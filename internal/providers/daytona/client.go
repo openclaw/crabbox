@@ -44,6 +44,7 @@ type daytonaSDKClient struct {
 }
 
 const defaultDaytonaAPIURL = "https://app.daytona.io/api"
+const daytonaControlTimeout = 60 * time.Second
 
 var newDaytonaClient = func(cfg Config, rt Runtime) (daytonaAPI, error) {
 	auth, err := daytonaAuthConfig(cfg)
@@ -53,7 +54,11 @@ var newDaytonaClient = func(cfg Config, rt Runtime) (daytonaAPI, error) {
 	apiURL := daytonaAPIURL(cfg, auth)
 	apiCfg := daytona.NewConfiguration()
 	apiCfg.Servers = daytona.ServerConfigurations{{URL: apiURL}}
-	apiCfg.HTTPClient, err = daytonaHTTPClient(rt.HTTP, apiURL)
+	controlClient := rt.HTTP
+	if controlClient == nil {
+		controlClient = &http.Client{Timeout: daytonaControlTimeout}
+	}
+	apiCfg.HTTPClient, err = daytonaHTTPClient(controlClient, apiURL)
 	if err != nil {
 		return nil, err
 	}

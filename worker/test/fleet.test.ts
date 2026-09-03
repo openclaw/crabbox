@@ -16,6 +16,7 @@ import { routeCoordinatorRequest } from "../src/coordinator-entry";
 import {
   CloudflareCoordinatorRuntime,
   legacyAlarmKey,
+  setLegacyWake,
   type CoordinatorRuntime,
   type CoordinatorSocketHandlers,
   type CoordinatorStorage,
@@ -308,6 +309,7 @@ class MemoryStorage {
   }
 
   async getAlarm(): Promise<number | null> {
+    await this.beforeGetAlarm();
     return this.alarmTime ?? null;
   }
 
@@ -318,6 +320,8 @@ class MemoryStorage {
     this.revision += 1;
     this.alarmCommitted(time);
   }
+
+  async beforeGetAlarm(): Promise<void> {}
 
   async beforeAlarmWrite(_time: number | undefined): Promise<void> {}
 
@@ -355,6 +359,7 @@ class MemoryStorage {
     const prefixes = new Set<string>();
     const transaction = new MemoryStorage(structuredClone(snapshot));
     transaction.alarmTime = this.alarmTime;
+    transaction.beforeGetAlarm = () => this.beforeGetAlarm();
     transaction.beforeAlarmWrite = (time) => this.beforeAlarmWrite(time);
     transaction.beforeList = (options) => this.beforeList(options);
     transaction.beforeGet = async (key) => {
@@ -402,8 +407,9 @@ class MemoryStorage {
         else this.values.delete(key);
       }
       this.alarmTime = transaction.alarmTime;
-      if (transaction.alarmWritten) this.alarmCommitted(transaction.alarmTime);
       this.revision += 1;
+      // A same-time write rearms a consumed job, but aborted attempts publish no job.
+      if (transaction.alarmWritten) this.alarmCommitted(transaction.alarmTime);
       return { committed: true, value: result };
     } finally {
       this.transactionPutCounts.push(putCount);
@@ -39843,6 +39849,65 @@ describe("synthetic acknowledgement reliability", () => {
     },
   );
 
+  it.each(["callback", "alarm"])(
+    "publishes neither transaction state nor an alarm job after a %s failure",
+    async (failure) => {
+      const storage = new RetainedAlarmStorage();
+      const runtime = alarmRuntime(storage);
+      const future = Date.now() + 10_000;
+      await runtime.scheduleAlarm(future);
+      storage.seed("synthetic-transaction", "before");
+      const nativeWrite = vi
+        .spyOn(storage, "beforeAlarmWrite")
+        .mockRejectedValue(new Error("synthetic alarm transaction failure"));
+      await expect(
+        runtime.commitAndWake(async (transaction) => {
+          await transaction.put("synthetic-transaction", "after");
+          await setLegacyWake(transaction, future - 1);
+          if (failure === "callback") throw new Error("synthetic callback transaction failure");
+        }),
+      ).rejects.toThrow(`synthetic ${failure} transaction failure`);
+      expect(nativeWrite).toHaveBeenCalledTimes(failure === "alarm" ? 1 : 0);
+      expect(storage.value("synthetic-transaction")).toBe("before");
+      expect(storage.value(legacyAlarmKey)).toBe(future);
+      expect(storage.alarm()).toBe(future);
+      expect(storage.queuedAlarm).toBe(future);
+      expect(storage.alarmWrites).toEqual([future]);
+    },
+  );
+
+  it("preserves the queued future alarm across a serialization retry without redundant writes", async () => {
+    const storage = new RetainedAlarmStorage();
+    const runtime = alarmRuntime(storage);
+    const future = Date.now() + 10_000;
+    await runtime.scheduleAlarm(future);
+    storage.seed("synthetic-transaction", "before");
+    const entered = deferred<void>();
+    const resume = deferred<void>();
+    let attempts = 0;
+    const operation = runtime.commitAndWake(async (transaction) => {
+      const value = await transaction.get("synthetic-transaction");
+      attempts += 1;
+      if (attempts === 1) {
+        entered.resolve();
+        await resume.promise;
+      }
+      await transaction.put("synthetic-result", value);
+    });
+    await entered.promise;
+    await storage.put("synthetic-transaction", "replacement");
+    resume.resolve();
+    await operation;
+    expect(attempts).toBe(2);
+    expect(storage.value("synthetic-result")).toBe("replacement");
+    expect(storage.alarm()).toBe(future);
+    expect(storage.value(legacyAlarmKey)).toBe(future);
+    expect(storage.queuedAlarm).toBe(future);
+    expect(storage.alarmWrites).toEqual([future]);
+    await storage.transaction(async () => undefined);
+    expect(storage.alarmWrites).toEqual([future]);
+  });
+
   it.each(["serializeAttachment", "deserializeAttachment"] as const)(
     "acknowledges the terminal commit despite a subscribed socket %s failure",
     async (method) => {
@@ -40006,11 +40071,15 @@ describe("synthetic acknowledgement reliability", () => {
         const fleet = testFleet(storage);
         await fleet.initialized;
         const socket = addSocket(fleet, "synthetic-heartbeat");
-        const get = vi.spyOn(storage, "get");
-        const put = vi.spyOn(storage, "put");
-        const getAlarm = vi.spyOn(storage, "getAlarm");
+        const get = (storage.beforeGet = vi.fn<NonNullable<MemoryStorage["beforeGet"]>>(
+          async () => {},
+        ));
+        const put = (storage.beforePut = vi.fn<NonNullable<MemoryStorage["beforePut"]>>(
+          async () => {},
+        ));
+        const getAlarm = vi.spyOn(storage, "beforeGetAlarm");
         const setAlarm = vi.spyOn(storage, "beforeAlarmWrite");
-        async function heartbeat(alarmReads: number, idleTimeoutSeconds?: number): Promise<void> {
+        async function heartbeat(dueReads: number, idleTimeoutSeconds?: number): Promise<void> {
           storage.resetListOptions();
           get.mockClear();
           put.mockClear();
@@ -40037,10 +40106,11 @@ describe("synthetic acknowledgement reliability", () => {
             acknowledged = (socket.sentJSON().at(-1) as { ok?: boolean }).ok === true;
           }
           expect(acknowledged).toBe(true);
-          expectBoundedAlarmReads(storage, alarmReads);
-          expect.soft(get.mock.calls.length).toBeLessThanOrEqual(3);
-          expect(put).toHaveBeenCalledTimes(1);
-          expect.soft(getAlarm).toHaveBeenCalledTimes(1);
+          expectBoundedAlarmReads(storage, dueReads);
+          expect.soft(get.mock.calls.length).toBeLessThanOrEqual(5);
+          expect(put.mock.calls.filter(([key]) => key.startsWith("lease:"))).toHaveLength(1);
+          expect(put.mock.calls.length).toBeLessThanOrEqual(2);
+          expect.soft(getAlarm).toHaveBeenCalledTimes(1 + dueReads);
           expect(setAlarm.mock.calls.length).toBeLessThanOrEqual(1);
         }
         await heartbeat(1);
@@ -40062,6 +40132,54 @@ describe("synthetic acknowledgement reliability", () => {
       }
     },
   );
+
+  it("retries failed runtime-owned maintenance without losing queued cleanup", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const storage = new RetainedAlarmStorage();
+      const lease = seedLease(storage);
+      const deleted: string[] = [];
+      const provider = fakeProvider(undefined, {}, async (id) => {
+        deleted.push(id);
+      });
+      const fleet = testFleet(storage, { hetzner: provider });
+      await fleet.initialized;
+      const release = await fleet.fetch(
+        request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+      );
+      expect(release.status).toBe(200);
+      let failures = 0;
+      const beforeList = storage.beforeList.bind(storage);
+      vi.spyOn(storage, "beforeList").mockImplementation(async (options) => {
+        await beforeList(options);
+        if (options?.prefix === "workspace:" && failures === 0) {
+          failures += 1;
+          throw new Error("synthetic maintenance failure before alarm reconciliation");
+        }
+      });
+      // The fixture awaits actual waitUntil-owned work, including its retry commit.
+      await storage.deliverAlarm(fleet);
+      expect(failures).toBe(1);
+      expect(error).toHaveBeenCalledExactlyOnceWith(
+        "coordinator maintenance failed; scheduling retry",
+      );
+      const retryAt = Date.now() + 15_000;
+      expect(storage.alarm()).toBe(retryAt);
+      expect(storage.queuedAlarm).toBe(retryAt);
+      expect(storage.alarmWrites.at(-1)).toBe(retryAt);
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.releaseDeletesServer).toBe(true);
+      expect(deleted).toEqual([]);
+      vi.setSystemTime(retryAt);
+      await storage.deliverAlarm(testFleet(storage, { hetzner: provider }));
+      expect(deleted).toEqual([lease.cloudID]);
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.releaseDeletesServer).toBeUndefined();
+      expect(storage.queuedAlarm).toBeUndefined();
+    } finally {
+      error.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 
   it.each([
     ["http heartbeat", 0],
@@ -40150,6 +40268,8 @@ describe("synthetic acknowledgement reliability", () => {
         await fleet.initialized;
         expect(storage.alarmWrites.slice(repairStart)).toEqual([earlier]);
         expect(storage.queuedAlarm).toBe(earlier);
+        storage.consumeAlarm();
+        expect(storage.queuedAlarm).toBeUndefined();
         const writesBefore = storage.alarmWrites.length;
         await acknowledge(1);
         expect(storage.alarmWrites.slice(writesBefore)).toEqual([earlier]);
@@ -40186,8 +40306,12 @@ describe("synthetic acknowledgement reliability", () => {
         await fleet.initialized;
         await alarmRuntime(storage).scheduleAlarm(Date.now() + 1800_000);
         storage.resetListOptions();
-        const get = vi.spyOn(storage, "get");
-        const put = vi.spyOn(storage, "put");
+        const get = (storage.beforeGet = vi.fn<NonNullable<MemoryStorage["beforeGet"]>>(
+          async () => {},
+        ));
+        const put = (storage.beforePut = vi.fn<NonNullable<MemoryStorage["beforePut"]>>(
+          async () => {},
+        ));
         const before = Date.now();
         const release = await fleet.fetch(
           request("POST", `/v1/leases/${leaseID}/release`, {
@@ -40197,8 +40321,9 @@ describe("synthetic acknowledgement reliability", () => {
         );
         expect(release.status).toBe(200);
         expectBoundedAlarmReads(storage, 2);
-        expect.soft(get.mock.calls.length).toBeLessThanOrEqual(6);
-        expect(put).toHaveBeenCalledTimes(1);
+        expect.soft(get.mock.calls.length).toBeLessThanOrEqual(9);
+        expect(put.mock.calls.filter(([key]) => key.startsWith("lease:"))).toHaveLength(1);
+        expect(put).toHaveBeenCalledTimes(2);
         expect(storage.alarm()).toBe(before);
         const earlier = before - 1;
         await alarmRuntime(storage).scheduleAlarm(earlier);
@@ -40249,6 +40374,7 @@ describe("synthetic acknowledgement reliability", () => {
         expect(pending.cleanupClaimExpiresAt).toBe(pending.cleanupStartedAt);
         expect(deleted).toEqual([]);
         expect(storage.alarm() === undefined).toBe(failAlarmWrite);
+        expect(storage.value(legacyAlarmKey)).toBe(failAlarmWrite ? undefined : storage.alarm());
         const reconstructed = testFleet(storage, { hetzner: provider });
         await reconstructed.initialized;
         storage.resetListOptions();

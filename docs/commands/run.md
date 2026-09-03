@@ -266,6 +266,11 @@ renewal, release, token, or child state fails closed instead of risking a
 concurrent checkout. POSIX, WSL2, and native Windows targets implement the same
 protocol; the small sync-finalization lock remains nested inside it.
 
+Renewal errors retain recognized `MISMATCH`, `EXPIRED`, and `AMBIGUOUS` protocol
+states alongside transport errors. Unrecognized response text is omitted. These
+diagnostics do not retry renewal or permit collection or cleanup after ownership
+fails closed.
+
 Native Windows stages owner scripts and witnessed command input with exact byte
 counts and asynchronous pipe reads. Empty frames complete without initializing
 stdin; nonempty frames leave any following bytes available. Incomplete input
