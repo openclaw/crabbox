@@ -20,6 +20,7 @@
 
 ### Changes
 
+- Preserved bounded Hetzner error codes and messages from multiline provider responses without changing allocation recovery or secret redaction. [PR 1771](https://github.com/openclaw/crabbox/pull/1771). Thanks @steipete.
 - Kept sync working when runners cannot authenticate to or reach Git origins by falling back to a full manifest, preserving internal Git-control exit codes, and recognizing disconnected sockets without mistaking URL digits for authentication failures. [PR 1622](https://github.com/openclaw/crabbox/pull/1622), [PR 1744](https://github.com/openclaw/crabbox/pull/1744). Thanks @vincentkoc.
 - Restored brokered artifact publishing with complete production storage configuration and atomic deployment of bucket-scoped signing credentials, preserving the existing storage and signed-read design. [PR 1732](https://github.com/openclaw/crabbox/pull/1732), [PR 1737](https://github.com/openclaw/crabbox/pull/1737).
 - Made fixed-ID creation cancellable at coordinator admission before allocation, preserving exact owner binding and cancellation across restart, duplicate replay, and reservation races without inventing lease records or treating unknown IDs as released. [PR 1749](https://github.com/openclaw/crabbox/pull/1749).
