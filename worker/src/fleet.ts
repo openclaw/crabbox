@@ -327,6 +327,7 @@ import type {
   ExternalRunnerInput,
   ExternalRunnerRecord,
   ExternalRunnerSyncRequest,
+  FixedLeaseCreateIntent,
   HetznerServer,
   LeaseRecord,
   LeaseRegistrationRequest,
@@ -455,6 +456,7 @@ const typedReadyPoolPrefix = "typed-ready-pool-v1:";
 const typedReadyPoolDesiredPrefix = "typed-ready-pool-v1-desired:";
 const typedReadyPoolFillClaimPrefix = "typed-ready-pool-v1-fill-claim:";
 const typedReadyPoolCountersPrefix = "typed-ready-pool-v1-counters:";
+const durableObjectStorageKeyMaxBytes = 2048;
 const readyPoolIdentitySchemaV1 = "crabbox-ready-pool-identity/v1";
 const readyPoolSeedFieldMaxBytes = 1024;
 const readyPoolBorrowTimeoutMs = 2 * 60_000;
@@ -3047,7 +3049,7 @@ export class FleetCoordinator {
 
   private async reserveCreateAttempt(
     requestedLeaseID: string,
-    token: string,
+    source: string | FixedLeaseCreateIntent,
     owner: string,
     org: string,
     checkpointID?: string,
@@ -3062,48 +3064,28 @@ export class FleetCoordinator {
       return createAttemptBindingConflictResponse();
     }
     return await this.state.runExclusive(async () => {
+      let existing = await this.getCreateAttempt(requestedLeaseID);
+      const fixedCreate = typeof source === "string" ? undefined : source;
+      // Fixed callers have no private token. Mint one only at admission; a token
+      // derived from their public ID could be pre-canceled by another owner.
+      const token =
+        typeof source === "string"
+          ? source
+          : existing?.fixedCreate
+            ? existing.token
+            : `cat_${crypto.randomUUID().replaceAll("-", "")}`;
       const canceled = await this.getArchivedCanceledCreateAttempt(requestedLeaseID, token);
       if (canceled) {
         return canceled.owner === owner && canceled.org === org
           ? createCanceledResponse()
           : createAttemptConflictResponse();
       }
-      let existing = await this.getCreateAttempt(requestedLeaseID);
-      if (existing) {
-        if (existing.token !== token) {
-          if (unboundCanceledCreateAttempt(existing, requestedLeaseID)) {
-            const [exactLease, workspaceReservation] = await Promise.all([
-              this.getLease(requestedLeaseID),
-              this.state.storage.get(workspaceLeaseReservationKey(requestedLeaseID)),
-            ]);
-            if (workspaceReservation) {
-              return workspaceManagedLeaseResponse();
-            }
-            if (exactLease) {
-              return createAttemptIDConflictResponse();
-            }
-            await this.archiveCanceledCreateAttempt(existing);
-            const now = new Date().toISOString();
-            const attempt: CreateAttemptRecord = {
-              version: 1,
-              requestedLeaseID,
-              token,
-              owner,
-              org,
-              state: "pending",
-              ...(checkpointID === undefined
-                ? {}
-                : { checkpointID, checkpointUseClaimHash: checkpointUseClaimHash! }),
-              createdAt: now,
-              updatedAt: now,
-            };
-            await this.putCreateAttempt(attempt);
-            return { attempt };
-          }
-          return createAttemptConflictResponse();
-        }
+      if (existing?.token === token) {
         if (existing.owner !== owner || existing.org !== org) {
           return createAttemptConflictResponse();
+        }
+        if (!sameFixedCreateIntent(existing.fixedCreate, fixedCreate)) {
+          return createAttemptBindingConflictResponse();
         }
         if (
           checkpointID !== undefined &&
@@ -3137,7 +3119,12 @@ export class FleetCoordinator {
         if (!replayLease || !createAttemptMatchesLease(existing, replayLease)) {
           return createAttemptBindingConflictResponse();
         }
-        return { attempt: existing, replayLease };
+        return fixedCreate
+          ? this.fixedLeaseReplayResponse(replayLease, owner, org, fixedCreate, existing)!
+          : { attempt: existing, replayLease };
+      }
+      if (existing && !unboundCanceledCreateAttempt(existing, requestedLeaseID)) {
+        return createAttemptConflictResponse();
       }
       if (await this.state.storage.get(workspaceLeaseReservationKey(requestedLeaseID))) {
         return workspaceManagedLeaseResponse();
@@ -3145,14 +3132,20 @@ export class FleetCoordinator {
       if (await this.getLease(requestedLeaseID)) {
         return createAttemptIDConflictResponse();
       }
+      if (existing) {
+        await this.archiveCanceledCreateAttempt(existing);
+      }
       const now = new Date().toISOString();
       const attempt: CreateAttemptRecord = {
-        version: 1,
+        // Old coordinators only recycle version-1 unbound cancellations. Keep
+        // admitted fixed IDs fenced even if the coordinator is rolled back.
+        version: fixedCreate ? 2 : 1,
         requestedLeaseID,
         token,
         owner,
         org,
         state: "pending",
+        ...(fixedCreate ? { fixedCreate } : {}),
         ...(checkpointID === undefined
           ? {}
           : { checkpointID, checkpointUseClaimHash: checkpointUseClaimHash! }),
@@ -3238,7 +3231,7 @@ export class FleetCoordinator {
     org: string,
   ): Promise<CreateAttemptRecord | undefined> {
     const attempt = await this.getCreateAttempt(requestedLeaseID);
-    return attempt?.version === 1 &&
+    return (attempt?.version === 1 || attempt?.version === 2) &&
       attempt.requestedLeaseID === requestedLeaseID &&
       attempt.token === token &&
       attempt.owner === owner &&
@@ -3624,21 +3617,23 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
-    let fixedCreateIntentHash: string | undefined;
+    let fixedCreate: FixedLeaseCreateIntent | undefined;
     if (fixedLeaseID) {
       if (!config.providerKey) {
         config = { ...config, providerKey: providerKeyForLease(fixedLeaseID) };
       }
-      fixedCreateIntentHash = await fixedLeaseCreateIntentHash(config, requestedSlug);
+      fixedCreate = {
+        version: fixedLeaseCreateIntentVersion,
+        hash: await fixedLeaseCreateIntentHash(config, requestedSlug),
+        provider: config.provider,
+      };
       const replay = await this.state.runExclusive(async () => {
-        if (createAttemptBlocksLeaseID(await this.getCreateAttempt(fixedLeaseID))) {
-          return createAttemptIDConflictResponse();
-        }
         return this.fixedLeaseReplayResponse(
           await this.getLease(fixedLeaseID),
           owner,
           org,
-          fixedCreateIntentHash!,
+          fixedCreate!,
+          await this.getCreateAttempt(fixedLeaseID),
         );
       });
       if (replay) {
@@ -3783,10 +3778,11 @@ export class FleetCoordinator {
       );
     }
     let createAttempt: CreateAttemptRecord | undefined;
-    if (ordinaryCreate && input.createAttemptID !== undefined) {
+    const attemptSource = fixedCreate ?? (ordinaryCreate ? input.createAttemptID : undefined);
+    if (attemptSource !== undefined) {
       const reserved = await this.reserveCreateAttempt(
         leaseID,
-        input.createAttemptID,
+        attemptSource,
         owner,
         org,
         checkpointAuthorization?.id,
@@ -4087,7 +4083,13 @@ export class FleetCoordinator {
       }
       const existingLease = await this.getLease(leaseID);
       if (existingLease && fixedLeaseID) {
-        return this.fixedLeaseReplayResponse(existingLease, owner, org, fixedCreateIntentHash!)!;
+        return this.fixedLeaseReplayResponse(
+          existingLease,
+          owner,
+          org,
+          fixedCreate!,
+          reservedAttempt,
+        )!;
       }
       if (
         existingLease &&
@@ -4126,10 +4128,10 @@ export class FleetCoordinator {
               createAttemptGeneration: createAttemptGeneration!,
             }
           : {}),
-        ...(fixedCreateIntentHash
+        ...(fixedCreate
           ? {
-              fixedCreateIntentVersion: fixedLeaseCreateIntentVersion,
-              fixedCreateIntentHash,
+              fixedCreateIntentVersion: fixedCreate.version,
+              fixedCreateIntentHash: fixedCreate.hash,
             }
           : {}),
         ...(workspaceID ? { workspaceID } : {}),
@@ -4452,7 +4454,7 @@ export class FleetCoordinator {
           return operation(access.lease, access.context);
         }),
     };
-    const { server, serverType, market, attempts, image, provisioningTiming } = await provider
+    const provisioned = await provider
       .createServerWithFallback(config, leaseID, slug, owner, provisioning)
       .catch(async (error: unknown) => {
         const cleanupClaim = validatedProviderProvisioningCleanupClaim(error, config.provider);
@@ -4493,8 +4495,11 @@ export class FleetCoordinator {
           await this.markAWSIngressReconcilePending(record);
           await this.scheduleAlarm();
         });
+        if (error instanceof CreateAttemptCanceledError) return createCanceledResponse();
         throw error;
       });
+    if (provisioned instanceof Response) return provisioned;
+    const { server, serverType, market, attempts, image, provisioningTiming } = provisioned;
     let current = await this.getLease(record.id);
     const pendingAfterProvision = createAttempt
       ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
@@ -4597,13 +4602,32 @@ export class FleetCoordinator {
     existing: LeaseRecord | undefined,
     owner: string,
     org: string,
-    intentHash: string,
+    intent: FixedLeaseCreateIntent,
+    attempt: CreateAttemptRecord | undefined,
   ): Response | undefined {
+    if (attempt && createAttemptBlocksLeaseID(attempt)) {
+      if (
+        attempt.owner !== owner ||
+        attempt.org !== org ||
+        !sameFixedCreateIntent(attempt.fixedCreate, intent)
+      ) {
+        return createAttemptIDConflictResponse();
+      }
+      if (attempt.state === "canceled") {
+        return createCanceledResponse();
+      }
+      if (
+        attempt.canonicalLeaseID &&
+        (!existing || !createAttemptMatchesLease(attempt, existing))
+      ) {
+        return createAttemptBindingConflictResponse();
+      }
+    }
     if (!existing) return undefined;
     const sameOwner = existing.owner === owner && existing.org === org;
     const sameIntent =
-      existing.fixedCreateIntentVersion === fixedLeaseCreateIntentVersion &&
-      existing.fixedCreateIntentHash === intentHash;
+      existing.fixedCreateIntentVersion === intent.version &&
+      existing.fixedCreateIntentHash === intent.hash;
     if (!sameOwner || !sameIntent || !leaseIsLive(existing)) {
       return json(
         { error: "lease_id_conflict", message: "lease id is bound to another create intent" },
@@ -7284,9 +7308,54 @@ export class FleetCoordinator {
       runtimeAdapterDeleteCompletion?: unknown;
       runtimeAdapterLegacyDeleteCompletion?: unknown;
     }>(request);
-    const lease = await this.resolveLease(leaseID, request, admin);
-    if (!lease) {
-      return notFound();
+    const lease =
+      (await this.resolveLease(leaseID, request, admin)) ??
+      (await this.state.runExclusive(async () => {
+        const current = await this.getLease(leaseID);
+        if (current)
+          return this.leaseVisibleToRequest(current, request, admin) ? current : notFound();
+        const attempt = validLeaseID(leaseID) ? await this.getCreateAttempt(leaseID) : undefined;
+        if (
+          !attempt?.fixedCreate ||
+          (!admin &&
+            (attempt.owner !== requestOwner(request) ||
+              attempt.org !== requestOrg(request, this.env))) ||
+          body.runtimeAdapterDeleteCompletion !== undefined ||
+          body.runtimeAdapterLegacyDeleteCompletion !== undefined
+        ) {
+          return notFound();
+        }
+        const providerError = mutationExpectedProviderError(
+          body.expectedProvider,
+          attempt.fixedCreate,
+        );
+        if (providerError) return providerError;
+        if (attempt.canonicalLeaseID) return createAttemptBindingConflictResponse();
+        // Admission is not allocation. Fence the owned intent without a synthetic
+        // lease row, which would charge rejected creations against capacity and cost.
+        const canceled: CreateAttemptRecord = {
+          ...attempt,
+          state: "canceled",
+          updatedAt: attempt.state === "canceled" ? attempt.updatedAt : new Date().toISOString(),
+        };
+        await this.putCreateAttempt(canceled);
+        return json({
+          lease: {
+            id: leaseID,
+            provider: attempt.fixedCreate.provider,
+            owner: attempt.owner,
+            org: orgLabelForDisplay(attempt.org),
+            state: "released",
+            createdAt: attempt.createdAt,
+            updatedAt: canceled.updatedAt,
+            endedAt: canceled.updatedAt,
+            releaseDeletesServer: true,
+            cleanupStatus: "complete",
+          },
+        });
+      }));
+    if (lease instanceof Response) {
+      return lease;
     }
     if (!this.leaseManageableByRequest(lease, request, admin)) {
       return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
@@ -12306,6 +12375,8 @@ export class FleetCoordinator {
     const input = await readJson<ReadyPoolBorrowRequest>(request);
     const identityError = readyPoolIdentityRequestError(input.identity, typed);
     if (identityError) return identityError;
+    const providerError = normalizeReadyPoolIdentityProvider(input);
+    if (providerError) return providerError;
     const seedError = await readyPoolSeedIdentityRequestError(input.identity, input);
     if (seedError) return seedError;
     const compatibilityKey = normalizeReadyPoolCompatibilityKey(input.compatibilityKey);
@@ -12493,6 +12564,8 @@ export class FleetCoordinator {
     const input = await readJson<ReadyPoolReconcileRequest>(request);
     const identityError = readyPoolIdentityRequestError(input.identity, typed);
     if (identityError) return identityError;
+    const providerError = normalizeReadyPoolIdentityProvider(input);
+    if (providerError) return providerError;
     const seedError = await readyPoolSeedIdentityRequestError(input.identity, input);
     if (seedError) return seedError;
     if (typed && !this.readyPoolImageIdentitySupported(input.identity!.image)) {
@@ -12538,14 +12611,63 @@ export class FleetCoordinator {
         await this.maintainReadyPools(nowMs);
         const owner = requestOwner(request);
         const org = requestOrg(request, this.env);
-        const policyKey = readyPoolDesiredKey(owner, org, key, compatibilityKey, input.identity);
-        const previous = await this.state.storage.get<ReadyPoolDesiredCapacity>(policyKey);
+        let policyKey: string;
+        let previous: ReadyPoolDesiredCapacity | undefined;
+        let legacyPolicyKey: string | undefined;
+        if (input.identity) {
+          policyKey = await readyPoolDesiredCapacityKeyV2({
+            org,
+            owner,
+            key,
+            compatibilityKey,
+            identity: input.identity,
+          });
+          const current = await this.state.storage.get<ReadyPoolDesiredCapacity>(policyKey);
+          const candidateLegacyKey = readyPoolLegacyTypedDesiredKey(
+            owner,
+            org,
+            key,
+            compatibilityKey,
+            input.identity,
+          );
+          const legacy = storageKeyWithinLimit(candidateLegacyKey)
+            ? await this.state.storage.get<ReadyPoolDesiredCapacity>(candidateLegacyKey)
+            : undefined;
+          for (const [storedKey, stored] of [
+            [policyKey, current],
+            [candidateLegacyKey, legacy],
+          ] as const) {
+            if (!stored) continue;
+            const storedProvider = stored.criteria.provider;
+            if (
+              !readyPoolDesiredCapacityScopeMatches(stored, owner, org, key, compatibilityKey) ||
+              !readyPoolIdentityEqual(stored.criteria.identity, input.identity) ||
+              (storedProvider !== undefined && storedProvider !== input.identity.image.provider) ||
+              (storedKey === policyKey && !readyPoolIdentityEqual(stored.identity, input.identity))
+            ) {
+              return json(
+                {
+                  error: "typed_ready_pool_desired_identity_mismatch",
+                  message:
+                    "stored typed desired capacity does not match the requested provider identity",
+                },
+                { status: 409 },
+              );
+            }
+            previous ??= stored;
+            if (storedKey !== policyKey) legacyPolicyKey = storedKey;
+          }
+        } else {
+          policyKey = readyPoolLegacyDesiredKey(owner, org, key, compatibilityKey);
+          previous = await this.state.storage.get<ReadyPoolDesiredCapacity>(policyKey);
+        }
         const now = new Date(nowMs).toISOString();
         const desired: ReadyPoolDesiredCapacity = {
           key,
           owner,
           org,
           criteria,
+          ...(input.identity ? { identity: input.identity } : {}),
           minReady,
           maxReady,
           createdAt: previous?.createdAt ?? now,
@@ -12553,6 +12675,9 @@ export class FleetCoordinator {
           ...(compatibilityKey ? { compatibilityKey } : {}),
         };
         await this.state.storage.put(policyKey, desired);
+        if (legacyPolicyKey) {
+          await this.state.storage.delete(legacyPolicyKey);
+        }
 
         const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
         const entries = (await this.readyPoolEntries(typed)).filter((entry) => {
@@ -12726,6 +12851,7 @@ export class FleetCoordinator {
         );
       }
       let result = String(input.result ?? "ready");
+      let typedReturnError: Response | undefined;
       if (result !== "ready" && result !== "drain" && result !== "release") {
         return json(
           { error: "invalid_result", message: "result must be ready, drain, or release" },
@@ -12756,16 +12882,27 @@ export class FleetCoordinator {
           { status: 409 },
         );
       }
-      if (
-        typed &&
-        result === "ready" &&
-        (!validReadyPoolIdentityV1(input.identity) ||
-          !readyPoolIdentityEqual(current.identity, input.identity) ||
-          !lease ||
-          !this.readyPoolIdentityMatchesLease(input.identity, lease))
-      ) {
-        result = "drain";
-        input.reason = "typed ready-pool identity evidence changed on return";
+      if (typed && result === "ready") {
+        typedReturnError = readyPoolIdentityRequestError(input.identity, true);
+        if (
+          !typedReturnError &&
+          (!readyPoolIdentityEqual(current.identity, input.identity) ||
+            !lease ||
+            !this.readyPoolIdentityMatchesLease(input.identity!, lease))
+        ) {
+          typedReturnError = json(
+            {
+              error: "ready_pool_lease_identity_mismatch",
+              message: "typed ready-pool identity does not match stored or lease evidence",
+            },
+            { status: 409 },
+          );
+        }
+        if (typedReturnError) {
+          result = "drain";
+          input.reason =
+            nonSecretString(input.reason) || "typed ready-pool identity evidence changed on return";
+        }
       }
       if (result === "release" || result === "drain") {
         if (!canManage) {
@@ -12776,18 +12913,22 @@ export class FleetCoordinator {
         }
         const drained = this.nextReturnedReadyPoolEntry(current, lease, "draining", input.reason);
         await this.putReadyPoolEntry(drained, typed);
+        let returnedLease = lease;
         if (lease && lease.state === "active") {
-          return json({
-            entry: publicReadyPoolEntry(drained),
-            lease: publicLeaseRecord(
-              await this.releaseResolvedLease(lease, { deleteServer: true, keep: false }),
-            ),
+          returnedLease = await this.releaseResolvedLease(lease, {
+            deleteServer: true,
+            keep: false,
           });
         }
-        return json({
+        const returned = {
           entry: publicReadyPoolEntry(drained),
-          lease: lease ? publicLeaseRecord(lease) : undefined,
-        });
+          lease: returnedLease ? publicLeaseRecord(returnedLease) : undefined,
+        };
+        if (typedReturnError) {
+          const error = (await typedReturnError.json()) as Record<string, unknown>;
+          return json({ ...error, ...returned }, { status: typedReturnError.status });
+        }
+        return json(returned);
       }
       if (!lease || lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
         const stale = this.nextReturnedReadyPoolEntry(current, lease, "stale", input.reason);
@@ -12878,7 +13019,13 @@ export class FleetCoordinator {
         lease.state !== "active" ||
         !Number.isFinite(backingLeaseExpiresAt) ||
         backingLeaseExpiresAt <= nowMs;
-      if (leaseStale && entry.state !== "stale") {
+      const providerCleanupPending =
+        lease?.state === "released" && lease.releaseDeletesServer === true;
+      if (
+        leaseStale &&
+        entry.state !== "stale" &&
+        !(entry.state === "draining" && providerCleanupPending)
+      ) {
         // oxlint-disable-next-line eslint/no-await-in-loop -- ordered writes prevent stale maintenance from racing a newer entry transition.
         await this.putReadyPoolEntry(
           withoutReadyPoolBorrow({
@@ -16624,6 +16771,8 @@ export class FleetCoordinator {
     if (exact) {
       return this.leaseVisibleToRequest(exact, request, admin) ? exact : undefined;
     }
+    // Canonical IDs never become aliases for another lease's normalized slug.
+    if (validLeaseID(identifier)) return undefined;
     const slug = normalizeLeaseSlug(identifier);
     if (!slug) {
       return undefined;
@@ -17432,29 +17581,25 @@ export class FleetCoordinator {
       }
       await this.deleteProviderAccess(reservation.id);
       await this.state.storage.delete(leaseKey(reservation.id));
-      await this.unbindPendingCreateAttemptReservation(current);
+      await this.unbindCreateAttemptReservation(current);
       await this.scheduleAlarm();
     });
   }
 
-  private async unbindPendingCreateAttemptReservation(reservation: LeaseRecord): Promise<void> {
+  private async unbindCreateAttemptReservation(reservation: LeaseRecord): Promise<void> {
     if (!reservation.createAttemptID || !reservation.createAttemptGeneration) {
       return;
     }
     const attempt = await this.getCreateAttempt(reservation.id);
     if (
       !attempt ||
-      attempt.state !== "pending" ||
-      attempt.requestedLeaseID !== reservation.id ||
-      attempt.token !== reservation.createAttemptID ||
-      attempt.owner !== reservation.owner ||
-      attempt.org !== reservation.org ||
-      attempt.canonicalLeaseID !== reservation.id ||
-      attempt.generation !== reservation.createAttemptGeneration
+      (attempt.state !== "pending" && !attempt.fixedCreate) ||
+      !createAttemptMatchesLease(attempt, reservation)
     ) {
       return;
     }
     const unbound = { ...attempt, updatedAt: new Date().toISOString() };
+    if (reservation.state === "released") unbound.state = "canceled";
     delete unbound.canonicalLeaseID;
     delete unbound.cloudID;
     delete unbound.generation;
@@ -17478,6 +17623,9 @@ export class FleetCoordinator {
       }
       await this.deleteProviderAccess(reservation.id);
       await this.state.storage.delete(leaseKey(reservation.id));
+      // This owner proved no provider request started; preserve cancellation
+      // without leaving a charged lease row or a dangling canonical binding.
+      await this.unbindCreateAttemptReservation(latest);
       await this.markAWSIngressReconcilePending(reservation);
       await this.scheduleAlarm();
       return undefined;
@@ -17888,6 +18036,14 @@ export class FleetCoordinator {
       if (current.runtimeAdapterDeleteRequestedAt) {
         return { cleanup: false as const, blocked: true as const, lease: current };
       }
+      const attempt = current.createAttemptID ? await this.getCreateAttempt(current.id) : undefined;
+      if (attempt?.state === "pending" && createAttemptMatchesLease(attempt, current)) {
+        await this.putCreateAttempt({
+          ...attempt,
+          state: "canceled",
+          updatedAt: new Date().toISOString(),
+        });
+      }
       if (current.cleanupStartedAt) {
         if (options.awaitProviderCleanup && cleanupClaimDeadline(current) <= Date.now()) {
           // Reclaim the expired claim below. Its prior owner remains fenced by the
@@ -18046,7 +18202,13 @@ class LeaseProviderIdentityMismatchError extends Error {}
 
 class LeaseCleanupInProgressError extends Error {}
 
-class CreateAttemptCanceledError extends Error {}
+const createAttemptCanceledMessage = "create attempt was canceled before completion";
+
+class CreateAttemptCanceledError extends Error {
+  constructor() {
+    super(createAttemptCanceledMessage);
+  }
+}
 
 interface ProviderReadiness {
   provider: Provider;
@@ -18209,6 +18371,36 @@ function readyPoolIdentityRequestError(value: unknown, required: boolean): Respo
       {
         error: "invalid_ready_pool_identity",
         message: `identity must be a complete ${readyPoolIdentitySchemaV1} object`,
+      },
+      { status: 400 },
+    );
+  }
+  return undefined;
+}
+
+function normalizeReadyPoolIdentityProvider(input: ReadyPoolBorrowRequest): Response | undefined {
+  if (!input.identity) {
+    return undefined;
+  }
+  const identityProvider = input.identity.image.provider;
+  if (input.provider === undefined) {
+    if (!isCoordinatorProvider(identityProvider)) {
+      return json(
+        {
+          error: "invalid_ready_pool_provider",
+          message: "typed ready-pool identity requires a canonical coordinator provider",
+        },
+        { status: 400 },
+      );
+    }
+    input.provider = identityProvider;
+    return undefined;
+  }
+  if (!isCoordinatorProvider(input.provider) || input.provider !== identityProvider) {
+    return json(
+      {
+        error: "invalid_ready_pool_provider",
+        message: "typed ready-pool provider must match identity.image.provider",
       },
       { status: 400 },
     );
@@ -18408,6 +18600,14 @@ function readyPoolCriteriaEqual(
 ): boolean {
   const normalizedLeft = readyPoolCriteria(left);
   const normalizedRight = readyPoolCriteria(right);
+  for (const criteria of [normalizedLeft, normalizedRight]) {
+    if (
+      criteria.identity &&
+      (!validReadyPoolIdentityV1(criteria.identity) || normalizeReadyPoolIdentityProvider(criteria))
+    ) {
+      return false;
+    }
+  }
   for (const key of [
     "repo",
     "ref",
@@ -18556,27 +18756,100 @@ function readyPoolKey(key: string, leaseID: string, typed = false): string {
   return `${typed ? typedReadyPoolPrefix : readyPoolPrefix}${key}:${leaseID}`;
 }
 
-function readyPoolDesiredKey(
+function readyPoolLegacyDesiredKey(
   owner: string,
   org: string,
   key: string,
   compatibilityKey?: string,
-  identity?: ReadyPoolIdentityV1,
 ): string {
   const parts = [org, owner, key, compatibilityKey ?? ""];
-  if (identity) {
-    parts.push(
-      identity.image.provider,
-      identity.image.scope,
-      identity.image.id,
-      identity.architecture,
-      identity.seedDigest,
-      identity.cacheCompatibility,
-    );
+  return `${readyPoolDesiredPrefix}${parts.map((part) => encodeURIComponent(part)).join(":")}`;
+}
+
+function readyPoolLegacyTypedDesiredKey(
+  owner: string,
+  org: string,
+  key: string,
+  compatibilityKey: string | undefined,
+  identity: ReadyPoolIdentityV1,
+): string {
+  const parts = [
+    org,
+    owner,
+    key,
+    compatibilityKey ?? "",
+    identity.image.provider,
+    identity.image.scope,
+    identity.image.id,
+    identity.architecture,
+    identity.seedDigest,
+    identity.cacheCompatibility,
+  ];
+  return `${typedReadyPoolDesiredPrefix}${parts.map((part) => encodeURIComponent(part)).join(":")}`;
+}
+
+export async function readyPoolDesiredCapacityKeyV2(input: {
+  org: string;
+  owner: string;
+  key: string;
+  compatibilityKey: string | undefined;
+  identity: ReadyPoolIdentityV1;
+}): Promise<string> {
+  const fields = [
+    input.org,
+    input.owner,
+    input.key,
+    input.compatibilityKey ?? "",
+    input.identity.schema,
+    input.identity.image.provider,
+    input.identity.image.scope,
+    input.identity.image.id,
+    input.identity.architecture,
+    input.identity.seedDigest,
+    input.identity.cacheCompatibility,
+  ].map((value, index) => {
+    if (!validUnicodeScalarString(value)) {
+      throw new Error(`ready-pool desired field ${index + 1} must be valid UTF-8`);
+    }
+    return { tag: index + 1, encoded: textEncoder.encode(value) };
+  });
+  const domain = textEncoder.encode("crabbox-ready-pool-desired/v2\0");
+  const payload = new Uint8Array(
+    domain.byteLength + fields.reduce((size, field) => size + 5 + field.encoded.byteLength, 0),
+  );
+  payload.set(domain);
+  const view = new DataView(payload.buffer);
+  let offset = domain.byteLength;
+  for (const field of fields) {
+    payload[offset] = field.tag;
+    view.setUint32(offset + 1, field.encoded.byteLength, false);
+    offset += 5;
+    payload.set(field.encoded, offset);
+    offset += field.encoded.byteLength;
   }
-  return `${identity ? typedReadyPoolDesiredPrefix : readyPoolDesiredPrefix}${parts
-    .map((part) => encodeURIComponent(part))
-    .join(":")}`;
+  const digest = await crypto.subtle.digest("SHA-256", payload);
+  return `typed-ready-pool-v2-desired:sha256:${[...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
+function readyPoolDesiredCapacityScopeMatches(
+  desired: ReadyPoolDesiredCapacity,
+  owner: string,
+  org: string,
+  key: string,
+  compatibilityKey: string | undefined,
+): boolean {
+  return (
+    desired.owner === owner &&
+    desired.org === org &&
+    desired.key === key &&
+    desired.compatibilityKey === compatibilityKey
+  );
+}
+
+function storageKeyWithinLimit(key: string): boolean {
+  return textEncoder.encode(key).byteLength <= durableObjectStorageKeyMaxBytes;
 }
 
 function readyPoolFillClaimKey(token: string, typed = false): string {
@@ -19344,7 +19617,7 @@ function createCanceledResponse(): Response {
   return json(
     {
       error: "create_canceled",
-      message: "create attempt was canceled before completion",
+      message: createAttemptCanceledMessage,
     },
     { status: 409 },
   );
@@ -19387,13 +19660,14 @@ function sameLeaseReleaseIdentity(left: LeaseRecord, right: LeaseRecord): boolea
 
 function sameCreateAttempt(left: CreateAttemptRecord, right: CreateAttemptRecord): boolean {
   return (
-    left.version === 1 &&
-    right.version === 1 &&
+    (left.version === 1 || left.version === 2) &&
+    left.version === right.version &&
     left.requestedLeaseID === right.requestedLeaseID &&
     left.token === right.token &&
     left.owner === right.owner &&
     left.org === right.org &&
     left.state === right.state &&
+    sameFixedCreateIntent(left.fixedCreate, right.fixedCreate) &&
     left.canonicalLeaseID === right.canonicalLeaseID &&
     left.cloudID === right.cloudID &&
     left.generation === right.generation &&
@@ -19418,6 +19692,17 @@ function unboundCanceledCreateAttempt(
 
 function createAttemptBlocksLeaseID(attempt: CreateAttemptRecord | undefined): boolean {
   return Boolean(attempt && !unboundCanceledCreateAttempt(attempt));
+}
+
+function sameFixedCreateIntent(
+  left: FixedLeaseCreateIntent | undefined,
+  right: FixedLeaseCreateIntent | undefined,
+): boolean {
+  return (
+    left?.version === right?.version &&
+    left?.hash === right?.hash &&
+    left?.provider === right?.provider
+  );
 }
 
 export async function backfillCheckpointCreateAttempt(
@@ -19530,7 +19815,7 @@ function createAttemptMatchesCheckpoint(
 
 function createAttemptMatchesLease(attempt: CreateAttemptRecord, lease: LeaseRecord): boolean {
   return (
-    attempt.version === 1 &&
+    (attempt.version === 1 || attempt.version === 2) &&
     validLeaseID(attempt.requestedLeaseID) &&
     validCreateAttemptID(attempt.token) &&
     Boolean(attempt.canonicalLeaseID) &&
@@ -19541,6 +19826,10 @@ function createAttemptMatchesLease(attempt: CreateAttemptRecord, lease: LeaseRec
     Boolean(attempt.generation) &&
     attempt.generation === lease.createAttemptGeneration &&
     (attempt.cloudID === undefined || attempt.cloudID === lease.cloudID) &&
+    (!attempt.fixedCreate ||
+      (attempt.fixedCreate.version === lease.fixedCreateIntentVersion &&
+        attempt.fixedCreate.hash === lease.fixedCreateIntentHash &&
+        attempt.fixedCreate.provider === lease.provider)) &&
     createAttemptMatchesCheckpoint(attempt, lease.checkpointID, attempt.checkpointUseClaimHash) &&
     (attempt.requestedLeaseID === lease.id ||
       (lease.provider === "aws" && lease.target === "macos")) &&
@@ -21823,7 +22112,10 @@ function sanitizeRunnerProvider(value: unknown): string {
   return /^[a-z0-9][a-z0-9-]{1,63}$/.test(provider) ? provider : "";
 }
 
-function mutationExpectedProviderError(value: unknown, lease: LeaseRecord): Response | undefined {
+function mutationExpectedProviderError(
+  value: unknown,
+  lease: Pick<LeaseRecord, "provider">,
+): Response | undefined {
   const code = mutationExpectedProviderErrorCode(value, lease);
   if (code === "invalid_expected_provider") {
     return json(
@@ -21842,7 +22134,7 @@ function mutationExpectedProviderError(value: unknown, lease: LeaseRecord): Resp
 
 function mutationExpectedProviderErrorCode(
   value: unknown,
-  lease: LeaseRecord,
+  lease: Pick<LeaseRecord, "provider">,
 ): "invalid_expected_provider" | "provider_identity_mismatch" | undefined {
   if (value === undefined) {
     return undefined;
@@ -22760,6 +23052,10 @@ function boundedRunEvent(
 }
 
 function applyRunEventSummary(run: RunRecord, event: RunEventRecord): void {
+  // Late deliveries remain in the audit trail without rewriting committed terminal evidence.
+  if (run.terminalFinishSHA256) {
+    return;
+  }
   if (event.phase) {
     run.phase = event.phase;
   } else {
@@ -26524,7 +26820,10 @@ export class AWSProvider implements CloudProvider {
         }
         return result;
       } catch (error) {
+        // Keep cancellation typed so the create owner records cleanup debt before
+        // returning its terminal response, even after an earlier regional failure.
         if (
+          error instanceof CreateAttemptCanceledError ||
           providerProvisioningCleanupClaim(error) ||
           error instanceof ProviderResourceUnresolvedError
         ) {

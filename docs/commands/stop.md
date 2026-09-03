@@ -24,6 +24,14 @@ release; `--force` still requires successful inspection. Canceling the command
 does not start a release fallback. Cleanup must still be confirmed before local
 claim and SSH artifacts are removed.
 
+If a fixed-ID create was admitted by the coordinator but never allocated a
+machine, `stop` cancels that intent and confirms the cancellation even when
+the preliminary lease lookup returns 404. This includes a create rejected by
+a quota check. The owner, organization, and selected provider must match.
+Delayed creates cannot allocate after this confirmation; a genuinely unknown
+ID still fails, and an allocation already in progress must finish cleanup
+before Stop reports success.
+
 ## Identifying the lease
 
 Pass the lease as a positional argument or with `--id`; both accept the

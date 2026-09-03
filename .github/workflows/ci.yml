@@ -182,10 +182,15 @@ jobs:
       - name: Test pond mesh cancellation
         run: go test ./internal/cli/ -run PondMeshCancel -count=1 -v
 
+      - name: Test native Windows runtime prerequisite
+        run: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/test-windows-runtime.ps1
+
       - name: Run required native transport behaviors without skips
         shell: pwsh
         run: |
           $required = @(
+            'TestWindowsSSHStdinReaderBehavior',
+            'TestWindowsWitnessRedirectedStdinUploadBehavior',
             'TestWSLStageLauncherVerifiesAndConsumesReadyFile',
             'TestWSLStageLauncherRejectsCorruptOrNonFileStage',
             'TestWSLStageLauncherRejectsSameNonceValidReplacement',

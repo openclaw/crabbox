@@ -222,9 +222,12 @@ files and config; Crabbox does not delete files there.
 
 When `sync.fingerprint` is enabled (the default), Crabbox derives a fingerprint
 from `HEAD`, the delete/checksum settings, the manifest, the deletion list, the
-excludes, and the content of every changed file. If the remote workdir already
-carries that fingerprint, the sync is skipped entirely. `--full-resync` ignores
-the remote fingerprint and forces a clean transfer.
+excludes, and the content of every changed regular file. Changed symlinks are
+hashed by their target text, without following the link, so retargeting a link
+invalidates the fingerprint even when both targets contain identical bytes.
+Dangling links and links to directories are supported. If the remote workdir
+already carries that fingerprint, the sync is skipped entirely. `--full-resync`
+ignores the remote fingerprint and forces a clean transfer.
 
 Git seeding (`sync.gitSeed`, default on) clones or fetches the base tree on the
 runner before rsync, so only your diff travels over the wire. It activates only
@@ -242,7 +245,9 @@ existing login-shell behavior.
 If an otherwise forwardable origin requires authentication or is unreachable
 due to DNS, connectivity, or TLS transport errors, ordinary POSIX/WSL2 sync
 and local Actions hydration fall back to the full, plain manifest sync. This
-also covers a reused Git worktree whose fetch fails during finalization.
+includes a peer disconnect during connection setup reported by Git/libcurl as
+`getpeername() ... is not connected`, and a reused Git worktree whose fetch
+fails during finalization.
 Fallback warnings contain only a fixed reason. The plain manifest path clears
 reusable fingerprints and Git hydration markers and does not forward local
 credentials.
@@ -289,7 +294,8 @@ never receive forwarded credentials, credential helpers, hooks, global Git
 configuration, external transports, or repository-defined filters.
 Anonymous HTTP authentication failures and eligible-origin DNS, TLS, firewall,
 connection, and fetch failures safely fall back to the complete ordinary file
-manifest.
+manifest. HTTP authentication classification uses response statuses, not
+status-like digits in origin URLs.
 
 A fallback involving `assume-unchanged` or `skip-worktree` index flags does
 not reuse or publish a sync fingerprint: Git can hide edits behind those

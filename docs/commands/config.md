@@ -55,6 +55,19 @@ the `environment` retain the canonical provider name and report selected=true. P
 `config show --provider <name>` reports `flag` because that command-scoped
 override wins the merge.
 
+The top-level JSON `ttl` and `idleTimeout` fields report the effective generic
+lease durations. Text output reports them on a separate
+`lease ttl=<duration> idle_timeout=<duration>` line immediately after the provider
+summary. Both formats use normalized Go duration strings: the existing `90m`
+TTL and `30m` idle-timeout defaults appear as `1h30m0s` and `30m0s`.
+Within each config file, nested `lease.ttl` and `lease.idleTimeout` override
+top-level `ttl` and `idleTimeout`; the file layering described above still
+applies, and `CRABBOX_TTL` / `CRABBOX_IDLE_TIMEOUT` take precedence over files.
+These are merged configuration values, not per-command flag overrides or
+observations of an existing lease or server. Provider-specific durations
+(such as `blaxel.ttl` or `githubCodespaces.idleTimeout`) and per-job durations
+under `jobs` remain separate from these generic values.
+
 `architecture` (text: `arch`) describes the configured architecture or the
 provider's implicit selection, not a host observation or proof of runtime
 support. `config show` is offline and does not acquire or probe a host.

@@ -854,7 +854,7 @@ func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, ex
 		fmt.Fprintf(h, "v1-overlay\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", plan.RemoteURL, plan.Branch, plan.Target, plan.Tree)
 		fmt.Fprintf(h, "delete=%t\nchecksum=%t\ngitOverlay=true\n", cfg.Sync.Delete, cfg.Sync.Checksum)
 	} else {
-		fmt.Fprintf(h, "v5\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", plan.RemoteURL, plan.Branch, plan.Target, plan.Tree)
+		fmt.Fprintf(h, "v6\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", plan.RemoteURL, plan.Branch, plan.Target, plan.Tree)
 		fmt.Fprintf(h, "delete=%t\nchecksum=%t\n", cfg.Sync.Delete, cfg.Sync.Checksum)
 	}
 	fmt.Fprintf(h, "manifest=%x\n", sha256.Sum256(manifest.NUL()))
@@ -874,7 +874,7 @@ func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, ex
 		if info.IsDir() {
 			continue
 		}
-		if cfg.Sync.GitOverlay && info.Mode()&os.ModeSymlink != 0 {
+		if info.Mode()&os.ModeSymlink != 0 {
 			target, err := os.Readlink(full)
 			if err != nil {
 				return "", err

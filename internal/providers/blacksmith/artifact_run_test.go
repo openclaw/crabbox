@@ -123,6 +123,8 @@ func TestBlacksmithArtifactRunShellAndTerminalExit(t *testing.T) {
 		{name: "argv", argv: []string{"printf", "%s", "a b", "'quoted'", "$HOME"}, stdout: "a b'quoted'$HOME"},
 		{name: "env", argv: []string{"VALUE=a b", "bash", "-c", `printf '%s' "$VALUE"`}, stdout: "a b"},
 		{name: "multiline", command: "printf 'line1\\nline2\\n'\nprintf original > report", stdout: "line1\nline2\n"},
+		{name: "literal-control-bytes", command: "printf 'out\\036bytes\\037tail'; printf 'err\\036bytes\\037tail' >&2; printf original > report", stdout: "out\x1ebytes\x1ftail", stderr: "err\x1ebytes\x1ftail"},
+		{name: "literal-control-bytes-failure", command: "printf 'out\\036bytes\\037tail'; printf 'err\\036bytes\\037tail' >&2; printf original > report; exit 23", stdout: "out\x1ebytes\x1ftail", stderr: "err\x1ebytes\x1ftail", code: 23},
 		{name: "stdin", command: "read value; printf 'read=%s' $?; printf original > report", stdout: "read=1"},
 		{name: "signal-like", command: "printf original > report; exit 137", code: 137},
 	} {
@@ -155,7 +157,7 @@ func TestBlacksmithArtifactRunShellAndTerminalExit(t *testing.T) {
 			if stdout.String() != tt.stdout || !strings.Contains(stderr.String(), tt.stderr) {
 				t.Fatalf("streams stdout=%q stderr=%q", stdout.String(), stderr.String())
 			}
-			if strings.Contains(stdout.String()+stderr.String()+result.LogExcerpt, "__CRABBOX_ARTIFACT_") || strings.Contains(stdout.String()+stderr.String()+result.LogExcerpt, "\x1e") {
+			if strings.Contains(stdout.String()+stderr.String()+result.LogExcerpt, "__CRABBOX_ARTIFACT_") || strings.Contains(stdout.String()+stderr.String()+result.LogExcerpt, "\x1eCRABBOX_BS_") {
 				t.Fatal("protocol leaked")
 			}
 			if tt.code >= 128 {
@@ -177,7 +179,7 @@ func TestBlacksmithArtifactRunShellAndTerminalExit(t *testing.T) {
 					t.Fatalf("failure bundles=%v", bundles)
 				}
 				for name, data := range readBlacksmithArchive(t, bundles[0]) {
-					if strings.Contains(data, "\x1e") || strings.Contains(data, "__CRABBOX_ARTIFACT_") || strings.Contains(data, "H4sI") {
+					if strings.Contains(data, "\x1eCRABBOX_BS_") || strings.Contains(data, "__CRABBOX_ARTIFACT_") || strings.Contains(data, "H4sI") {
 						t.Fatalf("payload leaked to %s", name)
 					}
 				}
@@ -266,7 +268,12 @@ func TestBlacksmithArtifactReceiptAdversarial(t *testing.T) {
 				case "missing-end":
 					output = start + exit + payload
 				case "stale":
-					output = strings.ReplaceAll(output, "CRABBOX_BS_", "CRABBOX_OLD_")
+					nonce := strings.TrimSuffix(strings.TrimPrefix(start, "\x1eCRABBOX_BS_"), ":start\x1f")
+					stale := "0" + nonce[1:]
+					if nonce[0] == '0' {
+						stale = "1" + nonce[1:]
+					}
+					output = strings.ReplaceAll(output, nonce, stale)
 				case "duplicate-start":
 					output = start + output
 				case "duplicate-exit":
@@ -280,7 +287,7 @@ func TestBlacksmithArtifactReceiptAdversarial(t *testing.T) {
 				case "malformed":
 					output = start + strings.Replace(exit, "exit:0", "exit:00", 1) + payload + end
 				case "oversized-record":
-					output = "\x1e" + strings.Repeat("x", 1024) + payload
+					output = start[:len(start)-1] + strings.Repeat("x", 1024) + payload
 				case "partial-archive":
 					output = start + exit + payload[:len(payload)/2] + end
 				case "duplicate-archive":
@@ -343,7 +350,7 @@ func TestBlacksmithArtifactReceiptAdversarial(t *testing.T) {
 
 func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 	requireBlacksmithArtifactShell(t)
-	for _, kind := range []string{"workload-outlives-budget", "local-collection-stall", "remote-collection-timeout", "sync-stall", "startup-failure", "missing-timeout"} {
+	for _, kind := range []string{"workload-outlives-budget", "local-collection-stall", "remote-collection-timeout", "sync-stall", "startup-failure", "missing-timeout", "unsupported-timeout"} {
 		for _, code := range []int{0, 1, 23} {
 			t.Run(fmt.Sprintf("%s/%d", kind, code), func(t *testing.T) {
 				isolateBlacksmithOwnership(t)
@@ -388,14 +395,33 @@ func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 						return runSyntheticBlacksmithCommand(t, t.Context(), req)
 					case "missing-timeout":
 						for i, arg := range req.Args {
-							req.Args[i] = strings.Replace(arg, "command -v timeout", "command -v crabbox_nonexistent_timeout", 1)
+							req.Args[i] = strings.Replace(arg, "timeout --kill-after=1s", "crabbox_nonexistent_timeout --kill-after=1s", 1)
 						}
+					case "unsupported-timeout":
+						dir := t.TempDir()
+						if err := os.WriteFile(filepath.Join(dir, "timeout"), []byte("#!/bin/sh\nexit 125\n"), 0o700); err != nil {
+							t.Fatal(err)
+						}
+						req.Env = []string{"PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH")}
 					}
 					return runSyntheticBlacksmithCommand(t, runCtx, req)
 				})
 				backend := newTestBlacksmithBackend(baseConfig(), runner)
 				begin := time.Now()
-				got, ended, artifacts, err := backend.runArtifactTestbox(t.Context(), RunRequest{Repo: Repo{Root: repo}, Command: []string{fmt.Sprintf("sleep %s; exit %d", workloadWait, code)}, ArtifactGlobs: []string{"report"}}, "tbx_budget", nil, nil, nil, budget)
+				runReq := RunRequest{Repo: Repo{Root: repo}, Command: []string{fmt.Sprintf("sleep %s; exit %d", workloadWait, code)}, ArtifactGlobs: []string{"report"}}
+				if kind == "unsupported-timeout" {
+					runReq.Command = []string{fmt.Sprintf("printf started > workload-started; exit %d", code)}
+					runReq.ShellMode = true
+				}
+				got, ended, artifacts, err := backend.runArtifactTestbox(t.Context(), runReq, "tbx_budget", nil, nil, nil, budget)
+				if kind == "unsupported-timeout" {
+					if got != 7 || !ended.IsZero() {
+						t.Errorf("unsupported timeout reached workload: code=%d ended=%v", got, ended)
+					}
+					if _, statErr := os.Stat(filepath.Join(repo, "workload-started")); !errors.Is(statErr, os.ErrNotExist) {
+						t.Errorf("unsupported timeout allowed workload side effect: %v", statErr)
+					}
+				}
 				if kind == "workload-outlives-budget" {
 					if err != nil || got != code || len(artifacts.Artifacts) != 1 || ended.Sub(begin) < budget {
 						t.Fatalf("workload was bounded: code=%d err=%v", got, err)
@@ -702,5 +728,38 @@ func TestBlacksmithArtifactReceiptEverySplit(t *testing.T) {
 			t.Fatalf("split %d failed", split)
 		}
 		cancel(nil)
+	}
+}
+
+func TestBlacksmithArtifactLiteralControlBytes(t *testing.T) {
+	for _, tt := range []struct{ name, output string }{
+		{"record-separator", "\x1e"},
+		{"unit-separator", "\x1f"},
+		{"binary", "\x00A\x1eB\x1f\xffC"},
+		{"repeated-separators", "\x1e\x1e\x1f"},
+		{"partial-prefix", "\x1eCRABBOX_BS"},
+		{"prefix-mismatch", "\x1eCRABBOX_BX_body\x1f"},
+		{"nested-prefix", "\x1eC\x1eCRABBOX_OLD_body\x1f"},
+		{"long-literal", "\x1e" + strings.Repeat("x", 1024) + "\x1f"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for chunk := 1; chunk <= len(tt.output); chunk++ {
+				var visible bytes.Buffer
+				receipt := &blacksmithArtifactReceipt{nonce: strings.Repeat("a", 64), stage: 1, output: &visible}
+				ctx, cancel := context.WithCancelCause(t.Context())
+				demux := blacksmithControlDemux{data: receipt.data, record: receipt.record, cancel: cancel}
+				for remaining := tt.output; len(remaining) > 0; {
+					n := min(chunk, len(remaining))
+					_, _ = demux.Write([]byte(remaining[:n]))
+					remaining = remaining[n:]
+				}
+				demux.finish()
+				canceled := ctx.Err()
+				cancel(nil)
+				if demux.err != nil || canceled != nil || visible.String() != tt.output {
+					t.Fatalf("chunk=%d err=%v canceled=%v output=%q want=%q", chunk, demux.err, canceled, visible.String(), tt.output)
+				}
+			}
+		})
 	}
 }

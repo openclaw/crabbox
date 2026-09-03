@@ -432,10 +432,14 @@ test("release source guard pins an allowed signed tag object while permitting la
   }
 });
 
-test("release notes extraction is exact and rejects missing sections", () => {
+test("release notes extraction ignores Unreleased, is exact, and rejects missing sections", () => {
   const extractor = path.join(repoRoot, "scripts", "extract-release-notes.sh");
   const changelog = [
     "# Changelog",
+    "",
+    "## Unreleased",
+    "",
+    "- Pending change, not part of this release.",
     "",
     "## 1.2.3 - 2026-07-10",
     "",

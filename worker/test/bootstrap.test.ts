@@ -7,8 +7,140 @@ import {
   cloudInit,
   windowsBootstrapPowerShell,
 } from "../src/bootstrap";
-import type { LeaseConfig } from "../src/config";
+import {
+  sharedWindowsRuntime,
+  sharedWindowsRuntimeGate,
+  sharedWindowsCore,
+  sharedWindowsNativePrelude,
+  sharedWslTruffleHogInstall,
+  windowsVCRuntimeX64URL,
+  windowsVCRuntimeX64SHA256,
+  windowsVCRuntimeARM64URL,
+  windowsVCRuntimeARM64SHA256,
+} from "../src/bootstrap.generated";
+import { leaseConfig, type LeaseConfig } from "../src/config";
 import { linuxMinimalReadinessBootstrap } from "../src/linux-readiness.generated";
+
+function expectRuntimeBeforeCore(script: string) {
+  let previousEnd = -1;
+  for (const fragment of [
+    sharedWindowsRuntime(),
+    sharedWindowsRuntimeGate(),
+    sharedWindowsCore(),
+  ]) {
+    const index = script.indexOf(fragment);
+    expect(index).toBeGreaterThanOrEqual(0);
+    expect(index).toBeGreaterThanOrEqual(previousEnd);
+    expect(script.split(fragment)).toHaveLength(2);
+    previousEnd = index + fragment.length;
+  }
+  expect(script.split("function Ensure-CrabboxWindowsRuntime {")).toHaveLength(2);
+  expect(script.split("\nEnsure-CrabboxWindowsRuntime\n")).toHaveLength(2);
+}
+
+describe("native Windows runtime readiness", () => {
+  for (const architecture of ["amd64", "arm64"] as const) {
+    for (const desktop of [false, true]) {
+      it(`gates AWS shared core and Azure extension on ${architecture}, desktop=${desktop}`, () => {
+        const windows: LeaseConfig = {
+          ...config,
+          target: "windows",
+          windowsMode: "normal",
+          architecture,
+          desktop,
+        };
+        const scenarios = [
+          { script: windowsBootstrapPowerShell(windows), writesReady: true, reboots: desktop },
+          {
+            script: azureWindowsBootstrapPowerShell({ ...windows, provider: "azure" }),
+            writesReady: !desktop,
+            reboots: false,
+          },
+          {
+            script: azureWindowsBootstrapPowerShell({
+              ...windows,
+              provider: "azure",
+              azureSnapshot: "fixture-snapshot",
+            }),
+            writesReady: !desktop,
+            reboots: false,
+          },
+        ];
+        for (const { script, writesReady, reboots } of scenarios) {
+          expectRuntimeBeforeCore(script);
+          const call = script.indexOf("\nEnsure-CrabboxWindowsRuntime\n");
+          const clear = script.indexOf(
+            "Remove-Item -LiteralPath $setupCompletePath -Force -ErrorAction Stop",
+          );
+          expect(clear).toBeGreaterThan(0);
+          expect(call).toBeGreaterThan(clear);
+          expect(script.split("\nEnsure-CrabboxWindowsRuntime\n")).toHaveLength(2);
+          const ready = script.indexOf(
+            "Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
+          );
+          expect(ready >= 0).toBe(writesReady);
+          expect(ready > call).toBe(writesReady);
+          expect(script.includes("Restart-Computer")).toBe(reboots);
+        }
+      });
+    }
+  }
+
+  it("retains the default native mode for shared and Azure bootstrap callers", () => {
+    const windows = leaseConfig({
+      provider: "aws",
+      target: "windows",
+      sshPublicKey: "ssh-ed25519 fixture",
+    });
+    expect(windows.windowsMode).toBe("normal");
+    expectRuntimeBeforeCore(windowsBootstrapPowerShell(windows));
+    expectRuntimeBeforeCore(azureWindowsBootstrapPowerShell({ ...windows, provider: "azure" }));
+  });
+
+  it("omits native runtime prerequisites from WSL2 shared and Azure bootstrap", () => {
+    const windows: LeaseConfig = { ...config, target: "windows", windowsMode: "wsl2" };
+    const shared = windowsBootstrapPowerShell(windows);
+    const azure = azureWindowsBootstrapPowerShell({ ...windows, provider: "azure" });
+    const azureSnapshot = azureWindowsBootstrapPowerShell({
+      ...windows,
+      provider: "azure",
+      azureSnapshot: "fixture-snapshot",
+    });
+    for (const script of [shared, azure, azureSnapshot]) {
+      for (const unwanted of [
+        "CrabboxWindowsRuntime",
+        "crabboxSetupWasComplete",
+        "PendingBoot",
+        "VC_redist",
+        "Remove-Item -LiteralPath $setupCompletePath",
+        windowsVCRuntimeX64URL,
+        windowsVCRuntimeX64SHA256,
+        windowsVCRuntimeARM64URL,
+        windowsVCRuntimeARM64SHA256,
+      ]) {
+        expect(script).not.toContain(unwanted);
+      }
+      const core = script.indexOf(sharedWindowsCore());
+      const ready = script.indexOf(
+        "Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
+      );
+      expect(core).toBeGreaterThan(0);
+      expect(script.split(sharedWindowsCore())).toHaveLength(2);
+      expect(ready).toBeGreaterThan(core);
+      expect(script).toContain("Restart-Service sshd -Force");
+    }
+    expect(shared).toContain(sharedWindowsNativePrelude());
+    expect(shared).toContain(sharedWslTruffleHogInstall());
+    expect(shared.indexOf('$wslDistro = "Crabbox"')).toBeGreaterThan(
+      shared.indexOf(sharedWindowsCore()) + sharedWindowsCore().length,
+    );
+    expect(shared).toContain("Restart-CrabboxBootstrap");
+    expect(shared).toContain("Restart-Computer -Force");
+    expect(shared).toContain("test -e /proc/sys/fs/binfmt_misc/WSLInterop");
+    expect(azure).not.toContain("Restart-Computer");
+    expect(azureSnapshot).not.toContain("Restart-Computer");
+  });
+});
 
 const config: LeaseConfig = {
   provider: "aws",

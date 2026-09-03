@@ -361,14 +361,29 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 	if !fixed {
 		createAttemptID = coordinatorCreateAttemptID()
 	}
-	defer func() {
-		if err == nil {
-			lease, err = b.validateCoordinatorLeaseCreateResult(ctx, lease, leaseID, slug, createAttemptID, fixed)
-		}
-	}()
 	timeout := coordinatorCreateLeaseTimeoutForConfig(cfg)
 	createCtx, cancelCreate := context.WithTimeout(ctx, timeout)
 	defer cancelCreate()
+	defer func() {
+		if err != nil {
+			return
+		}
+		lease, err = b.validateCoordinatorLeaseCreateResult(ctx, lease, leaseID, slug, createAttemptID, fixed)
+		if err != nil || lease.State != "provisioning" {
+			return
+		}
+		// Recovery confirms creation; activation still belongs to the original budget.
+		lease, err = b.waitForCoordinatorLeaseActivation(createCtx, blank(lease.ID, leaseID), lease)
+		switch {
+		case err == nil:
+			lease, err = b.validateCoordinatorLeaseCreateResult(ctx, lease, leaseID, slug, createAttemptID, fixed)
+		case ctx.Err() != nil:
+			cancelErr := b.canceledCoordinatorLeaseCreateError(ctx, leaseID, slug, createAttemptID, fixed, nil)
+			err = errors.Join(cancelErr, definitiveCoordinatorCreateError(err))
+		case !fixed:
+			err = b.abandonUnrecoveredCoordinatorLeaseCreate(ctx, leaseID, slug, createAttemptID, err)
+		}
+	}()
 	resultCh := make(chan coordinatorCreateLeaseResult, 1)
 	go func() {
 		var lease CoordinatorLease
@@ -422,17 +437,6 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 				if coordinatorCreateLeaseErrorMayHaveCommitted(result.err) {
 					return CoordinatorLease{}, b.abandonUnrecoveredCoordinatorLeaseCreate(ctx, leaseID, slug, createAttemptID, result.err)
 				}
-			}
-			if result.err == nil && result.lease.State == "provisioning" {
-				lease, err := b.waitForCoordinatorLeaseActivation(createCtx, blank(result.lease.ID, leaseID), result.lease)
-				if err != nil && ctx.Err() != nil {
-					cancelErr := b.canceledCoordinatorLeaseCreateError(ctx, leaseID, slug, createAttemptID, fixed, nil)
-					return CoordinatorLease{}, errors.Join(cancelErr, definitiveCoordinatorCreateError(err))
-				}
-				if err != nil && !fixed {
-					return CoordinatorLease{}, b.abandonUnrecoveredCoordinatorLeaseCreate(ctx, leaseID, slug, createAttemptID, err)
-				}
-				return lease, err
 			}
 			return result.lease, result.err
 		case <-ticker.C:
@@ -588,10 +592,6 @@ func (b *coordinatorLeaseBackend) recoverFixedCoordinatorLeaseAfterCreateError(c
 		lease, err := b.coord.EnsureLease(recoverCtx, cfg, publicKey, keep, leaseID, slug)
 		if err == nil {
 			fmt.Fprintf(b.rt.Stderr, "confirmed coordinator fixed lease %s slug=%s with exact PUT after uncertain create\n", leaseID, blank(lease.Slug, slug))
-			if lease.State == "provisioning" {
-				active, waitErr := b.waitForCoordinatorLeaseActivation(recoverCtx, leaseID, lease)
-				return active, waitErr, true
-			}
 			return lease, nil, true
 		}
 		if !coordinatorCreateLeaseErrorMayHaveCommitted(err) {
@@ -647,21 +647,9 @@ func (b *coordinatorLeaseBackend) recoverCoordinatorLeaseAfterCreateError(ctx co
 			if identityErr != nil {
 				return CoordinatorLease{}, identityErr, true
 			}
-			if coordinatorLeaseRecoveredFromCreateError(cfg, lease) {
+			if coordinatorLeaseRecoveredFromCreateError(cfg, lease) || lease.State == "provisioning" {
 				fmt.Fprintf(b.rt.Stderr, "recovered coordinator lease %s slug=%s with token-bound POST after uncertain response\n", lease.ID, blank(lease.Slug, slug))
 				return lease, nil, true
-			}
-			if lease.State == "provisioning" {
-				active, waitErr := b.waitForCoordinatorLeaseActivation(recoverCtx, blank(lease.ID, leaseID), lease)
-				if waitErr == nil {
-					active, identityErr = b.validateCoordinatorLeaseCreateResult(recoverCtx, active, leaseID, slug, createAttemptID, false)
-					if identityErr != nil {
-						return CoordinatorLease{}, identityErr, true
-					}
-					fmt.Fprintf(b.rt.Stderr, "recovered coordinator lease %s slug=%s with token-bound POST after uncertain response\n", active.ID, blank(active.Slug, slug))
-					return active, nil, true
-				}
-				return CoordinatorLease{}, nil, false
 			}
 			if lease.State == "failed" || lease.State == "released" || lease.State == "expired" {
 				return CoordinatorLease{}, nil, false

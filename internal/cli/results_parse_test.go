@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -389,19 +390,130 @@ func TestParseAutoJUnitResultsKeepsFailuresAfterTwentyFiles(t *testing.T) {
 }
 
 func TestNormalizeResultPath(t *testing.T) {
+	windows := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}
 	for _, tc := range []struct {
+		target  SSHTarget
 		workdir string
 		name    string
 		want    string
 	}{
 		{workdir: "/repo", name: "./junit.xml", want: "junit.xml"},
 		{workdir: "/repo", name: "/repo/reports/junit.xml", want: "reports/junit.xml"},
-		{workdir: `C:\work\repo`, name: `C:\work\repo\reports\junit.xml`, want: "reports/junit.xml"},
-		{workdir: `C:\work\repo`, name: `c:\work\repo\reports\junit.xml`, want: "reports/junit.xml"},
+		{workdir: "/", name: "/junit.xml", want: "junit.xml"},
+		{workdir: "/repo", name: `a\b.xml`, want: `a\b.xml`},
+		{workdir: "/repo", name: "/REPO/junit.xml", want: "/REPO/junit.xml"},
+		{workdir: "/repo", name: "link/../junit.xml", want: "link/../junit.xml"},
+		{target: windows, workdir: `C:\work\repo`, name: `C:\work\repo\reports\junit.xml`, want: "reports/junit.xml"},
+		{target: windows, workdir: `C:\work\repo`, name: `c:\work\repo\reports\junit.xml`, want: "reports/junit.xml"},
+		{target: windows, workdir: `C:\work\repo`, name: `.\reports/junit.xml`, want: "reports/junit.xml"},
+		{target: windows, workdir: `C:\`, name: `c:\junit.xml`, want: "junit.xml"},
+		{target: windows, workdir: `\\server\share\repo`, name: `\\SERVER\share\repo\junit.xml`, want: "junit.xml"},
+		{target: windows, workdir: `C:\repo`, name: `C:\repo\Case.xml`, want: "Case.xml"},
+		{target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, workdir: "/repo", name: `a\b.xml`, want: `a\b.xml`},
 	} {
-		if got := normalizeResultPath(tc.workdir, tc.name); got != tc.want {
+		if got := normalizeResultPath(tc.target, tc.workdir, tc.name); got != tc.want {
 			t.Fatalf("normalizeResultPath(%q, %q)=%q, want %q", tc.workdir, tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestCollectRemoteJUnitResultsDeduplicatesExplicitAliases(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX SSH fixture")
+	}
+	workdir := t.TempDir()
+	const report = `<testsuite name="sample" tests="1" failures="1"><testcase name="fails"><failure message="boom"/></testcase></testsuite>`
+	for _, name := range []string{"junit.xml", "other.xml"} {
+		writeFile(t, filepath.Join(workdir, name), report)
+	}
+	if err := os.Symlink("junit.xml", filepath.Join(workdir, "same-link.xml")); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	installWorkspaceOwnerAwareSSH(t, filepath.Join(bin, "ssh"), "#!/bin/sh\nexec /bin/sh -c \"$1\"\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	target := SSHTarget{Host: "example.test", User: "runner", Port: "22"}
+	abs := filepath.Join(workdir, "junit.xml")
+	for _, tc := range []struct {
+		name      string
+		paths     []string
+		auto      bool
+		wantFiles []string
+	}{
+		{name: "relative first", paths: []string{"junit.xml", "./junit.xml", abs}, wantFiles: []string{"junit.xml"}},
+		{name: "absolute first", paths: []string{abs, "./junit.xml", "junit.xml"}, wantFiles: []string{abs}},
+		{name: "explicit and auto", paths: []string{"junit.xml", "./junit.xml", abs}, auto: true, wantFiles: []string{"junit.xml"}},
+		{name: "identical reports remain distinct", paths: []string{"junit.xml", "other.xml"}, wantFiles: []string{"junit.xml", "other.xml"}},
+		{name: "symlink spelling remains distinct", paths: []string{"junit.xml", "same-link.xml"}, wantFiles: []string{"junit.xml", "same-link.xml"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := collectRemoteJUnitResults(context.Background(), target, workdir, ResultsConfig{JUnit: tc.paths, Auto: tc.auto}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantCount := len(tc.wantFiles)
+			if got == nil || !reflect.DeepEqual(got.Files, tc.wantFiles) || got.Tests != wantCount || got.Failures != wantCount || len(got.Failed) != wantCount {
+				t.Fatalf("summary=%+v, want files=%v with %d tests and failures", got, tc.wantFiles, wantCount)
+			}
+		})
+	}
+}
+
+func TestCollectRemoteJUnitResultsDeduplicatesCollectedPathsForTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX SSH fixture")
+	}
+	for _, tc := range []struct {
+		name      string
+		target    SSHTarget
+		workdir   string
+		paths     []string
+		collected []string
+		wantFiles []string
+	}{
+		{
+			name: "native Windows aliases", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, workdir: `C:\work\repo`,
+			paths:     []string{`reports\junit.xml`, `.\reports/junit.xml`, `c:\work\repo\reports\junit.xml`},
+			wantFiles: []string{`reports\junit.xml`},
+		},
+		{
+			name: "native Windows filename case", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, workdir: `C:\repo`,
+			paths: []string{"Case.xml", "case.xml"}, wantFiles: []string{"Case.xml", "case.xml"},
+		},
+		{
+			name: "POSIX backslash", workdir: "/repo",
+			paths: []string{`a\b.xml`, "a/b.xml"}, wantFiles: []string{"a/b.xml", `a\b.xml`},
+		},
+		{
+			name: "unreadable first alias", workdir: "/repo", paths: []string{"junit.xml", "./junit.xml"},
+			collected: []string{"./junit.xml"}, wantFiles: []string{"./junit.xml"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := t.TempDir()
+			payload := filepath.Join(bin, "results.txt")
+			collected := tc.collected
+			if collected == nil {
+				collected = tc.paths
+			}
+			var marked strings.Builder
+			for _, name := range collected {
+				fmt.Fprintf(&marked, "%s%s\n<testsuite tests=\"1\" failures=\"1\"><testcase name=\"fails\"><failure/></testcase></testsuite>\n", resultFileMarker, name)
+			}
+			writeFile(t, payload, marked.String())
+			installWorkspaceOwnerAwareSSH(t, filepath.Join(bin, "ssh"), "#!/bin/sh\ncat "+shellQuote(payload)+"\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			target := tc.target
+			target.Host, target.User, target.Port = "example.test", "runner", "22"
+			got, err := collectRemoteJUnitResults(context.Background(), target, tc.workdir, ResultsConfig{JUnit: tc.paths}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantCount := len(tc.wantFiles)
+			if got == nil || !reflect.DeepEqual(got.Files, tc.wantFiles) || got.Tests != wantCount || got.Failures != wantCount || len(got.Failed) != wantCount {
+				t.Fatalf("summary=%+v, want files=%v with %d tests and failures", got, tc.wantFiles, wantCount)
+			}
+		})
 	}
 }
 

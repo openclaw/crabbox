@@ -265,13 +265,20 @@ export interface LeaseRequest {
   checkpointUseClaim?: string;
 }
 
+export interface FixedLeaseCreateIntent {
+  version: number;
+  hash: string;
+  provider: Provider;
+}
+
 export interface CreateAttemptRecord {
-  version: 1;
+  version: 1 | 2;
   requestedLeaseID: string;
   token: string;
   owner: string;
   org: string;
   state: "pending" | "canceled";
+  fixedCreate?: FixedLeaseCreateIntent;
   canonicalLeaseID?: string;
   cloudID?: string;
   generation?: string;
@@ -654,6 +661,7 @@ export interface ReadyPoolDesiredCapacity {
   owner: string;
   org: string;
   criteria: ReadyPoolBorrowRequest;
+  identity?: ReadyPoolIdentityV1;
   compatibilityKey?: string;
   minReady: number;
   maxReady: number;

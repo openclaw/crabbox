@@ -627,7 +627,7 @@ func (runEnvProfileTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "run-env-profile-test",
 		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}},
+		Targets:     []TargetSpec{{OS: targetLinux}, {OS: targetWindows, WindowsMode: windowsModeNormal}},
 		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync},
 		Coordinator: CoordinatorNever,
 	}
@@ -7522,5 +7522,61 @@ func TestApplyResolvedLeaseConfigPreservesProviderTargetUser(t *testing.T) {
 
 	if target.User != "image-admin" {
 		t.Fatalf("resolved target user=%q, want provider user", target.User)
+	}
+}
+
+func TestTypedReadyPoolRunRejectsProviderBeforeBackendLoad(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".crabbox.yaml")
+	if err := os.WriteFile(configPath, []byte("provider: gcp\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	identityPath := filepath.Join(dir, "identity.json")
+	identity, err := json.Marshal(testReadyPoolIdentity(t, "", "", "", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(identityPath, identity, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+
+	err = (App{Stdout: io.Discard, Stderr: io.Discard}).Run(context.Background(), []string{
+		"run", "--pool", "builders", "--pool-identity-file", identityPath, "--", "true",
+	})
+	if err == nil || !strings.Contains(err.Error(), "configured typed ready-pool provider") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestLoadRunConfigBindsReadyPoolIdentityBeforeProviderDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+
+	defaults := defaultConfig()
+	if defaults.Provider != "hetzner" {
+		t.Fatalf("compiled provider=%q, want hetzner", defaults.Provider)
+	}
+	fs := newFlagSet("run", io.Discard)
+	flags := registerRunFlags(fs, defaults, ordinaryLeaseCreateFlagRegistrationOptions())
+	if err := parseFlags(fs, []string{"--pool", "builders"}); err != nil {
+		t.Fatal(err)
+	}
+	identity := testReadyPoolIdentity(t, "", "", "", "")
+	cfg, err := loadRunConfig(fs, flags, leaseFlagTarget{}, false, &identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "aws" || cfg.providerSelectionSource != providerSelectionLeaseContext || *flags.Lease.Provider != "aws" {
+		t.Fatalf("provider binding cfg=%q source=%q flag=%q", cfg.Provider, cfg.providerSelectionSource, *flags.Lease.Provider)
+	}
+	if cfg.ServerType == defaults.ServerType || cfg.ServerType != serverTypeForConfig(cfg) {
+		t.Fatalf("server type=%q, compiled hetzner=%q, projected aws=%q", cfg.ServerType, defaults.ServerType, serverTypeForConfig(cfg))
 	}
 }

@@ -83,10 +83,17 @@ reports from an earlier run:
 
 Explicit `--junit` files and auto-discovered files are merged (de-duplicated by
 normalized workdir-relative path), so a multi-report setup still produces one
-result record. A malformed, partial, or oversized report emits a named warning
-without discarding summaries parsed from other valid files. The CLI prints a
-one-line summary to stderr and includes every valid parsed summary in the run's
-`finish` payload.
+result record. Aliases within the explicit list, such as `junit.xml`,
+`./junit.xml`, and its absolute path inside the workdir, are counted once; the
+first readable explicit spelling is retained. Native Windows normalizes path
+separators and workdir-prefix casing while preserving filename case. Distinct
+lexical paths stay separate even when report contents match or symlinks point
+to the same file.
+
+A malformed, partial, or oversized report emits a named warning without
+discarding summaries parsed from other valid files. The CLI prints a one-line
+summary to stderr and includes every valid parsed summary in the run's `finish`
+payload.
 
 Result collection warnings remain non-fatal. To make parsed test failures affect
 the run status, opt in with `--fail-on-test-failures`,

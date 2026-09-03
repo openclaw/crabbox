@@ -162,8 +162,13 @@ cleanup context, while the existing local claim lock remains held. Cleanup is
 acknowledged only when that query succeeds without cancellation and its stdout
 contains the native table header and one complete, unambiguous row identifying
 the **exact requested ID** with state **`completed`**. The IP cell may be empty
-after native stop clears it; the remaining columns must still be present and
-aligned with the header. Successful stops also require terminal confirmation.
+after native stop clears it. A Testbox stopped before leaving the queue may
+complete without ever receiving an IP or GitHub Actions run URL. Empty IP and
+`RUN URL` cells are allowed only in the complete native table: workflow/job/ref
+must match the exact claim, `CREATED` must be nonempty, and the row must retain
+its column alignment, padding through the `RUN URL` column, and final newline.
+A present run URL must be a valid GitHub Actions run URL. Successful stops also
+require terminal confirmation.
 Raw IDs without exact local ownership never reach native stop.
 
 Only `completed` establishes terminal status for this reconciliation. A 409 or
@@ -282,8 +287,9 @@ or a native CLI exit 1 do not establish a remote workload exit.
 
 The remote Linux environment must provide `timeout` with `--kill-after` support,
 in addition to Bash and the existing `find`, `tar`, `base64`, and temporary-file
-utilities. Its availability is checked before starting the child. Collection
-has an independent 30-second budget, with a one-second forced-kill grace;
+utilities. The required timeout option and duration syntax are checked with a
+harmless command before starting the child. Collection has an independent
+30-second budget, with a one-second forced-kill grace;
 the local wait is also bounded from the workload exit receipt. Caller
 cancellation takes precedence. This is not a 30-second workload deadline.
 
@@ -296,9 +302,10 @@ an observed nonzero workload exit. Collection failure after a successful
 workload still fails the run (missing required artifacts return exit 7).
 Command timing ends at the exit receipt; collection and cleanup count toward total.
 
-Protocol and archive bytes are removed before console/proof/failure-log capture;
-malformed or overflowing collection output is discarded and cancels the local
-runner. `--keep`, `--keep-on-failure`, reused leases, and failure bundles retain
+Reserved receipt frames and archive bytes are removed before
+console/proof/failure-log capture; unrelated workload control bytes remain
+streaming. Malformed or overflowing collection output is discarded and cancels
+the local runner. `--keep`, `--keep-on-failure`, reused leases, and failure bundles retain
 their existing policy. Downloaded evidence does **not** mean the workload
 succeeded; proof rendering remains success-only. The nonce binds the local
 invocation, not remote source authenticity or exact Git bytes: native Blacksmith

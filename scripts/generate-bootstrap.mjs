@@ -19,6 +19,7 @@ export const imageFields = {
   ContainerName: "containerName", AppleVMImage: "appleVMImage", AppleVMSHA256: "appleVMSHA256",
 };
 const artifactFields = {
+  windowsVCRuntimeX64: ["URL", "SHA256"], windowsVCRuntimeARM64: ["URL", "SHA256"],
   tightVNCMSI: ["URL", "SHA256"], gitForWindowsSetup: ["URL", "SHA256"],
   openSSHWin64Zip: ["URL", "SHA256"], ubuntuWSLRootFS: ["URL", "SHA256"],
   wslTruffleHog: ["Version", "AMD64SHA256"],
@@ -231,6 +232,8 @@ function bootstrapShellQuote(value: string): string {
   catalogGo += '\nvar osImageSpecs = map[string]osImageSpec{\n' + catalog.images.map((image) => `${JSON.stringify(image.Selector)}: {\n` + Object.entries(image).map(([k,v]) => `${k}: ${JSON.stringify(v)},`).join('\n') + '\n},').join('\n') + '\n}\n';
   catalogTS += '\n// prettier-ignore\nexport const osImageSpecs: Readonly<Record<string, OSImageSpec>> = ' + JSON.stringify(Object.fromEntries(catalog.images.map((image) => [image.Selector, Object.fromEntries(Object.entries(image).map(([key,value]) => [imageFields[key], value]))]))) + ';\n';
   return new Map([
+    ["scripts/windows-runtime.generated.ps1", provenance.replace("//", "#") +
+      fragmentTokens(fragments.find((fragment) => fragment.name === "windowsRuntime"), constants).map((token) => token.literal).join("")],
     ["internal/cli/bootstrap_generated.go", gofmt(go)],
     ["worker/src/bootstrap.generated.ts", ts],
     ["internal/cli/os_image.go", gofmt(catalogGo)],

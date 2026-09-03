@@ -29,7 +29,7 @@ const (
 var (
 	gitOriginHTTPServerError = regexp.MustCompile(`(?i)(?:requested URL returned error:[[:space:]]*|HTTP(?:/[0-9.]+)?[[:space:]]+|HTTP code[[:space:]]*=[[:space:]]*)5[0-9][0-9]\b`)
 	gitOriginHTTPAuthError   = regexp.MustCompile(`(?i)` + gitOriginHTTPAuthPattern)
-	gitOriginTransportError  = regexp.MustCompile(`(?i)Could not resolve (?:host|proxy)|Could not resolve hostname|Failed to connect|Couldn.t connect to server|Connection (?:refused|timed out|reset by peer)|Operation timed out|Network is unreachable|No route to host|SSL certificate problem|server certificate verification failed|TLS connect error|SSL connect error|gnutls_handshake\(\) failed|Empty reply from server|Recv failure|Send failure|Failed sending data to the peer`)
+	gitOriginTransportError  = regexp.MustCompile(`(?i)Could not resolve (?:host|proxy)|Could not resolve hostname|Failed to connect|Couldn.t connect to server|Connection (?:refused|timed out|reset by peer)|getpeername\(\) failed with errno [0-9]+: (?:Transport endpoint|Socket) is not connected\b|Operation timed out|Network is unreachable|No route to host|SSL certificate problem|server certificate verification failed|TLS connect error|SSL connect error|gnutls_handshake\(\) failed|Empty reply from server|Recv failure|Send failure|Failed sending data to the peer`)
 	gitOriginHTTPNotFound    = regexp.MustCompile(`(?i)\brepository not found\b`)
 	gitOriginFilesystemError = regexp.MustCompile(`(?i)does not appear to be a git repository|repository .* does not exist|No such file or directory|Permission denied|unable to access`)
 )

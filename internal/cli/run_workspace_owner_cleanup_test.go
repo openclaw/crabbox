@@ -530,3 +530,34 @@ func TestRunFailureDigestCleanupOutcomes(t *testing.T) {
 		})
 	}
 }
+
+func TestRunCommandFreshWindowsLeaseAcquiresInputOwner(t *testing.T) {
+	setupRunCleanupWorkspaceOwnerTest(t)
+	const leaseID = "cbx_env_profile_test"
+	runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) {
+		return LeaseTarget{
+			LeaseID: leaseID,
+			Server:  Server{Provider: runEnvProfileTestProvider{}.Name()},
+			SSH:     SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeNormal, SSHConfigProxy: true},
+		}, nil
+	}
+	ownerBoundary := errors.New("stop before Windows input can bypass its owner")
+	ownerCalls, releases := 0, 0
+	runEnvProfileTestReleaseHook = func() error { releases++; return nil }
+	var output bytes.Buffer
+	app := App{
+		Stdout: &output,
+		Stderr: &output,
+		workspaceOwnerAcquirer: func(_ context.Context, target SSHTarget, id string, _ io.Writer) (*workspaceOwner, error) {
+			ownerCalls++
+			if id != leaseID || !isWindowsNativeTarget(target) {
+				t.Fatalf("wrong input owner target: id=%s target=%+v", id, target)
+			}
+			return nil, ownerBoundary
+		},
+	}
+	err := app.runCommand(t.Context(), []string{"--provider", runEnvProfileTestProvider{}.Name(), "--target", targetWindows, "--windows-mode", windowsModeNormal, "--no-sync", "--no-hydrate", "--", "Write-Output", "must-not-run"})
+	if !errors.Is(err, ownerBoundary) || ownerCalls != 1 || releases != 1 {
+		t.Fatalf("fresh Windows input bypassed owner or cleanup: err=%v owners=%d releases=%d\n%s", err, ownerCalls, releases, output.String())
+	}
+}

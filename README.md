@@ -623,7 +623,7 @@ and the [provider docs](docs/providers/README.md).
 # Go CLI
 go build -trimpath -o bin/crabbox ./cmd/crabbox
 go vet ./...
-go test -race ./...
+go test -race -timeout=15m ./...
 
 # Coordinator runtimes (Node 22+ locally; CI runs Node 24)
 npm ci --prefix worker
@@ -655,6 +655,8 @@ suite, Linux supervision proof, and build), `Go modules` (normal tests in every
 module, including the root), and `Go coverage` (90% core coverage threshold).
 The race suite, all-module normal tests, and coverage collection use a 15-minute
 package timeout.
+Use the explicit timeout locally too: the CLI race suite can exceed Go's default
+10-minute package deadline even when its individual tests pass.
 Production releases use a serialized, draft-first process: preserve and verify
 the signed tag, build and
 Developer ID sign/notarize the macOS candidates locally, verify the exact draft

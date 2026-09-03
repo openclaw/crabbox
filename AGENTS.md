@@ -16,7 +16,7 @@ Keep core provider-neutral. Core may pass generic request/lease context and call
 
 - `go build -trimpath -o bin/crabbox ./cmd/crabbox`: build the local CLI.
 - `go vet ./...`: run Go static checks.
-- `go test -race ./...`: run the Go test suite with the race detector.
+- `go test -race -timeout=15m ./...`: run the Go test suite with the race detector and CI's package timeout.
 - `gofmt -w $(git ls-files '*.go')`: format Go files.
 - `npm ci --prefix worker`: install Worker dependencies.
 - `npm run format:check --prefix worker`: verify TypeScript formatting.
@@ -37,6 +37,8 @@ Name Go tests `*_test.go` beside the code they cover. Name Worker tests `*.test.
 ## Commit & Pull Request Guidelines
 
 History uses Conventional Commit prefixes such as `feat:`, `fix:`, `docs:`, and `ci:`. Keep commits focused and mention user-visible behavior changes. Pull requests should include a clear summary, verification commands, config or secret implications, and screenshots only for generated docs or UI changes. Issue/PR references: always use full GitHub URLs, every time.
+
+Maintainers and agents add user-visible fixes and features to `CHANGELOG.md` as work lands, normally under `## Unreleased`; contributor PR authors leave changelog edits to maintainers. Use concise one-line bullets, full PR links, and contributor thanks by `@login`. Release preparation finalizes the accumulated section's version and date; do not defer changelog maintenance until release time.
 
 ## Releasing
 

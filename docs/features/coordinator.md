@@ -400,8 +400,19 @@ canonical lease exists, its released state and durable cleanup claim are written
 under the same state lock before provider deletion, so ordinary maintenance can
 resume cleanup after a restart. It releases a reserved, provisioning, or
 retained canonical lease only when its private token, owner/org, and retained
-generation match; otherwise it fails closed. Fixed-ID `PUT` creates remain
-replay-owned and never use cancellation cleanup.
+generation match; otherwise it fails closed.
+
+Fixed-ID `PUT` creates record an owner/org/provider-bound intent before
+asynchronous preparation or capacity checks. They remain replay-owned, without
+a caller-supplied cancellation token. `POST /v1/leases/{id}/release` also
+cancels an admitted fixed intent that has not allocated a machine, including
+one rejected by a quota check. The cancellation survives coordinator restart
+and prevents a delayed or repeated create from allocating. Admission alone
+does not create a lease row or reserve usage. Unknown IDs still return 404;
+missing records from older coordinators do not prove cancellation or cleanup.
+Fixed admissions use version-2 attempt records: an older coordinator refuses
+to reuse these IDs, but only the upgraded coordinator can confirm cancellation
+before a lease row exists.
 
 **Release.** `POST /v1/leases/{id}/release` (body `{delete?}`, defaulting to
 `!keep`) deletes the cloud server when the lease is still active and sets state

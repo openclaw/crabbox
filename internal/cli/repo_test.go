@@ -1177,6 +1177,62 @@ func TestSyncFingerprintIncludesExcludeRuleProvenance(t *testing.T) {
 	}
 }
 
+func TestSyncFingerprintHashesChangedSymlinkIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink fixture requires Unix semantics")
+	}
+	for _, overlay := range []bool{false, true} {
+		for _, targetKind := range []string{"file", "directory", "missing"} {
+			t.Run(fmt.Sprintf("overlay=%t/%s", overlay, targetKind), func(t *testing.T) {
+				root := t.TempDir()
+				for _, name := range []string{"target-a", "target-b"} {
+					switch targetKind {
+					case "file":
+						writeFile(t, filepath.Join(root, name), "identical target contents\n")
+					case "directory":
+						if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				link := filepath.Join(root, "link")
+				if err := os.Symlink("target-a", link); err != nil {
+					t.Fatal(err)
+				}
+				cfg := baseConfig()
+				cfg.Sync.GitOverlay = overlay
+				manifest := SyncManifest{Files: []string{"link"}, Changed: []string{"link"}}
+				plan := gitCoherencePlan{RemoteURL: "https://example.test/repo.git", Target: "target", Tree: "tree", Branch: "main"}
+				fingerprint := func() string {
+					t.Helper()
+					value, err := syncFingerprintForManifest(Repo{Root: root}, cfg, manifest, SyncExcludeRules{}, plan)
+					if err != nil {
+						t.Fatalf("fingerprint changed %s symlink: %v", targetKind, err)
+					}
+					return value
+				}
+				before := fingerprint()
+				if err := os.Remove(link); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("target-b", link); err != nil {
+					t.Fatal(err)
+				}
+				after := fingerprint()
+				if before == after {
+					t.Error("retargeted symlink kept the same fingerprint")
+				}
+				if targetKind == "file" {
+					writeFile(t, filepath.Join(root, "target-b"), "changed target contents\n")
+					if got := fingerprint(); got != after {
+						t.Error("fingerprint followed symlink target contents outside the manifest")
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestSyncExcludeRuleUpgradeCompatibilityPreservesRenderedOrder(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, ".crabboxignore"), "coverage\n!coverage/keep.txt\n")
