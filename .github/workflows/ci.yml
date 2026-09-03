@@ -186,6 +186,8 @@ jobs:
         shell: pwsh
         run: |
           $required = @(
+            'TestWindowsSSHStdinReaderBehavior',
+            'TestWindowsWitnessRedirectedStdinUploadBehavior',
             'TestWSLStageLauncherVerifiesAndConsumesReadyFile',
             'TestWSLStageLauncherRejectsCorruptOrNonFileStage',
             'TestWSLStageLauncherRejectsSameNonceValidReplacement',
@@ -231,6 +233,9 @@ jobs:
 
       - name: Test Git workspace coherence
         run: go test ./internal/cli/ -run '^(TestWindowsGitRootIdentityAcceptsShortAliasAndRejectsDistinctRoot|TestWindowsGitCoherenceRollbackRestoresIndexAfterSymbolicHeadFailure|TestWindowsGitSeedReplacesUnusableExactRootsAfterVerifiedClone|TestWindowsGitCoherenceSupportsDetachedSparseSplitAndLinkedIndexes|TestGitSeedFailurePhaseAndPreservation|TestGitSeedDiagnosticLabelsAndPrivacy|TestWorkspaceOwnerWindowsProtocolBehavior)$' -count=1 -v
+
+      - name: Test Git overlay snapshot capabilities
+        run: go test ./internal/cli/ -run '^(TestOpenGitOverlaySnapshotParentRejectsFilesAndReparsePoints|TestOpenGitOverlaySnapshotParentSupportsMetadataRestoration|TestGitOverlaySnapshotCleanupThawsReadOnlyFiles|TestGitOverlaySnapshotCopiesThroughNestedReadOnlyParents|TestGitOverlaySnapshotCleanupRejectsRootReplacementAndRetriesOriginal)$' -count=1 -v
 
   connector-lifecycles:
     name: Connector Lifecycles

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -15,6 +16,39 @@ import (
 func TestCIGoContract(t *testing.T) {
 	if err := checkCIGoContract(readCIGoWorkflow(t)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCIGoDocumentedRaceCommand(t *testing.T) {
+	var command string
+	for _, step := range ciGoSteps(ciGoJob(readCIGoWorkflow(t), "go-test")) {
+		if ciGoScalar(step, "name") == "Test" {
+			command = strings.TrimSpace(ciGoScalar(step, "run"))
+		}
+	}
+	if command == "" {
+		t.Fatal("go-test workflow is missing its Test command")
+	}
+	raceCommand := regexp.MustCompile("go test -race[^\\r\\n`]*\\./\\.\\.\\.")
+	for _, path := range []string{
+		"README.md", "AGENTS.md", "docs/operations.md",
+		"docs/features/provider-authoring.md", "docs/providers/islo.md", "docs/providers/morph.md",
+	} {
+		t.Run(path, func(t *testing.T) {
+			content, err := os.ReadFile("../" + path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			commands := raceCommand.FindAllString(string(content), -1)
+			if len(commands) == 0 {
+				t.Fatal("missing documented full race-test command")
+			}
+			for _, documented := range commands {
+				if documented != command {
+					t.Errorf("documented race command %q differs from CI command %q", documented, command)
+				}
+			}
+		})
 	}
 }
 

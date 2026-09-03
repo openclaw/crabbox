@@ -54,6 +54,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 
 	for _, boundary := range []string{"flush", "stopped"} {
 		t.Run("ordinary failure before submission releases reservation after "+boundary, func(t *testing.T) {
+			t.Parallel()
 			f := newCheckpointCaptureFixture(t, repo, binary)
 			s := f.state()
 			s.Pause, s.StartRunning = boundary, true
@@ -92,6 +93,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 	}
 
 	t.Run("ordinary interrupted submission retains blank reservation", func(t *testing.T) {
+		t.Parallel()
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		s := f.state()
 		s.Pause = "saved"
@@ -170,6 +172,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 
 	for _, boundary := range []string{"stopped", "saved", "image", "removed"} {
 		t.Run("retirement survives death after "+boundary, func(t *testing.T) {
+			t.Parallel()
 			f := newCheckpointCaptureFixture(t, repo, binary)
 			s := f.state()
 			s.Pause, s.Ready = boundary, boundary == "removed"
@@ -208,6 +211,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 	}
 
 	t.Run("replacement observed after stop cannot be saved", func(t *testing.T) {
+		t.Parallel()
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		s := f.state()
 		s.ReplaceStopped = true
@@ -222,6 +226,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 	})
 
 	t.Run("ordinary capture revalidates source after awaited flush", func(t *testing.T) {
+		t.Parallel()
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		s := f.state()
 		s.ReplaceAfterFlush = true
@@ -235,6 +240,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 
 	for _, transition := range []string{"STARTING", "STOPPING"} {
 		t.Run("retirement holds "+transition, func(t *testing.T) {
+			t.Parallel()
 			f := newCheckpointCaptureFixture(t, repo, binary)
 			s := f.state()
 			s.Machine["status"] = transition
@@ -255,6 +261,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 	}
 
 	t.Run("lost save response and absent image never authorize another save", func(t *testing.T) {
+		t.Parallel()
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		s := f.state()
 		s.Pause = "saved"
@@ -282,6 +289,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 
 	for _, state := range []string{"STARTING", "STOPPING"} {
 		t.Run("ready image retirement waits for source "+state, func(t *testing.T) {
+			t.Parallel()
 			f := newCheckpointCaptureFixture(t, repo, binary)
 			f.requirePending()
 			s := f.state()
@@ -306,6 +314,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 	}
 
 	t.Run("historical blank reservation is held by capture delete and prune", func(t *testing.T) {
+		t.Parallel()
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		id := "chk_0123456789abcdef"
 		path := filepath.Join(f.root, "state", "crabbox", "checkpoints", id, checkpointMetaFile)
@@ -338,6 +347,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 	})
 
 	t.Run("configured suspend never becomes destructive retirement", func(t *testing.T) {
+		t.Parallel()
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		config, err := os.OpenFile(filepath.Join(f.root, "config.yaml"), os.O_APPEND|os.O_WRONLY, 0)
 		if err != nil {
@@ -356,6 +366,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 	})
 
 	t.Run("replaced claim generation cannot replay copied operation binding", func(t *testing.T) {
+		t.Parallel()
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		f.requirePending()
 		claim := f.claim()
@@ -374,6 +385,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 	})
 
 	t.Run("concurrent operations cannot claim the same stopped source", func(t *testing.T) {
+		t.Parallel()
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		s := f.state()
 		s.Pause = "saved"
@@ -399,6 +411,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 	})
 
 	t.Run("ordinary lifecycle cannot bypass the capture owner", func(t *testing.T) {
+		t.Parallel()
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		f.requirePending()
 		for _, args := range [][]string{
@@ -421,6 +434,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 
 	for _, replacement := range []string{"image identity", "image version"} {
 		t.Run("replacement of "+replacement+" holds source", func(t *testing.T) {
+			t.Parallel()
 			f := newCheckpointCaptureFixture(t, repo, binary)
 			f.requirePending()
 			s := f.state()
@@ -442,6 +456,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 	}
 
 	t.Run("failed snapshot cleanup survives lost image removal response", func(t *testing.T) {
+		t.Parallel()
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		s := f.state()
 		s.Failed = true
@@ -481,6 +496,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 	})
 
 	t.Run("failed legacy account remains held before discard", func(t *testing.T) {
+		t.Parallel()
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		f.requirePending()
 		s := f.state()
@@ -503,6 +519,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 	})
 	for _, accountCase := range []string{"switched", "unbound legacy", "same account absent"} {
 		t.Run("retiring account fence "+accountCase, func(t *testing.T) {
+			t.Parallel()
 			f := newCheckpointCaptureFixture(t, repo, binary)
 			f.requirePending()
 			s := f.state()
@@ -553,6 +570,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 	runCheckpointContainerReviewContract(t, repo, binary)
 	runCheckpointAWSStrategyContract(t, repo, binary)
 	t.Run("fixed Machine0 fork replay reads detail version", func(t *testing.T) {
+		t.Parallel()
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		s := f.state()
 		s.Ready = true

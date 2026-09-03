@@ -13,6 +13,7 @@ import (
 
 func runCheckpointAbandonContract(t *testing.T, repo, binary string) {
 	t.Run("abandon legacy source preserves unknown image obligation", func(t *testing.T) {
+		t.Parallel()
 		f := newCheckpointAbandonFixture(t, repo, binary)
 		finishCheckpointAbandonment(t, f, captureFixtureCheckpoint)
 		before, _ := json.Marshal(f.state())
@@ -59,6 +60,7 @@ func runCheckpointAbandonContract(t *testing.T, repo, binary string) {
 
 	for _, refusal := range []string{"wrong expected source", "missing expected source", "source absent", "other account absent", "source replacement", "another unresolved checkpoint", "existing retirement"} {
 		t.Run("abandon refuses "+refusal, func(t *testing.T) {
+			t.Parallel()
 			f := newCheckpointAbandonFixture(t, repo, binary)
 			args := checkpointAbandonArgs(captureFixtureCheckpoint)
 			s := f.state()
@@ -100,6 +102,7 @@ func runCheckpointAbandonContract(t *testing.T, repo, binary string) {
 
 	for _, replacement := range []string{"source", "claim generation", "account", "account and absence"} {
 		t.Run("abandon replay refuses changed "+replacement, func(t *testing.T) {
+			t.Parallel()
 			f := newCheckpointAbandonFixture(t, repo, binary)
 			s := f.state()
 			s.Machine["status"] = "STOPPING"
@@ -139,6 +142,7 @@ func runCheckpointAbandonContract(t *testing.T, repo, binary string) {
 
 	for _, boundary := range []string{"bound", "removed"} {
 		t.Run("abandon survives death after "+boundary, func(t *testing.T) {
+			t.Parallel()
 			f := newCheckpointAbandonFixture(t, repo, binary)
 			s := f.state()
 			s.Pause = "get"
@@ -173,6 +177,7 @@ func runCheckpointAbandonContract(t *testing.T, repo, binary string) {
 	}
 
 	t.Run("abandon reopens prepared journal before claim binding", func(t *testing.T) {
+		t.Parallel()
 		f := newCheckpointAbandonFixture(t, repo, binary)
 		originalClaim := f.claim()
 		s := f.state()
@@ -195,6 +200,7 @@ func runCheckpointAbandonContract(t *testing.T, repo, binary string) {
 	})
 
 	t.Run("abandon retains image arriving after source cleanup", func(t *testing.T) {
+		t.Parallel()
 		f := newCheckpointAbandonFixture(t, repo, binary)
 		finishCheckpointAbandonment(t, f, captureFixtureCheckpoint)
 		s := f.state()
@@ -213,6 +219,7 @@ func runCheckpointAbandonContract(t *testing.T, repo, binary string) {
 	})
 
 	t.Run("abandon source after lost ordinary save response retains image", func(t *testing.T) {
+		t.Parallel()
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		s := f.state()
 		s.Pause = "saved"

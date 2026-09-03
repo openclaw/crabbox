@@ -51,7 +51,7 @@ func (r *blacksmithArtifactReceipt) command(req RunRequest, budget time.Duration
 	}
 	// Neither child runs in a conditional: bash errexit, exit, exec, and traps
 	// remain child-owned. The supervisor never changes its initial remote cwd.
-	body := "command -v timeout >/dev/null 2>&1 || exit 7\n" +
+	body := "timeout --kill-after=1s 1s /bin/sh -c ':' >/dev/null 2>&1 || exit 7\n" +
 		"bash -c " + shellQuote(child) + "\n" +
 		"workload_code=$?\n" +
 		"printf '" + format + "exit:%d\\037' \"$workload_code\" || exit 7\n" +
@@ -118,8 +118,9 @@ func (r *blacksmithArtifactReceipt) data(data []byte) error {
 	return nil
 }
 
-// Strip all control frames, including stale/malformed ones. Once invalid, drop
-// the rest of this stream, so truncated or overflowing archives cannot leak.
+// Strip reserved control frames, including stale/malformed ones, but preserve
+// unrelated workload bytes. Once invalid, drop the rest of this stream so
+// truncated or overflowing archives cannot leak.
 type blacksmithControlDemux struct {
 	pending []byte
 	inFrame bool
@@ -138,7 +139,12 @@ func (d *blacksmithControlDemux) fail(err error) {
 }
 
 func (d *blacksmithControlDemux) Write(data []byte) (int, error) {
+	const prefix = "\x1eCRABBOX_BS_"
 	n := len(data)
+	if !d.inFrame && len(d.pending) > 0 {
+		data = append(d.pending, data...)
+		d.pending = nil
+	}
 	for len(data) > 0 && d.err == nil {
 		if !d.inFrame {
 			i := bytes.IndexByte(data, '\x1e')
@@ -153,8 +159,22 @@ func (d *blacksmithControlDemux) Write(data []byte) (int, error) {
 			if len(data) == 0 {
 				break
 			}
+			matched := min(len(data), len(prefix))
+			if !bytes.Equal(data[:matched], []byte(prefix[:matched])) {
+				if err := d.data(data[:1]); err != nil {
+					d.fail(err)
+					break
+				}
+				data = data[1:]
+				continue
+			}
+			if len(data) < len(prefix) {
+				d.pending = bytes.Clone(data)
+				break
+			}
 			d.inFrame = true
-			data = data[1:]
+			d.pending = append(d.pending, prefix[1:]...)
+			data = data[len(prefix):]
 		}
 		i := bytes.IndexByte(data, '\x1f')
 		if i < 0 {
@@ -181,6 +201,11 @@ func (d *blacksmithControlDemux) Write(data []byte) (int, error) {
 func (d *blacksmithControlDemux) finish() {
 	if d.inFrame {
 		d.fail(errors.New("truncated artifact receipt"))
+	} else if d.err == nil && len(d.pending) > 0 {
+		if err := d.data(d.pending); err != nil {
+			d.fail(err)
+		}
+		d.pending = nil
 	}
 }
 
