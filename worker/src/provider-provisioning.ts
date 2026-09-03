@@ -158,9 +158,7 @@ export function validateProviderProvisioningCleanupClaim(
     case "gcp":
       return nonEmptyClaimValue(claim.region) &&
         nonEmptyClaimValue(claim.providerProject) &&
-        (claim.providerResourceID === undefined ||
-          (/^[0-9]+$/.test(claim.providerResourceID) &&
-            claim.providerResourceID === claim.providerResourceID.trim()))
+        canonicalNumericClaimValue(claim.providerResourceID)
         ? claim
         : undefined;
     case "daytona":
@@ -175,6 +173,10 @@ export function validateProviderProvisioningCleanupClaim(
 
 function nonEmptyClaimValue(value: string | undefined): boolean {
   return Boolean(value && value === value.trim());
+}
+
+function canonicalNumericClaimValue(value: string | undefined): boolean {
+  return Boolean(value && value === value.trim() && /^[0-9]+$/.test(value));
 }
 
 function validAzureProviderScope(value: string | undefined): boolean {

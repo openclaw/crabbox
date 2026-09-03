@@ -64,6 +64,7 @@ import {
   ProviderProvisioningOutcomeUncertainError,
   ProviderResourceUnresolvedError,
   providerProvisioningCleanupClaim,
+  validateProviderProvisioningCleanupClaim,
   type ProviderProvisioningCleanupClaim,
 } from "../src/provider-provisioning";
 import { providerReconciliationFingerprint } from "../src/provider-reconciliation";
@@ -9425,6 +9426,7 @@ describe("fleet lease identity and idle", () => {
         cloudID: "crabbox-published",
         region: "us-central1-c",
         providerProject: "proj",
+        providerResourceID: "9223372036854775807",
       },
     },
     {
@@ -9434,6 +9436,7 @@ describe("fleet lease identity and idle", () => {
         cloudID: "crabbox-published",
         region: "us-central1-b",
         providerProject: "other-project",
+        providerResourceID: "9223372036854775807",
       },
     },
   ])("rejects a GCP publication claim outside the persisted $name", async ({ claim }) => {
@@ -10045,6 +10048,119 @@ describe("fleet lease identity and idle", () => {
     }
   });
 
+  it.each([
+    ["missing", undefined],
+    ["blank", ""],
+    ["malformed", "instance-latest"],
+    ["noncanonical", "9223372036854775807 "],
+  ] as const)("rejects a GCP cleanup claim with a %s numeric resource id", (_case, value) => {
+    expect(
+      validateProviderProvisioningCleanupClaim(
+        {
+          provider: "gcp",
+          cloudID: "crabbox-blue-lobster-c80c2195",
+          region: "us-central1-a",
+          providerProject: "default-project",
+          ...(value === undefined ? {} : { providerResourceID: value }),
+        },
+        "gcp",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("accepts a GCP cleanup claim with a canonical numeric resource id", () => {
+    const claim: ProviderProvisioningCleanupClaim = {
+      provider: "gcp",
+      cloudID: "crabbox-blue-lobster-c80c2195",
+      region: "us-central1-a",
+      providerProject: "default-project",
+      providerResourceID: "9223372036854775807",
+    };
+    expect(validateProviderProvisioningCleanupClaim(claim, "gcp")).toBe(claim);
+  });
+
+  it("keeps an incomplete uncertain GCP cleanup claim unbound and recoverable", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const createAttemptID = "cat_00000000000000000000000000000013";
+    let unboundReads = 0;
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(
+        async () => {
+          throw new ProviderProvisioningCleanupError(
+            "accepted GCP create has incomplete cleanup evidence",
+            {
+              provider: "gcp",
+              cloudID: "crabbox-blue-lobster-c80c2195",
+              region: "us-central1-a",
+              providerProject: "default-project",
+            },
+            new ProviderProvisioningOutcomeUncertainError("operation target id is unavailable"),
+          );
+        },
+        {
+          provider: "gcp",
+          onPrepareLeaseCreate(config, lease) {
+            return { config, lease, provisioning: {} };
+          },
+          onRecoverUnboundProvisioningResource() {
+            unboundReads += 1;
+            return undefined;
+          },
+        },
+      ),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          leaseID,
+          createAttemptID,
+          provider: "gcp",
+          target: "linux",
+          gcpProject: "default-project",
+          gcpZone: "us-central1-a",
+          sshPublicKey: "ssh-ed25519 incomplete-claim",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+    expect(failed).toMatchObject({
+      state: "failed",
+      cloudID: "",
+      serverID: 0,
+      serverName: "",
+      provisioningResourceMayExist: true,
+      provisioningFailureRetryable: false,
+      provisioningRequestStartedAt: expect.any(String),
+      provisioningRequestSettledAt: expect.any(String),
+    });
+    expect(failed.providerResourceID).toBeUndefined();
+    expect(failed.cleanupRetryAt).toBeUndefined();
+
+    await fleet.alarm();
+    const observed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+    expect(unboundReads).toBe(0);
+    expect(observed.provisioningRecoveryObservedAt).toEqual(expect.any(String));
+    storage.seed(`lease:${leaseID}`, {
+      ...observed,
+      provisioningRecoveryObservedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+    });
+
+    await fleet.alarm();
+
+    expect(unboundReads).toBe(1);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      cloudID: "",
+      serverID: 0,
+      serverName: "",
+      provisioningResourceMayExist: true,
+      provisioningRecoveryMissingSince: expect.any(String),
+    });
+  });
+
   it("persists and retries an exact funded-provider cleanup claim", async () => {
     const storage = new MemoryStorage();
     const leaseID = "cbx_abcdef123456";
@@ -10147,6 +10263,7 @@ describe("fleet lease identity and idle", () => {
               cloudID: "crabbox-blue-lobster-c80c2195",
               region: "us-central1-b",
               providerProject: "stored-project",
+              providerResourceID: "9223372036854775807",
             },
             new Error("cleanup unavailable"),
           );
@@ -10174,6 +10291,7 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
       state: "released",
       cloudID: "crabbox-blue-lobster-c80c2195",
+      providerResourceID: "9223372036854775807",
       region: "us-central1-b",
       providerProject: "stored-project",
       releaseDeletesServer: false,
@@ -10193,6 +10311,7 @@ describe("fleet lease identity and idle", () => {
     { cleanupPending: true, changed: "cloudID" },
     { cleanupPending: true, changed: "region" },
     { cleanupPending: true, changed: "providerProject" },
+    { cleanupPending: true, changed: "providerResourceID" },
   ] as const)(
     "preserves exact cleanup custody after provisioning fails (pending=$cleanupPending, changed=$changed)",
     async ({ cleanupPending, changed }) => {
@@ -10206,6 +10325,7 @@ describe("fleet lease identity and idle", () => {
         cloudID: "crabbox-published-allocation",
         region: "us-central1-a",
         providerProject: "request-project",
+        providerResourceID: "9223372036854775807",
       };
       let deletes = 0;
       const fleet = testFleet(storage, {
@@ -10217,7 +10337,15 @@ describe("fleet lease identity and idle", () => {
             await failCreate.promise;
             throw new ProviderProvisioningCleanupError(
               "readiness failed after allocation publication",
-              changed === "none" ? claim : { ...claim, [changed]: `different-${changed}` },
+              changed === "none"
+                ? claim
+                : {
+                    ...claim,
+                    [changed]:
+                      changed === "providerResourceID"
+                        ? "9223372036854775806"
+                        : `different-${changed}`,
+                  },
               new Error("readiness failed"),
             );
           },
@@ -10274,7 +10402,8 @@ describe("fleet lease identity and idle", () => {
         const after = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
         const readinessError = expect.stringContaining("readiness failed");
         const failureRecord = expect.objectContaining({
-          [changed]: `different-${changed}`,
+          [changed]:
+            changed === "providerResourceID" ? "9223372036854775806" : `different-${changed}`,
           cleanupError: readinessError,
         });
         const retryTime = expect.any(String);
@@ -24861,6 +24990,7 @@ describe("fleet lease identity and idle", () => {
               cloudID: "crabbox-canceled-late",
               region: "us-central1-b",
               providerProject: "cleanup-project",
+              providerResourceID: "9223372036854775807",
             },
             new Error("cleanup unavailable"),
           );
@@ -24904,6 +25034,7 @@ describe("fleet lease identity and idle", () => {
       cloudID: "crabbox-canceled-late",
       region: "us-central1-b",
       providerProject: "cleanup-project",
+      providerResourceID: "9223372036854775807",
       releaseDeletesServer: true,
       provisioningResourceMayExist: true,
       cleanupRetryAt: expect.any(String),
