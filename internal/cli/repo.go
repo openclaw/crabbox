@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -640,17 +641,18 @@ func originBranchForTarget(root, baseRef, target string) string {
 	if target == "" {
 		return ""
 	}
+	out := gitOutput(root, "for-each-ref", "--contains="+target, "--sort=refname", "--format=%(refname)", "refs/remotes/origin")
+	eligibleRefs := strings.Split(out, "\n")
 	if branch := normalizedOriginBranch(baseRef); branch != "" &&
-		gitOutput(root, "rev-parse", "--verify", "refs/remotes/origin/"+branch+"^{commit}") == target {
+		slices.Contains(eligibleRefs, "refs/remotes/origin/"+branch) {
 		return branch
 	}
 	originHead := gitOutput(root, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
 	if branch := normalizedOriginBranch(originHead); branch != "" &&
-		gitOutput(root, "rev-parse", "--verify", "refs/remotes/origin/"+branch+"^{commit}") == target {
+		slices.Contains(eligibleRefs, "refs/remotes/origin/"+branch) {
 		return branch
 	}
-	out := gitOutput(root, "for-each-ref", "--contains="+target, "--sort=refname", "--format=%(refname)", "refs/remotes/origin")
-	for _, line := range strings.Split(out, "\n") {
+	for _, line := range eligibleRefs {
 		if branch := normalizedOriginBranch(line); branch != "" {
 			return branch
 		}

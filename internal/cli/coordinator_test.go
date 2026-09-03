@@ -445,12 +445,9 @@ func TestCoordinatorTokenCommandRefreshesBearer(t *testing.T) {
 	}))
 	defer server.Close()
 	client := CoordinatorClient{
-		BaseURL: server.URL,
-		TokenCommand: []string{
-			os.Args[0],
-			"-test.run=^TestCoordinatorTokenCommandHelper$",
-		},
-		Client: server.Client(),
+		BaseURL:      server.URL,
+		TokenCommand: synchronousTestHelperCommand("TestCoordinatorTokenCommandHelper"),
+		Client:       server.Client(),
 	}
 
 	if err := client.Health(context.Background()); err != nil {
@@ -473,7 +470,7 @@ func TestCoordinatorChildrenScrubExternalDesktopPassword(t *testing.T) {
 	t.Setenv("CRABBOX_TEST_KEEP", "preserved")
 	cfg := Config{
 		Coordinator:       "https://broker.example.test",
-		CoordTokenCommand: []string{os.Args[0], "-test.run=^TestCoordinatorTokenCommandHelper$"},
+		CoordTokenCommand: synchronousTestHelperCommand("TestCoordinatorTokenCommandHelper"),
 		Provider:          "external",
 		TargetOS:          targetMacOS,
 	}
@@ -572,7 +569,7 @@ func TestCoordinatorTokenCommandRejectsMultipleLines(t *testing.T) {
 	t.Setenv("CRABBOX_TOKEN_HELPER", "1")
 	t.Setenv("CRABBOX_TOKEN_HELPER_VALUE", "first\nsecond")
 	client := CoordinatorClient{
-		TokenCommand: []string{os.Args[0], "-test.run=^TestCoordinatorTokenCommandHelper$"},
+		TokenCommand: synchronousTestHelperCommand("TestCoordinatorTokenCommandHelper"),
 	}
 	if _, err := client.authorizationToken(context.Background()); err == nil || !strings.Contains(err.Error(), "exactly one token line") {
 		t.Fatalf("error=%v, want one-line validation", err)
@@ -1346,12 +1343,9 @@ func TestCoordinatorHeartbeatMintsTokenBeforeControlDialTimeout(t *testing.T) {
 	defer server.Close()
 
 	client := CoordinatorClient{
-		BaseURL: server.URL,
-		TokenCommand: []string{
-			os.Args[0],
-			"-test.run=^TestCoordinatorTokenCommandHelper$",
-		},
-		Client: server.Client(),
+		BaseURL:      server.URL,
+		TokenCommand: synchronousTestHelperCommand("TestCoordinatorTokenCommandHelper"),
+		Client:       server.Client(),
 	}
 	stop, err := startCoordinatorHeartbeat(context.Background(), &client, "cbx_123", "aws", 30*time.Minute, nil, nil, io.Discard)
 	if err != nil {

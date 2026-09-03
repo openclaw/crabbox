@@ -220,7 +220,7 @@ func TestWriteArtifactRunLogsUsesRoutedCoordinatorAndScrubsDesktopCredentials(t 
 
 	cfg := Config{
 		Coordinator:       server.URL,
-		CoordTokenCommand: []string{os.Args[0], "-test.run=^TestArtifactRunLogCoordinatorTokenHelper$"},
+		CoordTokenCommand: synchronousTestHelperCommand("TestArtifactRunLogCoordinatorTokenHelper"),
 		Provider:          "external",
 		TargetOS:          targetMacOS,
 	}

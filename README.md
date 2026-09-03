@@ -678,6 +678,15 @@ disable interactive credential requests, including during ordinary seed
 fallback. A credential-helper/askpass canary guards this test-only boundary;
 the separate production overlay security tests still inject hostile Git config.
 
+CLI runtime optimizations retain the full normal, race, and coverage modes and
+their existing deadlines and observation windows. Synchronous POSIX test-executable
+helpers suppress only the race runtime's exit delay in their child environment,
+preserving inherited detection and reporting options; Windows keeps its existing
+execution path. HTTP deadline cases with
+explicit configuration and private servers overlap their real waits without
+changing timeout contracts. The shared immutable CLI and provider builds stay
+inside `M.Run`, with their existing fixture cleanup and rebuild ownership.
+
 Cloudflare, Node/PostgreSQL, container, ingress, secrets, and DNS deployment live
 in [docs/infrastructure.md](docs/infrastructure.md). The dedicated ECS Fargate
 path is documented in
