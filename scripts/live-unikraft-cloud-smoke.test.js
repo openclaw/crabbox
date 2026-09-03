@@ -644,10 +644,25 @@ esac`,
   crabbox = crabbox.replaceAll('"$FAKE_REMOTE"', JSON.stringify(harness.remote));
   fs.writeFileSync(harness.fakeCrabbox, crabbox);
 
-  const startedAt = Date.now();
+  const fakeBin = path.join(harness.dir, "bin");
+  const pollDelays = path.join(harness.dir, "poll-delays.log");
+  fs.mkdirSync(fakeBin);
+  // Observe the cleanup delay directly; process startup varies under parallel test load.
+  writeExecutable(
+    path.join(fakeBin, "sleep"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  0.1|0.05) exec /bin/sleep "$@" ;;
+  *) printf '%s\\n' "$*" >>"$CRABBOX_TEST_POLL_DELAYS" ;;
+esac
+`,
+  );
   const result = spawnSync(bashPath, [smokeScript], {
     cwd: repoRoot,
     env: baseEnv({
+      PATH: `${fakeBin}${path.delimiter}${process.env.PATH}`,
+      CRABBOX_TEST_POLL_DELAYS: pollDelays,
       CRABBOX_BIN: harness.fakeCrabbox,
       CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_DIR: harness.proofDir,
       CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_RAW_HELPER: harness.rawHelper,
@@ -667,7 +682,7 @@ esac`,
     new RegExp(`^delete ${createdUUID} ${createdName}$`, "m"),
   );
   assert.equal(fs.readFileSync(harness.deleteAttempts, "utf8"), "2");
-  assert.ok(Date.now() - startedAt < 12_000, result.stdout + result.stderr);
+  assert.equal(fs.readFileSync(pollDelays, "utf8"), "5.000\n");
   assert.doesNotMatch(
     result.stdout + result.stderr + fs.readFileSync(harness.rawCalls, "utf8"),
     /smoke-secret-token/,

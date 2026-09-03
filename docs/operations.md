@@ -930,7 +930,9 @@ stay narrow. The original request supplies authorization; GitHub events alone
 do not. No event automatically publishes a tag. Publication makes the release eligible
 for the ordinary tap updater and independent generic reconciliation. Technical
 gates, identity binding, credential isolation, immutability, exact frozen inputs,
-actual exclusive-writer coordination, and cancellation boundaries still apply.
+immediate publication readbacks, and cancellation boundaries still apply.
+Publication does not require a particular PR-approval ruleset or an
+administrative writer freeze; existing GitHub merge protections still apply.
 
 Before creating or reusing a signed release tag:
 
@@ -975,12 +977,14 @@ Then advance sequentially under that authorization as each technical gate passes
    Intel jobs download assets with narrowly scoped credentials, remove all API,
    Actions, OIDC, and Homebrew credentials, then verify and execute the matching
    candidates in a clean environment.
-5. **Publication.** Establish and verify the administrative freeze of all release
-   writers required by [Release engineering](RELEASING.md#serialized-gates);
-   the release request is not evidence that the freeze is active. Re-read and
+5. **Publication.** Follow the exact-record checks in
+   [Release engineering](RELEASING.md#serialized-gates). Re-read and
    compare the unchanged draft, successful native proofs, tag, protected verifier
    SHA, notes, asset IDs, sizes, and digests. Publication is a single draft-state
-   transition; it does not rebuild, replace, or delete anything.
+   transition; it does not rebuild, replace, or delete anything. The final read
+   and publication are not atomic: no administrative freeze is required, and
+   a detected post-publication mismatch is an incident, not permission to rewrite
+   the release.
 6. **Homebrew update.** Publication establishes eligibility. Explicitly dispatch
    the tap's ordinary `update-formula.yml` with `formula=crabbox`, the tag,
    `repository=openclaw/crabbox`, and the four-target `assets` JSON constructed

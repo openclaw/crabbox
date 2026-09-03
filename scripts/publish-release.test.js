@@ -184,20 +184,19 @@ function prepareFixture({
     commit: { sha: "f".repeat(40) },
   });
   writeJson(path.join(api, "ruleset-list.json"), [
-    { id: 701 },
     { id: 702 },
     { id: 703 },
     { id: 705 },
   ]);
-  const branchRuleset = {
+  const optionalApprovalRuleset = {
     id: 701,
     target: "branch",
     enforcement: "active",
     bypass_actors: [
       {
-        actor_id: 16654667,
+        actor_id: 42,
         actor_type: "Team",
-        bypass_mode: "pull_request",
+        bypass_mode: "always",
       },
     ],
     conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } },
@@ -205,43 +204,21 @@ function prepareFixture({
       {
         type: "pull_request",
         parameters: {
-          dismiss_stale_reviews_on_push: true,
-          require_code_owner_review: true,
-          require_last_push_approval: true,
-          required_approving_review_count: 1,
+          dismiss_stale_reviews_on_push: false,
+          require_code_owner_review: false,
+          require_last_push_approval: false,
+          required_approving_review_count: 0,
         },
       },
     ],
   };
-  writeJson(path.join(api, "ruleset-branch.json"), branchRuleset);
-  writeJson(path.join(api, "ruleset-branch-missing.json"), {
-    ...branchRuleset,
-    rules: [{ type: "deletion" }, { type: "non_fast_forward" }],
-  });
-  writeJson(path.join(api, "ruleset-branch-wrong-team.json"), {
-    ...branchRuleset,
-    bypass_actors: [
-      {
-        actor_id: 42,
-        actor_type: "Team",
-        bypass_mode: "pull_request",
-      },
-    ],
-  });
-  writeJson(path.join(api, "ruleset-branch-always-bypass.json"), {
-    ...branchRuleset,
-    bypass_actors: [
-      {
-        actor_id: 16654667,
-        actor_type: "Team",
-        bypass_mode: "always",
-      },
-    ],
-  });
-  writeJson(path.join(api, "ruleset-branch-with-status.json"), {
-    ...branchRuleset,
+  writeJson(path.join(api, "ruleset-optional-approval.json"), optionalApprovalRuleset);
+  writeJson(path.join(api, "ruleset-optional-approval-with-status.json"), {
+    ...optionalApprovalRuleset,
+    id: 706,
+    bypass_actors: [],
     rules: [
-      ...branchRuleset.rules,
+      ...optionalApprovalRuleset.rules,
       {
         type: "required_status_checks",
         parameters: {
@@ -251,6 +228,13 @@ function prepareFixture({
       },
     ],
   });
+  writeJson(path.join(api, "ruleset-list-with-approvals.json"), [
+    { id: 701 },
+    { id: 702 },
+    { id: 703 },
+    { id: 705 },
+    { id: 706 },
+  ]);
   const branchHistoryRuleset = {
     id: 703,
     target: "branch",
@@ -390,7 +374,7 @@ function prepareFixture({
       },
     ],
   });
-  const otherActorApprovalRuleset = {
+  const otherActorHistoryRuleset = {
     id: 704,
     target: "branch",
     enforcement: "active",
@@ -402,35 +386,34 @@ function prepareFixture({
       },
     ],
     conditions: { ref_name: { include: ["refs/heads/main"], exclude: [] } },
-    rules: branchRuleset.rules,
+    rules: branchHistoryRuleset.rules,
   };
-  writeJson(path.join(api, "ruleset-branch-other-actor-approval.json"), otherActorApprovalRuleset);
-  writeJson(path.join(api, "ruleset-branch-other-actor-approval-all.json"), {
-    ...otherActorApprovalRuleset,
+  writeJson(path.join(api, "ruleset-branch-other-actor-history.json"), otherActorHistoryRuleset);
+  writeJson(path.join(api, "ruleset-branch-other-actor-history-all.json"), {
+    ...otherActorHistoryRuleset,
     conditions: { ref_name: { include: ["~ALL"], exclude: [] } },
   });
-  writeJson(path.join(api, "ruleset-branch-other-actor-approval-glob.json"), {
-    ...otherActorApprovalRuleset,
+  writeJson(path.join(api, "ruleset-branch-other-actor-history-glob.json"), {
+    ...otherActorHistoryRuleset,
     conditions: { ref_name: { include: ["refs/heads/ma*"], exclude: [] } },
   });
-  writeJson(path.join(api, "ruleset-branch-other-actor-approval-excluded.json"), {
-    ...otherActorApprovalRuleset,
+  writeJson(path.join(api, "ruleset-branch-other-actor-history-excluded.json"), {
+    ...otherActorHistoryRuleset,
     conditions: { ref_name: { include: ["~ALL"], exclude: ["refs/heads/main"] } },
   });
-  writeJson(path.join(api, "ruleset-branch-other-actor-approval-double-star.json"), {
-    ...otherActorApprovalRuleset,
+  writeJson(path.join(api, "ruleset-branch-other-actor-history-double-star.json"), {
+    ...otherActorHistoryRuleset,
     conditions: { ref_name: { include: ["refs/**"], exclude: [] } },
   });
-  writeJson(path.join(api, "ruleset-branch-other-actor-approval-recursive.json"), {
-    ...otherActorApprovalRuleset,
+  writeJson(path.join(api, "ruleset-branch-other-actor-history-recursive.json"), {
+    ...otherActorHistoryRuleset,
     conditions: { ref_name: { include: ["refs/**/main"], exclude: [] } },
   });
-  writeJson(path.join(api, "ruleset-branch-other-actor-approval-slash-class.json"), {
-    ...otherActorApprovalRuleset,
+  writeJson(path.join(api, "ruleset-branch-other-actor-history-slash-class.json"), {
+    ...otherActorHistoryRuleset,
     conditions: { ref_name: { include: ["refs[/]heads/main"], exclude: [] } },
   });
   writeJson(path.join(api, "ruleset-list-overlap.json"), [
-    { id: 701 },
     { id: 702 },
     { id: 703 },
     { id: 704 },
@@ -690,41 +673,33 @@ if (method === "PATCH") {
   value.immutable = true;
   value.updated_at = "2026-07-10T10:10:00Z";
   value.published_at = "2026-07-10T10:10:00Z";
+  if (process.env.MOCK_MODE === "patch-response-drift") value.assets[0].digest = "sha256:" + "e".repeat(64);
   outputJson(value);
   process.exit(0);
 }
 if (method !== "GET") process.exit(93);
 if (endpoint === "repos/${repository}") outputFile("repository.json");
 else if (endpoint === "repos/${repository}/branches/main") {
-  outputFile(process.env.MOCK_MODE === "current-main-drift" ? "branch-wrong.json" : "branch.json");
+  outputFile(
+    process.env.MOCK_MODE === "current-main-drift" ||
+    (process.env.MOCK_MODE === "published-main-drift" && published)
+      ? "branch-wrong.json" : "branch.json",
+  );
 }
 else if (endpoint === "repos/${repository}/rulesets?per_page=100") {
   outputFile(
-    [
-      "other-actor-approval-overlap",
-      "other-actor-approval-overlap-all",
-      "other-actor-approval-overlap-glob",
-      "other-actor-approval-excluded",
-      "other-actor-approval-double-star",
-      "other-actor-approval-recursive",
-      "other-actor-approval-slash-class",
-    ].includes(process.env.MOCK_MODE)
-      ? "ruleset-list-overlap.json"
-      : "ruleset-list.json",
+    process.env.MOCK_MODE === "optional-approvals"
+      ? "ruleset-list-with-approvals.json"
+      : process.env.MOCK_MODE.startsWith("other-actor-history-")
+        ? "ruleset-list-overlap.json"
+        : "ruleset-list.json",
   );
 }
 else if (endpoint === "repos/${repository}/rulesets/701") {
-  outputFile(
-    process.env.MOCK_MODE === "missing-rules"
-      ? "ruleset-branch-missing.json"
-      : process.env.MOCK_MODE === "wrong-release-team"
-        ? "ruleset-branch-wrong-team.json"
-        : process.env.MOCK_MODE === "always-release-team-bypass"
-          ? "ruleset-branch-always-bypass.json"
-          : process.env.MOCK_MODE === "approval-with-status"
-            ? "ruleset-branch-with-status.json"
-            : "ruleset-branch.json",
-  );
+  outputFile("ruleset-optional-approval.json");
+}
+else if (endpoint === "repos/${repository}/rulesets/706") {
+  outputFile("ruleset-optional-approval-with-status.json");
 }
 else if (endpoint === "repos/${repository}/rulesets/702") {
   outputFile(
@@ -748,19 +723,19 @@ else if (endpoint === "repos/${repository}/rulesets/703") {
 }
 else if (endpoint === "repos/${repository}/rulesets/704") {
   outputFile(
-    process.env.MOCK_MODE === "other-actor-approval-overlap-all"
-      ? "ruleset-branch-other-actor-approval-all.json"
-      : process.env.MOCK_MODE === "other-actor-approval-overlap-glob"
-        ? "ruleset-branch-other-actor-approval-glob.json"
-        : process.env.MOCK_MODE === "other-actor-approval-excluded"
-          ? "ruleset-branch-other-actor-approval-excluded.json"
-          : process.env.MOCK_MODE === "other-actor-approval-double-star"
-            ? "ruleset-branch-other-actor-approval-double-star.json"
-            : process.env.MOCK_MODE === "other-actor-approval-recursive"
-              ? "ruleset-branch-other-actor-approval-recursive.json"
-              : process.env.MOCK_MODE === "other-actor-approval-slash-class"
-                ? "ruleset-branch-other-actor-approval-slash-class.json"
-                : "ruleset-branch-other-actor-approval.json",
+    process.env.MOCK_MODE === "other-actor-history-overlap-all"
+      ? "ruleset-branch-other-actor-history-all.json"
+      : process.env.MOCK_MODE === "other-actor-history-overlap-glob"
+        ? "ruleset-branch-other-actor-history-glob.json"
+        : process.env.MOCK_MODE === "other-actor-history-excluded"
+          ? "ruleset-branch-other-actor-history-excluded.json"
+          : process.env.MOCK_MODE === "other-actor-history-double-star"
+            ? "ruleset-branch-other-actor-history-double-star.json"
+            : process.env.MOCK_MODE === "other-actor-history-recursive"
+              ? "ruleset-branch-other-actor-history-recursive.json"
+              : process.env.MOCK_MODE === "other-actor-history-slash-class"
+                ? "ruleset-branch-other-actor-history-slash-class.json"
+                : "ruleset-branch-other-actor-history.json",
   );
 }
 else if (endpoint === "repos/${repository}/rulesets/705") {
@@ -826,6 +801,7 @@ else if (endpoint === "repos/${repository}/releases/${releaseId}") {
     value.immutable = true;
     value.updated_at = "2026-07-10T10:10:00Z";
     value.published_at = "2026-07-10T10:10:00Z";
+    if (process.env.MOCK_MODE === "public-readback-drift") value.assets[0].digest = "sha256:" + "e".repeat(64);
   } else if (process.env.MOCK_MODE === "drift" && count >= 2) {
     value.assets[0].digest = "sha256:" + "f".repeat(64);
   } else if (process.env.MOCK_MODE === "prepatch-drift" && count >= 4) {
@@ -845,7 +821,6 @@ else if (endpoint === "repos/${repository}/releases/${releaseId}") {
   const run = (
     mode,
     {
-      serializationConfirmed = true,
       suppliedWorkflowCommit = workflowCommit,
       explicitWorkflow = splitCommit || divergentWorkflow,
     } = {},
@@ -857,11 +832,7 @@ else if (endpoint === "repos/${repository}/releases/${releaseId}") {
       MOCK_LOG: log,
       MOCK_MODE: mode,
     };
-    if (serializationConfirmed) {
-      childEnv.CRABBOX_RELEASE_SERIALIZATION_CONFIRMED = `${tag}:${releaseId}`;
-    } else {
-      delete childEnv.CRABBOX_RELEASE_SERIALIZATION_CONFIRMED;
-    }
+    delete childEnv.CRABBOX_RELEASE_SERIALIZATION_CONFIRMED;
     const args = [
       path.join(checkout, "scripts", "publish-release.sh"),
       String(releaseId),
@@ -948,39 +919,11 @@ test("tampered native proof workflow commit fails before any mutation", () => {
   });
 });
 
-test("missing protected branch rules fail before any mutation", () => {
+test("optional approval rules do not constrain publication", () => {
   withFixture({}, ({ run, mutations }) => {
-    const result = run("missing-rules");
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /exactly one active pull-request approval ruleset/);
-    assert.deepEqual(mutations(), []);
-  });
-});
-
-test("wrong release-team bypass fails before any mutation", () => {
-  withFixture({}, ({ run, mutations }) => {
-    const result = run("wrong-release-team");
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /approval-only release-team PR bypass/);
-    assert.deepEqual(mutations(), []);
-  });
-});
-
-test("always-on release-team bypass fails before any mutation", () => {
-  withFixture({}, ({ run, mutations }) => {
-    const result = run("always-release-team-bypass");
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /approval-only release-team PR bypass/);
-    assert.deepEqual(mutations(), []);
-  });
-});
-
-test("status checks in the release-team approval ruleset fail before any mutation", () => {
-  withFixture({}, ({ run, mutations }) => {
-    const result = run("approval-with-status");
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /approval-only release-team PR bypass/);
-    assert.deepEqual(mutations(), []);
+    const result = run("optional-approvals");
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(mutations(), [`PATCH\trepos/${repository}/releases/${releaseId}`]);
   });
 });
 
@@ -993,70 +936,69 @@ test("missing no-bypass history rules fail before any mutation", () => {
   });
 });
 
-test("overlapping no-bypass approval rules fail before any mutation", () => {
+test("optional approval rules can share no-bypass history protection", () => {
   withFixture({}, ({ run, mutations }) => {
     const result = run("history-with-approval");
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(mutations(), [`PATCH\trepos/${repository}/releases/${releaseId}`]);
+  });
+});
+
+test("overlapping bypassable history rules fail before any mutation", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("other-actor-history-overlap");
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /exactly one active pull-request approval ruleset/);
+    assert.match(result.stderr, /bypassable history protection/);
     assert.deepEqual(mutations(), []);
   });
 });
 
-test("overlapping other-actor approval rules fail before any mutation", () => {
+test("all-branch bypassable history rules fail before any mutation", () => {
   withFixture({}, ({ run, mutations }) => {
-    const result = run("other-actor-approval-overlap");
+    const result = run("other-actor-history-overlap-all");
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /exactly one active pull-request approval ruleset/);
+    assert.match(result.stderr, /bypassable history protection/);
     assert.deepEqual(mutations(), []);
   });
 });
 
-test("all-branch other-actor approval rules fail before any mutation", () => {
+test("globbed bypassable history rules fail before any mutation", () => {
   withFixture({}, ({ run, mutations }) => {
-    const result = run("other-actor-approval-overlap-all");
+    const result = run("other-actor-history-overlap-glob");
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /exactly one active pull-request approval ruleset/);
+    assert.match(result.stderr, /bypassable history protection/);
     assert.deepEqual(mutations(), []);
   });
 });
 
-test("globbed other-actor approval rules fail before any mutation", () => {
+test("excluded bypassable history rules do not block publication", () => {
   withFixture({}, ({ run, mutations }) => {
-    const result = run("other-actor-approval-overlap-glob");
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /exactly one active pull-request approval ruleset/);
-    assert.deepEqual(mutations(), []);
-  });
-});
-
-test("excluded other-actor approval rules do not block publication", () => {
-  withFixture({}, ({ run, mutations }) => {
-    const result = run("other-actor-approval-excluded");
+    const result = run("other-actor-history-excluded");
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(mutations().map((line) => line.split("\t")[0]), ["PATCH"]);
   });
 });
 
-test("non-recursive double-star approval rules do not match nested refs", () => {
+test("non-recursive double-star history rules do not match nested refs", () => {
   withFixture({}, ({ run, mutations }) => {
-    const result = run("other-actor-approval-double-star");
+    const result = run("other-actor-history-double-star");
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(mutations().map((line) => line.split("\t")[0]), ["PATCH"]);
   });
 });
 
-test("recursive double-star approval rules fail before any mutation", () => {
+test("recursive double-star bypassable history rules fail before any mutation", () => {
   withFixture({}, ({ run, mutations }) => {
-    const result = run("other-actor-approval-recursive");
+    const result = run("other-actor-history-recursive");
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /exactly one active pull-request approval ruleset/);
+    assert.match(result.stderr, /bypassable history protection/);
     assert.deepEqual(mutations(), []);
   });
 });
 
 test("slash character classes do not match path separators", () => {
   withFixture({}, ({ run, mutations }) => {
-    const result = run("other-actor-approval-slash-class");
+    const result = run("other-actor-history-slash-class");
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(mutations().map((line) => line.split("\t")[0]), ["PATCH"]);
   });
@@ -1140,6 +1082,28 @@ test("final immediately pre-PATCH draft drift fails before any mutation", () => 
   });
 });
 
+for (const mode of ["patch-response-drift", "public-readback-drift"]) {
+  test(`${mode} reports an incident after one PATCH without corrective mutations`, () => {
+    withFixture({}, ({ run, mutations }) => {
+      const result = run(mode);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /asset identity drifted|digest/);
+      assert.doesNotMatch(result.stdout, /Published exact verified release/);
+      assert.deepEqual(mutations(), [`PATCH\trepos/${repository}/releases/${releaseId}`]);
+    });
+  });
+}
+
+test("post-PATCH protected-main drift reports an incident without corrective mutations", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("published-main-drift");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /protected default-branch head does not match the workflow commit/);
+    assert.doesNotMatch(result.stdout, /Published exact verified release/);
+    assert.deepEqual(mutations(), [`PATCH\trepos/${repository}/releases/${releaseId}`]);
+  });
+});
+
 test("disabled release immutability fails before publication", () => {
   withFixture({}, ({ run, mutations }) => {
     const result = run("immutable-disabled");
@@ -1180,15 +1144,6 @@ test("local HEAD drift fails before any network call", () => {
   });
 });
 
-test("missing administrative serialization confirmation fails closed", () => {
-  withFixture({}, ({ run, mutations }) => {
-    const result = run("success", { serializationConfirmed: false });
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /requires an exclusive administrative release freeze/);
-    assert.deepEqual(mutations(), []);
-  });
-});
-
 test("protected blocked record fails before any mutation", () => {
   withFixture({ publishable: false }, ({ run, mutations }) => {
     const result = run("success");
@@ -1198,7 +1153,7 @@ test("protected blocked record fails before any mutation", () => {
   });
 });
 
-test("exact protected proof performs one draft-state PATCH and no other mutation", () => {
+test("exact proof publishes without approval rules or a serialization attestation using one PATCH", () => {
   withFixture({}, ({ run, mutations }) => {
     const result = run("success");
     assert.equal(result.status, 0, result.stderr || result.stdout);

@@ -1,6 +1,6 @@
 # Release Engineering
 
-Crabbox releases are local-produced, draft-first, and serialized. One explicit
+Crabbox releases are local-produced, draft-first, and explicitly authorized. One explicit
 full release/publish request authorizes the complete normal sequence:
 preparation, tagging, build and signing, private draft creation and upload,
 native dispatch and proof, publication, ordinary Homebrew update, independent
@@ -14,8 +14,9 @@ are not authorization: no tag push, repository dispatch, retry, or verifier run
 grants permission to release. Before publication, advance sequentially only as
 each technical gate passes. Post-publication smokes are independent of tap
 dispatch. Identity binding, credential isolation, immutability, exact frozen
-inputs, actual exclusive-writer coordination, and cancellation boundaries
-remain mandatory.
+inputs, immediate publication readbacks, and cancellation boundaries remain
+mandatory. No additional approval-ruleset configuration or administrative
+writer freeze is required by the release contract.
 
 Maintainers keep user-visible fixes and features in `CHANGELOG.md` under
 `Unreleased` as work lands, with full PR links and contributor thanks. Release
@@ -66,12 +67,9 @@ verifier, publisher, or Homebrew updater.
 The publishing checkout must have `HEAD` exactly equal to the protected verifier
 commit, and every release-policy or executable tooling file must match that
 commit with no staged, unstaged, or untracked replacement. Fetch every detailed
-repository ruleset. One active approval ruleset must cover the default branch,
-require code-owner pull requests with stale-review dismissal, last-push
-approval and at least one approval, and grant exactly one bypass to the
-`openclaw-secops` release team (GitHub team ID `16654667`) in `pull_request`
-mode. That allows a release admin to merge their own PR without granting a
-direct-push path. A separate active no-bypass branch ruleset must enforce
+repository ruleset. Pull-request approval policy is independent of publication:
+no particular approval ruleset or release-team bypass is required, and existing
+GitHub merge protections still apply. An active no-bypass branch ruleset must enforce
 deletion and non-fast-forward protection. The default branch must also be
 covered by the no-bypass OpenClaw organization workflow
 `.github/workflows/crabbox-release-check.yml` from
@@ -79,9 +77,7 @@ covered by the no-bypass OpenClaw organization workflow
 `refs/heads/main`. That protected external workflow owns the credential-free
 macOS release snapshot check, so a Crabbox pull request cannot redefine the
 check that gates its own merge. A separate active no-bypass tag ruleset must
-cover every `refs/tags/v*` release tag and prevent deletion and updates. Before
-publication, an administrator must also freeze all default-branch, tag, and
-Releases API writers for the non-atomic final gate.
+cover every `refs/tags/v*` release tag and prevent deletion and updates.
 
 GitHub omits ruleset bypass actors from the ordinary workflow token. Configure
 `CRABBOX_RULESET_READ_TOKEN` as a fine-grained repository secret scoped only to
@@ -342,7 +338,6 @@ confirmation. The seven-argument compatibility form is only for historical
 runs where `WORKFLOW_COMMIT` exactly equals `VERIFIER_COMMIT`:
 
 ```sh
-CRABBOX_RELEASE_SERIALIZATION_CONFIRMED="$TAG:$RELEASE_ID" \
 scripts/publish-release.sh \
   "$RELEASE_ID" "$TAG" "$TAG_OBJECT" "$TAG_COMMIT" \
   "$VERIFIER_COMMIT" "$WORKFLOW_COMMIT" "$DRAFT_VERIFIER_RUN_ID" "$TAG"
@@ -551,6 +546,9 @@ smoke independently after a smoke failure; do not re-enter publication.
 
 ## Serialized Gates
 
+These gates order this operator's work; they do not establish a global writer
+lock or require an administrative freeze.
+
 ### 1. Create the private draft
 
 After local package verification succeeds, continue under the original release
@@ -611,18 +609,15 @@ before mutation.
 
 The protected native verifier uses a non-cancelling concurrency key scoped to
 the immutable numeric release. GitHub Actions retains at most one pending run
-per key, so the serialized operator dispatches exactly once; different releases
+per key, so the operator dispatches exactly once; different releases
 do not cancel one another. This cannot lock direct Releases API edits from
 another token or administrator. GitHub's
 documented Update-a-release endpoint does not provide a conditional `If-Match`
 publication operation, so the final GET plus PATCH is not an atomic
-compare-and-swap. Fail closed unless the administrative freeze above is active,
-then acknowledge the exact draft with
-`CRABBOX_RELEASE_SERIALIZATION_CONFIRMED=vX.Y.Z:RELEASE_ID`. This attests to
-actual exclusive-writer coordination for the non-atomic gate; it does not
-request another chat approval. The release request is not evidence that the
-administrative freeze is active. Establish and verify that coordination before
-setting the attestation; never infer it from authorization or a successful run.
+compare-and-swap. No administrative freeze or serialization attestation is
+required. Another writer can still race the final read and publication; this
+workflow does not claim exclusive-writer guarantees.
+
 The publisher prepares its request body first, repeats the immutable numeric-ID
 draft read and comparison immediately before the sole PATCH, and repeats all
 protected-source and public-record checks afterward. A detected post-PATCH race is a publication
