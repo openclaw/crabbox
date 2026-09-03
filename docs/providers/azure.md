@@ -1,5 +1,43 @@
 # Azure Provider
 
+## Coordinator continuation rollout
+
+The coordinator has an opt-in durable creation path for native Windows
+`normal`/amd64, managed OS disks, and VM-image-based ordinary/fixed-ID leases.
+Enable new admissions only with `CRABBOX_DURABLE_PROVISIONING_ADMISSION=true`
+and a stable, suitable existing `CRABBOX_SESSION_SECRET`; both prerequisites
+are reported by coordinator readiness. The gate defaults to off. Promoted OS
+disk snapshots, explicit snapshots/copy disks, ephemeral disks and WSL2 stay
+on their existing paths, including when a default resolves to one of them.
+Plans are bounded to 64 resolved region/SKU/market candidates. Each normal Windows
+class currently has five SKU candidates, so six regions with spot/on-demand
+fallback fit. Larger configured expansions remain on the existing path and are
+not advertised as resumable; readiness evaluates the effective defaults.
+
+The durable plan freezes region/SKU/market ordering, candidate names,
+subscription/resource group, exact marketplace image versions, resource tags,
+network settings, bootstrap bytes and the extension timestamp before allocation.
+Subsequent deployments do not rebuild that plan from changed defaults. VM PUTs
+use `If-None-Match: *` with Compute API `2024-07-01`; network/disk writes are not
+assumed to support create-only conditions. A missing network resource after an
+ambiguous dispatch remains unresolved. Fallback waits for definitive rejection
+or settled allocation plus verified owned cleanup, rather than starting a
+second candidate merely because a timeout elapsed.
+
+Shared infrastructure writes are fenced by exact provider scope. An unresolved
+shared-infrastructure write retains that fence instead of authorizing another
+writer. Windows continuation observes the original VM's `CustomData.bin` and
+matching extension; a succeeded extension is not PUT again. Protected replay
+material is stored once outside public lease records, encrypted with a
+provisioning-specific derivation and lease/operation/generation/scope binding.
+
+This is not migration of existing interrupted creates, universal Azure/provider
+resumability, or proof of live recovery. Roll out journal-aware scheduling and
+cleanup readers before enabling admission, and do not roll back below that
+version while operations or cleanup debt remain. Deployment interruption plus
+SSH/immutable-identity/owned-cleanup proof still requires a separately authorized
+isolated deployment and a fresh test lease.
+
 Read this when you are:
 
 - choosing `provider: azure`;

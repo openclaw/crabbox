@@ -16,6 +16,46 @@ export interface CoordinatorStorage extends CoordinatorStorageView {
   transaction<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T>;
 }
 
+export const provisioningDuePrefix = "provisioning-due:";
+export const legacyAlarmKey = "runtime:legacy-alarm";
+
+export interface ProvisioningDueRecord {
+  operationID: string;
+  at: number;
+}
+
+export async function earliestProvisioningWake(
+  storage: CoordinatorStorageView,
+): Promise<number | undefined> {
+  const entries = await storage.list<ProvisioningDueRecord>({
+    prefix: provisioningDuePrefix,
+    limit: 1,
+  });
+  if (entries.size === 0) return undefined;
+  const at = entries.values().next().value?.at;
+  // A malformed index value still needs the bounded controller tick to quarantine it.
+  return typeof at === "number" && Number.isFinite(at) ? at : Date.now();
+}
+
+export async function mergedCoordinatorWake(
+  storage: CoordinatorStorageView,
+): Promise<number | undefined> {
+  const legacy = await storage.get<number | null>(legacyAlarmKey);
+  const provisioning = await earliestProvisioningWake(storage);
+  if (legacy == null) return provisioning;
+  return provisioning === undefined ? legacy : Math.min(legacy, provisioning);
+}
+
+export async function setLegacyWake(storage: CoordinatorStorageView, time?: number): Promise<void> {
+  await storage.put(legacyAlarmKey, time ?? null);
+}
+
+export interface ProvisioningRuntime {
+  commitAndWake<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T>;
+  registerProvisioningTick(tick: () => Promise<void>): void;
+  ownMaintenance(operation: Promise<void>): void;
+}
+
 export type CoordinatorRequestQueue = "direct" | "lifecycle";
 
 export function controlMessageOwnsTransaction(message: unknown): boolean {
@@ -212,9 +252,11 @@ export interface CoordinatorRuntime {
   getAlarm(): Promise<number | undefined>;
   scheduleAlarm(time: number): Promise<void>;
   clearAlarm(): Promise<void>;
+  readonly provisioning?: ProvisioningRuntime;
 }
 
 export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
+  readonly provisioning: ProvisioningRuntime = this;
   readonly storage: CoordinatorStorage;
   readonly ephemeralWebSocketMaxPayloadBytes = 32 * 1024 * 1024;
   private readonly attachments = new WeakMap<WebSocket, unknown>();
@@ -312,12 +354,39 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
     });
   }
 
+  async commitAndWake<T>(
+    callback: (transaction: CoordinatorStorageView) => Promise<T>,
+  ): Promise<T> {
+    return this.state.storage.transaction(async (transaction) => {
+      if ((await transaction.get(legacyAlarmKey)) === undefined) {
+        const legacy = await transaction.getAlarm();
+        if (legacy !== null) await transaction.put(legacyAlarmKey, legacy);
+      }
+      const result = await callback(transaction);
+      const wake = await mergedCoordinatorWake(transaction);
+      if (wake === undefined) await transaction.deleteAlarm();
+      else await transaction.setAlarm(wake);
+      return result;
+    });
+  }
+
+  registerProvisioningTick(_tick: () => Promise<void>): void {
+    // Constructor recovery is storage-only; provider I/O belongs to a later alarm.
+    this.state.blockConcurrencyWhile(async () => {
+      await this.commitAndWake(async () => undefined);
+    });
+  }
+
+  ownMaintenance(operation: Promise<void>): void {
+    this.state.waitUntil(operation);
+  }
+
   scheduleAlarm(time: number): Promise<void> {
-    return this.state.storage.setAlarm(time);
+    return this.commitAndWake(async (transaction) => setLegacyWake(transaction, time));
   }
 
   clearAlarm(): Promise<void> {
-    return this.state.storage.deleteAlarm();
+    return this.commitAndWake(async (transaction) => setLegacyWake(transaction));
   }
 
   private runSocketOperation<T>(

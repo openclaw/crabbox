@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -21,9 +22,12 @@ import (
 
 type snapshotFixture struct {
 	*daytonaLifecycleFixture
+	snapshotMu                              sync.Mutex
 	snapshot                                *api.SnapshotDto
 	creates, starts, stops, removes, reads  int
 	lostResponse, failSnapshot              bool
+	snapshotResponseCanceled                chan struct{}
+	stallSnapshotReads                      bool
 	rejectCreate                            bool
 	transientReadFailure, replaceInRecovery bool
 	request                                 core.NativeCheckpointCreateRequest
@@ -44,6 +48,8 @@ func newSnapshotFixture(t *testing.T) *snapshotFixture {
 	t.Cleanup(func() { checkpointPollInterval, checkpointRecoveryTimeout = oldInterval, oldRecovery })
 	original := f.server.Config.Handler
 	f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.snapshotMu.Lock()
+		defer s.snapshotMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/process/execute"):
@@ -78,6 +84,13 @@ func newSnapshotFixture(t *testing.T) *snapshotFixture {
 			}
 			s.snapshot = &api.SnapshotDto{Id: "snapshot-exact-id", Name: body.Name, State: api.SNAPSHOTSTATE_PENDING, Entrypoint: []string{}}
 			s.snapshot.SetOrganizationId("org-test")
+			if s.snapshotResponseCanceled != nil {
+				s.snapshotMu.Unlock()
+				<-r.Context().Done()
+				s.snapshotMu.Lock()
+				close(s.snapshotResponseCanceled)
+				return
+			}
 			if s.lostResponse {
 				w.WriteHeader(502)
 				_, _ = io.WriteString(w, `{"message":"response lost"}`)
@@ -114,6 +127,12 @@ func newSnapshotFixture(t *testing.T) *snapshotFixture {
 				return
 			}
 			if s.reads > 2 {
+				if s.stallSnapshotReads {
+					s.snapshotMu.Unlock()
+					<-r.Context().Done()
+					s.snapshotMu.Lock()
+					return
+				}
 				s.snapshot.SetState(api.SNAPSHOTSTATE_ACTIVE)
 				if s.failSnapshot {
 					s.snapshot.SetState(api.SNAPSHOTSTATE_ERROR)
@@ -202,37 +221,70 @@ func TestDaytonaSnapshotLifecycleWaitsEvenWithoutWaitFlag(t *testing.T) {
 }
 
 func TestDaytonaSnapshotFailureRetainsIdentityAndRestoresSource(t *testing.T) {
-	for _, failure := range []string{"lost-response", "snapshot-error", "unconfirmed"} {
+	for _, failure := range []string{"lost-response", "http-timeout", "http-timeout-unconfirmed", "snapshot-error", "unconfirmed"} {
 		t.Run(failure, func(t *testing.T) {
 			f := newSnapshotFixture(t)
 			f.lostResponse = failure == "lost-response"
 			f.failSnapshot = failure == "snapshot-error"
+			httpTimeout := strings.HasPrefix(failure, "http-timeout")
+			if httpTimeout {
+				f.snapshotResponseCanceled = make(chan struct{})
+				f.stallSnapshotReads = failure == "http-timeout-unconfirmed"
+			}
 			var stalled *snapshotDeadlineClient
-			if failure == "unconfirmed" {
+			if failure == "unconfirmed" || httpTimeout {
 				original := newDaytonaClient
 				newDaytonaClient = func(cfg Config, rt Runtime) (daytonaAPI, error) {
 					client, err := original(cfg, rt)
 					if err != nil {
 						return nil, err
 					}
+					if httpTimeout {
+						client.(*daytonaSDKClient).api.GetConfig().HTTPClient.Timeout = 250 * time.Millisecond
+						return client, nil
+					}
 					stalled = &snapshotDeadlineClient{daytonaSnapshotAPI: client.(daytonaSnapshotAPI)}
 					return stalled, nil
 				}
 				t.Cleanup(func() { newDaytonaClient = original })
 			}
-			result, err := (Provider{}).CreateNativeCheckpoint(t.Context(), f.request)
+			ctx := t.Context()
+			if httpTimeout {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+				defer cancel()
+			}
+			result, err := (Provider{}).CreateNativeCheckpoint(ctx, f.request)
+			if httpTimeout {
+				if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+					t.Fatalf("snapshot request did not reach its client timeout before the caller deadline: %v", err)
+				}
+				select {
+				case <-f.snapshotResponseCanceled:
+				case <-ctx.Done():
+					t.Fatal("accepted snapshot request did not observe HTTP cancellation")
+				}
+			}
+			f.snapshotMu.Lock()
+			defer f.snapshotMu.Unlock()
 			if err == nil || result.Image.ID == "" || result.Metadata["source"] == "" {
 				t.Fatalf("result=%+v err=%v", result, err)
 			}
 			if f.creates != 1 {
 				t.Fatal("allocation was retried")
 			}
-			if failure == "unconfirmed" {
+			if httpTimeout && (result.Image.ID != "snapshot-exact-id" || result.Image.Name != "crabbox-"+f.request.CheckpointID || result.Metadata["snapshot_id"] != result.Image.ID || result.Metadata["source"] != f.request.Server.CloudID) {
+				t.Fatalf("accepted snapshot lost its exact recovery identity: %+v", result)
+			}
+			if failure == "unconfirmed" || f.stallSnapshotReads {
 				if f.starts != 0 || f.stops != 1 || f.sandbox.GetState() != api.SANDBOXSTATE_STOPPED || !strings.Contains(err.Error(), "left stopped") {
 					t.Fatalf("unsafe restart: %v", err)
 				}
-				if stalled == nil || stalled.deadlineReads != 2 || !errors.Is(err, context.DeadlineExceeded) {
+				if failure == "unconfirmed" && (stalled == nil || stalled.deadlineReads != 2 || !errors.Is(err, context.DeadlineExceeded)) {
 					t.Fatalf("snapshot polling and recovery did not both observe the injected deadline: %v", err)
+				}
+				if f.stallSnapshotReads && (f.reads != 4 || result.Image.State != "pending") {
+					t.Fatalf("snapshot polling and recovery did not preserve pending identity: reads=%d result=%+v", f.reads, result)
 				}
 			} else if f.starts != 1 || result.Image.ID != "snapshot-exact-id" {
 				t.Fatalf("source not restored or identity lost: %+v %v", result, err)

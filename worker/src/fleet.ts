@@ -1,5 +1,23 @@
 import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
 
+import { AzureResumableProvisioning } from "./azure-provisioning";
+import {
+  LeaseProvisioningController,
+  cancelProvisioningOperation,
+  provisioningOperationKey,
+  provisioningPlanKey,
+  provisioningOwnsLease,
+  putProvisioningOperation,
+  validateProvisioningRecord,
+  type LeaseProvisioningOperation,
+} from "./lease-provisioning";
+import type { ProviderResumableProvisioning } from "./provider-provisioning";
+import {
+  provisioningMaterialConfigured,
+  provisioningMaterialKey,
+  sealProvisioningMaterial,
+} from "./provisioning-material";
+
 const { Client: SSHClientConstructor, utils: sshUtils } = ssh2;
 
 import { artifactUploadResponse, type ArtifactUploadRequest } from "./artifacts";
@@ -123,6 +141,8 @@ import {
   bufferCoordinatorRequestBody,
   controlMessageOwnsTransaction,
   coordinatorRequestQueue,
+  legacyAlarmKey,
+  setLegacyWake,
   type CoordinatorRuntime,
   type CoordinatorStorage,
   type CoordinatorStorageView,
@@ -1086,6 +1106,9 @@ export class FleetCoordinator {
   private awsIngressBarrier: Promise<void> = Promise.resolve();
   private providerMaintenanceQueue: Promise<void> = Promise.resolve();
   private readonly webVNCCredentialHandoffs: WebVNCCredentialHandoffs;
+  private readonly leaseProvisioning: LeaseProvisioningController;
+  private maintenanceRun: Promise<void> | undefined;
+  private maintenanceFollowup: { grantVersion?: string; preserve: boolean } | undefined;
 
   constructor(
     private readonly state: CoordinatorRuntime,
@@ -1094,6 +1117,41 @@ export class FleetCoordinator {
     private readonly authContext: AuthRequestContext = {},
     private readonly coordinatorGeneration: string = crypto.randomUUID(),
   ) {
+    this.leaseProvisioning = new LeaseProvisioningController(
+      state,
+      env,
+      (provider) => this.provider(provider).resumableProvisioning?.(),
+      async (transaction, lease, result) => {
+        const now = new Date().toISOString();
+        const completed: LeaseRecord = {
+          ...lease,
+          state: "active",
+          updatedAt: now,
+          cloudID: result.server.cloudID,
+          serverID: result.server.id,
+          serverName: result.server.name,
+          serverType: result.serverType,
+          host: result.server.host,
+          market: result.market,
+          ...(result.server.region ? { region: result.server.region } : {}),
+          ...(result.image ? { image: result.image } : {}),
+        };
+        clearProvisioningRecoveryMetadata(completed);
+        if (result.cost) {
+          completed.estimatedHourlyUSD = result.cost.hourlyUSD;
+          completed.maxEstimatedUSD = result.cost.maxUSD;
+        }
+        await transaction.put(leaseKey(lease.id), completed);
+        const attempt = await transaction.get<CreateAttemptRecord>(createAttemptKey(lease.id));
+        if (attempt && createAttemptMatchesLease(attempt, lease))
+          await transaction.put(createAttemptKey(lease.id), {
+            ...attempt,
+            cloudID: completed.cloudID,
+            updatedAt: now,
+          });
+      },
+    );
+    state.provisioning?.registerProvisioningTick(() => this.leaseProvisioning.tick());
     this.bridgeTickets = new BridgeTickets(state.storage, {
       withLock: (operation) => this.withBridgeTicketLock(operation),
       getLease: (id) => this.getLease(id),
@@ -3006,11 +3064,55 @@ export class FleetCoordinator {
   }
 
   async alarm(): Promise<void> {
-    await this.runScheduledMaintenance();
+    await this.provisioningAlarm();
   }
 
   protected async durableObjectAlarm(): Promise<void> {
-    await this.runScheduledMaintenance(undefined, true);
+    await this.provisioningAlarm(undefined, true);
+  }
+
+  private async provisioningAlarm(grantVersion?: string, preserve = false): Promise<void> {
+    if (!this.state.provisioning) return this.runScheduledMaintenance(grantVersion, preserve);
+    try {
+      await this.state.provisioning.commitAndWake(async (transaction) => {
+        const legacy = await transaction.get<number | null>(legacyAlarmKey);
+        if (legacy != null && legacy <= Date.now()) await setLegacyWake(transaction);
+      });
+      await this.leaseProvisioning.tick();
+    } catch {
+      console.error("durable provisioning tick failed; committed claims remain scheduled");
+    } finally {
+      await this.state.provisioning.commitAndWake(async () => undefined);
+      this.startMaintenance(grantVersion, preserve);
+    }
+  }
+
+  private startMaintenance(grantVersion?: string, preserve = false): void {
+    if (this.maintenanceRun) {
+      if (grantVersion !== undefined || !preserve)
+        this.maintenanceFollowup = {
+          ...(grantVersion === undefined ? {} : { grantVersion }),
+          preserve,
+        };
+      return;
+    }
+    const run = this.runScheduledMaintenance(grantVersion, preserve)
+      .catch(async () => {
+        console.error("coordinator maintenance failed; retry scheduled");
+        try {
+          await this.state.scheduleAlarm(Date.now() + 15_000);
+        } catch {
+          console.error("coordinator maintenance retry wake failed");
+        }
+      })
+      .finally(() => {
+        this.maintenanceRun = undefined;
+        const followup = this.maintenanceFollowup;
+        this.maintenanceFollowup = undefined;
+        if (followup) this.startMaintenance(followup.grantVersion, followup.preserve);
+      });
+    this.maintenanceRun = run;
+    this.state.provisioning!.ownMaintenance(run);
   }
 
   private async runScheduledMaintenance(
@@ -3047,7 +3149,7 @@ export class FleetCoordinator {
     if (request.headers.get("x-crabbox-internal") !== "scheduled") {
       return json({ error: "unauthorized" }, { status: 401 });
     }
-    await this.runScheduledMaintenance(trustedAdminGrantVersion(request));
+    await this.provisioningAlarm(trustedAdminGrantVersion(request));
     return json({ ok: true });
   }
 
@@ -3320,6 +3422,16 @@ export class FleetCoordinator {
         await this.putCreateAttempt(attempt);
         return createAttemptBindingConflictResponse();
       }
+      if (this.state.provisioning) {
+        const released = await this.state.provisioning.commitAndWake(async (transaction) => {
+          const latest = await transaction.get<LeaseRecord>(leaseKey(lease.id));
+          if (!latest || !createAttemptMatchesLease(attempt, latest)) return undefined;
+          const canceled = await cancelProvisioningOperation(transaction, latest, Date.now());
+          if (canceled) await transaction.put(createAttemptKey(requestedLeaseID), attempt);
+          return canceled;
+        });
+        if (released) return { attempt, lease: released };
+      }
       if (lease.cleanupStartedAt) {
         await this.putCreateAttempt(attempt);
         await this.scheduleAlarm();
@@ -3537,6 +3649,10 @@ export class FleetCoordinator {
       return json({ error: "invalid_create_attempt_id" }, { status: 400 });
     }
     const leaseID = fixedLeaseID ?? (validLeaseID(input.leaseID) ? input.leaseID : newLeaseID());
+    if (fixedLeaseID) {
+      const replay = await this.replayDurableFixedRequest(request, input, fixedLeaseID, owner, org);
+      if (replay) return replay;
+    }
     if (ordinaryCreate && input.createAttemptID !== undefined) {
       const replay = await this.replayCreateAttempt(
         leaseID,
@@ -3547,7 +3663,7 @@ export class FleetCoordinator {
         checkpointUseClaimHash,
       );
       if (replay) {
-        return replay;
+        return this.preferredCreateReplay(request, leaseID, replay);
       }
     }
     const requestedSlugInput = input.slug ?? input.requestedSlug;
@@ -3641,7 +3757,7 @@ export class FleetCoordinator {
         );
       });
       if (replay) {
-        return replay;
+        return this.preferredCreateReplay(request, leaseID, replay);
       }
     }
     if (deferredSlugError) {
@@ -3793,11 +3909,15 @@ export class FleetCoordinator {
         checkpointUseClaimHash,
       );
       if (reserved instanceof Response) {
-        return reserved;
+        return this.preferredCreateReplay(request, leaseID, reserved);
       }
       createAttempt = reserved.attempt;
       if (reserved.replayLease) {
-        return createAttemptReplayResponse(reserved.replayLease);
+        return this.preferredCreateReplay(
+          request,
+          leaseID,
+          createAttemptReplayResponse(reserved.replayLease),
+        );
       }
     }
     try {
@@ -3842,6 +3962,38 @@ export class FleetCoordinator {
       config.ttlSeconds,
       providerHourlyUSD,
     );
+    const continuation =
+      !workspaceID && !checkpointAuthorization && !reservationGuard
+        ? provider.resumableProvisioning?.()
+        : undefined;
+    if (
+      this.env.CRABBOX_DURABLE_PROVISIONING_ADMISSION === "true" &&
+      continuation?.supports(config)
+    ) {
+      if (!this.state.provisioning || !provisioningMaterialConfigured(this.env)) {
+        return json(
+          {
+            error: "continuation_unavailable",
+            message:
+              "durable provisioning requires transactional wake support and a stable CRABBOX_SESSION_SECRET distinct from the shared token (at least 32 characters)",
+          },
+          { status: 424 },
+        );
+      }
+      return this.createDurableLease(
+        request,
+        input,
+        config,
+        leaseID,
+        requestedSlug,
+        owner,
+        org,
+        cost,
+        continuation,
+        createAttempt,
+        fixedCreate,
+      );
+    }
     if (!workspaceID && retainedMacHostLease) {
       const reactivation = await this.state.runExclusive(async () => {
         const reservedAttempt = await this.getCreateAttempt(leaseID);
@@ -4600,6 +4752,261 @@ export class FleetCoordinator {
       ssm_command_id: record.awsSSMCommandID,
     });
     return json({ lease: publicLeaseRecord(record) }, { status: 201 });
+  }
+
+  private async replayDurableFixedRequest(
+    request: Request,
+    input: LeaseRequest,
+    leaseID: string,
+    owner: string,
+    org: string,
+  ): Promise<Response | undefined> {
+    const fingerprint = await fixedRequestFingerprint(input);
+    return this.state.storage.transaction(async (transaction) => {
+      const operation = await transaction.get<LeaseProvisioningOperation>(
+        provisioningOperationKey(leaseID),
+      );
+      if (
+        !operation ||
+        operation.fixedRequestFingerprint !== fingerprint ||
+        operation.owner !== owner ||
+        operation.org !== org
+      )
+        return undefined;
+      const lease = await transaction.get<LeaseRecord>(leaseKey(leaseID));
+      const attempt = await transaction.get<CreateAttemptRecord>(createAttemptKey(leaseID));
+      if (
+        !lease ||
+        !attempt?.fixedCreate ||
+        !leaseIsLive(lease) ||
+        operation.generation !== lease.createAttemptGeneration ||
+        operation.provider !== lease.provider ||
+        operation.scope !== lease.providerScope ||
+        !createAttemptMatchesLease(attempt, lease)
+      )
+        return undefined;
+      const replay = this.fixedLeaseReplayResponse(lease, owner, org, attempt.fixedCreate, attempt);
+      return replay?.ok && lease.state === "provisioning" && prefersAsyncProvisioning(request)
+        ? acceptedProvisioningLease(lease)
+        : replay;
+    });
+  }
+
+  private async preferredCreateReplay(
+    request: Request,
+    requestedID: string,
+    response: Response,
+  ): Promise<Response> {
+    if (!prefersAsyncProvisioning(request) || !response.ok) return response;
+    const attempt = await this.getCreateAttempt(requestedID);
+    const id = attempt?.canonicalLeaseID ?? requestedID;
+    if (!(await provisioningOwnsLease(this.state.storage, id))) return response;
+    const lease = await this.getLease(id);
+    return lease?.state === "provisioning" ? acceptedProvisioningLease(lease) : response;
+  }
+
+  private async createDurableLease(
+    request: Request,
+    input: LeaseRequest,
+    config: LeaseConfig,
+    leaseID: string,
+    requestedSlug: string,
+    owner: string,
+    org: string,
+    cost: ReturnType<typeof leaseCost>,
+    capability: ProviderResumableProvisioning,
+    attempt?: CreateAttemptRecord,
+    fixedCreate?: FixedLeaseCreateIntent,
+  ): Promise<Response> {
+    const now = new Date();
+    const generation = newCreateAttemptGeneration();
+    const operationID = crypto.randomUUID();
+    const leases = [...(await this.state.storage.list<LeaseRecord>({ prefix: "lease:" })).values()];
+    const slug = allocateLeaseSlug(
+      requestedSlug || leaseSlugFromID(leaseID),
+      leaseID,
+      owner,
+      org,
+      leases,
+    );
+    const tailscaleError = await this.prepareTailscaleConfig(config, input, leaseID, slug);
+    if (tailscaleError) return tailscaleError;
+    const record: LeaseRecord = withRequestedTailscaleMetadata(
+      {
+        id: leaseID,
+        slug,
+        provider: config.provider,
+        owner,
+        providerOwner: owner,
+        org,
+        target: config.target,
+        windowsMode: config.windowsMode,
+        architecture: config.architecture,
+        os: config.os,
+        desktop: config.desktop,
+        desktopEnv: config.desktopEnv,
+        browser: config.browser,
+        code: config.code,
+        profile: config.profile,
+        class: config.class,
+        serverType: config.serverType,
+        requestedServerType: config.serverType,
+        cloudID: "",
+        serverID: 0,
+        serverName: "",
+        host: "",
+        providerKey: config.providerKey,
+        sshUser: config.sshUser,
+        sshPort: config.sshPort,
+        sshFallbackPorts: config.sshFallbackPorts,
+        workRoot: config.workRoot,
+        keep: config.keep,
+        ttlSeconds: config.ttlSeconds,
+        idleTimeoutSeconds: config.idleTimeoutSeconds,
+        estimatedHourlyUSD: cost.hourlyUSD,
+        maxEstimatedUSD: cost.maxUSD,
+        state: "provisioning",
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+        lastTouchedAt: now.toISOString(),
+        expiresAt: leaseExpiresAt(
+          now,
+          now,
+          config.ttlSeconds,
+          config.idleTimeoutSeconds,
+        ).toISOString(),
+        createAttemptGeneration: generation,
+        ...(attempt ? { createAttemptID: attempt.token } : {}),
+        ...(fixedCreate
+          ? {
+              fixedCreateIntentVersion: fixedCreate.version,
+              fixedCreateIntentHash: fixedCreate.hash,
+            }
+          : {}),
+        ...(config.pond ? { pond: config.pond } : {}),
+        ...(config.exposedPorts.length ? { exposedPorts: config.exposedPorts } : {}),
+      },
+      config,
+    );
+    // Rendering, randomness, crypto and read-only provider discovery stay outside retried transactions.
+    const prepared = await capability.prepare(config, record);
+    record.providerScope = prepared.plan.scope;
+    const operation: LeaseProvisioningOperation = {
+      schema: 1,
+      leaseID,
+      operationID,
+      generation,
+      scope: prepared.plan.scope,
+      owner,
+      org,
+      provider: config.provider,
+      createdAt: now.getTime(),
+      deadline: now.getTime() + 30 * 60_000,
+      revision: 0,
+      step: prepared.step,
+      ...(fixedCreate ? { fixedRequestFingerprint: await fixedRequestFingerprint(input) } : {}),
+    };
+    validateProvisioningRecord(prepared.plan);
+    const sealed = await sealProvisioningMaterial(this.env, operation, prepared.material);
+    validateProvisioningRecord(sealed);
+    const admission = await this.state.provisioning!.commitAndWake(async (transaction) => {
+      const currentAttempt = await transaction.get<CreateAttemptRecord>(createAttemptKey(leaseID));
+      const existing = await transaction.get<LeaseRecord>(leaseKey(leaseID));
+      if (attempt) {
+        const tombstone = await transaction.get(
+          archivedCanceledCreateAttemptKey(leaseID, attempt.token),
+        );
+        if (tombstone || currentAttempt?.state === "canceled") return createCanceledResponse();
+        if (
+          !currentAttempt ||
+          currentAttempt.token !== attempt.token ||
+          currentAttempt.owner !== owner ||
+          currentAttempt.org !== org ||
+          !sameFixedCreateIntent(currentAttempt.fixedCreate, fixedCreate)
+        )
+          return createAttemptBindingConflictResponse();
+        if (existing && createAttemptMatchesLease(currentAttempt, existing))
+          return { lease: existing, replay: true };
+      } else if (currentAttempt && createAttemptBlocksLeaseID(currentAttempt))
+        return createAttemptIDConflictResponse();
+      if (existing || (await transaction.get(provisioningOperationKey(leaseID))))
+        return createAttemptIDConflictResponse();
+      if (await transaction.get(`legacy-provider-mutation:${leaseID}`))
+        return createAttemptIDConflictResponse();
+      if (await transaction.get(workspaceLeaseReservationKey(leaseID)))
+        return workspaceManagedLeaseResponse();
+      await capability.validateAdmission?.(transaction, prepared.plan, record);
+      const storedLeases = [
+        ...(await transaction.list<LeaseRecord>({ prefix: "lease:" })).values(),
+      ];
+      const providerAccess = [
+        ...(await transaction.list<LeaseRecord>({ prefix: providerAccessPrefix() })).values(),
+      ];
+      const merged = new Map(storedLeases.map((lease) => [lease.id, lease]));
+      for (const lease of providerAccess) merged.set(lease.id, lease);
+      if (
+        allocateLeaseSlug(requestedSlug || leaseSlugFromID(leaseID), leaseID, owner, org, [
+          ...merged.values(),
+        ]) !== slug
+      ) {
+        return json(
+          {
+            error: "lease_slug_conflict",
+            message: "lease slug changed during admission; retry the same create intent",
+          },
+          { status: 409 },
+        );
+      }
+      const usage = createCostLimitUsage(record, now);
+      for (const lease of merged.values()) addLeaseToCostLimitUsage(usage, lease, now);
+      const limit = enforceCostLimitUsage(usage, record, costLimits(this.env));
+      if (limit) return json({ error: "cost_limit_exceeded", message: limit }, { status: 429 });
+      if (currentAttempt && attempt)
+        await transaction.put(createAttemptKey(leaseID), {
+          ...currentAttempt,
+          canonicalLeaseID: leaseID,
+          generation,
+          updatedAt: now.toISOString(),
+        });
+      await transaction.put(leaseKey(leaseID), record);
+      await transaction.put(provisioningPlanKey(operationID), prepared.plan);
+      await transaction.put(provisioningMaterialKey(operationID), sealed);
+      await putProvisioningOperation(transaction, operation);
+      return { lease: record, replay: false };
+    });
+    if (admission instanceof Response) return admission;
+    if (prefersAsyncProvisioning(request) && admission.lease.state === "provisioning")
+      return acceptedProvisioningLease(admission.lease);
+    if (admission.replay)
+      return fixedCreate
+        ? this.fixedLeaseReplayResponse(
+            admission.lease,
+            owner,
+            org,
+            fixedCreate,
+            await this.getCreateAttempt(leaseID),
+          )!
+        : createAttemptReplayResponse(admission.lease);
+    while (Date.now() < operation.deadline) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- legacy callers retain a synchronous facade over durable work.
+      await this.leaseProvisioning.advance(leaseID);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- observe only the admitted canonical lease.
+      const current = await this.getLease(leaseID);
+      if (!current || current.createAttemptGeneration !== generation)
+        return createAttemptBindingConflictResponse();
+      if (current.state === "active")
+        return json({ lease: publicLeaseRecord(current) }, { status: 201 });
+      if (current.state !== "provisioning") return createAttemptReplayResponse(current);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- waiting does not own the coordinator lifecycle queue.
+      await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+    }
+    return json(
+      {
+        error: "provisioning_deadline_exceeded",
+        lease: publicLeaseRecord((await this.getLease(leaseID)) ?? record),
+      },
+      { status: 504 },
+    );
   }
 
   private fixedLeaseReplayResponse(
@@ -7813,6 +8220,50 @@ export class FleetCoordinator {
       readiness.checks = await this.awsProviderCapacityChecks(url.searchParams);
     } else if (provider === "daytona" && readiness.configured && !this.testProviders.daytona) {
       readiness.checks = await new DaytonaProvider(this.env).readinessChecks();
+    }
+    if (readiness.configured) {
+      const adapter = this.provider(provider);
+      const capability = adapter.resumableProvisioning?.();
+      if (capability) {
+        let supported = false;
+        try {
+          let config = leaseConfig(
+            {
+              provider,
+              target: normalizeReadinessTarget(url.searchParams.get("target")),
+              windowsMode: normalizeReadinessWindowsMode(url.searchParams.get("windowsMode")),
+              architecture: url.searchParams.get("architecture") ?? "amd64",
+            },
+            {
+              allowAzurePromotedImage: true,
+              ...(this.env.CRABBOX_AZURE_OS_DISK
+                ? { azureOSDisk: this.env.CRABBOX_AZURE_OS_DISK }
+                : {}),
+              ...(this.env.CRABBOX_AZURE_IMAGE ? { azureImage: this.env.CRABBOX_AZURE_IMAGE } : {}),
+            },
+          );
+          config = (await adapter.prepareLeaseConfig?.(config)) ?? config;
+          supported = capability.supports(config);
+        } catch {
+          supported = false;
+        }
+        const admissionEnabled = this.env.CRABBOX_DURABLE_PROVISIONING_ADMISSION === "true";
+        const materialConfigured = provisioningMaterialConfigured(this.env);
+        return json({
+          ...readiness,
+          resumableProvisioning: {
+            version: 1,
+            supported,
+            admissionEnabled,
+            available:
+              supported &&
+              admissionEnabled &&
+              materialConfigured &&
+              Boolean(this.state.provisioning),
+            missing: materialConfigured ? [] : ["CRABBOX_SESSION_SECRET"],
+          },
+        });
+      }
     }
     return json(readiness);
   }
@@ -15536,6 +15987,7 @@ export class FleetCoordinator {
         if (due.length >= interruptedProvisioningRecoveryBatchSize) {
           return;
         }
+        if (await provisioningOwnsLease(this.state.storage, lease.id)) return;
         const recoveryAt = interruptedProvisioningRecoveryAt(
           lease,
           this.coordinatorGeneration,
@@ -15566,6 +16018,7 @@ export class FleetCoordinator {
   }
 
   private async reconcileInterruptedLease(lease: LeaseRecord): Promise<void> {
+    if (await provisioningOwnsLease(this.state.storage, lease.id)) return;
     const providerName = managedLeaseProvider(lease);
     if (!providerName) {
       return;
@@ -15578,7 +16031,10 @@ export class FleetCoordinator {
       const failure = `interrupted provisioning recovery failed: ${coordinatorErrorMessage(this.env, error)}`;
       await this.state.runExclusive(async () => {
         const current = await this.getLease(lease.id);
-        if (!sameProvisioningAttempt(current, lease)) {
+        if (
+          !sameProvisioningAttempt(current, lease) ||
+          (await provisioningOwnsLease(this.state.storage, lease.id))
+        ) {
           return;
         }
         const failedAt = new Date();
@@ -15600,7 +16056,10 @@ export class FleetCoordinator {
     }
     await this.state.runExclusive(async () => {
       const current = await this.getLease(lease.id);
-      if (!sameProvisioningAttempt(current, lease)) {
+      if (
+        !sameProvisioningAttempt(current, lease) ||
+        (await provisioningOwnsLease(this.state.storage, lease.id))
+      ) {
         return;
       }
       const failedAtDate = new Date();
@@ -15676,6 +16135,7 @@ export class FleetCoordinator {
       const now = Date.now();
       const claimed: Array<{ claim: string; lease: LeaseRecord }> = [];
       await this.visitLeaseRecords(async (stored) => {
+        if (await provisioningOwnsLease(this.state.storage, stored.id)) return;
         if (!leaseIsLive(stored)) {
           await this.closeLeaseBridges(stored.id, 1008, "lease ended");
         }
@@ -16157,15 +16617,18 @@ export class FleetCoordinator {
         try {
           const lease = azureDeferredCleanupLease(record);
           const scope = azureProviderScope(lease.providerScope)!;
-          await new AzureClient(this.env, {
-            location: record.location,
-            subscription: scope.subscription,
-            resourceGroup: scope.resourceGroup,
-            ownedDeleteClaimStorage: this.state.storage,
-          }).deleteOwnedServer(lease);
+          await this.withLegacyProviderMutation(lease.id, () =>
+            new AzureClient(this.env, {
+              location: record.location,
+              subscription: scope.subscription,
+              resourceGroup: scope.resourceGroup,
+              ownedDeleteClaimStorage: this.state.storage,
+            }).deleteOwnedServer(lease),
+          );
         } catch (error) {
           await this.state.runExclusive(async () => {
             const current = await this.state.storage.get<AzureDeferredCleanupRecord>(key);
+            if (await provisioningOwnsLease(this.state.storage, record.leaseID)) return;
             if (!current || current.updatedAt !== record.updatedAt) {
               return;
             }
@@ -16191,6 +16654,7 @@ export class FleetCoordinator {
         }
         await this.state.runExclusive(async () => {
           const current = await this.state.storage.get<AzureDeferredCleanupRecord>(key);
+          if (await provisioningOwnsLease(this.state.storage, record.leaseID)) return;
           if (current?.updatedAt === record.updatedAt) {
             await this.state.storage.delete(key);
           }
@@ -16662,9 +17126,11 @@ export class FleetCoordinator {
         try {
           // Azure release uses the persisted provider scope and resumable owned-resource deletion.
           // oxlint-disable-next-line eslint/no-await-in-loop -- release failures must stay attached to the candidate.
-          await this.provider("azure", region).releaseLease(exactOwnershipLease, {
-            resourceIdentity: machine.resourceIdentity ?? "",
-          });
+          await this.withLegacyProviderMutation(exactOwnershipLease.id, () =>
+            this.provider("azure", region).releaseLease(exactOwnershipLease, {
+              resourceIdentity: machine.resourceIdentity ?? "",
+            }),
+          );
           candidate.action = "terminated";
           released = true;
         } catch (error) {
@@ -17794,7 +18260,51 @@ export class FleetCoordinator {
     if (!provider) {
       return;
     }
-    await this.provider(provider, lease.region, lease.providerProject).releaseLease(lease);
+    const operation = await this.state.storage.get<LeaseProvisioningOperation>(
+      provisioningOperationKey(lease.id),
+    );
+    const publication = operation?.step.publication;
+    const resourceIdentity =
+      operation?.generation === lease.createAttemptGeneration &&
+      publication?.server.cloudID === lease.cloudID
+        ? publication.server.resourceIdentity
+        : undefined;
+    await this.withLegacyProviderMutation(lease.id, () =>
+      this.provider(provider, lease.region, lease.providerProject).releaseLease(
+        lease,
+        resourceIdentity ? { resourceIdentity } : undefined,
+      ),
+    );
+  }
+
+  private async withLegacyProviderMutation<T>(
+    leaseID: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const key = `legacy-provider-mutation:${leaseID}`;
+    const claimID = crypto.randomUUID();
+    await this.state.storage.transaction(async (transaction) => {
+      if (await provisioningOwnsLease(transaction, leaseID))
+        throw new ProviderResourceUnresolvedError(
+          "durable provisioning owns this lease's provider mutations",
+        );
+      const claims = (await transaction.get<string[]>(key)) ?? [];
+      await transaction.put(key, [...claims, claimID]);
+    });
+    const result = await operation();
+    // Uncertain failures retain this admission fence along with their existing cleanup journal.
+    await this.state.storage.transaction(async (transaction) => {
+      if (await provisioningOwnsLease(transaction, leaseID))
+        throw new ProviderResourceUnresolvedError(
+          "durable provisioning owns this lease's provider mutations",
+        );
+      const claims = ((await transaction.get<string[]>(key)) ?? []).filter(
+        (claim) => claim !== claimID,
+      );
+      if (claims.length) await transaction.put(key, claims);
+      else await transaction.delete(key);
+    });
+    return result;
   }
 
   private async abortProvisionedLeaseAfterStateChange(
@@ -17990,6 +18500,17 @@ export class FleetCoordinator {
     ) {
       return current;
     }
+    if (this.state.provisioning) {
+      const released = await this.state.provisioning.commitAndWake(async (transaction) => {
+        const latest = await transaction.get<LeaseRecord>(leaseKey(current.id));
+        if (!latest || !sameLeaseReleaseIdentity(latest, current)) return undefined;
+        return cancelProvisioningOperation(transaction, latest, Date.now(), options);
+      });
+      if (released) {
+        await this.closeLeaseBridges(released.id, 1008, "lease ended");
+        return released;
+      }
+    }
     await this.markWorkspaceReleaseRequested(current);
     if (
       !options.expectedCreateAttempt &&
@@ -18160,12 +18681,18 @@ export class FleetCoordinator {
     claim: string;
     keep?: boolean;
   }): Promise<LeaseRecord> {
+    if (await provisioningOwnsLease(this.state.storage, preparation.lease.id))
+      return (await this.getLease(preparation.lease.id)) ?? preparation.lease;
     try {
       await this.deleteLeaseServer(preparation.lease);
     } catch (error) {
       await this.state.runExclusive(async () => {
         const current = await this.getLease(preparation.lease.id);
-        if (!current || current.cleanupStartedAt !== preparation.claim) {
+        if (
+          !current ||
+          current.cleanupStartedAt !== preparation.claim ||
+          (await provisioningOwnsLease(this.state.storage, preparation.lease.id))
+        ) {
           return;
         }
         current.releaseDeletesServer = true;
@@ -18182,7 +18709,11 @@ export class FleetCoordinator {
     }
     return await this.state.runExclusive(async () => {
       const current = await this.getLease(preparation.lease.id);
-      if (!current || current.cleanupStartedAt !== preparation.claim) {
+      if (
+        !current ||
+        current.cleanupStartedAt !== preparation.claim ||
+        (await provisioningOwnsLease(this.state.storage, preparation.lease.id))
+      ) {
         return current ?? preparation.lease;
       }
       const released = finalizedReleasedLease(current, true, preparation.keep);
@@ -19683,6 +20214,26 @@ function createAttemptReplayResponse(lease: LeaseRecord): Response {
       lease: publicLeaseRecord(lease),
     },
     { status: 409 },
+  );
+}
+
+function prefersAsyncProvisioning(request: Request): boolean {
+  return (request.headers.get("prefer") ?? "")
+    .split(",")
+    .some((value) => value.trim().toLowerCase() === "respond-async");
+}
+
+function acceptedProvisioningLease(lease: LeaseRecord): Response {
+  return json(
+    { lease: publicLeaseRecord(lease) },
+    {
+      status: 202,
+      headers: {
+        location: `/v1/leases/${encodeURIComponent(lease.id)}`,
+        "retry-after": "2",
+        "preference-applied": "respond-async",
+      },
+    },
   );
 }
 
@@ -23428,6 +23979,13 @@ function boundedTelemetrySamples(samples: LeaseTelemetry[], max: number): LeaseT
 
 const fixedLeaseCreateIntentVersion = 2;
 
+async function fixedRequestFingerprint(input: LeaseRequest): Promise<string> {
+  const request = { ...input };
+  // The URL already binds the ID; its optional duplicate in the body is not a new intent.
+  delete request.leaseID;
+  return sha256Hex(`crabbox-fixed-request-v1\0${canonicalJSONStringify(request)}`);
+}
+
 export async function fixedLeaseCreateIntentHash(
   config: LeaseConfig,
   requestedSlug: string,
@@ -24636,6 +25194,7 @@ function parseProviderLabelTime(value: string | undefined): number {
 }
 
 interface CloudProvider {
+  resumableProvisioning?(): ProviderResumableProvisioning;
   readyPoolImageIdentity?(lease: LeaseRecord): ReadyPoolImageIdentity | undefined;
   supportsReadyPoolImageIdentity?(identity: ReadyPoolImageIdentity): boolean;
   listCrabboxServers(): Promise<ProviderMachine[]>;
@@ -24976,6 +25535,10 @@ export class HetznerProvider implements CloudProvider {
 
 export class AzureProvider implements CloudProvider {
   private clientValue?: AzureClient;
+
+  resumableProvisioning(): ProviderResumableProvisioning {
+    return new AzureResumableProvisioning(this.env, undefined, this.storage);
+  }
 
   constructor(
     private readonly env: Env,
