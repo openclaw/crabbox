@@ -358,14 +358,18 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
     callback: (transaction: CoordinatorStorageView) => Promise<T>,
   ): Promise<T> {
     return this.state.storage.transaction(async (transaction) => {
+      const currentAlarm = await transaction.getAlarm();
       if ((await transaction.get(legacyAlarmKey)) === undefined) {
-        const legacy = await transaction.getAlarm();
-        if (legacy !== null) await transaction.put(legacyAlarmKey, legacy);
+        if (currentAlarm !== null) await transaction.put(legacyAlarmKey, currentAlarm);
       }
       const result = await callback(transaction);
       const wake = await mergedCoordinatorWake(transaction);
-      if (wake === undefined) await transaction.deleteAlarm();
-      else await transaction.setAlarm(wake);
+      if (wake === undefined) {
+        if (currentAlarm !== null) await transaction.deleteAlarm();
+      } else if (wake !== currentAlarm || wake <= Date.now()) {
+        // A retained due timestamp may outlive its consumed job; only future wakes are reusable.
+        await transaction.setAlarm(wake);
+      }
       return result;
     });
   }

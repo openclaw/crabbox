@@ -3098,11 +3098,13 @@ export class FleetCoordinator {
     }
     const run = this.runScheduledMaintenance(grantVersion, preserve)
       .catch(async () => {
-        console.error("coordinator maintenance failed; retry scheduled");
+        const retryAt = Date.now() + 15_000;
+        console.error("coordinator maintenance failed; scheduling retry");
         try {
-          await this.state.scheduleAlarm(Date.now() + 15_000);
+          await this.state.runExclusive(() => this.armAlarmNoLaterThan(retryAt));
         } catch {
           console.error("coordinator maintenance retry wake failed");
+          throw new Error("coordinator maintenance retry wake failed");
         }
       })
       .finally(() => {
