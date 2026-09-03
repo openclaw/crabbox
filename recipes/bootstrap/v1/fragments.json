@@ -17,6 +17,11 @@
       "parameters": {}
     },
     {
+      "name": "windowsRuntimeGate",
+      "file": "windowsRuntimeGate.ps1",
+      "parameters": {}
+    },
+    {
       "name": "windowsCore",
       "file": "windowsCore.ps1",
       "parameters": {}

@@ -2,6 +2,7 @@ import {
   sharedWslTruffleHogInstall,
   sharedWindowsHeader,
   sharedWindowsRuntime,
+  sharedWindowsRuntimeGate,
   sharedWindowsCore,
   sharedWindowsDesktopPrelude,
   sharedWindowsNativePrelude,
@@ -215,10 +216,17 @@ tasks:
 }
 
 function windowsBootstrapHeaderPowerShell(config: LeaseConfig): string {
-  return (
-    sharedWindowsHeader(config.sshUser, config.sshPublicKey, config.workRoot, sshPorts(config)) +
-    sharedWindowsRuntime()
+  let script = sharedWindowsHeader(
+    config.sshUser,
+    config.sshPublicKey,
+    config.workRoot,
+    sshPorts(config),
   );
+  // An omitted mode retains the native default; WSL2 owns a separate Linux runtime.
+  if (config.windowsMode !== "wsl2") {
+    script += sharedWindowsRuntime() + sharedWindowsRuntimeGate();
+  }
+  return script;
 }
 
 export function windowsBootstrapPowerShell(config: LeaseConfig): string {

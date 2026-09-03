@@ -200,7 +200,8 @@ from `C:\Program Files\OpenSSH`, then `%WINDIR%\System32\OpenSSH`, then PATH,
 and fail if none is present. This supports images with Windows' built-in
 OpenSSH as well as the pinned archive installation.
 
-Managed Windows bootstrap also provides the native Visual C++ v14 runtime
+Managed native Windows bootstrap (`--windows-mode normal`, the default) also
+provides the native Visual C++ v14 runtime
 before OpenSSH/Git installation and before writing `setup-complete`. The shared
 recipe covers Azure extension bootstrap, Azure snapshot rehydration, AWS's
 post-EC2Launch bootstrap, and Parallels. It checks actual DLL loadability in a
@@ -212,6 +213,12 @@ emulated PowerShell fail with instructions to rerun in native AMD64 or ARM64
 PowerShell matching the OS. The ARM64 check covers native ARM64 applications;
 it does not attest x86 or emulated x64 application prerequisites, or make other
 bootstrap downloads ARM64-native.
+
+WSL2 uses a distinct Linux runtime flow. Its generated bootstrap omits the
+native VC++ helper definitions, installer URLs and pins, and runtime readiness
+gate, including elevation, download, pending-boot, and stale-readiness handling.
+WSL2 retains its existing Windows baseline, Linux setup, and finalization/reboot
+behavior.
 
 Missing or unloadable runtime DLLs require elevated managed bootstrap. The
 installer uses immutable Microsoft URLs and SHA-256 pins in `artifacts.json`
@@ -303,6 +310,11 @@ Edit `recipes/bootstrap/v1/` rather than the generated Go or TypeScript files:
   `.ps1` and `.sh` files own the Windows header/core, native/desktop preludes,
   desktop setup and finalization, macOS bootstrap, Linux code-server and
   Tailscale installers, and WSL TruffleHog installer.
+
+The Windows header composes `windowsRuntime.ps1` definitions followed by
+`windowsRuntimeGate.ps1` only for native mode, before the managed core and
+readiness. The gate owns stale-readiness invalidation and the helper call;
+`windowsCore.ps1` remains shared with WSL2 and contains no runtime gate.
 
 Run `node scripts/generate-bootstrap.mjs` after edits, then
 `node scripts/generate-bootstrap.mjs --check`. Generation requires Node and

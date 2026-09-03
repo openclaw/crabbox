@@ -10,6 +10,7 @@ const fragment = sources.fragments.find((entry) => entry.name === "windowsRuntim
 const runtime = fragmentTokens(fragment, sources.constants).map((token) => token.literal).join("");
 const generated = await readFile(resolve(repoRoot, "scripts/windows-runtime.generated.ps1"), "utf8");
 const core = sources.fragments.find((entry) => entry.name === "windowsCore").source;
+const gate = sources.fragments.find((entry) => entry.name === "windowsRuntimeGate").source;
 
 test("standalone Windows runtime helper is the generated shared fragment with canonical pins", () => {
   assert.equal(generated.slice(generated.indexOf("\n") + 1), runtime);
@@ -73,9 +74,13 @@ test("installation is outside download retries and gates success on postconditio
   assert.match(staging, /AreAccessRulesProtected/u);
   assert.match(staging, /\$rules.Count -ne 2/u);
   assert.match(staging, /ReparsePoint/u);
-  assert.ok(core.indexOf("Remove-Item -LiteralPath $setupCompletePath") < core.indexOf("\nEnsure-CrabboxWindowsRuntime\n"));
-  assert.ok(core.indexOf("\nEnsure-CrabboxWindowsRuntime\n") < core.indexOf("Get-LocalUser"));
-  assert.match(core, /\$crabboxSetupWasComplete = Test-Path/u);
+  const clear = gate.indexOf("Remove-Item -LiteralPath $setupCompletePath");
+  const call = gate.indexOf("\nEnsure-CrabboxWindowsRuntime\n");
+  assert.ok(clear >= 0 && call > clear);
+  assert.equal(gate.split("\nEnsure-CrabboxWindowsRuntime\n").length, 2);
+  assert.ok((gate + core).indexOf("Get-LocalUser") > call);
+  assert.match(gate, /\$crabboxSetupWasComplete = Test-Path/u);
+  assert.doesNotMatch(core, /CrabboxWindowsRuntime|crabboxSetupWasComplete|Remove-Item -LiteralPath \$setupCompletePath/u);
   const desktop = sources.fragments.find((entry) => entry.name === "windowsDesktop").source;
   assert.match(desktop, /if \(-not \$crabboxSetupWasComplete\) \{\s+Restart-Computer -Force/u);
 });

@@ -59,6 +59,7 @@
     "name": "windows-native",
     "target": "windows",
     "architecture": "amd64",
+    "windowsMode": "normal",
     "user": "crabbox",
     "workRoot": "C:\\crabbox",
     "publicKey": "ssh-ed25519 fixture",

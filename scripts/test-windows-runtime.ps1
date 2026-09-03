@@ -16,14 +16,14 @@ function Get-RequiredFragmentMarker([string]$Source, [string]$Marker) {
   return $index
 }
 
-function Get-RuntimeTestFragments([string]$Core, [string]$Finalize, [string]$Desktop) {
+function Get-RuntimeTestFragments([string]$Gate, [string]$Finalize, [string]$Desktop) {
   # Windows checkouts may use CRLF; normalize before matching or joining fragments.
-  $Core = $Core.Replace("`r`n", "`n")
+  $Gate = $Gate.Replace("`r`n", "`n")
   $Finalize = $Finalize.Replace("`r`n", "`n")
   $Desktop = $Desktop.Replace("`r`n", "`n")
   $runtimeCall = "`nEnsure-CrabboxWindowsRuntime`n"
-  $call = Get-RequiredFragmentMarker $Core $runtimeCall
-  $clear = Get-RequiredFragmentMarker $Core 'Remove-Item -LiteralPath $setupCompletePath -Force -ErrorAction Stop'
+  $call = Get-RequiredFragmentMarker $Gate $runtimeCall
+  $clear = Get-RequiredFragmentMarker $Gate 'Remove-Item -LiteralPath $setupCompletePath -Force -ErrorAction Stop'
   Assert-True ($clear -lt $call) 'Readiness invalidation must precede the runtime gate'
   $ready = 'Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath'
   $null = Get-RequiredFragmentMarker $Finalize $ready
@@ -31,16 +31,16 @@ function Get-RuntimeTestFragments([string]$Core, [string]$Finalize, [string]$Des
   $desktopReady = Get-RequiredFragmentMarker $Desktop $ready
   Assert-True ($completion -lt $desktopReady) 'Desktop completion must include the readiness marker'
   return [pscustomobject]@{
-    Gate = $Core.Substring(0, $call + $runtimeCall.Length)
+    Gate = $Gate
     Finalize = $Finalize
     Completion = $Desktop.Substring($completion)
   }
 }
 
-$core = Get-Content -Raw -LiteralPath (Join-Path $root 'recipes/bootstrap/v1/windowsCore.ps1')
+$gate = Get-Content -Raw -LiteralPath (Join-Path $root 'recipes/bootstrap/v1/windowsRuntimeGate.ps1')
 $finalize = Get-Content -Raw -LiteralPath (Join-Path $root 'recipes/bootstrap/v1/windowsFinalize.ps1')
 $desktop = Get-Content -Raw -LiteralPath (Join-Path $root 'recipes/bootstrap/v1/windowsDesktop.ps1')
-$fragments = Get-RuntimeTestFragments $core $finalize $desktop
+$fragments = Get-RuntimeTestFragments $gate $finalize $desktop
 
 # Run these regressions both locally (-TestExtractionOnly) and in the native harness.
 $expectedGate = @'
@@ -53,24 +53,24 @@ Ensure-CrabboxWindowsRuntime
 '@
 $expectedGate = $expectedGate.Replace("`r`n", "`n") + "`n"
 foreach ($lineEnding in @("`n", "`r`n")) {
-  $variantCore = $core.Replace("`r`n", "`n").Replace("`n", $lineEnding)
+  $variantGate = $gate.Replace("`r`n", "`n").Replace("`n", $lineEnding)
   $variantFinalize = $finalize.Replace("`r`n", "`n").Replace("`n", $lineEnding)
   $variantDesktop = $desktop.Replace("`r`n", "`n").Replace("`n", $lineEnding)
-  $actual = Get-RuntimeTestFragments $variantCore $variantFinalize $variantDesktop
+  $actual = Get-RuntimeTestFragments $variantGate $variantFinalize $variantDesktop
   Assert-True ($actual.Gate -ceq $expectedGate) 'Line endings changed the exact runtime gate'
   Assert-True ($actual.Finalize -ceq $finalize.Replace("`r`n", "`n")) 'Line endings changed finalization'
   Assert-True ($actual.Completion -ceq $fragments.Completion) 'Line endings changed desktop completion'
   foreach ($invalid in @(
-    @{ Core = $variantCore.Replace('Ensure-CrabboxWindowsRuntime', 'Missing-RuntimeCall'); Finalize = $variantFinalize; Desktop = $variantDesktop; Error = 'Missing harness fragment marker' },
-    @{ Core = $variantCore.Replace('Remove-Item -LiteralPath $setupCompletePath', 'Missing-ReadinessInvalidation'); Finalize = $variantFinalize; Desktop = $variantDesktop; Error = 'Missing harness fragment marker' },
-    @{ Core = $variantCore; Finalize = $variantFinalize.Replace('Set-Content', 'Missing-ReadinessWrite'); Desktop = $variantDesktop; Error = 'Missing harness fragment marker' },
-    @{ Core = $variantCore; Finalize = $variantFinalize; Desktop = $variantDesktop.Replace('if (-not (Test-Path -LiteralPath $setupCompletePath))', 'if ($true)'); Error = 'Missing harness fragment marker' },
-    @{ Core = $variantCore; Finalize = $variantFinalize; Desktop = $variantDesktop.Replace('Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath', 'Missing-DesktopReadiness'); Error = 'Missing harness fragment marker' },
-    @{ Core = ($variantCore + $lineEnding + 'Ensure-CrabboxWindowsRuntime' + $lineEnding); Finalize = $variantFinalize; Desktop = $variantDesktop; Error = 'Duplicate harness fragment marker' },
-    @{ Core = ($lineEnding + 'Ensure-CrabboxWindowsRuntime' + $lineEnding + $variantCore.Replace('Ensure-CrabboxWindowsRuntime', 'Missing-RuntimeCall')); Finalize = $variantFinalize; Desktop = $variantDesktop; Error = 'Readiness invalidation must precede' }
+    @{ Gate = $variantGate.Replace('Ensure-CrabboxWindowsRuntime', 'Missing-RuntimeCall'); Finalize = $variantFinalize; Desktop = $variantDesktop; Error = 'Missing harness fragment marker' },
+    @{ Gate = $variantGate.Replace('Remove-Item -LiteralPath $setupCompletePath', 'Missing-ReadinessInvalidation'); Finalize = $variantFinalize; Desktop = $variantDesktop; Error = 'Missing harness fragment marker' },
+    @{ Gate = $variantGate; Finalize = $variantFinalize.Replace('Set-Content', 'Missing-ReadinessWrite'); Desktop = $variantDesktop; Error = 'Missing harness fragment marker' },
+    @{ Gate = $variantGate; Finalize = $variantFinalize; Desktop = $variantDesktop.Replace('if (-not (Test-Path -LiteralPath $setupCompletePath))', 'if ($true)'); Error = 'Missing harness fragment marker' },
+    @{ Gate = $variantGate; Finalize = $variantFinalize; Desktop = $variantDesktop.Replace('Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath', 'Missing-DesktopReadiness'); Error = 'Missing harness fragment marker' },
+    @{ Gate = ($variantGate + $lineEnding + 'Ensure-CrabboxWindowsRuntime' + $lineEnding); Finalize = $variantFinalize; Desktop = $variantDesktop; Error = 'Duplicate harness fragment marker' },
+    @{ Gate = ($lineEnding + 'Ensure-CrabboxWindowsRuntime' + $lineEnding + $variantGate.Replace('Ensure-CrabboxWindowsRuntime', 'Missing-RuntimeCall')); Finalize = $variantFinalize; Desktop = $variantDesktop; Error = 'Readiness invalidation must precede' }
   )) {
     $failure = ''
-    try { $null = Get-RuntimeTestFragments $invalid.Core $invalid.Finalize $invalid.Desktop } catch { $failure = $_.ToString() }
+    try { $null = Get-RuntimeTestFragments $invalid.Gate $invalid.Finalize $invalid.Desktop } catch { $failure = $_.ToString() }
     Assert-True ($failure -match $invalid.Error) "Malformed fragment did not fail closed: $failure"
   }
 }
