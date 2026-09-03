@@ -308,7 +308,7 @@ async function checkpointFixture(
   const deleteImage = vi.spyOn(provider, "deleteCheckpointImage").mockResolvedValue(undefined);
   const coordinator = new FleetCoordinator(runtime, env, { [providerName]: provider });
   await storage.put(`lease:${leaseID}`, checkpointLease(providerName));
-  return { storage, runtime, coordinator, provider, deleteImage };
+  return { storage, runtime, coordinator, provider, deleteImage, env };
 }
 
 function checkpointRequest(
@@ -734,13 +734,106 @@ describe("coordinator-managed checkpoints", () => {
     expect(create).toHaveBeenCalledOnce();
   });
 
+  async function expectUnboundFixedAttempt(
+    storage: CheckpointMemoryStorage,
+    id: string,
+    state: "pending" | "canceled",
+  ) {
+    const attempt = await storage.get<CreateAttemptRecord>(`create-attempt:${id}`);
+    expect(attempt).toMatchObject({
+      version: 2,
+      requestedLeaseID: id,
+      token: expect.stringMatching(/^cat_[a-f0-9]{32}$/),
+      owner: "alice@example.com",
+      org,
+      state,
+      fixedCreate: { hash: expect.stringMatching(/^[a-f0-9]{64}$/), provider: "aws" },
+    });
+    for (const key of [
+      "canonicalLeaseID",
+      "generation",
+      "cloudID",
+      "checkpointID",
+      "checkpointUseClaimHash",
+    ]) {
+      expect(attempt).not.toHaveProperty(key);
+    }
+    return attempt!;
+  }
+
+  it.each(["source validation", "config preparation"] as const)(
+    "cancels a fixed checkpoint fork during %s and retains the fence after restart",
+    async (phase) => {
+      const { storage, coordinator, provider, env, checkpointID, body, begin, fork, create } =
+        await fixedForkFixture();
+      const claim = await begin();
+      const claimKey = `checkpoint-use:${checkpointID}:${await sha256Hex(claim)}`;
+      const available = await storage.get(claimKey);
+      const entered = Promise.withResolvers<void>();
+      const finish = Promise.withResolvers<void>();
+      if (phase === "source validation") {
+        vi.mocked(provider.validateCheckpointImage).mockImplementationOnce(async () => {
+          entered.resolve();
+          await finish.promise;
+        });
+      } else {
+        vi.mocked(provider.prepareLeaseConfig).mockImplementationOnce(async (config) => {
+          entered.resolve();
+          await finish.promise;
+          return config;
+        });
+      }
+      const creating = fork(claim);
+      try {
+        await Promise.race([
+          entered.promise,
+          creating.then(() => {
+            throw new Error("fixed fork ended before the blocked preflight");
+          }),
+        ]);
+        const released = await coordinator.fetch(
+          checkpointRequest("POST", `/v1/leases/${body.leaseID}/release`, {
+            delete: true,
+            expectedProvider: "aws",
+          }),
+        );
+        expect(released.status).toBe(200);
+        await expectUnboundFixedAttempt(storage, body.leaseID, "canceled");
+        expect(await storage.get(claimKey)).toEqual(available);
+      } finally {
+        finish.resolve();
+        await creating;
+      }
+      expect((await creating).status).toBe(409);
+      await expect((await creating).json()).resolves.toMatchObject({ error: "create_canceled" });
+      expect(create).not.toHaveBeenCalled();
+      expect(await storage.get(`lease:${body.leaseID}`)).toBeUndefined();
+      expect(await storage.get(claimKey)).toEqual(available);
+      const canceled = await expectUnboundFixedAttempt(storage, body.leaseID, "canceled");
+      const restarted = new FleetCoordinator(new CheckpointRuntime(storage), env, {
+        aws: provider,
+      });
+      const replay = await restarted.fetch(
+        checkpointRequest("PUT", `/v1/leases/${body.leaseID}/from-checkpoint`, {
+          ...body,
+          checkpointUseClaim: claim,
+        }),
+      );
+      expect(replay.status).toBe(409);
+      await expect(replay.json()).resolves.toMatchObject({ error: "create_canceled" });
+      expect(await storage.get(`create-attempt:${body.leaseID}`)).toEqual(canceled);
+      expect(await storage.get(claimKey)).toEqual(available);
+      expect(create).not.toHaveBeenCalled();
+    },
+  );
+
   it("rolls back a fixed checkpoint reservation and its fence together on storage failure", async () => {
     const { storage, checkpointID, body, begin, fork, create } = await fixedForkFixture();
     const claim = await begin();
     storage.failKey = `lease:${body.leaseID}`;
     expect((await fork(claim)).status).toBe(500);
     expect(await storage.get(`lease:${body.leaseID}`)).toBeUndefined();
-    expect(await storage.get(`create-attempt:${body.leaseID}`)).toBeUndefined();
+    await expectUnboundFixedAttempt(storage, body.leaseID, "pending");
     expect([
       ...(
         await storage.list<CoordinatorCheckpointUseClaim>({
@@ -778,7 +871,7 @@ describe("coordinator-managed checkpoints", () => {
       });
       expect((await fork(claim)).status).toBe(409);
       expect(await storage.get(`lease:${body.leaseID}`)).toBeUndefined();
-      expect(await storage.get(`create-attempt:${body.leaseID}`)).toBeUndefined();
+      await expectUnboundFixedAttempt(storage, body.leaseID, "pending");
       expect(create).not.toHaveBeenCalled();
     },
   );

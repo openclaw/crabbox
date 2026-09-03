@@ -13,6 +13,7 @@ import (
 
 func runCheckpointCaptureReviewContract(t *testing.T, repo, binary string) {
 	t.Run("retirement admission is read only and holds existing operations", func(t *testing.T) {
+		t.Parallel()
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		description := f.run("providers", "describe", "machine0", "--json")
 		if description.err != nil || !bytes.Contains(description.stdout, []byte(`"checkpoint-retirement-prepare"`)) {
@@ -47,6 +48,7 @@ func runCheckpointCaptureReviewContract(t *testing.T, repo, binary string) {
 	})
 
 	t.Run("readiness probe cannot restart pending capture", func(t *testing.T) {
+		t.Parallel()
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		f.requirePending()
 		s := f.state()
@@ -69,6 +71,7 @@ func runCheckpointCaptureReviewContract(t *testing.T, repo, binary string) {
 
 	for _, policy := range []string{"configured", "claimed"} {
 		t.Run(policy+" suspend rejection leaves source usable", func(t *testing.T) {
+			t.Parallel()
 			f := newCheckpointCaptureFixture(t, repo, binary)
 			if policy == "configured" {
 				config := filepath.Join(f.root, "config.yaml")
@@ -117,6 +120,7 @@ func runCheckpointCaptureReviewContract(t *testing.T, repo, binary string) {
 
 	for _, action := range []string{"delete", "delete-local", "prune"} {
 		t.Run("ordinary writer serializes "+action, func(t *testing.T) {
+			t.Parallel()
 			f := newCheckpointCaptureFixture(t, repo, binary)
 			s := f.state()
 			s.StartRunning = true

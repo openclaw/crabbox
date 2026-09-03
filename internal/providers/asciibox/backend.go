@@ -111,7 +111,16 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 func (b *backend) rollbackBox(ctx context.Context, client api, leaseID string, box boxData, claim LeaseClaim, exists bool) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), boxReleaseTimeout)
 	defer cancel()
-	return core.CleanupLeaseClaimIfUnchangedAfter(leaseID, claim, exists, func() error {
+	if exists {
+		if claim.LeaseID != leaseID || box.ID != box.createdID || !concreteBoxID(box.createdID) {
+			return exit(2, "ascii-box rollback has no matching original publication identity")
+		}
+		if err := validateBoxIdentity(box, boxFromClaim(claim)); err != nil {
+			return err
+		}
+		return releaseClaimedBox(cleanupCtx, client, claim, nil)
+	}
+	return core.CleanupLeaseClaimIfUnchangedAfter(leaseID, claim, false, func() error {
 		if box.ID != box.createdID || !concreteBoxID(box.createdID) {
 			return exit(2, "ascii-box rollback has no original creation identity")
 		}
@@ -125,7 +134,7 @@ func (b *backend) rollbackBox(ctx context.Context, client api, leaseID string, b
 			}
 			box = mergeBox(box, fresh)
 		}
-		return releaseExactBox(cleanupCtx, client, box, nil)
+		return releaseExactBox(cleanupCtx, client, box, nil, nil)
 	})
 }
 
@@ -160,9 +169,21 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 				return err
 			}
 		}
-		box, err := client.GetBox(ctx, claim.CloudID)
-		if err != nil {
-			return err
+		var box boxData
+		if req.ReleaseOnly {
+			var absent bool
+			box, absent, err = exactBoxForRelease(ctx, client, boxFromClaim(claim))
+			if err != nil {
+				return err
+			}
+			if absent {
+				box = boxFromClaim(claim)
+			}
+		} else {
+			box, err = client.GetBox(ctx, claim.CloudID)
+			if err != nil {
+				return err
+			}
 		}
 		if err := validateBoxIdentity(box, boxFromClaim(claim)); err != nil {
 			return err
@@ -287,8 +308,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	if err != nil {
 		return err
 	}
-	want, err := boxClaimBinding(cfg, claim)
-	if err != nil {
+	if _, err := boxClaimBinding(cfg, claim); err != nil {
 		return err
 	}
 	if req.Lease.LeaseID != claim.LeaseID || req.Lease.Server.CloudID != claim.CloudID || req.Lease.Server.Labels["box_id"] != claim.CloudID {
@@ -296,17 +316,15 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	}
 	ctx, cancel := context.WithTimeout(ctx, boxReleaseTimeout)
 	defer cancel()
-	return shared.RemoveExactClaimAfter(claim, want, func() error {
-		return releaseExactBox(ctx, client, boxFromClaim(claim), func(box boxData) {
-			if req.GuardedRemoteCleanup != nil {
-				lease := req.Lease
-				lease.Server = boxToServer(cfg, box, claim.LeaseID, claim.Slug, true)
-				if target, err := boxSSHTarget(cfg, box); err == nil {
-					lease.SSH = target
-					req.GuardedRemoteCleanup(ctx, lease)
-				}
+	return releaseClaimedBox(ctx, client, claim, func(box boxData) {
+		if req.GuardedRemoteCleanup != nil {
+			lease := req.Lease
+			lease.Server = boxToServer(cfg, box, claim.LeaseID, claim.Slug, true)
+			if target, err := boxSSHTarget(cfg, box); err == nil {
+				lease.SSH = target
+				req.GuardedRemoteCleanup(ctx, lease)
 			}
-		})
+		}
 	})
 }
 
@@ -647,6 +665,10 @@ func boxClaimsByID(cfg Config) (map[string]LeaseClaim, error) {
 
 func isNotFound(err error) bool {
 	if err == nil {
+		return false
+	}
+	var identityErr *boxIdentityError
+	if errors.As(err, &identityErr) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())

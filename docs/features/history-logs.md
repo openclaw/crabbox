@@ -94,6 +94,11 @@ subscriptions, and portal pages for auditing work on their lease. Only the
 initiating actor or an admin can append events or telemetry and finish the run.
 Lease shares do not grant access to runs created by other actors.
 
+Once a finish is committed, later events remain in the ordered audit trail but
+do not change the run's terminal state, phase, end time, or backing lease
+metadata. This includes delayed output, duplicate failure notifications, and
+post-finish lease cleanup events; the committed logs and receipt remain authoritative.
+
 ## Storage limits
 
 History records, run events, and run logs all live in coordinator storage:

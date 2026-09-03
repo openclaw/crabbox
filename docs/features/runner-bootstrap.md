@@ -180,7 +180,10 @@ with per-OS scripts rather than cloud-init:
 - **macOS** — a shell script creates SSH access for the lease user, enables
   Remote Login on the configured ports, enables Screen Sharing, and writes a
   `crabbox-ready` that checks `rsync`/`curl`, a writable work root, an open SSH
-  port, and the VNC port `5900`.
+  port, and the VNC port `5900`. Shell tracing stays disabled so the generated
+  account password is not copied into user-data logs; command errors remain
+  visible. The password file is private from creation and feeds the account
+  tool over stdin rather than process arguments.
 - **Windows** — a PowerShell script installs OpenSSH, configures key-only access
   for administrators, enables the `internal-sftp` subsystem before restarting
   `sshd`, opens firewall rules on the SSH ports, and installs Git for Windows so

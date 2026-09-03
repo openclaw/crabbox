@@ -35,6 +35,12 @@ func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	return ApplyIsloProviderFlags(cfg, fs, values)
 }
+
+// ClaimScope contributes the API endpoint identity to every claim core writes
+// for this provider, the same way the other sandbox providers do, so a claim
+// created against one endpoint is never matched against another.
+func (Provider) ClaimScope(cfg core.Config) string { return isloClaimScope(cfg) }
+
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewIsloBackend(p.Spec(), cfg, rt), nil
 }

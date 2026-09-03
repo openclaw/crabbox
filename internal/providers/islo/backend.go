@@ -134,7 +134,7 @@ func (b *isloBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, name, slug, err := b.createSandbox(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
+	leaseID, name, slug, _, err := b.createSandbox(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
 	if err != nil {
 		return err
 	}
@@ -170,11 +170,12 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		return RunResult{}, err
 	}
 	leaseID, name, slug := "", "", ""
+	var acquiredClaim core.LeaseClaim
 	acquired := false
 	tailnetEnrolled := false
 	tailnetReady := false
 	if req.ID == "" {
-		leaseID, name, slug, err = b.createSandbox(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
+		leaseID, name, slug, acquiredClaim, err = b.createSandbox(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -224,11 +225,9 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 			if !shouldStop {
 				return
 			}
-			if err := deleteIsloSandboxForCleanup(client, name); err != nil {
+			if err := b.releaseIsloLease(client, acquiredClaim, name); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: islo stop failed for %s: %v\n", name, err)
-				return
 			}
-			removeLeaseClaim(leaseID)
 		}()
 	}
 	result := RunResult{
@@ -505,13 +504,23 @@ func (b *isloBackend) Status(ctx context.Context, req StatusRequest) (statusView
 		deadline = b.now().Add(5 * time.Minute)
 	}
 	for {
-		sandbox, err := client.GetSandbox(ctx, name)
+		sandbox, err := b.resolveIsloSandbox(ctx, client, leaseID, name)
 		if err != nil {
-			return statusView{}, isloError("get sandbox", err)
+			return statusView{}, err
+		}
+		view := isloStatusView(leaseID, sandbox)
+		if view.Labels["islo_resource_id_mismatch"] == "true" {
+			if req.Wait {
+				return view, exit(4, "islo sandbox %q does not identify resource %s claimed by lease %q; refusing to wait on an unverified resource", name, view.Labels["islo_claimed_resource_id"], leaseID)
+			}
+			return view, nil
 		}
 		var tailscaleValidationErr error
 		if sandbox != nil && isloStatusReady(sandbox.GetStatus()) {
-			if _, err := b.ensureLeaseTailscale(ctx, client, name, newLeaseSlug(leaseID), leaseID, false); err != nil {
+			if strings.TrimSpace(view.ServerID) == "" {
+				return statusView{}, exit(5, "islo sandbox %s returned no current name; refusing remote status checks", leaseID)
+			}
+			if _, err := b.ensureLeaseTailscale(ctx, client, view.ServerID, newLeaseSlug(leaseID), leaseID, false); err != nil {
 				switch {
 				case errors.Is(err, core.ErrTailnetPeerUnavailable):
 					tailscaleValidationErr = err
@@ -522,7 +531,7 @@ func (b *isloBackend) Status(ctx context.Context, req StatusRequest) (statusView
 				}
 			}
 		}
-		view := isloStatusView(leaseID, sandbox)
+		view = isloStatusView(leaseID, sandbox)
 		applyIsloTailscaleValidationError(&view, tailscaleValidationErr)
 		if !req.Wait || view.Ready {
 			return view, nil
@@ -550,15 +559,44 @@ func (b *isloBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	if err := requireIsloLeaseClaim(leaseID, "stop"); err != nil {
+	claim, err := requireIsloLeaseClaim(leaseID, "stop")
+	if err != nil {
 		return err
 	}
-	if err := client.DeleteSandbox(ctx, name); err != nil {
-		return isloError("delete sandbox", err)
+	outcome, err := b.teardownClaimedIsloSandbox(ctx, client, claim, name, isloTeardownBudgets{})
+	if err != nil {
+		return err
 	}
-	removeLeaseClaim(leaseID)
-	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", leaseID, name)
+	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s proof=%s\n", leaseID, outcome.name, outcome.proof)
 	return nil
+}
+
+// releaseIsloLease binds run cleanup to the claim returned at acquisition.
+// It drops that claim only once the delete is proven; a replacement claim is
+// never authority to delete on the original run's behalf.
+//
+// The whole teardown gets one cleanup budget, because this defer runs while the
+// caller is waiting. Within it a third is reserved for the DELETE, so a slow
+// identity read cannot eat the time the delete needs: a sandbox that is never
+// deleted keeps billing, and that is the one call here that must not be starved.
+func (b *isloBackend) releaseIsloLease(client isloAPI, acquired core.LeaseClaim, name string) error {
+	budgets := isloTeardownBudgets{overall: isloCleanupTimeout, deleteReserve: isloCleanupTimeout / 3}
+	leaseID := acquired.LeaseID
+	if acquired.Provider != isloProvider || leaseID == "" {
+		return exit(4, "islo cleanup has no captured acquisition claim; no delete was issued")
+	}
+	claim, ok, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return exit(5, "islo lease %q has no exact local claim for cleanup of sandbox %q; no delete was issued because this run can no longer prove local ownership. The sandbox may still be running and billable: verify its original resource id and ownership through the Islo API before cleanup; do not delete by the stored name alone", leaseID, name)
+	}
+	if !sameIsloRunOwnership(acquired, claim) {
+		return exit(4, "islo lease %q no longer matches this run's acquired identity or repository owner; no delete was issued, and the current claim is retained", leaseID)
+	}
+	_, err = b.teardownClaimedIsloSandbox(context.Background(), client, claim, name, budgets)
+	return err
 }
 
 // Pause snapshots a running Islo sandbox to disk and frees its CPU/memory while
@@ -572,7 +610,7 @@ func (b *isloBackend) Pause(ctx context.Context, req PauseRequest) error {
 	if err != nil {
 		return err
 	}
-	if err := requireIsloLeaseClaim(leaseID, "pause"); err != nil {
+	if _, err := requireIsloLeaseClaim(leaseID, "pause"); err != nil {
 		return err
 	}
 	if _, err := client.PauseSandbox(ctx, name); err != nil {
@@ -592,7 +630,7 @@ func (b *isloBackend) Resume(ctx context.Context, req ResumeRequest) error {
 	if err != nil {
 		return err
 	}
-	if err := requireIsloLeaseClaim(leaseID, "resume"); err != nil {
+	if _, err := requireIsloLeaseClaim(leaseID, "resume"); err != nil {
 		return err
 	}
 	if _, err := client.ResumeSandbox(ctx, name); err != nil {
@@ -602,13 +640,13 @@ func (b *isloBackend) Resume(ctx context.Context, req ResumeRequest) error {
 	return nil
 }
 
-func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
+func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Repo, reclaim bool, requestedSlug string) (string, string, string, core.LeaseClaim, error) {
 	if err := b.validateTailscaleConfig(); err != nil {
-		return "", "", "", err
+		return "", "", "", core.LeaseClaim{}, err
 	}
 	_, err := isloRelativeWorkdir(b.cfg)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", core.LeaseClaim{}, err
 	}
 	name := newIsloSandboxName(repo)
 	create := &gosdk.CreateSandboxRequest{Name: stringValue(name)}
@@ -635,49 +673,67 @@ func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Re
 	}
 	sandbox, err := client.CreateSandbox(ctx, create)
 	if err != nil {
-		return "", "", "", isloError("create sandbox", err)
+		return "", "", "", core.LeaseClaim{}, isloError("create sandbox", err)
 	}
 	if sandbox == nil || sandbox.GetName() == "" {
-		return "", "", "", exit(5, "islo create sandbox returned no name")
+		return "", "", "", core.LeaseClaim{}, exit(5, "islo create sandbox returned no name")
 	}
 	leaseID := isloLeasePrefix + sandbox.GetName()
+	identity := isloIdentityFromSandbox(sandbox)
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
-		if cleanupErr := deleteIsloSandboxForCleanup(client, sandbox.GetName()); cleanupErr != nil {
-			return "", "", "", isloUnclaimedCleanupError(err, sandbox.GetName(), cleanupErr)
+		if cleanupErr := b.cleanupCreatedIsloSandbox(client, identity); cleanupErr != nil {
+			return "", "", "", core.LeaseClaim{}, isloUnclaimedCleanupError(err, sandbox.GetName(), cleanupErr)
 		}
-		return "", "", "", err
+		return "", "", "", core.LeaseClaim{}, err
 	}
-	if err := claimLeaseForRepoProviderWithPond(leaseID, slug, isloProvider, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
-		if cleanupErr := deleteIsloSandboxForCleanup(client, sandbox.GetName()); cleanupErr != nil {
-			return "", "", "", isloUnclaimedCleanupError(err, sandbox.GetName(), cleanupErr)
+	acquired, err := b.publishIsloClaim(ctx, leaseID, slug, repo.Root, identity)
+	if err != nil {
+		if cleanupErr := b.cleanupCreatedIsloSandbox(client, identity); cleanupErr != nil {
+			return "", "", "", core.LeaseClaim{}, isloUnclaimedCleanupError(err, sandbox.GetName(), cleanupErr)
 		}
-		return "", "", "", err
+		return "", "", "", core.LeaseClaim{}, err
 	}
 	// When --tailscale is set, bring the sandbox onto the tailnet through the
 	// islo exec stream and record its tailnet address on the claim. A failure
 	// here means the lease cannot serve the plane the caller asked for, so we
 	// tear the sandbox down rather than leave a half-joined member behind.
 	if err := b.maybeJoinTailscale(ctx, client, sandbox.GetName(), slug, leaseID); err != nil {
-		if cleanupErr := deleteIsloSandboxForCleanup(client, sandbox.GetName()); cleanupErr != nil {
-			return "", "", "", fmt.Errorf("%w; cleanup failed for islo sandbox %s: %v", err, sandbox.GetName(), cleanupErr)
+		if cleanupErr := b.releaseIsloLease(client, acquired, sandbox.GetName()); cleanupErr != nil {
+			return "", "", "", core.LeaseClaim{}, fmt.Errorf("%w; cleanup failed for islo sandbox %s: %v", err, sandbox.GetName(), cleanupErr)
 		}
-		removeLeaseClaim(leaseID)
-		return "", "", "", err
+		return "", "", "", core.LeaseClaim{}, err
 	}
-	return leaseID, sandbox.GetName(), slug, nil
+	return leaseID, sandbox.GetName(), slug, acquired, nil
 }
 
 func isloUnclaimedCleanupError(cause error, name string, cleanupErr error) error {
 	leaseID := isloLeasePrefix + name
 	adopt := fmt.Sprintf("crabbox run --provider %s --id %s --reclaim --no-sync -- true", isloProvider, shellQuote(leaseID))
-	return fmt.Errorf("%w; cleanup failed for islo sandbox %s: %v; first run `%s`, then run `%s` to retry cleanup", cause, name, cleanupErr, adopt, isloCleanupCommand(leaseID))
+	return fmt.Errorf("%w; cleanup failed for islo sandbox %s: %v; verify the sandbox identity and existing local claim before retrying. Only if no claim exists, run `%s`, then `%s` to retry cleanup; do not reclaim over a competing owner", cause, name, cleanupErr, adopt, isloCleanupCommand(leaseID))
 }
 
-func deleteIsloSandboxForCleanup(client isloAPI, name string) error {
+func (b *isloBackend) cleanupCreatedIsloSandbox(client isloAPI, identity isloIdentity) error {
+	if identity.ID == "" {
+		return exit(5, "cannot confirm cleanup of sandbox %q without its resource id", identity.Name)
+	}
+	// A concurrent adopter may now own this resource. Rollback is allowed only
+	// while the claim remains absent, under the same fence as claim publication.
+	claim := core.LeaseClaim{
+		LeaseID: isloLeasePrefix + identity.Name, Provider: isloProvider,
+		ProviderScope: b.claimScope(), CloudID: identity.ID, CloudImmutableID: identity.ID,
+		Labels: identity.labels(),
+	}
 	cleanupCtx, cancel := isloCleanupContext()
 	defer cancel()
-	return client.DeleteSandbox(cleanupCtx, name)
+	err := core.CleanupLeaseClaimIfUnchangedAfterContext(cleanupCtx, claim.LeaseID, core.LeaseClaim{}, false, func() error {
+		_, err := b.teardownIsloSandbox(cleanupCtx, client, claim, identity.Name, isloTeardownBudgets{})
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("resource %s: %w", identity.ID, err)
+	}
+	return nil
 }
 
 func (b *isloBackend) exec(ctx context.Context, client isloAPI, name, workdir string, command []string, shellMode bool, env map[string]string, user string) (int, error) {
@@ -773,19 +829,56 @@ func (b *isloBackend) resolveLeaseIDForRepo(ctx context.Context, client isloAPI,
 	if sandbox == nil || sandbox.GetName() != name {
 		return "", "", "", exit(4, "islo sandbox %q was not found; refusing to create a local claim", name)
 	}
-	if err := claimLeaseForRepoProviderWithPond(leaseID, slug, isloProvider, b.cfg.Pond, repoRoot, b.cfg.IdleTimeout, true); err != nil {
+	if _, err := b.publishIsloClaim(ctx, leaseID, slug, repoRoot, isloIdentityFromSandbox(sandbox)); err != nil {
 		return "", "", "", err
 	}
 	return leaseID, name, slug, nil
 }
 
-func requireIsloLeaseClaim(leaseID, action string) error {
-	if _, ok, err := resolveExactIsloLeaseClaim(leaseID); err != nil {
-		return err
-	} else if !ok {
-		return exit(4, "islo lease %q has no exact local claim; adopt it with an explicit --reclaim reuse before %s", leaseID, action)
+// resolveIsloSandbox prefers the immutable provider id recorded on the claim
+// over the sandbox name. A name identifies a namespace slot rather than a
+// resource generation, so addressing the id is what makes a status read report
+// on the resource this lease actually owns. The by-id lookup also keeps
+// answering for a deleted sandbox, which is how a stale lease surfaces as state
+// "deleted" instead of a bare not-found error.
+func (b *isloBackend) resolveIsloSandbox(ctx context.Context, client isloAPI, leaseID, name string) (*gosdk.SandboxResponse, error) {
+	claim, _, err := resolveExactIsloLeaseClaim(leaseID)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	if err := requireIsloClaimScope(claim, b.claimScope()); err != nil {
+		return nil, err
+	}
+	if id := isloClaimIdentity(claim).ID; id != "" {
+		sandbox, err := client.GetSandboxByID(ctx, id)
+		if err == nil && sandbox != nil {
+			if err := requireIsloByIDResponse(id, sandbox); err != nil {
+				return nil, err
+			}
+			return sandbox, nil
+		}
+		if err != nil && !isloNotFound(err) {
+			return nil, isloError("get sandbox by id", err)
+		}
+		// The id is not addressable here (older resource, or a plane that does
+		// not carry it). Fall back to the name rather than failing the read.
+	}
+	sandbox, err := client.GetSandbox(ctx, name)
+	if err != nil {
+		return nil, isloError("get sandbox", err)
+	}
+	return sandbox, nil
+}
+
+func requireIsloLeaseClaim(leaseID, action string) (core.LeaseClaim, error) {
+	claim, ok, err := resolveExactIsloLeaseClaim(leaseID)
+	if err != nil {
+		return core.LeaseClaim{}, err
+	}
+	if !ok {
+		return core.LeaseClaim{}, exit(4, "islo lease %q has no exact local claim; adopt it with an explicit --reclaim reuse before %s", leaseID, action)
+	}
+	return claim, nil
 }
 
 func resolveExactIsloLeaseClaim(leaseID string) (core.LeaseClaim, bool, error) {
@@ -836,11 +929,12 @@ func isloSandboxToServer(sandbox *gosdk.SandboxResponse) Server {
 	applyIsloClaimLabels(labels, leaseID)
 	applyIsloTailscaleSandboxState(labels, sandbox.GetStatus())
 	return Server{
-		Provider: isloProvider,
-		CloudID:  sandbox.GetID(),
-		Name:     sandbox.GetName(),
-		Status:   sandbox.GetStatus(),
-		Labels:   labels,
+		Provider:    isloProvider,
+		CloudID:     sandbox.GetID(),
+		ImmutableID: sandbox.GetID(),
+		Name:        sandbox.GetName(),
+		Status:      sandbox.GetStatus(),
+		Labels:      labels,
 	}
 }
 
@@ -848,10 +942,12 @@ func isloStatusView(leaseID string, sandbox *gosdk.SandboxResponse) statusView {
 	name := strings.TrimPrefix(leaseID, isloLeasePrefix)
 	status := ""
 	image := ""
+	resourceID := ""
 	if sandbox != nil {
 		name = sandbox.GetName()
 		status = sandbox.GetStatus()
 		image = sandbox.GetImage()
+		resourceID = strings.TrimSpace(sandbox.GetID())
 	}
 	labels := map[string]string{
 		"provider": isloProvider,
@@ -863,6 +959,20 @@ func isloStatusView(leaseID string, sandbox *gosdk.SandboxResponse) statusView {
 	applyIsloTailscaleSandboxState(labels, status)
 	var tailscale *core.TailscaleMetadata
 	claim, claimOK, _ := resolveLeaseClaim(leaseID)
+	// The read can fall back to the sandbox name when the claimed id is not
+	// addressable, so the resource that answered is not guaranteed to be the one
+	// the claim owns. Surface that rather than publishing an id automation would
+	// key off in silence.
+	mismatched := false
+	if bound := isloClaimIdentity(claim).ID; bound != "" && bound != resourceID {
+		labels["islo_resource_id_mismatch"] = "true"
+		labels["islo_claimed_resource_id"] = bound
+		// Withhold the id entirely rather than attributing another resource's
+		// identity to this lease: the documented contract is that automation may
+		// key off providerResourceId, and the mismatch labels carry the detail.
+		mismatched = true
+		labels["tailscale_state"] = "unavailable"
+	}
 	if labels["tailscale"] == "true" || (claimOK && isloClaimTailscaleEnrolled(claim)) {
 		tailscaleState := labels["tailscale_state"]
 		if tailscaleState == "" {
@@ -880,17 +990,18 @@ func isloStatusView(leaseID string, sandbox *gosdk.SandboxResponse) statusView {
 		}
 	}
 	return statusView{
-		ID:         leaseID,
-		Slug:       labels["slug"],
-		Provider:   isloProvider,
-		TargetOS:   targetLinux,
-		State:      status,
-		ServerID:   name,
-		ServerType: image,
-		Network:    NetworkPublic,
-		Tailscale:  tailscale,
-		Ready:      isloStatusReady(status),
-		Labels:     labels,
+		ID:                 leaseID,
+		Slug:               labels["slug"],
+		Provider:           isloProvider,
+		TargetOS:           targetLinux,
+		State:              status,
+		ServerID:           name,
+		ProviderResourceID: isloReportedResourceID(mismatched, resourceID, claim.CloudImmutableID),
+		ServerType:         image,
+		Network:            NetworkPublic,
+		Tailscale:          tailscale,
+		Ready:              !mismatched && isloStatusReady(status),
+		Labels:             labels,
 	}
 }
 
@@ -1003,6 +1114,15 @@ func isloError(action string, err error) error {
 		return nil
 	}
 	return fmt.Errorf("islo %s: %w", action, err)
+}
+
+// warnf reports a non-fatal adapter problem. It tolerates a Runtime without a
+// stderr writer, which the lease-resolution helpers are constructed with.
+func (b *isloBackend) warnf(format string, args ...any) {
+	if b.rt.Stderr == nil {
+		return
+	}
+	fmt.Fprintf(b.rt.Stderr, format, args...)
 }
 
 func (b *isloBackend) now() time.Time {

@@ -38,6 +38,7 @@ func runCheckpointContainerReviewContract(t *testing.T, repo, binary string) {
 	}
 	for _, strategy := range []string{"", "auto", "image", "disk-snapshot"} {
 		t.Run("local container retirement strategy "+blank(strategy, "default"), func(t *testing.T) {
+			t.Parallel()
 			f := newCheckpointContainerFixture(t, repo, binary, docker)
 			args := []string{"checkpoint", "create", "--provider", "local-container", "--id", captureFixtureLease, "--checkpoint-id", captureFixtureCheckpoint, "--retire-source", "--mode", "native", "--wait=false", "--json"}
 			if strategy != "" {

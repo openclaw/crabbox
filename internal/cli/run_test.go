@@ -627,7 +627,7 @@ func (runEnvProfileTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "run-env-profile-test",
 		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}},
+		Targets:     []TargetSpec{{OS: targetLinux}, {OS: targetWindows, WindowsMode: windowsModeNormal}},
 		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync},
 		Coordinator: CoordinatorNever,
 	}
@@ -683,6 +683,14 @@ var runEnvProfileTestTerminalReleaseError bool
 var runEnvProfileTestAcquireHook func(AcquireRequest)
 var runEnvProfileTestAcquireLease func(AcquireRequest) (LeaseTarget, error)
 var runEnvProfileTestTouchHook func(TouchRequest) error
+var runEnvProfileTestEvidenceHook func(context.Context, RunFailureEvidenceRequest) (RunFailureEvidenceCollector, error)
+
+func (b runEnvProfileTestBackend) BeginRunFailureEvidence(ctx context.Context, req RunFailureEvidenceRequest) (RunFailureEvidenceCollector, error) {
+	if runEnvProfileTestEvidenceHook != nil {
+		return runEnvProfileTestEvidenceHook(ctx, req)
+	}
+	return nil, nil
+}
 
 func (b runEnvProfileTestBackend) Spec() ProviderSpec { return b.spec }
 func (b runEnvProfileTestBackend) Acquire(_ context.Context, req AcquireRequest) (LeaseTarget, error) {
@@ -3854,14 +3862,11 @@ exit 0
 			logText := string(logData)
 			previous := -1
 			for _, want := range []string{"check_artifact_file()", "tar -czf", "base64 <", "rm -f --", "RELEASE"} {
-				index := strings.Index(logText, want)
-				if index < 0 {
+				relative := strings.Index(logText[previous+1:], want)
+				if relative < 0 {
 					t.Fatalf("ssh log missing %q:\n%s", want, logText)
 				}
-				if index <= previous {
-					t.Fatalf("ssh log has %q out of order:\n%s", want, logText)
-				}
-				previous = index
+				previous += relative + 1
 			}
 		})
 	}

@@ -27,6 +27,7 @@ import (
 type isloAPI interface {
 	CreateSandbox(context.Context, *gosdk.CreateSandboxRequest) (*gosdk.SandboxResponse, error)
 	GetSandbox(context.Context, string) (*gosdk.SandboxResponse, error)
+	GetSandboxByID(context.Context, string) (*gosdk.SandboxResponse, error)
 	PauseSandbox(context.Context, string) (*gosdk.SandboxResponse, error)
 	ResumeSandbox(context.Context, string) (*gosdk.SandboxResponse, error)
 	ListSandboxes(context.Context) ([]*gosdk.SandboxResponse, error)
@@ -58,6 +59,10 @@ type isloSDKClient struct {
 
 const isloDefaultResponseHeaderTimeout = 30 * time.Second
 
+// isloDefaultBaseURL is the Islo control-plane host. It is the default endpoint
+// the SDK client and the claim scope are both built from.
+const isloDefaultBaseURL = "https://api.islo.dev"
+
 var isloCleanupTimeout = 15 * time.Second
 
 var newIsloClient = func(cfg Config, rt Runtime) (isloAPI, error) {
@@ -65,7 +70,7 @@ var newIsloClient = func(cfg Config, rt Runtime) (isloAPI, error) {
 	if apiKey == "" {
 		return nil, exit(2, "provider=islo requires ISLO_API_KEY")
 	}
-	baseURL := strings.TrimRight(blank(cfg.Islo.BaseURL, "https://api.islo.dev"), "/")
+	baseURL := strings.TrimRight(blank(cfg.Islo.BaseURL, isloDefaultBaseURL), "/")
 	httpClient := rt.HTTP
 	if httpClient == nil {
 		var err error
@@ -195,6 +200,18 @@ func (c *isloSDKClient) CreateSandbox(ctx context.Context, req *gosdk.CreateSand
 
 func (c *isloSDKClient) GetSandbox(ctx context.Context, name string) (*gosdk.SandboxResponse, error) {
 	sandbox, err := c.sdk.Sandboxes.GetSandbox(ctx, &gosdk.GetSandboxRequest{SandboxName: name})
+	if err != nil {
+		return nil, isloSanitizeRedirectError(err)
+	}
+	return sandbox, nil
+}
+
+// GetSandboxByID resolves a sandbox through `GET /sandboxes/-/by-id/{id}`.
+// Unlike the by-name lookup it keeps answering 200 after a delete, returning
+// status "deleted" with deleted_at set, so it is the only authoritative
+// tombstone the API offers for a specific resource generation.
+func (c *isloSDKClient) GetSandboxByID(ctx context.Context, id string) (*gosdk.SandboxResponse, error) {
+	sandbox, err := c.sdk.Sandboxes.GetSandboxByID(ctx, &gosdk.GetSandboxByIDRequest{ID: id})
 	if err != nil {
 		return nil, isloSanitizeRedirectError(err)
 	}

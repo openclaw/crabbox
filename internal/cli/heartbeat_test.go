@@ -89,6 +89,13 @@ func TestHeartbeatIdentifierSyntax(t *testing.T) {
 				if !strings.Contains(stdout.String(), "heartbeat lease="+test.wantID) {
 					t.Fatalf("heartbeat output=%q", stdout.String())
 				}
+				if backend.requests[0].IncludeDiagnostics {
+					t.Fatal("heartbeat requested presentation diagnostics")
+				}
+				data, _ := json.Marshal(backend.touches[0])
+				if strings.Contains(string(data), "diagnostic.memory.") {
+					t.Fatal("presentation diagnostics entered heartbeat Touch")
+				}
 				return
 			}
 
@@ -381,6 +388,7 @@ type heartbeatDirectBackend struct {
 	lease      LeaseTarget
 	configures int
 	resolves   int
+	requests   []ResolveRequest
 	touches    []TouchRequest
 	touchFn    func(TouchRequest) (Server, error)
 }
@@ -391,6 +399,7 @@ func (b *heartbeatDirectBackend) Acquire(context.Context, AcquireRequest) (Lease
 }
 func (b *heartbeatDirectBackend) Resolve(_ context.Context, req ResolveRequest) (LeaseTarget, error) {
 	b.resolves++
+	b.requests = append(b.requests, req)
 	if req.ID != b.lease.LeaseID && req.ID != serverSlug(b.lease.Server) {
 		return LeaseTarget{}, fmt.Errorf("lease %s not found", req.ID)
 	}

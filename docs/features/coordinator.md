@@ -246,10 +246,11 @@ conflict/definite error. Public GET is used only after that PUT confirmation,
 never to adopt an unverified fixed-ID record.
 
 Fixed checkpoint forks use `PUT /v1/leases/{canonical-id}/from-checkpoint` with
-the existing checkpoint ID and use claim fields. The first admission atomically
-reserves the fixed lease, its exact create attempt, and the checkpoint's
-provisioning fence. Its immutable intent also binds the checkpoint incarnation
-and provider artifact. Replays preserve that original binding and consume only
+the existing checkpoint ID and use claim fields. Admission records a cancellable
+fixed intent before remote source validation or preparation, without consuming
+the claim. Allocation atomically binds the winning claim, the lease, and the
+checkpoint's provisioning fence to that same private attempt. Its immutable
+intent also binds the checkpoint incarnation and provider artifact. Replays preserve that original binding and consume only
 an unused caller claim; they do not advance `lastUsedAt` again. An in-request
 retry may adopt its child after source deletion, but a fresh CLI invocation still
 requires a valid new checkpoint use claim. Older coordinators reject this route
@@ -411,8 +412,19 @@ canonical lease exists, its released state and durable cleanup claim are written
 under the same state lock before provider deletion, so ordinary maintenance can
 resume cleanup after a restart. It releases a reserved, provisioning, or
 retained canonical lease only when its private token, owner/org, and retained
-generation match; otherwise it fails closed. Fixed-ID `PUT` creates remain
-replay-owned and never use cancellation cleanup.
+generation match; otherwise it fails closed.
+
+Fixed-ID `PUT` creates record an owner/org/provider-bound intent before
+asynchronous preparation or capacity checks. They remain replay-owned, without
+a caller-supplied cancellation token. `POST /v1/leases/{id}/release` also
+cancels an admitted fixed intent that has not allocated a machine, including
+one rejected by a quota check. The cancellation survives coordinator restart
+and prevents a delayed or repeated create from allocating. Admission alone
+does not create a lease row or reserve usage. Unknown IDs still return 404;
+missing records from older coordinators do not prove cancellation or cleanup.
+Fixed admissions use version-2 attempt records: an older coordinator refuses
+to reuse these IDs, but only the upgraded coordinator can confirm cancellation
+before a lease row exists.
 
 **Release.** `POST /v1/leases/{id}/release` (body `{delete?}`, defaulting to
 `!keep`) deletes the cloud server when the lease is still active and sets state

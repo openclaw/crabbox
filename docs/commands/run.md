@@ -254,8 +254,10 @@ held through sync or fresh checkout, Actions hydration, the command, result and
 artifact collection, failure capture, and ready-pool scrub/return. Separate
 clients and `watch` iterations therefore cannot mutate or execute the same
 reused workspace concurrently. A contending client waits for a bounded interval
-and prints periodic progress. Newly acquired one-shot leases are already
-exclusive and bypass this owner.
+and prints periodic progress. Newly acquired exclusive one-shot leases bypass
+this owner on POSIX and WSL2 targets. Native Windows also uses the owner for
+fresh one-shot runs: its witness stages inherited SSH input into an ordinary
+redirected file stream before upload, sync, or user commands read it.
 
 Ownership is fenced with a random token and renewed while the lifecycle is
 active. If the local client disappears, Crabbox recovers an expired owner only
@@ -711,9 +713,10 @@ not reconstruct secrets or hidden local shell state. Short-circuit explanations 
 When an SSH backend supplies per-run memory
 exhaustion evidence, the summary and digest use
 `blocked_stage=resource_exhaustion resource_exhaustion=memory retry_likely=false`
-and recommend increasing the memory limit or reducing workload concurrency.
-Evidence read failures are warnings and do not replace the original command
-failure.
+and prefer the provider's bounded contextual hint. Without usable context,
+advice is to reduce memory demand and inspect active limits and runtime capacity
+before retrying. Exit 137 alone is not positive OOM evidence. Evidence read
+failures are warnings and do not replace the original command failure.
 
 Use `--timing-json` to emit a final JSON timing record with provider, lease ID,
 slug, run ID, machine type, repo path, remote workdir, lease acquisition,
@@ -721,6 +724,15 @@ bootstrap, sync phases, command phases, command duration, command-path total,
 end-to-end duration, exit code, normalized `runStatus`, optional `errorKind`,
 stop command, artifacts, and Actions run URL when available. Failed runs also
 include `blockedStage`, `resourceExhaustion`, and `retryLikely` when classifiable.
+Optional `failureEvidence` contains the provider's classification, sanitized
+`hint`, and bounded string-valued `details`. Invalid optional presentation fields
+do not erase valid OOM classification. The same snapshot is copied into local
+failure bundles and the deferred digest, so one-shot deletion does not lose it.
+For [Local Container](../providers/local-container.md#memory-failure-evidence),
+actual container settings, total runtime RAM, and swap are separate observations,
+not an exact effective or free-memory bound.
+App finalization emits timing after cleanup and the failure digest; the executable
+can subsequently append its existing exit diagnostic.
 After an automatic cleanup attempt, `leaseStopped` reports whether the release
 owner confirmed that lease-based recovery is no longer available. An accepted
 release alone does not set it to true. `leaseStopError` independently records a

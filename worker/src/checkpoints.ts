@@ -1262,7 +1262,7 @@ export async function bindCheckpointUseProvisioningInTransaction(
   const attempt = await transaction.get<CreateAttemptRecord>(attemptKey);
   if (
     !attempt ||
-    attempt.version !== 1 ||
+    (attempt.version !== 1 && attempt.version !== 2) ||
     attempt.requestedLeaseID !== leaseID ||
     attempt.token !== attemptID ||
     attempt.owner !== principal.owner ||
@@ -1382,7 +1382,7 @@ export async function resolveRejectedCheckpointProvisioning(
       claim.owner !== principal.owner ||
       !sameOrgIdentityKey(claim.org, principal.org) ||
       !attempt ||
-      attempt.version !== 1 ||
+      (attempt.version !== 1 && attempt.version !== 2) ||
       attempt.requestedLeaseID !== leaseID ||
       attempt.token !== attemptID ||
       attempt.owner !== principal.owner ||
@@ -1499,7 +1499,7 @@ async function completedCheckpointUse(
         ["deleting", "delete-pending", "deleted"].includes(checkpoint.state)
       )) ||
     !attempt ||
-    attempt.version !== 1 ||
+    (attempt.version !== 1 && attempt.version !== 2) ||
     attempt.requestedLeaseID !== completion.requestedLeaseID ||
     attempt.token !== attemptID ||
     attempt.state === "canceled" ||

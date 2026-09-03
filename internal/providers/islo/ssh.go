@@ -24,7 +24,7 @@ func (b *isloBackend) Resolve(ctx context.Context, req core.ResolveRequest) (cor
 		return core.LeaseTarget{}, err
 	}
 	if !req.StatusOnly {
-		if err := requireIsloLeaseClaim(leaseID, "SSH reuse"); err != nil {
+		if _, err := requireIsloLeaseClaim(leaseID, "SSH reuse"); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}

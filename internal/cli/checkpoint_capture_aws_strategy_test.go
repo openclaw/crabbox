@@ -20,6 +20,7 @@ import (
 func runCheckpointAWSStrategyContract(t *testing.T, repo, binary string) {
 	for _, strategy := range []string{"", "auto", "image", "disk-snapshot"} {
 		t.Run("direct AWS Linux retirement strategy "+blank(strategy, "default"), func(t *testing.T) {
+			t.Parallel()
 			f := newCheckpointCaptureFixture(t, repo, binary)
 			const instanceID = "i-0123456789abcdef0"
 			const imageID = "ami-0123456789abcdef0"

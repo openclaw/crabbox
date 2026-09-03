@@ -65,6 +65,8 @@ type inspectContainer struct {
 	Config          inspectConfig     `json:"Config"`
 	State           inspectState      `json:"State"`
 	NetworkSettings inspectNetworking `json:"NetworkSettings"`
+	// Optional settings must not make identity or OOM-state inspection fail.
+	HostConfig json.RawMessage `json:"HostConfig"`
 }
 
 type inspectConfig struct {
@@ -123,25 +125,26 @@ func (b *backend) BeginRunFailureEvidence(ctx context.Context, req core.RunFailu
 	if containerID == "" {
 		return nil, core.Exit(2, "local-container failed-run evidence requires a container id")
 	}
-	baseline, err := b.readOOMKillCount(ctx, containerID)
+	runtime := b.memoryRuntime()
+	baseline, err := readOOMKillCount(ctx, runtime.run, containerID)
 	if err != nil {
 		return nil, err
 	}
-	baselineContainer, err := b.inspectContainer(ctx, containerID)
+	baselineContainer, err := inspectRuntimeContainer(ctx, runtime.run, containerID)
 	if err != nil {
 		return nil, err
 	}
 	return func(ctx context.Context) (core.RunFailureEvidence, error) {
-		current, err := b.readOOMKillCount(ctx, containerID)
+		current, err := readOOMKillCount(ctx, runtime.run, containerID)
 		if err == nil && current > baseline {
-			return core.RunFailureEvidence{ResourceExhaustion: core.ResourceExhaustionMemory}, nil
+			return runtime.memoryFailureEvidence(ctx, containerID, baselineContainer), nil
 		}
 		if err == nil {
 			return core.RunFailureEvidence{}, nil
 		}
-		container, inspectErr := b.inspectContainer(ctx, containerID)
+		container, inspectErr := inspectRuntimeContainer(ctx, runtime.run, containerID)
 		if inspectErr == nil && !baselineContainer.State.OOMKilled && container.State.OOMKilled {
-			return core.RunFailureEvidence{ResourceExhaustion: core.ResourceExhaustionMemory}, nil
+			return runtime.memoryFailureEvidence(ctx, containerID, baselineContainer), nil
 		}
 		if inspectErr != nil {
 			return core.RunFailureEvidence{}, fmt.Errorf("%v; inspect container OOM state: %w", err, inspectErr)
@@ -151,9 +154,13 @@ func (b *backend) BeginRunFailureEvidence(ctx context.Context, req core.RunFailu
 }
 
 func (b *backend) readOOMKillCount(ctx context.Context, containerID string) (uint64, error) {
+	return readOOMKillCount(ctx, b.memoryRuntime().run, containerID)
+}
+
+func readOOMKillCount(ctx context.Context, run containerObservationCommand, containerID string) (uint64, error) {
 	var failures []string
 	for _, cgroupPath := range cgroupOOMCounterPaths {
-		result, err := b.docker(ctx, []string{"exec", containerID, "cat", cgroupPath}, nil, nil)
+		result, err := run(ctx, []string{"exec", containerID, "cat", cgroupPath})
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", cgroupPath, err))
 			continue
@@ -856,6 +863,18 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		}
 	}
 	lease.Server.Labels = publicLocalContainerClaimLabels(lease.Server.Labels)
+	if req.IncludeDiagnostics && req.IsReadOnlyStatus() && !req.ReadyProbe {
+		// All ownership/claim merges are complete. Enrich only the returned copy.
+		lease.Server.Labels = cloneLabels(lease.Server.Labels)
+		for key := range lease.Server.Labels {
+			if strings.HasPrefix(key, memoryDiagnosticPrefix) {
+				delete(lease.Server.Labels, key)
+			}
+		}
+		for key, value := range b.memoryRuntime().memoryDetails(ctx, container.ID, container, "current") {
+			lease.Server.Labels[memoryDiagnosticPrefix+key] = value
+		}
+	}
 	return lease, nil
 }
 
@@ -2108,7 +2127,11 @@ func (b *backend) listContainers(ctx context.Context) ([]inspectContainer, error
 }
 
 func (b *backend) inspectContainer(ctx context.Context, id string) (inspectContainer, error) {
-	result, err := b.docker(ctx, []string{"inspect", id}, nil, nil)
+	return inspectRuntimeContainer(ctx, b.memoryRuntime().run, id)
+}
+
+func inspectRuntimeContainer(ctx context.Context, run containerObservationCommand, id string) (inspectContainer, error) {
+	result, err := run(ctx, []string{"inspect", id})
 	if err != nil {
 		return inspectContainer{}, commandError("container inspect", result, err)
 	}
@@ -2468,6 +2491,12 @@ func (b *backend) docker(ctx context.Context, args []string, stdout, stderr io.W
 }
 
 func (b *backend) containerRuntime(ctx context.Context, cfg core.Config, args []string, stdout, stderr io.Writer) (core.LocalCommandResult, error) {
+	req := containerRuntimeRequest(cfg, args)
+	req.Stdout, req.Stderr = stdout, stderr
+	return b.rt.Exec.Run(ctx, req)
+}
+
+func containerRuntimeRequest(cfg core.Config, args []string) core.LocalCommandRequest {
 	var env []string
 	if metadata := cfg.LocalContainer.CheckpointMetadata; len(metadata) != 0 {
 		scope := checkpointScopeFromMetadata(metadata, cfg.LocalContainer.Runtime)
@@ -2478,13 +2507,11 @@ func (b *backend) containerRuntime(ctx context.Context, cfg core.Config, args []
 		}
 		env = checkpointEnvForScope(scope)
 	}
-	return b.rt.Exec.Run(ctx, core.LocalCommandRequest{
-		Name:   cfg.LocalContainer.Runtime,
-		Args:   args,
-		Env:    env,
-		Stdout: stdout,
-		Stderr: stderr,
-	})
+	return core.LocalCommandRequest{
+		Name: cfg.LocalContainer.Runtime,
+		Args: args,
+		Env:  env,
+	}
 }
 
 func (b *backend) assertRequestedArchitecture(ctx context.Context, cfg core.Config) (string, error) {
