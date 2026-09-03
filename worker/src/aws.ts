@@ -310,6 +310,12 @@ class QualificationAWSFetchClient implements AWSFetchClient {
   }
 }
 
+class RejectedQualificationFetchClient implements AWSFetchClient {
+  async fetch(): Promise<Response> {
+    throw new Error("AWS qualification transport does not allow SSM actions");
+  }
+}
+
 function qualificationRequest(
   service: AWSQualificationService,
   region: string,
@@ -688,7 +694,7 @@ export class EC2SpotClient {
         this.region,
       );
       this.stsClient = new QualificationAWSFetchClient(qualification, "sts", this.region);
-      this.ssmClient = new QualificationAWSFetchClient(qualification, "ssm", this.region);
+      this.ssmClient = new RejectedQualificationFetchClient();
     } else {
       const credentials = awsCredentialProvider(env);
       this.aws = new RefreshingAWSFetchClient(credentials, "ec2", this.region);

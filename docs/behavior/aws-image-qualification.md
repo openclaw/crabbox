@@ -11,14 +11,18 @@ It is not a general AWS proxy and is not enabled by default.
 
 There are three Workers:
 
-1. A protected control plane enrolls and finalizes runs through a service binding.
-2. The exact candidate Worker has only `CRABBOX_AWS_QUALIFICATION_TRANSPORT`, bound
-   to the authority's `AWSQualificationTransport` entrypoint.
+1. A protected binding selects the named `AWSQualificationController` entrypoint
+   to enroll and finalize runs.
+2. The exact candidate Worker has only `CRABBOX_AWS_QUALIFICATION_TRANSPORT`,
+   bound to the authority's default transport entrypoint.
 3. The non-public authority Worker holds the sandbox AWS credentials and signs
    admitted calls.
 
 The candidate binding has immutable `ctx.props` containing `runId`, `owner`,
-`candidateSha`, and `expiresAt`. The authority requires an enrolled exact match.
+`candidateSha`, `deploymentHash`, and `expiresAt`. The controller binding carries
+the same deployment hash. Enrollment stores the complete fixed policy and its
+hash; candidate operations fail closed if the deployed policy later drifts.
+The authority requires an enrolled exact match.
 The absolute expiry must be in the next 120 minutes. A transport failure retries
 the same operation ID once and then fails closed; it never falls back to raw
 credentials, even if stray credential variables are present.
@@ -42,9 +46,17 @@ CRABBOX_AWS_QUALIFICATION_ROOT_GB
 
 The account, Region, subnet, preprovisioned security group, and base AMI are
 fixed by the authority deployment. `CRABBOX_AWS_QUALIFICATION_ROOT_GB` must be
-8-20. Launches are one on-demand `t3.small` or `t3a.small`, with an encrypted
+8-20. A run may launch at most two sequential on-demand `t3.small` or
+`t3a.small` instances, with only one active at a time. This permits the source
+and promoted-image smoke phases while bounding compute to two instance-hours.
+Each launch has an encrypted
 `gp3` root volume, no instance profile, IMDSv2 required, and authority-injected
 owner/run/SHA/expiry/operation tags.
+
+The run may own one physical key pair and one active AMI with at most one child
+snapshot. Candidate traffic is capped at 64 operations, eight unresolved
+intents, 64 KiB per request and response, four levels of nesting, and the
+120-minute expiry. Cleanup and inventory calls do not consume candidate capacity.
 
 The preprovisioned security group is read-only to qualification runs. Its ingress
 must already admit the trusted smoke executor. The authority neither creates nor
@@ -65,7 +77,6 @@ Do not grant `iam:PassRole`. The authority role's allow surface is limited to:
 sts:GetCallerIdentity
 servicequotas:GetServiceQuota
 ec2:CreateImage
-ec2:CreateSnapshot
 ec2:CreateTags
 ec2:DeleteKeyPair
 ec2:DeleteSnapshot
@@ -95,18 +106,20 @@ Deploy the authority from
 `worker/wrangler.aws-qualification-authority.jsonc`. That config has no route,
 workers.dev URL, preview URL, or cron. Supply AWS credentials only to this Worker.
 
-Before deploying a candidate, call the protected control-plane `enroll` RPC. Add
-a candidate service binding whose props exactly match the enrolled identity:
+Before deploying a candidate, bind the protected caller to
+`AWSQualificationController` with the reviewed deployment hash and call
+`enroll`. Add a candidate service binding whose props exactly match the enrolled
+identity:
 
 ```json
 {
   "binding": "CRABBOX_AWS_QUALIFICATION_TRANSPORT",
   "service": "crabbox-aws-qualification-authority",
-  "entrypoint": "AWSQualificationTransport",
   "props": {
     "runId": "image-qualification-<run>",
     "owner": "<reviewed-owner>",
     "candidateSha": "<40-hex-same-repo-sha>",
+    "deploymentHash": "<64-hex-candidate-deployment-hash>",
     "expiresAt": "<absolute-iso8601-within-120m>"
   }
 }
@@ -123,12 +136,17 @@ workers.dev, preview URLs, and cron.
 Each run has one Durable Object. Before a mutation, it persists the operation ID,
 canonical request hash, and pending intent. A completed receipt is replayed only
 for the same hash. `RunInstances` receives an authority-derived deterministic
-`ClientToken`. Lost image or snapshot responses reconcile through
-authority-injected operation tags.
+`ClientToken` derived from the run and operation IDs. Lost image responses
+reconcile through authority-injected operation tags. Imported key names are
+authority-generated; ownership is recorded only after ID, public key, and run
+tags are read back.
 
 The ledger learns only IDs created by, or discovered beneath, the registered
 run. Candidate reads and mutations are restricted to those IDs, except the fixed
-base AMI and security group. `finalize` deregisters images, deletes snapshots,
+base AMI and security group. Lifecycle deletes remove current ledger ownership
+instead of accumulating stale IDs. Before and after teardown, a run-tag inventory
+finds resources that were created before an ambiguous response. `finalize`
+deregisters images, deletes snapshots,
 terminates instances, deletes imported key pairs, and verifies zero run-owned
 instance/volume/key-pair/image/snapshot residue. The expiry alarm runs the same
 cleanup and retries incomplete teardown.
