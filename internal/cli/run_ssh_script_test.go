@@ -320,13 +320,28 @@ func TestHybridSSHScriptCancellationAndSameLeaseReplay(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 	replayMarker := filepath.Join(dir, "replayed")
-	replayCtx, stopReplay := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	replayCtx, stopReplay := context.WithCancel(t.Context())
 	defer stopReplay()
-	err = (App{Stdout: &stdout, Stderr: &stderr, Stdin: strings.NewReader("touch " + shellQuote(replayMarker) + "\n")}).runCommand(replayCtx, []string{
+	refusal := ""
+	replayApp := App{Stdout: &stdout, Stderr: &stderr, Stdin: strings.NewReader("touch " + shellQuote(replayMarker) + "\n")}
+	replayApp.workspaceOwnerAcquirer = func(ctx context.Context, target SSHTarget, leaseID string, stderr io.Writer) (*workspaceOwner, error) {
+		transport := sshWorkspaceOwnerTransport{target: target}
+		observed := workspaceOwnerTransportFunc(func(ctx context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+			response, err := transport.Do(ctx, req)
+			if err == nil && req.Action == workspaceOwnerAcquire && (response == "BUSY" || response == "CHILD") {
+				// Readiness has no fixed latency; cancel only after real owner refusal.
+				refusal = response
+				stopReplay()
+			}
+			return response, err
+		})
+		return acquireWorkspaceOwnerWithTransport(ctx, target, leaseID, stderr, observed, workspaceOwnerWaitTimeout, workspaceOwnerTTL, workspaceOwnerRenewInterval)
+	}
+	err = replayApp.runCommand(replayCtx, []string{
 		"--provider", p.Name(), "--id", b.lease.LeaseID, "--no-sync", "--no-hydrate", "--keep", "--script-stdin",
 	})
-	if err == nil || !strings.Contains(err.Error(), "workspace owner") || b.joined != 2 || len(b.requests) != 0 {
-		t.Fatalf("ambiguous same-lease replay=%v joins=%d\nstdout=%s\nstderr=%s", err, b.joined, stdout.String(), stderr.String())
+	if !errors.Is(err, context.Canceled) || (refusal != "BUSY" && refusal != "CHILD") || b.joined != 2 || len(b.requests) != 0 {
+		t.Fatalf("ambiguous same-lease replay=%v refusal=%q joins=%d\nstdout=%s\nstderr=%s", err, refusal, b.joined, stdout.String(), stderr.String())
 	}
 	if _, err := os.Stat(replayMarker); !os.IsNotExist(err) {
 		t.Fatal("replayed while the earlier workspace witness was unsettled")
