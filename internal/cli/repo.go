@@ -624,7 +624,7 @@ func syncGitCoherencePlan(cfg Config, repo Repo) (gitCoherencePlan, bool) {
 	}
 	target := gitOutput(repo.Root, "rev-parse", "--verify", repo.Head+"^{commit}")
 	tree := gitOutput(repo.Root, "rev-parse", "--verify", repo.Head+"^{tree}")
-	branch := originBranchForTarget(repo.Root, repo.BaseRef, target)
+	branch := originBranchForTarget(repo.Root, firstNonBlank(cfg.Sync.BaseRef, repo.BaseRef), target)
 	plan := gitCoherencePlan{RemoteURL: normalizeGitRemoteURL(repo.RemoteURL), Target: target, Branch: branch}
 	if target == "" || target != repo.Head || branch == "" {
 		return gitCoherencePlan{}, false

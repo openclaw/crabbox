@@ -233,7 +233,8 @@ Git seeding (`sync.gitSeed`, default on) clones or fetches the base tree on the
 runner before rsync, so only your diff travels over the wire. It activates only
 when the local `HEAD` commit is reachable from a remote ref.
 Among local origin tracking branches that contain the selected commit, Crabbox
-prefers the configured base branch, then origin's symbolic default branch, then
+prefers the explicit `sync.baseRef` (or the inferred repository base when unset),
+then origin's symbolic default branch, then
 the first eligible branch in ref-name order. A preferred branch may have newer
 commits; the selected commit and tree remain unchanged. Planning does not contact
 origin or prune tracking refs, so a local candidate may still be stale. On the
