@@ -26,8 +26,11 @@ Log in with the Daytona CLI to populate a profile:
 daytona login
 ```
 
-Crabbox reads the active profile's API key and active organization ID from the
-Daytona CLI config when no explicit token is provided.
+Crabbox reads the active profile's API key or unexpired OAuth access token and
+active organization ID when no explicit token is provided. `DAYTONA_CONFIG_DIR`
+selects the CLI config directory exclusively when set. The Daytona CLI owns
+token refresh and profile writes; Crabbox rejects expired or invalid token
+expiry with a `daytona login` reauthentication instruction.
 
 To set credentials directly, provide an API key:
 
@@ -42,7 +45,8 @@ export DAYTONA_JWT_TOKEN=...
 export DAYTONA_ORGANIZATION_ID=...
 ```
 
-`DAYTONA_ORGANIZATION_ID` is required whenever JWT auth is used. If no API key,
+`DAYTONA_ORGANIZATION_ID` is required for explicit JWT auth; CLI OAuth uses the
+profile's active organization. If no API key,
 JWT token, or authenticated CLI profile is found, lease operations fail with a
 configuration error.
 

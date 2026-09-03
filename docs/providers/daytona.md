@@ -107,8 +107,16 @@ Crabbox reads the active Daytona CLI profile when no Daytona auth values are set
 in the environment or config:
 
 ```sh
-daytona login --api-key ...
+daytona login
 ```
+
+Both browser OAuth login and `daytona login --api-key ...` are supported.
+Crabbox reads `config.json` from `DAYTONA_CONFIG_DIR` when set, without falling
+back to another profile store. Otherwise it searches the normal Daytona CLI
+config locations. OAuth uses the active profile's access token and organization;
+expired or missing token expiry is rejected before a provider request. Run
+`daytona login` to reauthenticate. The Daytona CLI owns token refresh and profile
+writes; Crabbox never uses the saved refresh token.
 
 You can also supply explicit API-key auth:
 
@@ -123,7 +131,8 @@ export DAYTONA_JWT_TOKEN=...
 export DAYTONA_ORGANIZATION_ID=...
 ```
 
-`DAYTONA_ORGANIZATION_ID` is required with JWT auth. Explicit environment values
+`DAYTONA_ORGANIZATION_ID` is required with explicit JWT auth; a CLI OAuth profile
+supplies its active organization. Explicit environment values
 (or Crabbox config values) override the Daytona CLI profile.
 
 Each auth variable also has a `CRABBOX_`-prefixed form that takes precedence over

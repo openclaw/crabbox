@@ -162,8 +162,12 @@ type daytonaCLIProfile struct {
 	Name                 string `json:"name"`
 	ActiveOrganizationID string `json:"activeOrganizationId"`
 	API                  struct {
-		URL string `json:"url"`
-		Key string `json:"key"`
+		URL   string `json:"url"`
+		Key   string `json:"key"`
+		Token *struct {
+			AccessToken string `json:"accessToken"`
+			ExpiresAt   string `json:"expiresAt"`
+		} `json:"token"`
 	} `json:"api"`
 }
 
@@ -189,6 +193,10 @@ func daytonaCLIAuthConfig() (daytonaAuth, error) {
 }
 
 func daytonaCLIConfigPaths() []string {
+	if dir := os.Getenv("DAYTONA_CONFIG_DIR"); dir != "" {
+		// The CLI override selects one profile store, never a fallback account.
+		return []string{filepath.Join(dir, "config.json")}
+	}
 	var candidates []string
 	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
 		candidates = append(candidates,
@@ -239,11 +247,21 @@ func parseDaytonaCLIAuthConfig(data []byte) (daytonaAuth, error) {
 	if selected == nil {
 		return daytonaAuth{}, nil
 	}
-	return daytonaAuth{
+	auth := daytonaAuth{
 		APIKey:         strings.TrimSpace(selected.API.Key),
 		OrganizationID: strings.TrimSpace(selected.ActiveOrganizationID),
 		APIURL:         strings.TrimSpace(selected.API.URL),
-	}, nil
+	}
+	if auth.APIKey == "" && selected.API.Token != nil {
+		token := selected.API.Token
+		expiresAt, err := time.Parse(time.RFC3339, token.ExpiresAt)
+		if err != nil || !time.Now().Before(expiresAt) {
+			return daytonaAuth{}, fmt.Errorf("daytona CLI OAuth token is expired or has no valid expiry; run 'daytona login' to reauthenticate")
+		}
+		// Refresh and profile writes belong to the Daytona CLI, not this reader.
+		auth.JWTToken = strings.TrimSpace(token.AccessToken)
+	}
+	return auth, nil
 }
 
 func mergeDaytonaCLIAuth(auth, cliAuth daytonaAuth) daytonaAuth {
