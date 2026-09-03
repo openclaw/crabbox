@@ -113,6 +113,13 @@ temporary FIFO, without a disk log. After each attempt, Crabbox forwards up to
 512 bytes; overflow, incomplete capture, or output errors disable this recovery.
 Capture ends when the foreground attempt exits, even if a persistent master remains.
 
+Native Windows framed stdin transfers use asynchronous reads on Win32 OpenSSH's
+pipe handle. They read the declared byte count before running a staged script;
+short input or a read failure aborts the transfer. Empty frames do not initialize
+stdin, and the reader preserves following bytes without closing the process-owned
+handle. SSH identity, host-key checks, multiplexing, and ambiguous-disconnect
+retry rules are unchanged.
+
 ## What the broker sees
 
 In brokered mode the CLI sends only the public key to the coordinator; the

@@ -186,6 +186,8 @@ jobs:
         shell: pwsh
         run: |
           $required = @(
+            'TestWindowsNativeStdinRuntime',
+            'TestWindowsNativeStdinCancellation',
             'TestWindowsSSHStdinReaderBehavior',
             'TestWindowsWitnessRedirectedStdinUploadBehavior',
             'TestWSLStageLauncherVerifiesAndConsumesReadyFile',

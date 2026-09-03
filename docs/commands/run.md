@@ -266,6 +266,12 @@ renewal, release, token, or child state fails closed instead of risking a
 concurrent checkout. POSIX, WSL2, and native Windows targets implement the same
 protocol; the small sync-finalization lock remains nested inside it.
 
+Native Windows stages owner scripts and witnessed command input with exact byte
+counts and asynchronous pipe reads. Empty frames complete without initializing
+stdin; nonempty frames leave any following bytes available. Incomplete input
+fails before the staged script or command runs. A transport failure during
+renewal still fails closed.
+
 Use `--full-resync` (alias `--fresh-sync`) when a warm lease smells stale:
 Crabbox deletes the remote workdir, skips the fingerprint fast path, reseeds Git
 when possible, and uploads the checkout from scratch. Use `--checksum` for a

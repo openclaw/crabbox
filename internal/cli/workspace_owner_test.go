@@ -501,7 +501,7 @@ func TestWorkspaceOwnerProtocolGeneration(t *testing.T) {
 	}
 	windowsInputSize := int64(len("input"))
 	windowsInputWitness := remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output ok", &windowsInputSize)
-	for _, want := range []string{"$remaining = [Int64]5", "$stdin.Read($buffer, 0, $readSize)", "-RedirectStandardInput $inputPath", "[IO.FileShare]::None"} {
+	for _, want := range []string{"$remaining = [Int64]5", "$stdin.ReadAsync($buffer, 0, $readSize).GetAwaiter().GetResult()", "-RedirectStandardInput $inputPath", "[IO.FileShare]::None"} {
 		if !strings.Contains(windowsInputWitness, want) {
 			t.Fatalf("Windows input witness missing %q:\n%s", want, windowsInputWitness)
 		}
@@ -517,6 +517,7 @@ func TestWorkspaceOwnerNativeWindowsCommandLengthBaseline(t *testing.T) {
 	commands := map[string]string{
 		"owner acquire":       acquire,
 		"large witness stage": remoteWorkspaceOwnerWindowsStageWitnessCommand(key, token, name, 20_000),
+		"maximum frame size":  remoteWorkspaceOwnerWindowsStageWitnessCommand(key, token, name, 1<<63-4),
 		"large witness run":   remoteWorkspaceOwnerWindowsRunWitnessCommand(name),
 		"witness cleanup":     remoteWorkspaceOwnerWindowsCleanupWitnessCommand(name),
 		"background witness":  remoteWorkspaceOwnerWindowsStartBackgroundWitnessCommand(name),
@@ -1344,7 +1345,7 @@ func TestWorkspaceOwnerNativeWindowsWitnessStagesRawScriptAndPreservesInput(t *t
 
 	stageCommand, stagedScript := readWorkspaceOwnerSSHCall(t, dir, 1)
 	stage := decodePowerShellCommand(t, stageCommand)
-	for _, want := range []string{"[IO.FileMode]::CreateNew", "[IO.FileShare]::None", "$stdin.Read($buffer, 0, $readSize)", "staged workspace witness length is ambiguous", owner.key, owner.token} {
+	for _, want := range []string{"[IO.FileMode]::CreateNew", "[IO.FileShare]::None", "$stdin.ReadAsync($buffer, 0, $readSize).GetAwaiter().GetResult()", "staged workspace witness length is ambiguous", owner.key, owner.token} {
 		if !strings.Contains(stage, want) {
 			t.Fatalf("stage command missing %q", want)
 		}
