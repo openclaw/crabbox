@@ -128,7 +128,7 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     path[2] &&
     ((method === "POST" &&
       path.length === 4 &&
-      (path[3] === "promote" || path[3] === "promote-catalog")) ||
+      (path[3] === "promote" || path[3] === "promote-cas" || path[3] === "promote-catalog")) ||
       (method === "DELETE" &&
         (path.length === 3 ||
           (path.length === 4 && (path[3] === "promote-catalog" || path[3] === "promote")))))

@@ -378,11 +378,23 @@ type CoordinatorImage struct {
 	ServerType           string                           `json:"serverType,omitempty"`
 	Architecture         string                           `json:"architecture,omitempty"`
 	PromotedAt           string                           `json:"promotedAt,omitempty"`
+	Revision             string                           `json:"revision,omitempty"`
 	FastSnapshotRestores []CoordinatorFastSnapshotRestore `json:"fastSnapshotRestores,omitempty"`
 	Capabilities         *imageCapabilities               `json:"capabilities,omitempty"`
 	CatalogOnly          bool                             `json:"catalogOnly,omitempty"`
 	VariantSelectors     *imageVariantSelectors           `json:"variantSelectors,omitempty"`
 	managedCheckpoint    *coordinatorCheckpoint
+}
+
+type CoordinatorImageDefaultState struct {
+	State    string `json:"state"`
+	ImageID  string `json:"imageId,omitempty"`
+	Revision string `json:"revision,omitempty"`
+}
+
+type CoordinatorImagePromotionResult struct {
+	Image    *CoordinatorImage            `json:"image,omitempty"`
+	Previous CoordinatorImageDefaultState `json:"previous"`
 }
 
 type CoordinatorFastSnapshotRestore struct {
@@ -2102,6 +2114,25 @@ func (c *CoordinatorClient) PromoteImage(ctx context.Context, imageID string, re
 		}
 	}
 	return res.Image, nil
+}
+
+func (c *CoordinatorClient) PromoteImageCAS(ctx context.Context, imageID string, expected CoordinatorImageDefaultState, clear, retireExpectedCatalog bool, refs ...CoordinatorImageRef) (CoordinatorImagePromotionResult, error) {
+	var res CoordinatorImagePromotionResult
+	req := map[string]any{"expectedCurrent": expected}
+	if clear {
+		req["clearDefault"] = true
+	}
+	if retireExpectedCatalog {
+		req["retireExpectedCatalog"] = true
+	}
+	err := c.do(ctx, http.MethodPost, imagePath(imageID, "promote-cas", refs...), req, &res)
+	if isCoordinatorNotFound(err) {
+		return res, fmt.Errorf("coordinator does not support transactional image promotion; upgrade the coordinator before publishing images (%w)", err)
+	}
+	if err == nil && (res.Previous.State == "" || (!clear && res.Image == nil)) {
+		return res, fmt.Errorf("coordinator did not return a transactional image promotion receipt")
+	}
+	return res, err
 }
 
 func (c *CoordinatorClient) FastSnapshotRestoreStatus(ctx context.Context, imageID string, refs ...CoordinatorImageRef) (CoordinatorImage, error) {

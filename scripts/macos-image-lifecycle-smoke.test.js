@@ -169,7 +169,18 @@ case "$1" in
     if [[ "$2" == "create" ]]; then
       printf '{"id":"ami-mock"}\\n'
     elif [[ "$2" == "promote" ]]; then
-      printf '{"id":"ami-mock","target":"macos","region":"eu-west-1"}\\n'
+      if [[ " $* " == *" --expected-current-image capture"* ]]; then
+        if [[ "\${CRABBOX_FAKE_PREVIOUS_PRESENT:-0}" == "1" ]]; then
+          printf '{"image":{"id":"ami-mock","target":"macos","region":"eu-west-1","revision":"rev-new"},"previous":{"state":"present","imageId":"ami-previous","revision":"rev-old"}}\\n'
+        else
+          printf '{"image":{"id":"ami-mock","target":"macos","region":"eu-west-1","revision":"rev-new"},"previous":{"state":"absent"}}\\n'
+        fi
+      elif [[ "\${CRABBOX_FAKE_ROLLBACK_FAIL:-0}" == "1" ]]; then
+        printf 'coordinator: http 409: image default changed\\n' >&2
+        exit 19
+      else
+        printf '{"previous":{"state":"present","imageId":"ami-mock","revision":"rev-new"}}\\n'
+      fi
     fi
     ;;
   checkpoint)
@@ -285,6 +296,12 @@ async function assertSummaryFileContains(artifactRoot, value, expected) {
 function assertSummaryOmitsArtifactRoot(summary, artifactRoot) {
   assert.equal(JSON.stringify(summary).includes(artifactRoot), false);
 }
+
+test("macOS lifecycle smoke arms rollback before the CAS promotion request", async () => {
+  const source = await readFile(lifecycleScript, "utf8");
+  assert.match(source, /trap 'exit 130' INT\ntrap 'exit 143' TERM/);
+  assert.match(source, /rollback_pending=1\nrun_tee "\$image_promote_log"/);
+});
 
 test("macOS lifecycle smoke reports a missing coordinator mac-host endpoint before paid work", async () => {
   const run = await setupRun();
@@ -648,6 +665,63 @@ test("macOS lifecycle smoke preserves full mock lifecycle evidence", async () =>
   assert.match(fakeLog, /^checkpoint delete chk_macos$/m);
   assert.match(fakeLog, /^admin hosts quota --provider aws --target macos --region eu-west-1 --type mac2\.metal --json$/m);
   assert.match(fakeLog, /^admin hosts release h-mock --provider aws --target macos --region eu-west-1 --force$/m);
+});
+
+test("macOS lifecycle smoke clears a new default after promoted warmup failure", async () => {
+  const run = await setupRun();
+  const result = await runLifecycle({
+    CRABBOX_BIN: run.fake,
+    CRABBOX_FAKE_LOG: run.fakeLog,
+    CRABBOX_FAKE_STATE: run.fakeState,
+    CRABBOX_FAKE_NO_HOST: "1",
+    CRABBOX_MACOS_ALLOCATE: "1",
+    CRABBOX_MACOS_PROMOTE: "1",
+    CRABBOX_FAKE_WARMUP_FAIL_AT: "3",
+    CRABBOX_MACOS_ARTIFACT_DIR: run.artifacts,
+    CRABBOX_MACOS_IMAGE_NAME: "rollback",
+    CRABBOX_MACOS_WEBVNC_START_GRACE: "0s",
+  });
+
+  assert.equal(result.code, 42, result.stdout + result.stderr);
+  assert.match(result.stderr, /restored previous default image=none/);
+  const fakeLog = await readFile(run.fakeLog, "utf8");
+  assert.match(
+    fakeLog,
+    /^image promote none --target macos --region eu-west-1 --type mac2\.metal --json --expected-current-image ami-mock --expected-current-revision rev-new --retire-expected-catalog$/m,
+  );
+  const summary = await readJSON(path.join(run.artifacts, "summary.json"));
+  assert.equal(summary.result, "failed");
+  assert.equal(summary.phase, "image-rollback");
+  await assertSummaryFileContains(run.artifacts, summary.evidence.imageRollback, /"previous"/);
+});
+
+test("macOS lifecycle smoke preserves the original failure when restoring a prior default is rejected", async () => {
+  const run = await setupRun();
+  const result = await runLifecycle({
+    CRABBOX_BIN: run.fake,
+    CRABBOX_FAKE_LOG: run.fakeLog,
+    CRABBOX_FAKE_STATE: run.fakeState,
+    CRABBOX_FAKE_NO_HOST: "1",
+    CRABBOX_MACOS_ALLOCATE: "1",
+    CRABBOX_MACOS_PROMOTE: "1",
+    CRABBOX_FAKE_PREVIOUS_PRESENT: "1",
+    CRABBOX_FAKE_ROLLBACK_FAIL: "1",
+    CRABBOX_FAKE_WARMUP_FAIL_AT: "3",
+    CRABBOX_MACOS_ARTIFACT_DIR: run.artifacts,
+    CRABBOX_MACOS_IMAGE_NAME: "rollback-rejected",
+    CRABBOX_MACOS_WEBVNC_START_GRACE: "0s",
+  });
+
+  assert.equal(result.code, 42, result.stdout + result.stderr);
+  assert.match(result.stderr, /CAS rollback failed or was rejected; a newer default was not overwritten/);
+  const fakeLog = await readFile(run.fakeLog, "utf8");
+  assert.match(
+    fakeLog,
+    /^image promote ami-previous --target macos --region eu-west-1 --type mac2\.metal --json --expected-current-image ami-mock --expected-current-revision rev-new --retire-expected-catalog$/m,
+  );
+  const summary = await readJSON(path.join(run.artifacts, "summary.json"));
+  assert.equal(summary.blocker.reason, "post-promotion failure and CAS rollback failed or was rejected");
+  await assertSummaryFileContains(run.artifacts, summary.evidence.imageRollback, /http 409/);
 });
 
 test("macOS lifecycle smoke uses stricter defaults for mac-m host families", async () => {

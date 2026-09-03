@@ -69,6 +69,9 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	fastSnapshotRestore := fs.Bool("fast-snapshot-restore", false, "enable AWS Fast Snapshot Restore for the promoted AMI snapshots")
 	var fastSnapshotRestoreAZs stringListFlag
 	fs.Var(&fastSnapshotRestoreAZs, "fsr-az", "availability zone for Fast Snapshot Restore; repeatable")
+	expectedCurrentImage := fs.String("expected-current-image", "", "expected current image id, none, or capture")
+	expectedCurrentRevision := fs.String("expected-current-revision", "", "expected current default revision when an image is present")
+	retireExpectedCatalog := fs.Bool("retire-expected-catalog", false, "retire the exact expected AWS catalog revision during rollback")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
@@ -85,6 +88,15 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	}
 	if normalizedProvider == "azure" && (*fastSnapshotRestore || len(fastSnapshotRestoreAZs) > 0) {
 		return exit(2, "Fast Snapshot Restore is AWS-only")
+	}
+	if normalizedProvider == "azure" && flagWasSet(fs, "expected-current-image") {
+		return exit(2, "compare-and-swap image promotion is AWS-only")
+	}
+	if *catalogOnly && (flagWasSet(fs, "expected-current-image") || *retireExpectedCatalog) {
+		return exit(2, "--catalog-only cannot be combined with transactional image promotion")
+	}
+	if *retireExpectedCatalog && !flagWasSet(fs, "expected-current-image") {
+		return exit(2, "--retire-expected-catalog requires --expected-current-image and --expected-current-revision")
 	}
 	if *serverType == "" {
 		*serverType = *serverTypeAlias
@@ -143,7 +155,7 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	image, err := coord.PromoteImage(ctx, fs.Arg(0), CoordinatorImageRef{
+	ref := CoordinatorImageRef{
 		Provider:               normalizedProvider,
 		Region:                 *region,
 		Target:                 *target,
@@ -162,7 +174,48 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 			Desktop:   *desktop,
 		},
 		VariantSelectors: variantSelectors,
-	})
+	}
+	var image CoordinatorImage
+	if flagWasSet(fs, "expected-current-image") {
+		expected, err := imageExpectedCurrent(*expectedCurrentImage, *expectedCurrentRevision)
+		if err != nil {
+			return err
+		}
+		if *retireExpectedCatalog && expected.State != "present" {
+			return exit(2, "--retire-expected-catalog requires an exact expected current image and revision")
+		}
+		var result CoordinatorImagePromotionResult
+		if fs.Arg(0) == "none" {
+			if expected.State != "present" {
+				return exit(2, "clearing a default requires an expected current image and revision")
+			}
+			result, err = coord.PromoteImageCAS(ctx, expected.ImageID, expected, true, *retireExpectedCatalog, ref)
+		} else {
+			result, err = coord.PromoteImageCAS(ctx, fs.Arg(0), expected, false, *retireExpectedCatalog, ref)
+		}
+		if err != nil {
+			return err
+		}
+		if *jsonOut {
+			return json.NewEncoder(a.Stdout).Encode(result)
+		}
+		if fs.Arg(0) == "none" {
+			fmt.Fprintln(a.Stdout, "promoted image=none")
+			return nil
+		}
+		if result.Image == nil {
+			return fmt.Errorf("coordinator did not return the promoted image")
+		}
+		image = *result.Image
+	} else {
+		if fs.Arg(0) == "none" {
+			return exit(2, "promoting image none requires --expected-current-image and --expected-current-revision")
+		}
+		if flagWasSet(fs, "expected-current-revision") {
+			return exit(2, "--expected-current-revision requires --expected-current-image")
+		}
+		image, err = coord.PromoteImage(ctx, fs.Arg(0), ref)
+	}
 	if err != nil {
 		return err
 	}
@@ -175,6 +228,30 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintln(a.Stdout)
 	return nil
+}
+
+func imageExpectedCurrent(imageID, revision string) (CoordinatorImageDefaultState, error) {
+	imageID = strings.TrimSpace(imageID)
+	revision = strings.TrimSpace(revision)
+	if imageID == "none" {
+		if revision != "" {
+			return CoordinatorImageDefaultState{}, exit(2, "--expected-current-revision is invalid when --expected-current-image=none")
+		}
+		return CoordinatorImageDefaultState{State: "absent"}, nil
+	}
+	if imageID == "capture" {
+		if revision != "" {
+			return CoordinatorImageDefaultState{}, exit(2, "--expected-current-revision is invalid when --expected-current-image=capture")
+		}
+		return CoordinatorImageDefaultState{State: "capture"}, nil
+	}
+	if imageID == "" {
+		return CoordinatorImageDefaultState{}, exit(2, "--expected-current-image must be an image id, none, or capture")
+	}
+	if revision == "" {
+		return CoordinatorImageDefaultState{}, exit(2, "--expected-current-revision is required when the expected current image is present")
+	}
+	return CoordinatorImageDefaultState{State: "present", ImageID: imageID, Revision: revision}, nil
 }
 
 func (a App) imageFSRStatus(ctx context.Context, args []string) error {
