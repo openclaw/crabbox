@@ -1106,57 +1106,14 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	endToEndStartedAt := time.Now()
 	leaseStartedAt := endToEndStartedAt
-	if *leaseIDFlag != "" {
-		var lease LeaseTarget
-		lease, err = resolveSSHLeaseTarget(ctx, sshBackend, ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim, Prepare: true})
-		if err == nil {
-			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
-			if lease.Coordinator != nil {
-				coord = lease.Coordinator
-				useCoordinator = true
-				recorder.UseCoordinator(coord)
-			}
-			applyResolvedLeaseConfig(&cfg, server, &target)
-			if borrowedPool != nil {
-				target = applyReadyPoolEndpoint(target, borrowedPool.Entry)
-			}
-			if resolved, resolveErr := resolveNetworkTarget(ctx, cfg, server, target); resolveErr != nil {
-				err = resolveErr
-			} else {
-				target = resolved.Target
-				if resolved.FallbackReason != "" {
-					fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
-				}
-			}
-		}
-		if err == nil && !flagWasSet(fs, "idle-timeout") {
-			if useCoordinator {
-				if duration, ok := parseDurationSecondsLabel(server.Labels["idle_timeout_secs"]); ok {
-					cfg.IdleTimeout = duration
-				}
-			} else if duration, ok := parseDurationSecondsLabel(server.Labels["idle_timeout_secs"]); ok {
-				cfg.IdleTimeout = duration
-			} else if duration, ok := parseDurationSecondsLabel(server.Labels["idle_timeout"]); ok {
-				cfg.IdleTimeout = duration
-			}
-		}
-	} else {
-		var lease LeaseTarget
-		lease, err = sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim, RequestedSlug: requestedSlug})
-		if err == nil {
-			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
-		}
-		acquired = true
-	}
-	if err != nil {
-		return recordFailure(err)
-	}
+	claimAdmitted := false
+	releaseResolvedLease := false
 	keepFailedLease := false
 	// A newly acquired retained lease is not safe to keep until its requested
 	// cleanup handle has been written successfully.
-	releaseUnreportedLease := acquired && leaseOutputPath != ""
+	releaseUnreportedLease := false
 	defer func() {
-		if !releaseUnreportedLease && !shouldReleaseRunLease(acquired, *keep, keepFailedLease, *stopAfter, runFailure) {
+		if !releaseResolvedLease || (!releaseUnreportedLease && !shouldReleaseRunLease(acquired, *keep, keepFailedLease, *stopAfter, runFailure)) {
 			return
 		}
 		if lifecycleOwner != nil {
@@ -1200,49 +1157,139 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			fmt.Fprintf(a.Stderr, "lease cleanup stopped=%t policy=%s lease=%s slug=%s\n", cleanup.Stopped, blank(*stopAfter, "auto"), leaseID, blank(serverSlug(server), "-"))
 		}
 	}()
+	admitLease := func(lease *LeaseTarget) error {
+		server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+		applyResolvedServerConfig(&cfg, server)
+		stripTargetCredentialsFromRunEnv(&envSelection, target)
+		if borrowedPool != nil && strings.TrimSpace(borrowedPool.Entry.WorkRoot) != "" {
+			cfg.WorkRoot = strings.TrimSpace(borrowedPool.Entry.WorkRoot)
+		}
+		if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
+			return err
+		}
+		if err := validateRunArtifactGlobTarget(target, expansion.ArtifactGlobs); err != nil {
+			return err
+		}
+		if err := validateRequiredRunArtifactGlobTarget(target, requiredArtifactGlobs); err != nil {
+			return err
+		}
+		if err := validateArtifactChangeTarget(target, requiredArtifactChanges); err != nil {
+			return err
+		}
+		if err := validateFailureDownloadTarget(target, failureDownloads); err != nil {
+			return err
+		}
+		if expansion.Profile.Doctor.Enabled && isWindowsNativeTarget(target) {
+			return exit(2, "profile doctor is not supported for native Windows targets")
+		}
+		if useCoordinator {
+			recorder.AttachLease(leaseID, serverSlug(server), cfg)
+		}
+		if recorder.runID != "" {
+			executionRunID = recorder.runID
+		}
+		if !*syncOnly {
+			if err := recorder.requireHandle(); err != nil {
+				return err
+			}
+		}
+		applyRunExecutionMetadata(&envSelection, leaseID, executionRunID, serverSlug(server))
+		runReq.RunID = executionRunID
+		runReq.Env = envSelection.Effective
+		lease.Server, lease.SSH = server, target
+		return nil
+	}
+	prepareResolvedLease := func(lease *LeaseTarget) error {
+		server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+		if lease.Coordinator != nil {
+			coord = lease.Coordinator
+			useCoordinator = true
+			recorder.UseCoordinator(coord)
+		}
+		applyResolvedLeaseConfig(&cfg, server, &target)
+		if borrowedPool != nil {
+			target = applyReadyPoolEndpoint(target, borrowedPool.Entry)
+		}
+		if resolved, resolveErr := resolveNetworkTarget(ctx, cfg, server, target); resolveErr != nil {
+			return resolveErr
+		} else {
+			target = resolved.Target
+			if resolved.FallbackReason != "" {
+				fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
+			}
+		}
+		if !flagWasSet(fs, "idle-timeout") {
+			if useCoordinator {
+				if duration, ok := parseDurationSecondsLabel(server.Labels["idle_timeout_secs"]); ok {
+					cfg.IdleTimeout = duration
+				}
+			} else if duration, ok := parseDurationSecondsLabel(server.Labels["idle_timeout_secs"]); ok {
+				cfg.IdleTimeout = duration
+			} else if duration, ok := parseDurationSecondsLabel(server.Labels["idle_timeout"]); ok {
+				cfg.IdleTimeout = duration
+			}
+		}
+		lease.Server, lease.SSH = server, target
+		return nil
+	}
+	if *leaseIDFlag != "" {
+		var lease LeaseTarget
+		req := ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim, Prepare: true}
+		if borrowedPool == nil {
+			lease, claimAdmitted, err = admitRunLeaseUnderClaim(ctx, sshBackend, req, &cfg, func(lease *LeaseTarget) error {
+				if err := prepareResolvedLease(lease); err != nil {
+					return err
+				}
+				releaseResolvedLease = true
+				return admitLease(lease)
+			})
+		}
+		if err == nil && !claimAdmitted {
+			lease, err = resolveSSHLeaseTarget(ctx, sshBackend, req)
+		}
+		if err == nil && !claimAdmitted {
+			err = prepareResolvedLease(&lease)
+		}
+		if err == nil {
+			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+		}
+
+	} else {
+		var lease LeaseTarget
+		lease, err = sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim, RequestedSlug: requestedSlug})
+		if err == nil {
+			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+		}
+		acquired = true
+	}
+	if err != nil {
+		return recordFailure(err)
+	}
+	releaseResolvedLease = true
+	releaseUnreportedLease = acquired && leaseOutputPath != ""
+
 	leaseDuration := time.Since(leaseStartedAt)
 	if timingRecordEnabled {
 		coldRun := acquired && strings.TrimSpace(*leaseIDFlag) == "" && borrowedPool == nil
 		timingRecordColdRun = &coldRun
 	}
-	applyResolvedServerConfig(&cfg, server)
-	stripTargetCredentialsFromRunEnv(&envSelection, target)
-	if borrowedPool != nil && strings.TrimSpace(borrowedPool.Entry.WorkRoot) != "" {
-		cfg.WorkRoot = strings.TrimSpace(borrowedPool.Entry.WorkRoot)
-	}
-	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
-		return recordFailure(err)
-	}
-	if err := validateRunArtifactGlobTarget(target, expansion.ArtifactGlobs); err != nil {
-		return recordFailure(err)
-	}
-	if err := validateRequiredRunArtifactGlobTarget(target, requiredArtifactGlobs); err != nil {
-		return recordFailure(err)
-	}
-	if err := validateArtifactChangeTarget(target, requiredArtifactChanges); err != nil {
-		return recordFailure(err)
-	}
-	if err := validateFailureDownloadTarget(target, failureDownloads); err != nil {
-		return recordFailure(err)
-	}
-	if expansion.Profile.Doctor.Enabled && isWindowsNativeTarget(target) {
-		return recordFailure(exit(2, "profile doctor is not supported for native Windows targets"))
-	}
-	if useCoordinator {
-		recorder.AttachLease(leaseID, serverSlug(server), cfg)
-	}
-	if recorder.runID != "" {
-		executionRunID = recorder.runID
-	}
-	if !*syncOnly {
-		if err := recorder.requireHandle(); err != nil {
+	if !claimAdmitted {
+		lease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+		if err := admitLease(&lease); err != nil {
 			return recordFailure(err)
 		}
 	}
-	applyRunExecutionMetadata(&envSelection, leaseID, executionRunID, serverSlug(server))
-	runReq.RunID = executionRunID
-	runReq.Env = envSelection.Effective
-	if err := a.claimRunLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, *reclaim || borrowedPool != nil, *leaseIDFlag != ""); err != nil {
+
+	if claimAdmitted {
+		// Registration publishes its own adapter/portal stages; it runs after the
+		// admission lock is released and retains the committed claim snapshot.
+		lease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+		err = a.registerCoordinatorLeaseBestEffort(ctx, cfg, &lease)
+		server = lease.Server
+	} else {
+		err = a.claimRunLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, *reclaim || borrowedPool != nil, *leaseIDFlag != "")
+	}
+	if err != nil {
 		return recordFailure(err)
 	}
 	if leaseOutputPath != "" {

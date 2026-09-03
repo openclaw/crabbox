@@ -63,6 +63,13 @@ type ProviderClaimScoper interface {
 	ClaimScope(cfg Config) string
 }
 
+// RunLeaseClaimResolver prepares an already-bound canonical lease while core
+// holds its claim lock. It must honor cancellation and must not acquire claim
+// locks or publish local claims; core validates and publishes the result once.
+type RunLeaseClaimResolver interface {
+	ResolveRunLeaseUnderClaim(context.Context, ResolveRequest, LeaseClaim) (LeaseTarget, error)
+}
+
 // ProviderDiagnosticSecretSource contributes runtime-only credentials to the
 // final diagnostic redaction pass. Providers should include every credential
 // source that is intentionally absent from Config, including local CLI stores.

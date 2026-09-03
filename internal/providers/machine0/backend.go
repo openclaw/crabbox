@@ -333,27 +333,51 @@ func resolveClaim(identifier string) (LeaseClaim, bool, error) {
 	if err != nil || !exists {
 		return claim, exists, err
 	}
+	if err := validateResolvedMachine0Claim(identifier, claim); err != nil {
+		return LeaseClaim{}, false, err
+	}
+	return claim, true, nil
+}
+
+func validateResolvedMachine0Claim(identifier string, claim LeaseClaim) error {
 	if claim.Provider == core.FixedMachine0ClaimProvider || claim.FixedCreateIntent != nil {
+		var err error
 		if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == fixedMachine0IntentReleased {
 			err = fixedMachine0LeaseKind.ValidateTerminalClaim(claim, LeaseClaim{}, claim.LeaseID, validateFixedMachine0TerminalClaimExtra)
 		} else {
 			_, err = fixedMachine0ClaimAttempt(claim)
 		}
 		if err != nil {
-			return LeaseClaim{}, false, err
+			return err
 		}
 	} else if firstNonBlank(claim.Labels["machine0_name"], claim.CloudID) == "" {
-		return LeaseClaim{}, false, exit(4, "machine0 lease %q has no bound native resource", identifier)
+		return exit(4, "machine0 lease %q has no bound native resource", identifier)
 	}
-	return claim, true, nil
+	return nil
 }
 
 func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+	return b.resolve(ctx, req, nil)
+}
+
+func (b *backend) ResolveRunLeaseUnderClaim(ctx context.Context, req ResolveRequest, original core.LeaseClaim) (LeaseTarget, error) {
+	return b.resolve(ctx, req, &original)
+}
+
+func (b *backend) resolve(ctx context.Context, req ResolveRequest, original *LeaseClaim) (LeaseTarget, error) {
 	if req.Reclaim && req.Repo.Root == "" {
 		return LeaseTarget{}, exit(2, "machine0 --reclaim requires repository context")
 	}
 	baseCfg := b.configForRun()
-	claim, claimed, err := resolveClaim(req.ID)
+	var claim LeaseClaim
+	var claimed bool
+	var err error
+	if original == nil {
+		claim, claimed, err = resolveClaim(req.ID)
+	} else {
+		claim, claimed = *original, true
+		err = validateResolvedMachine0Claim(req.ID, claim)
+	}
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -367,7 +391,7 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 			return LeaseTarget{}, exit(4, "lease_id_conflict: fixed Machine0 lease %s is bound to another repository", claim.LeaseID)
 		}
 		item, err = b.resolveFixedMachine0(ctx, claim)
-		if err == nil && item.ID != "" && !req.NoLocalStateMutations {
+		if err == nil && item.ID != "" && original == nil && !req.NoLocalStateMutations {
 			claim, err = b.bindFixedMachine0Claim(claim, item)
 		}
 		if err != nil {
@@ -453,6 +477,14 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 			server = b.serverFromMachine(item, claim, cfg)
 		}
 		return b.prepareLeaseWithOptions(ctx, item, server, leaseID, machine0PrepareOptions{Check: req.Prepare || req.ReadyProbe, ResetHostTrust: resetHostTrust})
+	}
+	if original != nil {
+		// Core already owns the claim transaction; preparation keeps its
+		// checkpoint fence without reentering endpoint publication.
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			return LeaseTarget{}, err
+		}
+		return prepare()
 	}
 	if claimed {
 		var lease LeaseTarget

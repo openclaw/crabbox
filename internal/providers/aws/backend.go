@@ -494,6 +494,27 @@ func (b *awsLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Leas
 	return LeaseTarget{}, exit(4, "lease/server not found: %s", req.ID)
 }
 
+func (b *awsLeaseBackend) ResolveRunLeaseUnderClaim(ctx context.Context, req ResolveRequest, original core.LeaseClaim) (LeaseTarget, error) {
+	// The held claim already identifies the instance and region. Reuse the
+	// direct resolver without inventory discovery or cross-region fallback.
+	bound := *b
+	bound.Cfg = awsConfigForServer(b.Cfg, Server{Labels: original.Labels})
+	bound.Cfg.Capacity.Regions = nil
+	req.ID = original.CloudID
+	lease, err := bound.Resolve(ctx, req)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	// Fixed leases retain their acquired/account fence. Ordinary run admission
+	// uses the endpoint policy, which preserves absent historical cleanup identity.
+	if original.Provider == core.FixedAWSClaimProvider || original.FixedCreateIntent != nil {
+		if err := bound.AuthorizeStatusTouchClaim(ctx, lease, original); err != nil {
+			return LeaseTarget{}, err
+		}
+	}
+	return lease, nil
+}
+
 func isCrabboxAWSLease(server Server) bool {
 	labels := server.Labels
 	return labels != nil &&

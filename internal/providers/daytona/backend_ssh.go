@@ -8,6 +8,7 @@ import (
 	"time"
 
 	daytona "github.com/daytonaio/daytona/libs/api-client-go"
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -115,6 +116,14 @@ func (b *daytonaLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (
 }
 
 func (b *daytonaLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+	return b.resolve(ctx, req, nil)
+}
+
+func (b *daytonaLeaseBackend) ResolveRunLeaseUnderClaim(ctx context.Context, req ResolveRequest, original core.LeaseClaim) (LeaseTarget, error) {
+	return b.resolve(ctx, req, &original)
+}
+
+func (b *daytonaLeaseBackend) resolve(ctx context.Context, req ResolveRequest, original *LeaseClaim) (LeaseTarget, error) {
 	if req.RejectAuthSecret {
 		return LeaseTarget{}, exit(2, "crabbox connect does not support token-as-username SSH targets; use crabbox ssh --show-secret in a trusted terminal")
 	}
@@ -130,17 +139,31 @@ func (b *daytonaLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (
 	if req.StatusOnly {
 		server.Labels["state"] = server.Status
 	}
-	if req.Reclaim && !req.NoLocalStateMutations {
-		if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), b.cfg, server, SSHTarget{}, req.Repo.Root, b.cfg.IdleTimeout, true); err != nil {
+	if original != nil {
+		// Core owns publication for run admission. Preserve the repository and
+		// resource checks before Start or creating token-bearing SSH access.
+		if err := validateExactDaytonaResourceClaim(leaseID, server.CloudID, *original, true); err != nil {
 			return LeaseTarget{}, err
 		}
-	}
-	if err := requireExactDaytonaClaim(leaseID, sandbox); err != nil {
-		return LeaseTarget{}, err
-	}
-	if !req.Reclaim && !req.NoLocalStateMutations {
-		if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), b.cfg, server, SSHTarget{}, req.Repo.Root, b.cfg.IdleTimeout, false); err != nil {
+		if err := core.CheckLeaseClaimRepositoryOwner(leaseID, *original, req.Repo.Root, false); err != nil {
 			return LeaseTarget{}, err
+		}
+		if err := core.AuthorizeCheckpointRelease(*original, ""); err != nil {
+			return LeaseTarget{}, err
+		}
+	} else {
+		if req.Reclaim && !req.NoLocalStateMutations {
+			if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), b.cfg, server, SSHTarget{}, req.Repo.Root, b.cfg.IdleTimeout, true); err != nil {
+				return LeaseTarget{}, err
+			}
+		}
+		if err := requireExactDaytonaClaim(leaseID, sandbox); err != nil {
+			return LeaseTarget{}, err
+		}
+		if !req.Reclaim && !req.NoLocalStateMutations {
+			if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), b.cfg, server, SSHTarget{}, req.Repo.Root, b.cfg.IdleTimeout, false); err != nil {
+				return LeaseTarget{}, err
+			}
 		}
 	}
 	if req.StatusOnly {
@@ -391,7 +414,11 @@ func requireExactDaytonaResourceClaim(leaseID, resourceID string) error {
 	if err != nil {
 		return err
 	}
-	if !ok || strings.TrimSpace(claim.LeaseID) != strings.TrimSpace(leaseID) || strings.TrimSpace(claim.CloudID) != resourceID {
+	return validateExactDaytonaResourceClaim(leaseID, resourceID, claim, ok)
+}
+
+func validateExactDaytonaResourceClaim(leaseID, resourceID string, claim LeaseClaim, exists bool) error {
+	if !exists || strings.TrimSpace(claim.LeaseID) != strings.TrimSpace(leaseID) || strings.TrimSpace(claim.CloudID) != resourceID {
 		return exit(4, "daytona sandbox %s has no exact local claim for lease %s; use --reclaim from the owning repository before reuse or deletion", blank(resourceID, "-"), blank(leaseID, "-"))
 	}
 	return nil

@@ -363,6 +363,78 @@ func checkLeaseClaimRepositoryOwner(leaseID string, existing leaseClaim, repoRoo
 	return nil
 }
 
+func transformLeaseClaimForRepo(existing *leaseClaim, leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool, metadata claimMetadata, now string) error {
+	hadExisting := existing.LeaseID != ""
+	original := cloneLeaseClaim(*existing)
+	if metadata.setEndpoint && hadExisting {
+		server, err := prepareLeaseClaimEndpoint(original, provider, slug, metadata.server, metadata.providerMetadata)
+		if err != nil {
+			return err
+		}
+		metadata.server = server
+	}
+	if err := checkLeaseClaimRepositoryOwner(leaseID, *existing, repoRoot, reclaim); err != nil {
+		return err
+	}
+	if existing.ClaimedAt == "" || reclaim || existing.RepoRoot != repoRoot {
+		existing.CheckpointCapture = nil
+		existing.ClaimedAt = now
+	}
+	existing.LeaseID = leaseID
+	existing.Slug = slug
+	if provider != "" {
+		if existing.FixedCreateIntent != nil && existing.Provider != "" {
+			if canonicalClaimProvider(existing.Provider) != canonicalClaimProvider(provider) {
+				return exit(2, "lease %s fixed claim provider changed from %s to %s", leaseID, existing.Provider, provider)
+			}
+		} else {
+			existing.Provider = provider
+		}
+	}
+	if providerScope != "" {
+		existing.ProviderScope = providerScope
+	}
+	if pond = normalizePondName(pond); pond != "" {
+		existing.Pond = pond
+	}
+	if staticDetails.Present {
+		existing.StaticHost = staticDetails.Host
+		existing.StaticUser = staticDetails.User
+		existing.StaticPort = staticDetails.Port
+		existing.StaticWorkRoot = staticDetails.WorkRoot
+		existing.TargetOS = staticDetails.TargetOS
+		existing.WindowsMode = staticDetails.WindowsMode
+	} else if provider != "" && !isStaticProvider(provider) {
+		existing.StaticHost = ""
+		existing.StaticUser = ""
+		existing.StaticPort = ""
+		existing.StaticWorkRoot = ""
+		existing.TargetOS = ""
+		existing.WindowsMode = ""
+	}
+	existing.RepoRoot = repoRoot
+	existing.LastUsedAt = now
+	if idleTimeout > 0 {
+		existing.IdleTimeoutSeconds = int(idleTimeout.Seconds())
+	}
+	if metadata.setCacheVolumes {
+		existing.CacheVolumes = append([]string(nil), metadata.cacheVolumes...)
+	}
+	if metadata.setLabels {
+		existing.Labels = cloneStringMap(metadata.labels)
+	}
+	if metadata.setEndpoint {
+		applyLeaseClaimEndpoint(existing, metadata.server, metadata.target, metadata.endpointMode)
+		if metadata.reservationLabel != "" && metadata.reservationDuration > 0 {
+			if existing.Labels == nil {
+				existing.Labels = make(map[string]string)
+			}
+			existing.Labels[metadata.reservationLabel] = leaseLabelTime(time.Now().UTC().Add(metadata.reservationDuration))
+		}
+	}
+	return nil
+}
+
 func claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool, metadata claimMetadata) error {
 	if leaseID == "" || (repoRoot == "" && !metadata.allowEmptyRepoRoot) {
 		return nil
@@ -384,75 +456,7 @@ func claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, 
 		directory:   directory,
 		publication: claimSkipEmpty,
 		mutate: func(existing *leaseClaim) error {
-			hadExisting := existing.LeaseID != ""
-			original := cloneLeaseClaim(*existing)
-			if metadata.setEndpoint && hadExisting {
-				server, err := prepareLeaseClaimEndpoint(original, provider, slug, metadata.server, metadata.providerMetadata)
-				if err != nil {
-					return err
-				}
-				metadata.server = server
-			}
-			if err := checkLeaseClaimRepositoryOwner(leaseID, *existing, repoRoot, reclaim); err != nil {
-				return err
-			}
-			if existing.ClaimedAt == "" || reclaim || existing.RepoRoot != repoRoot {
-				existing.CheckpointCapture = nil
-				existing.ClaimedAt = now
-			}
-			existing.LeaseID = leaseID
-			existing.Slug = slug
-			if provider != "" {
-				if existing.FixedCreateIntent != nil && existing.Provider != "" {
-					if canonicalClaimProvider(existing.Provider) != canonicalClaimProvider(provider) {
-						return exit(2, "lease %s fixed claim provider changed from %s to %s", leaseID, existing.Provider, provider)
-					}
-				} else {
-					existing.Provider = provider
-				}
-			}
-			if providerScope != "" {
-				existing.ProviderScope = providerScope
-			}
-			if pond = normalizePondName(pond); pond != "" {
-				existing.Pond = pond
-			}
-			if staticDetails.Present {
-				existing.StaticHost = staticDetails.Host
-				existing.StaticUser = staticDetails.User
-				existing.StaticPort = staticDetails.Port
-				existing.StaticWorkRoot = staticDetails.WorkRoot
-				existing.TargetOS = staticDetails.TargetOS
-				existing.WindowsMode = staticDetails.WindowsMode
-			} else if provider != "" && !isStaticProvider(provider) {
-				existing.StaticHost = ""
-				existing.StaticUser = ""
-				existing.StaticPort = ""
-				existing.StaticWorkRoot = ""
-				existing.TargetOS = ""
-				existing.WindowsMode = ""
-			}
-			existing.RepoRoot = repoRoot
-			existing.LastUsedAt = now
-			if idleTimeout > 0 {
-				existing.IdleTimeoutSeconds = int(idleTimeout.Seconds())
-			}
-			if metadata.setCacheVolumes {
-				existing.CacheVolumes = append([]string(nil), metadata.cacheVolumes...)
-			}
-			if metadata.setLabels {
-				existing.Labels = cloneStringMap(metadata.labels)
-			}
-			if metadata.setEndpoint {
-				applyLeaseClaimEndpoint(existing, metadata.server, metadata.target, metadata.endpointMode)
-				if metadata.reservationLabel != "" && metadata.reservationDuration > 0 {
-					if existing.Labels == nil {
-						existing.Labels = make(map[string]string)
-					}
-					existing.Labels[metadata.reservationLabel] = leaseLabelTime(time.Now().UTC().Add(metadata.reservationDuration))
-				}
-			}
-			return nil
+			return transformLeaseClaimForRepo(existing, leaseID, slug, provider, providerScope, pond, staticDetails, repoRoot, idleTimeout, reclaim, metadata, now)
 		},
 	})
 	if metadata.result != nil {

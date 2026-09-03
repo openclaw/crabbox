@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"math"
@@ -13,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +23,7 @@ import (
 	sdkdaytona "github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
 	sdktypes "github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
 	toolbox "github.com/daytonaio/daytona/libs/toolbox-api-client-go"
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -632,6 +635,116 @@ func TestDaytonaResolveRejectsClaimOwnedByAnotherRepo(t *testing.T) {
 	}
 	if fake.mutated {
 		t.Fatal("cross-repository resolve mutated the Daytona sandbox")
+	}
+}
+
+type runAdmissionDaytonaAPI struct {
+	fakeDaytonaDoctorAPI
+	started    []string
+	accessed   []string
+	accessTTL  time.Duration
+	blockStart bool
+}
+
+func (a *runAdmissionDaytonaAPI) StartSandbox(ctx context.Context, id string) (*apidaytona.Sandbox, error) {
+	a.started = append(a.started, id)
+	if a.blockStart {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Second):
+			return nil, errors.New("caller deadline not passed to Start")
+		}
+	}
+	sandbox := a.getSandboxes[id]
+	sandbox.SetState(apidaytona.SANDBOXSTATE_STARTED)
+	return sandbox, nil
+}
+
+func (a *runAdmissionDaytonaAPI) CreateSSHAccess(_ context.Context, id string, ttl time.Duration) (daytonaSSHAccess, error) {
+	a.accessed = append(a.accessed, id)
+	a.accessTTL = ttl
+	return daytonaSSHAccess{Token: "synthetic-token", Command: "ssh -p 2222 synthetic-token@ssh.example.invalid"}, nil
+}
+
+func TestDaytonaRunResolutionPreparesWithoutPublishingClaim(t *testing.T) {
+	for _, scenario := range []string{"ready", "lagging inventory", "stopped", "canceled start", "wrong repository", "replacement resource", "checkpoint hold"} {
+		t.Run(scenario, func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			const leaseID = "cbx_454545454545"
+			sandbox := apidaytona.Sandbox{}
+			sandbox.SetId("sandbox-run-owned")
+			sandbox.SetState(apidaytona.SANDBOXSTATE_STOPPED)
+			if scenario == "ready" || scenario == "lagging inventory" {
+				sandbox.SetState(apidaytona.SANDBOXSTATE_STARTED)
+			}
+			sandbox.SetLabels(map[string]string{"crabbox": "true", "provider": daytonaProvider, "lease": leaseID, "slug": "run-owned"})
+			cfg := baseConfig()
+			cfg.Provider, cfg.Daytona.SSHAccessMinutes = daytonaProvider, 17
+			repoRoot := t.TempDir()
+			server := daytonaSandboxToServer(&sandbox, cfg)
+			if err := claimLeaseTargetForRepoConfig(leaseID, "run-owned", cfg, server, SSHTarget{}, repoRoot, time.Hour, false); err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "checkpoint hold" {
+				if err := core.WithDurableLeaseClaimLock(leaseID, func(claim *LeaseClaim, _ bool, persist func() error) error {
+					claim.CheckpointCapture = &core.CheckpointCaptureBinding{ID: "chk_runhold", Revision: claim.Revision, BoundRevision: claim.Revision}
+					return persist()
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := core.ReadLeaseClaim(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "replacement resource" {
+				sandbox.SetId("sandbox-replacement")
+			}
+			fake := &runAdmissionDaytonaAPI{fakeDaytonaDoctorAPI: fakeDaytonaDoctorAPI{
+				sandboxes: []apidaytona.Sandbox{sandbox}, getSandboxes: map[string]*apidaytona.Sandbox{sandbox.GetId(): &sandbox},
+			}, blockStart: scenario == "canceled start"}
+			if scenario == "lagging inventory" {
+				fake.sandboxes = nil
+			}
+			oldClient := newDaytonaClient
+			newDaytonaClient = func(Config, Runtime) (daytonaAPI, error) { return fake, nil }
+			t.Cleanup(func() { newDaytonaClient = oldClient })
+			req := ResolveRequest{ID: leaseID, Repo: Repo{Root: repoRoot}, Prepare: true}
+			if scenario == "wrong repository" {
+				req.Repo.Root = t.TempDir()
+			}
+			timeout := 2 * time.Second
+			if scenario == "canceled start" {
+				timeout = 50 * time.Millisecond
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), timeout)
+			defer cancel()
+			b := &daytonaLeaseBackend{cfg: cfg, rt: Runtime{Stderr: io.Discard}}
+			resolved, resolveErr := b.ResolveRunLeaseUnderClaim(ctx, req, before)
+			wantStarts, wantAccess := 0, 0
+			if scenario == "stopped" || scenario == "canceled start" {
+				wantStarts = 1
+			}
+			if scenario == "ready" || scenario == "lagging inventory" || scenario == "stopped" {
+				wantAccess = 1
+				if resolveErr != nil || resolved.LeaseID != leaseID || resolved.Server.CloudID != before.CloudID || !resolved.SSH.AuthSecret || resolved.SSH.Host != "ssh.example.invalid" || resolved.SSH.Port != "2222" || fake.accessTTL != 17*time.Minute {
+					t.Fatalf("run resolution lost exact resource or SSH access contract: %v", resolveErr)
+				}
+			} else if resolveErr == nil {
+				t.Fatal("run resolution accepted changed authority or canceled Start")
+			}
+			if scenario == "canceled start" && !errors.Is(resolveErr, context.DeadlineExceeded) {
+				t.Fatalf("Start lost caller deadline: %v", resolveErr)
+			}
+			if len(fake.started) != wantStarts || len(fake.accessed) != wantAccess || fake.mutated {
+				t.Fatalf("unexpected provider effects: starts=%v access=%v other=%t", fake.started, fake.accessed, fake.mutated)
+			}
+			after, err := core.ReadLeaseClaim(leaseID)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("provider run resolution published a claim: %v", err)
+			}
+		})
 	}
 }
 

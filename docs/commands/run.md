@@ -139,6 +139,11 @@ not trigger this multiplexing recovery.
 
 Crabbox records a local repo claim for each reused lease. If a lease is already
 claimed by another repo, pass `--reclaim` to move the claim intentionally.
+For already-bound canonical IDs on native AWS, Machine0, and Daytona, run
+admission holds that claim through provider preparation and endpoint publication.
+A concurrent heartbeat cannot invalidate the command between those steps.
+Aliases, explicit reclaim, and coordinator-managed leases retain their existing
+resolution paths; stale heartbeat snapshots still fail the exact-claim check.
 
 `--idle-timeout` controls inactivity expiry (default `30m`); `--ttl` is the
 maximum wall-clock lifetime (default `90m`). Use `--stop-after

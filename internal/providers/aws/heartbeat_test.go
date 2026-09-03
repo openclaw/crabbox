@@ -92,6 +92,92 @@ func TestAWSFixedHeartbeatCommandRenewsAccountScopedLease(t *testing.T) {
 	}
 }
 
+type runResolutionAWSClient struct {
+	*fakeAWSClient
+	listCalls int
+}
+
+func (c *runResolutionAWSClient) ListCrabboxServers(ctx context.Context) ([]Server, error) {
+	c.listCalls++
+	return c.fakeAWSClient.ListCrabboxServers(ctx)
+}
+
+func TestAWSRunResolutionPreservesClaimAndExactAuthority(t *testing.T) {
+	for _, fixed := range []bool{false, true} {
+		scenarios := []string{"ready", "legacy missing account"}
+		if fixed {
+			scenarios = []string{"ready", "wrong account", "replacement resource", "checkpoint hold"}
+		}
+		for _, scenario := range scenarios {
+			t.Run(fmt.Sprintf("fixed=%t/%s", fixed, scenario), func(t *testing.T) {
+				b, fake, lease := awsHeartbeatFixture(t, fixed)
+				if scenario == "checkpoint hold" {
+					if err := core.WithDurableLeaseClaimLock(lease.LeaseID, func(claim *core.LeaseClaim, _ bool, persist func() error) error {
+						claim.CheckpointCapture = &core.CheckpointCaptureBinding{ID: "chk_runhold", Revision: claim.Revision, BoundRevision: claim.Revision}
+						return persist()
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if scenario == "legacy missing account" {
+					if err := core.WithDurableLeaseClaimLock(lease.LeaseID, func(claim *core.LeaseClaim, _ bool, persist func() error) error {
+						delete(claim.Labels, "aws_account_id")
+						delete(claim.Labels, "aws_key_pair_id")
+						return persist()
+					}); err != nil {
+						t.Fatal(err)
+					}
+					fake.accountErr = errors.New("ordinary run resolution must not require STS")
+				}
+				before, err := core.ReadLeaseClaim(lease.LeaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "wrong account" {
+					fake.accountID = "999999999999"
+				}
+				if scenario == "replacement resource" {
+					fake.servers[0].CloudID = "i-replacement"
+				}
+				lookup := &runResolutionAWSClient{fakeAWSClient: fake}
+				oldClient := newAWSClient
+				newAWSClient = func(_ context.Context, cfg Config) (awsClient, error) {
+					if cfg.AWSRegion != before.Labels["aws_region"] || len(cfg.Capacity.Regions) != 0 {
+						t.Errorf("run lookup escaped claim region: region=%s alternatives=%v", cfg.AWSRegion, cfg.Capacity.Regions)
+					}
+					return lookup, nil
+				}
+				t.Cleanup(func() { newAWSClient = oldClient })
+				b.Cfg.AWSRegion = "us-west-2"
+				b.Cfg.Capacity.Regions = []string{"eu-west-1", before.Labels["aws_region"]}
+				fake.getIDs = nil
+				creates := fake.createCalls
+				resolved, resolveErr := b.ResolveRunLeaseUnderClaim(t.Context(), ResolveRequest{ID: lease.LeaseID, Prepare: true}, before)
+				if lookup.listCalls != 0 || len(fake.getIDs) != 1 || fake.getIDs[0] != before.CloudID {
+					t.Fatalf("run lookup must read only the bound instance: lists=%d gets=%v", lookup.listCalls, fake.getIDs)
+				}
+				if b.Cfg.AWSRegion != "us-west-2" || !reflect.DeepEqual(b.Cfg.Capacity.Regions, []string{"eu-west-1", before.Labels["aws_region"]}) {
+					t.Fatal("run lookup changed backend region configuration")
+				}
+				if scenario == "ready" || scenario == "legacy missing account" {
+					if resolveErr != nil || resolved.LeaseID != lease.LeaseID || resolved.Server.CloudID != before.CloudID || resolved.SSH.Key != lease.SSH.Key {
+						t.Fatalf("run resolution lost its exact resource or stored key: %v", resolveErr)
+					}
+				} else if resolveErr == nil {
+					t.Fatal("run resolution accepted changed authority")
+				}
+				after, err := core.ReadLeaseClaim(lease.LeaseID)
+				if err != nil || !reflect.DeepEqual(before, after) {
+					t.Fatalf("provider run resolution published a claim: %v", err)
+				}
+				if len(fake.tagged)+len(fake.deletedInstances)+len(fake.deletedKeys) != 0 || fake.createCalls != creates {
+					t.Fatal("provider run resolution mutated AWS resources")
+				}
+			})
+		}
+	}
+}
+
 func TestAWSHeartbeatClaimReplacementBeforeTagWrite(t *testing.T) {
 	_, fake, lease := awsHeartbeatFixture(t, true)
 	initial, err := core.ReadLeaseClaim(lease.LeaseID)
