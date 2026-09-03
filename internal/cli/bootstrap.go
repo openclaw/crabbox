@@ -117,7 +117,12 @@ tasks:
 }
 
 func windowsBootstrapHeaderPowerShell(cfg Config, publicKey, workRoot string) string {
-	return sharedWindowsHeader(cfg.SSHUser, publicKey, workRoot, sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
+	script := sharedWindowsHeader(cfg.SSHUser, publicKey, workRoot, sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
+	// An omitted mode retains the native default; WSL2 owns a separate Linux runtime.
+	if cfg.WindowsMode != windowsModeWSL2 {
+		script += sharedWindowsRuntime() + sharedWindowsRuntimeGate()
+	}
+	return script
 }
 
 func windowsBootstrapPowerShell(cfg Config, publicKey string) string {

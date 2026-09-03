@@ -128,12 +128,19 @@ POST /v1/ready-pools/:key/release-fill-claim-identity
 Routes alone are not the rollback boundary. Typed entries, fill claims,
 desired-capacity policies, and counters use independent
 `typed-ready-pool-v1:`, `typed-ready-pool-v1-fill-claim:`,
-`typed-ready-pool-v1-desired:`, and `typed-ready-pool-v1-counters:` storage
-namespaces. Neither Durable Object prefix scans nor PostgreSQL prefix scans
-used by deployed legacy coordinators can enumerate or borrow typed capacity
-after a rollback. Legacy clients continue using unchanged legacy records;
-typed clients fail explicitly against old coordinators and never retry legacy
-routes.
+`typed-ready-pool-v2-desired:sha256:<digest>`, and
+`typed-ready-pool-v1-counters:` storage namespaces. The
+`typed-ready-pool-v1-desired:` namespace is exact-policy migration-only: the
+coordinator deletes a v1 key only after writing the matching v2 policy
+successfully. Counters remain in the v1 namespace. Neither Durable Object
+prefix scans nor PostgreSQL prefix scans used by deployed legacy coordinators
+can enumerate or borrow typed capacity after a rollback. Existing typed fill
+claims that omitted `provider` retain their capacity reservation: their valid
+typed image identity supplies the provider for comparison, while an explicit
+conflicting provider never matches. This prevents a migration from issuing
+duplicate fill claims. Legacy clients
+continue using unchanged legacy records; typed clients fail explicitly against
+old coordinators and never retry legacy routes.
 
 The broker stores pool entries in coordinator storage. The CLI owns SSH
 keys, source sync, and Actions hydration, so it registers a lease only after it

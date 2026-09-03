@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"strconv"
@@ -212,17 +214,20 @@ func (a App) readyPoolBorrow(ctx context.Context, args []string) error {
 	if key == "" {
 		return exit(2, "usage: crabbox pool borrow <key>")
 	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
 	var identity *CoordinatorReadyPoolIdentityV1
 	if flagWasSet(fs, "identity-file") {
 		parsed, identityErr := loadReadyPoolIdentity(*identityFile)
 		if identityErr != nil {
 			return identityErr
 		}
+		if providerErr := bindReadyPoolIdentityProviderConfig(&cfg, fs, provider, parsed); providerErr != nil {
+			return providerErr
+		}
 		identity = &parsed
-	}
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
 	}
 	coord, err := readyPoolCoordinatorFromConfig(cfg)
 	if err != nil {
@@ -235,6 +240,9 @@ func (a App) readyPoolBorrow(ctx context.Context, args []string) error {
 		metadata := readyPoolIdentityMetadata(cfg, localRepo, *repo, *ref, *commit, *fingerprint)
 		for field, value := range metadata {
 			input[field] = value
+		}
+		if providerErr := bindReadyPoolIdentityProvider(input, *identity); providerErr != nil {
+			return providerErr
 		}
 		input["identity"] = *identity
 		res, err = borrowValidatedTypedReadyPoolLease(ctx, coord, key, input, *identity)
@@ -311,14 +319,23 @@ func (a App) readyPoolReturn(ctx context.Context, args []string) error {
 	}
 	var res CoordinatorReadyPoolResponse
 	if flagWasSet(fs, "identity-file") {
-		identity, identityErr := loadReadyPoolIdentity(*identityFile)
-		if identityErr != nil {
-			return identityErr
+		input := map[string]any{
+			"leaseID": strings.TrimSpace(*id), "result": strings.TrimSpace(*result),
+			"reason": strings.TrimSpace(*reason), "borrowToken": strings.TrimSpace(*borrowToken),
 		}
-		res, err = coord.ReturnTypedReadyPoolLease(ctx, key, map[string]any{
-			"leaseID": *id, "result": *result, "reason": *reason,
-			"borrowToken": *borrowToken, "identity": identity,
-		})
+		if strings.TrimSpace(*result) != "ready" {
+			res, err = coord.ReturnTypedReadyPoolLease(ctx, key, input)
+		} else {
+			identity, identityErr := loadReadyPoolIdentity(*identityFile)
+			if identityErr != nil {
+				input["result"] = "drain"
+				input["reason"] = "typed ready-pool identity unavailable or invalid"
+				res, err = coord.ReturnTypedReadyPoolLease(ctx, key, input)
+				return errors.Join(identityErr, err)
+			}
+			input["identity"] = identity
+			res, err = coord.ReturnTypedReadyPoolLease(ctx, key, input)
+		}
 	} else {
 		res, err = coord.ReturnReadyPoolLease(ctx, key, *id, *result, *reason, *borrowToken)
 	}
@@ -347,14 +364,6 @@ func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 	if key == "" {
 		return exit(2, "usage: crabbox pool ensure <key> [--create] [prewarm flags...]")
 	}
-	var identity *CoordinatorReadyPoolIdentityV1
-	if flagWasSet(fs, "identity-file") {
-		parsed, identityErr := loadReadyPoolIdentity(*identityFile)
-		if identityErr != nil {
-			return identityErr
-		}
-		identity = &parsed
-	}
 	if err := validateReadyPoolEnsurePrewarmArgs(fs.Args()); err != nil {
 		return err
 	}
@@ -370,6 +379,25 @@ func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
+	}
+	var identity *CoordinatorReadyPoolIdentityV1
+	explicitIdentityProvider := false
+	if flagWasSet(fs, "identity-file") {
+		parsed, identityErr := loadReadyPoolIdentity(*identityFile)
+		if identityErr != nil {
+			return identityErr
+		}
+		explicitProvider, providerErr := validateReadyPoolEnsureProviderArgs(fs.Args(), parsed)
+		if providerErr != nil {
+			return providerErr
+		}
+		if explicitProvider {
+			setProviderSelection(&cfg, parsed.Image.Provider, providerSelectionFlag)
+			explicitIdentityProvider = true
+		} else if providerErr := bindReadyPoolIdentityConfiguredProvider(&cfg, parsed); providerErr != nil {
+			return providerErr
+		}
+		identity = &parsed
 	}
 	coord, err := readyPoolCoordinatorFromConfig(cfg)
 	if err != nil {
@@ -393,6 +421,9 @@ func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 		if err := validateReadyPoolSeedIdentity(*identity, borrowInput); err != nil {
 			return err
 		}
+		if providerErr := bindReadyPoolIdentityProvider(borrowInput, *identity); providerErr != nil {
+			return providerErr
+		}
 		borrowInput["identity"] = *identity
 	}
 	prewarmArgs := append([]string{}, fs.Args()...)
@@ -401,6 +432,9 @@ func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 		prewarmArgs = append(prewarmArgs, "--pool-compatibility-key", strings.TrimSpace(*compatibilityKey))
 	}
 	if identity != nil {
+		if !explicitIdentityProvider {
+			prewarmArgs = append(prewarmArgs, "--provider", identity.Image.Provider)
+		}
 		prewarmArgs = append(prewarmArgs, "--pool-identity-file", *identityFile)
 	}
 	prewarmApp := a
@@ -576,6 +610,81 @@ func readyPoolBorrowInput(repo, ref, commit, fingerprint, compatibilityKey, prov
 	return input
 }
 
+func bindReadyPoolIdentityProvider(input map[string]any, identity CoordinatorReadyPoolIdentityV1) error {
+	requested := readyPoolInputString(input, "provider")
+	if requested != "" {
+		provider, err := canonicalProviderName(requested)
+		if err != nil || provider != identity.Image.Provider {
+			return exit(2, "typed ready-pool provider %q does not match identity provider %q", requested, identity.Image.Provider)
+		}
+	}
+	input["provider"] = identity.Image.Provider
+	return nil
+}
+
+func bindReadyPoolIdentityProviderConfig(cfg *Config, fs *flag.FlagSet, providerValue *string, identity CoordinatorReadyPoolIdentityV1) error {
+	if providerValue == nil {
+		return exit(2, "typed ready-pool provider selection is unavailable")
+	}
+	if flagWasSet(fs, "provider") {
+		provider, err := canonicalProviderName(*providerValue)
+		if err != nil || provider != identity.Image.Provider {
+			return exit(2, "typed ready-pool provider %q does not match identity provider %q", *providerValue, identity.Image.Provider)
+		}
+		*providerValue = identity.Image.Provider
+		return nil
+	}
+	if err := bindReadyPoolIdentityConfiguredProvider(cfg, identity); err != nil {
+		return err
+	}
+	*providerValue = identity.Image.Provider
+	return nil
+}
+
+func bindReadyPoolIdentityConfiguredProvider(cfg *Config, identity CoordinatorReadyPoolIdentityV1) error {
+	if providerSelectionIsActionable(*cfg) {
+		provider, err := canonicalProviderName(cfg.Provider)
+		if err != nil || provider != identity.Image.Provider {
+			return exit(2, "configured typed ready-pool provider %q does not match identity provider %q", cfg.Provider, identity.Image.Provider)
+		}
+	} else {
+		setProviderSelection(cfg, identity.Image.Provider, providerSelectionLeaseContext)
+	}
+	return nil
+}
+
+func validateReadyPoolIdentityProviderConfig(cfg Config, identity CoordinatorReadyPoolIdentityV1) error {
+	provider, err := canonicalProviderName(cfg.Provider)
+	if err != nil || provider != identity.Image.Provider {
+		return exit(2, "routed typed ready-pool provider %q does not match identity provider %q", cfg.Provider, identity.Image.Provider)
+	}
+	_, err = validateReadyPoolIdentityProvider(provider)
+	return err
+}
+
+func validateReadyPoolEnsureProviderArgs(args []string, identity CoordinatorReadyPoolIdentityV1) (bool, error) {
+	found := false
+	for index := 0; index < len(args); index++ {
+		arg := strings.TrimSpace(args[index])
+		var provider string
+		switch {
+		case (arg == "--provider" || arg == "-provider") && index+1 < len(args):
+			index++
+			provider = args[index]
+		case strings.HasPrefix(arg, "--provider=") || strings.HasPrefix(arg, "-provider="):
+			provider = strings.TrimPrefix(strings.TrimPrefix(arg, "--provider="), "-provider=")
+		default:
+			continue
+		}
+		found = true
+		canonical, err := canonicalProviderName(provider)
+		if err != nil || canonical != identity.Image.Provider {
+			return false, exit(2, "typed ready-pool provider %q does not match identity provider %q", provider, identity.Image.Provider)
+		}
+	}
+	return found, nil
+}
+
 func readyPoolRegisterCommit(cfg Config, repo Repo, ref, explicitCommit string) string {
 	if explicitCommit = strings.TrimSpace(explicitCommit); explicitCommit != "" {
 		return explicitCommit
@@ -681,7 +790,7 @@ func borrowValidatedTypedReadyPoolLease(ctx context.Context, coord *CoordinatorC
 		_, drainErr := coord.ReturnTypedReadyPoolLease(drainCtx, key, returnInput)
 		cancel()
 		if drainErr != nil {
-			return response, fmt.Errorf("%w; drain mismatched ready-pool entry: %v", err, drainErr)
+			return response, errors.Join(err, fmt.Errorf("drain mismatched ready-pool entry: %w", drainErr))
 		}
 	}
 	return response, err
