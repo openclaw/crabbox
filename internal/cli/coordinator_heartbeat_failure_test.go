@@ -24,14 +24,18 @@ func (w heartbeatWarningWriter) Write(p []byte) (int, error) {
 }
 
 func TestCoordinatorHeartbeatControlFailure(t *testing.T) {
+	// Explicit clients and private servers let the real deadlines overlap.
+	t.Parallel()
 	for _, mode := range []string{"expired budget", "immediate rejection", "failed fallback", "caller cancellation"} {
 		t.Run(mode, func(t *testing.T) {
-			clearConfigEnv(t)
-			t.Setenv("CRABBOX_OWNER", "synthetic@example.com")
+			t.Parallel()
 			var httpRequests atomic.Int32
 			received := make(chan struct{}, 1)
 			fallback := make(chan struct{}, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer synthetic-fixture-token" {
+					t.Error("heartbeat did not use the explicit fixture token")
+				}
 				switch r.URL.Path {
 				case "/v1/control":
 					conn, err := websocket.Accept(w, r, nil)
