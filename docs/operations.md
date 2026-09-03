@@ -430,6 +430,13 @@ CloudWatch evidence, client URL/bearer contract, idempotent cleanup, rollback,
 and retirement. Deployment and the paid create/delete canary require a separate
 AWS GO; code merge alone is not approval.
 
+### Pre-merge AWS image qualification
+
+The [AWS Image Qualification Authority](behavior/aws-image-qualification.md)
+documents the credential-isolated service-binding boundary for exact-candidate
+Linux image lifecycle and rollback proof. It is a separate, opt-in sandbox
+deployment and does not authorize cloud setup or a paid run.
+
 ### Minimum coordinator configuration
 
 Configure `CRABBOX_PUBLIC_URL`, one auth model, and at least one brokered

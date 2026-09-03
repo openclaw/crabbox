@@ -1,6 +1,11 @@
 import { AwsClient } from "aws4fetch";
 import { XMLParser } from "fast-xml-parser";
 
+import type {
+  AWSQualificationRequest,
+  AWSQualificationService,
+  AWSQualificationTransportBinding,
+} from "./aws-qualification-contract";
 import { requireAWSRegion, sanitizeAWSRegion } from "./aws-region";
 import { awsRunInstancesUserData } from "./bootstrap";
 import {
@@ -284,10 +289,71 @@ class RefreshingAWSFetchClient implements AWSFetchClient {
   }
 }
 
+class QualificationAWSFetchClient implements AWSFetchClient {
+  constructor(
+    private readonly binding: AWSQualificationTransportBinding,
+    private readonly service: AWSQualificationService,
+    private readonly region: string,
+  ) {}
+
+  async fetch(_input: string, init?: RequestInit): Promise<Response> {
+    const request = qualificationRequest(this.service, this.region, init);
+    let result;
+    try {
+      result = await this.binding.execute(request);
+    } catch {
+      // The authority keeps opId receipts and pending intents. A same-op retry is safe
+      // after a lost RPC response and never falls back to candidate-held credentials.
+      result = await this.binding.execute(request);
+    }
+    return new Response(result.body, { status: result.status });
+  }
+}
+
+function qualificationRequest(
+  service: AWSQualificationService,
+  region: string,
+  init?: RequestInit,
+): AWSQualificationRequest {
+  if (init?.method !== "POST" || typeof init.body !== "string") {
+    throw new Error("AWS qualification transport requires a bounded POST body");
+  }
+  const opId = crypto.randomUUID();
+  if (service === "ec2" || service === "sts") {
+    const body = new URLSearchParams(init.body);
+    const action = body.get("Action") ?? "";
+    body.delete("Action");
+    body.delete("Version");
+    if (!action) throw new Error("AWS qualification transport request is missing an action");
+    return { opId, region, service, action, parameters: Object.fromEntries(body) };
+  }
+  const target = new Headers(init.headers).get("x-amz-target") ?? "";
+  const action = target.split(".").at(-1) ?? "";
+  if (!action) throw new Error("AWS qualification transport request is missing a target");
+  const parsed = JSON.parse(init.body) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("AWS qualification transport request body must be an object");
+  }
+  return {
+    opId,
+    region,
+    service,
+    action,
+    parameters: parsed as Record<string, unknown>,
+  };
+}
+
 export function awsCredentialsConfigured(
-  env: Pick<Env, "awsCredentialProvider" | "AWS_ACCESS_KEY_ID" | "AWS_SECRET_ACCESS_KEY">,
+  env: Pick<
+    Env,
+    | "CRABBOX_AWS_QUALIFICATION_TRANSPORT"
+    | "awsCredentialProvider"
+    | "AWS_ACCESS_KEY_ID"
+    | "AWS_SECRET_ACCESS_KEY"
+  >,
 ): boolean {
   return Boolean(
+    env.CRABBOX_AWS_QUALIFICATION_TRANSPORT ||
     env.awsCredentialProvider ||
     (env.AWS_ACCESS_KEY_ID?.trim() && env.AWS_SECRET_ACCESS_KEY?.trim()),
   );
@@ -609,15 +675,27 @@ export class EC2SpotClient {
         `AWS region mismatch: expected ${expected.region}, configured ${this.region}`,
       );
     }
-    const credentials = awsCredentialProvider(env);
     this.endpoint = `https://ec2.${this.region}.amazonaws.com/`;
     this.serviceQuotasEndpoint = `https://servicequotas.${this.region}.amazonaws.com/`;
     this.stsEndpoint = `https://sts.${this.region}.amazonaws.com/`;
     this.ssmEndpoint = `https://ssm.${this.region}.amazonaws.com/`;
-    this.aws = new RefreshingAWSFetchClient(credentials, "ec2", this.region);
-    this.serviceQuotas = new RefreshingAWSFetchClient(credentials, "servicequotas", this.region);
-    this.stsClient = new RefreshingAWSFetchClient(credentials, "sts", this.region);
-    this.ssmClient = new RefreshingAWSFetchClient(credentials, "ssm", this.region);
+    const qualification = env.CRABBOX_AWS_QUALIFICATION_TRANSPORT;
+    if (qualification) {
+      this.aws = new QualificationAWSFetchClient(qualification, "ec2", this.region);
+      this.serviceQuotas = new QualificationAWSFetchClient(
+        qualification,
+        "servicequotas",
+        this.region,
+      );
+      this.stsClient = new QualificationAWSFetchClient(qualification, "sts", this.region);
+      this.ssmClient = new QualificationAWSFetchClient(qualification, "ssm", this.region);
+    } else {
+      const credentials = awsCredentialProvider(env);
+      this.aws = new RefreshingAWSFetchClient(credentials, "ec2", this.region);
+      this.serviceQuotas = new RefreshingAWSFetchClient(credentials, "servicequotas", this.region);
+      this.stsClient = new RefreshingAWSFetchClient(credentials, "sts", this.region);
+      this.ssmClient = new RefreshingAWSFetchClient(credentials, "ssm", this.region);
+    }
   }
 
   async capacityReadinessChecks(config: LeaseConfig): Promise<AWSCapacityReadinessCheck[]> {
@@ -1557,6 +1635,9 @@ export class EC2SpotClient {
     snapshotIDs: string[],
     availabilityZones: string[],
   ): Promise<ProviderFastSnapshotRestore[]> {
+    if (this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT) {
+      throw new Error("AWS qualification fast snapshot restore is disabled");
+    }
     const snapshots = uniqueStrings(snapshotIDs);
     const zones = uniqueStrings(availabilityZones);
     if (snapshots.length === 0 || zones.length === 0) {
@@ -1601,6 +1682,9 @@ export class EC2SpotClient {
     snapshotIDs: string[],
     availabilityZones: string[] = [],
   ): Promise<ProviderFastSnapshotRestore[]> {
+    if (this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT) {
+      return [];
+    }
     const snapshots = uniqueStrings(snapshotIDs);
     const zones = uniqueStrings(availabilityZones);
     if (snapshots.length === 0) {
@@ -2215,6 +2299,12 @@ export class EC2SpotClient {
         "GroupId.1": groupID,
       });
       group = items(record(existing["securityGroupInfo"])["item"])[0];
+      if (this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT) {
+        if (asString(record(group)["groupId"]) !== groupID) {
+          throw new Error(`AWS qualification security group is unavailable: ${groupID}`);
+        }
+        return groupID;
+      }
     } else {
       const vpcID = await this.securityGroupVPC(config);
       const name = awsManagedSecurityGroupName(config);

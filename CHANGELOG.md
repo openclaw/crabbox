@@ -18,6 +18,7 @@
 - Added typed GCP ready-pool cohorts bound to exact boot-image or disk-snapshot provenance while allowing capacity fallback across zones. [PR 1621](https://github.com/openclaw/crabbox/pull/1621). Thanks @vincentkoc.
 
 - Report OpenSandbox cleanup failures instead of silently succeeding, preserve the original command exit when cleanup also fails, and finalize timing/session results after cleanup without weakening reuse admission or absolute TTL checks. [PR 1804](https://github.com/openclaw/crabbox/pull/1804). Thanks @steipete.
+- Added a credential-isolated AWS image-qualification transport and non-public per-run authority with fixed sandbox policy, bounded intent reconciliation, verified resource ownership, and eventual-consistency-aware teardown, without changing normal AWS credential behavior. [PR 1778](https://github.com/openclaw/crabbox/pull/1778). Thanks @vincentkoc.
 
 ## 0.49.0 - 2026-09-03
 

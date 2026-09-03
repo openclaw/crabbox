@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "crabbox-aws-qualification-authority",
+  "main": "src/aws-qualification-authority.ts",
+  "compatibility_date": "2026-09-03",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "AWS_QUALIFICATION_RUNS",
+        "class_name": "AWSQualificationRun",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "aws-qualification-v1",
+      "new_sqlite_classes": ["AWSQualificationRun"],
+    },
+  ],
+}
