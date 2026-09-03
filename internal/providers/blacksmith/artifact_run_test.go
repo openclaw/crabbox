@@ -190,7 +190,7 @@ func TestBlacksmithArtifactRunShellAndTerminalExit(t *testing.T) {
 
 func TestBlacksmithArtifactRunCollectionFailurePreservesWorkload(t *testing.T) {
 	requireBlacksmithArtifactShell(t)
-	for _, kind := range []string{"required", "files", "compressed-bytes", "local-write"} {
+	for _, kind := range []string{"required", "files", "compressed-bytes", "local-write", "remote-timeout"} {
 		for _, code := range []int{0, 1, 23} {
 			t.Run(fmt.Sprintf("%s/%d", kind, code), func(t *testing.T) {
 				isolateBlacksmithOwnership(t)
@@ -215,10 +215,19 @@ func TestBlacksmithArtifactRunCollectionFailurePreservesWorkload(t *testing.T) {
 				case "local-write":
 					testWriteBlacksmithFile(t, repo, ".crabbox/runs", "not a directory")
 				}
+				runs := 0
 				runner := &blacksmithFuncRunner{fn: func(native LocalCommandRequest) (LocalCommandResult, error) {
+					runs++
+					if kind == "remote-timeout" {
+						start, exit, end := testBlacksmithReceiptFrames(t, syntheticBlacksmithCommand(t, native), code)
+						fmt.Fprint(native.Stdout, start+exit+strings.Replace(end, ":end:0", ":end:124", 1))
+						return LocalCommandResult{}, nil
+					}
 					return runSyntheticBlacksmithCommand(t, t.Context(), native)
 				}}
 				backend := newTestBlacksmithBackend(baseConfig(), runner)
+				var stderr bytes.Buffer
+				backend.rt.Stderr = &stderr
 				result, err := backend.Run(t.Context(), req)
 				want := code
 				if code == 0 {
@@ -230,6 +239,9 @@ func TestBlacksmithArtifactRunCollectionFailurePreservesWorkload(t *testing.T) {
 				var ee ExitError
 				if !errors.As(err, &ee) || ee.Code != want || result.ExitCode != want || len(result.Artifacts) != 0 {
 					t.Fatalf("result=%+v err=%v", result, err)
+				}
+				if kind == "remote-timeout" && (runs != 1 || !strings.Contains(stderr.String(), "blacksmith artifact retrieval failed: collection exited 124\n")) {
+					t.Fatalf("remote collection timeout not reported: runs=%d stderr=%q", runs, stderr.String())
 				}
 			})
 		}
@@ -383,16 +395,24 @@ func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 						<-runCtx.Done()
 						return LocalCommandResult{ExitCode: 1}, runCtx.Err()
 					case "remote-collection-timeout":
-						// Exercise the actual timeout command, leaving the local
-						// receipt deadline long enough to receive its terminal code.
+						// Buffer receipts until the real remote timeout finishes so
+						// the equal local budget starts only after native completion.
 						for i, arg := range req.Args {
 							if strings.HasPrefix(arg, "/bin/sh -c ") {
 								req.Args[i] = strings.Replace(arg, "set -euo pipefail", "sleep 1; set -euo pipefail", 1)
 							}
 						}
-						// This fixture waits independently of the adapter's local
-						// timer so the shell must enforce the remote timeout itself.
-						return runSyntheticBlacksmithCommand(t, t.Context(), req)
+						stdout, stderr := req.Stdout, req.Stderr
+						var out, errout bytes.Buffer
+						req.Stdout, req.Stderr = &out, &errout
+						native, err := runSyntheticBlacksmithCommand(t, t.Context(), req)
+						_, _, end := testBlacksmithReceiptFrames(t, syntheticBlacksmithCommand(t, req), code)
+						if err != nil || native.ExitCode != 0 || !strings.HasSuffix(out.String(), strings.Replace(end, ":end:0", ":end:124", 1)) {
+							t.Errorf("remote timeout did not complete cleanly: code=%d err=%v", native.ExitCode, err)
+						}
+						_, _ = stdout.Write(out.Bytes())
+						_, _ = stderr.Write(errout.Bytes())
+						return native, err
 					case "missing-timeout":
 						for i, arg := range req.Args {
 							req.Args[i] = strings.Replace(arg, "timeout --kill-after=1s", "crabbox_nonexistent_timeout --kill-after=1s", 1)
@@ -426,11 +446,20 @@ func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 					if err != nil || got != code || len(artifacts.Artifacts) != 1 || ended.Sub(begin) < budget {
 						t.Fatalf("workload was bounded: code=%d err=%v", got, err)
 					}
+				} else if kind == "remote-collection-timeout" {
+					var ee ExitError
+					if got != code || ended.IsZero() || !errors.As(err, &ee) || ee.Code != 7 || ee.Message != "collection exited 124" || len(artifacts.Artifacts) != 0 {
+						t.Fatalf("remote collection timeout lost workload result: code=%d ended=%v artifacts=%+v err=%v", got, ended, artifacts, err)
+					}
+					path := core.LocalRunArtifactPath(repo, "", "tbx_budget", "blacksmith-artifacts.tgz")
+					if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+						t.Fatalf("remote collection timeout published an archive: %v", statErr)
+					}
 				} else {
 					if err == nil || len(artifacts.Artifacts) != 0 || got == 0 {
 						t.Fatalf("unconfirmed success code=%d err=%v", got, err)
 					}
-					if (kind == "local-collection-stall" || kind == "remote-collection-timeout") && code != 0 && got != code {
+					if kind == "local-collection-stall" && code != 0 && got != code {
 						t.Fatalf("lost workload exit %d: %d", code, got)
 					}
 					if kind == "sync-stall" && got != 124 {
