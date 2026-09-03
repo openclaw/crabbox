@@ -34,6 +34,11 @@ Bootstrap creates:
 - shared package cache directories `/var/cache/crabbox/pnpm` and
   `/var/cache/crabbox/npm`.
 
+After writing the SSH port configuration, bootstrap reloads systemd and restarts
+the active `ssh.socket`, or the SSH service on images without socket activation.
+This also runs on prepared images that skip package installation: restarting only
+the service would keep the socket's previous listening ports.
+
 Bootstrap installs only a small base set with `--no-install-recommends`:
 
 - `ca-certificates`

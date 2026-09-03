@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { awsUserData, windowsBootstrapPowerShell } from "../src/bootstrap";
 import {
+  sharedLinuxSSHRestart,
   googleLinuxSigningKeyFingerprint,
   defaultTailscaleVersion,
   defaultTailscaleAMD64SHA256,
@@ -103,8 +104,15 @@ describe("shared bootstrap composition fixtures", () => {
         fragments.push(
           sharedMacOS(config.sshUser, config.sshPublicKey, config.workRoot, fixture.ports),
         );
-      } else if (config.code) {
-        fragments.push(sharedCodeServerInstall());
+      } else {
+        fragments.push(
+          sharedLinuxSSHRestart()
+            .trimEnd()
+            .split("\n")
+            .map((line) => `    ${line}`)
+            .join("\n"),
+        );
+        if (config.code) fragments.push(sharedCodeServerInstall());
       }
       if (config.tailscale) {
         fragments.push(

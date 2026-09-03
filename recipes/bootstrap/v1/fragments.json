@@ -2,6 +2,11 @@
   "schema": "crabbox-bootstrap-fragments/v1",
   "fragments": [
     {
+      "name": "linuxSSHRestart",
+      "file": "linuxSSHRestart.sh",
+      "parameters": {}
+    },
+    {
       "name": "windowsHeader",
       "file": "windowsHeader.ps1",
       "parameters": {

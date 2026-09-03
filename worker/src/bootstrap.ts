@@ -1,4 +1,5 @@
 import {
+  sharedLinuxSSHRestart,
   sharedWslTruffleHogInstall,
   sharedWindowsHeader,
   sharedWindowsRuntime,
@@ -63,6 +64,7 @@ export function cloudInit(config: LeaseConfig, additionalBootstrap = ""): string
   const writeFiles = optionalWriteFiles(config);
   const bootstrap = [optionalBootstrap(config), additionalBootstrap].filter(Boolean).join("\n");
   const readinessBootstrap = indentRuncmdScript(linuxMinimalReadinessBootstrap);
+  const sshRestart = indentRuncmdScript(sharedLinuxSSHRestart());
   return `#cloud-config
 package_update: false
 package_upgrade: false
@@ -115,7 +117,7 @@ runcmd:
   - |
     bash -euxo pipefail <<'BOOT'
     export DEBIAN_FRONTEND=noninteractive
-    timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true
+${sshRestart}
     retry() {
       n=1
       until "$@"; do
@@ -131,7 +133,7 @@ ${readinessBootstrap}
     chown -R ${config.sshUser}:${config.sshUser} ${config.workRoot} /var/cache/crabbox
     install -d /var/lib/crabbox
     systemctl enable ssh || true
-    timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true
+${sshRestart}
 ${bootstrap}
     systemctl daemon-reload
     systemctl enable crabbox-workspace-ready.service
