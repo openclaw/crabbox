@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -202,6 +203,1543 @@ func assertNoGitOverlayResidue(t *testing.T, workdir string) {
 	}
 }
 
+func TestGitOverlaySnapshotRetriesWhenCleanTrackedFileChanges(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	_, excludes := fixture.manifest(t)
+	attempts := 0
+	snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+		if phase == "snapshot_fingerprinted" {
+			attempts = attempt
+			if attempt == 1 {
+				mustWriteTestFile(t, filepath.Join(fixture.root, "clean.txt"), "changed during fingerprint\n")
+			}
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = snapshot.cleanup() }()
+	if attempts != 2 {
+		t.Fatalf("snapshot attempts=%d want 2", attempts)
+	}
+	if !slices.Contains(snapshot.Manifest.OverlayFiles, "clean.txt") {
+		t.Fatalf("newly changed tracked file missing from overlay: %v", snapshot.Manifest.OverlayFiles)
+	}
+	if got, readErr := os.ReadFile(filepath.Join(snapshot.Root, "clean.txt")); readErr != nil || string(got) != "changed during fingerprint\n" {
+		t.Fatalf("snapshot clean.txt=%q err=%v", got, readErr)
+	}
+	assertGitOverlaySnapshotFingerprint(t, fixture.repo, fixture.cfg, excludes, fixture.plan, snapshot)
+}
+
+func TestGitOverlaySnapshotRetriesSameSizeChangedFileMutation(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "aaaa\n")
+	_, excludes := fixture.manifest(t)
+	attempts := 0
+	snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+		if phase == "snapshot_fingerprinted" {
+			attempts = attempt
+			if attempt == 1 {
+				mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "bbbb\n")
+			}
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = snapshot.cleanup() }()
+	if attempts != 2 {
+		t.Fatalf("snapshot attempts=%d want 2", attempts)
+	}
+	if got, readErr := os.ReadFile(filepath.Join(snapshot.Root, "unstaged.txt")); readErr != nil || string(got) != "bbbb\n" {
+		t.Fatalf("snapshot unstaged.txt=%q err=%v", got, readErr)
+	}
+	assertGitOverlaySnapshotFingerprint(t, fixture.repo, fixture.cfg, excludes, fixture.plan, snapshot)
+}
+
+func TestGitOverlaySnapshotRetriesReplacementAfterLstat(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	source := filepath.Join(fixture.root, "unstaged.txt")
+	mustWriteTestFile(t, source, "aaaa\n")
+	info, err := os.Lstat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, excludes := fixture.manifest(t)
+	attempts := 0
+	snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+		if phase == "snapshot_created" {
+			attempts = attempt
+		}
+		if phase != "after_lstat" || attempt != 1 {
+			return
+		}
+		if err := os.Rename(source, source+".old"); err != nil {
+			t.Fatal(err)
+		}
+		mustWriteTestFile(t, source, "bbbb\n")
+		if err := os.Chmod(source, info.Mode().Perm()); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(source, info.ModTime(), info.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = snapshot.cleanup() }()
+	if attempts != 2 {
+		t.Fatalf("snapshot attempts=%d want 2", attempts)
+	}
+	if got, readErr := os.ReadFile(filepath.Join(snapshot.Root, "unstaged.txt")); readErr != nil || string(got) != "bbbb\n" {
+		t.Fatalf("snapshot unstaged.txt=%q err=%v", got, readErr)
+	}
+}
+
+func TestGitOverlaySnapshotRetriesMetadataChangeAfterLstat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes")
+	}
+	fixture := newGitOverlayFixture(t)
+	source := filepath.Join(fixture.root, "unstaged.txt")
+	mustWriteTestFile(t, source, "local change\n")
+	if err := os.Chmod(source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, excludes := fixture.manifest(t)
+	attempts := 0
+	snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+		if phase == "snapshot_created" {
+			attempts = attempt
+		}
+		if phase == "after_lstat" && attempt == 1 {
+			if err := os.Chmod(source, 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = snapshot.cleanup() }()
+	if attempts != 2 {
+		t.Fatalf("snapshot attempts=%d want 2", attempts)
+	}
+	info, err := os.Stat(filepath.Join(snapshot.Root, "unstaged.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o640 {
+		t.Fatalf("snapshot mode=%#o want 0640", got)
+	}
+}
+
+func TestGitOverlaySnapshotClassifiesDisappearanceAfterLstatAsDrift(t *testing.T) {
+	for _, kind := range []string{"regular file", "symlink", "nested parent"} {
+		t.Run(kind, func(t *testing.T) {
+			if kind == "symlink" && runtime.GOOS == "windows" {
+				t.Skip("POSIX symlink integration")
+			}
+			sourceRoot := t.TempDir()
+			snapshotRoot := t.TempDir()
+			rel := "payload"
+			source := filepath.Join(sourceRoot, rel)
+			remove := source
+			if kind == "nested parent" {
+				rel = "nested/payload"
+				source = filepath.Join(sourceRoot, filepath.FromSlash(rel))
+				remove = filepath.Dir(source)
+			}
+			mustWriteTestFile(t, source, "payload\n")
+			if kind == "symlink" {
+				if err := os.Remove(source); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("target", source); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := copyGitOverlaySnapshotWithHook(sourceRoot, snapshotRoot, []string{rel}, 1, func(phase string, _ int, _ string) {
+				if phase == "after_lstat" {
+					if err := os.RemoveAll(remove); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+			if !errors.Is(err, errGitOverlaySnapshotDrift) {
+				t.Fatalf("disappearance error=%v, want snapshot drift", err)
+			}
+		})
+	}
+}
+
+func TestGitOverlaySnapshotStableSourceErrorsStayTerminal(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "source")
+	mustWriteTestFile(t, source, "stable\n")
+	observed, err := os.Lstat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, operationErr := range []error{errors.New("synthetic source failure"), os.ErrPermission} {
+		got := classifyGitOverlaySnapshotSourceError(source, observed, operationErr)
+		if !errors.Is(got, operationErr) || errors.Is(got, errGitOverlaySnapshotDrift) {
+			t.Fatalf("stable source error=%v, want terminal %v", got, operationErr)
+		}
+	}
+}
+
+func TestGitOverlaySnapshotRetriesIgnoreRuleDriftAndOwnsAcceptedRules(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	mustWriteTestFile(t, filepath.Join(fixture.root, "generated.txt"), "generated\n")
+	_, excludes := fixture.manifest(t)
+	attempts := 0
+	snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+		if phase == "snapshot_created" {
+			attempts = attempt
+		}
+		if phase == "snapshot_fingerprinted" && attempt == 1 {
+			mustWriteTestFile(t, filepath.Join(fixture.root, ".crabboxignore"), "generated.txt\n")
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = snapshot.cleanup() }()
+	if attempts != 2 {
+		t.Fatalf("snapshot attempts=%d want 2", attempts)
+	}
+	if slices.Contains(snapshot.Manifest.Files, "generated.txt") || slices.Contains(snapshot.Manifest.OverlayFiles, "generated.txt") {
+		t.Fatalf("accepted snapshot retained newly excluded file: %+v", snapshot.Manifest)
+	}
+	if !slices.Contains(snapshot.Excludes.patterns(), "generated.txt") {
+		t.Fatalf("accepted snapshot excludes=%v", snapshot.Excludes.patterns())
+	}
+	assertGitOverlaySnapshotFingerprint(t, fixture.repo, fixture.cfg, snapshot.Excludes, fixture.plan, snapshot)
+}
+
+func TestGitOverlaySnapshotDestinationFailureIsTerminal(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "local change\n")
+	_, excludes := fixture.manifest(t)
+	attempts := 0
+	var snapshotRoot string
+	_, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, root string) {
+		if phase != "snapshot_created" {
+			return
+		}
+		attempts = attempt
+		snapshotRoot = root
+		mustWriteTestFile(t, filepath.Join(root, "unstaged.txt"), "obstruction\n")
+	})
+	if snapshotRoot != "" {
+		t.Cleanup(func() { _ = os.RemoveAll(snapshotRoot) })
+	}
+	if err == nil || errors.Is(err, errGitOverlaySnapshotDrift) {
+		t.Fatalf("destination failure=%v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("terminal destination failure attempts=%d want 1", attempts)
+	}
+}
+
+func TestGitOverlaySnapshotABAMutationCannotDivergeFingerprint(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "aaaa\n")
+	_, excludes := fixture.manifest(t)
+	snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+		if attempt != 1 {
+			return
+		}
+		switch phase {
+		case "snapshot_fingerprinted":
+			mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "bbbb\n")
+		case "before_live_fingerprint":
+			mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "aaaa\n")
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = snapshot.cleanup() }()
+	if got, readErr := os.ReadFile(filepath.Join(snapshot.Root, "unstaged.txt")); readErr != nil || string(got) != "aaaa\n" {
+		t.Fatalf("snapshot unstaged.txt=%q err=%v", got, readErr)
+	}
+	assertGitOverlaySnapshotFingerprint(t, fixture.repo, fixture.cfg, excludes, fixture.plan, snapshot)
+}
+
+func TestGitOverlaySnapshotStableTreeReusesFingerprint(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "stable local change\n")
+	_, excludes := fixture.manifest(t)
+	first, err := prepareGitOverlaySnapshot(fixture.repo, fixture.cfg, excludes, nil, fixture.plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.cleanup() }()
+	second, err := prepareGitOverlaySnapshot(fixture.repo, fixture.cfg, excludes, nil, fixture.plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.cleanup() }()
+	if first.Fingerprint == "" || first.Fingerprint != second.Fingerprint {
+		t.Fatalf("stable snapshot fingerprints first=%q second=%q", first.Fingerprint, second.Fingerprint)
+	}
+	if !sameSyncManifest(first.Manifest, second.Manifest) {
+		t.Fatalf("stable snapshot manifests diverged: first=%+v second=%+v", first.Manifest, second.Manifest)
+	}
+}
+
+func TestGitOverlaySnapshotAcceptsStableStagedIndex(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	mustWriteTestFile(t, filepath.Join(fixture.root, "staged.txt"), "stable staged change\n")
+	runGit(t, fixture.root, "add", "staged.txt")
+	wantState, err := captureGitOverlayCheckoutState(fixture.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantState.IndexTree == fixture.plan.Tree {
+		t.Fatalf("staged index tree=%q unexpectedly matches target tree", wantState.IndexTree)
+	}
+	_, excludes := fixture.manifest(t)
+	snapshot, err := prepareGitOverlaySnapshot(fixture.repo, fixture.cfg, excludes, nil, fixture.plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = snapshot.cleanup() }()
+	if snapshot.Checkout != wantState {
+		t.Fatalf("snapshot checkout=%+v want %+v", snapshot.Checkout, wantState)
+	}
+	if got, readErr := os.ReadFile(filepath.Join(snapshot.Root, "staged.txt")); readErr != nil || string(got) != "stable staged change\n" {
+		t.Fatalf("snapshot staged.txt=%q err=%v", got, readErr)
+	}
+}
+
+func TestGitOverlaySnapshotRetriesIndexMutation(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	mustWriteTestFile(t, filepath.Join(fixture.root, "staged.txt"), "first staged value\n")
+	runGit(t, fixture.root, "add", "staged.txt")
+	_, excludes := fixture.manifest(t)
+	attempts := 0
+	snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+		if phase == "initial_checkout_state_captured" {
+			attempts = attempt
+		}
+		if phase == "before_final_checkout_state" && attempt == 1 {
+			mustWriteTestFile(t, filepath.Join(fixture.root, "staged.txt"), "second staged value\n")
+			runGit(t, fixture.root, "add", "staged.txt")
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = snapshot.cleanup() }()
+	if attempts != 2 {
+		t.Fatalf("snapshot attempts=%d want 2", attempts)
+	}
+	if got, readErr := os.ReadFile(filepath.Join(snapshot.Root, "staged.txt")); readErr != nil || string(got) != "second staged value\n" {
+		t.Fatalf("snapshot staged.txt=%q err=%v", got, readErr)
+	}
+	if snapshot.Checkout.IndexTree != gitOutput(fixture.root, "write-tree") {
+		t.Fatalf("snapshot index tree=%q current=%q", snapshot.Checkout.IndexTree, gitOutput(fixture.root, "write-tree"))
+	}
+}
+
+func TestGitOverlaySnapshotRetriesIndexMutationAcrossValidationWindows(t *testing.T) {
+	for _, phase := range []string{"before_initial_validation_checkout_state", "before_accepted_checkout_state"} {
+		t.Run(phase, func(t *testing.T) {
+			fixture := newGitOverlayFixture(t)
+			mustWriteTestFile(t, filepath.Join(fixture.root, "staged.txt"), "first staged value\n")
+			runGit(t, fixture.root, "add", "staged.txt")
+			_, excludes := fixture.manifest(t)
+			attempts := 0
+			snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(current string, attempt int, _ string) {
+				attempts = max(attempts, attempt)
+				if current == phase && attempt == 1 {
+					mustWriteTestFile(t, filepath.Join(fixture.root, "staged.txt"), "second staged value\n")
+					runGit(t, fixture.root, "add", "staged.txt")
+				}
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = snapshot.cleanup() }()
+			if attempts != 2 {
+				t.Fatalf("snapshot attempts=%d want 2", attempts)
+			}
+			if got, readErr := os.ReadFile(filepath.Join(snapshot.Root, "staged.txt")); readErr != nil || string(got) != "second staged value\n" {
+				t.Fatalf("snapshot staged.txt=%q err=%v", got, readErr)
+			}
+		})
+	}
+}
+
+func TestGitOverlaySnapshotFinalAcceptedManifestRejectsLateMutation(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "first local value\n")
+	_, excludes := fixture.manifest(t)
+	attempts := 0
+	snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+		attempts = max(attempts, attempt)
+		if phase == "before_final_checkout_state" && attempt == 1 {
+			mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "second local value\n")
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = snapshot.cleanup() }()
+	if attempts != 2 {
+		t.Fatalf("snapshot attempts=%d want 2", attempts)
+	}
+	if got, readErr := os.ReadFile(filepath.Join(snapshot.Root, "unstaged.txt")); readErr != nil || string(got) != "second local value\n" {
+		t.Fatalf("snapshot unstaged.txt=%q err=%v", got, readErr)
+	}
+}
+
+func TestGitOverlaySnapshotHeadMutationDuringInitialValidationBecomesStaleTarget(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	_, excludes := fixture.manifest(t)
+	created := false
+	_, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+		if phase == "snapshot_created" {
+			created = true
+		}
+		if phase == "before_initial_validation_checkout_state" && attempt == 1 {
+			mustWriteTestFile(t, filepath.Join(fixture.root, "new-head.txt"), "new head\n")
+			runGit(t, fixture.root, "add", "new-head.txt")
+			runGit(t, fixture.root, "commit", "-qm", "advance during initial validation")
+		}
+	})
+	if err == nil || !strings.Contains(err.Error(), "head_changed") || errors.Is(err, errGitOverlaySnapshotDrift) {
+		t.Fatalf("advanced HEAD error=%v, want terminal stale target", err)
+	}
+	if created {
+		t.Fatal("initial validation mutation created a snapshot before stale-target rejection")
+	}
+}
+
+func TestGitOverlaySnapshotHeadMutationRetriesThenRejectsStaleTarget(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	_, excludes := fixture.manifest(t)
+	var snapshotRoots []string
+	_, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, root string) {
+		if phase == "snapshot_created" {
+			snapshotRoots = append(snapshotRoots, root)
+		}
+		if phase == "before_final_checkout_state" && attempt == 1 {
+			mustWriteTestFile(t, filepath.Join(fixture.root, "new-head.txt"), "new head\n")
+			runGit(t, fixture.root, "add", "new-head.txt")
+			runGit(t, fixture.root, "commit", "-qm", "advance local head")
+		}
+	})
+	if err == nil || !strings.Contains(err.Error(), "head_changed") || errors.Is(err, errGitOverlaySnapshotDrift) {
+		t.Fatalf("advanced HEAD error=%v, want terminal stale target", err)
+	}
+	if len(snapshotRoots) != 1 {
+		t.Fatalf("snapshot roots=%d want 1 before stale retry rejection", len(snapshotRoots))
+	}
+	if _, statErr := os.Stat(snapshotRoots[0]); !os.IsNotExist(statErr) {
+		t.Fatalf("discarded snapshot %q still exists: %v", snapshotRoots[0], statErr)
+	}
+}
+
+func TestGitOverlaySnapshotInitialTargetMismatchIsTerminal(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	runGit(t, fixture.root, "checkout", "--quiet", "--detach", "HEAD^")
+	_, excludes := fixture.manifest(t)
+	created := false
+	_, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, _ int, _ string) {
+		created = created || phase == "snapshot_created"
+	})
+	if err == nil || !strings.Contains(err.Error(), "head_changed") || errors.Is(err, errGitOverlaySnapshotDrift) {
+		t.Fatalf("initial target mismatch error=%v", err)
+	}
+	if created {
+		t.Fatal("initial target mismatch created a snapshot")
+	}
+}
+
+func TestGitOverlayCheckoutStateRejectsInvalidInitialState(t *testing.T) {
+	t.Run("unborn head", func(t *testing.T) {
+		root := t.TempDir()
+		runGit(t, root, "init", "-q")
+		if _, err := captureGitOverlayCheckoutState(root); err == nil || !strings.Contains(err.Error(), "unborn_head") || errors.Is(err, errGitOverlaySnapshotDrift) {
+			t.Fatalf("unborn checkout error=%v", err)
+		}
+	})
+
+	t.Run("invalid head", func(t *testing.T) {
+		fixture := newGitOverlayFixture(t)
+		mustWriteTestFile(t, filepath.Join(fixture.root, ".git", "HEAD"), "not a ref or object\n")
+		if _, err := captureGitOverlayCheckoutState(fixture.root); err == nil || !strings.Contains(err.Error(), "invalid_head") || errors.Is(err, errGitOverlaySnapshotDrift) {
+			t.Fatalf("invalid checkout error=%v", err)
+		}
+	})
+
+	t.Run("corrupt index", func(t *testing.T) {
+		fixture := newGitOverlayFixture(t)
+		mustWriteTestFile(t, filepath.Join(fixture.root, ".git", "index"), "corrupt index\n")
+		if _, err := captureGitOverlayCheckoutState(fixture.root); err == nil || !strings.Contains(err.Error(), "invalid_index") || errors.Is(err, errGitOverlaySnapshotDrift) {
+			t.Fatalf("corrupt index error=%v", err)
+		}
+	})
+
+	t.Run("unmerged index", func(t *testing.T) {
+		fixture := newGitOverlayFixture(t)
+		setUnmergedIndexModes(t, fixture.root, "clean.txt", "100644", "100644")
+		if _, err := captureGitOverlayCheckoutState(fixture.root); err == nil || !strings.Contains(err.Error(), "unmerged_index") || errors.Is(err, errGitOverlaySnapshotDrift) {
+			t.Fatalf("unmerged index error=%v", err)
+		}
+	})
+}
+
+func TestGitOverlayCheckoutStateAcceptsExactDetachedAndLinkedWorktree(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	runGit(t, fixture.root, "checkout", "--quiet", "--detach", fixture.repo.Head)
+	detached, err := captureGitOverlayCheckoutState(fixture.root)
+	if err != nil {
+		t.Fatalf("detached checkout: %v", err)
+	}
+	if detached.Head != fixture.repo.Head {
+		t.Fatalf("detached head=%q want %q", detached.Head, fixture.repo.Head)
+	}
+
+	linked := filepath.Join(t.TempDir(), "linked")
+	runGit(t, fixture.root, "worktree", "add", "--quiet", "--detach", linked, fixture.repo.Head)
+	t.Cleanup(func() {
+		_ = exec.Command("git", "-C", fixture.root, "worktree", "remove", "--force", linked).Run()
+	})
+	linkedRepo := fixture.repo
+	linkedRepo.Root = linked
+	linkedState, err := captureGitOverlayCheckoutState(linked)
+	if err != nil {
+		t.Fatalf("linked checkout: %v", err)
+	}
+	if linkedState.Head != fixture.repo.Head {
+		t.Fatalf("linked head=%q want %q", linkedState.Head, fixture.repo.Head)
+	}
+	linkedPlan, blocked := syncGitCoherencePlan(fixture.cfg, linkedRepo)
+	if blocked || !linkedPlan.enabled() {
+		t.Fatalf("linked plan=%+v blocked=%t", linkedPlan, blocked)
+	}
+	excludes, err := syncExcludes(linked, fixture.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := prepareGitOverlaySnapshot(linkedRepo, fixture.cfg, excludes, nil, linkedPlan)
+	if err != nil {
+		t.Fatalf("linked snapshot: %v", err)
+	}
+	defer func() { _ = snapshot.cleanup() }()
+	if snapshot.Checkout != linkedState {
+		t.Fatalf("linked snapshot checkout=%+v want %+v", snapshot.Checkout, linkedState)
+	}
+}
+
+func TestGitOverlayCheckoutStateIgnoresAmbientGitRouting(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	want, err := captureGitOverlayCheckoutState(fixture.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "missing.git"))
+	t.Setenv("GIT_WORK_TREE", t.TempDir())
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(t.TempDir(), "missing-index"))
+	got, err := captureGitOverlayCheckoutState(fixture.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("ambient-routed checkout=%+v want %+v", got, want)
+	}
+}
+
+func TestGitOverlayCheckoutStateRequiresStableDoubleSampleAndCanonicalRoot(t *testing.T) {
+	for _, mutation := range []string{"head", "index"} {
+		t.Run(mutation, func(t *testing.T) {
+			fixture := newGitOverlayFixture(t)
+			_, err := captureGitOverlayCheckoutStateWithHook(fixture.root, func() {
+				switch mutation {
+				case "head":
+					mustWriteTestFile(t, filepath.Join(fixture.root, "new-head.txt"), "new head\n")
+					runGit(t, fixture.root, "add", "new-head.txt")
+					runGit(t, fixture.root, "commit", "-qm", "mutate head between samples")
+				case "index":
+					mustWriteTestFile(t, filepath.Join(fixture.root, "staged.txt"), "mutated index\n")
+					runGit(t, fixture.root, "add", "staged.txt")
+				}
+			})
+			if !errors.Is(err, errGitOverlaySnapshotDrift) {
+				t.Fatalf("%s mutation error=%v, want checkout drift", mutation, err)
+			}
+		})
+	}
+
+	fixture := newGitOverlayFixture(t)
+	nested := filepath.Join(fixture.root, "nested")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureGitOverlayCheckoutState(nested); err == nil || !strings.Contains(err.Error(), "checkout_root_mismatch") {
+		t.Fatalf("nested checkout root error=%v", err)
+	}
+}
+
+func TestGitOverlaySnapshotPreservesFileAndParentDirectoryModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes")
+	}
+	fixture := newGitOverlayFixture(t)
+	privateDir := filepath.Join(fixture.root, "private")
+	if err := os.Mkdir(privateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(privateDir, "script.sh")
+	mustWriteTestFile(t, file, "#!/bin/sh\n")
+	if err := os.Chmod(file, 0o4750); err != nil {
+		t.Fatal(err)
+	}
+	modTime := time.Unix(1_700_000_000, 0)
+	if err := os.Chtimes(file, modTime, modTime); err != nil {
+		t.Fatal(err)
+	}
+	parentModTime := time.Unix(1_699_999_000, 123_456_000)
+	if err := os.Chmod(privateDir, 0o1750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(privateDir, parentModTime, parentModTime); err != nil {
+		t.Fatal(err)
+	}
+	_, excludes := fixture.manifest(t)
+	snapshot, err := prepareGitOverlaySnapshot(fixture.repo, fixture.cfg, excludes, nil, fixture.plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = snapshot.cleanup() }()
+	parentInfo, err := os.Stat(filepath.Join(snapshot.Root, "private"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceParentInfo, err := os.Stat(privateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := gitOverlaySupportedMode(parentInfo.Mode()), gitOverlaySupportedMode(sourceParentInfo.Mode()); got != want {
+		t.Fatalf("snapshot parent mode=%#o want %#o", got, want)
+	}
+	if want := normalizedGitOverlayFileTime(parentModTime); !parentInfo.ModTime().Equal(want) {
+		t.Fatalf("snapshot parent mtime=%s want %s", parentInfo.ModTime(), want)
+	}
+	fileInfo, err := os.Stat(filepath.Join(snapshot.Root, "private", "script.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceFileInfo, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := gitOverlaySupportedMode(fileInfo.Mode()), gitOverlaySupportedMode(sourceFileInfo.Mode()); got != want {
+		t.Fatalf("snapshot file mode=%#o want %#o", got, want)
+	}
+	if !fileInfo.ModTime().Equal(modTime) {
+		t.Fatalf("snapshot file mtime=%s want %s", fileInfo.ModTime(), modTime)
+	}
+}
+
+func TestGitOverlaySnapshotCopiesThroughNestedReadOnlyParents(t *testing.T) {
+	sourceRoot := t.TempDir()
+	sourceParent := filepath.Join(sourceRoot, "locked")
+	sourceDeep := filepath.Join(sourceParent, "deep")
+	if err := os.MkdirAll(sourceDeep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteTestFile(t, filepath.Join(sourceDeep, "payload.txt"), "payload\n")
+	if err := os.Chmod(sourceDeep, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sourceParent, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(sourceParent, 0o755)
+		_ = os.Chmod(sourceDeep, 0o755)
+	})
+
+	snapshotRoot := t.TempDir()
+	if err := copyGitOverlaySnapshot(sourceRoot, snapshotRoot, []string{"locked/deep/payload.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(snapshotRoot, "locked"), filepath.Join(snapshotRoot, "locked", "deep")} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o555 {
+			t.Fatalf("snapshot parent %q mode=%#o want 0555", path, got)
+		}
+	}
+	if got, err := os.ReadFile(filepath.Join(snapshotRoot, "locked", "deep", "payload.txt")); err != nil || string(got) != "payload\n" {
+		t.Fatalf("snapshot payload=%q err=%v", got, err)
+	}
+	if err := os.Chmod(filepath.Join(snapshotRoot, "locked"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(snapshotRoot, "locked", "deep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGitOverlaySnapshotDefersSharedParentModesAndRestoresDeepestFirst(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory modes")
+	}
+	sourceRoot := t.TempDir()
+	sourceParent := filepath.Join(sourceRoot, "locked")
+	sourceDeep := filepath.Join(sourceParent, "deep")
+	if err := os.MkdirAll(sourceDeep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteTestFile(t, filepath.Join(sourceParent, "first.txt"), "first\n")
+	mustWriteTestFile(t, filepath.Join(sourceDeep, "second.txt"), "second\n")
+	if err := os.Chmod(sourceDeep, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sourceParent, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(sourceParent, 0o755)
+		_ = os.Chmod(sourceDeep, 0o755)
+	})
+
+	snapshotRoot := t.TempDir()
+	var observed [][2]os.FileMode
+	err := copyGitOverlaySnapshotWithHook(
+		sourceRoot,
+		snapshotRoot,
+		[]string{"locked/first.txt", "locked/deep/second.txt"},
+		1,
+		func(phase string, _ int, _ string) {
+			if phase != "before_parent_mode_restore" {
+				return
+			}
+			parentInfo, parentErr := os.Stat(filepath.Join(snapshotRoot, "locked"))
+			deepInfo, deepErr := os.Stat(filepath.Join(snapshotRoot, "locked", "deep"))
+			if parentErr != nil || deepErr != nil {
+				t.Fatalf("stat deferred parents: parent=%v deep=%v", parentErr, deepErr)
+			}
+			observed = append(observed, [2]os.FileMode{parentInfo.Mode().Perm(), deepInfo.Mode().Perm()})
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tempMode := gitOverlayTemporaryDirectoryMode(0o555).Perm()
+	wantObserved := [][2]os.FileMode{{tempMode, tempMode}, {tempMode, 0o555}}
+	if !slices.Equal(observed, wantObserved) {
+		t.Fatalf("restore observations=%#v want %#v", observed, wantObserved)
+	}
+	for _, path := range []string{filepath.Join(snapshotRoot, "locked"), filepath.Join(snapshotRoot, "locked", "deep")} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o555 {
+			t.Fatalf("snapshot parent %q mode=%#o want 0555", path, got)
+		}
+	}
+	if err := os.Chmod(filepath.Join(snapshotRoot, "locked"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(snapshotRoot, "locked", "deep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGitOverlaySnapshotPreservesSymlinkModificationTime(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows symlink runtime coverage is platform-specific")
+	}
+	sourceRoot := t.TempDir()
+	snapshotRoot := t.TempDir()
+	source := filepath.Join(sourceRoot, "link")
+	if err := os.Symlink("target", source); err != nil {
+		t.Fatal(err)
+	}
+	wantTime := normalizedGitOverlayFileTime(time.Unix(1_650_000_000, 987_654_000))
+	if err := syncGitOverlaySymlinkTimes(source, wantTime); err != nil {
+		t.Fatal(err)
+	}
+	sourceInfo, err := os.Lstat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sourceInfo.ModTime().Equal(wantTime) {
+		t.Fatalf("source symlink mtime=%s want %s", sourceInfo.ModTime(), wantTime)
+	}
+	if err := copyGitOverlaySnapshot(sourceRoot, snapshotRoot, []string{"link"}); err != nil {
+		t.Fatal(err)
+	}
+	copiedInfo, err := os.Lstat(filepath.Join(snapshotRoot, "link"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !copiedInfo.ModTime().Equal(wantTime) {
+		t.Fatalf("snapshot symlink mtime=%s want %s", copiedInfo.ModTime(), wantTime)
+	}
+}
+
+func TestGitOverlayRsyncFilesFromDoesNotApplySourceRootMetadata(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX rsync integration")
+	}
+	rsyncPath, err := exec.LookPath("rsync")
+	if err != nil {
+		t.Skipf("rsync unavailable: %v", err)
+	}
+	root := t.TempDir()
+	sourceRoot := filepath.Join(root, "source")
+	destinationRoot := filepath.Join(root, "destination")
+	if err := os.Mkdir(sourceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(destinationRoot, 0o751); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteTestFile(t, filepath.Join(sourceRoot, "payload"), "payload\n")
+	sourceTime := time.Unix(1_500_000_000, 0)
+	destinationTime := time.Unix(1_600_000_000, 0)
+	if err := os.Chtimes(sourceRoot, sourceTime, sourceTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(destinationRoot, destinationTime, destinationTime); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(rsyncPath, "-a", "--from0", "--files-from=-", sourceRoot+string(os.PathSeparator), destinationRoot+string(os.PathSeparator))
+	command.Stdin = bytes.NewReader([]byte("payload\x00"))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("rsync explicit file list: %v\n%s", err, output)
+	}
+	destinationInfo, err := os.Stat(destinationRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if destinationInfo.Mode().Perm() != 0o751 {
+		t.Fatalf("destination root mode=%#o want 0751", destinationInfo.Mode().Perm())
+	}
+	if destinationInfo.ModTime().Equal(sourceTime) {
+		t.Fatalf("destination root inherited source mtime %s", sourceTime)
+	}
+}
+
+func TestGitOverlaySnapshotRejectsSourceParentSymlinkDriftBeforeModeRestore(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX symlinks")
+	}
+	sourceRoot := t.TempDir()
+	sourceParent := filepath.Join(sourceRoot, "private")
+	if err := os.Mkdir(sourceParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteTestFile(t, filepath.Join(sourceParent, "payload.txt"), "payload\n")
+	replacement := t.TempDir()
+	snapshotRoot := t.TempDir()
+	mutated := false
+	err := copyGitOverlaySnapshotWithHook(sourceRoot, snapshotRoot, []string{"private/payload.txt"}, 1, func(phase string, _ int, _ string) {
+		if phase != "before_parent_mode_restore" || mutated {
+			return
+		}
+		mutated = true
+		if err := os.Rename(sourceParent, sourceParent+".old"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(replacement, sourceParent); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err == nil || !errors.Is(err, errGitOverlaySnapshotDrift) {
+		t.Fatalf("source parent symlink drift was not rejected: %v", err)
+	}
+	info, statErr := os.Stat(filepath.Join(snapshotRoot, "private"))
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if got := info.Mode().Perm(); got&0o700 != 0o700 {
+		t.Fatalf("failed snapshot parent mode=%#o want owner access", got)
+	}
+	if removeErr := os.RemoveAll(snapshotRoot); removeErr != nil {
+		t.Fatalf("remove thawed snapshot: %v", removeErr)
+	}
+}
+
+func TestGitOverlaySnapshotDestinationSymlinkDoesNotChmodTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX symlinks and directory modes")
+	}
+	sourceRoot := t.TempDir()
+	sourceParent := filepath.Join(sourceRoot, "private")
+	if err := os.Mkdir(sourceParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteTestFile(t, filepath.Join(sourceParent, "payload.txt"), "payload\n")
+	if err := os.Chmod(sourceParent, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sourceParent, 0o755) })
+	snapshotRoot := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Chmod(outside, 0o511); err != nil {
+		t.Fatal(err)
+	}
+	outsideModTime := time.Unix(1_600_000_000, 0)
+	if err := os.Chtimes(outside, outsideModTime, outsideModTime); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(outside, 0o755) })
+	mutated := false
+	err := copyGitOverlaySnapshotWithHook(sourceRoot, snapshotRoot, []string{"private/payload.txt"}, 1, func(phase string, _ int, _ string) {
+		if phase != "before_parent_mode_restore" || mutated {
+			return
+		}
+		mutated = true
+		destination := filepath.Join(snapshotRoot, "private")
+		if err := os.Rename(destination, destination+".retained"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, destination); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err == nil || !strings.Contains(err.Error(), "parent path changed") {
+		t.Fatalf("destination symlink was not rejected: %v", err)
+	}
+	outsideInfo, statErr := os.Stat(outside)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if got := outsideInfo.Mode().Perm(); got != 0o511 {
+		t.Fatalf("destination symlink target mode=%#o want 0511", got)
+	}
+	if !outsideInfo.ModTime().Equal(outsideModTime) {
+		t.Fatalf("destination symlink target mtime=%s want %s", outsideInfo.ModTime(), outsideModTime)
+	}
+	retainedInfo, statErr := os.Stat(filepath.Join(snapshotRoot, "private.retained"))
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if got := retainedInfo.Mode().Perm(); got != 0o755 {
+		t.Fatalf("retained destination mode=%#o want thawed 0755", got)
+	}
+	if removeErr := os.RemoveAll(snapshotRoot); removeErr != nil {
+		t.Fatalf("remove thawed snapshot: %v", removeErr)
+	}
+}
+
+func TestGitOverlaySnapshotPartialRestoreFailureThawsParentsForCleanup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory modes")
+	}
+	sourceRoot := t.TempDir()
+	sourceParent := filepath.Join(sourceRoot, "locked")
+	sourceDeep := filepath.Join(sourceParent, "deep")
+	if err := os.MkdirAll(sourceDeep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteTestFile(t, filepath.Join(sourceDeep, "payload.txt"), "payload\n")
+	if err := os.Chmod(sourceDeep, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sourceParent, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(sourceParent, 0o755)
+		_ = os.Chmod(sourceDeep, 0o755)
+	})
+
+	snapshotRoot := t.TempDir()
+	restoreCount := 0
+	err := copyGitOverlaySnapshotWithHook(sourceRoot, snapshotRoot, []string{"locked/deep/payload.txt"}, 1, func(phase string, _ int, _ string) {
+		if phase != "before_parent_mode_restore" {
+			return
+		}
+		restoreCount++
+		if restoreCount == 2 {
+			if err := os.Chmod(sourceParent, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	if err == nil || !errors.Is(err, errGitOverlaySnapshotDrift) {
+		t.Fatalf("partial restore source drift was not rejected: %v", err)
+	}
+	if restoreCount != 2 {
+		t.Fatalf("restore hooks=%d want 2", restoreCount)
+	}
+	for _, path := range []string{filepath.Join(snapshotRoot, "locked"), filepath.Join(snapshotRoot, "locked", "deep")} {
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		if got := info.Mode().Perm(); got != 0o755 {
+			t.Fatalf("thawed parent %q mode=%#o want 0755", path, got)
+		}
+	}
+	if removeErr := os.RemoveAll(snapshotRoot); removeErr != nil {
+		t.Fatalf("remove thawed partial snapshot: %v", removeErr)
+	}
+}
+
+func TestGitOverlaySnapshotCopyFailureRetainsOwnershipWhenThawFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory modes")
+	}
+	sourceRoot := t.TempDir()
+	sourceParent := filepath.Join(sourceRoot, "locked")
+	sourceDeep := filepath.Join(sourceParent, "deep")
+	if err := os.MkdirAll(sourceDeep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteTestFile(t, filepath.Join(sourceDeep, "first.txt"), "first\n")
+	mustWriteTestFile(t, filepath.Join(sourceRoot, "second.txt"), "second\n")
+	if err := os.Chmod(sourceDeep, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sourceParent, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(sourceParent, 0o755)
+		_ = os.Chmod(sourceDeep, 0o755)
+	})
+
+	snapshot, err := newGitOverlaySnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := snapshot.Root
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	copyFailurePath := filepath.Join(root, "second.txt")
+	readOnlyPath := filepath.Join(root, "locked", "deep")
+	thawFailure := errors.New("synthetic thaw failure")
+	thawCalls := 0
+	var transferred *gitOverlaySnapshotParents
+	err = copyGitOverlaySnapshotContentsWithThaw(
+		sourceRoot,
+		root,
+		[]string{"locked/deep/first.txt", "second.txt"},
+		1,
+		func(phase string, _ int, _ string) {
+			if phase != "after_lstat" || thawCalls != 0 {
+				return
+			}
+			if _, statErr := os.Stat(filepath.Join(root, "locked", "deep", "first.txt")); statErr != nil {
+				return
+			}
+			mustWriteTestFile(t, copyFailurePath, "obstruction\n")
+			if chmodErr := os.Chmod(readOnlyPath, 0o555); chmodErr != nil {
+				t.Fatal(chmodErr)
+			}
+		},
+		snapshot.cleanupRoot,
+		func(parents *gitOverlaySnapshotParents) error {
+			thawCalls++
+			transferred = parents
+			return thawFailure
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "file exists") || !errors.Is(err, thawFailure) {
+		t.Fatalf("copy/thaw error=%v", err)
+	}
+	if copyAt, thawAt := strings.Index(err.Error(), "file exists"), strings.Index(err.Error(), thawFailure.Error()); copyAt < 0 || thawAt < 0 || copyAt >= thawAt {
+		t.Fatalf("copy/thaw error order=%q", err)
+	}
+	if thawCalls != 1 {
+		t.Fatalf("thaw calls=%d want 1", thawCalls)
+	}
+	if transferred == nil || len(transferred.ordered) != 0 || transferred.byPath != nil {
+		t.Fatalf("failed thaw retained duplicate ownership: %+v", transferred)
+	}
+	owner := snapshot.cleanupRoot
+	owned := append([]*gitOverlaySnapshotParent(nil), owner.directories...)
+	if len(owned) != 2 {
+		t.Fatalf("owned snapshot parents=%d want 2", len(owned))
+	}
+	for _, parent := range owned {
+		if parent.handle == nil {
+			t.Fatalf("adopted parent %q lost its cleanup handle", parent.relative)
+		}
+	}
+	info, statErr := os.Stat(readOnlyPath)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if info.Mode().Perm() != 0o555 {
+		t.Fatalf("partial read-only parent mode=%#o want 0555", info.Mode().Perm())
+	}
+
+	if err := snapshot.cleanup(); err != nil {
+		t.Fatalf("cleanup after retained thaw failure: %v", err)
+	}
+	if snapshot.Root != "" || snapshot.cleanupRoot != nil {
+		t.Fatalf("cleanup retained snapshot state: root=%q capability=%v", snapshot.Root, snapshot.cleanupRoot)
+	}
+	if _, statErr := os.Stat(root); !os.IsNotExist(statErr) {
+		t.Fatalf("snapshot root survived cleanup: %v", statErr)
+	}
+	for _, parent := range owned {
+		if parent.handle != nil {
+			t.Fatalf("cleanup retained parent handle for %q", parent.relative)
+		}
+	}
+	transferred.close()
+	transferred.close()
+	owner.close()
+	owner.close()
+}
+
+func TestGitOverlaySnapshotParentIdentityRejectsReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory replacement")
+	}
+	sourceRoot := t.TempDir()
+	sourceParent := filepath.Join(sourceRoot, "private")
+	if err := os.Mkdir(sourceParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	snapshotRoot := t.TempDir()
+	parents, err := newGitOverlaySnapshotParents(sourceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parents.close()
+	observed, err := os.Lstat(sourceParent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identities, err := parents.ensure(snapshotRoot, "private", sourceParent, observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(sourceParent, sourceParent+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(sourceParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyGitOverlaySnapshotParents(identities); err == nil || !errors.Is(err, errGitOverlaySnapshotDrift) || !strings.Contains(err.Error(), "changed during copy") {
+		t.Fatalf("parent replacement was not rejected: %v", err)
+	}
+}
+
+func TestGitOverlaySnapshotDriftLimitCleansEveryAttempt(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "initial\n")
+	_, excludes := fixture.manifest(t)
+	var snapshotRoots []string
+	_, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, snapshotRoot string) {
+		switch phase {
+		case "snapshot_created":
+			snapshotRoots = append(snapshotRoots, snapshotRoot)
+		case "snapshot_fingerprinted":
+			mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), fmt.Sprintf("changed-%d\n", attempt))
+		}
+	})
+	if err == nil || !errors.Is(err, errGitOverlaySnapshotDrift) || !strings.Contains(err.Error(), "changed during snapshot creation") {
+		t.Fatalf("snapshot drift error=%v", err)
+	}
+	if len(snapshotRoots) != gitOverlaySnapshotMaxAttempts {
+		t.Fatalf("snapshot attempts=%d want %d", len(snapshotRoots), gitOverlaySnapshotMaxAttempts)
+	}
+	for _, snapshotRoot := range snapshotRoots {
+		if _, statErr := os.Stat(snapshotRoot); !os.IsNotExist(statErr) {
+			t.Fatalf("discarded snapshot %q still exists: %v", snapshotRoot, statErr)
+		}
+	}
+}
+
+func TestGitOverlaySnapshotCleanupRetriesThenClearsRoot(t *testing.T) {
+	snapshot := gitOverlaySnapshot{Root: "/tmp/overlay-snapshot"}
+	var (
+		attempts int
+		sleeps   []time.Duration
+	)
+	err := snapshot.cleanupWith(func(root string) error {
+		attempts++
+		if root != "/tmp/overlay-snapshot" {
+			t.Fatalf("cleanup root=%q", root)
+		}
+		if attempts < gitOverlayCleanupMaxAttempts {
+			return fmt.Errorf("transient cleanup failure %d", attempts)
+		}
+		return nil
+	}, func(delay time.Duration) {
+		sleeps = append(sleeps, delay)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != gitOverlayCleanupMaxAttempts {
+		t.Fatalf("cleanup attempts=%d want %d", attempts, gitOverlayCleanupMaxAttempts)
+	}
+	if !slices.Equal(sleeps, []time.Duration{gitOverlayCleanupRetryDelay, gitOverlayCleanupRetryDelay}) {
+		t.Fatalf("cleanup sleeps=%v", sleeps)
+	}
+	if snapshot.Root != "" {
+		t.Fatalf("cleanup retained root=%q", snapshot.Root)
+	}
+}
+
+func TestGitOverlaySnapshotCleanupExhaustionRetainsRootForRetry(t *testing.T) {
+	snapshot := gitOverlaySnapshot{Root: "/tmp/overlay-snapshot"}
+	attempts := 0
+	err := snapshot.cleanupWith(func(string) error {
+		attempts++
+		return errors.New("persistent cleanup failure")
+	}, func(time.Duration) {})
+	if err == nil || !strings.Contains(err.Error(), "after 3 attempts") {
+		t.Fatalf("cleanup error=%v", err)
+	}
+	if attempts != gitOverlayCleanupMaxAttempts {
+		t.Fatalf("cleanup attempts=%d want %d", attempts, gitOverlayCleanupMaxAttempts)
+	}
+	if snapshot.Root != "/tmp/overlay-snapshot" {
+		t.Fatalf("failed cleanup root=%q", snapshot.Root)
+	}
+	if err := snapshot.cleanupWith(func(string) error {
+		attempts++
+		return nil
+	}, func(time.Duration) {}); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != gitOverlayCleanupMaxAttempts+1 {
+		t.Fatalf("cleanup attempts after retry=%d", attempts)
+	}
+	if snapshot.Root != "" {
+		t.Fatalf("successful retry retained root=%q", snapshot.Root)
+	}
+}
+
+func TestGitOverlaySnapshotCleanupIsConfinedAndThawsReadOnlyParents(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX symlink and special-mode integration")
+	}
+	fixture := newGitOverlayFixture(t)
+	parent := filepath.Join(fixture.root, "private")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteTestFile(t, filepath.Join(parent, "payload.txt"), "payload\n")
+	if err := os.Chmod(parent, 0o1555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+	outside := t.TempDir()
+	sentinel := filepath.Join(outside, "sentinel")
+	mustWriteTestFile(t, sentinel, "outside survives\n")
+	if err := os.Symlink(outside, filepath.Join(fixture.root, "outside-link")); err != nil {
+		t.Fatal(err)
+	}
+	_, excludes := fixture.manifest(t)
+	snapshot, err := prepareGitOverlaySnapshot(fixture.repo, fixture.cfg, excludes, nil, fixture.plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := snapshot.Root
+	if err := snapshot.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Root != "" || snapshot.cleanupRoot != nil {
+		t.Fatalf("successful cleanup retained snapshot state: root=%q capability=%v", snapshot.Root, snapshot.cleanupRoot)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("snapshot root survived cleanup: %v", err)
+	}
+	if got, err := os.ReadFile(sentinel); err != nil || string(got) != "outside survives\n" {
+		t.Fatalf("cleanup escaped snapshot root: data=%q err=%v", got, err)
+	}
+}
+
+func TestGitOverlaySnapshotCleanupRejectsRootReplacementAndRetriesOriginal(t *testing.T) {
+	snapshot, err := newGitOverlaySnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := snapshot.Root
+	retained := original + ".retained"
+	if err := os.Rename(original, retained); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(original, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	replacementSentinel := filepath.Join(original, "replacement")
+	mustWriteTestFile(t, replacementSentinel, "replacement survives\n")
+
+	err = snapshot.cleanupWith(func(string) error {
+		return snapshot.cleanupRoot.remove()
+	}, func(time.Duration) {})
+	if err == nil || !strings.Contains(err.Error(), "root identity changed") {
+		t.Fatalf("root replacement cleanup error=%v", err)
+	}
+	if snapshot.Root != original || snapshot.cleanupRoot == nil {
+		t.Fatalf("failed cleanup discarded retry state: root=%q capability=%v", snapshot.Root, snapshot.cleanupRoot)
+	}
+	if got, err := os.ReadFile(replacementSentinel); err != nil || string(got) != "replacement survives\n" {
+		t.Fatalf("replacement root was touched: data=%q err=%v", got, err)
+	}
+	if err := os.RemoveAll(original); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(retained, original); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Root != "" || snapshot.cleanupRoot != nil {
+		t.Fatalf("retry retained cleanup state: root=%q capability=%v", snapshot.Root, snapshot.cleanupRoot)
+	}
+}
+
+func TestGitOverlaySnapshotConstructionErrorPrecedesCleanupExhaustion(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "local change\n")
+	_, excludes := fixture.manifest(t)
+	cleanupFailure := errors.New("cleanup exhausted")
+	var snapshotRoot string
+	snapshot, err := prepareGitOverlaySnapshotWithCleanup(
+		fixture.repo,
+		fixture.cfg,
+		excludes,
+		nil,
+		fixture.plan,
+		func(phase string, _ int, root string) {
+			if phase != "snapshot_created" {
+				return
+			}
+			snapshotRoot = root
+			if removeErr := os.Remove(filepath.Join(fixture.root, "unstaged.txt")); removeErr != nil {
+				t.Fatal(removeErr)
+			}
+		},
+		func(snapshot *gitOverlaySnapshot) error {
+			return snapshot.cleanupWith(func(string) error {
+				return cleanupFailure
+			}, func(time.Duration) {})
+		},
+	)
+	if snapshotRoot != "" {
+		t.Cleanup(func() { _ = os.RemoveAll(snapshotRoot) })
+	}
+	if err == nil {
+		t.Fatal("snapshot construction unexpectedly succeeded")
+	}
+	if snapshot.Root == "" || snapshot.cleanupRoot == nil {
+		t.Fatalf("snapshot construction discarded cleanup capability: root=%q capability=%v", snapshot.Root, snapshot.cleanupRoot)
+	}
+	root := snapshot.Root
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if !errors.Is(err, cleanupFailure) {
+		t.Fatalf("snapshot error omitted cleanup failure: %v", err)
+	}
+	primary := `snapshot overlay path "unstaged.txt"`
+	if primaryAt, cleanupAt := strings.Index(err.Error(), primary), strings.Index(err.Error(), cleanupFailure.Error()); primaryAt < 0 || cleanupAt < 0 || primaryAt >= cleanupAt {
+		t.Fatalf("snapshot error order=%q", err)
+	}
+	if !strings.Contains(err.Error(), "after 3 attempts") {
+		t.Fatalf("snapshot error omitted exhausted cleanup attempts: %v", err)
+	}
+	if err := snapshot.cleanup(); err != nil {
+		t.Fatalf("retry retained snapshot cleanup: %v", err)
+	}
+	if snapshot.Root != "" || snapshot.cleanupRoot != nil {
+		t.Fatalf("retry retained snapshot state: root=%q capability=%v", snapshot.Root, snapshot.cleanupRoot)
+	}
+}
+
+func TestGitOverlaySnapshotDriftJoinsCleanupExhaustion(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "initial\n")
+	_, excludes := fixture.manifest(t)
+	cleanupFailure := errors.New("cleanup exhausted")
+	var snapshotRoot string
+	snapshot, err := prepareGitOverlaySnapshotWithCleanup(
+		fixture.repo,
+		fixture.cfg,
+		excludes,
+		nil,
+		fixture.plan,
+		func(phase string, attempt int, root string) {
+			if phase == "snapshot_created" {
+				snapshotRoot = root
+			}
+			if phase == "snapshot_fingerprinted" {
+				mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), fmt.Sprintf("changed-%d\n", attempt))
+			}
+		},
+		func(snapshot *gitOverlaySnapshot) error {
+			return snapshot.cleanupWith(func(string) error {
+				return cleanupFailure
+			}, func(time.Duration) {})
+		},
+	)
+	if snapshotRoot != "" {
+		t.Cleanup(func() { _ = os.RemoveAll(snapshotRoot) })
+	}
+	if err == nil || !strings.Contains(err.Error(), "local Git overlay changed during snapshot creation") {
+		t.Fatalf("snapshot drift error=%v", err)
+	}
+	if snapshot.Root == "" || snapshot.cleanupRoot == nil {
+		t.Fatalf("snapshot drift discarded cleanup capability: root=%q capability=%v", snapshot.Root, snapshot.cleanupRoot)
+	}
+	root := snapshot.Root
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if !errors.Is(err, cleanupFailure) || !strings.Contains(err.Error(), "after 3 attempts") {
+		t.Fatalf("snapshot drift omitted exhausted cleanup failure: %v", err)
+	}
+	if driftAt, cleanupAt := strings.Index(err.Error(), "local Git overlay changed"), strings.Index(err.Error(), cleanupFailure.Error()); driftAt < 0 || cleanupAt < 0 || driftAt >= cleanupAt {
+		t.Fatalf("snapshot drift error order=%q", err)
+	}
+	if err := snapshot.cleanup(); err != nil {
+		t.Fatalf("retry retained drift snapshot cleanup: %v", err)
+	}
+	if snapshot.Root != "" || snapshot.cleanupRoot != nil {
+		t.Fatalf("retry retained drift snapshot state: root=%q capability=%v", snapshot.Root, snapshot.cleanupRoot)
+	}
+}
+
+func assertGitOverlaySnapshotFingerprint(t *testing.T, repo Repo, cfg Config, excludes SyncExcludeRules, plan gitCoherencePlan, snapshot gitOverlaySnapshot) {
+	t.Helper()
+	snapshotRepo := repo
+	snapshotRepo.Root = snapshot.Root
+	fingerprint, err := syncFingerprintForManifest(snapshotRepo, cfg, snapshot.Manifest, excludes, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fingerprint != snapshot.Fingerprint {
+		t.Fatalf("snapshot fingerprint=%q recomputed=%q", snapshot.Fingerprint, fingerprint)
+	}
+}
+
+func TestFinalizeGitOverlaySnapshotCleanupPreservesPrimaryFailure(t *testing.T) {
+	primary := exit(17, "primary transfer failure")
+	cleanupErr := errors.New("cleanup failure")
+	var runErr error = primary
+	var runFailure error = primary
+
+	finalizeGitOverlaySnapshotCleanup(&runErr, &runFailure, func() error {
+		return cleanupErr
+	})
+
+	for name, got := range map[string]error{"return": runErr, "recorded": runFailure} {
+		var exitErr ExitError
+		if !AsExitError(got, &exitErr) || exitErr.Code != primary.Code {
+			t.Fatalf("%s failure=%v exit=%+v", name, got, exitErr)
+		}
+		if !strings.Contains(got.Error(), cleanupErr.Error()) {
+			t.Fatalf("%s failure omitted cleanup diagnostic: %v", name, got)
+		}
+		if !strings.HasPrefix(got.Error(), primary.Message) {
+			t.Fatalf("%s failure did not keep primary error first: %q", name, got)
+		}
+	}
+}
+
+func TestFinalizeGitOverlaySnapshotCleanupOnlyReturnsExitSix(t *testing.T) {
+	cleanupErr := errors.New("cleanup failure")
+	var runErr error
+	var runFailure error
+
+	finalizeGitOverlaySnapshotCleanup(&runErr, &runFailure, func() error {
+		return cleanupErr
+	})
+
+	for name, got := range map[string]error{"return": runErr, "recorded": runFailure} {
+		var exitErr ExitError
+		if !AsExitError(got, &exitErr) || exitErr.Code != 6 {
+			t.Fatalf("%s failure=%v exit=%+v", name, got, exitErr)
+		}
+		if !strings.Contains(got.Error(), cleanupErr.Error()) {
+			t.Fatalf("%s failure omitted cleanup diagnostic: %v", name, got)
+		}
+	}
+}
+
+func TestTerminalGitOverlaySnapshotCleanupRetriesRetainedSnapshot(t *testing.T) {
+	snapshot, err := newGitOverlaySnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := snapshot.Root
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	cleanupFailure := errors.New("cleanup exhausted")
+	if err := snapshot.cleanupWith(func(string) error {
+		return cleanupFailure
+	}, func(time.Duration) {}); !errors.Is(err, cleanupFailure) {
+		t.Fatalf("initial cleanup error=%v", err)
+	}
+	if snapshot.Root == "" || snapshot.cleanupRoot == nil {
+		t.Fatalf("initial cleanup discarded ownership: root=%q capability=%v", snapshot.Root, snapshot.cleanupRoot)
+	}
+	if err := terminalGitOverlaySnapshotCleanup(&snapshot, func(snapshot *gitOverlaySnapshot) error {
+		return snapshot.cleanup()
+	}); err != nil {
+		t.Fatalf("terminal cleanup retry: %v", err)
+	}
+	if snapshot.Root != "" || snapshot.cleanupRoot != nil {
+		t.Fatalf("terminal cleanup retained state: root=%q capability=%v", snapshot.Root, snapshot.cleanupRoot)
+	}
+}
+
+func TestTerminalGitOverlaySnapshotCleanupSkipsClearedSnapshot(t *testing.T) {
+	snapshot := gitOverlaySnapshot{}
+	calls := 0
+	if err := terminalGitOverlaySnapshotCleanup(&snapshot, func(*gitOverlaySnapshot) error {
+		calls++
+		return errors.New("unexpected cleanup")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("cleared snapshot cleanup calls=%d", calls)
+	}
+}
+
+func TestTerminalGitOverlaySnapshotCleanupClosesHandlesAndPreservesPrimaryFailure(t *testing.T) {
+	snapshot, err := newGitOverlaySnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := snapshot.Root
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	primary := exit(17, "primary transfer failure")
+	cleanupFailure := errors.New("cleanup exhausted")
+	var runErr error = primary
+	var runFailure error = primary
+
+	finalizeGitOverlaySnapshotCleanup(&runErr, &runFailure, func() error {
+		return terminalGitOverlaySnapshotCleanup(&snapshot, func(*gitOverlaySnapshot) error {
+			return cleanupFailure
+		})
+	})
+
+	if snapshot.cleanupRoot != nil {
+		t.Fatal("terminal cleanup failure retained open cleanup handles")
+	}
+	for name, got := range map[string]error{"return": runErr, "recorded": runFailure} {
+		var exitErr ExitError
+		if !AsExitError(got, &exitErr) || exitErr.Code != primary.Code {
+			t.Fatalf("%s failure=%v exit=%+v", name, got, exitErr)
+		}
+		if primaryAt, cleanupAt := strings.Index(got.Error(), primary.Message), strings.Index(got.Error(), cleanupFailure.Error()); primaryAt < 0 || cleanupAt < 0 || primaryAt >= cleanupAt {
+			t.Fatalf("%s failure order=%q", name, got)
+		}
+	}
+}
+
 func TestGitOverlayConfigDefaultFileEnvironmentAndShow(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
@@ -371,6 +1909,20 @@ func TestGitOverlayDecisionRejectsSparseGitlinksConflictsAndTransforms(t *testin
 	}
 }
 
+func TestGitOverlayDecisionRejectsAssumeUnchangedIndex(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	runGit(t, fixture.root, "update-index", "--assume-unchanged", "clean.txt")
+	mustWriteTestFile(t, filepath.Join(fixture.root, "clean.txt"), "hidden local edit\n")
+	manifest, _ := fixture.manifest(t)
+	if slices.Contains(manifest.Changed, "clean.txt") {
+		t.Fatalf("assume-unchanged edit unexpectedly entered changed paths: %v", manifest.Changed)
+	}
+	decision := decideGitOverlay(fixture.cfg, fixture.repo, SSHTarget{TargetOS: targetLinux}, manifest, fixture.plan, false, false, false)
+	if decision.Enabled || decision.Reason != "assume_unchanged_index" {
+		t.Fatalf("decision=%#v", decision)
+	}
+}
+
 func TestGitOverlayOriginAcceptsOnlyAnonymousSupportedTransports(t *testing.T) {
 	tests := []struct {
 		origin      string
@@ -409,7 +1961,9 @@ func TestGitOverlayOriginAcceptsOnlyAnonymousSupportedTransports(t *testing.T) {
 
 func TestGitOverlayBoundaryViolationsFailClosedWithoutRejectingLegacyFallback(t *testing.T) {
 	for _, reason := range []string{
-		"unsafe_remote_root", "symlink_remote_root", "symlink_git_directory", "symlink_git_config", "symlink_git_objects", "unsafe_overlay_metadata", "unsafe_runtime_state",
+		"unsafe_remote_root", "symlink_remote_root", "symlink_remote_parent", "symlink_git_directory", "symlink_git_config", "symlink_git_objects",
+		"symlink_git_info", "symlink_git_attributes", "symlink_git_exclude", "symlink_git_objects_info", "symlink_git_alternates",
+		"unsafe_git_metadata", "unsafe_overlay_metadata", "unsafe_runtime_state",
 	} {
 		if !gitOverlayBoundaryViolation(reason) {
 			t.Errorf("boundary violation %q remained eligible for legacy sync", reason)
@@ -421,6 +1975,191 @@ func TestGitOverlayBoundaryViolationsFailClosedWithoutRejectingLegacyFallback(t 
 		if gitOverlayBoundaryViolation(reason) {
 			t.Errorf("conservative overlay fallback %q incorrectly failed closed", reason)
 		}
+	}
+}
+
+func TestRemotePrepareGitOverlayRejectsHiddenIndexBeforeMutation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX Git overlay integration")
+	}
+	fixture := newGitOverlayFixture(t)
+	repo, coherence := fixture.repo, fixture.plan
+	for _, test := range []struct {
+		name    string
+		flag    string
+		reason  string
+		present bool
+	}{
+		{name: "skip stale", flag: "--skip-worktree", reason: "skip_worktree_index", present: true},
+		{name: "skip deleted", flag: "--skip-worktree", reason: "skip_worktree_index"},
+		{name: "assume stale", flag: "--assume-unchanged", reason: "assume_unchanged_index", present: true},
+		{name: "assume deleted", flag: "--assume-unchanged", reason: "assume_unchanged_index"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workdir := filepath.Join(t.TempDir(), "workdir")
+			if out, err := exec.Command("git", "clone", "--quiet", repo.RemoteURL, workdir).CombinedOutput(); err != nil {
+				t.Fatalf("clone remote workspace: %v\n%s", err, out)
+			}
+			runGit(t, workdir, "update-index", test.flag, "clean.txt")
+			cleanPath := filepath.Join(workdir, "clean.txt")
+			if test.present {
+				mustWriteTestFile(t, cleanPath, "hidden remote edit\n")
+			} else if err := os.Remove(cleanPath); err != nil {
+				t.Fatal(err)
+			}
+
+			out, err := runOverlayCommand(t, remotePrepareGitOverlay(workdir, coherence), nil)
+			reason, fallback, mutated := gitOverlayFallbackOutcome(string(out), err)
+			if !fallback || mutated || reason != test.reason {
+				t.Fatalf("reason=%q fallback=%t mutated=%t err=%v out=%q", reason, fallback, mutated, err, out)
+			}
+			if test.present {
+				got, readErr := os.ReadFile(cleanPath)
+				if readErr != nil || string(got) != "hidden remote edit\n" {
+					t.Fatalf("hidden file changed before fallback: data=%q err=%v", got, readErr)
+				}
+			} else if _, statErr := os.Stat(cleanPath); !os.IsNotExist(statErr) {
+				t.Fatalf("missing hidden file was recreated before fallback: %v", statErr)
+			}
+			if _, statErr := os.Stat(filepath.Join(workdir, ".git", "crabbox", "sync-manifest")); !os.IsNotExist(statErr) {
+				t.Fatalf("overlay wrote its baseline before hidden-index fallback: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestRemotePrepareGitOverlayRejectsSymlinkedParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX symlink integration")
+	}
+	fixture := newGitOverlayFixture(t)
+	root, coherence := fixture.root, fixture.plan
+	outside := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(outside, "sentinel.txt"), "keep\n")
+	parent := filepath.Join(root, "lease")
+	if err := os.Symlink(outside, parent); err != nil {
+		t.Fatal(err)
+	}
+	workdir := filepath.Join(parent, "repo")
+
+	out, err := runOverlayCommand(t, remotePrepareGitOverlay(workdir, coherence), nil)
+	reason, fallback := gitOverlayFallbackResult(string(out), err)
+	if !fallback || reason != "symlink_remote_parent" {
+		t.Fatalf("reason=%q fallback=%t err=%v out=%q", reason, fallback, err, out)
+	}
+	if got, readErr := os.ReadFile(filepath.Join(outside, "sentinel.txt")); readErr != nil || string(got) != "keep\n" {
+		t.Fatalf("outside sentinel changed: data=%q err=%v", got, readErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "repo")); !os.IsNotExist(statErr) {
+		t.Fatalf("overlay created workspace through symlinked parent: %v", statErr)
+	}
+}
+
+func TestRemotePrepareGitOverlayRejectsSymlinkedGitMetadata(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX symlink integration")
+	}
+	fixture := newGitOverlayFixture(t)
+	repo, coherence := fixture.repo, fixture.plan
+	for _, test := range []struct {
+		name   string
+		reason string
+		path   string
+		dir    bool
+	}{
+		{name: "info", reason: "symlink_git_info", path: ".git/info", dir: true},
+		{name: "attributes", reason: "symlink_git_attributes", path: ".git/info/attributes"},
+		{name: "exclude", reason: "symlink_git_exclude", path: ".git/info/exclude"},
+		{name: "objects info", reason: "symlink_git_objects_info", path: ".git/objects/info", dir: true},
+		{name: "alternates", reason: "symlink_git_alternates", path: ".git/objects/info/alternates"},
+		{name: "deep refs", reason: "unsafe_git_metadata", path: ".git/refs/crabbox", dir: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workdir := filepath.Join(t.TempDir(), "workdir")
+			if out, err := exec.Command("git", "clone", "--quiet", repo.RemoteURL, workdir).CombinedOutput(); err != nil {
+				t.Fatalf("clone remote workspace: %v\n%s", err, out)
+			}
+			outside := t.TempDir()
+			sentinel := filepath.Join(outside, "sentinel")
+			mustWriteTestFile(t, sentinel, "keep\n")
+			link := filepath.Join(workdir, filepath.FromSlash(test.path))
+			if err := os.RemoveAll(link); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			target := sentinel
+			if test.dir {
+				target = outside
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+
+			out, err := runOverlayCommand(t, remotePrepareGitOverlay(workdir, coherence), nil)
+			reason, fallback := gitOverlayFallbackResult(string(out), err)
+			if !fallback || reason != test.reason {
+				t.Fatalf("reason=%q fallback=%t err=%v out=%q", reason, fallback, err, out)
+			}
+			if got, readErr := os.ReadFile(sentinel); readErr != nil || string(got) != "keep\n" {
+				t.Fatalf("outside sentinel changed: data=%q err=%v", got, readErr)
+			}
+		})
+	}
+}
+
+func TestRemotePrepareGitOverlayRejectsHostileLocalGitCommandsBeforeFetch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX Git overlay integration")
+	}
+	fixture := newGitOverlayFixture(t)
+	repo, coherence := fixture.repo, fixture.plan
+	for _, key := range []string{"core.alternateRefsCommand", "core.fsmonitor"} {
+		t.Run(key, func(t *testing.T) {
+			workdir := filepath.Join(t.TempDir(), "workdir")
+			if out, err := exec.Command("git", "clone", "--quiet", repo.RemoteURL, workdir).CombinedOutput(); err != nil {
+				t.Fatalf("clone remote workspace: %v\n%s", err, out)
+			}
+			marker := filepath.Join(t.TempDir(), "hostile-command-ran")
+			command := filepath.Join(t.TempDir(), "hostile.sh")
+			if err := os.WriteFile(command, []byte("#!/bin/sh\nprintf attacked >"+shellQuote(marker)+"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			runGit(t, workdir, "config", key, command)
+
+			out, err := runOverlayCommand(t, remotePrepareGitOverlay(workdir, coherence), nil)
+			reason, fallback, mutated := gitOverlayFallbackOutcome(string(out), err)
+			if !fallback || mutated || reason != "unsafe_git_workspace" {
+				t.Fatalf("reason=%q fallback=%t mutated=%t err=%v out=%q", reason, fallback, mutated, err, out)
+			}
+			if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+				t.Fatalf("hostile %s command executed: %v", key, statErr)
+			}
+		})
+	}
+}
+
+func TestRemotePrepareGitOverlayUsesTrustedTemporaryPaths(t *testing.T) {
+	command := remotePrepareGitOverlay("/tmp/crabbox-overlay/workdir", gitCoherencePlan{
+		RemoteURL: "https://example.test/repo.git",
+		Target:    strings.Repeat("a", 40),
+		Tree:      strings.Repeat("b", 40),
+		Branch:    "main",
+	})
+	for _, want := range []string{
+		`baseline_tmp="$(/usr/bin/mktemp "$checkout_root/.git/crabbox/sync-manifest.overlay.XXXXXX")"`,
+		`cache_lookup_path="$cache_path"`,
+		`check-ignore --no-index -v -z --stdin`,
+		`if ! /usr/bin/find -P "$metadata_path" -type l -print -quit > "$git_runtime_root/git-metadata-symlinks"; then return 1; fi`,
+		`[ ! -s "$git_runtime_root/git-metadata-symlinks" ] || return 1`,
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("overlay command missing %q", want)
+		}
+	}
+	if strings.Contains(command, "sync-manifest.overlay.$$") {
+		t.Fatal("overlay baseline manifest remains predictable")
 	}
 }
 
@@ -669,7 +2408,13 @@ func TestRemoteGitOverlayTransportFailuresFallBack(t *testing.T) {
 		t.Skip("POSIX overlay integration")
 	}
 	fixture := newGitOverlayFixture(t)
-	fetchOrigin, failedFetch := newFailingGitFetchHTTPServer(t, fixture.origin)
+	// Auth-like URL digits are not an HTTP authentication status.
+	fetchRepo := filepath.Join(t.TempDir(), "origin-401-403.git")
+	if err := os.Rename(fixture.origin, fetchRepo); err != nil {
+		t.Fatal(err)
+	}
+	fetchOrigin, failedFetch := newFailingGitFetchHTTPServer(t, fetchRepo)
+	unavailableOrigin := newGitTransportFailureHTTPServer(t) + "/unavailable-401-403.git"
 	tests := []struct {
 		name      string
 		plan      gitCoherencePlan
@@ -678,7 +2423,7 @@ func TestRemoteGitOverlayTransportFailuresFallBack(t *testing.T) {
 		{
 			name: "ls-remote",
 			plan: gitCoherencePlan{
-				RemoteURL: "http://127.0.0.1:1/missing.git",
+				RemoteURL: unavailableOrigin,
 				Target:    strings.Repeat("a", 40),
 				Tree:      strings.Repeat("b", 40),
 				Branch:    "main",
@@ -1058,6 +2803,142 @@ func TestRemoteGitOverlayRecoveryRollsBackInterruptedCoherenceInstall(t *testing
 	}
 }
 
+func TestRemotePrepareGitOverlayValidHintReconcilesWithoutNetwork(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX overlay integration")
+	}
+	fixture := newGitOverlayFixture(t)
+	workdir := filepath.Join(t.TempDir(), "workspace")
+	if output, err := exec.Command("git", "clone", "--quiet", fixture.origin, workdir).CombinedOutput(); err != nil {
+		t.Fatalf("clone workspace: %v\n%s", err, output)
+	}
+	meta := filepath.Join(workdir, ".git", "crabbox")
+	mustWriteTestFile(t, filepath.Join(meta, "sync-finalize-token"), "token")
+	mustWriteTestFile(t, filepath.Join(meta, "sync-finalize-complete-token"), "token")
+	mustWriteTestFile(t, filepath.Join(meta, "sync-fingerprint"), "fixed-boundary-fingerprint")
+	mustWriteTestFile(t, filepath.Join(meta, "git-hydrate-base"), "main "+fixture.repo.Head+"\n")
+	mustWriteTestFile(t, filepath.Join(workdir, "clean.txt"), "remote working tree drift\n")
+	mustWriteTestFile(t, filepath.Join(workdir, "untracked.txt"), "remove me\n")
+
+	attack := t.TempDir()
+	marker := filepath.Join(attack, "ambient-command-ran")
+	helper := filepath.Join(attack, "credential-helper")
+	mustWriteTestFile(t, filepath.Join(attack, ".bash_profile"), "printf profile >"+shellQuote(marker)+"\n")
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf helper >"+shellQuote(marker)+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "config", "--file", filepath.Join(attack, ".gitconfig"), "credential.helper", helper).CombinedOutput(); err != nil {
+		t.Fatalf("configure hostile helper: %v\n%s", err, output)
+	}
+	if err := os.WriteFile(filepath.Join(attack, "git"), []byte("#!/bin/sh\nprintf path >"+shellQuote(marker)+"\nexit 99\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hook := filepath.Join(workdir, ".git", "hooks", "reference-transaction")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nprintf hook >"+shellQuote(marker)+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(fixture.origin); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := runOverlayCommand(
+		t,
+		remotePrepareGitOverlayWithHint(workdir, fixture.plan, "main", fixture.repo.Head, "fixed-boundary-fingerprint"),
+		nil,
+		"HOME="+attack,
+		"PATH="+attack,
+	)
+	if err != nil {
+		t.Fatalf("networkless overlay reconciliation: output=%q err=%v", output, err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("networkless overlay reconciliation executed ambient profile, PATH, helper, or hook: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(workdir, "clean.txt")); err != nil || string(got) != "base clean.txt\n" {
+		t.Fatalf("working tree drift was not repaired: data=%q err=%v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "untracked.txt")); !os.IsNotExist(err) {
+		t.Fatalf("untracked drift survived reconciliation: %v", err)
+	}
+	if baseline, err := os.ReadFile(filepath.Join(meta, "sync-manifest")); err != nil || !bytes.Contains(baseline, []byte("clean.txt\x00")) {
+		t.Fatalf("networkless reconciliation baseline=%q err=%v", baseline, err)
+	}
+	for _, name := range []string{"sync-fingerprint", "git-hydrate-base"} {
+		if _, err := os.Stat(filepath.Join(meta, name)); !os.IsNotExist(err) {
+			t.Fatalf("networkless reconciliation retained stale %s: %v", name, err)
+		}
+	}
+}
+
+func TestRemotePrepareGitOverlayInvalidHintUsesNetworkAndRepairsGitState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX overlay integration")
+	}
+	for _, mismatch := range []string{"head", "index"} {
+		t.Run(mismatch, func(t *testing.T) {
+			fixture := newGitOverlayFixture(t)
+			workdir := filepath.Join(t.TempDir(), "workspace")
+			if output, err := exec.Command("git", "clone", "--quiet", fixture.origin, workdir).CombinedOutput(); err != nil {
+				t.Fatalf("clone workspace: %v\n%s", err, output)
+			}
+			meta := filepath.Join(workdir, ".git", "crabbox")
+			mustWriteTestFile(t, filepath.Join(meta, "sync-finalize-token"), "token")
+			mustWriteTestFile(t, filepath.Join(meta, "sync-finalize-complete-token"), "token")
+			mustWriteTestFile(t, filepath.Join(meta, "sync-fingerprint"), "stale-fingerprint")
+			mustWriteTestFile(t, filepath.Join(meta, "git-hydrate-base"), "main "+fixture.repo.Head+"\n")
+			switch mismatch {
+			case "head":
+				runGit(t, workdir, "checkout", "--quiet", "--detach", "HEAD^")
+			case "index":
+				mustWriteTestFile(t, filepath.Join(workdir, "clean.txt"), "staged remote drift\n")
+				runGit(t, workdir, "add", "clean.txt")
+			}
+			output, err := runOverlayCommand(
+				t,
+				remotePrepareGitOverlayWithHint(workdir, fixture.plan, "main", fixture.repo.Head, "expected-fingerprint"),
+				nil,
+			)
+			if err != nil {
+				t.Fatalf("repair invalid hint: %v\n%s", err, output)
+			}
+			if got := gitOutput(workdir, "rev-parse", "HEAD"); got != fixture.repo.Head {
+				t.Fatalf("%s mismatch HEAD=%q want %q", mismatch, got, fixture.repo.Head)
+			}
+			if got := gitOutput(workdir, "write-tree"); got != fixture.plan.Tree {
+				t.Fatalf("%s mismatch index=%q want %q", mismatch, got, fixture.plan.Tree)
+			}
+		})
+	}
+}
+
+func TestRemotePrepareGitOverlayStaleHintAttemptsNetwork(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX overlay integration")
+	}
+	fixture := newGitOverlayFixture(t)
+	workdir := filepath.Join(t.TempDir(), "workspace")
+	if output, err := exec.Command("git", "clone", "--quiet", fixture.origin, workdir).CombinedOutput(); err != nil {
+		t.Fatalf("clone workspace: %v\n%s", err, output)
+	}
+	meta := filepath.Join(workdir, ".git", "crabbox")
+	mustWriteTestFile(t, filepath.Join(meta, "sync-finalize-token"), "token")
+	mustWriteTestFile(t, filepath.Join(meta, "sync-finalize-complete-token"), "token")
+	mustWriteTestFile(t, filepath.Join(meta, "sync-fingerprint"), "stale-fingerprint")
+	mustWriteTestFile(t, filepath.Join(meta, "git-hydrate-base"), "main "+fixture.repo.Head+"\n")
+	if err := os.RemoveAll(fixture.origin); err != nil {
+		t.Fatal(err)
+	}
+	output, err := runOverlayCommand(
+		t,
+		remotePrepareGitOverlayWithHint(workdir, fixture.plan, "main", fixture.repo.Head, "current-fingerprint"),
+		nil,
+	)
+	reason, fallback, mutated := gitOverlayFallbackOutcome(string(output), err)
+	if !fallback || mutated || reason != "origin_unavailable" {
+		t.Fatalf("stale hint did not enter networkful path: reason=%q fallback=%t mutated=%t err=%v output=%q", reason, fallback, mutated, err, output)
+	}
+}
+
 func TestRemoteGitOverlayRejectsSymlinkedMetadataAndRuntimeState(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX symlink integration")
@@ -1182,50 +3063,48 @@ func TestRemoteGitOverlayHooksAndGlobalConfigurationRemainHermetic(t *testing.T)
 	assertNoGitOverlayResidue(t, workdir)
 }
 
-func TestGitOverlayLocalSnapshotDetectsLateContentModesAndIndexChanges(t *testing.T) {
-	for _, kind := range []string{"clean file edit", "dirty file edit", "mode change", "staged change", "symlink change", "new file"} {
-		t.Run(kind, func(t *testing.T) {
-			if kind == "symlink change" && runtime.GOOS == "windows" {
-				t.Skip("symlink unavailable")
-			}
-			fixture := newGitOverlayFixture(t)
-			if kind == "dirty file edit" {
-				mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "first dirty value\n")
-			}
-			before, _ := fixture.manifest(t)
-			beforeSnapshot, err := gitOverlayLocalSnapshot(fixture.repo, before)
-			if err != nil {
-				t.Fatal(err)
-			}
-			switch kind {
-			case "clean file edit", "dirty file edit":
-				mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "late changed value\n")
-			case "mode change":
-				if err := os.Chmod(filepath.Join(fixture.root, "mode.sh"), 0o755); err != nil {
-					t.Fatal(err)
-				}
-			case "staged change":
-				mustWriteTestFile(t, filepath.Join(fixture.root, "staged.txt"), "late staged value\n")
-				runGit(t, fixture.root, "add", "staged.txt")
-			case "symlink change":
-				if err := os.Remove(filepath.Join(fixture.root, "link")); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink("unstaged.txt", filepath.Join(fixture.root, "link")); err != nil {
-					t.Fatal(err)
-				}
-			case "new file":
-				mustWriteTestFile(t, filepath.Join(fixture.root, "late.txt"), "late new file\n")
-			}
-			after, _ := fixture.manifest(t)
-			afterSnapshot, err := gitOverlayLocalSnapshot(fixture.repo, after)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if beforeSnapshot == afterSnapshot && sameSyncManifest(before, after) {
-				t.Fatalf("late %s escaped post-preparation validation", kind)
-			}
-		})
+func TestRemoteDiscardGitOverlayPendingMetadataIsHermetic(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX overlay cleanup integration")
+	}
+	fixture := newGitOverlayFixture(t)
+	workdir := filepath.Join(t.TempDir(), "workspace")
+	if output, err := runOverlayCommand(t, remotePrepareGitOverlay(workdir, fixture.plan), nil); err != nil {
+		t.Fatalf("prepare overlay: %v\n%s", err, output)
+	}
+	const token = "abcdef0123456789abcdef0123456789"
+	meta := filepath.Join(workdir, ".git", "crabbox")
+	pending := []string{
+		filepath.Join(meta, remoteSyncPendingManifestName(token)),
+		filepath.Join(meta, remoteSyncPendingDeletedName(token)),
+	}
+	for _, path := range pending {
+		mustWriteTestFile(t, path, "pending\n")
+	}
+	attack := t.TempDir()
+	marker := filepath.Join(attack, "ambient-command-ran")
+	for _, name := range []string{"rm", "git"} {
+		if err := os.WriteFile(filepath.Join(attack, name), []byte("#!/bin/sh\nprintf fired >"+shellQuote(marker)+"\nexit 99\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if output, err := runOverlayCommand(
+		t,
+		remoteDiscardGitOverlaySyncPendingMetadata(workdir, token),
+		nil,
+		"HOME="+attack,
+		"PATH="+attack,
+		"GIT_CONFIG_GLOBAL="+filepath.Join(attack, "gitconfig"),
+	); err != nil {
+		t.Fatalf("discard overlay pending metadata: %v\n%s", err, output)
+	}
+	for _, path := range pending {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("pending metadata survived at %q: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("overlay cleanup executed ambient command: %v", err)
 	}
 }
 
@@ -1242,7 +3121,7 @@ func TestGitOverlayFingerprintPreservesLegacySchemaAndHashesLinkIdentity(t *test
 		t.Fatal(err)
 	}
 	want := sha256.New()
-	fmt.Fprintf(want, "v5\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", fixture.plan.RemoteURL, fixture.plan.Branch, fixture.plan.Target, fixture.plan.Tree)
+	fmt.Fprintf(want, "v6\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", fixture.plan.RemoteURL, fixture.plan.Branch, fixture.plan.Target, fixture.plan.Tree)
 	fmt.Fprintf(want, "delete=%t\nchecksum=%t\n", legacy.Sync.Delete, legacy.Sync.Checksum)
 	fmt.Fprintf(want, "manifest=%x\n", sha256.Sum256(manifest.NUL()))
 	fmt.Fprintf(want, "deleted=%x\n", sha256.Sum256(manifest.DeletedNUL()))
@@ -1326,27 +3205,28 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 		t.Skip("POSIX SSH runtime integration")
 	}
 	for _, mode := range []string{
-		"success", "file-origin", "runtime-state", "classified-fallback", "private-origin", "origin-unavailable", "missing-origin", "local-ineligible", "local-fingerprint-reuse", "remote-fingerprint-reuse", "unsafe-metadata",
-		"ordinary-private-fresh", "ordinary-private-reused", "ordinary-unavailable-fresh", "ordinary-unavailable-reused", "ordinary-server-failure-reused",
+		"success", "file-origin", "runtime-state", "classified-fallback", "snapshot-prepare-fallback", "private-origin", "origin-unavailable", "missing-origin", "local-ineligible", "local-fingerprint-reuse", "remote-fingerprint-reuse", "unsafe-metadata",
+		"local-hidden-fingerprint", "local-sparse-hidden-fingerprint", "local-config-hidden-fingerprint", "remote-hidden-fingerprint", "remote-skip-hidden-fingerprint", "remote-inspection-hidden-fingerprint",
+		"ordinary-private-fresh", "ordinary-private-reused", "ordinary-unavailable-fresh", "ordinary-unavailable-reused", "ordinary-disconnected-reused", "ordinary-server-failure-reused",
 		"symlinked-workdir", "symlinked-git", "symlinked-git-config", "symlinked-git-objects", "linked-worktree",
-		"checkout-file-obstruction", "post-reset-cache", "post-reset-mass-deletion", "late-local-edit",
+		"checkout-file-obstruction", "post-reset-cache", "post-reset-mass-deletion", "late-local-edit", "workload-cleanup", "rsync-failure", "rsync-cleanup-failure", "empty-overlay-finalize",
 	} {
 		t.Run(mode, func(t *testing.T) {
 			clearConfigEnv(t)
 			fixture := newGitOverlayFixture(t)
 			ordinary := strings.HasPrefix(mode, "ordinary-")
 			reused := ordinary && strings.HasSuffix(mode, "-reused")
+			hiddenFingerprint := strings.HasSuffix(mode, "-hidden-fingerprint")
+			fingerprintReuse := mode == "local-fingerprint-reuse" || mode == "remote-fingerprint-reuse" || hiddenFingerprint
 			privateOrigin := mode == "private-origin" || strings.HasPrefix(mode, "ordinary-private-")
-			unavailableOrigin := mode == "origin-unavailable" || strings.HasPrefix(mode, "ordinary-unavailable-")
+			unavailableOrigin := mode == "origin-unavailable" || strings.HasPrefix(mode, "ordinary-unavailable-") || mode == "ordinary-disconnected-reused"
 			switch mode {
 			case "file-origin":
 				runGit(t, fixture.root, "remote", "set-url", "origin", "file://"+filepath.ToSlash(fixture.origin))
 			case "missing-origin":
 				runGit(t, fixture.root, "remote", "remove", "origin")
-			case "origin-unavailable", "ordinary-unavailable-fresh", "ordinary-unavailable-reused":
-				server := httptest.NewServer(http.NotFoundHandler())
-				unavailableOrigin := server.URL + "/unavailable.git"
-				server.Close()
+			case "origin-unavailable", "ordinary-unavailable-fresh", "ordinary-unavailable-reused", "ordinary-disconnected-reused":
+				unavailableOrigin := newGitTransportFailureHTTPServer(t) + "/unavailable.git"
 				runGit(t, fixture.root, "remote", "set-url", "origin", unavailableOrigin)
 			case "private-origin", "ordinary-private-fresh", "ordinary-private-reused":
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -1367,6 +3247,9 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 			}
 			if mode == "local-fingerprint-reuse" {
 				runGit(t, fixture.root, "config", "core.autocrlf", "true")
+			}
+			if mode == "late-local-edit" || mode == "workload-cleanup" || mode == "rsync-failure" || mode == "rsync-cleanup-failure" {
+				mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "snapshot local change\n")
 			}
 			if mode == "checkout-file-obstruction" {
 				mustWriteTestFile(t, filepath.Join(fixture.root, "shape", "new.txt"), "replacement tracked directory file\n")
@@ -1393,7 +3276,7 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 			}
 			remoteRoot := filepath.Join(testRoot, "remote")
 			configPath := filepath.Join(testRoot, "config.yaml")
-			config := fmt.Sprintf("workRoot: %q\nsync:\n  gitOverlay: %t\n  gitSeed: true\n  delete: true\n  fingerprint: %t\n  exclude:\n    - excluded.txt\n", remoteRoot, !ordinary, ordinary || mode == "local-fingerprint-reuse" || mode == "remote-fingerprint-reuse")
+			config := fmt.Sprintf("workRoot: %q\nsync:\n  gitOverlay: %t\n  gitSeed: true\n  delete: true\n  fingerprint: %t\n  exclude:\n    - excluded.txt\n", remoteRoot, !ordinary, ordinary || fingerprintReuse)
 			if mode == "post-reset-mass-deletion" {
 				config += "    - bulk\n"
 			}
@@ -1410,6 +3293,12 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 			}
 			sshLog := filepath.Join(testRoot, "ssh.log")
 			rsyncLog := filepath.Join(testRoot, "rsync-manifest")
+			rsyncSourceLog := filepath.Join(testRoot, "rsync-source")
+			snapshotParent := filepath.Join(testRoot, "snapshots")
+			if err := os.Mkdir(snapshotParent, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			workloadProbe := filepath.Join(testRoot, "workload-probe")
 			attackHome := filepath.Join(testRoot, "hostile-home")
 			attackBin := filepath.Join(testRoot, "hostile-bin")
 			attackMarker := filepath.Join(testRoot, "hostile-executed")
@@ -1427,7 +3316,7 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 				t.Fatal(err)
 			}
 			workdir := filepath.Join(remoteRoot, "cbx_overlay_runtime", repo.Name)
-			if reused || mode == "runtime-state" || mode == "checkout-file-obstruction" || mode == "post-reset-cache" || mode == "post-reset-mass-deletion" || mode == "classified-fallback" || mode == "missing-origin" || mode == "local-fingerprint-reuse" || mode == "remote-fingerprint-reuse" || mode == "unsafe-metadata" || mode == "symlinked-workdir" || mode == "symlinked-git" || mode == "symlinked-git-config" || mode == "symlinked-git-objects" || mode == "linked-worktree" {
+			if reused || mode == "runtime-state" || mode == "checkout-file-obstruction" || mode == "post-reset-cache" || mode == "post-reset-mass-deletion" || mode == "classified-fallback" || mode == "missing-origin" || fingerprintReuse || mode == "unsafe-metadata" || mode == "symlinked-workdir" || mode == "symlinked-git" || mode == "symlinked-git-config" || mode == "symlinked-git-objects" || mode == "linked-worktree" {
 				if err := os.MkdirAll(filepath.Dir(workdir), 0o755); err != nil {
 					t.Fatal(err)
 				}
@@ -1494,22 +3383,22 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 					mustWriteTestFile(t, filepath.Join(workdir, "shape"), "stale untracked managed file\n")
 					mustWriteTestFile(t, filepath.Join(workdir, ".git", "crabbox", "sync-manifest"), "shape\x00")
 				}
-				if mode == "local-fingerprint-reuse" || mode == "remote-fingerprint-reuse" {
-					legacyConfig, err := loadConfig()
+				if fingerprintReuse {
+					fingerprintConfig, err := loadConfig()
 					if err != nil {
 						t.Fatal(err)
 					}
-					legacyConfig.Sync.GitOverlay = false
-					excludes, err := syncExcludes(repo.Root, legacyConfig)
+					fingerprintConfig.Sync.GitOverlay = mode == "remote-fingerprint-reuse"
+					excludes, err := syncExcludes(repo.Root, fingerprintConfig)
 					if err != nil {
 						t.Fatal(err)
 					}
-					manifest, err := syncManifestFilteredRules(repo.Root, excludes, syncIncludes(legacyConfig))
+					manifest, err := syncManifestFilteredRules(repo.Root, excludes, syncIncludes(fingerprintConfig))
 					if err != nil {
 						t.Fatal(err)
 					}
-					coherence, _ := syncGitCoherencePlan(legacyConfig, repo)
-					fingerprint, err := syncFingerprintForManifest(repo, legacyConfig, manifest, excludes, coherence)
+					coherence, _ := syncGitCoherencePlan(fingerprintConfig, repo)
+					fingerprint, err := syncFingerprintForManifest(repo, fingerprintConfig, manifest, excludes, coherence)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -1521,6 +3410,35 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 					mustWriteTestFile(t, filepath.Join(meta, "git-hydrate-base"), "main "+repo.Head+"\n")
 					if err := os.Remove(filepath.Join(workdir, "excluded.txt")); err != nil {
 						t.Fatal(err)
+					}
+					if mode == "remote-fingerprint-reuse" {
+						mustWriteTestFile(t, filepath.Join(workdir, "clean.txt"), "remote working tree drift\n")
+						if err := os.RemoveAll(fixture.origin); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if hiddenFingerprint {
+						const token = "71717171717171717171717171717171"
+						mustWriteTestFile(t, filepath.Join(meta, remoteSyncPendingManifestName(token)), string(manifest.NUL()))
+						if out, err := runOverlayCommand(t, remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
+							Token: token, Fingerprint: fingerprint, Coherence: coherence,
+							HydrateGit: true, BaseRef: repo.BaseRef, BaseSHA: repo.Head,
+						}), nil); err != nil {
+							t.Fatalf("finalize ordinary fingerprint before hidden edit: %v\n%s", err, out)
+						}
+						editRoot, flag := workdir, "--assume-unchanged"
+						if strings.HasPrefix(mode, "local-") {
+							editRoot = fixture.root
+						} else if mode == "remote-skip-hidden-fingerprint" {
+							flag = "--skip-worktree"
+						}
+						runGit(t, editRoot, "update-index", flag, "clean.txt")
+						if mode == "local-sparse-hidden-fingerprint" {
+							runGit(t, editRoot, "config", "core.sparseCheckout", "true")
+						} else if mode == "local-config-hidden-fingerprint" {
+							runGit(t, editRoot, "config", "core.filemode", "false")
+						}
+						mustWriteTestFile(t, filepath.Join(editRoot, "clean.txt"), "hidden edit must not survive a fingerprint skip\n")
 					}
 				}
 				if mode == "unsafe-metadata" {
@@ -1556,11 +3474,43 @@ export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/
 export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false GCM_INTERACTIVE=Never
 cmd="$1"
 printf '%%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
+# Replay the CI libcurl diagnostic only after a real coherence fetch failure.
+# Keep the remote command, cleanup, and exit status intact.
+if [ "$CRABBOX_FAKE_OVERLAY_MODE" = ordinary-disconnected-reused ]; then
+  case "$cmd" in
+    *"Git coherence fetch failed"*)
+      diagnostic="$(mktemp)"
+      /bin/bash --noprofile --norc -c "$cmd" 2>"$diagnostic"
+      code=$?
+      if [ "$code" -eq 78 ] && grep -q 'Git coherence fetch failed' "$diagnostic"; then
+        printf replayed > "$CRABBOX_FAKE_RSYNC_LOG.disconnected"
+        printf '%%s\n' 'remote sync finalize failed: Git coherence fetch failed' "fatal: unable to access 'http://127.0.0.1/unavailable.git/': getpeername() failed with errno 107: Transport endpoint is not connected" >&2
+      else
+        cat "$diagnostic" >&2
+      fi
+      rm -f "$diagnostic"
+      exit "$code"
+      ;;
+  esac
+fi
 case "$cmd" in
+  *CRABBOX_SNAPSHOT_WORKLOAD_PROBE*)
+    snapshot_root="$(cat "$CRABBOX_FAKE_RSYNC_SOURCE_LOG")"
+    [ -n "$snapshot_root" ] && [ ! -e "$snapshot_root" ] || exit 86
+    : > "$CRABBOX_FAKE_WORKLOAD_PROBE"
+    exit 0
+    ;;
+	  *committed_token=*)
+	    if [ "$CRABBOX_FAKE_OVERLAY_MODE" = empty-overlay-finalize ]; then
+	      snapshot="$(/usr/bin/find "$TMPDIR" -maxdepth 1 -name 'crabbox-git-overlay-*' -print -quit)"
+	      [ -z "$snapshot" ] || exit 87
+	    fi
+	    ;;
   *crabbox-ready*) exit 0 ;;
-  *".overlay-git."*)
-    case "$CRABBOX_FAKE_OVERLAY_MODE" in
-      classified-fallback|remote-fingerprint-reuse) printf '%%scheckout_failed\n' %s >&2; exit %d ;;
+	  *".overlay-git."*)
+	    case "$CRABBOX_FAKE_OVERLAY_MODE" in
+	      classified-fallback) printf '%%scheckout_failed\n' %s >&2; exit %d ;;
+	      remote-inspection-hidden-fingerprint) printf '%%sindex_inspection_failed\n' %s >&2; exit %d ;;
       checkout-file-obstruction)
         /bin/chmod 0555 "$CRABBOX_FAKE_OVERLAY_WORKDIR"
         /usr/bin/env HOME="$CRABBOX_FAKE_ATTACK_HOME" PATH="$CRABBOX_FAKE_ATTACK_BIN:/usr/bin:/bin" /bin/bash --noprofile --norc -c "$cmd"
@@ -1569,28 +3519,45 @@ case "$cmd" in
         exit "$code"
         ;;
       late-local-edit) printf 'late local change\n' > "$CRABBOX_FAKE_REPO_ROOT/clean.txt" ;;
-    esac
-    ;;
+	      empty-overlay-finalize)
+	        snapshot="$(/usr/bin/find "$TMPDIR" -maxdepth 1 -name 'crabbox-git-overlay-*' -print -quit)"
+	        [ -n "$snapshot" ] || exit 86
+	        ;;
+	    esac
+	    ;;
 esac
 case "$CRABBOX_FAKE_OVERLAY_MODE" in
-  success|runtime-state|checkout-file-obstruction|post-reset-cache|post-reset-mass-deletion|late-local-edit)
+	  success|runtime-state|remote-fingerprint-reuse|checkout-file-obstruction|post-reset-cache|post-reset-mass-deletion|late-local-edit|workload-cleanup|rsync-failure|rsync-cleanup-failure|empty-overlay-finalize)
     exec /usr/bin/env HOME="$CRABBOX_FAKE_ATTACK_HOME" PATH="$CRABBOX_FAKE_ATTACK_BIN:/usr/bin:/bin" /bin/bash --noprofile --norc -c "$cmd"
     ;;
 esac
 exec /bin/bash --noprofile --norc -c "$cmd"
-`, shellQuote(gitOverlayFallbackMarker), gitOverlayFallbackExitCode))
+`, shellQuote(gitOverlayFallbackMarker), gitOverlayFallbackExitCode, shellQuote(gitOverlayFallbackMarker), gitOverlayFallbackExitCode))
 			rsyncScript := `#!/bin/bash
 set -euo pipefail
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 cat > "$tmp"
 cp "$tmp" "$CRABBOX_FAKE_RSYNC_LOG"
+args=("$@")
+source="${args[${#args[@]}-2]}"
+source="${source%/}"
+printf '%s\n' "$source" > "$CRABBOX_FAKE_RSYNC_SOURCE_LOG"
+if [ "$CRABBOX_FAKE_OVERLAY_MODE" = rsync-cleanup-failure ]; then
+  mv "$source" "$source.retained"
+  mkdir "$source"
+  printf 'replacement survives\n' > "$source/replacement-sentinel"
+  exit 31
+fi
+if [ "$CRABBOX_FAKE_OVERLAY_MODE" = rsync-failure ]; then
+  exit 31
+fi
 destination="${!#}"
 workdir="${destination#*:}"
 workdir="${workdir%%/}"
 while IFS= read -r -d '' rel; do
   mkdir -p "$workdir/$(dirname "$rel")"
-  cp -a "$CRABBOX_FAKE_REPO_ROOT/$rel" "$workdir/$rel"
+  cp -a "$source/$rel" "$workdir/$rel"
 done < "$tmp"
 `
 			if err := os.WriteFile(filepath.Join(binDir, "rsync"), []byte(rsyncScript), 0o755); err != nil {
@@ -1606,13 +3573,53 @@ done < "$tmp"
 			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			t.Setenv("CRABBOX_FAKE_SSH_LOG", sshLog)
 			t.Setenv("CRABBOX_FAKE_RSYNC_LOG", rsyncLog)
+			t.Setenv("CRABBOX_FAKE_RSYNC_SOURCE_LOG", rsyncSourceLog)
 			t.Setenv("CRABBOX_FAKE_REPO_ROOT", fixture.root)
 			t.Setenv("CRABBOX_FAKE_OVERLAY_MODE", mode)
 			t.Setenv("CRABBOX_FAKE_OVERLAY_WORKDIR", workdir)
 			t.Setenv("CRABBOX_FAKE_ATTACK_HOME", attackHome)
 			t.Setenv("CRABBOX_FAKE_ATTACK_BIN", attackBin)
+			t.Setenv("CRABBOX_FAKE_WORKLOAD_PROBE", workloadProbe)
 			t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
 			t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+			t.Setenv("TMPDIR", snapshotParent)
+			snapshotGitLog := filepath.Join(testRoot, "snapshot-git.log")
+			if mode == "snapshot-prepare-fallback" {
+				previousGitExecutable := gitOverlayGitExecutable
+				failingGitExecutable := filepath.Join(binDir, "snapshot-git")
+				fallbackFile := filepath.Join(fixture.root, "snapshot-fallback.txt")
+				counter := filepath.Join(testRoot, "snapshot-git.count")
+				script := fmt.Sprintf(`#!/bin/sh
+count=0
+if [ -f %s ]; then count="$(cat %s)"; fi
+count=$((count + 1))
+printf '%%s\n' "$count" > %s
+printf '%%s\n' "$*" >> %s
+if [ "$count" -le 5 ]; then exec %s "$@"; fi
+printf 'snapshot fallback live edit\n' > %s
+exit 99
+`,
+					shellQuote(counter),
+					shellQuote(counter),
+					shellQuote(counter),
+					shellQuote(snapshotGitLog),
+					shellQuote(previousGitExecutable),
+					shellQuote(fallbackFile),
+				)
+				if err := os.WriteFile(failingGitExecutable, []byte(script), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				gitOverlayGitExecutable = failingGitExecutable
+				t.Cleanup(func() {
+					gitOverlayGitExecutable = previousGitExecutable
+				})
+			}
+			t.Cleanup(func() {
+				matches, err := filepath.Glob(filepath.Join(snapshotParent, "crabbox-git-overlay-*"))
+				if err != nil || len(matches) != 0 {
+					t.Errorf("retained overlay snapshots=%v err=%v", matches, err)
+				}
+			})
 			credentialMarker := ""
 			if privateOrigin {
 				credentialMarker = installGitOverlayCredentialCanary(t)
@@ -1620,10 +3627,85 @@ done < "$tmp"
 			var stdout bytes.Buffer
 			var stderr synchronizedBuffer
 			app := App{Stdout: &stdout, Stderr: &stderr}
-			runErr := app.runCommand(context.Background(), []string{"--provider", providerName, "--no-hydrate", "--sync-only"})
+			runArgs := []string{"--provider", providerName, "--no-hydrate", "--sync-only"}
+			if mode == "workload-cleanup" {
+				runArgs = []string{"--provider", providerName, "--no-hydrate", "--", "CRABBOX_SNAPSHOT_WORKLOAD_PROBE"}
+			}
+			runErr := app.runCommand(context.Background(), runArgs)
+			if mode == "ordinary-disconnected-reused" {
+				if replay, err := os.ReadFile(rsyncLog + ".disconnected"); err != nil || string(replay) != "replayed" {
+					t.Fatalf("disconnected diagnostic was not replayed after a real fetch failure: replay=%q err=%v", replay, err)
+				}
+				if runErr == nil && strings.Contains(stderr.String(), "getpeername") {
+					t.Fatalf("successful fallback leaked transport diagnostics: %s", stderr.String())
+				}
+			}
 			if credentialMarker != "" {
 				if _, err := os.Stat(credentialMarker); !os.IsNotExist(err) {
 					t.Fatalf("local SSH fixture consulted ambient Git credentials: %v", err)
+				}
+			}
+			if mode == "rsync-failure" || mode == "rsync-cleanup-failure" {
+				source, err := os.ReadFile(rsyncSourceLog)
+				if err != nil {
+					t.Fatal(err)
+				}
+				root := strings.TrimSpace(string(source))
+				if filepath.Dir(root) != snapshotParent || !strings.HasPrefix(filepath.Base(root), "crabbox-git-overlay-") {
+					t.Fatalf("rsync failure source=%q", source)
+				}
+				if mode == "rsync-cleanup-failure" {
+					t.Cleanup(func() {
+						for _, path := range []string{root, root + ".retained"} {
+							if err := os.RemoveAll(path); err != nil {
+								t.Errorf("remove fixture snapshot %q: %v", path, err)
+							}
+						}
+					})
+				}
+				if runErr == nil || !strings.Contains(runErr.Error(), "rsync failed") {
+					t.Fatalf("rsync failure not reported: err=%v stderr=%s", runErr, stderr.String())
+				}
+				meta := filepath.Join(workdir, ".git", "crabbox")
+				for _, pattern := range []string{"sync-manifest.*.new", "sync-deleted.*.new"} {
+					matches, err := filepath.Glob(filepath.Join(meta, pattern))
+					if err != nil || len(matches) != 0 {
+						t.Fatalf("pending metadata pattern=%q matches=%v err=%v", pattern, matches, err)
+					}
+				}
+				if mode == "rsync-cleanup-failure" {
+					if sentinel, err := os.ReadFile(filepath.Join(root, "replacement-sentinel")); err != nil || string(sentinel) != "replacement survives\n" {
+						t.Fatalf("snapshot cleanup touched replacement: sentinel=%q err=%v", sentinel, err)
+					}
+					if retained, err := os.ReadFile(filepath.Join(root+".retained", "unstaged.txt")); err != nil || string(retained) != "snapshot local change\n" {
+						t.Fatalf("retained snapshot payload=%q err=%v", retained, err)
+					}
+					var primary ExitError
+					if !AsExitError(runErr, &primary) || primary.Code != 6 || !strings.HasPrefix(runErr.Error(), "rsync failed") {
+						t.Fatalf("snapshot cleanup replaced primary rsync failure: err=%v exit=%+v", runErr, primary)
+					}
+					for _, diagnostic := range []string{"clean up immutable git overlay snapshot", "root identity changed", root} {
+						if !strings.Contains(runErr.Error(), diagnostic) {
+							t.Fatalf("returned error omitted snapshot cleanup diagnostic %q: %v", diagnostic, runErr)
+						}
+					}
+				} else if _, err := os.Stat(root); !os.IsNotExist(err) {
+					t.Fatalf("failed transfer retained snapshot %q: %v", root, err)
+				}
+				return
+			}
+			if mode == "workload-cleanup" {
+				if _, err := os.Stat(workloadProbe); err != nil {
+					t.Fatalf("workload did not observe a cleaned snapshot: %v\nstderr=%s", err, stderr.String())
+				}
+				source, err := os.ReadFile(rsyncSourceLog)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if root := strings.TrimSpace(string(source)); root == "" || !strings.Contains(filepath.Base(root), "crabbox-git-overlay-") {
+					t.Fatalf("workload rsync source=%q", source)
+				} else if _, err := os.Stat(root); !os.IsNotExist(err) {
+					t.Fatalf("snapshot survived until workload execution: %q: %v", root, err)
 				}
 			}
 			if mode == "ordinary-server-failure-reused" {
@@ -1699,22 +3781,72 @@ done < "$tmp"
 				t.Fatalf("read synced clean file: %v\nstderr=%s", err, stderr.String())
 			}
 			switch mode {
-			case "success", "file-origin", "runtime-state", "local-fingerprint-reuse", "remote-fingerprint-reuse":
+			case "local-hidden-fingerprint", "local-sparse-hidden-fingerprint", "local-config-hidden-fingerprint", "remote-hidden-fingerprint", "remote-skip-hidden-fingerprint", "remote-inspection-hidden-fingerprint":
+				want := "base clean.txt\n"
+				if strings.HasPrefix(mode, "local-") {
+					want = "hidden edit must not survive a fingerprint skip\n"
+				}
+				if string(content) != want {
+					t.Errorf("hidden-index fallback left stale bytes: got=%q want=%q; stderr=%s", content, want, stderr.String())
+				}
+				if strings.Contains(stderr.String(), "No changes detected, skipping sync") {
+					t.Errorf("hidden-index fallback reused an ordinary fingerprint: %s", stderr.String())
+				}
+				manifest, _ := fixture.manifest(t)
+				if transfer, readErr := os.ReadFile(rsyncLog); readErr != nil || !bytes.Equal(transfer, manifest.NUL()) {
+					t.Errorf("hidden-index fallback omitted full manifest: got=%q want=%q err=%v", transfer, manifest.NUL(), readErr)
+				}
+				wantReason := "assume_unchanged_index"
+				if mode == "remote-skip-hidden-fingerprint" {
+					wantReason = "skip_worktree_index"
+				} else if mode == "local-sparse-hidden-fingerprint" {
+					wantReason = "sparse_checkout"
+				} else if mode == "local-config-hidden-fingerprint" {
+					wantReason = "core_filemode"
+				} else if mode == "remote-inspection-hidden-fingerprint" {
+					wantReason = "index_inspection_failed"
+				}
+				if !strings.Contains(stderr.String(), "git overlay fallback reason="+wantReason) {
+					t.Errorf("hidden-index fallback reason missing: %s", stderr.String())
+				}
+				assertGitOverlayRecoveryCoherent(t, workdir, repo)
+			case "success", "file-origin", "runtime-state", "local-fingerprint-reuse", "remote-fingerprint-reuse", "empty-overlay-finalize":
 				if _, err := os.Stat(rsyncLog); !os.IsNotExist(err) {
 					sshCommands, _ := os.ReadFile(sshLog)
 					t.Fatalf("clean overlay/legacy fingerprint unexpectedly transferred a source payload: %v\nstderr=%s\nssh=%s", err, stderr.String(), sshCommands)
 				}
-				if (mode == "local-fingerprint-reuse" || mode == "remote-fingerprint-reuse") && !strings.Contains(stderr.String(), "No changes detected, skipping sync") {
+				if mode == "local-fingerprint-reuse" && !strings.Contains(stderr.String(), "No changes detected, skipping sync") {
 					t.Fatalf("unmodified fallback discarded the legacy fingerprint: %s", stderr.String())
 				}
-			case "classified-fallback", "private-origin", "origin-unavailable", "missing-origin", "local-ineligible", "linked-worktree", "checkout-file-obstruction", "post-reset-cache", "late-local-edit",
-				"ordinary-private-fresh", "ordinary-private-reused", "ordinary-unavailable-fresh", "ordinary-unavailable-reused":
+				if mode == "remote-fingerprint-reuse" {
+					sshCommands, err := os.ReadFile(sshLog)
+					if err != nil ||
+						bytes.Contains(sshCommands, []byte("No changes detected, skipping sync")) ||
+						!bytes.Contains(sshCommands, []byte("git checkout --quiet --force --detach")) ||
+						!bytes.Contains(sshCommands, []byte("sync-manifest.")) ||
+						!bytes.Contains(sshCommands, []byte("committed_token=")) {
+						t.Fatalf("overlay reuse did not run a networkless reconciliation transaction: commands=%q err=%v", sshCommands, err)
+					}
+					if strings.Contains(stderr.String(), "No changes detected, skipping sync") {
+						t.Fatalf("overlay reconciliation was reported as skipped: %s", stderr.String())
+					}
+					if !strings.Contains(stderr.String(), "sync_skipped=false") {
+						t.Fatalf("overlay reconciliation emitted skipped telemetry: %s", stderr.String())
+					}
+					if string(content) != "base clean.txt\n" {
+						t.Fatalf("overlay reconciliation did not repair remote drift: %q", content)
+					}
+				}
+			case "classified-fallback", "snapshot-prepare-fallback", "private-origin", "origin-unavailable", "missing-origin", "local-ineligible", "linked-worktree", "checkout-file-obstruction", "post-reset-cache",
+				"ordinary-private-fresh", "ordinary-private-reused", "ordinary-unavailable-fresh", "ordinary-unavailable-reused", "ordinary-disconnected-reused":
 				transfer, err := os.ReadFile(rsyncLog)
 				if err != nil || !bytes.Contains(transfer, []byte("clean.txt\x00")) {
 					t.Fatalf("fallback omitted full manifest: data=%q err=%v", transfer, err)
 				}
 				wantReason := "checkout_failed"
-				if privateOrigin {
+				if mode == "snapshot-prepare-fallback" {
+					wantReason = "invalid_head"
+				} else if privateOrigin {
 					wantReason = "origin_auth_required"
 				} else if unavailableOrigin {
 					wantReason = "origin_unavailable"
@@ -1726,11 +3858,6 @@ done < "$tmp"
 					wantReason = "unsafe_git_workspace"
 				} else if mode == "post-reset-cache" {
 					wantReason = "unsafe_cache_root"
-				} else if mode == "late-local-edit" {
-					wantReason = "local_checkout_changed"
-					if string(content) != "late local change\n" {
-						t.Fatalf("late local edit omitted: %q", content)
-					}
 				}
 				warningPrefix := "git overlay fallback reason="
 				if ordinary {
@@ -1750,14 +3877,14 @@ done < "$tmp"
 						meta = filepath.Join(workdir, meta)
 					}
 				}
-				if mode == "late-local-edit" || mode == "checkout-file-obstruction" || mode == "post-reset-cache" {
+				if mode == "checkout-file-obstruction" || mode == "post-reset-cache" {
 					assertGitOverlayRecoveryCoherent(t, workdir, repo)
-				} else if !privateOrigin && !unavailableOrigin && mode != "missing-origin" {
+				} else if mode != "snapshot-prepare-fallback" && !privateOrigin && !unavailableOrigin && mode != "missing-origin" {
 					if _, err := os.Stat(filepath.Join(meta, "git-hydrate-base")); err != nil {
 						t.Fatalf("unmodified fallback lost ordinary Git hydration metadata: %v", err)
 					}
 				}
-				if privateOrigin || unavailableOrigin || mode == "missing-origin" {
+				if mode == "snapshot-prepare-fallback" || privateOrigin || unavailableOrigin || mode == "missing-origin" {
 					for _, name := range []string{"sync-fingerprint", "git-hydrate-base"} {
 						if _, err := os.Stat(filepath.Join(meta, name)); !os.IsNotExist(err) {
 							t.Fatalf("hardened manifest retained %s: %v", name, err)
@@ -1808,6 +3935,69 @@ done < "$tmp"
 					if _, err := os.Stat(filepath.Join(meta, "sync-manifest")); err != nil {
 						t.Fatalf("linked fallback did not preserve legacy metadata authority: %v", err)
 					}
+				}
+				if mode == "classified-fallback" {
+					source, err := os.ReadFile(rsyncSourceLog)
+					if err != nil || strings.TrimSpace(string(source)) != repo.Root {
+						t.Fatalf("fallback rsync source=%q want=%q err=%v", source, repo.Root, err)
+					}
+				}
+				if mode == "snapshot-prepare-fallback" {
+					transfer, err := os.ReadFile(rsyncLog)
+					if err != nil || !bytes.Contains(transfer, []byte("snapshot-fallback.txt\x00")) {
+						t.Fatalf("snapshot fallback did not rebuild live manifest: data=%q err=%v", transfer, err)
+					}
+					if content, err := os.ReadFile(filepath.Join(workdir, "snapshot-fallback.txt")); err != nil || string(content) != "snapshot fallback live edit\n" {
+						t.Fatalf("snapshot fallback live file=%q err=%v", content, err)
+					}
+					source, err := os.ReadFile(rsyncSourceLog)
+					if err != nil || strings.TrimSpace(string(source)) != repo.Root {
+						t.Fatalf("snapshot fallback rsync source=%q want=%q err=%v", source, repo.Root, err)
+					}
+					invocations, err := os.ReadFile(snapshotGitLog)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got := len(bytes.Split(bytes.TrimSpace(invocations), []byte{'\n'})); got != 7 {
+						t.Fatalf("snapshot Git invocations=%d want=7\n%s", got, invocations)
+					}
+					if !bytes.Contains(invocations, []byte("rev-parse --verify HEAD^{commit}")) {
+						t.Fatalf("snapshot Git failure did not exercise checkout capture:\n%s", invocations)
+					}
+					sshCommands, err := os.ReadFile(sshLog)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, forbidden := range []string{".overlay-git.", "git clone ", "git fetch ", "git ls-remote ", "refs/remotes/origin/"} {
+						if bytes.Contains(sshCommands, []byte(forbidden)) {
+							t.Fatalf("snapshot fallback ran forbidden Git path %q:\n%s", forbidden, sshCommands)
+						}
+					}
+				}
+			case "late-local-edit":
+				transfer, err := os.ReadFile(rsyncLog)
+				if err != nil || !bytes.Equal(transfer, []byte("unstaged.txt\x00")) {
+					t.Fatalf("immutable overlay manifest=%q err=%v", transfer, err)
+				}
+				source, err := os.ReadFile(rsyncSourceLog)
+				if err != nil {
+					t.Fatal(err)
+				}
+				snapshotRoot := strings.TrimSpace(string(source))
+				if snapshotRoot == "" || !strings.Contains(filepath.Base(snapshotRoot), "crabbox-git-overlay-") {
+					t.Fatalf("overlay rsync source=%q", source)
+				}
+				if _, err := os.Stat(snapshotRoot); !os.IsNotExist(err) {
+					t.Fatalf("overlay snapshot was not cleaned: %v", err)
+				}
+				if string(content) != "base clean.txt\n" {
+					t.Fatalf("late edit leaked into current sync: %q", content)
+				}
+				if live, err := os.ReadFile(filepath.Join(fixture.root, "clean.txt")); err != nil || string(live) != "late local change\n" {
+					t.Fatalf("late source edit=%q err=%v", live, err)
+				}
+				if remote, err := os.ReadFile(filepath.Join(workdir, "unstaged.txt")); err != nil || string(remote) != "snapshot local change\n" {
+					t.Fatalf("snapshot payload=%q err=%v", remote, err)
 				}
 			}
 			if _, err := os.Stat(filepath.Join(workdir, "excluded.txt")); !os.IsNotExist(err) {

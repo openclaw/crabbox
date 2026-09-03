@@ -254,8 +254,10 @@ held through sync or fresh checkout, Actions hydration, the command, result and
 artifact collection, failure capture, and ready-pool scrub/return. Separate
 clients and `watch` iterations therefore cannot mutate or execute the same
 reused workspace concurrently. A contending client waits for a bounded interval
-and prints periodic progress. Newly acquired one-shot leases are already
-exclusive and bypass this owner.
+and prints periodic progress. Newly acquired exclusive one-shot leases bypass
+this owner on POSIX and WSL2 targets. Native Windows also uses the owner for
+fresh one-shot runs: its witness stages inherited SSH input into an ordinary
+redirected file stream before upload, sync, or user commands read it.
 
 Ownership is fenced with a random token and renewed while the lifecycle is
 active. If the local client disappears, Crabbox recovers an expired owner only

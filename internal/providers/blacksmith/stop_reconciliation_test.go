@@ -28,6 +28,11 @@ func nativeStopStatus(id, state, ip string) string {
 		"2026-08-30T12:00:00.123456Z", "https://github.com/example-org/my-app/actions/runs/123456789")
 }
 
+func nativeNeverAssignedStatus(id, state string) string {
+	return nativeStopStatusTable(id, state, "", ".github/workflows/testbox.yml", "test", "main",
+		"2026-09-02T13:54:37.000000Z", "")
+}
+
 func nativeStopStatusTable(cells ...string) string {
 	var table strings.Builder
 	w := tabwriter.NewWriter(&table, 0, 0, 2, ' ', 0)
@@ -86,7 +91,7 @@ func assertStopState(t *testing.T, claim core.LeaseClaim, retained bool) {
 
 func TestBlacksmithStopReconcilesCompletedClaim(t *testing.T) {
 	const id = "tbx_completed123"
-	for _, mode := range []string{"with-ip", "empty-ip", "unicode-workflow", "successful-stop"} {
+	for _, mode := range []string{"with-ip", "empty-ip", "unicode-workflow", "successful-stop", "never-assigned-already-completed", "never-assigned-successful-stop", "never-assigned-failed-stop"} {
 		t.Run(mode, func(t *testing.T) {
 			isolateBlacksmithOwnership(t)
 			claim := seedStopClaim(t, id)
@@ -102,6 +107,8 @@ func TestBlacksmithStopReconcilesCompletedClaim(t *testing.T) {
 			}
 			var stdout, stderr bytes.Buffer
 			stopped := false
+			alreadyCompleted := mode == "never-assigned-already-completed"
+			successfulStop := mode == "successful-stop" || mode == "never-assigned-successful-stop"
 			var operations []string
 			cfg := baseConfig()
 			cfg.Blacksmith.Org = "example-org"
@@ -113,6 +120,13 @@ func TestBlacksmithStopReconcilesCompletedClaim(t *testing.T) {
 				}
 				switch req.Args[1] {
 				case "status":
+					if strings.HasPrefix(mode, "never-assigned-") {
+						state := "queued"
+						if stopped || alreadyCompleted {
+							state = "completed"
+						}
+						return LocalCommandResult{Stdout: nativeNeverAssignedStatus(id, state)}, nil
+					}
 					state, ip := "ready", "192.0.2.10"
 					if stopped {
 						state = "completed"
@@ -123,7 +137,7 @@ func TestBlacksmithStopReconcilesCompletedClaim(t *testing.T) {
 					return LocalCommandResult{Stdout: nativeStopStatusTable(id, state, ip, claim.Labels["workflow"], "test", "main", "2026-08-30T12:00:00.123456Z", "https://github.com/example-org/my-app/actions/runs/123456789")}, nil
 				case "stop":
 					stopped = true
-					if mode == "successful-stop" {
+					if successfulStop {
 						return LocalCommandResult{Stdout: "stopped\n", Stderr: "stop note\n"}, nil
 					}
 					return LocalCommandResult{ExitCode: 1, Stderr: stopDiagnostic}, errors.New("exit status 1")
@@ -135,12 +149,20 @@ func TestBlacksmithStopReconcilesCompletedClaim(t *testing.T) {
 			if err := backend.Stop(t.Context(), StopRequest{ID: claim.Slug}); err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(operations, []string{"status", "stop", "status", "status"}) {
+			wantOperations := []string{"status", "stop", "status", "status"}
+			if alreadyCompleted {
+				wantOperations = []string{"status", "status"}
+			}
+			if !reflect.DeepEqual(operations, wantOperations) {
 				t.Fatalf("operations=%v", operations)
 			}
 			assertStopState(t, claim, false)
 			assertStopState(t, unrelated, true)
-			if mode == "successful-stop" {
+			if alreadyCompleted {
+				if stdout.Len() != 0 || stderr.Len() != 0 {
+					t.Fatalf("already completed cleanup emitted stop output: %q %q", stdout.String(), stderr.String())
+				}
+			} else if successfulStop {
 				if stdout.String() != "stopped\n" || stderr.String() != "stop note\n" {
 					t.Fatalf("output changed: %q %q", stdout.String(), stderr.String())
 				}
@@ -158,6 +180,7 @@ func TestBlacksmithStopReconciliationFailsClosed(t *testing.T) {
 	header += "\n"
 	blankIP := nativeStopStatus(id, "completed", "")
 	blankHeader, blankRow, _ := strings.Cut(blankIP, "\n")
+	neverAssigned := nativeNeverAssignedStatus(id, "completed")
 	type statusCase struct {
 		name     string
 		stdout   string
@@ -188,6 +211,7 @@ func TestBlacksmithStopReconciliationFailsClosed(t *testing.T) {
 		{name: "blank IP collapsed whitespace", stdout: blankHeader + "\n" + strings.Join(strings.Fields(blankRow), "  ") + "\n"},
 		{name: "blank IP truncated row", stdout: strings.TrimSuffix(blankIP, "https://github.com/example-org/my-app/actions/runs/123456789\n")},
 		{name: "blank IP truncated run URL", stdout: strings.Replace(blankIP, "/runs/123456789", "/runs/", 1)},
+		{name: "numeric URL truncated without newline", stdout: strings.TrimSuffix(blankIP, "789\n")},
 		{name: "blank IP extra cell", stdout: strings.TrimSuffix(blankIP, "\n") + "  unexpected\n"},
 		{name: "blank IP misaligned row", stdout: strings.Replace(completed, "192.0.2.10", "", 1)},
 		{name: "stderr table only", stderr: completed},
@@ -207,6 +231,21 @@ func TestBlacksmithStopReconciliationFailsClosed(t *testing.T) {
 		{name: "query deadline", stdout: completed, code: 1, err: context.DeadlineExceeded, deadline: true},
 		{name: "canceled after successful status", stdout: completed, cancelAt: "status"},
 		{name: "canceled after stop", stdout: completed, cancelAt: "stop"},
+		{name: "empty URL missing newline", stdout: strings.TrimSuffix(neverAssigned, "\n")},
+		{name: "empty URL missing padding", stdout: strings.TrimRight(neverAssigned, " \n") + "\n"},
+		{name: "empty URL short padding", stdout: strings.TrimSuffix(neverAssigned, " \n") + "\n"},
+		{name: "empty URL extra blank column", stdout: strings.TrimSuffix(neverAssigned, "\n") + "  \n"},
+		{name: "empty URL duplicate row", stdout: neverAssigned + strings.Split(neverAssigned, "\n")[1] + "\n"},
+		{name: "empty URL collapsed whitespace", stdout: blankHeader + "\n" + strings.Join(strings.Fields(strings.Split(neverAssigned, "\n")[1]), "  ") + "\n"},
+		{name: "empty URL wrong id", stdout: nativeNeverAssignedStatus("tbx_other", "completed")},
+		{name: "empty URL foreign workflow", stdout: strings.Replace(neverAssigned, "testbox.yml", "foreign.yml", 1)},
+		{name: "empty URL foreign job", stdout: strings.Replace(neverAssigned, "  test  ", "  lint  ", 1)},
+		{name: "empty URL foreign ref", stdout: strings.Replace(neverAssigned, "  main  ", "  next  ", 1)},
+		{name: "empty URL status exit 7", stdout: neverAssigned, code: 7, err: errors.New("exit status 7")},
+		{name: "empty URL status exit without error", stdout: neverAssigned, code: 7},
+		{name: "empty URL stderr only", stderr: neverAssigned},
+		{name: "empty URL canceled query", stdout: neverAssigned, cancelAt: "status"},
+		{name: "empty URL query deadline", stdout: neverAssigned, code: 1, err: context.DeadlineExceeded, deadline: true},
 	}
 	cells := []string{id, "completed", "", ".github/workflows/testbox.yml", "test", "main", "2026-08-30T12:00:00.123456Z", "https://github.com/example-org/my-app/actions/runs/123456789"}
 	for i, name := range []string{"ID", "STATUS", "IP", "WORKFLOW", "JOB", "REF", "CREATED", "RUN URL"} {
@@ -215,7 +254,11 @@ func TestBlacksmithStopReconciliationFailsClosed(t *testing.T) {
 		}
 		missing := append([]string(nil), cells...)
 		missing[i] = ""
-		tests = append(tests, statusCase{name: "blank IP missing " + name, stdout: nativeStopStatusTable(missing...)})
+		if name != "RUN URL" {
+			tests = append(tests, statusCase{name: "blank IP missing " + name, stdout: nativeStopStatusTable(missing...)})
+			missing[7] = ""
+			tests = append(tests, statusCase{name: "empty URL missing " + name, stdout: nativeStopStatusTable(missing...)})
+		}
 		removed := append(append([]string(nil), cells[:i]...), cells[i+1:]...)
 		tests = append(tests, statusCase{name: "blank IP removed " + name + " column", stdout: nativeStopStatusTable(removed...)})
 	}
@@ -225,11 +268,13 @@ func TestBlacksmithStopReconciliationFailsClosed(t *testing.T) {
 	}
 	for _, state := range []string{"ready", "queued", "hydrating", "running", "in_progress", "unknown", "failed", "cancelled", "canceled", "stopped", "terminated", "Completed", "COMPLETED", "!Ready"} {
 		tests = append(tests, statusCase{name: state, stdout: nativeStopStatus(id, state, "")})
+		tests = append(tests, statusCase{name: "empty URL " + state, stdout: nativeNeverAssignedStatus(id, state)})
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			isolateBlacksmithOwnership(t)
 			claim := seedStopClaim(t, id)
+			unrelated := seedStopClaim(t, "tbx_unrelated123")
 			var stdout, stderr bytes.Buffer
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
@@ -277,6 +322,7 @@ func TestBlacksmithStopReconciliationFailsClosed(t *testing.T) {
 				t.Fatalf("operations=%v want=%v", operations, want)
 			}
 			assertStopState(t, claim, true)
+			assertStopState(t, unrelated, true)
 			if stdout.String() != "stop stdout\n" || stderr.String() != stopDiagnostic {
 				t.Fatalf("original diagnostics lost: %q %q", stdout.String(), stderr.String())
 			}
@@ -304,8 +350,9 @@ func TestBlacksmithStopRejectsForeignProviderClaim(t *testing.T) {
 }
 
 func TestBlacksmithReconciliationRetainsOriginalErrorUntilFinalized(t *testing.T) {
-	for _, mode := range []string{"status-error", "cancelled", "changed-identity", "not-completed"} {
+	for _, mode := range []string{"status-error", "cancelled", "changed-identity", "not-completed", "status-error-never-assigned", "cancelled-never-assigned", "changed-identity-never-assigned", "not-completed-never-assigned"} {
 		t.Run(mode, func(t *testing.T) {
+			mode, neverAssigned := strings.CutSuffix(mode, "-never-assigned")
 			isolateBlacksmithOwnership(t)
 			claim := seedStopClaim(t, "tbx_finalization123")
 			var stdout, stderr bytes.Buffer
@@ -324,6 +371,12 @@ func TestBlacksmithReconciliationRetainsOriginalErrorUntilFinalized(t *testing.T
 					state = "ready"
 				}
 				output := nativeStopStatus(claim.LeaseID, state, "")
+				if neverAssigned {
+					if inspections == 1 {
+						state = "queued"
+					}
+					output = nativeNeverAssignedStatus(claim.LeaseID, state)
+				}
 				if inspections == 3 {
 					switch mode {
 					case "status-error":
@@ -333,7 +386,7 @@ func TestBlacksmithReconciliationRetainsOriginalErrorUntilFinalized(t *testing.T
 					case "changed-identity":
 						output = strings.ReplaceAll(output, "testbox.yml", "foreign.yml")
 					case "not-completed":
-						output = nativeStopStatus(claim.LeaseID, "ready", "")
+						output = strings.Replace(output, "completed", "ready    ", 1)
 					}
 				}
 				return LocalCommandResult{Stdout: output}, nil
@@ -387,6 +440,15 @@ func TestBlacksmithStopRejectsChangedClaimBeforeProviderCalls(t *testing.T) {
 }
 
 func TestBlacksmithStopHoldsClaimFenceDuringStatus(t *testing.T) {
+	for _, neverAssigned := range []bool{false, true} {
+		t.Run(fmt.Sprintf("never_assigned=%t", neverAssigned), func(t *testing.T) {
+			testBlacksmithStopHoldsClaimFenceDuringStatus(t, neverAssigned)
+		})
+	}
+}
+
+func testBlacksmithStopHoldsClaimFenceDuringStatus(t *testing.T, neverAssigned bool) {
+	t.Helper()
 	isolateBlacksmithOwnership(t)
 	claim := seedStopClaim(t, "tbx_fenced123")
 	entered, proceed := make(chan struct{}), make(chan struct{})
@@ -405,6 +467,9 @@ func TestBlacksmithStopHoldsClaimFenceDuringStatus(t *testing.T) {
 		case "status":
 			inspections++
 			if !stopped {
+				if neverAssigned {
+					return LocalCommandResult{Stdout: nativeNeverAssignedStatus(claim.LeaseID, "queued")}, nil
+				}
 				return LocalCommandResult{Stdout: nativeStopStatus(claim.LeaseID, "ready", "")}, nil
 			}
 			if inspections == 2 {
@@ -414,6 +479,9 @@ func TestBlacksmithStopHoldsClaimFenceDuringStatus(t *testing.T) {
 				case <-ctx.Done():
 					return LocalCommandResult{}, ctx.Err()
 				}
+			}
+			if neverAssigned {
+				return LocalCommandResult{Stdout: nativeNeverAssignedStatus(claim.LeaseID, "completed")}, nil
 			}
 			return LocalCommandResult{Stdout: nativeStopStatus(claim.LeaseID, "completed", "")}, nil
 		default:
@@ -652,8 +720,9 @@ func reconciliationRunner(t *testing.T, fn func(context.Context, LocalCommandReq
 }
 
 func TestBlacksmithStopArtifactFinalization(t *testing.T) {
-	for _, mode := range []string{"unsafe", "missing", "reconciled-unsafe"} {
+	for _, mode := range []string{"unsafe", "missing", "reconciled-unsafe", "unsafe-never-assigned", "missing-never-assigned", "reconciled-unsafe-never-assigned"} {
 		t.Run(mode, func(t *testing.T) {
+			mode, neverAssigned := strings.CutSuffix(mode, "-never-assigned")
 			isolateBlacksmithOwnership(t)
 			const id = "tbx_artifact123"
 			claim := testOwnedBlacksmithClaim(t, id, "artifact-krill", t.TempDir())
@@ -709,6 +778,12 @@ func TestBlacksmithStopArtifactFinalization(t *testing.T) {
 				state := "completed"
 				if mode == "reconciled-unsafe" && inspections == 1 {
 					state = "ready"
+					if neverAssigned {
+						state = "queued"
+					}
+				}
+				if neverAssigned {
+					return LocalCommandResult{Stdout: nativeNeverAssignedStatus(id, state)}, nil
 				}
 				return LocalCommandResult{Stdout: nativeStopStatus(id, state, "")}, nil
 			}))

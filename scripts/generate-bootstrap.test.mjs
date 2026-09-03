@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile, rm, mkdir, cp } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, rm, mkdir, cp, stat } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -139,6 +139,70 @@ test("shell and PowerShell literals preserve quoting-sensitive data without eval
       await writeFile(file, render(fragment, fixture));
       run("bash", ["-n", file]);
     }
+  }
+});
+
+test("macOS bootstrap installs and reuses its account password without logging it", async (t) => {
+  for (const traced of [false, true]) {
+    await t.test(traced ? "caller enables xtrace" : "normal caller", async (t) => {
+      const directory = await temporary(t);
+      const bin = join(directory, "bin"), home = join(directory, "home");
+      const work = join(directory, "work"), state = join(directory, "state");
+      await Promise.all([bin, home, work, state, join(home, ".ssh")].map((path) => mkdir(path, { recursive: true })));
+      const passwordPath = join(state, "vnc.password"), installedPath = join(state, "installed");
+      const readyCalls = join(state, "ready-calls");
+      // Execute the complete generated script with task-local paths and inert OS commands.
+      let script = shared.sharedMacOS("fixture", "ssh-ed25519 fixture", work, ["2222", "22"]);
+      for (const [original, local] of [
+        ["/var/db/crabbox", state], ["/etc/ssh/sshd_config", join(state, "sshd_config")],
+        ["/usr/sbin/sshd", join(bin, "sshd")], ["/usr/local/bin/crabbox-ready", join(bin, "crabbox-ready")],
+      ]) script = script.replaceAll(original, local);
+      for (const command of ["sshd", "rsync", "curl", "nc"]) {
+        await writeFile(join(bin, command), `#!/bin/bash\nprintf '%s\\n' ${shellQuote(command)} >>${shellQuote(readyCalls)}\n`, { mode: 0o755 });
+      }
+      const receivePassword = `const fs = require("node:fs");
+if ((fs.statSync(process.argv[1]).mode & 0o777) !== 0o600) process.exit(72);
+process.stdout.write(fs.readFileSync(0));`;
+      const prelude = `
+umask 022
+id() { return 0; }
+install() { return 0; }
+chown() { return 0; }
+systemsetup() { return 0; }
+launchctl() { return 0; }
+dscl() {
+  case "$2" in
+    -read) printf 'NFSHomeDirectory: %s\\n' ${shellQuote(home)} ;;
+    -passwd)
+      [ "$#" -eq 3 ] || return 71
+      ${shellQuote(process.execPath)} -e ${shellQuote(receivePassword)} ${shellQuote(passwordPath)} >>${shellQuote(installedPath)} ;;
+    *) return 1 ;;
+  esac
+}
+`;
+      const invoke = () => spawnSync("bash", [...(traced ? ["-x"] : []), "-c", prelude + script], {
+        encoding: "utf8", timeout: 60000, env: { PATH: `${bin}:/usr/bin:/bin` },
+      });
+      const first = invoke();
+      assert.equal(first.status, 0, "synthetic bootstrap must complete");
+      const password = (await readFile(passwordPath, "utf8")).trim();
+      assert.match(password, /^[A-Za-z0-9]{16}$/u);
+      assert.equal(await readFile(installedPath, "utf8"), password + "\n");
+      assert.equal((await stat(passwordPath)).mode & 0o777, 0o600);
+      assert.match(await readFile(readyCalls, "utf8"), /rsync\ncurl\nnc\nnc\n$/u);
+      const second = invoke();
+      assert.equal(second.status, 0, "bootstrap must reuse the existing password");
+      assert.equal(await readFile(passwordPath, "utf8"), password + "\n");
+      assert.equal(await readFile(installedPath, "utf8"), password + "\n");
+      for (const result of [first, second]) {
+        assert.equal(result.stdout.includes(password), false, "bootstrap stdout must not contain its password");
+        assert.equal(result.stderr.includes(password), false, "bootstrap stderr must not contain its password");
+      }
+      await writeFile(join(bin, "sshd"), "#!/bin/bash\necho 'synthetic sshd failure' >&2\nexit 9\n");
+      const failed = invoke();
+      assert.equal(failed.status, 9, "bootstrap must still stop on command failure");
+      assert.match(failed.stderr, /synthetic sshd failure/u);
+    });
   }
 });
 

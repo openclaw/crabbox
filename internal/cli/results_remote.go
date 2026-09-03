@@ -21,6 +21,14 @@ const (
 func collectRemoteJUnitResults(ctx context.Context, target SSHTarget, workdir string, cfg ResultsConfig, autoMarker string) (*TestResultSummary, error) {
 	paths := appendUniqueStrings(nil, cfg.JUnit...)
 	files := map[string]string{}
+	seen := map[string]bool{}
+	addFile := func(name, data string) {
+		key := normalizeResultPath(target, workdir, name)
+		if !seen[key] {
+			files[name] = data
+			seen[key] = true
+		}
+	}
 	var warnings []error
 	if len(paths) > 0 {
 		remote := remoteReadResultFiles(workdir, paths)
@@ -31,7 +39,12 @@ func collectRemoteJUnitResults(ctx context.Context, target SSHTarget, workdir st
 		if err != nil {
 			return nil, err
 		}
-		files = parseMarkedFiles(out)
+		collected := parseMarkedFiles(out)
+		for _, name := range paths {
+			if data, ok := collected[name]; ok {
+				addFile(name, data)
+			}
+		}
 	}
 	if cfg.Auto {
 		autoFiles, autoWarnings, err := collectRemoteJUnitResultFilesAuto(ctx, target, workdir, autoMarker)
@@ -39,16 +52,8 @@ func collectRemoteJUnitResults(ctx context.Context, target SSHTarget, workdir st
 			return nil, err
 		}
 		warnings = append(warnings, autoWarnings...)
-		seen := map[string]bool{}
-		for name := range files {
-			seen[normalizeResultPath(workdir, name)] = true
-		}
 		for name, data := range autoFiles {
-			key := normalizeResultPath(workdir, name)
-			if !seen[key] {
-				files[name] = data
-				seen[key] = true
-			}
+			addFile(name, data)
 		}
 	}
 	if len(files) == 0 {
@@ -132,15 +137,20 @@ func filterAutoJUnitFiles(files map[string]string) map[string]string {
 	return valid
 }
 
-func normalizeResultPath(workdir, name string) string {
-	path := strings.TrimSpace(strings.ReplaceAll(name, "\\", "/"))
+func normalizeResultPath(target SSHTarget, workdir, name string) string {
+	path := strings.TrimSpace(name)
+	root := strings.TrimSpace(workdir)
+	windows := isWindowsNativeTarget(target)
+	if windows {
+		path = strings.ReplaceAll(path, "\\", "/")
+		root = strings.ReplaceAll(root, "\\", "/")
+	}
 	path = strings.TrimPrefix(path, "./")
-	root := strings.TrimRight(strings.TrimSpace(strings.ReplaceAll(workdir, "\\", "/")), "/")
 	if root != "" {
-		prefix := root + "/"
+		prefix := strings.TrimRight(root, "/") + "/"
 		if strings.HasPrefix(path, prefix) {
 			path = strings.TrimPrefix(path, prefix)
-		} else if len(path) >= len(prefix) && strings.EqualFold(path[:len(prefix)], prefix) {
+		} else if windows && len(path) >= len(prefix) && strings.EqualFold(path[:len(prefix)], prefix) {
 			path = path[len(prefix):]
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -166,6 +167,15 @@ func TestExecCommandRunnerOutputLimitHelperProcess(t *testing.T) {
 	child.Stderr = os.Stderr
 	if err := child.Start(); err != nil {
 		os.Exit(97)
+	}
+	if mode == "retained-pipe" {
+		pidPath := os.Getenv("CRABBOX_TEST_OUTPUT_LIMIT_CHILD_PID")
+		if err := os.WriteFile(pidPath, []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+			os.Exit(98)
+		}
+		os.Exit(0)
 	}
 	_, _ = io.WriteString(os.Stdout, strings.Repeat("x", 1<<20))
 	time.Sleep(time.Hour)
