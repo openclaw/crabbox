@@ -18697,6 +18697,7 @@ export class FleetCoordinator {
     if (!provider) {
       return;
     }
+    const cloudProvider = this.provider(provider, lease.region, lease.providerProject);
     const operation = await this.state.storage.get<LeaseProvisioningOperation>(
       provisioningOperationKey(lease.id),
     );
@@ -18706,12 +18707,64 @@ export class FleetCoordinator {
       publication?.server.cloudID === lease.cloudID
         ? publication.server.resourceIdentity
         : undefined;
-    await this.withLegacyProviderMutation(lease.id, () =>
-      this.provider(provider, lease.region, lease.providerProject).releaseLease(
-        lease,
-        resourceIdentity ? { resourceIdentity } : undefined,
-      ),
-    );
+    const context = resourceIdentity ? { resourceIdentity } : undefined;
+    await this.withLegacyProviderMutation(lease.id, async () => {
+      let releaseLease = lease;
+      if (
+        lease.providerResourceID === undefined &&
+        cloudProvider.observeLegacyCleanupIdentity &&
+        legacyCleanupIdentityCaptureEligible(lease)
+      ) {
+        const expected = await this.state.runExclusive(async () => {
+          const current = await this.getLease(lease.id);
+          if (
+            !current ||
+            !sameLeaseRecord(current, lease) ||
+            (await provisioningOwnsLease(this.state.storage, lease.id))
+          ) {
+            throw new ProviderResourceUnresolvedError(
+              "lease cleanup claim changed before legacy provider identity observation",
+            );
+          }
+          return structuredClone(current);
+        });
+        const observed = await cloudProvider.observeLegacyCleanupIdentity(expected, context);
+        if (!observed) return;
+        const providerResourceID = observed.providerResourceID;
+        if (!providerResourceID || providerResourceID !== providerResourceID.trim()) {
+          throw new ProviderResourceUnresolvedError(
+            "provider returned an invalid legacy cleanup identity",
+          );
+        }
+        releaseLease = await this.state.runExclusive(async () => {
+          const current = await this.getLease(expected.id);
+          if (!current || (await provisioningOwnsLease(this.state.storage, expected.id))) {
+            throw new ProviderResourceUnresolvedError(
+              "lease cleanup authority changed before legacy provider identity capture",
+            );
+          }
+          if (
+            current.providerResourceID === providerResourceID &&
+            sameLeaseAfterLegacyCleanupIdentityCapture(current, expected)
+          ) {
+            return current;
+          }
+          if (!sameLeaseRecord(current, expected)) {
+            throw new ProviderResourceUnresolvedError(
+              "lease cleanup claim changed before legacy provider identity capture",
+            );
+          }
+          const captured: LeaseRecord = {
+            ...current,
+            providerResourceID,
+            updatedAt: new Date().toISOString(),
+          };
+          await this.putLease(captured);
+          return captured;
+        });
+      }
+      await cloudProvider.releaseLease(releaseLease, context);
+    });
   }
 
   private async withLegacyProviderMutation<T>(
@@ -24585,6 +24638,50 @@ function managedLeaseProvider(lease: LeaseRecord): Provider | undefined {
     : undefined;
 }
 
+function legacyCleanupIdentityCaptureEligible(lease: LeaseRecord): boolean {
+  const cleanupStartedAt = Date.parse(lease.cleanupStartedAt ?? "");
+  const cleanupClaimExpiresAt = Date.parse(lease.cleanupClaimExpiresAt ?? "");
+  const deletionIntended =
+    (lease.state === "released" && lease.releaseDeletesServer === true) ||
+    (leaseIsLive(lease) && Date.parse(lease.expiresAt) <= Date.now());
+  return (
+    lease.lifecycle !== "registered" &&
+    lease.providerResourceID === undefined &&
+    !lease.workspaceID &&
+    lease.cloudID.length > 0 &&
+    lease.cloudID === lease.cloudID.trim() &&
+    lease.serverName === lease.cloudID &&
+    Boolean(lease.region?.trim()) &&
+    Number.isFinite(cleanupStartedAt) &&
+    Number.isFinite(cleanupClaimExpiresAt) &&
+    cleanupClaimExpiresAt >= cleanupStartedAt &&
+    deletionIntended &&
+    !lease.providerKeyCleanupPending &&
+    lease.state !== "provisioning" &&
+    lease.provisioningResourceMayExist === undefined &&
+    lease.provisioningFailureRetryable === undefined &&
+    lease.provisioningRequestStartedAt === undefined &&
+    lease.provisioningRequestSettledAt === undefined &&
+    lease.provisioningCoordinatorVersion === undefined &&
+    lease.provisioningRecoveryObservedAt === undefined &&
+    lease.provisioningRecoveryMissingSince === undefined
+  );
+}
+
+function sameLeaseRecord(left: LeaseRecord, right: LeaseRecord): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function sameLeaseAfterLegacyCleanupIdentityCapture(
+  current: LeaseRecord,
+  expected: LeaseRecord,
+): boolean {
+  const normalized = structuredClone(current);
+  delete normalized.providerResourceID;
+  normalized.updatedAt = expected.updatedAt;
+  return sameLeaseRecord(normalized, expected);
+}
+
 function leaseCleanupIsUnresolved(lease: LeaseRecord): boolean {
   return Boolean(
     lease.provisioningResourceMayExist === true &&
@@ -25756,6 +25853,10 @@ interface CloudProvider {
   ownershipLabelValue?(value: string): string;
   recoveryIsAuthoritative?: true;
   recoverUnboundProvisioningResource?(lease: LeaseRecord): Promise<ProviderMachine | undefined>;
+  observeLegacyCleanupIdentity?(
+    lease: LeaseRecord,
+    context?: ProviderReleaseContext,
+  ): Promise<{ providerResourceID: string } | undefined>;
   recoverServer?(lease: LeaseRecord): Promise<ProviderMachine | undefined>;
   resumeRecoveredServer?(
     config: ReturnType<typeof leaseConfig>,
@@ -26817,6 +26918,13 @@ export class GCPProvider implements CloudProvider {
 
   observeReadyPoolImageIdentity(lease: LeaseRecord): Promise<LeaseImageIdentity | undefined> {
     return this.client.observeReadyPoolImageIdentity(lease);
+  }
+
+  observeLegacyCleanupIdentity(
+    lease: LeaseRecord,
+    context?: ProviderReleaseContext,
+  ): Promise<{ providerResourceID: string } | undefined> {
+    return this.client.observeLegacyCleanupIdentity(lease, context);
   }
 
   prepareLeaseCreate(

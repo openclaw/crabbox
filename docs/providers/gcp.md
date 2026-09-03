@@ -370,10 +370,22 @@ If that strict lookup fails transiently, recovery retries only with the same
 captured ID; absence or replacement remains unresolved. Successful creates do
 not publish cleanup custody until either the operation or an exact owned-instance
 lookup supplies the numeric ID.
-Legacy, tokenless, active, registered, workspace, or already claimed leases
-cannot use this path. Brokered release requires the persisted numeric ID and
-refuses deletion when it is absent from or differs from the observed VM. These
-checks are defense-in-depth against accidental or ambiguous resource adoption.
+Unbound legacy, tokenless, active, registered, workspace, or already claimed
+leases cannot use this interrupted-create path.
+
+For a fully bound pre-upgrade brokered lease that lacks only the numeric instance
+ID, manual deletion or expiry cleanup may perform one exact scoped lookup under
+the unchanged cleanup claim. The lookup must match all ownership labels and
+either a durable resource identity or the lease's positive, safely represented
+legacy numeric server ID. The coordinator persists only the observed raw ID,
+then performs the ordinary strict lookup again before deletion. It never uses
+project inventory or this migration path for registered, workspace,
+provisioning, or uncertain-create records. Absence completes cleanup; replacement
+or ambiguity retains the captured ID without deleting either instance.
+
+Brokered release requires the persisted numeric ID and refuses deletion when it
+is absent from or differs from the observed VM. These checks are defense-in-depth
+against accidental or ambiguous resource adoption.
 GCP labels are operator metadata, not an authorization boundary against another
 principal that can already mutate instances in the same project. Brokered
 cleanup is coordinator-owned; direct cleanup additionally requires the exact

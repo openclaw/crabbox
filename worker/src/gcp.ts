@@ -310,6 +310,60 @@ export class GCPClient {
     return server;
   }
 
+  async observeLegacyCleanupIdentity(
+    lease: LeaseRecord,
+    context?: { resourceIdentity?: string },
+  ): Promise<{ providerResourceID: string } | undefined> {
+    const project = lease.providerProject?.trim() ?? "";
+    const zone = lease.region?.trim() ?? "";
+    const name = lease.cloudID.trim();
+    const resourceIdentity =
+      context?.resourceIdentity === undefined
+        ? undefined
+        : canonicalNumericResourceID(context.resourceIdentity);
+    if (
+      lease.provider !== "gcp" ||
+      !canonicalGCPProject(project) ||
+      project !== lease.providerProject ||
+      !canonicalGCPZone(zone) ||
+      zone !== lease.region ||
+      !name ||
+      name !== lease.cloudID ||
+      name !== lease.serverName ||
+      name !== leaseProviderName(lease.id, lease.slug) ||
+      lease.providerResourceID !== undefined ||
+      (context?.resourceIdentity !== undefined && !resourceIdentity) ||
+      (resourceIdentity === undefined &&
+        (!Number.isSafeInteger(lease.serverID) || lease.serverID <= 0))
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        `GCP lease ${lease.id} has no canonical legacy cleanup identity`,
+      );
+    }
+    const client = this.forScope(zone, project);
+    let instance: GCPInstance;
+    try {
+      instance = await client.gcp<GCPInstance>("GET", `/zones/${zone}/instances/${name}`);
+    } catch (error) {
+      if (gcpInstanceNotFound(error, project, zone, name)) return undefined;
+      throw error;
+    }
+    const server = toMachine(instance, zone);
+    const providerResourceID = canonicalNumericResourceID(server.providerResourceID);
+    const anchor = resourceIdentity ?? String(lease.serverID);
+    if (
+      !providerResourceID ||
+      providerResourceID !== anchor ||
+      !canonicalGCPMachine(server) ||
+      !providerMachineOwnedByLease(server, lease, "gcp", gcpProviderLabelValue)
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        `GCP instance ${name} cannot be bound to legacy cleanup for lease ${lease.id}`,
+      );
+    }
+    return { providerResourceID };
+  }
+
   async recoverUnboundProvisioningResource(
     lease: LeaseRecord,
   ): Promise<ProviderMachine | undefined> {

@@ -1606,6 +1606,167 @@ describe("gcp provider", () => {
     ]);
   });
 
+  it("observes one exact owned legacy cleanup identity from a safe numeric anchor", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const lease = observedGCPLease({
+      cloudID: name,
+      serverName: name,
+      serverID: 123,
+      providerResourceID: undefined,
+    });
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    const requests: string[] = [];
+    client.fetcher = async (input) => {
+      requests.push(String(input));
+      return Response.json(ownedGCPInstance(lease, { id: "123" }));
+    };
+
+    await expect(client.observeLegacyCleanupIdentity(lease)).resolves.toEqual({
+      providerResourceID: "123",
+    });
+    expect(requests).toEqual([
+      `https://compute.googleapis.com/compute/v1/projects/default-project/zones/us-central1-a/instances/${name}`,
+    ]);
+    expect(requests[0]).not.toContain("aggregated");
+  });
+
+  it("prefers a durable legacy cleanup anchor over the lossy numeric server id", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const lease = observedGCPLease({
+      cloudID: name,
+      serverName: name,
+      serverID: Number("9223372036854775807"),
+      providerResourceID: undefined,
+    });
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    client.fetcher = async () =>
+      Response.json(ownedGCPInstance(lease, { id: "9223372036854775807" }));
+
+    await expect(
+      client.observeLegacyCleanupIdentity(lease, {
+        resourceIdentity: "9223372036854775807",
+      }),
+    ).resolves.toEqual({ providerResourceID: "9223372036854775807" });
+  });
+
+  it("treats only exact legacy cleanup absence as authoritative", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const lease = observedGCPLease({
+      cloudID: name,
+      serverName: name,
+      serverID: 123,
+      providerResourceID: undefined,
+    });
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    client.fetcher = async () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            code: 404,
+            message: `The resource 'projects/default-project/zones/us-central1-a/instances/${name}' was not found`,
+          },
+        }),
+        { status: 404 },
+      );
+
+    await expect(client.observeLegacyCleanupIdentity(lease)).resolves.toBeUndefined();
+    client.fetcher = async () => new Response("temporarily unavailable", { status: 503 });
+    await expect(client.observeLegacyCleanupIdentity(lease)).rejects.toThrow("http 503");
+  });
+
+  it("rejects unsafe anchors, malformed scope, replacements, and foreign ownership without inventory", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const baseLease = observedGCPLease({
+      cloudID: name,
+      serverName: name,
+      serverID: 123,
+      providerResourceID: undefined,
+    });
+    const fixtures: Array<{
+      name: string;
+      lease: LeaseRecord;
+      context?: { resourceIdentity?: string };
+      instance: Record<string, unknown>;
+      requests: number;
+    }> = [
+      {
+        name: "unsafe numeric anchor",
+        lease: { ...baseLease, serverID: Number.MAX_SAFE_INTEGER + 1 },
+        instance: ownedGCPInstance(baseLease, { id: "9007199254740992" }),
+        requests: 0,
+      },
+      {
+        name: "missing numeric anchor",
+        lease: { ...baseLease, serverID: 0 },
+        instance: ownedGCPInstance(baseLease, { id: "123" }),
+        requests: 0,
+      },
+      {
+        name: "malformed durable anchor",
+        lease: baseLease,
+        context: { resourceIdentity: "123 " },
+        instance: ownedGCPInstance(baseLease, { id: "123" }),
+        requests: 0,
+      },
+      {
+        name: "noncanonical project",
+        lease: { ...baseLease, providerProject: "proj" },
+        instance: ownedGCPInstance(baseLease, { id: "123" }),
+        requests: 0,
+      },
+      {
+        name: "wrong canonical name",
+        lease: { ...baseLease, serverName: "crabbox-wrong-name" },
+        instance: ownedGCPInstance(baseLease, { id: "123" }),
+        requests: 0,
+      },
+      {
+        name: "replacement id",
+        lease: baseLease,
+        instance: ownedGCPInstance(baseLease, { id: "124" }),
+        requests: 1,
+      },
+      {
+        name: "foreign owner",
+        lease: baseLease,
+        instance: ownedGCPInstance(baseLease, {
+          id: "123",
+          labels: { ...(ownedGCPInstance(baseLease).labels as object), owner: "mallory" },
+        }),
+        requests: 1,
+      },
+      {
+        name: "missing raw id",
+        lease: baseLease,
+        instance: ownedGCPInstance(baseLease, { id: undefined }),
+        requests: 1,
+      },
+    ];
+
+    for (const fixture of fixtures) {
+      const client = new GCPClient(env);
+      primeAccessToken(client);
+      const requests: string[] = [];
+      client.fetcher = async (input) => {
+        requests.push(String(input));
+        return Response.json(fixture.instance);
+      };
+
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each cleanup refusal is isolated.
+      await expect(
+        client.observeLegacyCleanupIdentity(fixture.lease, fixture.context),
+      ).rejects.toBeInstanceOf(ProviderResourceUnresolvedError);
+      expect({ name: fixture.name, requests: requests.length }).toEqual({
+        name: fixture.name,
+        requests: fixture.requests,
+      });
+      expect(requests.some((request) => request.includes("aggregated"))).toBe(false);
+    }
+  });
+
   it("captures only an exact owned unbound instance with one canonical lookup", async () => {
     const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
     const ownedLease = observedGCPLease({ cloudID: name, serverName: name });
