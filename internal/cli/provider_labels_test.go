@@ -102,6 +102,24 @@ func TestTouchDirectLeaseLabelsMovesExpiryForwardToTTLCap(t *testing.T) {
 	}
 }
 
+func TestTouchDirectLeaseLabelsPreservesProviderMetadata(t *testing.T) {
+	labels := map[string]string{
+		"fixed_intent_sha256": strings.Repeat("a", 64),
+		"optional_identity":   "",
+		"provider_endpoint":   "https://api.example.test/org:team/",
+		"provider_document":   `{"scope":"exact"}`,
+	}
+	got := touchDirectLeaseLabels(labels, Config{TTL: time.Hour, IdleTimeout: time.Minute}, "worker busy", time.Now())
+	for key, value := range labels {
+		if got[key] != value {
+			t.Errorf("touch changed admitted provider metadata %s: got %q want %q", key, got[key], value)
+		}
+	}
+	if got["state"] != "worker_busy" || labels["state"] != "" {
+		t.Fatalf("state update should sanitize only the new value without mutating input: got=%q input=%q", got["state"], labels["state"])
+	}
+}
+
 func TestTouchDirectLeaseLabelsExplicitIdleTimeoutOverridesStoredValue(t *testing.T) {
 	created := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	touched := created.Add(time.Minute)
@@ -172,12 +190,10 @@ func TestTouchDirectLeaseLabelsRepairsLifecycleWithoutRewritingProviderMetadata(
 	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	cfg := Config{TTL: 10 * time.Minute, IdleTimeout: 2 * time.Minute}
 	got := touchDirectLeaseLabels(map[string]string{
-		"created_at":          "bad",
-		"idle_timeout_secs":   "bad",
-		"ttl_secs":            "bad",
-		"slug":                "blue lobster",
-		"fixed_intent_sha256": strings.Repeat("a", 64),
-		"native_resource":     "projects/example/locations/global/resources/owned",
+		"created_at":        "bad",
+		"idle_timeout_secs": "bad",
+		"ttl_secs":          "bad",
+		"slug":              "blue lobster",
 	}, cfg, "running/command", now)
 	if got["created_at"] != "1777636800" || got["last_touched_at"] != "1777636800" {
 		t.Fatalf("timestamps did not fall back to now: %#v", got)
@@ -185,11 +201,8 @@ func TestTouchDirectLeaseLabelsRepairsLifecycleWithoutRewritingProviderMetadata(
 	if got["idle_timeout_secs"] != "120" || got["ttl_secs"] != "600" || got["expires_at"] != "1777636920" {
 		t.Fatalf("durations did not fall back to cfg: %#v", got)
 	}
-	if got["slug"] != "blue lobster" || got["fixed_intent_sha256"] != strings.Repeat("a", 64) || got["native_resource"] != "projects/example/locations/global/resources/owned" {
-		t.Fatalf("touch changed provider-owned identity: %#v", got)
-	}
-	if got["state"] != "running_command" {
-		t.Fatalf("new lifecycle state was not sanitized: %#v", got)
+	if got["slug"] != "blue lobster" {
+		t.Fatalf("touch changed existing slug metadata: %#v", got)
 	}
 }
 

@@ -49,8 +49,10 @@ func validateReadyPoolIdentity(identity CoordinatorReadyPoolIdentityV1) error {
 	if identity.Schema != readyPoolIdentitySchemaV1 {
 		return exit(2, "unsupported ready-pool identity schema %q", identity.Schema)
 	}
+	if _, err := validateReadyPoolIdentityProvider(identity.Image.Provider); err != nil {
+		return err
+	}
 	for name, value := range map[string]string{
-		"image.provider":     identity.Image.Provider,
 		"image.scope":        identity.Image.Scope,
 		"image.id":           identity.Image.ID,
 		"cacheCompatibility": identity.CacheCompatibility,
@@ -67,6 +69,20 @@ func validateReadyPoolIdentity(identity CoordinatorReadyPoolIdentityV1) error {
 		return exit(2, "ready-pool identity seedDigest must be sha256:<64 lowercase hex>")
 	}
 	return nil
+}
+
+func validateReadyPoolIdentityProvider(value string) (string, error) {
+	if value == "" || strings.TrimSpace(value) != value {
+		return "", exit(2, "ready-pool identity image.provider must be a canonical provider name")
+	}
+	provider, err := ProviderFor(value)
+	if err != nil || provider.Name() != value {
+		return "", exit(2, "ready-pool identity image.provider must be a canonical provider name")
+	}
+	if provider.Spec().Coordinator != CoordinatorSupported {
+		return "", exit(2, "ready-pool identity provider %q does not support coordinator-managed leases", value)
+	}
+	return provider.Name(), nil
 }
 
 func readyPoolSeedDigest(repo, ref, commit, fingerprint string) (string, error) {

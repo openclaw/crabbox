@@ -320,7 +320,7 @@ func TestHeartbeatRegisteredClaimReplacementPreventsProviderMutation(t *testing.
 		if !set || !exists {
 			return Server{}, errors.New("exact claim snapshot missing")
 		}
-		_, server, _, err := UpdateLeaseClaimTouchIfUnchangedAction(req.Lease.LeaseID, snapshot, time.Now(), req.IdleTimeoutOverride, func() (Server, SSHTarget, bool, error) {
+		_, server, _, err := UpdateLeaseClaimTouchIfUnchangedAction(t.Context(), req.Lease.LeaseID, snapshot, time.Now(), req.IdleTimeoutOverride, func() (Server, SSHTarget, bool, error) {
 			providerWrites.Add(1)
 			return req.Lease.Server, req.Lease.SSH, true, nil
 		})

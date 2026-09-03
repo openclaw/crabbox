@@ -629,7 +629,7 @@ func updateLeaseClaimEndpointIfUnchangedAction(
 	expected leaseClaim,
 	action func() (Server, SSHTarget, bool, error),
 ) (leaseClaim, Server, SSHTarget, error) {
-	return updateLeaseClaimEndpointIfUnchangedActionMode(leaseID, expected, action, claimEndpointUpdate, nil)
+	return updateLeaseClaimEndpointIfUnchangedActionMode(context.Background(), leaseID, expected, action, claimEndpointUpdate, nil)
 }
 
 func replaceLeaseClaimEndpointIfUnchangedAction(
@@ -637,7 +637,7 @@ func replaceLeaseClaimEndpointIfUnchangedAction(
 	expected leaseClaim,
 	action func() (Server, SSHTarget, bool, error),
 ) (leaseClaim, Server, SSHTarget, error) {
-	return updateLeaseClaimEndpointIfUnchangedActionMode(leaseID, expected, action, claimEndpointReplace, nil)
+	return updateLeaseClaimEndpointIfUnchangedActionMode(context.Background(), leaseID, expected, action, claimEndpointReplace, nil)
 }
 
 type leaseClaimTouchPayload struct {
@@ -646,6 +646,7 @@ type leaseClaimTouchPayload struct {
 }
 
 func updateLeaseClaimEndpointIfUnchangedActionMode(
+	ctx context.Context,
 	leaseID string,
 	expected leaseClaim,
 	action func() (Server, SSHTarget, bool, error),
@@ -663,6 +664,7 @@ func updateLeaseClaimEndpointIfUnchangedActionMode(
 	var server Server
 	var target SSHTarget
 	updated, err := transactLeaseClaim(leaseID, leaseClaimTransaction{
+		context:  ctx,
 		guard:    endpointClaimGuard(leaseID, unchangedLeaseClaimGuard(leaseID, expected, true)),
 		revision: claimRevisionAfterMutation,
 		action: func() (claimActionDecision, error) {
@@ -751,34 +753,38 @@ func updateLeaseClaimLabelsAndLastUsedIfUnchanged(leaseID string, expected lease
 	return updated, err
 }
 
-func updateLeaseClaimTouchIfUnchanged(leaseID string, expected leaseClaim, labels map[string]string, lastUsed time.Time, idleTimeoutOverride *time.Duration) (leaseClaim, error) {
+func updateLeaseClaimTouchIfUnchanged(ctx context.Context, leaseID string, expected leaseClaim, labels map[string]string, lastUsed time.Time, idleTimeoutOverride *time.Duration) (leaseClaim, error) {
 	if leaseID == "" {
 		return leaseClaim{}, nil
 	}
 	if idleTimeoutOverride != nil && *idleTimeoutOverride <= 0 {
 		return leaseClaim{}, exit(2, "lease %s idle timeout override must be positive", leaseID)
 	}
-	var updated leaseClaim
-	err := mutateLeaseClaimGuarded(leaseID, unchangedLeaseClaimGuard(leaseID, expected, true), func(claim *leaseClaim) error {
-		if claim.LeaseID == "" {
-			return nil
-		}
-		// A journal can reserve this source without changing its revision.
-		if err := AuthorizeCheckpointRelease(*claim, ""); err != nil {
-			return err
-		}
-		claim.Labels = cloneStringMap(labels)
-		claim.LastUsedAt = lastUsed.UTC().Format(time.RFC3339)
-		if idleTimeoutOverride != nil {
-			claim.IdleTimeoutSeconds = int(idleTimeoutOverride.Round(time.Second) / time.Second)
-			if claim.IdleTimeoutSeconds <= 0 {
-				return exit(2, "lease %s idle timeout override must be at least one second", leaseID)
+	return transactLeaseClaim(leaseID, leaseClaimTransaction{
+		context:     ctx,
+		guard:       unchangedLeaseClaimGuard(leaseID, expected, true),
+		revision:    claimRevisionBeforeAction,
+		publication: claimSkipEmpty,
+		directory:   claimDirectoryCreate,
+		mutate: func(claim *leaseClaim) error {
+			if claim.LeaseID == "" {
+				return nil
 			}
-		}
-		updated = cloneLeaseClaim(*claim)
-		return nil
+			// A journal can reserve this source without changing its revision.
+			if err := AuthorizeCheckpointRelease(*claim, ""); err != nil {
+				return err
+			}
+			claim.Labels = cloneStringMap(labels)
+			claim.LastUsedAt = lastUsed.UTC().Format(time.RFC3339)
+			if idleTimeoutOverride != nil {
+				claim.IdleTimeoutSeconds = int(idleTimeoutOverride.Round(time.Second) / time.Second)
+				if claim.IdleTimeoutSeconds <= 0 {
+					return exit(2, "lease %s idle timeout override must be at least one second", leaseID)
+				}
+			}
+			return nil
+		},
 	})
-	return updated, err
 }
 
 func updateLeaseClaimLabelsIfUnchangedAfter(leaseID string, expected leaseClaim, labels map[string]string, action func() error) (leaseClaim, error) {

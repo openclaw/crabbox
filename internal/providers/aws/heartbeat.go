@@ -63,7 +63,7 @@ func (b *awsLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, 
 	now := time.Now().UTC()
 	// Fence the current claim across account/resource checks and the tag write;
 	// a coordinator round trip must not let an old owner renew a replacement.
-	updated, server, _, err := core.UpdateLeaseClaimTouchIfUnchangedAction(req.Lease.LeaseID, expected, now, req.IdleTimeoutOverride, func() (Server, SSHTarget, bool, error) {
+	updated, server, _, err := core.UpdateLeaseClaimTouchIfUnchangedAction(ctx, req.Lease.LeaseID, expected, now, req.IdleTimeoutOverride, func() (Server, SSHTarget, bool, error) {
 		client, err := newAWSClient(ctx, cfg)
 		if err != nil {
 			return Server{}, SSHTarget{}, false, err

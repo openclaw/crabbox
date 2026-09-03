@@ -92,6 +92,58 @@ func TestAWSFixedHeartbeatCommandRenewsAccountScopedLease(t *testing.T) {
 	}
 }
 
+func TestAWSTouchCancelsWhileRunOwnsClaim(t *testing.T) {
+	b, fake, lease := awsHeartbeatFixture(t, true)
+	claim, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	holderDone, touchDone := make(chan error, 1), make(chan error, 1)
+	go func() {
+		holderDone <- core.WithLeaseClaimUnchanged(lease.LeaseID, claim, func() error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-entered:
+	case err := <-holderDone:
+		t.Fatalf("claim holder stopped before admission: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	joined := false
+	defer func() {
+		close(release)
+		if err := <-holderDone; err != nil {
+			t.Error(err)
+		}
+		if !joined {
+			<-touchDone
+		}
+	}()
+	fake.getIDs = nil
+	go func() {
+		_, err := b.Touch(ctx, TouchRequest{Lease: lease, State: "running"})
+		touchDone <- err
+	}()
+	cancel()
+	select {
+	case err := <-touchDone:
+		joined = true
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled touch returned %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled heartbeat remained blocked behind run admission")
+	}
+	if len(fake.getIDs) != 0 || len(fake.tagged) != 0 {
+		t.Fatal("canceled heartbeat reached the provider")
+	}
+}
+
 type runResolutionAWSClient struct {
 	*fakeAWSClient
 	listCalls int

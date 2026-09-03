@@ -3226,7 +3226,7 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 			case "missing-origin":
 				runGit(t, fixture.root, "remote", "remove", "origin")
 			case "origin-unavailable", "ordinary-unavailable-fresh", "ordinary-unavailable-reused", "ordinary-disconnected-reused":
-				unavailableOrigin := newGitTransportFailureHTTPServer(t) + "/unavailable.git"
+				unavailableOrigin := newGitTransportFailureHTTPServer(t) + "/status-401-403/unavailable.git"
 				runGit(t, fixture.root, "remote", "set-url", "origin", unavailableOrigin)
 			case "private-origin", "ordinary-private-fresh", "ordinary-private-reused":
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {

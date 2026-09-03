@@ -418,7 +418,7 @@ func TestStatusWaitClaimReplacementPreventsProviderMutation(t *testing.T) {
 		if err != nil {
 			return Server{}, err
 		}
-		_, updated, _, err := UpdateLeaseClaimTouchIfUnchangedAction(req.Lease.LeaseID, snapshot, time.Now(), req.IdleTimeoutOverride, func() (Server, SSHTarget, bool, error) {
+		_, updated, _, err := UpdateLeaseClaimTouchIfUnchangedAction(t.Context(), req.Lease.LeaseID, snapshot, time.Now(), req.IdleTimeoutOverride, func() (Server, SSHTarget, bool, error) {
 			providerWrites++
 			return req.Lease.Server, req.Lease.SSH, true, nil
 		})

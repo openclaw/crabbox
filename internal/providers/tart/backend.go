@@ -494,20 +494,7 @@ func (b *backend) cleanupInstance(ctx context.Context, cfg Config, inst tartInst
 
 func (b *backend) Touch(_ context.Context, req TouchRequest) (Server, error) {
 	server := req.Lease.Server
-	if server.Labels == nil {
-		server.Labels = map[string]string{}
-	}
-	original := server.Labels
-	server.Labels = touchDirectLeaseLabels(original, b.configForRun(), req.State, time.Now().UTC())
-	for _, key := range []string{"image", "image_digest", "instance", "ssh_user", "ssh_port", "work_root"} {
-		if value := strings.TrimSpace(original[key]); value != "" {
-			server.Labels[key] = value
-		}
-	}
-	// Storage identity is an exact path, not a sanitized provider-label value.
-	if storage, ok := original["tart_storage"]; ok {
-		server.Labels["tart_storage"] = storage
-	}
+	server.Labels = touchDirectLeaseLabels(server.Labels, b.configForRun(), req.State, time.Now().UTC())
 	return server, nil
 }
 

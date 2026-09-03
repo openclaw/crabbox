@@ -586,7 +586,7 @@ func (b *backend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
 	}
 	now := b.now()
 	labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, req.State, now, req.IdleTimeoutOverride)
-	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(ctx, req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
 	if err != nil {
 		return Server{}, err
 	}

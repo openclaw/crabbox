@@ -1615,20 +1615,30 @@ func powershellCommand(script string) string {
 // Win32-OpenSSH inherits an overlapped pipe. Use its asynchronous handle contract
 // so a pending SSH write can complete before the server closes stdin at EOF.
 func windowsPowerShellCopyExactInput(destination string, inputSize int64) string {
-	return `Add-Type -Name SshStdin -Namespace Cbx -MemberDefinition '[DllImport("kernel32.dll")]public static extern IntPtr GetStdHandle(int n);'
-$stdinHandle = [Microsoft.Win32.SafeHandles.SafeFileHandle]::new([Cbx.SshStdin]::GetStdHandle(-10), $false)
-$stdin = [IO.FileStream]::new($stdinHandle, [IO.FileAccess]::Read, 1, $true)
-try {
-	$remaining = [Int64]` + strconv.FormatInt(inputSize, 10) + `
-	$buffer = New-Object byte[] 65536
-	while ($remaining -gt 0) {
-		$readSize = [int][Math]::Min([Int64]$buffer.Length, $remaining)
-		$read = $stdin.Read($buffer, 0, $readSize)
-		if ($read -le 0) { throw "SSH stdin ended before the framed payload" }
-		` + destination + `.Write($buffer, 0, $read)
-		$remaining -= $read
+	// An empty frame must not bind stdin, which may already be at EOF.
+	// Disable FileStream read-ahead so bytes after this frame remain on stdin.
+	return `$remaining = [Int64]` + strconv.FormatInt(inputSize, 10) + `
+if ($remaining -gt 0) {
+	if (-not ("Cbx.SshStdin" -as [type])) {
+		Add-Type -Name SshStdin -Namespace Cbx -MemberDefinition '[DllImport("kernel32.dll")]public static extern IntPtr GetStdHandle(int n);'
 	}
-} finally { $stdin.Dispose() }
+	$stdinHandle = [Microsoft.Win32.SafeHandles.SafeFileHandle]::new([Cbx.SshStdin]::GetStdHandle(-10), $false)
+	$stdin = $null
+	try {
+		$stdin = [IO.FileStream]::new($stdinHandle, [IO.FileAccess]::Read, 1, $true)
+		$buffer = New-Object byte[] 65536
+		while ($remaining -gt 0) {
+			$readSize = [int][Math]::Min([Int64]$buffer.Length, $remaining)
+			$read = $stdin.ReadAsync($buffer, 0, $readSize).GetAwaiter().GetResult()
+			if ($read -le 0) { throw "SSH stdin ended before the framed payload" }
+			` + destination + `.Write($buffer, 0, $read)
+			$remaining -= $read
+		}
+	} finally {
+		if ($null -ne $stdin) { $stdin.Dispose() }
+		$stdinHandle.Dispose()
+	}
+}
 `
 }
 

@@ -5523,12 +5523,23 @@ func TestLocalContainerTouchPersistsExactClaimLifecycle(t *testing.T) {
 		name        string
 		override    *time.Duration
 		wantTimeout time.Duration
+		ttlLabel    string
 	}{
 		{name: "omitted override preserves stored timeout", wantTimeout: 37 * time.Minute},
 		{name: "explicit override persists", override: durationPointer(45 * time.Minute), wantTimeout: 45 * time.Minute},
+		{name: "duration-form TTL stays exact", wantTimeout: 37 * time.Minute, ttlLabel: "24h"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			leaseID, _, initial, runner := createLocalContainerTouchClaim(t, 37*time.Minute)
+			if test.ttlLabel != "" {
+				labels := cloneLabels(initial.Labels)
+				labels["ttl_secs"] = test.ttlLabel
+				updated, err := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, initial, labels)
+				if err != nil {
+					t.Fatal(err)
+				}
+				initial = updated
+			}
 			touchedAt := time.Date(2026, time.August, 17, 20, 30, 0, 0, time.UTC)
 			b := testBackend(runner)
 			b.cfg.IdleTimeout = 5 * time.Minute
@@ -5563,7 +5574,7 @@ func TestLocalContainerTouchPersistsExactClaimLifecycle(t *testing.T) {
 			if got := unixLocalContainerLabelTime(t, committed.Labels["expires_at"]); !got.Equal(touchedAt.Add(test.wantTimeout)) {
 				t.Fatalf("expires=%s want=%s", got, touchedAt.Add(test.wantTimeout))
 			}
-			for _, key := range []string{"bootstrap_dir", "host_work_root", "work_root", checkpointMetadataConfig, checkpointMetadataEndpoint, checkpointMetadataDaemonID} {
+			for _, key := range []string{"created_at", "ttl_secs", "bootstrap_dir", "host_work_root", "work_root", checkpointMetadataConfig, checkpointMetadataEndpoint, checkpointMetadataDaemonID} {
 				if committed.Labels[key] != initial.Labels[key] {
 					t.Fatalf("claim label %s=%q want exact %q", key, committed.Labels[key], initial.Labels[key])
 				}

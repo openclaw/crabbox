@@ -23,6 +23,7 @@ import {
 import type { CoordinatorRuntime } from "../src/coordinator-runtime";
 import {
   FleetCoordinator,
+  readyPoolDesiredCapacityKeyV2,
   readyPoolSeedDigestV1,
   backfillCheckpointCreateAttempt,
 } from "../src/fleet";
@@ -1070,10 +1071,18 @@ describe("PostgresCoordinatorStorage", () => {
 
     expect([...(await storage.list({ prefix: "ready-pool:" })).values()]).toEqual([]);
     expect([...(await storage.list({ prefix: "ready-pool-fill-claim:" })).values()]).toEqual([]);
-    expect([...(await storage.list({ prefix: "ready-pool-desired:" })).values()]).toEqual([]);
+    const desiredKey = await readyPoolDesiredCapacityKeyV2({
+      org: orgKeyForLabel("example-org"),
+      owner: "alice@example.com",
+      key: "builders",
+      compatibilityKey: undefined,
+      identity,
+    });
+    expect([...(await storage.list({ prefix: "ready-pool-desired:" })).keys()]).toEqual([]);
+    expect(await storage.get(desiredKey)).toBeTruthy();
     expect(await storage.get(`typed-ready-pool-v1:builders:${leaseID}`)).toBeTruthy();
     expect(await storage.get(`typed-ready-pool-v1-fill-claim:${claim.claim.token}`)).toBeTruthy();
-    expect((await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).size).toBe(1);
+    expect((await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).size).toBe(0);
 
     const rolledBackWorker = new FleetCoordinator(postgresTestRuntime(storage), env);
     const legacyStatus = await rolledBackWorker.fetch(

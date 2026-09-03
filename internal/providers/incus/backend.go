@@ -268,7 +268,7 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (lease LeaseT
 			return LeaseTarget{}, err
 		}
 		server.Status = "ready"
-		server.Labels = touchInstanceLabels(server.Labels, cfg, "ready", time.Now().UTC())
+		server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", time.Now().UTC())
 		if err := setInstanceLabels(ctx, client, inst.Name, server.Labels); err != nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: set incus labels: %v\n", err)
 		}
@@ -425,7 +425,7 @@ func (b *backend) Touch(ctx context.Context, req TouchRequest) (core.Server, err
 		return core.Server{}, err
 	}
 	server := req.Lease.Server
-	server.Labels = touchInstanceLabels(server.Labels, cfg, req.State, time.Now().UTC())
+	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, time.Now().UTC())
 	name := strings.TrimSpace(core.Blank(server.CloudID, server.Labels["instance"]))
 	if name == "" {
 		return core.Server{}, core.Exit(2, "provider=%s touch requires an Incus instance name", providerName)

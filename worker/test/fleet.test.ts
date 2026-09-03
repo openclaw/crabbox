@@ -39,6 +39,7 @@ import {
   forwardOrBufferWebVNC,
   resetWebVNCBridge,
   recordAzureDeferredCleanup,
+  readyPoolDesiredCapacityKeyV2,
   readyPoolSeedDigestV1,
   replacedEgressSessionsPerLease,
   shouldActivateEgressSession,
@@ -71,6 +72,7 @@ import type {
   ProviderImage,
   ProviderMachine,
   ProvisioningAttempt,
+  ReadyPoolDesiredCapacity,
   ReadyPoolEntry,
   ReadyPoolIdentityV1,
   RunEventRecord,
@@ -14500,6 +14502,37 @@ describe("fleet lease identity and idle", () => {
       ]);
     },
   );
+  it("derives typed providers from identity and rejects explicit mismatches before state changes", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = typedReadyPoolHeaders();
+    const identity = await typedReadyPoolIdentity();
+    const metadata = typedReadyPoolMetadata();
+
+    const derived = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/reconcile-identity", {
+        headers,
+        body: { ...metadata, identity, minReady: 0, maxReady: 0 },
+      }),
+    );
+    expect(derived.status).toBe(200);
+    expect(await derived.json()).toMatchObject({
+      desired: { criteria: { provider: identity.image.provider, identity } },
+    });
+
+    const mismatched = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/reconcile-identity", {
+        headers,
+        body: { ...metadata, provider: "gcp", identity, minReady: 1, maxReady: 1, claim: true },
+      }),
+    );
+    expect(mismatched.status).toBe(400);
+    await expect(mismatched.json()).resolves.toMatchObject({
+      error: "invalid_ready_pool_provider",
+    });
+    expect((await storage.list({ prefix: "typed-ready-pool-v2-desired:" })).size).toBe(1);
+    expect((await storage.list({ prefix: "typed-ready-pool-v1-fill-claim:" })).size).toBe(0);
+  });
 
   it("isolates typed desired capacity and structurally matches reordered fill-claim identities", async () => {
     const storage = new MemoryStorage();
@@ -14524,10 +14557,12 @@ describe("fleet lease identity and idle", () => {
     expect(firstBody.counts.inFlight).toBe(1);
     expect(storage.value(`ready-pool-fill-claim:${firstBody.claim.token}`)).toBeUndefined();
     expect(storage.value(`typed-ready-pool-v1-fill-claim:${firstBody.claim.token}`)).toBeTruthy();
-    expect([...(await storage.list({ prefix: "ready-pool-desired:" })).keys()]).toEqual([]);
     expect([
-      ...(await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).keys(),
+      ...(await storage.list({ prefix: "typed-ready-pool-v2-desired:" })).keys(),
     ]).toHaveLength(1);
+    expect([...(await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).keys()]).toEqual(
+      [],
+    );
 
     const reorderedIdentity = {
       cacheCompatibility: identity.cacheCompatibility,
@@ -14566,7 +14601,7 @@ describe("fleet lease identity and idle", () => {
       counts: { ready: 0, inFlight: 1 },
       claim: { token: expect.any(String) },
     });
-    expect((await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).size).toBe(2);
+    expect((await storage.list({ prefix: "typed-ready-pool-v2-desired:" })).size).toBe(2);
 
     const mismatchedClaim = await fleet.fetch(
       request("POST", "/v1/ready-pools/builders/register-identity", {
@@ -14606,6 +14641,195 @@ describe("fleet lease identity and idle", () => {
       counts: { ready: 1, inFlight: 0 },
       satisfied: true,
     });
+  });
+
+  it.each([undefined, "aws"] as const)(
+    "migrates typed desired capacity with a stored %s provider without double-filling",
+    async (provider) => {
+      const storage = new MemoryStorage();
+      const fleet = testFleet(storage);
+      const headers = typedReadyPoolHeaders();
+      const owner = headers["x-crabbox-owner"];
+      const org = orgKeyForLabel(headers["x-crabbox-org"]);
+      const key = "builders";
+      const compatibilityKey = "linux-16-vcpu";
+      const identity = await typedReadyPoolIdentity();
+      const metadata = typedReadyPoolMetadata();
+      const legacyKey = `typed-ready-pool-v1-desired:${[
+        org,
+        owner,
+        key,
+        compatibilityKey,
+        identity.image.provider,
+        identity.image.scope,
+        identity.image.id,
+        identity.architecture,
+        identity.seedDigest,
+        identity.cacheCompatibility,
+      ]
+        .map((part) => encodeURIComponent(part))
+        .join(":")}`;
+      const unrelatedLegacyKey = `${legacyKey}:shadow`;
+      const createdAt = "2026-08-20T00:00:00.000Z";
+      const desired: ReadyPoolDesiredCapacity = {
+        key,
+        owner,
+        org,
+        compatibilityKey,
+        criteria: {
+          ...metadata,
+          compatibilityKey,
+          ...(provider === undefined ? {} : { provider }),
+          identity,
+        },
+        minReady: 1,
+        maxReady: 1,
+        createdAt,
+        updatedAt: createdAt,
+      };
+      storage.seed(legacyKey, desired);
+      storage.seed(unrelatedLegacyKey, desired);
+      const claimToken = "existing-v1-fill-claim";
+      storage.seed(`typed-ready-pool-v1-fill-claim:${claimToken}`, {
+        token: claimToken,
+        key,
+        owner,
+        org,
+        compatibilityKey,
+        criteria: desired.criteria,
+        createdAt,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      });
+
+      const reconcile = () =>
+        fleet.fetch(
+          request("POST", `/v1/ready-pools/${key}/reconcile-identity`, {
+            headers,
+            body: {
+              ...metadata,
+              compatibilityKey,
+              identity,
+              minReady: 1,
+              maxReady: 1,
+              claim: true,
+            },
+          }),
+        );
+      const first = await reconcile();
+      expect(first.status).toBe(200);
+      const firstBody = await first.json();
+      expect(firstBody).toMatchObject({
+        counts: { inFlight: 1 },
+        reconciling: true,
+      });
+      expect(firstBody).not.toHaveProperty("claim");
+      expect(
+        storage.value<{ criteria: { provider?: string } }>(
+          `typed-ready-pool-v1-fill-claim:${claimToken}`,
+        )?.criteria.provider,
+      ).toBe(provider);
+
+      const v2Key = await readyPoolDesiredCapacityKeyV2({
+        org,
+        owner,
+        key,
+        compatibilityKey,
+        identity,
+      });
+      expect(storage.value(legacyKey)).toBeUndefined();
+      expect(storage.value(unrelatedLegacyKey)).toBeDefined();
+      expect(storage.value<ReadyPoolDesiredCapacity>(v2Key)).toMatchObject({
+        createdAt,
+        identity,
+        criteria: { provider: identity.image.provider, identity },
+      });
+
+      const second = await reconcile();
+      expect(second.status).toBe(200);
+      await expect(second.json()).resolves.toMatchObject({
+        counts: { inFlight: 1 },
+        capped: true,
+      });
+      expect((await storage.list({ prefix: "typed-ready-pool-v1-fill-claim:" })).size).toBe(1);
+      const lease = typedReadyPoolLease();
+      storage.seed(`lease:${lease.id}`, lease);
+      const registered = await fleet.fetch(
+        request("POST", `/v1/ready-pools/${key}/register-identity`, {
+          headers,
+          body: {
+            ...metadata,
+            compatibilityKey,
+            identity,
+            leaseID: lease.id,
+            fillClaimToken: claimToken,
+          },
+        }),
+      );
+      expect(registered.status).toBe(200);
+      expect(storage.value(`typed-ready-pool-v1-fill-claim:${claimToken}`)).toBeUndefined();
+    },
+  );
+
+  it("keeps the untyped desired-capacity key byte-for-byte compatible", async () => {
+    const storage = new MemoryStorage();
+    const response = await testFleet(storage).fetch(
+      request("POST", "/v1/ready-pools/shared-linux/reconcile", {
+        headers: typedReadyPoolHeaders(),
+        body: {
+          compatibilityKey: "linux-16-vcpu",
+          minReady: 0,
+          maxReady: 0,
+        },
+      }),
+    );
+    expect(response.status).toBe(200);
+    const exactKey = `ready-pool-desired:${encodeURIComponent(
+      orgKeyForLabel("example-org"),
+    )}:alice%40example.com:shared-linux:linux-16-vcpu`;
+    expect(storage.value<ReadyPoolDesiredCapacity>(exactKey)).toMatchObject({
+      key: "shared-linux",
+      owner: "alice@example.com",
+      org: orgKeyForLabel("example-org"),
+      compatibilityKey: "linux-16-vcpu",
+    });
+    expect((await storage.list({ prefix: "ready-pool-desired:" })).size).toBe(1);
+    expect((await storage.list({ prefix: "typed-ready-pool-v2-desired:" })).size).toBe(0);
+  });
+
+  it("keeps typed desired keys fixed-size, deterministic, and provider-separated", async () => {
+    const identity = await typedReadyPoolIdentity();
+    const input = {
+      org: orgKeyForLabel("example-org"),
+      owner: "alice@example.com",
+      key: "builders",
+      compatibilityKey: "linux-16-vcpu",
+      identity,
+    };
+    const [first, second] = await Promise.all([
+      readyPoolDesiredCapacityKeyV2(input),
+      readyPoolDesiredCapacityKeyV2(input),
+    ]);
+    expect(first).toBe(second);
+    expect(first).toMatch(/^typed-ready-pool-v2-desired:sha256:[0-9a-f]{64}$/);
+
+    const otherProvider = await readyPoolDesiredCapacityKeyV2({
+      ...input,
+      identity: {
+        ...identity,
+        image: { ...identity.image, provider: "gcp" },
+      },
+    });
+    expect(otherProvider).not.toBe(first);
+
+    const maximumUnicode = await readyPoolDesiredCapacityKeyV2({
+      ...input,
+      identity: {
+        ...identity,
+        image: { ...identity.image, id: `${"界".repeat(340)}/?:@` },
+      },
+    });
+    expect(new TextEncoder().encode(`${"界".repeat(340)}/?:@`).byteLength).toBe(1024);
+    expect(new TextEncoder().encode(maximumUnicode).byteLength).toBeLessThan(2048);
   });
 
   it("drains typed entries immediately when their authoritative lease image or return identity changes", async () => {
@@ -14661,9 +14885,109 @@ describe("fleet lease identity and idle", () => {
         },
       }),
     );
-    expect(returned.status).toBe(200);
-    expect(await returned.json()).toMatchObject({ entry: { state: "draining" } });
+    expect(returned.status).toBe(409);
+    expect(await returned.json()).toMatchObject({
+      error: "ready_pool_lease_identity_mismatch",
+      entry: { state: "draining" },
+    });
     expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.state).toBe("released");
+  });
+
+  it("drains invalid typed ready returns while explicit drain and release skip identity reads", async () => {
+    const headers = typedReadyPoolHeaders();
+    const identity = await typedReadyPoolIdentity();
+    const runCase = async (
+      result: "ready" | "drain" | "release",
+      returnIdentity: unknown,
+      expectedStatus: number,
+      expectedError?: string,
+      releaseFailure = false,
+    ) => {
+      const storage = new MemoryStorage();
+      let releases = 0;
+      const fleet = testFleet(storage, {
+        aws: fakeProvider(undefined, {
+          provider: "aws",
+          onReleaseLease: async () => {
+            releases += 1;
+            if (releaseFailure) throw new Error("provider release failed");
+          },
+        }),
+      });
+      const lease = typedReadyPoolLease();
+      const now = new Date().toISOString();
+      storage.seed(`lease:${lease.id}`, lease);
+      storage.seed<ReadyPoolEntry>(`typed-ready-pool-v1:builders:${lease.id}`, {
+        key: "builders",
+        leaseID: lease.id,
+        state: "busy",
+        owner: lease.owner,
+        org: lease.org,
+        provider: lease.provider,
+        target: lease.target,
+        identity,
+        borrowedBy: headers["x-crabbox-owner"],
+        borrowToken: "borrow-token",
+        createdAt: now,
+        updatedAt: now,
+        expiresAt: lease.expiresAt,
+      });
+
+      const response = await fleet.fetch(
+        request("POST", "/v1/ready-pools/builders/return-identity", {
+          headers,
+          body: {
+            leaseID: lease.id,
+            borrowToken: "borrow-token",
+            result,
+            ...(returnIdentity === undefined ? {} : { identity: returnIdentity }),
+          },
+        }),
+      );
+      expect(response.status).toBe(expectedStatus);
+      const body = (await response.json()) as { error?: string; entry: ReadyPoolEntry };
+      expect(body.error).toBe(expectedError);
+      expect(body.entry.state).toBe("draining");
+      expect(storage.value<ReadyPoolEntry>(`typed-ready-pool-v1:builders:${lease.id}`)?.state).toBe(
+        "draining",
+      );
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+        state: "released",
+        releaseDeletesServer: true,
+      });
+      return { fleet, storage, lease, releases: () => releases };
+    };
+
+    await runCase("ready", undefined, 400, "invalid_ready_pool_identity");
+    await runCase(
+      "ready",
+      { ...identity, image: { ...identity.image, id: "" } },
+      400,
+      "invalid_ready_pool_identity",
+    );
+    await runCase(
+      "ready",
+      { ...identity, cacheCompatibility: "changed-cache" },
+      409,
+      "ready_pool_lease_identity_mismatch",
+    );
+    await runCase("drain", undefined, 200);
+    const failedCleanup = await runCase("release", { broken: true }, 200, undefined, true);
+    await failedCleanup.fleet.alarm();
+    expect(failedCleanup.releases()).toBe(1);
+    expect(
+      failedCleanup.storage.value<ReadyPoolEntry>(
+        `typed-ready-pool-v1:builders:${failedCleanup.lease.id}`,
+      )?.state,
+    ).toBe("draining");
+    expect(
+      failedCleanup.storage.value<LeaseRecord>(`lease:${failedCleanup.lease.id}`),
+    ).toMatchObject({
+      state: "released",
+      releaseDeletesServer: true,
+      cleanupError: "provider release failed",
+      cleanupRetryAt: expect.any(String),
+    });
   });
 
   it("keeps new typed Durable Object state invisible to shipped legacy enumeration after rollback", async () => {
@@ -14699,7 +15023,7 @@ describe("fleet lease identity and idle", () => {
     expect([...shippedLegacyDesired.values()]).toEqual([]);
     expect(storage.value(`typed-ready-pool-v1:builders:${lease.id}`)).toBeTruthy();
     expect(storage.value(`typed-ready-pool-v1-fill-claim:${claim.claim.token}`)).toBeTruthy();
-    expect((await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).size).toBe(1);
+    expect((await storage.list({ prefix: "typed-ready-pool-v2-desired:" })).size).toBe(1);
 
     const rolledBackWorker = testFleet(storage);
     const legacyStatus = await rolledBackWorker.fetch(
@@ -20719,55 +21043,84 @@ describe("fleet lease identity and idle", () => {
     ).toEqual(["198.51.100.20/32"]);
   });
 
-  it("rejects a canceled AWS regional retry before it writes ingress", async () => {
-    const nextRegionStarted = deferred<void>();
-    const finishNextRegionPreparation = deferred<void>();
-    const { fleet, headers, create, creatingID, createAttemptID, requests } = awsIngressTestFleet(
-      async (action, _params, region) => {
-        if (action === "RunInstances" && region === "eu-west-1") {
-          return ec2XMLResponse(
-            "<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code></Error></Errors></Response>",
-            400,
-          );
-        }
-        if (action === "DescribeKeyPairs" && region === "us-east-1") {
-          nextRegionStarted.resolve();
-          await finishNextRegionPreparation.promise;
-        }
-        return undefined;
-      },
-    );
-    const creating = create({
-      capacity: { market: "on-demand", fallback: "none", regions: ["eu-west-1", "us-east-1"] },
-    });
-    try {
-      await Promise.race([
-        nextRegionStarted.promise,
-        creating.then(async (response) => {
-          throw new Error(await response.text());
-        }),
-      ]);
-      const canceled = await fleet.fetch(
-        request("POST", `/v1/leases/${creatingID}/cancel-create`, {
-          headers,
-          body: { createAttemptID },
-        }),
+  it.each([
+    { action: "cancel-create", region: "eu-west-1" },
+    { action: "cancel-create", region: "us-east-1" },
+    { action: "release", region: "eu-west-1" },
+    { action: "release", region: "us-east-1" },
+  ] as const)(
+    "reports AWS $action in $region before writing ingress",
+    async ({ action, region }) => {
+      const preparationStarted = deferred<void>();
+      const finishPreparation = deferred<void>();
+      const { fleet, headers, create, creatingID, createAttemptID, requests } = awsIngressTestFleet(
+        async (operation, _params, requestRegion) => {
+          if (operation === "RunInstances" && requestRegion === "eu-west-1") {
+            return ec2XMLResponse(
+              "<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code></Error></Errors></Response>",
+              400,
+            );
+          }
+          if (operation === "DescribeKeyPairs" && requestRegion === region) {
+            preparationStarted.resolve();
+            await finishPreparation.promise;
+          }
+          return undefined;
+        },
       );
-      expect(canceled.status).toBe(200);
-      finishNextRegionPreparation.resolve();
-      expect((await creating).status).not.toBe(201);
-      expect(
-        requests.filter(
-          ({ action, region }) =>
-            region === "us-east-1" &&
-            ["AuthorizeSecurityGroupIngress", "RunInstances"].includes(action),
-        ),
-      ).toEqual([]);
-    } finally {
-      finishNextRegionPreparation.resolve();
-      await Promise.allSettled([creating]);
-    }
-  });
+      const creating = create(
+        {
+          capacity: { market: "on-demand", fallback: "none", regions: ["eu-west-1", "us-east-1"] },
+        },
+        action === "release" ? "PUT" : "POST",
+      );
+      try {
+        await Promise.race([
+          preparationStarted.promise,
+          creating.then(async (response) => {
+            throw new Error(await response.clone().text());
+          }),
+        ]);
+        const canceled = await fleet.fetch(
+          request("POST", `/v1/leases/${creatingID}/${action}`, {
+            headers,
+            body: action === "release" ? { delete: true } : { createAttemptID },
+          }),
+        );
+        expect(canceled.status).toBe(200);
+        finishPreparation.resolve();
+        const response = await creating;
+        expect({ status: response.status, body: await response.json() }).toEqual({
+          status: 409,
+          body: {
+            error: "create_canceled",
+            message: "create attempt was canceled before completion",
+          },
+        });
+        expect(
+          requests.filter(
+            (providerRequest) =>
+              providerRequest.region === region &&
+              ["AuthorizeSecurityGroupIngress", "RunInstances"].includes(providerRequest.action),
+          ),
+        ).toEqual([]);
+        const observed = await fleet.fetch(request("GET", `/v1/leases/${creatingID}`, { headers }));
+        expect(await observed.json()).toMatchObject({
+          lease: {
+            state: "released",
+            cloudID: "",
+            releaseDeletesServer: true,
+            cleanupStatus: "failed",
+            cleanupError: "create attempt was canceled before completion",
+            provisioningResourceMayExist: true,
+          },
+        });
+      } finally {
+        finishPreparation.resolve();
+        await Promise.allSettled([creating]);
+      }
+    },
+  );
 
   it("reconciles AWS ingress after the final overlapping create drains", async () => {
     const storage = new MemoryStorage();
@@ -39113,13 +39466,12 @@ function awsIngressTestFleet(
       expiresAt: new Date(Date.now() + 600_000).toISOString(),
     }),
   );
-  const create = (overrides: Partial<LeaseRequest> = {}) =>
+  const create = (overrides: Partial<LeaseRequest> = {}, method: "POST" | "PUT" = "POST") =>
     fleet.fetch(
-      request("POST", "/v1/leases", {
+      request(method, method === "PUT" ? `/v1/leases/${creatingID}` : "/v1/leases", {
         headers: { ...headers, "x-crabbox-admin": "true", "cf-connecting-ip": "198.51.100.20" },
         body: {
-          leaseID: creatingID,
-          createAttemptID,
+          ...(method === "POST" ? { leaseID: creatingID, createAttemptID } : {}),
           provider: "aws",
           awsRegion: "eu-west-1",
           awsSGID: "sg-shared",

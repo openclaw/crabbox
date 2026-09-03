@@ -716,6 +716,44 @@ describe("coordinator-managed checkpoints", () => {
     }
   });
 
+  it("completes a fixed checkpoint fork on replay after its completion transaction fails", async () => {
+    const { coordinator, storage, checkpointID, provider, body, begin, fork, create } =
+      await fixedForkFixture();
+    const claim = await begin();
+    vi.mocked(provider.finalizeLeaseCreate).mockImplementation(async (config, lease) => {
+      storage.failKey = checkpointKey(checkpointID);
+      return { config, lease };
+    });
+
+    expect((await fork(claim)).status).toBe(500);
+    expect(await storage.get(`lease:${body.leaseID}`)).toMatchObject({ state: "active" });
+    expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({ activeUseCount: 1 });
+    expect([
+      ...(await storage.list({ prefix: `checkpoint-use:${checkpointID}:` })).values(),
+    ]).toEqual([expect.objectContaining({ state: "provisioning", leaseID: body.leaseID })]);
+    delete storage.failKey;
+
+    expect((await fork(claim)).status).toBe(200);
+    const completed = await storage.get(checkpointKey(checkpointID));
+    expect(completed).toMatchObject({ activeUseCount: 0 });
+    expect(await storage.list({ prefix: `checkpoint-use:${checkpointID}:` })).toHaveLength(0);
+    const events = await storage.list<{ type: string }>({
+      prefix: `checkpoint-event:${checkpointID}:`,
+    });
+    expect(
+      [...events.values()].filter((event) => event.type === "checkpoint.use.completed"),
+    ).toHaveLength(1);
+
+    expect((await fork(claim)).status).toBe(200);
+    expect(await storage.get(checkpointKey(checkpointID))).toEqual(completed);
+    expect(await storage.list({ prefix: `checkpoint-event:${checkpointID}:` })).toEqual(events);
+    expect(create).toHaveBeenCalledOnce();
+    expect(
+      (await coordinator.fetch(checkpointRequest("DELETE", `/v1/checkpoints/${checkpointID}`)))
+        .status,
+    ).toBe(200);
+  });
+
   it("replays a fixed checkpoint child after source deletion without inspecting its image", async () => {
     const { coordinator, storage, checkpointID, provider, begin, fork, create } =
       await fixedForkFixture();

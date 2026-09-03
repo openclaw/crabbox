@@ -106,8 +106,8 @@ func touchDirectLeaseLabelsWithIdleTimeoutOverride(labels map[string]string, cfg
 	next["idle_timeout_secs"] = durationSecondsLabel(idleTimeout)
 	next["ttl_secs"] = durationSecondsLabel(ttl)
 	next["expires_at"] = leaseLabelTime(directLeaseExpiresAtFrom(createdAt, now, ttl, idleTimeout))
-	// Existing provider metadata may contain full hashes or native resource IDs.
-	// Touch owns lifecycle fields only; re-sanitizing identity breaks replay.
+	// Existing labels belong to their provider and may contain full fingerprints,
+	// empty attestation fields, or exact paths. Touch only normalizes values it writes.
 	return next
 }
 

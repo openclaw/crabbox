@@ -165,16 +165,20 @@ func (c *fakeAWSClient) CallerAccountID(context.Context) (string, error) {
 }
 
 func (c *fakeAWSClient) SetTags(_ context.Context, id string, labels map[string]string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.tagged = append(c.tagged, id)
 	c.tagLabels = append(c.tagLabels, maps.Clone(labels))
-	if c.setTagsErr == nil {
-		for i := range c.servers {
-			if c.servers[i].CloudID == id {
-				c.servers[i].Labels = maps.Clone(labels)
-			}
+	if c.setTagsErr != nil {
+		return c.setTagsErr
+	}
+	for i := range c.servers {
+		if c.servers[i].CloudID == id {
+			c.servers[i].Labels = maps.Clone(c.servers[i].Labels)
+			maps.Copy(c.servers[i].Labels, labels)
 		}
 	}
-	return c.setTagsErr
+	return nil
 }
 
 func (c *fakeAWSClient) CapacityDoctorChecks(context.Context, Config) []core.DoctorCheck {
@@ -227,6 +231,9 @@ func TestAWSFixedAcquireReplaysSameLeaseAndRejectsIntentDrift(t *testing.T) {
 	first := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
 	lease, err := first.Acquire(context.Background(), req)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Touch(context.Background(), TouchRequest{Lease: lease, State: "running"}); err != nil {
 		t.Fatal(err)
 	}
 	second := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)

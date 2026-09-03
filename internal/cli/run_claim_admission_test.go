@@ -133,7 +133,7 @@ decoded=""`), 1)
 	}
 	heartbeatStarted = true
 	go func() {
-		_, _, _, err := UpdateLeaseClaimTouchIfUnchangedAction(lease.LeaseID, original, time.Now(), nil, func() (Server, SSHTarget, bool, error) {
+		_, _, _, err := UpdateLeaseClaimTouchIfUnchangedAction(ctx, lease.LeaseID, original, time.Now(), nil, func() (Server, SSHTarget, bool, error) {
 			close(heartbeatEntered)
 			select {
 			case <-heartbeatGate:
@@ -193,7 +193,7 @@ decoded=""`), 1)
 	}
 	// A heartbeat that waited behind admission may lose its old CAS; its next
 	// ordinary scheduled call must succeed on the current exact snapshot.
-	if _, _, _, err := UpdateLeaseClaimTouchIfUnchangedAction(lease.LeaseID, current, time.Now(), nil, func() (Server, SSHTarget, bool, error) {
+	if _, _, _, err := UpdateLeaseClaimTouchIfUnchangedAction(ctx, lease.LeaseID, current, time.Now(), nil, func() (Server, SSHTarget, bool, error) {
 		return lease.Server, lease.SSH, true, nil
 	}); err != nil {
 		t.Fatal(err)

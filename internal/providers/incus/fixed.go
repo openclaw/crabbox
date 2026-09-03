@@ -171,7 +171,7 @@ func (b *backend) acquireDurable(ctx context.Context, req AcquireRequest) (Lease
 		if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
 			return LeaseTarget{}, err
 		}
-		server.Labels = touchInstanceLabels(server.Labels, cfg, "ready", time.Now().UTC())
+		server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", time.Now().UTC())
 		if err := setInstanceLabels(ctx, client, name, server.Labels); err != nil {
 			return LeaseTarget{}, err
 		}

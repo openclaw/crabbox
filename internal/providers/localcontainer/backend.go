@@ -1617,7 +1617,7 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 		cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
 	}
 	labels := localContainerTouchLabels(expected, cfg, req.State, now, req.IdleTimeoutOverride)
-	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(ctx, req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
 	if err != nil {
 		return core.Server{}, err
 	}
@@ -1627,14 +1627,13 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 }
 
 func localContainerTouchLabels(claim core.LeaseClaim, cfg core.Config, state string, now time.Time, idleTimeoutOverride *time.Duration) map[string]string {
-	labels := cloneLabels(claim.Labels)
-	labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, state, now, idleTimeoutOverride)
-	for key, value := range claim.Labels {
-		switch key {
-		case "state", "last_touched_at", "idle_timeout", "idle_timeout_secs", "expires_at":
-			continue
+	labels := core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(claim.Labels, cfg, state, now, idleTimeoutOverride)
+	// Expiry uses parsed lifecycle values, while the claim retains its original
+	// creation anchor and TTL representation across heartbeat updates.
+	for _, key := range []string{"created_at", "ttl_secs"} {
+		if value, ok := claim.Labels[key]; ok {
+			labels[key] = value
 		}
-		labels[key] = value
 	}
 	return labels
 }

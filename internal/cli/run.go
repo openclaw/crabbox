@@ -320,7 +320,7 @@ func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlag
 	return values
 }
 
-func loadRunConfig(fs *flag.FlagSet, flags runFlagValues, target leaseFlagTarget, mutateExternal bool) (Config, error) {
+func loadRunConfig(fs *flag.FlagSet, flags runFlagValues, target leaseFlagTarget, mutateExternal bool, identity *CoordinatorReadyPoolIdentityV1) (Config, error) {
 	cfg, err := loadConfig()
 	if err != nil {
 		return Config{}, err
@@ -329,8 +329,18 @@ func loadRunConfig(fs *flag.FlagSet, flags runFlagValues, target leaseFlagTarget
 	if err := applySelectedProfileConfig(&cfg); err != nil {
 		return Config{}, err
 	}
+	if identity != nil {
+		if err := bindReadyPoolIdentityProviderConfig(&cfg, fs, flags.Lease.Provider, *identity); err != nil {
+			return Config{}, err
+		}
+	}
 	if err := applyLeaseCreateFlagsForTarget(&cfg, fs, flags.Lease, target, mutateExternal); err != nil {
 		return Config{}, err
+	}
+	if identity != nil {
+		if err := validateReadyPoolIdentityProviderConfig(cfg, *identity); err != nil {
+			return Config{}, err
+		}
 	}
 	return cfg, nil
 }
@@ -387,16 +397,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	var readyPoolIdentity *CoordinatorReadyPoolIdentityV1
-	if flagWasSet(fs, "pool-identity-file") {
-		if strings.TrimSpace(*runFlags.ReadyPool) == "" {
-			return exit(2, "--pool-identity-file requires --pool")
-		}
-		identity, identityErr := loadReadyPoolIdentity(*runFlags.ReadyPoolIdentity)
-		if identityErr != nil {
-			return identityErr
-		}
-		readyPoolIdentity = &identity
+	if flagWasSet(fs, "pool-identity-file") && strings.TrimSpace(*runFlags.ReadyPool) == "" {
+		return exit(2, "--pool-identity-file requires --pool")
 	}
 	leaseFlags := runFlags.Lease
 	leaseIDFlag := runFlags.LeaseID
@@ -560,7 +562,15 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		return exit(2, "--pool cannot be combined with --full-resync or --fresh-sync")
 	}
 
-	cfg, err := loadRunConfig(fs, runFlags, leaseFlagTarget{ID: *leaseIDFlag, Reuse: *leaseIDFlag != ""}, true)
+	var readyPoolIdentity *CoordinatorReadyPoolIdentityV1
+	if flagWasSet(fs, "pool-identity-file") {
+		identity, identityErr := loadReadyPoolIdentity(*runFlags.ReadyPoolIdentity)
+		if identityErr != nil {
+			return identityErr
+		}
+		readyPoolIdentity = &identity
+	}
+	cfg, err := loadRunConfig(fs, runFlags, leaseFlagTarget{ID: *leaseIDFlag, Reuse: *leaseIDFlag != ""}, true, readyPoolIdentity)
 	if err != nil {
 		return err
 	}
@@ -1068,6 +1078,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return err
 		}
 		addStringInput(borrowInput, "compatibilityKey", *readyPoolCompatibilityKey)
+		if readyPoolIdentity != nil {
+			if providerErr := bindReadyPoolIdentityProvider(borrowInput, *readyPoolIdentity); providerErr != nil {
+				return providerErr
+			}
+		}
 		var res CoordinatorReadyPoolResponse
 		if readyPoolIdentity != nil {
 			delete(borrowInput, "allowMissingCommit")

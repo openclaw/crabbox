@@ -609,15 +609,11 @@ func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, 
 	if err := validateVastServer(server); err != nil {
 		return core.Server{}, err
 	}
-	claimMetadata := server.Labels
 	cfg := b.cfg
 	if req.IdleTimeout > 0 {
 		cfg.IdleTimeout = req.IdleTimeout
 	}
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, b.now())
-	// Provider labels are deliberately sanitized, but these local-only values
-	// must remain exact so cleanup stays bound to the original endpoint/account.
-	server.Labels = preserveVastClaimMetadata(server.Labels, claimMetadata)
 	if claim, ok, err := core.ReadLeaseClaimWithPresence(req.Lease.LeaseID); err == nil && ok {
 		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, claim, server.Labels); err != nil {
 			return core.Server{}, err

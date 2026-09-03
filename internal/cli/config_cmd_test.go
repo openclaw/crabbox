@@ -61,6 +61,116 @@ func TestConfigShowUsesProviderImplicitArchitecture(t *testing.T) {
 	}
 }
 
+func TestConfigShowEffectiveLeaseDurations(t *testing.T) {
+	for _, tc := range []struct {
+		name, userYAML, repoYAML, envTTL, envIdleTimeout string
+		wantTTL, wantIdleTimeout, wantProvider           string
+	}{
+		{
+			name: "compiled defaults", wantTTL: "1h30m0s", wantIdleTimeout: "30m0s",
+		},
+		{
+			name: "top-level YAML", userYAML: "ttl: 125m\nidleTimeout: 75s\n",
+			wantTTL: "2h5m0s", wantIdleTimeout: "1m15s",
+		},
+		{
+			name:     "nested lease overrides top-level",
+			userYAML: "ttl: 125m\nidleTimeout: 75s\nlease:\n  ttl: 150m\n  idleTimeout: 45m\n",
+			wantTTL:  "2h30m0s", wantIdleTimeout: "45m0s",
+		},
+		{
+			name:     "environment overrides file",
+			userYAML: "ttl: 125m\nidleTimeout: 75s\nlease:\n  ttl: 150m\n  idleTimeout: 45m\n",
+			envTTL:   "195m", envIdleTimeout: "90.5s",
+			wantTTL: "3h15m0s", wantIdleTimeout: "1m30.5s",
+		},
+		{
+			name:     "repo overrides user and preserves omitted values",
+			userYAML: "lease:\n  ttl: 150m\n  idleTimeout: 45m\n",
+			repoYAML: "ttl: 240m\n",
+			wantTTL:  "4h0m0s", wantIdleTimeout: "45m0s",
+		},
+		{
+			name: "AWS with distinct provider and job durations",
+			userYAML: `provider: aws
+blaxel:
+  ttl: 11m
+  idleTTL: 2m
+githubCodespaces:
+  idleTimeout: 13m
+jobs:
+  test:
+    ttl: 17m
+    idleTimeout: 3m
+`,
+			wantTTL: "1h30m0s", wantIdleTimeout: "30m0s", wantProvider: "aws",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Chdir(t.TempDir())
+			// clearConfigEnv does not clear these generic selection/duration inputs.
+			for _, key := range []string{"CRABBOX_CONFIG", "CRABBOX_PROVIDER", "CRABBOX_PROFILE", "CRABBOX_TARGET", "CRABBOX_OS", "CRABBOX_ARCH", "CRABBOX_TTL", "CRABBOX_IDLE_TIMEOUT"} {
+				t.Setenv(key, "")
+			}
+			for path, content := range map[string]string{userConfigPath(): tc.userYAML, "crabbox.yaml": tc.repoYAML} {
+				if content == "" {
+					continue
+				}
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("CRABBOX_TTL", tc.envTTL)
+			t.Setenv("CRABBOX_IDLE_TIMEOUT", tc.envIdleTimeout)
+			for _, format := range []string{"json", "text"} {
+				t.Run(format, func(t *testing.T) {
+					var stdout, stderr bytes.Buffer
+					var args []string
+					if format == "json" {
+						args = []string{"--json"}
+					}
+					if err := (App{Stdout: &stdout, Stderr: &stderr}).configShow(args); err != nil {
+						t.Fatalf("config show: %v", err)
+					}
+					output := stdout.String()
+					if format == "json" {
+						var view map[string]any
+						if err := json.Unmarshal(stdout.Bytes(), &view); err != nil {
+							t.Fatal(err)
+						}
+						for key, want := range map[string]string{"ttl": tc.wantTTL, "idleTimeout": tc.wantIdleTimeout, "provider": tc.wantProvider} {
+							if got := view[key]; got != want {
+								t.Errorf("top-level %s=%v, want string %q", key, got, want)
+							}
+						}
+						if tc.wantProvider == "aws" {
+							blaxel := view["blaxel"].(map[string]any)
+							codespaces := view["githubCodespaces"].(map[string]any)
+							job := view["jobs"].(map[string]any)["test"].(map[string]any)
+							if blaxel["ttl"] != "11m" || blaxel["idleTTL"] != "2m" || codespaces["idleTimeout"] != "13m0s" || job["ttl"] != "17m0s" || job["idleTimeout"] != "3m0s" {
+								t.Error("provider/job durations were not retained separately")
+							}
+						}
+						return
+					}
+					wantLine := fmt.Sprintf("lease ttl=%s idle_timeout=%s\n", tc.wantTTL, tc.wantIdleTimeout)
+					if !strings.Contains(output, "\n"+wantLine) || strings.Count(output, "\nlease ") != 1 {
+						t.Errorf("want one complete generic lease line %q", wantLine)
+					}
+					lines := strings.Split(output, "\n")
+					if len(lines) < 4 || !strings.HasPrefix(lines[1], "provider="+tc.wantProvider+" ") || lines[2]+"\n" != wantLine || !strings.HasPrefix(lines[3], "broker=") {
+						t.Error("generic lease line must appear immediately between provider and broker summaries")
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestConfigCommandsReportSelectedPath(t *testing.T) {
 	for _, name := range []string{"default", "absolute", "relative", "missing", "symlink"} {
 		t.Run(name, func(t *testing.T) {

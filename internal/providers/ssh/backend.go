@@ -271,7 +271,7 @@ func (b *staticLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
 	return fmt.Sprintf("released static lease=%s host=%s", lease.LeaseID, lease.SSH.Host)
 }
 
-func (b *staticLeaseBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
+func (b *staticLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
 	expected, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server)
 	if !set || !exists {
 		return Server{}, exit(4, "static lease %s has no exact claim snapshot; refusing touch", req.Lease.LeaseID)
@@ -293,7 +293,7 @@ func (b *staticLeaseBackend) Touch(_ context.Context, req TouchRequest) (Server,
 	}
 	labels := staticLeaseLabelsFromClaim(expected)
 	labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, req.State, now, req.IdleTimeoutOverride)
-	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(ctx, req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
 	if err != nil {
 		return Server{}, err
 	}

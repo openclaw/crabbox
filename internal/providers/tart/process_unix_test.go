@@ -588,13 +588,18 @@ func TestStartupStartFailureRemovesLog(t *testing.T) {
 
 func processFileDescriptors(t *testing.T) map[int]uint64 {
 	t.Helper()
-	entries, err := os.ReadDir("/dev/fd")
+	// Only names are needed; metadata lookups can fail for virtual fd entries.
+	directory, err := os.Open("/dev/fd")
 	if err != nil {
 		t.Fatal(err)
 	}
+	names, readErr := directory.Readdirnames(-1)
+	if err := errors.Join(readErr, directory.Close()); err != nil {
+		t.Fatal(err)
+	}
 	out := map[int]uint64{}
-	for _, entry := range entries {
-		fd, err := strconv.Atoi(entry.Name())
+	for _, name := range names {
+		fd, err := strconv.Atoi(name)
 		var stat syscall.Stat_t
 		if err == nil && syscall.Fstat(fd, &stat) == nil {
 			kind := stat.Mode & syscall.S_IFMT

@@ -298,6 +298,10 @@ func TestDaytonaHeartbeatUpdatesProviderAndLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	metadata := map[string]string{"fixed_intent_sha256": strings.Repeat("a", 64), "optional_identity": ""}
+	for key, value := range metadata {
+		sandbox.GetLabels()[key] = value
+	}
 	idle := 90 * time.Minute
 	touched, err := b.Touch(t.Context(), TouchRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: daytonaSandboxToServer(sandbox, b.cfg)}, State: "ready", IdleTimeoutOverride: &idle})
 	if err != nil {
@@ -305,6 +309,11 @@ func TestDaytonaHeartbeatUpdatesProviderAndLabels(t *testing.T) {
 	}
 	if f.autoStop != "90" || touched.Labels["idle_timeout_secs"] != "5400" || f.activity != 1 {
 		t.Fatalf("autoStop=%s labels=%v activity=%d", f.autoStop, touched.Labels, f.activity)
+	}
+	for key, value := range metadata {
+		if f.sandbox.GetLabels()[key] != value || touched.Labels[key] != value {
+			t.Errorf("heartbeat changed provider metadata %s: remote=%q response=%q want=%q", key, f.sandbox.GetLabels()[key], touched.Labels[key], value)
+		}
 	}
 }
 

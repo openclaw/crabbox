@@ -43,7 +43,7 @@ func TestWindowsPowerShellStdinScriptCommandUsesExactLengthFrame(t *testing.T) {
 	decoded := decodePowerShellCommand(t, command)
 	for _, want := range []string{
 		"$remaining = [Int64]12345",
-		"$stdin.Read($buffer, 0, $readSize)",
+		"$stdin.ReadAsync($buffer, 0, $readSize).GetAwaiter().GetResult()",
 		"SSH stdin ended before the framed payload",
 		"$scriptFile.Flush($true)",
 		"-File $path",

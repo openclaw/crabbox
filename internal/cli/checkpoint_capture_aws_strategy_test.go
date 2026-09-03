@@ -18,9 +18,9 @@ import (
 // Exercise the real AWS adapter and SDK with only a loopback EC2/STS boundary.
 // The explicit synthetic SDK credentials and empty HOME prevent ambient lookup.
 func runCheckpointAWSStrategyContract(t *testing.T, repo, binary string) {
+	t.Parallel()
 	for _, strategy := range []string{"", "auto", "image", "disk-snapshot"} {
 		t.Run("direct AWS Linux retirement strategy "+blank(strategy, "default"), func(t *testing.T) {
-			t.Parallel()
 			f := newCheckpointCaptureFixture(t, repo, binary)
 			const instanceID = "i-0123456789abcdef0"
 			const imageID = "ami-0123456789abcdef0"
