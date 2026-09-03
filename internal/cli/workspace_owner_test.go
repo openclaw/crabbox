@@ -25,7 +25,6 @@ type fakeWorkspaceOwnerRemote struct {
 	token            string
 	expires          time.Time
 	childAlive       bool
-	failRenew        bool
 	ambiguousRelease bool
 	blockBusyAcquire bool
 	changed          chan struct{}
@@ -82,10 +81,6 @@ func (f *fakeWorkspaceOwnerRemote) Do(ctx context.Context, req workspaceOwnerRem
 				continue
 			}
 		case workspaceOwnerRenew:
-			if f.failRenew {
-				f.mu.Unlock()
-				return "", errors.New("renew transport lost")
-			}
 			if f.token != req.Token {
 				f.mu.Unlock()
 				return "MISMATCH", nil
@@ -266,21 +261,56 @@ func TestWorkspaceOwnerTokenAndTransportFailuresFailClosed(t *testing.T) {
 	})
 
 	t.Run("failed renew", func(t *testing.T) {
-		remote := newFakeWorkspaceOwnerRemote()
-		owner, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_renew", &bytes.Buffer{}, remote, time.Second, 50*time.Millisecond, 5*time.Millisecond)
-		if err != nil {
-			t.Fatal(err)
-		}
-		remote.mu.Lock()
-		remote.failRenew = true
-		remote.mu.Unlock()
-		select {
-		case <-owner.Context().Done():
-		case <-time.After(time.Second):
-			t.Fatal("renewal failure did not cancel lifecycle context")
-		}
-		if err := owner.Close(context.Background()); err == nil || !strings.Contains(err.Error(), "renewal failed closed") {
-			t.Fatalf("close err=%v, want renewal failure", err)
+		const rawOutput = "private-unrecognized-renewal-output"
+		for _, tc := range []struct {
+			name, response, state string
+			err                   error
+		}{
+			{name: "transport", err: errors.New("renew transport lost")},
+			{name: "mismatch", response: "MISMATCH", state: "MISMATCH", err: errors.New("exit status 75")},
+			{name: "expired", response: "EXPIRED", state: "EXPIRED", err: errors.New("exit status 75")},
+			{name: "ambiguous", response: "AMBIGUOUS", state: "AMBIGUOUS", err: errors.New("exit status 74")},
+			{name: "mismatch without status", response: "MISMATCH", state: "MISMATCH"},
+			{name: "unknown output with status", response: rawOutput, err: errors.New("exit status 75")},
+			{name: "mixed output with status", response: "MISMATCH\n" + rawOutput, err: errors.New("exit status 75")},
+			{name: "unknown output without status", response: rawOutput},
+			{name: "acknowledgement with failure", response: "RENEWED", err: errors.New("renew transport lost")},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ownerCtx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				calls := 0
+				owner := &workspaceOwner{
+					transport: workspaceOwnerTransportFunc(func(_ context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+						calls++
+						if req.Action != workspaceOwnerRenew {
+							t.Errorf("unexpected authority call %s after failed renewal", req.Action)
+						}
+						return tc.response, tc.err
+					}),
+					ttl: time.Minute, ctx: ownerCtx, cancel: cancel, stop: make(chan struct{}), done: make(chan struct{}),
+				}
+				ticks := make(chan time.Time, 1)
+				ticks <- time.Now()
+				owner.renewLoopWithTicks(ticks, time.Second)
+				err := owner.Err()
+				if inspectErr := owner.ConfirmNoChild(t.Context()); inspectErr != err {
+					t.Errorf("inspection did not preserve failed renewal: %v", inspectErr)
+				}
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 7 || ownerCtx.Err() != context.Canceled || calls != 1 {
+					t.Fatalf("err=%v context=%v calls=%d; want immediate terminal exit 7", err, ownerCtx.Err(), calls)
+				}
+				if !strings.Contains(err.Error(), "renewal failed closed") || tc.err != nil && !strings.Contains(err.Error(), tc.err.Error()) {
+					t.Errorf("renewal failure lost original cause: %v", err)
+				}
+				if tc.state != "" && !strings.Contains(err.Error(), "protocol state "+tc.state) {
+					t.Errorf("renewal failure lost protocol state %s: %v", tc.state, err)
+				}
+				if strings.Contains(err.Error(), rawOutput) || tc.state == "" && strings.Contains(err.Error(), "protocol state") {
+					t.Errorf("renewal failure trusted unknown protocol output: %v", err)
+				}
+			})
 		}
 	})
 
@@ -1739,21 +1769,41 @@ func TestWorkspaceOwnerPOSIXProtocolBehavior(t *testing.T) {
 	request := func(action workspaceOwnerAction, token string) workspaceOwnerRemoteRequest {
 		return workspaceOwnerRemoteRequest{Action: action, Key: key, Token: token, TTL: 30 * time.Second}
 	}
+	requireFailedRenewal := func(token, state string, remoteExit int) {
+		t.Helper()
+		ownerCtx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		owner := &workspaceOwner{
+			transport: workspaceOwnerTransportFunc(func(_ context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+				out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(req))
+				var exitErr *exec.ExitError
+				if out != state || !errors.As(err, &exitErr) || exitErr.ExitCode() != remoteExit {
+					t.Fatalf("renew out=%q err=%v; want %s with remote exit %d", out, err, state, remoteExit)
+				}
+				return out, err
+			}),
+			key: key, token: token, ttl: 30 * time.Second, ctx: ownerCtx, cancel: cancel, stop: make(chan struct{}), done: make(chan struct{}),
+		}
+		ticks := make(chan time.Time, 1)
+		ticks <- time.Now()
+		owner.renewLoopWithTicks(ticks, time.Second)
+		var exitErr ExitError
+		if err := owner.Err(); !AsExitError(err, &exitErr) || exitErr.Code != 7 || !strings.Contains(err.Error(), "protocol state "+state) || ownerCtx.Err() != context.Canceled {
+			t.Errorf("real POSIX renewal lost terminal state %s: err=%v context=%v", state, err, ownerCtx.Err())
+		}
+	}
+	requireFailedRenewal(tokenA, "AMBIGUOUS", 74)
 	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenA))); err != nil || out != "ACQUIRED" {
 		t.Fatalf("acquire out=%q err=%v", out, err)
 	}
-	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerRenew, tokenB))); err == nil || out != "MISMATCH" {
-		t.Fatalf("mismatched renew out=%q err=%v", out, err)
-	}
+	requireFailedRenewal(tokenB, "MISMATCH", 75)
 	statePath := filepath.Join(home, ".crabbox", "workspace-owners", key+".owner")
 	childPath := filepath.Join(home, ".crabbox", "workspace-owners", key+".child")
 	expiredState := "v1\n" + tokenA + "\n1\n"
 	if err := os.WriteFile(statePath, []byte(expiredState), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerRenew, tokenA))); err == nil || out != "EXPIRED" {
-		t.Fatalf("late same-token renew out=%q err=%v", out, err)
-	}
+	requireFailedRenewal(tokenA, "EXPIRED", 75)
 	if data, err := os.ReadFile(statePath); err != nil || string(data) != expiredState {
 		t.Fatalf("late renew changed expired state: data=%q err=%v", data, err)
 	}

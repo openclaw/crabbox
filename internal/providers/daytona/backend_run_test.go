@@ -293,11 +293,31 @@ func TestUploadDaytonaFileStreamDoesNotPrebuffer(t *testing.T) {
 		bodyRead <- data
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer srv.Close()
+	defer func() {
+		_ = sourceWriter.Close()
+		_ = sourceReader.Close()
+		srv.Close()
+	}()
 
+	dataClient, err := daytonaHTTPClient(nil, srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := dataClient.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	callerDeadline, callerBounded := t.Context().Deadline()
+	dataClient.Transport = daytonaDeadlineRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		deadline, bounded := req.Context().Deadline()
+		if bounded != callerBounded || (bounded && !deadline.Equal(callerDeadline)) {
+			t.Error("archive upload acquired an independent control deadline")
+		}
+		return transport.RoundTrip(req)
+	})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- uploadDaytonaFileStream(t.Context(), srv.Client(), srv.URL+"/sbx-123/files/upload?path=%2Ftmp%2Farchive.tgz", map[string]string{
+		errCh <- uploadDaytonaFileStream(t.Context(), dataClient, srv.URL+"/sbx-123/files/upload?path=%2Ftmp%2Farchive.tgz", map[string]string{
 			"Authorization": "Bearer token",
 		}, sourceReader, "archive.tgz")
 	}()
@@ -306,6 +326,8 @@ func TestUploadDaytonaFileStreamDoesNotPrebuffer(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("upload did not start until the source reader completed")
 	}
+	// The upload remains active beyond the budget used by the control stall test.
+	time.Sleep(3 * daytonaControlTestTimeout)
 	if _, err := sourceWriter.Write([]byte("hello archive")); err != nil {
 		t.Fatal(err)
 	}

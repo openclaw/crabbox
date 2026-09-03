@@ -177,6 +177,11 @@ for lifetime, key-rotation, and recovery behavior.
 
 ## Direct lifecycle
 
+Direct control-plane HTTP requests have a 60-second default whole-request
+timeout, including response-body reads. Earlier caller cancellation or deadlines
+still apply. Toolbox execution and archive uploads keep their caller-controlled
+lifetimes rather than inheriting this control-plane budget.
+
 1. Create or resolve a Daytona sandbox from `daytona.snapshot`.
 2. Create private previews, configure Daytona's native wall-clock TTL and idle
    auto-stop interval, and store Crabbox labels and an exact local repo claim.
