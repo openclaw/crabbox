@@ -7,8 +7,9 @@ Read when:
 - understanding how the Daytona backend differs from a plain SSH-lease provider.
 
 `provider: daytona` provisions [Daytona](https://www.daytona.io/) sandboxes and
-supports Linux targets exclusively. Direct mode is hybrid: `warmup`, `run`,
-`list`, `status`, and `stop` drive Daytona's SDK and toolbox APIs, while `ssh`
+supports Linux targets exclusively. Direct mode is hybrid: `warmup`, ordinary
+`run` commands, `list`, `status`, and `stop` drive Daytona's SDK and toolbox APIs.
+Explicit `run --script` / `--script-stdin` use the core SSH runner, while `ssh`
 mints a short-lived SSH token. Brokered mode keeps the API key in the
 coordinator, returns an expiring SSH identity to the authorized client, and
 uses Crabbox's normal SSH/rsync run path.
@@ -176,13 +177,18 @@ crabbox stop --provider daytona swift-crab
   unique name for up to 30 seconds without retrying allocation. Daytona can
   return 400 after allocating a sandbox that fails to start, so even an invalid
   target can require this reconciliation before Crabbox reports the failure.
-- **`run --id`** resolves a Daytona sandbox, uploads a Crabbox sync-manifest
+- **Ordinary `run --id`** resolves a Daytona sandbox, uploads a Crabbox sync-manifest
   archive through Daytona toolbox file APIs, extracts it in the sandbox, and
-  executes the command through Daytona toolbox process APIs. The command transport
-  is Daytona's SDK — not direct SSH.
+  executes the command through Daytona toolbox process APIs.
   Resync preserves installed dependencies and remote-only files, deleting only
   source paths removed from the sync manifest. Periodic activity refreshes keep
   quiet commands alive until their command deadline or the hard sandbox TTL.
+- **`run --script` / `--script-stdin`** select the core SSH runner before
+  execution. Scripts upload privately, receive literal trailing arguments,
+  and use the repository workspace and normal environment-profile support.
+  `--no-sync` skips repository sync, while the script itself still uploads.
+  The existing SSH workspace witness governs cancellation and subsequent SSH
+  script reuse. Daytona activity refreshes run through setup and execution.
 - **`list`** and **`status`** discover sandboxes only when Daytona labels bind
   them to the Daytona provider and a canonical Crabbox lease. Direct IDs with
   missing or mismatched ownership labels are rejected.
@@ -196,8 +202,8 @@ crabbox stop --provider daytona swift-crab
   token redacted as `<token>` unless `--show-secret` is passed.
 
 Daytona is a hybrid backend: core rendering, lease labels, sync manifests, and
-repo claim checks stay Crabbox-owned, while the `run` transport is the Daytona
-SDK/toolbox. Actions runner hydration is not supported, because it requires a
+repo claim checks stay Crabbox-owned. Ordinary commands use the Daytona
+SDK/toolbox; explicit scripts use SSH without an SDK-error fallback. Actions runner hydration is not supported, because it requires a
 long-lived, directly SSH-reachable runner host.
 
 In brokered mode the Worker creates and deletes the sandbox, verifies exact

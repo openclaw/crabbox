@@ -869,12 +869,21 @@ func TestDaytonaSSHTargetErrorsDoNotExposeCommandCredentials(t *testing.T) {
 }
 
 func TestDaytonaBackendIsHybridSDKRunAndSSHAccess(t *testing.T) {
-	backend := NewDaytonaLeaseBackend(ProviderSpec{Name: daytonaProvider}, baseConfig(), Runtime{})
+	backend, err := (Provider{}).Configure(baseConfig(), Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := backend.(DelegatedRunBackend); !ok {
 		t.Fatal("daytona should use delegated SDK run path")
 	}
 	if _, ok := backend.(SSHLeaseBackend); !ok {
 		t.Fatal("daytona should still expose explicit SSH access")
+	}
+	if !backend.Spec().Features.Has(core.FeatureSSHScriptRun) {
+		t.Fatal("daytona scripts must select the core SSH runner")
+	}
+	if _, ok := backend.(core.SSHRunActivityBackend); !ok {
+		t.Fatal("SSH scripts require native Daytona idle activity")
 	}
 }
 

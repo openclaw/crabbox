@@ -252,6 +252,12 @@ type SSHLeaseBackend interface {
 	ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error
 }
 
+// SSHRunActivityBackend keeps provider-owned idle activity alive after lease
+// admission, including setup and sync. Stop must cancel and join its work.
+type SSHRunActivityBackend interface {
+	BeginSSHRunActivity(context.Context, LeaseTarget) (stop func(), err error)
+}
+
 // SSHRunFailureEvidenceBackend optionally captures provider-owned state just
 // before an SSH command starts. The returned collector retains that baseline
 // inside the provider and returns only normalized evidence to core after a
@@ -691,6 +697,9 @@ const (
 	FeatureRunArtifacts Feature = "run-artifacts"
 	FeatureRunDownloads Feature = "run-downloads"
 	FeatureModuleRun    Feature = "module-run"
+	// FeatureSSHScriptRun routes explicit scripts through the core SSH owner,
+	// while a hybrid backend may delegate ordinary commands.
+	FeatureSSHScriptRun Feature = "ssh-script-run"
 	FeaturePauseResume  Feature = "pause-resume"
 	FeatureMCP          Feature = "mcp-attachments"
 )

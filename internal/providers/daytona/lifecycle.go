@@ -182,6 +182,18 @@ func daytonaActivityInterval(idle time.Duration) time.Duration {
 	return interval
 }
 
+func (b *daytonaLeaseBackend) BeginSSHRunActivity(ctx context.Context, lease LeaseTarget) (func(), error) {
+	client, err := newDaytonaClient(b.cfg, b.rt)
+	if err != nil {
+		return nil, err
+	}
+	sandbox, err := client.GetSandbox(ctx, lease.Server.CloudID)
+	if err != nil {
+		return nil, daytonaError("get sandbox before SSH run", err)
+	}
+	return b.startDaytonaActivity(ctx, sandbox)
+}
+
 func (b *daytonaLeaseBackend) startDaytonaActivity(ctx context.Context, sandbox *daytona.Sandbox) (func(), error) {
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
