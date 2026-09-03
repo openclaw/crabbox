@@ -3,9 +3,65 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestDoctorHelpIncludesCommandContract(t *testing.T) {
+	for _, flag := range []string{"--help", "-h"} {
+		t.Run(flag, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Chdir(t.TempDir())
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			brokenConfig := []byte("broker: [invalid\n")
+			if err := os.WriteFile(configPath, brokenConfig, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_CONFIG", configPath)
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), []string{"doctor", flag})
+			var exitErr ExitError
+			if err != nil && (!AsExitError(err, &exitErr) || exitErr.Code != 0) {
+				t.Fatalf("help error=%v stderr=%q", err, stderr.String())
+			}
+			text := stderr.String()
+			boundary := strings.Index(text, "All flags:")
+			if boundary < 0 {
+				t.Fatal("doctor help omitted the full flag reference boundary")
+			}
+			for _, want := range []string{
+				"Usage:\n  crabbox doctor [flags]",
+				"Modes:",
+				"crabbox doctor --provider aws",
+				"crabbox doctor --id blue-box",
+				"crabbox doctor --from-run run_",
+				"crabbox doctor --pond my-pond",
+				"crabbox doctor --all --prepare-check",
+				"crabbox doctor --json",
+				"--provider <name>", "--profile <name>", "--id <lease-id-or-slug>",
+				"--from-run <run-id>", "--pond <name>", "--providers <list>",
+				"--doctor-probe-ssh", "--target linux|macos|windows",
+			} {
+				if !strings.Contains(text[:boundary], want) {
+					t.Fatalf("doctor help must show %q before the full flag reference", want)
+				}
+			}
+			for _, want := range []string{"-local-container-runtime", "-windows-mode"} {
+				if !strings.Contains(text[boundary:], want) {
+					t.Fatalf("doctor help lost provider flag %q", want)
+				}
+			}
+			if stdout.Len() != 0 {
+				t.Fatal("doctor help changed its output stream")
+			}
+			if got, err := os.ReadFile(configPath); err != nil || !bytes.Equal(got, brokenConfig) {
+				t.Fatalf("doctor help changed config: %v", err)
+			}
+		})
+	}
+}
 
 func TestCopyHelpIncludesCommandContract(t *testing.T) {
 	for _, flag := range []string{"--help", "-h"} {
