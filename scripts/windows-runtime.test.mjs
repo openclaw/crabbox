@@ -80,6 +80,17 @@ test("installation is outside download retries and gates success on postconditio
   assert.match(desktop, /if \(-not \$crabboxSetupWasComplete\) \{\s+Restart-Computer -Force/u);
 });
 
+test("harness preserves exact LF/CRLF fragments and rejects invalid extraction markers", (t) => {
+  const shell = process.platform === "win32" ? "powershell.exe" : "pwsh";
+  const result = spawnSync(shell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", resolve(repoRoot, "scripts/test-windows-runtime.ps1"), "-TestExtractionOnly"], { encoding: "utf8", timeout: 30000 });
+  if (process.platform !== "win32" && result.error?.code === "ENOENT") {
+    t.skip("PowerShell unavailable; extraction regressions also run in the native harness");
+    return;
+  }
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /PASS LF\/CRLF fragment extraction and missing, duplicate, or misordered markers/u);
+});
+
 test("native Windows behavioral harness", (t) => {
   if (process.platform !== "win32") {
     t.skip("Requires native Windows; run powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-windows-runtime.ps1");

@@ -22,11 +22,15 @@ describe("native Windows runtime readiness", () => {
           architecture,
           desktop,
         };
-        const scripts = [
-          windowsBootstrapPowerShell(windows),
-          azureWindowsBootstrapPowerShell({ ...windows, provider: "azure" }),
+        const scenarios = [
+          { script: windowsBootstrapPowerShell(windows), writesReady: true, reboots: desktop },
+          {
+            script: azureWindowsBootstrapPowerShell({ ...windows, provider: "azure" }),
+            writesReady: !desktop,
+            reboots: false,
+          },
         ];
-        for (const script of scripts) {
+        for (const { script, writesReady, reboots } of scenarios) {
           expect(script).toContain(sharedWindowsRuntime());
           expect(script).toContain(sharedWindowsCore());
           const call = script.indexOf("\nEnsure-CrabboxWindowsRuntime\n");
@@ -39,9 +43,9 @@ describe("native Windows runtime readiness", () => {
           const ready = script.indexOf(
             "Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
           );
-          if (ready >= 0) expect(ready).toBeGreaterThan(call);
-          else expect(desktop && script === scripts[1]).toBe(true);
-          if (!desktop || script === scripts[1]) expect(script).not.toContain("Restart-Computer");
+          expect(ready >= 0).toBe(writesReady);
+          expect(ready > call).toBe(writesReady);
+          expect(script.includes("Restart-Computer")).toBe(reboots);
         }
       });
     }
