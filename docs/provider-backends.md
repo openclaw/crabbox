@@ -141,6 +141,14 @@ warmup retain delegation. The capability cannot be combined with
 `FeatureModuleRun`; it does not weaken the delegated option guard or add a
 fallback after SDK errors. The selected backend must implement `SSHLeaseBackend`.
 
+Set `SSHTarget.AuthSecret` when the SSH username contains a provider credential.
+Noninteractive commands, input uploads, workspace-owner probes, and capture
+paths use the existing private OpenSSH config and a fixed host alias. The config
+is removed after the SSH command exits; the credential is never a `user@host`
+process argument. Managed targets without an explicit SSH-config route also
+exclude ambient identity files and agents. Ordinary keyed commands retain their
+multiplexing policy.
+
 `--no-sync` is validated by each adapter, not inferred from `FeatureArchiveSync`:
 some SDK/CLI transports support it without archive sync. An adapter that cannot
 skip transfer must reject it before acquisition or provider execution. Blacksmith

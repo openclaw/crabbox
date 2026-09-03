@@ -97,7 +97,7 @@ func setupSSHScriptRun(t *testing.T) (*sshScriptTestProvider, *sshScriptTestBack
 	}}
 	b := &sshScriptTestBackend{runEnvProfileTestBackend: runEnvProfileTestBackend{spec: p.spec}, activityPath: filepath.Join(dir, "activity")}
 	b.lease = LeaseTarget{LeaseID: "cbx_123456789abc", Server: Server{Provider: p.Name()}, SSH: SSHTarget{
-		User: "runner", Host: "fixture.invalid", Port: "22", TargetOS: targetLinux, SSHConfigProxy: true,
+		User: "synthetic-script-credential", Host: "fixture.invalid", Port: "22", TargetOS: targetLinux, SSHConfigProxy: true, AuthSecret: true,
 	}}
 	p.backend = b
 	RegisterProvider(p)
@@ -198,7 +198,7 @@ printf 'script-err\n' >&2
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(string(log), "synthetic-profile-value") || strings.Contains(string(log), "script-out:") {
+			if strings.Contains(string(log), b.lease.SSH.User) || strings.Contains(string(log), "synthetic-profile-value") || strings.Contains(string(log), "script-out:") {
 				t.Fatal("private input leaked into SSH argv")
 			}
 			if err := app.runCommand(t.Context(), []string{"--provider", p.Name(), "--no-sync", "--", "ordinary", "arg"}); err != nil {

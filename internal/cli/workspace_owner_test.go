@@ -578,10 +578,12 @@ port=
 previous=
 for arg do
   if [ "$previous" = "-p" ]; then port=$arg; fi
+  if [ "$previous" = "-F" ]; then port=$(/usr/bin/awk '$1 == "Port" { gsub(/"/, "", $2); print $2; exit }' "$arg"); fi
   previous=$arg
   command=$arg
 done
 printf '%s' "$command" > "$log_dir/$count.command"
+printf '%s' "$port" > "$log_dir/$count.port"
 printf '%s\n' "$@" > "$log_dir/$count.args"
 if [ -n "${CRABBOX_OWNER_SSH_REAL_PORT:-}" ] && [ "$port" = "$CRABBOX_OWNER_SSH_REAL_PORT" ]; then
   : > "$log_dir/$count.stdin"
@@ -687,7 +689,11 @@ func requireWorkspaceOwnerSSHProbe(t *testing.T, dir string, index int, port str
 		t.Fatal(err)
 	}
 	text := "\n" + string(args)
-	if !strings.Contains(text, "\n-n\n") || !strings.Contains(text, "\n-p\n"+port+"\n") {
+	actualPort, err := os.ReadFile(filepath.Join(dir, strconv.Itoa(index)+".port"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "\n-n\n") || string(actualPort) != port {
 		t.Fatalf("SSH call %d probe args=%q, want -n on port %s", index, text, port)
 	}
 }

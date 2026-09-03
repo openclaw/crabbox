@@ -1539,7 +1539,7 @@ printf 'executed once\n'
 			if len(lines) != test.wantCalls {
 				t.Fatalf("ssh calls=%d, want %d:\n%s", len(lines), test.wantCalls, calls)
 			}
-			if got := strings.Contains(lines[len(lines)-1], "ControlMaster=no"); got != test.wantDirect {
+			if got := strings.Contains(lines[len(lines)-1], "ControlMaster=no"); !test.authSecret && got != test.wantDirect {
 				t.Fatalf("last SSH invocation disables multiplexing=%t, want %t:\n%s", got, test.wantDirect, calls)
 			}
 			if (test.wantCode == 0 || test.mode == "nested-ssh" || test.mode == "server-disconnect") && stdout.String() != "executed once\n" {
