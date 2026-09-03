@@ -24,6 +24,9 @@ func (w heartbeatWarningWriter) Write(p []byte) (int, error) {
 }
 
 func TestCoordinatorHeartbeatControlFailure(t *testing.T) {
+	if runParallelCLIContract(t, 0) {
+		return
+	}
 	for _, mode := range []string{"expired budget", "immediate rejection", "failed fallback", "caller cancellation"} {
 		t.Run(mode, func(t *testing.T) {
 			clearConfigEnv(t)

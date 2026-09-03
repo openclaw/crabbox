@@ -237,6 +237,9 @@ func TestCoordinatorReleasePreservesCallerIdentityAndCancellation(t *testing.T) 
 }
 
 func TestCoordinatorStopReleasesAfterUnreachableGuestCleanup(t *testing.T) {
+	if runParallelCLIContract(t, 0) {
+		return
+	}
 	clearConfigEnv(t)
 	dir := t.TempDir()
 	logPath := installRecordingSSH(t, dir)

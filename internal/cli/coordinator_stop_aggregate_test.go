@@ -16,6 +16,9 @@ import (
 )
 
 func TestCoordinatorStopAggregateGuestCleanupPreservesReleaseBudget(t *testing.T) {
+	if runParallelCLIContract(t, 0) {
+		return
+	}
 	for _, stalled := range []bool{false, true} {
 		name := "responsive hydrated guest"
 		if stalled {

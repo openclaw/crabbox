@@ -16,6 +16,9 @@ import (
 )
 
 func TestBestEffortLeaseTouchHTTPBudget(t *testing.T) {
+	if runParallelCLIContract(t, 0) {
+		return
+	}
 	for _, mode := range []string{"success", "http error", "maintenance timeout", "parent cancellation", "parent deadline"} {
 		t.Run(mode, func(t *testing.T) {
 			clearConfigEnv(t)
