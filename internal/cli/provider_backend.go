@@ -1370,6 +1370,17 @@ type LeaseTarget struct {
 	SSH         SSHTarget
 	LeaseID     string
 	Coordinator *CoordinatorClient
+	// Recorded by the validated provider lookup, never inferred from absent SSH.
+	providerRelease *leaseReleaseConfirmation
+}
+
+type leaseReleaseConfirmation struct {
+	backend Backend
+	leaseID string
+}
+
+func (lease LeaseTarget) providerReleaseConfirmedBy(backend Backend) bool {
+	return lease.providerRelease != nil && lease.providerRelease.backend == backend && lease.providerRelease.leaseID == lease.LeaseID
 }
 
 type LeaseView = Server

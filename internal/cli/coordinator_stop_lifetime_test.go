@@ -114,6 +114,11 @@ func TestCoordinatorStopSharesCompletionBudget(t *testing.T) {
 					}
 				} else if r.Method == http.MethodGet {
 					read := reads.Add(1)
+					// These phases must reach provider release; a terminal initial
+					// lookup now retries local cleanup without another mutation.
+					if posts.Load() == 0 && (strings.Contains(phase, "observation") || phase == "egress fence") {
+						lease.State = "active"
+					}
 					if read == 1 {
 						close(entered)
 						if err := sleepContext(r.Context(), observationDelay); err != nil {

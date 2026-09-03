@@ -25,19 +25,19 @@ func TestCoordinatorStopUsesFreshCleanupState(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			for _, tc := range []struct {
-				name                             string
-				state                            string
-				deletes                          *bool
-				pending, failure, retry          string
-				provider                         string
-				inspectFails, wantSSH, wantError bool
-				admin                            bool
-				network                          NetworkMode
-				tailHost, wantHost               string
+				name                                        string
+				state                                       string
+				deletes                                     *bool
+				pending, failure, retry                     string
+				provider                                    string
+				inspectFails, wantSSH, wantError, localOnly bool
+				admin                                       bool
+				network                                     NetworkMode
+				tailHost, wantHost                          string
 			}{
-				{name: "confirmed legacy release", state: "released"},
-				{name: "confirmed deleting release", state: "released", deletes: &deleting},
-				{name: "admin confirmed release", state: "released", admin: true},
+				{name: "confirmed legacy release", state: "released", localOnly: true},
+				{name: "confirmed deleting release", state: "released", deletes: &deleting, localOnly: true},
+				{name: "admin confirmed release", state: "released", admin: true, localOnly: true},
 				{name: "admin active", state: "active", admin: true, wantSSH: true},
 				{name: "active", state: "active", wantSSH: true},
 				{name: "retained", state: "released", deletes: &retained, wantSSH: true},
@@ -49,7 +49,7 @@ func TestCoordinatorStopUsesFreshCleanupState(t *testing.T) {
 				{name: "tailscale route", state: "active", network: NetworkTailscale, tailHost: "127.0.0.1", wantHost: "127.0.0.1", wantSSH: true},
 				{name: "auto tailnet route", state: "active", network: NetworkAuto, tailHost: "127.0.0.1", wantHost: "127.0.0.1", wantSSH: true},
 				{name: "explicit public route", state: "active", network: NetworkPublic, tailHost: "127.0.0.1", wantSSH: true},
-				{name: "confirmed tailnet deletion", state: "released", network: NetworkTailscale, tailHost: "127.0.0.1"},
+				{name: "confirmed tailnet deletion", state: "released", network: NetworkTailscale, tailHost: "127.0.0.1", localOnly: true},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					clearConfigEnv(t)
@@ -169,7 +169,7 @@ cmd=""`, 1))
 						t.Fatalf("stop error=%v, wantError=%v; stderr=%s", err, tc.wantError, stderr.String())
 					}
 					wantReleases := 1
-					if tc.wantError {
+					if tc.wantError || tc.localOnly {
 						wantReleases = 0
 					}
 					if releases != wantReleases {

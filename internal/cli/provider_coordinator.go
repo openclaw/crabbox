@@ -140,14 +140,19 @@ func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease Coordina
 		return LeaseTarget{}, err
 	}
 	server, target, leaseID := leaseToServerTarget(lease, cfg)
-	if coordinatorProviderReleaseConfirmed(lease) {
+	released := coordinatorProviderReleaseConfirmed(lease)
+	if released {
 		// Confirmed deletion retires guest access, not the release operation. Keep
 		// platform metadata for local cleanup without recreating SSH trust.
 		target = SSHTarget{TargetOS: target.TargetOS, WindowsMode: target.WindowsMode}
 	} else if err := prepareLeaseSSHTrust(&target, leaseID); err != nil {
 		return LeaseTarget{}, err
 	}
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord}, nil
+	result := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord}
+	if released {
+		result.providerRelease = &leaseReleaseConfirmation{backend: b, leaseID: leaseID}
+	}
+	return result, nil
 }
 
 func selectCoordinatorLeaseSSHPort(lease CoordinatorLease, cfg Config) (CoordinatorLease, error) {
@@ -312,7 +317,7 @@ func reportCoordinatorAcquisitionRollback(stderr io.Writer, leaseID, reason stri
 		return
 	}
 	if coordinatorProviderReleaseConfirmed(released) {
-		cleanupReleasedCoordinatorLeaseArtifacts(stderr, leaseID)
+		cleanupReleasedCoordinatorLeaseArtifacts(context.Background(), stderr, leaseID)
 		return
 	}
 	state := "returned an unexpected non-final state"
@@ -958,6 +963,16 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 	if err := validateCoordinatorProviderIdentity(expectedProvider, req.Lease.LeaseID, req.Lease.Server.Provider, false); err != nil {
 		return false, err
 	}
+	finish := func() (bool, error) {
+		outcome.Terminal = true
+		err := cleanupReleasedCoordinatorLeaseArtifacts(ctx, b.rt.Stderr, req.Lease.LeaseID)
+		return err == nil, err
+	}
+	// A confirmed deletion is irreversible. Retrying retained local cleanup must
+	// not repeat provider deletion, nor recreate guest trust or connections.
+	if req.Lease.providerReleaseConfirmedBy(b) {
+		return finish()
+	}
 	// Refresh old guest targets under the release fence. No endpoint means no
 	// remote cleanup, so a failed explicit-stop lookup must not be repeated.
 	if req.GuardedRemoteCleanup != nil && req.Lease.SSH.Host != "" {
@@ -976,6 +991,9 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 			}
 			if err := ValidateLeaseTargetProviderIdentity(fresh, req.ExpectedProviderIdentity); err != nil {
 				return false, err
+			}
+			if fresh.providerReleaseConfirmedBy(b) {
+				return finish()
 			}
 			if fresh.SSH.Host != "" {
 				// Route probes are guest cleanup too; they must not consume the
@@ -1015,11 +1033,7 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 			return false, nil
 		}
 		if coordinatorProviderReleaseConfirmed(released) {
-			outcome.Terminal = true
-			if cleanupReleasedCoordinatorLeaseArtifacts(b.rt.Stderr, req.Lease.LeaseID) != nil {
-				return false, nil
-			}
-			return true, nil
+			return finish()
 		}
 		if coordinatorReleaseCleanupFailed(released) || coordinatorReleaseCleanupPending(released) {
 			fmt.Fprintf(b.rt.Stderr, "warning: coordinator accepted release for %s; remote cleanup remains pending and local claim/SSH artifacts were preserved\n", req.Lease.LeaseID)
@@ -1035,10 +1049,7 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 		return false, nil
 	}
 	if coordinatorProviderReleaseConfirmed(released) {
-		outcome.Terminal = true
-		if cleanupReleasedCoordinatorLeaseArtifacts(b.rt.Stderr, req.Lease.LeaseID) != nil {
-			return false, nil
-		}
+		return finish()
 	}
 	return true, nil
 }

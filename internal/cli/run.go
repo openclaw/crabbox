@@ -3862,9 +3862,10 @@ func coordinatorProviderReleaseConfirmed(lease CoordinatorLease) bool {
 		(lease.ReleaseDeletesServer == nil || *lease.ReleaseDeletesServer)
 }
 
-func cleanupReleasedCoordinatorLeaseArtifacts(stderr io.Writer, leaseID string) error {
-	if err := removeStoredTestboxConnectionArtifacts(leaseID); err != nil {
-		fmt.Fprintf(stderr, "warning: released lease %s but local SSH artifact cleanup failed: %v\n", leaseID, err)
+func cleanupReleasedCoordinatorLeaseArtifacts(ctx context.Context, stderr io.Writer, leaseID string) error {
+	if err := removeStoredTestboxConnectionArtifacts(ctx, leaseID); err != nil {
+		err = fmt.Errorf("lease %s remote deletion is confirmed; local SSH artifact cleanup failed: %w; retry crabbox stop to finish local cleanup", leaseID, err)
+		fmt.Fprintf(stderr, "warning: %v\n", err)
 		return err
 	}
 	return nil

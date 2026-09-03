@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -234,6 +235,13 @@ const sshCommandWaitDelay = 5 * time.Second
 
 func sshCommandContext(ctx context.Context, target SSHTarget, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, directSSHExecutable(), args...)
+	// Cmd.Start returns preparation errors before spawning an unowned listener.
+	if cmd.Err == nil {
+		cmd.Err = context.Cause(ctx)
+		if cmd.Err == nil {
+			cmd.Err = ensureSSHControlDirectory(target)
+		}
+	}
 	// A cancelled multiplexed SSH session can leave its ControlPersist master
 	// holding inherited pipes after the session process exits. Bound Go's pipe
 	// drain so cancellation cannot strand the caller in Cmd.Wait.
@@ -1213,6 +1221,10 @@ func sshControlPath(target SSHTarget) string {
 		strings.TrimSpace(target.SSHHostKey),
 		target.ProxyCommand,
 	}, "\x00")
+	if leaseDir := sshControlLeaseDirectory(target); leaseDir != "" {
+		sum := sha256.Sum256([]byte(scope))
+		return filepath.Join(sshControlDirectory(leaseDir), base64.RawURLEncoding.EncodeToString(sum[:16])+"-%C")
+	}
 	sum := sha1.Sum([]byte(scope))
 	return filepath.Join("/tmp", "crabbox-ssh-"+hex.EncodeToString(sum[:4])+"-%C")
 }

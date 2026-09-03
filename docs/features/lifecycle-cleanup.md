@@ -153,8 +153,11 @@ cancellation, provider errors, ownership mismatches, and retained resources keep
 the local claim and credentials available for a safe retry. Acquisition rollback
 and automatic post-run release only queue cleanup and do not wait for provider
 deletion; they preserve local state while cleanup is pending. Local cleanup is
-scoped to `<user-config>/crabbox/testboxes/<lease-id>` and never follows configured
-or shared SSH key paths.
+scoped to `<user-config>/crabbox/testboxes/<lease-id>` and its private short SSH
+socket namespace; it never follows configured or shared SSH key paths. Cleanup
+closes and joins the lease's persistent OpenSSH masters before deleting local
+artifacts. Local failure preserves the confirmed remote outcome and local claim;
+a fresh confirmed-deletion lookup retries only local cleanup, not provider deletion.
 
 For public AWS leases, shared security-group writes remain serialized with release
 and authoritative ingress reconciliation. Image selection, instance creation and
