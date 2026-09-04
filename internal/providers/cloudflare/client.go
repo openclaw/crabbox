@@ -307,19 +307,26 @@ func (c *cloudflareClient) doJSON(ctx context.Context, method, endpoint string, 
 	return json.NewDecoder(resp.Body).Decode(output)
 }
 
+type cloudflareResponseError struct {
+	statusCode int
+	message    string
+}
+
+func (e *cloudflareResponseError) Error() string { return e.message }
+
 func (c *cloudflareClient) responseError(resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	var payload struct {
 		Error string `json:"error"`
 	}
-	if err := json.Unmarshal(body, &payload); err == nil && strings.TrimSpace(payload.Error) != "" {
-		return fmt.Errorf("%s API %s: %s", providerName, resp.Status, redactCloudflareRunnerSecrets(payload.Error, c.token))
-	}
 	text := strings.TrimSpace(string(body))
+	if err := json.Unmarshal(body, &payload); err == nil && strings.TrimSpace(payload.Error) != "" {
+		text = payload.Error
+	}
 	if text == "" {
 		text = resp.Status
 	}
-	return fmt.Errorf("%s API %s: %s", providerName, resp.Status, redactCloudflareRunnerSecrets(text, c.token))
+	return &cloudflareResponseError{statusCode: resp.StatusCode, message: fmt.Sprintf("%s API %s: %s", providerName, resp.Status, redactCloudflareRunnerSecrets(text, c.token))}
 }
 
 func redactCloudflareRunnerSecrets(value string, secrets ...string) string {
