@@ -157,14 +157,14 @@ export function verifyCatalogRollbackEvidence({
   const failed =
     Number(failedStatus) === 404
       ? undefined
-      : imageRecord(objectAt(failedReadback, "failed readback").image, "failed readback image");
+      : objectAt(objectAt(failedReadback, "failed readback").image, "failed readback image");
   if (
     (Number(failedStatus) !== 200 && Number(failedStatus) !== 404) ||
     (failed &&
       (failed.id !== promoted.id ||
-        failed.revision === promoted.revision ||
-        failed.promotedAt !== undefined ||
-        failed.catalogOnly === true))
+        Object.hasOwn(failed, "revision") ||
+        Object.hasOwn(failed, "promotedAt") ||
+        Object.hasOwn(failed, "catalogOnly")))
   ) {
     throw new Error("failed image revision remains in the candidate catalog");
   }

@@ -581,8 +581,8 @@ test("catalog proof requires a fresh rollback revision and rejects stale CAS mut
       previous: { state: "present", imageId: failed.id, revision: failed.revision },
     },
     restoredReadback: { image: restored },
-    failedReadback: {},
-    failedStatus: 404,
+    failedReadback: { image: { id: failed.id, provider: "aws", state: "available" } },
+    failedStatus: 200,
     staleResponse: {
       error: "image_promotion_precondition_failed",
       expected: { state: "present", imageId: prior.id, revision: prior.revision },
@@ -590,8 +590,10 @@ test("catalog proof requires a fresh rollback revision and rejects stale CAS mut
     },
     staleStatus: 409,
     staleReadback: { image: structuredClone(restored) },
-    staleFailedReadback: {},
-    staleFailedStatus: 404,
+    staleFailedReadback: {
+      image: { id: failed.id, provider: "aws", state: "available" },
+    },
+    staleFailedStatus: 200,
   };
   const evidence = module.verifyCatalogRollbackEvidence(input);
   assert.equal(evidence.priorDefaultImageRestored, true);
@@ -645,6 +647,36 @@ test("catalog proof requires a fresh rollback revision and rejects stale CAS mut
         ...input,
         failedStatus: 200,
         failedReadback: { image: failed },
+      }),
+    /remains in the candidate catalog/,
+  );
+  assert.throws(
+    () =>
+      module.verifyCatalogRollbackEvidence({
+        ...input,
+        failedReadback: {
+          image: { id: "ami-33333333", provider: "aws", state: "available" },
+        },
+      }),
+    /remains in the candidate catalog/,
+  );
+  assert.throws(
+    () =>
+      module.verifyCatalogRollbackEvidence({
+        ...input,
+        failedReadback: {
+          image: { id: failed.id, provider: "aws", state: "available", catalogOnly: false },
+        },
+      }),
+    /remains in the candidate catalog/,
+  );
+  assert.throws(
+    () =>
+      module.verifyCatalogRollbackEvidence({
+        ...input,
+        failedReadback: {
+          image: { id: failed.id, provider: "aws", state: "available", promotedAt: null },
+        },
       }),
     /remains in the candidate catalog/,
   );

@@ -38,6 +38,8 @@ base image under a new revision, retire the failed candidate revision, and
 reject a stale compare-and-swap request with the fresh rollback revision as the
 current default. Full candidate API readbacks before and after that stale
 request must match, including catalog, default, and Fast Snapshot Restore state.
+A retired AMI may remain visible as a matching provider-only record, but it
+must have no revision, promotion timestamp, or catalog-only marker.
 
 The candidate binding has immutable `ctx.props` containing `runId`, `owner`,
 `candidateSha`, `candidateWorker`, `deploymentHash`, and `expiresAt`. The
