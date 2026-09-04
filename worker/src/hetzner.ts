@@ -237,7 +237,12 @@ export class HetznerClient {
     }
   }
 
-  async deleteSSHKey(name: string, leaseID: string, deadline?: number): Promise<void> {
+  async deleteSSHKey(
+    name: string,
+    leaseID: string,
+    deadline?: number,
+    beforeDelete?: () => Promise<void>,
+  ): Promise<void> {
     if (name !== providerKeyForLease(leaseID)) {
       return;
     }
@@ -249,13 +254,20 @@ export class HetznerClient {
     );
     const key = byName.ssh_keys.find((entry) => entry.name === name);
     if (key && providerKeyOwnedByLease(key.labels ?? {}, leaseID)) {
+      // Recheck after the lookup; an assertion cannot revoke a DELETE already dispatched.
+      await beforeDelete?.();
       await this.request<void>("DELETE", `/ssh_keys/${key.id}`, undefined, deadline);
     } else if (key) {
       console.warn(`Hetzner SSH key cleanup skipped unowned key lease=${leaseID} key=${name}`);
     }
   }
 
-  async deleteSSHKeyByID(id: number, deadline?: number): Promise<void> {
+  async deleteSSHKeyByID(
+    id: number,
+    deadline?: number,
+    beforeDelete?: () => Promise<void>,
+  ): Promise<void> {
+    await beforeDelete?.();
     try {
       await this.request<void>("DELETE", `/ssh_keys/${id}`, undefined, deadline);
     } catch (error) {

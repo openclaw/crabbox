@@ -129,10 +129,14 @@ function fixture() {
     },
   );
   vi.stubGlobal("fetch", fetchMock);
-  const run = () =>
-    new HetznerProvider({ HETZNER_TOKEN: "synthetic-token" } as Env).releaseLease(
+  const run = () => {
+    let expected = structuredClone(stored);
+    return new HetznerProvider({ HETZNER_TOKEN: "synthetic-token" } as Env).releaseLease(
       structuredClone(stored),
       {
+        assertCleanupOwner: async () => {
+          expect(stored).toEqual(expected);
+        },
         saveCleanupEvidence: async (evidence) => {
           if (
             (behavior.failWrite === "dispatch" && !evidence.action) ||
@@ -144,9 +148,11 @@ function fixture() {
           stored = JSON.parse(
             JSON.stringify({ ...stored, providerCleanup: evidence }),
           ) as LeaseRecord;
+          expected = structuredClone(stored);
         },
       },
     );
+  };
   return {
     run,
     requests,
@@ -582,6 +588,18 @@ describe("brokered Hetzner cleanup evidence", () => {
     await expect(
       new HetznerProvider({ HETZNER_TOKEN: "synthetic-token" } as Env).releaseLease(f.stored),
     ).rejects.toThrow("durable evidence storage");
+    expect(f.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("requires a current-owner assertion before normal release can perform provider I/O", async () => {
+    const f = fixture();
+    const save = vi.fn<(evidence: HetznerCleanupEvidence) => Promise<void>>();
+    await expect(
+      new HetznerProvider({ HETZNER_TOKEN: "synthetic-token" } as Env).releaseLease(f.stored, {
+        saveCleanupEvidence: save,
+      }),
+    ).rejects.toThrow("requires a current cleanup owner");
+    expect(save).not.toHaveBeenCalled();
     expect(f.fetchMock).not.toHaveBeenCalled();
   });
 

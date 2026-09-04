@@ -6478,6 +6478,296 @@ describe("fleet lease identity and idle", () => {
     },
   );
 
+  it("fences stale Hetzner canonical key lookup before key DELETE", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      owner: "alice@example.com",
+      org: "example-org",
+      providerKeyCleanupOwned: true,
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const requests: string[] = [];
+    let changed: LeaseRecord | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = new URL(String(input)).pathname;
+        requests.push(`${init?.method} ${path}`);
+        if (path === "/v1/ssh_keys") {
+          changed = {
+            ...structuredClone(storage.value<LeaseRecord>(`lease:${lease.id}`)!),
+            cleanupStartedAt: "2099-01-01T00:00:00Z",
+          };
+          storage.seed(`lease:${lease.id}`, changed);
+          return jsonResponse({
+            ssh_keys: [
+              {
+                id: 7,
+                name: lease.providerKey,
+                labels: { crabbox: "true", created_by: "crabbox", lease: lease.id },
+              },
+            ],
+          });
+        }
+        if (init?.method === "DELETE") return new Response(null, { status: 204 });
+        return jsonResponse({ error: { code: "not_found" } }, 404);
+      }),
+    );
+    await testFleet(storage, {}, { HETZNER_TOKEN: "synthetic-token" }).alarm();
+    expect(changed?.providerCleanup?.confirmation?.method).toBe("already-absent");
+    expect(requests).toEqual(["GET /v1/servers/123", "GET /v1/ssh_keys"]);
+    expect(storage.value(`lease:${lease.id}`)).toEqual(changed);
+  });
+
+  it.each(
+    ["canonical", "retained ID"].flatMap((keyPath) =>
+      [
+        "unchanged",
+        "reordered journal",
+        "cleanup owner",
+        "server",
+        "receipt",
+        "provisioning owner",
+      ].map((drift) => ({ keyPath, drift })),
+    ),
+  )(
+    "asserts Hetzner $keyPath key cleanup before DELETE with $drift",
+    async ({ keyPath, drift }) => {
+      const storage = new MemoryStorage();
+      const lease = testLease({
+        owner: "alice@example.com",
+        org: "example-org",
+        keep: false,
+        providerKeyCleanupOwned: true,
+        ...(keyPath === "retained ID"
+          ? { providerKeyCleanupPending: true, providerKeyCleanupID: "7" }
+          : {}),
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      let observedConfirmation: LeaseRecord["providerCleanup"];
+      let reordered = false;
+      const changeBeforeKeyDelete = () => {
+        const current = structuredClone(storage.value<LeaseRecord>(`lease:${lease.id}`)!);
+        observedConfirmation = structuredClone(current.providerCleanup);
+        if (drift === "cleanup owner") current.cleanupStartedAt = "2099-01-01T00:00:00Z";
+        if (drift === "server") {
+          current.serverID = 999;
+          current.cloudID = "999";
+        }
+        if (drift === "receipt") current.providerCleanup!.confirmation!.at = "2099-01-01T00:00:00Z";
+        if (drift === "reordered journal") {
+          const journal = current.providerCleanup!;
+          const confirmation = journal.confirmation!;
+          current.providerCleanup = {
+            ...Object.fromEntries(Object.entries(journal).toReversed()),
+            confirmation: { at: confirmation.at, method: confirmation.method },
+          } as typeof journal;
+          reordered =
+            JSON.stringify(current.providerCleanup) !== JSON.stringify(observedConfirmation);
+        }
+        storage.seed(`lease:${lease.id}`, current);
+        if (drift === "provisioning owner") {
+          const now = Date.now();
+          storage.seed<LeaseProvisioningOperation>(provisioningOperationKey(lease.id), {
+            schema: 1,
+            leaseID: lease.id,
+            operationID: lease.id,
+            generation: "replacement-generation",
+            scope: "hetzner:test",
+            owner: lease.owner,
+            org: lease.org,
+            provider: "hetzner",
+            createdAt: now,
+            deadline: now + 60_000,
+            revision: 0,
+            step: { phase: "provisioning", attempt: 0, state: {}, nextWake: now + 60_000 },
+          });
+        }
+      };
+      const provider = new HetznerProvider({ HETZNER_TOKEN: "synthetic-token" } as Env);
+      const release = provider.releaseLease.bind(provider);
+      let claimedSnapshot: LeaseRecord | undefined;
+      let claimedInput: LeaseRecord | undefined;
+      vi.spyOn(provider, "releaseLease").mockImplementation(async (claimed, context) => {
+        claimedInput = claimed;
+        claimedSnapshot = structuredClone(claimed);
+        if (!context?.saveCleanupEvidence) throw new Error("missing cleanup context");
+        const save = context.saveCleanupEvidence;
+        await release(claimed, {
+          ...context,
+          saveCleanupEvidence: async (evidence) => {
+            await save(evidence);
+            if (keyPath === "retained ID" && evidence.confirmation) changeBeforeKeyDelete();
+          },
+        });
+      });
+      const requests: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const path = new URL(String(input)).pathname;
+          requests.push(`${init?.method} ${path}`);
+          if (path === "/v1/ssh_keys") {
+            changeBeforeKeyDelete();
+            return jsonResponse({
+              ssh_keys: [
+                {
+                  id: 7,
+                  name: lease.providerKey,
+                  labels: { crabbox: "true", created_by: "crabbox", lease: lease.id },
+                },
+              ],
+            });
+          }
+          if (init?.method === "DELETE") return new Response(null, { status: 204 });
+          return jsonResponse({ error: { code: "not_found" } }, 404);
+        }),
+      );
+      const fleet = testFleet(storage, { hetzner: provider });
+      const releaseResponse = await fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/release`, {
+          headers: { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" },
+          body: { delete: true },
+        }),
+      );
+      expect(releaseResponse.status).toBe(200);
+      await fleet.alarm();
+      expect(observedConfirmation?.confirmation?.method).toBe("already-absent");
+      expect(reordered).toBe(drift === "reordered journal");
+      expect(claimedInput).toEqual(claimedSnapshot);
+      expect(claimedInput?.providerCleanup).toBeUndefined();
+      const allowed = drift === "unchanged" || drift === "reordered journal";
+      expect(requests).toEqual([
+        "GET /v1/servers/123",
+        ...(keyPath === "canonical" ? ["GET /v1/ssh_keys"] : []),
+        ...(allowed ? ["DELETE /v1/ssh_keys/7"] : []),
+      ]);
+      const inspect = await fleet.fetch(
+        request("GET", `/v1/leases/${lease.id}`, {
+          headers: { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" },
+        }),
+      );
+      const body = (await inspect.json()) as { lease: { cleanupStatus: string } };
+      expect(inspect.status).toBe(200);
+      expect(body.lease.cleanupStatus === "complete").toBe(allowed);
+    },
+  );
+
+  it("keeps the expected Hetzner journal unchanged when confirmation persistence fails", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      owner: "alice@example.com",
+      org: "example-org",
+      providerKeyCleanupPending: true,
+      providerKeyCleanupID: "7",
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    storage.beforePut = async (key, value) => {
+      if (key === `lease:${lease.id}` && (value as LeaseRecord).providerCleanup?.confirmation)
+        throw new Error("confirmation persistence failed");
+    };
+    const provider = new HetznerProvider({ HETZNER_TOKEN: "synthetic-token" } as Env);
+    const release = provider.releaseLease.bind(provider);
+    let assertionAfterFailure: boolean | undefined;
+    vi.spyOn(provider, "releaseLease").mockImplementation(async (claimed, context) => {
+      if (!context?.saveCleanupEvidence || !context.assertCleanupOwner)
+        throw new Error("missing cleanup context");
+      const save = context.saveCleanupEvidence;
+      const assertOwner = context.assertCleanupOwner;
+      await release(claimed, {
+        ...context,
+        saveCleanupEvidence: async (evidence) => {
+          try {
+            await save(evidence);
+          } catch (error) {
+            assertionAfterFailure = await assertOwner().then(
+              () => true,
+              () => false,
+            );
+            throw error;
+          }
+        },
+      });
+    });
+    const requests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        requests.push(`${init?.method} ${new URL(String(input)).pathname}`);
+        return jsonResponse({ error: { code: "not_found" } }, 404);
+      }),
+    );
+    await testFleet(storage, { hetzner: provider }).alarm();
+    expect(assertionAfterFailure).toBe(true);
+    expect(requests).toEqual(["GET /v1/servers/123"]);
+    const failed = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+    expect(failed.providerCleanup).toBeUndefined();
+    expect(failed.cleanupError).toContain("confirmation persistence failed");
+    expect(failed.providerKeyCleanupPending).toBe(true);
+  });
+
+  it("retries real Hetzner key cleanup under a fresh claim with its confirmed journal", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      owner: "alice@example.com",
+      org: "example-org",
+      keep: false,
+      providerKeyCleanupPending: true,
+      providerKeyCleanupID: "7",
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const env = { HETZNER_TOKEN: "synthetic-token" };
+    const requests: string[] = [];
+    let deletes = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        requests.push(`${init?.method} ${new URL(String(input)).pathname}`);
+        if (init?.method === "DELETE") {
+          deletes++;
+          return deletes === 1
+            ? jsonResponse({ error: { code: "server_error" } }, 503)
+            : new Response(null, { status: 204 });
+        }
+        return jsonResponse({ error: { code: "not_found" } }, 404);
+      }),
+    );
+    const fleet = testFleet(storage, {}, env);
+    const releaseResponse = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/release`, {
+        headers: { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" },
+        body: { delete: true },
+      }),
+    );
+    expect(releaseResponse.status).toBe(200);
+    await fleet.alarm();
+    const failed = structuredClone(storage.value<LeaseRecord>(`lease:${lease.id}`)!);
+    expect(failed.providerCleanup?.confirmation?.method).toBe("already-absent");
+    expect(failed.providerKeyCleanupPending).toBe(true);
+    expect(failed.cleanupError).toContain("http 503");
+    storage.seed(`lease:${lease.id}`, {
+      ...failed,
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    const retry = testFleet(storage, {}, env);
+    await retry.alarm();
+    expect(requests).toEqual([
+      "GET /v1/servers/123",
+      "DELETE /v1/ssh_keys/7",
+      "DELETE /v1/ssh_keys/7",
+    ]);
+    const complete = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+    expect(complete.providerCleanup).toEqual(failed.providerCleanup);
+    expect(complete.providerKeyCleanupPending).toBeUndefined();
+    const inspect = await retry.fetch(
+      request("GET", `/v1/leases/${lease.id}`, {
+        headers: { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" },
+      }),
+    );
+    expect(inspect.status).toBe(200);
+    expect(await inspect.json()).toMatchObject({ lease: { cleanupStatus: "complete" } });
+  });
+
   it("fences stale Hetzner final publication after key cleanup returns", async () => {
     const storage = new MemoryStorage();
     const lease = testLease({
@@ -45188,9 +45478,15 @@ function testHetznerCleanupProvider(): HetznerProvider {
   const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
   const release = provider.releaseLease.bind(provider);
   vi.spyOn(provider, "releaseLease").mockImplementation(async (lease) => {
+    let stored = structuredClone(lease);
+    let expected = structuredClone(lease);
     await release(lease, {
+      assertCleanupOwner: async () => {
+        expect(stored).toEqual(expected);
+      },
       saveCleanupEvidence: async (evidence) => {
-        lease.providerCleanup = structuredClone(evidence);
+        stored = { ...stored, providerCleanup: structuredClone(evidence) };
+        expected = structuredClone(stored);
       },
     });
   });

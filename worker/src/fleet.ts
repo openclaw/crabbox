@@ -18706,12 +18706,16 @@ export class FleetCoordinator {
       }
       return current;
     };
+    let expectedCleanupEvidence = structuredClone(lease.providerCleanup);
     const context: ProviderReleaseContext = {
       ...(resourceIdentity ? { resourceIdentity } : {}),
       assertCleanupOwner: async () => {
         await this.state.runExclusive(async () => {
           const current = await currentCleanupLease();
-          if (JSON.stringify(current.providerCleanup) !== JSON.stringify(lease.providerCleanup)) {
+          if (
+            canonicalJSONStringify(current.providerCleanup) !==
+            canonicalJSONStringify(expectedCleanupEvidence)
+          ) {
             throw new Error("lease cleanup evidence changed");
           }
         });
@@ -18719,7 +18723,9 @@ export class FleetCoordinator {
       saveCleanupEvidence: async (evidence) => {
         await this.state.runExclusive(async () => {
           const current = await currentCleanupLease();
-          await this.putLease({ ...current, providerCleanup: structuredClone(evidence) });
+          const nextEvidence = structuredClone(evidence);
+          await this.putLease({ ...current, providerCleanup: nextEvidence });
+          expectedCleanupEvidence = nextEvidence;
         });
       },
     };
@@ -26162,12 +26168,13 @@ export class HetznerProvider implements CloudProvider {
       if (!context?.assertCleanupOwner)
         throw new Error("Hetzner key cleanup requires a current cleanup owner");
       const deadline = Date.now() + 60_000;
-      await context.assertCleanupOwner();
-      await this.client.deleteSSHKeyByID(keyOnlyID, deadline);
+      await this.client.deleteSSHKeyByID(keyOnlyID, deadline, context.assertCleanupOwner);
       return;
     }
     if (!context?.saveCleanupEvidence)
       throw new Error("Hetzner cleanup requires durable evidence storage");
+    if (!context.assertCleanupOwner)
+      throw new Error("Hetzner key cleanup requires a current cleanup owner");
     const deadline = Date.now() + 60_000;
     await confirmHetznerServerCleanup(this.client, lease, context.saveCleanupEvidence, deadline);
     if (lease.providerKeyCleanupPending) {
@@ -26175,11 +26182,11 @@ export class HetznerProvider implements CloudProvider {
       if (!Number.isSafeInteger(providerKeyID) || providerKeyID <= 0) {
         throw new Error("invalid pending Hetzner SSH key cleanup id");
       }
-      await this.client.deleteSSHKeyByID(providerKeyID, deadline);
+      await this.client.deleteSSHKeyByID(providerKeyID, deadline, context.assertCleanupOwner);
       return;
     }
     if (leaseUsesCanonicalProviderKey(lease)) {
-      await this.deleteSSHKey(lease.providerKey, lease.id, deadline);
+      await this.deleteSSHKey(lease.providerKey, lease.id, deadline, context.assertCleanupOwner);
     }
   }
 
@@ -26206,8 +26213,13 @@ export class HetznerProvider implements CloudProvider {
   decorateImage = passthroughProviderImage;
   validateDeleteImage = allowProviderImageDelete;
 
-  async deleteSSHKey(name: string, leaseID: string, deadline?: number): Promise<void> {
-    await this.client.deleteSSHKey(name, leaseID, deadline);
+  async deleteSSHKey(
+    name: string,
+    leaseID: string,
+    deadline?: number,
+    beforeDelete?: () => Promise<void>,
+  ): Promise<void> {
+    await this.client.deleteSSHKey(name, leaseID, deadline, beforeDelete);
   }
 
   hourlyPriceUSD(
