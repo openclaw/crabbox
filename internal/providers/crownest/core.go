@@ -84,10 +84,6 @@ func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
 }
 
-func shellScriptFromArgv(command []string) string {
-	return core.ShellScriptFromArgv(command)
-}
-
 func shellQuote(value string) string {
 	return core.ShellQuote(value)
 }

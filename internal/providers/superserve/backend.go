@@ -293,12 +293,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		return result, nil
 	}
 
-	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, nil)
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
 		return RunResult{}, err
 	}
-	command := intent.Argv("bash", "-lc")
-	commandText := commandScript(command)
+	commandText := intent.ShellCommand("bash", "-lc")
 	commandEnv, strippedAuthEnv := superserveCommandEnv(req.Env)
 	if len(strippedAuthEnv) > 0 {
 		fmt.Fprintf(b.rt.Stderr, "warning: provider=superserve did not forward provider authentication variables: %s\n", strings.Join(strippedAuthEnv, ","))
@@ -948,10 +947,6 @@ func superserveCommandEnv(env map[string]string) (map[string]string, []string) {
 	}
 	slices.Sort(stripped)
 	return out, stripped
-}
-
-func commandScript(command []string) string {
-	return shellScriptFromArgv(command)
 }
 
 func (b *backend) now() time.Time {

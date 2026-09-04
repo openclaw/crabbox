@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve literal profile arguments and assignment-shaped executable names across Cloudflare Sandbox, Superserve, Crownest, Vercel Sandbox, and Nomad command transports without reinterpreting them as shell syntax.
+
 - Preserve existing Cloudflare container workspaces when sync upload or extraction fails, clean partial archives, and enforce full-checkout size limits before fresh allocation. [PR 1814](https://github.com/openclaw/crabbox/pull/1814). Thanks @steipete.
 - Protect Nomad runs from overwriting replacement claims or recreating retired leases, and expose standard run-session handles with cleanup-aware final outcomes that preserve the original command exit. [PR 1810](https://github.com/openclaw/crabbox/pull/1810). Thanks @steipete.
 - Preserve individual AWS, Azure, and GCP candidate failures in successful leases' provisioning history across market and regional fallback, including previously omitted GCP on-demand failures. [PR 1811](https://github.com/openclaw/crabbox/pull/1811). Thanks @steipete.

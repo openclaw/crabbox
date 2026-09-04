@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 	"time"
 )
@@ -458,6 +459,7 @@ func admitPrewarmProbe(args []string) error {
 		return err
 	}
 	req := runRequestFromFlags(cfg, flags, expansion.Command)
+	req.CommandLiteralArgs = maps.Clone(expansion.LiteralArgs)
 	req.ReuseLease = true
 	req.ShellMode = expansion.Shell
 	req.Preflight = expansion.Preflight

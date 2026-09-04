@@ -49,15 +49,14 @@ func (b *backend) execShell(ctx context.Context, client Client, ready allocation
 }
 
 func (b *backend) runCommand(ctx context.Context, client Client, ready allocationReadiness, req RunRequest, workdir string) (int, error) {
-	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, nil)
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
 		return 0, err
 	}
-	command := intent.Argv("bash", "-lc")
 	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
-	script := remoteCommandScript(workdir, req.Env, command)
+	script := remoteCommandScript(workdir, req.Env, intent)
 	execCtx, cancel := b.execContext(ctx)
 	defer cancel()
 	exitCode, err := b.allocationExec(execCtx, client, ready, []string{"sh", "-s"}, strings.NewReader(script), b.rt.Stdout, b.rt.Stderr)
@@ -101,7 +100,7 @@ func normalizeExitCode(code int) int {
 	return code
 }
 
-func remoteCommandScript(workdir string, env map[string]string, command []string) string {
+func remoteCommandScript(workdir string, env map[string]string, command core.CommandIntent) string {
 	var b strings.Builder
 	b.WriteString("mkdir -p ")
 	b.WriteString(shellQuote(workdir))
@@ -117,7 +116,7 @@ func remoteCommandScript(workdir string, env map[string]string, command []string
 		b.WriteString(shellQuote(value))
 	}
 	b.WriteString(" && exec ")
-	b.WriteString(shellScriptFromArgv(command))
+	b.WriteString(command.ShellCommand("bash", "-lc"))
 	return b.String()
 }
 
