@@ -4,23 +4,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { copySmokeRepo, shellArgHelper, writeExecutable } from "./test-support/smoke-fixtures.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
-function writeExecutable(file, body) {
-  fs.writeFileSync(file, body, "utf8");
-  fs.chmodSync(file, 0o755);
-}
-
-function prepareSmokeRepo(dir) {
-  const tempRoot = path.join(dir, "repo");
-  const tempScripts = path.join(tempRoot, "scripts");
-  const smokeScript = path.join(tempScripts, "live-nebius-smoke.sh");
-  fs.mkdirSync(tempScripts, { recursive: true });
-  fs.copyFileSync(path.join(repoRoot, "scripts", "live-nebius-smoke.sh"), smokeScript);
-  fs.chmodSync(smokeScript, 0o755);
-  return { tempRoot, smokeScript };
-}
+const prepareSmokeRepo = (dir) =>
+  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-nebius-smoke.sh"));
 
 function writeGoStub(binDir, scriptBody) {
   writeExecutable(
@@ -47,21 +36,6 @@ chmod +x "$out"
 `,
   );
 }
-
-const shellArgHelper = `
-arg_after() {
-  local want="$1"
-  shift
-  while [[ "$#" -gt 0 ]]; do
-    if [[ "$1" == "$want" ]]; then
-      printf '%s' "$2"
-      return 0
-    fi
-    shift
-  done
-  return 1
-}
-`;
 
 test("live nebius smoke skips unless globally opted in", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-nebius-skip-"));
@@ -173,9 +147,18 @@ esac
   const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
   assert.equal(seen[0], "doctor --provider nebius");
   assert.equal(seen[1], "list --provider nebius --json");
-  assert.match(seen[2], /^warmup --provider nebius --slug nebius-smoke-\d+-\d+-[0-9a-f]{8} --keep --ttl 20m --idle-timeout 5m$/);
-  assert.match(seen[3], /^status --provider nebius --id nebius-smoke-\d+-\d+-[0-9a-f]{8} --wait --wait-timeout 300s$/);
-  assert.match(seen[4], /^run --provider nebius --id nebius-smoke-\d+-\d+-[0-9a-f]{8} --no-sync -- echo ok$/);
+  assert.match(
+    seen[2],
+    /^warmup --provider nebius --slug nebius-smoke-\d+-\d+-[0-9a-f]{8} --keep --ttl 20m --idle-timeout 5m$/,
+  );
+  assert.match(
+    seen[3],
+    /^status --provider nebius --id nebius-smoke-\d+-\d+-[0-9a-f]{8} --wait --wait-timeout 300s$/,
+  );
+  assert.match(
+    seen[4],
+    /^run --provider nebius --id nebius-smoke-\d+-\d+-[0-9a-f]{8} --no-sync -- echo ok$/,
+  );
   assert.equal(seen[5], "list --provider nebius --json");
   assert.match(seen[6], /^stop --provider nebius nebius-smoke-\d+-\d+-[0-9a-f]{8}$/);
   assert.equal(seen[7], "cleanup --provider nebius --dry-run");
@@ -224,7 +207,10 @@ exit 99
   assert.match(result.stderr, /classification=environment_blocked/);
   assert.match(result.stderr, /created vm before failing/);
   assert.match(fs.readFileSync(calls, "utf8"), /warmup .* --keep /);
-  assert.match(fs.readFileSync(calls, "utf8"), /stop --provider nebius nebius-smoke-\d+-\d+-[0-9a-f]{8}/);
+  assert.match(
+    fs.readFileSync(calls, "utf8"),
+    /stop --provider nebius nebius-smoke-\d+-\d+-[0-9a-f]{8}/,
+  );
 });
 
 test("live nebius smoke validates list JSON contains the smoke slug", () => {

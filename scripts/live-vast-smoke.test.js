@@ -4,27 +4,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { copySmokeRepo, writeExecutable, writeGoStub } from "./test-support/smoke-fixtures.mjs";
+import {
+  copySmokeRepo,
+  shellArgHelper,
+  writeExecutable,
+  writeGoStub,
+} from "./test-support/smoke-fixtures.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
 const prepareSmokeRepo = (dir) =>
   copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-vast-smoke.sh"));
-
-const shellArgHelper = `
-arg_after() {
-  local want="$1"
-  shift
-  while [[ "$#" -gt 0 ]]; do
-    if [[ "$1" == "$want" ]]; then
-      printf '%s' "$2"
-      return 0
-    fi
-    shift
-  done
-  return 1
-}
-`;
 
 function vastLiveEnv(overrides = {}) {
   return {
@@ -116,7 +106,10 @@ test("live vast smoke rejects unsafe billing and cleanup settings before buildin
   const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
   const buildMarker = path.join(dir, "build-called");
   fs.mkdirSync(binDir, { recursive: true });
-  writeExecutable(path.join(binDir, "go"), `#!/usr/bin/env bash\ntouch "${buildMarker}"\nexit 99\n`);
+  writeExecutable(
+    path.join(binDir, "go"),
+    `#!/usr/bin/env bash\ntouch "${buildMarker}"\nexit 99\n`,
+  );
 
   const cases = [
     [{ CRABBOX_LIVE_VAST_MAX_DPH_TOTAL: "" }, /VAST_cost_cap_missing/],
@@ -225,9 +218,18 @@ esac
   const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
   assert.equal(seen[0], "doctor --provider vast");
   assert.equal(seen[1], "list --provider vast --json");
-  assert.match(seen[2], /^warmup --provider vast --slug vast-smoke-\d{14}-\d+ --keep --ttl 20m --idle-timeout 5m$/);
-  assert.match(seen[3], /^status --provider vast --id vast-smoke-\d{14}-\d+ --wait --wait-timeout 600s$/);
-  assert.match(seen[4], /^run --provider vast --id vast-smoke-\d{14}-\d+ --no-sync -- nvidia-smi -L$/);
+  assert.match(
+    seen[2],
+    /^warmup --provider vast --slug vast-smoke-\d{14}-\d+ --keep --ttl 20m --idle-timeout 5m$/,
+  );
+  assert.match(
+    seen[3],
+    /^status --provider vast --id vast-smoke-\d{14}-\d+ --wait --wait-timeout 600s$/,
+  );
+  assert.match(
+    seen[4],
+    /^run --provider vast --id vast-smoke-\d{14}-\d+ --no-sync -- nvidia-smi -L$/,
+  );
   assert.equal(seen[5], "list --provider vast --json");
   assert.match(seen[6], /^stop --provider vast vast-smoke-\d{14}-\d+$/);
   assert.equal(seen[7], "cleanup --provider vast --dry-run");

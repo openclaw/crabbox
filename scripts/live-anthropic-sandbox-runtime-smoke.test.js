@@ -4,26 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { copySmokeRepo, writeExecutable } from "./test-support/smoke-fixtures.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
-function writeExecutable(file, body) {
-  fs.writeFileSync(file, body, "utf8");
-  fs.chmodSync(file, 0o755);
-}
-
-function prepareSmokeRepo(dir) {
-  const tempRoot = path.join(dir, "repo");
-  const tempScripts = path.join(tempRoot, "scripts");
-  const smokeScript = path.join(tempScripts, "live-anthropic-sandbox-runtime-smoke.sh");
-  fs.mkdirSync(tempScripts, { recursive: true });
-  fs.copyFileSync(
-    path.join(repoRoot, "scripts", "live-anthropic-sandbox-runtime-smoke.sh"),
-    smokeScript,
-  );
-  fs.chmodSync(smokeScript, 0o755);
-  return { tempRoot, smokeScript };
-}
+const prepareSmokeRepo = (dir) =>
+  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-anthropic-sandbox-runtime-smoke.sh"));
 
 function smokeEnv(dir, bin, extra = {}) {
   const env = {

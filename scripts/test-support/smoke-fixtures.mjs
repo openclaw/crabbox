@@ -38,3 +38,18 @@ chmod +x "$out"
 `,
   );
 }
+
+export const shellArgHelper = `
+arg_after() {
+  local want="$1"
+  shift
+  while [[ "$#" -gt 0 ]]; do
+    if [[ "$1" == "$want" ]]; then
+      printf '%s' "$2"
+      return 0
+    fi
+    shift
+  done
+  return 1
+}
+`;

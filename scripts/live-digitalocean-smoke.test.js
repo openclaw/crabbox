@@ -4,13 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { copySmokeRepo, writeExecutable, writeGoStub } from "./test-support/smoke-fixtures.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
-
-function writeExecutable(file, body) {
-  fs.writeFileSync(file, body, "utf8");
-  fs.chmodSync(file, 0o755);
-}
 
 function writeRawInventoryPythonStub(binDir, rawStatus) {
   const python = spawnSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).stdout.trim();
@@ -53,15 +49,8 @@ exec ${JSON.stringify(python)} "$@"
   );
 }
 
-function prepareSmokeRepo(dir) {
-  const tempRoot = path.join(dir, "repo");
-  const tempScripts = path.join(tempRoot, "scripts");
-  const smokeScript = path.join(tempScripts, "live-digitalocean-smoke.sh");
-  fs.mkdirSync(tempScripts, { recursive: true });
-  fs.copyFileSync(path.join(repoRoot, "scripts", "live-digitalocean-smoke.sh"), smokeScript);
-  fs.chmodSync(smokeScript, 0o755);
-  return { tempRoot, smokeScript };
-}
+const prepareSmokeRepo = (dir) =>
+  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-digitalocean-smoke.sh"));
 
 test("live digitalocean smoke skips unless opted in", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-do-skip-"));
@@ -84,22 +73,9 @@ test("live digitalocean smoke runs guarded lifecycle and redacts token", () => {
   fs.mkdirSync(binDir, { recursive: true });
   writeRawInventoryPythonStub(binDir, 1);
 
-  writeExecutable(
-    path.join(binDir, "go"),
+  writeGoStub(
+    binDir,
     `#!/usr/bin/env bash
-set -euo pipefail
-out=""
-while [[ "$#" -gt 0 ]]; do
-  if [[ "$1" == "-o" ]]; then
-    out="$2"
-    shift 2
-    continue
-  fi
-  shift
-done
-mkdir -p "$(dirname "$out")"
-cat >"$out" <<'SCRIPT'
-#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${calls}"
 if [[ "\${DIGITALOCEAN_TOKEN:-}" != "test-secret-token" ]]; then
@@ -137,10 +113,7 @@ case "$1" in
     printf 'unexpected args: %s\n' "$*" >&2
     exit 99
     ;;
-esac
-SCRIPT
-chmod +x "$out"
-`,
+esac`,
   );
 
   const result = spawnSync("bash", [smokeScript], {
@@ -162,9 +135,18 @@ chmod +x "$out"
   const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
   assert.equal(seen[0], "doctor --provider digitalocean");
   assert.equal(seen[1], "list --provider digitalocean --json");
-  assert.match(seen[2], /^warmup --provider digitalocean --slug digitalocean-smoke-\d{14}-\d+ --keep --type s-1vcpu-1gb --ttl 20m --idle-timeout 5m$/);
-  assert.match(seen[3], /^status --provider digitalocean --id digitalocean-smoke-\d{14}-\d+ --wait --wait-timeout 300s$/);
-  assert.match(seen[4], /^run --provider digitalocean --id digitalocean-smoke-\d{14}-\d+ --no-sync -- echo ok$/);
+  assert.match(
+    seen[2],
+    /^warmup --provider digitalocean --slug digitalocean-smoke-\d{14}-\d+ --keep --type s-1vcpu-1gb --ttl 20m --idle-timeout 5m$/,
+  );
+  assert.match(
+    seen[3],
+    /^status --provider digitalocean --id digitalocean-smoke-\d{14}-\d+ --wait --wait-timeout 300s$/,
+  );
+  assert.match(
+    seen[4],
+    /^run --provider digitalocean --id digitalocean-smoke-\d{14}-\d+ --no-sync -- echo ok$/,
+  );
   assert.equal(seen[5], "list --provider digitalocean --json");
   assert.match(seen[6], /^stop --provider digitalocean digitalocean-smoke-\d{14}-\d+$/);
   assert.equal(seen[7], "cleanup --provider digitalocean --dry-run");
@@ -180,18 +162,9 @@ test("live digitalocean smoke attempts cleanup after partial failure", () => {
   fs.mkdirSync(binDir, { recursive: true });
   writeRawInventoryPythonStub(binDir, 1);
 
-  writeExecutable(
-    path.join(binDir, "go"),
+  writeGoStub(
+    binDir,
     `#!/usr/bin/env bash
-set -euo pipefail
-out=""
-while [[ "$#" -gt 0 ]]; do
-  if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
-  shift
-done
-mkdir -p "$(dirname "$out")"
-cat >"$out" <<'SCRIPT'
-#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${calls}"
 if [[ "$1" == "doctor" ]]; then
@@ -210,10 +183,7 @@ if [[ "$1" == "stop" ]]; then
   printf '%s\n' "$4" >>"${stopped}"
   exit 0
 fi
-exit 99
-SCRIPT
-chmod +x "$out"
-`,
+exit 99`,
   );
 
   const result = spawnSync("bash", [smokeScript], {
@@ -250,18 +220,9 @@ exit 0
 `,
   );
   writeRawInventoryPythonStub(binDir, 0);
-  writeExecutable(
-    path.join(binDir, "go"),
+  writeGoStub(
+    binDir,
     `#!/usr/bin/env bash
-set -euo pipefail
-out=""
-while [[ "$#" -gt 0 ]]; do
-  if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
-  shift
-done
-mkdir -p "$(dirname "$out")"
-cat >"$out" <<'SCRIPT'
-#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${calls}"
 case "$1" in
@@ -292,10 +253,7 @@ case "$1" in
   *)
     exit 98
     ;;
-esac
-SCRIPT
-chmod +x "$out"
-`,
+esac`,
   );
 
   const result = spawnSync("bash", [smokeScript], {
@@ -326,18 +284,9 @@ test("live digitalocean smoke accepts failed stop when rollback left no droplet"
   fs.mkdirSync(binDir, { recursive: true });
   writeRawInventoryPythonStub(binDir, 1);
 
-  writeExecutable(
-    path.join(binDir, "go"),
+  writeGoStub(
+    binDir,
     `#!/usr/bin/env bash
-set -euo pipefail
-out=""
-while [[ "$#" -gt 0 ]]; do
-  if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
-  shift
-done
-mkdir -p "$(dirname "$out")"
-cat >"$out" <<'SCRIPT'
-#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${calls}"
 case "$1" in
@@ -358,10 +307,7 @@ case "$1" in
   *)
     exit 98
     ;;
-esac
-SCRIPT
-chmod +x "$out"
-`,
+esac`,
   );
 
   const result = spawnSync("bash", [smokeScript], {
@@ -392,18 +338,9 @@ test("live digitalocean smoke reports cleanup failure for an orphaned managed ke
   writeOrphanKeyPythonStub(binDir, path.join(dir, "key-snapshot-seen"));
   writeExecutable(path.join(binDir, "sleep"), "#!/usr/bin/env bash\nexit 0\n");
 
-  writeExecutable(
-    path.join(binDir, "go"),
+  writeGoStub(
+    binDir,
     `#!/usr/bin/env bash
-set -euo pipefail
-out=""
-while [[ "$#" -gt 0 ]]; do
-  if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
-  shift
-done
-mkdir -p "$(dirname "$out")"
-cat >"$out" <<'SCRIPT'
-#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${calls}"
 case "$1" in
@@ -424,10 +361,7 @@ case "$1" in
   *)
     exit 98
     ;;
-esac
-SCRIPT
-chmod +x "$out"
-`,
+esac`,
   );
 
   const result = spawnSync("bash", [smokeScript], {
@@ -455,18 +389,9 @@ test("live digitalocean smoke refuses a non-empty inventory before mutation", ()
   const calls = path.join(dir, "calls.log");
   fs.mkdirSync(binDir, { recursive: true });
 
-  writeExecutable(
-    path.join(binDir, "go"),
+  writeGoStub(
+    binDir,
     `#!/usr/bin/env bash
-set -euo pipefail
-out=""
-while [[ "$#" -gt 0 ]]; do
-  if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
-  shift
-done
-mkdir -p "$(dirname "$out")"
-cat >"$out" <<'SCRIPT'
-#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${calls}"
 case "$1" in
@@ -480,10 +405,7 @@ case "$1" in
     printf 'mutation must not run\n' >&2
     exit 99
     ;;
-esac
-SCRIPT
-chmod +x "$out"
-`,
+esac`,
   );
 
   const result = spawnSync("bash", [smokeScript], {
