@@ -112,14 +112,6 @@ func shellScriptFromArgv(command []string) string {
 	return core.ShellScriptFromArgv(command)
 }
 
-func shouldUseShell(command []string) bool {
-	return core.ShouldUseShell(command)
-}
-
-func leadingEnvAssignment(command []string) bool {
-	return core.LeadingEnvAssignment(command)
-}
-
 func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, slug string, idleTimeout, ttl time.Duration, acquired bool, shouldStop *bool) {
 	core.HandleDelegatedRunFailure(w, req, provider, leaseID, slug, idleTimeout, ttl, acquired, shouldStop)
 }

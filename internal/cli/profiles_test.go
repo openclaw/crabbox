@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -337,6 +338,10 @@ func TestPresetCommandTreatsVariablesAsArgValues(t *testing.T) {
 	if shouldUseShellWithLiteralArgs(expansion.Command, expansion.LiteralArgs) {
 		t.Fatalf("placeholder value should not introduce shell operators: %#v", expansion.Command)
 	}
+	intent, err := ParseCommandIntent(expansion.Command, false, expansion.LiteralArgs)
+	if err != nil || !slices.Equal(intent.Argv("bash", "-lc"), want) {
+		t.Fatalf("profile command intent=%q err=%v", intent.Argv("bash", "-lc"), err)
+	}
 	if got := runCommandDisplayWithLiteralArgs(expansion.Command, false, expansion.LiteralArgs); got != "pnpm qa --scenario '&&' --fail-fast" {
 		t.Fatalf("display=%q", got)
 	}
@@ -349,6 +354,10 @@ func TestPresetCommandTreatsVariablesAsArgValues(t *testing.T) {
 	}
 	if shouldUseShellWithLiteralArgs(single.Command, single.LiteralArgs) {
 		t.Fatalf("single placeholder value should remain a literal arg: %#v", single.Command)
+	}
+	singleIntent, err := ParseCommandIntent(single.Command, false, single.LiteralArgs)
+	if err != nil || !slices.Equal(singleIntent.Argv("bash", "-lc"), single.Command) {
+		t.Fatalf("single profile intent=%q err=%v", singleIntent.Argv("bash", "-lc"), err)
 	}
 	if got := runCommandShellStringWithLiteralArgs(single.Command, false, single.LiteralArgs); got != "'echo ok && false'" {
 		t.Fatalf("single shell command=%q", got)

@@ -102,14 +102,6 @@ func shellScriptFromArgv(command []string) string {
 	return core.ShellScriptFromArgv(command)
 }
 
-func shouldUseShell(command []string) bool {
-	return core.ShouldUseShell(command)
-}
-
-func leadingEnvAssignment(command []string) bool {
-	return core.LeadingEnvAssignment(command)
-}
-
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
 	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
 }

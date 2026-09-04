@@ -396,6 +396,16 @@ preflight, timing JSON, and SSH key storage. Keep that helper surface narrow: if
 a provider needs broad command orchestration, the behavior probably belongs in
 core instead.
 
+`ParseCommandIntent` owns the distinction between literal argv and shell source
+for delegated POSIX command adapters. It reuses core shell inference and literal
+argument handling, snapshots the input, and rejects a missing command. The
+result's `Argv` method applies an adapter-supplied shell prefix only when needed;
+an explicitly empty shell source remains valid. Cloudflare Sandbox, Superserve,
+Crownest, Vercel Sandbox, and Nomad use this boundary. They retain their existing
+transport serialization, shell choice, working directory, environment, and
+execution lifecycle. These adapters currently pass no literal-argument map;
+the extraction does not change profile-literal propagation through transports.
+
 Claim-only recovery adapters may use `shared.ResolveProviderClaimStrict` to
 resolve an exact provider/scope-bound claim before a slug while preventing a
 canonical lease ID from falling through. `shared.ValidateClaimBinding` compares

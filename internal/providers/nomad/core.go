@@ -89,16 +89,8 @@ func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []s
 	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
 }
 
-func shouldUseShell(command []string) bool {
-	return core.ShouldUseShell(command)
-}
-
 func shellScriptFromArgv(command []string) string {
 	return core.ShellScriptFromArgv(command)
-}
-
-func leadingEnvAssignment(command []string) bool {
-	return core.LeadingEnvAssignment(command)
 }
 
 func shellQuote(value string) string {
