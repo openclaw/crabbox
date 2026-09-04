@@ -12959,8 +12959,7 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value<LeaseRecord>("lease:cbx_000000000091")).toMatchObject({
       state: "failed",
       cloudID: "",
-      failureError:
-        "coordinator deployment interrupted provider provisioning; no provider resource found",
+      failureError: "provider provisioning was interrupted; no provider resource found",
       provisioningResourceMayExist: false,
       provisioningFailureRetryable: false,
     });
@@ -13618,8 +13617,7 @@ describe("fleet lease identity and idle", () => {
       state: "provisioning",
       provisioningResourceMayExist: true,
       provisioningFailureRetryable: true,
-      cleanupError:
-        "coordinator deployment interrupted provider provisioning; provider resource not yet visible",
+      cleanupError: "provider provisioning was interrupted; provider resource not yet visible",
     });
     expect(Date.parse(uncertain?.provisioningRecoveryMissingSince ?? "")).toBeGreaterThanOrEqual(
       now,
@@ -13753,7 +13751,7 @@ describe("fleet lease identity and idle", () => {
       state: "failed",
       cloudID: "crabbox-interrupted",
       failureError:
-        "coordinator deployment interrupted provider provisioning; recovered provider resource for cleanup",
+        "provider provisioning was interrupted; recovered provider resource for cleanup",
       provisioningResourceMayExist: false,
       provisioningFailureRetryable: false,
     });
@@ -13909,6 +13907,96 @@ describe("fleet lease identity and idle", () => {
     expect(Date.parse(lease?.cleanupRetryAt ?? "")).toBeGreaterThan(now);
     expect(storage.alarm()).toBe(Date.parse(lease?.cleanupRetryAt ?? ""));
   });
+
+  it.each([false, true])(
+    "retains cleanup debt after incomplete AWS inventory (absence window elapsed: %s)",
+    async (absenceWindowElapsed) => {
+      const storage = new MemoryStorage();
+      const now = Date.now();
+      const missingSince = absenceWindowElapsed
+        ? new Date(now - 31 * 60_000).toISOString()
+        : undefined;
+      const leaseID = "cbx_000000000094";
+      const calls: Array<{ action: string | null; token: string | null; host: string }> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const inventoryRequest = input instanceof Request ? input : new Request(input, init);
+          const params = new URLSearchParams(await inventoryRequest.text());
+          calls.push({
+            action: params.get("Action"),
+            token: params.get("NextToken"),
+            host: new URL(inventoryRequest.url).hostname,
+          });
+          return calls.length === 1
+            ? ec2XMLResponse(
+                "<DescribeInstancesResponse><reservationSet/><nextToken>next-page</nextToken></DescribeInstancesResponse>",
+              )
+            : ec2XMLResponse(
+                "<Response><Errors><Error><Code>InvalidNextToken</Code><Message>unavailable page</Message></Error></Errors></Response>",
+                400,
+              );
+        }),
+      );
+      const fleet = testFleet(
+        storage,
+        {},
+        {
+          AWS_ACCESS_KEY_ID: "test",
+          AWS_SECRET_ACCESS_KEY: "secret",
+          CRABBOX_AWS_ORPHAN_SWEEP_ENABLED: "0",
+          CF_VERSION_METADATA: {
+            id: "new-version",
+            timestamp: new Date(now - 10 * 60_000).toISOString(),
+          },
+        },
+      );
+      storage.seed(
+        `lease:${leaseID}`,
+        testLease({
+          id: leaseID,
+          slug: "inventory",
+          provider: "aws",
+          region: "eu-west-1",
+          owner: "alice@example.com",
+          org: "example-org",
+          cloudID: "",
+          serverID: 0,
+          serverName: "",
+          host: "",
+          state: "provisioning",
+          provisioningResourceMayExist: true,
+          provisioningRequestStartedAt: new Date(now - 60_000).toISOString(),
+          provisioningCoordinatorVersion: "old-version",
+          provisioningRecoveryObservedAt: new Date(now - 10 * 60_000).toISOString(),
+          provisioningRecoveryMissingSince: missingSince,
+          expiresAt: new Date(now + 60 * 60_000).toISOString(),
+        }),
+      );
+
+      await fleet.alarm();
+
+      expect(calls).toEqual([
+        { action: "DescribeInstances", token: null, host: "ec2.eu-west-1.amazonaws.com" },
+        { action: "DescribeInstances", token: "next-page", host: "ec2.eu-west-1.amazonaws.com" },
+      ]);
+      const lease = storage.value<LeaseRecord>(`lease:${leaseID}`);
+      expect(lease).toMatchObject({
+        state: "provisioning",
+        cloudID: "",
+        provisioningResourceMayExist: true,
+        provisioningCoordinatorVersion: "old-version",
+        cleanupAttempts: 1,
+        cleanupError:
+          "interrupted provisioning recovery failed: aws DescribeInstances inventory incomplete in eu-west-1: page 2 request failed",
+      });
+      expect(lease?.provisioningRecoveryMissingSince).toBe(missingSince);
+      expect(lease?.failureError).toBeUndefined();
+      expect(lease?.endedAt).toBeUndefined();
+      expect(Date.parse(lease?.cleanupRetryAt ?? "")).toBeGreaterThan(now);
+      expect(storage.alarm()).toBe(Date.parse(lease?.cleanupRetryAt ?? ""));
+    },
+  );
 
   it("does not let registration overwrite another owner or managed lease", async () => {
     const storage = new MemoryStorage();
