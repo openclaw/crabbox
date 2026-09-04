@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Cloudflare: retain recovery claims when teardown fails, preserve command/cancellation outcomes, and fence reuse and cleanup against replaced local claims.
+
 - Preserve existing Cloudflare container workspaces when sync upload or extraction fails, clean partial archives, and enforce full-checkout size limits before fresh allocation. [PR 1814](https://github.com/openclaw/crabbox/pull/1814). Thanks @steipete.
 - Protect Nomad runs from overwriting replacement claims or recreating retired leases, and expose standard run-session handles with cleanup-aware final outcomes that preserve the original command exit. [PR 1810](https://github.com/openclaw/crabbox/pull/1810). Thanks @steipete.
 - Allow fresh brokered AWS Windows and WSL2 leases to bootstrap through advertised SSH port 22 while preserving an explicitly selected final workload port. [PR 1801](https://github.com/openclaw/crabbox/pull/1801). Thanks @steipete.

@@ -21,7 +21,7 @@ ports; they run module source through the Cloudflare Workers runtime.
 
 - **Targets:** Linux only.
 - **Supported commands:** `run`, `warmup`, `status`, `stop`, `list`, `doctor`,
-  and local-claim `cleanup`.
+  and claim-scoped `cleanup`.
 - **Run sessions:** `run --keep --lease-output <path>` writes a reusable lease
   handle with an exact cleanup command.
 - **Sync:** archive upload/extract (gzipped tar), not rsync.
@@ -237,6 +237,14 @@ crabbox run \
   configured TTL/idle deadline expires.
 - Reuse, `status`, and `stop` resolve local Crabbox claims before calling the
   runner and reject raw sandbox IDs without a matching claim.
+- Reuse and cleanup keep the captured local claim revision: another caller
+  replacing or removing that claim prevents stale admission or teardown. This
+  fences local claim writers, not remote operators recreating the same Durable
+  Object identity; the runner has no conditional generation-delete API.
+- Automatic cleanup finishes before the final result and timing record. A
+  cleanup failure fails an otherwise successful run and retains its recovery
+  claim; an existing command failure or cancellation stays the primary outcome.
+  `--keep-on-failure` also retains fresh sessions after preparation or sync fails.
 - `list` reports local Cloudflare claims. Add `--refresh` to check runner state
   for those claims. The runner intentionally does not expose a global container
   enumeration API.
@@ -250,8 +258,13 @@ crabbox run \
 - The runner stores lease metadata in Durable Object storage and schedules
   cleanup at the earlier of `--ttl` or `--idle-timeout`. Uploads and command
   execution extend the idle deadline.
-- `crabbox cleanup --provider cloudflare` only checks local claims. It removes
-  claims whose runner state is expired, stopped, or missing.
+- `status` reports expired or stopped metadata without retiring the local claim:
+  the runner may have stored that state before native destruction failed.
+  `crabbox cleanup --provider cloudflare` checks local claims and confirms or
+  retries native deletion for terminal containers before removing their claims.
+  An HTTP 404 can retire the exact unchanged claim; other errors preserve it.
+  `--dry-run` sends no DELETE requests and does not remove local claims; the
+  runner's expiry policy still applies during status reads.
 
 Cloudflare Containers can also reach Worker bindings through outbound handlers.
 Crabbox does not wire those by default, but custom runner images can add them:
@@ -260,7 +273,7 @@ Crabbox does not wire those by default, but custom runner images can add them:
 ## Limitations
 
 - Only Linux delegated `run`, `warmup`, `status`, `stop`, `list`, `doctor`, and
-  local-claim cleanup are supported.
+  claim-scoped cleanup are supported.
 - SSH, VNC, browser desktop, code-server, Actions hydration, `--download`, and
   `--fresh-pr` are not supported.
 - `--checksum` is not supported, because sync uses archive upload/extract rather
