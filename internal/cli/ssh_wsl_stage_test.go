@@ -613,20 +613,23 @@ func TestUploadToSFTPRejectsDifferentSubsystemDirectoryBeforeSensitiveWrite(t *t
 }
 
 func TestCopyWSLStageAllowsSlowContinuousUploadProgress(t *testing.T) {
-	data := bytes.Repeat([]byte("x"), 12*32<<10)
-	dst := &slowWriter{delay: 10 * time.Millisecond}
-	ctx, cancel := context.WithCancelCause(t.Context())
-	defer cancel(nil)
-	start := time.Now()
-	if err := copyWSLStage(dst, bytes.NewReader(data), int64(len(data)), 25*time.Millisecond, cancel); err != nil {
-		t.Fatal(err)
-	}
-	if elapsed := time.Since(start); elapsed < 4*25*time.Millisecond {
-		t.Fatalf("upload completed too quickly to exercise progress watchdog: %s", elapsed)
-	}
-	if !bytes.Equal(dst.Bytes(), data) || context.Cause(ctx) != nil {
-		t.Fatalf("upload bytes or watchdog changed: bytes=%d cause=%v", dst.Len(), context.Cause(ctx))
-	}
+	// Only deliberate write delays, not host scheduling, should consume the idle budget.
+	synctest.Test(t, func(t *testing.T) {
+		data := bytes.Repeat([]byte("x"), 12*32<<10)
+		dst := &slowWriter{delay: 10 * time.Millisecond}
+		ctx, cancel := context.WithCancelCause(t.Context())
+		defer cancel(nil)
+		start := time.Now()
+		if err := copyWSLStage(dst, bytes.NewReader(data), int64(len(data)), 25*time.Millisecond, cancel); err != nil {
+			t.Fatal(err)
+		}
+		if elapsed := time.Since(start); elapsed < 4*25*time.Millisecond {
+			t.Fatalf("upload completed too quickly to exercise progress watchdog: %s", elapsed)
+		}
+		if !bytes.Equal(dst.Bytes(), data) || context.Cause(ctx) != nil {
+			t.Fatalf("upload bytes or watchdog changed: bytes=%d cause=%v", dst.Len(), context.Cause(ctx))
+		}
+	})
 }
 
 func TestCopyWSLStageStallIsRetryableAndBounded(t *testing.T) {
