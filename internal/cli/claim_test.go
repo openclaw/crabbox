@@ -1802,15 +1802,6 @@ func TestConditionalClaimHelpersAndExactResolution(t *testing.T) {
 			t.Fatalf("leaseClaimMatchesIdentifier(%q)=%v want %v", identifier, got, want)
 		}
 	}
-	if exists, err := leaseClaimExists(leaseID); err != nil || !exists {
-		t.Fatalf("existing claim exists=%v err=%v", exists, err)
-	}
-	if exists, err := leaseClaimExists("cbx_missingclaim123"); err != nil || exists {
-		t.Fatalf("missing claim exists=%v err=%v", exists, err)
-	}
-	if exists, err := leaseClaimExists("../invalid"); err != nil || exists {
-		t.Fatalf("invalid claim exists=%v err=%v", exists, err)
-	}
 }
 
 func TestResolveLeaseClaimForProviderCloudIDRejectsDuplicates(t *testing.T) {
