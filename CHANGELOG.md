@@ -12,7 +12,7 @@ Users upgrading from v0.48.1 also receive the [v0.49.0 changes](https://github.c
 - **Faster runner startup.** Skip redundant Git lookups and unnecessary APT downloads, and share Azure/GCP token refreshes across concurrent requests.
 - **Sync that protects your workspace.** Cloudflare and Upstash Box preserve existing files when archive upload or extraction fails, while SmolVM reports decoder and write failures instead of false success.
 - **Daytona script support.** Run `--script` and `--script-stdin` through private SSH with literal arguments, environment profiles, activity refreshes, and cancellation support.
-- **Cleanup you can trust.** Failed bootstrap rollback stops further allocation, Hetzner waits for confirmed deletion, and interrupted AWS warmups remain stoppable. Providers retain recovery claims when cleanup fails and preserve the original command result.
+- **Correct sandbox targeting and trustworthy cleanup.** Canonical IDs no longer resolve to unrelated slug aliases. Failed bootstrap rollback stops further allocation, Hetzner waits for confirmed deletion, and interrupted AWS warmups remain stoppable. Providers retain recovery claims when cleanup fails and preserve the original command result.
 - **Predictable commands and environment profiles.** Preserve literal arguments across delegated providers, isolate each run's uploaded profile, and clean failed uploads without touching replacement claims.
 - **Clearer failures and more reliable Windows bootstrap.** Preserve failed-stage, fallback, terminal-recording, and Machine0 output diagnostics; fresh AWS Windows/WSL2 leases bootstrap through their advertised SSH route.
 - **Isolated AWS image qualification for maintainers.** An opt-in workflow and dedicated authority verify candidate image publication and rollback with bounded cloud access, provider credentials kept out of candidate code, and independent cleanup.
@@ -24,6 +24,7 @@ Users upgrading from v0.48.1 also receive the [v0.49.0 changes](https://github.c
 
 ### Changes
 
+- Keep canonical lease IDs separate from slug aliases in shared claim lookup and provider routing, preventing missing IDs from selecting, running on, or stopping a different sandbox while preserving provider recovery behavior. [PR 1839](https://github.com/openclaw/crabbox/pull/1839). Thanks @steipete.
 - Clean partial Upstash Box environment uploads after failure or cancellation, isolate each profile, and refuse stale file cleanup while preserving discovery-only reuse and original command outcomes. [PR 1834](https://github.com/openclaw/crabbox/pull/1834). Thanks @steipete.
 - Preserve literal Tensorlake and OpenSandbox profile arguments through final execution, including environment-wrapped commands, and fix Tensorlake's inferred single-string shell execution. [PR 1835](https://github.com/openclaw/crabbox/pull/1835). Thanks @steipete.
 - Preserve literal Agent Sandbox profile arguments through pod stdin execution and share checked workspace/environment command wrapping with Nomad. [PR 1831](https://github.com/openclaw/crabbox/pull/1831). Thanks @steipete.
