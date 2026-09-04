@@ -100,9 +100,13 @@ Apply `aws:RequestedRegion` to all regional allows. Create and tag allows must
 require the `crabbox_qualification_run`, `crabbox_qualification_owner`,
 `crabbox_qualification_sha`, and `crabbox_qualification_expiry` request tags.
 Mutation of existing resources must require the same run resource tag. Restrict
-`RunInstances` to the configured AMI, subnet, and security group ARNs and the
-two allowed instance types. Keep these IAM constraints even though the
-authority duplicates them at runtime.
+`RunInstances` to the configured base AMI ARN or an AMI carrying the complete
+authority-injected qualification tag set, plus the configured subnet and
+security group ARNs and the two allowed instance types. Do not grant a wildcard
+AMI resource. IAM provides the outer tagged-image boundary; the authority then
+requires the exact derived AMI ID to remain active in the enrolled run ledger,
+so another run's or an unrelated tagged image is still rejected. Keep these IAM
+constraints even though the authority duplicates them at runtime.
 
 ## Enrollment and binding
 
@@ -148,6 +152,10 @@ ownership is recorded only after ID, public key, and run tags are read back.
 If bounded reconciliation proves neither success nor a definitive error, the
 intent remains until final inventory and cleanup prove that no run-owned
 resource remains; only then is it retired.
+Finalization never redispatches a pending `RunInstances` request. It performs
+bounded read-only discovery by the authority-injected run and operation tags,
+then cleans any discovered instance; a no-effect launch intent is retired only
+after the same zero-residue proof.
 
 The ledger learns only IDs created by, or discovered beneath, the registered
 run. Candidate reads and mutations are restricted to those IDs, except the fixed
@@ -160,6 +168,11 @@ every mutation, so credential rotation cannot move a run into another account.
 The public AWS release path waits for that terminal instance state only when the
 qualification transport binding is active; ordinary AWS releases keep their
 existing fire-and-forget behavior.
+Successful deletes move exact instance, key-pair, AMI, and snapshot IDs into
+tombstone sets bounded by the launch and candidate-operation limits. Tombstones
+do not consume active-resource capacity or permit new use, but they preserve
+exact verification reads and idempotent cleanup retries while continuing to
+reject foreign IDs.
 `finalize`
 deregisters images, deletes snapshots,
 terminates instances, deletes imported key pairs, and verifies zero run-owned

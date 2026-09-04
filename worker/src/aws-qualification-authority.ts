@@ -121,7 +121,14 @@ interface AWSQualificationLedger {
   instanceIds: string[];
   keyPairIds: string[];
   keyPairNames: string[];
+  // Retired IDs authorize only exact verification and cleanup retries. Active arrays alone
+  // own capacity; termination acknowledgement stays separate until absence is authoritative.
+  retiredImageIds: string[];
+  retiredInstanceIds: string[];
+  retiredKeyPairIds: string[];
+  retiredSnapshotIds: string[];
   snapshotIds: string[];
+  terminatingInstanceIds: string[];
   volumeIds: string[];
   launchCount: number;
 }
@@ -339,6 +346,17 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         `AWS qualification ${normalizedRequest.action} response is ambiguous: http ${result.status}`,
       );
     }
+    if (
+      normalizedRequest.action === "DescribeInstances" &&
+      result.status >= 300 &&
+      result.body.includes("InvalidInstanceID.NotFound")
+    ) {
+      retireAcknowledgedMissingInstances(ledger, authorized.parameters);
+      await this.ctx.storage.put(ledgerKey, ledger);
+    }
+    if (result.status >= 300 && retireDefinitelyAbsentResource(ledger, normalizedRequest, result)) {
+      await this.ctx.storage.put(ledgerKey, ledger);
+    }
     if (result.status >= 200 && result.status < 300) {
       if (normalizedRequest.action === "ImportKeyPair") {
         await this.recordImportedKey(run, normalizedRequest, authorized.parameters, result, ledger);
@@ -470,8 +488,8 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
   ): Promise<AWSQualificationResponse | undefined> {
     await this.ensureAccount(run, policy);
     if (intent.request.action === "RunInstances") {
-      // RunInstances is retried through the normal path with an authority-derived ClientToken.
-      // AWS therefore returns the original allocation rather than creating a second instance.
+      // Candidate retries use the deterministic ClientToken in executeSerialized. Finalization
+      // calls reconcilePendingLaunchWithBackoff instead and must never issue a new launch.
       return undefined;
     }
     if (intent.request.action === "ImportKeyPair") {
@@ -601,15 +619,24 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       true,
     );
     await this.ctx.storage.put(ledgerKey, recoveredLedger);
-    for (const imageId of recoveredLedger.imageIds) {
+    for (const imageId of ownedWithRetired(
+      recoveredLedger.imageIds,
+      recoveredLedger.retiredImageIds,
+    )) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- teardown order protects dependent snapshots.
       await this.cleanup(run, policy, "DeregisterImage", { ImageId: imageId }, failures);
     }
-    for (const snapshotId of recoveredLedger.snapshotIds) {
+    for (const snapshotId of ownedWithRetired(
+      recoveredLedger.snapshotIds,
+      recoveredLedger.retiredSnapshotIds,
+    )) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- each exact resource has independent evidence.
       await this.cleanup(run, policy, "DeleteSnapshot", { SnapshotId: snapshotId }, failures);
     }
-    for (const instanceId of recoveredLedger.instanceIds) {
+    for (const instanceId of ownedWithRetired(
+      recoveredLedger.instanceIds,
+      recoveredLedger.retiredInstanceIds,
+    )) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- terminate only ledger-owned instances.
       await this.cleanup(
         run,
@@ -619,7 +646,10 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         failures,
       );
     }
-    for (const keyPairId of recoveredLedger.keyPairIds) {
+    for (const keyPairId of ownedWithRetired(
+      recoveredLedger.keyPairIds,
+      recoveredLedger.retiredKeyPairIds,
+    )) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- delete only ledger-owned key pairs.
       await this.cleanup(run, policy, "DeleteKeyPair", { KeyPairId: keyPairId }, failures);
     }
@@ -632,7 +662,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     await this.verifyZeroResidue(recoveredLedger, policy, failures);
     if (hasOwnedResources(residue)) failures.push("run-tag inventory still contains resources");
     if (failures.length === 0) {
-      await this.retireUnresolvedCreationIntents();
+      await this.retireUnresolvedIntents();
     }
     if (failures.length > 0) {
       await this.ctx.storage.setAlarm(Date.now() + cleanupRetryMs);
@@ -688,6 +718,10 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     policy: AWSQualificationPolicy,
     failures: string[],
   ): Promise<void> {
+    if (intent.request.action === "RunInstances") {
+      await this.reconcilePendingLaunchWithBackoff(run, intent, policy);
+      return;
+    }
     if (intent.request.action === "CreateImage" || intent.request.action === "ImportKeyPair") {
       await this.reconcileIntentWithBackoff(run, intent, policy);
       return;
@@ -851,16 +885,70 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     return await this.inventoryRunResourcesEventually(run, next, failures, accumulate, attempt + 1);
   }
 
-  private async retireUnresolvedCreationIntents(): Promise<void> {
+  private async reconcilePendingLaunch(
+    run: AWSQualificationRunState,
+    intent: AWSQualificationIntent,
+    policy: AWSQualificationPolicy,
+  ): Promise<boolean> {
+    await this.ensureAccount(run, policy);
+    const response = await this.signer.execute("ec2", "DescribeInstances", policy.region, {
+      "Filter.1.Name": "tag:crabbox_qualification_run",
+      "Filter.1.Value.1": run.identity.runId,
+      "Filter.2.Name": "tag:crabbox_qualification_op",
+      "Filter.2.Value.1": intent.request.opId,
+    });
+    const result = await boundedResponse(response);
+    if (result.status < 200 || result.status >= 300) return false;
+    const instances = reservationsFromXML(result.body)
+      .flatMap((reservation) => items(record(reservation["instancesSet"])["item"]).map(record))
+      .filter((instance) => {
+        const tags = awsTagMap(instance["tagSet"]);
+        return (
+          tags.get("crabbox_qualification_run") === run.identity.runId &&
+          tags.get("crabbox_qualification_op") === intent.request.opId
+        );
+      });
+    if (instances.length === 0) return false;
+    if (instances.length !== 1) {
+      throw new Error("AWS qualification launch reconciliation is ambiguous");
+    }
+    const instance = instances[0]!;
+    const instanceId = asString(instance["instanceId"]);
+    if (!instanceId) throw new Error("AWS qualification launch reconciliation returned no id");
+    const ledger = await this.ledger();
+    const state = asString(record(instance["instanceState"])["name"]);
+    if (state === "terminated") {
+      retireInstance(ledger, instanceId);
+    } else {
+      ledger.instanceIds = [instanceId];
+      ledger.retiredInstanceIds = ledger.retiredInstanceIds.filter((id) => id !== instanceId);
+      for (const mapping of items(record(instance["blockDeviceMapping"])["item"]).map(record)) {
+        const volumeId = asString(record(mapping["ebs"])["volumeId"]);
+        if (volumeId) ledger.volumeIds = [volumeId];
+      }
+    }
+    await this.ctx.storage.put(ledgerKey, ledger);
+    await this.ctx.storage.delete(`${intentPrefix}${intent.request.opId}`);
+    return true;
+  }
+
+  private async reconcilePendingLaunchWithBackoff(
+    run: AWSQualificationRunState,
+    intent: AWSQualificationIntent,
+    policy: AWSQualificationPolicy,
+    attempt = 0,
+  ): Promise<boolean> {
+    const reconciled = await this.reconcilePendingLaunch(run, intent, policy);
+    if (reconciled) return true;
+    const delay = reconciliationBackoffMs[attempt];
+    if (delay === undefined) return false;
+    await sleep(delay);
+    return await this.reconcilePendingLaunchWithBackoff(run, intent, policy, attempt + 1);
+  }
+
+  private async retireUnresolvedIntents(): Promise<void> {
     const pending = await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix });
-    await Promise.all(
-      [...pending]
-        .filter(
-          ([, intent]) =>
-            intent.request.action === "CreateImage" || intent.request.action === "ImportKeyPair",
-        )
-        .map(([key]) => this.ctx.storage.delete(key)),
-    );
+    await Promise.all([...pending].map(([key]) => this.ctx.storage.delete(key)));
   }
 
   private async verifyZeroResidue(
@@ -872,7 +960,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       policy,
       "DescribeInstances",
       "InstanceId",
-      ledger.instanceIds,
+      ownedWithRetired(ledger.instanceIds, ledger.retiredInstanceIds),
       "reservationSet",
       failures,
     );
@@ -880,7 +968,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       policy,
       "DescribeImages",
       "ImageId",
-      ledger.imageIds,
+      ownedWithRetired(ledger.imageIds, ledger.retiredImageIds),
       "imagesSet",
       failures,
     );
@@ -888,7 +976,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       policy,
       "DescribeSnapshots",
       "SnapshotId",
-      ledger.snapshotIds,
+      ownedWithRetired(ledger.snapshotIds, ledger.retiredSnapshotIds),
       "snapshotSet",
       failures,
     );
@@ -914,9 +1002,10 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     policy: AWSQualificationPolicy,
     failures: string[],
   ): Promise<void> {
+    const keyPairIds = ownedWithRetired(ledger.keyPairIds, ledger.retiredKeyPairIds);
     const parameters =
-      ledger.keyPairIds.length > 0
-        ? Object.fromEntries(ledger.keyPairIds.map((id, index) => [`KeyPairId.${index + 1}`, id]))
+      keyPairIds.length > 0
+        ? Object.fromEntries(keyPairIds.map((id, index) => [`KeyPairId.${index + 1}`, id]))
         : Object.fromEntries(
             ledger.keyPairNames.map((name, index) => [`KeyName.${index + 1}`, name]),
           );
@@ -1101,14 +1190,24 @@ function authorizeEC2(
         throw new Error("AWS qualification key read must include public key material");
       }
       const ids = indexedValues(input, "KeyPairId");
-      if (ids.length > 0) return authorizedIDs(input, "KeyPairId", ledger.keyPairIds);
+      if (ids.length > 0) {
+        return authorizedIDs(
+          input,
+          "KeyPairId",
+          ownedWithRetired(ledger.keyPairIds, ledger.retiredKeyPairIds),
+        );
+      }
       if (!input["KeyName.1"] || indexedValues(input, "KeyName").length !== 1) {
         throw new Error("AWS qualification key read is outside policy");
       }
       return { IncludePublicKey: "true", "KeyName.1": physicalKeyName };
     }
     case "DeleteKeyPair":
-      return authorizedSingleID(input, "KeyPairId", ledger.keyPairIds);
+      return authorizedSingleID(
+        input,
+        "KeyPairId",
+        ownedWithRetired(ledger.keyPairIds, ledger.retiredKeyPairIds),
+      );
     case "RunInstances":
       return authorizedRunInstances(
         input,
@@ -1120,19 +1219,47 @@ function authorizeEC2(
         physicalKeyName,
       );
     case "DescribeInstances":
-      return authorizedDescribe(input, "InstanceId", ledger.instanceIds, identity.runId);
+      return authorizedDescribe(
+        input,
+        "InstanceId",
+        ownedWithRetired(ledger.instanceIds, ledger.retiredInstanceIds),
+        identity.runId,
+      );
     case "DescribeVolumes":
       return authorizedDescribe(input, "VolumeId", ledger.volumeIds, identity.runId);
     case "DescribeImages":
-      return authorizedImageRead(input, policy.baseAmiId, ledger.imageIds, identity.runId);
+      return authorizedImageRead(
+        input,
+        policy.baseAmiId,
+        ownedWithRetired(ledger.imageIds, ledger.retiredImageIds),
+        identity.runId,
+      );
     case "DescribeSnapshots":
-      return authorizedDescribe(input, "SnapshotId", ledger.snapshotIds, identity.runId, true);
+      return authorizedDescribe(
+        input,
+        "SnapshotId",
+        ownedWithRetired(ledger.snapshotIds, ledger.retiredSnapshotIds),
+        identity.runId,
+        true,
+      );
     case "TerminateInstances":
-      return authorizedIDs(input, "InstanceId", ledger.instanceIds);
+      return authorizedIDs(
+        input,
+        "InstanceId",
+        ownedWithRetired(ledger.instanceIds, ledger.retiredInstanceIds),
+      );
     case "DeregisterImage":
-      return authorizedSingleID(input, "ImageId", ledger.imageIds);
+      return authorizedSingleID(
+        input,
+        "ImageId",
+        ownedWithRetired(ledger.imageIds, ledger.retiredImageIds),
+      );
     case "DeleteSnapshot":
-      return authorizedSingleID(input, "SnapshotId", ledger.snapshotIds);
+      return authorizedSingleID(
+        input,
+        "SnapshotId",
+        ownedWithRetired(ledger.snapshotIds, ledger.retiredSnapshotIds),
+      );
     case "CreateImage": {
       requireOwned(input["InstanceId"], ledger.instanceIds, "instance");
       const name = boundedName(input["Name"]);
@@ -1369,13 +1496,30 @@ function updateLedgerFromResponse(
         record,
       )) {
         const instanceId = asString(instance["instanceId"]);
-        if (instanceId) ledger.instanceIds = [instanceId];
+        if (instanceId) {
+          ledger.instanceIds = [instanceId];
+          ledger.retiredInstanceIds = ledger.retiredInstanceIds.filter(
+            (retiredId) => retiredId !== instanceId,
+          );
+        }
         for (const mapping of items(record(instance["blockDeviceMapping"])["item"]).map(record)) {
           const volumeId = asString(record(mapping["ebs"])["volumeId"]);
           if (volumeId) ledger.volumeIds = [volumeId];
         }
       }
     }
+  }
+  if (action === "TerminateInstances") {
+    const requested = new Set(indexedUnknownValues(parameters, "InstanceId"));
+    const acknowledged = items(record(root["instancesSet"])["item"])
+      .map(record)
+      .map((instance) => asString(instance["instanceId"]))
+      .filter((instanceId) => requested.has(instanceId) && ledger.instanceIds.includes(instanceId));
+    ledger.terminatingInstanceIds = boundedIDs(
+      [...ledger.terminatingInstanceIds, ...acknowledged],
+      maxActiveInstances,
+      "terminating instances",
+    );
   }
   if (action === "DescribeInstances") {
     const described = items(record(root["reservationSet"])["item"])
@@ -1393,20 +1537,44 @@ function updateLedgerFromResponse(
         .filter(([instanceId]) => instanceId),
     );
     const requested = indexedUnknownValues(parameters, "InstanceId");
-    ledger.instanceIds = ledger.instanceIds.filter((instanceId) => {
-      if (!requested.includes(instanceId)) return true;
+    const terminal = ledger.instanceIds.filter((instanceId) => {
+      if (!requested.includes(instanceId)) return false;
       const state = states.get(instanceId);
-      return state !== undefined && state !== "terminated";
+      return (
+        state === "terminated" ||
+        (state === undefined && ledger.terminatingInstanceIds.includes(instanceId))
+      );
     });
+    for (const instanceId of terminal) {
+      retireInstance(ledger, instanceId);
+    }
   }
   if (action === "DeregisterImage") {
-    ledger.imageIds = ledger.imageIds.filter((id) => id !== parameters["ImageId"]);
+    retireID(
+      ledger.imageIds,
+      ledger.retiredImageIds,
+      asString(parameters["ImageId"]),
+      maxCandidateOperations,
+      "images",
+    );
   }
   if (action === "DeleteSnapshot") {
-    ledger.snapshotIds = ledger.snapshotIds.filter((id) => id !== parameters["SnapshotId"]);
+    retireID(
+      ledger.snapshotIds,
+      ledger.retiredSnapshotIds,
+      asString(parameters["SnapshotId"]),
+      maxCandidateOperations,
+      "snapshots",
+    );
   }
   if (action === "DeleteKeyPair") {
-    ledger.keyPairIds = ledger.keyPairIds.filter((id) => id !== parameters["KeyPairId"]);
+    retireID(
+      ledger.keyPairIds,
+      ledger.retiredKeyPairIds,
+      asString(parameters["KeyPairId"]),
+      maxCandidateOperations,
+      "key pairs",
+    );
     if (ledger.keyPairIds.length === 0) ledger.keyPairNames = [];
   }
   if (action === "DescribeImages") {
@@ -1698,13 +1866,97 @@ function allLedgerIDs(ledger: AWSQualificationLedger): Set<string> {
   ]);
 }
 
+function ownedWithRetired(active: string[], retired: string[]): string[] {
+  return [...new Set([...active, ...retired])];
+}
+
+function boundedIDs(ids: string[], maximum: number, label: string): string[] {
+  const unique = [...new Set(ids.filter(Boolean))];
+  if (unique.length > maximum) {
+    throw new Error(`AWS qualification ${label} exceed ledger bounds`);
+  }
+  return unique;
+}
+
+function retireID(
+  active: string[],
+  retired: string[],
+  id: string,
+  maximum: number,
+  label: string,
+): void {
+  if (!id || (!active.includes(id) && !retired.includes(id))) return;
+  const activeIndex = active.indexOf(id);
+  if (activeIndex >= 0) active.splice(activeIndex, 1);
+  const next = boundedIDs([...retired, id], maximum, `retired ${label}`);
+  retired.splice(0, retired.length, ...next);
+}
+
+function retireInstance(ledger: AWSQualificationLedger, instanceId: string): void {
+  retireID(ledger.instanceIds, ledger.retiredInstanceIds, instanceId, maxLaunches, "instances");
+  ledger.terminatingInstanceIds = ledger.terminatingInstanceIds.filter((id) => id !== instanceId);
+}
+
+function retireAcknowledgedMissingInstances(
+  ledger: AWSQualificationLedger,
+  parameters: Record<string, unknown>,
+): void {
+  for (const instanceId of indexedUnknownValues(parameters, "InstanceId")) {
+    if (ledger.terminatingInstanceIds.includes(instanceId)) retireInstance(ledger, instanceId);
+  }
+}
+
+function retireDefinitelyAbsentResource(
+  ledger: AWSQualificationLedger,
+  request: AWSQualificationRequest,
+  result: AWSQualificationResponse,
+): boolean {
+  if (request.action === "DeregisterImage" && result.body.includes("InvalidAMIID.NotFound")) {
+    retireID(
+      ledger.imageIds,
+      ledger.retiredImageIds,
+      asString(request.parameters["ImageId"]),
+      maxCandidateOperations,
+      "images",
+    );
+    return true;
+  }
+  if (request.action === "DeleteSnapshot" && result.body.includes("InvalidSnapshot.NotFound")) {
+    retireID(
+      ledger.snapshotIds,
+      ledger.retiredSnapshotIds,
+      asString(request.parameters["SnapshotId"]),
+      maxCandidateOperations,
+      "snapshots",
+    );
+    return true;
+  }
+  if (request.action === "DeleteKeyPair" && result.body.includes("InvalidKeyPair.NotFound")) {
+    retireID(
+      ledger.keyPairIds,
+      ledger.retiredKeyPairIds,
+      asString(request.parameters["KeyPairId"]),
+      maxCandidateOperations,
+      "key pairs",
+    );
+    if (ledger.keyPairIds.length === 0) ledger.keyPairNames = [];
+    return true;
+  }
+  return false;
+}
+
 function emptyLedger(launchCount = 0): AWSQualificationLedger {
   return {
     imageIds: [],
     instanceIds: [],
     keyPairIds: [],
     keyPairNames: [],
+    retiredImageIds: [],
+    retiredInstanceIds: [],
+    retiredKeyPairIds: [],
+    retiredSnapshotIds: [],
     snapshotIds: [],
+    terminatingInstanceIds: [],
     volumeIds: [],
     launchCount,
   };
@@ -1714,12 +1966,51 @@ function mergeLedgers(
   left: AWSQualificationLedger,
   right: AWSQualificationLedger,
 ): AWSQualificationLedger {
+  const retiredImageIds = boundedIDs(
+    [...left.retiredImageIds, ...right.retiredImageIds],
+    maxCandidateOperations,
+    "retired images",
+  );
+  const retiredInstanceIds = boundedIDs(
+    [...left.retiredInstanceIds, ...right.retiredInstanceIds],
+    maxLaunches,
+    "retired instances",
+  );
+  const retiredKeyPairIds = boundedIDs(
+    [...left.retiredKeyPairIds, ...right.retiredKeyPairIds],
+    maxCandidateOperations,
+    "retired key pairs",
+  );
+  const retiredSnapshotIds = boundedIDs(
+    [...left.retiredSnapshotIds, ...right.retiredSnapshotIds],
+    maxCandidateOperations,
+    "retired snapshots",
+  );
+  const keyPairIds = [...new Set([...left.keyPairIds, ...right.keyPairIds])].filter(
+    (id) => !retiredKeyPairIds.includes(id),
+  );
   return {
-    imageIds: [...new Set([...left.imageIds, ...right.imageIds])],
-    instanceIds: [...new Set([...left.instanceIds, ...right.instanceIds])],
-    keyPairIds: [...new Set([...left.keyPairIds, ...right.keyPairIds])],
-    keyPairNames: [...new Set([...left.keyPairNames, ...right.keyPairNames])],
-    snapshotIds: [...new Set([...left.snapshotIds, ...right.snapshotIds])],
+    imageIds: [...new Set([...left.imageIds, ...right.imageIds])].filter(
+      (id) => !retiredImageIds.includes(id),
+    ),
+    instanceIds: [...new Set([...left.instanceIds, ...right.instanceIds])].filter(
+      (id) => !retiredInstanceIds.includes(id),
+    ),
+    keyPairIds,
+    keyPairNames:
+      keyPairIds.length > 0 ? [...new Set([...left.keyPairNames, ...right.keyPairNames])] : [],
+    retiredImageIds,
+    retiredInstanceIds,
+    retiredKeyPairIds,
+    retiredSnapshotIds,
+    snapshotIds: [...new Set([...left.snapshotIds, ...right.snapshotIds])].filter(
+      (id) => !retiredSnapshotIds.includes(id),
+    ),
+    terminatingInstanceIds: boundedIDs(
+      [...left.terminatingInstanceIds, ...right.terminatingInstanceIds],
+      maxActiveInstances,
+      "terminating instances",
+    ),
     volumeIds: [...new Set([...left.volumeIds, ...right.volumeIds])],
     launchCount: Math.max(left.launchCount, right.launchCount),
   };

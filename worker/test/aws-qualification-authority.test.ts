@@ -15,7 +15,7 @@ import type {
 } from "../src/aws-qualification-contract";
 import { leaseConfig } from "../src/config";
 import { AWSProvider } from "../src/fleet";
-import type { Env } from "../src/types";
+import type { CoordinatorCheckpointRecord, Env } from "../src/types";
 
 const controller: AWSQualificationControllerProps = { deploymentHash: "d".repeat(64) };
 const identity: AWSQualificationRunIdentity = {
@@ -280,6 +280,82 @@ describe("AWS qualification authority", () => {
     expect(fixture.signer.calls.filter((call) => call.action === "RunInstances")).toHaveLength(2);
   });
 
+  it("never redispatches a no-effect pending launch after expiry", async () => {
+    vi.useFakeTimers();
+    useImmediateTimeouts();
+    const now = new Date("2026-09-04T00:00:00Z");
+    vi.setSystemTime(now);
+    const expiring = { ...identity, expiresAt: new Date(now.getTime() + 1_000).toISOString() };
+    const fixture = authorityFixture({ failOnce: "RunInstances" });
+    await fixture.run.enroll(controller, expiring);
+    await fixture.run.execute(
+      expiring,
+      request(
+        "ImportKeyPair",
+        {
+          KeyName: "crabbox-cbx-abcdef123456",
+          PublicKeyMaterial: btoa("ssh-ed25519 AAAAqualification"),
+        },
+        "ec2",
+      ),
+    );
+    await expect(
+      fixture.run.execute(expiring, request("RunInstances", runInstancesParams(), "ec2")),
+    ).rejects.toThrow("lost response");
+    const launchCalls = fixture.signer.calls.filter((call) => call.action === "RunInstances");
+    expect(launchCalls).toHaveLength(1);
+    const callsBeforeExpiry = fixture.signer.calls.length;
+
+    vi.setSystemTime(new Date(now.getTime() + 2_000));
+    await expect(fixture.run.execute(expiring, request("GetCallerIdentity"))).rejects.toThrow(
+      "expired",
+    );
+    expect(fixture.signer.calls.filter((call) => call.action === "RunInstances")).toHaveLength(1);
+    expect(
+      fixture.signer.calls
+        .slice(callsBeforeExpiry)
+        .filter((call) => call.action === "RunInstances"),
+    ).toHaveLength(0);
+    expect(fixture.signer.calls.some((call) => call.action === "DeleteKeyPair")).toBe(true);
+    expect((await fixture.storage.list({ prefix: "intent:" })).size).toBe(0);
+  });
+
+  it("discovers and cleans a lost-response launch after expiry without redispatch", async () => {
+    vi.useFakeTimers();
+    useImmediateTimeouts();
+    const now = new Date("2026-09-04T00:00:00Z");
+    vi.setSystemTime(now);
+    const expiring = { ...identity, expiresAt: new Date(now.getTime() + 1_000).toISOString() };
+    const fixture = authorityFixture({ loseAfterEffect: "RunInstances" });
+    await fixture.run.enroll(controller, expiring);
+    await fixture.run.execute(
+      expiring,
+      request(
+        "ImportKeyPair",
+        {
+          KeyName: "crabbox-cbx-abcdef123456",
+          PublicKeyMaterial: btoa("ssh-ed25519 AAAAqualification"),
+        },
+        "ec2",
+      ),
+    );
+    await expect(
+      fixture.run.execute(expiring, request("RunInstances", runInstancesParams(), "ec2")),
+    ).rejects.toThrow("lost response");
+    const callsBeforeExpiry = fixture.signer.calls.length;
+
+    vi.setSystemTime(new Date(now.getTime() + 2_000));
+    await expect(fixture.run.execute(expiring, request("GetCallerIdentity"))).rejects.toThrow(
+      "expired",
+    );
+    expect(
+      fixture.signer.calls
+        .slice(callsBeforeExpiry)
+        .filter((call) => call.action === "RunInstances"),
+    ).toHaveLength(0);
+    expect(fixture.signer.calls.some((call) => call.action === "TerminateInstances")).toBe(true);
+  });
+
   it("captures the CreateImage child snapshot and permits only one active checkpoint set", async () => {
     const fixture = authorityFixture();
     await fixture.run.enroll(controller, identity);
@@ -300,6 +376,122 @@ describe("AWS qualification authority", () => {
       snapshotIds: string[];
     }>("ledger");
     expect(ledger).toMatchObject({ imageIds: ["ami-created"], snapshotIds: ["snap-child"] });
+  });
+
+  it("keeps bounded deletion tombstones for provider verification and retry", async () => {
+    const fixture = authorityFixture({ deleteNotFound: "DeregisterImage" });
+    await fixture.run.enroll(controller, identity);
+    await importKey(fixture);
+    await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
+    await fixture.run.execute(
+      identity,
+      request(
+        "CreateImage",
+        { InstanceId: "i-owned", Name: "qualification-image", NoReboot: "true" },
+        "ec2",
+      ),
+    );
+    const env = {
+      CRABBOX_AWS_QUALIFICATION_TRANSPORT: {
+        execute: (value: AWSQualificationRequest) => fixture.run.execute(identity, value),
+      },
+    } as Env;
+    const provider = new AWSProvider(env, "us-east-1", fixture.storage as never);
+    const checkpoint = {
+      leaseID: "cbx_source000001",
+      name: "qualification-image",
+      scope: { accountID: "123456789012", region: "us-east-1" },
+      image: {
+        id: "ami-created",
+        resourceID: "ami-created",
+        kind: "aws-ami",
+        immutableID: "ami-created",
+        snapshotIDs: ["snap-child"],
+        state: "available",
+      },
+    } as CoordinatorCheckpointRecord;
+
+    await expect(provider.deleteCheckpointImage(checkpoint)).resolves.toBeUndefined();
+    const ledger = await fixture.storage.get<{
+      imageIds: string[];
+      retiredImageIds: string[];
+      retiredSnapshotIds: string[];
+      snapshotIds: string[];
+    }>("ledger");
+    expect(ledger).toMatchObject({
+      imageIds: [],
+      retiredImageIds: ["ami-created"],
+      retiredSnapshotIds: ["snap-child"],
+      snapshotIds: [],
+    });
+    await expect(
+      fixture.run.execute(identity, request("DeregisterImage", { ImageId: "ami-created" }, "ec2")),
+    ).resolves.toMatchObject({ status: 400 });
+    expect(fixture.signer.calls.filter((call) => call.action === "DeregisterImage")).toHaveLength(
+      2,
+    );
+    await expect(
+      fixture.run.execute(identity, request("DeleteKeyPair", { KeyPairId: "key-owned" }, "ec2")),
+    ).resolves.toMatchObject({ status: 200 });
+    await expect(
+      fixture.run.execute(
+        identity,
+        request("DescribeKeyPairs", { "KeyPairId.1": "key-owned" }, "ec2"),
+      ),
+    ).resolves.toMatchObject({ status: 400 });
+    await expect(
+      fixture.run.execute(identity, request("DeleteKeyPair", { KeyPairId: "key-owned" }, "ec2")),
+    ).resolves.toMatchObject({ status: 200 });
+    await expect(
+      fixture.run.execute(
+        identity,
+        request("DescribeImages", { "ImageId.1": "ami-foreign" }, "ec2"),
+      ),
+    ).rejects.toThrow("outside the run ledger");
+  });
+
+  it("allows only the fixed base AMI or an active run-derived AMI", async () => {
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    await importKey(fixture);
+    await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
+    await fixture.run.execute(
+      identity,
+      request(
+        "CreateImage",
+        { InstanceId: "i-owned", Name: "qualification-image", NoReboot: "true" },
+        "ec2",
+      ),
+    );
+    await terminateOwned(fixture);
+
+    await expect(
+      fixture.run.execute(
+        identity,
+        request("RunInstances", { ...runInstancesParams(), ImageId: "ami-foreign" }, "ec2"),
+      ),
+    ).rejects.toThrow("outside the run ledger");
+    await expect(
+      fixture.run.execute(
+        identity,
+        request("RunInstances", { ...runInstancesParams(), ImageId: "ami-created" }, "ec2"),
+      ),
+    ).resolves.toMatchObject({ status: 200 });
+    await terminateOwned(fixture);
+    await fixture.run.execute(
+      identity,
+      request("DeregisterImage", { ImageId: "ami-created" }, "ec2"),
+    );
+    await fixture.run.execute(
+      identity,
+      request("DeleteSnapshot", { SnapshotId: "snap-child" }, "ec2"),
+    );
+    await expect(
+      fixture.run.execute(
+        identity,
+        request("RunInstances", { ...runInstancesParams(), ImageId: "ami-created" }, "ec2"),
+      ),
+    ).rejects.toThrow("outside the run ledger");
   });
 
   it("reconciles lost and delayed key creation without redispatching ImportKeyPair", async () => {
@@ -460,6 +652,47 @@ describe("AWS qualification authority", () => {
     ).resolves.toMatchObject({ status: 200 });
   });
 
+  it("retires an acknowledged missing instance before the next public launch", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    await importKey(fixture);
+    await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
+    fixture.signer.instanceDescribeNotFound = true;
+    await expect(
+      fixture.run.execute(
+        identity,
+        request("DescribeInstances", { "InstanceId.1": "i-owned" }, "ec2"),
+      ),
+    ).resolves.toMatchObject({ status: 400 });
+    await expect(
+      fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2")),
+    ).rejects.toThrow("one active instance");
+
+    const env = {
+      CRABBOX_AWS_QUALIFICATION_TRANSPORT: {
+        execute: (value: AWSQualificationRequest) => fixture.run.execute(identity, value),
+      },
+    } as Env;
+    const provider = new AWSProvider(env, "us-east-1", {} as never);
+    await provider.deleteServer("i-owned");
+    expect(
+      await fixture.storage.get<{
+        instanceIds: string[];
+        retiredInstanceIds: string[];
+        terminatingInstanceIds: string[];
+      }>("ledger"),
+    ).toMatchObject({
+      instanceIds: [],
+      retiredInstanceIds: ["i-owned"],
+      terminatingInstanceIds: [],
+    });
+    fixture.signer.instanceDescribeNotFound = false;
+    await expect(
+      fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2")),
+    ).resolves.toMatchObject({ status: 200 });
+  });
+
   it("never adopts or deletes a duplicate foreign physical key", async () => {
     useImmediateTimeouts();
     const fixture = authorityFixture({ duplicateForeignKey: true });
@@ -573,6 +806,7 @@ function authorityFixture(
   options: {
     delayedImageVisibility?: number;
     delayedKeyVisibility?: number;
+    deleteNotFound?: string;
     duplicateForeignKey?: boolean;
     failOnce?: string;
     http500AfterEffect?: string;
@@ -674,10 +908,12 @@ class FakeSigner {
     parameters: Record<string, unknown>;
   }> = [];
   accountId = "123456789012";
+  instanceDescribeNotFound = false;
   private failed = false;
   private imageDescribeCalls = 0;
   private key?: { id: string; name: string; publicKey: string; runId?: string; sha?: string };
   private keyDescribeCalls = 0;
+  private instanceOp = "";
   private instanceState: "absent" | "running" | "shutting-down" | "terminated" = "absent";
   private terminationDescribeCalls = 0;
   private imageActive = false;
@@ -689,6 +925,7 @@ class FakeSigner {
     private readonly options: {
       delayedImageVisibility?: number;
       delayedKeyVisibility?: number;
+      deleteNotFound?: string;
       duplicateForeignKey?: boolean;
       failOnce?: string;
       http500AfterEffect?: string;
@@ -763,7 +1000,12 @@ class FakeSigner {
     }
     if (action === "RunInstances") {
       this.instanceState = "running";
+      this.instanceOp = tagValue(parameters, "crabbox_qualification_op");
       this.terminationDescribeCalls = 0;
+      if (this.options.loseAfterEffect === action && !this.failed) {
+        this.failed = true;
+        throw new Error("lost response");
+      }
       return xml(
         "<RunInstancesResponse><instancesSet><item><instanceId>i-owned</instanceId><instanceType>t3.small</instanceType><ipAddress>203.0.113.10</ipAddress><instanceState><name>running</name></instanceState><blockDeviceMapping><item><ebs><volumeId>vol-owned</volumeId></ebs></item></blockDeviceMapping></item></instancesSet></RunInstancesResponse>",
       );
@@ -798,6 +1040,7 @@ class FakeSigner {
     }
     if (action === "DeregisterImage") {
       this.imageActive = false;
+      if (this.options.deleteNotFound === action) return awsError("InvalidAMIID.NotFound");
       return xml("<DeregisterImageResponse />");
     }
     if (action === "DeleteSnapshot") {
@@ -809,6 +1052,10 @@ class FakeSigner {
       return xml("<DeleteKeyPairResponse />");
     }
     if (action === "DescribeInstances") {
+      if (parameters["InstanceId.1"] === "i-owned" && this.instanceDescribeNotFound) {
+        if (this.instanceState === "shutting-down") this.instanceState = "absent";
+        return awsError("InvalidInstanceID.NotFound");
+      }
       if (this.instanceState === "shutting-down") {
         this.terminationDescribeCalls += 1;
         if (this.terminationDescribeCalls >= 2) this.instanceState = "terminated";
@@ -826,7 +1073,7 @@ class FakeSigner {
           : []),
         ...(ownedVisible
           ? [
-              `<item><instanceId>i-owned</instanceId><instanceType>t3.small</instanceType><ipAddress>203.0.113.10</ipAddress><instanceState><name>${this.instanceState}</name></instanceState><blockDeviceMapping><item><ebs><volumeId>vol-owned</volumeId></ebs></item></blockDeviceMapping></item>`,
+              `<item><instanceId>i-owned</instanceId><instanceType>t3.small</instanceType><ipAddress>203.0.113.10</ipAddress><instanceState><name>${this.instanceState}</name></instanceState><tagSet><item><key>crabbox_qualification_run</key><value>${identity.runId}</value></item><item><key>crabbox_qualification_op</key><value>${this.instanceOp}</value></item></tagSet><blockDeviceMapping><item><ebs><volumeId>vol-owned</volumeId></ebs></item></blockDeviceMapping></item>`,
             ]
           : []),
       ].join("");
