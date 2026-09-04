@@ -26,30 +26,36 @@ test("workflow isolates candidate execution from protected credentials", () => {
   assert.match(workflow, /if: always\(\)/);
   const buildJob = workflow.slice(
     workflow.indexOf("  build-candidate:"),
-    workflow.indexOf("  seal-candidate:"),
+    workflow.indexOf("  admit:"),
   );
   assert.match(buildJob, /needs: authorize/);
+  assert.match(buildJob, /ref: \$\{\{ github\.workflow_sha \}\}[\s\S]*path: harness/);
   assert.match(buildJob, /ref: \$\{\{ needs\.authorize\.outputs\.candidate_sha \}\}/);
+  assert.match(buildJob, /go-version-file: harness\/go\.mod/);
+  assert.match(buildJob, /npm ci --prefix harness\/worker --ignore-scripts/);
+  assert.match(buildJob, /image-qualification-control\.mjs prepare-build/);
+  assert.match(buildJob, /GOTOOLCHAIN=local GOWORK=off CGO_ENABLED=0 GOFLAGS=-mod=readonly/);
   assert.match(buildJob, /go build -trimpath/);
-  assert.match(buildJob, /npm ci --prefix candidate\/worker --ignore-scripts/);
+  assert.match(buildJob, /\.\/node_modules\/\.bin\/wrangler deploy --dry-run/);
+  assert.match(buildJob, /image-qualification-control\.mjs manifest/);
+  assert.match(buildJob, /build-inputs\.json/);
   assert.match(buildJob, /cache: false/g);
   assert.match(
     buildJob,
     /AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN CLOUDFLARE_API_TOKEN QUALIFICATION_CONTROLLER_TOKEN/,
   );
   assert.doesNotMatch(buildJob, /environment:|secrets\./);
-  const sealJob = workflow.slice(
-    workflow.indexOf("  seal-candidate:"),
-    workflow.indexOf("  admit:"),
-  );
-  assert.match(sealJob, /ref: \$\{\{ github\.workflow_sha \}\}/);
-  assert.match(
-    sealJob,
-    /artifact-ids: \$\{\{ needs\.build-candidate\.outputs\.raw_artifact_id \}\}/,
-  );
-  assert.match(sealJob, /Create immutable manifest with protected tooling/);
-  assert.match(sealJob, /image-qualification-candidate-\$\{\{ github\.run_id \}\}/);
-  assert.doesNotMatch(sealJob, /environment:|secrets\.|go build|npm ci|wrangler deploy/);
+  assert.doesNotMatch(buildJob, /npm ci --prefix candidate|npm exec|go-version-file: candidate/);
+  assert.doesNotMatch(workflow, /seal-candidate|image-qualification-candidate-raw/);
+  const buildOrder = [
+    "image-qualification-control.mjs prepare-build",
+    "go build -trimpath",
+    "./node_modules/.bin/wrangler deploy --dry-run",
+    "image-qualification-control.mjs manifest",
+    "Upload immutable candidate bundle",
+  ].map((marker) => buildJob.indexOf(marker));
+  assert.ok(buildOrder.every((offset) => offset >= 0));
+  assert.deepEqual(buildOrder, [...buildOrder].sort((left, right) => left - right));
   assert.match(workflow, /candidate_artifact_id/);
   assert.match(workflow, /path: \$\{\{ runner\.temp \}\}\/image-qualification-candidate/);
   const admitJob = workflow.slice(
@@ -61,12 +67,12 @@ test("workflow isolates candidate execution from protected credentials", () => {
     admitJob,
     /CLOUDFLARE_API_TOKEN|AWS_ACCESS_KEY_ID|QUALIFICATION_CONTROLLER_TOKEN/,
   );
-  assert.match(workflow, /deploy-enroll:[\s\S]*needs: \[authorize, seal-candidate, admit\]/);
+  assert.match(workflow, /deploy-enroll:[\s\S]*needs: \[authorize, build-candidate, admit\]/);
   assert.match(workflow, /arm:[\s\S]*environment: image-qualification/);
   assert.match(workflow, /image-qualification-control\.mjs arm/);
   assert.match(
     workflow,
-    /execute:[\s\S]*needs: \[authorize, seal-candidate, deploy-enroll, arm\]/,
+    /execute:[\s\S]*needs: \[authorize, build-candidate, deploy-enroll, arm\]/,
   );
   const executeJob = workflow.slice(
     workflow.indexOf("  execute:"),
@@ -113,6 +119,8 @@ test("control tool fixes the reviewed policy and recovery boundary", () => {
   assert.match(control, /AWSQualificationController/);
   assert.match(control, /candidate artifact is not from this protected workflow run/);
   assert.match(control, /candidate build or artifact changed/);
+  assert.match(control, /candidate changed protected build inputs/);
+  assert.match(control, /candidate build-input receipt mismatch/);
   assert.match(control, /deleted_classes: \["FleetDurableObject"\]/);
   assert.match(control, /controllerCall\(controllerURL, token, "finalize"/);
   assert.match(control, /controllerCall\(controllerURL, token, "retire"/);
@@ -146,28 +154,55 @@ test("executor proves auth denial, FSR denial, three launches, rollback, and har
   assert.match(adapter, /exit 86/);
 });
 
-test("protected sealer binds exact candidate bytes and rejects extras", async () => {
+test("protected build prep binds source, rejects substitution, and seals exact bytes", async () => {
   const module = await import(
     `${pathToFileURL(path.join(root, "scripts/image-qualification-control.mjs"))}?test=${Date.now()}`
   );
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-qualification-manifest-"));
   try {
+    const harness = path.join(temp, "harness");
     const candidate = path.join(temp, "candidate");
     const artifact = path.join(temp, "artifact");
-    fs.mkdirSync(candidate, { recursive: true });
-    execFileSync("git", ["init", "-q"], { cwd: candidate });
-    execFileSync("git", ["config", "user.name", "Qualification Test"], { cwd: candidate });
-    execFileSync("git", ["config", "user.email", "qualification@example.invalid"], {
-      cwd: candidate,
-    });
-    fs.writeFileSync(path.join(candidate, "source"), "candidate\n");
-    execFileSync("git", ["add", "source"], { cwd: candidate });
-    execFileSync("git", ["commit", "-qm", "test source"], { cwd: candidate });
-    const candidateSha = execFileSync("git", ["rev-parse", "HEAD"], {
-      cwd: candidate,
-      encoding: "utf8",
-    }).trim();
-    const workflowSha = "b".repeat(40);
+    const initialize = (directory, source) => {
+      fs.mkdirSync(path.join(directory, "worker", "src"), { recursive: true });
+      fs.mkdirSync(path.join(directory, "worker", "test"), { recursive: true });
+      fs.writeFileSync(path.join(directory, "go.mod"), "module example.invalid/qualification\n");
+      fs.writeFileSync(path.join(directory, "go.sum"), "");
+      fs.writeFileSync(path.join(directory, "worker", "package.json"), "{}\n");
+      fs.writeFileSync(path.join(directory, "worker", "package-lock.json"), "{}\n");
+      fs.writeFileSync(path.join(directory, "worker", "wrangler.jsonc"), "{}\n");
+      fs.writeFileSync(path.join(directory, "worker", "tsconfig.json"), "{}\n");
+      fs.writeFileSync(path.join(directory, "worker", "src", "index.ts"), source);
+      fs.writeFileSync(path.join(directory, "worker", "test", "index.test.ts"), "test\n");
+      execFileSync("git", ["init", "-q"], { cwd: directory });
+      execFileSync("git", ["config", "user.name", "Qualification Test"], { cwd: directory });
+      execFileSync("git", ["config", "user.email", "qualification@example.invalid"], {
+        cwd: directory,
+      });
+      execFileSync("git", ["add", "."], { cwd: directory });
+      execFileSync("git", ["commit", "-qm", "test source"], { cwd: directory });
+      return execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: directory,
+        encoding: "utf8",
+      }).trim();
+    };
+    const workflowSha = initialize(harness, "export default { base: true };\n");
+    let candidateSha = initialize(candidate, "export default { candidate: true };\n");
+    const receiptFile = path.join(artifact, "build-inputs.json");
+    const receipt = module.prepareCandidateBuild(
+      harness,
+      candidate,
+      receiptFile,
+      candidateSha,
+      workflowSha,
+    );
+    assert.equal(receipt.candidateSha, candidateSha);
+    assert.equal(receipt.workflowSha, workflowSha);
+    assert.equal(
+      fs.readFileSync(path.join(harness, "worker", "src", "index.ts"), "utf8"),
+      "export default { candidate: true };\n",
+    );
+
     fs.mkdirSync(path.join(artifact, "bin"), { recursive: true });
     fs.mkdirSync(path.join(artifact, "worker"), { recursive: true });
     fs.writeFileSync(path.join(artifact, "bin", "crabbox"), "candidate-cli");
@@ -179,6 +214,38 @@ test("protected sealer binds exact candidate bytes and rejects extras", async ()
     );
     fs.writeFileSync(path.join(artifact, "unexpected"), "nope");
     assert.throws(() => module.verifyManifest(artifact, candidateSha, workflowSha), /extra files/);
+
+    fs.writeFileSync(
+      path.join(candidate, "worker", "package.json"),
+      '{"scripts":{"build":"write-substituted-artifact"}}\n',
+    );
+    execFileSync("git", ["add", "worker/package.json"], { cwd: candidate });
+    execFileSync("git", ["commit", "-qm", "candidate build hook"], { cwd: candidate });
+    candidateSha = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: candidate,
+      encoding: "utf8",
+    }).trim();
+    assert.throws(
+      () =>
+        module.prepareCandidateBuild(harness, candidate, receiptFile, candidateSha, workflowSha),
+      /candidate changed protected build inputs/,
+    );
+
+    fs.writeFileSync(path.join(candidate, "worker", "package.json"), "{}\n");
+    fs.symlinkSync("../package.json", path.join(candidate, "worker", "src", "escape.ts"));
+    execFileSync("git", ["add", "worker/package.json", "worker/src/escape.ts"], {
+      cwd: candidate,
+    });
+    execFileSync("git", ["commit", "-qm", "candidate source link"], { cwd: candidate });
+    candidateSha = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: candidate,
+      encoding: "utf8",
+    }).trim();
+    assert.throws(
+      () =>
+        module.prepareCandidateBuild(harness, candidate, receiptFile, candidateSha, workflowSha),
+      /candidate Worker source contains a non-file entry/,
+    );
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }

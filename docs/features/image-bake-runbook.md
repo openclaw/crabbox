@@ -689,13 +689,15 @@ The workflow has separate trust zones:
   open same-repository pull request, and exact candidate SHA. The pull request
   base must equal the protected workflow SHA, so a stale candidate must be
   rebased before qualification.
-- `build-candidate` is a credentialless job in that protected workflow. Its
-  immutable commands explicitly check out the authorized candidate SHA, disable
-  dependency caches and package hooks, and produce the CLI and Worker bundle.
-- `seal-candidate` starts on a fresh credentialless runner, checks out protected
-  tooling again, treats the unsealed bundle as inert data, and publishes the
-  one-day manifest-covered artifact. Later jobs accept only that artifact ID
-  and digest from the current first-attempt protected workflow run.
+- `build-candidate` is a credentialless job in that protected workflow. It uses
+  the protected revision's Go version, Worker lockfile, Wrangler binary, config,
+  and other non-source build inputs. Candidate Go modules and non-source Worker
+  inputs must be byte-identical to that revision. The job copies only a bounded
+  regular-file candidate `worker/src` tree into the protected build root, never
+  runs candidate package tooling or hooks, and records the source and protected
+  input digests before publishing the one-day manifest-covered artifact. Later
+  jobs accept only that artifact ID and digest from the current first-attempt
+  protected workflow run.
 - `admit` runs without cloud credentials before environment approval. Trusted
   tooling verifies the exact artifact manifest and rejects publishers that do
   not implement injectable CLI delegation, pre-promotion candidate teardown,

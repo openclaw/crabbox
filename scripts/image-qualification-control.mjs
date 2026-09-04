@@ -259,30 +259,152 @@ export async function verifyCandidateIdentity({ artifact = false, cleanup = fals
   return { candidateSha, number, repository, workflowSha, ...candidate };
 }
 
-function filesUnder(directory) {
+function filesUnder(directory, label = "artifact") {
   const result = [];
-  const visit = (current) => {
+  const pending = [directory];
+  while (pending.length > 0) {
+    const current = pending.pop();
     for (const entry of fs
       .readdirSync(current, { withFileTypes: true })
-      .sort((a, b) => a.name.localeCompare(b.name))) {
+      .sort((a, b) => b.name.localeCompare(a.name))) {
       const absolute = path.join(current, entry.name);
-      if (entry.isDirectory()) visit(absolute);
+      if (entry.isDirectory()) pending.push(absolute);
       else if (entry.isFile()) result.push(absolute);
-      else throw new Error(`artifact contains a non-file entry: ${absolute}`);
+      else throw new Error(`${label} contains a non-file entry: ${absolute}`);
     }
+  }
+  return result.sort((left, right) => left.localeCompare(right));
+}
+
+function checkoutSha(directory) {
+  return execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: directory,
+    encoding: "utf8",
+  }).trim();
+}
+
+function trackedWorkerBuildInputs(directory) {
+  return execFileSync("git", ["ls-files", "-z", "--", "worker"], {
+    cwd: directory,
+    encoding: "utf8",
+  })
+    .split("\0")
+    .filter(
+      (file) =>
+        file &&
+        !file.startsWith("worker/src/") &&
+        !file.startsWith("worker/test/"),
+    )
+    .sort();
+}
+
+function fileRecords(directory, files) {
+  return files.map((file) => {
+    const absolute = path.join(directory, file);
+    const stat = fs.lstatSync(absolute);
+    if (!stat.isFile()) throw new Error(`protected build input is not a regular file: ${file}`);
+    return {
+      path: file,
+      bytes: stat.size,
+      sha256: digest(fs.readFileSync(absolute)),
+    };
+  });
+}
+
+function workerSourceRecords(candidateDir) {
+  const sourceDir = path.join(candidateDir, "worker", "src");
+  const sourceFiles = filesUnder(sourceDir, "candidate Worker source");
+  const sourceRecords = sourceFiles.map((file) => ({
+    path: path.relative(sourceDir, file).split(path.sep).join("/"),
+    bytes: fs.statSync(file).size,
+    sha256: digest(fs.readFileSync(file)),
+  }));
+  if (
+    sourceRecords.length === 0 ||
+    sourceRecords.length > 1024 ||
+    sourceRecords.some((file) => file.bytes > 4 * 1024 * 1024) ||
+    sourceRecords.reduce((total, file) => total + file.bytes, 0) > 32 * 1024 * 1024
+  ) {
+    throw new Error("candidate Worker source exceeds the file or byte limit");
+  }
+  return { sourceDir, sourceFiles, sourceRecords };
+}
+
+export function prepareCandidateBuild(
+  harnessDir,
+  candidateDir,
+  receiptFile,
+  candidateSha,
+  workflowSha,
+) {
+  if (!sha40.test(candidateSha) || !sha40.test(workflowSha)) {
+    throw new Error("invalid protected build SHA");
+  }
+  if (
+    checkoutSha(harnessDir) !== workflowSha ||
+    checkoutSha(candidateDir) !== candidateSha
+  ) {
+    throw new Error("protected build checkout SHA mismatch");
+  }
+  // Candidate source remains data: every executable build control comes from
+  // the protected checkout, so a PR cannot smuggle a build hook into the bundle.
+  const fixedFiles = ["go.mod", "go.sum"];
+  const harnessWorkerInputs = trackedWorkerBuildInputs(harnessDir);
+  const candidateWorkerInputs = trackedWorkerBuildInputs(candidateDir);
+  if (canonical(harnessWorkerInputs) !== canonical(candidateWorkerInputs)) {
+    throw new Error("candidate changed protected Worker build inputs");
+  }
+  const protectedFiles = [...fixedFiles, ...harnessWorkerInputs];
+  const harnessInputs = fileRecords(harnessDir, protectedFiles);
+  const candidateInputs = fileRecords(candidateDir, protectedFiles);
+  if (canonical(harnessInputs) !== canonical(candidateInputs)) {
+    throw new Error("candidate changed protected build inputs");
+  }
+
+  const { sourceDir, sourceFiles, sourceRecords } = workerSourceRecords(candidateDir);
+
+  const buildSourceDir = path.join(harnessDir, "worker", "src");
+  fs.rmSync(buildSourceDir, { recursive: true, force: true });
+  for (const source of sourceFiles) {
+    const relative = path.relative(sourceDir, source);
+    const destination = path.join(buildSourceDir, relative);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.copyFileSync(source, destination);
+    fs.chmodSync(destination, fs.statSync(source).mode & 0o777);
+  }
+
+  const receipt = {
+    version: 1,
+    candidateSha,
+    workflowSha,
+    workerSourceSha256: digest(canonical(sourceRecords)),
+    protectedBuildInputsSha256: digest(canonical(harnessInputs)),
   };
-  visit(directory);
-  return result;
+  writeJSON(receiptFile, receipt);
+  return receipt;
+}
+
+function verifyBuildReceipt(candidateDir, artifactDir, candidateSha, workflowSha) {
+  const receipt = readJSON(path.join(artifactDir, "build-inputs.json"));
+  const { sourceRecords } = workerSourceRecords(candidateDir);
+  if (
+    receipt.version !== 1 ||
+    receipt.candidateSha !== candidateSha ||
+    receipt.workflowSha !== workflowSha ||
+    receipt.workerSourceSha256 !== digest(canonical(sourceRecords)) ||
+    !sha64.test(receipt.protectedBuildInputsSha256)
+  ) {
+    throw new Error("candidate build-input receipt mismatch");
+  }
+  return receipt;
 }
 
 export function createManifest(candidateDir, artifactDir, candidateSha, workflowSha) {
   if (!sha40.test(candidateSha) || !sha40.test(workflowSha))
     throw new Error("invalid manifest SHA");
-  const actualSha = execFileSync("git", ["rev-parse", "HEAD"], {
-    cwd: candidateDir,
-    encoding: "utf8",
-  }).trim();
+  const actualSha = checkoutSha(candidateDir);
   if (actualSha !== candidateSha) throw new Error("candidate checkout SHA mismatch");
+  verifyBuildReceipt(candidateDir, artifactDir, candidateSha, workflowSha);
   const files = filesUnder(artifactDir)
     .filter((file) => path.basename(file) !== "manifest.json")
     .map((file) => ({
@@ -318,6 +440,7 @@ export function createManifest(candidateDir, artifactDir, candidateSha, workflow
 
 export function verifyManifest(artifactDir, expectedCandidate, expectedWorkflow) {
   const manifest = readJSON(path.join(artifactDir, "manifest.json"));
+  const receipt = readJSON(path.join(artifactDir, "build-inputs.json"));
   const unsigned = { ...manifest };
   delete unsigned.manifestSha256;
   if (
@@ -325,7 +448,12 @@ export function verifyManifest(artifactDir, expectedCandidate, expectedWorkflow)
     manifest.candidateSha !== expectedCandidate ||
     manifest.workflowSha !== expectedWorkflow ||
     !sha64.test(manifest.manifestSha256) ||
-    digest(canonical(unsigned)) !== manifest.manifestSha256
+    digest(canonical(unsigned)) !== manifest.manifestSha256 ||
+    receipt.version !== 1 ||
+    receipt.candidateSha !== expectedCandidate ||
+    receipt.workflowSha !== expectedWorkflow ||
+    !sha64.test(receipt.workerSourceSha256) ||
+    !sha64.test(receipt.protectedBuildInputsSha256)
   ) {
     throw new Error("candidate manifest identity mismatch");
   }
@@ -1480,6 +1608,17 @@ async function main() {
     createManifest(
       path.resolve(args[0]),
       path.resolve(args[1]),
+      required("QUALIFICATION_CANDIDATE_SHA", sha40),
+      required("QUALIFICATION_WORKFLOW_SHA", sha40),
+    );
+    return;
+  }
+  if (command === "prepare-build") {
+    if (args.length !== 3) throw new Error("prepare-build requires three arguments");
+    prepareCandidateBuild(
+      path.resolve(args[0]),
+      path.resolve(args[1]),
+      path.resolve(args[2]),
       required("QUALIFICATION_CANDIDATE_SHA", sha40),
       required("QUALIFICATION_WORKFLOW_SHA", sha40),
     );
