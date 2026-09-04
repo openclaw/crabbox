@@ -29,7 +29,24 @@ export function awsUserData(config: LeaseConfig): string {
   if (config.target === "macos") {
     return macOSUserData(config);
   }
-  return cloudInit(config);
+  // Custom images retain their sources. Keep security separate; cloud-init otherwise uses primary.
+  const aptConfig =
+    config.provider === "aws" &&
+    config.target === "linux" &&
+    !config.awsPrivate &&
+    config.os === "ubuntu:26.04" &&
+    config.architecture === "amd64" &&
+    config.selectedImage?.source === "stock"
+      ? `apt:
+  primary:
+    - arches: [amd64]
+      uri: https://archive.ubuntu.com/ubuntu/
+  security:
+    - arches: [amd64]
+      uri: http://security.ubuntu.com/ubuntu/
+`
+      : "";
+  return cloudInit(config, "", aptConfig);
 }
 
 export async function awsRunInstancesUserData(config: LeaseConfig): Promise<string> {
@@ -53,7 +70,11 @@ function base64Encode(bytes: Uint8Array): string {
   return btoa(chunks.join(""));
 }
 
-export function cloudInit(config: LeaseConfig, additionalBootstrap = ""): string {
+export function cloudInit(
+  config: LeaseConfig,
+  additionalBootstrap = "",
+  additionalCloudConfig = "",
+): string {
   if (config.awsPrivate) {
     return privateAWSCloudInit(config);
   }
@@ -69,7 +90,7 @@ export function cloudInit(config: LeaseConfig, additionalBootstrap = ""): string
   return `#cloud-config
 package_update: false
 package_upgrade: false
-users:
+${additionalCloudConfig}users:
   - name: ${config.sshUser}
     groups: sudo
     shell: /bin/bash

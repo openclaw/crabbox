@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"path"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -153,22 +152,27 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		return result, nil
 	}
 
-	command, err := buildCommand(req.Command, req.ShellMode)
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
 		return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
 	}
+	command := intent.ShellSource()
 	if req.EnvSummary {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
 	if len(req.Env) > 0 {
-		envPath := path.Join(workdir, ".crabbox-env-"+leaseID+".sh")
-		if err := client.WriteFile(ctx, machineID, envPath, shellEnvProfile(req.Env)); err != nil {
+		envPath, cleanup, err := b.uploadEnvProfile(ctx, client, claim, req.Env, workdir)
+		if cleanup != nil {
+			defer func() {
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), envProfileCleanupTimeout)
+				defer cancel()
+				cleanup(cleanupCtx)
+			}()
+		}
+		if err != nil {
 			return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
 		}
-		defer func() {
-			_, _ = client.Exec(context.Background(), machineID, "rm -f "+shellQuote(envPath), "")
-		}()
-		command = ". " + shellQuote(envPath) + " && " + command
+		command = shared.ShellScriptWithEnvProfile(command, envPath)
 	}
 	commandStarted := b.now()
 	exitCode, commandErr := client.ExecStream(ctx, machineID, command, folder, b.rt.Stdout)
@@ -594,21 +598,6 @@ func cleanWorkdir(workdir string) (string, error) {
 	return clean, nil
 }
 
-func buildCommand(command []string, shellMode bool) (string, error) {
-	if len(command) == 0 {
-		return "", errors.New("missing command")
-	}
-	var script string
-	if shellMode {
-		script = strings.Join(command, " ")
-	} else if shouldUseShell(command) || leadingEnvAssignment(command) {
-		script = shellScriptFromArgv(command)
-	} else {
-		script = "exec " + strings.Join(shellWords(command), " ")
-	}
-	return script, nil
-}
-
 const workspaceRoot = "/workspace"
 
 func workspaceFolder(workdir string) (string, error) {
@@ -625,38 +614,4 @@ func workspaceFolder(workdir string) (string, error) {
 		return "", exit(2, "smolvm workdir %q must be under %s or exactly %s", clean, workspaceRoot, workspaceRoot)
 	}
 	return clean, nil
-}
-
-func shellEnvProfile(env map[string]string) string {
-	var b strings.Builder
-	keys := make([]string, 0, len(env))
-	for key := range env {
-		if !validEnvName(key) {
-			continue
-		}
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	b.WriteString("set -a\n")
-	for _, key := range keys {
-		b.WriteString(key)
-		b.WriteString("=")
-		b.WriteString(shellQuote(env[key]))
-		b.WriteByte('\n')
-	}
-	b.WriteString("set +a\n")
-	return b.String()
-}
-
-func validEnvName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i, r := range name {
-		if r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (i > 0 && r >= '0' && r <= '9') {
-			continue
-		}
-		return false
-	}
-	return true
 }

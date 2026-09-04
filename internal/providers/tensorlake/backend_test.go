@@ -61,29 +61,6 @@ func TestProviderForResolvesNameAndAliases(t *testing.T) {
 	}
 }
 
-func TestBuildCommandAutoWrapsShellMetacharacters(t *testing.T) {
-	got, err := buildCommand([]string{"pnpm install && pnpm test"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 3 || got[0] != "bash" || got[1] != "-lc" {
-		t.Fatalf("command=%#v want bash -lc wrapping", got)
-	}
-	if !strings.Contains(got[2], "pnpm install") || !strings.Contains(got[2], "pnpm test") {
-		t.Fatalf("command=%#v missing user input", got)
-	}
-}
-
-func TestBuildCommandAutoWrapsLeadingEnvAssignment(t *testing.T) {
-	got, err := buildCommand([]string{"FOO=bar", "pnpm", "test"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 3 || got[0] != "bash" {
-		t.Fatalf("command=%#v want bash wrapping for FOO=bar", got)
-	}
-}
-
 func TestTensorlakeWorkdirRejectsRelative(t *testing.T) {
 	cfg := newTestConfig()
 	cfg.Tensorlake.Workdir = "relative/path"
@@ -125,34 +102,6 @@ func TestTensorlakeWorkdirDefault(t *testing.T) {
 	}
 	if got != "/workspace/crabbox" {
 		t.Fatalf("default=%q want /workspace/crabbox", got)
-	}
-}
-
-func TestBuildCommandShellMode(t *testing.T) {
-	got, err := buildCommand([]string{"pnpm install && pnpm test"}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"bash", "-lc", "pnpm install && pnpm test"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("command=%#v want %#v", got, want)
-	}
-}
-
-func TestBuildCommandPassThrough(t *testing.T) {
-	got, err := buildCommand([]string{"pnpm", "test"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"pnpm", "test"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("command=%#v want %#v", got, want)
-	}
-}
-
-func TestBuildCommandRejectsEmpty(t *testing.T) {
-	if _, err := buildCommand(nil, false); err == nil {
-		t.Fatalf("expected error for empty command")
 	}
 }
 
@@ -580,6 +529,130 @@ func TestRunForwardsEnvViaUploadedProfile(t *testing.T) {
 	}
 	if !containsArg(userExec.Args, "bash") || !containsArg(userExec.Args, "-lc") || !containsArgSubstring(userExec.Args, "/tmp/crabbox-env-") {
 		t.Fatalf("exec args=%v missing env profile wrapper", userExec.Args)
+	}
+}
+
+func TestRunCommandIntentSurvivesNativeCLIArgv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native POSIX CLI transport")
+	}
+	for _, withEnv := range []bool{false, true} {
+		for _, scenario := range []string{"literal pipe", "literal assignment", "mixed operators", "inferred source", "plain argv", "explicit exit", "explicit empty"} {
+			t.Run(fmt.Sprintf("env=%v/%s", withEnv, scenario), func(t *testing.T) {
+				b, _, runner, claim := ownedTensorlakeFixture(t)
+				root := t.TempDir()
+				b.cfg.Tensorlake.Workdir = root
+				t.Setenv("PATH", root+":/usr/bin:/bin")
+				if err := os.WriteFile(filepath.Join(root, "FOO=x"), []byte("#!/bin/sh\nprintf 'literal:%s' \"$*\"\nexit 42\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				marker := filepath.Join(root, "must-not-exist")
+				request := RunRequest{ID: claim.LeaseID, Repo: Repo{Root: claim.RepoRoot}, NoSync: true, Command: []string{"printf", "%s", "|", "touch", marker}, CommandLiteralArgs: map[int]bool{2: true}}
+				if withEnv {
+					request.Env = map[string]string{"FIXTURE": "quoted ' synthetic\n$literal", "PATH": root + ":/usr/bin:/bin"}
+				}
+				want, wantCode := "|touch"+marker, 0
+				switch scenario {
+				case "literal assignment":
+					request.Command = []string{"FOO=x", "argument"}
+					request.CommandLiteralArgs = map[int]bool{0: true}
+					want = "literal:argument"
+					wantCode = 42
+				case "mixed operators":
+					request.Command = []string{"printf", "%s", ";", "&&", "printf", "%s", "tail"}
+					want = ";tail"
+				case "inferred source":
+					request.Command = []string{"printf '%s' source"}
+					request.CommandLiteralArgs = nil
+					want = "source"
+				case "plain argv":
+					request.Command = []string{"printf", "%s", "plain"}
+					request.CommandLiteralArgs = nil
+					want = "plain"
+				case "explicit exit":
+					request.Command = []string{"printf explicit; exit 7"}
+					request.CommandLiteralArgs = nil
+					request.ShellMode = true
+					want, wantCode = "explicit", 7
+				case "explicit empty":
+					request.Command = []string{""}
+					request.CommandLiteralArgs = nil
+					request.ShellMode = true
+					want = ""
+				}
+				var stdout bytes.Buffer
+				b.rt.Stdout = &stdout
+				var localPath, remotePath string
+				t.Cleanup(func() {
+					if remotePath != "" {
+						_ = os.Remove(remotePath)
+					}
+				})
+				runner.contextHook = func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+					switch scriptKey(req.Args) {
+					case "sbx cp":
+						localPath = req.Args[len(req.Args)-2]
+						_, remotePath, _ = strings.Cut(req.Args[len(req.Args)-1], ":")
+						data, err := os.ReadFile(localPath)
+						if err != nil {
+							return core.LocalCommandResult{}, err, true
+						}
+						file, err := os.OpenFile(remotePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+						if err != nil {
+							return core.LocalCommandResult{}, err, true
+						}
+						_, writeErr := file.Write(data)
+						return core.LocalCommandResult{}, errors.Join(writeErr, file.Close()), true
+					case "sbx exec":
+						idIndex := -1
+						for i, arg := range req.Args {
+							if arg == claim.CloudID {
+								idIndex = i
+								break
+							}
+						}
+						if idIndex < 0 || idIndex+1 >= len(req.Args) {
+							t.Fatalf("missing native target: %v", req.Args)
+						}
+						argv := req.Args[idIndex+1:]
+						cmd := osexec.CommandContext(ctx, argv[0], argv[1:]...)
+						cmd.Dir = root
+						cmd.Env = []string{"PATH=" + root + ":/usr/bin:/bin", "HOME=" + root, "ENV=" + os.DevNull}
+						out, err := cmd.CombinedOutput()
+						if req.Stdout != nil {
+							_, _ = req.Stdout.Write(out)
+						}
+						code := 0
+						if err != nil {
+							var exitErr *osexec.ExitError
+							if !errors.As(err, &exitErr) {
+								t.Fatal(err)
+							}
+							code = exitErr.ExitCode()
+						}
+						return core.LocalCommandResult{ExitCode: code}, err, true
+					}
+					return core.LocalCommandResult{}, nil, false
+				}
+				result, err := b.Run(t.Context(), request)
+				if result.ExitCode != wantCode || stdout.String() != want || (err != nil) != (wantCode != 0) {
+					t.Fatalf("output=%q exit=%d err=%v want=%q/%d", stdout.String(), result.ExitCode, err, want, wantCode)
+				}
+				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("literal sentinel created: %v", err)
+				}
+				if withEnv {
+					for _, file := range []string{localPath, remotePath} {
+						if file == "" {
+							t.Fatal("profile upload missing")
+						}
+						if _, err := os.Stat(file); !errors.Is(err, os.ErrNotExist) {
+							t.Fatalf("profile residue: %v", err)
+						}
+					}
+				}
+			})
+		}
 	}
 }
 

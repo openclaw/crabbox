@@ -11,7 +11,7 @@ import (
 const envProfileCleanupTimeout = 30 * time.Second
 
 func (b *tensorlakeBackend) uploadEnvProfile(ctx context.Context, cli *tensorlakeCLI, claim core.LeaseClaim, env map[string]string) (string, func(context.Context), error) {
-	profile, err := shared.PrepareShellEnvProfile(env, "crabbox-env-")
+	profile, err := shared.PrepareShellEnvProfile(env, "/tmp", "crabbox-env-")
 	if err != nil {
 		return "", nil, err
 	}

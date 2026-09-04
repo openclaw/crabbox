@@ -44,6 +44,7 @@ import type {
 
 const awsUbuntuOwner = "099720109477";
 const ec2Version = "2016-11-15";
+const awsDescribeInstancesMaxPages = 100;
 const stsVersion = "2011-06-15";
 const awsSpotQuotaCode = "L-34B43A08";
 const awsOnDemandQuotaCode = "L-1216C47A";
@@ -942,7 +943,7 @@ export class EC2SpotClient {
   }
 
   async listCrabboxServers(): Promise<ProviderMachine[]> {
-    const root = await this.ec2("DescribeInstances", {
+    return this.describeAllInstances({
       "Filter.1.Name": "tag:crabbox",
       "Filter.1.Value.1": "true",
       "Filter.2.Name": "instance-state-name",
@@ -951,15 +952,10 @@ export class EC2SpotClient {
       "Filter.2.Value.3": "stopping",
       "Filter.2.Value.4": "stopped",
     });
-    return reservations(root).flatMap((reservation) =>
-      items(record(record(reservation)["instancesSet"])["item"]).map((instance) =>
-        this.withRegion(instanceToMachine(instance)),
-      ),
-    );
   }
 
   async findWorkspaceServerByLease(leaseID: string): Promise<ProviderMachine | undefined> {
-    const root = await this.ec2("DescribeInstances", {
+    const matches = await this.describeAllInstances({
       "Filter.1.Name": "tag:crabbox",
       "Filter.1.Value.1": "true",
       "Filter.2.Name": "tag:created_by",
@@ -976,15 +972,45 @@ export class EC2SpotClient {
       "Filter.6.Value.3": "stopping",
       "Filter.6.Value.4": "stopped",
     });
-    const matches = reservations(root).flatMap((reservation) =>
-      items(record(record(reservation)["instancesSet"])["item"]).map((instance) =>
-        this.withRegion(instanceToMachine(instance)),
-      ),
-    );
     if (matches.length > 1) {
       throw new Error(`AWS private workspace recovery is ambiguous for lease ${leaseID}`);
     }
     return matches[0];
+  }
+
+  private async describeAllInstances(params: Record<string, string>): Promise<ProviderMachine[]> {
+    const machines: ProviderMachine[] = [];
+    const seenTokens = new Set<string>();
+    let nextToken = "";
+    const incomplete = `aws DescribeInstances inventory incomplete in ${this.region}`;
+    for (let page = 0; page < awsDescribeInstancesMaxPages; page++) {
+      let root: Record<string, unknown>;
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- EC2 pagination depends on the previous token.
+        root = await this.ec2("DescribeInstances", {
+          ...params,
+          ...(nextToken ? { NextToken: nextToken } : {}),
+        });
+      } catch (error) {
+        if (page === 0) throw error;
+        // oxlint-disable-next-line eslint/preserve-caught-error -- Upstream causes can expose opaque tokens or credentials.
+        throw new Error(`${incomplete}: page ${page + 1} request failed`);
+      }
+      machines.push(
+        ...reservations(root).flatMap((reservation) =>
+          items(record(reservation["instancesSet"])["item"]).map((instance) =>
+            this.withRegion(instanceToMachine(instance)),
+          ),
+        ),
+      );
+      nextToken = asString(root["nextToken"]);
+      if (!nextToken) return machines;
+      if (seenTokens.has(nextToken)) {
+        throw new Error(`${incomplete}: repeated pagination token`);
+      }
+      seenTokens.add(nextToken);
+    }
+    throw new Error(`${incomplete}: pagination exceeded ${awsDescribeInstancesMaxPages} pages`);
   }
 
   async refreshSSHIngress(config: LeaseConfig, options: AWSIngressOptions = {}): Promise<void> {
@@ -2126,17 +2152,18 @@ export class EC2SpotClient {
   ): Promise<ProviderMachine> {
     const now = new Date();
     const name = leaseProviderName(leaseID, slug);
-    const labels = leaseProviderLabels(
-      { ...config, selectedImage: awsLeaseImageIdentity(config, imageID, this.region) },
-      leaseID,
-      slug,
-      owner,
-      "aws",
-      now,
-      {
-        market: config.capacityMarket,
-      },
-    );
+    // The resolver also accepts an environment AMI; preserve that provenance in tags and bootstrap.
+    const launchConfig: LeaseConfig = {
+      ...config,
+      selectedImage: awsLeaseImageIdentity(
+        { ...config, awsAMI: config.awsAMI || this.env.CRABBOX_AWS_AMI || "" },
+        imageID,
+        this.region,
+      ),
+    };
+    const labels = leaseProviderLabels(launchConfig, leaseID, slug, owner, "aws", now, {
+      market: config.capacityMarket,
+    });
     const rootGB = config.awsRootGB || positiveInt(this.env.CRABBOX_AWS_ROOT_GB) || 400;
     const instanceProfile = config.awsProfile || this.env.CRABBOX_AWS_INSTANCE_PROFILE || "";
     const subnetID = config.awsSubnetID || this.env.CRABBOX_AWS_SUBNET_ID || "";
@@ -2153,7 +2180,7 @@ export class EC2SpotClient {
     let lastMacHostID = "";
     const run = async (macHostID: string): Promise<ProviderMachine> => {
       const params = await awsRunInstancesParams({
-        config,
+        config: launchConfig,
         leaseID,
         imageID,
         securityGroupID,

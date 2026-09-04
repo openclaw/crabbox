@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"reflect"
@@ -686,9 +687,84 @@ func TestRunPreservesBashLoginShellForExplicitInvocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := fake.runs[len(fake.runs)-1].Command
-	want := shellScriptFromArgv([]string{"bash", "-lc", "echo hello"})
+	want := "'bash' '-lc' 'echo hello'"
 	if got != want {
 		t.Fatalf("command=%q want %q", got, want)
+	}
+}
+
+func TestRunCommandIntentSurvivesNativeExecdSource(t *testing.T) {
+	if os.PathSeparator != '/' {
+		t.Skip("native POSIX execd fixture")
+	}
+	for _, scenario := range []string{"literal pipe", "literal assignment", "singleton executable", "mixed operators", "inferred source", "explicit empty"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			root := t.TempDir()
+			marker := filepath.Join(root, "must-not-exist")
+			if err := os.WriteFile(filepath.Join(root, "FOO=x"), []byte("#!/bin/sh\nprintf 'literal:%s' \"$*\"\nexit 42\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			request := RunRequest{Repo: Repo{Name: "fixture", Root: t.TempDir()}, NoSync: true, Keep: true, Command: []string{"printf", "%s", "|", "touch", marker}, CommandLiteralArgs: map[int]bool{2: true}, Env: map[string]string{"FIXTURE": "synthetic"}}
+			want, wantCode := "|touch"+marker, 0
+			switch scenario {
+			case "literal assignment":
+				request.Command = []string{"FOO=x", "argument"}
+				request.CommandLiteralArgs = map[int]bool{0: true}
+				want = "literal:argument"
+				wantCode = 42
+			case "singleton executable":
+				request.Command = []string{"FOO=x"}
+				request.CommandLiteralArgs = nil
+				want = "literal:"
+				wantCode = 42
+			case "mixed operators":
+				request.Command = []string{"printf", "%s", ";", "&&", "printf", "%s", "tail"}
+				want = ";tail"
+			case "inferred source":
+				request.Command = []string{"printf '%s' source"}
+				request.CommandLiteralArgs = nil
+				want = "source"
+			case "explicit empty":
+				request.Command = []string{""}
+				request.CommandLiteralArgs = nil
+				request.ShellMode = true
+				want = ""
+			}
+			fake := newFakeClient()
+			b := newTestBackend(fake)
+			b.cfg.OpenSandbox.Workdir = root
+			var output string
+			workloads := 0
+			fake.afterRun = func(req runCommandRequest) {
+				if req.Workdir == "" {
+					return
+				}
+				workloads++
+				if req.Workdir != root || !reflect.DeepEqual(req.Env, request.Env) || req.TimeoutSecs != b.execTimeoutSecs() {
+					t.Fatalf("native fields changed: %#v", req)
+				}
+				cmd := exec.Command("sh", "-c", req.Command)
+				cmd.Dir = req.Workdir
+				cmd.Env = []string{"PATH=" + root + ":/usr/bin:/bin", "HOME=" + root, "ENV=" + os.DevNull, "FIXTURE=" + req.Env["FIXTURE"]}
+				out, err := cmd.CombinedOutput()
+				output = string(out)
+				if err != nil {
+					var exitErr *exec.ExitError
+					if !errors.As(err, &exitErr) {
+						t.Fatal(err)
+					}
+					fake.runExit = exitErr.ExitCode()
+				}
+			}
+			result, err := b.Run(t.Context(), request)
+			if workloads != 1 || output != want || result.ExitCode != wantCode || (err != nil) != (wantCode != 0) {
+				t.Fatalf("workloads=%d output=%q code=%d err=%v want=%q/%d", workloads, output, result.ExitCode, err, want, wantCode)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("literal sentinel created: %v", err)
+			}
+		})
 	}
 }
 
@@ -705,8 +781,8 @@ func TestRunPreservesBashLoginShellForAutoWrappedMetachars(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := fake.runs[len(fake.runs)-1].Command
-	inner := shellScriptFromArgv([]string{"pnpm", "install", "&&", "pnpm", "test"})
-	want := shellScriptFromArgv([]string{"bash", "-lc", inner})
+	inner := core.ShellScriptFromArgv([]string{"pnpm", "install", "&&", "pnpm", "test"})
+	want := strings.Join(core.ShellWords([]string{"bash", "-lc", inner}), " ")
 	if got != want {
 		t.Fatalf("command=%q want %q", got, want)
 	}

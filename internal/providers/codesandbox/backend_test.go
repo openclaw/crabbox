@@ -690,3 +690,56 @@ func initGitRepo(t *testing.T, dir string) {
 		}
 	}
 }
+
+func TestRunCommandIntentReachesNativeRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		command []string
+		literal map[int]bool
+		shell   bool
+		want    []string
+	}{
+		{"ordinary", []string{"printf", "%s", "hello"}, nil, false, []string{"printf", "%s", "hello"}},
+		{"literal separator", []string{"printf", "%s", ";", "touch", "sentinel"}, map[int]bool{2: true}, false, []string{"printf", "%s", ";", "touch", "sentinel"}},
+		{"literal assignment executable", []string{"FOO=x", "argument"}, map[int]bool{0: true}, false, []string{"FOO=x", "argument"}},
+		{"literal singleton", []string{"literal command $(echo x)"}, map[int]bool{0: true}, false, []string{"literal command $(echo x)"}},
+		{"invalid assignment executable", []string{"bad-name=x", "argument"}, nil, false, []string{"bad-name=x", "argument"}},
+		{"mixed operators", []string{"printf", "%s", ";", "&&", "printf", "%s", "done"}, map[int]bool{2: true}, false, []string{"bash", "-lc", "'printf' '%s' ';' && 'printf' '%s' 'done'"}},
+		{"inferred source", []string{"printf one && printf two"}, nil, false, []string{"bash", "-lc", "printf one && printf two"}},
+		{"explicit source", []string{"printf one; exit 7"}, nil, true, []string{"bash", "-lc", "printf one; exit 7"}},
+		{"leading assignment", []string{"GREETING=hello world", "printf", "%s", "$GREETING"}, nil, false, []string{"bash", "-lc", "GREETING='hello world' 'printf' '%s' '$GREETING'"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := newFakeCodeSandboxAPI()
+			backend, _, _ := newFakeBackend(t, fake)
+			_, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, NoSync: true, Command: tc.command, ShellMode: tc.shell, CommandLiteralArgs: tc.literal})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(fake.commands) != 2 {
+				t.Fatalf("commands=%#v", fake.commands)
+			}
+			got := fake.commands[1].Command
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("native command=%#v want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunRejectsEmptyCommandBeforeCreate(t *testing.T) {
+	for _, shellMode := range []bool{false, true} {
+		for _, command := range [][]string{nil, {""}, {"  "}} {
+			fake := newFakeCodeSandboxAPI()
+			backend, _, _ := newFakeBackend(t, fake)
+			_, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, NoSync: true, ShellMode: shellMode, Command: command})
+			if err == nil || !strings.Contains(err.Error(), "missing command") {
+				t.Fatalf("command=%#v shell=%v err=%v", command, shellMode, err)
+			}
+			if len(fake.created) != 0 {
+				t.Fatalf("created before validation: %#v", fake.created)
+			}
+		}
+	}
+}

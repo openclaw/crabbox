@@ -115,10 +115,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			}
 		}()
 	}
-	command, err := buildCommand(req.Command, req.ShellMode)
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
 		return RunResult{}, err
 	}
+	command := intent.Argv("sh", "-lc")
 	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
@@ -545,22 +546,6 @@ func validateCreateRepo(cfg Config, repo Repo) error {
 		}
 	}
 	return nil
-}
-
-func buildCommand(command []string, shellMode bool) ([]string, error) {
-	if len(command) == 0 {
-		return nil, errors.New("missing command")
-	}
-	if shellMode {
-		return []string{"sh", "-lc", strings.Join(command, " ")}, nil
-	}
-	if len(command) == 1 && shouldUseShell(command) {
-		return []string{"sh", "-lc", command[0]}, nil
-	}
-	if shouldUseShell(command) || leadingEnvAssignment(command) {
-		return []string{"sh", "-lc", shellScriptFromArgv(command)}, nil
-	}
-	return command, nil
 }
 
 func dockerSandboxAgent(cfg Config) string {

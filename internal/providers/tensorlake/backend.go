@@ -167,10 +167,11 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (result Run
 		return RunResult{}, err
 	}
 
-	command, err := buildCommand(req.Command, req.ShellMode)
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
 		return RunResult{}, err
 	}
+	command := intent.Argv("bash", "-lc")
 	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
@@ -503,23 +504,6 @@ func isReadyState(state string) bool {
 
 func randomSuffix() string {
 	return shared.RandomSuffix()
-}
-
-func buildCommand(command []string, shellMode bool) ([]string, error) {
-	if len(command) == 0 {
-		return nil, errors.New("missing command")
-	}
-	if shellMode {
-		return []string{"bash", "-lc", strings.Join(command, " ")}, nil
-	}
-	if shouldUseShell(command) || leadingEnvAssignment(command) {
-		return []string{"bash", "-lc", shellScriptFromArgv(command)}, nil
-	}
-	return command, nil
-}
-
-func leadingEnvAssignment(command []string) bool {
-	return len(command) > 1 && strings.Contains(command[0], "=") && !strings.HasPrefix(command[0], "-")
 }
 
 // tensorlakeWorkdir returns the configured absolute workspace path inside the

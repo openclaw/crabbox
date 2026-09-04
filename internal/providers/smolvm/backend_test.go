@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -467,17 +468,7 @@ func TestCleanWorkdirAndCommand(t *testing.T) {
 			t.Fatalf("cleanWorkdir(%q) succeeded unexpectedly", value)
 		}
 	}
-	command, err := buildCommand([]string{"go", "test", "./..."}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if command != "exec 'go' 'test' './...'" {
-		t.Fatalf("command=%q", command)
-	}
-	env := shellEnvProfile(map[string]string{"B": "two", "A": "one two", "BAD; id >&2 #": "boom"})
-	if env != "set -a\nA='one two'\nB='two'\nset +a\n" {
-		t.Fatalf("env profile=%q", env)
-	}
+
 }
 
 func TestWarmupRejectsActionsRunner(t *testing.T) {
@@ -774,6 +765,8 @@ type fakeAPI struct {
 	getHook        func(context.Context, string) (machineData, error)
 	deleteHook     func(context.Context, string) error
 	streamHook     func()
+	writeHook      func(context.Context, string, string) error
+	execHook       func(context.Context, string) (execResult, error)
 }
 
 func (f *fakeAPI) CreateMachine(_ context.Context, req createRequest) (machineData, error) {
@@ -832,10 +825,13 @@ func (f *fakeAPI) StartMachine(ctx context.Context, id string) error {
 }
 func (f *fakeAPI) StopMachine(context.Context, string) error { return nil }
 
-func (f *fakeAPI) Exec(_ context.Context, _ string, command, folder string) (execResult, error) {
+func (f *fakeAPI) Exec(ctx context.Context, _ string, command, folder string) (execResult, error) {
 	f.verbs = append(f.verbs, "exec")
 	f.execCommands = append(f.execCommands, command)
 	f.execFolders = append(f.execFolders, folder)
+	if f.execHook != nil {
+		return f.execHook(ctx, command)
+	}
 	if len(f.execResults) == 0 {
 		return execResult{ExitCode: 0}, nil
 	}
@@ -862,10 +858,13 @@ func (f *fakeAPI) InjectArchive(_ context.Context, _, _, targetDir string) error
 	return nil
 }
 
-func (f *fakeAPI) WriteFile(_ context.Context, _, remotePath, content string) error {
+func (f *fakeAPI) WriteFile(ctx context.Context, _ string, remotePath, content string) error {
 	f.verbs = append(f.verbs, "write")
 	f.writePaths = append(f.writePaths, remotePath)
 	f.writeContents = append(f.writeContents, content)
+	if f.writeHook != nil {
+		return f.writeHook(ctx, remotePath, content)
+	}
 	return nil
 }
 
@@ -1063,6 +1062,174 @@ func TestClientNativeUploadFailureAndPublication(t *testing.T) {
 				if err != nil || len(matches) != wantResidue {
 					t.Fatalf("staging residue=%v err=%v", matches, err)
 				}
+			}
+		})
+	}
+}
+
+func TestRunCleansPartialEnvironmentProfile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native cleanup fixture requires POSIX shell")
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
+	for _, canceled := range []bool{false, true} {
+		t.Run(fmt.Sprint(canceled), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			root := t.TempDir()
+			mapped := filepath.Join(root, "partial-profile")
+			var remote string
+			primary := errors.New("partial upload")
+			fake := &fakeAPI{}
+			fake.writeHook = func(_ context.Context, remotePath, content string) error {
+				remote = remotePath
+				if err := os.WriteFile(mapped, []byte(content), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if canceled {
+					cancel()
+					return context.Canceled
+				}
+				return primary
+			}
+			cleanups := 0
+			fake.execHook = func(cleanupCtx context.Context, command string) (execResult, error) {
+				if !strings.HasPrefix(command, "rm -f ") {
+					return execResult{}, nil
+				}
+				cleanups++
+				if cleanupCtx.Err() != nil {
+					t.Fatalf("cleanup canceled: %v", cleanupCtx.Err())
+				}
+				if _, ok := cleanupCtx.Deadline(); !ok {
+					t.Fatal("cleanup is unbounded")
+				}
+				if !strings.Contains(command, shellQuote(remote)) {
+					t.Fatal("wrong cleanup target")
+				}
+				cmd := exec.CommandContext(cleanupCtx, "sh", "-c", strings.ReplaceAll(command, shellQuote(remote), shellQuote(mapped)))
+				out, err := cmd.CombinedOutput()
+				return execResult{Output: string(out)}, err
+			}
+			withFakeAPI(t, fake)
+			b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+			_, err := b.Run(ctx, RunRequest{Repo: Repo{Root: root, Name: "fixture"}, NoSync: true, Keep: true, Command: []string{"true"}, Env: map[string]string{"FIXTURE": "synthetic"}})
+			want := primary
+			if canceled {
+				want = context.Canceled
+			}
+			if !errors.Is(err, want) || cleanups != 1 || len(fake.streamCommands) != 0 || fake.deleted {
+				t.Fatalf("err=%v cleanups=%d commands=%v deleted=%v", err, cleanups, fake.streamCommands, fake.deleted)
+			}
+			if _, err := os.Stat(mapped); !os.IsNotExist(err) {
+				t.Fatalf("partial profile retained: %v", err)
+			}
+		})
+	}
+}
+
+func TestEnvironmentProfileCleanupRejectsChangedOwnership(t *testing.T) {
+	for _, changed := range []string{"claim", "machine"} {
+		t.Run(changed, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := &fakeAPI{}
+			withFakeAPI(t, fake)
+			var stderr bytes.Buffer
+			rt := testRuntime()
+			rt.Stderr = &stderr
+			b := NewBackend(Provider{}.Spec(), testConfig(), rt).(*backend)
+			fake.streamHook = func() {
+				if changed == "machine" {
+					fake.machine.CreatedAt = "2026-09-01T00:00:00Z"
+					return
+				}
+				claims, err := core.ListLeaseClaims()
+				if err != nil || len(claims) != 1 {
+					t.Fatalf("claims=%v err=%v", claims, err)
+				}
+				labels := map[string]string{}
+				for k, v := range claims[0].Labels {
+					labels[k] = v
+				}
+				labels["fixture_changed"] = "true"
+				if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(claims[0].LeaseID, claims[0], labels); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, Keep: true, Command: []string{"true"}, Env: map[string]string{"FIXTURE": "synthetic"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, command := range fake.execCommands {
+				if strings.HasPrefix(command, "rm -f ") {
+					t.Fatalf("stale cleanup executed: %s", command)
+				}
+			}
+			if !strings.Contains(stderr.String(), "env profile cleanup failed") {
+				t.Fatalf("missing cleanup warning: %s", stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunSourceIntentSurvivesNativeShell(t *testing.T) {
+	if os.PathSeparator != '/' {
+		t.Skip("POSIX source transport")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh unavailable")
+	}
+	for _, tc := range []struct {
+		name    string
+		command []string
+		literal map[int]bool
+		want    string
+		code    int
+	}{
+		{"literal separator", []string{"printf", "<%s>", ";", "touch", "sentinel"}, map[int]bool{2: true}, "<;><touch><sentinel>", 0},
+		{"literal executable", []string{"FOO=x", "argument"}, map[int]bool{0: true}, "literal:argument", 42},
+		{"mixed intent", []string{"printf", "%s", ";", "&&", "printf", "%s", "done"}, map[int]bool{2: true}, ";done", 0},
+		{"inferred singleton", []string{"printf 'source value'"}, nil, "source value", 0},
+		{"ordinary argv", []string{"printf", "%s", "value"}, nil, "value", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			root := t.TempDir()
+			program := filepath.Join(root, "FOO=x")
+			if err := os.WriteFile(program, []byte("#!/bin/sh\nprintf 'literal:%s' \"$*\"\nexit 42\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			fake := &fakeAPI{}
+			withFakeAPI(t, fake)
+			b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+			_, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: root, Name: "fixture"}, NoSync: true, Keep: true, Command: tc.command, CommandLiteralArgs: tc.literal})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(fake.streamCommands) != 1 {
+				t.Fatalf("stream commands=%v", fake.streamCommands)
+			}
+			cmd := exec.Command(sh, "-c", fake.streamCommands[0])
+			cmd.Dir = root
+			cmd.Env = []string{"HOME=" + root, "PATH=" + root + ":/usr/bin:/bin", "ENV=" + os.DevNull}
+			out, runErr := cmd.CombinedOutput()
+			code := 0
+			if runErr != nil {
+				var ee *exec.ExitError
+				if !errors.As(runErr, &ee) {
+					t.Fatal(runErr)
+				}
+				code = ee.ExitCode()
+			}
+			if string(out) != tc.want || code != tc.code {
+				t.Fatalf("source=%q output=%q code=%d want=%q/%d", fake.streamCommands[0], out, code, tc.want, tc.code)
+			}
+			if _, err := os.Stat(filepath.Join(root, "sentinel")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("literal created sentinel: %v", err)
 			}
 		})
 	}
