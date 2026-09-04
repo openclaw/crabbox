@@ -19,9 +19,10 @@ There are three Workers:
    admitted calls.
 
 The candidate binding has immutable `ctx.props` containing `runId`, `owner`,
-`candidateSha`, `deploymentHash`, and `expiresAt`. The controller binding carries
-the same deployment hash. Enrollment stores the complete fixed policy and its
-hash; candidate operations fail closed if the deployed policy later drifts.
+`candidateSha`, `candidateWorker`, `deploymentHash`, and `expiresAt`. The
+controller binding carries the same deployment hash. Enrollment stores the
+complete fixed policy and its hash plus the authority source SHA and version;
+candidate operations fail closed if the deployed policy later drifts.
 The authority requires an enrolled exact match.
 The absolute expiry must be in the next 120 minutes. A transport failure retries
 the same operation ID once and then fails closed; it never falls back to raw
@@ -37,6 +38,8 @@ Configure these authority variables:
 
 ```text
 CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID
+CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA
+CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION
 CRABBOX_AWS_QUALIFICATION_REGION
 CRABBOX_AWS_QUALIFICATION_SUBNET_ID
 CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID
@@ -127,6 +130,7 @@ identity:
     "runId": "image-qualification-<run>",
     "owner": "<reviewed-owner>",
     "candidateSha": "<40-hex-same-repo-sha>",
+    "candidateWorker": "<isolated-candidate-worker-name>",
     "deploymentHash": "<64-hex-candidate-deployment-hash>",
     "expiresAt": "<absolute-iso8601-within-120m>"
   }
@@ -138,6 +142,28 @@ security group, and root size; request `on-demand`; select only `t3.small` or
 `t3a.small`; leave `CRABBOX_AWS_INSTANCE_PROFILE` empty; and leave
 `CRABBOX_AWS_FAST_SNAPSHOT_RESTORE_AZS` unset. It must also disable routes,
 workers.dev, preview URLs, and cron.
+
+The protected controller also owns a singleton `AWSQualificationRegistry`
+Durable Object. `claim` admits only one active qualification globally and is
+idempotent only for the exact run, candidate Worker, candidate SHA, deployment
+hash, and expiry. `discover` gives an independent reaper the active run and its
+`claimed`, `finalizing`, or `finalized` cleanup state without relying on workflow
+artifacts. `finalize` updates that state around per-run cleanup. `retire` clears
+the active slot only after the persisted run attestation proves finalization.
+These methods and `attest` exist only on the named controller entrypoint; the
+candidate transport exposes only `execute`. The controller persists the per-run
+cleanup owner before publishing its global claim, and every candidate call must
+match that exact active registry record.
+
+`attest(runId)` returns versioned evidence built from persisted Durable Object
+state. It binds the run, candidate and authority revisions, deployed bundle and
+policy hashes, timestamps, and finalized state. Each bounded operation record
+contains only operation/request digests, action, a normalized denial reason,
+and persisted signer before/after sequence points. The final receipt records
+resource counts and pending intent digests at cleanup start, every bounded
+cleanup attempt, each inventory and verification outcome, final zero counts,
+and normalized failures. It never returns raw tokens, keys, user data, URLs,
+account IDs, network addresses, or AWS resource IDs.
 
 ## Replay and teardown
 

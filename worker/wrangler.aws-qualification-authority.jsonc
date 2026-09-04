@@ -12,12 +12,20 @@
         "name": "AWS_QUALIFICATION_RUNS",
         "class_name": "AWSQualificationRun",
       },
+      {
+        "name": "AWS_QUALIFICATION_REGISTRY",
+        "class_name": "AWSQualificationRegistry",
+      },
     ],
   },
   "migrations": [
     {
       "tag": "aws-qualification-v1",
       "new_sqlite_classes": ["AWSQualificationRun"],
+    },
+    {
+      "tag": "aws-qualification-v2",
+      "new_sqlite_classes": ["AWSQualificationRegistry"],
     },
   ],
 }

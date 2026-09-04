@@ -4,10 +4,16 @@ import { XMLParser } from "fast-xml-parser";
 
 import { sha256Hex } from "./auth";
 import {
+  awsQualificationAttestationVersion,
   awsQualificationInstanceTypes,
   awsQualificationMaxRunMs,
+  type AWSQualificationAttestation,
   type AWSQualificationControllerProps,
+  type AWSQualificationFinalReceipt,
+  type AWSQualificationOperationEvidence,
+  type AWSQualificationRegistryRecord,
   type AWSQualificationRequest,
+  type AWSQualificationResourceCounts,
   type AWSQualificationResponse,
   type AWSQualificationRunIdentity,
   type AWSQualificationService,
@@ -22,6 +28,10 @@ const stateKey = "run";
 const ledgerKey = "ledger";
 const receiptPrefix = "receipt:";
 const intentPrefix = "intent:";
+const evidencePrefix = "evidence:";
+const finalReceiptKey = "final-receipt";
+const registryStateKey = "active";
+const registryObjectName = "global";
 const cleanupRetryMs = 60_000;
 const maxRootGB = 20;
 const maxUserDataBytes = 24 * 1024;
@@ -30,6 +40,11 @@ const maxResponseBytes = 64 * 1024;
 const maxRequestNodes = 512;
 const maxCandidateOperations = 64;
 const maxPendingIntents = 8;
+const maxEvidenceRecords = 64;
+const maxSignerDispatchesPerOperation = 4;
+const maxCleanupEvidence = 1024;
+const maxInventoryEvidence = 2048;
+const maxVerificationEvidence = 1024;
 const maxLaunches = 3;
 const maxActiveInstances = 1;
 const maxActiveImages = 1;
@@ -89,12 +104,15 @@ interface AWSQualificationAuthorityEnv {
   AWS_SECRET_ACCESS_KEY?: string;
   AWS_SESSION_TOKEN?: string;
   CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID?: string;
+  CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA?: string;
+  CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION?: string;
   CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID?: string;
   CRABBOX_AWS_QUALIFICATION_REGION?: string;
   CRABBOX_AWS_QUALIFICATION_ROOT_GB?: string;
   CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID?: string;
   CRABBOX_AWS_QUALIFICATION_SUBNET_ID?: string;
   AWS_QUALIFICATION_RUNS: DurableObjectNamespace<AWSQualificationRun>;
+  AWS_QUALIFICATION_REGISTRY: DurableObjectNamespace<AWSQualificationRegistry>;
 }
 
 interface AWSQualificationPolicy {
@@ -110,6 +128,9 @@ interface AWSQualificationRunState {
   identity: AWSQualificationRunIdentity;
   enrolledAt: string;
   operationCount: number;
+  signerSequence: number;
+  authoritySha: string;
+  authorityVersion: string;
   policy: AWSQualificationPolicy;
   policyHash: string;
   finalizedAt?: string;
@@ -158,6 +179,7 @@ export class AWSQualificationTransport extends WorkerEntrypoint<
   AWSQualificationRunIdentity
 > {
   async execute(request: AWSQualificationRequest): Promise<AWSQualificationResponse> {
+    await qualificationRegistry(this.env).assertActive(this.ctx.props);
     return await qualificationRun(this.env, this.ctx.props.runId).execute(this.ctx.props, request);
   }
 }
@@ -169,11 +191,131 @@ export class AWSQualificationController extends WorkerEntrypoint<
   AWSQualificationControllerProps
 > {
   async enroll(identity: AWSQualificationRunIdentity): Promise<void> {
-    await qualificationRun(this.env, identity.runId).enroll(this.ctx.props, identity);
+    await this.claim(identity);
   }
 
   async finalize(runId: string): Promise<AWSQualificationLedger> {
-    return await qualificationRun(this.env, runId).finalize(this.ctx.props);
+    await qualificationRegistry(this.env).markFinalizing(this.ctx.props, runId);
+    const ledger = await qualificationRun(this.env, runId).finalize(this.ctx.props);
+    await qualificationRegistry(this.env).markFinalized(this.ctx.props, runId);
+    return ledger;
+  }
+
+  async attest(runId: string): Promise<AWSQualificationAttestation> {
+    return await qualificationRun(this.env, runId).attest(this.ctx.props);
+  }
+
+  async claim(identity: AWSQualificationRunIdentity): Promise<AWSQualificationRegistryRecord> {
+    // Persist the per-run cleanup owner before making this run globally active. Candidate
+    // dispatch also checks the registry, so a losing concurrent claim cannot use its run state.
+    await qualificationRun(this.env, identity.runId).enroll(this.ctx.props, identity);
+    return await qualificationRegistry(this.env).claim(this.ctx.props, identity);
+  }
+
+  async discover(): Promise<AWSQualificationRegistryRecord | undefined> {
+    return await qualificationRegistry(this.env).discover(this.ctx.props);
+  }
+
+  async retire(runId: string): Promise<void> {
+    const attestation = await qualificationRun(this.env, runId).attest(this.ctx.props);
+    if (!attestation.finalized) throw new Error("AWS qualification run is not finalized");
+    await qualificationRegistry(this.env).retire(this.ctx.props, runId);
+  }
+}
+
+export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuthorityEnv> {
+  async assertActive(identity: AWSQualificationRunIdentity): Promise<void> {
+    validateRunIdentity(identity);
+    const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
+    if (
+      !active ||
+      canonicalJSON(registryIdentity(active)) !== canonicalJSON(registryIdentity(identity))
+    ) {
+      throw new Error("AWS qualification registry run is not active");
+    }
+  }
+
+  async discover(
+    controller: AWSQualificationControllerProps,
+  ): Promise<AWSQualificationRegistryRecord | undefined> {
+    const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
+    if (active) validateController(controller, active.deploymentHash);
+    else validateControllerShape(controller);
+    return active;
+  }
+
+  async claim(
+    controller: AWSQualificationControllerProps,
+    identity: AWSQualificationRunIdentity,
+  ): Promise<AWSQualificationRegistryRecord> {
+    validateController(controller, identity.deploymentHash);
+    validateRunIdentity(identity);
+    validateRunWindow(identity);
+    const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
+    if (active) {
+      if (canonicalJSON(registryIdentity(active)) !== canonicalJSON(registryIdentity(identity))) {
+        throw new Error("AWS qualification registry already has an active run");
+      }
+      return active;
+    }
+    const activeRecord: AWSQualificationRegistryRecord = {
+      version: awsQualificationAttestationVersion,
+      ...registryIdentity(identity),
+      cleanupState: "claimed",
+      claimedAt: new Date().toISOString(),
+    };
+    await this.ctx.storage.put(registryStateKey, activeRecord);
+    return activeRecord;
+  }
+
+  async markFinalizing(
+    controller: AWSQualificationControllerProps,
+    runId: string,
+  ): Promise<AWSQualificationRegistryRecord> {
+    return await this.transition(controller, runId, "finalizing");
+  }
+
+  async markFinalized(
+    controller: AWSQualificationControllerProps,
+    runId: string,
+  ): Promise<AWSQualificationRegistryRecord> {
+    return await this.transition(controller, runId, "finalized");
+  }
+
+  async retire(controller: AWSQualificationControllerProps, runId: string): Promise<void> {
+    const active = await this.requireActive(controller, runId);
+    if (active.cleanupState !== "finalized") {
+      throw new Error("AWS qualification registry run is not finalized");
+    }
+    await this.ctx.storage.delete(registryStateKey);
+  }
+
+  private async transition(
+    controller: AWSQualificationControllerProps,
+    runId: string,
+    cleanupState: "finalizing" | "finalized",
+  ): Promise<AWSQualificationRegistryRecord> {
+    const active = await this.requireActive(controller, runId);
+    if (active.cleanupState === "finalized") return active;
+    const next = {
+      ...active,
+      cleanupState,
+      ...(cleanupState === "finalized" ? { finalizedAt: new Date().toISOString() } : {}),
+    } satisfies AWSQualificationRegistryRecord;
+    await this.ctx.storage.put(registryStateKey, next);
+    return next;
+  }
+
+  private async requireActive(
+    controller: AWSQualificationControllerProps,
+    runId: string,
+  ): Promise<AWSQualificationRegistryRecord> {
+    const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
+    if (!active || active.runId !== runId) {
+      throw new Error("AWS qualification registry run is not active");
+    }
+    validateController(controller, active.deploymentHash);
+    return active;
   }
 }
 
@@ -196,13 +338,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
   ): Promise<void> {
     return await this.serialized(async () => {
       const policy = authorityPolicy(this.env);
+      const authority = authorityIdentity(this.env);
       validateController(controller, identity.deploymentHash);
       validateRunIdentity(identity);
+      validateRunWindow(identity);
       const expiresAt = Date.parse(identity.expiresAt);
       const now = Date.now();
-      if (expiresAt <= now || expiresAt > now + awsQualificationMaxRunMs) {
-        throw new Error("AWS qualification expiry must be in the next 120 minutes");
-      }
       if (policy.region !== requireAWSRegion(policy.region)) {
         throw new Error("AWS qualification region is invalid");
       }
@@ -210,7 +351,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       if (existing) {
         if (
           canonicalJSON(existing.identity) !== canonicalJSON(identity) ||
-          existing.policyHash !== (await qualificationPolicyHash(policy))
+          existing.policyHash !== (await qualificationPolicyHash(policy)) ||
+          existing.authoritySha !== authority.sha ||
+          existing.authorityVersion !== authority.version
         ) {
           throw new Error("AWS qualification run identity is already enrolled");
         }
@@ -222,6 +365,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
           identity: structuredClone(identity),
           enrolledAt: new Date(now).toISOString(),
           operationCount: 0,
+          signerSequence: 0,
+          authoritySha: authority.sha,
+          authorityVersion: authority.version,
           policy: structuredClone(policy),
           policyHash,
         } satisfies AWSQualificationRunState,
@@ -240,6 +386,40 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
 
   async finalize(controller?: AWSQualificationControllerProps): Promise<AWSQualificationLedger> {
     return await this.serialized(() => this.finalizeSerialized(controller));
+  }
+
+  async attest(controller: AWSQualificationControllerProps): Promise<AWSQualificationAttestation> {
+    return await this.serialized(async () => {
+      const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
+      if (!run) throw new Error("AWS qualification run is not enrolled");
+      validateController(controller, run.identity.deploymentHash);
+      const operations = [
+        ...(await this.ctx.storage.list<AWSQualificationOperationEvidence>({
+          prefix: evidencePrefix,
+        })),
+      ]
+        .map(([, evidence]) => evidence)
+        .toSorted((left, right) => left.requestedAt.localeCompare(right.requestedAt))
+        .slice(0, maxEvidenceRecords);
+      const finalReceipt =
+        await this.ctx.storage.get<AWSQualificationFinalReceipt>(finalReceiptKey);
+      return {
+        version: awsQualificationAttestationVersion,
+        runId: run.identity.runId,
+        candidateSha: run.identity.candidateSha,
+        candidateWorker: run.identity.candidateWorker,
+        deploymentHash: run.identity.deploymentHash,
+        authoritySha: run.authoritySha,
+        authorityVersion: run.authorityVersion,
+        policyHash: run.policyHash,
+        enrolledAt: run.enrolledAt,
+        expiresAt: run.identity.expiresAt,
+        finalized: Boolean(run.finalizedAt),
+        ...(run.finalizedAt ? { finalizedAt: run.finalizedAt } : {}),
+        operations,
+        ...(finalReceipt ? { finalReceipt } : {}),
+      };
+    });
   }
 
   override async alarm(): Promise<void> {
@@ -261,6 +441,30 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         service: normalizedRequest.service,
       }),
     );
+    const evidenceKey = `${evidencePrefix}${await sha256Hex(`op:${normalizedRequest.opId}`)}`;
+    let evidence = await this.ctx.storage.get<AWSQualificationOperationEvidence>(evidenceKey);
+    if (!evidence) {
+      const evidenceRecords = await this.ctx.storage.list<AWSQualificationOperationEvidence>({
+        prefix: evidencePrefix,
+      });
+      if (evidenceRecords.size >= maxEvidenceRecords) {
+        throw new Error("AWS qualification evidence limit reached");
+      }
+      evidence = {
+        version: awsQualificationAttestationVersion,
+        opDigest: evidenceKey.slice(evidencePrefix.length),
+        requestDigest: requestHash,
+        action: evidenceAction(normalizedRequest.action),
+        requestedAt: new Date().toISOString(),
+        signerDispatches: [],
+      };
+      await this.ctx.storage.put(evidenceKey, evidence);
+    } else if (
+      evidence.requestDigest !== requestHash ||
+      evidence.action !== evidenceAction(normalizedRequest.action)
+    ) {
+      throw new Error("AWS qualification evidence digest mismatch");
+    }
     const receipt = await this.ctx.storage.get<AWSQualificationReceipt>(
       `${receiptPrefix}${normalizedRequest.opId}`,
     );
@@ -296,25 +500,50 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
 
     const ledger = await this.ledger();
     const pending = await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix });
-    if (!priorIntent) {
-      if (run.operationCount >= maxCandidateOperations) {
-        throw new Error("AWS qualification candidate operation limit reached");
+    try {
+      if (!priorIntent) {
+        if (run.operationCount >= maxCandidateOperations) {
+          throw new Error("AWS qualification candidate operation limit reached");
+        }
+        if (pending.size >= maxPendingIntents) {
+          throw new Error("AWS qualification pending intent limit reached");
+        }
+        assertLifecycleCapacity(normalizedRequest, ledger, pending);
       }
-      if (pending.size >= maxPendingIntents) {
-        throw new Error("AWS qualification pending intent limit reached");
-      }
-      assertLifecycleCapacity(normalizedRequest, ledger, pending);
+    } catch (error) {
+      await this.ctx.storage.put(evidenceKey, {
+        ...evidence,
+        denialReason: evidenceDenialReason(error),
+      });
+      throw error;
     }
-    const authorized = await authorizeRequest(
-      normalizedRequest,
-      identity,
-      policy,
-      ledger,
-      await qualificationPhysicalKeyName(identity.runId),
-      await qualificationClientToken(identity.runId, normalizedRequest.opId),
-    );
-    if (normalizedRequest.service !== "sts") {
-      await this.ensureAccount(policy);
+    let authorized: Awaited<ReturnType<typeof authorizeRequest>>;
+    try {
+      authorized = await authorizeRequest(
+        normalizedRequest,
+        identity,
+        policy,
+        ledger,
+        await qualificationPhysicalKeyName(identity.runId),
+        await qualificationClientToken(identity.runId, normalizedRequest.opId),
+      );
+    } catch (error) {
+      await this.ctx.storage.put(evidenceKey, {
+        ...evidence,
+        denialReason: evidenceDenialReason(error),
+      });
+      throw error;
+    }
+    try {
+      if (normalizedRequest.service !== "sts") {
+        await this.ensureAccount(policy);
+      }
+    } catch (error) {
+      await this.ctx.storage.put(evidenceKey, {
+        ...evidence,
+        denialReason: evidenceDenialReason(error),
+      });
+      throw error;
     }
     let dispatchIntent = priorIntent;
     if (!dispatchIntent) {
@@ -336,6 +565,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     if (authorized.mutating) {
       await this.markCandidateMutationDispatched(run, intentKey, dispatchIntent);
     }
+    evidence = await this.beginSignerDispatch(run, evidenceKey, evidence);
     const response = await this.signer.execute(
       normalizedRequest.service,
       normalizedRequest.action,
@@ -343,6 +573,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       authorized.parameters,
     );
     const result = await boundedResponse(response);
+    await this.finishSignerDispatch(run, evidenceKey, evidence, result);
     if (authorized.mutating && result.status >= 500) {
       throw new Error(
         `AWS qualification ${normalizedRequest.action} response is ambiguous: http ${result.status}`,
@@ -578,6 +809,53 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     }
   }
 
+  private async beginSignerDispatch(
+    run: AWSQualificationRunState,
+    evidenceKey: string,
+    evidence: AWSQualificationOperationEvidence,
+  ): Promise<AWSQualificationOperationEvidence> {
+    run.signerSequence += 1;
+    if (evidence.signerDispatches.length >= maxSignerDispatchesPerOperation) {
+      throw new Error("AWS qualification operation dispatch evidence limit reached");
+    }
+    const next = {
+      ...evidence,
+      signerDispatches: [
+        ...evidence.signerDispatches,
+        { beforeSequence: run.signerSequence, beforeAt: new Date().toISOString() },
+      ],
+    } satisfies AWSQualificationOperationEvidence;
+    await this.ctx.storage.put({ [stateKey]: run, [evidenceKey]: next });
+    return next;
+  }
+
+  private async finishSignerDispatch(
+    run: AWSQualificationRunState,
+    evidenceKey: string,
+    evidence: AWSQualificationOperationEvidence,
+    result: AWSQualificationResponse,
+  ): Promise<void> {
+    run.signerSequence += 1;
+    const signerDispatches = evidence.signerDispatches.map((dispatch, index) =>
+      index === evidence.signerDispatches.length - 1
+        ? {
+            ...dispatch,
+            afterSequence: run.signerSequence,
+            afterAt: new Date().toISOString(),
+            outcome: result.status < 300 ? ("accepted" as const) : ("rejected" as const),
+            statusClass: Math.floor(result.status / 100),
+          }
+        : dispatch,
+    );
+    await this.ctx.storage.put({
+      [stateKey]: run,
+      [evidenceKey]: {
+        ...evidence,
+        signerDispatches,
+      } satisfies AWSQualificationOperationEvidence,
+    });
+  }
+
   private async markCandidateMutationDispatched(
     run: AWSQualificationRunState,
     intentKey: string,
@@ -613,6 +891,10 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     if ((await qualificationPolicyHash(authorityPolicy(this.env))) !== run.policyHash) {
       throw new Error("AWS qualification authority policy changed after enrollment");
     }
+    const authority = authorityIdentity(this.env);
+    if (authority.sha !== run.authoritySha || authority.version !== run.authorityVersion) {
+      throw new Error("AWS qualification authority deployment changed after enrollment");
+    }
     return run;
   }
 
@@ -624,14 +906,25 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     if (!run || run.finalizedAt) return ledger;
     if (controller) validateController(controller, run.identity.deploymentHash);
     const policy = run.policy;
-    await this.ensureAccount(policy);
     const failures: string[] = [];
+    await this.beginFinalReceipt(ledger);
+    try {
+      await this.ensureAccount(policy);
+      await this.recordVerificationEvidence("GetCallerIdentity", "accepted");
+    } catch (error) {
+      failures.push("account verification failed");
+      await this.recordVerificationEvidence("GetCallerIdentity", "error");
+      await this.completeFinalReceipt(ledger, failures);
+      await this.ctx.storage.setAlarm(Date.now() + cleanupRetryMs);
+      throw error;
+    }
     await this.recoverPendingIntents(run, policy, failures);
     const recoveredLedger = await this.inventoryRunResourcesEventually(
       run,
       await this.ledger(),
       failures,
       true,
+      "pre-cleanup",
     );
     await this.ctx.storage.put(ledgerKey, recoveredLedger);
     for (const imageId of ownedWithRetired(
@@ -673,6 +966,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       emptyLedger(recoveredLedger.launchCount),
       failures,
       false,
+      "post-cleanup",
     );
     await this.verifyZeroResidue(recoveredLedger, policy, failures);
     if (hasOwnedResources(residue)) failures.push("run-tag inventory still contains resources");
@@ -680,12 +974,14 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       await this.retireUnresolvedIntents();
     }
     if (failures.length > 0) {
+      await this.completeFinalReceipt(residue, failures);
       await this.ctx.storage.setAlarm(Date.now() + cleanupRetryMs);
       throw new Error(`AWS qualification cleanup incomplete: ${failures.join("; ")}`);
     }
     await this.ctx.storage.put(ledgerKey, emptyLedger(recoveredLedger.launchCount));
     run.finalizedAt = new Date().toISOString();
     await this.ctx.storage.put(stateKey, run);
+    await this.completeFinalReceipt(emptyLedger(recoveredLedger.launchCount), []);
     await this.ctx.storage.deleteAlarm();
     return recoveredLedger;
   }
@@ -757,6 +1053,130 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     // inventory and cleanup prove zero residue, then retireUnresolvedIntents removes them.
   }
 
+  private async beginFinalReceipt(ledger: AWSQualificationLedger): Promise<void> {
+    const existing = await this.ctx.storage.get<AWSQualificationFinalReceipt>(finalReceiptKey);
+    if (existing) {
+      const { completedAt: _completedAt, finalCounts: _finalCounts, ...pending } = existing;
+      await this.ctx.storage.put(finalReceiptKey, {
+        ...pending,
+        finalizeAttempts: existing.finalizeAttempts + 1,
+        failureCodes: [],
+      });
+      return;
+    }
+    const pending = [
+      ...(await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix })),
+    ];
+    const pendingAtStart = await Promise.all(
+      pending.map(async ([, intent]) => ({
+        opDigest: await sha256Hex(`op:${intent.request.opId}`),
+        requestDigest: intent.requestHash,
+        action: intent.request.action,
+        phase: intent.phase ?? ("legacy" as const),
+      })),
+    );
+    await this.ctx.storage.put(finalReceiptKey, {
+      version: awsQualificationAttestationVersion,
+      startedAt: new Date().toISOString(),
+      finalizeAttempts: 1,
+      resourcesAtStart: resourceCounts(ledger),
+      pendingAtStart,
+      cleanupAttempts: [],
+      inventory: [],
+      verification: [],
+      failureCodes: [],
+    } satisfies AWSQualificationFinalReceipt);
+  }
+
+  private async completeFinalReceipt(
+    ledger: AWSQualificationLedger | undefined,
+    failures: string[],
+  ): Promise<void> {
+    const receipt = await this.requireFinalReceipt();
+    await this.ctx.storage.put(finalReceiptKey, {
+      ...receipt,
+      completedAt: new Date().toISOString(),
+      ...(ledger ? { finalCounts: resourceCounts(ledger) } : {}),
+      failureCodes: failures.map(evidenceFailureCode),
+    });
+  }
+
+  private async beginCleanupEvidence(
+    action: string,
+    parameters: Record<string, unknown>,
+  ): Promise<number> {
+    const receipt = await this.requireFinalReceipt();
+    if (receipt.cleanupAttempts.length >= maxCleanupEvidence) {
+      throw new Error("AWS qualification cleanup evidence limit reached");
+    }
+    const sequence = receipt.cleanupAttempts.length + 1;
+    receipt.cleanupAttempts.push({
+      sequence,
+      action,
+      targetDigest: await sha256Hex(canonicalJSON(parameters)),
+      startedAt: new Date().toISOString(),
+    });
+    await this.ctx.storage.put(finalReceiptKey, receipt);
+    return sequence;
+  }
+
+  private async finishCleanupEvidence(
+    sequence: number,
+    outcome: "accepted" | "absent" | "rejected" | "error",
+    status?: number,
+  ): Promise<void> {
+    const receipt = await this.requireFinalReceipt();
+    const attempt = receipt.cleanupAttempts.find((entry) => entry.sequence === sequence);
+    if (!attempt) throw new Error("AWS qualification cleanup evidence is missing");
+    attempt.completedAt = new Date().toISOString();
+    attempt.outcome = outcome;
+    if (status !== undefined) attempt.statusClass = Math.floor(status / 100);
+    await this.ctx.storage.put(finalReceiptKey, receipt);
+  }
+
+  private async recordInventoryEvidence(
+    phase: "pre-cleanup" | "post-cleanup",
+    ledger: AWSQualificationLedger,
+    failures: string[],
+  ): Promise<void> {
+    const receipt = await this.requireFinalReceipt();
+    if (receipt.inventory.length >= maxInventoryEvidence) {
+      throw new Error("AWS qualification inventory evidence limit reached");
+    }
+    receipt.inventory.push({
+      sequence: receipt.inventory.length + 1,
+      phase,
+      at: new Date().toISOString(),
+      outcome: failures.length === 0 ? "accepted" : "rejected",
+      counts: resourceCounts(ledger),
+      failureCodes: failures.map(evidenceFailureCode),
+    });
+    await this.ctx.storage.put(finalReceiptKey, receipt);
+  }
+
+  private async recordVerificationEvidence(
+    action: string,
+    outcome: "accepted" | "absent" | "present" | "rejected" | "error",
+  ): Promise<void> {
+    const receipt = await this.requireFinalReceipt();
+    if (receipt.verification.length >= maxVerificationEvidence) {
+      throw new Error("AWS qualification verification evidence limit reached");
+    }
+    receipt.verification.push({
+      sequence: receipt.verification.length + 1,
+      action,
+      at: new Date().toISOString(),
+      outcome,
+    });
+    await this.ctx.storage.put(finalReceiptKey, receipt);
+  }
+
+  private async requireFinalReceipt(): Promise<AWSQualificationFinalReceipt> {
+    const receipt = await this.ctx.storage.get<AWSQualificationFinalReceipt>(finalReceiptKey);
+    if (!receipt) throw new Error("AWS qualification final receipt is missing");
+    return receipt;
+  }
+
   private async cleanup(
     run: AWSQualificationRunState,
     policy: AWSQualificationPolicy,
@@ -764,7 +1184,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     parameters: Record<string, unknown>,
     failures: string[],
   ): Promise<void> {
+    let evidenceSequence: number | undefined;
     try {
+      evidenceSequence = await this.beginCleanupEvidence(action, parameters);
       await this.ensureAccount(policy);
       const response = await this.signer.execute("ec2", action, policy.region, parameters);
       const result = await boundedResponse(response);
@@ -774,9 +1196,19 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         !result.body.includes("InvalidAMIID.NotFound") &&
         !result.body.includes("InvalidSnapshot.NotFound")
       ) {
+        await this.finishCleanupEvidence(evidenceSequence, "rejected", result.status);
         failures.push(`${action} http ${result.status}`);
+      } else {
+        await this.finishCleanupEvidence(
+          evidenceSequence,
+          result.status >= 300 ? "absent" : "accepted",
+          result.status,
+        );
       }
     } catch (error) {
+      if (evidenceSequence !== undefined) {
+        await this.finishCleanupEvidence(evidenceSequence, "error");
+      }
       failures.push(`${action}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
@@ -864,6 +1296,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     ledger: AWSQualificationLedger,
     failures: string[],
     accumulate: boolean,
+    phase: "pre-cleanup" | "post-cleanup",
     attempt = 0,
   ): Promise<AWSQualificationLedger> {
     const attemptFailures: string[] = [];
@@ -873,13 +1306,21 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       attemptFailures,
     );
     const next = accumulate ? mergeLedgers(ledger, observed) : observed;
+    await this.recordInventoryEvidence(phase, observed, attemptFailures);
     const delay = inventoryBackoffMs[attempt];
     if (delay === undefined) {
       failures.push(...attemptFailures);
       return next;
     }
     await sleep(delay);
-    return await this.inventoryRunResourcesEventually(run, next, failures, accumulate, attempt + 1);
+    return await this.inventoryRunResourcesEventually(
+      run,
+      next,
+      failures,
+      accumulate,
+      phase,
+      attempt + 1,
+    );
   }
 
   private async reconcilePendingLaunch(
@@ -1039,7 +1480,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
   ): Promise<void> {
     try {
       await this.ensureAccount(policy);
+      await this.recordVerificationEvidence("GetCallerIdentity", "accepted");
     } catch (error) {
+      await this.recordVerificationEvidence("GetCallerIdentity", "error");
       failures.push(
         `residue account verification: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -1084,6 +1527,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       });
       const groupResult = await boundedResponse(group);
       if (groupResult.status < 200 || groupResult.status >= 300) {
+        await this.recordVerificationEvidence("DescribeSecurityGroups", "rejected");
         failures.push(`DescribeSecurityGroups verification http ${groupResult.status}`);
         return;
       }
@@ -1091,9 +1535,13 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         record(awsXMLRoot(groupResult.body, "DescribeSecurityGroups")["securityGroupInfo"])["item"],
       ).map(record);
       if (groups.length !== 1 || asString(groups[0]!["groupId"]) !== policy.securityGroupId) {
+        await this.recordVerificationEvidence("DescribeSecurityGroups", "rejected");
         failures.push("preprovisioned security group is missing");
+      } else {
+        await this.recordVerificationEvidence("DescribeSecurityGroups", "accepted");
       }
     } catch (error) {
+      await this.recordVerificationEvidence("DescribeSecurityGroups", "error");
       failures.push(
         `DescribeSecurityGroups verification: ${
           error instanceof Error ? error.message : String(error)
@@ -1114,7 +1562,10 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         : Object.fromEntries(
             ledger.keyPairNames.map((name, index) => [`KeyName.${index + 1}`, name]),
           );
-    if (Object.keys(parameters).length === 0) return;
+    if (Object.keys(parameters).length === 0) {
+      await this.recordVerificationEvidence("DescribeKeyPairs", "absent");
+      return;
+    }
     try {
       const response = await this.signer.execute(
         "ec2",
@@ -1124,15 +1575,23 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       );
       const result = await boundedResponse(response);
       if (result.status >= 300) {
-        if (result.body.includes("NotFound")) return;
+        if (result.body.includes("NotFound")) {
+          await this.recordVerificationEvidence("DescribeKeyPairs", "absent");
+          return;
+        }
+        await this.recordVerificationEvidence("DescribeKeyPairs", "rejected");
         failures.push(`DescribeKeyPairs verification http ${result.status}`);
         return;
       }
       const root = awsXMLRoot(result.body, "DescribeKeyPairs");
       if (items(record(root["keySet"])["item"]).length > 0) {
+        await this.recordVerificationEvidence("DescribeKeyPairs", "present");
         failures.push("DescribeKeyPairs still returns run-owned resources");
+      } else {
+        await this.recordVerificationEvidence("DescribeKeyPairs", "absent");
       }
     } catch (error) {
+      await this.recordVerificationEvidence("DescribeKeyPairs", "error");
       failures.push(
         `DescribeKeyPairs verification: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -1147,13 +1606,20 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     resultField: string,
     failures: string[],
   ): Promise<void> {
-    if (ids.length === 0) return;
+    if (ids.length === 0) {
+      await this.recordVerificationEvidence(action, "absent");
+      return;
+    }
     const parameters = Object.fromEntries(ids.map((id, index) => [`${idField}.${index + 1}`, id]));
     try {
       const response = await this.signer.execute("ec2", action, policy.region, parameters);
       const result = await boundedResponse(response);
       if (result.status >= 300) {
-        if (result.body.includes("NotFound")) return;
+        if (result.body.includes("NotFound")) {
+          await this.recordVerificationEvidence(action, "absent");
+          return;
+        }
+        await this.recordVerificationEvidence(action, "rejected");
         failures.push(`${action} verification http ${result.status}`);
         return;
       }
@@ -1170,9 +1636,13 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
               )
           : entries;
       if (remaining.length > 0) {
+        await this.recordVerificationEvidence(action, "present");
         failures.push(`${action} still returns run-owned resources`);
+      } else {
+        await this.recordVerificationEvidence(action, "absent");
       }
     } catch (error) {
+      await this.recordVerificationEvidence(action, "error");
       failures.push(
         `${action} verification: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -1697,6 +2167,9 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
   if (!/^[0-9a-f]{40}$/.test(identity.candidateSha)) {
     throw new Error("AWS qualification candidate SHA must be exact");
   }
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(identity.candidateWorker)) {
+    throw new Error("AWS qualification candidate Worker is malformed");
+  }
   if (!/^[0-9a-f]{64}$/.test(identity.deploymentHash)) {
     throw new Error("AWS qualification deployment hash must be exact");
   }
@@ -1705,6 +2178,14 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
   }
   if (!Number.isFinite(Date.parse(identity.expiresAt))) {
     throw new Error("AWS qualification expiry is malformed");
+  }
+}
+
+function validateRunWindow(identity: AWSQualificationRunIdentity): void {
+  const expiresAt = Date.parse(identity.expiresAt);
+  const now = Date.now();
+  if (expiresAt <= now || expiresAt > now + awsQualificationMaxRunMs) {
+    throw new Error("AWS qualification expiry must be in the next 120 minutes");
   }
 }
 
@@ -1753,12 +2234,43 @@ function validateController(
   controller: AWSQualificationControllerProps,
   deploymentHash: string,
 ): void {
-  if (!/^[0-9a-f]{64}$/.test(controller.deploymentHash)) {
-    throw new Error("AWS qualification controller deployment hash is malformed");
-  }
+  validateControllerShape(controller);
   if (controller.deploymentHash !== deploymentHash) {
     throw new Error("AWS qualification controller is not bound to this deployment");
   }
+}
+
+function validateControllerShape(controller: AWSQualificationControllerProps): void {
+  if (!/^[0-9a-f]{64}$/.test(controller.deploymentHash)) {
+    throw new Error("AWS qualification controller deployment hash is malformed");
+  }
+}
+
+function registryIdentity(
+  value: AWSQualificationRunIdentity | AWSQualificationRegistryRecord,
+): Pick<
+  AWSQualificationRegistryRecord,
+  "runId" | "candidateSha" | "candidateWorker" | "deploymentHash" | "expiresAt"
+> {
+  return {
+    runId: value.runId,
+    candidateSha: value.candidateSha,
+    candidateWorker: value.candidateWorker,
+    deploymentHash: value.deploymentHash,
+    expiresAt: value.expiresAt,
+  };
+}
+
+function authorityIdentity(env: AWSQualificationAuthorityEnv): { sha: string; version: string } {
+  const sha = env.CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA?.trim() ?? "";
+  const version = env.CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION?.trim() ?? "";
+  if (!/^[0-9a-f]{40}$/.test(sha)) {
+    throw new Error("AWS qualification authority SHA must be exact");
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/.test(version)) {
+    throw new Error("AWS qualification authority version is malformed");
+  }
+  return { sha, version };
 }
 
 async function qualificationPolicyHash(policy: AWSQualificationPolicy): Promise<string> {
@@ -1808,6 +2320,14 @@ function qualificationRun(
   runId: string,
 ): DurableObjectStub<AWSQualificationRun> {
   return env.AWS_QUALIFICATION_RUNS.get(env.AWS_QUALIFICATION_RUNS.idFromName(runId));
+}
+
+function qualificationRegistry(
+  env: AWSQualificationAuthorityEnv,
+): DurableObjectStub<AWSQualificationRegistry> {
+  return env.AWS_QUALIFICATION_REGISTRY.get(
+    env.AWS_QUALIFICATION_REGISTRY.idFromName(registryObjectName),
+  );
 }
 
 function stringParameters(input: Record<string, unknown>): Record<string, string> {
@@ -2163,6 +2683,45 @@ function hasOwnedResources(ledger: AWSQualificationLedger): boolean {
     ledger.snapshotIds.length > 0 ||
     ledger.volumeIds.length > 0
   );
+}
+
+function resourceCounts(ledger: AWSQualificationLedger): AWSQualificationResourceCounts {
+  return {
+    images: ledger.imageIds.length,
+    instances: ledger.instanceIds.length,
+    keyPairs: ledger.keyPairIds.length,
+    snapshots: ledger.snapshotIds.length,
+    volumes: ledger.volumeIds.length,
+  };
+}
+
+function evidenceDenialReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("outside the run ledger")) return "resource-not-owned";
+  if (message.includes("outside policy") || message.includes("not allowed")) return "policy-denied";
+  if (message.includes("wrong account")) return "account-mismatch";
+  if (message.includes("limit") || message.includes("allows one")) return "capacity-denied";
+  if (message.includes("expired")) return "run-expired";
+  return "request-denied";
+}
+
+function evidenceAction(action: string): string {
+  if (
+    allowedEC2Actions.has(action) ||
+    action === "GetCallerIdentity" ||
+    action === "GetServiceQuota"
+  ) {
+    return action;
+  }
+  return "DeniedAction";
+}
+
+function evidenceFailureCode(failure: string): string {
+  if (failure.startsWith("run-tag inventory")) return "inventory-failed";
+  if (failure.startsWith("Describe")) return "verification-failed";
+  if (failure.includes("account verification")) return "account-verification-failed";
+  if (failure.includes("reconciliation")) return "reconciliation-failed";
+  return "cleanup-failed";
 }
 
 function decodePublicKeyMaterial(material: string): string {

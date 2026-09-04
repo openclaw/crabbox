@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { EC2SpotClient } from "../src/aws";
 import {
   AWSQualificationController,
+  AWSQualificationRegistry,
   AWSQualificationRun,
   AWSQualificationTransport,
 } from "../src/aws-qualification-authority";
@@ -22,6 +23,7 @@ const identity: AWSQualificationRunIdentity = {
   runId: "qualification-test-1",
   owner: "maintainer",
   candidateSha: "a".repeat(40),
+  candidateWorker: "crabbox-qualification-candidate",
   deploymentHash: controller.deploymentHash,
   expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
 };
@@ -42,6 +44,8 @@ describe("AWS qualification authority deployment", () => {
     expect(authorityConfig).not.toContain('"routes"');
     expect(authorityConfig).not.toContain('"triggers"');
     expect(authorityConfig).not.toContain('"crons"');
+    expect(authorityConfig).toContain('"name": "AWS_QUALIFICATION_REGISTRY"');
+    expect(authorityConfig).toContain('"new_sqlite_classes": ["AWSQualificationRegistry"]');
   });
 
   it("separates the candidate transport from the protected controller entrypoint", async () => {
@@ -53,6 +57,8 @@ describe("AWS qualification authority deployment", () => {
         ) => Promise<void>
       >();
     const finalize = vi.fn<(controller: AWSQualificationControllerProps) => Promise<unknown>>();
+    const attest = vi.fn<(controller: AWSQualificationControllerProps) => Promise<unknown>>();
+    attest.mockResolvedValue({ finalized: true });
     const execute =
       vi.fn<
         (
@@ -68,21 +74,106 @@ describe("AWS qualification authority deployment", () => {
           enroll: typeof enroll;
           execute: typeof execute;
           finalize: typeof finalize;
+          attest: typeof attest;
         }
-      >(() => ({ enroll, execute, finalize })),
+      >(() => ({ enroll, execute, finalize, attest })),
     };
-    const env = { AWS_QUALIFICATION_RUNS: namespace } as never;
+    const claim =
+      vi.fn<
+        (
+          controller: AWSQualificationControllerProps,
+          identity: AWSQualificationRunIdentity,
+        ) => Promise<unknown>
+      >();
+    const discover = vi.fn<(controller: AWSQualificationControllerProps) => Promise<unknown>>();
+    const markFinalizing =
+      vi.fn<(controller: AWSQualificationControllerProps, runId: string) => Promise<unknown>>();
+    const markFinalized =
+      vi.fn<(controller: AWSQualificationControllerProps, runId: string) => Promise<unknown>>();
+    const retire =
+      vi.fn<(controller: AWSQualificationControllerProps, runId: string) => Promise<void>>();
+    const assertActive = vi
+      .fn<(identity: AWSQualificationRunIdentity) => Promise<void>>()
+      .mockResolvedValue();
+    const registry = {
+      idFromName: vi.fn<(name: string) => string>((name) => name),
+      get: vi.fn<
+        () => {
+          assertActive: typeof assertActive;
+          claim: typeof claim;
+          discover: typeof discover;
+          markFinalizing: typeof markFinalizing;
+          markFinalized: typeof markFinalized;
+          retire: typeof retire;
+        }
+      >(() => ({ assertActive, claim, discover, markFinalizing, markFinalized, retire })),
+    };
+    const env = {
+      AWS_QUALIFICATION_RUNS: namespace,
+      AWS_QUALIFICATION_REGISTRY: registry,
+    } as never;
     const candidate = new AWSQualificationTransport(env, identity);
     const protectedController = new AWSQualificationController(env, controller);
 
     expect("enroll" in candidate).toBe(false);
     expect("finalize" in candidate).toBe(false);
+    expect("attest" in candidate).toBe(false);
+    expect("discover" in candidate).toBe(false);
+    expect("claim" in candidate).toBe(false);
+    expect("retire" in candidate).toBe(false);
     await candidate.execute(request("GetCallerIdentity"));
     await protectedController.enroll(identity);
     await protectedController.finalize(identity.runId);
+    await protectedController.attest(identity.runId);
+    await protectedController.discover();
+    await protectedController.retire(identity.runId);
+    expect(assertActive).toHaveBeenCalledWith(identity);
     expect(execute).toHaveBeenCalledWith(identity, expect.any(Object));
+    expect(claim).toHaveBeenCalledWith(controller, identity);
     expect(enroll).toHaveBeenCalledWith(controller, identity);
+    expect(enroll.mock.invocationCallOrder[0]).toBeLessThan(claim.mock.invocationCallOrder[0]!);
     expect(finalize).toHaveBeenCalledWith(controller);
+    expect(markFinalizing).toHaveBeenCalledWith(controller, identity.runId);
+    expect(markFinalized).toHaveBeenCalledWith(controller, identity.runId);
+    expect(attest).toHaveBeenCalledWith(controller);
+    expect(discover).toHaveBeenCalledWith(controller);
+    expect(retire).toHaveBeenCalledWith(controller, identity.runId);
+
+    assertActive.mockRejectedValueOnce(new Error("AWS qualification registry run is not active"));
+    await expect(candidate.execute(request("GetCallerIdentity"))).rejects.toThrow("not active");
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps one idempotent active registry claim until finalized retirement", async () => {
+    const storage = new MemoryStorage();
+    const registry = new AWSQualificationRegistry({ storage } as never, {} as never);
+
+    await expect(
+      registry.claim(controller, {
+        ...identity,
+        expiresAt: new Date(Date.now() - 1).toISOString(),
+      }),
+    ).rejects.toThrow("next 120 minutes");
+    const first = await registry.claim(controller, identity);
+    const repeated = await registry.claim(controller, identity);
+    expect(repeated).toEqual(first);
+    await expect(registry.assertActive(identity)).resolves.toBeUndefined();
+    await expect(
+      registry.assertActive({ ...identity, runId: "qualification-test-2" }),
+    ).rejects.toThrow("not active");
+    await expect(
+      registry.claim(controller, { ...identity, runId: "qualification-test-2" }),
+    ).rejects.toThrow("already has an active run");
+    await expect(registry.retire(controller, identity.runId)).rejects.toThrow("not finalized");
+    expect((await registry.markFinalizing(controller, identity.runId)).cleanupState).toBe(
+      "finalizing",
+    );
+    expect((await registry.markFinalized(controller, identity.runId)).cleanupState).toBe(
+      "finalized",
+    );
+    await registry.retire(controller, identity.runId);
+    expect(await registry.discover(controller)).toBeUndefined();
+    await expect(registry.assertActive(identity)).rejects.toThrow("not active");
   });
 });
 
@@ -112,6 +203,129 @@ describe("AWS qualification authority", () => {
     fixture.env.CRABBOX_AWS_QUALIFICATION_ROOT_GB = "19";
     await expect(fixture.run.execute(identity, request("GetCallerIdentity"))).rejects.toThrow(
       "policy changed",
+    );
+    await expect(
+      authorityFixture().run.enroll(controller, { ...identity, candidateWorker: "bad/worker" }),
+    ).rejects.toThrow("candidate Worker is malformed");
+    const authorityDrift = authorityFixture();
+    await authorityDrift.run.enroll(controller, identity);
+    authorityDrift.env.CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA = "c".repeat(40);
+    await expect(
+      authorityDrift.run.execute(identity, request("GetCallerIdentity")),
+    ).rejects.toThrow("authority deployment changed");
+  });
+
+  it("attests persisted operation and finalization evidence without sensitive values", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    const denied = request("TerminateInstances", { "InstanceId.1": "i-sensitive-foreign" }, "ec2");
+    await expect(fixture.run.execute(identity, denied)).rejects.toThrow("outside the run ledger");
+    const smuggledAction = request("https://private.example.invalid", {}, "ec2");
+    await expect(fixture.run.execute(identity, smuggledAction)).rejects.toThrow(
+      "action is not allowed",
+    );
+    const imported = request(
+      "ImportKeyPair",
+      {
+        KeyName: "crabbox-cbx-abcdef123456",
+        PublicKeyMaterial: btoa("ssh-ed25519 AAAAqualification secret-comment"),
+      },
+      "ec2",
+    );
+    await fixture.run.execute(identity, imported);
+    await fixture.run.finalize(controller);
+
+    const attestation = await fixture.run.attest(controller);
+    expect(attestation).toMatchObject({
+      version: 1,
+      runId: identity.runId,
+      candidateSha: identity.candidateSha,
+      candidateWorker: identity.candidateWorker,
+      deploymentHash: identity.deploymentHash,
+      authoritySha: "b".repeat(40),
+      authorityVersion: "qualification-v1",
+      policyHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+      enrolledAt: expect.any(String),
+      expiresAt: identity.expiresAt,
+      finalized: true,
+    });
+    expect(attestation.operations).toHaveLength(3);
+    expect(
+      attestation.operations.find((entry) => entry.action === "TerminateInstances"),
+    ).toMatchObject({ denialReason: "resource-not-owned" });
+    expect(attestation.operations.find((entry) => entry.action === "ImportKeyPair")).toMatchObject({
+      signerDispatches: [
+        {
+          beforeSequence: expect.any(Number),
+          beforeAt: expect.any(String),
+          afterSequence: expect.any(Number),
+          afterAt: expect.any(String),
+          outcome: "accepted",
+          statusClass: 2,
+        },
+      ],
+    });
+    expect(attestation.operations.find((entry) => entry.action === "DeniedAction")).toMatchObject({
+      denialReason: "policy-denied",
+    });
+    expect(attestation.finalReceipt).toMatchObject({
+      resourcesAtStart: { keyPairs: 1 },
+      cleanupAttempts: [
+        {
+          action: "DeleteKeyPair",
+          targetDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+          outcome: "accepted",
+        },
+      ],
+      finalCounts: { images: 0, instances: 0, keyPairs: 0, snapshots: 0, volumes: 0 },
+      failureCodes: [],
+    });
+    expect(attestation.finalReceipt?.inventory.length).toBeGreaterThan(0);
+    expect(attestation.finalReceipt?.verification).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ action: "GetCallerIdentity", outcome: "accepted" }),
+        expect.objectContaining({ action: "DescribeSecurityGroups", outcome: "accepted" }),
+      ]),
+    );
+    const encoded = JSON.stringify(attestation);
+    for (const sensitive of [
+      denied.opId,
+      imported.opId,
+      smuggledAction.opId,
+      "i-sensitive-foreign",
+      "key-owned",
+      "123456789012",
+      "AAAAqualification",
+      "203.0.113.10",
+      "https://",
+    ]) {
+      expect(encoded).not.toContain(sensitive);
+    }
+  });
+
+  it("bounds persisted operation evidence and keeps retries idempotent", async () => {
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    const read = request("GetCallerIdentity");
+    await fixture.run.execute(identity, read);
+    await fixture.run.execute(identity, read);
+    expect((await fixture.run.attest(controller)).operations).toHaveLength(1);
+
+    await Promise.all(
+      Array.from({ length: 63 }, (_, index) =>
+        fixture.storage.put(`evidence:seed-${index}`, {
+          version: 1,
+          opDigest: `${index}`.padStart(64, "0"),
+          requestDigest: "c".repeat(64),
+          action: "seed",
+          requestedAt: new Date().toISOString(),
+          signerDispatches: [],
+        }),
+      ),
+    );
+    await expect(fixture.run.execute(identity, request("GetCallerIdentity"))).rejects.toThrow(
+      "evidence limit",
     );
   });
 
@@ -1069,6 +1283,8 @@ function authorityFixture(
   const signer = new FakeSigner(options);
   const env = {
     CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID: "123456789012",
+    CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA: "b".repeat(40),
+    CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION: "qualification-v1",
     CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID: "ami-base",
     CRABBOX_AWS_QUALIFICATION_REGION: "us-east-1",
     CRABBOX_AWS_QUALIFICATION_ROOT_GB: "20",
