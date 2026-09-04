@@ -2,14 +2,13 @@
 
 ## Unreleased
 
-- Preserve literal profile arguments and assignment-shaped executable names across Cloudflare Sandbox, Superserve, Crownest, Vercel Sandbox, and Nomad command transports without reinterpreting them as shell syntax.
-
 - Preserve existing Cloudflare container workspaces when sync upload or extraction fails, clean partial archives, and enforce full-checkout size limits before fresh allocation. [PR 1814](https://github.com/openclaw/crabbox/pull/1814). Thanks @steipete.
 - Protect Nomad runs from overwriting replacement claims or recreating retired leases, and expose standard run-session handles with cleanup-aware final outcomes that preserve the original command exit. [PR 1810](https://github.com/openclaw/crabbox/pull/1810). Thanks @steipete.
 - Preserve individual AWS, Azure, and GCP candidate failures in successful leases' provisioning history across market and regional fallback, including previously omitted GCP on-demand failures. [PR 1811](https://github.com/openclaw/crabbox/pull/1811). Thanks @steipete.
 - Allow fresh brokered AWS Windows and WSL2 leases to bootstrap through advertised SSH port 22 while preserving an explicitly selected final workload port. [PR 1801](https://github.com/openclaw/crabbox/pull/1801). Thanks @steipete.
 - Reuse one Azure or GCP token refresh across concurrent requests, reducing duplicate authentication traffic while preserving credential isolation, refresh margins, and retry behavior. [PR 1802](https://github.com/openclaw/crabbox/pull/1802). Thanks @steipete.
 - Fix GCP metadata authentication in workerd by using supported redirect handling while continuing to reject redirected token responses without following them. [PR 1815](https://github.com/openclaw/crabbox/pull/1815). Thanks @steipete.
+- Preserve literal profile arguments and assignment-shaped executable names across Cloudflare Sandbox, Superserve, Crownest, Vercel Sandbox, and Nomad command transports without reinterpreting them as shell syntax. [PR 1818](https://github.com/openclaw/crabbox/pull/1818). Thanks @steipete.
 - Skip unnecessary APT translation, AppStream, and command-not-found downloads during minimal Linux bootstrap while preserving required package indexes, signature checks, and later operator defaults. [PR 1794](https://github.com/openclaw/crabbox/pull/1794). Thanks @steipete.
 - Report the correct install, build, or test failure stage from supported phase markers, preserving original exit codes and keeping later artifact-collection failures separate. [PR 1795](https://github.com/openclaw/crabbox/pull/1795). Thanks @steipete.
 - Restore current Tenki CLI inventory and legacy-claim recovery, and retain ownership claims until the exact session acknowledges termination; obsolete workspace/project settings now give migration guidance before creating a lease. [PR 1741](https://github.com/openclaw/crabbox/pull/1741). Thanks @eddiewang.
