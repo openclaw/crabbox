@@ -796,8 +796,8 @@ func (b *digitalOceanLeaseBackend) Touch(ctx context.Context, req core.TouchRequ
 	labels := normalizedDropletLabels(item.Tags)
 	accountID := strings.TrimSpace(server.Labels[digitalOceanAccountLabel])
 	liveTailscale := map[string]string{}
-	for _, key := range tagLabelKeys() {
-		if value, ok := labels[key]; ok && exactTagValueKey(key) {
+	for _, key := range tagSchema.Keys() {
+		if value, ok := labels[key]; ok && tagSchema.Exact(key) {
 			liveTailscale[key] = value
 		}
 	}
