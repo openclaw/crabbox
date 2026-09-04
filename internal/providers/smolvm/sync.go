@@ -1,14 +1,14 @@
 package smolvm
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func (b *backend) syncWorkspace(ctx context.Context, client api, machineID string, req RunRequest, workdir, folder string) ([]timingPhase, time.Duration, error) {
@@ -34,7 +34,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client api, machineID strin
 	}
 	prepareDuration := b.now().Sub(prepareStarted)
 	archiveStarted := b.now()
-	archive, err := createSyncArchive(ctx, req.Repo, manifest, b.rt.Stderr)
+	archive, err := core.CreateSyncArchive(ctx, req.Repo, manifest, "crabbox-smolvm-sync-*.tgz")
 	if err != nil {
 		return nil, 0, err
 	}
@@ -93,31 +93,4 @@ func (b *backend) execShell(ctx context.Context, client api, machineID, command 
 		return commandExitError("smolvm exec "+command, result)
 	}
 	return nil
-}
-
-func createSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, stderr io.Writer) (*os.File, error) {
-	var input bytes.Buffer
-	input.Write(manifest.NUL())
-	archive, err := os.CreateTemp("", "crabbox-smolvm-sync-*.tgz")
-	if err != nil {
-		return nil, fmt.Errorf("create sync archive temp file: %w", err)
-	}
-	keep := false
-	defer func() {
-		if !keep {
-			name := archive.Name()
-			_ = archive.Close()
-			_ = os.Remove(name)
-		}
-	}()
-	cmd := exec.CommandContext(ctx, "tar", "--no-xattrs", "-czf", "-", "-C", repo.Root, "--null", "-T", "-")
-	cmd.Stdin = &input
-	cmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
-	cmd.Stdout = archive
-	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
-		return nil, exit(6, "create sync archive: %v", err)
-	}
-	keep = true
-	return archive, nil
 }
