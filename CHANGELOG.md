@@ -10,7 +10,7 @@ Users upgrading from v0.48.1 also receive the [v0.49.0 changes](https://github.c
 
 - **Image-pinned GCP ready pools.** Reuse hydrated Linux runners tied to exact boot images or disk snapshots, with capacity fallback across zones and ownership checks throughout creation and cleanup.
 - **Faster runner startup.** Skip redundant Git lookups and unnecessary APT downloads, and share Azure/GCP token refreshes across concurrent requests.
-- **Sync that protects your workspace.** Cloudflare and Upstash Box preserve existing files when archive upload or extraction fails, while SmolVM reports decoder and write failures instead of false success.
+- **Safe sync and correct artifacts.** Cloudflare and Upstash Box preserve existing workspaces when transfers fail. Blacksmith collects artifacts from the prepared execution workspace that produced them.
 - **Daytona script support.** Run `--script` and `--script-stdin` through private SSH with literal arguments, environment profiles, activity refreshes, and cancellation support.
 - **Correct sandbox targeting and trustworthy cleanup.** Canonical IDs no longer resolve to unrelated slug aliases. Failed bootstrap rollback stops further allocation, Hetzner waits for confirmed deletion, and interrupted AWS warmups remain stoppable. Providers retain recovery claims when cleanup fails and preserve the original command result.
 - **Predictable commands and environment profiles.** Preserve literal arguments across delegated providers, isolate each run's uploaded profile, and clean failed uploads without touching replacement claims.
@@ -24,6 +24,7 @@ Users upgrading from v0.48.1 also receive the [v0.49.0 changes](https://github.c
 
 ### Changes
 
+- Collect Blacksmith artifacts from execution workspaces selected by a trusted `.git/crabbox-artifact-root` symlink, pinning the artifact directory before the workload and rejecting invalid bindings before execution while retaining existing exit and publication guards. [PR 1840](https://github.com/openclaw/crabbox/pull/1840). Thanks @steipete.
 - Preserve Upstash Box and SmolVM stream cancellation and timeout causes in run outcomes, and skip command submission when cancellation is already known after an acknowledged environment upload without skipping cleanup. [PR 1838](https://github.com/openclaw/crabbox/pull/1838). Thanks @steipete.
 - Keep canonical lease IDs separate from slug aliases in shared claim lookup and provider routing, preventing missing IDs from selecting, running on, or stopping a different sandbox while preserving provider recovery behavior. [PR 1839](https://github.com/openclaw/crabbox/pull/1839). Thanks @steipete.
 - Clean partial Upstash Box environment uploads after failure or cancellation, isolate each profile, and refuse stale file cleanup while preserving discovery-only reuse and original command outcomes. [PR 1834](https://github.com/openclaw/crabbox/pull/1834). Thanks @steipete.
