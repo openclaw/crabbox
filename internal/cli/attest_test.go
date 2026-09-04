@@ -98,18 +98,17 @@ func TestPrepareRunReceiptIsSideEffectFreeAndPersistsExactBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	der, err := x509.MarshalPKCS8PrivateKey(key)
+	managedKeyPath, err := attestKeyPath()
 	if err != nil {
-		t.Fatal(err)
-	}
-	keyPath := filepath.Join(t.TempDir(), "signer.pem")
-	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	receiptPath := filepath.Join(t.TempDir(), "nested", "receipt.json")
-	prepared, err := prepareRunReceipt(receiptPath, keyPath, fullReceiptInput())
+	prepared, err := prepareRunReceipt(receiptPath, key, fullReceiptInput())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(managedKeyPath); !os.IsNotExist(err) {
+		t.Fatalf("managed key exists after preparation: %v", err)
 	}
 	if _, err := os.Stat(receiptPath); !os.IsNotExist(err) {
 		t.Fatalf("receipt exists after preparation: %v", err)
@@ -878,11 +877,6 @@ func TestPreflightAttestPathsProtectsReceiptAndSigningKey(t *testing.T) {
 			opts: attestPathPreflight{Receipt: receiptPath, KeyOverride: keyPath, TimingRecord: keyHardlink, TimingRecordEnabled: true},
 			want: "attest key and timing record paths must be different",
 		},
-		{
-			name: "invalid override fails before run",
-			opts: attestPathPreflight{Receipt: receiptPath, KeyOverride: filepath.Join(dir, "missing.pem")},
-			want: "attest key:",
-		},
 	}
 	if symlinkAvailable {
 		cases = append(cases, pathCase{
@@ -905,6 +899,11 @@ func TestPreflightAttestPathsProtectsReceiptAndSigningKey(t *testing.T) {
 				t.Fatalf("error=%v, want %q", err, tc.want)
 			}
 		})
+	}
+	if err := preflightAttestPaths(attestPathPreflight{
+		Receipt: receiptPath, KeyOverride: filepath.Join(dir, "missing.pem"),
+	}); err != nil {
+		t.Fatalf("path-only preflight rejected missing signer: %v", err)
 	}
 	if err := preflightAttestPaths(attestPathPreflight{
 		Receipt:             receiptPath,

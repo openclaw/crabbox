@@ -205,11 +205,6 @@ func preflightAttestPaths(opts attestPathPreflight) error {
 	if same {
 		return exit(2, "attest receipt and attest key paths must be different")
 	}
-	if keyOverride != "" {
-		if _, err := loadAttestKey(keyOverride); err != nil {
-			return exit(2, "attest key: %v", err)
-		}
-	}
 	return nil
 }
 
@@ -723,18 +718,18 @@ func validSHA256Digest(value string) bool {
 }
 
 func writeRunReceipt(path, keyPath string, in runReceiptInput) (runArtifact, error) {
-	prepared, err := prepareRunReceipt(path, keyPath, in)
+	key, err := resolveAttestKey(keyPath)
+	if err != nil {
+		return runArtifact{}, exit(2, "attest key: %v", err)
+	}
+	prepared, err := prepareRunReceipt(path, key, in)
 	if err != nil {
 		return runArtifact{}, err
 	}
 	return persistPreparedRunReceipt(prepared)
 }
 
-func prepareRunReceipt(path, keyPath string, in runReceiptInput) (preparedRunReceipt, error) {
-	key, err := resolveAttestKey(keyPath)
-	if err != nil {
-		return preparedRunReceipt{}, exit(2, "attest key: %v", err)
-	}
+func prepareRunReceipt(path string, key ed25519.PrivateKey, in runReceiptInput) (preparedRunReceipt, error) {
 	pub := key.Public().(ed25519.PublicKey)
 	receipt := map[string]any{
 		"schema_version": attestReceiptSchemaVersion,

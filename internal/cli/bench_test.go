@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"flag"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -47,13 +49,17 @@ type benchmarkTimingTestBackend struct {
 	stderr io.Writer
 }
 
-var benchmarkTimingTestAfterRun func()
+var (
+	benchmarkTimingTestAfterRun func()
+	benchmarkTimingTestRunCalls atomic.Int64
+)
 
 func (b benchmarkTimingTestBackend) Spec() ProviderSpec { return b.spec }
 func (b benchmarkTimingTestBackend) Warmup(context.Context, WarmupRequest) error {
 	return nil
 }
 func (b benchmarkTimingTestBackend) Run(_ context.Context, req RunRequest) (RunResult, error) {
+	benchmarkTimingTestRunCalls.Add(1)
 	result := RunResult{
 		Provider:      b.spec.Name,
 		LeaseID:       "bench_test",
@@ -215,28 +221,39 @@ func TestRunDelegatedTimingJSONEmittedOnceWhileRecording(t *testing.T) {
 	assertReceiptArtifactMetadata(t, records[0].Timing.Artifacts, receiptPath, int(info.Size()))
 }
 
-func TestRunDelegatedReceiptPreparationFailureIsTerminal(t *testing.T) {
+func TestRunDelegatedCachesReceiptSignerAcrossTimingFailure(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := filepath.Join(dir, "signer.pem")
-	_, key, err := ed25519.GenerateKey(rand.Reader)
+	_, originalKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	der, err := x509.MarshalPKCS8PrivateKey(key)
+	_, replacementKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+	writeBenchmarkTimingTestKey(t, keyPath, originalKey)
+	replacementDER, err := x509.MarshalPKCS8PrivateKey(replacementKey)
+	if err != nil {
 		t.Fatal(err)
 	}
+	replacementPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: replacementDER})
+	benchmarkTimingTestRunCalls.Store(0)
 	benchmarkTimingTestAfterRun = func() {
 		if err := os.Remove(keyPath); err != nil {
 			t.Errorf("remove attest key: %v", err)
+			return
+		}
+		if err := os.WriteFile(keyPath, replacementPEM, 0o600); err != nil {
+			t.Errorf("replace attest key: %v", err)
 		}
 	}
 	t.Cleanup(func() { benchmarkTimingTestAfterRun = nil })
 
-	storePath := filepath.Join(dir, "timings.jsonl")
+	storePath := filepath.Join(dir, "timings")
+	if err := os.Mkdir(storePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	receiptPath := filepath.Join(dir, "receipt.json")
 	var stdout, stderr bytes.Buffer
 	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
@@ -249,10 +266,29 @@ func TestRunDelegatedReceiptPreparationFailureIsTerminal(t *testing.T) {
 	})
 	var exitErr ExitError
 	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
-		t.Fatalf("error=%v, want receipt preparation exit 2\nstderr=%s", err, stderr.String())
+		t.Fatalf("error=%v, want timing-record exit 2\nstderr=%s", err, stderr.String())
 	}
-	if _, statErr := os.Stat(receiptPath); !os.IsNotExist(statErr) {
-		t.Fatalf("receipt exists after preparation failure: %v", statErr)
+	if calls := benchmarkTimingTestRunCalls.Load(); calls != 1 {
+		t.Fatalf("backend run calls=%d, want 1", calls)
+	}
+	data, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := decodeRunReceipt(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exitCode, ok := receipt["exit_code"].(json.Number); !ok || exitCode.String() != "2" {
+		t.Fatalf("receipt exit=%v, want timing-record exit 2", receipt["exit_code"])
+	}
+	originalPublicKey := originalKey.Public().(ed25519.PublicKey)
+	replacementPublicKey := replacementKey.Public().(ed25519.PublicKey)
+	if got := receipt["public_key"]; got != base64.StdEncoding.EncodeToString(originalPublicKey) {
+		t.Fatalf("receipt public key=%v, want cached original signer", got)
+	}
+	if receipt["public_key"] == base64.StdEncoding.EncodeToString(replacementPublicKey) {
+		t.Fatal("receipt used replacement signer")
 	}
 	var emitted TimingReport
 	for _, line := range strings.Split(stderr.String(), "\n") {
@@ -264,22 +300,46 @@ func TestRunDelegatedReceiptPreparationFailureIsTerminal(t *testing.T) {
 	if emitted.ExitCode != 2 {
 		t.Fatalf("timing exit=%d, want 2", emitted.ExitCode)
 	}
-	for _, artifact := range emitted.Artifacts {
-		if artifact.Kind == "receipt" {
-			t.Fatalf("timing advertised failed receipt preparation: %#v", artifact)
-		}
+	assertReceiptArtifactMetadata(t, emitted.Artifacts, receiptPath, len(data))
+	timingIndex := strings.LastIndex(stderr.String(), `"runnerTotalMs"`)
+	receiptIndex := strings.LastIndex(stderr.String(), "artifact kind=receipt")
+	if timingIndex < 0 || receiptIndex <= timingIndex {
+		t.Fatalf("delegated terminal order must be timing then receipt persistence:\n%s", stderr.String())
 	}
-	records, readErr := readBenchmarkTimingRecords(storePath)
-	if readErr != nil {
-		t.Fatal(readErr)
+}
+
+func TestRunDelegatedSignerAcquisitionFailureSkipsBackend(t *testing.T) {
+	dir := t.TempDir()
+	benchmarkTimingTestRunCalls.Store(0)
+	benchmarkTimingTestAfterRun = nil
+	receiptPath := filepath.Join(dir, "receipt.json")
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "benchmark-timing-test",
+		"--attest", receiptPath,
+		"--attest-key", filepath.Join(dir, "missing.pem"),
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "attest key") {
+		t.Fatalf("error=%v, want signer acquisition exit 2\nstderr=%s", err, stderr.String())
 	}
-	if len(records) != 1 || records[0].Timing.ExitCode != 2 {
-		t.Fatalf("records=%#v, want one terminal preparation failure", records)
+	if calls := benchmarkTimingTestRunCalls.Load(); calls != 0 {
+		t.Fatalf("backend run calls=%d, want 0", calls)
 	}
-	for _, artifact := range records[0].Timing.Artifacts {
-		if artifact.Kind == "receipt" {
-			t.Fatalf("record advertised failed receipt preparation: %#v", artifact)
-		}
+	if _, statErr := os.Stat(receiptPath); !os.IsNotExist(statErr) {
+		t.Fatalf("receipt exists after signer acquisition failure: %v", statErr)
+	}
+}
+
+func writeBenchmarkTimingTestKey(t *testing.T, path string, key ed25519.PrivateKey) {
+	t.Helper()
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

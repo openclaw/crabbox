@@ -1046,6 +1046,14 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if runReq.Preflight {
 			printDelegatedPreflightUnsupported(a.Stderr, backend.Spec().Name)
 		}
+		attestPath := strings.TrimSpace(*attestOut)
+		var delegatedReceiptKey ed25519.PrivateKey
+		if attestPath != "" {
+			delegatedReceiptKey, err = resolveAttestKey(strings.TrimSpace(*attestKeyOverride))
+			if err != nil {
+				return exit(2, "attest key: %v", err)
+			}
+		}
 		runnerObservedStartedAt = time.Now()
 		result, runErr := delegated.Run(ctx, runReq)
 		delegatedProviderEndedAt = time.Now()
@@ -1064,7 +1072,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		preparedDelegatedExitCode := -1
 		delegatedPreparationAttempted := false
 		prepareTerminalRun = func() {
-			if strings.TrimSpace(*attestOut) == "" || !delegatedReceiptEligible {
+			if attestPath == "" || !delegatedReceiptEligible {
 				return
 			}
 			finalResult := result
@@ -1082,7 +1090,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			preparedDelegatedExitCode = finalResult.ExitCode
 			preparedDelegatedReceipt = nil
 			preparedReceiptArtifact = nil
-			prepared, receiptErr := prepareDelegatedRunReceipt(strings.TrimSpace(*attestOut), strings.TrimSpace(*attestKeyOverride), cfg, finalResult, runReq)
+			prepared, receiptErr := prepareDelegatedRunReceipt(attestPath, delegatedReceiptKey, cfg, finalResult, runReq)
 			if receiptErr != nil {
 				err = errors.Join(err, receiptErr)
 				runFailure = errors.Join(runFailure, receiptErr)
@@ -3115,14 +3123,18 @@ func writeDelegatedRunProof(path, templateName string, cfg Config, result RunRes
 }
 
 func writeDelegatedRunReceipt(path, keyPath string, cfg Config, result RunResult, req RunRequest) (runArtifact, error) {
-	prepared, err := prepareDelegatedRunReceipt(path, keyPath, cfg, result, req)
+	key, err := resolveAttestKey(keyPath)
+	if err != nil {
+		return runArtifact{}, exit(2, "attest key: %v", err)
+	}
+	prepared, err := prepareDelegatedRunReceipt(path, key, cfg, result, req)
 	if err != nil {
 		return runArtifact{}, err
 	}
 	return persistPreparedRunReceipt(prepared)
 }
 
-func prepareDelegatedRunReceipt(path, keyPath string, cfg Config, result RunResult, req RunRequest) (preparedRunReceipt, error) {
+func prepareDelegatedRunReceipt(path string, key ed25519.PrivateKey, cfg Config, result RunResult, req RunRequest) (preparedRunReceipt, error) {
 	command := strings.TrimSpace(result.CommandText)
 	if command == "" {
 		command = runCommandDisplay(req.Command, req.ShellMode)
@@ -3144,7 +3156,7 @@ func prepareDelegatedRunReceipt(path, keyPath string, cfg Config, result RunResu
 		receipt.ActionsURL = firstNonBlank(receipt.ActionsURL, session.ActionsURL)
 	}
 	receipt.Provider = firstNonBlank(receipt.Provider, cfg.Provider)
-	return prepareRunReceipt(path, keyPath, receipt)
+	return prepareRunReceipt(path, key, receipt)
 }
 
 func delegatedRunID(req RunRequest, result RunResult) string {
