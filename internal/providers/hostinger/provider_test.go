@@ -90,6 +90,10 @@ func TestClientValidationAndRedaction(t *testing.T) {
 	if strings.Contains(err.Error(), "secret-token") || !strings.Contains(err.Error(), "[redacted]") {
 		t.Fatalf("token was not redacted: %v", err)
 	}
+	var apiErr *hostingerAPIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized || apiErr.Status != "401 Unauthorized" || !strings.Contains(apiErr.Body, "is invalid") {
+		t.Fatalf("API error classification changed: %v", err)
+	}
 }
 
 func TestClientRejectsRedirectBeforeForwardingToken(t *testing.T) {

@@ -452,6 +452,14 @@ an existing redirect hook, and otherwise applies the standard redirect limit.
 The adapter supplies the exact refusal error and retains any additional path,
 method, transport, previous-hop, or provider-specific origin policy locally.
 
+Runpod and Hostinger share finite response consumption through
+`shared.DecodeBoundedJSONResponse`: close the body, read at most the adapter's
+limit plus one byte, reject read failures and overflow before interpreting
+HTTP status, then optionally decode one JSON value. The adapter retains its
+typed API error and redaction policy, so capacity retry and purchase ambiguity
+classification remain provider-owned. This does not apply to streaming
+responses or change request construction, redirects, or client timeouts.
+
 ## Acquisition stays adapter-owned
 
 SSH lease acquisition is a provider-owned transaction, not a shared sequence of
