@@ -3056,6 +3056,7 @@ func baseConfig() Config {
 		},
 		Boxd: BoxdConfig{
 			APIURL:          "https://app.boxd.sh",
+			GRPCURL:         "boxd.sh:9443",
 			WorkRoot:        "/home/boxd/crabbox",
 			DeleteOnRelease: true,
 		},
@@ -3992,10 +3993,12 @@ type fileNamespaceInstanceConfig struct {
 	Bare        *bool    `yaml:"bare,omitempty"`
 }
 
-// BoxdConfig contains non-secret HTTPS console routing and lease settings.
-// Interactive session tokens are read only from the environment by the provider.
+// BoxdConfig contains non-secret routing and lease settings: the TLS gRPC
+// endpoint for lifecycle calls and the HTTPS console origin for the API-key
+// exchange. API keys are read only from the environment by the provider.
 type BoxdConfig struct {
-	APIURL          string
+	APIURL          string // HTTPS console origin; used only for the API-key exchange.
+	GRPCURL         string // TLS gRPC endpoint as bare host:port.
 	Org             string // Empty selects the fixed personal account context.
 	WorkRoot        string
 	DeleteOnRelease bool
@@ -4003,6 +4006,7 @@ type BoxdConfig struct {
 
 type fileBoxdConfig struct {
 	APIURL          string `yaml:"apiUrl,omitempty"`
+	GRPCURL         string `yaml:"grpcUrl,omitempty"`
 	Org             string `yaml:"org,omitempty"`
 	WorkRoot        string `yaml:"workRoot,omitempty"`
 	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
@@ -6482,6 +6486,9 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			if file.Boxd.APIURL != "" {
 				cfg.Boxd.APIURL = file.Boxd.APIURL
 			}
+			if file.Boxd.GRPCURL != "" {
+				cfg.Boxd.GRPCURL = file.Boxd.GRPCURL
+			}
 			if file.Boxd.Org != "" {
 				cfg.Boxd.Org = file.Boxd.Org
 			}
@@ -8915,6 +8922,9 @@ func applyEnv(cfg *Config) error {
 	}
 	if value, ok := os.LookupEnv("CRABBOX_BOXD_API_URL"); ok {
 		cfg.Boxd.APIURL = value
+	}
+	if value, ok := os.LookupEnv("CRABBOX_BOXD_GRPC_URL"); ok {
+		cfg.Boxd.GRPCURL = value
 	}
 	if value, ok := os.LookupEnv("CRABBOX_BOXD_ORG"); ok {
 		cfg.Boxd.Org = value

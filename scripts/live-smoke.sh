@@ -1420,12 +1420,13 @@ morph_smoke() {
 boxd_smoke() (
   need_tool jq
   need_tool python3
-  if [[ -z "${CRABBOX_BOXD_TOKEN:-${BOXD_TOKEN:-}}" ]]; then
-    echo "set BOXD_TOKEN or CRABBOX_BOXD_TOKEN to an interactive session for Boxd HTTPS live smoke; no login or signup is performed" >&2
+  if [[ -z "${CRABBOX_BOXD_API_KEY:-${BOXD_API_KEY:-}}" ]]; then
+    echo "set BOXD_API_KEY or CRABBOX_BOXD_API_KEY to a bxd_ API key for the Boxd live smoke; no login or signup is performed" >&2
     return 2
   fi
-  case "${CRABBOX_BOXD_TOKEN:-${BOXD_TOKEN:-}}" in
-    bxd_*) echo "Boxd console mutations require an interactive session, not a bxd_ API key; use scripts/boxd-login.mjs" >&2; return 2 ;;
+  case "${CRABBOX_BOXD_API_KEY:-${BOXD_API_KEY:-}}" in
+    bxd_*) ;;
+    *) echo "Boxd authentication requires a bxd_ API key from the boxd console or 'boxd auth keys create'; interactive session tokens are no longer used" >&2; return 2 ;;
   esac
   # Explicit environment routing wins over every config file for both clients.
   export CRABBOX_BOXD_API_URL="${CRABBOX_BOXD_API_URL:-https://app.boxd.sh}"
