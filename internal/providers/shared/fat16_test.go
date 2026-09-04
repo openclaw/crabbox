@@ -26,7 +26,7 @@ func TestBuildFAT16ImageGolden(t *testing.T) {
 		{"label-truncate", "abcdefghijklmnop", []FATFile{{Name: "file", Data: []byte("x")}}, [2]string{"491f6aec8706725bdba81c2e7cf30e6f2123ad988b1469bf4de92f2c05b233a4", "c41a9dcda7e219bcf48d7f5a289e159bad7505dfea1cea54ad9140382ba0860a"}},
 		{"lfn-13-runes", "cidata", []FATFile{{Name: "abcdefghijklm", Data: []byte("x")}}, [2]string{"68246b5f6dcf2f4fafef9eb5895b3b9819831094d0f3d01505c9a0437db55fc4", "ffa3cc58a18d26f5850137eb3010f634541dfcf4e8aa53c6853936e3ad95b57a"}},
 		{"lfn-14-runes", "cidata", []FATFile{{Name: "abcdefghijklmn", Data: []byte("x")}}, [2]string{"704d0dfab25c0c1957008c46e720299c40807fc4b336150adfdc9106a0f83eef", "49c0df807932004e021ad11e58fd16be5b5f648bbac9299caa05f0bac0b647d0"}},
-		{"lfn-non-bmp", "cidata", []FATFile{{Name: "prefix-🚀-suffix", Data: []byte("x")}}, [2]string{"fe323f8b6492a81375c2129d21df8e7e9c73098e6e6cd355bf305751ae629df9", "b6ef0942918d043c63f14861ce25fca5123f4404b9dbd1769e1c0c718f8df384"}},
+		{"lfn-non-bmp", "cidata", []FATFile{{Name: "prefix-\U0001F680-suffix", Data: []byte("x")}}, [2]string{"fe323f8b6492a81375c2129d21df8e7e9c73098e6e6cd355bf305751ae629df9", "b6ef0942918d043c63f14861ce25fca5123f4404b9dbd1769e1c0c718f8df384"}},
 		{"directory-255-files", "cidata", files255, [2]string{"e24197abfd70a44bf9b2dcc3b69d87a988441929ca6fef023875ba725294f37f", "8b20aa081aa8a3f9bdf7d2feeef31ce621532f197d8f02c9bfe97cd7af37aeb8"}},
 	}
 	variants := []struct{ name, short, prefix string }{
