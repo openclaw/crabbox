@@ -96,7 +96,7 @@ func (b *hetznerLeaseBackend) acquireOnce(ctx context.Context, keep bool, reques
 			return
 		}
 		if cleanupErr := rollbackHetznerAcquire(client, rollbackServer, rollbackServerCreated, rollbackKey, rollbackKeyCreated); cleanupErr != nil {
-			err = errors.Join(err, fmt.Errorf("hetzner cleanup failed: %w", cleanupErr))
+			err = shared.JoinAcquireCleanupError(err, fmt.Errorf("hetzner cleanup failed: %w", cleanupErr))
 		}
 	}()
 	if cfg.ProviderKey != "" {

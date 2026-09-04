@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Stop direct AWS, Azure, GCP, and Hetzner bootstrap retries from allocating another machine when rollback reports a cleanup failure, preserving both the original failure and cleanup diagnostics. [PR 1819](https://github.com/openclaw/crabbox/pull/1819). Thanks @steipete.
 - Cloudflare: retain recovery claims when teardown fails, preserve command/cancellation outcomes, and fence reuse and cleanup against replaced local claims. [PR 1817](https://github.com/openclaw/crabbox/pull/1817). Thanks @steipete.
 - Preserve Upstash Box workspaces when archive upload or extraction fails, clean partial Upstash Box/Tensorlake uploads, and check complete archive limits before creating either sandbox. [PR 1820](https://github.com/openclaw/crabbox/pull/1820). Thanks @steipete.
 - Clean partial Tensorlake environment-profile uploads after failure or cancellation, fence cleanup to original ownership, and share isolated profile lifetimes and source-failure handling with Modal. Thanks @steipete.
@@ -24,6 +25,7 @@
 - Added typed GCP ready-pool cohorts bound to exact boot-image or disk-snapshot provenance while allowing capacity fallback across zones. [PR 1621](https://github.com/openclaw/crabbox/pull/1621). Thanks @vincentkoc.
 
 - Report OpenSandbox cleanup failures instead of silently succeeding, preserve the original command exit when cleanup also fails, and finalize timing/session results after cleanup without weakening reuse admission or absolute TTL checks. [PR 1804](https://github.com/openclaw/crabbox/pull/1804). Thanks @steipete.
+- Added a credential-isolated AWS image-qualification transport and non-public per-run authority with fixed sandbox policy, bounded intent reconciliation, verified resource ownership, and eventual-consistency-aware teardown, without changing normal AWS credential behavior. [PR 1778](https://github.com/openclaw/crabbox/pull/1778). Thanks @vincentkoc.
 
 ## 0.49.0 - 2026-09-03
 

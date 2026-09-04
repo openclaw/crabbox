@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "wrangler deploy --dry-run --outdir dist",
+    "build:aws-qualification-authority": "wrangler deploy --config wrangler.aws-qualification-authority.jsonc --dry-run --outdir dist-aws-qualification-authority",
     "build:cloudflare": "wrangler deploy --config wrangler.cloudflare.jsonc --dry-run --outdir dist-cloudflare",
     "build:cloudflare-dynamic-workers": "wrangler deploy --config wrangler.cloudflare-dynamic-workers.jsonc --dry-run --outdir dist-cloudflare-dynamic-workers",
     "build:node": "node scripts/build-node.mjs",

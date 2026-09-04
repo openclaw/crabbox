@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -398,4 +399,39 @@ func testCleanupServerWithLabels(name string, labels map[string]string) core.Ser
 
 func bootstrapWaitErr() error {
 	return core.Exit(5, "timed out waiting for SSH: test")
+}
+
+func TestAcquireCleanupFailureVetoesRetryThroughWrapping(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		for _, wrapped := range []bool{false, true} {
+			t.Run(fmt.Sprintf("keep=%t/wrapped=%t", keep, wrapped), func(t *testing.T) {
+				primary := bootstrapWaitErr()
+				cleanup := core.Exit(9, "cleanup denied")
+				var stderr bytes.Buffer
+				attempts := 0
+				_, err := AcquireAttemptsRetry(core.Runtime{Stderr: &stderr}, keep, func() (core.LeaseTarget, error) {
+					attempts++
+					debt := JoinAcquireCleanupError(primary, cleanup)
+					if wrapped {
+						debt = errors.Join(errors.New("attempt context"), fmt.Errorf("wrapped: %w", debt))
+					}
+					return core.LeaseTarget{}, debt
+				})
+				var ee core.ExitError
+				if attempts != 1 || !errors.Is(err, primary) || !errors.Is(err, cleanup) || !core.AsExitError(err, &ee) || ee.Code != 5 {
+					t.Fatalf("attempts=%d error=%v primary=%+v", attempts, err, ee)
+				}
+				if strings.Contains(stderr.String(), "retrying with fresh lease") {
+					t.Fatalf("unexpected retry: %s", stderr.String())
+				}
+				if !strings.Contains(stderr.String(), "cleanup denied") {
+					t.Fatalf("cleanup diagnosis missing from CLI diagnostics: %s", stderr.String())
+				}
+			})
+		}
+	}
+	primary := bootstrapWaitErr()
+	if got := JoinAcquireCleanupError(primary, nil); got != primary {
+		t.Fatalf("successful cleanup changed primary: %v", got)
+	}
 }
