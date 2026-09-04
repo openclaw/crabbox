@@ -88,9 +88,22 @@ jobs:
     timeout-minutes: 15
     environment: image-qualification
     outputs:
+      run_id: ${{ steps.deploy.outputs.run_id }}
+      candidate_sha: ${{ steps.deploy.outputs.candidate_sha }}
+      candidate_worker: ${{ steps.deploy.outputs.candidate_worker }}
+      candidate_version: ${{ steps.deploy.outputs.candidate_version }}
       candidate_url: ${{ steps.deploy.outputs.candidate_url }}
       candidate_admin_token: ${{ steps.deploy.outputs.candidate_admin_token }}
       candidate_shared_token: ${{ steps.deploy.outputs.candidate_shared_token }}
+      deployment_hash: ${{ steps.deploy.outputs.deployment_hash }}
+      manifest_sha: ${{ steps.deploy.outputs.manifest_sha }}
+      binding_digest: ${{ steps.deploy.outputs.binding_digest }}
+      authority_sha: ${{ steps.deploy.outputs.authority_sha }}
+      authority_version: ${{ steps.deploy.outputs.authority_version }}
+      policy_hash: ${{ steps.deploy.outputs.policy_hash }}
+      enrolled_at: ${{ steps.deploy.outputs.enrolled_at }}
+      expires_at: ${{ steps.deploy.outputs.expires_at }}
+      execution_manifest_digest: ${{ steps.deploy.outputs.execution_manifest_digest }}
       region: ${{ steps.deploy.outputs.region }}
       base_ami_id: ${{ steps.deploy.outputs.base_ami_id }}
     steps:
@@ -115,6 +128,7 @@ jobs:
           QUALIFICATION_CONTROLLER_TOKEN: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_CONTROLLER_TOKEN }}
           QUALIFICATION_AUTHORITY_SHA: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_SHA }}
           QUALIFICATION_AUTHORITY_VERSION: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_VERSION }}
+          QUALIFICATION_EXPECTED_POLICY_HASH: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_POLICY_HASH }}
           QUALIFICATION_CANDIDATE_ARTIFACT_DIGEST: ${{ needs.authorize.outputs.candidate_artifact_digest }}
           QUALIFICATION_CANDIDATE_ARTIFACT_ID: ${{ needs.authorize.outputs.candidate_artifact_id }}
           QUALIFICATION_CANDIDATE_RUN_ID: ${{ needs.authorize.outputs.candidate_run_id }}
@@ -135,9 +149,55 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  arm:
+    name: Protected final deployment admission
+    needs: [authorize, deploy-enroll]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: image-qualification
+    steps:
+      - name: Check out protected tooling only
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Revalidate exact Worker version and arm execution
+        id: arm
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          QUALIFICATION_CONTROLLER_TOKEN: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_CONTROLLER_TOKEN }}
+          QUALIFICATION_CANDIDATE_ARTIFACT_DIGEST: ${{ needs.authorize.outputs.candidate_artifact_digest }}
+          QUALIFICATION_CANDIDATE_ARTIFACT_ID: ${{ needs.authorize.outputs.candidate_artifact_id }}
+          QUALIFICATION_CANDIDATE_RUN_ID: ${{ needs.authorize.outputs.candidate_run_id }}
+          QUALIFICATION_EXPECTED_RUN_ID: ${{ needs.deploy-enroll.outputs.run_id }}
+          QUALIFICATION_EXPECTED_CANDIDATE_SHA: ${{ needs.deploy-enroll.outputs.candidate_sha }}
+          QUALIFICATION_EXPECTED_CANDIDATE_WORKER: ${{ needs.deploy-enroll.outputs.candidate_worker }}
+          QUALIFICATION_EXPECTED_CANDIDATE_VERSION: ${{ needs.deploy-enroll.outputs.candidate_version }}
+          QUALIFICATION_EXPECTED_DEPLOYMENT_HASH: ${{ needs.deploy-enroll.outputs.deployment_hash }}
+          QUALIFICATION_EXPECTED_MANIFEST_SHA: ${{ needs.deploy-enroll.outputs.manifest_sha }}
+          QUALIFICATION_EXPECTED_BINDING_DIGEST: ${{ needs.deploy-enroll.outputs.binding_digest }}
+          QUALIFICATION_EXPECTED_AUTHORITY_SHA: ${{ needs.deploy-enroll.outputs.authority_sha }}
+          QUALIFICATION_EXPECTED_AUTHORITY_VERSION: ${{ needs.deploy-enroll.outputs.authority_version }}
+          QUALIFICATION_EXPECTED_POLICY_HASH: ${{ needs.deploy-enroll.outputs.policy_hash }}
+          QUALIFICATION_EXPECTED_ENROLLED_AT: ${{ needs.deploy-enroll.outputs.enrolled_at }}
+          QUALIFICATION_EXPECTED_EXPIRES_AT: ${{ needs.deploy-enroll.outputs.expires_at }}
+          QUALIFICATION_EXPECTED_EXECUTION_MANIFEST_DIGEST: ${{ needs.deploy-enroll.outputs.execution_manifest_digest }}
+          QUALIFICATION_PROOF_DIR: ${{ runner.temp }}/image-qualification-arm-proof
+        run: node scripts/image-qualification-control.mjs arm
+      - name: Upload protected execution manifest
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-qualification-arm-${{ github.run_id }}
+          path: ${{ runner.temp }}/image-qualification-arm-proof
+          if-no-files-found: error
+          retention-days: 30
+
   execute:
     name: Execute candidate without cloud credentials
-    needs: [authorize, deploy-enroll]
+    needs: [authorize, deploy-enroll, arm]
     runs-on: ubuntu-latest
     timeout-minutes: 80
     steps:
@@ -181,7 +241,7 @@ jobs:
   finalize:
     name: Protected finalization and zero-residue proof
     if: always()
-    needs: [authorize, deploy-enroll, execute]
+    needs: [authorize, deploy-enroll, arm, execute]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: image-qualification
@@ -203,6 +263,19 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           QUALIFICATION_CONTROLLER_TOKEN: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_CONTROLLER_TOKEN }}
+          QUALIFICATION_EXPECTED_RUN_ID: ${{ needs.deploy-enroll.outputs.run_id }}
+          QUALIFICATION_EXPECTED_CANDIDATE_SHA: ${{ needs.deploy-enroll.outputs.candidate_sha }}
+          QUALIFICATION_EXPECTED_CANDIDATE_WORKER: ${{ needs.deploy-enroll.outputs.candidate_worker }}
+          QUALIFICATION_EXPECTED_CANDIDATE_VERSION: ${{ needs.deploy-enroll.outputs.candidate_version }}
+          QUALIFICATION_EXPECTED_DEPLOYMENT_HASH: ${{ needs.deploy-enroll.outputs.deployment_hash }}
+          QUALIFICATION_EXPECTED_MANIFEST_SHA: ${{ needs.deploy-enroll.outputs.manifest_sha }}
+          QUALIFICATION_EXPECTED_BINDING_DIGEST: ${{ needs.deploy-enroll.outputs.binding_digest }}
+          QUALIFICATION_EXPECTED_AUTHORITY_SHA: ${{ needs.deploy-enroll.outputs.authority_sha }}
+          QUALIFICATION_EXPECTED_AUTHORITY_VERSION: ${{ needs.deploy-enroll.outputs.authority_version }}
+          QUALIFICATION_EXPECTED_POLICY_HASH: ${{ needs.deploy-enroll.outputs.policy_hash }}
+          QUALIFICATION_EXPECTED_ENROLLED_AT: ${{ needs.deploy-enroll.outputs.enrolled_at }}
+          QUALIFICATION_EXPECTED_EXPIRES_AT: ${{ needs.deploy-enroll.outputs.expires_at }}
+          QUALIFICATION_EXPECTED_EXECUTION_MANIFEST_DIGEST: ${{ needs.deploy-enroll.outputs.execution_manifest_digest }}
           QUALIFICATION_PROOF_DIR: ${{ runner.temp }}/image-qualification-final-proof
           QUALIFICATION_EXECUTION_PROOF_DIR: ${{ runner.temp }}/image-qualification-execute-proof
         run: node scripts/image-qualification-control.mjs finalize

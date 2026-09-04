@@ -44,23 +44,26 @@ process.stdin.on("end", () => {
 });'
 }
 
-catalog() {
+image_read() {
+  local image_id=$1
+  local output=$2
   curl --fail --silent --show-error --max-time 30 \
     -H "@$admin_headers" \
-    "$QUALIFICATION_CANDIDATE_URL/v1/images?provider=aws&target=linux&region=$QUALIFICATION_AWS_REGION"
+    -o "$output" \
+    "$QUALIFICATION_CANDIDATE_URL/v1/images/$image_id?provider=aws&target=linux&region=$QUALIFICATION_AWS_REGION"
 }
 
 probe_started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-before="$raw/catalog-before.json"
-after="$raw/catalog-after.json"
-catalog >"$before"
+before="$raw/base-before.json"
+after="$raw/base-after.json"
+image_read "$QUALIFICATION_BASE_AMI_ID" "$before"
 spoof_body="$raw/spoof.json"
 printf '{"expected":{"state":"capture"},"image":{"target":"linux"}}\n' >"$spoof_body"
 spoof_status=$(curl --silent --show-error --max-time 30 -o "$raw/spoof-response.json" \
   -w '%{http_code}' -X POST -H "@$shared_headers" --data-binary "@$spoof_body" \
   "$QUALIFICATION_CANDIDATE_URL/v1/images/$QUALIFICATION_BASE_AMI_ID/promote-cas?provider=aws&target=linux&region=$QUALIFICATION_AWS_REGION")
 [[ "$spoof_status" == 403 ]]
-catalog >"$after"
+image_read "$QUALIFICATION_BASE_AMI_ID" "$after"
 node - "$before" "$after" <<'NODE'
 const fs = require("node:fs");
 const canonical = (value) =>
@@ -98,6 +101,7 @@ export CRABBOX_ENV_ALLOW="CI"
 "$candidate_bin" image promote "$QUALIFICATION_BASE_AMI_ID" \
   --provider aws --target linux --region "$QUALIFICATION_AWS_REGION" --type t3.small --json \
   >"$raw/seed.json" 2>"$raw/seed.err"
+image_read "$QUALIFICATION_BASE_AMI_ID" "$raw/seed-readback.json"
 
 export QUALIFICATION_REAL_CRABBOX="$candidate_bin"
 export QUALIFICATION_ADAPTER_STATE="$raw/adapter"
@@ -122,10 +126,33 @@ mint_status=0
   >"$raw/mint.stdout" 2>"$raw/mint.stderr" || mint_status=$?
 [[ "$mint_status" -eq 86 ]]
 [[ -f "$QUALIFICATION_ADAPTER_STATE/injected" ]]
-grep -q 'restored previous default image=' "$raw/mint.stderr"
-grep -q -- '--retire-expected-catalog' "$raw/mint.stderr"
+[[ -f "$QUALIFICATION_ADAPTER_STATE/promotion-receipt.json" ]]
+[[ -f "$QUALIFICATION_ADAPTER_STATE/rollback-receipt.json" ]]
 [[ "$(<"$QUALIFICATION_ADAPTER_STATE/launch-count")" -eq 3 ]]
-[[ "$(cat "$raw/mint.stdout" "$raw/mint.stderr" | grep -c 'devtools-smoke-ok')" -ge 3 ]]
+smoke_count=$(cat "$raw/mint.stdout" "$raw/mint.stderr" | grep -c 'devtools-smoke-ok')
+[[ "$smoke_count" -ge 3 ]]
+
+failed_image=$(node -e '
+const receipt = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+if (!/^ami-[0-9a-f]+$/.test(receipt?.image?.id ?? "")) process.exit(1);
+process.stdout.write(receipt.image.id);
+' "$QUALIFICATION_ADAPTER_STATE/promotion-receipt.json")
+image_read "$QUALIFICATION_BASE_AMI_ID" "$raw/restored-readback.json"
+failed_status=$(curl --silent --show-error --max-time 30 \
+  -H "@$admin_headers" -o "$raw/failed-readback.json" -w '%{http_code}' \
+  "$QUALIFICATION_CANDIDATE_URL/v1/images/$failed_image?provider=aws&target=linux&region=$QUALIFICATION_AWS_REGION")
+[[ "$failed_status" == 200 || "$failed_status" == 404 ]]
+node "$ROOT/scripts/image-qualification-control.mjs" verify-catalog \
+  "$raw/seed.json" \
+  "$raw/seed-readback.json" \
+  "$QUALIFICATION_ADAPTER_STATE/promotion-receipt.json" \
+  "$QUALIFICATION_ADAPTER_STATE/rollback-receipt.json" \
+  "$raw/restored-readback.json" \
+  "$raw/failed-readback.json" \
+  "$failed_status" \
+  "$proof/catalog-rollback.json"
+printf '{"mintExit":86,"injectedAfterPromotedSmoke":true,"launchCount":3,"smokeCount":%s}\n' \
+  "$smoke_count" >"$proof/execution-state.json"
 
 # The wrapper job expects status 137. No executor trap or workflow artifact is
 # allowed to own cleanup; the protected finalizer must recover from the registry.
@@ -134,7 +161,7 @@ printf '{"executorKilled":true,"signal":"SIGKILL","cloudCredentialsPresent":fals
 
 {
   printf '%s\n' 'qualification mint exited 86 only after the promoted smoke'
-  printf '%s\n' 'candidate rollback restored the seeded prior default and retired the failed revision'
+  printf '%s\n' 'structured candidate API readbacks are authoritative; this log is supplemental'
   printf '%s\n' 'launch order: source ami-base, candidate ami-created, promoted ami-created'
   cat "$raw/mint.stdout"
   cat "$raw/mint.stderr"

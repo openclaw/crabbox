@@ -17,7 +17,25 @@ if [[ "$command_name" == warmup ]]; then
 fi
 
 status=0
-"$QUALIFICATION_REAL_CRABBOX" "$@" || status=$?
+receipt=""
+if [[ "$command_name" == image && "${2:-}" == promote ]]; then
+  for argument in "$@"; do
+    if [[ "$argument" == capture ]]; then
+      receipt="$QUALIFICATION_ADAPTER_STATE/promotion-receipt.json"
+    elif [[ "$argument" == --retire-expected-catalog ]]; then
+      receipt="$QUALIFICATION_ADAPTER_STATE/rollback-receipt.json"
+    fi
+  done
+fi
+if [[ -n "$receipt" ]]; then
+  set +e
+  "$QUALIFICATION_REAL_CRABBOX" "$@" | tee "$receipt"
+  status=${PIPESTATUS[0]}
+  set -e
+  chmod 600 "$receipt"
+else
+  "$QUALIFICATION_REAL_CRABBOX" "$@" || status=$?
+fi
 [[ "$status" -eq 0 ]] || exit "$status"
 
 count=0

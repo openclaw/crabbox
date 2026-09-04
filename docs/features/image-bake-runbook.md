@@ -704,6 +704,11 @@ The workflow has separate trust zones:
   candidate bundle as data, deploys through the Cloudflare API, reads the
   resulting Worker version and settings back, rechecks the pull request and
   build identity, and claims the singleton authority registry.
+- `arm` is the last protected job before candidate execution. It rechecks the
+  open pull request and artifact, exact final Worker version and binding
+  settings, registry claim, and authority attestation. Its execution-manifest
+  digest binds the deployed version to the candidate, deployment, authority,
+  policy, and enrollment timestamps.
 - `execute` receives only the isolated coordinator URL and its ephemeral admin
   and shared tokens. It receives no AWS, Cloudflare, authority-controller, or
   production credentials.
@@ -714,13 +719,15 @@ The workflow has separate trust zones:
 
 The exact live proof seeds the fixed base AMI as the prior default, verifies
 that a shared-token request to `promote-cas` returns 403 without changing the
-catalog, and records a Fast Snapshot Restore rejection before signer dispatch.
-The candidate publisher then boots source, candidate-image, and promoted-image
-leases sequentially. A trusted `CRABBOX_BIN` adapter delegates every command to
-the exact candidate CLI and returns exit 86 only after the promoted smoke
-succeeds, exercising the candidate's compare-and-swap rollback and failed
-revision retirement. A credentialless child is then killed while authority
-owned image state remains for protected cleanup.
+base-image readback, and records a Fast Snapshot Restore rejection before
+signer dispatch. The candidate publisher then boots source, candidate-image,
+and promoted-image leases sequentially. A trusted `CRABBOX_BIN` adapter
+delegates every command to the exact candidate CLI and captures the structured
+promotion and rollback receipts. Candidate API readbacks must prove the exact
+seeded default revision was restored and the failed image revision lost its
+catalog role; candidate logs are supplemental only. The adapter returns exit 86
+only after the promoted smoke succeeds. A credentialless child is then killed
+while authority-owned image state remains for protected cleanup.
 
 The authority and candidate configuration fix the run to Linux, one
 `t3.small`/`t3a.small` on-demand instance at a time, exactly three launches,
@@ -745,6 +752,7 @@ Before enabling the workflow, maintainers must create the protected
 - variable `CLOUDFLARE_ACCOUNT_ID`;
 - variables `CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_SHA`,
   `CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_VERSION`,
+  `CRABBOX_IMAGE_QUALIFICATION_POLICY_HASH`,
   `CRABBOX_IMAGE_QUALIFICATION_AWS_REGION`,
   `CRABBOX_IMAGE_QUALIFICATION_SUBNET_ID`,
   `CRABBOX_IMAGE_QUALIFICATION_SECURITY_GROUP_ID`,

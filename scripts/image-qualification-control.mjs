@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sha40 = /^[0-9a-f]{40}$/;
 const sha64 = /^[0-9a-f]{64}$/;
+const runIdPattern = /^image-qualification-[0-9]+-[0-9]+$/;
 const workerNamePattern = /^crabbox-image-qualification-[0-9]+-[0-9]+$/;
 const maxRunMs = 120 * 60 * 1000;
 const controllerName = "crabbox-image-qualification-controller";
@@ -17,6 +18,16 @@ const authorityName = "crabbox-aws-qualification-authority";
 const candidateWorkflowFile = "image-qualification-candidate.yml";
 const candidateWorkflowPath = `.github/workflows/${candidateWorkflowFile}`;
 const controllerSource = path.join(root, "scripts/image-qualification-controller-worker.mjs");
+
+function workerVersion(value) {
+  if (/^[0-9a-f]{32}$/i.test(value ?? "")) {
+    return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+  }
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value ?? "")) {
+    return value.toLowerCase();
+  }
+  throw new Error("Cloudflare returned an invalid Worker version");
+}
 
 export function canonical(value) {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -59,6 +70,94 @@ function writeJSON(file, value, mode = 0o600) {
 function appendOutput(name, value) {
   const output = required("GITHUB_OUTPUT");
   fs.appendFileSync(output, `${name}=${String(value).replaceAll("\n", "")}\n`, { mode: 0o600 });
+}
+
+function objectAt(value, name) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${name} is invalid`);
+  }
+  return value;
+}
+
+function imageRecord(value, name) {
+  const image = objectAt(value, name);
+  if (
+    !/^ami-[0-9a-f]+$/.test(image.id ?? "") ||
+    typeof image.revision !== "string" ||
+    image.revision.length === 0 ||
+    image.revision.length > 128
+  ) {
+    throw new Error(`${name} identity is invalid`);
+  }
+  return image;
+}
+
+export function verifyCatalogRollbackEvidence({
+  seed,
+  seededReadback,
+  promotion,
+  rollback,
+  restoredReadback,
+  failedReadback,
+  failedStatus,
+}) {
+  const prior = imageRecord(seed, "seed promotion");
+  const seeded = imageRecord(
+    objectAt(seededReadback, "seed readback").image,
+    "seed readback image",
+  );
+  const promoted = imageRecord(objectAt(promotion, "promotion receipt").image, "failed promotion");
+  const promotedPrevious = objectAt(promotion.previous, "promotion previous state");
+  const rollbackImage = imageRecord(objectAt(rollback, "rollback receipt").image, "rollback image");
+  const rollbackPrevious = objectAt(rollback.previous, "rollback previous state");
+  const restored = imageRecord(
+    objectAt(restoredReadback, "restored readback").image,
+    "restored readback image",
+  );
+  if (
+    prior.id !== seeded.id ||
+    prior.revision !== seeded.revision ||
+    promotedPrevious.state !== "present" ||
+    promotedPrevious.imageId !== prior.id ||
+    promotedPrevious.revision !== prior.revision
+  ) {
+    throw new Error("candidate API did not capture the exact seeded default revision");
+  }
+  if (
+    rollbackPrevious.state !== "present" ||
+    rollbackPrevious.imageId !== promoted.id ||
+    rollbackPrevious.revision !== promoted.revision ||
+    rollbackImage.id !== prior.id ||
+    rollbackImage.revision !== prior.revision ||
+    restored.id !== prior.id ||
+    restored.revision !== prior.revision
+  ) {
+    throw new Error("candidate API did not restore the exact prior default revision");
+  }
+  const failed =
+    Number(failedStatus) === 404
+      ? undefined
+      : objectAt(objectAt(failedReadback, "failed readback").image, "failed readback image");
+  if (
+    (Number(failedStatus) !== 200 && Number(failedStatus) !== 404) ||
+    (failed &&
+      (failed.id !== promoted.id ||
+        failed.revision === promoted.revision ||
+        failed.promotedAt !== undefined ||
+        failed.catalogOnly === true))
+  ) {
+    throw new Error("failed image revision remains in the candidate catalog");
+  }
+  return {
+    version: 1,
+    priorImageDigest: digest(prior.id),
+    priorRevisionDigest: digest(prior.revision),
+    failedImageDigest: digest(promoted.id),
+    failedRevisionDigest: digest(promoted.revision),
+    seededDefaultReadback: true,
+    priorDefaultRevisionRestored: true,
+    failedCatalogRevisionRetired: true,
+  };
 }
 
 async function github(pathname) {
@@ -346,7 +445,7 @@ class Cloudflare {
     const versions = await this.request(`/workers/scripts/${name}/versions`);
     const version = versions?.items?.[0] ?? versions?.[0];
     if (!version?.id) throw new Error("Cloudflare did not return a Worker version");
-    return version.id;
+    return workerVersion(version.id);
   }
 
   async enableSubdomain(name) {
@@ -478,6 +577,115 @@ function publicBindingShape(bindings) {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function executionManifest(identity) {
+  // The final version cannot be embedded in its own Worker bindings. Bind it
+  // here, then re-read both version and bindings immediately before execution.
+  return {
+    version: 1,
+    runId: identity.runId,
+    candidateSha: identity.candidateSha,
+    candidateWorker: identity.candidateWorker,
+    candidateVersion: identity.candidateVersion,
+    deploymentHash: identity.deploymentHash,
+    manifestSha256: identity.manifestSha256,
+    bindingDigest: identity.bindingDigest,
+    authoritySha: identity.authoritySha,
+    authorityVersion: identity.authorityVersion,
+    policyHash: identity.policyHash,
+    enrolledAt: identity.enrolledAt,
+    expiresAt: identity.expiresAt,
+  };
+}
+
+export function executionManifestDigest(identity) {
+  return digest(canonical(executionManifest(identity)));
+}
+
+function qualificationExpectedFromEnv({ optional = false } = {}) {
+  const runId = process.env.QUALIFICATION_EXPECTED_RUN_ID?.trim() ?? "";
+  if (optional && !runId) return undefined;
+  return {
+    runId: required("QUALIFICATION_EXPECTED_RUN_ID", runIdPattern),
+    candidateSha: required("QUALIFICATION_EXPECTED_CANDIDATE_SHA", sha40),
+    candidateWorker: required("QUALIFICATION_EXPECTED_CANDIDATE_WORKER", workerNamePattern),
+    candidateVersion: boundedString("QUALIFICATION_EXPECTED_CANDIDATE_VERSION", 128),
+    deploymentHash: required("QUALIFICATION_EXPECTED_DEPLOYMENT_HASH", sha64),
+    manifestSha256: required("QUALIFICATION_EXPECTED_MANIFEST_SHA", sha64),
+    bindingDigest: required("QUALIFICATION_EXPECTED_BINDING_DIGEST", sha64),
+    authoritySha: required("QUALIFICATION_EXPECTED_AUTHORITY_SHA", sha40),
+    authorityVersion: boundedString("QUALIFICATION_EXPECTED_AUTHORITY_VERSION", 64),
+    policyHash: required("QUALIFICATION_EXPECTED_POLICY_HASH", sha64),
+    enrolledAt: required("QUALIFICATION_EXPECTED_ENROLLED_AT"),
+    expiresAt: required("QUALIFICATION_EXPECTED_EXPIRES_AT"),
+    executionManifestDigest: required("QUALIFICATION_EXPECTED_EXECUTION_MANIFEST_DIGEST", sha64),
+  };
+}
+
+export function verifyAttestationIdentity(attestation, expected, { finalized } = {}) {
+  if (!expected) throw new Error("protected qualification identity is absent");
+  const fields = [
+    "runId",
+    "candidateSha",
+    "candidateWorker",
+    "deploymentHash",
+    "authoritySha",
+    "authorityVersion",
+    "policyHash",
+    "enrolledAt",
+    "expiresAt",
+  ];
+  if (fields.some((field) => attestation?.[field] !== expected[field])) {
+    throw new Error("authority attestation identity does not match protected expectations");
+  }
+  const enrolledAt = Date.parse(attestation.enrolledAt);
+  const expiresAt = Date.parse(attestation.expiresAt);
+  const finalizingAt = Date.parse(attestation.finalizingAt ?? "");
+  const finalizedAt = Date.parse(attestation.finalizedAt ?? "");
+  if (
+    attestation.version !== 1 ||
+    !Number.isFinite(enrolledAt) ||
+    !Number.isFinite(expiresAt) ||
+    enrolledAt >= expiresAt ||
+    (finalized === true &&
+      (!attestation.finalized ||
+        !Number.isFinite(finalizingAt) ||
+        !Number.isFinite(finalizedAt) ||
+        finalizingAt < enrolledAt ||
+        finalizedAt < finalizingAt))
+  ) {
+    throw new Error("authority attestation timestamps or finalized state are invalid");
+  }
+}
+
+async function verifyExecutionDeployment(cf, expected) {
+  const [settings, candidateVersion] = await Promise.all([
+    cf.settings(expected.candidateWorker),
+    cf.latestVersion(expected.candidateWorker),
+  ]);
+  if (candidateVersion !== expected.candidateVersion) {
+    throw new Error("candidate Worker version changed after protected deployment");
+  }
+  const bindings = publicBindingShape(settings.bindings ?? []);
+  const transport = bindings.find(
+    (binding) =>
+      binding.name === "CRABBOX_AWS_QUALIFICATION_TRANSPORT" &&
+      binding.type === "service" &&
+      binding.service === authorityName,
+  );
+  if (
+    digest(canonical(bindings)) !== expected.bindingDigest ||
+    transport?.props?.runId !== expected.runId ||
+    transport?.props?.candidateSha !== expected.candidateSha ||
+    transport?.props?.candidateWorker !== expected.candidateWorker ||
+    transport?.props?.deploymentHash !== expected.deploymentHash ||
+    transport?.props?.expiresAt !== expected.expiresAt ||
+    executionManifestDigest(expected) !== expected.executionManifestDigest
+  ) {
+    throw new Error("candidate Worker content, settings, or execution manifest changed");
+  }
+  return { candidateVersion, bindingDigest: digest(canonical(bindings)) };
+}
+
 async function controllerCall(url, token, action, value = {}) {
   const response = await fetch(`${url}/${action}`, {
     method: "POST",
@@ -543,6 +751,7 @@ async function deploy() {
   const config = qualificationConfig();
   const authoritySha = required("QUALIFICATION_AUTHORITY_SHA", sha40);
   const authorityVersion = boundedString("QUALIFICATION_AUTHORITY_VERSION", 64);
+  const policyHash = required("QUALIFICATION_EXPECTED_POLICY_HASH", sha64);
   const baseIdentity = {
     runId,
     owner,
@@ -609,7 +818,7 @@ async function deploy() {
   );
   const identity = { ...baseIdentity, deploymentHash };
   const bindings = candidateBindings(identity, adminToken, sharedToken, config);
-  await cf.upload(
+  const finalUpload = await cf.upload(
     candidateWorker,
     mainFile,
     candidateMetadata(manifest.mainModule, bindings),
@@ -622,9 +831,13 @@ async function deploy() {
   ]);
   const actualBindings = publicBindingShape(settings.bindings ?? []);
   const expectedBindings = publicBindingShape(bindings);
-  if (canonical(actualBindings) !== canonical(expectedBindings)) {
+  if (
+    workerVersion(finalUpload.deployment_id) !== candidateVersion ||
+    canonical(actualBindings) !== canonical(expectedBindings)
+  ) {
     throw new Error("candidate Worker settings do not match the reviewed binding contract");
   }
+  const bindingDigest = digest(canonical(expectedBindings));
   const controllerURL = await deployController(cf, deploymentHash, controllerToken);
   await Promise.all([
     assertWorkerIsolation(cf, candidateWorker, 1),
@@ -634,6 +847,19 @@ async function deploy() {
   const record = await controllerCall(controllerURL, controllerToken, "claim", { identity });
   if (record.runId !== runId || record.cleanupState !== "claimed")
     throw new Error("authority claim readback mismatch");
+  const attestation = await controllerCall(controllerURL, controllerToken, "attest", { runId });
+  const protectedIdentity = {
+    ...identity,
+    candidateVersion,
+    manifestSha256: manifest.manifestSha256,
+    bindingDigest,
+    authoritySha,
+    authorityVersion,
+    policyHash,
+    enrolledAt: attestation.enrolledAt,
+  };
+  verifyAttestationIdentity(attestation, protectedIdentity, { finalized: false });
+  const manifestDigest = executionManifestDigest(protectedIdentity);
   const proofDir = path.resolve(required("QUALIFICATION_PROOF_DIR"));
   writeJSON(path.join(proofDir, "deployment.json"), {
     version: 1,
@@ -647,8 +873,11 @@ async function deploy() {
     candidateRunId: identityCheck.runId,
     candidateWorker,
     candidateVersionDigest: digest(candidateVersion),
+    executionManifestDigest: manifestDigest,
     authoritySha,
     authorityVersion,
+    policyHash,
+    enrolledAt: attestation.enrolledAt,
     expiresAt,
     isolation: {
       workersDev: true,
@@ -668,7 +897,7 @@ async function deploy() {
       rootGB: config.rootGB,
     },
     policyConfigDigest: digest(canonical(config)),
-    bindingDigest: digest(canonical(expectedBindings)),
+    bindingDigest,
   });
   appendOutput("run_id", runId);
   appendOutput("candidate_worker", candidateWorker);
@@ -676,9 +905,62 @@ async function deploy() {
   appendOutput("candidate_admin_token", adminToken);
   appendOutput("candidate_shared_token", sharedToken);
   appendOutput("deployment_hash", deploymentHash);
+  appendOutput("candidate_sha", identity.candidateSha);
+  appendOutput("candidate_version", candidateVersion);
+  appendOutput("manifest_sha", manifest.manifestSha256);
+  appendOutput("binding_digest", bindingDigest);
+  appendOutput("authority_sha", authoritySha);
+  appendOutput("authority_version", authorityVersion);
+  appendOutput("policy_hash", policyHash);
+  appendOutput("enrolled_at", attestation.enrolledAt);
+  appendOutput("execution_manifest_digest", manifestDigest);
   appendOutput("expires_at", expiresAt);
   appendOutput("region", config.region);
   appendOutput("base_ami_id", config.baseAmiId);
+}
+
+async function arm() {
+  const expected = qualificationExpectedFromEnv();
+  await verifyCandidateIdentity({ artifact: true });
+  const cf = cloudflareFromEnv();
+  await verifyExecutionDeployment(cf, expected);
+  const token = required("QUALIFICATION_CONTROLLER_TOKEN");
+  const controllerURL = await cf.enableSubdomain(controllerName);
+  const discovered = await controllerCall(controllerURL, token, "discover");
+  if (
+    discovered.run?.runId !== expected.runId ||
+    discovered.run?.candidateSha !== expected.candidateSha ||
+    discovered.run?.candidateWorker !== expected.candidateWorker ||
+    discovered.run?.deploymentHash !== expected.deploymentHash ||
+    discovered.run?.expiresAt !== expected.expiresAt ||
+    discovered.run?.cleanupState !== "claimed"
+  ) {
+    throw new Error("authority registry identity does not match protected expectations");
+  }
+  const attestation = await controllerCall(controllerURL, token, "attest", {
+    runId: expected.runId,
+  });
+  verifyAttestationIdentity(attestation, expected, { finalized: false });
+  const armedAt = new Date().toISOString();
+  if (Date.parse(armedAt) >= Date.parse(expected.expiresAt)) {
+    throw new Error("qualification expired before protected execution admission");
+  }
+  const proofDir = path.resolve(required("QUALIFICATION_PROOF_DIR"));
+  writeJSON(path.join(proofDir, "execution-manifest.json"), {
+    version: 1,
+    runId: expected.runId,
+    candidateSha: expected.candidateSha,
+    deploymentHash: expected.deploymentHash,
+    candidateVersionDigest: digest(expected.candidateVersion),
+    executionManifestDigest: expected.executionManifestDigest,
+    authoritySha: expected.authoritySha,
+    authorityVersion: expected.authorityVersion,
+    policyHash: expected.policyHash,
+    enrolledAt: expected.enrolledAt,
+    expiresAt: expected.expiresAt,
+    armedAt,
+  });
+  appendOutput("armed_at", armedAt);
 }
 
 async function namespaceResidue(cf, worker) {
@@ -742,7 +1024,12 @@ async function qualificationCandidates(cf) {
   return candidates;
 }
 
-async function cleanupRun({ reaper = false, requireProof = false } = {}) {
+async function cleanupRun({
+  reaper = false,
+  requireProof = false,
+  expected,
+  initialQualificationFailure,
+} = {}) {
   const cf = cloudflareFromEnv();
   const token = required("QUALIFICATION_CONTROLLER_TOKEN");
   let controllerURL;
@@ -780,20 +1067,52 @@ async function cleanupRun({ reaper = false, requireProof = false } = {}) {
       await deleteCandidate(cf, candidate.worker);
     }
     await cf.deleteScript(controllerName);
+    if (initialQualificationFailure || requireProof) {
+      return {
+        result: "failed",
+        failure:
+          initialQualificationFailure ?? "authority registry has no active qualification run",
+        cleanup: "idle",
+      };
+    }
     return { result: "idle", reason: "registry has no active run" };
   }
   const run = discovered.run;
   let failure;
   let firstAttestation;
-  let qualificationFailure;
+  let qualificationFailure = initialQualificationFailure;
+  // Qualification drift must fail the run, but only after teardown has had its
+  // full chance to finalize every protected resource.
+  const recordQualificationFailure = (error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    qualificationFailure = qualificationFailure ? `${qualificationFailure}; ${message}` : message;
+  };
+  if (requireProof) {
+    try {
+      if (!expected) throw new Error("protected qualification identity is absent");
+      if (
+        run.runId !== expected.runId ||
+        run.candidateSha !== expected.candidateSha ||
+        run.candidateWorker !== expected.candidateWorker ||
+        run.deploymentHash !== expected.deploymentHash ||
+        run.expiresAt !== expected.expiresAt
+      ) {
+        throw new Error("authority registry identity does not match protected expectations");
+      }
+      await verifyExecutionDeployment(cf, expected);
+    } catch (error) {
+      recordQualificationFailure(error);
+    }
+  }
   try {
     await controllerCall(controllerURL, token, "finalize", { runId: run.runId });
     firstAttestation = await controllerCall(controllerURL, token, "attest", { runId: run.runId });
     if (requireProof) {
       try {
+        verifyAttestationIdentity(firstAttestation, expected, { finalized: true });
         verifyQualificationEvidence(firstAttestation, readExecutionProof());
       } catch (error) {
-        qualificationFailure = error instanceof Error ? error.message : String(error);
+        recordQualificationFailure(error);
       }
     }
     await deleteCandidate(cf, run.candidateWorker);
@@ -806,6 +1125,13 @@ async function cleanupRun({ reaper = false, requireProof = false } = {}) {
       Object.values(finalAttestation.finalReceipt?.finalCounts ?? {}).some(Number)
     ) {
       throw new Error("authority did not attest zero AWS residue");
+    }
+    if (requireProof) {
+      try {
+        verifyAttestationIdentity(finalAttestation, expected, { finalized: true });
+      } catch (error) {
+        recordQualificationFailure(error);
+      }
     }
     await controllerCall(controllerURL, token, "retire", { runId: run.runId });
     const after = await controllerCall(controllerURL, token, "discover");
@@ -823,7 +1149,12 @@ async function cleanupRun({ reaper = false, requireProof = false } = {}) {
     return { result: "finalized", runId: run.runId, attestation: finalAttestation };
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);
-    return { result: "failed", runId: run.runId, failure, attestation: firstAttestation };
+    return {
+      result: "failed",
+      runId: run.runId,
+      failure: qualificationFailure ? `${qualificationFailure}; cleanup: ${failure}` : failure,
+      attestation: firstAttestation,
+    };
   }
 }
 
@@ -844,6 +1175,8 @@ function readExecutionProof() {
   return {
     spoof: readJSON(path.join(directory, "spoofed-admin.json")),
     fsr: readJSON(path.join(directory, "fsr-denial.json")),
+    catalog: readJSON(path.join(directory, "catalog-rollback.json")),
+    execution: readJSON(path.join(directory, "execution-state.json")),
     hardKill: readJSON(path.join(directory, "executor-hard-kill.json")),
     log: fs.readFileSync(path.join(directory, "candidate-execution.log"), "utf8"),
   };
@@ -894,11 +1227,19 @@ export function verifyQualificationEvidence(attestation, proof) {
     receipt.failureCodes?.length !== 0 ||
     (receipt.resourcesAtStart?.images ?? 0) < 1 ||
     proof?.fsr?.rejected !== true ||
+    proof?.catalog?.seededDefaultReadback !== true ||
+    proof?.catalog?.priorDefaultRevisionRestored !== true ||
+    proof?.catalog?.failedCatalogRevisionRetired !== true ||
+    !sha64.test(proof?.catalog?.priorImageDigest ?? "") ||
+    !sha64.test(proof?.catalog?.priorRevisionDigest ?? "") ||
+    !sha64.test(proof?.catalog?.failedImageDigest ?? "") ||
+    !sha64.test(proof?.catalog?.failedRevisionDigest ?? "") ||
+    proof?.execution?.mintExit !== 86 ||
+    proof?.execution?.injectedAfterPromotedSmoke !== true ||
+    proof?.execution?.launchCount !== 3 ||
+    proof?.execution?.smokeCount < 3 ||
     proof?.hardKill?.executorKilled !== true ||
-    proof?.hardKill?.cloudCredentialsPresent !== false ||
-    !proof?.log?.includes("qualification mint exited 86 only after the promoted smoke") ||
-    !proof?.log?.includes("restored previous default image=") ||
-    !proof?.log?.includes("--retire-expected-catalog")
+    proof?.hardKill?.cloudCredentialsPresent !== false
   ) {
     throw new Error("attestation does not prove owned image recovery after executor exit");
   }
@@ -974,16 +1315,42 @@ async function main() {
     );
     return;
   }
+  if (command === "verify-catalog") {
+    if (args.length !== 8) throw new Error("verify-catalog requires eight arguments");
+    const result = verifyCatalogRollbackEvidence({
+      seed: readJSON(path.resolve(args[0])),
+      seededReadback: readJSON(path.resolve(args[1])),
+      promotion: readJSON(path.resolve(args[2])),
+      rollback: readJSON(path.resolve(args[3])),
+      restoredReadback: readJSON(path.resolve(args[4])),
+      failedReadback: readJSON(path.resolve(args[5])),
+      failedStatus: args[6],
+    });
+    writeJSON(path.resolve(args[7]), result);
+    return;
+  }
   if (command === "deploy") return await deploy();
+  if (command === "arm") return await arm();
   if (command === "finalize") {
+    let identityFailure;
     try {
       await verifyCandidateIdentity({ cleanup: true });
     } catch (error) {
-      console.error(
-        `identity revalidation warning: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      identityFailure = error instanceof Error ? error.message : String(error);
     }
-    const result = await cleanupRun({ reaper: true, requireProof: true });
+    let expected;
+    try {
+      expected = qualificationExpectedFromEnv({ optional: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      identityFailure = identityFailure ? `${identityFailure}; ${message}` : message;
+    }
+    const result = await cleanupRun({
+      reaper: true,
+      requireProof: true,
+      expected,
+      initialQualificationFailure: identityFailure,
+    });
     writeEvidence(result);
     if (result.result === "failed") throw new Error(result.failure);
     return;
@@ -995,7 +1362,7 @@ async function main() {
     return;
   }
   throw new Error(
-    "usage: image-qualification-control.mjs authorize|admit|manifest|deploy|finalize|reap",
+    "usage: image-qualification-control.mjs authorize|admit|manifest|verify-catalog|deploy|arm|finalize|reap",
   );
 }
 

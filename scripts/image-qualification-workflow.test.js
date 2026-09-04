@@ -43,6 +43,9 @@ test("workflow isolates candidate execution from protected credentials", () => {
     /CLOUDFLARE_API_TOKEN|AWS_ACCESS_KEY_ID|QUALIFICATION_CONTROLLER_TOKEN/,
   );
   assert.match(workflow, /deploy-enroll:[\s\S]*needs: \[authorize, admit\]/);
+  assert.match(workflow, /arm:[\s\S]*environment: image-qualification/);
+  assert.match(workflow, /image-qualification-control\.mjs arm/);
+  assert.match(workflow, /execute:[\s\S]*needs: \[authorize, deploy-enroll, arm\]/);
   const executeJob = workflow.slice(
     workflow.indexOf("  execute:"),
     workflow.indexOf("  finalize:"),
@@ -53,6 +56,7 @@ test("workflow isolates candidate execution from protected credentials", () => {
   );
   assert.match(executeJob, /QUALIFICATION_ADMIN_TOKEN/);
   assert.match(executeJob, /QUALIFICATION_SHARED_TOKEN/);
+  assert.doesNotMatch(executeJob, /QUALIFICATION_EXPECTED_CANDIDATE_VERSION/);
   const protectedJobs = workflow.slice(workflow.indexOf("  deploy-enroll:"));
   assert.doesNotMatch(protectedJobs, /npm ci|go build|wrangler deploy/);
   assert.match(protectedJobs, /candidate bytes as inert data/);
@@ -90,6 +94,9 @@ test("control tool fixes the reviewed policy and recovery boundary", () => {
   assert.match(control, /controllerCall\(controllerURL, token, "finalize"/);
   assert.match(control, /controllerCall\(controllerURL, token, "retire"/);
   assert.match(control, /workers\/scripts/);
+  assert.match(control, /candidate Worker version changed after protected deployment/);
+  assert.match(control, /authority attestation identity does not match protected expectations/);
+  assert.doesNotMatch(control, /identity revalidation warning/);
 });
 
 test("executor proves auth denial, FSR denial, three launches, rollback, and hard kill", () => {
@@ -99,8 +106,12 @@ test("executor proves auth denial, FSR denial, three launches, rollback, and har
   assert.match(executor, /mint_status" -eq 86/);
   assert.match(executor, /launch-count.*-eq 3/);
   assert.match(executor, /kill -KILL "\$\$"/);
-  assert.match(executor, /restored previous default image=/);
+  assert.match(executor, /catalog-rollback\.json/);
+  assert.match(executor, /execution-state\.json/);
+  assert.doesNotMatch(executor, /v1\/images\?provider/);
   assert.match(adapter, /QUALIFICATION_REAL_CRABBOX/);
+  assert.match(adapter, /promotion-receipt\.json/);
+  assert.match(adapter, /rollback-receipt\.json/);
   assert.match(adapter, /exit 86/);
 });
 
@@ -305,8 +316,23 @@ test("attestation gate requires FSR denial and exact sequential launch order", a
   const proof = {
     spoof: { status: 403, catalogUnchanged: true, completedAt: "2026-09-04T00:00:01.000Z" },
     fsr: { rejected: true },
+    catalog: {
+      seededDefaultReadback: true,
+      priorDefaultRevisionRestored: true,
+      failedCatalogRevisionRetired: true,
+      priorImageDigest: "a".repeat(64),
+      priorRevisionDigest: "b".repeat(64),
+      failedImageDigest: "c".repeat(64),
+      failedRevisionDigest: "d".repeat(64),
+    },
+    execution: {
+      mintExit: 86,
+      injectedAfterPromotedSmoke: true,
+      launchCount: 3,
+      smokeCount: 3,
+    },
     hardKill: { executorKilled: true, cloudCredentialsPresent: false },
-    log: "qualification mint exited 86 only after the promoted smoke\nrestored previous default image=[aws-resource]\n--retire-expected-catalog",
+    log: "supplemental log can be empty of rollback assertions",
   };
   assert.doesNotThrow(() => module.verifyQualificationEvidence(attestation, proof));
   assert.throws(
@@ -333,6 +359,122 @@ test("attestation gate requires FSR denial and exact sequential launch order", a
         proof,
       ),
     /pre-signer/,
+  );
+});
+
+test("catalog proof requires exact default restoration and failed revision retirement", async () => {
+  const module = await import(
+    `${pathToFileURL(path.join(root, "scripts/image-qualification-control.mjs"))}?catalog=${Date.now()}`
+  );
+  const prior = { id: "ami-11111111", revision: "revision-prior", promotedAt: "before" };
+  const failed = { id: "ami-22222222", revision: "revision-failed", promotedAt: "during" };
+  const input = {
+    seed: prior,
+    seededReadback: { image: prior },
+    promotion: {
+      image: failed,
+      previous: { state: "present", imageId: prior.id, revision: prior.revision },
+    },
+    rollback: {
+      image: prior,
+      previous: { state: "present", imageId: failed.id, revision: failed.revision },
+    },
+    restoredReadback: { image: prior },
+    failedReadback: { image: { id: failed.id, state: "available" } },
+    failedStatus: 200,
+  };
+  const evidence = module.verifyCatalogRollbackEvidence(input);
+  assert.equal(evidence.priorDefaultRevisionRestored, true);
+  assert.equal(evidence.failedCatalogRevisionRetired, true);
+  assert.throws(
+    () =>
+      module.verifyCatalogRollbackEvidence({
+        ...input,
+        restoredReadback: {
+          image: { ...prior, revision: "replacement-revision" },
+        },
+      }),
+    /exact prior default revision/,
+  );
+  assert.throws(
+    () =>
+      module.verifyCatalogRollbackEvidence({
+        ...input,
+        failedReadback: { image: failed },
+      }),
+    /remains in the candidate catalog/,
+  );
+});
+
+test("final attestation must match every protected identity field and timestamp", async () => {
+  const module = await import(
+    `${pathToFileURL(path.join(root, "scripts/image-qualification-control.mjs"))}?attestation=${Date.now()}`
+  );
+  const expected = {
+    runId: "image-qualification-1-1",
+    candidateSha: "a".repeat(40),
+    candidateWorker: "crabbox-image-qualification-1-1",
+    deploymentHash: "b".repeat(64),
+    authoritySha: "c".repeat(40),
+    authorityVersion: "qualification-v1",
+    policyHash: "d".repeat(64),
+    enrolledAt: "2026-09-04T00:00:00.000Z",
+    expiresAt: "2026-09-04T02:00:00.000Z",
+  };
+  const attestation = {
+    version: 1,
+    ...expected,
+    finalizingAt: "2026-09-04T01:00:00.000Z",
+    finalizedAt: "2026-09-04T01:01:00.000Z",
+    finalized: true,
+  };
+  assert.doesNotThrow(() =>
+    module.verifyAttestationIdentity(attestation, expected, { finalized: true }),
+  );
+  assert.throws(
+    () =>
+      module.verifyAttestationIdentity({ ...attestation, policyHash: "e".repeat(64) }, expected, {
+        finalized: true,
+      }),
+    /protected expectations/,
+  );
+  assert.throws(
+    () =>
+      module.verifyAttestationIdentity(
+        { ...attestation, finalizedAt: "2026-09-03T23:59:00.000Z" },
+        expected,
+        { finalized: true },
+      ),
+    /timestamps/,
+  );
+});
+
+test("execution manifest binds the exact final Worker version and authority policy", async () => {
+  const module = await import(
+    `${pathToFileURL(path.join(root, "scripts/image-qualification-control.mjs"))}?execution=${Date.now()}`
+  );
+  const identity = {
+    runId: "image-qualification-1-1",
+    candidateSha: "a".repeat(40),
+    candidateWorker: "crabbox-image-qualification-1-1",
+    candidateVersion: "worker-version-1",
+    deploymentHash: "b".repeat(64),
+    manifestSha256: "c".repeat(64),
+    bindingDigest: "d".repeat(64),
+    authoritySha: "e".repeat(40),
+    authorityVersion: "qualification-v1",
+    policyHash: "f".repeat(64),
+    enrolledAt: "2026-09-04T00:00:00.000Z",
+    expiresAt: "2026-09-04T02:00:00.000Z",
+  };
+  const exact = module.executionManifestDigest(identity);
+  assert.notEqual(
+    module.executionManifestDigest({ ...identity, candidateVersion: "worker-version-2" }),
+    exact,
+  );
+  assert.notEqual(
+    module.executionManifestDigest({ ...identity, policyHash: "0".repeat(64) }),
+    exact,
   );
 });
 
@@ -391,9 +533,17 @@ test("adapter delegates and injects exit 86 only after the third launch smoke", 
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-qualification-adapter-"));
   try {
     const fake = path.join(temp, "crabbox");
-    fs.writeFileSync(fake, "#!/usr/bin/env bash\nprintf 'delegated %s\\n' \"$1\"\n", {
-      mode: 0o700,
-    });
+    fs.writeFileSync(
+      fake,
+      `#!/usr/bin/env bash
+if [[ "\${1:-}" == image && "\${2:-}" == promote ]]; then
+  printf '{"image":{"id":"ami-11111111","revision":"revision"},"previous":{"state":"present","imageId":"ami-22222222","revision":"previous"}}\\n'
+else
+  printf 'delegated %s\\n' "\${1:-}"
+fi
+`,
+      { mode: 0o700 },
+    );
     const env = {
       ...process.env,
       QUALIFICATION_REAL_CRABBOX: fake,
@@ -420,6 +570,24 @@ test("adapter delegates and injects exit 86 only after the third launch smoke", 
       }).status,
       0,
     );
+    assert.equal(
+      spawnSync(
+        path.join(root, "scripts/image-qualification-crabbox-adapter.sh"),
+        ["image", "promote", "--expected-current-image", "capture"],
+        { env },
+      ).status,
+      0,
+    );
+    assert.equal(
+      spawnSync(
+        path.join(root, "scripts/image-qualification-crabbox-adapter.sh"),
+        ["image", "promote", "--retire-expected-catalog", "ami-11111111"],
+        { env },
+      ).status,
+      0,
+    );
+    assert.ok(fs.existsSync(path.join(temp, "state", "promotion-receipt.json")));
+    assert.ok(fs.existsSync(path.join(temp, "state", "rollback-receipt.json")));
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
