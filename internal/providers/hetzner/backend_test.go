@@ -1,9 +1,11 @@
 package hetzner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -23,6 +25,7 @@ type fakeHetznerClient struct {
 	list    []Server
 
 	createServer Server
+	createCalls  int
 	createErr    error
 	deleteErr    error
 	keyDeleteErr error
@@ -46,6 +49,7 @@ func (f *fakeHetznerClient) EnsureSSHKey(_ context.Context, name, _ string) (cor
 }
 
 func (f *fakeHetznerClient) CreateServerWithFallback(_ context.Context, cfg Config, _, _, _ string, _ bool, _ func(string, ...any)) (Server, Config, error) {
+	f.createCalls++
 	return f.createServer, cfg, f.createErr
 }
 
@@ -773,4 +777,56 @@ func installHetznerClaimState(t *testing.T) {
 	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
 	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "")
 	t.Setenv("CRABBOX_PROVIDER", "")
+}
+
+func TestHetznerAcquireStopsFreshRetryAfterRollbackFailure(t *testing.T) {
+	for _, failure := range []string{"none", "server", "key"} {
+		t.Run(failure, func(t *testing.T) {
+			debt := errors.New("cleanup unavailable")
+			fake := &fakeHetznerClient{servers: map[int64]Server{}, keyCreated: true}
+			if failure == "server" {
+				fake.deleteErr = debt
+			}
+			if failure == "key" {
+				fake.keyDeleteErr = debt
+			}
+			installHetznerTestHooks(t, fake)
+			sequence := 0
+			newLeaseID = func() string {
+				sequence++
+				id := fmt.Sprintf("cbx_%012x", sequence)
+				server := acquiredHetznerTestServer(int64(42+sequence), id)
+				fake.createServer = server
+				fake.servers[server.ID] = server
+				return id
+			}
+			primary := core.Exit(5, "timed out waiting for SSH: fixture")
+			waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return primary }
+			var stderr bytes.Buffer
+			b := NewHetznerLeaseBackend(ProviderSpec{}, Config{}, Runtime{Stderr: &stderr}).(*hetznerLeaseBackend)
+			_, err := b.Acquire(context.Background(), AcquireRequest{RequestedSlug: "test"})
+			want := 1
+			if failure == "none" {
+				want = 2
+			}
+			if fake.createCalls != want || len(fake.deletedKeys) != want || !errors.Is(err, primary) {
+				t.Fatalf("creates=%d keys=%v error=%v", fake.createCalls, fake.deletedKeys, err)
+			}
+			wantDeletes := want
+			if failure == "key" {
+				wantDeletes = 0
+			}
+			if len(fake.deletedServers) != wantDeletes {
+				t.Fatalf("server deletion order changed: %v", fake.deletedServers)
+			}
+			for i, id := range fake.deletedServers {
+				if id != int64(43+i) {
+					t.Fatalf("wrong cleanup identity: %v", fake.deletedServers)
+				}
+			}
+			if failure != "none" && (!errors.Is(err, debt) || strings.Contains(stderr.String(), "retrying with fresh lease")) {
+				t.Fatalf("cleanup debt lost: error=%v stderr=%s", err, stderr.String())
+			}
+		})
+	}
 }

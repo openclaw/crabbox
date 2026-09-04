@@ -1,6 +1,7 @@
 package aws
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -2091,6 +2092,71 @@ func TestAWSAcquireUsesTailscaleHostnameOnlyForStrictMode(t *testing.T) {
 			}
 			if bootstrapHost != test.want {
 				t.Fatalf("bootstrap host=%q, want %q", bootstrapHost, test.want)
+			}
+		})
+	}
+}
+
+func TestAWSAcquireStopsFreshRetryAfterRollbackFailure(t *testing.T) {
+	for _, failure := range []string{"none", "instance", "key", "client"} {
+		t.Run(failure, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			primary := core.Exit(5, "timed out waiting for SSH: fixture")
+			debt := errors.New("cleanup unavailable")
+			fake := &fakeAWSClient{}
+			if failure == "instance" {
+				fake.deleteServerErr = debt
+			}
+			if failure == "key" {
+				fake.deleteKeyErr = debt
+			}
+			oldClient, oldBootstrap := newAWSClient, bootstrapAWSWindowsDesktop
+			bootstrapReached := false
+			newAWSClient = func(ctx context.Context, _ Config) (awsClient, error) {
+				if failure == "client" && bootstrapReached {
+					if _, bounded := ctx.Deadline(); bounded {
+						return nil, debt
+					}
+				}
+				return fake, nil
+			}
+			bootstrapAWSWindowsDesktop = func(context.Context, Config, *SSHTarget, string, io.Writer) error {
+				bootstrapReached = true
+				return primary
+			}
+			t.Cleanup(func() { newAWSClient = oldClient; bootstrapAWSWindowsDesktop = oldBootstrap })
+			var stderr bytes.Buffer
+			cfg := Config{Provider: "aws", AWSRegion: "us-east-1", AWSSSHCIDRs: []string{"198.51.100.7/32"}}
+			b := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: &stderr}).(*awsLeaseBackend)
+			_, err := b.Acquire(context.Background(), AcquireRequest{})
+			want := 1
+			if failure == "none" {
+				want = 2
+			}
+			if fake.createCalls != want || !errors.Is(err, primary) {
+				t.Fatalf("creates=%d error=%v", fake.createCalls, err)
+			}
+			wantCleanup := want
+			if failure == "client" {
+				wantCleanup = 0
+			}
+			if len(fake.deletedInstances) != wantCleanup || len(fake.deletedKeys) != wantCleanup {
+				t.Fatalf("cleanup changed: instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
+			}
+			for _, id := range fake.deletedInstances {
+				if id != fake.created.CloudID {
+					t.Fatalf("wrong instance cleanup: %v", fake.deletedInstances)
+				}
+			}
+			for _, id := range fake.deletedKeys {
+				if id != fake.created.Labels["aws_key_pair_id"] {
+					t.Fatalf("wrong key cleanup: %v", fake.deletedKeys)
+				}
+			}
+			if failure != "none" && (!errors.Is(err, debt) || strings.Contains(stderr.String(), "retrying with fresh lease")) {
+				t.Fatalf("cleanup debt lost: error=%v stderr=%s", err, stderr.String())
 			}
 		})
 	}

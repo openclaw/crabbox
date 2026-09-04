@@ -365,6 +365,17 @@ Without a coordinator, the CLI talks to the provider API directly and owns
 cleanup itself. Releasing a direct lease (`crabbox stop` / `crabbox release`)
 deletes the backing machine immediately.
 
+Ordinary direct AWS, Azure, GCP, and Hetzner acquisition can retry a bootstrap
+timeout with a fresh lease. If rollback reports a cleanup failure, acquisition
+stops instead: the original failure and cleanup diagnostics remain available,
+and no second allocation is attempted. This consumes each adapter's existing
+cleanup result; it does not give all providers the same deletion-confirmation
+guarantee. AWS termination acceptance and Hetzner DELETE success still differ
+from GCP operation completion and Azure's dependent-resource absence checks.
+GCP also stops retrying if its selected-scope cleanup client cannot be rebuilt,
+even if the existing best-effort fallback client returns success. That fallback
+does not establish that the selected project and zone were cleaned.
+
 RunPod and Hetzner bind readiness to the immutable resource ID and expected name
 returned or requested at creation, before using the SSH endpoint. Hetzner also
 checks the new allocation's lease, provider ownership, slug, and selected-key
