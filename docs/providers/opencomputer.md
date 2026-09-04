@@ -160,6 +160,11 @@ crabbox run --provider opencomputer --allow-env API_TOKEN -- printenv API_TOKEN
 6. `run --lease-output <path>` writes the OpenComputer lease ID, slug,
    reuse/retention state, and exact cleanup command for orchestration handoff.
 
+Command transport failures preserve their original error cause, including
+cancellation and deadlines, while retaining exit code 1 and the normal cleanup
+or `--keep-on-failure` behavior. Completed commands still mirror their remote
+exit code.
+
 ## Capabilities
 
 - SSH: not driven by Crabbox.
