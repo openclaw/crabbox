@@ -415,3 +415,315 @@ jobs:
 
       - name: Check docs
         run: scripts/check-docs.sh
+
+  production-deadcode-audit:
+    name: Deadcode audit (${{ matrix.module }}, ${{ matrix.goos }}/${{ matrix.goarch }})
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/audit/production-deadcode-20260904'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        module: [root, runner]
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+        exclude:
+          - module: runner
+            goos: windows
+    steps:
+      - name: Check out frozen source
+        timeout-minutes: 3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: 0f11089ee08fde86fb8e2088a326ac7e856497b3
+          persist-credentials: false
+
+      - name: Set up Go
+        timeout-minutes: 3
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Collect production and test-root diagnostics
+        timeout-minutes: 29
+        shell: bash
+        env:
+          AUDIT_MODULE: ${{ matrix.module }}
+          AUDIT_GOOS: ${{ matrix.goos }}
+          AUDIT_GOARCH: ${{ matrix.goarch }}
+          AUDIT_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          AUDIT_HEAD_SHA: ${{ github.sha }}
+          AUDIT_RUN_ID: ${{ github.run_id }}
+          AUDIT_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import signal
+          import subprocess
+          import time
+
+          collection_timeout_seconds = 28 * 60
+          collection_deadline = time.monotonic() + collection_timeout_seconds
+          source_sha = "0f11089ee08fde86fb8e2088a326ac7e856497b3"
+          tool_version = "v0.45.0"
+          source = pathlib.Path.cwd().resolve()
+          temp = pathlib.Path(os.environ["RUNNER_TEMP"])
+          output = temp / "production-deadcode"
+          output.mkdir()
+          module_dir = {"root": ".", "runner": "worker/cloudflare-container-runner"}[os.environ["AUDIT_MODULE"]]
+          module_path = "github.com/openclaw/crabbox"
+          if module_dir != ".":
+              module_path += "/" + module_dir
+          cwd = source / module_dir
+          target = {"goos": os.environ["AUDIT_GOOS"], "goarch": os.environ["AUDIT_GOARCH"]}
+          assert target["goos"] in ("linux", "darwin", "windows")
+          assert target["goarch"] in ("amd64", "arm64")
+          first_party = "^" + re.escape(module_path) + "(/|$)"
+          manifest = {
+              "source_sha": source_sha,
+              "source_tree": None,
+              "workflow_sha": os.environ["AUDIT_WORKFLOW_SHA"],
+              "head_sha": os.environ["AUDIT_HEAD_SHA"],
+              "run_id": os.environ["AUDIT_RUN_ID"],
+              "run_attempt": os.environ["AUDIT_RUN_ATTEMPT"],
+              "tool": "golang.org/x/tools/cmd/deadcode",
+              "tool_version": tool_version,
+              "collection_timeout_seconds": collection_timeout_seconds,
+              "module": module_dir,
+              "module_path": module_path,
+              "target": target,
+              "cgo_enabled": "0",
+              "tags": [],
+              "filter": first_party,
+              "generated": True,
+              "scope": "source-configuration function reachability, not native execution",
+              "uncovered": [
+                  {"scope": "vmdembed", "status": "UNCOVERED", "reason": "genuine Swift payload not built"},
+                  {"scope": "vmdembed,vmdrelease", "status": "UNCOVERED", "reason": "genuine Swift payload not built"},
+                  {"scope": "unused fields, types, variables and constants", "status": "UNCOVERED", "reason": "function analyzer only"},
+              ],
+              "status": "FAIL",
+              "passes": {
+                  mode: {"status": "FAIL", "reason": "not_started", "tests": mode == "test", "timeout_seconds": 900}
+                  for mode in ("production", "test")
+              },
+          }
+
+          class CoverageError(Exception):
+              pass
+
+          def save(name, value):
+              (output / name).write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+          def run(args, *, env=None, directory=cwd, timeout=120):
+              remaining = collection_deadline - time.monotonic()
+              if remaining <= 0:
+                  raise CoverageError("budget_exhausted")
+              if timeout <= 0:
+                  raise CoverageError("timeout")
+              budget_limited = remaining <= timeout
+              try:
+                  process = subprocess.Popen(
+                      args, cwd=directory, env=env, stdout=subprocess.PIPE,
+                      stderr=subprocess.DEVNULL, text=True, start_new_session=True,
+                  )
+                  try:
+                      stdout, _ = process.communicate(timeout=min(timeout, remaining))
+                  except subprocess.TimeoutExpired:
+                      os.killpg(process.pid, signal.SIGKILL)
+                      try:
+                          process.communicate(timeout=5)
+                      except subprocess.TimeoutExpired:
+                          raise CoverageError("process_cleanup_timeout") from None
+                      raise CoverageError("budget_exhausted" if budget_limited else "timeout") from None
+              except OSError:
+                  raise CoverageError("process_start_failed") from None
+              if process.returncode:
+                  raise CoverageError("command_exit_" + str(process.returncode))
+              if len(stdout) > 16 * 1024 * 1024:
+                  raise CoverageError("output_size_limit")
+              return stdout
+
+          def relative_file(value, directory):
+              if not isinstance(value, str):
+                  raise CoverageError("invalid_source_path")
+              path = pathlib.Path(value)
+              if not path.is_absolute():
+                  path = directory / path
+              try:
+                  relative = path.resolve().relative_to(source).as_posix()
+              except ValueError:
+                  raise CoverageError("source_path_outside_checkout") from None
+              if not relative.endswith(".go") or not re.fullmatch(r"[A-Za-z0-9_./+-]+", relative):
+                  raise CoverageError("invalid_source_path")
+              if not path.is_file():
+                  raise CoverageError("missing_source_file")
+              return relative
+
+          def package_id(value):
+              pattern = re.escape(module_path) + r"(?:/[A-Za-z0-9_.+/-]+)?(?:\.test)?"
+              if not isinstance(value, str) or not re.fullmatch(pattern + r"(?: \[" + pattern + r"\])?", value):
+                  raise CoverageError("unexpected_package")
+              return value
+
+          def inventory(raw, tests):
+              decoder = json.JSONDecoder()
+              records = []
+              while raw.strip():
+                  value, end = decoder.raw_decode(raw.lstrip())
+                  records.append(value)
+                  raw = raw.lstrip()[end:]
+              packages, roots = [], []
+              for package in records:
+                  if not isinstance(package, dict):
+                      raise CoverageError("invalid_package_shape")
+                  if package.get("Error") or package.get("DepsErrors") or package.get("Incomplete"):
+                      raise CoverageError("package_load_error")
+                  name = package_id(package["ImportPath"])
+                  synthetic = tests and package["Name"] == "main" and name.endswith(".test")
+                  directory = pathlib.Path(package["Dir"]).resolve()
+                  directory.relative_to(cwd.resolve())
+                  files = [] if synthetic else [
+                      relative_file(filename, directory)
+                      for filename in package.get("GoFiles", []) + package.get("CgoFiles", [])
+                  ]
+                  if not files and not synthetic:
+                      raise CoverageError("empty_package_files")
+                  packages.append({"path": name, "files": sorted(set(files)), "generated_test_main": synthetic})
+                  if package["Name"] == "main":
+                      roots.append(name)
+              if not packages or not roots:
+                  raise CoverageError("missing_main_roots")
+              if not tests and module_path + ("/cmd/crabbox" if module_dir == "." else "") not in roots:
+                  raise CoverageError("missing_expected_main")
+              return {"roots": sorted(set(roots)), "packages": sorted(packages, key=lambda p: p["path"])}
+
+          def findings(raw, eligible):
+              records = json.loads(raw)
+              if records is None:
+                  records = []
+              if not isinstance(records, list):
+                  raise CoverageError("invalid_findings_shape")
+              clean = []
+              for package in records:
+                  name = package_id(package["Path"])
+                  if not isinstance(package["Funcs"], list) or not package["Funcs"]:
+                      raise CoverageError("invalid_functions_shape")
+                  for function in package["Funcs"]:
+                      if not isinstance(function["Name"], str) or not re.fullmatch(r"(?:[A-Za-z_][A-Za-z0-9_.]*|init#[0-9]+)", function["Name"]):
+                          raise CoverageError("invalid_function_name")
+                      position = function["Position"]
+                      filename = relative_file(position["File"], cwd)
+                      if filename not in eligible:
+                          raise CoverageError("finding_outside_eligible_files")
+                      if any(type(position[key]) is not int or position[key] < 1 for key in ("Line", "Col")):
+                          raise CoverageError("invalid_position")
+                      if type(function["Generated"]) is not bool:
+                          raise CoverageError("invalid_generated_flag")
+                      clean.append({
+                          "package": name, "function": function["Name"], "file": filename,
+                          "line": position["Line"], "column": position["Col"], "generated": function["Generated"],
+                      })
+              return sorted(clean, key=lambda item: (item["file"], item["line"], item["column"], item["function"]))
+
+          save("manifest.json", manifest)
+          stage = "identity"
+          try:
+              for key in ("workflow_sha", "head_sha"):
+                  if not re.fullmatch(r"[0-9a-f]{40}", manifest[key]):
+                      raise CoverageError("invalid_workflow_identity")
+              if manifest["workflow_sha"] != manifest["head_sha"]:
+                  raise CoverageError("workflow_head_mismatch")
+              if run(["git", "rev-parse", "HEAD"]).strip() != source_sha:
+                  raise CoverageError("source_sha_mismatch")
+              tree = run(["git", "rev-parse", "HEAD^{tree}"]).strip()
+              if not re.fullmatch(r"[0-9a-f]{40}", tree):
+                  raise CoverageError("invalid_source_tree")
+              manifest["source_tree"] = tree
+              if run(["git", "status", "--porcelain"]).strip():
+                  raise CoverageError("dirty_source_checkout")
+              host_env = {
+                  "PATH": os.environ["PATH"], "HOME": os.environ["HOME"],
+                  "TMPDIR": str(temp), "XDG_CONFIG_HOME": str(temp / "audit-config"),
+                  "GOENV": str(temp / "audit-goenv"), "GOWORK": "off",
+                  "GOCACHE": str(temp / "audit-cache"), "GOMODCACHE": str(temp / "audit-modules"),
+                  "GOPATH": str(temp / "audit-gopath"), "GOBIN": str(temp / "audit-bin"),
+                  "GOFLAGS": "-mod=readonly -trimpath", "GOTOOLCHAIN": "local", "CGO_ENABLED": "0",
+              }
+              stage = "tool_setup"
+              run(["go", "telemetry", "off"], env=host_env)
+              if run(["go", "telemetry"], env=host_env).strip() != "off":
+                  raise CoverageError("telemetry_not_disabled")
+              manifest["telemetry"] = "off"
+              run(["go", "install", "golang.org/x/tools/cmd/deadcode@" + tool_version], env=host_env, timeout=300)
+              tool = str(temp / "audit-bin/deadcode")
+              build_info = run(["go", "version", "-m", tool], env=host_env)
+              if not re.search(r"\bmod\s+golang.org/x/tools\s+" + re.escape(tool_version) + r"\s", build_info):
+                  raise CoverageError("tool_version_mismatch")
+              go_version = run(["go", "env", "GOVERSION"], env=host_env).strip()
+              if not re.fullmatch(r"go[0-9.]+", go_version):
+                  raise CoverageError("invalid_go_version")
+              manifest["go_version"] = go_version
+              target_env = dict(host_env, GOOS=target["goos"], GOARCH=target["goarch"])
+              for mode in ("production", "test"):
+                  result = manifest["passes"][mode]
+                  started = time.monotonic()
+                  deadline = started + result["timeout_seconds"]
+                  stage = "inventory"
+                  try:
+                      test_args = ["-test"] if result["tests"] else []
+                      raw = run(["go", "list", "-json", *test_args, "./..."], env=target_env, timeout=180)
+                      listing = inventory(raw, result["tests"])
+                      save(mode + "-coverage.json", listing)
+                      result["roots"] = listing["roots"]
+                      eligible = {filename for package in listing["packages"] for filename in package["files"]}
+                      result["eligible_file_count"] = len(eligible)
+                      stage = "analysis"
+                      raw = run(
+                          [tool, "-json", "-generated", "-filter", first_party, *test_args, "./..."],
+                          env=target_env, timeout=deadline - time.monotonic(),
+                      )
+                      stage = "validation"
+                      clean = findings(raw, eligible)
+                      save(mode + "-findings.json", clean)
+                      result.update(status="PASS", reason=None, finding_count=len(clean))
+                  except CoverageError as error:
+                      reason = "budget_exhausted" if str(error) == "budget_exhausted" else stage + ":" + str(error)
+                      result.update(status="FAIL", reason=reason)
+                  except (KeyError, TypeError, ValueError):
+                      result.update(status="FAIL", reason=stage + ":malformed_output")
+                  result["elapsed_seconds"] = round(time.monotonic() - started, 3)
+                  save(mode + "-manifest.json", {**manifest, "status": result["status"], "passes": {mode: result}})
+                  save("manifest.json", manifest)
+              if all(result["status"] == "PASS" for result in manifest["passes"].values()):
+                  manifest["status"] = "PASS"
+          except CoverageError as error:
+              manifest["reason"] = stage + ":" + str(error)
+              if str(error) == "budget_exhausted":
+                  for result in manifest["passes"].values():
+                      if result["reason"] == "not_started":
+                          result["reason"] = "budget_exhausted"
+          except (KeyError, TypeError, ValueError):
+              manifest["reason"] = stage + ":malformed_output"
+          finally:
+              save("manifest.json", manifest)
+          print("Deadcode diagnostic coverage: " + manifest["status"])
+          raise SystemExit(0 if manifest["status"] == "PASS" else 1)
+          PY
+
+      - name: Upload sanitized diagnostics
+        if: always()
+        timeout-minutes: 3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: production-deadcode-${{ matrix.module }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ${{ runner.temp }}/production-deadcode/*.json
+          if-no-files-found: error
+          retention-days: 7
