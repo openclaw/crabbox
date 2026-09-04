@@ -149,11 +149,10 @@ func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease Coordina
 		return LeaseTarget{}, err
 	}
 	result := LeaseTarget{
-		Server:       server,
-		SSH:          target,
-		LeaseID:      leaseID,
-		Coordinator:  coord,
-		runnerTiming: coordinatorRunnerTiming(lease),
+		Server:      server,
+		SSH:         target,
+		LeaseID:     leaseID,
+		Coordinator: coord,
 	}
 	if released {
 		result.providerRelease = &leaseReleaseConfirmation{backend: b, leaseID: leaseID}

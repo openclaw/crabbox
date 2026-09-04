@@ -668,6 +668,76 @@ func TestCoordinatorFixedAcquireUsesRequestedIDAndJoinsProvisioning(t *testing.T
 	}
 }
 
+func TestCoordinatorAcquireRetainsCurrentProvisioningTiming(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper requires a unix-like host")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	toolDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(toolDir, "ssh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", toolDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	readyServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer readyServer.Close()
+	readyURL, err := url.Parse(readyServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, port, err := net.SplitHostPort(readyURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lease := CoordinatorLease{
+		ID: "cbx_abcdef123468", Slug: "current-timing", Provider: "aws", TargetOS: targetLinux,
+		State: "active", CloudID: "i-current", Host: host, SSHUser: "crabbox", SSHPort: port, WorkRoot: defaultPOSIXWorkRoot,
+		ProvisioningTiming: &CoordinatorProvisioningTiming{
+			RequestMs: 2,
+			TotalMs:   5,
+			Phases: []CoordinatorProvisioningPhase{
+				{Name: "request", Ms: 2},
+				{Name: "unattributed", Ms: 3},
+			},
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/leases/"+lease.ID:
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+lease.ID:
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+lease.ID+"/heartbeat":
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.Coordinator = server.URL
+	cfg.CoordToken = "user-token"
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: io.Discard}}
+	acquired, err := backend.Acquire(context.Background(), AcquireRequest{
+		Keep: true, RequestedLeaseID: lease.ID, RequestedSlug: lease.Slug,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := coordinatorRunnerTiming(lease)
+	if !reflect.DeepEqual(acquired.runnerTiming, want) {
+		t.Fatalf("runner timing=%#v want current provisioning timing %#v", acquired.runnerTiming, want)
+	}
+}
+
 func TestCoordinatorAcquirePollsCanonicalIDFromProvisioningReplay(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -2331,6 +2401,39 @@ func TestCoordinatorResolveFallsBackToAdminToken(t *testing.T) {
 	}
 	if lease.Coordinator.Token != "admin-token" {
 		t.Fatalf("coordinator token=%q, want admin token", lease.Coordinator.Token)
+	}
+}
+
+func TestCoordinatorResolveDropsHistoricalProvisioningTiming(t *testing.T) {
+	const leaseID = "cbx_historical_timing"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/"+leaseID {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+			ID: leaseID, Slug: "reused-timing", Provider: "aws", TargetOS: targetLinux,
+			CloudID: "i-reused", Host: "203.0.113.10", SSHUser: "crabbox", SSHPort: "22", State: "active",
+			ProvisioningTiming: &CoordinatorProvisioningTiming{
+				RequestMs:      2,
+				NetworkReadyMs: 3,
+				BootstrapMs:    4,
+				TotalMs:        9,
+			},
+		}})
+	}))
+	defer server.Close()
+
+	backend := newCoordinatorIdentityTestBackend(t, server.URL, "")
+	resolved, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.runnerTiming != nil {
+		t.Fatalf("resolved reused lease retained historical timing: %#v", resolved.runnerTiming)
+	}
+	if resolved.LeaseID != leaseID || resolved.Server.CloudID != "i-reused" {
+		t.Fatalf("resolved lease identity=%#v", resolved)
 	}
 }
 

@@ -3648,6 +3648,17 @@ func TestRunCommandSyncOnlyFinalizesAfterTiming(t *testing.T) {
 		SSHPort:    sshPort,
 		WorkRoot:   "/work/crabbox",
 		State:      "active",
+		ProvisioningTiming: &CoordinatorProvisioningTiming{
+			RequestMs:      101,
+			NetworkReadyMs: 102,
+			BootstrapMs:    103,
+			TotalMs:        306,
+			Phases: []CoordinatorProvisioningPhase{
+				{Name: "request", Ms: 101},
+				{Name: "network_ready", Ms: 102},
+				{Name: "bootstrap", Ms: 103},
+			},
+		},
 	}
 	var (
 		mu     sync.Mutex
@@ -3658,6 +3669,7 @@ func TestRunCommandSyncOnlyFinalizesAfterTiming(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/control":
 			http.NotFound(w, r)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+leaseID:
+			time.Sleep(10 * time.Millisecond)
 			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+leaseID+"/heartbeat":
 			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
@@ -3700,9 +3712,38 @@ func TestRunCommandSyncOnlyFinalizesAfterTiming(t *testing.T) {
 		t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
 	}
 	mu.Lock()
-	defer mu.Unlock()
-	if !reflect.DeepEqual(events, []string{"timing", "finish"}) {
-		t.Fatalf("terminal events=%v, want timing then finish", events)
+	gotEvents := append([]string(nil), events...)
+	mu.Unlock()
+	if !reflect.DeepEqual(gotEvents, []string{"timing", "finish"}) {
+		t.Fatalf("terminal events=%v, want timing then finish", gotEvents)
+	}
+
+	var report TimingReport
+	foundReport := false
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		var candidate TimingReport
+		if json.Unmarshal([]byte(line), &candidate) == nil && candidate.LeaseID == leaseID {
+			report = candidate
+			foundReport = true
+		}
+	}
+	if !foundReport {
+		t.Fatalf("missing timing JSON:\n%s", stderr.String())
+	}
+	foundResolve := false
+	for _, phase := range report.RunnerPhases {
+		switch phase.Name {
+		case "provider.request", "connect.provider", "bootstrap.readiness":
+			t.Fatalf("timing JSON retained historical provisioning phase: %#v", phase)
+		case "provider.resolve":
+			foundResolve = true
+			if phase.Ms <= 0 || phase.Provider != lease.Provider || phase.LeaseID != leaseID || phase.Slug != lease.Slug {
+				t.Fatalf("provider.resolve phase lacks measured lease identity: %#v", phase)
+			}
+		}
+	}
+	if !foundResolve {
+		t.Fatalf("timing JSON missing measured provider.resolve phase: %#v", report.RunnerPhases)
 	}
 }
 
