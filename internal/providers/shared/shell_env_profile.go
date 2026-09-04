@@ -75,7 +75,7 @@ func (p *PreparedShellEnvProfile) Close(ctx context.Context, remove func(context
 	return p.closeErr
 }
 
-func renderShellEnvProfile(env map[string]string) string {
+func sortedShellEnvNames(env map[string]string) []string {
 	keys := make([]string, 0, len(env))
 	for key := range env {
 		valid := key != ""
@@ -90,6 +90,11 @@ func renderShellEnvProfile(env map[string]string) string {
 		}
 	}
 	sort.Strings(keys)
+	return keys
+}
+
+func renderShellEnvProfile(env map[string]string) string {
+	keys := sortedShellEnvNames(env)
 	var out strings.Builder
 	out.WriteString("set -a\n")
 	for _, key := range keys {

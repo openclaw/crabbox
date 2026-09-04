@@ -429,6 +429,13 @@ it must not infer operators or assignments again. An exact three-word
 preserving the single login-shell boundary used by Modal and Tensorlake. Profile
 sourcing is failure-gated without adding global errexit to user source.
 
+Agent Sandbox and Nomad use `shared.ShellWorkspaceCommand` for their common
+POSIX-stdin wrapper: create and enter the workdir, export validated environment
+names in deterministic order, then execute the classified command. Pod and
+allocation readiness, stdin transport, timeout, and exit mapping remain local
+to each adapter. This wrapper is not the SSH command runner, whose environment
+and workspace setup contracts differ.
+
 Claim-only recovery adapters may use `shared.ResolveProviderClaimStrict` to
 resolve an exact provider/scope-bound claim before a slug while preventing a
 canonical lease ID from falling through. `shared.ValidateClaimBinding` compares
