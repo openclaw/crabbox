@@ -176,21 +176,23 @@ type CoordinatorProvisioningPhase struct {
 
 func (timing *CoordinatorProvisioningTiming) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		RequestMs      json.RawMessage `json:"requestMs"`
-		NetworkReadyMs json.RawMessage `json:"networkReadyMs"`
-		BootstrapMs    json.RawMessage `json:"bootstrapMs"`
-		TotalMs        json.RawMessage `json:"totalMs"`
+		RequestMs      int64           `json:"requestMs"`
+		NetworkReadyMs int64           `json:"networkReadyMs"`
+		BootstrapMs    int64           `json:"bootstrapMs"`
+		TotalMs        int64           `json:"totalMs"`
 		Phases         json.RawMessage `json:"phases"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		*timing = CoordinatorProvisioningTiming{}
-		return nil
+		return err
 	}
-	timing.RequestMs, _ = coordinatorOptionalInt64(raw.RequestMs)
-	timing.NetworkReadyMs, _ = coordinatorOptionalInt64(raw.NetworkReadyMs)
-	timing.BootstrapMs, _ = coordinatorOptionalInt64(raw.BootstrapMs)
-	timing.TotalMs, _ = coordinatorOptionalInt64(raw.TotalMs)
-	timing.Phases = decodeCoordinatorProvisioningPhases(raw.Phases)
+	*timing = CoordinatorProvisioningTiming{
+		RequestMs:      raw.RequestMs,
+		NetworkReadyMs: raw.NetworkReadyMs,
+		BootstrapMs:    raw.BootstrapMs,
+		TotalMs:        raw.TotalMs,
+		Phases:         decodeCoordinatorProvisioningPhases(raw.Phases),
+	}
 	return nil
 }
 

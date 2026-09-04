@@ -978,27 +978,121 @@ func TestCoordinatorRunnerTimingRejectsMalformedPhaseVectors(t *testing.T) {
 }
 
 func TestCoordinatorRunnerTimingFallsBackWithoutFailingDecode(t *testing.T) {
-	var lease CoordinatorLease
-	err := json.Unmarshal([]byte(`{
-		"id":"cbx_123",
-		"provisioningTiming":{
-			"requestMs":2,
-			"networkReadyMs":3,
-			"totalMs":10,
-			"phases":[{"name":"request","ms":1.5}]
-		}
-	}`), &lease)
-	if err != nil {
-		t.Fatalf("optional timing failed lease decode: %v", err)
-	}
-	runnerTiming := coordinatorRunnerTiming(lease)
 	want := []RunnerPhase{
 		{Name: "provider.request", Ms: 2},
 		{Name: "connect.provider", Ms: 3},
 		{Name: "provider.unattributed", Ms: 5},
 	}
-	if runnerTiming == nil || !reflect.DeepEqual(runnerTiming.Phases, want) {
-		t.Fatalf("runner timing=%#v want %#v", runnerTiming, want)
+	for _, phases := range []string{
+		`"invalid"`,
+		`[{"name":3,"ms":1}]`,
+		`[{"name":"request","ms":1.5}]`,
+	} {
+		t.Run(phases, func(t *testing.T) {
+			var lease CoordinatorLease
+			err := json.Unmarshal([]byte(fmt.Sprintf(`{
+				"id":"cbx_123",
+				"provisioningTiming":{
+					"requestMs":2,
+					"networkReadyMs":3,
+					"totalMs":10,
+					"phases":%s
+				}
+			}`, phases)), &lease)
+			if err != nil {
+				t.Fatalf("optional timing failed lease decode: %v", err)
+			}
+			runnerTiming := coordinatorRunnerTiming(lease)
+			if runnerTiming == nil || !reflect.DeepEqual(runnerTiming.Phases, want) {
+				t.Fatalf("runner timing=%#v want %#v", runnerTiming, want)
+			}
+		})
+	}
+}
+
+func TestCoordinatorProvisioningTimingRejectsMalformedScalars(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		json string
+	}{
+		{name: "request", json: `{"requestMs":"invalid","totalMs":10}`},
+		{name: "network ready", json: `{"networkReadyMs":1.5,"totalMs":10}`},
+		{name: "bootstrap", json: `{"bootstrapMs":{},"totalMs":10}`},
+		{name: "total", json: `{"totalMs":[]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var timing CoordinatorProvisioningTiming
+			if err := json.Unmarshal([]byte(test.json), &timing); err == nil {
+				t.Fatalf("json.Unmarshal(%s) succeeded, want malformed scalar error", test.json)
+			}
+		})
+	}
+}
+
+func TestCoordinatorProvisioningTimingRejectsNonObjects(t *testing.T) {
+	for _, input := range []string{`[]`, `"invalid"`, `42`, `true`} {
+		t.Run(input, func(t *testing.T) {
+			var timing CoordinatorProvisioningTiming
+			if err := json.Unmarshal([]byte(input), &timing); err == nil {
+				t.Fatalf("json.Unmarshal(%s) succeeded, want non-object error", input)
+			}
+		})
+	}
+}
+
+func TestCoordinatorAcquireProvisioningTimingDecode(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		timingJSON string
+		wantErr    bool
+	}{
+		{
+			name:       "malformed phases preserve scalar fallback",
+			timingJSON: `{"requestMs":2,"networkReadyMs":3,"totalMs":10,"phases":[{"name":"request","ms":1.5}]}`,
+		},
+		{
+			name:       "malformed total is rejected",
+			timingJSON: `{"requestMs":2,"totalMs":"invalid","phases":[{"name":"request","ms":2}]}`,
+			wantErr:    true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/leases" {
+					http.NotFound(w, r)
+					return
+				}
+				fmt.Fprintf(w, `{"lease":{"id":"cbx_timing","provisioningTiming":%s}}`, test.timingJSON)
+			}))
+			defer server.Close()
+
+			client := &CoordinatorClient{
+				BaseURL: server.URL,
+				Token:   "user-token",
+				Client:  server.Client(),
+			}
+			cfg := baseConfig()
+			cfg.Provider = "aws"
+			lease, err := client.CreateLease(context.Background(), cfg, "ssh-ed25519 test", false, "cbx_timing", "timing")
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("CreateLease succeeded, want malformed total error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			runnerTiming := coordinatorRunnerTiming(lease)
+			want := []RunnerPhase{
+				{Name: "provider.request", Ms: 2},
+				{Name: "connect.provider", Ms: 3},
+				{Name: "provider.unattributed", Ms: 5},
+			}
+			if runnerTiming == nil || !reflect.DeepEqual(runnerTiming.Phases, want) {
+				t.Fatalf("runner timing=%#v want %#v", runnerTiming, want)
+			}
+		})
 	}
 }
 
