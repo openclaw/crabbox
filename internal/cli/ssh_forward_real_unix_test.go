@@ -78,6 +78,11 @@ type forwardSSHServer struct {
 
 func newForwardSSHServer(t *testing.T, user string, allowedPorts ...int) *forwardSSHServer {
 	t.Helper()
+	return newForwardSSHServerAt(t, user, "127.0.0.1:0", allowedPorts...)
+}
+
+func newForwardSSHServerAt(t *testing.T, user, address string, allowedPorts ...int) *forwardSSHServer {
+	t.Helper()
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -86,12 +91,17 @@ func newForwardSSHServer(t *testing.T, user string, allowedPorts ...int) *forwar
 	if err != nil {
 		t.Fatal(err)
 	}
-	return newForwardSSHServerWithSigner(t, user, signer, allowedPorts...)
+	return newForwardSSHServerWithSignerAt(t, user, address, signer, allowedPorts...)
 }
 
 func newForwardSSHServerWithSigner(t *testing.T, user string, signer ssh.Signer, allowedPorts ...int) *forwardSSHServer {
 	t.Helper()
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	return newForwardSSHServerWithSignerAt(t, user, "127.0.0.1:0", signer, allowedPorts...)
+}
+
+func newForwardSSHServerWithSignerAt(t *testing.T, user, address string, signer ssh.Signer, allowedPorts ...int) *forwardSSHServer {
+	t.Helper()
+	listener, err := net.Listen("tcp4", address)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,6 +247,84 @@ func TestWaitForSSHReadyRejectsChangedHostKeyWithoutWaiting(t *testing.T) {
 				t.Fatalf("host trust changed: %q, %v", after, err)
 			}
 		})
+	}
+}
+
+func TestLeaseKnownHostsSeparatesRecycledEndpoint(t *testing.T) {
+	isolateTestUserDirs(t)
+	sshExecutable, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Skip("OpenSSH is unavailable")
+	}
+	key, _, err := EnsureTestboxKey("cbx_111111111111")
+	if err != nil {
+		t.Fatal(err)
+	}
+	echoPort := forwardEchoServer(t)
+	firstServer := newForwardSSHServer(t, "synthetic-host-trust", echoPort)
+	close(firstServer.release)
+	target := SSHTarget{
+		User: "synthetic-host-trust", Host: "127.0.0.1", Port: strconv.Itoa(firstServer.port()),
+		Key: key, TargetOS: targetLinux, NoControlMaster: true,
+	}
+	probe := func(target SSHTarget) ([]byte, error) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		args := append([]string{"-F", os.DevNull}, sshBaseArgs(target)...)
+		args = append(args, "-W", net.JoinHostPort("127.0.0.1", strconv.Itoa(echoPort)), target.User+"@"+target.Host)
+		cmd := exec.CommandContext(ctx, sshExecutable, args...)
+		cmd.Env = []string{"HOME=" + os.Getenv("HOME"), "LC_ALL=C", "PATH=/usr/bin:/bin"}
+		cmd.Stdin = strings.NewReader("lease-host-trust\n")
+		cmd.WaitDelay = sshCommandWaitDelay
+		return cmd.Output()
+	}
+	assertConnected := func(target SSHTarget) {
+		t.Helper()
+		output, err := probe(target)
+		if err != nil || string(output) != "lease-host-trust\n" {
+			t.Fatalf("native SSH payload failed: output=%q err=%v", output, err)
+		}
+	}
+	// The old provider-wide fallback learns A, as does the first scoped lease.
+	assertConnected(target)
+	sharedTrust := filepath.Join(filepath.Dir(key), "known_hosts")
+	first := target
+	if err := UseLeaseKnownHosts(&first, "cbx_222222222222"); err != nil {
+		t.Fatal(err)
+	}
+	assertConnected(first)
+	sharedBefore, err := os.ReadFile(sharedTrust)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstBefore, err := os.ReadFile(first.KnownHostsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := firstServer.listener.Addr().String()
+	if err := firstServer.listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	secondServer := newForwardSSHServerAt(t, target.User, address, echoPort)
+	close(secondServer.release)
+	second := target
+	if err := UseLeaseKnownHosts(&second, "cbx_333333333333"); err != nil {
+		t.Fatal(err)
+	}
+	assertConnected(second)
+	for _, stale := range []SSHTarget{target, first} {
+		_, err := probe(stale)
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || !strings.Contains(string(exitErr.Stderr), "REMOTE HOST IDENTIFICATION HAS CHANGED") {
+			t.Fatalf("native SSH did not reject changed host key: %v", err)
+		}
+	}
+	for file, before := range map[string][]byte{sharedTrust: sharedBefore, first.KnownHostsFile: firstBefore} {
+		after, err := os.ReadFile(file)
+		if err != nil || string(after) != string(before) {
+			t.Fatalf("old host trust changed: path=%s err=%v", file, err)
+		}
 	}
 }
 
