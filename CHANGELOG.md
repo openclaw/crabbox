@@ -24,6 +24,7 @@ Users upgrading from v0.48.1 also receive the [v0.49.0 changes](https://github.c
 
 ### Changes
 
+- Preserve Upstash Box and SmolVM stream cancellation and timeout causes in run outcomes, and skip command submission when cancellation is already known after an acknowledged environment upload without skipping cleanup. [PR 1838](https://github.com/openclaw/crabbox/pull/1838). Thanks @steipete.
 - Keep canonical lease IDs separate from slug aliases in shared claim lookup and provider routing, preventing missing IDs from selecting, running on, or stopping a different sandbox while preserving provider recovery behavior. [PR 1839](https://github.com/openclaw/crabbox/pull/1839). Thanks @steipete.
 - Clean partial Upstash Box environment uploads after failure or cancellation, isolate each profile, and refuse stale file cleanup while preserving discovery-only reuse and original command outcomes. [PR 1834](https://github.com/openclaw/crabbox/pull/1834). Thanks @steipete.
 - Preserve literal Tensorlake and OpenSandbox profile arguments through final execution, including environment-wrapped commands, and fix Tensorlake's inferred single-string shell execution. [PR 1835](https://github.com/openclaw/crabbox/pull/1835). Thanks @steipete.

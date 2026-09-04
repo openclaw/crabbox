@@ -22,6 +22,19 @@ type sandboxTestClock struct{ current time.Time }
 func (c *sandboxTestClock) Now() time.Time        { return c.current }
 func (c *sandboxTestClock) Sleep(d time.Duration) { c.current = c.current.Add(d) }
 
+func TestExitErrorWithCausePreservesSelectedCodeAndMessage(t *testing.T) {
+	inner := core.ExitError{Code: 7, Message: "raw provider diagnostic"}
+	cause := errors.Join(inner, context.Canceled)
+	err := ExitErrorWithCause(1, "safe provider error", cause)
+	var exitErr core.ExitError
+	if err.Error() != "safe provider error" || !errors.Is(err, cause) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cause or safe message lost: %v", err)
+	}
+	if !errors.As(err, &exitErr) || exitErr.Code != 1 {
+		t.Fatalf("selected exit code lost: %#v", exitErr)
+	}
+}
+
 func TestDelegatedSandboxLifecycle(t *testing.T) {
 	failure := errors.New("phase failed")
 	cleanupFailure := errors.New("delete unavailable")
