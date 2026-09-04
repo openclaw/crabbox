@@ -190,3 +190,29 @@ func TestPreparedShellEnvProfileRejectsRelativeRemoteDirectory(t *testing.T) {
 		}
 	}
 }
+
+func TestShellEnvProfilePreservesExecutionArgv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native Bash profile transport")
+	}
+	for _, operator := range []string{"|", ";", "&&"} {
+		t.Run(operator, func(t *testing.T) {
+			root := t.TempDir()
+			profile := filepath.Join(root, "env.sh")
+			if err := os.WriteFile(profile, []byte("FIXTURE=synthetic\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(root, "must-not-exist")
+			argv := WrapCommandWithShellEnvProfile([]string{"printf", "%s", operator, "touch", marker}, profile)
+			cmd := exec.Command(argv[0], argv[1:]...)
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + root, "ENV=" + os.DevNull}
+			output, err := cmd.CombinedOutput()
+			if err != nil || string(output) != operator+"touch"+marker {
+				t.Fatalf("argv=%q output=%q err=%v", argv, output, err)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("execution argv became shell operator: %v", err)
+			}
+		})
+	}
+}

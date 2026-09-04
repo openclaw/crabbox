@@ -232,7 +232,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			return b.ensureWorkspace(ctx, api, sandboxID, workdir)
 		},
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
-			command, err := buildCommand(req.Command, req.ShellMode)
+			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 			if err != nil {
 				return shared.DelegatedSandboxCommand{}, err
 			}
@@ -242,7 +242,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			if remaining := deadline.Sub(b.now()); remaining < b.commandLifetime() {
 				return shared.DelegatedSandboxCommand{}, exit(5, "opensandbox sandbox %s has %s remaining before its absolute TTL, less than the %s command budget; create a new sandbox", sandboxID, remaining.Round(time.Second), b.commandLifetime())
 			}
-			text := commandScript(command)
+			text := intent.ShellCommand("bash", "-lc")
 			return shared.DelegatedSandboxCommand{
 				Text: text,
 				Run: func(ctx context.Context) (int, error) {
@@ -956,30 +956,6 @@ func (b *openSandboxBackend) ensureReusableSandbox(ctx context.Context, api open
 	default:
 		return exit(4, "opensandbox sandbox %q is %s and cannot be reused until it is running", sandboxID, sb.State)
 	}
-}
-
-func buildCommand(command []string, shellMode bool) ([]string, error) {
-	if len(command) == 0 {
-		return nil, errors.New("missing command")
-	}
-	if shellMode {
-		return []string{"bash", "-lc", strings.Join(command, " ")}, nil
-	}
-	if shouldUseShell(command) || leadingEnvAssignment(command) {
-		if len(command) == 1 {
-			return []string{"bash", "-lc", command[0]}, nil
-		}
-		return []string{"bash", "-lc", shellScriptFromArgv(command)}, nil
-	}
-	return command, nil
-}
-
-func leadingEnvAssignment(command []string) bool {
-	return len(command) > 1 && strings.Contains(command[0], "=") && !strings.HasPrefix(command[0], "-")
-}
-
-func commandScript(command []string) string {
-	return shellScriptFromArgv(command)
 }
 
 func openSandboxWorkdir(cfg Config) (string, error) {

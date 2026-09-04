@@ -208,9 +208,11 @@ orchestrators that need to inspect or clean up retained sandboxes later.
   `--no-sync` with an explicit `--id` if the sandbox is already primed.
 - Large-sync guardrails still apply; pass `--force-sync-large` when a large
   archive sync is intentional.
-- `--shell` wraps the command as `bash -lc '<joined args>'`. Plain commands that
-  contain shell metacharacters (`&&`, `|`, `>`, etc.) or a leading `KEY=VALUE`
-  assignment are auto-wrapped the same way.
+- `--shell` wraps the command as `bash -lc '<joined args>'`. Inferred shell
+  source and unquoted operators or leading assignments use the same shell.
+  Literal profile arguments stay data, including assignment-shaped executable
+  names. Adding an environment profile does not reinterpret those arguments
+  as shell syntax; a single inferred source string remains executable source.
 - Forwarded environment values live in a temporary in-sandbox profile for the
   duration of the command, with an unpredictable per-operation name. The private
   local source is removed after upload returns, including partial-upload failure.
