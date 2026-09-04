@@ -34,6 +34,12 @@ The trailing command after `--` is sent to the box verbatim as argv. Use
 `--shell` to run it through the remote shell instead, for multi-statement
 snippets, pipes, or shell expansion.
 
+On Cloudflare Sandbox, Superserve, Crownest, Vercel Sandbox, and Nomad,
+quoted or interpolated profile arguments retain their literal meaning through
+the delegated command transport. A value such as `&&` does not become a shell
+operator, and an executable named `FOO=x` is invoked rather than treated as an
+environment assignment. Explicit `--shell` still selects shell source.
+
 On POSIX SSH targets, `--shell` runs in a Bash login shell. Its startup and
 logout files are part of that shell's behavior: for example, `set -e` plus a
 failing `~/.bash_logout` command can change an explicit `exit 7` to exit 1.

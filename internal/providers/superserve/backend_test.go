@@ -396,9 +396,10 @@ func TestRunNoSyncExecForwardsEnvInRequestBodyAndMirrorsOutput(t *testing.T) {
 	backend.rt.Stderr = &stderr
 
 	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "my-app", Root: t.TempDir()},
-		NoSync:  true,
-		Command: []string{"go", "test", "./..."},
+		Repo:               Repo{Name: "my-app", Root: t.TempDir()},
+		NoSync:             true,
+		Command:            []string{"go", "test", "./...", "&&"},
+		CommandLiteralArgs: map[int]bool{3: true},
 		Env: map[string]string{
 			"CRABBOX_SUPERSERVE_API_KEY": "crabbox_ss_test_not_real",
 			"SUPERSERVE_API_KEY":         "ss_test_not_real",
@@ -435,7 +436,7 @@ func TestRunNoSyncExecForwardsEnvInRequestBodyAndMirrorsOutput(t *testing.T) {
 		t.Fatalf("execs=%#v", fake.execs)
 	}
 	commandReq := fake.execs[1]
-	if commandReq.Command != "'go' 'test' './...'" || commandReq.WorkingDir != defaultWorkdir || commandReq.TimeoutSecs != backend.cfg.Superserve.ExecTimeoutSecs {
+	if commandReq.Command != "'go' 'test' './...' '&&'" || commandReq.WorkingDir != defaultWorkdir || commandReq.TimeoutSecs != backend.cfg.Superserve.ExecTimeoutSecs {
 		t.Fatalf("command req=%#v", commandReq)
 	}
 	if commandReq.Env["PROJECT_TOKEN"] != "project_test_not_real" || commandReq.Env["CI"] != "1" {
@@ -935,4 +936,34 @@ func cloneMap(in map[string]string) map[string]string {
 func cloneSandbox(in superserveSandbox) superserveSandbox {
 	in.Metadata = cloneMap(in.Metadata)
 	return in
+}
+
+func TestRunLiteralExecutableSurvivesFinalShellTransport(t *testing.T) {
+	if os.PathSeparator != '/' {
+		t.Skip("POSIX shell transport")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh unavailable")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "FOO=x"), []byte("#!/bin/sh\nprintf literal-executable\nexit 42\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	fake := newFakeSuperserveClient()
+	backend := newSuperserveTestBackend(t, fake)
+	result, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "repo", Root: t.TempDir()}, NoSync: true, Command: []string{"FOO=x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.execs) < 2 || fake.execs[len(fake.execs)-1].Command != result.CommandText {
+		t.Fatalf("missing final request: %+v", fake.execs)
+	}
+	cmd := exec.Command(sh, "-c", fake.execs[len(fake.execs)-1].Command)
+	cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + t.TempDir(), "ENV=" + os.DevNull}
+	out, err := cmd.CombinedOutput()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 42 || string(out) != "literal-executable" {
+		t.Fatalf("payload=%q output=%q error=%v, want executable/42", result.CommandText, out, err)
+	}
 }

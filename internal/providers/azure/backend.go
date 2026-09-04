@@ -57,7 +57,7 @@ func (b *azureLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 	})
 }
 
-func (b *azureLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (LeaseTarget, error) {
+func (b *azureLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (result LeaseTarget, retErr error) {
 	cfg := b.Cfg
 	if cfg.Tailscale.Enabled && cfg.Tailscale.AuthKey == "" {
 		return LeaseTarget{}, exit(2, "direct --tailscale requires %s to contain a Tailscale auth key; brokered mode uses coordinator OAuth secrets", cfg.Tailscale.AuthKeyEnv)
@@ -102,6 +102,7 @@ func (b *azureLeaseBackend) acquireOnce(ctx context.Context, keep bool, requeste
 		defer cancel()
 		if err := client.DeleteServer(cleanupCtx, rollbackCloudID); err != nil {
 			fmt.Fprintf(b.RT.Stderr, "warning: cleanup azure server %s after acquire failure: %v\n", rollbackCloudID, err)
+			retErr = shared.JoinAcquireCleanupError(retErr, fmt.Errorf("cleanup azure server %s after acquire failure: %w", rollbackCloudID, err))
 		}
 	}()
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%s type=%s\n", leaseID, server.DisplayID(), cfg.ServerType)

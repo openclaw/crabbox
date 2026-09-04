@@ -190,8 +190,9 @@ func TestRunOneShotSyncsExecutesAndDeletes(t *testing.T) {
 	fake.stdout = "ok\n"
 	backend := testBackend(fake, &stdout, &stderr)
 	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "my-app", Root: repo},
-		Command: []string{"echo", "ok"},
+		Repo:               Repo{Name: "my-app", Root: repo},
+		Command:            []string{"echo", "ok", "&&"},
+		CommandLiteralArgs: map[int]bool{2: true},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -216,6 +217,9 @@ func TestRunOneShotSyncsExecutesAndDeletes(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "ok\n") {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if result.CommandText != "'echo' 'ok' '&&'" {
+		t.Fatalf("literal intent lost in final payload: %q", result.CommandText)
 	}
 }
 

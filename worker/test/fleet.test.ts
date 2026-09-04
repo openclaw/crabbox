@@ -68,6 +68,7 @@ import {
   type ProviderProvisioningCleanupClaim,
 } from "../src/provider-provisioning";
 import { providerReconciliationFingerprint } from "../src/provider-reconciliation";
+import { ProvisioningAttemptsError } from "../src/provisioning-attempts";
 import { verifyTerminalReceipt } from "../src/run-receipt";
 import {
   runtimeAdapterDesktopRelayTimeoutMs,
@@ -11456,6 +11457,95 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("retains AWS allocation history when readiness fails without making a timeout retryable", async () => {
+    const prior: ProvisioningAttempt[] = [
+      {
+        region: "eu-west-1",
+        serverType: "t3.small",
+        market: "spot",
+        category: "quota",
+        message: "quota exceeded",
+      },
+      {
+        region: "eu-west-1",
+        serverType: "t3.medium",
+        market: "spot",
+        category: "capacity",
+        message: "capacity unavailable",
+      },
+    ];
+    const events: string[] = [];
+    const created = vi
+      .spyOn(EC2SpotClient.prototype, "createServerWithFallback")
+      .mockImplementation(async () => {
+        events.push("create");
+        return {
+          server: {
+            provider: "aws",
+            id: 42,
+            cloudID: "i-first",
+            name: "fixture",
+            status: "pending",
+            labels: {},
+          },
+          serverType: "t3.medium",
+          market: "on-demand",
+          imageID: "ami-fixture",
+          attempts: prior,
+        };
+      });
+    const waited = vi
+      .spyOn(EC2SpotClient.prototype, "waitForServerIP")
+      .mockImplementation(async () => {
+        events.push("wait");
+        throw new Error("timed out waiting for AWS instance network address: i-first");
+      });
+    const deleted = vi
+      .spyOn(EC2SpotClient.prototype, "deleteServer")
+      .mockImplementation(async (id) => {
+        events.push(`delete:${id}`);
+      });
+    try {
+      const provider = new AWSProvider(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+        "eu-west-1",
+        new MemoryStorage(),
+      );
+      const error = await provider
+        .createServerWithFallback(
+          {
+            ...leaseConfig({ provider: "aws", sshPublicKey: "ssh-ed25519 test" }),
+            capacityRegions: ["us-east-1"],
+          },
+          "cbx_abcdef123456",
+          "fixture",
+          "alice@example.com",
+        )
+        .catch((caught: unknown) => caught);
+      const message =
+        "timed out waiting for AWS instance network address: i-first; crabbox_aws_stale_instance_cleaned; deleted AWS instance i-first after readiness failure";
+      expect(error).toBeInstanceOf(ProvisioningAttemptsError);
+      expect(error).toMatchObject({
+        message: `eu-west-1: ${message}`,
+        attempts: [
+          ...prior,
+          {
+            region: "eu-west-1",
+            serverType: "t3.medium",
+            market: "on-demand",
+            category: "region",
+            message: `region eu-west-1: ${message}`,
+          },
+        ],
+      });
+      expect(events).toEqual(["create", "wait", "delete:i-first"]);
+    } finally {
+      created.mockRestore();
+      waited.mockRestore();
+      deleted.mockRestore();
+    }
+  });
+
   it("returns an exact AWS cleanup claim when readiness rollback fails", async () => {
     const created = vi
       .spyOn(EC2SpotClient.prototype, "createServerWithFallback")
@@ -11469,6 +11559,15 @@ describe("fleet lease identity and idle", () => {
           labels: {},
         },
         serverType: "t3.small",
+        attempts: [
+          {
+            region: "eu-west-1",
+            serverType: "t3.small",
+            market: "spot",
+            category: "quota",
+            message: "quota exceeded",
+          },
+        ],
       });
     const waited = vi
       .spyOn(EC2SpotClient.prototype, "waitForServerIP")
@@ -11500,6 +11599,8 @@ describe("fleet lease identity and idle", () => {
         .catch((caught: unknown) => caught);
 
       expect(error).toBeInstanceOf(ProviderProvisioningCleanupError);
+      expect(created).toHaveBeenCalledTimes(1);
+      expect(deleted).toHaveBeenCalledTimes(1);
       expect(providerProvisioningCleanupClaim(error)).toEqual({
         provider: "aws",
         cloudID: "i-abcdef123456",
@@ -23494,8 +23595,30 @@ describe("fleet lease identity and idle", () => {
   });
 
   it("reports each AWS fallback region before provisioning mutates it", async () => {
-    const attempts: string[] = [];
-    const targets: string[] = [];
+    const events: string[] = [];
+    const prior: ProvisioningAttempt[] = [
+      {
+        region: "eu-west-1",
+        serverType: "t3.small",
+        market: "spot",
+        category: "quota",
+        message: "quota exceeded",
+      },
+      {
+        region: "eu-west-1",
+        serverType: "t3.medium",
+        market: "on-demand",
+        category: "capacity",
+        message: "capacity unavailable",
+      },
+    ];
+    const finalRegionAttempt: ProvisioningAttempt = {
+      region: "us-east-1",
+      serverType: "t3.small",
+      market: "spot",
+      category: "capacity",
+      message: "capacity unavailable",
+    };
     const machine: ProviderMachine = {
       provider: "aws",
       id: 123,
@@ -23509,11 +23632,16 @@ describe("fleet lease identity and idle", () => {
     const create = vi
       .spyOn(EC2SpotClient.prototype, "createServerWithFallback")
       .mockImplementation(async (candidateConfig) => {
-        attempts.push(candidateConfig.awsRegion);
+        events.push(`create:${candidateConfig.awsRegion}`);
         if (candidateConfig.awsRegion === "eu-west-1") {
-          throw new Error("capacity unavailable");
+          throw new ProvisioningAttemptsError("quota exceeded; capacity unavailable", prior);
         }
-        return { server: machine, serverType: machine.serverType };
+        return {
+          server: machine,
+          serverType: machine.serverType,
+          attempts: [finalRegionAttempt],
+          imageID: "ami-fixture",
+        };
       });
     const wait = vi.spyOn(EC2SpotClient.prototype, "waitForServerIP").mockResolvedValue(machine);
     try {
@@ -23534,13 +23662,18 @@ describe("fleet lease identity and idle", () => {
         "alice@example.com",
         {
           onTargetAttempt: async (target) => {
-            targets.push(target.region ?? "");
+            events.push(`target:${target.region}`);
           },
         },
       );
 
-      expect(attempts).toEqual(["eu-west-1", "us-east-1"]);
-      expect(targets).toEqual(attempts);
+      expect(events).toEqual([
+        "target:eu-west-1",
+        "create:eu-west-1",
+        "target:us-east-1",
+        "create:us-east-1",
+      ]);
+      expect(result.attempts).toEqual([...prior, finalRegionAttempt]);
       expect(result.server.region).toBe("us-east-1");
     } finally {
       create.mockRestore();
@@ -28547,21 +28680,40 @@ describe("fleet lease identity and idle", () => {
         category: "quota",
         message: "quota L-34B43A08 in eu-west-1 is 64 vCPUs; c7a.48xlarge needs 192 vCPUs",
       },
+      {
+        region: "eu-west-1",
+        serverType: "c7i.24xlarge",
+        market: "on-demand",
+        category: "capacity",
+        message: "capacity unavailable",
+      },
+      {
+        region: "eu-west-2",
+        serverType: "c7i.24xlarge",
+        market: "spot",
+        category: "capacity",
+        message: "capacity unavailable",
+      },
     ];
-    const fleet = testFleet(new MemoryStorage(), {
+    const storage = new MemoryStorage();
+    const provider = new AWSProvider({} as Env, "eu-west-2", storage);
+    const fleet = testFleet(storage, {
       aws: fakeProvider(undefined, {
         provider: "aws",
         serverType: "c7i.24xlarge",
         cloudID: "i-123",
         market: "on-demand",
         attempts,
+        region: "eu-west-2",
+        onFinalizeLeaseCreate: (config, lease, server, history) =>
+          provider.finalizeLeaseCreate(config, lease, server, history),
       }),
     });
     const create = await fleet.fetch(
       request("POST", "/v1/leases", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
         },
         body: {
           leaseID: "cbx_abcdef123456",
@@ -28580,6 +28732,7 @@ describe("fleet lease identity and idle", () => {
     expect(lease.serverType).toBe("c7i.24xlarge");
     expect(lease.market).toBe("on-demand");
     expect(lease.provisioningAttempts).toEqual(attempts);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.provisioningAttempts).toEqual(attempts);
     expect(lease.capacityHints?.map((hint) => hint.code)).toEqual([
       "aws_capacity_routed",
       "aws_quota_pressure",

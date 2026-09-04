@@ -69,6 +69,14 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		return RunResult{}, err
 	}
 	started := b.now()
+	var prepared *core.PreparedArchive
+	if !req.NoSync {
+		prepared, err = b.prepareArchive(ctx, req)
+		if err != nil {
+			return RunResult{}, err
+		}
+		defer prepared.Close()
+	}
 	client, err := newAPI(b.cfg, b.rt)
 	if err != nil {
 		return RunResult{}, err
@@ -142,12 +150,12 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	syncDuration := time.Duration(0)
 	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
 	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, boxID, req, workdir, folder)
+		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, boxID, req, workdir, folder, prepared)
 		if err != nil {
 			return RunResult{Total: b.now().Sub(started), SyncDelegated: true}, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, client, boxID, folder, false); err != nil {
+	} else if err := b.prepareWorkspace(ctx, client, boxID, folder); err != nil {
 		return RunResult{}, err
 	}
 	if req.SyncOnly {

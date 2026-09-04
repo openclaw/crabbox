@@ -1,10 +1,8 @@
 package cloudflare
 
 import (
-	"context"
 	"flag"
 	"io"
-	"os"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -30,7 +28,6 @@ type CleanupRequest = core.CleanupRequest
 type Server = core.Server
 type LeaseClaim = core.LeaseClaim
 type Repo = core.Repo
-type SyncManifest = core.SyncManifest
 type ExitError = core.ExitError
 type FeatureSet = core.FeatureSet
 type Feature = core.Feature
@@ -72,32 +69,12 @@ func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTim
 	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
 }
 
-func claimLeaseForRepoProviderPondLabels(leaseID, slug, provider, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, labels map[string]string) error {
-	return core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, "", pond, repoRoot, idleTimeout, reclaim, Server{Labels: labels}, core.SSHTarget{})
-}
-
 func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaimForProvider(identifier, provider)
 }
 
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
-}
-
 func writeTimingJSON(w io.Writer, report timingReport) error {
 	return core.WriteTimingJSON(w, report)
-}
-
-func timingReportWithRunResult(report timingReport, result RunResult, err error) timingReport {
-	return core.TimingReportWithRunResult(report, result, err)
-}
-
-func finalizeRunResult(result RunResult, err error) RunResult {
-	return core.FinalizeRunResult(result, err)
-}
-
-func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, slug string, idleTimeout, ttl time.Duration, acquired bool, shouldStop *bool) {
-	core.HandleDelegatedRunFailure(w, req, provider, leaseID, slug, idleTimeout, ttl, acquired, shouldStop)
 }
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
@@ -134,20 +111,4 @@ func shouldUseShell(command []string) bool {
 
 func leadingEnvAssignment(command []string) bool {
 	return core.LeadingEnvAssignment(command)
-}
-
-func syncExcludes(root string, cfg Config) (core.SyncExcludeRules, error) {
-	return core.SyncExcludes(root, cfg)
-}
-
-func syncManifest(root string, excludes core.SyncExcludeRules, includes []string) (SyncManifest, error) {
-	return core.BuildSyncManifestFiltered(root, excludes, includes)
-}
-
-func checkSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {
-	return core.CheckSyncPreflight(manifest, cfg, force, stderr)
-}
-
-func createPortableSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, tempPattern string) (*os.File, error) {
-	return core.CreateSyncArchive(ctx, repo, manifest, tempPattern)
 }

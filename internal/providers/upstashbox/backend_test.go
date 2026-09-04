@@ -802,12 +802,113 @@ func TestSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected extract failure")
 	}
-	if !reflect.DeepEqual(fake.verbs, []string{"exec", "upload", "exec", "exec"}) {
+	if !reflect.DeepEqual(fake.verbs, []string{"upload", "exec", "exec", "exec"}) {
 		t.Fatalf("verbs=%v", fake.verbs)
 	}
 	if !strings.Contains(fake.execCommands[2], "rm -f '.crabbox-upstash-box-sync-") {
 		t.Fatalf("cleanup command=%q", fake.execCommands[2])
 	}
+}
+
+func TestSyncWorkspaceNativePreservesExistingFilesOnTransferFailure(t *testing.T) {
+	for _, failure := range []string{"upload", "extract", ""} {
+		t.Run(blank(failure, "success"), func(t *testing.T) {
+			root := t.TempDir()
+			work := filepath.Join(root, "crabbox")
+			if err := os.Mkdir(work, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			old := filepath.Join(work, "old.txt")
+			if err := os.WriteFile(old, []byte("preserve-me"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			client := &filesystemSyncAPI{root: root, failure: failure}
+			cfg := testConfig()
+			cfg.Sync.Delete = true
+			backend := NewBackend(Provider{}.Spec(), cfg, testRuntime()).(*backend)
+			_, _, err := backend.syncWorkspace(context.Background(), client, "box_1", RunRequest{Repo: Repo{Name: "repo", Root: newGitRepo(t)}}, "/workspace/home/crabbox", "crabbox")
+			if failure != "" {
+				if err == nil {
+					t.Fatal("expected transfer failure")
+				}
+				got, readErr := os.ReadFile(old)
+				if readErr != nil || string(got) != "preserve-me" {
+					t.Fatalf("previous workspace lost: content=%q err=%v syncErr=%v", got, readErr, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Stat(old); !os.IsNotExist(err) {
+					t.Fatalf("old file remains: %v", err)
+				}
+				if got, err := os.ReadFile(filepath.Join(work, "hello.txt")); err != nil || string(got) != "hello" {
+					t.Fatalf("new content=%q err=%v", got, err)
+				}
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if entry.Name() != "crabbox" {
+					t.Errorf("sync residue: %s", entry.Name())
+				}
+			}
+		})
+	}
+}
+
+func TestRunChecksArchiveBeforeAllocation(t *testing.T) {
+	fake := &fakeAPI{}
+	withFakeAPI(t, fake)
+	cfg := testConfig()
+	cfg.Sync.FailFiles = 1
+	backend := NewBackend(Provider{}.Spec(), cfg, testRuntime()).(*backend)
+	_, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Root: newGitRepo(t)}, Command: []string{"true"}})
+	if err == nil || !strings.Contains(err.Error(), "sync candidate too large") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(fake.verbs) != 0 {
+		t.Fatalf("provider called before archive admission: %v", fake.verbs)
+	}
+}
+
+type filesystemSyncAPI struct {
+	fakeAPI
+	root, failure string
+}
+
+func (f *filesystemSyncAPI) UploadFile(_ context.Context, _, localPath, remotePath string) error {
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		return err
+	}
+	if f.failure == "extract" {
+		data = []byte("corrupt archive")
+	}
+	if err := os.WriteFile(filepath.Join(f.root, filepath.Base(remotePath)), data, 0o600); err != nil {
+		return err
+	}
+	if f.failure == "upload" {
+		return errors.New("synthetic upload failed after writing remote bytes")
+	}
+	return nil
+}
+
+func (f *filesystemSyncAPI) Exec(ctx context.Context, _ string, command, _ string) (execResult, error) {
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd.Dir = f.root
+	output, err := cmd.CombinedOutput()
+	code := 0
+	if err != nil {
+		var exited *exec.ExitError
+		if !errors.As(err, &exited) {
+			return execResult{}, err
+		}
+		code = exited.ExitCode()
+	}
+	return execResult{ExitCode: code, Output: string(output)}, nil
 }
 
 func TestSyncWorkspaceWarnsWhenRemoteArchiveCleanupExitsNonzero(t *testing.T) {
@@ -820,7 +921,7 @@ func TestSyncWorkspaceWarnsWhenRemoteArchiveCleanupExitsNonzero(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected extract failure")
 	}
-	if !strings.Contains(stderr.String(), "warning: upstash-box sync cleanup failed for box_1") || !strings.Contains(stderr.String(), "cleanup denied") {
+	if !strings.Contains(stderr.String(), "warning: upstash-box sync cleanup failed:") || !strings.Contains(stderr.String(), "cleanup denied") {
 		t.Fatalf("stderr=%q, want cleanup warning", stderr.String())
 	}
 }

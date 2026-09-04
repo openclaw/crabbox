@@ -64,6 +64,14 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (result Run
 		return RunResult{}, err
 	}
 	started := b.now()
+	var prepared *core.PreparedArchive
+	if !req.NoSync {
+		prepared, err = b.prepareArchive(ctx, req)
+		if err != nil {
+			return RunResult{}, err
+		}
+		defer prepared.Close()
+	}
 	cli, err := newTensorlakeCLI(b.cfg, b.rt)
 	if err != nil {
 		return RunResult{}, err
@@ -150,7 +158,7 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (result Run
 	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
 	if !req.NoSync {
 		var err error
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, cli, sandboxID, req, workdir)
+		syncPhases, syncDuration, err = b.syncWorkspace(ctx, cli, sandboxID, req, workdir, prepared)
 		if err != nil {
 			return RunResult{Total: b.now().Sub(started), SyncDelegated: true}, err
 		}

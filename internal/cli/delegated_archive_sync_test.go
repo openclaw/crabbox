@@ -404,11 +404,14 @@ func TestRunDelegatedArchiveSyncCleanupOutlivesCanceledParent(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var cleanupContextActive bool
 	var calls int
+	var stderr bytes.Buffer
 
 	_, _, err := RunDelegatedArchiveSync(ctx, DelegatedArchiveSyncRequest{
-		Config:  baseConfig(),
-		Repo:    Repo{Root: root},
-		Workdir: "/workspace",
+		Config:   baseConfig(),
+		Repo:     Repo{Root: root},
+		Workdir:  "/workspace",
+		Provider: "test-provider",
+		Stderr:   &stderr,
 		CleanupContext: func(parent context.Context) (context.Context, context.CancelFunc) {
 			cleanupContextActive = parent.Err() == context.Canceled
 			return context.WithTimeout(context.WithoutCancel(parent), time.Second)
@@ -423,6 +426,9 @@ func TestRunDelegatedArchiveSyncCleanupOutlivesCanceledParent(t *testing.T) {
 			if strings.HasPrefix(command, "rm -f ") && callCtx.Err() != nil {
 				t.Fatalf("cleanup context canceled: %v", callCtx.Err())
 			}
+			if strings.HasPrefix(command, "rm -f ") {
+				return exec.CommandContext(callCtx, "sh", "-ec", "rm() { return 7; }; "+command).Run()
+			}
 			return nil
 		},
 	})
@@ -431,6 +437,9 @@ func TestRunDelegatedArchiveSyncCleanupOutlivesCanceledParent(t *testing.T) {
 	}
 	if !cleanupContextActive || calls < 3 {
 		t.Fatalf("cleanup active=%t calls=%d", cleanupContextActive, calls)
+	}
+	if !strings.Contains(stderr.String(), "warning: test-provider sync cleanup failed: exit status 7") {
+		t.Fatalf("missing cleanup warning: %s", stderr.String())
 	}
 }
 

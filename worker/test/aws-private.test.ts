@@ -740,6 +740,26 @@ describe("private AWS workspaces", () => {
     expect(actions).toEqual(["TerminateInstances", "DescribeInstances"]);
   });
 
+  it("keeps normal public deletion fire-and-forget", async () => {
+    const actions: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = requestFrom(input, init);
+        const action = new URLSearchParams(await request.clone().text()).get("Action") ?? "";
+        actions.push(action);
+        return ec2XMLResponse("<TerminateInstancesResponse />");
+      }),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      region,
+    );
+
+    await expect(client.deleteServer("i-public123")).resolves.toBeUndefined();
+    expect(actions).toEqual(["TerminateInstances"]);
+  });
+
   it("checks termination once more after the final backoff", async () => {
     let describeCalls = 0;
     const delays: number[] = [];

@@ -3,7 +3,6 @@ package gcp
 import (
 	"context"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
@@ -49,7 +48,7 @@ func (b *gcpLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Leas
 	})
 }
 
-func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (LeaseTarget, error) {
+func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (result LeaseTarget, retErr error) {
 	if b.Cfg.Tailscale.Enabled && b.Cfg.Tailscale.AuthKey == "" {
 		return LeaseTarget{}, exit(2, "direct --tailscale requires %s to contain a Tailscale auth key; brokered mode uses coordinator OAuth secrets", b.Cfg.Tailscale.AuthKeyEnv)
 	}
@@ -93,10 +92,12 @@ func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		cleanupClient, cleanupClientErr := newGCPClient(cleanupCtx, cfg)
 		if cleanupClientErr != nil {
 			fmt.Fprintf(b.RT.Stderr, "warning: create gcp cleanup client for %s: %v\n", rollbackCloudID, cleanupClientErr)
+			retErr = shared.JoinAcquireCleanupError(retErr, fmt.Errorf("create gcp cleanup client for %s project=%s zone=%s: %w", rollbackCloudID, cfg.GCPProject, cfg.GCPZone, cleanupClientErr))
 			cleanupClient = rollbackClient
 		}
 		if err := cleanupClient.DeleteServer(cleanupCtx, rollbackCloudID); err != nil {
 			fmt.Fprintf(b.RT.Stderr, "warning: cleanup gcp server %s after acquire failure: %v\n", rollbackCloudID, err)
+			retErr = shared.JoinAcquireCleanupError(retErr, fmt.Errorf("cleanup gcp server %s after acquire failure: %w", rollbackCloudID, err))
 		}
 	}()
 	client, err = newGCPClient(ctx, cfg)
@@ -470,9 +471,9 @@ func providerKeyForLease(leaseID string) string { return core.ProviderKeyForLeas
 func sshTargetFromConfig(cfg Config, host string) SSHTarget {
 	return core.SSHTargetFromConfig(cfg, host)
 }
-func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
-	return core.WaitForSSHReady(ctx, target, stderr, phase, timeout)
-}
+
+var waitForSSHReady = core.WaitForSSHReady
+
 func bootstrapWaitTimeout(cfg Config) time.Duration { return core.BootstrapWaitTimeout(cfg) }
 func blank(value, fallback string) string           { return core.Blank(value, fallback) }
 func useStoredTestboxKey(target *SSHTarget, leaseID string) {

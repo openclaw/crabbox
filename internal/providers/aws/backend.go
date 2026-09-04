@@ -70,7 +70,7 @@ func (b *awsLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Leas
 	})
 }
 
-func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (LeaseTarget, error) {
+func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (result LeaseTarget, retErr error) {
 	if b.Cfg.Tailscale.Enabled && b.Cfg.Tailscale.AuthKey == "" {
 		return LeaseTarget{}, exit(2, "direct --tailscale requires %s to contain a Tailscale auth key; brokered mode uses coordinator OAuth secrets", b.Cfg.Tailscale.AuthKeyEnv)
 	}
@@ -112,7 +112,7 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), awsAcquireRollbackTimeout)
 		defer cancel()
-		cleanupAWSCreatedResources(cleanupCtx, b.RT.Stderr, cfg, rollbackCloudID, rollbackKeyID)
+		retErr = shared.JoinAcquireCleanupError(retErr, cleanupAWSCreatedResources(cleanupCtx, b.RT.Stderr, cfg, rollbackCloudID, rollbackKeyID))
 	}()
 	client, err = newAWSClient(ctx, cfg)
 	if err != nil {
@@ -1124,23 +1124,26 @@ func (e *awsProviderKeyCleanupError) Error() string {
 
 func (e *awsProviderKeyCleanupError) Unwrap() error { return e.err }
 
-func cleanupAWSCreatedResources(ctx context.Context, stderr io.Writer, cfg Config, cloudID, keyPairID string) {
+func cleanupAWSCreatedResources(ctx context.Context, stderr io.Writer, cfg Config, cloudID, keyPairID string) error {
 	client, err := newAWSClient(ctx, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: create aws cleanup client for %s region=%s: %v\n", cloudID, cfg.AWSRegion, err)
-		return
+		return fmt.Errorf("create aws cleanup client for %s region=%s: %w", cloudID, cfg.AWSRegion, err)
 	}
 	if strings.TrimSpace(cloudID) != "" {
 		if err := client.DeleteServer(ctx, cloudID); err != nil {
 			fmt.Fprintf(stderr, "warning: cleanup aws instance %s after acquire failure: %v\n", cloudID, err)
-			return
+			// Keep the key available while instance termination remains unconfirmed.
+			return fmt.Errorf("cleanup aws instance %s after acquire failure: %w", cloudID, err)
 		}
 	}
 	if strings.TrimSpace(keyPairID) != "" {
 		if err := client.DeleteCleanupSSHKeyID(ctx, keyPairID); err != nil {
 			fmt.Fprintf(stderr, "warning: cleanup aws key pair %s after acquire failure: %v\n", keyPairID, err)
+			return fmt.Errorf("cleanup aws key pair %s after acquire failure: %w", keyPairID, err)
 		}
 	}
+	return nil
 }
 
 func awsRegionConfigs(cfg Config) []Config {

@@ -12,6 +12,7 @@ import {
   type LeaseProvisioningOperation,
 } from "./lease-provisioning";
 import type { ProviderResumableProvisioning } from "./provider-provisioning";
+import { ProvisioningAttemptHistory } from "./provisioning-attempts";
 import {
   provisioningMaterialConfigured,
   provisioningMaterialKey,
@@ -27989,8 +27990,7 @@ export class AWSProvider implements CloudProvider {
     const regions = awsRegionCandidates(config, this.env, this.region);
     const withLeaseAccess = provisioning?.withLeaseAccess;
     const totalStartedAt = Date.now();
-    const failures: string[] = [];
-    const regionAttempts: ProvisioningAttempt[] = [];
+    const history = new ProvisioningAttemptHistory();
     const ingressOptions =
       provisioning?.sshIngressReconcile === undefined && !provisioning?.allowEmptySSHIngress
         ? undefined
@@ -28002,6 +28002,13 @@ export class AWSProvider implements CloudProvider {
           };
     for (const region of regions) {
       const client = region === this.region ? this.client : new EC2SpotClient(this.env, region);
+      let allocated:
+        | {
+            serverType: string;
+            market: string | undefined;
+            attempts: ProvisioningAttempt[] | undefined;
+          }
+        | undefined;
       try {
         // Record only regions whose provisioning path is about to mutate provider state.
         // oxlint-disable-next-line eslint/no-await-in-loop -- region fallback is intentionally ordered.
@@ -28046,6 +28053,7 @@ export class AWSProvider implements CloudProvider {
                 : {}),
             },
           );
+        allocated = { serverType, market, attempts };
         const requestMs = Date.now() - requestStartedAt;
         const networkReadyStartedAt = Date.now();
         let bootstrapMs = 0;
@@ -28169,11 +28177,7 @@ export class AWSProvider implements CloudProvider {
         if (market) {
           result.market = market;
         }
-        const allAttempts = [...regionAttempts, ...(attempts ?? [])];
-        if (allAttempts.length > 0) {
-          result.attempts = allAttempts;
-        }
-        return result;
+        return { ...result, ...history.result(attempts) };
       } catch (error) {
         // Keep cancellation typed so the create owner records cleanup debt before
         // returning its terminal response, even after an earlier regional failure.
@@ -28185,20 +28189,24 @@ export class AWSProvider implements CloudProvider {
           throw error;
         }
         const message = error instanceof Error ? error.message : String(error);
-        regionAttempts.push({
-          region,
-          serverType: config.serverType,
-          market: config.capacityMarket,
-          category: awsProvisioningErrorCategory(message) || "region",
-          message: `region ${region}: ${message}`,
-        });
-        failures.push(`${region}: ${message}`);
+        history.recordFailure(
+          error,
+          {
+            region,
+            serverType: allocated?.serverType ?? config.serverType,
+            market: allocated?.market ?? config.capacityMarket,
+            category: awsProvisioningErrorCategory(message) || "region",
+            message: `region ${region}: ${message}`,
+          },
+          `${region}: ${message}`,
+          allocated?.attempts,
+        );
         if (!isRetryableAWSRegionProvisioningError(message)) {
           break;
         }
       }
     }
-    throw new Error(failures.join("; "));
+    throw history.error();
   }
 
   async deleteServer(id: string): Promise<void> {

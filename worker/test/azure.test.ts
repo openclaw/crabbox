@@ -23,7 +23,7 @@ import {
 } from "../src/azure";
 import type { LeaseConfig } from "../src/config";
 import { providerProvisioningCleanupClaim } from "../src/provider-provisioning";
-import type { Env, LeaseRecord } from "../src/types";
+import type { Env, LeaseRecord, ProviderMachine } from "../src/types";
 
 const baseEnv: Env = {
   FLEET: {} as DurableObjectNamespace,
@@ -4334,6 +4334,81 @@ describe("azure provider", () => {
         capacityFallback: "on-demand-after-120s",
       }),
     ).toBeUndefined();
+  });
+
+  it("retains Azure market failures across a region fallback", async () => {
+    const config = testLeaseConfig({
+      serverTypeExplicit: true,
+      serverType: "Standard_D2ads_v6",
+      azureLocation: "eastus",
+      capacityRegions: ["westus3"],
+      capacityMarket: "spot",
+      capacityFallback: "on-demand-after-120s",
+      azureOSDisk: "managed",
+    });
+    const events: string[] = [];
+    const infra = vi
+      .spyOn(AzureClient.prototype, "ensureSharedInfra")
+      .mockImplementation(async (location) => {
+        events.push(`infra:${location}`);
+        return { vnet: "fixture-vnet", nsg: "fixture-nsg" };
+      });
+    const internal = AzureClient.prototype as unknown as {
+      createVM(config: LeaseConfig, location: string): Promise<ProviderMachine>;
+    };
+    const create = vi
+      .spyOn(internal, "createVM")
+      .mockImplementation(async (candidate, location) => {
+        events.push(`create:${location}/${candidate.capacityMarket}`);
+        if (location === "eastus") {
+          throw new Error(
+            candidate.capacityMarket === "spot" ? "SkuNotAvailable" : "QuotaExceeded",
+          );
+        }
+        return {
+          provider: "azure",
+          id: 1,
+          cloudID: "fixture-vm",
+          name: "fixture-vm",
+          status: "running",
+          labels: {},
+        };
+      });
+    try {
+      const result = await new AzureClient(baseEnv).createServerWithFallback(
+        config,
+        "cbx_abcdef123456",
+        "fixture",
+        "alice@example.com",
+      );
+      expect(events).toEqual([
+        "infra:eastus",
+        "create:eastus/spot",
+        "create:eastus/on-demand",
+        "infra:westus3",
+        "create:westus3/spot",
+      ]);
+      expect(result.server.region).toBe("westus3");
+      expect(result.attempts).toEqual([
+        {
+          region: "eastus",
+          serverType: config.serverType,
+          market: "spot",
+          category: "capacity",
+          message: "SkuNotAvailable",
+        },
+        {
+          region: "eastus",
+          serverType: config.serverType,
+          market: "on-demand",
+          category: "quota",
+          message: "QuotaExceeded",
+        },
+      ]);
+    } finally {
+      infra.mockRestore();
+      create.mockRestore();
+    }
   });
 
   it("starts Azure on-demand fallback without waiting for timed-out Spot cleanup", async () => {

@@ -142,9 +142,13 @@ local `tensorlake` process argv.
    organization/project, requested namespace, and reported sandbox namespace.
 3. By default `run` archive-syncs the working tree: a `git ls-files`-driven
    manifest is packed into a gzipped tar locally, uploaded with
-   `tensorlake sbx cp` to `/tmp/crabbox-sync-*.tgz`, and extracted into the
-   configured workdir. Pass `--no-sync` to skip the archive step (the workdir is
-   still created).
+   `tensorlake sbx cp` to `/tmp/crabbox-tensorlake-sync-*.tgz`, and extracted into
+   the configured workdir. The complete archive is checked and built before
+   fresh allocation. Delete-sync stages extraction before replacing the existing
+   workspace; non-delete sync merges into it. A bounded cleanup attempt removes
+   partial uploads and staging directories even when transfer fails or is
+   canceled, warning on cleanup failure without replacing the original outcome.
+   Pass `--no-sync` to skip the archive step (the workdir is still created).
 4. The command runs via `tensorlake sbx exec -w <workdir> <id> -- <cmd>`,
    streaming stdout and stderr back through Crabbox.
 5. On release the original claim and provider scope are rechecked while claim

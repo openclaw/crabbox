@@ -643,54 +643,124 @@ func TestTensorlakeDeleteSyncDoesNotRemoveWorkspaceBeforeUpload(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "upload failed") {
 		t.Fatalf("err=%v, want upload failure", err)
 	}
-	prepare := findCallN(runner, "sbx exec", 0)
-	if prepare == nil {
-		t.Fatal("missing prepare command")
+	cleanup := findCallN(runner, "sbx exec", 0)
+	if cleanup == nil {
+		t.Fatal("missing failed-upload cleanup")
 	}
-	prepareText := strings.Join(prepare.Args, " ")
-	if strings.Contains(prepareText, "rm -rf") {
-		t.Fatalf("prepare deleted workspace before upload: %v", prepare.Args)
+	cleanupText := strings.Join(cleanup.Args, " ")
+	if !strings.Contains(cleanupText, "rm -f '/tmp/crabbox-tensorlake-sync-") || strings.Contains(cleanupText, "rm -rf '/workspace/crabbox'") {
+		t.Fatalf("cleanup=%s", cleanupText)
 	}
-	if !strings.Contains(prepareText, "mkdir -p") {
-		t.Fatalf("prepare should still create workspace: %v", prepare.Args)
-	}
-	if verbs := callMutationVerbs(runner); !reflect.DeepEqual(verbs, []string{"sbx create", "sbx exec", "sbx cp", "sbx terminate"}) {
+	if verbs := callMutationVerbs(runner); !reflect.DeepEqual(verbs, []string{"sbx create", "sbx cp", "sbx exec", "sbx terminate"}) {
 		t.Fatalf("verbs=%v", verbs)
 	}
 }
 
-func TestTensorlakeDeleteSyncExtractStagesBeforeReplacingWorkspace(t *testing.T) {
-	cmd := tensorlakeExtractArchiveCommand("/workspace/crabbox", "/tmp/archive.tgz", true)
-	tarAt := strings.Index(cmd, "tar -xzf '/tmp/archive.tgz'")
-	replaceAt := strings.Index(cmd, "mv '/workspace/crabbox' '/workspace/.crabbox-backup-")
-	if tarAt < 0 || replaceAt < 0 {
-		t.Fatalf("command missing staged extract or replacement: %s", cmd)
-	}
-	if replaceAt < tarAt {
-		t.Fatalf("workspace is replaced before archive extraction: %s", cmd)
-	}
-	if strings.Contains(cmd[:tarAt], "rm -rf '/workspace/crabbox'") {
-		t.Fatalf("workspace deleted before archive extraction: %s", cmd)
-	}
-	if !strings.Contains(cmd, "rm -f '/tmp/archive.tgz'") {
-		t.Fatalf("command should clean remote archive: %s", cmd)
-	}
-}
-
-func TestTensorlakeExtractArchiveCommandPreservesExtractStatus(t *testing.T) {
-	cmd := tensorlakeExtractArchiveCommand("/workspace/crabbox", "/tmp/archive.tgz", false)
-	for _, want := range []string{
-		"tar -xzf '/tmp/archive.tgz' -C '/workspace/crabbox'",
-		"; crabbox_status=$?;",
-		"; rm -f '/tmp/archive.tgz';",
-		"; exit \"$crabbox_status\"",
+func TestTensorlakeSyncNativeArchiveTransaction(t *testing.T) {
+	for _, scenario := range []struct {
+		name, failure string
+		delete        bool
+	}{
+		{"partial upload", "upload", true}, {"corrupt archive", "extract", true},
+		{"replace", "", true}, {"merge", "", false},
 	} {
-		if !strings.Contains(cmd, want) {
-			t.Fatalf("command missing %q: %s", want, cmd)
-		}
-	}
-	if strings.Contains(cmd, "rm -f '/tmp/archive.tgz' exit") {
-		t.Fatalf("cleanup and exit are not separated: %s", cmd)
+		t.Run(scenario.name, func(t *testing.T) {
+			root := t.TempDir()
+			workdir := filepath.Join(root, "work")
+			if err := os.Mkdir(workdir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			old := filepath.Join(workdir, "old.txt")
+			if err := os.WriteFile(old, []byte("preserve-me"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runner := newRunner(nil, nil)
+			remoteArchive := ""
+			t.Cleanup(func() {
+				if remoteArchive != "" {
+					_ = os.Remove(remoteArchive)
+				}
+			})
+			runner.hook = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+				if scriptKey(req.Args) == "sbx cp" {
+					src, dst := req.Args[len(req.Args)-2], req.Args[len(req.Args)-1]
+					_, remoteArchive, _ = strings.Cut(dst, ":")
+					data, err := os.ReadFile(src)
+					if err != nil {
+						return core.LocalCommandResult{}, err, true
+					}
+					if scenario.failure == "extract" {
+						data = []byte("corrupt archive")
+					}
+					if err := os.WriteFile(remoteArchive, data, 0o600); err != nil {
+						return core.LocalCommandResult{}, err, true
+					}
+					if scenario.failure == "upload" {
+						return core.LocalCommandResult{ExitCode: 7}, errors.New("synthetic partial upload failure"), true
+					}
+					return core.LocalCommandResult{}, nil, true
+				}
+				if scriptKey(req.Args) == "sbx exec" {
+					cmd := osexec.Command("sh", "-c", req.Args[len(req.Args)-1])
+					cmd.Stdout, cmd.Stderr = req.Stdout, req.Stderr
+					err := cmd.Run()
+					code := 0
+					if err != nil {
+						var exited *osexec.ExitError
+						if !errors.As(err, &exited) {
+							return core.LocalCommandResult{}, err, true
+						}
+						code = exited.ExitCode()
+					}
+					return core.LocalCommandResult{ExitCode: code}, err, true
+				}
+				return core.LocalCommandResult{}, nil, false
+			}
+			cfg := newTestConfig()
+			cfg.Sync.Delete = scenario.delete
+			backend := NewTensorlakeBackend(Provider{}.Spec(), cfg, newTestRuntime(runner)).(*tensorlakeBackend)
+			cli, err := newTensorlakeCLI(cfg, backend.rt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			repo := newGitRepo(t)
+			if err := os.WriteFile(filepath.Join(repo, "incoming.txt"), []byte("new"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = backend.syncWorkspace(context.Background(), cli, "sandbox_fixture", RunRequest{Repo: Repo{Root: repo}}, workdir)
+			if scenario.failure != "" && err == nil {
+				t.Fatal("expected transfer failure")
+			}
+			if scenario.failure == "" && err != nil {
+				t.Fatal(err)
+			}
+			if scenario.failure != "" || !scenario.delete {
+				data, err := os.ReadFile(old)
+				if err != nil || string(data) != "preserve-me" {
+					t.Fatalf("previous workspace lost: %q %v", data, err)
+				}
+			} else if _, err := os.Stat(old); !os.IsNotExist(err) {
+				t.Fatalf("old file remains: %v", err)
+			}
+			if scenario.failure == "" {
+				data, err := os.ReadFile(filepath.Join(workdir, "incoming.txt"))
+				if err != nil || string(data) != "new" {
+					t.Fatalf("incoming=%q err=%v", data, err)
+				}
+			}
+			if _, err := os.Stat(remoteArchive); !os.IsNotExist(err) {
+				t.Fatalf("remote archive remains: %v", err)
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
+				if e.Name() != "work" {
+					t.Errorf("staging/backup residue %s", e.Name())
+				}
+			}
+		})
 	}
 }
 
@@ -837,8 +907,8 @@ func TestRunPerformsArchiveSyncByDefault(t *testing.T) {
 		t.Fatalf("Run err=%v", err)
 	}
 	verbs := callMutationVerbs(runner)
-	// Expected order: create → mkdir-prepare exec → cp upload → tar-extract exec → user exec → terminate
-	want := []string{"sbx create", "sbx exec", "sbx cp", "sbx exec", "sbx exec", "sbx terminate"}
+	// Archive upload precedes preparation; its cleanup is separate from user execution.
+	want := []string{"sbx create", "sbx cp", "sbx exec", "sbx exec", "sbx exec", "sbx exec", "sbx terminate"}
 	if !reflect.DeepEqual(verbs, want) {
 		t.Fatalf("verbs=%v want %v", verbs, want)
 	}
@@ -846,8 +916,26 @@ func TestRunPerformsArchiveSyncByDefault(t *testing.T) {
 	if cp == nil {
 		t.Fatalf("missing sbx cp call")
 	}
-	if !containsArgPrefix(cp.Args, "syncidaaaaaaaaaaaaaa0:/tmp/crabbox-sync-") {
+	if !containsArgPrefix(cp.Args, "syncidaaaaaaaaaaaaaa0:/tmp/crabbox-tensorlake-sync-") {
 		t.Fatalf("cp args=%v missing remote dest", cp.Args)
+	}
+}
+
+func TestTensorlakeRunChecksArchiveBeforeAllocation(t *testing.T) {
+	runner := newRunner(nil, nil)
+	cfg := newTestConfig()
+	cfg.Sync.FailFiles = 1
+	backend := NewTensorlakeBackend(Provider{}.Spec(), cfg, newTestRuntime(runner)).(*tensorlakeBackend)
+	repo := newGitRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "incoming.txt"), []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Root: repo}, Command: []string{"true"}})
+	if err == nil || !strings.Contains(err.Error(), "sync candidate too large") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("provider called before archive admission: %v", runner.calls)
 	}
 }
 

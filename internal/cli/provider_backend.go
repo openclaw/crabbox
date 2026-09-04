@@ -1187,6 +1187,7 @@ type RunRequest struct {
 	FreshPR               FreshPRSpec
 	ApplyLocalPatch       bool
 	Command               []string
+	CommandLiteralArgs    map[int]bool // Profile argument positions that must not introduce shell syntax.
 	Label                 string
 	RequestedSlug         string
 	TimingJSON            bool

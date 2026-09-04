@@ -236,11 +236,14 @@ func RunDelegatedArchiveSync(ctx context.Context, req DelegatedArchiveSyncReques
 	cleanupRemote := func() {
 		cleanupCtx, cleanupCancel := cleanupContext(ctx)
 		defer cleanupCancel()
-		command := "rm -f " + ShellQuote(remoteArchive) + " 2>/dev/null || true"
+		command := "rm -f " + ShellQuote(remoteArchive) + " && crabbox_cleanup_status=0 || crabbox_cleanup_status=$?"
 		if stagingDir != "" {
-			command += "; rm -rf " + ShellQuote(stagingDir) + " 2>/dev/null || true"
+			command += "; rm -rf " + ShellQuote(stagingDir) + " || crabbox_cleanup_status=$?"
 		}
-		_ = req.Exec(cleanupCtx, command)
+		command += "; exit \"$crabbox_cleanup_status\""
+		if err := req.Exec(cleanupCtx, command); err != nil {
+			fmt.Fprintf(stderr, "warning: %s sync cleanup failed: %v\n", provider, err)
+		}
 	}
 	cleanupPending := true
 	defer func() {

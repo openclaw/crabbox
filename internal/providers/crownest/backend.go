@@ -159,12 +159,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			}
 		}()
 	}
-	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, nil)
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
 		return RunResult{}, err
 	}
-	command := intent.Argv("bash", "-lc")
-	commandText := shellScriptFromArgv(command)
+	commandText := intent.ShellCommand("bash", "-lc")
 	commandEnv, stripped := commandEnv(req.Env)
 	if len(stripped) > 0 {
 		fmt.Fprintf(b.rt.Stderr, "warning: provider=crownest did not forward provider authentication variables: %s\n", strings.Join(stripped, ","))
