@@ -718,7 +718,8 @@ The workflow has separate trust zones:
   token. Candidate admin/shared tokens stay in the relay. The job receives no
   AWS, Cloudflare, authority-controller, or production credentials.
 - `finalize` always runs behind the protected environment. It fences candidate
-  mutation, finalizes AWS resources, deletes the candidate Fleet Durable Object
+  mutation by first disabling and deleting the public relay, verifies relay
+  absence, finalizes AWS resources, deletes the candidate Fleet Durable Object
   and Worker, verifies absence, repeats finalization idempotently, retires the
   registry record, and deletes the transient controller.
 

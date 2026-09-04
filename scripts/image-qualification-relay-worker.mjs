@@ -31,6 +31,11 @@ async function authorized(request, token) {
   return difference === 0;
 }
 
+function runActive(env) {
+  const expiresAt = Date.parse(env.QUALIFICATION_EXPIRES_AT ?? "");
+  return Number.isFinite(expiresAt) && Date.now() < expiresAt;
+}
+
 function requireNoQuery(url) {
   return url.search === "";
 }
@@ -265,7 +270,7 @@ function redactCandidateTokens(bytes, env) {
 
 export default {
   async fetch(request, env) {
-    if (!(await authorized(request, env.EXECUTOR_TOKEN ?? ""))) {
+    if (!runActive(env) || !(await authorized(request, env.EXECUTOR_TOKEN ?? ""))) {
       return json({ error: "forbidden" }, 403);
     }
     const route = routeFor(request, env);
@@ -287,6 +292,7 @@ export default {
     });
     if (body) headers.set("content-type", "application/json");
     if (route.preferAsync) headers.set("prefer", "respond-async");
+    if (!runActive(env)) return json({ error: "forbidden" }, 403);
     const response = await env.CANDIDATE.fetch(
       new Request(`https://candidate.invalid${route.pathname}${route.search}`, {
         method: request.method,

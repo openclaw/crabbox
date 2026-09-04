@@ -31,6 +31,8 @@ calling the candidate. Callers cannot choose a target Worker, forwarding
 headers, or destination URL. The relay has no controller or authority binding
 and receives no AWS or Cloudflare credential. It strips literal candidate auth
 tokens from bounded responses before returning them to the executor.
+The relay rejects an absent or expired run timestamp and rechecks expiry
+immediately before candidate dispatch.
 
 The publisher proof records a seeded base revision, failed candidate revision,
 and fresh rollback revision. It requires the rollback receipt to restore the
@@ -40,6 +42,11 @@ current default. Full candidate API readbacks before and after that stale
 request must match, including catalog, default, and Fast Snapshot Restore state.
 A retired AMI may remain visible as a matching provider-only record, but it
 must have no revision, promotion timestamp, or catalog-only marker.
+
+Protected teardown disables and verifies the relay's public endpoint, deletes
+and verifies absence of the relay Worker, and only then begins authority
+finalization. Expired or finalizing/finalized runs therefore have no public
+credential-injection path to the private candidate.
 
 The candidate binding has immutable `ctx.props` containing `runId`, `owner`,
 `candidateSha`, `candidateWorker`, `deploymentHash`, and `expiresAt`. The

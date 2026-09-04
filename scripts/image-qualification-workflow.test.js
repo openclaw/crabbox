@@ -131,6 +131,14 @@ test("control tool fixes the reviewed policy and recovery boundary", () => {
   assert.match(control, /assertWorkerIsolation\(cf, candidateWorker, 1, false\)/);
   assert.match(control, /assertWorkerIsolation\(cf, relayWorker, 0, true\)/);
   assert.match(control, /await deleteRelay\(cf, relayWorker\)/);
+  assert.match(
+    control,
+    /await deleteRelay\(cf, relayWorker\);\n    await controllerCall\(controllerURL, token, "finalize"/,
+  );
+  assert.match(
+    control,
+    /await cf\.disableSubdomain\(worker\);[\s\S]*assertWorkerIsolation\(cf, worker, 0, false\);[\s\S]*allow404: true/,
+  );
   assert.match(control, /authority attestation identity does not match protected expectations/);
   assert.doesNotMatch(control, /identity revalidation warning/);
 });
@@ -792,6 +800,7 @@ test("relay rejects non-contract requests before invoking the private candidate"
     AWS_REGION: "us-east-1",
     QUALIFICATION_OWNER: "image-qualification-1-1@example.invalid",
     QUALIFICATION_ORG: "image-qualification",
+    QUALIFICATION_EXPIRES_AT: "2999-01-01T00:00:00.000Z",
     CANDIDATE: {
       fetch: async (request) => {
         calls.push(request);
@@ -822,6 +831,44 @@ test("relay rejects non-contract requests before invoking the private candidate"
   );
   assert.equal(calls[0].headers.get("authorization"), `Bearer ${env.CANDIDATE_ADMIN_TOKEN}`);
   assert.equal(calls[0].headers.get("x-crabbox-owner"), env.QUALIFICATION_OWNER);
+
+  const expired = await worker.fetch(
+    new Request(
+      "https://relay.invalid/v1/images/ami-12345678?provider=aws&target=linux&region=us-east-1",
+      { headers: authorization },
+    ),
+    { ...env, QUALIFICATION_EXPIRES_AT: "2000-01-01T00:00:00.000Z" },
+  );
+  assert.equal(expired.status, 403);
+  assert.equal(calls.length, 1);
+
+  const missingExpiry = await worker.fetch(
+    new Request(
+      "https://relay.invalid/v1/images/ami-12345678?provider=aws&target=linux&region=us-east-1",
+      { headers: authorization },
+    ),
+    { ...env, QUALIFICATION_EXPIRES_AT: undefined },
+  );
+  assert.equal(missingExpiry.status, 403);
+  assert.equal(calls.length, 1);
+
+  const expiresAt = Date.parse("2099-01-01T00:00:00.000Z");
+  const now = Date.now;
+  const times = [expiresAt - 1, expiresAt];
+  Date.now = () => times.shift() ?? expiresAt;
+  try {
+    const expiredBeforeDispatch = await worker.fetch(
+      new Request(
+        "https://relay.invalid/v1/images/ami-12345678?provider=aws&target=linux&region=us-east-1",
+        { headers: authorization },
+      ),
+      { ...env, QUALIFICATION_EXPIRES_AT: new Date(expiresAt).toISOString() },
+    );
+    assert.equal(expiredBeforeDispatch.status, 403);
+  } finally {
+    Date.now = now;
+  }
+  assert.equal(calls.length, 1);
 
   const shared = await worker.fetch(
     new Request(

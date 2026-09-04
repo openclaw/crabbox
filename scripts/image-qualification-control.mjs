@@ -732,7 +732,15 @@ function controllerMetadata(deploymentHash, token) {
   };
 }
 
-function relayMetadata(candidateWorker, executorToken, adminToken, sharedToken, config, owner) {
+function relayMetadata(
+  candidateWorker,
+  executorToken,
+  adminToken,
+  sharedToken,
+  config,
+  owner,
+  expiresAt,
+) {
   return {
     main_module: "relay.mjs",
     compatibility_date: "2026-09-03",
@@ -743,6 +751,7 @@ function relayMetadata(candidateWorker, executorToken, adminToken, sharedToken, 
       { name: "AWS_REGION", type: "plain_text", text: config.region },
       { name: "QUALIFICATION_OWNER", type: "plain_text", text: owner },
       { name: "QUALIFICATION_ORG", type: "plain_text", text: "image-qualification" },
+      { name: "QUALIFICATION_EXPIRES_AT", type: "plain_text", text: expiresAt },
       { name: "CANDIDATE", type: "service", service: candidateWorker },
     ],
   };
@@ -876,6 +885,9 @@ async function verifyExecutionDeployment(cf, expected) {
       binding.type === "service" &&
       binding.service === authorityName,
   );
+  const relayExpiry = relayBindings.find(
+    (binding) => binding.name === "QUALIFICATION_EXPIRES_AT" && binding.type === "plain_text",
+  );
   if (
     digest(canonical(bindings)) !== expected.bindingDigest ||
     transport?.props?.runId !== expected.runId ||
@@ -883,6 +895,7 @@ async function verifyExecutionDeployment(cf, expected) {
     transport?.props?.candidateWorker !== expected.candidateWorker ||
     transport?.props?.deploymentHash !== expected.deploymentHash ||
     transport?.props?.expiresAt !== expected.expiresAt ||
+    relayExpiry?.text !== expected.expiresAt ||
     digest(canonical(relayBindings)) !== expected.relayBindingDigest ||
     relayBindings.some(
       (binding) =>
@@ -1056,8 +1069,15 @@ async function deploy() {
         name: relayWorker,
         sourceSha256: digest(fs.readFileSync(relaySource)),
         settings: publicBindingShape(
-          relayMetadata(candidateWorker, executorToken, adminToken, sharedToken, config, owner)
-            .bindings,
+          relayMetadata(
+            candidateWorker,
+            executorToken,
+            adminToken,
+            sharedToken,
+            config,
+            owner,
+            expiresAt,
+          ).bindings,
         ),
       },
       secretDigests: {
@@ -1095,6 +1115,7 @@ async function deploy() {
     sharedToken,
     config,
     owner,
+    expiresAt,
   );
   const relayUpload = await cf.upload(relayWorker, relaySource, expectedRelayMetadata);
   const [relaySettings, relayVersion, relayURL] = await Promise.all([
@@ -1301,9 +1322,23 @@ async function deleteCandidate(cf, worker) {
 
 async function deleteRelay(cf, worker) {
   if (!relayNamePattern.test(worker)) throw new Error("refusing to delete an unexpected relay");
+  const existing = await cf.request(
+    `/workers/scripts/${worker}/settings`,
+    {},
+    { allow404: true },
+  );
+  if (existing === undefined) {
+    if ((await namespaceResidue(cf, worker)) !== 0) {
+      throw new Error("qualification relay Durable Object residue remains");
+    }
+    return;
+  }
+  await cf.disableSubdomain(worker);
+  await assertWorkerIsolation(cf, worker, 0, false);
   await cf.deleteScript(worker);
-  if ((await namespaceResidue(cf, worker)) !== 0) {
-    throw new Error("qualification relay Durable Object residue remains");
+  const settings = await cf.request(`/workers/scripts/${worker}/settings`, {}, { allow404: true });
+  if (settings !== undefined || (await namespaceResidue(cf, worker)) !== 0) {
+    throw new Error("qualification relay Worker or Durable Object residue remains");
   }
 }
 
@@ -1435,6 +1470,8 @@ async function cleanupRun({
     }
   }
   try {
+    // Revoke public credential injection before authority finalization begins.
+    await deleteRelay(cf, relayWorker);
     await controllerCall(controllerURL, token, "finalize", { runId: run.runId });
     firstAttestation = await controllerCall(controllerURL, token, "attest", { runId: run.runId });
     if (requireProof) {
@@ -1445,7 +1482,6 @@ async function cleanupRun({
         recordQualificationFailure(error);
       }
     }
-    await deleteRelay(cf, relayWorker);
     await deleteCandidate(cf, run.candidateWorker);
     await controllerCall(controllerURL, token, "finalize", { runId: run.runId });
     const finalAttestation = await controllerCall(controllerURL, token, "attest", {
