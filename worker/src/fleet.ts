@@ -159,6 +159,7 @@ import {
   gcpMachineImageNotFound,
   gcpProviderLabelValue,
   gcpReadyPoolImageScope,
+  gcpReadyPoolImageScopeSupported,
   gcpSnapshotNotFound,
 } from "./gcp";
 import {
@@ -26854,6 +26855,14 @@ export class GCPProvider implements CloudProvider {
     }
     const scope = gcpReadyPoolImageScope(image.sourceID, image.kind);
     return scope ? { provider: "gcp", scope, id: image.id } : undefined;
+  }
+
+  supportsReadyPoolImageIdentity(identity: ReadyPoolImageIdentity): boolean {
+    return (
+      identity.provider === "gcp" &&
+      /^[0-9]+$/.test(identity.id) &&
+      gcpReadyPoolImageScopeSupported(identity.scope)
+    );
   }
 
   restrictedLeaseRequestFields(input: LeaseRequest): string[] {

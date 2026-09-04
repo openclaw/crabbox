@@ -426,6 +426,20 @@ do not read image or snapshot metadata. The coordinator credentials need
 `compute.instances.get` and `compute.disks.get` for typed GCP identity
 operations.
 
+Once persisted, typed cohort identity uses the source namespace
+`projects/<project>/global/images` or
+`projects/<project>/global/snapshots`, the immutable numeric source ID, and the
+canonical architecture. The execution project remains required launch evidence
+but is not substituted for the source project or included in the identity. The
+launch zone is excluded so capacity fallback does not split an otherwise
+identical cohort.
+
+Only exact relative resource names and the lowercase official Compute API HTTPS
+forms are accepted. Leading or trailing whitespace, family aliases, extra path
+segments, ports, queries, fragments, percent-encoded ambiguity,
+kind/collection mismatches, and non-numeric IDs fail closed. Machine images
+remain valid checkpoint sources but cannot join typed ready-pool cohorts.
+
 ## Checkpoints
 
 Brokered Linux GCP leases support native [checkpoints](../features/checkpoints.md):

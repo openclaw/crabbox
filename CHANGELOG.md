@@ -12,6 +12,7 @@
 - Clarify SSH cancellation, safe retained-workload recovery, and Bash login-shell exit behavior, and correct the default local-container image note. [PR 1685](https://github.com/openclaw/crabbox/pull/1685), [PR 1686](https://github.com/openclaw/crabbox/pull/1686). Thanks @steipete.
 - Fix native macOS readiness test fixtures when temporary directories inherit a different group from the process, without changing production ownership checks. [PR 1686](https://github.com/openclaw/crabbox/pull/1686). Thanks @steipete.
 - Typed GCP identity generation and registration now observe the owned VM boot disk to bind exact numeric image or snapshot provenance without adding image or snapshot reads to ordinary GCP launches; create cleanup custody requires a numeric VM ID, interrupted token-bound creates capture or retry that ID only through exact ownership lookups and strict rereads, and fully bound pre-upgrade leases may use their lossy historical numeric ID only to corroborate a raw ID during fenced deletion or expiry cleanup before an exact reread. [PR 1620](https://github.com/openclaw/crabbox/pull/1620). Thanks @vincentkoc.
+- Added typed GCP ready-pool cohorts bound to exact boot-image or disk-snapshot provenance while allowing capacity fallback across zones. [PR 1621](https://github.com/openclaw/crabbox/pull/1621). Thanks @vincentkoc.
 
 ## 0.49.0 - 2026-09-03
 

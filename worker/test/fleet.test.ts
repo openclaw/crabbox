@@ -15612,6 +15612,445 @@ describe("fleet lease identity and idle", () => {
     expect(observations).toBe(0);
   });
 
+  it("derives strict GCP image and snapshot identities without binding fallback zones", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, { provider: "gcp" }),
+    });
+    const baseLease = typedGCPReadyPoolCohortLease({
+      id: "cbx_000000000094",
+      architecture: "arm64",
+    });
+    storage.seed(`lease:${baseLease.id}`, baseLease);
+
+    const generate = async () =>
+      fleet.fetch(
+        request("POST", "/v1/ready-pools/builders/identity", {
+          headers: typedReadyPoolHeaders(),
+          body: {
+            leaseID: baseLease.id,
+            ...typedReadyPoolMetadata(),
+            cacheCompatibility: "node-22",
+          },
+        }),
+      );
+
+    const generated = await generate();
+    expect(generated.status).toBe(200);
+    expect(await generated.json()).toEqual({
+      identity: {
+        ...(await typedReadyPoolIdentity("node-22")),
+        image: {
+          provider: "gcp",
+          scope: "projects/source-project/global/images",
+          id: typedGCPImage.id,
+        },
+        architecture: "arm64",
+      },
+    });
+
+    storage.seed(`lease:${baseLease.id}`, {
+      ...baseLease,
+      region: "europe-west4-a",
+      image: {
+        ...typedGCPImage,
+        kind: "gcp-disk-snapshot",
+        source: "snapshot",
+        sourceID: "projects/source-project/global/snapshots/runner-v3",
+      },
+    });
+    const snapshot = await generate();
+    expect(snapshot.status).toBe(200);
+    expect(await snapshot.json()).toMatchObject({
+      identity: {
+        image: {
+          provider: "gcp",
+          scope: "projects/source-project/global/snapshots",
+          id: typedGCPImage.id,
+        },
+        architecture: "arm64",
+      },
+    });
+
+    const withoutProviderProject = { ...baseLease };
+    delete withoutProviderProject.providerProject;
+    const invalidLeases: LeaseRecord[] = [
+      withoutProviderProject,
+      { ...baseLease, providerProject: " execution-project" },
+      { ...baseLease, image: { ...typedGCPImage, id: "image-name" } },
+      { ...baseLease, image: { ...typedGCPImage, kind: "gcp-machine-image" } },
+      {
+        ...baseLease,
+        image: {
+          ...typedGCPImage,
+          sourceID: " projects/source-project/global/images/runner-v3",
+        },
+      },
+      {
+        ...baseLease,
+        image: {
+          ...typedGCPImage,
+          sourceID: "projects/source-project/global/images/runner-v3 ",
+        },
+      },
+      {
+        ...baseLease,
+        image: {
+          ...typedGCPImage,
+          sourceID: "projects/source-project/global/images/family/runner-v3",
+        },
+      },
+      {
+        ...baseLease,
+        image: {
+          ...typedGCPImage,
+          sourceID: "https://compute.googleapis.com:443/compute/v1/projects/p/global/images/i",
+        },
+      },
+      {
+        ...baseLease,
+        image: {
+          ...typedGCPImage,
+          sourceID: "projects/source-project/global/images/runner-v3?x=1",
+        },
+      },
+      {
+        ...baseLease,
+        image: {
+          ...typedGCPImage,
+          sourceID: "projects/source-project/global/images/runner-v3#x",
+        },
+      },
+      {
+        ...baseLease,
+        image: {
+          ...typedGCPImage,
+          sourceID: "projects/source-project/global/images/runner%2dv3",
+        },
+      },
+      {
+        ...baseLease,
+        image: {
+          ...typedGCPImage,
+          sourceID: "projects/source-project/global/images/runner-v3/extra",
+        },
+      },
+      {
+        ...baseLease,
+        image: {
+          ...typedGCPImage,
+          sourceID: "Projects/source-project/global/images/runner-v3",
+        },
+      },
+      {
+        ...baseLease,
+        image: {
+          ...typedGCPImage,
+          sourceID: "https://example.googleapis.com/compute/v1/projects/p/global/images/runner-v3",
+        },
+      },
+      {
+        ...baseLease,
+        image: {
+          ...typedGCPImage,
+          sourceID: "projects/source-project/global/snapshots/runner-v3",
+        },
+      },
+    ];
+    for (const invalidLease of invalidLeases) {
+      storage.seed(`lease:${baseLease.id}`, invalidLease);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each request validates one persisted GCP provenance shape.
+      const response = await generate();
+      expect(response.status).toBe(409);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- consume the response before replacing its backing lease.
+      expect(await response.json()).toMatchObject({
+        error: "unsupported_ready_pool_lease_identity",
+      });
+    }
+  });
+
+  it("runs GCP image and snapshot cohorts through ready, drain, release, and cleanup", async () => {
+    await Promise.all(
+      [
+        {
+          key: "gcp-images",
+          leaseID: "cbx_000000000096",
+          kind: "gcp-image" as const,
+          source: "explicit" as const,
+          collection: "images",
+          terminalResult: "drain" as const,
+        },
+        {
+          key: "gcp-snapshots",
+          leaseID: "cbx_000000000097",
+          kind: "gcp-disk-snapshot" as const,
+          source: "snapshot" as const,
+          collection: "snapshots",
+          terminalResult: "release" as const,
+        },
+      ].map(async (fixture) => {
+        const storage = new MemoryStorage();
+        let releases = 0;
+        const fleet = testFleet(storage, {
+          gcp: fakeProvider(undefined, {
+            provider: "gcp",
+            onReleaseLease: () => {
+              releases += 1;
+            },
+          }),
+        });
+        const headers = typedReadyPoolHeaders();
+        const metadata = typedReadyPoolMetadata();
+        const lease = typedGCPReadyPoolCohortLease({
+          id: fixture.leaseID,
+          cloudID: `crabbox-${fixture.key}`,
+          serverName: `crabbox-${fixture.key}`,
+          image: {
+            ...typedGCPImage,
+            source: fixture.source,
+            kind: fixture.kind,
+            region: "us-central1-a",
+            sourceID: `https://www.googleapis.com/compute/v1/projects/source-project/global/${fixture.collection}/runner-v3`,
+          },
+        });
+        storage.seed(`lease:${lease.id}`, lease);
+
+        const generated = await fleet.fetch(
+          request("POST", `/v1/ready-pools/${fixture.key}/identity`, {
+            headers,
+            body: { leaseID: lease.id, ...metadata, cacheCompatibility: "node-22" },
+          }),
+        );
+        expect(generated.status).toBe(200);
+        const identity = ((await generated.json()) as { identity: ReadyPoolIdentityV1 }).identity;
+        expect(identity.image).toEqual({
+          provider: "gcp",
+          scope: `projects/source-project/global/${fixture.collection}`,
+          id: typedGCPImage.id,
+        });
+
+        const reconcile = await fleet.fetch(
+          request("POST", `/v1/ready-pools/${fixture.key}/reconcile-identity`, {
+            headers,
+            body: { ...metadata, identity, minReady: 1, maxReady: 1, claim: true },
+          }),
+        );
+        expect(reconcile.status).toBe(200);
+        const claim = (await reconcile.json()) as { claim: { token: string } };
+        expect(claim.claim.token).toBeTruthy();
+        const desiredKeys = [
+          ...(await storage.list({ prefix: "typed-ready-pool-v2-desired:" })).keys(),
+        ];
+        expect(desiredKeys).toHaveLength(1);
+        expect(desiredKeys[0]).toMatch(/^typed-ready-pool-v2-desired:sha256:[0-9a-f]{64}$/);
+
+        const registered = await fleet.fetch(
+          request("POST", `/v1/ready-pools/${fixture.key}/register-identity`, {
+            headers,
+            body: {
+              leaseID: lease.id,
+              ...metadata,
+              identity,
+              fillClaimToken: claim.claim.token,
+            },
+          }),
+        );
+        expect(registered.status).toBe(200);
+
+        const borrow = async () => {
+          const response = await fleet.fetch(
+            request("POST", `/v1/ready-pools/${fixture.key}/borrow-identity`, {
+              headers,
+              body: { ...metadata, identity },
+            }),
+          );
+          expect(response.status).toBe(200);
+          return ((await response.json()) as { entry: ReadyPoolEntry }).entry;
+        };
+        const firstBorrow = await borrow();
+        const ready = await fleet.fetch(
+          request("POST", `/v1/ready-pools/${fixture.key}/return-identity`, {
+            headers,
+            body: {
+              leaseID: lease.id,
+              borrowToken: firstBorrow.borrowToken,
+              result: "ready",
+              identity,
+            },
+          }),
+        );
+        expect(ready.status).toBe(200);
+        expect(await ready.json()).toMatchObject({ entry: { state: "ready", identity } });
+        expect(releases).toBe(0);
+
+        const secondBorrow = await borrow();
+        const terminal = await fleet.fetch(
+          request("POST", `/v1/ready-pools/${fixture.key}/return-identity`, {
+            headers,
+            body: {
+              leaseID: lease.id,
+              borrowToken: secondBorrow.borrowToken,
+              result: fixture.terminalResult,
+            },
+          }),
+        );
+        expect(terminal.status).toBe(200);
+        expect(await terminal.json()).toMatchObject({
+          entry: { state: "draining" },
+          lease: { state: "released", releaseDeletesServer: true },
+        });
+        await fleet.alarm();
+        expect(releases).toBe(1);
+      }),
+    );
+  });
+
+  it("separates GCP source namespaces and drains mismatched typed leases", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, { provider: "gcp" }),
+    });
+    const headers = typedReadyPoolHeaders();
+    const metadata = typedReadyPoolMetadata();
+    const base = await typedGCPReadyPoolIdentity();
+    const identities: ReadyPoolIdentityV1[] = [
+      {
+        ...base,
+        image: {
+          provider: "gcp",
+          scope: "projects/source-project/global/images",
+          id: typedGCPImage.id,
+        },
+      },
+      {
+        ...base,
+        image: {
+          provider: "gcp",
+          scope: "projects/other-project/global/images",
+          id: typedGCPImage.id,
+        },
+      },
+      {
+        ...base,
+        image: {
+          provider: "gcp",
+          scope: "projects/source-project/global/snapshots",
+          id: "9".repeat(1024),
+        },
+      },
+    ];
+    for (const identity of identities) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each valid identity owns a separate desired cohort.
+      const response = await fleet.fetch(
+        request("POST", "/v1/ready-pools/gcp-collisions/reconcile-identity", {
+          headers,
+          body: { ...metadata, identity, minReady: 1, maxReady: 1, claim: true },
+        }),
+      );
+      expect(response.status).toBe(200);
+    }
+    const desiredKeys = [
+      ...(await storage.list({ prefix: "typed-ready-pool-v2-desired:" })).keys(),
+    ];
+    expect(desiredKeys).toHaveLength(3);
+    expect(desiredKeys.every((key) => key.length === desiredKeys[0]?.length)).toBe(true);
+
+    for (const { image, status, error } of [
+      {
+        image: {
+          provider: "gcp",
+          scope: "projects/source-project/global/images/extra",
+          id: "123",
+        },
+        status: 409,
+        error: "unsupported_ready_pool_image_identity",
+      },
+      {
+        image: {
+          provider: "gcp",
+          scope: "projects/source-project/global/images",
+          id: "image-name",
+        },
+        status: 409,
+        error: "unsupported_ready_pool_image_identity",
+      },
+      {
+        image: { provider: "gcp", scope: " projects/source-project/global/images", id: "123" },
+        status: 400,
+        error: "invalid_ready_pool_identity",
+      },
+      {
+        image: { provider: "gcp", scope: "projects/source-project/global/images ", id: "123" },
+        status: 400,
+        error: "invalid_ready_pool_identity",
+      },
+      {
+        image: { provider: "gcp", scope: "projects/SOURCE/global/images", id: "123" },
+        status: 409,
+        error: "unsupported_ready_pool_image_identity",
+      },
+      {
+        image: {
+          provider: "gcp",
+          scope: "projects/source-project/global/machineImages",
+          id: "123",
+        },
+        status: 409,
+        error: "unsupported_ready_pool_image_identity",
+      },
+      {
+        image: {
+          provider: "gcp",
+          scope: "https://compute.googleapis.com/compute/v1/projects/p/global/images",
+          id: "123",
+        },
+        status: 409,
+        error: "unsupported_ready_pool_image_identity",
+      },
+    ]) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each malformed namespace is independently rejected.
+      const response = await fleet.fetch(
+        request("POST", "/v1/ready-pools/gcp-invalid/reconcile-identity", {
+          headers,
+          body: { ...metadata, identity: { ...base, image }, minReady: 1, maxReady: 1 },
+        }),
+      );
+      expect(response.status).toBe(status);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- consume each validation response in sequence.
+      expect(await response.json()).toMatchObject({
+        error,
+      });
+    }
+
+    const lease = typedGCPReadyPoolCohortLease({ id: "cbx_000000000095" });
+    storage.seed(`lease:${lease.id}`, lease);
+    const identity = identities[0]!;
+    const registered = await fleet.fetch(
+      request("POST", "/v1/ready-pools/gcp-mismatch/register-identity", {
+        headers,
+        body: { leaseID: lease.id, ...metadata, identity },
+      }),
+    );
+    expect(registered.status).toBe(200);
+    storage.seed(`lease:${lease.id}`, {
+      ...lease,
+      image: {
+        ...lease.image!,
+        sourceID: "projects/other-project/global/images/runner-v3",
+      },
+    });
+    const mismatch = await fleet.fetch(
+      request("POST", "/v1/ready-pools/gcp-mismatch/borrow-identity", {
+        headers,
+        body: { ...metadata, identity },
+      }),
+    );
+    expect(mismatch.status).toBe(409);
+    expect(
+      storage.value<ReadyPoolEntry>(`typed-ready-pool-v1:gcp-mismatch:${lease.id}`)?.state,
+    ).toBe("draining");
+  });
+
   it("persists canonical architecture on newly provisioned leases", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage, { hetzner: fakeProvider() });
@@ -16235,17 +16674,30 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
-  it.each([undefined, "aws"] as const)(
-    "migrates typed desired capacity with a stored %s provider without double-filling",
-    async (provider) => {
+  it.each([
+    { identityProvider: "aws" as const, storedProvider: undefined },
+    { identityProvider: "aws" as const, storedProvider: "aws" },
+    { identityProvider: "gcp" as const, storedProvider: undefined },
+    { identityProvider: "gcp" as const, storedProvider: "gcp" },
+  ])(
+    "migrates $identityProvider typed desired capacity with stored provider $storedProvider without double-filling",
+    async ({ identityProvider, storedProvider }) => {
       const storage = new MemoryStorage();
-      const fleet = testFleet(storage);
+      const fleet = testFleet(
+        storage,
+        identityProvider === "gcp"
+          ? { gcp: fakeProvider(undefined, { provider: "gcp" }) }
+          : undefined,
+      );
       const headers = typedReadyPoolHeaders();
       const owner = headers["x-crabbox-owner"];
       const org = orgKeyForLabel(headers["x-crabbox-org"]);
       const key = "builders";
       const compatibilityKey = "linux-16-vcpu";
-      const identity = await typedReadyPoolIdentity();
+      const identity =
+        identityProvider === "gcp"
+          ? await typedGCPReadyPoolIdentity()
+          : await typedReadyPoolIdentity();
       const metadata = typedReadyPoolMetadata();
       const legacyKey = `typed-ready-pool-v1-desired:${[
         org,
@@ -16271,7 +16723,7 @@ describe("fleet lease identity and idle", () => {
         criteria: {
           ...metadata,
           compatibilityKey,
-          ...(provider === undefined ? {} : { provider }),
+          ...(storedProvider === undefined ? {} : { provider: storedProvider }),
           identity,
         },
         minReady: 1,
@@ -16319,7 +16771,7 @@ describe("fleet lease identity and idle", () => {
         storage.value<{ criteria: { provider?: string } }>(
           `typed-ready-pool-v1-fill-claim:${claimToken}`,
         )?.criteria.provider,
-      ).toBe(provider);
+      ).toBe(storedProvider);
 
       const v2Key = await readyPoolDesiredCapacityKeyV2({
         org,
@@ -16343,7 +16795,8 @@ describe("fleet lease identity and idle", () => {
         capped: true,
       });
       expect((await storage.list({ prefix: "typed-ready-pool-v1-fill-claim:" })).size).toBe(1);
-      const lease = typedReadyPoolLease();
+      const lease =
+        identityProvider === "gcp" ? typedGCPReadyPoolCohortLease() : typedReadyPoolLease();
       storage.seed(`lease:${lease.id}`, lease);
       const registered = await fleet.fetch(
         request("POST", `/v1/ready-pools/${key}/register-identity`, {
@@ -16614,57 +17067,69 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
-  it("keeps new typed Durable Object state invisible to shipped legacy enumeration after rollback", async () => {
-    const storage = new MemoryStorage();
-    const newWorker = testFleet(storage);
-    const headers = typedReadyPoolHeaders();
-    const lease = typedReadyPoolLease();
-    const metadata = typedReadyPoolMetadata();
-    const identity = await typedReadyPoolIdentity();
-    storage.seed(`lease:${lease.id}`, lease);
+  it.each(["aws", "gcp"] as const)(
+    "keeps new %s typed Durable Object state invisible to shipped legacy enumeration after rollback",
+    async (identityProvider) => {
+      const storage = new MemoryStorage();
+      const newWorker = testFleet(
+        storage,
+        identityProvider === "gcp"
+          ? { gcp: fakeProvider(undefined, { provider: "gcp" }) }
+          : undefined,
+      );
+      const headers = typedReadyPoolHeaders();
+      const lease =
+        identityProvider === "gcp" ? typedGCPReadyPoolCohortLease() : typedReadyPoolLease();
+      const metadata = typedReadyPoolMetadata();
+      const identity =
+        identityProvider === "gcp"
+          ? await typedGCPReadyPoolIdentity()
+          : await typedReadyPoolIdentity();
+      storage.seed(`lease:${lease.id}`, lease);
 
-    const reconcile = await newWorker.fetch(
-      request("POST", "/v1/ready-pools/builders/reconcile-identity", {
-        headers,
-        body: { ...metadata, identity, minReady: 2, maxReady: 2, claim: true },
-      }),
-    );
-    expect(reconcile.status).toBe(200);
-    const claim = (await reconcile.json()) as { claim: { token: string } };
-    const register = await newWorker.fetch(
-      request("POST", "/v1/ready-pools/builders/register-identity", {
-        headers,
-        body: { leaseID: lease.id, ...metadata, identity },
-      }),
-    );
-    expect(register.status).toBe(200);
+      const reconcile = await newWorker.fetch(
+        request("POST", "/v1/ready-pools/builders/reconcile-identity", {
+          headers,
+          body: { ...metadata, identity, minReady: 2, maxReady: 2, claim: true },
+        }),
+      );
+      expect(reconcile.status).toBe(200);
+      const claim = (await reconcile.json()) as { claim: { token: string } };
+      const register = await newWorker.fetch(
+        request("POST", "/v1/ready-pools/builders/register-identity", {
+          headers,
+          body: { leaseID: lease.id, ...metadata, identity },
+        }),
+      );
+      expect(register.status).toBe(200);
 
-    const shippedLegacyEntries = await storage.list<ReadyPoolEntry>({ prefix: "ready-pool:" });
-    const shippedLegacyClaims = await storage.list({ prefix: "ready-pool-fill-claim:" });
-    const shippedLegacyDesired = await storage.list({ prefix: "ready-pool-desired:" });
-    expect([...shippedLegacyEntries.values()]).toEqual([]);
-    expect([...shippedLegacyClaims.values()]).toEqual([]);
-    expect([...shippedLegacyDesired.values()]).toEqual([]);
-    expect(storage.value(`typed-ready-pool-v1:builders:${lease.id}`)).toBeTruthy();
-    expect(storage.value(`typed-ready-pool-v1-fill-claim:${claim.claim.token}`)).toBeTruthy();
-    expect((await storage.list({ prefix: "typed-ready-pool-v2-desired:" })).size).toBe(1);
+      const shippedLegacyEntries = await storage.list<ReadyPoolEntry>({ prefix: "ready-pool:" });
+      const shippedLegacyClaims = await storage.list({ prefix: "ready-pool-fill-claim:" });
+      const shippedLegacyDesired = await storage.list({ prefix: "ready-pool-desired:" });
+      expect([...shippedLegacyEntries.values()]).toEqual([]);
+      expect([...shippedLegacyClaims.values()]).toEqual([]);
+      expect([...shippedLegacyDesired.values()]).toEqual([]);
+      expect(storage.value(`typed-ready-pool-v1:builders:${lease.id}`)).toBeTruthy();
+      expect(storage.value(`typed-ready-pool-v1-fill-claim:${claim.claim.token}`)).toBeTruthy();
+      expect((await storage.list({ prefix: "typed-ready-pool-v2-desired:" })).size).toBe(1);
 
-    const rolledBackWorker = testFleet(storage);
-    const legacyStatus = await rolledBackWorker.fetch(
-      request("GET", "/v1/ready-pools/builders", { headers }),
-    );
-    expect(await legacyStatus.json()).toEqual({ pool: [] });
-    const legacyBorrow = await rolledBackWorker.fetch(
-      request("POST", "/v1/ready-pools/builders/borrow", {
-        headers,
-        body: metadata,
-      }),
-    );
-    expect(legacyBorrow.status).toBe(409);
-    expect(storage.value<ReadyPoolEntry>(`typed-ready-pool-v1:builders:${lease.id}`)?.state).toBe(
-      "ready",
-    );
-  });
+      const rolledBackWorker = testFleet(storage);
+      const legacyStatus = await rolledBackWorker.fetch(
+        request("GET", "/v1/ready-pools/builders", { headers }),
+      );
+      expect(await legacyStatus.json()).toEqual({ pool: [] });
+      const legacyBorrow = await rolledBackWorker.fetch(
+        request("POST", "/v1/ready-pools/builders/borrow", {
+          headers,
+          body: metadata,
+        }),
+      );
+      expect(legacyBorrow.status).toBe(409);
+      expect(storage.value<ReadyPoolEntry>(`typed-ready-pool-v1:builders:${lease.id}`)?.state).toBe(
+        "ready",
+      );
+    },
+  );
 
   it("shares exact UTF-8 length-framed seed vectors with the Go client", async () => {
     const vectors = [
@@ -43130,6 +43595,9 @@ function fakeProvider(
           readyPoolImageIdentity(lease: LeaseRecord) {
             return new GCPProvider({} as Env).readyPoolImageIdentity(lease);
           },
+          supportsReadyPoolImageIdentity(identity: ReadyPoolIdentityV1["image"]) {
+            return new GCPProvider({} as Env).supportsReadyPoolImageIdentity(identity);
+          },
           ownershipLabelValue(value: string) {
             return gcpProviderLabelValue(value);
           },
@@ -43972,6 +44440,14 @@ function typedGCPReadyPoolLease(id = "cbx_000000000098"): LeaseRecord {
   });
   delete lease.image;
   return lease;
+}
+
+function typedGCPReadyPoolCohortLease(overrides: Partial<LeaseRecord> = {}): LeaseRecord {
+  return {
+    ...typedGCPReadyPoolLease(overrides.id),
+    image: typedGCPImage,
+    ...overrides,
+  };
 }
 
 const typedGCPImage: LeaseImageIdentity = {
