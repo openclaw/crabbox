@@ -557,7 +557,7 @@ func TestRunPreservesCommandErrorCause(t *testing.T) {
 			if !errors.As(err, &exitErr) || exitErr.Code != 1 || !strings.HasPrefix(err.Error(), "opencomputer run failed: ") {
 				t.Errorf("Run error=%v, want provider failure with exit code 1", err)
 			}
-			wantStatus, wantKind := core.RunStatusFailed, core.RunErrorCommandExit
+			wantStatus, wantKind := core.RunStatusFailed, core.RunErrorProvider
 			switch cause {
 			case context.Canceled:
 				wantStatus, wantKind = core.RunStatusCanceled, core.RunErrorCanceled
@@ -655,11 +655,9 @@ func TestRunCleanupCannotBlockForever(t *testing.T) {
 	res, err := backend.Run(context.Background(), RunRequest{
 		Repo: Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true,
 	})
-	if err != nil {
-		t.Fatalf("Run err=%v", err)
-	}
-	if res.ExitCode != 0 {
-		t.Fatalf("exit=%d", res.ExitCode)
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 1 || res.ExitCode != 1 || res.ErrorKind != core.RunErrorProvider {
+		t.Fatalf("result=%#v err=%v, want cleanup failure", res, err)
 	}
 	if res.Session == nil || !res.Session.Kept {
 		t.Fatalf("session=%#v, want retained cleanup handle", res.Session)
@@ -670,9 +668,79 @@ func TestRunCleanupCannotBlockForever(t *testing.T) {
 	if f.calls(http.MethodDelete, "/api/sandboxes/") != 1 {
 		t.Fatalf("want 1 kill, got %d", f.calls(http.MethodDelete, "/api/sandboxes/"))
 	}
-	if !strings.Contains(stderr.String(), "context deadline exceeded") {
-		t.Fatalf("stderr=%q, want cleanup deadline warning", stderr.String())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run error=%v, want cleanup deadline cause", err)
 	}
+}
+
+func TestRunLifecycleFinalization(t *testing.T) {
+	for _, tc := range []struct {
+		name                                                         string
+		code                                                         int
+		cleanupFailure, timingFailure, missingCommand, keepOnFailure bool
+		wantCode                                                     int
+		wantKind                                                     core.RunErrorKind
+		wantDeletes                                                  int
+	}{
+		{name: "cleanup after success", cleanupFailure: true, wantCode: 1, wantKind: core.RunErrorProvider, wantDeletes: 1},
+		{name: "cleanup after exit", code: 7, cleanupFailure: true, wantCode: 7, wantKind: core.RunErrorCommandExit, wantDeletes: 1},
+		{name: "timing after exit", code: 7, timingFailure: true, keepOnFailure: true, wantCode: 7, wantKind: core.RunErrorCommandExit},
+		{name: "keep command preparation failure", missingCommand: true, keepOnFailure: true, wantCode: 1, wantKind: core.RunErrorProvider},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeAPI(t)
+			backend := newAPIBackend(t, fake)
+			fake.execReply = []execRunResult{{}, {ExitCode: tc.code}}
+			if tc.cleanupFailure {
+				fake.deleteStatus = http.StatusServiceUnavailable
+			}
+			var stderr bytes.Buffer
+			backend.rt.Stderr = &stderr
+			if tc.timingFailure {
+				backend.rt.Stderr = openComputerTimingFailureWriter{&stderr}
+			}
+			command := []string{"fixture-user"}
+			if tc.missingCommand {
+				command = nil
+			}
+			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "fixture", Root: t.TempDir()}, Command: command, NoSync: true, TimingJSON: true, KeepOnFailure: tc.keepOnFailure})
+			var exitErr ExitError
+			if !errors.As(err, &exitErr) || exitErr.Code != tc.wantCode || result.ExitCode != tc.wantCode || result.ErrorKind != tc.wantKind {
+				t.Errorf("result=%#v err=%v, want code=%d kind=%s", result, err, tc.wantCode, tc.wantKind)
+			}
+			if result.Session == nil || !result.Session.Kept || fake.calls(http.MethodDelete, "/api/sandboxes/") != tc.wantDeletes {
+				t.Fatalf("session=%#v deletes=%d", result.Session, fake.calls(http.MethodDelete, "/api/sandboxes/"))
+			}
+			if !tc.timingFailure {
+				var report core.TimingReport
+				count := 0
+				for _, line := range strings.Split(stderr.String(), "\n") {
+					if strings.HasPrefix(line, "{") {
+						count++
+						if err := json.Unmarshal([]byte(line), &report); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				if count != 1 || report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind || report.TotalMs != result.Total.Milliseconds() {
+					t.Errorf("timing count=%d report=%#v result=%#v", count, report, result)
+				}
+			}
+			fake.deleteStatus = 0
+			if err := backend.Stop(context.Background(), StopRequest{ID: result.LeaseID}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+type openComputerTimingFailureWriter struct{ io.Writer }
+
+func (w openComputerTimingFailureWriter) Write(p []byte) (int, error) {
+	if bytes.HasPrefix(p, []byte("{")) {
+		return 0, errors.New("fixture timing write failed")
+	}
+	return w.Writer.Write(p)
 }
 
 func TestRunClearsClaimWhenAcquiredSandboxAlreadyMissingAtCleanup(t *testing.T) {
