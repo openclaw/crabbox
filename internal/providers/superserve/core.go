@@ -23,7 +23,6 @@ type StatusRequest = core.StatusRequest
 type StatusView = core.StatusView
 type StopRequest = core.StopRequest
 type CleanupRequest = core.CleanupRequest
-type RunSessionHandle = core.RunSessionHandle
 type Server = core.Server
 type Repo = core.Repo
 type LeaseClaim = core.LeaseClaim
@@ -50,16 +49,6 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 
 func writeTimingJSON(w io.Writer, report core.TimingReport) error {
 	return core.WriteTimingJSON(w, report)
-}
-
-func timingReportWithRunResult(report core.TimingReport, result RunResult, err error) core.TimingReport {
-	return core.TimingReportWithRunResult(report, result, err)
-}
-
-func timingReportWithProviderError(report core.TimingReport) core.TimingReport {
-	report.RunStatus = core.RunStatusFailed
-	report.ErrorKind = core.RunErrorProvider
-	return report
 }
 
 func inventoryDoctorResult(provider string, leases int) DoctorResult {
@@ -104,10 +93,6 @@ func shellQuote(value string) string {
 
 func superserveCleanupCommand(leaseID string) string {
 	return "crabbox stop --provider " + providerName + " --id " + shellQuote(leaseID)
-}
-
-func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, slug string, idleTimeout, ttl time.Duration, acquired bool, shouldStop *bool) {
-	core.HandleDelegatedRunFailure(w, req, provider, leaseID, slug, idleTimeout, ttl, acquired, shouldStop)
 }
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {

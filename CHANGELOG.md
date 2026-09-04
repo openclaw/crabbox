@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Report Azure Dynamic Sessions cleanup failures as failed runs, preserve primary Superserve/Azure errors through cleanup and timing output, and keep Superserve rollback bound to the originally created sandbox. [PR 1836](https://github.com/openclaw/crabbox/pull/1836). Thanks @steipete.
 - Reject mismatched E2B and CubeSandbox read/connection identities before adopting a sandbox or using its execution session, sharing exact resource-ID validation while keeping cleanup bound to the original allocation. [PR 1841](https://github.com/openclaw/crabbox/pull/1841). Thanks @steipete.
 
 ## 0.49.1 - 2026-09-04
