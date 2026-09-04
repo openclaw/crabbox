@@ -500,24 +500,7 @@ func (c *azureDynamicSessionsClient) nextURL(next string) (string, error) {
 }
 
 func sameOriginURL(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveURLPort(a) == effectiveURLPort(b)
-}
-
-func effectiveURLPort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+	return shared.SameOrigin(a, b)
 }
 
 func (c *azureDynamicSessionsClient) url(path string, query url.Values) string {

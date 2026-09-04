@@ -19,6 +19,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const defaultEndpoint = "https://api.us.ovhcloud.com/1.0"
@@ -268,24 +269,7 @@ func secureOVHHTTPClient(source *http.Client, trusted *url.URL) *http.Client {
 }
 
 func sameOVHOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveOVHPort(a) == effectiveOVHPort(b)
-}
-
-func effectiveOVHPort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+	return shared.SameOrigin(a, b)
 }
 
 func sanitizeOVHClientError(err error) error {
