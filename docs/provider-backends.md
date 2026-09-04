@@ -415,12 +415,19 @@ core instead.
 for delegated POSIX command adapters. It reuses core shell inference and literal
 argument handling, snapshots the input, and rejects a missing command. The
 result's `Argv` method applies an adapter-supplied shell prefix only when needed;
-an explicitly empty shell source remains valid. Adopters include Cloudflare
-Sandbox, Superserve, Crownest, Vercel Sandbox, Nomad, CodeSandbox, OpenComputer,
-Docker Sandbox, and Agent Sandbox. Pass all three request fields (`Command`,
-`ShellMode`, and `CommandLiteralArgs`) so profile arguments remain literal through
-the transport. Adapters retain their shell choice and execution lifecycle;
-serialize the classified intent without running shell inference again.
+`ShellCommand` renders that execution argv for a string transport. An explicitly
+empty shell source remains valid. Pass all three request fields (`Command`,
+`ShellMode`, and `CommandLiteralArgs`) so profile arguments remain literal.
+Adapters retain their shell choice, working directory, environment transport,
+and execution lifecycle. Serialize the classified intent without running shell
+inference again.
+
+`shared.WrapCommandWithShellEnvProfile` accepts execution argv, not unclassified
+user input. Its fallback quotes every word literally before terminal execution;
+it must not infer operators or assignments again. An exact three-word
+`bash -lc <body>` invocation reuses its body inside the existing profile wrapper,
+preserving the single login-shell boundary used by Modal and Tensorlake. Profile
+sourcing is failure-gated without adding global errexit to user source.
 
 Agent Sandbox and Nomad use `shared.ShellWorkspaceCommand` for their common
 POSIX-stdin wrapper: create and enter the workdir, export validated environment
