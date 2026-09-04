@@ -142,26 +142,31 @@ workers.dev, preview URLs, and cron.
 ## Replay and teardown
 
 Each run has one Durable Object. Before a mutation, it persists the operation ID,
-canonical normalized-request hash, and pending intent. A completed receipt is
-replayed only for the same hash. `RunInstances` receives an authority-derived
-deterministic `ClientToken` derived from the run and operation IDs. Uncertain
-`CreateImage` and `ImportKeyPair` results retain their intents and use bounded
-read reconciliation; they are never blindly reissued. Image reconciliation uses
-authority-injected operation tags. Imported key names are authority-generated;
-ownership is recorded only after ID, public key, and run tags are read back.
+canonical normalized-request hash, and a prepared intent, then marks the intent
+dispatched immediately before the signer call. Prepared intents are deleted
+without recovery; only dispatched or legacy ambiguous intents can be reconciled.
+A completed receipt is replayed only for the same hash. `RunInstances` receives
+an authority-derived deterministic `ClientToken` derived from the run and
+operation IDs. Uncertain `CreateImage` and `ImportKeyPair` results retain their
+intents and use bounded read reconciliation; they are never blindly reissued.
+Image reconciliation uses authority-injected operation tags. Imported key names
+are authority-generated; ownership is recorded only after ID, public key, and
+run tags are read back.
 If bounded reconciliation proves neither success nor a definitive error, the
 intent remains until final inventory and cleanup prove that no run-owned
 resource remains; only then is it retired.
 Finalization never redispatches a pending `RunInstances` request. It performs
 bounded read-only discovery by the authority-injected run and operation tags,
 then cleans any discovered instance; a no-effect launch intent is retired only
-after the same zero-residue proof.
+after the same zero-residue proof. Lost termination responses use bounded
+single-instance reads and require repeated absence or an explicit terminal state
+before the intent and active slot are retired.
 
 The ledger learns only IDs created by, or discovered beneath, the registered
 run. Candidate reads and mutations are restricted to those IDs, except the fixed
 base AMI and security group. Lifecycle deletes remove current ledger ownership
 instead of accumulating stale IDs; terminating instances remain active until a
-read confirms `terminated` or absent. Before and after teardown, bounded
+single-ID read confirms `terminated` or absent. Before and after teardown, bounded
 eventual-consistency inventory scans find resources that appeared after an
 ambiguous response. The authority revalidates the configured STS account before
 every mutation, so credential rotation cannot move a run into another account.

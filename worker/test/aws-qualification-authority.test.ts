@@ -320,7 +320,7 @@ describe("AWS qualification authority", () => {
     expect((await fixture.storage.list({ prefix: "intent:" })).size).toBe(0);
   });
 
-  it("blocks a candidate mutation when account verification crosses expiry", async () => {
+  it("drops an undispatched generic mutation when account verification crosses expiry", async () => {
     vi.useFakeTimers();
     useImmediateTimeouts();
     const now = new Date("2026-09-04T00:00:00Z");
@@ -332,10 +332,48 @@ describe("AWS qualification authority", () => {
     fixture.signer.advanceNextIdentityByMs = 2_000;
 
     await expect(
-      fixture.run.execute(expiring, request("RunInstances", runInstancesParams(), "ec2")),
+      fixture.run.execute(
+        expiring,
+        request(
+          "CreateTags",
+          {
+            "ResourceId.1": "key-owned",
+            "Tag.1.Key": "Name",
+            "Tag.1.Value": "expired-candidate-mutation",
+          },
+          "ec2",
+        ),
+      ),
     ).rejects.toThrow("expired before mutation dispatch");
-    expect(fixture.signer.calls.filter((call) => call.action === "RunInstances")).toHaveLength(0);
+    expect(fixture.signer.calls.filter((call) => call.action === "CreateTags")).toHaveLength(0);
     expect(fixture.signer.calls.some((call) => call.action === "DeleteKeyPair")).toBe(true);
+    expect((await fixture.storage.list({ prefix: "intent:" })).size).toBe(0);
+  });
+
+  it("does not recover a prepared mutation that never reached the signer", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    await importKey(fixture);
+    const prepared = request(
+      "CreateTags",
+      {
+        "ResourceId.1": "key-owned",
+        "Tag.1.Key": "Name",
+        "Tag.1.Value": "never-dispatched",
+      },
+      "ec2",
+    );
+    await fixture.storage.put(`intent:${prepared.opId}`, {
+      phase: "prepared",
+      requestHash: "prepared-request",
+      request: prepared,
+      startedAt: new Date().toISOString(),
+    });
+
+    await expect(fixture.run.finalize(controller)).resolves.toBeDefined();
+    expect(fixture.signer.calls.filter((call) => call.action === "CreateTags")).toHaveLength(0);
+    expect((await fixture.storage.list({ prefix: "intent:" })).size).toBe(0);
   });
 
   it("discovers and cleans a lost-response launch after expiry without redispatch", async () => {
@@ -772,6 +810,88 @@ describe("AWS qualification authority", () => {
     ).resolves.toMatchObject({ status: 200 });
   });
 
+  it("confirms mixed DescribeInstances absence one instance at a time", async () => {
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    await importKey(fixture);
+    await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
+    await fixture.run.execute(
+      identity,
+      request("TerminateInstances", { "InstanceId.1": "i-owned" }, "ec2"),
+    );
+    const ledger = await fixture.storage.get<{
+      instanceIds: string[];
+      retiredInstanceIds: string[];
+      terminatingInstanceIds: string[];
+    }>("ledger");
+    expect(ledger).toBeDefined();
+    ledger!.retiredInstanceIds = ["i-retired"];
+    await fixture.storage.put("ledger", ledger);
+
+    await expect(
+      fixture.run.execute(
+        identity,
+        request(
+          "DescribeInstances",
+          { "InstanceId.1": "i-retired", "InstanceId.2": "i-owned" },
+          "ec2",
+        ),
+      ),
+    ).resolves.toMatchObject({ status: 400 });
+    expect(
+      await fixture.storage.get<{
+        instanceIds: string[];
+        retiredInstanceIds: string[];
+        terminatingInstanceIds: string[];
+      }>("ledger"),
+    ).toMatchObject({
+      instanceIds: ["i-owned"],
+      retiredInstanceIds: ["i-retired"],
+      terminatingInstanceIds: ["i-owned"],
+    });
+    await expect(
+      fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2")),
+    ).rejects.toThrow("one active instance");
+  });
+
+  it("recovers a lost termination only after repeated per-instance absence", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityFixture({
+      loseAfterEffect: "TerminateInstances",
+      terminationDescribeNotFound: true,
+    });
+    await fixture.run.enroll(controller, identity);
+    await importKey(fixture);
+    await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
+
+    await expect(
+      fixture.run.execute(
+        identity,
+        request("TerminateInstances", { "InstanceId.1": "i-owned" }, "ec2"),
+      ),
+    ).rejects.toThrow("lost response");
+    expect(
+      await fixture.storage.get<{ instanceIds: string[]; terminatingInstanceIds: string[] }>(
+        "ledger",
+      ),
+    ).toMatchObject({ instanceIds: ["i-owned"], terminatingInstanceIds: [] });
+
+    await expect(fixture.run.finalize(controller)).resolves.toBeDefined();
+    const terminationCalls = fixture.signer.calls
+      .map((call, index) => ({ ...call, index }))
+      .filter((call) => call.action === "TerminateInstances");
+    const individualConfirmations = fixture.signer.calls
+      .map((call, index) => ({ ...call, index }))
+      .filter(
+        (call) =>
+          call.action === "DescribeInstances" && call.parameters["InstanceId.1"] === "i-owned",
+      );
+    expect(terminationCalls).toHaveLength(2);
+    expect(individualConfirmations.length).toBeGreaterThanOrEqual(2);
+    expect(individualConfirmations[1]!.index).toBeLessThan(terminationCalls[1]!.index);
+    expect((await fixture.storage.list({ prefix: "intent:" })).size).toBe(0);
+  });
+
   it("never adopts or deletes a duplicate foreign physical key", async () => {
     useImmediateTimeouts();
     const fixture = authorityFixture({ duplicateForeignKey: true });
@@ -908,6 +1028,7 @@ function authorityFixture(
     http500AfterEffect?: string;
     loseAfterEffect?: string;
     securityGroupErrorWithId?: boolean;
+    terminationDescribeNotFound?: boolean;
     unknownTaggedInstance?: boolean;
     unknownVisibilityDelay?: number;
   } = {},
@@ -1017,6 +1138,7 @@ class FakeSigner {
   private instanceOp = "";
   private instanceState: "absent" | "running" | "shutting-down" | "terminated" = "absent";
   private terminationDescribeCalls = 0;
+  private terminationMissingCalls = 0;
   private imageActive = false;
   private snapshotActive = false;
   private unknownActive: boolean;
@@ -1033,6 +1155,7 @@ class FakeSigner {
       http500AfterEffect?: string;
       loseAfterEffect?: string;
       securityGroupErrorWithId?: boolean;
+      terminationDescribeNotFound?: boolean;
       unknownTaggedInstance?: boolean;
       unknownVisibilityDelay?: number;
     },
@@ -1121,6 +1244,10 @@ class FakeSigner {
     if (action === "TerminateInstances") {
       if (parameters["InstanceId.1"] === "i-unknown") this.unknownActive = false;
       else this.instanceState = "shutting-down";
+      if (this.options.loseAfterEffect === action && !this.failed) {
+        this.failed = true;
+        throw new Error("lost response");
+      }
       return xml(
         `<TerminateInstancesResponse><instancesSet><item><instanceId>${parameters["InstanceId.1"]}</instanceId><currentState><name>shutting-down</name></currentState></item></instancesSet></TerminateInstancesResponse>`,
       );
@@ -1174,6 +1301,22 @@ class FakeSigner {
       return xml("<DeleteKeyPairResponse />");
     }
     if (action === "DescribeInstances") {
+      const requested = Object.entries(parameters)
+        .filter(([key]) => /^InstanceId\.\d+$/.test(key))
+        .map(([, value]) => String(value));
+      if (requested.includes("i-retired")) {
+        return awsError("InvalidInstanceID.NotFound");
+      }
+      if (
+        this.options.terminationDescribeNotFound &&
+        requested.length === 1 &&
+        requested[0] === "i-owned" &&
+        this.instanceState === "shutting-down"
+      ) {
+        this.terminationMissingCalls += 1;
+        if (this.terminationMissingCalls >= 2) this.instanceState = "absent";
+        return awsError("InvalidInstanceID.NotFound");
+      }
       if (parameters["InstanceId.1"] === "i-owned" && this.instanceDescribeNotFound) {
         if (this.instanceState === "shutting-down") this.instanceState = "absent";
         return awsError("InvalidInstanceID.NotFound");

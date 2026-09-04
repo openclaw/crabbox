@@ -138,6 +138,7 @@ interface AWSQualificationReceipt {
 }
 
 interface AWSQualificationIntent {
+  phase?: "prepared" | "dispatched";
   requestHash: string;
   request: AWSQualificationRequest;
   startedAt: string;
@@ -269,26 +270,27 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       }
       return receipt.response;
     }
-    const priorIntent = await this.ctx.storage.get<AWSQualificationIntent>(
-      `${intentPrefix}${normalizedRequest.opId}`,
-    );
+    const intentKey = `${intentPrefix}${normalizedRequest.opId}`;
+    const priorIntent = await this.ctx.storage.get<AWSQualificationIntent>(intentKey);
     if (priorIntent) {
       if (priorIntent.requestHash !== requestHash) {
         throw new Error("AWS qualification pending opId has a different request");
       }
-      const reconciled =
-        priorIntent.request.action === "CreateImage" ||
-        priorIntent.request.action === "ImportKeyPair"
-          ? await this.reconcileIntentWithBackoff(run, priorIntent, policy)
-          : await this.reconcileIntent(run, priorIntent, policy);
-      if (reconciled) return reconciled;
-      if (
-        priorIntent.request.action === "CreateImage" ||
-        priorIntent.request.action === "ImportKeyPair"
-      ) {
-        throw new Error(
-          `AWS qualification ${priorIntent.request.action} outcome remains unresolved`,
-        );
+      if (priorIntent.phase !== "prepared") {
+        const reconciled =
+          priorIntent.request.action === "CreateImage" ||
+          priorIntent.request.action === "ImportKeyPair"
+            ? await this.reconcileIntentWithBackoff(run, priorIntent, policy)
+            : await this.reconcileIntent(run, priorIntent, policy);
+        if (reconciled) return reconciled;
+        if (
+          priorIntent.request.action === "CreateImage" ||
+          priorIntent.request.action === "ImportKeyPair"
+        ) {
+          throw new Error(
+            `AWS qualification ${priorIntent.request.action} outcome remains unresolved`,
+          );
+        }
       }
     }
 
@@ -314,26 +316,25 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     if (normalizedRequest.service !== "sts") {
       await this.ensureAccount(policy);
     }
-    if (!priorIntent) {
+    let dispatchIntent = priorIntent;
+    if (!dispatchIntent) {
       run.operationCount += 1;
       if (normalizedRequest.action === "RunInstances") ledger.launchCount += 1;
+      dispatchIntent = {
+        phase: "prepared",
+        requestHash,
+        request: normalizedRequest,
+        startedAt: new Date().toISOString(),
+      };
       await this.ctx.storage.put({
         [stateKey]: run,
         [ledgerKey]: ledger,
-        ...(authorized.mutating
-          ? {
-              [`${intentPrefix}${normalizedRequest.opId}`]: {
-                requestHash,
-                request: normalizedRequest,
-                startedAt: new Date().toISOString(),
-              } satisfies AWSQualificationIntent,
-            }
-          : {}),
+        ...(authorized.mutating ? { [intentKey]: dispatchIntent } : {}),
       });
     }
 
     if (authorized.mutating) {
-      await this.requireCandidateMutationActive(run);
+      await this.markCandidateMutationDispatched(run, intentKey, dispatchIntent);
     }
     const response = await this.signer.execute(
       normalizedRequest.service,
@@ -352,7 +353,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       result.status >= 300 &&
       result.body.includes("InvalidInstanceID.NotFound")
     ) {
-      retireAcknowledgedMissingInstances(ledger, authorized.parameters);
+      await this.confirmRequestedInstanceAbsence(policy, ledger, authorized.parameters);
       await this.ctx.storage.put(ledgerKey, ledger);
     }
     if (result.status >= 300 && retireDefinitelyAbsentResource(ledger, normalizedRequest, result)) {
@@ -377,7 +378,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       requestHash,
       response: result,
     } satisfies AWSQualificationReceipt);
-    await this.ctx.storage.delete(`${intentPrefix}${normalizedRequest.opId}`);
+    await this.ctx.storage.delete(intentKey);
     return result;
   }
 
@@ -577,8 +578,22 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     }
   }
 
-  private async requireCandidateMutationActive(run: AWSQualificationRunState): Promise<void> {
+  private async markCandidateMutationDispatched(
+    run: AWSQualificationRunState,
+    intentKey: string,
+    intent: AWSQualificationIntent,
+  ): Promise<void> {
+    await this.requireCandidateMutationActive(run, intentKey);
+    await this.ctx.storage.put(intentKey, { ...intent, phase: "dispatched" });
+    await this.requireCandidateMutationActive(run, intentKey);
+  }
+
+  private async requireCandidateMutationActive(
+    run: AWSQualificationRunState,
+    intentKey: string,
+  ): Promise<void> {
     if (Date.now() < Date.parse(run.identity.expiresAt)) return;
+    await this.ctx.storage.delete(intentKey);
     await this.finalizeSerialized();
     throw new Error("AWS qualification run expired before mutation dispatch");
   }
@@ -718,8 +733,20 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     policy: AWSQualificationPolicy,
     failures: string[],
   ): Promise<void> {
+    if (intent.phase === "prepared") {
+      await this.ctx.storage.delete(key);
+      return;
+    }
     if (intent.request.action === "RunInstances") {
       await this.reconcilePendingLaunchWithBackoff(run, intent, policy);
+      return;
+    }
+    if (intent.request.action === "TerminateInstances") {
+      if (await this.reconcilePendingTerminationWithBackoff(intent, policy)) {
+        await this.ctx.storage.delete(key);
+      } else {
+        failures.push("TerminateInstances reconciliation did not confirm terminal absence");
+      }
       return;
     }
     if (intent.request.action === "CreateImage" || intent.request.action === "ImportKeyPair") {
@@ -950,6 +977,90 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     if (delay === undefined) return false;
     await sleep(delay);
     return await this.reconcilePendingLaunchWithBackoff(run, intent, policy, attempt + 1);
+  }
+
+  private async reconcilePendingTerminationWithBackoff(
+    intent: AWSQualificationIntent,
+    policy: AWSQualificationPolicy,
+    missing = new Set<string>(),
+    attempt = 0,
+  ): Promise<boolean> {
+    const ledger = await this.ledger();
+    const requested = indexedUnknownValues(intent.request.parameters, "InstanceId").filter((id) =>
+      ledger.instanceIds.includes(id),
+    );
+    if (requested.length === 0) return true;
+    await this.reconcilePendingTerminationInstances(policy, ledger, requested, missing);
+    await this.ctx.storage.put(ledgerKey, ledger);
+    if (requested.every((id) => !ledger.instanceIds.includes(id))) return true;
+    const delay = reconciliationBackoffMs[attempt];
+    if (delay === undefined) return false;
+    await sleep(delay);
+    return await this.reconcilePendingTerminationWithBackoff(intent, policy, missing, attempt + 1);
+  }
+
+  private async reconcilePendingTerminationInstances(
+    policy: AWSQualificationPolicy,
+    ledger: AWSQualificationLedger,
+    instanceIds: string[],
+    missing: Set<string>,
+  ): Promise<void> {
+    const instanceId = instanceIds[0];
+    if (!instanceId) return;
+    const result = await this.describeInstance(policy, instanceId);
+    if (isMissingInstance(result)) {
+      if (missing.has(instanceId)) retireInstance(ledger, instanceId);
+      else missing.add(instanceId);
+    } else {
+      missing.delete(instanceId);
+      if (result.status >= 200 && result.status < 300) {
+        updateLedgerFromResponse(ledger, "DescribeInstances", result.body, {
+          "InstanceId.1": instanceId,
+        });
+      }
+    }
+    await this.reconcilePendingTerminationInstances(policy, ledger, instanceIds.slice(1), missing);
+  }
+
+  private async confirmRequestedInstanceAbsence(
+    policy: AWSQualificationPolicy,
+    ledger: AWSQualificationLedger,
+    parameters: Record<string, unknown>,
+  ): Promise<void> {
+    const candidates = indexedUnknownValues(parameters, "InstanceId").filter((id) =>
+      ledger.terminatingInstanceIds.includes(id),
+    );
+    await this.confirmRequestedInstanceAbsenceEntries(policy, ledger, candidates);
+  }
+
+  private async confirmRequestedInstanceAbsenceEntries(
+    policy: AWSQualificationPolicy,
+    ledger: AWSQualificationLedger,
+    instanceIds: string[],
+  ): Promise<void> {
+    const instanceId = instanceIds[0];
+    if (!instanceId) return;
+    const result = await this.describeInstance(policy, instanceId);
+    if (isMissingInstance(result)) {
+      retireInstance(ledger, instanceId);
+    } else if (result.status >= 200 && result.status < 300) {
+      updateLedgerFromResponse(ledger, "DescribeInstances", result.body, {
+        "InstanceId.1": instanceId,
+      });
+    }
+    await this.confirmRequestedInstanceAbsenceEntries(policy, ledger, instanceIds.slice(1));
+  }
+
+  private async describeInstance(
+    policy: AWSQualificationPolicy,
+    instanceId: string,
+  ): Promise<AWSQualificationResponse> {
+    await this.ensureAccount(policy);
+    return await boundedResponse(
+      await this.signer.execute("ec2", "DescribeInstances", policy.region, {
+        "InstanceId.1": instanceId,
+      }),
+    );
   }
 
   private async retireUnresolvedIntents(): Promise<void> {
@@ -1569,11 +1680,7 @@ function updateLedgerFromResponse(
     const requested = indexedUnknownValues(parameters, "InstanceId");
     const terminal = ledger.instanceIds.filter((instanceId) => {
       if (!requested.includes(instanceId)) return false;
-      const state = states.get(instanceId);
-      return (
-        state === "terminated" ||
-        (state === undefined && ledger.terminatingInstanceIds.includes(instanceId))
-      );
+      return states.get(instanceId) === "terminated";
     });
     for (const instanceId of terminal) {
       retireInstance(ledger, instanceId);
@@ -1927,13 +2034,8 @@ function retireInstance(ledger: AWSQualificationLedger, instanceId: string): voi
   ledger.terminatingInstanceIds = ledger.terminatingInstanceIds.filter((id) => id !== instanceId);
 }
 
-function retireAcknowledgedMissingInstances(
-  ledger: AWSQualificationLedger,
-  parameters: Record<string, unknown>,
-): void {
-  for (const instanceId of indexedUnknownValues(parameters, "InstanceId")) {
-    if (ledger.terminatingInstanceIds.includes(instanceId)) retireInstance(ledger, instanceId);
-  }
+function isMissingInstance(result: AWSQualificationResponse): boolean {
+  return result.status >= 300 && result.body.includes("InvalidInstanceID.NotFound");
 }
 
 function retireDefinitelyAbsentResource(
