@@ -168,6 +168,18 @@ func selectCoordinatorLeaseSSHPort(lease CoordinatorLease, cfg Config) (Coordina
 	return lease, nil
 }
 
+func (b *coordinatorLeaseBackend) prepareCoordinatorLeaseAcquisition(lease CoordinatorLease, cfg Config) (LeaseTarget, SSHTarget, error) {
+	resolved, err := b.coordinatorLeaseTargetForConfig(lease, cfg, b.coord)
+	if err != nil {
+		return LeaseTarget{}, SSHTarget{}, err
+	}
+	// Preserve the provider's initial routes separately from workload selection.
+	// Do not fill in omitted advertised ports from local fallback defaults.
+	authorizedPorts := append([]string{lease.SSHPort}, lease.SSHFallbackPorts...)
+	initial := managedWindowsBootstrapTarget(cfg, resolved.SSH, authorizedPorts)
+	return resolved, initial, nil
+}
+
 func (b *coordinatorLeaseBackend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
 	if rebinder, ok := b.direct.(ResolvedLeaseTargetRebinder); ok {
 		return rebinder.RebindResolvedLeaseTarget(target, leaseID)
@@ -272,7 +284,7 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 		}
 		return LeaseTarget{}, err
 	}
-	resolvedLease, err := b.coordinatorLeaseTargetForConfig(lease, cfg, b.coord)
+	resolvedLease, initialTarget, err := b.prepareCoordinatorLeaseAcquisition(lease, cfg)
 	if err != nil {
 		if requestedLeaseID == "" {
 			cleanupLeaseID := blank(lease.ID, leaseID)
@@ -299,15 +311,15 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 	defer stopHeartbeat()
 	stopLeaseWatch := startCoordinatorLeaseWatch(waitCtx, b.coord, leaseID, cancelWait, b.rt.Stderr)
 	defer stopLeaseWatch()
-	bootstrapTarget := bootstrapNetworkTarget(cfg, server, target)
-	if err := bootstrapManagedWindowsDesktop(waitCtx, cfg, &bootstrapTarget, publicKey, b.rt.Stderr); err != nil {
+	target = bootstrapNetworkTarget(cfg, server, target)
+	initialTarget = bootstrapNetworkTarget(cfg, server, initialTarget)
+	if err := bootstrapPreparedManagedWindowsDesktop(waitCtx, cfg, &target, initialTarget, publicKey, b.rt.Stderr); err != nil {
 		if requestedLeaseID == "" {
 			released, releaseErr := releaseCoordinatorLeaseResult(context.Background(), b.coord, leaseID, cfg.Provider)
 			reportCoordinatorAcquisitionRollback(b.rt.Stderr, leaseID, "bootstrap error", released, releaseErr)
 		}
 		return LeaseTarget{}, err
 	}
-	target = bootstrapTarget
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: b.coord}, nil
 }
 
