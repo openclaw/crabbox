@@ -74,55 +74,6 @@ func TestProviderDoesNotReportServerTypeMetadata(t *testing.T) {
 	}
 }
 
-func TestBuildCommandAutoWrapsShellMetacharacters(t *testing.T) {
-	got, err := buildCommand([]string{"pnpm install && pnpm test"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 3 || got[0] != "bash" || got[1] != "-lc" {
-		t.Fatalf("command=%#v want bash -lc wrapping", got)
-	}
-	if got[2] != "pnpm install && pnpm test" {
-		t.Fatalf("script=%q want unquoted shell expression", got[2])
-	}
-}
-
-func TestBuildCommandAutoWrapsLeadingEnvAssignment(t *testing.T) {
-	got, err := buildCommand([]string{"FOO=bar", "pnpm", "test"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 3 || got[0] != "bash" {
-		t.Fatalf("command=%#v want bash wrapping for FOO=bar", got)
-	}
-}
-
-func TestBuildCommandShellMode(t *testing.T) {
-	got, err := buildCommand([]string{"pnpm install && pnpm test"}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(got, []string{"bash", "-lc", "pnpm install && pnpm test"}) {
-		t.Fatalf("command=%#v", got)
-	}
-}
-
-func TestBuildCommandPassThrough(t *testing.T) {
-	got, err := buildCommand([]string{"pnpm", "test"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(got, []string{"pnpm", "test"}) {
-		t.Fatalf("command=%#v", got)
-	}
-}
-
-func TestBuildCommandRejectsEmpty(t *testing.T) {
-	if _, err := buildCommand(nil, false); err == nil {
-		t.Fatalf("expected error for empty command")
-	}
-}
-
 func TestOpenComputerWorkdirRejectsRelative(t *testing.T) {
 	cfg := newTestConfig("")
 	cfg.OpenComputer.Workdir = "relative/path"
@@ -1525,4 +1476,57 @@ func newGitRepo(t *testing.T) string {
 		}
 	}
 	return root
+}
+
+func TestRunCommandIntentReachesNativeRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		command []string
+		literal map[int]bool
+		shell   bool
+		want    []string
+	}{
+		{"empty explicit source", []string{""}, nil, true, []string{"bash", "-lc", ""}},
+		{"ordinary", []string{"printf", "%s", "hello"}, nil, false, []string{"printf", "%s", "hello"}},
+		{"literal separator", []string{"printf", "%s", ";", "touch", "sentinel"}, map[int]bool{2: true}, false, []string{"printf", "%s", ";", "touch", "sentinel"}},
+		{"literal assignment executable", []string{"FOO=x", "argument"}, map[int]bool{0: true}, false, []string{"FOO=x", "argument"}},
+		{"literal singleton", []string{"literal command $(echo x)"}, map[int]bool{0: true}, false, []string{"literal command $(echo x)"}},
+		{"invalid assignment executable", []string{"bad-name=x", "argument"}, nil, false, []string{"bad-name=x", "argument"}},
+		{"mixed operators", []string{"printf", "%s", ";", "&&", "printf", "%s", "done"}, map[int]bool{2: true}, false, []string{"bash", "-lc", "'printf' '%s' ';' && 'printf' '%s' 'done'"}},
+		{"inferred source", []string{"printf one && printf two"}, nil, false, []string{"bash", "-lc", "printf one && printf two"}},
+		{"explicit source", []string{"printf one; exit 7"}, nil, true, []string{"bash", "-lc", "printf one; exit 7"}},
+		{"leading assignment", []string{"GREETING=hello world", "printf", "%s", "$GREETING"}, nil, false, []string{"bash", "-lc", "GREETING='hello world' 'printf' '%s' '$GREETING'"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeAPI(t)
+			backend := newAPIBackend(t, fake)
+			_, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, NoSync: true, Command: tc.command, ShellMode: tc.shell, CommandLiteralArgs: tc.literal})
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := fake.allExecs()
+			if len(calls) != 2 {
+				t.Fatalf("execs=%#v", calls)
+			}
+			got := append([]string{calls[1].req.Cmd}, calls[1].req.Args...)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("native command=%#v want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunMissingCommandRetainsCleanup(t *testing.T) {
+	fake := newFakeAPI(t)
+	backend := newAPIBackend(t, fake)
+	_, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, NoSync: true})
+	if err == nil || err.Error() != "missing command" {
+		t.Fatalf("err=%v", err)
+	}
+	if got := fake.callsExact(http.MethodDelete, "/api/sandboxes/"+fake.sandboxID); got != 1 {
+		t.Fatalf("delete calls=%d", got)
+	}
+	if calls := fake.allExecs(); len(calls) != 1 {
+		t.Fatalf("expected only workspace setup, got %#v", calls)
+	}
 }

@@ -97,18 +97,6 @@ func listLeaseClaims() ([]core.LeaseClaim, error) {
 	return core.ListLeaseClaims()
 }
 
-func shouldUseShell(command []string) bool {
-	return core.ShouldUseShell(command)
-}
-
-func leadingEnvAssignment(command []string) bool {
-	return core.LeadingEnvAssignment(command)
-}
-
-func shellScriptFromArgv(command []string) string {
-	return core.ShellScriptFromArgv(command)
-}
-
 func blank(value, fallback string) string {
 	return core.Blank(value, fallback)
 }

@@ -1155,39 +1155,6 @@ func TestDockerSandboxSmallHelpers(t *testing.T) {
 	}
 }
 
-func TestBuildCommandShellModePreservesShellScript(t *testing.T) {
-	got, err := buildCommand([]string{"echo one && echo two"}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"sh", "-lc", "echo one && echo two"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("command=%#v want %#v", got, want)
-	}
-}
-
-func TestBuildCommandSingleShellStringStaysRaw(t *testing.T) {
-	got, err := buildCommand([]string{"echo one && echo two"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"sh", "-lc", "echo one && echo two"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("command=%#v want %#v", got, want)
-	}
-}
-
-func TestBuildCommandLeadingEnvAssignmentQuotesArgv(t *testing.T) {
-	got, err := buildCommand([]string{"GREETING=hello world", "printf", "%s\n", "$GREETING"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"sh", "-lc", "GREETING='hello world' 'printf' '%s\n' '$GREETING'"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("command=%#v want %#v", got, want)
-	}
-}
-
 func TestSBXErrorFormattingEdges(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	stderr.WriteString("plain failure")
@@ -1661,5 +1628,44 @@ func TestRunKeepOnFailureMarksSessionKept(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease=") {
 		t.Fatalf("stderr missing keep-on-failure hint: %s", stderr.String())
+	}
+}
+
+func TestRunCommandIntentReachesNativeRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		command []string
+		literal map[int]bool
+		shell   bool
+		want    []string
+	}{
+		{"empty explicit source", []string{""}, nil, true, []string{"sh", "-lc", ""}},
+		{"ordinary", []string{"printf", "%s", "hello"}, nil, false, []string{"printf", "%s", "hello"}},
+		{"literal separator", []string{"printf", "%s", ";", "touch", "sentinel"}, map[int]bool{2: true}, false, []string{"printf", "%s", ";", "touch", "sentinel"}},
+		{"literal assignment executable", []string{"FOO=x", "argument"}, map[int]bool{0: true}, false, []string{"FOO=x", "argument"}},
+		{"literal singleton", []string{"literal command $(echo x)"}, map[int]bool{0: true}, false, []string{"literal command $(echo x)"}},
+		{"invalid assignment executable", []string{"bad-name=x", "argument"}, nil, false, []string{"bad-name=x", "argument"}},
+		{"mixed operators", []string{"printf", "%s", ";", "&&", "printf", "%s", "done"}, map[int]bool{2: true}, false, []string{"sh", "-lc", "'printf' '%s' ';' && 'printf' '%s' 'done'"}},
+		{"inferred source", []string{"printf one && printf two"}, nil, false, []string{"sh", "-lc", "printf one && printf two"}},
+		{"explicit source", []string{"printf one; exit 7"}, nil, true, []string{"sh", "-lc", "printf one; exit 7"}},
+		{"leading assignment", []string{"GREETING=hello world", "printf", "%s", "$GREETING"}, nil, false, []string{"sh", "-lc", "GREETING='hello world' 'printf' '%s' '$GREETING'"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			runner := newRunner(nil, nil)
+			backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+			_, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, Command: tc.command, ShellMode: tc.shell, CommandLiteralArgs: tc.literal})
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := findCall(runner, "exec")
+			if call == nil || len(call.Args) < 5 || call.Args[1] != "--workdir" {
+				t.Fatalf("exec=%#v", call)
+			}
+			got := call.Args[4:]
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("native command=%#v want %#v", got, tc.want)
+			}
+		})
 	}
 }
