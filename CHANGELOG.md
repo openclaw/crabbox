@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Preserve literal E2B and CubeSandbox profile arguments through their shared envd command transport, and accept inferred single-string shell programs and explicit empty shell source. Thanks @steipete.
+- Preserve literal E2B and CubeSandbox profile arguments through their shared envd command transport, and accept inferred single-string shell programs and explicit empty shell source. [PR 1837](https://github.com/openclaw/crabbox/pull/1837). Thanks @steipete.
 - Preserve literal Tensorlake and OpenSandbox profile arguments through final execution, including environment-wrapped commands, and fix Tensorlake's inferred single-string shell execution. [PR 1835](https://github.com/openclaw/crabbox/pull/1835). Thanks @steipete.
 - Preserve literal Agent Sandbox profile arguments through pod stdin execution and share checked workspace/environment command wrapping with Nomad. [PR 1831](https://github.com/openclaw/crabbox/pull/1831). Thanks @steipete.
 - Preserve literal SmolVM and Upstash Box profile arguments, accept inferred single-string shell commands, and share source rendering without adding another shell. [PR 1833](https://github.com/openclaw/crabbox/pull/1833). Thanks @steipete.
