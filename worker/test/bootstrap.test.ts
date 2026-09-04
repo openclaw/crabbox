@@ -212,6 +212,7 @@ describe("cloud-init bootstrap", () => {
 
   it("uses retrying package installation in runcmd", () => {
     const got = cloudInit(config);
+    const minimalUpdate = "retry apt-get -o Acquire::Languages=none";
     expect(got).toContain("package_update: false");
     expect(got).toContain("bash -euxo pipefail <<'BOOT'");
     expect(got).toContain('Acquire::Retries "8";');
@@ -225,15 +226,17 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("test -s '/etc/ssl/certs/ca-certificates.crt'");
     expect(got).toContain("crabbox Linux readiness manifest verified; skipping apt bootstrap");
     expect(got).toContain("crabbox legacy image readiness migrated without package-manager work");
-    expect(got).toContain("retry apt-get update");
+    expect(got).toContain(minimalUpdate);
+    expect(got).toContain("-o Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false");
+    expect(got).toContain("-o Acquire::IndexTargets::deb::CNF::DefaultEnabled=false update");
     expect(got).toContain(
       "retry apt-get install -y --no-install-recommends $crabbox_readiness_packages",
     );
     expect(got).toContain(
       "crabbox_readiness_packages='ca-certificates curl git jq openssh-server rsync tmux util-linux'",
     );
-    expect(got.indexOf("systemctl restart ssh")).toBeLessThan(got.indexOf("retry apt-get update"));
-    expect(got.indexOf("retry apt-get update")).toBeLessThan(
+    expect(got.indexOf("systemctl restart ssh")).toBeLessThan(got.indexOf(minimalUpdate));
+    expect(got.indexOf(minimalUpdate)).toBeLessThan(
       got.indexOf("touch /var/lib/crabbox/bootstrapped"),
     );
     expect(got).toContain("curl --version >/dev/null");
