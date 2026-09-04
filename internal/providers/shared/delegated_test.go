@@ -233,6 +233,9 @@ func TestDelegatedSandboxLifecycle(t *testing.T) {
 			if reports != 1 || report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind || report.TotalMs != result.Total.Milliseconds() || report.CommandMs != result.Command.Milliseconds() || report.LeaseID != result.LeaseID || report.Label != "label" {
 				t.Fatalf("timing=%#v result=%#v stderr=%s", report, result, stderr.String())
 			}
+			if report.Workdir != "/workspace/repo" {
+				t.Fatalf("timing workdir=%q", report.Workdir)
+			}
 			if result.Total != clock.current.Sub(time.Unix(0, 0)) {
 				t.Fatalf("finalization missing from total: %v calls=%v", result.Total, calls)
 			}
@@ -377,6 +380,65 @@ func TestDelegatedSandboxCancellationBetweenPhases(t *testing.T) {
 			}
 			if !errors.Is(err, context.Canceled) || result.Status != core.RunStatusCanceled || cleanups != wantCleanups {
 				t.Fatalf("result=%#v err=%v cleanups=%d", result, err, cleanups)
+			}
+		})
+	}
+}
+
+func TestDelegatedSandboxReuseAdmission(t *testing.T) {
+	failure := errors.New("reuse is not ready")
+	for _, stage := range []string{"before admission", "admission error", "admission cancellation", "after admission", "setup error"} {
+		t.Run(stage, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var stderr bytes.Buffer
+			var calls []string
+			result, err := RunDelegatedSandbox(ctx, core.RunRequest{ID: "lease", KeepOnFailure: true, TimingJSON: true}, DelegatedSandboxLifecycle{
+				Provider: "test", Runtime: core.Runtime{Stderr: &stderr},
+				Resolve: func(context.Context) (DelegatedSandbox, error) {
+					if stage == "before admission" {
+						cancel()
+					}
+					return DelegatedSandbox{LeaseID: "lease", Slug: "slug", Unlock: func() { calls = append(calls, "unlock") }}, nil
+				},
+				AdmitReuse: func(context.Context) error {
+					calls = append(calls, "admit")
+					if stage == "admission error" {
+						return failure
+					}
+					if stage == "admission cancellation" {
+						cancel()
+						return ctx.Err()
+					}
+					if stage == "after admission" {
+						cancel()
+					}
+					return nil
+				},
+				Setup:    func(context.Context) error { calls = append(calls, "setup"); return failure },
+				Retained: func(context.Context) error { calls = append(calls, "retained"); return nil },
+				Cleanup:  func(context.Context) error { t.Fatal("reused session must not be deleted"); return nil },
+			})
+			if err == nil || result.Session == nil || !result.Session.Kept || !result.Session.Reused {
+				t.Fatalf("result=%#v session=%#v err=%v", result, result.Session, err)
+			}
+			want := []string{"admit", "unlock"}
+			switch stage {
+			case "before admission":
+				want = []string{"unlock"}
+			case "after admission":
+				want = []string{"admit", "retained", "unlock"}
+			case "setup error":
+				want = []string{"admit", "setup", "retained", "unlock"}
+			}
+			if !slices.Equal(calls, want) {
+				t.Fatalf("calls=%v want=%v", calls, want)
+			}
+			if !slices.Contains(want, "retained") && strings.Contains(stderr.String(), "rerun:") {
+				t.Fatalf("unusable session got a rerun hint: %s", stderr.String())
+			}
+			if strings.Contains(stage, "admission") && stage != "admission error" && !errors.Is(err, context.Canceled) {
+				t.Fatalf("lost cancellation cause: %v", err)
 			}
 		})
 	}

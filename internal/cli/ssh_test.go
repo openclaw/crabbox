@@ -1048,6 +1048,104 @@ func TestStaticLeaseBypassesCoordinatorAndUsesTargetServerType(t *testing.T) {
 	}
 }
 
+func TestCommandIntentArgv(t *testing.T) {
+	tests := []struct {
+		name    string
+		command []string
+		shell   bool
+		literal map[int]bool
+		want    []string
+	}{
+		{"literal argv", []string{"printf", "%s", "a b", ""}, false, nil, []string{"printf", "%s", "a b", ""}},
+		{"single inferred source", []string{"printf 'a b'"}, false, nil, []string{"bash", "-lc", "printf 'a b'"}},
+		{"explicit source", []string{"printf", "'%s'", "'a b'"}, true, nil, []string{"bash", "-lc", "printf '%s' 'a b'"}},
+		{"empty explicit source", []string{""}, true, nil, []string{"bash", "-lc", ""}},
+		{"operators", []string{"echo", "a b", "&&", "echo", "done"}, false, nil, []string{"bash", "-lc", "'echo' 'a b' && 'echo' 'done'"}},
+		{"assignment", []string{"FOO=a b", "printenv", "FOO"}, false, nil, []string{"bash", "-lc", "FOO='a b' 'printenv' 'FOO'"}},
+		{"invalid assignment is executable", []string{"bad-name=x", "arg"}, false, nil, []string{"bad-name=x", "arg"}},
+		{"literal operator", []string{"echo", "&&"}, false, map[int]bool{1: true}, []string{"echo", "&&"}},
+		{"literal single source", []string{"echo ok && false"}, false, map[int]bool{0: true}, []string{"echo ok && false"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			intent, err := ParseCommandIntent(tt.command, tt.shell, tt.literal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := intent.Argv("bash", "-lc"); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("argv=%q want=%q", got, tt.want)
+			}
+			// Neither caller mutations nor a rendered transport may change the intent.
+			tt.command[0] = "changed"
+			prefix := []string{"bash", "-lc", "spare"}[:2]
+			first := intent.Argv(prefix...)
+			first[0] = "changed"
+			if got := intent.Argv("bash", "-lc"); !reflect.DeepEqual(got, tt.want) || prefix[0] != "bash" {
+				t.Fatalf("intent or prefix aliased caller storage: argv=%q prefix=%q", got, prefix)
+			}
+		})
+	}
+	if _, err := ParseCommandIntent(nil, false, nil); err == nil || err.Error() != "missing command" {
+		t.Fatalf("missing command error=%v", err)
+	}
+}
+
+func TestCommandIntentNativeTransport(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX command transport")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash unavailable")
+	}
+	home := t.TempDir()
+	tests := []struct {
+		name    string
+		command []string
+		shell   bool
+		want    string
+		code    int
+	}{
+		{"literal arguments", []string{"printf", "<%s>", "a b", "", "$HOME", "$(printf bad)", "`bad`", "*.go", "a'b"}, false, "<a b><><$HOME><$(printf bad)><`bad`><*.go><a'b>", 0},
+		{"inferred source", []string{"printf '%s' 'raw source'"}, false, "raw source", 0},
+		{"operators", []string{"printf", "%s", "first", "&&", "printf", "%s", "second"}, false, "firstsecond", 0},
+		{"environment", []string{"CBX_NATIVE_VALUE=a b", "printenv", "CBX_NATIVE_VALUE"}, false, "a b\n", 0},
+		{"explicit source", []string{"printf '%s' 'explicit source'"}, true, "explicit source", 0},
+		{"empty source", []string{""}, true, "", 0},
+		{"nonzero exit", []string{"exit 42"}, true, "", 42},
+	}
+	for _, tt := range tests {
+		for _, serialized := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/serialized=%t", tt.name, serialized), func(t *testing.T) {
+				intent, err := ParseCommandIntent(tt.command, tt.shell, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				argv := intent.Argv(bash, "-lc")
+				if serialized {
+					argv = []string{"/bin/sh", "-c", shellScriptFromArgv(argv)}
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+				cmd.Env = []string{"HOME=" + home, "PATH=" + filepath.Dir(bash) + ":/usr/bin:/bin", "BASH_ENV=" + os.DevNull, "ENV=" + os.DevNull}
+				out, err := cmd.CombinedOutput()
+				code := 0
+				if err != nil {
+					var exitErr *exec.ExitError
+					if !errors.As(err, &exitErr) {
+						t.Fatal(err)
+					}
+					code = exitErr.ExitCode()
+				}
+				if string(out) != tt.want || code != tt.code {
+					t.Fatalf("output=%q exit=%d want=%q exit=%d", out, code, tt.want, tt.code)
+				}
+			})
+		}
+	}
+}
+
 func TestShouldUseShellForControlOperators(t *testing.T) {
 	if !shouldUseShell([]string{"pnpm", "install", "&&", "pnpm", "test"}) {
 		t.Fatal("expected shell mode for && token")

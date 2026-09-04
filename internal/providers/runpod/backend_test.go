@@ -47,6 +47,10 @@ func TestRunpodClientRedactsReflectedCredential(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "quota exceeded") {
 		t.Fatalf("Whoami error=%v, want redacted useful provider error", err)
 	}
+	var apiErr *runpodAPIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized || apiErr.Status != "401 Unauthorized" {
+		t.Fatalf("API error classification changed: %v", err)
+	}
 }
 
 func TestRunpodIsRunpodProviderNameAcceptsAliases(t *testing.T) {

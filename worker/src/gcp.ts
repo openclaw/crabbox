@@ -35,6 +35,8 @@ import type {
 const computeBaseURL = "https://compute.googleapis.com/compute/v1";
 const gcpReadyPoolResourcePattern =
   /^(?:https:\/\/(?:compute|www)\.googleapis\.com\/compute\/v1\/)?projects\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\/global\/(images|snapshots)\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)$/;
+const gcpReadyPoolScopePattern =
+  /^projects\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\/global\/(?:images|snapshots)$/;
 const gcpObservedDiskPattern =
   /^(?:https:\/\/(?:compute|www)\.googleapis\.com\/compute\/v1\/)?projects\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\/zones\/([a-z0-9-]+)\/disks\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)$/;
 const gcpObservedInstancePattern =
@@ -70,6 +72,10 @@ export function gcpReadyPoolImageScope(
 ): string | undefined {
   const match = gcpReadyPoolSourceMatch(sourceID, kind);
   return match ? `projects/${match[1]}/global/${match[2]}` : undefined;
+}
+
+export function gcpReadyPoolImageScopeSupported(scope: string): boolean {
+  return gcpReadyPoolScopePattern.test(scope);
 }
 
 class GCPMetadataTokenRequestError extends Error {}
@@ -1694,8 +1700,14 @@ function gcpReadyPoolSourceMatch(
   source: string | undefined,
   kind: string | undefined,
 ): RegExpExecArray | undefined {
-  if (!source || (kind !== "gcp-image" && kind !== "gcp-disk-snapshot")) return undefined;
-  const match = gcpReadyPoolResourcePattern.exec(source.trim());
+  if (
+    !source ||
+    source !== source.trim() ||
+    (kind !== "gcp-image" && kind !== "gcp-disk-snapshot")
+  ) {
+    return undefined;
+  }
+  const match = gcpReadyPoolResourcePattern.exec(source);
   if (
     !match?.[1] ||
     !match[2] ||

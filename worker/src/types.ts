@@ -425,6 +425,25 @@ export interface RunTelemetrySummary {
   samples?: LeaseTelemetry[];
 }
 
+export interface HetznerCleanupEvidence {
+  version: 1;
+  provider: "hetzner";
+  leaseID: string;
+  serverID: number;
+  dispatchStartedAt?: string;
+  deleteNotFoundAt?: string;
+  action?: { id: number; status: "running" | "success" | "error" };
+  confirmation?: {
+    method:
+      | "delete-action-success-and-server-absent"
+      | "already-absent"
+      | "delete-not-found-and-server-absent";
+    at: string;
+  };
+}
+
+export type ProviderCleanupEvidence = HetznerCleanupEvidence;
+
 export interface LeaseRecord {
   id: string;
   slug?: string;
@@ -506,6 +525,7 @@ export interface LeaseRecord {
   telemetry?: LeaseTelemetry;
   telemetryHistory?: LeaseTelemetry[];
   cleanupAttempts?: number;
+  providerCleanup?: ProviderCleanupEvidence;
   cleanupError?: string;
   cleanupFailedAt?: string;
   cleanupRetryAt?: string;

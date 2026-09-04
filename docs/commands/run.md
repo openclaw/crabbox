@@ -142,9 +142,11 @@ Pooled runs also reject `--keep` and
 
 Use `--pool-identity-file` to explicitly opt into a provider-scoped,
 image-pinned typed pool. Create the file with `crabbox pool identity <key> --id
-<lease-id> --cache-compatibility <value>`. The repository seed, immutable AWS
-AMI and region, canonical architecture, and operator-declared cache value must
-match exactly; unexpected identity or lease evidence drains the entry. Older
+<lease-id> --cache-compatibility <value>`. The repository seed, provider-owned
+immutable source, canonical architecture, and operator-declared cache value
+must match exactly. AWS binds the AMI and region; GCP binds the numeric image or
+disk-snapshot ID and source project/collection while allowing the launch zone
+to vary. Unexpected identity or lease evidence drains the entry. Older
 coordinators fail explicitly instead of borrowing from a legacy pool. Existing
 `--pool` calls without this flag retain their provider-neutral legacy behavior.
 

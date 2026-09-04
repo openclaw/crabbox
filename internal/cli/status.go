@@ -270,32 +270,33 @@ type StatusView struct {
 	// ProviderResourceID optionally exposes an immutable provider resource ID.
 	// ServerID keeps each provider's existing identity semantics; for Islo it
 	// is the sandbox name rather than the immutable sandbox ID.
-	ProviderResourceID   string             `json:"providerResourceId,omitempty"`
-	Host                 string             `json:"host"`
-	Pond                 string             `json:"pond,omitempty"`
-	Network              NetworkMode        `json:"network"`
-	Tailscale            *TailscaleMetadata `json:"tailscale,omitempty"`
-	SSHHost              string             `json:"sshHost"`
-	SSHHostKey           string             `json:"sshHostKey,omitempty"`
-	SSHUser              string             `json:"sshUser"`
-	SSHPort              string             `json:"sshPort"`
-	SSHFallbackPorts     []string           `json:"sshFallbackPorts,omitempty"`
-	SSHKey               string             `json:"sshKey"`
-	LastTouchedAt        string             `json:"lastTouchedAt,omitempty"`
-	IdleFor              string             `json:"idleFor,omitempty"`
-	IdleTimeout          string             `json:"idleTimeout,omitempty"`
-	ExpiresAt            string             `json:"expiresAt,omitempty"`
-	CleanupStatus        string             `json:"cleanupStatus,omitempty"`
-	CleanupStartedAt     string             `json:"cleanupStartedAt,omitempty"`
-	CleanupError         string             `json:"cleanupError,omitempty"`
-	CleanupRetryAt       string             `json:"cleanupRetryAt,omitempty"`
-	ReleaseDeletesServer *bool              `json:"releaseDeletesServer,omitempty"`
-	Labels               map[string]string  `json:"labels,omitempty"`
-	ProviderMetadata     map[string]any     `json:"providerMetadata,omitempty"`
-	HasHost              bool               `json:"hasHost"`
-	Ready                bool               `json:"ready"`
-	Telemetry            *LeaseTelemetry    `json:"telemetry,omitempty"`
-	TelemetryHistory     []*LeaseTelemetry  `json:"telemetryHistory,omitempty"`
+	ProviderResourceID   string                   `json:"providerResourceId,omitempty"`
+	Host                 string                   `json:"host"`
+	Pond                 string                   `json:"pond,omitempty"`
+	Network              NetworkMode              `json:"network"`
+	Tailscale            *TailscaleMetadata       `json:"tailscale,omitempty"`
+	SSHHost              string                   `json:"sshHost"`
+	SSHHostKey           string                   `json:"sshHostKey,omitempty"`
+	SSHUser              string                   `json:"sshUser"`
+	SSHPort              string                   `json:"sshPort"`
+	SSHFallbackPorts     []string                 `json:"sshFallbackPorts,omitempty"`
+	SSHKey               string                   `json:"sshKey"`
+	LastTouchedAt        string                   `json:"lastTouchedAt,omitempty"`
+	IdleFor              string                   `json:"idleFor,omitempty"`
+	IdleTimeout          string                   `json:"idleTimeout,omitempty"`
+	ExpiresAt            string                   `json:"expiresAt,omitempty"`
+	CleanupStatus        string                   `json:"cleanupStatus,omitempty"`
+	ProviderCleanup      *ProviderCleanupEvidence `json:"providerCleanup,omitempty"`
+	CleanupStartedAt     string                   `json:"cleanupStartedAt,omitempty"`
+	CleanupError         string                   `json:"cleanupError,omitempty"`
+	CleanupRetryAt       string                   `json:"cleanupRetryAt,omitempty"`
+	ReleaseDeletesServer *bool                    `json:"releaseDeletesServer,omitempty"`
+	Labels               map[string]string        `json:"labels,omitempty"`
+	ProviderMetadata     map[string]any           `json:"providerMetadata,omitempty"`
+	HasHost              bool                     `json:"hasHost"`
+	Ready                bool                     `json:"ready"`
+	Telemetry            *LeaseTelemetry          `json:"telemetry,omitempty"`
+	TelemetryHistory     []*LeaseTelemetry        `json:"telemetryHistory,omitempty"`
 }
 
 type statusView = StatusView

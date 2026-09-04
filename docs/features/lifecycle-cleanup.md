@@ -204,6 +204,65 @@ charged until exact lifecycle reconciliation. Each checkpoint retains only its
 256 most recent ordered audit events, and eventual tombstone pruning removes
 that entire retained suffix. Direct, archive, recipe, and historical checkpoints
 remain operator-managed.
+### Brokered Hetzner cleanup confirmation
+
+The coordinator records version-1 `providerCleanup` evidence on the existing
+lease before dispatching an exact-server DELETE. It saves the validated delete
+action ID before waiting on `/servers/actions/{id}`. Completion requires action
+success followed by exact `/servers/{id}` GET absence. Hetzner can remove the
+server from account visibility while deletion is still running; GET 404 alone
+does not complete a known action. Observation is bounded to 60 seconds per
+attempt, with each request and body read bounded to 10 seconds or the remaining
+observation budget.
+
+An exact DELETE rejection with HTTP 400, 401, 403, 405, 409, 410, 412, 423, or
+429 retires only that rejected attempt's dispatch marker under the cleanup
+owner fence. These statuses describe rejected requests in Hetzner's
+[error contract](https://docs.hetzner.cloud/cloud.spec.json). The rejection
+remains a cleanup failure and uses the existing broker backoff. The next attempt
+freshly reads the exact server and revalidates ownership, then durably records
+a new dispatch before DELETE. A failed rejection write retains uncertainty.
+HTTP 408, 422 (which also covers service errors), 5xx, timeouts, malformed
+actions, and lost acknowledgements never authorize retiring that marker.
+
+An exact server already missing before any recorded dispatch has the distinct
+`already-absent` basis. DELETE 404 requires a subsequent exact GET 404 and has
+its own basis. Neither can replace an unresolved action or lost acknowledgement.
+Action errors, malformed or missing actions, uncertain dispatches, conflicting
+identity or ownership, and exhausted waits retain cleanup debt. An unknown
+numeric server identity is unresolved unless the recorded failure proves that
+only a newly created owned SSH key needs cleanup; an empty inventory is not
+deletion proof.
+Modern ownership requires canonical lease, provider, slug, and owner labels.
+The supported pre-slug contract still requires the canonical server name and
+legacy labels, and rejects an explicitly conflicting owner label.
+
+Evidence writes and final publication are fenced to the same cleanup claim,
+lease incarnation, and resource identity. Retries resume recorded actions without
+another DELETE. For provisioned servers, owned SSH-key cleanup follows durable
+server confirmation; key failures retain that evidence for retry, and shared
+keys remain retained.
+Definite key-only failure records retain `provisioningResourceMayExist=false`
+and the exact owned-created key ID, with no server identity, server cleanup
+journal, or outstanding provisioning request. Cleanup rechecks the current
+claim before deleting that key and creates no server-absence receipt. Explicit
+no-delete retention preserves this evidence for later deletion. Historical
+records that lost the definite no-resource flag require resolution; absence of
+request markers alone cannot authorize the key-only path.
+Ordinary authenticated GET and `crabbox inspect --json` expose the nonsecret
+journal. Its confirmation timestamp records the provider API contract observed
+then, not physical hardware inspection or a fresh probe. `cleanupStatus` still
+governs finality. Historical released leases without evidence are not backfilled.
+
+For recovery, the ordinary owner should inspect the exact lease with
+`crabbox inspect --id <lease-id> --json` and retain local credentials and recorded
+evidence. Historical host fields, `released` state, or missing flags do not prove
+absence. A recorded action with a known ID resumes through the same lease owner
+and broker cleanup path. Missing no-resource evidence or dispatch acknowledgement
+authority requires operator reconciliation of the exact resource in its original
+provider project. Never manually clear cleanup flags or fabricate a receipt.
+There is no supported automatic historical backfill or population sweep.
+
 ### Managed Daytona cleanup
 
 New brokered Daytona sandboxes receive native wall-clock TTL in the original

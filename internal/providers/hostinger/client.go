@@ -211,23 +211,9 @@ func (c *hostingerClient) do(ctx context.Context, method, path string, body any,
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	data, readErr := io.ReadAll(io.LimitReader(resp.Body, hostingerMaxResponseBytes+1))
-	if readErr != nil {
-		return readErr
-	}
-	if len(data) > hostingerMaxResponseBytes {
-		return fmt.Errorf("hostinger response exceeds %d bytes", hostingerMaxResponseBytes)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &hostingerAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: redactToken(c.token, strings.TrimSpace(string(data)))}
-	}
-	if out != nil && len(strings.TrimSpace(string(data))) > 0 {
-		if err := json.Unmarshal(data, out); err != nil {
-			return fmt.Errorf("decode hostinger data: %w", err)
-		}
-	}
-	return nil
+	return shared.DecodeBoundedJSONResponse(resp, hostingerMaxResponseBytes, out, providerName, func(code int, status, body string) error {
+		return &hostingerAPIError{StatusCode: code, Status: status, Body: redactToken(c.token, body)}
+	})
 }
 
 func collection[T any](data []T) []T {

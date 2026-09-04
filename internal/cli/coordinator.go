@@ -70,6 +70,7 @@ type CoordinatorLease struct {
 	Code                  bool                           `json:"code,omitempty"`
 	Tailscale             *TailscaleMetadata             `json:"tailscale,omitempty"`
 	Region                string                         `json:"region,omitempty"`
+	ProviderProject       string                         `json:"providerProject,omitempty"`
 	Owner                 string                         `json:"owner"`
 	Org                   string                         `json:"org"`
 	Share                 *CoordinatorShare              `json:"share,omitempty"`
@@ -107,12 +108,35 @@ type CoordinatorLease struct {
 	TelemetryHistory      []*LeaseTelemetry              `json:"telemetryHistory,omitempty"`
 	CleanupAttempts       int                            `json:"cleanupAttempts,omitempty"`
 	CleanupStatus         string                         `json:"cleanupStatus,omitempty"`
+	ProviderCleanup       *ProviderCleanupEvidence       `json:"providerCleanup,omitempty"`
 	CleanupStartedAt      string                         `json:"cleanupStartedAt,omitempty"`
 	CleanupError          string                         `json:"cleanupError,omitempty"`
 	CleanupRetryAt        string                         `json:"cleanupRetryAt,omitempty"`
 	ReleaseDeletesServer  *bool                          `json:"releaseDeletesServer,omitempty"`
 	FailureError          string                         `json:"failureError,omitempty"`
 	ProviderMetadata      map[string]any                 `json:"providerMetadata,omitempty"`
+}
+
+// ProviderCleanupEvidence is recorded broker evidence, not a live provider observation.
+type ProviderCleanupEvidence struct {
+	Version           int                          `json:"version"`
+	Provider          string                       `json:"provider"`
+	LeaseID           string                       `json:"leaseID"`
+	ServerID          int64                        `json:"serverID"`
+	DispatchStartedAt string                       `json:"dispatchStartedAt,omitempty"`
+	DeleteNotFoundAt  string                       `json:"deleteNotFoundAt,omitempty"`
+	Action            *ProviderCleanupAction       `json:"action,omitempty"`
+	Confirmation      *ProviderCleanupConfirmation `json:"confirmation,omitempty"`
+}
+
+type ProviderCleanupAction struct {
+	ID     int64  `json:"id"`
+	Status string `json:"status"`
+}
+
+type ProviderCleanupConfirmation struct {
+	Method string `json:"method"`
+	At     string `json:"at"`
 }
 
 type CoordinatorCanceledCreateAttestation struct {

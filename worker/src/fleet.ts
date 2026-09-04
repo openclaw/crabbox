@@ -159,6 +159,7 @@ import {
   gcpMachineImageNotFound,
   gcpProviderLabelValue,
   gcpReadyPoolImageScope,
+  gcpReadyPoolImageScopeSupported,
   gcpSnapshotNotFound,
 } from "./gcp";
 import {
@@ -173,8 +174,12 @@ import {
   hetznerProvisioningFailureMayHaveResource,
   hetznerProvisioningFailureRetryable,
   hetznerProvisioningResourceID,
-  hetznerServerOwnedByLease,
 } from "./hetzner";
+import {
+  confirmHetznerServerCleanup,
+  hetznerDefiniteKeyOnlyFailure,
+  hetznerKeyOnlyCleanupID,
+} from "./hetzner-cleanup";
 import {
   bearerToken,
   errorMessage,
@@ -351,8 +356,8 @@ import type {
   ExternalRunnerRecord,
   ExternalRunnerSyncRequest,
   FixedLeaseCreateIntent,
-  HetznerServer,
   LeaseRecord,
+  ProviderCleanupEvidence,
   LeaseRegistrationRequest,
   LeaseRequest,
   LeaseShare,
@@ -16617,6 +16622,7 @@ export class FleetCoordinator {
             if (
               !current ||
               current.cleanupStartedAt !== claim ||
+              !sameLeaseCleanupClaim(current, lease) ||
               (await provisioningOwnsLease(this.state.storage, lease.id))
             ) {
               return;
@@ -18689,7 +18695,41 @@ export class FleetCoordinator {
       publication?.server.cloudID === lease.cloudID
         ? publication.server.resourceIdentity
         : undefined;
-    const context = resourceIdentity ? { resourceIdentity } : undefined;
+    const currentCleanupLease = async () => {
+      const current = await this.getLease(lease.id);
+      if (
+        !current ||
+        !sameLeaseCleanupClaim(current, lease) ||
+        cleanupClaimDeadline(current) <= Date.now() ||
+        (await provisioningOwnsLease(this.state.storage, lease.id))
+      ) {
+        throw new Error("lease cleanup owner or resource identity changed");
+      }
+      return current;
+    };
+    let expectedCleanupEvidence = structuredClone(lease.providerCleanup);
+    const context: ProviderReleaseContext = {
+      ...(resourceIdentity ? { resourceIdentity } : {}),
+      assertCleanupOwner: async () => {
+        await this.state.runExclusive(async () => {
+          const current = await currentCleanupLease();
+          if (
+            canonicalJSONStringify(current.providerCleanup) !==
+            canonicalJSONStringify(expectedCleanupEvidence)
+          ) {
+            throw new Error("lease cleanup evidence changed");
+          }
+        });
+      },
+      saveCleanupEvidence: async (evidence) => {
+        await this.state.runExclusive(async () => {
+          const current = await currentCleanupLease();
+          const nextEvidence = structuredClone(evidence);
+          await this.putLease({ ...current, providerCleanup: nextEvidence });
+          expectedCleanupEvidence = nextEvidence;
+        });
+      },
+    };
     await this.withLegacyProviderMutation(lease.id, async () => {
       let releaseLease = lease;
       if (
@@ -18894,7 +18934,7 @@ export class FleetCoordinator {
           await this.scheduleAlarm();
           return { suppressed: true as const, lease: cleanupLease };
         }
-        if (latest?.cleanupStartedAt !== preparation.cleanupStartedAt) {
+        if (!latest || !sameLeaseCleanupClaim(latest, preparation.lease)) {
           return { suppressed: true as const, lease: latest ?? cleanupLease };
         }
         const failedAt = new Date().toISOString();
@@ -18928,7 +18968,7 @@ export class FleetCoordinator {
     }
     const latest = await this.state.runExclusive(async () => {
       const current = await this.getLease(record.id);
-      if (current?.cleanupStartedAt === preparation.cleanupStartedAt) {
+      if (current && sameLeaseCleanupClaim(current, preparation.lease)) {
         if (preparation.previous) {
           const completed = applyLeaseRecordChanges(
             current,
@@ -19182,6 +19222,7 @@ export class FleetCoordinator {
         if (
           !current ||
           current.cleanupStartedAt !== preparation.claim ||
+          !sameLeaseCleanupClaim(current, preparation.lease) ||
           (await provisioningOwnsLease(this.state.storage, preparation.lease.id))
         ) {
           return;
@@ -19203,6 +19244,7 @@ export class FleetCoordinator {
       if (
         !current ||
         current.cleanupStartedAt !== preparation.claim ||
+        !sameLeaseCleanupClaim(current, preparation.lease) ||
         (await provisioningOwnsLease(this.state.storage, preparation.lease.id))
       ) {
         return current ?? preparation.lease;
@@ -20715,6 +20757,33 @@ function acceptedProvisioningLease(lease: LeaseRecord): Response {
         "preference-applied": "respond-async",
       },
     },
+  );
+}
+
+function sameLeaseCleanupClaim(current: LeaseRecord, claimed: LeaseRecord): boolean {
+  return (
+    !!claimed.cleanupStartedAt &&
+    current.cleanupStartedAt === claimed.cleanupStartedAt &&
+    sameLeaseReleaseIdentity(current, claimed) &&
+    current.provider === claimed.provider &&
+    current.cloudID === claimed.cloudID &&
+    current.serverID === claimed.serverID &&
+    current.providerScope === claimed.providerScope &&
+    current.providerProject === claimed.providerProject &&
+    current.region === claimed.region &&
+    current.slug === claimed.slug &&
+    current.serverName === claimed.serverName &&
+    current.providerOwner === claimed.providerOwner &&
+    current.providerKey === claimed.providerKey &&
+    current.providerKeyCleanupID === claimed.providerKeyCleanupID &&
+    current.providerKeyCleanupOwned === claimed.providerKeyCleanupOwned &&
+    current.providerKeyCleanupPending === claimed.providerKeyCleanupPending &&
+    current.provisioningResourceMayExist === claimed.provisioningResourceMayExist &&
+    current.provisioningRequestStartedAt === claimed.provisioningRequestStartedAt &&
+    current.provisioningRequestSettledAt === claimed.provisioningRequestSettledAt &&
+    current.provisioningRecoveryObservedAt === claimed.provisioningRecoveryObservedAt &&
+    current.provisioningRecoveryMissingSince === claimed.provisioningRecoveryMissingSince &&
+    current.provisioningCoordinatorVersion === claimed.provisioningCoordinatorVersion
   );
 }
 
@@ -24860,7 +24929,7 @@ function mergeProvisioningFailureMetadata(
     awsOutcomeUncertain ||
     providerOutcomeUncertain ||
     hetznerResourceMayExist ||
-    lease.provisioningResourceMayExist,
+    (lease.provisioningResourceMayExist && !hetznerDefiniteKeyOnlyFailure(lease, error)),
   );
 
   lease.updatedAt = failedAt;
@@ -24907,7 +24976,10 @@ function mergeProvisioningFailureMetadata(
     clearLeaseCleanupMetadata(lease);
     delete lease.cleanupStartedAt;
     delete lease.cleanupClaimExpiresAt;
-    delete lease.provisioningResourceMayExist;
+    // Retained key-only cleanup still needs the definite no-resource evidence.
+    if (lease.provisioningResourceMayExist !== false || !lease.providerKeyCleanupPending) {
+      delete lease.provisioningResourceMayExist;
+    }
     delete lease.provisioningFailureRetryable;
     return;
   }
@@ -25998,6 +26070,8 @@ interface ProviderAccessContext {
 
 interface ProviderReleaseContext {
   resourceIdentity?: string;
+  assertCleanupOwner?: () => Promise<void>;
+  saveCleanupEvidence?: (evidence: ProviderCleanupEvidence) => Promise<void>;
 }
 
 interface ProviderLeaseCreatePreparation {
@@ -26089,53 +26163,31 @@ export class HetznerProvider implements CloudProvider {
     };
   }
 
-  async releaseLease(lease: LeaseRecord): Promise<void> {
-    let serverID = Number(lease.serverID);
-    let server: HetznerServer | undefined;
-    if (
-      (!Number.isSafeInteger(serverID) || serverID <= 0) &&
-      lease.providerKeyCleanupPending &&
-      lease.provisioningResourceMayExist
-    ) {
-      server = await this.client.findServerByLease(lease.id);
-      serverID = server?.id ?? Number.NaN;
+  async releaseLease(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void> {
+    const keyOnlyID = hetznerKeyOnlyCleanupID(lease);
+    if (keyOnlyID !== undefined) {
+      if (!context?.assertCleanupOwner)
+        throw new Error("Hetzner key cleanup requires a current cleanup owner");
+      const deadline = Date.now() + 60_000;
+      await this.client.deleteSSHKeyByID(keyOnlyID, deadline, context.assertCleanupOwner);
+      return;
     }
-    if (Number.isSafeInteger(serverID) && serverID > 0) {
-      try {
-        server ??= await this.client.getServer(serverID);
-      } catch (error) {
-        if (!providerResourceNotFound(error)) {
-          throw error;
-        }
-      }
-      if (server) {
-        if (
-          server.id !== serverID ||
-          !hetznerServerOwnedByLease(server, lease.id, lease.slug, lease.serverName)
-        ) {
-          throw new Error(
-            `refusing to delete Hetzner server ${serverID}: ownership does not match lease ${lease.id}`,
-          );
-        }
-        try {
-          await this.deleteServer(String(serverID));
-        } catch (error) {
-          if (!providerResourceNotFound(error)) {
-            throw error;
-          }
-        }
-      }
-    }
+    if (!context?.saveCleanupEvidence)
+      throw new Error("Hetzner cleanup requires durable evidence storage");
+    if (!context.assertCleanupOwner)
+      throw new Error("Hetzner key cleanup requires a current cleanup owner");
+    const deadline = Date.now() + 60_000;
+    await confirmHetznerServerCleanup(this.client, lease, context.saveCleanupEvidence, deadline);
     if (lease.providerKeyCleanupPending) {
       const providerKeyID = Number(lease.providerKeyCleanupID);
       if (!Number.isSafeInteger(providerKeyID) || providerKeyID <= 0) {
         throw new Error("invalid pending Hetzner SSH key cleanup id");
       }
-      await this.client.deleteSSHKeyByID(providerKeyID);
+      await this.client.deleteSSHKeyByID(providerKeyID, deadline, context.assertCleanupOwner);
       return;
     }
     if (leaseUsesCanonicalProviderKey(lease)) {
-      await this.deleteSSHKey(lease.providerKey, lease.id);
+      await this.deleteSSHKey(lease.providerKey, lease.id, deadline, context.assertCleanupOwner);
     }
   }
 
@@ -26162,8 +26214,13 @@ export class HetznerProvider implements CloudProvider {
   decorateImage = passthroughProviderImage;
   validateDeleteImage = allowProviderImageDelete;
 
-  async deleteSSHKey(name: string, leaseID: string): Promise<void> {
-    await this.client.deleteSSHKey(name, leaseID);
+  async deleteSSHKey(
+    name: string,
+    leaseID: string,
+    deadline?: number,
+    beforeDelete?: () => Promise<void>,
+  ): Promise<void> {
+    await this.client.deleteSSHKey(name, leaseID, deadline, beforeDelete);
   }
 
   hourlyPriceUSD(
@@ -26854,6 +26911,14 @@ export class GCPProvider implements CloudProvider {
     }
     const scope = gcpReadyPoolImageScope(image.sourceID, image.kind);
     return scope ? { provider: "gcp", scope, id: image.id } : undefined;
+  }
+
+  supportsReadyPoolImageIdentity(identity: ReadyPoolImageIdentity): boolean {
+    return (
+      identity.provider === "gcp" &&
+      /^[0-9]+$/.test(identity.id) &&
+      gcpReadyPoolImageScopeSupported(identity.scope)
+    );
   }
 
   restrictedLeaseRequestFields(input: LeaseRequest): string[] {

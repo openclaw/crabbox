@@ -411,6 +411,16 @@ preflight, timing JSON, and SSH key storage. Keep that helper surface narrow: if
 a provider needs broad command orchestration, the behavior probably belongs in
 core instead.
 
+`ParseCommandIntent` owns the distinction between literal argv and shell source
+for delegated POSIX command adapters. It reuses core shell inference and literal
+argument handling, snapshots the input, and rejects a missing command. The
+result's `Argv` method applies an adapter-supplied shell prefix only when needed;
+an explicitly empty shell source remains valid. Cloudflare Sandbox, Superserve,
+Crownest, Vercel Sandbox, and Nomad use this boundary. They retain their existing
+transport serialization, shell choice, working directory, environment, and
+execution lifecycle. These adapters currently pass no literal-argument map;
+the extraction does not change profile-literal propagation through transports.
+
 Claim-only recovery adapters may use `shared.ResolveProviderClaimStrict` to
 resolve an exact provider/scope-bound claim before a slug while preventing a
 canonical lease ID from falling through. `shared.ValidateClaimBinding` compares
@@ -422,6 +432,16 @@ must not be inferred from the shared structural result.
 Use `shared.CloneLabels` for plain writable label copies; it returns an empty
 non-nil map for nil input. Keep preservation helpers local when missing, empty,
 and non-empty source values have provider-specific meaning.
+
+`shared.CommitClaimTouch` owns the exact-snapshot touch transaction used by
+Static SSH, Local Container, and Machine0: require the carried claim, run the
+adapter's authorization, validate an explicit idle replacement, prepare labels
+and one timestamp, then call the existing core claim compare-and-swap once.
+Preparation is deliberately lazy: authorization may first hydrate a recorded
+runtime route. Adapters retain identity checks, persisted-timeout defaults,
+label/TTL representation, and public result projection; they update caches only
+after the committed claim is returned. The helper does not mutate a native
+resource, create a missing claim, or replace core's checkpoint-journal fence.
 
 Lifecycle polling is the exception that belongs in
 `internal/providers/shared`, not command core. `shared.Poll` centralizes only
@@ -451,6 +471,14 @@ client, rejects destinations outside a trusted `shared.SameOrigin`, preserves
 an existing redirect hook, and otherwise applies the standard redirect limit.
 The adapter supplies the exact refusal error and retains any additional path,
 method, transport, previous-hop, or provider-specific origin policy locally.
+
+Runpod and Hostinger share finite response consumption through
+`shared.DecodeBoundedJSONResponse`: close the body, read at most the adapter's
+limit plus one byte, reject read failures and overflow before interpreting
+HTTP status, then optionally decode one JSON value. The adapter retains its
+typed API error and redaction policy, so capacity retry and purchase ambiguity
+classification remain provider-owned. This does not apply to streaming
+responses or change request construction, redirects, or client timeouts.
 
 ## Acquisition stays adapter-owned
 
@@ -525,77 +553,53 @@ was also evaluated across ten compatible providers; its estimated savings of
 only 20–70 lines did not cover the additional state, callback plumbing, and
 semantic tests required by the mechanism. Keep acquisition adapter-owned unless
 a future proposal proves both behavior preservation and meaningful net value.
-## Delegated-run lifecycles stay adapter-owned
+## Shared run sequencing and provider authority
 
-Delegated execution is a provider-owned transaction, not a shared sequence of
-claim, create, run, retain, and cleanup steps. The common `DelegatedRunBackend`
-method surface describes routing and capabilities, not a common transaction.
-Share small primitives without centralizing provider lifecycle decisions.
+`shared.RunDelegatedSandbox` owns the common sandbox run sequence: preflight,
+archive preparation, acquisition or resolution, setup, sync, command execution,
+and one final retention/cleanup decision before timing and session reporting.
+E2B, Modal, Cloudflare Sandbox, OpenSandbox, and Nomad's persistent shell
+allocations use this sequence. The shared
+owner preserves the primary command/cancellation outcome when cleanup also
+fails, reports cleanup-only failure as a failed run, and keeps the session
+marked retained until deletion succeeds. Adapter-held operation locks span
+finalization when present.
 
-Delegated execution already shares mechanics with provider-neutral contracts:
+Adapters supply operations, not a generic provider API. They retain exact claim
+and account authorization, native creation and ambiguous-create recovery,
+absolute lifetime checks, transport and environment handling, remote command
+cancellation, and verified deletion/claim-removal ordering. A returned resource
+ID alone does not grant cleanup authority: `Acquire` and `Resolve` must bind an
+authorized resource before a session is published. Partial-creation rollback
+stays with the adapter.
 
-- `procjson.Exchange` bounds strict subprocess JSON exchanges, cancellation
-  grace, and decoding; streaming bridges and provider envelopes stay local.
-- `shared.Poll` repeats observations without owning state interpretation,
-  readiness, deadlines, or side effects; `shared.PollDelegatedStatus` handles
-  narrow status projection without centralizing provider lifecycle decisions.
-- `shared.LockLeaseOperation`, `shared.LockOperation`, and
-  `shared.LockOperationFile` serialize cross-process operations; adapters choose
-  which transaction holds a lock and when it must be released.
-- `shared.SecureHTTPClient` and `shared.SameOrigin` enforce the common redirect
-  policy while preserving provider-specific transport and refusal semantics.
-- `core.RunDelegatedArchiveSync` owns bounded archive preparation, upload,
-  staged replacement, and cleanup; `shared.RunSandboxArchiveSync` supplies
-  conventional sandbox wiring when its contract fits the provider.
-- `shared.ScopedLeaseResolver`, `shared.ResolveScopedLeaseID`,
-  `shared.ResolveScopedLeaseClaim`, `shared.FinishScopedLease`, and
-  `shared.ValidateClaimBinding` share claim mechanics;
-  `core.RemoveLeaseClaimIfUnchangedAfter` fences claim removal around an
-  adapter-owned action without deciding destructive authority.
-- `core.HandleDelegatedRunFailure` shares basic keep-on-failure bookkeeping;
-  `shared.StartEnvdProcess` shares one execution protocol, not a lifecycle.
+An adapter may separate authorized reuse from readiness with `AdmitReuse`.
+OpenSandbox first binds the exact endpoint/ownership marker and repository
+claim in `Resolve`; admission then checks the absolute TTL, resumes if needed,
+rechecks the remaining budget, and only then persists reclaim/activity state.
+Failed admission still returns the authorized retained session and releases its
+lock, but does not refresh activity or suggest rerunning an unusable lease.
+Cancellation before admission cannot trigger resume; cancellation after resume
+is checked before mutating the local claim. Successful admission enables normal
+run finalization. Providers without this extra boundary keep their existing
+resolution behavior.
 
-The transaction boundary deliberately remains inside each adapter:
+Other delegated backends can adopt this owner when their session model fits;
+do not copy its result, timing, keep-on-failure, and cleanup bookkeeping into a
+new adapter. Distinct operations remain explicit: a finite batch job, a
+stateless local process, a retained billed VPS, and an interactive sandbox do
+not acquire the same deletion policy just because each can execute a command.
+Nomad keeps one provider-owned job-creation operation for warmup and fresh Run,
+and confirms scheduler convergence before removing an unchanged claim. Its reuse
+and retained-activity updates fence the captured claim revision instead of
+adopting a replacement. Docker clone-mode retention must preserve unfetched
+commits.
 
-- **Claim and ownership models:** Eleven of twelve sampled providers maintain
-  durable local claims with materially different ownership bindings. E2B binds
-  an endpoint and exact sandbox, Vercel binds project/team ownership, W&B binds
-  entity/project scope, Nomad binds a job and allocation, and Cloudflare claims
-  retained or recovery state. Anthropic Sandbox Runtime is stateless and has no
-  claim, durable resource, warmup, or stop transaction to centralize.
-- **Creation and retention:** Azure materializes sessions through runner access
-  and deletes unkept warmups; W&B supplies environment only when creating a
-  sandbox; Vercel must choose persistence before creation and repair tentative
-  ownership; OpenSandbox reconciles ambiguous creation and enforces absolute
-  lifetimes. Docker retains successful clone-mode sessions to preserve commits,
-  while Cloudflare retention depends on cache mode and execution coordination.
-- **Workload cancellation:** Only OpenSandbox and Blaxel explicitly attempt
-  remote command cancellation, through `InterruptCommand` and `StopProcess`.
-  Anthropic cancels its local workload by terminating the subprocess; E2B,
-  Azure, Vercel, W&B, and AWS otherwise cancel transport without proving the
-  remote command stopped. Cloudflare Durable Objects return HTTP 409 during
-  active execution: removing completed metadata is not workload cancellation.
-- **Cleanup ordering:** E2B and W&B hold claim transactions across verified
-  remote deletion; OpenSandbox, Vercel, and AWS hold provider operation locks;
-  Nomad deregisters its job, waits for scheduler convergence, confirms absence,
-  and only then removes an unchanged claim. Blacksmith additionally removes a
-  locally owned private key; Cloudflare deletes completed run metadata instead
-  of stopping active execution. These are different ownership transactions.
-- **Failure handling:** Blaxel and OpenSandbox can retain recovery claims after
-  ambiguous creation; Vercel and AWS propagate cleanup failures, while other
-  adapters intentionally warn. Blacksmith preserves Actions proof, artifacts,
-  and workflow-cancellation diagnostics; OpenSandbox refreshes retained
-  activity while enforcing absolute lifetime. Setup failures, rollback,
-  keep-on-failure handling, and final result timing remain provider decisions.
-
-Review proposals to centralize delegated-run orchestration against every
-existing provider: they must preserve exact claim and ownership models,
-creation and retention decisions, actual workload-cancellation guarantees,
-cleanup and lock ordering, and failure-handling behavior. A lifecycle engine
-that transfers these decisions into shared callbacks merely rebuilds adapter
-dispatch while weakening transaction boundaries. Keep delegated-run lifecycles
-adapter-owned unless a future proposal proves both per-provider behavior
-preservation across these dimensions and meaningful net value.
+Supporting mechanics remain reusable independently: `procjson.Exchange` for
+bounded subprocess JSON, `shared.Poll` for observations, operation locks for
+serialization, `core.RunDelegatedArchiveSync` for staged archive replacement,
+and scoped claim helpers for guarded local state. None of these grants native
+resource ownership or proves that canceling transport stopped a remote command.
 
 ## Provider registration
 

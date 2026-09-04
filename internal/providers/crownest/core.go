@@ -92,14 +92,6 @@ func shellQuote(value string) string {
 	return core.ShellQuote(value)
 }
 
-func shouldUseShell(command []string) bool {
-	return core.ShouldUseShell(command)
-}
-
-func leadingEnvAssignment(command []string) bool {
-	return core.LeadingEnvAssignment(command)
-}
-
 func syncExcludes(root string, cfg Config) (core.SyncExcludeRules, error) {
 	return core.SyncExcludes(root, cfg)
 }

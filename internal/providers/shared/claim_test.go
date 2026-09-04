@@ -1,9 +1,11 @@
 package shared
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -213,6 +215,88 @@ func TestRequireClaimSnapshot(t *testing.T) {
 			core.SetServerLeaseClaimSnapshot(&candidateServer, candidateClaim, true)
 			if _, err := RequireClaimSnapshot(candidateServer, claim.Provider); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("err=%v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestCommitClaimTouchOrdersAuthorizationAndPublication(t *testing.T) {
+	for _, scenario := range []string{"snapshot missing", "snapshot absent", "authorization denied", "invalid override", "changed during preparation", "committed"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			const leaseID = "static_claim_touch"
+			server := core.Server{Provider: "ssh", CloudID: "fixture-host", Labels: map[string]string{"lease": leaseID, "state": "ready"}}
+			if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "fixture", "ssh", "fixture-scope", "", t.TempDir(), time.Minute, false, server, core.SSHTarget{}); err != nil {
+				t.Fatal(err)
+			}
+			expected, err := core.ReadLeaseClaim(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario != "snapshot missing" {
+				core.SetServerLeaseClaimSnapshot(&server, expected, scenario != "snapshot absent")
+			}
+			override := 95 * time.Second
+			if scenario == "invalid override" {
+				override = 0
+			}
+			req := core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}, IdleTimeoutOverride: &override}
+			now := time.Now().UTC().Truncate(time.Second)
+			var calls []string
+			updated, touchErr := CommitClaimTouch(t.Context(), req, ClaimTouchPolicy{
+				Provider: "static",
+				Authorize: func(_ context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+					calls = append(calls, "authorize")
+					if lease.LeaseID != leaseID || !reflect.DeepEqual(claim, expected) {
+						t.Fatal("authorization lost exact snapshot")
+					}
+					if scenario == "authorization denied" {
+						return errors.New("identity mismatch")
+					}
+					return nil
+				},
+				Prepare: func(claim core.LeaseClaim) (map[string]string, time.Time) {
+					if len(calls) != 1 || calls[0] != "authorize" {
+						t.Fatal("preparation ran before authorization")
+					}
+					calls = append(calls, "prepare")
+					if scenario == "changed during preparation" {
+						if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, map[string]string{"state": "other-writer"}); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return map[string]string{"state": "touched"}, now
+				},
+			})
+			wantCalls := []string{"authorize"}
+			switch scenario {
+			case "snapshot missing", "snapshot absent":
+				wantCalls = nil
+			case "changed during preparation", "committed":
+				wantCalls = []string{"authorize", "prepare"}
+			}
+			if !reflect.DeepEqual(calls, wantCalls) {
+				t.Fatalf("calls=%v want=%v", calls, wantCalls)
+			}
+			actual, err := core.ReadLeaseClaim(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "committed" {
+				if touchErr != nil || updated.Revision == expected.Revision || !reflect.DeepEqual(actual, updated) || updated.Labels["state"] != "touched" || updated.LastUsedAt != now.Format(time.RFC3339) || updated.IdleTimeoutSeconds != 95 {
+					t.Fatalf("touch=%#v persisted=%#v err=%v", updated, actual, touchErr)
+				}
+			} else {
+				if touchErr == nil {
+					t.Fatal("expected refusal")
+				}
+				if scenario == "changed during preparation" {
+					if !strings.Contains(touchErr.Error(), "claim changed") || actual.Labels["state"] != "other-writer" {
+						t.Fatalf("raced touch=%#v err=%v", actual, touchErr)
+					}
+				} else if !reflect.DeepEqual(actual, expected) {
+					t.Fatal("refused touch changed durable claim")
+				}
 			}
 		})
 	}

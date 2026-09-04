@@ -65,6 +65,27 @@ key path, port, user, and host). Empty fields render as `-`.
 label map. Secrets such as broker tokens, provider keys, and VNC passwords are
 never included in either output mode.
 
+Brokered Hetzner leases may include versioned `providerCleanup` in JSON output.
+It binds the provider, lease ID and numeric server ID, retains dispatch and
+action status when known, and records a confirmation method and timestamp after
+server cleanup is observed. A recorded action must succeed before exact server
+absence can confirm its deletion. `already-absent` is a distinct, weaker basis
+for a server missing before any recorded dispatch. A confirmation may coexist
+with failed SSH-key cleanup; use `cleanupStatus` for overall release finality.
+Definitive key-only creation failures need no server receipt; their retained
+no-resource evidence authorizes only exact owned-key cleanup. Missing evidence
+on historical server records means no recorded confirmation. Stored
+host/server fields and `hasHost` describe the retained record, not current
+provider existence. Inspect reads this receipt from the broker without provider
+credentials or CLI-side provider polling.
+
+An exact rejected Hetzner DELETE can leave only the provider/lease/server binding
+in `providerCleanup`, with the rejection in the ordinary cleanup error fields.
+That is retryable debt, not server confirmation; the broker rechecks ownership
+after backoff. Keep local credentials and evidence while cleanup is unresolved.
+See [recovery guidance](../features/lifecycle-cleanup.md#brokered-hetzner-cleanup-confirmation)
+before acting on historical records or missing acknowledgement authority.
+
 [Local Container](../providers/local-container.md#memory-failure-evidence)
 adds fresh, read-only `diagnostic.memory.*` labels to the returned view. They
 describe actual container settings and, when available, total RAM from its

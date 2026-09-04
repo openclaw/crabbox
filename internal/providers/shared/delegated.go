@@ -34,7 +34,8 @@ type DelegatedSandboxCommand struct {
 
 // DelegatedSandboxLifecycle describes sandbox operations, not a provider API.
 // Adapters retain claim authorization, scope checks, locks, credential filtering,
-// archive transport and execution. Jobs and SSH leases have different lifecycles.
+// archive transport and execution. Persistent shell allocations fit this owner;
+// finite batch jobs and SSH leases have different lifecycles.
 type DelegatedSandboxLifecycle struct {
 	Provider       string
 	Runtime        core.Runtime
@@ -47,12 +48,15 @@ type DelegatedSandboxLifecycle struct {
 	PrepareArchive func(context.Context) (*core.PreparedArchive, error)
 	Acquire        func(context.Context) (DelegatedSandbox, error)
 	Resolve        func(context.Context) (DelegatedSandbox, error)
-	Setup          func(context.Context) error
-	Sync           func(context.Context, *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error)
-	NoSync         func(context.Context) error
-	Command        func(context.Context) (DelegatedSandboxCommand, error)
-	Retained       func(context.Context) error
-	Cleanup        func(context.Context) error
+	// AdmitReuse checks run readiness after Resolve binds an authorized session.
+	// Failure retains that session without activity refresh or rerun hints.
+	AdmitReuse func(context.Context) error
+	Setup      func(context.Context) error
+	Sync       func(context.Context, *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error)
+	NoSync     func(context.Context) error
+	Command    func(context.Context) (DelegatedSandboxCommand, error)
+	Retained   func(context.Context) error
+	Cleanup    func(context.Context) error
 }
 
 // RunDelegatedSandbox owns the single sandbox run sequence and finalization.
@@ -87,6 +91,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 		syncPhases = []core.TimingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
 	}
 	acquired := req.ID == ""
+	reuseAdmitted := acquired || lifecycle.AdmitReuse == nil
 	commandRan := false
 
 	defer func() {
@@ -129,7 +134,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 		}
 		if result.Session != nil {
 			shouldStop := acquired && !req.Keep
-			if retErr != nil {
+			if retErr != nil && reuseAdmitted {
 				core.HandleDelegatedRunFailure(stderr, req, lifecycle.Provider, sandbox.LeaseID, sandbox.Slug, lifecycle.IdleTimeout, lifecycle.TTL, acquired, &shouldStop)
 			}
 			result.Session.Kept = true
@@ -140,7 +145,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 				} else {
 					result.Session.Kept = false
 				}
-			} else if lifecycle.Retained != nil {
+			} else if reuseAdmitted && lifecycle.Retained != nil {
 				appendFailure(lifecycle.Retained(cleanupCtx))
 			}
 			cancel()
@@ -159,7 +164,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 				Provider: lifecycle.Provider, LeaseID: result.LeaseID, Slug: result.Slug,
 				SyncDelegated: true, SyncSkipped: req.NoSync, SyncMs: syncDuration.Milliseconds(), SyncPhases: syncPhases,
 				CommandMs: result.Command.Milliseconds(), TotalMs: result.Total.Milliseconds(),
-				ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label),
+				ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label), Workdir: lifecycle.Workdir,
 			}, result, retErr))
 			// A failed writer cannot emit an agreed record. Still report the I/O
 			// failure without replacing an existing command/cleanup failure.
@@ -200,6 +205,15 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 	result.Session = &core.RunSessionHandle{
 		Provider: lifecycle.Provider, LeaseID: sandbox.LeaseID, Slug: sandbox.Slug,
 		Reused: !acquired, CleanupCommand: sandbox.CleanupCommand,
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if !acquired && lifecycle.AdmitReuse != nil {
+		if err := lifecycle.AdmitReuse(ctx); err != nil {
+			return result, err
+		}
+		reuseAdmitted = true
 	}
 	if err := ctx.Err(); err != nil {
 		return result, err

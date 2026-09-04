@@ -293,10 +293,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		return result, nil
 	}
 
-	command, err := buildCommand(req.Command, req.ShellMode)
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, nil)
 	if err != nil {
 		return RunResult{}, err
 	}
+	command := intent.Argv("bash", "-lc")
 	commandText := commandScript(command)
 	commandEnv, strippedAuthEnv := superserveCommandEnv(req.Env)
 	if len(strippedAuthEnv) > 0 {
@@ -947,22 +948,6 @@ func superserveCommandEnv(env map[string]string) (map[string]string, []string) {
 	}
 	slices.Sort(stripped)
 	return out, stripped
-}
-
-func buildCommand(command []string, shellMode bool) ([]string, error) {
-	if len(command) == 0 {
-		return nil, errors.New("missing command")
-	}
-	if shellMode {
-		return []string{"bash", "-lc", strings.Join(command, " ")}, nil
-	}
-	if shouldUseShell(command) || leadingEnvAssignment(command) {
-		if len(command) == 1 {
-			return []string{"bash", "-lc", command[0]}, nil
-		}
-		return []string{"bash", "-lc", shellScriptFromArgv(command)}, nil
-	}
-	return command, nil
 }
 
 func commandScript(command []string) string {

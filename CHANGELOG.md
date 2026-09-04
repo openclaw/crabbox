@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Protect Nomad runs from overwriting replacement claims or recreating retired leases, and expose standard run-session handles with cleanup-aware final outcomes that preserve the original command exit. Thanks @steipete.
 - Allow fresh brokered AWS Windows and WSL2 leases to bootstrap through advertised SSH port 22 while preserving an explicitly selected final workload port. [PR 1801](https://github.com/openclaw/crabbox/pull/1801). Thanks @steipete.
 - Reuse one Azure or GCP token refresh across concurrent requests, reducing duplicate authentication traffic while preserving credential isolation, refresh margins, and retry behavior. [PR 1802](https://github.com/openclaw/crabbox/pull/1802). Thanks @steipete.
 - Skip unnecessary APT translation, AppStream, and command-not-found downloads during minimal Linux bootstrap while preserving required package indexes, signature checks, and later operator defaults. [PR 1794](https://github.com/openclaw/crabbox/pull/1794). Thanks @steipete.
@@ -13,6 +14,9 @@
 - Clarify SSH cancellation, safe retained-workload recovery, and Bash login-shell exit behavior, and correct the default local-container image note. [PR 1685](https://github.com/openclaw/crabbox/pull/1685), [PR 1686](https://github.com/openclaw/crabbox/pull/1686). Thanks @steipete.
 - Fix native macOS readiness test fixtures when temporary directories inherit a different group from the process, without changing production ownership checks. [PR 1686](https://github.com/openclaw/crabbox/pull/1686). Thanks @steipete.
 - Typed GCP identity generation and registration now observe the owned VM boot disk to bind exact numeric image or snapshot provenance without adding image or snapshot reads to ordinary GCP launches; create cleanup custody requires a numeric VM ID, interrupted token-bound creates capture or retry that ID only through exact ownership lookups and strict rereads, and fully bound pre-upgrade leases may use their lossy historical numeric ID only to corroborate a raw ID during fenced deletion or expiry cleanup before an exact reread. [PR 1620](https://github.com/openclaw/crabbox/pull/1620). Thanks @vincentkoc.
+- Added typed GCP ready-pool cohorts bound to exact boot-image or disk-snapshot provenance while allowing capacity fallback across zones. [PR 1621](https://github.com/openclaw/crabbox/pull/1621). Thanks @vincentkoc.
+
+- Report OpenSandbox cleanup failures instead of silently succeeding, preserve the original command exit when cleanup also fails, and finalize timing/session results after cleanup without weakening reuse admission or absolute TTL checks. [PR 1804](https://github.com/openclaw/crabbox/pull/1804). Thanks @steipete.
 
 ## 0.49.0 - 2026-09-03
 

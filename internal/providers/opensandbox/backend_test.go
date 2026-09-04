@@ -15,7 +15,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -628,25 +630,46 @@ func TestRunTimingJSONRemainsFinalLineWhenActivityRefreshFails(t *testing.T) {
 }
 
 func TestRunTimingJSONRemainsFinalLineWhenCleanupFails(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	fake := newFakeClient()
-	fake.deleteErr = errors.New("provider delete unavailable")
-	backend := newTestBackend(fake)
-	var stderr bytes.Buffer
-	backend.rt.Stderr = &stderr
-
-	if _, err := backend.Run(context.Background(), RunRequest{
-		Repo: Repo{Name: "my-app", Root: tempGitRepo(t)}, NoSync: true, Command: []string{"true"}, TimingJSON: true,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
-	var report map[string]any
-	if jsonErr := json.Unmarshal([]byte(lines[len(lines)-1]), &report); jsonErr != nil {
-		t.Fatalf("final stderr line is not timing JSON: %q: %v", lines[len(lines)-1], jsonErr)
-	}
-	if !strings.Contains(stderr.String(), "provider delete unavailable") {
-		t.Fatalf("stderr=%q want cleanup warning", stderr.String())
+	for _, commandCode := range []int{0, 42} {
+		t.Run(strconv.Itoa(commandCode), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := newFakeClient()
+			fake.deleteErr = errors.New("provider delete unavailable")
+			fake.afterRun = func(req runCommandRequest) {
+				if req.Workdir != "" {
+					fake.runExit = commandCode
+				}
+			}
+			backend := newTestBackend(fake)
+			var stderr bytes.Buffer
+			backend.rt.Stderr = &stderr
+			result, err := backend.Run(context.Background(), RunRequest{
+				Repo: Repo{Name: "my-app", Root: tempGitRepo(t)}, NoSync: true, Command: []string{"true"}, TimingJSON: true,
+			})
+			wantCode := commandCode
+			if wantCode == 0 {
+				wantCode = 1
+			}
+			var exitErr core.ExitError
+			if !errors.Is(err, fake.deleteErr) || !errors.As(err, &exitErr) || exitErr.Code != wantCode || result.ExitCode != wantCode {
+				t.Fatalf("result=%#v err=%v want exit=%d with cleanup cause", result, err, wantCode)
+			}
+			if result.Session == nil || !result.Session.Kept || len(fake.deleted) != 1 {
+				t.Fatalf("session=%#v deletes=%v", result.Session, fake.deleted)
+			}
+			claim, err := readLeaseClaim(result.LeaseID)
+			if err != nil || claim.LeaseID != result.LeaseID {
+				t.Fatalf("failed cleanup lost recovery claim: %#v %v", claim, err)
+			}
+			lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+			var report map[string]any
+			if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
+				t.Fatalf("final stderr line is not timing JSON: %q: %v", lines[len(lines)-1], err)
+			}
+			if report["exitCode"] != float64(wantCode) {
+				t.Fatalf("report=%#v stderr=%q", report, stderr.String())
+			}
+		})
 	}
 }
 
@@ -875,8 +898,12 @@ func TestRunDoesNotResumeOrReclaimPausedSandboxBeforeLifetimePreflight(t *testin
 		t.Fatal(err)
 	}
 	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+	before, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	_, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), RunRequest{
 		ID: leaseID, Repo: Repo{Name: "my-app", Root: "/other"}, Reclaim: true, NoSync: true, KeepOnFailure: true, Command: []string{"true"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "sync/command budget") {
@@ -888,9 +915,15 @@ func TestRunDoesNotResumeOrReclaimPausedSandboxBeforeLifetimePreflight(t *testin
 	if strings.Contains(stderr.String(), "rerun:") {
 		t.Fatalf("stderr=%q, want no unusable pre-reclaim rerun hint", stderr.String())
 	}
+	if result.Session == nil || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
+	}
 	claim, err := readLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(claim, before) {
+		t.Fatalf("failed admission changed claim: before=%#v after=%#v", before, claim)
 	}
 	if claim.RepoRoot != "/original" {
 		t.Fatalf("repo root=%q changed before lifetime preflight", claim.RepoRoot)
@@ -915,8 +948,12 @@ func TestRunRechecksLifetimeAfterResumeBeforeReclaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+	before, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	_, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), RunRequest{
 		ID: leaseID, Repo: Repo{Name: "my-app", Root: "/other"}, Reclaim: true, NoSync: true, Command: []string{"true"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "remaining after resume") {
@@ -928,9 +965,15 @@ func TestRunRechecksLifetimeAfterResumeBeforeReclaim(t *testing.T) {
 	if len(fake.runs) != 0 {
 		t.Fatalf("runs=%#v, want no command after post-resume lifetime rejection", fake.runs)
 	}
+	if result.Session == nil || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
+	}
 	claim, err := readLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(claim, before) {
+		t.Fatalf("failed admission changed claim: before=%#v after=%#v", before, claim)
 	}
 	if claim.RepoRoot != "/original" {
 		t.Fatalf("repo root=%q changed before post-resume lifetime preflight", claim.RepoRoot)
@@ -948,16 +991,26 @@ func TestRunReclaimPersistsOnlyAfterReusableSandboxValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+	before, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	_, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), RunRequest{
 		ID: leaseID, Repo: Repo{Name: "my-app", Root: "/other"}, Reclaim: true, NoSync: true, Command: []string{"true"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "cannot be reused") {
 		t.Fatalf("err=%v, want reusable sandbox rejection", err)
 	}
+	if result.Session == nil || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("session=%#v", result.Session)
+	}
 	claim, err := readLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(claim, before) {
+		t.Fatalf("failed admission changed claim: before=%#v after=%#v", before, claim)
 	}
 	if claim.RepoRoot != "/original" {
 		t.Fatalf("repo root=%q changed before reusable sandbox validation", claim.RepoRoot)
@@ -2938,3 +2991,38 @@ func (f *fakeOpenSandboxClient) RunCommand(_ context.Context, _ string, req runC
 }
 
 func (f *fakeOpenSandboxClient) Probe(context.Context) error { return nil }
+
+func TestRunCancellationAfterResumeDoesNotReclaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeClient()
+	fake.sandbox.State = "Paused"
+	backend := newTestBackend(fake)
+	var stderr bytes.Buffer
+	backend.rt.Stderr = &stderr
+	leaseID := leasePrefix + fake.sandbox.ID
+	scope := testOpenSandboxScope(t, fake.baseURL)
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, scope, "", "/original", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+	before, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	fake.afterResume = cancel
+	result, err := backend.Run(ctx, RunRequest{
+		ID: leaseID, Repo: Repo{Name: "my-app", Root: "/other"}, Reclaim: true, NoSync: true, KeepOnFailure: true, Command: []string{"true"},
+	})
+	if !errors.Is(err, context.Canceled) || result.Session == nil || !result.Session.Kept || !result.Session.Reused {
+		t.Fatalf("result=%#v session=%#v err=%v", result, result.Session, err)
+	}
+	after, err := readLeaseClaim(leaseID)
+	if err != nil || !reflect.DeepEqual(after, before) {
+		t.Fatalf("claim changed: before=%#v after=%#v err=%v", before, after, err)
+	}
+	if len(fake.resumed) != 1 || len(fake.runs) != 0 || len(fake.deleted) != 0 || strings.Contains(stderr.String(), "rerun:") {
+		t.Fatalf("resumed=%v runs=%v deletes=%v stderr=%s", fake.resumed, fake.runs, fake.deleted, stderr.String())
+	}
+}

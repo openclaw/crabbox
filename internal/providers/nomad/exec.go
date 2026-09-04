@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type nomadExecRequest struct {
@@ -47,10 +49,11 @@ func (b *backend) execShell(ctx context.Context, client Client, ready allocation
 }
 
 func (b *backend) runCommand(ctx context.Context, client Client, ready allocationReadiness, req RunRequest, workdir string) (int, error) {
-	command, err := buildCommand(req.Command, req.ShellMode)
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, nil)
 	if err != nil {
 		return 0, err
 	}
+	command := intent.Argv("bash", "-lc")
 	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
@@ -96,22 +99,6 @@ func normalizeExitCode(code int) int {
 		return 1
 	}
 	return code
-}
-
-func buildCommand(command []string, shellMode bool) ([]string, error) {
-	if len(command) == 0 {
-		return nil, errors.New("missing command")
-	}
-	if shellMode {
-		return []string{"bash", "-lc", strings.Join(command, " ")}, nil
-	}
-	if shouldUseShell(command) || leadingEnvAssignment(command) {
-		if len(command) == 1 {
-			return []string{"bash", "-lc", command[0]}, nil
-		}
-		return []string{"bash", "-lc", shellScriptFromArgv(command)}, nil
-	}
-	return append([]string(nil), command...), nil
 }
 
 func remoteCommandScript(workdir string, env map[string]string, command []string) string {

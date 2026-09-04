@@ -563,30 +563,23 @@ func (b *backend) AuthorizeStatusTouchClaim(_ context.Context, lease LeaseTarget
 }
 
 func (b *backend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
-	expected, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server)
-	if !set || !exists {
-		return Server{}, exit(4, "machine0 lease %s has no exact claim snapshot; refusing touch", req.Lease.LeaseID)
-	}
-	if err := b.AuthorizeStatusTouchClaim(ctx, req.Lease, expected); err != nil {
-		return Server{}, err
-	}
-	if req.IdleTimeoutOverride != nil && *req.IdleTimeoutOverride <= 0 {
-		return Server{}, exit(2, "machine0 lease %s idle timeout override must be positive", req.Lease.LeaseID)
-	}
-
-	cfg := b.configForRun()
-	if expected.IdleTimeoutSeconds > 0 {
-		cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
-	}
-	labels := shared.CloneLabels(expected.Labels)
-	for _, key := range machineLabelKeys {
-		if value := req.Lease.Server.Labels[key]; value != "" {
-			labels[key] = value
-		}
-	}
-	now := b.now()
-	labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, req.State, now, req.IdleTimeoutOverride)
-	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(ctx, req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
+		Provider: "machine0", Authorize: b.AuthorizeStatusTouchClaim,
+		Prepare: func(expected LeaseClaim) (map[string]string, time.Time) {
+			cfg := b.configForRun()
+			if expected.IdleTimeoutSeconds > 0 {
+				cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
+			}
+			labels := shared.CloneLabels(expected.Labels)
+			for _, key := range machineLabelKeys {
+				if value := req.Lease.Server.Labels[key]; value != "" {
+					labels[key] = value
+				}
+			}
+			now := b.now()
+			return core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, req.State, now, req.IdleTimeoutOverride), now
+		},
+	})
 	if err != nil {
 		return Server{}, err
 	}

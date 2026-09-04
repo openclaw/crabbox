@@ -800,6 +800,7 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		IdleTimeout:          formatSecondsDuration(lease.IdleTimeoutSeconds),
 		ExpiresAt:            lease.ExpiresAt,
 		CleanupStatus:        lease.CleanupStatus,
+		ProviderCleanup:      lease.ProviderCleanup,
 		CleanupStartedAt:     lease.CleanupStartedAt,
 		CleanupError:         lease.CleanupError,
 		CleanupRetryAt:       lease.CleanupRetryAt,
