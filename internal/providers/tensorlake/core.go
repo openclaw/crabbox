@@ -93,14 +93,6 @@ func blank(value, fallback string) string {
 	return core.Blank(value, fallback)
 }
 
-func shouldUseShell(command []string) bool {
-	return core.ShouldUseShell(command)
-}
-
-func shellScriptFromArgv(command []string) string {
-	return core.ShellScriptFromArgv(command)
-}
-
 func shellQuote(s string) string {
 	return core.ShellQuote(s)
 }
