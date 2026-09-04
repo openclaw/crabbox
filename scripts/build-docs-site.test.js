@@ -380,6 +380,29 @@ test("Markdown comments remain literal inside fenced code", () => {
   assert.match(html, /<p>Visible paragraph\.<\/p>/);
 });
 
+test("Markdown heading anchors avoid duplicate and literal-suffix collisions per document", () => {
+  const html = markdownToHtml("## Setup\n## Setup\n## Setup-1\n## Setup", "example.md");
+  const anchors = [...html.matchAll(/<h2 id="([^"]+)"><a class="anchor" href="#([^"]+)"/g)];
+
+  assert.deepEqual(anchors.map((match) => [match[1], match[2]]), [
+    ["setup", "setup"],
+    ["setup-1", "setup-1"],
+    ["setup-1-1", "setup-1-1"],
+    ["setup-2", "setup-2"],
+  ]);
+  assert.match(markdownToHtml("## Setup", "other.md"), /<h2 id="setup">/);
+});
+
+generatedTest("generated cache TOC links to each distinct cache volumes section", () => {
+  const html = readGenerated("features/cache.html");
+  const toc = element(html, "nav", /class="toc"/);
+
+  assert.equal(occurrences(article(html), 'id="cache-volumes"'), 1);
+  assert.equal(occurrences(article(html), 'id="cache-volumes-1"'), 1);
+  assert.match(toc, /href="#cache-volumes"/);
+  assert.match(toc, /href="#cache-volumes-1"/);
+});
+
 function readGenerated(relativePath) {
   return fs.readFileSync(path.join(siteDir, relativePath), "utf8");
 }
