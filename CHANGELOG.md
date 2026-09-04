@@ -2,12 +2,12 @@
 
 ## Unreleased
 
-- Fix documentation table-of-contents links for repeated headings so each link reaches its own section, while preserving existing first-heading URLs. Thanks @steipete.
 - Avoid unnecessary Git metadata lookups during configuration loading, lease claim refreshes, and sync planning while preserving repository and credential trust boundaries. [PR 1783](https://github.com/openclaw/crabbox/pull/1783). Thanks @steipete.
 - Preserve finish-submission and receipt-verification errors, attempt counts, and recovery guidance when terminal run recording times out, without changing retry limits or receipt verification.
 - Closed and joined lease-owned SSH connection masters after confirmed brokered deletion, preserving native connection reuse and lease/host-key isolation while retaining failed local cleanup for a local-only retry. [PR 1774](https://github.com/openclaw/crabbox/pull/1774). Thanks @steipete.
 - Clarify SSH cancellation, safe retained-workload recovery, and Bash login-shell exit behavior, and correct the default local-container image note. [PR 1685](https://github.com/openclaw/crabbox/pull/1685), [PR 1686](https://github.com/openclaw/crabbox/pull/1686). Thanks @steipete.
 - Fix native macOS readiness test fixtures when temporary directories inherit a different group from the process, without changing production ownership checks. [PR 1686](https://github.com/openclaw/crabbox/pull/1686). Thanks @steipete.
+- Fix documentation table-of-contents links for repeated headings so each link reaches its own section, while preserving existing first-heading URLs. [PR 1787](https://github.com/openclaw/crabbox/pull/1787). Thanks @steipete.
 
 ## 0.49.0 - 2026-09-03
 
