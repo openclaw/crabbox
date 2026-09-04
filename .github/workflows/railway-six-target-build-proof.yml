@@ -1,0 +1,308 @@
+name: Railway six-target build proof
+
+on:
+  push:
+    branches:
+      - audit/railway-six-target-build-proof-20260904
+
+permissions:
+  contents: read
+  id-token: none
+
+env:
+  BASE_SHA: bd672e05c90ad670777935eea682048d2f844f17
+  HEAD_SHA: ec2df98c6a0a7b71ee77de51eb27bfeb6475f788
+  MERGE_SHA: 5e165e4773e10d4dbd9f98de633aa4e84cf44d5a
+  MERGE_TREE_SHA: a029443b02258f796076b817686cef05a073c205
+  GOFLAGS: -mod=readonly -trimpath
+  GOTOOLCHAIN: local
+  GOWORK: "off"
+
+jobs:
+  build:
+    name: Build frozen PR merge on six targets
+    if: github.repository == 'openclaw/crabbox' && github.ref == 'refs/heads/audit/railway-six-target-build-proof-20260904'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Initialize incomplete proof metadata
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof_dir="$RUNNER_TEMP/railway-six-target-build-proof"
+          started_at="$(date +%s)"
+          work_deadline="$((started_at + 35 * 60))"
+          report_deadline="$((started_at + 40 * 60))"
+          mkdir -p "$proof_dir"
+          {
+            printf 'PROOF_STARTED_AT=%s\n' "$started_at"
+            printf 'PROOF_WORK_DEADLINE_EPOCH=%s\n' "$work_deadline"
+            printf 'PROOF_REPORT_DEADLINE_EPOCH=%s\n' "$report_deadline"
+          } >> "$GITHUB_ENV"
+          printf 'status\tphase\tdetail\tepoch\nINCOMPLETE\tinitialize\tstarted\t%s\n' \
+            "$started_at" > "$proof_dir/status.tsv"
+          printf 'status\tmerge_sha\tmerge_tree_sha\tbase_sha\thead_sha\nINCOMPLETE\t%s\t%s\t%s\t%s\n' \
+            "$MERGE_SHA" "$MERGE_TREE_SHA" "$BASE_SHA" "$HEAD_SHA" > "$proof_dir/source.tsv"
+          printf 'target\tbuild_exit\tproof_exit\tstatus\telapsed_seconds\tbytes\tsha256\n' \
+            > "$proof_dir/builds.tsv"
+          printf 'status=INCOMPLETE\nmerge_sha=%s\nmerge_tree_sha=%s\n\n' \
+            "$MERGE_SHA" "$MERGE_TREE_SHA" > "$proof_dir/build-info.txt"
+
+      - name: Check out frozen PR merge
+        timeout-minutes: 5
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.MERGE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        timeout-minutes: 7
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.26.5"
+          cache: false
+
+      - name: Verify frozen source and reviewed blobs
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof_dir="$RUNNER_TEMP/railway-six-target-build-proof"
+          now="$(date +%s)"
+          printf 'status\tphase\tdetail\tepoch\nINCOMPLETE\tverify_source\tstarted\t%s\n' \
+            "$now" > "$proof_dir/status.tsv"
+          (( now < PROOF_WORK_DEADLINE_EPOCH ))
+
+          actual_sha="$(git rev-parse HEAD)"
+          actual_tree="$(git show -s --format=%T HEAD)"
+          actual_parents="$(git show -s --format=%P HEAD)"
+          [[ "$actual_sha" == "$MERGE_SHA" ]]
+          [[ "$actual_tree" == "$MERGE_TREE_SHA" ]]
+          [[ "$actual_parents" == "$BASE_SHA $HEAD_SHA" ]]
+          [[ -z "$(git status --porcelain=v1)" ]]
+
+          expected_paths=(
+            README.md
+            internal/providers/railway/backend.go
+            internal/providers/railway/backend_test.go
+            internal/providers/railway/client.go
+          )
+          mapfile -t actual_paths < <(
+            git diff --name-only --no-renames "$BASE_SHA" "$MERGE_SHA" |
+              LC_ALL=C sort
+          )
+          [[ "${#actual_paths[@]}" -eq "${#expected_paths[@]}" ]]
+
+          {
+            printf 'status\tmerge_sha\tmerge_tree_sha\tbase_sha\thead_sha\n'
+            printf 'VERIFIED\t%s\t%s\t%s\t%s\n' \
+              "$actual_sha" "$actual_tree" "$BASE_SHA" "$HEAD_SHA"
+            printf '\nchange_status\tpath\tmerge_blob\treviewed_head_blob\n'
+          } > "$proof_dir/source.tsv"
+
+          for i in "${!expected_paths[@]}"; do
+            path="${expected_paths[$i]}"
+            [[ "${actual_paths[$i]}" == "$path" ]]
+            change_status="$(git diff --name-status --no-renames "$BASE_SHA" "$MERGE_SHA" -- "$path" | cut -f1)"
+            [[ "$change_status" == M ]]
+            merge_blob="$(git rev-parse "$MERGE_SHA:$path")"
+            head_blob="$(git rev-parse "$HEAD_SHA:$path")"
+            [[ "$merge_blob" == "$head_blob" ]]
+            printf '%s\t%s\t%s\t%s\n' \
+              "$change_status" "$path" "$merge_blob" "$head_blob" >> "$proof_dir/source.tsv"
+          done
+
+          [[ -z "$(git status --porcelain=v1)" ]]
+          now="$(date +%s)"
+          (( now < PROOF_WORK_DEADLINE_EPOCH ))
+          printf 'status\tphase\tdetail\tepoch\nINCOMPLETE\tbuild\tpending\t%s\n' \
+            "$now" > "$proof_dir/status.tsv"
+
+      - name: Build and record six targets
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof_dir="$RUNNER_TEMP/railway-six-target-build-proof"
+          output="$RUNNER_TEMP/crabbox-six-target-build"
+          results="$proof_dir/builds.tsv"
+          build_info="$proof_dir/build-info.txt"
+          failed_marker="$proof_dir/failed"
+          build_step_deadline="$(( $(date +%s) + 18 * 60 ))"
+          if (( build_step_deadline > PROOF_WORK_DEADLINE_EPOCH )); then
+            build_step_deadline="$PROOF_WORK_DEADLINE_EPOCH"
+          fi
+          rm -f "$output" "$failed_marker"
+          trap 'rm -f "$output"' EXIT
+
+          targets=(
+            darwin/amd64
+            darwin/arm64
+            linux/amd64
+            linux/arm64
+            windows/amd64
+            windows/arm64
+          )
+          {
+            printf 'status=INCOMPLETE\nmerge_sha=%s\nmerge_tree_sha=%s\n' \
+              "$MERGE_SHA" "$MERGE_TREE_SHA"
+            go version
+            go env GOTOOLCHAIN GOWORK GOFLAGS
+            printf '\n'
+          } > "$build_info"
+
+          for i in "${!targets[@]}"; do
+            target="${targets[$i]}"
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            remaining_targets="$(( ${#targets[@]} - i ))"
+            remaining_seconds="$((build_step_deadline - $(date +%s)))"
+            rm -f "$output"
+            started_at="$(date +%s)"
+            build_exit=124
+            proof_exit=124
+            status=DEADLINE_EXHAUSTED
+            bytes=0
+            sha256=-
+
+            if (( remaining_seconds >= remaining_targets )); then
+              target_budget="$((remaining_seconds / remaining_targets))"
+              set +e
+              CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+                timeout --signal=TERM --kill-after=15s "${target_budget}s" \
+                go build -mod=readonly -trimpath -o "$output" ./cmd/crabbox
+              build_exit=$?
+              set -e
+
+              proof_exit="$build_exit"
+              status=BUILD_FAILED
+              if [[ "$build_exit" -eq 124 ]]; then
+                status=BUILD_TIMEOUT
+              elif [[ "$build_exit" -eq 0 && ! -s "$output" ]]; then
+                proof_exit=125
+                status=MISSING_OUTPUT
+              elif [[ "$build_exit" -eq 0 ]]; then
+                set +e
+                bytes="$(stat -c %s "$output")"
+                stat_exit=$?
+                sha256="$(sha256sum "$output" | cut -d' ' -f1)"
+                hash_exit=$?
+                exec 3>> "$build_info"
+                printf 'target=%s\n' "$target" >&3
+                label_exit=$?
+                go version -m "$output" >&3
+                metadata_exit=$?
+                printf '\n' >&3
+                separator_exit=$?
+                exec 3>&-
+                set -e
+                if [[ "$stat_exit" -eq 0 && "$hash_exit" -eq 0 &&
+                      "$label_exit" -eq 0 && "$metadata_exit" -eq 0 &&
+                      "$separator_exit" -eq 0 ]]; then
+                  proof_exit=0
+                  status=PASS
+                else
+                  proof_exit=126
+                  status=METADATA_FAILED
+                fi
+              fi
+            fi
+
+            elapsed_seconds="$(( $(date +%s) - started_at ))"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+              "$target" "$build_exit" "$proof_exit" "$status" \
+              "$elapsed_seconds" "$bytes" "$sha256" >> "$results"
+            rm -f "$output"
+
+            if [[ "$status" != PASS ]]; then
+              touch "$failed_marker"
+            fi
+            printf 'status\tphase\tdetail\tepoch\nINCOMPLETE\tbuild\t%s:%s\t%s\n' \
+              "$target" "$status" "$(date +%s)" > "$proof_dir/status.tsv"
+          done
+
+          [[ ! -e "$output" ]]
+          [[ -z "$(git status --porcelain=v1)" ]]
+          if [[ -e "$failed_marker" ]]; then
+            final_status=INCOMPLETE
+            final_detail=one_or_more_targets_failed
+          else
+            final_status=COMPLETE
+            final_detail=six_targets_passed
+          fi
+          printf 'status\tphase\tdetail\tepoch\n%s\tbuild\t%s\t%s\n' \
+            "$final_status" "$final_detail" "$(date +%s)" > "$proof_dir/status.tsv"
+          sed -i "1s/status=INCOMPLETE/status=$final_status/" "$build_info"
+
+      - name: Upload proof metadata
+        if: always()
+        timeout-minutes: 3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: railway-six-target-build-proof-${{ env.MERGE_SHA }}
+          path: |
+            ${{ runner.temp }}/railway-six-target-build-proof/status.tsv
+            ${{ runner.temp }}/railway-six-target-build-proof/source.tsv
+            ${{ runner.temp }}/railway-six-target-build-proof/builds.tsv
+            ${{ runner.temp }}/railway-six-target-build-proof/build-info.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Enforce complete successful proof
+        if: always()
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof_dir="$RUNNER_TEMP/railway-six-target-build-proof"
+          output="$RUNNER_TEMP/crabbox-six-target-build"
+          results="$proof_dir/builds.tsv"
+          build_info="$proof_dir/build-info.txt"
+          failed_marker="$proof_dir/failed"
+
+          (( $(date +%s) <= PROOF_REPORT_DEADLINE_EPOCH ))
+          [[ "$(git rev-parse HEAD)" == "$MERGE_SHA" ]]
+          [[ "$(git show -s --format=%T HEAD)" == "$MERGE_TREE_SHA" ]]
+          [[ "$(git show -s --format=%P HEAD)" == "$BASE_SHA $HEAD_SHA" ]]
+          [[ -z "$(git status --porcelain=v1)" ]]
+          [[ ! -e "$output" ]]
+          [[ ! -e "$failed_marker" ]]
+          [[ -s "$proof_dir/status.tsv" ]]
+          [[ -s "$proof_dir/source.tsv" ]]
+          [[ -s "$results" ]]
+          [[ -s "$build_info" ]]
+          grep -Fxq $'COMPLETE\tbuild\tsix_targets_passed' <(
+            cut -f1-3 "$proof_dir/status.tsv"
+          )
+          grep -Fxq 'status=COMPLETE' "$build_info"
+          [[ "$(grep -c '^target=' "$build_info")" -eq 6 ]]
+
+          awk -F '\t' '
+            NR == 1 {
+              expected = "target\tbuild_exit\tproof_exit\tstatus\telapsed_seconds\tbytes\tsha256"
+              if ($0 != expected) exit 10
+              next
+            }
+            {
+              if (seen[$1]++) exit 11
+              if ($2 != 0 || $3 != 0 || $4 != "PASS") exit 12
+              if ($5 !~ /^[0-9]+$/ || $6 !~ /^[1-9][0-9]*$/) exit 13
+              if (length($7) != 64 || $7 !~ /^[0-9a-f]+$/) exit 14
+              count++
+            }
+            END {
+              required["darwin/amd64"] = 1
+              required["darwin/arm64"] = 1
+              required["linux/amd64"] = 1
+              required["linux/arm64"] = 1
+              required["windows/amd64"] = 1
+              required["windows/arm64"] = 1
+              if (count != 6) exit 15
+              for (target in required) {
+                if (!seen[target]) exit 16
+              }
+            }
+          ' "$results"
