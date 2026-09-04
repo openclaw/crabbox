@@ -53,6 +53,13 @@ Bootstrap installs only a small base set with `--no-install-recommends`:
 `apt-get` runs are wrapped in a retry loop (8 attempts, increasing backoff) so a
 transient mirror failure does not fail the whole boot.
 
+The minimal bootstrap's APT refresh skips translation, AppStream DEP-11, and
+command-not-found indexes through command-local APT options. These auxiliary
+indexes are not needed to install the baseline packages. Package indexes,
+repository signature verification, and installation errors are unchanged; slow
+package mirrors can still delay boot. Later operator updates and separate
+developer-tools or project setup refreshes keep their existing behavior.
+
 Managed Debian and Ubuntu images describe this baseline in the canonical
 `/var/lib/crabbox-readiness/linux.json` manifest. The dedicated readiness
 directory is root-owned and mode `0755`, independent of the runtime-user-owned

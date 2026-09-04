@@ -595,7 +595,10 @@ Acquire::Retries "8";
 Acquire::http::Timeout "30";
 Acquire::https::Timeout "30";
 CRABBOX_APT
-  retry apt-get update
+  # Only this refresh skips auxiliary indexes; later operator updates keep their defaults.
+  retry apt-get -o Acquire::Languages=none \\
+    -o Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false \\
+    -o Acquire::IndexTargets::deb::CNF::DefaultEnabled=false update
   retry apt-get install -y --no-install-recommends $crabbox_readiness_packages
   crabbox_minimal_readiness_probes
   crabbox_write_readiness_manifest "$crabbox_minimal_manifest_payload"
