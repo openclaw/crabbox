@@ -54,7 +54,7 @@ before="$raw/base-before.json"
 after="$raw/base-after.json"
 image_read "$QUALIFICATION_BASE_AMI_ID" "$before"
 spoof_body="$raw/spoof.json"
-printf '{"expected":{"state":"capture"},"image":{"target":"linux"}}\n' >"$spoof_body"
+printf '{"expectedCurrent":{"state":"capture"}}\n' >"$spoof_body"
 probe_started_at=$(node -e 'process.stdout.write(new Date().toISOString())')
 spoof_status=$(curl --silent --show-error --max-time 30 -o "$raw/spoof-response.json" \
   -w '%{http_code}' -X POST -H "@$relay_headers" -H 'Content-Type: application/json' \
@@ -139,6 +139,30 @@ failed_status=$(curl --silent --show-error --max-time 30 \
   -H "@$relay_headers" -o "$raw/failed-readback.json" -w '%{http_code}' \
   "$QUALIFICATION_RELAY_URL/v1/images/$failed_image?provider=aws&target=linux&region=$QUALIFICATION_AWS_REGION")
 [[ "$failed_status" == 200 || "$failed_status" == 404 ]]
+node - "$raw/seed.json" "$raw/stale-cas-request.json" <<'NODE'
+const fs = require("node:fs");
+const seed = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (!/^ami-[0-9a-f]+$/.test(seed?.id ?? "") || typeof seed?.revision !== "string") {
+  throw new Error("seed receipt does not contain an exact image revision");
+}
+fs.writeFileSync(
+  process.argv[3],
+  `${JSON.stringify({
+    expectedCurrent: { state: "present", imageId: seed.id, revision: seed.revision },
+  })}\n`,
+  { mode: 0o600 },
+);
+NODE
+stale_status=$(curl --silent --show-error --max-time 30 -o "$raw/stale-cas-response.json" \
+  -w '%{http_code}' -X POST -H "@$relay_headers" -H 'Content-Type: application/json' \
+  --data-binary "@$raw/stale-cas-request.json" \
+  "$QUALIFICATION_RELAY_URL/v1/images/$QUALIFICATION_BASE_AMI_ID/promote-cas?provider=aws&target=linux&region=$QUALIFICATION_AWS_REGION")
+[[ "$stale_status" == 409 ]]
+image_read "$QUALIFICATION_BASE_AMI_ID" "$raw/stale-readback.json"
+stale_failed_status=$(curl --silent --show-error --max-time 30 \
+  -H "@$relay_headers" -o "$raw/stale-failed-readback.json" -w '%{http_code}' \
+  "$QUALIFICATION_RELAY_URL/v1/images/$failed_image?provider=aws&target=linux&region=$QUALIFICATION_AWS_REGION")
+[[ "$stale_failed_status" == 200 || "$stale_failed_status" == 404 ]]
 node "$ROOT/scripts/image-qualification-control.mjs" verify-catalog \
   "$raw/seed.json" \
   "$raw/seed-readback.json" \
@@ -147,6 +171,11 @@ node "$ROOT/scripts/image-qualification-control.mjs" verify-catalog \
   "$raw/restored-readback.json" \
   "$raw/failed-readback.json" \
   "$failed_status" \
+  "$raw/stale-cas-response.json" \
+  "$stale_status" \
+  "$raw/stale-readback.json" \
+  "$raw/stale-failed-readback.json" \
+  "$stale_failed_status" \
   "$proof/catalog-rollback.json"
 printf '{"mintExit":86,"injectedAfterPromotedSmoke":true,"launchCount":3,"smokeCount":%s}\n' \
   "$smoke_count" >"$proof/execution-state.json"

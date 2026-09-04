@@ -729,10 +729,14 @@ signer dispatch. The candidate publisher then boots source, candidate-image,
 and promoted-image leases sequentially. A trusted `CRABBOX_BIN` adapter
 delegates every command to the exact candidate CLI and captures the structured
 promotion and rollback receipts. Candidate API readbacks must prove the exact
-seeded default revision was restored and the failed image revision lost its
-catalog role; candidate logs are supplemental only. The adapter returns exit 86
-only after the promoted smoke succeeds. A credentialless child is then killed
-while authority-owned image state remains for protected cleanup.
+seeded base image was restored under a fresh rollback revision, distinct from
+both the seeded and failed promotion revisions, and the failed image revision
+lost its catalog role. A stale request naming the seeded revision must then
+return 409 with the fresh rollback revision as current, while a complete
+candidate API readback remains unchanged, including catalog, default, and FSR
+state. Candidate logs are supplemental only. The adapter returns exit 86 only
+after the promoted smoke succeeds. A credentialless child is then killed while
+authority-owned image state remains for protected cleanup.
 
 The authority and candidate configuration fix the run to Linux, one
 `t3.small`/`t3a.small` on-demand instance at a time, exactly three launches,

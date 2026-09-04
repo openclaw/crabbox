@@ -137,7 +137,10 @@ test("control tool fixes the reviewed policy and recovery boundary", () => {
 
 test("executor proves auth denial, FSR denial, three launches, rollback, and hard kill", () => {
   assert.match(executor, /promote-cas/);
+  assert.match(executor, /"expectedCurrent":\{"state":"capture"\}/);
   assert.match(executor, /\[\[ "\$spoof_status" == 403 \]\]/);
+  assert.match(executor, /\[\[ "\$stale_status" == 409 \]\]/);
+  assert.match(executor, /stale-cas-response\.json/);
   assert.match(executor, /fast-snapshot-restore/);
   assert.match(executor, /mint_status" -eq 86/);
   assert.match(executor, /launch-count.*-eq 3/);
@@ -461,12 +464,16 @@ test("attestation gate requires FSR denial and exact sequential launch order", a
     fsr: { rejected: true },
     catalog: {
       seededDefaultReadback: true,
-      priorDefaultRevisionRestored: true,
+      priorDefaultImageRestored: true,
+      rollbackRevisionAdvanced: true,
       failedCatalogRevisionRetired: true,
+      staleCASRejected: true,
+      staleReadbackUnchanged: true,
       priorImageDigest: "a".repeat(64),
       priorRevisionDigest: "b".repeat(64),
       failedImageDigest: "c".repeat(64),
       failedRevisionDigest: "d".repeat(64),
+      restoredRevisionDigest: "e".repeat(64),
     },
     execution: {
       mintExit: 86,
@@ -550,12 +557,18 @@ test("attestation gate requires FSR denial and exact sequential launch order", a
   );
 });
 
-test("catalog proof requires exact default restoration and failed revision retirement", async () => {
+test("catalog proof requires a fresh rollback revision and rejects stale CAS mutation", async () => {
   const module = await import(
     `${pathToFileURL(path.join(root, "scripts/image-qualification-control.mjs"))}?catalog=${Date.now()}`
   );
   const prior = { id: "ami-11111111", revision: "revision-prior", promotedAt: "before" };
   const failed = { id: "ami-22222222", revision: "revision-failed", promotedAt: "during" };
+  const restored = {
+    ...prior,
+    revision: "revision-rollback",
+    promotedAt: "after",
+    fastSnapshotRestores: [],
+  };
   const input = {
     seed: prior,
     seededReadback: { image: prior },
@@ -564,33 +577,93 @@ test("catalog proof requires exact default restoration and failed revision retir
       previous: { state: "present", imageId: prior.id, revision: prior.revision },
     },
     rollback: {
-      image: prior,
+      image: restored,
       previous: { state: "present", imageId: failed.id, revision: failed.revision },
     },
-    restoredReadback: { image: prior },
-    failedReadback: { image: { id: failed.id, state: "available" } },
-    failedStatus: 200,
+    restoredReadback: { image: restored },
+    failedReadback: {},
+    failedStatus: 404,
+    staleResponse: {
+      error: "image_promotion_precondition_failed",
+      expected: { state: "present", imageId: prior.id, revision: prior.revision },
+      current: { state: "present", imageId: restored.id, revision: restored.revision },
+    },
+    staleStatus: 409,
+    staleReadback: { image: structuredClone(restored) },
+    staleFailedReadback: {},
+    staleFailedStatus: 404,
   };
   const evidence = module.verifyCatalogRollbackEvidence(input);
-  assert.equal(evidence.priorDefaultRevisionRestored, true);
+  assert.equal(evidence.priorDefaultImageRestored, true);
+  assert.equal(evidence.rollbackRevisionAdvanced, true);
   assert.equal(evidence.failedCatalogRevisionRetired, true);
+  assert.equal(evidence.staleCASRejected, true);
+  assert.equal(evidence.staleReadbackUnchanged, true);
+  assert.match(evidence.restoredRevisionDigest, /^[0-9a-f]{64}$/);
+  assert.equal("priorDefaultRevisionRestored" in evidence, false);
   assert.throws(
     () =>
       module.verifyCatalogRollbackEvidence({
         ...input,
-        restoredReadback: {
-          image: { ...prior, revision: "replacement-revision" },
-        },
+        rollback: { ...input.rollback, image: prior },
       }),
-    /exact prior default revision/,
+    /fresh revision/,
   );
   assert.throws(
     () =>
       module.verifyCatalogRollbackEvidence({
         ...input,
+        restoredReadback: { image: { ...restored, revision: "revision-mismatch" } },
+      }),
+    /receipt and restored candidate API readback/,
+  );
+  assert.throws(
+    () =>
+      module.verifyCatalogRollbackEvidence({
+        ...input,
+        rollback: {
+          ...input.rollback,
+          previous: { state: "present", imageId: failed.id, revision: prior.revision },
+        },
+      }),
+    /fresh revision/,
+  );
+  assert.throws(
+    () =>
+      module.verifyCatalogRollbackEvidence({
+        ...input,
+        staleResponse: {
+          ...input.staleResponse,
+          current: { state: "present", imageId: restored.id, revision: failed.revision },
+        },
+      }),
+    /stale CAS response/,
+  );
+  assert.throws(
+    () =>
+      module.verifyCatalogRollbackEvidence({
+        ...input,
+        failedStatus: 200,
         failedReadback: { image: failed },
       }),
     /remains in the candidate catalog/,
+  );
+  assert.throws(
+    () =>
+      module.verifyCatalogRollbackEvidence({
+        ...input,
+        staleReadback: { image: { ...restored, fastSnapshotRestores: ["us-east-1a"] } },
+      }),
+    /stale CAS changed/,
+  );
+  assert.throws(
+    () =>
+      module.verifyCatalogRollbackEvidence({
+        ...input,
+        staleFailedReadback: { image: failed },
+        staleFailedStatus: 200,
+      }),
+    /stale CAS changed/,
   );
 });
 

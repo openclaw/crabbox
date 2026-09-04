@@ -107,6 +107,11 @@ export function verifyCatalogRollbackEvidence({
   restoredReadback,
   failedReadback,
   failedStatus,
+  staleResponse,
+  staleStatus,
+  staleReadback,
+  staleFailedReadback,
+  staleFailedStatus,
 }) {
   const prior = imageRecord(seed, "seed promotion");
   const seeded = imageRecord(
@@ -121,30 +126,38 @@ export function verifyCatalogRollbackEvidence({
     objectAt(restoredReadback, "restored readback").image,
     "restored readback image",
   );
+  const stale = objectAt(staleResponse, "stale CAS response");
+  const staleExpected = objectAt(stale.expected, "stale CAS expected state");
+  const staleCurrent = objectAt(stale.current, "stale CAS current state");
+  if (prior.id !== seeded.id || prior.revision !== seeded.revision) {
+    throw new Error("candidate API did not capture the exact seeded default revision");
+  }
   if (
-    prior.id !== seeded.id ||
-    prior.revision !== seeded.revision ||
+    promoted.id === prior.id ||
+    promoted.revision === prior.revision ||
     promotedPrevious.state !== "present" ||
     promotedPrevious.imageId !== prior.id ||
     promotedPrevious.revision !== prior.revision
   ) {
-    throw new Error("candidate API did not capture the exact seeded default revision");
+    throw new Error("promotion receipt did not advance from the seeded default revision");
   }
   if (
     rollbackPrevious.state !== "present" ||
     rollbackPrevious.imageId !== promoted.id ||
     rollbackPrevious.revision !== promoted.revision ||
     rollbackImage.id !== prior.id ||
-    rollbackImage.revision !== prior.revision ||
-    restored.id !== prior.id ||
-    restored.revision !== prior.revision
+    rollbackImage.revision === prior.revision ||
+    rollbackImage.revision === promoted.revision
   ) {
-    throw new Error("candidate API did not restore the exact prior default revision");
+    throw new Error("rollback receipt did not restore the base image under a fresh revision");
+  }
+  if (restored.id !== rollbackImage.id || restored.revision !== rollbackImage.revision) {
+    throw new Error("rollback receipt and restored candidate API readback do not match");
   }
   const failed =
     Number(failedStatus) === 404
       ? undefined
-      : objectAt(objectAt(failedReadback, "failed readback").image, "failed readback image");
+      : imageRecord(objectAt(failedReadback, "failed readback").image, "failed readback image");
   if (
     (Number(failedStatus) !== 200 && Number(failedStatus) !== 404) ||
     (failed &&
@@ -155,15 +168,38 @@ export function verifyCatalogRollbackEvidence({
   ) {
     throw new Error("failed image revision remains in the candidate catalog");
   }
+  if (
+    Number(staleStatus) !== 409 ||
+    stale.error !== "image_promotion_precondition_failed" ||
+    staleExpected.state !== "present" ||
+    staleExpected.imageId !== prior.id ||
+    staleExpected.revision !== prior.revision ||
+    staleCurrent.state !== "present" ||
+    staleCurrent.imageId !== rollbackImage.id ||
+    staleCurrent.revision !== rollbackImage.revision
+  ) {
+    throw new Error("stale CAS response did not report the restored base image revision");
+  }
+  if (
+    canonical(staleReadback) !== canonical(restoredReadback) ||
+    Number(staleFailedStatus) !== Number(failedStatus) ||
+    canonical(staleFailedReadback) !== canonical(failedReadback)
+  ) {
+    throw new Error("stale CAS changed candidate catalog, default, or FSR state");
+  }
   return {
     version: 1,
     priorImageDigest: digest(prior.id),
     priorRevisionDigest: digest(prior.revision),
     failedImageDigest: digest(promoted.id),
     failedRevisionDigest: digest(promoted.revision),
+    restoredRevisionDigest: digest(rollbackImage.revision),
     seededDefaultReadback: true,
-    priorDefaultRevisionRestored: true,
+    priorDefaultImageRestored: true,
+    rollbackRevisionAdvanced: true,
     failedCatalogRevisionRetired: true,
+    staleCASRejected: true,
+    staleReadbackUnchanged: true,
   };
 }
 
@@ -1557,12 +1593,16 @@ export function verifyQualificationEvidence(attestation, proof) {
     (receipt.resourcesAtStart?.images ?? 0) < 1 ||
     proof?.fsr?.rejected !== true ||
     proof?.catalog?.seededDefaultReadback !== true ||
-    proof?.catalog?.priorDefaultRevisionRestored !== true ||
+    proof?.catalog?.priorDefaultImageRestored !== true ||
+    proof?.catalog?.rollbackRevisionAdvanced !== true ||
     proof?.catalog?.failedCatalogRevisionRetired !== true ||
+    proof?.catalog?.staleCASRejected !== true ||
+    proof?.catalog?.staleReadbackUnchanged !== true ||
     !sha64.test(proof?.catalog?.priorImageDigest ?? "") ||
     !sha64.test(proof?.catalog?.priorRevisionDigest ?? "") ||
     !sha64.test(proof?.catalog?.failedImageDigest ?? "") ||
     !sha64.test(proof?.catalog?.failedRevisionDigest ?? "") ||
+    !sha64.test(proof?.catalog?.restoredRevisionDigest ?? "") ||
     proof?.execution?.mintExit !== 86 ||
     proof?.execution?.injectedAfterPromotedSmoke !== true ||
     proof?.execution?.launchCount !== 3 ||
@@ -1653,7 +1693,7 @@ async function main() {
     return;
   }
   if (command === "verify-catalog") {
-    if (args.length !== 8) throw new Error("verify-catalog requires eight arguments");
+    if (args.length !== 13) throw new Error("verify-catalog requires thirteen arguments");
     const result = verifyCatalogRollbackEvidence({
       seed: readJSON(path.resolve(args[0])),
       seededReadback: readJSON(path.resolve(args[1])),
@@ -1662,8 +1702,13 @@ async function main() {
       restoredReadback: readJSON(path.resolve(args[4])),
       failedReadback: readJSON(path.resolve(args[5])),
       failedStatus: args[6],
+      staleResponse: readJSON(path.resolve(args[7])),
+      staleStatus: args[8],
+      staleReadback: readJSON(path.resolve(args[9])),
+      staleFailedReadback: readJSON(path.resolve(args[10])),
+      staleFailedStatus: args[11],
     });
-    writeJSON(path.resolve(args[7]), result);
+    writeJSON(path.resolve(args[12]), result);
     return;
   }
   if (command === "deploy") return await deploy();
