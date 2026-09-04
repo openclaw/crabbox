@@ -31,8 +31,32 @@ func TestSameOrigin(t *testing.T) {
 			}
 		})
 	}
-	if SameOrigin(nil, base) || SameOrigin(base, nil) {
+	if SameOrigin(nil, base) || SameOrigin(base, nil) || SameOrigin(nil, nil) {
 		t.Fatal("SameOrigin accepted a nil URL")
+	}
+}
+
+func TestSameOriginEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{name: "http default port", a: "http://example.com", b: "HTTP://EXAMPLE.COM:80", want: true},
+		{name: "empty URLs", want: true},
+		{name: "unknown scheme", a: "custom://example.com", b: "CUSTOM://EXAMPLE.COM", want: true},
+		{name: "unknown scheme explicit port", a: "custom://example.com", b: "custom://example.com:443"},
+		{name: "zero padded port", a: "https://example.com:0443", b: "https://example.com:443"},
+		{name: "IPv6 textual difference", a: "https://[2001:db8::1]", b: "https://[2001:0db8::1]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			a, b := mustParseURL(t, test.a), mustParseURL(t, test.b)
+			if got := SameOrigin(a, b); got != test.want {
+				t.Fatalf("SameOrigin(%q, %q) = %v, want %v", a, b, got, test.want)
+			}
+		})
 	}
 }
 
