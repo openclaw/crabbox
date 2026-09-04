@@ -785,6 +785,17 @@ phase markers on stdout or stderr as
 the marker line from output. In `blacksmith-testbox` mode, sync is reported as
 delegated in the same schema.
 
+For a failed command, the last observed phase names `install`, `hydrate`, or
+`setup` classify as `install`; `build` and `test` classify as themselves (case
+insensitive). Emit a marker before each stage. These phases take precedence over
+workload error text from earlier stages. Other custom phase names remain visible
+in timings but classify as `unknown`. Without phase evidence, diagnostic text may
+identify a failure, but echoed command flags and arbitrary stage receipts do not.
+Provider, SSH, auth, and normalized resource-exhaustion evidence retain priority;
+structured test-result failure policy is unchanged. A later artifact collection
+failure does not inherit a successful workload's phase. Classification does not
+alter the command's exit code or output.
+
 Use `--timing-record=default` or `--timing-record <path>` to append the final
 timing payload to a local benchmark JSONL store. This is opt-in; ordinary
 `crabbox run` invocations do not persist timing rows. The persisted row wraps the

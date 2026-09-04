@@ -2407,6 +2407,11 @@ afterSync:
 		code, streamErr, failureDownloadEligible = witness.finish(ctx, code, streamErr)
 	}
 	failureEvidence := RunFailureEvidence{}
+	var commandFailurePhases []TimingPhase
+	commandFailureLog := ""
+	if code != 0 {
+		commandFailureLog = logBuffer.String()
+	}
 	var results *TestResultSummary
 	classification := FailureClassification{}
 	attestPath := strings.TrimSpace(*attestOut)
@@ -2458,11 +2463,11 @@ afterSync:
 			return
 		}
 		if finalCode != 0 && classification.BlockedStage == "" {
-			classificationLog := logBuffer.String()
+			classificationLog := commandFailureLog
 			if finalFailure != nil {
 				classificationLog = strings.TrimSpace(classificationLog + "\n" + finalFailure.Error())
 			}
-			classification = classifyRunOutcomeFailure(finalCode, classificationLog, timings.commandPhases, failureEvidence, false)
+			classification = classifyRunOutcomeFailure(finalCode, classificationLog, commandFailurePhases, failureEvidence, false)
 		}
 
 		receipt := writtenAttestReceipt
@@ -2528,6 +2533,10 @@ afterSync:
 	stderrPhaseWriter.Flush()
 	timings.command = time.Since(commandStart)
 	timings.commandPhases = phaseTracker.Finish(time.Now())
+	// Later collection failures must not inherit a successful workload's phase.
+	if code != 0 {
+		commandFailurePhases = timings.commandPhases
+	}
 	if err := waitWorkspaceOwnerNoChild(ctx, lifecycleOwner, lifecycleOwner.callTimeout()); err != nil {
 		return recordFailure(exit(7, "remote command child ownership remains active; refusing collection and cleanup: %v", err))
 	}
@@ -2627,11 +2636,11 @@ afterSync:
 	}
 	total := time.Since(timings.started)
 	if code != 0 {
-		classificationLog := logBuffer.String()
+		classificationLog := commandFailureLog
 		if artifactFailure != nil {
 			classificationLog = strings.TrimSpace(classificationLog + "\n" + artifactFailure.Error())
 		}
-		classification = classifyRunOutcomeFailure(code, classificationLog, timings.commandPhases, failureEvidence, testResultsFailure != nil)
+		classification = classifyRunOutcomeFailure(code, classificationLog, commandFailurePhases, failureEvidence, testResultsFailure != nil)
 		timings.blockedStage = classification.BlockedStage
 		timings.resourceExhaustion = classification.ResourceExhaustion
 		timings.retryLikely = classification.RetryLikely
@@ -2717,7 +2726,7 @@ afterSync:
 			StopCommand:           report.StopCommand,
 			Classification:        classification,
 			Evidence:              sanitizeRunFailureEvidence(failureEvidence),
-			Phases:                timings.commandPhases,
+			Phases:                commandFailurePhases,
 			Results:               results,
 		}
 		finalizeFailureDigest = func() {

@@ -300,10 +300,12 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (runResult 
 	report = core.TimingReportWithRunResult(report, result, cleanupErr)
 	if code != 0 {
 		classificationInput := string(stdoutProof.Bytes()) + "\n" + string(stderrProof.Bytes())
+		failurePhases := commandPhases
 		if artifactFailedSuccess {
-			classificationInput += "\n" + artifactErr.Error()
+			classificationInput = artifactErr.Error()
+			failurePhases = nil
 		}
-		classification := core.ClassifyRunFailure(code, classificationInput, commandPhases)
+		classification := core.ClassifyRunFailure(code, classificationInput, failurePhases)
 		core.ApplyFailureClassification(&report, classification)
 	}
 	if cleanupErr != nil && result.ErrorKind == core.RunErrorProvider {

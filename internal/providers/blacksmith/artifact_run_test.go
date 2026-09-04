@@ -808,9 +808,15 @@ func TestBlacksmithArtifactFailureCleanupAndClassification(t *testing.T) {
 					if report.ExitCode != want || report.CommandMs != result.Command.Milliseconds() || report.TotalMs != result.Total.Milliseconds() {
 						t.Fatalf("timing changed: %+v", report)
 					}
-					baseline := core.ClassifyRunFailure(code, "CRABBOX_PHASE:test\n", report.CommandPhases)
-					if code != 0 && (report.BlockedStage != baseline.BlockedStage || report.ResourceExhaustion != baseline.ResourceExhaustion || report.RetryLikely != baseline.RetryLikely) {
-						t.Fatalf("collector reclassified workload: %+v", report)
+					stage, retry := "test", "unknown"
+					if code == 0 {
+						stage = "unknown"
+						if mode == "lease-cleanup" {
+							stage, retry = "cleanup", "true"
+						}
+					}
+					if report.BlockedStage != stage || report.ResourceExhaustion != "" || report.RetryLikely != retry {
+						t.Fatalf("collector changed failure attribution: %+v, want stage=%s retry=%s", report, stage, retry)
 					}
 				}
 				if strings.Contains(stderr.String(), "out of memory") || strings.Contains(stderr.String(), "H4sI") {

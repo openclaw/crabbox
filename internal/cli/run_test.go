@@ -3205,6 +3205,7 @@ printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd" in
   *"base64 <"*) printf 'ZG93bmxvYWRlZAo='; exit 0 ;;
   *"check_artifact_file()"*) printf 'missing required artifact: reports/data/manifest.json\n' >&2; exit 8 ;;
+  *"fixture-stage-success"*) printf 'CRABBOX_PHASE:install\npnpm install --package-import-method=copy completed\nCRABBOX_PHASE:test\n'; exit 0 ;;
 esac
 exit 0
 `
@@ -3222,7 +3223,7 @@ exit 0
 		"--timing-json",
 		"--require-artifact", "reports/data/manifest.json",
 		"--download", "reports/data/manifest.json=" + downloadPath,
-		"--", "true",
+		"--", "fixture-stage-success",
 	})
 	var exitErr ExitError
 	if !AsExitError(err, &exitErr) || exitErr.Code != 7 {
@@ -3253,6 +3254,12 @@ exit 0
 	}
 	if report.ExitCode != 7 {
 		t.Fatalf("timing exitCode=%d, want 7\nreport=%#v", report.ExitCode, report)
+	}
+	if report.BlockedStage != "unknown" || finalTimingPhaseName(report.CommandPhases) != "test" {
+		t.Fatalf("artifact failure blamed successful workload: %+v", report)
+	}
+	if strings.Contains(stderr.String(), "\n  failed_phase: test\n") {
+		t.Fatalf("failure digest blamed successful workload:\n%s", stderr.String())
 	}
 }
 
