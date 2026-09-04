@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"slices"
 	"strings"
@@ -1026,20 +1025,4 @@ func errorsJoin(errs ...error) error {
 		out = fmt.Errorf("%v; %w", out, err)
 	}
 	return out
-}
-
-func dataPlaneHostForSandbox(sandboxID, sandboxHost string) string {
-	sandboxID = strings.TrimSpace(sandboxID)
-	sandboxHost = strings.TrimSpace(sandboxHost)
-	if sandboxID == "" || sandboxHost == "" {
-		return ""
-	}
-	if strings.Contains(sandboxHost, "://") {
-		return ""
-	}
-	if _, _, err := net.SplitHostPort(sandboxHost); err == nil {
-		host, _, _ := net.SplitHostPort(sandboxHost)
-		sandboxHost = host
-	}
-	return "boxd-" + sandboxID + "." + sandboxHost
 }
