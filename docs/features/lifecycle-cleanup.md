@@ -89,6 +89,20 @@ cancel an already-dispatched provider request. Failed and released records can
 still carry unresolved cleanup responsibility. Their local state alone is not
 proof that the provider resource was deleted.
 
+Interrupted provisioning recovery describes an observed interruption, without
+attributing it to a deployment. It can reconcile settled calls in the same
+coordinator generation as well as attempts observed after reconstruction; the
+existing generation and settlement eligibility checks still apply.
+
+AWS recovery inventory is evidence only for the queried Region and existing
+tag/state filters. Both the coordinator's instance inventory and private
+workspace lookup read every `DescribeInstances` page, retaining duplicate
+matches for ambiguity checks. A repeated pagination token, more than 100 pages,
+or a later-page failure makes the inventory incomplete and rejects the entire
+lookup. Incomplete inventory retains cleanup debt and cannot confirm absence,
+even after the existing 30-minute absence confirmation window. A complete empty
+inventory remains subject to that window and the existing ownership checks.
+
 For an exact Azure lease whose provisioning stops before VM creation, ordinary
 owned-resource release can clean the observed creation prefix: an unattached
 canonical public IP alone, or the exact canonical public IP and NIC together.
