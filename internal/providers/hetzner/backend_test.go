@@ -3,12 +3,17 @@ package hetzner
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,9 +30,11 @@ type fakeHetznerClient struct {
 	deleteErr    error
 	keyDeleteErr error
 	keyCreated   bool
+	keyName      string
 
 	deletedServers []int64
 	deletedKeys    []string
+	labeledServers []int64
 }
 
 func (f *fakeHetznerClient) ListCrabboxServers(context.Context) ([]Server, error) {
@@ -35,12 +42,15 @@ func (f *fakeHetznerClient) ListCrabboxServers(context.Context) ([]Server, error
 }
 
 func (f *fakeHetznerClient) EnsureSSHKey(_ context.Context, name, _ string) (core.SSHKey, bool, error) {
+	if f.keyName != "" {
+		name = f.keyName
+	}
 	return core.SSHKey{Name: name}, f.keyCreated, nil
 }
 
-func (f *fakeHetznerClient) CreateServerWithFallback(context.Context, Config, string, string, string, bool, func(string, ...any)) (Server, Config, error) {
+func (f *fakeHetznerClient) CreateServerWithFallback(_ context.Context, cfg Config, _, _, _ string, _ bool, _ func(string, ...any)) (Server, Config, error) {
 	f.createCalls++
-	return f.createServer, Config{}, f.createErr
+	return f.createServer, cfg, f.createErr
 }
 
 func (f *fakeHetznerClient) GetServer(_ context.Context, id int64) (Server, error) {
@@ -61,7 +71,8 @@ func (f *fakeHetznerClient) DeleteSSHKey(_ context.Context, name string) error {
 	return f.keyDeleteErr
 }
 
-func (f *fakeHetznerClient) SetLabels(context.Context, int64, map[string]string) error {
+func (f *fakeHetznerClient) SetLabels(_ context.Context, id int64, _ map[string]string) error {
+	f.labeledServers = append(f.labeledServers, id)
 	return nil
 }
 
@@ -291,7 +302,7 @@ func TestHetznerReleaseRejectsClaimForDifferentServer(t *testing.T) {
 
 func TestHetznerReleaseRollsBackExactLeaseAcquiredByBackendBeforeClaim(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
-	server := crabboxHetznerServer(42, leaseID)
+	server := acquiredHetznerTestServer(42, leaseID)
 	client := &fakeHetznerClient{
 		servers:      map[int64]Server{42: server},
 		createServer: server,
@@ -301,7 +312,7 @@ func TestHetznerReleaseRollsBackExactLeaseAcquiredByBackendBeforeClaim(t *testin
 	installHetznerClaimState(t)
 
 	backend := NewHetznerLeaseBackend(ProviderSpec{}, Config{}, Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend)
-	lease, err := backend.Acquire(context.Background(), AcquireRequest{})
+	lease, err := backend.Acquire(context.Background(), AcquireRequest{RequestedSlug: "test"})
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
@@ -318,7 +329,7 @@ func TestHetznerReleaseRollsBackExactLeaseAcquiredByBackendBeforeClaim(t *testin
 
 func TestHetznerReleaseRejectsUnclaimedLeaseAcquiredByDifferentBackend(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
-	server := crabboxHetznerServer(42, leaseID)
+	server := acquiredHetznerTestServer(42, leaseID)
 	client := &fakeHetznerClient{
 		servers:      map[int64]Server{42: server},
 		createServer: server,
@@ -328,7 +339,7 @@ func TestHetznerReleaseRejectsUnclaimedLeaseAcquiredByDifferentBackend(t *testin
 	installHetznerClaimState(t)
 
 	acquiringBackend := NewHetznerLeaseBackend(ProviderSpec{}, Config{}, Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend)
-	lease, err := acquiringBackend.Acquire(context.Background(), AcquireRequest{})
+	lease, err := acquiringBackend.Acquire(context.Background(), AcquireRequest{RequestedSlug: "test"})
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
@@ -425,7 +436,7 @@ func TestHetznerResolveAliasAllowsExplicitUpgradeOfLegacyClaim(t *testing.T) {
 
 func TestHetznerAcquireRollsBackAfterIPWaitFailure(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
-	server := crabboxHetznerServer(42, leaseID)
+	server := acquiredHetznerTestServer(42, leaseID)
 	client := &fakeHetznerClient{
 		servers:      map[int64]Server{42: server},
 		createServer: server,
@@ -438,7 +449,7 @@ func TestHetznerAcquireRollsBackAfterIPWaitFailure(t *testing.T) {
 	}
 
 	backend := NewHetznerLeaseBackend(ProviderSpec{}, Config{}, Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend)
-	_, err := backend.acquireOnce(context.Background(), false, "")
+	_, err := backend.acquireOnce(context.Background(), false, "test")
 	if !errors.Is(err, waitErr) {
 		t.Fatalf("err=%v, want ip wait failure", err)
 	}
@@ -450,9 +461,243 @@ func TestHetznerAcquireRollsBackAfterIPWaitFailure(t *testing.T) {
 	}
 }
 
+func TestHetznerAcquireBindsReadinessToCreatedServer(t *testing.T) {
+	const leaseID = "cbx_abcdef123456"
+	for _, tt := range []struct {
+		name   string
+		mutate func(*Server)
+	}{
+		{"different ID", func(s *Server) { s.ID = 43; s.CloudID = "43" }},
+		{"missing ID", func(s *Server) { s.ID = 0; s.CloudID = "" }},
+		{"inconsistent cloud ID", func(s *Server) { s.CloudID = "43" }},
+		{"different name", func(s *Server) { s.Name = "another-resource" }},
+		{"missing name", func(s *Server) { s.Name = "" }},
+		{"different lease", func(s *Server) { s.Labels["lease"] = "cbx_111111111111" }},
+		{"different provider", func(s *Server) { s.Labels["provider"] = "other" }},
+		{"missing owner", func(s *Server) { delete(s.Labels, "created_by") }},
+		{"different slug", func(s *Server) { s.Labels["slug"] = "other" }},
+		{"different key", func(s *Server) { s.Labels["provider_key"] = core.ProviderKeyForLease("cbx_111111111111") }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			created := acquiredHetznerTestServer(42, leaseID)
+			client := &fakeHetznerClient{createServer: created, keyCreated: true}
+			installHetznerTestHooks(t, client)
+			waitForServerIP = func(_ context.Context, _ hetznerClient, id int64) (Server, error) {
+				if id != 42 {
+					t.Fatalf("readiness lookup=%d", id)
+				}
+				// Deliberately reuse the label map returned at creation: the rollback
+				// anchor must not depend on mutable later observations.
+				ready := created
+				tt.mutate(&ready)
+				return ready, nil
+			}
+			sshCalls := 0
+			waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+				sshCalls++
+				return errors.New("unexpected SSH")
+			}
+			backend := NewHetznerLeaseBackend(ProviderSpec{}, Config{}, Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend)
+			_, err := backend.Acquire(context.Background(), AcquireRequest{RequestedSlug: "test"})
+			if err == nil || !strings.Contains(err.Error(), "readiness") {
+				t.Fatalf("err=%v, want readiness binding rejection", err)
+			}
+			if sshCalls != 0 || len(client.labeledServers) != 0 {
+				t.Fatalf("ssh=%d labels=%v", sshCalls, client.labeledServers)
+			}
+			if len(client.deletedServers) != 1 || client.deletedServers[0] != 42 {
+				t.Fatalf("deleted=%v, want original server42 only", client.deletedServers)
+			}
+			if len(client.deletedKeys) != 1 || client.deletedKeys[0] != core.ProviderKeyForLease(leaseID) {
+				t.Fatalf("deleted keys=%v", client.deletedKeys)
+			}
+			if _, ok := backend.acquired.Load(leaseID); ok {
+				t.Fatal("mismatched resource published as acquired")
+			}
+		})
+	}
+}
+
+func acquiredHetznerTestServer(id int64, leaseID string) Server {
+	server := crabboxHetznerServer(id, leaseID)
+	server.Name = core.LeaseProviderName(leaseID, "test")
+	server.Labels = maps.Clone(server.Labels)
+	server.Labels["provider_key"] = core.ProviderKeyForLease(leaseID)
+	return server
+}
+
+func TestHetznerAcquireRejectsUnboundCreateWithoutDeletingReturnedServer(t *testing.T) {
+	const leaseID = "cbx_abcdef123456"
+	for _, tt := range []struct {
+		name   string
+		mutate func(*Server)
+	}{
+		{"missing ID", func(s *Server) { s.ID = 0; s.CloudID = "" }},
+		{"contradictory ID", func(s *Server) { s.CloudID = "43" }},
+		{"foreign name", func(s *Server) { s.Name = "foreign" }},
+		{"foreign lease", func(s *Server) { s.Labels["lease"] = "cbx_111111111111" }},
+		{"missing provider", func(s *Server) { delete(s.Labels, "provider") }},
+		{"foreign key", func(s *Server) { s.Labels["provider_key"] = core.ProviderKeyForLease("cbx_111111111111") }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			created := acquiredHetznerTestServer(42, leaseID)
+			tt.mutate(&created)
+			client := &fakeHetznerClient{createServer: created, keyCreated: true}
+			installHetznerTestHooks(t, client)
+			waitForServerIP = func(context.Context, hetznerClient, int64) (Server, error) {
+				t.Fatal("unbound creation polled")
+				return Server{}, nil
+			}
+			waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+				t.Fatal("unbound creation reached SSH")
+				return nil
+			}
+			backend := NewHetznerLeaseBackend(ProviderSpec{}, Config{}, Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend)
+			_, err := backend.Acquire(context.Background(), AcquireRequest{RequestedSlug: "test"})
+			if err == nil || !strings.Contains(err.Error(), "server cleanup withheld") {
+				t.Fatalf("err=%v", err)
+			}
+			if len(client.deletedServers) != 0 || len(client.labeledServers) != 0 {
+				t.Fatalf("deleted=%v labeled=%v", client.deletedServers, client.labeledServers)
+			}
+			if len(client.deletedKeys) != 1 || client.deletedKeys[0] != core.ProviderKeyForLease(leaseID) {
+				t.Fatalf("deleted keys=%v, want independently created key only", client.deletedKeys)
+			}
+		})
+	}
+}
+
+func TestHetznerAcquireAcceptsNewEndpointAndPreservesReusedKey(t *testing.T) {
+	const leaseID = "cbx_abcdef123456"
+	for _, failSSH := range []bool{false, true} {
+		t.Run(strconv.FormatBool(failSSH), func(t *testing.T) {
+			created := acquiredHetznerTestServer(42, leaseID)
+			const reusedKey = "shared key / with punctuation"
+			created.Labels["provider_key"] = core.DirectLeaseLabels(Config{ProviderKey: reusedKey}, leaseID, "test", providerName, "", false, time.Now())["provider_key"]
+			client := &fakeHetznerClient{createServer: created, keyName: reusedKey}
+			installHetznerTestHooks(t, client)
+			waitForServerIP = func(context.Context, hetznerClient, int64) (Server, error) {
+				ready := created
+				ready.Labels = maps.Clone(created.Labels)
+				ready.PublicNet.IPv4.IP = "203.0.113.11"
+				ready.Labels["state"] = "running"
+				return ready, nil
+			}
+			sshErr := errors.New("synthetic SSH failure")
+			waitForSSHReady = func(_ context.Context, target *SSHTarget, _ io.Writer, _ string, _ time.Duration) error {
+				if target.Host != "203.0.113.11" {
+					t.Fatalf("SSH host=%s", target.Host)
+				}
+				if failSSH {
+					return sshErr
+				}
+				return nil
+			}
+			backend := NewHetznerLeaseBackend(ProviderSpec{}, Config{}, Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend)
+			lease, err := backend.Acquire(context.Background(), AcquireRequest{RequestedSlug: "test"})
+			if failSSH {
+				if !errors.Is(err, sshErr) || len(client.deletedServers) != 1 || client.deletedServers[0] != 42 {
+					t.Fatalf("err=%v deleted=%v", err, client.deletedServers)
+				}
+			} else if err != nil || lease.Server.ID != 42 || len(client.labeledServers) != 1 || len(client.deletedServers) != 0 {
+				t.Fatalf("lease=%+v err=%v labeled=%v deleted=%v", lease, err, client.labeledServers, client.deletedServers)
+			}
+			if len(client.deletedKeys) != 0 {
+				t.Fatalf("reused key deleted: %v", client.deletedKeys)
+			}
+		})
+	}
+}
+
+func TestHetznerAcquireNativeHTTPReadinessBinding(t *testing.T) {
+	for _, observedID := range []int64{42, 43} {
+		t.Run(strconv.FormatInt(observedID, 10), func(t *testing.T) {
+			var mu sync.Mutex
+			var requests []string
+			var created Server
+			var createdKey core.SSHKey
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				requests = append(requests, r.Method+" "+r.URL.Path)
+				w.Header().Set("Content-Type", "application/json")
+				switch r.Method + " " + r.URL.Path {
+				case "GET /servers":
+					_, _ = io.WriteString(w, `{"servers":[]}`)
+				case "GET /ssh_keys":
+					keys := []core.SSHKey{}
+					if createdKey.ID != 0 {
+						keys = append(keys, createdKey)
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"ssh_keys": keys})
+				case "POST /ssh_keys":
+					if err := json.NewDecoder(r.Body).Decode(&createdKey); err != nil {
+						t.Error(err)
+						http.Error(w, "invalid key", 400)
+						return
+					}
+					createdKey.ID = 7
+					_ = json.NewEncoder(w).Encode(map[string]any{"ssh_key": createdKey})
+				case "POST /servers":
+					var input struct {
+						Name   string
+						Labels map[string]string
+					}
+					if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+						t.Error(err)
+						http.Error(w, "invalid server", 400)
+						return
+					}
+					created = Server{ID: 42, Name: input.Name, Labels: input.Labels}
+					_ = json.NewEncoder(w).Encode(map[string]any{"server": created})
+				case "GET /servers/42":
+					ready := created
+					ready.ID = observedID
+					ready.PublicNet.IPv4.IP = "203.0.113.11"
+					_ = json.NewEncoder(w).Encode(map[string]any{"server": ready})
+				case "PUT /servers/42", "DELETE /servers/42", "DELETE /ssh_keys/7":
+					_, _ = io.WriteString(w, `{}`)
+				default:
+					t.Errorf("unexpected native request %s %s", r.Method, r.URL.Path)
+					http.Error(w, "unexpected request", 400)
+				}
+			}))
+			defer api.Close()
+			installHetznerTestHooks(t, &fakeHetznerClient{})
+			client := &core.HetznerClient{Token: "synthetic", Client: api.Client(), BaseURL: api.URL}
+			newHetznerClient = func() (hetznerClient, error) { return client, nil }
+			waitForServerIP = func(ctx context.Context, _ hetznerClient, id int64) (Server, error) {
+				return core.WaitForServerIP(ctx, client, id)
+			}
+			sshCalls := 0
+			waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+				sshCalls++
+				if observedID != 42 {
+					return errors.New("unexpected readiness SSH")
+				}
+				return nil
+			}
+			cfg := Config{ServerType: "cpx11", ServerTypeExplicit: true, Location: "test", Image: "ubuntu-24.04"}
+			backend := NewHetznerLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend)
+			lease, err := backend.Acquire(context.Background(), AcquireRequest{RequestedSlug: "test"})
+			mu.Lock()
+			trace := strings.Join(requests, "\n")
+			mu.Unlock()
+			if observedID == 42 {
+				if err != nil || lease.Server.ID != 42 || sshCalls != 1 || !strings.Contains(trace, "PUT /servers/42") || strings.Contains(trace, "DELETE") {
+					t.Fatalf("lease=%+v err=%v SSH=%d requests:\n%s", lease, err, sshCalls, trace)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "readiness rejected") || sshCalls != 0 || !strings.HasSuffix(trace, "DELETE /ssh_keys/7\nDELETE /servers/42") || strings.Contains(trace, "PUT") || strings.Contains(trace, "/servers/43") {
+				t.Fatalf("err=%v SSH=%d requests:\n%s", err, sshCalls, trace)
+			}
+			t.Logf("created=42 observed=%d SSH=%d err=%v\nnative HTTP:\n%s", observedID, sshCalls, err, trace)
+		})
+	}
+}
+
 func TestHetznerAcquireReportsRollbackFailure(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
-	server := crabboxHetznerServer(42, leaseID)
+	server := acquiredHetznerTestServer(42, leaseID)
 	deleteErr := errors.New("delete failed")
 	waitErr := errors.New("ip wait failed")
 	client := &fakeHetznerClient{
@@ -467,7 +712,7 @@ func TestHetznerAcquireReportsRollbackFailure(t *testing.T) {
 	}
 
 	backend := NewHetznerLeaseBackend(ProviderSpec{}, Config{}, Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend)
-	_, err := backend.acquireOnce(context.Background(), false, "")
+	_, err := backend.acquireOnce(context.Background(), false, "test")
 	if !errors.Is(err, waitErr) || !errors.Is(err, deleteErr) {
 		t.Fatalf("err=%v, want both acquisition and cleanup errors", err)
 	}
@@ -550,7 +795,7 @@ func TestHetznerAcquireStopsFreshRetryAfterRollbackFailure(t *testing.T) {
 			newLeaseID = func() string {
 				sequence++
 				id := fmt.Sprintf("cbx_%012x", sequence)
-				server := crabboxHetznerServer(int64(42+sequence), id)
+				server := acquiredHetznerTestServer(int64(42+sequence), id)
 				fake.createServer = server
 				fake.servers[server.ID] = server
 				return id
@@ -559,7 +804,7 @@ func TestHetznerAcquireStopsFreshRetryAfterRollbackFailure(t *testing.T) {
 			waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return primary }
 			var stderr bytes.Buffer
 			b := NewHetznerLeaseBackend(ProviderSpec{}, Config{}, Runtime{Stderr: &stderr}).(*hetznerLeaseBackend)
-			_, err := b.Acquire(context.Background(), AcquireRequest{})
+			_, err := b.Acquire(context.Background(), AcquireRequest{RequestedSlug: "test"})
 			want := 1
 			if failure == "none" {
 				want = 2

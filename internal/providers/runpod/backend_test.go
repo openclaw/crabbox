@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -634,31 +635,46 @@ func TestRunpodAcquireRollbackCannotBlockForever(t *testing.T) {
 }
 
 func TestRunpodAcquireRejectsMismatchedReadyPodAndRollsBack(t *testing.T) {
-	fake := &fakeRunpodAPI{
-		deployPod: runpodPod{ID: "pod_created", Name: "crabbox-blue-12345678"},
-		getPod: func(string) (runpodPod, error) {
-			return runpodPod{
-				ID:            "pod_other",
-				Name:          "crabbox-blue-12345678",
-				DesiredStatus: "RUNNING",
-				Runtime: &runpodRuntime{Ports: []runpodRuntimePort{{
-					IP: "203.0.113.9", PrivatePort: 22, PublicPort: 41200, IsIPPublic: true, Type: "tcp",
-				}}},
-			}, nil
-		},
-	}
-	backend := &runpodLeaseBackend{
-		cfg:    testRunpodConfig(t),
-		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		client: fake,
-	}
-
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
-	if err == nil || !strings.Contains(err.Error(), "readiness resolved pod_other") {
-		t.Fatalf("err=%v, want create/readiness identity mismatch", err)
-	}
-	if len(fake.terminated) != 1 || fake.terminated[0] != "pod_created" {
-		t.Fatalf("terminated=%v, want exact created pod rollback", fake.terminated)
+	for _, tt := range []struct {
+		name       string
+		mutate     func(*runpodPod)
+		diagnostic string
+	}{
+		{"different ID", func(p *runpodPod) { p.ID = "pod_other" }, "readiness resolved pod_other"},
+		{"missing ID", func(p *runpodPod) { p.ID = "" }, "readiness resolved <empty>"},
+		{"different name", func(p *runpodPod) { p.Name = "other-name" }, "readiness returned other-name"},
+		{"missing name", func(p *runpodPod) { p.Name = "" }, "readiness returned <empty>"},
+	} {
+		for _, keep := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/keep=%v", tt.name, keep), func(t *testing.T) {
+				fake := &fakeRunpodAPI{deployPod: runpodPod{ID: "pod_created"}}
+				fake.getPod = func(id string) (runpodPod, error) {
+					if id != "pod_created" {
+						t.Fatalf("GET pod=%s", id)
+					}
+					pod := runpodPod{
+						ID: "pod_created", Name: fake.deployCalls[0].Name, DesiredStatus: "RUNNING",
+						Runtime: &runpodRuntime{Ports: []runpodRuntimePort{{
+							IP: "203.0.113.9", PrivatePort: 22, PublicPort: 41200, IsIPPublic: true, Type: "tcp",
+						}}},
+					}
+					tt.mutate(&pod)
+					return pod, nil
+				}
+				backend := &runpodLeaseBackend{cfg: testRunpodConfig(t), rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: fake}
+				_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: keep})
+				if err == nil || !strings.Contains(err.Error(), tt.diagnostic) {
+					t.Fatalf("err=%v, want %s", err, tt.diagnostic)
+				}
+				if keep {
+					if len(fake.terminated) != 0 {
+						t.Fatalf("kept pod terminated: %v", fake.terminated)
+					}
+				} else if len(fake.terminated) != 1 || fake.terminated[0] != "pod_created" {
+					t.Fatalf("terminated=%v, want original pod only", fake.terminated)
+				}
+			})
+		}
 	}
 }
 
