@@ -558,10 +558,12 @@ a future proposal proves both behavior preservation and meaningful net value.
 `shared.RunDelegatedSandbox` owns the common sandbox run sequence: preflight,
 archive preparation, acquisition or resolution, setup, sync, command execution,
 and one final retention/cleanup decision before timing and session reporting.
-E2B, Modal, Cloudflare Sandbox, and OpenSandbox use this sequence. The shared
+E2B, Modal, Cloudflare Sandbox, OpenSandbox, and Nomad's persistent shell
+allocations use this sequence. The shared
 owner preserves the primary command/cancellation outcome when cleanup also
 fails, reports cleanup-only failure as a failed run, and keeps the session
-marked retained until deletion succeeds. Operation locks span finalization.
+marked retained until deletion succeeds. Adapter-held operation locks span
+finalization when present.
 
 Adapters supply operations, not a generic provider API. They retain exact claim
 and account authorization, native creation and ambiguous-create recovery,
@@ -587,8 +589,11 @@ do not copy its result, timing, keep-on-failure, and cleanup bookkeeping into a
 new adapter. Distinct operations remain explicit: a finite batch job, a
 stateless local process, a retained billed VPS, and an interactive sandbox do
 not acquire the same deletion policy just because each can execute a command.
-For example, Nomad must still confirm scheduler convergence before removing an
-unchanged claim, and Docker clone-mode retention must preserve unfetched commits.
+Nomad keeps one provider-owned job-creation operation for warmup and fresh Run,
+and confirms scheduler convergence before removing an unchanged claim. Its reuse
+and retained-activity updates fence the captured claim revision instead of
+adopting a replacement. Docker clone-mode retention must preserve unfetched
+commits.
 
 Supporting mechanics remain reusable independently: `procjson.Exchange` for
 bounded subprocess JSON, `shared.Poll` for observations, operation locks for

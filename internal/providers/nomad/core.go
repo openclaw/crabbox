@@ -19,7 +19,6 @@ type DoctorCheck = core.DoctorCheck
 type WarmupRequest = core.WarmupRequest
 type RunRequest = core.RunRequest
 type RunResult = core.RunResult
-type RunSessionHandle = core.RunSessionHandle
 type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
 type StatusRequest = core.StatusRequest
@@ -75,14 +74,6 @@ func delegatedSyncOptionsError(spec ProviderSpec, req RunRequest) error {
 
 func writeTimingJSON(w io.Writer, report timingReport) error {
 	return core.WriteTimingJSON(w, report)
-}
-
-func timingReportWithRunResult(report timingReport, result RunResult, err error) timingReport {
-	return core.TimingReportWithRunResult(report, result, err)
-}
-
-func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, slug string, idleTimeout, ttl time.Duration, acquired bool, shouldStop *bool) {
-	core.HandleDelegatedRunFailure(w, req, provider, leaseID, slug, idleTimeout, ttl, acquired, shouldStop)
 }
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {

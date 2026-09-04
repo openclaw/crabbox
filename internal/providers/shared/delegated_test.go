@@ -233,6 +233,9 @@ func TestDelegatedSandboxLifecycle(t *testing.T) {
 			if reports != 1 || report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind || report.TotalMs != result.Total.Milliseconds() || report.CommandMs != result.Command.Milliseconds() || report.LeaseID != result.LeaseID || report.Label != "label" {
 				t.Fatalf("timing=%#v result=%#v stderr=%s", report, result, stderr.String())
 			}
+			if report.Workdir != "/workspace/repo" {
+				t.Fatalf("timing workdir=%q", report.Workdir)
+			}
 			if result.Total != clock.current.Sub(time.Unix(0, 0)) {
 				t.Fatalf("finalization missing from total: %v calls=%v", result.Total, calls)
 			}

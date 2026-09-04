@@ -75,6 +75,12 @@ until explicit `stop` or `cleanup`, even if `--keep` is omitted. A `run` without
 `--id` creates a fresh job and deletes it after the command unless `--keep` or
 `--keep-on-failure` retains it. A reused `--id` run leaves the job running.
 
+`run --keep --lease-output session.json` writes the standard run-session handle,
+including the exact lease ID, whether it was reused or kept, and its cleanup
+command. Run timing is finalized after retention or cleanup, preserves the
+command exit code when cleanup also fails, and reports cleanup-only failures as
+failed runs with a retained recovery session.
+
 ## Config
 
 ```yaml
@@ -262,6 +268,15 @@ in the meantime, including a partial publication, retains the job for explicit
 inspection instead of guessing who now owns it. These locks serialize Crabbox
 claim writers; they do not fence external Nomad operators changing jobs directly.
 
+Warmup and fresh runs share one Nomad job-creation path. Run sequencing and final
+retention/cleanup use the common sandbox lifecycle; Nomad still owns job metadata
+authorization, allocation selection, exec, purge evaluation, and absence checks.
+Reuse admission and retained activity refresh require the originally validated
+claim revision: an old run cannot recreate a removed claim or overwrite a
+successor's job/allocation identity, including with `--reclaim`. Kept and reused
+runs refresh idle activity after failures as well as successes, without extending
+the absolute expiry label. The existing local claim-lock wait is not cancelable.
+
 ## Capabilities
 
 - Provider ID: `nomad`.
@@ -276,7 +291,8 @@ claim writers; they do not fence external Nomad operators changing jobs directly
   env-forwarding flags.
 - Config show: yes; `crabbox config show --json` reports the token env name and
   auth source as `env` or `missing`, never the token value.
-- Unsupported: run artifacts, artifact downloads, run session, interactive TTY,
+- Run session: yes; `--lease-output` reports retained/reused identity and cleanup.
+- Unsupported: run artifacts, artifact downloads, interactive TTY,
   SSH, VNC, desktop, browser, code, Tailscale, URL bridge, MCP attachments, run
   proof, checkpoints, forks, restores, provider-managed coordinator routing, and
   mandatory live CI.
