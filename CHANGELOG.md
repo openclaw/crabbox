@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Preserve literal Tensorlake and OpenSandbox profile arguments through final execution, including environment-wrapped commands, and fix Tensorlake's inferred single-string shell execution. Thanks @steipete.
+- Preserve literal Tensorlake and OpenSandbox profile arguments through final execution, including environment-wrapped commands, and fix Tensorlake's inferred single-string shell execution. [PR 1835](https://github.com/openclaw/crabbox/pull/1835). Thanks @steipete.
 - Preserve literal SmolVM and Upstash Box profile arguments, accept inferred single-string shell commands, and share source rendering without adding another shell. [PR 1833](https://github.com/openclaw/crabbox/pull/1833). Thanks @steipete.
 - Read all AWS recovery inventory pages and retain cleanup debt when pagination is incomplete; describe interrupted provisioning without assuming a deployment caused it. [PR 1832](https://github.com/openclaw/crabbox/pull/1832). Thanks @steipete.
 - Preserve literal profile arguments through CodeSandbox, OpenComputer, and Docker Sandbox execution, sharing command-intent parsing without changing provider shells or environment transports. [PR 1830](https://github.com/openclaw/crabbox/pull/1830). Thanks @steipete.
