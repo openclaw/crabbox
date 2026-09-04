@@ -415,11 +415,19 @@ core instead.
 for delegated POSIX command adapters. It reuses core shell inference and literal
 argument handling, snapshots the input, and rejects a missing command. The
 result's `Argv` method applies an adapter-supplied shell prefix only when needed;
-an explicitly empty shell source remains valid. Cloudflare Sandbox, Superserve,
-Crownest, Vercel Sandbox, and Nomad use this boundary. They retain their existing
-transport serialization, shell choice, working directory, environment, and
-execution lifecycle. These adapters currently pass no literal-argument map;
-the extraction does not change profile-literal propagation through transports.
+an explicitly empty shell source remains valid. Adopters include Cloudflare
+Sandbox, Superserve, Crownest, Vercel Sandbox, Nomad, CodeSandbox, OpenComputer,
+Docker Sandbox, and Agent Sandbox. Pass all three request fields (`Command`,
+`ShellMode`, and `CommandLiteralArgs`) so profile arguments remain literal through
+the transport. Adapters retain their shell choice and execution lifecycle;
+serialize the classified intent without running shell inference again.
+
+Agent Sandbox and Nomad use `shared.ShellWorkspaceCommand` for their common
+POSIX-stdin wrapper: create and enter the workdir, export validated environment
+names in deterministic order, then execute the classified command. Pod and
+allocation readiness, stdin transport, timeout, and exit mapping remain local
+to each adapter. This wrapper is not the SSH command runner, whose environment
+and workspace setup contracts differ.
 
 Claim-only recovery adapters may use `shared.ResolveProviderClaimStrict` to
 resolve an exact provider/scope-bound claim before a slug while preventing a
