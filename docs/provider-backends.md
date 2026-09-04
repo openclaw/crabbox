@@ -558,8 +558,8 @@ a future proposal proves both behavior preservation and meaningful net value.
 `shared.RunDelegatedSandbox` owns the common sandbox run sequence: preflight,
 archive preparation, acquisition or resolution, setup, sync, command execution,
 and one final retention/cleanup decision before timing and session reporting.
-E2B, Modal, Cloudflare Sandbox, OpenSandbox, and Nomad's persistent shell
-allocations use this sequence. The shared
+E2B, Modal, Cloudflare Sandbox, OpenSandbox, Nomad's persistent shell
+allocations, Superserve, and Azure Dynamic Sessions use this sequence. The shared
 owner preserves the primary command/cancellation outcome when cleanup also
 fails, reports cleanup-only failure as a failed run, and keeps the session
 marked retained until deletion succeeds. Adapter-held operation locks span
@@ -583,6 +583,14 @@ Cancellation before admission cannot trigger resume; cancellation after resume
 is checked before mutating the local claim. Successful admission enables normal
 run finalization. Providers without this extra boundary keep their existing
 resolution behavior.
+
+Superserve keeps its lease-operation lock through final reporting and activates
+reused sandboxes in `AdmitReuse`; failed activation returns the retained session
+without the post-run activity refresh. Its acquisition rollback keeps the
+original create-response ID even when metadata setup fails or returns a different
+ID. Azure Dynamic Sessions supplies deletion behind its original claim snapshot
+and bounds both claim-lock waiting and the stop request. Neither adapter gives
+the shared sequencer authority to discover, adopt, or delete arbitrary resources.
 
 Other delegated backends can adopt this owner when their session model fits;
 do not copy its result, timing, keep-on-failure, and cleanup bookkeeping into a

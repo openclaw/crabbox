@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -107,288 +106,137 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	return nil
 }
 
-func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
-	if req.Options.Tailscale.Enabled {
-		return RunResult{}, exit(2, "provider=superserve is delegated-run only and does not support Tailscale options")
+func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+	var api superserveClient
+	var workdir, leaseID, sandboxID, slug string
+	var access sandboxAccess
+	activated := false
+	activate := func(ctx context.Context) error {
+		next, err := api.ActivateSandbox(ctx, sandboxID)
+		if err != nil {
+			return err
+		}
+		if next.Sandbox.ID == "" {
+			next.Sandbox.ID = sandboxID
+		}
+		access, activated = next, true
+		return nil
 	}
-	workdir, err := superserveWorkdir(b.cfg)
-	if err != nil {
-		return RunResult{}, err
-	}
-	started := b.now()
-	api, err := b.client()
-	if err != nil {
-		return RunResult{}, err
-	}
-	var prepared *core.PreparedArchive
-	if req.ID == "" && !req.NoSync {
-		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-			TempPattern: "crabbox-superserve-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
-		})
-		if err != nil {
-			return RunResult{}, err
-		}
-		defer prepared.Close()
-	}
-	leaseID, sandboxID, slug := "", "", ""
-	acquired := false
-	var unlockOperation func()
-	defer func() {
-		if unlockOperation != nil {
-			unlockOperation()
-		}
-	}()
-	if req.ID == "" {
-		leaseID, sandboxID, slug, unlockOperation, err = b.createSandbox(ctx, api, req.Repo, req.Reclaim, req.RequestedSlug)
-		if err != nil {
-			return RunResult{}, err
-		}
-		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
-		acquired = true
-	} else {
-		leaseID, sandboxID, _, err = resolveLeaseID(req.ID, "", false, 0, api.BaseURL())
-		if err != nil {
-			return RunResult{}, err
-		}
-		unlockOperation, err = lockSuperserveLeaseOperation(ctx, leaseID)
-		if err != nil {
-			return RunResult{}, err
-		}
-		leaseID, sandboxID, _, err = resolveLeaseID(leaseID, "", false, 0, api.BaseURL())
-		if err != nil {
-			return RunResult{}, err
-		}
-		if _, err := verifySuperserveClaim(ctx, api, leaseID, sandboxID); err != nil {
-			return RunResult{}, err
-		}
-		claim, err := readLeaseClaim(leaseID)
-		if err != nil {
-			return RunResult{}, err
-		}
-		_, _, slug, err = finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, api.BaseURL())
-		if err != nil {
-			return RunResult{}, err
+	// Resolve and acquire keep the operation lock until the shared owner has
+	// finished cleanup and reporting, including errors after lock acquisition.
+	handle := func(unlock func()) shared.DelegatedSandbox {
+		return shared.DelegatedSandbox{
+			LeaseID: leaseID, Slug: slug, CleanupCommand: superserveCleanupCommand(leaseID), Unlock: unlock,
 		}
 	}
-	shouldStop := acquired && !req.Keep
-	access, err := api.ActivateSandbox(ctx, sandboxID)
-	if err != nil {
-		if acquired {
-			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-			if shouldStop {
-				return RunResult{}, b.cleanupClaimedRunFailure(ctx, api, leaseID, sandboxID, err)
+	workdir, workdirErr := superserveWorkdir(b.cfg)
+	return shared.RunDelegatedSandbox(ctx, req, shared.DelegatedSandboxLifecycle{
+		Provider: providerName, Runtime: b.rt, Workdir: workdir,
+		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL, CleanupTimeout: b.cleanupTimeout(),
+		Preflight: func(context.Context) error {
+			if req.Options.Tailscale.Enabled {
+				return exit(2, "provider=superserve is delegated-run only and does not support Tailscale options")
 			}
-		}
-		return RunResult{}, err
-	}
-	if access.Sandbox.ID == "" {
-		access.Sandbox.ID = sandboxID
-	}
-	cleanedUp := false
-	session := &RunSessionHandle{
-		Provider:       providerName,
-		LeaseID:        leaseID,
-		Slug:           slug,
-		Reused:         !acquired,
-		Kept:           !shouldStop,
-		CleanupCommand: superserveCleanupCommand(leaseID),
-	}
-	finishResult := func(result RunResult) RunResult {
-		if result.Provider == "" {
-			result.Provider = providerName
-		}
-		if result.LeaseID == "" {
-			result.LeaseID = leaseID
-		}
-		if result.Slug == "" {
-			result.Slug = slug
-		}
-		result.Session = session
-		result.Session.Kept = !cleanedUp && !shouldStop
-		return result
-	}
-	defer func() {
-		result = finishResult(result)
-	}()
-	cleanupCreatedRun := func() error {
-		before := shouldStop
-		err := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop)
-		if before && err == nil {
-			cleanedUp = true
-		}
-		return err
-	}
-	if shouldStop {
-		defer func() {
-			if cleanupErr := cleanupCreatedRun(); cleanupErr != nil {
-				if result.ExitCode == 0 {
-					result.ExitCode = 1
-				}
-				if retErr == nil {
-					retErr = exit(1, "%v", cleanupErr)
-				} else {
-					retErr = errors.Join(retErr, cleanupErr)
+			if workdirErr != nil {
+				return workdirErr
+			}
+			var err error
+			api, err = b.client()
+			return err
+		},
+		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
+			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
+				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
+				TempPattern: "crabbox-superserve-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+			})
+		},
+		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var unlock func()
+			var err error
+			leaseID, sandboxID, slug, unlock, err = b.createSandbox(ctx, api, req.Repo, req.Reclaim, req.RequestedSlug)
+			if err == nil {
+				fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
+			}
+			return handle(unlock), err
+		},
+		Resolve: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var err error
+			leaseID, sandboxID, _, err = resolveLeaseID(req.ID, "", false, 0, api.BaseURL())
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			unlock, err := lockSuperserveLeaseOperation(ctx, leaseID)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			leaseID, sandboxID, _, err = resolveLeaseID(leaseID, "", false, 0, api.BaseURL())
+			if err != nil {
+				return handle(unlock), err
+			}
+			if _, err := verifySuperserveClaim(ctx, api, leaseID, sandboxID); err != nil {
+				return handle(unlock), err
+			}
+			claim, err := readLeaseClaim(leaseID)
+			if err != nil {
+				return handle(unlock), err
+			}
+			_, _, slug, err = finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, api.BaseURL())
+			return handle(unlock), err
+		},
+		AdmitReuse: activate,
+		Setup: func(ctx context.Context) error {
+			if req.ID == "" {
+				if err := activate(ctx); err != nil {
+					return err
 				}
 			}
-		}()
-	}
-	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
-
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
-	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, api, &access, req, workdir, prepared)
-		if err != nil {
-			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-			return RunResult{Total: b.now().Sub(started), SyncDelegated: true}, err
-		}
-		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.ensureWorkspace(ctx, api, &access, workdir); err != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return RunResult{}, err
-	}
-
-	if req.SyncOnly {
-		result := RunResult{
-			Provider:      providerName,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			Total:         b.now().Sub(started),
-			SyncDelegated: true,
-		}
-		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
-		activityErr := b.refreshSuperserveActivityIfRetained(leaseID, shouldStop)
-		if activityErr != nil {
-			fmt.Fprintf(b.rt.Stderr, "warning: refresh superserve lease activity failed lease=%s: %v\n", leaseID, activityErr)
-			result.ExitCode = 1
-		}
-		if cleanupErr := cleanupCreatedRun(); cleanupErr != nil {
-			result.ExitCode = 1
-			return result, cleanupErr
-		}
-		if req.TimingJSON {
-			report := timingReportWithRunResult(timingReport{
-				Provider:      providerName,
-				LeaseID:       leaseID,
-				Slug:          slug,
-				SyncDelegated: true,
-				SyncMs:        syncDuration.Milliseconds(),
-				SyncPhases:    syncPhases,
-				SyncSkipped:   req.NoSync,
-				TotalMs:       result.Total.Milliseconds(),
-				ExitCode:      result.ExitCode,
-				Label:         strings.TrimSpace(req.Label),
-			}, result, activityErr)
-			if activityErr != nil {
-				report = timingReportWithProviderError(report)
+			fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
+			return nil
+		},
+		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+			return b.syncWorkspace(ctx, api, &access, req, workdir, prepared)
+		},
+		NoSync: func(ctx context.Context) error {
+			return b.ensureWorkspace(ctx, api, &access, workdir)
+		},
+		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
+			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+			if err != nil {
+				return shared.DelegatedSandboxCommand{}, err
 			}
-			if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
-				return result, err
+			commandText := intent.ShellCommand("bash", "-lc")
+			commandEnv, strippedAuthEnv := superserveCommandEnv(req.Env)
+			if len(strippedAuthEnv) > 0 {
+				fmt.Fprintf(b.rt.Stderr, "warning: provider=superserve did not forward provider authentication variables: %s\n", strings.Join(strippedAuthEnv, ","))
 			}
-		}
-		if activityErr != nil {
-			return result, activityErr
-		}
-		return result, nil
-	}
-
-	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
-	if err != nil {
-		return RunResult{}, err
-	}
-	commandText := intent.ShellCommand("bash", "-lc")
-	commandEnv, strippedAuthEnv := superserveCommandEnv(req.Env)
-	if len(strippedAuthEnv) > 0 {
-		fmt.Fprintf(b.rt.Stderr, "warning: provider=superserve did not forward provider authentication variables: %s\n", strings.Join(strippedAuthEnv, ","))
-	}
-	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
-		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, commandEnv)
-	}
-	commandStart := b.now()
-	execRes, runErr := api.Exec(ctx, &access, execRequest{
-		Command:     commandText,
-		WorkingDir:  workdir,
-		Env:         commandEnv,
-		TimeoutSecs: b.execTimeoutSecs(),
-	}, b.rt.Stdout, b.rt.Stderr)
-	commandDuration := b.now().Sub(commandStart)
-	result = RunResult{
-		Provider:      providerName,
-		LeaseID:       leaseID,
-		Slug:          slug,
-		CommandText:   commandText,
-		ExitCode:      execRes.ExitCode,
-		Command:       commandDuration,
-		Total:         b.now().Sub(started),
-		SyncDelegated: true,
-	}
-	if req.NoSync {
-		fmt.Fprintf(b.rt.Stderr, "superserve run summary sync_skipped=true command=%s total=%s exit=%d\n",
-			result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	} else {
-		fmt.Fprintf(b.rt.Stderr, "superserve run summary sync=%s command=%s total=%s exit=%d\n",
-			syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	}
-	var commandErr error
-	if runErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		if result.ExitCode == 0 {
-			result.ExitCode = 1
-		}
-		commandErr = ExitError{Code: 1, Message: fmt.Sprintf("superserve run failed: %v", runErr)}
-	} else if result.ExitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		commandErr = ExitError{Code: result.ExitCode, Message: fmt.Sprintf("superserve run exited %d", result.ExitCode)}
-	}
-	commandFailed := commandErr != nil
-	activityErr := b.refreshSuperserveActivityIfRetained(leaseID, shouldStop)
-	if activityErr != nil {
-		fmt.Fprintf(b.rt.Stderr, "warning: refresh superserve lease activity failed lease=%s: %v\n", leaseID, activityErr)
-		if commandErr == nil {
-			result.ExitCode = 1
-		}
-	}
-	if cleanupErr := cleanupCreatedRun(); cleanupErr != nil {
-		if result.ExitCode == 0 {
-			result.ExitCode = 1
-		}
-		commandErr = errors.Join(commandErr, cleanupErr)
-	}
-	if req.TimingJSON {
-		timingErr := commandErr
-		if timingErr == nil {
-			timingErr = activityErr
-		}
-		report := timingReportWithRunResult(timingReport{
-			Provider:      providerName,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			SyncDelegated: true,
-			SyncMs:        syncDuration.Milliseconds(),
-			SyncPhases:    syncPhases,
-			SyncSkipped:   req.NoSync,
-			CommandMs:     result.Command.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      result.ExitCode,
-			Label:         strings.TrimSpace(req.Label),
-		}, result, timingErr)
-		if (!commandFailed && activityErr != nil) || (!commandFailed && commandErr != nil) {
-			report = timingReportWithProviderError(report)
-		}
-		if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
-			return result, err
-		}
-	}
-	if commandErr != nil {
-		return result, commandErr
-	}
-	if activityErr != nil {
-		return result, activityErr
-	}
-	return result, nil
+			if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
+				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, commandEnv)
+			}
+			return shared.DelegatedSandboxCommand{
+				Text: commandText,
+				Run: func(ctx context.Context) (int, error) {
+					res, err := api.Exec(ctx, &access, execRequest{
+						Command: commandText, WorkingDir: workdir, Env: commandEnv, TimeoutSecs: b.execTimeoutSecs(),
+					}, b.rt.Stdout, b.rt.Stderr)
+					return res.ExitCode, err
+				},
+			}, nil
+		},
+		Retained: func(context.Context) error {
+			if !activated {
+				return nil
+			}
+			return b.refreshSuperserveLeaseActivity(leaseID)
+		},
+		Cleanup: func(ctx context.Context) error {
+			if err := api.DeleteSandbox(ctx, sandboxID); err != nil && !isSuperserveNotFound(err) {
+				return fmt.Errorf("superserve delete failed for %s: %w", sandboxID, err)
+			}
+			removeLeaseClaim(leaseID)
+			return nil
+		},
+	})
 }
-
 func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
 	api, err := b.client()
 	if err != nil {
@@ -657,10 +505,14 @@ func (b *backend) createSandbox(ctx context.Context, api superserveClient, repo 
 	if err != nil {
 		return "", "", "", nil, err
 	}
-	leaseID := leasePrefix + sb.ID
+	createdID := sb.ID
+	if strings.TrimSpace(createdID) == "" {
+		return "", "", "", nil, exit(5, "superserve create response omitted sandbox identity")
+	}
+	leaseID := leasePrefix + createdID
 	unlockOperation, err := lockSuperserveLeaseOperation(ctx, leaseID)
 	if err != nil {
-		return leaseID, sb.ID, "", nil, b.cleanupCreateFailure(ctx, api, sb.ID, err)
+		return leaseID, createdID, "", nil, b.cleanupCreateFailure(ctx, api, createdID, err)
 	}
 	keepLock := false
 	defer func() {
@@ -670,21 +522,24 @@ func (b *backend) createSandbox(ctx context.Context, api superserveClient, repo 
 	}()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
-		return leaseID, sb.ID, "", nil, b.cleanupCreateFailure(ctx, api, sb.ID, err)
+		return leaseID, createdID, "", nil, b.cleanupCreateFailure(ctx, api, createdID, err)
 	}
 	metadata := b.ownershipMetadata(api.BaseURL(), providerScope, leaseID, slug, repo)
-	sb, err = api.UpdateSandboxMetadata(ctx, sb.ID, metadata)
+	sb, err = api.UpdateSandboxMetadata(ctx, createdID, metadata)
 	if err != nil {
-		return leaseID, sb.ID, slug, nil, b.cleanupCreateFailure(ctx, api, sb.ID, err)
+		return leaseID, createdID, slug, nil, b.cleanupCreateFailure(ctx, api, createdID, err)
+	}
+	if sb.ID != createdID {
+		return leaseID, createdID, slug, nil, b.cleanupCreateFailure(ctx, api, createdID, exit(5, "superserve metadata response changed sandbox identity"))
 	}
 	if err := validateSuperserveSandboxOwnership(LeaseClaim{LeaseID: leaseID, Provider: providerName, ProviderScope: providerScope}, sb); err != nil {
-		return leaseID, sb.ID, slug, nil, b.cleanupCreateFailure(ctx, api, sb.ID, err)
+		return leaseID, createdID, slug, nil, b.cleanupCreateFailure(ctx, api, createdID, err)
 	}
 	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, providerScope, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
-		return leaseID, sb.ID, slug, nil, b.cleanupCreateFailure(ctx, api, sb.ID, err)
+		return leaseID, createdID, slug, nil, b.cleanupCreateFailure(ctx, api, createdID, err)
 	}
 	keepLock = true
-	return leaseID, sb.ID, slug, unlockOperation, nil
+	return leaseID, createdID, slug, unlockOperation, nil
 }
 
 func superserveCreateSource(cfg Config) (string, string) {
@@ -871,13 +726,6 @@ func (b *backend) refreshSuperserveLeaseActivity(leaseID string) error {
 	)
 }
 
-func (b *backend) refreshSuperserveActivityIfRetained(leaseID string, shouldStop bool) error {
-	if shouldStop {
-		return nil
-	}
-	return b.refreshSuperserveLeaseActivity(leaseID)
-}
-
 func (b *backend) cleanupCreateFailure(ctx context.Context, api superserveClient, sandboxID string, cause error) error {
 	cleanupCtx, cancel := b.cleanupContext(ctx)
 	defer cancel()
@@ -890,36 +738,15 @@ func (b *backend) cleanupCreateFailure(ctx context.Context, api superserveClient
 	return cause
 }
 
-func (b *backend) cleanupClaimedRunFailure(ctx context.Context, api superserveClient, leaseID, sandboxID string, cause error) error {
-	cleanupCtx, cancel := b.cleanupContext(ctx)
-	defer cancel()
-	if err := api.DeleteSandbox(cleanupCtx, sandboxID); err != nil && !isSuperserveNotFound(err) {
-		return errors.Join(cause, fmt.Errorf("superserve cleanup failed for sandbox %s; delete it in the Superserve console: %w", sandboxID, err))
+func (b *backend) cleanupTimeout() time.Duration {
+	if b.cleanupTimeoutOverride > 0 {
+		return b.cleanupTimeoutOverride
 	}
-	removeLeaseClaim(leaseID)
-	return cause
-}
-
-func (b *backend) cleanupCreatedRun(ctx context.Context, api superserveClient, leaseID, sandboxID string, shouldStop *bool) error {
-	if !*shouldStop {
-		return nil
-	}
-	*shouldStop = false
-	cleanupCtx, cancel := b.cleanupContext(ctx)
-	defer cancel()
-	if err := api.DeleteSandbox(cleanupCtx, sandboxID); err != nil && !isSuperserveNotFound(err) {
-		return fmt.Errorf("superserve delete failed for %s: %w", sandboxID, err)
-	}
-	removeLeaseClaim(leaseID)
-	return nil
+	return superserveCleanupTimeout
 }
 
 func (b *backend) cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	timeout := superserveCleanupTimeout
-	if b.cleanupTimeoutOverride > 0 {
-		timeout = b.cleanupTimeoutOverride
-	}
-	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	return context.WithTimeout(context.WithoutCancel(ctx), b.cleanupTimeout())
 }
 
 func (b *backend) execTimeoutSecs() int {
