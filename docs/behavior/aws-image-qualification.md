@@ -46,17 +46,19 @@ CRABBOX_AWS_QUALIFICATION_ROOT_GB
 
 The account, Region, subnet, preprovisioned security group, and base AMI are
 fixed by the authority deployment. `CRABBOX_AWS_QUALIFICATION_ROOT_GB` must be
-8-20. A run may launch at most two sequential on-demand `t3.small` or
-`t3a.small` instances, with only one active at a time. This permits the source
-and promoted-image smoke phases while bounding compute to two instance-hours.
+8-20. A run may launch at most three sequential on-demand `t3.small` or
+`t3a.small` instances, with only one active at a time. This permits the source,
+candidate-image, and promoted-image smoke phases while bounding compute to
+at most 120 minutes of aggregate instance runtime.
 Each launch has an encrypted
 `gp3` root volume, no instance profile, IMDSv2 required, and authority-injected
 owner/run/SHA/expiry/operation tags.
 
 The run may own one physical key pair and one active AMI with at most one child
 snapshot. Candidate traffic is capped at 64 operations, eight unresolved
-intents, 64 KiB per request and response, four levels of nesting, and the
-120-minute expiry. Cleanup and inventory calls do not consume candidate capacity.
+intents, a flat map of at most 256 string parameters, 64 KiB per request and
+response, and the 120-minute expiry. Cleanup and inventory calls do not consume
+candidate capacity.
 
 The preprovisioned security group is read-only to qualification runs. Its ingress
 must already admit the trusted smoke executor. The authority neither creates nor
@@ -134,18 +136,23 @@ workers.dev, preview URLs, and cron.
 ## Replay and teardown
 
 Each run has one Durable Object. Before a mutation, it persists the operation ID,
-canonical request hash, and pending intent. A completed receipt is replayed only
-for the same hash. `RunInstances` receives an authority-derived deterministic
-`ClientToken` derived from the run and operation IDs. Lost image responses
-reconcile through authority-injected operation tags. Imported key names are
-authority-generated; ownership is recorded only after ID, public key, and run
-tags are read back.
+canonical normalized-request hash, and pending intent. A completed receipt is
+replayed only for the same hash. `RunInstances` receives an authority-derived
+deterministic `ClientToken` derived from the run and operation IDs. Uncertain
+`CreateImage` and `ImportKeyPair` results retain their intents and use bounded
+read reconciliation; they are never blindly reissued. Image reconciliation uses
+authority-injected operation tags. Imported key names are authority-generated;
+ownership is recorded only after ID, public key, and run tags are read back.
 
 The ledger learns only IDs created by, or discovered beneath, the registered
 run. Candidate reads and mutations are restricted to those IDs, except the fixed
 base AMI and security group. Lifecycle deletes remove current ledger ownership
-instead of accumulating stale IDs. Before and after teardown, a run-tag inventory
-finds resources that were created before an ambiguous response. `finalize`
+instead of accumulating stale IDs; terminating instances remain active until a
+read confirms `terminated` or absent. Before and after teardown, bounded
+eventual-consistency inventory scans find resources that appeared after an
+ambiguous response. The authority revalidates the configured STS account before
+every mutation, so credential rotation cannot move a run into another account.
+`finalize`
 deregisters images, deletes snapshots,
 terminates instances, deletes imported key pairs, and verifies zero run-owned
 instance/volume/key-pair/image/snapshot residue. The expiry alarm runs the same

@@ -13,6 +13,7 @@ import type {
   AWSQualificationRequest,
   AWSQualificationRunIdentity,
 } from "../src/aws-qualification-contract";
+import { leaseConfig } from "../src/config";
 import type { Env } from "../src/types";
 
 const controller: AWSQualificationControllerProps = { deploymentHash: "d".repeat(64) };
@@ -30,6 +31,7 @@ const authorityConfig = readFileSync(
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe("AWS qualification authority deployment", () => {
@@ -143,7 +145,7 @@ describe("AWS qualification authority", () => {
     );
   });
 
-  it("serializes concurrent launches and enforces two total sequential launch attempts", async () => {
+  it("serializes concurrent launches and enforces three confirmed sequential launches", async () => {
     const fixture = authorityFixture();
     await fixture.run.enroll(controller, identity);
     await importKey(fixture);
@@ -156,18 +158,100 @@ describe("AWS qualification authority", () => {
     expect(outcomes.filter((result) => result.status === "rejected")).toHaveLength(1);
     expect(fixture.signer.calls.filter((call) => call.action === "RunInstances")).toHaveLength(1);
 
-    await fixture.run.execute(
-      identity,
-      request("TerminateInstances", { "InstanceId.1": "i-owned" }, "ec2"),
-    );
+    await terminateOwned(fixture);
     await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
-    await fixture.run.execute(
-      identity,
-      request("TerminateInstances", { "InstanceId.1": "i-owned" }, "ec2"),
-    );
+    await terminateOwned(fixture);
+    await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
+    await terminateOwned(fixture);
     await expect(
       fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2")),
     ).rejects.toThrow("launch budget");
+  });
+
+  it("runs the real EC2SpotClient through source, candidate, and promoted launches", async () => {
+    vi.stubGlobal("setTimeout", ((callback: () => void) => {
+      queueMicrotask(callback);
+      return 0;
+    }) as typeof setTimeout);
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    const client = new EC2SpotClient(
+      {
+        CRABBOX_AWS_QUALIFICATION_TRANSPORT: {
+          execute: (value) => fixture.run.execute(identity, value),
+        },
+      } as Env,
+      "us-east-1",
+    ) as unknown as {
+      createServer(
+        config: ReturnType<typeof leaseConfig>,
+        leaseID: string,
+        slug: string,
+        owner: string,
+        imageID: string,
+        securityGroupID: string,
+      ): Promise<{ cloudID: string }>;
+      ensureSSHKey(name: string, publicKey: string, leaseID: string): Promise<void>;
+      terminateServerAndWait(instanceID: string): Promise<void>;
+    };
+    const config = {
+      ...leaseConfig({
+        provider: "aws",
+        target: "linux",
+        serverType: "t3.small",
+        serverTypeExplicit: true,
+        capacity: { market: "on-demand" },
+        providerKey: "crabbox-cbx-abcdef123456",
+        sshPublicKey: "ssh-ed25519 AAAAqualification",
+      }),
+      awsProfile: "",
+      awsRootGB: 20,
+      awsSubnetID: "subnet-fixed",
+    };
+    await client.ensureSSHKey(config.providerKey, config.sshPublicKey, "cbx_abcdef123456");
+
+    const source = await client.createServer(
+      config,
+      "cbx_source000001",
+      "qualification-source",
+      "maintainer",
+      "ami-base",
+      "sg-fixed",
+    );
+    await client.terminateServerAndWait(source.cloudID);
+    const candidate = await client.createServer(
+      config,
+      "cbx_candidate001",
+      "qualification-candidate",
+      "maintainer",
+      "ami-base",
+      "sg-fixed",
+    );
+    await fixture.run.execute(
+      identity,
+      request(
+        "CreateImage",
+        { InstanceId: candidate.cloudID, Name: "qualification-image", NoReboot: "true" },
+        "ec2",
+      ),
+    );
+    await client.terminateServerAndWait(candidate.cloudID);
+    const promoted = await client.createServer(
+      config,
+      "cbx_promoted0001",
+      "qualification-promoted",
+      "maintainer",
+      "ami-created",
+      "sg-fixed",
+    );
+    await client.terminateServerAndWait(promoted.cloudID);
+
+    const launches = fixture.signer.calls.filter((call) => call.action === "RunInstances");
+    expect(launches.map((call) => call.parameters["ImageId"])).toEqual([
+      "ami-base",
+      "ami-base",
+      "ami-created",
+    ]);
   });
 
   it("reconciles an ambiguous launch with a run-and-op scoped client token", async () => {
@@ -208,7 +292,93 @@ describe("AWS qualification authority", () => {
     expect(ledger).toMatchObject({ imageIds: ["ami-created"], snapshotIds: ["snap-child"] });
   });
 
+  it("reconciles lost and delayed key creation without redispatching ImportKeyPair", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityFixture({
+      delayedKeyVisibility: 2,
+      loseAfterEffect: "ImportKeyPair",
+    });
+    await fixture.run.enroll(controller, identity);
+    const keyRequest = request(
+      "ImportKeyPair",
+      {
+        KeyName: "crabbox-cbx-abcdef123456",
+        PublicKeyMaterial: btoa("ssh-ed25519 AAAAqualification"),
+      },
+      "ec2",
+    );
+    const imported = fixture.run.execute(identity, keyRequest);
+    await expect(imported).rejects.toThrow("lost response");
+
+    const replay = fixture.run.execute(identity, keyRequest);
+    await expect(replay).resolves.toMatchObject({ status: 200 });
+    expect(fixture.signer.calls.filter((call) => call.action === "ImportKeyPair")).toHaveLength(1);
+  });
+
+  it("reconciles a 5xx and delayed image without redispatching CreateImage", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityFixture({
+      delayedImageVisibility: 3,
+      http500AfterEffect: "CreateImage",
+    });
+    await fixture.run.enroll(controller, identity);
+    await importKey(fixture);
+    await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
+    const create = request(
+      "CreateImage",
+      { InstanceId: "i-owned", Name: "qualification-image", NoReboot: "true" },
+      "ec2",
+    );
+    await expect(fixture.run.execute(identity, create)).rejects.toThrow("response is ambiguous");
+
+    const replay = fixture.run.execute(identity, create);
+    await expect(replay).resolves.toMatchObject({ status: 200 });
+    expect(fixture.signer.calls.filter((call) => call.action === "CreateImage")).toHaveLength(1);
+  });
+
+  it("revalidates the expected STS account before every mutation", async () => {
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    await importKey(fixture);
+    fixture.signer.accountId = "999999999999";
+
+    await expect(
+      fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2")),
+    ).rejects.toThrow("wrong account");
+    expect(fixture.signer.calls.filter((call) => call.action === "RunInstances")).toHaveLength(0);
+  });
+
+  it("retains active instance ownership until Describe confirms termination", async () => {
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    await importKey(fixture);
+    await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
+    await fixture.run.execute(
+      identity,
+      request("TerminateInstances", { "InstanceId.1": "i-owned" }, "ec2"),
+    );
+
+    await expect(
+      fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2")),
+    ).rejects.toThrow("one active instance");
+    await fixture.run.execute(
+      identity,
+      request("DescribeInstances", { "InstanceId.1": "i-owned" }, "ec2"),
+    );
+    await expect(
+      fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2")),
+    ).rejects.toThrow("one active instance");
+    await fixture.run.execute(
+      identity,
+      request("DescribeInstances", { "InstanceId.1": "i-owned" }, "ec2"),
+    );
+    await expect(
+      fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2")),
+    ).resolves.toMatchObject({ status: 200 });
+  });
+
   it("never adopts or deletes a duplicate foreign physical key", async () => {
+    useImmediateTimeouts();
     const fixture = authorityFixture({ duplicateForeignKey: true });
     await fixture.run.enroll(controller, identity);
     const result = await fixture.run.execute(
@@ -230,10 +400,11 @@ describe("AWS qualification authority", () => {
 
   it("expires into cleanup and a final tag inventory catches unknown resources", async () => {
     vi.useFakeTimers();
+    useImmediateTimeouts();
     const now = new Date("2026-09-03T12:00:00Z");
     vi.setSystemTime(now);
     const expiring = { ...identity, expiresAt: new Date(now.getTime() + 1_000).toISOString() };
-    const fixture = authorityFixture({ unknownTaggedInstance: true });
+    const fixture = authorityFixture({ unknownTaggedInstance: true, unknownVisibilityDelay: 2 });
     await fixture.run.enroll(controller, expiring);
     vi.setSystemTime(new Date(now.getTime() + 2_000));
 
@@ -266,6 +437,23 @@ describe("AWS qualification authority", () => {
       ),
     ).rejects.toThrow("forbidden");
   });
+
+  it("rejects cyclic and nested parameter maps before canonical hashing", async () => {
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    const cyclic: Record<string, unknown> = {};
+    cyclic["self"] = cyclic;
+    await expect(
+      fixture.run.execute(identity, request("GetCallerIdentity", cyclic)),
+    ).rejects.toThrow("parameter is malformed");
+    await expect(
+      fixture.run.execute(
+        identity,
+        request("GetCallerIdentity", { nested: { deeper: { value: "nope" } } }),
+      ),
+    ).rejects.toThrow("parameter is malformed");
+    expect(fixture.signer.calls).toHaveLength(0);
+  });
 });
 
 describe("AWS qualification candidate transport", () => {
@@ -288,9 +476,14 @@ describe("AWS qualification candidate transport", () => {
 
 function authorityFixture(
   options: {
+    delayedImageVisibility?: number;
+    delayedKeyVisibility?: number;
     duplicateForeignKey?: boolean;
     failOnce?: string;
+    http500AfterEffect?: string;
+    loseAfterEffect?: string;
     unknownTaggedInstance?: boolean;
+    unknownVisibilityDelay?: number;
   } = {},
 ) {
   const storage = new MemoryStorage();
@@ -319,6 +512,28 @@ async function importKey(fixture: ReturnType<typeof authorityFixture>): Promise<
       "ec2",
     ),
   );
+}
+
+async function terminateOwned(fixture: ReturnType<typeof authorityFixture>): Promise<void> {
+  await fixture.run.execute(
+    identity,
+    request("TerminateInstances", { "InstanceId.1": "i-owned" }, "ec2"),
+  );
+  await fixture.run.execute(
+    identity,
+    request("DescribeInstances", { "InstanceId.1": "i-owned" }, "ec2"),
+  );
+  await fixture.run.execute(
+    identity,
+    request("DescribeInstances", { "InstanceId.1": "i-owned" }, "ec2"),
+  );
+}
+
+function useImmediateTimeouts(): void {
+  vi.stubGlobal("setTimeout", ((callback: () => void) => {
+    queueMicrotask(callback);
+    return 0;
+  }) as typeof setTimeout);
 }
 
 function request(
@@ -363,18 +578,28 @@ class FakeSigner {
     region: string;
     parameters: Record<string, unknown>;
   }> = [];
+  accountId = "123456789012";
   private failed = false;
+  private imageDescribeCalls = 0;
   private key?: { id: string; name: string; publicKey: string; runId?: string; sha?: string };
-  private instanceActive = false;
+  private keyDescribeCalls = 0;
+  private instanceState: "absent" | "running" | "shutting-down" | "terminated" = "absent";
+  private terminationDescribeCalls = 0;
   private imageActive = false;
   private snapshotActive = false;
   private unknownActive: boolean;
+  private unknownDescribeCalls = 0;
 
   constructor(
     private readonly options: {
+      delayedImageVisibility?: number;
+      delayedKeyVisibility?: number;
       duplicateForeignKey?: boolean;
       failOnce?: string;
+      http500AfterEffect?: string;
+      loseAfterEffect?: string;
       unknownTaggedInstance?: boolean;
+      unknownVisibilityDelay?: number;
     },
   ) {
     this.unknownActive = Boolean(options.unknownTaggedInstance);
@@ -393,19 +618,24 @@ class FakeSigner {
     }
     if (action === "GetCallerIdentity") {
       return xml(
-        "<GetCallerIdentityResponse><GetCallerIdentityResult><Account>123456789012</Account></GetCallerIdentityResult></GetCallerIdentityResponse>",
+        `<GetCallerIdentityResponse><GetCallerIdentityResult><Account>${this.accountId}</Account></GetCallerIdentityResult></GetCallerIdentityResponse>`,
       );
     }
     if (action === "DescribeKeyPairs") {
       if (parameters["Filter.1.Name"]) {
-        return xml("<DescribeKeyPairsResponse><keySet /></DescribeKeyPairsResponse>");
+        const tagged = this.key?.runId ? keyXML(this.key) : "";
+        return xml(
+          `<DescribeKeyPairsResponse><keySet>${tagged}</keySet></DescribeKeyPairsResponse>`,
+        );
       }
       if (!this.key) return awsError("InvalidKeyPair.NotFound");
-      return xml(`<DescribeKeyPairsResponse><keySet><item>
-        <keyPairId>${this.key.id}</keyPairId><keyName>${this.key.name}</keyName>
-        <publicKey>${this.key.publicKey}</publicKey>
-        <tagSet>${this.key.runId ? `<item><key>crabbox_qualification_run</key><value>${this.key.runId}</value></item><item><key>crabbox_qualification_sha</key><value>${this.key.sha}</value></item>` : ""}</tagSet>
-      </item></keySet></DescribeKeyPairsResponse>`);
+      this.keyDescribeCalls += 1;
+      if (this.keyDescribeCalls <= (this.options.delayedKeyVisibility ?? 0)) {
+        return awsError("InvalidKeyPair.NotFound");
+      }
+      return xml(
+        `<DescribeKeyPairsResponse><keySet>${keyXML(this.key)}</keySet></DescribeKeyPairsResponse>`,
+      );
     }
     if (action === "ImportKeyPair") {
       if (this.options.duplicateForeignKey) {
@@ -423,19 +653,28 @@ class FakeSigner {
         runId: tagValue(parameters, "crabbox_qualification_run"),
         sha: tagValue(parameters, "crabbox_qualification_sha"),
       };
+      if (this.options.loseAfterEffect === action && !this.failed) {
+        this.failed = true;
+        throw new Error("lost response");
+      }
+      if (this.options.http500AfterEffect === action && !this.failed) {
+        this.failed = true;
+        return awsServerError();
+      }
       return xml(
         `<ImportKeyPairResponse><keyPairId>${this.key.id}</keyPairId><keyName>${this.key.name}</keyName></ImportKeyPairResponse>`,
       );
     }
     if (action === "RunInstances") {
-      this.instanceActive = true;
+      this.instanceState = "running";
+      this.terminationDescribeCalls = 0;
       return xml(
-        "<RunInstancesResponse><instancesSet><item><instanceId>i-owned</instanceId><instanceState><name>running</name></instanceState><blockDeviceMapping><item><ebs><volumeId>vol-owned</volumeId></ebs></item></blockDeviceMapping></item></instancesSet></RunInstancesResponse>",
+        "<RunInstancesResponse><instancesSet><item><instanceId>i-owned</instanceId><instanceType>t3.small</instanceType><ipAddress>203.0.113.10</ipAddress><instanceState><name>running</name></instanceState><blockDeviceMapping><item><ebs><volumeId>vol-owned</volumeId></ebs></item></blockDeviceMapping></item></instancesSet></RunInstancesResponse>",
       );
     }
     if (action === "TerminateInstances") {
       if (parameters["InstanceId.1"] === "i-unknown") this.unknownActive = false;
-      else this.instanceActive = false;
+      else this.instanceState = "shutting-down";
       return xml(
         `<TerminateInstancesResponse><instancesSet><item><instanceId>${parameters["InstanceId.1"]}</instanceId><currentState><name>shutting-down</name></currentState></item></instancesSet></TerminateInstancesResponse>`,
       );
@@ -443,10 +682,20 @@ class FakeSigner {
     if (action === "CreateImage") {
       this.imageActive = true;
       this.snapshotActive = true;
+      if (this.options.loseAfterEffect === action && !this.failed) {
+        this.failed = true;
+        throw new Error("lost response");
+      }
+      if (this.options.http500AfterEffect === action && !this.failed) {
+        this.failed = true;
+        return awsServerError();
+      }
       return xml("<CreateImageResponse><imageId>ami-created</imageId></CreateImageResponse>");
     }
     if (action === "DescribeImages") {
-      const visible = this.imageActive;
+      this.imageDescribeCalls += 1;
+      const visible =
+        this.imageActive && this.imageDescribeCalls > (this.options.delayedImageVisibility ?? 0);
       return xml(
         `<DescribeImagesResponse><imagesSet>${visible ? `<item><imageId>ami-created</imageId><tagSet><item><key>crabbox_qualification_run</key><value>${identity.runId}</value></item><item><key>crabbox_qualification_op</key><value>${imageOp(this.calls)}</value></item></tagSet><blockDeviceMapping><item><ebs><snapshotId>snap-child</snapshotId></ebs></item></blockDeviceMapping></item>` : ""}</imagesSet></DescribeImagesResponse>`,
       );
@@ -464,13 +713,30 @@ class FakeSigner {
       return xml("<DeleteKeyPairResponse />");
     }
     if (action === "DescribeInstances") {
-      const item = this.unknownActive
-        ? "<item><instanceId>i-unknown</instanceId><instanceState><name>running</name></instanceState></item>"
-        : this.instanceActive
-          ? "<item><instanceId>i-owned</instanceId><instanceState><name>running</name></instanceState></item>"
-          : "";
+      const exact = parameters["InstanceId.1"] === "i-owned";
+      if (exact && this.instanceState === "shutting-down") {
+        this.terminationDescribeCalls += 1;
+        if (this.terminationDescribeCalls >= 2) this.instanceState = "terminated";
+      }
+      this.unknownDescribeCalls += 1;
+      const unknownVisible =
+        this.unknownActive &&
+        this.unknownDescribeCalls > (this.options.unknownVisibilityDelay ?? 0);
+      const ownedVisible = this.instanceState !== "absent";
+      const items = [
+        ...(unknownVisible
+          ? [
+              "<item><instanceId>i-unknown</instanceId><instanceState><name>running</name></instanceState></item>",
+            ]
+          : []),
+        ...(ownedVisible
+          ? [
+              `<item><instanceId>i-owned</instanceId><instanceType>t3.small</instanceType><ipAddress>203.0.113.10</ipAddress><instanceState><name>${this.instanceState}</name></instanceState><blockDeviceMapping><item><ebs><volumeId>vol-owned</volumeId></ebs></item></blockDeviceMapping></item>`,
+            ]
+          : []),
+      ].join("");
       return xml(
-        `<DescribeInstancesResponse><reservationSet>${item ? `<item><instancesSet>${item}</instancesSet></item>` : ""}</reservationSet></DescribeInstancesResponse>`,
+        `<DescribeInstancesResponse><reservationSet>${items ? `<item><instancesSet>${items}</instancesSet></item>` : ""}</reservationSet></DescribeInstancesResponse>`,
       );
     }
     if (action === "DescribeSnapshots") {
@@ -480,7 +746,7 @@ class FakeSigner {
     }
     if (action === "DescribeVolumes") {
       return xml(
-        `<DescribeVolumesResponse><volumeSet>${this.instanceActive ? "<item><volumeId>vol-owned</volumeId></item>" : ""}</volumeSet></DescribeVolumesResponse>`,
+        `<DescribeVolumesResponse><volumeSet>${this.instanceState === "running" || this.instanceState === "shutting-down" ? "<item><volumeId>vol-owned</volumeId></item>" : ""}</volumeSet></DescribeVolumesResponse>`,
       );
     }
     if (action === "DescribeSecurityGroups") {
@@ -509,6 +775,20 @@ function tagValue(parameters: Record<string, unknown>, key: string): string {
     }
   }
   return "";
+}
+
+function keyXML(key: {
+  id: string;
+  name: string;
+  publicKey: string;
+  runId?: string;
+  sha?: string;
+}): string {
+  return `<item>
+    <keyPairId>${key.id}</keyPairId><keyName>${key.name}</keyName>
+    <publicKey>${key.publicKey}</publicKey>
+    <tagSet>${key.runId ? `<item><key>crabbox_qualification_run</key><value>${key.runId}</value></item><item><key>crabbox_qualification_sha</key><value>${key.sha}</value></item>` : ""}</tagSet>
+  </item>`;
 }
 
 class MemoryStorage {
@@ -554,6 +834,13 @@ function awsError(code: string): Response {
   return new Response(
     `<Response><Errors><Error><Code>${code}</Code><Message>rejected</Message></Error></Errors></Response>`,
     { status: 400, headers: { "content-type": "text/xml" } },
+  );
+}
+
+function awsServerError(): Response {
+  return new Response(
+    "<Response><Errors><Error><Code>InternalError</Code><Message>uncertain</Message></Error></Errors></Response>",
+    { status: 500, headers: { "content-type": "text/xml" } },
   );
 }
 

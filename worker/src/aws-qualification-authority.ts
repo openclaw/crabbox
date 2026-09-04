@@ -27,13 +27,14 @@ const maxRootGB = 20;
 const maxUserDataBytes = 24 * 1024;
 const maxRequestBytes = 64 * 1024;
 const maxResponseBytes = 64 * 1024;
-const maxRequestDepth = 4;
 const maxCandidateOperations = 64;
 const maxPendingIntents = 8;
-const maxLaunches = 2;
+const maxLaunches = 3;
 const maxActiveInstances = 1;
 const maxActiveImages = 1;
 const maxActiveSnapshots = 1;
+const reconciliationBackoffMs = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const;
+const inventoryBackoffMs = reconciliationBackoffMs;
 const parser = new XMLParser({ ignoreAttributes: false });
 
 const allowedEC2Actions = new Set([
@@ -243,17 +244,17 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
   ): Promise<AWSQualificationResponse> {
     const run = await this.requireActiveRun(identity);
     const policy = run.policy;
-    validateRequestShape(request, policy.region);
+    const normalizedRequest = validateRequestShape(request, policy.region);
     const requestHash = await sha256Hex(
       canonicalJSON({
-        action: request.action,
-        parameters: request.parameters,
-        region: request.region,
-        service: request.service,
+        action: normalizedRequest.action,
+        parameters: normalizedRequest.parameters,
+        region: normalizedRequest.region,
+        service: normalizedRequest.service,
       }),
     );
     const receipt = await this.ctx.storage.get<AWSQualificationReceipt>(
-      `${receiptPrefix}${request.opId}`,
+      `${receiptPrefix}${normalizedRequest.opId}`,
     );
     if (receipt) {
       if (receipt.requestHash !== requestHash) {
@@ -262,14 +263,26 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       return receipt.response;
     }
     const priorIntent = await this.ctx.storage.get<AWSQualificationIntent>(
-      `${intentPrefix}${request.opId}`,
+      `${intentPrefix}${normalizedRequest.opId}`,
     );
     if (priorIntent) {
       if (priorIntent.requestHash !== requestHash) {
         throw new Error("AWS qualification pending opId has a different request");
       }
-      const reconciled = await this.reconcileIntent(run, priorIntent, policy);
+      const reconciled =
+        priorIntent.request.action === "CreateImage" ||
+        priorIntent.request.action === "ImportKeyPair"
+          ? await this.reconcileIntentWithBackoff(run, priorIntent, policy)
+          : await this.reconcileIntent(run, priorIntent, policy);
       if (reconciled) return reconciled;
+      if (
+        priorIntent.request.action === "CreateImage" ||
+        priorIntent.request.action === "ImportKeyPair"
+      ) {
+        throw new Error(
+          `AWS qualification ${priorIntent.request.action} outcome remains unresolved`,
+        );
+      }
     }
 
     const ledger = await this.ledger();
@@ -281,30 +294,30 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       if (pending.size >= maxPendingIntents) {
         throw new Error("AWS qualification pending intent limit reached");
       }
-      assertLifecycleCapacity(request, ledger, pending);
+      assertLifecycleCapacity(normalizedRequest, ledger, pending);
     }
     const authorized = await authorizeRequest(
-      request,
+      normalizedRequest,
       identity,
       policy,
       ledger,
       await qualificationPhysicalKeyName(identity.runId),
-      await qualificationClientToken(identity.runId, request.opId),
+      await qualificationClientToken(identity.runId, normalizedRequest.opId),
     );
-    if (request.service !== "sts") {
-      await this.ensureAccount(run, policy);
+    if (normalizedRequest.service !== "sts") {
+      await this.ensureAccount(run, policy, authorized.mutating);
     }
     if (!priorIntent) {
       run.operationCount += 1;
-      if (request.action === "RunInstances") ledger.launchCount += 1;
+      if (normalizedRequest.action === "RunInstances") ledger.launchCount += 1;
       await this.ctx.storage.put({
         [stateKey]: run,
         [ledgerKey]: ledger,
         ...(authorized.mutating
           ? {
-              [`${intentPrefix}${request.opId}`]: {
+              [`${intentPrefix}${normalizedRequest.opId}`]: {
                 requestHash,
-                request: structuredClone(request),
+                request: normalizedRequest,
                 startedAt: new Date().toISOString(),
               } satisfies AWSQualificationIntent,
             }
@@ -313,27 +326,37 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     }
 
     const response = await this.signer.execute(
-      request.service,
-      request.action,
+      normalizedRequest.service,
+      normalizedRequest.action,
       policy.region,
       authorized.parameters,
     );
     const result = await boundedResponse(response);
+    if (authorized.mutating && result.status >= 500) {
+      throw new Error(
+        `AWS qualification ${normalizedRequest.action} response is ambiguous: http ${result.status}`,
+      );
+    }
     if (result.status >= 200 && result.status < 300) {
-      if (request.action === "ImportKeyPair") {
-        await this.recordImportedKey(run, request, authorized.parameters, result, ledger);
-      } else if (request.action === "CreateImage") {
-        await this.recordCreatedImage(run, request, result, ledger);
+      if (normalizedRequest.action === "ImportKeyPair") {
+        await this.recordImportedKey(run, normalizedRequest, authorized.parameters, result, ledger);
+      } else if (normalizedRequest.action === "CreateImage") {
+        await this.recordCreatedImage(run, normalizedRequest, result, ledger);
       } else {
-        updateLedgerFromResponse(ledger, request.action, result.body, authorized.parameters);
+        updateLedgerFromResponse(
+          ledger,
+          normalizedRequest.action,
+          result.body,
+          authorized.parameters,
+        );
       }
       await this.ctx.storage.put(ledgerKey, ledger);
     }
-    await this.ctx.storage.put(`${receiptPrefix}${request.opId}`, {
+    await this.ctx.storage.put(`${receiptPrefix}${normalizedRequest.opId}`, {
       requestHash,
       response: result,
     } satisfies AWSQualificationReceipt);
-    await this.ctx.storage.delete(`${intentPrefix}${request.opId}`);
+    await this.ctx.storage.delete(`${intentPrefix}${normalizedRequest.opId}`);
     return result;
   }
 
@@ -431,8 +454,8 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       throw new Error("AWS qualification image ownership verification failed");
     }
     const snapshots = imageSnapshotIDs(image);
-    if (snapshots.length > maxActiveSnapshots) {
-      throw new Error("AWS qualification image exceeds the snapshot limit");
+    if (snapshots.length !== maxActiveSnapshots) {
+      throw new Error("AWS qualification image snapshot is not uniquely visible");
     }
     ledger.imageIds = [imageId];
     ledger.snapshotIds = snapshots;
@@ -501,11 +524,30 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     return receipt.response;
   }
 
+  private async reconcileIntentWithBackoff(
+    run: AWSQualificationRunState,
+    intent: AWSQualificationIntent,
+    policy: AWSQualificationPolicy,
+    attempt = 0,
+  ): Promise<AWSQualificationResponse | undefined> {
+    try {
+      const reconciled = await this.reconcileIntent(run, intent, policy);
+      if (reconciled) return reconciled;
+    } catch (error) {
+      if (!isRetryableReconciliationError(error)) throw error;
+    }
+    const delay = reconciliationBackoffMs[attempt];
+    if (delay === undefined) return undefined;
+    await sleep(delay);
+    return await this.reconcileIntentWithBackoff(run, intent, policy, attempt + 1);
+  }
+
   private async ensureAccount(
     run: AWSQualificationRunState,
     policy: AWSQualificationPolicy,
+    force = false,
   ): Promise<void> {
-    if (run.accountVerified) return;
+    if (run.accountVerified && !force) return;
     const response = await this.signer.execute("sts", "GetCallerIdentity", policy.region, {});
     const result = await boundedResponse(response);
     if (result.status < 200 || result.status >= 300) {
@@ -550,30 +592,42 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     await this.ensureAccount(run, policy);
     const failures: string[] = [];
     await this.recoverPendingIntents(run, policy, failures);
-    const recoveredLedger = await this.inventoryRunResources(run, await this.ledger(), failures);
+    const recoveredLedger = await this.inventoryRunResourcesEventually(
+      run,
+      await this.ledger(),
+      failures,
+      true,
+    );
     await this.ctx.storage.put(ledgerKey, recoveredLedger);
     for (const imageId of recoveredLedger.imageIds) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- teardown order protects dependent snapshots.
-      await this.cleanup(policy, "DeregisterImage", { ImageId: imageId }, failures);
+      await this.cleanup(run, policy, "DeregisterImage", { ImageId: imageId }, failures);
     }
     for (const snapshotId of recoveredLedger.snapshotIds) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- each exact resource has independent evidence.
-      await this.cleanup(policy, "DeleteSnapshot", { SnapshotId: snapshotId }, failures);
+      await this.cleanup(run, policy, "DeleteSnapshot", { SnapshotId: snapshotId }, failures);
     }
     for (const instanceId of recoveredLedger.instanceIds) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- terminate only ledger-owned instances.
-      await this.cleanup(policy, "TerminateInstances", { "InstanceId.1": instanceId }, failures);
+      await this.cleanup(
+        run,
+        policy,
+        "TerminateInstances",
+        { "InstanceId.1": instanceId },
+        failures,
+      );
     }
     for (const keyPairId of recoveredLedger.keyPairIds) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- delete only ledger-owned key pairs.
-      await this.cleanup(policy, "DeleteKeyPair", { KeyPairId: keyPairId }, failures);
+      await this.cleanup(run, policy, "DeleteKeyPair", { KeyPairId: keyPairId }, failures);
     }
-    await this.verifyZeroResidue(recoveredLedger, policy, failures);
-    const residue = await this.inventoryRunResources(
+    const residue = await this.inventoryRunResourcesEventually(
       run,
       emptyLedger(recoveredLedger.launchCount),
       failures,
+      true,
     );
+    await this.verifyZeroResidue(recoveredLedger, policy, failures);
     if (hasOwnedResources(residue)) failures.push("run-tag inventory still contains resources");
     if (failures.length > 0) {
       await this.ctx.storage.setAlarm(Date.now() + cleanupRetryMs);
@@ -628,7 +682,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     failures: string[],
   ): Promise<void> {
     if (intent.request.action === "CreateImage" || intent.request.action === "ImportKeyPair") {
-      const reconciled = await this.reconcileIntent(run, intent, policy);
+      const reconciled = await this.reconcileIntentWithBackoff(run, intent, policy);
       if (!reconciled) failures.push(`${intent.request.action} intent is unresolved`);
       return;
     }
@@ -642,6 +696,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       await qualificationPhysicalKeyName(run.identity.runId),
       await qualificationClientToken(run.identity.runId, intent.request.opId),
     );
+    if (authorized.mutating) {
+      await this.ensureAccount(run, policy, true);
+    }
     const response = await this.signer.execute(
       intent.request.service,
       intent.request.action,
@@ -665,12 +722,14 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
   }
 
   private async cleanup(
+    run: AWSQualificationRunState,
     policy: AWSQualificationPolicy,
     action: string,
     parameters: Record<string, unknown>,
     failures: string[],
   ): Promise<void> {
     try {
+      await this.ensureAccount(run, policy, true);
       const response = await this.signer.execute("ec2", action, policy.region, parameters);
       const result = await boundedResponse(response);
       if (
@@ -761,6 +820,29 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       failures.push(`run-tag inventory: ${error instanceof Error ? error.message : String(error)}`);
     }
     return ledger;
+  }
+
+  private async inventoryRunResourcesEventually(
+    run: AWSQualificationRunState,
+    ledger: AWSQualificationLedger,
+    failures: string[],
+    accumulate: boolean,
+    attempt = 0,
+  ): Promise<AWSQualificationLedger> {
+    const attemptFailures: string[] = [];
+    const observed = await this.inventoryRunResources(
+      run,
+      emptyLedger(ledger.launchCount),
+      attemptFailures,
+    );
+    const next = accumulate ? mergeLedgers(ledger, observed) : observed;
+    const delay = inventoryBackoffMs[attempt];
+    if (delay === undefined) {
+      failures.push(...attemptFailures);
+      return next;
+    }
+    await sleep(delay);
+    return await this.inventoryRunResourcesEventually(run, next, failures, accumulate, attempt + 1);
   }
 
   private async verifyZeroResidue(
@@ -1262,11 +1344,8 @@ function updateLedgerFromResponse(
   parameters: Record<string, unknown>,
 ): void {
   const root = awsXMLRoot(body, action);
-  if (action === "RunInstances" || action === "DescribeInstances") {
-    const reservations =
-      action === "RunInstances"
-        ? [{ instancesSet: root["instancesSet"] }]
-        : items(record(root["reservationSet"])["item"]);
+  if (action === "RunInstances") {
+    const reservations = [{ instancesSet: root["instancesSet"] }];
     for (const reservation of reservations) {
       for (const instance of items(record(record(reservation)["instancesSet"])["item"]).map(
         record,
@@ -1280,9 +1359,27 @@ function updateLedgerFromResponse(
       }
     }
   }
-  if (action === "TerminateInstances") {
-    ledger.instanceIds = [];
-    ledger.volumeIds = [];
+  if (action === "DescribeInstances") {
+    const described = items(record(root["reservationSet"])["item"])
+      .flatMap((reservation) => items(record(record(reservation)["instancesSet"])["item"]))
+      .map(record);
+    const states = new Map(
+      described
+        .map(
+          (instance) =>
+            [
+              asString(instance["instanceId"]),
+              asString(record(instance["instanceState"])["name"]),
+            ] as const,
+        )
+        .filter(([instanceId]) => instanceId),
+    );
+    const requested = indexedUnknownValues(parameters, "InstanceId");
+    ledger.instanceIds = ledger.instanceIds.filter((instanceId) => {
+      if (!requested.includes(instanceId)) return true;
+      const state = states.get(instanceId);
+      return state !== undefined && state !== "terminated";
+    });
   }
   if (action === "DeregisterImage") {
     ledger.imageIds = ledger.imageIds.filter((id) => id !== parameters["ImageId"]);
@@ -1324,24 +1421,40 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
   }
 }
 
-function validateRequestShape(request: AWSQualificationRequest, region: string): void {
-  if (!/^[0-9a-f-]{36}$/.test(request.opId)) {
+function validateRequestShape(
+  request: AWSQualificationRequest,
+  region: string,
+): AWSQualificationRequest {
+  if (!request || typeof request !== "object" || Array.isArray(request)) {
+    throw new Error("AWS qualification request is malformed");
+  }
+  if (typeof request.opId !== "string" || !/^[0-9a-f-]{36}$/.test(request.opId)) {
     throw new Error("AWS qualification opId is malformed");
   }
   if (request.region !== region) throw new Error("AWS qualification region is outside policy");
-  if (!request.action || request.action.length > 128) {
+  if (typeof request.action !== "string" || !request.action || request.action.length > 128) {
     throw new Error("AWS qualification action is malformed");
   }
-  if (Object.keys(request.parameters).length > 256) {
-    throw new Error("AWS qualification request has too many parameters");
+  if (
+    request.service !== "ec2" &&
+    request.service !== "servicequotas" &&
+    request.service !== "sts"
+  ) {
+    throw new Error("AWS qualification service is malformed");
   }
-  const encoded = new TextEncoder().encode(canonicalJSON(request));
+  const parameters = flatStringMap(request.parameters);
+  const normalized = {
+    opId: request.opId,
+    region: request.region,
+    service: request.service,
+    action: request.action,
+    parameters,
+  } satisfies AWSQualificationRequest;
+  const encoded = new TextEncoder().encode(canonicalJSON(normalized));
   if (encoded.byteLength > maxRequestBytes) {
     throw new Error("AWS qualification request exceeds 64 KiB");
   }
-  if (valueDepth(request) > maxRequestDepth) {
-    throw new Error("AWS qualification request nesting exceeds policy");
-  }
+  return normalized;
 }
 
 function validateController(
@@ -1416,6 +1529,27 @@ function stringParameters(input: Record<string, unknown>): Record<string, string
   return output;
 }
 
+function flatStringMap(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("AWS qualification parameters must be a flat string map");
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 256) {
+    throw new Error("AWS qualification request has too many parameters");
+  }
+  const output: Record<string, string> = {};
+  for (const [key, entry] of entries) {
+    if (typeof entry !== "string" || key.length > 256) {
+      throw new Error(`AWS qualification parameter is malformed: ${key}`);
+    }
+    if (new TextEncoder().encode(entry).byteLength > maxRequestBytes) {
+      throw new Error("AWS qualification request exceeds 64 KiB");
+    }
+    output[key] = entry;
+  }
+  return output;
+}
+
 function authorizedIDs(
   input: Record<string, string>,
   field: string,
@@ -1442,6 +1576,15 @@ function indexedValues(input: Record<string, string>, field: string): string[] {
   for (let index = 1; index <= 128; index += 1) {
     const value = input[`${field}.${index}`];
     if (value) values.push(value);
+  }
+  return values;
+}
+
+function indexedUnknownValues(input: Record<string, unknown>, field: string): string[] {
+  const values: string[] = [];
+  for (let index = 1; index <= 128; index += 1) {
+    const value = input[`${field}.${index}`];
+    if (typeof value === "string" && value) values.push(value);
   }
   return values;
 }
@@ -1489,6 +1632,21 @@ function emptyLedger(launchCount = 0): AWSQualificationLedger {
     snapshotIds: [],
     volumeIds: [],
     launchCount,
+  };
+}
+
+function mergeLedgers(
+  left: AWSQualificationLedger,
+  right: AWSQualificationLedger,
+): AWSQualificationLedger {
+  return {
+    imageIds: [...new Set([...left.imageIds, ...right.imageIds])],
+    instanceIds: [...new Set([...left.instanceIds, ...right.instanceIds])],
+    keyPairIds: [...new Set([...left.keyPairIds, ...right.keyPairIds])],
+    keyPairNames: [...new Set([...left.keyPairNames, ...right.keyPairNames])],
+    snapshotIds: [...new Set([...left.snapshotIds, ...right.snapshotIds])],
+    volumeIds: [...new Set([...left.volumeIds, ...right.volumeIds])],
+    launchCount: Math.max(left.launchCount, right.launchCount),
   };
 }
 
@@ -1588,12 +1746,6 @@ function reservationsFromXML(body: string): Record<string, unknown>[] {
   return items(record(awsXMLRoot(body, "DescribeInstances")["reservationSet"])["item"]).map(record);
 }
 
-function valueDepth(value: unknown, depth = 0): number {
-  if (!value || typeof value !== "object") return depth;
-  const entries = Array.isArray(value) ? value : Object.values(value);
-  return entries.reduce((maximum, entry) => Math.max(maximum, valueDepth(entry, depth + 1)), depth);
-}
-
 function canonicalJSON(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJSON).join(",")}]`;
   if (value && typeof value === "object") {
@@ -1626,4 +1778,17 @@ function asString(value: unknown): string {
 
 function xmlEscape(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function isRetryableReconciliationError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("not uniquely visible") ||
+    message.includes("could not be verified") ||
+    message.includes("verification failed: http 5")
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
