@@ -212,8 +212,15 @@ orchestrators that need to inspect or clean up retained sandboxes later.
   contain shell metacharacters (`&&`, `|`, `>`, etc.) or a leading `KEY=VALUE`
   assignment are auto-wrapped the same way.
 - Forwarded environment values live in a temporary in-sandbox profile for the
-  duration of the command. Avoid forwarding broad wildcard allowlists unless you
-  trust the sandbox and command.
+  duration of the command, with an unpredictable per-operation name. The private
+  local source is removed after upload returns, including partial-upload failure.
+  Cleanup is attempted after upload failure or cancellation with a fresh
+  30-second budget, but refuses remote mutation if the original claim or provider
+  scope no longer matches. Cleanup failures warn without replacing the original
+  outcome. The command does not run if sourcing its profile fails. Remote file
+  permissions remain governed by native `sbx cp`, not a new Crabbox permission
+  guarantee. Avoid forwarding broad wildcard allowlists unless you trust the
+  sandbox and command.
 - `tensorlake.workdir` must be an absolute path (default `/workspace/crabbox`)
   and cannot be a broad system directory such as `/`, `/tmp`, or `/workspace`.
   It serves as both the sync target and the `-w` working directory for exec. The

@@ -175,12 +175,18 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (result Run
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
 	if len(req.Env) > 0 {
-		envPath, cleanup, err := b.uploadEnvProfile(ctx, cli, sandboxID, req.Env)
+		envPath, cleanup, err := b.uploadEnvProfile(ctx, cli, claim, req.Env)
+		if cleanup != nil {
+			defer func() {
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), envProfileCleanupTimeout)
+				defer cancel()
+				cleanup(cleanupCtx)
+			}()
+		}
 		if err != nil {
 			return RunResult{}, err
 		}
-		defer cleanup()
-		command = wrapCommandWithEnvProfile(command, envPath)
+		command = shared.WrapCommandWithShellEnvProfile(command, envPath)
 	}
 	commandStart := b.now()
 	exitCode, runErr := cli.execStream(ctx, sandboxID, workdir, command, b.rt.Stdout, b.rt.Stderr)

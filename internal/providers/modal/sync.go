@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -59,8 +58,4 @@ func (b *modalBackend) execShell(ctx context.Context, client modalAPI, sandboxID
 		return exit(code, "modal exec %q exited %d", command, code)
 	}
 	return nil
-}
-
-func modalRandomSuffix() string {
-	return strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
 }

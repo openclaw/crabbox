@@ -214,7 +214,13 @@ pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
   `--artifact-glob`, `--require-artifact`, `--emit-proof`, and `--stop-after`.
 - Forwarded environment values are written to a temporary shell profile,
   uploaded into `/tmp`, sourced (`set -a`) for the command, and removed
-  best-effort afterward. They are never placed on the local Python process argv.
+  best-effort afterward. Each operation has its own unpredictable profile path;
+  the private local source is removed as soon as upload returns. Failed uploads
+  retain cleanup responsibility, and remote cleanup uses a bounded, uncanceled
+  context and the original ownership claim. The command does not run if sourcing
+  its profile fails. They are never placed on the local Python process argv.
+  Remote file permissions remain governed by the provider upload transport; this
+  does not establish a new remote permission guarantee.
 
 ## Related docs
 
