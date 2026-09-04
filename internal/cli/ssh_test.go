@@ -1127,15 +1127,17 @@ func TestCommandIntentNativeTransport(t *testing.T) {
 		{"literal mixed with intentional operator", []string{"printf", "%s", ";", "&&", "printf", "%s", "done"}, false, ";done", 0, map[int]bool{2: true}},
 	}
 	for _, tt := range tests {
-		for _, serialized := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/serialized=%t", tt.name, serialized), func(t *testing.T) {
+		for _, transport := range []string{"argv", "command", "source"} {
+			t.Run(fmt.Sprintf("%s/transport=%s", tt.name, transport), func(t *testing.T) {
 				intent, err := ParseCommandIntent(tt.command, tt.shell, tt.literal)
 				if err != nil {
 					t.Fatal(err)
 				}
 				argv := intent.Argv(bash, "-lc")
-				if serialized {
+				if transport == "command" {
 					argv = []string{"/bin/sh", "-c", intent.ShellCommand(bash, "-lc")}
+				} else if transport == "source" {
+					argv = []string{"/bin/sh", "-c", intent.ShellSource()}
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
@@ -6434,5 +6436,54 @@ $t=$raw.WriteAsync($b,0,$b.Length);if(!$t.Wait(5000)){exit 74};$null=$t.GetAwait
 				t.Fatalf("post-preamble bytes=%x err=%v", got, err)
 			}
 		})
+	}
+}
+
+func TestCommandIntentShellSourceKeepsExistingShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell context")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh unavailable")
+	}
+	root := t.TempDir()
+	source, err := ParseCommandIntent([]string{`printf '%s:' "$hidden"; say "$1"; exit 7`}, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prelude := `hidden=local; say() { printf '%s' "$1"; }; set -- argument; trap 'printf :trap' EXIT; `
+	cmd := exec.Command(sh, "-c", prelude+source.ShellSource())
+	cmd.Env = []string{"HOME=" + root, "PATH=/usr/bin:/bin", "ENV=" + os.DevNull}
+	out, runErr := cmd.CombinedOutput()
+	var ee *exec.ExitError
+	if !errors.As(runErr, &ee) || ee.ExitCode() != 7 || string(out) != "local:argument:trap" {
+		t.Fatalf("existing shell output=%q err=%v", out, runErr)
+	}
+	program := filepath.Join(root, "argv-program")
+	if err := os.WriteFile(program, []byte("#!/bin/sh\nprintf argv\nexit 42\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	argv, err := ParseCommandIntent([]string{program}, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command(sh, "-c", `trap 'printf old-shell-trap' EXIT; `+argv.ShellSource()+`; printf old-shell-suffix`)
+	cmd.Env = []string{"HOME=" + root, "PATH=/usr/bin:/bin", "ENV=" + os.DevNull}
+	out, runErr = cmd.CombinedOutput()
+	if !errors.As(runErr, &ee) || ee.ExitCode() != 42 || string(out) != "argv" {
+		t.Fatalf("terminal exec output=%q err=%v", out, runErr)
+	}
+	for _, tc := range []struct {
+		shell bool
+		want  string
+	}{{true, ""}, {false, "exec ''"}} {
+		intent, err := ParseCommandIntent([]string{""}, tc.shell, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := intent.ShellSource(); got != tc.want {
+			t.Fatalf("empty source shell=%t got=%q want=%q", tc.shell, got, tc.want)
+		}
 	}
 }

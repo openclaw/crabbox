@@ -35,7 +35,7 @@ The trailing command after `--` is sent to the box verbatim as argv. Use
 snippets, pipes, or shell expansion.
 
 On Cloudflare Sandbox, Superserve, Crownest, Vercel Sandbox, Nomad, CodeSandbox,
-OpenComputer, Docker Sandbox, and Agent Sandbox,
+OpenComputer, Docker Sandbox, Agent Sandbox, SmolVM, and Upstash Box,
 quoted or interpolated profile arguments retain their literal meaning through
 the delegated command transport. A value such as `&&` does not become a shell
 operator, and an executable named `FOO=x` is invoked rather than treated as an

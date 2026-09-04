@@ -2152,17 +2152,18 @@ export class EC2SpotClient {
   ): Promise<ProviderMachine> {
     const now = new Date();
     const name = leaseProviderName(leaseID, slug);
-    const labels = leaseProviderLabels(
-      { ...config, selectedImage: awsLeaseImageIdentity(config, imageID, this.region) },
-      leaseID,
-      slug,
-      owner,
-      "aws",
-      now,
-      {
-        market: config.capacityMarket,
-      },
-    );
+    // The resolver also accepts an environment AMI; preserve that provenance in tags and bootstrap.
+    const launchConfig: LeaseConfig = {
+      ...config,
+      selectedImage: awsLeaseImageIdentity(
+        { ...config, awsAMI: config.awsAMI || this.env.CRABBOX_AWS_AMI || "" },
+        imageID,
+        this.region,
+      ),
+    };
+    const labels = leaseProviderLabels(launchConfig, leaseID, slug, owner, "aws", now, {
+      market: config.capacityMarket,
+    });
     const rootGB = config.awsRootGB || positiveInt(this.env.CRABBOX_AWS_ROOT_GB) || 400;
     const instanceProfile = config.awsProfile || this.env.CRABBOX_AWS_INSTANCE_PROFILE || "";
     const subnetID = config.awsSubnetID || this.env.CRABBOX_AWS_SUBNET_ID || "";
@@ -2179,7 +2180,7 @@ export class EC2SpotClient {
     let lastMacHostID = "";
     const run = async (macHostID: string): Promise<ProviderMachine> => {
       const params = await awsRunInstancesParams({
-        config,
+        config: launchConfig,
         leaseID,
         imageID,
         securityGroupID,
