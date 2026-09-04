@@ -14,6 +14,7 @@ import type {
   AWSQualificationRunIdentity,
 } from "../src/aws-qualification-contract";
 import { leaseConfig } from "../src/config";
+import { AWSProvider } from "../src/fleet";
 import type { Env } from "../src/types";
 
 const controller: AWSQualificationControllerProps = { deploymentHash: "d".repeat(64) };
@@ -168,21 +169,19 @@ describe("AWS qualification authority", () => {
     ).rejects.toThrow("launch budget");
   });
 
-  it("runs the real EC2SpotClient through source, candidate, and promoted launches", async () => {
+  it("runs the real public stop path through source, candidate, and promoted image order", async () => {
     vi.stubGlobal("setTimeout", ((callback: () => void) => {
       queueMicrotask(callback);
       return 0;
     }) as typeof setTimeout);
     const fixture = authorityFixture();
     await fixture.run.enroll(controller, identity);
-    const client = new EC2SpotClient(
-      {
-        CRABBOX_AWS_QUALIFICATION_TRANSPORT: {
-          execute: (value) => fixture.run.execute(identity, value),
-        },
-      } as Env,
-      "us-east-1",
-    ) as unknown as {
+    const env = {
+      CRABBOX_AWS_QUALIFICATION_TRANSPORT: {
+        execute: (value: AWSQualificationRequest) => fixture.run.execute(identity, value),
+      },
+    } as Env;
+    const client = new EC2SpotClient(env, "us-east-1") as unknown as {
       createServer(
         config: ReturnType<typeof leaseConfig>,
         leaseID: string,
@@ -192,8 +191,8 @@ describe("AWS qualification authority", () => {
         securityGroupID: string,
       ): Promise<{ cloudID: string }>;
       ensureSSHKey(name: string, publicKey: string, leaseID: string): Promise<void>;
-      terminateServerAndWait(instanceID: string): Promise<void>;
     };
+    const provider = new AWSProvider(env, "us-east-1", {} as never);
     const config = {
       ...leaseConfig({
         provider: "aws",
@@ -218,24 +217,24 @@ describe("AWS qualification authority", () => {
       "ami-base",
       "sg-fixed",
     );
-    await client.terminateServerAndWait(source.cloudID);
+    await fixture.run.execute(
+      identity,
+      request(
+        "CreateImage",
+        { InstanceId: source.cloudID, Name: "qualification-image", NoReboot: "true" },
+        "ec2",
+      ),
+    );
+    await provider.deleteServer(source.cloudID);
     const candidate = await client.createServer(
       config,
       "cbx_candidate001",
       "qualification-candidate",
       "maintainer",
-      "ami-base",
+      "ami-created",
       "sg-fixed",
     );
-    await fixture.run.execute(
-      identity,
-      request(
-        "CreateImage",
-        { InstanceId: candidate.cloudID, Name: "qualification-image", NoReboot: "true" },
-        "ec2",
-      ),
-    );
-    await client.terminateServerAndWait(candidate.cloudID);
+    await provider.deleteServer(candidate.cloudID);
     const promoted = await client.createServer(
       config,
       "cbx_promoted0001",
@@ -244,14 +243,25 @@ describe("AWS qualification authority", () => {
       "ami-created",
       "sg-fixed",
     );
-    await client.terminateServerAndWait(promoted.cloudID);
+    await provider.deleteServer(promoted.cloudID);
 
-    const launches = fixture.signer.calls.filter((call) => call.action === "RunInstances");
-    expect(launches.map((call) => call.parameters["ImageId"])).toEqual([
-      "ami-base",
-      "ami-base",
-      "ami-created",
+    expect(
+      fixture.signer.calls
+        .filter((call) => call.action === "RunInstances" || call.action === "CreateImage")
+        .map((call) =>
+          call.action === "RunInstances"
+            ? `RunInstances:${call.parameters["ImageId"]}`
+            : call.action,
+        ),
+    ).toEqual([
+      "RunInstances:ami-base",
+      "CreateImage",
+      "RunInstances:ami-created",
+      "RunInstances:ami-created",
     ]);
+    expect(
+      fixture.signer.calls.filter((call) => call.action === "TerminateInstances"),
+    ).toHaveLength(3);
   });
 
   it("reconciles an ambiguous launch with a run-and-op scoped client token", async () => {
@@ -334,6 +344,79 @@ describe("AWS qualification authority", () => {
     const replay = fixture.run.execute(identity, create);
     await expect(replay).resolves.toMatchObject({ status: 200 });
     expect(fixture.signer.calls.filter((call) => call.action === "CreateImage")).toHaveLength(1);
+  });
+
+  it("retires a no-effect ImportKeyPair intent after authoritative absence", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityFixture({ failOnce: "ImportKeyPair" });
+    await fixture.run.enroll(controller, identity);
+    await expect(importKey(fixture)).rejects.toThrow("lost response");
+
+    await expect(fixture.run.finalize(controller)).resolves.toBeDefined();
+    expect((await fixture.storage.list({ prefix: "intent:" })).size).toBe(0);
+    expect(fixture.signer.calls.some((call) => call.action === "DeleteKeyPair")).toBe(false);
+  });
+
+  it("retires a no-effect CreateImage intent after authoritative cleanup", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityFixture({ failOnce: "CreateImage" });
+    await fixture.run.enroll(controller, identity);
+    await importKey(fixture);
+    await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
+    await expect(
+      fixture.run.execute(
+        identity,
+        request(
+          "CreateImage",
+          { InstanceId: "i-owned", Name: "qualification-image", NoReboot: "true" },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("lost response");
+
+    await expect(fixture.run.finalize(controller)).resolves.toBeDefined();
+    expect((await fixture.storage.list({ prefix: "intent:" })).size).toBe(0);
+    expect(fixture.signer.calls.some((call) => call.action === "DeregisterImage")).toBe(false);
+  });
+
+  it("cleans up an image that becomes visible only during final inventory", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityFixture({
+      delayedImageVisibility: 8,
+      loseAfterEffect: "CreateImage",
+    });
+    await fixture.run.enroll(controller, identity);
+    await importKey(fixture);
+    await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
+    await expect(
+      fixture.run.execute(
+        identity,
+        request(
+          "CreateImage",
+          { InstanceId: "i-owned", Name: "qualification-image", NoReboot: "true" },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("lost response");
+
+    await expect(fixture.run.finalize(controller)).resolves.toBeDefined();
+    expect(fixture.signer.calls.some((call) => call.action === "DeregisterImage")).toBe(true);
+    expect(fixture.signer.calls.some((call) => call.action === "DeleteSnapshot")).toBe(true);
+    expect((await fixture.storage.list({ prefix: "intent:" })).size).toBe(0);
+  });
+
+  it("cleans up a key pair that becomes visible only during final inventory", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityFixture({
+      delayedKeyVisibility: 8,
+      loseAfterEffect: "ImportKeyPair",
+    });
+    await fixture.run.enroll(controller, identity);
+    await expect(importKey(fixture)).rejects.toThrow("lost response");
+
+    await expect(fixture.run.finalize(controller)).resolves.toBeDefined();
+    expect(fixture.signer.calls.some((call) => call.action === "DeleteKeyPair")).toBe(true);
+    expect((await fixture.storage.list({ prefix: "intent:" })).size).toBe(0);
   });
 
   it("revalidates the expected STS account before every mutation", async () => {
@@ -438,20 +521,32 @@ describe("AWS qualification authority", () => {
     ).rejects.toThrow("forbidden");
   });
 
-  it("rejects cyclic and nested parameter maps before canonical hashing", async () => {
+  it("bounds the complete envelope and rejects unknown, cyclic, and nested input", async () => {
     const fixture = authorityFixture();
     await fixture.run.enroll(controller, identity);
     const cyclic: Record<string, unknown> = {};
     cyclic["self"] = cyclic;
     await expect(
       fixture.run.execute(identity, request("GetCallerIdentity", cyclic)),
-    ).rejects.toThrow("parameter is malformed");
+    ).rejects.toThrow("contains a cycle");
     await expect(
       fixture.run.execute(
         identity,
         request("GetCallerIdentity", { nested: { deeper: { value: "nope" } } }),
       ),
-    ).rejects.toThrow("parameter is malformed");
+    ).rejects.toThrow("nesting exceeds policy");
+    await expect(
+      fixture.run.execute(identity, {
+        ...request("GetCallerIdentity"),
+        unexpected: "nope",
+      } as AWSQualificationRequest),
+    ).rejects.toThrow("unknown field");
+    await expect(
+      fixture.run.execute(identity, {
+        ...request("GetCallerIdentity"),
+        unexpected: "x".repeat(70 * 1024),
+      } as AWSQualificationRequest),
+    ).rejects.toThrow("64 KiB");
     expect(fixture.signer.calls).toHaveLength(0);
   });
 });
@@ -622,15 +717,16 @@ class FakeSigner {
       );
     }
     if (action === "DescribeKeyPairs") {
+      this.keyDescribeCalls += 1;
+      const visibilityDelayed = this.keyDescribeCalls <= (this.options.delayedKeyVisibility ?? 0);
       if (parameters["Filter.1.Name"]) {
-        const tagged = this.key?.runId ? keyXML(this.key) : "";
+        const tagged = !visibilityDelayed && this.key?.runId ? keyXML(this.key) : "";
         return xml(
           `<DescribeKeyPairsResponse><keySet>${tagged}</keySet></DescribeKeyPairsResponse>`,
         );
       }
       if (!this.key) return awsError("InvalidKeyPair.NotFound");
-      this.keyDescribeCalls += 1;
-      if (this.keyDescribeCalls <= (this.options.delayedKeyVisibility ?? 0)) {
+      if (visibilityDelayed) {
         return awsError("InvalidKeyPair.NotFound");
       }
       return xml(
@@ -713,8 +809,7 @@ class FakeSigner {
       return xml("<DeleteKeyPairResponse />");
     }
     if (action === "DescribeInstances") {
-      const exact = parameters["InstanceId.1"] === "i-owned";
-      if (exact && this.instanceState === "shutting-down") {
+      if (this.instanceState === "shutting-down") {
         this.terminationDescribeCalls += 1;
         if (this.terminationDescribeCalls >= 2) this.instanceState = "terminated";
       }

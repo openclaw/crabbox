@@ -27,6 +27,7 @@ const maxRootGB = 20;
 const maxUserDataBytes = 24 * 1024;
 const maxRequestBytes = 64 * 1024;
 const maxResponseBytes = 64 * 1024;
+const maxRequestNodes = 512;
 const maxCandidateOperations = 64;
 const maxPendingIntents = 8;
 const maxLaunches = 3;
@@ -36,6 +37,7 @@ const maxActiveSnapshots = 1;
 const reconciliationBackoffMs = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const;
 const inventoryBackoffMs = reconciliationBackoffMs;
 const parser = new XMLParser({ ignoreAttributes: false });
+const requestKeys = new Set(["action", "opId", "parameters", "region", "service"]);
 
 const allowedEC2Actions = new Set([
   "CreateImage",
@@ -625,10 +627,13 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       run,
       emptyLedger(recoveredLedger.launchCount),
       failures,
-      true,
+      false,
     );
     await this.verifyZeroResidue(recoveredLedger, policy, failures);
     if (hasOwnedResources(residue)) failures.push("run-tag inventory still contains resources");
+    if (failures.length === 0) {
+      await this.retireUnresolvedCreationIntents();
+    }
     if (failures.length > 0) {
       await this.ctx.storage.setAlarm(Date.now() + cleanupRetryMs);
       throw new Error(`AWS qualification cleanup incomplete: ${failures.join("; ")}`);
@@ -663,11 +668,13 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     try {
       await this.recoverPendingIntent(key, intent, run, policy, failures);
     } catch (error) {
-      failures.push(
-        `${intent.request.action} reconciliation: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+      if (intent.request.action !== "CreateImage" && intent.request.action !== "ImportKeyPair") {
+        failures.push(
+          `${intent.request.action} reconciliation: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
     }
     // The queue is capped at maxPendingIntents. Serial recursion preserves each ledger commit
     // before the next intent observes state without an unbounded call stack.
@@ -682,8 +689,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     failures: string[],
   ): Promise<void> {
     if (intent.request.action === "CreateImage" || intent.request.action === "ImportKeyPair") {
-      const reconciled = await this.reconcileIntentWithBackoff(run, intent, policy);
-      if (!reconciled) failures.push(`${intent.request.action} intent is unresolved`);
+      await this.reconcileIntentWithBackoff(run, intent, policy);
       return;
     }
 
@@ -843,6 +849,18 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     }
     await sleep(delay);
     return await this.inventoryRunResourcesEventually(run, next, failures, accumulate, attempt + 1);
+  }
+
+  private async retireUnresolvedCreationIntents(): Promise<void> {
+    const pending = await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix });
+    await Promise.all(
+      [...pending]
+        .filter(
+          ([, intent]) =>
+            intent.request.action === "CreateImage" || intent.request.action === "ImportKeyPair",
+        )
+        .map(([key]) => this.ctx.storage.delete(key)),
+    );
   }
 
   private async verifyZeroResidue(
@@ -1428,6 +1446,11 @@ function validateRequestShape(
   if (!request || typeof request !== "object" || Array.isArray(request)) {
     throw new Error("AWS qualification request is malformed");
   }
+  validateBoundedRequestInput(request);
+  const unknownKeys = Object.keys(request).filter((key) => !requestKeys.has(key));
+  if (unknownKeys.length > 0) {
+    throw new Error(`AWS qualification request has unknown field: ${unknownKeys[0]}`);
+  }
   if (typeof request.opId !== "string" || !/^[0-9a-f-]{36}$/.test(request.opId)) {
     throw new Error("AWS qualification opId is malformed");
   }
@@ -1530,10 +1553,10 @@ function stringParameters(input: Record<string, unknown>): Record<string, string
 }
 
 function flatStringMap(value: unknown): Record<string, string> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (!isPlainRecord(value)) {
     throw new Error("AWS qualification parameters must be a flat string map");
   }
-  const entries = Object.entries(value as Record<string, unknown>);
+  const entries = Object.entries(value);
   if (entries.length > 256) {
     throw new Error("AWS qualification request has too many parameters");
   }
@@ -1548,6 +1571,58 @@ function flatStringMap(value: unknown): Record<string, string> {
     output[key] = entry;
   }
   return output;
+}
+
+function validateBoundedRequestInput(value: unknown): void {
+  const pending: Array<{ depth: number; value: unknown }> = [{ depth: 0, value }];
+  const seen = new WeakSet<object>();
+  let bytes = 2;
+  let nodes = 0;
+  for (let index = 0; index < pending.length; index += 1) {
+    const entry = pending[index]!;
+    if (typeof entry.value === "string") {
+      bytes += boundedUTF8Length(entry.value);
+    } else if (
+      entry.value === null ||
+      typeof entry.value === "boolean" ||
+      typeof entry.value === "number"
+    ) {
+      bytes += String(entry.value).length;
+    } else if (typeof entry.value === "object" && !Array.isArray(entry.value)) {
+      if (seen.has(entry.value)) {
+        throw new Error("AWS qualification request contains a cycle");
+      }
+      if (entry.depth > 1) {
+        throw new Error("AWS qualification request nesting exceeds policy");
+      }
+      seen.add(entry.value);
+      const children = Object.entries(entry.value);
+      nodes += children.length;
+      if (nodes > maxRequestNodes) {
+        throw new Error("AWS qualification request is too complex");
+      }
+      for (const [key, child] of children) {
+        bytes += boundedUTF8Length(key) + 3;
+        pending.push({ depth: entry.depth + 1, value: child });
+      }
+    } else {
+      throw new Error("AWS qualification request contains an unsupported value");
+    }
+    if (bytes > maxRequestBytes) {
+      throw new Error("AWS qualification request exceeds 64 KiB");
+    }
+  }
+}
+
+function boundedUTF8Length(value: string): number {
+  if (value.length > maxRequestBytes) return maxRequestBytes + 1;
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function authorizedIDs(

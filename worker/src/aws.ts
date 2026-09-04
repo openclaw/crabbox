@@ -1402,6 +1402,10 @@ export class EC2SpotClient {
   }
 
   async deleteServer(instanceID: string): Promise<void> {
+    if (this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT) {
+      await this.terminateServerAndWait(instanceID);
+      return;
+    }
     await this.ec2("TerminateInstances", { "InstanceId.1": instanceID });
   }
 

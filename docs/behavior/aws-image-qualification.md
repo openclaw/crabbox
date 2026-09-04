@@ -56,8 +56,10 @@ owner/run/SHA/expiry/operation tags.
 
 The run may own one physical key pair and one active AMI with at most one child
 snapshot. Candidate traffic is capped at 64 operations, eight unresolved
-intents, a flat map of at most 256 string parameters, 64 KiB per request and
-response, and the 120-minute expiry. Cleanup and inventory calls do not consume
+intents, and the 120-minute expiry. The authority accepts only the five request
+fields in the service binding contract, bounds the complete envelope to 64 KiB
+before normalization, and requires a flat map of at most 256 string parameters.
+Responses are also capped at 64 KiB. Cleanup and inventory calls do not consume
 candidate capacity.
 
 The preprovisioned security group is read-only to qualification runs. Its ingress
@@ -143,6 +145,9 @@ deterministic `ClientToken` derived from the run and operation IDs. Uncertain
 read reconciliation; they are never blindly reissued. Image reconciliation uses
 authority-injected operation tags. Imported key names are authority-generated;
 ownership is recorded only after ID, public key, and run tags are read back.
+If bounded reconciliation proves neither success nor a definitive error, the
+intent remains until final inventory and cleanup prove that no run-owned
+resource remains; only then is it retired.
 
 The ledger learns only IDs created by, or discovered beneath, the registered
 run. Candidate reads and mutations are restricted to those IDs, except the fixed
@@ -152,6 +157,9 @@ read confirms `terminated` or absent. Before and after teardown, bounded
 eventual-consistency inventory scans find resources that appeared after an
 ambiguous response. The authority revalidates the configured STS account before
 every mutation, so credential rotation cannot move a run into another account.
+The public AWS release path waits for that terminal instance state only when the
+qualification transport binding is active; ordinary AWS releases keep their
+existing fire-and-forget behavior.
 `finalize`
 deregisters images, deletes snapshots,
 terminates instances, deletes imported key pairs, and verifies zero run-owned
