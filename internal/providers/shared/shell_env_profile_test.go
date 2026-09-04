@@ -14,7 +14,7 @@ import (
 )
 
 func TestPreparedShellEnvProfileRetainsPartialUploadCustody(t *testing.T) {
-	profile, err := PrepareShellEnvProfile(map[string]string{"FIXTURE": "synthetic"}, "crabbox-fixture-env-")
+	profile, err := PrepareShellEnvProfile(map[string]string{"FIXTURE": "synthetic"}, "/tmp", "crabbox-fixture-env-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestPreparedShellEnvProfileRetainsPartialUploadCustody(t *testing.T) {
 }
 
 func TestPreparedShellEnvProfileBeforeUploadHasNoRemoteCustody(t *testing.T) {
-	profile, err := PrepareShellEnvProfile(map[string]string{"FIXTURE": "value"}, "crabbox-fixture-env-")
+	profile, err := PrepareShellEnvProfile(map[string]string{"FIXTURE": "value"}, "/tmp", "crabbox-fixture-env-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestShellEnvProfilesNativeIsolationAndSourceFailure(t *testing.T) {
 	values := []string{"quote' newline\n$(touch " + core.ShellQuote(marker) + ")", "second-profile"}
 	profiles := make([]*PreparedShellEnvProfile, 0, len(values))
 	for _, value := range values {
-		profile, err := PrepareShellEnvProfile(map[string]string{"FIXTURE_VALUE": value, "EMPTY": "", "bad-name": "ignored"}, "crabbox-fixture-env-")
+		profile, err := PrepareShellEnvProfile(map[string]string{"FIXTURE_VALUE": value, "EMPTY": "", "bad-name": "ignored"}, "/tmp", "crabbox-fixture-env-")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -136,5 +136,57 @@ func TestShellEnvProfilesNativeIsolationAndSourceFailure(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatal("command executed without required profile")
+	}
+}
+
+func TestShellEnvProfileKeepsCallerShellAndRemoteDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native fixture requires POSIX shell")
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
+	root := t.TempDir()
+	profile, err := PrepareShellEnvProfile(map[string]string{"VALUE": "quoted'\nline"}, root, "profile-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	remove := func(_ context.Context, p string) error { return os.Remove(p) }
+	defer profile.Close(t.Context(), remove)
+	if filepath.Dir(profile.RemotePath()) != root {
+		t.Fatalf("remote directory changed: %s", profile.RemotePath())
+	}
+	if err := profile.Upload(t.Context(), func(_ context.Context, local, remote string) error {
+		data, err := os.ReadFile(local)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(remote, data, 0600)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	run := func(script string) ([]byte, error) {
+		cmd := exec.Command("sh", "-c", ShellScriptWithEnvProfile(script, profile.RemotePath()))
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root}
+		return cmd.CombinedOutput()
+	}
+	out, err := run(`false; printf '%s' "$VALUE"`)
+	if err != nil || string(out) != "quoted'\nline" {
+		t.Fatalf("caller shell semantics changed: %q %v", out, err)
+	}
+	if err := profile.Close(t.Context(), remove); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run(`printf 'must-not-run'`)
+	if err == nil || strings.Contains(string(out), "must-not-run") {
+		t.Fatalf("missing source ran command: %q %v", out, err)
+	}
+}
+
+func TestPreparedShellEnvProfileRejectsRelativeRemoteDirectory(t *testing.T) {
+	for _, dir := range []string{"", "relative", "../outside"} {
+		if profile, err := PrepareShellEnvProfile(map[string]string{"VALUE": "synthetic"}, dir, "profile-"); err == nil || profile != nil {
+			t.Fatalf("directory=%q profile=%v error=%v", dir, profile, err)
+		}
 	}
 }

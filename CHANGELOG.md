@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Report SmolVM decoder, file-write and extraction failures instead of false upload success, isolate temporary upload files, and preserve existing files when decoding fails. [PR 1826](https://github.com/openclaw/crabbox/pull/1826). Thanks @steipete.
+- Clean failed SmolVM environment-profile uploads with bounded original-claim checks, isolate each run's profile, and reuse shared shell-profile handling without requiring Bash. Thanks @steipete.
 - Stop direct AWS, Azure, GCP, and Hetzner bootstrap retries from allocating another machine when rollback reports a cleanup failure, preserving both the original failure and cleanup diagnostics. [PR 1819](https://github.com/openclaw/crabbox/pull/1819). Thanks @steipete.
 - Cloudflare: retain recovery claims when teardown fails, preserve command/cancellation outcomes, and fence reuse and cleanup against replaced local claims. [PR 1817](https://github.com/openclaw/crabbox/pull/1817). Thanks @steipete.
 - Preserve Upstash Box workspaces when archive upload or extraction fails, clean partial Upstash Box/Tensorlake uploads, and check complete archive limits before creating either sandbox. [PR 1820](https://github.com/openclaw/crabbox/pull/1820). Thanks @steipete.

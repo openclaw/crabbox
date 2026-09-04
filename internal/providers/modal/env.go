@@ -8,7 +8,7 @@ import (
 )
 
 func (b *modalBackend) uploadEnvProfile(ctx context.Context, client modalAPI, claim core.LeaseClaim, env map[string]string) (string, func(context.Context), error) {
-	profile, err := shared.PrepareShellEnvProfile(env, "crabbox-modal-env-")
+	profile, err := shared.PrepareShellEnvProfile(env, "/tmp", "crabbox-modal-env-")
 	if err != nil {
 		return "", nil, err
 	}

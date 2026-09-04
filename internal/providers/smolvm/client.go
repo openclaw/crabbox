@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -326,66 +326,46 @@ func (c *client) InjectArchive(ctx context.Context, machineID, localPath, target
 	if err != nil {
 		return err
 	}
-	b64 := base64.StdEncoding.EncodeToString(data)
-
-	// Direct API call: embed the base64 of the tgz in a heredoc inside the exec
-	// command string sent to /exec. The guest only needs sh + base64 + tar (no
-	// Python, no "installing" anything). This is a pure direct call to the
-	// smolfleet exec API with the payload in the request body.
-	// We use a distinctive delimiter that cannot appear in base64 output.
-	const eof = "CRABBOX_SYNC_B64_EOF_9f8e7d6c5b4a"
 	absTarget := targetDir
 	if !strings.HasPrefix(absTarget, "/") {
 		absTarget = "/workspace"
 	}
-	script := fmt.Sprintf(`cat > /tmp/crabbox-sync.tgz << '%s'
-%s
-%s
-base64 -d /tmp/crabbox-sync.tgz | tar -xzf - -C %s && rm -f /tmp/crabbox-sync.tgz
-echo "smolvm-direct-archive-extract: ok"
-`, eof, b64, eof, shellQuote(absTarget))
-
-	res, err := c.Exec(ctx, machineID, script, "")
-	if err != nil {
-		return fmt.Errorf("smolvm direct archive exec: %w", err)
-	}
-	if res.ExitCode != 0 {
-		msg := strings.TrimSpace(res.Error)
-		if msg == "" {
-			msg = strings.TrimSpace(res.Output)
-		}
-		return exit(res.ExitCode, "smolvm direct archive extract: %s", msg)
-	}
-	return nil
+	return c.withDecodedFile(ctx, machineID, data, "", `"${TMPDIR:-/tmp}"`,
+		"tar -xzf \"$upload_dir/payload\" -C "+shellQuote(absTarget), "archive extract")
 }
 
 func (c *client) WriteFile(ctx context.Context, machineID, remotePath, content string) error {
-	// Direct API: write small text (e.g. env profile) via heredoc in a single
-	// /exec call. Pure shell, no Python or extra interpreters required.
 	absPath := remotePath
 	if !strings.HasPrefix(absPath, "/") {
 		absPath = "/workspace/" + strings.TrimLeft(absPath, "/")
 	}
-	b64 := base64.StdEncoding.EncodeToString([]byte(content))
-	const eof = "CRABBOX_WRITE_B64_EOF_4e2d8a7c9b1f"
-	tmpPath := "/tmp/crabbox-write-" + base64.RawURLEncoding.EncodeToString([]byte(filepath.Base(absPath))) + ".b64"
-	script := fmt.Sprintf(`mkdir -p %s && cat > %s << '%s'
-%s
-%s
-base64 -d %s > %s && rm -f %s
-echo "smolvm-direct-write: ok"
-`, shellQuote(filepath.Dir(absPath)), shellQuote(tmpPath), eof, b64, eof, shellQuote(tmpPath), shellQuote(absPath), shellQuote(tmpPath))
+	parent := shellQuote(path.Dir(absPath))
+	// Stage beside the destination so publication stays on one filesystem.
+	prepare := "mkdir -p " + parent + "\n[ ! -d " + shellQuote(absPath) + " ] || { echo 'file destination is a directory' >&2; exit 1; }\n"
+	return c.withDecodedFile(ctx, machineID, []byte(content), prepare, parent,
+		"mv -f \"$upload_dir/payload\" "+shellQuote(absPath), "write")
+}
 
+// withDecodedFile owns only this exec's private staging directory. Its trap
+// cannot guarantee cleanup after SIGKILL or ambiguous remote HTTP completion.
+func (c *client) withDecodedFile(ctx context.Context, machineID string, data []byte, prepare, stagingParent, consume, operation string) error {
+	// Check decoding separately from consumption: POSIX pipelines only expose
+	// the last command's status, even when the decoder emitted partial data.
+	const eof = "CRABBOX_UPLOAD_B64_EOF"
+	script := "set -eu\nupload_umask=$(umask)\numask 077\n" + prepare +
+		"upload_dir=$(mktemp -d " + stagingParent + "/.crabbox-upload.XXXXXXXXXX)\n" +
+		`trap 'upload_status=$?; trap - 0; rm -rf -- "$upload_dir" || { echo "upload staging cleanup failed" >&2; [ "$upload_status" -ne 0 ] || upload_status=1; }; exit "$upload_status"' 0` + "\n" +
+		"trap 'exit 129' HUP\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\n" +
+		"base64 -d > \"$upload_dir/payload\" << '" + eof + "'\n" +
+		base64.StdEncoding.EncodeToString(data) + "\n" + eof + "\n" +
+		"umask \"$upload_umask\"\n" +
+		consume + "\n"
 	res, err := c.Exec(ctx, machineID, script, "")
 	if err != nil {
-		return fmt.Errorf("smolvm direct write exec: %w", err)
+		return fmt.Errorf("smolvm direct %s exec: %w", operation, err)
 	}
 	if res.ExitCode != 0 {
-		msg := strings.TrimSpace(res.Error)
-		if msg == "" {
-			msg = strings.TrimSpace(res.Output)
-		}
-		return exit(res.ExitCode, "smolvm direct write: %s", msg)
+		return commandExitError("smolvm direct "+operation, res)
 	}
 	return nil
 }
