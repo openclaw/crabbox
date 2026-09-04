@@ -108,7 +108,12 @@ Accepted values, validated before the API is called:
 2. By default `run` archive-syncs the working tree: Git manifest → local
    `tar -czf` → upload into the Box workspace as
    `.crabbox-upstash-box-sync-*.tgz` → in-Box `tar -xzf` into the workdir
-   (the temp archive is removed afterward).
+   (the temp archive is removed afterward). The full archive is checked and built
+   before fresh allocation. With delete-sync enabled, extraction completes in a
+   sibling staging directory before replacing the existing workdir; failed upload
+   or extraction leaves the previous workspace intact. Temporary archive/staging
+   cleanup is attempted even after a partial upload or cancellation. Cleanup
+   failures warn without replacing the original sync outcome.
 3. The user command runs through the Box exec-stream endpoint wrapped in
    `sh -c`, with the workspace folder set as the working directory, streaming
    output back through Crabbox.
