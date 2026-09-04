@@ -320,6 +320,24 @@ describe("AWS qualification authority", () => {
     expect((await fixture.storage.list({ prefix: "intent:" })).size).toBe(0);
   });
 
+  it("blocks a candidate mutation when account verification crosses expiry", async () => {
+    vi.useFakeTimers();
+    useImmediateTimeouts();
+    const now = new Date("2026-09-04T00:00:00Z");
+    vi.setSystemTime(now);
+    const expiring = { ...identity, expiresAt: new Date(now.getTime() + 1_000).toISOString() };
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, expiring);
+    await importKey(fixture, expiring);
+    fixture.signer.advanceNextIdentityByMs = 2_000;
+
+    await expect(
+      fixture.run.execute(expiring, request("RunInstances", runInstancesParams(), "ec2")),
+    ).rejects.toThrow("expired before mutation dispatch");
+    expect(fixture.signer.calls.filter((call) => call.action === "RunInstances")).toHaveLength(0);
+    expect(fixture.signer.calls.some((call) => call.action === "DeleteKeyPair")).toBe(true);
+  });
+
   it("discovers and cleans a lost-response launch after expiry without redispatch", async () => {
     vi.useFakeTimers();
     useImmediateTimeouts();
@@ -611,6 +629,36 @@ describe("AWS qualification authority", () => {
     expect((await fixture.storage.list({ prefix: "intent:" })).size).toBe(0);
   });
 
+  it("retires a pending snapshot deletion after recovery confirms absence", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityFixture({
+      deleteNotFound: "DeleteSnapshot",
+      loseAfterEffect: "DeleteSnapshot",
+    });
+    await fixture.run.enroll(controller, identity);
+    await importKey(fixture);
+    await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
+    await fixture.run.execute(
+      identity,
+      request(
+        "CreateImage",
+        { InstanceId: "i-owned", Name: "qualification-image", NoReboot: "true" },
+        "ec2",
+      ),
+    );
+    await fixture.run.execute(
+      identity,
+      request("DeregisterImage", { ImageId: "ami-created" }, "ec2"),
+    );
+    await expect(
+      fixture.run.execute(identity, request("DeleteSnapshot", { SnapshotId: "snap-child" }, "ec2")),
+    ).rejects.toThrow("lost response");
+
+    await expect(fixture.run.finalize(controller)).resolves.toBeDefined();
+    expect((await fixture.storage.list({ prefix: "intent:" })).size).toBe(0);
+    expect(fixture.signer.calls.filter((call) => call.action === "DeleteSnapshot").length).toBe(3);
+  });
+
   it("revalidates the expected STS account before every mutation", async () => {
     const fixture = authorityFixture();
     await fixture.run.enroll(controller, identity);
@@ -621,6 +669,37 @@ describe("AWS qualification authority", () => {
       fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2")),
     ).rejects.toThrow("wrong account");
     expect(fixture.signer.calls.filter((call) => call.action === "RunInstances")).toHaveLength(0);
+  });
+
+  it("revalidates the expected STS account before finalization and reconciliation", async () => {
+    useImmediateTimeouts();
+    const finalizeFixture = authorityFixture();
+    await finalizeFixture.run.enroll(controller, identity);
+    await importKey(finalizeFixture);
+    finalizeFixture.signer.accountId = "999999999999";
+    await expect(finalizeFixture.run.finalize(controller)).rejects.toThrow("wrong account");
+    expect(
+      finalizeFixture.signer.calls.filter((call) => call.action === "DescribeInstances"),
+    ).toHaveLength(0);
+
+    const reconcileFixture = authorityFixture({ loseAfterEffect: "CreateImage" });
+    await reconcileFixture.run.enroll(controller, identity);
+    await importKey(reconcileFixture);
+    await reconcileFixture.run.execute(
+      identity,
+      request("RunInstances", runInstancesParams(), "ec2"),
+    );
+    const create = request(
+      "CreateImage",
+      { InstanceId: "i-owned", Name: "qualification-image", NoReboot: "true" },
+      "ec2",
+    );
+    await expect(reconcileFixture.run.execute(identity, create)).rejects.toThrow("lost response");
+    reconcileFixture.signer.accountId = "999999999999";
+    await expect(reconcileFixture.run.execute(identity, create)).rejects.toThrow("wrong account");
+    expect(
+      reconcileFixture.signer.calls.filter((call) => call.action === "DescribeImages"),
+    ).toHaveLength(0);
   });
 
   it("retains active instance ownership until Describe confirms termination", async () => {
@@ -735,6 +814,22 @@ describe("AWS qualification authority", () => {
     ).toBe(true);
   });
 
+  it("requires one parsed security group from a successful response", async () => {
+    useImmediateTimeouts();
+    const errorFixture = authorityFixture({ securityGroupErrorWithId: true });
+    await errorFixture.run.enroll(controller, identity);
+
+    await expect(errorFixture.run.finalize(controller)).rejects.toThrow(
+      "DescribeSecurityGroups verification http 403",
+    );
+
+    const duplicateFixture = authorityFixture({ duplicateSecurityGroup: true });
+    await duplicateFixture.run.enroll(controller, identity);
+    await expect(duplicateFixture.run.finalize(controller)).rejects.toThrow(
+      "preprovisioned security group is missing",
+    );
+  });
+
   it("rejects oversized and privileged candidate payloads before AWS", async () => {
     const fixture = authorityFixture();
     await fixture.run.enroll(controller, identity);
@@ -808,9 +903,11 @@ function authorityFixture(
     delayedKeyVisibility?: number;
     deleteNotFound?: string;
     duplicateForeignKey?: boolean;
+    duplicateSecurityGroup?: boolean;
     failOnce?: string;
     http500AfterEffect?: string;
     loseAfterEffect?: string;
+    securityGroupErrorWithId?: boolean;
     unknownTaggedInstance?: boolean;
     unknownVisibilityDelay?: number;
   } = {},
@@ -829,9 +926,12 @@ function authorityFixture(
   return { env, run, signer, storage };
 }
 
-async function importKey(fixture: ReturnType<typeof authorityFixture>): Promise<void> {
+async function importKey(
+  fixture: ReturnType<typeof authorityFixture>,
+  runIdentity: AWSQualificationRunIdentity = identity,
+): Promise<void> {
   await fixture.run.execute(
-    identity,
+    runIdentity,
     request(
       "ImportKeyPair",
       {
@@ -908,6 +1008,7 @@ class FakeSigner {
     parameters: Record<string, unknown>;
   }> = [];
   accountId = "123456789012";
+  advanceNextIdentityByMs = 0;
   instanceDescribeNotFound = false;
   private failed = false;
   private imageDescribeCalls = 0;
@@ -927,9 +1028,11 @@ class FakeSigner {
       delayedKeyVisibility?: number;
       deleteNotFound?: string;
       duplicateForeignKey?: boolean;
+      duplicateSecurityGroup?: boolean;
       failOnce?: string;
       http500AfterEffect?: string;
       loseAfterEffect?: string;
+      securityGroupErrorWithId?: boolean;
       unknownTaggedInstance?: boolean;
       unknownVisibilityDelay?: number;
     },
@@ -949,6 +1052,11 @@ class FakeSigner {
       throw new Error("lost response");
     }
     if (action === "GetCallerIdentity") {
+      if (this.advanceNextIdentityByMs > 0) {
+        const advanceBy = this.advanceNextIdentityByMs;
+        this.advanceNextIdentityByMs = 0;
+        vi.setSystemTime(new Date(Date.now() + advanceBy));
+      }
       return xml(
         `<GetCallerIdentityResponse><GetCallerIdentityResult><Account>${this.accountId}</Account></GetCallerIdentityResult></GetCallerIdentityResponse>`,
       );
@@ -1040,15 +1148,29 @@ class FakeSigner {
     }
     if (action === "DeregisterImage") {
       this.imageActive = false;
+      if (this.options.loseAfterEffect === action && !this.failed) {
+        this.failed = true;
+        throw new Error("lost response");
+      }
       if (this.options.deleteNotFound === action) return awsError("InvalidAMIID.NotFound");
       return xml("<DeregisterImageResponse />");
     }
     if (action === "DeleteSnapshot") {
       this.snapshotActive = false;
+      if (this.options.loseAfterEffect === action && !this.failed) {
+        this.failed = true;
+        throw new Error("lost response");
+      }
+      if (this.options.deleteNotFound === action) return awsError("InvalidSnapshot.NotFound");
       return xml("<DeleteSnapshotResponse />");
     }
     if (action === "DeleteKeyPair") {
       if (this.key?.id === parameters["KeyPairId"]) this.key = undefined;
+      if (this.options.loseAfterEffect === action && !this.failed) {
+        this.failed = true;
+        throw new Error("lost response");
+      }
+      if (this.options.deleteNotFound === action) return awsError("InvalidKeyPair.NotFound");
       return xml("<DeleteKeyPairResponse />");
     }
     if (action === "DescribeInstances") {
@@ -1092,8 +1214,17 @@ class FakeSigner {
       );
     }
     if (action === "DescribeSecurityGroups") {
+      if (this.options.securityGroupErrorWithId) {
+        return new Response(
+          "<Response><Errors><Error><Message>sg-fixed is unavailable</Message></Error></Errors></Response>",
+          { status: 403, headers: { "content-type": "text/xml" } },
+        );
+      }
+      const group =
+        "<item><groupId>sg-fixed</groupId></item>" +
+        (this.options.duplicateSecurityGroup ? "<item><groupId>sg-fixed</groupId></item>" : "");
       return xml(
-        "<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-fixed</groupId></item></securityGroupInfo></DescribeSecurityGroupsResponse>",
+        `<DescribeSecurityGroupsResponse><securityGroupInfo>${group}</securityGroupInfo></DescribeSecurityGroupsResponse>`,
       );
     }
     return xml(`<${action}Response/>`);

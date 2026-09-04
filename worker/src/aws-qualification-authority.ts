@@ -109,7 +109,6 @@ interface AWSQualificationPolicy {
 interface AWSQualificationRunState {
   identity: AWSQualificationRunIdentity;
   enrolledAt: string;
-  accountVerified: boolean;
   operationCount: number;
   policy: AWSQualificationPolicy;
   policyHash: string;
@@ -221,7 +220,6 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         [stateKey]: {
           identity: structuredClone(identity),
           enrolledAt: new Date(now).toISOString(),
-          accountVerified: false,
           operationCount: 0,
           policy: structuredClone(policy),
           policyHash,
@@ -314,7 +312,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       await qualificationClientToken(identity.runId, normalizedRequest.opId),
     );
     if (normalizedRequest.service !== "sts") {
-      await this.ensureAccount(run, policy, authorized.mutating);
+      await this.ensureAccount(policy);
     }
     if (!priorIntent) {
       run.operationCount += 1;
@@ -334,6 +332,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       });
     }
 
+    if (authorized.mutating) {
+      await this.requireCandidateMutationActive(run);
+    }
     const response = await this.signer.execute(
       normalizedRequest.service,
       normalizedRequest.action,
@@ -486,7 +487,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     intent: AWSQualificationIntent,
     policy: AWSQualificationPolicy,
   ): Promise<AWSQualificationResponse | undefined> {
-    await this.ensureAccount(run, policy);
+    await this.ensureAccount(policy);
     if (intent.request.action === "RunInstances") {
       // Candidate retries use the deterministic ClientToken in executeSerialized. Finalization
       // calls reconcilePendingLaunchWithBackoff instead and must never issue a new launch.
@@ -562,12 +563,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     return await this.reconcileIntentWithBackoff(run, intent, policy, attempt + 1);
   }
 
-  private async ensureAccount(
-    run: AWSQualificationRunState,
-    policy: AWSQualificationPolicy,
-    force = false,
-  ): Promise<void> {
-    if (run.accountVerified && !force) return;
+  private async ensureAccount(policy: AWSQualificationPolicy): Promise<void> {
     const response = await this.signer.execute("sts", "GetCallerIdentity", policy.region, {});
     const result = await boundedResponse(response);
     if (result.status < 200 || result.status >= 300) {
@@ -579,8 +575,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     if (asString(identity["Account"]) !== policy.accountId) {
       throw new Error("AWS qualification authority is authenticated to the wrong account");
     }
-    run.accountVerified = true;
-    await this.ctx.storage.put(stateKey, run);
+  }
+
+  private async requireCandidateMutationActive(run: AWSQualificationRunState): Promise<void> {
+    if (Date.now() < Date.parse(run.identity.expiresAt)) return;
+    await this.finalizeSerialized();
+    throw new Error("AWS qualification run expired before mutation dispatch");
   }
 
   private async requireActiveRun(
@@ -609,7 +609,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     if (!run || run.finalizedAt) return ledger;
     if (controller) validateController(controller, run.identity.deploymentHash);
     const policy = run.policy;
-    await this.ensureAccount(run, policy);
+    await this.ensureAccount(policy);
     const failures: string[] = [];
     await this.recoverPendingIntents(run, policy, failures);
     const recoveredLedger = await this.inventoryRunResourcesEventually(
@@ -737,7 +737,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       await qualificationClientToken(run.identity.runId, intent.request.opId),
     );
     if (authorized.mutating) {
-      await this.ensureAccount(run, policy, true);
+      await this.ensureAccount(policy);
     }
     const response = await this.signer.execute(
       intent.request.service,
@@ -747,6 +747,11 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     );
     const result = await boundedResponse(response);
     if (result.status < 200 || result.status >= 300) {
+      if (retireDefinitelyAbsentResource(ledger, intent.request, result)) {
+        await this.ctx.storage.put(ledgerKey, ledger);
+        await this.ctx.storage.delete(key);
+        return;
+      }
       failures.push(`${intent.request.action} reconciliation http ${result.status}`);
       return;
     }
@@ -769,7 +774,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     failures: string[],
   ): Promise<void> {
     try {
-      await this.ensureAccount(run, policy, true);
+      await this.ensureAccount(policy);
       const response = await this.signer.execute("ec2", action, policy.region, parameters);
       const result = await boundedResponse(response);
       if (
@@ -795,6 +800,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       "Filter.1.Value.1": run.identity.runId,
     };
     try {
+      await this.ensureAccount(run.policy);
       const [instancesResponse, imagesResponse, snapshotsResponse, volumesResponse, keysResponse] =
         await Promise.all([
           this.signer.execute("ec2", "DescribeInstances", run.policy.region, filter),
@@ -890,7 +896,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     intent: AWSQualificationIntent,
     policy: AWSQualificationPolicy,
   ): Promise<boolean> {
-    await this.ensureAccount(run, policy);
+    await this.ensureAccount(policy);
     const response = await this.signer.execute("ec2", "DescribeInstances", policy.region, {
       "Filter.1.Name": "tag:crabbox_qualification_run",
       "Filter.1.Value.1": run.identity.runId,
@@ -956,6 +962,14 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     policy: AWSQualificationPolicy,
     failures: string[],
   ): Promise<void> {
+    try {
+      await this.ensureAccount(policy);
+    } catch (error) {
+      failures.push(
+        `residue account verification: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
     await this.verifyAbsent(
       policy,
       "DescribeInstances",
@@ -989,11 +1003,27 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       failures,
     );
     await this.verifyKeyPairsAbsent(ledger, policy, failures);
-    const group = await this.signer.execute("ec2", "DescribeSecurityGroups", policy.region, {
-      "GroupId.1": policy.securityGroupId,
-    });
-    if (!(await boundedResponse(group)).body.includes(policy.securityGroupId)) {
-      failures.push("preprovisioned security group is missing");
+    try {
+      const group = await this.signer.execute("ec2", "DescribeSecurityGroups", policy.region, {
+        "GroupId.1": policy.securityGroupId,
+      });
+      const groupResult = await boundedResponse(group);
+      if (groupResult.status < 200 || groupResult.status >= 300) {
+        failures.push(`DescribeSecurityGroups verification http ${groupResult.status}`);
+        return;
+      }
+      const groups = items(
+        record(awsXMLRoot(groupResult.body, "DescribeSecurityGroups")["securityGroupInfo"])["item"],
+      ).map(record);
+      if (groups.length !== 1 || asString(groups[0]!["groupId"]) !== policy.securityGroupId) {
+        failures.push("preprovisioned security group is missing");
+      }
+    } catch (error) {
+      failures.push(
+        `DescribeSecurityGroups verification: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 
