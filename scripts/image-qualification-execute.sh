@@ -50,16 +50,17 @@ image_read() {
     "$QUALIFICATION_RELAY_URL/v1/images/$image_id?provider=aws&target=linux&region=$QUALIFICATION_AWS_REGION"
 }
 
-probe_started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 before="$raw/base-before.json"
 after="$raw/base-after.json"
 image_read "$QUALIFICATION_BASE_AMI_ID" "$before"
 spoof_body="$raw/spoof.json"
 printf '{"expected":{"state":"capture"},"image":{"target":"linux"}}\n' >"$spoof_body"
+probe_started_at=$(node -e 'process.stdout.write(new Date().toISOString())')
 spoof_status=$(curl --silent --show-error --max-time 30 -o "$raw/spoof-response.json" \
   -w '%{http_code}' -X POST -H "@$relay_headers" -H 'Content-Type: application/json' \
   --data-binary "@$spoof_body" \
   "$QUALIFICATION_RELAY_URL/qualification/shared/v1/images/$QUALIFICATION_BASE_AMI_ID/promote-cas?provider=aws&target=linux&region=$QUALIFICATION_AWS_REGION")
+probe_completed_at=$(node -e 'process.stdout.write(new Date().toISOString())')
 [[ "$spoof_status" == 403 ]]
 image_read "$QUALIFICATION_BASE_AMI_ID" "$after"
 node - "$before" "$after" <<'NODE'
@@ -74,7 +75,6 @@ if (canonical(JSON.parse(fs.readFileSync(process.argv[2]))) !== canonical(JSON.p
   throw new Error("shared-token admin probe mutated the image catalog");
 }
 NODE
-probe_completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 printf '{"status":403,"catalogUnchanged":true,"startedAt":"%s","completedAt":"%s"}\n' \
   "$probe_started_at" "$probe_completed_at" >"$proof/spoofed-admin.json"
 sleep 2

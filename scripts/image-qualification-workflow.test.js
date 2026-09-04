@@ -419,22 +419,32 @@ test("attestation gate requires FSR denial and exact sequential launch order", a
   const module = await import(
     `${pathToFileURL(path.join(root, "scripts/image-qualification-control.mjs"))}?evidence=${Date.now()}`
   );
-  const operation = (action, accepted = true) => ({
+  const operation = (action, requestedAt, accepted = true) => ({
     action,
-    signerDispatches: accepted ? [{ outcome: "accepted" }] : [],
+    requestedAt,
+    signerDispatches: accepted
+      ? [
+          {
+            beforeAt: new Date(Date.parse(requestedAt) + 10).toISOString(),
+            afterAt: new Date(Date.parse(requestedAt) + 20).toISOString(),
+            outcome: "accepted",
+          },
+        ]
+      : [],
   });
   const attestation = {
     finalized: true,
     operations: [
+      operation("DescribeImages", "2026-09-04T00:00:00.900Z"),
+      operation("DescribeImages", "2026-09-04T00:00:01.200Z"),
       {
-        ...operation("EnableFastSnapshotRestores", false),
+        ...operation("EnableFastSnapshotRestores", "2026-09-04T00:00:02.000Z", false),
         denialReason: "policy-denied",
-        requestedAt: "2026-09-04T00:00:02.000Z",
       },
-      { ...operation("RunInstances"), requestedAt: "2026-09-04T00:00:03.000Z" },
-      { ...operation("CreateImage"), requestedAt: "2026-09-04T00:00:04.000Z" },
-      { ...operation("RunInstances"), requestedAt: "2026-09-04T00:00:05.000Z" },
-      { ...operation("RunInstances"), requestedAt: "2026-09-04T00:00:06.000Z" },
+      operation("RunInstances", "2026-09-04T00:00:03.000Z"),
+      operation("CreateImage", "2026-09-04T00:00:04.000Z"),
+      operation("RunInstances", "2026-09-04T00:00:05.000Z"),
+      operation("RunInstances", "2026-09-04T00:00:06.000Z"),
     ],
     finalReceipt: {
       failureCodes: [],
@@ -442,7 +452,12 @@ test("attestation gate requires FSR denial and exact sequential launch order", a
     },
   };
   const proof = {
-    spoof: { status: 403, catalogUnchanged: true, completedAt: "2026-09-04T00:00:01.000Z" },
+    spoof: {
+      status: 403,
+      catalogUnchanged: true,
+      startedAt: "2026-09-04T00:00:01.000Z",
+      completedAt: "2026-09-04T00:00:01.100Z",
+    },
     fsr: { rejected: true },
     catalog: {
       seededDefaultReadback: true,
@@ -468,7 +483,10 @@ test("attestation gate requires FSR denial and exact sequential launch order", a
       module.verifyQualificationEvidence(
         {
           ...attestation,
-          operations: [...attestation.operations, operation("RunInstances")],
+          operations: [
+            ...attestation.operations,
+            operation("RunInstances", "2026-09-04T00:00:07.000Z"),
+          ],
         },
         proof,
       ),
@@ -480,13 +498,55 @@ test("attestation gate requires FSR denial and exact sequential launch order", a
         {
           ...attestation,
           operations: [
-            { ...operation("EnableFastSnapshotRestores"), denialReason: "policy-denied" },
-            ...attestation.operations.slice(1),
+            {
+              ...operation("EnableFastSnapshotRestores", "2026-09-04T00:00:02.000Z"),
+              denialReason: "policy-denied",
+            },
+            ...attestation.operations.filter(
+              (entry) => entry.action !== "EnableFastSnapshotRestores",
+            ),
           ],
         },
         proof,
       ),
     /pre-signer/,
+  );
+  assert.throws(
+    () =>
+      module.verifyQualificationEvidence(
+        {
+          ...attestation,
+          operations: [
+            ...attestation.operations,
+            operation("DescribeImages", "2026-09-04T00:00:01.050Z"),
+          ],
+        },
+        proof,
+      ),
+    /spoofed admin probe/,
+  );
+  assert.throws(
+    () =>
+      module.verifyQualificationEvidence(
+        {
+          ...attestation,
+          operations: attestation.operations.map((entry, index) =>
+            index === 0
+              ? {
+                  ...entry,
+                  signerDispatches: [
+                    {
+                      ...entry.signerDispatches[0],
+                      afterAt: "2026-09-04T00:00:01.100Z",
+                    },
+                  ],
+                }
+              : entry,
+          ),
+        },
+        proof,
+      ),
+    /spoofed admin probe/,
   );
 });
 

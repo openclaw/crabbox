@@ -1485,12 +1485,40 @@ function readExecutionProof() {
 
 export function verifyQualificationEvidence(attestation, proof) {
   const operations = attestation?.operations ?? [];
-  const probeCompletedAt = Date.parse(proof?.spoof?.completedAt ?? "");
+  const millisecondTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+  const probeStarted = proof?.spoof?.startedAt ?? "";
+  const probeCompleted = proof?.spoof?.completedAt ?? "";
+  const probeStartedAt = Date.parse(probeStarted);
+  const probeCompletedAt = Date.parse(probeCompleted);
+  // The surrounding catalog reads may sign DescribeImages. Only evidence
+  // timestamped inside the exact spoof request window invalidates the probe.
+  const operationInsideProbeWindow = operations.some((operation) => {
+    if (typeof operation.requestedAt !== "string") return true;
+    const timestamps = [operation.requestedAt];
+    for (const dispatch of operation.signerDispatches ?? []) {
+      if (typeof dispatch.beforeAt !== "string") return true;
+      timestamps.push(dispatch.beforeAt);
+      if (dispatch.afterAt !== undefined) {
+        if (typeof dispatch.afterAt !== "string") return true;
+        timestamps.push(dispatch.afterAt);
+      }
+    }
+    return timestamps.some((timestamp) => {
+      const parsed = Date.parse(timestamp);
+      return (
+        !Number.isFinite(parsed) || (parsed >= probeStartedAt && parsed <= probeCompletedAt)
+      );
+    });
+  });
   if (
     proof?.spoof?.status !== 403 ||
     proof?.spoof?.catalogUnchanged !== true ||
+    !millisecondTimestamp.test(probeStarted) ||
+    !millisecondTimestamp.test(probeCompleted) ||
+    !Number.isFinite(probeStartedAt) ||
     !Number.isFinite(probeCompletedAt) ||
-    operations.some((operation) => Date.parse(operation.requestedAt) <= probeCompletedAt)
+    probeStartedAt > probeCompletedAt ||
+    operationInsideProbeWindow
   ) {
     throw new Error(
       "evidence does not prove the spoofed admin probe left signer sequence unchanged",
