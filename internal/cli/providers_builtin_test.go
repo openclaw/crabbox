@@ -626,6 +626,36 @@ func (testGCPProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProvi
 func (testGCPProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
+func (testGCPProvider) ReadyPoolImageIdentityMatchesLease(req ProviderReadyPoolImageIdentityRequest) bool {
+	image := req.Lease.Image
+	if image == nil || image.SourceID != strings.TrimSpace(image.SourceID) {
+		return false
+	}
+	resource := image.SourceID
+	for _, prefix := range []string{
+		"https://compute.googleapis.com/compute/v1/",
+		"https://www.googleapis.com/compute/v1/",
+	} {
+		resource = strings.TrimPrefix(resource, prefix)
+	}
+	parts := strings.Split(resource, "/")
+	if len(parts) != 5 || parts[0] != "projects" || parts[1] == "" || parts[2] != "global" || parts[4] == "" {
+		return false
+	}
+	collection := parts[3]
+	if (image.Kind == "gcp-image" && collection != "images") ||
+		(image.Kind == "gcp-disk-snapshot" && collection != "snapshots") ||
+		(image.Kind != "gcp-image" && image.Kind != "gcp-disk-snapshot") {
+		return false
+	}
+	return req.Identity.Provider == "gcp" &&
+		req.Lease.Provider == "gcp" &&
+		image.Provider == "gcp" &&
+		req.Lease.Project != "" &&
+		strings.TrimSpace(req.Lease.Project) == req.Lease.Project &&
+		image.ID == req.Identity.ID &&
+		fmt.Sprintf("projects/%s/global/%s", parts[1], collection) == req.Identity.Scope
+}
 func (testGCPProvider) ServerTypeForConfig(cfg Config) string {
 	candidates := gcpMachineTypeCandidatesForConfig(cfg)
 	if len(candidates) == 0 {
@@ -691,6 +721,17 @@ func (testAWSProvider) Spec() ProviderSpec {
 func (testAWSProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
 func (testAWSProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
+}
+func (testAWSProvider) ReadyPoolImageIdentityMatchesLease(req ProviderReadyPoolImageIdentityRequest) bool {
+	image := req.Lease.Image
+	return req.Identity.Provider == "aws" &&
+		req.Lease.Provider == "aws" &&
+		image != nil &&
+		image.Provider == "aws" &&
+		image.Kind == "aws-ami" &&
+		image.ID == req.Identity.ID &&
+		image.Region == req.Identity.Scope &&
+		req.Lease.Region == req.Identity.Scope
 }
 func (testAWSProvider) ConfigureSSHTarget(target *SSHTarget, readyCommand string) {
 	if target.TargetOS == targetLinux {

@@ -145,11 +145,31 @@ func readyPoolIdentityMatchesLease(identity CoordinatorReadyPoolIdentityV1, leas
 	if lease.TargetOS != targetLinux {
 		return exit(2, "typed ready pools currently require a native Linux lease")
 	}
-	if lease.Image == nil || lease.Image.ID != identity.Image.ID || lease.Image.Provider != identity.Image.Provider || lease.Image.Region != identity.Image.Scope || lease.Region != identity.Image.Scope || lease.Provider != identity.Image.Provider {
+	provider, err := ProviderFor(identity.Image.Provider)
+	if err != nil {
 		return exit(7, "coordinator lease provider, immutable image, or scope does not match ready-pool identity")
+	}
+	if err := readyPoolIdentityMatchesLeaseWithProvider(provider, identity, lease); err != nil {
+		return err
 	}
 	if lease.Architecture != identity.Architecture {
 		return exit(7, "coordinator lease architecture does not match ready-pool identity")
+	}
+	return nil
+}
+
+func readyPoolIdentityMatchesLeaseWithProvider(provider Provider, identity CoordinatorReadyPoolIdentityV1, lease CoordinatorLease) error {
+	capability, ok := provider.(ProviderReadyPoolImageIdentityCapability)
+	if !ok || !capability.ReadyPoolImageIdentityMatchesLease(ProviderReadyPoolImageIdentityRequest{
+		Identity: identity.Image,
+		Lease: ProviderReadyPoolLeaseImageIdentity{
+			Provider: lease.Provider,
+			Region:   lease.Region,
+			Project:  lease.ProviderProject,
+			Image:    lease.Image,
+		},
+	}) {
+		return exit(7, "coordinator lease provider, immutable image, or scope does not match ready-pool identity")
 	}
 	return nil
 }

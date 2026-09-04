@@ -56,6 +56,24 @@ type ProviderArchitectureCapability interface {
 	SupportsArchitecture(cfg Config, architecture string) bool
 }
 
+type ProviderReadyPoolLeaseImageIdentity struct {
+	Provider string
+	Region   string
+	Project  string
+	Image    *CoordinatorLeaseImage
+}
+
+type ProviderReadyPoolImageIdentityRequest struct {
+	Identity CoordinatorReadyPoolImageIdentity
+	Lease    ProviderReadyPoolLeaseImageIdentity
+}
+
+// ProviderReadyPoolImageIdentityCapability owns provider-specific validation
+// of immutable image evidence returned with a typed ready-pool lease.
+type ProviderReadyPoolImageIdentityCapability interface {
+	ReadyPoolImageIdentityMatchesLease(ProviderReadyPoolImageIdentityRequest) bool
+}
+
 // ProviderConfigArchitectureDescriber describes an omitted architecture for
 // config diagnostics only. It must not probe the runtime or change execution.
 type ProviderConfigArchitectureDescriber interface {
