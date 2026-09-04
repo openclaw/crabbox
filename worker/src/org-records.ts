@@ -7,16 +7,21 @@ import {
 import type { ExternalRunnerRecord, LeaseRecord, ReadyPoolEntry, RunRecord } from "./types";
 
 export type PortalOrgKind = "missing" | "legacy" | "unsupported";
-export type PortalLeaseRecord = LeaseRecord & { portalOrgKind?: PortalOrgKind };
+type LeaseCleanupStatus = "pending" | "failed" | "complete" | "retained";
+export type PublicLeaseRecord = LeaseRecord & { cleanupStatus?: LeaseCleanupStatus };
+export type PortalLeaseRecord = PublicLeaseRecord & { portalOrgKind?: PortalOrgKind };
 export type PortalExternalRunnerRecord = ExternalRunnerRecord & {
   portalOrgKind?: PortalOrgKind;
 };
 
-export function publicLeaseRecord(record: LeaseRecord): LeaseRecord {
-  const publicRecord = {
+export function publicLeaseRecord(record: LeaseRecord): PublicLeaseRecord {
+  const publicRecord: PublicLeaseRecord = {
     ...record,
     org: orgLabelForDisplay(record.org),
   };
+  if (record.state === "released") {
+    publicRecord.cleanupStatus = releaseCleanupStatus(record);
+  }
   delete publicRecord.provisioningCoordinatorVersion;
   delete publicRecord.provisioningRequestSettledAt;
   delete publicRecord.provisioningRecoveryObservedAt;
@@ -26,6 +31,41 @@ export function publicLeaseRecord(record: LeaseRecord): LeaseRecord {
   delete publicRecord.createAttemptID;
   delete publicRecord.createAttemptGeneration;
   return publicRecord;
+}
+
+function releaseCleanupStatus(record: LeaseRecord): LeaseCleanupStatus {
+  if (record.releaseDeletesServer === false) return "retained";
+  // A retry's current claim supersedes historical failure diagnostics; failures
+  // clear that claim. This is an observation, never provider deletion authority.
+  if (record.cleanupStartedAt) {
+    return Number.isFinite(Date.parse(record.cleanupStartedAt)) ? "pending" : "failed";
+  }
+  if (
+    record.releaseDeletesServer === true &&
+    Number.isFinite(Date.parse(record.provisioningRequestStartedAt ?? "")) &&
+    !record.provisioningRequestSettledAt &&
+    !record.provisioningRecoveryObservedAt &&
+    !record.provisioningRecoveryMissingSince &&
+    !record.failureError &&
+    !record.cleanupFailedAt &&
+    !record.cleanupAttempts
+  ) {
+    // Release can precede the allocation response. Keep legacy diagnostics for
+    // older clients while current observers wait for the create owner's outcome.
+    return "pending";
+  }
+  return record.cleanupError ||
+    record.cleanupRetryAt ||
+    record.cleanupFailedAt ||
+    record.cleanupAttempts ||
+    record.provisioningRequestStartedAt ||
+    record.provisioningRequestSettledAt ||
+    record.provisioningRecoveryObservedAt ||
+    record.provisioningRecoveryMissingSince ||
+    record.provisioningResourceMayExist ||
+    record.providerKeyCleanupPending
+    ? "failed"
+    : "complete";
 }
 
 export function publicRunRecord(record: RunRecord): RunRecord {

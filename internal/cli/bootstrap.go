@@ -91,12 +91,12 @@ runcmd:
     chown -R %[7]s:%[7]s %[3]s /var/cache/crabbox
     install -d /var/lib/crabbox
     systemctl enable ssh || true
-    timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true
+%[10]s
 %[8]s
     touch /var/lib/crabbox/bootstrapped
     crabbox-ready
     BOOT
-`, yamlSSHUser, yamlPublicKey, shellWorkRoot, portLines, readyChecks, writeFiles, shellSSHUser, bootstrap, readinessBootstrap)
+`, yamlSSHUser, yamlPublicKey, shellWorkRoot, portLines, readyChecks, writeFiles, shellSSHUser, bootstrap, readinessBootstrap, indentCloudInitRuncmd(sharedLinuxSSHRestart()))
 }
 
 func CloudInitUserData(cfg Config, publicKey string) string {
@@ -117,7 +117,12 @@ tasks:
 }
 
 func windowsBootstrapHeaderPowerShell(cfg Config, publicKey, workRoot string) string {
-	return sharedWindowsHeader(cfg.SSHUser, publicKey, workRoot, sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
+	script := sharedWindowsHeader(cfg.SSHUser, publicKey, workRoot, sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
+	// An omitted mode retains the native default; WSL2 owns a separate Linux runtime.
+	if cfg.WindowsMode != windowsModeWSL2 {
+		script += sharedWindowsRuntime() + sharedWindowsRuntimeGate()
+	}
+	return script
 }
 
 func windowsBootstrapPowerShell(cfg Config, publicKey string) string {

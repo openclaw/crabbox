@@ -65,6 +65,14 @@ key path, port, user, and host). Empty fields render as `-`.
 label map. Secrets such as broker tokens, provider keys, and VNC passwords are
 never included in either output mode.
 
+[Local Container](../providers/local-container.md#memory-failure-evidence)
+adds fresh, read-only `diagnostic.memory.*` labels to the returned view. They
+describe actual container settings and, when available, total RAM from its
+verified runtime route, not free memory or a universal effective limit. These
+facts are not persisted into claims or container labels, and do not reconstruct
+a previous command's OOM evidence. For a deleted one-shot container, use the
+run's timing/failure-bundle snapshot instead.
+
 For brokered leases, labels describe the current coordinator lease record,
 including allocation identity, target, capacity, timing, and capability facts.
 They are not a fresh read of provider tags. Only the documented
@@ -73,8 +81,12 @@ coordinator inspection.
 
 Brokered JSON records also expose the coordinator's provider-cleanup state:
 
+- `cleanupStatus`: for released leases, `pending`, `failed`, `complete`, or
+  `retained`. This is computed from the current lifecycle record, not persisted
+  as a separate state or used as provider deletion authority.
 - `cleanupStartedAt`: cleanup has started but is not yet terminal.
-- `cleanupError`: the coordinator observed a provider-cleanup failure.
+- `cleanupError`: cleanup remains unconfirmed; this can include legacy diagnostics
+  for pending creation as well as observed failures.
 - `cleanupRetryAt`: the coordinator scheduled another cleanup attempt.
 - `releaseDeletesServer`: whether release is intended to delete the provider
   resource.
@@ -86,8 +98,17 @@ absent, and `releaseDeletesServer` is either omitted or `true`. An explicit
 retained and must not be treated as deletion-confirmed. Omitted and `false` are
 therefore distinct states.
 
+`pending` includes an allocation response or cleanup attempt still being
+observed. An explicit stop keeps observing that state within its existing
+five-minute bound instead of treating it as a provider failure. A real cleanup
+failure or uncertain abandoned allocation remains `failed`; local claims and
+SSH files are retained. Older coordinators omit `cleanupStatus`, and clients
+continue using the existing conservative metadata checks. The original
+diagnostics remain available so older clients also fail closed.
+
 These fields report the coordinator's lifecycle observation. They are not an
-independent provider inventory check.
+independent provider inventory check. `complete` does not override remaining
+cleanup metadata or an explicit retained-resource flag.
 
 For coordinator leases whose provider can inject an SSH host key before first
 boot, JSON also includes `sshHostKey`. Its value is exactly the public host-key
@@ -102,6 +123,30 @@ algorithm and base64 payload, without a hostname or comment:
 The key is the authoritative public half generated for provisioning, not a key
 learned later through `known_hosts` or `ssh-keyscan`. The field is omitted when
 the provider cannot inject a host key before boot.
+
+For Islo leases, JSON also includes the API-assigned sandbox ID as
+`providerResourceId`:
+
+```json
+{
+  "serverId": "my-app-7f3a91",
+  "providerResourceId": "0195f3d2-5c1a-7c39-9c1e-6f0f2b7a41cd"
+}
+```
+
+For Islo, `serverId` remains the sandbox name and `providerResourceId` identifies
+its resource generation. Other providers retain their existing `serverId`
+semantics and may omit `providerResourceId`; omission does not imply that their
+resource names are immutable.
+
+When an Islo name fallback does not report the resource ID the lease claims,
+`labels.islo_resource_id_mismatch` is set to
+`true`, `labels.islo_claimed_resource_id` reports the id the lease claims, and
+`providerResourceId` is omitted entirely rather than attributed to a resource
+the lease does not own. The lease is not ready, and `status --wait` fails without
+running remote Tailscale checks. A fallback that reports the claimed ID sets
+neither label. Malformed by-ID responses fail rather than falling back to a
+different resource.
 
 AWS leases also include authoritative provider metadata sourced from EC2
 `DescribeInstances`. Brokered inspection requests a fresh coordinator-side

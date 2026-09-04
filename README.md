@@ -623,7 +623,7 @@ and the [provider docs](docs/providers/README.md).
 # Go CLI
 go build -trimpath -o bin/crabbox ./cmd/crabbox
 go vet ./...
-go test -race ./...
+go test -race -timeout=15m ./...
 
 # Coordinator runtimes (Node 22+ locally; CI runs Node 24)
 npm ci --prefix worker
@@ -649,11 +649,27 @@ CRABBOX_BIN=./bin/crabbox scripts/live-firecracker-smoke.sh
 
 CI runs the full gate (gofmt, vet, race tests, all Go modules, coverage
 threshold, repository script tests, docs link/build check, GoReleaser snapshot, and Worker
-lint/typecheck/tests/build) on every push and PR. Production releases use a
-serialized, draft-first process: preserve and verify the signed tag, build and
+lint/typecheck/tests/build) on every push and PR. The required `Go` check aggregates
+three independent 30-minute jobs: `Go test` (formatting, vet, deadcode, full race
+suite, Linux supervision proof, and build), `Go modules` (normal tests in every
+module, including the root), and `Go coverage` (90% core coverage threshold).
+The race suite, all-module normal tests, and coverage collection use a 15-minute
+package timeout.
+Use the explicit timeout locally too: the CLI race suite can exceed Go's default
+10-minute package deadline even when its individual tests pass.
+Production releases use a serialized, draft-first process: preserve and verify
+the signed tag, build and
 Developer ID sign/notarize the macOS candidates locally, verify the exact draft
 on native Apple Silicon and Intel runners from protected-default code, then
-authorize publication and the Homebrew update as separate gates. See
+publish those exact artifacts, dispatch the ordinary Homebrew tap update, and
+run independent public-download, public Go installation, and native Homebrew
+smokes. Publication establishes eligibility; retry a failed Homebrew update
+without rebuilding or republishing. The tap handoff is an explicit operator
+step, with generic tap reconciliation as an independent fallback. One explicit full release/publish request authorizes
+this complete normal sequence without renewed chat approval at each stage.
+Narrow requests stay narrow. The original request supplies authorization;
+GitHub events alone do not. Sequential technical gates, separate trust domains,
+and cancellation boundaries remain mandatory. See
 [Release engineering](docs/RELEASING.md).
 
 Git-overlay integration tests use real Git with task-owned local and loopback
@@ -661,6 +677,15 @@ origins. Their local SSH stand-ins isolate Git authentication settings and
 disable interactive credential requests, including during ordinary seed
 fallback. A credential-helper/askpass canary guards this test-only boundary;
 the separate production overlay security tests still inject hostile Git config.
+
+CLI runtime optimizations retain the full normal, race, and coverage modes and
+their existing deadlines and observation windows. Synchronous POSIX test-executable
+helpers suppress only the race runtime's exit delay in their child environment,
+preserving inherited detection and reporting options; Windows keeps its existing
+execution path. HTTP deadline cases with
+explicit configuration and private servers overlap their real waits without
+changing timeout contracts. The shared immutable CLI and provider builds stay
+inside `M.Run`, with their existing fixture cleanup and rebuild ownership.
 
 Cloudflare, Node/PostgreSQL, container, ingress, secrets, and DNS deployment live
 in [docs/infrastructure.md](docs/infrastructure.md). The dedicated ECS Fargate

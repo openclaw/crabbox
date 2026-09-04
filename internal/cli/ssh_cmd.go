@@ -81,6 +81,9 @@ func (a App) resolveSSHCommandTargetWithOptions(ctx context.Context, command str
 	if err := a.claimAndTouchLeaseTarget(ctx, cfg, &lease.Server, lease.SSH, lease.LeaseID, *reclaim); err != nil {
 		return resolvedSSHCommandTarget{}, err
 	}
+	if err := ensureSSHControlDirectory(lease.SSH); err != nil {
+		return resolvedSSHCommandTarget{}, err
+	}
 	resolved := resolvedSSHCommandTarget{
 		Config: cfg,
 		Lease:  lease,

@@ -31,6 +31,45 @@ type doctorJSONCheck struct {
 func (a App) doctor(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("doctor", a.Stderr)
+	fs.Usage = func() {
+		fmt.Fprint(fs.Output(), `Usage:
+  crabbox doctor [flags]
+
+Check local tools and configured broker/provider readiness without creating,
+mutating, or deleting provider resources.
+
+Modes:
+  crabbox doctor                              check configured readiness
+  crabbox doctor --provider aws               check a selected provider strictly
+  crabbox doctor --id blue-box                inspect a lease and probe remote tools
+  crabbox doctor --profile live-qa --id blue-box  check an enabled profile's remote prerequisites
+  crabbox doctor --from-run run_abcdef123456   diagnose a recorded run (requires coordinator)
+  crabbox doctor --pond my-pond               verify an existing pond's Tailscale policy
+  crabbox doctor --all --prepare-check        check the test-runner provider matrix
+  crabbox doctor --json                       print structured check results
+
+Doctor flags:
+  --provider <name>             provider to validate (defaults to configured selection)
+  --profile <name>              profile for remote prerequisite checks
+  --id <lease-id-or-slug>       resolve a lease and run remote SSH/tool checks
+  --from-run <run-id>           load recorded provider, target, lease, and phase context
+  --pond <name>                 verify Tailscale policy setup for this pond
+  --all                         check the test-runner matrix, not every provider
+  --providers <list>            comma-separated providers for --all
+  --prepare-check               include preparation readiness checks with --all
+  --doctor-probe-ssh            opt in to static SSH reachability checks
+  --json                        print JSON
+  --target linux|macos|windows  select the target OS
+  --windows-mode normal|wsl2    select the Windows execution mode
+
+With no selected provider, doctor checks local readiness and skips provider
+credentials with a warning. Configured broker checks may still access the network.
+Profile prerequisite checks require doctor.enabled and do not support native Windows.
+
+All flags:
+`)
+		fs.PrintDefaults()
+	}
 	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
 	profile := fs.String("profile", defaults.Profile, "configured profile for remote prerequisite checks")
 	id := fs.String("id", "", "remote lease id to inspect")
@@ -282,7 +321,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	useCoordinator := false
 	useCoordinatorForDoctor := cfg.BrokerMode != BrokerModeRegistered && strings.TrimSpace(cfg.Coordinator) != ""
 	if providerSelected {
-		useCoordinatorForDoctor = shouldUseCoordinator(cfg, providerDef.Spec())
+		useCoordinatorForDoctor = ShouldUseCoordinator(cfg, providerDef.Spec())
 	}
 	if useCoordinatorForDoctor {
 		if coord, coordinatorConfigured, err := newTargetCoordinatorClient(cfg); err != nil {

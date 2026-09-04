@@ -123,6 +123,12 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (runResult 
 	if err := b.ValidateRunOptions(req); err != nil {
 		return RunResult{}, err
 	}
+	if err := core.ValidateRunArtifactGlobs(req.ArtifactGlobs); err != nil {
+		return RunResult{}, err
+	}
+	if err := core.ValidateRequiredRunArtifactGlobs(req.RequiredArtifactGlobs); err != nil {
+		return RunResult{}, err
+	}
 	if blacksmithEnvForwardingRequested(req) {
 		core.PrintEnvForwardingSummary(b.rt.Stderr, blacksmithTestboxProvider, "unsupported", req.Options.EnvAllow, req.Env)
 		fmt.Fprintf(b.rt.Stderr, "env forwarding note=blacksmith-testbox delegates execution to the Blacksmith CLI; configure secrets in the Testbox workflow instead\n")
@@ -215,7 +221,15 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (runResult 
 	commandStart := b.rt.Clock.Now()
 	phaseTracker := core.NewCommandPhaseTracker(commandStart)
 	code := 0
+	var commandEnd time.Time
+	var collected core.DelegatedRunArtifactResult
+	var artifactErr error
 	if err := b.withOwnedTestbox(ctx, claim, func() error {
+		if len(req.ArtifactGlobs) > 0 || len(req.RequiredArtifactGlobs) > 0 {
+			code, commandEnd, collected, artifactErr = b.runArtifactTestbox(ctx, req, leaseID, phaseTracker,
+				mergeWriters(stdoutCapture, stdoutProof), mergeWriters(stderrCapture, stderrProof), blacksmithCollectionTimeout)
+			return nil
+		}
 		code = b.runTestbox(
 			ctx,
 			leaseID,
@@ -230,6 +244,14 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (runResult 
 	}); err != nil {
 		return RunResult{}, err
 	}
+	// Artifact diagnostics must not reclassify an earlier workload failure.
+	artifactFailedSuccess := artifactErr != nil && code == 0
+	if artifactErr != nil {
+		fmt.Fprintf(b.rt.Stderr, "blacksmith artifact retrieval failed: %v\n", artifactErr)
+		if code == 0 {
+			code = blacksmithArtifactFailureExitCode(artifactErr)
+		}
+	}
 	if closeErr := stdoutCapture.Close(); closeErr != nil && code == 0 {
 		return RunResult{}, core.Exit(2, "blacksmith failure bundle stdout close: %v", closeErr)
 	}
@@ -237,8 +259,11 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (runResult 
 		return RunResult{}, core.Exit(2, "blacksmith failure bundle stderr close: %v", closeErr)
 	}
 	finished := b.rt.Clock.Now()
-	commandDuration := finished.Sub(commandStart)
-	commandPhases := core.FinishCommandPhaseTracker(phaseTracker, finished)
+	if commandEnd.IsZero() {
+		commandEnd = finished
+	}
+	commandDuration := commandEnd.Sub(commandStart)
+	commandPhases := core.FinishCommandPhaseTracker(phaseTracker, commandEnd)
 	total := finished.Sub(started)
 	actionsURL := firstNonBlank(stdoutProof.ActionsURL(), stderrProof.ActionsURL())
 	result := RunResult{
@@ -253,29 +278,10 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (runResult 
 		Total:         total,
 		SyncDelegated: true,
 	}
-	var artifactErr error
-	if code == 0 && (len(req.ArtifactGlobs) > 0 || len(req.RequiredArtifactGlobs) > 0) {
-		collected, err := b.CollectRunArtifacts(ctx, core.DelegatedRunArtifactRequest{
-			RunReq:   req,
-			Result:   result,
-			MaxFiles: core.DelegatedRunArtifactDefaultMaxFiles,
-			MaxBytes: core.DelegatedRunArtifactDefaultMaxBytes,
-		})
-		if err != nil {
-			artifactErr = err
-			fmt.Fprintf(b.rt.Stderr, "blacksmith artifact retrieval failed: %v\n", err)
-			code = blacksmithArtifactFailureExitCode(err)
-			result.ExitCode = code
-		} else {
-			if strings.TrimSpace(collected.Output) != "" {
-				fmt.Fprintln(b.rt.Stderr, strings.TrimSpace(collected.Output))
-			}
-			for _, artifact := range collected.Artifacts {
-				fmt.Fprintf(b.rt.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
-			}
-			result.Artifacts = append(result.Artifacts, collected.Artifacts...)
-		}
+	for _, artifact := range collected.Artifacts {
+		fmt.Fprintf(b.rt.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
 	}
+	result.Artifacts = append(result.Artifacts, collected.Artifacts...)
 	if code != 0 && req.KeepOnFailure {
 		shouldStop = false
 	}
@@ -294,7 +300,7 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (runResult 
 	report = core.TimingReportWithRunResult(report, result, cleanupErr)
 	if code != 0 {
 		classificationInput := string(stdoutProof.Bytes()) + "\n" + string(stderrProof.Bytes())
-		if artifactErr != nil {
+		if artifactFailedSuccess {
 			classificationInput += "\n" + artifactErr.Error()
 		}
 		classification := core.ClassifyRunFailure(code, classificationInput, commandPhases)
@@ -1070,10 +1076,18 @@ func (b *blacksmithBackend) runCommand(ctx context.Context, args []string, stdou
 }
 
 func (b *blacksmithBackend) runCommandCapture(ctx context.Context, args []string, stdout, stderr io.Writer, disableOutputCapture bool) (LocalCommandResult, error) {
+	return b.runCommandCaptureInDir(ctx, args, stdout, stderr, disableOutputCapture, "")
+}
+
+func (b *blacksmithBackend) runCommandCaptureInDir(ctx context.Context, args []string, stdout, stderr io.Writer, disableOutputCapture bool, dir string) (LocalCommandResult, error) {
 	if b.route != nil {
 		args = append(append([]string(nil), args...), "--api-url", b.route.API, "--org", b.route.Org)
 	}
-	request := LocalCommandRequest{Name: "blacksmith", Args: args, Stdout: stdout, Stderr: stderr, DisableOutputCapture: disableOutputCapture}
+	request := LocalCommandRequest{Name: "blacksmith", Args: args, Dir: dir, Stdout: stdout, Stderr: stderr, DisableOutputCapture: disableOutputCapture}
+	if dir != "" {
+		// Artifact supervision must also bound local pipe draining on cancel.
+		request.CancelGracePeriod = time.Second
+	}
 	if !disableOutputCapture {
 		request.MaxCapturedOutputBytes = blacksmithCommandCaptureBytes
 	}
@@ -1089,25 +1103,39 @@ func (b *blacksmithBackend) runCommandWithSyncGuard(ctx context.Context, args []
 }
 
 func (b *blacksmithBackend) runCommandWithSyncGuardCapture(ctx context.Context, args []string, stdout, stderr io.Writer, disableOutputCapture bool) (LocalCommandResult, bool, error) {
+	return b.runCommandWithSyncGuardFiltered(ctx, args, stdout, stderr, disableOutputCapture, "", nil)
+}
+
+// Filter before sync observation as well as console, proof, and failure capture.
+func (b *blacksmithBackend) runCommandWithSyncGuardFiltered(ctx context.Context, args []string, stdout, stderr io.Writer, disableOutputCapture bool, dir string, filter func(io.Writer, io.Writer) (io.Writer, io.Writer)) (LocalCommandResult, bool, error) {
 	timeout := blacksmithSyncTimeout(os.Getenv)
 	if timeout <= 0 {
-		result, err := b.runCommandCapture(ctx, args, stdout, stderr, disableOutputCapture)
+		if filter != nil {
+			stdout, stderr = filter(stdout, stderr)
+		}
+		result, err := b.runCommandCaptureInDir(ctx, args, stdout, stderr, disableOutputCapture, dir)
 		return result, false, err
 	}
 	guardCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	tracker := &blacksmithSyncTracker{}
+	stdout = blacksmithSyncGuardWriter{w: stdout, tracker: tracker}
+	stderr = blacksmithSyncGuardWriter{w: stderr, tracker: tracker}
+	if filter != nil {
+		stdout, stderr = filter(stdout, stderr)
+	}
 	resultCh := make(chan struct {
 		result LocalCommandResult
 		err    error
 	}, 1)
 	go func() {
-		result, err := b.runCommandCapture(
+		result, err := b.runCommandCaptureInDir(
 			guardCtx,
 			args,
-			blacksmithSyncGuardWriter{w: stdout, tracker: tracker},
-			blacksmithSyncGuardWriter{w: stderr, tracker: tracker},
+			stdout,
+			stderr,
 			disableOutputCapture,
+			dir,
 		)
 		resultCh <- struct {
 			result LocalCommandResult

@@ -162,8 +162,13 @@ cleanup context, while the existing local claim lock remains held. Cleanup is
 acknowledged only when that query succeeds without cancellation and its stdout
 contains the native table header and one complete, unambiguous row identifying
 the **exact requested ID** with state **`completed`**. The IP cell may be empty
-after native stop clears it; the remaining columns must still be present and
-aligned with the header. Successful stops also require terminal confirmation.
+after native stop clears it. A Testbox stopped before leaving the queue may
+complete without ever receiving an IP or GitHub Actions run URL. Empty IP and
+`RUN URL` cells are allowed only in the complete native table: workflow/job/ref
+must match the exact claim, `CREATED` must be nonempty, and the row must retain
+its column alignment, padding through the `RUN URL` column, and final newline.
+A present run URL must be a valid GitHub Actions run URL. Successful stops also
+require terminal confirmation.
 Raw IDs without exact local ownership never reach native stop.
 
 Only `completed` establishes terminal status for this reconciliation. A 409 or
@@ -262,11 +267,49 @@ detected GitHub Actions run URL when one appears in the output. Failed runs alwa
 failure bundle with stdout/stderr, timing, and redacted env/config metadata. `--keep-on-failure`
 keeps a failed one-shot Testbox inspectable until its idle timeout or an explicit `crabbox stop`.
 
-`--artifact-glob` and `--require-artifact` are supported through Blacksmith's delegated
-run-artifact adapter. After the command succeeds, Crabbox asks the same Testbox to validate
-required globs and stream one bounded tarball back to the local
-`.crabbox/runs/<lease>/blacksmith-artifacts.tgz` path. The adapter caps retrieval at 256 files and
-10 MiB by default and still excludes `.git` and `.crabbox` paths.
+### Run artifacts
+
+`--artifact-glob` and `--require-artifact` opt into an adapter-owned supervisor
+inside the **original** native run. It executes the command in an isolated,
+non-login `bash -c` child, observes its normal terminal exit, then validates
+required globs and collects from the original remote working directory. A child
+`cd`, `exit`, `exec`, or trap does not change the supervisor's collection directory.
+Stdout and stderr remain streaming; stdin forwarding remains unsupported.
+There is no second native run, retry, or re-sync, including after success.
+
+Collection runs after exit 0 or normal nonzero exits below 128. Signal-like
+codes 128 and above skip collection. Crabbox accepts the tarball only after a
+fresh, complete, ordered invocation receipt **and** clean native CLI completion,
+with no caller cancellation or sync timeout, under the original unchanged
+claim fence. Missing/malformed receipts, transport failures (even after a full
+payload), and stopped leases cannot authorize retrieval. Generic log markers
+or a native CLI exit 1 do not establish a remote workload exit.
+
+The remote Linux environment must provide `timeout` with `--kill-after` support,
+in addition to Bash and the existing `find`, `tar`, `base64`, and temporary-file
+utilities. The required timeout option and duration syntax are checked with a
+harmless command before starting the child. Collection has an independent
+30-second budget, with a one-second forced-kill grace;
+the local wait is also bounded from the workload exit receipt. Caller
+cancellation takes precedence. This is not a 30-second workload deadline.
+
+The private local archive is
+`.crabbox/runs/<lease>/blacksmith-artifacts.tgz`. The defaults remain 256 files
+and 10 MiB compressed; `.git` and `.crabbox` paths remain excluded and existing
+symlink rules apply. Required globs are all-or-nothing, including on failed
+workloads. Collection, decoding, local write, or cleanup failure never replaces
+an observed nonzero workload exit. Collection failure after a successful
+workload still fails the run (missing required artifacts return exit 7).
+Command timing ends at the exit receipt; collection and cleanup count toward total.
+
+Reserved receipt frames and archive bytes are removed before
+console/proof/failure-log capture; unrelated workload control bytes remain
+streaming. Malformed or overflowing collection output is discarded and cancels
+the local runner. `--keep`, `--keep-on-failure`, reused leases, and failure bundles retain
+their existing policy. Downloaded evidence does **not** mean the workload
+succeeded; proof rendering remains success-only. The nonce binds the local
+invocation, not remote source authenticity or exact Git bytes: native Blacksmith
+still owns the selected source and sync.
 
 ## Desktop and VNC
 

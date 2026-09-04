@@ -64,7 +64,7 @@ func (a App) status(ctx context.Context, args []string) error {
 			state, err = delegated.Status(statusCtx, StatusRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, Wait: *wait, WaitTimeout: *waitTimeout})
 		} else if isSSH {
 			var lease LeaseTarget
-			lease, err = sshBackend.Resolve(statusCtx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, StatusOnly: true, ReadyProbe: *wait, NoLocalStateMutations: true})
+			lease, err = sshBackend.Resolve(statusCtx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, StatusOnly: true, ReadyProbe: *wait, NoLocalStateMutations: true, IncludeDiagnostics: *jsonOut && !*wait})
 			if err == nil {
 				state, err = statusViewFromLeaseTarget(statusCtx, cfg, lease)
 				if err == nil && *wait && !statusTerminalState(state.State) {
@@ -259,14 +259,18 @@ func leaseStatusStateCanBeReady(lease LeaseTarget, state string) bool {
 }
 
 type StatusView struct {
-	ID                   string             `json:"id"`
-	Slug                 string             `json:"slug,omitempty"`
-	Provider             string             `json:"provider"`
-	TargetOS             string             `json:"target"`
-	WindowsMode          string             `json:"windowsMode,omitempty"`
-	State                string             `json:"state"`
-	ServerID             string             `json:"serverId"`
-	ServerType           string             `json:"serverType"`
+	ID          string `json:"id"`
+	Slug        string `json:"slug,omitempty"`
+	Provider    string `json:"provider"`
+	TargetOS    string `json:"target"`
+	WindowsMode string `json:"windowsMode,omitempty"`
+	State       string `json:"state"`
+	ServerID    string `json:"serverId"`
+	ServerType  string `json:"serverType"`
+	// ProviderResourceID optionally exposes an immutable provider resource ID.
+	// ServerID keeps each provider's existing identity semantics; for Islo it
+	// is the sandbox name rather than the immutable sandbox ID.
+	ProviderResourceID   string             `json:"providerResourceId,omitempty"`
 	Host                 string             `json:"host"`
 	Pond                 string             `json:"pond,omitempty"`
 	Network              NetworkMode        `json:"network"`
@@ -281,6 +285,7 @@ type StatusView struct {
 	IdleFor              string             `json:"idleFor,omitempty"`
 	IdleTimeout          string             `json:"idleTimeout,omitempty"`
 	ExpiresAt            string             `json:"expiresAt,omitempty"`
+	CleanupStatus        string             `json:"cleanupStatus,omitempty"`
 	CleanupStartedAt     string             `json:"cleanupStartedAt,omitempty"`
 	CleanupError         string             `json:"cleanupError,omitempty"`
 	CleanupRetryAt       string             `json:"cleanupRetryAt,omitempty"`
@@ -296,13 +301,14 @@ type StatusView struct {
 type statusView = StatusView
 
 func (a App) leaseStatus(ctx context.Context, cfg Config, id string) (statusView, error) {
-	return a.leaseStatusWithRequest(ctx, cfg, StatusRequest{Options: leaseOptionsFromConfig(cfg), ID: id})
+	return a.leaseStatusWithRequest(ctx, cfg, StatusRequest{Options: leaseOptionsFromConfig(cfg), ID: id}, false)
 }
 
 func (a App) leaseStatusWithRequest(
 	ctx context.Context,
 	cfg Config,
 	req StatusRequest,
+	includeDiagnostics bool,
 ) (statusView, error) {
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
@@ -320,7 +326,7 @@ func (a App) leaseStatusWithRequest(
 	if !ok {
 		return statusView{}, exit(2, "provider=%s does not support status", backend.Spec().Name)
 	}
-	lease, err := sshBackend.Resolve(ctx, ResolveRequest{Options: req.Options, ID: req.ID, StatusOnly: true, NoLocalStateMutations: true})
+	lease, err := sshBackend.Resolve(ctx, ResolveRequest{Options: req.Options, ID: req.ID, StatusOnly: true, NoLocalStateMutations: true, IncludeDiagnostics: includeDiagnostics})
 	if err != nil {
 		return statusView{}, err
 	}

@@ -1,14 +1,12 @@
 package tart
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -96,7 +94,7 @@ func (b *backend) configForRun() Config {
 	return cfg
 }
 
-func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
+func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (target LeaseTarget, acquireErr error) {
 	cfg := b.configForRun()
 	leaseID := newLeaseID()
 	instances, err := b.listInstances(ctx)
@@ -166,19 +164,42 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	if err := b.configureVM(ctx, cfg, name); err != nil {
 		return LeaseTarget{}, errors.Join(err, cleanupUnclaimedVM())
 	}
-	if err := b.startVM(ctx, name, req.Keep); err != nil {
-		return LeaseTarget{}, errors.Join(err, cleanupUnclaimedVM())
-	}
-	ip, err := b.waitForIP(ctx, name)
+	startup, err := b.startVM(ctx, name, req.Keep)
 	if err != nil {
 		return LeaseTarget{}, errors.Join(err, cleanupUnclaimedVM())
 	}
+	var publishedClaim core.LeaseClaim
+	defer func() {
+		if acquireErr == nil {
+			return
+		}
+		// Reap our exact child and preserve its failure before name-based cleanup.
+		acquireErr = startup.abort(acquireErr)
+		cleanup := cleanupUnclaimedVM
+		if publishedClaim.LeaseID != "" {
+			cleanup = func() error {
+				// A failed durable write can return a candidate before or after
+				// rename. Fence cleanup against either absence or that revision.
+				_, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+				if err != nil {
+					return err
+				}
+				return core.CleanupLeaseClaimIfUnchangedAfter(leaseID, publishedClaim, exists, cleanupUnclaimedVM)
+			}
+		}
+		acquireErr = errors.Join(acquireErr, cleanup())
+	}()
+	ctx = startup.ctx
+	ip, err := b.waitForIP(ctx, name)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
 	if err := b.injectSSHKey(ctx, name, cfg.Tart.User, publicKey); err != nil {
-		return LeaseTarget{}, errors.Join(err, cleanupUnclaimedVM())
+		return LeaseTarget{}, err
 	}
 	if cfg.Desktop {
 		if err := b.enableScreenSharing(ctx, name); err != nil {
-			return LeaseTarget{}, errors.Join(err, cleanupUnclaimedVM())
+			return LeaseTarget{}, err
 		}
 	}
 
@@ -197,10 +218,16 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	inst := tartInstance{Name: name, State: "running", Running: true, Source: cfg.Tart.Image}
 	lease, err := b.prepareLease(ctx, cfg, inst, ip, claim, true)
 	if err != nil {
-		return LeaseTarget{}, errors.Join(err, cleanupUnclaimedVM())
+		return LeaseTarget{}, err
 	}
-	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH); err != nil {
-		return LeaseTarget{}, errors.Join(err, cleanupUnclaimedVM())
+	// Cancel lock acquisition on startup exit, and retain the exact published
+	// revision for rollback if startup fails at the final handoff.
+	publishedClaim, err = core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfterContext(ctx, leaseID, slug, cfg, instanceScope(name), lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, core.LeaseClaim{}, false, nil)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	if err := startup.handoff(); err != nil {
+		return LeaseTarget{}, err
 	}
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s instance=%s state=ready\n", leaseID, name)
@@ -467,20 +494,7 @@ func (b *backend) cleanupInstance(ctx context.Context, cfg Config, inst tartInst
 
 func (b *backend) Touch(_ context.Context, req TouchRequest) (Server, error) {
 	server := req.Lease.Server
-	if server.Labels == nil {
-		server.Labels = map[string]string{}
-	}
-	original := server.Labels
-	server.Labels = touchDirectLeaseLabels(original, b.configForRun(), req.State, time.Now().UTC())
-	for _, key := range []string{"image", "image_digest", "instance", "ssh_user", "ssh_port", "work_root"} {
-		if value := strings.TrimSpace(original[key]); value != "" {
-			server.Labels[key] = value
-		}
-	}
-	// Storage identity is an exact path, not a sanitized provider-label value.
-	if storage, ok := original["tart_storage"]; ok {
-		server.Labels["tart_storage"] = storage
-	}
+	server.Labels = touchDirectLeaseLabels(server.Labels, b.configForRun(), req.State, time.Now().UTC())
 	return server, nil
 }
 
@@ -512,89 +526,6 @@ func (b *backend) configureVM(ctx context.Context, cfg Config, name string) erro
 		}
 	}
 	return nil
-}
-
-// startVM starts the VM headless in the background.
-// When keep is true the tart process is fully detached so it survives
-// crabbox exit, matching how docker run -d keeps containers alive.
-func (b *backend) startVM(ctx context.Context, name string, keep bool) error {
-	env, envErr := tartEnvironment()
-	if envErr != nil {
-		return envErr
-	}
-	// Headless mode alone still exposes the host clipboard and audio to the guest.
-	args := []string{"run", name, "--no-graphics", "--no-clipboard", "--no-audio"}
-	var stderrBuf bytes.Buffer
-	var detachedStderr *os.File
-	var devNull *os.File
-	var cmd *exec.Cmd
-	var err error
-	if keep {
-		if err := ctx.Err(); err != nil {
-			return exit(2, "tart run %s: context already cancelled", name)
-		}
-		cmd = exec.Command("tart", args...)
-		detachCommand(cmd)
-		devNull, err = os.OpenFile(os.DevNull, os.O_RDWR, 0)
-		if err != nil {
-			return exit(2, "tart run %s: open null device: %v", name, err)
-		}
-		detachedStderr, err = os.CreateTemp("", "crabbox-tart-run-*.log")
-		if err != nil {
-			return errors.Join(exit(2, "tart run %s: create startup log: %v", name, err), devNull.Close())
-		}
-		defer func() {
-			_ = detachedStderr.Close()
-			_ = os.Remove(detachedStderr.Name())
-		}()
-		cmd.Stdin = devNull
-		cmd.Stdout = devNull
-		cmd.Stderr = detachedStderr
-	} else {
-		cmd = exec.CommandContext(ctx, "tart", args...)
-		cmd.Stdout = io.Discard
-		cmd.Stderr = io.MultiWriter(&stderrBuf, b.rt.Stderr)
-	}
-	closeDevNull := func() error {
-		if devNull == nil {
-			return nil
-		}
-		err := devNull.Close()
-		devNull = nil
-		return err
-	}
-	cmd.Env = env
-	if err := cmd.Start(); err != nil {
-		return errors.Join(exit(2, "tart run %s: %v", name, err), closeDevNull())
-	}
-	if err := closeDevNull(); err != nil {
-		return exit(2, "tart run %s: close null device: %v", name, err)
-	}
-	exitCh := make(chan error, 1)
-	go func() { exitCh <- cmd.Wait() }()
-	select {
-	case <-ctx.Done():
-		if !keep {
-			_ = cmd.Process.Kill()
-		}
-		return exit(2, "tart run %s: context cancelled during startup", name)
-	case err := <-exitCh:
-		if detachedStderr != nil {
-			if _, seekErr := detachedStderr.Seek(0, io.SeekStart); seekErr == nil {
-				_, _ = io.Copy(&stderrBuf, io.LimitReader(detachedStderr, 64<<10))
-			}
-		}
-		detail := strings.TrimSpace(stderrBuf.String())
-		if detail != "" {
-			return exit(2, "tart run %s failed during startup: %s", name, detail)
-		}
-		if err != nil {
-			return exit(2, "tart run %s failed during startup: %v", name, err)
-		}
-		return exit(2, "tart run %s exited unexpectedly during startup", name)
-	case <-time.After(b.startupObserveTimeout):
-		return nil
-	}
 }
 
 // waitForIP polls `tart ip` until the VM has an IP address.

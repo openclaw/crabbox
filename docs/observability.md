@@ -107,10 +107,16 @@ to your terminal. To redirect streams into local files:
 - `run --capture-stderr <path>` does the same for remote stderr.
 
 Failed runs write a local failure bundle to `.crabbox/captures/*.tar.gz` by
-default. SSH-backed runs bundle the uploaded script, redacted env/config
-summaries, timing JSON, command stdout/stderr, common test/report/log paths, and
-a generic gateway log tail when present. Blacksmith delegated runs bundle
-stdout/stderr plus timing and redacted env/config metadata. The stdout/stderr
+default. POSIX SSH-backed runs bundle only the current run's uploaded script
+file when still available, redacted env/config summaries, timing JSON, command
+stdout/stderr, common test/report/log paths, and
+a generic gateway log tail when present. Automatic capture excludes the retained
+`.crabbox/scripts` store from general report/log discovery: earlier uploads and
+arbitrary neighbors, including logs and XML reports, are not included. A run
+without an uploaded script includes no files from that store. Explicit artifact
+and download selections are independent, including `--download-on-failure` for
+eligible failures. Native Windows capture stays local-only. Blacksmith delegated
+runs bundle stdout/stderr plus timing and redacted env/config metadata. The stdout/stderr
 files captured inside automatic failure bundles are size-capped — pass
 `--capture-stdout` / `--capture-stderr` when you need a complete local stream
 file. Remote archive entries are confined to the bundle subtree; unsafe links
@@ -162,6 +168,15 @@ generated proof block as local run artifacts.
 phases. Failed runs add `blockedStage` and `retryLikely` when Crabbox can
 classify the likely blocker; the human-readable run summary prints the same
 values as `blocked_stage` and `retry_likely`.
+
+Automatic run cleanup adds `leaseStopped`: true means the release owner confirmed
+the end of the recoverable lease, even when a terminal receipt remains locally.
+Retained resources and accepted but pending, failed, retry-scheduled, or otherwise
+unconfirmed cleanup report false and preserve failure recovery guidance. False
+does not certify a running or reachable resource. `leaseStopError` reports cleanup
+errors separately and may be present even after confirmed removal, for example
+when local finalization fails. Run finalization emits timing after cleanup and
+the failure digest; a failing CLI invocation can append its normal exit diagnostic.
 
 Commands can define their own phases by printing marker lines to stdout or
 stderr:
@@ -234,8 +249,9 @@ crabbox run \
   --timing-json
 ```
 
-The script is uploaded under `.crabbox/scripts/` in the remote workdir and is
-included in failure bundles. POSIX SSH providers support this path; delegated
+The script is uploaded under `.crabbox/scripts/` in the remote workdir; only
+that run's uploaded file is selected for automatic failure bundles, not its
+directory or earlier uploads. POSIX SSH providers support this path; delegated
 providers reject it before reading stdin because they own command transport.
 Native Windows targets upload scripts too and run them through Windows
 PowerShell — use `--shell` for short snippets and `--script <file.ps1>` for

@@ -289,6 +289,10 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 				}
 			}
 			if err != nil {
+				var notSubmitted NativeCheckpointNotSubmittedError
+				if record.Native.ImageID == "" && errors.As(err, &notSubmitted) && !record.coordinatorManaged() {
+					recordWritten = false
+				}
 				if record.Native.ImageID != "" {
 					if writeErr := store.Write(record); writeErr != nil {
 						return writeErr
@@ -660,6 +664,10 @@ func (a App) readCheckpointRecord(ctx context.Context, store checkpointStore, id
 	previous := record
 	remote, err := coord.Checkpoint(ctx, id)
 	if err != nil {
+		// Both authorities must be missing; surviving cache evidence remains an error.
+		if isCheckpointNotFound(localErr) && isCoordinatorCheckpointNotFound(err) {
+			err = localErr
+		}
 		return checkpointRecord{}, checkpointPaths{}, err
 	}
 	record, err = checkpointRecordFromCoordinator(remote, origin)
@@ -893,6 +901,9 @@ func printCheckpointInspect(stdout io.Writer, record checkpointRecord) {
 	fmt.Fprintf(stdout, "id=%s\nkind=%s\nname=%s\ncreated=%s\nlast_used=%s\nprovider=%s\nlease=%s\nrepo=%s\nhead=%s\nserver_type=%s\nworkdir=%s\narchive=%s\nbytes=%s\n",
 		record.ID, record.Kind, blank(record.Name, "-"), record.CreatedAt, record.LastUsedAt, blank(record.Provider, "-"), blank(record.LeaseID, "-"), blank(record.Repo.Name, "-"), blank(record.Repo.Head, "-"), blank(record.ServerType, "-"), blank(record.Workdir, "-"), blank(record.ArchivePath, "-"), humanBytes(record.ArchiveBytes))
 	if isNativeCheckpointKind(record.Kind) {
+		if record.Capture != nil && record.Capture.SourceDisposition == "abandon" {
+			fmt.Fprintf(stdout, "source_disposition=abandon\nsource_phase=%s\nimage_submission=unresolved\nrecovery=%s\n", record.Capture.Phase, record.Capture.Error)
+		}
 		fmt.Fprintf(stdout, "resource=%s\nresource_name=%s\nresource_state=%s\nresource_region=%s\nstrategy=%s\nno_reboot=%t\n",
 			blank(record.Native.ImageID, "-"), blank(record.Native.Name, "-"), blank(record.Native.State, "-"), blank(record.Native.Region, "-"), blank(record.Native.Strategy, checkpointStrategyImage), record.Native.NoReboot)
 		if record.Native.Project != "" {
@@ -1918,7 +1929,7 @@ func (a App) checkpointDelete(ctx context.Context, args []string) error {
 	if !*localOnly && (localErr != nil || !record.coordinatorManaged()) {
 		record, _, err = a.readCheckpointRecord(ctx, store, id)
 		if err != nil {
-			if isCheckpointNotFound(err) || isCheckpointNotFound(localErr) && isCoordinatorCheckpointNotFound(err) {
+			if isCheckpointNotFound(err) {
 				fmt.Fprintf(a.Stdout, "checkpoint absent id=%s\n", id)
 				return nil
 			}
@@ -2056,18 +2067,10 @@ func deleteCheckpointResource(ctx context.Context, store checkpointStore, record
 		if err != nil {
 			return err
 		}
-		if err := client.GuardAccount(ctx, record.Native.AccountID); err != nil {
-			return err
-		}
-		if len(record.Native.SnapshotIDs) == 0 {
-			if image, err := client.GetImageCheckpoint(ctx, providerID); err == nil && len(image.SnapshotIDs) > 0 {
-				record.Native.SnapshotIDs = image.SnapshotIDs
-				if writeErr := store.Write(record); writeErr != nil {
-					return writeErr
-				}
-			}
-		}
-		return client.DeleteImageCheckpoint(ctx, providerID, record.Native.SnapshotIDs, record.Native.AccountID)
+		return client.DeleteImageCheckpoint(ctx, providerID, record.Native.SnapshotIDs, record.Native.AccountID, func(snapshotIDs []string) error {
+			record.Native.SnapshotIDs = snapshotIDs
+			return store.Write(record)
+		})
 	}
 	if cfg, ok := directAzureCheckpointConfig(record); ok {
 		client, err := NewAzureClient(ctx, cfg)
@@ -2280,10 +2283,17 @@ func (a App) verifyCheckpointRecord(ctx context.Context, store checkpointStore, 
 		if _, err := store.Paths(record.ID); err != nil {
 			return checkpointAudit{}, err
 		}
-		return checkpointAudit{
+		audit := checkpointAudit{
 			Record: record, LocalState: "metadata_available", ProviderState: "pending",
 			NextAction: "replay_capture", Error: record.Capture.Error,
-		}, nil
+		}
+		if record.Capture.SourceDisposition == "abandon" {
+			audit.ProviderState, audit.NextAction = "unresolved_capture", "replay_abandon"
+			if record.Capture.Phase == "abandoned" {
+				audit.NextAction = "reconcile_image"
+			}
+		}
+		return audit, nil
 	}
 	return a.verifyCheckpointResource(ctx, store, record)
 }
@@ -2724,11 +2734,9 @@ func createCheckpointArchive(ctx context.Context, target SSHTarget, workdir, loc
 		return 0, exit(2, "create checkpoint archive: %v", err)
 	}
 	defer func() { _ = os.Remove(tmpPath) }()
-	cmd := sshCommandContext(ctx, target, sshArgs(target, remoteCheckpointArchiveCommand(workdir))...)
-	cmd.Stdout = file
+	transport := sshTransportPreparation{command: remoteCheckpointArchiveCommand(workdir)}
 	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	runErr := cmd.Run()
+	_, runErr := transport.runOnce(ctx, target, "10", "3", file, &stderr, false)
 	closeErr := file.Close()
 	if runErr != nil {
 		return 0, exit(7, "archive checkpoint workdir %s: %v: %s", workdir, runErr, trimFailureDetail(stderr.String()))

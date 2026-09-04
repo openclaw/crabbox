@@ -97,6 +97,12 @@ parallels:
   startupTimeout: 15m
 ```
 
+Set `parallels.vmRoot` or `--parallels-vm-root` to an existing parent directory
+on the Parallels host. Crabbox passes this directory to `prlctl clone --dst`;
+Parallels names and creates the VM bundle beneath it. With a remote host, the
+directory must exist on that Mac. Crabbox does not create the parent directory.
+Leave the setting unset to use the Parallels default location.
+
 ### Named templates
 
 ```yaml

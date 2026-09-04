@@ -445,12 +445,9 @@ func TestCoordinatorTokenCommandRefreshesBearer(t *testing.T) {
 	}))
 	defer server.Close()
 	client := CoordinatorClient{
-		BaseURL: server.URL,
-		TokenCommand: []string{
-			os.Args[0],
-			"-test.run=^TestCoordinatorTokenCommandHelper$",
-		},
-		Client: server.Client(),
+		BaseURL:      server.URL,
+		TokenCommand: synchronousTestHelperCommand("TestCoordinatorTokenCommandHelper"),
+		Client:       server.Client(),
 	}
 
 	if err := client.Health(context.Background()); err != nil {
@@ -473,7 +470,7 @@ func TestCoordinatorChildrenScrubExternalDesktopPassword(t *testing.T) {
 	t.Setenv("CRABBOX_TEST_KEEP", "preserved")
 	cfg := Config{
 		Coordinator:       "https://broker.example.test",
-		CoordTokenCommand: []string{os.Args[0], "-test.run=^TestCoordinatorTokenCommandHelper$"},
+		CoordTokenCommand: synchronousTestHelperCommand("TestCoordinatorTokenCommandHelper"),
 		Provider:          "external",
 		TargetOS:          targetMacOS,
 	}
@@ -572,7 +569,7 @@ func TestCoordinatorTokenCommandRejectsMultipleLines(t *testing.T) {
 	t.Setenv("CRABBOX_TOKEN_HELPER", "1")
 	t.Setenv("CRABBOX_TOKEN_HELPER_VALUE", "first\nsecond")
 	client := CoordinatorClient{
-		TokenCommand: []string{os.Args[0], "-test.run=^TestCoordinatorTokenCommandHelper$"},
+		TokenCommand: synchronousTestHelperCommand("TestCoordinatorTokenCommandHelper"),
 	}
 	if _, err := client.authorizationToken(context.Background()); err == nil || !strings.Contains(err.Error(), "exactly one token line") {
 		t.Fatalf("error=%v, want one-line validation", err)
@@ -1245,6 +1242,7 @@ func TestCoordinatorHeartbeatIncludesTelemetry(t *testing.T) {
 func TestCoordinatorHeartbeatUsesControlWebSocket(t *testing.T) {
 	bodies := make(chan string, 1)
 	httpHeartbeats := make(chan struct{}, 1)
+	handlerDone := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/control":
@@ -1253,7 +1251,8 @@ func TestCoordinatorHeartbeatUsesControlWebSocket(t *testing.T) {
 				t.Errorf("accept control websocket: %v", err)
 				return
 			}
-			defer conn.Close(websocket.StatusNormalClosure, "")
+			defer close(handlerDone)
+			defer conn.CloseNow()
 			_, data, err := conn.Read(r.Context())
 			if err != nil {
 				t.Errorf("read control heartbeat: %v", err)
@@ -1261,7 +1260,8 @@ func TestCoordinatorHeartbeatUsesControlWebSocket(t *testing.T) {
 			}
 			bodies <- string(data)
 			_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"type":"heartbeat","leaseID":"cbx_123","ok":true,"expiresAt":"2026-05-01T00:30:00Z"}`))
-			<-r.Context().Done()
+			// A hijacked request's HTTP context does not track peer closure.
+			_, _, _ = conn.Read(r.Context())
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/cbx_123/heartbeat":
 			httpHeartbeats <- struct{}{}
 			w.Header().Set("Content-Type", "application/json")
@@ -1296,6 +1296,12 @@ func TestCoordinatorHeartbeatUsesControlWebSocket(t *testing.T) {
 		t.Fatal("heartbeat fell back to HTTP despite websocket success")
 	default:
 	}
+	stop()
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("control websocket handler did not exit after heartbeat stopped")
+	}
 }
 
 func TestCoordinatorHeartbeatMintsTokenBeforeControlDialTimeout(t *testing.T) {
@@ -1304,6 +1310,7 @@ func TestCoordinatorHeartbeatMintsTokenBeforeControlDialTimeout(t *testing.T) {
 	t.Setenv("CRABBOX_TOKEN_HELPER_DELAY", "1600ms")
 	controlHeartbeats := make(chan struct{}, 1)
 	httpHeartbeats := make(chan struct{}, 1)
+	handlerDone := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/control":
@@ -1316,14 +1323,15 @@ func TestCoordinatorHeartbeatMintsTokenBeforeControlDialTimeout(t *testing.T) {
 				t.Errorf("accept control websocket: %v", err)
 				return
 			}
-			defer conn.Close(websocket.StatusNormalClosure, "")
+			defer close(handlerDone)
+			defer conn.CloseNow()
 			if _, _, err := conn.Read(r.Context()); err != nil {
 				t.Errorf("read control heartbeat: %v", err)
 				return
 			}
 			controlHeartbeats <- struct{}{}
 			_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"type":"heartbeat","leaseID":"cbx_123","ok":true}`))
-			<-r.Context().Done()
+			_, _, _ = conn.Read(r.Context())
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/cbx_123/heartbeat":
 			httpHeartbeats <- struct{}{}
 			w.Header().Set("Content-Type", "application/json")
@@ -1335,12 +1343,9 @@ func TestCoordinatorHeartbeatMintsTokenBeforeControlDialTimeout(t *testing.T) {
 	defer server.Close()
 
 	client := CoordinatorClient{
-		BaseURL: server.URL,
-		TokenCommand: []string{
-			os.Args[0],
-			"-test.run=^TestCoordinatorTokenCommandHelper$",
-		},
-		Client: server.Client(),
+		BaseURL:      server.URL,
+		TokenCommand: synchronousTestHelperCommand("TestCoordinatorTokenCommandHelper"),
+		Client:       server.Client(),
 	}
 	stop, err := startCoordinatorHeartbeat(context.Background(), &client, "cbx_123", "aws", 30*time.Minute, nil, nil, io.Discard)
 	if err != nil {
@@ -1357,6 +1362,12 @@ func TestCoordinatorHeartbeatMintsTokenBeforeControlDialTimeout(t *testing.T) {
 	case <-httpHeartbeats:
 		t.Fatal("heartbeat fell back to HTTP after successful control websocket dial")
 	default:
+	}
+	stop()
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("control websocket handler did not exit after heartbeat stopped")
 	}
 }
 

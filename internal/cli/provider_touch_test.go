@@ -16,9 +16,11 @@ import (
 )
 
 func TestBestEffortLeaseTouchHTTPBudget(t *testing.T) {
+	// Each case owns its config and HTTP server, not process-wide environment.
+	t.Parallel()
 	for _, mode := range []string{"success", "http error", "maintenance timeout", "parent cancellation", "parent deadline"} {
 		t.Run(mode, func(t *testing.T) {
-			clearConfigEnv(t)
+			t.Parallel()
 			ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
 			defer cancel()
 			if mode == "parent deadline" {
@@ -43,7 +45,7 @@ func TestBestEffortLeaseTouchHTTPBudget(t *testing.T) {
 				decodeErr := json.NewDecoder(r.Body).Decode(&body)
 				_, _ = io.Copy(io.Discard, r.Body)
 				_ = r.Body.Close()
-				if decodeErr != nil || r.Method != http.MethodPost || r.URL.Path != "/v1/leases/cbx_touch_budget/heartbeat" {
+				if decodeErr != nil || r.Method != http.MethodPost || r.URL.Path != "/v1/leases/cbx_touch_budget/heartbeat" || r.Header.Get("Authorization") != "Bearer synthetic-touch-token" {
 					body = map[string]any{"invalidRequest": true}
 				}
 				requests <- body

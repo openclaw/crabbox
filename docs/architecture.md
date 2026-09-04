@@ -202,6 +202,7 @@ GET  /v1/leases
 GET  /v1/leases/{id-or-slug}
 POST /v1/leases
 POST /v1/leases/from-checkpoint
+PUT  /v1/leases/{canonical-id}/from-checkpoint
 POST /v1/leases/{requested-id}/cancel-create
 POST /v1/leases/{id-or-slug}/heartbeat
 POST /v1/leases/{id-or-slug}/release

@@ -97,6 +97,7 @@ export interface Env {
   CRABBOX_SHARED_OWNER?: string;
   CRABBOX_ADMIN_TOKEN?: string;
   CRABBOX_SESSION_SECRET?: string;
+  CRABBOX_DURABLE_PROVISIONING_ADMISSION?: string;
   CRABBOX_USER_TOKEN_TTL_SECONDS?: string;
   CRABBOX_RUN_RETENTION_DAYS?: string;
   CRABBOX_GITHUB_CLIENT_ID?: string;
@@ -265,13 +266,20 @@ export interface LeaseRequest {
   checkpointUseClaim?: string;
 }
 
+export interface FixedLeaseCreateIntent {
+  version: number;
+  hash: string;
+  provider: Provider;
+}
+
 export interface CreateAttemptRecord {
-  version: 1;
+  version: 1 | 2;
   requestedLeaseID: string;
   token: string;
   owner: string;
   org: string;
   state: "pending" | "canceled";
+  fixedCreate?: FixedLeaseCreateIntent;
   canonicalLeaseID?: string;
   cloudID?: string;
   generation?: string;
@@ -654,6 +662,7 @@ export interface ReadyPoolDesiredCapacity {
   owner: string;
   org: string;
   criteria: ReadyPoolBorrowRequest;
+  identity?: ReadyPoolIdentityV1;
   compatibilityKey?: string;
   minReady: number;
   maxReady: number;

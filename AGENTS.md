@@ -16,7 +16,7 @@ Keep core provider-neutral. Core may pass generic request/lease context and call
 
 - `go build -trimpath -o bin/crabbox ./cmd/crabbox`: build the local CLI.
 - `go vet ./...`: run Go static checks.
-- `go test -race ./...`: run the Go test suite with the race detector.
+- `go test -race -timeout=15m ./...`: run the Go test suite with the race detector and CI's package timeout.
 - `gofmt -w $(git ls-files '*.go')`: format Go files.
 - `npm ci --prefix worker`: install Worker dependencies.
 - `npm run format:check --prefix worker`: verify TypeScript formatting.
@@ -38,9 +38,11 @@ Name Go tests `*_test.go` beside the code they cover. Name Worker tests `*.test.
 
 History uses Conventional Commit prefixes such as `feat:`, `fix:`, `docs:`, and `ci:`. Keep commits focused and mention user-visible behavior changes. Pull requests should include a clear summary, verification commands, config or secret implications, and screenshots only for generated docs or UI changes. Issue/PR references: always use full GitHub URLs, every time.
 
+Maintainers and agents add user-visible fixes and features to `CHANGELOG.md` as work lands, normally under `## Unreleased`; contributor PR authors leave changelog edits to maintainers. Use concise one-line bullets, full PR links, and contributor thanks by `@login`. Release preparation finalizes the accumulated section's version and date; do not defer changelog maintenance until release time.
+
 ## Releasing
 
-Follow `docs/RELEASING.md` exactly; the flow is gated and mostly irreversible. Pitfalls that have broken past releases:
+Follow `docs/RELEASING.md` exactly. One explicit full release/publish request authorizes the complete normal sequence: preparation/tagging/build/signing, private draft/upload, native dispatch/proof, publication, ordinary Homebrew tap update, independent public/native/Go installation smokes, and closeout, without renewed chat approval at each stage. Narrow requests stay narrow. The original request is the authorization; GitHub events alone do not authorize a release. Sequential technical gates, identity binding, credential isolation, immutability, exact frozen inputs, immediate publication readbacks, and cancellation boundaries remain mandatory. Publication does not require a particular PR-approval ruleset or an administrative writer freeze; existing GitHub merge protections still apply. The final read and publication are not atomic, and a detected post-publication mismatch is an incident rather than permission to rewrite the release. Explicit cancellation requires renewed direction before mutations resume. Publication establishes tap eligibility; public smoke results are not an approval gate. Dispatch the existing ordinary tap updater explicitly and retry Homebrew alone after failure, never production or publication. Tap maintainers own executable formulae; evaluate them only credential-free. Cancellation cannot stop independent reconciliation of an already-public release. Pitfalls that have broken past releases:
 
 - Before tagging on any maintainer Mac, that machine's SSH signing key must BOTH be in `.github/release-allowed-signers` AND be registered on the maintainer's GitHub account as a signing key. GitHub evaluates SSH tag-signature verification at push time only; a tag pushed before its key is registered is permanently `unknown_key` and can never pass `scripts/publish-release.sh`'s `verification.verified` gate. Check `gh api repos/openclaw/crabbox/git/tags/<tag-object> --jq .verification` immediately after pushing the tag, before building anything.
 - The signed tag annotation must be exactly the bare version (`git tag -s v0.39.0 -m "v0.39.0"`), never a descriptive message. `scripts/verify-release-source.sh` requires the tag subject to equal the version, and the protected tag ruleset blocks deleting or recreating a wrong tag.

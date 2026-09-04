@@ -854,8 +854,8 @@ func TestAcquireResolveListReleaseCleanupDoctorWithFakeAPI(t *testing.T) {
 	if api.stopCalls != 0 {
 		t.Fatal("dry-run cleanup stopped a VM")
 	}
-	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
-		t.Fatal(err)
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil || outcome.Terminal {
+		t.Fatalf("stop outcome=%+v err=%v", outcome, err)
 	}
 	if api.stopCalls != 1 || api.stopped[0] != "vm-new" {
 		t.Fatalf("stops=%v", api.stopped)

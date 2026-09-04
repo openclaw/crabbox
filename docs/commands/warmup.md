@@ -100,6 +100,12 @@ the CLI never falls back to slug lookup or legacy create behavior. After an
 ambiguous fixed create response, the CLI repeats that exact PUT to atomically
 confirm the same intent before it may poll lease status with GET.
 
+For coordinator-backed creates, recovering an uncertain response does not restart
+the provisioning deadline or shorten it to the recovery window. Once the same
+create is confirmed, readiness uses the remaining original creation budget and
+honors caller cancellation. Fixed-ID leases remain available for explicit recovery
+or stop; ordinary creates keep their token-bound cancellation cleanup.
+
 A fixed lease ID is single-use. Direct AWS, Machine0, Incus, and local-container
 acquisitions fail closed if their bound resource later disappears. Successful
 stop and missing-resource cleanup replace the live local claim with a compact

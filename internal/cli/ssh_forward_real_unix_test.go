@@ -193,6 +193,337 @@ func writeForwardSSHHostKeys(t *testing.T, f forwardBoundaryFixture, servers ...
 	}
 }
 
+func TestCoordinatorReleaseJoinsSSHControlMasters(t *testing.T) {
+	testCoordinatorReleaseJoinsSSHControlMasters(t, "coordinator", "configured HostName", "configured ProxyJump", "partial local failure", "stale local socket", "direct artifact owner")
+}
+
+func testCoordinatorReleaseJoinsSSHControlMasters(t *testing.T, modes ...string) {
+	for _, mode := range modes {
+		t.Run(mode, func(t *testing.T) {
+			isolateTestUserDirs(t)
+			sshExecutable, err := exec.LookPath("ssh")
+			if err != nil {
+				t.Skip("OpenSSH is unavailable")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			t.Cleanup(cancel)
+			server := newForwardSSHServer(t, "synthetic-mux-owner")
+			rotated := newForwardSSHServer(t, "synthetic-mux-owner")
+			close(server.release)
+			close(rotated.release)
+			const releasedID = "cbx_001122334455"
+			const companionID = "cbx_66778899aabb"
+			type masterIdentity struct {
+				target  SSHTarget
+				path    string
+				native  string
+				pid     int
+				started string
+			}
+			control := func(path, operation string) (string, error) {
+				command := exec.CommandContext(ctx, sshExecutable, "-F", os.DevNull, "-S", path, "-O", operation, "--", "localhost")
+				command.WaitDelay = sshCommandWaitDelay
+				output, err := command.CombinedOutput()
+				return strings.TrimSpace(string(output)), err
+			}
+			start := func(leaseID string, endpoint *forwardSSHServer, route string) masterIdentity {
+				t.Helper()
+				key, _, err := ensureTestboxKey(leaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				target := SSHTarget{User: "synthetic-mux-owner", Host: "127.0.0.1", Port: strconv.Itoa(endpoint.port()),
+					Key: key, SSHHostKey: endpoint.hostKey, TargetOS: targetLinux}
+				config := os.DevNull
+				if route != "" {
+					target.Host = "fixture-route"
+					config = filepath.Join(t.TempDir(), "ssh_config")
+					if err := os.WriteFile(config, []byte(route), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := prepareLeaseSSHTrust(&target, leaseID); err != nil {
+					t.Fatal(err)
+				}
+				args := append([]string{"-F", config}, sshBaseArgs(target)...)
+				args = append(args, target.User+"@"+target.Host)
+				// Keep the installed client's %C semantics; ProxyJump joins that hash
+				// only in OpenSSH 9.6+. Cleanup must not reread the original config.
+				output, err := exec.CommandContext(ctx, sshExecutable, append([]string{"-G"}, args...)...).Output()
+				if err != nil {
+					t.Fatal(err)
+				}
+				identity := masterIdentity{target: target}
+				for _, line := range strings.Split(string(output), "\n") {
+					if value, ok := strings.CutPrefix(line, "controlpath "); ok {
+						identity.path = value
+					}
+				}
+				if identity.path == "" || len(identity.path)+18 > 104 {
+					t.Fatalf("control path does not fit Darwin listener, including temporary suffix and NUL: %q", identity.path)
+				}
+				output, err = exec.CommandContext(ctx, sshExecutable, append([]string{"-G", "-o", "ControlPath=%C"}, args...)...).Output()
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, line := range strings.Split(string(output), "\n") {
+					if value, ok := strings.CutPrefix(line, "controlpath "); ok {
+						identity.native = value
+					}
+				}
+				if identity.native == "" || !strings.HasSuffix(identity.path, "-"+identity.native) {
+					t.Fatal("lease scope did not preserve the installed client's native connection hash")
+				}
+				command := sshCommandContext(ctx, target, append([]string{"-fN"}, args...)...)
+				if output, err := command.CombinedOutput(); err != nil {
+					t.Fatalf("start real local SSH master: %v: %s", err, output)
+				}
+				t.Cleanup(func() {
+					_, _ = control(identity.path, "exit")
+					if err := RemoveStoredTestboxConnectionArtifacts(leaseID); err != nil {
+						t.Errorf("cleanup synthetic lease: %v", err)
+					}
+				})
+				checked, err := control(identity.path, "check")
+				if err != nil {
+					t.Fatalf("master did not persist: %v: %s", err, checked)
+				}
+				if _, err := fmt.Sscanf(checked, "Master running (pid=%d)", &identity.pid); err != nil {
+					t.Fatal(err)
+				}
+				identity.started, err = webVNCDaemonProcessStartIdentity(identity.pid)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return identity
+			}
+			var firstRoute, secondRoute string
+			if mode == "configured HostName" {
+				firstRoute = "Host fixture-route\n HostName 127.0.0.1\n"
+				secondRoute = "Host fixture-route\n HostName localhost\n"
+				rotated = server
+			}
+			if mode == "configured ProxyJump" {
+				jump := newForwardSSHServer(t, "synthetic-jump", server.port())
+				close(jump.release)
+				jumpConfig := fmt.Sprintf("Host jump-one jump-two\n HostName 127.0.0.1\n Port %d\n User synthetic-jump\n IdentityFile none\n CertificateFile none\n IdentityAgent none\n IdentitiesOnly yes\n StrictHostKeyChecking no\n UserKnownHostsFile /dev/null\n GlobalKnownHostsFile none\n LogLevel ERROR\n", jump.port())
+				firstRoute = "Host fixture-route\n HostName 127.0.0.1\n ProxyJump jump-one\n" + jumpConfig
+				secondRoute = "Host fixture-route\n HostName 127.0.0.1\n ProxyJump jump-two\n" + jumpConfig
+				rotated = server
+			}
+			first := start(releasedID, server, firstRoute)
+			firstPID, err := control(first.path, "check")
+			if err != nil {
+				t.Fatal(err)
+			}
+			start(releasedID, server, firstRoute)
+			if reused, err := control(first.path, "check"); err != nil || reused != firstPID {
+				t.Fatalf("active lease did not reuse its master: before=%q after=%q err=%v", firstPID, reused, err)
+			}
+			second := start(releasedID, rotated, secondRoute)
+			if mode == "configured ProxyJump" && first.native == second.native {
+				if first.path != second.path || first.pid != second.pid {
+					t.Fatal("unchanged native connection hash did not reuse its master")
+				}
+				t.Log("installed OpenSSH does not include ProxyJump in %C; existing sharing semantics preserved")
+			} else if first.path == second.path || first.pid == second.pid {
+				t.Fatal("different endpoint or effective route reused the previous master")
+			}
+			companion := start(companionID, server, "")
+			companionBefore, err := control(companion.path, "check")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := claimLeaseTargetForConfig(releasedID, "mux-release", Config{Provider: "aws"}, Server{Provider: "aws"}, second.target, time.Hour); err != nil {
+				t.Fatal(err)
+			}
+			broker := coordinatorReleaseTestServer(t, func() CoordinatorLease {
+				return CoordinatorLease{ID: releasedID, Provider: "aws", State: "released", CleanupStatus: "complete"}
+			})
+			var blocked *net.UnixListener
+			if mode == "partial local failure" || mode == "stale local socket" {
+				blocked, err = net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(filepath.Dir(second.path), "00000000000000000000000000000000"), Net: "unix"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = blocked.Close() })
+				if err := os.Chmod(blocked.Addr().String(), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if mode == "stale local socket" {
+					blocked.SetUnlinkOnClose(false)
+					if err := blocked.Close(); err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = os.Remove(blocked.Addr().String()) })
+				}
+			}
+			if mode == "direct artifact owner" {
+				err = RemoveStoredTestboxConnectionArtifacts(releasedID)
+			} else {
+				var outcome ReleaseLeaseOutcome
+				outcome, err = coordinatorReleaseTestBackend(broker, io.Discard).ReleaseLeaseWithOutcome(ctx, ReleaseLeaseRequest{
+					Lease: LeaseTarget{LeaseID: releasedID, Server: Server{Provider: "aws"}, SSH: second.target},
+				})
+				if !outcome.Terminal {
+					t.Fatal("confirmed remote deletion was lost")
+				}
+			}
+			if mode == "partial local failure" {
+				if err == nil || !strings.Contains(err.Error(), "remote deletion is confirmed") {
+					t.Errorf("unresponsive endpoint cleanup error=%v", err)
+				}
+				if _, exists, err := readLeaseClaimWithPresence(releasedID); err != nil || !exists {
+					t.Errorf("local cleanup debt lost its claim: exists=%t err=%v", exists, err)
+				}
+			} else if err != nil {
+				states, _ := exec.Command("ps", "-o", "pid=,ppid=,stat=,comm=", "-p", fmt.Sprintf("%d,%d", first.pid, second.pid)).Output()
+				t.Logf("exact native master states at cleanup failure:\n%s", states)
+				t.Fatal(err)
+			}
+			for _, identity := range []masterIdentity{first, second} {
+				if output, err := control(identity.path, "check"); err == nil {
+					t.Errorf("confirmed lease release left a real SSH master alive: %s", output)
+				}
+				current, err := webVNCDaemonProcessStartIdentity(identity.pid)
+				state, stateErr := exec.CommandContext(ctx, "ps", "-o", "stat=", "-p", strconv.Itoa(identity.pid)).Output()
+				zombie := stateErr == nil && strings.HasPrefix(strings.TrimSpace(string(state)), "Z")
+				if mode == "unreaped native masters" && !zombie {
+					t.Errorf("fixture did not retain the exited master for its parent to reap: pid=%d state=%q err=%v", identity.pid, state, stateErr)
+				}
+				if err == nil && current == identity.started && !zombie || err != nil && !errors.Is(syscall.Kill(identity.pid, 0), syscall.ESRCH) {
+					t.Errorf("release returned before exact master exited: pid=%d started=%s current=%s err=%v", identity.pid, identity.started, current, err)
+				} else {
+					t.Logf("released master pid=%d started=%s is absent or exited (zombie=%t); exit status not observed", identity.pid, identity.started, zombie)
+				}
+			}
+			if after, err := control(companion.path, "check"); err != nil || after != companionBefore {
+				t.Fatalf("companion lease master changed: before=%q after=%q err=%v", companionBefore, after, err)
+			}
+		})
+	}
+}
+
+func TestSSHControlCleanupRejectsMalformedMuxWithoutNetworkFallback(t *testing.T) {
+	isolateTestUserDirs(t)
+	sshExecutable, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Skip("OpenSSH is unavailable")
+	}
+	key, _, err := ensureTestboxKey("cbx_001122334455")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := SSHTarget{Key: key}
+	if err := ensureSSHControlDirectory(target); err != nil {
+		t.Fatal(err)
+	}
+	dir := sshControlDirectory(filepath.Dir(key))
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "malformed")
+	mux, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	muxDone := make(chan struct{})
+	go func() {
+		defer close(muxDone)
+		for {
+			conn, err := mux.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.SetDeadline(time.Now().Add(time.Second))
+			var hello [12]byte
+			if _, err := io.ReadFull(conn, hello[:]); err == nil {
+				// MUX_MSG_HELLO with unsupported version zero.
+				_, _ = conn.Write([]byte{0, 0, 0, 8, 0, 0, 0, 1, 0, 0, 0, 0})
+			}
+			_ = conn.Close()
+		}
+	}()
+	t.Cleanup(func() { _ = mux.Close(); <-muxDone })
+	fallback, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	connected := make(chan struct{}, 1)
+	fallbackDone := make(chan struct{})
+	go func() {
+		defer close(fallbackDone)
+		conn, err := fallback.Accept()
+		if err == nil {
+			connected <- struct{}{}
+			_ = conn.Close()
+		}
+	}()
+	t.Cleanup(func() { _ = fallback.Close(); <-fallbackDone })
+	root := t.TempDir()
+	config := filepath.Join(root, "effective-config")
+	// The real -G probe checks production options before any safety overrides.
+	// The execution-only shim confines a regressing client's TCP fallback to our
+	// listener and prevents it from reading the operator's default identities.
+	wrapper := "#!/bin/sh\n" + shellQuote(sshExecutable) + " -G \"$@\" > " + shellQuote(config) + " || exit $?\nexec " + shellQuote(sshExecutable) +
+		" -p " + strconv.Itoa(fallback.Addr().(*net.TCPAddr).Port) + " -o HostName=127.0.0.1 -o IdentityFile=none -o CertificateFile=none -o IdentityAgent=none \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(root, "ssh"), []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	if err := closeSSHControlMaster(ctx, socket); err == nil {
+		t.Error("malformed live mux endpoint was accepted as cleaned up")
+	}
+	if _, err := os.Lstat(socket); err != nil {
+		t.Errorf("failed endpoint lost its cleanup identity: %v", err)
+	}
+	_ = fallback.Close()
+	<-fallbackDone
+	select {
+	case <-connected:
+		t.Error("malformed mux handshake fell back to a TCP connection")
+	default:
+	}
+	data, err := os.ReadFile(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, setting := range []string{"identityfile none", "certificatefile none", "identityagent none"} {
+		if !strings.Contains(string(data), "\n"+setting+"\n") {
+			t.Errorf("production control command did not disable %s", strings.Fields(setting)[0])
+		}
+	}
+}
+
+func TestSSHCommandRejectsUnsafeLeaseControlNamespace(t *testing.T) {
+	for _, kind := range []string{"symlink", "public directory"} {
+		t.Run(kind, func(t *testing.T) {
+			isolateTestUserDirs(t)
+			key, _, err := ensureTestboxKey("cbx_001122334455")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := sshControlDirectory(filepath.Dir(key))
+			if kind == "symlink" {
+				err = os.Symlink(t.TempDir(), dir)
+			} else {
+				err = os.Mkdir(dir, 0o700)
+				if err == nil {
+					err = os.Chmod(dir, 0o777)
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Remove(dir) })
+			cmd := sshCommandContext(t.Context(), SSHTarget{Key: key}, "-V")
+			if err := cmd.Run(); err == nil {
+				t.Fatal("unsafe control namespace did not prevent SSH execution")
+			}
+		})
+	}
+}
+
 func forwardEchoServer(t *testing.T) int {
 	t.Helper()
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")

@@ -181,6 +181,9 @@ func TestCoordinatorReadCurlFallbackSharesCallerDeadline(t *testing.T) {
 }
 
 func TestStopCoordinatorStalledLookup(t *testing.T) {
+	if runParallelCLIContract(t, 0) {
+		return
+	}
 	for _, mode := range []string{"release", "force", "canceled"} {
 		t.Run(mode, func(t *testing.T) {
 			clearConfigEnv(t)

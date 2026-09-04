@@ -116,6 +116,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.list(ctx, helpArgs), true
 	case "usage":
 		return a.usage(ctx, helpArgs), true
+	case "capacity":
+		return a.capacity(ctx, helpArgs), true
 	case "ssh":
 		return a.ssh(ctx, helpArgs), true
 	case "connect":
@@ -220,6 +222,7 @@ Commands:
   unshare     Remove lease sharing
   image       Create provider images and promote brokered AWS runner images
   usage       Show cost and usage estimates by user, org, or fleet
+  capacity    Show self-owner admission count and effective owner limit
   marketplace  Preview the Crabbox credits gateway and smart routing quotes
   admin       Lease admin controls for trusted operators
   actions     Hydrate boxes from repo workflows or GitHub runners

@@ -5,14 +5,73 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
+
+func TestRunRecorderCapturesTelemetryOnlyWithRunHandle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell ssh fixture")
+	}
+	for _, test := range []struct {
+		name        string
+		coordinator bool
+		runID       string
+	}{
+		{name: "direct"},
+		{name: "awaiting run handle", coordinator: true},
+		{name: "recorded", coordinator: true, runID: "run_123"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			callsPath := filepath.Join(dir, "calls")
+			if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte("#!/bin/sh\nprintf 'telemetry\\n' >> \"$CRABBOX_FAKE_TELEMETRY_CALLS\"\nprintf 'cpuCount=2\\n'\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_FAKE_TELEMETRY_CALLS", callsPath)
+			posts := 0
+			var client *CoordinatorClient
+			if test.coordinator {
+				client = &CoordinatorClient{BaseURL: "https://example.test", Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Method != http.MethodPost || req.URL.Path != "/v1/runs/run_123/telemetry" {
+						t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
+					}
+					var body struct {
+						Telemetry LeaseTelemetry `json:"telemetry"`
+					}
+					if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.Telemetry.CPUCount == nil || *body.Telemetry.CPUCount != 2 {
+						t.Fatalf("telemetry=%+v error=%v", body.Telemetry, err)
+					}
+					posts++
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"run":{"id":"run_123"}}`)), Header: make(http.Header)}, nil
+				})}}
+			}
+			rec := newRunRecorder(t.Context(), client, Config{}, []string{"true"}, "", io.Discard, true)
+			rec.runID = test.runID
+			target := SSHTarget{User: "runner", Host: "example.test", Port: "22", FallbackPorts: []string{}}
+			rec.CaptureTelemetryStart(t.Context(), target)
+			rec.CaptureTelemetryStart(t.Context(), target)
+			calls, err := os.ReadFile(callsPath)
+			if test.runID == "" {
+				if !os.IsNotExist(err) || posts != 0 || rec.telemetryStart != nil || len(rec.telemetrySnapshot()) != 0 {
+					t.Fatalf("unrecorded run collected telemetry: SSH=%q posts=%d error=%v", calls, posts, err)
+				}
+			} else if err != nil || string(calls) != "telemetry\n" || posts != 1 || len(rec.telemetrySnapshot()) != 1 {
+				t.Fatalf("recorded run needs one start sample: SSH=%q posts=%d error=%v", calls, posts, err)
+			}
+		})
+	}
+}
 
 func TestRunRecorderRedactsCoordinatorDiagnosticEvents(t *testing.T) {
 	const (
@@ -322,12 +381,39 @@ func TestRunEventStreamWriterCapsOutputEvents(t *testing.T) {
 
 func TestRunEventStreamWriterDoesNotBlockOnCoordinatorPost(t *testing.T) {
 	started := make(chan struct{})
+	releaseCtx, releasePost := context.WithCancel(context.Background())
 	client := &CoordinatorClient{
 		BaseURL: "https://example.test",
-		Client:  &http.Client{Transport: blockingRoundTripper{started: started}},
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			close(started)
+			select {
+			case <-releaseCtx.Done():
+				// Success keeps the worker alive until its queue is closed.
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"event":{"runID":"run_123","seq":1,"type":"stdout"}}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			case <-req.Context().Done():
+				return nil, context.Cause(req.Context())
+			}
+		})},
 	}
 	rec := &runRecorder{coord: client, runID: "run_123", stderr: io.Discard}
 	stdout := rec.StreamWriter("stdout")
+	var joined chan struct{}
+	t.Cleanup(func() {
+		releasePost()
+		rec.waitForOutputEvents(time.Second)
+		if joined != nil {
+			select {
+			case <-joined:
+			case <-time.After(time.Second):
+				t.Error("output event queue did not join during cleanup")
+			}
+		}
+	})
 	chunk := bytes.Repeat([]byte("x"), runEventOutputChunkBytes)
 
 	start := time.Now()
@@ -345,6 +431,18 @@ func TestRunEventStreamWriterDoesNotBlockOnCoordinatorPost(t *testing.T) {
 	case <-started:
 	case <-time.After(time.Second):
 		t.Fatal("output event post did not start")
+	}
+	releasePost()
+	joined = make(chan struct{})
+	go func() {
+		rec.output.wg.Wait()
+		close(joined)
+	}()
+	rec.waitForOutputEvents(time.Second)
+	select {
+	case <-joined:
+	case <-time.After(time.Second):
+		t.Fatal("output event queue did not join")
 	}
 }
 
@@ -774,32 +872,104 @@ func TestRunRecorderRequiresCoordinatorHandleBeforeExecution(t *testing.T) {
 	}
 }
 
-func TestRunRecorderFinishUsesExtendedTimeout(t *testing.T) {
-	var deadlineRemaining time.Duration
-	client := &CoordinatorClient{
-		BaseURL: "https://example.test",
-		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if req.Method != http.MethodPost || req.URL.Path != "/v1/runs/run_123/finish" {
-				t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
-			}
-			deadline, ok := req.Context().Deadline()
-			if !ok {
-				t.Fatal("finish request missing context deadline")
-			}
-			deadlineRemaining = time.Until(deadline)
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Status:     "200 OK",
-				Body:       io.NopCloser(strings.NewReader(`{"run":{"id":"run_123","leaseID":"","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"state":"succeeded","phase":"completed","exitCode":0,"logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z","finishedAt":"2026-05-02T00:00:01Z"}}`)),
-				Header:     make(http.Header),
-				Request:    req,
-			}, nil
-		})},
-	}
-	rec := &runRecorder{coord: client, runID: "run_123", stderr: io.Discard}
-	rec.Finish(context.Background(), SSHTarget{}, 0, time.Second, time.Second, strings.Repeat("x", 2*runLogFallbackPreviewBytes), true, nil, FailureClassification{}, nil)
-	if deadlineRemaining < runRecorderFinishTimeout-5*time.Second {
-		t.Fatalf("deadline remaining=%s, want near %s", deadlineRemaining, runRecorderFinishTimeout)
+func TestRunRecorderFinishFailureDiagnostics(t *testing.T) {
+	receipt := runRecorderTestReceipt(t)
+	t.Setenv("CRABBOX_OWNER", "alice@example.com")
+	for _, test := range []struct {
+		name            string
+		finishStatus    int
+		finishError     bool
+		stallPhase      string
+		receiptStatus   int
+		receiptDelay    time.Duration
+		wantFinish      int
+		wantReceipt     int
+		wantElapsed     time.Duration
+		wantDiagnostics []string
+	}{
+		{
+			name: "finish deadline", stallPhase: "finish", wantFinish: 1,
+			wantElapsed:     runRecorderFinishTimeout,
+			wantDiagnostics: []string{"submit terminal result", "finish stalled", "context deadline exceeded"},
+		},
+		{
+			name: "receipt deadline after rejected finish", finishStatus: 503, stallPhase: "receipt",
+			wantFinish: 1, wantReceipt: 1, wantElapsed: runRecorderFinishTimeout,
+			wantDiagnostics: []string{"submit terminal result", "finish unavailable", "verify persisted terminal receipt", "receipt stalled", "context deadline exceeded"},
+		},
+		{
+			name: "deadline during retry wait", finishStatus: 503, receiptStatus: 503,
+			receiptDelay: runRecorderFinishTimeout - runRecorderFinishRetry/2,
+			wantFinish:   1, wantReceipt: 1, wantElapsed: runRecorderFinishTimeout,
+			wantDiagnostics: []string{"finish unavailable", "receipt unavailable", "context deadline exceeded"},
+		},
+		{
+			name: "retryable finish and missing receipt", finishStatus: 503, receiptStatus: 404,
+			wantFinish: 3, wantReceipt: 3, wantElapsed: 2 * runRecorderFinishRetry,
+			wantDiagnostics: []string{"finish unavailable", "receipt unavailable"},
+		},
+		{
+			name: "transport failure and missing receipt", finishError: true, receiptStatus: 404,
+			wantFinish: 3, wantReceipt: 3, wantElapsed: 2 * runRecorderFinishRetry,
+			wantDiagnostics: []string{"finish connection lost", "receipt unavailable"},
+		},
+		{
+			name: "permanent finish and retryable receipt", finishStatus: 400, receiptStatus: 503,
+			wantFinish: 1, wantReceipt: 1,
+			wantDiagnostics: []string{"finish unavailable", "receipt unavailable"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				start := time.Now()
+				var finishRequests, receiptRequests int
+				client := &CoordinatorClient{
+					BaseURL: "https://example.test",
+					Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						deadline, ok := req.Context().Deadline()
+						if !ok || !deadline.Equal(start.Add(runRecorderFinishTimeout)) {
+							t.Fatalf("request deadline=%v, want original finish deadline", deadline)
+						}
+						phase, code := "finish", test.finishStatus
+						switch {
+						case req.Method == http.MethodPost && req.URL.Path == "/v1/runs/run_123/finish":
+							finishRequests++
+							if test.finishError {
+								return nil, errors.New("finish connection lost")
+							}
+						case req.Method == http.MethodGet && req.URL.Path == "/v1/runs/run_123/receipt":
+							receiptRequests++
+							phase, code = "receipt", test.receiptStatus
+							time.Sleep(test.receiptDelay)
+						default:
+							t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
+						}
+						if phase == test.stallPhase {
+							<-req.Context().Done()
+							return nil, fmt.Errorf("%s stalled: %w", phase, req.Context().Err())
+						}
+						return &http.Response{
+							StatusCode: code, Body: io.NopCloser(strings.NewReader(phase + " unavailable")),
+							Header: make(http.Header), Request: req,
+						}, nil
+					})},
+				}
+				rec := &runRecorder{coord: client, runID: "run_123", stderr: io.Discard}
+				err := rec.Finish(t.Context(), SSHTarget{}, 1, 0, 100*time.Millisecond, "", false, nil, FailureClassification{}, &receipt)
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 7 || rec.finished {
+					t.Fatalf("Finish error=%v recorded=%v, want unrecorded exit 7", err, rec.finished)
+				}
+				if finishRequests != test.wantFinish || receiptRequests != test.wantReceipt || time.Since(start) != test.wantElapsed {
+					t.Fatalf("finish=%d receipt=%d elapsed=%s", finishRequests, receiptRequests, time.Since(start))
+				}
+				for _, want := range append(test.wantDiagnostics, fmt.Sprintf("after %d attempts", test.wantFinish), "recover with `crabbox receipt run_123`") {
+					if !strings.Contains(exitErr.Message, want) {
+						t.Errorf("Finish lost %q: %s", want, exitErr.Message)
+					}
+				}
+			})
+		})
 	}
 }
 
@@ -978,20 +1148,6 @@ func TestRunRecorderResetTelemetryForLeaseReplacement(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("telemetry sampler was not stopped")
 	}
-}
-
-type blockingRoundTripper struct {
-	started chan struct{}
-}
-
-func (t blockingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	select {
-	case <-t.started:
-	default:
-		close(t.started)
-	}
-	<-req.Context().Done()
-	return nil, context.Cause(req.Context())
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

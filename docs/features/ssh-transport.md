@@ -126,7 +126,26 @@ password retrieval, remote setup/cleanup, and sync need their own transport
 boundary. Native VNC handoff stdout still intentionally contains the viewer
 credentials documented by that command.
 
+## Native Windows command input
+
+Native Windows SSH carries workspace-owner requests, witness scripts, and
+command input as exact byte frames. The receiver uses asynchronous I/O on the
+inherited Win32-OpenSSH pipe, so pending writes can complete before SSH closes
+stdin. It consumes only the declared frame and rejects premature EOF; it does
+not wait for EOF to finish a complete frame or close the borrowed stdin handle.
+
+All native Windows runs, including fresh exclusive one-shot leases, use the
+workspace witness to stage command input. User commands that receive it through
+PowerShell's `Start-Process -RedirectStandardInput` retain their separate
+redirected-file stream behavior. No SSH service setting or client timeout change is required.
+
 ## Workspace-owner setup failures
+
+Linux, macOS, and native Windows readiness checks execute the ready command
+without a separate successful-login probe. A failed direct readiness check
+still probes transport to distinguish authentication from toolchain startup.
+Proxy routes try the ready command on each candidate port and select a port
+only after it succeeds.
 
 On reused POSIX and WSL2 leases, SSH readiness commands also run under the
 remote workspace owner. A successful SSH login or bootstrap readiness command

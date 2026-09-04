@@ -258,8 +258,10 @@ func workspaceOwnerKey(leaseID string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte("crabbox-workspace-owner-v1\x00"+leaseID)))
 }
 
-func shouldAcquireWorkspaceOwner(acquired, mayRetain bool, backend SSHLeaseBackend) bool {
-	if !acquired || mayRetain {
+func shouldAcquireWorkspaceOwner(target SSHTarget, acquired, mayRetain bool, backend SSHLeaseBackend) bool {
+	// The Windows witness also converts overlapped SSH stdin into ordinary
+	// redirected input for upload and sync commands, even on exclusive leases.
+	if isWindowsNativeTarget(target) || !acquired || mayRetain {
 		return true
 	}
 	exclusive, ok := backend.(ExclusiveOneShotAcquireBackend)
@@ -378,7 +380,12 @@ func (o *workspaceOwner) renewLoopWithTicks(ticks <-chan time.Time, callTimeout 
 				continue
 			}
 			if err == nil {
-				err = fmt.Errorf("unexpected protocol response %q", response)
+				err = errors.New("unexpected protocol response")
+			}
+			// Only recognized states are safe to add to transport diagnostics.
+			switch response {
+			case "MISMATCH", "EXPIRED", "AMBIGUOUS":
+				err = fmt.Errorf("protocol state %s: %w", response, err)
 			}
 			o.mu.Lock()
 			o.renewErr = exit(7, "remote workspace owner renewal failed closed: %v", err)

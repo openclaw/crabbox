@@ -3,10 +3,17 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -368,5 +375,112 @@ func TestReadyPoolEntryRequiresHydrationForRefOnlyEntries(t *testing.T) {
 	}
 	if !readyPoolRunRequiresHydrationProof(CoordinatorReadyPoolEntry{Ref: "main", Commit: strings.Repeat("a", 40)}, true) {
 		t.Fatal("exact-commit Actions run skipped hydration proof")
+	}
+}
+
+func TestRunReadyPoolEndpointPrecedesExplicitSSHPort(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("existing SSH recorder requires a POSIX host")
+	}
+	for _, selection := range []string{"implicit", "environment", "flag", "config"} {
+		t.Run(selection, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			t.Chdir(dir)
+			configPath := filepath.Join(dir, "config.yaml")
+			t.Setenv("CRABBOX_CONFIG", configPath)
+			runGit(t, dir, "init")
+			runGit(t, dir, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "fixture")
+			path := os.Getenv("PATH")
+			installRecordingSSH(t, dir)
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+path)
+			listener, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			go func() {
+				for {
+					conn, err := listener.Accept()
+					if err != nil {
+						return
+					}
+					_ = conn.Close()
+				}
+			}()
+			_, port, err := net.SplitHostPort(listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			const leaseID = "cbx_abcdef123456"
+			const runID = "run_pool_endpoint"
+			key := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 41))
+			lease := CoordinatorLease{ID: leaseID, Provider: "run-ready-pool-preflight-test", Host: "127.0.0.1", SSHUser: "lease-user", SSHPort: "2222", SSHFallbackPorts: []string{port}, SSHHostKey: key, State: "active", TargetOS: targetLinux, WorkRoot: "/work/crabbox"}
+			entry := CoordinatorReadyPoolEntry{Key: "shared-linux", LeaseID: leaseID, SSHHost: lease.Host, SSHUser: lease.SSHUser, SSHPort: port, BorrowToken: "test-borrow-token"}
+			var borrowed, returned atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				switch req.Method + " " + req.URL.Path {
+				case "POST /v1/ready-pools/shared-linux/borrow":
+					borrowed.Add(1)
+					_ = json.NewEncoder(w).Encode(CoordinatorReadyPoolResponse{Entry: entry, Lease: lease})
+				case "POST /v1/ready-pools/shared-linux/return":
+					var body map[string]string
+					if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+						t.Error(err)
+					}
+					if body["leaseID"] != leaseID || body["borrowToken"] != entry.BorrowToken || body["result"] != "drain" {
+						t.Errorf("wrong borrow return: %#v", body)
+					}
+					returned.Add(1)
+					_ = json.NewEncoder(w).Encode(CoordinatorReadyPoolResponse{Entry: entry, Lease: lease})
+				case "POST /v1/ready-pools/shared-linux/heartbeat":
+					_ = json.NewEncoder(w).Encode(CoordinatorReadyPoolResponse{Entry: entry, Lease: lease})
+				case "GET /v1/leases/" + leaseID, "POST /v1/leases/" + leaseID + "/heartbeat":
+					_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+				case "POST /v1/runs", "POST /v1/runs/" + runID + "/finish":
+					_ = json.NewEncoder(w).Encode(map[string]any{"run": CoordinatorRun{ID: runID, LeaseID: leaseID, Provider: lease.Provider, State: "running"}})
+				case "POST /v1/runs/" + runID + "/events":
+					_ = json.NewEncoder(w).Encode(map[string]any{"event": CoordinatorRunEvent{RunID: runID, Seq: 1}})
+				case "GET /v1/control":
+					http.NotFound(w, req)
+				default:
+					t.Errorf("unexpected coordinator operation %s %s", req.Method, req.URL.Path)
+					http.NotFound(w, req)
+				}
+			}))
+			defer server.Close()
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+			if selection == "environment" {
+				t.Setenv("CRABBOX_SSH_PORT", "2200")
+			} else if selection == "config" {
+				if err := os.WriteFile(configPath, []byte("ssh:\n  port: 2200\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			args := []string{"--provider", lease.Provider, "--pool", entry.Key, "--pool-return", "drain", "--no-sync", "--no-hydrate"}
+			if selection == "flag" {
+				args = append(args, "--ssh-port", "2200")
+			}
+			args = append(args, "--", "true")
+			reachedOwner := errors.New("stop after exact pool endpoint reaches workspace owner")
+			ownerCalls := 0
+			var output synchronizedBuffer
+			app := App{Stdout: &output, Stderr: &output, workspaceOwnerAcquirer: func(_ context.Context, target SSHTarget, id string, _ io.Writer) (*workspaceOwner, error) {
+				ownerCalls++
+				if id != leaseID || target.Port != port || target.Host != lease.Host || target.User != lease.SSHUser || target.SSHHostKey != key {
+					t.Errorf("pool endpoint or lease authority changed: id=%s port=%s", id, target.Port)
+				}
+				return nil, reachedOwner
+			}}
+			err = app.runCommand(t.Context(), args)
+			if !errors.Is(err, reachedOwner) || ownerCalls != 1 {
+				t.Fatalf("pool failed before its endpoint reached owner: calls=%d err=%v\n%s", ownerCalls, err, output.String())
+			}
+			if borrowed.Load() != 1 || returned.Load() != 1 {
+				t.Fatalf("borrow=%d return=%d, want one exact borrow and return", borrowed.Load(), returned.Load())
+			}
+		})
 	}
 }

@@ -106,6 +106,7 @@ type CoordinatorLease struct {
 	Telemetry             *LeaseTelemetry                `json:"telemetry,omitempty"`
 	TelemetryHistory      []*LeaseTelemetry              `json:"telemetryHistory,omitempty"`
 	CleanupAttempts       int                            `json:"cleanupAttempts,omitempty"`
+	CleanupStatus         string                         `json:"cleanupStatus,omitempty"`
 	CleanupStartedAt      string                         `json:"cleanupStartedAt,omitempty"`
 	CleanupError          string                         `json:"cleanupError,omitempty"`
 	CleanupRetryAt        string                         `json:"cleanupRetryAt,omitempty"`
@@ -242,6 +243,13 @@ type CoordinatorLeaseCloudAudit struct {
 type CoordinatorUsageResponse struct {
 	Usage  CoordinatorUsageSummary `json:"usage"`
 	Limits CoordinatorCostLimits   `json:"limits"`
+}
+
+type CoordinatorCapacityResponse struct {
+	Owner          string `json:"owner"`
+	ActiveLeases   int    `json:"activeLeases"`
+	EffectiveLimit int    `json:"effectiveLimit"`
+	ObservedAt     string `json:"observedAt"`
 }
 
 type CoordinatorMarketplaceStatusResponse struct {
@@ -1019,9 +1027,6 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 	method := http.MethodPost
 	path := "/v1/leases"
 	checkpointClaim, checkpointBacked := checkpointLeaseClaimFromContext(ctx)
-	if checkpointBacked && fixed {
-		return CoordinatorLease{}, fmt.Errorf("checkpoint-backed leases do not support fixed lease identifiers")
-	}
 	if fixed {
 		method = http.MethodPut
 		path = "/v1/leases/" + url.PathEscape(leaseID)
@@ -1048,8 +1053,11 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 		req["checkpointID"] = checkpointClaim.CheckpointID
 		req["checkpointUseClaim"] = checkpointClaim.Token
 		path = "/v1/leases/from-checkpoint"
+		if fixed {
+			path = "/v1/leases/" + url.PathEscape(leaseID) + "/from-checkpoint"
+		}
 	}
-	err = c.do(ctx, method, path, req, &res)
+	err = c.doWithHeaders(ctx, method, path, req, &res, http.Header{"Prefer": {"respond-async"}})
 	if err == nil && checkpointBacked && checkpointClaim.LeaseCreated != nil {
 		checkpointClaim.LeaseCreated()
 	}
@@ -1512,6 +1520,32 @@ func (c *CoordinatorClient) doTypedReadyPool(ctx context.Context, method, key, a
 		return fmt.Errorf("typed ready pools are unsupported by this coordinator: %w", err)
 	}
 	return err
+}
+
+func (c *CoordinatorClient) Capacity(ctx context.Context) (CoordinatorCapacityResponse, error) {
+	// Pointers distinguish an explicit zero (limit off) from a missing field.
+	var payload struct {
+		Owner          string `json:"owner"`
+		ActiveLeases   *int   `json:"activeLeases"`
+		EffectiveLimit *int   `json:"effectiveLimit"`
+		ObservedAt     string `json:"observedAt"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/capacity", nil, &payload); err != nil {
+		var httpErr CoordinatorHTTPError
+		if errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusNotFound || httpErr.StatusCode == http.StatusMethodNotAllowed) {
+			return CoordinatorCapacityResponse{}, fmt.Errorf("capacity is unsupported by this coordinator: %w", err)
+		}
+		return CoordinatorCapacityResponse{}, err
+	}
+	observedAt, err := time.Parse(time.RFC3339Nano, payload.ObservedAt)
+	if strings.TrimSpace(payload.Owner) == "" || payload.ActiveLeases == nil || *payload.ActiveLeases < 0 ||
+		payload.EffectiveLimit == nil || *payload.EffectiveLimit < 0 || err != nil || !strings.HasSuffix(payload.ObservedAt, "Z") || observedAt.IsZero() {
+		return CoordinatorCapacityResponse{}, fmt.Errorf("invalid capacity response from coordinator")
+	}
+	return CoordinatorCapacityResponse{
+		Owner: payload.Owner, ActiveLeases: *payload.ActiveLeases,
+		EffectiveLimit: *payload.EffectiveLimit, ObservedAt: payload.ObservedAt,
+	}, nil
 }
 
 func (c *CoordinatorClient) Usage(ctx context.Context, scope, owner, org, month string) (CoordinatorUsageResponse, error) {
@@ -2113,12 +2147,14 @@ func (c *CoordinatorClient) CreateRun(ctx context.Context, leaseID string, cfg C
 
 func (c *CoordinatorClient) FinishRun(ctx context.Context, runID string, exitCode int, sync, command time.Duration, log string, truncated bool, results *TestResultSummary, telemetry *RunTelemetrySummary, classification FailureClassification, receipt *terminalRunReceipt) (CoordinatorRun, error) {
 	var res CoordinatorRunResponse
+	log, changed := retainedRunLogText(log, maxRunLogBytes)
+	truncated = truncated || changed
 	logChunks := splitRunLogChunks(log)
 	body := map[string]any{
 		"exitCode":     exitCode,
 		"syncMs":       sync.Milliseconds(),
 		"commandMs":    command.Milliseconds(),
-		"log":          runLogFallbackPreview(log, truncated),
+		"log":          runLogFallbackPreview(log),
 		"logChunks":    logChunks,
 		"logTruncated": truncated,
 		"results":      results,
@@ -2251,6 +2287,10 @@ func (c *CoordinatorClient) doControl(ctx context.Context, method, path string, 
 }
 
 func (c *CoordinatorClient) do(ctx context.Context, method, path string, body any, out any) error {
+	return c.doWithHeaders(ctx, method, path, body, out, nil)
+}
+
+func (c *CoordinatorClient) doWithHeaders(ctx context.Context, method, path string, body any, out any, headers http.Header) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -2262,7 +2302,7 @@ func (c *CoordinatorClient) do(ctx context.Context, method, path string, body an
 			return err
 		}
 	}
-	err = c.doHTTP(ctx, method, path, data, body != nil, out)
+	err = c.doHTTPWithHeaders(ctx, method, path, data, body != nil, out, headers)
 	if err == nil || !shouldUseCoordinatorCurlFallback(method, body != nil, err) {
 		return err
 	}
@@ -2274,12 +2314,19 @@ func (c *CoordinatorClient) do(ctx context.Context, method, path string, body an
 }
 
 func (c *CoordinatorClient) doHTTP(ctx context.Context, method, path string, data []byte, hasBody bool, out any) error {
+	return c.doHTTPWithHeaders(ctx, method, path, data, hasBody, out, nil)
+}
+
+func (c *CoordinatorClient) doHTTPWithHeaders(ctx context.Context, method, path string, data []byte, hasBody bool, out any, headers http.Header) error {
 	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
 	if hasBody {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for name, values := range headers {
+		req.Header[name] = append([]string(nil), values...)
 	}
 	if err := c.addRequestHeaders(ctx, req.Header); err != nil {
 		return err

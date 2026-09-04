@@ -2,6 +2,11 @@
   "schema": "crabbox-bootstrap-fragments/v1",
   "fragments": [
     {
+      "name": "linuxSSHRestart",
+      "file": "linuxSSHRestart.sh",
+      "parameters": {}
+    },
+    {
       "name": "windowsHeader",
       "file": "windowsHeader.ps1",
       "parameters": {
@@ -10,6 +15,16 @@
         "workRoot": "ps-string",
         "ports": "ps-strings"
       }
+    },
+    {
+      "name": "windowsRuntime",
+      "file": "windowsRuntime.ps1",
+      "parameters": {}
+    },
+    {
+      "name": "windowsRuntimeGate",
+      "file": "windowsRuntimeGate.ps1",
+      "parameters": {}
     },
     {
       "name": "windowsCore",

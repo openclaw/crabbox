@@ -180,10 +180,6 @@ func createPortableSyncArchive(ctx context.Context, repo Repo, manifest SyncMani
 	return core.CreateSyncArchive(ctx, repo, manifest, tempPattern)
 }
 
-func serverTypeForProviderClass(provider, class string) string {
-	return core.ServerTypeForProviderClass(provider, class)
-}
-
 func idleForString(value string, now time.Time) string {
 	return core.IdleForString(value, now)
 }

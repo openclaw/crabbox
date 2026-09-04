@@ -13,14 +13,43 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
+
+type coordinatorAcquireValidationBackend struct {
+	testSSHBackend
+	err   error
+	calls int
+}
+
+func (b *coordinatorAcquireValidationBackend) ValidateCoordinatorAcquire() error {
+	b.calls++
+	return b.err
+}
+
+func TestCoordinatorAcquireValidatesBeforeAllocation(t *testing.T) {
+	t.Parallel()
+	for _, requestedID := range []string{"", "cbx_0123456789ab"} {
+		t.Run(blank(requestedID, "generated-id"), func(t *testing.T) {
+			cause := errors.New("provider allocation is unsupported")
+			direct := &coordinatorAcquireValidationBackend{err: cause}
+			// No client or key configuration: rejected acquisition must not reach
+			// allocation, including the fixed-ID and retry paths.
+			backend := &coordinatorLeaseBackend{direct: direct}
+			if _, err := backend.Acquire(t.Context(), AcquireRequest{RequestedLeaseID: requestedID}); !errors.Is(err, cause) || direct.calls != 1 {
+				t.Fatalf("calls=%d err=%v", direct.calls, err)
+			}
+		})
+	}
+}
 
 func TestCoordinatorListUsesUserLeasesWithoutAdminProbe(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -849,6 +878,7 @@ func TestCoordinatorAcquireReportsSelectedImageAndProviderStartupTiming(t *testi
 }
 
 func TestCoordinatorCreateLeaseTimesOutWithDiagnostics(t *testing.T) {
+	t.Setenv("CRABBOX_OWNER", "test@example.com")
 	oldTimeout := coordinatorCreateLeaseTimeoutForConfig
 	oldProgressInterval := coordinatorCreateLeaseProgressInterval
 	oldRecoveryTimeout := coordinatorCreateLeaseRecoveryTimeout
@@ -927,6 +957,7 @@ func TestCoordinatorCreateLeaseTimesOutWithDiagnostics(t *testing.T) {
 }
 
 func TestCoordinatorCreateLeaseCancellationUsesExactDurableAttemptToken(t *testing.T) {
+	t.Setenv("CRABBOX_OWNER", "test@example.com")
 	oldRecoveryTimeout := coordinatorCanceledCreateRecoveryTimeout
 	oldRecoveryInterval := coordinatorCreateLeaseRecoveryInterval
 	coordinatorCanceledCreateRecoveryTimeout = time.Second
@@ -941,6 +972,7 @@ func TestCoordinatorCreateLeaseCancellationUsesExactDurableAttemptToken(t *testi
 
 	createStarted := make(chan struct{})
 	allowCreateCommit := make(chan struct{})
+	unblockCreate := sync.OnceFunc(func() { close(allowCreateCommit) })
 	firstReconcileRelease := make(chan struct{})
 	releaseObserved := make(chan struct{})
 	var firstReleaseAttempt sync.Once
@@ -1005,7 +1037,15 @@ func TestCoordinatorCreateLeaseCancellationUsesExactDurableAttemptToken(t *testi
 
 	ctx, cancel := context.WithCancel(context.Background())
 	resultCh := make(chan coordinatorCreateLeaseResult, 1)
+	createFinished := make(chan struct{})
+	// Join before server.Close and the earlier global-restoration defer.
+	defer func() {
+		cancel()
+		unblockCreate()
+		<-createFinished
+	}()
 	go func() {
+		defer close(createFinished)
 		lease, err := backend.createCoordinatorLeaseWithProgress(
 			ctx,
 			cfg,
@@ -1016,16 +1056,24 @@ func TestCoordinatorCreateLeaseCancellationUsesExactDurableAttemptToken(t *testi
 		)
 		resultCh <- coordinatorCreateLeaseResult{lease: lease, err: err}
 	}()
-	<-createStarted
+	select {
+	case <-createStarted:
+	case <-createFinished:
+		t.Fatalf("create ended before its request started: %v", (<-resultCh).err)
+	}
 	cancel()
 
 	select {
 	case <-firstReconcileRelease:
-	case <-time.After(250 * time.Millisecond):
-		close(allowCreateCommit)
-		t.Fatal("canceled create did not send its pre-generated create attempt token")
+	case <-createFinished:
+		// Completion and receipt observation can become ready together.
+		select {
+		case <-firstReconcileRelease:
+		default:
+			t.Fatal("canceled create did not send its pre-generated create attempt token")
+		}
 	}
-	close(allowCreateCommit)
+	unblockCreate()
 
 	select {
 	case result := <-resultCh:
@@ -1050,6 +1098,7 @@ func TestCoordinatorCreateLeaseCancellationUsesExactDurableAttemptToken(t *testi
 }
 
 func TestCanceledCoordinatorCreateRetriesTransientCancelFailure(t *testing.T) {
+	t.Setenv("CRABBOX_OWNER", "test@example.com")
 	oldRecoveryInterval := coordinatorCreateLeaseRecoveryInterval
 	coordinatorCreateLeaseRecoveryInterval = time.Millisecond
 	defer func() { coordinatorCreateLeaseRecoveryInterval = oldRecoveryInterval }()
@@ -1126,63 +1175,70 @@ func TestCoordinatorCreateLeaseTreatsAllServerErrorsAsAmbiguous(t *testing.T) {
 }
 
 func TestCanceledCoordinatorCreateMakesOneFreshFinalCancelAttemptAtRecoveryDeadline(t *testing.T) {
-	oldFinalTimeout := coordinatorCanceledCreateFinalTimeout
-	oldRecoveryInterval := coordinatorCreateLeaseRecoveryInterval
-	coordinatorCanceledCreateFinalTimeout = time.Second
-	coordinatorCreateLeaseRecoveryInterval = time.Hour
-	defer func() {
-		coordinatorCanceledCreateFinalTimeout = oldFinalTimeout
-		coordinatorCreateLeaseRecoveryInterval = oldRecoveryInterval
-	}()
+	t.Setenv("CRABBOX_OWNER", "test@example.com")
+	// Advance the recovery deadline only once the mock request is blocked.
+	synctest.Test(t, func(t *testing.T) {
+		oldFinalTimeout := coordinatorCanceledCreateFinalTimeout
+		oldRecoveryInterval := coordinatorCreateLeaseRecoveryInterval
+		coordinatorCanceledCreateFinalTimeout = time.Second
+		coordinatorCreateLeaseRecoveryInterval = time.Hour
+		defer func() {
+			coordinatorCanceledCreateFinalTimeout = oldFinalTimeout
+			coordinatorCreateLeaseRecoveryInterval = oldRecoveryInterval
+		}()
 
-	var attempts atomic.Int32
-	var deadlines [2]time.Time
-	coord := &CoordinatorClient{
-		BaseURL: "http://coordinator.test",
-		Token:   "user-token",
-		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			attempt := int(attempts.Add(1))
-			if req.Method != http.MethodPost || req.URL.Path != "/v1/leases/cbx_cancel_final/cancel-create" {
-				return nil, fmt.Errorf("unexpected request %s %s", req.Method, req.URL.Path)
-			}
-			deadline, ok := req.Context().Deadline()
-			if !ok {
-				return nil, errors.New("cancel-create attempt had no deadline")
-			}
-			if attempt > len(deadlines) {
-				return nil, fmt.Errorf("unexpected cancel-create attempt %d", attempt)
-			}
-			deadlines[attempt-1] = deadline
-			if attempt == 1 {
-				<-req.Context().Done()
-				return nil, req.Context().Err()
-			}
-			if err := req.Context().Err(); err != nil {
-				return nil, fmt.Errorf("final cancel-create started with expired context: %w", err)
-			}
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body: io.NopCloser(strings.NewReader(
-					`{"canceledCreate":{"version":1,"requestedLeaseID":"cbx_cancel_final","createAttemptID":"cat_22222222222222222222222222222222","state":"canceled"}}`,
-				)),
-				Request: req,
-			}, nil
-		})},
-	}
-	backend := &coordinatorLeaseBackend{coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
-	recoverCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
+		var attempts atomic.Int32
+		var deadlines [2]time.Time
+		coord := &CoordinatorClient{
+			BaseURL: "http://coordinator.test",
+			Token:   "user-token",
+			Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				attempt := int(attempts.Add(1))
+				if req.Method != http.MethodPost || req.URL.Path != "/v1/leases/cbx_cancel_final/cancel-create" {
+					return nil, fmt.Errorf("unexpected request %s %s", req.Method, req.URL.Path)
+				}
+				deadline, ok := req.Context().Deadline()
+				if !ok {
+					return nil, errors.New("cancel-create attempt had no deadline")
+				}
+				if attempt > len(deadlines) {
+					return nil, fmt.Errorf("unexpected cancel-create attempt %d", attempt)
+				}
+				deadlines[attempt-1] = deadline
+				if attempt == 1 {
+					<-req.Context().Done()
+					return nil, req.Context().Err()
+				}
+				if err := req.Context().Err(); err != nil {
+					return nil, fmt.Errorf("final cancel-create started with expired context: %w", err)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body: io.NopCloser(strings.NewReader(
+						`{"canceledCreate":{"version":1,"requestedLeaseID":"cbx_cancel_final","createAttemptID":"cat_22222222222222222222222222222222","state":"canceled"}}`,
+					)),
+					Request: req,
+				}, nil
+			})},
+		}
+		backend := &coordinatorLeaseBackend{coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
+		recoverCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
 
-	if err := backend.cancelCoordinatorLeaseCreate(recoverCtx, "cbx_cancel_final", "final-crab", "cat_22222222222222222222222222222222"); err != nil {
-		t.Fatal(err)
-	}
-	if got := attempts.Load(); got != 2 {
-		t.Fatalf("cancel-create attempts=%d, want recovery attempt plus exactly one final attempt", got)
-	}
-	if !deadlines[1].After(deadlines[0]) {
-		t.Fatalf("final deadline=%s, want fresh deadline after expired recovery deadline=%s", deadlines[1], deadlines[0])
-	}
+		if err := backend.cancelCoordinatorLeaseCreate(recoverCtx, "cbx_cancel_final", "final-crab", "cat_22222222222222222222222222222222"); err != nil {
+			t.Fatal(err)
+		}
+		if !errors.Is(recoverCtx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("recovery err=%v, want deadline exceeded", recoverCtx.Err())
+		}
+		if got := attempts.Load(); got != 2 {
+			t.Fatalf("cancel-create attempts=%d, want recovery attempt plus exactly one final attempt", got)
+		}
+		if !deadlines[1].After(deadlines[0]) {
+			t.Fatalf("final deadline=%s, want fresh deadline after expired recovery deadline=%s", deadlines[1], deadlines[0])
+		}
+	})
 }
 
 func TestCoordinatorFixedCreateCancellationDoesNotReleaseDurableLease(t *testing.T) {
@@ -1403,6 +1459,7 @@ func TestCanceledCoordinatorCreateValidatesAttestation(t *testing.T) {
 }
 
 func TestCoordinatorCreateLeaseRecoversWithSameTokenBoundPost(t *testing.T) {
+	t.Setenv("CRABBOX_OWNER", "test@example.com")
 	oldRecoveryTimeout := coordinatorCreateLeaseRecoveryTimeout
 	oldRecoveryInterval := coordinatorCreateLeaseRecoveryInterval
 	coordinatorCreateLeaseRecoveryTimeout = time.Second
@@ -1568,6 +1625,7 @@ func TestCoordinatorCreateLeaseDefinitiveErrorDoesNotReconcile(t *testing.T) {
 }
 
 func TestCoordinatorFixedCreateAmbiguousErrorRepeatsPutAndDoesNotAdoptConflictingGet(t *testing.T) {
+	t.Setenv("CRABBOX_OWNER", "test@example.com")
 	oldRecoveryTimeout := coordinatorCreateLeaseRecoveryTimeout
 	oldRecoveryInterval := coordinatorCreateLeaseRecoveryInterval
 	coordinatorCreateLeaseRecoveryTimeout = time.Second
@@ -1622,63 +1680,137 @@ func TestCoordinatorFixedCreateAmbiguousErrorRepeatsPutAndDoesNotAdoptConflictin
 	}
 }
 
-func TestCoordinatorFixedCreateCommitThenTimeoutRepeatsPutAndCreatesOnce(t *testing.T) {
-	oldRecoveryTimeout := coordinatorCreateLeaseRecoveryTimeout
-	oldRecoveryInterval := coordinatorCreateLeaseRecoveryInterval
-	coordinatorCreateLeaseRecoveryTimeout = time.Second
-	coordinatorCreateLeaseRecoveryInterval = time.Millisecond
-	defer func() {
-		coordinatorCreateLeaseRecoveryTimeout = oldRecoveryTimeout
-		coordinatorCreateLeaseRecoveryInterval = oldRecoveryInterval
-	}()
-
-	puts := 0
-	gets := 0
-	creates := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPut && r.URL.Path == "/v1/leases/cbx_abcdef123463":
-			puts++
-			if puts == 1 {
-				creates++
-				http.Error(w, "error code: 1101", http.StatusInternalServerError)
-				return
-			}
-			w.WriteHeader(http.StatusAccepted)
-			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
-				ID: "cbx_abcdef123463", Slug: "fixed-commit", Provider: "aws", TargetOS: targetLinux, State: "provisioning",
-			}})
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/cbx_abcdef123463":
-			gets++
-			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
-				ID: "cbx_abcdef123463", Slug: "fixed-commit", Provider: "aws", TargetOS: targetLinux,
-				State: "active", CloudID: "i-fixed", Host: "203.0.113.44",
-			}})
-		default:
-			http.NotFound(w, r)
+func TestCoordinatorRecoveredProvisioningKeepsCreationLifetime(t *testing.T) {
+	t.Setenv("CRABBOX_OWNER", "test@example.com")
+	for _, fixed := range []bool{true, false} {
+		for _, test := range []struct {
+			name          string
+			createDelay   time.Duration
+			readyAfter    time.Duration
+			cancelAfter   time.Duration
+			callerTimeout time.Duration
+			wantElapsed   time.Duration
+			wantErr       error
+		}{
+			{name: "activation beyond recovery window", createDelay: 2 * time.Minute, readyAfter: 4 * time.Minute, wantElapsed: 4 * time.Minute},
+			{name: "original creation deadline", createDelay: 29 * time.Minute, readyAfter: 31 * time.Minute, wantElapsed: 30 * time.Minute, wantErr: context.DeadlineExceeded},
+			{name: "caller cancellation", createDelay: 2 * time.Minute, readyAfter: 4 * time.Minute, cancelAfter: 3 * time.Minute, wantElapsed: 3 * time.Minute, wantErr: context.Canceled},
+			{name: "earlier caller deadline", createDelay: 2 * time.Minute, readyAfter: 4 * time.Minute, callerTimeout: 3 * time.Minute, wantElapsed: 3 * time.Minute, wantErr: context.DeadlineExceeded},
+		} {
+			t.Run(fmt.Sprintf("fixed=%v/%s", fixed, test.name), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					const requestedID = "cbx_abcdef123463"
+					canonicalID := "cbx_abcdef123464"
+					target := targetMacOS
+					createMethod, createPath := http.MethodPost, "/v1/leases"
+					if fixed {
+						canonicalID = requestedID
+						target = targetLinux
+						createMethod, createPath = http.MethodPut, createPath+"/"+requestedID
+					}
+					started := time.Now()
+					ctx, cancel := context.WithCancel(t.Context())
+					defer cancel()
+					if test.cancelAfter > 0 {
+						cancelTimer := time.AfterFunc(test.cancelAfter, cancel)
+						defer cancelTimer.Stop()
+					}
+					if test.callerTimeout > 0 {
+						var cancelDeadline context.CancelFunc
+						ctx, cancelDeadline = context.WithTimeout(ctx, test.callerTimeout)
+						defer cancelDeadline()
+					}
+					respond := func(code int, body any) (*http.Response, error) {
+						data, err := json.Marshal(body)
+						if err != nil {
+							return nil, err
+						}
+						return &http.Response{StatusCode: code, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(data))}, nil
+					}
+					var initialRequest map[string]any
+					var attemptID string
+					creates, gets, cancellations := 0, 0, 0
+					coord := &CoordinatorClient{
+						BaseURL: "http://coordinator.test",
+						Token:   "user-token",
+						Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+							lease := CoordinatorLease{ID: canonicalID, Slug: "recovered-crab", Provider: "aws", TargetOS: target, State: "provisioning"}
+							switch {
+							case req.Method == createMethod && req.URL.Path == createPath:
+								creates++
+								var body map[string]any
+								if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+									return nil, err
+								}
+								if creates == 1 {
+									initialRequest = body
+									attemptID, _ = body["createAttemptID"].(string)
+									if body["leaseID"] != requestedID || (attemptID == "") != fixed {
+										t.Errorf("unexpected create identity: lease=%v attempt=%q fixed=%v", body["leaseID"], attemptID, fixed)
+									}
+									time.Sleep(test.createDelay)
+									return respond(http.StatusInternalServerError, map[string]string{"error": "response_lost"})
+								}
+								if creates != 2 || !reflect.DeepEqual(body, initialRequest) {
+									t.Errorf("recovery changed create intent or created again: requests=%d", creates)
+								}
+								return respond(http.StatusAccepted, map[string]any{"lease": lease})
+							case req.Method == http.MethodGet && req.URL.Path == "/v1/leases/"+canonicalID:
+								gets++
+								if creates != 2 {
+									t.Error("polled before confirming the create intent")
+								}
+								if time.Since(started) >= test.readyAfter {
+									lease.State, lease.Host = "active", "203.0.113.44"
+								}
+								return respond(http.StatusOK, map[string]any{"lease": lease})
+							case req.Method == http.MethodPost && req.URL.Path == "/v1/leases/"+requestedID+"/cancel-create":
+								cancellations++
+								var body struct {
+									CreateAttemptID string `json:"createAttemptID"`
+								}
+								if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+									return nil, err
+								}
+								if fixed || body.CreateAttemptID == "" || body.CreateAttemptID != attemptID {
+									t.Error("cancellation lost the original create ownership")
+								}
+								return respond(http.StatusOK, map[string]any{"canceledCreate": map[string]any{
+									"version": 1, "requestedLeaseID": requestedID, "createAttemptID": body.CreateAttemptID, "state": "canceled",
+								}})
+							default:
+								t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
+								return respond(http.StatusBadRequest, map[string]string{"error": "unexpected_request"})
+							}
+						})},
+					}
+					cfg := baseConfig()
+					cfg.Provider, cfg.TargetOS = "aws", target
+					backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
+					lease, err := backend.createCoordinatorLeaseWithProgressMode(ctx, cfg, "ssh-ed25519 test", true, requestedID, "recovered-crab", fixed)
+					if !errors.Is(err, test.wantErr) {
+						t.Errorf("create error=%v, want %v", err, test.wantErr)
+					}
+					if test.wantErr == nil {
+						if lease.ID != canonicalID || lease.State != "active" || lease.Host == "" {
+							t.Errorf("create did not return the ready canonical lease: %#v", lease)
+						}
+					} else if lease.ID != "" {
+						t.Errorf("failed create adopted lease: %#v", lease)
+					}
+					wantCancellations := 0
+					if !fixed && test.wantErr != nil {
+						wantCancellations = 1
+					}
+					if creates != 2 || gets == 0 || cancellations != wantCancellations {
+						t.Errorf("create/get/cancel requests=%d/%d/%d, want 2/positive/%d", creates, gets, cancellations, wantCancellations)
+					}
+					if elapsed := time.Since(started); elapsed != test.wantElapsed {
+						t.Errorf("create elapsed=%v, want original lifetime %v", elapsed, test.wantElapsed)
+					}
+				})
+			})
 		}
-	}))
-	defer server.Close()
-
-	cfg := baseConfig()
-	cfg.Provider = "aws"
-	cfg.TargetOS = targetLinux
-	cfg.Coordinator = server.URL
-	cfg.CoordToken = "user-token"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
-	lease, err := backend.createCoordinatorLeaseWithProgressMode(
-		context.Background(), cfg, "ssh-ed25519 test", true,
-		"cbx_abcdef123463", "fixed-commit", true,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lease.ID != "cbx_abcdef123463" || lease.CloudID != "i-fixed" || puts != 2 || gets == 0 || creates != 1 {
-		t.Fatalf("lease=%#v puts=%d gets=%d creates=%d", lease, puts, gets, creates)
 	}
 }
 
@@ -1959,8 +2091,9 @@ func TestCoordinatorProviderIdentityValidationCanonicalizesAliases(t *testing.T)
 	}
 }
 
-func TestCoordinatorCreateRecoveryCanonicalProviderMatching(t *testing.T) {
+func TestCoordinatorCreateCanonicalProviderMatching(t *testing.T) {
 	cfg := Config{Provider: "gcp", TargetOS: targetLinux}
+	backend := &coordinatorLeaseBackend{cfg: cfg}
 	base := CoordinatorLease{ID: "cbx_recovered", State: "active", Host: "203.0.113.10", TargetOS: targetLinux}
 	for _, test := range []struct {
 		name     string
@@ -1977,7 +2110,7 @@ func TestCoordinatorCreateRecoveryCanonicalProviderMatching(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			lease := base
 			lease.Provider = test.provider
-			if got := coordinatorLeaseRecoveredFromCreateError(cfg, lease); got != test.want {
+			if got := backend.validateCoordinatorLeaseCreateResult(cfg, lease, lease.ID, false) == nil; got != test.want {
 				t.Fatalf("recovered=%t want %t for provider=%q", got, test.want, test.provider)
 			}
 		})

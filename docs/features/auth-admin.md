@@ -162,6 +162,7 @@ POST /v1/leases/{id}/tailscale   owner, manage share, or admin
 GET/PUT/DELETE /v1/leases/{id}/share owner, manage share, or admin
 GET  /v1/runs and logs/events    own runs only
 GET  /v1/usage                   own usage only
+GET  /v1/capacity                self-owner admission aggregate across months/orgs
 GET  /v1/pool                    admin token only
 POST /v1/leases with hostId      admin token only
 /v1/admin/*                      admin token only
@@ -171,6 +172,13 @@ A lease is **visible** to a caller who is the owner (matching immutable owner
 and org), an admin, or a share recipient. It is **manageable** by the owner, an
 admin, or a `manage` share recipient. Non-admin admin-route requests are
 rejected with `403 admin token required`.
+
+[`capacity`](../commands/capacity.md) is a narrow aggregate exception to owner/org
+visibility. It uses normal authentication, remains self-owner only even for
+admins, rejects all query parameters, and exposes only owner, active admission
+count, effective owner limit, and observed time. It grants no additional lease
+visibility or monthly-report access; admin authentication alone does not grant
+an elevated owner limit.
 
 Provider host inventory is also capacity administration. Normal portal users
 see a Dedicated Host only when it backs an active lease already visible to

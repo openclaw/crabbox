@@ -224,7 +224,7 @@ func TestWorkspaceOwnerPOSIXSetupStagesAreCredentialFree(t *testing.T) {
 }
 
 func TestWaitForSSHReadyWorkspaceOwnerSetupFailure(t *testing.T) {
-	for _, scenario := range []string{"direct", "proxy", "bootstrap", "identity"} {
+	for _, scenario := range []string{"direct", "proxy", "diagnostic", "identity"} {
 		t.Run(scenario, func(t *testing.T) {
 			home, owner := workspaceOwnerSetupFixture(t)
 			tools := t.TempDir()
@@ -237,8 +237,8 @@ func TestWaitForSSHReadyWorkspaceOwnerSetupFailure(t *testing.T) {
 			}
 			// Execute the generated remote script, without recording subprocess argv.
 			fakeSSH := "#!/bin/sh\nfor arg; do remote=\"$arg\"; done\n"
-			if scenario == "bootstrap" {
-				fakeSSH += "if [ ! -f " + shellQuote(filepath.Join(home, "transport-done")) + " ]; then touch " + shellQuote(filepath.Join(home, "transport-done")) + "; exit 0; fi\n"
+			if scenario == "diagnostic" {
+				fakeSSH += "if [ ! -f " + shellQuote(filepath.Join(home, "readiness-failed")) + " ]; then touch " + shellQuote(filepath.Join(home, "readiness-failed")) + "; exit 1; fi\n"
 			}
 			fakeSSH += "HOME=" + shellQuote(home) + "\nPATH=" + shellQuote(path) + "\nexport HOME PATH\nexec /bin/sh -c \"$remote\"\n"
 			writeExecutable(t, filepath.Join(tools, "ssh"), fakeSSH)
@@ -294,6 +294,50 @@ wait`
 	code, err := runSSHStreamResult(ctx, target, payload, &combined, &combined)
 	if err != nil || code != 0 || strings.Count(combined.String(), "stdout\n") != 2000 || strings.Count(combined.String(), "stderr\n") != 2000 {
 		t.Fatal("owner protocol lost shared stdout/stderr output")
+	}
+}
+
+func TestWorkspaceOwnerGitSeedPreservesOriginFailure(t *testing.T) {
+	for _, kind := range []string{"missing filesystem", "HTTP transport"} {
+		t.Run(kind, func(t *testing.T) {
+			home, owner := workspaceOwnerSetupFixture(t)
+			tools := t.TempDir()
+			writeExecutable(t, filepath.Join(tools, "ssh"), "#!/bin/sh\nfor arg; do remote=\"$arg\"; done\nHOME="+shellQuote(home)+"\nexport HOME\nexec /bin/sh -c \"$remote\"\n")
+			t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+			target := SSHTarget{Host: "127.0.0.1", User: "runner", Port: "22", FallbackPorts: []string{}, TargetOS: targetLinux}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			ctx = contextWithWorkspaceOwner(ctx, owner)
+			plan := gitCoherencePlan{
+				RemoteURL: filepath.Join(home, "absent-origin.git"),
+				Target:    strings.Repeat("a", 40),
+				Tree:      strings.Repeat("b", 40),
+				Branch:    "main",
+			}
+			diagnostic := gitOriginFilesystemError
+			if kind == "HTTP transport" {
+				plan.RemoteURL = newGitTransportFailureHTTPServer(t) + "/repo.git"
+				diagnostic = gitOriginTransportError
+			}
+			workdir := filepath.Join(home, "workspace")
+			if err := os.Mkdir(workdir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, plan), 0)
+			t.Logf("owned Git seed exit=%d combined diagnostics:\n%s", exitCode(err), out)
+			if got := exitCode(err); got != gitOriginRuntimeFallbackExitCode {
+				t.Fatalf("owned Git seed exit=%d want=%d diagnostic-bytes=%d", got, gitOriginRuntimeFallbackExitCode, len(out))
+			}
+			if len(out) > gitSeedDiagnosticLimit || !strings.Contains(out, "crabbox-git-seed phase=clone") || !diagnostic.MatchString(out) {
+				t.Fatalf("owned Git seed lost bounded clone diagnostics: diagnostic-bytes=%d", len(out))
+			}
+			if reason, fallback := gitOriginRuntimeFallbackResult(plan.RemoteURL, out, err); !fallback || reason != "origin_unavailable" {
+				t.Fatalf("owned Git seed fallback=%t reason=%q", fallback, reason)
+			}
+			if strings.Contains(out, owner.token) || strings.Contains(out, "CRABBOX_OWNER_SETUP_V1") {
+				t.Fatal("owned Git seed exposed workspace-owner protocol diagnostics")
+			}
+		})
 	}
 }
 

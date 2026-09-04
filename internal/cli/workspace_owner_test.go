@@ -25,7 +25,6 @@ type fakeWorkspaceOwnerRemote struct {
 	token            string
 	expires          time.Time
 	childAlive       bool
-	failRenew        bool
 	ambiguousRelease bool
 	blockBusyAcquire bool
 	changed          chan struct{}
@@ -82,10 +81,6 @@ func (f *fakeWorkspaceOwnerRemote) Do(ctx context.Context, req workspaceOwnerRem
 				continue
 			}
 		case workspaceOwnerRenew:
-			if f.failRenew {
-				f.mu.Unlock()
-				return "", errors.New("renew transport lost")
-			}
 			if f.token != req.Token {
 				f.mu.Unlock()
 				return "MISMATCH", nil
@@ -266,21 +261,56 @@ func TestWorkspaceOwnerTokenAndTransportFailuresFailClosed(t *testing.T) {
 	})
 
 	t.Run("failed renew", func(t *testing.T) {
-		remote := newFakeWorkspaceOwnerRemote()
-		owner, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_renew", &bytes.Buffer{}, remote, time.Second, 50*time.Millisecond, 5*time.Millisecond)
-		if err != nil {
-			t.Fatal(err)
-		}
-		remote.mu.Lock()
-		remote.failRenew = true
-		remote.mu.Unlock()
-		select {
-		case <-owner.Context().Done():
-		case <-time.After(time.Second):
-			t.Fatal("renewal failure did not cancel lifecycle context")
-		}
-		if err := owner.Close(context.Background()); err == nil || !strings.Contains(err.Error(), "renewal failed closed") {
-			t.Fatalf("close err=%v, want renewal failure", err)
+		const rawOutput = "private-unrecognized-renewal-output"
+		for _, tc := range []struct {
+			name, response, state string
+			err                   error
+		}{
+			{name: "transport", err: errors.New("renew transport lost")},
+			{name: "mismatch", response: "MISMATCH", state: "MISMATCH", err: errors.New("exit status 75")},
+			{name: "expired", response: "EXPIRED", state: "EXPIRED", err: errors.New("exit status 75")},
+			{name: "ambiguous", response: "AMBIGUOUS", state: "AMBIGUOUS", err: errors.New("exit status 74")},
+			{name: "mismatch without status", response: "MISMATCH", state: "MISMATCH"},
+			{name: "unknown output with status", response: rawOutput, err: errors.New("exit status 75")},
+			{name: "mixed output with status", response: "MISMATCH\n" + rawOutput, err: errors.New("exit status 75")},
+			{name: "unknown output without status", response: rawOutput},
+			{name: "acknowledgement with failure", response: "RENEWED", err: errors.New("renew transport lost")},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ownerCtx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				calls := 0
+				owner := &workspaceOwner{
+					transport: workspaceOwnerTransportFunc(func(_ context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+						calls++
+						if req.Action != workspaceOwnerRenew {
+							t.Errorf("unexpected authority call %s after failed renewal", req.Action)
+						}
+						return tc.response, tc.err
+					}),
+					ttl: time.Minute, ctx: ownerCtx, cancel: cancel, stop: make(chan struct{}), done: make(chan struct{}),
+				}
+				ticks := make(chan time.Time, 1)
+				ticks <- time.Now()
+				owner.renewLoopWithTicks(ticks, time.Second)
+				err := owner.Err()
+				if inspectErr := owner.ConfirmNoChild(t.Context()); inspectErr != err {
+					t.Errorf("inspection did not preserve failed renewal: %v", inspectErr)
+				}
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 7 || ownerCtx.Err() != context.Canceled || calls != 1 {
+					t.Fatalf("err=%v context=%v calls=%d; want immediate terminal exit 7", err, ownerCtx.Err(), calls)
+				}
+				if !strings.Contains(err.Error(), "renewal failed closed") || tc.err != nil && !strings.Contains(err.Error(), tc.err.Error()) {
+					t.Errorf("renewal failure lost original cause: %v", err)
+				}
+				if tc.state != "" && !strings.Contains(err.Error(), "protocol state "+tc.state) {
+					t.Errorf("renewal failure lost protocol state %s: %v", tc.state, err)
+				}
+				if strings.Contains(err.Error(), rawOutput) || tc.state == "" && strings.Contains(err.Error(), "protocol state") {
+					t.Errorf("renewal failure trusted unknown protocol output: %v", err)
+				}
+			})
 		}
 	})
 
@@ -298,24 +328,28 @@ func TestWorkspaceOwnerTokenAndTransportFailuresFailClosed(t *testing.T) {
 
 func TestWorkspaceOwnerAcquisitionBoundary(t *testing.T) {
 	nonExclusive := newWatchTestBackend()
-	if !shouldAcquireWorkspaceOwner(true, false, nonExclusive) {
+	if !shouldAcquireWorkspaceOwner(SSHTarget{}, true, false, nonExclusive) {
 		t.Fatal("a successful non-exclusive acquisition must acquire the workspace owner")
 	}
 	exclusive := runEnvProfileTestBackend{}
 	tests := []struct {
 		name      string
+		target    SSHTarget
 		acquired  bool
 		mayRetain bool
 		wantOwner bool
 	}{
-		{name: "fresh one-shot cleanup", acquired: true, wantOwner: false},
+		{name: "fresh Linux one-shot cleanup", target: SSHTarget{TargetOS: targetLinux}, acquired: true},
+		{name: "fresh macOS one-shot cleanup", target: SSHTarget{TargetOS: targetMacOS}, acquired: true},
+		{name: "fresh WSL2 one-shot cleanup", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, acquired: true},
+		{name: "fresh Windows input requires witness", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, acquired: true, wantOwner: true},
 		{name: "fresh keep", acquired: true, mayRetain: true, wantOwner: true},
 		{name: "fresh keep-on-failure", acquired: true, mayRetain: true, wantOwner: true},
 		{name: "reused retained lease", acquired: false, wantOwner: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldAcquireWorkspaceOwner(tt.acquired, tt.mayRetain, exclusive); got != tt.wantOwner {
+			if got := shouldAcquireWorkspaceOwner(tt.target, tt.acquired, tt.mayRetain, exclusive); got != tt.wantOwner {
 				t.Fatalf("shouldAcquireWorkspaceOwner()=%t, want %t", got, tt.wantOwner)
 			}
 		})
@@ -399,7 +433,7 @@ func TestWorkspaceOwnerLifecycleBoundaryMatrix(t *testing.T) {
 		"watch iteration",
 	} {
 		t.Run(lifecycle, func(t *testing.T) {
-			if !shouldAcquireWorkspaceOwner(false, false, nil) {
+			if !shouldAcquireWorkspaceOwner(SSHTarget{}, false, false, nil) {
 				t.Fatalf("reused %s path bypassed workspace ownership", lifecycle)
 			}
 		})
@@ -407,7 +441,7 @@ func TestWorkspaceOwnerLifecycleBoundaryMatrix(t *testing.T) {
 }
 
 func TestWorkspaceOwnerSerializesStaticRunAndStandaloneActionsHydration(t *testing.T) {
-	if !shouldAcquireWorkspaceOwner(true, false, testStaticSSHBackend{}) {
+	if !shouldAcquireWorkspaceOwner(SSHTarget{}, true, false, testStaticSSHBackend{}) {
 		t.Fatal("static SSH acquisition bypassed workspace ownership")
 	}
 	remote := newFakeWorkspaceOwnerRemote()
@@ -497,7 +531,7 @@ func TestWorkspaceOwnerProtocolGeneration(t *testing.T) {
 	}
 	windowsInputSize := int64(len("input"))
 	windowsInputWitness := remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output ok", &windowsInputSize)
-	for _, want := range []string{"$remaining = [Int64]5", "$stdin.Read($buffer, 0, $readSize)", "-RedirectStandardInput $inputPath", "[IO.FileShare]::None"} {
+	for _, want := range []string{"$remaining = [Int64]5", "$stdin.ReadAsync($buffer, 0, $readSize).GetAwaiter().GetResult()", "-RedirectStandardInput $inputPath", "[IO.FileShare]::None"} {
 		if !strings.Contains(windowsInputWitness, want) {
 			t.Fatalf("Windows input witness missing %q:\n%s", want, windowsInputWitness)
 		}
@@ -513,6 +547,7 @@ func TestWorkspaceOwnerNativeWindowsCommandLengthBaseline(t *testing.T) {
 	commands := map[string]string{
 		"owner acquire":       acquire,
 		"large witness stage": remoteWorkspaceOwnerWindowsStageWitnessCommand(key, token, name, 20_000),
+		"maximum frame size":  remoteWorkspaceOwnerWindowsStageWitnessCommand(key, token, name, 1<<63-4),
 		"large witness run":   remoteWorkspaceOwnerWindowsRunWitnessCommand(name),
 		"witness cleanup":     remoteWorkspaceOwnerWindowsCleanupWitnessCommand(name),
 		"background witness":  remoteWorkspaceOwnerWindowsStartBackgroundWitnessCommand(name),
@@ -543,10 +578,12 @@ port=
 previous=
 for arg do
   if [ "$previous" = "-p" ]; then port=$arg; fi
+  if [ "$previous" = "-F" ]; then port=$(/usr/bin/awk '$1 == "Port" { gsub(/"/, "", $2); print $2; exit }' "$arg"); fi
   previous=$arg
   command=$arg
 done
 printf '%s' "$command" > "$log_dir/$count.command"
+printf '%s' "$port" > "$log_dir/$count.port"
 printf '%s\n' "$@" > "$log_dir/$count.args"
 if [ -n "${CRABBOX_OWNER_SSH_REAL_PORT:-}" ] && [ "$port" = "$CRABBOX_OWNER_SSH_REAL_PORT" ]; then
   : > "$log_dir/$count.stdin"
@@ -652,7 +689,11 @@ func requireWorkspaceOwnerSSHProbe(t *testing.T, dir string, index int, port str
 		t.Fatal(err)
 	}
 	text := "\n" + string(args)
-	if !strings.Contains(text, "\n-n\n") || !strings.Contains(text, "\n-p\n"+port+"\n") {
+	actualPort, err := os.ReadFile(filepath.Join(dir, strconv.Itoa(index)+".port"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "\n-n\n") || string(actualPort) != port {
 		t.Fatalf("SSH call %d probe args=%q, want -n on port %s", index, text, port)
 	}
 }
@@ -1340,7 +1381,7 @@ func TestWorkspaceOwnerNativeWindowsWitnessStagesRawScriptAndPreservesInput(t *t
 
 	stageCommand, stagedScript := readWorkspaceOwnerSSHCall(t, dir, 1)
 	stage := decodePowerShellCommand(t, stageCommand)
-	for _, want := range []string{"[IO.FileMode]::CreateNew", "[IO.FileShare]::None", "$stdin.Read($buffer, 0, $readSize)", "staged workspace witness length is ambiguous", owner.key, owner.token} {
+	for _, want := range []string{"[IO.FileMode]::CreateNew", "[IO.FileShare]::None", "$stdin.ReadAsync($buffer, 0, $readSize).GetAwaiter().GetResult()", "staged workspace witness length is ambiguous", owner.key, owner.token} {
 		if !strings.Contains(stage, want) {
 			t.Fatalf("stage command missing %q", want)
 		}
@@ -1537,10 +1578,12 @@ func TestWorkspaceOwnerPOSIXTransportIsLoginShellIndependent(t *testing.T) {
 				},
 			}) + " && " + privateCheck + "\nmkdir " + shellQuote(userDir) + " && cat > " + shellQuote(inputPath)
 			transportCommand := remoteWorkspaceOwnerPOSIXWitness(key, token, payload, true)
+			const transportLimit = 30_000
 			if !strings.HasPrefix(transportCommand, "exec /bin/sh -c '") || strings.Contains(transportCommand, "\n") || strings.Count(transportCommand, "'") != 2 {
 				t.Fatalf("workspace owner transport is raw login-shell input: %q", transportCommand[:min(len(transportCommand), 80)])
 			}
-			if len(transportCommand) >= 30_000 {
+			t.Logf("workspace owner transport bytes=%d margin=%d", len(transportCommand), transportLimit-len(transportCommand))
+			if len(transportCommand) >= transportLimit {
 				t.Fatalf("workspace owner transport is too large for a bounded Windows SSH command: %d bytes", len(transportCommand))
 			}
 			cmd := command(transportCommand)
@@ -1732,21 +1775,41 @@ func TestWorkspaceOwnerPOSIXProtocolBehavior(t *testing.T) {
 	request := func(action workspaceOwnerAction, token string) workspaceOwnerRemoteRequest {
 		return workspaceOwnerRemoteRequest{Action: action, Key: key, Token: token, TTL: 30 * time.Second}
 	}
+	requireFailedRenewal := func(token, state string, remoteExit int) {
+		t.Helper()
+		ownerCtx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		owner := &workspaceOwner{
+			transport: workspaceOwnerTransportFunc(func(_ context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+				out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(req))
+				var exitErr *exec.ExitError
+				if out != state || !errors.As(err, &exitErr) || exitErr.ExitCode() != remoteExit {
+					t.Fatalf("renew out=%q err=%v; want %s with remote exit %d", out, err, state, remoteExit)
+				}
+				return out, err
+			}),
+			key: key, token: token, ttl: 30 * time.Second, ctx: ownerCtx, cancel: cancel, stop: make(chan struct{}), done: make(chan struct{}),
+		}
+		ticks := make(chan time.Time, 1)
+		ticks <- time.Now()
+		owner.renewLoopWithTicks(ticks, time.Second)
+		var exitErr ExitError
+		if err := owner.Err(); !AsExitError(err, &exitErr) || exitErr.Code != 7 || !strings.Contains(err.Error(), "protocol state "+state) || ownerCtx.Err() != context.Canceled {
+			t.Errorf("real POSIX renewal lost terminal state %s: err=%v context=%v", state, err, ownerCtx.Err())
+		}
+	}
+	requireFailedRenewal(tokenA, "AMBIGUOUS", 74)
 	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenA))); err != nil || out != "ACQUIRED" {
 		t.Fatalf("acquire out=%q err=%v", out, err)
 	}
-	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerRenew, tokenB))); err == nil || out != "MISMATCH" {
-		t.Fatalf("mismatched renew out=%q err=%v", out, err)
-	}
+	requireFailedRenewal(tokenB, "MISMATCH", 75)
 	statePath := filepath.Join(home, ".crabbox", "workspace-owners", key+".owner")
 	childPath := filepath.Join(home, ".crabbox", "workspace-owners", key+".child")
 	expiredState := "v1\n" + tokenA + "\n1\n"
 	if err := os.WriteFile(statePath, []byte(expiredState), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerRenew, tokenA))); err == nil || out != "EXPIRED" {
-		t.Fatalf("late same-token renew out=%q err=%v", out, err)
-	}
+	requireFailedRenewal(tokenA, "EXPIRED", 75)
 	if data, err := os.ReadFile(statePath); err != nil || string(data) != expiredState {
 		t.Fatalf("late renew changed expired state: data=%q err=%v", data, err)
 	}

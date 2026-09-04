@@ -394,7 +394,10 @@ func TestReleaseOwnershipFences(t *testing.T) {
 			case "same-name":
 				f.mutate(func() { f.rows[0].ID = "vm-replacement" })
 			}
-			err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
+			outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
+			if outcome.Terminal != (mode == "same-name") {
+				t.Errorf("release outcome=%+v mode=%s", outcome, mode)
+			}
 			if mode == "same-name" {
 				if err != nil {
 					t.Fatal(err)
@@ -422,8 +425,8 @@ func TestRetainedReuseAndTouchIdleOverride(t *testing.T) {
 	b, f := fixtureBackend(t)
 	b.cfg.Boxd.DeleteOnRelease = false
 	lease := acquireFixture(t, b, true)
-	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
-		t.Fatal(err)
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil || outcome.Terminal {
+		t.Fatalf("stop outcome=%+v err=%v", outcome, err)
 	}
 	if !b.RetainLeaseClaimAfterRelease(lease) || onlyClaim(t).Labels["state"] != "stopped" {
 		t.Fatal("did not retain stopped claim")
@@ -543,6 +546,42 @@ func TestTouchUsesSnapshotAndAccountFence(t *testing.T) {
 		})
 	}
 }
+
+func TestTouchCancelsBehindClaimOwner(t *testing.T) {
+	b, _ := fixtureBackend(t)
+	lease := acquireFixture(t, b, false)
+	before := onlyClaim(t)
+	done := make(chan error, 1)
+	joined := false
+	err := core.WithLeaseClaimUnchanged(lease.LeaseID, before, func() error {
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		defer cancel()
+		go func() {
+			_, err := b.Touch(ctx, core.TouchRequest{Lease: lease, State: "running"})
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			joined = true
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("canceled touch returned %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Error("canceled touch remained blocked behind the claim owner")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !joined {
+		<-done
+	}
+	if onlyClaim(t).Revision != before.Revision {
+		t.Fatal("canceled touch changed the owned claim")
+	}
+}
+
 func TestAcquireWithRepositoryAndReuseRetainsTimeout(t *testing.T) {
 	b, _ := fixtureBackend(t)
 	repo := core.Repo{Root: t.TempDir()}

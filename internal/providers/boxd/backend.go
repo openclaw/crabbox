@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -404,14 +405,20 @@ func (b *backend) exactClaim(lease core.LeaseTarget) (core.LeaseClaim, error) {
 		if !exists {
 			return core.LeaseClaim{}, core.Exit(4, "boxd ownership snapshot is absent")
 		}
-		if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, snapshot); err != nil {
-			return core.LeaseClaim{}, err
+		// Compare the validated read here; each mutation owner fences this exact
+		// claim again. A separate preflight lock cannot protect later effects.
+		if !reflect.DeepEqual(claim, snapshot) {
+			return core.LeaseClaim{}, core.Exit(2, "lease %s claim changed; retry", claim.LeaseID)
 		}
 	}
 	return claim, nil
 }
 
 func (b *backend) deleteClaim(ctx context.Context, c *consoleClient, claim core.LeaseClaim) error {
+	return b.deleteClaimWithOutcome(ctx, c, claim, &core.ReleaseLeaseOutcome{})
+}
+
+func (b *backend) deleteClaimWithOutcome(ctx context.Context, c *consoleClient, claim core.LeaseClaim, outcome *core.ReleaseLeaseOutcome) error {
 	ctx, cancel := context.WithTimeout(ctx, b.rollbackTimeout)
 	defer cancel()
 	return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
@@ -444,10 +451,22 @@ func (b *backend) deleteClaim(ctx context.Context, c *consoleClient, claim core.
 			}
 			return time.Since(absentSince) >= b.absenceGrace, nil
 		}, nil)
+		outcome.Terminal = err == nil
 		return err
 	})
 }
 func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *backend) ReleaseLeaseWithOutcome(ctx context.Context, req core.ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	var outcome core.ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *backend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	claim, err := b.exactClaim(req.Lease)
 	if err != nil {
 		return err
@@ -457,7 +476,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		return err
 	}
 	if deleteOnRelease(leaseFromClaim(claim, consoleMachine{}), b.cfg) {
-		return b.deleteClaim(ctx, c, claim)
+		return b.deleteClaimWithOutcome(ctx, c, claim, outcome)
 	}
 	labels := shared.CloneLabels(claim.Labels)
 	labels["state"], labels["release"] = "stopped", "stop"
@@ -512,7 +531,7 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	}
 	server := leaseFromClaim(claim, vm).Server
 	server.Labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(server.Labels, b.cfg, req.State, b.now(), req.IdleTimeoutOverride)
-	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(claim.LeaseID, claim, server.Labels, b.now(), req.IdleTimeoutOverride)
+	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(ctx, claim.LeaseID, claim, server.Labels, b.now(), req.IdleTimeoutOverride)
 	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, err
 }

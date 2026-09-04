@@ -12,10 +12,14 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
 func TestCoordinatorStopAggregateGuestCleanupPreservesReleaseBudget(t *testing.T) {
+	if runParallelCLIContract(t, 0) {
+		return
+	}
 	for _, stalled := range []bool{false, true} {
 		name := "responsive hydrated guest"
 		if stalled {
@@ -120,22 +124,42 @@ if [ -n "${CRABBOX_FAKE_SSH_STDIN_LOG:-}" ]; then`, 1))
 	if err := os.WriteFile(sshPath, script, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
-	started := time.Now()
-	var stderr bytes.Buffer
-	(App{Stderr: &stderr}).writeActionsHydrationStopBestEffort(ctx, SSHTarget{Host: "192.0.2.70", Port: "22", User: "crabbox", TargetOS: targetLinux}, "cbx_abcdef123456")
-	log, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(log, []byte(".env")) || !bytes.Contains(log, []byte("touch ")) {
-		t.Fatal("hydration read and stop write did not run")
-	}
-	if strings.Contains(stderr.String(), "could not stop GitHub Actions hydration") {
-		t.Fatalf("marker write failed before the grace period: %s", stderr.String())
-	}
-	if ctx.Err() != context.DeadlineExceeded || time.Since(started) > 3*time.Second {
-		t.Fatalf("hydration cleanup elapsed=%s parent=%v, want prompt cancellation after successful marker", time.Since(started), ctx.Err())
-	}
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		started := time.Now()
+		var stderr bytes.Buffer
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			(App{Stderr: &stderr}).writeActionsHydrationStopBestEffort(ctx, SSHTarget{Host: "192.0.2.70", Port: "22", User: "crabbox", TargetOS: targetLinux}, "cbx_abcdef123456")
+		}()
+		// OS process/pipe waits hold virtual time still; only the grace durably blocks.
+		synctest.Wait()
+		if elapsed := time.Since(started); elapsed != 0 || ctx.Err() != nil {
+			t.Fatalf("marker I/O consumed virtual time: elapsed=%s parent=%v", elapsed, ctx.Err())
+		}
+		log, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatalf("read SSH log: %v", err)
+		}
+		if !bytes.Contains(log, []byte(".env")) || !bytes.Contains(log, []byte("touch ")) {
+			t.Fatal("hydration read and stop write did not run")
+		}
+		select {
+		case <-done:
+			t.Fatalf("hydration cleanup returned before the grace period: %s", stderr.String())
+		default:
+		}
+		<-done
+		if ctx.Err() != context.DeadlineExceeded || time.Since(started) != time.Second {
+			t.Fatalf("hydration cleanup elapsed=%s parent=%v, want cancellation at the one-second deadline after successful marker", time.Since(started), ctx.Err())
+		}
+		if strings.Contains(stderr.String(), "could not stop GitHub Actions hydration") {
+			t.Fatalf("marker write failed before the grace period: %s", stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "hydration stop wait ended") {
+			t.Fatalf("grace did not report caller cancellation: %s", stderr.String())
+		}
+	})
 }

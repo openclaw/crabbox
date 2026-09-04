@@ -11,6 +11,7 @@ import {
 } from "../src/aws";
 import { leaseConfig, type LeaseConfig } from "../src/config";
 import { AWSProvider } from "../src/fleet";
+import { providerProvisioningCleanupClaim } from "../src/provider-provisioning";
 import type { Env, LeaseRecord, ProviderMachine } from "../src/types";
 
 const expectedAccountID = "123456789012";
@@ -629,66 +630,86 @@ describe("private AWS workspaces", () => {
     ]);
   });
 
-  it("refuses and retires a recovered instance outside the private policy", async () => {
-    const actions: string[] = [];
-    const ssmTargets: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const request = requestFrom(input, init);
-        if (new URL(request.url).hostname.startsWith("ssm.")) {
-          ssmTargets.push(request.headers.get("x-amz-target") ?? "");
-          return jsonResponse({});
-        }
-        const params = new URLSearchParams(await request.clone().text());
-        const action = params.get("Action") ?? "";
-        actions.push(action);
-        if (action === "TerminateInstances") {
-          return ec2XMLResponse(`<TerminateInstancesResponse><instancesSet><item>
+  it.each([false, true])(
+    "refuses a recovered instance outside policy and preserves unacknowledged cleanup (acknowledged=%s)",
+    async (acknowledged) => {
+      const actions: string[] = [];
+      const ssmTargets: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = requestFrom(input, init);
+          if (new URL(request.url).hostname.startsWith("ssm.")) {
+            ssmTargets.push(request.headers.get("x-amz-target") ?? "");
+            return jsonResponse({});
+          }
+          const params = new URLSearchParams(await request.clone().text());
+          const action = params.get("Action") ?? "";
+          actions.push(action);
+          if (action === "TerminateInstances" && acknowledged) {
+            return ec2XMLResponse(`<TerminateInstancesResponse><instancesSet><item>
             <instanceId>i-private123</instanceId>
           </item></instancesSet></TerminateInstancesResponse>`);
-        }
-        return awsErrorResponse(
-          "InvalidInstanceID.NotFound",
-          "The instance ID 'i-private123' does not exist",
-        );
-      }),
-    );
-    const provider = new AWSProvider(
-      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
-      region,
-      {} as never,
-    );
-    const server: ProviderMachine = {
-      provider: "aws",
-      id: 0,
-      cloudID: "i-private123",
-      name: "private-workspace",
-      status: "running",
-      serverType: "t3a.small",
-      host: "",
-      region,
-      awsSubnetID: "subnet-private123",
-      awsSecurityGroupIDs: ["sg-workspace123"],
-      awsInstanceProfileARN: "arn:aws:iam::123456789012:instance-profile/crabbox-private-workspace",
-      awsMetadataHttpEndpoint: "enabled",
-      awsMetadataHttpTokens: "required",
-      awsMetadataHttpPutResponseHopLimit: 1,
-      awsMetadataInstanceTags: "disabled",
-      awsIPv6Addresses: ["2001:db8::1"],
-      labels: {},
-    };
+          }
+          return awsErrorResponse(
+            "InvalidInstanceID.NotFound",
+            "The instance ID 'i-private123' does not exist",
+          );
+        }),
+      );
+      const provider = new AWSProvider(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+        region,
+        {} as never,
+      );
+      const server: ProviderMachine = {
+        provider: "aws",
+        id: 0,
+        cloudID: "i-private123",
+        name: "private-workspace",
+        status: "running",
+        serverType: "t3a.small",
+        host: "",
+        region,
+        awsSubnetID: "subnet-private123",
+        awsSecurityGroupIDs: ["sg-workspace123"],
+        awsInstanceProfileARN:
+          "arn:aws:iam::123456789012:instance-profile/crabbox-private-workspace",
+        awsMetadataHttpEndpoint: "enabled",
+        awsMetadataHttpTokens: "required",
+        awsMetadataHttpPutResponseHopLimit: 1,
+        awsMetadataInstanceTags: "disabled",
+        awsIPv6Addresses: ["2001:db8::1"],
+        labels: {},
+      };
 
-    await expect(
-      provider.resumeRecoveredServer(
-        privateLeaseConfig(),
-        { id: "cbx_private000001" } as LeaseRecord,
-        server,
-      ),
-    ).rejects.toThrow("recovered AWS private workspace is outside deployment policy");
-    expect(actions).toEqual(["TerminateInstances", "DescribeInstances"]);
-    expect(ssmTargets).toEqual([]);
-  });
+      const error = await provider
+        .resumeRecoveredServer(
+          privateLeaseConfig(),
+          { id: "cbx_private000001" } as LeaseRecord,
+          server,
+        )
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(
+        "recovered AWS private workspace is outside deployment policy",
+      );
+      expect(providerProvisioningCleanupClaim(error)).toEqual(
+        acknowledged
+          ? undefined
+          : {
+              provider: "aws",
+              cloudID: "i-private123",
+              serverID: 0,
+              region,
+            },
+      );
+      expect(actions).toEqual(
+        acknowledged ? ["TerminateInstances", "DescribeInstances"] : ["TerminateInstances"],
+      );
+      expect(ssmTargets).toEqual([]);
+    },
+  );
 
   it("confirms termination when the instance disappears", async () => {
     const actions: string[] = [];
@@ -756,7 +777,7 @@ describe("private AWS workspaces", () => {
     expect(delays).toEqual([1_000, 2_000, 4_000, 8_000, 15_000, 30_000]);
   });
 
-  it("treats an already absent instance as an idempotent cleanup success", async () => {
+  it("rejects unacknowledged termination because absence may be propagation delay", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
@@ -771,7 +792,9 @@ describe("private AWS workspaces", () => {
       region,
     );
 
-    await expect(client.terminateServerAndWait("i-private123")).resolves.toBeUndefined();
+    await expect(client.terminateServerAndWait("i-private123")).rejects.toThrow(
+      "InvalidInstanceID.NotFound",
+    );
   });
 
   it("requires the full fail-closed private deployment policy", () => {

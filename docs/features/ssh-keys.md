@@ -95,10 +95,15 @@ Provider-owned isolated trust flows, including Machine0 host rotation and Lume
 bootstrap attestation, keep their own aliases and lifecycle rules.
 
 On macOS and Linux, connection multiplexing is enabled
-(`ControlMaster=auto`, `ControlPersist=10m`) with a `ControlPath` scoped by the
-key path, so reused IPs do not share a control socket between leases. Windows
-OpenSSH and secret-authenticated targets disable multiplexing
+(`ControlMaster=auto`, `ControlPersist=10m`). Canonical per-lease credentials use
+a private, short socket directory under `/tmp`, with separate sockets for each
+endpoint and authentication/host-key identity. Reused IPs do not share connections
+between leases. Windows OpenSSH and secret-authenticated targets disable multiplexing
 (`ControlMaster=no`).
+
+Route sharing retains the installed OpenSSH client's `%C` semantics: clients
+before 9.6 do not distinguish changes to the configured ProxyJump hostname.
+Even newer clients do not fingerprint the entire jump chain or SSH configuration.
 
 If a multiplexed OpenSSH session cannot pass its file descriptors because the
 local control socket is full, Crabbox retries that same session once. A second
@@ -112,6 +117,13 @@ temporary FIFO, without a disk log. After each attempt, Crabbox forwards up to
 64 KiB to stderr and marks any truncation. The retry detector retains at most
 512 bytes; overflow, incomplete capture, or output errors disable this recovery.
 Capture ends when the foreground attempt exits, even if a persistent master remains.
+
+Native Windows framed stdin transfers use asynchronous reads on Win32 OpenSSH's
+pipe handle. They read the declared byte count before running a staged script;
+short input or a read failure aborts the transfer. Empty frames do not initialize
+stdin, and the reader preserves following bytes without closing the process-owned
+handle. SSH identity, host-key checks, multiplexing, and ambiguous-disconnect
+retry rules are unchanged.
 
 ## What the broker sees
 
@@ -136,11 +148,20 @@ Provider delete paths remove the per-lease cloud key or key pair when the
 machine is deleted (for example AWS `DeleteKeyPair`, Hetzner SSH-key delete, and
 the equivalent on other adapters). After a brokered provider deletion is
 confirmed, the CLI removes that lease's local connection directory, including
-its private/public key, certificate, `known_hosts`, and control artifacts. It
+its private/public key, certificate, and `known_hosts`. First it requests exit
+through each lease-owned OpenSSH control socket and waits for those exact master
+processes to exit. A local cleanup failure returns an error explicitly preserving
+the confirmed remote deletion; the claim remains for a local-only Stop retry. It
 preserves the directory when cleanup is queued, failed, canceled, retained, or
 ownership cannot be confirmed, and never removes a configured shared key path.
 Several direct provider backends likewise remove their generated lease directory
 after confirmed destructive cleanup.
+
+Configured shared keys outside the canonical lease directory retain their shared
+connection scope; Stop does not close another lease's connections. Old clients'
+flat `/tmp/crabbox-ssh-*` sockets are not adopted or swept: after their last
+session, those masters retain their existing ten-minute idle expiry. The new
+lease namespace does not reuse them.
 
 ## Bringing your own key
 

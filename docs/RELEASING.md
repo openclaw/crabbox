@@ -1,10 +1,28 @@
 # Release Engineering
 
-Crabbox releases are local-produced, draft-first, and serialized. Building a
-candidate, uploading a private draft, verifying it, publishing it, and updating
-Homebrew are distinct gates. Approval for one gate does not authorize the next.
-No tag push, repository dispatch, retry, or verifier run may collapse those
-boundaries.
+Crabbox releases are local-produced, draft-first, and explicitly authorized. One explicit
+full release/publish request authorizes the complete normal sequence:
+preparation, tagging, build and signing, private draft creation and upload,
+native dispatch and proof, publication, ordinary Homebrew update, independent
+public-download/native verification, public Go installation and installed-Homebrew
+smokes, and closeout, without renewed chat approval at each stage. Narrow
+requests stay narrow: a request to build or verify a candidate does not authorize
+publication.
+
+The original explicit release request is the authorization. GitHub events alone
+are not authorization: no tag push, repository dispatch, retry, or verifier run
+grants permission to release. Before publication, advance sequentially only as
+each technical gate passes. Post-publication smokes are independent of tap
+dispatch. Identity binding, credential isolation, immutability, exact frozen
+inputs, immediate publication readbacks, and cancellation boundaries remain
+mandatory. No additional approval-ruleset configuration or administrative
+writer freeze is required by the release contract.
+
+Maintainers keep user-visible fixes and features in `CHANGELOG.md` under
+`Unreleased` as work lands, with full PR links and contributor thanks. Release
+preparation finalizes those accumulated entries into the versioned, dated release
+section. Later work starts a new `Unreleased` section on `main`; it does not change
+the frozen tagged source or published release notes.
 
 ## Trust Anchors
 
@@ -49,12 +67,9 @@ verifier, publisher, or Homebrew updater.
 The publishing checkout must have `HEAD` exactly equal to the protected verifier
 commit, and every release-policy or executable tooling file must match that
 commit with no staged, unstaged, or untracked replacement. Fetch every detailed
-repository ruleset. One active approval ruleset must cover the default branch,
-require code-owner pull requests with stale-review dismissal, last-push
-approval and at least one approval, and grant exactly one bypass to the
-`openclaw-secops` release team (GitHub team ID `16654667`) in `pull_request`
-mode. That allows a release admin to merge their own PR without granting a
-direct-push path. A separate active no-bypass branch ruleset must enforce
+repository ruleset. Pull-request approval policy is independent of publication:
+no particular approval ruleset or release-team bypass is required, and existing
+GitHub merge protections still apply. An active no-bypass branch ruleset must enforce
 deletion and non-fast-forward protection. The default branch must also be
 covered by the no-bypass OpenClaw organization workflow
 `.github/workflows/crabbox-release-check.yml` from
@@ -62,9 +77,7 @@ covered by the no-bypass OpenClaw organization workflow
 `refs/heads/main`. That protected external workflow owns the credential-free
 macOS release snapshot check, so a Crabbox pull request cannot redefine the
 check that gates its own merge. A separate active no-bypass tag ruleset must
-cover every `refs/tags/v*` release tag and prevent deletion and updates. Before
-publication, an administrator must also freeze all default-branch, tag, and
-Releases API writers for the non-atomic final gate.
+cover every `refs/tags/v*` release tag and prevent deletion and updates.
 
 GitHub omits ruleset bypass actors from the ordinary workflow token. Configure
 `CRABBOX_RULESET_READ_TOKEN` as a fine-grained repository secret scoped only to
@@ -281,11 +294,11 @@ env -i \
     "$TAG_OBJECT" "$TAG_COMMIT" "$VERIFIER_COMMIT"
 ```
 
-Let that token-free verification process exit. Do not invoke draft creation
-from the same wrapper or ancestor environment as candidate execution. Stop
-here. Draft creation is the first remote mutation and needs its own
-authorization. It performs protected static verification only; the final
-positional argument is a deliberate exact-tag confirmation:
+Let that token-free verification process exit successfully. Do not invoke draft
+creation from the same wrapper or ancestor environment as candidate execution.
+Continue under the original full release authorization. Draft creation is the
+first remote mutation and performs protected static verification only; the
+final positional argument is a deliberate exact-tag confirmation:
 
 ```sh
 DRAFT_OUTPUT=$(scripts/create-release-draft.sh \
@@ -297,9 +310,9 @@ RELEASE_ID=$(printf '%s\n' "$DRAFT_OUTPUT" | \
 test -n "$RELEASE_ID"
 ```
 
-Stop again. With separate authorization, dispatch the protected verifier for
-that numeric draft. Capture the numeric ID of this exact run as
-`DRAFT_VERIFIER_RUN_ID`, then require both native jobs to succeed:
+After draft creation succeeds, dispatch the protected verifier for that numeric
+draft under the same release authorization. Capture the numeric ID of this
+exact run as `DRAFT_VERIFIER_RUN_ID`, then require both native jobs to succeed:
 
 ```sh
 gh workflow run release-assets.yml \
@@ -318,22 +331,85 @@ gh run watch "$DRAFT_VERIFIER_RUN_ID" \
   --repo openclaw/crabbox --exit-status
 ```
 
-Stop for the publication gate. Publication takes the exact successful draft
-run ID, its protected workflow commit, and repeats the tag as its explicit
+After the native draft proof succeeds and the publication checks below pass,
+continue to publication. Publication takes the exact successful draft run ID,
+its protected workflow commit, and repeats the tag as its explicit
 confirmation. The seven-argument compatibility form is only for historical
 runs where `WORKFLOW_COMMIT` exactly equals `VERIFIER_COMMIT`:
 
 ```sh
-CRABBOX_RELEASE_SERIALIZATION_CONFIRMED="$TAG:$RELEASE_ID" \
 scripts/publish-release.sh \
   "$RELEASE_ID" "$TAG" "$TAG_OBJECT" "$TAG_COMMIT" \
   "$VERIFIER_COMMIT" "$WORKFLOW_COMMIT" "$DRAFT_VERIFIER_RUN_ID" "$TAG"
 ```
 
-Stop again. Dispatch a new native run against the published state; do not reuse
-the draft proof. `VERIFIER_COMMIT` remains the immutable candidate-provenance
-commit. Bind the new run separately to the current protected workflow commit,
-which must descend from that verifier, then capture and wait for the exact run:
+Publication establishes eligibility for the ordinary tap updater. The publisher
+has finished at this point; Homebrew is an explicit, separately retryable
+operator step under the original release authorization, not automatic dispatch
+from Crabbox. Do not consult or await public native or public Go smoke results
+before this handoff.
+
+Use only `TAG` and normal tap dispatch authorization from any trusted operator
+checkout or session; no retained build directory or source/provenance identities
+are needed. This reads the published metadata and selects the four canonical
+archive digests. The ordinary updater independently downloads the archives and
+compares their hashes. Full-artifact validation belongs to the separate
+installed-Homebrew smoke, not this handoff.
+
+<!-- ordinary-tap-handoff -->
+
+```sh
+(
+  set -euo pipefail
+  : "${TAG:?}"
+  [[ "$TAG" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]] || exit 1
+  ASSETS_JSON=$(curl --disable --fail --silent --show-error --location --retry 3 \
+    "https://api.github.com/repos/openclaw/crabbox/releases/tags/$TAG" |
+    jq -ce --arg tag "$TAG" '
+      (if .tag_name == $tag and .draft == false and .prerelease == false and
+         .immutable == true and (.assets | type) == "array"
+      then .assets else error("expected immutable public release") end) as $assets |
+      ["darwin_amd64", "darwin_arm64", "linux_amd64", "linux_arm64"] |
+      map(. as $target | "crabbox_\($tag[1:])_\($target).tar.gz" as $name |
+        [$assets[] | select(.name == $name)] as $matches |
+        if ($matches | length) == 1 and $matches[0].state == "uploaded" and
+           ($matches[0].digest | type) == "string" and
+           ($matches[0].digest | test("^sha256:[0-9a-f]{64}\\z"))
+        then {key: $target, value: {name: $name, sha256: $matches[0].digest[7:]}}
+        else error("missing, duplicate, or invalid archive: " + $name) end) |
+      from_entries
+    ')
+  gh workflow run update-formula.yml \
+    --repo openclaw/homebrew-tap --ref main \
+    -f formula=crabbox -f tag="$TAG" -f repository=openclaw/crabbox \
+    -f assets="$ASSETS_JSON"
+)
+```
+
+The tap's existing updater downloads and hashes all four named archives and
+preserves maintained formula content. Use the ordinary `assets` contract, not
+`verified-hashes-v1`: no source-object/request-ID ledger or provenance commit is
+needed, and an already-current tap is success. Observe the dispatched tap run
+separately; dispatch success alone does not prove the update finished.
+
+If the tap update fails, retry this same handoff after resolving the failure.
+It also accepts an already-completed update. Never rebuild, repackage, create a
+draft, or invoke the publisher to retry Homebrew. Retrying needs only `TAG` and
+normal tap dispatch authorization, even from a different trusted operator
+session. Generic tap reconciliation remains a valid independent fallback for
+public stable releases.
+A checksum or identity mismatch is an incident to investigate, not a reason to
+replace immutable release assets.
+
+Public native and public Go installation checks below are independent channel
+smokes. They report health, not a second readiness or approval gate for the
+published release or tap dispatch.
+
+For the independent public native smoke, dispatch a new run against the published
+state; it produces no downstream approval artifacts. `VERIFIER_COMMIT` remains
+the immutable candidate-provenance commit. Bind the new run separately to the current protected
+workflow commit, which must descend from that verifier, then capture and wait
+for the exact run:
 
 ```sh
 WORKFLOW_COMMIT=$(git rev-parse HEAD)
@@ -357,8 +433,8 @@ gh run watch "$PUBLIC_VERIFIER_RUN_ID" \
   --repo openclaw/crabbox --exit-status
 ```
 
-Prove the newly public source-install channel from the public Go module proxy,
-not from a checkout, local proxy, or direct VCS fallback. Use fresh state and
+Independently smoke-test the public source-install channel from the public Go
+module proxy, not from a checkout, local proxy, or direct VCS fallback. Use fresh state and
 require the exact public tag, fork dependency, replacement-free build metadata,
 version, and help surfaces:
 
@@ -378,7 +454,7 @@ mkdir -m 700 \
     HOME="$PUBLIC_GO_INSTALL/home" PATH="$PATH" TMPDIR="$PUBLIC_GO_INSTALL/tmp" \
     go install "github.com/openclaw/crabbox/cmd/crabbox@$TAG"
 )
-go version -m -json "$PUBLIC_GO_INSTALL/bin/crabbox" >"$PUBLIC_GO_INSTALL/build.json"
+GOTOOLCHAIN=local go version -m -json "$PUBLIC_GO_INSTALL/bin/crabbox" >"$PUBLIC_GO_INSTALL/build.json"
 jq -e --arg version "$TAG" \
   --arg forkVersion v6.0.3-0.20260817142523-966654abed4a '
   .Path == "github.com/openclaw/crabbox/cmd/crabbox" and
@@ -396,70 +472,28 @@ test "$(cd "$PUBLIC_GO_INSTALL/work" && "$PUBLIC_GO_INSTALL/bin/crabbox" --versi
 (cd "$PUBLIC_GO_INSTALL/work" && "$PUBLIC_GO_INSTALL/bin/crabbox" run --help >/dev/null 2>&1)
 ```
 
-Only after that public run and a separate tap-update authorization, update the
-formula with the four verified public archive hashes. Generate the only
-accepted Ruby program with protected tooling (the four digest arguments are
-Darwin amd64, Darwin arm64, Linux amd64, and Linux arm64, in that order):
+After the tap update, smoke-test installation on both native Apple Silicon and
+native Intel. Download the fixed canonical public inventory (never URLs taken
+from formula text or arbitrary release metadata):
 
 ```sh
-node scripts/render-homebrew-formula.mjs \
-  "$TAG" "$DARWIN_AMD64_SHA256" "$DARWIN_ARM64_SHA256" \
-  "$LINUX_AMD64_SHA256" "$LINUX_ARM64_SHA256" >crabbox.rb
-```
-
-After the separately authorized tap commit, on both a clean
-native Apple Silicon host and a clean native Intel host, download all eight
-assets through their public URLs. While the GitHub token is still available,
-download the two proof ZIPs from the exact public verifier run by immutable
-artifact ID. The later verifier re-fetches their public metadata without a
-token and requires each local ZIP to match GitHub's SHA-256 artifact digest:
-
-```sh
+[[ "$TAG" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]] || exit 1
 PUBLIC_ASSETS=$(mktemp -d "${TMPDIR:-/tmp}/crabbox-public-assets.XXXXXX")
 while IFS= read -r asset; do
-  curl --fail --location --retry 3 \
+  curl --disable --fail --location --retry 3 \
     --output "$PUBLIC_ASSETS/$asset" \
     "https://github.com/openclaw/crabbox/releases/download/$TAG/$asset"
 done < <(scripts/release-config.sh assets "$TAG")
-
-PUBLIC_PROOFS=$(mktemp -d "${TMPDIR:-/tmp}/crabbox-public-proofs.XXXXXX")
-PUBLIC_ARTIFACTS=$(mktemp "${TMPDIR:-/tmp}/crabbox-public-artifacts.XXXXXX")
-gh api --method GET \
-  "repos/openclaw/crabbox/actions/runs/$PUBLIC_VERIFIER_RUN_ID/artifacts?per_page=100" \
-  >"$PUBLIC_ARTIFACTS"
-for arch in arm64 x86_64; do
-  ARTIFACT_ID=$(jq -er --arg name "verified-assets-$arch" '
-    [.artifacts[] | select(.name == $name)] |
-    if length == 1 then .[0].id else error("ambiguous proof artifact") end
-  ' "$PUBLIC_ARTIFACTS")
-  gh api --method GET \
-    --header 'Accept: application/vnd.github+json' \
-    "repos/openclaw/crabbox/actions/artifacts/$ARTIFACT_ID/zip" \
-    >"$PUBLIC_PROOFS/verified-assets-$arch.zip"
-done
 ```
 
 Remove every GitHub, Actions, Homebrew, signing, notary, and secret-store
 credential from the environment. Then run the downstream verifier in a new
-credential-free shell:
-
-On an ephemeral runner, materialize the public tap after removing credentials
-and before starting the verifier:
-
-```sh
-HOMEBREW_NO_AUTO_UPDATE=1 brew tap openclaw/tap
-```
+credential-free shell.
 
 The launcher captures absolute Homebrew, Node, and Go executable paths before
 scrubbing the environment, then preserves only those tool directories plus the
-macOS system paths in the child `PATH`.
-
-Hosted native runners also place a credential-free `curl` retry wrapper in that
-trusted tool directory. It keeps the frozen verifier's public GitHub API reads
-bounded to 15 minutes while tolerating transient shared-runner 403/rate-limit
-responses. Stdout responses are staged in a curl-owned temporary file and
-emitted only after success, so retries cannot append to partial JSON. The wrapper
-never adds an authorization header or skips a pre/postflight read.
+macOS system paths in the child `PATH`. Tap setup and formula evaluation run
+inside that child with a fresh `HOME` and cache.
 
 ```sh
 HOMEBREW_TOOLING_COMMIT=$(git rev-parse HEAD)
@@ -478,49 +512,60 @@ CRABBOX_VERIFY_TOOLING_COMMIT="$HOMEBREW_TOOLING_COMMIT" \
 scripts/verify-homebrew-release.sh \
   "$TAG" "$PUBLIC_ASSETS" \
   "$TAG_OBJECT" "$TAG_COMMIT" "$VERIFIER_COMMIT" \
-  "$RELEASE_ID" "$PUBLIC_VERIFIER_RUN_ID" "$PUBLIC_PROOFS"
+  "$RELEASE_ID"
 ```
 
-The last command first re-fetches the current public release, workflow run,
-workflow, and artifact metadata without authentication. It binds the successful
-post-publication run, both digest-pinned native proof ZIPs, their current release
-and asset timestamps, and the supplied public bytes before it changes local
-Homebrew state. It then performs `brew update`, a fresh install or reinstall,
-`brew test`, exact installed-byte and architecture comparison, Foundation
-signature and online notarization checks, exact version execution, and Apple
-Silicon `vmd-info`, then repeats the unauthenticated public-record and proof
-comparison to close the verification window. It does not update the tap. The
-tap formula must be byte-for-byte output from the protected
-`scripts/render-homebrew-formula.mjs`; any additional Ruby, interpolation, or
-format drift is rejected before Homebrew evaluates it. Protected downstream
-tooling must remain clean at the explicit tooling commit, and the immutable
-candidate verifier must be its ancestor, before and after candidate execution. The
-lower-level `codesign-macos.sh`, `extract-release-notes.sh`,
-`release-provenance.mjs`, `validate-release-publication.mjs`,
-`verify-go-release-binary.mjs`, and `verify-macos-binary.sh` are internal to the
-operator commands above and must not be reordered or invoked as substitute
-gates.
+The six-argument verifier first fetches the immutable public release by numeric
+ID without authentication and compares its exact notes, inventory, asset IDs,
+sizes, and digests with the supplied bytes. Protected static `verify-release.sh`
+validation precedes Homebrew. There is no public verifier run ID, proof ZIP,
+witness, or post-candidate API comparison.
 
-The hosted `Verify Homebrew Release` workflow (`verify-homebrew.yml`; dispatch inputs `tag`, `tag_object`, `source_commit`, `verifier_commit`, `release_id`, `public_verifier_run_id`) preserves the same anonymous
-public-record boundary without depending on a rate-limited native-runner IP. A
-credential-free Linux preflight freezes the public release, verifier run,
-workflow, and artifact metadata before either native job starts. Each native
-job validates that digest-pinned witness before any candidate execution, then
-performs no post-candidate read from its candidate-writable filesystem. A
-separate credential-free Linux postflight owns the post-candidate boundary: it
-repeats the anonymous reads after both native jobs and requires byte-for-byte
-equality of the security-relevant record with the preflight witness. Mutable
-download telemetry is excluded because verification itself downloads every
-asset.
+Tap maintainers own executable formulae. `brew info --json=v2 --formula
+openclaw/tap/crabbox` evaluates that trusted code only in the credential-free
+environment; its structured metadata must report the exact formula name, full
+name, tap, stable version, selected native URL, and checksum. Harmless maintained
+formula changes and interpolation are accepted. This metadata check is not a
+Ruby sandbox. All-four URL/hash maintenance belongs to the ordinary tap updater.
+
+The verifier performs a fresh public fetch, install or reinstall, exact
+archive-to-install byte comparison, native architecture and Foundation signature
+and online notarization checks, `brew test`, exact version execution, and Apple
+Silicon helper `vmd-info`. The helper must be present only on arm64 and report
+the provenance-bound VMD trust marker. No raw candidate execution is needed
+before this installed-binary smoke. Protected downstream tooling remains clean
+at the explicit tooling commit, descending from the immutable provenance
+verifier, before and after installation.
+
+The hosted `Verify Homebrew Release` workflow (`verify-homebrew.yml`) accepts
+`tag`, `tag_object`, `source_commit`, `verifier_commit`, and `release_id`. It uses
+protected-default tooling and anonymous fixed-repository downloads on both
+native architectures, then runs the same six-argument verifier. It never writes
+to the tap or supplies candidate-accessible credentials. Rerun this installation
+smoke independently after a smoke failure; do not re-enter publication.
 
 ## Serialized Gates
 
+These gates order this operator's work; they do not establish a global writer
+lock or require an administrative freeze.
+
 ### 1. Create the private draft
 
-After local package verification, obtain separate authorization to create one
-private draft and upload only the frozen eight files. Capture the numeric
-release ID and every asset ID from the response. Re-download into a fresh
-directory and prove that the remote draft matches the local record exactly.
+After local package verification succeeds, continue under the original release
+authorization to create one private draft and upload only the frozen eight
+files. Capture the numeric release ID and every asset ID from the response.
+Re-download into a fresh directory and prove that the remote draft matches the
+local record exactly.
+
+Static Go build-info inspection uses the installed local toolchain without
+switching or downloading one; the binary's recorded toolchain and build settings
+must still match the release contract. Draft creation removes its fresh private
+verification home, making read-only cache directories writable without following
+symlinks or changing operator caches. It prints success only after cleanup
+succeeds. Cleanup errors retain diagnostics and the temporary path, fail the
+command, and preserve any earlier verification, creation, or readback exit code.
+A cleanup failure does not undo draft creation; inspect the existing record
+read-only before considering any further action.
 
 ### 2. Verify the draft natively
 
@@ -550,7 +595,7 @@ last. Overall workflow success binds execution to the already frozen proofs.
 
 ### 3. Publish explicitly
 
-Publication requires a new explicit gate after both native draft jobs succeed.
+Continue to the publication checks after both native draft jobs succeed.
 Immediately before mutation, fetch the remote tag, protected workflow head,
 draft metadata, notes, and every asset record again. Require byte-for-byte
 equality with the frozen proof and require the successful native markers to
@@ -564,68 +609,53 @@ before mutation.
 
 The protected native verifier uses a non-cancelling concurrency key scoped to
 the immutable numeric release. GitHub Actions retains at most one pending run
-per key, so the serialized operator dispatches exactly once; different releases
+per key, so the operator dispatches exactly once; different releases
 do not cancel one another. This cannot lock direct Releases API edits from
 another token or administrator. GitHub's
 documented Update-a-release endpoint does not provide a conditional `If-Match`
 publication operation, so the final GET plus PATCH is not an atomic
-compare-and-swap. Fail closed unless the administrative freeze above is active,
-then acknowledge the exact draft with
-`CRABBOX_RELEASE_SERIALIZATION_CONFIRMED=vX.Y.Z:RELEASE_ID`. The publisher
-prepares its request body first, repeats the immutable numeric-ID draft read and
-comparison immediately before the sole PATCH, and repeats all protected-source
-and public-record checks afterward. A detected post-PATCH race is a publication
+compare-and-swap. No administrative freeze or serialization attestation is
+required. Another writer can still race the final read and publication; this
+workflow does not claim exclusive-writer guarantees.
+
+The publisher prepares its request body first, repeats the immutable numeric-ID
+draft read and comparison immediately before the sole PATCH, and repeats all
+protected-source and public-record checks afterward. A detected post-PATCH race is a publication
 incident to report; it is not permission to delete, rewrite, or republish.
 
 Publish with one draft-state transition. Do not rebuild, re-upload, rename,
 replace, or delete assets; do not edit notes; do not update Homebrew in the same
 operation.
 
-### 4. Verify the public release
+### 4. Update and prove Homebrew
 
-Re-fetch the public release by its numeric ID and re-download every asset by its
-captured immutable asset ID. Repeat metadata, notes, inventory, checksum,
-provenance, native architecture, signature, online notarization, and clean
-candidate-execution checks. The successful public verifier run must be newer
-than the publication and every release or asset update.
+Publication establishes eligibility. Dispatch the ordinary tap update using the
+TAG-only four-target handoff above, without waiting for either public native
+or Go smoke. The updater maintains all four URL/hash routes; retry only this
+step after an update failure. An already-current update succeeds. After the tap
+finishes, run the independent installed-Homebrew smoke on both native macOS
+architectures. Neither smoke failure requires rebuilding or republishing.
 
-### 5. Verify public Go installation
+### 5. Independent public channel smokes
 
-Install `github.com/openclaw/crabbox/cmd/crabbox@$TAG` from the public Go module
-proxy with the fresh, proxy-only procedure above. This gate is distinct from
-the pre-release hermetic fixture: it proves that the actual published tag is
-remotely resolvable. Preserve its structured build metadata with the release
-proof. Do not substitute a checkout, `replace`, pseudo-version, local proxy, or
-`,direct` fallback.
+Dispatch `release-assets.yml` with `draft=false` for anonymous downloads and
+native verification. Static verification still precedes isolated execution,
+using the same opaque `release-input` transport; public mode emits no
+`verified-assets-*` approval artifacts. Draft mode still freezes exactly
+`release-input`, `verified-assets-arm64`, and `verified-assets-x86_64` for the
+publisher, with unchanged proof schemas.
 
-### 6. Update and prove Homebrew
-
-Homebrew mutation needs a final separate authorization and a successful public
-verifier proof. Re-download the frozen public assets immediately before the tap
-change. Generate four explicit, non-fallthrough formula routes for Darwin
-arm64, Darwin amd64, Linux arm64, and Linux amd64; every URL and SHA-256 must
-match the public record. Apple Silicon installs the helper; other targets do
-not.
-
-On clean native Apple Silicon and Intel hosts, remove release/API credentials
-before the first formula evaluation, then run the downstream verifier shown
-above. It proves the installed files byte-match their selected archive members,
-reports the expected version and architecture, and repeats the Foundation
-authority, Team ID, identifier, hardened-runtime, timestamp, and online
-notarization checks. Apple Silicon also runs the helper's non-mutating info path.
-This bounded verifier is the installed-binary smoke; it does not create a lease.
-Only both native proofs complete the Homebrew gate.
-
-The Homebrew workflow and verification checkout run from the current protected
-`main` commit. The public release run and proof bind their own workflow commit,
-while candidate provenance remains pinned to the older verifier commit; each
-tooling commit must descend from that immutable verifier. This keeps published
-provenance immutable while allowing a protected workflow-only repair to restore
-the downstream proof.
+Run the public Go installation procedure independently with fresh proxy-only
+state. It proves the actual published tag is remotely resolvable, unlike the
+preproduction hermetic fixture. Do not substitute a checkout, `replace`,
+pseudo-version, local proxy, or `,direct` fallback. Record channel smoke failures
+and retry the affected check, not production or publication.
 
 ## Cancellation And Recovery
 
-Cancellation stops all publication and tap actions immediately. Inspect the
+Cancellation stops this operator’s remaining publication and tap actions. It
+cannot stop independent tap reconciliation of an already-public release; a
+global stop requires separate administrative intervention. Inspect the
 workflow, exact draft/public release ID and state, uploaded asset IDs, and
 Homebrew tap commit read-only. Record whether anything escaped, but make no
 corrective mutation under the cancelled gate.
@@ -633,10 +663,17 @@ corrective mutation under the cancelled gate.
 Never delete a partial draft or release based on its tag, body, or incomplete
 inventory. Never overwrite assets, rewrite or recreate the signed tag,
 redispatch a release, publish, or update Homebrew to "clean up" a cancelled
-attempt. Preserve the evidence and resume only after a new serialized gate
-explicitly authorizes the next mutation.
+attempt. Preserve the evidence. Explicit cancellation requires renewed direction
+authorizing the next mutation before resuming the serialized sequence.
 
-After the public release, public verifier, and both native Homebrew install
-proofs succeed, add the next patch `Unreleased` section to `CHANGELOG.md`,
-commit and push it, wait for exact-head CI, pull with `--ff-only`, and leave
-`main` clean and synchronized.
+Before publication, a failed gate or uncertain state also stops release writes. Resolve the blocker and
+re-establish the exact frozen state and required proofs before continuing.
+Normal continuation after successful checks uses the original release
+authorization; it does not require another chat approval.
+
+For closeout, record the published release, tap result, and independent smoke
+results, including outstanding failures. Verify the published notes match the
+finalized release section in the changelog. Keep later user-visible changes in
+`Unreleased` on `main`; never change the frozen tagged source, published release
+notes, or release versions as part of downstream retries. Leave the intended
+checkout clean and synchronized after authorized release commits are complete.

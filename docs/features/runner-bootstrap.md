@@ -34,6 +34,11 @@ Bootstrap creates:
 - shared package cache directories `/var/cache/crabbox/pnpm` and
   `/var/cache/crabbox/npm`.
 
+After writing the SSH port configuration, bootstrap reloads systemd and restarts
+the active `ssh.socket`, or the SSH service on images without socket activation.
+This also runs on prepared images that skip package installation: restarting only
+the service would keep the socket's previous listening ports.
+
 Bootstrap installs only a small base set with `--no-install-recommends`:
 
 - `ca-certificates`
@@ -180,7 +185,10 @@ with per-OS scripts rather than cloud-init:
 - **macOS** — a shell script creates SSH access for the lease user, enables
   Remote Login on the configured ports, enables Screen Sharing, and writes a
   `crabbox-ready` that checks `rsync`/`curl`, a writable work root, an open SSH
-  port, and the VNC port `5900`.
+  port, and the VNC port `5900`. Shell tracing stays disabled so the generated
+  account password is not copied into user-data logs; command errors remain
+  visible. The password file is private from creation and feeds the account
+  tool over stdin rather than process arguments.
 - **Windows** — a PowerShell script installs OpenSSH, configures key-only access
   for administrators, enables the `internal-sftp` subsystem before restarting
   `sshd`, opens firewall rules on the SSH ports, and installs Git for Windows so
@@ -197,6 +205,54 @@ from `C:\Program Files\OpenSSH`, then `%WINDIR%\System32\OpenSSH`, then PATH,
 and fail if none is present. This supports images with Windows' built-in
 OpenSSH as well as the pinned archive installation.
 
+Managed native Windows bootstrap (`--windows-mode normal`, the default) also
+provides the native Visual C++ v14 runtime
+before OpenSSH/Git installation and before writing `setup-complete`. The shared
+recipe covers Azure extension bootstrap, Azure snapshot rehydration, AWS's
+post-EC2Launch bootstrap, and Parallels. It checks actual DLL loadability in a
+fresh native PowerShell child process on every run: `vcruntime140.dll`,
+`msvcp140.dll`, and (AMD64 only) `vcruntime140_1.dll`. A healthy runtime needs no
+download or installation. Architecture comes from Windows `IsWow64Process2`,
+independently of the controller's requested architecture. WOW64, 32-bit, and
+emulated PowerShell fail with instructions to rerun in native AMD64 or ARM64
+PowerShell matching the OS. The ARM64 check covers native ARM64 applications;
+it does not attest x86 or emulated x64 application prerequisites, or make other
+bootstrap downloads ARM64-native.
+
+WSL2 uses a distinct Linux runtime flow. Its generated bootstrap omits the
+native VC++ helper definitions, installer URLs and pins, and runtime readiness
+gate, including elevation, download, pending-boot, and stale-readiness handling.
+WSL2 retains its existing Windows baseline, Linux setup, and finalization/reboot
+behavior.
+
+Missing or unloadable runtime DLLs require elevated managed bootstrap. The
+installer uses immutable Microsoft URLs and SHA-256 pins in `artifacts.json`
+(retrieved 2026-09-02). It downloads into a unique directory restricted to
+Administrators and SYSTEM, verifies the ACL, then requires both the pinned hash
+and Valid Authenticode with the exact Microsoft Corporation publisher identity
+before execution. Publisher validation compares every expected subject field,
+not a substring or signature status alone. Only downloads are retried, at most
+three times. The installer runs once with `/install /quiet /norestart`; exit `0`
+requires a fresh loadability check. Exit `3010` blocks readiness until an
+operator reboots outside bootstrap and retries; `1641` and other nonzero exits
+fail explicitly. The Azure extension never reboots for this prerequisite.
+
+A pending installation boot identifier is stored under
+`HKLM:\SOFTWARE\Crabbox\Bootstrap\WindowsRuntime` before installer execution.
+It prevents an interrupted install or a reboot-required result from becoming
+false readiness on a same-boot retry, even when the DLLs already load. A failed
+installation or postcondition requires investigation and an external reboot
+before retrying. After reboot the helper probes again, installs only if still
+needed, and clears its pending state after success. Bootstrap removes stale
+`setup-complete` before checking the runtime; an existing desktop setup retains
+its prior first-setup reboot decision. Temporary cleanup removes only the
+helper's own staging directory.
+
+This is a machine prerequisite, not repository setup: Node versions, pinned
+package managers, and their existing checks remain repository-owned. Hyper-V
+and `scripts/install-windows-developer-tools.ps1` retain their separately owned
+provisioning paths; this change does not rewrite those paths.
+
 ### Static / BYO SSH hosts
 
 `provider=ssh` (aliases `static`, `static-ssh`) targets are **not** bootstrapped
@@ -205,12 +261,21 @@ by Crabbox. They are assumed to be operator-managed and must already provide:
 - macOS targets: SSH, `bash`, `git`, `rsync`, and `tar`;
 - Windows WSL2 targets: Windows OpenSSH with `Subsystem sftp internal-sftp`,
   WSL, `bash`, `git`, `rsync`, and `tar`;
-- native Windows targets: OpenSSH, PowerShell, `git`, and `tar`;
+- native Windows targets: OpenSSH, PowerShell, `git`, `tar`, and the Visual C++
+  runtime matching each native application's architecture;
 - `static.workRoot` pointing at a writable directory for that target mode.
 
 For native Windows, install Git before the Crabbox check or restart OpenSSH
 Server afterward, so new non-interactive SSH sessions inherit `git` and `tar` on
 PATH.
+
+BYO operators must install or repair the required VC++ runtime themselves;
+Crabbox does not install it on static hosts. An executable exiting
+`-1073741515` (`0xC0000135`, `STATUS_DLL_NOT_FOUND`) has an unresolved DLL
+dependency. Missing VC++ runtime DLLs are one cause, not the only cause; a
+working Node executable or an executable found on PATH does not establish
+that a native package manager can load its dependencies. Preserve the failing
+exit code and repository package-manager checks when diagnosing this failure.
 
 For Windows WSL2, run `crabbox doctor --provider ssh --target windows
 --windows-mode wsl2 --static-host <host> --doctor-probe-ssh` after changing
@@ -251,6 +316,11 @@ Edit `recipes/bootstrap/v1/` rather than the generated Go or TypeScript files:
   desktop setup and finalization, macOS bootstrap, Linux code-server and
   Tailscale installers, and WSL TruffleHog installer.
 
+The Windows header composes `windowsRuntime.ps1` definitions followed by
+`windowsRuntimeGate.ps1` only for native mode, before the managed core and
+readiness. The gate owns stale-readiness invalidation and the helper call;
+`windowsCore.ps1` remains shared with WSL2 and contains no runtime gate.
+
 Run `node scripts/generate-bootstrap.mjs` after edits, then
 `node scripts/generate-bootstrap.mjs --check`. Generation requires Node and
 `gofmt`; consumers use compiled constants and functions, with no runtime recipe
@@ -273,6 +343,38 @@ native Windows, WSL2, and macOS. Architecture fixtures exercise amd64 and arm64
 installer selection. When PowerShell is available, local filesystem tests
 exercise the OpenSSH resolver, parser, and checksum rejection without installing
 services or downloading packages; these are not Windows machine readiness proof.
+
+`node --test scripts/windows-runtime.test.mjs` adds runtime-specific local
+assertions and runs the native behavioral harness when on Windows. On a native
+Windows runner, run the harness directly with no downloads or installation:
+
+```powershell
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/test-windows-runtime.ps1
+```
+
+Use native ARM64 PowerShell on ARM64 Windows. The harness parses the helper,
+exercises native architecture/DLL APIs and a fresh child probe, then mocks OS,
+download, signature, staging, and process boundaries to check idempotence,
+security rejection, architecture errors, retry bounds, installer exit codes,
+postconditions, reboot retry, and readiness failure. It does not validate the
+downloaded Microsoft publisher certificate or a real installation.
+
+For separately authorized native installation proof, the generator also emits
+`scripts/windows-runtime.generated.ps1`. Dot-source it in elevated native
+PowerShell, then call its entry point:
+
+```powershell
+. ./scripts/windows-runtime.generated.ps1
+Ensure-CrabboxWindowsRuntime
+```
+
+This file contains the same parameter-free fragment as Go's
+`sharedWindowsRuntime()` and TypeScript's exported `sharedWindowsRuntime()`;
+dot-sourcing alone does not install anything. Regenerate it with
+`node scripts/generate-bootstrap.mjs` and check it with `--check`. Edit only
+`recipes/bootstrap/v1/windowsRuntime.ps1` and the artifact recipe, never the
+generated copy. Native publisher and installation proof remains separate from
+the mocked harness.
 
 Whole bootstrap outputs intentionally need not match. EC2Launch wrapping,
 compression, YAML indentation, coordinator SSH host-key injection, private AWS

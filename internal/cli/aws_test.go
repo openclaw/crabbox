@@ -1083,21 +1083,30 @@ func TestValidateImageCheckpointSourceRejectsMissingInstance(t *testing.T) {
 }
 
 func TestDeleteImageCheckpointRefusesNotFoundWithoutAccountID(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
-			t.Fatal(err)
-		}
-		if action := r.Form.Get("Action"); action != "DescribeImages" {
-			writeEC2Error(w, "Unexpected", action, http.StatusBadRequest)
-			return
-		}
-		writeEC2Error(w, "InvalidAMIID.NotFound", "image not found", http.StatusBadRequest)
-	}))
-	defer server.Close()
+	for _, absent := range []string{"not found", "empty response"} {
+		t.Run(absent, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := r.ParseForm(); err != nil {
+					t.Error(err)
+					return
+				}
+				if action := r.Form.Get("Action"); action != "DescribeImages" {
+					writeEC2Error(w, "Unexpected", action, http.StatusBadRequest)
+					return
+				}
+				if absent == "not found" {
+					writeEC2Error(w, "InvalidAMIID.NotFound", "image not found", http.StatusBadRequest)
+				} else {
+					writeEC2XML(w, `<DescribeImagesResponse><imagesSet/></DescribeImagesResponse>`)
+				}
+			}))
+			defer server.Close()
 
-	err := testAWSClient(server.URL).DeleteImageCheckpoint(context.Background(), "ami-12345678", nil, "")
-	if err == nil || !strings.Contains(err.Error(), "checkpoint record has no accountId") {
-		t.Fatalf("err=%v, want account guard error", err)
+			err := testAWSClient(server.URL).DeleteImageCheckpoint(context.Background(), "ami-12345678", nil, "", nil)
+			if err == nil || !strings.Contains(err.Error(), "checkpoint record has no accountId") {
+				t.Fatalf("err=%v, want account guard error", err)
+			}
+		})
 	}
 }
 
@@ -1119,7 +1128,7 @@ func TestDeleteImageCheckpointRefusesAccountMismatchBeforeDescribe(t *testing.T)
 	}))
 	defer server.Close()
 
-	err := testAWSClient(server.URL).DeleteImageCheckpoint(context.Background(), "ami-12345678", nil, "123456789012")
+	err := testAWSClient(server.URL).DeleteImageCheckpoint(context.Background(), "ami-12345678", nil, "123456789012", nil)
 	if err == nil || !strings.Contains(err.Error(), "account mismatch") {
 		t.Fatalf("err=%v, want account mismatch", err)
 	}

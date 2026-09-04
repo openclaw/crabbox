@@ -106,10 +106,6 @@ func ClaimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repo
 	return claimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repoRoot, idleTimeout, reclaim)
 }
 
-func ClaimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return claimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot, idleTimeout, reclaim)
-}
-
 func AppendDirectPondTailscaleTag(cfg *Config) {
 	appendPondTailscaleTag(cfg, true)
 }
@@ -391,14 +387,14 @@ func UpdateLeaseClaimLabelsAndLastUsedIfUnchanged(leaseID string, expected Lease
 
 // UpdateLeaseClaimTouchIfUnchanged atomically commits touched lifecycle labels,
 // last-use time, and an explicitly requested idle-timeout replacement.
-func UpdateLeaseClaimTouchIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string, lastUsed time.Time, idleTimeoutOverride *time.Duration) (LeaseClaim, error) {
-	return updateLeaseClaimTouchIfUnchanged(leaseID, expected, labels, lastUsed, idleTimeoutOverride)
+func UpdateLeaseClaimTouchIfUnchanged(ctx context.Context, leaseID string, expected LeaseClaim, labels map[string]string, lastUsed time.Time, idleTimeoutOverride *time.Duration) (LeaseClaim, error) {
+	return updateLeaseClaimTouchIfUnchanged(ctx, leaseID, expected, labels, lastUsed, idleTimeoutOverride)
 }
 
 // UpdateLeaseClaimTouchIfUnchangedAction fences a provider mutation and commits
 // its endpoint, lifecycle timestamps, and optional timeout in one claim write.
-func UpdateLeaseClaimTouchIfUnchangedAction(leaseID string, expected LeaseClaim, lastUsed time.Time, idleTimeoutOverride *time.Duration, action func() (Server, SSHTarget, bool, error)) (LeaseClaim, Server, SSHTarget, error) {
-	return updateLeaseClaimEndpointIfUnchangedActionMode(leaseID, expected, action, claimEndpointUpdate, &leaseClaimTouchPayload{
+func UpdateLeaseClaimTouchIfUnchangedAction(ctx context.Context, leaseID string, expected LeaseClaim, lastUsed time.Time, idleTimeoutOverride *time.Duration, action func() (Server, SSHTarget, bool, error)) (LeaseClaim, Server, SSHTarget, error) {
+	return updateLeaseClaimEndpointIfUnchangedActionMode(ctx, leaseID, expected, action, claimEndpointUpdate, &leaseClaimTouchPayload{
 		lastUsed:            lastUsed,
 		idleTimeoutOverride: idleTimeoutOverride,
 	})
@@ -476,6 +472,12 @@ func ImageRequirementsIntent(cfg Config) (string, error) {
 
 func ClassWasExplicit(cfg Config) bool {
 	return cfg.classExplicitOrder != 0
+}
+
+// ClassFlagWasExplicit preserves CLI intent until checkpoint routing is final.
+// Config-file and environment selections still use ClassWasExplicit.
+func ClassFlagWasExplicit(cfg Config) bool {
+	return cfg.classFlagExplicit
 }
 
 func MarkClassExplicit(cfg *Config) {

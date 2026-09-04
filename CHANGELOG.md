@@ -1,90 +1,204 @@
 # Changelog
 
+## Unreleased
+
+- Preserve finish-submission and receipt-verification errors, attempt counts, and recovery guidance when terminal run recording times out, without changing retry limits or receipt verification.
+- Closed and joined lease-owned SSH connection masters after confirmed brokered deletion, preserving native connection reuse and lease/host-key isolation while retaining failed local cleanup for a local-only retry. [PR 1774](https://github.com/openclaw/crabbox/pull/1774). Thanks @steipete.
+- Clarify SSH cancellation, safe retained-workload recovery, and Bash login-shell exit behavior, and correct the default local-container image note. [PR 1685](https://github.com/openclaw/crabbox/pull/1685), [PR 1686](https://github.com/openclaw/crabbox/pull/1686). Thanks @steipete.
+- Fix native macOS readiness test fixtures when temporary directories inherit a different group from the process, without changing production ownership checks. [PR 1686](https://github.com/openclaw/crabbox/pull/1686). Thanks @steipete.
+
+## 0.49.0 - 2026-09-03
+
+### Highlights
+
+- **Sync that keeps working.** Unreachable Git origins fall back to full-file sync, symlink retargets reach the runner, and Git overlays transfer a consistent snapshot while later edits wait for the next sync.
+- **Keep the evidence when runs fail.** Brokered artifact publishing is restored, and Blacksmith can return requested artifacts after confirmed normal failures with exit codes 1–127 while preserving the original result.
+- **More predictable creation and checkpoints.** Reuse stable lease IDs for managed checkpoint forks, inspect your admission count and limit without allocating, and cancel or recover creation without losing its original readiness deadline.
+- **Easier Daytona setup.** Reuse browser OAuth login and select native container tiers with `--class`, while preserving custom and checkpoint snapshots.
+- **More reliable Windows runs and private Mac setup.** Managed native Windows setup now checks and repairs the Visual C++ runtime, SSH command input no longer depends on EOF, and macOS bootstrap passwords stay out of shell traces and process arguments.
+- **Clearer failures and trustworthy results.** Get better out-of-memory guidance for local containers and original Tart startup errors, avoid double-counting aliased JUnit reports, and keep late events from rewriting finalized run summaries.
+
+### Upgrade notes
+
+- Managed fixed-ID checkpoint forks and `crabbox capacity` require an updated coordinator; older coordinators reject these requests without falling back to ordinary creation or direct providers. [PR 1692](https://github.com/openclaw/crabbox/pull/1692), [PR 1752](https://github.com/openclaw/crabbox/pull/1752).
+- On Linux images using cloud-init, native checkpoint preparation now requires completed initialization, the distro Python/cloud-init module, and a runtime directory on `tmpfs`; preparation failures stop before image creation. [PR 1692](https://github.com/openclaw/crabbox/pull/1692).
+- Fixed-ID creation cancellation requires the updated coordinator. After a coordinator rollback, version-2 admission records stay fenced; upgrade the coordinator again before confirming pre-allocation stop. [PR 1749](https://github.com/openclaw/crabbox/pull/1749).
+- Managed native Windows runtime repair requires access to the pinned Microsoft downloads. Reboot-required or interrupted installations block readiness until an external reboot and retry; static/BYO hosts remain operator-managed. [PR 1753](https://github.com/openclaw/crabbox/pull/1753).
+- Blacksmith artifact collection requires remote `timeout` support for `--kill-after`; incompatible timeout implementations now fail preflight before the user command starts. [PR 1736](https://github.com/openclaw/crabbox/pull/1736).
+- Legacy Islo claims remain name-bound. Recreate leases to obtain ID-bound claims; provider deletion still uses the name-based API rather than an atomic delete-by-ID operation. [PR 1708](https://github.com/openclaw/crabbox/pull/1708).
+- Ordinary sync fingerprints advance to v6, causing one safe resync; Git-overlay fingerprints remain v1 and no configuration migration is required. [PR 1736](https://github.com/openclaw/crabbox/pull/1736).
+
+### Changes
+
+- Kept sync working when runners cannot authenticate to or reach Git origins by falling back to a full manifest, preserving internal Git-control exit codes, and recognizing disconnected sockets without mistaking URL digits for authentication failures. [PR 1622](https://github.com/openclaw/crabbox/pull/1622), [PR 1744](https://github.com/openclaw/crabbox/pull/1744). Thanks @vincentkoc.
+- Restored brokered artifact publishing with complete production storage configuration and atomic deployment of bucket-scoped signing credentials, preserving the existing storage and signed-read design. [PR 1732](https://github.com/openclaw/crabbox/pull/1732), [PR 1737](https://github.com/openclaw/crabbox/pull/1737).
+- Added replay-safe `checkpoint fork --lease-id` for coordinator-managed native checkpoints, reusing the same child for matching requests while refusing changed, canceled, or terminal attempts. [PR 1692](https://github.com/openclaw/crabbox/pull/1692). Thanks @Copilot.
+- Made fixed-ID creation cancellable at coordinator admission before allocation, preserving exact owner binding and cancellation across restart, duplicate replay, and reservation races without inventing lease records or treating unknown IDs as released. [PR 1749](https://github.com/openclaw/crabbox/pull/1749).
+- Added `crabbox capacity` and `GET /v1/capacity` for read-only snapshots of the authenticated owner's admission-equivalent count and effective limit across all months and orgs, without changing monthly usage or allocating resources. [PR 1752](https://github.com/openclaw/crabbox/pull/1752). Thanks @steipete.
+- Preserved the original provisioning deadline after recovering an uncertain coordinator create response, so readiness is neither cut short by the recovery window nor restarted with a fresh budget; caller cancellation and cleanup ownership remain intact. [PR 1740](https://github.com/openclaw/crabbox/pull/1740).
+- Kept canceled AWS creates from continuing into another region, preserved the `409 create_canceled` result and reason, and kept cleanup confirmation separate from cancellation. [PR 1743](https://github.com/openclaw/crabbox/pull/1743).
+- Preserved native AWS, Machine0, and Daytona lease claims through reused-run preparation so concurrent heartbeats cannot invalidate command admission; AWS renewals also preserve fixed-create ownership tags. [PR 1692](https://github.com/openclaw/crabbox/pull/1692).
+- Retained accepted AWS and Hetzner checkpoint identities through interrupted readiness waits, and recorded AWS backing snapshots before AMI deletion so partial cleanup remains retryable. [PR 1692](https://github.com/openclaw/crabbox/pull/1692).
+- Kept running Linux checkpoint sources cloud-init-ready while requiring restored VMs to complete their own initialization. [PR 1692](https://github.com/openclaw/crabbox/pull/1692).
+- Applied configured SSH ports on socket-activated Linux and prepared images by refreshing systemd's SSH socket configuration. [PR 1692](https://github.com/openclaw/crabbox/pull/1692).
+- Prevented failed coordinator maintenance from postponing earlier queued work, while rearming consumed overdue wakeups and reporting retry-scheduling failures. [PR 1767](https://github.com/openclaw/crabbox/pull/1767).
+- Bound typed ready-pool capacity to canonical provider identities, migrated desired state to fixed-size v2 keys without legacy-reader exposure, and routed returns to fail-closed drain cleanup when provider or lease identity evidence changes. [PR 1619](https://github.com/openclaw/crabbox/pull/1619). Thanks @vincentkoc.
+- Kept managed macOS bootstrap passwords out of shell traces and process arguments, made new password files private from creation, and corrected Screen Sharing guidance to keep port 5900 closed in custom ingress rules. [PR 1723](https://github.com/openclaw/crabbox/pull/1723).
+- Preserved native Windows SSH input framing with asynchronous reads that do not wait for EOF or close borrowed stdin, and staged input through the workspace witness for fresh one-shot runs as well as reused leases. [PR 1724](https://github.com/openclaw/crabbox/pull/1724).
+- Added verified Visual C++ v14 runtime checks and repair to shared managed native Windows bootstrap before readiness, preventing missing-runtime failures while leaving WSL2 unchanged. [PR 1753](https://github.com/openclaw/crabbox/pull/1753).
+- Included symlink target identity in ordinary sync fingerprints without following links, so same-content retargets no longer leave stale remote links. [PR 1736](https://github.com/openclaw/crabbox/pull/1736).
+- Made Git-overlay transfers use accepted immutable snapshots for payloads, manifests, fingerprints, and index validation, leaving later edits for the next sync and preserving primary errors through cleanup and fallback. [PR 1624](https://github.com/openclaw/crabbox/pull/1624). Thanks @vincentkoc.
+- Hardened reused Git-overlay workspaces against hidden index changes and incomplete fingerprints while preserving verified ignored caches. [PR 1623](https://github.com/openclaw/crabbox/pull/1623). Thanks @vincentkoc.
+- Made Git-coherence branch selection honor explicit `sync.baseRef` before inferred defaults, avoiding deleted topic or stale default branches when a valid containing branch exists while preserving the selected commit and tree. [PR 1759](https://github.com/openclaw/crabbox/pull/1759).
+- Kept late run events in the audit log without rewriting finalized run summaries or receipts. [PR 1736](https://github.com/openclaw/crabbox/pull/1736).
+- Deduplicated explicit relative and absolute aliases of JUnit reports while preserving distinct reports and target-platform path semantics. [PR 1736](https://github.com/openclaw/crabbox/pull/1736).
+- Made local-container OOM retry guidance use observed retained-container limits and reported runtime total RAM, with read-only diagnostics in `inspect` and non-wait `status --json` and conservative unknown-capacity fallback that preserves the workload exit. [PR 1734](https://github.com/openclaw/crabbox/pull/1734).
+- Collected requested Blacksmith artifacts after confirmed normal workload failures with exit codes 1–127 in the original invocation, preserving the workload result and requiring complete receipts, clean transport completion, and unchanged ownership before publishing evidence. [PR 1733](https://github.com/openclaw/crabbox/pull/1733).
+- Validated artifact-glob and required-artifact patterns by path component, accepting ordinary names such as `result..json` and rejecting explicit `.git` or `.crabbox` paths before lease acquisition while preserving traversal checks. [Issue 1751](https://github.com/openclaw/crabbox/issues/1751). Thanks @coygeek.
+- Preserved literal Blacksmith stdout/stderr control bytes outside the reserved receipt namespace and checked timeout support before user code could have side effects. [PR 1736](https://github.com/openclaw/crabbox/pull/1736).
+- Used ASCII Box's advertised SSH host and port for readiness, sync, execution, and status while retaining the older IP-and-port-22 fallback. [PR 1728](https://github.com/openclaw/crabbox/pull/1728). Thanks @shunkakinoki.
+- Preserved ASCII Box deletion-operation references across interrupted cleanup and required confirmed operation completion and inventory absence before removing ownership claims. [PR 1731](https://github.com/openclaw/crabbox/pull/1731). Thanks @shunkakinoki.
+- Recognized Daytona CLI browser OAuth profiles, honoring `DAYTONA_CONFIG_DIR` and preserving explicit credentials and API-key precedence; expired tokens direct users to `daytona login`. [PR 1772](https://github.com/openclaw/crabbox/pull/1772).
+- Added direct Daytona class selection through native container snapshots, validating custom and checkpoint snapshots without replacing or resizing them and cleaning up mismatched allocations. [PR 1773](https://github.com/openclaw/crabbox/pull/1773).
+- Bounded direct Daytona control requests to 60 seconds, including stalled response bodies, without cutting off long-running commands or archive uploads; earlier caller deadlines and exact allocation-recovery ownership remain intact. [PR 1750](https://github.com/openclaw/crabbox/pull/1750). Thanks @SebTardif.
+- Recorded Islo sandbox IDs in ownership claims, validated identity before status and cleanup, and clarified delegated-run behavior and the distinction between sandbox identity and lease addressing. [PR 1705](https://github.com/openclaw/crabbox/pull/1705), [PR 1708](https://github.com/openclaw/crabbox/pull/1708). Thanks @zozo123.
+- Allowed exactly owned completed Blacksmith Testboxes to finish local claim and SSH-key cleanup when no Actions run URL was assigned, without relaxing native-table framing or ownership checks. [PR 1746](https://github.com/openclaw/crabbox/pull/1746).
+- Preserved delayed Tart startup failures and bounded stderr through readiness and cleanup so later IP, guest-agent, or SSH errors no longer hide the original cause. [PR 1738](https://github.com/openclaw/crabbox/pull/1738).
+- Preserved bounded Hetzner error codes and messages from multiline provider responses without changing allocation recovery or secret redaction. [PR 1771](https://github.com/openclaw/crabbox/pull/1771). Thanks @steipete.
+- Preserved recognized workspace-owner renewal failure states alongside transport errors without changing exit 7 or fail-closed collection and cleanup. [Issue 1712](https://github.com/openclaw/crabbox/issues/1712). Thanks @coygeek.
+- Exposed effective generic lease `ttl` and `idleTimeout` in `config show` text and JSON without changing defaults or lease behavior. [PR 1757](https://github.com/openclaw/crabbox/pull/1757).
+- Made `doctor --help` and `-h` show diagnostic modes and primary options before the complete provider flag reference, so the installed CLI explains how to inspect providers, leases, recorded runs, and ponds. [Issue 1754](https://github.com/openclaw/crabbox/issues/1754). Thanks @coygeek.
+- Simplified post-publication Homebrew updates into the ordinary tag-based tap handoff, with independently retryable channel smokes and no need to rebuild or republish a release when the tap update fails. [PR 1735](https://github.com/openclaw/crabbox/pull/1735).
+- Removed extra PR-approval ruleset and administrative-freeze prerequisites from release publication while retaining signed-source, immutable-asset, native-verification, and immediate publication readback checks.
+- Aligned copyable full race-test commands with CI's 15-minute package timeout and added a regression check to prevent documentation drift. [PR 1736](https://github.com/openclaw/crabbox/pull/1736). Thanks @coygeek for the timeout report.
+
+## 0.48.1 - 2026-09-01
+
+### Changes
+
+- Corrected nested JUnit totals and preserved failed-case details so `--fail-on-test-failures` catches failures even when suite counters are missing or zero, without double-counting parent aggregates.
+- Fixed signed receipt/log mismatches by keeping retained output valid UTF-8 before signing and storage, preserving raw captures and full-stream hashes, and marking incomplete retained logs as truncated.
+- Kept automatic POSIX SSH failure bundles focused on the current uploaded script instead of earlier uploads and neighboring files. Explicit artifact and download selections remain independent.
+- Reduced SSH startup round trips by avoiding redundant successful-login checks and skipping telemetry when no coordinator run handle exists.
+- Made run summaries, timing JSON, and recovery guidance distinguish confirmed release from retained or pending cleanup, report local cleanup errors separately, and preserve an existing workload failure's exit code.
+- Made coordinator-backed `stop` use one five-minute cancellation budget across inspection, claim waits, cleanup, release, and observation; local daemon lock waits now honor cancellation without reversing confirmed cleanup.
+- Fixed coordinator-managed AWS cleanup during creation by tracking the exact allocation before readiness, continuing to observe pending cleanup, and retaining recovery evidence when storage or deletion is uncertain.
+- Prevented ready-pool leases from being borrowed concurrently across typed and legacy pools, including existing duplicate records, and blocked expired or quarantined borrows from returning to ready.
+- Honored explicit empty YAML lists for environment forwarding, JUnit paths, and preflight probes while preserving omitted-key inheritance, additive profile/sync lists, and independent automatic result discovery.
+- Honored explicit advertised SSH-port selection on ordinary reused coordinator leases without changing host trust or provider cleanup; ready-pool connections retain their pool-recorded endpoint.
+- Exposed local-container settings in `config show` text and JSON, including effective work-root defaults when selected, without Docker discovery or daemon access.
+- Kept brokered native checkpoint creation waiting through coordinator-owned capture recovery without submitting another capture, while respecting cancellation, timeouts, and terminal failures. Thanks @Copilot.
+- Restored machine-readable missing-checkpoint inspection after managed deletion without treating unresolved capture bindings or coordinator failures as confirmed deletion.
+- Unblocked ordinary Machine0 source cleanup when a failed checkpoint capture is proven not to have attempted image submission; interrupted or uncertain submissions retain their recovery records.
+- Added `checkpoint abandon` for unresolved ordinary Machine0 captures: dispose of the verified source through its existing ownership claim while retaining the unresolved image record and blocking image reuse, deletion, or pruning.
+- Preserved the original coordinator heartbeat transport error when HTTP fallback also fails or has no time left, without changing successful fallback behavior.
+- Fixed Parallels clone placement under the configured parent directory, leaving VM bundle naming and creation to Parallels.
+
+### Upgrade notes
+
+- Previously ignored SSH-port overrides now take effect on ordinary reused coordinator leases and reject unadvertised ports. Remove obsolete `--ssh-port`, `ssh.port`, or `CRABBOX_SSH_PORT` settings to retain automatic selection; explicit selection disables port fallback.
+- Empty YAML `env.allow`, `results.junit`, and `run.preflightTools` lists now clear inherited values. Omit the key to inherit instead; clearing JUnit paths does not disable `results.auto`, and profile allowlists remain additive.
+- Automatic POSIX SSH failure bundles no longer include the retained `.crabbox/scripts` store. Explicitly select additional files you need; use `--download-on-failure` for eligible Linux SSH failure downloads.
+
 ## 0.48.0 - 2026-08-30
 
 ### Highlights
 
-- Manage brokered native checkpoints through the coordinator, including opt-in deletion after an unused period; Incus also gains durable fixed-ID leases and private disk checkpoints that survive source deletion.
-- Collect selected files after failed Linux SSH workloads with `--download-on-failure`, and require freshly created or changed artifact bytes with `--require-artifact-change`.
-- Start from pinned Ubuntu images on Local Container and Apple Container, and a pinned, verified macOS image on Tart, while preserving explicit custom-image choices. Thanks @coygeek.
-- Safer provider cleanup checks the recorded resource and its account, endpoint, or storage before acting, protects replacement resources, and retains uncertain ownership records for recovery. Thanks @coygeek.
-- Fixed IPv6 file transfers and improved SSH, WSL2, Code, and WebVNC cancellation and recovery, including overloaded SSH connections. Thanks @excelsier, @SebTardif, and @vincentkoc.
+- **Keep the evidence when a run fails.** Linux SSH runs can download selected artifacts after a confirmed workload failure with `--download-on-failure`; `--require-artifact-change` can reject stale, unchanged evidence instead of accepting files left by an earlier run.
+- **More capable checkpoints.** Brokered native checkpoints gain coordinator-owned admission limits, audit events, and optional unused-checkpoint expiry. Incus gains durable fixed lease IDs and private container disk checkpoints that survive source deletion.
+- **Smoother remote runs.** IPv6 sync and uploads work correctly, overloaded SSH multiplexed sessions recover without replacing the lease, and active lease operations no longer block unrelated runs.
+- **Safer cleanup and trusted defaults.** More providers require exact, unchanged ownership before reuse or destruction; shipped Ubuntu container images are digest-pinned, and the built-in Tart image is verified before boot.
+- **More reliable Windows and WSL2 execution.** WSL2 uses a verified SFTP command envelope with bounded cleanup and complete exit results; native Windows state updates preserve open readers and private routing state.
 
-### Before upgrading
+### Upgrade notes
 
-- WSL2 execution now requires SFTP on the Windows OpenSSH server; the v0.47.0 stdin fallback is removed. Enable SFTP and verify Doctor's `wsl2-sftp` probe before upgrading. Thanks @vincentkoc.
-- The native Windows CLI now requires Windows 10 version 1709+ or Windows Server 2019+.
-- Older or unclaimed provider resources may no longer qualify for Crabbox cleanup when their exact ownership cannot be verified. Retain their records and keys, inspect them through the native provider, and follow its manual cleanup guidance; do not discard state or use `--reclaim` to bypass missing ownership.
-- Explicit static SSH architecture settings, including inherited `amd64`, must match fresh host evidence on Linux, macOS, Windows, and WSL2. Remove the explicit setting for automatic discovery; offline defaults are not proof of the host's architecture.
-- Blacksmith Testbox rejects `--no-sync` with exit 2 before acquisition or reuse, including prewarm probes and named jobs with `noSync: true`, rather than silently syncing anyway.
-- Pinned image defaults apply to new leases without overrides. Explicit custom images remain operator-managed; an explicitly configured mutable Tart tag stays mutable. Tart verifies the full cloned disk even on a warm cache, adding a local disk read before boot.
+- **WSL2 now requires SFTP.** Enable the Windows OpenSSH SFTP subsystem and verify Doctor's `wsl2-sftp` probe before upgrading; the v0.47.0 stdin fallback has been removed.
+- **Native Windows requires Windows 10 version 1709+ or Windows Server 2019+.**
+- **Blacksmith Testbox stop and reuse require exact local claims.** For legacy or missing claims, independently verify the organization and Testbox, stop it with the native CLI, confirm terminal status, and create a new lease; `--reclaim` does not bypass this requirement.
+- **Blacksmith Testbox rejects `--no-sync`.** Remove it from runs, prewarm probes, and named jobs; Testbox manages workspace synchronization.
+- **Static SSH architecture settings are assertions.** Explicit or inherited architecture settings, including `amd64`, must match fresh host evidence; remove the explicit setting to use automatic discovery.
 
-### Checkpoints, artifacts, and provider selection
+### Added
 
-- Fixed normal stop for Docker checkpoint forks from fixed-ID sources, including forks from older checkpoint images, without weakening cleanup ownership checks.
+- Added Linux SSH `--download-on-failure` retrieval after an owned nonzero workload exit, preserving the exit code and collecting selected evidence before failure bundles and teardown.
+- Added opt-in Linux SSH `--require-artifact-change` checks with bounded content snapshots, created/changed/unchanged/missing timing states, and collection of only accepted bytes.
+- Added coordinator-owned brokered native checkpoints with transactional checkpoint and fork-claim admission limits, bounded recent audit events, opt-in unused-checkpoint expiry, and promotion-safe cleanup.
+- Added durable fixed-ID Incus leases and private container disk checkpoints that survive source deletion, with ownership-checked cleanup and fresh SSH identity before fork startup.
+- Added replayable native checkpoint capture-and-retire with `--checkpoint-id`, `--retire-source`, read-only `--prepare-only` admission, and explicit `--discard-failed` recovery on supported providers; Hetzner source retirement remains unavailable.
+- Added `providers sizes machine0 --with-context --json` to show effective native size and region selection alongside the live catalog, preserving configured defaults and exact fixed-lease replay.
 
-- Added coordinator-managed native checkpoints for brokered AWS, Azure, and GCP leases, with limits on concurrent checkpoint and fork requests, recent audit events, opt-in `--expire-unused-after`, and cleanup that protects promoted images; retention remains manual by default.
-- Added durable fixed-ID Incus leases and private container disk checkpoints independent of the source lease, with ownership-checked cleanup and fresh SSH credentials before a fork starts.
-- Added Linux SSH `--download-on-failure` to retrieve selected evidence after a confirmed nonzero workload exit, before failure bundles and teardown, without changing the workload's exit code.
-- Added opt-in Linux SSH `--require-artifact-change` checks using bounded content snapshots, with created, changed, unchanged, and missing timing states and collection restricted to the accepted bytes.
-- Made native checkpoint source retirement resumable after interruption, preserving pending operations and capture/source identities, preventing ordinary release from racing capture, and refusing forks from discarded images without restarting a retiring Machine0 source or discarding unresolved ownership; Machine0 retirement remains tied to the captured account, and Hetzner retirement remains unavailable until project identity can be verified.
-- Added opt-in Machine0 native size selection to live catalog discovery without changing configured defaults or fixed-lease replay; creation-only selectors no longer leak into prewarm follow-ups, and invalid follow-up configuration fails before allocation.
-- Honored explicit Tencent Cloud Spot and on-demand market choices, kept hourly billing when no market is configured, and rejected invalid values before provider access. Thanks @exAClior.
-- Validated generated prewarm probes against the provider's supported run options before backend setup, ready-pool checks, or access changes, preserving follow-up routing and reuse intent.
+### Fixed
 
-### SSH, Windows, and desktop sessions
-
-- Clarified that local Ctrl+C may leave non-interactive SSH workloads running, with safe retained-lease recovery; documented explicit `bash -c` execution when login logout hooks would otherwise change a shell snippet’s exit status.
-
-- Fixed IPv6 workspace sync and artifact/egress uploads through private SSH aliases, preserving authentication, host trust, Windows/WSL routing, and transfer cleanup.
-- Recovered overloaded SSH multiplexed sessions with one targeted retry and a direct-connection fallback, preserving the original lease and command. Thanks @excelsier.
-- Reworked WSL2 SSH staging into one verified private SFTP transfer with bounded startup, execution control, completion, and partial cleanup; Windows builds use LF helpers, workload exit records are published atomically, malformed results are rejected, and uncertain publication never triggers replay. Thanks @vincentkoc.
-- Distinguished POSIX and WSL2 workspace-owner setup failures from SSH readiness failures, bounded cleanup before workload startup, and retained recovery state when child ownership could not be observed.
-- Preserved caller umasks for workspace-owned POSIX and WSL2 commands while keeping staged inputs private, and preserved SIGINT/SIGQUIT behavior for kept and reused POSIX SSH workloads. Thanks @coygeek.
-- Checked static SSH architecture only after read-only ownership verification and before publishing the guarded claim, and reported measured or unknown evidence separately from offline defaults.
-- Released run-owned workspace authority after static SSH one-shot cleanup so the surviving host can be reused immediately, preserving ownership checks and destructive-provider cleanup order.
-- Made Code reconnect/code-server readiness waits and Hostinger bootstrap SSH retry delays respond promptly to cancellation, preserving retry timing and Hostinger recovery state. Thanks @SebTardif.
-- Bounded coordinator lease reads, doctor probes, and HTTP heartbeats to 30 seconds, stop's preliminary lookup to ten seconds, and best-effort foreground lease refreshes to 20 seconds, without shortening provisioning budgets or losing caller cancellation and cleanup evidence.
-- Reaped WebVNC daemon SSH tunnels across child restarts and orderly shutdown, reported unconfirmed cleanup, and preserved macOS authentication timeout diagnostics when the browser transport closes first.
-- Bounded VNC/WebVNC credential reads to 30 seconds and 64 KiB, discarding partial credentials on failure, and bounded bridge response-header waits to 30 seconds without limiting established WebSocket sessions or bypassing configured HTTP transports. Thanks @SebTardif.
-- Kept automatic egress tickets and secret SSH usernames out of process arguments and tunnel state, completed bounded ticket delivery before SSH teardown, and retained private tunnel configs through confirmed readiness or cleanup while preserving pond environment filtering and overrides.
-- Honored flags after the name in `pond connect <name> --export`, starting tracked daemons instead of blocking in the foreground.
-- Limited best-effort Testbox portal bookkeeping to one five-second budget and included it before final warmup completion/timing, preserving successful allocations and retained leases when synchronization fails.
-- Preserved open readers during native Windows state replacement and cleanup, and kept external routing state readable by its owner with private access controls.
-
-### Safer cleanup and reproducible images
-
+- Prevented active lease operations from blocking unrelated claim discovery, slug allocation, and Testbox runs while preserving exact ownership checks and cleanup fencing.
+- Fixed IPv6 workspace sync and artifact/egress uploads by using private SSH transport aliases, preserving authentication, host trust, Windows/WSL routing, and transfer cleanup.
+- Recovered overloaded SSH multiplexed sessions with one exact-diagnostic retry and a direct-connection fallback while preserving the original lease and command. Thanks @excelsier.
+- Rendered failure recovery guidance after automatic cleanup, omitting lease commands only after confirmed release while preserving retained and uncertain cleanup recovery.
+- Printed failed-run output tails once after the digest, preserving both streams, bounded output, capture notices, redaction, and failure bundles. Thanks @coygeek.
+- Rejected lease-output aliases of captures and success/failure downloads before acquisition, preserving retained lease handles and existing output bytes.
+- Released run-owned workspace authority after static SSH one-shot cleanup so the surviving host can be reused immediately, while preserving guarded owner checks and destructive-provider cleanup ordering.
+- Preserved SIGINT and SIGQUIT behavior for kept and reused POSIX SSH workloads without weakening child ownership checks or changing caller umasks. Thanks @coygeek.
+- Preserved the remote caller's umask for workspace-owned POSIX and WSL2 commands while keeping staged scripts, stdin, and owner state private.
+- Reported POSIX and WSL2 workspace-owner setup failures separately from SSH readiness, with bounded pre-start cleanup and fail-closed recovery when child observation is denied.
+- Fixed static SSH architecture admission across Linux, macOS, Windows, and WSL2: configured values, including inherited `amd64`, now require fresh matching evidence after read-only ownership checks and before guarded claim publication; remove explicit architecture settings for automatic discovery, with measured or unknown evidence reported separately from offline defaults.
+- Simplified WSL2 SSH execution into one verified, privately blinded SFTP envelope with a derived fixed-control startup/work/completion budget, LF helpers on Windows builds, identity-checked cleanup, and no replay after publication uncertainty; SFTP is now required, replacing the v0.47.0 stdin fallback (enable it and verify Doctor's `wsl2-sftp` probe before upgrading). Thanks @vincentkoc.
+- Kept WSL2 partial-cleanup hashing within its cancellation budget and published complete workload exit results atomically, preserving staged ownership checks and rejecting malformed statuses. Thanks @vincentkoc.
+- Made native Windows state replacement and cleanup preserve open readers; the CLI now requires Windows 10 version 1709+ or Windows Server 2019+.
+- Kept Windows external routing state readable after publication by creating it with current-user ownership and private ACLs.
+- Pinned the built-in Tart macOS image and verified cloned disk, NVRAM, and configuration contents before boot, retaining custom-image overrides, recording verified provenance, and waiting for the guest agent before SSH setup. Thanks @coygeek.
+- Pinned shipped Local Container and Apple Container Ubuntu defaults to reviewed multi-platform OCI digests, verified Apple images before bootstrap, and preserved explicit custom-image overrides. Thanks @coygeek.
+- Disabled automatic host clipboard and audio passthrough for Tart VMs.
+- Kept automatic egress client tickets off SSH, remote shell, and helper process arguments with a foreground bounded-input handoff to the detached client, preventing SSH teardown from truncating ticket delivery.
+- Kept secret SSH usernames out of VNC/WebVNC and pond tunnel arguments and daemon state, retained private configs through attached teardown or authenticated detached listener readiness, and preserved pond child environment filtering and overrides.
 - Preserved replacement and backend-retained claims after delegated stops in `pond release` by leaving claim finalization to the provider.
-- Pinned the shipped Local Container and Apple Container Ubuntu defaults to reviewed multi-platform image digests, verified Apple Container images before bootstrap, and preserved explicit custom-image overrides. Thanks @coygeek.
-- Pinned Tart's built-in macOS image and verified the cloned disk, NVRAM, and configuration before boot, recorded the verified image identity, waited for the guest agent before SSH setup, and disabled automatic host clipboard and audio passthrough. Thanks @coygeek.
-- Required exact resource and provider-scope claims for Modal, Tensorlake, ASCII Box, and SmolVM reuse and cleanup, checking the applicable account, API-key scope, organization, or endpoint and refusing concurrent ownership changes; ASCII Box setup rollback also preserves uncertain resources and keys. Thanks @coygeek.
-- Bound Apple Machine and Tart cleanup to the VM's storage and recorded ownership marker, and Proxmox cleanup to the cluster scope, VMID, and native VM generation; legacy, replaced, unclaimed, or ambiguous machines and keys remain available for manual recovery, and endpoint refreshes cannot silently change ownership. Thanks @coygeek.
-- Required durable Incus claims before stop or cleanup, preserved legacy instances and keys without automatic adoption, kept status read-only, and rechecked instance identity after stopping. Thanks @coygeek.
-- Protected Nomad stop, cleanup, run teardown, and setup rollback against changed claims, preserving successor jobs and retaining ownership records until remote absence is confirmed. Thanks @coygeek.
-- Required exact Blacksmith Testbox ownership and organization/API/workflow bindings for reuse and cleanup, protected interrupted acquisition and active-run stop, and finalized failed stops only after confirming the exact Testbox completed; uncertain resources, keys, and sessions remain available for recovery without hiding the workload failure. Thanks @coygeek.
-- Retained exact Blacksmith claims when local SSH-artifact cleanup fails and exposed verification/finalization diagnostics alongside the original native exit code, while treating already-missing key directories as clean.
-- Preserved managed Daytona cleanup after lost create responses, recorded the exact resource early, applied native TTL to kept sandboxes, and required provider confirmation of deletion in the original context.
-- Kept public AWS lease release independent of unrelated instances' image and network readiness, required fresh ownership before ingress changes, and retained account- and region-bound direct-AWS cleanup receipts so canonical fixed-ID stop can be replayed after inventory disappears; older compact records keep their existing refusal behavior when ownership is uncertain.
-- Cleaned up exact-owned interrupted Azure public-IP and NIC allocations and restored ordered SKU fallback without weakening resource identity checks. Thanks @excelsier and @vincentkoc.
-- Ordered and bounded guest cleanup before authoritative coordinator release, skipped guest cleanup for confirmed deleted leases, and kept prewarm cleanup with the release owner; recovery guidance now reflects the final cleanup result and omits lease commands only after confirmed release.
-- Prevented active lease operations from blocking unrelated claim discovery, slug allocation, and Testbox runs while preserving ownership and cleanup checks.
-
-### Machine0 reliability
-
-- Repaired UUID lookup through validated inventory and full VM details, and verified fixed checkpoint-fork replay even when inventory omits the pinned image version, refusing changed identities without creating duplicates or changing key behavior.
-- Preserved explicit repository reclaim for existing Machine0 leases and used verified native details and early durable UUID recording across fixed replay, inspection, and cleanup; ambiguous attempts and empty legacy records are retained without inferring creation or cancellation outcomes.
-- Resolved complete default SSH-key metadata before preflight, rejected proven public-key identity mismatches before VM creation without changing key selection, and avoided blocking reads from special files; Doctor now checks creation's key prerequisites without mutating keys or blocking existing fixed-lease replay. Thanks @coygeek.
-- Honored configured Machine0 executable paths and polling settings during checkpoint verification, deletion, and pruning, and distinguished removal of one image version from whole-image absence—even after a lost response—without erasing sibling versions or unresolved records.
-
-### Diagnostics and everyday use
-
-- Rejected lease-output paths that alias captures or success/failure downloads before acquisition, protecting existing output bytes and retained lease handles.
-- Restored Ubuntu ARM64 Local Container browser provisioning with signed native Mozilla Firefox packages instead of Snap transition packages, preserving working browsers and skipping broken distribution candidates. Thanks @coygeek.
-- Retained bounded Docker and Podman diagnostics when identity probes return empty successful output, without accepting a missing runtime identity. Thanks @coygeek.
-- Made config path diagnostics honor `CRABBOX_CONFIG`, exposed resolved Incus settings in `config show --json` without daemon access or endpoint credentials, and reported an omitted Local Container architecture as `native` without probing the runtime or changing explicit assertions. Thanks @coygeek.
-- Printed failed-run output tails once after the digest, preserving both streams, output limits, capture notices, redaction, and failure bundles; omitted speculative `&&` explanations for compound shell commands while retaining simple-chain diagnostics and workload exit behavior. Thanks @coygeek.
-- Added bounded, secret-safe remote Git seed failure phases and categories for ordinary sync, local Actions hydration, and native Windows without changing file sync or Git coherence. Thanks @coygeek.
-- Moved copy usage, path syntax, and examples ahead of provider flags in `cp --help`, and clarified when uploaded scripts should run from the synced repository so adjacent assets remain accessible. Thanks @coygeek.
+- Fixed cleanup of Docker checkpoint forks from fixed-ID source leases by clearing inherited allocation ownership, including when forking older checkpoint images.
+- Required exact Modal sandbox and native scope bindings for stop, reuse, and one-shot cleanup, fencing claim changes and retaining uncertain or legacy resources until termination is confirmed. Thanks @coygeek.
+- Required exact Tensorlake resource and API-key scope bindings for reuse and cleanup, fencing claim changes and retaining legacy or uncertain sandboxes until termination is confirmed. Thanks @coygeek.
+- Required exact Apple Machine ownership claims bound to daemon storage and an acquisition-only marker, fencing cleanup and retaining legacy, replaced, or uncertain machines without implicit adoption. Thanks @coygeek.
+- Required exact ASCII Box ownership claims for reuse and deletion, pinning creation identity and endpoint/organization routing, fencing teardown and rollback, and retaining uncertain resources until deletion is confirmed. Thanks @coygeek.
+- Required exact SmolVM ownership claims for deletion and reuse, binding machine identity and endpoint before startup, fencing cleanup against claim changes, and retaining legacy or uncertain resources without implicit adoption. Thanks @coygeek.
+- Fenced Nomad stop, cleanup, run teardown, and setup rollback against concurrent claim changes, preserving successor jobs and retaining claims until remote absence is confirmed. Thanks @coygeek.
+- Required durable Incus ownership claims for stop and cleanup, preserving legacy instances and keys without implicit adoption, keeping status read-only, and rechecking identity after stop. Thanks @coygeek.
+- Required exact, unchanged Proxmox cleanup claims bound to the cluster scope, VMID, and native generation ID, retaining unclaimed or ambiguous VMs and keys and preventing endpoint refreshes from rebinding ownership. Thanks @coygeek.
+- Required exact, unchanged Tart cleanup claims bound to the VM's storage and ownership marker, preserving unclaimed, legacy, replaced, or ambiguous VMs and local keys.
+- Kept public AWS lease release independent of other instances’ image and network readiness, while fencing ingress writes with fresh lease authority and access state.
+- Prevented guest cleanup of confirmed deleted coordinator leases, bounded ordered guest cleanup before authoritative release, and kept prewarm cleanup behind the release owner.
+- Preserved managed Daytona cleanup responsibility after lost create responses, with native TTL for kept sandboxes, early exact-resource tracking, and original-context deletion confirmed by provider observation.
+- Cleaned exact-owned interrupted Azure public-IP and NIC provisioning prefixes while restoring ordered SKU fallback and preserving immutable-identity cleanup fences. Thanks @excelsier and @vincentkoc.
+- Retained scoped direct-AWS fixed-lease cleanup receipts for canonical stop replay after inventory disappears, with fresh account, region, identity, and inventory checks; older compact tombstones remain unchanged and fail closed.
+- Required exact scoped Blacksmith Testbox claims for stop/reuse, fenced acquisition rollback and key ownership, and confirmed terminal cleanup before dropping state while preserving active-command cancellation and truthful cleanup results. Thanks @coygeek.
+- Reconciled failed Blacksmith stops only after fresh exact-Testbox terminal confirmation, retaining exact claims when local artifact cleanup fails and reporting independent verification failures without losing native exit codes or original command failures.
+- Made native checkpoint source retirement replayable, preserving pending operation and image identity across interruption, fencing ordinary release after capture reservation, binding Machine0 retirement to its captured account, and refusing forks from discarded images without restarting a retiring Machine0 source or discarding unresolved ownership records; Hetzner retirement remains unavailable until its project identity can be attested.
+- Preserved explicit repository reclaim for existing Machine0 leases and unified fixed replay, inspection, and cleanup around attested native details and early durable UUID binding; retained ambiguous attempts and empty legacy records without duplicate creation or inferred cancellation.
+- Attested fixed Machine0 checkpoint-fork replay from identity-checked VM details when inventory omits the pinned image version, preserving key semantics and refusing mismatches without duplicate creation.
+- Repaired Machine0 UUID lookups through validated inventory and identity-verified full details by name, preserving UUID ownership and rejecting incomplete or changed identities.
+- Resolved full Machine0 default SSH-key metadata before preflight so public keys are not rejected when list summaries omit their local filenames.
+- Rejected proven Machine0 PUBLIC-key identity mismatches before VM creation without changing key selection or treating unverified keys as mismatches, and avoided blocking extraction on special files.
+- Made Machine0 doctor check the same SSH-key prerequisites as new creation and reject missing legacy key pairs when no default is selected, without mutating keys or blocking existing fixed-lease replay. Thanks @coygeek.
+- Preserved configured Machine0 executable paths and polling settings during checkpoint verification, deletion, and pruning while retaining exact image/version ownership checks and local records on uncertain failures.
+- Preserved Machine0 missing-version cleanup refusals while distinguishing confirmed version removal from whole-image absence, including lost remove responses without erasing sibling versions or unresolved metadata.
+- Marked Machine0 creation-only selectors in provider discovery and excluded them from prewarm follow-ups, with invalid projected provider configuration rejected before allocation.
+- Honored explicit Tencent Cloud Spot and on-demand market selections while preserving hourly billing when no market is configured, with invalid values rejected before provider access. Thanks @exAClior.
+- Restored Ubuntu ARM64 local-container browser provisioning with signed native Mozilla Firefox packages instead of Snap transition packages, while preserving working browsers and advancing past broken distro candidates. Thanks @coygeek.
+- Bounded coordinator lease reads, doctor probes, and HTTP heartbeats to 30 seconds, and stop's preliminary lookup to ten seconds, preserving provisioning budgets, provider-scoped release, caller cancellation, and cleanup evidence.
+- Bounded best-effort foreground lease refreshes to 20 seconds so stalled maintenance does not block SSH-backed copy and connection commands for the coordinator's full HTTP budget, while preserving claim checks and caller cancellation.
+- Bounded best-effort Testbox portal bookkeeping to one five-second budget and delayed final warmup completion/timing until it ends, preserving successful allocations and retained leases on sync failure.
+- Honored cancellation during Code bridge reconnect and code-server readiness waits, preserving the existing retry delays while returning promptly on Ctrl+C. Thanks @SebTardif.
+- Honored cancellation during Hostinger bootstrap SSH retry delays while preserving ownership-checked rollback and recovery state. Thanks @SebTardif.
+- Reaped WebVNC daemon SSH tunnels across child restarts and orderly shutdown, retaining exact ownership records and reporting failure when cleanup cannot be confirmed.
+- Bounded VNC/WebVNC credential reads to 30 seconds and 64 KiB, discarding partial credentials on any failure while preserving connection defaults, caller cancellation, and transport cleanup. Thanks @SebTardif.
+- Bounded WebVNC bridge response-header waits to 30 seconds without limiting established WebSocket sessions or bypassing configured HTTP transports. Thanks @SebTardif.
+- Preserved macOS WebVNC authentication timeout diagnostics when a connection deadline closes the browser transport before negotiation returns.
+- Honored `pond connect` flags after the pond name so the documented `pond connect <name> --export` form starts tracked daemons instead of blocking in foreground mode.
+- Validated generated prewarm probes through the provider's run contract before backend configuration, ready-pool checks, or ACL changes, preserving follow-up routing and reuse intent.
+- Rejected Blacksmith Testbox `--no-sync` with exit 2 before acquisition or reuse instead of silently delegating sync, including nonblank `prewarm --probe-command` and named jobs with `noSync: true` before warmup or dry-run planning.
+- Reported bounded, secret-safe remote Git seed failure phases and categories across ordinary sync, local Actions hydration, and native Windows, while preserving file sync and Git coherence behavior. Thanks @coygeek.
+- Made config path diagnostics honor `CRABBOX_CONFIG`, matching the file selected for reads and writes. Thanks @coygeek.
+- Exposed resolved Incus settings in `config show --json`, with endpoint credential redaction and no daemon access.
+- Reported omitted local-container architecture as `native` in config diagnostics without probing the runtime or changing explicit architecture assertions. Thanks @coygeek.
+- Preserved bounded Docker and Podman diagnostics when runtime identity probes return empty successful output, without accepting missing identities. Thanks @coygeek.
+- Omitted speculative `&&` failure diagnostics for compound shell commands while retaining simple-chain explanations and workload exit behavior. Thanks @coygeek.
+- Put copy-command usage, path syntax, and examples before the provider flag reference in `cp --help`. Thanks @coygeek.
+- Clarified uploaded-script path semantics in the Agent Skill, including when to run a synced repository script in place for adjacent assets. Thanks @coygeek.
 
 ## 0.47.0 - 2026-08-28
 

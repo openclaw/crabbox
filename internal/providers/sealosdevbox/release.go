@@ -14,6 +14,17 @@ const (
 )
 
 func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *backend) ReleaseLeaseWithOutcome(ctx context.Context, req core.ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	var outcome core.ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *backend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	if err := core.ValidateLeaseTargetProviderIdentity(req.Lease, req.ExpectedProviderIdentity); err != nil {
 		return err
 	}
@@ -45,6 +56,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 				} else if !kubernetesObjectNotFound(err) {
 					return err
 				}
+				outcome.Terminal = true
 				core.RemoveStoredTestboxKey(req.Lease.LeaseID)
 				return nil
 			}); err != nil {
@@ -71,6 +83,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 			validated, _, _, _, err := b.validateDevboxIdentity(ctx, name, leaseID, slug)
 			if err != nil {
 				if kubernetesObjectNotFound(err) {
+					outcome.Terminal = true
 					core.RemoveStoredTestboxKey(leaseID)
 					return nil
 				}
@@ -85,6 +98,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 			if err := b.deleteDevbox(ctx, validated); err != nil {
 				return err
 			}
+			outcome.Terminal = true
 			core.RemoveStoredTestboxKey(leaseID)
 			return nil
 		}

@@ -98,6 +98,21 @@ multiple scopes of one canonical provider, which that provider resolves; claims
 from different providers require a canonical ID or explicit provider. An
 explicit `--provider` remains authoritative.
 
+For an ordinary reused coordinator lease, `--ssh-port <port>` pins one of the
+lease's advertised primary or fallback SSH ports before workspace ownership or
+command delivery. An unadvertised port is rejected; the lease's host, user,
+credentials, and host-key policy remain unchanged. Explicit selection disables
+automatic port fallback for that connection and does not update the broker's
+lease metadata. Without an explicit selection, normal port probing is unchanged.
+The existing `ssh.port` configuration and `CRABBOX_SSH_PORT` environment input
+use the same selection rule, including for desktop commands that do not expose
+`--ssh-port`. Provider release remains independent of guest-port selection.
+Previously ignored explicit settings now take effect: remove an obsolete
+`--ssh-port`, `ssh.port`, or `CRABBOX_SSH_PORT` override to retain automatic
+selection instead of failing on an unadvertised port.
+For `--pool`, the pool-recorded endpoint takes precedence over explicit port
+flags, configuration, and environment inputs.
+
 With `--pool <key>`, Crabbox borrows one hydrated broker ready-pool lease,
 uses the pool-recorded SSH endpoint, keeps the borrow deadline alive while it
 runs the command and return-time scrub, and then returns the lease.
@@ -147,6 +162,11 @@ not trigger this multiplexing recovery.
 
 Crabbox records a local repo claim for each reused lease. If a lease is already
 claimed by another repo, pass `--reclaim` to move the claim intentionally.
+For already-bound canonical IDs on native AWS, Machine0, and Daytona, run
+admission holds that claim through provider preparation and endpoint publication.
+A concurrent heartbeat cannot invalidate the command between those steps.
+Aliases, explicit reclaim, and coordinator-managed leases retain their existing
+resolution paths; stale heartbeat snapshots still fail the exact-claim check.
 
 `--idle-timeout` controls inactivity expiry (default `30m`); `--ttl` is the
 maximum wall-clock lifetime (default `90m`). Use `--stop-after
@@ -262,8 +282,10 @@ held through sync or fresh checkout, Actions hydration, the command, result and
 artifact collection, failure capture, and ready-pool scrub/return. Separate
 clients and `watch` iterations therefore cannot mutate or execute the same
 reused workspace concurrently. A contending client waits for a bounded interval
-and prints periodic progress. Newly acquired one-shot leases are already
-exclusive and bypass this owner.
+and prints periodic progress. Newly acquired exclusive one-shot leases bypass
+this owner on POSIX and WSL2 targets. Native Windows also uses the owner for
+fresh one-shot runs: its witness stages inherited SSH input into an ordinary
+redirected file stream before upload, sync, or user commands read it.
 
 Ownership is fenced with a random token and renewed while the lifecycle is
 active. If the local client disappears, Crabbox recovers an expired owner only
@@ -271,6 +293,17 @@ after verifying that its witnessed remote child is no longer alive. Ambiguous
 renewal, release, token, or child state fails closed instead of risking a
 concurrent checkout. POSIX, WSL2, and native Windows targets implement the same
 protocol; the small sync-finalization lock remains nested inside it.
+
+Renewal errors retain recognized `MISMATCH`, `EXPIRED`, and `AMBIGUOUS` protocol
+states alongside transport errors. Unrecognized response text is omitted. These
+diagnostics do not retry renewal or permit collection or cleanup after ownership
+fails closed.
+
+Native Windows stages owner scripts and witnessed command input with exact byte
+counts and asynchronous pipe reads. Empty frames complete without initializing
+stdin; nonempty frames leave any following bytes available. Incomplete input
+fails before the staged script or command runs. A transport failure during
+renewal still fails closed.
 
 Use `--full-resync` (alias `--fresh-sync`) when a warm lease smells stale:
 Crabbox deletes the remote workdir, skips the fingerprint fast path, reseeds Git
@@ -405,8 +438,11 @@ invoke it as trailing argv so the project copy runs in place:
 crabbox run -- ./scripts/check.sh
 ```
 
-Crabbox includes the uploaded script directory in failure bundles. A shebang is
-honored on POSIX targets; scripts without one run through `bash`. Native Windows
+On POSIX SSH targets, automatic failure bundles include only the current run's
+uploaded script file, when still available—not the retained `.crabbox/scripts`
+directory or neighboring files. Runs without an uploaded script select none
+of that store. A shebang is honored on POSIX targets; scripts without one run
+through `bash`. Native Windows
 targets run uploaded scripts through Windows PowerShell, and
 `--script-stdin` is treated as a PowerShell script; a non-`.ps1` script path
 gets a `.ps1` extension added before upload. Trailing arguments after `--` are
@@ -564,6 +600,24 @@ limits as `--artifact-glob` apply. Delegated providers that support bounded run
 artifact retrieval enforce provider-owned file and byte limits before returning
 local artifacts.
 
+Blacksmith Testbox collects requested artifact globs in the **same native run**
+after a normal terminal exit, including nonzero exits below 128. It does not
+retry, re-sync, or recover files from stopped leases. A fresh complete invocation
+receipt and clean native CLI completion are both required before local
+publication under the original claim fence; cancellation, sync timeout, or
+transport failure withholds artifacts. Signal-like exits skip collection.
+Required globs remain all-or-nothing. Collection/cleanup errors preserve an
+earlier nonzero workload exit; collection failure after workload success still
+fails the run. Limits remain 256 files and 10 MiB compressed, with existing
+protected-path and symlink checks. Remote Linux `timeout` with `--kill-after`
+is required for a separate 30-second collection budget; caller cancellation
+wins and the local post-exit wait is also bounded. Collection uses the initial
+remote cwd even if the child changes directory. Command timing ends at the
+workload receipt, while collection and cleanup count toward total. Evidence
+retrieved after failure is not success proof or attestation of exact remote Git
+bytes; `--emit-proof` stays success-only. See the
+[Blacksmith contract](../features/blacksmith-testbox.md#run-artifacts).
+
 Use repeatable `--require-artifact-change <path>` for created-or-changed byte
 evidence on ordinary Linux SSH runs. Every exact relative path must be a regular
 file with no symlink components. Crabbox compares bounded content snapshots
@@ -627,11 +681,15 @@ reads or embeds the captured bytes. Any other live console output remains in
 the proof's redacted tail excerpt.
 
 When the remote command exits non-zero, Crabbox writes a local-only
-`.crabbox/captures/*.tar.gz` failure bundle by default. SSH-backed bundles
-include the uploaded script directory, redacted env/config summaries, timing
-JSON, command stdout/stderr, common debug paths such as `test-results`,
+`.crabbox/captures/*.tar.gz` failure bundle by default. POSIX SSH-backed bundles
+include the current run's uploaded script file (when available), redacted
+env/config summaries, timing JSON, command stdout/stderr, common debug paths such as `test-results`,
 `playwright-report`, `coverage`, JUnit XML files, nearby `*.log` files, and a
-gateway log tail when a known gateway log path exists. Implicit stdout/stderr
+gateway log tail when a known gateway log path exists. The exact `.crabbox/scripts`
+store is excluded from general report/log discovery, including prior uploads
+and report-looking neighbors. Explicit artifact/download selections remain
+independent; use `--download-on-failure` to request additional files after an
+eligible failure. Native Windows bundles remain local-only. Implicit stdout/stderr
 entries are capped to keep bundles bounded; explicit `--capture-stdout` /
 `--capture-stderr` files are included as caller-created local files.
 Remote archive entries are confined to the bundle subtree; unsafe links and
@@ -678,7 +736,10 @@ record.
 
 When a remote command exits non-zero, `run` prints a compact failure digest
 after automatic cleanup. Lease recovery commands are omitted after confirmed
-release, and remain available when the lease is kept or cleanup is uncertain.
+terminal release, including deletion that leaves a fixed-ID receipt. They remain
+available for retained resources and pending or unconfirmed cleanup. Preserved
+recovery state does not imply that the resource is running or reachable; inspect
+its status before reuse, or retry the printed stop command to finish cleanup.
 The digest includes the failed phase when phase markers are known, a
 likely area (provider auth, SSH/connectivity, sync, install/setup, user command,
 model/tool/provider limit, or resource exhaustion), retryability when inferable, next commands
@@ -691,9 +752,10 @@ not reconstruct secrets or hidden local shell state. Short-circuit explanations 
 When an SSH backend supplies per-run memory
 exhaustion evidence, the summary and digest use
 `blocked_stage=resource_exhaustion resource_exhaustion=memory retry_likely=false`
-and recommend increasing the memory limit or reducing workload concurrency.
-Evidence read failures are warnings and do not replace the original command
-failure.
+and prefer the provider's bounded contextual hint. Without usable context,
+advice is to reduce memory demand and inspect active limits and runtime capacity
+before retrying. Exit 137 alone is not positive OOM evidence. Evidence read
+failures are warnings and do not replace the original command failure.
 
 Use `--timing-json` to emit a final JSON timing record with provider, lease ID,
 slug, run ID, machine type, repo path, remote workdir, lease acquisition,
@@ -701,6 +763,22 @@ bootstrap, sync phases, command phases, command duration, command-path total,
 end-to-end duration, exit code, normalized `runStatus`, optional `errorKind`,
 stop command, artifacts, and Actions run URL when available. Failed runs also
 include `blockedStage`, `resourceExhaustion`, and `retryLikely` when classifiable.
+Optional `failureEvidence` contains the provider's classification, sanitized
+`hint`, and bounded string-valued `details`. Invalid optional presentation fields
+do not erase valid OOM classification. The same snapshot is copied into local
+failure bundles and the deferred digest, so one-shot deletion does not lose it.
+For [Local Container](../providers/local-container.md#memory-failure-evidence),
+actual container settings, total runtime RAM, and swap are separate observations,
+not an exact effective or free-memory bound.
+App finalization emits timing after cleanup and the failure digest; the executable
+can subsequently append its existing exit diagnostic.
+After an automatic cleanup attempt, `leaseStopped` reports whether the release
+owner confirmed that lease-based recovery is no longer available. An accepted
+release alone does not set it to true. `leaseStopError` independently records a
+cleanup error: it can accompany `leaseStopped=true` when the remote resource is
+gone but local finalization failed. An existing workload failure keeps its exit
+code. Accepted pending or retained cleanup does not itself turn a successful
+workload into a command failure.
 Commands can emit
 phase markers on stdout or stderr as
 `CRABBOX_PHASE:<name>`; Crabbox records those as `commandPhases` without removing

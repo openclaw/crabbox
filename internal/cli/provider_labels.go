@@ -74,7 +74,7 @@ func touchDirectLeaseLabelsWithIdleTimeoutOverride(labels map[string]string, cfg
 		next[key] = value
 	}
 	if state != "" {
-		next["state"] = state
+		next["state"] = sanitizeProviderLabelValue(state)
 	}
 	createdAt, ok := parseLeaseLabelTime(next["created_at"])
 	if !ok {
@@ -106,7 +106,9 @@ func touchDirectLeaseLabelsWithIdleTimeoutOverride(labels map[string]string, cfg
 	next["idle_timeout_secs"] = durationSecondsLabel(idleTimeout)
 	next["ttl_secs"] = durationSecondsLabel(ttl)
 	next["expires_at"] = leaseLabelTime(directLeaseExpiresAtFrom(createdAt, now, ttl, idleTimeout))
-	return sanitizeProviderLabels(next)
+	// Existing labels belong to their provider and may contain full fingerprints,
+	// empty attestation fields, or exact paths. Touch only normalizes values it writes.
+	return next
 }
 
 func directLeaseExpiresAtFrom(createdAt, lastTouchedAt time.Time, ttl, idleTimeout time.Duration) time.Time {

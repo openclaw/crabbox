@@ -1285,11 +1285,11 @@ func TestMorphReleaseUsesStoredPolicyAndPreservesPausedClaim(t *testing.T) {
 			if got := backend.RetainLeaseClaimAfterRelease(lease); got != tc.explicitRetain {
 				t.Fatalf("RetainLeaseClaimAfterRelease=%t release=%s", got, tc.release)
 			}
-			err = backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{
+			outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{
 				Lease: lease,
 			})
-			if err != nil {
-				t.Fatal(err)
+			if err != nil || outcome.Terminal != (tc.wantDeleteCalls == 1) {
+				t.Fatalf("release outcome=%+v err=%v", outcome, err)
 			}
 			if pauseCalls != tc.wantPauseCalls || deleteCalls != tc.wantDeleteCalls {
 				t.Fatalf("pauseCalls=%d deleteCalls=%d", pauseCalls, deleteCalls)

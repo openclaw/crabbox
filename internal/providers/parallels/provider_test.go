@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -331,7 +332,7 @@ func TestAcquireRemovesStoredKeyAfterPostKeyFailure(t *testing.T) {
 	}
 }
 
-func TestAcquireKeepsStoredKeyWhenRollbackDeleteFails(t *testing.T) {
+func TestParallelsAcquireKeepsStoredKeyWhenRollbackDeleteFails(t *testing.T) {
 	if _, err := exec.LookPath("ssh-keygen"); err != nil {
 		t.Skip("ssh-keygen not available")
 	}
@@ -344,6 +345,7 @@ func TestAcquireKeepsStoredKeyWhenRollbackDeleteFails(t *testing.T) {
 	cfg.TargetOS = core.TargetLinux
 	cfg.Parallels.Source = "source-vm"
 	cfg.Parallels.CloneMode = "full"
+	cfg.Parallels.VMRoot = "/Volumes/VM Storage"
 	runner := &parallelsAcquireRunner{
 		startErr:  errors.New("start failed"),
 		deleteErr: errors.New("delete failed"),
@@ -355,6 +357,10 @@ func TestAcquireKeepsStoredKeyWhenRollbackDeleteFails(t *testing.T) {
 	_, err := backend.acquireOnce(context.Background(), false, "")
 	if err == nil || !strings.Contains(err.Error(), "start failed") {
 		t.Fatalf("acquireOnce err=%v, want start failure", err)
+	}
+	wantCloneArgs := []string{"clone", "source-vm", "--name", runner.cloneName, "--dst", cfg.Parallels.VMRoot}
+	if runner.cloneName == "" || !reflect.DeepEqual(runner.cloneArgs, wantCloneArgs) {
+		t.Fatalf("clone args=%q, want %q", runner.cloneArgs, wantCloneArgs)
 	}
 	keyMatches := storedTestboxKeyMatches(t)
 	if len(keyMatches) != 1 {
@@ -502,6 +508,7 @@ type parallelsAcquireRunner struct {
 	deleteErr   error
 	cloneID     string
 	cloneName   string
+	cloneArgs   []string
 }
 
 func (r *parallelsAcquireRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
@@ -528,6 +535,7 @@ func (r *parallelsAcquireRunner) Run(_ context.Context, req core.LocalCommandReq
 		}
 		return core.LocalCommandResult{Stdout: `[]`}, nil
 	case "clone":
+		r.cloneArgs = append([]string(nil), req.Args...)
 		r.cloneID = "clone-id"
 		for i := 0; i+1 < len(req.Args); i++ {
 			if req.Args[i] == "--name" {

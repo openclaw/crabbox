@@ -538,7 +538,7 @@ function roundUSD(value: number): number {
 
 async function safeBody(response: Response): Promise<string> {
   const text = await response.text();
-  return text.length > 500 ? `${text.slice(0, 500)}...` : text;
+  return (text.length > 500 ? `${text.slice(0, 500)}...` : text).replace(/\s+/g, " ").trim();
 }
 
 function sleep(ms: number): Promise<void> {

@@ -30,7 +30,7 @@ func (a App) inspect(ctx context.Context, args []string) error {
 		Options:                       leaseOptionsFromConfig(cfg),
 		ID:                            *id,
 		AuthoritativeProviderMetadata: *jsonOut,
-	})
+	}, true)
 	if err != nil {
 		return err
 	}

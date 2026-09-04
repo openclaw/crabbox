@@ -57,6 +57,52 @@ the coordinator. The dedicated
 SSM-only workspace API path. See [Architecture](../architecture.md) for the full
 topology.
 
+## Durable Azure provisioning
+
+`CRABBOX_DURABLE_PROVISIONING_ADMISSION=true` opts new eligible creates into the
+versioned durable provisioning controller. It defaults to off. Eligibility is
+evaluated after provider defaults and promoted images resolve: initially only
+ordinary and fixed-ID Azure native Windows `normal`, amd64, managed OS disks
+created from VM images qualify. Snapshot/copy-disk, ephemeral, WSL2, workspace,
+registered and other-provider requests keep their existing provisioning paths.
+An unsupported effective default is not advertised as resumable by readiness.
+
+The existing server-only `CRABBOX_SESSION_SECRET` must be stable, distinct from
+the shared token, and at least 32 characters. Missing or unsuitable material
+configuration returns `424 continuation_unavailable` before durable admission;
+the coordinator does not create a key or fall back to a provider/shared token.
+Provider readiness includes `resumableProvisioning` with scope support,
+admission availability, and missing material configuration.
+
+Clients opt into an asynchronous create response with `Prefer: respond-async`.
+An admitted supported job returns `202 {lease}` with `lease.state=provisioning`,
+`Location`, `Retry-After`, and `Preference-Applied: respond-async`. The envelope
+does not change. A create-attempt token alone is not async negotiation. Initial
+requests without the preference retain a synchronous facade; ordinary token
+replay and fixed PUT keep their existing status/intent contracts. Older brokers
+may ignore the preference. Clients must confirm the canonical create intent,
+then observe readiness within their original acquisition budget.
+Durable fixed-ID admission also retains a private request fingerprint, allowing
+the same request to rebind after deployment defaults change without serializing
+the lease configuration or accepting a changed caller intent.
+
+Admission commits the canonical attempt, lease, private operation, sealed
+material and due entry atomically. Restarted controllers use the frozen
+provider plan and original deadline. Disabling new admissions does not disable
+existing journals. Publication is a separate durable phase; cancellation and
+expiry remain authoritative over late provider results. Fixed-ID caller
+disconnection does not cancel the retained operation; explicit release does.
+
+Operation plans, attempt journals, claims and sealed bootstrap/admin-password
+material live outside lease records and are never returned by lease GET/list or
+portal serialization. Material is purged at terminal publication or when durable
+cancellation, retention or expiry irrevocably disables forward work. Settlement
+and exact owned cleanup use the nonsecret journals and provider authentication,
+so retiring the VM password/bootstrap or losing the session key does not prevent
+cleanup. Key loss or tampering still blocks forward replay. Unsupported or
+quarantined records retain their material until their authority is understood;
+resource and deletion evidence are preserved independently.
+
 ## CLI request budgets
 
 The CLI bounds individual lease reads (including authoritative provider
@@ -159,6 +205,7 @@ GET    /v1/providers/{provider}/readiness
 GET    /v1/control                       (websocket: run events + heartbeats)
 POST   /v1/leases
 POST   /v1/leases/from-checkpoint
+PUT    /v1/leases/{canonical-id}/from-checkpoint
 PUT    /v1/leases/{canonical-id}       (fixed-ID idempotent create)
 PUT    /v1/leases/{id}/registration
 GET    /v1/leases
@@ -243,6 +290,17 @@ If the PUT response is ambiguous, the CLI repeats the full identical PUT until
 the coordinator atomically confirms the same stored intent or returns a
 conflict/definite error. Public GET is used only after that PUT confirmation,
 never to adopt an unverified fixed-ID record.
+
+Fixed checkpoint forks use `PUT /v1/leases/{canonical-id}/from-checkpoint` with
+the existing checkpoint ID and use claim fields. Admission records a cancellable
+fixed intent before remote source validation or preparation, without consuming
+the claim. Allocation atomically binds the winning claim, the lease, and the
+checkpoint's provisioning fence to that same private attempt. Its immutable
+intent also binds the checkpoint incarnation and provider artifact. Replays preserve that original binding and consume only
+an unused caller claim; they do not advance `lastUsedAt` again. An in-request
+retry may adopt its child after source deletion, but a fresh CLI invocation still
+requires a valid new checkpoint use claim. Older coordinators reject this route
+without ordinary-create fallback.
 
 Registration accepts generic provider and SSH metadata. Repeating the same
 owner/org/id/provider tuple refreshes it and reactivates an expired record.
@@ -387,10 +445,12 @@ fallback, persists the record, and returns 201 `{lease}`. The CLI then starts a
 heartbeat goroutine and a lease watch.
 
 **Heartbeat.** `POST /v1/leases/{id}/heartbeat` bumps `lastTouchedAt`,
-recomputes `expiresAt`, clears cleanup metadata, and reschedules the alarm. It
+recomputes `expiresAt`, clears cleanup metadata, and arms the alarm no later
+than the lease's next deadline, preserving an already-earlier wakeup. It
 updates the idle timeout **only** when the request explicitly sends a positive
 `idleTimeoutSeconds` (clamped to `86400`); telemetry samples may ride along in
-the same body.
+the same body. HTTP and control-websocket heartbeats use the same alarm arming;
+an explicitly shortened idle timeout advances the wakeup when necessary.
 
 **Cancel create.** If the caller cancels an ordinary create, the CLI sends
 `POST /v1/leases/{requested-id}/cancel-create` with the exact create-attempt
@@ -400,8 +460,19 @@ canonical lease exists, its released state and durable cleanup claim are written
 under the same state lock before provider deletion, so ordinary maintenance can
 resume cleanup after a restart. It releases a reserved, provisioning, or
 retained canonical lease only when its private token, owner/org, and retained
-generation match; otherwise it fails closed. Fixed-ID `PUT` creates remain
-replay-owned and never use cancellation cleanup.
+generation match; otherwise it fails closed.
+
+Fixed-ID `PUT` creates record an owner/org/provider-bound intent before
+asynchronous preparation or capacity checks. They remain replay-owned, without
+a caller-supplied cancellation token. `POST /v1/leases/{id}/release` also
+cancels an admitted fixed intent that has not allocated a machine, including
+one rejected by a quota check. The cancellation survives coordinator restart
+and prevents a delayed or repeated create from allocating. Admission alone
+does not create a lease row or reserve usage. Unknown IDs still return 404;
+missing records from older coordinators do not prove cancellation or cleanup.
+Fixed admissions use version-2 attempt records: an older coordinator refuses
+to reuse these IDs, but only the upgraded coordinator can confirm cancellation
+before a lease row exists.
 
 **Release.** `POST /v1/leases/{id}/release` (body `{delete?}`, defaulting to
 `!keep`) deletes the cloud server when the lease is still active and sets state
@@ -418,6 +489,20 @@ claim and credentials for retry. Acquisition rollback queues release without
 waiting, as does automatic post-run release, so asynchronous provider cleanup
 does not delay an otherwise completed run. Isolated local lease credentials are
 removed only after final deletion is observed; retained releases preserve them.
+
+Ordinary heartbeat and release acknowledgements arm alarms under the lifecycle
+mutex without scanning global workspace or lease collections for scheduling.
+Release retains durable cleanup intent and requests immediate maintenance;
+retries preserve that wakeup, including after coordinator reconstruction.
+An already-due stored alarm time is rearmed at the earlier of that time and the
+requested deadline: a consumed runtime job can leave its timestamp behind.
+An earlier future alarm is preserved without another scheduling write.
+Alarm storage errors still fail the request and do not certify cleanup success.
+The existing full scheduler shares the lifecycle mutex with this arming, so a
+scan cannot race an acknowledgement's earlier wakeup. Full maintenance scans,
+slug resolution, provider access refresh, and provider ingress locking retain
+their existing behavior; their work and other shared-queue stalls are not
+bounded by this acknowledgement path.
 
 **Expiry and cleanup.** A DO alarm and the cron both run maintenance:
 `expireLeases` deletes cloud servers for active leases past `expiresAt`
@@ -451,6 +536,18 @@ heartbeats. A run keeps its initiating actor in `owner`/`org` plus every backing
 lease identity used by replacement flows. Each backing lease owner can read and
 subscribe for audit purposes, while only the actor or an admin can append
 events or telemetry and finish the run.
+
+Terminal finish atomically persists the run, signed receipt when supplied, log
+pointer, and terminal event before notifying control subscribers. Attachment
+read or serialization failures retire the affected socket and allow delivery
+to other authorized subscribers without failing the durable acknowledgement.
+Late close, error, and queued message callbacks for a retired notification
+socket are ignored without rereading its attachment; a replacement socket with
+the same client ID is unaffected.
+Subscription relevance is checked before asynchronous grant revalidation;
+both run access and a current grant are still required before sending. Receipt
+validation, storage, and grant-validation errors remain errors. Identical finish
+replays are idempotent; conflicting terminal evidence still returns `409`.
 
 ## CLI responsibilities
 

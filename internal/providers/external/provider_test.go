@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -3893,37 +3894,44 @@ func TestAcquireAcknowledgesRawIdentityBeforeSSHValidation(t *testing.T) {
 
 func TestAcquireRollbackReleaseUsesBoundedDetachedContext(t *testing.T) {
 	isolateCrabboxState(t)
+	const rollbackTimeout = 10 * time.Millisecond
 	oldTimeout := lifecycleRollbackTimeout
-	lifecycleRollbackTimeout = 10 * time.Millisecond
+	lifecycleRollbackTimeout = rollbackTimeout
 	t.Cleanup(func() { lifecycleRollbackTimeout = oldTimeout })
 
-	runner := &blockingAcquireRollbackRunner{}
-	backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	synctest.Test(t, func(t *testing.T) {
+		runner := &blockingAcquireRollbackRunner{}
+		backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
 
-	start := time.Now()
-	_, err := backend.Acquire(ctx, core.AcquireRequest{RequestedSlug: "invalid", Keep: false})
-	elapsed := time.Since(start)
-	if err == nil ||
-		!strings.Contains(err.Error(), "SSH host and user are required") ||
-		!strings.Contains(err.Error(), "external provider cleanup failed") ||
-		!strings.Contains(err.Error(), "context deadline exceeded") {
-		t.Fatalf("err=%v, want validation error with bounded cleanup failure", err)
-	}
-	var exit core.ExitError
-	if !core.AsExitError(err, &exit) || exit.Code != 5 || !strings.Contains(exit.Message, "external provider cleanup failed") {
-		t.Fatalf("exit=%#v ok=%v, want primary validation exit with cleanup message", exit, core.AsExitError(err, &exit))
-	}
-	if elapsed > time.Second {
-		t.Fatalf("Acquire took %s, want bounded cleanup to return promptly", elapsed)
-	}
-	if len(runner.operations) != 2 || runner.operations[0] != "acquire" || runner.operations[1] != "release" {
-		t.Fatalf("operations=%#v", runner.operations)
-	}
-	if !runner.releaseHasDeadline {
-		t.Fatal("release rollback did not receive a deadline")
-	}
+		// Reservation I/O holds virtual time still; the in-memory release advances it.
+		start := time.Now()
+		_, err := backend.Acquire(ctx, core.AcquireRequest{RequestedSlug: "invalid", Keep: false})
+		elapsed := time.Since(start)
+		if err == nil ||
+			!strings.Contains(err.Error(), "SSH host and user are required") ||
+			!strings.Contains(err.Error(), "external provider cleanup failed") ||
+			!strings.Contains(err.Error(), "context deadline exceeded") {
+			t.Fatalf("err=%v, want validation error with bounded cleanup failure", err)
+		}
+		var exit core.ExitError
+		if !core.AsExitError(err, &exit) || exit.Code != 5 || !strings.Contains(exit.Message, "external provider cleanup failed") {
+			t.Fatalf("exit=%#v ok=%v, want primary validation exit with cleanup message", exit, core.AsExitError(err, &exit))
+		}
+		if elapsed != rollbackTimeout {
+			t.Fatalf("Acquire took %s of virtual time, want exactly %s for rollback", elapsed, rollbackTimeout)
+		}
+		if len(runner.operations) != 2 || runner.operations[0] != "acquire" || runner.operations[1] != "release" {
+			t.Fatalf("operations=%#v", runner.operations)
+		}
+		if ctx.Err() != context.Canceled || runner.releaseInitialErr != nil {
+			t.Fatalf("parent=%v release initial error=%v, want rollback detached from canceled parent", ctx.Err(), runner.releaseInitialErr)
+		}
+		if !runner.releaseHasDeadline || runner.releaseTimeout != rollbackTimeout {
+			t.Fatalf("release deadline=%v timeout=%s, want exactly %s", runner.releaseHasDeadline, runner.releaseTimeout, rollbackTimeout)
+		}
+	})
 }
 
 func TestAcquireRollbackReleasePreservesCanceledPrimaryError(t *testing.T) {
@@ -4527,6 +4535,8 @@ type blockingAcquireRollbackRunner struct {
 	acquireResponse    string
 	operations         []string
 	releaseHasDeadline bool
+	releaseTimeout     time.Duration
+	releaseInitialErr  error
 }
 
 func (r *blockingAcquireRollbackRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
@@ -4543,7 +4553,10 @@ func (r *blockingAcquireRollbackRunner) Run(ctx context.Context, req core.LocalC
 		}
 		return core.LocalCommandResult{Stdout: response}, nil
 	case "release":
-		_, r.releaseHasDeadline = ctx.Deadline()
+		deadline, hasDeadline := ctx.Deadline()
+		r.releaseHasDeadline = hasDeadline
+		r.releaseTimeout = time.Until(deadline)
+		r.releaseInitialErr = ctx.Err()
 		<-ctx.Done()
 		return core.LocalCommandResult{ExitCode: 124, Stderr: "release timed out"}, ctx.Err()
 	default:

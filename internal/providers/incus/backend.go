@@ -268,7 +268,7 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (lease LeaseT
 			return LeaseTarget{}, err
 		}
 		server.Status = "ready"
-		server.Labels = touchInstanceLabels(server.Labels, cfg, "ready", time.Now().UTC())
+		server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", time.Now().UTC())
 		if err := setInstanceLabels(ctx, client, inst.Name, server.Labels); err != nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: set incus labels: %v\n", err)
 		}
@@ -341,6 +341,17 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 }
 
 func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *backend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	var outcome core.ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *backend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	cfg := b.configForRun()
 	client, err := newClient(cfg)
 	if err != nil {
@@ -352,7 +363,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 			return err
 		}
 		if exists && claim.Provider == providerName && claim.FixedCreateIntent != nil {
-			return b.releaseDurable(ctx, client, req.Lease.LeaseID, incusDeleteOnRelease(req.Lease, cfg), req.Force)
+			return b.releaseDurableWithOutcome(ctx, client, req.Lease.LeaseID, incusDeleteOnRelease(req.Lease, cfg), req.Force, outcome)
 		}
 	}
 	_, _, leaseID, err := b.resolveInstance(ctx, client, req.Lease.LeaseID)
@@ -368,7 +379,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	}
 	deleteInstance := incusDeleteOnRelease(req.Lease, cfg)
 	if claimOK && claim.FixedCreateIntent != nil {
-		return b.releaseDurable(ctx, client, leaseID, deleteInstance, req.Force)
+		return b.releaseDurableWithOutcome(ctx, client, leaseID, deleteInstance, req.Force, outcome)
 	}
 	return core.Exit(4, "Incus lease %s requires its durable ownership claim for release; inspect legacy instances with Incus directly", leaseID)
 }
@@ -414,7 +425,7 @@ func (b *backend) Touch(ctx context.Context, req TouchRequest) (core.Server, err
 		return core.Server{}, err
 	}
 	server := req.Lease.Server
-	server.Labels = touchInstanceLabels(server.Labels, cfg, req.State, time.Now().UTC())
+	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, time.Now().UTC())
 	name := strings.TrimSpace(core.Blank(server.CloudID, server.Labels["instance"]))
 	if name == "" {
 		return core.Server{}, core.Exit(2, "provider=%s touch requires an Incus instance name", providerName)

@@ -87,12 +87,23 @@ execution and includes `runID`. A missing receipt is not reconstructed from logs
 or events. A receipt-bearing CLI fails closed against a coordinator that accepts
 the finish but cannot return the exact stored receipt.
 
+If terminal recording fails, the CLI reports the attempted finish submission
+and receipt-verification errors, the attempt count, and the recovery command.
+These diagnostics remain available when the shared 60-second recording deadline
+expires. That failure does not establish the remote command's exit status; use
+the committed receipt to resolve an ambiguous result.
+
 Run records keep the initiating actor in `owner`/`org` and retain every backing
 lease identity used by a replacement flow. Each backing lease owner has
 read-only access to history, details, logs, events, telemetry, live event
 subscriptions, and portal pages for auditing work on their lease. Only the
 initiating actor or an admin can append events or telemetry and finish the run.
 Lease shares do not grant access to runs created by other actors.
+
+Once a finish is committed, later events remain in the ordered audit trail but
+do not change the run's terminal state, phase, end time, or backing lease
+metadata. This includes delayed output, duplicate failure notifications, and
+post-finish lease cleanup events; the committed logs and receipt remain authoritative.
 
 ## Storage limits
 
@@ -101,8 +112,13 @@ Durable Object storage on Cloudflare or PostgreSQL on Node. Log text is stored
 separately from run metadata and is intentionally bounded so noisy commands
 cannot exhaust storage:
 
-- The CLI keeps the **last 8 MiB** of command output and reports
-  `logTruncated` when more was produced.
+- The CLI keeps a **UTF-8 text tail of at most 8 MiB**. It replaces each
+  malformed output byte with U+FFFD and truncates only at codepoint boundaries,
+  so a retained tail can be a few bytes smaller than the cap.
+- `logTruncated` (the receipt's `log_truncated`) means the retained text is not
+  byte-complete: output exceeded the cap, malformed UTF-8 was normalized, or
+  output went exclusively to local captures. An exact-cap valid UTF-8 stream
+  with no omitted output is not truncated.
 - The broker stores the same **8 MiB** cap, chunked at **64 KiB** per storage
   value and reassembled by `crabbox logs`.
 
@@ -118,8 +134,11 @@ For uncapped, local-only output, mirror the streams to files:
 crabbox run --capture-stdout out.log --capture-stderr err.log -- ./test.sh
 ```
 
-These captures are written on the operator's machine and bypass coordinator
-run-log storage entirely. Use distinct paths for stdout, stderr, and any
+These captures preserve raw bytes on the operator's machine and bypass
+coordinator run-log storage entirely. The signed full-stream hash also remains
+raw; only the retained-text hash uses the normalized representation. Nonempty
+captured streams therefore make the retained log byte-incomplete even when its
+text is below the cap. Use distinct paths for stdout, stderr, and any
 `--download remote=local` artifacts — Crabbox rejects path collisions before the
 command runs.
 

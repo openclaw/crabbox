@@ -71,7 +71,7 @@ func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 		Host:             fs.String("parallels-host", defaults.Parallels.Host, "remote Mac host running Parallels"),
 		HostUser:         fs.String("parallels-host-user", defaults.Parallels.HostUser, "remote Mac SSH user"),
 		HostKey:          fs.String("parallels-host-key", defaults.Parallels.HostKey, "remote Mac SSH key"),
-		VMRoot:           fs.String("parallels-vm-root", defaults.Parallels.VMRoot, "destination directory for cloned .pvm bundles"),
+		VMRoot:           fs.String("parallels-vm-root", defaults.Parallels.VMRoot, "destination directory for cloned VM bundles"),
 		User:             fs.String("parallels-user", defaults.Parallels.User, "guest SSH user"),
 		WorkRoot:         fs.String("parallels-work-root", defaults.Parallels.WorkRoot, "remote work root inside Parallels guests"),
 		StartupTimeout:   fs.String("parallels-startup-timeout", defaults.Parallels.StartupTimeout.String(), "Parallels VM startup timeout"),

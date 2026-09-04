@@ -1,5 +1,62 @@
 # Lifecycle and Cleanup
 
+## Durable provisioning ownership
+
+Eligible new Azure Windows creates can be admitted by the versioned durable
+controller described in [Coordinator](coordinator.md#durable-azure-provisioning).
+Their private operation owns all candidate resource identities until terminal
+publication or verified cleanup. Legacy interrupted-create recovery, expiry,
+deferred cleanup and orphan mutation must respect this ownership. Transactional
+legacy mutation fences prevent a new admission from overtaking cleanup that
+has already claimed its provider work. An unsuccessful legacy mutation retains
+its fence and existing cleanup evidence; a new job is never proof that old
+cleanup debt disappeared.
+
+Cancellation, including ordinary token cancellation with `keep=true`, stops
+forward provisioning and fallback. Already dispatched work must settle before
+the controller deletes verified resources. The journal retains immutable VM,
+NIC, public-IP and disk identities while deletion progress shrinks separately.
+An unexplained missing resource, identity replacement or unresolved dispatch
+remains cleanup debt. In particular, a network PUT with a lost acknowledgement
+followed by 404 is not permission to repeat allocation or move to another
+candidate. Completed machines retain their observed identity for the existing
+owned-deletion path.
+
+Explicit release with `{ "delete": false }` retains a provisioning resource and
+its private identity records. It stops forward provisioning and active
+publication, observes any dispatched work to settlement, and then removes the
+operation from the runnable queue. A later explicit release with `delete: true`
+resumes exact owned cleanup without decrypting the retired VM password/bootstrap.
+Ordinary token cancellation still requires cleanup,
+including when the original request used `keep=true`. A retention request cannot
+undo a deletion request that already owns cleanup.
+
+Healthy queued cleanup reports `cleanupStatus: pending` through release and GET.
+Verified final cleanup clears its transient metadata and reports `complete`;
+identity conflicts, missing successful-deletion proof and observed errors report
+`failed`. Retention reports `retained`. These states preserve the existing client
+rule to keep local credentials until cleanup is verified complete.
+
+Durable Azure cleanup uses the same owned-delete claims, immutable identity and
+attachment validation as ordinary release. Each bounded tick removes at most one
+resource or polls one acknowledged deletion operation. Intent alone, a lost
+DELETE response, or a failed successful-progress write never authorizes removal
+of the remaining members. An accepted asynchronous DELETE is recorded separately
+from successful progress; the operation must report success before that progress
+can be persisted. Retryable in-use errors trigger fresh ownership checks on the
+next tick. Completed deletion claims remain as exact completion evidence so a
+lost provisioning-result commit cannot erase cleanup proof.
+
+Nonsecret plans, attempt histories and completed deletion claims currently have
+the same manual retention lifecycle as lease history; there is no automatic
+history-pruning job. Understood operations retire sealed replay material in the
+same transaction that durably disables forward work through cancellation,
+retention or expiry, even when settlement or cleanup remains unresolved. Pending
+forward operations still require valid bound material; unsupported/quarantined
+records are not blindly purged. Successful publication also purges material.
+A future history pruner must preserve unresolved ownership and consume
+completed claims together with their operation history, never as orphan cleanup.
+
 Read this when:
 
 - changing how leases are released or expired;
@@ -45,10 +102,14 @@ orphan sweep's complete-set and quarantine requirements.
 
 ### Heartbeats and expiry
 
-While a command runs, the CLI heartbeats the active lease (`POST
-/v1/leases/{id}/heartbeat`). A heartbeat is a touch: it bumps `lastTouchedAt`,
-recomputes `expiresAt`, clears stale cleanup metadata, and refreshes provider SSH
-access where the provider supports it. Heartbeats at or after `expiresAt` are
+While a command runs, the CLI heartbeats the active lease over the coordinator
+control WebSocket, falling back to `POST /v1/leases/{id}/heartbeat` within the
+same 20-second request budget. An exhausted control request keeps its original
+failure diagnosis instead of attempting HTTP with an expired context; when both
+transports fail, the warning retains both causes. A heartbeat
+bumps `lastTouchedAt`, recomputes `expiresAt`, and clears stale cleanup metadata;
+the HTTP path also refreshes provider SSH access where supported. Heartbeats at
+or after `expiresAt` are
 rejected so they cannot revive a lease once expiry cleanup owns it.
 
 Expiry is the minimum of two clocks (`leaseExpiresAt` in `worker/src/fleet.ts`):
@@ -76,20 +137,38 @@ does **not** exempt a lease from idle or TTL expiry.
 
 After one release mutation is accepted, an explicit CLI stop observes the lease
 with read-only requests until provider deletion is final or a bounded wait ends.
+The public `cleanupStatus` distinguishes normal pending creation or cleanup from
+an observed failure. Pending work uses that same observation loop and five-minute
+bound; the CLI does not send another release mutation after acceptance. Existing
+cleanup diagnostics remain intact for clients that predate this classification.
+New AWS instance IDs can be temporarily invisible. Cleanup observes visibility
+within the existing bound before verifying allocation ownership; unconfirmed
+visibility or termination retains cleanup debt rather than reporting deletion.
+Allocation claims carry the prepared account scope for AWS Mac instances.
+Storage failures while publishing or checking an allocation preserve its cleanup
+claim without retrying creation.
 The CLI removes its local per-lease SSH connection directory only after final
 cleanup state is observed. Pending or retrying cleanup, observation timeout or
 cancellation, provider errors, ownership mismatches, and retained resources keep
 the local claim and credentials available for a safe retry. Acquisition rollback
 and automatic post-run release only queue cleanup and do not wait for provider
 deletion; they preserve local state while cleanup is pending. Local cleanup is
-scoped to `<user-config>/crabbox/testboxes/<lease-id>` and never follows configured
-or shared SSH key paths.
+scoped to `<user-config>/crabbox/testboxes/<lease-id>` and its private short SSH
+socket namespace; it never follows configured or shared SSH key paths. Cleanup
+closes and joins the lease's persistent OpenSSH masters before deleting local
+artifacts. Local failure preserves the confirmed remote outcome and local claim;
+a fresh confirmed-deletion lookup retries only local cleanup, not provider deletion.
 
 For public AWS leases, shared security-group writes remain serialized with release
 and authoritative ingress reconciliation. Image selection, instance creation and
 network-address readiness do not hold that fence, so a slow new instance does
 not delay release of another lease. Every regional ingress attempt rechecks the
 creating lease and derives access from current lease records before writing.
+
+If a create attempt is canceled or its lease is released during AWS region
+preparation, the in-flight create returns `409 create_canceled` with the reason.
+It does not continue into another region or report an empty provider error.
+Cancellation does not confirm deletion; inspect the lease's cleanup status separately.
 
 ### Cleanup retries
 

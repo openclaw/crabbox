@@ -440,7 +440,7 @@ func (a App) coordinatorRegistrationWarning(leaseID string, err error) {
 	fmt.Fprintf(a.Stderr, "warning: coordinator registration failed for %s: %v\n", firstNonBlank(leaseID, "unknown"), err)
 }
 
-func (a App) startRegisteredWebVNCDaemonBestEffort(cfg Config, target SSHTarget, leaseID string, keep bool) {
+func (a App) startRegisteredWebVNCDaemonBestEffort(ctx context.Context, cfg Config, target SSHTarget, leaseID string, keep bool) {
 	if !shouldStartRegisteredWebVNCDaemon(cfg, keep) {
 		return
 	}
@@ -448,7 +448,7 @@ func (a App) startRegisteredWebVNCDaemonBestEffort(cfg Config, target SSHTarget,
 	// Resolve the password before the daemon environment is scrubbed. The
 	// supervisor forwards this value to the bridge over its one-shot stdin gate.
 	credentialInput := registeredWebVNCDaemonCredentialInput(cfg, args.Args)
-	if err := a.startWebVNCDaemon(args, leaseID, false, "", credentialInput, target.ChildEnvDenylist...); err != nil {
+	if err := a.startWebVNCDaemon(ctx, args, leaseID, false, "", credentialInput, target.ChildEnvDenylist...); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: could not start registered WebVNC bridge for %s: %v\n", leaseID, err)
 	}
 }
@@ -583,7 +583,7 @@ func (a App) releaseRegisteredCoordinatorLease(ctx context.Context, cfg Config, 
 		return nil
 	}
 	if stopBridge {
-		if _, err := a.stopWebVNCDaemonIfRunning(leaseID); err != nil && a.Stderr != nil {
+		if _, err := a.stopWebVNCDaemonIfRunning(ctx, leaseID); err != nil && a.Stderr != nil {
 			fmt.Fprintf(a.Stderr, "warning: could not stop registered WebVNC bridge for %s: %v\n", leaseID, err)
 		}
 	}

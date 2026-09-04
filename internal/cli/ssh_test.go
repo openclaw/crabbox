@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,7 +43,7 @@ func TestWindowsPowerShellStdinScriptCommandUsesExactLengthFrame(t *testing.T) {
 	decoded := decodePowerShellCommand(t, command)
 	for _, want := range []string{
 		"$remaining = [Int64]12345",
-		"$stdin.Read($buffer, 0, $readSize)",
+		"$stdin.ReadAsync($buffer, 0, $readSize).GetAwaiter().GetResult()",
 		"SSH stdin ended before the framed payload",
 		"$scriptFile.Flush($true)",
 		"-File $path",
@@ -1537,7 +1539,7 @@ printf 'executed once\n'
 			if len(lines) != test.wantCalls {
 				t.Fatalf("ssh calls=%d, want %d:\n%s", len(lines), test.wantCalls, calls)
 			}
-			if got := strings.Contains(lines[len(lines)-1], "ControlMaster=no"); got != test.wantDirect {
+			if got := strings.Contains(lines[len(lines)-1], "ControlMaster=no"); !test.authSecret && got != test.wantDirect {
 				t.Fatalf("last SSH invocation disables multiplexing=%t, want %t:\n%s", got, test.wantDirect, calls)
 			}
 			if (test.wantCode == 0 || test.mode == "nested-ssh" || test.mode == "server-disconnect") && stdout.String() != "executed once\n" {
@@ -1725,8 +1727,8 @@ exit 0
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(ports) != "2222\n22\n22\n" {
-		t.Fatalf("ports=%q want probe fallback then readiness execution", string(ports))
+	if string(ports) != "2222\n22\n" {
+		t.Fatalf("ports=%q want one readiness execution per candidate", string(ports))
 	}
 }
 
@@ -1819,7 +1821,7 @@ exit 0
 				t.Fatalf("readiness did not pin the fully ready fallback: %+v", target)
 			}
 			calls, err := os.ReadFile(callsPath)
-			if got, want := string(calls), "2222:exit 0\n2222:true\n22:exit 0\n22:true\n"; err != nil || got != want {
+			if got, want := string(calls), "2222:true\n22:true\n"; err != nil || got != want {
 				t.Fatalf("readiness calls=%q error=%v want=%q", got, err, want)
 			}
 		})
@@ -2987,6 +2989,48 @@ func TestRemoteFinalizeSyncCommitsMetadataInOneCommand(t *testing.T) {
 	}
 }
 
+func TestRemoteFinalizeSyncPlainManifestSuppressesOriginState(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	workdir := t.TempDir()
+	runGit(t, workdir, "init")
+	runGit(t, workdir, "config", "user.email", "alice@example.com")
+	runGit(t, workdir, "config", "user.name", "Alice")
+	mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "tracked\n")
+	runGit(t, workdir, "add", ".")
+	runGit(t, workdir, "commit", "-qm", "base")
+	metaDir := coherenceMetaDir(t, workdir)
+	mustWriteTestFile(t, filepath.Join(metaDir, remoteSyncPendingManifestName(token)), "tracked.txt\x00")
+	mustWriteTestFile(t, filepath.Join(metaDir, "sync-fingerprint"), "stale")
+	mustWriteTestFile(t, filepath.Join(metaDir, "git-hydrate-base"), "main stale\n")
+
+	command := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
+		PlainManifest: true,
+		HydrateGit:    true,
+		BaseRef:       "main",
+		BaseSHA:       "abc123",
+		Fingerprint:   "must-not-publish",
+		Token:         token,
+	})
+	for _, forbidden := range []string{"git fetch ", "repair_origin", "base_tmp=", "refs/remotes/origin/"} {
+		if strings.Contains(command, forbidden) {
+			t.Fatalf("plain manifest finalize contains %q:\n%s", forbidden, command)
+		}
+	}
+	for _, want := range []string{"plain_git status --porcelain=v1", "protocol.allow=never", "BASH_ENV=/dev/null", "ENV=/dev/null"} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("plain manifest finalize missing %q:\n%s", want, command)
+		}
+	}
+	if out, err := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", command).CombinedOutput(); err != nil {
+		t.Fatalf("plain manifest finalize: %v\n%s", err, out)
+	}
+	for _, name := range []string{"sync-fingerprint", "git-hydrate-base"} {
+		if _, err := os.Stat(filepath.Join(metaDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("%s survived plain manifest finalize: %v", name, err)
+		}
+	}
+}
+
 func TestRemoteFinalizeSyncHydratesForRepositoryDepth(t *testing.T) {
 	fixture := newGitCoherenceFixture(t)
 	// Exceed the fallback depth so accidentally deepening a complete clone is observable.
@@ -3367,17 +3411,13 @@ exec ` + shellQuote(gitOutput("", "--exec-path")+"/git") + ` "$@"
 	if err := os.WriteFile(filepath.Join(tools, "git"), []byte(gitScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	envFile := filepath.Join(tools, "env")
-	if err := os.WriteFile(envFile, []byte("export PATH="+shellQuote(tools)+":$PATH\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	commonEnv := []string{
-		"BASH_ENV=" + envFile,
+		"PATH=" + tools + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"CRABBOX_COHERENT_READY=" + coherentReady,
 		"CRABBOX_OVERLAY_WROTE=" + overlayWrote,
 		"CRABBOX_RELEASE_OVERLAY=" + releaseOverlay,
 	}
-	coherent := exec.Command("bash", "-lc", remoteFinalizeSync(coherentWorkdir, remoteSyncFinalizeOptions{
+	coherent := exec.Command("/bin/sh", "-c", remoteFinalizeSync(coherentWorkdir, remoteSyncFinalizeOptions{
 		Token:       token,
 		Fingerprint: "coherent",
 		Coherence:   plan,
@@ -3417,7 +3457,7 @@ exec ` + shellQuote(gitOutput("", "--exec-path")+"/git") + ` "$@"
 	}
 	waitForPath(coherentReady, "coherent finalizer did not reach candidate status inspection")
 
-	overlay = exec.Command("bash", "-lc", remoteFinalizeSync(overlayWorkdir, remoteSyncFinalizeOptions{Token: token}))
+	overlay = exec.Command("/bin/sh", "-c", remoteFinalizeSync(overlayWorkdir, remoteSyncFinalizeOptions{Token: token}))
 	overlay.Env = append(os.Environ(), append(commonEnv, "CRABBOX_STATUS_ROLE=overlay")...)
 	var overlayOutput bytes.Buffer
 	overlay.Stdout = &overlayOutput
@@ -3613,7 +3653,7 @@ func stageCoherenceFinalize(t *testing.T, workdir, token string) {
 }
 
 func runCoherenceFinalize(workdir string, plan gitCoherencePlan, token, fingerprint string, env ...string) ([]byte, error) {
-	cmd := exec.Command("bash", "-lc", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
+	cmd := exec.Command("/bin/sh", "-c", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
 		Token:       token,
 		Fingerprint: fingerprint,
 		Coherence:   plan,
@@ -3654,6 +3694,125 @@ func requireGitOutput(t *testing.T, workdir, want string, args ...string) {
 	t.Helper()
 	if got := gitOutput(workdir, args...); got != want {
 		t.Fatalf("git %v=%q want %q", args, got, want)
+	}
+}
+
+func newGitCoherenceFixtureWithDeletedTopic(t *testing.T) gitCoherenceFixture {
+	t.Helper()
+	f := newGitCoherenceFixture(t)
+	runGit(t, f.origin, "update-ref", "refs/heads/alpha-deleted", f.b)
+	runGit(t, f.origin, "update-ref", "refs/heads/release", f.c)
+	runGit(t, f.source, "fetch", "--no-prune", "origin", "+refs/heads/*:refs/remotes/origin/*")
+	runGit(t, f.origin, "update-ref", "-d", "refs/heads/alpha-deleted")
+	runGit(t, f.source, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+	runGit(t, f.source, "checkout", "--quiet", "--detach", f.b)
+	requireGitOutput(t, f.origin, "", "for-each-ref", "refs/heads/alpha-deleted")
+	requireGitOutput(t, f.source, f.b, "rev-parse", "refs/remotes/origin/alpha-deleted")
+	refs := gitOutput(f.source, "for-each-ref", "--format=%(refname) %(objectname) %(symref)", "refs/remotes/origin")
+	t.Cleanup(func() {
+		requireGitOutput(t, f.source, refs, "for-each-ref", "--format=%(refname) %(objectname) %(symref)", "refs/remotes/origin")
+		requireGitOutput(t, f.source, f.b, "rev-parse", "HEAD")
+	})
+	return f
+}
+
+func TestRemoteGitSeedAndCoherencePreferContainingBranchOverDeletedTopic(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell Git seed/coherence fixture")
+	}
+	t.Parallel()
+	f := newGitCoherenceFixtureWithDeletedTopic(t)
+	for _, tc := range []struct {
+		name, configuredBase, baseRef, want string
+	}{
+		{"repository base", "", "main", "main"},
+		{"origin default", "", "missing", "main"},
+		{"configured base after default deletion", "release", "main", "release"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reusedWorkdir := f.workspace(t, f.c, true)
+			if tc.configuredBase != "" {
+				runGit(t, f.origin, "update-ref", "-d", "refs/heads/main")
+				requireGitOutput(t, f.source, f.c, "rev-parse", "refs/remotes/origin/main")
+			}
+			cfg := baseConfig()
+			cfg.Sync.BaseRef = tc.configuredBase
+			plan, blocked := syncGitCoherencePlan(cfg, Repo{
+				Root: f.source, RemoteURL: f.origin, Head: f.b, BaseRef: tc.baseRef,
+			})
+			if blocked || !plan.enabled() {
+				t.Fatalf("coherence plan unavailable: blocked=%v plan=%#v", blocked, plan)
+			}
+			for _, mode := range []string{"seed", "coherence"} {
+				t.Run(mode, func(t *testing.T) {
+					var workdir string
+					if mode == "seed" {
+						workdir = filepath.Join(t.TempDir(), "work")
+						if out, err := exec.Command("/bin/sh", "-c", remoteGitSeed(workdir, plan)).CombinedOutput(); err != nil {
+							t.Fatalf("seed via %q: %v\n%s", plan.Branch, err, out)
+						}
+					} else {
+						workdir = reusedWorkdir
+						mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
+						const token = "abababababababababababababababab"
+						stageCoherenceFinalize(t, workdir, token)
+						if out, err := runCoherenceFinalize(workdir, plan, token, "fp-b"); err != nil {
+							t.Fatalf("coherence via %q: %v\n%s", plan.Branch, err, out)
+						}
+						if got := readCoherentFingerprint(t, workdir, plan); got != "fp-b" {
+							t.Fatalf("coherent fingerprint=%q", got)
+						}
+					}
+					if plan.Branch != tc.want {
+						t.Fatalf("branch=%q, want %q", plan.Branch, tc.want)
+					}
+					requireGitOutput(t, workdir, f.b, "rev-parse", "HEAD")
+					requireGitOutput(t, workdir, gitOutput(f.source, "rev-parse", f.b+"^{tree}"), "write-tree")
+					requireGitOutput(t, workdir, f.c, "rev-parse", "refs/remotes/origin/"+tc.want)
+					requireGitOutput(t, workdir, "", "status", "--porcelain")
+				})
+			}
+		})
+	}
+}
+
+func TestWindowsGitSeedAndCoherenceUseContainingBranch(t *testing.T) {
+	t.Parallel()
+	f := newGitCoherenceFixtureWithDeletedTopic(t)
+	plan, blocked := syncGitCoherencePlan(baseConfig(), Repo{
+		Root: f.source, RemoteURL: f.origin, Head: f.b, BaseRef: "origin/main",
+	})
+	if blocked || !plan.enabled() {
+		t.Fatalf("coherence plan unavailable: blocked=%v plan=%#v", blocked, plan)
+	}
+	tree := gitOutput(f.source, "rev-parse", f.b+"^{tree}")
+	for _, tc := range []struct {
+		name, command string
+		want          []string
+	}{
+		{"seed", windowsGitSeed(`C:\work\repo`, plan), []string{
+			"--single-branch --branch 'main' $expectedOrigin $tmp",
+			"checkout --quiet --detach '" + f.b + "'",
+			"$expectedTree = '" + tree + "'",
+		}},
+		{"coherence", windowsGitCoherence(`C:\work\repo`, plan), []string{
+			`("+refs/heads/" + 'main' + ":" + $tmpRef)`,
+			"$target = '" + f.b + "'; $tree = '" + tree + "'",
+			"git merge-base --is-ancestor $target $tmpRef",
+			"git update-ref --no-deref HEAD $target $oldHead",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			decoded := decodePowerShellCommand(t, tc.command)
+			for _, want := range tc.want {
+				if !strings.Contains(decoded, want) {
+					t.Errorf("Windows %s missing %q (plan branch=%q)", tc.name, want, plan.Branch)
+				}
+			}
+			if strings.Contains(decoded, "alpha-deleted") || strings.Contains(decoded, f.c) {
+				t.Error("Windows command selected deleted topic or newer branch tip")
+			}
+		})
 	}
 }
 
@@ -3707,7 +3866,7 @@ func TestRemoteGitCoherenceExitTrapBehavior(t *testing.T) {
 		beforeIndex := coherenceIndexBytes(t, workdir)
 		tools := coherenceFailureTools(t, plan.Target)
 		out, err := runCoherenceFinalize(workdir, plan, token, "fp-failure",
-			"BASH_ENV="+filepath.Join(tools, "env"), "CRABBOX_FAIL_MV=complete")
+			"PATH="+tools+string(os.PathListSeparator)+os.Getenv("PATH"), "CRABBOX_FAIL_MV=complete")
 		if got := exitCode(err); got != 94 {
 			t.Fatalf("failed finalize exit=%d, want original exit 94: %v\n%s", got, err, out)
 		}
@@ -3771,7 +3930,7 @@ func TestRemoteGitCoherenceRepairsReuseBeforeFingerprintSkip(t *testing.T) {
 	if got := readCoherentFingerprint(t, workdir, planB); got != "fp-b" {
 		t.Fatalf("coherent B fingerprint=%q", got)
 	}
-	if out, err := exec.Command("bash", "-lc", remoteInvalidateSyncFingerprintForTarget(SSHTarget{TargetOS: targetLinux}, workdir)).CombinedOutput(); err != nil {
+	if out, err := exec.Command("bash", "-lc", remoteInvalidateSyncFingerprintForTarget(SSHTarget{TargetOS: targetLinux}, workdir, false)).CombinedOutput(); err != nil {
 		t.Fatalf("invalidate fingerprint: %v\n%s", err, out)
 	}
 	if got := readCoherentFingerprint(t, workdir, planB); got != "" {
@@ -3797,7 +3956,7 @@ func TestRemoteGitCoherenceFailsClosedWhenAdvertisedBranchCannotBeVerified(t *te
 	f := newGitCoherenceFixture(t)
 	workdir := f.workspace(t, f.a, true)
 	plan := f.plan(t, f.b)
-	plan.RemoteURL = filepath.Join(t.TempDir(), "missing-origin.git")
+	plan.Branch = "missing"
 	const token = "abababababababababababababababab"
 	stageCoherenceFinalize(t, workdir, token)
 	out, err := runCoherenceFinalize(workdir, plan, token, "must-not-publish")
@@ -3881,9 +4040,6 @@ exec /bin/mv "$@"
 	if err := os.WriteFile(filepath.Join(dir, "mv"), []byte(mvScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "env"), []byte("export PATH="+shellQuote(dir)+":$PATH\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	return dir
 }
 
@@ -3898,7 +4054,7 @@ func TestRemoteGitCoherenceRollsBackFailuresAndRetries(t *testing.T) {
 			stageCoherenceFinalize(t, workdir, token)
 			beforeIndex := coherenceIndexBytes(t, workdir)
 			tools := coherenceFailureTools(t, plan.Target)
-			env := []string{"BASH_ENV=" + filepath.Join(tools, "env")}
+			env := []string{"PATH=" + tools + string(os.PathListSeparator) + os.Getenv("PATH")}
 			if failure == "fingerprint" || failure == "complete" {
 				env = append(env, "CRABBOX_FAIL_MV="+failure)
 			} else {
@@ -3934,7 +4090,7 @@ func TestRemoteGitCoherenceDoesNotOverwriteConcurrentRollbackChanges(t *testing.
 			token := fmt.Sprintf("%032x", len(failure)+200)
 			stageCoherenceFinalize(t, workdir, token)
 			tools := coherenceFailureTools(t, plan.Target)
-			env := []string{"BASH_ENV=" + filepath.Join(tools, "env"), "CRABBOX_FAIL_MV=" + failure, "CRABBOX_CONCURRENT_WORKDIR=" + workdir, "CRABBOX_CONCURRENT_HEAD=" + f.c, "CRABBOX_TARGET_HEAD=" + f.b, "CRABBOX_OLD_HEAD=" + f.a}
+			env := []string{"PATH=" + tools + string(os.PathListSeparator) + os.Getenv("PATH"), "CRABBOX_FAIL_MV=" + failure, "CRABBOX_CONCURRENT_WORKDIR=" + workdir, "CRABBOX_CONCURRENT_HEAD=" + f.c, "CRABBOX_TARGET_HEAD=" + f.b, "CRABBOX_OLD_HEAD=" + f.a}
 			out, err := runCoherenceFinalize(workdir, plan, token, "fp-"+failure, env...)
 			if err == nil {
 				t.Fatalf("concurrent fault unexpectedly succeeded\n%s", out)
@@ -4567,8 +4723,10 @@ func TestRemoteGitSeedRemovesFailedCheckout(t *testing.T) {
 	got := remoteGitSeed("/work/repo", gitCoherencePlan{RemoteURL: "https://github.com/openclaw/crabbox.git", Target: "missing-sha", Tree: "tree", Branch: "main"})
 	for _, want := range []string{
 		"git -C \"$tmp\" checkout --quiet --detach",
-		"cleanup_seed() { rm -rf -- \"$tmp\"; }",
+		"cleanup_seed() { rm -rf -- \"$tmp\"; rm -f -- \"$transport_error\"; }",
 		"trap cleanup_seed EXIT",
+		"cat \"$transport_error\" >&2",
+		"exit 78",
 		"mv -- \"$tmp\" \"$workdir\"",
 	} {
 		if !strings.Contains(got, want) {
@@ -4577,6 +4735,489 @@ func TestRemoteGitSeedRemovesFailedCheckout(t *testing.T) {
 	}
 	if strings.Contains(got, "git checkout --quiet FETCH_HEAD || true") {
 		t.Fatalf("remoteGitSeed should not keep failed checkouts: %q", got)
+	}
+	for _, forbidden := range []string{"origin_transport_fallback", "CRABBOX_GIT_ORIGIN_FALLBACK", "Authentication failed", "repository not found"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("remoteGitSeed retained origin policy %q in %q", forbidden, got)
+		}
+	}
+}
+
+func TestRemoteGitOriginTransportClassification(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX origin transport classifier")
+	}
+	tests := []struct {
+		name         string
+		remoteURL    string
+		message      string
+		exitCode     int
+		truncated    bool
+		wantReason   string
+		wantFallback bool
+	}{
+		{name: "authentication", remoteURL: "https://example.test/repo.git", message: "fatal: Authentication failed", exitCode: gitOriginRuntimeFallbackExitCode, wantReason: "origin_auth_required", wantFallback: true},
+		{name: "HTTP 403", remoteURL: "https://example.test/repo.git", message: "fatal: unable to access: The requested URL returned error: 403", exitCode: gitOriginRuntimeFallbackExitCode, wantReason: "origin_auth_required", wantFallback: true},
+		{name: "DNS", remoteURL: "https://example.test/repo.git", message: "fatal: unable to access: Could not resolve host: example.test", exitCode: gitOriginRuntimeFallbackExitCode, wantReason: "origin_unavailable", wantFallback: true},
+		{name: "TLS", remoteURL: "https://example.test/repo.git", message: "fatal: unable to access: SSL certificate problem: unable to get local issuer certificate", exitCode: gitOriginRuntimeFallbackExitCode, wantReason: "origin_unavailable", wantFallback: true},
+		{name: "firewall", remoteURL: "https://example.test/repo.git", message: "fatal: unable to access: No route to host", exitCode: gitOriginRuntimeFallbackExitCode, wantReason: "origin_unavailable", wantFallback: true},
+		{name: "disconnected socket Linux", remoteURL: "https://example.test/repo.git", message: "fatal: unable to access 'https://example.test/repo.git/': getpeername() failed with errno 107: Transport endpoint is not connected", exitCode: gitOriginRuntimeFallbackExitCode, wantReason: "origin_unavailable", wantFallback: true},
+		{name: "disconnected socket BSD", remoteURL: "https://example.test/repo.git", message: "fatal: unable to access: getpeername() failed with errno 57: Socket is not connected", exitCode: gitOriginRuntimeFallbackExitCode, wantReason: "origin_unavailable", wantFallback: true},
+		{name: "other socket inspection error", remoteURL: "https://example.test/repo.git", message: "fatal: unable to access: getpeername() failed with errno 9: Bad file descriptor", exitCode: gitOriginRuntimeFallbackExitCode},
+		{name: "unclassified HTTP failure", remoteURL: "https://example.test/repo.git", message: "fatal: unable to access: unknown transport failure", exitCode: gitOriginRuntimeFallbackExitCode},
+		{name: "HTTP server failure beats disconnected socket", remoteURL: "https://example.test/repo.git", message: "fatal: The requested URL returned error: 503\ngetpeername() failed with errno 107: Transport endpoint is not connected", exitCode: gitOriginRuntimeFallbackExitCode},
+		{name: "disconnected socket wrong exit", remoteURL: "https://example.test/repo.git", message: "getpeername() failed with errno 107: Transport endpoint is not connected", exitCode: 67},
+		{name: "disconnected socket truncated", remoteURL: "https://example.test/repo.git", message: "getpeername() failed with errno 107: Transport endpoint is not connected", exitCode: gitOriginRuntimeFallbackExitCode, truncated: true},
+		{name: "private HTTP repository", remoteURL: "https://example.test/repo.git", message: "remote: Repository not found.", exitCode: gitOriginRuntimeFallbackExitCode, wantReason: "origin_auth_required", wantFallback: true},
+		{name: "filesystem unavailable", remoteURL: "/srv/git/repo.git", message: "fatal: '/srv/git/repo.git' does not appear to be a git repository", exitCode: gitOriginRuntimeFallbackExitCode, wantReason: "origin_unavailable", wantFallback: true},
+		{name: "HTTP server failure beats transport", remoteURL: "https://example.test/repo.git", message: "fatal: The requested URL returned error: 503; Failed to connect", exitCode: gitOriginRuntimeFallbackExitCode},
+		{name: "HTTP response", remoteURL: "https://example.test/repo.git", message: "fatal: unable to access: The requested URL returned error: 500", exitCode: gitOriginRuntimeFallbackExitCode},
+		{name: "missing branch", remoteURL: "https://example.test/repo.git", message: "fatal: couldn't find remote ref absent", exitCode: gitOriginRuntimeFallbackExitCode},
+		{name: "marker spoof", remoteURL: "https://example.test/repo.git", message: "CRABBOX_GIT_ORIGIN_FALLBACK:origin_unavailable", exitCode: gitOriginRuntimeFallbackExitCode},
+		{name: "wrong exit", remoteURL: "https://example.test/repo.git", message: "fatal: Authentication failed", exitCode: 67},
+		{name: "truncated authentication", remoteURL: "https://example.test/repo.git", message: "fatal: Authentication failed", exitCode: gitOriginRuntimeFallbackExitCode, truncated: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := exec.Command("sh", "-c", "exit "+strconv.Itoa(tt.exitCode)).Run()
+			if tt.truncated {
+				err = &gitOriginDiagnosticsTruncatedError{err: err}
+			}
+			reason, fallback := gitOriginRuntimeFallbackResult(tt.remoteURL, tt.message, err)
+			if fallback != tt.wantFallback || reason != tt.wantReason {
+				t.Fatalf("fallback=%t reason=%q err=%v output=%q", fallback, reason, err, tt.message)
+			}
+		})
+	}
+	if reason, fallback := gitOriginRuntimeFallbackResult("https://example.test/repo.git", "fatal: Authentication failed", nil); fallback || reason != "" {
+		t.Fatalf("successful attempt classified fallback=%t reason=%q", fallback, reason)
+	}
+	functions := remoteGitOriginTransportFunctions()
+	for _, forbidden := range []string{"grep", "origin_transport_fallback", "CRABBOX_GIT_ORIGIN_FALLBACK", "Authentication failed", "repository not found"} {
+		if strings.Contains(functions, forbidden) {
+			t.Fatalf("remote origin helper retained policy %q:\n%s", forbidden, functions)
+		}
+	}
+}
+
+func TestRemoteGitOriginAttemptCommandsDeferPolicyToGo(t *testing.T) {
+	plan := gitCoherencePlan{
+		RemoteURL: "https://example.test/repo.git",
+		Target:    strings.Repeat("a", 40),
+		Tree:      strings.Repeat("b", 40),
+		Branch:    "main",
+	}
+	commands := map[string]string{
+		"seed": remoteGitSeed("/work/repo", plan),
+		"finalize": remoteFinalizeSync("/work/repo", remoteSyncFinalizeOptions{
+			HydrateGit: true,
+			Token:      strings.Repeat("c", 32),
+			Coherence:  plan,
+		}),
+	}
+	for name, command := range commands {
+		t.Run(name, func(t *testing.T) {
+			for _, want := range []string{`cat "$transport_error" >&2`, "exit 78"} {
+				if !strings.Contains(command, want) {
+					t.Fatalf("%s missing %q:\n%s", name, want, command)
+				}
+			}
+			catIndex := strings.Index(command, `cat "$transport_error" >&2`)
+			exitIndex := strings.Index(command[catIndex:], "exit 78")
+			if exitIndex < 0 {
+				t.Fatalf("%s does not emit transport diagnostics before exit 78:\n%s", name, command)
+			}
+			if name == "finalize" {
+				diagnostic := "remote sync finalize failed: Git coherence fetch failed"
+				diagnosticIndex := strings.Index(command, diagnostic)
+				if diagnosticIndex < 0 || diagnosticIndex > catIndex {
+					t.Fatalf("finalize does not emit %q before raw transport diagnostics:\n%s", diagnostic, command)
+				}
+			}
+			for _, forbidden := range []string{"origin_transport_fallback", "CRABBOX_GIT_ORIGIN_FALLBACK", "Authentication failed", "repository not found"} {
+				if strings.Contains(command, forbidden) {
+					t.Fatalf("%s retained origin policy %q:\n%s", name, forbidden, command)
+				}
+			}
+		})
+	}
+}
+
+func newGitTransportFailureHTTPServer(t *testing.T) string {
+	t.Helper()
+
+	// Wait for the HTTP request before closing: resetting immediately after
+	// accept races libcurl's connection inspection and varies its diagnostic.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "" {
+			t.Error("transport failure fixture received origin credentials")
+		}
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack transport failure connection: %v", err)
+			return
+		}
+		if err := conn.Close(); err != nil {
+			t.Errorf("close transport failure connection: %v", err)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server.URL
+}
+
+func runGitControlWithShellHook(t *testing.T, hook, command string) ([]byte, error) {
+	t.Helper()
+	home := t.TempDir()
+	marker := filepath.Join(home, "hook-ran")
+	envFile := os.DevNull
+	if hook == "logout" {
+		mustWriteTestFile(t, filepath.Join(home, ".bash_profile"), ":\n")
+		mustWriteTestFile(t, filepath.Join(home, ".bash_logout"), "printf logout >"+shellQuote(marker)+"\nfalse\n")
+	} else {
+		envFile = filepath.Join(home, "bash-env")
+		mustWriteTestFile(t, envFile, "printf startup >"+shellQuote(marker)+"\nexit 97\n")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "exec "+command)
+	cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH"), "SHLVL=0", "BASH_ENV=" + envFile, "ENV=" + envFile, "LC_ALL=C"}
+	cmd.WaitDelay = time.Second
+	out, err := cmd.CombinedOutput()
+	if data, statErr := os.ReadFile(marker); !os.IsNotExist(statErr) {
+		t.Errorf("Git control executed %s hook: marker=%q err=%v", hook, data, statErr)
+	}
+	return out, err
+}
+
+func TestRemoteGitControlsIgnoreShellHooks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX Git control shell")
+	}
+	f := newGitCoherenceFixture(t)
+	for _, hook := range []string{"logout", "BASH_ENV"} {
+		for _, scenario := range []string{"seed unavailable", "seed fresh", "seed reused", "finalize unavailable", "finalize success", "finalize tree mismatch"} {
+			t.Run(hook+"/"+scenario, func(t *testing.T) {
+				plan := f.plan(t, f.b)
+				workdir := filepath.Join(t.TempDir(), "work")
+				wantCode, wantReason := 0, ""
+				if strings.HasSuffix(scenario, "unavailable") {
+					plan.RemoteURL = filepath.Join(t.TempDir(), "absent-origin.git")
+					wantCode, wantReason = gitOriginRuntimeFallbackExitCode, "origin_unavailable"
+				}
+				var command string
+				if strings.HasPrefix(scenario, "seed") {
+					if scenario == "seed reused" {
+						workdir = f.workspace(t, f.b, false)
+					}
+					command = remoteGitSeed(workdir, plan)
+				} else {
+					workdir = f.workspace(t, f.a, true)
+					mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
+					const token = "61616161616161616161616161616161"
+					stageCoherenceFinalize(t, workdir, token)
+					if scenario == "finalize tree mismatch" {
+						plan.Tree = strings.Repeat("f", 40)
+						wantCode = 67
+					}
+					command = remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: token, Fingerprint: "coherent", Coherence: plan})
+				}
+				out, err := runGitControlWithShellHook(t, hook, command)
+				if got := exitCode(err); got != wantCode {
+					t.Fatalf("Git control exit=%d want=%d err=%v output=%q", got, wantCode, err, out)
+				}
+				if reason, fallback := gitOriginRuntimeFallbackResult(plan.RemoteURL, string(out), err); reason != wantReason || fallback != (wantReason != "") {
+					t.Fatalf("fallback=%t reason=%q want=%q output=%q", fallback, reason, wantReason, out)
+				}
+				if wantCode == 0 {
+					requireGitOutput(t, workdir, f.b, "rev-parse", "HEAD")
+					requireGitOutput(t, workdir, plan.Tree, "write-tree")
+				} else if strings.HasPrefix(scenario, "finalize") {
+					requireGitOutput(t, workdir, f.a, "rev-parse", "HEAD")
+					if got := readCoherentFingerprint(t, workdir, plan); got != "" {
+						t.Fatalf("failed finalizer certified fingerprint %q", got)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRemoteGitMetadataControlsIgnoreShellHooks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX Git control shell")
+	}
+	f := newGitCoherenceFixture(t)
+	for _, hook := range []string{"logout", "BASH_ENV"} {
+		for _, operation := range []string{"hydrate status", "fingerprint", "seed manifest", "discard pending"} {
+			t.Run(hook+"/"+operation, func(t *testing.T) {
+				workdir := f.workspace(t, f.c, false)
+				plan := f.plan(t, f.c)
+				meta := coherenceMetaDir(t, workdir)
+				var command, want string
+				var discarded []string
+				var preserved map[string]string
+				switch operation {
+				case "hydrate status":
+					mustWriteTestFile(t, filepath.Join(meta, "git-hydrate-base"), "main "+f.c+"\n")
+					command, want = remoteGitHydrateStatus(workdir, "main", f.c), "marker base current"
+				case "fingerprint":
+					for name, value := range map[string]string{"sync-finalize-token": "complete", "sync-finalize-complete-token": "complete", "sync-fingerprint": "coherent"} {
+						mustWriteTestFile(t, filepath.Join(meta, name), value)
+					}
+					command, want = remoteReadSyncFingerprint(workdir, plan), "coherent"
+				case "seed manifest":
+					command = remoteSeedSyncManifestFromGit(workdir)
+				case "discard pending":
+					const token = "81818181818181818181818181818181"
+					const neighbor = "82828282828282828282828282828282"
+					discarded = []string{remoteSyncPendingManifestName(token), remoteSyncPendingDeletedName(token)}
+					preserved = map[string]string{
+						remoteSyncPendingManifestName(neighbor): "neighbor.txt\x00",
+						remoteSyncPendingDeletedName(neighbor):  "neighbor-deleted.txt\x00",
+						"sync-manifest":                         "committed.txt\x00",
+					}
+					for _, name := range discarded {
+						mustWriteTestFile(t, filepath.Join(meta, name), "discard.txt\x00")
+					}
+					for name, value := range preserved {
+						mustWriteTestFile(t, filepath.Join(meta, name), value)
+					}
+					command = remoteDiscardSyncPendingMetadata(workdir, token, false)
+				}
+				out, err := runGitControlWithShellHook(t, hook, command)
+				if err != nil || string(out) != want {
+					t.Fatalf("Git metadata control output=%q want=%q err=%v", out, want, err)
+				}
+				if operation == "seed manifest" {
+					wantManifest := "deleted.txt\x00modified.txt\x00other/omit.txt\x00src/keep.txt\x00tracked.txt\x00"
+					if data, readErr := os.ReadFile(filepath.Join(meta, "sync-manifest")); readErr != nil || string(data) != wantManifest {
+						t.Fatalf("seeded manifest=%q err=%v", data, readErr)
+					}
+				}
+				for _, name := range discarded {
+					if _, statErr := os.Stat(filepath.Join(meta, name)); !os.IsNotExist(statErr) {
+						t.Fatalf("discarded pending metadata %s survived: %v", name, statErr)
+					}
+				}
+				for name, value := range preserved {
+					if data, readErr := os.ReadFile(filepath.Join(meta, name)); readErr != nil || string(data) != value {
+						t.Fatalf("discard changed neighboring metadata %s: data=%q err=%v", name, data, readErr)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRemoteUserWorkloadPreservesLoginShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX workload shell")
+	}
+	for _, shell := range []bool{false, true} {
+		t.Run(fmt.Sprintf("shell=%t", shell), func(t *testing.T) {
+			home, workdir := t.TempDir(), t.TempDir()
+			mustWriteTestFile(t, filepath.Join(home, ".bash_profile"), "export CRABBOX_TEST_LOGIN_VALUE=profile-loaded\n")
+			const script = `printf '%s' "$CRABBOX_TEST_LOGIN_VALUE"`
+			command := remoteCommand(workdir, nil, []string{"bash", "-c", script})
+			if shell {
+				command = remoteShellCommand(workdir, nil, script)
+			}
+			cmd := exec.Command("/bin/sh", "-c", command)
+			cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH"), "BASH_ENV=" + os.DevNull, "ENV=" + os.DevNull}
+			if out, err := cmd.CombinedOutput(); err != nil || string(out) != "profile-loaded" {
+				t.Fatalf("user workload lost login profile: output=%q err=%v", out, err)
+			}
+		})
+	}
+}
+
+func TestRemoteGitSeedClassifiesRuntimeOriginFailures(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX Git seed integration")
+	}
+	for _, kind := range []string{"missing filesystem", "private HTTP", "HTTP transport", "non-auth HTTP", "missing branch"} {
+		t.Run(kind, func(t *testing.T) {
+			remote := filepath.Join(t.TempDir(), "missing.git")
+			var server *httptest.Server
+			switch kind {
+			case "private HTTP", "non-auth HTTP":
+				status := http.StatusUnauthorized
+				if kind == "non-auth HTTP" {
+					status = http.StatusInternalServerError
+				}
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+					if request.Header.Get("Authorization") != "" {
+						t.Errorf("seed forwarded an Authorization header")
+					}
+					if status == http.StatusUnauthorized {
+						w.Header().Set("WWW-Authenticate", `Basic realm="private"`)
+					}
+					http.Error(w, http.StatusText(status), status)
+				}))
+				defer server.Close()
+				remote = server.URL + "/repo.git"
+			case "HTTP transport":
+				remote = newGitTransportFailureHTTPServer(t) + "/repo.git"
+			}
+			workdir := filepath.Join(t.TempDir(), "work")
+			plan := gitCoherencePlan{RemoteURL: remote, Target: strings.Repeat("a", 40), Tree: strings.Repeat("b", 40), Branch: "main"}
+			if kind == "missing branch" {
+				f := newGitCoherenceFixture(t)
+				plan = f.plan(t, f.b)
+				plan.Branch = "absent"
+			}
+			out, err := exec.Command("bash", "-lc", remoteGitSeed(workdir, plan)).CombinedOutput()
+			reason, fallback := gitOriginRuntimeFallbackResult(plan.RemoteURL, string(out), err)
+			if kind == "HTTP transport" && !strings.Contains(string(out), "Empty reply from server") {
+				t.Fatalf("transport fixture did not close after the HTTP request: err=%v output=%q", err, out)
+			}
+			wantReason := "origin_unavailable"
+			wantFallback := true
+			if kind == "private HTTP" {
+				wantReason = "origin_auth_required"
+			} else if kind == "non-auth HTTP" || kind == "missing branch" {
+				wantReason, wantFallback = "", false
+			}
+			if fallback != wantFallback || reason != wantReason || err == nil {
+				t.Fatalf("fallback=%t reason=%q err=%v output=%q", fallback, reason, err, out)
+			}
+			if _, statErr := os.Stat(workdir); !os.IsNotExist(statErr) {
+				t.Fatalf("failed seed retained workspace: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestRemoteFinalizeRuntimeOriginFallbackRetriesCommittedManifest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX Git finalize integration")
+	}
+	for _, kind := range []string{"missing filesystem", "private HTTP", "HTTP transport", "non-auth HTTP", "missing branch", "tree verification"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newGitCoherenceFixture(t)
+			workdir := f.workspace(t, f.a, true)
+			plan := f.plan(t, f.b)
+			var server *httptest.Server
+			switch kind {
+			case "missing filesystem":
+				if err := os.Rename(f.origin, f.origin+".missing"); err != nil {
+					t.Fatal(err)
+				}
+			case "private HTTP", "non-auth HTTP":
+				status := http.StatusUnauthorized
+				if kind == "non-auth HTTP" {
+					status = http.StatusInternalServerError
+				}
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+					if request.Header.Get("Authorization") != "" {
+						t.Errorf("finalize forwarded an Authorization header")
+					}
+					if status == http.StatusUnauthorized {
+						w.Header().Set("WWW-Authenticate", `Basic realm="private"`)
+					}
+					http.Error(w, http.StatusText(status), status)
+				}))
+				defer server.Close()
+				plan.RemoteURL = server.URL + "/repo.git"
+			case "HTTP transport":
+				plan.RemoteURL = newGitTransportFailureHTTPServer(t) + "/repo.git"
+			case "missing branch":
+				plan.Branch = "absent"
+			case "tree verification":
+				plan.Tree = strings.Repeat("f", 40)
+			}
+			const token = "1234567890abcdef1234567890abcdef"
+			stageCoherenceFinalize(t, workdir, token)
+			meta := coherenceMetaDir(t, workdir)
+			mustWriteTestFile(t, filepath.Join(meta, "sync-fingerprint"), "stale")
+			mustWriteTestFile(t, filepath.Join(meta, "git-hydrate-base"), "main stale\n")
+
+			tools := t.TempDir()
+			logPath := filepath.Join(tools, "ssh.log")
+			ssh := `#!/bin/sh
+remote=""
+for arg do remote="$arg"; done
+printf '%s\n---\n' "$remote" >> "$CRABBOX_FINALIZE_SSH_LOG"
+exec /bin/bash --noprofile --norc -c "$remote"
+`
+			if err := os.WriteFile(filepath.Join(tools, "ssh"), []byte(ssh), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_FINALIZE_SSH_LOG", logPath)
+			out, err, reason, fallback := runRemoteFinalizeSync(context.Background(), SSHTarget{
+				User: "crabbox", Host: "example.test", Port: "22", TargetOS: targetLinux, NoControlMaster: true,
+			}, workdir, remoteSyncFinalizeOptions{
+				HydrateGit: true, BaseRef: "main", BaseSHA: f.b, Fingerprint: "new", Token: token, Coherence: plan,
+			})
+			wantFallback := kind == "missing filesystem" || kind == "private HTTP" || kind == "HTTP transport"
+			wantReason := ""
+			if kind == "missing filesystem" || kind == "HTTP transport" {
+				wantReason = "origin_unavailable"
+			} else if kind == "private HTTP" {
+				wantReason = "origin_auth_required"
+			}
+			if fallback != wantFallback || reason != wantReason {
+				t.Fatalf("fallback=%t reason=%q err=%v output=%q", fallback, reason, err, out)
+			}
+			logData, readErr := os.ReadFile(logPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			commands := strings.Split(strings.TrimSuffix(string(logData), "---\n"), "---\n")
+			wantAttempts := 1
+			if wantFallback {
+				wantAttempts = 2
+			}
+			if len(commands) != wantAttempts {
+				t.Fatalf("finalize attempts=%d want %d:\n%s", len(commands), wantAttempts, logData)
+			}
+			for _, command := range commands {
+				if !strings.Contains(command, token) {
+					t.Fatalf("finalize retry changed token:\n%s", logData)
+				}
+			}
+			if !wantFallback {
+				if err == nil {
+					t.Fatalf("non-origin failure succeeded: output=%q", out)
+				}
+				if kind == "missing branch" {
+					diagnostic := "remote sync finalize failed: Git coherence fetch failed"
+					raw := "fatal: couldn't find remote ref refs/heads/absent"
+					diagnosticIndex := strings.Index(out, diagnostic)
+					rawIndex := strings.Index(out, raw)
+					if diagnosticIndex < 0 || rawIndex < 0 || diagnosticIndex > rawIndex {
+						t.Fatalf("missing branch diagnostics out of order: %q", out)
+					}
+				}
+				if kind == "non-auth HTTP" && !strings.Contains(out, "500") {
+					t.Fatalf("fatal HTTP diagnostics were not retained: %q", out)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("fallback finalize: %v\n%s", err, out)
+			}
+			if strings.Contains(out, "Authentication failed") ||
+				strings.Contains(out, "Failed to connect") ||
+				strings.Contains(out, "does not appear to be a git repository") {
+				t.Fatalf("successful fallback retained first-attempt diagnostics: %q", out)
+			}
+			for _, name := range []string{"sync-finalize-token", "sync-finalize-complete-token"} {
+				value, readErr := os.ReadFile(filepath.Join(meta, name))
+				if readErr != nil || string(value) != token {
+					t.Fatalf("%s=%q err=%v", name, value, readErr)
+				}
+			}
+			for _, name := range []string{"sync-fingerprint", "git-hydrate-base"} {
+				if _, statErr := os.Stat(filepath.Join(meta, name)); !os.IsNotExist(statErr) {
+					t.Fatalf("%s survived fallback: %v", name, statErr)
+				}
+			}
+			if _, statErr := os.Stat(filepath.Join(meta, "sync-manifest")); statErr != nil {
+				t.Fatalf("committed manifest missing: %v", statErr)
+			}
+		})
 	}
 }
 
@@ -4631,6 +5272,13 @@ func TestRemoteGitSeedLocalCanary(t *testing.T) {
 		seed := exec.Command("bash", "-lc", remoteGitSeed(workdir, plan))
 		if out, err := seed.CombinedOutput(); err != nil {
 			t.Fatalf("%s: %v\n%s", label, err, out)
+		}
+		staging, err := filepath.Glob(filepath.Join(filepath.Dir(workdir), ".seed.*"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(staging) != 0 {
+			t.Fatalf("%s left seed staging files: %v", label, staging)
 		}
 	}
 	requireSeeded := func(workdir string) {
@@ -4856,6 +5504,72 @@ func TestRemoteWriteSyncManifestsNewForTargetUsesInterpretedWriterForWSL2(t *tes
 		if !strings.Contains(plain, want) {
 			t.Fatalf("non-WSL2 manifest writer missing %q: %q", want, plain)
 		}
+	}
+}
+
+func TestRemoteWriteSyncManifestsNewForTargetPlainWSL2IsHermetic(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
+	if got, want := remoteWriteSyncManifestsNewForTargetMode(target, "/work/repo", token, false), remoteWriteSyncManifestsNewPython("/work/repo", token); got != want {
+		t.Fatal("ordinary WSL2 manifest command bytes changed")
+	}
+	got := remoteWriteSyncManifestsNewForTargetMode(target, "/work/repo", token, true)
+	for _, want := range []string{
+		"/usr/bin/env -i",
+		"BASH_ENV=/dev/null",
+		"ENV=/dev/null",
+		"/bin/bash --noprofile --norc -c",
+		"/usr/bin/python3 -c",
+		"/bin/mkdir -p --",
+		"/usr/bin/find",
+		"-exec /bin/rm",
+		"plain_git",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("plain WSL2 writer missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "bash -lc") {
+		t.Fatalf("plain WSL2 writer uses a login shell:\n%s", got)
+	}
+}
+
+func TestPlainManifestMetadataIgnoresHostileEnvironment(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	workdir := filepath.Join(t.TempDir(), "repo")
+	marker := filepath.Join(t.TempDir(), "executed")
+	profile := filepath.Join(t.TempDir(), "profile")
+	mustWriteTestFile(t, profile, "printf hostile >"+shellQuote(marker)+"\n")
+	hostileBin := t.TempDir()
+	for _, name := range []string{"bash", "git", "python3", "mkdir", "find", "rm"} {
+		writeExecutable(t, filepath.Join(hostileBin, name), "#!/bin/sh\nprintf hostile >"+shellQuote(marker)+"\nexit 97\n")
+	}
+	manifest := []byte("tracked.txt\x00")
+	deleted := []byte("removed.txt\x00")
+	command := exec.Command("/bin/sh", "-c", remoteWriteSyncManifestsNewForTargetMode(
+		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2},
+		workdir,
+		token,
+		true,
+	))
+	command.Env = []string{"PATH=" + hostileBin, "BASH_ENV=" + profile, "ENV=" + profile}
+	command.Stdin = strings.NewReader(syncManifestInputForTarget(
+		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2},
+		manifest,
+		deleted,
+	))
+	if out, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("plain WSL2 writer failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("hostile environment executed: %v", err)
+	}
+	metaDir := filepath.Join(workdir, ".crabbox")
+	if got, err := os.ReadFile(filepath.Join(metaDir, remoteSyncPendingManifestName(token))); err != nil || !bytes.Equal(got, manifest) {
+		t.Fatalf("manifest=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(metaDir, remoteSyncPendingDeletedName(token))); err != nil || !bytes.Equal(got, deleted) {
+		t.Fatalf("deleted=%q err=%v", got, err)
 	}
 }
 

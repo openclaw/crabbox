@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -80,6 +82,118 @@ func TestParseJUnitResultsDerivesFailuresWhenSuiteCountersAreOmitted(t *testing.
 	}
 	if results == nil || results.Failures != 1 || len(results.Failed) != 1 {
 		t.Fatalf("testcase failure was not reflected in aggregate counters: %#v", results)
+	}
+}
+
+func TestParseJUnitResultsNested(t *testing.T) {
+	for _, counters := range []string{` tests="1" failures="1" time="0.25"`, "", ` tests="0" failures="0" errors="0" skipped="0"`} {
+		for _, root := range []string{"testsuite", "testsuites"} {
+			t.Run(root+"/"+counters, func(t *testing.T) {
+				report := `<testsuite name="project"` + counters + `><testsuite name="auth"` + counters + `><testcase name="testLogin" classname="AuthTest" file="tests/AuthTest.php" time="0.25"><failure type="AssertionError" message="expected 200, got 401">details</failure></testcase></testsuite></testsuite>`
+				if root == "testsuites" {
+					report = `<testsuites tests="1" failures="1" time="0.25">` + report + `</testsuites>`
+				}
+				got, err := parseJUnitResults(map[string]string{"junit.xml": report})
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := &TestResultSummary{Format: "junit", Files: []string{"junit.xml"}, Suites: 2, Tests: 1, Failures: 1, TimeSeconds: 0.25,
+					Failed: []TestFailure{{Suite: "auth", Name: "testLogin", Classname: "AuthTest", File: "tests/AuthTest.php", Message: "expected 200, got 401", Type: "AssertionError", Kind: "failure"}}}
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("nested summary=%+v, want %+v", got, want)
+				}
+				if !failRunForTestResults(0, ResultsConfig{FailOnFailures: true}, got) {
+					t.Error("nested failure did not reject a zero-exit command")
+				}
+				if failRunForTestResults(23, ResultsConfig{FailOnFailures: true}, got) {
+					t.Error("nested failure replaced authoritative command exit")
+				}
+			})
+		}
+	}
+}
+
+func TestParseJUnitResultsNestedAggregation(t *testing.T) {
+	const children = `<testcase name="direct" time="0.25"><failure message=" direct message ">ignored text</failure></testcase>
+<testsuite name="branch"><testsuite name="leaf" tests="3" errors="1" skipped="1" time="1.5">
+<testcase name="broken" classname="Example" file="example_test.go" time="0.5"><error type="RuntimeError"> error text </error></testcase>
+<testcase name="skipped" time="0.25"><skipped/></testcase><testcase name="passed" time="0.75"/>
+</testsuite></testsuite><testsuite name="sibling"><testcase name="last" time="0.25"><failure message=" "> last text </failure></testcase></testsuite>`
+	for _, tc := range []struct {
+		name, attrs                      string
+		tests, failures, errors, skipped int
+		time                             float64
+	}{
+		{"derived", "", 5, 2, 1, 1, 2},
+		{"aggregate", ` tests="5" failures="2" errors="1" skipped="1" time="2"`, 5, 2, 1, 1, 2},
+		{"partial", ` tests="5" time="3"`, 5, 2, 1, 1, 3},
+		{"zero", ` tests="0" failures="0" errors="0" skipped="0" time="0"`, 5, 2, 1, 1, 2},
+		{"omitted tests", ` failures="4" errors="3" skipped="2" time="4"`, 5, 4, 3, 2, 4},
+		{"observed lower bounds", ` tests="1" failures="1" errors="0" skipped="0"`, 1, 2, 1, 1, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseJUnitResults(map[string]string{"junit.xml": `<testsuite name="parent"` + tc.attrs + `>` + children + `</testsuite>`})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := &TestResultSummary{Format: "junit", Files: []string{"junit.xml"}, Suites: 4, Tests: tc.tests, Failures: tc.failures, Errors: tc.errors, Skipped: tc.skipped, TimeSeconds: tc.time,
+				Failed: []TestFailure{
+					{Suite: "parent", Name: "direct", Message: "direct message", Kind: "failure"},
+					{Suite: "leaf", Name: "broken", Classname: "Example", File: "example_test.go", Message: "error text", Type: "RuntimeError", Kind: "error"},
+					{Suite: "sibling", Name: "last", Message: "last text", Kind: "failure"},
+				}}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("summary=%+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestParseJUnitResultsNestedFilesAndMalformedSibling(t *testing.T) {
+	got, err := parseJUnitResults(map[string]string{
+		"z.xml":   `<testsuites><testsuite name="z"><testsuite name="leaf"><testcase name="z"><failure message="last"/></testcase></testsuite></testsuite><testsuite name="sibling" tests="2" skipped="2" time="0.5"/></testsuites>`,
+		"bad.xml": `<testsuite tests="99"><testsuite><testcase name="partial"><failure/></testcase></testsuite>`,
+		"a.xml":   `<testsuite name="a"><testcase name="a"><failure message="first"/><failure>second</failure><error>third</error></testcase></testsuite>`,
+	})
+	if err == nil || !strings.Contains(err.Error(), "skip junit bad.xml") {
+		t.Fatalf("missing malformed-file warning: %v", err)
+	}
+	want := &TestResultSummary{Format: "junit", Files: []string{"a.xml", "z.xml"}, Suites: 4, Tests: 4, Failures: 3, Errors: 1, Skipped: 2, TimeSeconds: 0.5,
+		Failed: []TestFailure{
+			{Suite: "a", Name: "a", Message: "first", Kind: "failure"},
+			{Suite: "a", Name: "a", Message: "second", Kind: "failure"},
+			{Suite: "a", Name: "a", Message: "third", Kind: "error"},
+			{Suite: "leaf", Name: "z", Message: "last", Kind: "failure"},
+		}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("summary=%+v, want %+v", got, want)
+	}
+}
+
+func TestParseJUnitResultsFlatAccounting(t *testing.T) {
+	for _, tc := range []struct {
+		name, report                             string
+		suites, tests, failures, errors, skipped int
+		time                                     float64
+	}{
+		{"reported", `<testsuite tests="7" failures="3" errors="2" skipped="1" time="4"><testcase time="0.25"/></testsuite>`, 1, 7, 3, 2, 1, 4},
+		{"derived", `<testsuite><testcase time="0.25"><failure/><error/><skipped/></testcase></testsuite>`, 1, 1, 1, 1, 1, 0.25},
+		{"zero counters", `<testsuite tests="0" failures="0" errors="0" skipped="0"><testcase time="0.25"><failure/><error/><skipped/></testcase></testsuite>`, 1, 1, 1, 1, 1, 0.25},
+		{"time without counters", `<testsuite time="4"><testcase time="0.25"/></testsuite>`, 1, 1, 0, 0, 0, 0.25},
+		{"wrapper aggregates", `<testsuites tests="99" failures="99" time="99"><testsuite tests="2" time="0.5"/><testsuite tests="3" time="1"/></testsuites>`, 2, 5, 0, 0, 0, 1.5},
+		{"summary only", `<testsuites tests="7" failures="3" errors="2" skipped="1" time="4"/>`, 0, 7, 3, 2, 1, 4},
+		{"empty wrapper", `<testsuites/>`, 0, 0, 0, 0, 0, 0},
+		{"empty suite", `<testsuite/>`, 1, 0, 0, 0, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseJUnitResults(map[string]string{"junit.xml": tc.report})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Suites != tc.suites || got.Tests != tc.tests || got.Failures != tc.failures || got.Errors != tc.errors || got.Skipped != tc.skipped || got.TimeSeconds != tc.time {
+				t.Fatalf("summary=%+v, want %+v", got, tc)
+			}
+		})
 	}
 }
 
@@ -276,19 +390,130 @@ func TestParseAutoJUnitResultsKeepsFailuresAfterTwentyFiles(t *testing.T) {
 }
 
 func TestNormalizeResultPath(t *testing.T) {
+	windows := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}
 	for _, tc := range []struct {
+		target  SSHTarget
 		workdir string
 		name    string
 		want    string
 	}{
 		{workdir: "/repo", name: "./junit.xml", want: "junit.xml"},
 		{workdir: "/repo", name: "/repo/reports/junit.xml", want: "reports/junit.xml"},
-		{workdir: `C:\work\repo`, name: `C:\work\repo\reports\junit.xml`, want: "reports/junit.xml"},
-		{workdir: `C:\work\repo`, name: `c:\work\repo\reports\junit.xml`, want: "reports/junit.xml"},
+		{workdir: "/", name: "/junit.xml", want: "junit.xml"},
+		{workdir: "/repo", name: `a\b.xml`, want: `a\b.xml`},
+		{workdir: "/repo", name: "/REPO/junit.xml", want: "/REPO/junit.xml"},
+		{workdir: "/repo", name: "link/../junit.xml", want: "link/../junit.xml"},
+		{target: windows, workdir: `C:\work\repo`, name: `C:\work\repo\reports\junit.xml`, want: "reports/junit.xml"},
+		{target: windows, workdir: `C:\work\repo`, name: `c:\work\repo\reports\junit.xml`, want: "reports/junit.xml"},
+		{target: windows, workdir: `C:\work\repo`, name: `.\reports/junit.xml`, want: "reports/junit.xml"},
+		{target: windows, workdir: `C:\`, name: `c:\junit.xml`, want: "junit.xml"},
+		{target: windows, workdir: `\\server\share\repo`, name: `\\SERVER\share\repo\junit.xml`, want: "junit.xml"},
+		{target: windows, workdir: `C:\repo`, name: `C:\repo\Case.xml`, want: "Case.xml"},
+		{target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, workdir: "/repo", name: `a\b.xml`, want: `a\b.xml`},
 	} {
-		if got := normalizeResultPath(tc.workdir, tc.name); got != tc.want {
+		if got := normalizeResultPath(tc.target, tc.workdir, tc.name); got != tc.want {
 			t.Fatalf("normalizeResultPath(%q, %q)=%q, want %q", tc.workdir, tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestCollectRemoteJUnitResultsDeduplicatesExplicitAliases(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX SSH fixture")
+	}
+	workdir := t.TempDir()
+	const report = `<testsuite name="sample" tests="1" failures="1"><testcase name="fails"><failure message="boom"/></testcase></testsuite>`
+	for _, name := range []string{"junit.xml", "other.xml"} {
+		writeFile(t, filepath.Join(workdir, name), report)
+	}
+	if err := os.Symlink("junit.xml", filepath.Join(workdir, "same-link.xml")); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	installWorkspaceOwnerAwareSSH(t, filepath.Join(bin, "ssh"), "#!/bin/sh\nexec /bin/sh -c \"$1\"\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	target := SSHTarget{Host: "example.test", User: "runner", Port: "22"}
+	abs := filepath.Join(workdir, "junit.xml")
+	for _, tc := range []struct {
+		name      string
+		paths     []string
+		auto      bool
+		wantFiles []string
+	}{
+		{name: "relative first", paths: []string{"junit.xml", "./junit.xml", abs}, wantFiles: []string{"junit.xml"}},
+		{name: "absolute first", paths: []string{abs, "./junit.xml", "junit.xml"}, wantFiles: []string{abs}},
+		{name: "explicit and auto", paths: []string{"junit.xml", "./junit.xml", abs}, auto: true, wantFiles: []string{"junit.xml"}},
+		{name: "identical reports remain distinct", paths: []string{"junit.xml", "other.xml"}, wantFiles: []string{"junit.xml", "other.xml"}},
+		{name: "symlink spelling remains distinct", paths: []string{"junit.xml", "same-link.xml"}, wantFiles: []string{"junit.xml", "same-link.xml"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := collectRemoteJUnitResults(context.Background(), target, workdir, ResultsConfig{JUnit: tc.paths, Auto: tc.auto}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantCount := len(tc.wantFiles)
+			if got == nil || !reflect.DeepEqual(got.Files, tc.wantFiles) || got.Tests != wantCount || got.Failures != wantCount || len(got.Failed) != wantCount {
+				t.Fatalf("summary=%+v, want files=%v with %d tests and failures", got, tc.wantFiles, wantCount)
+			}
+		})
+	}
+}
+
+func TestCollectRemoteJUnitResultsDeduplicatesCollectedPathsForTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX SSH fixture")
+	}
+	for _, tc := range []struct {
+		name      string
+		target    SSHTarget
+		workdir   string
+		paths     []string
+		collected []string
+		wantFiles []string
+	}{
+		{
+			name: "native Windows aliases", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, workdir: `C:\work\repo`,
+			paths:     []string{`reports\junit.xml`, `.\reports/junit.xml`, `c:\work\repo\reports\junit.xml`},
+			wantFiles: []string{`reports\junit.xml`},
+		},
+		{
+			name: "native Windows filename case", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, workdir: `C:\repo`,
+			paths: []string{"Case.xml", "case.xml"}, wantFiles: []string{"Case.xml", "case.xml"},
+		},
+		{
+			name: "POSIX backslash", workdir: "/repo",
+			paths: []string{`a\b.xml`, "a/b.xml"}, wantFiles: []string{"a/b.xml", `a\b.xml`},
+		},
+		{
+			name: "unreadable first alias", workdir: "/repo", paths: []string{"junit.xml", "./junit.xml"},
+			collected: []string{"./junit.xml"}, wantFiles: []string{"./junit.xml"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := t.TempDir()
+			payload := filepath.Join(bin, "results.txt")
+			collected := tc.collected
+			if collected == nil {
+				collected = tc.paths
+			}
+			var marked strings.Builder
+			for _, name := range collected {
+				fmt.Fprintf(&marked, "%s%s\n<testsuite tests=\"1\" failures=\"1\"><testcase name=\"fails\"><failure/></testcase></testsuite>\n", resultFileMarker, name)
+			}
+			writeFile(t, payload, marked.String())
+			installWorkspaceOwnerAwareSSH(t, filepath.Join(bin, "ssh"), "#!/bin/sh\ncat "+shellQuote(payload)+"\n")
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			target := tc.target
+			target.Host, target.User, target.Port = "example.test", "runner", "22"
+			got, err := collectRemoteJUnitResults(context.Background(), target, tc.workdir, ResultsConfig{JUnit: tc.paths}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantCount := len(tc.wantFiles)
+			if got == nil || !reflect.DeepEqual(got.Files, tc.wantFiles) || got.Tests != wantCount || got.Failures != wantCount || len(got.Failed) != wantCount {
+				t.Fatalf("summary=%+v, want files=%v with %d tests and failures", got, tc.wantFiles, wantCount)
+			}
+		})
 	}
 }
 

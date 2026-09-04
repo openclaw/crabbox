@@ -50,6 +50,10 @@ func TestSharedBootstrapFixtures(t *testing.T) {
 			case targetWindows:
 				fragments["header"] = sharedWindowsHeader(cfg.SSHUser, fixture.PublicKey, windowsBootstrapWorkRoot(cfg), fixture.Ports)
 				fragments["core"] = sharedWindowsCore()
+				if cfg.WindowsMode != windowsModeWSL2 {
+					fragments["runtime"] = sharedWindowsRuntime()
+					fragments["runtimeGate"] = sharedWindowsRuntimeGate()
+				}
 				if cfg.WindowsMode == windowsModeWSL2 {
 					fragments["prelude"] = sharedWindowsNativePrelude()
 					fragments["trufflehog"] = sharedWslTruffleHogInstall()
@@ -63,6 +67,7 @@ func TestSharedBootstrapFixtures(t *testing.T) {
 			case targetMacOS:
 				fragments["macos"] = sharedMacOS(cfg.SSHUser, fixture.PublicKey, cfg.WorkRoot, fixture.Ports)
 			default:
+				fragments["ssh"] = indentCloudInitRuncmd(sharedLinuxSSHRestart())
 				if cfg.Code {
 					fragments["code"] = sharedCodeServerInstall()
 				}
@@ -83,6 +88,9 @@ func TestSharedBootstrapFixtures(t *testing.T) {
 			script := awsUserData(cfg, fixture.PublicKey)
 			if cfg.TargetOS == targetWindows {
 				script = windowsBootstrapPowerShell(cfg, fixture.PublicKey)
+				if cfg.WindowsMode == windowsModeWSL2 {
+					assertWindowsRuntimeAbsent(t, script)
+				}
 			}
 			for name, fragment := range fragments {
 				if !strings.Contains(script, fragment) {

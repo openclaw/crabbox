@@ -12,7 +12,7 @@ import (
 
 func TestProductionProviderClassCatalogCompleteness(t *testing.T) {
 	mappedProviders := map[string]struct{}{
-		"aws": {}, "azure": {}, "cloudflare": {}, "digitalocean": {}, "gcp": {}, "hetzner": {}, "linode": {},
+		"aws": {}, "azure": {}, "cloudflare": {}, "daytona": {}, "digitalocean": {}, "gcp": {}, "hetzner": {}, "linode": {},
 		"machine0": {}, "namespace-devbox": {}, "namespace-instance": {}, "ovh": {}, "phala": {}, "scaleway": {}, "tencentcloud": {}, "vultr": {},
 	}
 	counts := map[core.ProviderClassDisposition]int{}
@@ -70,8 +70,8 @@ func TestProductionProviderClassCatalogCompleteness(t *testing.T) {
 			}
 		}
 	}
-	if counts[core.ProviderClassDispositionMapped] != 15 || counts[core.ProviderClassDispositionUnmapped] != 66 || len(counts) != 2 {
-		t.Fatalf("class disposition counts=%v want mapped=15 unmapped=66", counts)
+	if counts[core.ProviderClassDispositionMapped] != 16 || counts[core.ProviderClassDispositionUnmapped] != 65 || len(counts) != 2 {
+		t.Fatalf("class disposition counts=%v want mapped=16 unmapped=65", counts)
 	}
 }
 
@@ -111,6 +111,7 @@ func TestTinyAndSmallProfilePrimariesForMappedProviders(t *testing.T) {
 		"aws":                {"tiny": "m7a.large", "small": "c7a.2xlarge"},
 		"azure":              {"tiny": "Standard_D2ads_v6", "small": "Standard_D8ads_v6"},
 		"cloudflare":         {"tiny": "standard-4", "small": "standard-4"},
+		"daytona":            {"tiny": "daytona-small", "small": "daytona-small"},
 		"digitalocean":       {"tiny": "s-1vcpu-1gb", "small": "s-1vcpu-1gb"},
 		"gcp":                {"tiny": "c4-standard-4", "small": "c4-standard-8"},
 		"hetzner":            {"tiny": "ccx13", "small": "ccx23"},

@@ -4,6 +4,8 @@ import { adminGrantVersion } from "../src/auth";
 import {
   CloudflareCoordinatorRuntime,
   coordinatorRequestQueue,
+  legacyAlarmKey,
+  setLegacyWake,
   type CoordinatorRuntime,
   type CoordinatorSocketHandlers,
   type CoordinatorStorage,
@@ -15,6 +17,7 @@ import { githubAuthRoute } from "../src/oauth";
 import { orgKeyForLabel } from "../src/org-identity";
 import { runtimeAdapterRelayFrameLimit } from "../src/runtime-adapter-relay";
 import type { Env, LeaseRecord } from "../src/types";
+import { ProvisioningTestStorage } from "./provisioning-fixtures";
 
 const exampleOrgKey = orgKeyForLabel("example-org");
 
@@ -562,6 +565,7 @@ describe("coordinator runtimes", () => {
       ["GET", "/v1/native-vnc/handoff"],
       ["GET", "/v1/leases/cbx_abcdef123456"],
       ["PUT", "/v1/leases/cbx_abcdef123456"],
+      ["PUT", "/v1/leases/cbx_abcdef123456/from-checkpoint"],
       ["POST", "/v1/leases/from-checkpoint"],
       ["POST", "/v1/checkpoints"],
       ["GET", "/v1/checkpoints/chk_example"],
@@ -709,16 +713,10 @@ describe("coordinator runtimes", () => {
   });
 
   it("maps Cloudflare alarms and hibernating socket attachments", async () => {
-    const transactionGet = vi.fn<() => Promise<unknown>>(async () => ({ ticket: "one-time" }));
-    const transactionDelete = vi.fn<() => Promise<void>>(async () => {});
-    const storage = {
-      getAlarm: vi.fn<() => Promise<number | null>>(async () => 1234),
-      setAlarm: vi.fn<(time: number) => Promise<void>>(async () => {}),
-      deleteAlarm: vi.fn<() => Promise<void>>(async () => {}),
-      transaction: vi.fn<
-        (callback: (transaction: unknown) => Promise<unknown>) => Promise<unknown>
-      >(async (callback) => callback({ get: transactionGet, delete: transactionDelete })),
-    };
+    const storage = new ProvisioningTestStorage();
+    const deadline = Date.now() + 60_000;
+    await storage.put("ticket:one-time", { ticket: "one-time" });
+    await storage.setAlarm(deadline);
     const acceptWebSocket = vi.fn<(socket: WebSocket, tags?: string[]) => void>();
     const state = {
       storage,
@@ -736,18 +734,181 @@ describe("coordinator runtimes", () => {
       error: () => {},
     });
     await expect(runtime.take("ticket:one-time")).resolves.toEqual({ ticket: "one-time" });
-    await expect(runtime.getAlarm()).resolves.toBe(1234);
-    await runtime.scheduleAlarm(1234);
+    await expect(runtime.getAlarm()).resolves.toBe(deadline);
+    await runtime.scheduleAlarm(deadline);
+    await expect(runtime.getAlarm()).resolves.toBe(deadline);
     await runtime.clearAlarm();
 
     expect(acceptWebSocket).toHaveBeenCalledWith(socket, ["control:client-1"]);
     expect(serializeAttachment).toHaveBeenCalledWith(attachment);
     expect(runtime.socketAttachment(socket)).toBe(attachment);
-    expect(storage.getAlarm).toHaveBeenCalledOnce();
-    expect(transactionGet).toHaveBeenCalledWith("ticket:one-time");
-    expect(transactionDelete).toHaveBeenCalledWith("ticket:one-time");
-    expect(storage.setAlarm).toHaveBeenCalledWith(1234);
-    expect(storage.deleteAlarm).toHaveBeenCalledOnce();
+    await expect(storage.get("ticket:one-time")).resolves.toBeUndefined();
+    await expect(runtime.getAlarm()).resolves.toBeUndefined();
+  });
+
+  it("atomically commits durable due work and alarms across rollback and concurrent clear", async () => {
+    const storage = new ProvisioningTestStorage();
+    const runtime = new CloudflareCoordinatorRuntime({ storage } as unknown as DurableObjectState);
+    const at = Date.now() + 60_000;
+    const dueKey = `provisioning-due:${at.toString().padStart(16, "0")}:lease`;
+    await expect(
+      runtime.commitAndWake(async (transaction) => {
+        await transaction.put("operation", { phase: "prepared" });
+        await transaction.put(dueKey, { operationID: "lease", at });
+        throw new Error("rollback");
+      }),
+    ).rejects.toThrow("rollback");
+    expect((await storage.list()).size).toBe(0);
+    await Promise.all([
+      runtime.commitAndWake(async (transaction) => {
+        await transaction.put("operation", { phase: "prepared" });
+        await transaction.put(dueKey, { operationID: "lease", at });
+      }),
+      runtime.clearAlarm(),
+    ]);
+    await expect(runtime.getAlarm()).resolves.toBe(at);
+    await runtime.scheduleAlarm(at + 60_000);
+    await expect(runtime.getAlarm()).resolves.toBe(at);
+    await runtime.clearAlarm();
+    await expect(runtime.getAlarm()).resolves.toBe(at);
+  });
+
+  it.each(["create", "reschedule", "clear"] as const)(
+    "rolls back state, due index, legacy deadline and native alarm when %s alarm writes fail",
+    async (mutation) => {
+      const storage = new ProvisioningTestStorage();
+      const runtime = new CloudflareCoordinatorRuntime({
+        storage,
+      } as unknown as DurableObjectState);
+      const at = Date.now() + 60_000;
+      const dueKey = `provisioning-due:${at.toString().padStart(16, "0")}:lease`;
+      if (mutation !== "create") {
+        await runtime.commitAndWake(async (transaction) => {
+          await transaction.put("operation", { phase: "prepared" });
+          await transaction.put(dueKey, { operationID: "lease", at });
+          await setLegacyWake(transaction, at + 60_000);
+        });
+      }
+      const before = structuredClone(storage.values);
+      storage.listOptions.length = 0;
+      storage.writes.length = 0;
+      storage.failKey = "test:native-alarm";
+      await expect(
+        runtime.commitAndWake(async (transaction) => {
+          await transaction.put("operation", { phase: "changed" });
+          if (mutation === "clear") {
+            await transaction.delete(dueKey);
+            await setLegacyWake(transaction);
+          } else {
+            await transaction.put(dueKey, { operationID: "lease", at });
+            await setLegacyWake(transaction, at - 1000);
+          }
+        }),
+      ).rejects.toThrow("injected storage failure");
+      expect(storage.writes.filter((key) => key === "test:native-alarm")).toHaveLength(1);
+      expect(storage.listOptions).toEqual([{ prefix: "provisioning-due:", limit: 1 }]);
+      expect(storage.values).toEqual(before);
+    },
+  );
+
+  it.each(["empty", "future", "due", "past"] as const)(
+    "constructor repair skips redundant %s alarm writes but rearms consumed deadlines",
+    async (kind) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const storage = new ProvisioningTestStorage();
+        let initialized: Promise<unknown> | undefined;
+        const runtime = new CloudflareCoordinatorRuntime({
+          storage,
+          blockConcurrencyWhile(callback: () => Promise<unknown>) {
+            initialized = callback();
+            return initialized;
+          },
+        } as unknown as DurableObjectState);
+        const at = Date.now() + (kind === "future" ? 1000 : kind === "past" ? -1000 : 0);
+        if (kind !== "empty") await runtime.scheduleAlarm(at);
+        const before = structuredClone(storage.values);
+        storage.writes.length = 0;
+        storage.listOptions.length = 0;
+        storage.failKey = "test:native-alarm";
+        runtime.registerProvisioningTick(async () => {});
+        const needsRearm = kind === "due" || kind === "past";
+        expect(await Promise.allSettled([initialized])).toEqual([
+          needsRearm
+            ? { status: "rejected", reason: new Error("injected storage failure") }
+            : { status: "fulfilled", value: undefined },
+        ]);
+        expect(storage.writes).toEqual(needsRearm ? ["test:native-alarm"] : []);
+        expect(storage.values).toEqual(before);
+        expect(storage.listOptions).toEqual([{ prefix: "provisioning-due:", limit: 1 }]);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("reconstructs a missing native alarm from durable due work and preserves an earlier stored wake", async () => {
+    const storage = new ProvisioningTestStorage();
+    const at = Date.now() + 60_000;
+    const dueKey = `provisioning-due:${at.toString().padStart(16, "0")}:lease`;
+    await storage.put(dueKey, { operationID: "lease", at });
+    let initialized: Promise<unknown> | undefined;
+    const state = {
+      storage,
+      blockConcurrencyWhile(callback: () => Promise<unknown>) {
+        initialized = callback();
+        return initialized;
+      },
+    } as unknown as DurableObjectState;
+    const runtime = new CloudflareCoordinatorRuntime(state);
+    runtime.registerProvisioningTick(async () => {});
+    await initialized;
+    expect(await runtime.getAlarm()).toBe(at);
+    await runtime.scheduleAlarm(at - 1000);
+    storage.writes.length = 0;
+    storage.listOptions.length = 0;
+    const reconstructed = new CloudflareCoordinatorRuntime(state);
+    reconstructed.registerProvisioningTick(async () => {});
+    await initialized;
+    expect(await reconstructed.getAlarm()).toBe(at - 1000);
+    expect(await storage.get(legacyAlarmKey)).toBe(at - 1000);
+    expect(storage.writes).toEqual([]);
+    expect(storage.listOptions).toEqual([{ prefix: "provisioning-due:", limit: 1 }]);
+  });
+
+  it("returns from real alarms while one runtime-owned legacy maintenance pass is blocked", async () => {
+    const storage = new ProvisioningTestStorage();
+    const owned: Promise<void>[] = [];
+    let initialization: Promise<unknown> | undefined;
+    const runtime = new CloudflareCoordinatorRuntime({
+      storage,
+      blockConcurrencyWhile<T>(callback: () => Promise<T>) {
+        const run = callback();
+        initialization = run;
+        return run;
+      },
+      waitUntil(task: Promise<void>) {
+        owned.push(task);
+      },
+    } as unknown as DurableObjectState);
+    const coordinator = new FleetCoordinator(runtime, {} as Env);
+    await initialization;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const maintenance = vi
+      .spyOn(
+        coordinator as unknown as { runScheduledMaintenance: () => Promise<void> },
+        "runScheduledMaintenance",
+      )
+      .mockReturnValue(blocked);
+    await coordinator.alarm();
+    await coordinator.alarm();
+    expect(maintenance).toHaveBeenCalledTimes(1);
+    expect(owned).toHaveLength(1);
+    release();
+    await Promise.all(owned);
   });
 
   it("serializes Cloudflare coordinator state transitions", async () => {

@@ -116,6 +116,55 @@ func readyPoolScrubBranch(ref string) (string, error) {
 	return ref, nil
 }
 
+func remoteIgnoredWarmCacheCleanScript(gitCommand, label string) string {
+	return `crabbox_clean_ignored_warm_caches() {
+clean_args=(-ffdx --quiet)
+cache_paths="$(/usr/bin/mktemp)"
+if ! /usr/bin/find -P . \( -ipath './.git' -o -ipath './.crabbox' \) -prune -o \( -type d -o -type l \) \( -iname node_modules -o -iname .pnpm-store -o -ipath '*/.yarn/cache' -o -ipath '*/.yarn/unplugged' \) -print0 -prune > "$cache_paths"; then
+  rm -f -- "$cache_paths"
+  echo "` + label + ` cache discovery failed" >&2
+  return 1
+fi
+while IFS= read -r -d '' cache_path; do
+  cache_lookup_path="$cache_path"
+  cache_path="${cache_path#./}"
+  if printf '%s\0' "$cache_lookup_path" | ` + gitCommand + ` check-ignore -q -z --stdin; then
+    if [ -L "$cache_path" ] || [ ! -d "$cache_path" ]; then
+      rm -f -- "$cache_paths"
+      echo "` + label + ` cache root must be a real directory" >&2
+      return 1
+    fi
+    resolved_cache="$(cd -P -- "$cache_path" && pwd -P)"
+    case "$resolved_cache/" in
+      "$workdir"/*) ;;
+      *)
+        rm -f -- "$cache_paths"
+        echo "` + label + ` cache root escapes the workspace" >&2
+        return 1
+        ;;
+    esac
+    cache_pattern="${cache_path//\\/\\\\}"
+    cache_pattern="${cache_pattern//\*/\\*}"
+    cache_pattern="${cache_pattern//\?/\\?}"
+    cache_pattern="${cache_pattern//\[/\\[}"
+    cache_pattern="${cache_pattern//\]/\\]}"
+    cache_pattern="${cache_pattern//!/\\!}"
+    cache_pattern="${cache_pattern//#/\\#}"
+    clean_args+=(-e "$cache_pattern/")
+  elif [ "$?" -ne 1 ]; then
+    rm -f -- "$cache_paths"
+    echo "` + label + ` cache ignore check failed" >&2
+    return 1
+  fi
+done < "$cache_paths"
+rm -f -- "$cache_paths"
+if ! ` + gitCommand + ` clean "${clean_args[@]}"; then
+  echo "` + label + ` clean failed" >&2
+  return 1
+fi
+}`
+}
+
 func remoteReadyPoolScrub(workdir, ref, trustedRemoteURL string) string {
 	script := `set -euo pipefail
 workdir=` + shellQuote(workdir) + `
@@ -167,44 +216,8 @@ if safe_git ls-files --stage | awk '$1 == "160000" { found=1 } END { exit !found
   echo "ready-pool scrub does not reuse submodule worktrees" >&2
   exit 1
 fi
-clean_args=(-ffdx --quiet)
-cache_paths=".git/crabbox-cache-paths.$$"
-trap 'rm -f -- "$cache_paths"' EXIT
-if ! /usr/bin/find -P . \( -ipath './.git' -o -ipath './.crabbox' \) -prune -o \( -type d -o -type l \) \( -iname node_modules -o -iname .pnpm-store -o -ipath '*/.yarn/cache' -o -ipath '*/.yarn/unplugged' \) -print0 -prune > "$cache_paths"; then
-  echo "ready-pool cache discovery failed" >&2
-  exit 1
-fi
-while IFS= read -r -d '' cache_path; do
-  cache_path="${cache_path#./}"
-  if safe_git check-ignore -q -- "$cache_path"; then
-    if [ -L "$cache_path" ] || [ ! -d "$cache_path" ]; then
-      echo "ready-pool cache root must be a real directory" >&2
-      exit 1
-    fi
-    resolved_cache="$(cd -P -- "$cache_path" && pwd -P)"
-    case "$resolved_cache/" in
-      "$workdir"/*) ;;
-      *)
-        echo "ready-pool cache root escapes the workspace" >&2
-        exit 1
-        ;;
-    esac
-    cache_pattern="${cache_path//\\/\\\\}"
-    cache_pattern="${cache_pattern//\*/\\*}"
-    cache_pattern="${cache_pattern//\?/\\?}"
-    cache_pattern="${cache_pattern//\[/\\[}"
-    cache_pattern="${cache_pattern//\]/\\]}"
-    cache_pattern="${cache_pattern//!/\\!}"
-    cache_pattern="${cache_pattern//#/\\#}"
-    clean_args+=(-e "$cache_pattern/")
-  elif [ "$?" -ne 1 ]; then
-    echo "ready-pool cache ignore check failed" >&2
-    exit 1
-  fi
-done < "$cache_paths"
-rm -f -- "$cache_paths"
-trap - EXIT
-safe_git clean "${clean_args[@]}"
+` + remoteIgnoredWarmCacheCleanScript("safe_git", "ready-pool") + `
+crabbox_clean_ignored_warm_caches
 if [ -L .crabbox ]; then
   echo "ready-pool .crabbox root must not be a symlink" >&2
   exit 1

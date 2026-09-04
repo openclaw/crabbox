@@ -55,6 +55,19 @@ the `environment` retain the canonical provider name and report selected=true. P
 `config show --provider <name>` reports `flag` because that command-scoped
 override wins the merge.
 
+The top-level JSON `ttl` and `idleTimeout` fields report the effective generic
+lease durations. Text output reports them on a separate
+`lease ttl=<duration> idle_timeout=<duration>` line immediately after the provider
+summary. Both formats use normalized Go duration strings: the existing `90m`
+TTL and `30m` idle-timeout defaults appear as `1h30m0s` and `30m0s`.
+Within each config file, nested `lease.ttl` and `lease.idleTimeout` override
+top-level `ttl` and `idleTimeout`; the file layering described above still
+applies, and `CRABBOX_TTL` / `CRABBOX_IDLE_TIMEOUT` take precedence over files.
+These are merged configuration values, not per-command flag overrides or
+observations of an existing lease or server. Provider-specific durations
+(such as `blaxel.ttl` or `githubCodespaces.idleTimeout`) and per-job durations
+under `jobs` remain separate from these generic values.
+
 `architecture` (text: `arch`) describes the configured architecture or the
 provider's implicit selection, not a host observation or proof of runtime
 support. `config show` is offline and does not acquire or probe a host.
@@ -74,6 +87,34 @@ Static SSH now checks these assertions against fresh host evidence, including
 inherited `amd64` values. See [Upgrading existing static-host configuration](../providers/ssh.md#upgrading-existing-static-host-configuration)
 to keep a strict constraint or remove the contributing values for automatic
 discovery; a blank override does not clear an inherited assertion.
+
+The JSON `localContainer` object and text `local_container` line include these
+public settings:
+
+| JSON field | Meaning and default |
+| --- | --- |
+| `runtime` | Configured Docker-compatible executable; defaults to `docker`. |
+| `image` | Configured image, or the reviewed OCI image selected by `os`. |
+| `user` | Container SSH user; defaults to `crabbox`. |
+| `workRoot` | Provider workspace root, resolved as described below. |
+| `cpus` | Numeric CPU limit; `0` leaves the runtime default. |
+| `memory` | Memory limit such as `6g`; an empty string leaves the runtime default. |
+| `network` | Container network; defaults to `bridge`. |
+| `dockerSocket` | Whether socket pass-through is configured; defaults to `false`. |
+
+When `local-container` is selected, both its `workRoot` and the top-level
+`workRoot` use the provider's effective defaulting rules: an explicit provider
+root wins over the generic root, and socket mode uses its host-visible cache
+root on POSIX when neither root is explicit. Windows retains the Linux guest
+root. See [socket pass-through](../providers/local-container.md#socket-pass-through).
+When another provider or no provider is selected, the section retains its
+merged settings, including an empty provider root when omitted.
+
+Inspection stays offline: `runtime=docker` is a configured/default value, not
+evidence of an installed executable or a reachable daemon. It does not discover
+Docker/Podman, inspect sockets, or acquire a container. Zero, false, and empty
+JSON values remain present; text uses `-` for an empty work root or memory limit.
+CLI-only volumes and internal checkpoint metadata are excluded.
 
 The JSON `incus` object includes the merged Incus settings: connection selectors,
 instance type, image, profile, SSH/proxy settings, release policy, timeout, and

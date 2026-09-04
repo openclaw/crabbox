@@ -22,6 +22,9 @@ type runCleanupWorkspaceOwnerTransport struct {
 
 	blockInspectAt            int
 	inspectCount              int
+	inspectReply              string
+	inspectErr                error
+	renewReply                string
 	renewErr                  error
 	destroyed                 atomic.Bool
 	releaseReply              string
@@ -74,9 +77,9 @@ func (r *runCleanupWorkspaceOwnerTransport) Do(ctx context.Context, req workspac
 			return "", errors.New("renew transport destroyed with lease")
 		}
 		if r.renewErr != nil {
-			return "", r.renewErr
+			return r.renewReply, r.renewErr
 		}
-		return "RENEWED", nil
+		return firstNonBlank(r.renewReply, "RENEWED"), nil
 	case workspaceOwnerInspect:
 		r.mu.Lock()
 		r.inspectCount++
@@ -90,7 +93,10 @@ func (r *runCleanupWorkspaceOwnerTransport) Do(ctx context.Context, req workspac
 			case <-r.allowInspect:
 			}
 		}
-		return "OWNED", nil
+		if r.inspectErr != nil {
+			return r.inspectReply, r.inspectErr
+		}
+		return firstNonBlank(r.inspectReply, "OWNED"), nil
 	case workspaceOwnerRelease:
 		r.mu.Lock()
 		if deadline, ok := ctx.Deadline(); ok {
@@ -219,6 +225,7 @@ func setupRunCleanupWorkspaceOwnerTest(t *testing.T) string {
 	t.Chdir(dir)
 	sshPath := filepath.Join(dir, "ssh")
 	commandScript := `#!/bin/sh
+printf '%s\n---\n' "$1" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$1" in
   *"base64 <"*) printf 'cHJvb2YtZG93bmxvYWRlZAo='; exit 0 ;;
   *"renewal-cleanup-exit-23"*) exit 23 ;;
@@ -227,6 +234,7 @@ exit 0
 `
 	installWorkspaceOwnerAwareSSH(t, sshPath, commandScript)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_LOG", filepath.Join(dir, "ssh.log"))
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
 	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
 	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
@@ -238,6 +246,8 @@ exit 0
 	runEnvProfileTestReleaseErr = nil
 	runEnvProfileTestConnectionCleanupSafe = true
 	runEnvProfileTestPreservesSSHWorkspace = false
+	runEnvProfileTestRetainsLease = false
+	runEnvProfileTestTerminalReleaseError = false
 	t.Cleanup(func() {
 		runEnvProfileTestAcquireLease = nil
 		runEnvProfileTestAcquireHook = nil
@@ -247,6 +257,8 @@ exit 0
 		runEnvProfileTestReleaseErr = nil
 		runEnvProfileTestConnectionCleanupSafe = true
 		runEnvProfileTestPreservesSSHWorkspace = false
+		runEnvProfileTestRetainsLease = false
+		runEnvProfileTestTerminalReleaseError = false
 		removeLeaseClaim("cbx_env_profile_test")
 	})
 	return dir
@@ -412,16 +424,28 @@ func TestRunCommandLeaseCleanupQuiescesWorkspaceOwner(t *testing.T) {
 
 func TestRunCommandRetainedLeaseRetainsFailClosedRenewal(t *testing.T) {
 	tests := []struct {
-		name string
-		args []string
+		name           string
+		args           []string
+		renewReply     string
+		renewErr       error
+		wantDiagnostic string
+		forbidOutput   string
 	}{
-		{name: "new lease explicitly kept", args: []string{"--keep"}},
-		{name: "reused lease normal lifecycle", args: []string{"--id", "cbx_env_profile_test"}},
+		{name: "new lease explicitly kept", args: []string{"--keep"}, renewErr: errors.New("renew response lost")},
+		{name: "reused lease normal lifecycle", args: []string{"--id", "cbx_env_profile_test"}, renewErr: errors.New("renew response lost")},
+		{name: "mismatch renewal denial", args: []string{"--id", "cbx_env_profile_test", "--stop-after", "always"}, renewReply: "MISMATCH", renewErr: errors.New("exit status 75"), wantDiagnostic: "remote workspace owner renewal failed closed: protocol state MISMATCH: exit status 75"},
+		{name: "expired renewal denial", args: []string{"--id", "cbx_env_profile_test", "--stop-after", "always"}, renewReply: "EXPIRED", renewErr: errors.New("exit status 75"), wantDiagnostic: "remote workspace owner renewal failed closed: protocol state EXPIRED: exit status 75"},
+		{name: "ambiguous renewal denial", args: []string{"--id", "cbx_env_profile_test", "--stop-after", "always"}, renewReply: "AMBIGUOUS", renewErr: errors.New("exit status 74"), wantDiagnostic: "remote workspace owner renewal failed closed: protocol state AMBIGUOUS: exit status 74"},
+		{name: "unknown renewal denial", args: []string{"--id", "cbx_env_profile_test", "--stop-after", "always"}, renewReply: "UNKNOWN raw-renew-output", renewErr: errors.New("exit status 75"), wantDiagnostic: "remote workspace owner renewal failed closed: exit status 75", forbidOutput: "raw-renew-output"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			setupRunCleanupWorkspaceOwnerTest(t)
-			remote := newRunCleanupWorkspaceOwnerTransport(1, errors.New("renew response lost"))
+			dir := setupRunCleanupWorkspaceOwnerTest(t)
+			remote := newRunCleanupWorkspaceOwnerTransport(1, test.renewErr)
+			remote.renewReply = test.renewReply
+			if test.renewReply != "" {
+				remote.inspectReply, remote.inspectErr = test.renewReply, test.renewErr
+			}
 			releaseStarted := make(chan struct{})
 			var releaseOnce sync.Once
 			runEnvProfileTestReleaseHook = func() error {
@@ -429,22 +453,64 @@ func TestRunCommandRetainedLeaseRetainsFailClosedRenewal(t *testing.T) {
 				return nil
 			}
 			var stdout, stderr bytes.Buffer
-			app := App{Stdout: &stdout, Stderr: &stderr, workspaceOwnerAcquirer: remote.acquire}
+			ownerReady := make(chan *workspaceOwner, 1)
+			app := App{Stdout: &stdout, Stderr: &stderr, workspaceOwnerAcquirer: func(ctx context.Context, target SSHTarget, leaseID string, stderr io.Writer) (*workspaceOwner, error) {
+				owner, err := remote.acquire(ctx, target, leaseID, stderr)
+				if err == nil {
+					ownerReady <- owner
+				}
+				return owner, err
+			}}
+			downloadPath := filepath.Join(dir, "proof.txt")
 			args := []string{
 				"--provider", runEnvProfileTestProvider{}.Name(),
 				"--no-sync",
 				"--no-hydrate",
+				"--junit", "report.xml",
+				"--artifact-glob", "artifacts/*.txt",
+				"--download", "proof.txt=" + downloadPath,
 			}
 			args = append(args, test.args...)
 			args = append(args, "--", "renewal-cleanup-success")
 			result := startRunCleanupAsync(t, remote, func(ctx context.Context) error {
 				return app.runCommand(ctx, args)
 			})
+			var owner *workspaceOwner
+			select {
+			case owner = <-ownerReady:
+			case <-time.After(runCleanupTestTimeout):
+				t.Fatal("run did not acquire workspace owner")
+			}
 			waitRunCleanupSignal(t, remote.inspectStarted, "post-command owner inspection")
-			remote.unblockInspect()
+			sshBeforeDenial, err := os.ReadFile(filepath.Join(dir, "ssh.log"))
+			if err != nil {
+				t.Fatal(err)
+			}
 			remote.unblockRenewal()
+			waitRunCleanupSignal(t, owner.ctx.Done(), "failed renewal owner cancellation")
+			waitRunCleanupSignal(t, owner.done, "failed renewal loop completion")
+			remote.unblockInspect()
 			runErr := result.wait(t)
 			assertRunCleanupExitCode(t, runErr, 7, stdout.String(), stderr.String())
+			if owner.Err() == nil {
+				t.Fatal("failed renewal did not retain the owner error")
+			}
+			if test.wantDiagnostic != "" && !strings.Contains(runErr.Error(), test.wantDiagnostic) {
+				t.Errorf("error=%v, want diagnostic %q", runErr, test.wantDiagnostic)
+			}
+			if test.forbidOutput != "" && strings.Contains(runErr.Error()+stdout.String()+stderr.String(), test.forbidOutput) {
+				t.Errorf("untrusted renewal output reached run diagnostics: %v\n%s\n%s", runErr, stdout.String(), stderr.String())
+			}
+			sshAfterDenial, err := os.ReadFile(filepath.Join(dir, "ssh.log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(sshBeforeDenial, sshAfterDenial) {
+				t.Fatalf("remote commands ran after renewal denied result, artifact, download, and cleanup authority:\nbefore=%s\nafter=%s", sshBeforeDenial, sshAfterDenial)
+			}
+			if _, err := os.Stat(downloadPath); !os.IsNotExist(err) {
+				t.Fatalf("download ran after renewal denial: stat err=%v", err)
+			}
 			select {
 			case <-releaseStarted:
 				t.Fatal("retained lease was destructively stopped")
@@ -463,10 +529,12 @@ func TestRunCommandRetainedLeaseRetainsFailClosedRenewal(t *testing.T) {
 
 func TestRunFailureDigestCleanupOutcomes(t *testing.T) {
 	for _, test := range []struct {
-		name     string
-		flags    []string
-		stopErr  error
-		wantStop bool
+		name          string
+		flags         []string
+		stopErr       error
+		retained      bool
+		terminalError bool
+		wantStop      bool
 	}{
 		{name: "automatic failure cleanup", wantStop: true},
 		{name: "always", flags: []string{"--stop-after", "always"}, wantStop: true},
@@ -477,9 +545,13 @@ func TestRunFailureDigestCleanupOutcomes(t *testing.T) {
 		{name: "keep failed", flags: []string{"--keep-on-failure"}},
 		{name: "failed cleanup", stopErr: errors.New("release failed")},
 		{name: "ambiguous cleanup", stopErr: errors.New("release response lost")},
+		{name: "retained direct release", retained: true},
+		{name: "deleted with local cleanup error", stopErr: errors.New("local cleanup failed"), terminalError: true, wantStop: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			setupRunCleanupWorkspaceOwnerTest(t)
+			runEnvProfileTestRetainsLease = test.retained
+			runEnvProfileTestTerminalReleaseError = test.terminalError
 			var stdout, stderr bytes.Buffer
 			var releaseCalls int
 			runEnvProfileTestReleaseHook = func() error {
@@ -503,6 +575,9 @@ func TestRunFailureDigestCleanupOutcomes(t *testing.T) {
 			if report.ExitCode != 23 || (report.LeaseStopped != nil && *report.LeaseStopped) != test.wantStop {
 				t.Fatalf("timing outcome disagrees with cleanup: %#v", report)
 			}
+			if report.RunStatus != "failed" || (report.LeaseStopErr != "") != (test.stopErr != nil) {
+				t.Errorf("run status or release error changed: %#v", report)
+			}
 			if !strings.Contains(out, "failure digest") {
 				t.Fatalf("missing failure digest:\n%s", out)
 			}
@@ -511,9 +586,40 @@ func TestRunFailureDigestCleanupOutcomes(t *testing.T) {
 					t.Errorf("recovery %s present=%v, stopped=%v:\n%s", command, got, test.wantStop, out)
 				}
 			}
-			if (test.wantStop || test.stopErr != nil) != (releaseCalls == 1) {
+			if (test.wantStop || test.stopErr != nil || test.retained) != (releaseCalls == 1) {
 				t.Errorf("release calls=%d", releaseCalls)
 			}
 		})
+	}
+}
+
+func TestRunCommandFreshWindowsLeaseAcquiresInputOwner(t *testing.T) {
+	setupRunCleanupWorkspaceOwnerTest(t)
+	const leaseID = "cbx_env_profile_test"
+	runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) {
+		return LeaseTarget{
+			LeaseID: leaseID,
+			Server:  Server{Provider: runEnvProfileTestProvider{}.Name()},
+			SSH:     SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeNormal, SSHConfigProxy: true},
+		}, nil
+	}
+	ownerBoundary := errors.New("stop before Windows input can bypass its owner")
+	ownerCalls, releases := 0, 0
+	runEnvProfileTestReleaseHook = func() error { releases++; return nil }
+	var output bytes.Buffer
+	app := App{
+		Stdout: &output,
+		Stderr: &output,
+		workspaceOwnerAcquirer: func(_ context.Context, target SSHTarget, id string, _ io.Writer) (*workspaceOwner, error) {
+			ownerCalls++
+			if id != leaseID || !isWindowsNativeTarget(target) {
+				t.Fatalf("wrong input owner target: id=%s target=%+v", id, target)
+			}
+			return nil, ownerBoundary
+		},
+	}
+	err := app.runCommand(t.Context(), []string{"--provider", runEnvProfileTestProvider{}.Name(), "--target", targetWindows, "--windows-mode", windowsModeNormal, "--no-sync", "--no-hydrate", "--", "Write-Output", "must-not-run"})
+	if !errors.Is(err, ownerBoundary) || ownerCalls != 1 || releases != 1 {
+		t.Fatalf("fresh Windows input bypassed owner or cleanup: err=%v owners=%d releases=%d\n%s", err, ownerCalls, releases, output.String())
 	}
 }

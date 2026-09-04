@@ -661,7 +661,7 @@ func (b *linodeLeaseBackend) updateFencedLinodeMetadata(ctx context.Context, lea
 	}
 	var updated core.LeaseClaim
 	if touch != nil {
-		updated, server, _, err = core.UpdateLeaseClaimTouchIfUnchangedAction(lease.LeaseID, expected, now, touch.IdleTimeoutOverride, action)
+		updated, server, _, err = core.UpdateLeaseClaimTouchIfUnchangedAction(providerCtx, lease.LeaseID, expected, now, touch.IdleTimeoutOverride, action)
 	} else {
 		updated, server, _, err = core.UpdateLeaseClaimEndpointIfUnchangedAction(lease.LeaseID, expected, action)
 	}

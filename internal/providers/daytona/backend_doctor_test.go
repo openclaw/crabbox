@@ -17,6 +17,10 @@ type fakeDaytonaDoctorAPI struct {
 	deleted      []string
 }
 
+func (a *fakeDaytonaDoctorAPI) GetSnapshot(context.Context, string) (*apidaytona.SnapshotDto, error) {
+	return nil, nil
+}
+
 func (a *fakeDaytonaDoctorAPI) CreateSandbox(context.Context, apidaytona.CreateSandbox) (*apidaytona.Sandbox, error) {
 	a.mutated = true
 	return nil, nil

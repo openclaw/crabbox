@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -184,10 +185,11 @@ func repositoryGitEnvironment() []string {
 }
 
 type gitTrackedPath struct {
-	name         string
-	mode         string
-	stage        int
-	skipWorktree bool
+	name            string
+	mode            string
+	stage           int
+	skipWorktree    bool
+	assumeUnchanged bool
 }
 
 // GitCheckoutHasHiddenOmissions reports whether sparse rules or skip-worktree
@@ -229,7 +231,7 @@ func gitCheckoutSparseEnabled(root string) bool {
 }
 
 func loadGitTrackedPaths(root string) ([]gitTrackedPath, error) {
-	trackedCmd := exec.Command("git", "ls-files", "-t", "--stage", "-z")
+	trackedCmd := exec.Command("git", "ls-files", "-v", "--stage", "-z")
 	trackedCmd.Dir = root
 	trackedCmd.Env = repositoryGitEnvironment()
 	tagged, err := trackedCmd.Output()
@@ -319,10 +321,11 @@ func parseGitTrackedPaths(tagged []byte) ([]gitTrackedPath, error) {
 			return nil, fmt.Errorf("parse tracked path stage %q", fields[2])
 		}
 		tracked = append(tracked, gitTrackedPath{
-			name:         string(name),
-			mode:         mode,
-			stage:        stage,
-			skipWorktree: record[0] == 'S',
+			name:            string(name),
+			mode:            mode,
+			stage:           stage,
+			skipWorktree:    record[0] == 'S' || record[0] == 's',
+			assumeUnchanged: record[0] >= 'a' && record[0] <= 'z',
 		})
 	}
 	return tracked, nil
@@ -621,7 +624,7 @@ func syncGitCoherencePlan(cfg Config, repo Repo) (gitCoherencePlan, bool) {
 	}
 	target := gitOutput(repo.Root, "rev-parse", "--verify", repo.Head+"^{commit}")
 	tree := gitOutput(repo.Root, "rev-parse", "--verify", repo.Head+"^{tree}")
-	branch := originBranchForTarget(repo.Root, repo.BaseRef, target)
+	branch := originBranchForTarget(repo.Root, firstNonBlank(cfg.Sync.BaseRef, repo.BaseRef), target)
 	plan := gitCoherencePlan{RemoteURL: normalizeGitRemoteURL(repo.RemoteURL), Target: target, Branch: branch}
 	if target == "" || target != repo.Head || branch == "" {
 		return gitCoherencePlan{}, false
@@ -638,17 +641,18 @@ func originBranchForTarget(root, baseRef, target string) string {
 	if target == "" {
 		return ""
 	}
+	out := gitOutput(root, "for-each-ref", "--contains="+target, "--sort=refname", "--format=%(refname)", "refs/remotes/origin")
+	eligibleRefs := strings.Split(out, "\n")
 	if branch := normalizedOriginBranch(baseRef); branch != "" &&
-		gitOutput(root, "rev-parse", "--verify", "refs/remotes/origin/"+branch+"^{commit}") == target {
+		slices.Contains(eligibleRefs, "refs/remotes/origin/"+branch) {
 		return branch
 	}
 	originHead := gitOutput(root, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
 	if branch := normalizedOriginBranch(originHead); branch != "" &&
-		gitOutput(root, "rev-parse", "--verify", "refs/remotes/origin/"+branch+"^{commit}") == target {
+		slices.Contains(eligibleRefs, "refs/remotes/origin/"+branch) {
 		return branch
 	}
-	out := gitOutput(root, "for-each-ref", "--contains="+target, "--sort=refname", "--format=%(refname)", "refs/remotes/origin")
-	for _, line := range strings.Split(out, "\n") {
+	for _, line := range eligibleRefs {
 		if branch := normalizedOriginBranch(line); branch != "" {
 			return branch
 		}
@@ -852,7 +856,7 @@ func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, ex
 		fmt.Fprintf(h, "v1-overlay\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", plan.RemoteURL, plan.Branch, plan.Target, plan.Tree)
 		fmt.Fprintf(h, "delete=%t\nchecksum=%t\ngitOverlay=true\n", cfg.Sync.Delete, cfg.Sync.Checksum)
 	} else {
-		fmt.Fprintf(h, "v5\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", plan.RemoteURL, plan.Branch, plan.Target, plan.Tree)
+		fmt.Fprintf(h, "v6\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", plan.RemoteURL, plan.Branch, plan.Target, plan.Tree)
 		fmt.Fprintf(h, "delete=%t\nchecksum=%t\n", cfg.Sync.Delete, cfg.Sync.Checksum)
 	}
 	fmt.Fprintf(h, "manifest=%x\n", sha256.Sum256(manifest.NUL()))
@@ -872,7 +876,7 @@ func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, ex
 		if info.IsDir() {
 			continue
 		}
-		if cfg.Sync.GitOverlay && info.Mode()&os.ModeSymlink != 0 {
+		if info.Mode()&os.ModeSymlink != 0 {
 			target, err := os.Readlink(full)
 			if err != nil {
 				return "", err

@@ -8,7 +8,7 @@ import {
   acquireCheckpointUse,
   finishCheckpointUse,
   backfillFailedCheckpointCreateRecovery,
-  bindCheckpointUseProvisioning,
+  bindCheckpointUseProvisioningInTransaction,
   checkpointDueKey,
   checkpointKey,
   checkpointLimits,
@@ -23,6 +23,7 @@ import {
 import type { CoordinatorRuntime } from "../src/coordinator-runtime";
 import {
   FleetCoordinator,
+  readyPoolDesiredCapacityKeyV2,
   readyPoolSeedDigestV1,
   backfillCheckpointCreateAttempt,
 } from "../src/fleet";
@@ -367,7 +368,16 @@ describe("PostgresCoordinatorStorage", () => {
         updatedAt: now,
       } satisfies CreateAttemptRecord;
       await storage.put(`create-attempt:${leaseID}`, attempt);
-      await bindCheckpointUseProvisioning(storage, id, claim.token, principal, attemptID, leaseID);
+      await storage.transaction((transaction) =>
+        bindCheckpointUseProvisioningInTransaction(
+          transaction,
+          id,
+          attempt.checkpointUseClaimHash,
+          principal,
+          attemptID,
+          leaseID,
+        ),
+      );
       await storage.put(`lease:${leaseID}`, {
         id: leaseID,
         state: "active",
@@ -574,6 +584,7 @@ describe("PostgresCoordinatorStorage", () => {
     const claims = await Promise.all(
       checkpointIDs.map(async (id) => await acquireCheckpointUse(storage, id, principal)),
     );
+    const claimHashes = await Promise.all(claims.map((claim) => sha256Hex(claim.token)));
     const ordinaryAttempt = {
       version: 1,
       requestedLeaseID,
@@ -586,32 +597,36 @@ describe("PostgresCoordinatorStorage", () => {
     } satisfies CreateAttemptRecord;
     await storage.put(`create-attempt:${requestedLeaseID}`, ordinaryAttempt);
     await expect(
-      bindCheckpointUseProvisioning(
-        storage,
-        checkpointIDs[0]!,
-        claims[0]!.token,
-        principal,
-        attemptID,
-        requestedLeaseID,
+      storage.transaction((transaction) =>
+        bindCheckpointUseProvisioningInTransaction(
+          transaction,
+          checkpointIDs[0]!,
+          claimHashes[0]!,
+          principal,
+          attemptID,
+          requestedLeaseID,
+        ),
       ),
     ).rejects.toMatchObject({ code: "create_attempt_binding_conflict" });
     expect(await storage.get(`create-attempt:${requestedLeaseID}`)).toEqual(ordinaryAttempt);
     await storage.put(`create-attempt:${requestedLeaseID}`, {
       ...ordinaryAttempt,
       checkpointID: checkpointIDs[0],
-      checkpointUseClaimHash: await sha256Hex(claims[0]!.token),
+      checkpointUseClaimHash: claimHashes[0]!,
     } satisfies CreateAttemptRecord);
 
     const results = await Promise.allSettled(
       checkpointIDs.map(
         async (checkpointID, index) =>
-          await bindCheckpointUseProvisioning(
-            storage,
-            checkpointID,
-            claims[index]!.token,
-            principal,
-            attemptID,
-            requestedLeaseID,
+          await storage.transaction((transaction) =>
+            bindCheckpointUseProvisioningInTransaction(
+              transaction,
+              checkpointID,
+              claimHashes[index]!,
+              principal,
+              attemptID,
+              requestedLeaseID,
+            ),
           ),
       ),
     );
@@ -687,6 +702,7 @@ describe("PostgresCoordinatorStorage", () => {
       target: "linux",
     } satisfies CoordinatorCheckpointRecord);
     const claim = await acquireCheckpointUse(storage, checkpointID, principal);
+    const tokenHash = await sha256Hex(claim.token);
     await storage.put(`create-attempt:${requestedLeaseID}`, {
       version: 1,
       requestedLeaseID,
@@ -695,17 +711,19 @@ describe("PostgresCoordinatorStorage", () => {
       org: principal.org,
       state: "pending",
       checkpointID,
-      checkpointUseClaimHash: await sha256Hex(claim.token),
+      checkpointUseClaimHash: tokenHash,
       createdAt: now,
       updatedAt: now,
     } satisfies CreateAttemptRecord);
-    await bindCheckpointUseProvisioning(
-      storage,
-      checkpointID,
-      claim.token,
-      principal,
-      attemptID,
-      requestedLeaseID,
+    await storage.transaction((transaction) =>
+      bindCheckpointUseProvisioningInTransaction(
+        transaction,
+        checkpointID,
+        tokenHash,
+        principal,
+        attemptID,
+        requestedLeaseID,
+      ),
     );
     if (scenario.attemptState === "canceled") {
       const attempt = (await storage.get<CreateAttemptRecord>(
@@ -1033,67 +1051,8 @@ describe("PostgresCoordinatorStorage", () => {
   });
 
   it("keeps new typed PostgreSQL pool records invisible to shipped legacy scans and borrow after rollback", async () => {
-    const pool = statefulFakePool();
-    const storage = new PostgresCoordinatorStorage("postgres://unused", pool);
-    const runtime = postgresTestRuntime(storage);
-    const env = { CRABBOX_DEFAULT_ORG: "example-org" } as Env;
-    const headers = {
-      "x-crabbox-owner": "alice@example.com",
-      "x-crabbox-org": "example-org",
-      "content-type": "application/json",
-    };
-    const leaseID = "cbx_000000000099";
-    const lease: LeaseRecord = {
-      id: leaseID,
-      provider: "aws",
-      target: "linux",
-      architecture: "amd64",
-      cloudID: "i-0123456789abcdef0",
-      region: "us-east-1",
-      owner: "alice@example.com",
-      org: orgKeyForLabel("example-org"),
-      profile: "default",
-      class: "standard",
-      serverType: "c6i.large",
-      image: {
-        id: "ami-0123456789abcdef0",
-        source: "promoted",
-        provider: "aws",
-        kind: "aws-ami",
-        region: "us-east-1",
-      },
-      serverID: 1,
-      serverName: "typed-runner",
-      providerKey: "typed-key",
-      host: "192.0.2.10",
-      sshUser: "crabbox",
-      sshPort: "22",
-      workRoot: "/work/crabbox",
-      keep: true,
-      ttlSeconds: 3600,
-      estimatedHourlyUSD: 1,
-      maxEstimatedUSD: 1,
-      state: "active",
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
-    };
-    await storage.put(`lease:${leaseID}`, lease);
-    const metadata = { repo: "example-org/my-app", ref: "main", commit: "abc123" };
-    const identity: ReadyPoolIdentityV1 = {
-      schema: "crabbox-ready-pool-identity/v1",
-      image: { provider: "aws", scope: "us-east-1", id: "ami-0123456789abcdef0" },
-      architecture: "amd64",
-      seedDigest: await readyPoolSeedDigestV1(metadata),
-      cacheCompatibility: "node-22",
-    };
-    const poolRequest = (action: string, body: Record<string, unknown>) =>
-      new Request(`https://coordinator.test/v1/ready-pools/builders/${action}`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-      });
-    const newWorker = new FleetCoordinator(runtime, env);
+    const { storage, env, headers, leaseID, metadata, identity, poolRequest, newWorker } =
+      await postgresReadyPoolFixture();
     const reconcile = await newWorker.fetch(
       poolRequest("reconcile-identity", {
         ...metadata,
@@ -1112,10 +1071,18 @@ describe("PostgresCoordinatorStorage", () => {
 
     expect([...(await storage.list({ prefix: "ready-pool:" })).values()]).toEqual([]);
     expect([...(await storage.list({ prefix: "ready-pool-fill-claim:" })).values()]).toEqual([]);
-    expect([...(await storage.list({ prefix: "ready-pool-desired:" })).values()]).toEqual([]);
+    const desiredKey = await readyPoolDesiredCapacityKeyV2({
+      org: orgKeyForLabel("example-org"),
+      owner: "alice@example.com",
+      key: "builders",
+      compatibilityKey: undefined,
+      identity,
+    });
+    expect([...(await storage.list({ prefix: "ready-pool-desired:" })).keys()]).toEqual([]);
+    expect(await storage.get(desiredKey)).toBeTruthy();
     expect(await storage.get(`typed-ready-pool-v1:builders:${leaseID}`)).toBeTruthy();
     expect(await storage.get(`typed-ready-pool-v1-fill-claim:${claim.claim.token}`)).toBeTruthy();
-    expect((await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).size).toBe(1);
+    expect((await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).size).toBe(0);
 
     const rolledBackWorker = new FleetCoordinator(postgresTestRuntime(storage), env);
     const legacyStatus = await rolledBackWorker.fetch(
@@ -1128,7 +1095,138 @@ describe("PostgresCoordinatorStorage", () => {
       (await storage.get<ReadyPoolEntry>(`typed-ready-pool-v1:builders:${leaseID}`))?.state,
     ).toBe("ready");
   });
+
+  it.each([false, true])(
+    "preserves PostgreSQL pool ownership and quarantine across restart (typed source: %s)",
+    async (typed) => {
+      const { pool, storage, env, leaseID, metadata, identity, poolRequest, newWorker } =
+        await postgresReadyPoolFixture();
+      const source = typed ? "-identity" : "";
+      const destination = typed ? "" : "-identity";
+      const sourceBody = { ...metadata, ...(typed ? { identity } : {}) };
+      const destinationBody = { ...metadata, ...(!typed ? { identity } : {}) };
+      const registered = await newWorker.fetch(
+        poolRequest(`register${source}`, { leaseID, ...sourceBody }),
+      );
+      expect(registered.status).toBe(200);
+      const { entry: ready } = (await registered.json()) as { entry: ReadyPoolEntry };
+      const borrowed = await newWorker.fetch(
+        poolRequest(`borrow${source}`, { ...sourceBody, heartbeat: true }),
+      );
+      expect(borrowed.status).toBe(200);
+      const { entry: busy } = (await borrowed.json()) as { entry: ReadyPoolEntry };
+      const duplicateRegister = await newWorker.fetch(
+        poolRequest(`register${destination}`, { leaseID, ...destinationBody }),
+      );
+      expect(duplicateRegister.status).toBe(409);
+
+      await storage.put(`${typed ? "ready-pool" : "typed-ready-pool-v1"}:builders:${leaseID}`, {
+        ...ready,
+        identity: undefined,
+        ...destinationBody,
+      });
+      const reopenedStorage = new PostgresCoordinatorStorage("postgres://unused", pool);
+      const reopened = new FleetCoordinator(postgresTestRuntime(reopenedStorage), env);
+      expect(
+        (await reopened.fetch(poolRequest(`borrow${destination}`, destinationBody))).status,
+      ).toBe(409);
+      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse(busy.borrowExpiresAt!));
+      try {
+        const expiredReturn = await reopened.fetch(
+          poolRequest(`return${source}`, {
+            leaseID,
+            ...sourceBody,
+            borrowToken: busy.borrowToken,
+          }),
+        );
+        expect(expiredReturn.status).toBe(409);
+        expect(await expiredReturn.json()).toMatchObject({ error: "borrow_expired" });
+        const persisted = await reopenedStorage.get<ReadyPoolEntry>(
+          `${typed ? "typed-ready-pool-v1" : "ready-pool"}:builders:${leaseID}`,
+        );
+        expect(persisted).toMatchObject({ state: "quarantined", failureCount: 1 });
+        expect(persisted).not.toHaveProperty("borrowToken");
+        const afterQuarantine = new FleetCoordinator(postgresTestRuntime(reopenedStorage), env);
+        const reRegister = await afterQuarantine.fetch(
+          poolRequest(`register${destination}`, { leaseID, ...destinationBody }),
+        );
+        expect(reRegister.status).toBe(409);
+        expect(await reRegister.json()).toMatchObject({ error: "pool_entry_quarantined" });
+        expect(
+          (await afterQuarantine.fetch(poolRequest(`borrow${destination}`, destinationBody)))
+            .status,
+        ).toBe(409);
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
 });
+
+async function postgresReadyPoolFixture() {
+  const pool = statefulFakePool();
+  const storage = new PostgresCoordinatorStorage("postgres://unused", pool);
+  const runtime = postgresTestRuntime(storage);
+  const env = { CRABBOX_DEFAULT_ORG: "example-org" } as Env;
+  const headers = {
+    "x-crabbox-owner": "alice@example.com",
+    "x-crabbox-org": "example-org",
+    "content-type": "application/json",
+  };
+  const leaseID = "cbx_000000000099";
+  const lease: LeaseRecord = {
+    id: leaseID,
+    provider: "aws",
+    target: "linux",
+    architecture: "amd64",
+    cloudID: "i-0123456789abcdef0",
+    region: "us-east-1",
+    owner: "alice@example.com",
+    org: orgKeyForLabel("example-org"),
+    profile: "default",
+    class: "standard",
+    serverType: "c6i.large",
+    image: {
+      id: "ami-0123456789abcdef0",
+      source: "promoted",
+      provider: "aws",
+      kind: "aws-ami",
+      region: "us-east-1",
+    },
+    serverID: 1,
+    serverName: "typed-runner",
+    providerKey: "typed-key",
+    host: "192.0.2.10",
+    sshUser: "crabbox",
+    sshPort: "22",
+    workRoot: "/work/crabbox",
+    keep: true,
+    ttlSeconds: 3600,
+    estimatedHourlyUSD: 1,
+    maxEstimatedUSD: 1,
+    state: "active",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+  };
+  await storage.put(`lease:${leaseID}`, lease);
+  const metadata = { repo: "example-org/my-app", ref: "main", commit: "abc123" };
+  const identity: ReadyPoolIdentityV1 = {
+    schema: "crabbox-ready-pool-identity/v1",
+    image: { provider: "aws", scope: "us-east-1", id: "ami-0123456789abcdef0" },
+    architecture: "amd64",
+    seedDigest: await readyPoolSeedDigestV1(metadata),
+    cacheCompatibility: "node-22",
+  };
+  const poolRequest = (action: string, body: Record<string, unknown>) =>
+    new Request(`https://coordinator.test/v1/ready-pools/builders/${action}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+  const newWorker = new FleetCoordinator(runtime, env);
+  return { pool, storage, env, headers, leaseID, metadata, identity, poolRequest, newWorker };
+}
 
 function postgresTestRuntime(storage: PostgresCoordinatorStorage): CoordinatorRuntime {
   let alarm: number | undefined;

@@ -110,7 +110,7 @@ func testCleanupPreservesInstanceReclaimedDuringList(t *testing.T, dryRun, reser
 	}
 
 	publishFreshClaim := func() {
-		freshLabels := touchInstanceLabels(staleLabels, core.BaseConfig(), "ready", time.Now().UTC())
+		freshLabels := core.TouchDirectLeaseLabels(staleLabels, core.BaseConfig(), "ready", time.Now().UTC())
 		freshServer := core.Server{
 			CloudID:  name,
 			Provider: providerName,
@@ -137,7 +137,7 @@ func testCleanupPreservesInstanceReclaimedDuringList(t *testing.T, dryRun, reser
 		if !reserveBeforeSnapshot {
 			publishFreshClaim()
 		}
-		freshLabels := touchInstanceLabels(staleLabels, core.BaseConfig(), "ready", time.Now().UTC())
+		freshLabels := core.TouchDirectLeaseLabels(staleLabels, core.BaseConfig(), "ready", time.Now().UTC())
 		freshConfig := cloneMap(instanceConfig)
 		for key, value := range freshLabels {
 			freshConfig[labelKey(key)] = value

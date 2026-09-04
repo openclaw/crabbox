@@ -8,6 +8,7 @@ import (
 	"time"
 
 	daytona "github.com/daytonaio/daytona/libs/api-client-go"
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -40,9 +41,6 @@ func RegisterDaytonaProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyDaytonaProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == daytonaProvider {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=daytona; choose CPU, memory, and disk in the Daytona snapshot")
-		}
 		if flagWasSet(fs, "type") {
 			return exit(2, "--type is not supported for provider=daytona; choose CPU, memory, and disk in the Daytona snapshot")
 		}
@@ -99,7 +97,7 @@ func (b *daytonaLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (
 	}
 	cfg := b.cfg
 	cfg.WorkRoot = daytonaWorkRoot(cfg)
-	server := daytonaSandboxToServer(sandbox, cfg)
+	server := daytonaSandboxToServer(sandbox)
 	target, err := daytonaSSHTargetFor(ctx, client, cfg, server)
 	if err != nil {
 		return LeaseTarget{}, b.rollbackDaytonaSandbox(server.CloudID, leaseID, err)
@@ -115,6 +113,14 @@ func (b *daytonaLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (
 }
 
 func (b *daytonaLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+	return b.resolve(ctx, req, nil)
+}
+
+func (b *daytonaLeaseBackend) ResolveRunLeaseUnderClaim(ctx context.Context, req ResolveRequest, original core.LeaseClaim) (LeaseTarget, error) {
+	return b.resolve(ctx, req, &original)
+}
+
+func (b *daytonaLeaseBackend) resolve(ctx context.Context, req ResolveRequest, original *LeaseClaim) (LeaseTarget, error) {
 	if req.RejectAuthSecret {
 		return LeaseTarget{}, exit(2, "crabbox connect does not support token-as-username SSH targets; use crabbox ssh --show-secret in a trusted terminal")
 	}
@@ -126,21 +132,35 @@ func (b *daytonaLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	server := daytonaSandboxToServer(sandbox, b.cfg)
+	server := daytonaSandboxToServer(sandbox)
 	if req.StatusOnly {
 		server.Labels["state"] = server.Status
 	}
-	if req.Reclaim && !req.NoLocalStateMutations {
-		if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), b.cfg, server, SSHTarget{}, req.Repo.Root, b.cfg.IdleTimeout, true); err != nil {
+	if original != nil {
+		// Core owns publication for run admission. Preserve the repository and
+		// resource checks before Start or creating token-bearing SSH access.
+		if err := validateExactDaytonaResourceClaim(leaseID, server.CloudID, *original, true); err != nil {
 			return LeaseTarget{}, err
 		}
-	}
-	if err := requireExactDaytonaClaim(leaseID, sandbox); err != nil {
-		return LeaseTarget{}, err
-	}
-	if !req.Reclaim && !req.NoLocalStateMutations {
-		if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), b.cfg, server, SSHTarget{}, req.Repo.Root, b.cfg.IdleTimeout, false); err != nil {
+		if err := core.CheckLeaseClaimRepositoryOwner(leaseID, *original, req.Repo.Root, false); err != nil {
 			return LeaseTarget{}, err
+		}
+		if err := core.AuthorizeCheckpointRelease(*original, ""); err != nil {
+			return LeaseTarget{}, err
+		}
+	} else {
+		if req.Reclaim && !req.NoLocalStateMutations {
+			if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), b.cfg, server, SSHTarget{}, req.Repo.Root, b.cfg.IdleTimeout, true); err != nil {
+				return LeaseTarget{}, err
+			}
+		}
+		if err := requireExactDaytonaClaim(leaseID, sandbox); err != nil {
+			return LeaseTarget{}, err
+		}
+		if !req.Reclaim && !req.NoLocalStateMutations {
+			if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), b.cfg, server, SSHTarget{}, req.Repo.Root, b.cfg.IdleTimeout, false); err != nil {
+				return LeaseTarget{}, err
+			}
 		}
 	}
 	if req.StatusOnly {
@@ -159,7 +179,7 @@ func (b *daytonaLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (
 			return LeaseTarget{}, err
 		}
 	}
-	server = daytonaSandboxToServer(sandbox, b.cfg)
+	server = daytonaSandboxToServer(sandbox)
 	target, err := daytonaSSHTargetFor(ctx, client, b.cfg, server)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -182,7 +202,7 @@ func (b *daytonaLeaseBackend) List(ctx context.Context, req ListRequest) ([]Leas
 		if _, owned := daytonaSandboxOwnership(&sandboxes[i]); !owned {
 			continue
 		}
-		servers = append(servers, daytonaSandboxToServer(&sandboxes[i], b.cfg))
+		servers = append(servers, daytonaSandboxToServer(&sandboxes[i]))
 	}
 	return servers, nil
 }
@@ -391,7 +411,11 @@ func requireExactDaytonaResourceClaim(leaseID, resourceID string) error {
 	if err != nil {
 		return err
 	}
-	if !ok || strings.TrimSpace(claim.LeaseID) != strings.TrimSpace(leaseID) || strings.TrimSpace(claim.CloudID) != resourceID {
+	return validateExactDaytonaResourceClaim(leaseID, resourceID, claim, ok)
+}
+
+func validateExactDaytonaResourceClaim(leaseID, resourceID string, claim LeaseClaim, exists bool) error {
+	if !exists || strings.TrimSpace(claim.LeaseID) != strings.TrimSpace(leaseID) || strings.TrimSpace(claim.CloudID) != resourceID {
 		return exit(4, "daytona sandbox %s has no exact local claim for lease %s; use --reclaim from the owning repository before reuse or deletion", blank(resourceID, "-"), blank(leaseID, "-"))
 	}
 	return nil
@@ -433,6 +457,7 @@ func daytonaSSHTargetFromAccess(cfg Config, access daytonaSSHAccess) (SSHTarget,
 	}, nil
 }
 
+// Any response field may contain a credential; diagnostics report reasons only.
 func parseDaytonaSSHCommand(command string) (string, string, string, error) {
 	fields := strings.Fields(command)
 	if len(fields) == 0 {
@@ -448,34 +473,34 @@ func parseDaytonaSSHCommand(command string) (string, string, string, error) {
 		switch {
 		case field == "-p":
 			if i+1 >= len(fields) || strings.TrimSpace(fields[i+1]) == "" {
-				return "", "", "", fmt.Errorf("daytona ssh command missing -p value: %q", command)
+				return "", "", "", fmt.Errorf("daytona ssh command missing -p value")
 			}
 			i++
 			port = fields[i]
 		case strings.HasPrefix(field, "-p") && len(field) > 2:
 			port = strings.TrimPrefix(field, "-p")
 		case strings.HasPrefix(field, "-"):
-			return "", "", "", fmt.Errorf("daytona ssh command has unsupported option %q", field)
+			return "", "", "", fmt.Errorf("daytona ssh command has unsupported option")
 		default:
 			destination = field
 		}
 	}
 	user, host, ok := strings.Cut(destination, "@")
 	if !ok || strings.TrimSpace(user) == "" || strings.TrimSpace(host) == "" {
-		return "", "", "", fmt.Errorf("daytona ssh command missing user@host destination: %q", command)
+		return "", "", "", fmt.Errorf("daytona ssh command missing user@host destination")
 	}
 	return user, host, port, nil
 }
 
-func daytonaSandboxesToServers(sandboxes []daytona.Sandbox, cfg Config) []Server {
+func daytonaSandboxesToServers(sandboxes []daytona.Sandbox) []Server {
 	servers := make([]Server, 0, len(sandboxes))
 	for i := range sandboxes {
-		servers = append(servers, daytonaSandboxToServer(&sandboxes[i], cfg))
+		servers = append(servers, daytonaSandboxToServer(&sandboxes[i]))
 	}
 	return servers
 }
 
-func daytonaSandboxToServer(sandbox *daytona.Sandbox, cfg Config) Server {
+func daytonaSandboxToServer(sandbox *daytona.Sandbox) Server {
 	labels := map[string]string{}
 	if sandbox != nil && sandbox.Labels != nil {
 		for k, v := range sandbox.Labels {
@@ -491,7 +516,7 @@ func daytonaSandboxToServer(sandbox *daytona.Sandbox, cfg Config) Server {
 	if server.Name == "" {
 		server.Name = blank(labels["lease_name"], server.CloudID)
 	}
-	server.ServerType.Name = blank(labels["server_type"], serverTypeForProviderClass(cfg.Provider, cfg.Class))
+	server.ServerType.Name = blank(labels["server_type"], "snapshot")
 	return server
 }
 

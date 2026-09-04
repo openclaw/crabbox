@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { Script, createContext } from "node:vm";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -15,6 +16,8 @@ import {
 import { routeCoordinatorRequest } from "../src/coordinator-entry";
 import {
   CloudflareCoordinatorRuntime,
+  legacyAlarmKey,
+  setLegacyWake,
   type CoordinatorRuntime,
   type CoordinatorSocketHandlers,
   type CoordinatorStorage,
@@ -26,7 +29,7 @@ import {
   AzureProvider,
   DaytonaProvider,
   FleetCoordinator,
-  FleetDurableObject,
+  FleetDurableObject as ProductionFleetDurableObject,
   GCPProvider,
   HetznerProvider,
   bridgeTicketFromRequest,
@@ -39,6 +42,7 @@ import {
   forwardOrBufferWebVNC,
   resetWebVNCBridge,
   recordAzureDeferredCleanup,
+  readyPoolDesiredCapacityKeyV2,
   readyPoolSeedDigestV1,
   replacedEgressSessionsPerLease,
   shouldActivateEgressSession,
@@ -47,14 +51,18 @@ import {
 } from "../src/fleet";
 import { gcpProviderLabelValue } from "../src/gcp";
 import { HetznerClient, HetznerProvisioningError } from "../src/hetzner";
+import { errorMessage } from "../src/http";
 import { MISSING_ORG_KEY, isCurrentOrgKey, orgKeyForLabel } from "../src/org-identity";
 import { portalCode, portalVNC, webVNCCredentialsFromHistoryState } from "../src/portal";
 import { providerLabelValue } from "../src/provider-labels";
 import {
   ProviderProvisioningCleanupError,
+  ProviderResourceUnresolvedError,
   providerProvisioningCleanupClaim,
+  type ProviderProvisioningCleanupClaim,
 } from "../src/provider-provisioning";
 import { providerReconciliationFingerprint } from "../src/provider-reconciliation";
+import { verifyTerminalReceipt } from "../src/run-receipt";
 import {
   runtimeAdapterDesktopRelayTimeoutMs,
   runtimeAdapterRelayFrameLimit,
@@ -69,14 +77,20 @@ import type {
   ProviderImage,
   ProviderMachine,
   ProvisioningAttempt,
+  ReadyPoolDesiredCapacity,
   ReadyPoolEntry,
   ReadyPoolIdentityV1,
+  RunEventRecord,
   RunRecord,
 } from "../src/types";
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
+
+function expandLogTextRuns(parts: Array<{ text: string; count: number }>): string {
+  return parts.map((part) => part.text.repeat(part.count)).join("");
+}
 
 async function testSHA256Digest(value: Uint8Array): Promise<string> {
   const hashed = new Uint8Array(await crypto.subtle.digest("SHA-256", value));
@@ -198,9 +212,71 @@ function workspaceFixtureKey(
   return `workspace:${orgKeyForLabel(org)}:${encodeURIComponent(owner)}:${workspaceID}`;
 }
 
+// These tests assert completed maintenance outcomes. The production runtime returns from its
+// alarm after the bounded tick; this fixture explicitly drains runtime-owned maintenance too.
+// Alarm latency and durable wake behavior are exercised separately with the real runtime.
+class FleetDurableObject extends ProductionFleetDurableObject {
+  private readonly initialized: Promise<unknown>;
+  private readonly tasks: Set<Promise<unknown>>;
+
+  constructor(...args: ConstructorParameters<typeof ProductionFleetDurableObject>) {
+    const [state, ...rest] = args;
+    const initializers: Promise<unknown>[] = [];
+    const tasks = new Set<Promise<unknown>>();
+    super(
+      {
+        ...state,
+        blockConcurrencyWhile<T>(callback: () => Promise<T>): Promise<T> {
+          const initialized = callback();
+          initializers.push(initialized);
+          return initialized;
+        },
+        waitUntil(task: Promise<unknown>): void {
+          tasks.add(task);
+          void task.then(
+            () => tasks.delete(task),
+            () => tasks.delete(task),
+          );
+        },
+      } as DurableObjectState,
+      ...rest,
+    );
+    this.initialized = Promise.all(initializers);
+    this.tasks = tasks;
+  }
+
+  override async fetch(incomingRequest: Request): Promise<Response> {
+    await this.initialized;
+    const response = await super.fetch(incomingRequest);
+    if (new URL(incomingRequest.url).pathname === "/v1/internal/scheduled")
+      await this.drainMaintenance();
+    return response;
+  }
+
+  override async alarm(): Promise<void> {
+    await this.initialized;
+    await super.alarm();
+    await this.drainMaintenance();
+  }
+
+  async ready(): Promise<void> {
+    await this.initialized;
+  }
+
+  private async drainMaintenance(): Promise<void> {
+    while (this.tasks.size) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- a completed pass may latch a follow-up pass.
+      await Promise.all(this.tasks);
+    }
+  }
+}
+
 class MemoryStorage {
   private values: Map<string, unknown>;
   private alarmTime: number | undefined;
+  private alarmWritten = false;
+  private revision = 0;
+  private transactionTail = Promise.resolve();
   beforeGet?: (key: string) => Promise<void>;
   afterGet?: (key: string, value: unknown) => Promise<void> | void;
   beforePut?: (key: string, value: unknown) => Promise<void>;
@@ -221,54 +297,141 @@ class MemoryStorage {
   async put<T>(key: string, value: T, _options?: { noCache?: boolean }): Promise<void> {
     await this.beforePut?.(key, value);
     this.values.set(key, value);
+    this.revision += 1;
   }
 
   async delete(key: string): Promise<void> {
     await this.beforeDelete?.(key);
     this.values.delete(key);
+    this.revision += 1;
   }
 
   async deleteAlarm(): Promise<void> {
+    await this.beforeAlarmWrite(undefined);
     this.alarmTime = undefined;
+    this.alarmWritten = true;
+    this.revision += 1;
+    this.alarmCommitted(undefined);
   }
 
   async getAlarm(): Promise<number | null> {
+    await this.beforeGetAlarm();
     return this.alarmTime ?? null;
   }
 
   async setAlarm(time: number): Promise<void> {
+    await this.beforeAlarmWrite(time);
     this.alarmTime = time;
+    this.alarmWritten = true;
+    this.revision += 1;
+    this.alarmCommitted(time);
   }
 
+  async beforeGetAlarm(): Promise<void> {}
+
+  async beforeAlarmWrite(_time: number | undefined): Promise<void> {}
+
+  protected alarmCommitted(_time: number | undefined): void {}
+
+  async beforeList(_options: Parameters<CoordinatorStorageView["list"]>[0]): Promise<void> {}
+
   async transaction<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T> {
-    const transaction = new MemoryStorage(new Map(this.values));
-    transaction.beforeGet = this.beforeGet;
+    const predecessor = this.transactionTail;
+    let release!: () => void;
+    this.transactionTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await predecessor;
+    try {
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- serialization retries must use the last committed snapshot.
+        const result = await this.transactionAttempt(callback);
+        if (result.committed) return result.value;
+      }
+      throw new Error("test storage serialization retry exhausted");
+    } finally {
+      release();
+    }
+  }
+
+  private async transactionAttempt<T>(
+    callback: (transaction: CoordinatorStorageView) => Promise<T>,
+  ): Promise<{ committed: true; value: T } | { committed: false }> {
+    const revision = this.revision;
+    const snapshot = structuredClone(this.values);
+    const originalAlarm = this.alarmTime;
+    const reads = new Set<string>();
+    const writes = new Set<string>();
+    const prefixes = new Set<string>();
+    const transaction = new MemoryStorage(structuredClone(snapshot));
+    transaction.alarmTime = this.alarmTime;
+    transaction.beforeGetAlarm = () => this.beforeGetAlarm();
+    transaction.beforeAlarmWrite = (time) => this.beforeAlarmWrite(time);
+    transaction.beforeList = (options) => this.beforeList(options);
+    transaction.beforeGet = async (key) => {
+      reads.add(key);
+      await this.beforeGet?.(key);
+    };
     transaction.afterGet = this.afterGet;
+    const list = transaction.list.bind(transaction);
+    transaction.list = async <Value>(
+      options: Parameters<CoordinatorStorageView["list"]>[0] = {},
+    ) => {
+      prefixes.add(options.prefix ?? "");
+      return list<Value>(options);
+    };
     let putCount = 0;
     transaction.beforePut = async (key, value) => {
       putCount += 1;
+      writes.add(key);
       await this.beforePut?.(key, value);
     };
-    transaction.beforeDelete = this.beforeDelete;
+    transaction.beforeDelete = async (key) => {
+      writes.add(key);
+      await this.beforeDelete?.(key);
+    };
     try {
       const result = await callback(transaction);
-      this.values = new Map(transaction.values);
-      return result;
+      if (this.revision !== revision) {
+        for (const key of new Set([...reads, ...writes])) {
+          if (JSON.stringify(snapshot.get(key)) !== JSON.stringify(this.values.get(key)))
+            return { committed: false };
+        }
+        for (const prefix of prefixes) {
+          const select = (values: Map<string, unknown>) =>
+            JSON.stringify(
+              [...values]
+                .filter(([key]) => key.startsWith(prefix))
+                .toSorted(([a], [b]) => a.localeCompare(b)),
+            );
+          if (select(snapshot) !== select(this.values)) return { committed: false };
+        }
+        if (originalAlarm !== this.alarmTime) return { committed: false };
+      }
+      for (const key of writes) {
+        if (transaction.values.has(key)) this.values.set(key, transaction.values.get(key));
+        else this.values.delete(key);
+      }
+      this.alarmTime = transaction.alarmTime;
+      this.revision += 1;
+      // A same-time write rearms a consumed job, but aborted attempts publish no job.
+      if (transaction.alarmWritten) this.alarmCommitted(transaction.alarmTime);
+      return { committed: true, value: result };
     } finally {
       this.transactionPutCounts.push(putCount);
     }
   }
 
-  async list<T>({
-    prefix = "",
-    limit,
-    startAfter,
-  }: {
-    prefix?: string;
-    limit?: number;
-    startAfter?: string;
-    noCache?: boolean;
-  } = {}): Promise<Map<string, T>> {
+  async list<T>(
+    options: {
+      prefix?: string;
+      limit?: number;
+      startAfter?: string;
+      noCache?: boolean;
+    } = {},
+  ): Promise<Map<string, T>> {
+    await this.beforeList(options);
+    const { prefix = "", limit, startAfter } = options;
     const matches = new Map<string, T>();
     for (const [key, value] of [...this.values].toSorted(([left], [right]) =>
       left.localeCompare(right),
@@ -285,6 +448,7 @@ class MemoryStorage {
 
   seed<T>(key: string, value: T): void {
     this.values.set(key, currentOrgFixture(value));
+    this.revision += 1;
   }
 
   value<T>(key: string): T | undefined {
@@ -330,16 +494,16 @@ class ObservedMemoryStorage extends MemoryStorage {
     noCache?: boolean;
   }> = [];
 
-  override async list<T>(
+  override async beforeList(
     options: {
       prefix?: string;
       limit?: number;
       startAfter?: string;
       noCache?: boolean;
     } = {},
-  ): Promise<Map<string, T>> {
+  ): Promise<void> {
     this.listOptions.push({ ...options });
-    return await super.list<T>(options);
+    await super.beforeList(options);
   }
 
   resetListOptions(): void {
@@ -348,21 +512,21 @@ class ObservedMemoryStorage extends MemoryStorage {
 }
 
 class BoundedObservedMemoryStorage extends ObservedMemoryStorage {
-  override async list<T>(
+  override async beforeList(
     options: {
       prefix?: string;
       limit?: number;
       startAfter?: string;
       noCache?: boolean;
     } = {},
-  ): Promise<Map<string, T>> {
+  ): Promise<void> {
     if (
       (options.prefix === "lease:" || options.prefix === "workspace:") &&
       options.limit === undefined
     ) {
       throw new Error(`unbounded ${options.prefix} list`);
     }
-    return await super.list<T>(options);
+    await super.beforeList(options);
   }
 }
 
@@ -4983,26 +5147,57 @@ describe("fleet lease identity and idle", () => {
           public_key: "ssh-ed25519 workspace-test",
         },
       }),
-      jsonResponse({ error: { code: "server_error" } }, 503),
+      new Response(
+        JSON.stringify(
+          { error: { code: "server_error", message: "Service temporarily unavailable" } },
+          null,
+          2,
+        ),
+        { status: 503 },
+      ),
     ];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => responses.shift() ?? jsonResponse({}, 500)),
-    );
-    const client = new HetznerClient({ HETZNER_TOKEN: "test-token" } as Env);
-    const config = leaseConfig({
-      provider: "hetzner",
-      providerKey: "crabbox-workspace-test",
-      sshPublicKey: "ssh-ed25519 workspace-test",
+    let serverCreates = 0;
+    const server = createServer(async (incoming, response) => {
+      incoming.resume();
+      if (incoming.method === "POST" && incoming.url === "/v1/servers") serverCreates++;
+      const upstream = responses.shift() ?? jsonResponse({}, 500);
+      response.writeHead(upstream.status, { "content-type": "application/json" });
+      response.end(await upstream.text());
     });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("missing test HTTP address");
+    const nativeFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      expect(url.origin).toBe("https://api.hetzner.cloud");
+      return nativeFetch(`http://127.0.0.1:${address.port}${url.pathname}${url.search}`, init);
+    });
+    try {
+      const client = new HetznerClient({ HETZNER_TOKEN: "test-token" } as Env);
+      const config = leaseConfig({
+        provider: "hetzner",
+        providerKey: "crabbox-workspace-test",
+        sshPublicKey: "ssh-ed25519 workspace-test",
+      });
 
-    const error = await client
-      .createServerWithFallback(config, "cbx_abcdef123456", "fleet-is-100", "alice@example.com")
-      .catch((caught: unknown) => caught);
+      const error = await client
+        .createServerWithFallback(config, "cbx_abcdef123456", "fleet-is-100", "alice@example.com")
+        .catch((caught: unknown) => caught);
 
-    expect(error).toBeInstanceOf(HetznerProvisioningError);
-    expect((error as HetznerProvisioningError).resourceMayExist).toBe(true);
-    expect((error as HetznerProvisioningError).providerKeyCleanupID).toBeUndefined();
+      expect(error).toBeInstanceOf(HetznerProvisioningError);
+      expect((error as HetznerProvisioningError).resourceMayExist).toBe(true);
+      expect((error as HetznerProvisioningError).retryable).toBe(true);
+      expect((error as HetznerProvisioningError).providerKeyCleanupID).toBeUndefined();
+      expect(serverCreates).toBe(1);
+      expect(errorMessage(error)).toMatch(
+        /http 503:.*server_error.*Service temporarily unavailable/,
+      );
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
   });
 
   it("retains a newly created lease key when the server ID is unknown", async () => {
@@ -9293,6 +9488,117 @@ describe("fleet lease identity and idle", () => {
     expect(cleanupLeases).toHaveLength(0);
   });
 
+  it.each([
+    { cleanupPending: true, changed: "none" },
+    { cleanupPending: false, changed: "none" },
+    { cleanupPending: true, changed: "cloudID" },
+    { cleanupPending: true, changed: "region" },
+    { cleanupPending: true, changed: "providerProject" },
+  ] as const)(
+    "preserves exact cleanup custody after provisioning fails (pending=$cleanupPending, changed=$changed)",
+    async ({ cleanupPending, changed }) => {
+      const storage = new MemoryStorage();
+      const created = deferred<void>();
+      const failCreate = deferred<void>();
+      const deleting = deferred<void>();
+      const finishDelete = deferred<void>();
+      const claim: ProviderProvisioningCleanupClaim = {
+        provider: "gcp",
+        cloudID: "crabbox-published-allocation",
+        region: "us-central1-a",
+        providerProject: "request-project",
+      };
+      let deletes = 0;
+      const fleet = testFleet(storage, {
+        gcp: fakeProvider(undefined, {
+          provider: "gcp",
+          async onCreateProvisioning(provisioning) {
+            expect(await provisioning?.onResourceCreated?.(claim)).toBe(true);
+            created.resolve();
+            await failCreate.promise;
+            throw new ProviderProvisioningCleanupError(
+              "readiness failed after allocation publication",
+              changed === "none" ? claim : { ...claim, [changed]: `different-${changed}` },
+              new Error("readiness failed"),
+            );
+          },
+          async onReleaseLease() {
+            deletes++;
+            deleting.resolve();
+            await finishDelete.promise;
+          },
+        }),
+      });
+      const leaseID = "cbx_abcdef123456";
+      const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+      const creating = fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers,
+          body: {
+            leaseID,
+            provider: "gcp",
+            target: "linux",
+            gcpProject: "request-project",
+            gcpZone: "us-central1-a",
+            sshPublicKey: "ssh-ed25519 cleanup-custody",
+          },
+        }),
+      );
+      let cleanup: Promise<void> | undefined;
+      try {
+        await Promise.race([
+          created.promise,
+          creating.then(() => {
+            throw new Error("create settled before publication");
+          }),
+        ]);
+        expect(
+          (
+            await fleet.fetch(
+              request("POST", `/v1/leases/${leaseID}/release`, {
+                headers,
+                body: { delete: true },
+              }),
+            )
+          ).status,
+        ).toBe(200);
+        cleanup = fleet.alarm();
+        await deleting.promise;
+        if (!cleanupPending) {
+          finishDelete.resolve();
+          await cleanup;
+        }
+        const before = structuredClone(storage.value<LeaseRecord>(`lease:${leaseID}`)!);
+        expect(Boolean(before.cleanupStartedAt)).toBe(cleanupPending);
+        failCreate.resolve();
+        expect((await creating).status).toBe(500);
+        const after = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+        const readinessError = expect.stringContaining("readiness failed");
+        const failureRecord = expect.objectContaining({
+          [changed]: `different-${changed}`,
+          cleanupError: readinessError,
+        });
+        const retryTime = expect.any(String);
+        expect(after).toEqual(changed === "none" ? before : failureRecord);
+        expect(after.cleanupStartedAt).toBe(
+          changed === "none" ? before.cleanupStartedAt : undefined,
+        );
+        finishDelete.resolve();
+        await cleanup;
+        const final = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+        expect(final.cleanupStartedAt).toBeUndefined();
+        expect(final.cleanupError).toEqual(changed === "none" ? undefined : readinessError);
+        expect(final.cleanupRetryAt).toEqual(changed === "none" ? undefined : retryTime);
+        expect(deletes).toBe(1);
+      } finally {
+        failCreate.resolve();
+        finishDelete.resolve();
+        await creating;
+        await cleanup;
+      }
+    },
+  );
+
   it("rejects a cleanup claim for a different provider", async () => {
     const storage = new MemoryStorage();
     const leaseID = "cbx_abcdef123456";
@@ -9333,53 +9639,120 @@ describe("fleet lease identity and idle", () => {
   });
 
   it("returns an exact AWS cleanup claim when readiness rollback fails", async () => {
-    vi.spyOn(EC2SpotClient.prototype, "createServerWithFallback").mockResolvedValue({
-      server: {
-        provider: "aws",
-        id: 42,
-        cloudID: "i-abcdef123456",
-        name: "crabbox-blue-lobster",
-        status: "pending",
-        labels: {},
-      },
-      serverType: "t3.small",
-    });
-    vi.spyOn(EC2SpotClient.prototype, "waitForServerIP").mockRejectedValue(
-      new Error("readiness timed out"),
-    );
-    vi.spyOn(EC2SpotClient.prototype, "deleteServer").mockRejectedValue(
-      new Error("temporary terminate failure"),
-    );
+    const created = vi
+      .spyOn(EC2SpotClient.prototype, "createServerWithFallback")
+      .mockResolvedValue({
+        server: {
+          provider: "aws",
+          id: 42,
+          cloudID: "i-abcdef123456",
+          name: "crabbox-blue-lobster",
+          status: "pending",
+          labels: {},
+        },
+        serverType: "t3.small",
+      });
+    const waited = vi
+      .spyOn(EC2SpotClient.prototype, "waitForServerIP")
+      .mockRejectedValue(new Error("readiness timed out"));
+    const deleted = vi
+      .spyOn(EC2SpotClient.prototype, "deleteServer")
+      .mockRejectedValue(new Error("temporary terminate failure"));
     const provider = new AWSProvider(
       { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
       "eu-west-1",
       new MemoryStorage(),
     );
 
-    const error = await provider
-      .createServerWithFallback(
-        leaseConfig({
-          provider: "aws",
-          serverType: "t3.small",
-          serverTypeExplicit: true,
-          awsRegion: "eu-west-1",
-          capacity: { market: "on-demand", fallback: "none" },
-          sshPublicKey: "ssh-ed25519 test",
-        }),
-        "cbx_abcdef123456",
-        "blue-lobster",
-        "alice@example.com",
-      )
-      .catch((caught: unknown) => caught);
+    try {
+      const error = await provider
+        .createServerWithFallback(
+          leaseConfig({
+            provider: "aws",
+            serverType: "t3.small",
+            serverTypeExplicit: true,
+            awsRegion: "eu-west-1",
+            capacity: { market: "on-demand", fallback: "none" },
+            sshPublicKey: "ssh-ed25519 test",
+          }),
+          "cbx_abcdef123456",
+          "blue-lobster",
+          "alice@example.com",
+        )
+        .catch((caught: unknown) => caught);
 
-    expect(error).toBeInstanceOf(ProviderProvisioningCleanupError);
-    expect(providerProvisioningCleanupClaim(error)).toEqual({
-      provider: "aws",
-      cloudID: "i-abcdef123456",
-      region: "eu-west-1",
-      serverID: 42,
-    });
+      expect(error).toBeInstanceOf(ProviderProvisioningCleanupError);
+      expect(providerProvisioningCleanupClaim(error)).toEqual({
+        provider: "aws",
+        cloudID: "i-abcdef123456",
+        region: "eu-west-1",
+        serverID: 42,
+      });
+    } finally {
+      created.mockRestore();
+      waited.mockRestore();
+      deleted.mockRestore();
+    }
   });
+
+  it.each([false, true])(
+    "preserves a direct AWS allocation claim when readiness and termination both report missing (private=%s)",
+    async (privateNetwork) => {
+      const created = vi
+        .spyOn(EC2SpotClient.prototype, "createServerWithFallback")
+        .mockResolvedValue({
+          server: {
+            provider: "aws",
+            id: 0,
+            cloudID: "i-new-instance",
+            name: "newly-allocated",
+            status: "pending",
+            labels: {},
+          },
+          serverType: "t3.small",
+        });
+      const waited = vi
+        .spyOn(EC2SpotClient.prototype, "waitForServerIP")
+        .mockRejectedValue(new Error("InvalidInstanceID.NotFound"));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          ec2XMLResponse(
+            "<Response><Errors><Error><Code>InvalidInstanceID.NotFound</Code></Error></Errors></Response>",
+            400,
+          ),
+        ),
+      );
+      const provider = new AWSProvider(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "test" } as Env,
+        "eu-west-1",
+        new MemoryStorage(),
+      );
+      try {
+        const error = await provider
+          .createServerWithFallback(
+            {
+              ...leaseConfig({ provider: "aws", sshPublicKey: "ssh-ed25519 test" }),
+              awsPrivate: privateNetwork,
+            },
+            "cbx_abcdef123456",
+            "newly-allocated",
+            "alice@example.com",
+          )
+          .catch((caught: unknown) => caught);
+        expect(providerProvisioningCleanupClaim(error)).toEqual({
+          provider: "aws",
+          cloudID: "i-new-instance",
+          serverID: 0,
+          region: "eu-west-1",
+        });
+        expect(created).toHaveBeenCalledTimes(1);
+      } finally {
+        created.mockRestore();
+        waited.mockRestore();
+      }
+    },
+  );
 
   it("backs off durable Hetzner server and SSH key cleanup after rollback failure", async () => {
     const storage = new MemoryStorage();
@@ -9524,7 +9897,7 @@ describe("fleet lease identity and idle", () => {
         },
       });
       expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupRetryAt).toBeUndefined();
-      expect(storage.alarm()).toBeUndefined();
+      expect(storage.alarm()).toBeLessThanOrEqual(Date.now());
 
       await fleet.alarm();
       expect(cleanupLeases).toHaveLength(0);
@@ -14044,6 +14417,309 @@ describe("fleet lease identity and idle", () => {
     expect(await returned.json()).toMatchObject({ entry: { state: "ready", identity } });
   });
 
+  it.each([false, true])(
+    "keeps borrowed leases exclusive across pool protocols (typed source: %s)",
+    async (typed) => {
+      const { fleet, headers, lease, source, sourceBody, destination, destinationBody, entry } =
+        await borrowedReadyPoolFixture(typed);
+
+      const duplicate = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/register${destination}`, {
+          headers,
+          body: { leaseID: lease.id, ...destinationBody },
+        }),
+      );
+      const secondBorrow = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/borrow${destination}`, {
+          headers,
+          body: destinationBody,
+        }),
+      );
+      expect([duplicate.status, secondBorrow.status]).toEqual([409, 409]);
+      expect(await duplicate.json()).toMatchObject({ error: "lease_pool_busy" });
+      const returned = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/return${source}`, {
+          headers,
+          body: { ...sourceBody, leaseID: lease.id, borrowToken: entry.borrowToken },
+        }),
+      );
+      expect(returned.status).toBe(200);
+      const moved = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/register${destination}`, {
+          headers,
+          body: { leaseID: lease.id, ...destinationBody },
+        }),
+      );
+      expect(moved.status).toBe(200);
+      const oldBorrow = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/borrow${source}`, {
+          headers,
+          body: sourceBody,
+        }),
+      );
+      expect(oldBorrow.status).toBe(409);
+      expect(
+        (
+          await fleet.fetch(
+            request("POST", `/v1/ready-pools/builders/borrow${destination}`, {
+              headers,
+              body: destinationBody,
+            }),
+          )
+        ).status,
+      ).toBe(200);
+    },
+  );
+
+  it.each([
+    { typed: false, offset: 0 },
+    { typed: true, offset: 0 },
+    { typed: false, offset: 1 },
+    { typed: true, offset: 1 },
+  ])(
+    "enforces pool borrow deadlines on ready return before maintenance (typed: $typed, offset: $offset)",
+    async ({ typed, offset }) => {
+      const {
+        fleet,
+        headers,
+        lease,
+        source: suffix,
+        sourceBody: body,
+        entry,
+      } = await borrowedReadyPoolFixture(typed);
+      const clock = vi
+        .spyOn(Date, "now")
+        .mockReturnValue(Date.parse(entry.borrowExpiresAt!) + offset);
+      try {
+        const returned = await fleet.fetch(
+          request("POST", `/v1/ready-pools/builders/return${suffix}`, {
+            headers,
+            body: { ...body, leaseID: lease.id, borrowToken: entry.borrowToken, result: "ready" },
+          }),
+        );
+        expect(returned.status).toBe(409);
+        expect(await returned.json()).toMatchObject({ error: "borrow_expired" });
+        const reRegister = await fleet.fetch(
+          request("POST", `/v1/ready-pools/builders/register${suffix}`, {
+            headers,
+            body: { leaseID: lease.id, ...body },
+          }),
+        );
+        expect(reRegister.status).toBe(409);
+        expect(await reRegister.json()).toMatchObject({ error: "pool_entry_quarantined" });
+        const drained = await fleet.fetch(
+          request("POST", `/v1/ready-pools/builders/return${suffix}`, {
+            headers,
+            body: { leaseID: lease.id, result: "drain" },
+          }),
+        );
+        expect(drained.status).toBe(200);
+        expect(await drained.json()).toMatchObject({ lease: { state: "released" } });
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    { typed: false, result: "drain" },
+    { typed: true, result: "drain" },
+    { typed: false, result: "release" },
+    { typed: true, result: "release" },
+  ])(
+    "releases expired pool borrows before maintenance (typed: $typed, result: $result)",
+    async ({ typed, result }) => {
+      const { fleet, headers, lease, source, entry } = await borrowedReadyPoolFixture(typed);
+      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse(entry.borrowExpiresAt!));
+      try {
+        const returned = await fleet.fetch(
+          request("POST", `/v1/ready-pools/builders/return${source}`, {
+            headers,
+            body: { leaseID: lease.id, borrowToken: entry.borrowToken, result },
+          }),
+        );
+        expect(returned.status).toBe(200);
+        expect(await returned.json()).toMatchObject({ lease: { state: "released" } });
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "does not re-register quarantined leases across pool protocols (typed source: %s)",
+    async (typed) => {
+      const { fleet, headers, lease, destination, destinationBody, entry } =
+        await borrowedReadyPoolFixture(typed);
+      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse(entry.borrowExpiresAt!));
+      try {
+        await fleet.alarm();
+        const register = await fleet.fetch(
+          request("POST", `/v1/ready-pools/other/register${destination}`, {
+            headers,
+            body: { leaseID: lease.id, ...destinationBody },
+          }),
+        );
+        expect(register.status).toBe(409);
+        expect(await register.json()).toMatchObject({ error: "pool_entry_quarantined" });
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "does not borrow duplicate capacity left by older coordinators (typed source: %s)",
+    async (typed) => {
+      const { storage, headers, lease, destination, destinationBody, entry } =
+        await borrowedReadyPoolFixture(typed);
+      // Preserve older coordinators' duplicate records across restart in both directions.
+      storage.seed<ReadyPoolEntry>(
+        `${typed ? "ready-pool" : "typed-ready-pool-v1"}:other:${lease.id}`,
+        {
+          key: "other",
+          leaseID: lease.id,
+          state: "ready",
+          owner: lease.owner,
+          org: lease.org,
+          createdAt: lease.createdAt,
+          updatedAt: lease.updatedAt,
+          expiresAt: lease.expiresAt,
+          ...destinationBody,
+        },
+      );
+      const reopened = testFleet(storage);
+      const duplicateBorrow = await reopened.fetch(
+        request("POST", `/v1/ready-pools/other/borrow${destination}`, {
+          headers,
+          body: destinationBody,
+        }),
+      );
+      expect(duplicateBorrow.status).toBe(409);
+      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse(entry.borrowExpiresAt!));
+      try {
+        await reopened.alarm();
+        const quarantinedBorrow = await reopened.fetch(
+          request("POST", `/v1/ready-pools/other/borrow${destination}`, {
+            headers,
+            body: destinationBody,
+          }),
+        );
+        expect(quarantinedBorrow.status).toBe(409);
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    { typed: false, action: "borrow" },
+    { typed: true, action: "borrow" },
+    { typed: false, action: "register" },
+    { typed: true, action: "register" },
+  ])(
+    "serializes cross-protocol $action behind a pending borrow (typed source: $typed)",
+    async ({ typed, action }) => {
+      const {
+        storage,
+        fleet,
+        headers,
+        lease,
+        source,
+        sourceBody,
+        destination,
+        destinationBody,
+        entry,
+      } = await borrowedReadyPoolFixture(typed);
+      const returned = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/return${source}`, {
+          headers,
+          body: { ...sourceBody, leaseID: lease.id, borrowToken: entry.borrowToken },
+        }),
+      );
+      expect(returned.status).toBe(200);
+      const { entry: ready } = (await returned.json()) as { entry: ReadyPoolEntry };
+      storage.seed<ReadyPoolEntry>(
+        `${typed ? "ready-pool" : "typed-ready-pool-v1"}:other:${lease.id}`,
+        { ...ready, key: "other", identity: undefined, ...destinationBody },
+      );
+      const borrowWriteStarted = deferred<void>();
+      const finishBorrowWrite = deferred<void>();
+      storage.beforePut = async (key, value) => {
+        if (
+          key === `${typed ? "typed-ready-pool-v1" : "ready-pool"}:builders:${lease.id}` &&
+          (value as ReadyPoolEntry).state === "busy"
+        ) {
+          borrowWriteStarted.resolve();
+          await finishBorrowWrite.promise;
+        }
+      };
+      const firstBorrow = fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/borrow${source}`, {
+          headers,
+          body: sourceBody,
+        }),
+      );
+      await borrowWriteStarted.promise;
+      const competing = fleet.fetch(
+        request("POST", `/v1/ready-pools/other/${action}${destination}`, {
+          headers,
+          body: { ...destinationBody, leaseID: lease.id },
+        }),
+      );
+      try {
+        expect(
+          await Promise.race([
+            competing.then(() => true),
+            new Promise<false>((resolve) => setTimeout(() => resolve(false), 25)),
+          ]),
+        ).toBe(false);
+      } finally {
+        finishBorrowWrite.resolve();
+      }
+      expect((await firstBorrow).status).toBe(200);
+      expect((await competing).status).toBe(409);
+      const entries = [
+        ...(await storage.list<ReadyPoolEntry>({ prefix: "ready-pool:" })).values(),
+        ...(await storage.list<ReadyPoolEntry>({ prefix: "typed-ready-pool-v1:" })).values(),
+      ];
+      expect(entries.filter((candidate) => candidate.state === "busy")).toMatchObject([
+        { key: "builders", leaseID: lease.id },
+      ]);
+    },
+  );
+  it("derives typed providers from identity and rejects explicit mismatches before state changes", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = typedReadyPoolHeaders();
+    const identity = await typedReadyPoolIdentity();
+    const metadata = typedReadyPoolMetadata();
+
+    const derived = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/reconcile-identity", {
+        headers,
+        body: { ...metadata, identity, minReady: 0, maxReady: 0 },
+      }),
+    );
+    expect(derived.status).toBe(200);
+    expect(await derived.json()).toMatchObject({
+      desired: { criteria: { provider: identity.image.provider, identity } },
+    });
+
+    const mismatched = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/reconcile-identity", {
+        headers,
+        body: { ...metadata, provider: "gcp", identity, minReady: 1, maxReady: 1, claim: true },
+      }),
+    );
+    expect(mismatched.status).toBe(400);
+    await expect(mismatched.json()).resolves.toMatchObject({
+      error: "invalid_ready_pool_provider",
+    });
+    expect((await storage.list({ prefix: "typed-ready-pool-v2-desired:" })).size).toBe(1);
+    expect((await storage.list({ prefix: "typed-ready-pool-v1-fill-claim:" })).size).toBe(0);
+  });
+
   it("isolates typed desired capacity and structurally matches reordered fill-claim identities", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
@@ -14067,10 +14743,12 @@ describe("fleet lease identity and idle", () => {
     expect(firstBody.counts.inFlight).toBe(1);
     expect(storage.value(`ready-pool-fill-claim:${firstBody.claim.token}`)).toBeUndefined();
     expect(storage.value(`typed-ready-pool-v1-fill-claim:${firstBody.claim.token}`)).toBeTruthy();
-    expect([...(await storage.list({ prefix: "ready-pool-desired:" })).keys()]).toEqual([]);
     expect([
-      ...(await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).keys(),
+      ...(await storage.list({ prefix: "typed-ready-pool-v2-desired:" })).keys(),
     ]).toHaveLength(1);
+    expect([...(await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).keys()]).toEqual(
+      [],
+    );
 
     const reorderedIdentity = {
       cacheCompatibility: identity.cacheCompatibility,
@@ -14109,7 +14787,7 @@ describe("fleet lease identity and idle", () => {
       counts: { ready: 0, inFlight: 1 },
       claim: { token: expect.any(String) },
     });
-    expect((await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).size).toBe(2);
+    expect((await storage.list({ prefix: "typed-ready-pool-v2-desired:" })).size).toBe(2);
 
     const mismatchedClaim = await fleet.fetch(
       request("POST", "/v1/ready-pools/builders/register-identity", {
@@ -14149,6 +14827,195 @@ describe("fleet lease identity and idle", () => {
       counts: { ready: 1, inFlight: 0 },
       satisfied: true,
     });
+  });
+
+  it.each([undefined, "aws"] as const)(
+    "migrates typed desired capacity with a stored %s provider without double-filling",
+    async (provider) => {
+      const storage = new MemoryStorage();
+      const fleet = testFleet(storage);
+      const headers = typedReadyPoolHeaders();
+      const owner = headers["x-crabbox-owner"];
+      const org = orgKeyForLabel(headers["x-crabbox-org"]);
+      const key = "builders";
+      const compatibilityKey = "linux-16-vcpu";
+      const identity = await typedReadyPoolIdentity();
+      const metadata = typedReadyPoolMetadata();
+      const legacyKey = `typed-ready-pool-v1-desired:${[
+        org,
+        owner,
+        key,
+        compatibilityKey,
+        identity.image.provider,
+        identity.image.scope,
+        identity.image.id,
+        identity.architecture,
+        identity.seedDigest,
+        identity.cacheCompatibility,
+      ]
+        .map((part) => encodeURIComponent(part))
+        .join(":")}`;
+      const unrelatedLegacyKey = `${legacyKey}:shadow`;
+      const createdAt = "2026-08-20T00:00:00.000Z";
+      const desired: ReadyPoolDesiredCapacity = {
+        key,
+        owner,
+        org,
+        compatibilityKey,
+        criteria: {
+          ...metadata,
+          compatibilityKey,
+          ...(provider === undefined ? {} : { provider }),
+          identity,
+        },
+        minReady: 1,
+        maxReady: 1,
+        createdAt,
+        updatedAt: createdAt,
+      };
+      storage.seed(legacyKey, desired);
+      storage.seed(unrelatedLegacyKey, desired);
+      const claimToken = "existing-v1-fill-claim";
+      storage.seed(`typed-ready-pool-v1-fill-claim:${claimToken}`, {
+        token: claimToken,
+        key,
+        owner,
+        org,
+        compatibilityKey,
+        criteria: desired.criteria,
+        createdAt,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      });
+
+      const reconcile = () =>
+        fleet.fetch(
+          request("POST", `/v1/ready-pools/${key}/reconcile-identity`, {
+            headers,
+            body: {
+              ...metadata,
+              compatibilityKey,
+              identity,
+              minReady: 1,
+              maxReady: 1,
+              claim: true,
+            },
+          }),
+        );
+      const first = await reconcile();
+      expect(first.status).toBe(200);
+      const firstBody = await first.json();
+      expect(firstBody).toMatchObject({
+        counts: { inFlight: 1 },
+        reconciling: true,
+      });
+      expect(firstBody).not.toHaveProperty("claim");
+      expect(
+        storage.value<{ criteria: { provider?: string } }>(
+          `typed-ready-pool-v1-fill-claim:${claimToken}`,
+        )?.criteria.provider,
+      ).toBe(provider);
+
+      const v2Key = await readyPoolDesiredCapacityKeyV2({
+        org,
+        owner,
+        key,
+        compatibilityKey,
+        identity,
+      });
+      expect(storage.value(legacyKey)).toBeUndefined();
+      expect(storage.value(unrelatedLegacyKey)).toBeDefined();
+      expect(storage.value<ReadyPoolDesiredCapacity>(v2Key)).toMatchObject({
+        createdAt,
+        identity,
+        criteria: { provider: identity.image.provider, identity },
+      });
+
+      const second = await reconcile();
+      expect(second.status).toBe(200);
+      await expect(second.json()).resolves.toMatchObject({
+        counts: { inFlight: 1 },
+        capped: true,
+      });
+      expect((await storage.list({ prefix: "typed-ready-pool-v1-fill-claim:" })).size).toBe(1);
+      const lease = typedReadyPoolLease();
+      storage.seed(`lease:${lease.id}`, lease);
+      const registered = await fleet.fetch(
+        request("POST", `/v1/ready-pools/${key}/register-identity`, {
+          headers,
+          body: {
+            ...metadata,
+            compatibilityKey,
+            identity,
+            leaseID: lease.id,
+            fillClaimToken: claimToken,
+          },
+        }),
+      );
+      expect(registered.status).toBe(200);
+      expect(storage.value(`typed-ready-pool-v1-fill-claim:${claimToken}`)).toBeUndefined();
+    },
+  );
+
+  it("keeps the untyped desired-capacity key byte-for-byte compatible", async () => {
+    const storage = new MemoryStorage();
+    const response = await testFleet(storage).fetch(
+      request("POST", "/v1/ready-pools/shared-linux/reconcile", {
+        headers: typedReadyPoolHeaders(),
+        body: {
+          compatibilityKey: "linux-16-vcpu",
+          minReady: 0,
+          maxReady: 0,
+        },
+      }),
+    );
+    expect(response.status).toBe(200);
+    const exactKey = `ready-pool-desired:${encodeURIComponent(
+      orgKeyForLabel("example-org"),
+    )}:alice%40example.com:shared-linux:linux-16-vcpu`;
+    expect(storage.value<ReadyPoolDesiredCapacity>(exactKey)).toMatchObject({
+      key: "shared-linux",
+      owner: "alice@example.com",
+      org: orgKeyForLabel("example-org"),
+      compatibilityKey: "linux-16-vcpu",
+    });
+    expect((await storage.list({ prefix: "ready-pool-desired:" })).size).toBe(1);
+    expect((await storage.list({ prefix: "typed-ready-pool-v2-desired:" })).size).toBe(0);
+  });
+
+  it("keeps typed desired keys fixed-size, deterministic, and provider-separated", async () => {
+    const identity = await typedReadyPoolIdentity();
+    const input = {
+      org: orgKeyForLabel("example-org"),
+      owner: "alice@example.com",
+      key: "builders",
+      compatibilityKey: "linux-16-vcpu",
+      identity,
+    };
+    const [first, second] = await Promise.all([
+      readyPoolDesiredCapacityKeyV2(input),
+      readyPoolDesiredCapacityKeyV2(input),
+    ]);
+    expect(first).toBe(second);
+    expect(first).toMatch(/^typed-ready-pool-v2-desired:sha256:[0-9a-f]{64}$/);
+
+    const otherProvider = await readyPoolDesiredCapacityKeyV2({
+      ...input,
+      identity: {
+        ...identity,
+        image: { ...identity.image, provider: "gcp" },
+      },
+    });
+    expect(otherProvider).not.toBe(first);
+
+    const maximumUnicode = await readyPoolDesiredCapacityKeyV2({
+      ...input,
+      identity: {
+        ...identity,
+        image: { ...identity.image, id: `${"界".repeat(340)}/?:@` },
+      },
+    });
+    expect(new TextEncoder().encode(`${"界".repeat(340)}/?:@`).byteLength).toBe(1024);
+    expect(new TextEncoder().encode(maximumUnicode).byteLength).toBeLessThan(2048);
   });
 
   it("drains typed entries immediately when their authoritative lease image or return identity changes", async () => {
@@ -14204,9 +15071,109 @@ describe("fleet lease identity and idle", () => {
         },
       }),
     );
-    expect(returned.status).toBe(200);
-    expect(await returned.json()).toMatchObject({ entry: { state: "draining" } });
+    expect(returned.status).toBe(409);
+    expect(await returned.json()).toMatchObject({
+      error: "ready_pool_lease_identity_mismatch",
+      entry: { state: "draining" },
+    });
     expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.state).toBe("released");
+  });
+
+  it("drains invalid typed ready returns while explicit drain and release skip identity reads", async () => {
+    const headers = typedReadyPoolHeaders();
+    const identity = await typedReadyPoolIdentity();
+    const runCase = async (
+      result: "ready" | "drain" | "release",
+      returnIdentity: unknown,
+      expectedStatus: number,
+      expectedError?: string,
+      releaseFailure = false,
+    ) => {
+      const storage = new MemoryStorage();
+      let releases = 0;
+      const fleet = testFleet(storage, {
+        aws: fakeProvider(undefined, {
+          provider: "aws",
+          onReleaseLease: async () => {
+            releases += 1;
+            if (releaseFailure) throw new Error("provider release failed");
+          },
+        }),
+      });
+      const lease = typedReadyPoolLease();
+      const now = new Date().toISOString();
+      storage.seed(`lease:${lease.id}`, lease);
+      storage.seed<ReadyPoolEntry>(`typed-ready-pool-v1:builders:${lease.id}`, {
+        key: "builders",
+        leaseID: lease.id,
+        state: "busy",
+        owner: lease.owner,
+        org: lease.org,
+        provider: lease.provider,
+        target: lease.target,
+        identity,
+        borrowedBy: headers["x-crabbox-owner"],
+        borrowToken: "borrow-token",
+        createdAt: now,
+        updatedAt: now,
+        expiresAt: lease.expiresAt,
+      });
+
+      const response = await fleet.fetch(
+        request("POST", "/v1/ready-pools/builders/return-identity", {
+          headers,
+          body: {
+            leaseID: lease.id,
+            borrowToken: "borrow-token",
+            result,
+            ...(returnIdentity === undefined ? {} : { identity: returnIdentity }),
+          },
+        }),
+      );
+      expect(response.status).toBe(expectedStatus);
+      const body = (await response.json()) as { error?: string; entry: ReadyPoolEntry };
+      expect(body.error).toBe(expectedError);
+      expect(body.entry.state).toBe("draining");
+      expect(storage.value<ReadyPoolEntry>(`typed-ready-pool-v1:builders:${lease.id}`)?.state).toBe(
+        "draining",
+      );
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+        state: "released",
+        releaseDeletesServer: true,
+      });
+      return { fleet, storage, lease, releases: () => releases };
+    };
+
+    await runCase("ready", undefined, 400, "invalid_ready_pool_identity");
+    await runCase(
+      "ready",
+      { ...identity, image: { ...identity.image, id: "" } },
+      400,
+      "invalid_ready_pool_identity",
+    );
+    await runCase(
+      "ready",
+      { ...identity, cacheCompatibility: "changed-cache" },
+      409,
+      "ready_pool_lease_identity_mismatch",
+    );
+    await runCase("drain", undefined, 200);
+    const failedCleanup = await runCase("release", { broken: true }, 200, undefined, true);
+    await failedCleanup.fleet.alarm();
+    expect(failedCleanup.releases()).toBe(1);
+    expect(
+      failedCleanup.storage.value<ReadyPoolEntry>(
+        `typed-ready-pool-v1:builders:${failedCleanup.lease.id}`,
+      )?.state,
+    ).toBe("draining");
+    expect(
+      failedCleanup.storage.value<LeaseRecord>(`lease:${failedCleanup.lease.id}`),
+    ).toMatchObject({
+      state: "released",
+      releaseDeletesServer: true,
+      cleanupError: "provider release failed",
+      cleanupRetryAt: expect.any(String),
+    });
   });
 
   it("keeps new typed Durable Object state invisible to shipped legacy enumeration after rollback", async () => {
@@ -14242,7 +15209,7 @@ describe("fleet lease identity and idle", () => {
     expect([...shippedLegacyDesired.values()]).toEqual([]);
     expect(storage.value(`typed-ready-pool-v1:builders:${lease.id}`)).toBeTruthy();
     expect(storage.value(`typed-ready-pool-v1-fill-claim:${claim.claim.token}`)).toBeTruthy();
-    expect((await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).size).toBe(1);
+    expect((await storage.list({ prefix: "typed-ready-pool-v2-desired:" })).size).toBe(1);
 
     const rolledBackWorker = testFleet(storage);
     const legacyStatus = await rolledBackWorker.fetch(
@@ -16693,7 +17660,7 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("provider-access:cbx_abcdef123456")).toBeUndefined();
   });
 
-  it("removes a retained release when Tailscale preparation fails", async () => {
+  it("keeps cancellation authoritative when Tailscale preparation later fails", async () => {
     const storage = new MemoryStorage();
     let oauthStarted!: () => void;
     let finishOAuth!: () => void;
@@ -16760,7 +17727,9 @@ describe("fleet lease identity and idle", () => {
     });
 
     finishOAuth();
-    expect((await createPromise).status).toBe(502);
+    const canceled = await createPromise;
+    expect(canceled.status).toBe(409);
+    await expect(canceled.json()).resolves.toMatchObject({ error: "create_canceled" });
     expect(providerCalled).toBe(false);
     expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
     expect(storage.value("provider-access:cbx_abcdef123456")).toBeUndefined();
@@ -17626,6 +18595,110 @@ describe("fleet lease identity and idle", () => {
     expect(providerReleases).toBe(0);
   });
 
+  it.each([
+    { name: "confirmed deletion", fields: {}, status: "complete" },
+    {
+      name: "completed cleanup with provisioning failure history",
+      fields: { failureError: "creation failed before cleanup completed" },
+      status: "complete",
+    },
+    {
+      name: "retained resource",
+      fields: { releaseDeletesServer: false },
+      status: "retained",
+    },
+    {
+      name: "pending creation before allocation identity",
+      fields: {
+        cloudID: "",
+        provisioningRequestStartedAt: "2026-08-30T00:00:00Z",
+        provisioningResourceMayExist: true,
+        cleanupError: "provider creation is unresolved; cleanup has not been confirmed",
+      },
+      status: "pending",
+    },
+    {
+      name: "late allocation awaiting its create owner rollback",
+      fields: {
+        provisioningRequestStartedAt: "2026-08-30T00:00:00Z",
+        provisioningResourceMayExist: true,
+        cleanupError: "provider resource returned after the lease ended; cleanup pending",
+        cleanupRetryAt: "2026-08-30T00:05:00Z",
+      },
+      status: "pending",
+    },
+    {
+      name: "current cleanup claim after an earlier failure",
+      fields: {
+        cleanupStartedAt: "2026-08-30T00:05:00Z",
+        cleanupFailedAt: "2026-08-30T00:00:00Z",
+        cleanupAttempts: 1,
+        cleanupError: "earlier provider failure",
+        cleanupRetryAt: "2026-08-30T00:05:00Z",
+      },
+      status: "pending",
+    },
+    {
+      name: "actual cleanup failure",
+      fields: {
+        cleanupFailedAt: "2026-08-30T00:00:00Z",
+        cleanupError: "provider deletion failed",
+        cleanupRetryAt: "2026-08-30T00:05:00Z",
+      },
+      status: "failed",
+    },
+    {
+      name: "settled creation with uncertain allocation",
+      fields: {
+        cloudID: "",
+        provisioningRequestStartedAt: "2026-08-30T00:00:00Z",
+        provisioningRequestSettledAt: "2026-08-30T00:01:00Z",
+        provisioningResourceMayExist: true,
+        cleanupError: "provider creation outcome is uncertain",
+      },
+      status: "failed",
+    },
+    {
+      name: "abandoned creation observed by recovery",
+      fields: {
+        cloudID: "",
+        provisioningRequestStartedAt: "2026-08-30T00:00:00Z",
+        provisioningRecoveryObservedAt: "2026-08-30T00:01:00Z",
+        provisioningResourceMayExist: true,
+      },
+      status: "failed",
+    },
+    {
+      name: "unknown cleanup error",
+      fields: { cleanupError: "unclassified provider failure" },
+      status: "failed",
+    },
+  ])(
+    "exposes release cleanup status for $name without changing its record",
+    async ({ fields, status }) => {
+      const storage = new MemoryStorage();
+      const lease = testLease({
+        id: "cbx_abcdef123456",
+        owner: "alice@example.com",
+        org: "example-org",
+        state: "released",
+        releaseDeletesServer: true,
+        ...fields,
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      const fleet = testFleet(storage);
+      const response = await fleet.fetch(
+        request("GET", `/v1/leases/${lease.id}`, {
+          headers: { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" },
+        }),
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ lease: { cleanupStatus: status } });
+      expect(storage.value(`lease:${lease.id}`)).toEqual(lease);
+      expect(storage.value(`lease:${lease.id}`)).not.toHaveProperty("cleanupStatus");
+    },
+  );
+
   it("can release a provisioning lease before cloud resources are known", async () => {
     const storage = new MemoryStorage();
     const deleted: string[] = [];
@@ -17706,18 +18779,24 @@ describe("fleet lease identity and idle", () => {
     );
 
     await createStartedPromise;
-    const release = await fleet.fetch(
-      request("POST", "/v1/leases/cbx_abcdef123456/release", {
-        headers: {
-          "x-crabbox-owner": "alice@example.com",
-          "x-crabbox-org": "example-org",
-        },
-        body: { delete: true },
-      }),
-    );
-    expect(release.status).toBe(200);
-
-    finishCreate();
+    try {
+      const release = await fleet.fetch(
+        request("POST", "/v1/leases/cbx_abcdef123456/release", {
+          headers: {
+            "x-crabbox-owner": "alice@example.com",
+            "x-crabbox-org": "example-org",
+          },
+          body: { delete: true },
+        }),
+      );
+      expect(release.status).toBe(200);
+      expect(await release.json()).toMatchObject({
+        lease: { state: "released", cloudID: "", cleanupStatus: "pending" },
+      });
+    } finally {
+      finishCreate();
+      await createPromise;
+    }
     const create = await createPromise;
     expect(create.status).toBe(409);
     expect(deleted).toEqual(["vm-cbx-abcdef123456"]);
@@ -17727,6 +18806,17 @@ describe("fleet lease identity and idle", () => {
       provider: "azure",
       state: "released",
       cloudID: "",
+    });
+    const observed = await fleet.fetch(
+      request("GET", "/v1/leases/cbx_abcdef123456", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    expect(await observed.json()).toMatchObject({
+      lease: { state: "released", cloudID: "", cleanupStatus: "complete" },
     });
   });
 
@@ -19311,6 +20401,647 @@ describe("fleet lease identity and idle", () => {
     );
   });
 
+  it.each(
+    [
+      "DescribeInstances",
+      "DescribeInstanceInformation",
+      "SendCommand",
+      "GetCommandInvocation",
+    ].flatMap((pausedOperation) => [
+      { pausedOperation, betweenPolls: false },
+      ...(pausedOperation === "SendCommand" ? [] : [{ pausedOperation, betweenPolls: true }]),
+    ]),
+  )(
+    "stops AWS readiness after authority ends during $pausedOperation (betweenPolls=$betweenPolls)",
+    async ({ pausedOperation, betweenPolls }) => {
+      if (betweenPolls) vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const entered = deferred<void>();
+      const resume = deferred<void>();
+      const operations: string[] = [];
+      const claims: unknown[] = [];
+      let authorized = true;
+      const server: ProviderMachine = {
+        provider: "aws",
+        id: 0,
+        cloudID: "i-allocation",
+        name: "allocation",
+        status: "pending",
+        host: "",
+        labels: {},
+      };
+      const create = vi
+        .spyOn(EC2SpotClient.prototype, "createServerWithFallback")
+        .mockResolvedValue({
+          server,
+          serverType: "t3.small",
+          imageID: "ami-test",
+        });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const outgoing = input instanceof Request ? input : new Request(input, init);
+          const operation =
+            outgoing.headers.get("x-amz-target")?.split(".").at(-1) ??
+            new URLSearchParams(await requestBodyForTest(input, init)).get("Action") ??
+            "";
+          operations.push(operation);
+          const paused =
+            operation === pausedOperation &&
+            operations.filter((value) => value === operation).length === 1;
+          if (paused) {
+            entered.resolve();
+            if (!betweenPolls) await resume.promise;
+          }
+          if (operation === "DescribeInstances") {
+            return ec2XMLResponse(
+              `<Response><reservationSet><item><instancesSet><item><instanceId>i-allocation</instanceId>${paused && betweenPolls ? "" : "<ipAddress>192.0.2.20</ipAddress>"}<instanceState><name>running</name></instanceState></item></instancesSet></item></reservationSet></Response>`,
+            );
+          }
+          if (operation === "DescribeInstanceInformation") {
+            return jsonResponse({
+              InstanceInformationList:
+                paused && betweenPolls
+                  ? []
+                  : [{ InstanceId: "i-allocation", PingStatus: "Online" }],
+            });
+          }
+          if (operation === "SendCommand")
+            return jsonResponse({ Command: { CommandId: "command-owned" } });
+          if (operation === "GetCommandInvocation")
+            return jsonResponse({ Status: paused && betweenPolls ? "InProgress" : "Success" });
+          throw new Error(`unexpected provider operation: ${operation}`);
+        }),
+      );
+      const provider = new AWSProvider(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "test" } as Env,
+        "eu-west-1",
+        new MemoryStorage(),
+      );
+      const provisioning = provider.createServerWithFallback(
+        {
+          ...leaseConfig({ provider: "aws", sshPublicKey: "ssh-ed25519 test" }),
+          awsPrivate: true,
+          awsRequireSSM: true,
+          awsSSMBootstrapCommand: "true",
+          awsSSMLogGroup: "/test/bootstrap",
+        },
+        "cbx_abcdef123457",
+        "allocation",
+        "alice@example.com",
+        {
+          onResourceCreated: async (claim) => {
+            claims.push(claim);
+            return authorized;
+          },
+        },
+      );
+      try {
+        await Promise.race([
+          entered.promise,
+          provisioning.then(() => {
+            throw new Error("provisioning settled before paused read");
+          }),
+        ]);
+        if (betweenPolls) await vi.advanceTimersByTimeAsync(0);
+        authorized = false;
+        resume.resolve();
+        if (betweenPolls) await vi.advanceTimersByTimeAsync(5_000);
+        const result = await provisioning;
+        expect(claims).toContainEqual({
+          provider: "aws",
+          cloudID: "i-allocation",
+          serverID: 0,
+          region: "eu-west-1",
+        });
+        expect(result.server).toEqual({ ...server, region: "eu-west-1" });
+        expect(operations.at(-1)).toBe(pausedOperation);
+        expect(operations.filter((operation) => operation === pausedOperation)).toHaveLength(1);
+        expect(create).toHaveBeenCalledTimes(1);
+      } finally {
+        resume.resolve();
+        await provisioning;
+        create.mockRestore();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([
+    ...(["release", "cancel", "retain"] as const).flatMap((action) => [
+      { action, fallback: false, lateError: false, cleanupPending: false },
+      { action, fallback: true, lateError: false, cleanupPending: false },
+      { action, fallback: false, lateError: true, cleanupPending: false },
+    ]),
+    { action: "release", fallback: false, lateError: false, cleanupPending: true },
+    { action: "expire", fallback: false, lateError: false, cleanupPending: false },
+  ])(
+    "keeps AWS allocation custody when $action interrupts address readiness (fallback=$fallback, lateError=$lateError, cleanupPending=$cleanupPending)",
+    async ({ action, fallback, lateError, cleanupPending }) => {
+      if (action === "expire") vi.useFakeTimers({ toFake: ["Date"] });
+      const readingAddress = deferred<void>();
+      const finishAddress = deferred<void>();
+      const deleting = deferred<void>();
+      const finishDelete = deferred<void>();
+      let firstRead = true;
+      let terminated = false;
+      const terminations: Array<{ id: string | null; region: string }> = [];
+      let fixture: ReturnType<typeof awsIngressTestFleet>;
+      fixture = awsIngressTestFleet(async (operation, params, region) => {
+        if (fallback && region === "eu-west-1" && operation === "RunInstances") {
+          return ec2XMLResponse(
+            "<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code></Error></Errors></Response>",
+            400,
+          );
+        }
+        if (operation === "TerminateInstances") {
+          terminations.push({ id: params.get("InstanceId.1"), region });
+          terminated = true;
+          deleting.resolve();
+          if (cleanupPending) await finishDelete.promise;
+          return ec2XMLResponse("<Response />");
+        }
+        if (operation !== "DescribeInstances") return undefined;
+        const heldRead = firstRead;
+        firstRead = false;
+        if (heldRead) {
+          readingAddress.resolve();
+          await finishAddress.promise;
+          if (lateError) throw new Error("address read failed after release");
+        } else if (terminated) {
+          return ec2XMLResponse(
+            "<Response><Errors><Error><Code>InvalidInstanceID.NotFound</Code></Error></Errors></Response>",
+            400,
+          );
+        }
+        return ec2XMLResponse(
+          `<Response><reservationSet><item><instancesSet><item><instanceId>i-new-instance</instanceId><instanceType>t3.small</instanceType><ipAddress>192.0.2.20</ipAddress><instanceState><name>running</name></instanceState><tagSet>${Object.entries(
+            {
+              crabbox: "true",
+              created_by: "crabbox",
+              lease: fixture.creatingID,
+              owner: "alice_example.com",
+              provider: "aws",
+              slug: "allocation-custody",
+            },
+          )
+            .map(([key, value]) => `<item><key>${key}</key><value>${value}</value></item>`)
+            .join("")}</tagSet></item></instancesSet></item></reservationSet></Response>`,
+        );
+      });
+      const { fleet, storage, creatingID, createAttemptID, headers, requests } = fixture;
+      const creating = fixture.create({
+        slug: "allocation-custody",
+        ...(fallback
+          ? { capacity: { market: "on-demand", fallback: "none", regions: ["us-east-1"] } }
+          : {}),
+      });
+      let cleanup: Promise<void> | undefined;
+      try {
+        await Promise.race([
+          readingAddress.promise,
+          creating.then(async (response) => {
+            throw new Error(`create settled before readiness: ${await response.text()}`);
+          }),
+        ]);
+        expect(storage.value<LeaseRecord>(`lease:${creatingID}`)).toMatchObject({
+          state: "provisioning",
+          cloudID: "i-new-instance",
+          region: fallback ? "us-east-1" : "eu-west-1",
+        });
+        let response: Response;
+        if (action === "expire") {
+          vi.setSystemTime(
+            Date.parse(storage.value<LeaseRecord>(`lease:${creatingID}`)!.expiresAt) + 1,
+          );
+          finishAddress.resolve();
+          response = await creating;
+        } else {
+          response = await fleet.fetch(
+            request(
+              "POST",
+              `/v1/leases/${creatingID}/${action === "cancel" ? "cancel-create" : "release"}`,
+              {
+                headers,
+                body: action === "cancel" ? { createAttemptID } : { delete: action !== "retain" },
+              },
+            ),
+          );
+        }
+        expect(response.status).toBe(action === "expire" ? 409 : 200);
+        cleanup = fleet.alarm();
+        let claimBefore: string | undefined;
+        let claimAfter: string | undefined;
+        let deletesBeforeCleanup: number | undefined;
+        if (cleanupPending) {
+          await deleting.promise;
+          claimBefore = storage.value<LeaseRecord>(`lease:${creatingID}`)?.cleanupStartedAt;
+          finishAddress.resolve();
+          await creating;
+          claimAfter = storage.value<LeaseRecord>(`lease:${creatingID}`)?.cleanupStartedAt;
+          deletesBeforeCleanup = terminations.length;
+          finishDelete.resolve();
+        }
+        expect(Boolean(claimBefore)).toBe(cleanupPending);
+        expect(claimAfter).toBe(claimBefore);
+        expect(deletesBeforeCleanup).toBe(cleanupPending ? 1 : undefined);
+        await cleanup;
+        expect(terminated).toBe(action !== "retain");
+        expect(storage.value<LeaseRecord>(`lease:${creatingID}`)?.cleanupError).toBeUndefined();
+        const readsBeforeCompletion = requests.filter(
+          ({ action: operation }) => operation === "DescribeInstances",
+        ).length;
+        finishAddress.resolve();
+        expect((await creating).status).toBe(409);
+        expect(
+          requests.filter(({ action: operation }) => operation === "DescribeInstances"),
+        ).toHaveLength(readsBeforeCompletion);
+        expect(terminations).toEqual(
+          action === "retain"
+            ? []
+            : [{ id: "i-new-instance", region: fallback ? "us-east-1" : "eu-west-1" }],
+        );
+        const released = storage.value<LeaseRecord>(`lease:${creatingID}`);
+        expect(released?.state).toBe(action === "expire" ? "failed" : "released");
+        expect(released?.cleanupError).toBeUndefined();
+        expect(released?.cleanupRetryAt).toBeUndefined();
+        expect(released?.cleanupStartedAt).toBeUndefined();
+        expect(released?.releaseDeletesServer).toBe(action === "retain" ? false : undefined);
+      } finally {
+        finishAddress.resolve();
+        finishDelete.resolve();
+        await creating;
+        await cleanup;
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(
+    [false, true].flatMap((privateNetwork) =>
+      [false, true].flatMap((recoveredClaim) =>
+        [false, true].map((appears) => ({ privateNetwork, recoveredClaim, appears })),
+      ),
+    ),
+  )(
+    "keeps a newly allocated AWS instance owned during visibility propagation (private=$privateNetwork, recovered=$recoveredClaim, appears=$appears)",
+    async ({ privateNetwork, recoveredClaim, appears }) => {
+      const observing = deferred<void>();
+      const resumeObservation = deferred<void>();
+      const delays: number[] = [];
+      vi.stubGlobal("setTimeout", ((callback: () => void, delay?: number) => {
+        delays.push(delay ?? 0);
+        observing.resolve();
+        // oxlint-disable-next-line promise/no-callback-in-promise -- this timer fixture releases sleep callbacks through an explicit barrier.
+        void resumeObservation.promise.then(callback);
+        return 0;
+      }) as typeof setTimeout);
+      let reads = 0;
+      let terminated = false;
+      const fixture = awsIngressTestFleet(async (operation, params) => {
+        if (operation === "TerminateInstances") {
+          terminated = true;
+          return ec2XMLResponse(
+            "<Response><instancesSet><item><instanceId>i-active-instance</instanceId></item></instancesSet></Response>",
+          );
+        }
+        if (operation !== "DescribeInstances") return undefined;
+        if (!params.get("InstanceId.1"))
+          return ec2XMLResponse("<Response><reservationSet /></Response>");
+        reads++;
+        if (reads === 1 || !appears || terminated) {
+          return ec2XMLResponse(
+            "<Response><Errors><Error><Code>InvalidInstanceID.NotFound</Code></Error></Errors></Response>",
+            400,
+          );
+        }
+        return ec2XMLResponse(
+          `<Response><reservationSet><item><instancesSet><item><instanceId>i-active-instance</instanceId><instanceState><name>pending</name></instanceState><tagSet>${Object.entries(
+            {
+              crabbox: "true",
+              created_by: "crabbox",
+              lease: "cbx_abcdef123456",
+              owner: "alice_example.com",
+              provider: "aws",
+              slug: "newly-allocated",
+            },
+          )
+            .map(([key, value]) => `<item><key>${key}</key><value>${value}</value></item>`)
+            .join("")}</tagSet></item></instancesSet></item></reservationSet></Response>`,
+        );
+      });
+      const { storage, activeID, fleet, headers, requests } = fixture;
+      storage.seed(`lease:${activeID}`, {
+        ...storage.value<LeaseRecord>(`lease:${activeID}`)!,
+        state: recoveredClaim ? "failed" : "provisioning",
+        slug: "newly-allocated",
+        providerKey: "",
+        ...(recoveredClaim
+          ? { provisioningResourceMayExist: true, releaseDeletesServer: true }
+          : { provisioningRequestStartedAt: new Date().toISOString() }),
+        network: {
+          ...storage.value<LeaseRecord>(`lease:${activeID}`)!.network,
+          awsPrivate: privateNetwork,
+        },
+      });
+      let cleanup: Promise<void> | undefined;
+      try {
+        expect((await fixture.release()).status).toBe(200);
+        cleanup = fleet.alarm();
+        const observation = await Promise.race([
+          observing.promise.then(() => "pending"),
+          cleanup.then(() => "finished"),
+        ]);
+        expect(observation).toBe("pending");
+        const during = await fleet.fetch(request("GET", `/v1/leases/${activeID}`, { headers }));
+        expect(await during.json()).toMatchObject({
+          lease: { state: "released", cleanupStatus: "pending" },
+        });
+        expect(terminated).toBe(false);
+        resumeObservation.resolve();
+        await cleanup;
+        const after = await fleet.fetch(request("GET", `/v1/leases/${activeID}`, { headers }));
+        expect(await after.json()).toMatchObject({
+          lease: { state: "released", cleanupStatus: appears ? "complete" : "failed" },
+        });
+        const lease = storage.value<LeaseRecord>(`lease:${activeID}`)!;
+        expect(Boolean(lease.cleanupError)).toBe(!appears);
+        expect(Boolean(lease.cleanupRetryAt)).toBe(!appears);
+        expect(terminated).toBe(appears);
+        expect(delays).toEqual(appears ? [1_000] : [1_000, 2_000, 4_000, 8_000, 15_000, 30_000]);
+        expect(requests.filter(({ action }) => action === "TerminateInstances")).toHaveLength(
+          appears ? 1 : 0,
+        );
+      } finally {
+        resumeObservation.resolve();
+        await cleanup;
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "retains AWS cleanup debt when termination is not acknowledged (private=%s)",
+    async (privateNetwork) => {
+      const fixture = awsIngressTestFleet(async (operation, params) => {
+        if (operation === "TerminateInstances") {
+          return ec2XMLResponse(
+            "<Response><Errors><Error><Code>InvalidInstanceID.NotFound</Code></Error></Errors></Response>",
+            400,
+          );
+        }
+        if (operation !== "DescribeInstances") return undefined;
+        if (!params.get("InstanceId.1"))
+          return ec2XMLResponse("<Response><reservationSet /></Response>");
+        return ec2XMLResponse(
+          `<Response><reservationSet><item><instancesSet><item><instanceId>i-active-instance</instanceId><instanceState><name>pending</name></instanceState><tagSet>${Object.entries(
+            {
+              crabbox: "true",
+              created_by: "crabbox",
+              lease: "cbx_abcdef123456",
+              owner: "alice_example.com",
+              provider: "aws",
+              slug: "newly-allocated",
+            },
+          )
+            .map(([key, value]) => `<item><key>${key}</key><value>${value}</value></item>`)
+            .join("")}</tagSet></item></instancesSet></item></reservationSet></Response>`,
+        );
+      });
+      const { storage, activeID, fleet, headers, requests } = fixture;
+      storage.seed(`lease:${activeID}`, {
+        ...storage.value<LeaseRecord>(`lease:${activeID}`)!,
+        state: "provisioning",
+        slug: "newly-allocated",
+        providerKey: "",
+        provisioningRequestStartedAt: new Date().toISOString(),
+        network: {
+          ...storage.value<LeaseRecord>(`lease:${activeID}`)!.network,
+          awsPrivate: privateNetwork,
+        },
+      });
+      expect((await fixture.release()).status).toBe(200);
+      await fleet.alarm();
+      const after = await fleet.fetch(request("GET", `/v1/leases/${activeID}`, { headers }));
+      expect(await after.json()).toMatchObject({
+        lease: { state: "released", cleanupStatus: "failed" },
+      });
+      expect(storage.value<LeaseRecord>(`lease:${activeID}`)).toMatchObject({
+        cloudID: "i-active-instance",
+        releaseDeletesServer: true,
+        cleanupError: expect.stringContaining("InvalidInstanceID.NotFound"),
+        cleanupRetryAt: expect.any(String),
+      });
+      expect(requests.filter(({ action }) => action === "TerminateInstances")).toHaveLength(1);
+    },
+  );
+
+  it.each(["ready", "retain", "changed-scope"] as const)(
+    "publishes AWS Mac allocation in its prepared account scope (%s)",
+    async (outcome) => {
+      const reading = deferred<void>();
+      const finishRead = deferred<void>();
+      let fixture: ReturnType<typeof awsIngressTestFleet>;
+      fixture = awsIngressTestFleet(async (operation) => {
+        if (operation === "GetCallerIdentity")
+          return ec2XMLResponse(
+            "<GetCallerIdentityResponse><GetCallerIdentityResult><Arn>arn:aws:iam::123456789012:user/test</Arn><UserId>TEST</UserId><Account>123456789012</Account></GetCallerIdentityResult></GetCallerIdentityResponse>",
+          );
+        if (operation === "DescribeHosts")
+          return ec2XMLResponse(
+            "<Response><hostSet><item><hostId>h-test</hostId><hostProperties><instanceType>mac2.metal</instanceType></hostProperties></item></hostSet></Response>",
+          );
+        if (operation === "RunInstances") {
+          if (outcome === "changed-scope")
+            fixture.storage.seed(`lease:${fixture.creatingID}`, {
+              ...fixture.storage.value<LeaseRecord>(`lease:${fixture.creatingID}`)!,
+              providerScope: "aws:account:999999999999",
+            });
+          return ec2XMLResponse(
+            "<Response><instancesSet><item><instanceId>i-new-instance</instanceId><instanceType>mac2.metal</instanceType><instanceState><name>pending</name></instanceState><placement><hostId>h-test</hostId></placement></item></instancesSet></Response>",
+          );
+        }
+        if (operation === "DescribeInstances") {
+          reading.resolve();
+          await finishRead.promise;
+        }
+        return undefined;
+      });
+      const { fleet, storage, creatingID, headers, requests } = fixture;
+      const creating = fixture.create({
+        target: "macos",
+        serverType: "mac2.metal",
+        hostId: "h-test",
+      });
+      try {
+        const phase = await Promise.race([
+          reading.promise.then(() => "readiness"),
+          creating.then(() => "finished"),
+        ]);
+        expect(phase).toBe(outcome === "changed-scope" ? "finished" : "readiness");
+        const published = storage.value<LeaseRecord>(`lease:${creatingID}`)!;
+        expect(published.providerScope).toBe(
+          outcome === "changed-scope" ? "aws:account:999999999999" : "aws:account:123456789012",
+        );
+        expect(published.cloudID).toBe(outcome === "changed-scope" ? "" : "i-new-instance");
+        if (outcome === "retain")
+          await fleet.fetch(
+            request("POST", `/v1/leases/${creatingID}/release`, {
+              headers,
+              body: { delete: false },
+            }),
+          );
+        finishRead.resolve();
+        const response = await creating;
+        expect(response.status).toBe(outcome === "ready" ? 201 : outcome === "retain" ? 409 : 500);
+        expect(storage.value<LeaseRecord>(`lease:${creatingID}`)?.state).toBe(
+          outcome === "ready" ? "active" : outcome === "retain" ? "released" : "failed",
+        );
+        expect(storage.value<LeaseRecord>(`lease:${creatingID}`)?.cleanupRetryAt).toBeUndefined();
+        const scopeConflict = expect.stringContaining("original lease incarnation");
+        expect(storage.value<LeaseRecord>(`lease:${creatingID}`)?.failureError).toEqual(
+          outcome === "changed-scope" ? scopeConflict : undefined,
+        );
+        expect(requests.filter(({ action }) => action === "GetCallerIdentity")).toHaveLength(1);
+        expect(requests.filter(({ action }) => action === "TerminateInstances")).toHaveLength(0);
+      } finally {
+        finishRead.resolve();
+        await creating;
+      }
+    },
+  );
+
+  it.each(["publication", "recheck"] as const)(
+    "retains known AWS allocation when lease storage fails during %s",
+    async (phase) => {
+      let allocated = false;
+      let readinessStarted = false;
+      let failures = 0;
+      const fixture = awsIngressTestFleet(async (operation) => {
+        if (operation === "RunInstances") allocated = true;
+        if (operation === "DescribeInstances") readinessStarted = true;
+        return undefined;
+      });
+      const { storage, creatingID, requests } = fixture;
+      storage.beforePut = async (key, value) => {
+        if (
+          phase === "publication" &&
+          key === `lease:${creatingID}` &&
+          (value as LeaseRecord).state === "provisioning" &&
+          (value as LeaseRecord).cloudID
+        ) {
+          failures++;
+          throw new Error("allocation publication storage failed");
+        }
+      };
+      // Storage recovers when the failure owner withdraws access, not on a publication retry.
+      storage.beforeDelete = async (key) => {
+        if (key === `provider-access:${creatingID}`) readinessStarted = false;
+      };
+      storage.beforeGet = async (key) => {
+        if (phase === "recheck" && key === `lease:${creatingID}` && readinessStarted) {
+          failures++;
+          throw new Error("allocation recheck storage failed");
+        }
+      };
+      const response = await fixture.create();
+      expect(allocated).toBe(true);
+      expect(response.status).toBe(500);
+      const lease = storage.value<LeaseRecord>(`lease:${creatingID}`)!;
+      expect(lease).toMatchObject({
+        state: "failed",
+        cloudID: "i-new-instance",
+        region: "eu-west-1",
+        provisioningResourceMayExist: true,
+        cleanupRetryAt: expect.any(String),
+      });
+      expect(lease.cleanupError).toContain("storage failed");
+      expect(failures).toBe(1);
+      expect(requests.filter(({ action }) => action === "RunInstances")).toHaveLength(1);
+      expect(requests.filter(({ action }) => action === "TerminateInstances")).toHaveLength(0);
+    },
+  );
+
+  it.each(["publication", "readiness-recheck", "scope-conflict"] as const)(
+    "preserves AWS callback failure ownership and cause (%s)",
+    async (phase) => {
+      const claim = {
+        provider: "aws" as const,
+        cloudID: "i-new-instance",
+        serverID: 0,
+        region: "eu-west-1",
+      };
+      const publicationError = new Error("publication unavailable");
+      const readinessError = new Error("readiness unavailable");
+      const conflict = new ProviderResourceUnresolvedError("scope changed", {
+        cause: new ProviderProvisioningCleanupError(
+          "untrusted nested claim",
+          claim,
+          publicationError,
+        ),
+      });
+      let readinessFailed = false;
+      const created = vi
+        .spyOn(EC2SpotClient.prototype, "createServerWithFallback")
+        .mockResolvedValue({
+          server: {
+            provider: "aws",
+            id: 0,
+            cloudID: claim.cloudID,
+            name: "allocation",
+            status: "pending",
+            labels: {},
+          },
+          serverType: "t3.small",
+        });
+      const waited = vi
+        .spyOn(EC2SpotClient.prototype, "waitForServerIP")
+        .mockImplementation(async () => {
+          readinessFailed = true;
+          throw readinessError;
+        });
+      const publication = vi.fn<() => Promise<boolean>>(async () => {
+        if (phase === "scope-conflict") throw conflict;
+        if (phase === "publication" || readinessFailed) throw publicationError;
+        return true;
+      });
+      const provider = new AWSProvider(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "test" } as Env,
+        "eu-west-1",
+        new MemoryStorage(),
+      );
+      try {
+        const error = await provider
+          .createServerWithFallback(
+            leaseConfig({ provider: "aws", sshPublicKey: "ssh-ed25519 test" }),
+            "cbx_abcdef123456",
+            "allocation",
+            "alice@example.com",
+            { onResourceCreated: publication },
+          )
+          .catch((caught: unknown) => caught);
+        const wrapped = expect.any(ProviderProvisioningCleanupError);
+        const combinedCause = expect.objectContaining({
+          cause: readinessError,
+          errors: [readinessError, publicationError],
+        });
+        expect(error).toEqual(phase === "scope-conflict" ? conflict : wrapped);
+        expect(error).toMatchObject({
+          cause:
+            phase === "scope-conflict"
+              ? conflict.cause
+              : phase === "readiness-recheck"
+                ? combinedCause
+                : publicationError,
+        });
+        expect(publication).toHaveBeenCalledTimes(phase === "readiness-recheck" ? 2 : 1);
+        expect(created).toHaveBeenCalledTimes(1);
+      } finally {
+        created.mockRestore();
+        waited.mockRestore();
+      }
+    },
+  );
+
   it("releases an unrelated AWS lease while a new instance waits for its address", async () => {
     const waitingForAddress = deferred<void>();
     const addressReady = deferred<ProviderMachine>();
@@ -19426,12 +21157,12 @@ describe("fleet lease identity and idle", () => {
       }
       return undefined;
     });
-    const { fleet, headers, activeID, create, release, provider } = fixture;
-    const prepare = provider.prepareLeaseCreate.bind(provider);
+    const { fleet, headers, activeID, create, release } = fixture;
+    const prepare = AWSProvider.prototype.prepareLeaseCreate;
     const prepared = vi
-      .spyOn(provider, "prepareLeaseCreate")
-      .mockImplementation(async (...args) => {
-        const result = await prepare(...args);
+      .spyOn(AWSProvider.prototype, "prepareLeaseCreate")
+      .mockImplementation(async function (...args) {
+        const result = await prepare.apply(this, args);
         createPrepared.resolve();
         return result;
       });
@@ -19498,55 +21229,84 @@ describe("fleet lease identity and idle", () => {
     ).toEqual(["198.51.100.20/32"]);
   });
 
-  it("rejects a canceled AWS regional retry before it writes ingress", async () => {
-    const nextRegionStarted = deferred<void>();
-    const finishNextRegionPreparation = deferred<void>();
-    const { fleet, headers, create, creatingID, createAttemptID, requests } = awsIngressTestFleet(
-      async (action, _params, region) => {
-        if (action === "RunInstances" && region === "eu-west-1") {
-          return ec2XMLResponse(
-            "<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code></Error></Errors></Response>",
-            400,
-          );
-        }
-        if (action === "DescribeKeyPairs" && region === "us-east-1") {
-          nextRegionStarted.resolve();
-          await finishNextRegionPreparation.promise;
-        }
-        return undefined;
-      },
-    );
-    const creating = create({
-      capacity: { market: "on-demand", fallback: "none", regions: ["eu-west-1", "us-east-1"] },
-    });
-    try {
-      await Promise.race([
-        nextRegionStarted.promise,
-        creating.then(async (response) => {
-          throw new Error(await response.text());
-        }),
-      ]);
-      const canceled = await fleet.fetch(
-        request("POST", `/v1/leases/${creatingID}/cancel-create`, {
-          headers,
-          body: { createAttemptID },
-        }),
+  it.each([
+    { action: "cancel-create", region: "eu-west-1" },
+    { action: "cancel-create", region: "us-east-1" },
+    { action: "release", region: "eu-west-1" },
+    { action: "release", region: "us-east-1" },
+  ] as const)(
+    "reports AWS $action in $region before writing ingress",
+    async ({ action, region }) => {
+      const preparationStarted = deferred<void>();
+      const finishPreparation = deferred<void>();
+      const { fleet, headers, create, creatingID, createAttemptID, requests } = awsIngressTestFleet(
+        async (operation, _params, requestRegion) => {
+          if (operation === "RunInstances" && requestRegion === "eu-west-1") {
+            return ec2XMLResponse(
+              "<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code></Error></Errors></Response>",
+              400,
+            );
+          }
+          if (operation === "DescribeKeyPairs" && requestRegion === region) {
+            preparationStarted.resolve();
+            await finishPreparation.promise;
+          }
+          return undefined;
+        },
       );
-      expect(canceled.status).toBe(200);
-      finishNextRegionPreparation.resolve();
-      expect((await creating).status).not.toBe(201);
-      expect(
-        requests.filter(
-          ({ action, region }) =>
-            region === "us-east-1" &&
-            ["AuthorizeSecurityGroupIngress", "RunInstances"].includes(action),
-        ),
-      ).toEqual([]);
-    } finally {
-      finishNextRegionPreparation.resolve();
-      await Promise.allSettled([creating]);
-    }
-  });
+      const creating = create(
+        {
+          capacity: { market: "on-demand", fallback: "none", regions: ["eu-west-1", "us-east-1"] },
+        },
+        action === "release" ? "PUT" : "POST",
+      );
+      try {
+        await Promise.race([
+          preparationStarted.promise,
+          creating.then(async (response) => {
+            throw new Error(await response.clone().text());
+          }),
+        ]);
+        const canceled = await fleet.fetch(
+          request("POST", `/v1/leases/${creatingID}/${action}`, {
+            headers,
+            body: action === "release" ? { delete: true } : { createAttemptID },
+          }),
+        );
+        expect(canceled.status).toBe(200);
+        finishPreparation.resolve();
+        const response = await creating;
+        expect({ status: response.status, body: await response.json() }).toEqual({
+          status: 409,
+          body: {
+            error: "create_canceled",
+            message: "create attempt was canceled before completion",
+          },
+        });
+        expect(
+          requests.filter(
+            (providerRequest) =>
+              providerRequest.region === region &&
+              ["AuthorizeSecurityGroupIngress", "RunInstances"].includes(providerRequest.action),
+          ),
+        ).toEqual([]);
+        const observed = await fleet.fetch(request("GET", `/v1/leases/${creatingID}`, { headers }));
+        expect(await observed.json()).toMatchObject({
+          lease: {
+            state: "released",
+            cloudID: "",
+            releaseDeletesServer: true,
+            cleanupStatus: "failed",
+            cleanupError: "create attempt was canceled before completion",
+            provisioningResourceMayExist: true,
+          },
+        });
+      } finally {
+        finishPreparation.resolve();
+        await Promise.allSettled([creating]);
+      }
+    },
+  );
 
   it("reconciles AWS ingress after the final overlapping create drains", async () => {
     const storage = new MemoryStorage();
@@ -20218,6 +21978,144 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("cancels a quota-rejected fixed admission without reserving usage and fences replay after restart", async () => {
+    const storage = new MemoryStorage();
+    let creates = 0;
+    const limits = { CRABBOX_MAX_ACTIVE_LEASES: "1" };
+    const fleet = testFleet(storage, { hetzner: fakeProvider(() => creates++) }, limits);
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const busyID = "cbx_ca1100000040";
+    const leaseID = "cbx_ca1100000041";
+    const now = new Date().toISOString();
+    storage.seed(
+      `lease:${busyID}`,
+      testLease({
+        id: busyID,
+        owner: "alice@example.com",
+        org: "example-org",
+        createdAt: now,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        maxEstimatedUSD: 1,
+      }),
+    );
+    const body = { provider: "hetzner", sshPublicKey: "ssh-ed25519 fixed-quota" };
+    const unknownRelease = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+    );
+    expect(unknownRelease.status).toBe(404);
+
+    const create = await fleet.fetch(request("PUT", `/v1/leases/${leaseID}`, { headers, body }));
+    expect(create.status).toBe(429);
+    await expect(create.json()).resolves.toMatchObject({ error: "cost_limit_exceeded" });
+    const canceled = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/release`, {
+        headers,
+        body: { delete: true, expectedProvider: "hetzner" },
+      }),
+    );
+    expect(canceled.status).toBe(200);
+    await expect(canceled.json()).resolves.toMatchObject({
+      lease: { id: leaseID, provider: "hetzner", state: "released", cleanupStatus: "complete" },
+    });
+    expect(storage.value(`lease:${leaseID}`)).toBeUndefined();
+    const usage = await fleet.fetch(request("GET", "/v1/usage", { headers }));
+    await expect(usage.json()).resolves.toMatchObject({
+      usage: { leases: 1, activeLeases: 1, reservedUSD: 1 },
+    });
+
+    const released = await fleet.fetch(
+      request("POST", `/v1/leases/${busyID}/release`, { headers, body: { delete: true } }),
+    );
+    expect(released.status).toBe(200);
+    const reopenedStorage = new MemoryStorage(structuredClone(await storage.list()));
+    const reopened = testFleet(reopenedStorage, { hetzner: fakeProvider(() => creates++) }, limits);
+    await Promise.all(
+      [fleet, reopened].map(async (coordinator) => {
+        const replay = await coordinator.fetch(
+          request("PUT", `/v1/leases/${leaseID}`, { headers, body }),
+        );
+        expect(replay.status).toBe(409);
+        const repeatedRelease = await coordinator.fetch(
+          request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+        );
+        expect(repeatedRelease.status).toBe(200);
+        await expect(repeatedRelease.json()).resolves.toMatchObject({
+          lease: { id: leaseID, state: "released", cleanupStatus: "complete" },
+        });
+      }),
+    );
+    expect(creates).toBe(0);
+    expect(reopenedStorage.value(`lease:${leaseID}`)).toBeUndefined();
+    const reopenedUsage = await reopened.fetch(request("GET", "/v1/usage", { headers }));
+    await expect(reopenedUsage.json()).resolves.toMatchObject({
+      usage: { leases: 1, activeLeases: 0, reservedUSD: 1 },
+    });
+    const fresh = await reopened.fetch(
+      request("PUT", "/v1/leases/cbx_ca1100000042", { headers, body }),
+    );
+    expect(fresh.status).toBe(201);
+    expect(creates).toBe(1);
+  });
+
+  it("releases an exact fixed admission without resolving another lease's colliding slug", async () => {
+    const storage = new MemoryStorage();
+    let creates = 0;
+    const fleet = testFleet(
+      storage,
+      { hetzner: fakeProvider(() => creates++) },
+      { CRABBOX_MAX_ACTIVE_LEASES: "1" },
+    );
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const leaseID = "cbx_ca1100000048";
+    const otherID = "cbx_ca1100000049";
+    const friendlySlug = "cbx-ca1100000048";
+    const body = { provider: "hetzner", sshPublicKey: "ssh-ed25519 exact-admission" };
+    const other = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers,
+        body: { ...body, leaseID: otherID, slug: leaseID },
+      }),
+    );
+    expect(other.status).toBe(201);
+    await expect(other.json()).resolves.toMatchObject({
+      lease: { id: otherID, slug: friendlySlug, state: "active" },
+    });
+    const pending = await fleet.fetch(request("PUT", `/v1/leases/${leaseID}`, { headers, body }));
+    expect(pending.status).toBe(429);
+    await expect(pending.json()).resolves.toMatchObject({ error: "cost_limit_exceeded" });
+
+    const exact = await fleet.fetch(request("GET", `/v1/leases/${leaseID}`, { headers }));
+    expect.soft(exact.status).toBe(404);
+    const stopped = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/release`, {
+        headers,
+        body: { delete: true, expectedProvider: "hetzner" },
+      }),
+    );
+    expect(stopped.status).toBe(200);
+    await expect.soft(stopped.json()).resolves.toMatchObject({
+      lease: { id: leaseID, state: "released", cleanupStatus: "complete" },
+    });
+    await Promise.all(
+      [otherID, friendlySlug].map(async (identifier) => {
+        const untouched = await fleet.fetch(
+          request("GET", `/v1/leases/${identifier}`, { headers }),
+        );
+        expect.soft(untouched.status).toBe(200);
+        await expect.soft(untouched.json()).resolves.toMatchObject({
+          lease: { id: otherID, slug: friendlySlug, state: "active" },
+        });
+      }),
+    );
+    expect(creates).toBe(1);
+  });
+
   it("keeps expired managed leases inside active limits and rejects heartbeat revival", async () => {
     const storage = new MemoryStorage();
     let created = false;
@@ -20617,6 +22515,71 @@ describe("fleet lease identity and idle", () => {
     await expect(committedReplay.json()).resolves.toMatchObject({
       lease: { id: canonicalLeaseID, state: "active" },
     });
+  });
+
+  it("does not replay an old fixed create across retained Mac reactivation", async () => {
+    const storage = new MemoryStorage();
+    let creates = 0;
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(() => creates++, {
+        provider: "aws",
+        serverType: "mac2.metal",
+        hostID: "h-fixed-incarnation",
+        cloudID: "i-fixed-incarnation",
+      }),
+    });
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const leaseID = "cbx_ca1100000046";
+    const fixedBody = {
+      provider: "aws",
+      target: "macos",
+      serverType: "mac2.metal",
+      capacity: { market: "on-demand" },
+      keep: true,
+      ttlSeconds: 1200,
+      sshPublicKey: "ssh-ed25519 fixed-incarnation",
+    };
+    const fixed = await fleet.fetch(
+      request("PUT", `/v1/leases/${leaseID}`, { headers, body: fixedBody }),
+    );
+    expect(fixed.status).toBe(201);
+    const retained = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: false } }),
+    );
+    expect(retained.status).toBe(200);
+    await expect(retained.json()).resolves.toMatchObject({
+      lease: { id: leaseID, state: "released", cleanupStatus: "retained" },
+    });
+    const ordinaryBody = {
+      ...fixedBody,
+      leaseID: "cbx_ca1100000047",
+      createAttemptID: "cat_47000000000000000000000000000047",
+      hostId: "h-fixed-incarnation",
+      ttlSeconds: 2400,
+    };
+    const reactivated = await fleet.fetch(
+      request("POST", "/v1/leases", { headers, body: ordinaryBody }),
+    );
+    expect(reactivated.status).toBe(201);
+    await expect(reactivated.json()).resolves.toMatchObject({
+      lease: { id: leaseID, state: "active", cloudID: "i-fixed-incarnation", ttlSeconds: 2400 },
+    });
+
+    const stale = await fleet.fetch(
+      request("PUT", `/v1/leases/${leaseID}`, { headers, body: fixedBody }),
+    );
+    expect.soft(stale.status).toBe(409);
+    const replay = await fleet.fetch(
+      request("POST", "/v1/leases", { headers, body: ordinaryBody }),
+    );
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toMatchObject({
+      lease: { id: leaseID, state: "active", cloudID: "i-fixed-incarnation", ttlSeconds: 2400 },
+    });
+    expect(creates).toBe(1);
   });
 
   it("persists a cancel-before-create tombstone and rejects the later create without provisioning", async () => {
@@ -21224,22 +23187,81 @@ describe("fleet lease identity and idle", () => {
     expect(admin.status).toBe(200);
   });
 
-  it("lets cancellation win during slow config preparation before lease reservation", async () => {
+  it.each(["ordinary", "fixed"] as const)(
+    "lets cancellation win during slow %s config preparation before lease reservation",
+    async (kind) => {
+      const storage = new MemoryStorage();
+      const preparationStarted = deferred<void>();
+      const finishPreparation = deferred<void>();
+      let creates = 0;
+      const fleet = testFleet(storage, {
+        hetzner: fakeProvider(() => creates++, {
+          onPrepareLeaseConfig: async (config) => {
+            preparationStarted.resolve();
+            await finishPreparation.promise;
+            return config;
+          },
+        }),
+      });
+      const headers = {
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+      };
+      const leaseID = "cbx_ca1100000004";
+      const createAttemptID = "cat_40000000000000000000000000000004";
+      const create = () =>
+        fleet.fetch(
+          request(
+            kind === "fixed" ? "PUT" : "POST",
+            kind === "fixed" ? `/v1/leases/${leaseID}` : "/v1/leases",
+            {
+              headers,
+              body: {
+                leaseID,
+                createAttemptID: kind === "ordinary" ? createAttemptID : undefined,
+                provider: "hetzner",
+                sshPublicKey: "ssh-ed25519 x",
+              },
+            },
+          ),
+        );
+      const creating = [create()];
+      await preparationStarted.promise;
+      if (kind === "fixed") creating.push(create());
+      const cancel = () =>
+        fleet.fetch(
+          request(
+            "POST",
+            `/v1/leases/${leaseID}/${kind === "fixed" ? "release" : "cancel-create"}`,
+            { headers, body: kind === "fixed" ? { delete: true } : { createAttemptID } },
+          ),
+        );
+      const cancellations: Response[] = [];
+      try {
+        cancellations.push(await cancel(), await cancel());
+      } finally {
+        finishPreparation.resolve();
+      }
+      const outcomes = await Promise.all(creating);
+      expect.soft(cancellations.map((response) => response.status)).toEqual([200, 200]);
+      expect
+        .soft(outcomes.map((response) => response.status))
+        .toEqual(kind === "fixed" ? [409, 409] : [409]);
+      expect.soft(creates).toBe(0);
+      expect(storage.value(`lease:${leaseID}`)).toBeUndefined();
+    },
+  );
+
+  it("rejects foreign owner, organization, and provider releases without canceling fixed preparation", async () => {
     const storage = new MemoryStorage();
-    let releasePreparation!: () => void;
-    let preparationStarted!: () => void;
-    const preparationStartedPromise = new Promise<void>(
-      (resolve) => (preparationStarted = resolve),
-    );
-    const releasePreparationPromise = new Promise<void>(
-      (resolve) => (releasePreparation = resolve),
-    );
+    const preparationStarted = deferred<void>();
+    const finishPreparation = deferred<void>();
     let creates = 0;
     const fleet = testFleet(storage, {
       hetzner: fakeProvider(() => creates++, {
         onPrepareLeaseConfig: async (config) => {
-          preparationStarted();
-          await releasePreparationPromise;
+          preparationStarted.resolve();
+          await finishPreparation.promise;
           return config;
         },
       }),
@@ -21248,26 +23270,35 @@ describe("fleet lease identity and idle", () => {
       "x-crabbox-owner": "alice@example.com",
       "x-crabbox-org": "example-org",
     };
-    const leaseID = "cbx_ca1100000004";
-    const createAttemptID = "cat_40000000000000000000000000000004";
+    const leaseID = "cbx_ca1100000043";
     const creating = fleet.fetch(
-      request("POST", "/v1/leases", {
+      request("PUT", `/v1/leases/${leaseID}`, {
         headers,
-        body: { leaseID, createAttemptID, provider: "hetzner", sshPublicKey: "ssh-ed25519 x" },
+        body: { provider: "hetzner", sshPublicKey: "ssh-ed25519 fixed-owner" },
       }),
     );
-    await preparationStartedPromise;
-    const canceled = await fleet.fetch(
-      request("POST", `/v1/leases/${leaseID}/cancel-create`, {
-        headers,
-        body: { createAttemptID },
-      }),
-    );
-    expect(canceled.status).toBe(200);
-    releasePreparation();
-    expect((await creating).status).toBe(409);
-    expect(storage.value(`lease:${leaseID}`)).toBeUndefined();
-    expect(creates).toBe(0);
+    await preparationStarted.promise;
+    let rejected: Response[];
+    try {
+      rejected = await Promise.all(
+        [
+          { headers: { ...headers, "x-crabbox-owner": "bob@example.com" } },
+          { headers: { ...headers, "x-crabbox-org": "other-org" } },
+          { headers, body: { delete: true, expectedProvider: "aws" } },
+        ].map((options) => fleet.fetch(request("POST", `/v1/leases/${leaseID}/release`, options))),
+      );
+    } finally {
+      finishPreparation.resolve();
+    }
+    const created = await creating;
+    expect(rejected.map((response) => response.status)).toEqual([404, 404, 409]);
+    expect(created.status).toBe(201);
+    expect(creates).toBe(1);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      owner: "alice@example.com",
+      org: orgKeyForLabel("example-org"),
+      state: "active",
+    });
   });
 
   it.each([
@@ -21275,6 +23306,7 @@ describe("fleet lease identity and idle", () => {
       name: "legacy ordinary POST",
       method: "POST",
       path: "/v1/leases",
+      expectedCancelStatus: 200,
       expectedStatus: 409,
       expectedCreates: 0,
     },
@@ -21282,12 +23314,13 @@ describe("fleet lease identity and idle", () => {
       name: "fixed PUT",
       method: "PUT",
       path: "/v1/leases/cbx_ca1100000013",
+      expectedCancelStatus: 409,
       expectedStatus: 201,
       expectedCreates: 1,
     },
   ])(
     "applies a racing unbound attempt tombstone to $name without crossing lifecycle ownership",
-    async ({ method, path, expectedStatus, expectedCreates }) => {
+    async ({ method, path, expectedCancelStatus, expectedStatus, expectedCreates }) => {
       const storage = new MemoryStorage();
       let releasePreparation!: () => void;
       let preparationStarted!: () => void;
@@ -21331,9 +23364,9 @@ describe("fleet lease identity and idle", () => {
           body: { createAttemptID },
         }),
       );
-      expect(canceled.status).toBe(200);
       releasePreparation();
       expect((await creating).status).toBe(expectedStatus);
+      expect(canceled.status).toBe(expectedCancelStatus);
       expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).toBe(
         expectedStatus === 201 ? "active" : undefined,
       );
@@ -21341,49 +23374,197 @@ describe("fleet lease identity and idle", () => {
     },
   );
 
-  it("cancels after ordinary reservation and deletes a provider resource that completes late", async () => {
+  it("fences a delayed duplicate fixed create after release during reserved preparation", async () => {
     const storage = new MemoryStorage();
-    let createStarted!: () => void;
-    let finishCreate!: () => void;
-    const createStartedPromise = new Promise<void>((resolve) => (createStarted = resolve));
-    const finishCreatePromise = new Promise<void>((resolve) => (finishCreate = resolve));
-    const deleted: string[] = [];
+    const firstConfigStarted = deferred<void>();
+    const secondConfigStarted = deferred<void>();
+    const finishFirstConfig = deferred<void>();
+    const finishSecondConfig = deferred<void>();
+    const reservationPrepared = deferred<void>();
+    const finishPreparation = deferred<void>();
+    let configs = 0;
+    let preparations = 0;
+    let creates = 0;
     const fleet = testFleet(storage, {
-      hetzner: fakeProvider(
-        async () => {
-          createStarted();
-          await finishCreatePromise;
+      hetzner: fakeProvider(() => creates++, {
+        async onPrepareLeaseConfig(config) {
+          configs += 1;
+          if (configs === 1) {
+            firstConfigStarted.resolve();
+            await finishFirstConfig.promise;
+          } else {
+            secondConfigStarted.resolve();
+            await finishSecondConfig.promise;
+          }
+          return config;
         },
-        { cloudID: "late-cloud" },
-        (id) => deleted.push(id),
-      ),
+        async onPrepareLeaseCreate(config, lease) {
+          preparations += 1;
+          if (preparations === 1) {
+            reservationPrepared.resolve();
+            await finishPreparation.promise;
+          }
+          return { config, lease };
+        },
+      }),
     });
     const headers = {
       "x-crabbox-owner": "alice@example.com",
       "x-crabbox-org": "example-org",
     };
-    const leaseID = "cbx_ca1100000005";
-    const createAttemptID = "cat_50000000000000000000000000000005";
-    const creating = fleet.fetch(
-      request("POST", "/v1/leases", {
-        headers,
-        body: { leaseID, createAttemptID, provider: "hetzner", sshPublicKey: "ssh-ed25519 x" },
-      }),
-    );
-    await createStartedPromise;
-    const canceled = await fleet.fetch(
-      request("POST", `/v1/leases/${leaseID}/cancel-create`, {
-        headers,
-        body: { createAttemptID },
-      }),
-    );
-    expect(canceled.status).toBe(200);
-    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).toBe("released");
-    finishCreate();
-    expect((await creating).status).toBe(409);
-    expect(deleted).toEqual(["123"]);
-    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).toBe("released");
+    const leaseID = "cbx_ca1100000045";
+    const body = { provider: "hetzner", sshPublicKey: "ssh-ed25519 reserved-cancellation" };
+    const first = fleet.fetch(request("PUT", `/v1/leases/${leaseID}`, { headers, body }));
+    await firstConfigStarted.promise;
+    const second = fleet.fetch(request("PUT", `/v1/leases/${leaseID}`, { headers, body }));
+    const release = () =>
+      fleet.fetch(
+        request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+      );
+    try {
+      await secondConfigStarted.promise;
+      finishFirstConfig.resolve();
+      await reservationPrepared.promise;
+      const canceled = await release();
+      expect(canceled.status).toBe(200);
+      await expect(canceled.json()).resolves.toMatchObject({
+        lease: { id: leaseID, state: "released", cleanupStatus: "complete" },
+      });
+      finishPreparation.resolve();
+      expect((await first).status).toBe(409);
+      const repeated = await release();
+      expect.soft(repeated.status).toBe(200);
+      await expect.soft(repeated.json()).resolves.toMatchObject({
+        lease: { id: leaseID, state: "released", cleanupStatus: "complete" },
+      });
+      finishSecondConfig.resolve();
+      expect.soft((await second).status).toBe(409);
+      expect(creates).toBe(0);
+    } finally {
+      finishFirstConfig.resolve();
+      finishSecondConfig.resolve();
+      finishPreparation.resolve();
+      await Promise.all([first, second]);
+    }
   });
+
+  it("does not project a missing canonical fixed lease as confirmed cleanup", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(undefined, { cloudID: "missing-canonical-cloud" }),
+    });
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const leaseID = "cbx_ca1100000044";
+    const create = await fleet.fetch(
+      request("PUT", `/v1/leases/${leaseID}`, {
+        headers,
+        body: { provider: "hetzner", sshPublicKey: "ssh-ed25519 missing-canonical" },
+      }),
+    );
+    expect(create.status).toBe(201);
+    await expect(create.json()).resolves.toMatchObject({
+      lease: { id: leaseID, state: "active", cloudID: "missing-canonical-cloud" },
+    });
+    await storage.delete(`lease:${leaseID}`);
+
+    const release = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/release`, {
+        headers,
+        body: { delete: true, expectedProvider: "hetzner" },
+      }),
+    );
+    expect(release.status).not.toBe(200);
+    expect(await release.json()).not.toMatchObject({ lease: { cleanupStatus: "complete" } });
+  });
+
+  it.each(["ordinary", "fixed"] as const)(
+    "cancels after %s reservation and deletes a provider resource that completes late",
+    async (kind) => {
+      const storage = new MemoryStorage();
+      const createStarted = deferred<void>();
+      const finishCreate = deferred<void>();
+      const cleanupStarted = deferred<void>();
+      const finishCleanup = deferred<void>();
+      const deleted: string[] = [];
+      const fleet = testFleet(storage, {
+        hetzner: fakeProvider(
+          async () => {
+            createStarted.resolve();
+            await finishCreate.promise;
+          },
+          { cloudID: "late-cloud" },
+          async (id) => {
+            deleted.push(id);
+            cleanupStarted.resolve();
+            await finishCleanup.promise;
+          },
+        ),
+      });
+      const headers = {
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+      };
+      const leaseID = "cbx_ca1100000005";
+      const createAttemptID = "cat_50000000000000000000000000000005";
+      const creating = fleet.fetch(
+        request(
+          kind === "fixed" ? "PUT" : "POST",
+          kind === "fixed" ? `/v1/leases/${leaseID}` : "/v1/leases",
+          {
+            headers,
+            body: {
+              leaseID,
+              createAttemptID: kind === "ordinary" ? createAttemptID : undefined,
+              provider: "hetzner",
+              sshPublicKey: "ssh-ed25519 x",
+            },
+          },
+        ),
+      );
+      await createStarted.promise;
+      try {
+        const canceled = await fleet.fetch(
+          request(
+            "POST",
+            `/v1/leases/${leaseID}/${kind === "fixed" ? "release" : "cancel-create"}`,
+            {
+              headers,
+              body: kind === "fixed" ? { delete: true } : { createAttemptID },
+            },
+          ),
+        );
+        expect(canceled.status).toBe(200);
+        await expect(canceled.json()).resolves.toMatchObject({
+          lease: { id: leaseID, state: "released", cleanupStatus: "pending" },
+        });
+        expect(deleted).toEqual([]);
+        finishCreate.resolve();
+        expect(
+          await Promise.race([cleanupStarted.promise.then(() => true), creating.then(() => false)]),
+        ).toBe(true);
+        const pending = await fleet.fetch(request("GET", `/v1/leases/${leaseID}`, { headers }));
+        await expect(pending.json()).resolves.toMatchObject({
+          lease: { id: leaseID, state: "released", cleanupStatus: "pending" },
+        });
+      } finally {
+        finishCreate.resolve();
+        finishCleanup.resolve();
+        await creating;
+      }
+      expect((await creating).status).toBe(409);
+      const released = await fleet.fetch(
+        request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+      );
+      expect(released.status).toBe(200);
+      await expect(released.json()).resolves.toMatchObject({
+        lease: { id: leaseID, state: "released", cleanupStatus: "complete" },
+      });
+      expect(deleted).toEqual(["123"]);
+    },
+  );
 
   it("retains an explicit cleanup claim from a provider failure that arrives after cancellation", async () => {
     const storage = new MemoryStorage();
@@ -22284,35 +24465,36 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect([fixedReplacement.status, workspaceReplacement.status]).toEqual([409, 409]);
-    expect(storage.value<{ token: string }>(`create-attempt:${fixedID}`)?.token).toBe(
-      canceledTokens.get(fixedID),
-    );
     expect(storage.value<{ token: string }>(`create-attempt:${workspaceID}`)?.token).toBe(
       canceledTokens.get(workspaceID),
     );
 
-    const delayedCanceledCreate = await fleet.fetch(
-      request("POST", "/v1/leases", {
-        headers: {
-          "x-crabbox-owner": "alice@example.com",
-          "x-crabbox-org": "example-org",
-        },
-        body: {
-          leaseID: ordinaryID,
-          createAttemptID: canceledTokens.get(ordinaryID),
-          provider: "hetzner",
-          sshPublicKey: "ssh-ed25519 delayed-old-create",
-        },
+    await Promise.all(
+      [fixedID, ordinaryID].map(async (leaseID) => {
+        const delayedCanceledCreate = await fleet.fetch(
+          request("POST", "/v1/leases", {
+            headers: {
+              "x-crabbox-owner": "alice@example.com",
+              "x-crabbox-org": "example-org",
+            },
+            body: {
+              leaseID,
+              createAttemptID: canceledTokens.get(leaseID),
+              provider: "hetzner",
+              sshPublicKey: "ssh-ed25519 delayed-old-create",
+            },
+          }),
+        );
+        expect(delayedCanceledCreate.status).toBe(409);
+        await expect(delayedCanceledCreate.json()).resolves.toMatchObject({
+          error: "create_canceled",
+        });
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+          owner: "bob@example.com",
+          state: "active",
+        });
       }),
     );
-    expect(delayedCanceledCreate.status).toBe(409);
-    await expect(delayedCanceledCreate.json()).resolves.toMatchObject({
-      error: "create_canceled",
-    });
-    expect(storage.value<LeaseRecord>(`lease:${ordinaryID}`)).toMatchObject({
-      owner: "bob@example.com",
-      state: "active",
-    });
   });
 
   it("keeps pending and canonical-bound create attempts as global ID blockers", async () => {
@@ -33381,6 +35563,7 @@ describe("fleet run history", () => {
   it("pages run history and lease detail scans while retaining only the newest matches", async () => {
     const storage = new ObservedMemoryStorage();
     const fleet = testFleet(storage);
+    await fleet.ready();
     const ownerHeaders = {
       "x-crabbox-owner": "alice@example.com",
       "x-crabbox-org": "example-org",
@@ -34203,10 +36386,20 @@ describe("fleet run history", () => {
 
   it("serializes control heartbeat provider validation with its mutation", async () => {
     const storage = new MemoryStorage();
-    const runtime = new CloudflareCoordinatorRuntime({ storage } as unknown as DurableObjectState);
+    let initialized: Promise<unknown> | undefined;
+    const runtime = new CloudflareCoordinatorRuntime({
+      storage,
+      blockConcurrencyWhile<T>(callback: () => Promise<T>) {
+        const run = callback();
+        initialized = run;
+        return run;
+      },
+      waitUntil() {},
+    } as unknown as DurableObjectState);
     const fleet = new FleetCoordinator(runtime, {
       CRABBOX_DEFAULT_ORG: "openclaw",
     } as Env);
+    await initialized;
     const leaseID = "cbx_control_provider_fence";
     const now = new Date();
     const original = testLease({
@@ -34564,6 +36757,142 @@ describe("fleet run history", () => {
     expect(storage.value<RunRecord>(`run:${run.id}`)?.exitCode).toBe(17);
   });
 
+  it.each([
+    { exitCode: 0, signed: true },
+    { exitCode: 17, signed: true },
+    { exitCode: 0, signed: false },
+  ])(
+    "preserves finalized run metadata when late events arrive after exit $exitCode (signed: $signed)",
+    async ({ exitCode, signed }) => {
+      const storage = new MemoryStorage();
+      const fleet = testFleet(storage);
+      const headers = {
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+      };
+      const lease = testLease({
+        id: "cbx_000000000001",
+        slug: "initial-runner",
+        owner: "alice@example.com",
+        org: "example-org",
+        provider: "aws",
+      });
+      const replacement = testLease({
+        ...lease,
+        id: "cbx_000000000002",
+        slug: "replacement-runner",
+        provider: "hetzner",
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      storage.seed(`lease:${replacement.id}`, replacement);
+      const create = await fleet.fetch(
+        request("POST", "/v1/runs", {
+          headers,
+          body: { leaseID: lease.id, command: ["echo", "done"] },
+        }),
+      );
+      const { run } = (await create.json()) as { run: RunRecord };
+      const log = "done\n";
+      const receipt = signed
+        ? await testTerminalReceipt({ run, exitCode, syncMs: 0, commandMs: 1, log })
+        : undefined;
+      const body = { exitCode, commandMs: 1, log, receipt };
+      const finish = await fleet.fetch(
+        request("POST", `/v1/runs/${run.id}/finish`, { headers, body }),
+      );
+      expect(finish.status).toBe(200);
+      const { run: finished } = (await finish.json()) as { run: RunRecord };
+      const failure = {
+        type: "run.failed",
+        phase: "failed",
+        message: "finish acknowledgment unavailable",
+      };
+      const lateEvents = [
+        failure,
+        {
+          type: "lease.created",
+          phase: "leased",
+          leaseID: replacement.id,
+          slug: replacement.slug,
+          provider: replacement.provider,
+          target: "windows",
+          windowsMode: "wsl2",
+          class: "large",
+          serverType: "replacement-type",
+        },
+        { type: "stdout", stream: "stdout", data: log },
+        { type: "lease.released", phase: "released" },
+        failure,
+      ];
+      const appendedEvents: RunEventRecord[] = [];
+      for (const lateEvent of lateEvents) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- preserve duplicate and out-of-order delivery in the audit sequence.
+        const response = await fleet.fetch(
+          request("POST", `/v1/runs/${run.id}/events`, { headers, body: lateEvent }),
+        );
+        expect(response.status).toBe(201);
+        // oxlint-disable-next-line eslint/no-await-in-loop -- inspect each append before the next delivery.
+        const { event } = (await response.json()) as { event: RunEventRecord };
+        appendedEvents.push(event);
+        // oxlint-disable-next-line eslint/no-await-in-loop -- assert that no individual late event rewrites terminal metadata.
+        const read = await fleet.fetch(request("GET", `/v1/runs/${run.id}`, { headers }));
+        // oxlint-disable-next-line eslint/no-await-in-loop -- inspect each append before the next delivery.
+        expect(await read.json()).toEqual({
+          run: {
+            ...finished,
+            eventCount: (finished.eventCount ?? 0) + appendedEvents.length,
+            lastEventAt: event.createdAt,
+          },
+        });
+      }
+      expect(appendedEvents.map((event) => event.seq)).toEqual([3, 4, 5, 6, 7]);
+      const events = await fleet.fetch(
+        request("GET", `/v1/runs/${run.id}/events?after=2`, { headers }),
+      );
+      expect(await events.json()).toEqual({ events: appendedEvents });
+      const duplicate = await fleet.fetch(
+        request("POST", `/v1/runs/${run.id}/finish`, { headers, body }),
+      );
+      expect(duplicate.status).toBe(200);
+      expect(await duplicate.json()).toEqual({
+        run: { ...finished, eventCount: 7, lastEventAt: appendedEvents.at(-1)?.createdAt },
+      });
+      const logs = await fleet.fetch(request("GET", `/v1/runs/${run.id}/logs`, { headers }));
+      expect(await logs.text()).toBe(log);
+      const recovered = await fleet.fetch(
+        request("GET", `/v1/runs/${run.id}/receipt`, { headers }),
+      );
+      expect(recovered.status).toBe(signed ? 200 : 404);
+      expect(await recovered.json()).toEqual(
+        signed ? { receipt } : { error: "receipt_unavailable" },
+      );
+    },
+  );
+
+  it("still marks unfinished runs failed when a failure event arrives", async () => {
+    const fleet = testFleet();
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const create = await fleet.fetch(
+      request("POST", "/v1/runs", { headers, body: { command: ["echo", "done"] } }),
+    );
+    const { run } = (await create.json()) as { run: RunRecord };
+    const failure = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/events`, {
+        headers,
+        body: { type: "run.failed", message: "bootstrap unavailable" },
+      }),
+    );
+    expect(failure.status).toBe(201);
+    const { event } = (await failure.json()) as { event: { createdAt: string } };
+    const read = await fleet.fetch(request("GET", `/v1/runs/${run.id}`, { headers }));
+    expect(await read.json()).toMatchObject({
+      run: { state: "failed", phase: "failed", endedAt: event.createdAt, eventCount: 2 },
+    });
+  });
+
   it("keeps committed logs under concurrent identical terminal finishes", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
@@ -34908,6 +37237,187 @@ describe("fleet run history", () => {
     expect(finished.run.results?.files).toEqual([]);
     expect(finished.run.results?.failed).toEqual([]);
   });
+
+  it.each([
+    "ascii",
+    "unicode",
+    "malformed",
+    "two-byte-tail",
+    "three-byte-tail",
+    "four-byte-tail",
+    "replacement-expansion",
+    "exact-cap",
+  ])("commits the Go FinishRun UTF-8 wire golden: %s", async (name) => {
+    type TextRun = { text: string; count: number };
+    type Fixture = {
+      name: string;
+      raw: Array<{ hex: string; count: number }>;
+      finish: {
+        log: TextRun[];
+        logChunks: Array<{ parts: TextRun[]; count: number }>;
+        logTruncated: boolean;
+        receipt: import("../src/types").TerminalRunReceipt;
+      };
+    };
+    const fixtures = JSON.parse(
+      await readFile(
+        new URL("../../internal/cli/testdata/terminal-log-wire.json", import.meta.url),
+        "utf8",
+      ),
+    ) as Fixture[];
+    const fixture = fixtures.find((entry) => entry.name === name)!;
+    const body = {
+      ...fixture.finish,
+      log: expandLogTextRuns(fixture.finish.log),
+      logChunks: fixture.finish.logChunks.flatMap((chunk) =>
+        Array<string>(chunk.count).fill(expandLogTextRuns(chunk.parts)),
+      ),
+    };
+    const raw = Buffer.concat(
+      fixture.raw.map((part) => {
+        const bytes = Buffer.from(part.hex, "hex");
+        return Buffer.alloc(bytes.length * part.count, bytes);
+      }),
+    );
+    expect(body.receipt.log_sha256).toBe(await testSHA256Digest(raw));
+    const log = body.logChunks.join("");
+    expect(body.receipt.retained_log_sha256).toBe(
+      await testSHA256Digest(new TextEncoder().encode(log)),
+    );
+    expect(body.logTruncated).toBe(!raw.equals(Buffer.from(log)));
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    const run = testRun({
+      owner: "alice@example.com",
+      org: "example-org",
+      id: "run_unicode",
+      provider: "aws",
+      leaseID: undefined,
+      command: ["synthetic-output"],
+      startedAt: "2026-08-23T10:00:00Z",
+    });
+    storage.seed(`run:${run.id}`, run);
+    // Tampering still fails before storage, including logs whose full hash cannot
+    // be recomputed from the retained text.
+    const tamperedBodies = [
+      { ...body, logChunks: [...body.logChunks, "tampered"] },
+      { ...body, logTruncated: !body.logTruncated },
+      {
+        ...body,
+        receipt: {
+          ...body.receipt,
+          signature:
+            (body.receipt.signature.startsWith("A") ? "B" : "A") + body.receipt.signature.slice(1),
+        },
+      },
+    ];
+    await Promise.all(
+      tamperedBodies.map(async (tampered) => {
+        const rejected = await fleet.fetch(
+          request("POST", `/v1/runs/${run.id}/finish`, { headers, body: tampered }),
+        );
+        expect(rejected.status).toBe(400);
+        expect(storage.value<RunRecord>(`run:${run.id}`)?.state).toBe("running");
+      }),
+    );
+    const finish = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/finish`, { headers, body }),
+    );
+    expect(finish.status).toBe(200);
+    const stored = storage.value<RunRecord>(`run:${run.id}`)!;
+    expect(stored.logBytes).toBe(Buffer.byteLength(log));
+    expect(stored.logBytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+    expect(stored.logTruncated).toBe(body.logTruncated);
+    expect(stored.terminalReceipt).toEqual(body.receipt);
+    const values = await storage.list<string>({ prefix: stored.terminalLogPrefix! });
+    for (const value of values.values()) {
+      expect(value.isWellFormed()).toBe(true);
+      expect(Buffer.byteLength(value)).toBeLessThanOrEqual(64 * 1024);
+    }
+    const logs = await fleet.fetch(request("GET", `/v1/runs/${run.id}/logs`, { headers }));
+    expect(await logs.text()).toBe(log);
+    const receipt = await fleet.fetch(request("GET", `/v1/runs/${run.id}/receipt`, { headers }));
+    expect(await receipt.json()).toEqual({ receipt: body.receipt });
+  });
+
+  it.each([
+    ["é", 1],
+    ["€", 1],
+    ["€", 2],
+    ["😀", 1],
+    ["😀", 2],
+    ["😀", 3],
+  ])("bounds stored UTF-8 tails at whole codepoints: %s minus %i bytes", async (char, cut) => {
+    const cap = 8 * 1024 * 1024;
+    const tail = "a".repeat(cap - Buffer.byteLength(char) + cut);
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    const run = testRun({ owner: "alice@example.com", org: "example-org", id: "run_unicode_tail" });
+    storage.seed(`run:${run.id}`, run);
+    const finish = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/finish`, {
+        headers,
+        body: { exitCode: 0, log: char + tail },
+      }),
+    );
+    expect(finish.status).toBe(200);
+    const stored = storage.value<RunRecord>(`run:${run.id}`)!;
+    expect(stored.logBytes).toBe(tail.length);
+    expect(stored.logTruncated).toBe(true);
+    const logs = await fleet.fetch(request("GET", `/v1/runs/${run.id}/logs`, { headers }));
+    expect(await logs.text()).toBe(tail);
+  });
+
+  it.each([
+    { log: "\ud800x\udc00", want: "�x�", truncated: true },
+    {
+      log: "a".repeat(64 * 1024) + "\ufeff😀",
+      want: "a".repeat(64 * 1024) + "\ufeff😀",
+      truncated: false,
+    },
+    { log: "�", want: "�", truncated: false },
+    {
+      log: "a".repeat(8 * 1024 * 1024 - 3) + "€",
+      want: "a".repeat(8 * 1024 * 1024 - 3) + "€",
+      truncated: false,
+    },
+    {
+      log: "x".repeat(8 * 1024 * 1024) + "\ufeff" + "a".repeat(8 * 1024 * 1024 - 3),
+      want: "\ufeff" + "a".repeat(8 * 1024 * 1024 - 3),
+      truncated: true,
+    },
+  ])(
+    "normalizes stored logs without losing literal replacements or BOMs ($truncated)",
+    async ({ log, want, truncated }) => {
+      const storage = new MemoryStorage();
+      const fleet = testFleet(storage);
+      const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+      const run = testRun({
+        owner: "alice@example.com",
+        org: "example-org",
+        id: "run_unicode_normalization",
+      });
+      storage.seed(`run:${run.id}`, run);
+      const finish = await fleet.fetch(
+        request("POST", `/v1/runs/${run.id}/finish`, {
+          headers,
+          body: { exitCode: 0, log },
+        }),
+      );
+      expect(finish.status).toBe(200);
+      const stored = storage.value<RunRecord>(`run:${run.id}`)!;
+      expect(stored.logBytes).toBe(Buffer.byteLength(want));
+      expect(stored.logTruncated).toBe(truncated);
+      const values = await storage.list<string>({ prefix: stored.terminalLogPrefix! });
+      expect([...values.values()].join("")).toBe(want);
+      for (const value of values.values()) {
+        expect(value.isWellFormed()).toBe(true);
+        expect(Buffer.byteLength(value)).toBeLessThanOrEqual(64 * 1024);
+      }
+    },
+  );
 
   it("records chunked run logs so failures do not disappear from long output", async () => {
     const storage = new MemoryStorage();
@@ -36977,6 +39487,1271 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function alarmRuntime(storage: MemoryStorage): CloudflareCoordinatorRuntime {
+  return new CloudflareCoordinatorRuntime({ storage } as unknown as DurableObjectState);
+}
+
+function expectBoundedAlarmReads(storage: ObservedMemoryStorage, count: number): void {
+  expect(storage.listOptions).toEqual(
+    Array.from({ length: count }, () => ({ prefix: "provisioning-due:", limit: 1 })),
+  );
+}
+
+describe("synthetic acknowledgement reliability", () => {
+  const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+  const leaseID = "cbx_aacc00000001";
+  const releaseID = "cbx_aacc00000002";
+
+  class RetainedAlarmStorage extends ObservedMemoryStorage {
+    queuedAlarm: number | undefined;
+    readonly alarmWrites: number[] = [];
+
+    protected override alarmCommitted(time: number | undefined): void {
+      if (time !== undefined) this.alarmWrites.push(time);
+      this.queuedAlarm = time;
+    }
+
+    consumeAlarm(): void {
+      if (this.queuedAlarm === undefined || this.queuedAlarm > Date.now()) {
+        throw new Error("no due alarm job is queued");
+      }
+      // A consumed job can retain its native timestamp without a queued wake.
+      this.queuedAlarm = undefined;
+    }
+
+    async deliverAlarm(fleet: FleetDurableObject): Promise<void> {
+      await fleet.ready();
+      this.consumeAlarm();
+      await fleet.alarm();
+    }
+  }
+
+  function seedLease(storage: MemoryStorage, id = leaseID): LeaseRecord {
+    const now = new Date();
+    const lease = testLease({
+      id,
+      slug: `synthetic-${id}`,
+      owner: "alice@example.com",
+      org: "example-org",
+      keep: false,
+      createdAt: now.toISOString(),
+      lastTouchedAt: now.toISOString(),
+      idleTimeoutSeconds: 1800,
+      expiresAt: new Date(now.getTime() + 1800_000).toISOString(),
+    });
+    storage.seed(`lease:${id}`, lease);
+    return lease;
+  }
+
+  async function createRun(fleet: FleetCoordinator): Promise<RunRecord> {
+    const response = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        headers,
+        body: { leaseID, command: ["printf", "synthetic acknowledgement\\n"] },
+      }),
+    );
+    expect(response.status).toBe(201);
+    return ((await response.json()) as { run: RunRecord }).run;
+  }
+
+  function addSocket(fleet: FleetCoordinator, clientID: string, fields = {}): FakeWebSocket {
+    const socket = new FakeWebSocket({
+      kind: "control",
+      clientID,
+      owner: "alice@example.com",
+      org: "example-org",
+      subscriptions: {},
+      ...fields,
+    });
+    (fleet as unknown as { controlSockets: Map<string, WebSocket> }).controlSockets.set(
+      clientID,
+      socket as unknown as WebSocket,
+    );
+    return socket;
+  }
+
+  it.each(["callback", "alarm"])(
+    "publishes neither transaction state nor an alarm job after a %s failure",
+    async (failure) => {
+      const storage = new RetainedAlarmStorage();
+      const runtime = alarmRuntime(storage);
+      const future = Date.now() + 10_000;
+      await runtime.scheduleAlarm(future);
+      storage.seed("synthetic-transaction", "before");
+      const alarmWrite = vi
+        .spyOn(storage, "beforeAlarmWrite")
+        .mockRejectedValue(new Error("synthetic alarm transaction failure"));
+      await expect(
+        runtime.commitAndWake(async (transaction) => {
+          await transaction.put("synthetic-transaction", "after");
+          await setLegacyWake(transaction, future - 1);
+          if (failure === "callback") throw new Error("synthetic callback transaction failure");
+        }),
+      ).rejects.toThrow(`synthetic ${failure} transaction failure`);
+      expect(alarmWrite).toHaveBeenCalledTimes(failure === "alarm" ? 1 : 0);
+      expect(storage.value("synthetic-transaction")).toBe("before");
+      expect(storage.value(legacyAlarmKey)).toBe(future);
+      expect(storage.alarm()).toBe(future);
+      expect(storage.queuedAlarm).toBe(future);
+      expect(storage.alarmWrites).toEqual([future]);
+    },
+  );
+
+  it("publishes only the committed alarm job after a serialization retry", async () => {
+    const storage = new RetainedAlarmStorage();
+    const runtime = alarmRuntime(storage);
+    const future = Date.now() + 10_000;
+    await runtime.scheduleAlarm(future);
+    storage.seed("synthetic-transaction", "before");
+    const entered = deferred<void>();
+    const resume = deferred<void>();
+    let attempts = 0;
+    const operation = runtime.commitAndWake(async (transaction) => {
+      const value = await transaction.get("synthetic-transaction");
+      attempts += 1;
+      if (attempts === 1) {
+        entered.resolve();
+        await resume.promise;
+      }
+      await transaction.put("synthetic-result", value);
+      await setLegacyWake(transaction, future - 1);
+    });
+    await entered.promise;
+    await storage.put("synthetic-transaction", "replacement");
+    resume.resolve();
+    await operation;
+    expect(attempts).toBe(2);
+    expect(storage.value("synthetic-result")).toBe("replacement");
+    expect(storage.queuedAlarm).toBe(future - 1);
+    expect(storage.alarm()).toBe(future - 1);
+    expect(storage.value(legacyAlarmKey)).toBe(future - 1);
+    expect(storage.alarmWrites).toEqual([future, future - 1]);
+    await runtime.commitAndWake(async () => undefined);
+    expect(storage.alarmWrites).toEqual([future, future - 1]);
+  });
+
+  it("preserves durable data and queued work when a transaction's native alarm read fails", async () => {
+    const storage = new RetainedAlarmStorage();
+    const runtime = alarmRuntime(storage);
+    const future = Date.now() + 60_000;
+    await runtime.scheduleAlarm(future);
+    storage.seed("synthetic-transaction", "before");
+    const callback = vi.fn<(transaction: CoordinatorStorageView) => Promise<void>>(
+      async (transaction) => {
+        await transaction.put("synthetic-transaction", "after");
+      },
+    );
+    const read = vi
+      .spyOn(storage, "beforeGetAlarm")
+      .mockRejectedValueOnce(new Error("synthetic native alarm read failure"));
+    await expect(runtime.commitAndWake(callback)).rejects.toThrow(
+      "synthetic native alarm read failure",
+    );
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(callback).not.toHaveBeenCalled();
+    expect(storage.value("synthetic-transaction")).toBe("before");
+    expect(storage.value(legacyAlarmKey)).toBe(future);
+    expect(storage.alarm()).toBe(future);
+    expect(storage.queuedAlarm).toBe(future);
+    expect(storage.alarmWrites).toEqual([future]);
+    await expect(runtime.getAlarm()).resolves.toBe(future);
+  });
+
+  it.each(["http", "control", "release"] as const)(
+    "preserves an earlier %s acknowledgement wake when delayed maintenance fails",
+    async (action) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const failure = deferred<void>();
+      let alarm: Promise<void> | undefined;
+      try {
+        const storage = new RetainedAlarmStorage();
+        seedLease(storage);
+        const fleet = testFleet(storage);
+        await fleet.ready();
+        const started = deferred<void>();
+        vi.spyOn(
+          fleet as unknown as { runScheduledMaintenance(): Promise<void> },
+          "runScheduledMaintenance",
+        ).mockImplementation(() => {
+          started.resolve();
+          return failure.promise.then(() => {
+            throw new Error("synthetic delayed maintenance failure");
+          });
+        });
+        alarm = fleet.alarm();
+        await started.promise;
+        let acknowledged: boolean;
+        if (action === "control") {
+          const socket = addSocket(fleet, "synthetic-retry-race");
+          await fleet.webSocketMessage(
+            socket as unknown as WebSocket,
+            JSON.stringify({ type: "heartbeat", leaseID, idleTimeoutSeconds: 1 }),
+          );
+          acknowledged = (socket.sentJSON().at(-1) as { ok?: boolean }).ok === true;
+        } else {
+          const response = await fleet.fetch(
+            request(
+              "POST",
+              `/v1/leases/${leaseID}/${action === "release" ? "release" : "heartbeat"}`,
+              {
+                headers,
+                body: action === "release" ? { delete: true } : { idleTimeoutSeconds: 1 },
+              },
+            ),
+          );
+          acknowledged = response.status === 200;
+        }
+        expect(acknowledged).toBe(true);
+        const earlier = Date.now() + (action === "release" ? 0 : 1000);
+        expect(storage.alarm()).toBe(earlier);
+        failure.resolve();
+        await alarm;
+        expect(storage.alarm()).toBe(earlier);
+        expect(storage.value(legacyAlarmKey)).toBe(earlier);
+        expect(storage.queuedAlarm).toBe(earlier);
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.releaseDeletesServer).toBe(
+          action === "release" ? true : undefined,
+        );
+      } finally {
+        failure.resolve();
+        await alarm;
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["none", "http", "control", "release"] as const)(
+    "anchors a queued maintenance retry to failure time while %s acknowledgement races it",
+    async (action) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const failure = deferred<void>();
+      const unlock = deferred<void>();
+      let alarm: Promise<void> | undefined;
+      let lock: Promise<void> | undefined;
+      try {
+        const storage = new RetainedAlarmStorage();
+        seedLease(storage);
+        const fleet = testFleet(storage);
+        await fleet.ready();
+        const state = (fleet as unknown as { state: CoordinatorRuntime }).state;
+        const started = deferred<void>();
+        vi.spyOn(
+          fleet as unknown as { runScheduledMaintenance(): Promise<void> },
+          "runScheduledMaintenance",
+        ).mockImplementation(async () => {
+          started.resolve();
+          await failure.promise;
+          throw new Error("synthetic blocked maintenance failure");
+        });
+        alarm = fleet.alarm();
+        await started.promise;
+        const locked = deferred<void>();
+        lock = state.runExclusive(async () => {
+          locked.resolve();
+          await unlock.promise;
+        });
+        await locked.promise;
+        const queued = deferred<void>();
+        const runExclusive = state.runExclusive.bind(state);
+        vi.spyOn(state, "runExclusive").mockImplementation((callback) => {
+          queued.resolve();
+          return runExclusive(callback);
+        });
+        const failedAt = Date.now();
+        failure.resolve();
+        expect(
+          await Promise.race([
+            queued.promise.then(() => "queued"),
+            alarm.then(() => "completed without lock"),
+          ]),
+        ).toBe("queued");
+        expect(storage.queuedAlarm).toBeUndefined();
+        vi.setSystemTime(failedAt + 5000);
+        let acknowledgement: Promise<boolean> = Promise.resolve(true);
+        if (action === "control") {
+          const socket = addSocket(fleet, "synthetic-queued-retry");
+          acknowledgement = fleet
+            .webSocketMessage(
+              socket as unknown as WebSocket,
+              JSON.stringify({ type: "heartbeat", leaseID, idleTimeoutSeconds: 1 }),
+            )
+            .then(() => (socket.sentJSON().at(-1) as { ok?: boolean }).ok === true);
+        } else if (action !== "none") {
+          acknowledgement = fleet
+            .fetch(
+              request(
+                "POST",
+                `/v1/leases/${leaseID}/${action === "release" ? "release" : "heartbeat"}`,
+                {
+                  headers,
+                  body: action === "release" ? { delete: true } : { idleTimeoutSeconds: 1 },
+                },
+              ),
+            )
+            .then((response) => response.status === 200);
+        }
+        unlock.resolve();
+        await Promise.all([lock, alarm, acknowledgement]);
+        expect(await acknowledgement).toBe(true);
+        const expected =
+          action === "none" ? failedAt + 15_000 : Date.now() + (action === "release" ? 0 : 1000);
+        expect(storage.alarm()).toBe(expected);
+        expect(storage.queuedAlarm).toBe(expected);
+        expect(storage.value(legacyAlarmKey)).toBe(expected);
+      } finally {
+        failure.resolve();
+        unlock.resolve();
+        await Promise.all([lock, alarm]);
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("reports a failed runtime-owned retry wake and preserves cleanup debt for reconstruction", async () => {
+    const storage = new RetainedAlarmStorage();
+    const pending = {
+      ...seedLease(storage),
+      state: "released" as const,
+      releaseDeletesServer: true,
+    };
+    storage.seed(`lease:${leaseID}`, pending);
+    const fleet = testFleet(storage);
+    await fleet.ready();
+    const started = deferred<void>();
+    const failure = deferred<void>();
+    vi.spyOn(
+      fleet as unknown as { runScheduledMaintenance(): Promise<void> },
+      "runScheduledMaintenance",
+    ).mockImplementation(async () => {
+      started.resolve();
+      await failure.promise;
+      throw new Error("synthetic legacy maintenance failure");
+    });
+    const alarm = fleet.alarm();
+    await started.promise;
+    const retryWrite = vi
+      .spyOn(storage, "beforeAlarmWrite")
+      .mockRejectedValueOnce(new Error("synthetic retry storage failure"));
+    failure.resolve();
+    await expect(alarm).rejects.toThrow("coordinator maintenance retry wake failed");
+    expect(retryWrite).toHaveBeenCalledTimes(1);
+    expect(storage.alarm()).toBeUndefined();
+    expect(storage.queuedAlarm).toBeUndefined();
+    expect(storage.value(`lease:${leaseID}`)).toEqual(pending);
+    const reconstructed = testFleet(storage);
+    await reconstructed.ready();
+    const response = await reconstructed.fetch(
+      request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+    );
+    expect(response.status).toBe(200);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.releaseDeletesServer).toBe(true);
+    expect(storage.queuedAlarm).toBe(storage.alarm());
+    expect(storage.queuedAlarm).toBeLessThanOrEqual(Date.now());
+  });
+
+  it.each([
+    ["http", false],
+    ["control", false],
+    ["http", true],
+    ["control", true],
+  ] as const)(
+    "fails %s heartbeat acknowledgement on native alarm failure (consumed=%s)",
+    async (transport, consumed) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const storage = new RetainedAlarmStorage();
+        seedLease(storage);
+        const fleet = testFleet(storage);
+        await fleet.ready();
+        const previous = consumed ? Date.now() - 1000 : undefined;
+        if (previous !== undefined) {
+          await alarmRuntime(storage).scheduleAlarm(previous);
+          storage.consumeAlarm();
+        }
+        const nativeWrite = vi
+          .spyOn(storage, "beforeAlarmWrite")
+          .mockRejectedValueOnce(new Error("synthetic heartbeat alarm failure"));
+        storage.resetListOptions();
+        let heartbeat: Promise<unknown>;
+        let socket: FakeWebSocket | undefined;
+        if (transport === "http") {
+          heartbeat = fleet
+            .fetch(request("POST", `/v1/leases/${leaseID}/heartbeat`, { headers }))
+            .then((response) => response.status);
+        } else {
+          socket = addSocket(fleet, "synthetic-failed-heartbeat");
+          heartbeat = fleet.webSocketMessage(
+            socket as unknown as WebSocket,
+            JSON.stringify({ type: "heartbeat", leaseID }),
+          );
+        }
+        expect(await Promise.allSettled([heartbeat])).toEqual([
+          transport === "http"
+            ? { status: "fulfilled", value: 500 }
+            : { status: "rejected", reason: new Error("synthetic heartbeat alarm failure") },
+        ]);
+        expect(socket?.sentJSON() ?? []).toEqual([]);
+        expect(nativeWrite).toHaveBeenCalledExactlyOnceWith(previous ?? Date.now() + 1800_000);
+        expectBoundedAlarmReads(storage, 1);
+        expect(storage.alarm()).toBe(previous);
+        expect(storage.value(legacyAlarmKey)).toBe(previous);
+        expect(storage.queuedAlarm).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("publishes native alarm bookkeeping only for the committed serialization attempt", async () => {
+    const storage = new RetainedAlarmStorage();
+    const runtime = alarmRuntime(storage);
+    const original = Date.now() + 60_000;
+    await runtime.scheduleAlarm(original);
+    const at = original - 1000;
+    const dueKey = `provisioning-due:${String(at).padStart(16, "0")}:retry`;
+    storage.seed("test:revision", 0);
+    let attempts = 0;
+    const nativeWrite = vi.spyOn(storage, "beforeAlarmWrite").mockImplementation(async () => {
+      expect(storage.queuedAlarm).toBe(original);
+      expect(storage.alarmWrites).toEqual([original]);
+      expect(storage.value("test:operation")).toBeUndefined();
+      expect(storage.value(dueKey)).toBeUndefined();
+      if (++attempts === 1) storage.seed("test:revision", 1);
+    });
+    storage.resetListOptions();
+    await runtime.commitAndWake(async (transaction) => {
+      const revision = await transaction.get("test:revision");
+      await transaction.put("test:operation", { revision });
+      await transaction.put(dueKey, { operationID: "retry", at });
+    });
+    expect(nativeWrite.mock.calls).toEqual([[at], [at]]);
+    expectBoundedAlarmReads(storage, 2);
+    expect(storage.value("test:operation")).toEqual({ revision: 1 });
+    expect(storage.value(dueKey)).toEqual({ operationID: "retry", at });
+    expect(storage.value(legacyAlarmKey)).toBe(original);
+    expect(storage.alarm()).toBe(at);
+    expect(storage.queuedAlarm).toBe(at);
+    expect(storage.alarmWrites).toEqual([original, at]);
+  });
+
+  it.each(["native failure", "callback rollback"] as const)(
+    "keeps queued jobs, native alarms and durable data unchanged after %s",
+    async (failure) => {
+      const storage = new RetainedAlarmStorage();
+      const runtime = alarmRuntime(storage);
+      const earlier = Date.now() + 60_000;
+      await runtime.scheduleAlarm(earlier);
+      const at = earlier - 1000;
+      const dueKey = `provisioning-due:${String(at).padStart(16, "0")}:rollback`;
+      const writes = vi.spyOn(storage, "beforeAlarmWrite");
+      if (failure === "native failure") writes.mockRejectedValueOnce(new Error("native failure"));
+      storage.resetListOptions();
+      const queuedDuringAttempt: Array<number | undefined> = [];
+      const mutate = async (transaction: CoordinatorStorageView) => {
+        await transaction.put("test:operation", { phase: "prepared" });
+        await transaction.put(dueKey, { operationID: "rollback", at });
+      };
+      const operation =
+        failure === "native failure"
+          ? runtime.commitAndWake(mutate)
+          : storage.transaction(async (transaction) => {
+              await mutate(transaction);
+              await (transaction as MemoryStorage).setAlarm(at);
+              queuedDuringAttempt.push(storage.queuedAlarm);
+              throw new Error("callback rollback");
+            });
+      await expect(operation).rejects.toThrow(failure);
+      expect(queuedDuringAttempt).toEqual(failure === "callback rollback" ? [earlier] : []);
+      expect(writes).toHaveBeenCalledExactlyOnceWith(at);
+      expectBoundedAlarmReads(storage, failure === "native failure" ? 1 : 0);
+      expect(storage.alarm()).toBe(earlier);
+      expect(storage.queuedAlarm).toBe(earlier);
+      expect(storage.alarmWrites).toEqual([earlier]);
+      expect(storage.value(legacyAlarmKey)).toBe(earlier);
+      expect(storage.value("test:operation")).toBeUndefined();
+      expect(storage.value(dueKey)).toBeUndefined();
+    },
+  );
+
+  it.each(["serializeAttachment", "deserializeAttachment"] as const)(
+    "acknowledges the terminal commit despite a subscribed socket %s failure",
+    async (method) => {
+      const storage = new MemoryStorage();
+      seedLease(storage);
+      const fleet = testFleet(storage);
+      const run = await createRun(fleet);
+      const subscriptions = { [run.id]: run.eventCount };
+      const broken = addSocket(fleet, "synthetic-broken", { subscriptions });
+      const healthy = addSocket(fleet, "synthetic-healthy", { subscriptions });
+      const unauthorized = addSocket(fleet, "synthetic-unauthorized", {
+        subscriptions,
+        owner: "mallory@example.com",
+      });
+      const revoked = addSocket(fleet, "synthetic-revoked", { subscriptions, admin: true });
+      const irrelevant = addSocket(fleet, "synthetic-irrelevant", { admin: true });
+      const log = "synthetic acknowledgement\n";
+      const body = {
+        exitCode: 0,
+        syncMs: 0,
+        commandMs: 1,
+        log,
+        receipt: await testTerminalReceipt({ run, exitCode: 0, syncMs: 0, commandMs: 1, log }),
+      };
+      vi.spyOn(broken, method).mockImplementation(() => {
+        expect(storage.value<RunRecord>(`run:${run.id}`)?.terminalReceipt).toEqual(body.receipt);
+        throw new Error("synthetic attachment failure after terminal commit");
+      });
+      const finish = await fleet.fetch(
+        request("POST", `/v1/runs/${run.id}/finish`, { headers, body }),
+      );
+      expect.soft(finish.status).toBe(200);
+      expect.soft(broken.closeCode).toBe(1011);
+      expect.soft(healthy.sentJSON()).toEqual([
+        expect.objectContaining({
+          type: "run_events",
+          runID: run.id,
+          events: [expect.objectContaining({ type: "command.finished", exitCode: 0 })],
+        }),
+      ]);
+      expect(unauthorized.sentJSON()).toEqual([]);
+      expect(revoked.sentJSON()).toEqual([]);
+      expect.soft(revoked.closeCode).toBe(1008);
+      expect.soft(irrelevant.closeCode).toBeUndefined();
+      const replacement = addSocket(fleet, "synthetic-broken");
+      const attachmentRead = vi.spyOn(broken, "deserializeAttachment");
+      attachmentRead.mockClear();
+      const retired = broken as unknown as WebSocket;
+      expect.soft(() => fleet.webSocketClose(retired, 1011, "delayed close", false)).not.toThrow();
+      expect.soft(() => fleet.webSocketError(retired, new Error("delayed error"))).not.toThrow();
+      await expect
+        .soft(Promise.resolve().then(() => fleet.webSocketMessage(retired, '{"type":"ping"}')))
+        .resolves.toBeUndefined();
+      await expect
+        .soft(
+          Promise.resolve().then(() =>
+            fleet.webSocketMessage(retired, JSON.stringify({ type: "heartbeat", leaseID })),
+          ),
+        )
+        .resolves.toBeUndefined();
+      expect.soft(attachmentRead).not.toHaveBeenCalled();
+      expect(broken.sentJSON()).toEqual([]);
+      await fleet.webSocketMessage(
+        replacement as unknown as WebSocket,
+        JSON.stringify({ type: "subscribe_run", runID: run.id, after: run.eventCount }),
+      );
+      expect(replacement.closeCode).toBeUndefined();
+      expect(replacement.sentJSON()).toEqual(healthy.sentJSON());
+      const persisted = structuredClone(storage.value<RunRecord>(`run:${run.id}`)!);
+      const recovered = await fleet.fetch(
+        request("GET", `/v1/runs/${run.id}/receipt`, { headers }),
+      );
+      expect(recovered.status).toBe(200);
+      expect(await recovered.json()).toEqual({ receipt: body.receipt });
+      await expect(
+        verifyTerminalReceipt(persisted.terminalReceipt, {
+          run: persisted,
+          ...body,
+          logTruncated: false,
+          observedAt: new Date(),
+        }),
+      ).resolves.toEqual(body.receipt);
+      const logs = await fleet.fetch(request("GET", `/v1/runs/${run.id}/logs`, { headers }));
+      expect(await logs.text()).toBe(log);
+      const replay = await fleet.fetch(
+        request("POST", `/v1/runs/${run.id}/finish`, { headers, body }),
+      );
+      expect(replay.status).toBe(200);
+      const conflict = await fleet.fetch(
+        request("POST", `/v1/runs/${run.id}/finish`, {
+          headers,
+          body: { ...body, exitCode: 1 },
+        }),
+      );
+      expect(conflict.status).toBe(409);
+      expect(storage.value(`run:${run.id}`)).toEqual(persisted);
+      const events = await fleet.fetch(request("GET", `/v1/runs/${run.id}/events`, { headers }));
+      const records = ((await events.json()) as { events: RunEventRecord[] }).events;
+      expect(records.filter((event) => event.type === "command.finished")).toHaveLength(1);
+      expect.soft(healthy.sentJSON()).toHaveLength(1);
+    },
+  );
+
+  it("ignores retired notification callbacks with cached attachments even when close fails", async () => {
+    const storage = new MemoryStorage();
+    seedLease(storage);
+    const runtime = new FakeCoordinatorRuntime(storage);
+    const accept = vi.spyOn(runtime, "acceptWebSocket");
+    const fleet = new FleetCoordinator(runtime, { CRABBOX_DEFAULT_ORG: "default-org" } as Env);
+    const run = await createRun(fleet);
+    await fleet.fetch(
+      request("GET", "/v1/control", { headers: { ...headers, upgrade: "websocket" } }),
+    );
+    const [socket, , , handlers] = accept.mock.calls[0]!;
+    const broken = runtime.createdSockets[0]!;
+    const { clientID } = broken.deserializeAttachment() as { clientID: string };
+    await handlers.message(JSON.stringify({ type: "subscribe_run", runID: run.id }));
+    vi.spyOn(broken, "serializeAttachment").mockImplementation(() => {
+      throw new Error("synthetic notification serialization failure");
+    });
+    const close = vi.spyOn(broken, "close").mockImplementation(() => {
+      throw new Error("synthetic socket close failure");
+    });
+    const finish = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/finish`, {
+        headers,
+        body: { exitCode: 0, syncMs: 0, commandMs: 1 },
+      }),
+    );
+    expect(finish.status).toBe(200);
+    expect(close).toHaveBeenCalledTimes(2);
+    const replacement = addSocket(fleet, clientID);
+    const attachmentRead = vi.spyOn(runtime, "socketAttachment").mockImplementation(() => {
+      throw new Error("retired socket attachment must not be read");
+    });
+    const sentBefore = broken.sentJSON();
+    expect.soft(() => handlers.close(1011, "delayed close")).not.toThrow();
+    expect.soft(() => handlers.error()).not.toThrow();
+    await expect(handlers.message('{"type":"ping"}')).resolves.toBeUndefined();
+    await expect(
+      handlers.message(JSON.stringify({ type: "heartbeat", leaseID })),
+    ).resolves.toBeUndefined();
+    expect.soft(attachmentRead).not.toHaveBeenCalled();
+    expect.soft(close).toHaveBeenCalledTimes(2);
+    expect(broken.sentJSON()).toEqual(sentBefore);
+    attachmentRead.mockRestore();
+    await fleet.webSocketMessage(replacement as unknown as WebSocket, '{"type":"ping"}');
+    expect(replacement.sentJSON()).toEqual([{ type: "pong" }]);
+    expect(
+      (fleet as unknown as { controlSockets: Map<string, WebSocket> }).controlSockets.get(clientID),
+    ).not.toBe(socket);
+  });
+
+  it.each(["http", "control"])(
+    "arms %s heartbeats without global storage scans",
+    async (transport) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const storage = new ObservedMemoryStorage();
+        seedLease(storage);
+        const fleet = testFleet(storage);
+        await fleet.ready();
+        const socket = addSocket(fleet, "synthetic-heartbeat");
+        const get = vi.spyOn(storage, "get");
+        const put = vi.spyOn(storage, "put");
+        const getAlarm = vi.spyOn(storage, "getAlarm");
+        const nativeReads = vi.spyOn(storage, "beforeGetAlarm");
+        const observedGet = (storage.beforeGet = vi.fn<NonNullable<MemoryStorage["beforeGet"]>>(
+          async () => {},
+        ));
+        const observedPut = (storage.beforePut = vi.fn<NonNullable<MemoryStorage["beforePut"]>>(
+          async () => {},
+        ));
+        const list = vi.spyOn(storage, "beforeList");
+        const setAlarm = vi.spyOn(storage, "beforeAlarmWrite");
+        async function heartbeat(alarmReads: number, idleTimeoutSeconds?: number): Promise<void> {
+          storage.resetListOptions();
+          get.mockClear();
+          put.mockClear();
+          list.mockClear();
+          getAlarm.mockClear();
+          setAlarm.mockClear();
+          nativeReads.mockClear();
+          observedGet.mockClear();
+          observedPut.mockClear();
+          let acknowledged: boolean;
+          if (transport === "http") {
+            const response = await fleet.fetch(
+              request("POST", `/v1/leases/${leaseID}/heartbeat`, {
+                headers,
+                body: { idleTimeoutSeconds },
+              }),
+            );
+            acknowledged = response.status === 200;
+          } else {
+            await fleet.webSocketMessage(
+              socket as unknown as WebSocket,
+              JSON.stringify({
+                type: "heartbeat",
+                leaseID,
+                idleTimeoutSeconds,
+              }),
+            );
+            acknowledged = (socket.sentJSON().at(-1) as { ok?: boolean }).ok === true;
+          }
+          expect(acknowledged).toBe(true);
+          expectBoundedAlarmReads(storage, alarmReads);
+          expect.soft(get.mock.calls.length).toBeLessThanOrEqual(3);
+          expect(put).toHaveBeenCalledTimes(1);
+          expect.soft(getAlarm).toHaveBeenCalledTimes(1);
+          expect(nativeReads).toHaveBeenCalledTimes(1 + alarmReads);
+          expect(observedGet.mock.calls.length).toBeLessThanOrEqual(5);
+          expect(observedPut.mock.calls.filter(([key]) => key.startsWith("lease:"))).toHaveLength(
+            1,
+          );
+          expect(observedPut.mock.calls.length).toBeLessThanOrEqual(2);
+          expect(list).toHaveBeenCalledTimes(alarmReads);
+          expect(setAlarm.mock.calls.length).toBeLessThanOrEqual(1);
+        }
+        await heartbeat(1);
+        expect(storage.alarm()).toBe(
+          Date.parse(storage.value<LeaseRecord>(`lease:${leaseID}`)!.expiresAt),
+        );
+        expect(storage.alarm()! - Date.now()).toBe(1800_000);
+        const earlier = Date.now() + 10_000;
+        await alarmRuntime(storage).scheduleAlarm(earlier);
+        await heartbeat(0);
+        expect.soft(storage.alarm()).toBe(earlier);
+        expect.soft(setAlarm).not.toHaveBeenCalled();
+        await alarmRuntime(storage).scheduleAlarm(Date.now() + 1800_000);
+        await heartbeat(1, 60);
+        expect(storage.alarm()).toBe(Date.now() + 60_000);
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.idleTimeoutSeconds).toBe(60);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("retries failed runtime-owned maintenance without losing queued cleanup", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const error = vi.spyOn(console, "error");
+    try {
+      const storage = new RetainedAlarmStorage();
+      const lease = seedLease(storage);
+      const deleted: string[] = [];
+      const provider = fakeProvider(undefined, {}, async (id) => {
+        deleted.push(id);
+      });
+      const fleet = testFleet(storage, { hetzner: provider });
+      await fleet.ready();
+      const release = await fleet.fetch(
+        request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+      );
+      expect(release.status).toBe(200);
+      let failures = 0;
+      const beforeList = storage.beforeList.bind(storage);
+      vi.spyOn(storage, "beforeList").mockImplementation(async (options) => {
+        await beforeList(options);
+        if (options?.prefix === "workspace:" && failures === 0) {
+          failures += 1;
+          throw new Error("synthetic maintenance failure before alarm reconciliation");
+        }
+      });
+      // The fixture awaits actual waitUntil-owned work, including its retry commit.
+      await storage.deliverAlarm(fleet);
+      expect(failures).toBe(1);
+      expect(error).toHaveBeenCalledExactlyOnceWith(
+        "coordinator maintenance failed; scheduling retry",
+      );
+      const retryAt = Date.now() + 15_000;
+      expect(storage.alarm()).toBe(retryAt);
+      expect(storage.queuedAlarm).toBe(retryAt);
+      expect(storage.alarmWrites.at(-1)).toBe(retryAt);
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.releaseDeletesServer).toBe(true);
+      expect(deleted).toEqual([]);
+      vi.setSystemTime(retryAt);
+      await storage.deliverAlarm(testFleet(storage, { hetzner: provider }));
+      expect(deleted).toEqual([lease.cloudID]);
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.releaseDeletesServer).toBeUndefined();
+      expect(storage.queuedAlarm).toBeUndefined();
+    } finally {
+      error.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["http heartbeat", 0],
+    ["http heartbeat", 1000],
+    ["control heartbeat", 0],
+    ["control heartbeat", 1000],
+    ["release", 0],
+    ["release", 1000],
+  ] as const)(
+    "rearms %s with a consumed alarm job and a timestamp overdue by %sms after reconstruction",
+    async (action, overdueMS) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const storage = new RetainedAlarmStorage();
+        const lease = seedLease(storage);
+        const deleted: string[] = [];
+        const provider = fakeProvider(undefined, {}, async (id) => {
+          deleted.push(id);
+        });
+        let fleet = testFleet(storage, { hetzner: provider });
+        await fleet.ready();
+        async function acknowledge(alarmReads: number): Promise<void> {
+          storage.resetListOptions();
+          let acknowledged: boolean;
+          if (action === "control heartbeat") {
+            const socket = addSocket(fleet, "synthetic-retained-alarm");
+            await fleet.webSocketMessage(
+              socket as unknown as WebSocket,
+              JSON.stringify({ type: "heartbeat", leaseID }),
+            );
+            acknowledged = (socket.sentJSON().at(-1) as { ok?: boolean }).ok === true;
+          } else {
+            const response = await fleet.fetch(
+              request(
+                "POST",
+                `/v1/leases/${leaseID}/${action === "release" ? "release" : "heartbeat"}`,
+                {
+                  headers,
+                  body: action === "release" ? { delete: true } : {},
+                },
+              ),
+            );
+            acknowledged = response.status === 200;
+          }
+          expect(acknowledged).toBe(true);
+          expectBoundedAlarmReads(storage, alarmReads);
+        }
+
+        const future = Date.now() + 10_000;
+        await alarmRuntime(storage).scheduleAlarm(future);
+        await acknowledge(action === "release" ? 2 : 0);
+        const earlier = action === "release" ? Date.now() : future;
+        expect(storage.alarm()).toBe(earlier);
+        expect(storage.queuedAlarm).toBe(earlier);
+        // The cancellation check reuses the future wake; release then arms earlier cleanup.
+        expect(storage.alarmWrites).toEqual(action === "release" ? [future, earlier] : [future]);
+        expect(deleted).toEqual([]);
+
+        vi.setSystemTime(earlier + overdueMS);
+        const beforeList = storage.beforeList.bind(storage);
+        let failed = false;
+        const failure = vi.spyOn(storage, "beforeList").mockImplementation(async (options) => {
+          await beforeList(options);
+          if (!failed && options?.prefix === "workspace:") {
+            failed = true;
+            throw new Error("synthetic legacy maintenance failure before alarm reconciliation");
+          }
+        });
+        // The fixture drains the runtime-owned pass after the bounded handler returns.
+        await storage.deliverAlarm(fleet);
+        failure.mockRestore();
+        expect(failed).toBe(true);
+        const retry = Date.now() + 15_000;
+        expect(storage.alarm()).toBe(retry);
+        expect(storage.value(legacyAlarmKey)).toBe(retry);
+        expect(storage.queuedAlarm).toBe(retry);
+        expect(deleted).toEqual([]);
+
+        // Explicitly model another consumed job whose retained timestamp needs repair.
+        await alarmRuntime(storage).scheduleAlarm(earlier);
+        storage.consumeAlarm();
+        expect(storage.alarm()).toBe(earlier);
+        expect(storage.queuedAlarm).toBeUndefined();
+
+        const repairStart = storage.alarmWrites.length;
+        fleet = testFleet(storage, { hetzner: provider });
+        await fleet.ready();
+        expect(storage.alarmWrites.slice(repairStart)).toEqual([earlier]);
+        expect(storage.queuedAlarm).toBe(earlier);
+        const writesBefore = storage.alarmWrites.length;
+        await acknowledge(1);
+        expect(storage.alarmWrites.slice(writesBefore)).toEqual([earlier]);
+        expect(storage.queuedAlarm).toBe(earlier);
+        storage.consumeAlarm();
+        const consumedWritesBefore = storage.alarmWrites.length;
+        await acknowledge(1);
+        expect(storage.alarmWrites.slice(consumedWritesBefore)).toEqual([earlier]);
+        expect.soft(storage.queuedAlarm).toBe(earlier);
+        expect(storage.alarm()).toBe(earlier);
+        expect(deleted).toEqual([]);
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.releaseDeletesServer).toBe(
+          action === "release" ? true : undefined,
+        );
+        await storage.deliverAlarm(testFleet(storage, { hetzner: provider }));
+        expect(deleted).toEqual(action === "release" ? [lease.cloudID] : []);
+        expect(
+          storage.value<LeaseRecord>(`lease:${leaseID}`)?.releaseDeletesServer,
+        ).toBeUndefined();
+        expect(storage.queuedAlarm).toBe(
+          action === "release"
+            ? undefined
+            : Date.parse(storage.value<LeaseRecord>(`lease:${leaseID}`)!.expiresAt),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([true, false])(
+    "accepts release delete=%s with bounded storage work and an immediate wakeup",
+    async (deleteServer) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const storage = new ObservedMemoryStorage();
+        seedLease(storage);
+        const fleet = testFleet(storage);
+        await fleet.ready();
+        await alarmRuntime(storage).scheduleAlarm(Date.now() + 1800_000);
+        storage.resetListOptions();
+        const get = vi.spyOn(storage, "get");
+        const put = vi.spyOn(storage, "put");
+        const observedGet = (storage.beforeGet = vi.fn<NonNullable<MemoryStorage["beforeGet"]>>(
+          async () => {},
+        ));
+        const observedPut = (storage.beforePut = vi.fn<NonNullable<MemoryStorage["beforePut"]>>(
+          async () => {},
+        ));
+        const before = Date.now();
+        const release = await fleet.fetch(
+          request("POST", `/v1/leases/${leaseID}/release`, {
+            headers,
+            body: { delete: deleteServer },
+          }),
+        );
+        expect(release.status).toBe(200);
+        expectBoundedAlarmReads(storage, 2);
+        expect.soft(get.mock.calls.length).toBeLessThanOrEqual(6);
+        expect(put).toHaveBeenCalledTimes(1);
+        expect(observedGet.mock.calls.length).toBeLessThanOrEqual(9);
+        expect(observedPut.mock.calls.filter(([key]) => key.startsWith("lease:"))).toHaveLength(1);
+        expect(observedPut).toHaveBeenCalledTimes(2);
+        expect(storage.alarm()).toBe(before);
+        const earlier = before - 1;
+        await alarmRuntime(storage).scheduleAlarm(earlier);
+        storage.resetListOptions();
+        const setAlarm = vi.spyOn(storage, "beforeAlarmWrite");
+        const replay = await fleet.fetch(
+          request("POST", `/v1/leases/${leaseID}/release`, {
+            headers,
+            body: { delete: deleteServer },
+          }),
+        );
+        expect(replay.status).toBe(200);
+        expectBoundedAlarmReads(storage, deleteServer ? 1 : 2);
+        expect.soft(storage.alarm()).toBe(earlier);
+        expect(setAlarm.mock.calls).toEqual(deleteServer ? [[earlier]] : [[earlier], [earlier]]);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "recovers queued cleanup after reconstruction (alarm write failure=%s)",
+    async (failAlarmWrite) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const storage = new ObservedMemoryStorage();
+        seedLease(storage);
+        const deleted: string[] = [];
+        let failProvider = true;
+        const provider = fakeProvider(undefined, {}, async (id) => {
+          if (failProvider) throw new Error("synthetic provider deletion failure");
+          deleted.push(id);
+        });
+        const fleet = testFleet(storage, { hetzner: provider });
+        await fleet.ready();
+        if (failAlarmWrite)
+          vi.spyOn(storage, "beforeAlarmWrite").mockRejectedValueOnce(
+            new Error("synthetic alarm storage failure"),
+          );
+        const release = await fleet.fetch(
+          request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+        );
+        expect(release.status).toBe(failAlarmWrite ? 500 : 200);
+        const pending = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+        expect(pending.state).toBe("released");
+        expect(pending.releaseDeletesServer).toBe(true);
+        expect(pending.cleanupClaimExpiresAt).toBe(pending.cleanupStartedAt);
+        expect(deleted).toEqual([]);
+        expect(storage.alarm() === undefined).toBe(failAlarmWrite);
+        expect(storage.value(legacyAlarmKey)).toBe(failAlarmWrite ? undefined : storage.alarm());
+        const reconstructed = testFleet(storage, { hetzner: provider });
+        await reconstructed.ready();
+        storage.resetListOptions();
+        const retry = await reconstructed.fetch(
+          request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+        );
+        expect(retry.status).toBe(200);
+        expectBoundedAlarmReads(storage, 1);
+        expect(storage.alarm()).toBe(Date.now());
+        await storage.deleteAlarm(); // A delivered DO alarm is consumed before its handler runs.
+        await testFleet(storage, { hetzner: provider }).alarm();
+        const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+        expect(failed.releaseDeletesServer).toBe(true);
+        expect(failed.cleanupError).toContain("synthetic provider deletion failure");
+        expect(storage.alarm()).toBe(Date.parse(failed.cleanupRetryAt!));
+        failProvider = false;
+        storage.seed(`lease:${leaseID}`, {
+          ...failed,
+          cleanupRetryAt: new Date(Date.now() - 1).toISOString(),
+        });
+        await storage.deleteAlarm();
+        await testFleet(storage, { hetzner: provider }).alarm();
+        expect(deleted).toEqual([pending.cloudID]);
+        expect(
+          storage.value<LeaseRecord>(`lease:${leaseID}`)?.releaseDeletesServer,
+        ).toBeUndefined();
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.cleanupError).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["workspace:", "lease:"])(
+    "keeps run and release progress during repeated heartbeats with slow unrelated %s pages",
+    async (prefix) => {
+      const storage = new ObservedMemoryStorage();
+      seedLease(storage);
+      seedLease(storage, releaseID);
+      const unrelated = { ...seedLease(storage, "cbx_aacc00000010"), owner: "bob@example.com" };
+      storage.seed(`lease:${unrelated.id}`, unrelated);
+      storage.seed(workspaceFixtureKey("synthetic-unrelated", unrelated.owner), {
+        id: "synthetic-unrelated",
+        leaseID: unrelated.id,
+        owner: unrelated.owner,
+        org: unrelated.org,
+        createdAt: unrelated.createdAt,
+        updatedAt: unrelated.updatedAt,
+      });
+      const fleet = testFleet(storage);
+      const run = await createRun(fleet);
+      const log = "synthetic progress\n";
+      const body = {
+        exitCode: 0,
+        syncMs: 0,
+        commandMs: 1,
+        log,
+        receipt: await testTerminalReceipt({ run, exitCode: 0, syncMs: 0, commandMs: 1, log }),
+      };
+      const entered = deferred<void>();
+      const resume = deferred<void>();
+      const list = storage.list.bind(storage);
+      const hook = vi.spyOn(storage, "list").mockImplementation(async (options = {}) => {
+        if (options.prefix === prefix) {
+          entered.resolve();
+          await resume.promise;
+        }
+        return list(options);
+      });
+      const pending: Promise<unknown>[] = [];
+      const completed: string[] = [];
+      const track = (name: string, operation: Promise<Response>) => {
+        const result = operation.then((response) => {
+          completed.push(name);
+          return response;
+        });
+        pending.push(result);
+        return result;
+      };
+      try {
+        const heartbeat = track(
+          "heartbeat",
+          fleet.fetch(request("POST", `/v1/leases/${leaseID}/heartbeat`, { headers })),
+        );
+        const first = await Promise.race([
+          heartbeat.then(() => "acknowledged"),
+          entered.promise.then(() => "scan blocked"),
+        ]);
+        const event = track(
+          "event",
+          fleet.fetch(
+            request("POST", `/v1/runs/${run.id}/events`, {
+              headers,
+              body: { type: "stdout", data: "synthetic" },
+            }),
+          ),
+        );
+        const finish = track(
+          "finish",
+          fleet.fetch(request("POST", `/v1/runs/${run.id}/finish`, { headers, body })),
+        );
+        const receipt = track(
+          "receipt",
+          fleet.fetch(request("GET", `/v1/runs/${run.id}/receipt`, { headers })),
+        );
+        const release = track(
+          "release",
+          fleet.fetch(
+            request("POST", `/v1/leases/${releaseID}/release`, { headers, body: { delete: true } }),
+          ),
+        );
+        expect(first).toBe("acknowledged");
+        for (let iteration = 0; iteration < 3; iteration++) {
+          const repeated = track(
+            "repeated heartbeat",
+            fleet.fetch(request("POST", `/v1/leases/${leaseID}/heartbeat`, { headers })),
+          );
+          // oxlint-disable-next-line eslint/no-await-in-loop -- exercise successive heartbeats and fail before draining a newly blocked scan.
+          const response = await Promise.race([repeated, entered.promise.then(() => undefined)]);
+          expect(response?.status).toBe(200);
+        }
+        const progress = await Promise.race([
+          Promise.all(pending).then(() => "acknowledged"),
+          entered.promise.then(() => "scan blocked"),
+        ]);
+        expect(progress).toBe("acknowledged");
+        expect(completed).toEqual(
+          expect.arrayContaining(["heartbeat", "event", "finish", "receipt", "release"]),
+        );
+        expect((await event).status).toBe(201);
+        expect((await finish).status).toBe(200);
+        // The bodyless read can enter the queue before the buffered finish request.
+        expect([200, 404]).toContain((await receipt).status);
+        const recovered = await fleet.fetch(
+          request("GET", `/v1/runs/${run.id}/receipt`, { headers }),
+        );
+        expect(recovered.status).toBe(200);
+        expect(await recovered.json()).toEqual({ receipt: body.receipt });
+        expect((await release).status).toBe(200);
+        expect(
+          hook.mock.calls.filter(([options]) =>
+            ["workspace:", "lease:"].includes(options?.prefix ?? ""),
+          ),
+        ).toEqual([]);
+      } finally {
+        resume.resolve();
+        await Promise.allSettled(pending);
+        hook.mockRestore();
+      }
+    },
+  );
+
+  it.each(["heartbeat", "release"])(
+    "serializes %s arming behind an in-flight full reconciliation",
+    async (action) => {
+      const storage = new MemoryStorage();
+      const originalExpiresAt = seedLease(storage).expiresAt;
+      const fleet = testFleet(storage);
+      const scanned = deferred<void>();
+      const resume = deferred<void>();
+      const list = storage.list.bind(storage);
+      const hook = vi.spyOn(storage, "list").mockImplementation(async (options = {}) => {
+        const result = await list(options);
+        if (options.prefix === "checkpoint-due:" && options.limit === 1) {
+          scanned.resolve();
+          await resume.promise;
+        }
+        return result;
+      });
+      const pending: Promise<unknown>[] = [];
+      try {
+        const maintenance = fleet.alarm();
+        pending.push(maintenance);
+        expect(
+          await Promise.race([
+            scanned.promise.then(() => "scanned"),
+            maintenance.then(() => "completed"),
+          ]),
+        ).toBe("scanned"); // The full scheduler already read the old lease deadline.
+        let acknowledged = false;
+        const mutation = fleet
+          .fetch(
+            request("POST", `/v1/leases/${leaseID}/${action}`, {
+              headers,
+              body: action === "heartbeat" ? { idleTimeoutSeconds: 60 } : { delete: true },
+            }),
+          )
+          .then((response) => {
+            acknowledged = true;
+            return response;
+          });
+        pending.push(mutation);
+        for (let checkpoint = 0; checkpoint < 50; checkpoint++) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- let queued requests reach the held mutex without a wall-clock sleep.
+          await Promise.resolve();
+        }
+        expect(acknowledged).toBe(false);
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.expiresAt).toBe(originalExpiresAt);
+        resume.resolve();
+        await maintenance;
+        expect((await mutation).status).toBe(200);
+        const current = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+        expect(storage.alarm()).toBeLessThanOrEqual(
+          action === "heartbeat" ? Date.parse(current.expiresAt) : Date.now(),
+        );
+        expect(current.releaseDeletesServer).toBe(action === "release" ? true : undefined);
+      } finally {
+        resume.resolve();
+        await Promise.allSettled(pending);
+        hook.mockRestore();
+      }
+    },
+  );
+
+  it("keeps a queued deletion wakeup across heartbeat and full reconciliation", async () => {
+    const storage = new ObservedMemoryStorage();
+    seedLease(storage);
+    seedLease(storage, releaseID);
+    const fleet = testFleet(storage);
+    const release = await fleet.fetch(
+      request("POST", `/v1/leases/${releaseID}/release`, {
+        headers,
+        body: { delete: true },
+      }),
+    );
+    expect(release.status).toBe(200);
+    const immediate = storage.alarm();
+    const heartbeat = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/heartbeat`, { headers }),
+    );
+    expect(heartbeat.status).toBe(200);
+    expect(storage.alarm()).toBe(immediate);
+    // Registration invokes full reconciliation without performing cleanup.
+    const registration = await fleet.fetch(
+      request("PUT", "/v1/leases/cbx_aacc00000003/registration", {
+        headers,
+        body: { provider: "external", target: "linux", host: "192.0.2.30", ttlSeconds: 3600 },
+      }),
+    );
+    expect(registration.status).toBe(201);
+    expect(storage.listOptions.some((options) => options.prefix === "workspace:")).toBe(true);
+    const debt = storage.value<LeaseRecord>(`lease:${releaseID}`)!;
+    expect(debt.releaseDeletesServer).toBe(true);
+    expect(storage.alarm()).toBe(Date.parse(debt.cleanupClaimExpiresAt!));
+  });
+
+  it("reconstructs queued AWS deletion and ingress reconciliation from durable intent", async () => {
+    const storage = new ObservedMemoryStorage();
+    const lease = {
+      ...seedLease(storage),
+      provider: "aws",
+      cloudID: "i-synthetic-ack",
+      region: "eu-west-1",
+    } as LeaseRecord;
+    storage.seed(`lease:${leaseID}`, lease);
+    const deleted: string[] = [];
+    const reconciled: string[] = [];
+    const provider = fakeProvider(
+      undefined,
+      {
+        provider: "aws",
+        onReconcileLeaseAccess(anchor) {
+          reconciled.push(anchor.id);
+        },
+      },
+      async (id) => {
+        deleted.push(id);
+      },
+    );
+    const fleet = testFleet(storage, { aws: provider });
+    await fleet.ready();
+    storage.resetListOptions();
+    const response = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+    );
+    expect(response.status).toBe(200);
+    expectBoundedAlarmReads(storage, 2);
+    expect(storage.value("aws-ingress-reconcile:pending")).toBeDefined();
+    expect(storage.alarm()).toBeLessThanOrEqual(Date.now());
+    expect(deleted).toEqual([]);
+    expect(reconciled).toEqual([]);
+    await storage.deleteAlarm();
+    await testFleet(storage, { aws: provider }).alarm();
+    expect(deleted).toEqual([lease.cloudID]);
+    expect(reconciled).toEqual([leaseID]);
+    expect(storage.value("aws-ingress-reconcile:pending")).toBeUndefined();
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.releaseDeletesServer).toBeUndefined();
+  });
+});
+
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((next) => {
@@ -37032,7 +40807,7 @@ function testCoordinator(
     ).attachStorage?.(storage);
   }
   return new FleetCoordinator(
-    new CloudflareCoordinatorRuntime({ storage } as unknown as DurableObjectState),
+    new FakeCoordinatorRuntime(storage),
     { CRABBOX_DEFAULT_ORG: "default-org", ...env } as Env,
     providers,
     {},
@@ -37126,12 +40901,14 @@ function awsIngressTestFleet(
       throw new Error(`unexpected EC2 action: ${action}`);
     }),
   );
-  const provider = new AWSProvider(
-    { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "test" } as Env,
-    "eu-west-1",
+  const fleet = testFleet(
     storage,
+    {},
+    {
+      AWS_ACCESS_KEY_ID: "test",
+      AWS_SECRET_ACCESS_KEY: "test",
+    },
   );
-  const fleet = testFleet(storage, { aws: provider });
   storage.seed(
     `lease:${activeID}`,
     testLease({
@@ -37151,13 +40928,12 @@ function awsIngressTestFleet(
       expiresAt: new Date(Date.now() + 600_000).toISOString(),
     }),
   );
-  const create = (overrides: Partial<LeaseRequest> = {}) =>
+  const create = (overrides: Partial<LeaseRequest> = {}, method: "POST" | "PUT" = "POST") =>
     fleet.fetch(
-      request("POST", "/v1/leases", {
+      request(method, method === "PUT" ? `/v1/leases/${creatingID}` : "/v1/leases", {
         headers: { ...headers, "x-crabbox-admin": "true", "cf-connecting-ip": "198.51.100.20" },
         body: {
-          leaseID: creatingID,
-          createAttemptID,
+          ...(method === "POST" ? { leaseID: creatingID, createAttemptID } : {}),
           provider: "aws",
           awsRegion: "eu-west-1",
           awsSGID: "sg-shared",
@@ -37184,7 +40960,6 @@ function awsIngressTestFleet(
     createAttemptID,
     requests,
     fleet,
-    provider,
     create,
     release,
   };
@@ -37256,6 +41031,7 @@ function fakeProvider(
       sshIngressReconcile?: "authoritative" | "additive";
       publishAccessBeforeProvisioning?: boolean;
       onTargetAttempt?: (target: { region?: string }) => Promise<void>;
+      onResourceCreated?: (claim: ProviderProvisioningCleanupClaim) => Promise<boolean>;
     }) => Promise<void> | void;
     onPrepareLeaseConfig?: (
       config: LeaseConfig,
@@ -37454,6 +41230,7 @@ function fakeProvider(
         sshIngressReconcile?: "authoritative" | "additive";
         publishAccessBeforeProvisioning?: boolean;
         onTargetAttempt?: (target: { region?: string }) => Promise<void>;
+        onResourceCreated?: (claim: ProviderProvisioningCleanupClaim) => Promise<boolean>;
       },
     ) {
       await result.onCreateProvisioning?.(provisioning);
@@ -38066,6 +41843,44 @@ function workerCloudReleaseCases() {
       provider: new GCPProvider({} as Env),
     },
   ];
+}
+
+async function borrowedReadyPoolFixture(typed: boolean) {
+  const storage = new MemoryStorage();
+  const fleet = testFleet(storage, { aws: fakeProvider(undefined, { provider: "aws" }) });
+  const headers = typedReadyPoolHeaders();
+  const lease = typedReadyPoolLease();
+  const metadata = typedReadyPoolMetadata();
+  const identity = await typedReadyPoolIdentity();
+  const source = typed ? "-identity" : "";
+  const sourceBody = { ...metadata, ...(typed ? { identity } : {}) };
+  storage.seed(`lease:${lease.id}`, lease);
+  const register = await fleet.fetch(
+    request("POST", `/v1/ready-pools/builders/register${source}`, {
+      headers,
+      body: { leaseID: lease.id, ...sourceBody },
+    }),
+  );
+  expect(register.status).toBe(200);
+  const borrowed = await fleet.fetch(
+    request("POST", `/v1/ready-pools/builders/borrow${source}`, {
+      headers,
+      body: { ...sourceBody, heartbeat: true },
+    }),
+  );
+  expect(borrowed.status).toBe(200);
+  const { entry } = (await borrowed.json()) as { entry: ReadyPoolEntry };
+  return {
+    storage,
+    fleet,
+    headers,
+    lease,
+    source,
+    sourceBody,
+    destination: typed ? "" : "-identity",
+    destinationBody: { ...metadata, ...(!typed ? { identity } : {}) },
+    entry,
+  };
 }
 
 function typedReadyPoolHeaders(): Record<string, string> {

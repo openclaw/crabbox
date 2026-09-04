@@ -18,6 +18,7 @@ import (
 // Exercise the real AWS adapter and SDK with only a loopback EC2/STS boundary.
 // The explicit synthetic SDK credentials and empty HOME prevent ambient lookup.
 func runCheckpointAWSStrategyContract(t *testing.T, repo, binary string) {
+	t.Parallel()
 	for _, strategy := range []string{"", "auto", "image", "disk-snapshot"} {
 		t.Run("direct AWS Linux retirement strategy "+blank(strategy, "default"), func(t *testing.T) {
 			f := newCheckpointCaptureFixture(t, repo, binary)
@@ -93,7 +94,7 @@ func runCheckpointAWSStrategyContract(t *testing.T, repo, binary string) {
 for arg do remote=$arg; done
 case "$remote" in
   'exit 0') printf 'probe\n' >> "$CAPTURE_AWS_SSH_CALLS";;
-  "bash -lc 'if command -v cloud-init >/dev/null 2>&1; then sudo cloud-init clean --logs; fi; sync'") printf 'prepare\n' >> "$CAPTURE_AWS_SSH_CALLS";;
+  ` + shellQuote("bash -lc "+shellQuote(remotePrepareNativeImageCommand())) + `) printf 'prepare\n' >> "$CAPTURE_AWS_SSH_CALLS";;
   *) printf 'unexpected SSH command: %s\n' "$remote" >&2; exit 97;;
 esac
 `

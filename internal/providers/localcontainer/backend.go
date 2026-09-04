@@ -65,6 +65,8 @@ type inspectContainer struct {
 	Config          inspectConfig     `json:"Config"`
 	State           inspectState      `json:"State"`
 	NetworkSettings inspectNetworking `json:"NetworkSettings"`
+	// Optional settings must not make identity or OOM-state inspection fail.
+	HostConfig json.RawMessage `json:"HostConfig"`
 }
 
 type inspectConfig struct {
@@ -123,25 +125,26 @@ func (b *backend) BeginRunFailureEvidence(ctx context.Context, req core.RunFailu
 	if containerID == "" {
 		return nil, core.Exit(2, "local-container failed-run evidence requires a container id")
 	}
-	baseline, err := b.readOOMKillCount(ctx, containerID)
+	runtime := b.memoryRuntime()
+	baseline, err := readOOMKillCount(ctx, runtime.run, containerID)
 	if err != nil {
 		return nil, err
 	}
-	baselineContainer, err := b.inspectContainer(ctx, containerID)
+	baselineContainer, err := inspectRuntimeContainer(ctx, runtime.run, containerID)
 	if err != nil {
 		return nil, err
 	}
 	return func(ctx context.Context) (core.RunFailureEvidence, error) {
-		current, err := b.readOOMKillCount(ctx, containerID)
+		current, err := readOOMKillCount(ctx, runtime.run, containerID)
 		if err == nil && current > baseline {
-			return core.RunFailureEvidence{ResourceExhaustion: core.ResourceExhaustionMemory}, nil
+			return runtime.memoryFailureEvidence(ctx, containerID, baselineContainer), nil
 		}
 		if err == nil {
 			return core.RunFailureEvidence{}, nil
 		}
-		container, inspectErr := b.inspectContainer(ctx, containerID)
+		container, inspectErr := inspectRuntimeContainer(ctx, runtime.run, containerID)
 		if inspectErr == nil && !baselineContainer.State.OOMKilled && container.State.OOMKilled {
-			return core.RunFailureEvidence{ResourceExhaustion: core.ResourceExhaustionMemory}, nil
+			return runtime.memoryFailureEvidence(ctx, containerID, baselineContainer), nil
 		}
 		if inspectErr != nil {
 			return core.RunFailureEvidence{}, fmt.Errorf("%v; inspect container OOM state: %w", err, inspectErr)
@@ -151,9 +154,13 @@ func (b *backend) BeginRunFailureEvidence(ctx context.Context, req core.RunFailu
 }
 
 func (b *backend) readOOMKillCount(ctx context.Context, containerID string) (uint64, error) {
+	return readOOMKillCount(ctx, b.memoryRuntime().run, containerID)
+}
+
+func readOOMKillCount(ctx context.Context, run containerObservationCommand, containerID string) (uint64, error) {
 	var failures []string
 	for _, cgroupPath := range cgroupOOMCounterPaths {
-		result, err := b.docker(ctx, []string{"exec", containerID, "cat", cgroupPath}, nil, nil)
+		result, err := run(ctx, []string{"exec", containerID, "cat", cgroupPath})
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", cgroupPath, err))
 			continue
@@ -856,6 +863,18 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		}
 	}
 	lease.Server.Labels = publicLocalContainerClaimLabels(lease.Server.Labels)
+	if req.IncludeDiagnostics && req.IsReadOnlyStatus() && !req.ReadyProbe {
+		// All ownership/claim merges are complete. Enrich only the returned copy.
+		lease.Server.Labels = cloneLabels(lease.Server.Labels)
+		for key := range lease.Server.Labels {
+			if strings.HasPrefix(key, memoryDiagnosticPrefix) {
+				delete(lease.Server.Labels, key)
+			}
+		}
+		for key, value := range b.memoryRuntime().memoryDetails(ctx, container.ID, container, "current") {
+			lease.Server.Labels[memoryDiagnosticPrefix+key] = value
+		}
+	}
 	return lease, nil
 }
 
@@ -923,6 +942,17 @@ func (b *backend) Doctor(ctx context.Context, req core.DoctorRequest) (core.Doct
 }
 
 func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *backend) ReleaseLeaseWithOutcome(ctx context.Context, req core.ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	var outcome core.ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *backend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	lease := req.Lease
 	scopeLabels := lease.Server.Labels
 	if snapshot, exists, set := core.ServerLeaseClaimSnapshot(lease.Server); set && exists {
@@ -944,7 +974,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	}
 	id := strings.TrimSpace(req.Lease.Server.CloudID)
 	if id == "" {
-		if handled, err := b.releaseMissingClaim(ctx, lease, req.CheckpointID); handled || err != nil {
+		if handled, err := b.releaseMissingClaim(ctx, lease, req.CheckpointID, outcome); handled || err != nil {
 			return err
 		}
 		container, leaseID, _, err := b.resolveContainer(ctx, req.Lease.LeaseID)
@@ -988,6 +1018,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		if err := b.removeContainer(ctx, id); err != nil {
 			return err
 		}
+		outcome.Terminal = true
 		return b.cleanupContainerSidecars(lease.LeaseID, lease.Server.Labels, true)
 	})
 	if b.afterClaimCleanup != nil {
@@ -1072,7 +1103,7 @@ func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.Leas
 	return b.validateExactLocalContainerClaim(ctx, claim, lease.LeaseID, lease.Server.CloudID)
 }
 
-func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarget, checkpointID string) (bool, error) {
+func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarget, checkpointID string, outcome *core.ReleaseLeaseOutcome) (bool, error) {
 	leaseID := strings.TrimSpace(firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"]))
 	if leaseID == "" || strings.TrimSpace(lease.Server.CloudID) != "" {
 		return false, nil
@@ -1095,6 +1126,7 @@ func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarge
 		if !absent {
 			return core.Exit(4, "local-container %s still exists; refusing to remove its claim", shortID(claim.CloudID))
 		}
+		outcome.Terminal = true
 		return b.cleanupContainerSidecars(leaseID, claim.Labels, true)
 	})
 	if b.afterClaimCleanup != nil {
@@ -1585,7 +1617,7 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 		cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
 	}
 	labels := localContainerTouchLabels(expected, cfg, req.State, now, req.IdleTimeoutOverride)
-	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(ctx, req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
 	if err != nil {
 		return core.Server{}, err
 	}
@@ -1595,14 +1627,13 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 }
 
 func localContainerTouchLabels(claim core.LeaseClaim, cfg core.Config, state string, now time.Time, idleTimeoutOverride *time.Duration) map[string]string {
-	labels := cloneLabels(claim.Labels)
-	labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, state, now, idleTimeoutOverride)
-	for key, value := range claim.Labels {
-		switch key {
-		case "state", "last_touched_at", "idle_timeout", "idle_timeout_secs", "expires_at":
-			continue
+	labels := core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(claim.Labels, cfg, state, now, idleTimeoutOverride)
+	// Expiry uses parsed lifecycle values, while the claim retains its original
+	// creation anchor and TTL representation across heartbeat updates.
+	for _, key := range []string{"created_at", "ttl_secs"} {
+		if value, ok := claim.Labels[key]; ok {
+			labels[key] = value
 		}
-		labels[key] = value
 	}
 	return labels
 }
@@ -2095,7 +2126,11 @@ func (b *backend) listContainers(ctx context.Context) ([]inspectContainer, error
 }
 
 func (b *backend) inspectContainer(ctx context.Context, id string) (inspectContainer, error) {
-	result, err := b.docker(ctx, []string{"inspect", id}, nil, nil)
+	return inspectRuntimeContainer(ctx, b.memoryRuntime().run, id)
+}
+
+func inspectRuntimeContainer(ctx context.Context, run containerObservationCommand, id string) (inspectContainer, error) {
+	result, err := run(ctx, []string{"inspect", id})
 	if err != nil {
 		return inspectContainer{}, commandError("container inspect", result, err)
 	}
@@ -2455,6 +2490,12 @@ func (b *backend) docker(ctx context.Context, args []string, stdout, stderr io.W
 }
 
 func (b *backend) containerRuntime(ctx context.Context, cfg core.Config, args []string, stdout, stderr io.Writer) (core.LocalCommandResult, error) {
+	req := containerRuntimeRequest(cfg, args)
+	req.Stdout, req.Stderr = stdout, stderr
+	return b.rt.Exec.Run(ctx, req)
+}
+
+func containerRuntimeRequest(cfg core.Config, args []string) core.LocalCommandRequest {
 	var env []string
 	if metadata := cfg.LocalContainer.CheckpointMetadata; len(metadata) != 0 {
 		scope := checkpointScopeFromMetadata(metadata, cfg.LocalContainer.Runtime)
@@ -2465,13 +2506,11 @@ func (b *backend) containerRuntime(ctx context.Context, cfg core.Config, args []
 		}
 		env = checkpointEnvForScope(scope)
 	}
-	return b.rt.Exec.Run(ctx, core.LocalCommandRequest{
-		Name:   cfg.LocalContainer.Runtime,
-		Args:   args,
-		Env:    env,
-		Stdout: stdout,
-		Stderr: stderr,
-	})
+	return core.LocalCommandRequest{
+		Name: cfg.LocalContainer.Runtime,
+		Args: args,
+		Env:  env,
+	}
 }
 
 func (b *backend) assertRequestedArchitecture(ctx context.Context, cfg core.Config) (string, error) {

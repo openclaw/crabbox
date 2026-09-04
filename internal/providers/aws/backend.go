@@ -494,6 +494,27 @@ func (b *awsLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Leas
 	return LeaseTarget{}, exit(4, "lease/server not found: %s", req.ID)
 }
 
+func (b *awsLeaseBackend) ResolveRunLeaseUnderClaim(ctx context.Context, req ResolveRequest, original core.LeaseClaim) (LeaseTarget, error) {
+	// The held claim already identifies the instance and region. Reuse the
+	// direct resolver without inventory discovery or cross-region fallback.
+	bound := *b
+	bound.Cfg = awsConfigForServer(b.Cfg, Server{Labels: original.Labels})
+	bound.Cfg.Capacity.Regions = nil
+	req.ID = original.CloudID
+	lease, err := bound.Resolve(ctx, req)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	// Fixed leases retain their acquired/account fence. Ordinary run admission
+	// uses the endpoint policy, which preserves absent historical cleanup identity.
+	if original.Provider == core.FixedAWSClaimProvider || original.FixedCreateIntent != nil {
+		if err := bound.AuthorizeStatusTouchClaim(ctx, lease, original); err != nil {
+			return LeaseTarget{}, err
+		}
+	}
+	return lease, nil
+}
+
 func isCrabboxAWSLease(server Server) bool {
 	labels := server.Labels
 	return labels != nil &&
@@ -567,6 +588,17 @@ func (b *awsLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (cor
 }
 
 func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *awsLeaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	var outcome core.ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *awsLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	if !isCrabboxAWSLease(req.Lease.Server) || req.Lease.LeaseID != req.Lease.Server.Labels["lease"] {
 		return exit(4, "refusing to release AWS instance %s without matching canonical Crabbox ownership tags", req.Lease.Server.DisplayID())
 	}
@@ -578,7 +610,7 @@ func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequ
 	if (claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == fixedAWSIntentReleased) ||
 		(snapshot.FixedCreateIntent != nil && snapshot.FixedCreateIntent.State == fixedAWSIntentReleased) ||
 		req.Lease.Server.Status == fixedAWSIntentReleased {
-		return b.releaseTerminalReceipt(ctx, req)
+		return b.releaseTerminalReceipt(ctx, req, outcome)
 	}
 	if strings.TrimSpace(req.Lease.Server.Labels["fixed_intent_sha256"]) != "" && (!exists || !fixedAWSLeaseKind.IsFixedClaim(claim)) {
 		return exit(4, "refusing to release fixed AWS lease %s without its durable create intent", req.Lease.LeaseID)
@@ -595,7 +627,10 @@ func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequ
 			if err := core.AuthorizeCheckpointRelease(exact, req.CheckpointID); err != nil {
 				return err
 			}
-			return deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server)
+			err := deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server)
+			var keyErr *awsProviderKeyCleanupError
+			outcome.Terminal = err == nil || errors.As(err, &keyErr)
+			return err
 		})
 	}
 	var providerKeyErr error
@@ -606,11 +641,13 @@ func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequ
 		if err := deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server); err != nil {
 			var keyErr *awsProviderKeyCleanupError
 			if errors.As(err, &keyErr) {
+				outcome.Terminal = true
 				providerKeyErr = err
 				return nil
 			}
 			return err
 		}
+		outcome.Terminal = true
 		return nil
 	}); err != nil {
 		return err
@@ -641,26 +678,6 @@ func (b *awsLeaseBackend) retainLeaseClaimAfterRelease(lease LeaseTarget, previo
 		}
 		return nil
 	})
-}
-
-func (b *awsLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
-	server := req.Lease.Server
-	if server.Labels == nil {
-		server.Labels = map[string]string{}
-	}
-	cfg := awsConfigForServer(b.Cfg, server)
-	if req.IdleTimeout > 0 {
-		cfg.IdleTimeout = req.IdleTimeout
-	}
-	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, time.Now().UTC())
-	client, err := newAWSClient(ctx, cfg)
-	if err != nil {
-		return server, err
-	}
-	if err := client.SetTags(ctx, server.CloudID, server.Labels); err != nil {
-		return server, err
-	}
-	return server, nil
 }
 
 func (b *awsLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
@@ -880,10 +897,14 @@ func requireExactAWSClaim(server Server, expectedLeaseID string) (core.LeaseClai
 	if !exists {
 		return core.LeaseClaim{}, exit(2, "aws lease=%s has no exact local claim; refusing destructive operation", expectedLeaseID)
 	}
+	return claim, validateExactAWSClaim(server, expectedLeaseID, claim)
+}
+
+func validateExactAWSClaim(server Server, expectedLeaseID string, claim core.LeaseClaim) error {
 	if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == fixedAWSIntentReleased {
-		return core.LeaseClaim{}, exit(4, "lease_id_conflict: AWS lease %s is terminal; refusing another destructive operation", expectedLeaseID)
+		return exit(4, "lease_id_conflict: AWS lease %s is terminal; refusing another operation", expectedLeaseID)
 	}
-	if !isCrabboxAWSLease(server) ||
+	if server.Provider != "aws" || !isCrabboxAWSLease(server) ||
 		claim.LeaseID != expectedLeaseID ||
 		!isAWSClaimProvider(claim.Provider) ||
 		claim.CloudID == "" ||
@@ -893,16 +914,16 @@ func requireExactAWSClaim(server Server, expectedLeaseID string) (core.LeaseClai
 		server.Labels["lease"] != expectedLeaseID ||
 		awsServerRegion(server) == "" ||
 		strings.TrimSpace(claim.Labels["aws_region"]) != awsServerRegion(server) {
-		return core.LeaseClaim{}, exit(2, "refusing to operate on AWS instance %s from a missing or stale exact local claim", server.DisplayID())
+		return exit(2, "refusing to operate on AWS instance %s from a missing or stale exact local claim", server.DisplayID())
 	}
 	expectedProviderKey := strings.TrimSpace(claim.Labels["provider_key"])
 	if expectedProviderKey == "" {
 		expectedProviderKey = core.ProviderKeyForLease(expectedLeaseID)
 	}
 	if strings.TrimSpace(core.ServerProviderKey(server)) != expectedProviderKey {
-		return core.LeaseClaim{}, exit(2, "refusing to operate on AWS instance %s whose provider key differs from its exact local claim", server.DisplayID())
+		return exit(2, "refusing to operate on AWS instance %s whose provider key differs from its exact local claim", server.DisplayID())
 	}
-	return claim, nil
+	return nil
 }
 
 func deleteClaimedAWSServerWithClient(ctx context.Context, client awsClient, server Server, claim core.LeaseClaim, cleanupKeyID string) error {

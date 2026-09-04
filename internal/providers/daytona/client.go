@@ -21,6 +21,7 @@ import (
 )
 
 type daytonaAPI interface {
+	GetSnapshot(context.Context, string) (*daytona.SnapshotDto, error)
 	CreateSandbox(context.Context, daytona.CreateSandbox) (*daytona.Sandbox, error)
 	GetSandbox(context.Context, string) (*daytona.Sandbox, error)
 	ListCrabboxSandboxes(context.Context) ([]daytona.Sandbox, error)
@@ -44,6 +45,7 @@ type daytonaSDKClient struct {
 }
 
 const defaultDaytonaAPIURL = "https://app.daytona.io/api"
+const daytonaControlTimeout = 60 * time.Second
 
 var newDaytonaClient = func(cfg Config, rt Runtime) (daytonaAPI, error) {
 	auth, err := daytonaAuthConfig(cfg)
@@ -53,7 +55,11 @@ var newDaytonaClient = func(cfg Config, rt Runtime) (daytonaAPI, error) {
 	apiURL := daytonaAPIURL(cfg, auth)
 	apiCfg := daytona.NewConfiguration()
 	apiCfg.Servers = daytona.ServerConfigurations{{URL: apiURL}}
-	apiCfg.HTTPClient, err = daytonaHTTPClient(rt.HTTP, apiURL)
+	controlClient := rt.HTTP
+	if controlClient == nil {
+		controlClient = &http.Client{Timeout: daytonaControlTimeout}
+	}
+	apiCfg.HTTPClient, err = daytonaHTTPClient(controlClient, apiURL)
 	if err != nil {
 		return nil, err
 	}
@@ -157,8 +163,12 @@ type daytonaCLIProfile struct {
 	Name                 string `json:"name"`
 	ActiveOrganizationID string `json:"activeOrganizationId"`
 	API                  struct {
-		URL string `json:"url"`
-		Key string `json:"key"`
+		URL   string `json:"url"`
+		Key   string `json:"key"`
+		Token *struct {
+			AccessToken string `json:"accessToken"`
+			ExpiresAt   string `json:"expiresAt"`
+		} `json:"token"`
 	} `json:"api"`
 }
 
@@ -184,6 +194,10 @@ func daytonaCLIAuthConfig() (daytonaAuth, error) {
 }
 
 func daytonaCLIConfigPaths() []string {
+	if dir := os.Getenv("DAYTONA_CONFIG_DIR"); dir != "" {
+		// The CLI override selects one profile store, never a fallback account.
+		return []string{filepath.Join(dir, "config.json")}
+	}
 	var candidates []string
 	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
 		candidates = append(candidates,
@@ -234,11 +248,21 @@ func parseDaytonaCLIAuthConfig(data []byte) (daytonaAuth, error) {
 	if selected == nil {
 		return daytonaAuth{}, nil
 	}
-	return daytonaAuth{
+	auth := daytonaAuth{
 		APIKey:         strings.TrimSpace(selected.API.Key),
 		OrganizationID: strings.TrimSpace(selected.ActiveOrganizationID),
 		APIURL:         strings.TrimSpace(selected.API.URL),
-	}, nil
+	}
+	if auth.APIKey == "" && selected.API.Token != nil {
+		token := selected.API.Token
+		expiresAt, err := time.Parse(time.RFC3339, token.ExpiresAt)
+		if err != nil || !time.Now().Before(expiresAt) {
+			return daytonaAuth{}, fmt.Errorf("daytona CLI OAuth token is expired or has no valid expiry; run 'daytona login' to reauthenticate")
+		}
+		// Refresh and profile writes belong to the Daytona CLI, not this reader.
+		auth.JWTToken = strings.TrimSpace(token.AccessToken)
+	}
+	return auth, nil
 }
 
 func mergeDaytonaCLIAuth(auth, cliAuth daytonaAuth) daytonaAuth {

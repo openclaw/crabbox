@@ -414,7 +414,8 @@ func (s *wslStageSpool) run(ctx context.Context, target *SSHTarget, connectTimeo
 	}
 	defer cancel()
 	stdout, stderr, finish := workspaceOwnerSetupStreams(s.setupMarker, stdout, stderr)
-	err = runSSHCommand(sshCommandContext(execCtx, *target, sshArgsNoInputWithOptions(*target, command, connectTimeout, attempts)...), stdout, stderr)
+	transport := sshTransportPreparation{command: command}
+	_, err = transport.runOnce(execCtx, *target, connectTimeout, attempts, stdout, stderr, false)
 	if err == nil {
 		err = context.Cause(execCtx)
 	}
@@ -526,8 +527,8 @@ func (s *wslStageSpool) stage(ctx context.Context, target *SSHTarget, timing wsl
 }
 
 func probeWSLStageTransport(ctx context.Context, target SSHTarget, connectTimeout, attempts string) error {
-	err := runSSHCommand(sshCommandContext(ctx, target,
-		sshArgsNoInputWithOptions(target, sshTransportProbeCommand(target), connectTimeout, attempts)...), io.Discard, io.Discard)
+	transport := sshTransportPreparation{command: sshTransportProbeCommand(target)}
+	_, err := transport.runOnce(ctx, target, connectTimeout, attempts, io.Discard, io.Discard, false)
 	if shouldRetrySSHPort(err) {
 		return retryableWSLStageError{fmt.Errorf("probe WSL2 stage route failed: %w", err)}
 	}
@@ -543,9 +544,8 @@ func prepareWSLStageRootWithin(ctx context.Context, target SSHTarget, connectTim
 	defer cancel()
 	var output bytes.Buffer
 	proof, _ := ctx.Value(wslStageRouteProofKey{}).(string)
-	command := sshCommandContext(prepareCtx, target,
-		sshArgsNoInputWithOptions(target, wslStageRootPreparationCommand(proof), connectTimeout, attempts)...)
-	if err := runSSHCommand(command, &output, io.Discard); err != nil {
+	transport := sshTransportPreparation{command: wslStageRootPreparationCommand(proof)}
+	if _, err := transport.runOnce(prepareCtx, target, connectTimeout, attempts, &output, io.Discard, false); err != nil {
 		if cause := context.Cause(prepareCtx); cause != nil {
 			if errors.Is(cause, context.DeadlineExceeded) && context.Cause(ctx) == nil {
 				return "", retryableWSLStageError{fmt.Errorf("prepare private WSL2 stage route timed out: %w", cause)}
@@ -948,7 +948,8 @@ func discardWSLStageFileNative(ctx context.Context, target SSHTarget, nonce, nam
 		return errors.New("invalid WSL2 discard command")
 	}
 	target.NoControlMaster, target.FallbackPorts = true, []string{}
-	err := runSSHCommand(sshCommandContext(ctx, target, sshArgsNoInputWithOptions(target, command, connectTimeout, "1")...), io.Discard, io.Discard)
+	transport := sshTransportPreparation{command: command}
+	_, err := transport.runOnce(ctx, target, connectTimeout, "1", io.Discard, io.Discard, false)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
