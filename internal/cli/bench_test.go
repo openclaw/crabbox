@@ -3,7 +3,11 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"flag"
 	"io"
 	"os"
@@ -43,6 +47,8 @@ type benchmarkTimingTestBackend struct {
 	stderr io.Writer
 }
 
+var benchmarkTimingTestAfterRun func()
+
 func (b benchmarkTimingTestBackend) Spec() ProviderSpec { return b.spec }
 func (b benchmarkTimingTestBackend) Warmup(context.Context, WarmupRequest) error {
 	return nil
@@ -64,6 +70,9 @@ func (b benchmarkTimingTestBackend) Run(_ context.Context, req RunRequest) (RunR
 		if err := writeTimingJSON(b.stderr, report); err != nil {
 			return RunResult{}, err
 		}
+	}
+	if benchmarkTimingTestAfterRun != nil {
+		benchmarkTimingTestAfterRun()
 	}
 	return result, nil
 }
@@ -157,13 +166,16 @@ func TestBenchRecordAppendsTimingJSONRecord(t *testing.T) {
 }
 
 func TestRunDelegatedTimingJSONEmittedOnceWhileRecording(t *testing.T) {
-	storePath := filepath.Join(t.TempDir(), "timings.jsonl")
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "timings.jsonl")
+	receiptPath := filepath.Join(dir, "receipt.json")
 	var stdout, stderr bytes.Buffer
 	app := App{Stdout: &stdout, Stderr: &stderr}
 	err := app.runCommand(context.Background(), []string{
 		"--provider", "benchmark-timing-test",
 		"--timing-json",
 		"--timing-record", storePath,
+		"--attest", receiptPath,
 		"--", "true",
 	})
 	if err != nil {
@@ -182,6 +194,11 @@ func TestRunDelegatedTimingJSONEmittedOnceWhileRecording(t *testing.T) {
 	if timingJSONCount != 1 || emitted.Provider != "benchmark-timing-test" {
 		t.Fatalf("delegated timing JSON count=%d want 1; stderr=%q", timingJSONCount, stderr.String())
 	}
+	info, err := os.Stat(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertReceiptArtifactMetadata(t, emitted.Artifacts, receiptPath, int(info.Size()))
 	records, err := readBenchmarkTimingRecords(storePath)
 	if err != nil {
 		t.Fatal(err)
@@ -194,6 +211,75 @@ func TestRunDelegatedTimingJSONEmittedOnceWhileRecording(t *testing.T) {
 	}
 	if records[0].Timing.RunStatus != RunStatusSucceeded {
 		t.Fatalf("delegated timing runStatus=%q", records[0].Timing.RunStatus)
+	}
+	assertReceiptArtifactMetadata(t, records[0].Timing.Artifacts, receiptPath, int(info.Size()))
+}
+
+func TestRunDelegatedReceiptPreparationFailureIsTerminal(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "signer.pem")
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	benchmarkTimingTestAfterRun = func() {
+		if err := os.Remove(keyPath); err != nil {
+			t.Errorf("remove attest key: %v", err)
+		}
+	}
+	t.Cleanup(func() { benchmarkTimingTestAfterRun = nil })
+
+	storePath := filepath.Join(dir, "timings.jsonl")
+	receiptPath := filepath.Join(dir, "receipt.json")
+	var stdout, stderr bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "benchmark-timing-test",
+		"--timing-json",
+		"--timing-record", storePath,
+		"--attest", receiptPath,
+		"--attest-key", keyPath,
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("error=%v, want receipt preparation exit 2\nstderr=%s", err, stderr.String())
+	}
+	if _, statErr := os.Stat(receiptPath); !os.IsNotExist(statErr) {
+		t.Fatalf("receipt exists after preparation failure: %v", statErr)
+	}
+	var emitted TimingReport
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		var candidate TimingReport
+		if json.Unmarshal([]byte(line), &candidate) == nil && candidate.Provider == "benchmark-timing-test" {
+			emitted = candidate
+		}
+	}
+	if emitted.ExitCode != 2 {
+		t.Fatalf("timing exit=%d, want 2", emitted.ExitCode)
+	}
+	for _, artifact := range emitted.Artifacts {
+		if artifact.Kind == "receipt" {
+			t.Fatalf("timing advertised failed receipt preparation: %#v", artifact)
+		}
+	}
+	records, readErr := readBenchmarkTimingRecords(storePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(records) != 1 || records[0].Timing.ExitCode != 2 {
+		t.Fatalf("records=%#v, want one terminal preparation failure", records)
+	}
+	for _, artifact := range records[0].Timing.Artifacts {
+		if artifact.Kind == "receipt" {
+			t.Fatalf("record advertised failed receipt preparation: %#v", artifact)
+		}
 	}
 }
 

@@ -86,6 +86,11 @@ type terminalRunReceiptInput struct {
 	LogTruncated      bool
 }
 
+type preparedRunReceipt struct {
+	artifact runArtifact
+	encoded  []byte
+}
+
 func attestKeyPath() (string, error) {
 	base, err := os.UserConfigDir()
 	if err != nil {
@@ -500,7 +505,15 @@ func decodeTerminalRunReceipt(data []byte) (terminalRunReceipt, error) {
 }
 
 func writeTerminalRunReceipt(path string, receipt terminalRunReceipt) (runArtifact, error) {
-	return writeReceiptFile(path, receipt, maxTerminalReceiptBytes)
+	prepared, err := prepareTerminalRunReceipt(path, receipt)
+	if err != nil {
+		return runArtifact{}, err
+	}
+	return persistPreparedRunReceipt(prepared)
+}
+
+func prepareTerminalRunReceipt(path string, receipt terminalRunReceipt) (preparedRunReceipt, error) {
+	return prepareReceiptFile(path, receipt, maxTerminalReceiptBytes)
 }
 
 // JSONHasDuplicateKeys scans one JSON value recursively. Callers remain
@@ -710,9 +723,17 @@ func validSHA256Digest(value string) bool {
 }
 
 func writeRunReceipt(path, keyPath string, in runReceiptInput) (runArtifact, error) {
+	prepared, err := prepareRunReceipt(path, keyPath, in)
+	if err != nil {
+		return runArtifact{}, err
+	}
+	return persistPreparedRunReceipt(prepared)
+}
+
+func prepareRunReceipt(path, keyPath string, in runReceiptInput) (preparedRunReceipt, error) {
 	key, err := resolveAttestKey(keyPath)
 	if err != nil {
-		return runArtifact{}, exit(2, "attest key: %v", err)
+		return preparedRunReceipt{}, exit(2, "attest key: %v", err)
 	}
 	pub := key.Public().(ed25519.PublicKey)
 	receipt := map[string]any{
@@ -741,30 +762,38 @@ func writeRunReceipt(path, keyPath string, in runReceiptInput) (runArtifact, err
 	}
 	canonical, err := canonicalReceiptBytes(receipt)
 	if err != nil {
-		return runArtifact{}, err
+		return preparedRunReceipt{}, err
 	}
 	receipt["signature"] = base64.StdEncoding.EncodeToString(ed25519.Sign(key, canonical))
-	return writeReceiptFile(path, receipt, 0)
+	return prepareReceiptFile(path, receipt, 0)
 }
 
-func writeReceiptFile(path string, receipt any, maxBytes int) (runArtifact, error) {
+func prepareReceiptFile(path string, receipt any, maxBytes int) (preparedRunReceipt, error) {
 	encoded, err := json.MarshalIndent(receipt, "", "  ")
 	if err != nil {
-		return runArtifact{}, err
+		return preparedRunReceipt{}, err
 	}
 	encoded = append(encoded, '\n')
 	if maxBytes > 0 && len(encoded) > maxBytes {
-		return runArtifact{}, fmt.Errorf("terminal receipt exceeds %d bytes", maxBytes)
+		return preparedRunReceipt{}, fmt.Errorf("terminal receipt exceeds %d bytes", maxBytes)
 	}
+	return preparedRunReceipt{
+		artifact: runArtifact{Kind: "receipt", Path: path, Bytes: len(encoded)},
+		encoded:  encoded,
+	}, nil
+}
+
+func persistPreparedRunReceipt(prepared preparedRunReceipt) (runArtifact, error) {
+	path := prepared.artifact.Path
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
 		if err := createPrivateRunOutputDir(dir); err != nil {
 			return runArtifact{}, exit(2, "create receipt directory: %v", err)
 		}
 	}
-	if err := writePrivateRunOutputFile(path, encoded); err != nil {
+	if err := writePrivateRunOutputFile(path, prepared.encoded); err != nil {
 		return runArtifact{}, exit(2, "write receipt %s: %v", path, err)
 	}
-	return runArtifact{Kind: "receipt", Path: path, Bytes: len(encoded)}, nil
+	return prepared.artifact, nil
 }
 
 func (a App) verify(ctx context.Context, args []string) error {

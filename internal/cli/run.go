@@ -477,8 +477,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var runFailure error
 	returnedRunError := &err
 	recorder := &runRecorder{}
+	var prepareTerminalRun func()
 	var finalizeTerminalRun func()
 	var finalTimingReport *timingReport
+	var preparedReceiptArtifact *runArtifact
 	var artifactChangeResults []ArtifactChangeResult
 	var timingRecordRepo Repo
 	var timingRecordCommand []string
@@ -493,6 +495,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		report := *finalTimingReport
 		report.ArtifactChanges = artifactChangeResults
+		report.Artifacts = append([]runArtifact(nil), report.Artifacts...)
+		if preparedReceiptArtifact != nil {
+			report.Artifacts = append(report.Artifacts, *preparedReceiptArtifact)
+		}
 		if !runnerObservedStartedAt.IsZero() && !frozenAt.Before(runnerObservedStartedAt) {
 			report.RunnerTotalMs = durationMillisecondsCeil(frozenAt.Sub(runnerObservedStartedAt))
 		}
@@ -515,6 +521,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if finalizeFailureDigest != nil {
 			finalizeFailureDigest()
 		}
+		if prepareTerminalRun != nil {
+			prepareTerminalRun()
+		}
 		frozenAt := time.Now()
 		report, hasReport := snapshotFinalTimingReport(frozenAt)
 		if hasReport && timingRecordEnabled {
@@ -529,6 +538,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				}
 				err = errors.Join(err, writeErr)
 				runFailure = errors.Join(runFailure, writeErr)
+				if prepareTerminalRun != nil {
+					prepareTerminalRun()
+				}
 				report, _ = snapshotFinalTimingReport(frozenAt)
 			} else {
 				if benchmarkCtx.OnRecord != nil {
@@ -542,6 +554,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				timingErr := exit(7, "write timing JSON: %v", writeErr)
 				err = errors.Join(err, timingErr)
 				runFailure = errors.Join(runFailure, timingErr)
+				if prepareTerminalRun != nil {
+					prepareTerminalRun()
+				}
 			}
 		}
 		if finalizeTerminalRun != nil {
@@ -1045,7 +1060,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			finalTimingReport = &report
 		}
 		delegatedReceiptEligible := runErr == nil || RunErrorKindForResult(result, runErr) == RunErrorCommandExit
-		finalizeTerminalRun = func() {
+		var preparedDelegatedReceipt *preparedRunReceipt
+		preparedDelegatedExitCode := -1
+		delegatedPreparationAttempted := false
+		prepareTerminalRun = func() {
 			if strings.TrimSpace(*attestOut) == "" || !delegatedReceiptEligible {
 				return
 			}
@@ -1057,7 +1075,27 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			if finalResult.ExitCode == 0 && finalFailure != nil {
 				finalResult.ExitCode = exitCodeForError(finalFailure, 7)
 			}
-			receipt, receiptErr := writeDelegatedRunReceipt(strings.TrimSpace(*attestOut), strings.TrimSpace(*attestKeyOverride), cfg, finalResult, runReq)
+			if delegatedPreparationAttempted && preparedDelegatedExitCode == finalResult.ExitCode {
+				return
+			}
+			delegatedPreparationAttempted = true
+			preparedDelegatedExitCode = finalResult.ExitCode
+			preparedDelegatedReceipt = nil
+			preparedReceiptArtifact = nil
+			prepared, receiptErr := prepareDelegatedRunReceipt(strings.TrimSpace(*attestOut), strings.TrimSpace(*attestKeyOverride), cfg, finalResult, runReq)
+			if receiptErr != nil {
+				err = errors.Join(err, receiptErr)
+				runFailure = errors.Join(runFailure, receiptErr)
+				return
+			}
+			preparedDelegatedReceipt = &prepared
+			preparedReceiptArtifact = &preparedDelegatedReceipt.artifact
+		}
+		finalizeTerminalRun = func() {
+			if preparedDelegatedReceipt == nil {
+				return
+			}
+			receipt, receiptErr := persistPreparedRunReceipt(*preparedDelegatedReceipt)
 			if receiptErr != nil {
 				err = errors.Join(err, receiptErr)
 				runFailure = errors.Join(runFailure, receiptErr)
@@ -2520,8 +2558,10 @@ afterSync:
 	var results *TestResultSummary
 	classification := FailureClassification{}
 	attestPath := strings.TrimSpace(*attestOut)
-	var writtenAttestReceipt terminalRunReceipt
-	attestReceiptWritten := false
+	var preparedTerminalReceipt terminalRunReceipt
+	var preparedTerminalReceiptFile *preparedRunReceipt
+	preparedTerminalExitCode := -1
+	terminalPreparationAttempted := false
 	terminalLog := logBuffer.Snapshot()
 	buildTerminalReceipt := func(finalCode int) (terminalRunReceipt, error) {
 		startedAt := recorder.startedAt
@@ -2552,7 +2592,7 @@ afterSync:
 			LogTruncated:      terminalLog.Truncated,
 		})
 	}
-	finalizeTerminalRun = func() {
+	prepareTerminalRun = func() {
 		if timings.command == 0 {
 			timings.command = time.Since(commandStart)
 		}
@@ -2574,45 +2614,65 @@ afterSync:
 			}
 			classification = classifyRunOutcomeFailure(finalCode, classificationLog, commandFailurePhases, failureEvidence, false)
 		}
-
-		receipt := writtenAttestReceipt
-		var receiptErr error
-		if !attestReceiptWritten || receipt.ExitCode != finalCode {
-			receipt, receiptErr = buildTerminalReceipt(finalCode)
+		if terminalPreparationAttempted && preparedTerminalExitCode == finalCode {
+			return
 		}
+		terminalPreparationAttempted = true
+		preparedTerminalExitCode = finalCode
+		preparedTerminalReceiptFile = nil
+		preparedReceiptArtifact = nil
+		receipt, receiptErr := buildTerminalReceipt(finalCode)
 		if receiptErr != nil {
 			err = errors.Join(err, receiptErr)
 			recordRunFailure(&runFailure, receiptErr)
 			return
 		}
-		if attestPath != "" && (!attestReceiptWritten || writtenAttestReceipt.ExitCode != finalCode) {
-			artifact, writeErr := writeTerminalRunReceipt(attestPath, receipt)
+		prepared, receiptErr := prepareTerminalRunReceipt(attestPath, receipt)
+		if receiptErr != nil {
+			err = errors.Join(err, receiptErr)
+			recordRunFailure(&runFailure, receiptErr)
+			return
+		}
+		preparedTerminalReceipt = receipt
+		preparedTerminalReceiptFile = &prepared
+		if attestPath != "" {
+			preparedReceiptArtifact = &preparedTerminalReceiptFile.artifact
+		}
+	}
+	finalizeTerminalRun = func() {
+		if preparedTerminalReceiptFile == nil {
+			return
+		}
+		if attestPath != "" {
+			artifact, writeErr := persistPreparedRunReceipt(*preparedTerminalReceiptFile)
 			if writeErr != nil {
 				err = errors.Join(err, writeErr)
 				recordRunFailure(&runFailure, writeErr)
 			} else {
-				writtenAttestReceipt = receipt
-				attestReceiptWritten = true
 				fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
 			}
 		}
-		if finishErr := recorder.Finish(ctx, target, finalCode, timings.sync, timings.command, terminalLog.Log, terminalLog.Truncated, results, classification, &receipt); finishErr != nil {
+		if finishErr := recorder.Finish(ctx, target, preparedTerminalReceipt.ExitCode, timings.sync, timings.command, terminalLog.Log, terminalLog.Truncated, results, classification, &preparedTerminalReceipt); finishErr != nil {
 			err = errors.Join(err, finishErr)
 			recordRunFailure(&runFailure, finishErr)
-			if attestPath != "" && receipt.ExitCode == 0 {
+			if attestPath != "" && preparedTerminalReceipt.ExitCode == 0 {
 				// The coordinator commit is now ambiguous. Preserve the exact receipt
 				// sent remotely, but make the local CLI failure impossible to miss.
 				failedReceipt, receiptErr := buildTerminalReceipt(exitCodeForError(finishErr, 7))
 				if receiptErr != nil {
 					err = errors.Join(err, receiptErr)
 					recordRunFailure(&runFailure, receiptErr)
-				} else if artifact, writeErr := writeTerminalRunReceipt(attestPath, failedReceipt); writeErr != nil {
-					err = errors.Join(err, writeErr)
-					recordRunFailure(&runFailure, writeErr)
 				} else {
-					writtenAttestReceipt = failedReceipt
-					attestReceiptWritten = true
-					fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
+					failedPrepared, prepareErr := prepareTerminalRunReceipt(attestPath, failedReceipt)
+					if prepareErr != nil {
+						err = errors.Join(err, prepareErr)
+						recordRunFailure(&runFailure, prepareErr)
+					} else if artifact, writeErr := persistPreparedRunReceipt(failedPrepared); writeErr != nil {
+						err = errors.Join(err, writeErr)
+						recordRunFailure(&runFailure, writeErr)
+					} else {
+						fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
+					}
 				}
 			}
 			if a.runOutcome != nil {
@@ -3055,6 +3115,14 @@ func writeDelegatedRunProof(path, templateName string, cfg Config, result RunRes
 }
 
 func writeDelegatedRunReceipt(path, keyPath string, cfg Config, result RunResult, req RunRequest) (runArtifact, error) {
+	prepared, err := prepareDelegatedRunReceipt(path, keyPath, cfg, result, req)
+	if err != nil {
+		return runArtifact{}, err
+	}
+	return persistPreparedRunReceipt(prepared)
+}
+
+func prepareDelegatedRunReceipt(path, keyPath string, cfg Config, result RunResult, req RunRequest) (preparedRunReceipt, error) {
 	command := strings.TrimSpace(result.CommandText)
 	if command == "" {
 		command = runCommandDisplay(req.Command, req.ShellMode)
@@ -3076,7 +3144,7 @@ func writeDelegatedRunReceipt(path, keyPath string, cfg Config, result RunResult
 		receipt.ActionsURL = firstNonBlank(receipt.ActionsURL, session.ActionsURL)
 	}
 	receipt.Provider = firstNonBlank(receipt.Provider, cfg.Provider)
-	return writeRunReceipt(path, keyPath, receipt)
+	return prepareRunReceipt(path, keyPath, receipt)
 }
 
 func delegatedRunID(req RunRequest, result RunResult) string {

@@ -92,6 +92,55 @@ func TestAttestReceiptRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPrepareRunReceiptIsSideEffectFreeAndPersistsExactBytes(t *testing.T) {
+	setAttestTestHome(t)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(t.TempDir(), "signer.pem")
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := filepath.Join(t.TempDir(), "nested", "receipt.json")
+	prepared, err := prepareRunReceipt(receiptPath, keyPath, fullReceiptInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(receiptPath); !os.IsNotExist(err) {
+		t.Fatalf("receipt exists after preparation: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(receiptPath)); !os.IsNotExist(err) {
+		t.Fatalf("receipt directory exists after preparation: %v", err)
+	}
+	if prepared.artifact.Kind != "receipt" || prepared.artifact.Path != receiptPath || prepared.artifact.Bytes != len(prepared.encoded) {
+		t.Fatalf("prepared artifact=%#v encoded bytes=%d", prepared.artifact, len(prepared.encoded))
+	}
+
+	artifact, err := persistPreparedRunReceipt(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, prepared.encoded) || artifact != prepared.artifact || info.Size() != int64(artifact.Bytes) {
+		t.Fatalf("persisted artifact=%#v size=%d data bytes=%d", artifact, info.Size(), len(data))
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("receipt mode=%#o, want 0600", info.Mode().Perm())
+	}
+}
+
 func TestTerminalReceiptSignsNonzeroExitAndBindsCommand(t *testing.T) {
 	setAttestTestHome(t)
 	startedAt := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)

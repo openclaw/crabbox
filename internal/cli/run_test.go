@@ -50,6 +50,23 @@ func (writer *terminalOrderTimingWriter) WriteTimingReport(report TimingReport) 
 	return encodeTimingJSON(&writer.Buffer, report)
 }
 
+func assertReceiptArtifactMetadata(t *testing.T, artifacts []runArtifact, path string, size int) {
+	t.Helper()
+	var matches int
+	for _, artifact := range artifacts {
+		if artifact.Kind != "receipt" {
+			continue
+		}
+		matches++
+		if artifact.Path != path || artifact.Bytes != size {
+			t.Fatalf("receipt artifact=%#v, want path=%q bytes=%d", artifact, path, size)
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("receipt artifacts=%d, want one in %#v", matches, artifacts)
+	}
+}
+
 func init() {
 	RegisterProvider(windowsEnvHelperTestProvider{})
 	RegisterProvider(runEnvProfileTestProvider{})
@@ -3298,6 +3315,7 @@ func TestRunCommandWritesTerminalReceiptOnSuccess(t *testing.T) {
 			isolateRunTestUserDirs(t, dir)
 			sshPath := filepath.Join(dir, "ssh")
 			receiptPath := filepath.Join(dir, "receipt.json")
+			timingRecordPath := filepath.Join(dir, "timings.jsonl")
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
@@ -3332,6 +3350,8 @@ func TestRunCommandWritesTerminalReceiptOnSuccess(t *testing.T) {
 			args := []string{
 				"--provider", "run-env-profile-test",
 				"--no-sync",
+				"--timing-json",
+				"--timing-record", timingRecordPath,
 				"--attest", receiptPath,
 			}
 			capturePath := filepath.Join(dir, "capture.raw")
@@ -3357,6 +3377,26 @@ func TestRunCommandWritesTerminalReceiptOnSuccess(t *testing.T) {
 			if !strings.Contains(stderr.String(), "artifact kind=receipt") {
 				t.Fatalf("missing terminal receipt output:\n%s", stderr.String())
 			}
+			info, err := os.Stat(receiptPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var timing TimingReport
+			for _, line := range strings.Split(stderr.String(), "\n") {
+				var candidate TimingReport
+				if json.Unmarshal([]byte(line), &candidate) == nil && candidate.Provider == "run-env-profile-test" {
+					timing = candidate
+				}
+			}
+			assertReceiptArtifactMetadata(t, timing.Artifacts, receiptPath, int(info.Size()))
+			records, err := readBenchmarkTimingRecords(timingRecordPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(records) != 1 {
+				t.Fatalf("timing records=%d, want one", len(records))
+			}
+			assertReceiptArtifactMetadata(t, records[0].Timing.Artifacts, receiptPath, int(info.Size()))
 
 			if receipt.LogSHA256 != sha256Digest([]byte(tc.raw)) {
 				t.Fatal("receipt lost raw stream digest")
@@ -3490,6 +3530,21 @@ func TestRunCommandTerminalReceiptIncludesLateTimingRecordFailure(t *testing.T) 
 	if receipt.ExitCode != 2 {
 		t.Fatalf("receipt exit=%d, want late timing-record exit 2\nreceipt=%+v", receipt.ExitCode, receipt)
 	}
+	info, statErr := os.Stat(receiptPath)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	var timing TimingReport
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		var candidate TimingReport
+		if json.Unmarshal([]byte(line), &candidate) == nil && candidate.Provider == "run-env-profile-test" {
+			timing = candidate
+		}
+	}
+	if timing.ExitCode != 2 {
+		t.Fatalf("timing exit=%d, want late timing-record exit 2", timing.ExitCode)
+	}
+	assertReceiptArtifactMetadata(t, timing.Artifacts, receiptPath, int(info.Size()))
 	if !strings.Contains(exitErr.Message, "open benchmark timing store") {
 		t.Fatalf("missing timing-record failure: %v", exitErr)
 	}
@@ -3568,6 +3623,9 @@ func TestRunCommandTimingJSONFailureIsTerminalAndUpdatesReceipt(t *testing.T) {
 			if receipt.ExitCode != 7 {
 				t.Fatalf("receipt exit=%d, want timing sink exit 7", receipt.ExitCode)
 			}
+			if !strings.Contains(stderr.String(), "artifact kind=receipt") {
+				t.Fatalf("missing persisted receipt diagnostic:\n%s", stderr.String())
+			}
 		})
 	}
 }
@@ -3603,6 +3661,18 @@ func TestRunCommandDelegatedTerminalOrder(t *testing.T) {
 	if exitCode, ok := receipt["exit_code"].(json.Number); !ok || exitCode.String() != "0" {
 		t.Fatalf("delegated receipt exit=%v", receipt["exit_code"])
 	}
+	info, err := os.Stat(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var timing TimingReport
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		var candidate TimingReport
+		if json.Unmarshal([]byte(line), &candidate) == nil && candidate.Provider == "benchmark-timing-test" {
+			timing = candidate
+		}
+	}
+	assertReceiptArtifactMetadata(t, timing.Artifacts, receiptPath, int(info.Size()))
 }
 
 func TestRunCommandSyncOnlyFinalizesAfterTiming(t *testing.T) {
@@ -3793,10 +3863,12 @@ func TestRunCommandTerminalReceiptMarksCoordinatorFinishFailureLocally(t *testin
 		State:      "active",
 	}
 	var (
-		mu              sync.Mutex
-		finishAttempts  int
-		finishReceipts  []terminalRunReceipt
-		unexpectedCalls []string
+		mu                  sync.Mutex
+		finishAttempts      int
+		finishReceipts      []terminalRunReceipt
+		finishLocalReceipts []terminalRunReceipt
+		finishLocalErrors   []error
+		unexpectedCalls     []string
 	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -3823,9 +3895,16 @@ func TestRunCommandTerminalReceiptMarksCoordinatorFinishFailureLocally(t *testin
 				http.Error(w, decodeErr.Error(), http.StatusBadRequest)
 				return
 			}
+			localData, localErr := os.ReadFile(receiptPath)
+			var localReceipt terminalRunReceipt
+			if localErr == nil {
+				localReceipt, localErr = decodeTerminalRunReceipt(localData)
+			}
 			mu.Lock()
 			finishAttempts++
 			finishReceipts = append(finishReceipts, body.Receipt)
+			finishLocalReceipts = append(finishLocalReceipts, localReceipt)
+			finishLocalErrors = append(finishLocalErrors, localErr)
 			mu.Unlock()
 			http.Error(w, "terminal store unavailable", http.StatusServiceUnavailable)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/"+runID+"/receipt":
@@ -3868,8 +3947,8 @@ func TestRunCommandTerminalReceiptMarksCoordinatorFinishFailureLocally(t *testin
 
 	mu.Lock()
 	defer mu.Unlock()
-	if finishAttempts != runRecorderFinishAttempts || len(finishReceipts) != runRecorderFinishAttempts {
-		t.Fatalf("finish attempts=%d receipts=%d, want %d", finishAttempts, len(finishReceipts), runRecorderFinishAttempts)
+	if finishAttempts != runRecorderFinishAttempts || len(finishReceipts) != runRecorderFinishAttempts || len(finishLocalReceipts) != runRecorderFinishAttempts {
+		t.Fatalf("finish attempts=%d remote receipts=%d local receipts=%d, want %d", finishAttempts, len(finishReceipts), len(finishLocalReceipts), runRecorderFinishAttempts)
 	}
 	for i, receipt := range finishReceipts {
 		if receipt.ExitCode != 0 {
@@ -3877,6 +3956,12 @@ func TestRunCommandTerminalReceiptMarksCoordinatorFinishFailureLocally(t *testin
 		}
 		if receipt != finishReceipts[0] {
 			t.Fatalf("remote receipt attempt %d changed:\nfirst=%+v\ncurrent=%+v", i+1, finishReceipts[0], receipt)
+		}
+		if finishLocalErrors[i] != nil {
+			t.Fatalf("read local receipt during finish attempt %d: %v", i+1, finishLocalErrors[i])
+		}
+		if finishLocalReceipts[i] != receipt {
+			t.Fatalf("finish attempt %d used a different receipt from local persistence:\nlocal=%+v\nremote=%+v", i+1, finishLocalReceipts[i], receipt)
 		}
 	}
 	if localReceipt == finishReceipts[0] {
