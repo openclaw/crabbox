@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 // Polling configuration for waiting on a freshly deployed pod to expose its
@@ -601,13 +603,15 @@ func unclaimedRunpodError(identifier string) error {
 }
 
 func validateCreatedRunpodPod(pod runpodPod, expectedID, expectedName string) error {
-	if strings.TrimSpace(expectedID) == "" || pod.ID != expectedID {
+	expected := shared.NamedResourceIdentity{ID: expectedID, Name: expectedName}
+	mismatch := expected.Validate(shared.NamedResourceIdentity{ID: pod.ID, Name: pod.Name})
+	if mismatch == nil {
+		return nil
+	}
+	if mismatch.Field == "ID" {
 		return exit(1, "runpod create returned pod %s but readiness resolved %s", blank(expectedID, "<empty>"), blank(pod.ID, "<empty>"))
 	}
-	if strings.TrimSpace(expectedName) == "" || pod.Name != expectedName {
-		return exit(1, "runpod create expected pod name %s but readiness returned %s", blank(expectedName, "<empty>"), blank(pod.Name, "<empty>"))
-	}
-	return nil
+	return exit(1, "runpod create expected pod name %s but readiness returned %s", blank(expectedName, "<empty>"), blank(pod.Name, "<empty>"))
 }
 
 func (b *runpodLeaseBackend) findPodByName(ctx context.Context, client runpodAPI, name string) (runpodPod, error) {
