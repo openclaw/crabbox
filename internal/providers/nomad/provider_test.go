@@ -35,8 +35,8 @@ func TestProviderSpecIsDelegatedRunLinuxWithoutAliases(t *testing.T) {
 	if !spec.Features.Has(core.FeatureArchiveSync) {
 		t.Fatalf("spec.Features=%#v, want archive-sync after Wave 3 sync implementation", spec.Features)
 	}
-	if spec.Features.Has(core.FeatureRunSession) {
-		t.Fatalf("spec.Features=%#v, nomad does not expose reusable run sessions", spec.Features)
+	if !spec.Features.Has(core.FeatureRunSession) {
+		t.Fatalf("spec.Features=%#v, want reusable run sessions", spec.Features)
 	}
 }
 

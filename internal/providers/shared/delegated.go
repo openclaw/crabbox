@@ -34,7 +34,8 @@ type DelegatedSandboxCommand struct {
 
 // DelegatedSandboxLifecycle describes sandbox operations, not a provider API.
 // Adapters retain claim authorization, scope checks, locks, credential filtering,
-// archive transport and execution. Jobs and SSH leases have different lifecycles.
+// archive transport and execution. Persistent shell allocations fit this owner;
+// finite batch jobs and SSH leases have different lifecycles.
 type DelegatedSandboxLifecycle struct {
 	Provider       string
 	Runtime        core.Runtime
@@ -163,7 +164,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 				Provider: lifecycle.Provider, LeaseID: result.LeaseID, Slug: result.Slug,
 				SyncDelegated: true, SyncSkipped: req.NoSync, SyncMs: syncDuration.Milliseconds(), SyncPhases: syncPhases,
 				CommandMs: result.Command.Milliseconds(), TotalMs: result.Total.Milliseconds(),
-				ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label),
+				ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label), Workdir: lifecycle.Workdir,
 			}, result, retErr))
 			// A failed writer cannot emit an agreed record. Still report the I/O
 			// failure without replacing an existing command/cleanup failure.

@@ -22,6 +22,7 @@ type cleanupHookClient struct {
 	Client
 	jobInfo func(context.Context, string) (*nomadapi.Job, error)
 	purge   func(context.Context, string, bool) (string, error)
+	exec    func(context.Context, nomadExecRequest) (int, error)
 }
 
 func (c cleanupHookClient) JobInfo(ctx context.Context, id string) (*nomadapi.Job, error) {
@@ -36,6 +37,13 @@ func (c cleanupHookClient) DeregisterJob(ctx context.Context, id string, purge b
 		return c.purge(ctx, id, purge)
 	}
 	return c.Client.DeregisterJob(ctx, id, purge)
+}
+
+func (c cleanupHookClient) AllocationExec(ctx context.Context, req nomadExecRequest) (int, error) {
+	if c.exec != nil {
+		return c.exec(ctx, req)
+	}
+	return c.Client.AllocationExec(ctx, req)
 }
 
 func assertNomadClaimRetained(t *testing.T, expected LeaseClaim) {
@@ -184,6 +192,132 @@ func TestNomadRunCleanupDoesNotAdoptSuccessorClaim(t *testing.T) {
 		t.Fatalf("err=%v purges=%v", err, fake.deregisters)
 	}
 	assertNomadClaimRetained(t, successor)
+}
+
+func TestNomadRetainedRefreshDoesNotAdoptChangedClaim(t *testing.T) {
+	for _, removed := range []bool{false, true} {
+		t.Run(strconv.FormatBool(removed), func(t *testing.T) {
+			fake := newLifecycleFakeClient()
+			b, _, _ := testBackend(t, fake)
+			original := createClaim(t, b, "cbx_a33333333334", "retained-crab", "crabbox-a33333333334", "alloc-a")
+			var successor LeaseClaim
+			if removed {
+				if err := core.RemoveLeaseClaimIfUnchanged(original.LeaseID, original); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				replacement := original
+				replacement.Labels = maps.Clone(original.Labels)
+				replacement.Labels[claimLabelJobID] = "crabbox-successor"
+				if err := core.ReplaceLeaseClaimIfUnchanged(original.LeaseID, original, replacement); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				successor, err = readLeaseClaim(original.LeaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := refreshNomadLeaseActivity(b.cfg, original); err == nil {
+				t.Error("retained refresh accepted a changed claim")
+			}
+			if removed {
+				got, err := readLeaseClaim(original.LeaseID)
+				if err != nil || got.LeaseID != "" {
+					t.Fatalf("retired claim recreated: %#v err=%v", got, err)
+				}
+			} else {
+				assertNomadClaimRetained(t, successor)
+			}
+		})
+	}
+}
+
+func TestNomadReuseDoesNotAdoptClaimChangedAfterLookup(t *testing.T) {
+	for _, removed := range []bool{false, true} {
+		t.Run(strconv.FormatBool(removed), func(t *testing.T) {
+			fake := newLifecycleFakeClient()
+			b, _, _ := testBackend(t, fake)
+			original := createClaim(t, b, "cbx_a33333333335", "reuse-fence", "crabbox-a33333333335", "alloc-a")
+			var successor LeaseClaim
+			client := cleanupHookClient{Client: fake, jobInfo: func(ctx context.Context, id string) (*nomadapi.Job, error) {
+				if removed {
+					if err := core.RemoveLeaseClaimIfUnchanged(original.LeaseID, original); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					replacement := original
+					replacement.Labels = maps.Clone(original.Labels)
+					replacement.Labels[claimLabelJobID] = "crabbox-successor"
+					var err error
+					successor, err = core.ReplaceLeaseClaimIfUnchangedDurableReturning(original.LeaseID, original, replacement)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				return fake.JobInfo(ctx, id)
+			}}
+			b.clientFactory = func(Config, Runtime) (Client, error) { return client, nil }
+			_, err := b.Run(context.Background(), RunRequest{ID: original.LeaseID, Repo: Repo{Root: original.RepoRoot}, Reclaim: true, NoSync: true, Command: []string{"true"}})
+			if err == nil || len(fake.execs) != 0 || len(fake.deregisters) != 0 {
+				t.Fatalf("err=%v executions=%d purges=%v", err, len(fake.execs), fake.deregisters)
+			}
+			if removed {
+				got, err := readLeaseClaim(original.LeaseID)
+				if err != nil || got.LeaseID != "" {
+					t.Fatalf("retired claim recreated: %#v err=%v", got, err)
+				}
+			} else {
+				assertNomadClaimRetained(t, successor)
+			}
+		})
+	}
+}
+
+func TestNomadKeptRunRefreshFencesClaimChangedDuringExecution(t *testing.T) {
+	for _, removed := range []bool{false, true} {
+		t.Run(strconv.FormatBool(removed), func(t *testing.T) {
+			fake := newLifecycleFakeClient()
+			b, _, _ := testBackend(t, fake)
+			var original, successor LeaseClaim
+			client := cleanupHookClient{Client: fake, exec: func(ctx context.Context, req nomadExecRequest) (int, error) {
+				code, err := fake.AllocationExec(ctx, req)
+				if len(fake.execs) != 2 {
+					return code, err
+				}
+				original, err = readLeaseClaim(fake.jobs[req.JobID].Meta[metadataLeaseID])
+				if err != nil || original.LeaseID == "" {
+					t.Fatalf("original claim=%#v err=%v", original, err)
+				}
+				if removed {
+					err = core.RemoveLeaseClaimIfUnchanged(original.LeaseID, original)
+				} else {
+					replacement := original
+					replacement.Labels = maps.Clone(original.Labels)
+					replacement.Labels[claimLabelJobID] = "crabbox-successor"
+					successor, err = core.ReplaceLeaseClaimIfUnchangedDurableReturning(original.LeaseID, original, replacement)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				return code, nil
+			}}
+			b.clientFactory = func(Config, Runtime) (Client, error) { return client, nil }
+			result, err := b.Run(context.Background(), RunRequest{Repo: newNomadRunRepo(t), Keep: true, NoSync: true, Command: []string{"true"}})
+			if err == nil || result.ExitCode == 0 || len(fake.deregisters) != 0 {
+				t.Fatalf("result=%#v err=%v purges=%v", result, err, fake.deregisters)
+			}
+			assertNomadRunSession(t, result, false, true)
+			if removed {
+				got, err := readLeaseClaim(original.LeaseID)
+				if err != nil || got.LeaseID != "" {
+					t.Fatalf("retired claim recreated: %#v err=%v", got, err)
+				}
+			} else {
+				assertNomadClaimRetained(t, successor)
+			}
+		})
+	}
 }
 
 func TestNomadSetupRollbackRetainsPublishedClaim(t *testing.T) {
