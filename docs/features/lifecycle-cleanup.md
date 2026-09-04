@@ -215,6 +215,16 @@ does not complete a known action. Observation is bounded to 60 seconds per
 attempt, with each request and body read bounded to 10 seconds or the remaining
 observation budget.
 
+An exact DELETE rejection with HTTP 400, 401, 403, 405, 409, 410, 412, 423, or
+429 retires only that rejected attempt's dispatch marker under the cleanup
+owner fence. These statuses describe rejected requests in Hetzner's
+[error contract](https://docs.hetzner.cloud/cloud.spec.json). The rejection
+remains a cleanup failure and uses the existing broker backoff. The next attempt
+freshly reads the exact server and revalidates ownership, then durably records
+a new dispatch before DELETE. A failed rejection write retains uncertainty.
+HTTP 408, 422 (which also covers service errors), 5xx, timeouts, malformed
+actions, and lost acknowledgements never authorize retiring that marker.
+
 An exact server already missing before any recorded dispatch has the distinct
 `already-absent` basis. DELETE 404 requires a subsequent exact GET 404 and has
 its own basis. Neither can replace an unresolved action or lost acknowledgement.
@@ -243,6 +253,15 @@ Ordinary authenticated GET and `crabbox inspect --json` expose the nonsecret
 journal. Its confirmation timestamp records the provider API contract observed
 then, not physical hardware inspection or a fresh probe. `cleanupStatus` still
 governs finality. Historical released leases without evidence are not backfilled.
+
+For recovery, the ordinary owner should inspect the exact lease with
+`crabbox inspect --id <lease-id> --json` and retain local credentials and recorded
+evidence. Historical host fields, `released` state, or missing flags do not prove
+absence. A recorded action with a known ID resumes through the same lease owner
+and broker cleanup path. Missing no-resource evidence or dispatch acknowledgement
+authority requires operator reconciliation of the exact resource in its original
+provider project. Never manually clear cleanup flags or fabricate a receipt.
+There is no supported automatic historical backfill or population sweep.
 
 ### Managed Daytona cleanup
 

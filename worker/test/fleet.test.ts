@@ -6173,6 +6173,161 @@ describe("fleet lease identity and idle", () => {
     );
   });
 
+  it("retries a rejected Hetzner DELETE429 through broker backoff and fresh ownership", async () => {
+    const f = hetznerDeleteRetryFixture();
+    const release = await f.fleet.fetch(
+      request("POST", `/v1/leases/${f.lease.id}/release`, {
+        headers: f.headers,
+        body: { delete: true },
+      }),
+    );
+    expect(release.status).toBe(200);
+    expect(await release.json()).toMatchObject({ lease: { cleanupStatus: "pending" } });
+    await f.fleet.alarm();
+    const first = f.stored();
+    expect(first.cleanupError).toContain("http 429");
+    expect(Date.parse(first.cleanupRetryAt!)).toBeGreaterThan(Date.now());
+    expect(first.providerCleanup?.confirmation).toBeUndefined();
+    expect(first.providerKeyCleanupPending).toBe(true);
+    expect(await f.inspect()).toMatchObject({ lease: { cleanupStatus: "failed" } });
+    await f.fleet.alarm();
+    expect(f.requests).toEqual(["GET /v1/servers/123", "DELETE /v1/servers/123"]);
+    await f.retry();
+    expect(await f.inspect()).toMatchObject({
+      lease: {
+        cleanupStatus: "complete",
+        providerCleanup: {
+          action: { id: 456, status: "success" },
+          confirmation: { method: "delete-action-success-and-server-absent" },
+        },
+      },
+    });
+    expect(f.requests).toEqual([
+      "GET /v1/servers/123",
+      "DELETE /v1/servers/123",
+      "GET /v1/servers/123",
+      "DELETE /v1/servers/123",
+      "GET /v1/servers/123",
+      "DELETE /v1/ssh_keys/7",
+    ]);
+    expect(f.stored().providerKeyCleanupPending).toBeUndefined();
+  });
+
+  it.each([409, 423])("retries a rejected Hetzner DELETE%s on a later alarm", async (status) => {
+    const f = hetznerDeleteRetryFixture();
+    f.behavior.rejectionStatus = status;
+    expect((await f.queue()).status).toBe(200);
+    await f.fleet.alarm();
+    expect(f.stored().cleanupError).toContain(`http ${status}`);
+    expect(f.stored().providerCleanup?.dispatchStartedAt).toBeUndefined();
+    expect(await f.inspect()).toMatchObject({ lease: { cleanupStatus: "failed" } });
+    await f.retry();
+    expect(await f.inspect()).toMatchObject({ lease: { cleanupStatus: "complete" } });
+    expect(f.requests).toEqual([
+      "GET /v1/servers/123",
+      "DELETE /v1/servers/123",
+      "GET /v1/servers/123",
+      "DELETE /v1/servers/123",
+      "GET /v1/servers/123",
+      "DELETE /v1/ssh_keys/7",
+    ]);
+  });
+
+  it("rechecks Hetzner ownership after a rejected DELETE before any new mutation", async () => {
+    const f = hetznerDeleteRetryFixture();
+    expect((await f.queue()).status).toBe(200);
+    await f.fleet.alarm();
+    expect(f.stored().providerCleanup?.dispatchStartedAt).toBeUndefined();
+    f.server.labels.owner = "different-owner";
+    await f.retry();
+    expect(f.stored().cleanupError).toContain("ownership does not match");
+    expect(f.stored().providerKeyCleanupPending).toBe(true);
+    expect(await f.inspect()).toMatchObject({ lease: { cleanupStatus: "failed" } });
+    expect(f.requests).toEqual([
+      "GET /v1/servers/123",
+      "DELETE /v1/servers/123",
+      "GET /v1/servers/123",
+    ]);
+  });
+
+  it("retains lost acknowledgement on a retried Hetzner DELETE without replaying the rejected attempt", async () => {
+    const f = hetznerDeleteRetryFixture();
+    expect((await f.queue()).status).toBe(200);
+    await f.fleet.alarm();
+    expect(f.stored().providerCleanup?.dispatchStartedAt).toBeUndefined();
+    f.behavior.loseSecondAcknowledgement = true;
+    await f.retry();
+    const uncertainty = f.stored().providerCleanup;
+    expect(uncertainty?.dispatchStartedAt).toBeTruthy();
+    expect(uncertainty?.action).toBeUndefined();
+    expect(f.stored().cleanupError).toContain("connection lost after DELETE");
+    expect(f.behavior.absent).toBe(true);
+    await f.retry();
+    expect(f.stored().providerCleanup).toEqual(uncertainty);
+    expect(f.stored().cleanupError).toContain("unresolved Hetzner delete acknowledgement");
+    expect(await f.inspect()).toMatchObject({ lease: { cleanupStatus: "failed" } });
+    expect(f.requests).toEqual([
+      "GET /v1/servers/123",
+      "DELETE /v1/servers/123",
+      "GET /v1/servers/123",
+      "DELETE /v1/servers/123",
+    ]);
+    expect(f.stored().providerKeyCleanupPending).toBe(true);
+  });
+
+  it("retains Hetzner dispatch uncertainty if persisting rejection fails", async () => {
+    const f = hetznerDeleteRetryFixture();
+    let failedWrite = false;
+    f.storage.beforePut = async (key, value) => {
+      const evidence = (value as LeaseRecord).providerCleanup;
+      if (
+        key === `lease:${f.lease.id}` &&
+        !failedWrite &&
+        evidence &&
+        !evidence.dispatchStartedAt &&
+        f.stored().providerCleanup?.dispatchStartedAt
+      ) {
+        failedWrite = true;
+        throw new Error("rejection persistence failed");
+      }
+    };
+    expect((await f.queue()).status).toBe(200);
+    await f.fleet.alarm();
+    const uncertainty = f.stored().providerCleanup;
+    expect(failedWrite).toBe(true);
+    expect(uncertainty?.dispatchStartedAt).toBeTruthy();
+    expect(f.stored().cleanupError).toContain("rejection persistence failed");
+    f.behavior.absent = true;
+    await f.retry();
+    expect(f.stored().providerCleanup).toEqual(uncertainty);
+    expect(f.stored().cleanupError).toContain("unresolved Hetzner delete acknowledgement");
+    expect(await f.inspect()).toMatchObject({ lease: { cleanupStatus: "failed" } });
+    expect(f.requests).toEqual(["GET /v1/servers/123", "DELETE /v1/servers/123"]);
+  });
+
+  it("requires durable fresh dispatch evidence before retrying a rejected Hetzner DELETE", async () => {
+    const f = hetznerDeleteRetryFixture();
+    expect((await f.queue()).status).toBe(200);
+    await f.fleet.alarm();
+    expect(f.stored().providerCleanup?.dispatchStartedAt).toBeUndefined();
+    f.storage.beforePut = async (key, value) => {
+      if (
+        key === `lease:${f.lease.id}` &&
+        (value as LeaseRecord).providerCleanup?.dispatchStartedAt
+      ) {
+        throw new Error("fresh dispatch persistence failed");
+      }
+    };
+    await f.retry();
+    expect(f.stored().cleanupError).toContain("fresh dispatch persistence failed");
+    expect(await f.inspect()).toMatchObject({ lease: { cleanupStatus: "failed" } });
+    expect(f.requests).toEqual([
+      "GET /v1/servers/123",
+      "DELETE /v1/servers/123",
+      "GET /v1/servers/123",
+    ]);
+  });
+
   it.each(["dispatch", "action"])(
     "retains broker Hetzner cleanup debt on %s storage failure",
     async (phase) => {
@@ -45040,4 +45195,107 @@ function testHetznerCleanupProvider(): HetznerProvider {
     });
   });
   return provider;
+}
+
+function hetznerDeleteRetryFixture() {
+  const storage = new MemoryStorage();
+  const lease = testLease({
+    owner: "alice@example.com",
+    org: "example-org",
+    keep: false,
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    providerKeyCleanupPending: true,
+    providerKeyCleanupID: "7",
+  });
+  storage.seed(`lease:${lease.id}`, lease);
+  const headers = { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" };
+  const fleet = testFleet(storage, {}, { HETZNER_TOKEN: "synthetic-token" });
+  const requests: string[] = [];
+  const server = {
+    id: 123,
+    name: lease.serverName,
+    labels: {
+      crabbox: "true",
+      created_by: "crabbox",
+      provider: "hetzner",
+      lease: lease.id,
+      slug: lease.slug,
+      owner: providerLabelValue(lease.owner),
+    },
+  };
+  const behavior = { rejectionStatus: 429, loseSecondAcknowledgement: false, absent: false };
+  let deleteAttempts = 0;
+  const stored = () => structuredClone(storage.value<LeaseRecord>(`lease:${lease.id}`)!);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      const method = init?.method ?? "GET";
+      requests.push(`${method} ${path}`);
+      if (path === "/v1/servers/123" && method === "GET") {
+        return behavior.absent
+          ? jsonResponse({ error: { code: "not_found" } }, 404)
+          : jsonResponse({ server });
+      }
+      if (path === "/v1/servers/123" && method === "DELETE") {
+        // oxlint-disable-next-line vitest/no-conditional-expect -- verify durable uncertainty at every actual dispatch.
+        expect(stored().providerCleanup?.dispatchStartedAt).toBeTruthy();
+        deleteAttempts++;
+        if (deleteAttempts === 1)
+          return jsonResponse(
+            {
+              error: {
+                code: (
+                  { 429: "rate_limit_exceeded", 409: "conflict", 423: "locked" } as Record<
+                    number,
+                    string
+                  >
+                )[behavior.rejectionStatus],
+                message: "request rejected",
+              },
+            },
+            behavior.rejectionStatus,
+          );
+        behavior.absent = true;
+        if (behavior.loseSecondAcknowledgement) throw new Error("connection lost after DELETE");
+        return jsonResponse({
+          action: {
+            id: 456,
+            command: "delete_server",
+            status: "success",
+            resources: [{ id: 123, type: "server" }],
+          },
+        });
+      }
+      if (path === "/v1/ssh_keys/7" && method === "DELETE") {
+        // oxlint-disable-next-line vitest/no-conditional-expect -- keys must follow durable server confirmation.
+        expect(stored().providerCleanup?.confirmation).toBeDefined();
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected request ${method} ${path}`);
+    }),
+  );
+  return {
+    storage,
+    lease,
+    headers,
+    fleet,
+    server,
+    behavior,
+    requests,
+    stored,
+    queue: () =>
+      fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/release`, { headers, body: { delete: true } }),
+      ),
+    inspect: async () =>
+      (await fleet.fetch(request("GET", `/v1/leases/${lease.id}`, { headers }))).json(),
+    retry: async () => {
+      storage.seed(`lease:${lease.id}`, {
+        ...stored(),
+        cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+      });
+      await fleet.alarm();
+    },
+  };
 }

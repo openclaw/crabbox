@@ -244,6 +244,77 @@ describe("brokered Hetzner cleanup evidence", () => {
     await expect(client.deleteSSHKeyByID(7, deadline)).rejects.toThrow("GET /ssh_keys/7");
   });
 
+  it.each([400, 401, 403, 405, 409, 410, 412, 423, 429])(
+    "retires only a definite Hetzner DELETE rejection %s and revalidates before retry",
+    async (status) => {
+      const f = fixture();
+      f.behavior.override = (_path, init) =>
+        init?.method === "DELETE"
+          ? Response.json({ error: { message: "request rejected" } }, { status })
+          : undefined;
+      expect(await settle(f.run())).toContain(`http ${status}`);
+      expect(f.stored.providerCleanup).toEqual({
+        version: 1,
+        provider: "hetzner",
+        leaseID: f.stored.id,
+        serverID: 123,
+      });
+      expect(f.requests).toEqual(["GET /servers/123", "DELETE /servers/123"]);
+      f.behavior.override = undefined;
+      expect(await settle(f.run())).toBe("complete");
+      expect(f.requests.slice(2, 4)).toEqual(["GET /servers/123", "DELETE /servers/123"]);
+      expect(f.stored.providerCleanup?.confirmation?.method).toBe(confirmationMethod);
+    },
+  );
+
+  it.each([
+    "408",
+    "422",
+    "499",
+    "500",
+    "502",
+    "503",
+    "504",
+    "network",
+    "parse",
+    "fetch timeout",
+    "429 body timeout",
+    "500 body timeout",
+    "wrong method",
+    "wrong path",
+  ])("does not retire ambiguous Hetzner DELETE dispatch on %s", async (failure) => {
+    const f = fixture();
+    f.behavior.override = (_path, init) => {
+      if (init?.method !== "DELETE") return undefined;
+      if (failure === "network") throw new Error("http 429 rate_limit_exceeded: connection lost");
+      if (failure === "wrong method")
+        throw new HetznerHTTPError("GET", "/servers/123", 429, "rejected");
+      if (failure === "wrong path")
+        throw new HetznerHTTPError("DELETE", "/servers/999", 429, "rejected");
+      if (failure === "parse") return new Response("invalid JSON", { status: 200 });
+      if (failure === "fetch timeout") return new Promise<Response>(() => {});
+      if (failure.endsWith("body timeout"))
+        return new Response(new ReadableStream({ start() {} }), {
+          status: failure.startsWith("429") ? 429 : 500,
+        });
+      return Response.json(
+        { error: { code: "rate_limit_exceeded", message: "request rejected" } },
+        { status: Number(failure) },
+      );
+    };
+    expect(await settle(f.run())).not.toBe("complete");
+    const uncertainty = structuredClone(f.stored.providerCleanup);
+    expect(uncertainty?.dispatchStartedAt).toBeTruthy();
+    expect(uncertainty?.action).toBeUndefined();
+    expect(uncertainty?.deleteNotFoundAt).toBeUndefined();
+    expect(uncertainty?.confirmation).toBeUndefined();
+    f.behavior.override = undefined;
+    f.behavior.alreadyAbsent = true;
+    expect(await settle(f.run())).toContain("unresolved Hetzner delete acknowledgement");
+    expect(f.stored.providerCleanup).toEqual(uncertainty);
+    expect(f.requests).toEqual(["GET /servers/123", "DELETE /servers/123"]);
+  });
+
   it("does not interpret GET404 as completion while an acknowledged action is running, including after restart", async () => {
     const f = fixture();
     f.behavior.running = true;

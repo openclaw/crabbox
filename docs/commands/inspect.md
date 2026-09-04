@@ -79,6 +79,13 @@ host/server fields and `hasHost` describe the retained record, not current
 provider existence. Inspect reads this receipt from the broker without provider
 credentials or CLI-side provider polling.
 
+An exact rejected Hetzner DELETE can leave only the provider/lease/server binding
+in `providerCleanup`, with the rejection in the ordinary cleanup error fields.
+That is retryable debt, not server confirmation; the broker rechecks ownership
+after backoff. Keep local credentials and evidence while cleanup is unresolved.
+See [recovery guidance](../features/lifecycle-cleanup.md#brokered-hetzner-cleanup-confirmation)
+before acting on historical records or missing acknowledgement authority.
+
 [Local Container](../providers/local-container.md#memory-failure-evidence)
 adds fresh, read-only `diagnostic.memory.*` labels to the returned view. They
 describe actual container settings and, when available, total RAM from its

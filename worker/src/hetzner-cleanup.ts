@@ -1,5 +1,6 @@
 import {
   HetznerClient,
+  HetznerHTTPError,
   HetznerProvisioningError,
   hetznerExactNotFound,
   hetznerServerOwnedByLease,
@@ -123,6 +124,17 @@ function timestamp(value: string | undefined): boolean {
   return value !== undefined && Number.isFinite(Date.parse(value));
 }
 
+function definiteDeleteRejection(error: unknown, serverID: number): boolean {
+  // Hetzner's documented Errors contract rejects these requests before starting an action.
+  // 408 is uncertain; 422 also covers service_error, so neither is safe to retire by status.
+  return (
+    error instanceof HetznerHTTPError &&
+    error.method === "DELETE" &&
+    error.path === `/servers/${serverID}` &&
+    [400, 401, 403, 405, 409, 410, 412, 423, 429].includes(error.status)
+  );
+}
+
 function validEvidence(evidence: HetznerCleanupEvidence, lease: LeaseRecord): boolean {
   if (
     evidence.version !== 1 ||
@@ -211,6 +223,13 @@ export async function confirmHetznerServerCleanup(
     try {
       response = await client.deleteServerAction(lease.serverID, deadline);
     } catch (error) {
+      if (definiteDeleteRejection(error, lease.serverID)) {
+        const rejected = { ...evidence };
+        delete rejected.dispatchStartedAt;
+        // Retire only this known rejection. Failed persistence leaves dispatch uncertainty.
+        await persist(rejected);
+        throw error;
+      }
       if (!hetznerExactNotFound(error, "DELETE", `/servers/${lease.serverID}`)) throw error;
       await persist({ ...evidence, deleteNotFoundAt: new Date().toISOString() });
     }
