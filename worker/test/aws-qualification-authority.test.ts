@@ -120,6 +120,7 @@ describe("AWS qualification authority deployment", () => {
     const protectedController = new AWSQualificationController(env, controller);
 
     expect("enroll" in candidate).toBe(false);
+    expect("beginFinalization" in candidate).toBe(false);
     expect("finalize" in candidate).toBe(false);
     expect("attest" in candidate).toBe(false);
     expect("discover" in candidate).toBe(false);
@@ -228,11 +229,12 @@ describe("AWS qualification authority deployment", () => {
     );
 
     await candidateEntered.promise;
-    const finalization = protectedController.finalize(identity.runId);
-    await cleanupEntered.promise;
+    await protectedController.beginFinalization(identity.runId);
     releaseCandidate.resolve();
     await expect(candidateResult).rejects.toThrow("finalizing");
     expect(fixture.signer.calls).toHaveLength(0);
+    const finalization = protectedController.finalize(identity.runId);
+    await cleanupEntered.promise;
     releaseCleanup.resolve();
     await finalization;
     expect(beginFinalization.mock.invocationCallOrder[0]).toBeLessThan(

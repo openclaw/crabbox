@@ -204,10 +204,15 @@ export class AWSQualificationController extends WorkerEntrypoint<
     await this.claim(identity);
   }
 
-  async finalize(runId: string): Promise<AWSQualificationLedger> {
+  async beginFinalization(runId: string): Promise<void> {
     const run = qualificationRun(this.env, runId);
     await run.beginFinalization(this.ctx.props);
     await qualificationRegistry(this.env).markFinalizing(this.ctx.props, runId);
+  }
+
+  async finalize(runId: string): Promise<AWSQualificationLedger> {
+    await this.beginFinalization(runId);
+    const run = qualificationRun(this.env, runId);
     const ledger = await run.finalize(this.ctx.props);
     await qualificationRegistry(this.env).markFinalized(this.ctx.props, runId);
     return ledger;

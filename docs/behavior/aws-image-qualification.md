@@ -12,7 +12,7 @@ It is not a general AWS proxy and is not enabled by default.
 There are three Workers:
 
 1. A protected binding selects the named `AWSQualificationController` entrypoint
-   to enroll and finalize runs.
+   to enroll, fence, and finalize runs.
 2. The exact candidate Worker has only `CRABBOX_AWS_QUALIFICATION_TRANSPORT`,
    bound to the authority's default transport entrypoint.
 3. The non-public authority Worker holds the sandbox AWS credentials and signs
@@ -148,7 +148,8 @@ Durable Object. `claim` admits only one active qualification globally and is
 idempotent only for the exact run, candidate Worker, candidate SHA, deployment
 hash, and expiry. `discover` gives an independent reaper the active run and its
 `claimed`, `finalizing`, or `finalized` cleanup state without relying on workflow
-artifacts. `finalize` updates that state around per-run cleanup. `retire` clears
+artifacts. `beginFinalization` persists the fence before external ingress
+teardown, and `finalize` updates that state around per-run cleanup. `retire` clears
 the active slot only after the persisted run attestation proves finalization,
 is idempotent for the same bounded retirement tombstone, and rejects a different
 active run. A retired or finalizing per-run object cannot be enrolled again.
