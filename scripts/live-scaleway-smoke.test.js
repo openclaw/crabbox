@@ -4,46 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { copySmokeRepo, writeExecutable, writeGoStub } from "./test-support/smoke-fixtures.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
-function writeExecutable(file, body) {
-  fs.writeFileSync(file, body, "utf8");
-  fs.chmodSync(file, 0o755);
-}
-
-function prepareSmokeRepo(dir) {
-  const tempRoot = path.join(dir, "repo");
-  const tempScripts = path.join(tempRoot, "scripts");
-  const smokeScript = path.join(tempScripts, "live-scaleway-smoke.sh");
-  fs.mkdirSync(tempScripts, { recursive: true });
-  fs.copyFileSync(path.join(repoRoot, "scripts", "live-scaleway-smoke.sh"), smokeScript);
-  fs.chmodSync(smokeScript, 0o755);
-  return { tempRoot, smokeScript };
-}
-
-function writeGoStub(binDir, scriptBody) {
-  writeExecutable(
-    path.join(binDir, "go"),
-    `#!/usr/bin/env bash
-set -euo pipefail
-out=""
-while [[ "$#" -gt 0 ]]; do
-  if [[ "$1" == "-o" ]]; then
-    out="$2"
-    shift 2
-    continue
-  fi
-  shift
-done
-mkdir -p "$(dirname "$out")"
-cat >"$out" <<'SCRIPT'
-${scriptBody}
-SCRIPT
-chmod +x "$out"
-`,
-  );
-}
+const prepareSmokeRepo = (dir) =>
+  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-scaleway-smoke.sh"));
 
 const validEnv = {
   CRABBOX_LIVE: "1",
@@ -193,8 +159,8 @@ esac
   assert.equal(seen[8], "list --provider scaleway --json");
 });
 
-test("live scaleway smoke builds from the script root when cwd differs", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-scaleway-cwd-"));
+test("live scaleway smoke builds from the script root with spaces when cwd differs", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox live scaleway cwd-"));
   const binDir = path.join(dir, "bin");
   const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
   const calls = path.join(dir, "calls.log");
