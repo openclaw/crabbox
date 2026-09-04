@@ -1602,3 +1602,53 @@ func tarGzipContains(t *testing.T, data []byte, name string) bool {
 		}
 	}
 }
+
+func TestCubeSandboxRejectsMissingCanonicalIDMatchingAnotherSlug(t *testing.T) {
+	for _, operation := range []string{"stop", "run", "status"} {
+		t.Run(operation, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			client := &fakeCubeSandboxSyncClient{}
+			restore := swapNewCubeSandboxClient(client)
+			defer restore()
+			backend := &cubesandboxBackend{cfg: Config{CubeSandbox: CubeSandboxConfig{APIURL: "https://cube.example.test", Template: "base"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+			const missingID = "cbx_aaaaaaaaaaaa"
+			repo := Repo{Root: t.TempDir()}
+			leaseID, _, _, err := backend.createSandbox(t.Context(), client, repo, true, false, "cbx-aaaaaaaaaaaa")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if leaseID == missingID {
+				t.Fatal("fixture unexpectedly allocated requested ID")
+			}
+			claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+			if err != nil || !exists {
+				t.Fatalf("fixture claim exists=%v err=%v", exists, err)
+			}
+			before, err := json.Marshal(claim)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.getIDs = nil
+			switch operation {
+			case "stop":
+				err = backend.Stop(t.Context(), StopRequest{ID: missingID})
+			case "run":
+				_, err = backend.Run(t.Context(), RunRequest{ID: missingID, Repo: repo, NoSync: true, Command: []string{"true"}})
+			case "status":
+				_, err = backend.Status(t.Context(), StatusRequest{ID: missingID})
+			}
+			var ee core.ExitError
+			if !errors.As(err, &ee) || ee.Code != 4 {
+				t.Errorf("missing canonical ID selected a slug: err=%v", err)
+			}
+			if len(client.getIDs) != 0 || len(client.deleteIDs) != 0 || len(client.commands) != 0 {
+				t.Errorf("wrong target reached provider: gets=%v deletes=%v commands=%v", client.getIDs, client.deleteIDs, client.commands)
+			}
+			afterClaim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+			after, marshalErr := json.Marshal(afterClaim)
+			if err != nil || marshalErr != nil || !exists || !bytes.Equal(before, after) {
+				t.Fatalf("unrelated claim changed: exists=%v err=%v marshal=%v", exists, err, marshalErr)
+			}
+		})
+	}
+}
