@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
@@ -1491,21 +1490,6 @@ func parseFirstIPv4(raw string) string {
 func isUsableIPv4(s string) bool {
 	addr, err := netip.ParseAddr(strings.TrimSpace(s))
 	return err == nil && addr.Is4() && addr.IsGlobalUnicast()
-}
-
-func isIPv4(s string) bool {
-	s = strings.TrimSpace(s)
-	parts := strings.Split(s, ".")
-	if len(parts) != 4 {
-		return false
-	}
-	for _, p := range parts {
-		n, err := strconv.Atoi(p)
-		if err != nil || n < 0 || n > 255 {
-			return false
-		}
-	}
-	return true
 }
 
 func escapePSString(s string) string {
