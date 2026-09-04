@@ -268,6 +268,9 @@ func (c *cloudflareClient) execStream(ctx context.Context, sandboxID string, req
 	if err := scanner.Err(); err != nil {
 		return exitCode, err
 	}
+	if err := ctx.Err(); err != nil {
+		return exitCode, err
+	}
 	return exitCode, fmt.Errorf("%s stream ended before completion", providerName)
 }
 

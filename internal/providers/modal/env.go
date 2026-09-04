@@ -3,89 +3,31 @@ package modal
 import (
 	"context"
 	"fmt"
-	"os"
-	"sort"
-	"strings"
-
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func (b *modalBackend) uploadEnvProfile(ctx context.Context, client modalAPI, claim core.LeaseClaim, env map[string]string) (string, func(context.Context), error) {
-	sandboxID := claim.CloudID
-	if len(env) == 0 {
-		return "", func(context.Context) {}, nil
-	}
-	file, err := os.CreateTemp("", "crabbox-modal-env-*.sh")
+	profile, err := shared.PrepareShellEnvProfile(env, "crabbox-modal-env-")
 	if err != nil {
-		return "", nil, fmt.Errorf("create modal env profile: %w", err)
+		return "", nil, err
 	}
-	localPath := file.Name()
-	cleanupLocal := func() { _ = os.Remove(localPath) }
-	keep := false
-	defer func() {
-		_ = file.Close()
-		if !keep {
-			cleanupLocal()
-		}
-	}()
-	if _, err := file.WriteString(formatModalShellEnvFile(env)); err != nil {
-		return "", nil, fmt.Errorf("write modal env profile: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return "", nil, fmt.Errorf("close modal env profile: %w", err)
-	}
-	remotePath := "/tmp/crabbox-modal-env-" + modalRandomSuffix() + ".sh"
 	cleanup := func(cleanupCtx context.Context) {
-		cleanupLocal()
-		if err := core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error {
-			return b.execShell(cleanupCtx, client, sandboxID, "rm -f "+shellQuote(remotePath), nil)
-		}); err != nil {
-			fmt.Fprintf(b.rt.Stderr, "warning: modal env profile cleanup failed for %s: %v\n", sandboxID, err)
+		err := profile.Close(cleanupCtx, func(removeCtx context.Context, remotePath string) error {
+			// Each operation owns a unique path; shared fencing excludes claim writers
+			// without allowing lock contention to outlive the cleanup deadline.
+			return core.WithLeaseClaimUnchangedShared(removeCtx, claim.LeaseID, claim, func() error {
+				return b.execShell(removeCtx, client, claim.CloudID, "rm -f "+shellQuote(remotePath), nil)
+			})
+		})
+		if err != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: modal env profile cleanup failed for %s: %v\n", claim.CloudID, err)
 		}
 	}
-	if err := client.UploadFile(ctx, sandboxID, localPath, remotePath); err != nil {
+	if err := profile.Upload(ctx, func(uploadCtx context.Context, localPath, remotePath string) error {
+		return client.UploadFile(uploadCtx, claim.CloudID, localPath, remotePath)
+	}); err != nil {
 		return "", cleanup, err
 	}
-	keep = true
-	return remotePath, cleanup, nil
-}
-
-func formatModalShellEnvFile(env map[string]string) string {
-	keys := make([]string, 0, len(env))
-	for key := range env {
-		if validModalEnvName(key) {
-			keys = append(keys, key)
-		}
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	b.WriteString("set -a\n")
-	for _, key := range keys {
-		fmt.Fprintf(&b, "%s=%s\n", key, shellQuote(env[key]))
-	}
-	b.WriteString("set +a\n")
-	return b.String()
-}
-
-func wrapModalCommandWithEnvProfile(command []string, envPath string) []string {
-	script := ". " + shellQuote(envPath) + "\n"
-	if len(command) == 3 && command[0] == "bash" && command[1] == "-lc" {
-		script += command[2]
-	} else {
-		script += "exec " + shellScriptFromArgv(command)
-	}
-	return []string{"bash", "-lc", script}
-}
-
-func validModalEnvName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i, r := range name {
-		if r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (i > 0 && r >= '0' && r <= '9') {
-			continue
-		}
-		return false
-	}
-	return true
+	return profile.RemotePath(), cleanup, nil
 }

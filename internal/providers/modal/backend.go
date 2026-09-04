@@ -150,7 +150,7 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 				if err != nil {
 					return shared.DelegatedSandboxCommand{Close: cleanup}, err
 				}
-				command = wrapModalCommandWithEnvProfile(command, envPath)
+				command = shared.WrapCommandWithShellEnvProfile(command, envPath)
 			}
 			return shared.DelegatedSandboxCommand{Close: cleanup, Run: func(ctx context.Context) (int, error) {
 				var code int

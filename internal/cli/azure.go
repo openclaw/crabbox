@@ -1869,10 +1869,11 @@ func (c *AzureClient) DeleteServer(ctx context.Context, name string) error {
 }
 
 // PrepareOwnedServer captures immutable companion identities before the VM can
-// be deleted. The caller persists the returned labels in the exact lease claim.
+// be deleted. Callers requiring crash-resumable cleanup persist the returned
+// labels in the exact lease claim; acquisition rollback holds them in process.
 func (c *AzureClient) PrepareOwnedServer(ctx context.Context, expected Server) (Server, error) {
 	return c.prepareAzureDeleteServer(ctx, expected, func(expected, live Server) error {
-		return validateAzureOwnedVM(expected, live)
+		return ValidateAzureOwnedVM(expected, live)
 	})
 }
 
@@ -1931,7 +1932,7 @@ func (c *AzureClient) DeleteOwnedServer(ctx context.Context, expected Server) er
 	if err != nil {
 		return err
 	}
-	return c.deleteAzureValidatedResourcesWithRetry(ctx, expected, resources, validateAzureOwnedVM)
+	return c.deleteAzureValidatedResourcesWithRetry(ctx, expected, resources, ValidateAzureOwnedVM)
 }
 
 type azureCleanupSkipError struct{ err error }
@@ -2165,7 +2166,7 @@ func requireMatchingAzureDeleteResources(expected, live azureVMDeleteResources) 
 }
 
 func validateAzureCleanupVM(expected, live Server, now time.Time) error {
-	if err := validateAzureOwnedVM(expected, live); err != nil {
+	if err := ValidateAzureOwnedVM(expected, live); err != nil {
 		return err
 	}
 	if shouldDelete, reason := shouldCleanupServer(live, now); !shouldDelete {
@@ -2174,7 +2175,9 @@ func validateAzureCleanupVM(expected, live Server, now time.Time) error {
 	return nil
 }
 
-func validateAzureOwnedVM(expected, live Server) error {
+// ValidateAzureOwnedVM compares an observation with a frozen VM generation and
+// ownership binding. It does not authorize name-addressed mutations by itself.
+func ValidateAzureOwnedVM(expected, live Server) error {
 	expectedID := strings.TrimSpace(expected.CloudID)
 	if expectedID == "" || strings.TrimSpace(live.CloudID) != expectedID {
 		return fmt.Errorf("live Azure cloud id %q does not match cleanup candidate %q", live.CloudID, expected.CloudID)
