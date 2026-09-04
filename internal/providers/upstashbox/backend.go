@@ -202,7 +202,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		command = shared.ShellScriptWithEnvProfile(command, envPath)
 	}
 	commandStarted := b.now()
-	exitCode, commandErr := client.ExecStream(ctx, boxID, command, folder, b.rt.Stdout)
+	exitCode := 0
+	commandErr := ctx.Err()
+	if commandErr == nil {
+		exitCode, commandErr = client.ExecStream(ctx, boxID, command, folder, b.rt.Stdout)
+	}
 	commandDuration := b.now().Sub(commandStarted)
 	envCleanupErr := error(nil)
 	if cleanupEnv != nil {
@@ -257,9 +261,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if commandErr != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		if envCleanupErr != nil {
-			return result, ExitError{Code: 1, Message: fmt.Sprintf("upstash-box run failed: %v; %v", commandErr, envCleanupErr)}
+			return result, shared.ExitErrorWithCause(1, fmt.Sprintf("upstash-box run failed: %v; %v", commandErr, envCleanupErr), commandErr)
 		}
-		return result, ExitError{Code: 1, Message: fmt.Sprintf("upstash-box run failed: %v", commandErr)}
+		return result, shared.ExitErrorWithCause(1, fmt.Sprintf("upstash-box run failed: %v", commandErr), commandErr)
 	}
 	if exitCode != 0 {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)

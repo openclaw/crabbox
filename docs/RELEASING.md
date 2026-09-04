@@ -26,6 +26,15 @@ the frozen tagged source or published release notes.
 
 ## Trust Anchors
 
+Treat a pushed version tag as public source publication even when no GitHub
+Release exists. Go module proxies may already have cached its source, and the
+public checksum database preserves that content identity. Never move a version
+tag to include newer code or rely on deleting a tag or clearing a local cache to
+remove the public version. Complete the exact tagged release or publish the
+changes under a new version, preserving the original changelog section. See
+[Go's publishing guidance](https://go.dev/doc/modules/publishing) and the
+[module mirror FAQ](https://proxy.golang.org/#faq).
+
 > **v0.37.0 safety stop:** `release/records/v0.37.0.json` preserves tag object
 > `d3e0da6a0355372bb3600ef9f2360983acd8272e` and source commit
 > `99c82134c62e0da795b6165efa6affe7140c20dd`, but marks publication blocked.
