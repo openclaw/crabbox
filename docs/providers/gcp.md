@@ -207,7 +207,8 @@ If either `GCP_CLIENT_EMAIL` or `GCP_PRIVATE_KEY` is set, both must be set.
 When `CRABBOX_GCP_CREDENTIAL_SOURCE` is unset, brokered GCP uses the
 service-account-key path. `CRABBOX_GCP_CREDENTIAL_SOURCE=service-account-key`
 is accepted as an explicit spelling of the same default. Metadata token requests
-reject redirects and responses without Google's metadata marker, refresh before
+use manual redirect handling supported by both Node and workerd, reject all `3xx`
+responses without following them or retrying, reject responses without Google's metadata marker, refresh before
 the metadata server's five-minute token-cache boundary, and retry
 connection/startup failures plus transient `429`, `499`, and `5xx` responses
 with bounded exponential backoff and a one-minute overall deadline.

@@ -24,6 +24,7 @@ import {
   sshPublicKeyIdentity,
 } from "./provider-key";
 import { leaseProviderLabels } from "./provider-labels";
+import { ProvisioningAttemptHistory } from "./provisioning-attempts";
 import { leaseProviderName } from "./slug";
 import type {
   AWSCredentialProvider,
@@ -954,8 +955,7 @@ export class EC2SpotClient {
         );
       }
       const candidates = pinnedMacHostType ? [pinnedMacHostType] : awsLaunchCandidates(config);
-      const failures: string[] = [];
-      const attempts: ProvisioningAttempt[] = [];
+      const history = new ProvisioningAttemptHistory();
       const quotaCache = new Map<string, number | undefined>();
       const imageCache = new Map<string, string>();
       const marketFallbackCandidates: string[] = [];
@@ -1003,8 +1003,7 @@ export class EC2SpotClient {
           quotaCache,
         );
         if (preflight) {
-          attempts.push(preflight);
-          failures.push(`${serverType}: ${preflight.message}`);
+          history.record(preflight, `${serverType}: ${preflight.message}`);
           if (config.capacityMarket === "spot") {
             marketFallbackCandidates.push(serverType);
           }
@@ -1029,20 +1028,19 @@ export class EC2SpotClient {
             attempts?: ProvisioningAttempt[];
             imageID: string;
           } = { server, serverType, market: config.capacityMarket, imageID };
-          if (attempts.length > 0) {
-            result.attempts = attempts;
-          }
-          return result;
+          return { ...result, ...history.result() };
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          attempts.push({
-            region: this.region,
-            serverType,
-            market: config.capacityMarket,
-            category: awsProvisioningErrorCategory(message) || "fatal",
-            message: conciseAWSProvisioningMessage(message),
-          });
-          failures.push(`${serverType}: ${message}`);
+          history.record(
+            {
+              region: this.region,
+              serverType,
+              market: config.capacityMarket,
+              category: awsProvisioningErrorCategory(message) || "fatal",
+              message: conciseAWSProvisioningMessage(message),
+            },
+            `${serverType}: ${message}`,
+          );
           if (!isRetryableAWSProvisioningError(message)) {
             marketFallbackCandidates.length = 0;
             break;
@@ -1058,8 +1056,7 @@ export class EC2SpotClient {
           // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback must stay sequential.
           const preflight = await this.quotaPreflightAttempt(serverType, "on-demand", quotaCache);
           if (preflight) {
-            attempts.push(preflight);
-            failures.push(`on-demand ${serverType}: ${preflight.message}`);
+            history.record(preflight, `on-demand ${serverType}: ${preflight.message}`);
             continue;
           }
           try {
@@ -1085,20 +1082,19 @@ export class EC2SpotClient {
               attempts?: ProvisioningAttempt[];
               imageID: string;
             } = { server, serverType, market: "on-demand", imageID };
-            if (attempts.length > 0) {
-              result.attempts = attempts;
-            }
-            return result;
+            return { ...result, ...history.result() };
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            attempts.push({
-              region: this.region,
-              serverType,
-              market: "on-demand",
-              category: awsProvisioningErrorCategory(message) || "fatal",
-              message: conciseAWSProvisioningMessage(message),
-            });
-            failures.push(`on-demand ${serverType}: ${message}`);
+            history.record(
+              {
+                region: this.region,
+                serverType,
+                market: "on-demand",
+                category: awsProvisioningErrorCategory(message) || "fatal",
+                message: conciseAWSProvisioningMessage(message),
+              },
+              `on-demand ${serverType}: ${message}`,
+            );
             if (!isRetryableAWSProvisioningError(message)) {
               break;
             }
@@ -1106,11 +1102,11 @@ export class EC2SpotClient {
         }
       }
       if (config.serverTypeExplicit) {
-        throw new Error(
-          `requested exact AWS instance type ${config.serverType} failed; remove --type to allow class fallback: ${failures.join("; ")}`,
+        throw history.error(
+          `requested exact AWS instance type ${config.serverType} failed; remove --type to allow class fallback: `,
         );
       }
-      throw new Error(failures.join("; "));
+      throw history.error();
     } finally {
       if (transientImageID) {
         await this.ec2("DeregisterImage", { ImageId: transientImageID }).catch(() => undefined);

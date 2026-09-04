@@ -1065,8 +1065,50 @@ describe("gcp provider", () => {
     await expect(client.listCrabboxServers()).resolves.toEqual([]);
     expect(calls[0]?.url).toContain("metadata.google.internal");
     expect(calls[0]?.headers.get("Metadata-Flavor")).toBe("Google");
-    expect(calls[0]?.redirect).toBe("error");
+    expect(calls[0]?.redirect).toBe("manual");
     expect(calls[1]?.headers.get("Authorization")).toBe("Bearer metadata-token");
+  });
+
+  it.each([300, 301, 302, 303, 307, 308, 399])(
+    "rejects metadata HTTP %s without following, caching, or retrying it",
+    async (status) => {
+      const client = new GCPClient({ ...env, CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata" });
+      const requests: string[] = [];
+      client.fetcher = async (input) => {
+        requests.push(String(input));
+        return metadataJSON(
+          { access_token: "redirect-token", expires_in: 3600 },
+          {
+            status,
+            headers: { Location: "https://untrusted.example/metadata" },
+          },
+        );
+      };
+      await expect(client.listCrabboxServers()).rejects.toThrow(
+        `gcp metadata token: redirect rejected (http ${status})`,
+      );
+      await expect(client.listCrabboxServers()).rejects.toThrow(
+        `gcp metadata token: redirect rejected (http ${status})`,
+      );
+      expect(requests).toEqual(
+        Array(2).fill(
+          "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+        ),
+      );
+    },
+  );
+
+  it("rejects metadata redirects before reading the marker or response body", async () => {
+    const client = new GCPClient({ ...env, CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata" });
+    const response = new Response(null, { status: 304 });
+    const body = vi.spyOn(response, "text").mockRejectedValue(new Error("must not read body"));
+    const fetcher = vi.fn<typeof fetch>(async () => response);
+    client.fetcher = fetcher;
+    await expect(client.listCrabboxServers()).rejects.toThrow(
+      "gcp metadata token: redirect rejected (http 304)",
+    );
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(body).not.toHaveBeenCalled();
   });
 
   it("retries transient metadata token failures", async () => {
@@ -2397,6 +2439,130 @@ describe("gcp provider", () => {
     );
     expect(createCall?.body).not.toHaveProperty("disks");
     expect(String(createCall?.body?.name)).toMatch(/^crabbox-blue-lobster-/);
+  });
+
+  it("retains failed on-demand attempts after Spot and zone fallback", async () => {
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    const leaseID = "cbx_abcdef123456";
+    const slug = "blue-lobster";
+    const name = leaseProviderName(leaseID, slug);
+    const calls: string[] = [];
+    const targets: string[] = [];
+    const claims: ProviderProvisioningCleanupClaim[] = [];
+    const inserts: Array<{ zone: string; market: string }> = [];
+    let labels: Record<string, string> = {};
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? "GET";
+      calls.push(`${method} ${url.pathname}`);
+      if (method === "GET" && url.pathname.endsWith("/global/firewalls/crabbox-ssh")) {
+        return Response.json({
+          name: "crabbox-ssh",
+          description: "Crabbox-managed SSH ingress",
+          network: "projects/default-project/global/networks/default",
+          direction: "INGRESS",
+          sourceRanges: ["0.0.0.0/0"],
+          targetTags: ["crabbox-ssh"],
+          allowed: [{ IPProtocol: "tcp", ports: ["22", "2222"] }],
+        });
+      }
+      if (method === "PUT" && url.pathname.endsWith("/global/firewalls/crabbox-ssh")) {
+        return Response.json({ name: "firewall-op", status: "DONE" });
+      }
+      if (method === "POST" && url.pathname.endsWith("/global/operations/firewall-op/wait")) {
+        return Response.json({ name: "firewall-op", status: "DONE" });
+      }
+      if (
+        method === "POST" &&
+        url.pathname.endsWith("/zones/us-central1-b/operations/insert-op/wait")
+      ) {
+        return Response.json({
+          name: "insert-op",
+          status: "DONE",
+          targetId: "9223372036854775807",
+        });
+      }
+      const zone = url.pathname.match(/\/zones\/([^/]+)\//)?.[1];
+      if (method === "POST" && zone && url.pathname.endsWith("/instances")) {
+        const body = JSON.parse(String(init?.body));
+        const market = body.scheduling?.provisioningModel === "SPOT" ? "spot" : "on-demand";
+        inserts.push({ zone, market });
+        if (inserts.length < 4)
+          return new Response("ZONE_RESOURCE_POOL_EXHAUSTED", { status: 429 });
+        labels = body.labels;
+        return Response.json({
+          name: "insert-op",
+          status: "DONE",
+          targetId: "9223372036854775807",
+        });
+      }
+      if (
+        method === "GET" &&
+        zone === "us-central1-b" &&
+        url.pathname.endsWith(`/instances/${name}`)
+      ) {
+        return Response.json({
+          id: "9223372036854775807",
+          name,
+          labels,
+          status: "RUNNING",
+          zone: "projects/default-project/zones/us-central1-b",
+          machineType: "zones/us-central1-b/machineTypes/e2-micro",
+          networkInterfaces: [{ accessConfigs: [{ natIP: "192.0.2.10" }] }],
+        });
+      }
+      throw new Error(`unexpected GCP request ${method} ${url.pathname}`);
+    };
+    const result = await client.createServerWithFallback(
+      leaseConfig({
+        provider: "gcp",
+        gcpZone: "us-central1-a",
+        serverType: "e2-micro",
+        serverTypeExplicit: true,
+        sshPublicKey: "ssh-ed25519 test",
+        capacity: { market: "spot", fallback: "on-demand", availabilityZones: ["us-central1-b"] },
+      }),
+      leaseID,
+      slug,
+      "alice@example.com",
+      {
+        async onTargetAttempt(target) {
+          targets.push(target.region ?? "");
+        },
+        async onResourceCreated(claim) {
+          claims.push({ ...claim });
+          return true;
+        },
+      },
+    );
+    expect(inserts).toEqual([
+      { zone: "us-central1-a", market: "spot" },
+      { zone: "us-central1-b", market: "spot" },
+      { zone: "us-central1-a", market: "on-demand" },
+      { zone: "us-central1-b", market: "on-demand" },
+    ]);
+    expect(targets).toEqual(inserts.map(({ zone }) => zone));
+    expect(claims).toEqual([
+      expect.objectContaining({
+        region: "us-central1-b",
+        providerResourceID: "9223372036854775807",
+      }),
+    ]);
+    expect(result).toMatchObject({
+      market: "on-demand",
+      server: { region: "us-central1-b", providerResourceID: "9223372036854775807" },
+    });
+    expect(calls.filter((call) => call.includes(`/instances/${name}`))).toHaveLength(1);
+    expect(result.attempts).toEqual(
+      inserts.slice(0, 3).map(({ zone, market }) => ({
+        region: zone,
+        market,
+        serverType: "e2-micro",
+        category: "capacity",
+        message: expect.stringContaining("ZONE_RESOURCE_POOL_EXHAUSTED"),
+      })),
+    );
   });
 
   it("keeps exact GCP types eligible for zone fallback", async () => {
