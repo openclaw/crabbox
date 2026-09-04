@@ -162,10 +162,74 @@ type CoordinatorLeaseImage struct {
 }
 
 type CoordinatorProvisioningTiming struct {
-	RequestMs      int64 `json:"requestMs"`
-	NetworkReadyMs int64 `json:"networkReadyMs,omitempty"`
-	BootstrapMs    int64 `json:"bootstrapMs,omitempty"`
-	TotalMs        int64 `json:"totalMs"`
+	RequestMs      int64                          `json:"requestMs"`
+	NetworkReadyMs int64                          `json:"networkReadyMs,omitempty"`
+	BootstrapMs    int64                          `json:"bootstrapMs,omitempty"`
+	TotalMs        int64                          `json:"totalMs"`
+	Phases         []CoordinatorProvisioningPhase `json:"phases,omitempty"`
+}
+
+type CoordinatorProvisioningPhase struct {
+	Name string `json:"name"`
+	Ms   int64  `json:"ms"`
+}
+
+func (timing *CoordinatorProvisioningTiming) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		RequestMs      json.RawMessage `json:"requestMs"`
+		NetworkReadyMs json.RawMessage `json:"networkReadyMs"`
+		BootstrapMs    json.RawMessage `json:"bootstrapMs"`
+		TotalMs        json.RawMessage `json:"totalMs"`
+		Phases         json.RawMessage `json:"phases"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		*timing = CoordinatorProvisioningTiming{}
+		return nil
+	}
+	timing.RequestMs, _ = coordinatorOptionalInt64(raw.RequestMs)
+	timing.NetworkReadyMs, _ = coordinatorOptionalInt64(raw.NetworkReadyMs)
+	timing.BootstrapMs, _ = coordinatorOptionalInt64(raw.BootstrapMs)
+	timing.TotalMs, _ = coordinatorOptionalInt64(raw.TotalMs)
+	timing.Phases = decodeCoordinatorProvisioningPhases(raw.Phases)
+	return nil
+}
+
+func decodeCoordinatorProvisioningPhases(data json.RawMessage) []CoordinatorProvisioningPhase {
+	if len(data) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil
+	}
+	var raw []struct {
+		Name json.RawMessage `json:"name"`
+		Ms   json.RawMessage `json:"ms"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	phases := make([]CoordinatorProvisioningPhase, 0, len(raw))
+	for _, phase := range raw {
+		var name string
+		if err := json.Unmarshal(phase.Name, &name); err != nil {
+			return nil
+		}
+		ms, ok := coordinatorOptionalInt64(phase.Ms)
+		if !ok {
+			return nil
+		}
+		phases = append(phases, CoordinatorProvisioningPhase{Name: name, Ms: ms})
+	}
+	return phases
+}
+
+func coordinatorOptionalInt64(data json.RawMessage) (int64, bool) {
+	if len(data) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return 0, true
+	}
+	var number json.Number
+	if err := json.Unmarshal(data, &number); err != nil {
+		return 0, false
+	}
+	value, err := strconv.ParseInt(number.String(), 10, 64)
+	return value, err == nil
 }
 
 type CoordinatorLeaseRegistration struct {

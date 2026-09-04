@@ -169,13 +169,18 @@ func TestRunDelegatedTimingJSONEmittedOnceWhileRecording(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run error=%v stderr=%q", err, stderr.String())
 	}
-	if count := strings.Count(stderr.String(), `"provider":"benchmark-timing-test"`); count != 1 {
-		t.Fatalf("delegated timing JSON count=%d want 1; stderr=%q", count, stderr.String())
-	}
 	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
 	var emitted TimingReport
-	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &emitted); err != nil || emitted.Provider != "benchmark-timing-test" {
-		t.Fatalf("final stderr line is not delegated timing JSON: line=%q error=%v", lines[len(lines)-1], err)
+	var timingJSONCount int
+	for _, line := range lines {
+		var candidate TimingReport
+		if err := json.Unmarshal([]byte(line), &candidate); err == nil && candidate.Provider != "" {
+			emitted = candidate
+			timingJSONCount++
+		}
+	}
+	if timingJSONCount != 1 || emitted.Provider != "benchmark-timing-test" {
+		t.Fatalf("delegated timing JSON count=%d want 1; stderr=%q", timingJSONCount, stderr.String())
 	}
 	records, err := readBenchmarkTimingRecords(storePath)
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -863,6 +864,11 @@ func TestCoordinatorAcquireReportsSelectedImageAndProviderStartupTiming(t *testi
 			NetworkReadyMs: 3400,
 			BootstrapMs:    500,
 			TotalMs:        5100,
+			Phases: []CoordinatorProvisioningPhase{
+				{Name: "request", Ms: 1200},
+				{Name: "network_ready", Ms: 3400},
+				{Name: "bootstrap", Ms: 500},
+			},
 		},
 	}
 	var stderr bytes.Buffer
@@ -874,6 +880,162 @@ func TestCoordinatorAcquireReportsSelectedImageAndProviderStartupTiming(t *testi
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr=%q missing %q", stderr.String(), want)
 		}
+	}
+	runnerTiming := coordinatorRunnerTiming(lease)
+	if runnerTiming == nil || runnerTiming.TotalMs != 5100 || len(runnerTiming.Phases) != 3 {
+		t.Fatalf("runner timing=%#v", runnerTiming)
+	}
+	var total int64
+	for _, phase := range runnerTiming.Phases {
+		total += phase.Ms
+	}
+	if total != runnerTiming.TotalMs {
+		t.Fatalf("phase total=%d want %d: %#v", total, runnerTiming.TotalMs, runnerTiming.Phases)
+	}
+}
+
+func TestCoordinatorRunnerTimingRejectsMalformedPhaseVectors(t *testing.T) {
+	validLegacy := func() *CoordinatorProvisioningTiming {
+		return &CoordinatorProvisioningTiming{RequestMs: 2, TotalMs: 10}
+	}
+	tests := []struct {
+		name   string
+		timing *CoordinatorProvisioningTiming
+	}{
+		{
+			name: "unknown",
+			timing: &CoordinatorProvisioningTiming{
+				RequestMs: 2, TotalMs: 10,
+				Phases: []CoordinatorProvisioningPhase{{Name: "dns", Ms: 10}},
+			},
+		},
+		{
+			name: "duplicate",
+			timing: &CoordinatorProvisioningTiming{
+				RequestMs: 2, TotalMs: 10,
+				Phases: []CoordinatorProvisioningPhase{
+					{Name: "request", Ms: 4},
+					{Name: "request", Ms: 6},
+				},
+			},
+		},
+		{
+			name: "nonpositive",
+			timing: &CoordinatorProvisioningTiming{
+				RequestMs: 2, TotalMs: 10,
+				Phases: []CoordinatorProvisioningPhase{{Name: "request", Ms: 0}},
+			},
+		},
+		{
+			name: "over budget",
+			timing: &CoordinatorProvisioningTiming{
+				RequestMs: 2, TotalMs: 10,
+				Phases: []CoordinatorProvisioningPhase{{Name: "request", Ms: 11}},
+			},
+		},
+		{
+			name: "over four",
+			timing: &CoordinatorProvisioningTiming{
+				RequestMs: 2, TotalMs: 10,
+				Phases: []CoordinatorProvisioningPhase{
+					{Name: "request", Ms: 1},
+					{Name: "network_ready", Ms: 1},
+					{Name: "bootstrap", Ms: 1},
+					{Name: "unattributed", Ms: 1},
+					{Name: "request", Ms: 1},
+				},
+			},
+		},
+		{
+			name: "overflow",
+			timing: &CoordinatorProvisioningTiming{
+				TotalMs: math.MaxInt64,
+				Phases: []CoordinatorProvisioningPhase{
+					{Name: "request", Ms: math.MaxInt64},
+					{Name: "network_ready", Ms: 1},
+				},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runnerTiming := coordinatorRunnerTiming(CoordinatorLease{ProvisioningTiming: test.timing})
+			if runnerTiming == nil {
+				t.Fatal("runner timing is nil")
+			}
+			if test.name == "overflow" {
+				if len(runnerTiming.Phases) != 1 || runnerTiming.Phases[0] != (RunnerPhase{Name: "provider.unattributed", Ms: math.MaxInt64}) {
+					t.Fatalf("overflow fallback=%#v", runnerTiming.Phases)
+				}
+				return
+			}
+			want := coordinatorRunnerTiming(CoordinatorLease{ProvisioningTiming: validLegacy()})
+			if !reflect.DeepEqual(runnerTiming, want) {
+				t.Fatalf("runner timing=%#v want legacy fallback %#v", runnerTiming, want)
+			}
+		})
+	}
+}
+
+func TestCoordinatorRunnerTimingFallsBackWithoutFailingDecode(t *testing.T) {
+	var lease CoordinatorLease
+	err := json.Unmarshal([]byte(`{
+		"id":"cbx_123",
+		"provisioningTiming":{
+			"requestMs":2,
+			"networkReadyMs":3,
+			"totalMs":10,
+			"phases":[{"name":"request","ms":1.5}]
+		}
+	}`), &lease)
+	if err != nil {
+		t.Fatalf("optional timing failed lease decode: %v", err)
+	}
+	runnerTiming := coordinatorRunnerTiming(lease)
+	want := []RunnerPhase{
+		{Name: "provider.request", Ms: 2},
+		{Name: "connect.provider", Ms: 3},
+		{Name: "provider.unattributed", Ms: 5},
+	}
+	if runnerTiming == nil || !reflect.DeepEqual(runnerTiming.Phases, want) {
+		t.Fatalf("runner timing=%#v want %#v", runnerTiming, want)
+	}
+}
+
+func TestCoordinatorRunnerTimingKeepsAcceptedPhaseNamesUnique(t *testing.T) {
+	runnerTiming := coordinatorRunnerTiming(CoordinatorLease{
+		ProvisioningTiming: &CoordinatorProvisioningTiming{
+			TotalMs: 10,
+			Phases: []CoordinatorProvisioningPhase{
+				{Name: "request", Ms: 1},
+				{Name: "network_ready", Ms: 1},
+				{Name: "bootstrap", Ms: 1},
+				{Name: "unattributed", Ms: 1},
+			},
+		},
+	})
+	want := []RunnerPhase{
+		{Name: "provider.request", Ms: 1},
+		{Name: "connect.provider", Ms: 1},
+		{Name: "bootstrap.readiness", Ms: 1},
+		{Name: "provider.unattributed", Ms: 7},
+	}
+	if runnerTiming == nil || !reflect.DeepEqual(runnerTiming.Phases, want) {
+		t.Fatalf("runner timing=%#v want %#v", runnerTiming, want)
+	}
+}
+
+func TestCoordinatorRunnerTimingUsesUnattributedForInconsistentLegacyScalars(t *testing.T) {
+	runnerTiming := coordinatorRunnerTiming(CoordinatorLease{
+		ProvisioningTiming: &CoordinatorProvisioningTiming{
+			RequestMs:      8,
+			NetworkReadyMs: 3,
+			TotalMs:        10,
+		},
+	})
+	want := []RunnerPhase{{Name: "provider.unattributed", Ms: 10}}
+	if runnerTiming == nil || !reflect.DeepEqual(runnerTiming.Phases, want) {
+		t.Fatalf("runner timing=%#v want %#v", runnerTiming, want)
 	}
 }
 

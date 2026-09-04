@@ -27,6 +27,29 @@ import (
 	"time"
 )
 
+type rejectTimingJSONWriter struct {
+	bytes.Buffer
+	rejected bool
+}
+
+func (writer *rejectTimingJSONWriter) WriteTimingReport(TimingReport) error {
+	writer.rejected = true
+	return errors.New("timing JSON sink unavailable")
+}
+
+type terminalOrderTimingWriter struct {
+	bytes.Buffer
+	mu     *sync.Mutex
+	events *[]string
+}
+
+func (writer *terminalOrderTimingWriter) WriteTimingReport(report TimingReport) error {
+	writer.mu.Lock()
+	*writer.events = append(*writer.events, "timing")
+	writer.mu.Unlock()
+	return encodeTimingJSON(&writer.Buffer, report)
+}
+
 func init() {
 	RegisterProvider(windowsEnvHelperTestProvider{})
 	RegisterProvider(runEnvProfileTestProvider{})
@@ -3448,6 +3471,7 @@ func TestRunCommandTerminalReceiptIncludesLateTimingRecordFailure(t *testing.T) 
 		"--provider", "run-env-profile-test",
 		"--no-sync",
 		"--timing-record", timingRecordPath,
+		"--timing-json",
 		"--attest", receiptPath,
 		"--", "true",
 	})
@@ -3468,6 +3492,217 @@ func TestRunCommandTerminalReceiptIncludesLateTimingRecordFailure(t *testing.T) 
 	}
 	if !strings.Contains(exitErr.Message, "open benchmark timing store") {
 		t.Fatalf("missing timing-record failure: %v", exitErr)
+	}
+	timingIndex := strings.LastIndex(stderr.String(), `"runnerTotalMs"`)
+	receiptIndex := strings.LastIndex(stderr.String(), "artifact kind=receipt")
+	if timingIndex < 0 || receiptIndex <= timingIndex {
+		t.Fatalf("terminal order must be timing record, timing JSON, then receipt:\n%s", stderr.String())
+	}
+}
+
+func TestRunCommandTimingJSONFailureIsTerminalAndUpdatesReceipt(t *testing.T) {
+	for _, withReceipt := range []bool{false, true} {
+		name := "without receipt"
+		if withReceipt {
+			name = "with receipt"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			sshPath := filepath.Join(dir, "ssh")
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			go func() {
+				for {
+					conn, err := listener.Accept()
+					if err != nil {
+						return
+					}
+					_ = conn.Close()
+				}
+			}()
+			_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\nexit 0\n")
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+
+			args := []string{
+				"--provider", "run-env-profile-test",
+				"--no-sync",
+				"--timing-json",
+				"--stop-after", "never",
+			}
+			receiptPath := filepath.Join(dir, "receipt.json")
+			if withReceipt {
+				args = append(args, "--attest", receiptPath)
+			}
+			args = append(args, "--", "true")
+			var stdout bytes.Buffer
+			stderr := &rejectTimingJSONWriter{}
+			err = (App{Stdout: &stdout, Stderr: stderr}).runCommand(context.Background(), args)
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 7 {
+				t.Fatalf("error=%v, want timing sink exit 7\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+			}
+			if !stderr.rejected || !strings.Contains(exitErr.Message, "write timing JSON") {
+				t.Fatalf("timing sink was not terminal: error=%v stderr=%s", err, stderr.String())
+			}
+			if !withReceipt {
+				return
+			}
+			data, readErr := os.ReadFile(receiptPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			receipt, decodeErr := decodeTerminalRunReceipt(data)
+			if decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			if receipt.ExitCode != 7 {
+				t.Fatalf("receipt exit=%d, want timing sink exit 7", receipt.ExitCode)
+			}
+		})
+	}
+}
+
+func TestRunCommandDelegatedTerminalOrder(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	receiptPath := filepath.Join(dir, "receipt.json")
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "benchmark-timing-test",
+		"--timing-json",
+		"--attest", receiptPath,
+		"--", "true",
+	})
+	if err != nil {
+		t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	timingIndex := strings.LastIndex(stderr.String(), `"runnerTotalMs"`)
+	receiptIndex := strings.LastIndex(stderr.String(), "artifact kind=receipt")
+	if timingIndex < 0 || receiptIndex <= timingIndex {
+		t.Fatalf("delegated terminal order must be timing then receipt:\n%s", stderr.String())
+	}
+	data, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := decodeRunReceipt(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exitCode, ok := receipt["exit_code"].(json.Number); !ok || exitCode.String() != "0" {
+		t.Fatalf("delegated receipt exit=%v", receipt["exit_code"])
+	}
+}
+
+func TestRunCommandSyncOnlyFinalizesAfterTiming(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+
+	const (
+		leaseID = "cbx_sync_only"
+		runID   = "run_sync_only"
+	)
+	lease := CoordinatorLease{
+		ID:         leaseID,
+		Slug:       "sync-only",
+		Provider:   "run-ready-pool-preflight-test",
+		Owner:      "test@example.com",
+		Org:        "test",
+		Class:      "standard",
+		ServerType: "test",
+		Host:       "127.0.0.1",
+		SSHUser:    "crabbox",
+		SSHPort:    sshPort,
+		WorkRoot:   "/work/crabbox",
+		State:      "active",
+	}
+	var (
+		mu     sync.Mutex
+		events []string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/control":
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+leaseID:
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+leaseID+"/heartbeat":
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+			_ = json.NewEncoder(w).Encode(map[string]any{"run": CoordinatorRun{
+				ID: runID, LeaseID: leaseID, Provider: lease.Provider, State: "running",
+				StartedAt: "2026-09-04T00:00:00Z",
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/"+runID+"/events":
+			_ = json.NewEncoder(w).Encode(map[string]any{"event": CoordinatorRunEvent{
+				RunID: runID, Seq: 1, Type: "run.event", CreatedAt: "2026-09-04T00:00:00Z",
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/"+runID+"/finish":
+			mu.Lock()
+			events = append(events, "finish")
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"run": CoordinatorRun{
+				ID: runID, LeaseID: leaseID, Provider: lease.Provider, State: "finished",
+				StartedAt: "2026-09-04T00:00:00Z",
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+
+	var stdout bytes.Buffer
+	stderr := &terminalOrderTimingWriter{mu: &mu, events: &events}
+	err = (App{Stdout: &stdout, Stderr: stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-ready-pool-preflight-test",
+		"--id", leaseID,
+		"--no-sync",
+		"--sync-only",
+		"--timing-json",
+		"--stop-after", "never",
+	})
+	if err != nil {
+		t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !reflect.DeepEqual(events, []string{"timing", "finish"}) {
+		t.Fatalf("terminal events=%v, want timing then finish", events)
 	}
 }
 
@@ -3652,6 +3887,7 @@ exit 0
 		"--provider", "run-env-profile-test",
 		"--no-sync",
 		"--keep-on-failure",
+		"--timing-json",
 		"--attest", receiptPath,
 		"--download", "reports/data/manifest.json=" + downloadPath,
 		"--", "true",
@@ -3672,6 +3908,11 @@ exit 0
 	}
 	if !strings.Contains(stderr.String(), "artifact kind=receipt") {
 		t.Fatalf("missing terminal receipt output:\n%s", stderr.String())
+	}
+	timingIndex := strings.LastIndex(stderr.String(), `"runnerTotalMs"`)
+	receiptIndex := strings.LastIndex(stderr.String(), "artifact kind=receipt")
+	if timingIndex < 0 || receiptIndex <= timingIndex {
+		t.Fatalf("terminal order must be timing then receipt:\n%s", stderr.String())
 	}
 }
 

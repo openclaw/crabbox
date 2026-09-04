@@ -9,6 +9,7 @@
 - Reject mismatched E2B and CubeSandbox read/connection identities before adopting a sandbox or using its execution session, sharing exact resource-ID validation while keeping cleanup bound to the original allocation. [PR 1841](https://github.com/openclaw/crabbox/pull/1841). Thanks @steipete.
 - Local provider bridges: preserve cancellation and deadline causes when a POSIX child is interrupted, without masking completed command exits or output-limit errors. [PR 1862](https://github.com/openclaw/crabbox/pull/1862). Thanks @steipete.
 - CodeSandbox: share run finalization so failed cleanup returns an accurate recovery session, cancellation honors `--keep-on-failure`, and timing errors preserve the command outcome. [PR 1843](https://github.com/openclaw/crabbox/pull/1843). Thanks @steipete.
+- Add bounded runner wall-time phase telemetry to final timing JSON and benchmark records without changing signed receipt v2. [PR 1618](https://github.com/openclaw/crabbox/pull/1618). Thanks @vincentkoc.
 
 ## 0.49.1 - 2026-09-04
 
