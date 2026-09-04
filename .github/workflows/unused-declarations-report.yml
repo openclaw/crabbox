@@ -1,0 +1,331 @@
+name: Unused declarations report
+
+on:
+  push:
+    branches:
+      - audit/unused-declarations-20260904
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_SHA: 0f11089ee08fde86fb8e2088a326ac7e856497b3
+  GOLANGCI_LINT_VERSION: 2.12.2
+  GOLANGCI_LINT_ARCHIVE_SHA256: 8df580d2670fed8fa984aac0507099af8df275e665215f5c7a2ae3943893a553
+
+jobs:
+  harness-test:
+    name: Audit harness tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out harness
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Test audit harness
+        run: python3 -m unittest scripts/unused_declarations_audit_test.py
+
+  audit:
+    name: ${{ matrix.module_label }} ${{ matrix.goos }}/${{ matrix.goarch }} tests=${{ matrix.tests }}
+    needs: harness-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - module: .
+            module_label: root
+            goos: linux
+            goarch: amd64
+            tests: "false"
+          - module: .
+            module_label: root
+            goos: linux
+            goarch: amd64
+            tests: "true"
+          - module: .
+            module_label: root
+            goos: linux
+            goarch: arm64
+            tests: "false"
+          - module: .
+            module_label: root
+            goos: linux
+            goarch: arm64
+            tests: "true"
+          - module: .
+            module_label: root
+            goos: darwin
+            goarch: amd64
+            tests: "false"
+          - module: .
+            module_label: root
+            goos: darwin
+            goarch: amd64
+            tests: "true"
+          - module: .
+            module_label: root
+            goos: darwin
+            goarch: arm64
+            tests: "false"
+          - module: .
+            module_label: root
+            goos: darwin
+            goarch: arm64
+            tests: "true"
+          - module: .
+            module_label: root
+            goos: windows
+            goarch: amd64
+            tests: "false"
+          - module: .
+            module_label: root
+            goos: windows
+            goarch: amd64
+            tests: "true"
+          - module: .
+            module_label: root
+            goos: windows
+            goarch: arm64
+            tests: "false"
+          - module: .
+            module_label: root
+            goos: windows
+            goarch: arm64
+            tests: "true"
+          - module: worker/cloudflare-container-runner
+            module_label: cloudflare-container-runner
+            goos: linux
+            goarch: amd64
+            tests: "false"
+          - module: worker/cloudflare-container-runner
+            module_label: cloudflare-container-runner
+            goos: linux
+            goarch: amd64
+            tests: "true"
+          - module: worker/cloudflare-container-runner
+            module_label: cloudflare-container-runner
+            goos: linux
+            goarch: arm64
+            tests: "false"
+          - module: worker/cloudflare-container-runner
+            module_label: cloudflare-container-runner
+            goos: linux
+            goarch: arm64
+            tests: "true"
+          - module: worker/cloudflare-container-runner
+            module_label: cloudflare-container-runner
+            goos: darwin
+            goarch: amd64
+            tests: "false"
+          - module: worker/cloudflare-container-runner
+            module_label: cloudflare-container-runner
+            goos: darwin
+            goarch: amd64
+            tests: "true"
+          - module: worker/cloudflare-container-runner
+            module_label: cloudflare-container-runner
+            goos: darwin
+            goarch: arm64
+            tests: "false"
+          - module: worker/cloudflare-container-runner
+            module_label: cloudflare-container-runner
+            goos: darwin
+            goarch: arm64
+            tests: "true"
+
+    steps:
+      # Worst case: 1m metadata + 4m prep + 25m audit/report + 5m upload = 35m.
+      - name: Record audit job budget
+        timeout-minutes: 1
+        shell: bash
+        env:
+          AUDIT_GOARCH: ${{ matrix.goarch }}
+          AUDIT_GOOS: ${{ matrix.goos }}
+          AUDIT_MODULE: ${{ matrix.module }}
+          AUDIT_TESTS: ${{ matrix.tests }}
+        run: |
+          set -euo pipefail
+          started_epoch="$(date +%s)"
+          deadline_epoch="$((started_epoch + 35 * 60))"
+          export started_epoch deadline_epoch
+          {
+            printf 'JOB_STARTED_EPOCH=%s\n' "$started_epoch"
+            printf 'JOB_DEADLINE_EPOCH=%s\n' "$deadline_epoch"
+            printf 'UPLOAD_RESERVE_SECONDS=300\n'
+            printf 'BUDGET_OVERHEAD_SECONDS=60\n'
+          } >>"$GITHUB_ENV"
+          public_dir="$RUNNER_TEMP/unused-audit-public"
+          mkdir -p "$public_dir"
+          python3 - "$public_dir/setup-incomplete.json" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          report = {
+              "schemaVersion": 1,
+              "status": "incomplete",
+              "completeness": {
+                  "complete": False,
+                  "reasons": ["setup_incomplete"],
+              },
+              "identity": {
+                  "source": {"commit": os.environ["SOURCE_SHA"], "tree": ""},
+                  "harness": {"commit": os.environ["GITHUB_SHA"], "tree": ""},
+              },
+              "cell": {
+                  "module": os.environ["AUDIT_MODULE"],
+                  "target": {
+                      "goos": os.environ["AUDIT_GOOS"],
+                      "goarch": os.environ["AUDIT_GOARCH"],
+                  },
+                  "tests": os.environ["AUDIT_TESTS"] == "true",
+              },
+              "execution": {
+                  "jobStartedEpoch": int(os.environ["started_epoch"]),
+                  "jobDeadlineEpoch": int(os.environ["deadline_epoch"]),
+                  "uploadReserveSeconds": 300,
+                  "budgetOverheadSeconds": 60,
+              },
+              "findingCount": None,
+              "findings": [],
+          }
+          Path(sys.argv[1]).write_text(
+              json.dumps(report, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Check out harness
+        timeout-minutes: 1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: harness
+          persist-credentials: false
+
+      - name: Check out frozen source
+        timeout-minutes: 1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+
+      - name: Set up Go
+        timeout-minutes: 1
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: 1.26.5
+          cache: false
+          check-latest: false
+
+      - name: Install checksum-verified host linter
+        id: install
+        if: ${{ always() }}
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/golangci-lint.tar.gz"
+          tool_root="$RUNNER_TEMP/golangci-lint"
+          url="https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64.tar.gz"
+          cutoff="$((JOB_DEADLINE_EPOCH - UPLOAD_RESERVE_SECONDS - BUDGET_OVERHEAD_SECONDS))"
+          remaining="$((cutoff - $(date +%s)))"
+          test "$remaining" -gt 0
+          install_limit="$remaining"
+          if [ "$install_limit" -gt 60 ]; then
+            install_limit=60
+          fi
+          curl --fail --silent --show-error --location \
+            --connect-timeout 10 --max-time "$install_limit" \
+            --retry 3 --retry-max-time "$install_limit" \
+            "$url" \
+            --output "$archive"
+          remaining="$((cutoff - $(date +%s)))"
+          test "$remaining" -gt 0
+          printf '%s  %s\n' "$GOLANGCI_LINT_ARCHIVE_SHA256" "$archive" |
+            timeout --signal=TERM --kill-after=10s "${remaining}s" \
+              sha256sum --check --strict -
+          remaining="$((cutoff - $(date +%s)))"
+          test "$remaining" -gt 0
+          timeout --signal=TERM --kill-after=10s "${remaining}s" \
+            mkdir -p "$tool_root"
+          remaining="$((cutoff - $(date +%s)))"
+          test "$remaining" -gt 0
+          timeout --signal=TERM --kill-after=10s "${remaining}s" \
+            tar -xzf "$archive" --strip-components=1 -C "$tool_root"
+          test -x "$tool_root/golangci-lint"
+
+      - name: Run report-only unused audit
+        id: audit
+        if: ${{ always() }}
+        continue-on-error: true
+        timeout-minutes: 25
+        shell: bash
+        run: |
+          set -euo pipefail
+          public_dir="$RUNNER_TEMP/unused-audit-public"
+          private_dir="$RUNNER_TEMP/unused-audit-private"
+          mkdir -p "$public_dir" "$private_dir"
+          set +e
+          python3 harness/scripts/unused_declarations_audit.py \
+            --source-root "$GITHUB_WORKSPACE/source" \
+            --harness-root "$GITHUB_WORKSPACE/harness" \
+            --module "${{ matrix.module }}" \
+            --goos "${{ matrix.goos }}" \
+            --goarch "${{ matrix.goarch }}" \
+            --tests "${{ matrix.tests }}" \
+            --tool "$RUNNER_TEMP/golangci-lint/golangci-lint" \
+            --tool-version "$GOLANGCI_LINT_VERSION" \
+            --tool-archive-sha256 "$GOLANGCI_LINT_ARCHIVE_SHA256" \
+            --config "$GITHUB_WORKSPACE/harness/.github/unused-declarations.golangci.yml" \
+            --output-dir "$public_dir" \
+            --private-root "$private_dir" \
+            --source-sha "$SOURCE_SHA" \
+            --harness-sha "$GITHUB_SHA" \
+            --job-started-epoch "$JOB_STARTED_EPOCH" \
+            --job-deadline-epoch "$JOB_DEADLINE_EPOCH" \
+            --process-deadline-seconds 1440 \
+            --upload-reserve-seconds "$UPLOAD_RESERVE_SECONDS" \
+            --budget-overhead-seconds "$BUDGET_OVERHEAD_SECONDS"
+          audit_status="$?"
+          set -e
+          actual_report="$public_dir/unused-${{ matrix.module_label }}-${{ matrix.goos }}-${{ matrix.goarch }}-tests-${{ matrix.tests }}.json"
+          if [ -f "$actual_report" ]; then
+            python3 - "$public_dir/setup-incomplete.json" <<'PY'
+          from pathlib import Path
+          import sys
+
+          placeholder = Path(sys.argv[1])
+          if placeholder.exists():
+              placeholder.unlink()
+          PY
+          fi
+          exit "$audit_status"
+
+      - name: Upload sanitized report
+        if: ${{ always() }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unused-${{ matrix.module_label }}-${{ matrix.goos }}-${{ matrix.goarch }}-tests-${{ matrix.tests }}
+          path: ${{ runner.temp }}/unused-audit-public
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Require complete evidence
+        if: ${{ always() }}
+        shell: bash
+        env:
+          AUDIT_OUTCOME: ${{ steps.audit.outcome }}
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+        run: test "$INSTALL_OUTCOME" = success && test "$AUDIT_OUTCOME" = success

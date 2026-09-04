@@ -1,0 +1,27 @@
+version: "2"
+run:
+  go: "1.26"
+  concurrency: 2
+  timeout: 24m
+  modules-download-mode: readonly
+  relative-path-mode: wd
+linters:
+  default: none
+  enable: [unused]
+  settings:
+    unused:
+      field-writes-are-uses: false
+      post-statements-are-reads: false
+      exported-fields-are-used: true
+      parameters-are-used: true
+      local-variables-are-used: true
+      generated-is-used: true
+  exclusions:
+    generated: strict
+    presets: []
+    rules: []
+    paths: []
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  uniq-by-line: false
