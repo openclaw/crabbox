@@ -129,6 +129,13 @@ func TestResolveProviderClaimStrict(t *testing.T) {
 	if _, ok, err := ResolveProviderClaimStrict(leaseID, "other", scope); ok || !errors.Is(err, ErrStrictClaimMismatch) {
 		t.Fatalf("provider mismatch ok=%v err=%v", ok, err)
 	}
+	if claim, ok, err := ResolveProviderClaimStrict(leaseID, provider, scope); err != nil || !ok || claim.LeaseID != leaseID {
+		t.Fatalf("lookalike slug displaced exact claim: claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+	core.RemoveLeaseClaim(leaseID)
+	if _, ok, err := ResolveProviderClaimStrict(leaseID, provider, scope); ok || !errors.Is(err, ErrStrictClaimMismatch) {
+		t.Fatalf("missing canonical ID matched another claim's slug: ok=%v err=%v", ok, err)
+	}
 }
 
 func TestExactClaimOwnershipRejectsMissingAndStaleBindings(t *testing.T) {

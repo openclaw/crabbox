@@ -1472,6 +1472,9 @@ type fakeE2BSyncClient struct {
 	createReq           e2bCreateSandboxRequest
 	createCalls         int
 	getIDs              []string
+	listFilters         []map[string]string
+	listedSandboxes     []e2bSandbox
+	connectIDs          []string
 	getErr              error
 	getWaitForCancel    bool
 	getWaitAfterCalls   int
@@ -1506,7 +1509,8 @@ func (f *fakeE2BSyncClient) CreateSandbox(_ context.Context, req e2bCreateSandbo
 	return f.sandbox, nil
 }
 
-func (f *fakeE2BSyncClient) ConnectSandbox(context.Context, string, int) (e2bSession, error) {
+func (f *fakeE2BSyncClient) ConnectSandbox(_ context.Context, sandboxID string, _ int) (e2bSession, error) {
+	f.connectIDs = append(f.connectIDs, sandboxID)
 	return e2bSession{}, f.connectErr
 }
 
@@ -1522,8 +1526,9 @@ func (f *fakeE2BSyncClient) GetSandbox(ctx context.Context, sandboxID string) (e
 	return f.sandbox, nil
 }
 
-func (f *fakeE2BSyncClient) ListSandboxes(context.Context, map[string]string) ([]e2bSandbox, error) {
-	return nil, nil
+func (f *fakeE2BSyncClient) ListSandboxes(_ context.Context, filter map[string]string) ([]e2bSandbox, error) {
+	f.listFilters = append(f.listFilters, filter)
+	return f.listedSandboxes, nil
 }
 
 func (f *fakeE2BSyncClient) DeleteSandbox(ctx context.Context, sandboxID string) error {
@@ -1695,5 +1700,97 @@ func TestE2BRunLifecycleCleanupOutcomeAndTiming(t *testing.T) {
 				t.Fatalf("report=%#v result=%#v", report, result)
 			}
 		})
+	}
+}
+
+func TestE2BRunCanonicalIDPreservesInventoryRecovery(t *testing.T) {
+	const requestedID = "cbx_aaaaaaaaaaaa"
+	for _, state := range []string{"missing", "inventory", "legacy exact claim"} {
+		t.Run(state, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			client := &fakeE2BSyncClient{}
+			restore := swapNewE2BClient(client)
+			defer restore()
+			backend := &e2bBackend{cfg: Config{E2B: E2BConfig{APIURL: "https://api.example.test", Template: "base"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+			repo := Repo{Root: t.TempDir()}
+			otherID, _, _, err := backend.createSandbox(t.Context(), client, repo, true, false, "cbx-aaaaaaaaaaaa")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state != "missing" {
+				client.listedSandboxes = []e2bSandbox{{SandboxID: "sbx_requested", Metadata: map[string]string{"lease": requestedID, "slug": "requested", "provider": e2bProvider, "crabbox": "true"}}}
+			}
+			if state == "legacy exact claim" {
+				if err := claimLeaseForRepoProvider(requestedID, "legacy", e2bProvider, repo.Root, time.Minute, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, exists, err := core.ReadLeaseClaimWithPresence(otherID)
+			if err != nil || !exists {
+				t.Fatal(err)
+			}
+			result, err := backend.Run(t.Context(), RunRequest{ID: requestedID, Repo: repo, Command: []string{"true"}, NoSync: true, Keep: true})
+			if state == "missing" {
+				var ee core.ExitError
+				if !errors.As(err, &ee) || ee.Code != 4 || len(client.connectIDs) != 0 || len(client.commands) != 0 {
+					t.Errorf("missing canonical run: err=%v connects=%v commands=%v", err, client.connectIDs, client.commands)
+				}
+			} else if err != nil || result.Session.LeaseID != requestedID || len(client.connectIDs) != 1 || client.connectIDs[0] != "sbx_requested" {
+				t.Errorf("inventory recovery: result=%#v err=%v connects=%v", result, err, client.connectIDs)
+			}
+			if len(client.getIDs) != 0 || len(client.listFilters) != 1 || client.listFilters[0]["lease"] != requestedID || client.listFilters[0]["provider"] != e2bProvider {
+				t.Errorf("canonical lookup did not use its own inventory: gets=%v lists=%v", client.getIDs, client.listFilters)
+			}
+			after, exists, err := core.ReadLeaseClaimWithPresence(otherID)
+			beforeJSON, beforeErr := json.Marshal(before)
+			afterJSON, afterErr := json.Marshal(after)
+			if err != nil || !exists || beforeErr != nil || afterErr != nil || !bytes.Equal(beforeJSON, afterJSON) {
+				t.Errorf("unrelated claim changed: read=%v marshal=%v/%v", err, beforeErr, afterErr)
+			}
+		})
+	}
+}
+
+func TestE2BStopRejectsMissingCanonicalIDMatchingAnotherSlug(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeE2BSyncClient{}
+	restore := swapNewE2BClient(client)
+	defer restore()
+	backend := &e2bBackend{cfg: Config{E2B: E2BConfig{APIURL: "https://api.example.test", Template: "base"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	const missingID = "cbx_aaaaaaaaaaaa"
+	leaseID, sandbox, _, err := backend.createSandbox(t.Context(), client, Repo{Root: t.TempDir()}, true, false, "cbx-aaaaaaaaaaaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaseID == missingID {
+		t.Fatal("fixture unexpectedly allocated requested ID")
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists {
+		t.Fatalf("fixture claim exists=%v err=%v", exists, err)
+	}
+	before, err := json.Marshal(claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.getIDs = nil
+	err = backend.Stop(t.Context(), StopRequest{ID: missingID})
+	var ee core.ExitError
+	if !errors.As(err, &ee) || ee.Code != 4 {
+		t.Errorf("missing canonical ID selected a slug: err=%v", err)
+	}
+	if len(client.getIDs) != 0 || len(client.deleteIDs) != 0 {
+		t.Errorf("wrong target reached provider: gets=%v deletes=%v", client.getIDs, client.deleteIDs)
+	}
+	afterClaim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	after, marshalErr := json.Marshal(afterClaim)
+	if err != nil || marshalErr != nil || !exists || !bytes.Equal(before, after) {
+		t.Fatalf("unrelated claim changed: exists=%v err=%v marshal=%v", exists, err, marshalErr)
+	}
+	if err := backend.Stop(t.Context(), StopRequest{ID: leaseID}); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != sandbox.SandboxID {
+		t.Fatalf("exact positive target=%v", client.deleteIDs)
 	}
 }

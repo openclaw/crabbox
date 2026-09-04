@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Reject mismatched E2B and CubeSandbox read/connection identities before adopting a sandbox or using its execution session, sharing exact resource-ID validation while keeping cleanup bound to the original allocation. [PR 1841](https://github.com/openclaw/crabbox/pull/1841). Thanks @steipete.
+- Keep canonical lease IDs separate from slug aliases in shared claim lookup and provider routing, preventing missing IDs from selecting, running on, or stopping a different sandbox while preserving provider recovery behavior. [PR 1839](https://github.com/openclaw/crabbox/pull/1839). Thanks @steipete.
 
 ## 0.49.0 - 2026-09-04
 
