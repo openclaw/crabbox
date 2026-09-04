@@ -157,9 +157,20 @@ pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
   `--env-helper`, `--capture-stdout` / `--capture-stderr`, `--capture-on-fail`,
   `--download`, `--artifact-glob`, `--require-artifact`, `--emit-proof`, and
   `--stop-after`.
-- Forwarded environment values are written to a temporary shell profile in the
-  Box workspace, sourced (`set -a`) for the command, and removed best-effort
-  afterward. They are never placed on the local process argv.
+- Forwarded environment values use a private local profile and a unique remote
+  profile under `/workspace/home`, uploaded through the normal multipart file
+  transport. The command sources it (`set -a`) in its existing shell; failed
+  sourcing stops the whole script, and an explicitly empty script is valid.
+  Values are never placed on the local process argv. Removal is attempted after
+  command completion or a failed/canceled upload, with a separate 15-second
+  budget. A cleanup-only failure is reported as exit code 5; cleanup diagnostics
+  do not replace an existing command exit or upload/cancellation error.
+- Profile upload/removal requires an unchanged Box ID, name, positive creation
+  timestamp, and the originally observed local claim (or continued absence of
+  one). Discovery-only runs remain supported without creating a claim. This
+  file-only receipt cannot authorize Box deletion. Changed/uncertain identity
+  refuses file mutation; it does not promise an atomic remote check-and-remove,
+  cancellation of a delayed server upload, or whole-run concurrency isolation.
 - `upstashBox.keepAlive` maps to the Box create `keep_alive` option. Crabbox
   `--keep` independently controls whether a one-shot `run` deletes the Box
   afterward.

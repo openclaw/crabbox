@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"path"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -186,20 +185,27 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if req.EnvSummary {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
-	envPath := ""
+	var cleanupEnv func() error
 	if len(req.Env) > 0 {
-		envPath = workspacePath(".crabbox-env-" + leaseID + ".sh")
-		if err := client.WriteFile(ctx, boxID, envPath, shellEnvProfile(req.Env)); err != nil {
+		var envPath string
+		envPath, cleanupEnv, err = uploadEnvProfile(ctx, client, leaseID, boxID, slug, req.Env)
+		if cleanupEnv != nil {
+			defer func() { _ = cleanupEnv() }()
+		}
+		if err != nil {
+			if cleanupEnv != nil {
+				err = errors.Join(err, cleanupEnv())
+			}
 			return RunResult{}, err
 		}
-		command = ". " + shellQuote(envPath) + " && " + command
+		command = shared.ShellScriptWithEnvProfile(command, envPath)
 	}
 	commandStarted := b.now()
 	exitCode, commandErr := client.ExecStream(ctx, boxID, command, folder, b.rt.Stdout)
 	commandDuration := b.now().Sub(commandStarted)
 	envCleanupErr := error(nil)
-	if envPath != "" {
-		envCleanupErr = b.cleanupEnvFile(client, boxID, envPath)
+	if cleanupEnv != nil {
+		envCleanupErr = cleanupEnv()
 	}
 	finalExitCode := exitCode
 	if commandErr != nil {
@@ -265,26 +271,6 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		return result, ExitError{Code: 5, Message: envCleanupErr.Error()}
 	}
 	return result, nil
-}
-
-func (b *backend) cleanupEnvFile(client api, boxID, envPath string) error {
-	if err := cleanupRemoteFile(client, boxID, envPath); err != nil {
-		return fmt.Errorf("upstash-box env cleanup failed for %s: %w", boxID, err)
-	}
-	return nil
-}
-
-func cleanupRemoteFile(client api, boxID, remotePath string) error {
-	cleanupCtx, cancel := upstashBoxCleanupContext()
-	defer cancel()
-	result, err := client.Exec(cleanupCtx, boxID, "rm -f "+shellQuote(remotePath), "")
-	if err != nil {
-		return err
-	}
-	if result.ExitCode != 0 {
-		return commandExitError("upstash-box exec rm -f "+remotePath, result)
-	}
-	return nil
 }
 
 func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -644,38 +630,4 @@ func workspaceFolder(workdir string) (string, error) {
 
 func workspacePath(name string) string {
 	return path.Join(workspaceRoot, name)
-}
-
-func shellEnvProfile(env map[string]string) string {
-	var b strings.Builder
-	keys := make([]string, 0, len(env))
-	for key := range env {
-		if !validEnvName(key) {
-			continue
-		}
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	b.WriteString("set -a\n")
-	for _, key := range keys {
-		b.WriteString(key)
-		b.WriteString("=")
-		b.WriteString(shellQuote(env[key]))
-		b.WriteByte('\n')
-	}
-	b.WriteString("set +a\n")
-	return b.String()
-}
-
-func validEnvName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i, r := range name {
-		if r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (i > 0 && r >= '0' && r <= '9') {
-			continue
-		}
-		return false
-	}
-	return true
 }

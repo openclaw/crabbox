@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Clean partial Upstash Box environment uploads after failure or cancellation, isolate each profile, and refuse stale file cleanup while preserving discovery-only reuse and original command outcomes. Thanks @steipete.
 - Preserve literal profile arguments through CodeSandbox, OpenComputer, and Docker Sandbox execution, sharing command-intent parsing without changing provider shells or environment transports. [PR 1830](https://github.com/openclaw/crabbox/pull/1830). Thanks @steipete.
 
 - Reject changed Azure VM identities during acquisition readiness and use identity-checked VM/companion cleanup for failed acquisitions instead of blind name-based rollback. [PR 1827](https://github.com/openclaw/crabbox/pull/1827). Thanks @steipete.
