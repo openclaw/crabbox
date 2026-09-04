@@ -149,11 +149,15 @@ idempotent only for the exact run, candidate Worker, candidate SHA, deployment
 hash, and expiry. `discover` gives an independent reaper the active run and its
 `claimed`, `finalizing`, or `finalized` cleanup state without relying on workflow
 artifacts. `finalize` updates that state around per-run cleanup. `retire` clears
-the active slot only after the persisted run attestation proves finalization.
+the active slot only after the persisted run attestation proves finalization,
+is idempotent for the same bounded retirement tombstone, and rejects a different
+active run. A retired or finalizing per-run object cannot be enrolled again.
 These methods and `attest` exist only on the named controller entrypoint; the
 candidate transport exposes only `execute`. The controller persists the per-run
 cleanup owner before publishing its global claim, and every candidate call must
-match that exact active registry record.
+match that exact registry record while its state remains `claimed`. Finalization
+persists an irreversible per-run `finalizingAt` fence before cleanup I/O, so a
+failed cleanup cannot reopen candidate dispatch.
 
 `attest(runId)` returns versioned evidence built from persisted Durable Object
 state. It binds the run, candidate and authority revisions, deployed bundle and
@@ -162,8 +166,11 @@ contains only operation/request digests, action, a normalized denial reason,
 and persisted signer before/after sequence points. The final receipt records
 resource counts and pending intent digests at cleanup start, every bounded
 cleanup attempt, each inventory and verification outcome, final zero counts,
-and normalized failures. It never returns raw tokens, keys, user data, URLs,
-account IDs, network addresses, or AWS resource IDs.
+and normalized failures. Cleanup, inventory, and verification evidence use
+bounded rings with total and truncation counters; saturation drops the oldest
+proof records without blocking teardown. The attestation never returns raw
+tokens, keys, user data, URLs, account IDs, network addresses, or AWS resource
+IDs.
 
 ## Replay and teardown
 

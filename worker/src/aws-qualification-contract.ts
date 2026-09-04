@@ -86,6 +86,8 @@ export interface AWSQualificationFinalReceipt {
     action: string;
     phase: "prepared" | "dispatched" | "legacy";
   }>;
+  cleanupAttemptsTotal: number;
+  cleanupAttemptsTruncated: number;
   cleanupAttempts: Array<{
     sequence: number;
     action: string;
@@ -95,6 +97,8 @@ export interface AWSQualificationFinalReceipt {
     outcome?: "accepted" | "absent" | "rejected" | "error";
     statusClass?: number;
   }>;
+  inventoryTotal: number;
+  inventoryTruncated: number;
   inventory: Array<{
     sequence: number;
     phase: "pre-cleanup" | "post-cleanup";
@@ -103,6 +107,8 @@ export interface AWSQualificationFinalReceipt {
     counts: AWSQualificationResourceCounts;
     failureCodes: string[];
   }>;
+  verificationTotal: number;
+  verificationTruncated: number;
   verification: Array<{
     sequence: number;
     action: string;
@@ -125,6 +131,7 @@ export interface AWSQualificationAttestation {
   policyHash: string;
   enrolledAt: string;
   expiresAt: string;
+  finalizingAt?: string;
   finalized: boolean;
   finalizedAt?: string;
   operations: AWSQualificationOperationEvidence[];

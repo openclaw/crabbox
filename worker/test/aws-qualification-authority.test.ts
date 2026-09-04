@@ -11,6 +11,7 @@ import {
 } from "../src/aws-qualification-authority";
 import type {
   AWSQualificationControllerProps,
+  AWSQualificationFinalReceipt,
   AWSQualificationRequest,
   AWSQualificationRunIdentity,
 } from "../src/aws-qualification-contract";
@@ -168,12 +169,20 @@ describe("AWS qualification authority deployment", () => {
     expect((await registry.markFinalizing(controller, identity.runId)).cleanupState).toBe(
       "finalizing",
     );
+    await expect(registry.assertActive(identity)).rejects.toThrow("not active");
     expect((await registry.markFinalized(controller, identity.runId)).cleanupState).toBe(
       "finalized",
     );
     await registry.retire(controller, identity.runId);
     expect(await registry.discover(controller)).toBeUndefined();
+    await expect(registry.retire(controller, identity.runId)).resolves.toBeUndefined();
     await expect(registry.assertActive(identity)).rejects.toThrow("not active");
+    await expect(registry.claim(controller, identity)).rejects.toThrow("retired");
+
+    const nextIdentity = { ...identity, runId: "qualification-test-2" };
+    await registry.claim(controller, nextIdentity);
+    await expect(registry.retire(controller, identity.runId)).rejects.toThrow("not active");
+    await expect(registry.assertActive(nextIdentity)).resolves.toBeUndefined();
   });
 });
 
@@ -302,6 +311,95 @@ describe("AWS qualification authority", () => {
     ]) {
       expect(encoded).not.toContain(sensitive);
     }
+  });
+
+  it("rings saturated cleanup evidence without blocking teardown", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    await importKey(fixture);
+    const counts = { images: 0, instances: 0, keyPairs: 1, snapshots: 0, volumes: 0 };
+    const startedAt = new Date().toISOString();
+    await fixture.storage.put("final-receipt", {
+      version: 1,
+      startedAt,
+      finalizeAttempts: 1,
+      resourcesAtStart: counts,
+      pendingAtStart: [],
+      cleanupAttemptsTotal: 1024,
+      cleanupAttemptsTruncated: 0,
+      cleanupAttempts: Array.from({ length: 1024 }, (_, index) => ({
+        sequence: index + 1,
+        action: "DeleteKeyPair",
+        targetDigest: "d".repeat(64),
+        startedAt,
+        completedAt: startedAt,
+        outcome: "accepted" as const,
+        statusClass: 2,
+      })),
+      inventoryTotal: 2048,
+      inventoryTruncated: 0,
+      inventory: Array.from({ length: 2048 }, (_, index) => ({
+        sequence: index + 1,
+        phase: "pre-cleanup" as const,
+        at: startedAt,
+        outcome: "accepted" as const,
+        counts,
+        failureCodes: [],
+      })),
+      verificationTotal: 1024,
+      verificationTruncated: 0,
+      verification: Array.from({ length: 1024 }, (_, index) => ({
+        sequence: index + 1,
+        action: "DescribeKeyPairs",
+        at: startedAt,
+        outcome: "absent" as const,
+      })),
+      failureCodes: [],
+    } satisfies AWSQualificationFinalReceipt);
+
+    await expect(fixture.run.finalize(controller)).resolves.toBeDefined();
+    const receipt = (await fixture.run.attest(controller)).finalReceipt!;
+    expect(fixture.signer.calls.some((call) => call.action === "DeleteKeyPair")).toBe(true);
+    expect(receipt.cleanupAttempts).toHaveLength(1024);
+    expect(receipt.cleanupAttemptsTotal).toBeGreaterThan(1024);
+    expect(receipt.cleanupAttemptsTruncated).toBeGreaterThan(0);
+    expect(receipt.inventory).toHaveLength(2048);
+    expect(receipt.inventoryTotal).toBeGreaterThan(2048);
+    expect(receipt.inventoryTruncated).toBeGreaterThan(0);
+    expect(receipt.verification).toHaveLength(1024);
+    expect(receipt.verificationTotal).toBeGreaterThan(1024);
+    expect(receipt.verificationTruncated).toBeGreaterThan(0);
+    expect(receipt.finalCounts).toEqual({
+      images: 0,
+      instances: 0,
+      keyPairs: 0,
+      snapshots: 0,
+      volumes: 0,
+    });
+  });
+
+  it("keeps candidate dispatch fenced after a failed finalization", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    fixture.signer.accountId = "999999999999";
+
+    await expect(fixture.run.finalize(controller)).rejects.toThrow("wrong account");
+    const failed = await fixture.run.attest(controller);
+    expect(failed).toMatchObject({
+      finalizingAt: expect.any(String),
+      finalized: false,
+    });
+
+    fixture.signer.accountId = "123456789012";
+    const callsBeforeRetry = fixture.signer.calls.length;
+    await expect(fixture.run.execute(identity, request("GetCallerIdentity"))).rejects.toThrow(
+      "finalizing",
+    );
+    expect(fixture.signer.calls).toHaveLength(callsBeforeRetry);
+    await expect(fixture.run.finalize(controller)).resolves.toBeDefined();
+    await expect(fixture.run.enroll(controller, identity)).rejects.toThrow("cannot be re-enrolled");
   });
 
   it("bounds persisted operation evidence and keeps retries idempotent", async () => {
