@@ -717,11 +717,12 @@ The workflow has separate trust zones:
 - `execute` receives only the relay URL and its distinct ephemeral executor
   token. Candidate admin/shared tokens stay in the relay. The job receives no
   AWS, Cloudflare, authority-controller, or production credentials.
-- `finalize` always runs behind the protected environment. It fences candidate
-  mutation by first disabling and deleting the public relay, verifies relay
-  absence, finalizes AWS resources, deletes the candidate Fleet Durable Object
-  and Worker, verifies absence, repeats finalization idempotently, retires the
-  registry record, and deletes the transient controller.
+- `finalize` always runs behind the protected environment. It first persists the
+  authority and registry finalization fence, then disables and deletes the
+  public relay and verifies its absence before continuing AWS cleanup. It
+  deletes the candidate Fleet Durable Object and Worker, verifies absence,
+  repeats finalization idempotently, retires the registry record, and deletes
+  the transient controller.
 
 The exact live proof seeds the fixed base AMI as the prior default, verifies
 that a shared-token request to `promote-cas` returns 403 without changing the
