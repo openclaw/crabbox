@@ -765,6 +765,7 @@ type fakeAPI struct {
 	getHook        func(context.Context, string) (machineData, error)
 	deleteHook     func(context.Context, string) error
 	streamHook     func()
+	streamErr      error
 	writeHook      func(context.Context, string, string) error
 	execHook       func(context.Context, string) (execResult, error)
 }
@@ -848,7 +849,7 @@ func (f *fakeAPI) ExecStream(_ context.Context, _ string, command, folder string
 	f.streamCommands = append(f.streamCommands, command)
 	f.streamFolders = append(f.streamFolders, folder)
 	_, _ = io.WriteString(stdout, "ok\n")
-	return 0, nil
+	return 0, f.streamErr
 }
 
 func (f *fakeAPI) InjectArchive(_ context.Context, _, _, targetDir string) error {
@@ -1064,6 +1065,48 @@ func TestClientNativeUploadFailureAndPublication(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunPreservesStreamErrorCause(t *testing.T) {
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded, errors.New("synthetic transport failure")} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := &fakeAPI{streamErr: fmt.Errorf("stream: %w", cause)}
+			withFakeAPI(t, fake)
+			b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+			result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir()}, NoSync: true, Keep: true, Command: []string{"true"}})
+			var exitErr ExitError
+			if !errors.Is(err, cause) || !errors.As(err, &exitErr) || exitErr.Code != 1 || len(fake.streamCommands) != 1 || t.Context().Err() != nil {
+				t.Fatalf("stream cause lost: err=%v stream calls=%d parent=%v", err, len(fake.streamCommands), t.Context().Err())
+			}
+			if got, want := core.RunStatusForResult(result, err), core.RunStatusForResult(result, cause); got != want {
+				t.Fatalf("primary status=%s, want %s", got, want)
+			}
+		})
+	}
+}
+
+func TestRunSkipsStreamAfterCanceledSuccessfulEnvUpload(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	fake := &fakeAPI{writeHook: func(context.Context, string, string) error { cancel(); return nil }}
+	cleanups := 0
+	fake.execHook = func(cleanupCtx context.Context, command string) (execResult, error) {
+		if strings.HasPrefix(command, "rm -f ") {
+			cleanups++
+			if cleanupCtx.Err() != nil {
+				t.Error("profile cleanup inherited cancellation")
+			}
+		}
+		return execResult{}, nil
+	}
+	withFakeAPI(t, fake)
+	b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+	_, err := b.Run(ctx, RunRequest{Repo: Repo{Root: t.TempDir()}, NoSync: true, Keep: true, Command: []string{"true"}, Env: map[string]string{"FIXTURE": "synthetic"}})
+	if !errors.Is(err, context.Canceled) || len(fake.streamCommands) != 0 || cleanups != 1 || fake.deleted {
+		t.Fatalf("canceled successful upload: err=%v streams=%v cleanups=%d deleted=%t", err, fake.streamCommands, cleanups, fake.deleted)
 	}
 }
 

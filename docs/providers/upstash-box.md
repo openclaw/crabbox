@@ -123,6 +123,10 @@ Accepted values, validated before the API is called:
 Note: `warmup` always keeps the Box until an explicit `crabbox stop`. If you
 pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
 
+Stream errors retain their cancellation or timeout cause for run status.
+Crabbox checks cancellation immediately before submitting the command, including
+after a successful environment upload; existing profile cleanup still runs.
+
 ## Capabilities
 
 - SSH: no.

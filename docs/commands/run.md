@@ -622,7 +622,8 @@ fails the run. Limits remain 256 files and 10 MiB compressed, with existing
 protected-path and symlink checks. Remote Linux `timeout` with `--kill-after`
 is required for a separate 30-second collection budget; caller cancellation
 wins and the local post-exit wait is also bounded. Collection uses the initial
-remote cwd even if the child changes directory. Command timing ends at the
+remote cwd, or a CI-prepared artifact workspace captured before the child starts;
+the child's directory changes cannot redirect it. Command timing ends at the
 workload receipt, while collection and cleanup count toward total. Evidence
 retrieved after failure is not success proof or attestation of exact remote Git
 bytes; `--emit-proof` stays success-only. See the

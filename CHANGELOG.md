@@ -3,35 +3,32 @@
 ## Unreleased
 
 - Reject mismatched E2B and CubeSandbox read/connection identities before adopting a sandbox or using its execution session, sharing exact resource-ID validation while keeping cleanup bound to the original allocation. [PR 1841](https://github.com/openclaw/crabbox/pull/1841). Thanks @steipete.
-- Keep canonical lease IDs separate from slug aliases in shared claim lookup and provider routing, preventing missing IDs from selecting, running on, or stopping a different sandbox while preserving provider recovery behavior. [PR 1839](https://github.com/openclaw/crabbox/pull/1839). Thanks @steipete.
 
-## 0.49.0 - 2026-09-04
+## 0.49.1 - 2026-09-04
+
+Users upgrading from v0.48.1 also receive the [v0.49.0 changes](https://github.com/openclaw/crabbox/blob/v0.49.0/CHANGELOG.md#0490---2026-09-03), previously available through the Go module release.
 
 ### Highlights
 
-- **Image-pinned GCP ready pools.** Reuse hydrated Linux runners tied to exact boot images or disk snapshots across fallback zones. Startup also avoids redundant Git lookups, unnecessary APT downloads, and duplicate Azure/GCP token refreshes.
-- **Replayable checkpoint forks and visible capacity.** Reuse the same managed checkpoint child with `checkpoint fork --lease-id`, and inspect your admission count and limit with `crabbox capacity` before allocating.
-- **Sync that survives failures.** Unreachable Git origins fall back to full-file sync, symlink retargets reach the runner, and Git overlays transfer consistent snapshots. Cloudflare and Upstash Box preserve existing workspaces when archive upload or extraction fails.
-- **Keep the evidence when a run fails.** Brokered artifact publishing is restored, Blacksmith can return requested artifacts after confirmed normal failures with exit codes 1–127, and aliased JUnit reports no longer inflate test totals.
-- **More capable Daytona workflows.** Reuse browser OAuth login, select native container tiers with `--class`, and run `--script` or `--script-stdin` through private SSH with literal arguments, environment profiles, and cancellation support.
-- **More reliable Windows runs and private Mac setup.** Managed Windows checks and repairs the Visual C++ runtime, SSH input no longer depends on EOF, AWS Windows/WSL2 bootstraps through its advertised SSH route, and macOS bootstrap passwords stay out of shell traces and process arguments.
-- **Cleanup and failure reports you can trust.** Failed bootstrap rollback stops further allocation, Hetzner waits for confirmed deletion, and providers retain recovery claims when cleanup fails. Failed-stage, fallback, terminal-recording, and Machine0 output diagnostics preserve the original failure.
+- **Image-pinned GCP ready pools.** Reuse hydrated Linux runners tied to exact boot images or disk snapshots, with capacity fallback across zones and ownership checks throughout creation and cleanup.
+- **Faster runner startup.** Skip redundant Git lookups and unnecessary APT downloads, and share Azure/GCP token refreshes across concurrent requests.
+- **Safe sync and correct artifacts.** Cloudflare and Upstash Box preserve existing workspaces when transfers fail. Blacksmith collects artifacts from the prepared execution workspace that produced them.
+- **Daytona script support.** Run `--script` and `--script-stdin` through private SSH with literal arguments, environment profiles, activity refreshes, and cancellation support.
+- **Correct sandbox targeting and trustworthy cleanup.** Canonical IDs no longer resolve to unrelated slug aliases. Failed bootstrap rollback stops further allocation, Hetzner waits for confirmed deletion, and interrupted AWS warmups remain stoppable. Providers retain recovery claims when cleanup fails and preserve the original command result.
+- **Predictable commands and environment profiles.** Preserve literal arguments across delegated providers, isolate each run's uploaded profile, and clean failed uploads without touching replacement claims.
+- **Clearer failures and more reliable Windows bootstrap.** Preserve failed-stage, fallback, terminal-recording, and Machine0 output diagnostics; fresh AWS Windows/WSL2 leases bootstrap through their advertised SSH route.
 - **Isolated AWS image qualification for maintainers.** An opt-in workflow and dedicated authority verify candidate image publication and rollback with bounded cloud access, provider credentials kept out of candidate code, and independent cleanup.
 
 ### Upgrade notes
 
 - GCP typed ready pools require an updated coordinator and authoritative boot-image or disk-snapshot evidence; machine-image checkpoints and older leases without that evidence cannot join. Coordinator credentials need `compute.instances.get` and `compute.disks.get` for typed identity operations. [PR 1620](https://github.com/openclaw/crabbox/pull/1620), [PR 1621](https://github.com/openclaw/crabbox/pull/1621).
 - Tenki workspace/project settings are now accepted only for recovering older scoped leases. Stop those leases before removing the settings, then use `tenki login` to select the workspace for new leases. [PR 1741](https://github.com/openclaw/crabbox/pull/1741).
-- Managed fixed-ID checkpoint forks and `crabbox capacity` require an updated coordinator; older coordinators reject these requests without falling back to ordinary creation or direct providers. [PR 1692](https://github.com/openclaw/crabbox/pull/1692), [PR 1752](https://github.com/openclaw/crabbox/pull/1752).
-- On Linux images using cloud-init, native checkpoint preparation now requires completed initialization, the distro Python/cloud-init module, and a runtime directory on `tmpfs`; preparation failures stop before image creation. [PR 1692](https://github.com/openclaw/crabbox/pull/1692).
-- Fixed-ID creation cancellation requires the updated coordinator. After a coordinator rollback, version-2 admission records stay fenced; upgrade the coordinator again before confirming pre-allocation stop. [PR 1749](https://github.com/openclaw/crabbox/pull/1749).
-- Managed native Windows runtime repair requires access to the pinned Microsoft downloads. Reboot-required or interrupted installations block readiness until an external reboot and retry; static/BYO hosts remain operator-managed. [PR 1753](https://github.com/openclaw/crabbox/pull/1753).
-- Blacksmith artifact collection requires remote `timeout` support for `--kill-after`; incompatible timeout implementations now fail preflight before the user command starts. [PR 1736](https://github.com/openclaw/crabbox/pull/1736).
-- Legacy Islo claims remain name-bound. Recreate leases to obtain ID-bound claims; provider deletion still uses the name-based API rather than an atomic delete-by-ID operation. [PR 1708](https://github.com/openclaw/crabbox/pull/1708).
-- Ordinary sync fingerprints advance to v6, causing one safe resync; Git-overlay fingerprints remain v1 and no configuration migration is required. [PR 1736](https://github.com/openclaw/crabbox/pull/1736).
 
 ### Changes
 
+- Collect Blacksmith artifacts from execution workspaces selected by a trusted `.git/crabbox-artifact-root` symlink, pinning the artifact directory before the workload and rejecting invalid bindings before execution while retaining existing exit and publication guards. [PR 1840](https://github.com/openclaw/crabbox/pull/1840). Thanks @steipete.
+- Preserve Upstash Box and SmolVM stream cancellation and timeout causes in run outcomes, and skip command submission when cancellation is already known after an acknowledged environment upload without skipping cleanup. [PR 1838](https://github.com/openclaw/crabbox/pull/1838). Thanks @steipete.
+- Keep canonical lease IDs separate from slug aliases in shared claim lookup and provider routing, preventing missing IDs from selecting, running on, or stopping a different sandbox while preserving provider recovery behavior. [PR 1839](https://github.com/openclaw/crabbox/pull/1839). Thanks @steipete.
 - Clean partial Upstash Box environment uploads after failure or cancellation, isolate each profile, and refuse stale file cleanup while preserving discovery-only reuse and original command outcomes. [PR 1834](https://github.com/openclaw/crabbox/pull/1834). Thanks @steipete.
 - Preserve literal Tensorlake and OpenSandbox profile arguments through final execution, including environment-wrapped commands, and fix Tensorlake's inferred single-string shell execution. [PR 1835](https://github.com/openclaw/crabbox/pull/1835). Thanks @steipete.
 - Preserve literal Agent Sandbox profile arguments through pod stdin execution and share checked workspace/environment command wrapping with Nomad. [PR 1831](https://github.com/openclaw/crabbox/pull/1831). Thanks @steipete.
@@ -72,6 +69,30 @@
 - Reject changed Azure VM identities during acquisition readiness and use identity-checked VM/companion cleanup for failed acquisitions instead of blind name-based rollback. [PR 1827](https://github.com/openclaw/crabbox/pull/1827). Thanks @steipete.
 - Clean partial Tensorlake environment-profile uploads after failure or cancellation, fence cleanup to original ownership, and share isolated profile lifetimes and source-failure handling with Modal. [PR 1825](https://github.com/openclaw/crabbox/pull/1825). Thanks @steipete.
 - Preserve Cloudflare and Azure Dynamic Sessions cancellation when an incomplete command stream ends with clean EOF, without replacing accepted completion events or scanner errors. [PR 1825](https://github.com/openclaw/crabbox/pull/1825). Thanks @steipete.
+
+## 0.49.0 - 2026-09-03
+
+### Highlights
+
+- **Sync that keeps working.** Unreachable Git origins fall back to full-file sync, symlink retargets reach the runner, and Git overlays transfer a consistent snapshot while later edits wait for the next sync.
+- **Keep the evidence when runs fail.** Brokered artifact publishing is restored, and Blacksmith can return requested artifacts after confirmed normal failures with exit codes 1–127 while preserving the original result.
+- **More predictable creation and checkpoints.** Reuse stable lease IDs for managed checkpoint forks, inspect your admission count and limit without allocating, and cancel or recover creation without losing its original readiness deadline.
+- **Easier Daytona setup.** Reuse browser OAuth login and select native container tiers with `--class`, while preserving custom and checkpoint snapshots.
+- **More reliable Windows runs and private Mac setup.** Managed native Windows setup now checks and repairs the Visual C++ runtime, SSH command input no longer depends on EOF, and macOS bootstrap passwords stay out of shell traces and process arguments.
+- **Clearer failures and trustworthy results.** Get better out-of-memory guidance for local containers and original Tart startup errors, avoid double-counting aliased JUnit reports, and keep late events from rewriting finalized run summaries.
+
+### Upgrade notes
+
+- Managed fixed-ID checkpoint forks and `crabbox capacity` require an updated coordinator; older coordinators reject these requests without falling back to ordinary creation or direct providers. [PR 1692](https://github.com/openclaw/crabbox/pull/1692), [PR 1752](https://github.com/openclaw/crabbox/pull/1752).
+- On Linux images using cloud-init, native checkpoint preparation now requires completed initialization, the distro Python/cloud-init module, and a runtime directory on `tmpfs`; preparation failures stop before image creation. [PR 1692](https://github.com/openclaw/crabbox/pull/1692).
+- Fixed-ID creation cancellation requires the updated coordinator. After a coordinator rollback, version-2 admission records stay fenced; upgrade the coordinator again before confirming pre-allocation stop. [PR 1749](https://github.com/openclaw/crabbox/pull/1749).
+- Managed native Windows runtime repair requires access to the pinned Microsoft downloads. Reboot-required or interrupted installations block readiness until an external reboot and retry; static/BYO hosts remain operator-managed. [PR 1753](https://github.com/openclaw/crabbox/pull/1753).
+- Blacksmith artifact collection requires remote `timeout` support for `--kill-after`; incompatible timeout implementations now fail preflight before the user command starts. [PR 1736](https://github.com/openclaw/crabbox/pull/1736).
+- Legacy Islo claims remain name-bound. Recreate leases to obtain ID-bound claims; provider deletion still uses the name-based API rather than an atomic delete-by-ID operation. [PR 1708](https://github.com/openclaw/crabbox/pull/1708).
+- Ordinary sync fingerprints advance to v6, causing one safe resync; Git-overlay fingerprints remain v1 and no configuration migration is required. [PR 1736](https://github.com/openclaw/crabbox/pull/1736).
+
+### Changes
+
 - Kept sync working when runners cannot authenticate to or reach Git origins by falling back to a full manifest, preserving internal Git-control exit codes, and recognizing disconnected sockets without mistaking URL digits for authentication failures. [PR 1622](https://github.com/openclaw/crabbox/pull/1622), [PR 1744](https://github.com/openclaw/crabbox/pull/1744). Thanks @vincentkoc.
 - Restored brokered artifact publishing with complete production storage configuration and atomic deployment of bucket-scoped signing credentials, preserving the existing storage and signed-read design. [PR 1732](https://github.com/openclaw/crabbox/pull/1732), [PR 1737](https://github.com/openclaw/crabbox/pull/1737).
 - Added replay-safe `checkpoint fork --lease-id` for coordinator-managed native checkpoints, reusing the same child for matching requests while refusing changed, canceled, or terminal attempts. [PR 1692](https://github.com/openclaw/crabbox/pull/1692). Thanks @Copilot.

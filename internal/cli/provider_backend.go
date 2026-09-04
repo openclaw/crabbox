@@ -363,11 +363,6 @@ type StopReclaimBackend interface {
 	ReclaimAndStop(ctx context.Context, req StopRequest) error
 }
 
-type DelegatedRunArtifactBackend interface {
-	Backend
-	CollectRunArtifacts(ctx context.Context, req DelegatedRunArtifactRequest) (DelegatedRunArtifactResult, error)
-}
-
 type DelegatedRunDownloadBackend interface {
 	Backend
 	FetchRunFile(ctx context.Context, req DelegatedRunDownloadRequest) ([]byte, error)
@@ -721,6 +716,8 @@ const (
 	FeaturePauseResume  Feature = "pause-resume"
 	FeatureMCP          Feature = "mcp-attachments"
 )
+
+const FeaturePreparedArtifactWorkspace Feature = "prepared-artifact-workspace"
 
 type FeatureSet []Feature
 
@@ -1314,18 +1311,6 @@ func RunErrorKindForResult(result RunResult, err error) RunErrorKind {
 		return RunErrorProvider
 	}
 	return RunErrorNone
-}
-
-type DelegatedRunArtifactRequest struct {
-	RunReq   RunRequest
-	Result   RunResult
-	MaxFiles int
-	MaxBytes int64
-}
-
-type DelegatedRunArtifactResult struct {
-	Artifacts []RunArtifact
-	Output    string
 }
 
 type RunSessionHandle struct {
