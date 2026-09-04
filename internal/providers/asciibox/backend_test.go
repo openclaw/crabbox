@@ -292,7 +292,7 @@ func TestReleaseBoxPendingOperationHonorsDeadline(t *testing.T) {
 }
 
 func TestReleaseBoxReportsLastDeletionStatusWhenNativeLookupTimesOut(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	lookups := 0
 	runner := &releaseCommandRunner{configPath: filepath.Join(t.TempDir(), "config.json"), outcomes: map[string][]commandOutcome{

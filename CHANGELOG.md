@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Show periodic ASCII Box cleanup progress and preserve the deletion phase and last observed status on timeout, while retaining incomplete cleanup claims. [Issue 1730](https://github.com/openclaw/crabbox/issues/1730). Thanks @shunkakinoki.
+- Show periodic ASCII Box cleanup progress and preserve the deletion phase and last observed status on timeout, while retaining incomplete cleanup claims. [PR 1789](https://github.com/openclaw/crabbox/pull/1789). Thanks @shunkakinoki.
 - Avoid unnecessary Git metadata lookups during configuration loading, lease claim refreshes, and sync planning while preserving repository and credential trust boundaries. [PR 1783](https://github.com/openclaw/crabbox/pull/1783). Thanks @steipete.
 - Preserve finish-submission and receipt-verification errors, attempt counts, and recovery guidance when terminal run recording times out, without changing retry limits or receipt verification.
 - Closed and joined lease-owned SSH connection masters after confirmed brokered deletion, preserving native connection reuse and lease/host-key isolation while retaining failed local cleanup for a local-only retry. [PR 1774](https://github.com/openclaw/crabbox/pull/1774). Thanks @steipete.
