@@ -272,8 +272,9 @@ keeps a failed one-shot Testbox inspectable until its idle timeout or an explici
 `--artifact-glob` and `--require-artifact` opt into an adapter-owned supervisor
 inside the **original** native run. It executes the command in an isolated,
 non-login `bash -c` child, observes its normal terminal exit, then validates
-required globs and collects from the original remote working directory. A child
-`cd`, `exit`, `exec`, or trap does not change the supervisor's collection directory.
+required globs and collects from the original remote working directory by default.
+CI may prepare a separate artifact workspace as described below. A child `cd`,
+`exit`, `exec`, or trap does not change the supervisor's collection directory.
 Stdout and stderr remain streaming; stdin forwarding remains unsupported.
 There is no second native run, retry, or re-sync, including after success.
 
@@ -310,6 +311,36 @@ their existing policy. Downloaded evidence does **not** mean the workload
 succeeded; proof rendering remains success-only. The nonce binds the local
 invocation, not remote source authenticity or exact Git bytes: native Blacksmith
 still owns the selected source and sync.
+
+#### Prepared artifact workspace
+
+Trusted CI may create `.git/crabbox-artifact-root` in the native sync checkout as
+a symlink to a separate, existing artifact workspace before marking the Testbox
+ready. This is CI-owned Git metadata, not a CLI flag, configuration key, or
+workload-provided artifact path. CI owns the binding and its target's lifecycle.
+
+For artifact runs, the outer supervisor enters that directory before starting
+the workload. The workload still starts in the original native sync directory,
+so a bootstrap can consume uploaded inputs before entering its execution
+checkout. Collection stays in the supervisor's captured directory even if the
+workload retargets the symlink, replaces the directory's pathname, changes
+working directory, or exits through `exec` or a trap. No files are copied back to
+the sync checkout, and the existing glob, protected-path, and symlink checks
+still apply within the captured artifact workspace.
+
+Without a binding, collection keeps its original-directory behavior. A present
+binding that is not a symlink to an accessible directory fails before the
+workload starts; it never falls back to collecting from the sync checkout.
+The metadata location keeps the binding outside source sync, but it is not an
+authentication or sandbox boundary against same-user workloads. Trusted CI must
+keep the binding valid across reused runs. Signal, timeout, cancellation, and
+transport-failure publication rules remain unchanged.
+
+Check support using `crabbox providers describe blacksmith-testbox --json`:
+`capabilities.features` includes `prepared-artifact-workspace`. This static fact
+reports CLI support, not that a particular Testbox binding is valid. Callers
+requiring the binding must fail closed if the feature is absent or introspection
+fails; `run-artifacts` alone does not promise prepared-workspace support.
 
 ## Desktop and VNC
 

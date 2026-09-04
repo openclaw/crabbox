@@ -1391,6 +1391,56 @@ func TestEnvProfileDeniedUploadHasNoRemoteCustody(t *testing.T) {
 	}
 }
 
+func TestRunPreservesStreamErrorCause(t *testing.T) {
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded, errors.New("synthetic transport failure")} {
+		for _, cleanupFails := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/cleanup=%t", cause, cleanupFails), func(t *testing.T) {
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				fake := &fakeAPI{streamErr: fmt.Errorf("stream: %w", cause)}
+				fake.execHook = func(_ context.Context, command string) (execResult, error) {
+					if cleanupFails && strings.HasPrefix(command, "rm -f ") {
+						return execResult{}, context.Canceled
+					}
+					return execResult{}, nil
+				}
+				withFakeAPI(t, fake)
+				b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+				result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir()}, NoSync: true, Keep: true, Command: []string{"true"}, Env: map[string]string{"FIXTURE": "synthetic"}})
+				var exitErr ExitError
+				if !errors.Is(err, cause) || !errors.As(err, &exitErr) || exitErr.Code != 1 || len(fake.streamCommands) != 1 || t.Context().Err() != nil {
+					t.Fatalf("stream cause lost: err=%v stream calls=%d parent=%v", err, len(fake.streamCommands), t.Context().Err())
+				}
+				if got, want := core.RunStatusForResult(result, err), core.RunStatusForResult(result, cause); got != want {
+					t.Fatalf("primary status=%s, want %s", got, want)
+				}
+			})
+		}
+	}
+}
+
+func TestRunSkipsStreamAfterCanceledSuccessfulEnvUpload(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	fake := &fakeAPI{uploadHook: func(context.Context, string, string) error { cancel(); return nil }}
+	cleanups := 0
+	fake.execHook = func(cleanupCtx context.Context, command string) (execResult, error) {
+		if strings.HasPrefix(command, "rm -f ") {
+			cleanups++
+			if cleanupCtx.Err() != nil {
+				t.Error("profile cleanup inherited cancellation")
+			}
+		}
+		return execResult{}, nil
+	}
+	withFakeAPI(t, fake)
+	b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+	_, err := b.Run(ctx, RunRequest{Repo: Repo{Root: t.TempDir()}, NoSync: true, Keep: true, Command: []string{"true"}, Env: map[string]string{"FIXTURE": "synthetic"}})
+	if !errors.Is(err, context.Canceled) || len(fake.streamCommands) != 0 || cleanups != 1 || len(fake.deletedIDs) != 0 {
+		t.Fatalf("canceled successful upload: err=%v streams=%v cleanups=%d deleted=%v", err, fake.streamCommands, cleanups, fake.deletedIDs)
+	}
+}
+
 func TestRunEnvCleanupPreservesPrimaryOutcome(t *testing.T) {
 	for _, outcome := range []string{"command exit", "transport error", "upload cancellation"} {
 		t.Run(outcome, func(t *testing.T) {

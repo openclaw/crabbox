@@ -175,7 +175,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		command = shared.ShellScriptWithEnvProfile(command, envPath)
 	}
 	commandStarted := b.now()
-	exitCode, commandErr := client.ExecStream(ctx, machineID, command, folder, b.rt.Stdout)
+	exitCode := 0
+	commandErr := ctx.Err()
+	if commandErr == nil {
+		exitCode, commandErr = client.ExecStream(ctx, machineID, command, folder, b.rt.Stdout)
+	}
 	commandDuration := b.now().Sub(commandStarted)
 	result := RunResult{
 		ExitCode:      exitCode,
@@ -214,7 +218,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		failureReq := req
 		failureReq.Keep = effectiveKeep
 		handleDelegatedRunFailure(b.rt.Stderr, failureReq, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, ExitError{Code: 1, Message: fmt.Sprintf("smolvm run failed: %v", commandErr)}
+		return result, shared.ExitErrorWithCause(1, fmt.Sprintf("smolvm run failed: %v", commandErr), commandErr)
 	}
 	if exitCode != 0 {
 		failureReq := req
