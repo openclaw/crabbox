@@ -14195,7 +14195,7 @@ export class FleetCoordinator {
     return json({ config, sweep });
   }
 
-  private async auditAWSLeaseCloud(lease: LeaseRecord): Promise<LeaseCloudAudit> {
+  private leaseCloudAuditBase(lease: LeaseRecord): LeaseCloudAudit {
     const audit: LeaseCloudAudit = {
       leaseID: lease.id,
       provider: lease.provider,
@@ -14224,6 +14224,11 @@ export class FleetCoordinator {
     if (lease.cleanupRetryAt) {
       audit.cleanupRetryAt = lease.cleanupRetryAt;
     }
+    return audit;
+  }
+
+  private async auditAWSLeaseCloud(lease: LeaseRecord): Promise<LeaseCloudAudit> {
+    const audit = this.leaseCloudAuditBase(lease);
     try {
       const server = await this.awsLeaseServer(lease);
       if (isAWSTerminalInstanceState(server.status)) {
@@ -14266,34 +14271,7 @@ export class FleetCoordinator {
   }
 
   private async auditAzureLeaseCloud(lease: LeaseRecord): Promise<LeaseCloudAudit> {
-    const audit: LeaseCloudAudit = {
-      leaseID: lease.id,
-      provider: lease.provider,
-      state: lease.state,
-      target: lease.target,
-      owner: lease.owner,
-      org: orgLabelForDisplay(lease.org),
-      cloudID: lease.cloudID,
-      host: lease.host,
-      serverType: lease.serverType,
-      expiresAt: lease.expiresAt,
-      cloudStatus: "error",
-    };
-    if (lease.slug) {
-      audit.slug = lease.slug;
-    }
-    if (lease.region) {
-      audit.region = lease.region;
-    }
-    if (lease.cleanupAttempts !== undefined) {
-      audit.cleanupAttempts = lease.cleanupAttempts;
-    }
-    if (lease.cleanupError) {
-      audit.cleanupError = coordinatorDiagnosticText(this.env, lease.cleanupError);
-    }
-    if (lease.cleanupRetryAt) {
-      audit.cleanupRetryAt = lease.cleanupRetryAt;
-    }
+    const audit = this.leaseCloudAuditBase(lease);
     try {
       const machines = await this.provider("azure", lease.region).listCrabboxServers();
       const server = machines.find(
