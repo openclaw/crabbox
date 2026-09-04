@@ -2,7 +2,6 @@ package upstashbox
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/url"
 	"path"
@@ -179,10 +178,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		return result, nil
 	}
 
-	command, err := buildCommand(req.Command, req.ShellMode)
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
 		return RunResult{}, err
 	}
+	command := intent.ShellSource()
 	if req.EnvSummary {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
@@ -611,21 +611,6 @@ func cleanWorkdir(workdir string) (string, error) {
 		return "", exit(2, "upstash-box workdir %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return clean, nil
-}
-
-func buildCommand(command []string, shellMode bool) (string, error) {
-	if len(command) == 0 {
-		return "", errors.New("missing command")
-	}
-	var script string
-	if shellMode {
-		script = strings.Join(command, " ")
-	} else if shouldUseShell(command) || leadingEnvAssignment(command) {
-		script = shellScriptFromArgv(command)
-	} else {
-		script = "exec " + strings.Join(shellWords(command), " ")
-	}
-	return script, nil
 }
 
 const workspaceRoot = "/workspace/home"

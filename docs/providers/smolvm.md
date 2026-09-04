@@ -170,6 +170,16 @@ during the first exec.
 - Forwarded environment values use an independently named profile in the validated workdir. The shared profile owner retains cleanup responsibility after a failed upload; cleanup runs before one-shot teardown with a fresh bounded context, checking the original local claim and native machine identity. Changed ownership retains the remote file and warns rather than authorizing stale cleanup. The source check uses the existing POSIX shell and does not require Bash or change user-command errexit behavior.
 - The direct archive sync sends the (base64) tar inside the `/exec` command body. Very large repos may hit request size limits (the usual preflight checks still apply).
 
+## Command interpretation
+
+Quoted and interpolated profile arguments remain literal through the source-only
+command transport. Unmarked single-string commands follow the shared shell-source
+inference, while explicit `--shell` remains source in the provider's existing
+shell. Literal argv retains terminal `exec`; Crabbox does not introduce another
+shell or a Bash dependency for this interpretation. Environment-profile and
+working-directory handling remain provider-specific.
+
+
 ## Related docs
 
 - [Provider backends](../provider-backends.md)
