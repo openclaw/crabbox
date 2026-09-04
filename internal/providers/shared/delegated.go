@@ -32,6 +32,18 @@ type DelegatedSandboxCommand struct {
 	Close func(context.Context)
 }
 
+type observedProcessEndError struct{ message string }
+
+func (e observedProcessEndError) Error() string { return e.message }
+
+// ObservedProcessEndError marks an abnormal end decoded for the submitted
+// command. Its accompanying return code is the observed process exit, not a
+// transport status. The message must already be safe to display. Return this
+// error directly from Command.Run; wrapping or joining it loses this distinction.
+func ObservedProcessEndError(message string) error {
+	return observedProcessEndError{message: message}
+}
+
 // DelegatedSandboxLifecycle describes sandbox operations, not a provider API.
 // Adapters retain claim authorization, scope checks, locks, credential filtering,
 // archive transport and execution. Persistent shell allocations fit this owner;
@@ -257,6 +269,13 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 	result.Command = now().Sub(commandStarted)
 	commandRan = true
 	if err != nil {
+		if _, observed := err.(observedProcessEndError); observed {
+			if result.ExitCode == 0 {
+				result.ExitCode = 1
+			}
+			result.Status, result.ErrorKind = core.RunStatusFailed, core.RunErrorCommandExit
+			return result, ExitErrorWithCause(result.ExitCode, fmt.Sprintf("%s run failed: %v", lifecycle.Provider, RedactErrorSecrets(err.Error())), err)
+		}
 		// Transport errors are not command exits, even if the API also reports
 		// a nonzero process code. Preserve context causes for normalization.
 		outcome := core.FinalizeRunResult(core.RunResult{}, err)

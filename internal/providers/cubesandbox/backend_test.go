@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -111,6 +112,34 @@ func TestParseCubeSandboxProcessStream(t *testing.T) {
 	}
 	if code != 7 || stdout.String() != "hello" || stderr.String() != "warn" {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestCubeSandboxProcessEndAndStreamFailurePrecedence(t *testing.T) {
+	for _, exited := range []bool{false, true} {
+		for _, ending := range []string{"clean", "rpc error", "truncated"} {
+			t.Run(fmt.Sprintf("exited=%t/%s", exited, ending), func(t *testing.T) {
+				body := cubesandboxTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 137, "exited": exited, "error": "fixture process end"}}})
+				switch ending {
+				case "rpc error":
+					body = append(body, cubesandboxTestEnvelope(2, map[string]any{"error": map[string]any{"code": "internal", "message": "fixture RPC failure"}})...)
+				case "truncated":
+					body = append(body, 0)
+				}
+				code, err := parseCubeSandboxProcessStream(bytes.NewReader(body), io.Discard, io.Discard)
+				if !exited {
+					if code != 137 || err == nil || !strings.Contains(err.Error(), "fixture process end") {
+						t.Fatalf("abnormal end lost precedence: code=%d err=%v", code, err)
+					}
+				} else if ending == "clean" {
+					if code != 137 || err != nil {
+						t.Fatalf("normal end: code=%d err=%v", code, err)
+					}
+				} else if code != 1 || err == nil {
+					t.Fatalf("stream failure lost precedence: code=%d err=%v", code, err)
+				}
+			})
+		}
 	}
 }
 
@@ -1056,26 +1085,102 @@ func TestCubeSandboxRunReturnsSessionHandleWhenKeepOnFailureRetainsSandbox(t *te
 	}
 }
 
+func TestCubeSandboxRunLifecycleFinalization(t *testing.T) {
+	failure := errors.New("fixture failure")
+	for _, tc := range []struct {
+		name                               string
+		commandCode                        int
+		commandErr, connectErr, cleanupErr error
+		keepOnFailure, failTiming          bool
+		wantCode                           int
+		wantKind                           core.RunErrorKind
+		wantKept                           bool
+		wantDeletes                        int
+	}{
+		{name: "cleanup after success", cleanupErr: failure, wantCode: 1, wantKind: core.RunErrorProvider, wantKept: true, wantDeletes: 1},
+		{name: "cleanup after exit", commandCode: 7, cleanupErr: failure, wantCode: 7, wantKind: core.RunErrorCommandExit, wantKept: true, wantDeletes: 1},
+		{name: "keep setup failure", connectErr: failure, keepOnFailure: true, wantCode: 1, wantKind: core.RunErrorProvider, wantKept: true},
+		{name: "cleanup setup failure", connectErr: failure, wantCode: 1, wantKind: core.RunErrorProvider, wantDeletes: 1},
+		{name: "cancel command", commandErr: context.Canceled, wantCode: 1, wantKind: core.RunErrorCanceled, wantDeletes: 1},
+		{name: "timeout command", commandErr: context.DeadlineExceeded, wantCode: 1, wantKind: core.RunErrorTimeout, wantDeletes: 1},
+		{name: "writer after command exit", commandCode: 7, failTiming: true, keepOnFailure: true, wantCode: 7, wantKind: core.RunErrorCommandExit, wantKept: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			client := &fakeCubeSandboxSyncClient{processCodes: []int{0, tc.commandCode}, processErrs: []error{nil, tc.commandErr}, connectErr: tc.connectErr, deleteErr: tc.cleanupErr}
+			restore := swapNewCubeSandboxClient(client)
+			defer restore()
+			var stderr bytes.Buffer
+			var output io.Writer = &stderr
+			if tc.failTiming {
+				output = cubeTimingFailureWriter{&stderr}
+			}
+			backend := &cubesandboxBackend{cfg: Config{TTL: time.Minute, CubeSandbox: CubeSandboxConfig{Template: "base", Workdir: "repo"}}, rt: Runtime{Stdout: io.Discard, Stderr: output}}
+			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, TimingJSON: true, KeepOnFailure: tc.keepOnFailure})
+			var ee ExitError
+			if !errors.As(err, &ee) || ee.Code != tc.wantCode || result.ExitCode != tc.wantCode || result.ErrorKind != tc.wantKind {
+				t.Errorf("result=%#v err=%v, want code=%d kind=%s", result, err, tc.wantCode, tc.wantKind)
+			}
+			if tc.commandErr != nil && !errors.Is(err, tc.commandErr) {
+				t.Errorf("lost command cause: %v", err)
+			}
+			if result.Session == nil || result.Session.Kept != tc.wantKept || len(client.deleteIDs) != tc.wantDeletes || (tc.wantDeletes > 0 && !client.deleteDeadlineSet) {
+				t.Fatalf("session=%#v deletes=%v", result.Session, client.deleteIDs)
+			}
+			if _, exists, claimErr := readLeaseClaimWithPresence(result.LeaseID); claimErr != nil || exists != tc.wantKept {
+				t.Errorf("claim exists=%t err=%v, want kept=%t", exists, claimErr, tc.wantKept)
+			}
+			if !tc.failTiming {
+				var report core.TimingReport
+				count := 0
+				for _, line := range strings.Split(stderr.String(), "\n") {
+					if strings.HasPrefix(line, "{") {
+						count++
+						if err := json.Unmarshal([]byte(line), &report); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				if count != 1 || report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind || report.TotalMs != result.Total.Milliseconds() {
+					t.Errorf("timing count=%d report=%#v result=%#v", count, report, result)
+				}
+			}
+		})
+	}
+}
+
+type cubeTimingFailureWriter struct{ io.Writer }
+
+func (w cubeTimingFailureWriter) Write(p []byte) (int, error) {
+	if bytes.HasPrefix(p, []byte("{")) {
+		return 0, errors.New("fixture timing writer failed")
+	}
+	return w.Writer.Write(p)
+}
+
 func TestCubeSandboxRunPreservesAbnormalProcessExitCode(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	client := &fakeCubeSandboxSyncClient{
-		processCodes: []int{0, 137},
-		processErrs:  []error{nil, errors.New("process did not exit normally")},
-	}
-	restore := swapNewCubeSandboxClient(client)
-	defer restore()
-	backend := &cubesandboxBackend{
-		cfg: Config{TTL: time.Minute, CubeSandbox: CubeSandboxConfig{APIKey: "test", Template: "base", Workdir: "repo"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
-	}
-	_, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "repo", Root: t.TempDir()},
-		Command: []string{"false"},
-		NoSync:  true,
-	})
-	var exitErr ExitError
-	if !errors.As(err, &exitErr) || exitErr.Code != 137 {
-		t.Fatalf("err=%v, want ExitError code 137", err)
+	for _, reported := range []int{137, -1, 0} {
+		t.Run(fmt.Sprint(reported), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			body := cubesandboxTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": reported, "exited": false, "error": "fixture process interrupted"}}})
+			code, processErr := parseCubeSandboxProcessStream(bytes.NewReader(body), io.Discard, io.Discard)
+			client := &fakeCubeSandboxSyncClient{processCodes: []int{0, code}, processErrs: []error{nil, processErr}}
+			restore := swapNewCubeSandboxClient(client)
+			defer restore()
+			backend := &cubesandboxBackend{
+				cfg: Config{TTL: time.Minute, CubeSandbox: CubeSandboxConfig{APIKey: "test", Template: "base", Workdir: "repo"}},
+				rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+			}
+			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"false"}, NoSync: true})
+			wantCode := reported
+			if wantCode == 0 {
+				wantCode = 1
+			}
+			var exitErr ExitError
+			if !errors.As(err, &exitErr) || exitErr.Code != wantCode || result.ExitCode != wantCode || result.ErrorKind != core.RunErrorCommandExit || !strings.Contains(err.Error(), "fixture process interrupted") {
+				t.Fatalf("result=%#v err=%v, want abnormal command exit %d", result, err, wantCode)
+			}
+		})
 	}
 }
 
@@ -1477,6 +1582,7 @@ type fakeCubeSandboxSyncClient struct {
 	createCalls       int
 	getIDs            []string
 	getErr            error
+	connectErr        error
 	deleteIDs         []string
 	deleteErr         error
 	deleteDeadlineSet bool
@@ -1504,7 +1610,7 @@ func (f *fakeCubeSandboxSyncClient) CreateSandbox(_ context.Context, req cubesan
 }
 
 func (f *fakeCubeSandboxSyncClient) ConnectSandbox(context.Context, string, int) (cubesandboxSession, error) {
-	return cubesandboxSession{}, nil
+	return cubesandboxSession{}, f.connectErr
 }
 
 func (f *fakeCubeSandboxSyncClient) GetSandbox(_ context.Context, sandboxID string) (cubesandboxSandbox, error) {

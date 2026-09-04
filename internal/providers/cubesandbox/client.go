@@ -533,7 +533,7 @@ func parseCubeSandboxProcessStream(r io.Reader, stdout, stderr io.Writer, secret
 				if exitCode == 0 {
 					exitCode = 1
 				}
-				return exitCode, fmt.Errorf("cubesandbox process did not exit normally: %s", detail)
+				return exitCode, shared.ObservedProcessEndError(fmt.Sprintf("cubesandbox process did not exit normally: %s", detail))
 			}
 		}
 	}

@@ -139,6 +139,22 @@ that virtual host already resolves from the Crabbox host.
 - Desktop/browser/code: no.
 - Coordinator: no (direct from CLI only).
 
+## Run completion and cleanup
+
+Run results and timing are finalized after cleanup. A failed automatic deletion
+returns a failure and a retained recovery session; claims are removed only after
+authorized cleanup succeeds. An existing command failure keeps its exit code if cleanup
+or timing output also fails. `--keep-on-failure` applies to connection and
+workspace preparation failures after acquisition, as well as command failures.
+Reused sandboxes are never automatically deleted.
+
+An abnormal process-end event preserves its reported nonzero exit code and
+diagnostic, including negative codes reported for directly signaled processes.
+An abnormal zero becomes failure code 1. Transport errors remain separate from
+observed process exits and preserve cancellation/timeout causes. CubeSandbox's
+existing immediate return on an abnormal end is unchanged; this does not certify
+that a later stream trailer or sandbox deletion succeeded.
+
 ## Gotchas
 
 - `--class` and `--type` are rejected; choose the template and CubeSandbox node
