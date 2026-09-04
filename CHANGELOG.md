@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- CodeSandbox: share run finalization so failed cleanup returns an accurate recovery session, cancellation honors `--keep-on-failure`, and timing errors preserve the command outcome. Thanks @steipete.
+- CodeSandbox: share run finalization so failed cleanup returns an accurate recovery session, cancellation honors `--keep-on-failure`, and timing errors preserve the command outcome. [PR 1843](https://github.com/openclaw/crabbox/pull/1843). Thanks @steipete.
 
 ## 0.49.1 - 2026-09-04
 
