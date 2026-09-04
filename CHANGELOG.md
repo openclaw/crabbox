@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Protect Nomad runs from overwriting replacement claims or recreating retired leases, and expose standard run-session handles with cleanup-aware final outcomes that preserve the original command exit. Thanks @steipete.
+- Protect Nomad runs from overwriting replacement claims or recreating retired leases, and expose standard run-session handles with cleanup-aware final outcomes that preserve the original command exit. [PR 1810](https://github.com/openclaw/crabbox/pull/1810). Thanks @steipete.
 - Allow fresh brokered AWS Windows and WSL2 leases to bootstrap through advertised SSH port 22 while preserving an explicitly selected final workload port. [PR 1801](https://github.com/openclaw/crabbox/pull/1801). Thanks @steipete.
 - Reuse one Azure or GCP token refresh across concurrent requests, reducing duplicate authentication traffic while preserving credential isolation, refresh margins, and retry behavior. [PR 1802](https://github.com/openclaw/crabbox/pull/1802). Thanks @steipete.
 - Skip unnecessary APT translation, AppStream, and command-not-found downloads during minimal Linux bootstrap while preserving required package indexes, signature checks, and later operator defaults. [PR 1794](https://github.com/openclaw/crabbox/pull/1794). Thanks @steipete.
