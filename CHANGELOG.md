@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reject changed Azure VM identities during acquisition readiness and use identity-checked VM/companion cleanup for failed acquisitions instead of blind name-based rollback. [PR 1827](https://github.com/openclaw/crabbox/pull/1827). Thanks @steipete.
 - Report SmolVM decoder, file-write and extraction failures instead of false upload success, isolate temporary upload files, and preserve existing files when decoding fails. [PR 1826](https://github.com/openclaw/crabbox/pull/1826). Thanks @steipete.
 - Clean failed SmolVM environment-profile uploads with bounded original-claim checks, isolate each run's profile, and reuse shared shell-profile handling without requiring Bash. [PR 1829](https://github.com/openclaw/crabbox/pull/1829). Thanks @steipete.
 - Stop direct AWS, Azure, GCP, and Hetzner bootstrap retries from allocating another machine when rollback reports a cleanup failure, preserving both the original failure and cleanup diagnostics. [PR 1819](https://github.com/openclaw/crabbox/pull/1819). Thanks @steipete.

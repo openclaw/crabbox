@@ -19,6 +19,7 @@ import (
 type fakeAzureClient struct {
 	claimScope        string
 	deleted           []string
+	plainDeletes      []string
 	cleanupExpected   []Server
 	ownedExpected     []Server
 	prepareCleanup    []Server
@@ -35,6 +36,9 @@ type fakeAzureClient struct {
 	created           Server
 	createCfg         Config
 	createErr         error
+	createFunc        func(Server) Server
+	waitFunc          func(Server) (Server, error)
+	waitCalls         int
 	waitErr           error
 	getErr            error
 	get               map[string]Server
@@ -59,18 +63,28 @@ func (c *fakeAzureClient) ListCrabboxServers(context.Context) ([]Server, error) 
 	return c.servers, nil
 }
 
-func (c *fakeAzureClient) CreateServerWithFallback(_ context.Context, _ Config, _ string, leaseID string, _ string, _ bool, _ func(string, ...any)) (Server, Config, error) {
+func (c *fakeAzureClient) CreateServerWithFallback(_ context.Context, cfg Config, _ string, leaseID, slug string, keep bool, _ func(string, ...any)) (Server, Config, error) {
 	c.createLeaseIDs = append(c.createLeaseIDs, leaseID)
 	if c.createErr != nil {
 		return Server{}, Config{}, c.createErr
 	}
-	if c.created.CloudID == "" {
-		c.created = Server{CloudID: "crabbox-created", Name: "crabbox-created", Labels: map[string]string{}}
+	c.created.CloudID = core.LeaseProviderName(leaseID, slug)
+	c.created.Name = c.created.CloudID
+	if c.created.ImmutableID == "" {
+		c.created.ImmutableID = "native-vm-" + leaseID
 	}
-	return c.created, c.createCfg, nil
+	c.created.Labels = core.DirectLeaseLabels(cfg, leaseID, slug, "azure", "on-demand", keep, time.Unix(1, 0))
+	if c.createFunc != nil {
+		c.created = c.createFunc(c.created)
+	}
+	return c.created, cfg, nil
 }
 
 func (c *fakeAzureClient) WaitForServerIP(context.Context, string) (Server, error) {
+	c.waitCalls++
+	if c.waitFunc != nil {
+		return c.waitFunc(c.created)
+	}
 	if c.waitErr != nil {
 		return Server{}, c.waitErr
 	}
@@ -99,6 +113,7 @@ func (c *fakeAzureClient) GetServer(_ context.Context, id string) (Server, error
 }
 
 func (c *fakeAzureClient) DeleteServer(_ context.Context, name string) error {
+	c.plainDeletes = append(c.plainDeletes, name)
 	c.deleted = append(c.deleted, name)
 	return c.deleteErr
 }
@@ -175,7 +190,7 @@ func TestAzureAcquireCleansUpCreatedServerOnIPFailure(t *testing.T) {
 	if !errors.Is(err, ipErr) {
 		t.Fatalf("err=%v, want IP failure", err)
 	}
-	if len(fake.deleted) != 1 || fake.deleted[0] != "crabbox-created" {
+	if len(fake.deleted) != 1 || fake.deleted[0] != fake.created.CloudID {
 		t.Fatalf("deleted=%v, want created server cleanup", fake.deleted)
 	}
 }
@@ -262,13 +277,13 @@ func TestAzureAcquireDoesNotRollbackReadyServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease.Server.CloudID != "crabbox-ready" {
-		t.Fatalf("server=%s, want crabbox-ready", lease.Server.CloudID)
+	if lease.Server.CloudID != fake.created.CloudID {
+		t.Fatalf("server=%s, want created VM", lease.Server.CloudID)
 	}
 	if len(fake.deleted) != 0 {
 		t.Fatalf("deleted=%v, want no rollback on success", fake.deleted)
 	}
-	if len(fake.tagged) != 1 || fake.tagged[0] != "crabbox-ready" {
+	if len(fake.tagged) != 1 || fake.tagged[0] != fake.created.CloudID {
 		t.Fatalf("tagged=%v, want ready tag update", fake.tagged)
 	}
 	claim, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
@@ -310,7 +325,7 @@ func TestAzureAcquireRollsBackWhenExactClaimCannotPersist(t *testing.T) {
 	if _, err := backend.acquireOnce(context.Background(), false, ""); err == nil {
 		t.Fatal("expected exact-claim persistence failure")
 	}
-	if len(fake.deleted) != 1 || fake.deleted[0] != created.CloudID {
+	if len(fake.deleted) != 1 || fake.deleted[0] != fake.created.CloudID {
 		t.Fatalf("deleted=%v, want funded VM rollback after claim failure", fake.deleted)
 	}
 }
@@ -699,8 +714,8 @@ func TestAzureCleanupRejectsChangedLiveSlug(t *testing.T) {
 	if len(fake.cleanupExpected) != 0 || len(fake.deleted) != 0 {
 		t.Fatalf("cleanup crossed changed slug: expected=%v deleted=%v", fake.cleanupExpected, fake.deleted)
 	}
-	if !strings.Contains(stderr.String(), "exact local claim missing or stale") {
-		t.Fatalf("stderr=%q, want exact-claim diagnostic", stderr.String())
+	if !strings.Contains(stderr.String(), "Azure VM slug") {
+		t.Fatalf("stderr=%q, want changed-slug diagnostic", stderr.String())
 	}
 }
 
@@ -839,8 +854,9 @@ func TestAzureAcquireStopsFreshRetryAfterRollbackFailure(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			primary := core.Exit(5, "timed out waiting for SSH: fixture")
 			fake := &fakeAzureClient{createCfg: azureAcquireTestConfig()}
+			cleanupErr := errors.New("delete unavailable")
 			if failed {
-				fake.deleteErr = errors.New("delete unavailable")
+				fake.deleteOwnedFunc = func(Server) error { return cleanupErr }
 			}
 			oldClient, oldBootstrap := newAzureClient, bootstrapManagedWindowsDesktop
 			newAzureClient = func(context.Context, Config) (azureClient, error) { return fake, nil }
@@ -853,14 +869,111 @@ func TestAzureAcquireStopsFreshRetryAfterRollbackFailure(t *testing.T) {
 			if failed {
 				want = 1
 			}
-			if len(fake.createLeaseIDs) != want || len(fake.deleted) != want || !errors.Is(err, primary) {
+			if len(fake.createLeaseIDs) != want || len(fake.ownedExpected) != want || len(fake.plainDeletes) != 0 || !errors.Is(err, primary) {
 				t.Fatalf("creates=%v deletes=%v error=%v", fake.createLeaseIDs, fake.deleted, err)
 			}
 			if !failed && fake.createLeaseIDs[0] == fake.createLeaseIDs[1] {
 				t.Fatal("retry reused lease identity")
 			}
-			if failed && (!errors.Is(err, fake.deleteErr) || strings.Contains(stderr.String(), "retrying with fresh lease")) {
+			if failed && (!errors.Is(err, cleanupErr) || strings.Contains(stderr.String(), "retrying with fresh lease")) {
 				t.Fatalf("cleanup debt lost: error=%v stderr=%s", err, stderr.String())
+			}
+		})
+	}
+}
+
+func TestAzureAcquireRejectsChangedReadinessGenerationWithoutMutation(t *testing.T) {
+	mutations := []struct {
+		name   string
+		change func(*Server)
+	}{
+		{"generation", func(s *Server) { s.ImmutableID = "replacement-vm" }},
+		{"missing-generation", func(s *Server) { s.ImmutableID = "" }},
+		{"cloud-name", func(s *Server) { s.CloudID = "replacement-name" }},
+		{"name", func(s *Server) { s.Name = "replacement-name" }},
+		{"owner", func(s *Server) { s.Labels["created_by"] = "other" }},
+		{"provider", func(s *Server) { s.Labels["provider"] = "gcp" }},
+		{"lease", func(s *Server) { s.Labels["lease"] = "cbx_111111111111" }},
+		{"slug", func(s *Server) { s.Labels["slug"] = "replacement" }},
+		{"key", func(s *Server) { s.Labels["provider_key"] = "replacement" }},
+	}
+	for _, creation := range []bool{false, true} {
+		for _, tc := range mutations {
+			// A nonempty generation at creation is the initial anchor.
+			if creation && tc.name == "generation" {
+				continue
+			}
+			t.Run(fmt.Sprintf("creation=%v/%s", creation, tc.name), func(t *testing.T) {
+				t.Setenv("HOME", t.TempDir())
+				t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				fake := &fakeAzureClient{}
+				if creation {
+					fake.createFunc = func(s Server) Server { tc.change(&s); return s }
+				} else {
+					// Deliberately mutate the aliased labels returned by creation.
+					fake.waitFunc = func(s Server) (Server, error) { tc.change(&s); return s, nil }
+				}
+				oldClient, oldBootstrap := newAzureClient, bootstrapManagedWindowsDesktop
+				newAzureClient = func(context.Context, Config) (azureClient, error) { return fake, nil }
+				bootstrapCalls := 0
+				bootstrapManagedWindowsDesktop = func(context.Context, Config, *SSHTarget, string, io.Writer) error { bootstrapCalls++; return nil }
+				t.Cleanup(func() { newAzureClient = oldClient; bootstrapManagedWindowsDesktop = oldBootstrap })
+				b := NewAzureLeaseBackend(ProviderSpec{}, azureAcquireTestConfig(), Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
+				_, err := b.Acquire(t.Context(), AcquireRequest{})
+				if err == nil || bootstrapCalls != 0 || len(fake.tagged) != 0 || len(fake.deleted) != 0 || len(fake.prepareOwned) != 0 || len(fake.createLeaseIDs) != 1 {
+					t.Fatalf("err=%v bootstrap=%d tags=%v deletes=%v prepared=%d creates=%v", err, bootstrapCalls, fake.tagged, fake.deleted, len(fake.prepareOwned), fake.createLeaseIDs)
+				}
+				if creation && fake.waitCalls != 0 {
+					t.Fatal("invalid creation reached waiter")
+				}
+				if _, exists, e := core.ReadLeaseClaimWithPresence(fake.createLeaseIDs[0]); e != nil || exists {
+					t.Fatalf("unexpected claim: exists=%v err=%v", exists, e)
+				}
+			})
+		}
+	}
+}
+
+func TestAzureAcquireRollbackKeepsOriginalBindingAndRefusesUnpreparedDelete(t *testing.T) {
+	for _, failure := range []string{"", "prepare", "changed-preparation"} {
+		t.Run(failure, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			primary := errors.New("readiness unavailable")
+			fake := &fakeAzureClient{waitErr: primary}
+			fake.prepareFunc = func(s Server) Server {
+				s.Labels = maps.Clone(s.Labels)
+				s.Labels["fixture_cleanup_binding"] = "captured"
+				return s
+			}
+			if failure == "prepare" {
+				fake.prepareErr = errors.New("cannot verify resources")
+			}
+			if failure == "changed-preparation" {
+				fake.prepareFunc = func(s Server) Server { s.ImmutableID = "replacement"; return s }
+			}
+			oldClient := newAzureClient
+			newAzureClient = func(context.Context, Config) (azureClient, error) { return fake, nil }
+			t.Cleanup(func() { newAzureClient = oldClient })
+			b := NewAzureLeaseBackend(ProviderSpec{}, azureAcquireTestConfig(), Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
+			_, err := b.Acquire(t.Context(), AcquireRequest{})
+			if !errors.Is(err, primary) || len(fake.prepareOwned) != 1 || len(fake.plainDeletes) != 0 {
+				t.Fatalf("err=%v prepare=%v plain=%v", err, fake.prepareOwned, fake.plainDeletes)
+			}
+			if fake.prepareOwned[0].ImmutableID != fake.created.ImmutableID {
+				t.Fatal("original binding lost")
+			}
+			wantDelete := 0
+			if failure == "" {
+				wantDelete = 1
+			}
+			if len(fake.ownedExpected) != wantDelete {
+				t.Fatalf("deletion calls=%d", len(fake.ownedExpected))
+			}
+			if wantDelete == 1 && fake.ownedExpected[0].Labels["fixture_cleanup_binding"] != "captured" {
+				t.Fatal("prepared companion evidence lost")
 			}
 		})
 	}
