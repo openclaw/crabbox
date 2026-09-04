@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reject mismatched E2B and CubeSandbox read/connection identities before adopting a sandbox or using its execution session, sharing exact resource-ID validation while keeping cleanup bound to the original allocation. Thanks @steipete.
+
 ## 0.49.0 - 2026-09-04
 
 ### Highlights

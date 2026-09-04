@@ -114,6 +114,11 @@ E2B caps sandbox timeouts at one hour. Crabbox clamps a longer local lease TTL t
 that limit when creating or connecting to a sandbox, and a TTL of zero falls back
 to five minutes.
 
+Sandbox reads and connections must return the exact requested native sandbox
+ID. A missing or different ID is rejected before its metadata or execution
+session can be used; ordinary cleanup of an already acquired sandbox still
+follows that sandbox's original claim.
+
 ## Capabilities
 
 - SSH: no.

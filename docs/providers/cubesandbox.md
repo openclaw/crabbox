@@ -153,6 +153,9 @@ that virtual host already resolves from the Crabbox host.
 - To adopt a labelled legacy or externally restored sandbox, use its exact
   CubeSandbox sandbox ID with `run --id <sandbox-id> --reclaim` or
   `stop --id <sandbox-id> --reclaim`. Conflicting claims fail closed.
+- Sandbox reads and connections must return the exact requested native sandbox
+  ID. A missing or different ID is rejected before adoption or execution; normal
+  failure cleanup remains bound to the originally acquired sandbox.
 
 Related docs:
 
