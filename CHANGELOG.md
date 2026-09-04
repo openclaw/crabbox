@@ -13,7 +13,7 @@
 - Fix native macOS readiness test fixtures when temporary directories inherit a different group from the process, without changing production ownership checks. [PR 1686](https://github.com/openclaw/crabbox/pull/1686). Thanks @steipete.
 - Typed GCP identity generation and registration now observe the owned VM boot disk to bind exact numeric image or snapshot provenance without adding image or snapshot reads to ordinary GCP launches; create cleanup custody requires a numeric VM ID, interrupted token-bound creates capture or retry that ID only through exact ownership lookups and strict rereads, and fully bound pre-upgrade leases may use their lossy historical numeric ID only to corroborate a raw ID during fenced deletion or expiry cleanup before an exact reread. [PR 1620](https://github.com/openclaw/crabbox/pull/1620). Thanks @vincentkoc.
 
-- Report OpenSandbox cleanup failures instead of silently succeeding, preserve the original command exit when cleanup also fails, and finalize timing/session results after cleanup without weakening reuse admission or absolute TTL checks. Thanks @steipete.
+- Report OpenSandbox cleanup failures instead of silently succeeding, preserve the original command exit when cleanup also fails, and finalize timing/session results after cleanup without weakening reuse admission or absolute TTL checks. [PR 1804](https://github.com/openclaw/crabbox/pull/1804). Thanks @steipete.
 
 ## 0.49.0 - 2026-09-03
 
