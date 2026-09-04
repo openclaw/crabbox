@@ -2,8 +2,9 @@
 
 ## Unreleased
 
-- Preserve literal E2B and CubeSandbox profile arguments through their shared envd command transport, and accept inferred single-string shell programs and explicit empty shell source. [PR 1837](https://github.com/openclaw/crabbox/pull/1837). Thanks @steipete.
+- Clean partial Upstash Box environment uploads after failure or cancellation, isolate each profile, and refuse stale file cleanup while preserving discovery-only reuse and original command outcomes. [PR 1834](https://github.com/openclaw/crabbox/pull/1834). Thanks @steipete.
 - Preserve literal Tensorlake and OpenSandbox profile arguments through final execution, including environment-wrapped commands, and fix Tensorlake's inferred single-string shell execution. [PR 1835](https://github.com/openclaw/crabbox/pull/1835). Thanks @steipete.
+- Preserve literal E2B and CubeSandbox profile arguments through their shared envd command transport, and accept inferred single-string shell programs and explicit empty shell source. [PR 1837](https://github.com/openclaw/crabbox/pull/1837). Thanks @steipete.
 - Preserve literal Agent Sandbox profile arguments through pod stdin execution and share checked workspace/environment command wrapping with Nomad. [PR 1831](https://github.com/openclaw/crabbox/pull/1831). Thanks @steipete.
 - Preserve literal SmolVM and Upstash Box profile arguments, accept inferred single-string shell commands, and share source rendering without adding another shell. [PR 1833](https://github.com/openclaw/crabbox/pull/1833). Thanks @steipete.
 - Read all AWS recovery inventory pages and retain cleanup debt when pagination is incomplete; describe interrupted provisioning without assuming a deployment caused it. [PR 1832](https://github.com/openclaw/crabbox/pull/1832). Thanks @steipete.
