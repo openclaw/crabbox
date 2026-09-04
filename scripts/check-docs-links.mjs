@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
+import { reserveHeadingAnchor } from "./lib/markdown-headings.mjs";
 
 const root = process.cwd();
 const explicitFiles = [
@@ -71,13 +72,7 @@ function headingAnchors(markdown) {
     if (!base) {
       continue;
     }
-    let anchor = base;
-    let suffix = 0;
-    while (anchors.has(anchor)) {
-      suffix += 1;
-      anchor = `${base}-${suffix}`;
-    }
-    anchors.add(anchor);
+    reserveHeadingAnchor(anchors, base);
   }
   return anchors;
 }
