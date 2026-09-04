@@ -111,6 +111,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 func (b *backend) rollbackBox(ctx context.Context, client api, leaseID string, box boxData, claim LeaseClaim, exists bool) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), boxReleaseTimeout)
 	defer cancel()
+	cleanupCtx = withBoxCleanupProgress(cleanupCtx, b.rt.Stderr)
 	if exists {
 		if claim.LeaseID != leaseID || box.ID != box.createdID || !concreteBoxID(box.createdID) {
 			return exit(2, "ascii-box rollback has no matching original publication identity")
@@ -139,6 +140,9 @@ func (b *backend) rollbackBox(ctx context.Context, client api, leaseID string, b
 }
 
 func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+	if req.ReleaseOnly {
+		ctx = withBoxCleanupProgress(ctx, b.rt.Stderr)
+	}
 	cfg, err := b.configForRun()
 	if err != nil {
 		return LeaseTarget{}, err
@@ -316,6 +320,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	}
 	ctx, cancel := context.WithTimeout(ctx, boxReleaseTimeout)
 	defer cancel()
+	ctx = withBoxCleanupProgress(ctx, b.rt.Stderr)
 	return releaseClaimedBox(ctx, client, claim, func(box boxData) {
 		if req.GuardedRemoteCleanup != nil {
 			lease := req.Lease

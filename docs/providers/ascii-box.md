@@ -115,6 +115,15 @@ BOX_ORG
    lookups, and cancellation retain the claim without recording completion. The
    shared native CLI SSH key is retained.
 
+Cleanup reports its current native-call phase and elapsed time at roughly
+ten-second intervals, including while a native command is blocked. A remaining
+budget is shown only when that command's context has a deadline; progress does
+not extend it or impose a new whole-command timeout. Claim-lock waits and
+best-effort remote teardown are outside this native-call progress reporter.
+Deletion-wait failures retain the exact operation and its last validated status
+in the error. Native command capture is capped at 8 MiB per stream; oversized or
+incomplete output is an error, never evidence of completed deletion.
+
 If this release observes a valid native deletion acceptance but cannot finish
 waiting because of a timeout, cancellation, or operation lookup failure, it
 durably records the exact operation ID and its claim binding before returning

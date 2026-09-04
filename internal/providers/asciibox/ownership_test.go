@@ -312,8 +312,8 @@ func TestReleasePendingDeletionSurvivesTimeoutAndRetries(t *testing.T) {
 	pending := assertPendingDeletionRetained(t, claim, testDeletionID)
 	runner.outcomes["deletion"] = []commandOutcome{deletionOutcome(testDeletionID, claim.CloudID, "box", "blocked")}
 	commandCount := len(runner.commands)
-	if _, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true}); err == nil {
-		t.Fatal("blocked operation was treated as completed")
+	if _, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "phase=deletion-operation") || !strings.Contains(err.Error(), "last_observed_status=blocked") {
+		t.Fatalf("blocked operation lost its diagnostic or was treated as completed: %v", err)
 	}
 	assertClaimRetained(t, pending)
 	for _, command := range runner.commands[commandCount:] {
@@ -472,7 +472,7 @@ func TestReleaseRejectsCancellationDuringAbsenceCheck(t *testing.T) {
 		cancel()
 		return []boxData{}, nil
 	}
-	if err := b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease}); !errors.Is(err, context.Canceled) {
+	if err := b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease}); !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "phase=inventory-confirmation") {
 		t.Fatalf("release err=%v, want cancellation", err)
 	}
 	assertClaimRetained(t, claim)
@@ -499,27 +499,34 @@ func TestReleaseRetriesCompletedDeletionAfterConfirmationFailure(t *testing.T) {
 }
 
 func TestReleaseRecordsCompletionWhenConfirmationCanceled(t *testing.T) {
-	b, f, claim, lease := ownedFixture(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	f.listHook = func() ([]boxData, error) {
-		cancel()
-		return []boxData{}, nil
-	}
-	if err := b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("release err=%v, want canceled confirmation", err)
-	}
-	assertCompletedDeletionRetained(t, claim)
-	f.listHook = nil
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
-		t.Fatal(err)
-	}
-	if len(f.deletedIDs) != 1 {
-		t.Fatalf("retry duplicated native deletion: %v", f.deletedIDs)
+	for _, failedResponse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failed-response=%t", failedResponse), func(t *testing.T) {
+			b, f, claim, lease := ownedFixture(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			f.listHook = func() ([]boxData, error) {
+				cancel()
+				if failedResponse {
+					return nil, errors.New("native inventory call failed after cancellation")
+				}
+				return []boxData{}, nil
+			}
+			if err := b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease}); !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "phase=inventory-confirmation") {
+				t.Fatalf("release err=%v, want canceled confirmation", err)
+			}
+			assertCompletedDeletionRetained(t, claim)
+			f.listHook = nil
+			lease, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+				t.Fatal(err)
+			}
+			if len(f.deletedIDs) != 1 {
+				t.Fatalf("retry duplicated native deletion: %v", f.deletedIDs)
+			}
+		})
 	}
 }
 

@@ -284,14 +284,14 @@ func releaseExactBox(ctx context.Context, client api, expected boxData, beforeRe
 	// native deletion completion followed by complete inventory is finalization.
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return fmt.Errorf("ascii-box cleanup phase=inventory-confirmation; retaining claim: %w", err)
 		}
 		boxes, err := client.ListBoxes(ctx, true)
-		if err != nil {
-			return fmt.Errorf("ascii-box deletion confirmation; retaining claim: %w", err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("ascii-box cleanup phase=inventory-confirmation; retaining claim: %w", ctxErr)
 		}
-		if err := ctx.Err(); err != nil {
-			return err
+		if err != nil {
+			return fmt.Errorf("ascii-box cleanup phase=inventory-confirmation; retaining claim: %w", err)
 		}
 		found := false
 		for _, box := range boxes {
@@ -307,7 +307,7 @@ func releaseExactBox(ctx context.Context, client api, expected boxData, beforeRe
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("ascii-box cleanup phase=inventory-confirmation; retaining claim: %w", ctx.Err())
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
@@ -320,16 +320,16 @@ func exactBoxForRelease(ctx context.Context, client api, expected boxData) (boxD
 	if expected.deletionOperationID != "" {
 		operation, err := client.GetDeletionOperation(ctx, expected.ID, expected.deletionOperationID)
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return boxData{}, false, ctxErr
+			return boxData{}, false, fmt.Errorf("ascii-box cleanup phase=deletion-operation; retaining claim: %w", ctxErr)
 		}
 		if err != nil {
-			return boxData{}, false, fmt.Errorf("ascii-box deletion operation lookup; retaining claim: %w", err)
+			return boxData{}, false, fmt.Errorf("ascii-box cleanup phase=deletion-operation lookup; retaining claim: %w", err)
 		}
 		if err := validateBoxDeletionOperation(operation, expected.ID, expected.deletionOperationID); err != nil {
 			return boxData{}, false, err
 		}
 		if operation.Status != "completed" {
-			return boxData{}, false, exit(2, "ascii-box deletion operation %s is %s; retaining claim", operation.ID, operation.Status)
+			return boxData{}, false, exit(2, "ascii-box cleanup phase=deletion-operation operation=%s last_observed_status=%s; retaining claim", operation.ID, operation.Status)
 		}
 		// Recheck the recorded operation inside the release fence; a reference
 		// or an earlier resolution read is not completion authority.
@@ -353,10 +353,10 @@ func exactBoxForRelease(ctx context.Context, client api, expected boxData) (boxD
 	}
 	boxes, listErr := client.ListBoxes(ctx, true)
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return boxData{}, false, ctxErr
+		return boxData{}, false, fmt.Errorf("ascii-box cleanup phase=inventory-confirmation; retaining claim: %w", ctxErr)
 	}
 	if listErr != nil {
-		return boxData{}, false, fmt.Errorf("ascii-box absence confirmation; retaining claim: %w", listErr)
+		return boxData{}, false, fmt.Errorf("ascii-box cleanup phase=inventory-confirmation; retaining claim: %w", listErr)
 	}
 	for _, box := range boxes {
 		if box.ID != expected.ID {
