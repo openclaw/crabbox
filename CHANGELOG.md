@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Local provider bridges: preserve cancellation and deadline causes when a POSIX child is interrupted, without masking completed command exits or output-limit errors. Thanks @steipete.
+
 ## 0.49.1 - 2026-09-04
 
 Users upgrading from v0.48.1 also receive the [v0.49.0 changes](https://github.com/openclaw/crabbox/blob/v0.49.0/CHANGELOG.md#0490---2026-09-03), previously available through the Go module release.
