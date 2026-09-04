@@ -127,8 +127,10 @@ explicit feature covers the request. Providers that execute source modules
 instead of shell commands may declare `FeatureModuleRun`; then `--script` and
 `--script-stdin` are accepted as module source input, while trailing shell
 command argv remains rejected. Delegated artifact globs require
-`FeatureRunArtifacts` and `DelegatedRunArtifactBackend`. Delegated single-file
-downloads require `FeatureRunDownloads` and `DelegatedRunDownloadBackend`;
+`FeatureRunArtifacts`: the backend validates and collects them within `Run`,
+returns them in `RunResult.Artifacts`, and completes collection before cleanup.
+There is no separate post-run artifact dispatch. Delegated single-file downloads
+require `FeatureRunDownloads` and `DelegatedRunDownloadBackend`;
 required artifacts may use either capability, but download-only providers accept
 safe relative file paths instead of globs. Do not pretend a delegated provider
 is SSH-like unless it has a stable SSH contract. If Crabbox cannot run rsync and
@@ -755,6 +757,7 @@ cli.FeatureRunSession   // "run-session"
 cli.FeatureModuleRun    // "module-run"
 cli.FeatureSSHScriptRun // "ssh-script-run"
 cli.FeatureRunArtifacts // "run-artifacts"
+cli.FeaturePreparedArtifactWorkspace // "prepared-artifact-workspace"
 cli.FeatureRunDownloads // "run-downloads"
 cli.FeaturePauseResume  // "pause-resume"
 cli.FeatureMCP          // "mcp-attachments"
@@ -788,8 +791,13 @@ Checkpoint-related features are reserved for versioned workspaces:
   use this core-owned SSH contract; providers do not construct the handle
   themselves. A brokered run ID identifies coordinator history, while a direct
   run ID is only local correlation metadata.
-- `FeatureRunArtifacts`: delegated provider can validate and collect bounded run
-  artifact globs after a successful command, including required artifacts.
+- `FeatureRunArtifacts`: delegated provider validates and collects bounded run
+  artifact globs within `Run`, including required artifacts. Publication and
+  failure eligibility follow the provider's execution contract.
+- `FeaturePreparedArtifactWorkspace`: artifact supervision can capture a
+  CI-prepared workspace before workload code starts, independently of the
+  workload's entry directory. Requires `FeatureRunArtifacts`; this static fact
+  does not validate a particular lease's binding.
 - `FeatureRunDownloads`: delegated provider can materialize bounded single-file
   downloads and validate safe relative single-file required artifacts after a
   successful command.
