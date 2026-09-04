@@ -324,6 +324,21 @@ select the recorded runtime route, but it must not mutate or adopt ownership.
 Providers without this capability retain core's exact static provider-scope
 and resource comparison, plus any `StatusTouchClaimValidator` check.
 
+## Logical lease metadata
+
+Tag-backed adapters share the lease field schema and duplicate-value reduction
+in `internal/providers/shared/tag_labels.go`. DigitalOcean, Linode, and Vultr
+use this contract: contradictory ownership fields stay rejected, state tags
+retain the established precedence, and expiration/activity tags retain the
+largest parsed timestamp. Optional field groups are explicit; using the shared
+schema does not make an adapter accept another provider's metadata.
+
+Adapters still own the wire format: tag length limits, escaping, native API
+updates, and legacy/versioned decoding. In particular, Linode reconstructs its
+chunks before applying the logical schema, and malformed newer values cannot
+fall back to older ownership metadata. Provider/account checks and exact local
+claim fencing remain mandatory; decoded tags alone never authorize deletion.
+
 ## Package layout
 
 Built-in providers live under `internal/providers/<name>`. The registry is

@@ -11,9 +11,16 @@ import {
   isFallbackProvisioningError,
   operationDone,
 } from "../src/gcp";
-import { providerProvisioningCleanupClaim } from "../src/provider-provisioning";
+import {
+  ProviderProvisioningCleanupError,
+  ProviderProvisioningOutcomeUncertainError,
+  ProviderResourceUnresolvedError,
+  providerProvisioningCleanupClaim,
+  providerProvisioningOutcomeUncertain,
+  type ProviderProvisioningCleanupClaim,
+} from "../src/provider-provisioning";
 import { leaseProviderName } from "../src/slug";
-import type { Env, ProviderMachine } from "../src/types";
+import type { Env, LeaseRecord, ProviderMachine } from "../src/types";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -32,12 +39,90 @@ function metadataJSON(body: unknown, init: ResponseInit = {}): Response {
   return metadataResponse(JSON.stringify(body), { ...init, headers });
 }
 
-function seedGCPAuthCache(
+function primeAccessToken(
   client: GCPClient,
   token = "test-token",
   expiresAt = Math.trunc(Date.now() / 1000) + 3600,
 ): void {
   Reflect.set(Reflect.get(client, "tokenCache"), "cached", { token, expiresAt });
+}
+
+function observedGCPLease(overrides: Partial<LeaseRecord> = {}): LeaseRecord {
+  return {
+    id: "cbx_abcdef123456",
+    slug: "blue-lobster",
+    provider: "gcp",
+    target: "linux",
+    architecture: "arm64",
+    cloudID: "crabbox-blue-lobster",
+    region: "us-central1-a",
+    providerProject: "default-project",
+    owner: "alice@example.com",
+    org: "example-org",
+    profile: "default",
+    class: "standard",
+    serverType: "t2a-standard-1",
+    serverID: 123,
+    providerResourceID: "9223372036854775807",
+    serverName: "crabbox-blue-lobster",
+    providerKey: "",
+    host: "192.0.2.10",
+    sshUser: "ubuntu",
+    sshPort: "22",
+    workRoot: "/workspace",
+    keep: false,
+    ttlSeconds: 3600,
+    estimatedHourlyUSD: 0,
+    maxEstimatedUSD: 0,
+    state: "active",
+    createdAt: "2026-09-03T00:00:00.000Z",
+    updatedAt: "2026-09-03T00:00:00.000Z",
+    expiresAt: "2026-09-04T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function ownedGCPInstance(
+  lease: LeaseRecord,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id: lease.providerResourceID,
+    name: lease.cloudID,
+    status: "RUNNING",
+    machineType: `zones/${lease.region}/machineTypes/${lease.serverType}`,
+    zone: `projects/${lease.providerProject}/zones/${lease.region}`,
+    labels: {
+      crabbox: "true",
+      created_by: "crabbox",
+      lease: lease.id,
+      owner: "alice_example_com",
+      provider: "gcp",
+      slug: lease.slug,
+    },
+    disks: [
+      {
+        boot: true,
+        type: "PERSISTENT",
+        source: `projects/${lease.providerProject}/zones/${lease.region}/disks/boot-disk`,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function observedGCPBootDisk(
+  lease: LeaseRecord,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id: "8223372036854775807",
+    selfLink: `projects/${lease.providerProject}/zones/${lease.region}/disks/boot-disk`,
+    users: [`projects/${lease.providerProject}/zones/${lease.region}/instances/${lease.cloudID}`],
+    sourceImage: "projects/source-project/global/images/runner-v3",
+    sourceImageId: "8123456789012345678",
+    ...overrides,
+  };
 }
 
 describe("gcp provider", () => {
@@ -60,6 +145,899 @@ describe("gcp provider", () => {
   it("prefers per-request project over Worker defaults", () => {
     expect(new GCPClient(env).project).toBe("default-project");
     expect(new GCPClient(env, undefined, "request-project").project).toBe("request-project");
+  });
+
+  it("observes exact immutable image and snapshot provenance from the owned boot disk", async () => {
+    const fixtures = [
+      {
+        disk: {
+          sourceImage: "projects/source-project/global/images/runner-v3",
+          sourceImageId: "8123456789012345678",
+        },
+        expected: {
+          id: "8123456789012345678",
+          source: "explicit",
+          provider: "gcp",
+          kind: "gcp-image",
+          region: "us-central1-a",
+          sourceID: "projects/source-project/global/images/runner-v3",
+        },
+      },
+      {
+        disk: {
+          sourceImage: undefined,
+          sourceImageId: undefined,
+          sourceSnapshot:
+            "https://www.googleapis.com/compute/v1/projects/source-project/global/snapshots/runner-v3",
+          sourceSnapshotId: "7123456789012345678",
+        },
+        expected: {
+          id: "7123456789012345678",
+          source: "snapshot",
+          provider: "gcp",
+          kind: "gcp-disk-snapshot",
+          region: "us-central1-a",
+          sourceID: "projects/source-project/global/snapshots/runner-v3",
+        },
+      },
+    ] as const;
+
+    for (const fixture of fixtures) {
+      const lease = observedGCPLease();
+      const client = new GCPClient(env);
+      const requests: string[] = [];
+      const internal = client as unknown as {
+        gcp<T>(method: string, path: string): Promise<T>;
+      };
+      vi.spyOn(internal, "gcp").mockImplementation(async (method, path) => {
+        requests.push(`${method} ${path}`);
+        if (path.includes("/instances/")) return ownedGCPInstance(lease) as never;
+        if (path.includes("/disks/")) {
+          return observedGCPBootDisk(lease, fixture.disk) as never;
+        }
+        throw new Error(`unexpected GCP request ${method} ${path}`);
+      });
+
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each source owns isolated request evidence.
+      await expect(client.observeReadyPoolImageIdentity(lease)).resolves.toEqual(fixture.expected);
+      expect(requests).toEqual([
+        "GET /zones/us-central1-a/instances/crabbox-blue-lobster",
+        "GET /zones/us-central1-a/disks/boot-disk",
+        "GET /zones/us-central1-a/instances/crabbox-blue-lobster",
+        "GET /zones/us-central1-a/disks/boot-disk",
+      ]);
+    }
+  });
+
+  it("rejects incomplete lease scope before GCP I/O", async () => {
+    const fixtures: Array<Partial<LeaseRecord>> = [
+      { provider: "aws" },
+      { providerProject: undefined },
+      { providerProject: " default-project" },
+      { region: undefined },
+      { region: "us-central1-a " },
+      { cloudID: "" },
+      { cloudID: " crabbox-blue-lobster" },
+      { serverName: "other-instance" },
+      { providerResourceID: undefined },
+      { providerResourceID: "9223372036854775807 " },
+      { providerResourceID: "instance-latest" },
+    ];
+
+    for (const fixture of fixtures) {
+      const client = new GCPClient(env);
+      const internal = client as unknown as {
+        gcp<T>(method: string, path: string): Promise<T>;
+      };
+      const gcp = vi.spyOn(internal, "gcp");
+
+      // oxlint-disable-next-line eslint/no-await-in-loop -- every malformed scope must stop before I/O.
+      await expect(
+        client.observeReadyPoolImageIdentity(observedGCPLease(fixture)),
+      ).resolves.toBeUndefined();
+      expect(gcp).not.toHaveBeenCalled();
+    }
+  });
+
+  it("rejects foreign, ambiguous, malformed, and non-persistent boot provenance", async () => {
+    const lease = observedGCPLease();
+    const baseDisk = observedGCPBootDisk(lease);
+    const baseBoot = {
+      boot: true,
+      type: "PERSISTENT",
+      source: "projects/default-project/zones/us-central1-a/disks/boot-disk",
+    };
+    const fixtures: Array<{
+      name: string;
+      instance?: Record<string, unknown>;
+      disk?: Record<string, unknown>;
+    }> = [
+      { name: "machine image", instance: { sourceMachineImage: "machine-images/runner" } },
+      { name: "missing instance id", instance: { id: undefined } },
+      { name: "replacement instance id", instance: { id: "9223372036854775806" } },
+      { name: "foreign instance", instance: { name: "foreign-instance" } },
+      {
+        name: "foreign ownership",
+        instance: {
+          labels: { ...(ownedGCPInstance(lease).labels as object), owner: "mallory" },
+        },
+      },
+      { name: "missing boot disk", instance: { disks: [] } },
+      { name: "multiple boot disks", instance: { disks: [baseBoot, { ...baseBoot }] } },
+      { name: "non-persistent boot disk", instance: { disks: [{ ...baseBoot, type: "SCRATCH" }] } },
+      {
+        name: "foreign disk project",
+        instance: {
+          disks: [
+            {
+              ...baseBoot,
+              source: "projects/foreign-project/zones/us-central1-a/disks/boot-disk",
+            },
+          ],
+        },
+      },
+      {
+        name: "foreign disk zone",
+        instance: {
+          disks: [
+            {
+              ...baseBoot,
+              source: "projects/default-project/zones/us-central1-b/disks/boot-disk",
+            },
+          ],
+        },
+      },
+      { name: "malformed disk path", instance: { disks: [{ ...baseBoot, source: "boot-disk" }] } },
+      { name: "missing disk id", disk: { id: undefined } },
+      { name: "non-numeric disk id", disk: { id: "disk-latest" } },
+      { name: "missing disk self link", disk: { selfLink: undefined } },
+      { name: "malformed disk self link", disk: { selfLink: "boot-disk" } },
+      {
+        name: "foreign disk self link",
+        disk: {
+          selfLink: "projects/foreign-project/zones/us-central1-a/disks/boot-disk",
+        },
+      },
+      { name: "missing disk users", disk: { users: undefined } },
+      { name: "empty disk users", disk: { users: [] } },
+      {
+        name: "multiple disk users",
+        disk: {
+          users: [
+            "projects/default-project/zones/us-central1-a/instances/crabbox-blue-lobster",
+            "projects/default-project/zones/us-central1-a/instances/other-instance",
+          ],
+        },
+      },
+      {
+        name: "foreign disk user",
+        disk: {
+          users: ["projects/default-project/zones/us-central1-a/instances/other-instance"],
+        },
+      },
+      { name: "malformed disk user", disk: { users: ["crabbox-blue-lobster"] } },
+      {
+        name: "both source kinds",
+        disk: {
+          ...baseDisk,
+          sourceSnapshot: "projects/source-project/global/snapshots/runner-v3",
+          sourceSnapshotId: "7123456789012345678",
+        },
+      },
+      {
+        name: "neither source kind",
+        disk: {
+          sourceImage: undefined,
+          sourceImageId: undefined,
+          sourceSnapshot: undefined,
+          sourceSnapshotId: undefined,
+        },
+      },
+      { name: "malformed image source", disk: { ...baseDisk, sourceImage: "runner-v3" } },
+      { name: "missing immutable id", disk: { sourceImageId: undefined } },
+      { name: "non-numeric immutable id", disk: { ...baseDisk, sourceImageId: "latest" } },
+      {
+        name: "machine image disk source",
+        disk: {
+          sourceImage: "projects/source-project/global/machineImages/runner-v3",
+          sourceImageId: "8123456789012345678",
+        },
+      },
+    ];
+
+    for (const fixture of fixtures) {
+      const client = new GCPClient(env);
+      let requests = 0;
+      const internal = client as unknown as {
+        gcp<T>(method: string, path: string): Promise<T>;
+      };
+      vi.spyOn(internal, "gcp").mockImplementation(async (_method, path) => {
+        requests += 1;
+        if (path.includes("/instances/")) {
+          return ownedGCPInstance(lease, fixture.instance) as never;
+        }
+        return { ...baseDisk, ...fixture.disk } as never;
+      });
+
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each invalid shape is an isolated fail-closed fixture.
+      const observed = await client.observeReadyPoolImageIdentity(lease);
+      expect({ name: fixture.name, observed }).toEqual({ name: fixture.name, observed: undefined });
+      expect({ name: fixture.name, requests }).toEqual({
+        name: fixture.name,
+        requests: fixture.instance ? 1 : 2,
+      });
+    }
+  });
+
+  it("rejects instance replacement and attachment or provenance drift across fenced rereads", async () => {
+    const lease = observedGCPLease();
+    const changedBootDisk = {
+      boot: true,
+      type: "PERSISTENT",
+      source: "projects/default-project/zones/us-central1-a/disks/replacement-disk",
+    };
+    const fixtures: Array<{
+      name: string;
+      read: number;
+      value: Record<string, unknown>;
+    }> = [
+      { name: "instance replacement", read: 3, value: { id: "9223372036854775806" } },
+      {
+        name: "ownership drift",
+        read: 3,
+        value: {
+          labels: { ...(ownedGCPInstance(lease).labels as object), owner: "mallory" },
+        },
+      },
+      { name: "boot attachment drift", read: 3, value: { disks: [changedBootDisk] } },
+      { name: "disk replacement", read: 4, value: { id: "8223372036854775806" } },
+      {
+        name: "disk self link drift",
+        read: 4,
+        value: {
+          selfLink: "projects/default-project/zones/us-central1-a/disks/replacement-disk",
+        },
+      },
+      {
+        name: "disk user drift",
+        read: 4,
+        value: {
+          users: ["projects/default-project/zones/us-central1-a/instances/other-instance"],
+        },
+      },
+      {
+        name: "disk provenance drift",
+        read: 4,
+        value: { sourceImageId: "8123456789012345677" },
+      },
+      {
+        name: "disk provenance source drift",
+        read: 4,
+        value: { sourceImage: "projects/source-project/global/images/runner-v4" },
+      },
+    ];
+
+    for (const fixture of fixtures) {
+      const client = new GCPClient(env);
+      let reads = 0;
+      const internal = client as unknown as {
+        gcp<T>(method: string, path: string): Promise<T>;
+      };
+      vi.spyOn(internal, "gcp").mockImplementation(async (_method, path) => {
+        reads += 1;
+        const base = path.includes("/instances/")
+          ? ownedGCPInstance(lease)
+          : observedGCPBootDisk(lease);
+        return { ...base, ...(reads === fixture.read ? fixture.value : {}) } as never;
+      });
+
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each drift point owns isolated read evidence.
+      await expect(client.observeReadyPoolImageIdentity(lease)).resolves.toBeUndefined();
+      expect({ name: fixture.name, reads }).toEqual({ name: fixture.name, reads: fixture.read });
+    }
+  });
+
+  it("propagates IAM failures at every fenced instance and boot-disk read", async () => {
+    const lease = observedGCPLease();
+    for (const deniedRead of [1, 2, 3, 4] as const) {
+      const client = new GCPClient(env);
+      let reads = 0;
+      const internal = client as unknown as {
+        gcp<T>(method: string, path: string): Promise<T>;
+      };
+      vi.spyOn(internal, "gcp").mockImplementation(async (_method, path) => {
+        reads += 1;
+        if (reads === deniedRead) throw new Error(`IAM denied read ${deniedRead}`);
+        return path.includes("/instances/")
+          ? (ownedGCPInstance(lease) as never)
+          : (observedGCPBootDisk(lease) as never);
+      });
+
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each fenced read is a distinct IAM boundary.
+      await expect(client.observeReadyPoolImageIdentity(lease)).rejects.toThrow(
+        `IAM denied read ${deniedRead}`,
+      );
+    }
+  });
+
+  it("preserves the exact raw GCP instance resource id on provider machines", async () => {
+    const lease = observedGCPLease();
+    const client = new GCPClient(env);
+    const internal = client as unknown as {
+      gcp<T>(method: string, path: string): Promise<T>;
+    };
+    vi.spyOn(internal, "gcp").mockResolvedValue(ownedGCPInstance(lease) as never);
+
+    await expect(client.getServer(lease.cloudID)).resolves.toMatchObject({
+      id: Number("9223372036854775807"),
+      providerResourceID: "9223372036854775807",
+    });
+  });
+
+  it("uses the owned collision reread instead of an operation error target id", async () => {
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    const leaseID = "cbx_abcdef123456";
+    const slug = "blue-lobster";
+    const instanceName = leaseProviderName(leaseID, slug);
+    const lease = observedGCPLease({
+      id: leaseID,
+      slug,
+      cloudID: instanceName,
+      serverName: instanceName,
+    });
+    const internal = client as unknown as {
+      ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void>;
+    };
+    vi.spyOn(internal, "ensureFirewall").mockResolvedValue();
+    const calls: string[] = [];
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      calls.push(`${init?.method ?? "GET"} ${url.pathname}`);
+      if (init?.method === "POST" && url.pathname.endsWith("/zones/us-central1-a/instances")) {
+        return Response.json({ name: "insert-op", targetId: "1111111111111111111" });
+      }
+      if (
+        init?.method === "POST" &&
+        url.pathname.endsWith("/zones/us-central1-a/operations/insert-op/wait")
+      ) {
+        return Response.json({
+          name: "insert-op",
+          status: "DONE",
+          targetId: "1111111111111111111",
+          error: {
+            errors: [{ code: "RESOURCE_ALREADY_EXISTS", message: "already exists" }],
+          },
+        });
+      }
+      if (
+        init?.method === "GET" &&
+        url.pathname.endsWith(`/zones/us-central1-a/instances/${instanceName}`)
+      ) {
+        return Response.json(ownedGCPInstance(lease));
+      }
+      throw new Error(`unexpected GCP request ${init?.method ?? "GET"} ${url.pathname}`);
+    };
+    const claims: ProviderProvisioningCleanupClaim[] = [];
+    const targets: string[] = [];
+
+    const error = await client
+      .createServerWithFallback(
+        leaseConfig({
+          provider: "gcp",
+          gcpZone: "us-central1-a",
+          capacity: { availabilityZones: ["us-central1-b"] },
+          serverType: "e2-micro",
+          serverTypeExplicit: true,
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+        leaseID,
+        slug,
+        "alice@example.com",
+        {
+          async onTargetAttempt(target) {
+            targets.push(target.region ?? "");
+          },
+          async onResourceCreated(claim) {
+            claims.push(claim);
+            return true;
+          },
+        },
+      )
+      .catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(ProviderResourceUnresolvedError);
+    expect(error).toMatchObject({
+      message: expect.stringContaining("not bound to this create attempt"),
+    });
+    expect(targets).toEqual(["us-central1-a"]);
+    expect(claims).toEqual([
+      {
+        provider: "gcp",
+        cloudID: instanceName,
+        region: "us-central1-a",
+        providerProject: "default-project",
+        providerResourceID: "9223372036854775807",
+      },
+    ]);
+    expect(calls).toEqual([
+      "POST /compute/v1/projects/default-project/zones/us-central1-a/instances",
+      "POST /compute/v1/projects/default-project/zones/us-central1-a/operations/insert-op/wait",
+      `GET /compute/v1/projects/default-project/zones/us-central1-a/instances/${instanceName}`,
+    ]);
+  });
+
+  it("fails closed without fallback when the instance insert response is lost", async () => {
+    const client = new GCPClient(env);
+    const internal = client as unknown as {
+      ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void>;
+      gcp<T>(method: string, path: string, body?: unknown): Promise<T>;
+    };
+    vi.spyOn(internal, "ensureFirewall").mockResolvedValue();
+    const gcp = vi.spyOn(internal, "gcp").mockRejectedValue(new TypeError("socket closed"));
+    const targets: string[] = [];
+    const config = leaseConfig({
+      provider: "gcp",
+      gcpZone: "us-central1-a",
+      capacity: { availabilityZones: ["us-central1-b"] },
+      serverType: "e2-micro",
+      serverTypeExplicit: true,
+      sshPublicKey: "ssh-ed25519 test",
+    });
+
+    await expect(
+      client.createServerWithFallback(
+        config,
+        "cbx_abcdef123456",
+        "blue-lobster",
+        "alice@example.com",
+        {
+          async onTargetAttempt(target) {
+            targets.push(target.region ?? "");
+          },
+          async onResourceCreated() {
+            return true;
+          },
+        },
+      ),
+    ).rejects.toBeInstanceOf(ProviderProvisioningOutcomeUncertainError);
+    expect(targets).toEqual(["us-central1-a"]);
+    expect(gcp).toHaveBeenCalledOnce();
+  });
+
+  it.each([408, 503])(
+    "fails closed without fallback when the instance insert returns HTTP %i",
+    async (status) => {
+      const client = new GCPClient(env);
+      primeAccessToken(client);
+      const internal = client as unknown as {
+        ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void>;
+      };
+      vi.spyOn(internal, "ensureFirewall").mockResolvedValue();
+      const calls: string[] = [];
+      client.fetcher = async (input, init) => {
+        calls.push(`${init?.method ?? "GET"} ${String(input)}`);
+        return new Response("backend unavailable", { status });
+      };
+      const targets: string[] = [];
+      const config = leaseConfig({
+        provider: "gcp",
+        gcpZone: "us-central1-a",
+        capacity: { availabilityZones: ["us-central1-b"] },
+        serverType: "e2-micro",
+        serverTypeExplicit: true,
+        sshPublicKey: "ssh-ed25519 test",
+      });
+
+      await expect(
+        client.createServerWithFallback(
+          config,
+          "cbx_abcdef123456",
+          "blue-lobster",
+          "alice@example.com",
+          {
+            async onTargetAttempt(target) {
+              targets.push(target.region ?? "");
+            },
+            async onResourceCreated() {
+              return true;
+            },
+          },
+        ),
+      ).rejects.toBeInstanceOf(ProviderProvisioningOutcomeUncertainError);
+      expect(targets).toEqual(["us-central1-a"]);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toContain(
+        "POST https://compute.googleapis.com/compute/v1/projects/default-project/zones/us-central1-a/instances",
+      );
+    },
+  );
+
+  it("fails closed without fallback when an accepted instance operation becomes unobservable", async () => {
+    const client = new GCPClient(env);
+    const internal = client as unknown as {
+      ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void>;
+      gcp<T>(method: string, path: string, body?: unknown): Promise<T>;
+    };
+    vi.spyOn(internal, "ensureFirewall").mockResolvedValue();
+    const calls: string[] = [];
+    vi.spyOn(internal, "gcp").mockImplementation(async (method, path) => {
+      calls.push(`${method} ${path}`);
+      if (path.endsWith("/instances")) {
+        return { name: "insert-op", targetId: "9223372036854775807" } as T;
+      }
+      throw new TypeError("operation wait disconnected");
+    });
+    const targets: string[] = [];
+    const config = leaseConfig({
+      provider: "gcp",
+      gcpZone: "us-central1-a",
+      capacity: { availabilityZones: ["us-central1-b"] },
+      serverType: "e2-micro",
+      serverTypeExplicit: true,
+      sshPublicKey: "ssh-ed25519 test",
+    });
+
+    const error = await client
+      .createServerWithFallback(config, "cbx_abcdef123456", "blue-lobster", "alice@example.com", {
+        async onTargetAttempt(target) {
+          targets.push(target.region ?? "");
+        },
+        async onResourceCreated() {
+          return true;
+        },
+      })
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(ProviderProvisioningCleanupError);
+    expect(providerProvisioningOutcomeUncertain(error)).toBe(true);
+    expect(providerProvisioningCleanupClaim(error)).toEqual({
+      provider: "gcp",
+      cloudID: leaseProviderName("cbx_abcdef123456", "blue-lobster"),
+      region: "us-central1-a",
+      providerProject: "default-project",
+      providerResourceID: "9223372036854775807",
+    });
+    expect(targets).toEqual(["us-central1-a"]);
+    expect(calls).toEqual([
+      "POST /zones/us-central1-a/instances",
+      "POST /zones/us-central1-a/operations/insert-op/wait",
+    ]);
+  });
+
+  it.each([
+    {
+      name: "malformed initial target id",
+      initialTargetID: "instance-latest",
+      completedTargetID: "9223372036854775807",
+      expectedCalls: 1,
+    },
+    {
+      name: "conflicting completed target id",
+      initialTargetID: "9223372036854775807",
+      completedTargetID: "9223372036854775806",
+      expectedCalls: 2,
+    },
+  ])("keeps $name in exact interrupted-create recovery", async (fixture) => {
+    const client = new GCPClient(env);
+    const internal = client as unknown as {
+      ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void>;
+      gcp<T>(method: string, path: string, body?: unknown): Promise<T>;
+    };
+    vi.spyOn(internal, "ensureFirewall").mockResolvedValue();
+    const calls: string[] = [];
+    vi.spyOn(internal, "gcp").mockImplementation(async (method, path) => {
+      calls.push(`${method} ${path}`);
+      if (path.endsWith("/instances")) {
+        return { name: "insert-op", targetId: fixture.initialTargetID } as T;
+      }
+      if (path.endsWith("/operations/insert-op/wait")) {
+        return {
+          name: "insert-op",
+          status: "DONE",
+          targetId: fixture.completedTargetID,
+        } as T;
+      }
+      throw new Error(`unexpected GCP request ${method} ${path}`);
+    });
+    let publications = 0;
+    const targets: string[] = [];
+
+    const error = await client
+      .createServerWithFallback(
+        leaseConfig({
+          provider: "gcp",
+          gcpZone: "us-central1-a",
+          capacity: { availabilityZones: ["us-central1-b"] },
+          serverType: "e2-micro",
+          serverTypeExplicit: true,
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+        "cbx_abcdef123456",
+        "blue-lobster",
+        "alice@example.com",
+        {
+          async onTargetAttempt(target) {
+            targets.push(target.region ?? "");
+          },
+          async onResourceCreated() {
+            publications += 1;
+            return true;
+          },
+        },
+      )
+      .catch((cause: unknown) => cause);
+
+    expect(providerProvisioningOutcomeUncertain(error)).toBe(true);
+    expect(providerProvisioningCleanupClaim(error)).toBeUndefined();
+    expect(publications).toBe(0);
+    expect(targets).toEqual(["us-central1-a"]);
+    expect(calls).toHaveLength(fixture.expectedCalls);
+  });
+
+  it("never treats an operation error target id as resource ownership", async () => {
+    const client = new GCPClient(env);
+    const internal = client as unknown as {
+      ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void>;
+      gcp<T>(method: string, path: string, body?: unknown): Promise<T>;
+    };
+    vi.spyOn(internal, "ensureFirewall").mockResolvedValue();
+    vi.spyOn(internal, "gcp").mockImplementation(async (_method, path) => {
+      if (path.endsWith("/instances")) {
+        return { name: "insert-op", targetId: "9223372036854775807" } as never;
+      }
+      return {
+        name: "insert-op",
+        status: "DONE",
+        targetId: "9223372036854775807",
+        error: { errors: [{ code: "QUOTA_EXCEEDED", message: "quota exceeded" }] },
+      } as never;
+    });
+    let publications = 0;
+
+    const error = await client
+      .createServer(
+        leaseConfig({
+          provider: "gcp",
+          serverType: "e2-micro",
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+        "cbx_abcdef123456",
+        "blue-lobster",
+        "alice@example.com",
+        {
+          async onResourceCreated() {
+            publications += 1;
+            return true;
+          },
+        },
+      )
+      .catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(providerProvisioningCleanupClaim(error)).toBeUndefined();
+    expect(publications).toBe(0);
+  });
+
+  it("returns immediately without provenance I/O when publication stops readiness", async () => {
+    const client = new GCPClient(env);
+    const internal = client as unknown as {
+      ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void>;
+      gcp<T>(method: string, path: string, body?: unknown): Promise<T>;
+    };
+    vi.spyOn(internal, "ensureFirewall").mockResolvedValue();
+    const calls: string[] = [];
+    vi.spyOn(internal, "gcp").mockImplementation(async (method, path) => {
+      calls.push(`${method} ${path}`);
+      if (path.endsWith("/instances")) {
+        return { name: "insert-op", targetId: "9223372036854775807" } as T;
+      }
+      if (path.endsWith("/operations/insert-op/wait")) {
+        return {
+          name: "insert-op",
+          status: "DONE",
+          targetId: "9223372036854775807",
+        } as T;
+      }
+      throw new Error(`unexpected GCP request ${method} ${path}`);
+    });
+    const claims: unknown[] = [];
+
+    const server = await client.createServer(
+      leaseConfig({
+        provider: "gcp",
+        serverType: "e2-micro",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+      "cbx_abcdef123456",
+      "blue-lobster",
+      "alice@example.com",
+      {
+        async onResourceCreated(claim) {
+          claims.push(claim);
+          return false;
+        },
+      },
+    );
+
+    expect(claims).toEqual([
+      {
+        provider: "gcp",
+        cloudID: leaseProviderName("cbx_abcdef123456", "blue-lobster"),
+        region: "us-central1-a",
+        providerProject: "default-project",
+        providerResourceID: "9223372036854775807",
+      },
+    ]);
+    expect(server).toMatchObject({
+      cloudID: leaseProviderName("cbx_abcdef123456", "blue-lobster"),
+      status: "provisioning",
+      region: "us-central1-a",
+    });
+    expect(calls).toEqual([
+      "POST /zones/us-central1-a/instances",
+      "POST /zones/us-central1-a/operations/insert-op/wait",
+    ]);
+  });
+
+  it("resolves a missing operation target id before publishing cleanup custody", async () => {
+    const leaseID = "cbx_abcdef123456";
+    const slug = "blue-lobster";
+    const instanceName = leaseProviderName(leaseID, slug);
+    const lease = observedGCPLease({ id: leaseID, slug, cloudID: instanceName });
+    const client = new GCPClient(env);
+    const internal = client as unknown as {
+      ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void>;
+      gcp<T>(method: string, path: string, body?: unknown): Promise<T>;
+    };
+    vi.spyOn(internal, "ensureFirewall").mockResolvedValue();
+    const calls: string[] = [];
+    vi.spyOn(internal, "gcp").mockImplementation(async (method, path) => {
+      calls.push(`${method} ${path}`);
+      if (path.endsWith("/instances")) return { name: "insert-op" } as T;
+      if (path.endsWith("/operations/insert-op/wait")) {
+        return { name: "insert-op", status: "DONE" } as T;
+      }
+      if (path.endsWith(`/instances/${instanceName}`)) {
+        return ownedGCPInstance(lease) as T;
+      }
+      throw new Error(`unexpected GCP request ${method} ${path}`);
+    });
+    const claims: ProviderProvisioningCleanupClaim[] = [];
+
+    await expect(
+      client.createServer(
+        leaseConfig({
+          provider: "gcp",
+          serverType: "e2-micro",
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+        leaseID,
+        slug,
+        lease.owner,
+        {
+          async onResourceCreated(claim) {
+            claims.push(claim);
+            return false;
+          },
+        },
+      ),
+    ).resolves.toMatchObject({ status: "provisioning" });
+
+    expect(claims).toEqual([
+      {
+        provider: "gcp",
+        cloudID: instanceName,
+        region: "us-central1-a",
+        providerProject: "default-project",
+        providerResourceID: "9223372036854775807",
+      },
+    ]);
+    expect(calls).toEqual([
+      "POST /zones/us-central1-a/instances",
+      "POST /zones/us-central1-a/operations/insert-op/wait",
+      `GET /zones/us-central1-a/instances/${instanceName}`,
+    ]);
+  });
+
+  it("never publishes an id-less GCP cleanup claim", async () => {
+    const client = new GCPClient(env);
+    const internal = client as unknown as {
+      ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void>;
+      gcp<T>(method: string, path: string, body?: unknown): Promise<T>;
+    };
+    vi.spyOn(internal, "ensureFirewall").mockResolvedValue();
+    vi.spyOn(internal, "gcp").mockImplementation(async (_method, path) => {
+      if (path.endsWith("/instances")) return { name: "insert-op" } as T;
+      if (path.endsWith("/operations/insert-op/wait")) {
+        return { name: "insert-op", status: "DONE" } as T;
+      }
+      throw new TypeError("instance identity read disconnected");
+    });
+    let publications = 0;
+
+    const error = await client
+      .createServer(
+        leaseConfig({
+          provider: "gcp",
+          serverType: "e2-micro",
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+        "cbx_abcdef123456",
+        "blue-lobster",
+        "alice@example.com",
+        {
+          async onResourceCreated() {
+            publications += 1;
+            return true;
+          },
+        },
+      )
+      .catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(ProviderProvisioningOutcomeUncertainError);
+    expect(providerProvisioningCleanupClaim(error)).toBeUndefined();
+    expect(publications).toBe(0);
+  });
+
+  it("propagates unresolved publication and wraps other post-publication failures", async () => {
+    const client = new GCPClient(env);
+    const internal = client as unknown as {
+      ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void>;
+      gcp<T>(method: string, path: string, body?: unknown): Promise<T>;
+    };
+    vi.spyOn(internal, "ensureFirewall").mockResolvedValue();
+    const calls: string[] = [];
+    vi.spyOn(internal, "gcp").mockImplementation(async (method, path) => {
+      calls.push(`${method} ${path}`);
+      if (path.endsWith("/instances")) {
+        return { name: "insert-op", targetId: "9223372036854775807" } as T;
+      }
+      if (path.endsWith("/operations/insert-op/wait")) {
+        return {
+          name: "insert-op",
+          status: "DONE",
+          targetId: "9223372036854775807",
+        } as T;
+      }
+      if (path.includes("/instances/")) {
+        throw new Error("instance read failed");
+      }
+      throw new Error(`unexpected GCP request ${method} ${path}`);
+    });
+    const config = leaseConfig({
+      provider: "gcp",
+      serverType: "e2-micro",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    const unresolved = new ProviderResourceUnresolvedError("lease incarnation changed");
+
+    const unresolvedResult = await client
+      .createServer(config, "cbx_abcdef123456", "blue-lobster", "alice@example.com", {
+        async onResourceCreated() {
+          throw unresolved;
+        },
+      })
+      .catch((error: unknown) => error);
+    expect(unresolvedResult).toBe(unresolved);
+    expect(calls).toHaveLength(2);
+
+    calls.length = 0;
+    const cleanupError = await client
+      .createServer(config, "cbx_abcdef123456", "blue-lobster", "alice@example.com", {
+        async onResourceCreated() {
+          return true;
+        },
+      })
+      .catch((error: unknown) => error);
+    expect(cleanupError).toBeInstanceOf(ProviderProvisioningCleanupError);
+    expect(providerProvisioningCleanupClaim(cleanupError)).toEqual({
+      provider: "gcp",
+      cloudID: leaseProviderName("cbx_abcdef123456", "blue-lobster"),
+      region: "us-central1-a",
+      providerProject: "default-project",
+      providerResourceID: "9223372036854775807",
+    });
+    expect(calls.some((call) => call.startsWith("DELETE "))).toBe(false);
   });
 
   it("uses the metadata server when service account key credentials are omitted", async () => {
@@ -279,6 +1257,45 @@ describe("gcp provider", () => {
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(60_000);
   });
 
+  it("copies a completed token to a scoped client without sharing its refresh", async () => {
+    vi.useFakeTimers();
+    const client = new GCPClient({
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    });
+    primeAccessToken(client, "cached-token", Math.trunc(Date.now() / 1000) + 301);
+    let exchanges = 0;
+    const calls: Array<{ url: string; authorization: string }> = [];
+    client.fetcher = async (input, init) => {
+      if (String(input).includes("metadata.google.internal")) {
+        exchanges += 1;
+        return metadataJSON({ access_token: `refresh-${exchanges}`, expires_in: 3600 });
+      }
+      calls.push({
+        url: String(input),
+        authorization: new Headers(init?.headers).get("authorization") ?? "",
+      });
+      return Response.json({ items: {} });
+    };
+    const scoped = client.forScope("us-central1-b", "other-project");
+    expect(client.forScope()).toBe(client);
+    await scoped.listCrabboxServers();
+    expect(exchanges).toBe(0);
+    expect(calls[0]?.authorization).toBe("Bearer cached-token");
+    expect(calls[0]?.url).toContain("/projects/other-project/");
+    vi.setSystemTime(Date.now() + 1_000);
+    await Promise.all([client.listCrabboxServers(), scoped.listCrabboxServers()]);
+    expect(exchanges).toBe(2);
+    expect(
+      calls
+        .slice(1)
+        .map((call) => call.authorization)
+        .toSorted(),
+    ).toEqual(["Bearer refresh-1", "Bearer refresh-2"]);
+  });
+
   it("shares one metadata token exchange across concurrent resource reads", async () => {
     const client = new GCPClient({
       FLEET: {} as DurableObjectNamespace,
@@ -400,7 +1417,7 @@ describe("gcp provider", () => {
       CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
     };
     const client = new GCPClient(metadataEnv);
-    seedGCPAuthCache(client, "expiring-token", Math.trunc(Date.now() / 1000) + 300);
+    primeAccessToken(client, "expiring-token", Math.trunc(Date.now() / 1000) + 300);
     const authorizations: string[] = [];
     let metadataCalls = 0;
     client.fetcher = async (input, init) => {
@@ -419,7 +1436,7 @@ describe("gcp provider", () => {
 
   it("keeps service account key tokens until the one-minute cache boundary", async () => {
     const client = new GCPClient(env);
-    seedGCPAuthCache(client, "cached-token", Math.trunc(Date.now() / 1000) + 120);
+    primeAccessToken(client, "cached-token", Math.trunc(Date.now() / 1000) + 120);
     const calls: Array<{ url: string; authorization: string }> = [];
     client.fetcher = async (input, init) => {
       calls.push({
@@ -470,7 +1487,7 @@ describe("gcp provider", () => {
 
   it("treats only the exact zonal instance as absent", async () => {
     const client = new GCPClient(env);
-    seedGCPAuthCache(client, "test-token");
+    primeAccessToken(client, "test-token");
     let message =
       "The resource 'projects/default-project/zones/us-central1-a/instances/crabbox-blue-lobster' was not found";
     client.fetcher = async () =>
@@ -485,7 +1502,7 @@ describe("gcp provider", () => {
 
   it("treats only an exact missing instance DELETE as complete", async () => {
     const client = new GCPClient(env);
-    seedGCPAuthCache(client, "test-token");
+    primeAccessToken(client, "test-token");
     let message =
       "The resource 'projects/default-project/zones/us-central1-a/instances/crabbox-blue-lobster' was not found";
     client.fetcher = async () =>
@@ -552,7 +1569,7 @@ describe("gcp provider", () => {
 
   it("recovers when another create wins the shared firewall race", async () => {
     const client = new GCPClient(env);
-    seedGCPAuthCache(client, "test-token");
+    primeAccessToken(client, "test-token");
     const calls: string[] = [];
     let firewallReads = 0;
     client.fetcher = async (input, init) => {
@@ -589,7 +1606,7 @@ describe("gcp provider", () => {
   it("waits for a raced firewall insert before reconciling policy", async () => {
     vi.useFakeTimers();
     const client = new GCPClient(env);
-    seedGCPAuthCache(client, "test-token");
+    primeAccessToken(client, "test-token");
     let firewallReads = 0;
     let firewallUpdates = 0;
     let operationWaits = 0;
@@ -637,7 +1654,7 @@ describe("gcp provider", () => {
 
   it("lists Crabbox machines across aggregated GCP zones", async () => {
     const client = new GCPClient(env);
-    seedGCPAuthCache(client, "test-token");
+    primeAccessToken(client, "test-token");
     client.fetcher = async (input) => {
       const url = new URL(String(input));
       expect(url.pathname).toBe("/compute/v1/projects/default-project/aggregated/instances");
@@ -701,117 +1718,418 @@ describe("gcp provider", () => {
     ]);
   });
 
-  it("recovers a lease only through its deterministic canonical instance", async () => {
+  it("recovers only the exact persisted GCP instance identity with one lookup", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const lease = observedGCPLease({ cloudID: name, serverName: name });
     const client = new GCPClient(env);
-    seedGCPAuthCache(client, "test-token");
-    let leaseLabel = "cbx_abcdef123456";
+    primeAccessToken(client);
+    const requests: string[] = [];
     client.fetcher = async (input) => {
-      const url = new URL(String(input));
-      expect(url.pathname).toBe(
-        "/compute/v1/projects/default-project/zones/us-central1-a/instances/crabbox-blue-lobster-c80c2195",
-      );
-      return Response.json({
-        id: "1",
-        name: "crabbox-blue-lobster-c80c2195",
-        machineType: "zones/us-central1-a/machineTypes/e2-micro",
-        labels: {
-          crabbox: "true",
-          created_by: "crabbox",
-          provider: "gcp",
-          lease: leaseLabel,
-          slug: "blue-lobster",
-        },
-      });
+      requests.push(String(input));
+      return Response.json(ownedGCPInstance(lease));
     };
 
-    await expect(
-      client.recoverServerForLease("cbx_abcdef123456", "blue-lobster"),
-    ).resolves.toMatchObject({
-      name: "crabbox-blue-lobster-c80c2195",
-      labels: { lease: "cbx_abcdef123456" },
+    await expect(client.recoverServerForLease(lease)).resolves.toMatchObject({
+      cloudID: name,
+      providerResourceID: lease.providerResourceID,
     });
-    leaseLabel = "cbx_000000000001";
-    await expect(
-      client.recoverServerForLease("cbx_abcdef123456", "blue-lobster"),
-    ).resolves.toBeUndefined();
+    expect(requests).toEqual([
+      `https://compute.googleapis.com/compute/v1/projects/default-project/zones/us-central1-a/instances/${name}`,
+    ]);
   });
 
-  it("recovers pre-upgrade fallback-zone instances by exact canonical name", async () => {
+  it("observes one exact owned legacy cleanup identity from a historical numeric anchor", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const lease = observedGCPLease({
+      cloudID: name,
+      serverName: name,
+      serverID: 123,
+      providerResourceID: undefined,
+    });
     const client = new GCPClient(env);
-    seedGCPAuthCache(client, "test-token");
-    const expectedName = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    primeAccessToken(client);
+    const requests: string[] = [];
     client.fetcher = async (input) => {
-      const url = new URL(String(input));
-      if (url.pathname.endsWith(`/instances/${expectedName}`)) {
-        return new Response("not found", { status: 404 });
-      }
-      expect(url.pathname).toBe("/compute/v1/projects/default-project/aggregated/instances");
-      return Response.json({
-        items: {
-          "zones/us-central1-b": {
-            instances: [
-              {
-                id: "1",
-                name: expectedName,
-                zone: "projects/default-project/zones/us-central1-b",
-                machineType: "zones/us-central1-b/machineTypes/e2-micro",
-                labels: {
-                  crabbox: "true",
-                  created_by: "crabbox",
-                  provider: "gcp",
-                  lease: "cbx_abcdef123456",
-                  slug: "blue-lobster",
-                },
-              },
-            ],
-          },
-        },
-      });
+      requests.push(String(input));
+      return Response.json(ownedGCPInstance(lease, { id: "123" }));
     };
 
-    await expect(
-      client.recoverServerForLease("cbx_abcdef123456", "blue-lobster"),
-    ).resolves.toMatchObject({
-      name: expectedName,
-      region: "us-central1-b",
+    await expect(client.observeLegacyCleanupIdentity(lease)).resolves.toEqual({
+      providerResourceID: "123",
+    });
+    expect(requests).toEqual([
+      `https://compute.googleapis.com/compute/v1/projects/default-project/zones/us-central1-a/instances/${name}`,
+    ]);
+    expect(requests[0]).not.toContain("aggregated");
+  });
+
+  it("corroborates an unsafe raw ID through the historical numeric server ID", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const rawID = "9223372036854775807";
+    const lease = observedGCPLease({
+      cloudID: name,
+      serverName: name,
+      serverID: Number(rawID),
+      providerResourceID: undefined,
+    });
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    client.fetcher = async () => Response.json(ownedGCPInstance(lease, { id: rawID }));
+
+    await expect(client.observeLegacyCleanupIdentity(lease)).resolves.toEqual({
+      providerResourceID: rawID,
     });
   });
 
-  it("rejects ambiguous exact-name fallback-zone recovery", async () => {
+  it("keeps lossy adjacent aliases distinct only when a durable raw identity exists", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const rawID = "9223372036854775807";
+    const adjacentID = "9223372036854775806";
+    const mismatchedID = "9223372036854774784";
+    const lease = observedGCPLease({
+      cloudID: name,
+      serverName: name,
+      serverID: Number(rawID),
+      providerResourceID: undefined,
+    });
     const client = new GCPClient(env);
-    seedGCPAuthCache(client, "test-token");
-    const leaseID = "cbx_abcdef123456";
-    const slug = "blue-lobster";
-    const expectedName = leaseProviderName(leaseID, slug);
-    client.fetcher = async (input) => {
-      const url = new URL(String(input));
-      if (url.pathname.endsWith(`/instances/${expectedName}`)) {
-        return new Response("not found", { status: 404 });
-      }
-      const instance = (zone: string) => ({
-        id: zone,
-        name: expectedName,
-        zone: `projects/default-project/zones/${zone}`,
-        machineType: `zones/${zone}/machineTypes/e2-micro`,
-        labels: {
-          crabbox: "true",
-          created_by: "crabbox",
-          provider: "gcp",
-          lease: leaseID,
-          slug,
-        },
-      });
-      return Response.json({
-        items: {
-          "zones/us-central1-b": { instances: [instance("us-central1-b")] },
-          "zones/us-central1-c": { instances: [instance("us-central1-c")] },
-        },
-      });
-    };
+    primeAccessToken(client);
+    client.fetcher = async () => Response.json(ownedGCPInstance(lease, { id: adjacentID }));
 
-    await expect(client.recoverServerForLease(leaseID, slug)).rejects.toThrow(
-      "ambiguous GCP recovery",
+    await expect(client.observeLegacyCleanupIdentity(lease)).resolves.toEqual({
+      providerResourceID: adjacentID,
+    });
+    await expect(
+      client.observeLegacyCleanupIdentity(lease, { resourceIdentity: rawID }),
+    ).rejects.toBeInstanceOf(ProviderResourceUnresolvedError);
+
+    client.fetcher = async () => Response.json(ownedGCPInstance(lease, { id: mismatchedID }));
+    await expect(client.observeLegacyCleanupIdentity(lease)).rejects.toBeInstanceOf(
+      ProviderResourceUnresolvedError,
     );
+  });
+
+  it("prefers a durable legacy cleanup anchor over the lossy numeric server id", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const lease = observedGCPLease({
+      cloudID: name,
+      serverName: name,
+      serverID: Number("9223372036854775807"),
+      providerResourceID: undefined,
+    });
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    client.fetcher = async () =>
+      Response.json(ownedGCPInstance(lease, { id: "9223372036854775807" }));
+
+    await expect(
+      client.observeLegacyCleanupIdentity(lease, {
+        resourceIdentity: "9223372036854775807",
+      }),
+    ).resolves.toEqual({ providerResourceID: "9223372036854775807" });
+  });
+
+  it("treats only exact legacy cleanup absence as authoritative", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const lease = observedGCPLease({
+      cloudID: name,
+      serverName: name,
+      serverID: 123,
+      providerResourceID: undefined,
+    });
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    client.fetcher = async () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            code: 404,
+            message: `The resource 'projects/default-project/zones/us-central1-a/instances/${name}' was not found`,
+          },
+        }),
+        { status: 404 },
+      );
+
+    await expect(client.observeLegacyCleanupIdentity(lease)).resolves.toBeUndefined();
+    client.fetcher = async () => new Response("temporarily unavailable", { status: 503 });
+    await expect(client.observeLegacyCleanupIdentity(lease)).rejects.toThrow("http 503");
+  });
+
+  it("rejects unsafe anchors, malformed scope, replacements, and foreign ownership without inventory", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const baseLease = observedGCPLease({
+      cloudID: name,
+      serverName: name,
+      serverID: 123,
+      providerResourceID: undefined,
+    });
+    const fixtures: Array<{
+      name: string;
+      lease: LeaseRecord;
+      context?: { resourceIdentity?: string };
+      instance: Record<string, unknown>;
+      requests: number;
+    }> = [
+      {
+        name: "non-integral numeric anchor",
+        lease: { ...baseLease, serverID: 123.5 },
+        instance: ownedGCPInstance(baseLease, { id: "123" }),
+        requests: 0,
+      },
+      {
+        name: "missing numeric anchor",
+        lease: { ...baseLease, serverID: 0 },
+        instance: ownedGCPInstance(baseLease, { id: "123" }),
+        requests: 0,
+      },
+      {
+        name: "malformed durable anchor",
+        lease: baseLease,
+        context: { resourceIdentity: "123 " },
+        instance: ownedGCPInstance(baseLease, { id: "123" }),
+        requests: 0,
+      },
+      {
+        name: "noncanonical project",
+        lease: { ...baseLease, providerProject: "proj" },
+        instance: ownedGCPInstance(baseLease, { id: "123" }),
+        requests: 0,
+      },
+      {
+        name: "wrong canonical name",
+        lease: { ...baseLease, serverName: "crabbox-wrong-name" },
+        instance: ownedGCPInstance(baseLease, { id: "123" }),
+        requests: 0,
+      },
+      {
+        name: "replacement id",
+        lease: baseLease,
+        instance: ownedGCPInstance(baseLease, { id: "124" }),
+        requests: 1,
+      },
+      {
+        name: "foreign owner",
+        lease: baseLease,
+        instance: ownedGCPInstance(baseLease, {
+          id: "123",
+          labels: { ...(ownedGCPInstance(baseLease).labels as object), owner: "mallory" },
+        }),
+        requests: 1,
+      },
+      {
+        name: "missing raw id",
+        lease: baseLease,
+        instance: ownedGCPInstance(baseLease, { id: undefined }),
+        requests: 1,
+      },
+    ];
+
+    for (const fixture of fixtures) {
+      const client = new GCPClient(env);
+      primeAccessToken(client);
+      const requests: string[] = [];
+      client.fetcher = async (input) => {
+        requests.push(String(input));
+        return Response.json(fixture.instance);
+      };
+
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each cleanup refusal is isolated.
+      await expect(
+        client.observeLegacyCleanupIdentity(fixture.lease, fixture.context),
+      ).rejects.toBeInstanceOf(ProviderResourceUnresolvedError);
+      expect({ name: fixture.name, requests: requests.length }).toEqual({
+        name: fixture.name,
+        requests: fixture.requests,
+      });
+      expect(requests.some((request) => request.includes("aggregated"))).toBe(false);
+    }
+  });
+
+  it("captures only an exact owned unbound instance with one canonical lookup", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const ownedLease = observedGCPLease({ cloudID: name, serverName: name });
+    const unboundLease = structuredClone(ownedLease);
+    unboundLease.cloudID = "";
+    unboundLease.serverID = 0;
+    delete unboundLease.providerResourceID;
+    unboundLease.serverName = "";
+    unboundLease.host = "";
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    const requests: string[] = [];
+    client.fetcher = async (input) => {
+      requests.push(String(input));
+      return Response.json(ownedGCPInstance(ownedLease));
+    };
+
+    await expect(client.recoverUnboundProvisioningResource(unboundLease)).resolves.toMatchObject({
+      cloudID: name,
+      providerResourceID: ownedLease.providerResourceID,
+    });
+    expect(requests).toEqual([
+      `https://compute.googleapis.com/compute/v1/projects/default-project/zones/us-central1-a/instances/${name}`,
+    ]);
+  });
+
+  it("retries strict unbound recovery only for the same captured raw id", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const ownedLease = observedGCPLease({ cloudID: name, serverName: name });
+    const capturedLease = structuredClone(ownedLease);
+    capturedLease.cloudID = "";
+    capturedLease.serverID = 0;
+    capturedLease.serverName = "";
+    capturedLease.host = "";
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    client.fetcher = async () => Response.json(ownedGCPInstance(ownedLease));
+
+    await expect(client.recoverUnboundProvisioningResource(capturedLease)).resolves.toMatchObject({
+      cloudID: name,
+      providerResourceID: capturedLease.providerResourceID,
+    });
+
+    const replacement = ownedGCPInstance(ownedLease);
+    replacement.id = "9223372036854775806";
+    client.fetcher = async () => Response.json(replacement);
+    await expect(client.recoverUnboundProvisioningResource(capturedLease)).rejects.toBeInstanceOf(
+      ProviderResourceUnresolvedError,
+    );
+  });
+
+  it("rejects malformed scope and foreign unbound recovery evidence without inventory fallback", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const ownedLease = observedGCPLease({ cloudID: name, serverName: name });
+    const unboundLease = structuredClone(ownedLease);
+    unboundLease.cloudID = "";
+    unboundLease.serverID = 0;
+    delete unboundLease.providerResourceID;
+    unboundLease.serverName = "";
+    unboundLease.host = "";
+    const fixtures: Array<{
+      name: string;
+      lease: LeaseRecord;
+      instance: Record<string, unknown>;
+      requests: number;
+    }> = [
+      {
+        name: "noncanonical project",
+        lease: { ...unboundLease, providerProject: "proj" },
+        instance: ownedGCPInstance(ownedLease),
+        requests: 0,
+      },
+      {
+        name: "existing identity",
+        lease: { ...unboundLease, cloudID: name },
+        instance: ownedGCPInstance(ownedLease),
+        requests: 0,
+      },
+      {
+        name: "missing raw id",
+        lease: unboundLease,
+        instance: ownedGCPInstance(ownedLease, { id: undefined }),
+        requests: 1,
+      },
+      {
+        name: "foreign owner",
+        lease: unboundLease,
+        instance: ownedGCPInstance(ownedLease, {
+          labels: { ...(ownedGCPInstance(ownedLease).labels as object), owner: "mallory" },
+        }),
+        requests: 1,
+      },
+      {
+        name: "wrong canonical name",
+        lease: unboundLease,
+        instance: ownedGCPInstance(ownedLease, { name: "crabbox-wrong-name" }),
+        requests: 1,
+      },
+    ];
+
+    for (const fixture of fixtures) {
+      const client = new GCPClient(env);
+      primeAccessToken(client);
+      const requests: string[] = [];
+      client.fetcher = async (input) => {
+        requests.push(String(input));
+        return Response.json(fixture.instance);
+      };
+
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each recovery authority failure is isolated.
+      await expect(client.recoverUnboundProvisioningResource(fixture.lease)).rejects.toBeInstanceOf(
+        ProviderResourceUnresolvedError,
+      );
+      expect({ name: fixture.name, requests: requests.length }).toEqual({
+        name: fixture.name,
+        requests: fixture.requests,
+      });
+      expect(requests.some((request) => request.includes("aggregated"))).toBe(false);
+    }
+  });
+
+  it("treats only an exact persisted GCP instance 404 as authoritative absence", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const lease = observedGCPLease({ cloudID: name, serverName: name });
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    const requests: string[] = [];
+    client.fetcher = async (input) => {
+      requests.push(String(input));
+      return new Response(`projects/default-project/zones/us-central1-a/instances/${name}`, {
+        status: 404,
+      });
+    };
+
+    await expect(client.recoverServerForLease(lease)).resolves.toBeUndefined();
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).not.toContain("aggregated");
+  });
+
+  it("refuses recovery without the persisted raw ID or when identity and ownership drift", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const baseLease = observedGCPLease({ cloudID: name, serverName: name });
+    const missingIDLease = structuredClone(baseLease);
+    delete missingIDLease.providerResourceID;
+    const fixtures = [
+      {
+        name: "missing persisted id",
+        lease: missingIDLease,
+        instance: ownedGCPInstance(baseLease),
+        requests: 0,
+      },
+      {
+        name: "replacement id",
+        lease: baseLease,
+        instance: ownedGCPInstance(baseLease, { id: "9223372036854775806" }),
+        requests: 1,
+      },
+      {
+        name: "foreign ownership",
+        lease: baseLease,
+        instance: ownedGCPInstance(baseLease, {
+          labels: { ...(ownedGCPInstance(baseLease).labels as object), owner: "mallory" },
+        }),
+        requests: 1,
+      },
+    ];
+
+    for (const fixture of fixtures) {
+      const client = new GCPClient(env);
+      primeAccessToken(client);
+      let requests = 0;
+      client.fetcher = async () => {
+        requests += 1;
+        return Response.json(fixture.instance);
+      };
+
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each recovery authority failure is isolated.
+      await expect(client.recoverServerForLease(fixture.lease)).rejects.toBeInstanceOf(
+        ProviderResourceUnresolvedError,
+      );
+      expect({ name: fixture.name, requests }).toEqual({
+        name: fixture.name,
+        requests: fixture.requests,
+      });
+    }
   });
 
   it("publishes each fallback zone before creating an instance", async () => {
@@ -836,15 +2154,16 @@ describe("gcp provider", () => {
       };
     });
 
+    const config = leaseConfig({
+      provider: "gcp",
+      gcpZone: "us-central1-a",
+      capacity: { availabilityZones: ["us-central1-b"] },
+      serverType: "e2-micro",
+      serverTypeExplicit: true,
+      sshPublicKey: "ssh-ed25519 test",
+    });
     await client.createServerWithFallback(
-      leaseConfig({
-        provider: "gcp",
-        gcpZone: "us-central1-a",
-        capacity: { availabilityZones: ["us-central1-b"] },
-        serverType: "e2-micro",
-        serverTypeExplicit: true,
-        sshPublicKey: "ssh-ed25519 test",
-      }),
+      config,
       "cbx_abcdef123456",
       "blue-lobster",
       "alice@example.com",
@@ -861,7 +2180,7 @@ describe("gcp provider", () => {
 
   it("creates and deletes machine images through Compute Engine", async () => {
     const client = new GCPClient(env);
-    seedGCPAuthCache(client, "test-token");
+    primeAccessToken(client, "test-token");
     const calls: Array<{ method: string; path: string; body: unknown }> = [];
     client.fetcher = async (input, init) => {
       const url = new URL(String(input));
@@ -906,7 +2225,7 @@ describe("gcp provider", () => {
     "encodes bounded GCP ownership labels for checkpoint id %s",
     async (checkpointID) => {
       const client = new GCPClient(env);
-      seedGCPAuthCache(client, "test-token");
+      primeAccessToken(client, "test-token");
       const ownership = {
         checkpointID,
         sourceLeaseID: "cbx_000000000001",
@@ -951,7 +2270,7 @@ describe("gcp provider", () => {
 
   it("accepts only exact project and resource kind in checkpoint not-found responses", async () => {
     const client = new GCPClient(env);
-    seedGCPAuthCache(client, "test-token");
+    primeAccessToken(client, "test-token");
     client.fetcher = async (input) => {
       const url = new URL(String(input));
       const resource = url.pathname.slice(url.pathname.indexOf("projects/"));
@@ -974,7 +2293,7 @@ describe("gcp provider", () => {
 
   it("routes kind-specific snapshot reads and deletes to GCP snapshots", async () => {
     const client = new GCPClient(env);
-    seedGCPAuthCache(client, "test-token");
+    primeAccessToken(client, "test-token");
     const calls: Array<{ method: string; path: string }> = [];
     client.fetcher = async (input, init) => {
       const url = new URL(String(input));
@@ -1015,7 +2334,7 @@ describe("gcp provider", () => {
 
   it("creates instances from machine images without boot disk initialization", async () => {
     const client = new GCPClient(env);
-    seedGCPAuthCache(client, "test-token");
+    primeAccessToken(client, "test-token");
     const calls: Array<{
       method: string;
       path: string;
@@ -1072,76 +2391,12 @@ describe("gcp provider", () => {
       (call) => call.method === "POST" && call.path.includes("/zones/us-central1-a/instances?"),
     );
     expect(server.host).toBe("192.0.2.5");
+    expect(server.providerResourceID).toBe("123");
     expect(createCall?.path).toContain(
       "sourceMachineImage=projects%2Fdefault-project%2Fglobal%2FmachineImages%2Fcheckpoint-gcp",
     );
     expect(createCall?.body).not.toHaveProperty("disks");
     expect(String(createCall?.body?.name)).toMatch(/^crabbox-blue-lobster-/);
-  });
-
-  it("creates instances from disk snapshots without forcing default disk size", async () => {
-    const client = new GCPClient(env);
-    seedGCPAuthCache(client, "test-token");
-    const calls: Array<{
-      method: string;
-      path: string;
-      body: Record<string, unknown> | undefined;
-    }> = [];
-    client.fetcher = async (input, init) => {
-      const url = new URL(String(input));
-      const method = init?.method ?? "GET";
-      const body = init?.body
-        ? (JSON.parse(String(init.body)) as Record<string, unknown>)
-        : undefined;
-      calls.push({ method, path: url.pathname + url.search, body });
-      if (url.pathname.endsWith("/global/firewalls/crabbox-ssh") && method === "GET") {
-        return new Response("not found", { status: 404 });
-      }
-      if (url.pathname.endsWith("/global/operations/op-firewall/wait")) {
-        return Response.json({ name: "op-firewall", status: "DONE" });
-      }
-      if (url.pathname.endsWith("/zones/us-central1-a/operations/op-instance/wait")) {
-        return Response.json({ name: "op-instance", status: "DONE" });
-      }
-      if (url.pathname.endsWith("/global/firewalls") && method === "POST") {
-        return Response.json({ name: "op-firewall", status: "PENDING" });
-      }
-      if (url.pathname.endsWith("/zones/us-central1-a/instances") && method === "POST") {
-        return Response.json({ name: "op-instance", status: "PENDING" });
-      }
-      if (url.pathname.includes("/zones/us-central1-a/instances/crabbox-blue-lobster-")) {
-        return Response.json({
-          id: "123",
-          name: url.pathname.split("/").pop(),
-          status: "RUNNING",
-          machineType: "zones/us-central1-a/machineTypes/e2-micro",
-          networkInterfaces: [{ accessConfigs: [{ natIP: "192.0.2.5" }] }],
-        });
-      }
-      return Response.json({});
-    };
-
-    await client.createServer(
-      leaseConfig({
-        provider: "gcp",
-        serverType: "e2-micro",
-        gcpSnapshot: "checkpoint-gcp",
-        sshPublicKey: "ssh-ed25519 test",
-      }),
-      "cbx_123456789abc",
-      "blue-lobster",
-      "alice@example.com",
-    );
-
-    const createCall = calls.find(
-      (call) => call.method === "POST" && call.path.endsWith("/zones/us-central1-a/instances"),
-    );
-    const disks = createCall?.body?.disks as Array<{ initializeParams?: Record<string, unknown> }>;
-    expect(disks[0]?.initializeParams).toMatchObject({
-      sourceSnapshot: "projects/default-project/global/snapshots/checkpoint-gcp",
-      diskType: "zones/us-central1-a/diskTypes/pd-balanced",
-    });
-    expect(disks[0]?.initializeParams).not.toHaveProperty("diskSizeGb");
   });
 
   it("keeps exact GCP types eligible for zone fallback", async () => {

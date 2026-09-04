@@ -69,6 +69,25 @@ describe("per-client expiring token cache", () => {
     );
   });
 
+  it("clones completed tokens without sharing pending or later refreshes", async () => {
+    const original = new ExpiringTokenCache();
+    await original.get(100, async () => ({ token: "original", expiresAt: 200 }));
+    const refresh = Promise.withResolvers<ExpiringToken>();
+    const pending = original.get(200, () => refresh.promise);
+    const clone = original.clone();
+    const cloneLoad = vi.fn<() => Promise<ExpiringToken>>(async () => ({
+      token: "clone",
+      expiresAt: 400,
+    }));
+    await expect(clone.get(199, cloneLoad)).resolves.toBe("original");
+    expect(cloneLoad).not.toHaveBeenCalled();
+    await expect(clone.get(200, cloneLoad)).resolves.toBe("clone");
+    refresh.resolve({ token: "refreshed-original", expiresAt: 300 });
+    await expect(pending).resolves.toBe("refreshed-original");
+    await expect(clone.get(299, cloneLoad)).resolves.toBe("clone");
+    expect(cloneLoad).toHaveBeenCalledTimes(1);
+  });
+
   it("does not reuse a short-lived response on the next request", async () => {
     const cache = new ExpiringTokenCache();
     const load = vi.fn<() => Promise<ExpiringToken>>(async () => ({

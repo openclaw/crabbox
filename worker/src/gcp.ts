@@ -16,11 +16,16 @@ import {
 } from "./provider-labels";
 import {
   ProviderProvisioningCleanupError,
+  ProviderProvisioningOutcomeUncertainError,
+  ProviderResourceUnresolvedError,
   providerProvisioningCleanupClaim,
+  type ProviderProvisioningCleanupClaim,
 } from "./provider-provisioning";
 import { leaseProviderName } from "./slug";
 import type {
   Env,
+  LeaseImageIdentity,
+  LeaseRecord,
   ProviderCheckpointOwnership,
   ProviderImage,
   ProviderMachine,
@@ -28,6 +33,12 @@ import type {
 } from "./types";
 
 const computeBaseURL = "https://compute.googleapis.com/compute/v1";
+const gcpReadyPoolResourcePattern =
+  /^(?:https:\/\/(?:compute|www)\.googleapis\.com\/compute\/v1\/)?projects\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\/global\/(images|snapshots)\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)$/;
+const gcpObservedDiskPattern =
+  /^(?:https:\/\/(?:compute|www)\.googleapis\.com\/compute\/v1\/)?projects\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\/zones\/([a-z0-9-]+)\/disks\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)$/;
+const gcpObservedInstancePattern =
+  /^(?:https:\/\/(?:compute|www)\.googleapis\.com\/compute\/v1\/)?projects\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\/zones\/([a-z0-9-]+)\/instances\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)$/;
 const tokenURL = "https://oauth2.googleapis.com/token";
 const metadataTokenURL =
   "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
@@ -51,6 +62,16 @@ class GCPHTTPError extends Error {
   }
 }
 
+class GCPOperationError extends Error {}
+
+export function gcpReadyPoolImageScope(
+  sourceID: string | undefined,
+  kind: string | undefined,
+): string | undefined {
+  const match = gcpReadyPoolSourceMatch(sourceID, kind);
+  return match ? `projects/${match[1]}/global/${match[2]}` : undefined;
+}
+
 class GCPMetadataTokenRequestError extends Error {}
 
 class GCPMetadataTokenTrustError extends Error {}
@@ -58,6 +79,7 @@ class GCPMetadataTokenTrustError extends Error {}
 interface GCPInstance {
   id?: string;
   name?: string;
+  sourceMachineImage?: string;
   status?: string;
   machineType?: string;
   zone?: string;
@@ -68,6 +90,7 @@ interface GCPInstance {
   disks?: {
     boot?: boolean;
     source?: string;
+    type?: string;
   }[];
 }
 
@@ -78,6 +101,7 @@ interface GCPAggregatedInstanceList {
 interface GCPOperation {
   name?: string;
   status?: string;
+  targetId?: string;
   error?: { errors?: { code?: string; message?: string }[] };
 }
 
@@ -97,6 +121,16 @@ interface GCPSnapshot {
   labels?: Record<string, string>;
 }
 
+interface GCPDisk {
+  id?: string;
+  selfLink?: string;
+  users?: string[];
+  sourceImage?: string;
+  sourceImageId?: string;
+  sourceSnapshot?: string;
+  sourceSnapshotId?: string;
+}
+
 export class GCPClient {
   readonly project: string;
   readonly zone: string;
@@ -108,7 +142,7 @@ export class GCPClient {
   readonly rootGB: number;
   readonly serviceAccount: string;
   fetcher: typeof fetch = (input, init) => fetch(input, init);
-  private readonly tokenCache = new ExpiringTokenCache();
+  private tokenCache = new ExpiringTokenCache();
 
   constructor(
     private readonly env: Env,
@@ -159,35 +193,223 @@ export class GCPClient {
       .filter(canonicalGCPMachine);
   }
 
-  async recoverServerForLease(
-    leaseID: string,
-    slug: string | undefined,
-  ): Promise<ProviderMachine | undefined> {
-    const expectedName = leaseProviderName(leaseID, slug);
-    let server: ProviderMachine | undefined;
-    try {
-      server = await this.getServer(expectedName);
-    } catch (error) {
-      if (!isNotFound(error)) throw error;
-      // Pre-upgrade fallback attempts may have created the canonical instance
-      // before the selected zone was persisted on the lease.
-      const matches = (await this.listCrabboxServers()).filter(
-        (candidate) => candidate.name === expectedName && candidate.labels["lease"] === leaseID,
-      );
-      if (matches.length > 1) {
-        throw new Error(
-          `ambiguous GCP recovery for ${leaseID}: ${matches.length} canonical instances named ${expectedName}`,
-          { cause: error },
-        );
-      }
-      server = matches[0];
+  forScope(zone?: string, project?: string): GCPClient {
+    const scopedZone = zone?.trim() || this.zone;
+    const scopedProject = project?.trim() || this.project;
+    if (scopedZone === this.zone && scopedProject === this.project) {
+      return this;
     }
-    if (!server) return undefined;
-    return server.name === expectedName &&
-      canonicalGCPMachine(server) &&
-      server.labels["lease"] === leaseID
-      ? server
+    const client = new GCPClient(this.env, scopedZone, scopedProject);
+    client.fetcher = this.fetcher;
+    client.tokenCache = this.tokenCache.clone();
+    return client;
+  }
+
+  async observeReadyPoolImageIdentity(lease: LeaseRecord): Promise<LeaseImageIdentity | undefined> {
+    const project = lease.providerProject?.trim() ?? "";
+    const zone = lease.region?.trim() ?? "";
+    const name = lease.cloudID.trim();
+    const providerResourceID = canonicalNumericResourceID(lease.providerResourceID);
+    // A missing raw ID has no safe adoption path here; legacy migration remains operator-controlled.
+    if (
+      lease.provider !== "gcp" ||
+      !project ||
+      project !== lease.providerProject ||
+      !zone ||
+      zone !== lease.region ||
+      !name ||
+      name !== lease.cloudID ||
+      name !== lease.serverName ||
+      !providerResourceID
+    ) {
+      return undefined;
+    }
+    const client = this.forScope(zone, project);
+    const instancePath = `projects/${project}/zones/${zone}/instances/${name}`;
+    const instance = await client.gcp<GCPInstance>("GET", `/zones/${zone}/instances/${name}`);
+    const diskPath = observedOwnedGCPBootDiskPath(
+      instance,
+      lease,
+      project,
+      zone,
+      providerResourceID,
+    );
+    if (!diskPath) return undefined;
+    const diskName = lastPathPart(diskPath);
+    const disk = await client.gcp<GCPDisk>("GET", `/zones/${zone}/disks/${diskName}`);
+    const observedDisk = observedGCPBootDisk(disk, diskPath, instancePath, zone);
+    if (!observedDisk) return undefined;
+
+    const verifiedInstance = await client.gcp<GCPInstance>(
+      "GET",
+      `/zones/${zone}/instances/${name}`,
+    );
+    const verifiedDiskPath = observedOwnedGCPBootDiskPath(
+      verifiedInstance,
+      lease,
+      project,
+      zone,
+      providerResourceID,
+    );
+    if (verifiedInstance.id !== instance.id || verifiedDiskPath !== diskPath) {
+      return undefined;
+    }
+    const verifiedDisk = await client.gcp<GCPDisk>("GET", `/zones/${zone}/disks/${diskName}`);
+    const verifiedObservation = observedGCPBootDisk(verifiedDisk, diskPath, instancePath, zone);
+    return verifiedObservation &&
+      verifiedObservation.resourceID === observedDisk.resourceID &&
+      sameGCPObservedImageIdentity(verifiedObservation.image, observedDisk.image)
+      ? observedDisk.image
       : undefined;
+  }
+
+  async recoverServerForLease(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
+    const project = lease.providerProject?.trim() ?? "";
+    const zone = lease.region?.trim() ?? "";
+    const name = lease.cloudID.trim();
+    const providerResourceID = canonicalNumericResourceID(lease.providerResourceID);
+    if (
+      lease.provider !== "gcp" ||
+      !project ||
+      project !== lease.providerProject ||
+      !zone ||
+      zone !== lease.region ||
+      !name ||
+      name !== lease.cloudID ||
+      name !== lease.serverName ||
+      !providerResourceID
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        `GCP lease ${lease.id} has no exact persisted project, zone, name, and numeric resource id`,
+      );
+    }
+    const client = this.forScope(zone, project);
+    let instance: GCPInstance;
+    try {
+      instance = await client.gcp<GCPInstance>("GET", `/zones/${zone}/instances/${name}`);
+    } catch (error) {
+      if (gcpInstanceNotFound(error, project, zone, name)) return undefined;
+      throw error;
+    }
+    const server = toMachine(instance, zone);
+    if (
+      server.providerResourceID !== providerResourceID ||
+      !canonicalGCPMachine(server) ||
+      !providerMachineOwnedByLease(server, lease, "gcp", gcpProviderLabelValue)
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        `GCP instance ${name} identity or ownership does not match lease ${lease.id}`,
+      );
+    }
+    return server;
+  }
+
+  async observeLegacyCleanupIdentity(
+    lease: LeaseRecord,
+    context?: { resourceIdentity?: string },
+  ): Promise<{ providerResourceID: string } | undefined> {
+    const project = lease.providerProject?.trim() ?? "";
+    const zone = lease.region?.trim() ?? "";
+    const name = lease.cloudID.trim();
+    const resourceIdentity =
+      context?.resourceIdentity === undefined
+        ? undefined
+        : canonicalNumericResourceID(context.resourceIdentity);
+    const historicalServerID =
+      Number.isFinite(lease.serverID) && Number.isInteger(lease.serverID) && lease.serverID > 0
+        ? lease.serverID
+        : undefined;
+    if (
+      lease.provider !== "gcp" ||
+      !canonicalGCPProject(project) ||
+      project !== lease.providerProject ||
+      !canonicalGCPZone(zone) ||
+      zone !== lease.region ||
+      !name ||
+      name !== lease.cloudID ||
+      name !== lease.serverName ||
+      name !== leaseProviderName(lease.id, lease.slug) ||
+      lease.providerResourceID !== undefined ||
+      (context?.resourceIdentity !== undefined && !resourceIdentity) ||
+      (resourceIdentity === undefined && historicalServerID === undefined)
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        `GCP lease ${lease.id} has no canonical legacy cleanup identity`,
+      );
+    }
+    const client = this.forScope(zone, project);
+    let instance: GCPInstance;
+    try {
+      instance = await client.gcp<GCPInstance>("GET", `/zones/${zone}/instances/${name}`);
+    } catch (error) {
+      if (gcpInstanceNotFound(error, project, zone, name)) return undefined;
+      throw error;
+    }
+    const server = toMachine(instance, zone);
+    const providerResourceID = canonicalNumericResourceID(server.providerResourceID);
+    const identityMatches =
+      resourceIdentity === undefined
+        ? Number(providerResourceID) === historicalServerID
+        : providerResourceID === resourceIdentity;
+    if (
+      !providerResourceID ||
+      !identityMatches ||
+      !canonicalGCPMachine(server) ||
+      !providerMachineOwnedByLease(server, lease, "gcp", gcpProviderLabelValue)
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        `GCP instance ${name} cannot be bound to legacy cleanup for lease ${lease.id}`,
+      );
+    }
+    return { providerResourceID };
+  }
+
+  async recoverUnboundProvisioningResource(
+    lease: LeaseRecord,
+  ): Promise<ProviderMachine | undefined> {
+    const project = lease.providerProject?.trim() ?? "";
+    const zone = lease.region?.trim() ?? "";
+    const name = leaseProviderName(lease.id, lease.slug);
+    const providerResourceID =
+      lease.providerResourceID === undefined
+        ? undefined
+        : canonicalNumericResourceID(lease.providerResourceID);
+    if (
+      lease.provider !== "gcp" ||
+      !canonicalGCPProject(project) ||
+      project !== lease.providerProject ||
+      !canonicalGCPZone(zone) ||
+      zone !== lease.region ||
+      lease.cloudID !== "" ||
+      lease.serverID !== 0 ||
+      (lease.providerResourceID !== undefined && !providerResourceID) ||
+      lease.serverName !== ""
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        `GCP lease ${lease.id} has no canonical unbound provisioning scope`,
+      );
+    }
+    const client = this.forScope(zone, project);
+    let instance: GCPInstance;
+    try {
+      instance = await client.gcp<GCPInstance>("GET", `/zones/${zone}/instances/${name}`);
+    } catch (error) {
+      if (gcpInstanceNotFound(error, project, zone, name)) return undefined;
+      throw error;
+    }
+    const server = toMachine(instance, zone);
+    const claimedLease = { ...lease, cloudID: name };
+    if (
+      !server.providerResourceID ||
+      (providerResourceID !== undefined && server.providerResourceID !== providerResourceID) ||
+      !canonicalGCPMachine(server) ||
+      !providerMachineOwnedByLease(server, claimedLease, "gcp", gcpProviderLabelValue)
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        `GCP instance ${name} cannot be bound to unbound lease ${lease.id}`,
+      );
+    }
+    return server;
   }
 
   async createServerWithFallback(
@@ -195,7 +417,10 @@ export class GCPClient {
     leaseID: string,
     slug: string,
     owner: string,
-    provisioning?: { onTargetAttempt?: (target: { region?: string }) => Promise<void> },
+    provisioning?: {
+      onTargetAttempt?: (target: { region?: string }) => Promise<void>;
+      onResourceCreated?: (claim: ProviderProvisioningCleanupClaim) => Promise<boolean>;
+    },
   ): Promise<{
     server: ProviderMachine;
     serverType: string;
@@ -211,10 +436,7 @@ export class GCPClient {
     const attempts: ProvisioningAttempt[] = [];
     const project = config.gcpProject || this.project;
     for (const zone of zones) {
-      const client =
-        zone === this.zone && project === this.project
-          ? this
-          : new GCPClient(this.env, zone, project);
+      const client = this.forScope(zone, project);
       for (const machineType of candidates) {
         try {
           // Persist the zone before an instance create can outlive the coordinator request.
@@ -226,6 +448,7 @@ export class GCPClient {
             leaseID,
             slug,
             owner,
+            provisioning,
           );
           const result: {
             server: ProviderMachine;
@@ -236,7 +459,13 @@ export class GCPClient {
           if (attempts.length > 0) result.attempts = attempts;
           return result;
         } catch (error) {
-          if (providerProvisioningCleanupClaim(error)) throw error;
+          if (
+            error instanceof ProviderProvisioningOutcomeUncertainError ||
+            error instanceof ProviderResourceUnresolvedError ||
+            providerProvisioningCleanupClaim(error)
+          ) {
+            throw error;
+          }
           const message = errorMessage(error);
           failures.push(`${zone}/${machineType}: ${message}`);
           attempts.push({
@@ -254,10 +483,7 @@ export class GCPClient {
     }
     if (config.capacityMarket === "spot" && config.capacityFallback.startsWith("on-demand")) {
       for (const zone of zones) {
-        const client =
-          zone === this.zone && project === this.project
-            ? this
-            : new GCPClient(this.env, zone, project);
+        const client = this.forScope(zone, project);
         for (const machineType of candidates) {
           try {
             // Persist the zone before an instance create can outlive the coordinator request.
@@ -274,6 +500,7 @@ export class GCPClient {
               leaseID,
               slug,
               owner,
+              provisioning,
             );
             return {
               server,
@@ -282,7 +509,13 @@ export class GCPClient {
               attempts,
             };
           } catch (error) {
-            if (providerProvisioningCleanupClaim(error)) throw error;
+            if (
+              error instanceof ProviderProvisioningOutcomeUncertainError ||
+              error instanceof ProviderResourceUnresolvedError ||
+              providerProvisioningCleanupClaim(error)
+            ) {
+              throw error;
+            }
             const message = errorMessage(error);
             failures.push(`on-demand ${zone}/${machineType}: ${message}`);
             if (!isFallbackProvisioningError(message)) {
@@ -300,6 +533,9 @@ export class GCPClient {
     leaseID: string,
     slug: string,
     owner: string,
+    provisioning?: {
+      onResourceCreated?: (claim: ProviderProvisioningCleanupClaim) => Promise<boolean>;
+    },
   ): Promise<ProviderMachine> {
     if (config.target !== "linux") {
       throw new Error("brokered gcp currently supports target=linux only");
@@ -370,29 +606,216 @@ export class GCPClient {
         onHostMaintenance: "TERMINATE",
       };
     }
+    const path = config.gcpMachineImage
+      ? `/zones/${this.zone}/instances?sourceMachineImage=${encodeURIComponent(gcpMachineImageRef(config.gcpMachineImage, project))}`
+      : `/zones/${this.zone}/instances`;
+    const claim: ProviderProvisioningCleanupClaim = {
+      provider: "gcp",
+      cloudID: name,
+      region: this.zone,
+      providerProject: project,
+    };
+    let recoveredCollision: ProviderMachine | undefined;
     try {
-      const path = config.gcpMachineImage
-        ? `/zones/${this.zone}/instances?sourceMachineImage=${encodeURIComponent(gcpMachineImageRef(config.gcpMachineImage, project))}`
-        : `/zones/${this.zone}/instances`;
-      const op = await this.gcp<GCPOperation>("POST", path, instance);
-      await this.waitZoneOperation(op);
-      return await this.getServer(name);
+      await this.insertInstanceAndWait(path, instance, claim);
     } catch (error) {
+      if (provisioning?.onResourceCreated) {
+        if (error instanceof GCPOperationError) {
+          delete claim.providerResourceID;
+        }
+        recoveredCollision = await this.ownedCreateCollision(error, name, leaseID, slug, owner);
+        if (!recoveredCollision) throw error;
+        const collisionResourceID = recoveredCollision.providerResourceID;
+        if (!collisionResourceID) {
+          throw new ProviderResourceUnresolvedError(
+            `GCP instance ${name} collision has no numeric resource id`,
+          );
+        }
+        claim.providerResourceID = collisionResourceID;
+      } else {
+        await this.rollbackDirectCreate(name, leaseID, slug, owner, claim, error);
+        throw error;
+      }
+    }
+    if (provisioning?.onResourceCreated) {
+      if (!claim.providerResourceID) {
+        try {
+          const created = await this.gcp<GCPInstance>(
+            "GET",
+            `/zones/${this.zone}/instances/${name}`,
+          );
+          const machine = toMachine(created, this.zone);
+          if (
+            !machine.providerResourceID ||
+            !canonicalGCPMachine(machine) ||
+            !providerMachineOwnedByLease(
+              machine,
+              { id: leaseID, slug, owner, provider: "gcp", cloudID: name },
+              "gcp",
+              gcpProviderLabelValue,
+            )
+          ) {
+            throw new Error("instance identity or ownership is incomplete");
+          }
+          claim.providerResourceID = machine.providerResourceID;
+        } catch (error) {
+          throw new ProviderProvisioningOutcomeUncertainError(
+            `GCP instance ${name} was created but its numeric resource id is unconfirmed: ${errorMessage(error)}`,
+            { cause: error },
+          );
+        }
+      }
+      let continueReadiness: boolean;
       try {
-        await this.deleteServerOwnedByClaim(name, leaseID, slug, owner);
-      } catch (cleanupError) {
+        continueReadiness = await provisioning.onResourceCreated(claim);
+      } catch (error) {
+        if (error instanceof ProviderResourceUnresolvedError) throw error;
         throw new ProviderProvisioningCleanupError(
-          `${errorMessage(error)}; GCP provisioning cleanup failed closed: ${errorMessage(cleanupError)}`,
-          {
-            provider: "gcp",
-            cloudID: name,
-            region: this.zone,
-            providerProject: project,
-          },
-          cleanupError,
+          `${errorMessage(error)}; GCP instance ${name} cleanup remains pending`,
+          claim,
+          error,
         );
       }
+      if (!continueReadiness) {
+        return pendingMachine(name, config.serverType, this.zone, labels);
+      }
+      if (recoveredCollision) {
+        throw new ProviderResourceUnresolvedError(
+          `GCP instance ${name} collision is owned but not bound to this create attempt`,
+        );
+      }
+      try {
+        const created = await this.gcp<GCPInstance>("GET", `/zones/${this.zone}/instances/${name}`);
+        const machine = toMachine(created, this.zone);
+        if (claim.providerResourceID && machine.providerResourceID !== claim.providerResourceID) {
+          throw new ProviderResourceUnresolvedError(
+            `GCP instance ${name} numeric resource id changed after creation`,
+          );
+        }
+        return machine;
+      } catch (error) {
+        if (error instanceof ProviderResourceUnresolvedError) throw error;
+        throw new ProviderProvisioningCleanupError(
+          `${errorMessage(error)}; GCP instance ${name} cleanup remains pending`,
+          claim,
+          error,
+        );
+      }
+    }
+    try {
+      const created = await this.gcp<GCPInstance>("GET", `/zones/${this.zone}/instances/${name}`);
+      return toMachine(created, this.zone);
+    } catch (error) {
+      await this.rollbackDirectCreate(name, leaseID, slug, owner, claim, error);
       throw error;
+    }
+  }
+
+  private async ownedCreateCollision(
+    createError: unknown,
+    name: string,
+    leaseID: string,
+    slug: string,
+    owner: string,
+  ): Promise<ProviderMachine | undefined> {
+    if (!isGCPCreateCollision(createError)) return undefined;
+    let instance: GCPInstance;
+    try {
+      instance = await this.gcp<GCPInstance>("GET", `/zones/${this.zone}/instances/${name}`);
+    } catch (error) {
+      if (isNotFound(error)) return undefined;
+      throw new ProviderResourceUnresolvedError(
+        `GCP instance ${name} collision ownership could not be resolved`,
+        { cause: error },
+      );
+    }
+    const machine = toMachine(instance, this.zone);
+    return machine.providerResourceID &&
+      canonicalGCPMachine(machine) &&
+      providerMachineOwnedByLease(
+        machine,
+        { id: leaseID, slug, owner, provider: "gcp", cloudID: name },
+        "gcp",
+        gcpProviderLabelValue,
+      )
+      ? machine
+      : undefined;
+  }
+
+  private async insertInstanceAndWait(
+    path: string,
+    instance: Record<string, unknown>,
+    claim: ProviderProvisioningCleanupClaim,
+  ): Promise<void> {
+    let operation: GCPOperation;
+    try {
+      operation = await this.gcp<GCPOperation>("POST", path, instance);
+      if (!operation.name) {
+        throw new Error("GCP instance insert returned no operation name");
+      }
+    } catch (error) {
+      if (error instanceof GCPHTTPError && error.status < 500 && error.status !== 408) throw error;
+      throw new ProviderProvisioningOutcomeUncertainError(
+        `GCP instance insert outcome is uncertain: ${errorMessage(error)}`,
+        { cause: error },
+      );
+    }
+    if (operation.targetId !== undefined) {
+      const providerResourceID = canonicalNumericResourceID(operation.targetId);
+      if (!providerResourceID) {
+        throw new ProviderProvisioningOutcomeUncertainError(
+          "GCP accepted an instance insert with a malformed numeric target id",
+        );
+      }
+      claim.providerResourceID = providerResourceID;
+    }
+    try {
+      const completed = await this.waitZoneOperation(operation);
+      if (completed.targetId !== undefined) {
+        const providerResourceID = canonicalNumericResourceID(completed.targetId);
+        if (
+          !providerResourceID ||
+          (claim.providerResourceID && claim.providerResourceID !== providerResourceID)
+        ) {
+          delete claim.providerResourceID;
+          throw new ProviderProvisioningOutcomeUncertainError(
+            "GCP accepted an instance insert with malformed or conflicting numeric target ids",
+          );
+        }
+        claim.providerResourceID = providerResourceID;
+      }
+    } catch (error) {
+      if (error instanceof GCPOperationError || error instanceof ProviderResourceUnresolvedError) {
+        throw error;
+      }
+      if (error instanceof ProviderProvisioningOutcomeUncertainError) throw error;
+      const uncertain = new ProviderProvisioningOutcomeUncertainError(
+        `GCP accepted instance operation ${operation.name} but its outcome is uncertain: ${errorMessage(error)}`,
+        { cause: error },
+      );
+      if (claim.providerResourceID) {
+        throw new ProviderProvisioningCleanupError(uncertain.message, { ...claim }, uncertain);
+      }
+      throw uncertain;
+    }
+  }
+
+  private async rollbackDirectCreate(
+    name: string,
+    leaseID: string,
+    slug: string,
+    owner: string,
+    claim: ProviderProvisioningCleanupClaim,
+    createError: unknown,
+  ): Promise<void> {
+    try {
+      await this.deleteServerOwnedByClaim(name, leaseID, slug, owner);
+    } catch (cleanupError) {
+      throw new ProviderProvisioningCleanupError(
+        `${errorMessage(createError)}; GCP provisioning cleanup failed closed: ${errorMessage(cleanupError)}`,
+        claim,
+        cleanupError,
+      );
     }
   }
 
@@ -824,8 +1247,8 @@ export class GCPClient {
     }
   }
 
-  private async waitZoneOperation(op: GCPOperation): Promise<void> {
-    if (!op.name) return;
+  private async waitZoneOperation(op: GCPOperation): Promise<GCPOperation> {
+    if (!op.name) return op;
     for (;;) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- operation polling is sequential.
       const done = await this.gcp<GCPOperation>(
@@ -833,7 +1256,7 @@ export class GCPClient {
         `/zones/${this.zone}/operations/${op.name}/wait`,
       );
       operationError(done);
-      if (operationDone(done)) return;
+      if (operationDone(done)) return done;
       // oxlint-disable-next-line eslint/no-await-in-loop -- polling interval.
       await sleep(2000);
     }
@@ -975,6 +1398,7 @@ function toMachine(instance: GCPInstance, zone: string): ProviderMachine {
   return {
     provider: "gcp",
     id: Number(instance.id ?? 0),
+    ...(instance.id ? { providerResourceID: instance.id } : {}),
     cloudID: instance.name ?? "",
     region: zone,
     name: instance.name ?? "",
@@ -1051,10 +1475,18 @@ function isUnavailableMachineTypeError(value: string): boolean {
   );
 }
 
+function isGCPCreateCollision(error: unknown): boolean {
+  return (
+    (error instanceof GCPHTTPError && error.status === 409) ||
+    (error instanceof GCPOperationError &&
+      /(?:already[_ ]exists|resource[_ ]already[_ ]exists)/i.test(error.message))
+  );
+}
+
 function operationError(op: GCPOperation): void {
   const errors = op.error?.errors ?? [];
   if (errors.length > 0) {
-    throw new Error(
+    throw new GCPOperationError(
       errors.map((item) => `${item.code ?? "error"}: ${item.message ?? ""}`).join("; "),
     );
   }
@@ -1115,6 +1547,25 @@ function gcpCheckpointTokenHash(labels: Record<string, string> | undefined): str
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function pendingMachine(
+  name: string,
+  serverType: string,
+  zone: string,
+  labels: Record<string, string>,
+): ProviderMachine {
+  return {
+    provider: "gcp",
+    id: 0,
+    cloudID: name,
+    name,
+    status: "provisioning",
+    serverType,
+    host: "",
+    region: zone,
+    labels,
+  };
 }
 
 function uniqueStrings(values: string[]): string[] {
@@ -1229,6 +1680,158 @@ function gcpSnapshotRef(value: string, project: string): string {
     return value;
   }
   return `projects/${project}/global/snapshots/${value}`;
+}
+
+function canonicalGCPReadyPoolSource(
+  source: string | undefined,
+  kind: string | undefined,
+): string | undefined {
+  const match = gcpReadyPoolSourceMatch(source, kind);
+  return match ? `projects/${match[1]}/global/${match[2]}/${match[3]}` : undefined;
+}
+
+function gcpReadyPoolSourceMatch(
+  source: string | undefined,
+  kind: string | undefined,
+): RegExpExecArray | undefined {
+  if (!source || (kind !== "gcp-image" && kind !== "gcp-disk-snapshot")) return undefined;
+  const match = gcpReadyPoolResourcePattern.exec(source.trim());
+  if (
+    !match?.[1] ||
+    !match[2] ||
+    !match[3] ||
+    (kind === "gcp-image" ? match[2] !== "images" : match[2] !== "snapshots")
+  ) {
+    return undefined;
+  }
+  return match;
+}
+
+function canonicalGCPObservedResource(
+  source: string | undefined,
+  pattern: RegExp,
+  project: string,
+  zone: string,
+  collection: "disks" | "instances",
+): string | undefined {
+  if (!source) return undefined;
+  const match = pattern.exec(source.trim());
+  return match?.[1] === project && match[2] === zone
+    ? `projects/${project}/zones/${zone}/${collection}/${match[3]}`
+    : undefined;
+}
+
+function canonicalNumericResourceID(value: unknown): string | undefined {
+  return typeof value === "string" && value === value.trim() && /^[0-9]+$/.test(value)
+    ? value
+    : undefined;
+}
+
+function canonicalGCPProject(value: string): boolean {
+  return /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(value);
+}
+
+function canonicalGCPZone(value: string): boolean {
+  return /^[a-z][a-z0-9-]{1,61}[a-z0-9]$/.test(value);
+}
+
+function observedOwnedGCPBootDiskPath(
+  instance: GCPInstance,
+  lease: LeaseRecord,
+  project: string,
+  zone: string,
+  providerResourceID: string,
+): string | undefined {
+  const machine = toMachine(instance, zone);
+  if (
+    instance.id !== providerResourceID ||
+    instance.name !== lease.cloudID ||
+    !providerMachineOwnedByLease(machine, lease, "gcp", gcpProviderLabelValue) ||
+    instance.sourceMachineImage?.trim()
+  ) {
+    return undefined;
+  }
+  const bootDisks = (instance.disks ?? []).filter((disk) => disk.boot === true);
+  if (bootDisks.length !== 1 || bootDisks[0]?.type !== "PERSISTENT") return undefined;
+  return canonicalGCPObservedResource(
+    bootDisks[0].source,
+    gcpObservedDiskPattern,
+    project,
+    zone,
+    "disks",
+  );
+}
+
+function observedGCPBootDisk(
+  disk: GCPDisk,
+  expectedDiskPath: string,
+  expectedInstancePath: string,
+  zone: string,
+): { resourceID: string; image: LeaseImageIdentity } | undefined {
+  const diskMatch = gcpObservedDiskPattern.exec(expectedDiskPath);
+  const instanceMatch = gcpObservedInstancePattern.exec(expectedInstancePath);
+  if (!diskMatch?.[1] || !diskMatch[2] || !instanceMatch?.[1] || !instanceMatch[2]) {
+    return undefined;
+  }
+  const diskPath = canonicalGCPObservedResource(
+    disk.selfLink,
+    gcpObservedDiskPattern,
+    diskMatch[1],
+    diskMatch[2],
+    "disks",
+  );
+  const users = (disk.users ?? []).map((user) =>
+    canonicalGCPObservedResource(
+      user,
+      gcpObservedInstancePattern,
+      instanceMatch[1]!,
+      instanceMatch[2]!,
+      "instances",
+    ),
+  );
+  const resourceID = canonicalNumericResourceID(disk.id);
+  if (
+    diskPath !== expectedDiskPath ||
+    !resourceID ||
+    users.length !== 1 ||
+    users[0] !== expectedInstancePath
+  ) {
+    return undefined;
+  }
+
+  const imagePresent = Boolean(disk.sourceImage?.trim() || disk.sourceImageId?.trim());
+  const snapshotPresent = Boolean(disk.sourceSnapshot?.trim() || disk.sourceSnapshotId?.trim());
+  if (imagePresent === snapshotPresent) return undefined;
+  const kind = imagePresent ? "gcp-image" : "gcp-disk-snapshot";
+  const source = imagePresent ? disk.sourceImage : disk.sourceSnapshot;
+  const id = canonicalNumericResourceID(imagePresent ? disk.sourceImageId : disk.sourceSnapshotId);
+  const canonicalSource = canonicalGCPReadyPoolSource(source, kind);
+  if (!canonicalSource || !id) return undefined;
+  return {
+    resourceID,
+    image: {
+      id,
+      source: imagePresent ? "explicit" : "snapshot",
+      provider: "gcp",
+      kind,
+      region: zone,
+      sourceID: canonicalSource,
+    },
+  };
+}
+
+function sameGCPObservedImageIdentity(
+  left: LeaseImageIdentity,
+  right: LeaseImageIdentity,
+): boolean {
+  return (
+    left.id === right.id &&
+    left.source === right.source &&
+    left.provider === right.provider &&
+    left.kind === right.kind &&
+    left.region === right.region &&
+    left.sourceID === right.sourceID
+  );
 }
 
 function numberFromEnv(value: string | undefined, fallback: number): number {

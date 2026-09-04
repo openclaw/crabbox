@@ -9,6 +9,13 @@ export class ExpiringTokenCache {
   private cached?: ExpiringToken;
   private pending: Promise<ExpiringToken> | undefined;
 
+  // Scope clones retain a completed token, but own their subsequent refreshes.
+  clone(): ExpiringTokenCache {
+    const clone = new ExpiringTokenCache();
+    if (this.cached) clone.cached = { ...this.cached };
+    return clone;
+  }
+
   async get(validAfter: number, load: () => Promise<ExpiringToken>): Promise<string> {
     if (this.cached && this.cached.expiresAt > validAfter) return this.cached.token;
     if (!this.pending) {

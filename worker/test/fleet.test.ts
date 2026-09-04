@@ -52,13 +52,19 @@ import {
 import { gcpProviderLabelValue } from "../src/gcp";
 import { HetznerClient, HetznerProvisioningError } from "../src/hetzner";
 import { errorMessage } from "../src/http";
+import {
+  provisioningOperationKey,
+  type LeaseProvisioningOperation,
+} from "../src/lease-provisioning";
 import { MISSING_ORG_KEY, isCurrentOrgKey, orgKeyForLabel } from "../src/org-identity";
 import { portalCode, portalVNC, webVNCCredentialsFromHistoryState } from "../src/portal";
 import { providerLabelValue } from "../src/provider-labels";
 import {
   ProviderProvisioningCleanupError,
+  ProviderProvisioningOutcomeUncertainError,
   ProviderResourceUnresolvedError,
   providerProvisioningCleanupClaim,
+  validateProviderProvisioningCleanupClaim,
   type ProviderProvisioningCleanupClaim,
 } from "../src/provider-provisioning";
 import { providerReconciliationFingerprint } from "../src/provider-reconciliation";
@@ -71,6 +77,7 @@ import {
 import type {
   Env,
   ExternalRunnerRecord,
+  LeaseImageIdentity,
   LeaseRecord,
   LeaseRequest,
   ProviderFastSnapshotRestore,
@@ -6801,10 +6808,10 @@ describe("fleet lease identity and idle", () => {
     );
   });
 
-  it("reads and verifies cloud ownership before AWS, Azure, or GCP release", async () => {
+  it("reads and verifies cloud ownership before AWS release", async () => {
     await Promise.all(
       workerCloudReleaseCases()
-        .filter(({ providerName }) => providerName !== "azure")
+        .filter(({ providerName }) => providerName === "aws")
         .map(async ({ providerName, cloudID, provider }) => {
           const findServer = vi
             .spyOn(provider, "findServer")
@@ -6822,6 +6829,47 @@ describe("fleet lease identity and idle", () => {
           expect(deleteServer).toHaveBeenCalledWith(cloudID);
         }),
     );
+  });
+
+  it("requires the persisted raw GCP instance id to match before release deletion", async () => {
+    const provider = new GCPProvider({} as Env);
+    expect(provider.recoveryIsAuthoritative).toBe(true);
+    const cloudID = "crabbox-blue-lobster";
+    const machine = ownedTestMachine("gcp", cloudID);
+    machine.providerResourceID = "9223372036854775807";
+    const findServer = vi.spyOn(provider, "findServer").mockResolvedValue(machine);
+    const deleteServer = vi.spyOn(provider, "deleteServer").mockResolvedValue();
+    const lease = testLease({
+      id: "cbx_abcdef123456",
+      provider: "gcp",
+      cloudID,
+      providerResourceID: "9223372036854775807",
+    });
+
+    await expect(provider.releaseLease(lease)).resolves.toBeUndefined();
+    expect(findServer).toHaveBeenCalledWith(cloudID);
+    expect(deleteServer).toHaveBeenCalledWith(cloudID);
+
+    deleteServer.mockClear();
+    machine.providerResourceID = "9223372036854775806";
+    await expect(provider.releaseLease(lease)).rejects.toBeInstanceOf(
+      ProviderResourceUnresolvedError,
+    );
+    expect(deleteServer).not.toHaveBeenCalled();
+
+    delete machine.providerResourceID;
+    await expect(provider.releaseLease(lease)).rejects.toBeInstanceOf(
+      ProviderResourceUnresolvedError,
+    );
+    expect(deleteServer).not.toHaveBeenCalled();
+
+    findServer.mockClear();
+    delete lease.providerResourceID;
+    await expect(provider.releaseLease(lease)).rejects.toBeInstanceOf(
+      ProviderResourceUnresolvedError,
+    );
+    expect(findServer).not.toHaveBeenCalled();
+    expect(deleteServer).not.toHaveBeenCalled();
   });
 
   it("routes Azure release through its companion-aware ownership cleanup", async () => {
@@ -6919,6 +6967,9 @@ describe("fleet lease identity and idle", () => {
         .filter(({ providerName }) => providerName !== "azure")
         .map(async ({ providerName, cloudID, provider }) => {
           const machine = ownedTestMachine(providerName, cloudID);
+          if (providerName === "gcp") {
+            machine.providerResourceID = "9223372036854775807";
+          }
           vi.spyOn(provider, "findServer").mockResolvedValue({
             ...machine,
             labels: { ...machine.labels, lease: "cbx_000000000000" },
@@ -6927,7 +6978,12 @@ describe("fleet lease identity and idle", () => {
 
           await expect(
             provider.releaseLease(
-              testLease({ id: "cbx_abcdef123456", provider: providerName, cloudID }),
+              testLease({
+                id: "cbx_abcdef123456",
+                provider: providerName,
+                cloudID,
+                ...(providerName === "gcp" ? { providerResourceID: "9223372036854775807" } : {}),
+              }),
             ),
           ).rejects.toThrow(`ownership does not match lease cbx_abcdef123456`);
           expect(deleteServer).not.toHaveBeenCalled();
@@ -6945,7 +7001,12 @@ describe("fleet lease identity and idle", () => {
 
           await expect(
             provider.releaseLease(
-              testLease({ id: "cbx_abcdef123456", provider: providerName, cloudID }),
+              testLease({
+                id: "cbx_abcdef123456",
+                provider: providerName,
+                cloudID,
+                ...(providerName === "gcp" ? { providerResourceID: "9223372036854775807" } : {}),
+              }),
             ),
           ).resolves.toBeUndefined();
           expect(deleteServer).not.toHaveBeenCalled();
@@ -6980,7 +7041,12 @@ describe("fleet lease identity and idle", () => {
 
           await expect(
             provider.releaseLease(
-              testLease({ id: "cbx_abcdef123456", provider: providerName, cloudID }),
+              testLease({
+                id: "cbx_abcdef123456",
+                provider: providerName,
+                cloudID,
+                ...(providerName === "gcp" ? { providerResourceID: "9223372036854775807" } : {}),
+              }),
             ),
           ).rejects.toThrow("scope missing");
           expect(deleteServer).not.toHaveBeenCalled();
@@ -9323,7 +9389,9 @@ describe("fleet lease identity and idle", () => {
         },
         async onCreateProvisioning(provisioning) {
           await provisioning?.onTargetAttempt?.({ region: "us-central1-a" });
+          expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.image).toBeUndefined();
           await provisioning?.onTargetAttempt?.({ region: "us-central1-b" });
+          expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.image).toBeUndefined();
           throw new Error("capacity unavailable");
         },
       }),
@@ -9347,6 +9415,750 @@ describe("fleet lease identity and idle", () => {
       state: "failed",
       region: "us-central1-b",
     });
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.image).toBeUndefined();
+  });
+
+  it.each([
+    {
+      name: "zone",
+      claim: {
+        provider: "gcp" as const,
+        cloudID: "crabbox-published",
+        region: "us-central1-c",
+        providerProject: "proj",
+        providerResourceID: "9223372036854775807",
+      },
+    },
+    {
+      name: "project",
+      claim: {
+        provider: "gcp" as const,
+        cloudID: "crabbox-published",
+        region: "us-central1-b",
+        providerProject: "other-project",
+        providerResourceID: "9223372036854775807",
+      },
+    },
+  ])("rejects a GCP publication claim outside the persisted $name", async ({ claim }) => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        cloudID: claim.cloudID,
+        region: "us-central1-b",
+        onPrepareLeaseCreate(config, lease) {
+          return { config, lease, provisioning: {} };
+        },
+        async onCreateProvisioning(provisioning) {
+          await provisioning?.onTargetAttempt?.({ region: "us-central1-b" });
+          await provisioning?.onResourceCreated?.(claim);
+        },
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          leaseID,
+          provider: "gcp",
+          target: "linux",
+          gcpProject: "proj",
+          gcpZone: "us-central1-a",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      cloudID: "",
+      region: "us-central1-b",
+      providerProject: "proj",
+      provisioningResourceMayExist: true,
+      provisioningFailureRetryable: false,
+      cleanupError: expect.stringContaining("cannot be bound to the original lease incarnation"),
+    });
+  });
+
+  it("publishes exact GCP fallback identity before the lease becomes active", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const cloudID = "crabbox-published";
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        cloudID,
+        providerResourceID: "9223372036854775807",
+        region: "us-central1-b",
+        onPrepareLeaseCreate(config, lease) {
+          return { config, lease, provisioning: {} };
+        },
+        async onCreateProvisioning(provisioning) {
+          await provisioning?.onTargetAttempt?.({ region: "us-central1-b" });
+          expect(
+            await provisioning?.onResourceCreated?.({
+              provider: "gcp",
+              cloudID,
+              region: "us-central1-b",
+              providerProject: "proj",
+              providerResourceID: "9223372036854775807",
+            }),
+          ).toBe(true);
+          expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+            state: "provisioning",
+            cloudID,
+            providerResourceID: "9223372036854775807",
+            region: "us-central1-b",
+            providerProject: "proj",
+          });
+        },
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          leaseID,
+          provider: "gcp",
+          target: "linux",
+          gcpProject: "proj",
+          gcpZone: "us-central1-a",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "active",
+      cloudID,
+      providerResourceID: "9223372036854775807",
+      region: "us-central1-b",
+      providerProject: "proj",
+    });
+  });
+
+  it("keeps GCP uncertainty in interrupted-create recovery until a later lookup is visible", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const createAttemptID = "cat_00000000000000000000000000000001";
+    let recoveries = 0;
+    let strictRecoveries = 0;
+    const releases: string[] = [];
+    const recovered: ProviderMachine = {
+      provider: "gcp",
+      id: 123,
+      providerResourceID: "9223372036854775807",
+      cloudID: "crabbox-blue-lobster-c80c2195",
+      name: "crabbox-blue-lobster-c80c2195",
+      status: "running",
+      serverType: "e2-micro",
+      host: "192.0.2.10",
+      region: "us-central1-a",
+      labels: {
+        crabbox: "true",
+        created_by: "crabbox",
+        provider: "gcp",
+        lease: leaseID,
+        owner: "alice_example.com",
+        slug: "blue-lobster",
+      },
+    };
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(
+        async () => {
+          throw new Error("wrapped provider failure", {
+            cause: new ProviderProvisioningOutcomeUncertainError(
+              "GCP instance insert outcome is uncertain: socket closed",
+            ),
+          });
+        },
+        {
+          provider: "gcp",
+          onPrepareLeaseCreate(config, lease) {
+            return { config, lease, provisioning: {} };
+          },
+          onRecoverUnboundProvisioningResource() {
+            recoveries += 1;
+            return recoveries === 1 ? undefined : recovered;
+          },
+          onRecoverServer(lease) {
+            strictRecoveries += 1;
+            expect(lease.providerResourceID).toBe(recovered.providerResourceID);
+            expect(lease.cloudID).toBe(recovered.cloudID);
+            return recovered;
+          },
+          onReleaseLease(lease) {
+            releases.push(lease.cloudID);
+          },
+        },
+      ),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          leaseID,
+          createAttemptID,
+          provider: "gcp",
+          target: "linux",
+          gcpProject: "proj",
+          gcpZone: "us-central1-a",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+    expect(failed).toMatchObject({
+      state: "failed",
+      cloudID: "",
+      provisioningResourceMayExist: true,
+      provisioningFailureRetryable: false,
+      provisioningRequestStartedAt: expect.any(String),
+      provisioningRequestSettledAt: expect.any(String),
+    });
+    recovered.labels.owner = gcpProviderLabelValue(failed.providerOwner ?? failed.owner);
+    recovered.labels.slug = gcpProviderLabelValue(failed.slug);
+
+    await fleet.alarm();
+    const observed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+    expect(recoveries).toBe(0);
+    expect(strictRecoveries).toBe(0);
+    expect(observed.provisioningRecoveryObservedAt).toEqual(expect.any(String));
+    storage.seed(`lease:${leaseID}`, {
+      ...observed,
+      provisioningRecoveryObservedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    await fleet.alarm();
+
+    const missing = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+    expect(recoveries).toBe(1);
+    expect(strictRecoveries).toBe(0);
+    expect(releases).toEqual([]);
+    expect(missing).toMatchObject({
+      cloudID: "",
+      provisioningRecoveryMissingSince: expect.any(String),
+      provisioningRequestStartedAt: failed.provisioningRequestStartedAt,
+    });
+
+    storage.seed(`lease:${leaseID}`, {
+      ...missing,
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    await fleet.alarm();
+
+    expect(recoveries).toBe(2);
+    expect(strictRecoveries).toBe(1);
+    expect(releases).toEqual([recovered.cloudID]);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      cloudID: recovered.cloudID,
+      providerResourceID: recovered.providerResourceID,
+      provisioningResourceMayExist: false,
+    });
+  });
+
+  it("preserves a captured GCP raw id when the mandatory strict reread fails", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const createAttemptID = "cat_00000000000000000000000000000002";
+    const captured: ProviderMachine = {
+      provider: "gcp",
+      id: 123,
+      providerResourceID: "9223372036854775807",
+      cloudID: "crabbox-blue-lobster-c80c2195",
+      name: "crabbox-blue-lobster-c80c2195",
+      status: "running",
+      serverType: "e2-micro",
+      host: "192.0.2.10",
+      region: "us-central1-a",
+      labels: {},
+    };
+    let strictReads = 0;
+    let releases = 0;
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(
+        async () => {
+          throw new ProviderProvisioningOutcomeUncertainError("socket closed");
+        },
+        {
+          provider: "gcp",
+          onPrepareLeaseCreate(config, lease) {
+            return { config, lease, provisioning: {} };
+          },
+          onRecoverUnboundProvisioningResource() {
+            return captured;
+          },
+          onRecoverServer() {
+            strictReads += 1;
+            expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+              cloudID: "",
+              serverID: 0,
+              serverName: "",
+              providerResourceID: captured.providerResourceID,
+            });
+            throw new ProviderResourceUnresolvedError("replacement instance");
+          },
+          onReleaseLease() {
+            releases += 1;
+          },
+        },
+      ),
+    });
+
+    expect(
+      (
+        await fleet.fetch(
+          request("POST", "/v1/leases", {
+            body: {
+              leaseID,
+              createAttemptID,
+              provider: "gcp",
+              target: "linux",
+              gcpProject: "default-project",
+              gcpZone: "us-central1-a",
+              sshPublicKey: "ssh-ed25519 test",
+            },
+          }),
+        )
+      ).status,
+    ).toBe(500);
+    const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+    storage.seed(`lease:${leaseID}`, {
+      ...failed,
+      provisioningRecoveryObservedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+
+    await fleet.alarm();
+
+    expect(strictReads).toBe(1);
+    expect(releases).toBe(0);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      cloudID: "",
+      serverID: 0,
+      serverName: "",
+      providerResourceID: captured.providerResourceID,
+      provisioningResourceMayExist: true,
+      provisioningFailureRetryable: false,
+      cleanupError: expect.stringContaining("replacement instance"),
+    });
+  });
+
+  it("retries a transient strict reread with the already captured GCP raw id", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const createAttemptID = "cat_00000000000000000000000000000012";
+    const captured: ProviderMachine = {
+      provider: "gcp",
+      id: 123,
+      providerResourceID: "9223372036854775807",
+      cloudID: "crabbox-blue-lobster-c80c2195",
+      name: "crabbox-blue-lobster-c80c2195",
+      status: "running",
+      serverType: "e2-micro",
+      host: "192.0.2.10",
+      region: "us-central1-a",
+      labels: {
+        crabbox: "true",
+        created_by: "crabbox",
+        provider: "gcp",
+        lease: leaseID,
+        owner: "alice_example.com",
+        slug: "blue-lobster",
+      },
+    };
+    let unboundReads = 0;
+    let strictReads = 0;
+    const releases: string[] = [];
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(
+        async () => {
+          throw new ProviderProvisioningOutcomeUncertainError("socket closed");
+        },
+        {
+          provider: "gcp",
+          onPrepareLeaseCreate(config, lease) {
+            return { config, lease, provisioning: {} };
+          },
+          onRecoverUnboundProvisioningResource(lease) {
+            unboundReads += 1;
+            if (unboundReads === 2) {
+              expect(lease.providerResourceID).toBe(captured.providerResourceID);
+            }
+            return captured;
+          },
+          onRecoverServer() {
+            strictReads += 1;
+            if (strictReads === 1) throw new Error("transient IAM failure");
+            return captured;
+          },
+          onReleaseLease(lease) {
+            releases.push(lease.cloudID);
+          },
+        },
+      ),
+    });
+
+    expect(
+      (
+        await fleet.fetch(
+          request("POST", "/v1/leases", {
+            body: {
+              leaseID,
+              createAttemptID,
+              provider: "gcp",
+              target: "linux",
+              gcpProject: "default-project",
+              gcpZone: "us-central1-a",
+              sshPublicKey: "ssh-ed25519 test",
+            },
+          }),
+        )
+      ).status,
+    ).toBe(500);
+    const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+    captured.labels.owner = gcpProviderLabelValue(failed.providerOwner ?? failed.owner);
+    captured.labels.slug = gcpProviderLabelValue(failed.slug);
+    storage.seed(`lease:${leaseID}`, {
+      ...failed,
+      provisioningRecoveryObservedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+
+    await fleet.alarm();
+
+    const retry = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+    expect({ unboundReads, strictReads, releases }).toEqual({
+      unboundReads: 1,
+      strictReads: 1,
+      releases: [],
+    });
+    expect(retry).toMatchObject({
+      cloudID: "",
+      providerResourceID: captured.providerResourceID,
+      cleanupRetryAt: expect.any(String),
+    });
+    storage.seed(`lease:${leaseID}`, {
+      ...retry,
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+
+    await fleet.alarm();
+
+    expect({ unboundReads, strictReads, releases }).toEqual({
+      unboundReads: 2,
+      strictReads: 2,
+      releases: [captured.cloudID],
+    });
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      cloudID: captured.cloudID,
+      providerResourceID: captured.providerResourceID,
+      provisioningResourceMayExist: false,
+    });
+  });
+
+  it("rejects unbound GCP capture when the lease or durable attempt drifts", async () => {
+    for (const drift of ["lease", "attempt"] as const) {
+      const storage = new MemoryStorage();
+      const leaseID = drift === "lease" ? "cbx_abcdef123456" : "cbx_abcdef123457";
+      const createAttemptID =
+        drift === "lease"
+          ? "cat_00000000000000000000000000000003"
+          : "cat_00000000000000000000000000000004";
+      const captured: ProviderMachine = {
+        provider: "gcp",
+        id: 123,
+        providerResourceID: "9223372036854775807",
+        cloudID: "crabbox-blue-lobster-c80c2195",
+        name: "crabbox-blue-lobster-c80c2195",
+        status: "running",
+        serverType: "e2-micro",
+        host: "192.0.2.10",
+        region: "us-central1-a",
+        labels: {},
+      };
+      let strictReads = 0;
+      const fleet = testFleet(storage, {
+        gcp: fakeProvider(
+          async () => {
+            throw new ProviderProvisioningOutcomeUncertainError("socket closed");
+          },
+          {
+            provider: "gcp",
+            onPrepareLeaseCreate(config, lease) {
+              return { config, lease, provisioning: {} };
+            },
+            onRecoverUnboundProvisioningResource(lease) {
+              if (drift === "lease") {
+                storage.seed(`lease:${lease.id}`, { ...lease, providerOwner: "changed-owner" });
+              } else {
+                const attempt = storage.value<CreateAttemptRecord>(`create-attempt:${lease.id}`)!;
+                storage.seed(`create-attempt:${lease.id}`, {
+                  ...attempt,
+                  updatedAt: new Date(Date.now() + 1_000).toISOString(),
+                });
+              }
+              return captured;
+            },
+            onRecoverServer() {
+              strictReads += 1;
+              return captured;
+            },
+          },
+        ),
+      });
+
+      // oxlint-disable eslint/no-await-in-loop -- each drift owns isolated durable state.
+      expect(
+        (
+          await fleet.fetch(
+            request("POST", "/v1/leases", {
+              body: {
+                leaseID,
+                createAttemptID,
+                provider: "gcp",
+                target: "linux",
+                gcpProject: "default-project",
+                gcpZone: "us-central1-a",
+                sshPublicKey: "ssh-ed25519 test",
+              },
+            }),
+          )
+        ).status,
+      ).toBe(500);
+      // oxlint-enable eslint/no-await-in-loop
+      const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+      storage.seed(`lease:${leaseID}`, {
+        ...failed,
+        provisioningRecoveryObservedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+        cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+      });
+
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each drift owns isolated alarm recovery.
+      await fleet.alarm();
+
+      expect({ drift, strictReads }).toEqual({ drift, strictReads: 0 });
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.providerResourceID).toBeUndefined();
+    }
+  });
+
+  it("never probes unbound GCP recovery for legacy, tokenless, workspace, active, or claimed leases", async () => {
+    const fixtures = [
+      "registered",
+      "tokenless",
+      "workspace",
+      "active",
+      "cleanup-claimed",
+      "attempt-mismatch",
+    ] as const;
+    for (const [index, fixture] of fixtures.entries()) {
+      const storage = new MemoryStorage();
+      const leaseID = `cbx_${String(index + 1).padStart(12, "0")}`;
+      const createAttemptID = `cat_${String(index + 1).padStart(32, "0")}`;
+      const generation = `generation-${index + 1}`;
+      const now = Date.now();
+      const lease = testLease({
+        id: leaseID,
+        slug: "unbound",
+        provider: "gcp",
+        owner: "alice@example.com",
+        org: "example-org",
+        cloudID: "",
+        serverID: 0,
+        serverName: "",
+        host: "",
+        state: "failed",
+        providerProject: "default-project",
+        region: "us-central1-a",
+        createAttemptID,
+        createAttemptGeneration: generation,
+        provisioningResourceMayExist: true,
+        provisioningFailureRetryable: false,
+        provisioningRequestStartedAt: new Date(now - 60_000).toISOString(),
+        provisioningRequestSettledAt: new Date(now - 50_000).toISOString(),
+        provisioningRecoveryObservedAt: new Date(now - 10 * 60_000).toISOString(),
+        cleanupRetryAt: new Date(now - 1_000).toISOString(),
+        createdAt: new Date(now - 120_000).toISOString(),
+        updatedAt: new Date(now - 50_000).toISOString(),
+        expiresAt: new Date(now + 60 * 60_000).toISOString(),
+      });
+      const attempt: CreateAttemptRecord = {
+        version: 1,
+        requestedLeaseID: leaseID,
+        token: createAttemptID,
+        owner: lease.owner,
+        org: lease.org,
+        state: "pending",
+        canonicalLeaseID: leaseID,
+        generation,
+        createdAt: lease.createdAt,
+        updatedAt: lease.createdAt,
+      };
+      if (fixture === "registered") lease.lifecycle = "registered";
+      if (fixture === "tokenless") {
+        delete lease.createAttemptID;
+        delete lease.createAttemptGeneration;
+      }
+      if (fixture === "workspace") lease.workspaceID = "workspace-one";
+      if (fixture === "active") lease.state = "active";
+      if (fixture === "cleanup-claimed") {
+        lease.cleanupStartedAt = new Date(now).toISOString();
+        lease.cleanupClaimExpiresAt = new Date(now + 60_000).toISOString();
+      }
+      if (fixture === "attempt-mismatch") attempt.generation = "other-generation";
+      storage.seed(`lease:${leaseID}`, lease);
+      if (fixture !== "tokenless") {
+        storage.seed(`create-attempt:${leaseID}`, attempt);
+      }
+      let unboundReads = 0;
+      let releases = 0;
+      const fleet = testFleet(storage, {
+        gcp: fakeProvider(undefined, {
+          provider: "gcp",
+          onRecoverUnboundProvisioningResource() {
+            unboundReads += 1;
+            throw new Error("unbound recovery must not run");
+          },
+          onRecoverServer() {
+            throw new ProviderResourceUnresolvedError("missing exact resource identity");
+          },
+          onReleaseLease() {
+            releases += 1;
+          },
+        }),
+      });
+
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each exclusion owns isolated state.
+      await fleet.alarm();
+
+      expect({ fixture, unboundReads, releases }).toEqual({
+        fixture,
+        unboundReads: 0,
+        releases: 0,
+      });
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.providerResourceID).toBeUndefined();
+    }
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["blank", ""],
+    ["malformed", "instance-latest"],
+    ["noncanonical", "9223372036854775807 "],
+  ] as const)("rejects a GCP cleanup claim with a %s numeric resource id", (_case, value) => {
+    expect(
+      validateProviderProvisioningCleanupClaim(
+        {
+          provider: "gcp",
+          cloudID: "crabbox-blue-lobster-c80c2195",
+          region: "us-central1-a",
+          providerProject: "default-project",
+          ...(value === undefined ? {} : { providerResourceID: value }),
+        },
+        "gcp",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("accepts a GCP cleanup claim with a canonical numeric resource id", () => {
+    const claim: ProviderProvisioningCleanupClaim = {
+      provider: "gcp",
+      cloudID: "crabbox-blue-lobster-c80c2195",
+      region: "us-central1-a",
+      providerProject: "default-project",
+      providerResourceID: "9223372036854775807",
+    };
+    expect(validateProviderProvisioningCleanupClaim(claim, "gcp")).toBe(claim);
+  });
+
+  it("keeps an incomplete uncertain GCP cleanup claim unbound and recoverable", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const createAttemptID = "cat_00000000000000000000000000000013";
+    let unboundReads = 0;
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(
+        async () => {
+          throw new ProviderProvisioningCleanupError(
+            "accepted GCP create has incomplete cleanup evidence",
+            {
+              provider: "gcp",
+              cloudID: "crabbox-blue-lobster-c80c2195",
+              region: "us-central1-a",
+              providerProject: "default-project",
+            },
+            new ProviderProvisioningOutcomeUncertainError("operation target id is unavailable"),
+          );
+        },
+        {
+          provider: "gcp",
+          onPrepareLeaseCreate(config, lease) {
+            return { config, lease, provisioning: {} };
+          },
+          onRecoverUnboundProvisioningResource() {
+            unboundReads += 1;
+            return undefined;
+          },
+        },
+      ),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          leaseID,
+          createAttemptID,
+          provider: "gcp",
+          target: "linux",
+          gcpProject: "default-project",
+          gcpZone: "us-central1-a",
+          sshPublicKey: "ssh-ed25519 incomplete-claim",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+    expect(failed).toMatchObject({
+      state: "failed",
+      cloudID: "",
+      serverID: 0,
+      serverName: "",
+      provisioningResourceMayExist: true,
+      provisioningFailureRetryable: false,
+      provisioningRequestStartedAt: expect.any(String),
+      provisioningRequestSettledAt: expect.any(String),
+    });
+    expect(failed.providerResourceID).toBeUndefined();
+    expect(failed.cleanupRetryAt).toBeUndefined();
+
+    await fleet.alarm();
+    const observed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+    expect(unboundReads).toBe(0);
+    expect(observed.provisioningRecoveryObservedAt).toEqual(expect.any(String));
+    storage.seed(`lease:${leaseID}`, {
+      ...observed,
+      provisioningRecoveryObservedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+    });
+
+    await fleet.alarm();
+
+    expect(unboundReads).toBe(1);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      cloudID: "",
+      serverID: 0,
+      serverName: "",
+      provisioningResourceMayExist: true,
+      provisioningRecoveryMissingSince: expect.any(String),
+    });
   });
 
   it("persists and retries an exact funded-provider cleanup claim", async () => {
@@ -9363,8 +10175,9 @@ describe("fleet lease identity and idle", () => {
               cloudID: "crabbox-blue-lobster-c80c2195",
               region: "us-central1-b",
               providerProject: "stored-project",
+              providerResourceID: "9223372036854775807",
             },
-            new Error("cleanup unavailable"),
+            new ProviderProvisioningOutcomeUncertainError("operation wait disconnected"),
           );
         },
         {
@@ -9394,6 +10207,7 @@ describe("fleet lease identity and idle", () => {
     expect(failed).toMatchObject({
       state: "failed",
       cloudID: "crabbox-blue-lobster-c80c2195",
+      providerResourceID: "9223372036854775807",
       region: "us-central1-b",
       providerProject: "stored-project",
       releaseDeletesServer: true,
@@ -9409,6 +10223,7 @@ describe("fleet lease identity and idle", () => {
     expect(cleanupLeases).toHaveLength(1);
     expect(cleanupLeases[0]).toMatchObject({
       cloudID: "crabbox-blue-lobster-c80c2195",
+      providerResourceID: "9223372036854775807",
       region: "us-central1-b",
       providerProject: "stored-project",
     });
@@ -9448,6 +10263,7 @@ describe("fleet lease identity and idle", () => {
               cloudID: "crabbox-blue-lobster-c80c2195",
               region: "us-central1-b",
               providerProject: "stored-project",
+              providerResourceID: "9223372036854775807",
             },
             new Error("cleanup unavailable"),
           );
@@ -9475,6 +10291,7 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
       state: "released",
       cloudID: "crabbox-blue-lobster-c80c2195",
+      providerResourceID: "9223372036854775807",
       region: "us-central1-b",
       providerProject: "stored-project",
       releaseDeletesServer: false,
@@ -9494,6 +10311,7 @@ describe("fleet lease identity and idle", () => {
     { cleanupPending: true, changed: "cloudID" },
     { cleanupPending: true, changed: "region" },
     { cleanupPending: true, changed: "providerProject" },
+    { cleanupPending: true, changed: "providerResourceID" },
   ] as const)(
     "preserves exact cleanup custody after provisioning fails (pending=$cleanupPending, changed=$changed)",
     async ({ cleanupPending, changed }) => {
@@ -9507,6 +10325,7 @@ describe("fleet lease identity and idle", () => {
         cloudID: "crabbox-published-allocation",
         region: "us-central1-a",
         providerProject: "request-project",
+        providerResourceID: "9223372036854775807",
       };
       let deletes = 0;
       const fleet = testFleet(storage, {
@@ -9518,7 +10337,15 @@ describe("fleet lease identity and idle", () => {
             await failCreate.promise;
             throw new ProviderProvisioningCleanupError(
               "readiness failed after allocation publication",
-              changed === "none" ? claim : { ...claim, [changed]: `different-${changed}` },
+              changed === "none"
+                ? claim
+                : {
+                    ...claim,
+                    [changed]:
+                      changed === "providerResourceID"
+                        ? "9223372036854775806"
+                        : `different-${changed}`,
+                  },
               new Error("readiness failed"),
             );
           },
@@ -9575,7 +10402,8 @@ describe("fleet lease identity and idle", () => {
         const after = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
         const readinessError = expect.stringContaining("readiness failed");
         const failureRecord = expect.objectContaining({
-          [changed]: `different-${changed}`,
+          [changed]:
+            changed === "providerResourceID" ? "9223372036854775806" : `different-${changed}`,
           cleanupError: readinessError,
         });
         const retryTime = expect.any(String);
@@ -11840,6 +12668,104 @@ describe("fleet lease identity and idle", () => {
     });
     expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.cleanupError).toBeUndefined();
   });
+
+  it.each(["success", "failure"] as const)(
+    "does not let legacy interrupted recovery %s overwrite active provisioning ownership",
+    async (outcome) => {
+      const storage = new MemoryStorage();
+      const now = Date.now();
+      const leaseID = `cbx_0000000000${outcome === "success" ? "a6" : "a7"}`;
+      let providerLookups = 0;
+      let providerReleases = 0;
+      const server: ProviderMachine = {
+        provider: "azure",
+        id: 0,
+        cloudID: `crabbox-${outcome}`,
+        name: `crabbox-${outcome}`,
+        status: "running",
+        serverType: "Standard_D4ads_v6",
+        host: "192.0.2.98",
+        labels: {
+          crabbox: "true",
+          created_by: "crabbox",
+          lease: leaseID,
+          owner: "alice_example.com",
+          provider: "azure",
+          slug: `ownership-${outcome}`,
+        },
+      };
+      const lease = testLease({
+        id: leaseID,
+        slug: `ownership-${outcome}`,
+        provider: "azure",
+        owner: "alice@example.com",
+        org: "example-org",
+        cloudID: "",
+        serverID: 0,
+        serverName: "",
+        host: "",
+        state: "provisioning",
+        provisioningRequestStartedAt: new Date(now - 60_000).toISOString(),
+        provisioningCoordinatorVersion: "old-version",
+        provisioningRecoveryObservedAt: new Date(now - 10 * 60_000).toISOString(),
+        expiresAt: new Date(now + 60 * 60_000).toISOString(),
+      });
+      const activeOperation: LeaseProvisioningOperation = {
+        schema: 1,
+        leaseID,
+        operationID: leaseID,
+        generation: "active-generation",
+        scope: "azure:test",
+        owner: lease.owner,
+        org: lease.org,
+        provider: "azure",
+        createdAt: now,
+        deadline: now + 30 * 60_000,
+        revision: 0,
+        step: {
+          phase: "provisioning",
+          attempt: 0,
+          state: {},
+          nextWake: now + 60_000,
+        },
+      };
+      const fleet = testFleet(
+        storage,
+        {
+          azure: fakeProvider(undefined, {
+            provider: "azure",
+            onRecoverServer() {
+              providerLookups += 1;
+              storage.seed(provisioningOperationKey(leaseID), activeOperation);
+              if (outcome === "failure") {
+                throw new Error("provider recovery failed after ownership transfer");
+              }
+              return server;
+            },
+            onReleaseLease() {
+              providerReleases += 1;
+            },
+          }),
+        },
+        {
+          CF_VERSION_METADATA: {
+            id: "new-version",
+            timestamp: new Date(now - 10 * 60_000).toISOString(),
+          },
+        },
+      );
+      storage.seed(`lease:${leaseID}`, lease);
+
+      await fleet.alarm();
+
+      expect(providerLookups).toBe(1);
+      expect(providerReleases).toBe(0);
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toEqual(lease);
+      expect(storage.value<LeaseProvisioningOperation>(provisioningOperationKey(leaseID))).toEqual(
+        activeOperation,
+      );
+    },
+  );
 
   it("backs off interrupted provisioning recovery when provider inventory fails", async () => {
     const storage = new MemoryStorage();
@@ -14161,7 +15087,9 @@ describe("fleet lease identity and idle", () => {
 
   it("generates provider-owned typed identities and rejects unsupported or incomplete evidence", async () => {
     const storage = new MemoryStorage();
-    const fleet = testFleet(storage);
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, { provider: "gcp" }),
+    });
     const headers = typedReadyPoolHeaders();
     const lease = typedReadyPoolLease();
     storage.seed(`lease:${lease.id}`, lease);
@@ -14204,6 +15132,484 @@ describe("fleet lease identity and idle", () => {
         error: "unsupported_ready_pool_lease_identity",
       });
     }
+  });
+
+  it("observes and persists GCP evidence for generated and supplied typed identities", async () => {
+    for (const action of ["identity", "register-identity"] as const) {
+      const storage = new MemoryStorage();
+      const lease = typedGCPReadyPoolLease(
+        action === "identity" ? "cbx_000000000097" : "cbx_000000000098",
+      );
+      storage.seed(`lease:${lease.id}`, lease);
+      let observations = 0;
+      const fleet = testFleet(storage, {
+        gcp: fakeProvider(undefined, {
+          provider: "gcp",
+          onObserveReadyPoolImageIdentity(observed) {
+            observations += 1;
+            expect(observed.region).toBe("us-west1-b");
+            expect(observed.providerProject).toBe("execution-project");
+            return typedGCPImage;
+          },
+        }),
+      });
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each route owns isolated provider evidence.
+      const identity = await typedGCPReadyPoolIdentity();
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each route owns isolated coordinator state.
+      const response = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/${action}`, {
+          headers: typedReadyPoolHeaders(),
+          body: {
+            leaseID: lease.id,
+            ...typedReadyPoolMetadata(),
+            ...(action === "identity" ? { cacheCompatibility: "node-22" } : { identity }),
+          },
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      expect(observations).toBe(1);
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.image).toEqual(typedGCPImage);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- consume each isolated route response.
+      const responseBody = await response.json();
+      expect(responseBody).toMatchObject(
+        action === "identity" ? { identity } : { entry: { identity } },
+      );
+    }
+  });
+
+  it("validates typed input and lease access before provider observation", async () => {
+    const storage = new MemoryStorage();
+    const lease = {
+      ...typedGCPReadyPoolLease(),
+      share: { users: { "viewer@example.com": "use" as const } },
+    };
+    storage.seed(`lease:${lease.id}`, lease);
+    let observations = 0;
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        onObserveReadyPoolImageIdentity() {
+          observations += 1;
+          return typedGCPImage;
+        },
+      }),
+    });
+    const identity = await typedGCPReadyPoolIdentity();
+    const cases = [
+      {
+        action: "identity",
+        headers: typedReadyPoolHeaders(),
+        body: {
+          leaseID: lease.id,
+          ...typedReadyPoolMetadata(),
+          cacheCompatibility: " node-22",
+        },
+        status: 400,
+      },
+      {
+        action: "identity",
+        headers: typedReadyPoolHeaders(),
+        body: {
+          leaseID: lease.id,
+          ...typedReadyPoolMetadata(),
+          repo: "\ud800",
+          cacheCompatibility: "node-22",
+        },
+        status: 400,
+      },
+      {
+        action: "register-identity",
+        headers: typedReadyPoolHeaders(),
+        body: { leaseID: lease.id, ...typedReadyPoolMetadata(), identity: { ...identity, id: "" } },
+        status: 400,
+      },
+      {
+        action: "identity",
+        headers: {
+          "x-crabbox-owner": "viewer@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: {
+          leaseID: lease.id,
+          ...typedReadyPoolMetadata(),
+          cacheCompatibility: "node-22",
+        },
+        status: 403,
+      },
+    ] as const;
+    for (const fixture of cases) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each request proves an admission boundary.
+      const response = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/${fixture.action}`, {
+          headers: fixture.headers,
+          body: fixture.body,
+        }),
+      );
+      expect(response.status).toBe(fixture.status);
+    }
+    for (const inactive of [
+      { state: "released" as const },
+      { expiresAt: new Date(Date.now() - 1_000).toISOString() },
+    ]) {
+      storage.seed(`lease:${lease.id}`, { ...lease, ...inactive });
+      // oxlint-disable-next-line eslint/no-await-in-loop -- state and expiry are separate admission checks.
+      const response = await fleet.fetch(
+        request("POST", "/v1/ready-pools/builders/identity", {
+          headers: typedReadyPoolHeaders(),
+          body: {
+            leaseID: lease.id,
+            ...typedReadyPoolMetadata(),
+            cacheCompatibility: "node-22",
+          },
+        }),
+      );
+      expect(response.status).toBe(409);
+    }
+    expect(observations).toBe(0);
+  });
+
+  it("maps provider observation failures to typed-route 502 responses", async () => {
+    const storage = new MemoryStorage();
+    const lease = typedGCPReadyPoolLease();
+    storage.seed(`lease:${lease.id}`, lease);
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        onObserveReadyPoolImageIdentity() {
+          throw new Error("permission denied");
+        },
+      }),
+    });
+    const identity = await typedGCPReadyPoolIdentity();
+    for (const action of ["identity", "register-identity"] as const) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- both typed entry points own the same provider failure contract.
+      const response = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/${action}`, {
+          headers: typedReadyPoolHeaders(),
+          body: {
+            leaseID: lease.id,
+            ...typedReadyPoolMetadata(),
+            ...(action === "identity" ? { cacheCompatibility: "node-22" } : { identity }),
+          },
+        }),
+      );
+      expect(response.status).toBe(502);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- consume each isolated route response.
+      expect(await response.json()).toMatchObject({
+        error: "ready_pool_image_observation_failed",
+        message: expect.stringContaining("provider immutable image observation failed"),
+      });
+    }
+  });
+
+  it("maps provider observation errors only after the final lease CAS", async () => {
+    const identity = await typedGCPReadyPoolIdentity();
+    for (const action of ["identity", "register-identity"] as const) {
+      const storage = new MemoryStorage();
+      const lease = typedGCPReadyPoolLease(
+        action === "identity" ? "cbx_000000000097" : "cbx_000000000098",
+      );
+      storage.seed(`lease:${lease.id}`, lease);
+      let writes = 0;
+      storage.beforePut = async () => {
+        writes += 1;
+      };
+      const fleet = testFleet(storage, {
+        gcp: fakeProvider(undefined, {
+          provider: "gcp",
+          onObserveReadyPoolImageIdentity() {
+            storage.seed(`lease:${lease.id}`, {
+              ...lease,
+              providerResourceID: "9223372036854775806",
+            });
+            throw new Error("permission denied");
+          },
+        }),
+      });
+
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each route owns isolated CAS state.
+      const response = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/${action}`, {
+          headers: typedReadyPoolHeaders(),
+          body: {
+            leaseID: lease.id,
+            ...typedReadyPoolMetadata(),
+            ...(action === "identity" ? { cacheCompatibility: "node-22" } : { identity }),
+          },
+        }),
+      );
+
+      expect(response.status).toBe(409);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- consume each isolated route response.
+      await expect(response.json()).resolves.toMatchObject({
+        error: "ready_pool_image_observation_conflict",
+      });
+      expect(writes).toBe(0);
+    }
+  });
+
+  it("fences every lease incarnation field before persisting observed GCP evidence", async () => {
+    const identity = await typedGCPReadyPoolIdentity();
+    const mutations: Array<[string, (lease: LeaseRecord) => void]> = [
+      ["createdAt", (lease) => (lease.createdAt = "2026-09-03T00:00:00.000Z")],
+      ["createAttemptGeneration", (lease) => (lease.createAttemptGeneration = "generation-2")],
+      ["runtimeAdapterRegistrationID", (lease) => (lease.runtimeAdapterRegistrationID = "rr_2")],
+      [
+        "createAttemptID",
+        (lease) => (lease.createAttemptID = "cat_00000000000000000000000000000002"),
+      ],
+      ["provider", (lease) => (lease.provider = "aws")],
+      ["cloudID", (lease) => (lease.cloudID = "changed-cloud-id")],
+      ["serverID", (lease) => (lease.serverID = 456)],
+      ["providerResourceID", (lease) => (lease.providerResourceID = "9223372036854775806")],
+      ["serverName", (lease) => (lease.serverName = "changed-server-name")],
+      ["slug", (lease) => (lease.slug = "changed-slug")],
+      [
+        "owner",
+        (lease) => {
+          lease.owner = "mallory@example.com";
+          lease.share = { users: { "alice@example.com": "manage" } };
+        },
+      ],
+      ["providerOwner", (lease) => (lease.providerOwner = "provider@example.com")],
+      ["workspaceID", (lease) => (lease.workspaceID = "changed-workspace")],
+      ["region", (lease) => (lease.region = "us-west1-c")],
+      ["providerProject", (lease) => (lease.providerProject = "changed-project")],
+      ["providerScope", (lease) => (lease.providerScope = "changed-scope")],
+      ["lifecycle", (lease) => (lease.lifecycle = "registered")],
+      ["target", (lease) => (lease.target = "windows")],
+      ["architecture", (lease) => (lease.architecture = "amd64")],
+      ["state", (lease) => (lease.state = "released")],
+      ["expiresAt", (lease) => (lease.expiresAt = new Date(Date.now() + 120_000).toISOString())],
+    ];
+    for (const action of ["identity", "register-identity"] as const) {
+      for (const [field, mutate] of mutations) {
+        const storage = new MemoryStorage();
+        const lease = typedGCPReadyPoolLease(
+          action === "identity" ? "cbx_000000000097" : "cbx_000000000098",
+        );
+        storage.seed(`lease:${lease.id}`, lease);
+        let writes = 0;
+        storage.beforePut = async () => {
+          writes += 1;
+        };
+        const fleet = testFleet(storage, {
+          gcp: fakeProvider(undefined, {
+            provider: "gcp",
+            onObserveReadyPoolImageIdentity() {
+              const changed = structuredClone(lease);
+              mutate(changed);
+              storage.seed(`lease:${lease.id}`, changed);
+              return typedGCPImage;
+            },
+          }),
+        });
+        // oxlint-disable-next-line eslint/no-await-in-loop -- each field owns an isolated CAS fixture.
+        const response = await fleet.fetch(
+          request("POST", `/v1/ready-pools/builders/${action}`, {
+            headers: typedReadyPoolHeaders(),
+            body: {
+              leaseID: lease.id,
+              ...typedReadyPoolMetadata(),
+              ...(action === "identity" ? { cacheCompatibility: "node-22" } : { identity }),
+            },
+          }),
+        );
+        expect({ action, field, status: response.status }).toEqual({ action, field, status: 409 });
+        // oxlint-disable-next-line eslint/no-await-in-loop -- consume each isolated CAS response.
+        expect(await response.json()).toMatchObject({
+          error: field === "state" ? "lease_not_active" : "ready_pool_image_observation_conflict",
+        });
+        expect(writes).toBe(0);
+      }
+    }
+  });
+
+  it("keeps equal evidence idempotent and rejects conflicting or missing observations", async () => {
+    const identity = await typedGCPReadyPoolIdentity();
+    for (const mode of ["equal", "different", "missing"] as const) {
+      for (const action of ["identity", "register-identity"] as const) {
+        const storage = new MemoryStorage();
+        const lease = typedGCPReadyPoolLease(
+          action === "identity" ? "cbx_000000000097" : "cbx_000000000098",
+        );
+        lease.image =
+          mode === "different" ? { ...typedGCPImage, id: "7123456789012345678" } : typedGCPImage;
+        storage.seed(`lease:${lease.id}`, lease);
+        let writes = 0;
+        storage.beforePut = async () => {
+          writes += 1;
+        };
+        const fleet = testFleet(storage, {
+          gcp: fakeProvider(undefined, {
+            provider: "gcp",
+            onObserveReadyPoolImageIdentity() {
+              return mode === "missing" ? undefined : typedGCPImage;
+            },
+          }),
+        });
+        // oxlint-disable-next-line eslint/no-await-in-loop -- each mode and route owns isolated state.
+        const response = await fleet.fetch(
+          request("POST", `/v1/ready-pools/builders/${action}`, {
+            headers: typedReadyPoolHeaders(),
+            body: {
+              leaseID: lease.id,
+              ...typedReadyPoolMetadata(),
+              ...(action === "identity" ? { cacheCompatibility: "node-22" } : { identity }),
+            },
+          }),
+        );
+        const expectedStatus = mode === "equal" ? 200 : 409;
+        const mayWritePoolEntry = mode === "equal" && action === "register-identity";
+        expect({
+          mode,
+          action,
+          status: response.status,
+          prohibitedWrites: mayWritePoolEntry ? 0 : writes,
+        }).toEqual({ mode, action, status: expectedStatus, prohibitedWrites: 0 });
+        expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.image).toEqual(lease.image);
+        // oxlint-disable-next-line eslint/no-await-in-loop -- consume each isolated route response.
+        const responseBody = (await response.json()) as { error?: string };
+        const expectedError =
+          mode === "equal"
+            ? undefined
+            : mode === "different"
+              ? "ready_pool_image_observation_conflict"
+              : action === "identity"
+                ? "unsupported_ready_pool_lease_identity"
+                : "ready_pool_lease_identity_mismatch";
+        expect(responseBody.error).toBe(expectedError);
+      }
+    }
+  });
+
+  it("reauthorizes typed identity requests after provider observation", async () => {
+    const identity = await typedGCPReadyPoolIdentity();
+    for (const observation of ["success", "error"] as const) {
+      for (const access of ["revoked", "downgraded"] as const) {
+        for (const action of ["identity", "register-identity"] as const) {
+          const storage = new MemoryStorage();
+          const lease = typedGCPReadyPoolLease(
+            action === "identity" ? "cbx_000000000097" : "cbx_000000000098",
+          );
+          lease.share = { users: { "builder@example.com": "manage" } };
+          storage.seed(`lease:${lease.id}`, lease);
+          let writes = 0;
+          storage.beforePut = async () => {
+            writes += 1;
+          };
+          const fleet = testFleet(storage, {
+            gcp: fakeProvider(undefined, {
+              provider: "gcp",
+              onObserveReadyPoolImageIdentity() {
+                storage.seed(`lease:${lease.id}`, {
+                  ...lease,
+                  share:
+                    access === "downgraded"
+                      ? { users: { "builder@example.com": "use" as const } }
+                      : undefined,
+                });
+                if (observation === "error") throw new Error("permission denied");
+                return typedGCPImage;
+              },
+            }),
+          });
+          // oxlint-disable-next-line eslint/no-await-in-loop -- each route and authority change owns isolated state.
+          const response = await fleet.fetch(
+            request("POST", `/v1/ready-pools/builders/${action}`, {
+              headers: {
+                "x-crabbox-owner": "builder@example.com",
+                "x-crabbox-org": "example-org",
+              },
+              body: {
+                leaseID: lease.id,
+                ...typedReadyPoolMetadata(),
+                ...(action === "identity" ? { cacheCompatibility: "node-22" } : { identity }),
+              },
+            }),
+          );
+          expect({ observation, access, action, status: response.status }).toEqual({
+            observation,
+            access,
+            action,
+            status: 403,
+          });
+          expect(writes).toBe(0);
+        }
+      }
+    }
+  });
+
+  it("requires register-identity to reload the lease after observation", async () => {
+    const storage = new MemoryStorage();
+    const lease = typedGCPReadyPoolLease();
+    lease.image = typedGCPImage;
+    storage.seed(`lease:${lease.id}`, lease);
+    let leaseReads = 0;
+    storage.beforeGet = async (key) => {
+      if (key !== `lease:${lease.id}`) return;
+      leaseReads += 1;
+      if (leaseReads === 3) await storage.delete(key);
+    };
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        onObserveReadyPoolImageIdentity() {
+          return typedGCPImage;
+        },
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/register-identity", {
+        headers: typedReadyPoolHeaders(),
+        body: {
+          leaseID: lease.id,
+          ...typedReadyPoolMetadata(),
+          identity: await typedGCPReadyPoolIdentity(),
+        },
+      }),
+    );
+
+    expect(response.status).toBe(404);
+    expect(storage.value(`ready-pool:v2:builders:${lease.id}`)).toBeUndefined();
+  });
+
+  it("never observes provider provenance on non-registration ready-pool routes", async () => {
+    const storage = new MemoryStorage();
+    const lease = typedGCPReadyPoolLease();
+    storage.seed(`lease:${lease.id}`, lease);
+    let observations = 0;
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        onObserveReadyPoolImageIdentity() {
+          observations += 1;
+          return typedGCPImage;
+        },
+      }),
+    });
+    const identity = await typedGCPReadyPoolIdentity();
+    const headers = typedReadyPoolHeaders();
+    const metadata = typedReadyPoolMetadata();
+    await fleet.fetch(request("GET", "/v1/ready-pools/builders/identity", { headers }));
+    await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/register", {
+        headers,
+        body: { leaseID: lease.id },
+      }),
+    );
+    for (const [action, body] of [
+      ["borrow-identity", { ...metadata, identity }],
+      ["return-identity", { leaseID: lease.id, identity, result: "ready" }],
+      ["heartbeat-identity", { leaseID: lease.id, borrowToken: "missing" }],
+      ["reconcile-identity", { ...metadata, identity, minReady: 1, maxReady: 1 }],
+    ] as const) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each route proves it stays observation-free.
+      await fleet.fetch(request("POST", `/v1/ready-pools/builders/${action}`, { headers, body }));
+    }
+    expect(observations).toBe(0);
   });
 
   it("persists canonical architecture on newly provisioned leases", async () => {
@@ -18589,6 +19995,504 @@ describe("fleet lease identity and idle", () => {
     expect(providerReleases).toBe(2);
     expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupError).toBeUndefined();
     expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.releaseDeletesServer).toBeUndefined();
+  });
+
+  it.each(["manual release", "expiry"] as const)(
+    "captures one legacy GCP cleanup identity before strict release for %s",
+    async (source) => {
+      const storage = new MemoryStorage();
+      const calls: string[] = [];
+      const rawID = "9223372036854775807";
+      const lease = legacyGCPLease({
+        serverID: Number(rawID),
+        ...(source === "expiry" ? { expiresAt: new Date(Date.now() - 60_000).toISOString() } : {}),
+      });
+      const fleet = testFleet(storage, {
+        gcp: fakeProvider(
+          undefined,
+          {
+            provider: "gcp",
+            onObserveLegacyCleanupIdentity(observed) {
+              calls.push("GET");
+              expect(observed.providerResourceID).toBeUndefined();
+              expect(storage.value<string[]>(`legacy-provider-mutation:${lease.id}`)).toHaveLength(
+                1,
+              );
+              return { providerResourceID: rawID };
+            },
+            onReleaseLease(observed, context) {
+              calls.push("CAS");
+              expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.providerResourceID).toBe(
+                rawID,
+              );
+              calls.push("GET");
+              expect(observed.providerResourceID).toBe(rawID);
+              expect(context).toBeUndefined();
+            },
+          },
+          async () => {
+            calls.push("DELETE");
+          },
+        ),
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      let releaseStatus = 200;
+      if (source === "manual release") {
+        releaseStatus = (
+          await fleet.fetch(
+            request("POST", `/v1/leases/${lease.id}/release`, {
+              headers: {
+                "x-crabbox-owner": lease.owner,
+                "x-crabbox-org": "example-org",
+              },
+              body: { delete: true },
+            }),
+          )
+        ).status;
+      }
+      expect(releaseStatus).toBe(200);
+
+      await fleet.alarm();
+
+      expect(calls).toEqual(["GET", "CAS", "GET", "DELETE"]);
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+        state: source === "expiry" ? "expired" : "released",
+        providerResourceID: rawID,
+      });
+    },
+  );
+
+  it.each(["manual release", "expiry"] as const)(
+    "finishes legacy GCP %s cleanup on unchanged exact absence",
+    async (source) => {
+      const storage = new MemoryStorage();
+      const lease = legacyGCPLease(
+        source === "expiry" ? { expiresAt: new Date(Date.now() - 60_000).toISOString() } : {},
+      );
+      let releases = 0;
+      const fleet = testFleet(storage, {
+        gcp: fakeProvider(undefined, {
+          provider: "gcp",
+          onObserveLegacyCleanupIdentity() {
+            return undefined;
+          },
+          onReleaseLease() {
+            releases += 1;
+          },
+        }),
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      let releaseStatus = 200;
+      if (source === "manual release") {
+        releaseStatus = (
+          await fleet.fetch(
+            request("POST", `/v1/leases/${lease.id}/release`, {
+              headers: {
+                "x-crabbox-owner": lease.owner,
+                "x-crabbox-org": "example-org",
+              },
+              body: { delete: true },
+            }),
+          )
+        ).status;
+      }
+      expect(releaseStatus).toBe(200);
+
+      await fleet.alarm();
+
+      expect(releases).toBe(0);
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+        state: source === "expiry" ? "expired" : "released",
+      });
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.providerResourceID).toBeUndefined();
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupStartedAt).toBeUndefined();
+    },
+  );
+
+  it.each(
+    (["manual release", "expiry"] as const).flatMap((source) =>
+      (["scope", "server id", "cleanup claim", "provisioning owner"] as const).map((drift) => ({
+        source,
+        drift,
+      })),
+    ),
+  )(
+    "blocks $source finalization when exact absence races $drift drift",
+    async ({ source, drift }) => {
+      const storage = new MemoryStorage();
+      const lease = legacyGCPLease(
+        source === "expiry" ? { expiresAt: new Date(Date.now() - 60_000).toISOString() } : {},
+      );
+      let releases = 0;
+      const fleet = testFleet(storage, {
+        gcp: fakeProvider(undefined, {
+          provider: "gcp",
+          onObserveLegacyCleanupIdentity(observed) {
+            if (drift === "provisioning owner") {
+              const now = Date.now();
+              storage.seed<LeaseProvisioningOperation>(provisioningOperationKey(lease.id), {
+                schema: 1,
+                leaseID: lease.id,
+                operationID: lease.id,
+                generation: "replacement-generation",
+                scope: "gcp:test",
+                owner: observed.owner,
+                org: observed.org,
+                provider: "gcp",
+                createdAt: now,
+                deadline: now + 60_000,
+                revision: 0,
+                step: {
+                  phase: "provisioning",
+                  attempt: 0,
+                  state: {},
+                  nextWake: now + 60_000,
+                },
+              });
+              return undefined;
+            }
+            const changed = structuredClone(observed);
+            if (drift === "scope") {
+              changed.region = "us-central1-b";
+            } else if (drift === "server id") {
+              changed.serverID += 1;
+            } else {
+              changed.cleanupStartedAt = new Date(Date.now() + 1_000).toISOString();
+              changed.cleanupClaimExpiresAt = new Date(Date.now() + 61_000).toISOString();
+            }
+            changed.updatedAt = new Date(Date.now() + 2_000).toISOString();
+            storage.seed(`lease:${lease.id}`, changed);
+            return undefined;
+          },
+          onReleaseLease() {
+            releases += 1;
+          },
+        }),
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      let releaseStatus = 200;
+      if (source === "manual release") {
+        releaseStatus = (
+          await fleet.fetch(
+            request("POST", `/v1/leases/${lease.id}/release`, {
+              headers: {
+                "x-crabbox-owner": lease.owner,
+                "x-crabbox-org": "example-org",
+              },
+              body: { delete: true },
+            }),
+          )
+        ).status;
+      }
+      expect(releaseStatus).toBe(200);
+
+      await fleet.alarm();
+
+      const current = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+      const finalized =
+        source === "expiry"
+          ? current.state === "expired"
+          : current.cleanupStartedAt === undefined && current.releaseDeletesServer === undefined;
+      expect({
+        releases,
+        providerResourceID: current.providerResourceID,
+        finalized,
+        pending: Boolean(current.cleanupStartedAt || current.cleanupError),
+      }).toEqual({
+        releases: 0,
+        providerResourceID: undefined,
+        finalized: false,
+        pending: true,
+      });
+    },
+  );
+
+  it("retains a captured legacy GCP identity when the mandatory second lookup is absent", async () => {
+    const storage = new MemoryStorage();
+    const lease = legacyGCPLease();
+    const provider = fakeProvider(undefined, {
+      provider: "gcp",
+      onObserveLegacyCleanupIdentity() {
+        return { providerResourceID: "123" };
+      },
+    });
+    let strictLookups = 0;
+    provider.releaseLease = async (observed) => {
+      strictLookups += 1;
+      expect(observed.providerResourceID).toBe("123");
+    };
+    const fleet = testFleet(storage, { gcp: provider });
+    storage.seed(`lease:${lease.id}`, lease);
+    await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/release`, {
+        headers: {
+          "x-crabbox-owner": lease.owner,
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: true },
+      }),
+    );
+
+    await fleet.alarm();
+
+    expect(strictLookups).toBe(1);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+      state: "released",
+      providerResourceID: "123",
+    });
+  });
+
+  it("retains captured legacy GCP identity when strict release observes a replacement", async () => {
+    const storage = new MemoryStorage();
+    const lease = legacyGCPLease();
+    let deletes = 0;
+    const provider = fakeProvider(
+      undefined,
+      {
+        provider: "gcp",
+        onObserveLegacyCleanupIdentity() {
+          return { providerResourceID: "123" };
+        },
+      },
+      async () => {
+        deletes += 1;
+      },
+    );
+    provider.releaseLease = async (observed) => {
+      expect(observed.providerResourceID).toBe("123");
+      throw new ProviderResourceUnresolvedError("GCP instance replacement does not match");
+    };
+    const fleet = testFleet(storage, { gcp: provider });
+    storage.seed(`lease:${lease.id}`, lease);
+    await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/release`, {
+        headers: {
+          "x-crabbox-owner": lease.owner,
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: true },
+      }),
+    );
+
+    await fleet.alarm();
+
+    expect(deletes).toBe(0);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+      providerResourceID: "123",
+      provisioningResourceMayExist: true,
+      cleanupError: "GCP instance replacement does not match",
+    });
+  });
+
+  it.each([
+    { name: "cleanup claim drift", capture: undefined, field: "cleanupStartedAt" },
+    { name: "lease incarnation drift", capture: undefined, field: "serverID" },
+    { name: "equal concurrent capture", capture: "123", field: undefined },
+    { name: "different concurrent capture", capture: "124", field: undefined },
+    { name: "malformed concurrent capture", capture: "123 ", field: undefined },
+  ] as const)("fences legacy GCP identity capture against $name", async ({ capture, field }) => {
+    const storage = new MemoryStorage();
+    const lease = legacyGCPLease();
+    let releases = 0;
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        onObserveLegacyCleanupIdentity(observed) {
+          const changed = structuredClone(observed);
+          if (field === "cleanupStartedAt") {
+            changed.cleanupStartedAt = new Date(Date.now() + 1_000).toISOString();
+            changed.cleanupClaimExpiresAt = new Date(Date.now() + 61_000).toISOString();
+          } else if (field === "serverID") {
+            changed.serverID = 124;
+          } else {
+            changed.providerResourceID = capture;
+          }
+          changed.updatedAt = new Date(Date.now() + 2_000).toISOString();
+          storage.seed(`lease:${lease.id}`, changed);
+          return { providerResourceID: "123" };
+        },
+        onReleaseLease() {
+          releases += 1;
+        },
+      }),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/release`, {
+        headers: {
+          "x-crabbox-owner": lease.owner,
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: true },
+      }),
+    );
+
+    await fleet.alarm();
+
+    expect(releases).toBe(capture === "123" ? 1 : 0);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.providerResourceID).toBe(capture);
+  });
+
+  it.each(["before capture", "after capture"] as const)(
+    "retries transient legacy GCP cleanup failure %s without rebinding identity",
+    async (failurePoint) => {
+      const storage = new MemoryStorage();
+      const rawID = "9223372036854775807";
+      const lease = legacyGCPLease({ serverID: Number(rawID) });
+      let observations = 0;
+      let releases = 0;
+      const provider = fakeProvider(undefined, {
+        provider: "gcp",
+        onObserveLegacyCleanupIdentity() {
+          observations += 1;
+          if (failurePoint === "before capture" && observations === 1) {
+            throw new Error("GCP lookup temporarily unavailable");
+          }
+          return { providerResourceID: rawID };
+        },
+      });
+      provider.releaseLease = async (observed) => {
+        releases += 1;
+        expect(observed.providerResourceID).toBe(rawID);
+        if (failurePoint === "after capture" && releases === 1) {
+          throw new Error("GCP strict lookup temporarily unavailable");
+        }
+      };
+      const fleet = testFleet(storage, { gcp: provider });
+      storage.seed(`lease:${lease.id}`, lease);
+      const headers = {
+        "x-crabbox-owner": lease.owner,
+        "x-crabbox-org": "example-org",
+      };
+      await fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/release`, {
+          headers,
+          body: { delete: true },
+        }),
+      );
+
+      await fleet.alarm();
+
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.providerResourceID).toBe(
+        failurePoint === "after capture" ? rawID : undefined,
+      );
+      const retry = await fleet.fetch(
+        request("POST", `/v1/admin/leases/${lease.id}/delete`, {
+          headers: { ...headers, "x-crabbox-admin": "true" },
+        }),
+      );
+      expect(retry.status).toBe(200);
+      expect(observations).toBe(failurePoint === "before capture" ? 2 : 1);
+      expect(releases).toBe(failurePoint === "before capture" ? 1 : 2);
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.providerResourceID).toBe(rawID);
+    },
+  );
+
+  it.each([
+    {
+      name: "registered lease",
+      lease: legacyGCPLease({
+        lifecycle: "registered",
+        expiresAt: new Date(Date.now() - 60_000).toISOString(),
+      }),
+      release: false,
+    },
+    {
+      name: "provisioning lease",
+      lease: legacyGCPLease({
+        state: "provisioning",
+        provisioningRequestStartedAt: new Date(Date.now() - 60_000).toISOString(),
+        expiresAt: new Date(Date.now() - 1_000).toISOString(),
+      }),
+      release: true,
+    },
+    {
+      name: "uncertain provisioning metadata",
+      lease: legacyGCPLease({
+        provisioningResourceMayExist: true,
+        expiresAt: new Date(Date.now() - 1_000).toISOString(),
+      }),
+      release: true,
+    },
+  ])("does not observe legacy cleanup identity for $name", async ({ lease, release }) => {
+    const storage = new MemoryStorage();
+    let observations = 0;
+    let releases = 0;
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        onObserveLegacyCleanupIdentity() {
+          observations += 1;
+          return { providerResourceID: "123" };
+        },
+        onReleaseLease() {
+          releases += 1;
+        },
+      }),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+
+    await fleet.alarm();
+
+    expect(observations).toBe(0);
+    expect(releases).toBe(release ? 1 : 0);
+  });
+
+  it("leaves non-capable providers and provisioning-owned leases on their existing paths", async () => {
+    const storage = new MemoryStorage();
+    const ordinary = testLease({
+      id: "cbx_0000000000b1",
+      expiresAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    const owned = legacyGCPLease({
+      id: "cbx_0000000000b2",
+      cloudID: "crabbox-owned",
+      serverName: "crabbox-owned",
+      expiresAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    const now = Date.now();
+    const operation: LeaseProvisioningOperation = {
+      schema: 1,
+      leaseID: owned.id,
+      operationID: owned.id,
+      generation: "active-generation",
+      scope: "gcp:test",
+      owner: owned.owner,
+      org: owned.org,
+      provider: "gcp",
+      createdAt: now,
+      deadline: now + 60_000,
+      revision: 0,
+      step: {
+        phase: "provisioning",
+        attempt: 0,
+        state: {},
+        nextWake: now + 60_000,
+      },
+    };
+    let ordinaryReleases = 0;
+    let gcpObservations = 0;
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(undefined, {}, async () => {
+        ordinaryReleases += 1;
+      }),
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        onObserveLegacyCleanupIdentity() {
+          gcpObservations += 1;
+          return { providerResourceID: "123" };
+        },
+      }),
+    });
+    storage.seed(`lease:${ordinary.id}`, ordinary);
+    storage.seed(`lease:${owned.id}`, owned);
+    storage.seed(provisioningOperationKey(owned.id), operation);
+
+    await fleet.alarm();
+
+    expect(ordinaryReleases).toBe(1);
+    expect(gcpObservations).toBe(0);
+    expect(storage.value<LeaseRecord>(`lease:${owned.id}`)).toEqual(owned);
   });
 
   it("does not queue provider cleanup for a no-delete release", async () => {
@@ -23616,6 +25520,7 @@ describe("fleet lease identity and idle", () => {
               cloudID: "crabbox-canceled-late",
               region: "us-central1-b",
               providerProject: "cleanup-project",
+              providerResourceID: "9223372036854775807",
             },
             new Error("cleanup unavailable"),
           );
@@ -23659,6 +25564,7 @@ describe("fleet lease identity and idle", () => {
       cloudID: "crabbox-canceled-late",
       region: "us-central1-b",
       providerProject: "cleanup-project",
+      providerResourceID: "9223372036854775807",
       releaseDeletesServer: true,
       provisioningResourceMayExist: true,
       cleanupRetryAt: expect.any(String),
@@ -25010,6 +26916,30 @@ describe("fleet lease identity and idle", () => {
     const { lease } = (await create.json()) as { lease: LeaseRecord };
     expect(lease.providerProject).toBe("request-project");
     expect(lease.region).toBe("us-central1-a");
+  });
+
+  it("defaults only the GCP project during lease preparation", async () => {
+    const env = {
+      CRABBOX_GCP_PROJECT: "operator-project",
+      CRABBOX_GCP_ZONE: "us-central1-a",
+      GCP_CLIENT_EMAIL: "coordinator@example-project.iam.gserviceaccount.com",
+      GCP_PRIVATE_KEY: "test-private-key",
+    } as Env;
+    const prepared = await new GCPProvider(env).prepareLeaseConfig(
+      leaseConfig({
+        provider: "gcp",
+        gcpImage: "projects/source-project/global/images/runner-v3",
+        gcpSnapshot: "checkpoint",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    );
+
+    expect(prepared).toMatchObject({
+      gcpProject: "operator-project",
+      gcpImage: "projects/source-project/global/images/runner-v3",
+      gcpSnapshot: "checkpoint",
+    });
+    expect(prepared.selectedImage).toBeUndefined();
   });
 
   it("records requested type and provider fallback attempts on resolved leases", async () => {
@@ -41040,6 +42970,7 @@ function fakeProvider(
   result: {
     provider?: "hetzner" | "aws" | "azure" | "gcp" | "daytona";
     serverType?: string;
+    providerResourceID?: string;
     hostID?: string;
     cloudID?: string;
     providerKey?: string;
@@ -41093,6 +43024,16 @@ function fakeProvider(
       context: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] },
     ) => LeaseRecord | undefined;
     onRefreshLeaseAccessForResolution?: (lease: LeaseRecord) => LeaseRecord | undefined;
+    onObserveReadyPoolImageIdentity?: (
+      lease: LeaseRecord,
+    ) => Promise<LeaseImageIdentity | undefined> | LeaseImageIdentity | undefined;
+    onObserveLegacyCleanupIdentity?: (
+      lease: LeaseRecord,
+      context?: { resourceIdentity?: string },
+    ) =>
+      | Promise<{ providerResourceID: string } | undefined>
+      | { providerResourceID: string }
+      | undefined;
     onReconcileLeaseAccess?: (
       lease: LeaseRecord,
       context: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] },
@@ -41126,6 +43067,9 @@ function fakeProvider(
     ) => Promise<void> | void;
     onDeleteOwnedServer?: (lease: LeaseRecord) => Promise<void> | void;
     onRecoverServer?: (
+      lease: LeaseRecord,
+    ) => Promise<ProviderMachine | undefined> | ProviderMachine | undefined;
+    onRecoverUnboundProvisioningResource?: (
       lease: LeaseRecord,
     ) => Promise<ProviderMachine | undefined> | ProviderMachine | undefined;
   } = {},
@@ -41183,8 +43127,28 @@ function fakeProvider(
       : {}),
     ...(result.provider === "gcp"
       ? {
+          readyPoolImageIdentity(lease: LeaseRecord) {
+            return new GCPProvider({} as Env).readyPoolImageIdentity(lease);
+          },
           ownershipLabelValue(value: string) {
             return gcpProviderLabelValue(value);
+          },
+        }
+      : {}),
+    ...(result.onObserveReadyPoolImageIdentity
+      ? {
+          async observeReadyPoolImageIdentity(lease: LeaseRecord) {
+            return await result.onObserveReadyPoolImageIdentity?.(lease);
+          },
+        }
+      : {}),
+    ...(result.onObserveLegacyCleanupIdentity
+      ? {
+          async observeLegacyCleanupIdentity(
+            lease: LeaseRecord,
+            context?: { resourceIdentity?: string },
+          ) {
+            return await result.onObserveLegacyCleanupIdentity?.(lease, context);
           },
         }
       : {}),
@@ -41192,6 +43156,13 @@ function fakeProvider(
       ? {
           async recoverServer(lease: LeaseRecord) {
             return await result.onRecoverServer?.(lease);
+          },
+        }
+      : {}),
+    ...(result.onRecoverUnboundProvisioningResource
+      ? {
+          async recoverUnboundProvisioningResource(lease: LeaseRecord) {
+            return await result.onRecoverUnboundProvisioningResource?.(lease);
           },
         }
       : {}),
@@ -41309,6 +43280,7 @@ function fakeProvider(
         server: {
           provider: result.provider ?? "hetzner",
           id: 123,
+          ...(result.providerResourceID ? { providerResourceID: result.providerResourceID } : {}),
           cloudID: result.cloudID ?? "123",
           ...(result.providerKey ? { providerKey: result.providerKey } : {}),
           name: `crabbox-${slug}`,
@@ -41982,6 +43954,51 @@ function typedReadyPoolLease(): LeaseRecord {
   });
 }
 
+function typedGCPReadyPoolLease(id = "cbx_000000000098"): LeaseRecord {
+  const lease = testLease({
+    id,
+    provider: "gcp",
+    target: "linux",
+    architecture: "arm64",
+    owner: "alice@example.com",
+    org: "example-org",
+    cloudID: `crabbox-${id}`,
+    serverID: Number("9223372036854775807"),
+    providerResourceID: "9223372036854775807",
+    serverName: `crabbox-${id}`,
+    region: "us-west1-b",
+    providerProject: "execution-project",
+    expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+  });
+  delete lease.image;
+  return lease;
+}
+
+const typedGCPImage: LeaseImageIdentity = {
+  id: "8123456789012345678",
+  source: "explicit",
+  provider: "gcp",
+  kind: "gcp-image",
+  region: "us-west1-b",
+  sourceID: "projects/source-project/global/images/runner-v3",
+};
+
+async function typedGCPReadyPoolIdentity(
+  cacheCompatibility = "node-22",
+): Promise<ReadyPoolIdentityV1> {
+  return {
+    schema: "crabbox-ready-pool-identity/v1",
+    image: {
+      provider: "gcp",
+      scope: "projects/source-project/global/images",
+      id: typedGCPImage.id,
+    },
+    architecture: "arm64",
+    seedDigest: await readyPoolSeedDigestV1(typedReadyPoolMetadata()),
+    cacheCompatibility,
+  };
+}
+
 async function typedReadyPoolIdentity(
   cacheCompatibility = "node-22",
 ): Promise<ReadyPoolIdentityV1> {
@@ -42021,6 +44038,25 @@ function testLease(overrides: Partial<LeaseRecord>): LeaseRecord {
     createdAt: "2026-05-01T00:00:00.000Z",
     updatedAt: "2026-05-01T00:00:00.000Z",
     expiresAt: "2026-05-01T01:30:00.000Z",
+    ...overrides,
+  });
+}
+
+function legacyGCPLease(overrides: Partial<LeaseRecord> = {}): LeaseRecord {
+  return testLease({
+    id: "cbx_abcdef123456",
+    slug: "blue-lobster",
+    provider: "gcp",
+    cloudID: "crabbox-blue-lobster",
+    region: "us-central1-a",
+    providerProject: "default-project",
+    owner: "alice@example.com",
+    org: "example-org",
+    serverID: 123,
+    providerResourceID: undefined,
+    serverName: "crabbox-blue-lobster",
+    keep: false,
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
     ...overrides,
   });
 }
