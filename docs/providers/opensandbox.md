@@ -148,15 +148,22 @@ crabbox run --provider opensandbox --allow-env API_TOKEN -- printenv API_TOKEN
 4. The command runs through OpenSandbox execd with `cwd` set to the workdir and
    `envs` carrying forwarded environment values. The remote exit code is
    mirrored by Crabbox.
-5. On release the sandbox is deleted unless `--keep` was set.
+5. A newly created sandbox is deleted after the run unless `--keep` was set;
+   reused sandboxes are retained.
    `--keep-on-failure` retains a newly created sandbox after a sync, workspace
-   setup, or command failure and prints rerun/stop guidance. Best-effort
-   cleanup calls are bounded; failed cleanup reports the sandbox ID for manual
-   provider-side cleanup.
+   setup, or command failure and prints rerun/stop guidance. Cleanup is bounded;
+   failure retains the recovery claim and fails an otherwise successful run.
+   An existing command failure keeps its original exit code even when cleanup
+   also fails. Timing and session reports are finalized after cleanup.
 6. `cleanup` removes retained sandboxes after their local sliding idle timeout.
    Cleanup rechecks ownership metadata and serializes with lease reuse.
    Missing-or-inaccessible claims are preserved unless `forgetMissing` is
    explicitly enabled.
+
+Before reuse, Crabbox verifies ownership and repository authorization, checks
+the remaining absolute TTL, resumes if needed, and checks the budget again
+before updating the claim. Failed admission retains the authorized session
+without refreshing activity or printing a rerun hint for an unusable sandbox.
 
 ## Capabilities
 
