@@ -1227,9 +1227,15 @@ export class GCPClient {
     try {
       const response = await this.fetcher(metadataTokenURL, {
         headers: { "Metadata-Flavor": "Google" },
-        redirect: "error",
+        redirect: "manual",
         signal: controller.signal,
       });
+      // workerd supports manual redirects, not Fetch's error mode. Never follow metadata elsewhere.
+      if (response.status >= 300 && response.status < 400) {
+        throw new GCPMetadataTokenTrustError(
+          `gcp metadata token: redirect rejected (http ${response.status})`,
+        );
+      }
       if (response.headers.get("Metadata-Flavor") !== "Google") {
         throw new GCPMetadataTokenTrustError(
           "gcp metadata token: response missing Metadata-Flavor: Google",

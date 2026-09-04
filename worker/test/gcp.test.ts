@@ -1065,8 +1065,50 @@ describe("gcp provider", () => {
     await expect(client.listCrabboxServers()).resolves.toEqual([]);
     expect(calls[0]?.url).toContain("metadata.google.internal");
     expect(calls[0]?.headers.get("Metadata-Flavor")).toBe("Google");
-    expect(calls[0]?.redirect).toBe("error");
+    expect(calls[0]?.redirect).toBe("manual");
     expect(calls[1]?.headers.get("Authorization")).toBe("Bearer metadata-token");
+  });
+
+  it.each([300, 301, 302, 303, 307, 308, 399])(
+    "rejects metadata HTTP %s without following, caching, or retrying it",
+    async (status) => {
+      const client = new GCPClient({ ...env, CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata" });
+      const requests: string[] = [];
+      client.fetcher = async (input) => {
+        requests.push(String(input));
+        return metadataJSON(
+          { access_token: "redirect-token", expires_in: 3600 },
+          {
+            status,
+            headers: { Location: "https://untrusted.example/metadata" },
+          },
+        );
+      };
+      await expect(client.listCrabboxServers()).rejects.toThrow(
+        `gcp metadata token: redirect rejected (http ${status})`,
+      );
+      await expect(client.listCrabboxServers()).rejects.toThrow(
+        `gcp metadata token: redirect rejected (http ${status})`,
+      );
+      expect(requests).toEqual(
+        Array(2).fill(
+          "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+        ),
+      );
+    },
+  );
+
+  it("rejects metadata redirects before reading the marker or response body", async () => {
+    const client = new GCPClient({ ...env, CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata" });
+    const response = new Response(null, { status: 304 });
+    const body = vi.spyOn(response, "text").mockRejectedValue(new Error("must not read body"));
+    const fetcher = vi.fn<typeof fetch>(async () => response);
+    client.fetcher = fetcher;
+    await expect(client.listCrabboxServers()).rejects.toThrow(
+      "gcp metadata token: redirect rejected (http 304)",
+    );
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(body).not.toHaveBeenCalled();
   });
 
   it("retries transient metadata token failures", async () => {
