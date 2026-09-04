@@ -311,7 +311,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		if req.GuardedRemoteCleanup != nil {
 			lease := req.Lease
 			lease.Server = boxToServer(cfg, box, claim.LeaseID, claim.Slug, true)
-			if target, err := boxSSHTarget(cfg, box); err == nil {
+			if target, err := boxSSHTarget(cfg, box, claim.LeaseID); err == nil {
 				lease.SSH = target
 				req.GuardedRemoteCleanup(ctx, lease)
 			}
@@ -339,7 +339,7 @@ func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, 
 
 func (b *backend) leaseFromBox(ctx context.Context, cfg core.Config, box boxData, leaseID, slug string, keep, waitSSH bool) (core.LeaseTarget, error) {
 	server := boxToServer(cfg, box, leaseID, slug, keep)
-	target, err := boxSSHTarget(cfg, box)
+	target, err := boxSSHTarget(cfg, box, leaseID)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -508,7 +508,7 @@ func statusFromBox(cfg core.Config, box boxData, leaseID, slug string) core.Stat
 	}
 }
 
-func boxSSHTarget(cfg core.Config, box boxData) (core.SSHTarget, error) {
+func boxSSHTarget(cfg core.Config, box boxData, leaseID string) (core.SSHTarget, error) {
 	host, port, err := boxSSHConnection(box)
 	if err != nil {
 		return core.SSHTarget{}, err
@@ -517,7 +517,7 @@ func boxSSHTarget(cfg core.Config, box boxData) (core.SSHTarget, error) {
 	if user == "" {
 		return core.SSHTarget{}, core.Exit(5, "ascii-box %s is missing SSH user", box.ID)
 	}
-	return core.SSHTarget{
+	target := core.SSHTarget{
 		User:            user,
 		Host:            host,
 		Key:             boxSSHKey(cfg),
@@ -526,7 +526,11 @@ func boxSSHTarget(cfg core.Config, box boxData) (core.SSHTarget, error) {
 		NetworkKind:     networkPublic,
 		NoControlMaster: true,
 		ReadyCheck:      "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null",
-	}, nil
+	}
+	if err := core.UseLeaseKnownHosts(&target, leaseID); err != nil {
+		return core.SSHTarget{}, err
+	}
+	return target, nil
 }
 
 func boxSSHConnection(box boxData) (string, string, error) {

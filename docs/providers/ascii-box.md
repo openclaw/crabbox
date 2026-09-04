@@ -154,6 +154,14 @@ Deletion-wait failures retain the exact operation and its last validated status
 in the error. Native command capture is capped at 8 MiB per stream; oversized or
 incomplete output is an error, never evidence of completed deletion.
 
+SSH host trust is separate from the shared native authentication key. Readiness,
+reuse, and guarded teardown use a protected `known_hosts` file for the exact
+Crabbox lease, so a new Box may reuse an IP or gateway endpoint without inheriting
+another lease's host key. A changed host key within the same lease is still
+rejected. Existing leases from before lease-scoped trust enroll on their first
+connection with the new client; Crabbox does not copy or remove pins from the
+old provider-wide file.
+
 If this release observes a valid native deletion acceptance but cannot finish
 waiting because of a timeout, cancellation, or operation lookup failure, it
 durably records the exact operation ID and its claim binding before returning
