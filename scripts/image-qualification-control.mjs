@@ -260,6 +260,40 @@ export function verifyManifest(artifactDir, expectedCandidate, expectedWorkflow)
   return manifest;
 }
 
+export function verifyPublisherContract(source) {
+  if (typeof source !== "string" || Buffer.byteLength(source) > 256 * 1024) {
+    throw new Error("candidate publisher source is invalid");
+  }
+  const requiredPatterns = [
+    /CRABBOX_BIN="\$\{CRABBOX_BIN:-/,
+    /trap cleanup EXIT/,
+    /rollback_promoted_image\(\)/,
+    /--expected-current-image "\$current_id".*--expected-current-revision "\$current_revision".*--retire-expected-catalog "\$rollback_image"/,
+    /promote_args=\(image promote .*--expected-current-image capture\)/,
+    /restored previous default image=%s/,
+  ];
+  if (requiredPatterns.some((pattern) => !pattern.test(source))) {
+    throw new Error("candidate publisher lacks the transactional rollback contract");
+  }
+  const ordered = [
+    'run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$candidate_lease"',
+    'candidate_lease=""',
+    "rollback_pending=1",
+    'run_json_tee "$promotion_log" "$CRABBOX_BIN" "${promote_args[@]}"',
+    'promoted_lease="$(warmup promoted)"',
+    'smoke "$promoted_lease"',
+    "rollback_pending=0",
+  ];
+  let cursor = 0;
+  for (const marker of ordered) {
+    const next = source.indexOf(marker, cursor);
+    if (next === -1) {
+      throw new Error("candidate publisher rollback ordering is not admissible");
+    }
+    cursor = next + marker.length;
+  }
+}
+
 class Cloudflare {
   constructor(accountId, token) {
     this.accountId = accountId;
@@ -497,6 +531,9 @@ async function deploy() {
     artifactDir,
     identityCheck.candidateSha,
     identityCheck.workflowSha,
+  );
+  verifyPublisherContract(
+    fs.readFileSync(path.join(artifactDir, "candidate/scripts/mint-aws-devtools-image.sh"), "utf8"),
   );
   const runId = `image-qualification-${required("GITHUB_RUN_ID", /^[1-9][0-9]*$/)}-${required("GITHUB_RUN_ATTEMPT", /^[1-9][0-9]*$/)}`;
   const candidateWorker = `crabbox-${runId}`;
@@ -916,6 +953,18 @@ async function main() {
     appendOutput("candidate_sha", result.candidateSha);
     return;
   }
+  if (command === "admit") {
+    const result = await verifyCandidateIdentity({ artifact: true });
+    const artifactDir = path.resolve(required("QUALIFICATION_ARTIFACT_DIR"));
+    verifyManifest(artifactDir, result.candidateSha, result.workflowSha);
+    verifyPublisherContract(
+      fs.readFileSync(
+        path.join(artifactDir, "candidate/scripts/mint-aws-devtools-image.sh"),
+        "utf8",
+      ),
+    );
+    return;
+  }
   if (command === "manifest") {
     createManifest(
       path.resolve(args[0]),
@@ -945,7 +994,9 @@ async function main() {
     if (result.result === "failed") throw new Error(result.failure);
     return;
   }
-  throw new Error("usage: image-qualification-control.mjs authorize|manifest|deploy|finalize|reap");
+  throw new Error(
+    "usage: image-qualification-control.mjs authorize|admit|manifest|deploy|finalize|reap",
+  );
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

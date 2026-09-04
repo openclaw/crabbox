@@ -33,6 +33,16 @@ test("workflow isolates candidate execution from protected credentials", () => {
   assert.match(workflow, /candidate_artifact_id/);
   assert.match(workflow, /github-token: \$\{\{ github\.token \}\}/);
   assert.match(workflow, /path: \$\{\{ runner\.temp \}\}\/image-qualification-candidate/);
+  const admitJob = workflow.slice(
+    workflow.indexOf("  admit:"),
+    workflow.indexOf("  deploy-enroll:"),
+  );
+  assert.match(admitJob, /image-qualification-control\.mjs admit/);
+  assert.doesNotMatch(
+    admitJob,
+    /CLOUDFLARE_API_TOKEN|AWS_ACCESS_KEY_ID|QUALIFICATION_CONTROLLER_TOKEN/,
+  );
+  assert.match(workflow, /deploy-enroll:[\s\S]*needs: \[authorize, admit\]/);
   const executeJob = workflow.slice(
     workflow.indexOf("  execute:"),
     workflow.indexOf("  finalize:"),
@@ -130,6 +140,46 @@ test("manifest binds exact candidate bytes and rejects extras", async () => {
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
+});
+
+test("publisher admission requires transactional rollback before paid deployment", async () => {
+  const module = await import(
+    `${pathToFileURL(path.join(root, "scripts/image-qualification-control.mjs"))}?admit=${Date.now()}`
+  );
+  const admissible = `
+CRABBOX_BIN="\${CRABBOX_BIN:-$ROOT/bin/crabbox}"
+cleanup() {
+  rollback_promoted_image "$promotion_log"
+}
+trap cleanup EXIT
+rollback_promoted_image() {
+  args+=(--expected-current-image "$current_id" --expected-current-revision "$current_revision" --retire-expected-catalog "$rollback_image")
+  printf 'promoted-image smoke failed; restored previous default image=%s\\n' "$rollback_image"
+}
+run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$candidate_lease"
+candidate_lease=""
+promote_args=(image promote --target "$target" --json --expected-current-image capture)
+rollback_pending=1
+run_json_tee "$promotion_log" "$CRABBOX_BIN" "\${promote_args[@]}"
+promoted_lease="$(warmup promoted)"
+smoke "$promoted_lease"
+rollback_pending=0
+`;
+  assert.doesNotThrow(() => module.verifyPublisherContract(admissible));
+  assert.throws(
+    () =>
+      module.verifyPublisherContract(
+        admissible.replace("--expected-current-image capture", "ami-candidate"),
+      ),
+    /transactional rollback contract/,
+  );
+  assert.throws(
+    () =>
+      module.verifyPublisherContract(
+        admissible.replace('candidate_lease=""', 'candidate_lease="still-running"'),
+      ),
+    /rollback ordering/,
+  );
 });
 
 test("authorization selects one exact same-PR candidate artifact and detects replacement", async () => {

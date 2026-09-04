@@ -693,12 +693,17 @@ The workflow has separate trust zones:
   open pull request, exact candidate SHA, and one successful artifact from the
   matching unprivileged build. The pull request base must equal the protected
   workflow SHA, so a stale candidate must be rebased and rebuilt.
+- `admit` runs without cloud credentials before environment approval. Trusted
+  tooling verifies the exact artifact manifest and rejects publishers that do
+  not implement injectable CLI delegation, pre-promotion candidate teardown,
+  transactional promotion receipts, compare-and-swap rollback, and failed
+  revision retirement in the required order.
 - `deploy-enroll` is environment-protected. It checks out only protected
   tooling, downloads the exact artifact ID into runner temporary storage,
-  revalidates every manifest entry, treats the candidate bundle as data,
-  deploys through the Cloudflare API, reads the resulting Worker version and
-  settings back, rechecks the pull request and build identity, and claims the
-  singleton authority registry.
+  revalidates every manifest entry and the admission contract, treats the
+  candidate bundle as data, deploys through the Cloudflare API, reads the
+  resulting Worker version and settings back, rechecks the pull request and
+  build identity, and claims the singleton authority registry.
 - `execute` receives only the isolated coordinator URL and its ephemeral admin
   and shared tokens. It receives no AWS, Cloudflare, authority-controller, or
   production credentials.
