@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -246,15 +247,6 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 						return exit(4, "lease_id_conflict: fixed lease %s resource %s does not match acquired CloudID %s", leaseID, blank(server.CloudID, "<empty>"), blank(claim.CloudID, "<empty>"))
 					}
 				}
-				if err := validateFixedAWSServer(server, leaseID, intent.Slug, fingerprint, accountID); err != nil {
-					return err
-				}
-				if pinned == nil {
-					return exit(4, "lease_id_conflict: fixed AWS resource for lease %s has no durable launch attempt", leaseID)
-				}
-				if err := validateFixedAWSAttemptServer(server, leaseID, *pinned); err != nil {
-					return err
-				}
 				resolvedCfg = awsConfigForServer(cfg, server)
 			} else {
 				if intent.State == fixedAWSIntentAcquired || claim.CloudID != "" {
@@ -307,8 +299,32 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 					}
 					return err
 				}
+				// Inventory already carries the queried region; replay must not replace it from labels.
+				server = annotateAWSServerRegion(server, resolvedCfg.AWSRegion)
 			}
 
+			if err := validateFixedAWSServer(server, leaseID, intent.Slug, fingerprint, accountID); err != nil {
+				return err
+			}
+			pinned, err = fixedAWSAttemptFromIntent(intent)
+			if err != nil || pinned == nil {
+				return exit(4, "lease_id_conflict: fixed AWS lease %s has no valid durable launch attempt after provisioning", leaseID)
+			}
+			if err := validateFixedAWSAttemptServer(server, leaseID, *pinned); err != nil {
+				return err
+			}
+			if claim.CloudID == "" {
+				// Bind once before readiness can fail; replays retain the original cleanup
+				// identity. Prepared claims permit cleanup but cannot authorize normal use.
+				claim.CloudID = server.CloudID
+				claim.CloudImmutableID = server.ImmutableID
+				claim.Labels = maps.Clone(server.Labels)
+				if err := persist(); err != nil {
+					return err
+				}
+			} else if err := validateExactAWSClaim(server, leaseID, *claim); err != nil {
+				return err
+			}
 			serverClient, err := newAWSClient(ctx, resolvedCfg)
 			if err != nil {
 				return err
@@ -318,12 +334,11 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 				return err
 			}
 			server = annotateAWSServerRegion(server, resolvedCfg.AWSRegion)
-			if err := validateFixedAWSServer(server, leaseID, intent.Slug, fingerprint, accountID); err != nil {
+			if err := validateExactAWSClaim(server, leaseID, *claim); err != nil {
 				return err
 			}
-			pinned, err = fixedAWSAttemptFromIntent(intent)
-			if err != nil || pinned == nil {
-				return exit(4, "lease_id_conflict: fixed AWS lease %s has no valid durable launch attempt after provisioning", leaseID)
+			if err := validateFixedAWSServer(server, leaseID, intent.Slug, fingerprint, accountID); err != nil {
+				return err
 			}
 			if err := validateFixedAWSAttemptServer(server, leaseID, *pinned); err != nil {
 				return err
@@ -364,7 +379,7 @@ func fixedAWSLeaseMatches(servers []LeaseView, leaseID string) []Server {
 }
 
 func validateFixedAWSServer(server Server, leaseID, slug, fingerprint, accountID string) error {
-	if !isCrabboxAWSLease(server) || server.Labels["lease"] != leaseID ||
+	if server.CloudID == "" || !isCrabboxAWSLease(server) || server.Labels["lease"] != leaseID ||
 		core.NormalizeLeaseSlug(server.Labels["slug"]) != slug ||
 		server.Labels["fixed_intent_sha256"] != fingerprint ||
 		server.Labels["aws_account_id"] != accountID {
@@ -379,6 +394,8 @@ func validateFixedAWSAttemptServer(server Server, leaseID string, attempt core.A
 	}
 	if strings.TrimSpace(server.ServerType.Name) != strings.TrimSpace(attempt.ServerType) ||
 		awsServerRegion(server) != strings.TrimSpace(attempt.Region) ||
+		strings.TrimSpace(server.Labels["provider_key"]) != core.ProviderKeyForLease(leaseID) ||
+		strings.TrimSpace(server.Labels["aws_key_pair_id"]) != strings.TrimSpace(attempt.KeyPairID) ||
 		strings.TrimSpace(server.HostID) != strings.TrimSpace(attempt.HostID) {
 		return exit(4, "lease_id_conflict: AWS resource for lease %s provider identity does not match its durable launch attempt", leaseID)
 	}
@@ -727,7 +744,7 @@ func (b *awsLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 					}
 					return fmt.Errorf("re-read AWS cleanup key for missing instance %s: %w", server.DisplayID(), keyErr)
 				}
-				if err := deleteMissingClaimedAWSResourcesWithClient(ctx, client, claim, cleanupKeyID); err != nil {
+				if err := finalizeAWSKeyRecovery(ctx, client, claim, cleanupKeyID, nil); err != nil {
 					return err
 				}
 				fmt.Fprintf(b.RT.Stderr, "delete missing server recovery id=%s name=%s\n", server.DisplayID(), server.Name)
@@ -1008,10 +1025,12 @@ func (b *awsLeaseBackend) cleanupOrphanedAWSClaims(ctx context.Context, dryRun b
 			fmt.Fprintf(b.RT.Stderr, "skip orphaned AWS claim lease=%s reason=current AWS account differs from exact local claim\n", claim.LeaseID)
 			continue
 		}
+		var terminal *Server
 		if live, err := client.GetServer(ctx, claim.CloudID); err == nil {
 			if !isAWSTerminalServer(live) {
 				continue
 			}
+			terminal = &live
 		} else if !isAWSResolveNotFound(err) {
 			return fmt.Errorf("re-read orphaned AWS claim %s: %w", claim.LeaseID, err)
 		}
@@ -1027,7 +1046,7 @@ func (b *awsLeaseBackend) cleanupOrphanedAWSClaims(ctx context.Context, dryRun b
 			fmt.Fprintf(b.RT.Stderr, "delete orphaned AWS key recovery lease=%s key=%s\n", claim.LeaseID, core.ServerProviderKey(server))
 			continue
 		}
-		if err := deleteMissingClaimedAWSResourcesWithClient(ctx, client, claim, cleanupKeyID); err != nil {
+		if err := finalizeAWSKeyRecovery(ctx, client, claim, cleanupKeyID, terminal); err != nil {
 			return err
 		}
 		fmt.Fprintf(b.RT.Stderr, "delete orphaned AWS key recovery lease=%s key=%s\n", claim.LeaseID, core.ServerProviderKey(server))
@@ -1035,7 +1054,19 @@ func (b *awsLeaseBackend) cleanupOrphanedAWSClaims(ctx context.Context, dryRun b
 	return nil
 }
 
-func deleteMissingClaimedAWSResourcesWithClient(ctx context.Context, client awsClient, claim core.LeaseClaim, cleanupKeyID string) error {
+func finalizeAWSKeyRecovery(ctx context.Context, client awsClient, claim core.LeaseClaim, cleanupKeyID string, terminal *Server) error {
+	if terminal != nil {
+		if !isAWSTerminalServer(*terminal) {
+			return exit(4, "AWS lease %s has no observed terminal instance", claim.LeaseID)
+		}
+		if err := validateExactAWSClaim(*terminal, claim.LeaseID, claim); err != nil {
+			return err
+		}
+	} else if fixedAWSLeaseKind.IsFixedClaim(claim) && claim.FixedCreateIntent.State == fixedAWSIntentPrepared {
+		// A new allocation can be temporarily invisible. Keep its cleanup authority
+		// until full release succeeds or the exact instance is observed terminal.
+		return exit(4, "AWS lease %s instance visibility is unresolved; retaining its claim and key; retry when the exact instance is visible, or arrange operator recovery if it remains absent", claim.LeaseID)
+	}
 	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
 		return err
 	}
@@ -1052,7 +1083,7 @@ func isAWSClaimProvider(provider string) bool {
 }
 
 func deleteAWSCleanupServerWithClient(ctx context.Context, client awsClient, server Server, cleanupKeyID string) error {
-	if err := client.DeleteServer(ctx, server.CloudID); err != nil && !isAWSResolveNotFound(err) {
+	if err := client.DeleteServer(ctx, server.CloudID); err != nil {
 		return err
 	}
 	if cleanupKeyID != "" {
@@ -1099,20 +1130,20 @@ func cleanupAWSCreatedResources(ctx context.Context, stderr io.Writer, cfg Confi
 		fmt.Fprintf(stderr, "warning: create aws cleanup client for %s region=%s: %v\n", cloudID, cfg.AWSRegion, err)
 		return fmt.Errorf("create aws cleanup client for %s region=%s: %w", cloudID, cfg.AWSRegion, err)
 	}
-	var cleanupErr error
 	if strings.TrimSpace(cloudID) != "" {
 		if err := client.DeleteServer(ctx, cloudID); err != nil {
 			fmt.Fprintf(stderr, "warning: cleanup aws instance %s after acquire failure: %v\n", cloudID, err)
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup aws instance %s after acquire failure: %w", cloudID, err))
+			// Keep the key available while instance termination remains unconfirmed.
+			return fmt.Errorf("cleanup aws instance %s after acquire failure: %w", cloudID, err)
 		}
 	}
 	if strings.TrimSpace(keyPairID) != "" {
 		if err := client.DeleteCleanupSSHKeyID(ctx, keyPairID); err != nil {
 			fmt.Fprintf(stderr, "warning: cleanup aws key pair %s after acquire failure: %v\n", keyPairID, err)
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("cleanup aws key pair %s after acquire failure: %w", keyPairID, err))
+			return fmt.Errorf("cleanup aws key pair %s after acquire failure: %w", keyPairID, err)
 		}
 	}
-	return cleanupErr
+	return nil
 }
 
 func awsRegionConfigs(cfg Config) []Config {

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Clean partial Upstash Box environment uploads after failure or cancellation, isolate each profile, and refuse stale file cleanup while preserving discovery-only reuse and original command outcomes. [PR 1834](https://github.com/openclaw/crabbox/pull/1834). Thanks @steipete.
+- Preserve literal SmolVM and Upstash Box profile arguments, accept inferred single-string shell commands, and share source rendering without adding another shell. [PR 1833](https://github.com/openclaw/crabbox/pull/1833). Thanks @steipete.
 - Read all AWS recovery inventory pages and retain cleanup debt when pagination is incomplete; describe interrupted provisioning without assuming a deployment caused it. [PR 1832](https://github.com/openclaw/crabbox/pull/1832). Thanks @steipete.
 - Preserve literal profile arguments through CodeSandbox, OpenComputer, and Docker Sandbox execution, sharing command-intent parsing without changing provider shells or environment transports. [PR 1830](https://github.com/openclaw/crabbox/pull/1830). Thanks @steipete.
 
