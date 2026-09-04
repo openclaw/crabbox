@@ -697,6 +697,10 @@ func PowershellCommand(script string) string {
 	return powershellCommand(script)
 }
 
+func GnomeDesktopThemeScript() string {
+	return sharedGnomeDesktopTheme()
+}
+
 func WindowsBootstrapPowerShell(cfg Config, publicKey string) string {
 	return windowsBootstrapPowerShell(cfg, publicKey)
 }

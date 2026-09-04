@@ -299,6 +299,10 @@ func TestCloudInitGnomeDesktopProfile(t *testing.T) {
 	cfg.Browser = true
 	cfg.DesktopEnv = "gnome"
 	got := cloudInit(cfg, "ssh-ed25519 test")
+	if strings.Count(got, indentCloudInitRuncmd(sharedGnomeDesktopTheme())) != 1 {
+		t.Fatal("GNOME cloud-init must install exactly one complete shared theme script")
+	}
+
 	for _, want := range []string{
 		"labwc wayvnc swaybg librsvg2-common gnome-panel wlr-randr grim slurp wtype wl-clipboard",
 		"swaybg librsvg2-common",

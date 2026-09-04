@@ -313,7 +313,7 @@ Edit `recipes/bootstrap/v1/` rather than the generated Go or TypeScript files:
   precedence remain outside the generator.
 - `fragments.json` declares each script asset and its typed parameters. The
   `.ps1` and `.sh` files own the Windows header/core, native/desktop preludes,
-  desktop setup and finalization, macOS bootstrap, Linux code-server and
+  desktop setup and finalization, the installed GNOME theme helper, macOS bootstrap, Linux code-server and
   Tailscale installers, and WSL TruffleHog installer.
 
 The Windows header composes `windowsRuntime.ps1` definitions followed by
@@ -328,6 +328,8 @@ loading or new dependency. CI checks for stale output and runs
 `node --test scripts/generate-bootstrap.test.mjs`. The generator validates exact
 metadata fields, hashes, URLs, aliases, parameter types, and template tokens;
 duplicate JSON keys, unknown tokens, and unused parameters fail generation.
+
+A fragment marked `"literal": true` must have no parameters and is emitted byte-for-byte, without placeholder parsing. Use this for standalone scripts such as the GNOME theme helper, where nested shell expansions contain template-like braces. Omitting the flag retains strict template validation.
 
 Templates use `{{parameter}}` for typed runtime inputs and `{{ps:constant}}` or
 `{{sh:constant}}` for quoted artifact metadata. Runtime strings and string lists
