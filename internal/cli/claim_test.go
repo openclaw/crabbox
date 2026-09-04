@@ -2380,6 +2380,71 @@ func TestReadLeaseClaimRejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestResolveLeaseClaimDoesNotTreatCanonicalIDAsSlug(t *testing.T) {
+	const requestedID = "cbx_aaaaaaaaaaaa"
+	const otherID = "cbx_bbbbbbbbbbbb"
+	const scope = "endpoint:https://api.example.test"
+	lookups := []struct {
+		name    string
+		resolve func(string) (leaseClaim, bool, error)
+	}{
+		{"unscoped", resolveLeaseClaim},
+		{"provider", func(id string) (leaseClaim, bool, error) {
+			return resolveLeaseClaimForProvider(id, "e2b")
+		}},
+		{"provider exact", func(id string) (leaseClaim, bool, error) {
+			claim, ok, _, err := resolveLeaseClaimForProviderWithExact(id, "e2b")
+			return claim, ok, err
+		}},
+		{"scope exact", func(id string) (leaseClaim, bool, error) {
+			claim, ok, _, err := resolveLeaseClaimForProviderScopeWithExact(id, "e2b", scope)
+			return claim, ok, err
+		}},
+	}
+	for _, lookup := range lookups {
+		t.Run(lookup.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			if err := claimLeaseForRepoProviderScope(otherID, "cbx-aaaaaaaaaaaa", "e2b", scope, "/repo", time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			if claim, ok, err := lookup.resolve(requestedID); err != nil || ok || claim.LeaseID != "" {
+				t.Errorf("missing canonical ID selected alias: claim=%#v ok=%t err=%v", claim, ok, err)
+			}
+			if claim, ok, err := lookup.resolve("CBX AAAAAAAAAAAA"); err != nil || !ok || claim.LeaseID != otherID {
+				t.Fatalf("ordinary normalized slug: claim=%#v ok=%t err=%v", claim, ok, err)
+			}
+			if err := claimLeaseForRepoProviderScope(requestedID, "exact-lease", "e2b", scope, "/repo", time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			if claim, ok, err := lookup.resolve(requestedID); err != nil || !ok || claim.LeaseID != requestedID {
+				t.Fatalf("exact claim precedence: claim=%#v ok=%t err=%v", claim, ok, err)
+			}
+			if err := claimLeaseForRepoProviderScope("legacy-file", "cbx-not-canonical", "e2b", scope, "/repo", time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range []string{"legacy-file", "cbx_not_canonical"} {
+				if claim, ok, err := lookup.resolve(id); err != nil || !ok || claim.LeaseID != "legacy-file" {
+					t.Fatalf("legacy/literal identifier %q: claim=%#v ok=%t err=%v", id, claim, ok, err)
+				}
+			}
+		})
+	}
+	t.Run("foreign exact provider does not select alias", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		for _, claim := range []leaseClaim{
+			{LeaseID: requestedID, Slug: "exact-lease", Provider: "gcp"},
+			{LeaseID: otherID, Slug: "cbx-aaaaaaaaaaaa", Provider: "e2b"},
+		} {
+			if err := claimLeaseForRepoProvider(claim.LeaseID, claim.Slug, claim.Provider, "/repo", time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if claim, ok, err := resolveLeaseClaimForProvider(requestedID, "e2b"); err != nil || ok || claim.LeaseID != "" {
+			t.Fatalf("provider fallback selected alias: claim=%#v ok=%t err=%v", claim, ok, err)
+		}
+	})
+}
+
 func TestResolveLeaseClaimFindsSlug(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	if err := claimLeaseForRepoProvider("tbx_abc123", "Blue Lobster", "blacksmith-testbox", "/repo", time.Minute, false); err != nil {
