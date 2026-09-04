@@ -16363,7 +16363,7 @@ export class FleetCoordinator {
       }
       const failedAtDate = new Date();
       const failedAt = failedAtDate.toISOString();
-      const interruption = "coordinator deployment interrupted provider provisioning";
+      const interruption = "provider provisioning was interrupted";
       current.updatedAt = failedAt;
       if (server) {
         current.state = lease.state === "released" ? "released" : "failed";
