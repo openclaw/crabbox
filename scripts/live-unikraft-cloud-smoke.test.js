@@ -927,9 +927,10 @@ test("TERM interrupts an active warmup and starts zero-residue cleanup promptly"
   warmup)
     printf '%s' '[{"name":"existing-service","uuid":"${existingUUID}"},{"name":"${createdName}","uuid":"${createdUUID}"}]\n' >${JSON.stringify("$FAKE_REMOTE")}
     printf 'leased ${createdLease} slug=unikraft-cloud-live-smoke-test provider=unikraft-cloud instance=${createdUUID} state=running\n'
-    : >${JSON.stringify("$WARMUP_STARTED")}
     (trap '' TERM; while :; do sleep 1; done) &
     printf '%s' "$!" >${JSON.stringify("$SLEEP_PID")}
+    # TERM must not interrupt before the descendant PID is recorded.
+    : >${JSON.stringify("$WARMUP_STARTED")}
     wait
     ;;
   stop)
