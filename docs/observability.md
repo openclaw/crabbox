@@ -169,6 +169,15 @@ phases. Failed runs add `blockedStage` and `retryLikely` when Crabbox can
 classify the likely blocker; the human-readable run summary prints the same
 values as `blocked_stage` and `retry_likely`.
 
+`runnerTotalMs` is the CLI's observed wall time through route cleanup.
+`runnerPhases` is a timing-only breakdown whose accepted durations never exceed
+that total; Crabbox fills any remainder with `unattributed` or a delegated
+opaque phase. Coordinator phase vectors accept at most one positive integer
+duration for each of `request`, `network_ready`, `bootstrap`, and
+`unattributed`. Any malformed vector is discarded as a unit, after which valid
+legacy startup scalars can supply the breakdown. These fields are unsigned
+local telemetry: receipt v2 and its signing contract are unchanged.
+
 Automatic run cleanup adds `leaseStopped`: true means the release owner confirmed
 the end of the recoverable lease, even when a terminal receipt remains locally.
 Retained resources and accepted but pending, failed, retry-scheduled, or otherwise
@@ -176,7 +185,10 @@ unconfirmed cleanup report false and preserve failure recovery guidance. False
 does not certify a running or reachable resource. `leaseStopError` reports cleanup
 errors separately and may be present even after confirmed removal, for example
 when local finalization fails. Run finalization emits timing after cleanup and
-the failure digest; a failing CLI invocation can append its normal exit diagnostic.
+the failure digest. Its terminal order is timing record, timing JSON, local
+receipt persistence, then coordinator finish. Timing sink failures are terminal
+and are reflected in the local receipt and process exit; a failing CLI
+invocation can append its normal exit diagnostic.
 
 Commands can define their own phases by printing marker lines to stdout or
 stderr:
@@ -204,6 +216,11 @@ labels, artifact paths, and lease metadata because they preserve the timing
 payload. Use [`crabbox bench report`](commands/bench.md) to aggregate local
 observations, and treat insufficient sample counts as a prompt to collect more
 local evidence rather than as a provider ranking.
+
+Timing rows, receipts, captures, and failure bundles are sensitive local
+correlation artifacts. They may contain repository and filesystem paths,
+workdirs, labels, artifact paths, lease IDs, and run IDs. Keep them private and
+review them before sharing.
 
 The benchmark ledger records observed timing; it is not a deterministic budget
 gate. The future deterministic metric contract lives in
