@@ -16,6 +16,7 @@ import {
   ProviderProvisioningCleanupError,
   providerProvisioningCleanupClaim,
 } from "./provider-provisioning";
+import { ProvisioningAttemptHistory } from "./provisioning-attempts";
 import { leaseProviderName } from "./slug";
 import type {
   Env,
@@ -651,8 +652,7 @@ export class AzureClient {
   }> {
     const locations = azureRegionCandidates(config, this.env, this.defaultLocation);
     const multiRegion = locations.length > 1;
-    const failures: string[] = [];
-    const attempts: ProvisioningAttempt[] = [];
+    const history = new ProvisioningAttemptHistory();
     for (const location of locations) {
       const client = this.clientForLocation(location, multiRegion);
       try {
@@ -664,30 +664,30 @@ export class AzureClient {
           slug,
           owner,
         );
-        const allAttempts = [...attempts, ...(result.attempts ?? [])];
         const server = {
           ...result.server,
           region: location,
           labels: { ...result.server.labels, region: location },
         };
-        return allAttempts.length > 0
-          ? { ...result, server, attempts: allAttempts }
-          : { ...result, server };
+        return { ...result, server, ...history.result(result.attempts) };
       } catch (error) {
         if (providerProvisioningCleanupClaim(error)) throw error;
         const message = error instanceof Error ? error.message : String(error);
-        attempts.push({
-          region: location,
-          serverType: config.serverType,
-          market: config.capacityMarket,
-          category: azureProvisioningErrorCategory(message) || "region",
-          message: conciseAzureProvisioningMessage(message),
-        });
-        failures.push(`${location}: ${message}`);
+        history.recordFailure(
+          error,
+          {
+            region: location,
+            serverType: config.serverType,
+            market: config.capacityMarket,
+            category: azureProvisioningErrorCategory(message) || "region",
+            message: conciseAzureProvisioningMessage(message),
+          },
+          `${location}: ${message}`,
+        );
         if (!isRetryableProvisioningError(message)) break;
       }
     }
-    throw new Error(failures.join("; "));
+    throw history.error();
   }
 
   private clientForLocation(location: string, multiRegion: boolean): AzureClient {
@@ -729,8 +729,7 @@ export class AzureClient {
     attempts?: ProvisioningAttempt[];
   }> {
     const candidates = azureProvisioningCandidatesForConfig(config);
-    const failures: string[] = [];
-    const attempts: ProvisioningAttempt[] = [];
+    const history = new ProvisioningAttemptHistory();
     let infra: AzureSharedInfraNames | undefined;
     for (let index = 0; index < candidates.length; index += 1) {
       const vmSize = candidates[index] ?? config.serverType;
@@ -755,20 +754,20 @@ export class AzureClient {
           infra,
           azureAttemptNameSeed(leaseID, location, config.capacityMarket, index),
         );
-        return attempts.length > 0
-          ? { server, serverType: vmSize, market: config.capacityMarket, attempts }
-          : { server, serverType: vmSize, market: config.capacityMarket };
+        return { server, serverType: vmSize, market: config.capacityMarket, ...history.result() };
       } catch (error) {
         if (providerProvisioningCleanupClaim(error)) throw error;
         const message = error instanceof Error ? error.message : String(error);
-        attempts.push({
-          region: location,
-          serverType: vmSize,
-          market: config.capacityMarket,
-          category: azureProvisioningErrorCategory(message) || "fatal",
-          message: conciseAzureProvisioningMessage(message),
-        });
-        failures.push(`${vmSize}: ${message}`);
+        history.record(
+          {
+            region: location,
+            serverType: vmSize,
+            market: config.capacityMarket,
+            category: azureProvisioningErrorCategory(message) || "fatal",
+            message: conciseAzureProvisioningMessage(message),
+          },
+          `${vmSize}: ${message}`,
+        );
         if (!isRetryableProvisioningError(message)) break;
       }
     }
@@ -799,25 +798,25 @@ export class AzureClient {
             infra,
             azureAttemptNameSeed(leaseID, location, "on-demand", index),
           );
-          return attempts.length > 0
-            ? { server, serverType: vmSize, market: "on-demand", attempts }
-            : { server, serverType: vmSize, market: "on-demand" };
+          return { server, serverType: vmSize, market: "on-demand", ...history.result() };
         } catch (error) {
           if (providerProvisioningCleanupClaim(error)) throw error;
           const message = error instanceof Error ? error.message : String(error);
-          attempts.push({
-            region: location,
-            serverType: vmSize,
-            market: "on-demand",
-            category: azureProvisioningErrorCategory(message) || "fatal",
-            message: conciseAzureProvisioningMessage(message),
-          });
-          failures.push(`on-demand ${vmSize}: ${message}`);
+          history.record(
+            {
+              region: location,
+              serverType: vmSize,
+              market: "on-demand",
+              category: azureProvisioningErrorCategory(message) || "fatal",
+              message: conciseAzureProvisioningMessage(message),
+            },
+            `on-demand ${vmSize}: ${message}`,
+          );
           if (!isRetryableProvisioningError(message)) break;
         }
       }
     }
-    throw new Error(failures.join("; "));
+    throw history.error();
   }
 
   async deleteServer(name: string): Promise<void> {

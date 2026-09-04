@@ -21,6 +21,7 @@ import {
   providerProvisioningCleanupClaim,
   type ProviderProvisioningCleanupClaim,
 } from "./provider-provisioning";
+import { ProvisioningAttemptHistory } from "./provisioning-attempts";
 import { leaseProviderName } from "./slug";
 import type {
   Env,
@@ -438,8 +439,7 @@ export class GCPClient {
       config.gcpZone || this.zone,
       config.capacityAvailabilityZones.length > 0 ? config.capacityAvailabilityZones : [this.zone],
     );
-    const failures: string[] = [];
-    const attempts: ProvisioningAttempt[] = [];
+    const history = new ProvisioningAttemptHistory();
     const project = config.gcpProject || this.project;
     for (const zone of zones) {
       const client = this.forScope(zone, project);
@@ -462,8 +462,7 @@ export class GCPClient {
             market?: string;
             attempts?: ProvisioningAttempt[];
           } = { server, serverType: machineType, market: config.capacityMarket };
-          if (attempts.length > 0) result.attempts = attempts;
-          return result;
+          return { ...result, ...history.result() };
         } catch (error) {
           if (
             error instanceof ProviderProvisioningOutcomeUncertainError ||
@@ -473,16 +472,18 @@ export class GCPClient {
             throw error;
           }
           const message = errorMessage(error);
-          failures.push(`${zone}/${machineType}: ${message}`);
-          attempts.push({
-            region: zone,
-            serverType: machineType,
-            market: config.capacityMarket,
-            category: isFallbackProvisioningError(message) ? "capacity" : "fatal",
-            message,
-          });
+          history.record(
+            {
+              region: zone,
+              serverType: machineType,
+              market: config.capacityMarket,
+              category: isFallbackProvisioningError(message) ? "capacity" : "fatal",
+              message,
+            },
+            `${zone}/${machineType}: ${message}`,
+          );
           if (!isFallbackProvisioningError(message)) {
-            throw new Error(failures.join("; "), { cause: error });
+            throw history.error("", { cause: error });
           }
         }
       }
@@ -512,7 +513,7 @@ export class GCPClient {
               server,
               serverType: machineType,
               market: "on-demand",
-              attempts,
+              ...history.result(),
             };
           } catch (error) {
             if (
@@ -523,15 +524,24 @@ export class GCPClient {
               throw error;
             }
             const message = errorMessage(error);
-            failures.push(`on-demand ${zone}/${machineType}: ${message}`);
+            history.record(
+              {
+                region: zone,
+                serverType: machineType,
+                market: "on-demand",
+                category: isFallbackProvisioningError(message) ? "capacity" : "fatal",
+                message,
+              },
+              `on-demand ${zone}/${machineType}: ${message}`,
+            );
             if (!isFallbackProvisioningError(message)) {
-              throw new Error(failures.join("; "), { cause: error });
+              throw history.error("", { cause: error });
             }
           }
         }
       }
     }
-    throw new Error(failures.join("; "));
+    throw history.error();
   }
 
   async createServer(
