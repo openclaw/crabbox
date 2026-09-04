@@ -272,36 +272,32 @@ func (b *staticLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
 }
 
 func (b *staticLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
-	expected, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server)
-	if !set || !exists {
-		return Server{}, exit(4, "static lease %s has no exact claim snapshot; refusing touch", req.Lease.LeaseID)
-	}
-	if err := validateStaticTouchIdentity(b.Cfg, req.Lease, expected); err != nil {
-		return Server{}, err
-	}
-	if req.IdleTimeoutOverride != nil && *req.IdleTimeoutOverride <= 0 {
-		return Server{}, exit(2, "static lease %s idle timeout override must be positive", req.Lease.LeaseID)
-	}
-
-	now := time.Now().UTC()
-	if b.RT.Clock != nil {
-		now = b.RT.Clock.Now().UTC()
-	}
-	cfg := b.Cfg
-	if expected.IdleTimeoutSeconds > 0 {
-		cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
-	}
-	labels := staticLeaseLabelsFromClaim(expected)
-	labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, req.State, now, req.IdleTimeoutOverride)
-	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(ctx, req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
+		Provider: "static",
+		Authorize: func(_ context.Context, lease LeaseTarget, claim core.LeaseClaim) error {
+			return validateStaticTouchIdentity(b.Cfg, lease, claim)
+		},
+		Prepare: func(expected core.LeaseClaim) (map[string]string, time.Time) {
+			now := time.Now().UTC()
+			if b.RT.Clock != nil {
+				now = b.RT.Clock.Now().UTC()
+			}
+			cfg := b.Cfg
+			if expected.IdleTimeoutSeconds > 0 {
+				cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
+			}
+			labels := core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(staticLeaseLabelsFromClaim(expected), cfg, req.State, now, req.IdleTimeoutOverride)
+			return labels, now
+		},
+	})
 	if err != nil {
 		return Server{}, err
 	}
 	server := req.Lease.Server
-	server.Labels = labels
+	server.Labels = updated.Labels
 	server.ServerType.Architecture = ""
 	historicalArchitecture(&server, req.Lease.SSH)
-	if state := strings.TrimSpace(labels["state"]); state != "" {
+	if state := strings.TrimSpace(server.Labels["state"]); state != "" {
 		server.Status = state
 	}
 	core.SetServerLeaseClaimSnapshot(&server, updated, true)

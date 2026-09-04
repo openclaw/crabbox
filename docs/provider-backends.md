@@ -423,6 +423,16 @@ Use `shared.CloneLabels` for plain writable label copies; it returns an empty
 non-nil map for nil input. Keep preservation helpers local when missing, empty,
 and non-empty source values have provider-specific meaning.
 
+`shared.CommitClaimTouch` owns the exact-snapshot touch transaction used by
+Static SSH, Local Container, and Machine0: require the carried claim, run the
+adapter's authorization, validate an explicit idle replacement, prepare labels
+and one timestamp, then call the existing core claim compare-and-swap once.
+Preparation is deliberately lazy: authorization may first hydrate a recorded
+runtime route. Adapters retain identity checks, persisted-timeout defaults,
+label/TTL representation, and public result projection; they update caches only
+after the committed claim is returned. The helper does not mutate a native
+resource, create a missing claim, or replace core's checkpoint-journal fence.
+
 Lifecycle polling is the exception that belongs in
 `internal/providers/shared`, not command core. `shared.Poll` centralizes only
 the repeated read mechanics: last-success retention, attempt limits,
