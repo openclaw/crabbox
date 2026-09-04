@@ -84,6 +84,7 @@ func (b *azureLeaseBackend) acquireOnce(ctx context.Context, keep bool, requeste
 	}
 	cfg.SSHKey = keyPath
 	cfg.ProviderKey = providerKeyForLease(leaseID)
+	expected := Server{CloudID: core.LeaseProviderName(leaseID, slug), Labels: core.DirectLeaseLabels(cfg, leaseID, slug, "azure", "on-demand", keep, time.Now())}
 	fmt.Fprintf(b.RT.Stderr, "provisioning provider=azure lease=%s slug=%s class=%s preferred_type=%s location=%s rg=%s keep=%v\n",
 		leaseID, slug, cfg.Class, cfg.ServerType, cfg.AzureLocation, cfg.AzureResourceGroup, keep)
 	server, cfg, err := client.CreateServerWithFallback(ctx, cfg, publicKey, leaseID, slug, keep, func(format string, args ...any) {
@@ -92,23 +93,40 @@ func (b *azureLeaseBackend) acquireOnce(ctx context.Context, keep bool, requeste
 	if err != nil {
 		return LeaseTarget{}, err
 	}
+	expected.ImmutableID = server.ImmutableID
+	if err := validateAzureAcquiredVM(expected, server); err != nil {
+		return LeaseTarget{}, shared.JoinAcquireCleanupError(fmt.Errorf("azure creation rejected: %w", err), errors.New("Azure cleanup withheld: created VM binding is incomplete or inconsistent"))
+	}
+	created := server
+	created.Labels = maps.Clone(server.Labels)
 	rollback := true
-	rollbackCloudID := server.CloudID
 	defer func() {
-		if !rollback || strings.TrimSpace(rollbackCloudID) == "" {
+		if !rollback {
 			return
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), azureAcquireRollbackTimeout)
 		defer cancel()
-		if err := client.DeleteServer(cleanupCtx, rollbackCloudID); err != nil {
-			fmt.Fprintf(b.RT.Stderr, "warning: cleanup azure server %s after acquire failure: %v\n", rollbackCloudID, err)
-			retErr = shared.JoinAcquireCleanupError(retErr, fmt.Errorf("cleanup azure server %s after acquire failure: %w", rollbackCloudID, err))
+		prepared, err := client.PrepareOwnedServer(cleanupCtx, created)
+		if err == nil {
+			err = validateAzureAcquiredVM(created, prepared)
+		}
+		if err == nil {
+			err = client.DeleteOwnedServer(cleanupCtx, prepared)
+		}
+		if err != nil {
+			fmt.Fprintf(b.RT.Stderr, "warning: cleanup azure server %s after acquire failure: %v\n", created.CloudID, err)
+			retErr = shared.JoinAcquireCleanupError(retErr, fmt.Errorf("cleanup azure server %s after acquire failure: %w", created.CloudID, err))
 		}
 	}()
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%s type=%s\n", leaseID, server.DisplayID(), cfg.ServerType)
 	server, err = client.WaitForServerIP(ctx, server.CloudID)
 	if err != nil {
 		return LeaseTarget{}, err
+	}
+	if err := validateAzureAcquiredVM(created, server); err != nil {
+		// A later matching read must not erase an observed replacement.
+		rollback = false
+		return LeaseTarget{}, shared.JoinAcquireCleanupError(fmt.Errorf("azure readiness rejected: %w", err), errors.New("Azure cleanup withheld after readiness identity loss"))
 	}
 	target := sshTargetFromConfig(cfg, azureServerHost(server, cfg.AzureNetwork))
 	if err := bootstrapManagedWindowsDesktop(ctx, cfg, &target, publicKey, b.RT.Stderr); err != nil {
@@ -291,7 +309,7 @@ func (b *azureLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 			}
 			return fmt.Errorf("re-read Azure cleanup candidate %s: %w", server.DisplayID(), err)
 		}
-		if err := validateAzureCleanupLiveServer(server, live); err != nil {
+		if err := core.ValidateAzureOwnedVM(server, live); err != nil {
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%v\n", server.DisplayID(), server.Name, err)
 			continue
 		}
@@ -491,22 +509,11 @@ func validateExactAzureClaim(claim core.LeaseClaim, server Server, expectedLease
 	return nil
 }
 
-func validateAzureCleanupLiveServer(expected, live Server) error {
-	cloudID := strings.TrimSpace(expected.CloudID)
-	if cloudID == "" || strings.TrimSpace(live.CloudID) != cloudID {
-		return fmt.Errorf("live cloud id %q does not match cleanup candidate %q", live.CloudID, expected.CloudID)
+func validateAzureAcquiredVM(expected, live Server) error {
+	if live.Name != expected.CloudID {
+		return fmt.Errorf("Azure VM name %q does not match allocation %q", live.Name, expected.CloudID)
 	}
-	if strings.TrimSpace(expected.ImmutableID) == "" || strings.TrimSpace(live.ImmutableID) != strings.TrimSpace(expected.ImmutableID) {
-		return fmt.Errorf("live VM identity %q does not match cleanup candidate identity %q", live.ImmutableID, expected.ImmutableID)
-	}
-	if !isCrabboxAzureLease(live) {
-		return fmt.Errorf("live VM no longer has canonical Crabbox ownership tags")
-	}
-	expectedLeaseID := strings.TrimSpace(expected.Labels["lease"])
-	if liveLeaseID := strings.TrimSpace(live.Labels["lease"]); liveLeaseID != expectedLeaseID {
-		return fmt.Errorf("live VM lease %q does not match cleanup candidate lease %q", liveLeaseID, expectedLeaseID)
-	}
-	return nil
+	return core.ValidateAzureOwnedVM(expected, live)
 }
 
 func isAzureCleanupNotFound(err error) bool {

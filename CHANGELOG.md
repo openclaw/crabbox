@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reject changed Azure VM identities during acquisition readiness and use identity-checked VM/companion cleanup for failed acquisitions instead of blind name-based rollback. Thanks @steipete.
 - Stop direct AWS, Azure, GCP, and Hetzner bootstrap retries from allocating another machine when rollback reports a cleanup failure, preserving both the original failure and cleanup diagnostics. [PR 1819](https://github.com/openclaw/crabbox/pull/1819). Thanks @steipete.
 - Cloudflare: retain recovery claims when teardown fails, preserve command/cancellation outcomes, and fence reuse and cleanup against replaced local claims. [PR 1817](https://github.com/openclaw/crabbox/pull/1817). Thanks @steipete.
 - Preserve Upstash Box workspaces when archive upload or extraction fails, clean partial Upstash Box/Tensorlake uploads, and check complete archive limits before creating either sandbox. [PR 1820](https://github.com/openclaw/crabbox/pull/1820). Thanks @steipete.
