@@ -118,7 +118,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 			}
 			// Pin the primary exit before joining cleanup errors, which may
 			// themselves contain an ExitError with a different code.
-			retErr = sandboxLifecycleError(result.ExitCode, retErr.Error(), retErr)
+			retErr = ExitErrorWithCause(result.ExitCode, retErr.Error(), retErr)
 		}
 		appendFailure := func(err error) {
 			if err == nil {
@@ -127,7 +127,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 			if retErr == nil {
 				result.ExitCode = 1
 				result.Status, result.ErrorKind = core.RunStatusFailed, core.RunErrorProvider
-				retErr = sandboxLifecycleError(1, err.Error(), err)
+				retErr = ExitErrorWithCause(1, err.Error(), err)
 			} else {
 				retErr = errors.Join(retErr, err)
 			}
@@ -262,7 +262,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 		outcome := core.FinalizeRunResult(core.RunResult{}, err)
 		result.ExitCode = 1
 		result.Status, result.ErrorKind = outcome.Status, outcome.ErrorKind
-		return result, sandboxLifecycleError(1, fmt.Sprintf("%s run failed: %v", lifecycle.Provider, RedactErrorSecrets(err.Error())), err)
+		return result, ExitErrorWithCause(1, fmt.Sprintf("%s run failed: %v", lifecycle.Provider, RedactErrorSecrets(err.Error())), err)
 	}
 	if result.ExitCode != 0 {
 		result = core.FinalizeRunResult(result, nil)
@@ -280,6 +280,8 @@ type sandboxRunError struct {
 
 func (e sandboxRunError) Unwrap() []error { return []error{e.ExitError, e.cause} }
 
-func sandboxLifecycleError(code int, message string, cause error) error {
+// ExitErrorWithCause keeps the selected exit code and a display-safe message
+// while retaining the cause for errors.Is/As without printing it again.
+func ExitErrorWithCause(code int, message string, cause error) error {
 	return sandboxRunError{ExitError: core.ExitError{Code: code, Message: message}, cause: cause}
 }

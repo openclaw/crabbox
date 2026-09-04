@@ -104,6 +104,8 @@ Defaults: image `alpine` (lightweight; provides the standard shell tools needed 
 
 Note: `warmup` always keeps the sandbox until an explicit `crabbox stop`. If you pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
 
+Stream errors retain their cancellation or timeout cause for run status. Crabbox checks cancellation immediately before submitting the command, including after a successful environment upload; existing profile cleanup still runs.
+
 Deletion and reuse require that exact local claim and a fresh matching machine response. Crabbox holds the unchanged claim through deletion and confirmed absence; run teardown and failed-start rollback use the same ownership checks with a fresh 60-second cleanup budget. Explicit stop preserves caller cancellation within that budget. A concurrent claim change, changed machine identity, failed delete, or uncertain confirmation retains the claim and reports the cleanup problem.
 
 Older claims without the machine ID, endpoint, and creation timestamp do not authorize stop or reuse. Name-matched machines remain discoverable through `list` and `status`, which do not create or upgrade claims. `--reclaim` transfers repository ownership of an already proven binding; it never adopts an unclaimed or legacy machine. Review those machines in the provider console before any manual cleanup, or create a new lease for reuse.
