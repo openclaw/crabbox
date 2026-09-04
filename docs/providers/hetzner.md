@@ -163,6 +163,14 @@ when Hetzner reports a capacity or quota error.
 
 ## Gotchas
 
+Brokered release acknowledgement queues cleanup. A durable journal records
+validated delete-action success plus exact server absence before owned key
+cleanup, or a distinct already-absent observation before any known dispatch.
+Inspect it with `crabbox inspect --json`; `cleanupStatus` remains the overall
+completion signal. Pending actions and lost acknowledgements cannot be resolved
+by GET 404 alone. Definitive key-only creation failures can retry the retained
+owned key ID without a server receipt. See [cleanup confirmation](../features/lifecycle-cleanup.md#brokered-hetzner-cleanup-confirmation).
+
 - No managed Windows or macOS targets — Hetzner is Linux-only in Crabbox.
 - Dedicated-core types (`ccx*`) can hit account quota. Prefer class fallback over
   pinning an exact `--type`.

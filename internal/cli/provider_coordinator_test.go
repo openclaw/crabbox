@@ -2892,3 +2892,64 @@ func TestCoordinatorAcquireWrapsWorkerCleanupSignalWithoutRelease(t *testing.T) 
 		t.Fatalf("releases=%d want 0", releases)
 	}
 }
+
+func TestCoordinatorInspectJSONPreservesProviderCleanupReceipt(t *testing.T) {
+	isolateTestUserDirs(t)
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "user-token")
+	for _, state := range []string{"running", "success", "historical"} {
+		t.Run(state, func(t *testing.T) {
+			receipt := map[string]any{
+				"version": 1, "provider": "hetzner", "leaseID": "cbx_abcdef123456", "serverID": 123,
+				"dispatchStartedAt": "2026-09-01T08:00:00Z",
+				"action":            map[string]any{"id": 456, "status": state},
+			}
+			if state == "success" {
+				receipt["confirmation"] = map[string]any{"method": "delete-action-success-and-server-absent", "at": "2026-09-01T08:00:02Z"}
+			}
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_abcdef123456" || r.Header.Get("Authorization") != "Bearer user-token" {
+					t.Errorf("unexpected broker inspect request: %s %s", r.Method, r.URL.Path)
+				}
+				lease := map[string]any{"id": "cbx_abcdef123456", "provider": "hetzner", "state": "released", "cloudID": "123", "serverID": 123, "host": "192.0.2.1", "cleanupStatus": "pending"}
+				if state != "historical" {
+					lease["providerCleanup"] = receipt
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+			}))
+			defer server.Close()
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			var stdout bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+			if err := app.inspect(context.Background(), []string{"--provider", "hetzner", "--id", "cbx_abcdef123456", "--json"}); err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]json.RawMessage
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if requests != 1 {
+				t.Fatalf("inspect made %d requests, want one broker GET", requests)
+			}
+			if state == "historical" {
+				if _, exists := got["providerCleanup"]; exists {
+					t.Fatal("historical receipt was invented")
+				}
+				return
+			}
+			want, _ := json.Marshal(receipt)
+			var actualValue, expectedValue any
+			_ = json.Unmarshal(got["providerCleanup"], &actualValue)
+			_ = json.Unmarshal(want, &expectedValue)
+			if !reflect.DeepEqual(actualValue, expectedValue) {
+				t.Fatalf("receipt = %s, want %s", got["providerCleanup"], want)
+			}
+			if string(got["cleanupStatus"]) != `"pending"` || string(got["ready"]) != "false" || string(got["hasHost"]) != "true" {
+				t.Fatalf("recorded evidence changed finality or historical host semantics: %s", stdout.Bytes())
+			}
+		})
+	}
+}

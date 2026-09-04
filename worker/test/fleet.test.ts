@@ -6052,12 +6052,530 @@ describe("fleet lease identity and idle", () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
+  it("exposes recorded Hetzner cleanup through authenticated release, alarm and owner GET only", async () => {
+    const storage = new MemoryStorage();
+    const env = {
+      CRABBOX_SESSION_SECRET: "synthetic-session-secret",
+      CRABBOX_DEFAULT_ORG: "example-org",
+      HETZNER_TOKEN: "synthetic-provider-token",
+    } as Env;
+    const lease = testLease({
+      owner: "alice@example.com",
+      org: "example-org",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      providerKeyCleanupOwned: false,
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const fleet = testFleet(storage, {}, env);
+    const tokens = await Promise.all(
+      ["alice", "mallory"].map((login) =>
+        issueUserToken(env, {
+          owner: `${login}@example.com`,
+          ownerSource: "github-verified-email",
+          org: "example-org",
+          login,
+          githubAccessToken: "synthetic-github-token",
+        }),
+      ),
+    );
+    const throughBroker = (method: string, path: string, token = tokens[0]!) =>
+      routeCoordinatorRequest(
+        new Request(`https://crabbox.test${path}`, {
+          method,
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          ...(method === "POST" ? { body: JSON.stringify({ delete: true }) } : {}),
+        }),
+        env,
+        (prepared) => fleet.fetch(prepared),
+        { githubMembership: async () => {} },
+      );
+    const requests: string[] = [];
+    let deleted = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = new URL(String(input)).pathname;
+        requests.push(`${init?.method} ${path}`);
+        if (init?.method === "DELETE") {
+          // oxlint-disable-next-line vitest/no-conditional-expect -- assert durable intent exactly at DELETE dispatch.
+          expect(
+            storage.value<LeaseRecord>(`lease:${lease.id}`)?.providerCleanup?.dispatchStartedAt,
+          ).toBeTruthy();
+          deleted = true;
+          return jsonResponse({
+            action: {
+              id: 456,
+              command: "delete_server",
+              status: "success",
+              resources: [{ id: 123, type: "server" }],
+            },
+          });
+        }
+        if (deleted) return jsonResponse({ error: { code: "not_found" } }, 404);
+        return jsonResponse({
+          server: {
+            id: 123,
+            name: lease.serverName,
+            labels: {
+              crabbox: "true",
+              created_by: "crabbox",
+              provider: "hetzner",
+              lease: lease.id,
+              slug: lease.slug,
+              owner: providerLabelValue(lease.owner),
+            },
+          },
+        });
+      }),
+    );
+    const release = await throughBroker("POST", `/v1/leases/${lease.id}/release`);
+    expect(release.status).toBe(200);
+    expect(await release.json()).toMatchObject({
+      lease: { state: "released", cleanupStatus: "pending" },
+    });
+    expect(requests).toEqual([]);
+    await fleet.alarm();
+    const inspect = await throughBroker("GET", `/v1/leases/${lease.id}`);
+    expect(inspect.status).toBe(200);
+    const result = (await inspect.json()) as { lease: LeaseRecord & { cleanupStatus: string } };
+    expect(result.lease).toMatchObject({
+      state: "released",
+      cleanupStatus: "complete",
+      serverID: 123,
+      host: lease.host,
+      providerCleanup: {
+        version: 1,
+        provider: "hetzner",
+        leaseID: lease.id,
+        serverID: 123,
+        action: { id: 456, status: "success" },
+        confirmation: { method: "delete-action-success-and-server-absent", at: expect.any(String) },
+      },
+    });
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.providerCleanup).toEqual(
+      result.lease.providerCleanup,
+    );
+    expect(requests).toEqual([
+      "GET /v1/servers/123",
+      "DELETE /v1/servers/123",
+      "GET /v1/servers/123",
+    ]);
+    await Promise.all(
+      ["GET", "POST"].map(async (method) => {
+        const denied = await throughBroker(
+          method,
+          `/v1/leases/${lease.id}${method === "POST" ? "/release" : ""}`,
+          tokens[1]!,
+        );
+        expect(denied.status).toBe(404);
+        expect(await denied.text()).not.toContain("providerCleanup");
+      }),
+    );
+  });
+
+  it.each(["dispatch", "action"])(
+    "retains broker Hetzner cleanup debt on %s storage failure",
+    async (phase) => {
+      const storage = new MemoryStorage();
+      const lease = testLease({
+        owner: "alice@example.com",
+        org: "example-org",
+        state: "released",
+        releaseDeletesServer: true,
+        cleanupStartedAt: "2026-01-01T00:00:00Z",
+        cleanupClaimExpiresAt: "2026-01-01T00:00:00Z",
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      let failedWrite = false;
+      storage.beforePut = async (key, value) => {
+        const evidence = (value as LeaseRecord).providerCleanup;
+        if (
+          key === `lease:${lease.id}` &&
+          !failedWrite &&
+          evidence &&
+          (phase === "dispatch" || evidence.action)
+        ) {
+          failedWrite = true;
+          throw new Error("synthetic evidence storage failure");
+        }
+      };
+      let deletes = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+          if (init?.method === "DELETE") {
+            deletes++;
+            return jsonResponse({
+              action: {
+                id: 456,
+                command: "delete_server",
+                status: "running",
+                resources: [{ id: 123, type: "server" }],
+              },
+            });
+          }
+          return jsonResponse({
+            server: {
+              id: 123,
+              name: lease.serverName,
+              labels: {
+                crabbox: "true",
+                created_by: "crabbox",
+                provider: "hetzner",
+                lease: lease.id,
+                slug: lease.slug,
+                owner: providerLabelValue(lease.owner),
+              },
+            },
+          });
+        }),
+      );
+      const fleet = testFleet(storage, {}, { HETZNER_TOKEN: "synthetic-token" });
+      await fleet.alarm();
+      const failed = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+      expect(failed.cleanupError).toContain("synthetic evidence storage failure");
+      expect(failed.cleanupRetryAt).toBeTruthy();
+      expect(failed.providerCleanup?.action).toBeUndefined();
+      expect(Boolean(failed.providerCleanup?.dispatchStartedAt)).toBe(phase === "action");
+      expect(deletes).toBe(phase === "action" ? 1 : 0);
+      const read = await fleet.fetch(
+        request("GET", `/v1/leases/${lease.id}`, {
+          headers: { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" },
+        }),
+      );
+      expect(await read.json()).toMatchObject({ lease: { cleanupStatus: "failed" } });
+      if (phase === "action") {
+        storage.seed(`lease:${lease.id}`, { ...failed, cleanupRetryAt: "2026-01-01T00:00:00Z" });
+        const retryFetch = vi.fn<() => Promise<Response>>(async () =>
+          jsonResponse({ error: { code: "not_found" } }, 404),
+        );
+        vi.stubGlobal("fetch", retryFetch);
+        await testFleet(storage, {}, { HETZNER_TOKEN: "synthetic-token" }).alarm();
+        // oxlint-disable-next-line vitest/no-conditional-expect -- this table case exercises a lost action acknowledgement retry.
+        expect(retryFetch).not.toHaveBeenCalled();
+        // oxlint-disable-next-line vitest/no-conditional-expect -- this table case exercises a lost action acknowledgement retry.
+        expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupError).toContain(
+          "unresolved Hetzner delete acknowledgement",
+        );
+        // oxlint-disable-next-line vitest/no-conditional-expect -- this table case exercises a lost action acknowledgement retry.
+        expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.providerCleanup).toEqual(
+          failed.providerCleanup,
+        );
+      }
+    },
+  );
+
+  it.each([
+    ["cleanup owner", { cleanupStartedAt: "2099-01-01T00:00:00Z" }],
+    ["lease incarnation", { createdAt: "2099-01-01T00:00:00Z" }],
+    ["generation", { createAttemptGeneration: "replacement-generation" }],
+    ["server", { serverID: 999, cloudID: "999" }],
+    ["provider", { provider: "aws" }],
+    ["owner", { owner: "mallory@example.com" }],
+  ])(
+    "fences stale Hetzner action evidence and completion after %s changes",
+    async (_name, replacement) => {
+      const storage = new MemoryStorage();
+      const lease = testLease({ owner: "alice@example.com", org: "example-org" });
+      storage.seed(`lease:${lease.id}`, lease);
+      let changed: LeaseRecord | undefined;
+      const requests: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          requests.push(`${init?.method} ${new URL(String(input)).pathname}`);
+          if (init?.method === "DELETE") {
+            changed = {
+              ...structuredClone(storage.value<LeaseRecord>(`lease:${lease.id}`)!),
+              ...replacement,
+            };
+            storage.seed(`lease:${lease.id}`, changed);
+            return jsonResponse({
+              action: {
+                id: 456,
+                command: "delete_server",
+                status: "success",
+                resources: [{ id: 123, type: "server" }],
+              },
+            });
+          }
+          return jsonResponse({
+            server: {
+              id: 123,
+              name: lease.serverName,
+              labels: {
+                crabbox: "true",
+                created_by: "crabbox",
+                provider: "hetzner",
+                lease: lease.id,
+                slug: lease.slug,
+                owner: providerLabelValue(lease.owner),
+              },
+            },
+          });
+        }),
+      );
+      await testFleet(storage, {}, { HETZNER_TOKEN: "synthetic-token" }).alarm();
+      expect(changed).toBeDefined();
+      expect(storage.value(`lease:${lease.id}`)).toEqual(changed);
+      expect(changed?.providerCleanup?.action).toBeUndefined();
+      expect(requests).toEqual(["GET /v1/servers/123", "DELETE /v1/servers/123"]);
+    },
+  );
+
+  it("fences stale Hetzner final publication after key cleanup returns", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      owner: "alice@example.com",
+      org: "example-org",
+      providerKeyCleanupPending: true,
+      providerKeyCleanupID: "7",
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    let changed: LeaseRecord | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "DELETE") {
+          changed = {
+            ...structuredClone(storage.value<LeaseRecord>(`lease:${lease.id}`)!),
+            cloudID: "999",
+            serverID: 999,
+          };
+          storage.seed(`lease:${lease.id}`, changed);
+          return new Response(null, { status: 204 });
+        }
+        return jsonResponse({ error: { code: "not_found" } }, 404);
+      }),
+    );
+    await testFleet(storage, {}, { HETZNER_TOKEN: "synthetic-token" }).alarm();
+    expect(changed?.providerCleanup?.confirmation?.method).toBe("already-absent");
+    expect(storage.value(`lease:${lease.id}`)).toEqual(changed);
+    expect(changed?.providerKeyCleanupPending).toBe(true);
+    expect(changed?.state).toBe("active");
+  });
+
+  it.each(["none", "after failure", "during create"])(
+    "retries real Hetzner key-only cleanup after definite create rejection (retention: %s)",
+    async (retention) => {
+      const storage = new MemoryStorage();
+      const leaseID = "cbx_abcdef123456";
+      const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+      const env = { HETZNER_TOKEN: "synthetic-token" };
+      const fleet = testFleet(storage, {}, env);
+      const release = (remove: boolean) =>
+        fleet.fetch(
+          request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: remove } }),
+        );
+      const requests: string[] = [];
+      const retentionResponses: number[] = [];
+      let keyDeletes = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const path = new URL(String(input)).pathname;
+          const method = init?.method ?? "GET";
+          requests.push(`${method} ${path}`);
+          if (method === "GET" && path === "/v1/server_types")
+            return jsonResponse({ server_types: [] });
+          if (method === "GET" && path === "/v1/ssh_keys") return jsonResponse({ ssh_keys: [] });
+          if (method === "POST" && path === "/v1/ssh_keys") {
+            const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+            return jsonResponse({ ssh_key: { ...body, id: 7 } });
+          }
+          if (method === "POST" && path === "/v1/servers") {
+            if (retention === "during create")
+              retentionResponses.push((await release(false)).status);
+            return jsonResponse(
+              { error: { code: "invalid_input", message: "invalid server configuration" } },
+              400,
+            );
+          }
+          if (method === "DELETE" && path === "/v1/ssh_keys/7") {
+            keyDeletes++;
+            return keyDeletes <= 2
+              ? jsonResponse({ error: { code: "server_error" } }, 503)
+              : new Response(null, { status: 204 });
+          }
+          throw new Error(`unexpected request ${method} ${path}`);
+        }),
+      );
+      const create = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers,
+          body: {
+            leaseID,
+            provider: "hetzner",
+            target: "linux",
+            serverType: "cx23",
+            sshPublicKey: "ssh-ed25519 key-only-test",
+          },
+        }),
+      );
+      expect(create.status).toBe(500);
+      expect(keyDeletes).toBe(1);
+      const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+      expect(failed).toMatchObject({
+        serverID: 0,
+        cloudID: "",
+        provisioningResourceMayExist: false,
+        providerKeyCleanupPending: true,
+        providerKeyCleanupID: "7",
+      });
+      expect(failed.provisioningRequestStartedAt).toBeUndefined();
+      expect(failed.providerCleanup).toBeUndefined();
+      if (retention === "after failure") retentionResponses.push((await release(false)).status);
+      await fleet.alarm();
+      expect(keyDeletes).toBe(1);
+      expect(retentionResponses).toEqual(retention === "none" ? [] : [200]);
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.provisioningResourceMayExist).toBe(
+        false,
+      );
+      expect((await release(true)).status).toBe(200);
+      await fleet.alarm();
+      const retry = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+      expect(keyDeletes).toBe(2);
+      expect(retry).toMatchObject({
+        state: "released",
+        provisioningResourceMayExist: false,
+        providerKeyCleanupPending: true,
+        providerKeyCleanupID: "7",
+        cleanupError: expect.stringContaining("http 503"),
+      });
+      expect(retry.providerCleanup).toBeUndefined();
+      storage.seed(`lease:${leaseID}`, {
+        ...retry,
+        cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+      });
+      await testFleet(storage, {}, env).alarm();
+      const inspect = await fleet.fetch(request("GET", `/v1/leases/${leaseID}`, { headers }));
+      expect(inspect.status).toBe(200);
+      expect(await inspect.json()).toMatchObject({
+        lease: { cleanupStatus: "complete", state: "released", serverID: 0, cloudID: "" },
+      });
+      const complete = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+      expect(complete.providerKeyCleanupPending).toBeUndefined();
+      expect(complete.providerKeyCleanupID).toBeUndefined();
+      expect(complete.providerCleanup).toBeUndefined();
+      expect(keyDeletes).toBe(3);
+      expect(requests.filter((value) => value.includes("/servers"))).toEqual(["POST /v1/servers"]);
+      expect(requests.filter((value) => value.startsWith("DELETE"))).toEqual(
+        Array(3).fill("DELETE /v1/ssh_keys/7"),
+      );
+    },
+  );
+
+  it.each([
+    ["resource uncertainty", { provisioningResourceMayExist: true }],
+    ["missing no-resource evidence", { provisioningResourceMayExist: undefined }],
+    ["retained legacy missing evidence", { provisioningResourceMayExist: undefined, keep: true }],
+    [
+      "unknown delete dispatch",
+      {
+        providerCleanup: {
+          version: 1,
+          provider: "hetzner",
+          leaseID: "cbx_abcdef123456",
+          serverID: 123,
+          dispatchStartedAt: "2026-01-01T00:00:00Z",
+        },
+      },
+    ],
+    ["conflicting cloud ID", { cloudID: "123" }],
+    ["outstanding request", { provisioningRequestStartedAt: "2026-01-01T00:00:00Z" }],
+    ["missing key ID", { providerKeyCleanupID: undefined }],
+    ["shared key", { providerKey: "shared-key" }],
+  ] as Array<[string, Partial<LeaseRecord>]>)(
+    "rejects real Hetzner key-only bypass with %s",
+    async (_name, fields) => {
+      const storage = new MemoryStorage();
+      const lease = testLease({
+        id: "cbx_abcdef123456",
+        owner: "alice@example.com",
+        org: "example-org",
+        state: "released",
+        serverID: 0,
+        cloudID: "",
+        providerKey: "crabbox-cbx-abcdef123456",
+        provisioningResourceMayExist: false,
+        providerKeyCleanupPending: true,
+        providerKeyCleanupID: "7",
+        releaseDeletesServer: true,
+        cleanupStartedAt: "2026-01-01T00:00:00Z",
+        cleanupClaimExpiresAt: "2026-01-01T00:00:00Z",
+        ...fields,
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      const fetchMock = vi.fn<() => Promise<Response>>(async () => {
+        throw new Error("no provider requests allowed");
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const fleet = testFleet(storage, {}, { HETZNER_TOKEN: "synthetic-token" });
+      // Invoke the cleanup phase directly so unrelated interrupted-create recovery cannot run.
+      await (fleet as unknown as { expireLeases(): Promise<void> }).expireLeases();
+      expect(fetchMock).not.toHaveBeenCalled();
+      const failed = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+      expect(failed.providerKeyCleanupPending).toBe(true);
+      expect(failed.providerCleanup).toEqual(lease.providerCleanup);
+      expect(failed.cleanupError).toContain("exact server identity");
+    },
+  );
+
+  it.each(["owner", "resource evidence", "journal"])(
+    "fences real Hetzner key-only mutation after %s changes",
+    async (change) => {
+      const storage = new MemoryStorage();
+      const lease = testLease({
+        id: "cbx_abcdef123456",
+        providerKey: "crabbox-cbx-abcdef123456",
+        state: "released",
+        serverID: 0,
+        cloudID: "",
+        provisioningResourceMayExist: false,
+        providerKeyCleanupPending: true,
+        providerKeyCleanupID: "7",
+        releaseDeletesServer: true,
+        cleanupStartedAt: "2026-01-01T00:00:00Z",
+        cleanupClaimExpiresAt: "2026-01-01T00:00:00Z",
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      const provider = new HetznerProvider({ HETZNER_TOKEN: "synthetic-token" } as Env);
+      const release = provider.releaseLease.bind(provider);
+      let replacement: LeaseRecord | undefined;
+      vi.spyOn(provider, "releaseLease").mockImplementation(async (claimed, context) => {
+        replacement = { ...structuredClone(storage.value<LeaseRecord>(`lease:${lease.id}`)!) };
+        if (change === "owner") replacement.cleanupStartedAt = "2099-01-01T00:00:00Z";
+        if (change === "resource evidence") replacement.provisioningResourceMayExist = true;
+        if (change === "journal")
+          replacement.providerCleanup = {
+            version: 1,
+            provider: "hetzner",
+            leaseID: lease.id,
+            serverID: 123,
+            dispatchStartedAt: "2026-01-01T00:00:00Z",
+          };
+        storage.seed(`lease:${lease.id}`, replacement);
+        await release(claimed, context);
+      });
+      const fetchMock = vi.fn<() => Promise<Response>>(
+        async () => new Response(null, { status: 204 }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      await testFleet(storage, { hetzner: provider }).alarm();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.providerKeyCleanupPending).toBe(true);
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.providerCleanup).toEqual(
+        replacement?.providerCleanup,
+      );
+    },
+  );
+
   it("treats an already-absent Hetzner server as successful cleanup", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => jsonResponse({ error: { code: "not_found" } }, 404)),
     );
-    const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
+    const provider = testHetznerCleanupProvider();
     const lease = testLease({
       provider: "hetzner",
       serverID: 123,
@@ -6075,6 +6593,9 @@ describe("fleet lease identity and idle", () => {
         const url = new URL(String(input));
         const method = init?.method ?? "GET";
         requests.push(`${method} ${url.pathname}`);
+        if (method === "GET" && requests.includes("DELETE /v1/servers/123")) {
+          return jsonResponse({ error: { code: "not_found" } }, 404);
+        }
         if (method === "GET") {
           return jsonResponse({
             server: {
@@ -6087,6 +6608,7 @@ describe("fleet lease identity and idle", () => {
                 crabbox: "true",
                 created_by: "crabbox",
                 provider: "hetzner",
+                owner: providerLabelValue(testLease({}).owner),
                 lease: "cbx_000000000000",
                 slug: "blue-lobster",
               },
@@ -6099,7 +6621,7 @@ describe("fleet lease identity and idle", () => {
         return new Response(null, { status: 204 });
       }),
     );
-    const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
+    const provider = testHetznerCleanupProvider();
 
     await expect(
       provider.releaseLease(
@@ -6110,6 +6632,7 @@ describe("fleet lease identity and idle", () => {
     expect(requests).toEqual([
       "GET /v1/servers/123",
       "DELETE /v1/servers/123",
+      "GET /v1/servers/123",
       "DELETE /v1/ssh_keys/7",
     ]);
   });
@@ -6121,6 +6644,19 @@ describe("fleet lease identity and idle", () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input));
         requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
+        if (init?.method === "GET" && requests.includes("DELETE /v1/servers/123")) {
+          return jsonResponse({ error: { code: "not_found" } }, 404);
+        }
+        if (init?.method === "DELETE" && url.pathname === "/v1/servers/123") {
+          return jsonResponse({
+            action: {
+              id: 456,
+              command: "delete_server",
+              status: "success",
+              resources: [{ id: 123, type: "server" }],
+            },
+          });
+        }
         if ((init?.method ?? "GET") === "GET") {
           return jsonResponse({
             server: {
@@ -6133,6 +6669,7 @@ describe("fleet lease identity and idle", () => {
                 crabbox: "true",
                 created_by: "crabbox",
                 provider: "hetzner",
+                owner: providerLabelValue(testLease({}).owner),
                 lease: "cbx_000000000000",
                 slug: "blue-lobster",
               },
@@ -6142,7 +6679,7 @@ describe("fleet lease identity and idle", () => {
         return new Response(null, { status: 204 });
       }),
     );
-    const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
+    const provider = testHetznerCleanupProvider();
     const lease = testLease({
       provider: "hetzner",
       serverID: 123,
@@ -6155,6 +6692,7 @@ describe("fleet lease identity and idle", () => {
     expect(requests).toEqual([
       "GET /v1/servers/123",
       "DELETE /v1/servers/123",
+      "GET /v1/servers/123",
       "DELETE /v1/ssh_keys/7",
     ]);
   });
@@ -6169,6 +6707,19 @@ describe("fleet lease identity and idle", () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input));
         requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
+        if (init?.method === "GET" && requests.includes("DELETE /v1/servers/123")) {
+          return jsonResponse({ error: { code: "not_found" } }, 404);
+        }
+        if (init?.method === "DELETE" && url.pathname === "/v1/servers/123") {
+          return jsonResponse({
+            action: {
+              id: 456,
+              command: "delete_server",
+              status: "success",
+              resources: [{ id: 123, type: "server" }],
+            },
+          });
+        }
         return jsonResponse({
           server: {
             id: 123,
@@ -6186,7 +6737,7 @@ describe("fleet lease identity and idle", () => {
         });
       }),
     );
-    const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
+    const provider = testHetznerCleanupProvider();
     const lease = testLease({
       provider: "hetzner",
       serverID: 123,
@@ -6209,6 +6760,19 @@ describe("fleet lease identity and idle", () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input));
         requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
+        if (init?.method === "GET" && requests.includes("DELETE /v1/servers/123")) {
+          return jsonResponse({ error: { code: "not_found" } }, 404);
+        }
+        if (init?.method === "DELETE" && url.pathname === "/v1/servers/123") {
+          return jsonResponse({
+            action: {
+              id: 456,
+              command: "delete_server",
+              status: "success",
+              resources: [{ id: 123, type: "server" }],
+            },
+          });
+        }
         if ((init?.method ?? "GET") === "GET") {
           return jsonResponse({
             server: {
@@ -6221,6 +6785,7 @@ describe("fleet lease identity and idle", () => {
                 crabbox: "true",
                 created_by: "crabbox",
                 provider: "hetzner",
+                owner: providerLabelValue(testLease({}).owner),
                 lease: "cbx_000000000000",
                 slug: slug.slice(0, 63),
               },
@@ -6230,7 +6795,7 @@ describe("fleet lease identity and idle", () => {
         return new Response(null, { status: 204 });
       }),
     );
-    const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
+    const provider = testHetznerCleanupProvider();
 
     await expect(
       provider.releaseLease(
@@ -6245,6 +6810,7 @@ describe("fleet lease identity and idle", () => {
     expect(requests).toEqual([
       "GET /v1/servers/123",
       "DELETE /v1/servers/123",
+      "GET /v1/servers/123",
       "DELETE /v1/ssh_keys/7",
     ]);
   });
@@ -6254,7 +6820,12 @@ describe("fleet lease identity and idle", () => {
       "canonical name",
       "crabbox-cbx-000000000000",
       "released",
-      ["GET /v1/servers/123", "DELETE /v1/servers/123", "DELETE /v1/ssh_keys/7"],
+      [
+        "GET /v1/servers/123",
+        "DELETE /v1/servers/123",
+        "GET /v1/servers/123",
+        "DELETE /v1/ssh_keys/7",
+      ],
     ],
     [
       "unexpected name",
@@ -6271,6 +6842,19 @@ describe("fleet lease identity and idle", () => {
         vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
           const url = new URL(String(input));
           requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
+          if (init?.method === "GET" && requests.includes("DELETE /v1/servers/123")) {
+            return jsonResponse({ error: { code: "not_found" } }, 404);
+          }
+          if (init?.method === "DELETE" && url.pathname === "/v1/servers/123") {
+            return jsonResponse({
+              action: {
+                id: 456,
+                command: "delete_server",
+                status: "success",
+                resources: [{ id: 123, type: "server" }],
+              },
+            });
+          }
           if ((init?.method ?? "GET") === "GET") {
             return jsonResponse({
               server: {
@@ -6290,7 +6874,7 @@ describe("fleet lease identity and idle", () => {
           return new Response(null, { status: 204 });
         }),
       );
-      const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
+      const provider = testHetznerCleanupProvider();
       const outcome = await provider
         .releaseLease(
           testLease({
@@ -6310,57 +6894,19 @@ describe("fleet lease identity and idle", () => {
     },
   );
 
-  it("recovers an unknown Hetzner server before deleting its retained SSH key", async () => {
-    const requests: string[] = [];
-    let labelSelector: string | null = null;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = new URL(String(input));
-        requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
-        if ((init?.method ?? "GET") === "GET") {
-          labelSelector = url.searchParams.get("label_selector");
-          return jsonResponse({
-            servers: [
-              {
-                id: 123,
-                name: "crabbox-rollback",
-                status: "running",
-                server_type: { name: "cx23" },
-                public_net: { ipv4: { ip: "192.0.2.1" } },
-                labels: {
-                  crabbox: "true",
-                  created_by: "crabbox",
-                  provider: "hetzner",
-                  lease: "cbx_abcdef123456",
-                  slug: "rollback",
-                },
-              },
-            ],
-          });
-        }
-        return new Response(null, { status: 204 });
-      }),
-    );
-    const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
+  it("retains unknown Hetzner provisioning identity without rediscovery or key deletion", async () => {
+    const fetchMock = vi.fn<() => Promise<Response>>(async () => jsonResponse({ servers: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = testHetznerCleanupProvider();
     const lease = testLease({
-      id: "cbx_abcdef123456",
-      slug: "rollback",
-      provider: "hetzner",
       serverID: 0,
+      cloudID: "",
       provisioningResourceMayExist: true,
       providerKeyCleanupPending: true,
       providerKeyCleanupID: "7",
     });
-
-    await expect(provider.releaseLease(lease)).resolves.toBeUndefined();
-
-    expect(labelSelector).toBe("crabbox=true,lease=cbx_abcdef123456");
-    expect(requests).toEqual([
-      "GET /v1/servers",
-      "DELETE /v1/servers/123",
-      "DELETE /v1/ssh_keys/7",
-    ]);
+    await expect(provider.releaseLease(lease)).rejects.toThrow("exact server identity");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("retains a Hetzner SSH key when persisted server cleanup fails", async () => {
@@ -6370,10 +6916,23 @@ describe("fleet lease identity and idle", () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input));
         requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
+        if (init?.method === "GET" && requests.includes("DELETE /v1/servers/123")) {
+          return jsonResponse({ error: { code: "not_found" } }, 404);
+        }
+        if (init?.method === "DELETE" && url.pathname === "/v1/servers/123") {
+          return jsonResponse({
+            action: {
+              id: 456,
+              command: "delete_server",
+              status: "success",
+              resources: [{ id: 123, type: "server" }],
+            },
+          });
+        }
         return jsonResponse({ error: { code: "server_error" } }, 503);
       }),
     );
-    const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
+    const provider = testHetznerCleanupProvider();
     const lease = testLease({
       provider: "hetzner",
       serverID: 123,
@@ -6749,27 +7308,10 @@ describe("fleet lease identity and idle", () => {
   it("only deletes provider keys canonically bound to the released lease", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () =>
-        jsonResponse({
-          server: {
-            id: 123,
-            name: "crabbox-blue-lobster",
-            status: "running",
-            server_type: { name: "cx23" },
-            public_net: { ipv4: { ip: "192.0.2.1" } },
-            labels: {
-              crabbox: "true",
-              created_by: "crabbox",
-              provider: "hetzner",
-              lease: "cbx_abcdef123456",
-              slug: "blue-lobster",
-            },
-          },
-        }),
-      ),
+      vi.fn(async () => jsonResponse({ error: { code: "not_found" } }, 404)),
     );
     const providers = [
-      new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env),
+      testHetznerCleanupProvider(),
       new AWSProvider({} as Env, "eu-west-1", new MemoryStorage()),
     ];
     await Promise.all(
@@ -6803,7 +7345,10 @@ describe("fleet lease identity and idle", () => {
           }),
         );
         expect(deleteSSHKey).toHaveBeenCalledOnce();
-        expect(deleteSSHKey).toHaveBeenCalledWith("crabbox-cbx-abcdef123456", "cbx_abcdef123456");
+        expect(deleteSSHKey.mock.calls[0]?.slice(0, 2)).toEqual([
+          "crabbox-cbx-abcdef123456",
+          "cbx_abcdef123456",
+        ]);
       }),
     );
   });
@@ -20020,14 +20565,18 @@ describe("fleet lease identity and idle", () => {
               );
               return { providerResourceID: rawID };
             },
-            onReleaseLease(observed, context) {
+            async onReleaseLease(observed, context) {
               calls.push("CAS");
               expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.providerResourceID).toBe(
                 rawID,
               );
               calls.push("GET");
               expect(observed.providerResourceID).toBe(rawID);
-              expect(context).toBeUndefined();
+              expect(context).toEqual({
+                assertCleanupOwner: expect.any(Function),
+                saveCleanupEvidence: expect.any(Function),
+              });
+              await expect(context!.assertCleanupOwner!()).resolves.toBeUndefined();
             },
           },
           async () => {
@@ -20059,6 +20608,143 @@ describe("fleet lease identity and idle", () => {
         state: source === "expiry" ? "expired" : "released",
         providerResourceID: rawID,
       });
+      const completed = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+      expect(completed.cleanupStartedAt).toBeUndefined();
+      expect(completed.cleanupClaimExpiresAt).toBeUndefined();
+      expect(completed.cleanupError).toBeUndefined();
+      expect(completed.releaseDeletesServer).toBeUndefined();
+    },
+  );
+
+  it.each(
+    (["gcp", "hetzner"] as const).flatMap((provider) =>
+      (["unchanged", "cleanup claim", "provisioning owner"] as const).map((drift) => ({
+        provider,
+        drift,
+      })),
+    ),
+  )(
+    "publishes $provider cleanup only under its original owner after $drift",
+    async ({ provider, drift }) => {
+      const storage = new MemoryStorage();
+      const lease =
+        provider === "gcp"
+          ? legacyGCPLease({ expiresAt: new Date(Date.now() - 60_000).toISOString() })
+          : testLease({
+              owner: "alice@example.com",
+              org: "example-org",
+              providerKeyCleanupOwned: false,
+            });
+      storage.seed(`lease:${lease.id}`, lease);
+      const rawID = "9223372036854775807";
+      const observe = vi.fn<() => Promise<{ providerResourceID: string }>>(async () => ({
+        providerResourceID: rawID,
+      }));
+      const gcp = fakeProvider(undefined, {
+        provider: "gcp",
+        onObserveLegacyCleanupIdentity: observe,
+        async onReleaseLease(observed, context) {
+          expect(observed.providerResourceID).toBe(rawID);
+          expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.providerResourceID).toBe(rawID);
+          expect(context?.assertCleanupOwner).toEqual(expect.any(Function));
+          await context!.assertCleanupOwner!();
+        },
+      });
+      const cloudProvider =
+        provider === "gcp" ? gcp : new HetznerProvider({ HETZNER_TOKEN: "synthetic-token" } as Env);
+      const release = cloudProvider.releaseLease.bind(cloudProvider);
+      let beforePublication: LeaseRecord | undefined;
+      const releaseSpy = vi
+        .spyOn(cloudProvider, "releaseLease")
+        .mockImplementation(async (observed, context) => {
+          await release(observed, context);
+          beforePublication = structuredClone(storage.value<LeaseRecord>(`lease:${lease.id}`)!);
+          if (drift === "cleanup claim") {
+            beforePublication.cleanupStartedAt = new Date(Date.now() + 1_000).toISOString();
+            beforePublication.cleanupClaimExpiresAt = new Date(Date.now() + 61_000).toISOString();
+            storage.seed(`lease:${lease.id}`, beforePublication);
+          } else if (drift === "provisioning owner") {
+            const now = Date.now();
+            storage.seed<LeaseProvisioningOperation>(provisioningOperationKey(lease.id), {
+              schema: 1,
+              leaseID: lease.id,
+              operationID: lease.id,
+              generation: "replacement-generation",
+              scope: `${provider}:test`,
+              owner: lease.owner,
+              org: lease.org,
+              provider,
+              createdAt: now,
+              deadline: now + 60_000,
+              revision: 0,
+              step: { phase: "provisioning", attempt: 0, state: {}, nextWake: now + 60_000 },
+            });
+          }
+        });
+      const requests: string[] = [];
+      let deleted = false;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          requests.push(`${init?.method} ${new URL(String(input)).pathname}`);
+          if (init?.method === "DELETE") {
+            // oxlint-disable-next-line vitest/no-conditional-expect -- intent must be durable before dispatch.
+            expect(
+              storage.value<LeaseRecord>(`lease:${lease.id}`)?.providerCleanup?.dispatchStartedAt,
+            ).toBeTruthy();
+            deleted = true;
+            return jsonResponse({
+              action: {
+                id: 456,
+                command: "delete_server",
+                status: "success",
+                resources: [{ id: 123, type: "server" }],
+              },
+            });
+          }
+          if (deleted) return jsonResponse({ error: { code: "not_found" } }, 404);
+          return jsonResponse({
+            server: {
+              id: 123,
+              name: lease.serverName,
+              labels: {
+                crabbox: "true",
+                created_by: "crabbox",
+                provider: "hetzner",
+                lease: lease.id,
+                slug: lease.slug,
+                owner: providerLabelValue(lease.owner),
+              },
+            },
+          });
+        }),
+      );
+      const fleet = testFleet(storage, { [provider]: cloudProvider });
+      await fleet.alarm();
+      expect(releaseSpy).toHaveBeenCalledTimes(1);
+      expect(observe).toHaveBeenCalledTimes(provider === "gcp" ? 1 : 0);
+      expect(beforePublication).toBeDefined();
+      expect(beforePublication?.providerResourceID).toBe(provider === "gcp" ? rawID : undefined);
+      expect(beforePublication?.providerCleanup?.confirmation?.method).toBe(
+        provider === "hetzner" ? "delete-action-success-and-server-absent" : undefined,
+      );
+      expect(requests).toEqual(
+        provider === "hetzner"
+          ? ["GET /v1/servers/123", "DELETE /v1/servers/123", "GET /v1/servers/123"]
+          : [],
+      );
+      const current = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+      const completedState = expect.objectContaining({ state: "expired" });
+      expect(current).toEqual(drift === "unchanged" ? completedState : beforePublication);
+      expect(current.cleanupStartedAt).toBe(
+        drift === "unchanged" ? undefined : beforePublication!.cleanupStartedAt,
+      );
+      expect(current.cleanupClaimExpiresAt).toBe(
+        drift === "unchanged" ? undefined : beforePublication!.cleanupClaimExpiresAt,
+      );
+      expect(current.cleanupError).toBeUndefined();
+      expect(current.providerResourceID).toBe(beforePublication!.providerResourceID);
+      expect(current.providerCleanup).toEqual(beforePublication!.providerCleanup);
     },
   );
 
@@ -43029,7 +43715,7 @@ function fakeProvider(
     ) => Promise<LeaseImageIdentity | undefined> | LeaseImageIdentity | undefined;
     onObserveLegacyCleanupIdentity?: (
       lease: LeaseRecord,
-      context?: { resourceIdentity?: string },
+      context?: Parameters<HetznerProvider["releaseLease"]>[1],
     ) =>
       | Promise<{ providerResourceID: string } | undefined>
       | { providerResourceID: string }
@@ -43063,7 +43749,7 @@ function fakeProvider(
       | undefined;
     onReleaseLease?: (
       lease: LeaseRecord,
-      context?: { resourceIdentity?: string },
+      context?: Parameters<HetznerProvider["releaseLease"]>[1],
     ) => Promise<void> | void;
     onDeleteOwnedServer?: (lease: LeaseRecord) => Promise<void> | void;
     onRecoverServer?: (
@@ -43146,7 +43832,7 @@ function fakeProvider(
       ? {
           async observeLegacyCleanupIdentity(
             lease: LeaseRecord,
-            context?: { resourceIdentity?: string },
+            context?: Parameters<HetznerProvider["releaseLease"]>[1],
           ) {
             return await result.onObserveLegacyCleanupIdentity?.(lease, context);
           },
@@ -43313,7 +43999,10 @@ function fakeProvider(
           },
         }
       : {}),
-    async releaseLease(lease: LeaseRecord, context?: { resourceIdentity?: string }) {
+    async releaseLease(
+      lease: LeaseRecord,
+      context?: Parameters<HetznerProvider["releaseLease"]>[1],
+    ) {
       await result.onReleaseLease?.(lease, context);
       await onDelete?.(
         (lease.provider ?? result.provider) === "hetzner" ? String(lease.serverID) : lease.cloudID,
@@ -44338,4 +45027,17 @@ function decodeUserTokenPayload(token: string): {
     githubCredential: string;
     owner: string;
   };
+}
+
+function testHetznerCleanupProvider(): HetznerProvider {
+  const provider = new HetznerProvider({ HETZNER_TOKEN: "test-token" } as Env);
+  const release = provider.releaseLease.bind(provider);
+  vi.spyOn(provider, "releaseLease").mockImplementation(async (lease) => {
+    await release(lease, {
+      saveCleanupEvidence: async (evidence) => {
+        lease.providerCleanup = structuredClone(evidence);
+      },
+    });
+  });
+  return provider;
 }
