@@ -15018,6 +15018,38 @@ describe("fleet lease identity and idle", () => {
     expect(new TextEncoder().encode(maximumUnicode).byteLength).toBeLessThan(2048);
   });
 
+  it("preserves exact length-framed typed desired key vectors", async () => {
+    const input = {
+      org: "example-org",
+      owner: "alice@example.com",
+      key: "builders",
+      compatibilityKey: "linux-16-vcpu",
+      identity: {
+        schema: "crabbox-ready-pool-identity/v1",
+        image: { provider: "aws", scope: "us-east-1", id: "ami-0123456789abcdef0" },
+        architecture: "amd64",
+        seedDigest: "sha256:8b76ec429b7e084f6af6c6a2de4be7faf09f872c892513d4ce97d2f055e44e20",
+        cacheCompatibility: "node-22",
+      } satisfies ReadyPoolIdentityV1,
+    };
+    expect(await readyPoolDesiredCapacityKeyV2(input)).toBe(
+      "typed-ready-pool-v2-desired:sha256:ff61c2deb49060ea3e5d8dca7da0a60e3b60e6ac42b419b8f1e9f6a47cfaf8ac",
+    );
+    expect(
+      await readyPoolDesiredCapacityKeyV2({
+        ...input,
+        org: "example:org",
+        owner: "alice\u2028東京@example.com",
+        compatibilityKey: undefined,
+      }),
+    ).toBe(
+      "typed-ready-pool-v2-desired:sha256:6e1ce2699c9bec4ed83cdfbb73eb62a22dc409b078dfb3849261309cc15c82c4",
+    );
+    await expect(readyPoolDesiredCapacityKeyV2({ ...input, key: "\ud800" })).rejects.toThrow(
+      "ready-pool desired field 3 must be valid UTF-8",
+    );
+  });
+
   it("drains typed entries immediately when their authoritative lease image or return identity changes", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage, {
