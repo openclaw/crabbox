@@ -10,6 +10,7 @@ import {
   validatedCIDRs,
   type LeaseConfig,
 } from "./config";
+import { ExpiringTokenCache, type ExpiringToken } from "./expiring-token-cache";
 import { leaseProviderLabels, providerLabelsOwnedByLease } from "./provider-labels";
 import {
   ProviderProvisioningCleanupError,
@@ -101,11 +102,6 @@ export function azureOwnedDeleteClaimKey(
   return ["provider:azure:delete-claim", providerScope, cloudID, leaseID]
     .map((part) => encodeURIComponent(part))
     .join(":");
-}
-
-interface TokenCache {
-  token: string;
-  expiresAt: number;
 }
 
 export interface AzureVM {
@@ -394,7 +390,7 @@ export class AzureClient {
   readonly image: string;
   readonly sshCIDRs: string[];
   readonly defaultLocation: string;
-  private cache?: TokenCache;
+  private readonly tokenCache = new ExpiringTokenCache();
   private ephemeralOSSupport?: Map<string, boolean>;
   private readonly deferredCleanup:
     | ((request: AzureDeferredCleanupRequest) => Promise<void>)
@@ -2835,7 +2831,10 @@ export class AzureClient {
   }
 
   private async token(): Promise<string> {
-    if (this.cache && this.cache.expiresAt > Date.now() + 30_000) return this.cache.token;
+    return this.tokenCache.get(Date.now() + 30_000, () => this.loadToken());
+  }
+
+  private async loadToken(): Promise<ExpiringToken> {
     const body = new URLSearchParams({
       grant_type: "client_credentials",
       client_id: this.clientID,
@@ -2855,11 +2854,10 @@ export class AzureClient {
     }
     const json = (await response.json()) as { access_token?: string; expires_in?: number };
     if (!json.access_token) throw new Error("azure token response missing access_token");
-    this.cache = {
+    return {
       token: json.access_token,
       expiresAt: Date.now() + (json.expires_in ?? 3600) * 1000,
     };
-    return this.cache.token;
   }
 }
 

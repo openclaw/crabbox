@@ -32,6 +32,14 @@ function metadataJSON(body: unknown, init: ResponseInit = {}): Response {
   return metadataResponse(JSON.stringify(body), { ...init, headers });
 }
 
+function seedGCPAuthCache(
+  client: GCPClient,
+  token = "test-token",
+  expiresAt = Math.trunc(Date.now() / 1000) + 3600,
+): void {
+  Reflect.set(Reflect.get(client, "tokenCache"), "cached", { token, expiresAt });
+}
+
 describe("gcp provider", () => {
   const env: Env = {
     FLEET: {} as DurableObjectNamespace,
@@ -271,6 +279,119 @@ describe("gcp provider", () => {
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(60_000);
   });
 
+  it("shares one metadata token exchange across concurrent resource reads", async () => {
+    const client = new GCPClient({
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    });
+    let tokenMints = 0;
+    const authorizations: string[] = [];
+    client.fetcher = async (input, init) => {
+      if (String(input).includes("metadata.google.internal")) {
+        tokenMints += 1;
+        return metadataJSON({ access_token: "parallel-token", expires_in: 3600 });
+      }
+      authorizations.push(new Headers(init?.headers).get("authorization") ?? "");
+      return Response.json({ items: {} });
+    };
+    await Promise.all(Array.from({ length: 4 }, () => client.listCrabboxServers()));
+    expect(tokenMints).toBe(1);
+    expect(authorizations).toEqual(Array(4).fill("Bearer parallel-token"));
+  });
+
+  it("retries after a shared metadata denial without reusing the failed refresh", async () => {
+    const client = new GCPClient({
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    });
+    let exchanges = 0;
+    client.fetcher = async (input) => {
+      if (String(input).includes("metadata.google.internal")) {
+        exchanges += 1;
+        return exchanges === 1
+          ? metadataResponse("denied", { status: 401, statusText: "Unauthorized" })
+          : metadataJSON({ access_token: "recovered", expires_in: 3600 });
+      }
+      return Response.json({ items: {} });
+    };
+    const failures = await Promise.allSettled([
+      client.listCrabboxServers(),
+      client.listCrabboxServers(),
+    ]);
+    expect(failures.map((result) => result.status)).toEqual(["rejected", "rejected"]);
+    expect(exchanges).toBe(1);
+    await expect(client.listCrabboxServers()).resolves.toEqual([]);
+    expect(exchanges).toBe(2);
+  });
+
+  it("shares the bounded metadata retry sequence between concurrent callers", async () => {
+    vi.useFakeTimers();
+    const client = new GCPClient({
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_GCP_PROJECT: "default-project",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    });
+    let exchanges = 0;
+    client.fetcher = async (input) => {
+      if (String(input).includes("metadata.google.internal")) {
+        exchanges += 1;
+        return exchanges === 1
+          ? metadataResponse("busy", { status: 503 })
+          : metadataJSON({ access_token: "recovered", expires_in: 3600 });
+      }
+      return Response.json({ items: {} });
+    };
+    const calls = Promise.all(Array.from({ length: 4 }, () => client.listCrabboxServers()));
+    await vi.runAllTimersAsync();
+    await expect(calls).resolves.toEqual([[], [], [], []]);
+    expect(exchanges).toBe(2);
+  });
+
+  it("shares a service-account exchange without changing the JWT credential source", async () => {
+    const keys = await crypto.subtle.generateKey(
+      {
+        name: "RSASSA-PKCS1-v1_5",
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: "SHA-256",
+      },
+      true,
+      ["sign", "verify"],
+    );
+    const bytes = new Uint8Array(await crypto.subtle.exportKey("pkcs8", keys.privateKey));
+    const encoded = btoa(String.fromCharCode(...bytes));
+    const client = new GCPClient({
+      ...env,
+      GCP_PRIVATE_KEY: `-----BEGIN PRIVATE KEY-----\n${encoded}\n-----END PRIVATE KEY-----`,
+    });
+    let exchanges = 0;
+    let grantType: string | null = null;
+    let assertion: string | null = null;
+    client.fetcher = async (input, init) => {
+      if (String(input) === "https://oauth2.googleapis.com/token") {
+        exchanges += 1;
+        const body = new URLSearchParams(String(init?.body));
+        grantType = body.get("grant_type");
+        assertion = body.get("assertion");
+        return Response.json({ access_token: "service-account-token", expires_in: 3600 });
+      }
+      expect(String(input)).toContain("compute.googleapis.com");
+      expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer service-account-token");
+      return Response.json({ items: {} });
+    };
+    await expect(
+      Promise.all(Array.from({ length: 4 }, () => client.listCrabboxServers())),
+    ).resolves.toEqual([[], [], [], []]);
+    expect(exchanges).toBe(1);
+    expect(grantType).toBe("urn:ietf:params:oauth:grant-type:jwt-bearer");
+    expect(String(assertion).split(".")).toHaveLength(3);
+  });
+
   it("refreshes metadata tokens at the five-minute cache boundary", async () => {
     const metadataEnv: Env = {
       FLEET: {} as DurableObjectNamespace,
@@ -279,10 +400,7 @@ describe("gcp provider", () => {
       CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
     };
     const client = new GCPClient(metadataEnv);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "expiring-token",
-      expiresAt: Math.trunc(Date.now() / 1000) + 300,
-    };
+    seedGCPAuthCache(client, "expiring-token", Math.trunc(Date.now() / 1000) + 300);
     const authorizations: string[] = [];
     let metadataCalls = 0;
     client.fetcher = async (input, init) => {
@@ -301,10 +419,7 @@ describe("gcp provider", () => {
 
   it("keeps service account key tokens until the one-minute cache boundary", async () => {
     const client = new GCPClient(env);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "cached-token",
-      expiresAt: Math.trunc(Date.now() / 1000) + 120,
-    };
+    seedGCPAuthCache(client, "cached-token", Math.trunc(Date.now() / 1000) + 120);
     const calls: Array<{ url: string; authorization: string }> = [];
     client.fetcher = async (input, init) => {
       calls.push({
@@ -355,10 +470,7 @@ describe("gcp provider", () => {
 
   it("treats only the exact zonal instance as absent", async () => {
     const client = new GCPClient(env);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
-    };
+    seedGCPAuthCache(client, "test-token");
     let message =
       "The resource 'projects/default-project/zones/us-central1-a/instances/crabbox-blue-lobster' was not found";
     client.fetcher = async () =>
@@ -373,10 +485,7 @@ describe("gcp provider", () => {
 
   it("treats only an exact missing instance DELETE as complete", async () => {
     const client = new GCPClient(env);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
-    };
+    seedGCPAuthCache(client, "test-token");
     let message =
       "The resource 'projects/default-project/zones/us-central1-a/instances/crabbox-blue-lobster' was not found";
     client.fetcher = async () =>
@@ -443,10 +552,7 @@ describe("gcp provider", () => {
 
   it("recovers when another create wins the shared firewall race", async () => {
     const client = new GCPClient(env);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
-    };
+    seedGCPAuthCache(client, "test-token");
     const calls: string[] = [];
     let firewallReads = 0;
     client.fetcher = async (input, init) => {
@@ -483,10 +589,7 @@ describe("gcp provider", () => {
   it("waits for a raced firewall insert before reconciling policy", async () => {
     vi.useFakeTimers();
     const client = new GCPClient(env);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
-    };
+    seedGCPAuthCache(client, "test-token");
     let firewallReads = 0;
     let firewallUpdates = 0;
     let operationWaits = 0;
@@ -534,10 +637,7 @@ describe("gcp provider", () => {
 
   it("lists Crabbox machines across aggregated GCP zones", async () => {
     const client = new GCPClient(env);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
-    };
+    seedGCPAuthCache(client, "test-token");
     client.fetcher = async (input) => {
       const url = new URL(String(input));
       expect(url.pathname).toBe("/compute/v1/projects/default-project/aggregated/instances");
@@ -603,10 +703,7 @@ describe("gcp provider", () => {
 
   it("recovers a lease only through its deterministic canonical instance", async () => {
     const client = new GCPClient(env);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
-    };
+    seedGCPAuthCache(client, "test-token");
     let leaseLabel = "cbx_abcdef123456";
     client.fetcher = async (input) => {
       const url = new URL(String(input));
@@ -641,10 +738,7 @@ describe("gcp provider", () => {
 
   it("recovers pre-upgrade fallback-zone instances by exact canonical name", async () => {
     const client = new GCPClient(env);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
-    };
+    seedGCPAuthCache(client, "test-token");
     const expectedName = leaseProviderName("cbx_abcdef123456", "blue-lobster");
     client.fetcher = async (input) => {
       const url = new URL(String(input));
@@ -685,10 +779,7 @@ describe("gcp provider", () => {
 
   it("rejects ambiguous exact-name fallback-zone recovery", async () => {
     const client = new GCPClient(env);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
-    };
+    seedGCPAuthCache(client, "test-token");
     const leaseID = "cbx_abcdef123456";
     const slug = "blue-lobster";
     const expectedName = leaseProviderName(leaseID, slug);
@@ -770,10 +861,7 @@ describe("gcp provider", () => {
 
   it("creates and deletes machine images through Compute Engine", async () => {
     const client = new GCPClient(env);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
-    };
+    seedGCPAuthCache(client, "test-token");
     const calls: Array<{ method: string; path: string; body: unknown }> = [];
     client.fetcher = async (input, init) => {
       const url = new URL(String(input));
@@ -818,10 +906,7 @@ describe("gcp provider", () => {
     "encodes bounded GCP ownership labels for checkpoint id %s",
     async (checkpointID) => {
       const client = new GCPClient(env);
-      (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-        token: "test-token",
-        expiresAt: Math.trunc(Date.now() / 1000) + 3600,
-      };
+      seedGCPAuthCache(client, "test-token");
       const ownership = {
         checkpointID,
         sourceLeaseID: "cbx_000000000001",
@@ -866,10 +951,7 @@ describe("gcp provider", () => {
 
   it("accepts only exact project and resource kind in checkpoint not-found responses", async () => {
     const client = new GCPClient(env);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
-    };
+    seedGCPAuthCache(client, "test-token");
     client.fetcher = async (input) => {
       const url = new URL(String(input));
       const resource = url.pathname.slice(url.pathname.indexOf("projects/"));
@@ -892,10 +974,7 @@ describe("gcp provider", () => {
 
   it("routes kind-specific snapshot reads and deletes to GCP snapshots", async () => {
     const client = new GCPClient(env);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
-    };
+    seedGCPAuthCache(client, "test-token");
     const calls: Array<{ method: string; path: string }> = [];
     client.fetcher = async (input, init) => {
       const url = new URL(String(input));
@@ -936,10 +1015,7 @@ describe("gcp provider", () => {
 
   it("creates instances from machine images without boot disk initialization", async () => {
     const client = new GCPClient(env);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
-    };
+    seedGCPAuthCache(client, "test-token");
     const calls: Array<{
       method: string;
       path: string;
@@ -1005,10 +1081,7 @@ describe("gcp provider", () => {
 
   it("creates instances from disk snapshots without forcing default disk size", async () => {
     const client = new GCPClient(env);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
-    };
+    seedGCPAuthCache(client, "test-token");
     const calls: Array<{
       method: string;
       path: string;

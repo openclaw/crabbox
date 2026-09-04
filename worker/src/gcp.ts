@@ -8,6 +8,7 @@ import {
   uniqueProviderMachineCandidates,
   type LeaseConfig,
 } from "./config";
+import { ExpiringTokenCache, type ExpiringToken } from "./expiring-token-cache";
 import {
   leaseProviderLabels,
   providerLabelValue,
@@ -38,11 +39,6 @@ const metadataTokenDeadlineMs = 60_000;
 const metadataTokenRequestTimeoutMs = 5_000;
 const metadataTokenRefreshSkewSeconds = 300;
 const serviceAccountTokenRefreshSkewSeconds = 60;
-
-interface TokenCache {
-  token: string;
-  expiresAt: number;
-}
 
 class GCPHTTPError extends Error {
   constructor(
@@ -112,7 +108,7 @@ export class GCPClient {
   readonly rootGB: number;
   readonly serviceAccount: string;
   fetcher: typeof fetch = (input, init) => fetch(input, init);
-  private cache?: TokenCache;
+  private readonly tokenCache = new ExpiringTokenCache();
 
   constructor(
     private readonly env: Env,
@@ -701,12 +697,14 @@ export class GCPClient {
       credentialSource === "metadata"
         ? metadataTokenRefreshSkewSeconds
         : serviceAccountTokenRefreshSkewSeconds;
-    if (this.cache && this.cache.expiresAt - refreshSkewSeconds > now) {
-      return this.cache.token;
-    }
-    if (credentialSource === "metadata") {
-      return this.metadataAccessToken();
-    }
+    return this.tokenCache.get(now + refreshSkewSeconds, () =>
+      credentialSource === "metadata"
+        ? this.metadataAccessToken()
+        : this.serviceAccountAccessToken(now),
+    );
+  }
+
+  private async serviceAccountAccessToken(now: number): Promise<ExpiringToken> {
     const assertion = await serviceAccountAssertion(this.env, now);
     const response = await this.fetcher(tokenURL, {
       method: "POST",
@@ -724,11 +722,10 @@ export class GCPClient {
     if (!response.ok || !data.access_token) {
       throw new Error(`gcp token: ${data.error ?? response.statusText}`);
     }
-    this.cache = { token: data.access_token, expiresAt: now + (data.expires_in ?? 3600) };
-    return data.access_token;
+    return { token: data.access_token, expiresAt: now + (data.expires_in ?? 3600) };
   }
 
-  private async metadataAccessToken(): Promise<string> {
+  private async metadataAccessToken(): Promise<ExpiringToken> {
     const deadline = Date.now() + metadataTokenDeadlineMs;
     let lastFailure: Error | undefined;
     for (let attempt = 0; ; attempt += 1) {
@@ -760,11 +757,10 @@ export class GCPClient {
           data.expires_in > 0
             ? data.expires_in
             : 3600;
-        this.cache = {
+        return {
           token,
           expiresAt: Math.trunc(Date.now() / 1000) + expiresIn,
         };
-        return token;
       }
       const detail =
         typeof data?.error === "string" && data.error.trim()

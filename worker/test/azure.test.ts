@@ -70,12 +70,12 @@ function isAzureLoginURL(value: string): boolean {
   return new URL(value).hostname === "login.microsoftonline.com";
 }
 
-function seedAzureAuthCache(client: AzureClient): void {
-  const valueKey = ["to", "ken"].join("");
-  Reflect.set(client, "cache", {
-    [valueKey]: baseEnv.AZURE_CLIENT_ID,
-    expiresAt: Date.now() + 3_600_000,
-  });
+function seedAzureAuthCache(
+  client: AzureClient,
+  token = baseEnv.AZURE_CLIENT_ID,
+  expiresAt = Date.now() + 3_600_000,
+): void {
+  Reflect.set(Reflect.get(client, "tokenCache"), "cached", { token, expiresAt });
 }
 
 function ownedAzureLease(): Pick<
@@ -929,10 +929,7 @@ describe("azure provider", () => {
 
   it("verifies every Azure companion before deleting an owned lease", async () => {
     const client = new AzureClient(baseEnv);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Date.now() + 3_600_000,
-    };
+    seedAzureAuthCache(client, "test-token");
     const deletes: string[] = [];
     const deleted = new Set<string>();
     client.fetcher = async (input, init) => {
@@ -1101,10 +1098,7 @@ describe("azure provider", () => {
     const { putKeys, storage } = memoryAzureDeleteClaimStorage();
     for (const cloudID of ["crabbox-blue-lobster-attempt-1", "crabbox-blue-lobster-attempt-2"]) {
       const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
-      (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-        token: "test-token",
-        expiresAt: Date.now() + 3_600_000,
-      };
+      seedAzureAuthCache(client, "test-token");
       client.fetcher = async (input) => azureResourceNotFoundResponse(new URL(String(input)));
       // oxlint-disable-next-line eslint/no-await-in-loop -- preserve deterministic claim-write order for the assertion.
       await expect(
@@ -2397,10 +2391,7 @@ describe("azure provider", () => {
 
   it("does not delete an Azure VM before its referenced managed disk identity is visible", async () => {
     const client = new AzureClient(baseEnv);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Date.now() + 3_600_000,
-    };
+    seedAzureAuthCache(client, "test-token");
     const deletes: string[] = [];
     client.fetcher = async (input, init) => {
       const url = new URL(String(input));
@@ -2455,10 +2446,7 @@ describe("azure provider", () => {
     let failNICDelete = true;
     const client = (): AzureClient => {
       const value = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
-      (value as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-        token: "test-token",
-        expiresAt: Date.now() + 3_600_000,
-      };
+      seedAzureAuthCache(value, "test-token");
       value.fetcher = async (input, init) => {
         const url = new URL(String(input));
         const method = init?.method ?? "GET";
@@ -2838,10 +2826,7 @@ describe("azure provider", () => {
 
   it("refuses all Azure deletion when a companion belongs to another lease", async () => {
     const client = new AzureClient(baseEnv);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Date.now() + 3_600_000,
-    };
+    seedAzureAuthCache(client, "test-token");
     const deletes: string[] = [];
     client.fetcher = async (input, init) => {
       const url = new URL(String(input));
@@ -2993,10 +2978,7 @@ describe("azure provider", () => {
 
   it("binds an untagged Azure OS disk through the verified live VM before deletion", async () => {
     const client = new AzureClient(baseEnv);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Date.now() + 3_600_000,
-    };
+    seedAzureAuthCache(client, "test-token");
     let diskTagged = false;
     const deleted = new Set<string>();
     const methods: string[] = [];
@@ -3086,10 +3068,7 @@ describe("azure provider", () => {
     "refuses to adopt an Azure disk with %s",
     async (_case, diskTags, diskManagedBy, expectedError = "ownership does not match") => {
       const client = new AzureClient(baseEnv);
-      (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-        token: "test-token",
-        expiresAt: Date.now() + 3_600_000,
-      };
+      seedAzureAuthCache(client, "test-token");
       const deletes: string[] = [];
       client.fetcher = async (input, init) => {
         const url = new URL(String(input));
@@ -3147,10 +3126,7 @@ describe("azure provider", () => {
 
   it("revalidates Azure companions after deleting the VM", async () => {
     const client = new AzureClient(baseEnv);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Date.now() + 3_600_000,
-    };
+    seedAzureAuthCache(client, "test-token");
     let vmDeleted = false;
     const deletes: string[] = [];
     client.fetcher = async (input, init) => {
@@ -3235,10 +3211,7 @@ describe("azure provider", () => {
 
   it("fails closed when an owned Azure DELETE returns a scope-level 404", async () => {
     const client = new AzureClient(baseEnv);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Date.now() + 3_600_000,
-    };
+    seedAzureAuthCache(client, "test-token");
     client.fetcher = async (input, init) => {
       const url = new URL(String(input));
       if (init?.method === "DELETE") {
@@ -4271,6 +4244,48 @@ describe("azure provider", () => {
 
     expect(puts.some((path) => path.endsWith("/networkSecurityGroups/crabbox-nsg"))).toBe(true);
     expect(puts.some((path) => path.includes("crabbox-nsg-westus3-eastus"))).toBe(false);
+  });
+
+  it("shares one token exchange across concurrent resource reads", async () => {
+    const client = new AzureClient(baseEnv);
+    let tokenMints = 0;
+    const authorizations: string[] = [];
+    client.fetcher = async (input, init) => {
+      if (isAzureLoginURL(String(input))) {
+        tokenMints += 1;
+        return Response.json({ access_token: "parallel-token", expires_in: 3600 });
+      }
+      authorizations.push(new Headers(init?.headers).get("authorization") ?? "");
+      return Response.json({ value: [] });
+    };
+    await client.listReconciliationResources();
+    expect(tokenMints).toBe(1);
+    expect(authorizations).toEqual(Array(4).fill("Bearer parallel-token"));
+  });
+
+  it("refreshes at the thirty-second margin without sharing credentials between clients", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    let exchanges = 0;
+    const client = new AzureClient(baseEnv);
+    client.fetcher = async (input) => {
+      if (isAzureLoginURL(String(input))) {
+        exchanges += 1;
+        return Response.json({ access_token: `token-${exchanges}`, expires_in: 60 });
+      }
+      return Response.json({ value: [] });
+    };
+    await client.listCrabboxServers();
+    vi.advanceTimersByTime(29_999);
+    await client.listCrabboxServers();
+    expect(exchanges).toBe(1);
+    vi.advanceTimersByTime(1);
+    await client.listReconciliationResources();
+    expect(exchanges).toBe(2);
+    const other = new AzureClient({ ...baseEnv, AZURE_TENANT_ID: "other-tenant" });
+    other.fetcher = client.fetcher;
+    await other.listCrabboxServers();
+    expect(exchanges).toBe(3);
   });
 
   it("caches the client_credentials token across calls", async () => {
