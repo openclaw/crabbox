@@ -87,6 +87,14 @@ under the durable claim lock; missing inventory or a terminal provider status
 alone never proves cleanup. The recorded repository path is retained as
 identity evidence, not a requirement to run stop from the original directory.
 
+After saving the receipt, stop and automatic cleanup close canonical per-lease
+SSH control masters and remove the local SSH key and trust files under the same
+claim lock. A local cleanup failure returns an error while preserving the
+terminal receipt. Fix the reported local problem and repeat
+`crabbox stop --provider aws --id cbx_...`; after the same account, region,
+identity, and inventory checks, it retries local cleanup without deleting AWS
+resources again or rewriting the receipt.
+
 This is a forward repair: older compact tombstones discarded instance and
 region binding and cannot prove that scope after upgrading. They remain
 unchanged and fail closed on repeated stop. Definitive launch rejections also

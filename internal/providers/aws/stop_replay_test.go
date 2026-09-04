@@ -168,6 +168,15 @@ func TestAWSFixedStopReplayAfterInventoryDisappears(t *testing.T) {
 				} else if err != nil {
 					t.Fatalf("first canonical stop failed: %v; output=%q", err, output.String())
 				}
+				if !tc.keyFailure {
+					key, err := core.TestboxKeyPath(lease.LeaseID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := os.Stat(filepath.Dir(key)); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("successful stop retained local SSH artifacts: %v", err)
+					}
+				}
 				if !reflect.DeepEqual(fake.deletedInstances, []string{lease.Server.CloudID}) ||
 					!reflect.DeepEqual(fake.deletedKeys, []string{core.ServerProviderKey(lease.Server)}) {
 					t.Fatalf("first stop did not attempt exact instance/key cleanup: instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
@@ -204,6 +213,18 @@ func TestAWSFixedStopReplayAfterInventoryDisappears(t *testing.T) {
 			}
 			before, err := os.ReadFile(claimPath)
 			if err != nil {
+				t.Fatal(err)
+			}
+			// Model local files left by an older stop or interrupted cleanup.
+			key, err := core.TestboxKeyPath(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(key), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			trust := filepath.Join(filepath.Dir(key), "known_hosts")
+			if err := os.WriteFile(trust, []byte("synthetic lease trust"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			// Discard all prior client/backend state. Only the persisted claim and
@@ -270,6 +291,12 @@ func TestAWSFixedStopReplayAfterInventoryDisappears(t *testing.T) {
 			}
 			if len(reloaded.deletedInstances) != 0 || len(reloaded.deletedKeys) != 0 {
 				t.Error("replay mutated provider resources without a live ownership binding")
+			}
+			_, trustErr := os.Stat(trust)
+			if tc.wantSuccess && !errors.Is(trustErr, os.ErrNotExist) {
+				t.Errorf("successful stop replay retained local SSH artifacts: %v", trustErr)
+			} else if !tc.wantSuccess && trustErr != nil {
+				t.Errorf("rejected stop replay changed local SSH artifacts: %v", trustErr)
 			}
 			if tc.wantSuccess {
 				if err != nil {
@@ -338,6 +365,81 @@ func setupAWSReplayClaim(t *testing.T) (*awsLeaseBackend, *fakeAWSClient, Acquir
 	lease.Server.PublicNet.IPv4.IP = ""
 	fake.servers[0].PublicNet.IPv4.IP = ""
 	return backend, fake, req, lease, filepath.Join(dirs.StateHome, "crabbox", "claims", lease.LeaseID+".json")
+}
+
+func TestAWSFixedStopRetriesLocalSSHCleanup(t *testing.T) {
+	backend, fake, req, lease, path := setupAWSReplayClaim(t)
+	acquired, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := core.TestboxKeyPath(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(key)
+	saved := filepath.Join(t.TempDir(), "lease-ssh")
+	if err := os.Rename(dir, saved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("synthetic cleanup obstacle"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := backend.ReleaseLeaseWithOutcome(t.Context(), ReleaseLeaseRequest{Lease: lease})
+	if err == nil || !outcome.Terminal || !strings.Contains(err.Error(), "local SSH cleanup") {
+		t.Fatalf("confirmed remote deletion must report pending local cleanup: outcome=%+v err=%v", outcome, err)
+	}
+	receipt, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertAWSReceiptIdentity(t, receipt, acquired)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fake.deletedInstances, []string{lease.Server.CloudID}) ||
+		!reflect.DeepEqual(fake.deletedKeys, []string{core.ServerProviderKey(lease.Server)}) {
+		t.Fatal("local cleanup failure did not follow exact provider cleanup")
+	}
+	fresh := &fakeAWSClient{}
+	newAWSClient = func(context.Context, Config) (awsClient, error) { return fresh, nil }
+	backend = NewAWSLeaseBackend(Provider{}.Spec(), backend.Cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	target, err := backend.Resolve(t.Context(), ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err = backend.ReleaseLeaseWithOutcome(t.Context(), ReleaseLeaseRequest{Lease: target})
+	if err == nil || !outcome.Terminal || !strings.Contains(err.Error(), "local SSH cleanup") {
+		t.Fatalf("terminal replay must report pending local cleanup: outcome=%+v err=%v", outcome, err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("failed local cleanup replay changed terminal receipt")
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(saved, dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(req.Repo.Root)
+	configPath := filepath.Join(req.Repo.Root, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("provider: aws\naws:\n  region: us-east-1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	var output bytes.Buffer
+	if err := (core.App{Stdout: &output, Stderr: &output}).Run(t.Context(), []string{"stop", "--provider", "aws", "--id", lease.LeaseID}); err != nil {
+		t.Fatalf("canonical local cleanup retry failed: %v; output=%q", err, output.String())
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("canonical retry retained SSH artifacts: %v", err)
+	}
+	after, err = os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) || fresh.createCalls != 0 || len(fresh.deletedInstances)+len(fresh.deletedKeys) != 0 {
+		t.Fatal("local cleanup retry changed terminal/provider state")
+	}
 }
 
 func TestAWSFixedStopReleaseOwnerFence(t *testing.T) {
@@ -513,6 +615,13 @@ func TestAWSFixedCleanupFailureThenStopReplay(t *testing.T) {
 			fake.deleteKeyErr = nil
 			if err := backend.Cleanup(t.Context(), CleanupRequest{}); err != nil {
 				t.Fatal(err)
+			}
+			key, err := core.TestboxKeyPath(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Dir(key)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("successful %s cleanup retained local SSH artifacts: %v", mode, err)
 			}
 			receipt, err := core.ReadLeaseClaim(lease.LeaseID)
 			if err != nil {

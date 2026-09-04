@@ -480,6 +480,7 @@ export interface LeaseRecord {
   awsSSMLogGroup?: string;
   capacityHints?: CapacityHint[];
   serverID: number;
+  providerResourceID?: string;
   serverName: string;
   providerKey: string;
   providerKeyCleanupOwned?: boolean;
@@ -1164,6 +1165,7 @@ export interface MachineView {
 export interface ProviderMachine {
   provider: Provider;
   id: number;
+  providerResourceID?: string;
   cloudID: string;
   region?: string;
   name: string;
