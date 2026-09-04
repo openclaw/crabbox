@@ -5,54 +5,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
-	"math/rand"
 	"strings"
 	"sync"
-	"time"
 )
 
-// Polling configuration for Railway redeploy tracking. Railway has no
-// synchronous exec endpoint; redeploy tracking polls the new deployment's status
-// until it reaches a terminal state. The interval grows exponentially with
-// jitter so a long deployment doesn't hammer the API while a short one still
-// feels snappy.
 const (
-	railwayPollInitialInterval   = 5 * time.Second
-	railwayPollMaxInterval       = 30 * time.Second
-	railwayPollOverallTimeout    = 30 * time.Minute
-	railwayDeployResolveTimeout  = 2 * time.Minute
-	railwayPollJitterFraction    = 0.2
-	railwayPollLogLimit          = 500
 	railwayClaimServiceLabel     = "railwayServiceId"
 	railwayClaimProjectLabel     = "railwayProjectId"
 	railwayClaimEnvironmentLabel = "railwayEnvironmentId"
 	railwayClaimDeploymentLabel  = "railwayDeploymentId"
 )
-
-// railwayPollRand seeds a private rand.Source on first use so jitter doesn't
-// rely on the global generator (which other tests may reseed) while staying
-// dependency-free.
-var (
-	railwayPollRandOnce sync.Once
-	railwayPollRand     *rand.Rand
-	railwayPollRandMu   sync.Mutex
-)
-
-func railwayJitter(d time.Duration) time.Duration {
-	railwayPollRandOnce.Do(func() {
-		railwayPollRand = rand.New(rand.NewSource(time.Now().UnixNano()))
-	})
-	railwayPollRandMu.Lock()
-	defer railwayPollRandMu.Unlock()
-	// Centered jitter in [-fraction, +fraction] * d.
-	delta := (railwayPollRand.Float64()*2 - 1) * railwayPollJitterFraction
-	jittered := time.Duration(float64(d) * (1 + delta))
-	if jittered <= 0 {
-		return d
-	}
-	return jittered
-}
 
 func NewRailwayBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = providerName
@@ -64,14 +26,6 @@ type railwayBackend struct {
 	cfg    Config
 	rt     Runtime
 	client railwayAPI
-
-	// pollOverride lets tests shrink the polling interval without changing the
-	// production defaults. When zero, railwayPollInitialInterval is used.
-	pollInitialOverride time.Duration
-	// pollOverallOverride lets tests shorten the overall poll timeout.
-	pollOverallOverride time.Duration
-	// deployResolveOverride lets tests shorten empty-trigger deployment resolution.
-	deployResolveOverride time.Duration
 }
 
 func (b *railwayBackend) Spec() ProviderSpec { return b.spec }
@@ -98,201 +52,6 @@ func (b *railwayBackend) Run(ctx context.Context, req RunRequest) (RunResult, er
 		return RunResult{}, exit(2, "missing command")
 	}
 	return RunResult{}, exit(2, "provider=%s cannot execute arbitrary run commands; Railway only runs the service's configured start command", providerName)
-}
-
-func (b *railwayBackend) redeployService(ctx context.Context, serviceID string) (RunResult, error) {
-	projectID, environmentID, err := b.requireProjectEnv()
-	if err != nil {
-		return RunResult{}, err
-	}
-	client, err := b.api()
-	if err != nil {
-		return RunResult{}, err
-	}
-	started := b.now()
-	fmt.Fprintf(b.rt.Stderr, "redeploying %s service=%s (Railway runs the service's configured start command)\n", providerName, serviceID)
-
-	previousDeployment, previousErr := client.LatestDeployment(ctx, projectID, environmentID, serviceID)
-	deploymentID, err := client.TriggerDeploy(ctx, projectID, environmentID, serviceID)
-	if err != nil {
-		return RunResult{}, ExitError{Code: 1, Message: fmt.Sprintf("%s trigger deploy failed: %v", providerName, err)}
-	}
-	deploymentID = strings.TrimSpace(deploymentID)
-	if deploymentID == "" {
-		if previousErr != nil {
-			return RunResult{ExitCode: 1}, ExitError{Code: 1, Message: fmt.Sprintf("%s read latest deployment before trigger failed: %v", providerName, previousErr)}
-		}
-		deploymentID, err = b.resolveTriggeredDeployment(ctx, client, projectID, environmentID, serviceID, previousDeployment.ID)
-		if err != nil {
-			return RunResult{ExitCode: 1}, ExitError{Code: 1, Message: fmt.Sprintf("%s resolve triggered deployment failed: %v", providerName, err)}
-		}
-	}
-
-	logs := &railwayLogStreamer{out: b.rt.Stdout}
-	finalStatus, pollErr := b.pollDeployment(ctx, client, deploymentID, logs)
-	if pollErr != nil {
-		commandDuration := b.now().Sub(started)
-		return RunResult{ExitCode: 1, Command: commandDuration, Total: commandDuration}, ExitError{Code: 1, Message: fmt.Sprintf("%s deployment %s polling failed: %v", providerName, deploymentID, pollErr)}
-	}
-
-	commandDuration := b.now().Sub(started)
-	result := RunResult{
-		ExitCode: finalStatus.ExitCode(),
-		Command:  commandDuration,
-		Total:    commandDuration,
-	}
-	fmt.Fprintf(b.rt.Stderr, "%s redeploy summary elapsed=%s exit=%d status=%s\n", providerName, result.Total.Round(time.Millisecond), result.ExitCode, finalStatus)
-	if result.ExitCode != 0 {
-		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s deployment status=%s", providerName, finalStatus)}
-	}
-	return result, nil
-}
-
-func (b *railwayBackend) resolveTriggeredDeployment(ctx context.Context, client railwayAPI, projectID, environmentID, serviceID, previousID string) (string, error) {
-	overall := railwayDeployResolveTimeout
-	if b.deployResolveOverride > 0 {
-		overall = b.deployResolveOverride
-	}
-	deadlineCtx, cancel := context.WithTimeout(ctx, overall)
-	defer cancel()
-
-	interval := railwayPollInitialInterval
-	if b.pollInitialOverride > 0 {
-		interval = b.pollInitialOverride
-	}
-	for {
-		deployment, err := client.LatestDeployment(deadlineCtx, projectID, environmentID, serviceID)
-		if err != nil {
-			if deadlineCtx.Err() != nil {
-				return "", fmt.Errorf("deployment resolution cancelled: %w", deadlineCtx.Err())
-			}
-			return "", err
-		}
-		deploymentID := strings.TrimSpace(deployment.ID)
-		if deploymentID != "" && deploymentID != strings.TrimSpace(previousID) {
-			return deploymentID, nil
-		}
-		sleepFor := railwayJitter(interval)
-		select {
-		case <-deadlineCtx.Done():
-			return "", fmt.Errorf("deployment resolution cancelled: %w", deadlineCtx.Err())
-		case <-time.After(sleepFor):
-		}
-		if interval < railwayPollMaxInterval {
-			interval *= 2
-			if interval > railwayPollMaxInterval {
-				interval = railwayPollMaxInterval
-			}
-		}
-	}
-}
-
-// pollDeployment polls a specific deployment until it reaches a terminal state
-// or the overall timeout / parent context expires. Returns the final observed
-// status on success.
-func (b *railwayBackend) pollDeployment(ctx context.Context, client railwayAPI, deploymentID string, logs *railwayLogStreamer) (railwayDeploymentStatus, error) {
-	overall := railwayPollOverallTimeout
-	if b.pollOverallOverride > 0 {
-		overall = b.pollOverallOverride
-	}
-	deadlineCtx, cancel := context.WithTimeout(ctx, overall)
-	defer cancel()
-
-	initial := railwayPollInitialInterval
-	if b.pollInitialOverride > 0 {
-		initial = b.pollInitialOverride
-	}
-	interval := initial
-
-	for {
-		dep, err := client.Deployment(deadlineCtx, deploymentID)
-		if err != nil {
-			// Bubble up context errors as-is so the caller can tell timeout from
-			// transport failures.
-			if deadlineCtx.Err() != nil {
-				return "", fmt.Errorf("polling cancelled: %w", deadlineCtx.Err())
-			}
-			return "", err
-		}
-		if dep.Status.IsTerminal() {
-			if logs != nil {
-				if err := logs.Flush(deadlineCtx, client, deploymentID); err != nil {
-					return "", err
-				}
-			}
-			return dep.Status, nil
-		}
-		if logs != nil {
-			if err := logs.Flush(deadlineCtx, client, deploymentID); err != nil {
-				return "", err
-			}
-		}
-		// Backoff with ±jitter, capped at railwayPollMaxInterval.
-		sleepFor := railwayJitter(interval)
-		select {
-		case <-deadlineCtx.Done():
-			return "", fmt.Errorf("polling cancelled: %w", deadlineCtx.Err())
-		case <-time.After(sleepFor):
-		}
-		if interval < railwayPollMaxInterval {
-			interval *= 2
-			if interval > railwayPollMaxInterval {
-				interval = railwayPollMaxInterval
-			}
-		}
-	}
-}
-
-type railwayLogStreamer struct {
-	out            io.Writer
-	buildSeen      []string
-	deploymentSeen []string
-}
-
-func (s *railwayLogStreamer) Flush(ctx context.Context, client railwayAPI, deploymentID string) error {
-	buildLogs, err := client.BuildLogs(ctx, deploymentID, railwayPollLogLimit)
-	if err != nil {
-		return fmt.Errorf("fetch build logs: %w", err)
-	}
-	s.buildSeen = printNewRailwayLogs(s.out, buildLogs, s.buildSeen)
-
-	deploymentLogs, err := client.DeploymentLogs(ctx, deploymentID, railwayPollLogLimit)
-	if err != nil {
-		return fmt.Errorf("fetch deployment logs: %w", err)
-	}
-	s.deploymentSeen = printNewRailwayLogs(s.out, deploymentLogs, s.deploymentSeen)
-	return nil
-}
-
-func printNewRailwayLogs(out io.Writer, lines []string, seen []string) []string {
-	start := overlappingRailwayLogLines(seen, lines)
-	for _, line := range lines[start:] {
-		fmt.Fprintln(out, line)
-	}
-	next := make([]string, len(lines))
-	copy(next, lines)
-	return next
-}
-
-func overlappingRailwayLogLines(previous, current []string) int {
-	n := len(previous)
-	if len(current) < n {
-		n = len(current)
-	}
-	for overlap := n; overlap > 0; overlap-- {
-		match := true
-		previousStart := len(previous) - overlap
-		for i := 0; i < overlap; i++ {
-			if previous[previousStart+i] != current[i] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return overlap
-		}
-	}
-	return 0
 }
 
 func (b *railwayBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -584,11 +343,4 @@ func rejectRailwayRunOptions(req RunRequest) error {
 		return exit(2, "provider=%s cannot forward per-run environment variables", providerName)
 	}
 	return nil
-}
-
-func (b *railwayBackend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }
