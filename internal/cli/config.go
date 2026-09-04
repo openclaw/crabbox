@@ -1778,6 +1778,32 @@ func finalizeProviderSelection(cfg *Config) error {
 	return applyProviderConfigDefaults(cfg)
 }
 
+func applyLinuxConnectionDefaults(cfg *Config, defaultSSHUser, defaultSSHPort string) {
+	if !IsTargetExplicit(cfg) {
+		cfg.TargetOS = targetLinux
+	}
+	if cfg.explicitWindowsMode != "" {
+		cfg.WindowsMode = cfg.explicitWindowsMode
+	} else {
+		cfg.WindowsMode = windowsModeNormal
+	}
+	if cfg.explicitWorkRoot != "" {
+		cfg.WorkRoot = cfg.explicitWorkRoot
+	} else {
+		cfg.WorkRoot = defaultPOSIXWorkRoot
+	}
+	if cfg.explicitSSHUser != "" {
+		cfg.SSHUser = cfg.explicitSSHUser
+	} else {
+		cfg.SSHUser = defaultSSHUser
+	}
+	if cfg.explicitSSHPort != "" {
+		cfg.SSHPort = cfg.explicitSSHPort
+	} else {
+		cfg.SSHPort = defaultSSHPort
+	}
+}
+
 func applyProviderConfigDefaults(cfg *Config) error {
 	prepareProviderDefaults(cfg)
 	if normalized, err := normalizeArchitecture(cfg.Architecture); err != nil {
@@ -1814,29 +1840,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		} else if cfg.DigitalOcean.Image == "" {
 			cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
 		}
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetLinux
-		}
-		if cfg.explicitWindowsMode != "" {
-			cfg.WindowsMode = cfg.explicitWindowsMode
-		} else {
-			cfg.WindowsMode = windowsModeNormal
-		}
-		if cfg.explicitWorkRoot != "" {
-			cfg.WorkRoot = cfg.explicitWorkRoot
-		} else {
-			cfg.WorkRoot = defaultPOSIXWorkRoot
-		}
-		if cfg.explicitSSHUser != "" {
-			cfg.SSHUser = cfg.explicitSSHUser
-		} else {
-			cfg.SSHUser = baseConfig().SSHUser
-		}
-		if cfg.explicitSSHPort != "" {
-			cfg.SSHPort = cfg.explicitSSHPort
-		} else {
-			cfg.SSHPort = baseConfig().SSHPort
-		}
+		applyLinuxConnectionDefaults(cfg, baseConfig().SSHUser, baseConfig().SSHPort)
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
@@ -1847,29 +1851,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if cfg.Vultr.UserScheme == "" {
 			cfg.Vultr.UserScheme = "root"
 		}
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetLinux
-		}
-		if cfg.explicitWindowsMode != "" {
-			cfg.WindowsMode = cfg.explicitWindowsMode
-		} else {
-			cfg.WindowsMode = windowsModeNormal
-		}
-		if cfg.explicitWorkRoot != "" {
-			cfg.WorkRoot = cfg.explicitWorkRoot
-		} else {
-			cfg.WorkRoot = defaultPOSIXWorkRoot
-		}
-		if cfg.explicitSSHUser != "" {
-			cfg.SSHUser = cfg.explicitSSHUser
-		} else {
-			cfg.SSHUser = "root"
-		}
-		if cfg.explicitSSHPort != "" {
-			cfg.SSHPort = cfg.explicitSSHPort
-		} else {
-			cfg.SSHPort = "22"
-		}
+		applyLinuxConnectionDefaults(cfg, "root", "22")
 		cfg.SSHFallbackPorts = nil
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
@@ -1890,29 +1872,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if cfg.Linode.Type == "" {
 			cfg.Linode.Type = "g6-standard-1"
 		}
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetLinux
-		}
-		if cfg.explicitWindowsMode != "" {
-			cfg.WindowsMode = cfg.explicitWindowsMode
-		} else {
-			cfg.WindowsMode = windowsModeNormal
-		}
-		if cfg.explicitWorkRoot != "" {
-			cfg.WorkRoot = cfg.explicitWorkRoot
-		} else {
-			cfg.WorkRoot = defaultPOSIXWorkRoot
-		}
-		if cfg.explicitSSHUser != "" {
-			cfg.SSHUser = cfg.explicitSSHUser
-		} else {
-			cfg.SSHUser = baseConfig().SSHUser
-		}
-		if cfg.explicitSSHPort != "" {
-			cfg.SSHPort = cfg.explicitSSHPort
-		} else {
-			cfg.SSHPort = baseConfig().SSHPort
-		}
+		applyLinuxConnectionDefaults(cfg, baseConfig().SSHUser, baseConfig().SSHPort)
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
@@ -1932,29 +1892,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		} else if cfg.Lambda.Image == "" && cfg.Lambda.ImageFamily == "" {
 			cfg.Lambda.ImageFamily = "lambda-stack-24-04"
 		}
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetLinux
-		}
-		if cfg.explicitWindowsMode != "" {
-			cfg.WindowsMode = cfg.explicitWindowsMode
-		} else {
-			cfg.WindowsMode = windowsModeNormal
-		}
-		if cfg.explicitWorkRoot != "" {
-			cfg.WorkRoot = cfg.explicitWorkRoot
-		} else {
-			cfg.WorkRoot = defaultPOSIXWorkRoot
-		}
-		if cfg.explicitSSHUser != "" {
-			cfg.SSHUser = cfg.explicitSSHUser
-		} else {
-			cfg.SSHUser = "ubuntu"
-		}
-		if cfg.explicitSSHPort != "" {
-			cfg.SSHPort = cfg.explicitSSHPort
-		} else {
-			cfg.SSHPort = "22"
-		}
+		applyLinuxConnectionDefaults(cfg, "ubuntu", "22")
 		cfg.SSHFallbackPorts = nil
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
@@ -2042,29 +1980,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if cfg.Nebius.RecoveryPolicy == "" {
 			cfg.Nebius.RecoveryPolicy = "fail"
 		}
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetLinux
-		}
-		if cfg.explicitWindowsMode != "" {
-			cfg.WindowsMode = cfg.explicitWindowsMode
-		} else {
-			cfg.WindowsMode = windowsModeNormal
-		}
-		if cfg.explicitWorkRoot != "" {
-			cfg.WorkRoot = cfg.explicitWorkRoot
-		} else {
-			cfg.WorkRoot = defaultPOSIXWorkRoot
-		}
-		if cfg.explicitSSHUser != "" {
-			cfg.SSHUser = cfg.explicitSSHUser
-		} else {
-			cfg.SSHUser = cfg.Nebius.User
-		}
-		if cfg.explicitSSHPort != "" {
-			cfg.SSHPort = cfg.explicitSSHPort
-		} else {
-			cfg.SSHPort = baseConfig().SSHPort
-		}
+		applyLinuxConnectionDefaults(cfg, cfg.Nebius.User, baseConfig().SSHPort)
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
@@ -2078,29 +1994,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if cfg.OVH.Flavor == "" {
 			cfg.OVH.Flavor = "b3-8"
 		}
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetLinux
-		}
-		if cfg.explicitWindowsMode != "" {
-			cfg.WindowsMode = cfg.explicitWindowsMode
-		} else {
-			cfg.WindowsMode = windowsModeNormal
-		}
-		if cfg.explicitWorkRoot != "" {
-			cfg.WorkRoot = cfg.explicitWorkRoot
-		} else {
-			cfg.WorkRoot = defaultPOSIXWorkRoot
-		}
-		if cfg.explicitSSHUser != "" {
-			cfg.SSHUser = cfg.explicitSSHUser
-		} else {
-			cfg.SSHUser = baseConfig().SSHUser
-		}
-		if cfg.explicitSSHPort != "" {
-			cfg.SSHPort = cfg.explicitSSHPort
-		} else {
-			cfg.SSHPort = baseConfig().SSHPort
-		}
+		applyLinuxConnectionDefaults(cfg, baseConfig().SSHUser, baseConfig().SSHPort)
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
@@ -2123,29 +2017,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if cfg.Scaleway.Type == "" {
 			cfg.Scaleway.Type = "DEV1-S"
 		}
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetLinux
-		}
-		if cfg.explicitWindowsMode != "" {
-			cfg.WindowsMode = cfg.explicitWindowsMode
-		} else {
-			cfg.WindowsMode = windowsModeNormal
-		}
-		if cfg.explicitWorkRoot != "" {
-			cfg.WorkRoot = cfg.explicitWorkRoot
-		} else {
-			cfg.WorkRoot = defaultPOSIXWorkRoot
-		}
-		if cfg.explicitSSHUser != "" {
-			cfg.SSHUser = cfg.explicitSSHUser
-		} else {
-			cfg.SSHUser = "root"
-		}
-		if cfg.explicitSSHPort != "" {
-			cfg.SSHPort = cfg.explicitSSHPort
-		} else {
-			cfg.SSHPort = "22"
-		}
+		applyLinuxConnectionDefaults(cfg, "root", "22")
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
@@ -2168,29 +2040,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if cfg.TencentCloud.InternetMaxBandwidthOut == 0 {
 			cfg.TencentCloud.InternetMaxBandwidthOut = 5
 		}
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetLinux
-		}
-		if cfg.explicitWindowsMode != "" {
-			cfg.WindowsMode = cfg.explicitWindowsMode
-		} else {
-			cfg.WindowsMode = windowsModeNormal
-		}
-		if cfg.explicitWorkRoot != "" {
-			cfg.WorkRoot = cfg.explicitWorkRoot
-		} else {
-			cfg.WorkRoot = defaultPOSIXWorkRoot
-		}
-		if cfg.explicitSSHUser != "" {
-			cfg.SSHUser = cfg.explicitSSHUser
-		} else {
-			cfg.SSHUser = "ubuntu"
-		}
-		if cfg.explicitSSHPort != "" {
-			cfg.SSHPort = cfg.explicitSSHPort
-		} else {
-			cfg.SSHPort = "22"
-		}
+		applyLinuxConnectionDefaults(cfg, "ubuntu", "22")
 		cfg.SSHFallbackPorts = nil
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
@@ -5119,8 +4969,8 @@ func classifyConfigPath(path string) configPathTrust {
 	if sameConfigPath(path, userConfigPath()) {
 		return configPathTrust{trusted: true}
 	}
-	repo, _ := findRepo()
-	root, _ := filepath.Abs(repo.Root)
+	boundary, _ := findRepositoryBoundary()
+	root, _ := filepath.Abs(boundary.root)
 	if explicit := strings.TrimSpace(os.Getenv("CRABBOX_CONFIG")); explicit != "" &&
 		sameConfigPath(path, explicit) && !configPathWithinRoot(path, root) {
 		return configPathTrust{trusted: true}

@@ -420,7 +420,7 @@ container ID leaves both the container and claim untouched.
 - Cache volumes persist as Docker-compatible named volumes after a container is
   stopped.
   Remove them with the Docker-compatible runtime when the cache key is obsolete.
-- The default `debian:bookworm` image bootstraps packages on first start. Use a
+- The pinned default Ubuntu image bootstraps packages on first start. Use a
   prebuilt image with SSH/Git/rsync/desktop/browser packages when startup time
   matters.
 

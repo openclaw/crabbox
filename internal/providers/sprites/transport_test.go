@@ -117,15 +117,24 @@ func TestSpritesRealCLIUsesConfiguredEndpointAndToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	testutil.IsolateUserDirs(t)
-	var apiRequests, wrongRequests atomic.Int32
+	var execRequests, proxyRequests, wrongRequests atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		apiRequests.Add(1)
 		if r.Header.Get("Authorization") != "Bearer test-configured-token" {
 			t.Error("wrong credential used by API or CLI")
 		}
-		if r.URL.Path == "/v1/sprites/crabbox-test" {
+		if r.Method != http.MethodGet {
+			t.Errorf("unexpected native request method: %s", r.Method)
+		}
+		switch r.URL.Path {
+		case "/v1/sprites/crabbox-test":
 			io.WriteString(w, `{"id":"test-id","name":"crabbox-test"}`)
 			return
+		case "/v1/sprites/crabbox-test/exec":
+			execRequests.Add(1)
+		case "/v1/sprites/crabbox-test/proxy":
+			proxyRequests.Add(1)
+		default:
+			t.Errorf("unexpected native request path: %s", r.URL.Path)
 		}
 		http.Error(w, "test endpoint: no remote execution", http.StatusUnauthorized)
 	}))
@@ -150,15 +159,19 @@ func TestSpritesRealCLIUsesConfiguredEndpointAndToken(t *testing.T) {
 	}
 	b := &spritesBackend{cfg: cfg, rt: Runtime{Exec: spritesRealCLIRunner{}}}
 	for _, args := range [][]string{{"exec", "-s", "crabbox-test", "--", "true"}, {"proxy", "-s", "crabbox-test", "-W", "22"}} {
-		before := apiRequests.Load()
+		requests := &execRequests
+		if args[0] == "proxy" {
+			requests = &proxyRequests
+		}
+		before := requests.Load()
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		_, err := b.runSprite(ctx, args, nil, nil)
 		cancel()
 		if err == nil {
 			t.Fatal("mock endpoint should refuse remote execution")
 		}
-		if apiRequests.Load() <= before {
-			t.Fatalf("%s did not contact configured endpoint", args[0])
+		if requests.Load() <= before {
+			t.Fatalf("%s did not contact its configured endpoint path", args[0])
 		}
 	}
 	if wrongRequests.Load() != 0 {

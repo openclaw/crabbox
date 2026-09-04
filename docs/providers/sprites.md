@@ -150,6 +150,10 @@ deletion. Explicit `--reclaim` can adopt a verified sprite through a normal
 reuse command before it can be stopped. `stop --force` is unavailable because
 Sprites cannot independently prove ownership of an arbitrary lost-claim sprite.
 
+Normal reuse without a local ownership claim requires `--reclaim` even when all
+Crabbox labels match. Adoption requires an immutable provider resource ID;
+read-only status and inspection do not create a claim or bootstrap the Sprite.
+
 ## Live smoke
 
 Run a live smoke when you change Sprites lifecycle, SSH bootstrap, the proxy

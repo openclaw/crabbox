@@ -5151,6 +5151,10 @@ func TestBootstrapImagePathProfileCanonicalization(t *testing.T) {
 }
 
 func TestBootstrapScriptSupportsWaylandDesktop(t *testing.T) {
+	if strings.Count(bootstrapScript, core.GnomeDesktopThemeScript()) != 1 {
+		t.Fatal("container bootstrap must install exactly one complete shared GNOME theme script")
+	}
+
 	for _, want := range []string{
 		`CRABBOX_DESKTOP_ENV:-xfce`,
 		`labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr`,

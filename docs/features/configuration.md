@@ -69,8 +69,9 @@ is loaded, and neither the user config nor the repo-local files are read. The
 override changes file selection, not its trust domain. A selected path inside
 the active repository remains repository configuration, including a path that
 enters the repository through a symlink; use the OS user config path or an
-explicit file outside the repository for trusted operator settings. The
-CLI writes new user config (for example via `crabbox login` or
+explicit file outside the repository for trusted operator settings. The trust
+decision uses the discovered workspace root, not its remote, commit, or branch
+metadata. The CLI writes new user config (for example via `crabbox login` or
 `crabbox config set-broker`) with `0600` permissions and warns if an existing
 file is group- or world-readable.
 

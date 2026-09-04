@@ -2734,11 +2734,9 @@ func createCheckpointArchive(ctx context.Context, target SSHTarget, workdir, loc
 		return 0, exit(2, "create checkpoint archive: %v", err)
 	}
 	defer func() { _ = os.Remove(tmpPath) }()
-	cmd := sshCommandContext(ctx, target, sshArgs(target, remoteCheckpointArchiveCommand(workdir))...)
-	cmd.Stdout = file
+	transport := sshTransportPreparation{command: remoteCheckpointArchiveCommand(workdir)}
 	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	runErr := cmd.Run()
+	_, runErr := transport.runOnce(ctx, target, "10", "3", file, &stderr, false)
 	closeErr := file.Close()
 	if runErr != nil {
 		return 0, exit(7, "archive checkpoint workdir %s: %v: %s", workdir, runErr, trimFailureDetail(stderr.String()))

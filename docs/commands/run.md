@@ -34,11 +34,34 @@ The trailing command after `--` is sent to the box verbatim as argv. Use
 `--shell` to run it through the remote shell instead, for multi-statement
 snippets, pipes, or shell expansion.
 
+On POSIX SSH targets, `--shell` runs in a Bash login shell. Its startup and
+logout files are part of that shell's behavior: for example, `set -e` plus a
+failing `~/.bash_logout` command can change an explicit `exit 7` to exit 1.
+Crabbox reports the shell's actual status. To load the login environment but
+run a snippet in a separate non-login Bash, use argv explicitly:
+
+```sh
+crabbox run -- bash -c 'set -eu; ./scripts/test.sh'
+```
+
+This inner Bash inherits exported environment values, not unexported shell
+variables or functions from login startup files.
+
 On POSIX and WSL2 SSH targets, private command staging does not change the
 remote caller's umask for user work. Commands keep the target shell's creation
 policy; Crabbox's staged scripts, input, and workspace-owner state remain private.
 Keeping or reusing a POSIX SSH lease also preserves the remote caller's SIGINT
 and SIGQUIT dispositions, including intentionally ignored signals.
+
+Local Ctrl+C cancels the CLI's non-interactive SSH connection; it does not
+guarantee that the remote foreground process has stopped. A retained lease can
+therefore remain busy until that process exits. Crabbox preserves child
+ownership and refuses conflicting reuse or evidence collection instead of
+discarding the live process record. Stop a disposable lease with `crabbox stop
+--provider <provider> --id <lease>` when it is no longer needed. Static SSH hosts
+are never destroyed by stop: finish or terminate the known remote workload on
+that host before reusing its workspace. Do not delete owner records to bypass
+the busy check.
 
 ## Remote workspace root
 

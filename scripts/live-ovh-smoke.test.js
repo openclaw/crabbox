@@ -4,23 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { copySmokeRepo, writeExecutable, writeGoStub } from "./test-support/smoke-fixtures.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
-function writeExecutable(file, body) {
-  fs.writeFileSync(file, body, "utf8");
-  fs.chmodSync(file, 0o755);
-}
-
-function prepareSmokeRepo(dir) {
-  const tempRoot = path.join(dir, "repo");
-  const tempScripts = path.join(tempRoot, "scripts");
-  const smokeScript = path.join(tempScripts, "live-ovh-smoke.sh");
-  fs.mkdirSync(tempScripts, { recursive: true });
-  fs.copyFileSync(path.join(repoRoot, "scripts", "live-ovh-smoke.sh"), smokeScript);
-  fs.chmodSync(smokeScript, 0o755);
-  return { tempRoot, smokeScript };
-}
+const prepareSmokeRepo = (dir) =>
+  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-ovh-smoke.sh"));
 
 test("live ovh smoke skips unless opted in", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-ovh-skip-"));
@@ -51,7 +40,10 @@ test("live ovh smoke requires provider selection and credentials", () => {
     encoding: "utf8",
   });
   assert.equal(missingKey.status, 0, missingKey.stderr);
-  assert.match(missingKey.stdout, /classification=environment_blocked reason=OVH_APPLICATION_KEY_missing/);
+  assert.match(
+    missingKey.stdout,
+    /classification=environment_blocked reason=OVH_APPLICATION_KEY_missing/,
+  );
 });
 
 test("live ovh smoke runs guarded lifecycle and redacts credentials", () => {
@@ -62,22 +54,9 @@ test("live ovh smoke runs guarded lifecycle and redacts credentials", () => {
   const slugFile = path.join(dir, "slug.txt");
   fs.mkdirSync(binDir, { recursive: true });
 
-  writeExecutable(
-    path.join(binDir, "go"),
+  writeGoStub(
+    binDir,
     `#!/usr/bin/env bash
-set -euo pipefail
-out=""
-while [[ "$#" -gt 0 ]]; do
-  if [[ "$1" == "-o" ]]; then
-    out="$2"
-    shift 2
-    continue
-  fi
-  shift
-done
-mkdir -p "$(dirname "$out")"
-cat >"$out" <<'SCRIPT'
-#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${calls}"
 if [[ "\${OVH_APPLICATION_SECRET:-}" != "test-ovh-secret" || "\${OVH_CONSUMER_KEY:-}" != "test-consumer-key" ]]; then
@@ -115,10 +94,7 @@ case "$1" in
     printf 'unexpected args: %s\n' "$*" >&2
     exit 99
     ;;
-esac
-SCRIPT
-chmod +x "$out"
-`,
+esac`,
   );
 
   const result = spawnSync("bash", [smokeScript], {
@@ -144,8 +120,14 @@ chmod +x "$out"
   const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
   assert.equal(seen[0], "doctor --provider ovh");
   assert.equal(seen[1], "list --provider ovh --json");
-  assert.match(seen[2], /^warmup --provider ovh --slug ovh-smoke-\d{14}-\d+ --keep --type b3-8 --ttl 20m --idle-timeout 5m$/);
-  assert.match(seen[3], /^status --provider ovh --id ovh-smoke-\d{14}-\d+ --wait --wait-timeout 300s$/);
+  assert.match(
+    seen[2],
+    /^warmup --provider ovh --slug ovh-smoke-\d{14}-\d+ --keep --type b3-8 --ttl 20m --idle-timeout 5m$/,
+  );
+  assert.match(
+    seen[3],
+    /^status --provider ovh --id ovh-smoke-\d{14}-\d+ --wait --wait-timeout 300s$/,
+  );
   assert.match(seen[4], /^run --provider ovh --id ovh-smoke-\d{14}-\d+ --no-sync -- echo ok$/);
   assert.equal(seen[5], "list --provider ovh --json");
   assert.match(seen[6], /^stop --provider ovh ovh-smoke-\d{14}-\d+$/);
@@ -168,18 +150,9 @@ test("live ovh smoke attempts targeted cleanup after partial failure", () => {
 exit 0
 `,
   );
-  writeExecutable(
-    path.join(binDir, "go"),
+  writeGoStub(
+    binDir,
     `#!/usr/bin/env bash
-set -euo pipefail
-out=""
-while [[ "$#" -gt 0 ]]; do
-  if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
-  shift
-done
-mkdir -p "$(dirname "$out")"
-cat >"$out" <<'SCRIPT'
-#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${calls}"
 if [[ "$1" == "doctor" ]]; then
@@ -198,10 +171,7 @@ if [[ "$1" == "stop" ]]; then
   printf '%s\n' "$4" >>"${stopped}"
   exit 0
 fi
-exit 99
-SCRIPT
-chmod +x "$out"
-`,
+exit 99`,
   );
 
   const result = spawnSync("bash", [smokeScript], {
@@ -235,18 +205,9 @@ test("live ovh smoke cleanup retries beyond ambiguous-create grace", () => {
   fs.mkdirSync(binDir, { recursive: true });
 
   writeExecutable(path.join(binDir, "sleep"), "#!/usr/bin/env bash\nexit 0\n");
-  writeExecutable(
-    path.join(binDir, "go"),
+  writeGoStub(
+    binDir,
     `#!/usr/bin/env bash
-set -euo pipefail
-out=""
-while [[ "$#" -gt 0 ]]; do
-  if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
-  shift
-done
-mkdir -p "$(dirname "$out")"
-cat >"$out" <<'SCRIPT'
-#!/usr/bin/env bash
 set -euo pipefail
 case "$1" in
   doctor|list) [[ "$1" == "list" ]] && printf '[]\n' || printf 'auth=ready leases=0\n' ;;
@@ -258,10 +219,7 @@ case "$1" in
     [[ "$count" -ge 61 ]]
     ;;
   *) exit 99 ;;
-esac
-SCRIPT
-chmod +x "$out"
-`,
+esac`,
   );
 
   const result = spawnSync("bash", [smokeScript], {
@@ -291,26 +249,14 @@ test("live ovh smoke rejects claim-independent orphan inventory", () => {
   const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
   fs.mkdirSync(binDir, { recursive: true });
 
-  writeExecutable(
-    path.join(binDir, "go"),
+  writeGoStub(
+    binDir,
     `#!/usr/bin/env bash
-set -euo pipefail
-out=""
-while [[ "$#" -gt 0 ]]; do
-  if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
-  shift
-done
-mkdir -p "$(dirname "$out")"
-cat >"$out" <<'SCRIPT'
-#!/usr/bin/env bash
 set -euo pipefail
 case "$1" in
   doctor) printf 'auth=ready inventory=ready leases=1\n' ;;
   *) exit 99 ;;
-esac
-SCRIPT
-chmod +x "$out"
-`,
+esac`,
   );
 
   const result = spawnSync("bash", [smokeScript], {
@@ -340,18 +286,9 @@ test("live ovh smoke classifies quota and validation failures", () => {
   const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
   fs.mkdirSync(binDir, { recursive: true });
 
-  writeExecutable(
-    path.join(binDir, "go"),
+  writeGoStub(
+    binDir,
     `#!/usr/bin/env bash
-set -euo pipefail
-out=""
-while [[ "$#" -gt 0 ]]; do
-  if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
-  shift
-done
-mkdir -p "$(dirname "$out")"
-cat >"$out" <<'SCRIPT'
-#!/usr/bin/env bash
 set -euo pipefail
 case "$1" in
   doctor)
@@ -374,10 +311,7 @@ case "$1" in
   *)
     exit 99
     ;;
-esac
-SCRIPT
-chmod +x "$out"
-`,
+esac`,
   );
 
   const baseEnv = {

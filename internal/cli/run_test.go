@@ -1730,7 +1730,8 @@ func TestRunCommandRejectsUnsupportedDelegatedCaptureOptions(t *testing.T) {
 		{name: "islo unsafe require artifact", provider: "islo", args: []string{"--require-artifact", "../manifest.json"}, want: "--require-artifact contains unsupported characters or non-relative path"},
 		{name: "e2b require artifact", provider: "e2b", args: []string{"--require-artifact", "reports/data/manifest.json"}, want: "e2b delegates run execution; --require-artifact is not supported"},
 		{name: "e2b stop after", provider: "e2b", args: []string{"--stop-after", "never"}, want: "e2b delegates run execution; --stop-after is not supported"},
-		{name: "daytona script", provider: "daytona", args: []string{"--script", "testdata/missing.sh"}, want: "daytona delegates run execution; --script is not supported"},
+		{name: "islo script", provider: "islo", args: []string{"--script", "testdata/missing.sh"}, want: "islo delegates run execution; --script is not supported"},
+		{name: "blacksmith script", provider: "blacksmith", args: []string{"--script", "testdata/missing.sh"}, want: "blacksmith-testbox delegates run execution; --script is not supported"},
 		{name: "e2b fresh pr", provider: "e2b", args: []string{"--fresh-pr", "example-org/my-app#1"}, want: "e2b delegates sync; --fresh-pr is not supported"},
 		{name: "e2b full resync", provider: "e2b", args: []string{"--full-resync"}, want: "e2b delegates sync; --full-resync is not supported"},
 	}

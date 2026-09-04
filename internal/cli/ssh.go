@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -235,6 +236,13 @@ const sshCommandWaitDelay = 5 * time.Second
 
 func sshCommandContext(ctx context.Context, target SSHTarget, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, directSSHExecutable(), args...)
+	// Cmd.Start returns preparation errors before spawning an unowned listener.
+	if cmd.Err == nil {
+		cmd.Err = context.Cause(ctx)
+		if cmd.Err == nil {
+			cmd.Err = ensureSSHControlDirectory(target)
+		}
+	}
 	// A cancelled multiplexed SSH session can leave its ControlPersist master
 	// holding inherited pipes after the session process exits. Bound Go's pipe
 	// drain so cancellation cannot strand the caller in Cmd.Wait.
@@ -468,8 +476,9 @@ func probeWSL2SSHReady(ctx context.Context, target *SSHTarget, profile sshReadin
 		probe := *target
 		probe.Port, probe.FallbackPorts = port, []string{}
 		run := func(remote string) error {
-			args := sshArgsNoInputWithOptions(probe, wsl2ReadinessCommand(remote), profile.connectTimeout, profile.connectionAttempts)
-			return runSSHCommand(sshCommandContext(ctx, probe, args...), io.Discard, io.Discard)
+			command := sshTransportPreparation{command: wsl2ReadinessCommand(remote)}
+			_, err := command.runOnce(ctx, probe, profile.connectTimeout, profile.connectionAttempts, io.Discard, io.Discard, false)
+			return err
 		}
 		if err := run(sshTransportProbeCommand(probe)); err != nil {
 			outcomes = append(outcomes, outcome{err: err})
@@ -602,9 +611,9 @@ func resolveSSHPortNoInput(ctx context.Context, target *SSHTarget, connectTimeou
 	var err error
 	for index, port := range ports {
 		probe.Port = port
-		args := sshArgsNoInputWithOptions(probe, sshTransportProbeCommand(probe), connectTimeout, connectionAttempts)
+		command := sshTransportPreparation{command: sshTransportProbeCommand(probe)}
 		var diagnostic synchronizedBuffer
-		err = runSSHCommand(sshCommandContext(ctx, probe, args...), io.Discard, &diagnostic)
+		_, err = command.runOnce(ctx, probe, connectTimeout, connectionAttempts, io.Discard, &diagnostic, false)
 		if err == nil {
 			target.Port, target.FallbackPorts = port, []string{}
 			return nil
@@ -708,6 +717,20 @@ func (p *sshTransportPreparation) runOnce(ctx context.Context, target SSHTarget,
 	args := sshArgsNoInputWithOptions(target, p.command, connectTimeout, connectionAttempts)
 	if p.direct != nil {
 		args = sshArgsWithOptions(target, p.command, connectTimeout, connectionAttempts)
+	}
+	if target.AuthSecret {
+		// Every command, including probes and workspace witnesses, needs the same
+		// private identity config as copy/forward transports. Keep it until Wait.
+		session, sessionErr := newSSHTransportSession(ctx, target, false)
+		if sessionErr != nil {
+			return false, sessionErr
+		}
+		defer func() { err = errors.Join(err, session.Close()) }()
+		args = session.commandPrefixWithOptions(connectTimeout, connectionAttempts)
+		if p.direct == nil {
+			args = append(args, "-n")
+		}
+		args = append(args, session.host(), p.command)
 	}
 	cmd := sshCommandContext(ctx, target, args...)
 	input, err := p.reset()
@@ -1199,6 +1222,10 @@ func sshControlPath(target SSHTarget) string {
 		strings.TrimSpace(target.SSHHostKey),
 		target.ProxyCommand,
 	}, "\x00")
+	if leaseDir := sshControlLeaseDirectory(target); leaseDir != "" {
+		sum := sha256.Sum256([]byte(scope))
+		return filepath.Join(sshControlDirectory(leaseDir), base64.RawURLEncoding.EncodeToString(sum[:16])+"-%C")
+	}
 	sum := sha1.Sum([]byte(scope))
 	return filepath.Join("/tmp", "crabbox-ssh-"+hex.EncodeToString(sum[:4])+"-%C")
 }

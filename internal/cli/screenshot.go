@@ -151,11 +151,9 @@ func runSSHToWriter(ctx context.Context, target SSHTarget, remote string, stdout
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := target
 		probe.Port = port
-		cmd := sshCommandContext(ctx, probe, sshArgs(probe, remote)...)
-		cmd.Stdout = stdout
+		transport := sshTransportPreparation{command: remote}
 		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
+		if _, err := transport.runOnce(ctx, probe, "10", "3", stdout, &stderr, false); err != nil {
 			lastErr = err
 			lastMessage = strings.TrimSpace(stderr.String())
 			if shouldRetrySSHPort(err) {

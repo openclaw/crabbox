@@ -8,6 +8,7 @@ import {
   windowsBootstrapPowerShell,
 } from "../src/bootstrap";
 import {
+  sharedGnomeDesktopTheme,
   sharedWindowsRuntime,
   sharedWindowsRuntimeGate,
   sharedWindowsCore,
@@ -422,6 +423,11 @@ describe("cloud-init bootstrap", () => {
 
   it("adds GNOME Wayland desktop services when requested", () => {
     const got = cloudInit({ ...config, desktop: true, desktopEnv: "gnome", browser: true });
+    const themeScript = sharedGnomeDesktopTheme()
+      .split("\n")
+      .map((line) => (line ? `    ${line}` : ""))
+      .join("\n");
+    expect(got.split(themeScript)).toHaveLength(2);
     expect(got).toContain(
       "labwc wayvnc swaybg librsvg2-common gnome-panel wlr-randr grim slurp wtype wl-clipboard",
     );

@@ -4,13 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { copySmokeRepo, writeExecutable, writeGoStub } from "./test-support/smoke-fixtures.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
-
-function writeExecutable(file, body) {
-  fs.writeFileSync(file, body, "utf8");
-  fs.chmodSync(file, 0o755);
-}
 
 function writeRawInventoryPythonStub(binDir, rawStatus) {
   const python = spawnSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).stdout.trim();
@@ -30,38 +26,8 @@ exec ${JSON.stringify(python)} "$@"
   );
 }
 
-function prepareSmokeRepo(dir) {
-  const tempRoot = path.join(dir, "repo");
-  const tempScripts = path.join(tempRoot, "scripts");
-  const smokeScript = path.join(tempScripts, "live-lambda-smoke.sh");
-  fs.mkdirSync(tempScripts, { recursive: true });
-  fs.copyFileSync(path.join(repoRoot, "scripts", "live-lambda-smoke.sh"), smokeScript);
-  fs.chmodSync(smokeScript, 0o755);
-  return { tempRoot, smokeScript };
-}
-
-function writeGoStub(binDir, scriptBody) {
-  writeExecutable(
-    path.join(binDir, "go"),
-    `#!/usr/bin/env bash
-set -euo pipefail
-out=""
-while [[ "$#" -gt 0 ]]; do
-  if [[ "$1" == "-o" ]]; then
-    out="$2"
-    shift 2
-    continue
-  fi
-  shift
-done
-mkdir -p "$(dirname "$out")"
-cat >"$out" <<'SCRIPT'
-${scriptBody}
-SCRIPT
-chmod +x "$out"
-`,
-  );
-}
+const prepareSmokeRepo = (dir) =>
+  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-lambda-smoke.sh"));
 
 test("live lambda smoke skips unless opted in", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-lambda-skip-"));

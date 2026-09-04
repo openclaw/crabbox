@@ -6,9 +6,10 @@ Read this when you are:
 - configuring Daytona API auth, snapshots, or SSH access;
 - changing `internal/providers/daytona`.
 
-Daytona is an SSH-lease provider with two data planes. Direct `run` and `warmup`
-create the sandbox from a Daytona snapshot and drive sync and command execution
-through the Daytona SDK/toolbox APIs. With a coordinator configured, the Worker
+Daytona is an SSH-lease provider with two data planes. Direct ordinary `run` and
+`warmup` use the Daytona SDK/toolbox APIs. Explicit `--script` and `--script-stdin`
+runs use Crabbox's SSH runner, including script upload and optional rsync.
+Both paths create new sandboxes from a Daytona snapshot. With a coordinator configured, the Worker
 creates the sandbox and mints an expiring SSH access token; the CLI then uses
 normal SSH and rsync without receiving the Daytona API key.
 
@@ -31,6 +32,8 @@ crabbox warmup --provider daytona --class standard
 crabbox warmup --provider daytona --daytona-snapshot crabbox-ready
 crabbox run --provider daytona --daytona-snapshot crabbox-ready -- pnpm test
 crabbox run --provider daytona --id swift-crab -- pnpm test:changed
+crabbox run --provider daytona --id swift-crab --no-sync --script ./check.sh -- "literal argument"
+printf 'printf "script ready\\n"\n' | crabbox run --provider daytona --id swift-crab --no-sync --script-stdin
 crabbox ssh --provider daytona --id swift-crab
 crabbox stop --provider daytona swift-crab
 ```
@@ -206,7 +209,7 @@ lifetimes rather than inheriting this control-plane budget.
    startup is rolled back. A lost create response is reconciled by the unique
    sandbox name and verified ownership, without allocating again. Failed
    cleanup retains a recovery claim and reports the exact sandbox and lease IDs.
-3. For `run`, build the Crabbox sync manifest, stream a gzipped tar archive to
+3. For ordinary `run`, build the Crabbox sync manifest, stream a gzipped tar archive to
    the Daytona toolbox upload endpoint, extract it in the sandbox, and execute
    the command through the Daytona process APIs. Remote process timeouts are
    derived from the caller's context deadline, rounded up to whole seconds, and
@@ -218,9 +221,19 @@ lifetimes rather than inheriting this control-plane budget.
    published only after successful extraction. Active sync and execution
    refresh Daytona activity at least every 30 seconds so quiet commands do not
    trigger idle auto-stop.
-4. For `ssh`, request short-lived SSH access (TTL `daytona.sshAccessMinutes`),
+4. For script runs, admit the exact lease and repository claim, then use the
+   normal SSH workspace owner, private script upload, and shell runner. Scripts
+   retain their shebang; scripts without one run with Bash. Trailing arguments
+   are passed literally, the cwd is the lease's repository workspace, and
+   `--env-from-profile` uses the private environment-file path. `--no-sync`
+   skips repository sync while still uploading the script. Activity refreshes
+   cover setup, sync, and execution with the same native idle policy.
+   After cancellation, another SSH script run must acquire the workspace owner;
+   a live or ambiguous witnessed child blocks reuse. This does not establish
+   settlement of an ordinary SDK command.
+5. For `ssh`, request short-lived SSH access (TTL `daytona.sshAccessMinutes`),
    parse Daytona's `sshCommand`, and redact the token in normal output.
-5. Delete the sandbox on release unless the lease is kept.
+6. Delete the sandbox on release unless the lease is kept.
 
 `--ttl` is a hard upper bound even while commands run or a lease is kept.
 Daytona lifetime settings use whole minutes, so positive durations are rounded
@@ -241,8 +254,8 @@ development endpoints.
 
 - Provider kind: SSH-lease (Linux only).
 - SSH: yes, via a short-lived Daytona SSH access token.
-- Sync: direct mode uses Daytona toolbox archive sync; brokered mode uses normal
-  Crabbox rsync over SSH.
+- Sync: direct ordinary commands use Daytona toolbox archive sync; script runs
+  and brokered mode use normal Crabbox rsync over SSH.
 - Desktop / browser / code: no — Daytona has no Crabbox VNC or `code` surface.
 - Actions hydration: no.
 - Coordinator (broker): yes for Linux SSH/sync/run. The coordinator owns the
@@ -264,12 +277,15 @@ development endpoints.
   existing snapshots keep precedence. Brokered mode rejects `--class` but preserves existing
   YAML/environment class configuration without changing coordinator-owned sizing.
 - `--id <sandbox-id-or-slug>` is required to address an existing sandbox.
-- Daytona `run` is delegated to the toolbox APIs; it is not core-over-SSH
-  execution. Because of that, the following `run` options are rejected:
+- Ordinary Daytona `run` commands delegate to the toolbox APIs and reject:
   `--checksum`, `--full-resync`,
-  `--fresh-pr`, `--script` / `--script-stdin`, `--env-helper`,
+  `--fresh-pr`, `--env-helper`,
   `--capture-stdout` / `--capture-stderr`, `--capture-on-fail`, `--download`,
   `--artifact-glob`, `--require-artifact`, `--emit-proof`, and `--stop-after`.
+- `--script` / `--script-stdin` explicitly select the SSH runner and its normal
+  sync, environment, capture, and exit-code behavior. The SDK transport never
+  retries failed commands through SSH. Script runs need snapshot tooling for
+  SSH, Git, rsync, tar, and Bash, plus access to the Daytona SSH gateway.
 - Use `--sync-only` to pre-upload the archive into a kept sandbox before a later
   command. Large-sync guardrails still apply; `--force-sync-large` is honored
   for intentional large archive syncs.

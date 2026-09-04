@@ -134,6 +134,21 @@ safe relative file paths instead of globs. Do not pretend a delegated provider
 is SSH-like unless it has a stable SSH contract. If Crabbox cannot run rsync and
 remote commands itself, use `DelegatedRunBackend`.
 
+A hybrid backend implementing both interfaces may declare `FeatureSSHScriptRun`
+alongside `FeatureSSH`. Explicit `--script` / `--script-stdin` then select core's
+SSH run owner before input is read or a lease is acquired. Ordinary commands and
+warmup retain delegation. The capability cannot be combined with
+`FeatureModuleRun`; it does not weaken the delegated option guard or add a
+fallback after SDK errors. The selected backend must implement `SSHLeaseBackend`.
+
+Set `SSHTarget.AuthSecret` when the SSH username contains a provider credential.
+Noninteractive commands, input uploads, workspace-owner probes, and capture
+paths use the existing private OpenSSH config and a fixed host alias. The config
+is removed after the SSH command exits; the credential is never a `user@host`
+process argument. Managed targets without an explicit SSH-config route also
+exclude ambient identity files and agents. Ordinary keyed commands retain their
+multiplexing policy.
+
 `--no-sync` is validated by each adapter, not inferred from `FeatureArchiveSync`:
 some SDK/CLI transports support it without archive sync. An adapter that cannot
 skip transfer must reject it before acquisition or provider execution. Blacksmith
@@ -142,6 +157,21 @@ Testbox does this because its native run command has no supported sync bypass.
 ### Optional interfaces
 
 Add optional capabilities as small interfaces instead of widening every backend.
+
+Provider-owned idle activity during an SSH run is optional:
+
+```go
+type SSHRunActivityBackend interface {
+	BeginSSHRunActivity(context.Context, LeaseTarget) (stop func(), err error)
+}
+```
+
+Core calls this after lease admission and before remote setup and sync. On
+success, the provider returns a non-nil stop function that cancels and joins all
+activity work; core calls it on every exit. On failure, the provider leaves no
+background work running and core does not begin setup. Idle intervals, request
+budgets, and refresh policy belong to the provider. Daytona reuses its existing
+SDK activity lifecycle for direct SSH script runs.
 
 Provider-specific run admission belongs on the provider, beside config validation:
 
@@ -689,6 +719,7 @@ cli.FeatureCacheVolume  // "cache-volume"
 cli.FeatureRunProof     // "run-proof"
 cli.FeatureRunSession   // "run-session"
 cli.FeatureModuleRun    // "module-run"
+cli.FeatureSSHScriptRun // "ssh-script-run"
 cli.FeatureRunArtifacts // "run-artifacts"
 cli.FeatureRunDownloads // "run-downloads"
 cli.FeaturePauseResume  // "pause-resume"

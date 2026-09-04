@@ -93,7 +93,8 @@ if [[ "$(uname -s)" == Darwin && "\${1:-}" == -fT ]]; then shift; set -- -f "$@"
 exec /bin/mv "$@"`,
   );
   const ownerUID = String(process.getuid?.() ?? 0);
-  const ownerGID = String(process.getgid?.() ?? 0);
+  // BSD temporary directories inherit their parent's group, not the process GID.
+  const ownerGID = String((await stat(root)).gid);
   const options = {
     manifestPath: manifest,
     legacyMarkerPath: marker,

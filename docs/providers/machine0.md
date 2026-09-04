@@ -566,6 +566,18 @@ instead of baking secrets into a reusable image.
 
 ## CLI contract
 
+On POSIX hosts, Crabbox captures native JSON responses through private regular
+files because the CLI can exit before asynchronous pipe writes finish. Capture
+files are unlinked before the CLI starts; they leave no named output files,
+including when the operation is killed. Windows and non-JSON commands retain
+pipe capture.
+
+Each output stream retains the existing 16 MiB limit. Crabbox monitors file
+growth and cancels the command on overflow; temporary disk use can exceed that
+limit between observations and process termination, while returned output is
+strictly capped. An inherited writer that outlives the command produces an
+explicit incomplete-capture error, with no partial output accepted as success.
+
 The adapter uses the documented CLI. Prior lifecycle testing used
 `@machine0/cli` 1.0.155:
 

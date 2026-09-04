@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -1719,6 +1722,65 @@ func TestVultrDefaultsAndIsolation(t *testing.T) {
 	}
 	if cfg.Vultr.OS != "" || cfg.Vultr.Image != "" {
 		t.Fatalf("portable OS must not silently map to unverified Vultr boot source: %#v", cfg.Vultr)
+	}
+}
+
+func TestLinuxProviderConnectionDefaultsPreserveExplicitValues(t *testing.T) {
+	base := baseConfig()
+	for _, provider := range []struct {
+		name, user, port string
+		clearFallbacks   bool
+	}{
+		{"digitalocean", base.SSHUser, base.SSHPort, false},
+		{"vultr", "root", "22", true},
+		{"linode", base.SSHUser, base.SSHPort, false},
+		{"lambda", "ubuntu", "22", true},
+		{"nebius", "builder", base.SSHPort, false},
+		{"ovh", base.SSHUser, base.SSHPort, false},
+		{"scaleway", "root", "22", false},
+		{"tencentcloud", "ubuntu", "22", true},
+	} {
+		for _, explicit := range []string{"none", "base", "custom"} {
+			t.Run(provider.name+"/"+explicit, func(t *testing.T) {
+				cfg := baseConfig()
+				cfg.Provider = provider.name
+				cfg.TargetOS, cfg.WindowsMode = targetMacOS, windowsModeWSL2
+				cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort = "/previous", "previous", "2999"
+				cfg.Nebius.User = "builder"
+				cfg.SSHFallbackPorts = []string{"2022"}
+				cfg.sshFallbackPortsExplicit = true
+				cfg.explicitSSHFallbackPorts = []string{"2022"}
+				wantUser, wantPort, wantRoot := provider.user, provider.port, defaultPOSIXWorkRoot
+				if explicit != "none" {
+					wantUser, wantPort, wantRoot = base.SSHUser, base.SSHPort, base.WorkRoot
+					if explicit == "custom" {
+						wantUser, wantPort, wantRoot = "alice", "2200", "/srv/proof"
+					}
+					if err := applyFileConfig(&cfg, fileConfig{
+						WorkRoot: wantRoot,
+						SSH:      &fileSSHConfig{User: wantUser, Port: wantPort},
+						Windows:  &fileWindowsConfig{Mode: windowsModeNormal},
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := applyProviderConfigDefaults(&cfg); err != nil {
+					t.Fatal(err)
+				}
+				got := []string{cfg.TargetOS, cfg.WindowsMode, cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort}
+				want := []string{targetLinux, windowsModeNormal, wantRoot, wantUser, wantPort}
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("connection = %q, want %q", got, want)
+				}
+				wantFallbacks := "2022"
+				if provider.clearFallbacks {
+					wantFallbacks = ""
+				}
+				if got := strings.Join(cfg.SSHFallbackPorts, ","); got != wantFallbacks {
+					t.Fatalf("fallback ports = %q, want %q", got, wantFallbacks)
+				}
+			})
+		}
 	}
 }
 
@@ -5590,6 +5652,59 @@ func TestExplicitConfigSymlinkIntoRepoRemainsUntrusted(t *testing.T) {
 	}
 	if trust.repositoryRoot != wantRoot {
 		t.Fatalf("repository root=%q, want %q", trust.repositoryRoot, wantRoot)
+	}
+}
+
+func TestConfigDiscoveryDoesNotReadRepositoryMetadata(t *testing.T) {
+	clearConfigEnv(t)
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	t.Chdir(repo)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	writeFile(t, configPath, "provider: aws\nprofile: root-discovery\n")
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	tracePath := filepath.Join(t.TempDir(), "git-trace.jsonl")
+	// Git's global Trace2 setting observes real commands without changing the
+	// credential-filtered environment used by repository discovery.
+	runGit(t, repo, "config", "--file", filepath.Join(os.Getenv("HOME"), ".gitconfig"), "trace2.eventTarget", tracePath)
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	if err := app.Run(context.Background(), []string{"config", "show", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var config struct{ Profile string }
+	if err := json.Unmarshal(stdout.Bytes(), &config); err != nil || config.Profile != "root-discovery" {
+		t.Fatalf("config show profile=%q decode=%v", config.Profile, err)
+	}
+	trace, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	discoveredRoot := false
+	decoder := json.NewDecoder(bytes.NewReader(trace))
+	for {
+		var event struct {
+			Event string
+			Argv  []string
+		}
+		if err := decoder.Decode(&event); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if event.Event != "start" {
+			continue
+		}
+		command := strings.Join(event.Argv[1:], " ")
+		if strings.Contains(command, "--show-toplevel") {
+			discoveredRoot = true
+		}
+		if strings.HasPrefix(command, "remote ") || strings.HasPrefix(command, "symbolic-ref ") || strings.HasPrefix(command, "branch ") || command == "rev-parse HEAD" {
+			t.Errorf("config discovery read unused repository metadata: git %s", command)
+		}
+	}
+	if !discoveredRoot {
+		t.Fatal("config discovery did not resolve the active repository root")
 	}
 }
 

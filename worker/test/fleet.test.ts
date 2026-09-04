@@ -15018,6 +15018,38 @@ describe("fleet lease identity and idle", () => {
     expect(new TextEncoder().encode(maximumUnicode).byteLength).toBeLessThan(2048);
   });
 
+  it("preserves exact length-framed typed desired key vectors", async () => {
+    const input = {
+      org: "example-org",
+      owner: "alice@example.com",
+      key: "builders",
+      compatibilityKey: "linux-16-vcpu",
+      identity: {
+        schema: "crabbox-ready-pool-identity/v1",
+        image: { provider: "aws", scope: "us-east-1", id: "ami-0123456789abcdef0" },
+        architecture: "amd64",
+        seedDigest: "sha256:8b76ec429b7e084f6af6c6a2de4be7faf09f872c892513d4ce97d2f055e44e20",
+        cacheCompatibility: "node-22",
+      } satisfies ReadyPoolIdentityV1,
+    };
+    expect(await readyPoolDesiredCapacityKeyV2(input)).toBe(
+      "typed-ready-pool-v2-desired:sha256:ff61c2deb49060ea3e5d8dca7da0a60e3b60e6ac42b419b8f1e9f6a47cfaf8ac",
+    );
+    expect(
+      await readyPoolDesiredCapacityKeyV2({
+        ...input,
+        org: "example:org",
+        owner: "alice\u2028東京@example.com",
+        compatibilityKey: undefined,
+      }),
+    ).toBe(
+      "typed-ready-pool-v2-desired:sha256:6e1ce2699c9bec4ed83cdfbb73eb62a22dc409b078dfb3849261309cc15c82c4",
+    );
+    await expect(readyPoolDesiredCapacityKeyV2({ ...input, key: "\ud800" })).rejects.toThrow(
+      "ready-pool desired field 3 must be valid UTF-8",
+    );
+  });
+
   it("drains typed entries immediately when their authoritative lease image or return identity changes", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage, {
@@ -37836,6 +37868,10 @@ describe("fleet identity", () => {
         cloudID: "i-live",
         region: "eu-west-1",
         state: "expired",
+        owner: "alice@example.com",
+        org: "engineering-team",
+        cleanupAttempts: 0,
+        cleanupRetryAt: "2026-05-01T02:00:00.000Z",
       }),
     );
     storage.seed(
@@ -37856,10 +37892,10 @@ describe("fleet identity", () => {
       "lease:cbx_000000000004",
       testLease({
         id: "cbx_000000000004",
-        slug: "terminated-runner",
+        slug: undefined,
         provider: "aws",
         cloudID: "i-terminated",
-        region: "eu-west-1",
+        region: undefined,
         state: "expired",
         createdAt: "2026-05-01T00:02:00.000Z",
       }),
@@ -37914,6 +37950,17 @@ describe("fleet identity", () => {
       { leaseID: "cbx_000000000002", cloudStatus: "missing" },
       { leaseID: "cbx_000000000001", cloudStatus: "found", cloudState: "running" },
     ]);
+    expect(body.audits[2]).toMatchObject({
+      owner: "alice@example.com",
+      org: "engineering-team",
+      provider: "aws",
+      cloudID: "i-live",
+      host: "192.0.2.1",
+      cleanupAttempts: 0,
+      cleanupRetryAt: "2026-05-01T02:00:00.000Z",
+    });
+    expect(body.audits[0]).not.toHaveProperty("slug");
+    expect(body.audits[0]).not.toHaveProperty("region");
     const serialized = JSON.stringify(body);
     expect(serialized).toContain("[redacted]");
     expect(serialized).not.toContain("configured-audit-secret");
@@ -37932,36 +37979,45 @@ describe("fleet identity", () => {
         cloudID: "vm-live",
         region: "eastus",
         state: "expired",
+        owner: "alice@example.com",
+        org: "engineering-team",
+        cleanupAttempts: 0,
+        cleanupRetryAt: "2026-05-01T02:00:00.000Z",
       }),
     );
     storage.seed(
       "lease:cbx_000000000002",
       testLease({
         id: "cbx_000000000002",
-        slug: "gone-azure",
+        slug: undefined,
         provider: "azure",
         cloudID: "vm-gone",
-        region: "eastus",
+        region: undefined,
+        cleanupError: "failed configured-audit-secret",
         state: "expired",
         createdAt: "2026-05-01T00:01:00.000Z",
       }),
     );
-    const fleet = testFleet(storage, {
-      azure: fakeProvider(undefined, {
-        provider: "azure",
-        servers: [
-          testMachine({
-            provider: "azure",
-            cloudID: "vm-live",
-            name: "vm-live",
-            status: "running",
-            serverType: "Standard_D16ads_v5",
-            host: "192.0.2.30",
-            labels: { crabbox: "true", lease: "cbx_000000000001" },
-          }),
-        ],
-      }),
-    });
+    const fleet = testFleet(
+      storage,
+      {
+        azure: fakeProvider(undefined, {
+          provider: "azure",
+          servers: [
+            testMachine({
+              provider: "azure",
+              cloudID: "vm-live",
+              name: "vm-live",
+              status: "running",
+              serverType: "Standard_D16ads_v5",
+              host: "192.0.2.30",
+              labels: { crabbox: "true", lease: "cbx_000000000001" },
+            }),
+          ],
+        }),
+      },
+      { AZURE_CLIENT_SECRET: "configured-audit-secret" },
+    );
 
     const response = await fleet.fetch(
       request("GET", "/v1/admin/lease-audit?state=expired&provider=azure", {
@@ -37977,6 +38033,20 @@ describe("fleet identity", () => {
       { leaseID: "cbx_000000000002", cloudStatus: "missing" },
       { leaseID: "cbx_000000000001", cloudStatus: "found", cloudState: "running" },
     ]);
+    expect(body.audits[1]).toMatchObject({
+      owner: "alice@example.com",
+      org: "engineering-team",
+      provider: "azure",
+      cloudID: "vm-live",
+      host: "192.0.2.1",
+      cleanupAttempts: 0,
+      cleanupRetryAt: "2026-05-01T02:00:00.000Z",
+    });
+    expect(body.audits[0]).not.toHaveProperty("slug");
+    expect(body.audits[0]).not.toHaveProperty("region");
+    const serialized = JSON.stringify(body);
+    expect(serialized).toContain("[redacted]");
+    expect(serialized).not.toContain("configured-audit-secret");
   });
 
   it("starts GitHub login and keeps polling secret server-side", async () => {

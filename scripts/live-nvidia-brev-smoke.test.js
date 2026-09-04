@@ -4,23 +4,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { copySmokeRepo, shellArgHelper, writeExecutable } from "./test-support/smoke-fixtures.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
-function writeExecutable(file, body) {
-  fs.writeFileSync(file, body, "utf8");
-  fs.chmodSync(file, 0o755);
-}
-
-function prepareSmokeRepo(dir) {
-  const tempRoot = path.join(dir, "repo");
-  const tempScripts = path.join(tempRoot, "scripts");
-  const smokeScript = path.join(tempScripts, "live-nvidia-brev-smoke.sh");
-  fs.mkdirSync(tempScripts, { recursive: true });
-  fs.copyFileSync(path.join(repoRoot, "scripts", "live-nvidia-brev-smoke.sh"), smokeScript);
-  fs.chmodSync(smokeScript, 0o755);
-  return { tempRoot, smokeScript };
-}
+const prepareSmokeRepo = (dir) =>
+  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-nvidia-brev-smoke.sh"));
 
 function writeGoStub(binDir, scriptBody) {
   writeExecutable(
@@ -48,21 +37,6 @@ chmod +x "$out"
   );
 }
 
-const shellArgHelper = `
-arg_after() {
-  local want="$1"
-  shift
-  while [[ "$#" -gt 0 ]]; do
-    if [[ "$1" == "$want" ]]; then
-      printf '%s' "$2"
-      return 0
-    fi
-    shift
-  done
-  return 1
-}
-`;
-
 test("live nvidia brev smoke skips unless explicitly opted in", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-nbrev-skip-"));
   const binDir = path.join(dir, "bin");
@@ -82,7 +56,10 @@ test("live nvidia brev smoke skips unless explicitly opted in", () => {
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /classification=environment_blocked reason=CRABBOX_NVIDIA_BREV_LIVE_not_enabled/);
+  assert.match(
+    result.stdout,
+    /classification=environment_blocked reason=CRABBOX_NVIDIA_BREV_LIVE_not_enabled/,
+  );
 });
 
 test("live nvidia brev smoke runs guarded lifecycle without real credentials", () => {
@@ -149,12 +126,24 @@ esac
   const seen = fs.readFileSync(calls, "utf8").trim().split("\n");
   assert.equal(seen[0], "doctor --provider nvidia-brev --nvidia-brev-cli brev");
   assert.equal(seen[1], "list --provider nvidia-brev --nvidia-brev-cli brev --json");
-  assert.match(seen[2], /^warmup --provider nvidia-brev --nvidia-brev-cli brev --nvidia-brev-release-action delete --slug nbrev-smoke-\d+-\d+-[0-9a-f]{8} --keep=false --ttl 20m --idle-timeout 5m$/);
+  assert.match(
+    seen[2],
+    /^warmup --provider nvidia-brev --nvidia-brev-cli brev --nvidia-brev-release-action delete --slug nbrev-smoke-\d+-\d+-[0-9a-f]{8} --keep=false --ttl 20m --idle-timeout 5m$/,
+  );
   assert.ok(seen[2].match(/--slug (\S+)/)[1].length <= 48);
-  assert.match(seen[3], /^status --provider nvidia-brev --nvidia-brev-cli brev --nvidia-brev-release-action delete --id nbrev-smoke-\d+-\d+-[0-9a-f]{8} --wait --wait-timeout 300s$/);
-  assert.match(seen[4], /^run --provider nvidia-brev --nvidia-brev-cli brev --nvidia-brev-release-action delete --id nbrev-smoke-\d+-\d+-[0-9a-f]{8} --no-sync -- nvidia-smi$/);
+  assert.match(
+    seen[3],
+    /^status --provider nvidia-brev --nvidia-brev-cli brev --nvidia-brev-release-action delete --id nbrev-smoke-\d+-\d+-[0-9a-f]{8} --wait --wait-timeout 300s$/,
+  );
+  assert.match(
+    seen[4],
+    /^run --provider nvidia-brev --nvidia-brev-cli brev --nvidia-brev-release-action delete --id nbrev-smoke-\d+-\d+-[0-9a-f]{8} --no-sync -- nvidia-smi$/,
+  );
   assert.equal(seen[5], "list --provider nvidia-brev --nvidia-brev-cli brev --json");
-  assert.match(seen[6], /^stop --provider nvidia-brev --nvidia-brev-cli brev --nvidia-brev-release-action delete nbrev-smoke-\d+-\d+-[0-9a-f]{8}$/);
+  assert.match(
+    seen[6],
+    /^stop --provider nvidia-brev --nvidia-brev-cli brev --nvidia-brev-release-action delete nbrev-smoke-\d+-\d+-[0-9a-f]{8}$/,
+  );
 });
 
 test("live nvidia brev smoke attempts targeted cleanup after partial failure", () => {
@@ -213,7 +202,10 @@ exit 99
   assert.match(result.stderr, /classification=environment_blocked/);
   assert.match(result.stderr, /created workspace before failing/);
   assert.match(fs.readFileSync(calls, "utf8"), /warmup .* --keep=false /);
-  assert.match(fs.readFileSync(calls, "utf8"), /stop --provider nvidia-brev .* nbrev-smoke-\d+-\d+-[0-9a-f]{8}/);
+  assert.match(
+    fs.readFileSync(calls, "utf8"),
+    /stop --provider nvidia-brev .* nbrev-smoke-\d+-\d+-[0-9a-f]{8}/,
+  );
   assert.doesNotMatch(result.stderr, /reason=cleanup_failed/);
 });
 

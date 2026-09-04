@@ -14195,7 +14195,7 @@ export class FleetCoordinator {
     return json({ config, sweep });
   }
 
-  private async auditAWSLeaseCloud(lease: LeaseRecord): Promise<LeaseCloudAudit> {
+  private leaseCloudAuditBase(lease: LeaseRecord): LeaseCloudAudit {
     const audit: LeaseCloudAudit = {
       leaseID: lease.id,
       provider: lease.provider,
@@ -14224,6 +14224,11 @@ export class FleetCoordinator {
     if (lease.cleanupRetryAt) {
       audit.cleanupRetryAt = lease.cleanupRetryAt;
     }
+    return audit;
+  }
+
+  private async auditAWSLeaseCloud(lease: LeaseRecord): Promise<LeaseCloudAudit> {
+    const audit = this.leaseCloudAuditBase(lease);
     try {
       const server = await this.awsLeaseServer(lease);
       if (isAWSTerminalInstanceState(server.status)) {
@@ -14266,34 +14271,7 @@ export class FleetCoordinator {
   }
 
   private async auditAzureLeaseCloud(lease: LeaseRecord): Promise<LeaseCloudAudit> {
-    const audit: LeaseCloudAudit = {
-      leaseID: lease.id,
-      provider: lease.provider,
-      state: lease.state,
-      target: lease.target,
-      owner: lease.owner,
-      org: orgLabelForDisplay(lease.org),
-      cloudID: lease.cloudID,
-      host: lease.host,
-      serverType: lease.serverType,
-      expiresAt: lease.expiresAt,
-      cloudStatus: "error",
-    };
-    if (lease.slug) {
-      audit.slug = lease.slug;
-    }
-    if (lease.region) {
-      audit.region = lease.region;
-    }
-    if (lease.cleanupAttempts !== undefined) {
-      audit.cleanupAttempts = lease.cleanupAttempts;
-    }
-    if (lease.cleanupError) {
-      audit.cleanupError = coordinatorDiagnosticText(this.env, lease.cleanupError);
-    }
-    if (lease.cleanupRetryAt) {
-      audit.cleanupRetryAt = lease.cleanupRetryAt;
-    }
+    const audit = this.leaseCloudAuditBase(lease);
     try {
       const machines = await this.provider("azure", lease.region).listCrabboxServers();
       const server = machines.find(
@@ -19226,7 +19204,15 @@ export async function readyPoolSeedDigestV1(
     }
     return { tag: index + 1, encoded };
   });
-  const domain = textEncoder.encode("crabbox-ready-pool-seed/v1\0");
+  const digest = await readyPoolTaggedDigest("crabbox-ready-pool-seed/v1\0", fields);
+  return `sha256:${digest}`;
+}
+
+async function readyPoolTaggedDigest(
+  domainLabel: string,
+  fields: readonly { tag: number; encoded: Uint8Array }[],
+): Promise<string> {
+  const domain = textEncoder.encode(domainLabel);
   const payload = new Uint8Array(
     domain.byteLength + fields.reduce((size, field) => size + 5 + field.encoded.byteLength, 0),
   );
@@ -19241,9 +19227,7 @@ export async function readyPoolSeedDigestV1(
     offset += field.encoded.byteLength;
   }
   const digest = await crypto.subtle.digest("SHA-256", payload);
-  return `sha256:${[...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("")}`;
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function validUnicodeScalarString(value: string): boolean {
@@ -19586,24 +19570,8 @@ export async function readyPoolDesiredCapacityKeyV2(input: {
     }
     return { tag: index + 1, encoded: textEncoder.encode(value) };
   });
-  const domain = textEncoder.encode("crabbox-ready-pool-desired/v2\0");
-  const payload = new Uint8Array(
-    domain.byteLength + fields.reduce((size, field) => size + 5 + field.encoded.byteLength, 0),
-  );
-  payload.set(domain);
-  const view = new DataView(payload.buffer);
-  let offset = domain.byteLength;
-  for (const field of fields) {
-    payload[offset] = field.tag;
-    view.setUint32(offset + 1, field.encoded.byteLength, false);
-    offset += 5;
-    payload.set(field.encoded, offset);
-    offset += field.encoded.byteLength;
-  }
-  const digest = await crypto.subtle.digest("SHA-256", payload);
-  return `typed-ready-pool-v2-desired:sha256:${[...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("")}`;
+  const digest = await readyPoolTaggedDigest("crabbox-ready-pool-desired/v2\0", fields);
+  return `typed-ready-pool-v2-desired:sha256:${digest}`;
 }
 
 function readyPoolDesiredCapacityScopeMatches(

@@ -608,10 +608,13 @@ digests. One explicit full release/publish request authorizes the complete norma
 sequence through closeout without renewed chat approval at each stage. Narrow
 requests stay narrow. The original request supplies authorization; GitHub events
 alone do not. Trust domains, sequential technical gates, credential isolation,
-identity binding, exact frozen inputs, immutability, actual exclusive-writer
-coordination, and cancellation boundaries remain mandatory. Authorization is
-not evidence of an administrative freeze. Publication changes only the verified
-draft state. Publication establishes eligibility for the existing ordinary tap
+identity binding, exact frozen inputs, immutability, immediate publication
+readbacks, and cancellation boundaries remain mandatory. Publication does not
+require a particular PR-approval ruleset or an administrative writer freeze.
+The final read and publication are not atomic, so another writer can still race
+that boundary; a detected post-publication mismatch is an incident, not
+permission to rewrite the release. Publication changes only the verified draft
+state. Publication establishes eligibility for the existing ordinary tap
 updater. The explicit operator handoff supplies four validated archive names
 and hashes; public native and public Go installation smokes neither authorize
 nor delay it. A Homebrew failure is retried independently without rebuilding,

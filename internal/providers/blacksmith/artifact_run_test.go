@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -448,7 +449,7 @@ func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 					}
 				} else if kind == "remote-collection-timeout" {
 					var ee ExitError
-					if got != code || ended.IsZero() || !errors.As(err, &ee) || ee.Code != 7 || ee.Message != "collection exited 124" || len(artifacts.Artifacts) != 0 {
+					if got != code || ended.IsZero() || !errors.As(err, &ee) || ee.Code != 7 || ee.Message != "collection exited 124" || len(artifacts.Artifacts) != 0 || artifacts.Output != "" {
 						t.Fatalf("remote collection timeout lost workload result: code=%d ended=%v artifacts=%+v err=%v", got, ended, artifacts, err)
 					}
 					path := core.LocalRunArtifactPath(repo, "", "tbx_budget", "blacksmith-artifacts.tgz")
@@ -456,8 +457,31 @@ func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 						t.Fatalf("remote collection timeout published an archive: %v", statErr)
 					}
 				} else {
-					if err == nil || len(artifacts.Artifacts) != 0 || got == 0 {
+					var ee ExitError
+					if !errors.As(err, &ee) || ee.Code != 7 || len(artifacts.Artifacts) != 0 || artifacts.Output != "" {
 						t.Fatalf("unconfirmed success code=%d err=%v", got, err)
+					}
+					want := 7
+					observedExit := kind == "local-collection-stall"
+					if ee.Message != "native run did not complete a clean artifact protocol; artifacts withheld" || got == 0 {
+						t.Fatalf("unexpected protocol failure code=%d err=%v", got, err)
+					}
+					switch kind {
+					case "local-collection-stall":
+						want = 1 // The mock native runner returns 1 on cancellation.
+					case "sync-stall":
+						want = 124
+					case "startup-failure":
+						// Cancellation may kill the shell before its normal exit 0.
+						if got == 1 {
+							want = 1
+						}
+					}
+					if observedExit && code != 0 {
+						want = code
+					}
+					if got != want || ended.IsZero() == observedExit {
+						t.Fatalf("code=%d want=%d observed exit=%t want=%t err=%v", got, want, !ended.IsZero(), observedExit, err)
 					}
 					if kind == "local-collection-stall" && code != 0 && got != code {
 						t.Fatalf("lost workload exit %d: %d", code, got)
@@ -469,6 +493,65 @@ func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 				if time.Since(begin) > budget+3*time.Second {
 					t.Fatal("unbounded collection wait")
 				}
+			})
+		}
+	}
+}
+
+func TestBlacksmithArtifactCollectionTimeoutReceipt(t *testing.T) {
+	for _, boundary := range []string{"helper", "public"} {
+		for _, code := range []int{0, 1, 23} {
+			t.Run(fmt.Sprintf("%s/%d", boundary, code), func(t *testing.T) {
+				isolateBlacksmithOwnership(t)
+				repo := t.TempDir()
+				t.Chdir(repo)
+				const id = "tbx_collecttimeout"
+				if boundary == "public" {
+					testOwnedBlacksmithClaim(t, id, "jade-krill", repo)
+				}
+				archive := makeTarGz(t, map[string]string{"report": "synthetic"})
+				// Deliver a complete batch before local timers can fire, even when
+				// the failed collector emitted an otherwise valid archive.
+				synctest.Test(t, func(t *testing.T) {
+					runs := 0
+					runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+						runs++
+						start, workloadExit, end := testBlacksmithReceiptFrames(t, syntheticBlacksmithCommand(t, req), code)
+						payload := core.DelegatedRunArtifactBeginMarker + "\n" + base64.StdEncoding.EncodeToString(archive) + "\n" + core.DelegatedRunArtifactEndMarker + "\n"
+						fmt.Fprint(req.Stdout, start+workloadExit+payload+strings.Replace(end, "end:0", "end:124", 1))
+						return LocalCommandResult{}, nil
+					}}
+					backend := newTestBlacksmithBackend(baseConfig(), runner)
+					req := RunRequest{ID: id, Repo: Repo{Root: repo}, Command: []string{fmt.Sprintf("exit %d", code)}, ArtifactGlobs: []string{"report"}}
+					var ee ExitError
+					if boundary == "helper" {
+						got, ended, collected, err := backend.runArtifactTestbox(t.Context(), req, id, nil, nil, nil, 100*time.Millisecond)
+						if got != code || ended.IsZero() || !errors.As(err, &ee) || ee.Code != 7 || ee.Message != "collection exited 124" || len(collected.Artifacts) != 0 || collected.Output != "" {
+							t.Fatalf("code=%d want=%d ended=%v collected=%+v err=%v", got, code, ended, collected, err)
+						}
+					} else {
+						result, err := backend.Run(t.Context(), req)
+						want := code
+						if want == 0 {
+							want = 7
+						}
+						if result.ExitCode != want || !errors.As(err, &ee) || ee.Code != want {
+							t.Fatalf("code=%d want=%d err=%v", result.ExitCode, want, err)
+						}
+						for _, artifact := range result.Artifacts {
+							if artifact.Kind == "artifact-glob" {
+								t.Fatal("failed collector published an artifact")
+							}
+						}
+					}
+					if runs != 1 {
+						t.Fatalf("native runs=%d want=1", runs)
+					}
+					path := core.LocalRunArtifactPath(repo, "", id, "blacksmith-artifacts.tgz")
+					if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("failed collector left a local archive: %v", err)
+					}
+				})
 			})
 		}
 	}

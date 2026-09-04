@@ -742,6 +742,7 @@ type fakeSpritesAPI struct {
 	organizationErr error
 	create          spritesInfo
 	get             spritesInfo
+	list            []spritesInfo
 	createdName     string
 	createdLabels   []string
 	deleted         string
@@ -770,7 +771,7 @@ func (f *fakeSpritesAPI) GetSprite(context.Context, string) (spritesInfo, error)
 }
 
 func (f *fakeSpritesAPI) ListSprites(context.Context, string) ([]spritesInfo, error) {
-	return nil, nil
+	return f.list, nil
 }
 
 func (f *fakeSpritesAPI) DeleteSprite(_ context.Context, name string) error {

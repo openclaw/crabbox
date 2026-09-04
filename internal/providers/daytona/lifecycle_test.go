@@ -608,40 +608,57 @@ func TestDaytonaStatusWaitFailsOnTerminalProviderState(t *testing.T) {
 }
 
 func TestDaytonaActivityRefreshStopsWithRun(t *testing.T) {
-	f, b, repo := newDaytonaLifecycleFixture(t)
-	sandbox, _, _, err := b.createDaytonaSandbox(t.Context(), repo, true, false, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sandbox.SetAutoStopInterval(0)
-	b.cfg.IdleTimeout = 3 * time.Second
-	stop, err := b.startDaytonaActivity(t.Context(), sandbox)
-	if err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		f.mu.Lock()
-		calls := f.activity
-		f.mu.Unlock()
-		if calls >= 2 {
-			break
-		}
-		if time.Now().After(deadline) {
+	for _, sshRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ssh=%t", sshRun), func(t *testing.T) {
+			f, b, repo := newDaytonaLifecycleFixture(t)
+			sandbox, leaseID, _, err := b.createDaytonaSandbox(t.Context(), repo, true, false, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			sandbox.SetAutoStopInterval(0)
+			f.mu.Lock()
+			f.sandbox.SetAutoStopInterval(0)
+			f.mu.Unlock()
+			b.cfg.IdleTimeout = 3 * time.Second
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var stop func()
+			if sshRun {
+				stop, err = b.BeginSSHRunActivity(ctx, LeaseTarget{LeaseID: leaseID, Server: daytonaSandboxToServer(sandbox)})
+			} else {
+				stop, err = b.startDaytonaActivity(ctx, sandbox)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				f.mu.Lock()
+				calls := f.activity
+				f.mu.Unlock()
+				if calls >= 2 {
+					break
+				}
+				if time.Now().After(deadline) {
+					stop()
+					t.Fatal("activity was not refreshed")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if sshRun {
+				cancel()
+			}
 			stop()
-			t.Fatal("activity was not refreshed")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	stop()
-	f.mu.Lock()
-	calls := f.activity
-	f.mu.Unlock()
-	time.Sleep(1100 * time.Millisecond)
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.activity != calls {
-		t.Fatal("activity continued after run stopped")
+			f.mu.Lock()
+			calls := f.activity
+			f.mu.Unlock()
+			time.Sleep(1100 * time.Millisecond)
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if f.activity != calls {
+				t.Fatal("activity continued after run stopped")
+			}
+		})
 	}
 }
 

@@ -2,6 +2,12 @@
   "schema": "crabbox-bootstrap-fragments/v1",
   "fragments": [
     {
+      "name": "gnomeDesktopTheme",
+      "file": "gnomeDesktopTheme.sh",
+      "literal": true,
+      "parameters": {}
+    },
+    {
       "name": "linuxSSHRestart",
       "file": "linuxSSHRestart.sh",
       "parameters": {}

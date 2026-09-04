@@ -837,6 +837,15 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if err != nil {
 		return err
 	}
+	sshScriptRun, err := selectSSHScriptRun(backend.Spec(), runReq)
+	if err != nil {
+		return err
+	}
+	if sshScriptRun {
+		if _, ok := backend.(SSHLeaseBackend); !ok {
+			return exit(2, "provider=%s declares SSH script execution without an SSH lease backend", backend.Spec().Name)
+		}
+	}
 	if len(requiredArtifactChanges) > 0 && backend.Spec().Kind != ProviderKindSSHLease {
 		return exit(2, "--require-artifact-change requires an ordinary SSH-backed Linux provider")
 	}
@@ -967,7 +976,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return err
 		}
 	}
-	if delegated, ok := backend.(DelegatedRunBackend); ok {
+	if delegated, ok := backend.(DelegatedRunBackend); ok && !sshScriptRun {
 		if err := validateDelegatedRunRouting(backend.Spec(), runReq, *readyPool, len(requiredArtifactSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
 			return err
 		}
@@ -1306,6 +1315,13 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	if err != nil {
 		return recordFailure(err)
+	}
+	if activity, ok := sshBackend.(SSHRunActivityBackend); ok {
+		stopActivity, activityErr := activity.BeginSSHRunActivity(ctx, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
+		if activityErr != nil {
+			return recordFailure(activityErr)
+		}
+		defer stopActivity()
 	}
 	if leaseOutputPath != "" {
 		session := &RunSessionHandle{
@@ -3133,15 +3149,29 @@ func validateDelegatedRunRouting(spec ProviderSpec, req RunRequest, readyPool st
 }
 
 func validateProviderRun(provider Provider, req RunRequest, readyPool string, hasArtifactSchemas, profileDoctor bool) error {
+	sshScriptRun, err := selectSSHScriptRun(provider.Spec(), req)
+	if err != nil {
+		return err
+	}
 	if validator, ok := provider.(RunOptionsValidator); ok {
 		if err := validator.ValidateRunOptions(req); err != nil {
 			return err
 		}
 	}
-	if spec := provider.Spec(); spec.Kind == ProviderKindDelegatedRun {
+	if spec := provider.Spec(); spec.Kind == ProviderKindDelegatedRun && !sshScriptRun {
 		return validateDelegatedRunRouting(spec, req, readyPool, hasArtifactSchemas, profileDoctor)
 	}
 	return nil
+}
+
+func selectSSHScriptRun(spec ProviderSpec, req RunRequest) (bool, error) {
+	if !spec.Features.Has(FeatureSSHScriptRun) || (!req.ScriptRequested && req.Script == nil) {
+		return false, nil
+	}
+	if !spec.Features.Has(FeatureSSH) || spec.Features.Has(FeatureModuleRun) {
+		return false, exit(2, "provider=%s SSH script execution requires SSH support and cannot execute modules", spec.Name)
+	}
+	return true, nil
 }
 
 func rawJSRuntimeHydrateSuggestion(cfg Config, target SSHTarget, leaseID string, acquired, keep, keepOnFailure bool) string {
@@ -3832,9 +3862,10 @@ func coordinatorProviderReleaseConfirmed(lease CoordinatorLease) bool {
 		(lease.ReleaseDeletesServer == nil || *lease.ReleaseDeletesServer)
 }
 
-func cleanupReleasedCoordinatorLeaseArtifacts(stderr io.Writer, leaseID string) error {
-	if err := removeStoredTestboxConnectionArtifacts(leaseID); err != nil {
-		fmt.Fprintf(stderr, "warning: released lease %s but local SSH artifact cleanup failed: %v\n", leaseID, err)
+func cleanupReleasedCoordinatorLeaseArtifacts(ctx context.Context, stderr io.Writer, leaseID string) error {
+	if err := removeStoredTestboxConnectionArtifacts(ctx, leaseID); err != nil {
+		err = fmt.Errorf("lease %s remote deletion is confirmed; local SSH artifact cleanup failed: %w; retry crabbox stop to finish local cleanup", leaseID, err)
+		fmt.Fprintf(stderr, "warning: %v\n", err)
 		return err
 	}
 	return nil

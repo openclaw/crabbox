@@ -33,7 +33,7 @@ func spritesTestClaim(t *testing.T, cfg Config, name, id, org string) (LeaseTarg
 }
 
 func TestSpritesResolveValidatesClaimBeforeBootstrap(t *testing.T) {
-	for _, scenario := range []string{"identity", "reclaim replacement", "organization", "endpoint", "name", "labels", "live lease", "repo", "expected identity"} {
+	for _, scenario := range []string{"identity", "reclaim replacement", "raw reclaim replacement", "prefixed reclaim replacement", "raw changed lease", "organization", "endpoint", "name", "labels", "live lease", "repo", "expected identity"} {
 		t.Run(scenario, func(t *testing.T) {
 			testutil.IsolateUserDirs(t)
 			cfg := Config{Provider: spritesProvider, Sprites: SpritesConfig{WorkRoot: "/home/sprite/crabbox"}}
@@ -45,6 +45,15 @@ func TestSpritesResolveValidatesClaimBeforeBootstrap(t *testing.T) {
 				sprite.ID = "replacement-id"
 			case "reclaim replacement":
 				sprite.ID, req.Reclaim = "replacement-id", true
+			case "raw reclaim replacement", "prefixed reclaim replacement":
+				req.ID, req.Reclaim = sprite.Name, true
+				if scenario == "prefixed reclaim replacement" {
+					req.ID = "spr_" + sprite.Name
+				}
+				sprite.ID, sprite.Labels = "replacement-id", nil
+			case "raw changed lease":
+				req.ID, req.Reclaim = sprite.Name, true
+				sprite.Labels = spritesAPILabels("cbx_other", "other")
 			case "organization":
 				sprite.Organization = "other-org"
 			case "endpoint":
@@ -60,7 +69,7 @@ func TestSpritesResolveValidatesClaimBeforeBootstrap(t *testing.T) {
 			case "expected identity":
 				req.ExpectedProviderIdentity = core.ProviderIdentityExpectation{LeaseID: lease.LeaseID, ResourceID: "other-name"}
 			}
-			runner := &recordingRunner{}
+			runner := &recordingRunner{failContains: "sprite", err: errors.New("unexpected native command")}
 			b := &spritesBackend{cfg: cfg, client: &fakeSpritesAPI{get: sprite}, rt: Runtime{Exec: runner, Stderr: io.Discard}}
 			if _, err := b.Resolve(t.Context(), req); err == nil {
 				t.Fatal("expected identity/ownership error")
@@ -119,7 +128,7 @@ func TestSpritesReadOnlyResolutionAndStatusDoNotBootstrap(t *testing.T) {
 }
 
 func TestSpritesResolveAllowsVerifiedReuseAndExplicitAdoption(t *testing.T) {
-	for _, scenario := range []string{"managed", "adopted", "reclaim"} {
+	for _, scenario := range []string{"managed", "adopted", "reclaim", "raw reclaim"} {
 		t.Run(scenario, func(t *testing.T) {
 			testutil.IsolateUserDirs(t)
 			cfg := Config{Provider: spritesProvider, Sprites: SpritesConfig{WorkRoot: "/home/sprite/crabbox"}}
@@ -137,9 +146,74 @@ func TestSpritesResolveAllowsVerifiedReuseAndExplicitAdoption(t *testing.T) {
 			// Stop at bootstrap so this test never starts SSH or remote processes.
 			runner := &recordingRunner{failContains: "sprite exec", err: errors.New("bootstrap reached")}
 			b := &spritesBackend{cfg: cfg, client: &fakeSpritesAPI{get: sprite}, rt: Runtime{Exec: runner, Stderr: io.Discard}}
-			_, err := b.Resolve(t.Context(), ResolveRequest{ID: lease.LeaseID, Repo: core.Repo{Root: repo}, Reclaim: scenario == "reclaim"})
+			id := lease.LeaseID
+			if scenario == "raw reclaim" {
+				id = sprite.Name
+			}
+			_, err := b.Resolve(t.Context(), ResolveRequest{ID: id, Repo: core.Repo{Root: repo}, Reclaim: scenario == "reclaim" || scenario == "raw reclaim"})
 			if err == nil || !strings.Contains(err.Error(), "bootstrap reached") || len(runner.calls) != 2 {
 				t.Fatalf("verified reuse did not reach bootstrap: err=%v calls=%d", err, len(runner.calls))
+			}
+		})
+	}
+}
+
+func TestSpritesClaimlessReuseRequiresExplicitAdoption(t *testing.T) {
+	for _, scenario := range []string{"normal", "empty repo", "canonical ID", "reclaim", "missing ID", "blank ID", "status only", "no local mutations"} {
+		t.Run(scenario, func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			const leaseID = "cbx_abcdef123456"
+			cfg := Config{Provider: spritesProvider, Sprites: SpritesConfig{WorkRoot: "/home/sprite/crabbox"}}
+			sprite := spritesInfo{ID: "original-id", Name: "crabbox-test", Organization: "test-org", Labels: spritesAPILabels(leaseID, "test-identity")}
+			req := ResolveRequest{ID: sprite.Name, Repo: core.Repo{Root: t.TempDir()}}
+			switch scenario {
+			case "empty repo":
+				req.Repo.Root = ""
+			case "canonical ID":
+				req.ID = leaseID
+			case "reclaim":
+				req.Reclaim = true
+			case "missing ID", "blank ID":
+				req.Reclaim = true
+				sprite.ID = ""
+				if scenario == "blank ID" {
+					sprite.ID = "  "
+				}
+			case "status only":
+				req.StatusOnly = true
+			case "no local mutations":
+				req.NoLocalStateMutations = true
+			}
+			runner := &recordingRunner{failContains: "sprite exec", err: errors.New("bootstrap reached")}
+			b := &spritesBackend{cfg: cfg, client: &fakeSpritesAPI{get: sprite, list: []spritesInfo{sprite}}, rt: Runtime{Exec: runner, Stderr: io.Discard}}
+			_, err := b.Resolve(t.Context(), req)
+			if scenario == "reclaim" {
+				if err == nil || !strings.Contains(err.Error(), "bootstrap reached") || len(runner.calls) != 2 {
+					t.Fatalf("explicit adoption did not reach bootstrap: err=%v calls=%d", err, len(runner.calls))
+				}
+			} else {
+				if req.StatusOnly || req.NoLocalStateMutations {
+					if err != nil {
+						t.Fatal(err)
+					}
+				} else if err == nil || (!strings.Contains(err.Error(), "ownership claim") && !strings.Contains(err.Error(), "immutable provider resource identity")) {
+					t.Fatalf("expected adoption fence: %v", err)
+				}
+				if len(runner.calls) != 0 {
+					t.Fatal("native CLI invoked without adoption or during read-only inspection")
+				}
+				key, keyErr := core.TestboxKeyPath(leaseID)
+				if keyErr != nil {
+					t.Fatal(keyErr)
+				}
+				for _, path := range []string{key, key + ".pub"} {
+					if _, err := os.Stat(path); !os.IsNotExist(err) {
+						t.Fatalf("unexpected key %s: %v", path, err)
+					}
+				}
+			}
+			if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+				t.Fatalf("unexpected ownership claim: exists=%t err=%v", exists, err)
 			}
 		})
 	}

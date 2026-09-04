@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -870,32 +872,104 @@ func TestRunRecorderRequiresCoordinatorHandleBeforeExecution(t *testing.T) {
 	}
 }
 
-func TestRunRecorderFinishUsesExtendedTimeout(t *testing.T) {
-	var deadlineRemaining time.Duration
-	client := &CoordinatorClient{
-		BaseURL: "https://example.test",
-		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if req.Method != http.MethodPost || req.URL.Path != "/v1/runs/run_123/finish" {
-				t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
-			}
-			deadline, ok := req.Context().Deadline()
-			if !ok {
-				t.Fatal("finish request missing context deadline")
-			}
-			deadlineRemaining = time.Until(deadline)
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Status:     "200 OK",
-				Body:       io.NopCloser(strings.NewReader(`{"run":{"id":"run_123","leaseID":"","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"state":"succeeded","phase":"completed","exitCode":0,"logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z","finishedAt":"2026-05-02T00:00:01Z"}}`)),
-				Header:     make(http.Header),
-				Request:    req,
-			}, nil
-		})},
-	}
-	rec := &runRecorder{coord: client, runID: "run_123", stderr: io.Discard}
-	rec.Finish(context.Background(), SSHTarget{}, 0, time.Second, time.Second, strings.Repeat("x", 2*runLogFallbackPreviewBytes), true, nil, FailureClassification{}, nil)
-	if deadlineRemaining < runRecorderFinishTimeout-5*time.Second {
-		t.Fatalf("deadline remaining=%s, want near %s", deadlineRemaining, runRecorderFinishTimeout)
+func TestRunRecorderFinishFailureDiagnostics(t *testing.T) {
+	receipt := runRecorderTestReceipt(t)
+	t.Setenv("CRABBOX_OWNER", "alice@example.com")
+	for _, test := range []struct {
+		name            string
+		finishStatus    int
+		finishError     bool
+		stallPhase      string
+		receiptStatus   int
+		receiptDelay    time.Duration
+		wantFinish      int
+		wantReceipt     int
+		wantElapsed     time.Duration
+		wantDiagnostics []string
+	}{
+		{
+			name: "finish deadline", stallPhase: "finish", wantFinish: 1,
+			wantElapsed:     runRecorderFinishTimeout,
+			wantDiagnostics: []string{"submit terminal result", "finish stalled", "context deadline exceeded"},
+		},
+		{
+			name: "receipt deadline after rejected finish", finishStatus: 503, stallPhase: "receipt",
+			wantFinish: 1, wantReceipt: 1, wantElapsed: runRecorderFinishTimeout,
+			wantDiagnostics: []string{"submit terminal result", "finish unavailable", "verify persisted terminal receipt", "receipt stalled", "context deadline exceeded"},
+		},
+		{
+			name: "deadline during retry wait", finishStatus: 503, receiptStatus: 503,
+			receiptDelay: runRecorderFinishTimeout - runRecorderFinishRetry/2,
+			wantFinish:   1, wantReceipt: 1, wantElapsed: runRecorderFinishTimeout,
+			wantDiagnostics: []string{"finish unavailable", "receipt unavailable", "context deadline exceeded"},
+		},
+		{
+			name: "retryable finish and missing receipt", finishStatus: 503, receiptStatus: 404,
+			wantFinish: 3, wantReceipt: 3, wantElapsed: 2 * runRecorderFinishRetry,
+			wantDiagnostics: []string{"finish unavailable", "receipt unavailable"},
+		},
+		{
+			name: "transport failure and missing receipt", finishError: true, receiptStatus: 404,
+			wantFinish: 3, wantReceipt: 3, wantElapsed: 2 * runRecorderFinishRetry,
+			wantDiagnostics: []string{"finish connection lost", "receipt unavailable"},
+		},
+		{
+			name: "permanent finish and retryable receipt", finishStatus: 400, receiptStatus: 503,
+			wantFinish: 1, wantReceipt: 1,
+			wantDiagnostics: []string{"finish unavailable", "receipt unavailable"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				start := time.Now()
+				var finishRequests, receiptRequests int
+				client := &CoordinatorClient{
+					BaseURL: "https://example.test",
+					Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						deadline, ok := req.Context().Deadline()
+						if !ok || !deadline.Equal(start.Add(runRecorderFinishTimeout)) {
+							t.Fatalf("request deadline=%v, want original finish deadline", deadline)
+						}
+						phase, code := "finish", test.finishStatus
+						switch {
+						case req.Method == http.MethodPost && req.URL.Path == "/v1/runs/run_123/finish":
+							finishRequests++
+							if test.finishError {
+								return nil, errors.New("finish connection lost")
+							}
+						case req.Method == http.MethodGet && req.URL.Path == "/v1/runs/run_123/receipt":
+							receiptRequests++
+							phase, code = "receipt", test.receiptStatus
+							time.Sleep(test.receiptDelay)
+						default:
+							t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
+						}
+						if phase == test.stallPhase {
+							<-req.Context().Done()
+							return nil, fmt.Errorf("%s stalled: %w", phase, req.Context().Err())
+						}
+						return &http.Response{
+							StatusCode: code, Body: io.NopCloser(strings.NewReader(phase + " unavailable")),
+							Header: make(http.Header), Request: req,
+						}, nil
+					})},
+				}
+				rec := &runRecorder{coord: client, runID: "run_123", stderr: io.Discard}
+				err := rec.Finish(t.Context(), SSHTarget{}, 1, 0, 100*time.Millisecond, "", false, nil, FailureClassification{}, &receipt)
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 7 || rec.finished {
+					t.Fatalf("Finish error=%v recorded=%v, want unrecorded exit 7", err, rec.finished)
+				}
+				if finishRequests != test.wantFinish || receiptRequests != test.wantReceipt || time.Since(start) != test.wantElapsed {
+					t.Fatalf("finish=%d receipt=%d elapsed=%s", finishRequests, receiptRequests, time.Since(start))
+				}
+				for _, want := range append(test.wantDiagnostics, fmt.Sprintf("after %d attempts", test.wantFinish), "recover with `crabbox receipt run_123`") {
+					if !strings.Contains(exitErr.Message, want) {
+						t.Errorf("Finish lost %q: %s", want, exitErr.Message)
+					}
+				}
+			})
+		})
 	}
 }
 

@@ -78,11 +78,6 @@ git -C "$ROOT" diff --quiet "$WORKFLOW_COMMIT" -- "${PROTECTED_TOOLING[@]}" || {
   echo "protected release tooling does not match workflow commit $WORKFLOW_COMMIT" >&2
   exit 1
 }
-[[ "${CRABBOX_RELEASE_SERIALIZATION_CONFIRMED:-}" == "$TAG:$RELEASE_ID" ]] || {
-  echo "publication requires an exclusive administrative release freeze; set CRABBOX_RELEASE_SERIALIZATION_CONFIRMED=$TAG:$RELEASE_ID only after confirming it" >&2
-  exit 1
-}
-
 # shellcheck source=release-config.sh
 # shellcheck disable=SC1091
 source "$ROOT/scripts/release-config.sh"
@@ -307,9 +302,10 @@ publication_environment node "$ROOT/scripts/validate-release-publication.mjs" st
 cmp "$WORK/predownload-state.json" "$WORK/postdownload-state.json"
 
 # Prepare the sole mutation body before the final trust and draft reads. GitHub's
-# release API has no documented conditional PATCH, so the required administrative
-# freeze is the serialization boundary; no local command intervenes after the
-# final comparison except the exact draft=false PATCH.
+# release API has no documented conditional PATCH: these readbacks detect drift
+# but cannot prevent another writer from racing the final GET/PATCH. Keep the
+# exact draft=false PATCH immediately after comparison and report any detected
+# post-PATCH drift without attempting corrective mutations.
 printf '{"draft":false}\n' >"$WORK/publish.json"
 api_get "repos/$REPOSITORY/immutable-releases" >"$WORK/immutable-releases.json"
 jq -e '.enabled == true and .enforced_by_owner == true' \

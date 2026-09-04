@@ -207,6 +207,15 @@ func (b *spritesBackend) Resolve(ctx context.Context, req ResolveRequest) (Lease
 	if req.StatusOnly || req.NoLocalStateMutations {
 		return resolved, nil
 	}
+	if !hasClaim {
+		if !req.Reclaim {
+			return LeaseTarget{}, exit(4, "sprite %q has no local ownership claim; use --reclaim to adopt it", sprite.Name)
+		}
+		if strings.TrimSpace(sprite.ID) == "" {
+			return LeaseTarget{}, exit(4, "refusing to adopt sprite %q without an immutable provider resource identity", sprite.Name)
+		}
+		adopted = true
+	}
 	if err := b.ensureCLI(ctx); err != nil {
 		return LeaseTarget{}, err
 	}
@@ -476,6 +485,13 @@ func (b *spritesBackend) resolveSpriteName(ctx context.Context, identifier strin
 	spriteIdentifier := identifier
 	if strings.HasPrefix(spriteIdentifier, "spr_") {
 		spriteIdentifier = strings.TrimPrefix(spriteIdentifier, "spr_")
+	}
+	// Preserve an existing immutable binding even if a raw-name lookup has lost
+	// its lease labels or now returns a same-name replacement.
+	if claim, ok, err := core.ResolveLeaseClaimForProviderCloudIDScope(spriteIdentifier, spritesProvider, core.ProviderClaimScope(spritesProvider, b.cfg)); err != nil {
+		return "", "", "", err
+	} else if ok {
+		return spriteIdentifier, claim.LeaseID, claim.Slug, nil
 	}
 	if sprite, err := b.client.GetSprite(ctx, spriteIdentifier); err == nil {
 		if !isCrabboxSprite(sprite) && !reclaim {

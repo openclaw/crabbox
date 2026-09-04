@@ -108,7 +108,7 @@ func TestRunCoordinatorCleanupOutcomes(t *testing.T) {
 					if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
 						t.Fatalf("final timing: %v\n%s", err, out)
 					}
-					if report.LeaseStopped == nil || *report.LeaseStopped != tc.terminal || report.ExitCode != 23 || report.RunStatus != "failed" || (report.LeaseStopErr != "") != tc.releaseError {
+					if report.LeaseStopped == nil || *report.LeaseStopped != tc.terminal || report.ExitCode != 23 || report.RunStatus != "failed" || (report.LeaseStopErr != "") != (tc.releaseError || tc.artifactError) {
 						t.Errorf("wrong timing: %+v\n%s", report, out)
 					}
 				} else if !strings.Contains(out, "lease cleanup stopped="+map[bool]string{true: "true", false: "false"}[tc.terminal]) {
