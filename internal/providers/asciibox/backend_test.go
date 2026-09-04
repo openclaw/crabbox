@@ -86,6 +86,11 @@ func TestClientUsesOfficialAsciiBoxCLI(t *testing.T) {
 	if !reflect.DeepEqual(runner.commands, want) {
 		t.Fatalf("commands=%v want=%v", runner.commands, want)
 	}
+	for _, req := range runner.requests {
+		if req.MaxCapturedOutputBytes <= 0 || req.MaxCapturedOutputBytes > 8<<20 || req.DisableOutputCapture || req.Stdout != nil || req.Stderr != nil {
+			t.Fatalf("native command must use bounded, non-streaming capture: %+v", req.Args)
+		}
+	}
 	for _, env := range runner.env {
 		if !hasEnv(env, "BOX_API_KEY=box_key") {
 			t.Fatal("child environment missing the synthetic BOX_API_KEY")
@@ -283,6 +288,135 @@ func TestReleaseBoxPendingOperationHonorsDeadline(t *testing.T) {
 	err := c.ReleaseBox(ctx, "bx_guard", func(context.Context) error { return nil })
 	if !errors.Is(err, context.DeadlineExceeded) || !containsCommand(runner.commands, "box --no-update --json --org personal --api-url https://ascii.dev delete bx_guard --yes") {
 		t.Fatalf("pending deletion err=%v commands=%v", err, runner.commands)
+	}
+}
+
+func TestReleaseBoxReportsLastDeletionStatusWhenNativeLookupTimesOut(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	lookups := 0
+	runner := &releaseCommandRunner{configPath: filepath.Join(t.TempDir(), "config.json"), outcomes: map[string][]commandOutcome{
+		"stop":   {{result: LocalCommandResult{}}},
+		"delete": {deletionOutcome(testDeletionID, "bx_guard", "box", "pending")},
+		"deletion": {
+			deletionOutcome(testDeletionID, "bx_guard", "box", "blocked"),
+			{err: context.DeadlineExceeded},
+		},
+	}, onAction: func(action string) {
+		if action == "deletion" {
+			lookups++
+			if lookups == 2 {
+				<-ctx.Done()
+			}
+		}
+	}}
+	c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner, releasePollInterval: time.Nanosecond}
+	err := c.ReleaseBox(ctx, "bx_guard", func(context.Context) error { return nil })
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("lost deadline cause: %v", err)
+	}
+	for _, want := range []string{"phase=deletion-operation", testDeletionID, "last_observed_status=blocked", "retaining claim"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("missing %q in %v", want, err)
+		}
+	}
+	var incomplete *boxDeletionIncompleteError
+	if !errors.As(err, &incomplete) || incomplete.operation.ID != testDeletionID || incomplete.operation.Status != "pending" {
+		t.Fatalf("lost original accepted operation: %v", err)
+	}
+}
+
+func TestBoxCleanupProgressReportsDuringNativeCallAndJoins(t *testing.T) {
+	output := make(boxProgressOutput, 32)
+	ctx, cancel := context.WithTimeout(withBoxCleanupProgress(context.Background(), output), time.Second)
+	defer cancel()
+	ctx.Value(boxCleanupProgressKey{}).(*boxCleanupProgress).interval = 5 * time.Millisecond
+	entered := make(chan struct{})
+	runner := boxCommandRunnerFunc(func(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+		close(entered)
+		<-ctx.Done()
+		return LocalCommandResult{Stdout: "native output must not become progress"}, ctx.Err()
+	})
+	c := &client{cliPath: "box", runner: runner}
+	done := make(chan error, 1)
+	go func() { _, err := c.runPrepared(ctx, "delete", "bx_guard", "--yes"); done <- err }()
+	<-entered
+	for range 2 {
+		select {
+		case line := <-output:
+			if !strings.Contains(line, "phase=native-delete") || !strings.Contains(line, "remaining=") || strings.Contains(line, "native output") {
+				t.Fatalf("unexpected progress: %s", line)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("no progress while native command was blocked")
+		}
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("native cancellation lost: %v", err)
+	}
+	for len(output) > 0 {
+		<-output
+	}
+	select {
+	case line := <-output:
+		t.Fatalf("progress after native command returned: %s", line)
+	case <-time.After(15 * time.Millisecond):
+	}
+}
+
+func TestBoxCleanupProgressRetainsCadenceAcrossFastPolls(t *testing.T) {
+	output := make(boxProgressOutput, 32)
+	ctx := withBoxCleanupProgress(context.Background(), output)
+	ctx.Value(boxCleanupProgressKey{}).(*boxCleanupProgress).interval = 5 * time.Millisecond
+	c := &client{cliPath: "box", runner: boxCommandRunnerFunc(func(context.Context, LocalCommandRequest) (LocalCommandResult, error) {
+		return LocalCommandResult{}, nil
+	})}
+	deadline := time.Now().Add(time.Second)
+	for len(output) < 2 && time.Now().Before(deadline) {
+		if _, err := c.runPrepared(ctx, "deletion", "status", testDeletionID); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if len(output) < 2 {
+		t.Fatal("fast native calls reset progress cadence")
+	}
+	for len(output) > 0 {
+		if line := <-output; !strings.Contains(line, "phase=deletion-operation") || strings.Contains(line, "remaining=-") {
+			t.Fatalf("unexpected progress: %s", line)
+		}
+	}
+}
+
+func TestNativeCaptureErrorCannotAuthorizeCleanupJSON(t *testing.T) {
+	for _, action := range []string{"status", "list", "deletion"} {
+		t.Run(action, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			runner := boxCommandRunnerFunc(func(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+				current := boxCLIAction(req.Args)
+				result := LocalCommandResult{Stdout: fmt.Sprintf(`{"config":{"path":%q}}`, configPath)}
+				if current == "list" {
+					result.Stdout = `{"boxes":[],"pageInfo":{"hasMore":false}}`
+				} else if current == "deletion" {
+					result = deletionOutcome(testDeletionID, "bx_guard", "box", "completed").result
+				}
+				if current == action {
+					return result, errors.New("captured command output exceeded limit")
+				}
+				return result, nil
+			})
+			c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner}
+			var err error
+			if action == "deletion" {
+				_, err = c.GetDeletionOperation(context.Background(), "bx_guard", testDeletionID)
+			} else {
+				_, err = c.ListBoxes(context.Background(), true)
+			}
+			if err == nil {
+				t.Fatal("valid-looking JSON from failed capture was accepted")
+			}
+		})
 	}
 }
 
@@ -865,6 +999,7 @@ func (f *fakeAPI) GetDeletionOperation(_ context.Context, targetID, operationID 
 
 type fakeCommandRunner struct {
 	commands   []string
+	requests   []LocalCommandRequest
 	env        [][]string
 	configPath string
 	newStdout  string
@@ -921,6 +1056,7 @@ func snapshotGuardOutcome() commandOutcome {
 }
 
 func (r *fakeCommandRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	r.requests = append(r.requests, req)
 	r.commands = append(r.commands, strings.Join(append([]string{req.Name}, req.Args...), " "))
 	r.env = append(r.env, req.Env)
 	joined := strings.Join(req.Args, " ")
@@ -958,6 +1094,19 @@ func (r *fakeCommandRunner) Run(_ context.Context, req LocalCommandRequest) (Loc
 	default:
 		return LocalCommandResult{Stderr: "unexpected command"}, fmt.Errorf("unexpected command")
 	}
+}
+
+type boxCommandRunnerFunc func(context.Context, LocalCommandRequest) (LocalCommandResult, error)
+
+func (f boxCommandRunnerFunc) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	return f(ctx, req)
+}
+
+type boxProgressOutput chan string
+
+func (out boxProgressOutput) Write(data []byte) (int, error) {
+	out <- string(data)
+	return len(data), nil
 }
 
 func hasEnv(env []string, want string) bool {
