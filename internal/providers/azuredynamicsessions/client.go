@@ -279,7 +279,6 @@ func (c *azureDynamicSessionsClient) ExecStream(ctx context.Context, identifier 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	exitCode := 0
-	completed := false
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
@@ -303,7 +302,6 @@ func (c *azureDynamicSessionsClient) ExecStream(ctx context.Context, identifier 
 				}
 			}
 		case "complete":
-			completed = true
 			if event.ExitCode != nil {
 				exitCode = *event.ExitCode
 			}
@@ -321,10 +319,10 @@ func (c *azureDynamicSessionsClient) ExecStream(ctx context.Context, identifier 
 	if err := scanner.Err(); err != nil {
 		return exitCode, err
 	}
-	if !completed {
-		return exitCode, fmt.Errorf("%s stream ended before completion", providerName)
+	if err := ctx.Err(); err != nil {
+		return exitCode, err
 	}
-	return exitCode, nil
+	return exitCode, fmt.Errorf("%s stream ended before completion", providerName)
 }
 
 func (c *azureDynamicSessionsClient) GetSession(ctx context.Context, identifier string) (azureDynamicSessionsSession, error) {
