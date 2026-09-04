@@ -320,7 +320,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		if req.GuardedRemoteCleanup != nil {
 			lease := req.Lease
 			lease.Server = boxToServer(cfg, box, claim.LeaseID, claim.Slug, true)
-			if target, err := boxSSHTarget(cfg, box); err == nil {
+			if target, err := boxSSHTarget(cfg, box, claim.LeaseID); err == nil {
 				lease.SSH = target
 				req.GuardedRemoteCleanup(ctx, lease)
 			}
@@ -348,7 +348,7 @@ func (b *backend) Touch(_ context.Context, req TouchRequest) (Server, error) {
 
 func (b *backend) leaseFromBox(ctx context.Context, cfg Config, box boxData, leaseID, slug string, keep, waitSSH bool) (LeaseTarget, error) {
 	server := boxToServer(cfg, box, leaseID, slug, keep)
-	target, err := boxSSHTarget(cfg, box)
+	target, err := boxSSHTarget(cfg, box, leaseID)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -517,7 +517,7 @@ func statusFromBox(cfg Config, box boxData, leaseID, slug string) StatusView {
 	}
 }
 
-func boxSSHTarget(cfg Config, box boxData) (SSHTarget, error) {
+func boxSSHTarget(cfg Config, box boxData, leaseID string) (SSHTarget, error) {
 	host, port, err := boxSSHConnection(box)
 	if err != nil {
 		return SSHTarget{}, err
@@ -526,7 +526,7 @@ func boxSSHTarget(cfg Config, box boxData) (SSHTarget, error) {
 	if user == "" {
 		return SSHTarget{}, exit(5, "ascii-box %s is missing SSH user", box.ID)
 	}
-	return SSHTarget{
+	target := SSHTarget{
 		User:            user,
 		Host:            host,
 		Key:             boxSSHKey(cfg),
@@ -535,7 +535,11 @@ func boxSSHTarget(cfg Config, box boxData) (SSHTarget, error) {
 		NetworkKind:     networkPublic,
 		NoControlMaster: true,
 		ReadyCheck:      "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null",
-	}, nil
+	}
+	if err := core.UseLeaseKnownHosts(&target, leaseID); err != nil {
+		return SSHTarget{}, err
+	}
+	return target, nil
 }
 
 func boxSSHConnection(box boxData) (string, string, error) {

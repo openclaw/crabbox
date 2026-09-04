@@ -15,7 +15,12 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
+
+func TestMain(m *testing.M) {
+	os.Exit(testutil.RunWithIsolatedUserDirs(m))
+}
 
 func TestProviderSpecAndAliases(t *testing.T) {
 	p := Provider{}
@@ -575,12 +580,94 @@ func TestAcquireUsesBoxSSHEndpoint(t *testing.T) {
 	}
 }
 
+func TestLeaseFromBoxScopesHostTrustToLease(t *testing.T) {
+	for _, endpoint := range []string{"", "198.51.100.20:19036"} {
+		t.Run(blank(endpoint, "legacy-ip"), func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			t.Setenv("CRABBOX_ASCII_BOX_HOME", t.TempDir())
+			cfg := testConfig()
+			sharedKey := boxSSHKey(cfg)
+			if err := os.MkdirAll(filepath.Dir(sharedKey), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			sharedTrust := filepath.Join(filepath.Dir(sharedKey), "known_hosts")
+			if err := os.WriteFile(sharedTrust, []byte("shared provider trust\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stubSSHWait(t)
+			var waited []SSHTarget
+			waitForSSHReadyFunc = func(_ context.Context, target *SSHTarget, _ io.Writer, _ string, _ time.Duration) error {
+				waited = append(waited, *target)
+				return nil
+			}
+			b := NewBackend(Provider{}.Spec(), cfg, testRuntime()).(*backend)
+			box := testBox()
+			box.SSHEndpoint = endpoint
+			first, err := b.leaseFromBox(context.Background(), cfg, box, "cbx_123456789abc", "first", true, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first.SSH.KnownHostsFile == "" || first.SSH.KnownHostsFile == sharedTrust || filepath.Base(filepath.Dir(first.SSH.KnownHostsFile)) != first.LeaseID {
+				t.Fatalf("host trust is not lease-scoped: %+v", first.SSH)
+			}
+			const enrolled = "first lease host key\n"
+			if err := os.WriteFile(first.SSH.KnownHostsFile, []byte(enrolled), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			again, err := b.leaseFromBox(context.Background(), cfg, box, first.LeaseID, "first", true, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			box.ID = "bx_2"
+			second, err := b.leaseFromBox(context.Background(), cfg, box, "cbx_abcdef123456", "second", true, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if again.SSH.KnownHostsFile != first.SSH.KnownHostsFile || second.SSH.KnownHostsFile == first.SSH.KnownHostsFile || second.SSH.Host != first.SSH.Host || second.SSH.Port != first.SSH.Port {
+				t.Fatalf("incorrect host trust reuse: first=%+v again=%+v second=%+v", first.SSH, again.SSH, second.SSH)
+			}
+			for _, lease := range []LeaseTarget{first, again, second} {
+				if lease.SSH.Key != sharedKey || lease.SSH.DisableHostKeyChecking || !lease.SSH.NoControlMaster {
+					t.Fatalf("changed native authentication or SSH policy: %+v", lease.SSH)
+				}
+			}
+			if len(waited) != 3 || waited[0].KnownHostsFile != first.SSH.KnownHostsFile || waited[2].KnownHostsFile != second.SSH.KnownHostsFile {
+				t.Fatalf("readiness did not use scoped trust: %+v", waited)
+			}
+			if data, err := os.ReadFile(first.SSH.KnownHostsFile); err != nil || string(data) != enrolled {
+				t.Fatalf("reuse overwrote enrolled host trust: %q, %v", data, err)
+			}
+			if _, err := os.Stat(second.SSH.KnownHostsFile); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("new lease inherited host trust: %v", err)
+			}
+			if data, err := os.ReadFile(sharedTrust); err != nil || string(data) != "shared provider trust\n" {
+				t.Fatalf("shared trust changed: %q, %v", data, err)
+			}
+		})
+	}
+}
+
+func TestLeaseFromBoxRejectsUnsafeHostTrustPathBeforeReadiness(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	stubSSHWait(t)
+	waited := false
+	waitForSSHReadyFunc = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		waited = true
+		return nil
+	}
+	b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+	_, err := b.leaseFromBox(context.Background(), testConfig(), testBox(), "../outside", "unsafe", true, true)
+	if err == nil || waited {
+		t.Fatalf("unsafe lease host trust reached readiness: err=%v waited=%t", err, waited)
+	}
+}
+
 func TestBoxSSHTargetRejectsMalformedEndpoint(t *testing.T) {
 	_, err := boxSSHTarget(testConfig(), boxData{
 		ID:          "bx_malformed",
 		IP:          "203.0.113.10",
 		SSHEndpoint: "gateway-without-port",
-	})
+	}, "cbx_123456789abc")
 	if err == nil || !strings.Contains(err.Error(), "invalid SSH endpoint") {
 		t.Fatalf("err=%v, want malformed endpoint error", err)
 	}
