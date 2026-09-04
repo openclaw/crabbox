@@ -115,6 +115,14 @@ BOX_ORG
    lookups, and cancellation retain the claim without recording completion. The
    shared native CLI SSH key is retained.
 
+SSH host trust is separate from the shared native authentication key. Readiness,
+reuse, and guarded teardown use a protected `known_hosts` file for the exact
+Crabbox lease, so a new Box may reuse an IP or gateway endpoint without inheriting
+another lease's host key. A changed host key within the same lease is still
+rejected. Existing leases from before lease-scoped trust enroll on their first
+connection with the new client; Crabbox does not copy or remove pins from the
+old provider-wide file.
+
 If this release observes a valid native deletion acceptance but cannot finish
 waiting because of a timeout, cancellation, or operation lookup failure, it
 durably records the exact operation ID and its claim binding before returning

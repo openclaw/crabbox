@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -935,6 +936,9 @@ func TestCleanupTeardownUsesVerifiedTarget(t *testing.T) {
 		called = true
 		if got.Server.CloudID != claim.CloudID || got.SSH.Host != boxHost(f.box) || ctx.Err() != nil {
 			t.Fatal("wrong teardown target")
+		}
+		if filepath.Base(filepath.Dir(got.SSH.KnownHostsFile)) != claim.LeaseID || got.SSH.Key != boxSSHKey(testConfig()) {
+			t.Fatalf("teardown lost lease host trust or native key: %+v", got.SSH)
 		}
 	}})
 	if err != nil || !called || !f.deleted {
