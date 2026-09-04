@@ -8,6 +8,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 
 const root = path.resolve(import.meta.dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
+const candidateWorkflow = read(".github/workflows/image-qualification-candidate.yml");
 const workflow = read(".github/workflows/image-qualification.yml");
 const reaper = read(".github/workflows/image-qualification-reaper.yml");
 const control = read("scripts/image-qualification-control.mjs");
@@ -16,9 +17,22 @@ const adapter = read("scripts/image-qualification-crabbox-adapter.sh");
 
 test("workflow isolates candidate execution from protected credentials", () => {
   assert.match(workflow, /^  workflow_dispatch:$/m);
+  assert.match(candidateWorkflow, /^  pull_request:$/m);
+  assert.doesNotMatch(candidateWorkflow, /workflow_dispatch:|environment:|secrets\./);
+  assert.match(
+    candidateWorkflow,
+    /if: github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
+  );
+  assert.match(candidateWorkflow, /cache: false/g);
+  assert.match(candidateWorkflow, /AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN/);
+  assert.match(candidateWorkflow, /CLOUDFLARE_API_TOKEN/);
   assert.match(workflow, /group: image-qualification\n  cancel-in-progress: false/);
   assert.match(workflow, /environment: image-qualification/);
   assert.match(workflow, /if: always\(\)/);
+  assert.doesNotMatch(workflow, /go build|npm ci|Check out exact candidate/);
+  assert.match(workflow, /candidate_artifact_id/);
+  assert.match(workflow, /github-token: \$\{\{ github\.token \}\}/);
+  assert.match(workflow, /path: \$\{\{ runner\.temp \}\}\/image-qualification-candidate/);
   const executeJob = workflow.slice(
     workflow.indexOf("  execute:"),
     workflow.indexOf("  finalize:"),
@@ -35,7 +49,7 @@ test("workflow isolates candidate execution from protected credentials", () => {
 });
 
 test("all workflow actions use immutable repository-standard pins", () => {
-  for (const source of [workflow, reaper]) {
+  for (const source of [candidateWorkflow, workflow, reaper]) {
     for (const line of source.matchAll(/uses:\s+([^@\s]+)@([^\s]+)/g)) {
       assert.match(line[2], /^[0-9a-f]{40}$/);
     }
@@ -60,6 +74,8 @@ test("control tool fixes the reviewed policy and recovery boundary", () => {
   assert.match(control, /fastSnapshotRestore: false/);
   assert.match(control, /CRABBOX_AWS_QUALIFICATION_TRANSPORT/);
   assert.match(control, /AWSQualificationController/);
+  assert.match(control, /image-qualification-candidate\.yml/);
+  assert.match(control, /candidate build or artifact changed/);
   assert.match(control, /deleted_classes: \["FleetDurableObject"\]/);
   assert.match(control, /controllerCall\(controllerURL, token, "finalize"/);
   assert.match(control, /controllerCall\(controllerURL, token, "retire"/);
@@ -113,6 +129,100 @@ test("manifest binds exact candidate bytes and rejects extras", async () => {
     assert.throws(() => module.verifyManifest(artifact, candidateSha, workflowSha), /extra files/);
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("authorization selects one exact same-PR candidate artifact and detects replacement", async () => {
+  const module = await import(
+    `${pathToFileURL(path.join(root, "scripts/image-qualification-control.mjs"))}?identity=${Date.now()}`
+  );
+  const candidateSha = "a".repeat(40);
+  const workflowSha = "b".repeat(40);
+  const artifactDigest = `sha256:${"c".repeat(64)}`;
+  const environment = {
+    GH_TOKEN: "test-token",
+    GITHUB_REPOSITORY: "openclaw/crabbox",
+    GITHUB_RUN_ATTEMPT: "1",
+    GITHUB_WORKFLOW_REF:
+      "openclaw/crabbox/.github/workflows/image-qualification.yml@refs/heads/main",
+    QUALIFICATION_CANDIDATE_SHA: candidateSha,
+    QUALIFICATION_CONFIRM: "qualify",
+    QUALIFICATION_DEFAULT_BRANCH: "main",
+    QUALIFICATION_PULL_REQUEST: "1756",
+    QUALIFICATION_WORKFLOW_SHA: workflowSha,
+  };
+  const originalEnvironment = Object.fromEntries(
+    Object.keys(environment).map((key) => [key, process.env[key]]),
+  );
+  const originalFetch = globalThis.fetch;
+  Object.assign(process.env, environment);
+  globalThis.fetch = async (input) => {
+    const url = new URL(input);
+    let value;
+    if (url.pathname.endsWith("/pulls/1756")) {
+      value = {
+        state: "open",
+        head: { repo: { full_name: "openclaw/crabbox" }, sha: candidateSha },
+        base: { sha: workflowSha },
+      };
+    } else if (url.pathname.endsWith("/commits/main")) {
+      value = { sha: workflowSha };
+    } else if (url.pathname.includes("/actions/workflows/")) {
+      value = {
+        workflow_runs: [
+          {
+            id: 42,
+            event: "pull_request",
+            conclusion: "success",
+            head_sha: candidateSha,
+            head_repository: { full_name: "openclaw/crabbox" },
+            path: ".github/workflows/image-qualification-candidate.yml",
+            pull_requests: [{ number: 1756 }],
+          },
+        ],
+      };
+    } else if (url.pathname.endsWith("/actions/runs/42/artifacts")) {
+      value = {
+        artifacts: [
+          {
+            id: 7,
+            name: "image-qualification-candidate-42",
+            expired: false,
+            digest: artifactDigest,
+            workflow_run: { id: 42, head_sha: candidateSha },
+          },
+        ],
+      };
+    } else {
+      throw new Error(`unexpected test URL: ${url}`);
+    }
+    return new Response(JSON.stringify(value), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    assert.deepEqual(await module.verifyCandidateIdentity({ artifact: true }), {
+      artifactDigest,
+      artifactId: "7",
+      candidateSha,
+      number: "1756",
+      repository: "openclaw/crabbox",
+      runId: "42",
+      workflowSha,
+    });
+    process.env.QUALIFICATION_CANDIDATE_ARTIFACT_ID = "8";
+    await assert.rejects(
+      module.verifyCandidateIdentity({ artifact: true }),
+      /candidate build or artifact changed/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.QUALIFICATION_CANDIDATE_ARTIFACT_ID;
+    for (const [key, value] of Object.entries(originalEnvironment)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
 
@@ -209,6 +319,22 @@ test("controller rejects unauthenticated and oversized control requests", async 
   );
   assert.equal(discovered.status, 200);
   assert.deepEqual(await discovered.json(), { run: null });
+  const failed = await worker.fetch(
+    new Request("https://controller.invalid/discover", {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.CONTROLLER_TOKEN}` },
+    }),
+    {
+      ...env,
+      AUTHORITY: {
+        discover: async () => {
+          throw new Error("private stack and resource details");
+        },
+      },
+    },
+  );
+  assert.equal(failed.status, 409);
+  assert.deepEqual(await failed.json(), { error: "controller_error" });
 });
 
 test("adapter delegates and injects exit 86 only after the third launch smoke", () => {

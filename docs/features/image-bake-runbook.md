@@ -685,15 +685,20 @@ stacked on that authority and is not a general pull-request CI job.
 
 The workflow has separate trust zones:
 
+- `Image qualification candidate` runs only in the unprivileged
+  `pull_request` cache scope for same-repository pull requests. It builds the
+  exact candidate without AWS or Cloudflare credentials and publishes a
+  one-day CLI and Worker bundle covered by an immutable digest manifest.
 - `authorize` binds one first attempt to the protected default-branch workflow,
-  open pull request, and exact candidate SHA.
-- `build` checks out and builds the candidate without AWS or Cloudflare
-  credentials. Its CLI and Worker bundle are covered by an immutable digest
-  manifest.
+  open pull request, exact candidate SHA, and one successful artifact from the
+  matching unprivileged build. The pull request base must equal the protected
+  workflow SHA, so a stale candidate must be rebased and rebuilt.
 - `deploy-enroll` is environment-protected. It checks out only protected
-  tooling, treats the candidate bundle as data, deploys through the Cloudflare
-  API, reads the resulting Worker version and settings back, rechecks the pull
-  request, and claims the singleton authority registry.
+  tooling, downloads the exact artifact ID into runner temporary storage,
+  revalidates every manifest entry, treats the candidate bundle as data,
+  deploys through the Cloudflare API, reads the resulting Worker version and
+  settings back, rechecks the pull request and build identity, and claims the
+  singleton authority registry.
 - `execute` receives only the isolated coordinator URL and its ephemeral admin
   and shared tokens. It receives no AWS, Cloudflare, authority-controller, or
   production credentials.

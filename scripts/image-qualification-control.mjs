@@ -14,6 +14,8 @@ const workerNamePattern = /^crabbox-image-qualification-[0-9]+-[0-9]+$/;
 const maxRunMs = 120 * 60 * 1000;
 const controllerName = "crabbox-image-qualification-controller";
 const authorityName = "crabbox-aws-qualification-authority";
+const candidateWorkflowFile = "image-qualification-candidate.yml";
+const candidateWorkflowPath = `.github/workflows/${candidateWorkflowFile}`;
 const controllerSource = path.join(root, "scripts/image-qualification-controller-worker.mjs");
 
 export function canonical(value) {
@@ -73,7 +75,56 @@ async function github(pathname) {
   return await response.json();
 }
 
-export async function verifyCandidateIdentity({ cleanup = false } = {}) {
+async function candidateArtifact(repository, number, candidateSha) {
+  const query = new URLSearchParams({
+    event: "pull_request",
+    head_sha: candidateSha,
+    status: "completed",
+    per_page: "100",
+  });
+  const response = await github(
+    `/repos/${repository}/actions/workflows/${encodeURIComponent(candidateWorkflowFile)}/runs?${query}`,
+  );
+  const runs = (response.workflow_runs ?? [])
+    .filter(
+      (run) =>
+        run.event === "pull_request" &&
+        run.conclusion === "success" &&
+        run.head_sha === candidateSha &&
+        run.head_repository?.full_name === repository &&
+        run.path === candidateWorkflowPath &&
+        run.pull_requests?.some((pull) => String(pull.number) === number),
+    )
+    .sort((left, right) => right.id - left.id);
+  if (runs.length === 0) {
+    throw new Error("exact candidate build is absent");
+  }
+  const run = runs[0];
+  const artifactResponse = await github(
+    `/repos/${repository}/actions/runs/${run.id}/artifacts?per_page=100`,
+  );
+  const artifacts = (artifactResponse.artifacts ?? []).filter(
+    (artifact) =>
+      artifact.name === `image-qualification-candidate-${run.id}` &&
+      artifact.expired === false &&
+      artifact.workflow_run?.id === run.id &&
+      artifact.workflow_run?.head_sha === candidateSha,
+  );
+  if (artifacts.length !== 1) {
+    throw new Error("exact candidate artifact is absent or ambiguous");
+  }
+  const artifact = artifacts[0];
+  if (!/^sha256:[0-9a-f]{64}$/.test(artifact.digest ?? "")) {
+    throw new Error("candidate artifact digest is absent");
+  }
+  return {
+    artifactDigest: artifact.digest,
+    artifactId: String(artifact.id),
+    runId: String(run.id),
+  };
+}
+
+export async function verifyCandidateIdentity({ artifact = false, cleanup = false } = {}) {
   const repository = required("GITHUB_REPOSITORY", /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
   const number = required("QUALIFICATION_PULL_REQUEST", /^[1-9][0-9]*$/);
   const candidateSha = required("QUALIFICATION_CANDIDATE_SHA", sha40);
@@ -95,9 +146,25 @@ export async function verifyCandidateIdentity({ cleanup = false } = {}) {
     pull.state === "open" &&
     pull.head?.repo?.full_name === repository &&
     pull.head?.sha === candidateSha &&
+    pull.base?.sha === workflowSha &&
     branch.sha === workflowSha;
   if (!exact) throw new Error("pull request, candidate SHA, or protected workflow SHA changed");
-  return { candidateSha, number, repository, workflowSha };
+  if (!artifact) return { candidateSha, number, repository, workflowSha };
+  const candidate = await candidateArtifact(repository, number, candidateSha);
+  const expected = {
+    artifactDigest: process.env.QUALIFICATION_CANDIDATE_ARTIFACT_DIGEST?.trim(),
+    artifactId: process.env.QUALIFICATION_CANDIDATE_ARTIFACT_ID?.trim(),
+    runId: process.env.QUALIFICATION_CANDIDATE_RUN_ID?.trim(),
+  };
+  if (
+    Object.values(expected).some(Boolean) &&
+    (candidate.artifactDigest !== expected.artifactDigest ||
+      candidate.artifactId !== expected.artifactId ||
+      candidate.runId !== expected.runId)
+  ) {
+    throw new Error("candidate build or artifact changed");
+  }
+  return { candidateSha, number, repository, workflowSha, ...candidate };
 }
 
 function filesUnder(directory) {
@@ -424,7 +491,7 @@ async function assertWorkerIsolation(cf, worker, durableObjectCount) {
 }
 
 async function deploy() {
-  const identityCheck = await verifyCandidateIdentity();
+  const identityCheck = await verifyCandidateIdentity({ artifact: true });
   const artifactDir = path.resolve(required("QUALIFICATION_ARTIFACT_DIR"));
   const manifest = verifyManifest(
     artifactDir,
@@ -487,6 +554,11 @@ async function deploy() {
     canonical({
       version: 1,
       manifestSha256: manifest.manifestSha256,
+      candidateArtifact: {
+        digest: identityCheck.artifactDigest,
+        id: identityCheck.artifactId,
+        runId: identityCheck.runId,
+      },
       config,
       stagingVersion,
       stagingSettings: stagingShape,
@@ -521,7 +593,7 @@ async function deploy() {
     assertWorkerIsolation(cf, candidateWorker, 1),
     assertWorkerIsolation(cf, controllerName, 0),
   ]);
-  await verifyCandidateIdentity();
+  await verifyCandidateIdentity({ artifact: true });
   const record = await controllerCall(controllerURL, controllerToken, "claim", { identity });
   if (record.runId !== runId || record.cleanupState !== "claimed")
     throw new Error("authority claim readback mismatch");
@@ -533,6 +605,9 @@ async function deploy() {
     workflowSha: identityCheck.workflowSha,
     deploymentHash,
     manifestSha256: manifest.manifestSha256,
+    candidateArtifactDigest: identityCheck.artifactDigest,
+    candidateArtifactId: identityCheck.artifactId,
+    candidateRunId: identityCheck.runId,
     candidateWorker,
     candidateVersionDigest: digest(candidateVersion),
     authoritySha,
@@ -834,7 +909,10 @@ function writeEvidence(result) {
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (command === "authorize") {
-    const result = await verifyCandidateIdentity();
+    const result = await verifyCandidateIdentity({ artifact: true });
+    appendOutput("candidate_artifact_digest", result.artifactDigest);
+    appendOutput("candidate_artifact_id", result.artifactId);
+    appendOutput("candidate_run_id", result.runId);
     appendOutput("candidate_sha", result.candidateSha);
     return;
   }

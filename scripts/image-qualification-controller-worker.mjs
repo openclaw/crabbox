@@ -7,15 +7,6 @@ function json(value, status = 200) {
   });
 }
 
-function safeError(error) {
-  return (error instanceof Error ? error.message : String(error))
-    .replace(/https?:\/\/[^\s"<>]+/g, "[url]")
-    .replace(/\b(?:ami|i|vol|snap|key)-[0-9a-f]{8,}\b/gi, "[aws-resource]")
-    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "[ip]")
-    .replace(/\b\d{12}\b/g, "[aws-account]")
-    .slice(0, 512);
-}
-
 async function body(request) {
   const bytes = new Uint8Array(await request.arrayBuffer());
   if (bytes.byteLength > maxBodyBytes) throw new Error("request body too large");
@@ -65,14 +56,8 @@ export default {
         default:
           return json({ error: "not_found" }, 404);
       }
-    } catch (error) {
-      return json(
-        {
-          error: "controller_error",
-          message: safeError(error),
-        },
-        409,
-      );
+    } catch {
+      return json({ error: "controller_error" }, 409);
     }
   },
 };

@@ -1,0 +1,75 @@
+name: Image qualification candidate
+
+on:
+  pull_request:
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - "worker/**"
+      - "scripts/mint-aws-devtools-image.sh"
+      - "scripts/install-linux-developer-tools.sh"
+      - "scripts/linux-readiness.generated.sh"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build credentialless candidate
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out base tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: harness
+          persist-credentials: false
+      - name: Check out exact candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: candidate/go.mod
+          cache: false
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: false
+      - name: Build exact candidate without credentials
+        env:
+          ARTIFACT: ${{ runner.temp }}/image-qualification-candidate
+          QUALIFICATION_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+          QUALIFICATION_WORKFLOW_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN CLOUDFLARE_API_TOKEN; do
+            [[ -z "${!name+x}" ]]
+          done
+          mkdir -p "$ARTIFACT/bin" "$ARTIFACT/worker" "$ARTIFACT/candidate/scripts"
+          (cd candidate && go build -trimpath -o "$ARTIFACT/bin/crabbox" ./cmd/crabbox)
+          npm ci --prefix candidate/worker --ignore-scripts
+          (
+            cd candidate/worker
+            npm exec --offline -- wrangler deploy --dry-run --outdir "$ARTIFACT/worker" --config wrangler.jsonc
+          )
+          cp candidate/scripts/mint-aws-devtools-image.sh \
+            candidate/scripts/install-linux-developer-tools.sh \
+            candidate/scripts/linux-readiness.generated.sh \
+            "$ARTIFACT/candidate/scripts/"
+          chmod 700 "$ARTIFACT/bin/crabbox" "$ARTIFACT/candidate/scripts/"*.sh
+          node harness/scripts/image-qualification-control.mjs manifest candidate "$ARTIFACT"
+      - name: Upload immutable candidate bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-qualification-candidate-${{ github.run_id }}
+          path: ${{ runner.temp }}/image-qualification-candidate
+          if-no-files-found: error
+          retention-days: 1
