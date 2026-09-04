@@ -365,6 +365,17 @@ Without a coordinator, the CLI talks to the provider API directly and owns
 cleanup itself. Releasing a direct lease (`crabbox stop` / `crabbox release`)
 deletes the backing machine immediately.
 
+Ordinary direct AWS, Azure, GCP, and Hetzner acquisition can retry a bootstrap
+timeout with a fresh lease. If rollback reports a cleanup failure, acquisition
+stops instead: the original failure and cleanup diagnostics remain available,
+and no second allocation is attempted. This consumes each adapter's existing
+cleanup result; it does not give all providers the same deletion-confirmation
+guarantee. AWS termination acceptance and Hetzner DELETE success still differ
+from GCP operation completion and Azure's dependent-resource absence checks.
+GCP also stops retrying if its selected-scope cleanup client cannot be rebuilt,
+even if the existing best-effort fallback client returns success. That fallback
+does not establish that the selected project and zone were cleaned.
+
 `crabbox cleanup` (alias `crabbox machine cleanup`) sweeps expired
 direct-provider machines and stale local state. It refuses to run when a
 coordinator is configured, because sweeping provider resources can race live

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -16,17 +17,19 @@ import (
 )
 
 type fakeGCPDoctorClient struct {
-	listCalls int
-	deleted   []string
-	mutated   bool
-	servers   []Server
-	complete  []Server
-	get       map[string]Server
-	getErr    error
-	created   Server
-	createCfg Config
-	createErr error
-	waitErr   error
+	listCalls   int
+	deleted     []string
+	mutated     bool
+	servers     []Server
+	complete    []Server
+	get         map[string]Server
+	getErr      error
+	created     Server
+	createCfg   Config
+	createErr   error
+	waitErr     error
+	deleteErr   error
+	createCalls int
 }
 
 func (c *fakeGCPDoctorClient) ListCrabboxServers(context.Context) ([]Server, error) {
@@ -43,6 +46,7 @@ func (c *fakeGCPDoctorClient) ListCrabboxServersComplete(context.Context) ([]Ser
 }
 
 func (c *fakeGCPDoctorClient) CreateServerWithFallback(context.Context, Config, string, string, string, bool, func(string, ...any)) (Server, Config, error) {
+	c.createCalls++
 	c.mutated = true
 	if c.createErr != nil {
 		return Server{}, Config{}, c.createErr
@@ -75,7 +79,7 @@ func (c *fakeGCPDoctorClient) GetServer(_ context.Context, name string) (Server,
 func (c *fakeGCPDoctorClient) DeleteServer(_ context.Context, name string) error {
 	c.deleted = append(c.deleted, name)
 	c.mutated = true
-	return nil
+	return c.deleteErr
 }
 
 func (c *fakeGCPDoctorClient) SetLabels(context.Context, string, map[string]string) error {
@@ -630,5 +634,71 @@ func TestGCPDoctorListsInventoryOnly(t *testing.T) {
 	}
 	if fake.mutated {
 		t.Fatal("doctor called a mutating GCP method")
+	}
+}
+
+func TestGCPAcquireStopsFreshRetryAfterRollbackFailure(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		t.Run(fmt.Sprint(failed), func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			bootstrapErr := core.Exit(5, "timed out waiting for SSH: fixture readiness failure")
+			oldWait := waitForSSHReady
+			waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return bootstrapErr }
+			t.Cleanup(func() { waitForSSHReady = oldWait })
+			fake := &fakeGCPDoctorClient{created: Server{CloudID: "crabbox-created", Labels: map[string]string{}}, createCfg: Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}}
+			if failed {
+				fake.deleteErr = errors.New("delete unavailable")
+			}
+			old := newGCPClient
+			newGCPClient = func(context.Context, Config) (gcpClient, error) { return fake, nil }
+			t.Cleanup(func() { newGCPClient = old })
+			var stderr bytes.Buffer
+			backend := NewGCPLeaseBackend(core.ProviderSpec{}, fake.createCfg, Runtime{Stderr: &stderr}).(*gcpLeaseBackend)
+			_, err := backend.Acquire(context.Background(), AcquireRequest{})
+			want := 2
+			if failed {
+				want = 1
+			}
+			if fake.createCalls != want || len(fake.deleted) != want {
+				t.Fatalf("creates=%d deletes=%d want=%d error=%v", fake.createCalls, len(fake.deleted), want, err)
+			}
+			if !core.IsBootstrapWaitError(err) {
+				t.Fatalf("lost original bootstrap cause: %v", err)
+			}
+			if failed && (!errors.Is(err, fake.deleteErr) || strings.Contains(stderr.String(), "retrying with fresh lease")) {
+				t.Fatalf("lost cleanup debt or retried: error=%v stderr=%s", err, stderr.String())
+			}
+		})
+	}
+}
+
+func TestGCPAcquireRetainsCleanupClientFailureDespiteFallbackSuccess(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	primary := core.Exit(5, "timed out waiting for SSH: fixture")
+	debt := errors.New("selected-zone cleanup client unavailable")
+	fake := &fakeGCPDoctorClient{createCfg: Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-c"}}
+	oldClient, oldWait := newGCPClient, waitForSSHReady
+	bootstrapReached := false
+	newGCPClient = func(ctx context.Context, cfg Config) (gcpClient, error) {
+		if bootstrapReached {
+			if _, bounded := ctx.Deadline(); bounded {
+				return nil, debt
+			}
+		}
+		return fake, nil
+	}
+	waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		bootstrapReached = true
+		return primary
+	}
+	t.Cleanup(func() { newGCPClient = oldClient; waitForSSHReady = oldWait })
+	b := NewGCPLeaseBackend(ProviderSpec{}, Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
+	_, err := b.Acquire(context.Background(), AcquireRequest{})
+	if fake.createCalls != 1 || len(fake.deleted) != 1 || !errors.Is(err, primary) || !errors.Is(err, debt) {
+		t.Fatalf("creates=%d deletes=%v error=%v", fake.createCalls, fake.deleted, err)
 	}
 }

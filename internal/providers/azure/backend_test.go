@@ -1,8 +1,10 @@
 package azure
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"os"
@@ -23,6 +25,8 @@ type fakeAzureClient struct {
 	prepareOwned      []Server
 	prepareFunc       func(Server) Server
 	prepareErr        error
+	deleteErr         error
+	createLeaseIDs    []string
 	deleteOwnedFunc   func(Server) error
 	deleteCleanupFunc func(Server) error
 	tagged            []string
@@ -55,7 +59,8 @@ func (c *fakeAzureClient) ListCrabboxServers(context.Context) ([]Server, error) 
 	return c.servers, nil
 }
 
-func (c *fakeAzureClient) CreateServerWithFallback(context.Context, Config, string, string, string, bool, func(string, ...any)) (Server, Config, error) {
+func (c *fakeAzureClient) CreateServerWithFallback(_ context.Context, _ Config, _ string, leaseID string, _ string, _ bool, _ func(string, ...any)) (Server, Config, error) {
+	c.createLeaseIDs = append(c.createLeaseIDs, leaseID)
 	if c.createErr != nil {
 		return Server{}, Config{}, c.createErr
 	}
@@ -95,7 +100,7 @@ func (c *fakeAzureClient) GetServer(_ context.Context, id string) (Server, error
 
 func (c *fakeAzureClient) DeleteServer(_ context.Context, name string) error {
 	c.deleted = append(c.deleted, name)
-	return nil
+	return c.deleteErr
 }
 
 func (c *fakeAzureClient) PrepareOwnedServer(_ context.Context, server Server) (Server, error) {
@@ -824,4 +829,39 @@ func storeAzureTestClaim(t *testing.T, server Server) core.LeaseClaim {
 		t.Fatalf("claim exists=%v err=%v", exists, err)
 	}
 	return claim
+}
+
+func TestAzureAcquireStopsFreshRetryAfterRollbackFailure(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		t.Run(fmt.Sprint(failed), func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			primary := core.Exit(5, "timed out waiting for SSH: fixture")
+			fake := &fakeAzureClient{createCfg: azureAcquireTestConfig()}
+			if failed {
+				fake.deleteErr = errors.New("delete unavailable")
+			}
+			oldClient, oldBootstrap := newAzureClient, bootstrapManagedWindowsDesktop
+			newAzureClient = func(context.Context, Config) (azureClient, error) { return fake, nil }
+			bootstrapManagedWindowsDesktop = func(context.Context, Config, *SSHTarget, string, io.Writer) error { return primary }
+			t.Cleanup(func() { newAzureClient = oldClient; bootstrapManagedWindowsDesktop = oldBootstrap })
+			var stderr bytes.Buffer
+			b := NewAzureLeaseBackend(ProviderSpec{}, fake.createCfg, Runtime{Stderr: &stderr}).(*azureLeaseBackend)
+			_, err := b.Acquire(context.Background(), AcquireRequest{})
+			want := 2
+			if failed {
+				want = 1
+			}
+			if len(fake.createLeaseIDs) != want || len(fake.deleted) != want || !errors.Is(err, primary) {
+				t.Fatalf("creates=%v deletes=%v error=%v", fake.createLeaseIDs, fake.deleted, err)
+			}
+			if !failed && fake.createLeaseIDs[0] == fake.createLeaseIDs[1] {
+				t.Fatal("retry reused lease identity")
+			}
+			if failed && (!errors.Is(err, fake.deleteErr) || strings.Contains(stderr.String(), "retrying with fresh lease")) {
+				t.Fatalf("cleanup debt lost: error=%v stderr=%s", err, stderr.String())
+			}
+		})
+	}
 }
