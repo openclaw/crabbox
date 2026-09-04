@@ -82,6 +82,15 @@ an interrupted warmup can be stopped with
 unfinished lease. Replay remains bound to that exact instance; readiness cannot
 replace it with another instance carrying copied tags.
 
+EC2 can temporarily report a newly allocated instance as missing. The existing
+readiness wait allows that propagation delay within its ten-minute limit and
+honors cancellation. Cleanup keeps a prepared claim and its keys when instance
+visibility or termination is uncertain. Retry while the exact instance is
+visible; an observed terminal instance permits key recovery. If termination
+was accepted but key cleanup failed and the instance is no longer visible,
+the prepared claim and keys remain for operator recovery. The existing
+already-gone recovery paths for acquired and ordinary leases are unchanged.
+
 Successful stop and exact resource/key cleanup retain a terminal receipt in
 the existing claim fields: the original account, region, canonical lease ID,
 slug, instance ID, repository path, and versioned intent plus its original

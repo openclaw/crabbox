@@ -14,6 +14,7 @@ import (
 	"time"
 
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/smithy-go"
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
@@ -1228,6 +1229,115 @@ func installFixedAWSTestClient(t *testing.T, fake *fakeAWSClient) func() {
 	}
 }
 
+func TestAWSFixedCleanupRetainsPreparedClaimWhileInstanceVisibilityIsUncertain(t *testing.T) {
+	for _, boundary := range []string{"describe", "terminate", "observed terminal", "wrong terminal identity"} {
+		t.Run(boundary, func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			fake := &fakeAWSClient{waitErr: context.Canceled}
+			t.Cleanup(installFixedAWSTestClient(t, fake))
+			req := AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true, RequestedLeaseID: "cbx_abcdef12348a", RequestedSlug: "pending-visibility"}
+			backend := NewAWSLeaseBackend(ProviderSpec{}, fixedAWSTestConfig(), Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+			if _, err := backend.Acquire(t.Context(), req); !errors.Is(err, context.Canceled) {
+				t.Fatalf("initial readiness cancellation: %v", err)
+			}
+			before, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if err != nil || before.CloudID == "" || before.FixedCreateIntent.State != fixedAWSIntentPrepared {
+				t.Fatalf("missing prepared allocation: %+v err=%v", before, err)
+			}
+			missing := &smithy.GenericAPIError{Code: "InvalidInstanceID.NotFound", Message: "allocated instance has not propagated"}
+			switch boundary {
+			case "describe":
+				fake.getErr = missing
+				err = backend.cleanupOrphanedAWSClaims(t.Context(), false)
+			case "terminate":
+				fake.deleteServerErr = missing
+				err = deleteClaimedAWSServerWithClient(t.Context(), fake, fake.created, before, before.Labels["aws_key_pair_id"])
+			default:
+				terminal := fake.created
+				terminal.Status = "terminated"
+				if boundary == "wrong terminal identity" {
+					terminal.CloudID = "i-other"
+				}
+				fake.get = map[string]Server{before.CloudID: terminal}
+				err = backend.cleanupOrphanedAWSClaims(t.Context(), false)
+			}
+			after, readErr := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if boundary == "observed terminal" {
+				if err != nil || readErr != nil || after.FixedCreateIntent.State != fixedAWSIntentReleased || len(fake.deletedKeys) != 1 {
+					t.Fatalf("observed terminal instance was not recovered: claim=%+v keys=%v err=%v readErr=%v", after, fake.deletedKeys, err, readErr)
+				}
+				assertAWSReceiptIdentity(t, after, before)
+				return
+			}
+			if readErr != nil || !reflect.DeepEqual(before, after) || len(fake.deletedKeys) != 0 {
+				t.Fatalf("uncertain %s discarded allocation custody: before=%+v after=%+v keys=%v err=%v readErr=%v", boundary, before, after, fake.deletedKeys, err, readErr)
+			}
+			if boundary == "terminate" && !errors.Is(err, missing) {
+				t.Fatalf("uncertain termination error=%v, want provider error", err)
+			}
+		})
+	}
+}
+
+func TestAWSPreparedLeaseRetainsCustodyAfterPartialReleaseAndLostVisibility(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	fake := &fakeAWSClient{waitErr: context.Canceled}
+	t.Cleanup(installFixedAWSTestClient(t, fake))
+	req := AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true, RequestedLeaseID: "cbx_abcdef12348b", RequestedSlug: "partial-release"}
+	backend := NewAWSLeaseBackend(ProviderSpec{}, fixedAWSTestConfig(), Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	if _, err := backend.Acquire(t.Context(), req); !errors.Is(err, context.Canceled) {
+		t.Fatalf("initial readiness cancellation: %v", err)
+	}
+	before, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || before.FixedCreateIntent == nil || before.FixedCreateIntent.State != fixedAWSIntentPrepared {
+		t.Fatalf("missing prepared allocation: %+v err=%v", before, err)
+	}
+	lease, err := backend.Resolve(t.Context(), ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyErr := errors.New("key cleanup denied")
+	fake.deleteKeyErr = keyErr
+	outcome, err := backend.ReleaseLeaseWithOutcome(t.Context(), ReleaseLeaseRequest{Lease: lease})
+	if !outcome.Terminal || !errors.Is(err, keyErr) {
+		t.Fatalf("partial release outcome=%+v err=%v", outcome, err)
+	}
+	fake.servers = nil
+	fake.getErr = &smithy.GenericAPIError{Code: "InvalidInstanceID.NotFound", Message: "instance no longer visible"}
+	fake.deleteKeyErr = nil
+	if err := backend.cleanupOrphanedAWSClaims(t.Context(), false); err == nil || !strings.Contains(err.Error(), "retaining its claim and key") {
+		t.Fatalf("missing instance must leave explicit recovery obligation: %v", err)
+	}
+	after, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || !reflect.DeepEqual(before, after) || len(fake.deletedInstances) != 1 || len(fake.deletedKeys) != 1 {
+		t.Fatalf("partial release lost custody: claim=%+v instances=%v keys=%v err=%v", after, fake.deletedInstances, fake.deletedKeys, err)
+	}
+	keyPath, err := core.TestboxKeyPath(req.RequestedLeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("local key no longer available for recovery: %v", err)
+	}
+}
+
+func TestAWSAcquireRollbackRetainsKeyWhenTerminationIsUncertain(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	fake := &fakeAWSClient{
+		waitErr:         context.Canceled,
+		deleteServerErr: &smithy.GenericAPIError{Code: "InvalidInstanceID.NotFound", Message: "allocated instance has not propagated"},
+	}
+	t.Cleanup(installFixedAWSTestClient(t, fake))
+	var stderr strings.Builder
+	backend := NewAWSLeaseBackend(ProviderSpec{}, fixedAWSTestConfig(), Runtime{Stderr: &stderr}).(*awsLeaseBackend)
+	if _, err := backend.acquireOnce(t.Context(), false, "uncertain-rollback"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("acquisition error=%v, want cancellation", err)
+	}
+	if len(fake.deletedInstances) != 1 || len(fake.deletedKeys) != 0 || !strings.Contains(stderr.String(), "warning: cleanup aws instance") {
+		t.Fatalf("uncertain rollback instances=%v keys=%v stderr=%q", fake.deletedInstances, fake.deletedKeys, stderr.String())
+	}
+}
+
 func TestAWSAcquireBindsImmutableProviderKeyID(t *testing.T) {
 	testutil.IsolateUserDirs(t)
 	fake := &fakeAWSClient{}
@@ -2068,7 +2178,7 @@ func TestAWSCleanupCopiedLeaseTagDoesNotSuppressOrphanRecovery(t *testing.T) {
 	assertAWSClaimMissing(t, claimed.Labels["lease"])
 }
 
-func TestAWSCleanupTreatsInstanceMissingAtDeleteBoundaryAsRemoved(t *testing.T) {
+func TestAWSCleanupRetainsKeyAfterUncertainTerminationThenRecoversMissingInstance(t *testing.T) {
 	isolateAWSClaimState(t)
 	server := awsTestServer("i-raced", "cbx_333333333333", "raced", "us-east-1")
 	server.Labels["provider_key"] = "crabbox-cbx-333333333333"
@@ -2085,8 +2195,18 @@ func TestAWSCleanupTreatsInstanceMissingAtDeleteBoundaryAsRemoved(t *testing.T) 
 	cfg := Config{Provider: "aws", AWSRegion: "us-east-1"}
 	claimAWSCleanupServer(t, cfg, server)
 	backend := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
-		t.Fatal(err)
+	if err := backend.Cleanup(context.Background(), CleanupRequest{}); !errors.Is(err, fake.deleteServerErr) {
+		t.Fatalf("uncertain termination error=%v, want %v", err, fake.deleteServerErr)
+	}
+	if len(fake.deletedKeys) != 0 {
+		t.Fatalf("uncertain termination deleted keys=%v", fake.deletedKeys)
+	}
+	assertAWSClaimCloudID(t, server.Labels["lease"], server.CloudID)
+	fake.servers = nil
+	fake.get = nil
+	fake.getErr = core.Exit(4, "aws instance not found: %s", server.CloudID)
+	if err := backend.Cleanup(t.Context(), CleanupRequest{}); err != nil {
+		t.Fatalf("later missing-instance recovery: %v", err)
 	}
 	if len(fake.deletedKeys) != 1 || fake.deletedKeys[0] != "key-id-for-"+server.Labels["provider_key"] {
 		t.Fatalf("deleted keys=%v, want raced instance key cleanup", fake.deletedKeys)

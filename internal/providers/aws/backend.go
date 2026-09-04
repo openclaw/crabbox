@@ -744,7 +744,7 @@ func (b *awsLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 					}
 					return fmt.Errorf("re-read AWS cleanup key for missing instance %s: %w", server.DisplayID(), keyErr)
 				}
-				if err := deleteMissingClaimedAWSResourcesWithClient(ctx, client, claim, cleanupKeyID); err != nil {
+				if err := finalizeAWSKeyRecovery(ctx, client, claim, cleanupKeyID, nil); err != nil {
 					return err
 				}
 				fmt.Fprintf(b.RT.Stderr, "delete missing server recovery id=%s name=%s\n", server.DisplayID(), server.Name)
@@ -1025,10 +1025,12 @@ func (b *awsLeaseBackend) cleanupOrphanedAWSClaims(ctx context.Context, dryRun b
 			fmt.Fprintf(b.RT.Stderr, "skip orphaned AWS claim lease=%s reason=current AWS account differs from exact local claim\n", claim.LeaseID)
 			continue
 		}
+		var terminal *Server
 		if live, err := client.GetServer(ctx, claim.CloudID); err == nil {
 			if !isAWSTerminalServer(live) {
 				continue
 			}
+			terminal = &live
 		} else if !isAWSResolveNotFound(err) {
 			return fmt.Errorf("re-read orphaned AWS claim %s: %w", claim.LeaseID, err)
 		}
@@ -1044,7 +1046,7 @@ func (b *awsLeaseBackend) cleanupOrphanedAWSClaims(ctx context.Context, dryRun b
 			fmt.Fprintf(b.RT.Stderr, "delete orphaned AWS key recovery lease=%s key=%s\n", claim.LeaseID, core.ServerProviderKey(server))
 			continue
 		}
-		if err := deleteMissingClaimedAWSResourcesWithClient(ctx, client, claim, cleanupKeyID); err != nil {
+		if err := finalizeAWSKeyRecovery(ctx, client, claim, cleanupKeyID, terminal); err != nil {
 			return err
 		}
 		fmt.Fprintf(b.RT.Stderr, "delete orphaned AWS key recovery lease=%s key=%s\n", claim.LeaseID, core.ServerProviderKey(server))
@@ -1052,7 +1054,19 @@ func (b *awsLeaseBackend) cleanupOrphanedAWSClaims(ctx context.Context, dryRun b
 	return nil
 }
 
-func deleteMissingClaimedAWSResourcesWithClient(ctx context.Context, client awsClient, claim core.LeaseClaim, cleanupKeyID string) error {
+func finalizeAWSKeyRecovery(ctx context.Context, client awsClient, claim core.LeaseClaim, cleanupKeyID string, terminal *Server) error {
+	if terminal != nil {
+		if !isAWSTerminalServer(*terminal) {
+			return exit(4, "AWS lease %s has no observed terminal instance", claim.LeaseID)
+		}
+		if err := validateExactAWSClaim(*terminal, claim.LeaseID, claim); err != nil {
+			return err
+		}
+	} else if fixedAWSLeaseKind.IsFixedClaim(claim) && claim.FixedCreateIntent.State == fixedAWSIntentPrepared {
+		// A new allocation can be temporarily invisible. Keep its cleanup authority
+		// until full release succeeds or the exact instance is observed terminal.
+		return exit(4, "AWS lease %s instance visibility is unresolved; retaining its claim and key; retry when the exact instance is visible, or arrange operator recovery if it remains absent", claim.LeaseID)
+	}
 	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
 		return err
 	}
@@ -1069,7 +1083,7 @@ func isAWSClaimProvider(provider string) bool {
 }
 
 func deleteAWSCleanupServerWithClient(ctx context.Context, client awsClient, server Server, cleanupKeyID string) error {
-	if err := client.DeleteServer(ctx, server.CloudID); err != nil && !isAWSResolveNotFound(err) {
+	if err := client.DeleteServer(ctx, server.CloudID); err != nil {
 		return err
 	}
 	if cleanupKeyID != "" {
@@ -1119,6 +1133,7 @@ func cleanupAWSCreatedResources(ctx context.Context, stderr io.Writer, cfg Confi
 	if strings.TrimSpace(cloudID) != "" {
 		if err := client.DeleteServer(ctx, cloudID); err != nil {
 			fmt.Fprintf(stderr, "warning: cleanup aws instance %s after acquire failure: %v\n", cloudID, err)
+			return
 		}
 	}
 	if strings.TrimSpace(keyPairID) != "" {
