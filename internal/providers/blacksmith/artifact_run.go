@@ -49,10 +49,19 @@ func (r *blacksmithArtifactReceipt) command(req RunRequest, budget time.Duration
 	for _, marker := range []string{core.DelegatedRunArtifactBeginMarker, core.DelegatedRunArtifactEndMarker} {
 		collector = strings.ReplaceAll(collector, marker, `\137`+marker[1:])
 	}
-	// Neither child runs in a conditional: bash errexit, exit, exec, and traps
-	// remain child-owned. The supervisor never changes its initial remote cwd.
-	body := "timeout --kill-after=1s 1s /bin/sh -c ':' >/dev/null 2>&1 || exit 7\n" +
-		"bash -c " + shellQuote(child) + "\n" +
+	// Pin the prepared directory before workload code can retarget its binding.
+	// Only the child returns to the native cwd; cd, exit, exec, and traps stay child-owned.
+	body := `native_cwd=
+binding=./.git/crabbox-artifact-root
+if [ -e "$binding" ] || [ -L "$binding" ]; then
+  native_cwd=$(pwd -P) || exit 7
+  if [ ! -L "$binding" ] || ! cd -P "$binding" 2>/dev/null; then
+    printf '%s\n' 'invalid prepared artifact workspace; recreate the Testbox binding in trusted CI' >&2
+    exit 7
+  fi
+fi
+` + "timeout --kill-after=1s 1s /bin/sh -c ':' >/dev/null 2>&1 || exit 7\n" +
+		"(if [ -n \"$native_cwd\" ]; then cd -P \"$native_cwd\" || exit 7; fi\nexec bash -c " + shellQuote(child) + ")\n" +
 		"workload_code=$?\n" +
 		"printf '" + format + "exit:%d\\037' \"$workload_code\" || exit 7\n" +
 		"collection_code=0\n" +
@@ -209,27 +218,27 @@ func (d *blacksmithControlDemux) finish() {
 	}
 }
 
-func (r *blacksmithArtifactReceipt) archive() ([]byte, string, error) {
+func (r *blacksmithArtifactReceipt) archive() ([]byte, error) {
 	output := r.payload.String()
 	// Never include unvalidated payload in errors, even if collection failed
 	// after writing only an archive prefix or base64 fragment.
 	if r.collectCode != 0 {
 		if r.collectCode == 8 {
-			return nil, "", exit(7, "collection exited 8: missing required artifact")
+			return nil, exit(7, "collection exited 8: missing required artifact")
 		}
-		return nil, "", exit(7, "collection exited %d", r.collectCode)
+		return nil, exit(7, "collection exited %d", r.collectCode)
 	}
 	if strings.Count(output, core.DelegatedRunArtifactBeginMarker+"\n") != 1 || strings.Count(output, core.DelegatedRunArtifactEndMarker+"\n") != 1 {
-		return nil, "", exit(7, "collection returned an invalid archive envelope")
+		return nil, exit(7, "collection returned an invalid archive envelope")
 	}
 	archive, diagnostic, err := blacksmithExtractArtifactArchive(output, core.DelegatedRunArtifactDefaultMaxBytes)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	if int64(len(diagnostic)) > blacksmithArtifactDiagnosticCaptureBytes {
-		return nil, "", exit(7, "artifact diagnostics too large")
+		return nil, exit(7, "artifact diagnostics too large")
 	}
-	return archive, "", nil
+	return archive, nil
 }
 
 // A missing exit record must not turn the collector's archive into console
@@ -265,7 +274,7 @@ func (g *blacksmithArchiveGuard) flush() {
 
 // Called only inside the original shared claim fence. There is no follow-up
 // native run, route resolution, sync, or stopped-lease recovery.
-func (b *blacksmithBackend) runArtifactTestbox(ctx context.Context, req RunRequest, leaseID string, phases *core.CommandPhaseTracker, stdoutExtra, stderrExtra io.Writer, budget time.Duration) (code int, ended time.Time, collected core.DelegatedRunArtifactResult, artifactErr error) {
+func (b *blacksmithBackend) runArtifactTestbox(ctx context.Context, req RunRequest, leaseID string, phases *core.CommandPhaseTracker, stdoutExtra, stderrExtra io.Writer, budget time.Duration) (code int, ended time.Time, collected []core.RunArtifact, artifactErr error) {
 	r, err := newBlacksmithArtifactReceipt(b.rt.Clock.Now)
 	if err != nil {
 		return 2, time.Time{}, collected, err
@@ -325,7 +334,7 @@ func (b *blacksmithBackend) runArtifactTestbox(ctx context.Context, req RunReque
 	if code >= 128 {
 		return code, ended, collected, nil
 	}
-	archive, output, err := r.archive()
+	archive, err := r.archive()
 	if err != nil {
 		return code, ended, collected, err
 	}
@@ -333,9 +342,7 @@ func (b *blacksmithBackend) runArtifactTestbox(ctx context.Context, req RunReque
 	if err := writeBlacksmithRunArchive(runCtx, path, archive); err != nil {
 		return code, ended, collected, exit(2, "blacksmith artifact write: %v", err)
 	}
-	collected.Output = output
-	collected.Artifacts = []core.RunArtifact{{Kind: "artifact-glob", Path: path, Bytes: len(archive)}}
-	return code, ended, collected, nil
+	return code, ended, []core.RunArtifact{{Kind: "artifact-glob", Path: path, Bytes: len(archive)}}, nil
 }
 
 func writeBlacksmithRunArchive(ctx context.Context, path string, archive []byte) error {

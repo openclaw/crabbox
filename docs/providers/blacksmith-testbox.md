@@ -292,6 +292,8 @@ for inventory and enrichment semantics.
 - Provider sync: yes, Blacksmith-owned.
 - Desktop/browser/code: no Crabbox VNC/code surface.
 - Proof: yes, from the delegated stream, timing, and metadata.
+- Prepared artifact workspace: optional CI-owned binding; see
+  [prepared artifact workspace](../features/blacksmith-testbox.md#prepared-artifact-workspace).
 - Actions hydration: Blacksmith owns workflow setup; not Crabbox SSH hydration.
 - Coordinator: no (always direct from the CLI).
 
