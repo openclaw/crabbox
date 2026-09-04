@@ -1470,7 +1470,9 @@ async function cleanupRun({
     }
   }
   try {
-    // Revoke public credential injection before authority finalization begins.
+    // Persist the authority fence before revoking ingress. Requests already admitted
+    // by the relay can then reach neither the signer nor a reopened run.
+    await controllerCall(controllerURL, token, "begin-finalization", { runId: run.runId });
     await deleteRelay(cf, relayWorker);
     await controllerCall(controllerURL, token, "finalize", { runId: run.runId });
     firstAttestation = await controllerCall(controllerURL, token, "attest", { runId: run.runId });

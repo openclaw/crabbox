@@ -14,6 +14,7 @@ const control = read("scripts/image-qualification-control.mjs");
 const executor = read("scripts/image-qualification-execute.sh");
 const adapter = read("scripts/image-qualification-crabbox-adapter.sh");
 const relaySource = read("scripts/image-qualification-relay-worker.mjs");
+const controllerSource = read("scripts/image-qualification-controller-worker.mjs");
 
 test("workflow isolates candidate execution from protected credentials", () => {
   assert.equal(
@@ -132,8 +133,12 @@ test("control tool fixes the reviewed policy and recovery boundary", () => {
   assert.match(control, /assertWorkerIsolation\(cf, relayWorker, 0, true\)/);
   assert.match(control, /await deleteRelay\(cf, relayWorker\)/);
   assert.match(
+    controllerSource,
+    /case "\/begin-finalization":[\s\S]*env\.AUTHORITY\.beginFinalization\(input\.runId\)/,
+  );
+  assert.match(
     control,
-    /await deleteRelay\(cf, relayWorker\);\n    await controllerCall\(controllerURL, token, "finalize"/,
+    /controllerCall\(controllerURL, token, "begin-finalization"[\s\S]*await deleteRelay\(cf, relayWorker\);[\s\S]*controllerCall\(controllerURL, token, "finalize"/,
   );
   assert.match(
     control,

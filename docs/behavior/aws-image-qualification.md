@@ -43,10 +43,11 @@ request must match, including catalog, default, and Fast Snapshot Restore state.
 A retired AMI may remain visible as a matching provider-only record, but it
 must have no revision, promotion timestamp, or catalog-only marker.
 
-Protected teardown disables and verifies the relay's public endpoint, deletes
-and verifies absence of the relay Worker, and only then begins authority
-finalization. Expired or finalizing/finalized runs therefore have no public
-credential-injection path to the private candidate.
+Protected teardown first persists the authority and registry finalization fence,
+then disables and verifies the relay's public endpoint and deletes the relay
+Worker before running idempotent authority cleanup. Requests already admitted by
+the relay cannot reach the AWS signer after that fence, and later requests have
+no public credential-injection path to the private candidate.
 
 The candidate binding has immutable `ctx.props` containing `runId`, `owner`,
 `candidateSha`, `candidateWorker`, `deploymentHash`, and `expiresAt`. The

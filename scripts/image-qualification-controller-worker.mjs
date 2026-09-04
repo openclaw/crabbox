@@ -44,6 +44,9 @@ export default {
       switch (new URL(request.url).pathname) {
         case "/claim":
           return json(await env.AUTHORITY.claim(input.identity));
+        case "/begin-finalization":
+          await env.AUTHORITY.beginFinalization(input.runId);
+          return json({ finalizing: true });
         case "/finalize":
           return json(await env.AUTHORITY.finalize(input.runId));
         case "/attest":
