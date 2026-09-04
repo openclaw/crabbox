@@ -144,7 +144,10 @@ workers.dev, preview URLs, and cron.
 Each run has one Durable Object. Before a mutation, it persists the operation ID,
 canonical normalized-request hash, and a prepared intent, then marks the intent
 dispatched immediately before the signer call. Prepared intents are deleted
-without recovery; only dispatched or legacy ambiguous intents can be reconciled.
+without recovery. Finalization uses action-specific read reconciliation for
+dispatched or legacy ambiguous launch, termination, image, and key intents. It
+never redispatches generic candidate mutations; those intents remain until
+inventory, cleanup, and zero-residue verification allow their retirement.
 A completed receipt is replayed only for the same hash. `RunInstances` receives
 an authority-derived deterministic `ClientToken` derived from the run and
 operation IDs. Uncertain `CreateImage` and `ImportKeyPair` results retain their

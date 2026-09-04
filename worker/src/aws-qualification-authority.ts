@@ -753,44 +753,8 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       await this.reconcileIntentWithBackoff(run, intent, policy);
       return;
     }
-
-    const ledger = await this.ledger();
-    const authorized = await authorizeRequest(
-      intent.request,
-      run.identity,
-      policy,
-      ledger,
-      await qualificationPhysicalKeyName(run.identity.runId),
-      await qualificationClientToken(run.identity.runId, intent.request.opId),
-    );
-    if (authorized.mutating) {
-      await this.ensureAccount(policy);
-    }
-    const response = await this.signer.execute(
-      intent.request.service,
-      intent.request.action,
-      policy.region,
-      authorized.parameters,
-    );
-    const result = await boundedResponse(response);
-    if (result.status < 200 || result.status >= 300) {
-      if (retireDefinitelyAbsentResource(ledger, intent.request, result)) {
-        await this.ctx.storage.put(ledgerKey, ledger);
-        await this.ctx.storage.delete(key);
-        return;
-      }
-      failures.push(`${intent.request.action} reconciliation http ${result.status}`);
-      return;
-    }
-    updateLedgerFromResponse(ledger, intent.request.action, result.body, authorized.parameters);
-    await this.ctx.storage.put(ledgerKey, ledger);
-    if (intent.request.action === "RunInstances") {
-      await this.ctx.storage.put(key.replace(intentPrefix, receiptPrefix), {
-        requestHash: intent.requestHash,
-        response: result,
-      } satisfies AWSQualificationReceipt);
-    }
-    await this.ctx.storage.delete(key);
+    // Finalization never replays a candidate mutation. Generic intents stay pending until
+    // inventory and cleanup prove zero residue, then retireUnresolvedIntents removes them.
   }
 
   private async cleanup(

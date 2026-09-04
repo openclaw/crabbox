@@ -376,6 +376,38 @@ describe("AWS qualification authority", () => {
     expect((await fixture.storage.list({ prefix: "intent:" })).size).toBe(0);
   });
 
+  it("does not redispatch an expired dispatched generic mutation during finalization", async () => {
+    vi.useFakeTimers();
+    useImmediateTimeouts();
+    const now = new Date("2026-09-04T00:00:00Z");
+    vi.setSystemTime(now);
+    const expiring = { ...identity, expiresAt: new Date(now.getTime() + 1_000).toISOString() };
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, expiring);
+    await importKey(fixture, expiring);
+    const dispatched = request(
+      "CreateTags",
+      {
+        "ResourceId.1": "key-owned",
+        "Tag.1.Key": "Name",
+        "Tag.1.Value": "crash-before-signer",
+      },
+      "ec2",
+    );
+    await fixture.storage.put(`intent:${dispatched.opId}`, {
+      phase: "dispatched",
+      requestHash: "dispatched-request",
+      request: dispatched,
+      startedAt: now.toISOString(),
+    });
+    vi.setSystemTime(new Date(now.getTime() + 2_000));
+
+    await expect(fixture.run.finalize(controller)).resolves.toBeDefined();
+    expect(fixture.signer.calls.filter((call) => call.action === "CreateTags")).toHaveLength(0);
+    expect(fixture.signer.calls.some((call) => call.action === "DeleteKeyPair")).toBe(true);
+    expect((await fixture.storage.list({ prefix: "intent:" })).size).toBe(0);
+  });
+
   it("discovers and cleans a lost-response launch after expiry without redispatch", async () => {
     vi.useFakeTimers();
     useImmediateTimeouts();
@@ -694,7 +726,7 @@ describe("AWS qualification authority", () => {
 
     await expect(fixture.run.finalize(controller)).resolves.toBeDefined();
     expect((await fixture.storage.list({ prefix: "intent:" })).size).toBe(0);
-    expect(fixture.signer.calls.filter((call) => call.action === "DeleteSnapshot").length).toBe(3);
+    expect(fixture.signer.calls.filter((call) => call.action === "DeleteSnapshot").length).toBe(2);
   });
 
   it("revalidates the expected STS account before every mutation", async () => {
