@@ -42,12 +42,31 @@ describe("AWS qualification authority deployment", () => {
   });
 
   it("separates the candidate transport from the protected controller entrypoint", async () => {
-    const enroll = vi.fn();
-    const finalize = vi.fn();
-    const execute = vi.fn().mockResolvedValue({ status: 200, body: "ok" });
+    const enroll =
+      vi.fn<
+        (
+          controller: AWSQualificationControllerProps,
+          identity: AWSQualificationRunIdentity,
+        ) => Promise<void>
+      >();
+    const finalize = vi.fn<(controller: AWSQualificationControllerProps) => Promise<unknown>>();
+    const execute =
+      vi.fn<
+        (
+          identity: AWSQualificationRunIdentity,
+          request: AWSQualificationRequest,
+        ) => Promise<{ status: number; body: string }>
+      >();
+    execute.mockResolvedValue({ status: 200, body: "ok" });
     const namespace = {
-      idFromName: vi.fn((name: string) => name),
-      get: vi.fn(() => ({ enroll, execute, finalize })),
+      idFromName: vi.fn<(name: string) => string>((name) => name),
+      get: vi.fn<
+        (id: string) => {
+          enroll: typeof enroll;
+          execute: typeof execute;
+          finalize: typeof finalize;
+        }
+      >(() => ({ enroll, execute, finalize })),
     };
     const env = { AWS_QUALIFICATION_RUNS: namespace } as never;
     const candidate = new AWSQualificationTransport(env, identity);
@@ -251,7 +270,8 @@ describe("AWS qualification authority", () => {
 
 describe("AWS qualification candidate transport", () => {
   it("fails closed without falling back to stray raw credentials", async () => {
-    const execute = vi.fn().mockRejectedValue(new Error("binding unavailable"));
+    const execute = vi.fn<(request: AWSQualificationRequest) => Promise<never>>();
+    execute.mockRejectedValue(new Error("binding unavailable"));
     const client = new EC2SpotClient(
       {
         CRABBOX_AWS_QUALIFICATION_TRANSPORT: { execute },

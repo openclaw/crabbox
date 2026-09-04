@@ -591,89 +591,77 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     policy: AWSQualificationPolicy,
     failures: string[],
   ): Promise<void> {
-    const pending = await this.ctx.storage.list<AWSQualificationIntent>({
-      prefix: intentPrefix,
-    });
-    for (const [key, intent] of pending) {
-      try {
-        if (intent.request.action === "CreateImage" || intent.request.action === "ImportKeyPair") {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- each pending intent owns one resource.
-          const reconciled = await this.reconcileIntent(run, intent, policy);
-          if (!reconciled) failures.push(`${intent.request.action} intent is unresolved`);
-          continue;
-        }
-        if (intent.request.action === "RunInstances") {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- each pending intent has a separate ledger snapshot.
-          const ledger = await this.ledger();
-          // oxlint-disable-next-line eslint/no-await-in-loop -- deterministic ClientToken reconciles one intent.
-          const authorized = await authorizeRequest(
-            intent.request,
-            run.identity,
-            policy,
-            ledger,
-            await qualificationPhysicalKeyName(run.identity.runId),
-            await qualificationClientToken(run.identity.runId, intent.request.opId),
-          );
-          // oxlint-disable-next-line eslint/no-await-in-loop -- one exact pending allocation is reconciled.
-          const response = await this.signer.execute(
-            "ec2",
-            "RunInstances",
-            policy.region,
-            authorized.parameters,
-          );
-          // oxlint-disable-next-line eslint/no-await-in-loop -- response belongs to this pending intent.
-          const result = await boundedResponse(response);
-          if (result.status < 200 || result.status >= 300) {
-            failures.push(`RunInstances reconciliation http ${result.status}`);
-            continue;
-          }
-          updateLedgerFromResponse(ledger, "RunInstances", result.body, authorized.parameters);
-          // oxlint-disable-next-line eslint/no-await-in-loop -- persist this intent before reconciling another.
-          await this.ctx.storage.put(ledgerKey, ledger);
-          // oxlint-disable-next-line eslint/no-await-in-loop -- receipt belongs to this exact operation.
-          await this.ctx.storage.put(key.replace(intentPrefix, receiptPrefix), {
-            requestHash: intent.requestHash,
-            response: result,
-          } satisfies AWSQualificationReceipt);
-        } else {
-          const ledger = await this.ledger();
-          const authorized = await authorizeRequest(
-            intent.request,
-            run.identity,
-            policy,
-            ledger,
-            await qualificationPhysicalKeyName(run.identity.runId),
-            await qualificationClientToken(run.identity.runId, intent.request.opId),
-          );
-          const response = await this.signer.execute(
-            intent.request.service,
-            intent.request.action,
-            policy.region,
-            authorized.parameters,
-          );
-          const result = await boundedResponse(response);
-          if (result.status < 200 || result.status >= 300) {
-            failures.push(`${intent.request.action} reconciliation http ${result.status}`);
-            continue;
-          }
-          updateLedgerFromResponse(
-            ledger,
-            intent.request.action,
-            result.body,
-            authorized.parameters,
-          );
-          await this.ctx.storage.put(ledgerKey, ledger);
-        }
-        // oxlint-disable-next-line eslint/no-await-in-loop -- clear only the intent just reconciled.
-        await this.ctx.storage.delete(key);
-      } catch (error) {
-        failures.push(
-          `${intent.request.action} reconciliation: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
+    const pending = [
+      ...(await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix })),
+    ];
+    await this.recoverPendingIntentEntries(pending, run, policy, failures);
+  }
+
+  private async recoverPendingIntentEntries(
+    pending: Array<[string, AWSQualificationIntent]>,
+    run: AWSQualificationRunState,
+    policy: AWSQualificationPolicy,
+    failures: string[],
+  ): Promise<void> {
+    const entry = pending[0];
+    if (!entry) return;
+    const [key, intent] = entry;
+    try {
+      await this.recoverPendingIntent(key, intent, run, policy, failures);
+    } catch (error) {
+      failures.push(
+        `${intent.request.action} reconciliation: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
+    // The queue is capped at maxPendingIntents. Serial recursion preserves each ledger commit
+    // before the next intent observes state without an unbounded call stack.
+    await this.recoverPendingIntentEntries(pending.slice(1), run, policy, failures);
+  }
+
+  private async recoverPendingIntent(
+    key: string,
+    intent: AWSQualificationIntent,
+    run: AWSQualificationRunState,
+    policy: AWSQualificationPolicy,
+    failures: string[],
+  ): Promise<void> {
+    if (intent.request.action === "CreateImage" || intent.request.action === "ImportKeyPair") {
+      const reconciled = await this.reconcileIntent(run, intent, policy);
+      if (!reconciled) failures.push(`${intent.request.action} intent is unresolved`);
+      return;
+    }
+
+    const ledger = await this.ledger();
+    const authorized = await authorizeRequest(
+      intent.request,
+      run.identity,
+      policy,
+      ledger,
+      await qualificationPhysicalKeyName(run.identity.runId),
+      await qualificationClientToken(run.identity.runId, intent.request.opId),
+    );
+    const response = await this.signer.execute(
+      intent.request.service,
+      intent.request.action,
+      policy.region,
+      authorized.parameters,
+    );
+    const result = await boundedResponse(response);
+    if (result.status < 200 || result.status >= 300) {
+      failures.push(`${intent.request.action} reconciliation http ${result.status}`);
+      return;
+    }
+    updateLedgerFromResponse(ledger, intent.request.action, result.body, authorized.parameters);
+    await this.ctx.storage.put(ledgerKey, ledger);
+    if (intent.request.action === "RunInstances") {
+      await this.ctx.storage.put(key.replace(intentPrefix, receiptPrefix), {
+        requestHash: intent.requestHash,
+        response: result,
+      } satisfies AWSQualificationReceipt);
+    }
+    await this.ctx.storage.delete(key);
   }
 
   private async cleanup(
@@ -1522,12 +1510,9 @@ function assertLifecycleCapacity(
   ledger: AWSQualificationLedger,
   pending: Map<string, AWSQualificationIntent>,
 ): void {
-  const pendingActions = [...pending.values()].map((intent) => intent.request.action);
+  const pendingActions = new Set([...pending.values()].map((intent) => intent.request.action));
   if (request.action === "RunInstances") {
-    if (
-      ledger.instanceIds.length >= maxActiveInstances ||
-      pendingActions.includes("RunInstances")
-    ) {
+    if (ledger.instanceIds.length >= maxActiveInstances || pendingActions.has("RunInstances")) {
       throw new Error("AWS qualification allows one active instance");
     }
     if (ledger.launchCount >= maxLaunches) {
@@ -1538,13 +1523,13 @@ function assertLifecycleCapacity(
     request.action === "CreateImage" &&
     (ledger.imageIds.length >= maxActiveImages ||
       ledger.snapshotIds.length >= maxActiveSnapshots ||
-      pendingActions.includes("CreateImage"))
+      pendingActions.has("CreateImage"))
   ) {
     throw new Error("AWS qualification allows one active checkpoint image");
   }
   if (
     request.action === "ImportKeyPair" &&
-    (ledger.keyPairIds.length > 0 || pendingActions.includes("ImportKeyPair"))
+    (ledger.keyPairIds.length > 0 || pendingActions.has("ImportKeyPair"))
   ) {
     throw new Error("AWS qualification allows one active key pair");
   }
