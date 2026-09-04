@@ -3,9 +3,11 @@
 ## Unreleased
 
 - Preserve literal Agent Sandbox profile arguments through pod stdin execution and share checked workspace/environment command wrapping with Nomad. [PR 1831](https://github.com/openclaw/crabbox/pull/1831). Thanks @steipete.
+- Preserve literal profile arguments through CodeSandbox, OpenComputer, and Docker Sandbox execution, sharing command-intent parsing without changing provider shells or environment transports. [PR 1830](https://github.com/openclaw/crabbox/pull/1830). Thanks @steipete.
 
 - Reject changed Azure VM identities during acquisition readiness and use identity-checked VM/companion cleanup for failed acquisitions instead of blind name-based rollback. [PR 1827](https://github.com/openclaw/crabbox/pull/1827). Thanks @steipete.
 - Report SmolVM decoder, file-write and extraction failures instead of false upload success, isolate temporary upload files, and preserve existing files when decoding fails. [PR 1826](https://github.com/openclaw/crabbox/pull/1826). Thanks @steipete.
+- Clean failed SmolVM environment-profile uploads with bounded original-claim checks, isolate each run's profile, and reuse shared shell-profile handling without requiring Bash. [PR 1829](https://github.com/openclaw/crabbox/pull/1829). Thanks @steipete.
 - Stop direct AWS, Azure, GCP, and Hetzner bootstrap retries from allocating another machine when rollback reports a cleanup failure, preserving both the original failure and cleanup diagnostics. [PR 1819](https://github.com/openclaw/crabbox/pull/1819). Thanks @steipete.
 - Reject inconsistent Hetzner creation/readiness identities before SSH, and keep failed-acquisition cleanup bound to the original server and key; share exact ID/name validation with RunPod. [PR 1821](https://github.com/openclaw/crabbox/pull/1821). Thanks @steipete.
 - Cloudflare: retain recovery claims when teardown fails, preserve command/cancellation outcomes, and fence reuse and cleanup against replaced local claims. [PR 1817](https://github.com/openclaw/crabbox/pull/1817). Thanks @steipete.

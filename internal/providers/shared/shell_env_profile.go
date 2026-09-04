@@ -26,7 +26,10 @@ type PreparedShellEnvProfile struct {
 	closeErr              error
 }
 
-func PrepareShellEnvProfile(env map[string]string, prefix string) (*PreparedShellEnvProfile, error) {
+func PrepareShellEnvProfile(env map[string]string, remoteDir, prefix string) (*PreparedShellEnvProfile, error) {
+	if !path.IsAbs(remoteDir) {
+		return nil, errors.New("environment profile requires an absolute remote directory")
+	}
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, fmt.Errorf("name environment profile: %w", err)
@@ -41,7 +44,7 @@ func PrepareShellEnvProfile(env map[string]string, prefix string) (*PreparedShel
 		_ = os.Remove(file.Name())
 		return nil, fmt.Errorf("write environment profile: %w", err)
 	}
-	return &PreparedShellEnvProfile{localPath: file.Name(), remotePath: path.Join("/tmp", prefix+hex.EncodeToString(nonce[:])+".sh")}, nil
+	return &PreparedShellEnvProfile{localPath: file.Name(), remotePath: path.Join(remoteDir, prefix+hex.EncodeToString(nonce[:])+".sh")}, nil
 }
 
 func (p *PreparedShellEnvProfile) RemotePath() string { return p.remotePath }
@@ -103,11 +106,16 @@ func renderShellEnvProfile(env map[string]string) string {
 
 // WrapCommandWithShellEnvProfile gates only profile sourcing, not user commands.
 func WrapCommandWithShellEnvProfile(command []string, envPath string) []string {
-	script := ". " + core.ShellQuote(envPath) + " || exit $?\n"
+	var script string
 	if len(command) == 3 && command[0] == "bash" && command[1] == "-lc" {
-		script += command[2]
+		script = command[2]
 	} else {
-		script += "exec " + core.ShellScriptFromArgv(command)
+		script = "exec " + core.ShellScriptFromArgv(command)
 	}
-	return []string{"bash", "-lc", script}
+	return []string{"bash", "-lc", ShellScriptWithEnvProfile(script, envPath)}
+}
+
+// ShellScriptWithEnvProfile preserves the caller's shell and already-built script.
+func ShellScriptWithEnvProfile(script, envPath string) string {
+	return ". " + core.ShellQuote(envPath) + " || exit $?\n" + script
 }

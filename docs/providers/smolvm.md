@@ -126,7 +126,7 @@ The [hosted API](https://smolmachines.com/docs/cloud/api-reference) uses 404 bot
 - Network is open by default.
 - Archive sync and small file writes use direct calls to the smolfleet `/exec` API (heredoc payload).
 - Archive and small-file uploads share a checked byte-transfer path: an invocation-private directory holds a fully decoded file before extraction or publication. Decoder, write, extraction and temporary-cleanup failures return nonzero status; an earlier failure remains primary. Small files are published from a private same-filesystem staging file, so failed decoding does not truncate an existing destination. Archive extraction retains the incoming file-mode mask.
-- Remote traps clean temporary upload files on ordinary completion and handled signals. They do not guarantee cleanup after SIGKILL or an ambiguous HTTP failure while the remote command may still run. This does not make workspace replacement transactional or change the lifetime of the final environment profile.
+- Remote traps clean temporary upload files on ordinary completion and handled signals. They do not guarantee cleanup after SIGKILL or an ambiguous HTTP failure while the remote command may still run. This does not make workspace replacement transactional. Final environment profiles use the separate run-scoped owner described below.
 - No direct `crabbox ssh` / `crabbox vnc` (delegated execution model).
 - Supports `warmup`, `run`, `status`, `stop`, `list`, and `doctor`.
 
@@ -167,7 +167,7 @@ during the first exec.
 - Use `--sync-only` to pre-upload the archive into a kept sandbox before a later command (subject to delegated guardrails).
 - Delegated run/sync options that need an SSH target or proof surface are rejected: `--script` / `--script-stdin`, `--fresh-pr`, `--full-resync`, `--env-helper`, `--capture-stdout` / `--capture-stderr`, `--capture-on-fail`, `--download`, `--artifact-glob`, `--emit-proof`, and `--stop-after`.
 - IDs can be a Crabbox slug, a `cbx_...` lease ID, or a raw SmolVM identifier/name; stop and reuse require an unambiguous exact local claim, not just a Crabbox-looking name.
-- Forwarded environment values (if supported by the backend) are handled inside the injected workspace.
+- Forwarded environment values use an independently named profile in the validated workdir. The shared profile owner retains cleanup responsibility after a failed upload; cleanup runs before one-shot teardown with a fresh bounded context, checking the original local claim and native machine identity. Changed ownership retains the remote file and warns rather than authorizing stale cleanup. The source check uses the existing POSIX shell and does not require Bash or change user-command errexit behavior.
 - The direct archive sync sends the (base64) tar inside the `/exec` command body. Very large repos may hit request size limits (the usual preflight checks still apply).
 
 ## Related docs
