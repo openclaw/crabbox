@@ -1359,7 +1359,7 @@ func (c *AzureClient) azureOSProfile(cfg Config, publicKey, name, leaseID string
 }
 
 func azureLinuxCloudInit(cfg Config, publicKey string) string {
-	return cloudInitWithAdditionalBootstrap(cfg, publicKey, azureLinuxTruffleHogBootstrap())
+	return cloudInitWithExtras(cfg, publicKey, "", azureLinuxTruffleHogBootstrap())
 }
 
 func azureLinuxTruffleHogBootstrap() string {

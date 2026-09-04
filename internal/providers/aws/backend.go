@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -246,15 +247,6 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 						return exit(4, "lease_id_conflict: fixed lease %s resource %s does not match acquired CloudID %s", leaseID, blank(server.CloudID, "<empty>"), blank(claim.CloudID, "<empty>"))
 					}
 				}
-				if err := validateFixedAWSServer(server, leaseID, intent.Slug, fingerprint, accountID); err != nil {
-					return err
-				}
-				if pinned == nil {
-					return exit(4, "lease_id_conflict: fixed AWS resource for lease %s has no durable launch attempt", leaseID)
-				}
-				if err := validateFixedAWSAttemptServer(server, leaseID, *pinned); err != nil {
-					return err
-				}
 				resolvedCfg = awsConfigForServer(cfg, server)
 			} else {
 				if intent.State == fixedAWSIntentAcquired || claim.CloudID != "" {
@@ -307,8 +299,32 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 					}
 					return err
 				}
+				// Inventory already carries the queried region; replay must not replace it from labels.
+				server = annotateAWSServerRegion(server, resolvedCfg.AWSRegion)
 			}
 
+			if err := validateFixedAWSServer(server, leaseID, intent.Slug, fingerprint, accountID); err != nil {
+				return err
+			}
+			pinned, err = fixedAWSAttemptFromIntent(intent)
+			if err != nil || pinned == nil {
+				return exit(4, "lease_id_conflict: fixed AWS lease %s has no valid durable launch attempt after provisioning", leaseID)
+			}
+			if err := validateFixedAWSAttemptServer(server, leaseID, *pinned); err != nil {
+				return err
+			}
+			if claim.CloudID == "" {
+				// Bind once before readiness can fail; replays retain the original cleanup
+				// identity. Prepared claims permit cleanup but cannot authorize normal use.
+				claim.CloudID = server.CloudID
+				claim.CloudImmutableID = server.ImmutableID
+				claim.Labels = maps.Clone(server.Labels)
+				if err := persist(); err != nil {
+					return err
+				}
+			} else if err := validateExactAWSClaim(server, leaseID, *claim); err != nil {
+				return err
+			}
 			serverClient, err := newAWSClient(ctx, resolvedCfg)
 			if err != nil {
 				return err
@@ -318,12 +334,11 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 				return err
 			}
 			server = annotateAWSServerRegion(server, resolvedCfg.AWSRegion)
-			if err := validateFixedAWSServer(server, leaseID, intent.Slug, fingerprint, accountID); err != nil {
+			if err := validateExactAWSClaim(server, leaseID, *claim); err != nil {
 				return err
 			}
-			pinned, err = fixedAWSAttemptFromIntent(intent)
-			if err != nil || pinned == nil {
-				return exit(4, "lease_id_conflict: fixed AWS lease %s has no valid durable launch attempt after provisioning", leaseID)
+			if err := validateFixedAWSServer(server, leaseID, intent.Slug, fingerprint, accountID); err != nil {
+				return err
 			}
 			if err := validateFixedAWSAttemptServer(server, leaseID, *pinned); err != nil {
 				return err
@@ -364,7 +379,7 @@ func fixedAWSLeaseMatches(servers []LeaseView, leaseID string) []Server {
 }
 
 func validateFixedAWSServer(server Server, leaseID, slug, fingerprint, accountID string) error {
-	if !isCrabboxAWSLease(server) || server.Labels["lease"] != leaseID ||
+	if server.CloudID == "" || !isCrabboxAWSLease(server) || server.Labels["lease"] != leaseID ||
 		core.NormalizeLeaseSlug(server.Labels["slug"]) != slug ||
 		server.Labels["fixed_intent_sha256"] != fingerprint ||
 		server.Labels["aws_account_id"] != accountID {
@@ -379,6 +394,8 @@ func validateFixedAWSAttemptServer(server Server, leaseID string, attempt core.A
 	}
 	if strings.TrimSpace(server.ServerType.Name) != strings.TrimSpace(attempt.ServerType) ||
 		awsServerRegion(server) != strings.TrimSpace(attempt.Region) ||
+		strings.TrimSpace(server.Labels["provider_key"]) != core.ProviderKeyForLease(leaseID) ||
+		strings.TrimSpace(server.Labels["aws_key_pair_id"]) != strings.TrimSpace(attempt.KeyPairID) ||
 		strings.TrimSpace(server.HostID) != strings.TrimSpace(attempt.HostID) {
 		return exit(4, "lease_id_conflict: AWS resource for lease %s provider identity does not match its durable launch attempt", leaseID)
 	}
