@@ -156,8 +156,9 @@ These methods and `attest` exist only on the named controller entrypoint; the
 candidate transport exposes only `execute`. The controller persists the per-run
 cleanup owner before publishing its global claim, and every candidate call must
 match that exact registry record while its state remains `claimed`. Finalization
-persists an irreversible per-run `finalizingAt` fence before cleanup I/O, so a
-failed cleanup cannot reopen candidate dispatch.
+persists an irreversible per-run `finalizingAt` fence before transitioning the
+registry to `finalizing` or starting cleanup I/O, so an already-admitted
+candidate call and a failed cleanup cannot reopen candidate dispatch.
 
 `attest(runId)` returns versioned evidence built from persisted Durable Object
 state. It binds the run, candidate and authority revisions, deployed bundle and

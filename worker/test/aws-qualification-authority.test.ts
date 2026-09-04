@@ -58,6 +58,8 @@ describe("AWS qualification authority deployment", () => {
         ) => Promise<void>
       >();
     const finalize = vi.fn<(controller: AWSQualificationControllerProps) => Promise<unknown>>();
+    const beginFinalization =
+      vi.fn<(controller: AWSQualificationControllerProps) => Promise<void>>();
     const attest = vi.fn<(controller: AWSQualificationControllerProps) => Promise<unknown>>();
     attest.mockResolvedValue({ finalized: true });
     const execute =
@@ -74,10 +76,11 @@ describe("AWS qualification authority deployment", () => {
         (id: string) => {
           enroll: typeof enroll;
           execute: typeof execute;
+          beginFinalization: typeof beginFinalization;
           finalize: typeof finalize;
           attest: typeof attest;
         }
-      >(() => ({ enroll, execute, finalize, attest })),
+      >(() => ({ enroll, execute, beginFinalization, finalize, attest })),
     };
     const claim =
       vi.fn<
@@ -133,6 +136,10 @@ describe("AWS qualification authority deployment", () => {
     expect(claim).toHaveBeenCalledWith(controller, identity);
     expect(enroll).toHaveBeenCalledWith(controller, identity);
     expect(enroll.mock.invocationCallOrder[0]).toBeLessThan(claim.mock.invocationCallOrder[0]!);
+    expect(beginFinalization).toHaveBeenCalledWith(controller);
+    expect(beginFinalization.mock.invocationCallOrder[0]).toBeLessThan(
+      markFinalizing.mock.invocationCallOrder[0]!,
+    );
     expect(finalize).toHaveBeenCalledWith(controller);
     expect(markFinalizing).toHaveBeenCalledWith(controller, identity.runId);
     expect(markFinalized).toHaveBeenCalledWith(controller, identity.runId);
@@ -143,6 +150,94 @@ describe("AWS qualification authority deployment", () => {
     assertActive.mockRejectedValueOnce(new Error("AWS qualification registry run is not active"));
     await expect(candidate.execute(request("GetCallerIdentity"))).rejects.toThrow("not active");
     expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("fences an admitted candidate before signer dispatch when finalization wins the run hop", async () => {
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    const candidateEntered = Promise.withResolvers<void>();
+    const releaseCandidate = Promise.withResolvers<void>();
+    const cleanupEntered = Promise.withResolvers<void>();
+    const releaseCleanup = Promise.withResolvers<void>();
+    const execute = vi.fn<
+      (
+        runIdentity: AWSQualificationRunIdentity,
+        candidateRequest: AWSQualificationRequest,
+      ) => Promise<{ status: number; body: string }>
+    >(async (runIdentity, candidateRequest) => {
+      candidateEntered.resolve();
+      await releaseCandidate.promise;
+      return await fixture.run.execute(runIdentity, candidateRequest);
+    });
+    const beginFinalization = vi.fn<
+      (controllerProps: AWSQualificationControllerProps) => Promise<void>
+    >(async (controllerProps) => {
+      await fixture.run.beginFinalization(controllerProps);
+    });
+    const finalize = vi.fn<(controllerProps: AWSQualificationControllerProps) => Promise<unknown>>(
+      async () => {
+        cleanupEntered.resolve();
+        await releaseCleanup.promise;
+        return {};
+      },
+    );
+    const namespace = {
+      idFromName: vi.fn<(name: string) => string>((name) => name),
+      get: vi.fn<
+        () => {
+          execute: typeof execute;
+          beginFinalization: typeof beginFinalization;
+          finalize: typeof finalize;
+        }
+      >(() => ({ execute, beginFinalization, finalize })),
+    };
+    const assertActive = vi
+      .fn<(runIdentity: AWSQualificationRunIdentity) => Promise<void>>()
+      .mockResolvedValue();
+    const markFinalizing = vi
+      .fn<(controllerProps: AWSQualificationControllerProps, runId: string) => Promise<unknown>>()
+      .mockResolvedValue({});
+    const markFinalized = vi
+      .fn<(controllerProps: AWSQualificationControllerProps, runId: string) => Promise<unknown>>()
+      .mockResolvedValue({});
+    const registry = {
+      idFromName: vi.fn<(name: string) => string>((name) => name),
+      get: vi.fn<
+        () => {
+          assertActive: typeof assertActive;
+          markFinalizing: typeof markFinalizing;
+          markFinalized: typeof markFinalized;
+        }
+      >(() => ({ assertActive, markFinalizing, markFinalized })),
+    };
+    const env = {
+      AWS_QUALIFICATION_RUNS: namespace,
+      AWS_QUALIFICATION_REGISTRY: registry,
+    } as never;
+    const candidate = new AWSQualificationTransport(env, identity);
+    const protectedController = new AWSQualificationController(env, controller);
+    const candidateResult = candidate.execute(
+      request(
+        "ImportKeyPair",
+        {
+          KeyName: "candidate-key",
+          PublicKeyMaterial: btoa("ssh-ed25519 AAAAqualification"),
+        },
+        "ec2",
+      ),
+    );
+
+    await candidateEntered.promise;
+    const finalization = protectedController.finalize(identity.runId);
+    await cleanupEntered.promise;
+    releaseCandidate.resolve();
+    await expect(candidateResult).rejects.toThrow("finalizing");
+    expect(fixture.signer.calls).toHaveLength(0);
+    releaseCleanup.resolve();
+    await finalization;
+    expect(beginFinalization.mock.invocationCallOrder[0]).toBeLessThan(
+      markFinalizing.mock.invocationCallOrder[0]!,
+    );
   });
 
   it("keeps one idempotent active registry claim until finalized retirement", async () => {

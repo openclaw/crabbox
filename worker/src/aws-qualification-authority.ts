@@ -205,8 +205,10 @@ export class AWSQualificationController extends WorkerEntrypoint<
   }
 
   async finalize(runId: string): Promise<AWSQualificationLedger> {
+    const run = qualificationRun(this.env, runId);
+    await run.beginFinalization(this.ctx.props);
     await qualificationRegistry(this.env).markFinalizing(this.ctx.props, runId);
-    const ledger = await qualificationRun(this.env, runId).finalize(this.ctx.props);
+    const ledger = await run.finalize(this.ctx.props);
     await qualificationRegistry(this.env).markFinalized(this.ctx.props, runId);
     return ledger;
   }
@@ -437,6 +439,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
 
   async finalize(controller?: AWSQualificationControllerProps): Promise<AWSQualificationLedger> {
     return await this.serialized(() => this.finalizeSerialized(controller));
+  }
+
+  async beginFinalization(controller: AWSQualificationControllerProps): Promise<void> {
+    await this.serialized(async () => {
+      await this.persistFinalizationFence(controller);
+    });
   }
 
   async attest(controller: AWSQualificationControllerProps): Promise<AWSQualificationAttestation> {
@@ -954,14 +962,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
   private async finalizeSerialized(
     controller?: AWSQualificationControllerProps,
   ): Promise<AWSQualificationLedger> {
-    const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
+    const run = await this.persistFinalizationFence(controller);
     if (!run) return await this.ledger();
     if (run.finalizedAt) return await this.ledger();
-    if (controller) validateController(controller, run.identity.deploymentHash);
-    if (!run.finalizingAt) {
-      run.finalizingAt = new Date().toISOString();
-      await this.ctx.storage.put(stateKey, run);
-    }
     const ledger = await this.ledger();
     const policy = run.policy;
     const failures: string[] = [];
@@ -1042,6 +1045,19 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     await this.completeFinalReceipt(emptyLedger(recoveredLedger.launchCount), []);
     await this.ctx.storage.deleteAlarm();
     return recoveredLedger;
+  }
+
+  private async persistFinalizationFence(
+    controller?: AWSQualificationControllerProps,
+  ): Promise<AWSQualificationRunState | undefined> {
+    const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
+    if (!run) return undefined;
+    if (controller) validateController(controller, run.identity.deploymentHash);
+    if (!run.finalizingAt && !run.finalizedAt) {
+      run.finalizingAt = new Date().toISOString();
+      await this.ctx.storage.put(stateKey, run);
+    }
+    return run;
   }
 
   private async recoverPendingIntents(
