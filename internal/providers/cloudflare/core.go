@@ -1,10 +1,8 @@
 package cloudflare
 
 import (
-	"context"
 	"flag"
 	"io"
-	"os"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -30,7 +28,6 @@ type CleanupRequest = core.CleanupRequest
 type Server = core.Server
 type LeaseClaim = core.LeaseClaim
 type Repo = core.Repo
-type SyncManifest = core.SyncManifest
 type ExitError = core.ExitError
 type FeatureSet = core.FeatureSet
 type Feature = core.Feature
@@ -134,20 +131,4 @@ func shouldUseShell(command []string) bool {
 
 func leadingEnvAssignment(command []string) bool {
 	return core.LeadingEnvAssignment(command)
-}
-
-func syncExcludes(root string, cfg Config) (core.SyncExcludeRules, error) {
-	return core.SyncExcludes(root, cfg)
-}
-
-func syncManifest(root string, excludes core.SyncExcludeRules, includes []string) (SyncManifest, error) {
-	return core.BuildSyncManifestFiltered(root, excludes, includes)
-}
-
-func checkSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {
-	return core.CheckSyncPreflight(manifest, cfg, force, stderr)
-}
-
-func createPortableSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, tempPattern string) (*os.File, error) {
-	return core.CreateSyncArchive(ctx, repo, manifest, tempPattern)
 }

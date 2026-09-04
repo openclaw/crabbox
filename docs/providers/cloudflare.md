@@ -222,12 +222,17 @@ crabbox run \
 
 ## Behavior
 
-- `run` creates or reuses a container Durable Object, prepares `workdir`,
-  uploads a gzipped archive of the local checkout (unless `--no-sync`), extracts
-  it, then relays stdout, stderr, and exit status.
+- `run` creates or reuses a container Durable Object, uploads a gzipped archive
+  of the local checkout (unless `--no-sync`), extracts it, then relays stdout,
+  stderr, and exit status. Fresh runs prepare and size-check the full archive
+  before creating a container; a small dirty delta does not bypass full-archive limits.
+- With `sync.delete: true`, extraction uses a sibling staging directory and
+  replaces `workdir` only after extraction succeeds. Failed admission, upload,
+  or extraction preserves the old checkout, and exact temporary paths receive
+  best-effort cleanup. With deletion disabled, extraction merges into `workdir`.
 - Before upload, the provider checks remote disk headroom for both the archive
   and the extracted checkout, and fails early with a sizing hint if the selected
-  type is too small.
+  type is too small. This check does not remove the old checkout to free space.
 - `warmup` starts a container and leaves it alive until `crabbox stop` or the
   configured TTL/idle deadline expires.
 - Reuse, `status`, and `stop` resolve local Crabbox claims before calling the

@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -658,44 +660,192 @@ func TestCloudflareStatusUsesClaimedInstanceType(t *testing.T) {
 	}
 }
 
-func TestCloudflarePrepareWorkspacePreservesWhenRequested(t *testing.T) {
-	for _, tc := range []struct {
-		name           string
-		deleteContents bool
-		wantDelete     bool
-	}{
-		{name: "preserve", deleteContents: false, wantDelete: false},
-		{name: "delete", deleteContents: true, wantDelete: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var got execStreamRequest
+func TestCloudflareArchiveGuardrailUsesFullSnapshotBeforeRemoteWork(t *testing.T) {
+	for _, reuse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reuse=%t", reuse), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			root := t.TempDir()
+			git := func(args ...string) {
+				t.Helper()
+				cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+				if output, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("fixture git: %v: %s", err, output)
+				}
+			}
+			git("init", "--quiet")
+			if err := os.WriteFile(filepath.Join(root, "large.txt"), bytes.Repeat([]byte("x"), 2048), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "small.txt"), []byte("before"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			git("add", ".")
+			git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture")
+			if err := os.WriteFile(filepath.Join(root, "small.txt"), []byte("after"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { calls++; http.Error(w, "unexpected remote work", 503) }))
+			defer server.Close()
+			cfg := Config{Provider: providerName, TTL: time.Hour}
+			cfg.Cloudflare.APIURL = server.URL
+			cfg.Cloudflare.Token = "synthetic-token"
+			cfg.Sync.FailBytes = 256
+			req := RunRequest{Repo: Repo{Root: root, Name: "fixture"}, SyncOnly: true}
+			if reuse {
+				req.ID = "cbx_sync"
+				if err := claimLeaseForRepoProvider(req.ID, "sync", providerName, root, time.Hour, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			backend := cloudflareBackend{cfg: cfg, rt: Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+			_, err := backend.Run(context.Background(), req)
+			if err == nil || !strings.Contains(err.Error(), "sync candidate too large") || calls != 0 {
+				t.Fatalf("error=%v remote calls=%d", err, calls)
+			}
+		})
+	}
+}
+
+func TestCloudflareSyncPreservesWorkspaceUntilReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture executes POSIX workspace commands on the host")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is required for the workspace replacement fixture")
+	}
+	for _, mode := range []string{"upload rejected", "corrupt archive", "replace", "merge"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			repoRoot := t.TempDir()
+			if output, err := exec.Command("git", "init", "--quiet", repoRoot).CombinedOutput(); err != nil {
+				t.Fatalf("init fixture repo: %v: %s", err, output)
+			}
+			if err := os.WriteFile(filepath.Join(repoRoot, "new.txt"), []byte("replacement"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			workdir := filepath.Join(t.TempDir(), "workspace")
+			if err := os.MkdirAll(workdir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			old := filepath.Join(workdir, "old.txt")
+			if err := os.WriteFile(old, []byte("original"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := claimLeaseForRepoProvider("cbx_sync", "sync", providerName, repoRoot, time.Hour, false); err != nil {
+				t.Fatal(err)
+			}
+			var remoteArchive string
+			uploads, deletes := 0, 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/v1/sandboxes/cbx_test/exec-stream" {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/files"):
+					uploads++
+					remoteArchive = r.URL.Query().Get("path")
+					if !strings.HasPrefix(remoteArchive, "/tmp/crabbox-cloudflare-sync-") {
+						t.Errorf("unexpected archive %q", remoteArchive)
+						http.Error(w, "bad path", 500)
+						return
+					}
+					data, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Error(err)
+						http.Error(w, "read", 500)
+						return
+					}
+					if r.ContentLength != int64(len(data)) {
+						t.Errorf("Content-Length=%d, bytes=%d", r.ContentLength, len(data))
+					}
+					if mode == "upload rejected" || mode == "corrupt archive" {
+						data = []byte("partial invalid archive")
+					}
+					if err := os.WriteFile(remoteArchive, data, 0o600); err != nil {
+						t.Error(err)
+						http.Error(w, "write", 500)
+						return
+					}
+					if mode == "upload rejected" {
+						http.Error(w, "synthetic upload rejection", 500)
+						return
+					}
+					w.WriteHeader(http.StatusOK)
+				case strings.HasSuffix(r.URL.Path, "/exec-stream"):
+					var command execStreamRequest
+					if err := json.NewDecoder(r.Body).Decode(&command); err != nil {
+						t.Error(err)
+						http.Error(w, "decode", 500)
+						return
+					}
+					var output []byte
+					code := 0
+					if strings.Contains(command.Command, "df -B1") {
+						output = []byte("8589934592 /tmp\n8589934592 workspace\n")
+					} else {
+						if !strings.Contains(command.Command, filepath.Dir(workdir)) && (remoteArchive == "" || !strings.Contains(command.Command, remoteArchive)) {
+							t.Errorf("unexpected command %q", command.Command)
+							http.Error(w, "unexpected", 500)
+							return
+						}
+						var err error
+						output, err = exec.Command(bash, "-c", command.Command).CombinedOutput()
+						if err != nil {
+							code = 1
+						}
+					}
+					w.Header().Set("Content-Type", "application/x-ndjson")
+					_ = json.NewEncoder(w).Encode(map[string]any{"type": "stdout", "data": string(output)})
+					_ = json.NewEncoder(w).Encode(map[string]any{"type": "complete", "exitCode": code})
+				case r.Method == http.MethodDelete:
+					deletes++
+					w.WriteHeader(http.StatusOK)
+				default:
 					http.NotFound(w, r)
-					return
 				}
-				if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-					t.Fatalf("decode exec request: %v", err)
-				}
-				w.Header().Set("Content-Type", "application/x-ndjson")
-				_, _ = io.WriteString(w, `{"type":"complete","exitCode":0}`+"\n")
 			}))
 			defer server.Close()
-
-			cfg := Config{}
+			defer func() {
+				if remoteArchive != "" {
+					_ = os.Remove(remoteArchive)
+				}
+			}()
+			cfg := Config{Provider: providerName, TTL: time.Hour}
 			cfg.Cloudflare.APIURL = server.URL
-			cfg.Cloudflare.Token = "token"
-			backend := cloudflareBackend{cfg: cfg, rt: Runtime{HTTP: server.Client(), Stderr: io.Discard}}
-			client, err := newCloudflareClient(cfg, backend.rt)
-			if err != nil {
-				t.Fatal(err)
+			cfg.Cloudflare.Token = "synthetic-token"
+			cfg.Cloudflare.Workdir = workdir
+			cfg.Sync.Delete = mode != "merge"
+			backend := cloudflareBackend{cfg: cfg, rt: Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+			result, err := backend.Run(context.Background(), RunRequest{ID: "cbx_sync", Repo: Repo{Root: repoRoot, Name: "fixture"}, SyncOnly: true})
+			failed := mode == "upload rejected" || mode == "corrupt archive"
+			if (err != nil) != failed {
+				t.Fatalf("Run error=%v, failed=%t", err, failed)
 			}
-			if err := backend.prepareWorkspace(context.Background(), client, "cbx_test", "/workspace/repo", tc.deleteContents); err != nil {
-				t.Fatal(err)
+			if uploads != 1 || deletes != 0 {
+				t.Fatalf("uploads=%d deletes=%d", uploads, deletes)
 			}
-			hasDelete := strings.Contains(got.Command, "rm -rf")
-			if hasDelete != tc.wantDelete {
-				t.Fatalf("prepare command = %q, rm -rf presence = %t, want %t", got.Command, hasDelete, tc.wantDelete)
+			if result.Session == nil || !result.Session.Reused || !result.Session.Kept {
+				t.Fatalf("session=%+v", result.Session)
+			}
+			oldData, oldErr := os.ReadFile(old)
+			if failed || mode == "merge" {
+				if oldErr != nil || string(oldData) != "original" {
+					t.Fatalf("old workspace lost: data=%q error=%v", oldData, oldErr)
+				}
+			} else if !os.IsNotExist(oldErr) {
+				t.Fatalf("old file retained on replacement: %v", oldErr)
+			}
+			if !failed {
+				data, err := os.ReadFile(filepath.Join(workdir, "new.txt"))
+				if err != nil || string(data) != "replacement" {
+					t.Fatalf("new file=%q error=%v", data, err)
+				}
+			}
+			if _, err := os.Stat(remoteArchive); !os.IsNotExist(err) {
+				t.Fatalf("temporary archive remains: %v", err)
+			}
+			staging, err := filepath.Glob(filepath.Join(filepath.Dir(workdir), ".workspace.crabbox-sync-*"))
+			if err != nil || len(staging) != 0 {
+				t.Fatalf("staging remains=%v error=%v", staging, err)
 			}
 		})
 	}
@@ -1364,26 +1514,6 @@ func TestCloudflareRemoteDiskCheckRejectsZeroOrUnknownAvailable(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, tc.want)
 			}
 		})
-	}
-}
-
-func TestCloudflareExtractArchiveCommandRemovesArchiveAfterFailure(t *testing.T) {
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skip("bash is required for extract cleanup command test")
-	}
-	dir := t.TempDir()
-	archive := dir + "/bad archive.tgz"
-	if err := os.WriteFile(archive, []byte("not a tar archive"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(bash, "-lc", cloudflareExtractArchiveCommand(archive, dir))
-	err = cmd.Run()
-	if err == nil {
-		t.Fatal("expected invalid archive extraction to fail")
-	}
-	if _, statErr := os.Stat(archive); !os.IsNotExist(statErr) {
-		t.Fatalf("archive still exists after failed extract: %v", statErr)
 	}
 }
 

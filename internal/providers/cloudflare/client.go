@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -332,8 +331,4 @@ func redactCloudflareRunnerSecrets(value string, secrets ...string) string {
 		}
 	}
 	return cloudflareBearerPattern.ReplaceAllString(redacted, "Bearer [redacted]")
-}
-
-func remoteArchivePath() string {
-	return path.Join("/tmp", "crabbox-cloudflare-sync-"+time.Now().UTC().Format("20060102150405.000000000")+".tgz")
 }
