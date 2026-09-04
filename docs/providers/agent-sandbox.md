@@ -53,6 +53,9 @@ hydration, Tailscale, or the normal SSH/rsync data plane.
 - A sandbox image that provides `/bin/sh`, `bash`, `tar`, `cp`, and a writable
   workdir. Crabbox uses `/bin/sh` for transport scripts and `bash -lc` for
   user shell-mode and auto-shell commands.
+  Quoted and interpolated profile arguments remain literal through the stdin
+  transport; workspace setup and environment export share the same command wrapper
+  as Nomad without sharing Kubernetes lifecycle or execution machinery.
 
 ## Supported Agent Sandbox Version
 
