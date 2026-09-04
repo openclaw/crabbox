@@ -1,3 +1,5 @@
+import type { AWSQualificationTransportBinding } from "./aws-qualification-contract";
+
 export interface AWSCredentials {
   accessKeyId: string;
   secretAccessKey: string;
@@ -15,6 +17,7 @@ export interface Env {
     timestamp: string;
   };
   HETZNER_TOKEN: string;
+  CRABBOX_AWS_QUALIFICATION_TRANSPORT?: AWSQualificationTransportBinding;
   awsCredentialProvider?: AWSCredentialProvider;
   AWS_ACCESS_KEY_ID?: string;
   AWS_SECRET_ACCESS_KEY?: string;

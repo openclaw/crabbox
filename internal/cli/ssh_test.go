@@ -1063,6 +1063,7 @@ func TestCommandIntentArgv(t *testing.T) {
 		{"operators", []string{"echo", "a b", "&&", "echo", "done"}, false, nil, []string{"bash", "-lc", "'echo' 'a b' && 'echo' 'done'"}},
 		{"assignment", []string{"FOO=a b", "printenv", "FOO"}, false, nil, []string{"bash", "-lc", "FOO='a b' 'printenv' 'FOO'"}},
 		{"invalid assignment is executable", []string{"bad-name=x", "arg"}, false, nil, []string{"bad-name=x", "arg"}},
+		{"literal assignment executable", []string{"FOO=x", "argument"}, false, map[int]bool{0: true}, []string{"FOO=x", "argument"}},
 		{"literal operator", []string{"echo", "&&"}, false, map[int]bool{1: true}, []string{"echo", "&&"}},
 		{"literal single source", []string{"echo ok && false"}, false, map[int]bool{0: true}, []string{"echo ok && false"}},
 	}
@@ -1099,36 +1100,47 @@ func TestCommandIntentNativeTransport(t *testing.T) {
 		t.Skip("bash unavailable")
 	}
 	home := t.TempDir()
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "FOO=x"), []byte("#!/bin/sh\nprintf literal-executable\nexit 42\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	marker := filepath.Join(home, "must-not-exist")
 	tests := []struct {
 		name    string
 		command []string
 		shell   bool
 		want    string
 		code    int
+		literal map[int]bool
 	}{
-		{"literal arguments", []string{"printf", "<%s>", "a b", "", "$HOME", "$(printf bad)", "`bad`", "*.go", "a'b"}, false, "<a b><><$HOME><$(printf bad)><`bad`><*.go><a'b>", 0},
-		{"inferred source", []string{"printf '%s' 'raw source'"}, false, "raw source", 0},
-		{"operators", []string{"printf", "%s", "first", "&&", "printf", "%s", "second"}, false, "firstsecond", 0},
-		{"environment", []string{"CBX_NATIVE_VALUE=a b", "printenv", "CBX_NATIVE_VALUE"}, false, "a b\n", 0},
-		{"explicit source", []string{"printf '%s' 'explicit source'"}, true, "explicit source", 0},
-		{"empty source", []string{""}, true, "", 0},
-		{"nonzero exit", []string{"exit 42"}, true, "", 42},
+		{"literal arguments", []string{"printf", "<%s>", "a b", "", "$HOME", "$(printf bad)", "`bad`", "*.go", "a'b"}, false, "<a b><><$HOME><$(printf bad)><`bad`><*.go><a'b>", 0, nil},
+		{"inferred source", []string{"printf '%s' 'raw source'"}, false, "raw source", 0, nil},
+		{"operators", []string{"printf", "%s", "first", "&&", "printf", "%s", "second"}, false, "firstsecond", 0, nil},
+		{"environment", []string{"CBX_NATIVE_VALUE=a b", "printenv", "CBX_NATIVE_VALUE"}, false, "a b\n", 0, nil},
+		{"explicit source", []string{"printf '%s' 'explicit source'"}, true, "explicit source", 0, nil},
+		{"empty source", []string{""}, true, "", 0, nil},
+		{"nonzero exit", []string{"exit 42"}, true, "", 42, nil},
+		{"literal assignment executable", []string{"FOO=x"}, false, "literal-executable", 42, nil},
+		{"literal assignment with argument", []string{"FOO=x", "argument"}, false, "literal-executable", 42, map[int]bool{0: true}},
+		{"literal separator", []string{"printf", "%s", ";", "touch", marker}, false, ";touch" + marker, 0, map[int]bool{2: true}},
+		{"literal mixed with intentional operator", []string{"printf", "%s", ";", "&&", "printf", "%s", "done"}, false, ";done", 0, map[int]bool{2: true}},
 	}
 	for _, tt := range tests {
 		for _, serialized := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/serialized=%t", tt.name, serialized), func(t *testing.T) {
-				intent, err := ParseCommandIntent(tt.command, tt.shell, nil)
+				intent, err := ParseCommandIntent(tt.command, tt.shell, tt.literal)
 				if err != nil {
 					t.Fatal(err)
 				}
 				argv := intent.Argv(bash, "-lc")
 				if serialized {
-					argv = []string{"/bin/sh", "-c", shellScriptFromArgv(argv)}
+					argv = []string{"/bin/sh", "-c", intent.ShellCommand(bash, "-lc")}
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 				cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-				cmd.Env = []string{"HOME=" + home, "PATH=" + filepath.Dir(bash) + ":/usr/bin:/bin", "BASH_ENV=" + os.DevNull, "ENV=" + os.DevNull}
+				cmd.Env = []string{"HOME=" + home, "PATH=" + bin + ":" + filepath.Dir(bash) + ":/usr/bin:/bin", "BASH_ENV=" + os.DevNull, "ENV=" + os.DevNull}
 				out, err := cmd.CombinedOutput()
 				code := 0
 				if err != nil {
@@ -1143,6 +1155,9 @@ func TestCommandIntentNativeTransport(t *testing.T) {
 				}
 			})
 		}
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("literal separator created marker: %v", err)
 	}
 }
 

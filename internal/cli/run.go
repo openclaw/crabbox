@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -789,6 +790,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	scriptRequested := *scriptPath != "" || *scriptStdin
 	var script *RunScriptSpec
 	runReq := runRequestFromFlags(cfg, runFlags, command)
+	runReq.CommandLiteralArgs = maps.Clone(expansion.LiteralArgs)
 	runReq.Repo = repo
 	runReq.RunID = executionRunID
 	runReq.Env = envSelection.Effective
@@ -3550,7 +3552,7 @@ func shouldUseShellWithLiteralArgs(command []string, literalArgs map[int]bool) b
 		}
 		return strings.ContainsAny(command[0], " \t\r\n&|;<>*$`()")
 	}
-	if leadingEnvAssignment(command) {
+	if !literalArgs[0] && leadingEnvAssignment(command) {
 		return true
 	}
 	for idx, word := range command {

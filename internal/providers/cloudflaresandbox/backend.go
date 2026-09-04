@@ -179,12 +179,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			return b.ensureWorkspace(ctx, api, sandboxID, workdir)
 		},
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
-			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, nil)
+			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 			if err != nil {
 				return shared.DelegatedSandboxCommand{}, err
 			}
-			command := intent.Argv("bash", "-lc")
-			commandText := commandScript(command)
+			commandText := intent.ShellCommand("bash", "-lc")
 			commandEnv, strippedAuthEnv := cloudflareSandboxCommandEnv(req.Env)
 			if len(strippedAuthEnv) > 0 {
 				fmt.Fprintf(b.rt.Stderr, "warning: provider=%s did not forward provider authentication variables: %s\n", providerName, strings.Join(strippedAuthEnv, ","))
@@ -842,10 +841,6 @@ func newSandboxName(repo Repo) string {
 		return base + "-" + hex.EncodeToString(token[:])
 	}
 	return fmt.Sprintf("%s-%x", base, time.Now().UnixNano()&0xffffffff)
-}
-
-func commandScript(command []string) string {
-	return shellScriptFromArgv(command)
 }
 
 type cloudflareSandboxNotFoundError struct {

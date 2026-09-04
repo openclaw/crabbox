@@ -1,0 +1,2927 @@
+import { AwsClient } from "aws4fetch";
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+import { XMLParser } from "fast-xml-parser";
+
+import { sha256Hex } from "./auth";
+import {
+  awsQualificationAttestationVersion,
+  awsQualificationInstanceTypes,
+  awsQualificationMaxRunMs,
+  type AWSQualificationAttestation,
+  type AWSQualificationControllerProps,
+  type AWSQualificationFinalReceipt,
+  type AWSQualificationOperationEvidence,
+  type AWSQualificationRegistryRecord,
+  type AWSQualificationRequest,
+  type AWSQualificationResourceCounts,
+  type AWSQualificationResponse,
+  type AWSQualificationRunIdentity,
+  type AWSQualificationService,
+} from "./aws-qualification-contract";
+import { requireAWSRegion } from "./aws-region";
+import type { AWSCredentials } from "./types";
+
+const ec2Version = "2016-11-15";
+const stsVersion = "2011-06-15";
+const onDemandQuotaCode = "L-1216C47A";
+const stateKey = "run";
+const ledgerKey = "ledger";
+const receiptPrefix = "receipt:";
+const intentPrefix = "intent:";
+const evidencePrefix = "evidence:";
+const finalReceiptKey = "final-receipt";
+const registryStateKey = "active";
+const registryRetirementsKey = "retired";
+const registryObjectName = "global";
+const cleanupRetryMs = 60_000;
+const maxRootGB = 20;
+const maxUserDataBytes = 24 * 1024;
+const maxRequestBytes = 64 * 1024;
+const maxResponseBytes = 64 * 1024;
+const maxRequestNodes = 512;
+const maxCandidateOperations = 64;
+const maxPendingIntents = 8;
+const maxEvidenceRecords = 64;
+const maxSignerDispatchesPerOperation = 4;
+const maxCleanupEvidence = 1024;
+const maxInventoryEvidence = 2048;
+const maxVerificationEvidence = 1024;
+const maxRegistryRetirements = 64;
+const maxLaunches = 3;
+const maxActiveInstances = 1;
+const maxActiveImages = 1;
+const maxActiveSnapshots = 1;
+const reconciliationBackoffMs = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const;
+const inventoryBackoffMs = reconciliationBackoffMs;
+const parser = new XMLParser({ ignoreAttributes: false });
+const requestKeys = new Set(["action", "opId", "parameters", "region", "service"]);
+
+const allowedEC2Actions = new Set([
+  "CreateImage",
+  "CreateTags",
+  "DeleteKeyPair",
+  "DeleteSnapshot",
+  "DeregisterImage",
+  "DescribeImages",
+  "DescribeInstances",
+  "DescribeKeyPairs",
+  "DescribeSecurityGroups",
+  "DescribeSnapshots",
+  "DescribeVolumes",
+  "ImportKeyPair",
+  "RunInstances",
+  "TerminateInstances",
+]);
+
+const mutatingEC2Actions = new Set([
+  "CreateImage",
+  "CreateTags",
+  "DeleteKeyPair",
+  "DeleteSnapshot",
+  "DeregisterImage",
+  "ImportKeyPair",
+  "RunInstances",
+  "TerminateInstances",
+]);
+
+const preservedTagKeys = new Set([
+  "Name",
+  "architecture",
+  "created_by",
+  "crabbox",
+  "crabbox_checkpoint_id",
+  "crabbox_checkpoint_lease",
+  "crabbox_checkpoint_token",
+  "lease",
+  "market",
+  "org",
+  "owner",
+  "provider",
+  "server_type",
+  "target",
+]);
+
+interface AWSQualificationAuthorityEnv {
+  AWS_ACCESS_KEY_ID?: string;
+  AWS_SECRET_ACCESS_KEY?: string;
+  AWS_SESSION_TOKEN?: string;
+  CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID?: string;
+  CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA?: string;
+  CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION?: string;
+  CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID?: string;
+  CRABBOX_AWS_QUALIFICATION_REGION?: string;
+  CRABBOX_AWS_QUALIFICATION_ROOT_GB?: string;
+  CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID?: string;
+  CRABBOX_AWS_QUALIFICATION_SUBNET_ID?: string;
+  AWS_QUALIFICATION_RUNS: DurableObjectNamespace<AWSQualificationRun>;
+  AWS_QUALIFICATION_REGISTRY: DurableObjectNamespace<AWSQualificationRegistry>;
+}
+
+interface AWSQualificationPolicy {
+  accountId: string;
+  baseAmiId: string;
+  region: string;
+  rootGB: number;
+  securityGroupId: string;
+  subnetId: string;
+}
+
+interface AWSQualificationRunState {
+  identity: AWSQualificationRunIdentity;
+  enrolledAt: string;
+  operationCount: number;
+  signerSequence: number;
+  authoritySha: string;
+  authorityVersion: string;
+  policy: AWSQualificationPolicy;
+  policyHash: string;
+  finalizingAt?: string;
+  finalizedAt?: string;
+}
+
+interface AWSQualificationRegistryRetirement {
+  version: 1;
+  runId: string;
+  deploymentHash: string;
+  retiredAt: string;
+}
+
+interface AWSQualificationLedger {
+  imageIds: string[];
+  instanceIds: string[];
+  keyPairIds: string[];
+  keyPairNames: string[];
+  // Retired IDs authorize only exact verification and cleanup retries. Active arrays alone
+  // own capacity; termination acknowledgement stays separate until absence is authoritative.
+  retiredImageIds: string[];
+  retiredInstanceIds: string[];
+  retiredKeyPairIds: string[];
+  retiredSnapshotIds: string[];
+  snapshotIds: string[];
+  terminatingInstanceIds: string[];
+  volumeIds: string[];
+  launchCount: number;
+}
+
+interface AWSQualificationReceipt {
+  requestHash: string;
+  response: AWSQualificationResponse;
+}
+
+interface AWSQualificationIntent {
+  phase?: "prepared" | "dispatched";
+  requestHash: string;
+  request: AWSQualificationRequest;
+  startedAt: string;
+}
+
+interface AuthoritySigner {
+  execute(
+    service: AWSQualificationService,
+    action: string,
+    region: string,
+    parameters: Record<string, unknown>,
+  ): Promise<Response>;
+}
+
+export class AWSQualificationTransport extends WorkerEntrypoint<
+  AWSQualificationAuthorityEnv,
+  AWSQualificationRunIdentity
+> {
+  async execute(request: AWSQualificationRequest): Promise<AWSQualificationResponse> {
+    await qualificationRegistry(this.env).assertActive(this.ctx.props);
+    return await qualificationRun(this.env, this.ctx.props.runId).execute(this.ctx.props, request);
+  }
+}
+
+export default AWSQualificationTransport;
+
+export class AWSQualificationController extends WorkerEntrypoint<
+  AWSQualificationAuthorityEnv,
+  AWSQualificationControllerProps
+> {
+  async enroll(identity: AWSQualificationRunIdentity): Promise<void> {
+    await this.claim(identity);
+  }
+
+  async beginFinalization(runId: string): Promise<void> {
+    const run = qualificationRun(this.env, runId);
+    await run.beginFinalization(this.ctx.props);
+    await qualificationRegistry(this.env).markFinalizing(this.ctx.props, runId);
+  }
+
+  async finalize(runId: string): Promise<AWSQualificationLedger> {
+    await this.beginFinalization(runId);
+    const run = qualificationRun(this.env, runId);
+    const ledger = await run.finalize(this.ctx.props);
+    await qualificationRegistry(this.env).markFinalized(this.ctx.props, runId);
+    return ledger;
+  }
+
+  async attest(runId: string): Promise<AWSQualificationAttestation> {
+    return await qualificationRun(this.env, runId).attest(this.ctx.props);
+  }
+
+  async claim(identity: AWSQualificationRunIdentity): Promise<AWSQualificationRegistryRecord> {
+    // Persist the per-run cleanup owner before making this run globally active. Candidate
+    // dispatch also checks the registry, so a losing concurrent claim cannot use its run state.
+    await qualificationRun(this.env, identity.runId).enroll(this.ctx.props, identity);
+    return await qualificationRegistry(this.env).claim(this.ctx.props, identity);
+  }
+
+  async discover(): Promise<AWSQualificationRegistryRecord | undefined> {
+    return await qualificationRegistry(this.env).discover(this.ctx.props);
+  }
+
+  async retire(runId: string): Promise<void> {
+    const attestation = await qualificationRun(this.env, runId).attest(this.ctx.props);
+    if (!attestation.finalized) throw new Error("AWS qualification run is not finalized");
+    await qualificationRegistry(this.env).retire(this.ctx.props, runId);
+  }
+}
+
+export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuthorityEnv> {
+  async assertActive(identity: AWSQualificationRunIdentity): Promise<void> {
+    validateRunIdentity(identity);
+    const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
+    if (
+      !active ||
+      active.cleanupState !== "claimed" ||
+      canonicalJSON(registryIdentity(active)) !== canonicalJSON(registryIdentity(identity))
+    ) {
+      throw new Error("AWS qualification registry run is not active");
+    }
+  }
+
+  async discover(
+    controller: AWSQualificationControllerProps,
+  ): Promise<AWSQualificationRegistryRecord | undefined> {
+    const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
+    if (active) validateController(controller, active.deploymentHash);
+    else validateControllerShape(controller);
+    return active;
+  }
+
+  async claim(
+    controller: AWSQualificationControllerProps,
+    identity: AWSQualificationRunIdentity,
+  ): Promise<AWSQualificationRegistryRecord> {
+    validateController(controller, identity.deploymentHash);
+    validateRunIdentity(identity);
+    validateRunWindow(identity);
+    const retirements = await this.retirements();
+    if (retirements.some((retirement) => retirement.runId === identity.runId)) {
+      throw new Error("AWS qualification registry run is retired");
+    }
+    const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
+    if (active) {
+      if (canonicalJSON(registryIdentity(active)) !== canonicalJSON(registryIdentity(identity))) {
+        throw new Error("AWS qualification registry already has an active run");
+      }
+      if (active.cleanupState !== "claimed") {
+        throw new Error("AWS qualification registry run is already finalizing");
+      }
+      return active;
+    }
+    const activeRecord: AWSQualificationRegistryRecord = {
+      version: awsQualificationAttestationVersion,
+      ...registryIdentity(identity),
+      cleanupState: "claimed",
+      claimedAt: new Date().toISOString(),
+    };
+    await this.ctx.storage.put(registryStateKey, activeRecord);
+    return activeRecord;
+  }
+
+  async markFinalizing(
+    controller: AWSQualificationControllerProps,
+    runId: string,
+  ): Promise<AWSQualificationRegistryRecord> {
+    return await this.transition(controller, runId, "finalizing");
+  }
+
+  async markFinalized(
+    controller: AWSQualificationControllerProps,
+    runId: string,
+  ): Promise<AWSQualificationRegistryRecord> {
+    return await this.transition(controller, runId, "finalized");
+  }
+
+  async retire(controller: AWSQualificationControllerProps, runId: string): Promise<void> {
+    const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
+    if (!active) {
+      const retired = (await this.retirements()).find((entry) => entry.runId === runId);
+      if (!retired) throw new Error("AWS qualification registry run is not active");
+      validateController(controller, retired.deploymentHash);
+      return;
+    }
+    if (active.runId !== runId) {
+      throw new Error("AWS qualification registry run is not active");
+    }
+    validateController(controller, active.deploymentHash);
+    if (active.cleanupState !== "finalized") {
+      throw new Error("AWS qualification registry run is not finalized");
+    }
+    const retirements = await this.retirements();
+    if (!retirements.some((entry) => entry.runId === runId)) {
+      retirements.push({
+        version: awsQualificationAttestationVersion,
+        runId,
+        deploymentHash: active.deploymentHash,
+        retiredAt: new Date().toISOString(),
+      });
+      await this.ctx.storage.put(
+        registryRetirementsKey,
+        retirements.slice(-maxRegistryRetirements),
+      );
+    }
+    await this.ctx.storage.delete(registryStateKey);
+  }
+
+  private async transition(
+    controller: AWSQualificationControllerProps,
+    runId: string,
+    cleanupState: "finalizing" | "finalized",
+  ): Promise<AWSQualificationRegistryRecord> {
+    const active = await this.requireActive(controller, runId);
+    if (active.cleanupState === "finalized") return active;
+    const next = {
+      ...active,
+      cleanupState,
+      ...(cleanupState === "finalized" ? { finalizedAt: new Date().toISOString() } : {}),
+    } satisfies AWSQualificationRegistryRecord;
+    await this.ctx.storage.put(registryStateKey, next);
+    return next;
+  }
+
+  private async requireActive(
+    controller: AWSQualificationControllerProps,
+    runId: string,
+  ): Promise<AWSQualificationRegistryRecord> {
+    const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
+    if (!active || active.runId !== runId) {
+      throw new Error("AWS qualification registry run is not active");
+    }
+    validateController(controller, active.deploymentHash);
+    return active;
+  }
+
+  private async retirements(): Promise<AWSQualificationRegistryRetirement[]> {
+    return (
+      (await this.ctx.storage.get<AWSQualificationRegistryRetirement[]>(registryRetirementsKey)) ??
+      []
+    ).slice(-maxRegistryRetirements);
+  }
+}
+
+export class AWSQualificationRun extends DurableObject<AWSQualificationAuthorityEnv> {
+  private serial = Promise.resolve();
+  private readonly signer: AuthoritySigner;
+
+  constructor(
+    ctx: DurableObjectState,
+    env: AWSQualificationAuthorityEnv,
+    signer: AuthoritySigner = new DirectAuthoritySigner(env),
+  ) {
+    super(ctx, env);
+    this.signer = signer;
+  }
+
+  async enroll(
+    controller: AWSQualificationControllerProps,
+    identity: AWSQualificationRunIdentity,
+  ): Promise<void> {
+    return await this.serialized(async () => {
+      const policy = authorityPolicy(this.env);
+      const authority = authorityIdentity(this.env);
+      validateController(controller, identity.deploymentHash);
+      validateRunIdentity(identity);
+      validateRunWindow(identity);
+      const expiresAt = Date.parse(identity.expiresAt);
+      const now = Date.now();
+      if (policy.region !== requireAWSRegion(policy.region)) {
+        throw new Error("AWS qualification region is invalid");
+      }
+      const existing = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
+      if (existing) {
+        if (
+          canonicalJSON(existing.identity) !== canonicalJSON(identity) ||
+          existing.policyHash !== (await qualificationPolicyHash(policy)) ||
+          existing.authoritySha !== authority.sha ||
+          existing.authorityVersion !== authority.version
+        ) {
+          throw new Error("AWS qualification run identity is already enrolled");
+        }
+        if (existing.finalizingAt || existing.finalizedAt) {
+          throw new Error("AWS qualification run cannot be re-enrolled after finalization starts");
+        }
+        return;
+      }
+      const policyHash = await qualificationPolicyHash(policy);
+      await this.ctx.storage.put({
+        [stateKey]: {
+          identity: structuredClone(identity),
+          enrolledAt: new Date(now).toISOString(),
+          operationCount: 0,
+          signerSequence: 0,
+          authoritySha: authority.sha,
+          authorityVersion: authority.version,
+          policy: structuredClone(policy),
+          policyHash,
+        } satisfies AWSQualificationRunState,
+        [ledgerKey]: emptyLedger(),
+      });
+      await this.ctx.storage.setAlarm(expiresAt);
+    });
+  }
+
+  async execute(
+    identity: AWSQualificationRunIdentity,
+    request: AWSQualificationRequest,
+  ): Promise<AWSQualificationResponse> {
+    return await this.serialized(() => this.executeSerialized(identity, request));
+  }
+
+  async finalize(controller?: AWSQualificationControllerProps): Promise<AWSQualificationLedger> {
+    return await this.serialized(() => this.finalizeSerialized(controller));
+  }
+
+  async beginFinalization(controller: AWSQualificationControllerProps): Promise<void> {
+    await this.serialized(async () => {
+      await this.persistFinalizationFence(controller);
+    });
+  }
+
+  async attest(controller: AWSQualificationControllerProps): Promise<AWSQualificationAttestation> {
+    return await this.serialized(async () => {
+      const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
+      if (!run) throw new Error("AWS qualification run is not enrolled");
+      validateController(controller, run.identity.deploymentHash);
+      const operations = [
+        ...(await this.ctx.storage.list<AWSQualificationOperationEvidence>({
+          prefix: evidencePrefix,
+        })),
+      ]
+        .map(([, evidence]) => evidence)
+        .toSorted((left, right) => left.requestedAt.localeCompare(right.requestedAt))
+        .slice(0, maxEvidenceRecords);
+      const finalReceipt =
+        await this.ctx.storage.get<AWSQualificationFinalReceipt>(finalReceiptKey);
+      return {
+        version: awsQualificationAttestationVersion,
+        runId: run.identity.runId,
+        candidateSha: run.identity.candidateSha,
+        candidateWorker: run.identity.candidateWorker,
+        deploymentHash: run.identity.deploymentHash,
+        authoritySha: run.authoritySha,
+        authorityVersion: run.authorityVersion,
+        policyHash: run.policyHash,
+        enrolledAt: run.enrolledAt,
+        expiresAt: run.identity.expiresAt,
+        ...(run.finalizingAt ? { finalizingAt: run.finalizingAt } : {}),
+        finalized: Boolean(run.finalizedAt),
+        ...(run.finalizedAt ? { finalizedAt: run.finalizedAt } : {}),
+        operations,
+        ...(finalReceipt ? { finalReceipt } : {}),
+      };
+    });
+  }
+
+  override async alarm(): Promise<void> {
+    await this.finalize();
+  }
+
+  private async executeSerialized(
+    identity: AWSQualificationRunIdentity,
+    request: AWSQualificationRequest,
+  ): Promise<AWSQualificationResponse> {
+    const run = await this.requireActiveRun(identity);
+    const policy = run.policy;
+    const normalizedRequest = validateRequestShape(request, policy.region);
+    const requestHash = await sha256Hex(
+      canonicalJSON({
+        action: normalizedRequest.action,
+        parameters: normalizedRequest.parameters,
+        region: normalizedRequest.region,
+        service: normalizedRequest.service,
+      }),
+    );
+    const evidenceKey = `${evidencePrefix}${await sha256Hex(`op:${normalizedRequest.opId}`)}`;
+    let evidence = await this.ctx.storage.get<AWSQualificationOperationEvidence>(evidenceKey);
+    if (!evidence) {
+      const evidenceRecords = await this.ctx.storage.list<AWSQualificationOperationEvidence>({
+        prefix: evidencePrefix,
+      });
+      if (evidenceRecords.size >= maxEvidenceRecords) {
+        throw new Error("AWS qualification evidence limit reached");
+      }
+      evidence = {
+        version: awsQualificationAttestationVersion,
+        opDigest: evidenceKey.slice(evidencePrefix.length),
+        requestDigest: requestHash,
+        action: evidenceAction(normalizedRequest.action),
+        requestedAt: new Date().toISOString(),
+        signerDispatches: [],
+      };
+      await this.ctx.storage.put(evidenceKey, evidence);
+    } else if (
+      evidence.requestDigest !== requestHash ||
+      evidence.action !== evidenceAction(normalizedRequest.action)
+    ) {
+      throw new Error("AWS qualification evidence digest mismatch");
+    }
+    const receipt = await this.ctx.storage.get<AWSQualificationReceipt>(
+      `${receiptPrefix}${normalizedRequest.opId}`,
+    );
+    if (receipt) {
+      if (receipt.requestHash !== requestHash) {
+        throw new Error("AWS qualification opId was replayed with a different request");
+      }
+      return receipt.response;
+    }
+    const intentKey = `${intentPrefix}${normalizedRequest.opId}`;
+    const priorIntent = await this.ctx.storage.get<AWSQualificationIntent>(intentKey);
+    if (priorIntent) {
+      if (priorIntent.requestHash !== requestHash) {
+        throw new Error("AWS qualification pending opId has a different request");
+      }
+      if (priorIntent.phase !== "prepared") {
+        const reconciled =
+          priorIntent.request.action === "CreateImage" ||
+          priorIntent.request.action === "ImportKeyPair"
+            ? await this.reconcileIntentWithBackoff(run, priorIntent, policy)
+            : await this.reconcileIntent(run, priorIntent, policy);
+        if (reconciled) return reconciled;
+        if (
+          priorIntent.request.action === "CreateImage" ||
+          priorIntent.request.action === "ImportKeyPair"
+        ) {
+          throw new Error(
+            `AWS qualification ${priorIntent.request.action} outcome remains unresolved`,
+          );
+        }
+      }
+    }
+
+    const ledger = await this.ledger();
+    const pending = await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix });
+    try {
+      if (!priorIntent) {
+        if (run.operationCount >= maxCandidateOperations) {
+          throw new Error("AWS qualification candidate operation limit reached");
+        }
+        if (pending.size >= maxPendingIntents) {
+          throw new Error("AWS qualification pending intent limit reached");
+        }
+        assertLifecycleCapacity(normalizedRequest, ledger, pending);
+      }
+    } catch (error) {
+      await this.ctx.storage.put(evidenceKey, {
+        ...evidence,
+        denialReason: evidenceDenialReason(error),
+      });
+      throw error;
+    }
+    let authorized: Awaited<ReturnType<typeof authorizeRequest>>;
+    try {
+      authorized = await authorizeRequest(
+        normalizedRequest,
+        identity,
+        policy,
+        ledger,
+        await qualificationPhysicalKeyName(identity.runId),
+        await qualificationClientToken(identity.runId, normalizedRequest.opId),
+      );
+    } catch (error) {
+      await this.ctx.storage.put(evidenceKey, {
+        ...evidence,
+        denialReason: evidenceDenialReason(error),
+      });
+      throw error;
+    }
+    try {
+      if (normalizedRequest.service !== "sts") {
+        await this.ensureAccount(policy);
+      }
+    } catch (error) {
+      await this.ctx.storage.put(evidenceKey, {
+        ...evidence,
+        denialReason: evidenceDenialReason(error),
+      });
+      throw error;
+    }
+    let dispatchIntent = priorIntent;
+    if (!dispatchIntent) {
+      run.operationCount += 1;
+      if (normalizedRequest.action === "RunInstances") ledger.launchCount += 1;
+      dispatchIntent = {
+        phase: "prepared",
+        requestHash,
+        request: normalizedRequest,
+        startedAt: new Date().toISOString(),
+      };
+      await this.ctx.storage.put({
+        [stateKey]: run,
+        [ledgerKey]: ledger,
+        ...(authorized.mutating ? { [intentKey]: dispatchIntent } : {}),
+      });
+    }
+
+    if (authorized.mutating) {
+      await this.markCandidateMutationDispatched(run, intentKey, dispatchIntent);
+    }
+    evidence = await this.beginSignerDispatch(run, evidenceKey, evidence);
+    const response = await this.signer.execute(
+      normalizedRequest.service,
+      normalizedRequest.action,
+      policy.region,
+      authorized.parameters,
+    );
+    const result = await boundedResponse(response);
+    await this.finishSignerDispatch(run, evidenceKey, evidence, result);
+    if (authorized.mutating && result.status >= 500) {
+      throw new Error(
+        `AWS qualification ${normalizedRequest.action} response is ambiguous: http ${result.status}`,
+      );
+    }
+    if (
+      normalizedRequest.action === "DescribeInstances" &&
+      result.status >= 300 &&
+      result.body.includes("InvalidInstanceID.NotFound")
+    ) {
+      await this.confirmRequestedInstanceAbsence(policy, ledger, authorized.parameters);
+      await this.ctx.storage.put(ledgerKey, ledger);
+    }
+    if (result.status >= 300 && retireDefinitelyAbsentResource(ledger, normalizedRequest, result)) {
+      await this.ctx.storage.put(ledgerKey, ledger);
+    }
+    if (result.status >= 200 && result.status < 300) {
+      if (normalizedRequest.action === "ImportKeyPair") {
+        await this.recordImportedKey(run, normalizedRequest, authorized.parameters, result, ledger);
+      } else if (normalizedRequest.action === "CreateImage") {
+        await this.recordCreatedImage(run, normalizedRequest, result, ledger);
+      } else {
+        updateLedgerFromResponse(
+          ledger,
+          normalizedRequest.action,
+          result.body,
+          authorized.parameters,
+        );
+      }
+      await this.ctx.storage.put(ledgerKey, ledger);
+    }
+    await this.ctx.storage.put(`${receiptPrefix}${normalizedRequest.opId}`, {
+      requestHash,
+      response: result,
+    } satisfies AWSQualificationReceipt);
+    await this.ctx.storage.delete(intentKey);
+    return result;
+  }
+
+  private async recordImportedKey(
+    run: AWSQualificationRunState,
+    request: AWSQualificationRequest,
+    parameters: Record<string, unknown>,
+    result: AWSQualificationResponse,
+    ledger: AWSQualificationLedger,
+  ): Promise<void> {
+    const root = awsXMLRoot(result.body, "ImportKeyPair");
+    const keyPairId = asString(root["keyPairId"]);
+    const keyName = asString(root["keyName"]) || String(parameters["KeyName"] ?? "");
+    if (!keyPairId || keyName !== (await qualificationPhysicalKeyName(run.identity.runId))) {
+      throw new Error("AWS qualification key import returned an invalid identity");
+    }
+    const verified = await this.describeOwnedKey(run, request, keyName);
+    if (!verified || verified.id !== keyPairId) {
+      throw new Error("AWS qualification key import could not be verified");
+    }
+    ledger.keyPairIds = [keyPairId];
+    ledger.keyPairNames = [keyName];
+  }
+
+  private async describeOwnedKey(
+    run: AWSQualificationRunState,
+    request: AWSQualificationRequest,
+    keyName: string,
+  ): Promise<{ id: string; name: string } | undefined> {
+    const response = await this.signer.execute("ec2", "DescribeKeyPairs", run.policy.region, {
+      IncludePublicKey: "true",
+      "KeyName.1": keyName,
+    });
+    const result = await boundedResponse(response);
+    if (result.status >= 300) {
+      if (result.body.includes("InvalidKeyPair.NotFound")) return undefined;
+      throw new Error(`AWS qualification key verification failed: http ${result.status}`);
+    }
+    const keys = items(record(awsXMLRoot(result.body, "DescribeKeyPairs")["keySet"])["item"]).map(
+      record,
+    );
+    if (keys.length === 0) return undefined;
+    if (keys.length !== 1) throw new Error("AWS qualification key verification is ambiguous");
+    const key = keys[0]!;
+    const tags = awsTagMap(key["tagSet"]);
+    const material = decodePublicKeyMaterial(String(request.parameters["PublicKeyMaterial"] ?? ""));
+    if (
+      asString(key["keyName"]) !== keyName ||
+      !asString(key["keyPairId"]) ||
+      publicKeyIdentity(asString(key["publicKey"])) !== publicKeyIdentity(material) ||
+      tags.get("crabbox_qualification_run") !== run.identity.runId ||
+      tags.get("crabbox_qualification_sha") !== run.identity.candidateSha
+    ) {
+      throw new Error("AWS qualification physical key name is occupied by an unowned key");
+    }
+    return { id: asString(key["keyPairId"]), name: keyName };
+  }
+
+  private async recordCreatedImage(
+    run: AWSQualificationRunState,
+    request: AWSQualificationRequest,
+    result: AWSQualificationResponse,
+    ledger: AWSQualificationLedger,
+  ): Promise<void> {
+    const imageId = asString(awsXMLRoot(result.body, "CreateImage")["imageId"]);
+    if (!imageId) throw new Error("AWS qualification CreateImage returned no image id");
+    await this.captureImage(run, request.opId, imageId, ledger);
+  }
+
+  private async captureImage(
+    run: AWSQualificationRunState,
+    opId: string,
+    imageId: string,
+    ledger: AWSQualificationLedger,
+  ): Promise<void> {
+    const response = await this.signer.execute("ec2", "DescribeImages", run.policy.region, {
+      "ImageId.1": imageId,
+      "Owner.1": "self",
+    });
+    const result = await boundedResponse(response);
+    if (result.status >= 300) {
+      throw new Error(`AWS qualification image verification failed: http ${result.status}`);
+    }
+    const images = items(
+      record(awsXMLRoot(result.body, "DescribeImages")["imagesSet"])["item"],
+    ).map(record);
+    if (images.length !== 1) throw new Error("AWS qualification image is not uniquely visible");
+    const image = images[0]!;
+    const tags = awsTagMap(image["tagSet"]);
+    if (
+      asString(image["imageId"]) !== imageId ||
+      tags.get("crabbox_qualification_run") !== run.identity.runId ||
+      tags.get("crabbox_qualification_op") !== opId
+    ) {
+      throw new Error("AWS qualification image ownership verification failed");
+    }
+    const snapshots = imageSnapshotIDs(image);
+    if (snapshots.length !== maxActiveSnapshots) {
+      throw new Error("AWS qualification image snapshot is not uniquely visible");
+    }
+    ledger.imageIds = [imageId];
+    ledger.snapshotIds = snapshots;
+  }
+
+  private async reconcileIntent(
+    run: AWSQualificationRunState,
+    intent: AWSQualificationIntent,
+    policy: AWSQualificationPolicy,
+  ): Promise<AWSQualificationResponse | undefined> {
+    await this.ensureAccount(policy);
+    if (intent.request.action === "RunInstances") {
+      // Candidate retries use the deterministic ClientToken in executeSerialized. Finalization
+      // calls reconcilePendingLaunchWithBackoff instead and must never issue a new launch.
+      return undefined;
+    }
+    if (intent.request.action === "ImportKeyPair") {
+      const keyName = await qualificationPhysicalKeyName(run.identity.runId);
+      const owned = await this.describeOwnedKey(run, intent.request, keyName);
+      if (!owned) return undefined;
+      const ledger = await this.ledger();
+      ledger.keyPairIds = [owned.id];
+      ledger.keyPairNames = [owned.name];
+      await this.ctx.storage.put(ledgerKey, ledger);
+      const response = {
+        status: 200,
+        body: `<ImportKeyPairResponse><keyPairId>${xmlEscape(owned.id)}</keyPairId><keyName>${xmlEscape(owned.name)}</keyName></ImportKeyPairResponse>`,
+      };
+      await this.ctx.storage.put(`${receiptPrefix}${intent.request.opId}`, {
+        requestHash: intent.requestHash,
+        response,
+      } satisfies AWSQualificationReceipt);
+      await this.ctx.storage.delete(`${intentPrefix}${intent.request.opId}`);
+      return response;
+    }
+    if (intent.request.action !== "CreateImage") {
+      return undefined;
+    }
+    const response = await this.signer.execute("ec2", "DescribeImages", policy.region, {
+      "Filter.1.Name": "tag:crabbox_qualification_run",
+      "Filter.1.Value.1": run.identity.runId,
+      "Filter.2.Name": "tag:crabbox_qualification_op",
+      "Filter.2.Value.1": intent.request.opId,
+      "Owner.1": "self",
+    });
+    const result = await boundedResponse(response);
+    if (result.status < 200 || result.status >= 300) return undefined;
+    const root = awsXMLRoot(result.body, "DescribeImages");
+    const matches = items(record(root["imagesSet"])["item"]).map(record);
+    if (matches.length === 0) return undefined;
+    if (matches.length !== 1) {
+      throw new Error("AWS qualification image reconciliation is ambiguous");
+    }
+    const id = asString(matches[0]!["imageId"]);
+    if (!id) throw new Error("AWS qualification image reconciliation returned no id");
+    const ledger = await this.ledger();
+    await this.captureImage(run, intent.request.opId, id, ledger);
+    await this.ctx.storage.put(ledgerKey, ledger);
+    const synthetic = `<CreateImageResponse><imageId>${xmlEscape(id)}</imageId></CreateImageResponse>`;
+    const receipt = {
+      requestHash: intent.requestHash,
+      response: { status: 200, body: synthetic },
+    } satisfies AWSQualificationReceipt;
+    await this.ctx.storage.put(`${receiptPrefix}${intent.request.opId}`, receipt);
+    await this.ctx.storage.delete(`${intentPrefix}${intent.request.opId}`);
+    return receipt.response;
+  }
+
+  private async reconcileIntentWithBackoff(
+    run: AWSQualificationRunState,
+    intent: AWSQualificationIntent,
+    policy: AWSQualificationPolicy,
+    attempt = 0,
+  ): Promise<AWSQualificationResponse | undefined> {
+    try {
+      const reconciled = await this.reconcileIntent(run, intent, policy);
+      if (reconciled) return reconciled;
+    } catch (error) {
+      if (!isRetryableReconciliationError(error)) throw error;
+    }
+    const delay = reconciliationBackoffMs[attempt];
+    if (delay === undefined) return undefined;
+    await sleep(delay);
+    return await this.reconcileIntentWithBackoff(run, intent, policy, attempt + 1);
+  }
+
+  private async ensureAccount(policy: AWSQualificationPolicy): Promise<void> {
+    const response = await this.signer.execute("sts", "GetCallerIdentity", policy.region, {});
+    const result = await boundedResponse(response);
+    if (result.status < 200 || result.status >= 300) {
+      throw new Error(`AWS qualification account verification failed: http ${result.status}`);
+    }
+    const identity = record(
+      awsXMLRoot(result.body, "GetCallerIdentity")["GetCallerIdentityResult"],
+    );
+    if (asString(identity["Account"]) !== policy.accountId) {
+      throw new Error("AWS qualification authority is authenticated to the wrong account");
+    }
+  }
+
+  private async beginSignerDispatch(
+    run: AWSQualificationRunState,
+    evidenceKey: string,
+    evidence: AWSQualificationOperationEvidence,
+  ): Promise<AWSQualificationOperationEvidence> {
+    run.signerSequence += 1;
+    if (evidence.signerDispatches.length >= maxSignerDispatchesPerOperation) {
+      throw new Error("AWS qualification operation dispatch evidence limit reached");
+    }
+    const next = {
+      ...evidence,
+      signerDispatches: [
+        ...evidence.signerDispatches,
+        { beforeSequence: run.signerSequence, beforeAt: new Date().toISOString() },
+      ],
+    } satisfies AWSQualificationOperationEvidence;
+    await this.ctx.storage.put({ [stateKey]: run, [evidenceKey]: next });
+    return next;
+  }
+
+  private async finishSignerDispatch(
+    run: AWSQualificationRunState,
+    evidenceKey: string,
+    evidence: AWSQualificationOperationEvidence,
+    result: AWSQualificationResponse,
+  ): Promise<void> {
+    run.signerSequence += 1;
+    const signerDispatches = evidence.signerDispatches.map((dispatch, index) =>
+      index === evidence.signerDispatches.length - 1
+        ? {
+            ...dispatch,
+            afterSequence: run.signerSequence,
+            afterAt: new Date().toISOString(),
+            outcome: result.status < 300 ? ("accepted" as const) : ("rejected" as const),
+            statusClass: Math.floor(result.status / 100),
+          }
+        : dispatch,
+    );
+    await this.ctx.storage.put({
+      [stateKey]: run,
+      [evidenceKey]: {
+        ...evidence,
+        signerDispatches,
+      } satisfies AWSQualificationOperationEvidence,
+    });
+  }
+
+  private async markCandidateMutationDispatched(
+    run: AWSQualificationRunState,
+    intentKey: string,
+    intent: AWSQualificationIntent,
+  ): Promise<void> {
+    await this.requireCandidateMutationActive(run, intentKey);
+    await this.ctx.storage.put(intentKey, { ...intent, phase: "dispatched" });
+    await this.requireCandidateMutationActive(run, intentKey);
+  }
+
+  private async requireCandidateMutationActive(
+    run: AWSQualificationRunState,
+    intentKey: string,
+  ): Promise<void> {
+    if (Date.now() < Date.parse(run.identity.expiresAt)) return;
+    await this.ctx.storage.delete(intentKey);
+    await this.finalizeSerialized();
+    throw new Error("AWS qualification run expired before mutation dispatch");
+  }
+
+  private async requireActiveRun(
+    identity: AWSQualificationRunIdentity,
+  ): Promise<AWSQualificationRunState> {
+    const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
+    if (!run || canonicalJSON(run.identity) !== canonicalJSON(identity)) {
+      throw new Error("AWS qualification service binding is not enrolled for this run");
+    }
+    if (run.finalizedAt) throw new Error("AWS qualification run is finalized");
+    if (run.finalizingAt) throw new Error("AWS qualification run is finalizing");
+    if (Date.now() >= Date.parse(run.identity.expiresAt)) {
+      await this.finalizeSerialized();
+      throw new Error("AWS qualification run expired");
+    }
+    if ((await qualificationPolicyHash(authorityPolicy(this.env))) !== run.policyHash) {
+      throw new Error("AWS qualification authority policy changed after enrollment");
+    }
+    const authority = authorityIdentity(this.env);
+    if (authority.sha !== run.authoritySha || authority.version !== run.authorityVersion) {
+      throw new Error("AWS qualification authority deployment changed after enrollment");
+    }
+    return run;
+  }
+
+  private async finalizeSerialized(
+    controller?: AWSQualificationControllerProps,
+  ): Promise<AWSQualificationLedger> {
+    const run = await this.persistFinalizationFence(controller);
+    if (!run) return await this.ledger();
+    if (run.finalizedAt) return await this.ledger();
+    const ledger = await this.ledger();
+    const policy = run.policy;
+    const failures: string[] = [];
+    await this.beginFinalReceipt(ledger);
+    try {
+      await this.ensureAccount(policy);
+      await this.recordVerificationEvidence("GetCallerIdentity", "accepted");
+    } catch (error) {
+      failures.push("account verification failed");
+      await this.recordVerificationEvidence("GetCallerIdentity", "error");
+      await this.completeFinalReceipt(ledger, failures);
+      await this.ctx.storage.setAlarm(Date.now() + cleanupRetryMs);
+      throw error;
+    }
+    await this.recoverPendingIntents(run, policy, failures);
+    const recoveredLedger = await this.inventoryRunResourcesEventually(
+      run,
+      await this.ledger(),
+      failures,
+      true,
+      "pre-cleanup",
+    );
+    await this.ctx.storage.put(ledgerKey, recoveredLedger);
+    for (const imageId of ownedWithRetired(
+      recoveredLedger.imageIds,
+      recoveredLedger.retiredImageIds,
+    )) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- teardown order protects dependent snapshots.
+      await this.cleanup(run, policy, "DeregisterImage", { ImageId: imageId }, failures);
+    }
+    for (const snapshotId of ownedWithRetired(
+      recoveredLedger.snapshotIds,
+      recoveredLedger.retiredSnapshotIds,
+    )) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each exact resource has independent evidence.
+      await this.cleanup(run, policy, "DeleteSnapshot", { SnapshotId: snapshotId }, failures);
+    }
+    for (const instanceId of ownedWithRetired(
+      recoveredLedger.instanceIds,
+      recoveredLedger.retiredInstanceIds,
+    )) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- terminate only ledger-owned instances.
+      await this.cleanup(
+        run,
+        policy,
+        "TerminateInstances",
+        { "InstanceId.1": instanceId },
+        failures,
+      );
+    }
+    for (const keyPairId of ownedWithRetired(
+      recoveredLedger.keyPairIds,
+      recoveredLedger.retiredKeyPairIds,
+    )) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- delete only ledger-owned key pairs.
+      await this.cleanup(run, policy, "DeleteKeyPair", { KeyPairId: keyPairId }, failures);
+    }
+    const residue = await this.inventoryRunResourcesEventually(
+      run,
+      emptyLedger(recoveredLedger.launchCount),
+      failures,
+      false,
+      "post-cleanup",
+    );
+    await this.verifyZeroResidue(recoveredLedger, policy, failures);
+    if (hasOwnedResources(residue)) failures.push("run-tag inventory still contains resources");
+    if (failures.length === 0) {
+      await this.retireUnresolvedIntents();
+    }
+    if (failures.length > 0) {
+      await this.completeFinalReceipt(residue, failures);
+      await this.ctx.storage.setAlarm(Date.now() + cleanupRetryMs);
+      throw new Error(`AWS qualification cleanup incomplete: ${failures.join("; ")}`);
+    }
+    await this.ctx.storage.put(ledgerKey, emptyLedger(recoveredLedger.launchCount));
+    run.finalizedAt = new Date().toISOString();
+    await this.ctx.storage.put(stateKey, run);
+    await this.completeFinalReceipt(emptyLedger(recoveredLedger.launchCount), []);
+    await this.ctx.storage.deleteAlarm();
+    return recoveredLedger;
+  }
+
+  private async persistFinalizationFence(
+    controller?: AWSQualificationControllerProps,
+  ): Promise<AWSQualificationRunState | undefined> {
+    const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
+    if (!run) return undefined;
+    if (controller) validateController(controller, run.identity.deploymentHash);
+    if (!run.finalizingAt && !run.finalizedAt) {
+      run.finalizingAt = new Date().toISOString();
+      await this.ctx.storage.put(stateKey, run);
+    }
+    return run;
+  }
+
+  private async recoverPendingIntents(
+    run: AWSQualificationRunState,
+    policy: AWSQualificationPolicy,
+    failures: string[],
+  ): Promise<void> {
+    const pending = [
+      ...(await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix })),
+    ];
+    await this.recoverPendingIntentEntries(pending, run, policy, failures);
+  }
+
+  private async recoverPendingIntentEntries(
+    pending: Array<[string, AWSQualificationIntent]>,
+    run: AWSQualificationRunState,
+    policy: AWSQualificationPolicy,
+    failures: string[],
+  ): Promise<void> {
+    const entry = pending[0];
+    if (!entry) return;
+    const [key, intent] = entry;
+    try {
+      await this.recoverPendingIntent(key, intent, run, policy, failures);
+    } catch (error) {
+      if (intent.request.action !== "CreateImage" && intent.request.action !== "ImportKeyPair") {
+        failures.push(
+          `${intent.request.action} reconciliation: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+    // The queue is capped at maxPendingIntents. Serial recursion preserves each ledger commit
+    // before the next intent observes state without an unbounded call stack.
+    await this.recoverPendingIntentEntries(pending.slice(1), run, policy, failures);
+  }
+
+  private async recoverPendingIntent(
+    key: string,
+    intent: AWSQualificationIntent,
+    run: AWSQualificationRunState,
+    policy: AWSQualificationPolicy,
+    failures: string[],
+  ): Promise<void> {
+    if (intent.phase === "prepared") {
+      await this.ctx.storage.delete(key);
+      return;
+    }
+    if (intent.request.action === "RunInstances") {
+      await this.reconcilePendingLaunchWithBackoff(run, intent, policy);
+      return;
+    }
+    if (intent.request.action === "TerminateInstances") {
+      if (await this.reconcilePendingTerminationWithBackoff(intent, policy)) {
+        await this.ctx.storage.delete(key);
+      } else {
+        failures.push("TerminateInstances reconciliation did not confirm terminal absence");
+      }
+      return;
+    }
+    if (intent.request.action === "CreateImage" || intent.request.action === "ImportKeyPair") {
+      await this.reconcileIntentWithBackoff(run, intent, policy);
+      return;
+    }
+    // Finalization never replays a candidate mutation. Generic intents stay pending until
+    // inventory and cleanup prove zero residue, then retireUnresolvedIntents removes them.
+  }
+
+  private async beginFinalReceipt(ledger: AWSQualificationLedger): Promise<void> {
+    const existing = await this.ctx.storage.get<AWSQualificationFinalReceipt>(finalReceiptKey);
+    if (existing) {
+      const { completedAt: _completedAt, finalCounts: _finalCounts, ...pending } = existing;
+      await this.ctx.storage.put(finalReceiptKey, {
+        ...pending,
+        finalizeAttempts: existing.finalizeAttempts + 1,
+        failureCodes: [],
+      });
+      return;
+    }
+    const pending = [
+      ...(await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix })),
+    ];
+    const pendingAtStart = await Promise.all(
+      pending.map(async ([, intent]) => ({
+        opDigest: await sha256Hex(`op:${intent.request.opId}`),
+        requestDigest: intent.requestHash,
+        action: intent.request.action,
+        phase: intent.phase ?? ("legacy" as const),
+      })),
+    );
+    await this.ctx.storage.put(finalReceiptKey, {
+      version: awsQualificationAttestationVersion,
+      startedAt: new Date().toISOString(),
+      finalizeAttempts: 1,
+      resourcesAtStart: resourceCounts(ledger),
+      pendingAtStart,
+      cleanupAttemptsTotal: 0,
+      cleanupAttemptsTruncated: 0,
+      cleanupAttempts: [],
+      inventoryTotal: 0,
+      inventoryTruncated: 0,
+      inventory: [],
+      verificationTotal: 0,
+      verificationTruncated: 0,
+      verification: [],
+      failureCodes: [],
+    } satisfies AWSQualificationFinalReceipt);
+  }
+
+  private async completeFinalReceipt(
+    ledger: AWSQualificationLedger | undefined,
+    failures: string[],
+  ): Promise<void> {
+    const receipt = await this.requireFinalReceipt();
+    await this.ctx.storage.put(finalReceiptKey, {
+      ...receipt,
+      completedAt: new Date().toISOString(),
+      ...(ledger ? { finalCounts: resourceCounts(ledger) } : {}),
+      failureCodes: failures.map(evidenceFailureCode),
+    });
+  }
+
+  private async beginCleanupEvidence(
+    action: string,
+    parameters: Record<string, unknown>,
+  ): Promise<number> {
+    const receipt = await this.requireFinalReceipt();
+    const sequence = receipt.cleanupAttemptsTotal + 1;
+    const bounded = appendBoundedEvidence(
+      receipt.cleanupAttempts,
+      {
+        sequence,
+        action,
+        targetDigest: await sha256Hex(canonicalJSON(parameters)),
+        startedAt: new Date().toISOString(),
+      },
+      maxCleanupEvidence,
+    );
+    receipt.cleanupAttemptsTotal = sequence;
+    receipt.cleanupAttemptsTruncated += bounded.truncated;
+    receipt.cleanupAttempts = bounded.entries;
+    await this.ctx.storage.put(finalReceiptKey, receipt);
+    return sequence;
+  }
+
+  private async finishCleanupEvidence(
+    sequence: number,
+    outcome: "accepted" | "absent" | "rejected" | "error",
+    status?: number,
+  ): Promise<void> {
+    const receipt = await this.requireFinalReceipt();
+    const attempt = receipt.cleanupAttempts.find((entry) => entry.sequence === sequence);
+    if (!attempt) return;
+    attempt.completedAt = new Date().toISOString();
+    attempt.outcome = outcome;
+    if (status !== undefined) attempt.statusClass = Math.floor(status / 100);
+    await this.ctx.storage.put(finalReceiptKey, receipt);
+  }
+
+  private async recordInventoryEvidence(
+    phase: "pre-cleanup" | "post-cleanup",
+    ledger: AWSQualificationLedger,
+    failures: string[],
+  ): Promise<void> {
+    const receipt = await this.requireFinalReceipt();
+    const sequence = receipt.inventoryTotal + 1;
+    const bounded = appendBoundedEvidence(
+      receipt.inventory,
+      {
+        sequence,
+        phase,
+        at: new Date().toISOString(),
+        outcome: failures.length === 0 ? ("accepted" as const) : ("rejected" as const),
+        counts: resourceCounts(ledger),
+        failureCodes: failures.map(evidenceFailureCode),
+      },
+      maxInventoryEvidence,
+    );
+    receipt.inventoryTotal = sequence;
+    receipt.inventoryTruncated += bounded.truncated;
+    receipt.inventory = bounded.entries;
+    await this.ctx.storage.put(finalReceiptKey, receipt);
+  }
+
+  private async recordVerificationEvidence(
+    action: string,
+    outcome: "accepted" | "absent" | "present" | "rejected" | "error",
+  ): Promise<void> {
+    const receipt = await this.requireFinalReceipt();
+    const sequence = receipt.verificationTotal + 1;
+    const bounded = appendBoundedEvidence(
+      receipt.verification,
+      {
+        sequence,
+        action,
+        at: new Date().toISOString(),
+        outcome,
+      },
+      maxVerificationEvidence,
+    );
+    receipt.verificationTotal = sequence;
+    receipt.verificationTruncated += bounded.truncated;
+    receipt.verification = bounded.entries;
+    await this.ctx.storage.put(finalReceiptKey, receipt);
+  }
+
+  private async requireFinalReceipt(): Promise<AWSQualificationFinalReceipt> {
+    const receipt = await this.ctx.storage.get<AWSQualificationFinalReceipt>(finalReceiptKey);
+    if (!receipt) throw new Error("AWS qualification final receipt is missing");
+    return receipt;
+  }
+
+  private async cleanup(
+    run: AWSQualificationRunState,
+    policy: AWSQualificationPolicy,
+    action: string,
+    parameters: Record<string, unknown>,
+    failures: string[],
+  ): Promise<void> {
+    let evidenceSequence: number | undefined;
+    try {
+      evidenceSequence = await this.beginCleanupEvidence(action, parameters);
+      await this.ensureAccount(policy);
+      const response = await this.signer.execute("ec2", action, policy.region, parameters);
+      const result = await boundedResponse(response);
+      if (
+        result.status >= 300 &&
+        !result.body.includes("NotFound") &&
+        !result.body.includes("InvalidAMIID.NotFound") &&
+        !result.body.includes("InvalidSnapshot.NotFound")
+      ) {
+        await this.finishCleanupEvidence(evidenceSequence, "rejected", result.status);
+        failures.push(`${action} http ${result.status}`);
+      } else {
+        await this.finishCleanupEvidence(
+          evidenceSequence,
+          result.status >= 300 ? "absent" : "accepted",
+          result.status,
+        );
+      }
+    } catch (error) {
+      if (evidenceSequence !== undefined) {
+        await this.finishCleanupEvidence(evidenceSequence, "error");
+      }
+      failures.push(`${action}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private async inventoryRunResources(
+    run: AWSQualificationRunState,
+    ledger: AWSQualificationLedger,
+    failures: string[],
+  ): Promise<AWSQualificationLedger> {
+    const filter = {
+      "Filter.1.Name": "tag:crabbox_qualification_run",
+      "Filter.1.Value.1": run.identity.runId,
+    };
+    try {
+      await this.ensureAccount(run.policy);
+      const [instancesResponse, imagesResponse, snapshotsResponse, volumesResponse, keysResponse] =
+        await Promise.all([
+          this.signer.execute("ec2", "DescribeInstances", run.policy.region, filter),
+          this.signer.execute("ec2", "DescribeImages", run.policy.region, {
+            ...filter,
+            "Owner.1": "self",
+          }),
+          this.signer.execute("ec2", "DescribeSnapshots", run.policy.region, {
+            ...filter,
+            "Owner.1": "self",
+          }),
+          this.signer.execute("ec2", "DescribeVolumes", run.policy.region, filter),
+          this.signer.execute("ec2", "DescribeKeyPairs", run.policy.region, filter),
+        ]);
+      const [instances, images, snapshots, volumes, keys] = await Promise.all([
+        boundedResponse(instancesResponse),
+        boundedResponse(imagesResponse),
+        boundedResponse(snapshotsResponse),
+        boundedResponse(volumesResponse),
+        boundedResponse(keysResponse),
+      ]);
+      for (const result of [instances, images, snapshots, volumes, keys]) {
+        if (result.status >= 300) throw new Error(`inventory http ${result.status}`);
+      }
+      ledger.instanceIds = reservationsFromXML(instances.body)
+        .flatMap((reservation) => items(record(reservation["instancesSet"])["item"]).map(record))
+        .filter((instance) => asString(record(instance["instanceState"])["name"]) !== "terminated")
+        .map((instance) => asString(instance["instanceId"]))
+        .filter(Boolean);
+      const imageRecords = items(
+        record(awsXMLRoot(images.body, "DescribeImages")["imagesSet"])["item"],
+      ).map(record);
+      ledger.imageIds = imageRecords.map((image) => asString(image["imageId"])).filter(Boolean);
+      ledger.snapshotIds = [
+        ...new Set([
+          ...imageRecords.flatMap(imageSnapshotIDs),
+          ...items(record(awsXMLRoot(snapshots.body, "DescribeSnapshots")["snapshotSet"])["item"])
+            .map(record)
+            .map((snapshot) => asString(snapshot["snapshotId"]))
+            .filter(Boolean),
+        ]),
+      ];
+      ledger.volumeIds = items(
+        record(awsXMLRoot(volumes.body, "DescribeVolumes")["volumeSet"])["item"],
+      )
+        .map(record)
+        .map((volume) => asString(volume["volumeId"]))
+        .filter(Boolean);
+      const keyRecords = items(
+        record(awsXMLRoot(keys.body, "DescribeKeyPairs")["keySet"])["item"],
+      ).map(record);
+      ledger.keyPairIds = keyRecords.map((key) => asString(key["keyPairId"])).filter(Boolean);
+      ledger.keyPairNames = keyRecords.map((key) => asString(key["keyName"])).filter(Boolean);
+      if (
+        ledger.instanceIds.length > maxActiveInstances ||
+        ledger.imageIds.length > maxActiveImages ||
+        ledger.snapshotIds.length > maxActiveSnapshots ||
+        ledger.keyPairIds.length > 1
+      ) {
+        failures.push("run-tag inventory exceeds qualification resource bounds");
+      }
+    } catch (error) {
+      failures.push(`run-tag inventory: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return ledger;
+  }
+
+  private async inventoryRunResourcesEventually(
+    run: AWSQualificationRunState,
+    ledger: AWSQualificationLedger,
+    failures: string[],
+    accumulate: boolean,
+    phase: "pre-cleanup" | "post-cleanup",
+    attempt = 0,
+  ): Promise<AWSQualificationLedger> {
+    const attemptFailures: string[] = [];
+    const observed = await this.inventoryRunResources(
+      run,
+      emptyLedger(ledger.launchCount),
+      attemptFailures,
+    );
+    const next = accumulate ? mergeLedgers(ledger, observed) : observed;
+    await this.recordInventoryEvidence(phase, observed, attemptFailures);
+    const delay = inventoryBackoffMs[attempt];
+    if (delay === undefined) {
+      failures.push(...attemptFailures);
+      return next;
+    }
+    await sleep(delay);
+    return await this.inventoryRunResourcesEventually(
+      run,
+      next,
+      failures,
+      accumulate,
+      phase,
+      attempt + 1,
+    );
+  }
+
+  private async reconcilePendingLaunch(
+    run: AWSQualificationRunState,
+    intent: AWSQualificationIntent,
+    policy: AWSQualificationPolicy,
+  ): Promise<boolean> {
+    await this.ensureAccount(policy);
+    const response = await this.signer.execute("ec2", "DescribeInstances", policy.region, {
+      "Filter.1.Name": "tag:crabbox_qualification_run",
+      "Filter.1.Value.1": run.identity.runId,
+      "Filter.2.Name": "tag:crabbox_qualification_op",
+      "Filter.2.Value.1": intent.request.opId,
+    });
+    const result = await boundedResponse(response);
+    if (result.status < 200 || result.status >= 300) return false;
+    const instances = reservationsFromXML(result.body)
+      .flatMap((reservation) => items(record(reservation["instancesSet"])["item"]).map(record))
+      .filter((instance) => {
+        const tags = awsTagMap(instance["tagSet"]);
+        return (
+          tags.get("crabbox_qualification_run") === run.identity.runId &&
+          tags.get("crabbox_qualification_op") === intent.request.opId
+        );
+      });
+    if (instances.length === 0) return false;
+    if (instances.length !== 1) {
+      throw new Error("AWS qualification launch reconciliation is ambiguous");
+    }
+    const instance = instances[0]!;
+    const instanceId = asString(instance["instanceId"]);
+    if (!instanceId) throw new Error("AWS qualification launch reconciliation returned no id");
+    const ledger = await this.ledger();
+    const state = asString(record(instance["instanceState"])["name"]);
+    if (state === "terminated") {
+      retireInstance(ledger, instanceId);
+    } else {
+      ledger.instanceIds = [instanceId];
+      ledger.retiredInstanceIds = ledger.retiredInstanceIds.filter((id) => id !== instanceId);
+      for (const mapping of items(record(instance["blockDeviceMapping"])["item"]).map(record)) {
+        const volumeId = asString(record(mapping["ebs"])["volumeId"]);
+        if (volumeId) ledger.volumeIds = [volumeId];
+      }
+    }
+    await this.ctx.storage.put(ledgerKey, ledger);
+    await this.ctx.storage.delete(`${intentPrefix}${intent.request.opId}`);
+    return true;
+  }
+
+  private async reconcilePendingLaunchWithBackoff(
+    run: AWSQualificationRunState,
+    intent: AWSQualificationIntent,
+    policy: AWSQualificationPolicy,
+    attempt = 0,
+  ): Promise<boolean> {
+    const reconciled = await this.reconcilePendingLaunch(run, intent, policy);
+    if (reconciled) return true;
+    const delay = reconciliationBackoffMs[attempt];
+    if (delay === undefined) return false;
+    await sleep(delay);
+    return await this.reconcilePendingLaunchWithBackoff(run, intent, policy, attempt + 1);
+  }
+
+  private async reconcilePendingTerminationWithBackoff(
+    intent: AWSQualificationIntent,
+    policy: AWSQualificationPolicy,
+    missing = new Set<string>(),
+    attempt = 0,
+  ): Promise<boolean> {
+    const ledger = await this.ledger();
+    const requested = indexedUnknownValues(intent.request.parameters, "InstanceId").filter((id) =>
+      ledger.instanceIds.includes(id),
+    );
+    if (requested.length === 0) return true;
+    await this.reconcilePendingTerminationInstances(policy, ledger, requested, missing);
+    await this.ctx.storage.put(ledgerKey, ledger);
+    if (requested.every((id) => !ledger.instanceIds.includes(id))) return true;
+    const delay = reconciliationBackoffMs[attempt];
+    if (delay === undefined) return false;
+    await sleep(delay);
+    return await this.reconcilePendingTerminationWithBackoff(intent, policy, missing, attempt + 1);
+  }
+
+  private async reconcilePendingTerminationInstances(
+    policy: AWSQualificationPolicy,
+    ledger: AWSQualificationLedger,
+    instanceIds: string[],
+    missing: Set<string>,
+  ): Promise<void> {
+    const instanceId = instanceIds[0];
+    if (!instanceId) return;
+    const result = await this.describeInstance(policy, instanceId);
+    if (isMissingInstance(result)) {
+      if (missing.has(instanceId)) retireInstance(ledger, instanceId);
+      else missing.add(instanceId);
+    } else {
+      missing.delete(instanceId);
+      if (result.status >= 200 && result.status < 300) {
+        updateLedgerFromResponse(ledger, "DescribeInstances", result.body, {
+          "InstanceId.1": instanceId,
+        });
+      }
+    }
+    await this.reconcilePendingTerminationInstances(policy, ledger, instanceIds.slice(1), missing);
+  }
+
+  private async confirmRequestedInstanceAbsence(
+    policy: AWSQualificationPolicy,
+    ledger: AWSQualificationLedger,
+    parameters: Record<string, unknown>,
+  ): Promise<void> {
+    const candidates = indexedUnknownValues(parameters, "InstanceId").filter((id) =>
+      ledger.terminatingInstanceIds.includes(id),
+    );
+    await this.confirmRequestedInstanceAbsenceEntries(policy, ledger, candidates);
+  }
+
+  private async confirmRequestedInstanceAbsenceEntries(
+    policy: AWSQualificationPolicy,
+    ledger: AWSQualificationLedger,
+    instanceIds: string[],
+  ): Promise<void> {
+    const instanceId = instanceIds[0];
+    if (!instanceId) return;
+    const result = await this.describeInstance(policy, instanceId);
+    if (isMissingInstance(result)) {
+      retireInstance(ledger, instanceId);
+    } else if (result.status >= 200 && result.status < 300) {
+      updateLedgerFromResponse(ledger, "DescribeInstances", result.body, {
+        "InstanceId.1": instanceId,
+      });
+    }
+    await this.confirmRequestedInstanceAbsenceEntries(policy, ledger, instanceIds.slice(1));
+  }
+
+  private async describeInstance(
+    policy: AWSQualificationPolicy,
+    instanceId: string,
+  ): Promise<AWSQualificationResponse> {
+    await this.ensureAccount(policy);
+    return await boundedResponse(
+      await this.signer.execute("ec2", "DescribeInstances", policy.region, {
+        "InstanceId.1": instanceId,
+      }),
+    );
+  }
+
+  private async retireUnresolvedIntents(): Promise<void> {
+    const pending = await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix });
+    await Promise.all([...pending].map(([key]) => this.ctx.storage.delete(key)));
+  }
+
+  private async verifyZeroResidue(
+    ledger: AWSQualificationLedger,
+    policy: AWSQualificationPolicy,
+    failures: string[],
+  ): Promise<void> {
+    try {
+      await this.ensureAccount(policy);
+      await this.recordVerificationEvidence("GetCallerIdentity", "accepted");
+    } catch (error) {
+      await this.recordVerificationEvidence("GetCallerIdentity", "error");
+      failures.push(
+        `residue account verification: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    await this.verifyAbsent(
+      policy,
+      "DescribeInstances",
+      "InstanceId",
+      ownedWithRetired(ledger.instanceIds, ledger.retiredInstanceIds),
+      "reservationSet",
+      failures,
+    );
+    await this.verifyAbsent(
+      policy,
+      "DescribeImages",
+      "ImageId",
+      ownedWithRetired(ledger.imageIds, ledger.retiredImageIds),
+      "imagesSet",
+      failures,
+    );
+    await this.verifyAbsent(
+      policy,
+      "DescribeSnapshots",
+      "SnapshotId",
+      ownedWithRetired(ledger.snapshotIds, ledger.retiredSnapshotIds),
+      "snapshotSet",
+      failures,
+    );
+    await this.verifyAbsent(
+      policy,
+      "DescribeVolumes",
+      "VolumeId",
+      ledger.volumeIds,
+      "volumeSet",
+      failures,
+    );
+    await this.verifyKeyPairsAbsent(ledger, policy, failures);
+    try {
+      const group = await this.signer.execute("ec2", "DescribeSecurityGroups", policy.region, {
+        "GroupId.1": policy.securityGroupId,
+      });
+      const groupResult = await boundedResponse(group);
+      if (groupResult.status < 200 || groupResult.status >= 300) {
+        await this.recordVerificationEvidence("DescribeSecurityGroups", "rejected");
+        failures.push(`DescribeSecurityGroups verification http ${groupResult.status}`);
+        return;
+      }
+      const groups = items(
+        record(awsXMLRoot(groupResult.body, "DescribeSecurityGroups")["securityGroupInfo"])["item"],
+      ).map(record);
+      if (groups.length !== 1 || asString(groups[0]!["groupId"]) !== policy.securityGroupId) {
+        await this.recordVerificationEvidence("DescribeSecurityGroups", "rejected");
+        failures.push("preprovisioned security group is missing");
+      } else {
+        await this.recordVerificationEvidence("DescribeSecurityGroups", "accepted");
+      }
+    } catch (error) {
+      await this.recordVerificationEvidence("DescribeSecurityGroups", "error");
+      failures.push(
+        `DescribeSecurityGroups verification: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  private async verifyKeyPairsAbsent(
+    ledger: AWSQualificationLedger,
+    policy: AWSQualificationPolicy,
+    failures: string[],
+  ): Promise<void> {
+    const keyPairIds = ownedWithRetired(ledger.keyPairIds, ledger.retiredKeyPairIds);
+    const parameters =
+      keyPairIds.length > 0
+        ? Object.fromEntries(keyPairIds.map((id, index) => [`KeyPairId.${index + 1}`, id]))
+        : Object.fromEntries(
+            ledger.keyPairNames.map((name, index) => [`KeyName.${index + 1}`, name]),
+          );
+    if (Object.keys(parameters).length === 0) {
+      await this.recordVerificationEvidence("DescribeKeyPairs", "absent");
+      return;
+    }
+    try {
+      const response = await this.signer.execute(
+        "ec2",
+        "DescribeKeyPairs",
+        policy.region,
+        parameters,
+      );
+      const result = await boundedResponse(response);
+      if (result.status >= 300) {
+        if (result.body.includes("NotFound")) {
+          await this.recordVerificationEvidence("DescribeKeyPairs", "absent");
+          return;
+        }
+        await this.recordVerificationEvidence("DescribeKeyPairs", "rejected");
+        failures.push(`DescribeKeyPairs verification http ${result.status}`);
+        return;
+      }
+      const root = awsXMLRoot(result.body, "DescribeKeyPairs");
+      if (items(record(root["keySet"])["item"]).length > 0) {
+        await this.recordVerificationEvidence("DescribeKeyPairs", "present");
+        failures.push("DescribeKeyPairs still returns run-owned resources");
+      } else {
+        await this.recordVerificationEvidence("DescribeKeyPairs", "absent");
+      }
+    } catch (error) {
+      await this.recordVerificationEvidence("DescribeKeyPairs", "error");
+      failures.push(
+        `DescribeKeyPairs verification: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private async verifyAbsent(
+    policy: AWSQualificationPolicy,
+    action: string,
+    idField: string,
+    ids: string[],
+    resultField: string,
+    failures: string[],
+  ): Promise<void> {
+    if (ids.length === 0) {
+      await this.recordVerificationEvidence(action, "absent");
+      return;
+    }
+    const parameters = Object.fromEntries(ids.map((id, index) => [`${idField}.${index + 1}`, id]));
+    try {
+      const response = await this.signer.execute("ec2", action, policy.region, parameters);
+      const result = await boundedResponse(response);
+      if (result.status >= 300) {
+        if (result.body.includes("NotFound")) {
+          await this.recordVerificationEvidence(action, "absent");
+          return;
+        }
+        await this.recordVerificationEvidence(action, "rejected");
+        failures.push(`${action} verification http ${result.status}`);
+        return;
+      }
+      const root = awsXMLRoot(result.body, action);
+      const entries = items(record(root[resultField])["item"]).map(record);
+      const remaining =
+        action === "DescribeInstances"
+          ? entries
+              .flatMap((reservation) =>
+                items(record(reservation["instancesSet"])["item"]).map(record),
+              )
+              .filter(
+                (instance) => asString(record(instance["instanceState"])["name"]) !== "terminated",
+              )
+          : entries;
+      if (remaining.length > 0) {
+        await this.recordVerificationEvidence(action, "present");
+        failures.push(`${action} still returns run-owned resources`);
+      } else {
+        await this.recordVerificationEvidence(action, "absent");
+      }
+    } catch (error) {
+      await this.recordVerificationEvidence(action, "error");
+      failures.push(
+        `${action} verification: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private async ledger(): Promise<AWSQualificationLedger> {
+    return (await this.ctx.storage.get<AWSQualificationLedger>(ledgerKey)) ?? emptyLedger();
+  }
+
+  private async serialized<T>(operation: () => Promise<T>): Promise<T> {
+    const next = this.serial.then(operation, operation);
+    this.serial = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return await next;
+  }
+}
+
+class DirectAuthoritySigner implements AuthoritySigner {
+  constructor(private readonly env: AWSQualificationAuthorityEnv) {}
+
+  async execute(
+    service: AWSQualificationService,
+    action: string,
+    region: string,
+    parameters: Record<string, unknown>,
+  ): Promise<Response> {
+    const credentials = authorityCredentials(this.env);
+    const client = new AwsClient({ ...credentials, service, region, retries: 0 });
+    if (service === "ec2" || service === "sts") {
+      const version = service === "ec2" ? ec2Version : stsVersion;
+      const body = new URLSearchParams({ Action: action, Version: version });
+      for (const [key, value] of Object.entries(parameters)) {
+        if (typeof value !== "string")
+          throw new Error(`AWS query parameter ${key} is not a string`);
+        body.set(key, value);
+      }
+      return await client.fetch(`https://${service}.${region}.amazonaws.com/`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" },
+        body: body.toString(),
+      });
+    }
+    return await client.fetch(`https://${service}.${region}.amazonaws.com/`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-amz-json-1.1",
+        "x-amz-target": `ServiceQuotasV20190624.${action}`,
+      },
+      body: JSON.stringify(parameters),
+    });
+  }
+}
+
+async function authorizeRequest(
+  request: AWSQualificationRequest,
+  identity: AWSQualificationRunIdentity,
+  policy: AWSQualificationPolicy,
+  ledger: AWSQualificationLedger,
+  physicalKeyName: string,
+  clientToken: string,
+): Promise<{ mutating: boolean; parameters: Record<string, unknown> }> {
+  if (request.service === "sts") {
+    if (request.action !== "GetCallerIdentity" || Object.keys(request.parameters).length > 0) {
+      throw new Error("AWS qualification STS action is not allowed");
+    }
+    return { mutating: false, parameters: {} };
+  }
+  if (request.service === "servicequotas") {
+    if (
+      request.action !== "GetServiceQuota" ||
+      request.parameters["ServiceCode"] !== "ec2" ||
+      request.parameters["QuotaCode"] !== onDemandQuotaCode
+    ) {
+      throw new Error("AWS qualification Service Quotas action is not allowed");
+    }
+    return { mutating: false, parameters: structuredClone(request.parameters) };
+  }
+  if (request.service !== "ec2" || !allowedEC2Actions.has(request.action)) {
+    if (request.action.includes("FastSnapshotRestore")) {
+      throw new Error("AWS qualification fast snapshot restore is disabled");
+    }
+    throw new Error("AWS qualification action is not allowed");
+  }
+  return {
+    mutating: mutatingEC2Actions.has(request.action),
+    parameters: authorizeEC2(request, identity, policy, ledger, physicalKeyName, clientToken),
+  };
+}
+
+function authorizeEC2(
+  request: AWSQualificationRequest,
+  identity: AWSQualificationRunIdentity,
+  policy: AWSQualificationPolicy,
+  ledger: AWSQualificationLedger,
+  physicalKeyName: string,
+  clientToken: string,
+): Record<string, unknown> {
+  const input = stringParameters(request.parameters);
+  switch (request.action) {
+    case "DescribeSecurityGroups":
+      requireExact(input["GroupId.1"], policy.securityGroupId, "security group");
+      return { "GroupId.1": policy.securityGroupId };
+    case "ImportKeyPair": {
+      const material = input["PublicKeyMaterial"] ?? "";
+      if (!/^crabbox-[A-Za-z0-9._-]{1,180}$/.test(input["KeyName"] ?? "")) {
+        throw new Error("AWS qualification key pair name is outside policy");
+      }
+      decodePublicKeyMaterial(material);
+      return {
+        KeyName: physicalKeyName,
+        PublicKeyMaterial: material,
+        ...qualificationTags(input, "key-pair", identity, request.opId),
+      };
+    }
+    case "DescribeKeyPairs": {
+      if (input["IncludePublicKey"] !== undefined && input["IncludePublicKey"] !== "true") {
+        throw new Error("AWS qualification key read must include public key material");
+      }
+      const ids = indexedValues(input, "KeyPairId");
+      if (ids.length > 0) {
+        return authorizedIDs(
+          input,
+          "KeyPairId",
+          ownedWithRetired(ledger.keyPairIds, ledger.retiredKeyPairIds),
+        );
+      }
+      if (!input["KeyName.1"] || indexedValues(input, "KeyName").length !== 1) {
+        throw new Error("AWS qualification key read is outside policy");
+      }
+      return { IncludePublicKey: "true", "KeyName.1": physicalKeyName };
+    }
+    case "DeleteKeyPair":
+      return authorizedSingleID(
+        input,
+        "KeyPairId",
+        ownedWithRetired(ledger.keyPairIds, ledger.retiredKeyPairIds),
+      );
+    case "RunInstances":
+      return authorizedRunInstances(
+        input,
+        clientToken,
+        request.opId,
+        identity,
+        policy,
+        ledger,
+        physicalKeyName,
+      );
+    case "DescribeInstances":
+      return authorizedDescribe(
+        input,
+        "InstanceId",
+        ownedWithRetired(ledger.instanceIds, ledger.retiredInstanceIds),
+        identity.runId,
+      );
+    case "DescribeVolumes":
+      return authorizedDescribe(input, "VolumeId", ledger.volumeIds, identity.runId);
+    case "DescribeImages":
+      return authorizedImageRead(
+        input,
+        policy.baseAmiId,
+        ownedWithRetired(ledger.imageIds, ledger.retiredImageIds),
+        identity.runId,
+      );
+    case "DescribeSnapshots":
+      return authorizedDescribe(
+        input,
+        "SnapshotId",
+        ownedWithRetired(ledger.snapshotIds, ledger.retiredSnapshotIds),
+        identity.runId,
+        true,
+      );
+    case "TerminateInstances":
+      return authorizedIDs(
+        input,
+        "InstanceId",
+        ownedWithRetired(ledger.instanceIds, ledger.retiredInstanceIds),
+      );
+    case "DeregisterImage":
+      return authorizedSingleID(
+        input,
+        "ImageId",
+        ownedWithRetired(ledger.imageIds, ledger.retiredImageIds),
+      );
+    case "DeleteSnapshot":
+      return authorizedSingleID(
+        input,
+        "SnapshotId",
+        ownedWithRetired(ledger.snapshotIds, ledger.retiredSnapshotIds),
+      );
+    case "CreateImage": {
+      requireOwned(input["InstanceId"], ledger.instanceIds, "instance");
+      const name = boundedName(input["Name"]);
+      return {
+        InstanceId: input["InstanceId"],
+        Name: name,
+        NoReboot: input["NoReboot"] === "true" ? "true" : "false",
+        ...qualificationTags(input, "image", identity, request.opId),
+        ...qualificationTags(input, "snapshot", identity, request.opId, 2),
+      };
+    }
+    case "CreateTags": {
+      const resourceIds = indexedValues(input, "ResourceId");
+      if (resourceIds.length === 0 || resourceIds.some((id) => !allLedgerIDs(ledger).has(id))) {
+        throw new Error("AWS qualification tags target a resource outside the run ledger");
+      }
+      return {
+        ...Object.fromEntries(resourceIds.map((id, index) => [`ResourceId.${index + 1}`, id])),
+        ...plainTags(input, identity, request.opId),
+      };
+    }
+    default:
+      throw new Error("AWS qualification EC2 action is not implemented");
+  }
+}
+
+function authorizedRunInstances(
+  input: Record<string, string>,
+  clientToken: string,
+  opId: string,
+  identity: AWSQualificationRunIdentity,
+  policy: AWSQualificationPolicy,
+  ledger: AWSQualificationLedger,
+  physicalKeyName: string,
+): Record<string, unknown> {
+  for (const key of Object.keys(input)) {
+    if (
+      key.startsWith("IamInstanceProfile") ||
+      key.startsWith("InstanceMarketOptions") ||
+      key.startsWith("Placement.Host") ||
+      key.includes("FastSnapshotRestore")
+    ) {
+      throw new Error(`AWS qualification RunInstances parameter is forbidden: ${key}`);
+    }
+  }
+  const imageId = input["ImageId"] ?? "";
+  if (imageId !== policy.baseAmiId && !ledger.imageIds.includes(imageId)) {
+    throw new Error("AWS qualification image is outside the run ledger");
+  }
+  const instanceType = input["InstanceType"] ?? "";
+  if (
+    !awsQualificationInstanceTypes.includes(
+      instanceType as (typeof awsQualificationInstanceTypes)[number],
+    )
+  ) {
+    throw new Error("AWS qualification instance type is outside policy");
+  }
+  if (!/^crabbox-[A-Za-z0-9._-]{1,180}$/.test(input["KeyName"] ?? "")) {
+    throw new Error("AWS qualification key pair name is outside policy");
+  }
+  requireOwned(physicalKeyName, ledger.keyPairNames, "key pair");
+  requireExact(input["NetworkInterface.1.SubnetId"], policy.subnetId, "subnet");
+  requireExact(
+    input["NetworkInterface.1.SecurityGroupId.1"],
+    policy.securityGroupId,
+    "security group",
+  );
+  const rootGB = Number(input["BlockDeviceMapping.1.Ebs.VolumeSize"]);
+  if (!Number.isInteger(rootGB) || rootGB < 8 || rootGB > policy.rootGB) {
+    throw new Error("AWS qualification root volume is outside policy");
+  }
+  const userData = input["UserData"] ?? "";
+  if (new TextEncoder().encode(userData).byteLength > maxUserDataBytes) {
+    throw new Error("AWS qualification user data is too large");
+  }
+  return {
+    ClientToken: clientToken,
+    ImageId: imageId,
+    InstanceType: instanceType,
+    KeyName: physicalKeyName,
+    MaxCount: "1",
+    MinCount: "1",
+    UserData: userData,
+    "BlockDeviceMapping.1.DeviceName": "/dev/sda1",
+    "BlockDeviceMapping.1.Ebs.DeleteOnTermination": "true",
+    "BlockDeviceMapping.1.Ebs.Encrypted": "true",
+    "BlockDeviceMapping.1.Ebs.VolumeSize": String(rootGB),
+    "BlockDeviceMapping.1.Ebs.VolumeType": "gp3",
+    "MetadataOptions.HttpEndpoint": "enabled",
+    "MetadataOptions.HttpPutResponseHopLimit": "1",
+    "MetadataOptions.HttpTokens": "required",
+    "MetadataOptions.InstanceMetadataTags": "disabled",
+    "NetworkInterface.1.AssociatePublicIpAddress": "true",
+    "NetworkInterface.1.DeleteOnTermination": "true",
+    "NetworkInterface.1.DeviceIndex": "0",
+    "NetworkInterface.1.SecurityGroupId.1": policy.securityGroupId,
+    "NetworkInterface.1.SubnetId": policy.subnetId,
+    ...qualificationTags(input, "instance", identity, opId),
+    ...qualificationTags(input, "volume", identity, opId, 2),
+  };
+}
+
+function authorizedDescribe(
+  input: Record<string, string>,
+  field: string,
+  owned: string[],
+  runId: string,
+  ownerSelf = false,
+): Record<string, unknown> {
+  const ids = indexedValues(input, field);
+  if (ids.length > 0) return authorizedIDs(input, field, owned);
+  const filters = qualificationReadFilters(input, runId);
+  return { ...filters, ...(ownerSelf ? { "Owner.1": "self" } : {}) };
+}
+
+function authorizedImageRead(
+  input: Record<string, string>,
+  baseAmiId: string,
+  owned: string[],
+  runId: string,
+): Record<string, unknown> {
+  const ids = indexedValues(input, "ImageId");
+  if (ids.length > 0) {
+    if (ids.some((id) => id !== baseAmiId && !owned.includes(id))) {
+      throw new Error("AWS qualification image read is outside the run ledger");
+    }
+    return Object.fromEntries(ids.map((id, index) => [`ImageId.${index + 1}`, id]));
+  }
+  return { ...qualificationReadFilters(input, runId), "Owner.1": "self" };
+}
+
+function qualificationReadFilters(
+  input: Record<string, string>,
+  runId: string,
+): Record<string, unknown> {
+  const filters: Record<string, unknown> = {};
+  let next = 1;
+  for (let index = 1; index <= 16; index += 1) {
+    const name = input[`Filter.${index}.Name`];
+    if (!name) continue;
+    if (!name.startsWith("tag:") && name !== "name" && name !== "instance-state-name") {
+      throw new Error("AWS qualification read filter is outside policy");
+    }
+    filters[`Filter.${next}.Name`] = name;
+    for (let valueIndex = 1; valueIndex <= 16; valueIndex += 1) {
+      const value = input[`Filter.${index}.Value.${valueIndex}`];
+      if (value !== undefined) filters[`Filter.${next}.Value.${valueIndex}`] = value;
+    }
+    next += 1;
+  }
+  filters[`Filter.${next}.Name`] = "tag:crabbox_qualification_run";
+  filters[`Filter.${next}.Value.1`] = runId;
+  return filters;
+}
+
+function qualificationTags(
+  input: Record<string, string>,
+  resourceType: string,
+  identity: AWSQualificationRunIdentity,
+  opId: string,
+  specificationIndex = 1,
+): Record<string, string> {
+  const output: Record<string, string> = {
+    [`TagSpecification.${specificationIndex}.ResourceType`]: resourceType,
+  };
+  const sourceIndex = findTagSpecification(input, resourceType);
+  const tags = sourceIndex ? tagMap(input, `TagSpecification.${sourceIndex}.Tag`) : new Map();
+  injectAuthorityTags(tags, identity, opId);
+  let index = 1;
+  for (const [key, value] of tags) {
+    output[`TagSpecification.${specificationIndex}.Tag.${index}.Key`] = key;
+    output[`TagSpecification.${specificationIndex}.Tag.${index}.Value`] = value;
+    index += 1;
+  }
+  return output;
+}
+
+function plainTags(
+  input: Record<string, string>,
+  identity: AWSQualificationRunIdentity,
+  opId: string,
+): Record<string, string> {
+  const tags = tagMap(input, "Tag");
+  injectAuthorityTags(tags, identity, opId);
+  return Object.fromEntries(
+    [...tags].flatMap(([key, value], index) => [
+      [`Tag.${index + 1}.Key`, key],
+      [`Tag.${index + 1}.Value`, value],
+    ]),
+  );
+}
+
+function injectAuthorityTags(
+  tags: Map<string, string>,
+  identity: AWSQualificationRunIdentity,
+  opId: string,
+): void {
+  tags.set("crabbox_qualification_owner", boundedText(identity.owner, 256));
+  tags.set("crabbox_qualification_run", identity.runId);
+  tags.set("crabbox_qualification_sha", identity.candidateSha);
+  tags.set("crabbox_qualification_expiry", identity.expiresAt);
+  tags.set("crabbox_qualification_op", opId);
+}
+
+function tagMap(input: Record<string, string>, prefix: string): Map<string, string> {
+  const tags = new Map<string, string>();
+  for (let index = 1; index <= 64; index += 1) {
+    const key = input[`${prefix}.${index}.Key`];
+    const value = input[`${prefix}.${index}.Value`];
+    if (!key || value === undefined || !preservedTagKeys.has(key)) continue;
+    tags.set(key, boundedText(value, 256));
+  }
+  return tags;
+}
+
+function findTagSpecification(input: Record<string, string>, resourceType: string): number {
+  for (let index = 1; index <= 8; index += 1) {
+    if (input[`TagSpecification.${index}.ResourceType`] === resourceType) return index;
+  }
+  return 0;
+}
+
+function updateLedgerFromResponse(
+  ledger: AWSQualificationLedger,
+  action: string,
+  body: string,
+  parameters: Record<string, unknown>,
+): void {
+  const root = awsXMLRoot(body, action);
+  if (action === "RunInstances") {
+    const reservations = [{ instancesSet: root["instancesSet"] }];
+    for (const reservation of reservations) {
+      for (const instance of items(record(record(reservation)["instancesSet"])["item"]).map(
+        record,
+      )) {
+        const instanceId = asString(instance["instanceId"]);
+        if (instanceId) {
+          ledger.instanceIds = [instanceId];
+          ledger.retiredInstanceIds = ledger.retiredInstanceIds.filter(
+            (retiredId) => retiredId !== instanceId,
+          );
+        }
+        for (const mapping of items(record(instance["blockDeviceMapping"])["item"]).map(record)) {
+          const volumeId = asString(record(mapping["ebs"])["volumeId"]);
+          if (volumeId) ledger.volumeIds = [volumeId];
+        }
+      }
+    }
+  }
+  if (action === "TerminateInstances") {
+    const requested = new Set(indexedUnknownValues(parameters, "InstanceId"));
+    const acknowledged = items(record(root["instancesSet"])["item"])
+      .map(record)
+      .map((instance) => asString(instance["instanceId"]))
+      .filter((instanceId) => requested.has(instanceId) && ledger.instanceIds.includes(instanceId));
+    ledger.terminatingInstanceIds = boundedIDs(
+      [...ledger.terminatingInstanceIds, ...acknowledged],
+      maxActiveInstances,
+      "terminating instances",
+    );
+  }
+  if (action === "DescribeInstances") {
+    const described = items(record(root["reservationSet"])["item"])
+      .flatMap((reservation) => items(record(record(reservation)["instancesSet"])["item"]))
+      .map(record);
+    const states = new Map(
+      described
+        .map(
+          (instance) =>
+            [
+              asString(instance["instanceId"]),
+              asString(record(instance["instanceState"])["name"]),
+            ] as const,
+        )
+        .filter(([instanceId]) => instanceId),
+    );
+    const requested = indexedUnknownValues(parameters, "InstanceId");
+    const terminal = ledger.instanceIds.filter((instanceId) => {
+      if (!requested.includes(instanceId)) return false;
+      return states.get(instanceId) === "terminated";
+    });
+    for (const instanceId of terminal) {
+      retireInstance(ledger, instanceId);
+    }
+  }
+  if (action === "DeregisterImage") {
+    retireID(
+      ledger.imageIds,
+      ledger.retiredImageIds,
+      asString(parameters["ImageId"]),
+      maxCandidateOperations,
+      "images",
+    );
+  }
+  if (action === "DeleteSnapshot") {
+    retireID(
+      ledger.snapshotIds,
+      ledger.retiredSnapshotIds,
+      asString(parameters["SnapshotId"]),
+      maxCandidateOperations,
+      "snapshots",
+    );
+  }
+  if (action === "DeleteKeyPair") {
+    retireID(
+      ledger.keyPairIds,
+      ledger.retiredKeyPairIds,
+      asString(parameters["KeyPairId"]),
+      maxCandidateOperations,
+      "key pairs",
+    );
+    if (ledger.keyPairIds.length === 0) ledger.keyPairNames = [];
+  }
+  if (action === "DescribeImages") {
+    for (const image of items(record(root["imagesSet"])["item"]).map(record)) {
+      const imageId = asString(image["imageId"]);
+      if (!ledger.imageIds.includes(imageId)) continue;
+      for (const mapping of items(record(image["blockDeviceMapping"])["item"]).map(record)) {
+        const snapshotId = asString(record(mapping["ebs"])["snapshotId"]);
+        if (snapshotId) ledger.snapshotIds = [snapshotId];
+      }
+    }
+  }
+}
+
+function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(identity.runId)) {
+    throw new Error("AWS qualification run id is malformed");
+  }
+  if (!/^[0-9a-f]{40}$/.test(identity.candidateSha)) {
+    throw new Error("AWS qualification candidate SHA must be exact");
+  }
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(identity.candidateWorker)) {
+    throw new Error("AWS qualification candidate Worker is malformed");
+  }
+  if (!/^[0-9a-f]{64}$/.test(identity.deploymentHash)) {
+    throw new Error("AWS qualification deployment hash must be exact");
+  }
+  if (!identity.owner.trim() || identity.owner.length > 256) {
+    throw new Error("AWS qualification owner is malformed");
+  }
+  if (!Number.isFinite(Date.parse(identity.expiresAt))) {
+    throw new Error("AWS qualification expiry is malformed");
+  }
+}
+
+function validateRunWindow(identity: AWSQualificationRunIdentity): void {
+  const expiresAt = Date.parse(identity.expiresAt);
+  const now = Date.now();
+  if (expiresAt <= now || expiresAt > now + awsQualificationMaxRunMs) {
+    throw new Error("AWS qualification expiry must be in the next 120 minutes");
+  }
+}
+
+function validateRequestShape(
+  request: AWSQualificationRequest,
+  region: string,
+): AWSQualificationRequest {
+  if (!request || typeof request !== "object" || Array.isArray(request)) {
+    throw new Error("AWS qualification request is malformed");
+  }
+  validateBoundedRequestInput(request);
+  const unknownKeys = Object.keys(request).filter((key) => !requestKeys.has(key));
+  if (unknownKeys.length > 0) {
+    throw new Error(`AWS qualification request has unknown field: ${unknownKeys[0]}`);
+  }
+  if (typeof request.opId !== "string" || !/^[0-9a-f-]{36}$/.test(request.opId)) {
+    throw new Error("AWS qualification opId is malformed");
+  }
+  if (request.region !== region) throw new Error("AWS qualification region is outside policy");
+  if (typeof request.action !== "string" || !request.action || request.action.length > 128) {
+    throw new Error("AWS qualification action is malformed");
+  }
+  if (
+    request.service !== "ec2" &&
+    request.service !== "servicequotas" &&
+    request.service !== "sts"
+  ) {
+    throw new Error("AWS qualification service is malformed");
+  }
+  const parameters = flatStringMap(request.parameters);
+  const normalized = {
+    opId: request.opId,
+    region: request.region,
+    service: request.service,
+    action: request.action,
+    parameters,
+  } satisfies AWSQualificationRequest;
+  const encoded = new TextEncoder().encode(canonicalJSON(normalized));
+  if (encoded.byteLength > maxRequestBytes) {
+    throw new Error("AWS qualification request exceeds 64 KiB");
+  }
+  return normalized;
+}
+
+function validateController(
+  controller: AWSQualificationControllerProps,
+  deploymentHash: string,
+): void {
+  validateControllerShape(controller);
+  if (controller.deploymentHash !== deploymentHash) {
+    throw new Error("AWS qualification controller is not bound to this deployment");
+  }
+}
+
+function validateControllerShape(controller: AWSQualificationControllerProps): void {
+  if (!/^[0-9a-f]{64}$/.test(controller.deploymentHash)) {
+    throw new Error("AWS qualification controller deployment hash is malformed");
+  }
+}
+
+function registryIdentity(
+  value: AWSQualificationRunIdentity | AWSQualificationRegistryRecord,
+): Pick<
+  AWSQualificationRegistryRecord,
+  "runId" | "candidateSha" | "candidateWorker" | "deploymentHash" | "expiresAt"
+> {
+  return {
+    runId: value.runId,
+    candidateSha: value.candidateSha,
+    candidateWorker: value.candidateWorker,
+    deploymentHash: value.deploymentHash,
+    expiresAt: value.expiresAt,
+  };
+}
+
+function authorityIdentity(env: AWSQualificationAuthorityEnv): { sha: string; version: string } {
+  const sha = env.CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA?.trim() ?? "";
+  const version = env.CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION?.trim() ?? "";
+  if (!/^[0-9a-f]{40}$/.test(sha)) {
+    throw new Error("AWS qualification authority SHA must be exact");
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/.test(version)) {
+    throw new Error("AWS qualification authority version is malformed");
+  }
+  return { sha, version };
+}
+
+async function qualificationPolicyHash(policy: AWSQualificationPolicy): Promise<string> {
+  return await sha256Hex(canonicalJSON(policy));
+}
+
+async function qualificationPhysicalKeyName(runId: string): Promise<string> {
+  return `cbxq-${(await sha256Hex(`key:${runId}`)).slice(0, 32)}`;
+}
+
+async function qualificationClientToken(runId: string, opId: string): Promise<string> {
+  return `cbxq-${(await sha256Hex(`instance:${runId}:${opId}`)).slice(0, 59)}`;
+}
+
+function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPolicy {
+  const accountId = env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID?.trim() ?? "";
+  const baseAmiId = env.CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID?.trim() ?? "";
+  const region = requireAWSRegion(env.CRABBOX_AWS_QUALIFICATION_REGION ?? "");
+  const securityGroupId = env.CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID?.trim() ?? "";
+  const subnetId = env.CRABBOX_AWS_QUALIFICATION_SUBNET_ID?.trim() ?? "";
+  const rootGB = Number(env.CRABBOX_AWS_QUALIFICATION_ROOT_GB ?? maxRootGB);
+  if (!/^\d{12}$/.test(accountId)) throw new Error("AWS qualification account id is malformed");
+  if (!/^ami-[a-z0-9]+$/.test(baseAmiId))
+    throw new Error("AWS qualification base AMI is malformed");
+  if (!/^sg-[a-z0-9]+$/.test(securityGroupId)) {
+    throw new Error("AWS qualification security group is malformed");
+  }
+  if (!/^subnet-[a-z0-9]+$/.test(subnetId)) {
+    throw new Error("AWS qualification subnet is malformed");
+  }
+  if (!Number.isInteger(rootGB) || rootGB < 8 || rootGB > maxRootGB) {
+    throw new Error("AWS qualification root volume limit must be 8 through 20 GiB");
+  }
+  return { accountId, baseAmiId, region, rootGB, securityGroupId, subnetId };
+}
+
+function authorityCredentials(env: AWSQualificationAuthorityEnv): AWSCredentials {
+  const accessKeyId = env.AWS_ACCESS_KEY_ID?.trim() ?? "";
+  const secretAccessKey = env.AWS_SECRET_ACCESS_KEY?.trim() ?? "";
+  if (!accessKeyId || !secretAccessKey) throw new Error("AWS authority credentials are missing");
+  const sessionToken = env.AWS_SESSION_TOKEN?.trim();
+  return { accessKeyId, secretAccessKey, ...(sessionToken ? { sessionToken } : {}) };
+}
+
+function qualificationRun(
+  env: AWSQualificationAuthorityEnv,
+  runId: string,
+): DurableObjectStub<AWSQualificationRun> {
+  return env.AWS_QUALIFICATION_RUNS.get(env.AWS_QUALIFICATION_RUNS.idFromName(runId));
+}
+
+function qualificationRegistry(
+  env: AWSQualificationAuthorityEnv,
+): DurableObjectStub<AWSQualificationRegistry> {
+  return env.AWS_QUALIFICATION_REGISTRY.get(
+    env.AWS_QUALIFICATION_REGISTRY.idFromName(registryObjectName),
+  );
+}
+
+function stringParameters(input: Record<string, unknown>): Record<string, string> {
+  const output: Record<string, string> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (typeof value !== "string" || key.length > 256 || value.length > maxRequestBytes) {
+      throw new Error(`AWS qualification parameter is malformed: ${key}`);
+    }
+    output[key] = value;
+  }
+  return output;
+}
+
+function flatStringMap(value: unknown): Record<string, string> {
+  if (!isPlainRecord(value)) {
+    throw new Error("AWS qualification parameters must be a flat string map");
+  }
+  const entries = Object.entries(value);
+  if (entries.length > 256) {
+    throw new Error("AWS qualification request has too many parameters");
+  }
+  const output: Record<string, string> = {};
+  for (const [key, entry] of entries) {
+    if (typeof entry !== "string" || key.length > 256) {
+      throw new Error(`AWS qualification parameter is malformed: ${key}`);
+    }
+    if (new TextEncoder().encode(entry).byteLength > maxRequestBytes) {
+      throw new Error("AWS qualification request exceeds 64 KiB");
+    }
+    output[key] = entry;
+  }
+  return output;
+}
+
+function validateBoundedRequestInput(value: unknown): void {
+  const pending: Array<{ depth: number; value: unknown }> = [{ depth: 0, value }];
+  const seen = new WeakSet<object>();
+  let bytes = 2;
+  let nodes = 0;
+  for (let index = 0; index < pending.length; index += 1) {
+    const entry = pending[index]!;
+    if (typeof entry.value === "string") {
+      bytes += boundedUTF8Length(entry.value);
+    } else if (
+      entry.value === null ||
+      typeof entry.value === "boolean" ||
+      typeof entry.value === "number"
+    ) {
+      bytes += String(entry.value).length;
+    } else if (typeof entry.value === "object" && !Array.isArray(entry.value)) {
+      if (seen.has(entry.value)) {
+        throw new Error("AWS qualification request contains a cycle");
+      }
+      if (entry.depth > 1) {
+        throw new Error("AWS qualification request nesting exceeds policy");
+      }
+      seen.add(entry.value);
+      const children = Object.entries(entry.value);
+      nodes += children.length;
+      if (nodes > maxRequestNodes) {
+        throw new Error("AWS qualification request is too complex");
+      }
+      for (const [key, child] of children) {
+        bytes += boundedUTF8Length(key) + 3;
+        pending.push({ depth: entry.depth + 1, value: child });
+      }
+    } else {
+      throw new Error("AWS qualification request contains an unsupported value");
+    }
+    if (bytes > maxRequestBytes) {
+      throw new Error("AWS qualification request exceeds 64 KiB");
+    }
+  }
+}
+
+function boundedUTF8Length(value: string): number {
+  if (value.length > maxRequestBytes) return maxRequestBytes + 1;
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function authorizedIDs(
+  input: Record<string, string>,
+  field: string,
+  owned: string[],
+): Record<string, unknown> {
+  const ids = indexedValues(input, field);
+  if (ids.length === 0 || ids.some((id) => !owned.includes(id))) {
+    throw new Error(`AWS qualification ${field} is outside the run ledger`);
+  }
+  return Object.fromEntries(ids.map((id, index) => [`${field}.${index + 1}`, id]));
+}
+
+function authorizedSingleID(
+  input: Record<string, string>,
+  field: string,
+  owned: string[],
+): Record<string, unknown> {
+  requireOwned(input[field], owned, field);
+  return { [field]: input[field] };
+}
+
+function indexedValues(input: Record<string, string>, field: string): string[] {
+  const values: string[] = [];
+  for (let index = 1; index <= 128; index += 1) {
+    const value = input[`${field}.${index}`];
+    if (value) values.push(value);
+  }
+  return values;
+}
+
+function indexedUnknownValues(input: Record<string, unknown>, field: string): string[] {
+  const values: string[] = [];
+  for (let index = 1; index <= 128; index += 1) {
+    const value = input[`${field}.${index}`];
+    if (typeof value === "string" && value) values.push(value);
+  }
+  return values;
+}
+
+function requireOwned(value: string | undefined, owned: string[], label: string): void {
+  if (!value || !owned.includes(value)) {
+    throw new Error(`AWS qualification ${label} is outside the run ledger`);
+  }
+}
+
+function requireExact(value: string | undefined, expected: string, label: string): void {
+  if (value !== expected) throw new Error(`AWS qualification ${label} is outside policy`);
+}
+
+function boundedName(value: string | undefined): string {
+  const name = boundedText(value, 128);
+  if (!name || !/^[A-Za-z0-9() ./_-]+$/.test(name)) {
+    throw new Error("AWS qualification image name is malformed");
+  }
+  return name;
+}
+
+function boundedText(value: string | undefined, maximum: number): string {
+  const text = value ?? "";
+  if (text.length > maximum) throw new Error("AWS qualification text exceeds policy");
+  return text;
+}
+
+function allLedgerIDs(ledger: AWSQualificationLedger): Set<string> {
+  return new Set([
+    ...ledger.imageIds,
+    ...ledger.instanceIds,
+    ...ledger.keyPairIds,
+    ...ledger.snapshotIds,
+    ...ledger.volumeIds,
+  ]);
+}
+
+function ownedWithRetired(active: string[], retired: string[]): string[] {
+  return [...new Set([...active, ...retired])];
+}
+
+function boundedIDs(ids: string[], maximum: number, label: string): string[] {
+  const unique = [...new Set(ids.filter(Boolean))];
+  if (unique.length > maximum) {
+    throw new Error(`AWS qualification ${label} exceed ledger bounds`);
+  }
+  return unique;
+}
+
+function retireID(
+  active: string[],
+  retired: string[],
+  id: string,
+  maximum: number,
+  label: string,
+): void {
+  if (!id || (!active.includes(id) && !retired.includes(id))) return;
+  const activeIndex = active.indexOf(id);
+  if (activeIndex >= 0) active.splice(activeIndex, 1);
+  const next = boundedIDs([...retired, id], maximum, `retired ${label}`);
+  retired.splice(0, retired.length, ...next);
+}
+
+function retireInstance(ledger: AWSQualificationLedger, instanceId: string): void {
+  retireID(ledger.instanceIds, ledger.retiredInstanceIds, instanceId, maxLaunches, "instances");
+  ledger.terminatingInstanceIds = ledger.terminatingInstanceIds.filter((id) => id !== instanceId);
+}
+
+function isMissingInstance(result: AWSQualificationResponse): boolean {
+  return result.status >= 300 && result.body.includes("InvalidInstanceID.NotFound");
+}
+
+function retireDefinitelyAbsentResource(
+  ledger: AWSQualificationLedger,
+  request: AWSQualificationRequest,
+  result: AWSQualificationResponse,
+): boolean {
+  if (request.action === "DeregisterImage" && result.body.includes("InvalidAMIID.NotFound")) {
+    retireID(
+      ledger.imageIds,
+      ledger.retiredImageIds,
+      asString(request.parameters["ImageId"]),
+      maxCandidateOperations,
+      "images",
+    );
+    return true;
+  }
+  if (request.action === "DeleteSnapshot" && result.body.includes("InvalidSnapshot.NotFound")) {
+    retireID(
+      ledger.snapshotIds,
+      ledger.retiredSnapshotIds,
+      asString(request.parameters["SnapshotId"]),
+      maxCandidateOperations,
+      "snapshots",
+    );
+    return true;
+  }
+  if (request.action === "DeleteKeyPair" && result.body.includes("InvalidKeyPair.NotFound")) {
+    retireID(
+      ledger.keyPairIds,
+      ledger.retiredKeyPairIds,
+      asString(request.parameters["KeyPairId"]),
+      maxCandidateOperations,
+      "key pairs",
+    );
+    if (ledger.keyPairIds.length === 0) ledger.keyPairNames = [];
+    return true;
+  }
+  return false;
+}
+
+function emptyLedger(launchCount = 0): AWSQualificationLedger {
+  return {
+    imageIds: [],
+    instanceIds: [],
+    keyPairIds: [],
+    keyPairNames: [],
+    retiredImageIds: [],
+    retiredInstanceIds: [],
+    retiredKeyPairIds: [],
+    retiredSnapshotIds: [],
+    snapshotIds: [],
+    terminatingInstanceIds: [],
+    volumeIds: [],
+    launchCount,
+  };
+}
+
+function mergeLedgers(
+  left: AWSQualificationLedger,
+  right: AWSQualificationLedger,
+): AWSQualificationLedger {
+  const retiredImageIds = boundedIDs(
+    [...left.retiredImageIds, ...right.retiredImageIds],
+    maxCandidateOperations,
+    "retired images",
+  );
+  const retiredInstanceIds = boundedIDs(
+    [...left.retiredInstanceIds, ...right.retiredInstanceIds],
+    maxLaunches,
+    "retired instances",
+  );
+  const retiredKeyPairIds = boundedIDs(
+    [...left.retiredKeyPairIds, ...right.retiredKeyPairIds],
+    maxCandidateOperations,
+    "retired key pairs",
+  );
+  const retiredSnapshotIds = boundedIDs(
+    [...left.retiredSnapshotIds, ...right.retiredSnapshotIds],
+    maxCandidateOperations,
+    "retired snapshots",
+  );
+  const keyPairIds = [...new Set([...left.keyPairIds, ...right.keyPairIds])].filter(
+    (id) => !retiredKeyPairIds.includes(id),
+  );
+  return {
+    imageIds: [...new Set([...left.imageIds, ...right.imageIds])].filter(
+      (id) => !retiredImageIds.includes(id),
+    ),
+    instanceIds: [...new Set([...left.instanceIds, ...right.instanceIds])].filter(
+      (id) => !retiredInstanceIds.includes(id),
+    ),
+    keyPairIds,
+    keyPairNames:
+      keyPairIds.length > 0 ? [...new Set([...left.keyPairNames, ...right.keyPairNames])] : [],
+    retiredImageIds,
+    retiredInstanceIds,
+    retiredKeyPairIds,
+    retiredSnapshotIds,
+    snapshotIds: [...new Set([...left.snapshotIds, ...right.snapshotIds])].filter(
+      (id) => !retiredSnapshotIds.includes(id),
+    ),
+    terminatingInstanceIds: boundedIDs(
+      [...left.terminatingInstanceIds, ...right.terminatingInstanceIds],
+      maxActiveInstances,
+      "terminating instances",
+    ),
+    volumeIds: [...new Set([...left.volumeIds, ...right.volumeIds])],
+    launchCount: Math.max(left.launchCount, right.launchCount),
+  };
+}
+
+function awsXMLRoot(body: string, action: string): Record<string, unknown> {
+  const parsed = record(parser.parse(body));
+  return record(parsed[`${action}Response`] ?? parsed["Response"] ?? parsed);
+}
+
+async function boundedResponse(response: Response): Promise<AWSQualificationResponse> {
+  const body = await response.text();
+  if (new TextEncoder().encode(body).byteLength > maxResponseBytes) {
+    throw new Error("AWS qualification response exceeds 64 KiB");
+  }
+  return { status: response.status, body };
+}
+
+function assertLifecycleCapacity(
+  request: AWSQualificationRequest,
+  ledger: AWSQualificationLedger,
+  pending: Map<string, AWSQualificationIntent>,
+): void {
+  const pendingActions = new Set([...pending.values()].map((intent) => intent.request.action));
+  if (request.action === "RunInstances") {
+    if (ledger.instanceIds.length >= maxActiveInstances || pendingActions.has("RunInstances")) {
+      throw new Error("AWS qualification allows one active instance");
+    }
+    if (ledger.launchCount >= maxLaunches) {
+      throw new Error("AWS qualification launch budget is exhausted");
+    }
+  }
+  if (
+    request.action === "CreateImage" &&
+    (ledger.imageIds.length >= maxActiveImages ||
+      ledger.snapshotIds.length >= maxActiveSnapshots ||
+      pendingActions.has("CreateImage"))
+  ) {
+    throw new Error("AWS qualification allows one active checkpoint image");
+  }
+  if (
+    request.action === "ImportKeyPair" &&
+    (ledger.keyPairIds.length > 0 || pendingActions.has("ImportKeyPair"))
+  ) {
+    throw new Error("AWS qualification allows one active key pair");
+  }
+}
+
+function hasOwnedResources(ledger: AWSQualificationLedger): boolean {
+  return (
+    ledger.imageIds.length > 0 ||
+    ledger.instanceIds.length > 0 ||
+    ledger.keyPairIds.length > 0 ||
+    ledger.snapshotIds.length > 0 ||
+    ledger.volumeIds.length > 0
+  );
+}
+
+function resourceCounts(ledger: AWSQualificationLedger): AWSQualificationResourceCounts {
+  return {
+    images: ledger.imageIds.length,
+    instances: ledger.instanceIds.length,
+    keyPairs: ledger.keyPairIds.length,
+    snapshots: ledger.snapshotIds.length,
+    volumes: ledger.volumeIds.length,
+  };
+}
+
+function appendBoundedEvidence<T>(
+  entries: T[],
+  entry: T,
+  limit: number,
+): { entries: T[]; truncated: number } {
+  const next = [...entries, entry];
+  const truncated = Math.max(0, next.length - limit);
+  return {
+    entries: truncated > 0 ? next.slice(truncated) : next,
+    truncated,
+  };
+}
+
+function evidenceDenialReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("outside the run ledger")) return "resource-not-owned";
+  if (message.includes("outside policy") || message.includes("not allowed")) return "policy-denied";
+  if (message.includes("wrong account")) return "account-mismatch";
+  if (message.includes("limit") || message.includes("allows one")) return "capacity-denied";
+  if (message.includes("expired")) return "run-expired";
+  return "request-denied";
+}
+
+function evidenceAction(action: string): string {
+  if (
+    allowedEC2Actions.has(action) ||
+    action === "GetCallerIdentity" ||
+    action === "GetServiceQuota"
+  ) {
+    return action;
+  }
+  return "DeniedAction";
+}
+
+function evidenceFailureCode(failure: string): string {
+  if (failure.startsWith("run-tag inventory")) return "inventory-failed";
+  if (failure.startsWith("Describe")) return "verification-failed";
+  if (failure.includes("account verification")) return "account-verification-failed";
+  if (failure.includes("reconciliation")) return "reconciliation-failed";
+  return "cleanup-failed";
+}
+
+function decodePublicKeyMaterial(material: string): string {
+  if (!material || material.length > 24 * 1024 || !/^[A-Za-z0-9+/]+={0,2}$/.test(material)) {
+    throw new Error("AWS qualification public key material is outside policy");
+  }
+  let decoded = "";
+  try {
+    decoded = atob(material);
+  } catch {
+    throw new Error("AWS qualification public key material is not base64");
+  }
+  if (
+    new TextEncoder().encode(decoded).byteLength > 16 * 1024 ||
+    !/^ssh-(?:ed25519|rsa) [A-Za-z0-9+/]+={0,3}(?: |$)/.test(decoded)
+  ) {
+    throw new Error("AWS qualification decoded public key is outside policy");
+  }
+  return decoded;
+}
+
+function publicKeyIdentity(value: string): string {
+  return value.trim().split(/\s+/).slice(0, 2).join(" ");
+}
+
+function awsTagMap(value: unknown): Map<string, string> {
+  return new Map(
+    items(record(value)["item"])
+      .map(record)
+      .map((tag) => [asString(tag["key"]), asString(tag["value"])] as const)
+      .filter(([key]) => key),
+  );
+}
+
+function imageSnapshotIDs(image: Record<string, unknown>): string[] {
+  return items(record(image["blockDeviceMapping"])["item"])
+    .map(record)
+    .map((mapping) => asString(record(mapping["ebs"])["snapshotId"]))
+    .filter(Boolean);
+}
+
+function reservationsFromXML(body: string): Record<string, unknown>[] {
+  return items(record(awsXMLRoot(body, "DescribeInstances")["reservationSet"])["item"]).map(record);
+}
+
+function canonicalJSON(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJSON).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .toSorted(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJSON(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function items(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  return value === undefined ? [] : [value];
+}
+
+function asString(value: unknown): string {
+  return typeof value === "string"
+    ? value
+    : value === undefined || value === null
+      ? ""
+      : String(value);
+}
+
+function xmlEscape(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function isRetryableReconciliationError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("not uniquely visible") ||
+    message.includes("could not be verified") ||
+    message.includes("verification failed: http 5")
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

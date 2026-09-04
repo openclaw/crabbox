@@ -230,12 +230,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		return result, activityErr
 	}
 
-	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, nil)
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
 		return finishResult(RunResult{}), err
 	}
-	command := intent.Argv("bash", "-lc")
-	commandText := commandScript(command)
+	commandText := intent.ShellCommand("bash", "-lc")
 	commandEnv, strippedAuthEnv := vercelSandboxCommandEnv(req.Env)
 	if len(strippedAuthEnv) > 0 {
 		fmt.Fprintf(b.rt.Stderr, "warning: provider=%s did not forward provider authentication variables: %s\n", providerName, strings.Join(strippedAuthEnv, ","))
@@ -1011,10 +1010,6 @@ func vercelSandboxCommandEnv(env map[string]string) (map[string]string, []string
 	}
 	slices.Sort(stripped)
 	return out, stripped
-}
-
-func commandScript(command []string) string {
-	return shellScriptFromArgv(command)
 }
 
 type vercelSandboxNotFoundError struct {
