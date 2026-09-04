@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Preserve literal SmolVM and Upstash Box profile arguments, accept inferred single-string shell commands, and share source rendering without adding another shell. Thanks @steipete.
+- Preserve literal SmolVM and Upstash Box profile arguments, accept inferred single-string shell commands, and share source rendering without adding another shell. [PR 1833](https://github.com/openclaw/crabbox/pull/1833). Thanks @steipete.
 - Preserve literal profile arguments through CodeSandbox, OpenComputer, and Docker Sandbox execution, sharing command-intent parsing without changing provider shells or environment transports. [PR 1830](https://github.com/openclaw/crabbox/pull/1830). Thanks @steipete.
 
 - Reject changed Azure VM identities during acquisition readiness and use identity-checked VM/companion cleanup for failed acquisitions instead of blind name-based rollback. [PR 1827](https://github.com/openclaw/crabbox/pull/1827). Thanks @steipete.
