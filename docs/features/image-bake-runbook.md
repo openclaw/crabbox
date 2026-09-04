@@ -676,6 +676,75 @@ crabbox image create \
 crabbox image promote ami-1234567890abcdef0 --target macos --region us-east-1 --json
 ```
 
+## Pre-merge Linux AWS qualification
+
+The reviewer-gated `Image qualification` workflow qualifies an exact open,
+same-repository pull request against the credential-isolated authority described
+in [AWS image qualification](../behavior/aws-image-qualification.md). It is
+stacked on that authority and is not a general pull-request CI job.
+
+The workflow has separate trust zones:
+
+- `authorize` binds one first attempt to the protected default-branch workflow,
+  open pull request, and exact candidate SHA.
+- `build` checks out and builds the candidate without AWS or Cloudflare
+  credentials. Its CLI and Worker bundle are covered by an immutable digest
+  manifest.
+- `deploy-enroll` is environment-protected. It checks out only protected
+  tooling, treats the candidate bundle as data, deploys through the Cloudflare
+  API, reads the resulting Worker version and settings back, rechecks the pull
+  request, and claims the singleton authority registry.
+- `execute` receives only the isolated coordinator URL and its ephemeral admin
+  and shared tokens. It receives no AWS, Cloudflare, authority-controller, or
+  production credentials.
+- `finalize` always runs behind the protected environment. It fences candidate
+  mutation, finalizes AWS resources, deletes the candidate Fleet Durable Object
+  and Worker, verifies absence, repeats finalization idempotently, retires the
+  registry record, and deletes the transient controller.
+
+The exact live proof seeds the fixed base AMI as the prior default, verifies
+that a shared-token request to `promote-cas` returns 403 without changing the
+catalog, and records a Fast Snapshot Restore rejection before signer dispatch.
+The candidate publisher then boots source, candidate-image, and promoted-image
+leases sequentially. A trusted `CRABBOX_BIN` adapter delegates every command to
+the exact candidate CLI and returns exit 86 only after the promoted smoke
+succeeds, exercising the candidate's compare-and-swap rollback and failed
+revision retirement. A credentialless child is then killed while authority
+owned image state remains for protected cleanup.
+
+The authority and candidate configuration fix the run to Linux, one
+`t3.small`/`t3a.small` on-demand instance at a time, exactly three launches,
+one active image/checkpoint set, encrypted bounded root storage, no instance
+profile, no Fast Snapshot Restore, a $10 usage ceiling, one attempt, and an
+absolute 120-minute expiry. Execution stops after 80 minutes so protected
+cleanup retains at least 20 minutes.
+
+The independent `Image qualification reaper` runs after workflow completion
+and hourly. It discovers the active run from the durable registry rather than
+workflow artifacts. If the controller Worker disappeared, it recovers the
+deployment hash from the isolated candidate's service-binding settings,
+recreates only the protected controller, and performs the same idempotent
+finalization and zero-residue checks.
+
+Before enabling the workflow, maintainers must create the protected
+`image-qualification` GitHub environment and configure:
+
+- secret `CLOUDFLARE_API_TOKEN`, limited to deploying, inspecting, and deleting
+  the qualification candidate/controller Workers and their Durable Objects;
+- secret `CRABBOX_IMAGE_QUALIFICATION_CONTROLLER_TOKEN`;
+- variable `CLOUDFLARE_ACCOUNT_ID`;
+- variables `CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_SHA`,
+  `CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_VERSION`,
+  `CRABBOX_IMAGE_QUALIFICATION_AWS_REGION`,
+  `CRABBOX_IMAGE_QUALIFICATION_SUBNET_ID`,
+  `CRABBOX_IMAGE_QUALIFICATION_SECURITY_GROUP_ID`,
+  `CRABBOX_IMAGE_QUALIFICATION_BASE_AMI_ID`, and
+  `CRABBOX_IMAGE_QUALIFICATION_ROOT_GB`.
+
+The non-public authority Worker and its dedicated sandbox-account IAM deny
+contract must already be deployed. This repository change creates no
+environment, secret, Worker, Durable Object, AWS resource, or spend by itself.
+
 ## Hetzner status
 
 Hetzner image bytes belong in the Hetzner project. Crabbox can boot a configured

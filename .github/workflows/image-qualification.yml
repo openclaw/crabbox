@@ -1,0 +1,237 @@
+name: Image qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Open same-repository pull request number
+        required: true
+        type: string
+      candidate_sha:
+        description: Exact 40-character candidate commit SHA
+        required: true
+        type: string
+      confirm:
+        description: Type qualify to authorize one paid attempt
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: image-qualification
+  cancel-in-progress: false
+
+env:
+  QUALIFICATION_PULL_REQUEST: ${{ inputs.pull_request }}
+  QUALIFICATION_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+  QUALIFICATION_CONFIRM: ${{ inputs.confirm }}
+  QUALIFICATION_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+  QUALIFICATION_WORKFLOW_SHA: ${{ github.workflow_sha }}
+
+jobs:
+  authorize:
+    name: Authorize exact candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      candidate_sha: ${{ steps.authorize.outputs.candidate_sha }}
+    steps:
+      - name: Check out protected tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Validate protected workflow and open pull request
+        id: authorize
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/image-qualification-control.mjs authorize
+
+  build:
+    name: Build credentialless candidate
+    needs: authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out protected tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: harness
+          persist-credentials: false
+      - name: Check out exact candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.authorize.outputs.candidate_sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: candidate/go.mod
+          cache: false
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: false
+      - name: Build exact candidate without credentials
+        env:
+          ARTIFACT: ${{ runner.temp }}/image-qualification-candidate
+        run: |
+          set -euo pipefail
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN CLOUDFLARE_API_TOKEN; do
+            [[ -z "${!name+x}" ]]
+          done
+          mkdir -p "$ARTIFACT/bin" "$ARTIFACT/worker" "$ARTIFACT/candidate/scripts"
+          (cd candidate && go build -trimpath -o "$ARTIFACT/bin/crabbox" ./cmd/crabbox)
+          npm ci --prefix candidate/worker --ignore-scripts
+          (
+            cd candidate/worker
+            npm exec --offline -- wrangler deploy --dry-run --outdir "$ARTIFACT/worker" --config wrangler.jsonc
+          )
+          cp candidate/scripts/mint-aws-devtools-image.sh \
+            candidate/scripts/install-linux-developer-tools.sh \
+            candidate/scripts/linux-readiness.generated.sh \
+            "$ARTIFACT/candidate/scripts/"
+          chmod 700 "$ARTIFACT/bin/crabbox" "$ARTIFACT/candidate/scripts/"*.sh
+          QUALIFICATION_CANDIDATE_SHA="${{ needs.authorize.outputs.candidate_sha }}" \
+          QUALIFICATION_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" \
+            node harness/scripts/image-qualification-control.mjs manifest candidate "$ARTIFACT"
+      - name: Upload immutable candidate bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-qualification-candidate-${{ github.run_id }}
+          path: ${{ runner.temp }}/image-qualification-candidate
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy-enroll:
+    name: Protected deploy and enroll
+    needs: [authorize, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: image-qualification
+    outputs:
+      candidate_url: ${{ steps.deploy.outputs.candidate_url }}
+      candidate_admin_token: ${{ steps.deploy.outputs.candidate_admin_token }}
+      candidate_shared_token: ${{ steps.deploy.outputs.candidate_shared_token }}
+      region: ${{ steps.deploy.outputs.region }}
+      base_ami_id: ${{ steps.deploy.outputs.base_ami_id }}
+    steps:
+      - name: Check out protected tooling only
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Download candidate bytes as inert data
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: image-qualification-candidate-${{ github.run_id }}
+          path: ${{ runner.temp }}/image-qualification-candidate
+      - name: Revalidate, deploy, read back, and enroll
+        id: deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          QUALIFICATION_CONTROLLER_TOKEN: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_CONTROLLER_TOKEN }}
+          QUALIFICATION_AUTHORITY_SHA: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_SHA }}
+          QUALIFICATION_AUTHORITY_VERSION: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_VERSION }}
+          QUALIFICATION_AWS_REGION: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AWS_REGION }}
+          QUALIFICATION_SUBNET_ID: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_SUBNET_ID }}
+          QUALIFICATION_SECURITY_GROUP_ID: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_SECURITY_GROUP_ID }}
+          QUALIFICATION_BASE_AMI_ID: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_BASE_AMI_ID }}
+          QUALIFICATION_ROOT_GB: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ROOT_GB }}
+          QUALIFICATION_ARTIFACT_DIR: ${{ runner.temp }}/image-qualification-candidate
+          QUALIFICATION_PROOF_DIR: ${{ runner.temp }}/image-qualification-deploy-proof
+        run: node scripts/image-qualification-control.mjs deploy
+      - name: Upload deployment evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-qualification-deploy-${{ github.run_id }}
+          path: ${{ runner.temp }}/image-qualification-deploy-proof
+          if-no-files-found: warn
+          retention-days: 30
+
+  execute:
+    name: Execute candidate without cloud credentials
+    needs: [authorize, deploy-enroll]
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    steps:
+      - name: Check out protected executor
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: harness
+          persist-credentials: false
+      - name: Download exact candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: image-qualification-candidate-${{ github.run_id }}
+          path: ${{ runner.temp }}/image-qualification-candidate
+      - name: Run publisher rollback qualification
+        env:
+          QUALIFICATION_CANDIDATE_URL: ${{ needs.deploy-enroll.outputs.candidate_url }}
+          QUALIFICATION_ADMIN_TOKEN: ${{ needs.deploy-enroll.outputs.candidate_admin_token }}
+          QUALIFICATION_SHARED_TOKEN: ${{ needs.deploy-enroll.outputs.candidate_shared_token }}
+          QUALIFICATION_AWS_REGION: ${{ needs.deploy-enroll.outputs.region }}
+          QUALIFICATION_BASE_AMI_ID: ${{ needs.deploy-enroll.outputs.base_ami_id }}
+          QUALIFICATION_ARTIFACT_DIR: ${{ runner.temp }}/image-qualification-candidate
+          QUALIFICATION_PROOF_DIR: ${{ runner.temp }}/image-qualification-execute-proof
+        run: |
+          set +e
+          harness/scripts/image-qualification-execute.sh
+          status=$?
+          set -e
+          [[ "$status" -eq 137 ]]
+      - name: Upload sanitized execution evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-qualification-execute-${{ github.run_id }}
+          path: ${{ runner.temp }}/image-qualification-execute-proof
+          if-no-files-found: warn
+          retention-days: 30
+
+  finalize:
+    name: Protected finalization and zero-residue proof
+    if: always()
+    needs: [authorize, build, deploy-enroll, execute]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: image-qualification
+    steps:
+      - name: Check out protected tooling only
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Download execution evidence as inert data
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: image-qualification-execute-${{ github.run_id }}
+          path: ${{ runner.temp }}/image-qualification-execute-proof
+      - name: Revalidate identity and finalize idempotently
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          QUALIFICATION_CONTROLLER_TOKEN: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_CONTROLLER_TOKEN }}
+          QUALIFICATION_PROOF_DIR: ${{ runner.temp }}/image-qualification-final-proof
+          QUALIFICATION_EXECUTION_PROOF_DIR: ${{ runner.temp }}/image-qualification-execute-proof
+        run: node scripts/image-qualification-control.mjs finalize
+      - name: Upload bounded final evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-qualification-final-${{ github.run_id }}
+          path: ${{ runner.temp }}/image-qualification-final-proof
+          if-no-files-found: error
+          retention-days: 30
