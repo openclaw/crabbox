@@ -685,14 +685,17 @@ stacked on that authority and is not a general pull-request CI job.
 
 The workflow has separate trust zones:
 
-- `Image qualification candidate` runs only in the unprivileged
-  `pull_request` cache scope for same-repository pull requests. It builds the
-  exact candidate without AWS or Cloudflare credentials and publishes a
-  one-day CLI and Worker bundle covered by an immutable digest manifest.
 - `authorize` binds one first attempt to the protected default-branch workflow,
-  open pull request, exact candidate SHA, and one successful artifact from the
-  matching unprivileged build. The pull request base must equal the protected
-  workflow SHA, so a stale candidate must be rebased and rebuilt.
+  open same-repository pull request, and exact candidate SHA. The pull request
+  base must equal the protected workflow SHA, so a stale candidate must be
+  rebased before qualification.
+- `build-candidate` is a credentialless job in that protected workflow. Its
+  immutable commands explicitly check out the authorized candidate SHA, disable
+  dependency caches and package hooks, and produce the CLI and Worker bundle.
+- `seal-candidate` starts on a fresh credentialless runner, checks out protected
+  tooling again, treats the unsealed bundle as inert data, and publishes the
+  one-day manifest-covered artifact. Later jobs accept only that artifact ID
+  and digest from the current first-attempt protected workflow run.
 - `admit` runs without cloud credentials before environment approval. Trusted
   tooling verifies the exact artifact manifest and rejects publishers that do
   not implement injectable CLI delegation, pre-promotion candidate teardown,
@@ -709,9 +712,9 @@ The workflow has separate trust zones:
   settings, registry claim, and authority attestation. Its execution-manifest
   digest binds the deployed version to the candidate, deployment, authority,
   policy, and enrollment timestamps.
-- `execute` receives only the isolated coordinator URL and its ephemeral admin
-  and shared tokens. It receives no AWS, Cloudflare, authority-controller, or
-  production credentials.
+- `execute` receives only the relay URL and its distinct ephemeral executor
+  token. Candidate admin/shared tokens stay in the relay. The job receives no
+  AWS, Cloudflare, authority-controller, or production credentials.
 - `finalize` always runs behind the protected environment. It fences candidate
   mutation, finalizes AWS resources, deletes the candidate Fleet Durable Object
   and Worker, verifies absence, repeats finalization idempotently, retires the

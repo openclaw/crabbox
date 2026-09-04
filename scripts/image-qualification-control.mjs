@@ -16,8 +16,7 @@ const relayNamePattern = /^crabbox-image-qualification-relay-[0-9]+-[0-9]+$/;
 const maxRunMs = 120 * 60 * 1000;
 const controllerName = "crabbox-image-qualification-controller";
 const authorityName = "crabbox-aws-qualification-authority";
-const candidateWorkflowFile = "image-qualification-candidate.yml";
-const candidateWorkflowPath = `.github/workflows/${candidateWorkflowFile}`;
+const qualificationWorkflowPath = ".github/workflows/image-qualification.yml";
 const controllerSource = path.join(root, "scripts/image-qualification-controller-worker.mjs");
 const relaySource = path.join(root, "scripts/image-qualification-relay-worker.mjs");
 
@@ -182,60 +181,51 @@ async function github(pathname) {
   return await response.json();
 }
 
-export function workflowRunPathMatches(value, expected) {
+export function workflowRunPathMatches(value, expected, branch) {
   if (value === expected) return true;
-  if (typeof value !== "string" || !value.startsWith(`${expected}@`)) return false;
-  return /^refs\/(?:heads\/[A-Za-z0-9._/-]+|pull\/[1-9][0-9]*\/(?:head|merge))$/.test(
-    value.slice(expected.length + 1),
-  );
+  return value === `${expected}@refs/heads/${branch}`;
 }
 
-async function candidateArtifact(repository, number, candidateSha) {
-  const query = new URLSearchParams({
-    event: "pull_request",
-    head_sha: candidateSha,
-    status: "completed",
-    per_page: "100",
-  });
-  const response = await github(
-    `/repos/${repository}/actions/workflows/${encodeURIComponent(candidateWorkflowFile)}/runs?${query}`,
+export function normalizeArtifactDigest(value) {
+  const digest = String(value ?? "").trim().toLowerCase();
+  if (/^[0-9a-f]{64}$/.test(digest)) return `sha256:${digest}`;
+  if (/^sha256:[0-9a-f]{64}$/.test(digest)) return digest;
+  throw new Error("candidate artifact digest is absent or invalid");
+}
+
+async function candidateArtifact(repository, workflowSha, defaultBranch) {
+  const artifactDigest = normalizeArtifactDigest(
+    required("QUALIFICATION_CANDIDATE_ARTIFACT_DIGEST"),
   );
-  const runs = (response.workflow_runs ?? [])
-    .filter(
-      (run) =>
-        run.event === "pull_request" &&
-        run.conclusion === "success" &&
-        run.head_sha === candidateSha &&
-        run.head_repository?.full_name === repository &&
-        workflowRunPathMatches(run.path, candidateWorkflowPath) &&
-        run.pull_requests?.some((pull) => String(pull.number) === number),
-    )
-    .sort((left, right) => right.id - left.id);
-  if (runs.length === 0) {
-    throw new Error("exact candidate build is absent");
+  const artifactId = required("QUALIFICATION_CANDIDATE_ARTIFACT_ID", /^[1-9][0-9]*$/);
+  const runId = required("QUALIFICATION_CANDIDATE_RUN_ID", /^[1-9][0-9]*$/);
+  if (runId !== required("GITHUB_RUN_ID", /^[1-9][0-9]*$/)) {
+    throw new Error("candidate artifact is not from this protected workflow run");
   }
-  const run = runs[0];
-  const artifactResponse = await github(
-    `/repos/${repository}/actions/runs/${run.id}/artifacts?per_page=100`,
-  );
-  const artifacts = (artifactResponse.artifacts ?? []).filter(
-    (artifact) =>
-      artifact.name === `image-qualification-candidate-${run.id}` &&
-      artifact.expired === false &&
-      artifact.workflow_run?.id === run.id &&
-      artifact.workflow_run?.head_sha === candidateSha,
-  );
-  if (artifacts.length !== 1) {
-    throw new Error("exact candidate artifact is absent or ambiguous");
-  }
-  const artifact = artifacts[0];
-  if (!/^sha256:[0-9a-f]{64}$/.test(artifact.digest ?? "")) {
-    throw new Error("candidate artifact digest is absent");
+  const [run, artifact] = await Promise.all([
+    github(`/repos/${repository}/actions/runs/${runId}`),
+    github(`/repos/${repository}/actions/artifacts/${artifactId}`),
+  ]);
+  if (
+    String(run.id) !== runId ||
+    run.run_attempt !== 1 ||
+    run.event !== "workflow_dispatch" ||
+    run.head_sha !== workflowSha ||
+    run.head_repository?.full_name !== repository ||
+    !workflowRunPathMatches(run.path, qualificationWorkflowPath, defaultBranch) ||
+    String(artifact.id) !== artifactId ||
+    artifact.name !== `image-qualification-candidate-${runId}` ||
+    artifact.expired !== false ||
+    artifact.digest !== artifactDigest ||
+    String(artifact.workflow_run?.id) !== runId ||
+    artifact.workflow_run?.head_sha !== workflowSha
+  ) {
+    throw new Error("candidate build or artifact changed");
   }
   return {
-    artifactDigest: artifact.digest,
-    artifactId: String(artifact.id),
-    runId: String(run.id),
+    artifactDigest,
+    artifactId,
+    runId,
   };
 }
 
@@ -265,20 +255,7 @@ export async function verifyCandidateIdentity({ artifact = false, cleanup = fals
     branch.sha === workflowSha;
   if (!exact) throw new Error("pull request, candidate SHA, or protected workflow SHA changed");
   if (!artifact) return { candidateSha, number, repository, workflowSha };
-  const candidate = await candidateArtifact(repository, number, candidateSha);
-  const expected = {
-    artifactDigest: process.env.QUALIFICATION_CANDIDATE_ARTIFACT_DIGEST?.trim(),
-    artifactId: process.env.QUALIFICATION_CANDIDATE_ARTIFACT_ID?.trim(),
-    runId: process.env.QUALIFICATION_CANDIDATE_RUN_ID?.trim(),
-  };
-  if (
-    Object.values(expected).some(Boolean) &&
-    (candidate.artifactDigest !== expected.artifactDigest ||
-      candidate.artifactId !== expected.artifactId ||
-      candidate.runId !== expected.runId)
-  ) {
-    throw new Error("candidate build or artifact changed");
-  }
+  const candidate = await candidateArtifact(repository, workflowSha, defaultBranch);
   return { candidateSha, number, repository, workflowSha, ...candidate };
 }
 
@@ -1483,10 +1460,7 @@ function writeEvidence(result) {
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (command === "authorize") {
-    const result = await verifyCandidateIdentity({ artifact: true });
-    appendOutput("candidate_artifact_digest", result.artifactDigest);
-    appendOutput("candidate_artifact_id", result.artifactId);
-    appendOutput("candidate_run_id", result.runId);
+    const result = await verifyCandidateIdentity();
     appendOutput("candidate_sha", result.candidateSha);
     return;
   }
