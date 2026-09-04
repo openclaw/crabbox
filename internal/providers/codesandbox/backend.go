@@ -179,10 +179,11 @@ func (b *codeSandboxBackend) Run(ctx context.Context, req RunRequest) (result Ru
 		return result, nil
 	}
 
-	command, err := buildCommand(req.Command, req.ShellMode)
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
 		return finishResult(RunResult{}), err
 	}
+	command := intent.Argv("bash", "-lc")
 	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve literal profile arguments through CodeSandbox, OpenComputer, and Docker Sandbox execution, sharing command-intent parsing without changing provider shells or environment transports. Thanks @steipete.
+
 - Report SmolVM decoder, file-write and extraction failures instead of false upload success, isolate temporary upload files, and preserve existing files when decoding fails. [PR 1826](https://github.com/openclaw/crabbox/pull/1826). Thanks @steipete.
 - Stop direct AWS, Azure, GCP, and Hetzner bootstrap retries from allocating another machine when rollback reports a cleanup failure, preserving both the original failure and cleanup diagnostics. [PR 1819](https://github.com/openclaw/crabbox/pull/1819). Thanks @steipete.
 - Reject inconsistent Hetzner creation/readiness identities before SSH, and keep failed-acquisition cleanup bound to the original server and key; share exact ID/name validation with RunPod. [PR 1821](https://github.com/openclaw/crabbox/pull/1821). Thanks @steipete.
