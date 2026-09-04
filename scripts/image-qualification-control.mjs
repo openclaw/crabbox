@@ -174,6 +174,14 @@ async function github(pathname) {
   return await response.json();
 }
 
+export function workflowRunPathMatches(value, expected) {
+  if (value === expected) return true;
+  if (typeof value !== "string" || !value.startsWith(`${expected}@`)) return false;
+  return /^refs\/(?:heads\/[A-Za-z0-9._/-]+|pull\/[1-9][0-9]*\/(?:head|merge))$/.test(
+    value.slice(expected.length + 1),
+  );
+}
+
 async function candidateArtifact(repository, number, candidateSha) {
   const query = new URLSearchParams({
     event: "pull_request",
@@ -191,7 +199,7 @@ async function candidateArtifact(repository, number, candidateSha) {
         run.conclusion === "success" &&
         run.head_sha === candidateSha &&
         run.head_repository?.full_name === repository &&
-        run.path === candidateWorkflowPath &&
+        workflowRunPathMatches(run.path, candidateWorkflowPath) &&
         run.pull_requests?.some((pull) => String(pull.number) === number),
     )
     .sort((left, right) => right.id - left.id);

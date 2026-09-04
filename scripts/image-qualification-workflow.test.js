@@ -237,7 +237,7 @@ test("authorization selects one exact same-PR candidate artifact and detects rep
             conclusion: "success",
             head_sha: candidateSha,
             head_repository: { full_name: "openclaw/crabbox" },
-            path: ".github/workflows/image-qualification-candidate.yml",
+            path: ".github/workflows/image-qualification-candidate.yml@refs/pull/1756/merge",
             pull_requests: [{ number: 1756 }],
           },
         ],
@@ -285,6 +285,24 @@ test("authorization selects one exact same-PR candidate artifact and detects rep
       else process.env[key] = value;
     }
   }
+});
+
+test("candidate workflow identity accepts bare and ref-qualified API paths only", async () => {
+  const module = await import(
+    `${pathToFileURL(path.join(root, "scripts/image-qualification-control.mjs"))}?path=${Date.now()}`
+  );
+  const expected = ".github/workflows/image-qualification-candidate.yml";
+  assert.equal(module.workflowRunPathMatches(expected, expected), true);
+  assert.equal(module.workflowRunPathMatches(`${expected}@refs/pull/1756/merge`, expected), true);
+  assert.equal(
+    module.workflowRunPathMatches(`${expected}@refs/heads/feature/test`, expected),
+    true,
+  );
+  assert.equal(module.workflowRunPathMatches(`${expected}@main`, expected), false);
+  assert.equal(
+    module.workflowRunPathMatches(`.github/workflows/other.yml@refs/heads/main`, expected),
+    false,
+  );
 });
 
 test("attestation gate requires FSR denial and exact sequential launch order", async () => {
