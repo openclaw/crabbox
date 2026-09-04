@@ -164,6 +164,16 @@ pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
   `--keep` independently controls whether a one-shot `run` deletes the Box
   afterward.
 
+## Command interpretation
+
+Quoted and interpolated profile arguments remain literal through the source-only
+command transport. Unmarked single-string commands follow the shared shell-source
+inference, while explicit `--shell` remains source in the provider's existing
+shell. Literal argv retains terminal `exec`; Crabbox does not introduce another
+shell or a Bash dependency for this interpretation. Environment-profile and
+working-directory handling remain provider-specific.
+
+
 ## Related docs
 
 - [Crabbox setup guide](https://upstash.com/docs/box/guides/crabbox-setup) — Upstash's walkthrough for running Crabbox on Upstash Box.

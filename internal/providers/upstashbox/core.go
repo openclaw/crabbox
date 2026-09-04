@@ -103,22 +103,6 @@ func upstashBoxCleanupCommand(leaseID string) string {
 	return "crabbox stop --provider " + providerName + " " + shellQuote(leaseID)
 }
 
-func shellScriptFromArgv(command []string) string {
-	return core.ShellScriptFromArgv(command)
-}
-
-func shellWords(words []string) []string {
-	return core.ShellWords(words)
-}
-
-func shouldUseShell(command []string) bool {
-	return core.ShouldUseShell(command)
-}
-
-func leadingEnvAssignment(command []string) bool {
-	return core.LeadingEnvAssignment(command)
-}
-
 func inventoryDoctorResult(provider string, leases int) DoctorResult {
 	return core.InventoryDoctorResult(provider, leases)
 }

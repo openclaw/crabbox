@@ -42,3 +42,12 @@ func (c CommandIntent) Argv(shellPrefix ...string) []string {
 func (c CommandIntent) ShellCommand(shellPrefix ...string) string {
 	return strings.Join(shellWords(c.Argv(shellPrefix...)), " ")
 }
+
+// ShellSource renders a terminal workload for the caller's existing POSIX shell.
+// Shell intent remains source in that shell; literal argv replaces it with exec.
+func (c CommandIntent) ShellSource() string {
+	if c.shell {
+		return c.source
+	}
+	return "exec " + strings.Join(shellWords(c.args), " ")
+}
