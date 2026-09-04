@@ -82,19 +82,19 @@ func (a App) syncPlan(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	repo, err := findRepo()
+	boundary, err := findRepositoryBoundary()
 	if err != nil {
 		return err
 	}
-	excludes, err := syncExcludes(repo.Root, cfg)
+	excludes, err := syncExcludes(boundary.root, cfg)
 	if err != nil {
 		return err
 	}
-	manifest, err := syncManifestFilteredRules(repo.Root, excludes, syncIncludes(cfg))
+	manifest, err := syncManifestFilteredRules(boundary.root, excludes, syncIncludes(cfg))
 	if err != nil {
 		return exit(6, "build sync file list: %v", err)
 	}
-	files, dirs := syncPlanRows(repo.Root, manifest, *limit)
+	files, dirs := syncPlanRows(boundary.root, manifest, *limit)
 	if *jsonOut {
 		out := syncPlanJSON(manifest, files, dirs, cfg)
 		if err := json.NewEncoder(a.Stdout).Encode(out); err != nil {

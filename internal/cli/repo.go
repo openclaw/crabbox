@@ -377,7 +377,9 @@ func nulPathSet(out []byte) map[string]struct{} {
 	return paths
 }
 
-func findRepo() (Repo, error) {
+// Root-only callers share Git/Jujutsu discovery without querying remote or
+// branch metadata that cannot affect workspace ownership.
+func findRepositoryBoundary() (repositoryBoundary, error) {
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	cmd.Env = repositoryGitEnvironment()
 	out, err := cmd.Output()
@@ -386,25 +388,37 @@ func findRepo() (Repo, error) {
 		if !explicitGitRepositoryRouting() {
 			boundary, boundaryErr := nearestRepositoryBoundary(wd, "")
 			if boundaryErr != nil {
-				return Repo{}, boundaryErr
+				return repositoryBoundary{}, boundaryErr
 			}
 			if boundary.kind == repositoryBoundaryNativeJujutsu {
-				return Repo{Root: boundary.root, Name: filepath.Base(boundary.root)}, nil
+				return boundary, nil
 			}
 		}
-		return Repo{Root: wd, Name: filepath.Base(wd)}, nil
+		return repositoryBoundary{root: wd}, nil
 	}
 	root := strings.TrimSpace(string(out))
 	if !explicitGitRepositoryRouting() {
 		wd, getwdErr := os.Getwd()
 		if getwdErr != nil {
-			return Repo{}, getwdErr
+			return repositoryBoundary{}, getwdErr
 		}
 		if boundary, boundaryErr := nearestRepositoryBoundary(wd, root); boundaryErr != nil {
-			return Repo{}, boundaryErr
+			return repositoryBoundary{}, boundaryErr
 		} else if boundary.kind == repositoryBoundaryNativeJujutsu {
-			return Repo{Root: boundary.root, Name: filepath.Base(boundary.root)}, nil
+			return boundary, nil
 		}
+	}
+	return repositoryBoundary{root: root, kind: repositoryBoundaryGit}, nil
+}
+
+func findRepo() (Repo, error) {
+	boundary, err := findRepositoryBoundary()
+	if err != nil {
+		return Repo{}, err
+	}
+	root := boundary.root
+	if boundary.kind != repositoryBoundaryGit {
+		return Repo{Root: root, Name: filepath.Base(root)}, nil
 	}
 	remoteURL := gitOutput(root, "remote", "get-url", "origin")
 	return Repo{

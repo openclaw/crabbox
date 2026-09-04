@@ -1402,12 +1402,12 @@ func egressClientBinaryForTarget(ctx context.Context, target SSHTarget) (string,
 	if runtime.GOOS == "linux" {
 		return exe, func() {}, nil
 	}
-	repo, err := findRepo()
+	boundary, err := findRepositoryBoundary()
 	if err != nil {
 		return "", func() {}, exit(2, "cross-build egress client: %v", err)
 	}
 	out := filepath.Join(os.TempDir(), "crabbox-egress-client-linux-amd64-"+strconv.FormatInt(time.Now().UnixNano(), 36))
-	if err := crossBuildEgressClient(ctx, target, repo.Root, out); err != nil {
+	if err := crossBuildEgressClient(ctx, target, boundary.root, out); err != nil {
 		return "", func() {}, err
 	}
 	return out, func() { _ = os.Remove(out) }, nil

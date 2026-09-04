@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -5590,6 +5593,59 @@ func TestExplicitConfigSymlinkIntoRepoRemainsUntrusted(t *testing.T) {
 	}
 	if trust.repositoryRoot != wantRoot {
 		t.Fatalf("repository root=%q, want %q", trust.repositoryRoot, wantRoot)
+	}
+}
+
+func TestConfigDiscoveryDoesNotReadRepositoryMetadata(t *testing.T) {
+	clearConfigEnv(t)
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	t.Chdir(repo)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	writeFile(t, configPath, "provider: aws\nprofile: root-discovery\n")
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	tracePath := filepath.Join(t.TempDir(), "git-trace.jsonl")
+	// Git's global Trace2 setting observes real commands without changing the
+	// credential-filtered environment used by repository discovery.
+	runGit(t, repo, "config", "--file", filepath.Join(os.Getenv("HOME"), ".gitconfig"), "trace2.eventTarget", tracePath)
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	if err := app.Run(context.Background(), []string{"config", "show", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var config struct{ Profile string }
+	if err := json.Unmarshal(stdout.Bytes(), &config); err != nil || config.Profile != "root-discovery" {
+		t.Fatalf("config show profile=%q decode=%v", config.Profile, err)
+	}
+	trace, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	discoveredRoot := false
+	decoder := json.NewDecoder(bytes.NewReader(trace))
+	for {
+		var event struct {
+			Event string
+			Argv  []string
+		}
+		if err := decoder.Decode(&event); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if event.Event != "start" {
+			continue
+		}
+		command := strings.Join(event.Argv[1:], " ")
+		if strings.Contains(command, "--show-toplevel") {
+			discoveredRoot = true
+		}
+		if strings.HasPrefix(command, "remote ") || strings.HasPrefix(command, "symbolic-ref ") || strings.HasPrefix(command, "branch ") || command == "rev-parse HEAD" {
+			t.Errorf("config discovery read unused repository metadata: git %s", command)
+		}
+	}
+	if !discoveredRoot {
+		t.Fatal("config discovery did not resolve the active repository root")
 	}
 }
 

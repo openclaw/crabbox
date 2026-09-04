@@ -5119,8 +5119,8 @@ func classifyConfigPath(path string) configPathTrust {
 	if sameConfigPath(path, userConfigPath()) {
 		return configPathTrust{trusted: true}
 	}
-	repo, _ := findRepo()
-	root, _ := filepath.Abs(repo.Root)
+	boundary, _ := findRepositoryBoundary()
+	root, _ := filepath.Abs(boundary.root)
 	if explicit := strings.TrimSpace(os.Getenv("CRABBOX_CONFIG")); explicit != "" &&
 		sameConfigPath(path, explicit) && !configPathWithinRoot(path, root) {
 		return configPathTrust{trusted: true}
