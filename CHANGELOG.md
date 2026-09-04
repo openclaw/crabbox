@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Stop direct AWS, Azure, GCP, and Hetzner bootstrap retries from allocating another machine when rollback reports a cleanup failure, preserving both the original failure and cleanup diagnostics. [PR 1819](https://github.com/openclaw/crabbox/pull/1819). Thanks @steipete.
-- Reject inconsistent Hetzner creation/readiness identities before SSH, and keep failed-acquisition cleanup bound to the original server and key; share exact ID/name validation with RunPod. Thanks @steipete.
+- Reject inconsistent Hetzner creation/readiness identities before SSH, and keep failed-acquisition cleanup bound to the original server and key; share exact ID/name validation with RunPod. [PR 1821](https://github.com/openclaw/crabbox/pull/1821). Thanks @steipete.
 - Cloudflare: retain recovery claims when teardown fails, preserve command/cancellation outcomes, and fence reuse and cleanup against replaced local claims. [PR 1817](https://github.com/openclaw/crabbox/pull/1817). Thanks @steipete.
 - Preserve existing Cloudflare container workspaces when sync upload or extraction fails, clean partial archives, and enforce full-checkout size limits before fresh allocation. [PR 1814](https://github.com/openclaw/crabbox/pull/1814). Thanks @steipete.
 - Protect Nomad runs from overwriting replacement claims or recreating retired leases, and expose standard run-session handles with cleanup-aware final outcomes that preserve the original command exit. [PR 1810](https://github.com/openclaw/crabbox/pull/1810). Thanks @steipete.
