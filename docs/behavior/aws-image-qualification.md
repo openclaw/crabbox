@@ -9,20 +9,38 @@ It is not a general AWS proxy and is not enabled by default.
 
 ## Trust boundary
 
-There are three Workers:
+There are four Workers:
 
-1. A protected binding selects the named `AWSQualificationController` entrypoint
-   to enroll, fence, and finalize runs.
-2. The exact candidate Worker has only `CRABBOX_AWS_QUALIFICATION_TRANSPORT`,
-   bound to the authority's default transport entrypoint.
-3. The non-public authority Worker holds the sandbox AWS credentials and signs
+1. A protected controller selects the named `AWSQualificationController`
+   entrypoint to enroll, fence, and finalize runs.
+2. The exact candidate Worker has no public endpoint. It has only
+   `CRABBOX_AWS_QUALIFICATION_TRANSPORT`, bound to the authority's default
+   transport entrypoint.
+3. A trusted narrow relay is the only workers.dev endpoint exposed to the
+   credentialless executor. Its sole service binding targets the private
+   candidate Worker.
+4. The non-public authority Worker holds the sandbox AWS credentials and signs
    admitted calls.
+
+The relay accepts a distinct ephemeral executor token and injects the candidate
+admin token only for the fixed lease, image, and run API methods needed by the
+publisher proof. One separate path injects the candidate shared token only for
+the `/promote-cas` spoofed-admin probe. It rejects unknown paths, methods,
+queries, content types, oversized bodies, and identity/header overrides before
+calling the candidate. Callers cannot choose a target Worker, forwarding
+headers, or destination URL. The relay has no controller or authority binding
+and receives no AWS or Cloudflare credential. It strips literal candidate auth
+tokens from bounded responses before returning them to the executor.
 
 The candidate binding has immutable `ctx.props` containing `runId`, `owner`,
 `candidateSha`, `candidateWorker`, `deploymentHash`, and `expiresAt`. The
 controller binding carries the same deployment hash. Enrollment stores the
 complete fixed policy and its hash plus the authority source SHA and version;
 candidate operations fail closed if the deployed policy later drifts.
+The deployment hash also commits to the trusted relay source, fixed bindings,
+candidate service target, and digests of all three ephemeral tokens. The final
+execution manifest additionally binds the exact deployed candidate and relay
+Worker versions.
 The authority requires an enrolled exact match.
 The absolute expiry must be in the next 120 minutes. A transport failure retries
 the same operation ID once and then fails closed; it never falls back to raw
@@ -141,7 +159,13 @@ The candidate configuration must use the same fixed Region, AMI, subnet,
 security group, and root size; request `on-demand`; select only `t3.small` or
 `t3a.small`; leave `CRABBOX_AWS_INSTANCE_PROFILE` empty; and leave
 `CRABBOX_AWS_FAST_SNAPSHOT_RESTORE_AZS` unset. It must also disable routes,
-workers.dev, preview URLs, and cron.
+workers.dev, preview URLs, and cron. Protected tooling first uploads an inert
+bootstrap, disables workers.dev and verifies the setting, and only then uploads
+candidate bytes. The inert bootstrap already carries the run-scoped transport
+identity and Durable Object migration, so a finalizer or reaper can discover
+and delete it after a partial deployment. The relay enables workers.dev with
+preview URLs disabled and also has no routes, custom domain, cron, or Durable
+Object namespace.
 
 The protected controller also owns a singleton `AWSQualificationRegistry`
 Durable Object. `claim` admits only one active qualification globally and is
@@ -160,6 +184,9 @@ match that exact registry record while its state remains `claimed`. Finalization
 persists an irreversible per-run `finalizingAt` fence before transitioning the
 registry to `finalizing` or starting cleanup I/O, so an already-admitted
 candidate call and a failed cleanup cannot reopen candidate dispatch.
+The relay name is deterministically derived from the registered run ID, so the
+durable registry identity is sufficient for a fresh finalizer or reaper to
+discover and delete the exact relay without workflow artifacts.
 
 `attest(runId)` returns versioned evidence built from persisted Durable Object
 state. It binds the run, candidate and authority revisions, deployed bundle and
@@ -220,7 +247,10 @@ reject foreign IDs.
 deregisters images, deletes snapshots,
 terminates instances, deletes imported key pairs, and verifies zero run-owned
 instance/volume/key-pair/image/snapshot residue. The expiry alarm runs the same
-cleanup and retries incomplete teardown.
+cleanup and retries incomplete teardown. Protected teardown fences candidate
+mutations, deletes the public relay, deletes the private candidate Worker and
+its Fleet Durable Object namespace, verifies their absence, repeats authority
+finalization idempotently, and retires the registry record.
 
 Cloud setup, enrollment, candidate deployment, and paid execution remain
 explicit maintainer actions. Merging this seam creates no Worker, secret,

@@ -12,12 +12,20 @@ const sha40 = /^[0-9a-f]{40}$/;
 const sha64 = /^[0-9a-f]{64}$/;
 const runIdPattern = /^image-qualification-[0-9]+-[0-9]+$/;
 const workerNamePattern = /^crabbox-image-qualification-[0-9]+-[0-9]+$/;
+const relayNamePattern = /^crabbox-image-qualification-relay-[0-9]+-[0-9]+$/;
 const maxRunMs = 120 * 60 * 1000;
 const controllerName = "crabbox-image-qualification-controller";
 const authorityName = "crabbox-aws-qualification-authority";
 const candidateWorkflowFile = "image-qualification-candidate.yml";
 const candidateWorkflowPath = `.github/workflows/${candidateWorkflowFile}`;
 const controllerSource = path.join(root, "scripts/image-qualification-controller-worker.mjs");
+const relaySource = path.join(root, "scripts/image-qualification-relay-worker.mjs");
+
+function relayNameForRun(runId) {
+  const match = runId.match(/^image-qualification-([0-9]+-[0-9]+)$/);
+  if (!match) throw new Error("qualification run ID is invalid");
+  return `crabbox-image-qualification-relay-${match[1]}`;
+}
 
 function workerVersion(value) {
   if (/^[0-9a-f]{32}$/i.test(value ?? "")) {
@@ -456,16 +464,28 @@ class Cloudflare {
     return workerVersion(version.id);
   }
 
-  async enableSubdomain(name) {
+  async configureSubdomain(name, enabled) {
     await this.request(`/workers/scripts/${name}/subdomain`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ enabled: true, previews_enabled: false }),
+      body: JSON.stringify({ enabled, previews_enabled: false }),
     });
+    const actual = await this.request(`/workers/scripts/${name}/subdomain`);
+    if (actual?.enabled !== enabled || actual?.previews_enabled !== false) {
+      throw new Error(`Cloudflare Worker subdomain settings did not persist for ${name}`);
+    }
+  }
+
+  async enableSubdomain(name) {
+    await this.configureSubdomain(name, true);
     const subdomain = await this.request("/workers/subdomain");
     if (!subdomain?.subdomain)
       throw new Error("Cloudflare account workers.dev subdomain is absent");
     return `https://${name}.${subdomain.subdomain}.workers.dev`;
+  }
+
+  async disableSubdomain(name) {
+    await this.configureSubdomain(name, false);
   }
 
   async deleteScript(name) {
@@ -571,6 +591,22 @@ function controllerMetadata(deploymentHash, token) {
   };
 }
 
+function relayMetadata(candidateWorker, executorToken, adminToken, sharedToken, config, owner) {
+  return {
+    main_module: "relay.mjs",
+    compatibility_date: "2026-09-03",
+    bindings: [
+      { name: "EXECUTOR_TOKEN", type: "secret_text", text: executorToken },
+      { name: "CANDIDATE_ADMIN_TOKEN", type: "secret_text", text: adminToken },
+      { name: "CANDIDATE_SHARED_TOKEN", type: "secret_text", text: sharedToken },
+      { name: "AWS_REGION", type: "plain_text", text: config.region },
+      { name: "QUALIFICATION_OWNER", type: "plain_text", text: owner },
+      { name: "QUALIFICATION_ORG", type: "plain_text", text: "image-qualification" },
+      { name: "CANDIDATE", type: "service", service: candidateWorker },
+    ],
+  };
+}
+
 function publicBindingShape(bindings) {
   return bindings
     .map((binding) => ({
@@ -594,6 +630,9 @@ function executionManifest(identity) {
     candidateSha: identity.candidateSha,
     candidateWorker: identity.candidateWorker,
     candidateVersion: identity.candidateVersion,
+    relayWorker: identity.relayWorker,
+    relayVersion: identity.relayVersion,
+    relayBindingDigest: identity.relayBindingDigest,
     deploymentHash: identity.deploymentHash,
     manifestSha256: identity.manifestSha256,
     bindingDigest: identity.bindingDigest,
@@ -617,6 +656,9 @@ function qualificationExpectedFromEnv({ optional = false } = {}) {
     candidateSha: required("QUALIFICATION_EXPECTED_CANDIDATE_SHA", sha40),
     candidateWorker: required("QUALIFICATION_EXPECTED_CANDIDATE_WORKER", workerNamePattern),
     candidateVersion: boundedString("QUALIFICATION_EXPECTED_CANDIDATE_VERSION", 128),
+    relayWorker: required("QUALIFICATION_EXPECTED_RELAY_WORKER", relayNamePattern),
+    relayVersion: boundedString("QUALIFICATION_EXPECTED_RELAY_VERSION", 128),
+    relayBindingDigest: required("QUALIFICATION_EXPECTED_RELAY_BINDING_DIGEST", sha64),
     deploymentHash: required("QUALIFICATION_EXPECTED_DEPLOYMENT_HASH", sha64),
     manifestSha256: required("QUALIFICATION_EXPECTED_MANIFEST_SHA", sha64),
     bindingDigest: required("QUALIFICATION_EXPECTED_BINDING_DIGEST", sha64),
@@ -666,14 +708,27 @@ export function verifyAttestationIdentity(attestation, expected, { finalized } =
 }
 
 async function verifyExecutionDeployment(cf, expected) {
-  const [settings, candidateVersion] = await Promise.all([
+  if (expected.relayWorker !== relayNameForRun(expected.runId)) {
+    throw new Error("relay Worker does not match the registered qualification run");
+  }
+  const [settings, candidateVersion, relaySettings, relayVersion] = await Promise.all([
     cf.settings(expected.candidateWorker),
     cf.latestVersion(expected.candidateWorker),
+    cf.settings(expected.relayWorker),
+    cf.latestVersion(expected.relayWorker),
+  ]);
+  await Promise.all([
+    assertWorkerIsolation(cf, expected.candidateWorker, 1, false),
+    assertWorkerIsolation(cf, expected.relayWorker, 0, true),
   ]);
   if (candidateVersion !== expected.candidateVersion) {
     throw new Error("candidate Worker version changed after protected deployment");
   }
+  if (relayVersion !== expected.relayVersion) {
+    throw new Error("qualification relay version changed after protected deployment");
+  }
   const bindings = publicBindingShape(settings.bindings ?? []);
+  const relayBindings = publicBindingShape(relaySettings.bindings ?? []);
   const transport = bindings.find(
     (binding) =>
       binding.name === "CRABBOX_AWS_QUALIFICATION_TRANSPORT" &&
@@ -687,11 +742,22 @@ async function verifyExecutionDeployment(cf, expected) {
     transport?.props?.candidateWorker !== expected.candidateWorker ||
     transport?.props?.deploymentHash !== expected.deploymentHash ||
     transport?.props?.expiresAt !== expected.expiresAt ||
+    digest(canonical(relayBindings)) !== expected.relayBindingDigest ||
+    relayBindings.some(
+      (binding) =>
+        binding.type === "service" &&
+        (binding.name !== "CANDIDATE" || binding.service !== expected.candidateWorker),
+    ) ||
     executionManifestDigest(expected) !== expected.executionManifestDigest
   ) {
     throw new Error("candidate Worker content, settings, or execution manifest changed");
   }
-  return { candidateVersion, bindingDigest: digest(canonical(bindings)) };
+  return {
+    candidateVersion,
+    bindingDigest: digest(canonical(bindings)),
+    relayVersion,
+    relayBindingDigest: digest(canonical(relayBindings)),
+  };
 }
 
 async function controllerCall(url, token, action, value = {}) {
@@ -723,18 +789,39 @@ async function deployController(cf, deploymentHash, token) {
   return await cf.enableSubdomain(controllerName);
 }
 
-async function assertWorkerIsolation(cf, worker, durableObjectCount) {
-  const [routes, schedules, domains, namespaceCount] = await Promise.all([
+async function preparePrivateCandidate(cf, worker, bindings) {
+  const bootstrap = path.join(
+    process.env.RUNNER_TEMP ?? "/tmp",
+    `qualification-private-bootstrap-${process.pid}.mjs`,
+  );
+  fs.writeFileSync(
+    bootstrap,
+    "export class FleetDurableObject {}\nexport default {fetch(){return new Response(null,{status:404})}};\n",
+    { mode: 0o600 },
+  );
+  try {
+    await cf.upload(worker, bootstrap, candidateMetadata("private-bootstrap.mjs", bindings, true));
+    await cf.disableSubdomain(worker);
+  } finally {
+    fs.rmSync(bootstrap, { force: true });
+  }
+}
+
+async function assertWorkerIsolation(cf, worker, durableObjectCount, workersDev) {
+  const [routes, schedules, domains, namespaceCount, subdomain] = await Promise.all([
     cf.request(`/workers/services/${worker}/environments/production/routes?show_zonename=true`),
     cf.request(`/workers/scripts/${worker}/schedules`),
     cf.request(`/workers/domains/records?page=0&per_page=100&service=${worker}`),
     namespaceResidue(cf, worker),
+    cf.request(`/workers/scripts/${worker}/subdomain`),
   ]);
   if (
     (routes ?? []).length !== 0 ||
     (schedules ?? []).length !== 0 ||
     (domains ?? []).length !== 0 ||
-    namespaceCount !== durableObjectCount
+    namespaceCount !== durableObjectCount ||
+    subdomain?.enabled !== workersDev ||
+    subdomain?.previews_enabled !== false
   ) {
     throw new Error(`Worker isolation verification failed for ${worker}`);
   }
@@ -754,6 +841,8 @@ async function deploy() {
   const runId = `image-qualification-${required("GITHUB_RUN_ID", /^[1-9][0-9]*$/)}-${required("GITHUB_RUN_ATTEMPT", /^[1-9][0-9]*$/)}`;
   const candidateWorker = `crabbox-${runId}`;
   if (!workerNamePattern.test(candidateWorker)) throw new Error("candidate Worker name is invalid");
+  const relayWorker = relayNameForRun(runId);
+  if (!relayNamePattern.test(relayWorker)) throw new Error("relay Worker name is invalid");
   const expiresAt = new Date(Date.now() + maxRunMs).toISOString();
   const owner = `${runId}@example.invalid`;
   const config = qualificationConfig();
@@ -769,6 +858,7 @@ async function deploy() {
   };
   const adminToken = crypto.randomBytes(32).toString("hex");
   const sharedToken = crypto.randomBytes(32).toString("hex");
+  const executorToken = crypto.randomBytes(32).toString("hex");
   const controllerToken = required("QUALIFICATION_CONTROLLER_TOKEN");
   const placeholderIdentity = { ...baseIdentity, deploymentHash: "0".repeat(64) };
   const stagingBindings = candidateBindings(placeholderIdentity, adminToken, sharedToken, config);
@@ -786,10 +876,13 @@ async function deploy() {
       type: entry.path.endsWith(".wasm") ? "application/wasm" : "application/javascript+module",
     }));
   const cf = cloudflareFromEnv();
+  // Only this inert trusted bootstrap can be briefly public on first creation.
+  // Candidate bytes are uploaded only after workers.dev is observably disabled.
+  await preparePrivateCandidate(cf, candidateWorker, stagingBindings);
   await cf.upload(
     candidateWorker,
     mainFile,
-    candidateMetadata(manifest.mainModule, stagingBindings, true),
+    candidateMetadata(manifest.mainModule, stagingBindings),
     extraModules,
   );
   const [stagingSettings, stagingVersion] = await Promise.all([
@@ -818,9 +911,18 @@ async function deploy() {
       stagingSettings: stagingShape,
       authority: { name: authorityName, sha: authoritySha, version: authorityVersion },
       props: baseIdentity,
+      relay: {
+        name: relayWorker,
+        sourceSha256: digest(fs.readFileSync(relaySource)),
+        settings: publicBindingShape(
+          relayMetadata(candidateWorker, executorToken, adminToken, sharedToken, config, owner)
+            .bindings,
+        ),
+      },
       secretDigests: {
         admin: digest(adminToken),
         shared: digest(sharedToken),
+        executor: digest(executorToken),
       },
     }),
   );
@@ -832,10 +934,9 @@ async function deploy() {
     candidateMetadata(manifest.mainModule, bindings),
     extraModules,
   );
-  const [settings, candidateVersion, candidateURL] = await Promise.all([
+  const [settings, candidateVersion] = await Promise.all([
     cf.settings(candidateWorker),
     cf.latestVersion(candidateWorker),
-    cf.enableSubdomain(candidateWorker),
   ]);
   const actualBindings = publicBindingShape(settings.bindings ?? []);
   const expectedBindings = publicBindingShape(bindings);
@@ -846,10 +947,34 @@ async function deploy() {
     throw new Error("candidate Worker settings do not match the reviewed binding contract");
   }
   const bindingDigest = digest(canonical(expectedBindings));
+  const expectedRelayMetadata = relayMetadata(
+    candidateWorker,
+    executorToken,
+    adminToken,
+    sharedToken,
+    config,
+    owner,
+  );
+  const relayUpload = await cf.upload(relayWorker, relaySource, expectedRelayMetadata);
+  const [relaySettings, relayVersion, relayURL] = await Promise.all([
+    cf.settings(relayWorker),
+    cf.latestVersion(relayWorker),
+    cf.enableSubdomain(relayWorker),
+  ]);
+  const relayBindings = publicBindingShape(relaySettings.bindings ?? []);
+  const expectedRelayBindings = publicBindingShape(expectedRelayMetadata.bindings);
+  if (
+    workerVersion(relayUpload.deployment_id) !== relayVersion ||
+    canonical(relayBindings) !== canonical(expectedRelayBindings)
+  ) {
+    throw new Error("qualification relay settings do not match the reviewed binding contract");
+  }
+  const relayBindingDigest = digest(canonical(expectedRelayBindings));
   const controllerURL = await deployController(cf, deploymentHash, controllerToken);
   await Promise.all([
-    assertWorkerIsolation(cf, candidateWorker, 1),
-    assertWorkerIsolation(cf, controllerName, 0),
+    assertWorkerIsolation(cf, candidateWorker, 1, false),
+    assertWorkerIsolation(cf, relayWorker, 0, true),
+    assertWorkerIsolation(cf, controllerName, 0, true),
   ]);
   await verifyCandidateIdentity({ artifact: true });
   const record = await controllerCall(controllerURL, controllerToken, "claim", { identity });
@@ -859,6 +984,9 @@ async function deploy() {
   const protectedIdentity = {
     ...identity,
     candidateVersion,
+    relayWorker,
+    relayVersion,
+    relayBindingDigest,
     manifestSha256: manifest.manifestSha256,
     bindingDigest,
     authoritySha,
@@ -881,6 +1009,8 @@ async function deploy() {
     candidateRunId: identityCheck.runId,
     candidateWorker,
     candidateVersionDigest: digest(candidateVersion),
+    relayWorker,
+    relayVersionDigest: digest(relayVersion),
     executionManifestDigest: manifestDigest,
     authoritySha,
     authorityVersion,
@@ -888,12 +1018,22 @@ async function deploy() {
     enrolledAt: attestation.enrolledAt,
     expiresAt,
     isolation: {
-      workersDev: true,
-      previewURLs: false,
-      routes: 0,
-      customDomains: 0,
-      schedules: 0,
-      fleetDurableObjectNamespaces: 1,
+      candidate: {
+        workersDev: false,
+        previewURLs: false,
+        routes: 0,
+        customDomains: 0,
+        schedules: 0,
+        fleetDurableObjectNamespaces: 1,
+      },
+      relay: {
+        workersDev: true,
+        previewURLs: false,
+        routes: 0,
+        customDomains: 0,
+        schedules: 0,
+        durableObjectNamespaces: 0,
+      },
     },
     limits: {
       instanceTypes: config.instanceTypes,
@@ -906,12 +1046,15 @@ async function deploy() {
     },
     policyConfigDigest: digest(canonical(config)),
     bindingDigest,
+    relayBindingDigest,
   });
   appendOutput("run_id", runId);
   appendOutput("candidate_worker", candidateWorker);
-  appendOutput("candidate_url", candidateURL);
-  appendOutput("candidate_admin_token", adminToken);
-  appendOutput("candidate_shared_token", sharedToken);
+  appendOutput("relay_worker", relayWorker);
+  appendOutput("relay_version", relayVersion);
+  appendOutput("relay_binding_digest", relayBindingDigest);
+  appendOutput("relay_url", relayURL);
+  appendOutput("executor_token", executorToken);
   appendOutput("deployment_hash", deploymentHash);
   appendOutput("candidate_sha", identity.candidateSha);
   appendOutput("candidate_version", candidateVersion);
@@ -960,6 +1103,9 @@ async function arm() {
     candidateSha: expected.candidateSha,
     deploymentHash: expected.deploymentHash,
     candidateVersionDigest: digest(expected.candidateVersion),
+    relayWorker: expected.relayWorker,
+    relayVersionDigest: digest(expected.relayVersion),
+    relayBindingDigest: expected.relayBindingDigest,
     executionManifestDigest: expected.executionManifestDigest,
     authoritySha: expected.authoritySha,
     authorityVersion: expected.authorityVersion,
@@ -1012,6 +1158,14 @@ async function deleteCandidate(cf, worker) {
   }
 }
 
+async function deleteRelay(cf, worker) {
+  if (!relayNamePattern.test(worker)) throw new Error("refusing to delete an unexpected relay");
+  await cf.deleteScript(worker);
+  if ((await namespaceResidue(cf, worker)) !== 0) {
+    throw new Error("qualification relay Durable Object residue remains");
+  }
+}
+
 async function qualificationCandidates(cf) {
   const scriptsResult = await cf.request("/workers/scripts");
   const scripts = scriptsResult?.items ?? scriptsResult ?? [];
@@ -1030,6 +1184,29 @@ async function qualificationCandidates(cf) {
     if (transport) candidates.push({ worker, deploymentHash: transport.props.deploymentHash });
   }
   return candidates;
+}
+
+async function qualificationRelays(cf) {
+  const scriptsResult = await cf.request("/workers/scripts");
+  const scripts = scriptsResult?.items ?? scriptsResult ?? [];
+  const relays = [];
+  for (const worker of scripts
+    .map((item) => item.id ?? item.name)
+    .filter((name) => relayNamePattern.test(name))) {
+    const settings = await cf.settings(worker);
+    const candidateWorker = worker.replace(
+      "crabbox-image-qualification-relay-",
+      "crabbox-image-qualification-",
+    );
+    const candidate = (settings.bindings ?? []).find(
+      (binding) =>
+        binding.name === "CANDIDATE" &&
+        binding.type === "service" &&
+        binding.service === candidateWorker,
+    );
+    if (candidate) relays.push({ worker, candidateWorker });
+  }
+  return relays;
 }
 
 async function cleanupRun({
@@ -1071,6 +1248,9 @@ async function cleanupRun({
     }
   }
   if (!discovered.run) {
+    for (const relay of await qualificationRelays(cf)) {
+      await deleteRelay(cf, relay.worker);
+    }
     for (const candidate of await qualificationCandidates(cf)) {
       await deleteCandidate(cf, candidate.worker);
     }
@@ -1086,6 +1266,7 @@ async function cleanupRun({
     return { result: "idle", reason: "registry has no active run" };
   }
   const run = discovered.run;
+  const relayWorker = relayNameForRun(run.runId);
   let failure;
   let firstAttestation;
   let qualificationFailure = initialQualificationFailure;
@@ -1123,6 +1304,7 @@ async function cleanupRun({
         recordQualificationFailure(error);
       }
     }
+    await deleteRelay(cf, relayWorker);
     await deleteCandidate(cf, run.candidateWorker);
     await controllerCall(controllerURL, token, "finalize", { runId: run.runId });
     const finalAttestation = await controllerCall(controllerURL, token, "attest", {
@@ -1157,6 +1339,12 @@ async function cleanupRun({
     return { result: "finalized", runId: run.runId, attestation: finalAttestation };
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);
+    try {
+      await deleteRelay(cf, relayWorker);
+    } catch (relayError) {
+      const relayFailure = relayError instanceof Error ? relayError.message : String(relayError);
+      failure = `${failure}; relay cleanup: ${relayFailure}`;
+    }
     return {
       result: "failed",
       runId: run.runId,

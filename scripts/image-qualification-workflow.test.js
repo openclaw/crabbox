@@ -14,6 +14,7 @@ const reaper = read(".github/workflows/image-qualification-reaper.yml");
 const control = read("scripts/image-qualification-control.mjs");
 const executor = read("scripts/image-qualification-execute.sh");
 const adapter = read("scripts/image-qualification-crabbox-adapter.sh");
+const relaySource = read("scripts/image-qualification-relay-worker.mjs");
 
 test("workflow isolates candidate execution from protected credentials", () => {
   assert.match(workflow, /^  workflow_dispatch:$/m);
@@ -54,8 +55,9 @@ test("workflow isolates candidate execution from protected credentials", () => {
     executeJob,
     /CLOUDFLARE_API_TOKEN|AWS_ACCESS_KEY_ID|QUALIFICATION_CONTROLLER_TOKEN/,
   );
-  assert.match(executeJob, /QUALIFICATION_ADMIN_TOKEN/);
-  assert.match(executeJob, /QUALIFICATION_SHARED_TOKEN/);
+  assert.match(executeJob, /QUALIFICATION_RELAY_URL/);
+  assert.match(executeJob, /QUALIFICATION_EXECUTOR_TOKEN/);
+  assert.doesNotMatch(executeJob, /QUALIFICATION_ADMIN_TOKEN|QUALIFICATION_SHARED_TOKEN/);
   assert.doesNotMatch(executeJob, /QUALIFICATION_EXPECTED_CANDIDATE_VERSION/);
   const protectedJobs = workflow.slice(workflow.indexOf("  deploy-enroll:"));
   assert.doesNotMatch(protectedJobs, /npm ci|go build|wrangler deploy/);
@@ -95,6 +97,11 @@ test("control tool fixes the reviewed policy and recovery boundary", () => {
   assert.match(control, /controllerCall\(controllerURL, token, "retire"/);
   assert.match(control, /workers\/scripts/);
   assert.match(control, /candidate Worker version changed after protected deployment/);
+  assert.match(control, /await preparePrivateCandidate\(cf, candidateWorker, stagingBindings\)/);
+  assert.match(control, /candidateMetadata\("private-bootstrap\.mjs", bindings, true\)/);
+  assert.match(control, /assertWorkerIsolation\(cf, candidateWorker, 1, false\)/);
+  assert.match(control, /assertWorkerIsolation\(cf, relayWorker, 0, true\)/);
+  assert.match(control, /await deleteRelay\(cf, relayWorker\)/);
   assert.match(control, /authority attestation identity does not match protected expectations/);
   assert.doesNotMatch(control, /identity revalidation warning/);
 });
@@ -108,6 +115,9 @@ test("executor proves auth denial, FSR denial, three launches, rollback, and har
   assert.match(executor, /kill -KILL "\$\$"/);
   assert.match(executor, /catalog-rollback\.json/);
   assert.match(executor, /execution-state\.json/);
+  assert.match(executor, /qualification\/shared\/v1\/images/);
+  assert.match(executor, /QUALIFICATION_EXECUTOR_TOKEN/);
+  assert.doesNotMatch(executor, /QUALIFICATION_CANDIDATE_URL/);
   assert.doesNotMatch(executor, /v1\/images\?provider/);
   assert.match(adapter, /QUALIFICATION_REAL_CRABBOX/);
   assert.match(adapter, /promotion-receipt\.json/);
@@ -476,6 +486,9 @@ test("execution manifest binds the exact final Worker version and authority poli
     candidateSha: "a".repeat(40),
     candidateWorker: "crabbox-image-qualification-1-1",
     candidateVersion: "worker-version-1",
+    relayWorker: "crabbox-image-qualification-relay-1-1",
+    relayVersion: "relay-version-1",
+    relayBindingDigest: "0".repeat(64),
     deploymentHash: "b".repeat(64),
     manifestSha256: "c".repeat(64),
     bindingDigest: "d".repeat(64),
@@ -491,9 +504,161 @@ test("execution manifest binds the exact final Worker version and authority poli
     exact,
   );
   assert.notEqual(
+    module.executionManifestDigest({ ...identity, relayVersion: "relay-version-2" }),
+    exact,
+  );
+  assert.notEqual(
     module.executionManifestDigest({ ...identity, policyHash: "0".repeat(64) }),
     exact,
   );
+});
+
+test("relay rejects non-contract requests before invoking the private candidate", async () => {
+  const worker = (
+    await import(
+      `${pathToFileURL(path.join(root, "scripts/image-qualification-relay-worker.mjs"))}?test=${Date.now()}`
+    )
+  ).default;
+  const calls = [];
+  const env = {
+    EXECUTOR_TOKEN: "e".repeat(64),
+    CANDIDATE_ADMIN_TOKEN: "a".repeat(64),
+    CANDIDATE_SHARED_TOKEN: "s".repeat(64),
+    AWS_REGION: "us-east-1",
+    QUALIFICATION_OWNER: "image-qualification-1-1@example.invalid",
+    QUALIFICATION_ORG: "image-qualification",
+    CANDIDATE: {
+      fetch: async (request) => {
+        calls.push(request);
+        return new Response(
+          JSON.stringify({ authorization: request.headers.get("authorization") }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      },
+    },
+  };
+  const authorization = { authorization: `Bearer ${env.EXECUTOR_TOKEN}` };
+  const allowed = await worker.fetch(
+    new Request(
+      "https://relay.invalid/v1/images/ami-12345678?provider=aws&target=linux&region=us-east-1",
+      { headers: authorization },
+    ),
+    env,
+  );
+  assert.equal(allowed.status, 200);
+  assert.doesNotMatch(await allowed.text(), new RegExp(env.CANDIDATE_ADMIN_TOKEN));
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].url,
+    "https://candidate.invalid/v1/images/ami-12345678?provider=aws&region=us-east-1&target=linux",
+  );
+  assert.equal(calls[0].headers.get("authorization"), `Bearer ${env.CANDIDATE_ADMIN_TOKEN}`);
+  assert.equal(calls[0].headers.get("x-crabbox-owner"), env.QUALIFICATION_OWNER);
+
+  const shared = await worker.fetch(
+    new Request(
+      "https://relay.invalid/qualification/shared/v1/images/ami-12345678/promote-cas?provider=aws&target=linux&region=us-east-1",
+      {
+        method: "POST",
+        headers: { ...authorization, "content-type": "application/json" },
+        body: "{}",
+      },
+    ),
+    env,
+  );
+  assert.equal(shared.status, 200);
+  assert.doesNotMatch(await shared.text(), new RegExp(env.CANDIDATE_SHARED_TOKEN));
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].headers.get("authorization"), `Bearer ${env.CANDIDATE_SHARED_TOKEN}`);
+  assert.equal(
+    calls[1].url,
+    "https://candidate.invalid/v1/images/ami-12345678/promote-cas?provider=aws&region=us-east-1&target=linux",
+  );
+
+  const lease = await worker.fetch(
+    new Request("https://relay.invalid/v1/leases", {
+      method: "POST",
+      headers: {
+        ...authorization,
+        "content-type": "application/json",
+        prefer: "respond-async",
+      },
+      body: JSON.stringify({
+        provider: "aws",
+        target: "linux",
+        class: "standard",
+        serverType: "t3.small",
+        awsRegion: "us-east-1",
+        desktop: false,
+        browser: false,
+        tailscale: false,
+        capacity: { market: "on-demand" },
+      }),
+    }),
+    env,
+  );
+  assert.equal(lease.status, 200);
+  assert.equal(calls.length, 3);
+  assert.equal(calls[2].url, "https://candidate.invalid/v1/leases");
+  assert.equal(calls[2].headers.get("prefer"), "respond-async");
+  assert.equal(calls[2].headers.get("authorization"), `Bearer ${env.CANDIDATE_ADMIN_TOKEN}`);
+
+  const rejected = [
+    new Request("https://relay.invalid/v1/images/ami-12345678", {
+      headers: { authorization: "Bearer wrong" },
+    }),
+    new Request("https://relay.invalid/v1/admin/leases", { headers: authorization }),
+    new Request(
+      "https://relay.invalid/v1/images/ami-12345678?provider=aws&target=windows&region=us-east-1",
+      { headers: authorization },
+    ),
+    new Request(
+      "https://relay.invalid/v1/images/ami-12345678?provider=aws&target=linux&region=us-east-1",
+      { method: "PUT", headers: authorization },
+    ),
+    new Request(
+      "https://relay.invalid/v1/images/ami-12345678?provider=aws&target=linux&region=us-east-1",
+      { headers: { ...authorization, "x-original-url": "https://attacker.invalid/" } },
+    ),
+    new Request("https://relay.invalid/v1/images", {
+      method: "POST",
+      headers: { ...authorization, "content-type": "application/json" },
+      body: JSON.stringify({ value: "x".repeat(16 * 1024) }),
+    }),
+    new Request("https://relay.invalid/v1/images", {
+      method: "POST",
+      headers: { ...authorization, "content-type": "text/plain" },
+      body: "{}",
+    }),
+    new Request("https://relay.invalid/v1/leases", {
+      method: "POST",
+      headers: {
+        ...authorization,
+        "content-type": "application/json",
+        prefer: "respond-async",
+      },
+      body: JSON.stringify({
+        provider: "aws",
+        target: "windows",
+        class: "standard",
+        serverType: "t3.small",
+        awsRegion: "us-east-1",
+        desktop: false,
+        browser: false,
+        tailscale: false,
+        capacity: { market: "on-demand" },
+      }),
+    }),
+  ];
+  for (const request of rejected) {
+    const response = await worker.fetch(request, env);
+    assert.ok(response.status >= 400);
+  }
+  assert.equal(calls.length, 3);
+  assert.doesNotMatch(relaySource, /AUTHORITY|CONTROLLER|CLOUDFLARE|AWS_ACCESS_KEY/);
 });
 
 test("controller rejects unauthenticated and oversized control requests", async () => {

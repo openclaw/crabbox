@@ -92,9 +92,11 @@ jobs:
       candidate_sha: ${{ steps.deploy.outputs.candidate_sha }}
       candidate_worker: ${{ steps.deploy.outputs.candidate_worker }}
       candidate_version: ${{ steps.deploy.outputs.candidate_version }}
-      candidate_url: ${{ steps.deploy.outputs.candidate_url }}
-      candidate_admin_token: ${{ steps.deploy.outputs.candidate_admin_token }}
-      candidate_shared_token: ${{ steps.deploy.outputs.candidate_shared_token }}
+      relay_worker: ${{ steps.deploy.outputs.relay_worker }}
+      relay_version: ${{ steps.deploy.outputs.relay_version }}
+      relay_binding_digest: ${{ steps.deploy.outputs.relay_binding_digest }}
+      relay_url: ${{ steps.deploy.outputs.relay_url }}
+      executor_token: ${{ steps.deploy.outputs.executor_token }}
       deployment_hash: ${{ steps.deploy.outputs.deployment_hash }}
       manifest_sha: ${{ steps.deploy.outputs.manifest_sha }}
       binding_digest: ${{ steps.deploy.outputs.binding_digest }}
@@ -175,6 +177,9 @@ jobs:
           QUALIFICATION_EXPECTED_CANDIDATE_SHA: ${{ needs.deploy-enroll.outputs.candidate_sha }}
           QUALIFICATION_EXPECTED_CANDIDATE_WORKER: ${{ needs.deploy-enroll.outputs.candidate_worker }}
           QUALIFICATION_EXPECTED_CANDIDATE_VERSION: ${{ needs.deploy-enroll.outputs.candidate_version }}
+          QUALIFICATION_EXPECTED_RELAY_WORKER: ${{ needs.deploy-enroll.outputs.relay_worker }}
+          QUALIFICATION_EXPECTED_RELAY_VERSION: ${{ needs.deploy-enroll.outputs.relay_version }}
+          QUALIFICATION_EXPECTED_RELAY_BINDING_DIGEST: ${{ needs.deploy-enroll.outputs.relay_binding_digest }}
           QUALIFICATION_EXPECTED_DEPLOYMENT_HASH: ${{ needs.deploy-enroll.outputs.deployment_hash }}
           QUALIFICATION_EXPECTED_MANIFEST_SHA: ${{ needs.deploy-enroll.outputs.manifest_sha }}
           QUALIFICATION_EXPECTED_BINDING_DIGEST: ${{ needs.deploy-enroll.outputs.binding_digest }}
@@ -216,9 +221,8 @@ jobs:
           run-id: ${{ needs.authorize.outputs.candidate_run_id }}
       - name: Run publisher rollback qualification
         env:
-          QUALIFICATION_CANDIDATE_URL: ${{ needs.deploy-enroll.outputs.candidate_url }}
-          QUALIFICATION_ADMIN_TOKEN: ${{ needs.deploy-enroll.outputs.candidate_admin_token }}
-          QUALIFICATION_SHARED_TOKEN: ${{ needs.deploy-enroll.outputs.candidate_shared_token }}
+          QUALIFICATION_RELAY_URL: ${{ needs.deploy-enroll.outputs.relay_url }}
+          QUALIFICATION_EXECUTOR_TOKEN: ${{ needs.deploy-enroll.outputs.executor_token }}
           QUALIFICATION_AWS_REGION: ${{ needs.deploy-enroll.outputs.region }}
           QUALIFICATION_BASE_AMI_ID: ${{ needs.deploy-enroll.outputs.base_ami_id }}
           QUALIFICATION_ARTIFACT_DIR: ${{ runner.temp }}/image-qualification-candidate
@@ -267,6 +271,9 @@ jobs:
           QUALIFICATION_EXPECTED_CANDIDATE_SHA: ${{ needs.deploy-enroll.outputs.candidate_sha }}
           QUALIFICATION_EXPECTED_CANDIDATE_WORKER: ${{ needs.deploy-enroll.outputs.candidate_worker }}
           QUALIFICATION_EXPECTED_CANDIDATE_VERSION: ${{ needs.deploy-enroll.outputs.candidate_version }}
+          QUALIFICATION_EXPECTED_RELAY_WORKER: ${{ needs.deploy-enroll.outputs.relay_worker }}
+          QUALIFICATION_EXPECTED_RELAY_VERSION: ${{ needs.deploy-enroll.outputs.relay_version }}
+          QUALIFICATION_EXPECTED_RELAY_BINDING_DIGEST: ${{ needs.deploy-enroll.outputs.relay_binding_digest }}
           QUALIFICATION_EXPECTED_DEPLOYMENT_HASH: ${{ needs.deploy-enroll.outputs.deployment_hash }}
           QUALIFICATION_EXPECTED_MANIFEST_SHA: ${{ needs.deploy-enroll.outputs.manifest_sha }}
           QUALIFICATION_EXPECTED_BINDING_DIGEST: ${{ needs.deploy-enroll.outputs.binding_digest }}

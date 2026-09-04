@@ -2,15 +2,15 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-: "${QUALIFICATION_CANDIDATE_URL:?missing candidate coordinator URL}"
-: "${QUALIFICATION_ADMIN_TOKEN:?missing candidate admin token}"
-: "${QUALIFICATION_SHARED_TOKEN:?missing candidate shared token}"
+: "${QUALIFICATION_RELAY_URL:?missing qualification relay URL}"
+: "${QUALIFICATION_EXECUTOR_TOKEN:?missing ephemeral executor token}"
 : "${QUALIFICATION_BASE_AMI_ID:?missing fixed base AMI}"
 : "${QUALIFICATION_AWS_REGION:?missing fixed AWS region}"
 : "${QUALIFICATION_ARTIFACT_DIR:?missing candidate artifact directory}"
 : "${QUALIFICATION_PROOF_DIR:?missing proof directory}"
 
-for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN CLOUDFLARE_API_TOKEN QUALIFICATION_CONTROLLER_TOKEN; do
+for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN CLOUDFLARE_API_TOKEN \
+  QUALIFICATION_CONTROLLER_TOKEN QUALIFICATION_ADMIN_TOKEN QUALIFICATION_SHARED_TOKEN; do
   if [[ -n "${!name+x}" ]]; then
     printf '%s must be absent from the credentialless executor\n' "$name" >&2
     exit 1
@@ -22,11 +22,9 @@ proof="$QUALIFICATION_PROOF_DIR"
 raw=$(mktemp -d "${RUNNER_TEMP:-/tmp}/image-qualification-execute.XXXXXX")
 trap 'rm -rf "$raw"' EXIT
 mkdir -p "$proof"
-admin_headers="$raw/admin.headers"
-shared_headers="$raw/shared.headers"
-printf 'Authorization: Bearer %s\nContent-Type: application/json\n' "$QUALIFICATION_ADMIN_TOKEN" >"$admin_headers"
-printf 'Authorization: Bearer %s\nContent-Type: application/json\n' "$QUALIFICATION_SHARED_TOKEN" >"$shared_headers"
-chmod 600 "$admin_headers" "$shared_headers"
+relay_headers="$raw/relay.headers"
+printf 'Authorization: Bearer %s\n' "$QUALIFICATION_EXECUTOR_TOKEN" >"$relay_headers"
+chmod 600 "$relay_headers"
 
 sanitize() {
   node -e '
@@ -35,8 +33,7 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { text += chunk; });
 process.stdin.on("end", () => {
   text = text
-    .replaceAll(process.env.QUALIFICATION_ADMIN_TOKEN ?? "", "[admin-token]")
-    .replaceAll(process.env.QUALIFICATION_SHARED_TOKEN ?? "", "[shared-token]")
+    .replaceAll(process.env.QUALIFICATION_EXECUTOR_TOKEN ?? "", "[executor-token]")
     .replace(/https?:\/\/[^\s"<>]+/g, "[url]")
     .replace(/\b(?:ami|i|vol|snap|key)-[0-9a-f]{8,}\b/g, "[aws-resource]")
     .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "[ip]");
@@ -48,9 +45,9 @@ image_read() {
   local image_id=$1
   local output=$2
   curl --fail --silent --show-error --max-time 30 \
-    -H "@$admin_headers" \
+    -H "@$relay_headers" \
     -o "$output" \
-    "$QUALIFICATION_CANDIDATE_URL/v1/images/$image_id?provider=aws&target=linux&region=$QUALIFICATION_AWS_REGION"
+    "$QUALIFICATION_RELAY_URL/v1/images/$image_id?provider=aws&target=linux&region=$QUALIFICATION_AWS_REGION"
 }
 
 probe_started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -60,8 +57,9 @@ image_read "$QUALIFICATION_BASE_AMI_ID" "$before"
 spoof_body="$raw/spoof.json"
 printf '{"expected":{"state":"capture"},"image":{"target":"linux"}}\n' >"$spoof_body"
 spoof_status=$(curl --silent --show-error --max-time 30 -o "$raw/spoof-response.json" \
-  -w '%{http_code}' -X POST -H "@$shared_headers" --data-binary "@$spoof_body" \
-  "$QUALIFICATION_CANDIDATE_URL/v1/images/$QUALIFICATION_BASE_AMI_ID/promote-cas?provider=aws&target=linux&region=$QUALIFICATION_AWS_REGION")
+  -w '%{http_code}' -X POST -H "@$relay_headers" -H 'Content-Type: application/json' \
+  --data-binary "@$spoof_body" \
+  "$QUALIFICATION_RELAY_URL/qualification/shared/v1/images/$QUALIFICATION_BASE_AMI_ID/promote-cas?provider=aws&target=linux&region=$QUALIFICATION_AWS_REGION")
 [[ "$spoof_status" == 403 ]]
 image_read "$QUALIFICATION_BASE_AMI_ID" "$after"
 node - "$before" "$after" <<'NODE'
@@ -84,18 +82,17 @@ sleep 2
 fsr_body="$raw/fsr.json"
 printf '{"availabilityZones":["%sa"]}\n' "$QUALIFICATION_AWS_REGION" >"$fsr_body"
 fsr_status=$(curl --silent --show-error --max-time 30 -o "$raw/fsr-response.json" \
-  -w '%{http_code}' -X POST -H "@$admin_headers" --data-binary "@$fsr_body" \
-  "$QUALIFICATION_CANDIDATE_URL/v1/images/$QUALIFICATION_BASE_AMI_ID/fast-snapshot-restore?provider=aws&target=linux&region=$QUALIFICATION_AWS_REGION")
+  -w '%{http_code}' -X POST -H "@$relay_headers" -H 'Content-Type: application/json' \
+  --data-binary "@$fsr_body" \
+  "$QUALIFICATION_RELAY_URL/v1/images/$QUALIFICATION_BASE_AMI_ID/fast-snapshot-restore?provider=aws&target=linux&region=$QUALIFICATION_AWS_REGION")
 [[ "$fsr_status" -ge 400 ]]
 printf '{"rejected":true,"httpStatusClass":%s}\n' "$((fsr_status / 100))" >"$proof/fsr-denial.json"
 
 candidate_bin="$QUALIFICATION_ARTIFACT_DIR/bin/crabbox"
 chmod 700 "$candidate_bin" "$QUALIFICATION_ARTIFACT_DIR/candidate/scripts/"*.sh
-export CRABBOX_COORDINATOR="$QUALIFICATION_CANDIDATE_URL"
-export CRABBOX_COORDINATOR_TOKEN="$QUALIFICATION_ADMIN_TOKEN"
-export CRABBOX_COORDINATOR_ADMIN_TOKEN="$QUALIFICATION_ADMIN_TOKEN"
-export CRABBOX_OWNER="image-qualification@example.invalid"
-export CRABBOX_ORG="image-qualification"
+export CRABBOX_COORDINATOR="$QUALIFICATION_RELAY_URL"
+export CRABBOX_COORDINATOR_TOKEN="$QUALIFICATION_EXECUTOR_TOKEN"
+export CRABBOX_COORDINATOR_ADMIN_TOKEN="$QUALIFICATION_EXECUTOR_TOKEN"
 export CRABBOX_ENV_ALLOW="CI"
 
 "$candidate_bin" image promote "$QUALIFICATION_BASE_AMI_ID" \
@@ -139,8 +136,8 @@ process.stdout.write(receipt.image.id);
 ' "$QUALIFICATION_ADAPTER_STATE/promotion-receipt.json")
 image_read "$QUALIFICATION_BASE_AMI_ID" "$raw/restored-readback.json"
 failed_status=$(curl --silent --show-error --max-time 30 \
-  -H "@$admin_headers" -o "$raw/failed-readback.json" -w '%{http_code}' \
-  "$QUALIFICATION_CANDIDATE_URL/v1/images/$failed_image?provider=aws&target=linux&region=$QUALIFICATION_AWS_REGION")
+  -H "@$relay_headers" -o "$raw/failed-readback.json" -w '%{http_code}' \
+  "$QUALIFICATION_RELAY_URL/v1/images/$failed_image?provider=aws&target=linux&region=$QUALIFICATION_AWS_REGION")
 [[ "$failed_status" == 200 || "$failed_status" == 404 ]]
 node "$ROOT/scripts/image-qualification-control.mjs" verify-catalog \
   "$raw/seed.json" \
