@@ -376,6 +376,17 @@ GCP also stops retrying if its selected-scope cleanup client cannot be rebuilt,
 even if the existing best-effort fallback client returns success. That fallback
 does not establish that the selected project and zone were cleaned.
 
+RunPod and Hetzner bind readiness to the immutable resource ID and expected name
+returned or requested at creation, before using the SSH endpoint. Hetzner also
+checks the new allocation's lease, provider ownership, slug, and selected-key
+labels. A contradictory readiness response cannot replace the original rollback
+target or its key labels. If the creation response itself cannot be bound to the
+request, Hetzner refuses to delete the returned server and reports the unresolved
+allocation; only an independently created attempt key can be cleaned up. These
+checks do not establish generation-fenced deletion for providers addressed by
+reusable names. Existing provider-specific failed-acquisition keep and cleanup
+policies remain unchanged.
+
 `crabbox cleanup` (alias `crabbox machine cleanup`) sweeps expired
 direct-provider machines and stale local state. It refuses to run when a
 coordinator is configured, because sweeping provider resources can race live

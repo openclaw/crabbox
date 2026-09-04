@@ -283,3 +283,8 @@ Crabbox does not wire those by default, but custom runner images can add them:
 - Cleanup cannot discover containers that have no local Crabbox claim.
 - Container capacity is bounded by the checked-in Wrangler bindings
   (`max_instances`) and the target account's Cloudflare Containers limits.
+
+If a command stream ends before its completion event while the caller context is
+canceled, Crabbox reports cancellation rather than a missing-completion error.
+An accepted completion event and explicit stream-read errors retain their
+existing precedence.

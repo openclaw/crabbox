@@ -1994,3 +1994,49 @@ func TestCloudflareRunCancellationSurvivesFailedCleanup(t *testing.T) {
 		t.Fatalf("recovery claim missing: %v", err)
 	}
 }
+
+type cloudflareStreamEOFTransport struct {
+	body io.ReadCloser
+}
+
+func (t cloudflareStreamEOFTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/x-ndjson"}}, Body: t.body, Request: req}, nil
+}
+
+type cloudflareCancelingEOFBody struct {
+	data   string
+	cancel context.CancelFunc
+}
+
+func (b *cloudflareCancelingEOFBody) Read(p []byte) (int, error) {
+	n := copy(p, b.data)
+	b.data = b.data[n:]
+	if b.data == "" {
+		b.cancel()
+		return n, io.EOF
+	}
+	return n, nil
+}
+func (*cloudflareCancelingEOFBody) Close() error { return nil }
+
+func TestCloudflareStreamCancellationAtCleanEOF(t *testing.T) {
+	for _, complete := range []bool{false, true} {
+		t.Run(fmt.Sprint(complete), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			data := ""
+			if complete {
+				data = "{\"type\":\"complete\",\"exitCode\":7}\n"
+			}
+			client := &cloudflareClient{baseURL: "http://127.0.0.1", http: &http.Client{Transport: cloudflareStreamEOFTransport{body: &cloudflareCancelingEOFBody{data: data, cancel: cancel}}}}
+			code, err := client.execStream(ctx, "fixture", execStreamRequest{Command: "true"}, io.Discard, io.Discard)
+			if complete {
+				if err != nil || code != 7 {
+					t.Fatalf("accepted completion changed: code=%d err=%v", code, err)
+				}
+			} else if !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancellation lost at clean EOF: %v", err)
+			}
+		})
+	}
+}

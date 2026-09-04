@@ -204,3 +204,8 @@ Sessions identifiers are rejected unless they are already claimed.
 - `--actions-runner` is rejected.
 - Sync is archive upload/extract, not rsync, so rsync-specific options
   (for example `--checksum`) are rejected.
+
+If a command stream ends before its completion event while the caller context is
+canceled, Crabbox reports cancellation rather than a missing-completion error.
+An accepted completion event and explicit stream-read errors retain their
+existing precedence.
