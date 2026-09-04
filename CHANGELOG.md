@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Preserve literal Tensorlake and OpenSandbox profile arguments through final execution, including environment-wrapped commands, and fix Tensorlake's inferred single-string shell execution. Thanks @steipete.
 - Read all AWS recovery inventory pages and retain cleanup debt when pagination is incomplete; describe interrupted provisioning without assuming a deployment caused it. [PR 1832](https://github.com/openclaw/crabbox/pull/1832). Thanks @steipete.
 - Preserve literal profile arguments through CodeSandbox, OpenComputer, and Docker Sandbox execution, sharing command-intent parsing without changing provider shells or environment transports. [PR 1830](https://github.com/openclaw/crabbox/pull/1830). Thanks @steipete.
 

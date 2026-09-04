@@ -99,13 +99,14 @@ func renderShellEnvProfile(env map[string]string) string {
 	return out.String()
 }
 
-// WrapCommandWithShellEnvProfile gates only profile sourcing, not user commands.
+// WrapCommandWithShellEnvProfile composes execution argv without reinterpreting
+// literal arguments. It gates only profile sourcing, not user commands.
 func WrapCommandWithShellEnvProfile(command []string, envPath string) []string {
 	var script string
 	if len(command) == 3 && command[0] == "bash" && command[1] == "-lc" {
 		script = command[2]
 	} else {
-		script = "exec " + core.ShellScriptFromArgv(command)
+		script = "exec " + strings.Join(core.ShellWords(command), " ")
 	}
 	return []string{"bash", "-lc", ShellScriptWithEnvProfile(script, envPath)}
 }

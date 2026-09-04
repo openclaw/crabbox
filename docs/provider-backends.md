@@ -415,11 +415,19 @@ core instead.
 for delegated POSIX command adapters. It reuses core shell inference and literal
 argument handling, snapshots the input, and rejects a missing command. The
 result's `Argv` method applies an adapter-supplied shell prefix only when needed;
-an explicitly empty shell source remains valid. Cloudflare Sandbox, Superserve,
-Crownest, Vercel Sandbox, and Nomad use this boundary. They retain their existing
-transport serialization, shell choice, working directory, environment, and
-execution lifecycle. These adapters currently pass no literal-argument map;
-the extraction does not change profile-literal propagation through transports.
+`ShellCommand` renders that execution argv for a string transport. An explicitly
+empty shell source remains valid. Pass all three request fields (`Command`,
+`ShellMode`, and `CommandLiteralArgs`) so profile arguments remain literal.
+Adapters retain their shell choice, working directory, environment transport,
+and execution lifecycle. Serialize the classified intent without running shell
+inference again.
+
+`shared.WrapCommandWithShellEnvProfile` accepts execution argv, not unclassified
+user input. Its fallback quotes every word literally before terminal execution;
+it must not infer operators or assignments again. An exact three-word
+`bash -lc <body>` invocation reuses its body inside the existing profile wrapper,
+preserving the single login-shell boundary used by Modal and Tensorlake. Profile
+sourcing is failure-gated without adding global errexit to user source.
 
 Claim-only recovery adapters may use `shared.ResolveProviderClaimStrict` to
 resolve an exact provider/scope-bound claim before a slug while preventing a
