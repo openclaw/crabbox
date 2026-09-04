@@ -623,7 +623,7 @@ func (b *awsLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRequ
 		return err
 	}
 	if fixedAWSLeaseKind.IsFixedClaim(exact) {
-		return fixedAWSLeaseKind.FinalizeAfterCleanup(exact, func() error {
+		return finalizeAWSLeaseAfterCleanup(exact, func() error {
 			if err := core.AuthorizeCheckpointRelease(exact, req.CheckpointID); err != nil {
 				return err
 			}
@@ -930,18 +930,12 @@ func deleteClaimedAWSServerWithClient(ctx context.Context, client awsClient, ser
 	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
 		return err
 	}
-	var cleanupErr error
-	err := fixedAWSLeaseKind.FinalizeAfterCleanup(claim, func() error {
+	return finalizeAWSLeaseAfterCleanup(claim, func() error {
 		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
 			return err
 		}
-		cleanupErr = deleteAWSCleanupServerWithClient(ctx, client, server, cleanupKeyID)
-		return cleanupErr
+		return deleteAWSCleanupServerWithClient(ctx, client, server, cleanupKeyID)
 	})
-	if err != nil {
-		return err
-	}
-	return cleanupErr
 }
 
 func resolveAWSCleanupKeyID(ctx context.Context, client awsClient, server Server, claim core.LeaseClaim) (string, error) {
@@ -990,7 +984,8 @@ func (b *awsLeaseBackend) cleanupOrphanedAWSClaims(ctx context.Context, dryRun b
 		if !isAWSClaimProvider(claim.Provider) || !core.IsCanonicalLeaseID(claim.LeaseID) {
 			continue
 		}
-		// Released receipts retain identity, not outstanding cleanup obligations.
+		// Released receipts retain identity after provider cleanup. Canonical stop
+		// retries any pending local SSH cleanup without repeating provider deletion.
 		if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == fixedAWSIntentReleased {
 			continue
 		}
@@ -1044,7 +1039,7 @@ func deleteMissingClaimedAWSResourcesWithClient(ctx context.Context, client awsC
 	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
 		return err
 	}
-	return fixedAWSLeaseKind.FinalizeAfterCleanup(claim, func() error {
+	return finalizeAWSLeaseAfterCleanup(claim, func() error {
 		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
 			return err
 		}
