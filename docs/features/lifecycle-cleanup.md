@@ -455,3 +455,25 @@ attempt cannot overwrite or delete a newer claim.
 - [inspect command](../commands/inspect.md)
 - [Identifiers](identifiers.md)
 - [Security](../security.md)
+
+### Direct Azure acquisition identity
+
+After successful VM creation, direct Azure acquisition binds the returned native
+VM ID to the requested VM name and ownership tags. A final readiness observation
+must retain that binding before bootstrap, ready tagging, or claim publication.
+An incomplete creation result or changed readiness identity reports unresolved
+cleanup and withholds VM deletion; a later matching read does not erase the
+contradiction.
+
+Ordinary failures after a valid creation use the same prepared owned-cleanup
+operations as release: re-read the original VM, capture companion identities,
+revalidate them, delete the VM first, then its surviving companions. Refusal or
+cleanup failure preserves the original acquisition error and prevents a fresh
+bootstrap retry. This in-process rollback has no persisted recovery claim and
+does not provide crash-resumable companion cleanup.
+
+These are observed-identity checks, not an atomic generation-conditional Azure
+DELETE. Inner create-failure rollback and Windows setup performed during create,
+intermediate hidden readiness polls, and replacement races after the final
+validation remain separate boundaries. This does not change GCP cleanup or
+make name-addressed resources equivalent to immutable-ID deletion targets.
