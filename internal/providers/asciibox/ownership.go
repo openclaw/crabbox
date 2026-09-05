@@ -317,29 +317,29 @@ func exactBoxForRelease(ctx context.Context, client api, expected boxData) (boxD
 	if err := ctx.Err(); err != nil {
 		return boxData{}, false, err
 	}
-	if expected.deletionOperationID != "" {
-		operation, err := client.GetDeletionOperation(ctx, expected.ID, expected.deletionOperationID)
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return boxData{}, false, ctxErr
-		}
-		if err != nil {
-			return boxData{}, false, fmt.Errorf("ascii-box deletion operation lookup; retaining claim: %w", err)
-		}
-		if err := validateBoxDeletionOperation(operation, expected.ID, expected.deletionOperationID); err != nil {
-			return boxData{}, false, err
-		}
-		if operation.Status != "completed" {
-			return boxData{}, false, exit(2, "ascii-box deletion operation %s is %s; retaining claim", operation.ID, operation.Status)
-		}
-		// Recheck the recorded operation inside the release fence; a reference
-		// or an earlier resolution read is not completion authority.
-		expected.deletionCompleted = true
-	}
 	fresh, err := client.GetBox(ctx, expected.ID)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return boxData{}, false, ctxErr
 	}
 	if err == nil {
+		if expected.deletionOperationID != "" {
+			operation, operationErr := client.GetDeletionOperation(ctx, expected.ID, expected.deletionOperationID)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return boxData{}, false, ctxErr
+			}
+			if operationErr != nil {
+				return boxData{}, false, fmt.Errorf("ascii-box deletion operation lookup; retaining claim: %w", operationErr)
+			}
+			if err := validateBoxDeletionOperation(operation, expected.ID, expected.deletionOperationID); err != nil {
+				return boxData{}, false, err
+			}
+			if operation.Status != "completed" {
+				return boxData{}, false, exit(2, "ascii-box deletion operation %s is %s; retaining claim", operation.ID, operation.Status)
+			}
+			// Recheck the recorded operation inside the release fence; a reference
+			// or an earlier resolution read is not completion authority.
+			expected.deletionCompleted = true
+		}
 		if expected.deletionCompleted {
 			return boxData{}, false, exit(2, "ascii-box %s is still observable after recorded deletion completion; retaining claim", expected.ID)
 		}
@@ -348,9 +348,9 @@ func exactBoxForRelease(ctx context.Context, client api, expected boxData) (boxD
 	if !isNotFound(err) {
 		return boxData{}, false, fmt.Errorf("ascii-box ownership lookup; retaining claim: %w", err)
 	}
-	if !expected.deletionCompleted {
-		return boxData{}, false, exit(2, "ascii-box %s has no completed native deletion witness; absence alone cannot prove deletion completion; retaining claim", expected.ID)
-	}
+	// Exact native not-found plus a complete inventory absence is independent
+	// deletion authority. It permits stale-claim reconciliation without
+	// repeating a mutation or waiting on an obsolete operation record.
 	boxes, listErr := client.ListBoxes(ctx, true)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return boxData{}, false, ctxErr

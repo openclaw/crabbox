@@ -120,13 +120,17 @@ waiting because of a timeout, cancellation, or operation lookup failure, it
 durably records the exact operation ID and its claim binding before returning
 the error. The binding covers the original provider scope, Box ID, creation
 timestamp, and repository owner. This records acceptance, not completion. A later
-`crabbox stop` first reads that same operation. Pending, processing, or blocked
-operations retain the claim without normal Box lookups, SSH teardown, or another
-deletion request. Only a matching operation that explicitly reports `completed`
-with a valid completion timestamp can proceed to `box info` not-found and
-complete inventory absence checks. Crabbox repeats these operation and absence
-checks inside the actual release fence before removing the claim; an earlier
-lookup during lease resolution does not authorize finalization.
+`crabbox stop` first checks the exact Box identity. If the Box remains observable,
+Crabbox validates any recorded operation before proceeding. Pending, processing,
+or blocked operations retain the claim without SSH teardown or another deletion
+request. A matching operation that reports `completed` also retains the claim
+while the Box remains observable because those native results are inconsistent.
+If `box info` instead reports a recognized not-found and complete
+`box list --all` inventory also omits the exact Box ID, Crabbox reconciles the
+unchanged local claim without reading a stale operation or repeating native
+deletion. Crabbox repeats these checks inside the actual release fence before
+removing the claim; an earlier lookup during lease resolution does not authorize
+finalization.
 
 If Crabbox finishes waiting for native deletion but final inventory confirmation
 fails or is canceled, it durably records that completed deletion in the
@@ -140,15 +144,14 @@ retain the claim.
 Completion records from earlier unreleased builds that proved only native
 request acceptance are rejected, not upgraded into operation-completion evidence.
 
-Not-found and empty inventory alone are not deletion-completion evidence: ASCII
-can hide a Box while its deletion operation is still pending or blocked. Claims
-without either Crabbox's completion record or its bound accepted-operation
-reference stay retained, including external deletions, native commands interrupted
-before valid acceptance was observed, and a process termination before the record
-was durably written. Missing, malformed, changed, or incomplete record bindings
-are rejected. There is no automatic adoption of an external deletion receipt,
-replacement of a recorded operation, or conversion of an old claim into
-completed-deletion authority.
+Exact not-found plus complete inventory absence is independent deletion evidence;
+it authorizes only removal of the unchanged local claim and never another native
+mutation. Failed or partial inventory, an observable matching ID, a replacement
+identity, cancellation, and missing or malformed native responses retain the
+claim. Missing, malformed, changed, or incomplete operation-record bindings are
+still rejected when the Box remains observable. There is no automatic adoption
+of an external deletion receipt, replacement of a recorded operation, or
+conversion of an old claim into completed-deletion authority.
 
 Raw IDs, provider names, and legacy claims without the full ownership binding
 remain inspectable but cannot authorize reuse or deletion. Missing or changed
