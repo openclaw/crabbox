@@ -1148,8 +1148,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if !ok {
 		return exit(2, "provider=%s does not support run", backend.Spec().Name)
 	}
+	coord := backendCoordinator(backend)
 	var terminalReceiptKey ed25519.PrivateKey
-	if strings.TrimSpace(*attestOut) != "" {
+	if strings.TrimSpace(*attestOut) != "" || (coord != nil && !*syncOnly) {
 		terminalReceiptKey, err = resolveAttestKey(strings.TrimSpace(*attestKeyOverride))
 		if err != nil {
 			return exit(2, "attest key: %v", err)
@@ -1160,7 +1161,6 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return err
 		}
 	}
-	coord := backendCoordinator(backend)
 	var registrationCoord *CoordinatorClient
 	if shouldRegisterCoordinatorLease(cfg) {
 		if client, configured, coordErr := newCoordinatorClient(cfg); coordErr != nil {
@@ -2513,12 +2513,6 @@ afterSync:
 	if stderrCaptured {
 		stderrEvents = nil
 		stderr = io.MultiWriter(stderr, capturedRunLogWriter{&logBuffer})
-	}
-	if recorder.runID != "" && len(terminalReceiptKey) == 0 {
-		terminalReceiptKey, err = resolveAttestKey("")
-		if err != nil {
-			return recordFailure(exit(2, "attest key: %v", err))
-		}
 	}
 	resultsMarker := ""
 	if cfg.Results.Auto {

@@ -83,6 +83,19 @@ func writeRunTestAttestKey(t *testing.T, path string, key ed25519.PrivateKey) {
 	}
 }
 
+func installRunTestTransportMarkers(t *testing.T, dir, markerPath string) {
+	t.Helper()
+	for _, name := range []string{"ssh", "rsync", "scp", "tar"} {
+		path := filepath.Join(dir, name)
+		script := "#!/bin/sh\nprintf '%s\\n' \"$0\" >> \"$CRABBOX_TRANSPORT_MARKER\"\nexit 99\n"
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_TRANSPORT_MARKER", markerPath)
+}
+
 func init() {
 	RegisterProvider(windowsEnvHelperTestProvider{})
 	RegisterProvider(runEnvProfileTestProvider{})
@@ -3437,15 +3450,7 @@ func TestRunCommandRejectsMissingSSHAttestKeyBeforeAcquisition(t *testing.T) {
 	isolateRunTestUserDirs(t, dir)
 	receiptPath := filepath.Join(dir, "receipt.json")
 	markerPath := filepath.Join(dir, "transport-called")
-	for _, name := range []string{"ssh", "rsync", "scp", "tar"} {
-		path := filepath.Join(dir, name)
-		script := "#!/bin/sh\nprintf '%s\\n' \"$0\" >> \"$CRABBOX_TRANSPORT_MARKER\"\nexit 99\n"
-		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("CRABBOX_TRANSPORT_MARKER", markerPath)
+	installRunTestTransportMarkers(t, dir, markerPath)
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
 
 	acquireCalls := 0
@@ -3482,6 +3487,142 @@ func TestRunCommandRejectsMissingSSHAttestKeyBeforeAcquisition(t *testing.T) {
 	}
 	if _, statErr := os.Stat(receiptPath); !os.IsNotExist(statErr) {
 		t.Fatalf("receipt exists after signer validation failure: %v", statErr)
+	}
+}
+
+func TestRunCommandPreloadsImplicitSSHSignerBeforeCoordinator(t *testing.T) {
+	routes := []struct {
+		name string
+		args []string
+	}{
+		{name: "Acquire"},
+		{name: "Resolve", args: []string{"--id", "cbx_existing"}},
+	}
+	keyStates := []struct {
+		name  string
+		setup func(*testing.T, string, string)
+	}{
+		{
+			name: "corrupt existing",
+			setup: func(t *testing.T, _ string, keyPath string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(keyPath, []byte("not a private key\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "absent but uncreatable",
+			setup: func(t *testing.T, _ string, keyPath string) {
+				t.Helper()
+				blockedPath := filepath.Dir(filepath.Dir(keyPath))
+				if err := os.MkdirAll(filepath.Dir(blockedPath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(blockedPath, []byte("not a directory\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, route := range routes {
+		for _, keyState := range keyStates {
+			t.Run(route.name+"/"+keyState.name, func(t *testing.T) {
+				clearConfigEnv(t)
+				dir := t.TempDir()
+				isolateRunTestUserDirs(t, dir)
+				t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+				keyPath, err := attestKeyPath()
+				if err != nil {
+					t.Fatal(err)
+				}
+				keyState.setup(t, dir, keyPath)
+
+				markerPath := filepath.Join(dir, "transport-called")
+				installRunTestTransportMarkers(t, dir, markerPath)
+				providerCalls := 0
+				runEnvProfileTestAcquireHook = func(AcquireRequest) { providerCalls++ }
+				t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+				var coordinatorCalls atomic.Int64
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					coordinatorCalls.Add(1)
+					http.Error(w, "unexpected coordinator call", http.StatusInternalServerError)
+				}))
+				t.Cleanup(server.Close)
+				t.Setenv("CRABBOX_COORDINATOR", server.URL)
+				t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+
+				args := []string{"--provider", "run-ready-pool-preflight-test"}
+				args = append(args, route.args...)
+				args = append(args, "--", "true")
+				var stdout, stderr bytes.Buffer
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(ctx, args)
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "attest key") {
+					t.Fatalf("error=%v, want implicit SSH signer exit 2\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+				}
+				if calls := coordinatorCalls.Load(); calls != 0 {
+					t.Fatalf("coordinator calls=%d, want 0", calls)
+				}
+				if providerCalls != 0 {
+					t.Fatalf("provider calls=%d, want 0", providerCalls)
+				}
+				if _, statErr := os.Stat(markerPath); !os.IsNotExist(statErr) {
+					t.Fatalf("SSH/rsync/upload ran before implicit signer validation: %v", statErr)
+				}
+			})
+		}
+	}
+}
+
+func TestRunCommandDirectSSHWithoutReceiptDoesNotCreateSigner(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	keyPath, err := attestKeyPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sshPath := filepath.Join(dir, "ssh")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
+
+	var stdout, stderr bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--no-sync",
+		"--", "true",
+	})
+	if err != nil {
+		t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if _, statErr := os.Stat(keyPath); !os.IsNotExist(statErr) {
+		t.Fatalf("direct SSH created an implicit receipt signer: %v", statErr)
 	}
 }
 
