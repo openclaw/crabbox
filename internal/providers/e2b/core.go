@@ -113,22 +113,6 @@ func shellQuote(s string) string {
 	return core.ShellQuote(s)
 }
 
-func shellScriptFromArgv(command []string) string {
-	return core.ShellScriptFromArgv(command)
-}
-
-func shellWords(words []string) []string {
-	return core.ShellWords(words)
-}
-
-func shouldUseShell(command []string) bool {
-	return core.ShouldUseShell(command)
-}
-
-func leadingEnvAssignment(command []string) bool {
-	return core.LeadingEnvAssignment(command)
-}
-
 func summarizeJSON(data []byte) string {
 	return core.SummarizeJSON(data)
 }
