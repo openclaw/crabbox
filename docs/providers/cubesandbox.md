@@ -52,6 +52,14 @@ syncs the checkout into the sandbox workdir, runs the command through envd's
 Connect process API, and deletes the sandbox unless `--keep` or failure-retention
 options keep it. `warmup` creates a retained sandbox; stop it explicitly.
 
+Commands share Crabbox's argv-versus-shell intent handling. Quoted profile
+arguments remain literal, including separators and assignment-shaped executable
+names. Single-string inferred programs and explicit `--shell` source execute
+in envd's existing `/bin/bash -l -c` shell; explicitly empty shell source is valid.
+Literal argv uses `exec` in that shell, so the workload replaces it rather than
+running a shell suffix or exit trap afterward. No additional shell is inserted.
+Use `--shell` for shell-only builtins or functions rather than literal argv.
+
 ## Auth
 
 ```sh
@@ -169,6 +177,9 @@ that a later stream trailer or sandbox deletion succeeded.
 - To adopt a labelled legacy or externally restored sandbox, use its exact
   CubeSandbox sandbox ID with `run --id <sandbox-id> --reclaim` or
   `stop --id <sandbox-id> --reclaim`. Conflicting claims fail closed.
+- Sandbox reads and connections must return the exact requested native sandbox
+  ID. A missing or different ID is rejected before adoption or execution; normal
+  failure cleanup remains bound to the originally acquired sandbox.
 
 Related docs:
 

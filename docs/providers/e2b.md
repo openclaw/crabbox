@@ -114,6 +114,19 @@ E2B caps sandbox timeouts at one hour. Crabbox clamps a longer local lease TTL t
 that limit when creating or connecting to a sandbox, and a TTL of zero falls back
 to five minutes.
 
+Sandbox reads and connections must return the exact requested native sandbox
+ID. A missing or different ID is rejected before its metadata or execution
+session can be used; ordinary cleanup of an already acquired sandbox still
+follows that sandbox's original claim.
+
+Commands share Crabbox's argv-versus-shell intent handling. Quoted profile
+arguments remain literal, including separators and assignment-shaped executable
+names. Single-string inferred programs and explicit `--shell` source execute
+in envd's existing `/bin/bash -l -c` shell; explicitly empty shell source is valid.
+Literal argv uses `exec` in that shell, so the workload replaces it rather than
+running a shell suffix or exit trap afterward. No additional shell is inserted.
+Use `--shell` for shell-only builtins or functions rather than literal argv.
+
 ## Capabilities
 
 - SSH: no.

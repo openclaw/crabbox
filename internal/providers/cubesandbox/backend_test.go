@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -295,18 +296,6 @@ func TestParseCubeSandboxProcessStreamRequiresEndEvent(t *testing.T) {
 	}
 }
 
-func TestCubeSandboxCommandString(t *testing.T) {
-	if got := cubesandboxCommandString([]string{"go", "test", "./..."}, false); got != "'go' 'test' './...'" {
-		t.Fatalf("plain command=%q", got)
-	}
-	if got := cubesandboxCommandString([]string{"FOO=bar", "go", "test"}, false); !strings.Contains(got, "FOO=") || !strings.Contains(got, "'go'") {
-		t.Fatalf("env command=%q", got)
-	}
-	if got := cubesandboxCommandString([]string{"pnpm install && pnpm test"}, true); got != "pnpm install && pnpm test" {
-		t.Fatalf("shell command=%q", got)
-	}
-}
-
 func TestCubeSandboxWorkspacePath(t *testing.T) {
 	if got := cubesandboxWorkspacePath(Config{}); got != "/root/crabbox" {
 		t.Fatalf("workspace=%q", got)
@@ -408,6 +397,51 @@ func TestCleanCubeSandboxWorkspacePath(t *testing.T) {
 				t.Fatalf("workspace=%q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCubeSandboxClientBindsObservedSandboxID(t *testing.T) {
+	for _, operation := range []string{"get", "connect"} {
+		for _, observed := range []string{"sbx_a", "sbx_b", "", " ", "SBX_A", " sbx_a", "sbx_a ", "synthetic-api-token", "synthetic-envd-token"} {
+			t.Run(operation+"/"+observed, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					path, method := "/sandboxes/sbx_a", http.MethodGet
+					if operation == "connect" {
+						path, method = path+"/connect", http.MethodPost
+					}
+					if r.URL.Path != path || r.Method != method || r.Header.Get("Authorization") != "Bearer synthetic-api-token" {
+						t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"sandboxID": observed, "alias": "different-template-alias", "envdAccessToken": "synthetic-envd-token", "domain": "sandbox.example.test"})
+				}))
+				defer server.Close()
+				client, err := newCubeSandboxClient(Config{CubeSandbox: CubeSandboxConfig{APIKey: "synthetic-api-token", APIURL: server.URL}}, Runtime{HTTP: server.Client()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var id, token string
+				if operation == "connect" {
+					var session cubesandboxSession
+					session, err = client.ConnectSandbox(t.Context(), "sbx_a", 120)
+					id, token = session.SandboxID, session.EnvdAccessToken
+				} else {
+					var sandbox cubesandboxSandbox
+					sandbox, err = client.GetSandbox(t.Context(), "sbx_a")
+					id, token = sandbox.SandboxID, sandbox.EnvdAccessToken
+				}
+				if observed == "sbx_a" {
+					if err != nil || id != "sbx_a" || token != "synthetic-envd-token" {
+						t.Fatalf("exact observation: id=%q token preserved=%v err=%v", id, token == "synthetic-envd-token", err)
+					}
+				} else if err == nil || id != "" || token != "" {
+					t.Fatalf("unbound observation escaped: id=%q token present=%v err=%v", id, token != "", err)
+				} else if strings.Contains(err.Error(), "synthetic-api-token") || strings.Contains(err.Error(), "synthetic-envd-token") {
+					t.Fatal("identity refusal exposed a reflected credential")
+				}
+			})
+		}
 	}
 }
 
@@ -1706,6 +1740,107 @@ func tarGzipContains(t *testing.T, data []byte, name string) bool {
 		if header.Name == name {
 			return true
 		}
+	}
+}
+
+func TestRunCommandIntentReachesExistingShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell contract")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash unavailable")
+	}
+	for _, name := range []string{"literal separator", "literal assignment", "literal singleton", "mixed operators", "quoted argv", "unmarked assignment", "explicit source", "empty source", "inferred source", "missing command"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			root := t.TempDir()
+			marker := filepath.Join(root, "must-not-exist")
+			program := filepath.Join(root, "FOO=x")
+			if err := os.WriteFile(program, []byte("#!/bin/sh\nprintf 'literal:%s' \"$*\"\nexit 42\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			client := &fakeCubeSandboxSyncClient{}
+			restore := swapNewCubeSandboxClient(client)
+			defer restore()
+			backend := &cubesandboxBackend{cfg: Config{CubeSandbox: CubeSandboxConfig{Template: "base", Workdir: root}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+			req := RunRequest{Repo: Repo{Root: root}, NoSync: true, Keep: true}
+			want, wantExit := "", 0
+			switch name {
+			case "literal separator":
+				req.Command = []string{"printf", "<%s>", ";", "touch", marker}
+				req.CommandLiteralArgs = map[int]bool{2: true}
+				want = "<;><touch><" + marker + ">"
+			case "literal assignment":
+				req.Command = []string{"FOO=x", "argument"}
+				req.CommandLiteralArgs = map[int]bool{0: true}
+				want, wantExit = "literal:argument", 42
+			case "literal singleton":
+				req.Command = []string{"FOO=x"}
+				req.CommandLiteralArgs = map[int]bool{0: true}
+				want, wantExit = "literal:", 42
+			case "mixed operators":
+				req.Command = []string{"printf", "%s", ";", "&&", "printf", "%s", "tail"}
+				req.CommandLiteralArgs = map[int]bool{2: true}
+				want = ";tail"
+			case "quoted argv":
+				req.Command = []string{"printf", "<%s>", "", "$literal", "a'b"}
+				want = "<><$literal><a'b>"
+			case "unmarked assignment":
+				req.Command = []string{"CBX_PROBE=value", "sh", "-c", `printf %s "$CBX_PROBE"`}
+				want = "value"
+			case "explicit source":
+				req.Command = []string{`printf %s "$unexported_fixture_state"; exit 7`}
+				req.ShellMode = true
+				want, wantExit = "existing-shell", 7
+			case "empty source":
+				req.Command = []string{""}
+				req.ShellMode = true
+			case "inferred source":
+				req.Command = []string{"printf %s inferred"}
+				want = "inferred"
+			}
+			_, runErr := backend.Run(t.Context(), req)
+			if name == "missing command" {
+				var ee core.ExitError
+				if !errors.As(runErr, &ee) || ee.Code != 2 {
+					t.Fatalf("missing command error=%v", runErr)
+				}
+				if len(client.commands) != 1 {
+					t.Fatalf("missing command reached workload: %v", client.commands)
+				}
+				return
+			}
+			if runErr != nil {
+				t.Fatal(runErr)
+			}
+			if len(client.commands) != 2 {
+				t.Fatalf("commands=%v want preparation and workload", client.commands)
+			}
+			// Exercise the captured workload in an existing shell; the separate
+			// native envd fixture verifies its actual login-shell transport.
+			source := "unexported_fixture_state=existing-shell\n" + client.commands[1]
+			cmd := exec.CommandContext(t.Context(), bash, "--noprofile", "--norc", "-c", source)
+			cmd.Dir = root
+			cmd.Env = []string{"HOME=" + root, "PATH=" + root + ":/usr/bin:/bin"}
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			commandErr := cmd.Run()
+			code := 0
+			if commandErr != nil {
+				var ee *exec.ExitError
+				if !errors.As(commandErr, &ee) {
+					t.Fatal(commandErr)
+				}
+				code = ee.ExitCode()
+			}
+			if code != wantExit || stdout.String() != want {
+				t.Fatalf("source=%q stdout=%q stderr=%q exit=%d; want %q/%d", source, stdout.String(), stderr.String(), code, want, wantExit)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("literal separator ran touch: %v", err)
+			}
+		})
 	}
 }
 

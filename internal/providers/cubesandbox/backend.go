@@ -187,10 +187,11 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 			return b.prepareWorkspace(ctx, client, session, workspace)
 		},
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
-			command := cubesandboxCommandString(req.Command, req.ShellMode)
-			if command == "" {
-				return shared.DelegatedSandboxCommand{}, exit(2, "missing command")
+			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+			if err != nil {
+				return shared.DelegatedSandboxCommand{}, exit(2, "%v", err)
 			}
+			command := intent.ShellSource()
 			fmt.Fprintf(b.rt.Stderr, "running on cubesandbox %s\n", strings.Join(req.Command, " "))
 			commandEnv, strippedAuthEnv := cubeSandboxCommandEnv(req.Env)
 			if len(strippedAuthEnv) > 0 {
@@ -774,19 +775,6 @@ func cubesandboxProcessUser(user string) (string, error) {
 		return "", exit(2, "invalid cubesandbox.user %q: use a login name, not a path", user)
 	}
 	return clean, nil
-}
-
-func cubesandboxCommandString(command []string, shellMode bool) string {
-	if len(command) == 0 {
-		return ""
-	}
-	if shellMode {
-		return strings.Join(command, " ")
-	}
-	if shouldUseShell(command) || leadingEnvAssignment(command) {
-		return shellScriptFromArgv(command)
-	}
-	return strings.Join(shellWords(command), " ")
 }
 
 func rejectCubeSandboxSyncOptions(req RunRequest) error {

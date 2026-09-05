@@ -424,6 +424,14 @@ Adapters retain their shell choice, working directory, environment transport,
 and execution lifecycle. Serialize the classified intent without running shell
 inference again.
 
+`ShellSource` targets a terminal workload in an already selected POSIX shell:
+shell intent stays source in that shell, while literal argv is quoted after
+`exec`. E2B and CubeSandbox use this boundary before their shared envd transport
+selects `/bin/bash -l -c`; SmolVM and Upstash Box likewise retain their existing
+source-only shell boundaries. Shell-local functions, builtins, and state require
+shell intent, not literal argv. Do not insert a second shell or reinterpret the
+rendered source before transport.
+
 `shared.WrapCommandWithShellEnvProfile` accepts execution argv, not unclassified
 user input. Its fallback quotes every word literally before terminal execution;
 it must not infer operators or assignments again. An exact three-word
@@ -481,6 +489,13 @@ grace, request encoding, and exact single-document decoding. Keep response
 envelopes, versions, identity checks, redaction, and provider error semantics in
 the adapter. Do not use it for noisy CLI output, streaming or NDJSON protocols,
 or commands with ambiguous side effects.
+
+The local command runner preserves caller cancellation/deadline causes when
+its context watcher interrupts a child that then exits by signal. It retains
+the underlying process error and does not relabel observed nonnegative exits,
+post-exit capture cleanup, or output-limit failures as cancellation. This is a
+POSIX signal-termination guarantee; Windows forced-termination codes remain
+unchanged. It does not prove that canceling a bridge stops its remote workload.
 
 Vanilla provider HTTP redirect policy also belongs in
 `internal/providers/shared`. `shared.SecureHTTPClient` clones an injected
@@ -575,8 +590,8 @@ a future proposal proves both behavior preservation and meaningful net value.
 `shared.RunDelegatedSandbox` owns the common sandbox run sequence: preflight,
 archive preparation, acquisition or resolution, setup, sync, command execution,
 and one final retention/cleanup decision before timing and session reporting.
-E2B, Modal, Cloudflare Sandbox, OpenSandbox, and Nomad's persistent shell
-allocations use this sequence. The shared
+E2B, Modal, Cloudflare Sandbox, OpenSandbox, Nomad's persistent shell
+allocations, Superserve, and Azure Dynamic Sessions use this sequence. The shared
 owner preserves the primary command/cancellation outcome when cleanup also
 fails, reports cleanup-only failure as a failed run, and keeps the session
 marked retained until deletion succeeds. Adapter-held operation locks span
@@ -600,6 +615,14 @@ Cancellation before admission cannot trigger resume; cancellation after resume
 is checked before mutating the local claim. Successful admission enables normal
 run finalization. Providers without this extra boundary keep their existing
 resolution behavior.
+
+Superserve keeps its lease-operation lock through final reporting and activates
+reused sandboxes in `AdmitReuse`; failed activation returns the retained session
+without the post-run activity refresh. Its acquisition rollback keeps the
+original create-response ID even when metadata setup fails or returns a different
+ID. Azure Dynamic Sessions supplies deletion behind its original claim snapshot
+and bounds both claim-lock waiting and the stop request. Neither adapter gives
+the shared sequencer authority to discover, adopt, or delete arbitrary resources.
 
 Other delegated backends can adopt this owner when their session model fits;
 do not copy its result, timing, keep-on-failure, and cleanup bookkeeping into a

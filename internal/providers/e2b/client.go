@@ -163,6 +163,9 @@ func (c *e2bClient) ConnectSandbox(ctx context.Context, sandboxID string, timeou
 	if err := c.doJSON(ctx, http.MethodPost, "/sandboxes/"+url.PathEscape(sandboxID)+"/connect", nil, body, &sandbox); err != nil {
 		return e2bSession{}, err
 	}
+	if shared.ValidateResourceID(sandboxID, sandbox.SandboxID) != nil {
+		return e2bSession{}, errors.New("connect sandbox returned a different or missing sandbox ID")
+	}
 	return c.sessionFromSandbox(sandbox), nil
 }
 
@@ -170,6 +173,9 @@ func (c *e2bClient) GetSandbox(ctx context.Context, sandboxID string) (e2bSandbo
 	var sandbox e2bSandbox
 	if err := c.doJSON(ctx, http.MethodGet, "/sandboxes/"+url.PathEscape(sandboxID), nil, nil, &sandbox); err != nil {
 		return e2bSandbox{}, err
+	}
+	if shared.ValidateResourceID(sandboxID, sandbox.SandboxID) != nil {
+		return e2bSandbox{}, errors.New("get sandbox returned a different or missing sandbox ID")
 	}
 	if sandbox.Metadata == nil {
 		sandbox.Metadata = map[string]string{}
