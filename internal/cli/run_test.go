@@ -5,8 +5,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -64,6 +69,17 @@ func assertReceiptArtifactMetadata(t *testing.T, artifacts []runArtifact, path s
 	}
 	if matches != 1 {
 		t.Fatalf("receipt artifacts=%d, want one in %#v", matches, artifacts)
+	}
+}
+
+func writeRunTestAttestKey(t *testing.T, path string, key ed25519.PrivateKey) {
+	t.Helper()
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -3413,6 +3429,145 @@ func TestRunCommandWritesTerminalReceiptOnSuccess(t *testing.T) {
 				t.Fatal("receipt does not bind retained representation")
 			}
 		})
+	}
+}
+
+func TestRunCommandRejectsMissingSSHAttestKeyBeforeAcquisition(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	receiptPath := filepath.Join(dir, "receipt.json")
+	markerPath := filepath.Join(dir, "transport-called")
+	for _, name := range []string{"ssh", "rsync", "scp", "tar"} {
+		path := filepath.Join(dir, name)
+		script := "#!/bin/sh\nprintf '%s\\n' \"$0\" >> \"$CRABBOX_TRANSPORT_MARKER\"\nexit 99\n"
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_TRANSPORT_MARKER", markerPath)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+
+	acquireCalls := 0
+	runEnvProfileTestAcquireHook = func(AcquireRequest) { acquireCalls++ }
+	t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+	var coordinatorCalls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		coordinatorCalls.Add(1)
+		http.Error(w, "unexpected coordinator call", http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-ready-pool-preflight-test",
+		"--attest", receiptPath,
+		"--attest-key", filepath.Join(dir, "missing.pem"),
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "attest key") {
+		t.Fatalf("error=%v, want SSH signer exit 2\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if acquireCalls != 0 {
+		t.Fatalf("acquire calls=%d, want 0", acquireCalls)
+	}
+	if calls := coordinatorCalls.Load(); calls != 0 {
+		t.Fatalf("coordinator calls=%d, want 0", calls)
+	}
+	if _, statErr := os.Stat(markerPath); !os.IsNotExist(statErr) {
+		t.Fatalf("SSH/rsync/upload ran before signer validation: %v", statErr)
+	}
+	if _, statErr := os.Stat(receiptPath); !os.IsNotExist(statErr) {
+		t.Fatalf("receipt exists after signer validation failure: %v", statErr)
+	}
+}
+
+func TestRunCommandCachesSSHAttestSignerBeforeAcquisition(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	receiptPath := filepath.Join(dir, "receipt.json")
+	keyPath := filepath.Join(dir, "signer.pem")
+	replacementPath := filepath.Join(dir, "replacement.pem")
+	_, originalKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, replacementKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRunTestAttestKey(t, keyPath, originalKey)
+	writeRunTestAttestKey(t, replacementPath, replacementKey)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+
+	acquireCalls := 0
+	runEnvProfileTestAcquireHook = func(AcquireRequest) {
+		acquireCalls++
+		if err := os.Remove(keyPath); err != nil {
+			t.Errorf("remove original signer: %v", err)
+			return
+		}
+		if err := os.Rename(replacementPath, keyPath); err != nil {
+			t.Errorf("replace signer: %v", err)
+		}
+	}
+	t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+
+	var stdout, stderr bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--no-sync",
+		"--attest", receiptPath,
+		"--attest-key", keyPath,
+		"--", "true",
+	})
+	if err != nil {
+		t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if acquireCalls != 1 {
+		t.Fatalf("acquire calls=%d, want 1", acquireCalls)
+	}
+	data, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := decodeTerminalRunReceipt(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalPublicKey := originalKey.Public().(ed25519.PublicKey)
+	replacementPublicKey := replacementKey.Public().(ed25519.PublicKey)
+	if receipt.PublicKey != base64.StdEncoding.EncodeToString(originalPublicKey) || receipt.Signer != attestFingerprint(originalPublicKey) {
+		t.Fatalf("receipt signer=%q publicKey=%q, want cached original signer", receipt.Signer, receipt.PublicKey)
+	}
+	if receipt.PublicKey == base64.StdEncoding.EncodeToString(replacementPublicKey) {
+		t.Fatal("receipt used replacement signer")
 	}
 }
 

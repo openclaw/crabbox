@@ -1148,6 +1148,13 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if !ok {
 		return exit(2, "provider=%s does not support run", backend.Spec().Name)
 	}
+	var terminalReceiptKey ed25519.PrivateKey
+	if strings.TrimSpace(*attestOut) != "" {
+		terminalReceiptKey, err = resolveAttestKey(strings.TrimSpace(*attestKeyOverride))
+		if err != nil {
+			return exit(2, "attest key: %v", err)
+		}
+	}
 	if !*noSync && freshPR.Empty() {
 		if err := validateLocalWorkspaceSyncSource(repo); err != nil {
 			return err
@@ -2507,9 +2514,8 @@ afterSync:
 		stderrEvents = nil
 		stderr = io.MultiWriter(stderr, capturedRunLogWriter{&logBuffer})
 	}
-	var terminalReceiptKey ed25519.PrivateKey
-	if recorder.runID != "" || strings.TrimSpace(*attestOut) != "" {
-		terminalReceiptKey, err = resolveAttestKey(strings.TrimSpace(*attestKeyOverride))
+	if recorder.runID != "" && len(terminalReceiptKey) == 0 {
+		terminalReceiptKey, err = resolveAttestKey("")
 		if err != nil {
 			return recordFailure(exit(2, "attest key: %v", err))
 		}
