@@ -167,10 +167,11 @@ func (b *e2bBackend) Run(ctx context.Context, req RunRequest) (RunResult, error)
 			return b.prepareWorkspace(ctx, client, session, workspace)
 		},
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
-			command := e2bCommandString(req.Command, req.ShellMode)
-			if command == "" {
-				return shared.DelegatedSandboxCommand{}, exit(2, "missing command")
+			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+			if err != nil {
+				return shared.DelegatedSandboxCommand{}, exit(2, "%v", err)
 			}
+			command := intent.ShellSource()
 			return shared.DelegatedSandboxCommand{Run: func(ctx context.Context) (int, error) {
 				fmt.Fprintf(b.rt.Stderr, "running on e2b %s\n", strings.Join(req.Command, " "))
 				return client.StartProcess(ctx, session, e2bProcessRequest{
@@ -780,19 +781,6 @@ func e2bProcessUser(user string) (string, error) {
 		return "", exit(2, "invalid e2b.user %q: use a login name, not a path", user)
 	}
 	return clean, nil
-}
-
-func e2bCommandString(command []string, shellMode bool) string {
-	if len(command) == 0 {
-		return ""
-	}
-	if shellMode {
-		return strings.Join(command, " ")
-	}
-	if shouldUseShell(command) || leadingEnvAssignment(command) {
-		return shellScriptFromArgv(command)
-	}
-	return strings.Join(shellWords(command), " ")
 }
 
 func rejectE2BSyncOptions(req RunRequest) error {
