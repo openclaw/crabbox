@@ -2,13 +2,34 @@ package cua
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func claimLabels(cfg Config, sandboxName, createdAt string, missing bool) map[string]string {
+	workdir, _ := cuaWorkdir(cfg)
+	labels := map[string]string{
+		labelSandboxName: sandboxName,
+		labelImage:       strings.TrimSpace(blank(cfg.Cua.Image, defaultImage)),
+		labelKind:        strings.ToLower(strings.TrimSpace(blank(cfg.Cua.Kind, defaultKind))),
+		labelRegion:      strings.TrimSpace(cfg.Cua.Region),
+		labelWorkdir:     workdir,
+		labelCreatedAt:   strings.TrimSpace(createdAt),
+	}
+	if cfg.TTL > 0 {
+		labels[labelTTLSeconds] = fmt.Sprintf("%d", int64(cfg.TTL/time.Second))
+	}
+	if missing {
+		labels[labelMissing] = "true"
+	}
+	return labels
+}
 
 func TestCUALeaseIDUsesProviderPrefix(t *testing.T) {
 	leaseID := newCUALeaseID()

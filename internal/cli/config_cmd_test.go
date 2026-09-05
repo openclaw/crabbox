@@ -24,6 +24,17 @@ func (configArchitectureTestProvider) DescribeImplicitArchitecture(Config) strin
 	return "native"
 }
 
+func isolatedConfigPath(t *testing.T) string {
+	t.Helper()
+	clearConfigEnv(t)
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.yaml")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	return configPath
+}
+
 func TestConfigShowUsesProviderImplicitArchitecture(t *testing.T) {
 	provider := configArchitectureTestProvider{}
 	RegisterProvider(provider)
@@ -434,12 +445,7 @@ func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
 }
 
 func TestConfigSetBrokerRegisteredMode(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_PROVIDER", "")
 
 	var stdout bytes.Buffer
@@ -465,12 +471,7 @@ func TestConfigSetBrokerRegisteredMode(t *testing.T) {
 }
 
 func TestConfigSetBrokerRegisteredModeAcceptsDirectProvider(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_PROVIDER", "")
 
 	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
@@ -491,12 +492,7 @@ func TestConfigSetBrokerRegisteredModeAcceptsDirectProvider(t *testing.T) {
 }
 
 func TestConfigSetBrokerRegisteredModeRejectsUnknownProvider(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_PROVIDER", "")
 
 	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
@@ -514,12 +510,7 @@ func TestConfigSetBrokerRegisteredModeRejectsUnknownProvider(t *testing.T) {
 }
 
 func TestConfigSetBrokerUsesPersistedRegisteredModeForProviderValidation(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_PROVIDER", "")
 	if err := os.WriteFile(configPath, []byte("broker:\n  url: https://old.example.test\n  mode: Registered\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -542,12 +533,7 @@ func TestConfigSetBrokerUsesPersistedRegisteredModeForProviderValidation(t *test
 }
 
 func TestConfigSetBrokerRejectsPersistedDirectProviderWhenSwitchingToManaged(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_PROVIDER", "")
 	original := "provider: xcp-ng\nbroker:\n  url: https://old.example.test\n  mode: registered\n  provider: xcp-ng\n"
 	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
@@ -572,12 +558,7 @@ func TestConfigSetBrokerRejectsPersistedDirectProviderWhenSwitchingToManaged(t *
 }
 
 func TestConfigSetBrokerDoesNotPromoteTopLevelProviderWhenOmitted(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_PROVIDER", "")
 	if err := os.WriteFile(configPath, []byte("provider: xcp-ng\nbroker:\n  url: https://old.example.test\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -597,12 +578,7 @@ func TestConfigSetBrokerDoesNotPromoteTopLevelProviderWhenOmitted(t *testing.T) 
 }
 
 func TestConfigShowIncludesRunPreflightTools(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	if err := os.WriteFile(configPath, []byte("run:\n  preflightTools: [node, bun]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -634,12 +610,7 @@ func TestConfigShowIncludesRunPreflightTools(t *testing.T) {
 }
 
 func TestConfigShowReportsWebVNCAgentBaseURLSupport(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_WEBVNC_AGENT_BASE_URL", "https://agent.example.test")
 	if err := os.WriteFile(configPath, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -662,12 +633,7 @@ func TestConfigShowReportsWebVNCAgentBaseURLSupport(t *testing.T) {
 }
 
 func TestConfigShowExportsControllerProviderContract(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	config := "provider: external\nbroker:\n  url: https://broker-user:broker-pass@broker.example.test/root/?token=query-secret#fragment-secret\n  mode: registered\nexternal:\n  command: provider-a\n  capabilities:\n    idempotentLeaseId: true\n"
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
@@ -697,12 +663,7 @@ func TestConfigShowExportsControllerProviderContract(t *testing.T) {
 }
 
 func TestConfigShowExportsRawControllerProviderIdentityContract(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	config := "provider: external\nbroker:\n  url: https://broker-user:broker-pass@broker.example.test/root/?token=query-secret#fragment-secret\n  mode: registered\nexternal:\n  command: provider-a\n  capabilities:\n    idempotentLeaseId: true\n"
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
@@ -727,12 +688,7 @@ func TestConfigShowExportsRawControllerProviderIdentityContract(t *testing.T) {
 }
 
 func TestConfigShowRedactsCloudflareDynamicWorkers(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	if err := os.WriteFile(configPath, []byte(`provider: aws
 cloudflareDynamicWorkers:
   loaderUrl: https://user:pass@loader.example.test?token=query-secret#fragment-secret
@@ -783,12 +739,7 @@ cloudflareDynamicWorkers:
 }
 
 func TestConfigSetBrokerRejectsDirectOnlyProvider(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 
 	var stdout bytes.Buffer
 	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
@@ -802,12 +753,7 @@ func TestConfigSetBrokerRejectsDirectOnlyProvider(t *testing.T) {
 }
 
 func TestConfigShowIncludesJobHydrateGitHubRunner(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	if err := os.WriteFile(configPath, []byte("jobs:\n  smoke:\n    architecture: arm64\n    label: nightly smoke\n    artifactGlobs:\n      - reports/**\n    requiredArtifacts:\n      - reports/summary.json\n    hydrate:\n      actions: true\n      githubRunner: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -843,12 +789,7 @@ func TestConfigShowIncludesJobHydrateGitHubRunner(t *testing.T) {
 }
 
 func TestConfigShowRedactsCloudflareSandbox(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	if err := os.WriteFile(configPath, []byte(`provider: aws
 cloudflareSandbox:
   url: https://user:pass@bridge.example.test?token=query-secret#fragment-secret
@@ -902,12 +843,7 @@ cloudflareSandbox:
 }
 
 func TestConfigShowIncludesCloudflareWithoutSecret(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN", "cloudflare-secret-token")
 	if err := os.WriteFile(configPath, []byte("cloudflare:\n  apiUrl: https://cloudflare.example.test\n  workdir: /workspace/test\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -949,12 +885,7 @@ func TestConfigShowIncludesCloudflareWithoutSecret(t *testing.T) {
 }
 
 func TestConfigShowIncludesBlaxelWithoutSecret(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_BLAXEL_API_KEY", "blaxel-secret-token")
 	t.Setenv("CRABBOX_BLAXEL_API_URL", "https://api.blaxel.example.test")
 	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
@@ -1027,12 +958,7 @@ func TestConfigShowIncludesBlaxelWithoutSecret(t *testing.T) {
 }
 
 func TestConfigShowIncludesNomadWithoutSecret(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("NOMAD_TOKEN", "nomad-secret-token")
 	t.Setenv("CRABBOX_NOMAD_DATACENTERS", "dc1,dc2")
 	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
@@ -1116,12 +1042,7 @@ func TestConfigShowIncludesNomadWithoutSecret(t *testing.T) {
 }
 
 func TestConfigShowIncludesSuperserveWithoutSecret(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_SUPERSERVE_API_KEY", "superserve-secret-token")
 	if err := os.WriteFile(configPath, []byte("superserve:\n  baseUrl: https://user:base-url-secret@superserve.example.test\n  template: superserve/custom\n  workdir: /workspace/test\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1164,12 +1085,7 @@ func TestConfigShowIncludesSuperserveWithoutSecret(t *testing.T) {
 }
 
 func TestConfigShowIncludesDigitalOceanProviderConfig(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	if err := os.WriteFile(configPath, []byte("provider: digitalocean\ndigitalocean:\n  region: sfo3\n  image: ubuntu-24-04-x64\n  vpc: vpc-123\n  sshCIDRs: [203.0.113.0/24, 2001:db8::/64]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1217,12 +1133,7 @@ func TestConfigShowIncludesDigitalOceanProviderConfig(t *testing.T) {
 }
 
 func TestConfigShowIncludesVultrProviderConfigWithoutSecret(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("VULTR_API_KEY", "vultr-secret-token")
 	if err := os.WriteFile(configPath, []byte("provider: vultr\nvultr:\n  region: sjc\n  os: \"2284\"\n  image: image-123\n  snapshot: snapshot-123\n  firewallGroup: fw-123\n  vpcIds: [vpc-a, vpc-b]\n  sshCIDRs: [203.0.113.0/24, 2001:db8::/64]\n  userScheme: limited\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1285,12 +1196,7 @@ func TestConfigShowIncludesVultrProviderConfigWithoutSecret(t *testing.T) {
 }
 
 func TestConfigShowIncludesScalewayProviderConfigWithoutSecrets(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("SCW_ACCESS_KEY", "redaction-fixture-access")
 	t.Setenv("SCW_SECRET_KEY", "redaction-fixture-private")
 	if err := os.WriteFile(configPath, []byte("provider: scaleway\nscaleway:\n  region: fr-par\n  zone: fr-par-1\n  image: ubuntu_noble\n  type: DEV1-S\n  projectId: project-123\n  organizationId: org-123\n  securityGroup: sg-123\n  sshCIDRs: [203.0.113.0/24, 2001:db8::/64]\n"), 0o600); err != nil {
@@ -1374,12 +1280,7 @@ func TestConfigShowScalewayPartialAuth(t *testing.T) {
 }
 
 func TestConfigShowIncludesHostingerWithoutSecret(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("HOSTINGER_API_TOKEN", "hostinger-secret-token")
 	if err := os.WriteFile(configPath, []byte(`hostinger:
   apiUrl: https://hostinger.example.test
@@ -1450,12 +1351,7 @@ func TestConfigShowIncludesHostingerWithoutSecret(t *testing.T) {
 }
 
 func TestConfigShowIncludesLambdaWithoutSecret(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("LAMBDA_API_KEY", "lambda-secret-token")
 	if err := os.WriteFile(configPath, []byte(`provider: lambda
 lambda:
@@ -1522,12 +1418,7 @@ lambda:
 }
 
 func TestConfigShowIncludesNvidiaBrevWithoutSecretSurface(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_NVIDIA_BREV_TOKEN", "ignored-brev-secret")
 	if err := os.WriteFile(configPath, []byte(`nvidiaBrev:
   cli: /usr/local/bin/brev
@@ -1616,12 +1507,7 @@ func TestConfigShowIncludesNvidiaBrevWithoutSecretSurface(t *testing.T) {
 }
 
 func TestConfigShowIncludesVastWithoutSecretSurface(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_VAST_API_KEY", "vast-redaction-fixture-secret")
 	if err := os.WriteFile(configPath, []byte(`provider: vast
 ssh:
@@ -1713,12 +1599,7 @@ vast:
 }
 
 func TestConfigShowIncludesNebiusWithoutSecretSurface(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_NEBIUS_PROFILE", "env-profile")
 	if err := os.WriteFile(configPath, []byte(`provider: nebius
 nebius:
@@ -1846,12 +1727,7 @@ func TestConfigShowAppliesHostingerPerUserWorkRootDefault(t *testing.T) {
 }
 
 func TestConfigShowPreservesExplicitDigitalOceanSSHBaseValues(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	if err := os.WriteFile(configPath, []byte("provider: digitalocean\nssh:\n  user: crabbox\n  port: \"2222\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1874,12 +1750,7 @@ func TestConfigShowPreservesExplicitDigitalOceanSSHBaseValues(t *testing.T) {
 }
 
 func TestConfigShowIncludesMorphWithoutSecret(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("MORPH_API_KEY", "morph-secret-token")
 	if err := os.WriteFile(configPath, []byte("morph:\n  apiUrl: https://morph.example.test\n  snapshot: snapshot_123\n  sshGatewayHost: ssh.morph.example.test\n  workRoot: /tmp/morph\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1925,12 +1796,7 @@ func TestConfigShowIncludesMorphWithoutSecret(t *testing.T) {
 }
 
 func TestConfigShowSurfacesUnsupportedAzureDynamicSessionsPool(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	if err := os.WriteFile(configPath, []byte("azureDynamicSessions:\n  endpoint: https://pool.env.eastus.azurecontainerapps.io\n  pool: legacy-pool\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1962,12 +1828,7 @@ func TestConfigShowSurfacesUnsupportedAzureDynamicSessionsPool(t *testing.T) {
 }
 
 func TestConfigShowIncludesSyncInclude(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	if err := os.WriteFile(configPath, []byte("sync:\n  include:\n    - src\n    - scripts\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1999,12 +1860,7 @@ func TestConfigShowIncludesSyncInclude(t *testing.T) {
 }
 
 func TestConfigShowIncludesXCPNgWithoutSecret(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	config := []byte(`xcpNg:
   apiUrl: https://xcp-ng.example.test
   username: root
@@ -2071,12 +1927,7 @@ func TestConfigShowIncludesXCPNgWithoutSecret(t *testing.T) {
 }
 
 func TestConfigShowRedactsXCPNgAPIURLUserinfo(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	config := []byte(`xcpNg:
   apiUrl: https://pool-user:pool-pass@xcp-ng.example.test/path?token=query-secret#fragment-secret
   username: root
@@ -2126,12 +1977,7 @@ func TestConfigShowRedactsXCPNgAPIURLUserinfo(t *testing.T) {
 }
 
 func TestConfigShowRedactsProxmoxAPIURLUserinfo(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	config := []byte(`proxmox:
   apiUrl: https://proxy-user:proxy-pass@pve.example.test:8006/api2/json?view=1
   tokenId: crabbox@pve!ci
@@ -2180,12 +2026,7 @@ func TestConfigShowRedactsProxmoxAPIURLUserinfo(t *testing.T) {
 }
 
 func TestConfigShowRedactsSchemeLessXCPNgAPIURLUserinfo(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	config := []byte(`xcpNg:
   apiUrl: pool-user:pool-pass@xcp-ng.example.test/path?view=1
   username: root
@@ -2550,12 +2391,7 @@ func TestRoutingSafeURLRedactsUserinfoOnMalformedURL(t *testing.T) {
 }
 
 func TestConfigShowIncludesDockerSandboxConfig(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_PROVIDER", "")
 	if err := os.WriteFile(configPath, []byte(`provider: docker-sandbox
 dockerSandbox:
@@ -2622,12 +2458,7 @@ dockerSandbox:
 }
 
 func TestConfigShowRejectsInvalidDockerSandboxCPUConfig(t *testing.T) {
-	clearConfigEnv(t)
-	home := t.TempDir()
-	configPath := filepath.Join(home, "config.yaml")
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_PROVIDER", "docker-sandbox")
 	if err := os.WriteFile(configPath, []byte("profile: default\n"), 0o600); err != nil {
 		t.Fatal(err)

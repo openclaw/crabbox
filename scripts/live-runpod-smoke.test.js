@@ -9,7 +9,9 @@ import { copySmokeRepo, writeExecutable, writeGoStub } from "./test-support/smok
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
 const prepareSmokeRepo = (dir) =>
-  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-runpod-smoke.sh"));
+  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-runpod-smoke.sh"), [
+    "lib/live-smoke-json-match.py",
+  ]);
 
 test("live RunPod smoke embedded cleanup Python compiles", () => {
   const script = fs.readFileSync(path.join(repoRoot, "scripts", "live-runpod-smoke.sh"), "utf8");

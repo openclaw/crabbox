@@ -71,16 +71,6 @@ type azureDynamicSessionsSession struct {
 	} `json:"properties"`
 }
 
-type azureDynamicSessionsErrorResponse struct {
-	Error *azureDynamicSessionsError `json:"error,omitempty"`
-}
-
-type azureDynamicSessionsError struct {
-	Code    string `json:"code,omitempty"`
-	Message string `json:"message,omitempty"`
-	Target  string `json:"target,omitempty"`
-}
-
 type azureDynamicSessionsAPIError struct {
 	StatusCode int
 	Status     string
@@ -500,24 +490,7 @@ func (c *azureDynamicSessionsClient) nextURL(next string) (string, error) {
 }
 
 func sameOriginURL(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveURLPort(a) == effectiveURLPort(b)
-}
-
-func effectiveURLPort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+	return shared.SameOrigin(a, b)
 }
 
 func (c *azureDynamicSessionsClient) url(path string, query url.Values) string {

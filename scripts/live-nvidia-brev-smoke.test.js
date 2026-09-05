@@ -9,7 +9,9 @@ import { copySmokeRepo, shellArgHelper, writeExecutable } from "./test-support/s
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
 const prepareSmokeRepo = (dir) =>
-  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-nvidia-brev-smoke.sh"));
+  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-nvidia-brev-smoke.sh"), [
+    "lib/live-smoke-json-match.py",
+  ]);
 
 function writeGoStub(binDir, scriptBody) {
   writeExecutable(

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Freestyle: check the full archive and compressed upload limit before allocation, freeze pre-create snapshots, and share safe workspace replacement while isolating file-API and exec fallback uploads.
+- Freestyle: check the full archive and compressed upload limit before allocation, freeze pre-create snapshots, and share safe workspace replacement while isolating file-API and exec fallback uploads. [PR 1880](https://github.com/openclaw/crabbox/pull/1880). Thanks @steipete.
 - OpenComputer: share run finalization so cleanup failures are reported, timing errors preserve the original exit, and command preparation honors `--keep-on-failure`; preserve cancellation and timeout causes and distinguish transport errors from command exits. [PR 1845](https://github.com/openclaw/crabbox/pull/1845). Thanks @steipete.
 - Preserve literal E2B and CubeSandbox profile arguments through their shared envd command transport, and accept inferred single-string shell programs and explicit empty shell source. [PR 1837](https://github.com/openclaw/crabbox/pull/1837). Thanks @steipete.
 - Blaxel: stop the original process after interrupted polling requests and preserve cancellation and timeout causes without exposing redacted credentials. [PR 1846](https://github.com/openclaw/crabbox/pull/1846). Thanks @steipete.
