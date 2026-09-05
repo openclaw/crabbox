@@ -37,7 +37,7 @@ jobs:
   hermetic:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    timeout-minutes: ${{ matrix.timeout-minutes || 15 }}
 
     strategy:
       fail-fast: false
@@ -51,6 +51,8 @@ jobs:
           - name: local-container
             runner: ubuntu-latest
             build-cli: true
+            # Cold bootstrap allows 20m; leave room for build, use and cleanup.
+            timeout-minutes: 30
             smoke: |
               CRABBOX_LIVE=1 \
               CRABBOX_LIVE_PROVIDERS=local-container \

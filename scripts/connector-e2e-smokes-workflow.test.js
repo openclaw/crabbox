@@ -30,7 +30,13 @@ test("connector lifecycle gate stays hermetic: no secret references anywhere", (
 
 test("matrix rows do not fail fast and are time-bounded", () => {
   assert.match(workflow, /fail-fast:\s*false/);
-  assert.match(workflow, /timeout-minutes:\s*15/);
+  assert.match(workflow, /timeout-minutes: \$\{\{ matrix\.timeout-minutes \|\| 15 \}\}/);
+  const localContainer = workflow.match(
+    /- name: local-container\n([\s\S]*?)(?=\n {10}- name:)/,
+  )?.[1];
+  assert.ok(localContainer, "local-container row exists");
+  assert.match(localContainer, /timeout-minutes: 30/);
+  assert.equal((workflow.match(/^ {12}timeout-minutes:/gm) ?? []).length, 1);
 });
 
 test("SSH localhost asserts amd64 only on its hosted x64 lifecycle row", () => {
