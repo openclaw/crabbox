@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type tensorlakeCLI struct {
@@ -112,7 +113,7 @@ func (c *tensorlakeCLI) runStreamed(ctx context.Context, sub []string, args []st
 		Stderr: stderr,
 	})
 	if err != nil {
-		if processErr, ok := err.(*exec.ExitError); ok && processErr.ProcessState != nil && processErr.ExitCode() > 0 && processErr.ExitCode() == res.ExitCode {
+		if core.IsPlainLocalCommandExit(res, err) {
 			return res.ExitCode, nil
 		}
 		return res.ExitCode, fmt.Errorf("tensorlake %s: %w", strings.Join(sub, " "), err)

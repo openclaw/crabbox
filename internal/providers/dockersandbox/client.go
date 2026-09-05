@@ -8,9 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type sbxCLI struct {
@@ -64,7 +65,7 @@ func (c *sbxCLI) runStreamed(ctx context.Context, args []string, stdout, stderr 
 		return res.ExitCode, sbxError(streamedErrorArgs(args), res.ExitCode, &stdoutBuf, &stderrBuf, err)
 	}
 	if err != nil {
-		if isCommandExitError(err, res.ExitCode) {
+		if core.IsPlainLocalCommandExit(res, err) {
 			return res.ExitCode, nil
 		}
 		var stdoutBuf, stderrBuf bytes.Buffer
@@ -260,14 +261,14 @@ func sbxError(args []string, exitCode int, stdout, stderr *bytes.Buffer, runErr 
 	action := strings.Join(args, " ")
 	guidance := classifySBXError(action, tail, runErr)
 	if runErr != nil {
-		msg := fmt.Sprintf("sbx %s (exit=%d): %v", action, exitCode, runErr)
+		suffix := ""
 		if tail != "" {
-			msg += ": " + tail
+			suffix += ": " + tail
 		}
 		if guidance != "" {
-			msg += ": " + guidance
+			suffix += ": " + guidance
 		}
-		return errors.New(msg)
+		return fmt.Errorf("sbx %s (exit=%d): %w%s", action, exitCode, runErr, suffix)
 	}
 	if guidance != "" {
 		return fmt.Errorf("sbx %s exited %d: %s: %s", action, exitCode, tail, guidance)
@@ -301,17 +302,6 @@ func classifySBXError(action, text string, runErr error) string {
 
 func isMissingExecutableError(err error) bool {
 	return err != nil && (errors.Is(err, os.ErrNotExist) || strings.Contains(strings.ToLower(err.Error()), "no such file"))
-}
-
-func isCommandExitError(err error, exitCode int) bool {
-	if err == nil || exitCode == 0 {
-		return false
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return true
-	}
-	return err.Error() == fmt.Sprintf("exit status %d", exitCode)
 }
 
 func firstNonEmptyLine(value string) string {

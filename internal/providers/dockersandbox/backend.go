@@ -15,6 +15,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 var randomBytes = rand.Read
@@ -136,8 +137,12 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	commandStart := b.now()
 	exitCode, runErr := cli.execStream(ctx, sandboxName, workdir, envFile, command, b.rt.Stdout, b.rt.Stderr)
 	commandDuration := b.now().Sub(commandStart)
+	outcome := shared.FinalizeDelegatedCommandOutcome(exitCode, runErr)
+	exitCode = outcome.ExitCode
 	result := RunResult{
 		ExitCode:      exitCode,
+		Status:        outcome.Status,
+		ErrorKind:     outcome.ErrorKind,
 		Command:       commandDuration,
 		Total:         b.now().Sub(started),
 		SyncDelegated: true,
@@ -168,16 +173,17 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			ExitCode:      exitCode,
 			Label:         strings.TrimSpace(req.Label),
 		}, result, runErr)); err != nil {
+			if result.Status == core.RunStatusSucceeded {
+				failure := shared.FinalizeDelegatedCommandOutcome(0, err)
+				result.ExitCode, result.Status, result.ErrorKind = failure.ExitCode, failure.Status, failure.ErrorKind
+			}
 			return result, err
 		}
 	}
 	if runErr != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		result.Session.Kept = !shouldStop
-		if exitCode != 0 {
-			return result, exit(exitCode, "docker-sandbox run failed: %v", runErr)
-		}
-		return result, exit(1, "docker-sandbox run failed: %v", runErr)
+		return result, shared.ExitErrorWithCause(exitCode, fmt.Sprintf("docker-sandbox run failed: %v", shared.RedactErrorSecrets(runErr.Error())), runErr)
 	}
 	if exitCode != 0 {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)

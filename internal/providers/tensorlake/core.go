@@ -60,10 +60,6 @@ func timingReportWithRunResult(report timingReport, result RunResult, err error)
 	return core.TimingReportWithRunResult(report, result, err)
 }
 
-func finalizeRunResult(result RunResult, err error) RunResult {
-	return core.FinalizeRunResult(result, err)
-}
-
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
 	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
 }

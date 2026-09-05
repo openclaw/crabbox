@@ -192,11 +192,8 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (result Run
 	commandStart := b.now()
 	exitCode, runErr := cli.execStream(ctx, sandboxID, workdir, command, b.rt.Stdout, b.rt.Stderr)
 	commandDuration := b.now().Sub(commandStart)
-	var outcome RunResult
-	if runErr != nil {
-		outcome = finalizeRunResult(RunResult{}, runErr)
-		exitCode = 1
-	}
+	outcome := shared.FinalizeDelegatedCommandOutcome(exitCode, runErr)
+	exitCode = outcome.ExitCode
 	result = RunResult{
 		ExitCode:      exitCode,
 		Status:        outcome.Status,
@@ -205,7 +202,6 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (result Run
 		Total:         b.now().Sub(started),
 		SyncDelegated: true,
 	}
-	result = finalizeRunResult(result, runErr)
 	if req.NoSync {
 		fmt.Fprintf(b.rt.Stderr, "tensorlake run summary sync_skipped=true command=%s total=%s exit=%d\n",
 			result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)

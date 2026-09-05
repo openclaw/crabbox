@@ -778,6 +778,13 @@ type LocalCommandResult struct {
 	Stderr   string
 }
 
+// IsPlainLocalCommandExit recognizes an ordinary unsuccessful local process
+// completion, not a wrapped/joined error or proof of a remote command outcome.
+func IsPlainLocalCommandExit(result LocalCommandResult, err error) bool {
+	processErr, ok := err.(*exec.ExitError)
+	return ok && processErr != nil && processErr.ProcessState != nil && processErr.ExitCode() > 0 && processErr.ExitCode() == result.ExitCode
+}
+
 type DoctorRequest struct {
 	ProbeSSH bool
 }

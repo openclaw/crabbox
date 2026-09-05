@@ -112,6 +112,12 @@ variables; repository-local config cannot select a Modal environment or Secret.
 
 ## Lifecycle
 
+The Python bridge's process exit describes transport health; the remote command
+exit comes only from its result file. Bridge exit 125 remains a transport failure,
+while a remote command may legitimately exit 125. Returned cancellation, deadline,
+and I/O causes are preserved through streamed execution, uploads, and JSON control
+calls, so the shared run lifecycle can report cancellation and timeouts accurately.
+
 1. `warmup` / `run` without `--id` creates a Modal Sandbox in the configured
    `modal.app` from `modal.image`, with the sandbox timeout and Crabbox
    ownership tags, assigned atomically at creation. Crabbox durably stores a
