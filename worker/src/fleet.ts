@@ -4379,7 +4379,9 @@ export class FleetCoordinator {
         class: config.class,
         serverType: config.serverType,
         requestedServerType: config.serverType,
-        market: config.capacityMarket,
+        ...(coordinatorProviderSpec(config.provider).supportsCapacityMarket
+          ? { market: config.capacityMarket }
+          : {}),
         serverID: 0,
         serverName: "",
         providerKey: config.providerKey,
@@ -4974,7 +4976,9 @@ export class FleetCoordinator {
         class: config.class,
         serverType: config.serverType,
         requestedServerType: config.serverType,
-        market: config.capacityMarket,
+        ...(coordinatorProviderSpec(config.provider).supportsCapacityMarket
+          ? { market: config.capacityMarket }
+          : {}),
         cloudID: "",
         serverID: 0,
         serverName: "",

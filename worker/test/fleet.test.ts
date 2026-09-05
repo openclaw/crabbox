@@ -21154,6 +21154,47 @@ describe("fleet lease identity and idle", () => {
     expect(JSON.stringify(storedLease)).not.toContain("BEGIN OPENSSH PRIVATE KEY");
   });
 
+  it.each(["hetzner", "daytona"] as const)(
+    "omits capacity market from %s lease records",
+    async (provider) => {
+      const storage = new MemoryStorage();
+      let storedDuringCreate: LeaseRecord | undefined;
+      const fleet = testFleet(storage, {
+        [provider]: fakeProvider(
+          () => {
+            storedDuringCreate = structuredClone(storage.value("lease:cbx_abcdef123456"));
+          },
+          { provider, cloudID: `${provider}-cbx-abcdef123456` },
+        ),
+      });
+
+      const create = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers: {
+            "x-crabbox-owner": "alice@example.com",
+            "x-crabbox-org": "example-org",
+          },
+          body: {
+            leaseID: "cbx_abcdef123456",
+            provider,
+            capacity: { market: "on-demand", fallback: "none" },
+            sshPublicKey: "ssh-ed25519 test",
+          },
+        }),
+      );
+
+      expect(create.status).toBe(201);
+      expect(storedDuringCreate).toMatchObject({
+        provider,
+        state: "provisioning",
+      });
+      expect(storedDuringCreate).not.toHaveProperty("market");
+      const { lease } = (await create.json()) as { lease: LeaseRecord };
+      expect(lease).not.toHaveProperty("market");
+      expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).not.toHaveProperty("market");
+    },
+  );
+
   it("omits SSH host keys when a provider cannot inject them before boot", async () => {
     const storage = new MemoryStorage();
     let createdConfig: LeaseConfig | undefined;
