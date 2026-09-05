@@ -46,7 +46,8 @@ type SSHTarget struct {
 	SSHConfigProxy         bool
 	ProxyCommand           string
 	ChildEnvDenylist       []string
-	ChildEnv               map[string]string
+	// Transport-only overrides can contain credentials; never serialize them.
+	ChildEnv map[string]string `json:"-"`
 }
 
 func isLocalMacTarget(target SSHTarget) bool {

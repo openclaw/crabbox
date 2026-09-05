@@ -156,6 +156,7 @@ func runResolvedSSHArchiveCommand(ctx context.Context, session *sshTransportSess
 	if !ok {
 		return errors.New("resolved SSH archive transport does not expose process streams")
 	}
+	applyTargetChildEnvironment(execHandle.cmd, target)
 	stderrTail := newSynchronizedTailBuffer(failureTailLines)
 	execHandle.cmd.Stdin = stdin
 	execHandle.cmd.Stdout = stdout

@@ -718,6 +718,7 @@ func TestSpritesBootstrapInstallsFullSyncToolchain(t *testing.T) {
 
 type recordingRunner struct {
 	calls        []string
+	requests     []LocalCommandRequest
 	failContains string
 	err          error
 }
@@ -725,6 +726,7 @@ type recordingRunner struct {
 func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	call := strings.Join(append([]string{req.Name}, req.Args...), " ")
 	r.calls = append(r.calls, call)
+	r.requests = append(r.requests, req)
 	if r.failContains != "" && strings.Contains(call, r.failContains) {
 		err := r.err
 		if err == nil {
@@ -736,12 +738,18 @@ func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (Local
 }
 
 type fakeSpritesAPI struct {
-	create        spritesInfo
-	get           spritesInfo
-	createdName   string
-	createdLabels []string
-	deleted       string
-	deleteErr     error
+	organization    string
+	organizationErr error
+	create          spritesInfo
+	get             spritesInfo
+	createdName     string
+	createdLabels   []string
+	deleted         string
+	deleteErr       error
+}
+
+func (f *fakeSpritesAPI) GetOrganization(context.Context) (string, error) {
+	return f.organization, f.organizationErr
 }
 
 func (f *fakeSpritesAPI) CreateSprite(_ context.Context, name string, labels []string) (spritesInfo, error) {
