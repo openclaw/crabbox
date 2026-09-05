@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { adminGrantVersion, issueUserToken, sha256Hex } from "../src/auth";
 import { EC2SpotClient } from "../src/aws";
+import { AzureClient, azureOwnedDeleteClaimKey } from "../src/azure";
 import { codeOriginForLease } from "../src/code-origin";
 import {
   awsPromotedAMIConfigKey,
@@ -16,6 +17,7 @@ import {
 import { routeCoordinatorRequest } from "../src/coordinator-entry";
 import {
   CloudflareCoordinatorRuntime,
+  coordinatorRequestQueue,
   legacyAlarmKey,
   setLegacyWake,
   type CoordinatorRuntime,
@@ -677,7 +679,17 @@ class FakeCoordinatorRuntime implements CoordinatorRuntime {
 }
 
 describe("fleet cleanup inspection", () => {
-  function fixture(supported = true) {
+  type CleanupCommitGuard = NonNullable<Parameters<AzureClient["recoverMissingPublicIP"]>[3]>;
+
+  function fixture(
+    supported = true,
+    recoverCleanup?: (
+      lease: LeaseRecord,
+      fingerprint: string,
+      actor: string,
+      commitGuard: CleanupCommitGuard,
+    ) => Promise<unknown>,
+  ) {
     const storage = new MemoryStorage();
     const lease = testLease({
       id: "cbx_abcdef123456",
@@ -712,6 +724,7 @@ describe("fleet cleanup inspection", () => {
     const provider = {
       ...fakeProvider(undefined, { provider: "azure" }),
       ...(supported ? { inspectCleanup } : {}),
+      ...(recoverCleanup ? { recoverCleanup } : {}),
       refreshLeaseAccessForResolution,
       releaseLease,
     };
@@ -727,13 +740,376 @@ describe("fleet cleanup inspection", () => {
       fleet,
       inspection,
       inspectCleanup,
-      expectNoLifecycleMutation() {
+      expectNoLifecycleMutation(expectedLease = lease) {
         expect(refreshLeaseAccessForResolution).not.toHaveBeenCalled();
         expect(releaseLease).not.toHaveBeenCalled();
-        expect(storage.value(`lease:${lease.id}`)).toEqual(lease);
+        expect(storage.value(`lease:${lease.id}`)).toEqual(expectedLease);
       },
     };
   }
+
+  function recoveryFixture(supported = true) {
+    const recovery = { basis: "operator-confirmed-public-ip-absence", actor: "alice@example.com" };
+    const controls: { duringProviderRead?: () => Promise<void> } = {};
+    const commit = vi.fn<() => Promise<void>>(async () => undefined);
+    const recoverCleanup = vi.fn<
+      (
+        lease: LeaseRecord,
+        fingerprint: string,
+        actor: string,
+        commitGuard: CleanupCommitGuard,
+      ) => Promise<typeof recovery>
+    >(async (_lease, _fingerprint, actor, commitGuard) => {
+      await controls.duringProviderRead?.();
+      return commitGuard(async () => {
+        await commit();
+        return { ...recovery, actor };
+      });
+    });
+    const f = fixture(true, supported ? recoverCleanup : undefined);
+    f.lease.expiresAt = new Date(Date.now() - 60_000).toISOString();
+    f.lease.region = "eastus";
+    f.storage.seed(`lease:${f.lease.id}`, f.lease);
+    const claimKey = azureOwnedDeleteClaimKey(f.lease.providerScope!, f.lease.cloudID, f.lease.id);
+    const claim = { version: 2, stableResourceIdentity: "synthetic-baseline" };
+    f.storage.seed(claimKey, claim);
+    const coreWrites: string[] = [];
+    f.storage.beforePut = async (key) => {
+      if (key === `lease:${f.lease.id}` || key === claimKey) coreWrites.push(key);
+    };
+    f.storage.beforeDelete = async (key) => {
+      if (key === `lease:${f.lease.id}` || key === claimKey) coreWrites.push(key);
+    };
+    const fingerprint = "a".repeat(64);
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    const body = { action: "acknowledge-missing-resource", expectedClaimFingerprint: fingerprint };
+    return {
+      ...f,
+      recovery,
+      recoverCleanup,
+      controls,
+      commit,
+      fingerprint,
+      headers,
+      body,
+      path: `/v1/leases/${f.lease.id}/cleanup`,
+      expectCoreReadOnly(expectedLease = f.lease) {
+        f.expectNoLifecycleMutation(expectedLease);
+        expect(f.inspectCleanup).not.toHaveBeenCalled();
+        expect(coreWrites).toEqual([]);
+        expect(f.storage.value(claimKey)).toEqual(claim);
+      },
+    };
+  }
+
+  describe("missing public IP recovery route", () => {
+    it("keeps recovery provider reads outside the lifecycle queue", () => {
+      expect(coordinatorRequestQueue(request("POST", "/v1/leases/cbx_abcdef123456/cleanup"))).toBe(
+        "direct",
+      );
+    });
+
+    it.each([
+      ["owner", "alice@example.com", "example-org", false],
+      ["admin", "admin@example.com", "other-org", true],
+    ] as const)(
+      "permits %s acknowledgement while retaining the original lease owner",
+      async (_role, actor, org, admin) => {
+        const f = recoveryFixture();
+
+        const response = await f.fleet.fetch(
+          request("POST", f.path, {
+            headers: {
+              "x-crabbox-owner": actor,
+              "x-crabbox-org": org,
+              ...(admin ? { "x-crabbox-admin": "true" } : {}),
+            },
+            body: f.body,
+          }),
+        );
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+          leaseID: f.lease.id,
+          provider: "azure",
+          recovery: { ...f.recovery, actor },
+        });
+        expect(f.recoverCleanup).toHaveBeenCalledExactlyOnceWith(
+          f.lease,
+          f.fingerprint,
+          actor,
+          expect.any(Function),
+        );
+        expect(f.commit).toHaveBeenCalledTimes(1);
+        expect(f.lease.owner).toBe("alice@example.com");
+        f.expectCoreReadOnly();
+      },
+    );
+
+    it.each(["manager@example.com", "viewer@example.com"])(
+      "denies %s acknowledgement even though the lease is shared",
+      async (owner) => {
+        const f = recoveryFixture();
+
+        const response = await f.fleet.fetch(
+          request("POST", f.path, {
+            headers: { "x-crabbox-owner": owner, "x-crabbox-org": "other-org" },
+            body: f.body,
+          }),
+        );
+
+        expect(response.status).toBe(403);
+        expect(f.recoverCleanup).not.toHaveBeenCalled();
+        f.expectCoreReadOnly();
+      },
+    );
+
+    it("denies device acknowledgement before provider access", async () => {
+      const f = recoveryFixture();
+
+      const response = await f.fleet.fetch(
+        request("POST", f.path, {
+          headers: {
+            ...f.headers,
+            origin: "https://crabbox.test",
+            authorization: `Bearer cbxd_00000000-0000-4000-8000-000000000001.${"A".repeat(43)}`,
+          },
+          body: f.body,
+        }),
+      );
+
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toEqual({ error: "device_scope_forbidden" });
+      expect(f.recoverCleanup).not.toHaveBeenCalled();
+      f.expectCoreReadOnly();
+    });
+
+    it.each(["active", "released", "failed"] as const)(
+      "accepts an expired blocked %s lease",
+      async (state) => {
+        const f = recoveryFixture();
+        f.lease.state = state;
+        f.storage.seed(`lease:${f.lease.id}`, f.lease);
+
+        const response = await f.fleet.fetch(
+          request("POST", f.path, { headers: f.headers, body: f.body }),
+        );
+
+        expect(response.status).toBe(200);
+        expect(f.recoverCleanup).toHaveBeenCalledExactlyOnceWith(
+          f.lease,
+          f.fingerprint,
+          "alice@example.com",
+          expect.any(Function),
+        );
+        expect(f.commit).toHaveBeenCalledTimes(1);
+        f.expectCoreReadOnly();
+      },
+    );
+
+    it.each([
+      "live expiry",
+      "invalid expiry",
+      "running cleanup",
+      "unblocked active",
+      "unblocked failed",
+      "provisioning",
+      "explicit retention",
+    ])("rejects %s with 409 without provider access", async (reason) => {
+      const f = recoveryFixture();
+      if (reason === "live expiry") f.lease.expiresAt = new Date(Date.now() + 60_000).toISOString();
+      if (reason === "invalid expiry") f.lease.expiresAt = "not-a-date";
+      if (reason === "running cleanup") f.lease.cleanupStartedAt = new Date().toISOString();
+      if (reason === "unblocked active") {
+        f.lease.state = "active";
+        delete f.lease.cleanupError;
+      }
+      if (reason === "unblocked failed") delete f.lease.cleanupError;
+      if (reason === "provisioning") f.lease.state = "provisioning";
+      if (reason === "explicit retention") f.lease.releaseDeletesServer = false;
+      f.storage.seed(`lease:${f.lease.id}`, f.lease);
+
+      const response = await f.fleet.fetch(
+        request("POST", f.path, { headers: f.headers, body: f.body }),
+      );
+
+      expect(response.status).toBe(409);
+      expect(f.recoverCleanup).not.toHaveBeenCalled();
+      f.expectCoreReadOnly();
+    });
+
+    describe.each(["replacement", "in-place"])("%s lease races", (mutationMode) => {
+      const changes: Record<string, Partial<LeaseRecord>> = {
+        owner: { owner: "other-owner@example.com" },
+        org: { org: orgKeyForLabel("other-org") },
+        provider: { provider: "hetzner" },
+        cloudID: { cloudID: "another-vm" },
+        scope: { providerScope: "/subscriptions/other-sub/resourceGroups/other-rg" },
+        region: { region: "westus" },
+        createdAt: { createdAt: "2026-08-01T00:00:00.000Z" },
+        lifecycle: { lifecycle: "registered" },
+        expiry: { expiresAt: "2999-01-01T00:00:00.000Z" },
+        retention: { releaseDeletesServer: false },
+        start: { cleanupStartedAt: "2026-08-01T00:00:00.000Z" },
+        state: { state: "provisioning" },
+      };
+      it.each(Object.keys(changes))(
+        "rejects a changed %s at the commit boundary without writing",
+        async (field) => {
+          const f = recoveryFixture();
+          const leaseKey = `lease:${f.lease.id}`;
+          let expectedLease = f.lease;
+          f.controls.duringProviderRead = async () => {
+            const current = f.storage.value<LeaseRecord>(leaseKey)!;
+            expectedLease = mutationMode === "in-place" ? current : structuredClone(current);
+            Object.assign(expectedLease, changes[field]);
+            if (mutationMode === "replacement") f.storage.seed(leaseKey, expectedLease);
+          };
+
+          const response = await f.fleet.fetch(
+            request("POST", f.path, { headers: f.headers, body: f.body }),
+          );
+
+          expect(response.status).toBe(409);
+          await expect(response.json()).resolves.toEqual({
+            error: "cleanup_recovery_refused",
+            message: "Cleanup recovery lease changed before commit",
+          });
+          expect(f.recoverCleanup).toHaveBeenCalledTimes(1);
+          expect(f.commit).not.toHaveBeenCalled();
+          expect(Object.is(expectedLease, f.lease)).toBe(mutationMode === "in-place");
+          f.expectCoreReadOnly(expectedLease);
+        },
+      );
+    });
+
+    it.each(["registered", "unbound", "unsupported"])(
+      "rejects a %s lease with 501",
+      async (reason) => {
+        const f = recoveryFixture(reason !== "unsupported");
+        if (reason === "registered") f.lease.lifecycle = "registered";
+        if (reason === "unbound") f.lease.cloudID = "";
+        f.storage.seed(`lease:${f.lease.id}`, f.lease);
+
+        const response = await f.fleet.fetch(
+          request("POST", f.path, { headers: f.headers, body: f.body }),
+        );
+
+        expect(response.status).toBe(501);
+        expect(f.recoverCleanup).not.toHaveBeenCalled();
+        f.expectCoreReadOnly();
+      },
+    );
+
+    it.each([
+      {},
+      { action: "delete", expectedClaimFingerprint: "a".repeat(64) },
+      { action: "acknowledge-missing-resource" },
+      { action: "acknowledge-missing-resource", expectedClaimFingerprint: "A".repeat(64) },
+      { action: "acknowledge-missing-resource", expectedClaimFingerprint: "a".repeat(63) },
+      { action: "acknowledge-missing-resource", expectedClaimFingerprint: 123 },
+    ])("rejects malformed recovery body %j", async (body) => {
+      const f = recoveryFixture();
+
+      const response = await f.fleet.fetch(request("POST", f.path, { headers: f.headers, body }));
+
+      expect(response.status).toBe(400);
+      expect(f.recoverCleanup).not.toHaveBeenCalled();
+      f.expectCoreReadOnly();
+    });
+
+    it("returns 404 for an unknown recovery lease", async () => {
+      const f = recoveryFixture();
+
+      const response = await f.fleet.fetch(
+        request("POST", "/v1/leases/cbx_999999999999/cleanup", {
+          headers: f.headers,
+          body: f.body,
+        }),
+      );
+
+      expect(response.status).toBe(404);
+      expect(f.recoverCleanup).not.toHaveBeenCalled();
+      f.expectCoreReadOnly();
+    });
+
+    it("maps provider identity refusal to 409 without lifecycle or claim edits", async () => {
+      const f = recoveryFixture();
+      f.recoverCleanup.mockRejectedValue(
+        new ProviderResourceUnresolvedError("synthetic original disk changed"),
+      );
+
+      const response = await f.fleet.fetch(
+        request("POST", f.path, { headers: f.headers, body: f.body }),
+      );
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        error: "cleanup_recovery_refused",
+        message: "synthetic original disk changed",
+      });
+      f.expectCoreReadOnly();
+    });
+
+    it("uses the Azure lease's original scope and region rather than changed deployment defaults", async () => {
+      const f = recoveryFixture();
+      const provider = new AzureProvider(
+        {
+          AZURE_TENANT_ID: "synthetic-tenant",
+          AZURE_CLIENT_ID: "synthetic-client",
+          AZURE_CLIENT_SECRET: "synthetic-client-secret",
+          AZURE_SUBSCRIPTION_ID: "new-default-sub",
+          CRABBOX_AZURE_RESOURCE_GROUP: "new-default-rg",
+          CRABBOX_AZURE_LOCATION: "westus",
+        } as Env,
+        undefined,
+        f.storage,
+      );
+      const observed: Array<{ scope: string; region: string }> = [];
+      const commitGuard = vi.fn<CleanupCommitGuard>(async (commit) => commit());
+      const recover = vi
+        .spyOn(AzureClient.prototype, "recoverMissingPublicIP")
+        .mockImplementation(function () {
+          observed.push({ scope: this.providerScope(), region: this.defaultLocation });
+          return Promise.reject(new ProviderResourceUnresolvedError("synthetic adapter boundary"));
+        });
+      try {
+        await expect(
+          provider.recoverCleanup(f.lease, f.fingerprint, "admin@example.com", commitGuard),
+        ).rejects.toThrow("synthetic adapter boundary");
+
+        expect(recover).toHaveBeenCalledExactlyOnceWith(
+          f.lease,
+          f.fingerprint,
+          "admin@example.com",
+          commitGuard,
+        );
+        expect(observed).toEqual([{ scope: f.lease.providerScope, region: "eastus" }]);
+      } finally {
+        recover.mockRestore();
+      }
+    });
+
+    it.each(["scope", "region"])(
+      "rejects recovery without the original Azure %s before client access",
+      async (missing) => {
+        const f = recoveryFixture();
+        if (missing === "scope") delete f.lease.providerScope;
+        else delete f.lease.region;
+        const provider = new AzureProvider({} as Env, undefined, f.storage);
+        const recover = vi.spyOn(AzureClient.prototype, "recoverMissingPublicIP");
+        try {
+          await expect(async () =>
+            provider.recoverCleanup(f.lease, f.fingerprint, "alice@example.com"),
+          ).rejects.toThrow(/original provider scope|original.*region/i);
+
+          expect(recover).not.toHaveBeenCalled();
+        } finally {
+          recover.mockRestore();
+        }
+      },
+    );
+  });
 
   it.each([
     ["owner", "alice@example.com", "example-org", false],

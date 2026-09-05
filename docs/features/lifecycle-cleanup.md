@@ -373,6 +373,21 @@ cannot prove which cleanup deleted that member. A legacy claim can establish a
 new stable baseline only while the VM, NIC, public IP, and managed disk are all
 still present; an already-empty legacy claim can be cleared without mutation.
 
+Automatic cleanup does not relax that rule. For the specific expired, disk-only
+case with recorded VM/NIC deletion and an absent public IP, an owner or admin may
+use [audited cleanup recovery](../commands/inspect.md#audited-azure-cleanup-recovery)
+to explicitly accept original-scope public-IP absence. The resulting version-3
+claim retains its original baseline and actual DELETE receipts, records the
+operator acknowledgement separately, and requires the exact original owned disk
+to remain detached. Older workers reject this claim version. Normal release
+rechecks survivors before deleting the disk; it does not infer a historical
+public-IP DELETE receipt, and its separate audit survives claim cleanup.
+
+Azure polling distinguishes `Azure-AsyncOperation` status documents from
+`Location` completion responses. Location HTTP 202 remains pending; terminal
+200/204 completes only without an explicit pending/failure state. An empty
+Azure-AsyncOperation response never establishes success.
+
 ## Direct-provider lifecycle
 
 Without a coordinator, the CLI talks to the provider API directly and owns

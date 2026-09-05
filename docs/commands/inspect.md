@@ -152,6 +152,54 @@ means ownership labels are absent, not that the resource is safe to adopt.
 Provider observations are not an atomic inventory. Inspection never creates,
 updates, clears, or accepts a cleanup identity, and never issues a resource
 mutation. Keep local claims and SSH artifacts until normal stop confirms cleanup.
+The optional `claimFingerprint` binds an explicit recovery request to the exact
+stored claim; do not use it when `claimUnchanged` is false. A retained
+`recoveryAudit`, when present, distinguishes operator-acknowledged absence from
+provider-confirmed deletion progress.
+
+### Audited Azure cleanup recovery
+
+If historical public-IP completion evidence was lost, an owner or admin may
+explicitly accept its absence **in the original provider scope**. This does not
+prove Azure deleted the public IP rather than moving it elsewhere, and must not
+be used when that distinction still requires investigation. Manage-share and
+device credentials cannot authorize this exception.
+
+After reviewing a fresh cleanup inspection, send the authenticated API request:
+
+```http
+POST /v1/leases/{id}/cleanup
+Content-Type: application/json
+
+{"action":"acknowledge-missing-resource","expectedClaimFingerprint":"<claimFingerprint from inspection>"}
+```
+
+Azure accepts only an expired, blocked lease with no active cleanup attempt:
+its complete version-2 ordinary cleanup baseline must retain all four original
+identities and successful VM/NIC deletion progress. Fresh exact-scope GETs must
+show VM, NIC, and public IP absent, with only the original owned, detached disk
+remaining in the original region. Pending operations, incomplete claims,
+replacements, conflicting ownership, changed attachments, and stale fingerprints
+are rejected. Explicit retained-resource disposition is also rejected, and the
+lease binding and eligibility are rechecked after provider reads, immediately
+before the atomic recovery commit. No resource is created, tagged, or deleted
+by this request.
+
+The transaction preserves the original baseline and actual DELETE receipts,
+persists a separate audit with basis `operator-confirmed-public-ip-absence`, and
+promotes the claim to version 3 so older workers reject it. The acknowledgement
+is never inserted into the actual deletion receipt list. The same fingerprint is
+idempotent; another claim cannot overwrite the audit. Normal `crabbox stop` then
+rechecks every survivor before deleting the original disk and retains local
+artifacts until cleanup is confirmed. The audit survives removal of the completed
+cleanup claim and remains available through the cleanup diagnostic.
+
+`identityMatches` accounts for this explicitly acknowledged absence on a recovered
+claim; consult `recoveryAudit` for its basis. It is still not deletion authority.
+Orphan/provisioning continuation paths cannot replace the recovered baseline;
+only ordinary release consumes this recovery.
+
+### Additional provider metadata
 
 For coordinator leases whose provider can inject an SSH host key before first
 boot, JSON also includes `sshHostKey`. Its value is exactly the public host-key

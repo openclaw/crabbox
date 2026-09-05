@@ -7282,10 +7282,107 @@ export class FleetCoordinator {
     return await this.releaseResolvedLease(lease, { deleteServer: true, keep: false });
   }
 
+  private cleanupRecoveryLeaseEligible(lease: LeaseRecord): boolean {
+    const expiry = Date.parse(lease.expiresAt);
+    return (
+      Number.isFinite(expiry) &&
+      expiry <= Date.now() &&
+      !lease.cleanupStartedAt &&
+      lease.releaseDeletesServer !== false &&
+      ["active", "released", "failed"].includes(lease.state) &&
+      Boolean(lease.cleanupError || lease.state === "released")
+    );
+  }
+
+  private cleanupRecoveryLeaseBinding(lease: LeaseRecord): string {
+    return JSON.stringify([
+      lease.id,
+      lease.provider,
+      lease.cloudID,
+      lease.providerScope,
+      lease.providerProject,
+      lease.providerResourceID,
+      lease.region,
+      lease.owner,
+      lease.org,
+      lease.createdAt,
+      lease.createAttemptID,
+      lease.createAttemptGeneration,
+      lease.lifecycle,
+    ]);
+  }
+
   private async leaseRoute(request: Request, leaseID: string, action?: string): Promise<Response> {
     const method = request.method.toUpperCase();
     if (method === "PUT" && action === "registration") {
       return await this.registerLease(request, leaseID);
+    }
+    if (method === "POST" && action === "cleanup") {
+      const admin = isAdminRequest(request);
+      const lease = await this.resolveLease(leaseID, request, admin);
+      if (!lease) return notFound();
+      if (
+        requestAuthType(request) === "device" ||
+        (!admin &&
+          (lease.owner !== requestOwner(request) || lease.org !== requestOrg(request, this.env)))
+      ) {
+        return json(
+          { error: "forbidden", message: "lease owner or admin access required" },
+          { status: 403 },
+        );
+      }
+      const input = await readJson<{ action?: unknown; expectedClaimFingerprint?: unknown }>(
+        request,
+      );
+      if (
+        !input ||
+        input.action !== "acknowledge-missing-resource" ||
+        typeof input.expectedClaimFingerprint !== "string" ||
+        !/^[a-f0-9]{64}$/.test(input.expectedClaimFingerprint)
+      ) {
+        return json({ error: "invalid_cleanup_recovery_request" }, { status: 400 });
+      }
+      const providerID = managedLeaseProvider(lease);
+      const provider =
+        !isRegisteredLease(lease) && lease.cloudID && providerID
+          ? this.provider(providerID, lease.region, lease.providerProject)
+          : undefined;
+      if (!provider?.recoverCleanup)
+        return json({ error: "cleanup_recovery_unsupported" }, { status: 501 });
+      if (!this.cleanupRecoveryLeaseEligible(lease)) {
+        return json({ error: "cleanup_recovery_requires_expired_blocked_lease" }, { status: 409 });
+      }
+      const expectedBinding = this.cleanupRecoveryLeaseBinding(lease);
+      try {
+        const recovery = await provider.recoverCleanup(
+          lease,
+          input.expectedClaimFingerprint,
+          requestOwner(request),
+          <T>(commit: () => Promise<T>) =>
+            this.state.runExclusive(async () => {
+              const current = await this.getLease(lease.id);
+              if (
+                !current ||
+                this.cleanupRecoveryLeaseBinding(current) !== expectedBinding ||
+                !this.cleanupRecoveryLeaseEligible(current)
+              ) {
+                throw new ProviderResourceUnresolvedError(
+                  "Cleanup recovery lease changed before commit",
+                );
+              }
+              return await commit();
+            }),
+        );
+        return json({ leaseID: lease.id, provider: providerID, recovery });
+      } catch (error) {
+        if (error instanceof ProviderResourceUnresolvedError) {
+          return json(
+            { error: "cleanup_recovery_refused", message: error.message },
+            { status: 409 },
+          );
+        }
+        throw error;
+      }
     }
     if (method === "GET" && action === "cleanup") {
       const admin = isAdminRequest(request);
@@ -25994,6 +26091,13 @@ interface CloudProvider {
   deleteServer(id: string): Promise<void>;
   deleteOwnedServer?(lease: LeaseRecord): Promise<void>;
   inspectCleanup?(lease: LeaseRecord): Promise<unknown>;
+  // Revalidate the lease after provider reads, before committing any recovery writes.
+  recoverCleanup?(
+    lease: LeaseRecord,
+    expectedClaimFingerprint: string,
+    actor: string,
+    commitGuard: <T>(commit: () => Promise<T>) => Promise<T>,
+  ): Promise<unknown>;
   supportsNativeImages(): boolean;
   nativeImagesUnsupportedMessage(): string;
   defaultImageStrategy(lease: LeaseRecord): "image" | "disk-snapshot";
@@ -26451,6 +26555,25 @@ export class AzureProvider implements CloudProvider {
       resourceGroup: scope.resourceGroup,
       ...(this.storage ? { ownedDeleteClaimStorage: this.storage } : {}),
     }).inspectOwnedCleanup(lease);
+  }
+
+  recoverCleanup(
+    lease: LeaseRecord,
+    expectedClaimFingerprint: string,
+    actor: string,
+    commitGuard?: <T>(commit: () => Promise<T>) => Promise<T>,
+  ): ReturnType<AzureClient["recoverMissingPublicIP"]> {
+    const scope = azureProviderScope(lease.providerScope);
+    if (!scope || !lease.region?.trim())
+      throw new ProviderResourceUnresolvedError(
+        "Azure cleanup recovery requires the original provider scope and region",
+      );
+    return new AzureClient(this.env, {
+      location: lease.region,
+      subscription: scope.subscription,
+      resourceGroup: scope.resourceGroup,
+      ...(this.storage ? { ownedDeleteClaimStorage: this.storage } : {}),
+    }).recoverMissingPublicIP(lease, expectedClaimFingerprint, actor, commitGuard);
   }
 
   deleteOwnedServer(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void> {

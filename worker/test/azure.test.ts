@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { sha256Hex } from "../src/auth";
 import {
   AzureClient,
+  azureCleanupRecoveryAuditKey,
   azureLinuxCloudInit,
   azureLabelsFromTags,
   azureLROPollIntervalMS,
@@ -322,8 +324,228 @@ function testLeaseConfig(overrides: Partial<LeaseConfig> = {}): LeaseConfig {
   };
 }
 
+describe("Azure LRO polling protocols", () => {
+  const scope = "/subscriptions/sub/resourceGroups/crabbox-leases";
+  const locationURL = `https://management.azure.com${scope}/providers/Microsoft.Network/operations/location-op`;
+  const asyncURL = `https://management.azure.com${scope}/providers/Microsoft.Network/operations/async-op`;
+  const resource = { id: `${scope}/providers/Microsoft.Network/publicIPAddresses/example-pip` };
+
+  function fixture(headers: Record<string, string> = { location: locationURL }) {
+    vi.useFakeTimers();
+    const client = new AzureClient(baseEnv);
+    const fetcher = vi.fn<typeof fetch>();
+    client.fetcher = fetcher;
+    const run = (lroTimeoutMs = 60_000) =>
+      (
+        Reflect.get(client, "awaitLRO") as (
+          response: Response,
+          token: string,
+          opts: { lroTimeoutMs: number },
+        ) => Promise<void>
+      ).call(client, new Response(null, { status: 202, headers }), "test-token", { lroTimeoutMs });
+    return { fetcher, run };
+  }
+
+  it.each([{}, { status: "Succeeded" }, { properties: { provisioningState: "Succeeded" } }])(
+    "keeps Location 202 pending despite body %j, then completes on 204",
+    async (body) => {
+      const { fetcher, run } = fixture();
+      fetcher
+        .mockResolvedValueOnce(Response.json(body, { status: 202 }))
+        .mockResolvedValueOnce(new Response(null, { status: 204 }));
+      const completed = vi.fn<() => void>();
+      const operation = run().then(completed);
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(completed).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(15_000);
+      await operation;
+      expect(completed).toHaveBeenCalledTimes(1);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([
+    resource,
+    { ...resource, properties: { provisioningState: "Succeeded" } },
+    { status: "Succeeded" },
+  ])("completes Location 200 with body %j", async (body) => {
+    const { fetcher, run } = fixture();
+    fetcher.mockResolvedValueOnce(Response.json(body));
+    const operation = run();
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(operation).resolves.toBeUndefined();
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith(locationURL, {
+      headers: { authorization: "Bearer test-token" },
+    });
+  });
+
+  it("prefers Azure-AsyncOperation over Location and requires its status document", async () => {
+    const { fetcher, run } = fixture({
+      "azure-asyncoperation": asyncURL,
+      location: locationURL,
+    });
+    fetcher
+      .mockResolvedValueOnce(Response.json(resource))
+      .mockResolvedValueOnce(Response.json({ status: "Succeeded" }));
+    const completed = vi.fn<() => void>();
+    const operation = run().then(completed);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(completed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(15_000);
+    await operation;
+    expect(completed).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([asyncURL, asyncURL]);
+  });
+
+  it.each([
+    { code: 200, body: resource },
+    { code: 200, body: { properties: { provisioningState: "Succeeded" } } },
+    { code: 204, body: undefined },
+  ])("does not complete Azure-AsyncOperation without status: %j", async ({ code, body }) => {
+    const { fetcher, run } = fixture({ "azure-asyncoperation": asyncURL });
+    fetcher.mockImplementation(async () =>
+      body ? Response.json(body, { status: code }) : new Response(null, { status: code }),
+    );
+    const result = run(31_000).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(31_000);
+    await expect(result).resolves.toEqual(
+      new Error("azure long-running operation timed out after 31s"),
+    );
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { status: "Failed" },
+    { status: "Canceled" },
+    { provisioningState: "Failed" },
+    { provisioningState: "Canceled" },
+    { status: "Succeeded", properties: { provisioningState: "Failed" } },
+    { status: "Succeeded", properties: { provisioningState: "Canceled" } },
+  ])("rejects explicit operation failures in body %j", async (body) => {
+    const { fetcher, run } = fixture();
+    fetcher.mockResolvedValueOnce(Response.json(body));
+    const result = run().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(result).resolves.toMatchObject({
+      message: expect.stringMatching(/azure LRO (failed|canceled):/),
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["Failed", "Canceled"])("rejects Location 202 with %s state", async (status) => {
+    const { fetcher, run } = fixture();
+    fetcher.mockResolvedValueOnce(
+      Response.json({ properties: { provisioningState: status } }, { status: 202 }),
+    );
+    const result = run().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(result).resolves.toMatchObject({
+      message: expect.stringContaining(`azure LRO ${status.toLowerCase()}:`),
+    });
+  });
+
+  it.each(["Failed", "Canceled"])("preserves Azure-AsyncOperation %s errors", async (status) => {
+    const { fetcher, run } = fixture({ "azure-asyncoperation": asyncURL });
+    fetcher.mockResolvedValueOnce(Response.json({ status }));
+    const result = run().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(result).resolves.toMatchObject({
+      message: expect.stringContaining(`azure LRO ${status.toLowerCase()}:`),
+    });
+  });
+
+  it.each([
+    { status: "InProgress" },
+    { provisioningState: "Deleting" },
+    { properties: { provisioningState: "Updating" } },
+    { status: "Succeeded", properties: { provisioningState: "InProgress" } },
+    { status: "InProgress", properties: { provisioningState: "Succeeded" } },
+  ])("does not complete Location 200 with contradictory nonterminal body %j", async (body) => {
+    const { fetcher, run } = fixture();
+    fetcher.mockImplementation(async () => Response.json(body));
+    const result = run(31_000).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(31_000);
+    await expect(result).resolves.toEqual(
+      new Error("azure long-running operation timed out after 31s"),
+    );
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("honors Retry-After for Location polling", async () => {
+    const { fetcher, run } = fixture({ location: locationURL, "retry-after": "30" });
+    fetcher.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const operation = run();
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(fetcher).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(operation).resolves.toBeUndefined();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not treat a Location polling 404 as completion", async () => {
+    const { fetcher, run } = fixture();
+    fetcher.mockResolvedValueOnce(azureResourceNotFoundResponse(new URL(locationURL)));
+    const result = run().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(result).resolves.toMatchObject({
+      message: expect.stringContaining("azure LRO poll: http 404:"),
+    });
+  });
+
+  it.each([200, 204])(
+    "persists owned PIP deletion progress only after Location completes with %s",
+    async (code) => {
+      vi.useFakeTimers();
+      const { records, storage } = memoryAzureDeleteClaimStorage();
+      const deleted = new Set<string>();
+      const deletes: string[] = [];
+      const { client, nicID, pipID, diskID } = azurePIPDiskCleanupClient({
+        storage,
+        deleted,
+        deletes,
+        failDelete: () => "disk",
+      });
+      const fetcher = client.fetcher;
+      let polls = 0;
+      client.fetcher = async (request, init) => {
+        const url = new URL(String(request));
+        if (init?.method === "DELETE" && url.pathname === pipID) {
+          deletes.push(pipID);
+          return new Response(null, { status: 202, headers: { location: locationURL } });
+        }
+        if (url.toString() === locationURL) {
+          polls += 1;
+          if (polls === 1) return Response.json({ status: "Succeeded" }, { status: 202 });
+          deleted.add(pipID);
+          return code === 204 ? new Response(null, { status: 204 }) : Response.json({ id: pipID });
+        }
+        return await fetcher(request, init);
+      };
+      const result = client.deleteOwnedServer(ownedAzureLease()).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(15_000);
+      const pending = [...records.values()][0] as { deletedStableResourceIdentity?: string };
+      expect(polls).toBe(1);
+      expect(pending.deletedStableResourceIdentity).toContain("nic-immutable-id");
+      expect(pending.deletedStableResourceIdentity).not.toContain("pip-immutable-id");
+      expect(deletes).toEqual([nicID, pipID]);
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      await expect(result).resolves.toMatchObject({
+        message: expect.stringContaining("injected disk interruption"),
+      });
+      const completed = [...records.values()][0] as { deletedStableResourceIdentity?: string };
+      expect(completed.deletedStableResourceIdentity).toContain("pip-immutable-id");
+      expect(deletes).toEqual([nicID, pipID, diskID]);
+      expect(deleted).toEqual(new Set([nicID, pipID]));
+      expect(records.size).toBe(1);
+    },
+  );
+});
+
 describe("Azure cleanup inspection", () => {
-  function fixture() {
+  function fixture(store = memoryAzureDeleteClaimStorage()) {
     const lease = ownedAzureLease();
     const scope = lease.providerScope!;
     const ids = {
@@ -389,8 +611,9 @@ describe("Azure cleanup inspection", () => {
         topology: {},
       },
     ];
-    const { records, storage } = memoryAzureDeleteClaimStorage();
+    const { records, storage } = store;
     const claimKey = azureOwnedDeleteClaimKey(scope, lease.cloudID, lease.id);
+    const auditKey = azureCleanupRecoveryAuditKey(scope, lease.cloudID, lease.id);
     const claim = {
       version: 2,
       provider: "azure",
@@ -405,7 +628,10 @@ describe("Azure cleanup inspection", () => {
     const get = vi.spyOn(storage, "get");
     const put = vi.spyOn(storage, "put");
     const remove = vi.spyOn(storage, "delete");
-    const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
+    const client = new AzureClient(baseEnv, {
+      location: "eastus",
+      ownedDeleteClaimStorage: storage,
+    });
     seedAzureAuthCache(client);
     const fetcher = vi.fn<AzureClient["fetcher"]>(async (input, init) => {
       const url = new URL(String(input));
@@ -425,18 +651,587 @@ describe("Azure cleanup inspection", () => {
       resources,
       baseline,
       records,
+      storage,
       claimKey,
+      auditKey,
       claim,
       client,
       fetcher,
       expectReadOnly() {
         expect(fetcher).toHaveBeenCalledTimes(4);
-        expect(get.mock.calls).toEqual([[claimKey], [claimKey]]);
+        expect(get.mock.calls).toEqual([[claimKey], [auditKey], [claimKey]]);
         expect(put).not.toHaveBeenCalled();
         expect(remove).not.toHaveBeenCalled();
       },
     };
   }
+
+  function recoveryFixture() {
+    const records = new Map<string, unknown>();
+    const putKeys: string[] = [];
+    const transactions: Array<Array<{ key: string; value: unknown }>> = [];
+    const controls: {
+      beforeTransaction?: () => Promise<void>;
+      failPutNumber?: number;
+      allowDiskDelete: boolean;
+    } = { allowDiskDelete: false };
+    let tail = Promise.resolve();
+    const storage: AzureOwnedDeleteClaimStorage = {
+      get: async <T>(key: string) => structuredClone(records.get(key)) as T | undefined,
+      put: async <T>(key: string, value: T) => {
+        putKeys.push(key);
+        records.set(key, structuredClone(value));
+      },
+      delete: async (key) => records.delete(key),
+      transaction: async (callback) => {
+        const previous = tail;
+        let release!: () => void;
+        tail = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        await previous;
+        try {
+          await controls.beforeTransaction?.();
+          const snapshot = structuredClone(records);
+          const writes: Array<{ key: string; value: unknown }> = [];
+          const result = await callback({
+            get: async <T>(key: string) => structuredClone(snapshot.get(key)) as T | undefined,
+            put: async <T>(key: string, value: T) => {
+              writes.push({ key, value: structuredClone(value) });
+              if (writes.length === controls.failPutNumber)
+                throw new Error("synthetic transaction write failure");
+              snapshot.set(key, structuredClone(value));
+            },
+            delete: async (key) => snapshot.delete(key),
+          });
+          records.clear();
+          for (const [key, value] of snapshot) records.set(key, value);
+          transactions.push(writes);
+          return result;
+        } finally {
+          release();
+        }
+      },
+    };
+    const f = fixture({ records, putKeys, storage });
+    const originalResources = structuredClone(f.resources);
+    f.resources.clear();
+    f.resources.set(f.ids.disk, f.disk);
+    const claim: Record<string, unknown> = {
+      ...f.claim,
+      deletedStableResourceIdentity: JSON.stringify(f.baseline.slice(0, 2)),
+      disk: { resourceID: f.ids.disk, uniqueID: "disk-immutable-id" },
+    };
+    records.set(f.claimKey, claim);
+    const requests: Array<{ method: string; path: string }> = [];
+    const deletes: string[] = [];
+    f.client.fetcher = vi.fn<AzureClient["fetcher"]>(async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? "GET";
+      requests.push({ method, path: url.pathname });
+      expect(url.origin).toBe("https://management.azure.com");
+      expect(Object.values(f.ids)).toContain(url.pathname);
+      expect(controls.allowDiskDelete ? ["GET", "DELETE"] : ["GET"]).toContain(method);
+      expect(method !== "DELETE" || url.pathname === f.ids.disk).toBe(true);
+      if (method === "DELETE") {
+        deletes.push(url.pathname);
+        f.resources.delete(url.pathname);
+        return new Response(null, { status: 204 });
+      }
+      expect(method).toBe("GET");
+      const resource = f.resources.get(url.pathname);
+      return resource ? Response.json(resource) : azureResourceNotFoundResponse(url);
+    });
+    return {
+      ...f,
+      claim,
+      controls,
+      originalResources,
+      transactions,
+      requests,
+      deletes,
+      fingerprint: () => sha256Hex(JSON.stringify(records.get(f.claimKey))),
+      recover: async () =>
+        f.client.recoverMissingPublicIP(
+          f.lease,
+          await sha256Hex(JSON.stringify(records.get(f.claimKey))),
+          "alice@example.com",
+        ),
+      expectNoCloudWrites() {
+        expect(deletes).toEqual([]);
+        expect(requests.every((entry) => entry.method === "GET")).toBe(true);
+        expect(putKeys).toEqual([]);
+      },
+    };
+  }
+
+  describe("missing public IP recovery", () => {
+    type CleanupCommitGuard = NonNullable<Parameters<AzureClient["recoverMissingPublicIP"]>[3]>;
+
+    it("keeps provider reads outside the commit guard and the transaction inside it", async () => {
+      const f = recoveryFixture();
+      let insideGuard = false;
+      const fetcher = f.client.fetcher;
+      f.client.fetcher = async (input, init) => {
+        expect(insideGuard).toBe(false);
+        return fetcher(input, init);
+      };
+      f.controls.beforeTransaction = async () => {
+        expect(insideGuard).toBe(true);
+      };
+      const commitGuard = vi.fn<CleanupCommitGuard>(async (commit) => {
+        expect(f.requests).toHaveLength(4);
+        expect(f.transactions).toEqual([]);
+        insideGuard = true;
+        try {
+          return await commit();
+        } finally {
+          insideGuard = false;
+        }
+      });
+
+      await f.client.recoverMissingPublicIP(
+        f.lease,
+        await f.fingerprint(),
+        "alice@example.com",
+        commitGuard,
+      );
+
+      expect(commitGuard).toHaveBeenCalledTimes(1);
+      expect(f.transactions).toHaveLength(1);
+      expect(insideGuard).toBe(false);
+      f.expectNoCloudWrites();
+    });
+
+    it("does not start a storage transaction when the commit guard refuses", async () => {
+      const f = recoveryFixture();
+      const before = structuredClone(f.records);
+      const transaction = vi.spyOn(f.storage, "transaction");
+      const commitGuard = vi.fn<CleanupCommitGuard>(async () => {
+        throw new Error("synthetic lease guard refusal");
+      });
+
+      await expect(
+        f.client.recoverMissingPublicIP(
+          f.lease,
+          await f.fingerprint(),
+          "alice@example.com",
+          commitGuard,
+        ),
+      ).rejects.toThrow("synthetic lease guard refusal");
+
+      expect(commitGuard).toHaveBeenCalledTimes(1);
+      expect(transaction).not.toHaveBeenCalled();
+      expect(f.records).toEqual(before);
+      f.expectNoCloudWrites();
+    });
+
+    it("returns the retained audit on idempotent retry without invoking a write guard", async () => {
+      const f = recoveryFixture();
+      const fingerprint = await f.fingerprint();
+      const audit = await f.recover();
+      const commitGuard = vi.fn<CleanupCommitGuard>(async () => {
+        throw new Error("unexpected guard invocation");
+      });
+      const before = structuredClone(f.records);
+
+      await expect(
+        f.client.recoverMissingPublicIP(f.lease, fingerprint, "alice@example.com", commitGuard),
+      ).resolves.toEqual(audit);
+
+      expect(commitGuard).not.toHaveBeenCalled();
+      expect(f.records).toEqual(before);
+      f.expectNoCloudWrites();
+    });
+
+    it("atomically records an operator acknowledgement without changing the baseline or real deletion receipts", async () => {
+      const f = recoveryFixture();
+      const fingerprint = await f.fingerprint();
+      const original = structuredClone(f.claim);
+      const before = await f.client.inspectOwnedCleanup(f.lease);
+      expect(before.claimFingerprint).toBe(fingerprint);
+      expect(before.identityMatches).toBe(false);
+      expect(before).not.toHaveProperty("recoveryAudit");
+
+      const audit = await f.client.recoverMissingPublicIP(
+        f.lease,
+        fingerprint,
+        "alice@example.com",
+      );
+
+      expect(audit).toMatchObject({
+        version: 1,
+        basis: "operator-confirmed-public-ip-absence",
+        leaseID: f.lease.id,
+        owner: f.lease.owner,
+        providerScope: f.lease.providerScope,
+        actor: "alice@example.com",
+        claimFingerprint: fingerprint,
+        originalStableResourceIdentity: f.baseline,
+        previousDeletedStableResourceIdentity: f.baseline.slice(0, 2),
+        acknowledgedMissingResourceIdentity: f.baseline[2],
+        remainingDiskIdentity: f.baseline[3],
+      });
+      expect(Number.isFinite(Date.parse(audit.confirmedAt))).toBe(true);
+      expect(f.records.get(f.claimKey)).toEqual({ ...original, version: 3, recovery: audit });
+      expect(f.records.get(f.auditKey)).toEqual(audit);
+      expect(f.transactions).toEqual([
+        [
+          { key: f.auditKey, value: audit },
+          { key: f.claimKey, value: { ...original, version: 3, recovery: audit } },
+        ],
+      ]);
+      const after = await f.client.inspectOwnedCleanup(f.lease);
+      expect(after.identityMatches).toBe(true);
+      expect(after.claimFingerprint).toBe(await f.fingerprint());
+      expect(after.claimFingerprint).not.toBe(fingerprint);
+      expect(after.recoveryAudit).toEqual(audit);
+      expect(after.claim?.deletedStableResourceIdentity).toEqual(f.baseline.slice(0, 2));
+      expect(JSON.stringify(after)).not.toContain("synthetic-tag-secret");
+      f.expectNoCloudWrites();
+    });
+
+    it("normal release deletes only the original disk, clears the claim, and retains the audit", async () => {
+      const f = recoveryFixture();
+      const audit = await f.recover();
+      f.controls.allowDiskDelete = true;
+
+      await expect(f.client.deleteOwnedServer(f.lease)).resolves.toBeUndefined();
+
+      expect(f.deletes).toEqual([f.ids.disk]);
+      expect(f.records.has(f.claimKey)).toBe(false);
+      expect(f.records.get(f.auditKey)).toEqual(audit);
+      const inspection = await f.client.inspectOwnedCleanup(f.lease);
+      expect(inspection).toMatchObject({
+        resources: [],
+        identityMatches: null,
+        recoveryAudit: audit,
+      });
+      expect(inspection).not.toHaveProperty("claim");
+      expect(inspection).not.toHaveProperty("claimFingerprint");
+      const writtenClaims = f.transactions.flat().filter((entry) => entry.key === f.claimKey);
+      expect(writtenClaims.length).toBeGreaterThan(1);
+      for (const { value } of writtenClaims) {
+        const claim = value as {
+          stableResourceIdentity: string;
+          deletedStableResourceIdentity: string;
+        };
+        expect(claim.stableResourceIdentity).toBe(f.claim.stableResourceIdentity);
+        expect(
+          JSON.parse(claim.deletedStableResourceIdentity).map(
+            (entry: { kind: string }) => entry.kind,
+          ),
+        ).not.toContain("publicIPAddresses");
+      }
+    });
+
+    it.each(["before release", "after release"])(
+      "retries the original fingerprint idempotently %s without reads or writes",
+      async (phase) => {
+        const f = recoveryFixture();
+        const fingerprint = await f.fingerprint();
+        const audit = await f.recover();
+        if (phase === "after release") {
+          f.controls.allowDiskDelete = true;
+          await f.client.deleteOwnedServer(f.lease);
+        }
+        const records = structuredClone(f.records);
+        const transactionCount = f.transactions.length;
+        const requestCount = f.requests.length;
+
+        await expect(
+          f.client.recoverMissingPublicIP(f.lease, fingerprint, "admin@example.com"),
+        ).resolves.toEqual(audit);
+        await expect(
+          f.client.recoverMissingPublicIP(f.lease, "f".repeat(64), "alice@example.com"),
+        ).rejects.toThrow(/another claim/i);
+
+        expect(f.records).toEqual(records);
+        expect(f.transactions).toHaveLength(transactionCount);
+        expect(f.requests).toHaveLength(requestCount);
+      },
+    );
+
+    it("rolls back both records when the second transactional write fails", async () => {
+      const f = recoveryFixture();
+      const before = structuredClone(f.records);
+      f.controls.failPutNumber = 2;
+
+      await expect(f.recover()).rejects.toThrow("synthetic transaction write failure");
+
+      expect(f.records).toEqual(before);
+      expect(f.records.has(f.auditKey)).toBe(false);
+      expect(f.transactions).toEqual([]);
+      f.expectNoCloudWrites();
+    });
+
+    it("rejects a stale fingerprint at the final transaction without overwriting the concurrent claim", async () => {
+      const f = recoveryFixture();
+      const concurrent = { ...f.claim, canonicalVMID: f.ids.vm };
+      f.controls.beforeTransaction = async () => {
+        f.records.set(f.claimKey, concurrent);
+      };
+
+      await expect(f.recover()).rejects.toThrow(/claim changed before commit/i);
+
+      expect(f.records.get(f.claimKey)).toEqual(concurrent);
+      expect(f.records.has(f.auditKey)).toBe(false);
+      expect(f.transactions).toEqual([]);
+      f.expectNoCloudWrites();
+    });
+
+    it("serializes concurrent acknowledgements into one audit and claim transition", async () => {
+      const f = recoveryFixture();
+      const fingerprint = await f.fingerprint();
+
+      const results = await Promise.all([
+        f.client.recoverMissingPublicIP(f.lease, fingerprint, "alice@example.com"),
+        f.client.recoverMissingPublicIP(f.lease, fingerprint, "admin@example.com"),
+      ]);
+
+      expect(results[0]).toEqual(results[1]);
+      expect(f.transactions.filter((writes) => writes.length > 0)).toHaveLength(1);
+      expect(f.records.get(f.auditKey)).toEqual(results[0]);
+      f.expectNoCloudWrites();
+    });
+
+    it.each(["missing", "changed"])(
+      "refuses a %s retained audit during normal release",
+      async (change) => {
+        const f = recoveryFixture();
+        const audit = await f.recover();
+        if (change === "missing") f.records.delete(f.auditKey);
+        else f.records.set(f.auditKey, { ...audit, actor: "other-admin@example.com" });
+        const before = structuredClone(f.records);
+
+        await expect(f.client.deleteOwnedServer(f.lease)).rejects.toThrow(
+          /retained recovery record/i,
+        );
+
+        expect(f.records).toEqual(before);
+        f.expectNoCloudWrites();
+      },
+    );
+
+    it.each(["orphan", "provisioning"])(
+      "rejects a recovered v3 claim in %s cleanup",
+      async (mode) => {
+        const f = recoveryFixture();
+        await f.recover();
+        const before = structuredClone(f.records);
+        const context = { resourceIdentity: String(f.claim.stableResourceIdentity) };
+        const transport = {
+          request: vi.fn<() => Promise<{ status: number; resource: unknown }>>(),
+        };
+        const deletion =
+          mode === "orphan"
+            ? f.client.deleteOwnedServer(f.lease, context)
+            : f.client.advanceOwnedServerDeletion(f.lease, transport, context);
+
+        await expect(deletion).rejects.toThrow(/ordinary release/i);
+
+        expect(transport.request).not.toHaveBeenCalled();
+        expect(f.records).toEqual(before);
+        f.expectNoCloudWrites();
+      },
+    );
+
+    it.each(["vm", "nic", "pip"] as const)(
+      "blocks normal release when the original %s reappears after acknowledgement",
+      async (kind) => {
+        const f = recoveryFixture();
+        await f.recover();
+        f.resources.set(f.ids[kind], f.originalResources.get(f.ids[kind]));
+        const before = structuredClone(f.records);
+
+        await expect(f.client.deleteOwnedServer(f.lease)).rejects.toThrow(
+          /identity|resource|ownership/i,
+        );
+
+        expect(f.records).toEqual(before);
+        f.expectNoCloudWrites();
+      },
+    );
+
+    it.each(["generation", "location", "owner", "attachment"])(
+      "blocks normal release when the remaining disk changes %s",
+      async (change) => {
+        const f = recoveryFixture();
+        await f.recover();
+        if (change === "generation") f.disk.properties.uniqueId = "replacement-disk";
+        if (change === "location") f.disk.location = "westus";
+        if (change === "owner") f.disk.tags = ownedAzureTags({ owner: "another_owner" });
+        if (change === "attachment")
+          f.resources.set(f.ids.disk, { ...f.disk, managedBy: f.ids.vm });
+        const before = structuredClone(f.records);
+
+        await expect(f.client.deleteOwnedServer(f.lease)).rejects.toThrow(
+          /identity|location|ownership|attached|attachment/i,
+        );
+
+        expect(f.records).toEqual(before);
+        f.expectNoCloudWrites();
+      },
+    );
+
+    it.each(["vm", "nic", "pip"] as const)(
+      "refuses acknowledgement while original %s remains",
+      async (kind) => {
+        const f = recoveryFixture();
+        f.resources.set(f.ids[kind], f.originalResources.get(f.ids[kind]));
+        const before = structuredClone(f.records);
+
+        await expect(f.recover()).rejects.toThrow(/original owned disk remaining/i);
+
+        expect(f.records).toEqual(before);
+        f.expectNoCloudWrites();
+      },
+    );
+
+    it.each([
+      "missing",
+      "generation",
+      "id",
+      "location",
+      "owner",
+      "untagged",
+      "managedBy",
+      "managedByExtended",
+    ])("rejects a disk with %s mismatch without persisting recovery", async (change) => {
+      const f = recoveryFixture();
+      if (change === "missing") f.resources.delete(f.ids.disk);
+      if (change === "generation") f.disk.properties.uniqueId = "replacement-disk";
+      if (change === "id") f.disk.id = f.ids.disk.replace("/sub/", "/other-sub/");
+      if (change === "location") f.disk.location = "westus";
+      if (change === "owner") f.disk.tags = ownedAzureTags({ owner: "another_owner" });
+      if (change === "untagged") f.disk.tags = {};
+      if (change === "managedBy") f.resources.set(f.ids.disk, { ...f.disk, managedBy: f.ids.vm });
+      if (change === "managedByExtended")
+        f.resources.set(f.ids.disk, { ...f.disk, managedByExtended: [f.ids.vm] });
+      const before = structuredClone(f.records);
+
+      await expect(f.recover()).rejects.toThrow(
+        /original owned disk remaining|disk identity, location, or attachment changed/i,
+      );
+
+      expect(f.records).toEqual(before);
+      expect(f.transactions).toEqual([]);
+      f.expectNoCloudWrites();
+    });
+
+    it.each([
+      "legacy",
+      "preparing",
+      "completed",
+      "pending",
+      "partial",
+      "orphan",
+      "incomplete baseline",
+      "no receipts",
+      "wrong receipt prefix",
+    ])("rejects the %s claim shape without modifying evidence", async (change) => {
+      const f = recoveryFixture();
+      if (change === "legacy") f.claim.version = 1;
+      if (change === "preparing") f.claim.preparing = true;
+      if (change === "completed") f.claim.completed = true;
+      if (change === "pending")
+        f.claim.pendingDeletion = {
+          kind: "pip",
+          stableResourceIdentity: JSON.stringify(f.baseline.slice(2)),
+          operationURL: "https://management.azure.com/operations/synthetic-operation",
+          deadline: Date.now() + 60_000,
+        };
+      if (change === "partial")
+        f.claim.partialStableResourceIdentity = JSON.stringify(f.baseline.slice(2));
+      if (change === "orphan") f.claim.resourceIdentity = f.claim.stableResourceIdentity;
+      if (change === "incomplete baseline")
+        f.claim.stableResourceIdentity = JSON.stringify(f.baseline.slice(0, 3));
+      if (change === "no receipts") delete f.claim.deletedStableResourceIdentity;
+      if (change === "wrong receipt prefix")
+        f.claim.deletedStableResourceIdentity = JSON.stringify([f.baseline[0]]);
+      const before = structuredClone(f.records);
+
+      await expect(f.recover()).rejects.toThrow(
+        /cleanup claim mismatch|complete version-2|recorded VM\/NIC/i,
+      );
+
+      expect(f.records).toEqual(before);
+      expect(f.transactions).toEqual([]);
+      f.expectNoCloudWrites();
+    });
+
+    it.each(["scope", "fingerprint", "actor", "transaction"])(
+      "rejects invalid %s before any Azure GET",
+      async (invalid) => {
+        const f = recoveryFixture();
+        const lease =
+          invalid === "scope"
+            ? { ...f.lease, providerScope: "/subscriptions/other/resourceGroups/other" }
+            : f.lease;
+        const fingerprint = invalid === "fingerprint" ? "A".repeat(64) : await f.fingerprint();
+        const actor = invalid === "actor" ? " " : "alice@example.com";
+        if (invalid === "transaction") delete f.storage.transaction;
+        const before = structuredClone(f.records);
+
+        await expect(f.client.recoverMissingPublicIP(lease, fingerprint, actor)).rejects.toThrow(
+          /exact claim fingerprint, actor, scope, and transactional storage/i,
+        );
+
+        expect(f.requests).toEqual([]);
+        expect(f.records).toEqual(before);
+      },
+    );
+
+    it.each([0, 1, 2, 3])(
+      "rejects original baseline member %i from another region",
+      async (index) => {
+        const f = recoveryFixture();
+        const baseline = structuredClone(f.baseline);
+        baseline[index]!.location = "westus";
+        f.claim.stableResourceIdentity = JSON.stringify(baseline);
+        f.claim.deletedStableResourceIdentity = JSON.stringify(baseline.slice(0, 2));
+        const before = structuredClone(f.records);
+
+        await expect(f.recover()).rejects.toThrow(
+          /recorded VM\/NIC.*original owned disk remaining/i,
+        );
+
+        expect(f.records).toEqual(before);
+        expect(f.transactions).toEqual([]);
+        f.expectNoCloudWrites();
+      },
+    );
+
+    it.each([1, 2])(
+      "keeps version-%i ordinary cleanup fail-closed without the missing PIP acknowledgement",
+      async (version) => {
+        const f = recoveryFixture();
+        f.claim.version = version;
+        const before = structuredClone(f.records);
+
+        await expect(f.client.deleteOwnedServer(f.lease)).rejects.toThrow(
+          /resource identity changed/i,
+        );
+
+        expect(f.records).toEqual(before);
+        expect(f.records.has(f.auditKey)).toBe(false);
+        f.expectNoCloudWrites();
+      },
+    );
+
+    it("rejects a valid-shaped stale fingerprint without adopting the current claim", async () => {
+      const f = recoveryFixture();
+      const before = structuredClone(f.records);
+
+      await expect(
+        f.client.recoverMissingPublicIP(f.lease, "f".repeat(64), "alice@example.com"),
+      ).rejects.toThrow(/claim changed; inspect again/i);
+
+      expect(f.records).toEqual(before);
+      expect(f.transactions).toEqual([]);
+      f.expectNoCloudWrites();
+    });
+  });
 
   it("reads exact resources and projects a matching stable claim without secrets or writes", async () => {
     const f = fixture();
