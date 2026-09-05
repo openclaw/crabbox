@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode"
 )
 
 const (
@@ -193,20 +192,13 @@ func writeArtifactGlobMatcher(b *strings.Builder) {
 }
 
 func writeArtifactGlobEnumeration(b *strings.Builder, glob, addFunction string) {
-	root := artifactGlobSearchRoot(glob)
-	enumerate := `find "$artifact_root" \( -name .git -o -name .crabbox \) -prune -o \( -type f -o -type l \) -print0`
-	// The legacy regexp quotes bytes individually; keep non-ASCII spellings on that path.
-	asciiOnly := strings.IndexFunc(glob, func(r rune) bool { return r > unicode.MaxASCII }) < 0
-	if asciiOnly && !strings.ContainsAny(glob, "*?") {
-		// Expand one literal leaf to retain its directory-entry case on macOS.
-		// Keep outer whitespace: validation trims it, but the regex matches it literally.
-		leaf := glob[strings.LastIndex(glob, "/")+1:]
-		if leaf != "" {
-			last := len(leaf) - 1
-			enumerate = "printf '%s\\0' " + shellQuote(root+"/"+leaf[:last]) + "[" + shellQuote(leaf[last:]) + "]"
-		}
+	depth := ""
+	// Literal globs need only their guarded parent. Keep case folding and
+	// filename normalization in the existing matcher rather than a name prefilter.
+	if !strings.ContainsAny(glob, "*?") {
+		depth = " -mindepth 1 -maxdepth 1"
 	}
-	b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(root) + "; if artifact_safe_search_root \"$artifact_root\"; then while IFS= read -r -d '' f; do rel=$(artifact_rel_path \"$f\") || continue; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then " + addFunction + " \"$f\"; fi; done < <(" + enumerate + "); fi\n")
+	b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(artifactGlobSearchRoot(glob)) + "; if artifact_safe_search_root \"$artifact_root\"; then while IFS= read -r -d '' f; do rel=$(artifact_rel_path \"$f\") || continue; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then " + addFunction + " \"$f\"; fi; done < <(find \"$artifact_root\"" + depth + " \\( -name .git -o -name .crabbox \\) -prune -o \\( -type f -o -type l \\) -print0); fi\n")
 }
 
 func runArtifactRequireScript(workdir string, globs []string) string {
