@@ -53,9 +53,7 @@ type isoE2ERuntime struct {
 	installerDrive    xcpNgConfigDrive
 	answerDrive       xcpNgConfigDrive
 	installDisk       xcpNgConfigDrive
-	remasteredISO     string
 	generatedSeed     string
-	generatedAnswer   string
 	linuxSeedPayload  xcpNgCloudInitPayload
 	keyPath           string
 	ownsKey           bool
@@ -536,7 +534,6 @@ func (r *isoE2ERuntime) prepareInstallerMedia(ctx context.Context, opts ISOE2EOp
 			summary.Reason = fmt.Sprintf("linux_autoinstall_boot_arg_unavailable: %v", err)
 			return err
 		}
-		r.remasteredISO = remasteredISO
 		r.keepLocal[remasteredISO] = struct{}{}
 		summary.Evidence["installer_iso_remastered"] = remasteredISO
 		opts.ISO = remasteredISO
@@ -636,7 +633,6 @@ func (r *isoE2ERuntime) prepareWindowsAnswerMedia(ctx context.Context, opts ISOE
 		return err
 	}
 	r.windowsUser = payload.Username
-	r.generatedAnswer = answerISO
 	r.cleanupLocal = append(r.cleanupLocal, answerISO)
 	answerDir := filepath.Dir(answerISO)
 	if strings.HasPrefix(filepath.Base(answerDir), "windows-answer-media-") {
