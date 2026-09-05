@@ -188,7 +188,11 @@ when local finalization fails. Run finalization emits timing after cleanup and
 the failure digest. Its terminal order is timing record, timing JSON, local
 receipt persistence, then coordinator finish. Timing sink failures are terminal
 and are reflected in the local receipt and process exit; a failing CLI
-invocation can append its normal exit diagnostic.
+invocation can append its normal exit diagnostic. Timing `artifacts` lists only
+files already committed when the timing payload is emitted. Terminal receipt
+metadata is intentionally excluded because persistence happens afterward;
+successful persistence prints a separate
+`artifact kind=receipt path=... bytes=...` confirmation.
 
 Commands can define their own phases by printing marker lines to stdout or
 stderr:

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -204,7 +205,11 @@ func TestRunDelegatedTimingJSONEmittedOnceWhileRecording(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertReceiptArtifactMetadata(t, emitted.Artifacts, receiptPath, int(info.Size()))
+	assertNoReceiptArtifact(t, emitted.Artifacts)
+	confirmation := fmt.Sprintf("artifact kind=receipt path=%s bytes=%d", receiptPath, info.Size())
+	if !strings.Contains(stderr.String(), confirmation) {
+		t.Fatalf("missing delegated receipt confirmation %q: %s", confirmation, stderr.String())
+	}
 	records, err := readBenchmarkTimingRecords(storePath)
 	if err != nil {
 		t.Fatal(err)
@@ -218,7 +223,7 @@ func TestRunDelegatedTimingJSONEmittedOnceWhileRecording(t *testing.T) {
 	if records[0].Timing.RunStatus != RunStatusSucceeded {
 		t.Fatalf("delegated timing runStatus=%q", records[0].Timing.RunStatus)
 	}
-	assertReceiptArtifactMetadata(t, records[0].Timing.Artifacts, receiptPath, int(info.Size()))
+	assertNoReceiptArtifact(t, records[0].Timing.Artifacts)
 }
 
 func TestRunDelegatedCachesReceiptSignerAcrossTimingFailure(t *testing.T) {
@@ -300,12 +305,72 @@ func TestRunDelegatedCachesReceiptSignerAcrossTimingFailure(t *testing.T) {
 	if emitted.ExitCode != 2 {
 		t.Fatalf("timing exit=%d, want 2", emitted.ExitCode)
 	}
-	assertReceiptArtifactMetadata(t, emitted.Artifacts, receiptPath, len(data))
+	assertNoReceiptArtifact(t, emitted.Artifacts)
+	confirmation := fmt.Sprintf("artifact kind=receipt path=%s bytes=%d", receiptPath, len(data))
+	if !strings.Contains(stderr.String(), confirmation) {
+		t.Fatalf("missing delegated receipt confirmation %q: %s", confirmation, stderr.String())
+	}
 	timingIndex := strings.LastIndex(stderr.String(), `"runnerTotalMs"`)
 	receiptIndex := strings.LastIndex(stderr.String(), "artifact kind=receipt")
 	if timingIndex < 0 || receiptIndex <= timingIndex {
 		t.Fatalf("delegated terminal order must be timing then receipt persistence:\n%s", stderr.String())
 	}
+}
+
+func TestRunDelegatedReceiptPersistenceFailureOmitsReceiptArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "config.yaml"))
+	keyPath := filepath.Join(dir, "signer.pem")
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeBenchmarkTimingTestKey(t, keyPath, key)
+	receiptPath := filepath.Join(dir, "receipt.json")
+	benchmarkTimingTestAfterRun = func() {
+		if err := os.Mkdir(receiptPath, 0o700); err != nil {
+			t.Errorf("replace receipt destination with directory: %v", err)
+		}
+	}
+	t.Cleanup(func() { benchmarkTimingTestAfterRun = nil })
+
+	storePath := filepath.Join(dir, "timings.jsonl")
+	var stdout, stderr bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "benchmark-timing-test",
+		"--timing-json",
+		"--timing-record", storePath,
+		"--attest", receiptPath,
+		"--attest-key", keyPath,
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("error=%v, want receipt persistence exit 2\nstderr=%s", err, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "artifact kind=receipt") {
+		t.Fatalf("failed receipt persistence reported an artifact:\n%s", stderr.String())
+	}
+	var emitted TimingReport
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		var candidate TimingReport
+		if json.Unmarshal([]byte(line), &candidate) == nil && candidate.Provider == "benchmark-timing-test" {
+			emitted = candidate
+		}
+	}
+	if emitted.Provider != "benchmark-timing-test" {
+		t.Fatalf("missing delegated timing JSON: %s", stderr.String())
+	}
+	assertNoReceiptArtifact(t, emitted.Artifacts)
+	records, readErr := readBenchmarkTimingRecords(storePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(records) != 1 || records[0].Timing.Provider != "benchmark-timing-test" {
+		t.Fatalf("timing records=%#v, want one delegated record", records)
+	}
+	assertNoReceiptArtifact(t, records[0].Timing.Artifacts)
 }
 
 func TestRunDelegatedSignerAcquisitionFailureSkipsBackend(t *testing.T) {

@@ -208,15 +208,6 @@ func TestRunArtifactChangeWithFailureDownloadsE2E(t *testing.T) {
 
 func runArtifactChangeE2E(t *testing.T, failureDownloads bool) {
 	t.Helper()
-	artifactsByKind := func(artifacts []runArtifact, kind string) []runArtifact {
-		var matches []runArtifact
-		for _, artifact := range artifacts {
-			if artifact.Kind == kind {
-				matches = append(matches, artifact)
-			}
-		}
-		return matches
-	}
 	for _, tc := range []struct {
 		name, command, status string
 		code                  int
@@ -377,41 +368,16 @@ exit 0
 					t.Fatalf("final report lost test/command failure: %+v", report)
 				}
 			}
-			archives := artifactsByKind(report.Artifacts, "artifact-change")
-			receipts := artifactsByKind(report.Artifacts, "receipt")
 			if wantArchive {
-				if len(archives) != 1 {
-					t.Fatalf("artifact-change archives=%+v, want one", archives)
+				if len(report.Artifacts) != 1 {
+					t.Fatalf("artifacts=%+v, want one committed archive", report.Artifacts)
 				}
-				names := tarGzNames(t, archives[0].Path)
+				names := tarGzNames(t, report.Artifacts[0].Path)
 				if !reflect.DeepEqual(names, []string{p}) {
 					t.Fatalf("archive admitted extra paths: %v", names)
 				}
-			} else if len(archives) != 0 {
-				t.Fatalf("failed run archived evidence: %+v", archives)
-			}
-			wantReceipt := strings.HasSuffix(tc.name, "before nested JUnit")
-			if wantReceipt {
-				if len(receipts) != 1 {
-					t.Fatalf("receipt artifacts=%+v, want one", receipts)
-				}
-				info, err := os.Stat(receiptPath)
-				if err != nil {
-					t.Fatal(err)
-				}
-				assertReceiptArtifactMetadata(t, report.Artifacts, receiptPath, int(info.Size()))
-			} else if len(receipts) != 0 {
-				t.Fatalf("unexpected receipt artifacts=%+v", receipts)
-			}
-			wantArtifactCount := 0
-			if wantArchive {
-				wantArtifactCount++
-			}
-			if wantReceipt {
-				wantArtifactCount++
-			}
-			if len(report.Artifacts) != wantArtifactCount {
-				t.Fatalf("artifacts=%+v, want %d known artifacts", report.Artifacts, wantArtifactCount)
+			} else if len(report.Artifacts) != 0 {
+				t.Fatalf("timing included uncommitted or failed artifacts: %+v", report.Artifacts)
 			}
 			if releases != 1 || report.LeaseStopped == nil || !*report.LeaseStopped {
 				t.Fatalf("cleanup releases=%d report=%+v", releases, report)

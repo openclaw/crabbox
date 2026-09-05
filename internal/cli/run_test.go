@@ -55,20 +55,12 @@ func (writer *terminalOrderTimingWriter) WriteTimingReport(report TimingReport) 
 	return encodeTimingJSON(&writer.Buffer, report)
 }
 
-func assertReceiptArtifactMetadata(t *testing.T, artifacts []runArtifact, path string, size int) {
+func assertNoReceiptArtifact(t *testing.T, artifacts []runArtifact) {
 	t.Helper()
-	var matches int
 	for _, artifact := range artifacts {
-		if artifact.Kind != "receipt" {
-			continue
+		if artifact.Kind == "receipt" {
+			t.Fatalf("timing contains receipt before persistence: %#v", artifacts)
 		}
-		matches++
-		if artifact.Path != path || artifact.Bytes != size {
-			t.Fatalf("receipt artifact=%#v, want path=%q bytes=%d", artifact, path, size)
-		}
-	}
-	if matches != 1 {
-		t.Fatalf("receipt artifacts=%d, want one in %#v", matches, artifacts)
 	}
 }
 
@@ -3403,12 +3395,13 @@ func TestRunCommandWritesTerminalReceiptOnSuccess(t *testing.T) {
 			if receipt.SchemaVersion != terminalReceiptSchemaVersion || receipt.ReceiptType != terminalReceiptType || receipt.ExitCode != 0 {
 				t.Fatalf("receipt=%+v", receipt)
 			}
-			if !strings.Contains(stderr.String(), "artifact kind=receipt") {
-				t.Fatalf("missing terminal receipt output:\n%s", stderr.String())
-			}
 			info, err := os.Stat(receiptPath)
 			if err != nil {
 				t.Fatal(err)
+			}
+			confirmation := fmt.Sprintf("artifact kind=receipt path=%s bytes=%d", receiptPath, info.Size())
+			if !strings.Contains(stderr.String(), confirmation) {
+				t.Fatalf("missing terminal receipt confirmation %q:\n%s", confirmation, stderr.String())
 			}
 			var timing TimingReport
 			for _, line := range strings.Split(stderr.String(), "\n") {
@@ -3417,7 +3410,10 @@ func TestRunCommandWritesTerminalReceiptOnSuccess(t *testing.T) {
 					timing = candidate
 				}
 			}
-			assertReceiptArtifactMetadata(t, timing.Artifacts, receiptPath, int(info.Size()))
+			if timing.Provider != "run-env-profile-test" {
+				t.Fatalf("missing timing JSON:\n%s", stderr.String())
+			}
+			assertNoReceiptArtifact(t, timing.Artifacts)
 			records, err := readBenchmarkTimingRecords(timingRecordPath)
 			if err != nil {
 				t.Fatal(err)
@@ -3425,7 +3421,7 @@ func TestRunCommandWritesTerminalReceiptOnSuccess(t *testing.T) {
 			if len(records) != 1 {
 				t.Fatalf("timing records=%d, want one", len(records))
 			}
-			assertReceiptArtifactMetadata(t, records[0].Timing.Artifacts, receiptPath, int(info.Size()))
+			assertNoReceiptArtifact(t, records[0].Timing.Artifacts)
 
 			if receipt.LogSHA256 != sha256Digest([]byte(tc.raw)) {
 				t.Fatal("receipt lost raw stream digest")
@@ -3840,7 +3836,11 @@ func TestRunCommandTerminalReceiptIncludesLateTimingRecordFailure(t *testing.T) 
 	if timing.ExitCode != 2 {
 		t.Fatalf("timing exit=%d, want late timing-record exit 2", timing.ExitCode)
 	}
-	assertReceiptArtifactMetadata(t, timing.Artifacts, receiptPath, int(info.Size()))
+	assertNoReceiptArtifact(t, timing.Artifacts)
+	confirmation := fmt.Sprintf("artifact kind=receipt path=%s bytes=%d", receiptPath, info.Size())
+	if !strings.Contains(stderr.String(), confirmation) {
+		t.Fatalf("missing terminal receipt confirmation %q:\n%s", confirmation, stderr.String())
+	}
 	if !strings.Contains(exitErr.Message, "open benchmark timing store") {
 		t.Fatalf("missing timing-record failure: %v", exitErr)
 	}
@@ -3856,6 +3856,7 @@ func TestRunCommandReceiptPersistenceFailureFinishesWithRefreshedReceipt(t *test
 	isolateRunTestUserDirs(t, dir)
 	sshPath := filepath.Join(dir, "ssh")
 	receiptPath := filepath.Join(dir, "receipt.json")
+	timingRecordPath := filepath.Join(dir, "timings.jsonl")
 	keyPath := filepath.Join(dir, "signer.pem")
 	replacementPath := filepath.Join(dir, "replacement.pem")
 	_, originalKey, err := ed25519.GenerateKey(rand.Reader)
@@ -3989,6 +3990,7 @@ func TestRunCommandReceiptPersistenceFailureFinishesWithRefreshedReceipt(t *test
 		"--no-sync",
 		"--stop-after", "never",
 		"--timing-json",
+		"--timing-record", timingRecordPath,
 		"--attest", receiptPath,
 		"--attest-key", keyPath,
 		"--", "true",
@@ -4034,6 +4036,25 @@ func TestRunCommandReceiptPersistenceFailureFinishesWithRefreshedReceipt(t *test
 	if strings.Contains(stderr.String(), "artifact kind=receipt") {
 		t.Fatalf("failed receipt persistence reported an artifact:\n%s", stderr.String())
 	}
+	var timing TimingReport
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		var candidate TimingReport
+		if json.Unmarshal([]byte(line), &candidate) == nil && candidate.Provider == lease.Provider {
+			timing = candidate
+		}
+	}
+	if timing.Provider != lease.Provider {
+		t.Fatalf("missing timing JSON:\n%s", stderr.String())
+	}
+	assertNoReceiptArtifact(t, timing.Artifacts)
+	records, readErr := readBenchmarkTimingRecords(timingRecordPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(records) != 1 {
+		t.Fatalf("timing records=%d, want one", len(records))
+	}
+	assertNoReceiptArtifact(t, records[0].Timing.Artifacts)
 }
 
 func TestRunCommandTimingJSONFailureIsTerminalAndUpdatesReceipt(t *testing.T) {
@@ -4142,10 +4163,6 @@ func TestRunCommandDelegatedTerminalOrder(t *testing.T) {
 	if exitCode, ok := receipt["exit_code"].(json.Number); !ok || exitCode.String() != "0" {
 		t.Fatalf("delegated receipt exit=%v", receipt["exit_code"])
 	}
-	info, err := os.Stat(receiptPath)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var timing TimingReport
 	for _, line := range strings.Split(stderr.String(), "\n") {
 		var candidate TimingReport
@@ -4153,7 +4170,10 @@ func TestRunCommandDelegatedTerminalOrder(t *testing.T) {
 			timing = candidate
 		}
 	}
-	assertReceiptArtifactMetadata(t, timing.Artifacts, receiptPath, int(info.Size()))
+	if timing.Provider != "benchmark-timing-test" {
+		t.Fatalf("missing delegated timing JSON:\n%s", stderr.String())
+	}
+	assertNoReceiptArtifact(t, timing.Artifacts)
 }
 
 func TestRunCommandSyncOnlyFinalizesAfterTiming(t *testing.T) {

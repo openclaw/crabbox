@@ -480,7 +480,6 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var prepareTerminalRun func()
 	var finalizeTerminalRun func()
 	var finalTimingReport *timingReport
-	var preparedReceiptArtifact *runArtifact
 	var artifactChangeResults []ArtifactChangeResult
 	var timingRecordRepo Repo
 	var timingRecordCommand []string
@@ -496,9 +495,6 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		report := *finalTimingReport
 		report.ArtifactChanges = artifactChangeResults
 		report.Artifacts = append([]runArtifact(nil), report.Artifacts...)
-		if preparedReceiptArtifact != nil {
-			report.Artifacts = append(report.Artifacts, *preparedReceiptArtifact)
-		}
 		if !runnerObservedStartedAt.IsZero() && !frozenAt.Before(runnerObservedStartedAt) {
 			report.RunnerTotalMs = durationMillisecondsCeil(frozenAt.Sub(runnerObservedStartedAt))
 		}
@@ -1089,7 +1085,6 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			delegatedPreparationAttempted = true
 			preparedDelegatedExitCode = finalResult.ExitCode
 			preparedDelegatedReceipt = nil
-			preparedReceiptArtifact = nil
 			prepared, receiptErr := prepareDelegatedRunReceipt(attestPath, delegatedReceiptKey, cfg, finalResult, runReq)
 			if receiptErr != nil {
 				err = errors.Join(err, receiptErr)
@@ -1097,7 +1092,6 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				return
 			}
 			preparedDelegatedReceipt = &prepared
-			preparedReceiptArtifact = &preparedDelegatedReceipt.artifact
 		}
 		finalizeTerminalRun = func() {
 			if preparedDelegatedReceipt == nil {
@@ -2628,7 +2622,6 @@ afterSync:
 		terminalPreparationAttempted = true
 		preparedTerminalExitCode = finalCode
 		preparedTerminalReceiptFile = nil
-		preparedReceiptArtifact = nil
 		receipt, receiptErr := buildTerminalReceipt(finalCode)
 		if receiptErr != nil {
 			err = errors.Join(err, receiptErr)
@@ -2643,9 +2636,6 @@ afterSync:
 		}
 		preparedTerminalReceipt = receipt
 		preparedTerminalReceiptFile = &prepared
-		if attestPath != "" {
-			preparedReceiptArtifact = &preparedTerminalReceiptFile.artifact
-		}
 	}
 	finalizeTerminalRun = func() {
 		if preparedTerminalReceiptFile == nil {

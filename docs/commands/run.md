@@ -793,7 +793,11 @@ not change signing, and must not be treated as attested evidence. App
 finalization emits the failure digest, timing record, timing JSON, local receipt
 persistence, and coordinator finish in that order after cleanup. Timing sink
 failures are terminal and are reflected in the local receipt and process exit;
-the executable can subsequently append its existing exit diagnostic.
+the executable can subsequently append its existing exit diagnostic. Timing
+`artifacts` contains only files already committed when that timing payload is
+emitted. The terminal receipt is persisted afterward, so its metadata is
+intentionally excluded; successful persistence prints a separate
+`artifact kind=receipt path=... bytes=...` confirmation.
 After an automatic cleanup attempt, `leaseStopped` reports whether the release
 owner confirmed that lease-based recovery is no longer available. An accepted
 release alone does not set it to true. `leaseStopError` independently records a
