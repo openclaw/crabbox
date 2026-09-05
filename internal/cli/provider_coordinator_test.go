@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -667,6 +668,76 @@ func TestCoordinatorFixedAcquireUsesRequestedIDAndJoinsProvisioning(t *testing.T
 	}
 }
 
+func TestCoordinatorAcquireRetainsCurrentProvisioningTiming(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper requires a unix-like host")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	toolDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(toolDir, "ssh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", toolDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	readyServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer readyServer.Close()
+	readyURL, err := url.Parse(readyServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, port, err := net.SplitHostPort(readyURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lease := CoordinatorLease{
+		ID: "cbx_abcdef123468", Slug: "current-timing", Provider: "aws", TargetOS: targetLinux,
+		State: "active", CloudID: "i-current", Host: host, SSHUser: "crabbox", SSHPort: port, WorkRoot: defaultPOSIXWorkRoot,
+		ProvisioningTiming: &CoordinatorProvisioningTiming{
+			RequestMs: 2,
+			TotalMs:   5,
+			Phases: []CoordinatorProvisioningPhase{
+				{Name: "request", Ms: 2},
+				{Name: "unattributed", Ms: 3},
+			},
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/leases/"+lease.ID:
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+lease.ID:
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+lease.ID+"/heartbeat":
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.Coordinator = server.URL
+	cfg.CoordToken = "user-token"
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: io.Discard}}
+	acquired, err := backend.Acquire(context.Background(), AcquireRequest{
+		Keep: true, RequestedLeaseID: lease.ID, RequestedSlug: lease.Slug,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := coordinatorRunnerTiming(lease)
+	if !reflect.DeepEqual(acquired.runnerTiming, want) {
+		t.Fatalf("runner timing=%#v want current provisioning timing %#v", acquired.runnerTiming, want)
+	}
+}
+
 func TestCoordinatorAcquirePollsCanonicalIDFromProvisioningReplay(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -863,6 +934,11 @@ func TestCoordinatorAcquireReportsSelectedImageAndProviderStartupTiming(t *testi
 			NetworkReadyMs: 3400,
 			BootstrapMs:    500,
 			TotalMs:        5100,
+			Phases: []CoordinatorProvisioningPhase{
+				{Name: "request", Ms: 1200},
+				{Name: "network_ready", Ms: 3400},
+				{Name: "bootstrap", Ms: 500},
+			},
 		},
 	}
 	var stderr bytes.Buffer
@@ -874,6 +950,291 @@ func TestCoordinatorAcquireReportsSelectedImageAndProviderStartupTiming(t *testi
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr=%q missing %q", stderr.String(), want)
 		}
+	}
+	runnerTiming := coordinatorRunnerTiming(lease)
+	if runnerTiming == nil || runnerTiming.TotalMs != 5100 || len(runnerTiming.Phases) != 3 {
+		t.Fatalf("runner timing=%#v", runnerTiming)
+	}
+	var total int64
+	for _, phase := range runnerTiming.Phases {
+		total += phase.Ms
+	}
+	if total != runnerTiming.TotalMs {
+		t.Fatalf("phase total=%d want %d: %#v", total, runnerTiming.TotalMs, runnerTiming.Phases)
+	}
+}
+
+func TestCoordinatorRunnerTimingRejectsMalformedPhaseVectors(t *testing.T) {
+	validLegacy := func() *CoordinatorProvisioningTiming {
+		return &CoordinatorProvisioningTiming{RequestMs: 2, TotalMs: 10}
+	}
+	tests := []struct {
+		name   string
+		timing *CoordinatorProvisioningTiming
+	}{
+		{
+			name: "unknown",
+			timing: &CoordinatorProvisioningTiming{
+				RequestMs: 2, TotalMs: 10,
+				Phases: []CoordinatorProvisioningPhase{{Name: "dns", Ms: 10}},
+			},
+		},
+		{
+			name: "duplicate",
+			timing: &CoordinatorProvisioningTiming{
+				RequestMs: 2, TotalMs: 10,
+				Phases: []CoordinatorProvisioningPhase{
+					{Name: "request", Ms: 4},
+					{Name: "request", Ms: 6},
+				},
+			},
+		},
+		{
+			name: "nonpositive",
+			timing: &CoordinatorProvisioningTiming{
+				RequestMs: 2, TotalMs: 10,
+				Phases: []CoordinatorProvisioningPhase{{Name: "request", Ms: 0}},
+			},
+		},
+		{
+			name: "over budget",
+			timing: &CoordinatorProvisioningTiming{
+				RequestMs: 2, TotalMs: 10,
+				Phases: []CoordinatorProvisioningPhase{{Name: "request", Ms: 11}},
+			},
+		},
+		{
+			name: "over four",
+			timing: &CoordinatorProvisioningTiming{
+				RequestMs: 2, TotalMs: 10,
+				Phases: []CoordinatorProvisioningPhase{
+					{Name: "request", Ms: 1},
+					{Name: "network_ready", Ms: 1},
+					{Name: "bootstrap", Ms: 1},
+					{Name: "unattributed", Ms: 1},
+					{Name: "request", Ms: 1},
+				},
+			},
+		},
+		{
+			name: "overflow",
+			timing: &CoordinatorProvisioningTiming{
+				TotalMs: math.MaxInt64,
+				Phases: []CoordinatorProvisioningPhase{
+					{Name: "request", Ms: math.MaxInt64},
+					{Name: "network_ready", Ms: 1},
+				},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runnerTiming := coordinatorRunnerTiming(CoordinatorLease{ProvisioningTiming: test.timing})
+			if runnerTiming == nil {
+				t.Fatal("runner timing is nil")
+			}
+			if test.name == "overflow" {
+				if len(runnerTiming.Phases) != 1 || runnerTiming.Phases[0] != (RunnerPhase{Name: "provider.unattributed", Ms: math.MaxInt64}) {
+					t.Fatalf("overflow fallback=%#v", runnerTiming.Phases)
+				}
+				return
+			}
+			want := coordinatorRunnerTiming(CoordinatorLease{ProvisioningTiming: validLegacy()})
+			if !reflect.DeepEqual(runnerTiming, want) {
+				t.Fatalf("runner timing=%#v want legacy fallback %#v", runnerTiming, want)
+			}
+		})
+	}
+}
+
+func TestCoordinatorRunnerTimingFallsBackWithoutFailingDecode(t *testing.T) {
+	want := []RunnerPhase{
+		{Name: "provider.request", Ms: 2},
+		{Name: "connect.provider", Ms: 3},
+		{Name: "provider.unattributed", Ms: 5},
+	}
+	for _, phases := range []string{
+		`"invalid"`,
+		`[{"name":3,"ms":1}]`,
+		`[{"name":"request","ms":"1"}]`,
+		`[{"name":"request","ms":1.5}]`,
+		`[{"name":"request","ms":1e3}]`,
+		`[{"name":"request","ms":null}]`,
+		`[{"name":"request"}]`,
+		`[{"name":"request","ms":0}]`,
+		`[{"name":"request","ms":-1}]`,
+		`[{"name":"request","ms":9223372036854775808}]`,
+	} {
+		t.Run(phases, func(t *testing.T) {
+			var lease CoordinatorLease
+			err := json.Unmarshal([]byte(fmt.Sprintf(`{
+				"id":"cbx_123",
+				"provisioningTiming":{
+					"requestMs":2,
+					"networkReadyMs":3,
+					"totalMs":10,
+					"phases":%s
+				}
+			}`, phases)), &lease)
+			if err != nil {
+				t.Fatalf("optional timing failed lease decode: %v", err)
+			}
+			runnerTiming := coordinatorRunnerTiming(lease)
+			if runnerTiming == nil || !reflect.DeepEqual(runnerTiming.Phases, want) {
+				t.Fatalf("runner timing=%#v want %#v", runnerTiming, want)
+			}
+		})
+	}
+}
+
+func TestCoordinatorProvisioningTimingRejectsMalformedScalars(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		json string
+	}{
+		{name: "request", json: `{"requestMs":"invalid","totalMs":10}`},
+		{name: "network ready", json: `{"networkReadyMs":1.5,"totalMs":10}`},
+		{name: "bootstrap", json: `{"bootstrapMs":{},"totalMs":10}`},
+		{name: "total", json: `{"totalMs":[]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var timing CoordinatorProvisioningTiming
+			if err := json.Unmarshal([]byte(test.json), &timing); err == nil {
+				t.Fatalf("json.Unmarshal(%s) succeeded, want malformed scalar error", test.json)
+			}
+		})
+	}
+}
+
+func TestCoordinatorProvisioningTimingRejectsNonObjects(t *testing.T) {
+	for _, input := range []string{`[]`, `"invalid"`, `42`, `true`} {
+		t.Run(input, func(t *testing.T) {
+			var timing CoordinatorProvisioningTiming
+			if err := json.Unmarshal([]byte(input), &timing); err == nil {
+				t.Fatalf("json.Unmarshal(%s) succeeded, want non-object error", input)
+			}
+		})
+	}
+}
+
+func TestCoordinatorAcquireProvisioningTimingDecode(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		timingJSON string
+		wantErr    bool
+	}{
+		{
+			name:       "decimal phase preserves scalar fallback",
+			timingJSON: `{"requestMs":2,"networkReadyMs":3,"totalMs":10,"phases":[{"name":"request","ms":1.5}]}`,
+		},
+		{
+			name:       "quoted phase preserves scalar fallback",
+			timingJSON: `{"requestMs":2,"networkReadyMs":3,"totalMs":10,"phases":[{"name":"request","ms":"1"}]}`,
+		},
+		{
+			name:       "exponent phase preserves scalar fallback",
+			timingJSON: `{"requestMs":2,"networkReadyMs":3,"totalMs":10,"phases":[{"name":"request","ms":1e3}]}`,
+		},
+		{
+			name:       "null phase preserves scalar fallback",
+			timingJSON: `{"requestMs":2,"networkReadyMs":3,"totalMs":10,"phases":[{"name":"request","ms":null}]}`,
+		},
+		{
+			name:       "missing phase preserves scalar fallback",
+			timingJSON: `{"requestMs":2,"networkReadyMs":3,"totalMs":10,"phases":[{"name":"request"}]}`,
+		},
+		{
+			name:       "zero phase preserves scalar fallback",
+			timingJSON: `{"requestMs":2,"networkReadyMs":3,"totalMs":10,"phases":[{"name":"request","ms":0}]}`,
+		},
+		{
+			name:       "negative phase preserves scalar fallback",
+			timingJSON: `{"requestMs":2,"networkReadyMs":3,"totalMs":10,"phases":[{"name":"request","ms":-1}]}`,
+		},
+		{
+			name:       "overflow phase preserves scalar fallback",
+			timingJSON: `{"requestMs":2,"networkReadyMs":3,"totalMs":10,"phases":[{"name":"request","ms":9223372036854775808}]}`,
+		},
+		{
+			name:       "malformed total is rejected",
+			timingJSON: `{"requestMs":2,"totalMs":"invalid","phases":[{"name":"request","ms":2}]}`,
+			wantErr:    true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/leases" {
+					http.NotFound(w, r)
+					return
+				}
+				fmt.Fprintf(w, `{"lease":{"id":"cbx_timing","provisioningTiming":%s}}`, test.timingJSON)
+			}))
+			defer server.Close()
+
+			client := &CoordinatorClient{
+				BaseURL: server.URL,
+				Token:   "user-token",
+				Client:  server.Client(),
+			}
+			cfg := baseConfig()
+			cfg.Provider = "aws"
+			lease, err := client.CreateLease(context.Background(), cfg, "ssh-ed25519 test", false, "cbx_timing", "timing")
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("CreateLease succeeded, want malformed total error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			runnerTiming := coordinatorRunnerTiming(lease)
+			want := []RunnerPhase{
+				{Name: "provider.request", Ms: 2},
+				{Name: "connect.provider", Ms: 3},
+				{Name: "provider.unattributed", Ms: 5},
+			}
+			if runnerTiming == nil || !reflect.DeepEqual(runnerTiming.Phases, want) {
+				t.Fatalf("runner timing=%#v want %#v", runnerTiming, want)
+			}
+		})
+	}
+}
+
+func TestCoordinatorRunnerTimingKeepsAcceptedPhaseNamesUnique(t *testing.T) {
+	runnerTiming := coordinatorRunnerTiming(CoordinatorLease{
+		ProvisioningTiming: &CoordinatorProvisioningTiming{
+			TotalMs: 10,
+			Phases: []CoordinatorProvisioningPhase{
+				{Name: "request", Ms: 1},
+				{Name: "network_ready", Ms: 1},
+				{Name: "bootstrap", Ms: 1},
+				{Name: "unattributed", Ms: 1},
+			},
+		},
+	})
+	want := []RunnerPhase{
+		{Name: "provider.request", Ms: 1},
+		{Name: "connect.provider", Ms: 1},
+		{Name: "bootstrap.readiness", Ms: 1},
+		{Name: "provider.unattributed", Ms: 7},
+	}
+	if runnerTiming == nil || !reflect.DeepEqual(runnerTiming.Phases, want) {
+		t.Fatalf("runner timing=%#v want %#v", runnerTiming, want)
+	}
+}
+
+func TestCoordinatorRunnerTimingUsesUnattributedForInconsistentLegacyScalars(t *testing.T) {
+	runnerTiming := coordinatorRunnerTiming(CoordinatorLease{
+		ProvisioningTiming: &CoordinatorProvisioningTiming{
+			RequestMs:      8,
+			NetworkReadyMs: 3,
+			TotalMs:        10,
+		},
+	})
+	want := []RunnerPhase{{Name: "provider.unattributed", Ms: 10}}
+	if runnerTiming == nil || !reflect.DeepEqual(runnerTiming.Phases, want) {
+		t.Fatalf("runner timing=%#v want %#v", runnerTiming, want)
 	}
 }
 
@@ -2075,6 +2436,39 @@ func TestCoordinatorResolveFallsBackToAdminToken(t *testing.T) {
 	}
 	if lease.Coordinator.Token != "admin-token" {
 		t.Fatalf("coordinator token=%q, want admin token", lease.Coordinator.Token)
+	}
+}
+
+func TestCoordinatorResolveDropsHistoricalProvisioningTiming(t *testing.T) {
+	const leaseID = "cbx_historical_timing"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/"+leaseID {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+			ID: leaseID, Slug: "reused-timing", Provider: "aws", TargetOS: targetLinux,
+			CloudID: "i-reused", Host: "203.0.113.10", SSHUser: "crabbox", SSHPort: "22", State: "active",
+			ProvisioningTiming: &CoordinatorProvisioningTiming{
+				RequestMs:      2,
+				NetworkReadyMs: 3,
+				BootstrapMs:    4,
+				TotalMs:        9,
+			},
+		}})
+	}))
+	defer server.Close()
+
+	backend := newCoordinatorIdentityTestBackend(t, server.URL, "")
+	resolved, err := backend.Resolve(context.Background(), ResolveRequest{ID: leaseID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.runnerTiming != nil {
+		t.Fatalf("resolved reused lease retained historical timing: %#v", resolved.runnerTiming)
+	}
+	if resolved.LeaseID != leaseID || resolved.Server.CloudID != "i-reused" {
+		t.Fatalf("resolved lease identity=%#v", resolved)
 	}
 }
 

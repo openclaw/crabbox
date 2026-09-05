@@ -1428,6 +1428,14 @@ func syncGuardrailScope(manifest SyncManifest) (count int, bytes int64, scope st
 	return len(manifest.Files), manifest.Bytes, "candidate", manifest.Files
 }
 
+// FullSyncGuardrailManifest selects the complete transfer without changing the
+// caller's dirty-delta diagnostics or the archive's file manifest.
+func FullSyncGuardrailManifest(manifest SyncManifest) SyncManifest {
+	manifest.Changed = nil
+	manifest.ChangedBytes = 0
+	return manifest
+}
+
 func CheckSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {
 	return checkSyncPreflight(manifest, cfg, force, stderr)
 }

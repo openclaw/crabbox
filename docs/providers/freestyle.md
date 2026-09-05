@@ -133,6 +133,7 @@ even if the checkout changes during provisioning. Timing reports preparation
 once and separates upload, extraction and cleanup.
 
 File and byte guardrails apply to the complete archive, not only changed files.
+`sync-plan --json` previews those same full-archive limits before allocation.
 The provider also limits compressed archives to 64 MiB, checked before allocation
 and again by a bounded upload read. `--force-sync-large` overrides the normal
 sync guardrails but not this compressed transport limit.

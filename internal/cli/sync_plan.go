@@ -96,7 +96,11 @@ func (a App) syncPlan(ctx context.Context, args []string) error {
 	}
 	files, dirs := syncPlanRows(boundary.root, manifest, *limit)
 	if *jsonOut {
-		out := syncPlanJSON(manifest, files, dirs, cfg)
+		provider, err := ProviderFor(cfg.Provider)
+		if err != nil {
+			return err
+		}
+		out := syncPlanJSON(manifest, files, dirs, cfg, provider.Spec().SyncGuardrailFullCandidate)
 		if err := json.NewEncoder(a.Stdout).Encode(out); err != nil {
 			return err
 		}
@@ -118,13 +122,17 @@ func (a App) syncPlan(ctx context.Context, args []string) error {
 	return nil
 }
 
-func syncPlanJSON(manifest SyncManifest, files, dirs []syncPlanRow, cfg Config) syncPlanJSONOutput {
+func syncPlanJSON(manifest SyncManifest, files, dirs []syncPlanRow, cfg Config, fullCandidate bool) syncPlanJSONOutput {
+	guardrailManifest := manifest
+	if fullCandidate {
+		guardrailManifest = FullSyncGuardrailManifest(manifest)
+	}
 	return syncPlanJSONOutput{
 		Candidate:           syncPlanJSONSizeFor(len(manifest.Files), manifest.Bytes),
 		DirtyDelta:          syncPlanJSONSizeFor(len(manifest.Changed), manifest.ChangedBytes),
 		DeletedTrackedPaths: len(manifest.Deleted),
 		ProtectedTracked:    syncPlanJSONProtectedFor(manifest),
-		Guardrail:           syncPlanJSONGuardrailFor(manifest, cfg),
+		Guardrail:           syncPlanJSONGuardrailFor(guardrailManifest, cfg),
 		TopFiles:            syncPlanJSONRows(files),
 		TopDirs:             syncPlanJSONRows(dirs),
 	}
