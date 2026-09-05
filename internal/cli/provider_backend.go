@@ -834,6 +834,30 @@ func commandRunnerWithChildCredentialBoundary(next CommandRunner, denied []strin
 	return childCredentialBoundaryCommandRunner{next: next, denied: denied}
 }
 
+// TrackLocalCommandCancellation records the caller cause when the command's
+// cancellation watcher stops a child. Install it after configuring cmd.Cancel,
+// before starting a CommandContext command. Apply the returned function only
+// after Run or Wait joins that watcher; ordinary observed exits stay primary.
+func TrackLocalCommandCancellation(ctx context.Context, cmd *exec.Cmd) func(error) error {
+	stop := cmd.Cancel
+	var interrupted error
+	cmd.Cancel = func() error {
+		cause := ctx.Err()
+		err := stop()
+		if !errors.Is(err, os.ErrProcessDone) {
+			interrupted = cause
+		}
+		return err
+	}
+	return func(err error) error {
+		var processErr *exec.ExitError
+		if interrupted != nil && errors.As(err, &processErr) && processErr.ExitCode() < 0 {
+			return errors.Join(err, interrupted)
+		}
+		return err
+	}
+}
+
 func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	if req.CaptureOutputToFiles && (req.DisableOutputCapture || req.MaxCapturedOutputBytes <= 0 || req.Stdout != nil || req.Stderr != nil) {
 		return LocalCommandResult{ExitCode: 1}, errors.New("file output capture requires a positive limit and no streaming writers")
@@ -859,15 +883,7 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 		configureBoundedCommandCancellation(cmd)
 	}
 	stopCommand := cmd.Cancel
-	var interrupted error
-	cmd.Cancel = func() error {
-		cause := ctx.Err()
-		err := stopCommand()
-		if !errors.Is(err, os.ErrProcessDone) {
-			interrupted = cause
-		}
-		return err
-	}
+	withCancellationCause := TrackLocalCommandCancellation(ctx, cmd)
 	env := req.Env
 	if env == nil {
 		env = os.Environ()
@@ -898,13 +914,7 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 			files.closeWriters()
 			finishCapture = files.watch(cancel, stopCommand, cmd.WaitDelay)
 		}
-		err = cmd.Wait()
-		// Wait joins its context watcher. Keep observed exits primary; only a
-		// signaled child gains the caller cause from that watcher's stop attempt.
-		var processErr *exec.ExitError
-		if interrupted != nil && errors.As(err, &processErr) && processErr.ExitCode() < 0 {
-			err = errors.Join(err, interrupted)
-		}
+		err = withCancellationCause(cmd.Wait())
 		if finishCapture != nil {
 			observed := finishCapture()
 			err = errors.Join(err, observed.err)

@@ -18,7 +18,6 @@ type DoctorCheck = core.DoctorCheck
 type WarmupRequest = core.WarmupRequest
 type RunRequest = core.RunRequest
 type RunResult = core.RunResult
-type RunSessionHandle = core.RunSessionHandle
 type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
 type StatusRequest = core.StatusRequest
@@ -56,16 +55,6 @@ func inventoryDoctorResult(provider string, leases int) DoctorResult {
 
 func writeTimingJSON(w io.Writer, report core.TimingReport) error {
 	return core.WriteTimingJSON(w, report)
-}
-
-func timingReportWithRunResult(report core.TimingReport, result RunResult, err error) core.TimingReport {
-	return core.TimingReportWithRunResult(report, result, err)
-}
-
-func timingReportWithProviderError(report core.TimingReport) core.TimingReport {
-	report.RunStatus = core.RunStatusFailed
-	report.ErrorKind = core.RunErrorProvider
-	return report
 }
 
 func newLeaseSlug(leaseID string) string {
@@ -106,10 +95,6 @@ func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 
 func shellQuote(value string) string {
 	return core.ShellQuote(value)
-}
-
-func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, slug string, idleTimeout, ttl time.Duration, acquired bool, shouldStop *bool) {
-	core.HandleDelegatedRunFailure(w, req, provider, leaseID, slug, idleTimeout, ttl, acquired, shouldStop)
 }
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {

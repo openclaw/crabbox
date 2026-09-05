@@ -222,6 +222,24 @@ egress and cannot be combined with allow/deny entries. `ports` accepts ports or
    still-active claims, and treats missing-or-inaccessible sandboxes
    conservatively unless forget-missing is explicit.
 
+Run sequencing and finalization use the shared delegated-sandbox lifecycle.
+The adapter retains project scope, ownership metadata, operation locking,
+creation rollback, SDK transport, and its separate missing-resource policies.
+The operation lock stays held through cleanup, retained-lease bookkeeping, and
+timing output, including when reuse is rejected after locking.
+
+An early failure followed by failed deletion returns a kept recovery session.
+Command preparation failures also honor `--keep-on-failure`, and admitted
+retained runs refresh lease activity after setup or sync failure. Cleanup and
+timing errors add diagnostics without replacing an earlier command exit or
+provider failure. Final timing includes cleanup and agrees with the returned
+outcome. The automatic deletion request keeps its 15-second timeout.
+
+Interrupted bridge subprocesses preserve cancellation and deadline causes.
+Successful bridge completion still reports the sandbox's observed command exit,
+including nonzero exits. The SDK persistence setting controls sandbox creation;
+it does not independently request Crabbox retention after a successful run.
+
 ## Capabilities
 
 - SSH: no.
