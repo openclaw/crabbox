@@ -1309,6 +1309,7 @@ type LocalContainerConfig struct {
 	Memory             string
 	Network            string
 	DockerSocket       bool
+	NoHostname         bool
 	Volumes            []string
 	CheckpointMetadata map[string]string `yaml:"-" json:"-"`
 }
@@ -9241,6 +9242,9 @@ func applyEnv(cfg *Config) error {
 	cfg.LocalContainer.Network = getenv("CRABBOX_LOCAL_CONTAINER_NETWORK", cfg.LocalContainer.Network)
 	if value, ok := getenvBool("CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET"); ok {
 		cfg.LocalContainer.DockerSocket = value
+	}
+	if value, ok := getenvBool("CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME"); ok {
+		cfg.LocalContainer.NoHostname = value
 	}
 	cfg.AppleContainer.CLIPath = getenv("CRABBOX_APPLE_CONTAINER_CLI", cfg.AppleContainer.CLIPath)
 	if image := os.Getenv("CRABBOX_APPLE_CONTAINER_IMAGE"); image != "" {
