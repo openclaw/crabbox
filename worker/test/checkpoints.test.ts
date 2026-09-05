@@ -2308,6 +2308,50 @@ describe("coordinator-managed checkpoints", () => {
     },
   );
 
+  it("rejects transactional promotion for a deleting AWS checkpoint before provider or FSR work", async () => {
+    const storage = new CheckpointMemoryStorage();
+    const runtime = new CheckpointRuntime(storage);
+    const env = {
+      FLEET: {} as DurableObjectNamespace,
+      HETZNER_TOKEN: "",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } satisfies Env;
+    const provider = new AWSProvider(env, "eu-west-1", storage);
+    vi.spyOn(provider, "checkpointScope").mockResolvedValue(providerScope("aws"));
+    vi.spyOn(provider, "createCheckpointImage").mockImplementation(
+      async (_lease, name, _noReboot, strategy, ownership) => ({
+        ...providerImage("aws", name, strategy, ownership),
+        serverType: "standard-small",
+      }),
+    );
+    const coordinator = new FleetCoordinator(runtime, env, { aws: provider });
+    await storage.put(`lease:${leaseID}`, checkpointLease("aws"));
+    const id = "chk_transactional_promotion_deleting";
+    expect((await createCheckpoint(coordinator, id, { mode: "manual" }, "image")).status).toBe(201);
+    const record = (await storage.get<CoordinatorCheckpointRecord>(checkpointKey(id)))!;
+    const image = (await provider.storedImageMetadata(record.image!.id))!;
+    vi.spyOn(provider, "getImage").mockResolvedValue(image);
+    const promote = vi.spyOn(provider, "promoteImage");
+    const enableFSR = vi.spyOn(provider, "enableFastSnapshotRestore").mockResolvedValue([]);
+    await claimCheckpointDeletion(storage, id, undefined, "manual");
+
+    const response = await coordinator.fetch(
+      checkpointRequest(
+        "POST",
+        `/v1/images/${encodeURIComponent(record.image!.id)}/promote-cas?provider=aws&region=eu-west-1&target=linux&fastSnapshotRestore=true&fsrAz=eu-west-1a`,
+        { expectedCurrent: { state: "capture" } },
+        { admin: true },
+      ),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "checkpoint_delete_in_progress",
+    });
+    expect(promote).not.toHaveBeenCalled();
+    expect(enableFSR).not.toHaveBeenCalled();
+  });
+
   it("pins Azure promoted snapshots and blocks checkpoint deletion without removing promotion metadata", async () => {
     const storage = new CheckpointMemoryStorage();
     const runtime = new CheckpointRuntime(storage);

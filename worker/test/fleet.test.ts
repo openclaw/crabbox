@@ -35635,6 +35635,209 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("image:aws:promoted")).toBeUndefined();
   });
 
+  it("serves transactional AWS promotion on a dedicated fail-closed route", async () => {
+    const aws = fakeProvider();
+    const promote = vi
+      .spyOn(aws, "promoteImage")
+      .mockImplementation(async (imageID, _known, promotionRequest) => {
+        await expect(promotionRequest.clone().json()).resolves.toMatchObject({
+          expectedCurrent: { state: "capture" },
+        });
+        return {
+          image: { id: imageID, name: imageID, state: "available", provider: "aws" },
+          previous: { state: "absent" },
+        };
+      });
+    const fleet = testFleet(new MemoryStorage(), { aws });
+    const response = await fleet.fetch(
+      request("POST", "/v1/images/ami-candidate/promote-cas?target=windows&region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { expectedCurrent: { state: "capture" } },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      image: { id: "ami-candidate" },
+      previous: { state: "absent" },
+    });
+    const missingPrecondition = await fleet.fetch(
+      request("POST", "/v1/images/ami-candidate/promote-cas?target=windows&region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {},
+      }),
+    );
+    expect(missingPrecondition.status).toBe(400);
+    await expect(missingPrecondition.json()).resolves.toMatchObject({
+      error: "image_promotion_precondition_required",
+    });
+    const captureRetirement = await fleet.fetch(
+      request("POST", "/v1/images/ami-candidate/promote-cas?target=windows&region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {
+          expectedCurrent: { state: "capture" },
+          retireExpectedCatalog: true,
+        },
+      }),
+    );
+    expect(captureRetirement.status).toBe(400);
+    await expect(captureRetirement.json()).resolves.toMatchObject({
+      error: "invalid_image_precondition",
+    });
+    const ordinaryExpectation = await fleet.fetch(
+      request("POST", "/v1/images/ami-candidate/promote?target=windows&region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { expectedCurrent: { state: "capture" } },
+      }),
+    );
+    expect(ordinaryExpectation.status).toBe(400);
+    await expect(ordinaryExpectation.json()).resolves.toMatchObject({
+      error: "invalid_image_precondition",
+    });
+    expect(promote).toHaveBeenCalledOnce();
+    const ordinaryRetirement = await fleet.fetch(
+      request("POST", "/v1/images/ami-candidate/promote?target=windows&region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {
+          expectedCurrent: {
+            state: "present",
+            imageId: "ami-candidate",
+            revision: "revision-candidate",
+          },
+          retireExpectedCatalog: true,
+        },
+      }),
+    );
+    expect(ordinaryRetirement.status).toBe(400);
+    const catalogExpectation = await fleet.fetch(
+      request("POST", "/v1/images/ami-candidate/promote-catalog?target=windows&region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { expectedCurrent: { state: "capture" } },
+      }),
+    );
+    expect(catalogExpectation.status).toBe(400);
+    await expect(catalogExpectation.json()).resolves.toMatchObject({
+      error: "invalid_image_precondition",
+    });
+    const catalogRetirement = await fleet.fetch(
+      request("POST", "/v1/images/ami-candidate/promote-catalog?target=windows&region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { retireExpectedCatalog: true },
+      }),
+    );
+    expect(catalogRetirement.status).toBe(400);
+    expect(promote).toHaveBeenCalledOnce();
+  });
+
+  it("rejects shared-token transactional promotion before provider or storage mutation", async () => {
+    const storage = new MemoryStorage();
+    const defaultKey = "image:aws:promoted:windows:x86_64:eu-west-1";
+    const catalogKey = "image:aws:catalog:windows:x86_64:eu-west-1:ami-candidate";
+    const current = {
+      id: "ami-candidate",
+      name: "candidate",
+      state: "available" as const,
+      provider: "aws" as const,
+      target: "windows" as const,
+      region: "eu-west-1",
+      architecture: "x86_64",
+      snapshots: ["snap-root"],
+      promotedAt: "2026-09-03T00:00:00Z",
+      revision: "revision-candidate",
+    };
+    storage.seed(defaultKey, current);
+    storage.seed(catalogKey, current);
+    const env = {
+      CRABBOX_SHARED_TOKEN: "shared-operator-token",
+      CRABBOX_SHARED_OWNER: "automation@example.com",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const aws = fakeProvider();
+    const fleet = testFleet(storage, { aws }, env);
+    await fleet.ready();
+    const storedImageMetadata = vi.spyOn(aws, "storedImageMetadata");
+    const promote = vi.spyOn(aws, "promoteImage");
+    const enableFastSnapshotRestore = vi.spyOn(aws, "enableFastSnapshotRestore");
+    const transaction = vi.spyOn(storage, "transaction");
+    const put = vi.spyOn(storage, "put");
+    const remove = vi.spyOn(storage, "delete");
+    const scheduleAlarm = vi.spyOn(
+      fleet as unknown as { scheduleAlarm: () => Promise<void> },
+      "scheduleAlarm",
+    );
+    const transactionPutCounts = [...storage.transactionPutCounts];
+
+    const response = await routeCoordinatorRequest(
+      new Request(
+        "https://crabbox.test/v1/images/ami-candidate/promote-cas?provider=aws&target=windows&region=eu-west-1&fastSnapshotRestore=true&fsrAz=eu-west-1a",
+        {
+          method: "POST",
+          headers: {
+            authorization: "Bearer shared-operator-token",
+            "content-type": "application/json",
+            "x-crabbox-admin": "true",
+          },
+          body: JSON.stringify({
+            clearDefault: true,
+            expectedCurrent: {
+              state: "present",
+              imageId: current.id,
+              revision: current.revision,
+            },
+            retireExpectedCatalog: true,
+            fastSnapshotRestore: true,
+            fastSnapshotRestoreAvailabilityZones: ["eu-west-1a"],
+          }),
+        },
+      ),
+      env,
+      async (prepared) => await fleet.fetch(prepared),
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({
+      error: "forbidden",
+      message: "admin token required",
+    });
+    expect(storedImageMetadata).not.toHaveBeenCalled();
+    expect(promote).not.toHaveBeenCalled();
+    expect(enableFastSnapshotRestore).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
+    expect(put).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(scheduleAlarm).not.toHaveBeenCalled();
+    expect(storage.transactionPutCounts).toEqual(transactionPutCounts);
+    expect(storage.value(defaultKey)).toEqual(current);
+    expect(storage.value(catalogKey)).toEqual(current);
+    expect(storage.alarm()).toBeUndefined();
+  });
+
+  it("rejects transactional promotion for Azure before provider mutation", async () => {
+    const azure = fakeProvider(undefined, { provider: "azure" });
+    const promote = vi.spyOn(azure, "promoteImage");
+    const fleet = testFleet(new MemoryStorage(), { azure });
+    const response = await fleet.fetch(
+      request(
+        "POST",
+        "/v1/images/checkpoint-azure/promote-cas?provider=azure&target=linux&region=eastus",
+        {
+          headers: { "x-crabbox-admin": "true" },
+          body: {
+            expectedCurrent: { state: "capture" },
+            retireExpectedCatalog: true,
+          },
+        },
+      ),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "unsupported_provider",
+      message: "transactional image promotion is AWS-only",
+    });
+    expect(promote).not.toHaveBeenCalled();
+  });
+
   it("stores declared image capabilities in the selectable AWS image catalog", async () => {
     const storage = new MemoryStorage();
     const provider = new AWSProvider({} as Env, "eu-west-1", storage);
@@ -35739,6 +35942,41 @@ describe("fleet lease identity and idle", () => {
       storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-variant"),
     ).toBeUndefined();
     await expect(storage.list({ prefix: "image:aws:catalog:" })).resolves.toHaveLength(0);
+  });
+
+  it("rejects transactional fields for direct catalog-only AWS promotion without mutation", async () => {
+    const storage = new MemoryStorage();
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-variant",
+      name: "variant",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-variant/promote?target=linux&region=eu-west-1&catalogOnly=true",
+    );
+    const responses = await Promise.all(
+      [{ expectedCurrent: { state: "capture" } }, { retireExpectedCatalog: true }].map(
+        async (body) =>
+          await provider.promoteImage(
+            "ami-variant",
+            undefined,
+            new Request(url, { method: "POST", body: JSON.stringify(body) }),
+            url,
+          ),
+      ),
+    );
+    for (const response of responses) {
+      expect(response).toBeInstanceOf(Response);
+      expect((response as Response).status).toBe(400);
+    }
+    expect(storage.value("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1")).toBeUndefined();
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-variant"),
+    ).toBeUndefined();
   });
 
   it("serves catalog-only promotion on its dedicated coordinator route", async () => {
@@ -36981,6 +37219,822 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-a")).toEqual(
       expect.objectContaining({ capabilities: { runtimes: { node: "24.2" } } }),
     );
+  });
+
+  it("captures and restores AWS image defaults without clobbering a newer promotion", async () => {
+    const storage = new MemoryStorage();
+    const key = "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1";
+    const baseRevision = "revision-previous";
+    storage.seed(key, {
+      id: "ami-previous",
+      name: "previous",
+      state: "available",
+      provider: "aws",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-09-01T00:00:00Z",
+      revision: baseRevision,
+    });
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => ({
+      id: imageID,
+      name: imageID,
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    }));
+    const promote = async (
+      imageID: string,
+      expectedCurrent?: Record<string, string>,
+      clearDefault = false,
+      runtime = "",
+      retireExpectedCatalog = false,
+    ) => {
+      const url = new URL(
+        `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1${runtime ? `&runtime=node%3D${runtime}` : ""}`,
+      );
+      return provider.promoteImage(
+        imageID,
+        undefined,
+        new Request(url, {
+          method: "POST",
+          body: JSON.stringify({ expectedCurrent, clearDefault, retireExpectedCatalog }),
+        }),
+        url,
+      );
+    };
+
+    const published = await promote("ami-candidate", { state: "capture" }, false, "24");
+    expect(published).toMatchObject({
+      image: { id: "ami-candidate", revision: expect.any(String) },
+      previous: {
+        state: "present",
+        imageId: "ami-previous",
+        revision: baseRevision,
+      },
+    });
+    const candidateRevision = (published as { image: { revision: string } }).image.revision;
+    expect(candidateRevision).not.toBe(baseRevision);
+
+    const restored = await promote(
+      "ami-previous",
+      {
+        state: "present",
+        imageId: "ami-candidate",
+        revision: candidateRevision,
+      },
+      false,
+      "",
+      true,
+    );
+    expect(restored).toMatchObject({ image: { id: "ami-previous", revision: expect.any(String) } });
+    const restoredRevision = (restored as { image: { revision: string } }).image.revision;
+    expect(restoredRevision).not.toBe(baseRevision);
+    expect(restoredRevision).not.toBe(candidateRevision);
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-candidate"),
+    ).toBeUndefined();
+    await expect(
+      provider.prepareLeaseConfig(
+        leaseConfig({
+          provider: "aws",
+          sshPublicKey: "ssh-ed25519 test",
+          imageRequirements: { runtimes: { node: "24" } },
+        }),
+      ),
+    ).rejects.toThrow("no promoted AWS linux image satisfies the requested image capabilities");
+
+    const staleBase = await promote("ami-candidate", {
+      state: "present",
+      imageId: "ami-previous",
+      revision: baseRevision,
+    });
+    expect(staleBase).toBeInstanceOf(Response);
+    expect((staleBase as Response).status).toBe(409);
+    await expect((staleBase as Response).json()).resolves.toMatchObject({
+      error: "image_promotion_precondition_failed",
+      current: {
+        state: "present",
+        imageId: "ami-previous",
+        revision: restoredRevision,
+      },
+    });
+
+    const second = await promote("ami-candidate", { state: "capture" }, false, "24");
+    const secondRevision = (second as { image: { revision: string } }).image.revision;
+    await promote("ami-newer");
+    const genericStale = await promote("ami-previous", {
+      state: "present",
+      imageId: "ami-candidate",
+      revision: secondRevision,
+    });
+
+    expect(genericStale).toBeInstanceOf(Response);
+    expect((genericStale as Response).status).toBe(409);
+    await expect((genericStale as Response).json()).resolves.toMatchObject({
+      error: "image_promotion_precondition_failed",
+      current: { state: "present", imageId: "ami-newer" },
+    });
+    expect(storage.value(key)).toEqual(expect.objectContaining({ id: "ami-newer" }));
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-candidate"),
+    ).toEqual(expect.objectContaining({ id: "ami-candidate", revision: secondRevision }));
+
+    const staleRollback = await promote(
+      "ami-previous",
+      {
+        state: "present",
+        imageId: "ami-candidate",
+        revision: secondRevision,
+      },
+      false,
+      "",
+      true,
+    );
+    expect(staleRollback).toBeInstanceOf(Response);
+    expect((staleRollback as Response).status).toBe(409);
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-candidate"),
+    ).toBeUndefined();
+    await expect(
+      provider.prepareLeaseConfig(
+        leaseConfig({
+          provider: "aws",
+          sshPublicKey: "ssh-ed25519 test",
+          imageRequirements: { runtimes: { node: "24" } },
+        }),
+      ),
+    ).rejects.toThrow("no promoted AWS linux image satisfies the requested image capabilities");
+  });
+
+  it("restores cross-region AWS default aliases without overwriting a concurrent promotion", async () => {
+    const storage = new MemoryStorage();
+    const portableKey = "image:aws:promoted:linux:x86_64:ubuntu26.04";
+    const regionalKey = "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1";
+    const prior = {
+      id: "ami-prior-us-east",
+      name: "prior",
+      state: "available" as const,
+      provider: "aws" as const,
+      target: "linux" as const,
+      os: "ubuntu:26.04",
+      region: "us-east-2",
+      architecture: "x86_64",
+      promotedAt: "2026-09-01T00:00:00Z",
+      revision: "revision-prior",
+    };
+    storage.seed(portableKey, prior);
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const getImage = vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => ({
+      id: imageID,
+      name: imageID,
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    }));
+    const promote = async (imageID: string, body: Record<string, unknown>) => {
+      const url = new URL(
+        `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1`,
+      );
+      return provider.promoteImage(
+        imageID,
+        undefined,
+        new Request(url, { method: "POST", body: JSON.stringify(body) }),
+        url,
+      );
+    };
+
+    const published = (await promote("ami-candidate", {
+      expectedCurrent: { state: "capture" },
+    })) as {
+      image: { id: string; revision: string };
+      previous: {
+        state: string;
+        imageId: string;
+        revision: string;
+        aliases: Array<{ alias: string; state: string; image?: { id: string } }>;
+      };
+    };
+    expect(published.previous).toMatchObject({
+      state: "present",
+      imageId: prior.id,
+      revision: prior.revision,
+      aliases: [
+        { alias: "linux-os", state: "present", image: { id: prior.id } },
+        { alias: "regional", state: "absent" },
+      ],
+    });
+
+    const restored = await promote(published.image.id, {
+      expectedCurrent: {
+        state: "present",
+        imageId: published.image.id,
+        revision: published.image.revision,
+      },
+      restorePrevious: published.previous,
+      retireExpectedCatalog: true,
+    });
+    expect(restored).toMatchObject({ image: { id: prior.id, region: prior.region } });
+    expect(storage.value(portableKey)).toEqual(prior);
+    expect(storage.value(regionalKey)).toBeUndefined();
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-candidate"),
+    ).toBeUndefined();
+
+    const republished = (await promote("ami-candidate", {
+      expectedCurrent: { state: "capture" },
+    })) as typeof published;
+    const concurrent = {
+      ...prior,
+      id: "ami-concurrent",
+      name: "concurrent",
+      promotedAt: "2026-09-04T00:00:00Z",
+      revision: "revision-concurrent",
+    };
+    storage.seed(portableKey, concurrent);
+    const restoredAroundConcurrent = await promote(republished.image.id, {
+      expectedCurrent: {
+        state: "present",
+        imageId: republished.image.id,
+        revision: republished.image.revision,
+      },
+      restorePrevious: republished.previous,
+      retireExpectedCatalog: true,
+    });
+
+    expect(restoredAroundConcurrent).toMatchObject({
+      image: { id: concurrent.id, revision: concurrent.revision },
+    });
+    expect(storage.value(portableKey)).toEqual(concurrent);
+    expect(storage.value(regionalKey)).toBeUndefined();
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-candidate"),
+    ).toBeUndefined();
+    expect(getImage.mock.calls.map(([imageID]) => imageID)).toEqual([
+      "ami-candidate",
+      "ami-candidate",
+      "ami-candidate",
+      "ami-candidate",
+    ]);
+  });
+
+  it("does not restore a cross-region revisionless alias after regionless retirement", async () => {
+    const storage = new MemoryStorage();
+    const portableKey = "image:aws:promoted:linux:x86_64:ubuntu26.04";
+    const regionalKey = `${portableKey}:eu-west-1`;
+    const priorCatalogKey = "image:aws:catalog:linux:x86_64:ubuntu26.04:us-east-2:ami-prior";
+    const prior = {
+      id: "ami-prior",
+      name: "prior",
+      state: "available" as const,
+      provider: "aws" as const,
+      target: "linux" as const,
+      os: "ubuntu:26.04",
+      region: "us-east-2",
+      architecture: "x86_64",
+      promotedAt: "2026-09-01T00:00:00Z",
+    };
+    storage.seed(portableKey, prior);
+    storage.seed(priorCatalogKey, {
+      ...prior,
+      promotedAt: "2026-09-02T00:00:00Z",
+      revision: "revision-catalog",
+    });
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => ({
+      id: imageID,
+      name: imageID,
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    }));
+    const promote = async (imageID: string, body: Record<string, unknown>) => {
+      const url = new URL(
+        `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1`,
+      );
+      return provider.promoteImage(
+        imageID,
+        undefined,
+        new Request(url, { method: "POST", body: JSON.stringify(body) }),
+        url,
+      );
+    };
+
+    const published = (await promote("ami-candidate", {
+      expectedCurrent: { state: "capture" },
+    })) as {
+      image: { id: string; revision: string };
+      previous: Record<string, unknown>;
+    };
+    await expect(provider.retirePromotedImage(prior.id)).resolves.toBe(1);
+    const rollback = await promote(published.image.id, {
+      expectedCurrent: {
+        state: "present",
+        imageId: published.image.id,
+        revision: published.image.revision,
+      },
+      restorePrevious: published.previous,
+      retireExpectedCatalog: true,
+    });
+
+    expect(rollback).toMatchObject({ image: { id: "none", state: "absent" } });
+    expect(storage.value(portableKey)).toBeUndefined();
+    expect(storage.value(regionalKey)).toBeUndefined();
+    expect(storage.value(priorCatalogKey)).toBeUndefined();
+  });
+
+  it("does not restore a revision retired by an overlapping rollback", async () => {
+    const storage = new MemoryStorage();
+    const key = "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1";
+    const catalogPrefix = "image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:";
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => ({
+      id: imageID,
+      name: imageID,
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    }));
+    const promote = async (imageID: string, body: Record<string, unknown>, runtime = "") => {
+      const url = new URL(
+        `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1${runtime ? `&runtime=node%3D${runtime}` : ""}`,
+      );
+      return provider.promoteImage(
+        imageID,
+        undefined,
+        new Request(url, { method: "POST", body: JSON.stringify(body) }),
+        url,
+      );
+    };
+
+    const first = (await promote("ami-first", { expectedCurrent: { state: "capture" } }, "24")) as {
+      image: { id: string; revision: string };
+      previous: Record<string, unknown>;
+    };
+    const second = (await promote("ami-second", {
+      expectedCurrent: { state: "capture" },
+    })) as typeof first;
+
+    const staleFirstRollback = await promote(first.image.id, {
+      expectedCurrent: {
+        state: "present",
+        imageId: first.image.id,
+        revision: first.image.revision,
+      },
+      restorePrevious: first.previous,
+      retireExpectedCatalog: true,
+    });
+    expect(staleFirstRollback).toBeInstanceOf(Response);
+    expect((staleFirstRollback as Response).status).toBe(409);
+    expect(storage.value(`${catalogPrefix}${first.image.id}`)).toBeUndefined();
+
+    const secondRollback = await promote(second.image.id, {
+      expectedCurrent: {
+        state: "present",
+        imageId: second.image.id,
+        revision: second.image.revision,
+      },
+      restorePrevious: second.previous,
+      retireExpectedCatalog: true,
+    });
+
+    expect(secondRollback).toMatchObject({ image: { id: "none", state: "absent" } });
+    expect(storage.value(key)).toBeUndefined();
+    expect(storage.value(`${catalogPrefix}${first.image.id}`)).toBeUndefined();
+    expect(storage.value(`${catalogPrefix}${second.image.id}`)).toBeUndefined();
+    await expect(
+      provider.prepareLeaseConfig(
+        leaseConfig({
+          provider: "aws",
+          sshPublicKey: "ssh-ed25519 test",
+          imageRequirements: { runtimes: { node: "24" } },
+        }),
+      ),
+    ).rejects.toThrow("no promoted AWS linux image satisfies the requested image capabilities");
+  });
+
+  it("does not restore a failed revision after the same image is republished", async () => {
+    const storage = new MemoryStorage();
+    const key = "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1";
+    const catalogKey = "image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-candidate";
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => ({
+      id: imageID,
+      name: imageID,
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    }));
+    const promote = async (body: Record<string, unknown>) => {
+      const url = new URL(
+        "https://crabbox.test/v1/images/ami-candidate/promote?target=linux&region=eu-west-1",
+      );
+      return provider.promoteImage(
+        "ami-candidate",
+        undefined,
+        new Request(url, { method: "POST", body: JSON.stringify(body) }),
+        url,
+      );
+    };
+
+    const first = (await promote({ expectedCurrent: { state: "capture" } })) as {
+      image: { id: string; revision: string };
+      previous: Record<string, unknown>;
+    };
+    const second = (await promote({ expectedCurrent: { state: "capture" } })) as typeof first;
+    const staleFirstRollback = await promote({
+      expectedCurrent: {
+        state: "present",
+        imageId: first.image.id,
+        revision: first.image.revision,
+      },
+      restorePrevious: first.previous,
+      retireExpectedCatalog: true,
+    });
+
+    expect(staleFirstRollback).toBeInstanceOf(Response);
+    expect((staleFirstRollback as Response).status).toBe(409);
+    expect(storage.value(catalogKey)).toEqual(
+      expect.objectContaining({ id: second.image.id, revision: second.image.revision }),
+    );
+
+    const secondRollback = await promote({
+      expectedCurrent: {
+        state: "present",
+        imageId: second.image.id,
+        revision: second.image.revision,
+      },
+      restorePrevious: second.previous,
+      retireExpectedCatalog: true,
+    });
+
+    expect(secondRollback).toMatchObject({ image: { id: "none", state: "absent" } });
+    expect(storage.value(key)).toBeUndefined();
+    expect(storage.value(catalogKey)).toBeUndefined();
+  });
+
+  it.each(["promotion retirement", "provider deletion"] as const)(
+    "does not restore a saved revision after explicit AWS %s",
+    async (removal) => {
+      const storage = new MemoryStorage();
+      const key = "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1";
+      const catalogPrefix = "image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:";
+      const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+      vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => ({
+        id: imageID,
+        name: imageID,
+        state: "available",
+        provider: "aws",
+        region: "eu-west-1",
+        architecture: "x86_64",
+      }));
+      const promote = async (imageID: string, body: Record<string, unknown>) => {
+        const url = new URL(
+          `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1`,
+        );
+        return provider.promoteImage(
+          imageID,
+          undefined,
+          new Request(url, { method: "POST", body: JSON.stringify(body) }),
+          url,
+        );
+      };
+      const first = (await promote("ami-first", {
+        expectedCurrent: { state: "capture" },
+      })) as {
+        image: { id: string; revision: string };
+        previous: Record<string, unknown>;
+      };
+      const second = (await promote("ami-second", {
+        expectedCurrent: { state: "capture" },
+      })) as typeof first;
+
+      let removalProved = false;
+      if (removal === "promotion retirement") {
+        removalProved = (await provider.retirePromotedImage(first.image.id, "eu-west-1")) > 0;
+      } else {
+        const providerDelete = vi.fn<(imageID: string, snapshotIDs?: string[]) => Promise<void>>(
+          async () => {},
+        );
+        (
+          provider as unknown as {
+            clientValue: {
+              getImage: (imageID: string) => Promise<ProviderImage>;
+              deleteImage: typeof providerDelete;
+            };
+          }
+        ).clientValue = {
+          getImage: async (imageID) => ({
+            id: imageID,
+            name: imageID,
+            state: "available",
+            provider: "aws",
+            region: "eu-west-1",
+            architecture: "x86_64",
+            snapshots: [],
+          }),
+          deleteImage: providerDelete,
+        };
+        await provider.deleteImage(first.image.id);
+        removalProved =
+          providerDelete.mock.calls.length === 1 &&
+          providerDelete.mock.calls[0]?.[0] === first.image.id &&
+          providerDelete.mock.calls[0]?.[1]?.length === 0;
+      }
+      expect(removalProved).toBe(true);
+
+      const rollback = await promote(second.image.id, {
+        expectedCurrent: {
+          state: "present",
+          imageId: second.image.id,
+          revision: second.image.revision,
+        },
+        restorePrevious: second.previous,
+        retireExpectedCatalog: true,
+      });
+
+      expect(rollback).toMatchObject({ image: { id: "none", state: "absent" } });
+      expect(storage.value(key)).toBeUndefined();
+      expect(storage.value(`${catalogPrefix}${first.image.id}`)).toBeUndefined();
+      expect(storage.value(`${catalogPrefix}${second.image.id}`)).toBeUndefined();
+    },
+  );
+
+  it("upgrades revisionless AWS defaults through capture, restore, and stale rejection", async () => {
+    const storage = new MemoryStorage();
+    const key = "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1";
+    const catalogKey = "image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-previous";
+    const previous = {
+      id: "ami-previous",
+      name: "previous",
+      state: "available" as const,
+      provider: "aws" as const,
+      target: "linux" as const,
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-09-01T00:00:00Z",
+    };
+    storage.seed(key, previous);
+    storage.seed(catalogKey, previous);
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => ({
+      id: imageID,
+      name: imageID,
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    }));
+    const promote = async (
+      imageID: string,
+      expectedCurrent: Record<string, string>,
+      retireExpectedCatalog = false,
+    ) => {
+      const url = new URL(
+        `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1`,
+      );
+      return provider.promoteImage(
+        imageID,
+        undefined,
+        new Request(url, {
+          method: "POST",
+          body: JSON.stringify({ expectedCurrent, retireExpectedCatalog }),
+        }),
+        url,
+      );
+    };
+
+    const published = await promote("ami-candidate", { state: "capture" });
+    expect(published).toMatchObject({
+      previous: {
+        state: "present",
+        imageId: "ami-previous",
+        revision: "ami-previous@2026-09-01T00:00:00Z",
+      },
+    });
+    const candidateRevision = (published as { image: { revision: string } }).image.revision;
+    const restored = await promote(
+      "ami-previous",
+      {
+        state: "present",
+        imageId: "ami-candidate",
+        revision: candidateRevision,
+      },
+      true,
+    );
+    expect(restored).toMatchObject({ image: { id: "ami-previous" } });
+    const restoredRevision = (restored as { image: { revision: string } }).image.revision;
+    expect(restoredRevision).not.toBe("ami-previous@2026-09-01T00:00:00Z");
+
+    const stale = await promote(
+      "ami-candidate",
+      {
+        state: "present",
+        imageId: "ami-previous",
+        revision: "ami-previous@2026-09-01T00:00:00Z",
+      },
+      true,
+    );
+    expect(stale).toBeInstanceOf(Response);
+    expect((stale as Response).status).toBe(409);
+    expect(storage.value(key)).toEqual(
+      expect.objectContaining({ id: "ami-previous", revision: restoredRevision }),
+    );
+    expect(storage.value(catalogKey)).toEqual(
+      expect.objectContaining({ id: "ami-previous", revision: restoredRevision }),
+    );
+  });
+
+  it("does not restore a deleted receipt-only revisionless AWS default", async () => {
+    const storage = new MemoryStorage();
+    const imageID = "ami-legacy";
+    const key = "image:aws:promoted";
+    const osKey = "image:aws:promoted:linux:x86_64:ubuntu24.04";
+    const regionalKey = `${osKey}:eu-west-1`;
+    const legacy = {
+      id: imageID,
+      name: "legacy",
+      state: "available" as const,
+      provider: "aws" as const,
+      target: "linux" as const,
+      os: "ubuntu:24.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-09-01T00:00:00Z",
+    };
+    storage.seed(key, legacy);
+    storage.seed(`image:aws:created:${imageID}`, legacy);
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const getImage = vi.fn<(requestedImageID: string) => Promise<ProviderImage>>(
+      async (requestedImageID) => ({
+        ...legacy,
+        id: requestedImageID,
+        name: requestedImageID,
+        snapshots: [],
+      }),
+    );
+    const deleteImage = vi.fn<() => Promise<void>>(async () => undefined);
+    (
+      provider as unknown as {
+        clientValue: { getImage: typeof getImage; deleteImage: typeof deleteImage };
+      }
+    ).clientValue = { getImage, deleteImage };
+    const promote = async (imageIDToPromote: string, body: Record<string, unknown>) => {
+      const url = new URL(
+        `https://crabbox.test/v1/images/${imageIDToPromote}/promote?target=linux&region=eu-west-1`,
+      );
+      return provider.promoteImage(
+        imageIDToPromote,
+        undefined,
+        new Request(url, { method: "POST", body: JSON.stringify(body) }),
+        url,
+      );
+    };
+
+    const published = (await promote("ami-candidate", {
+      expectedCurrent: { state: "capture" },
+    })) as {
+      image: { id: string; revision: string };
+      previous: Record<string, unknown>;
+    };
+    await provider.deleteImage(imageID);
+    const rollback = await promote(published.image.id, {
+      expectedCurrent: {
+        state: "present",
+        imageId: published.image.id,
+        revision: published.image.revision,
+      },
+      restorePrevious: published.previous,
+      retireExpectedCatalog: true,
+    });
+
+    expect(deleteImage).toHaveBeenCalledOnce();
+    expect(rollback).toMatchObject({ image: { id: "none", state: "absent" } });
+    expect(storage.value(key)).toBeUndefined();
+    expect(storage.value(osKey)).toBeUndefined();
+    expect(storage.value(regionalKey)).toBeUndefined();
+
+    const republished = (await promote(imageID, {
+      expectedCurrent: { state: "capture" },
+    })) as typeof published;
+    const next = (await promote("ami-next", {
+      expectedCurrent: { state: "capture" },
+    })) as typeof published;
+    const restoredRepublished = await promote(next.image.id, {
+      expectedCurrent: {
+        state: "present",
+        imageId: next.image.id,
+        revision: next.image.revision,
+      },
+      restorePrevious: next.previous,
+      retireExpectedCatalog: true,
+    });
+
+    expect(restoredRepublished).toMatchObject({
+      image: { id: republished.image.id, revision: republished.image.revision },
+    });
+  });
+
+  it("CAS-clears a newly promoted AWS default when capture found no previous image", async () => {
+    const storage = new MemoryStorage();
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-candidate",
+      name: "candidate",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-candidate/promote?target=windows&region=eu-west-1",
+    );
+    const published = await provider.promoteImage(
+      "ami-candidate",
+      undefined,
+      new Request(url, {
+        method: "POST",
+        body: JSON.stringify({ expectedCurrent: { state: "capture" } }),
+      }),
+      url,
+    );
+    const revision = (published as { image: { revision: string } }).image.revision;
+    const cleared = await provider.promoteImage(
+      "ami-candidate",
+      undefined,
+      new Request(url, {
+        method: "POST",
+        body: JSON.stringify({
+          clearDefault: true,
+          expectedCurrent: { state: "present", imageId: "ami-candidate", revision },
+          retireExpectedCatalog: true,
+        }),
+      }),
+      url,
+    );
+
+    expect(cleared).toMatchObject({ previous: { state: "present", imageId: "ami-candidate" } });
+    expect(storage.value("image:aws:promoted:windows:x86_64:eu-west-1")).toBeUndefined();
+    expect(
+      storage.value("image:aws:catalog:windows:x86_64:eu-west-1:ami-candidate"),
+    ).toBeUndefined();
+  });
+
+  it("rejects stale AWS image CAS before enabling Fast Snapshot Restore", async () => {
+    const storage = new MemoryStorage();
+    storage.seed("image:aws:promoted:windows:x86_64:eu-west-1", {
+      id: "ami-current",
+      name: "current",
+      state: "available",
+      provider: "aws",
+      target: "windows",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-09-03T00:00:00Z",
+      revision: "revision-current",
+    });
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-candidate",
+      name: "candidate",
+      state: "available",
+      provider: "aws",
+      target: "windows",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      snapshots: ["snap-root"],
+    });
+    const enable = vi.spyOn(provider, "enableFastSnapshotRestore").mockResolvedValue([]);
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-candidate/promote?target=windows&region=eu-west-1&fastSnapshotRestore=true&fsrAz=eu-west-1a",
+    );
+    const response = await provider.promoteImage(
+      "ami-candidate",
+      undefined,
+      new Request(url, {
+        method: "POST",
+        body: JSON.stringify({
+          expectedCurrent: {
+            state: "present",
+            imageId: "ami-stale",
+            revision: "revision-stale",
+          },
+        }),
+      }),
+      url,
+    );
+
+    expect(response).toBeInstanceOf(Response);
+    expect((response as Response).status).toBe(409);
+    expect(enable).not.toHaveBeenCalled();
   });
 
   it("selects the newest promoted AWS image satisfying every requirement", async () => {

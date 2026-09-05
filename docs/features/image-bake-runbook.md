@@ -208,10 +208,11 @@ portable selector such as `ubuntu:26.04`.
 
 ## Roll back
 
-Rollback is just another promotion to a known-good AMI:
+For transactional publisher runs, restore the exact captured aliases from the
+promotion receipt:
 
 ```bash
-crabbox image promote ami-previous-good --json
+crabbox image promote ami-failed --restore-receipt promotion.json --json
 ```
 
 Run the normal brokered smoke again. Do not delete the failed AMI immediately;
@@ -295,8 +296,14 @@ gh workflow run devtools-image-publish.yml \
 
 Use `macos_host=allocate` only when no suitable EC2 Mac Dedicated Host is
 available. The workflow uploads its complete mint logs and macOS lifecycle
-evidence as a 30-day Actions artifact. A failed candidate or promoted-image
-smoke fails the workflow and leaves the previous promoted image selected.
+evidence as a 30-day Actions artifact. Candidate failure leaves the default
+unchanged. Publication is serialized per target; promotion atomically captures
+the current scoped default, and promoted-image smoke failure attempts a
+compare-and-swap restore. If another operator promotes a newer image first,
+rollback fails visibly rather than overwriting it. Publisher rollback explicitly
+authorizes retiring the exact failed catalog revision so capability-aware leases
+cannot select it; generic stale compare-and-swap requests leave the catalog
+unchanged.
 
 ## Developer-image wrappers
 

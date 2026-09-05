@@ -84,6 +84,8 @@ quota_log=""
 allocate_log=""
 image_create_log=""
 image_promote_log=""
+image_rollback_log=""
+rollback_pending=0
 checkpoint_create_log=""
 checkpoint_fork_log=""
 checkpoint_delete_log=""
@@ -136,6 +138,31 @@ run_tee_combined() {
     set -e
   fi
   return "$status"
+}
+
+rollback_promoted_image() {
+  local current_id previous_state rollback_image
+  if ! current_id="$(jq -er '.image.id' "$image_promote_log" 2>/dev/null)" ||
+    ! previous_state="$(jq -er '.previous.state' "$image_promote_log" 2>/dev/null)"; then
+    printf 'post-promotion failure; transactional promotion receipt is unavailable for rollback\n' >&2
+    return 1
+  fi
+  if [[ "$previous_state" == "present" ]]; then
+    rollback_image="$(jq -er '.previous.imageId' "$image_promote_log")"
+  elif [[ "$previous_state" == "absent" ]]; then
+    rollback_image="none"
+  else
+    printf 'promoted-image smoke failed; promotion receipt has invalid previous state\n' >&2
+    return 1
+  fi
+  image_rollback_log="$evidence_dir/image-rollback.json"
+  if ! run_tee_combined "$image_rollback_log" "$CRABBOX_BIN" image promote "$current_id" \
+    --target macos --region "$region" --type "$instance_type" --json \
+    --restore-receipt "$image_promote_log"; then
+    printf 'promoted-image smoke failed; CAS rollback failed or was rejected; a newer default was not overwritten\n' >&2
+    return 1
+  fi
+  printf 'promoted-image smoke failed; restored previous default image=%s\n' "$rollback_image" >&2
 }
 
 preflight_blocker_from_stderr() {
@@ -277,7 +304,7 @@ write_summary() {
   local phase="$2"
   local provider_identity_log_path aws_policy_log_path mac_host_policy_log_path macos_image_policy_log_path offerings_log_path hosts_log_path
   local region_preflight_log_path
-  local dry_log_path allocate_log_path image_create_log_path image_promote_log_path
+  local dry_log_path allocate_log_path image_create_log_path image_promote_log_path image_rollback_log_path
   local checkpoint_create_log_path checkpoint_fork_log_path checkpoint_delete_log_path
   local quota_log_path
   local source_prep_log_path
@@ -301,6 +328,7 @@ write_summary() {
   allocate_log_path="$(existing_file_or_empty "$allocate_log")"
   image_create_log_path="$(existing_file_or_empty "$image_create_log")"
   image_promote_log_path="$(existing_file_or_empty "$image_promote_log")"
+  image_rollback_log_path="$(existing_file_or_empty "$image_rollback_log")"
   checkpoint_create_log_path="$(existing_file_or_empty "$checkpoint_create_log")"
   checkpoint_fork_log_path="$(existing_file_or_empty "$checkpoint_fork_log")"
   checkpoint_delete_log_path="$(existing_file_or_empty "$checkpoint_delete_log")"
@@ -363,6 +391,7 @@ write_summary() {
     --arg allocateLog "$allocate_log_path" \
     --arg imageCreateLog "$image_create_log_path" \
     --arg imagePromoteLog "$image_promote_log_path" \
+    --arg imageRollbackLog "$image_rollback_log_path" \
     --arg checkpointCreateLog "$checkpoint_create_log_path" \
     --arg checkpointForkLog "$checkpoint_fork_log_path" \
     --arg checkpointDeleteLog "$checkpoint_delete_log_path" \
@@ -444,6 +473,7 @@ write_summary() {
         hostAllocate: maybe_path($allocateLog),
         imageCreate: maybe_path($imageCreateLog),
         imagePromote: maybe_path($imagePromoteLog),
+        imageRollback: maybe_path($imageRollbackLog),
         checkpointCreate: maybe_path($checkpointCreateLog),
         checkpointFork: maybe_path($checkpointForkLog),
         checkpointDelete: maybe_path($checkpointDeleteLog),
@@ -503,6 +533,14 @@ summary_path() {
 
 on_exit() {
   local status=$?
+  if [[ "$status" -ne 0 && "$rollback_pending" == "1" ]]; then
+    rollback_pending=0
+    summary_phase="image-rollback"
+    blocker_message="post-promotion failure; previous default restore attempted"
+    if ! rollback_promoted_image; then
+      blocker_message="post-promotion failure and CAS rollback failed or was rejected"
+    fi
+  fi
   if [[ "$status" -ne 0 ]]; then
     cleanup || true
   fi
@@ -515,6 +553,8 @@ on_exit() {
   exit "$status"
 }
 trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 release_host_if_requested() {
   local label="$1"
@@ -1193,18 +1233,23 @@ if [[ "$promote" != "1" ]]; then
   exit 0
 fi
 
-summary_phase="image-promote"
-image_promote_log="$evidence_dir/image-promote.json"
-run_tee "$image_promote_log" "$CRABBOX_BIN" image promote "$ami_id" --target macos --region "$region" --json
 stop_lease "$candidate_lease"
 candidate_lease=""
 wait_for_host_available "$allocated_host" candidate
+
+summary_phase="image-promote"
+image_promote_log="$evidence_dir/image-promote.json"
+rollback_pending=1
+run_tee "$image_promote_log" "$CRABBOX_BIN" image promote "$ami_id" \
+  --target macos --region "$region" --type "$instance_type" --json --expected-current-image capture
+jq -e '.image.id and .image.revision and (.previous.state == "present" or .previous.state == "absent") and (.previous.aliases | length > 0)' "$image_promote_log" >/dev/null
 
 write_summary running promoted-warmup
 promoted_lease="$(warmup_macos promoted)"
 promoted_lease_id="$promoted_lease"
 write_summary running promoted-smoke
 smoke_macos_lease "$promoted_lease" promoted
+rollback_pending=0
 printf 'promoted macOS image lifecycle passed: %s\n' "$ami_id"
 
 if [[ "$release_host" == "1" ]]; then

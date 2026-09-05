@@ -2266,6 +2266,21 @@ func TestImagePromoteCatalogOnlyValidation(t *testing.T) {
 			want: "--catalog-only is AWS-only",
 		},
 		{
+			name: "azure rejects restore receipt",
+			args: []string{"ami-variant", "--provider", "azure", "--restore-receipt", "promotion.json"},
+			want: "--restore-receipt is AWS-only",
+		},
+		{
+			name: "catalog only rejects expected current",
+			args: []string{"ami-variant", "--catalog-only", "--variant-runtime", "node=24", "--expected-current-image", "capture"},
+			want: "--catalog-only cannot be combined with transactional image promotion",
+		},
+		{
+			name: "catalog only rejects rollback retirement",
+			args: []string{"ami-variant", "--catalog-only", "--variant-runtime", "node=24", "--expected-current-image", "ami-current", "--expected-current-revision", "revision-current", "--retire-expected-catalog"},
+			want: "--catalog-only cannot be combined with transactional image promotion",
+		},
+		{
 			name: "conflicting repeated selector",
 			args: []string{"ami-variant", "--catalog-only", "--variant-sdk", "toolkit=2.0", "--variant-sdk", "toolkit=3.0"},
 			want: "--variant-sdk declares conflicting versions for toolkit",
@@ -2520,6 +2535,107 @@ func TestImagePromoteOrdinaryOutputCompatibility(t *testing.T) {
 	}
 	if _, ok := decoded["variantSelectors"]; ok {
 		t.Fatalf("ordinary JSON gained variantSelectors: %s", jsonOut.String())
+	}
+}
+
+func TestImagePromoteCompareAndSwapContract(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	var requests []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/promote-cas") {
+			t.Fatalf("path=%q", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, body)
+		if body["restorePrevious"] != nil {
+			_, _ = w.Write([]byte(`{"image":{"id":"ami-old","revision":"rev-old"},"previous":{"state":"present","imageId":"ami-new","revision":"rev-new"}}`))
+			return
+		}
+		if body["clearDefault"] == true {
+			_, _ = w.Write([]byte(`{"previous":{"state":"present","imageId":"ami-new","revision":"rev-new"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"image":{"id":"ami-new","revision":"rev-new"},"previous":{"state":"absent"}}`))
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "admin-token")
+
+	var out bytes.Buffer
+	app := App{Stdout: &out, Stderr: io.Discard}
+	if err := app.imagePromote(context.Background(), []string{"ami-new", "--json", "--target", "windows", "--expected-current-image", "capture"}); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := app.imagePromote(context.Background(), []string{"none", "--json", "--target", "windows", "--expected-current-image", "ami-new", "--expected-current-revision", "rev-new", "--retire-expected-catalog"}); err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := filepath.Join(t.TempDir(), "promotion.json")
+	if err := os.WriteFile(receiptPath, []byte(`{
+		"image":{"id":"ami-new","revision":"rev-new"},
+		"previous":{"state":"present","imageId":"ami-old","revision":"rev-old","aliases":[
+			{"alias":"regional","state":"present","image":{"id":"ami-old","name":"old","state":"available","provider":"aws","revision":"rev-old"}}
+		]}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := app.imagePromote(context.Background(), []string{"ami-new", "--json", "--target", "windows", "--restore-receipt", receiptPath}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := requests[0]["expectedCurrent"]; !reflect.DeepEqual(got, map[string]any{"state": "capture"}) {
+		t.Fatalf("capture body=%#v", requests[0])
+	}
+	if _, ok := requests[0]["retireExpectedCatalog"]; ok {
+		t.Fatalf("capture unexpectedly authorized retirement: %#v", requests[0])
+	}
+	if got := requests[1]["expectedCurrent"]; !reflect.DeepEqual(got, map[string]any{"state": "present", "imageId": "ami-new", "revision": "rev-new"}) || requests[1]["clearDefault"] != true || requests[1]["retireExpectedCatalog"] != true {
+		t.Fatalf("clear body=%#v", requests[1])
+	}
+	if got := requests[2]["expectedCurrent"]; !reflect.DeepEqual(got, map[string]any{"state": "present", "imageId": "ami-new", "revision": "rev-new"}) || requests[2]["retireExpectedCatalog"] != true {
+		t.Fatalf("restore body=%#v", requests[2])
+	}
+	restore, ok := requests[2]["restorePrevious"].(map[string]any)
+	if !ok || restore["imageId"] != "ami-old" {
+		t.Fatalf("restore previous=%#v", requests[2]["restorePrevious"])
+	}
+}
+
+func TestPromoteImageCASFailsClosedAgainstOldCoordinator(t *testing.T) {
+	var paths []string
+	mutated := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if strings.HasSuffix(r.URL.Path, "/promote") {
+			mutated = true
+			_, _ = w.Write([]byte(`{"image":{"id":"ami-new"}}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	_, err := client.PromoteImageCAS(
+		context.Background(),
+		"ami-new",
+		CoordinatorImageDefaultState{State: "capture"},
+		false,
+		false,
+		nil,
+		CoordinatorImageRef{Provider: "aws", Target: "windows", Region: "eu-west-1"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "upgrade the coordinator") {
+		t.Fatalf("error=%v", err)
+	}
+	if mutated || len(paths) != 1 || !strings.HasSuffix(paths[0], "/promote-cas") {
+		t.Fatalf("mutated=%v paths=%v", mutated, paths)
 	}
 }
 
