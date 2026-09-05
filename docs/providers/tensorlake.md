@@ -49,6 +49,13 @@ Tensorlake images, commands run as `tl-user`, which cannot create `/workspace`;
 either pin `tl-crabbox` or set `tensorlake.workdir` to a user-writable path such
 as `/home/tl-user/crabbox`.
 
+Ordinary nonzero native CLI exits remain command exits. Transport, cancellation,
+deadline, and output errors instead fail the run with exit code 1 and the matching
+timing status, even when the local process also reports a nonzero exit code.
+An already observed command exit is not replaced by later cancellation. Native
+CLI diagnostic exits cannot be distinguished from remote workload exits without
+stronger evidence from the native protocol.
+
 ## Auth
 
 ```sh

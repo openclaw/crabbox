@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -96,10 +97,9 @@ func (c *tensorlakeCLI) runQuiet(ctx context.Context, sub []string, args []strin
 }
 
 // runStreamed runs a tensorlake CLI subcommand and streams output to the
-// provided writers. Non-zero exit codes are reported via the int return,
-// not as an error — callers must propagate them as the wrapped command's
-// exit. Errors are reserved for transport-level failures (binary missing,
-// I/O errors).
+// provided writers. Ordinary native exits are reported via the int return.
+// Other returned errors retain transport/cancellation/I/O evidence regardless
+// of the numeric result; that result is a command exit only when err is nil.
 func (c *tensorlakeCLI) runStreamed(ctx context.Context, sub []string, args []string, stdout, stderr io.Writer) (int, error) {
 	full := append([]string{}, c.globalArgs()...)
 	full = append(full, sub...)
@@ -111,7 +111,10 @@ func (c *tensorlakeCLI) runStreamed(ctx context.Context, sub []string, args []st
 		Stdout: stdout,
 		Stderr: stderr,
 	})
-	if err != nil && res.ExitCode == 0 {
+	if err != nil {
+		if processErr, ok := err.(*exec.ExitError); ok && processErr.ProcessState != nil && processErr.ExitCode() > 0 && processErr.ExitCode() == res.ExitCode {
+			return res.ExitCode, nil
+		}
 		return res.ExitCode, fmt.Errorf("tensorlake %s: %w", strings.Join(sub, " "), err)
 	}
 	return res.ExitCode, nil
