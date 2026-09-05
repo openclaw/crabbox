@@ -33,11 +33,13 @@ type fakeSuperserveClient struct {
 	execResults []execResult
 	execErr     error
 	activateErr error
+	onActivate  func()
 	onExec      func(count int, req execRequest)
 	probes      int
 	getErr      error
 	deleteErr   error
 	updateErr   error
+	updateID    string
 }
 
 type fakeSuperserveUpload struct {
@@ -92,6 +94,9 @@ func (f *fakeSuperserveClient) ActivateSandbox(context.Context, string) (sandbox
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.activated = append(f.activated, f.sandbox.ID)
+	if f.onActivate != nil {
+		f.onActivate()
+	}
 	if f.activateErr != nil {
 		return sandboxAccess{}, f.activateErr
 	}
@@ -106,7 +111,11 @@ func (f *fakeSuperserveClient) UpdateSandboxMetadata(_ context.Context, _ string
 	}
 	f.updates = append(f.updates, cloneMap(metadata))
 	f.sandbox.Metadata = cloneMap(metadata)
-	return cloneSandbox(f.sandbox), nil
+	result := cloneSandbox(f.sandbox)
+	if f.updateID != "" {
+		result.ID = f.updateID
+	}
+	return result, nil
 }
 
 func (f *fakeSuperserveClient) PauseSandbox(context.Context, string) (superserveSandbox, error) {
@@ -120,12 +129,89 @@ func (f *fakeSuperserveClient) ResumeSandbox(context.Context, string) (sandboxAc
 func (f *fakeSuperserveClient) DeleteSandbox(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.deleted = append(f.deleted, id)
 	if f.deleteErr != nil {
 		return f.deleteErr
 	}
-	f.deleted = append(f.deleted, id)
 	return nil
 }
+
+func TestCreateMetadataFailureKeepsOriginalRollbackIdentity(t *testing.T) {
+	for _, mismatch := range []bool{false, true} {
+		t.Run(map[bool]string{false: "update error", true: "changed identity"}[mismatch], func(t *testing.T) {
+			fake := newFakeSuperserveClient()
+			originalID := fake.sandbox.ID
+			primary := errors.New("synthetic metadata failure")
+			if mismatch {
+				fake.updateID = "sb_replacement"
+			} else {
+				fake.updateErr = primary
+			}
+			b := newSuperserveTestBackend(t, fake)
+			result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, Command: []string{"true"}})
+			if err == nil || (!mismatch && !errors.Is(err, primary)) {
+				t.Fatalf("metadata error lost: %v", err)
+			}
+			if len(fake.deleted) != 1 || fake.deleted[0] != originalID {
+				t.Fatalf("rollback targets=%v want original %s", fake.deleted, originalID)
+			}
+			if result.Session != nil || len(fake.activated) != 0 {
+				t.Fatalf("failed acquisition admitted: session=%#v activations=%v", result.Session, fake.activated)
+			}
+			leaseID := leasePrefix + originalID
+			if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+				t.Fatalf("failed acquisition published claim: exists=%v err=%v", exists, err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			unlock, err := lockSuperserveLeaseOperation(ctx, leaseID)
+			if err != nil {
+				t.Fatalf("acquisition lock leaked: %v", err)
+			}
+			unlock()
+		})
+	}
+}
+
+func TestRunPreservesPrimaryFailureWhenTimingWriterFails(t *testing.T) {
+	for _, transport := range []bool{false, true} {
+		t.Run(map[bool]string{false: "command", true: "transport"}[transport], func(t *testing.T) {
+			fake := newFakeSuperserveClient()
+			fake.execResults = []execResult{{}, {ExitCode: 23}}
+			wantExit := 23
+			if transport {
+				wantExit = 1
+				fake.onExec = func(count int, _ execRequest) {
+					if count == 1 {
+						fake.execErr = context.Canceled
+					}
+				}
+			}
+			fake.deleteErr = errors.New("synthetic delete failure")
+			writerErr := errors.New("synthetic timing writer failure")
+			b := newSuperserveTestBackend(t, fake)
+			b.rt.Stderr = superserveLifecycleFailingWriter{writerErr}
+			result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, Command: []string{"false"}, TimingJSON: true})
+			var exitErr ExitError
+			if !errors.As(err, &exitErr) || exitErr.Code != wantExit || result.ExitCode != wantExit {
+				t.Fatalf("primary exit lost: result=%#v err=%v", result, err)
+			}
+			if !errors.Is(err, fake.deleteErr) || !errors.Is(err, writerErr) {
+				t.Fatalf("secondary errors lost: %v", err)
+			}
+			if transport && (!errors.Is(err, context.Canceled) || result.ErrorKind != core.RunErrorCanceled) {
+				t.Fatalf("cancellation cause lost: result=%#v err=%v", result, err)
+			}
+			if len(fake.deleted) != 1 || result.Session == nil || !result.Session.Kept {
+				t.Fatalf("cleanup/session=%v/%#v", fake.deleted, result.Session)
+			}
+		})
+	}
+}
+
+type superserveLifecycleFailingWriter struct{ err error }
+
+func (w superserveLifecycleFailingWriter) Write([]byte) (int, error) { return 0, w.err }
 
 func (f *fakeSuperserveClient) UploadFile(_ context.Context, access *sandboxAccess, remotePath string, content io.Reader) error {
 	f.mu.Lock()
@@ -966,4 +1052,160 @@ func TestRunLiteralExecutableSurvivesFinalShellTransport(t *testing.T) {
 	if !errors.As(err, &ee) || ee.ExitCode() != 42 || string(out) != "literal-executable" {
 		t.Fatalf("payload=%q output=%q error=%v, want executable/42", result.CommandText, out, err)
 	}
+}
+
+func TestCreateWithoutIdentityDoesNotInferCleanupAuthority(t *testing.T) {
+	fake := newFakeSuperserveClient()
+	fake.sandbox.ID = ""
+	b := newSuperserveTestBackend(t, fake)
+	result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, Command: []string{"true"}})
+	if err == nil || result.Session != nil || len(fake.deleted) != 0 || len(fake.updates) != 0 || len(fake.activated) != 0 {
+		t.Fatalf("unidentified acquisition continued: result=%#v err=%v deletes=%v updates=%v activation=%v", result, err, fake.deleted, fake.updates, fake.activated)
+	}
+}
+
+func TestRunReleasesOperationLockAfterResolutionFailure(t *testing.T) {
+	for _, mismatch := range []bool{false, true} {
+		t.Run(map[bool]string{false: "ownership lookup", true: "repository mismatch"}[mismatch], func(t *testing.T) {
+			fake := newFakeSuperserveClient()
+			b := newSuperserveTestBackend(t, fake)
+			leaseID, scope := createSuperserveClaim(t, b, fake, "fixture")
+			fake.sandbox.Metadata = ownedMetadata(fake.baseURL, scope, leaseID, "fixture")
+			repo := "/repo"
+			if mismatch {
+				repo = t.TempDir()
+			} else {
+				fake.getErr = errors.New("synthetic lookup failure")
+			}
+			result, err := b.Run(t.Context(), RunRequest{ID: leaseID, Repo: Repo{Root: repo}, NoSync: true, Command: []string{"true"}})
+			if err == nil || result.Session != nil || len(fake.deleted) != 0 || len(fake.activated) != 0 {
+				t.Fatalf("failed resolution admitted: result=%#v err=%v", result, err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			unlock, err := lockSuperserveLeaseOperation(ctx, leaseID)
+			if err != nil {
+				t.Fatalf("resolution lock leaked: %v", err)
+			}
+			unlock()
+		})
+	}
+}
+
+func TestRunFailedReuseAdmissionDoesNotRefreshActivity(t *testing.T) {
+	fake := newFakeSuperserveClient()
+	b := newSuperserveTestBackend(t, fake)
+	leaseID, scope := createSuperserveClaim(t, b, fake, "fixture")
+	fake.sandbox.Metadata = ownedMetadata(fake.baseURL, scope, leaseID, "fixture")
+	stale := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	fake.onActivate = func() {
+		claim, err := readLeaseClaim(leaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		claim.LastUsedAt = stale
+		writeClaimFixture(t, claim)
+	}
+	fake.activateErr = errors.New("synthetic unavailable sandbox")
+	var stderr bytes.Buffer
+	b.rt.Stderr = &stderr
+	result, err := b.Run(t.Context(), RunRequest{ID: leaseID, Repo: Repo{Root: "/repo"}, NoSync: true, Command: []string{"true"}, TimingJSON: true})
+	if !errors.Is(err, fake.activateErr) || result.Session == nil || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("admission failure lost recoverable session: result=%#v err=%v", result, err)
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil || claim.LastUsedAt != stale || len(fake.deleted) != 0 || len(fake.execs) != 0 || strings.Contains(stderr.String(), "rerun") {
+		t.Fatalf("failed admission performed run finalization: claim=%#v err=%v stderr=%q", claim, err, stderr.String())
+	}
+}
+
+func TestRunCommandPreparationFailureHonorsKeepOnFailure(t *testing.T) {
+	fake := newFakeSuperserveClient()
+	b := newSuperserveTestBackend(t, fake)
+	leaseID := leasePrefix + fake.sandbox.ID
+	stale := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	fake.onExec = func(_ int, _ execRequest) {
+		claim, err := readLeaseClaim(leaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		claim.LastUsedAt = stale
+		writeClaimFixture(t, claim)
+	}
+	result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: true})
+	if err == nil || result.Session == nil || !result.Session.Kept || len(fake.deleted) != 0 || len(fake.execs) != 1 {
+		t.Fatalf("command preparation failure did not retain: result=%#v err=%v", result, err)
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil || claim.LastUsedAt == stale {
+		t.Fatalf("retained activity not refreshed: claim=%#v err=%v", claim, err)
+	}
+}
+
+type superserveTimingGate struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *superserveTimingGate) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte(`"totalMs"`)) {
+		w.once.Do(func() { close(w.entered) })
+		select {
+		case <-w.release:
+		case <-time.After(5 * time.Second):
+			return 0, errors.New("synthetic timing gate deadline")
+		}
+	}
+	return len(p), nil
+}
+
+func TestRunHoldsOperationLockThroughFinalTiming(t *testing.T) {
+	fake := newFakeSuperserveClient()
+	b := newSuperserveTestBackend(t, fake)
+	gate := &superserveTimingGate{entered: make(chan struct{}), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(gate.release) }) }
+	defer release()
+	b.rt.Stderr = gate
+	repo := t.TempDir()
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: repo, Name: "fixture"}, NoSync: true, Command: []string{"true"}, TimingJSON: true})
+		done <- err
+	}()
+	select {
+	case <-gate.entered:
+	case err := <-done:
+		t.Fatalf("run ended before timing gate: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("run did not reach timing gate")
+	}
+	leaseID := leasePrefix + fake.sandbox.ID
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	unlock, err := lockSuperserveLeaseOperation(ctx, leaseID)
+	if err == nil {
+		unlock()
+		t.Fatal("operation lock released before final timing")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("run did not finish after timing release")
+	}
+	ctx2, cancel2 := context.WithTimeout(t.Context(), time.Second)
+	defer cancel2()
+	unlock, err = lockSuperserveLeaseOperation(ctx2, leaseID)
+	if err != nil {
+		t.Fatalf("finalized run leaked lock: %v", err)
+	}
+	unlock()
 }
