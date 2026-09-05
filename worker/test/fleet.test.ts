@@ -37482,71 +37482,268 @@ describe("fleet lease identity and idle", () => {
     ]);
   });
 
-  it("does not restore a cross-region revisionless alias after regionless retirement", async () => {
-    const storage = new MemoryStorage();
-    const portableKey = "image:aws:promoted:linux:x86_64:ubuntu26.04";
-    const regionalKey = `${portableKey}:eu-west-1`;
-    const priorCatalogKey = "image:aws:catalog:linux:x86_64:ubuntu26.04:us-east-2:ami-prior";
-    const prior = {
-      id: "ami-prior",
-      name: "prior",
-      state: "available" as const,
-      provider: "aws" as const,
-      target: "linux" as const,
-      os: "ubuntu:26.04",
-      region: "us-east-2",
-      architecture: "x86_64",
-      promotedAt: "2026-09-01T00:00:00Z",
-    };
-    storage.seed(portableKey, prior);
-    storage.seed(priorCatalogKey, {
-      ...prior,
-      promotedAt: "2026-09-02T00:00:00Z",
-      revision: "revision-catalog",
-    });
-    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
-    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => ({
-      id: imageID,
-      name: imageID,
-      state: "available",
-      provider: "aws",
-      region: "eu-west-1",
-      architecture: "x86_64",
-    }));
-    const promote = async (imageID: string, body: Record<string, unknown>) => {
-      const url = new URL(
-        `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1`,
-      );
-      return provider.promoteImage(
-        imageID,
-        undefined,
-        new Request(url, { method: "POST", body: JSON.stringify(body) }),
-        url,
-      );
-    };
+  it.each([
+    { region: "us-east-2", catalog: true, retirementRegion: undefined, restored: false },
+    { region: "eu-west-1", catalog: false, retirementRegion: undefined, restored: false },
+    { region: "us-east-2", catalog: false, retirementRegion: undefined, restored: false },
+    { region: undefined, catalog: false, retirementRegion: undefined, restored: false },
+    { region: "eu-west-1", catalog: false, retirementRegion: "eu-west-1", restored: false },
+    { region: undefined, catalog: false, retirementRegion: "eu-west-1", restored: false },
+    { region: "us-east-2", catalog: false, retirementRegion: "eu-west-1", restored: true },
+  ])(
+    "applies receipt-only retirement scope $region/$catalog/$retirementRegion",
+    async ({ region, catalog, retirementRegion, restored }) => {
+      const storage = new MemoryStorage();
+      const portableKey = "image:aws:promoted:linux:x86_64:ubuntu26.04";
+      const regionalKey = `${portableKey}:eu-west-1`;
+      const priorCatalogKey = "image:aws:catalog:linux:x86_64:ubuntu26.04:us-east-2:ami-prior";
+      const prior = {
+        id: "ami-prior",
+        name: "prior",
+        state: "available" as const,
+        provider: "aws" as const,
+        target: "linux" as const,
+        os: "ubuntu:26.04",
+        ...(region ? { region } : {}),
+        architecture: "x86_64",
+        promotedAt: "2026-09-01T00:00:00Z",
+      };
+      storage.seed(portableKey, prior);
+      if (catalog) {
+        storage.seed(priorCatalogKey, {
+          ...prior,
+          promotedAt: "2026-09-02T00:00:00Z",
+          revision: "revision-catalog",
+        });
+      }
+      const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+      vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => ({
+        id: imageID,
+        name: imageID,
+        state: "available",
+        provider: "aws",
+        region: "eu-west-1",
+        architecture: "x86_64",
+      }));
+      const promote = async (imageID: string, body: Record<string, unknown>) => {
+        const url = new URL(
+          `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1`,
+        );
+        return provider.promoteImage(
+          imageID,
+          undefined,
+          new Request(url, { method: "POST", body: JSON.stringify(body) }),
+          url,
+        );
+      };
 
-    const published = (await promote("ami-candidate", {
-      expectedCurrent: { state: "capture" },
-    })) as {
-      image: { id: string; revision: string };
-      previous: Record<string, unknown>;
-    };
-    await expect(provider.retirePromotedImage(prior.id)).resolves.toBe(1);
-    const rollback = await promote(published.image.id, {
-      expectedCurrent: {
-        state: "present",
-        imageId: published.image.id,
-        revision: published.image.revision,
-      },
-      restorePrevious: published.previous,
-      retireExpectedCatalog: true,
-    });
+      const published = (await promote("ami-candidate", {
+        expectedCurrent: { state: "capture" },
+      })) as {
+        image: { id: string; revision: string };
+        previous: Record<string, unknown>;
+      };
+      await expect(provider.retirePromotedImage(prior.id, retirementRegion)).resolves.toBe(
+        catalog ? 1 : 0,
+      );
+      const rollback = await promote(published.image.id, {
+        expectedCurrent: {
+          state: "present",
+          imageId: published.image.id,
+          revision: published.image.revision,
+        },
+        restorePrevious: published.previous,
+        retireExpectedCatalog: true,
+      });
 
-    expect(rollback).toMatchObject({ image: { id: "none", state: "absent" } });
-    expect(storage.value(portableKey)).toBeUndefined();
-    expect(storage.value(regionalKey)).toBeUndefined();
-    expect(storage.value(priorCatalogKey)).toBeUndefined();
-  });
+      expect(rollback).toMatchObject({
+        image: restored ? prior : { id: "none", state: "absent" },
+      });
+      expect(storage.value(portableKey)).toEqual(restored ? prior : undefined);
+      expect(storage.value(regionalKey)).toBeUndefined();
+      expect(storage.value(priorCatalogKey)).toBeUndefined();
+    },
+  );
+
+  it.each([
+    { firstRegion: undefined, secondRegion: undefined },
+    { firstRegion: "eu-west-1", secondRegion: undefined },
+    { firstRegion: undefined, secondRegion: "eu-west-1" },
+    { firstRegion: "eu-west-1", secondRegion: "eu-west-1" },
+  ])(
+    "orders rowless retirement and republication at frozen time $firstRegion/$secondRegion",
+    async ({ firstRegion, secondRegion }) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-09-05T00:00:00Z"));
+      try {
+        const storage = new MemoryStorage();
+        const imageID = "ami-prior";
+        const portableKey = "image:aws:promoted:linux:x86_64:ubuntu26.04";
+        const regionalKey = `${portableKey}:eu-west-1`;
+        const catalogKey = `image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:${imageID}`;
+        const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+        vi.spyOn(provider, "getImage").mockImplementation(async (id) => ({
+          id,
+          name: id,
+          state: "available",
+          provider: "aws",
+          region: "eu-west-1",
+          architecture: "x86_64",
+        }));
+        const promote = async (id: string, body: Record<string, unknown>) => {
+          const url = new URL(
+            `https://crabbox.test/v1/images/${id}/promote?target=linux&region=eu-west-1`,
+          );
+          const result = await provider.promoteImage(
+            id,
+            undefined,
+            new Request(url, { method: "POST", body: JSON.stringify(body) }),
+            url,
+          );
+          expect(result).not.toBeInstanceOf(Response);
+          return result as {
+            image: { id: string; revision: string; promotedAt: string };
+            previous: Record<string, unknown>;
+          };
+        };
+        const restore = (receipt: Awaited<ReturnType<typeof promote>>) =>
+          promote(receipt.image.id, {
+            expectedCurrent: {
+              state: "present",
+              imageId: receipt.image.id,
+              revision: receipt.image.revision,
+            },
+            restorePrevious: receipt.previous,
+            retireExpectedCatalog: true,
+          });
+
+        await expect(provider.retirePromotedImage(imageID, firstRegion)).resolves.toBe(0);
+        const first = await promote(imageID, { expectedCurrent: { state: "capture" } });
+        expect.soft(Date.parse(first.image.promotedAt)).toBe(Date.now() + 1);
+        // Model a legacy receipt-only alias without a surviving exact-revision tombstone.
+        const { revision: _revision, ...revisionless } = first.image;
+        storage.seed(portableKey, revisionless);
+        storage.seed(regionalKey, revisionless);
+        await storage.delete(catalogKey);
+        const displaced = await promote("ami-candidate", { expectedCurrent: { state: "capture" } });
+        expect(await storage.list({ prefix: "image:aws:retired:" })).toEqual(new Map());
+        await expect(provider.retirePromotedImage(imageID, secondRegion)).resolves.toBe(0);
+        await expect(provider.retirePromotedImage(imageID, secondRegion)).resolves.toBe(0);
+        const rejected = await restore(displaced);
+        expect.soft(rejected.image).toMatchObject({ id: "none", state: "absent" });
+        expect.soft(storage.value(portableKey)).toBeUndefined();
+        expect.soft(storage.value(regionalKey)).toBeUndefined();
+
+        const fresh = await promote(imageID, { expectedCurrent: { state: "capture" } });
+        expect.soft(Date.parse(fresh.image.promotedAt)).toBe(Date.now() + 2);
+        const next = await promote("ami-next", { expectedCurrent: { state: "capture" } });
+        expect((await restore(next)).image).toEqual(fresh.image);
+        const latest = await promote("ami-latest", { expectedCurrent: { state: "capture" } });
+        expect((await restore({ ...latest, previous: displaced.previous })).image).toMatchObject({
+          id: "none",
+          state: "absent",
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([
+    "global retirement",
+    "regional retirement",
+    "publication watermark",
+    "publication alias",
+  ] as const)(
+    "keeps image markers, catalog, and checkpoint pins atomic on failed %s",
+    async (failure) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-09-05T00:00:00Z"));
+      try {
+        const storage = new MemoryStorage();
+        const imageID = "ami-prior";
+        const markerKey = `image:aws:retired-image-global:${imageID}`;
+        const regionalMarkerKey = `image:aws:retired-image:eu-west-1:${imageID}`;
+        const aliasKey = "image:aws:promoted:linux:x86_64:ubuntu26.04";
+        const checkpointID = "chk_image_atomic";
+        const scope = { accountID: "123456789012", region: "eu-west-1" };
+        storage.seed(`checkpoint:${checkpointID}`, {
+          id: checkpointID,
+          provider: "aws",
+          scope,
+          state: "ready",
+          image: { immutableID: imageID },
+          generation: 1,
+          revision: 1,
+          eventSequence: 0,
+          pinCount: 0,
+          activeUseCount: 0,
+          retention: { mode: "retain" },
+        });
+        storage.seed(`checkpoint-resource:aws:${imageID}`, {
+          checkpointID,
+          provider: "aws",
+          scope,
+          kind: "aws-ami",
+          resourceID: imageID,
+          immutableID: imageID,
+        });
+        const provider = new AWSProvider({} as Env, scope.region, storage);
+        vi.spyOn(provider, "getImage").mockResolvedValue({
+          id: imageID,
+          name: imageID,
+          state: "available",
+          provider: "aws",
+          architecture: "x86_64",
+          ...scope,
+        });
+        const promote = () => {
+          const url = new URL(
+            `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1`,
+          );
+          return provider.promoteImage(
+            imageID,
+            undefined,
+            new Request(url, { method: "POST", body: "{}" }),
+            url,
+          );
+        };
+        await provider.retirePromotedImage(imageID);
+        await promote();
+        expect(storage.value(`checkpoint:${checkpointID}`)).toMatchObject({ pinCount: 3 });
+        const before = await storage.list();
+        const deleted: string[] = [];
+        storage.beforeDelete = async (key) => {
+          deleted.push(key);
+        };
+        const failingKey =
+          failure === "regional retirement"
+            ? regionalMarkerKey
+            : failure === "publication alias"
+              ? aliasKey
+              : markerKey;
+        storage.beforePut = async (key) => {
+          if (key === failingKey) throw new Error("image marker transaction failed");
+        };
+        vi.setSystemTime(new Date(Date.now() + 1000));
+        await expect(
+          failure.includes("retirement")
+            ? provider.retirePromotedImage(
+                imageID,
+                failure === "regional retirement" ? scope.region : undefined,
+              )
+            : promote(),
+        ).rejects.toThrow("image marker transaction failed");
+        expect(await storage.list()).toEqual(before);
+        expect(deleted.filter((key) => key.startsWith("checkpoint-pin:"))).toHaveLength(
+          failure.includes("retirement") ? 3 : 0,
+        );
+        expect(deleted.includes(aliasKey)).toBe(failure.includes("retirement"));
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("does not restore a revision retired by an overlapping rollback", async () => {
     const storage = new MemoryStorage();

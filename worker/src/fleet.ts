@@ -20246,8 +20246,10 @@ function retiredAWSImageRevisionKey(state: { imageId: string; revision: string }
   return `image:aws:retired:${encodeURIComponent(state.imageId)}:${encodeURIComponent(state.revision)}`;
 }
 
-function retiredAWSImageKey(imageID: string, region: string): string {
-  return `image:aws:retired-image:${encodeURIComponent(region)}:${encodeURIComponent(imageID)}`;
+function retiredAWSImageKey(imageID: string, region?: string): string {
+  return region === undefined
+    ? `image:aws:retired-image-global:${encodeURIComponent(imageID)}`
+    : `image:aws:retired-image:${encodeURIComponent(region)}:${encodeURIComponent(imageID)}`;
 }
 
 function promotedAWSImageVariantPrefix(
@@ -20437,11 +20439,44 @@ async function retireAWSImageRevision(
 async function retireAWSImage(
   storage: ProviderStateStorageView,
   imageID: string,
-  region: string,
+  region?: string,
 ): Promise<void> {
+  const { global, retiredAt, lastPromotedAt } = await awsImageRetirementState(
+    storage,
+    imageID,
+    region,
+  );
   await storage.put(retiredAWSImageKey(imageID, region), {
-    retiredAt: new Date().toISOString(),
+    ...(region === undefined ? global : {}),
+    retiredAt: new Date(Math.max(Date.now(), retiredAt, lastPromotedAt)).toISOString(),
   });
+}
+
+async function awsImageRetirementState(
+  storage: ProviderStateStorageView,
+  imageID: string,
+  region?: string,
+) {
+  const global = await storage.get<{ retiredAt?: string; lastPromotedAt?: string }>(
+    retiredAWSImageKey(imageID),
+  );
+  const regional =
+    region === undefined
+      ? undefined
+      : await storage.get<{ retiredAt?: string }>(retiredAWSImageKey(imageID, region));
+  const [globalCutoff = 0, regionalCutoff = 0, lastPromotedAt = 0] = [
+    global?.retiredAt,
+    regional?.retiredAt,
+    global?.lastPromotedAt,
+  ].map((value) => {
+    const timestamp = Date.parse(value ?? "");
+    return Number.isFinite(timestamp) ? timestamp : 0;
+  });
+  return {
+    global,
+    retiredAt: Math.max(globalCutoff, regionalCutoff),
+    lastPromotedAt,
+  };
 }
 
 async function awsImageRevisionRetired(
@@ -20456,12 +20491,13 @@ async function awsImageRevisionRetired(
   ) {
     return true;
   }
-  const retired = await storage.get<{ retiredAt?: unknown }>(
-    retiredAWSImageKey(image.id, image.region ?? fallbackRegion),
+  const { retiredAt } = await awsImageRetirementState(
+    storage,
+    image.id,
+    image.region ?? fallbackRegion,
   );
   const promotedAt = Date.parse(image.promotedAt);
-  const retiredAt = typeof retired?.retiredAt === "string" ? Date.parse(retired.retiredAt) : NaN;
-  return Number.isFinite(promotedAt) && Number.isFinite(retiredAt) && promotedAt <= retiredAt;
+  return Number.isFinite(promotedAt) && promotedAt <= retiredAt;
 }
 
 async function nextAWSImagePromotionTimestamp(
@@ -20469,12 +20505,16 @@ async function nextAWSImagePromotionTimestamp(
   imageID: string,
   region: string,
 ): Promise<string> {
-  const retired = await storage.get<{ retiredAt?: unknown }>(retiredAWSImageKey(imageID, region));
-  const retiredAt =
-    typeof retired?.retiredAt === "string" ? Date.parse(retired.retiredAt) : Number.NaN;
-  return new Date(
-    Math.max(Date.now(), Number.isFinite(retiredAt) ? retiredAt + 1 : 0),
-  ).toISOString();
+  const { global, retiredAt, lastPromotedAt } = await awsImageRetirementState(
+    storage,
+    imageID,
+    region,
+  );
+  const promotedAt = new Date(Math.max(Date.now(), retiredAt + 1, lastPromotedAt)).toISOString();
+  // Retain the publication high-water mark even after its last catalog row disappears.
+  // A later retirement must cover receipts timestamped ahead of a frozen or regressed clock.
+  await storage.put(retiredAWSImageKey(imageID), { ...global, lastPromotedAt: promotedAt });
+  return promotedAt;
 }
 
 function imagePromotionConflict(
@@ -29036,18 +29076,14 @@ export class AWSProvider implements CloudProvider {
 
   retirePromotedImage(imageID: string, region?: string): Promise<number> {
     return imageCatalogTransaction(this.storage, async (transaction) => {
-      const affectedRegions = new Set(region ? [region] : []);
       const retired = await deletePromotedAWSImageRecords(
         transaction,
         imageID,
         ["image:aws:catalog:", "image:aws:variant:", "image:aws:promoted"],
-        { ...(region ? { region } : {}), retireRevisions: true, affectedRegions },
+        { ...(region ? { region } : {}), retireRevisions: true },
       );
-      for (const affectedRegion of affectedRegions) {
-        // Regionless retirement must invalidate every revisionless alias region removed above.
-        // oxlint-disable-next-line eslint/no-await-in-loop
-        await retireAWSImage(transaction, imageID, affectedRegion);
-      }
+      // Receipt-only aliases have no catalog rows from which to recover their retirement scope.
+      await retireAWSImage(transaction, imageID, region);
       return retired;
     });
   }
@@ -29862,7 +29898,7 @@ async function deletePromotedAWSImageRecords(
   storage: ProviderStateStorageView,
   imageID: string,
   prefixes: string[],
-  options: { region?: string; retireRevisions?: boolean; affectedRegions?: Set<string> } = {},
+  options: { region?: string; retireRevisions?: boolean } = {},
 ): Promise<number> {
   const catalogs = await Promise.all(
     prefixes.map(async (prefix) => await storage.list<PromotedImageRecord>({ prefix })),
@@ -29876,7 +29912,6 @@ async function deletePromotedAWSImageRecords(
   const retiredRevisions = new Set<string>();
   await entries.reduce(async (pending, [key, image]) => {
     await pending;
-    if (image.region) options.affectedRegions?.add(image.region);
     await unpinCheckpointPromotion(storage, "aws", image, key);
     await storage.delete(key);
     if (!options.retireRevisions) return;
