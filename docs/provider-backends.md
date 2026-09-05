@@ -490,6 +490,13 @@ envelopes, versions, identity checks, redaction, and provider error semantics in
 the adapter. Do not use it for noisy CLI output, streaming or NDJSON protocols,
 or commands with ambiguous side effects.
 
+The local command runner preserves caller cancellation/deadline causes when
+its context watcher interrupts a child that then exits by signal. It retains
+the underlying process error and does not relabel observed nonnegative exits,
+post-exit capture cleanup, or output-limit failures as cancellation. This is a
+POSIX signal-termination guarantee; Windows forced-termination codes remain
+unchanged. It does not prove that canceling a bridge stops its remote workload.
+
 Vanilla provider HTTP redirect policy also belongs in
 `internal/providers/shared`. `shared.SecureHTTPClient` clones an injected
 client, rejects destinations outside a trusted `shared.SameOrigin`, preserves
