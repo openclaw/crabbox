@@ -328,6 +328,8 @@ func TestRunPreparesArchiveBeforeCreate(t *testing.T) {
 		b, fake, _, _, _ := newLifecycleBackend(t)
 		temp := t.TempDir()
 		t.Setenv("TMPDIR", temp)
+		t.Setenv("TMP", temp)
+		t.Setenv("TEMP", temp)
 		fake.updateErr = errors.New("synthetic create-label failure")
 		fake.onCreate = func() {
 			files, err := filepath.Glob(filepath.Join(temp, "crabbox-blaxel-sync-*.tgz"))
