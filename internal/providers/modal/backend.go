@@ -140,6 +140,7 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
 			var cleanup func(context.Context)
+			var closeCommand func(context.Context) error
 			if len(req.Env) > 0 {
 				var envPath string
 				err = fenced(func() error {
@@ -147,12 +148,18 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 					envPath, cleanup, err = b.uploadEnvProfile(ctx, client, claim, req.Env)
 					return err
 				})
+				if cleanup != nil {
+					closeCommand = func(ctx context.Context) error {
+						cleanup(ctx)
+						return nil
+					}
+				}
 				if err != nil {
-					return shared.DelegatedSandboxCommand{Close: cleanup}, err
+					return shared.DelegatedSandboxCommand{Close: closeCommand}, err
 				}
 				command = shared.WrapCommandWithShellEnvProfile(command, envPath)
 			}
-			return shared.DelegatedSandboxCommand{Close: cleanup, Run: func(ctx context.Context) (int, error) {
+			return shared.DelegatedSandboxCommand{Close: closeCommand, Run: func(ctx context.Context) (int, error) {
 				var code int
 				err := fenced(func() error {
 					var err error

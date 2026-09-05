@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -525,6 +526,86 @@ func TestDelegatedRunReceiptOmitsMissingLeaseID(t *testing.T) {
 	}
 	if !strings.HasPrefix(out, "PASS ") {
 		t.Fatalf("unexpected verify output: %q", out)
+	}
+}
+
+type attestOutcomeProvider struct {
+	testStopReclaimProvider
+	result RunResult
+	err    error
+}
+
+func (p attestOutcomeProvider) Name() string { return "attest-outcome-test" }
+func (p attestOutcomeProvider) Spec() ProviderSpec {
+	spec := p.testStopReclaimProvider.Spec()
+	spec.Name = p.Name()
+	return spec
+}
+func (p attestOutcomeProvider) Configure(Config, Runtime) (Backend, error) {
+	return attestOutcomeBackend{testDelegatedBackend{spec: p.Spec()}, p.result, p.err}, nil
+}
+
+type attestOutcomeBackend struct {
+	testDelegatedBackend
+	result RunResult
+	err    error
+}
+
+func (b attestOutcomeBackend) Run(context.Context, RunRequest) (RunResult, error) {
+	return b.result, b.err
+}
+
+func TestDelegatedAttestUsesNormalizedPrimaryOutcome(t *testing.T) {
+	for _, scenario := range []string{"legacy command exit", "command plus cleanup cancellation", "command plus cleanup timeout", "provider timeout", "cleanup only"} {
+		t.Run(scenario, func(t *testing.T) {
+			clearConfigEnv(t)
+			isolatedConfigPath(t)
+			setAttestTestHome(t)
+			t.Chdir(t.TempDir())
+			result := RunResult{Provider: "attest-outcome-test", ExitCode: 42, CommandText: "exit 42"}
+			var runErr error = ExitError{Code: 42, Message: "command exited 42"}
+			wantReceipt := true
+			switch scenario {
+			case "command plus cleanup cancellation", "command plus cleanup timeout":
+				result.Status, result.ErrorKind = RunStatusFailed, RunErrorCommandExit
+				cleanupErr := context.Canceled
+				if scenario == "command plus cleanup timeout" {
+					cleanupErr = context.DeadlineExceeded
+				}
+				runErr = errors.Join(runErr, cleanupErr)
+			case "provider timeout":
+				runErr, wantReceipt = context.DeadlineExceeded, false
+			case "cleanup only":
+				result.Status, result.ErrorKind = RunStatusFailed, RunErrorProvider
+				runErr, wantReceipt = errors.New("cleanup failed"), false
+			}
+			p := attestOutcomeProvider{result: result, err: runErr}
+			RegisterProvider(p)
+			t.Cleanup(func() { delete(providerRegistry, p.Name()) })
+			receiptPath := filepath.Join(t.TempDir(), "receipt.json")
+			app := App{Stdout: io.Discard, Stderr: io.Discard}
+			err := app.Run(t.Context(), []string{"run", "--provider", p.Name(), "--no-sync", "--attest", receiptPath, "--", "true"})
+			if !errors.Is(err, runErr) {
+				t.Fatalf("primary error changed: %v", err)
+			}
+			data, err := os.ReadFile(receiptPath)
+			if !wantReceipt {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("unexpected provider-failure receipt: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("completed command receipt missing: %v", err)
+			}
+			receipt, err := decodeRunReceipt(data)
+			if err != nil || receipt["exit_code"] != json.Number("42") {
+				t.Fatalf("receipt=%#v err=%v", receipt, err)
+			}
+			if _, err := runVerify(t, receiptPath); err != nil {
+				t.Fatalf("verify receipt: %v", err)
+			}
+		})
 	}
 }
 

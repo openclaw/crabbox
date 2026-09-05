@@ -1029,7 +1029,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			result.Artifacts = append(result.Artifacts, proof)
 			fmt.Fprintf(a.Stderr, "artifact kind=proof path=%s bytes=%d template=%s\n", proof.Path, proof.Bytes, blank(proof.Template, "default"))
 		}
-		if strings.TrimSpace(*attestOut) != "" && (runErr == nil || RunErrorKindForResult(result, runErr) == RunErrorCommandExit) {
+		if strings.TrimSpace(*attestOut) != "" && (runErr == nil || FinalizeRunResult(result, runErr).ErrorKind == RunErrorCommandExit) {
 			receipt, err := writeDelegatedRunReceipt(strings.TrimSpace(*attestOut), strings.TrimSpace(*attestKeyOverride), cfg, result, runReq)
 			if err != nil {
 				return err

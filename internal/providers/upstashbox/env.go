@@ -56,7 +56,7 @@ func (r envFileReceipt) withUnchanged(ctx context.Context, action func() error) 
 	})
 }
 
-func uploadEnvProfile(ctx context.Context, client api, leaseID, boxID, slug string, env map[string]string) (string, func() error, error) {
+func uploadEnvProfile(ctx context.Context, client api, leaseID, boxID, slug string, env map[string]string) (string, func(context.Context) error, error) {
 	receipt, err := captureEnvFileReceipt(ctx, client, leaseID, boxID, slug)
 	if err != nil {
 		return "", nil, err
@@ -65,9 +65,7 @@ func uploadEnvProfile(ctx context.Context, client api, leaseID, boxID, slug stri
 	if err != nil {
 		return "", nil, err
 	}
-	cleanup := func() error {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), upstashBoxCleanupTimeout)
-		defer cancel()
+	cleanup := func(cleanupCtx context.Context) error {
 		err := profile.Close(cleanupCtx, func(removeCtx context.Context, remotePath string) error {
 			return receipt.withUnchanged(removeCtx, func() error {
 				result, err := client.Exec(removeCtx, boxID, "rm -f "+shellQuote(remotePath), "")

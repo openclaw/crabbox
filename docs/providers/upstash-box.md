@@ -118,7 +118,22 @@ Accepted values, validated before the API is called:
    `sh -c`, with the workspace folder set as the working directory, streaming
    output back through Crabbox.
 4. One-shot Boxes are deleted after a `run` that did not pass `--keep`. `--keep`
-   and `--keep-on-failure` retain the Box until `crabbox stop`.
+   retains the Box until `crabbox stop`; `--keep-on-failure` also retains it after
+   workspace setup, sync, command preparation, execution, or mandatory profile
+   cleanup fails. Reused Boxes are never automatically deleted.
+
+Run sequencing and finalization use the shared delegated-sandbox lifecycle.
+The adapter still owns Box identity and deletion authority, file-profile custody,
+workspace paths, uploads, and native command transport. Local configuration/auth
+validation precedes archive preparation; fresh archives are prepared before
+allocation, while reused archives are prepared after the Box is resolved.
+
+A failed Box deletion returns exit code 1 and a kept recovery session instead
+of a successful run. An earlier command or provider failure retains its exit code
+and status; later profile cleanup, Box deletion, and timing-write failures add
+diagnostics without replacing it. Failure retention is decided before timing
+output, so a failed timing writer cannot delete a Box already retained for a
+failed command. Profile-cleanup-only failures retain their documented code 5.
 
 Note: `warmup` always keeps the Box until an explicit `crabbox stop`. If you
 pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
