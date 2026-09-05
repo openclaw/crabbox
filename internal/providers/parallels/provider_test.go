@@ -116,6 +116,138 @@ func TestApplyFlagsExplicitHostBypassesConfiguredFleet(t *testing.T) {
 	}
 }
 
+func TestApplyFlagsSetsMacOSBootstrapKey(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "parallels"
+	cfg.TargetOS = core.TargetMacOS
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	provider := Provider{}
+	values := provider.RegisterFlags(fs, cfg)
+	if err := fs.Parse([]string{"--parallels-bootstrap-key", "/Users/build/.ssh/bootstrap"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Parallels.BootstrapKey != "/Users/build/.ssh/bootstrap" {
+		t.Fatalf("bootstrap key=%q", cfg.Parallels.BootstrapKey)
+	}
+}
+
+func TestDesktopCredentialsUseConfiguredMacOSAccount(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.TargetOS = core.TargetMacOS
+	cfg.Parallels.User = "configured-user"
+	cfg.Parallels.Password = " account password with spaces "
+
+	credentials, ok := (Provider{}).DesktopCredentials(cfg, core.SSHTarget{TargetOS: core.TargetMacOS, User: "lease-user"})
+	if !ok {
+		t.Fatal("Parallels should provide configured macOS account credentials")
+	}
+	if credentials.Username != "lease-user" || credentials.Password != cfg.Parallels.Password {
+		t.Fatalf("credentials=%#v", credentials)
+	}
+
+	cfg.Parallels.Password = ""
+	if credentials, ok = (Provider{}).DesktopCredentials(cfg, core.SSHTarget{TargetOS: core.TargetMacOS}); ok || credentials != (core.DesktopCredentials{}) {
+		t.Fatalf("empty password unexpectedly enabled account credentials: %#v", credentials)
+	}
+	cfg.Parallels.Password = "configured"
+	cfg.TargetOS = core.TargetLinux
+	if credentials, ok = (Provider{}).DesktopCredentials(cfg, core.SSHTarget{TargetOS: core.TargetLinux}); ok || credentials != (core.DesktopCredentials{}) {
+		t.Fatalf("Linux unexpectedly received macOS account credentials: %#v", credentials)
+	}
+}
+
+func TestParallelsSSHTargetScrubsDesktopPasswordEnvironment(t *testing.T) {
+	target := parallelsSSHTarget(core.BaseConfig(), "192.0.2.10")
+	if len(target.ChildEnvDenylist) != 1 || target.ChildEnvDenylist[0] != "CRABBOX_PARALLELS_PASSWORD" {
+		t.Fatalf("child environment denylist=%v", target.ChildEnvDenylist)
+	}
+}
+
+func TestApplyParallelsClaimSSHPort(t *testing.T) {
+	target := core.SSHTarget{Port: "2222", FallbackPorts: []string{"22"}}
+	claim := core.LeaseClaim{
+		LeaseID: "cbx_example",
+		CloudID: "vm-id",
+		SSHPort: 22,
+		Labels:  map[string]string{"host": "mac.example"},
+	}
+	if !applyParallelsClaimSSHPort(&target, claim, "cbx_example", "vm-id", "mac.example") {
+		t.Fatal("exact Parallels claim endpoint was not applied")
+	}
+	if target.Port != "22" || len(target.FallbackPorts) != 0 {
+		t.Fatalf("target endpoint=%#v", target)
+	}
+
+	wrong := core.SSHTarget{Port: "2222", FallbackPorts: []string{"22"}}
+	if applyParallelsClaimSSHPort(&wrong, claim, "cbx_other", "vm-id", "mac.example") {
+		t.Fatal("mismatched claim endpoint was applied")
+	}
+	if wrong.Port != "2222" || len(wrong.FallbackPorts) != 1 {
+		t.Fatalf("mismatched target was mutated: %#v", wrong)
+	}
+}
+
+func TestValidateConfigRestrictsBootstrapFallback(t *testing.T) {
+	tests := []struct {
+		name    string
+		target  string
+		key     string
+		wantErr string
+	}{
+		{name: "macOS absolute", target: core.TargetMacOS, key: "/Users/build/.ssh/bootstrap"},
+		{name: "macOS unset", target: core.TargetMacOS},
+		{name: "Linux rejected", target: core.TargetLinux, key: "/Users/build/.ssh/bootstrap", wantErr: "only for macOS"},
+		{name: "relative rejected", target: core.TargetMacOS, key: ".ssh/bootstrap", wantErr: "absolute path"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.TargetOS = test.target
+			cfg.Parallels.BootstrapKey = test.key
+			err := (Provider{}).ValidateConfig(cfg)
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("err=%v, want %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestParallelsMacOSBootstrapFallbackGate(t *testing.T) {
+	toolsErr := errors.New("PRL_ERR_VM_EXEC_GUEST_TOOL_NOT_AVAILABLE")
+	tests := []struct {
+		name   string
+		target string
+		key    string
+		err    error
+		want   bool
+	}{
+		{name: "macOS tools unavailable", target: core.TargetMacOS, key: "/Users/build/.ssh/bootstrap", err: toolsErr, want: true},
+		{name: "no bootstrap key", target: core.TargetMacOS, err: toolsErr},
+		{name: "Linux", target: core.TargetLinux, key: "/Users/build/.ssh/bootstrap", err: toolsErr},
+		{name: "Windows", target: core.TargetWindows, key: "/Users/build/.ssh/bootstrap", err: toolsErr},
+		{name: "unrelated error", target: core.TargetMacOS, key: "/Users/build/.ssh/bootstrap", err: errors.New("permission denied")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.TargetOS = test.target
+			cfg.Parallels.BootstrapKey = test.key
+			if got := parallelsMacOSBootstrapFallbackAllowed(cfg, test.err); got != test.want {
+				t.Fatalf("got=%t want=%t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestResolveReportsPartialFleetInventory(t *testing.T) {
 	backend := &leaseBackend{
 		DirectSSHBackend: sharedBackend(testParallelsFleetConfig(), &parallelsFleetRunner{}),

@@ -1246,8 +1246,10 @@ type ParallelsConfig struct {
 	Host             string
 	HostUser         string
 	HostKey          string
+	BootstrapKey     string
 	VMRoot           string
 	User             string
+	Password         string
 	WorkRoot         string
 	StartupTimeout   time.Duration
 	Templates        map[string]ParallelsTemplateConfig
@@ -3661,8 +3663,10 @@ type fileParallelsConfig struct {
 	Host             string                                 `yaml:"host,omitempty"`
 	HostUser         string                                 `yaml:"hostUser,omitempty"`
 	HostKey          string                                 `yaml:"hostKey,omitempty"`
+	BootstrapKey     string                                 `yaml:"bootstrapKey,omitempty"`
 	VMRoot           string                                 `yaml:"vmRoot,omitempty"`
 	User             string                                 `yaml:"user,omitempty"`
+	Password         string                                 `yaml:"password,omitempty"`
 	WorkRoot         string                                 `yaml:"workRoot,omitempty"`
 	StartupTimeout   string                                 `yaml:"startupTimeout,omitempty"`
 	Templates        map[string]fileParallelsTemplateConfig `yaml:"templates,omitempty"`
@@ -5791,11 +5795,24 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Parallels.HostKey = expandUserPath(file.Parallels.HostKey)
 			cfg.credentialProvenance.parallelsHostKey = credentialSource
 		}
+		// The bootstrap identity is consumed on the Parallels host and can sign
+		// authentication challenges from a newly cloned guest. Repository config
+		// must not choose that identity; keep it in trusted user config or supply
+		// it through an explicit environment/flag override.
+		if trusted && file.Parallels.BootstrapKey != "" {
+			cfg.Parallels.BootstrapKey = strings.TrimSpace(file.Parallels.BootstrapKey)
+		}
 		if file.Parallels.VMRoot != "" {
 			cfg.Parallels.VMRoot = expandUserPath(file.Parallels.VMRoot)
 		}
 		if file.Parallels.User != "" {
 			cfg.Parallels.User = file.Parallels.User
+		}
+		// The macOS account password authenticates the local ARD viewer. A
+		// repository must not supply or replace it; use trusted user config or
+		// the environment, matching the Tart desktop credential boundary.
+		if trusted && file.Parallels.Password != "" {
+			cfg.Parallels.Password = file.Parallels.Password
 		}
 		if file.Parallels.WorkRoot != "" {
 			cfg.Parallels.WorkRoot = file.Parallels.WorkRoot
@@ -8372,8 +8389,12 @@ func applyEnv(cfg *Config) error {
 		cfg.Parallels.HostKey = expandUserPath(value)
 		cfg.credentialProvenance.parallelsHostKey = credentialSourceEnvironment
 	}
+	if value := os.Getenv("CRABBOX_PARALLELS_BOOTSTRAP_KEY"); value != "" {
+		cfg.Parallels.BootstrapKey = strings.TrimSpace(value)
+	}
 	cfg.Parallels.VMRoot = expandUserPath(getenv("CRABBOX_PARALLELS_VM_ROOT", cfg.Parallels.VMRoot))
 	cfg.Parallels.User = getenv("CRABBOX_PARALLELS_USER", cfg.Parallels.User)
+	cfg.Parallels.Password = getenv("CRABBOX_PARALLELS_PASSWORD", cfg.Parallels.Password)
 	cfg.Parallels.WorkRoot = getenv("CRABBOX_PARALLELS_WORK_ROOT", cfg.Parallels.WorkRoot)
 	if startupTimeout := os.Getenv("CRABBOX_PARALLELS_STARTUP_TIMEOUT"); startupTimeout != "" {
 		applyLeaseDuration(&cfg.Parallels.StartupTimeout, startupTimeout)
