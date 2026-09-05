@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -40,9 +42,7 @@ test("matrix rows do not fail fast and are time-bounded", () => {
 });
 
 test("SSH localhost asserts amd64 only on its hosted x64 lifecycle row", () => {
-  const rows = [
-    ...workflow.matchAll(/^ {10}- name: ssh-localhost\n((?: {12}[^\n]*\n)*)/gm),
-  ];
+  const rows = [...workflow.matchAll(/^ {10}- name: ssh-localhost\n((?: {12}[^\n]*\n)*)/gm)];
   assert.equal(rows.length, 1, "keep one existing SSH localhost row");
   const row = rows[0][1];
   assert.match(row, /^ {12}runner: ubuntu-latest$/m);
@@ -64,4 +64,81 @@ test("SSH localhost asserts amd64 only on its hosted x64 lifecycle row", () => {
 test("pull request runs cancel superseded attempts", () => {
   assert.match(workflow, /concurrency:\s*\n\s+group:/);
   assert.match(workflow, /cancel-in-progress:.*pull_request/);
+});
+
+test("failed bootstrap diagnostics read only the unique smoke container", (t) => {
+  const marker = "      - name: Diagnose local-container bootstrap\n";
+  const step = workflow.slice(workflow.indexOf(marker) + marker.length);
+  const script = step
+    .slice(step.indexOf("        run: |\n") + "        run: |\n".length)
+    .split("\n")
+    .map((line) => line.replace(/^ {10}/, ""))
+    .join("\n");
+  assert.match(step, /if: failure\(\) && matrix\.name == 'local-container'/);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-bootstrap-diagnostics-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const docker = path.join(dir, "docker");
+  fs.writeFileSync(
+    docker,
+    `#!/usr/bin/env bash
+set -eu
+printf '%s\\n' "$*" >> "$DIAGNOSTIC_CALLS"
+case "$1" in
+  ps) printf '%s\\n' "$DIAGNOSTIC_IDS" ;;
+  inspect) printf '{"Running":false,"ExitCode":100}\\n' ;;
+  logs) printf 'synthetic apt failure\\n' ;;
+  *) exit 99 ;;
+esac
+`,
+    { mode: 0o755 },
+  );
+  fs.writeFileSync(path.join(dir, "timeout"), '#!/usr/bin/env bash\nshift\nexec "$@"\n', {
+    mode: 0o755,
+  });
+  const log = path.join(dir, "local-container-smoke.log");
+  const calls = path.join(dir, "calls.log");
+  const lease = "cbx_123456789abc";
+  const container = "a".repeat(64);
+  const launch = `provisioning provider=local-container lease=${lease} slug=synthetic\n`;
+  for (const scenario of [
+    { name: "exact", log: launch, ids: container, inspect: true },
+    { name: "missing log", log: null, ids: container, inventory: false },
+    { name: "no lease", log: "build failed\n", ids: container, inventory: false },
+    { name: "multiple leases", log: launch + launch, ids: container, inventory: false },
+    { name: "no container", log: launch, ids: "" },
+    { name: "ambiguous containers", log: launch, ids: container + "\n" + "b".repeat(64) },
+  ]) {
+    fs.writeFileSync(calls, "");
+    if (scenario.log === null) fs.rmSync(log, { force: true });
+    else fs.writeFileSync(log, scenario.log);
+    const result = spawnSync("bash", ["-euo", "pipefail", "-c", script], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${dir}:${process.env.PATH}`,
+        RUNNER_TEMP: dir,
+        DIAGNOSTIC_CALLS: calls,
+        DIAGNOSTIC_IDS: scenario.ids,
+      },
+    });
+    assert.equal(result.status, 0, `${scenario.name}: ${result.stdout}${result.stderr}`);
+    const observed = fs.readFileSync(calls, "utf8");
+    if (scenario.inventory === false) assert.equal(observed, "", scenario.name);
+    else
+      assert.match(
+        observed,
+        new RegExp(
+          `^ps -aq --no-trunc --filter label=crabbox=true --filter label=provider=local-container --filter label=lease=${lease}\\n`,
+        ),
+      );
+    if (scenario.inspect) {
+      assert.match(
+        observed,
+        new RegExp(`inspect --format \\{\\{json \\.State\\}\\} ${container}\\n`),
+      );
+      assert.match(observed, new RegExp(`logs --tail 100 ${container}\\n`));
+      assert.match(result.stdout, /synthetic apt failure/);
+    } else assert.doesNotMatch(observed, /^(inspect|logs) /m, scenario.name);
+    assert.doesNotMatch(observed, /Config|(^|\n)(rm|exec|stop|kill) /);
+  }
 });

@@ -54,10 +54,11 @@ jobs:
             # Cold bootstrap allows 20m; leave room for build, use and cleanup.
             timeout-minutes: 30
             smoke: |
+              set -o pipefail
               CRABBOX_LIVE=1 \
               CRABBOX_LIVE_PROVIDERS=local-container \
               CRABBOX_BIN="$PWD/bin/crabbox" \
-                scripts/live-smoke.sh
+                scripts/live-smoke.sh 2>&1 | tee "$RUNNER_TEMP/local-container-smoke.log"
 
           # Read-only doctor readiness contract. Hosted runners do not ship
           # Firecracker or CNI plugins, so the script's own
@@ -147,3 +148,24 @@ jobs:
 
       - name: Run connector lifecycle smoke
         run: ${{ matrix.smoke }}
+
+      - name: Diagnose local-container bootstrap
+        if: failure() && matrix.name == 'local-container'
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/local-container-smoke.log"
+          test -f "$log" || exit 0
+          lease="$(sed -nE 's/^provisioning provider=local-container lease=(cbx_[0-9a-f]{12}) .*/\1/p' "$log")"
+          if [[ ! "$lease" =~ ^cbx_[0-9a-f]{12}$ ]]; then
+            echo "No unique smoke lease; skipping container diagnostics"
+            exit 0
+          fi
+          containers="$(docker ps -aq --no-trunc --filter label=crabbox=true --filter label=provider=local-container --filter "label=lease=$lease")"
+          if [[ ! "$containers" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "No unique exact smoke container; skipping container diagnostics"
+            exit 0
+          fi
+          # Never dump Config.Env or argv: bootstrap needs only state and logs.
+          docker inspect --format '{{json .State}}' "$containers"
+          timeout 15s docker logs --tail 100 "$containers"
