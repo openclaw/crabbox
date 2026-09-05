@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Upstash Box: share run finalization so early failures honor `--keep-on-failure`, failed deletion reports a kept recovery session, and cleanup/timing errors preserve the primary exit; keep delegated command receipts when secondary cleanup fails. [PR 1885](https://github.com/openclaw/crabbox/pull/1885). Thanks @steipete.
+- Tensorlake: include claim-lock waiting in the bound-sandbox cleanup deadline, retaining ownership and avoiding native operations when the deadline expires before admission.
 - Make `sync-plan --json` preview the configured provider's full-archive or dirty-delta guardrails accurately, without credentials or provider API calls. [PR 1882](https://github.com/openclaw/crabbox/pull/1882). Thanks @steipete.
 - Blaxel: prepare and validate sync archives before fresh allocation, freeze the pre-create snapshot, and share staged workspace replacement and cleanup while retaining native upload retries. [PR 1867](https://github.com/openclaw/crabbox/pull/1867). Thanks @steipete.
 - Freestyle: check the full archive and compressed upload limit before allocation, freeze pre-create snapshots, and share safe workspace replacement while isolating file-API and exec fallback uploads. [PR 1880](https://github.com/openclaw/crabbox/pull/1880). Thanks @steipete.

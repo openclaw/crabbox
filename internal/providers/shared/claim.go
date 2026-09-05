@@ -1,6 +1,7 @@
 package shared
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -82,10 +83,16 @@ func RequireExactClaim(want ClaimBinding) (core.LeaseClaim, error) {
 // RemoveExactClaimAfter keeps the exact claim fenced until the provider action
 // succeeds and its durable ownership record has been removed.
 func RemoveExactClaimAfter(claim core.LeaseClaim, want ClaimBinding, action func() error) error {
+	return RemoveExactClaimAfterContext(context.Background(), claim, want, action)
+}
+
+// RemoveExactClaimAfterContext also bounds waiting for the exact claim fence.
+// The action must honor ctx itself and must not reenter claim operations.
+func RemoveExactClaimAfterContext(ctx context.Context, claim core.LeaseClaim, want ClaimBinding, action func() error) error {
 	if err := ValidateClaimBinding(claim, want); err != nil {
 		return core.Exit(2, "%s lease=%s has a stale exact local ownership claim: %v", want.Provider, want.LeaseID, err)
 	}
-	return core.RemoveLeaseClaimIfUnchangedAfter(want.LeaseID, claim, action)
+	return core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, want.LeaseID, claim, true, action)
 }
 
 // UpdateExactClaimLabelsAfter fences provider mutations that retain their

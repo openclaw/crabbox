@@ -191,6 +191,66 @@ func TestResolveProviderClaimStrictRejectsMalformedExactClaim(t *testing.T) {
 	}
 }
 
+func TestRemoveExactClaimAfterContext(t *testing.T) {
+	for _, scenario := range []string{"canceled", "binding mismatch", "stale snapshot", "callback failure", "completed action"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			want := ClaimBinding{Provider: "example", ProviderScope: "account:one", LeaseID: "cbx_aaaaaaaaaaaa", Slug: "alpha", CloudID: "resource-1"}
+			labels := map[string]string{"lease": want.LeaseID, "slug": want.Slug, "provider": want.Provider}
+			if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(want.LeaseID, want.Slug, want.Provider, want.ProviderScope, "", t.TempDir(), time.Minute, false, core.Server{Provider: want.Provider, CloudID: want.CloudID, Labels: labels}, core.SSHTarget{}); err != nil {
+				t.Fatal(err)
+			}
+			claim, err := RequireExactClaim(want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := claim
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			switch scenario {
+			case "canceled":
+				cancel()
+			case "binding mismatch":
+				want.CloudID = "resource-2"
+			case "stale snapshot":
+				expected, err = core.ReplaceLeaseClaimIfUnchangedDurableReturning(claim.LeaseID, claim, claim)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			called := false
+			failed := errors.New("provider cleanup failed")
+			err = RemoveExactClaimAfterContext(ctx, claim, want, func() error {
+				called = true
+				if scenario == "callback failure" {
+					return failed
+				}
+				cancel()
+				return nil
+			})
+			if scenario == "completed action" {
+				if err != nil || !called {
+					t.Fatalf("confirmed action err=%v called=%t", err, called)
+				}
+				if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); exists || err != nil {
+					t.Fatalf("confirmed cleanup retained claim: exists=%t err=%v", exists, err)
+				}
+				return
+			}
+			if err == nil || called != (scenario == "callback failure") {
+				t.Fatalf("rejected cleanup err=%v called=%t", err, called)
+			}
+			if scenario == "canceled" && !errors.Is(err, context.Canceled) || scenario == "callback failure" && !errors.Is(err, failed) {
+				t.Fatalf("cleanup cause lost: %v", err)
+			}
+			got, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
+			if readErr != nil || !exists || !reflect.DeepEqual(got, expected) {
+				t.Fatalf("rejected cleanup changed ownership: claim=%#v err=%v", got, readErr)
+			}
+		})
+	}
+}
+
 func TestRequireClaimSnapshot(t *testing.T) {
 	claim := core.LeaseClaim{LeaseID: "cbx_aaaaaaaaaaaa", Provider: "example", Revision: "revision-1"}
 	server := core.Server{Labels: map[string]string{"lease": claim.LeaseID}}

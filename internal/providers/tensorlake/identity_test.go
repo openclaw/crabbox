@@ -196,6 +196,48 @@ func TestStaleCleanupRejectsBeforeNativeCalls(t *testing.T) {
 	assertTensorlakeClaimUnchanged(t, changed)
 }
 
+func TestBoundCleanupDeadlineIncludesClaimWait(t *testing.T) {
+	for _, shared := range []bool{false, true} {
+		t.Run(fmt.Sprintf("shared=%t", shared), func(t *testing.T) {
+			_, c, runner, claim := ownedTensorlakeFixture(t)
+			entered, release := make(chan struct{}), make(chan struct{})
+			holderDone := make(chan error, 1)
+			go func() {
+				hold := func() error { close(entered); <-release; return nil }
+				if shared {
+					holderDone <- core.WithLeaseClaimUnchangedShared(t.Context(), claim.LeaseID, claim, hold)
+				} else {
+					holderDone <- core.WithDurableLeaseClaimLockContext(t.Context(), claim.LeaseID, func(*core.LeaseClaim, bool, func() error) error { return hold() })
+				}
+			}()
+			<-entered
+			ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- c.removeBoundClaim(ctx, claim) }()
+			var err error
+			returnedBeforeRelease := false
+			select {
+			case err = <-done:
+				returnedBeforeRelease = true
+			case <-time.After(time.Second):
+			}
+			// Join both operations even on the broken contextless baseline.
+			close(release)
+			if holderErr := <-holderDone; holderErr != nil {
+				t.Fatal(holderErr)
+			}
+			if !returnedBeforeRelease {
+				err = <-done
+			}
+			if !returnedBeforeRelease || !errors.Is(err, context.DeadlineExceeded) || len(runner.calls) != 0 {
+				t.Fatalf("cleanup waited past deadline: returned=%t err=%v native_calls=%d", returnedBeforeRelease, err, len(runner.calls))
+			}
+			assertTensorlakeClaimUnchanged(t, claim)
+		})
+	}
+}
+
 func TestOneShotTeardownKeepsOriginalClaim(t *testing.T) {
 	testutil.IsolateUserDirs(t)
 	id := "3pryjysezwsnlex226i5h"

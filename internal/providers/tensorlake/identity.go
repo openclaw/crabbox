@@ -180,8 +180,10 @@ func (c *tensorlakeCLI) verifyBinding(ctx context.Context, binding sandboxBindin
 	return item, nil
 }
 
+const terminationTimeout = 30 * time.Second
+
 func (c *tensorlakeCLI) terminateBound(ctx context.Context, binding sandboxBinding) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, terminationTimeout)
 	defer cancel()
 	item, err := c.verifyBinding(ctx, binding)
 	if err != nil {
@@ -209,5 +211,8 @@ func (c *tensorlakeCLI) removeBoundClaim(ctx context.Context, claim core.LeaseCl
 	if err != nil {
 		return err
 	}
-	return shared.RemoveExactClaimAfter(claim, want, func() error { return c.terminateBound(ctx, binding) })
+	// One budget covers claim admission as well as native termination/confirmation.
+	ctx, cancel := context.WithTimeout(ctx, terminationTimeout)
+	defer cancel()
+	return shared.RemoveExactClaimAfterContext(ctx, claim, want, func() error { return c.terminateBound(ctx, binding) })
 }
