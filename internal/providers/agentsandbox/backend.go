@@ -7,6 +7,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type backend struct {
@@ -90,11 +92,12 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 			fmt.Fprintf(b.rt.Stderr, "warning: agent-sandbox warmup keeps the claim until explicit stop\n")
 		}
 	}
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, TotalMs: total.Milliseconds(), ExitCode: 0})
-	}
-	return nil
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
 func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
