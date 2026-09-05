@@ -82,9 +82,7 @@ func prepareDelegatedArchive(ctx context.Context, req DelegatedArchivePreparatio
 	manifestDuration := now().Sub(manifestStart)
 
 	preflightStart := now()
-	archiveManifest := manifest
-	archiveManifest.Changed = nil
-	archiveManifest.ChangedBytes = 0
+	archiveManifest := FullSyncGuardrailManifest(manifest)
 	if err := checkSyncPreflight(archiveManifest, req.Config, req.ForceSyncLarge, stderr); err != nil {
 		return nil, archiveCtx, cancel, err
 	}

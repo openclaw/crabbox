@@ -8,6 +8,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func (b *backend) syncWorkspace(ctx context.Context, client Client, sandboxID string, req RunRequest, workdir string) ([]timingPhase, time.Duration, error) {
@@ -131,9 +133,7 @@ func checkBlaxelSyncPreflight(manifest SyncManifest, cfg Config, force bool, wri
 	if writer == nil {
 		writer = os.Stderr
 	}
-	archiveManifest := manifest
-	archiveManifest.Changed = nil
-	archiveManifest.ChangedBytes = 0
+	archiveManifest := core.FullSyncGuardrailManifest(manifest)
 	return checkSyncPreflight(archiveManifest, cfg, force, writer)
 }
 
