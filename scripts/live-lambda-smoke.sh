@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+json_matcher="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/live-smoke-json-match.py"
+
 provider_enabled() {
   local list="${CRABBOX_LIVE_PROVIDERS:-lambda}"
   local item
@@ -103,34 +105,7 @@ validate_list_json_contains_slug() {
   local validation_output=""
   local status=0
   set +e
-  validation_output="$(CRABBOX_SMOKE_SLUG="$slug" python3 -c '
-import json
-import os
-import sys
-
-slug = os.environ["CRABBOX_SMOKE_SLUG"]
-try:
-    payload = json.load(sys.stdin)
-except Exception as exc:
-    print(f"invalid JSON: {exc}", file=sys.stderr)
-    sys.exit(1)
-
-def has_slug(value):
-    if isinstance(value, dict):
-        labels = value.get("labels") or value.get("tags")
-        if isinstance(labels, dict) and (labels.get("slug") == slug or labels.get("crabbox.slug") == slug):
-            return True
-        if value.get("slug") == slug or value.get("name") == slug or value.get("id") == slug or value.get("leaseId") == slug:
-            return True
-        return any(has_slug(child) for child in value.values())
-    if isinstance(value, list):
-        return any(has_slug(child) for child in value)
-    return False
-
-if not has_slug(payload):
-    print(f"list JSON did not include slug {slug}", file=sys.stderr)
-    sys.exit(1)
-' <<<"$output" 2>&1)"
+  validation_output="$(CRABBOX_SMOKE_SLUG="$slug" CRABBOX_SMOKE_FAILURE="list JSON did not include slug $slug" python3 "$json_matcher" lambda contains <<<"$output" 2>&1)"
   status=$?
   set -e
   if [ "$status" -ne 0 ]; then
@@ -145,20 +120,7 @@ validate_list_json_empty() {
   local validation_output=""
   local status=0
   set +e
-  validation_output="$(python3 -c '
-import json
-import sys
-
-try:
-    payload = json.load(sys.stdin)
-except Exception as exc:
-    print(f"invalid JSON: {exc}", file=sys.stderr)
-    sys.exit(1)
-
-if payload != []:
-    print("Lambda Crabbox inventory is not empty", file=sys.stderr)
-    sys.exit(1)
-' <<<"$output" 2>&1)"
+  validation_output="$(CRABBOX_SMOKE_SLUG="$slug" CRABBOX_SMOKE_FAILURE="Lambda Crabbox inventory is not empty" python3 "$json_matcher" standard empty <<<"$output" 2>&1)"
   status=$?
   set -e
   if [ "$status" -ne 0 ]; then

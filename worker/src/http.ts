@@ -4,13 +4,6 @@ export function json(data: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(redactStackTraceFields(data)), { ...init, headers });
 }
 
-export function text(message: string, status = 200): Response {
-  return new Response(message, {
-    status,
-    headers: { "content-type": "text/plain; charset=utf-8" },
-  });
-}
-
 export async function readJson<T>(request: Request): Promise<T> {
   const value = (await request.json()) as unknown;
   return value as T;

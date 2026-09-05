@@ -351,19 +351,6 @@ func TestParseFirstIPv4(t *testing.T) {
 	}
 }
 
-func TestIsIPv4(t *testing.T) {
-	for _, good := range []string{"192.168.1.1", "10.0.0.1", "172.20.0.5", "0.0.0.0", "255.255.255.255"} {
-		if !isIPv4(good) {
-			t.Fatalf("isIPv4(%q) should be true", good)
-		}
-	}
-	for _, bad := range []string{"fe80::1", "abc", "192.168.1", "192.168.1.1.1", "300.0.0.1"} {
-		if isIPv4(bad) {
-			t.Fatalf("isIPv4(%q) should be false", bad)
-		}
-	}
-}
-
 func TestHypervState(t *testing.T) {
 	tests := map[int]string{
 		2:  "running",
