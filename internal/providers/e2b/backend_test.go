@@ -383,18 +383,6 @@ func TestParseE2BProcessStreamRequiresEndEvent(t *testing.T) {
 	}
 }
 
-func TestE2BCommandString(t *testing.T) {
-	if got := e2bCommandString([]string{"go", "test", "./..."}, false); got != "'go' 'test' './...'" {
-		t.Fatalf("plain command=%q", got)
-	}
-	if got := e2bCommandString([]string{"FOO=bar", "go", "test"}, false); !strings.Contains(got, "FOO=") || !strings.Contains(got, "'go'") {
-		t.Fatalf("env command=%q", got)
-	}
-	if got := e2bCommandString([]string{"pnpm install && pnpm test"}, true); got != "pnpm install && pnpm test" {
-		t.Fatalf("shell command=%q", got)
-	}
-}
-
 func TestE2BWorkspacePath(t *testing.T) {
 	if got := e2bWorkspacePath(Config{}); got != "/home/user/crabbox" {
 		t.Fatalf("workspace=%q", got)
@@ -1653,6 +1641,107 @@ func TestE2BRunLifecycleCleanupOutcomeAndTiming(t *testing.T) {
 			}
 			if report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind || report.TotalMs != result.Total.Milliseconds() {
 				t.Fatalf("report=%#v result=%#v", report, result)
+			}
+		})
+	}
+}
+
+func TestRunCommandIntentReachesExistingShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell contract")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash unavailable")
+	}
+	for _, name := range []string{"literal separator", "literal assignment", "literal singleton", "mixed operators", "quoted argv", "unmarked assignment", "explicit source", "empty source", "inferred source", "missing command"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			root := t.TempDir()
+			marker := filepath.Join(root, "must-not-exist")
+			program := filepath.Join(root, "FOO=x")
+			if err := os.WriteFile(program, []byte("#!/bin/sh\nprintf 'literal:%s' \"$*\"\nexit 42\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			client := &fakeE2BSyncClient{}
+			restore := swapNewE2BClient(client)
+			defer restore()
+			backend := &e2bBackend{cfg: Config{E2B: E2BConfig{Template: "base", Workdir: root}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+			req := RunRequest{Repo: Repo{Root: root}, NoSync: true, Keep: true}
+			want, wantExit := "", 0
+			switch name {
+			case "literal separator":
+				req.Command = []string{"printf", "<%s>", ";", "touch", marker}
+				req.CommandLiteralArgs = map[int]bool{2: true}
+				want = "<;><touch><" + marker + ">"
+			case "literal assignment":
+				req.Command = []string{"FOO=x", "argument"}
+				req.CommandLiteralArgs = map[int]bool{0: true}
+				want, wantExit = "literal:argument", 42
+			case "literal singleton":
+				req.Command = []string{"FOO=x"}
+				req.CommandLiteralArgs = map[int]bool{0: true}
+				want, wantExit = "literal:", 42
+			case "mixed operators":
+				req.Command = []string{"printf", "%s", ";", "&&", "printf", "%s", "tail"}
+				req.CommandLiteralArgs = map[int]bool{2: true}
+				want = ";tail"
+			case "quoted argv":
+				req.Command = []string{"printf", "<%s>", "", "$literal", "a'b"}
+				want = "<><$literal><a'b>"
+			case "unmarked assignment":
+				req.Command = []string{"CBX_PROBE=value", "sh", "-c", `printf %s "$CBX_PROBE"`}
+				want = "value"
+			case "explicit source":
+				req.Command = []string{`printf %s "$unexported_fixture_state"; exit 7`}
+				req.ShellMode = true
+				want, wantExit = "existing-shell", 7
+			case "empty source":
+				req.Command = []string{""}
+				req.ShellMode = true
+			case "inferred source":
+				req.Command = []string{"printf %s inferred"}
+				want = "inferred"
+			}
+			_, runErr := backend.Run(t.Context(), req)
+			if name == "missing command" {
+				var ee core.ExitError
+				if !errors.As(runErr, &ee) || ee.Code != 2 {
+					t.Fatalf("missing command error=%v", runErr)
+				}
+				if len(client.commands) != 1 {
+					t.Fatalf("missing command reached workload: %v", client.commands)
+				}
+				return
+			}
+			if runErr != nil {
+				t.Fatal(runErr)
+			}
+			if len(client.commands) != 2 {
+				t.Fatalf("commands=%v want preparation and workload", client.commands)
+			}
+			// Exercise the captured workload in an existing shell; the separate
+			// native envd fixture verifies its actual login-shell transport.
+			source := "unexported_fixture_state=existing-shell\n" + client.commands[1]
+			cmd := exec.CommandContext(t.Context(), bash, "--noprofile", "--norc", "-c", source)
+			cmd.Dir = root
+			cmd.Env = []string{"HOME=" + root, "PATH=" + root + ":/usr/bin:/bin"}
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			commandErr := cmd.Run()
+			code := 0
+			if commandErr != nil {
+				var ee *exec.ExitError
+				if !errors.As(commandErr, &ee) {
+					t.Fatal(commandErr)
+				}
+				code = ee.ExitCode()
+			}
+			if code != wantExit || stdout.String() != want {
+				t.Fatalf("source=%q stdout=%q stderr=%q exit=%d; want %q/%d", source, stdout.String(), stderr.String(), code, want, wantExit)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("literal separator ran touch: %v", err)
 			}
 		})
 	}

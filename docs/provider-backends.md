@@ -424,6 +424,14 @@ Adapters retain their shell choice, working directory, environment transport,
 and execution lifecycle. Serialize the classified intent without running shell
 inference again.
 
+`ShellSource` targets a terminal workload in an already selected POSIX shell:
+shell intent stays source in that shell, while literal argv is quoted after
+`exec`. E2B and CubeSandbox use this boundary before their shared envd transport
+selects `/bin/bash -l -c`; SmolVM and Upstash Box likewise retain their existing
+source-only shell boundaries. Shell-local functions, builtins, and state require
+shell intent, not literal argv. Do not insert a second shell or reinterpret the
+rendered source before transport.
+
 `shared.WrapCommandWithShellEnvProfile` accepts execution argv, not unclassified
 user input. Its fallback quotes every word literally before terminal execution;
 it must not infer operators or assignments again. An exact three-word
