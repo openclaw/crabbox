@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Blaxel: prepare and validate sync archives before fresh allocation, freeze the pre-create snapshot, and share staged workspace replacement and cleanup while retaining native upload retries. Thanks @steipete.
+- Blaxel: prepare and validate sync archives before fresh allocation, freeze the pre-create snapshot, and share staged workspace replacement and cleanup while retaining native upload retries. [PR 1867](https://github.com/openclaw/crabbox/pull/1867). Thanks @steipete.
 - Preserve literal E2B and CubeSandbox profile arguments through their shared envd command transport, and accept inferred single-string shell programs and explicit empty shell source. [PR 1837](https://github.com/openclaw/crabbox/pull/1837). Thanks @steipete.
 - Blaxel: stop the original process after interrupted polling requests and preserve cancellation and timeout causes without exposing redacted credentials. [PR 1846](https://github.com/openclaw/crabbox/pull/1846). Thanks @steipete.
 - Report Azure Dynamic Sessions cleanup failures as failed runs, preserve primary Superserve/Azure errors through cleanup and timing output, and keep Superserve rollback bound to the originally created sandbox. [PR 1836](https://github.com/openclaw/crabbox/pull/1836). Thanks @steipete.
