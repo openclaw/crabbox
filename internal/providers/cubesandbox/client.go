@@ -251,6 +251,9 @@ func (c *cubesandboxClient) ConnectSandbox(ctx context.Context, sandboxID string
 	if err := c.doJSON(ctx, http.MethodPost, "/sandboxes/"+url.PathEscape(sandboxID)+"/connect", nil, body, &sandbox); err != nil {
 		return cubesandboxSession{}, err
 	}
+	if shared.ValidateResourceID(sandboxID, sandbox.SandboxID) != nil {
+		return cubesandboxSession{}, errors.New("connect sandbox returned a different or missing sandbox ID")
+	}
 	return c.sessionFromSandbox(sandbox), nil
 }
 
@@ -258,6 +261,9 @@ func (c *cubesandboxClient) GetSandbox(ctx context.Context, sandboxID string) (c
 	var sandbox cubesandboxSandbox
 	if err := c.doJSON(ctx, http.MethodGet, "/sandboxes/"+url.PathEscape(sandboxID), nil, nil, &sandbox); err != nil {
 		return cubesandboxSandbox{}, err
+	}
+	if shared.ValidateResourceID(sandboxID, sandbox.SandboxID) != nil {
+		return cubesandboxSandbox{}, errors.New("get sandbox returned a different or missing sandbox ID")
 	}
 	if sandbox.Metadata == nil {
 		sandbox.Metadata = map[string]string{}
@@ -533,7 +539,7 @@ func parseCubeSandboxProcessStream(r io.Reader, stdout, stderr io.Writer, secret
 				if exitCode == 0 {
 					exitCode = 1
 				}
-				return exitCode, fmt.Errorf("cubesandbox process did not exit normally: %s", detail)
+				return exitCode, shared.ObservedProcessEndError(fmt.Sprintf("cubesandbox process did not exit normally: %s", detail))
 			}
 		}
 	}

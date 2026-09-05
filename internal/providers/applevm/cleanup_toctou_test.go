@@ -36,7 +36,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,36 +121,9 @@ func TestCleanupOrphanSweepGuardDeclinesReclaimedCandidate(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	var out bytes.Buffer
 
-	oldGOOS, oldGOARCH := hostGOOS, hostGOARCH
-	oldMacOSVersion := hostMacOSVersion
-	hostGOOS, hostGOARCH = "darwin", "arm64"
-	hostMacOSVersion = func() (string, error) { return "26.5", nil }
-	t.Cleanup(func() {
-		hostGOOS, hostGOARCH = oldGOOS, oldGOARCH
-		hostMacOSVersion = oldMacOSVersion
-	})
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".state"))
-	root := t.TempDir()
-
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.AppleVM = core.AppleVMConfig{
-		HelperPath:  "/tmp/helper-source",
-		Image:       "https://cloud-images.ubuntu.com/releases/noble/release-20260518/ubuntu-24.04-server-cloudimg-arm64.img",
-		ImageSHA256: "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec",
-		User:        "runner",
-		WorkRoot:    "/workspace/crabbox",
-		CPUs:        4,
-		MemoryMiB:   8192,
-		DiskGiB:     40,
-	}
-	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &out, Stderr: &out, Exec: runner}).(*backend)
-	b.prepareHelper = func(context.Context, core.Config) (string, error) { return "helper", nil }
-	b.stateRoot = func() (string, error) { return root, nil }
-	b.waitForSSH = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	b := testBackend(t, runner)
+	b.rt.Stdout, b.rt.Stderr = &out, &out
+	root, _ := b.stateRoot()
 
 	leaseID := "cbx_orphan67890"
 	slug := "orphan-slug"
@@ -213,36 +185,9 @@ func TestCleanupRetainsKeyPreparedByConcurrentAcquire(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	var out bytes.Buffer
 
-	oldGOOS, oldGOARCH := hostGOOS, hostGOARCH
-	oldMacOSVersion := hostMacOSVersion
-	hostGOOS, hostGOARCH = "darwin", "arm64"
-	hostMacOSVersion = func() (string, error) { return "26.5", nil }
-	t.Cleanup(func() {
-		hostGOOS, hostGOARCH = oldGOOS, oldGOARCH
-		hostMacOSVersion = oldMacOSVersion
-	})
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".state"))
-	root := t.TempDir()
-
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.AppleVM = core.AppleVMConfig{
-		HelperPath:  "/tmp/helper-source",
-		Image:       "https://cloud-images.ubuntu.com/releases/noble/release-20260518/ubuntu-24.04-server-cloudimg-arm64.img",
-		ImageSHA256: "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec",
-		User:        "runner",
-		WorkRoot:    "/workspace/crabbox",
-		CPUs:        4,
-		MemoryMiB:   8192,
-		DiskGiB:     40,
-	}
-	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &out, Stderr: &out, Exec: runner}).(*backend)
-	b.prepareHelper = func(context.Context, core.Config) (string, error) { return "helper", nil }
-	b.stateRoot = func() (string, error) { return root, nil }
-	b.waitForSSH = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	b := testBackend(t, runner)
+	b.rt.Stdout, b.rt.Stderr = &out, &out
+	root, _ := b.stateRoot()
 
 	leaseID := "cbx_keyretained67890"
 	slug := "key-retained-slug"
@@ -283,36 +228,9 @@ func TestCleanupDryRunDoesNotPlanReclaimedCandidateRemoval(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	var out bytes.Buffer
 
-	oldGOOS, oldGOARCH := hostGOOS, hostGOARCH
-	oldMacOSVersion := hostMacOSVersion
-	hostGOOS, hostGOARCH = "darwin", "arm64"
-	hostMacOSVersion = func() (string, error) { return "26.5", nil }
-	t.Cleanup(func() {
-		hostGOOS, hostGOARCH = oldGOOS, oldGOARCH
-		hostMacOSVersion = oldMacOSVersion
-	})
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".state"))
-	root := t.TempDir()
-
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.AppleVM = core.AppleVMConfig{
-		HelperPath:  "/tmp/helper-source",
-		Image:       "https://cloud-images.ubuntu.com/releases/noble/release-20260518/ubuntu-24.04-server-cloudimg-arm64.img",
-		ImageSHA256: "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec",
-		User:        "runner",
-		WorkRoot:    "/workspace/crabbox",
-		CPUs:        4,
-		MemoryMiB:   8192,
-		DiskGiB:     40,
-	}
-	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &out, Stderr: &out, Exec: runner}).(*backend)
-	b.prepareHelper = func(context.Context, core.Config) (string, error) { return "helper", nil }
-	b.stateRoot = func() (string, error) { return root, nil }
-	b.waitForSSH = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	b := testBackend(t, runner)
+	b.rt.Stdout, b.rt.Stderr = &out, &out
+	root, _ := b.stateRoot()
 
 	leaseID := "cbx_dryrun67890"
 	slug := "dryrun-orphan-slug"
@@ -379,36 +297,9 @@ func TestCleanupDryRunReportsGenuineOrphanRemoval(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	var out bytes.Buffer
 
-	oldGOOS, oldGOARCH := hostGOOS, hostGOARCH
-	oldMacOSVersion := hostMacOSVersion
-	hostGOOS, hostGOARCH = "darwin", "arm64"
-	hostMacOSVersion = func() (string, error) { return "26.5", nil }
-	t.Cleanup(func() {
-		hostGOOS, hostGOARCH = oldGOOS, oldGOARCH
-		hostMacOSVersion = oldMacOSVersion
-	})
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".state"))
-	root := t.TempDir()
-
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.AppleVM = core.AppleVMConfig{
-		HelperPath:  "/tmp/helper-source",
-		Image:       "https://cloud-images.ubuntu.com/releases/noble/release-20260518/ubuntu-24.04-server-cloudimg-arm64.img",
-		ImageSHA256: "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec",
-		User:        "runner",
-		WorkRoot:    "/workspace/crabbox",
-		CPUs:        4,
-		MemoryMiB:   8192,
-		DiskGiB:     40,
-	}
-	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &out, Stderr: &out, Exec: runner}).(*backend)
-	b.prepareHelper = func(context.Context, core.Config) (string, error) { return "helper", nil }
-	b.stateRoot = func() (string, error) { return root, nil }
-	b.waitForSSH = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	b := testBackend(t, runner)
+	b.rt.Stdout, b.rt.Stderr = &out, &out
+	root, _ := b.stateRoot()
 
 	leaseID := "cbx_dryrun_genuine"
 	slug := "dryrun-genuine-slug"
@@ -443,36 +334,9 @@ func TestCleanupSweepSkipsForeignProviderClaim(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	var out bytes.Buffer
 
-	oldGOOS, oldGOARCH := hostGOOS, hostGOARCH
-	oldMacOSVersion := hostMacOSVersion
-	hostGOOS, hostGOARCH = "darwin", "arm64"
-	hostMacOSVersion = func() (string, error) { return "26.5", nil }
-	t.Cleanup(func() {
-		hostGOOS, hostGOARCH = oldGOOS, oldGOARCH
-		hostMacOSVersion = oldMacOSVersion
-	})
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".state"))
-	root := t.TempDir()
-
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.AppleVM = core.AppleVMConfig{
-		HelperPath:  "/tmp/helper-source",
-		Image:       "https://cloud-images.ubuntu.com/releases/noble/release-20260518/ubuntu-24.04-server-cloudimg-arm64.img",
-		ImageSHA256: "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec",
-		User:        "runner",
-		WorkRoot:    "/workspace/crabbox",
-		CPUs:        4,
-		MemoryMiB:   8192,
-		DiskGiB:     40,
-	}
-	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &out, Stderr: &out, Exec: runner}).(*backend)
-	b.prepareHelper = func(context.Context, core.Config) (string, error) { return "helper", nil }
-	b.stateRoot = func() (string, error) { return root, nil }
-	b.waitForSSH = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	b := testBackend(t, runner)
+	b.rt.Stdout, b.rt.Stderr = &out, &out
+	root, _ := b.stateRoot()
 
 	const foreignProvider = "aws"
 	leaseID := "cbx_foreign_provider"

@@ -15,6 +15,7 @@ import (
 
 	"github.com/hashicorp/go-cleanhttp"
 	nomadapi "github.com/hashicorp/nomad/api"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type Client interface {
@@ -112,24 +113,7 @@ func secureNomadHTTPClient(source *http.Client, trusted *url.URL) *http.Client {
 }
 
 func sameNomadOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveNomadPort(a) == effectiveNomadPort(b)
-}
-
-func effectiveNomadPort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+	return shared.SameOrigin(a, b)
 }
 
 func sanitizeNomadClientError(err error) error {

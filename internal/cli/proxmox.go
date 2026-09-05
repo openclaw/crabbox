@@ -1364,19 +1364,6 @@ func (c *ProxmoxClient) waitTask(ctx context.Context, upid string) error {
 	}
 }
 
-type proxmoxAgentExecStart struct {
-	PID int `json:"pid"`
-}
-
-type proxmoxAgentExecStatus struct {
-	Exited   proxmoxBool `json:"exited"`
-	ExitCode int         `json:"exitcode"`
-	OutData  string      `json:"out-data"`
-	ErrData  string      `json:"err-data"`
-}
-
-type proxmoxBool bool
-
 type proxmoxAgentInterface struct {
 	Name        string `json:"name"`
 	IPAddresses []struct {

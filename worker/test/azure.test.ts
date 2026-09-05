@@ -104,6 +104,41 @@ function ownedAzureTags(overrides: Record<string, string> = {}): Record<string, 
   };
 }
 
+function ownedAzureVMProperties() {
+  return {
+    vmId: "vm-immutable-id",
+    networkProfile: {
+      networkInterfaces: [
+        {
+          id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic",
+        },
+      ],
+    },
+    storageProfile: {
+      osDisk: {
+        managedDisk: {
+          id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/disks/crabbox-blue-lobster-osdisk",
+        },
+      },
+    },
+  };
+}
+
+function ownedAzureNICProperties() {
+  return {
+    resourceGuid: "nic-immutable-id",
+    ipConfigurations: [
+      {
+        properties: {
+          publicIPAddress: {
+            id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip",
+          },
+        },
+      },
+    ],
+  };
+}
+
 function memoryAzureDeleteClaimStorage(): {
   records: Map<string, unknown>;
   putKeys: string[];
@@ -947,23 +982,7 @@ describe("azure provider", () => {
           name: "crabbox-blue-lobster",
           location: "eastus",
           tags: ownedAzureTags(),
-          properties: {
-            vmId: "vm-immutable-id",
-            networkProfile: {
-              networkInterfaces: [
-                {
-                  id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic",
-                },
-              ],
-            },
-            storageProfile: {
-              osDisk: {
-                managedDisk: {
-                  id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/disks/crabbox-blue-lobster-osdisk",
-                },
-              },
-            },
-          },
+          properties: ownedAzureVMProperties(),
         });
       }
       if (url.pathname.endsWith("/networkInterfaces/crabbox-blue-lobster-nic")) {
@@ -2476,23 +2495,7 @@ describe("azure provider", () => {
         const isPIP = url.pathname.includes("/publicIPAddresses/");
         const isDisk = url.pathname.includes("/disks/");
         const properties = isVM
-          ? {
-              vmId: "vm-immutable-id",
-              networkProfile: {
-                networkInterfaces: [
-                  {
-                    id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic",
-                  },
-                ],
-              },
-              storageProfile: {
-                osDisk: {
-                  managedDisk: {
-                    id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/disks/crabbox-blue-lobster-osdisk",
-                  },
-                },
-              },
-            }
+          ? ownedAzureVMProperties()
           : isNIC
             ? {
                 resourceGuid: "nic-immutable-id",
@@ -3001,36 +3004,9 @@ describe("azure provider", () => {
         ? "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/virtualMachines/crabbox-blue-lobster"
         : undefined;
       const properties = url.pathname.includes("/virtualMachines/")
-        ? {
-            vmId: "vm-immutable-id",
-            networkProfile: {
-              networkInterfaces: [
-                {
-                  id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic",
-                },
-              ],
-            },
-            storageProfile: {
-              osDisk: {
-                managedDisk: {
-                  id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/disks/crabbox-blue-lobster-osdisk",
-                },
-              },
-            },
-          }
+        ? ownedAzureVMProperties()
         : url.pathname.includes("/networkInterfaces/")
-          ? {
-              resourceGuid: "nic-immutable-id",
-              ipConfigurations: [
-                {
-                  properties: {
-                    publicIPAddress: {
-                      id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip",
-                    },
-                  },
-                },
-              ],
-            }
+          ? ownedAzureNICProperties()
           : url.pathname.includes("/publicIPAddresses/")
             ? { resourceGuid: "pip-immutable-id" }
             : url.pathname.includes("/disks/")
@@ -3155,36 +3131,9 @@ describe("azure provider", () => {
           : ownedAzureTags();
       const isDisk = url.pathname.includes("/disks/");
       const properties = url.pathname.includes("/virtualMachines/")
-        ? {
-            vmId: "vm-immutable-id",
-            networkProfile: {
-              networkInterfaces: [
-                {
-                  id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic",
-                },
-              ],
-            },
-            storageProfile: {
-              osDisk: {
-                managedDisk: {
-                  id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/disks/crabbox-blue-lobster-osdisk",
-                },
-              },
-            },
-          }
+        ? ownedAzureVMProperties()
         : url.pathname.includes("/networkInterfaces/")
-          ? {
-              resourceGuid: "nic-immutable-id",
-              ipConfigurations: [
-                {
-                  properties: {
-                    publicIPAddress: {
-                      id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip",
-                    },
-                  },
-                },
-              ],
-            }
+          ? ownedAzureNICProperties()
           : url.pathname.includes("/publicIPAddresses/")
             ? { resourceGuid: "pip-immutable-id" }
             : isDisk
@@ -3228,36 +3177,9 @@ describe("azure provider", () => {
       const name = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
       const isDisk = url.pathname.includes("/disks/");
       const properties = url.pathname.includes("/virtualMachines/")
-        ? {
-            vmId: "vm-immutable-id",
-            networkProfile: {
-              networkInterfaces: [
-                {
-                  id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic",
-                },
-              ],
-            },
-            storageProfile: {
-              osDisk: {
-                managedDisk: {
-                  id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/disks/crabbox-blue-lobster-osdisk",
-                },
-              },
-            },
-          }
+        ? ownedAzureVMProperties()
         : url.pathname.includes("/networkInterfaces/")
-          ? {
-              resourceGuid: "nic-immutable-id",
-              ipConfigurations: [
-                {
-                  properties: {
-                    publicIPAddress: {
-                      id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip",
-                    },
-                  },
-                },
-              ],
-            }
+          ? ownedAzureNICProperties()
           : url.pathname.includes("/publicIPAddresses/")
             ? { resourceGuid: "pip-immutable-id" }
             : isDisk
