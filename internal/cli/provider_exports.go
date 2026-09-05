@@ -25,7 +25,7 @@ func RuntimeForProviderOperation(stderr io.Writer) Runtime {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	return Runtime{Stdout: io.Discard, Stderr: stderr, Clock: realClock{}, Exec: execCommandRunner{}}
+	return Runtime{Stdout: io.Discard, Stderr: stderr, Clock: realClock{}, HTTP: defaultRuntimeHTTP(), Exec: execCommandRunner{}}
 }
 
 // ProviderSelectionIsAuthoritativeRoute reports whether cfg names an exact

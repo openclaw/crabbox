@@ -1677,8 +1677,14 @@ func routeConfiguredProvider(cfg *Config) error {
 	return nil
 }
 
+const defaultRuntimeHTTPTimeout = 60 * time.Second
+
+func defaultRuntimeHTTP() *http.Client {
+	return &http.Client{Timeout: defaultRuntimeHTTPTimeout}
+}
+
 func runtimeForApp(a App) Runtime {
-	return Runtime{Stdout: a.Stdout, Stderr: a.Stderr, Clock: realClock{}, Exec: execCommandRunner{}}
+	return Runtime{Stdout: a.Stdout, Stderr: a.Stderr, Clock: realClock{}, HTTP: defaultRuntimeHTTP(), Exec: execCommandRunner{}}
 }
 
 const (
