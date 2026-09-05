@@ -17,7 +17,6 @@ import (
 
 const (
 	superserveCleanupTimeout = 15 * time.Second
-	statusViewReady          = "running"
 	NetworkPublic            = "public"
 
 	metadataProviderKey = "crabbox.provider"
