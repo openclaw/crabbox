@@ -879,11 +879,19 @@ func (e apiError) Error() string {
 	return fmt.Sprintf("blaxel API request failed status=%d body=%s", e.StatusCode, e.Body)
 }
 
+type redactedError struct {
+	message string
+	cause   error
+}
+
+func (e redactedError) Error() string { return e.message }
+func (e redactedError) Unwrap() error { return e.cause }
+
 func redactError(err error) error {
 	if err == nil {
 		return nil
 	}
-	return errors.New(redactString(err.Error()))
+	return redactedError{message: redactString(err.Error()), cause: err}
 }
 
 func redactString(value string) string {
