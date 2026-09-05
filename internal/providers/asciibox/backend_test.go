@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -274,16 +275,18 @@ func TestReleaseBoxRequiresCompletedDeletionOperation(t *testing.T) {
 }
 
 func TestReleaseBoxPendingOperationHonorsDeadline(t *testing.T) {
-	runner := &releaseCommandRunner{configPath: filepath.Join(t.TempDir(), "config.json"), outcomes: map[string][]commandOutcome{
-		"stop": {{result: LocalCommandResult{}}}, "delete": {deletionOutcome(testDeletionID, "bx_guard", "box", "blocked")},
-	}}
-	c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner, releasePollInterval: time.Hour}
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	err := c.ReleaseBox(ctx, "bx_guard", func(context.Context) error { return nil })
-	if !errors.Is(err, context.DeadlineExceeded) || !containsCommand(runner.commands, "box --no-update --json --org personal --api-url https://ascii.dev delete bx_guard --yes") {
-		t.Fatalf("pending deletion err=%v commands=%v", err, runner.commands)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		runner := &releaseCommandRunner{configPath: filepath.Join(t.TempDir(), "config.json"), outcomes: map[string][]commandOutcome{
+			"stop": {{result: LocalCommandResult{}}}, "delete": {deletionOutcome(testDeletionID, "bx_guard", "box", "blocked")},
+		}}
+		c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner, releasePollInterval: time.Hour}
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		err := c.ReleaseBox(ctx, "bx_guard", func(context.Context) error { return nil })
+		if !errors.Is(err, context.DeadlineExceeded) || !containsCommand(runner.commands, "box --no-update --json --org personal --api-url https://ascii.dev delete bx_guard --yes") {
+			t.Fatalf("pending deletion err=%v commands=%v", err, runner.commands)
+		}
+	})
 }
 
 func TestAsciiBoxBaseURLValidation(t *testing.T) {

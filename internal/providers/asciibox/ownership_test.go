@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -296,46 +297,48 @@ func TestReleasePendingReferenceRejectsUncertainOperation(t *testing.T) {
 }
 
 func TestReleasePendingDeletionSurvivesTimeoutAndRetries(t *testing.T) {
-	b, _, claim, _ := ownedFixture(t)
-	info := commandOutcome{result: LocalCommandResult{Stdout: fmt.Sprintf(`{"box":{"id":%q,"createdAt":%q}}`, claim.CloudID, claim.Labels[boxCreationLabel])}}
-	runner := &releaseCommandRunner{configPath: t.TempDir() + "/config.json", outcomes: map[string][]commandOutcome{
-		"info": {info, info, info, info}, "stop": {{result: LocalCommandResult{}}},
-		"delete": {deletionOutcome(testDeletionID, claim.CloudID, "box", "pending")},
-	}}
-	c := &client{apiKey: "box_test", apiURL: "https://ascii.dev", home: t.TempDir(), cliPath: "box", runner: runner, releasePollInterval: time.Hour}
-	withFakeAPI(t, c)
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	if err := releaseClaimedBox(ctx, c, claim, nil); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("release err=%v, want deadline", err)
-	}
-	pending := assertPendingDeletionRetained(t, claim, testDeletionID)
-	runner.outcomes["deletion"] = []commandOutcome{deletionOutcome(testDeletionID, claim.CloudID, "box", "blocked")}
-	commandCount := len(runner.commands)
-	if _, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true}); err == nil {
-		t.Fatal("blocked operation was treated as completed")
-	}
-	assertClaimRetained(t, pending)
-	for _, command := range runner.commands[commandCount:] {
-		if strings.Contains(command, " info ") || strings.Contains(command, " list ") || strings.Contains(command, " stop ") || strings.Contains(command, " delete ") || strings.Contains(command, " ssh ") {
-			t.Fatalf("pending retry used Box lookup or mutation: %s", command)
+	synctest.Test(t, func(t *testing.T) {
+		b, _, claim, _ := ownedFixture(t)
+		info := commandOutcome{result: LocalCommandResult{Stdout: fmt.Sprintf(`{"box":{"id":%q,"createdAt":%q}}`, claim.CloudID, claim.Labels[boxCreationLabel])}}
+		runner := &releaseCommandRunner{configPath: t.TempDir() + "/config.json", outcomes: map[string][]commandOutcome{
+			"info": {info, info, info, info}, "stop": {{result: LocalCommandResult{}}},
+			"delete": {deletionOutcome(testDeletionID, claim.CloudID, "box", "pending")},
+		}}
+		c := &client{apiKey: "box_test", apiURL: "https://ascii.dev", home: t.TempDir(), cliPath: "box", runner: runner, releasePollInterval: time.Hour}
+		withFakeAPI(t, c)
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		if err := releaseClaimedBox(ctx, c, claim, nil); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("release err=%v, want deadline", err)
 		}
-	}
-	runner.outcomes["deletion"] = []commandOutcome{deletionOutcome(testDeletionID, claim.CloudID, "box", "completed"), deletionOutcome(testDeletionID, claim.CloudID, "box", "completed")}
-	notFound := commandOutcome{result: LocalCommandResult{Stderr: "box not found (404)"}, err: errors.New("exit status 1")}
-	empty := commandOutcome{result: LocalCommandResult{Stdout: `{"boxes":[]}`}}
-	runner.outcomes["info"] = []commandOutcome{notFound, notFound}
-	runner.outcomes["list"] = []commandOutcome{empty, empty}
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
-		t.Fatal(err)
-	}
-	if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
-		t.Fatalf("completed operation did not finalize: exists=%t err=%v", exists, err)
-	}
+		pending := assertPendingDeletionRetained(t, claim, testDeletionID)
+		runner.outcomes["deletion"] = []commandOutcome{deletionOutcome(testDeletionID, claim.CloudID, "box", "blocked")}
+		commandCount := len(runner.commands)
+		if _, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true}); err == nil {
+			t.Fatal("blocked operation was treated as completed")
+		}
+		assertClaimRetained(t, pending)
+		for _, command := range runner.commands[commandCount:] {
+			if strings.Contains(command, " info ") || strings.Contains(command, " list ") || strings.Contains(command, " stop ") || strings.Contains(command, " delete ") || strings.Contains(command, " ssh ") {
+				t.Fatalf("pending retry used Box lookup or mutation: %s", command)
+			}
+		}
+		runner.outcomes["deletion"] = []commandOutcome{deletionOutcome(testDeletionID, claim.CloudID, "box", "completed"), deletionOutcome(testDeletionID, claim.CloudID, "box", "completed")}
+		notFound := commandOutcome{result: LocalCommandResult{Stderr: "box not found (404)"}, err: errors.New("exit status 1")}
+		empty := commandOutcome{result: LocalCommandResult{Stdout: `{"boxes":[]}`}}
+		runner.outcomes["info"] = []commandOutcome{notFound, notFound}
+		runner.outcomes["list"] = []commandOutcome{empty, empty}
+		lease, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
+			t.Fatalf("completed operation did not finalize: exists=%t err=%v", exists, err)
+		}
+	})
 }
 
 func TestReleaseRejectsUnownedAndChangedClaims(t *testing.T) {

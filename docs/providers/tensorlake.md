@@ -171,6 +171,12 @@ identity checks. A changed claim blocks stale cleanup. Native control calls are
 bounded; authentication, malformed output, and missing metadata fail closed.
 An empty list or a `not found` response alone is not deletion proof.
 
+Cleanup of an existing bound claim has a single 30-second budget covering the
+claim-lock wait, identity recheck, termination, and confirmation. A shorter caller
+deadline still applies. Expiry before admission performs no native operation and
+retains the claim for retry. This does not bound separate create/publication or
+run-admission lock waits, or failed-create rollback before a claim exists.
+
 ### Legacy and uncertain ownership
 
 Older provider-only claims cannot prove account or resource ownership. Crabbox
