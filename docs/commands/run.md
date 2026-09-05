@@ -567,6 +567,9 @@ including non-zero exits. SSH terminal receipts use schema v2 and bind the final
 run outcome, raw command digest, timing, retained-log digest, and full observed
 stream digest. Delegated providers retain schema v1 when they report a
 definitive command exit. Check local receipts with [`crabbox verify`](verify.md).
+Secondary cleanup errors do not suppress a receipt for an already-observed
+delegated command exit; provider/transport failures without a definitive exit
+do not produce that receipt.
 
 Brokered runs submit a schema v2 terminal receipt with the finish request even
 when `--attest` is omitted. The CLI verifies that the coordinator returns the

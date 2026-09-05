@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- SmolVM: validate full archive limits and prepare snapshots before fresh allocation or clearing a reused workspace; preserve pre-create bytes and apply the configured sync budget. [PR 1869](https://github.com/openclaw/crabbox/pull/1869). Thanks @steipete.
+- Upstash Box: share run finalization so early failures honor `--keep-on-failure`, failed deletion reports a kept recovery session, and cleanup/timing errors preserve the primary exit; keep delegated command receipts when secondary cleanup fails. [PR 1885](https://github.com/openclaw/crabbox/pull/1885). Thanks @steipete.
 - Make `sync-plan --json` preview the configured provider's full-archive or dirty-delta guardrails accurately, without credentials or provider API calls. [PR 1882](https://github.com/openclaw/crabbox/pull/1882). Thanks @steipete.
 - Blaxel: prepare and validate sync archives before fresh allocation, freeze the pre-create snapshot, and share staged workspace replacement and cleanup while retaining native upload retries. [PR 1867](https://github.com/openclaw/crabbox/pull/1867). Thanks @steipete.
 - CubeSandbox: share sandbox run finalization so failed cleanup retains an accurate recovery session, setup failures honor `--keep-on-failure`, and timing errors no longer mask command exits; preserve observed abnormal exit codes. [PR 1850](https://github.com/openclaw/crabbox/pull/1850). Thanks @steipete.
@@ -14,6 +14,7 @@
 - Reject mismatched E2B and CubeSandbox read/connection identities before adopting a sandbox or using its execution session, sharing exact resource-ID validation while keeping cleanup bound to the original allocation. [PR 1841](https://github.com/openclaw/crabbox/pull/1841). Thanks @steipete.
 - Local provider bridges: preserve cancellation and deadline causes when a POSIX child is interrupted, without masking completed command exits or output-limit errors. [PR 1862](https://github.com/openclaw/crabbox/pull/1862). Thanks @steipete.
 - CodeSandbox: share run finalization so failed cleanup returns an accurate recovery session, cancellation honors `--keep-on-failure`, and timing errors preserve the command outcome. [PR 1843](https://github.com/openclaw/crabbox/pull/1843). Thanks @steipete.
+- SmolVM: validate full archive limits and prepare snapshots before fresh allocation or clearing a reused workspace; preserve pre-create bytes and apply the configured sync budget. [PR 1869](https://github.com/openclaw/crabbox/pull/1869). Thanks @steipete.
 - Add bounded runner wall-time phase telemetry to final timing JSON and benchmark records without changing signed receipt v2. [PR 1618](https://github.com/openclaw/crabbox/pull/1618). Thanks @vincentkoc.
 
 ## 0.49.1 - 2026-09-04
