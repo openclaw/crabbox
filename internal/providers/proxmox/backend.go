@@ -477,12 +477,12 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		return target, nil
 	}
 	if req.ReleaseOnly {
-		return b.releaseTargetFromClaim(ctx, client, req.ID)
+		return b.releaseTargetFromClaim(ctx, client, req.ID, servers)
 	}
 	return LeaseTarget{}, exit(4, "lease/server not found: %s", req.ID)
 }
 
-func (b *leaseBackend) releaseTargetFromClaim(ctx context.Context, client proxmoxClient, id string) (LeaseTarget, error) {
+func (b *leaseBackend) releaseTargetFromClaim(ctx context.Context, client proxmoxClient, id string, inventory []Server) (LeaseTarget, error) {
 	var (
 		claim core.LeaseClaim
 		ok    bool
@@ -500,7 +500,10 @@ func (b *leaseBackend) releaseTargetFromClaim(ctx context.Context, client proxmo
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	if !ok || claim.LeaseID == "" || !core.LeaseClaimMatchesIdentifier(claim, id) {
+	if !ok {
+		return b.confirmedAbsentReleaseTarget(id, inventory)
+	}
+	if claim.LeaseID == "" || !core.LeaseClaimMatchesIdentifier(claim, id) {
 		return LeaseTarget{}, exit(4, "lease/server not found: %s", id)
 	}
 	cloudID := strings.TrimSpace(claim.CloudID)
@@ -557,6 +560,36 @@ func (b *leaseBackend) releaseTargetFromClaim(ctx context.Context, client proxmo
 			ID:       vmid,
 			Name:     claim.Slug,
 			Labels:   labels,
+		},
+	}, nil
+}
+
+// confirmedAbsentReleaseTarget converges an exact lease ID that Crabbox does
+// not claim into an idempotent release, so a caller holding a fixed ID is not
+// stuck retrying destruction of a VM that provably does not exist. The caller
+// supplies a completed cluster-wide inventory; a failed inventory read never
+// reaches here, so absence always rests on a full cluster read. No tombstone
+// is written because an unclaimed ID has no durable intent to bind one to.
+func (b *leaseBackend) confirmedAbsentReleaseTarget(id string, inventory []Server) (LeaseTarget, error) {
+	if !core.IsCanonicalLeaseID(id) {
+		return LeaseTarget{}, exit(4, "lease/server not found: %s", id)
+	}
+	if strings.TrimSpace(core.ProviderClaimScope("proxmox", b.Cfg)) == "" {
+		return LeaseTarget{}, exit(2, "refusing to confirm absence of unclaimed Proxmox lease %s without a resolved cluster scope", id)
+	}
+	providerKey := core.ProviderKeyForLease(id)
+	for _, server := range inventory {
+		if proxmoxClaimLabelLeaseID(server) == id || strings.TrimSpace(server.Labels["provider_key"]) == providerKey {
+			return LeaseTarget{}, exit(4, "lease_id_conflict: unclaimed Proxmox lease %s still owns VM %s", id, server.DisplayID())
+		}
+	}
+	fmt.Fprintf(b.RT.Stderr, "release provider=proxmox lease=%s reason=cluster_absence_confirmed\n", id)
+	return LeaseTarget{
+		LeaseID: id,
+		Server: Server{
+			Provider: "proxmox",
+			HostID:   proxmoxReleaseAbsentMarker,
+			Labels:   map[string]string{"lease": id, "provider": "proxmox"},
 		},
 	}, nil
 }

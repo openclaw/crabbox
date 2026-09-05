@@ -248,6 +248,80 @@ func TestProxmoxFixedConfirmedAbsentAttemptLeavesTerminalTombstone(t *testing.T)
 	}
 }
 
+func TestProxmoxFixedReleaseOnlyConvergesOnProvenClusterAbsenceWithoutClaim(t *testing.T) {
+	backend, client, req := fixedProxmoxFixture(t)
+	target, err := backend.Resolve(context.Background(), ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatalf("release-only resolve: %v", err)
+	}
+	if target.LeaseID != req.RequestedLeaseID {
+		t.Fatalf("target=%#v, want confirmed-absent target for %s", target, req.RequestedLeaseID)
+	}
+	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: target}); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if client.deleteCalls != 0 || client.mutated {
+		t.Fatalf("deletes=%d mutated=%t, want no provider mutation", client.deleteCalls, client.mutated)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID); err != nil || exists {
+		t.Fatalf("claim exists=%t err=%v, want no fabricated claim", exists, err)
+	}
+}
+
+func TestProxmoxFixedReleaseOnlyAbsenceFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		id     string
+		mutate func(*leaseBackend, *fixedProxmoxClient)
+		want   string
+	}{
+		{
+			name: "unreadable inventory",
+			mutate: func(_ *leaseBackend, client *fixedProxmoxClient) {
+				client.clusterListErr = errors.New("cluster inventory unavailable")
+			},
+			want: "cluster inventory unavailable",
+		},
+		{
+			name: "reused provider key",
+			mutate: func(_ *leaseBackend, client *fixedProxmoxClient) {
+				client.servers = []Server{{
+					Provider: "proxmox", CloudID: "417", HostID: "pve1", ID: 417,
+					Labels: map[string]string{
+						"crabbox": "true", "provider": "proxmox", "lease": "cbx_aaaaaaaaaaaa",
+						"slug": "other", "provider_key": core.ProviderKeyForLease("cbx_123456abcdef"),
+					},
+				}}
+			},
+			want: "lease_id_conflict",
+		},
+		{
+			name:   "unresolved cluster scope",
+			mutate: func(backend *leaseBackend, _ *fixedProxmoxClient) { backend.Cfg.Proxmox.Node = "" },
+			want:   "cluster scope",
+		},
+		{
+			name: "non-canonical identifier",
+			id:   "fixed-proxmox-lookalike",
+			want: "lease/server not found",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend, client, req := fixedProxmoxFixture(t)
+			if tc.mutate != nil {
+				tc.mutate(backend, client)
+			}
+			_, err := backend.Resolve(context.Background(), ResolveRequest{ID: core.Blank(tc.id, req.RequestedLeaseID), ReleaseOnly: true})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("resolve err=%v, want %q", err, tc.want)
+			}
+			if client.deleteCalls != 0 || client.mutated {
+				t.Fatalf("deletes=%d mutated=%t, want no provider mutation", client.deleteCalls, client.mutated)
+			}
+		})
+	}
+}
+
 func TestProxmoxFixedReleaseLeavesTerminalTombstone(t *testing.T) {
 	backend, client, req := fixedProxmoxFixture(t)
 	lease, err := backend.Acquire(context.Background(), req)
