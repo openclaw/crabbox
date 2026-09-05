@@ -676,6 +676,271 @@ class FakeCoordinatorRuntime implements CoordinatorRuntime {
   }
 }
 
+describe("fleet cleanup inspection", () => {
+  function fixture(supported = true) {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_abcdef123456",
+      slug: "blue-lobster",
+      provider: "azure",
+      cloudID: "crabbox-blue-lobster",
+      providerScope: "/subscriptions/original-sub/resourceGroups/original-rg",
+      owner: "alice@example.com",
+      org: "example-org",
+      state: "failed",
+      cleanupError: "synthetic cleanup interruption",
+      sshUser: "synthetic-private-access-token",
+      share: {
+        users: {
+          "manager@example.com": "manage",
+          "viewer@example.com": "use",
+        },
+      },
+    });
+    const inspection = {
+      providerScope: lease.providerScope,
+      observedAt: "2026-09-01T12:00:00.000Z",
+      claimUnchanged: true,
+      resources: [],
+      identityMatches: null,
+    };
+    const inspectCleanup = vi.fn<(lease: LeaseRecord) => Promise<typeof inspection>>(
+      async () => inspection,
+    );
+    const refreshLeaseAccessForResolution = vi.fn<() => Promise<undefined>>(async () => undefined);
+    const releaseLease = vi.fn<() => Promise<void>>(async () => undefined);
+    const provider = {
+      ...fakeProvider(undefined, { provider: "azure" }),
+      ...(supported ? { inspectCleanup } : {}),
+      refreshLeaseAccessForResolution,
+      releaseLease,
+    };
+    storage.seed(`lease:${lease.id}`, lease);
+    const fleet = testFleet(
+      storage,
+      { azure: provider },
+      { CRABBOX_PUBLIC_URL: "https://crabbox.test" },
+    );
+    return {
+      storage,
+      lease,
+      fleet,
+      inspection,
+      inspectCleanup,
+      expectNoLifecycleMutation() {
+        expect(refreshLeaseAccessForResolution).not.toHaveBeenCalled();
+        expect(releaseLease).not.toHaveBeenCalled();
+        expect(storage.value(`lease:${lease.id}`)).toEqual(lease);
+      },
+    };
+  }
+
+  it.each([
+    ["owner", "alice@example.com", "example-org", false],
+    ["manage share", "manager@example.com", "other-org", false],
+    ["admin", "admin@example.com", "other-org", true],
+  ] as const)(
+    "allows %s to inspect cleanup without refresh or release",
+    async (_role, owner, org, admin) => {
+      const f = fixture();
+
+      const response = await f.fleet.fetch(
+        request("GET", `/v1/leases/${f.lease.id}/cleanup`, {
+          headers: {
+            "x-crabbox-owner": owner,
+            "x-crabbox-org": org,
+            ...(admin ? { "x-crabbox-admin": "true" } : {}),
+          },
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        leaseID: f.lease.id,
+        provider: "azure",
+        inspection: f.inspection,
+      });
+      expect(f.inspectCleanup).toHaveBeenCalledExactlyOnceWith(f.lease);
+      f.expectNoLifecycleMutation();
+    },
+  );
+
+  it.each([
+    ["view-only share", "viewer@example.com", "other-org", 403],
+    ["unshared org member", "member@example.com", "example-org", 404],
+    ["unrelated user", "outsider@example.com", "other-org", 404],
+    ["owner in another org", "alice@example.com", "other-org", 404],
+  ] as const)(
+    "denies cleanup inspection to a %s before provider access",
+    async (_role, owner, org, expectedStatus) => {
+      const f = fixture();
+
+      const response = await f.fleet.fetch(
+        request("GET", `/v1/leases/${f.lease.id}/cleanup`, {
+          headers: { "x-crabbox-owner": owner!, "x-crabbox-org": org! },
+        }),
+      );
+
+      expect(response.status).toBe(expectedStatus);
+      expect(f.inspectCleanup).not.toHaveBeenCalled();
+      expect(await response.text()).not.toContain("synthetic-private-access-token");
+      f.expectNoLifecycleMutation();
+    },
+  );
+
+  it("denies device tokens access to cleanup diagnostics even with owner headers", async () => {
+    const f = fixture();
+
+    const response = await f.fleet.fetch(
+      request("GET", `/v1/leases/${f.lease.id}/cleanup`, {
+        headers: {
+          authorization: `Bearer cbxd_00000000-0000-4000-8000-000000000001.${"A".repeat(43)}`,
+          origin: "https://crabbox.test",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({ error: "device_scope_forbidden" });
+    expect(f.inspectCleanup).not.toHaveBeenCalled();
+    f.expectNoLifecycleMutation();
+  });
+
+  it("returns 404 for an unknown lease without provider access", async () => {
+    const f = fixture();
+
+    const response = await f.fleet.fetch(
+      request("GET", "/v1/leases/cbx_999999999999/cleanup", {
+        headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+      }),
+    );
+
+    expect(response.status).toBe(404);
+    expect(f.inspectCleanup).not.toHaveBeenCalled();
+    f.expectNoLifecycleMutation();
+  });
+
+  it("returns 501 for an unsupported hook only after authorization", async () => {
+    const f = fixture(false);
+    const path = `/v1/leases/${f.lease.id}/cleanup`;
+
+    const owner = await f.fleet.fetch(
+      request("GET", path, {
+        headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+      }),
+    );
+    const viewer = await f.fleet.fetch(
+      request("GET", path, {
+        headers: { "x-crabbox-owner": "viewer@example.com", "x-crabbox-org": "other-org" },
+      }),
+    );
+
+    expect(owner.status).toBe(501);
+    expect(viewer.status).toBe(403);
+    f.expectNoLifecycleMutation();
+  });
+
+  it.each(["registered", "unbound"])(
+    "returns 501 for a %s lease without invoking the provider",
+    async (kind) => {
+      const f = fixture();
+      if (kind === "registered") f.lease.lifecycle = "registered";
+      else f.lease.cloudID = "";
+      f.storage.seed(`lease:${f.lease.id}`, f.lease);
+
+      const response = await f.fleet.fetch(
+        request("GET", `/v1/leases/${f.lease.id}/cleanup`, {
+          headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+        }),
+      );
+
+      expect(response.status).toBe(501);
+      expect(f.inspectCleanup).not.toHaveBeenCalled();
+      f.expectNoLifecycleMutation();
+    },
+  );
+
+  it("routes Azure cleanup inspection to the original subscription and resource group", async () => {
+    const storage = new MemoryStorage();
+    const originalScope = "/subscriptions/original-sub/resourceGroups/original-rg";
+    const lease = testLease({
+      id: "cbx_abcdef123456",
+      slug: "blue-lobster",
+      provider: "azure",
+      cloudID: "crabbox-blue-lobster",
+      providerScope: originalScope,
+      owner: "alice@example.com",
+      org: "example-org",
+      state: "failed",
+      cleanupError: "synthetic cleanup interruption",
+    });
+    const env = {
+      AZURE_TENANT_ID: "tenant",
+      AZURE_CLIENT_ID: "client",
+      AZURE_CLIENT_SECRET: "synthetic-client-secret",
+      AZURE_SUBSCRIPTION_ID: "new-default-sub",
+      CRABBOX_AZURE_RESOURCE_GROUP: "new-default-rg",
+    };
+    const provider = new AzureProvider(env as Env, undefined, storage);
+    const release = vi.spyOn(provider, "releaseLease");
+    const reads: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const req = input instanceof Request ? input : new Request(input, init);
+        const url = new URL(req.url);
+        if (url.hostname === "login.microsoftonline.com") {
+          return Response.json({ access_token: "synthetic-azure-access-token", expires_in: 3600 });
+        }
+        expect(req.method).toBe("GET");
+        expect(url.origin).toBe("https://management.azure.com");
+        reads.push(url.pathname);
+        return Response.json(
+          {
+            error: {
+              code: "ResourceNotFound",
+              message: `The Resource '${url.pathname.slice(url.pathname.indexOf("/providers/") + 11)}' was not found.`,
+            },
+          },
+          { status: 404 },
+        );
+      }),
+    );
+    storage.seed(`lease:${lease.id}`, lease);
+    const fleet = testFleet(storage, { azure: provider }, env);
+
+    const response = await fleet.fetch(
+      request("GET", `/v1/leases/${lease.id}/cleanup`, {
+        headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      leaseID: lease.id,
+      provider: "azure",
+      inspection: {
+        providerScope: originalScope,
+        claimUnchanged: true,
+        identityMatches: null,
+        resources: [],
+      },
+    });
+    expect(reads.toSorted()).toEqual(
+      [
+        `${originalScope}/providers/Microsoft.Compute/virtualMachines/${lease.cloudID}`,
+        `${originalScope}/providers/Microsoft.Network/networkInterfaces/${lease.cloudID}-nic`,
+        `${originalScope}/providers/Microsoft.Network/publicIPAddresses/${lease.cloudID}-pip`,
+        `${originalScope}/providers/Microsoft.Compute/disks/${lease.cloudID}-osdisk`,
+      ].toSorted(),
+    );
+    expect(release).not.toHaveBeenCalled();
+    expect(storage.value(`lease:${lease.id}`)).toEqual(lease);
+  });
+});
+
 describe("runtime adapter relay", () => {
   it("revalidates active admin control sockets against the current grant source", async () => {
     const oldAdminToken = "old-admin-token";
