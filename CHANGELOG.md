@@ -2,24 +2,44 @@
 
 ## Unreleased
 
+## 0.50.0 - 2026-09-05
+
+### Highlights
+
+- **See where runner time goes.** Final timing JSON and benchmark records now report total runner wall time and a bounded phase breakdown, including time spent on cleanup.
+- **Investigate blocked Azure cleanup.** A read-only coordinator API exposes lease-scoped resource identities and deletion progress so operators can diagnose blocked cleanup while retaining ownership checks.
+- **Safer workspace sync.** Blaxel, Freestyle, and SmolVM validate archives before allocating a sandbox and preserve the prepared snapshot. `sync-plan --json` now previews each provider's actual archive guardrails without contacting it.
+- **Reliable failure recovery.** More providers honor `--keep-on-failure` during preparation, report recovery sessions when cleanup fails, and preserve the original command result through cleanup and timing output.
+- **Predictable commands and cancellation.** E2B and CubeSandbox preserve literal profile arguments; Tensorlake, Blaxel, Vercel Sandbox, and local bridges retain cancellation and timeout causes instead of reporting misleading workload exits.
+- **Faster artifact discovery.** Literal artifact paths search only their parent directory, avoiding recursive scans while preserving matching and symlink checks.
+
+### Upgrade notes
+
+- Runner phase fields are unsigned local telemetry; signed receipt v2 is unchanged. Timing output lists already-committed artifacts, with terminal receipts confirmed separately after persistence. Timing-output failures now appear in the final receipt and exit status. [PR 1618](https://github.com/openclaw/crabbox/pull/1618).
+- Full-archive sync limits can reject a large checkout even when its dirty delta is small; preview them with `sync-plan --json`. `--force-sync-large` keeps its normal override but cannot bypass Freestyle's 64 MiB compressed upload cap. SmolVM preparation failures preserve the existing workspace, while a later injection failure can still occur after clearing it. [PR 1880](https://github.com/openclaw/crabbox/pull/1880), [PR 1869](https://github.com/openclaw/crabbox/pull/1869), [PR 1882](https://github.com/openclaw/crabbox/pull/1882).
+- Azure cleanup diagnostics require an updated coordinator and an existing owner, manage-share, or admin credential. The endpoint is read-only and is not an `inspect` CLI flag. [PR 1889](https://github.com/openclaw/crabbox/pull/1889).
+
+### Changes
+
+- Add bounded runner wall-time phase telemetry to final timing JSON and benchmark records without changing signed receipt v2. [PR 1618](https://github.com/openclaw/crabbox/pull/1618). Thanks @vincentkoc.
 - Azure: expose read-only, lease-scoped cleanup identity diagnostics so blocked deletion can be investigated without changing claims, bypassing ownership guards, or accessing provider credentials locally. [PR 1889](https://github.com/openclaw/crabbox/pull/1889). Thanks @steipete.
-- Upstash Box: share run finalization so early failures honor `--keep-on-failure`, failed deletion reports a kept recovery session, and cleanup/timing errors preserve the primary exit; keep delegated command receipts when secondary cleanup fails. [PR 1885](https://github.com/openclaw/crabbox/pull/1885). Thanks @steipete.
 - Make `sync-plan --json` preview the configured provider's full-archive or dirty-delta guardrails accurately, without credentials or provider API calls. [PR 1882](https://github.com/openclaw/crabbox/pull/1882). Thanks @steipete.
 - Blaxel: prepare and validate sync archives before fresh allocation, freeze the pre-create snapshot, and share staged workspace replacement and cleanup while retaining native upload retries. [PR 1867](https://github.com/openclaw/crabbox/pull/1867). Thanks @steipete.
 - Freestyle: check the full archive and compressed upload limit before allocation, freeze pre-create snapshots, and share safe workspace replacement while isolating file-API and exec fallback uploads. [PR 1880](https://github.com/openclaw/crabbox/pull/1880). Thanks @steipete.
-- CubeSandbox: share sandbox run finalization so failed cleanup retains an accurate recovery session, setup failures honor `--keep-on-failure`, and timing errors no longer mask command exits; preserve observed abnormal exit codes. [PR 1850](https://github.com/openclaw/crabbox/pull/1850). Thanks @steipete.
+- SmolVM: validate full archive limits and prepare snapshots before fresh allocation or clearing a reused workspace; preserve pre-create bytes and apply the configured sync budget. [PR 1869](https://github.com/openclaw/crabbox/pull/1869). Thanks @steipete.
+- Upstash Box: share run finalization so early failures honor `--keep-on-failure`, failed deletion reports a kept recovery session, and cleanup/timing errors preserve the primary exit; keep delegated command receipts when secondary cleanup fails. [PR 1885](https://github.com/openclaw/crabbox/pull/1885). Thanks @steipete.
 - Vercel Sandbox: share run finalization so early cleanup failures return accurate recovery sessions, preparation failures honor `--keep-on-failure`, and timing errors preserve command exits; retain POSIX bridge cancellation and timeout causes. [PR 1886](https://github.com/openclaw/crabbox/pull/1886). Thanks @steipete.
-- Limit literal run-artifact discovery to the parent directory, preserving existing matching, required-file, and symlink guards. [PR 1878](https://github.com/openclaw/crabbox/pull/1878). Thanks @steipete.
+- CubeSandbox: share sandbox run finalization so failed cleanup retains an accurate recovery session, setup failures honor `--keep-on-failure`, and timing errors no longer mask command exits; preserve observed abnormal exit codes. [PR 1850](https://github.com/openclaw/crabbox/pull/1850). Thanks @steipete.
 - OpenComputer: share run finalization so cleanup failures are reported, timing errors preserve the original exit, and command preparation honors `--keep-on-failure`; preserve cancellation and timeout causes and distinguish transport errors from command exits. [PR 1845](https://github.com/openclaw/crabbox/pull/1845). Thanks @steipete.
-- Tensorlake: preserve cancellation, deadline, and I/O errors from the native command runner instead of misreporting them as workload exits; keep failure timing and displayed diagnostics consistent. [PR 1887](https://github.com/openclaw/crabbox/pull/1887). Thanks @steipete.
-- Preserve literal E2B and CubeSandbox profile arguments through their shared envd command transport, and accept inferred single-string shell programs and explicit empty shell source. [PR 1837](https://github.com/openclaw/crabbox/pull/1837). Thanks @steipete.
-- Blaxel: stop the original process after interrupted polling requests and preserve cancellation and timeout causes without exposing redacted credentials. [PR 1846](https://github.com/openclaw/crabbox/pull/1846). Thanks @steipete.
+- CodeSandbox: share run finalization so failed cleanup returns an accurate recovery session, cancellation honors `--keep-on-failure`, and timing errors preserve the command outcome. [PR 1843](https://github.com/openclaw/crabbox/pull/1843). Thanks @steipete.
 - Report Azure Dynamic Sessions cleanup failures as failed runs, preserve primary Superserve/Azure errors through cleanup and timing output, and keep Superserve rollback bound to the originally created sandbox. [PR 1836](https://github.com/openclaw/crabbox/pull/1836). Thanks @steipete.
 - Reject mismatched E2B and CubeSandbox read/connection identities before adopting a sandbox or using its execution session, sharing exact resource-ID validation while keeping cleanup bound to the original allocation. [PR 1841](https://github.com/openclaw/crabbox/pull/1841). Thanks @steipete.
+- Preserve literal E2B and CubeSandbox profile arguments through their shared envd command transport, and accept inferred single-string shell programs and explicit empty shell source. [PR 1837](https://github.com/openclaw/crabbox/pull/1837). Thanks @steipete.
+- Tensorlake: preserve cancellation, deadline, and I/O errors from the native command runner instead of misreporting them as workload exits; keep failure timing and displayed diagnostics consistent. [PR 1887](https://github.com/openclaw/crabbox/pull/1887). Thanks @steipete.
+- Blaxel: stop the original process after interrupted polling requests and preserve cancellation and timeout causes without exposing redacted credentials. [PR 1846](https://github.com/openclaw/crabbox/pull/1846). Thanks @steipete.
 - Local provider bridges: preserve cancellation and deadline causes when a POSIX child is interrupted, without masking completed command exits or output-limit errors. [PR 1862](https://github.com/openclaw/crabbox/pull/1862). Thanks @steipete.
-- CodeSandbox: share run finalization so failed cleanup returns an accurate recovery session, cancellation honors `--keep-on-failure`, and timing errors preserve the command outcome. [PR 1843](https://github.com/openclaw/crabbox/pull/1843). Thanks @steipete.
-- SmolVM: validate full archive limits and prepare snapshots before fresh allocation or clearing a reused workspace; preserve pre-create bytes and apply the configured sync budget. [PR 1869](https://github.com/openclaw/crabbox/pull/1869). Thanks @steipete.
-- Add bounded runner wall-time phase telemetry to final timing JSON and benchmark records without changing signed receipt v2. [PR 1618](https://github.com/openclaw/crabbox/pull/1618). Thanks @vincentkoc.
+- Limit literal run-artifact discovery to the parent directory, preserving existing matching, required-file, and symlink guards. [PR 1878](https://github.com/openclaw/crabbox/pull/1878). Thanks @steipete.
+- Fix AWS image qualification rollback checks to restore the exact seeded default aliases and revision through `--restore-receipt`, retire the failed candidate, and reject stale failed-revision updates. [PR 1879](https://github.com/openclaw/crabbox/pull/1879). Thanks @vincentkoc.
 
 ## 0.49.1 - 2026-09-04
 
