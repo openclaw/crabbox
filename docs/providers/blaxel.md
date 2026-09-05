@@ -167,6 +167,12 @@ crabbox run --provider blaxel --allow-env API_TOKEN -- printenv API_TOKEN
    retains it. `stop` deletes a retained sandbox only after the local claim and
    remote ownership labels match.
 
+Cancellation during process polling attempts to stop the original process with a bounded
+cleanup context, even when the interrupted HTTP request failed before response
+headers arrived. Redacted transport errors retain their underlying cancellation
+or timeout cause; run errors keep exit code 1 and completed commands retain their
+remote exit code.
+
 If create-time cleanup fails after Blaxel has created a sandbox, Crabbox records
 a recovery claim. `cleanup --provider blaxel` can later find the matching
 ownership label and delete only that sandbox. It does not delete by name prefix
