@@ -37482,6 +37482,72 @@ describe("fleet lease identity and idle", () => {
     ]);
   });
 
+  it("does not restore a cross-region revisionless alias after regionless retirement", async () => {
+    const storage = new MemoryStorage();
+    const portableKey = "image:aws:promoted:linux:x86_64:ubuntu26.04";
+    const regionalKey = `${portableKey}:eu-west-1`;
+    const priorCatalogKey = "image:aws:catalog:linux:x86_64:ubuntu26.04:us-east-2:ami-prior";
+    const prior = {
+      id: "ami-prior",
+      name: "prior",
+      state: "available" as const,
+      provider: "aws" as const,
+      target: "linux" as const,
+      os: "ubuntu:26.04",
+      region: "us-east-2",
+      architecture: "x86_64",
+      promotedAt: "2026-09-01T00:00:00Z",
+    };
+    storage.seed(portableKey, prior);
+    storage.seed(priorCatalogKey, {
+      ...prior,
+      promotedAt: "2026-09-02T00:00:00Z",
+      revision: "revision-catalog",
+    });
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => ({
+      id: imageID,
+      name: imageID,
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    }));
+    const promote = async (imageID: string, body: Record<string, unknown>) => {
+      const url = new URL(
+        `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1`,
+      );
+      return provider.promoteImage(
+        imageID,
+        undefined,
+        new Request(url, { method: "POST", body: JSON.stringify(body) }),
+        url,
+      );
+    };
+
+    const published = (await promote("ami-candidate", {
+      expectedCurrent: { state: "capture" },
+    })) as {
+      image: { id: string; revision: string };
+      previous: Record<string, unknown>;
+    };
+    await expect(provider.retirePromotedImage(prior.id)).resolves.toBe(1);
+    const rollback = await promote(published.image.id, {
+      expectedCurrent: {
+        state: "present",
+        imageId: published.image.id,
+        revision: published.image.revision,
+      },
+      restorePrevious: published.previous,
+      retireExpectedCatalog: true,
+    });
+
+    expect(rollback).toMatchObject({ image: { id: "none", state: "absent" } });
+    expect(storage.value(portableKey)).toBeUndefined();
+    expect(storage.value(regionalKey)).toBeUndefined();
+    expect(storage.value(priorCatalogKey)).toBeUndefined();
+  });
+
   it("does not restore a revision retired by an overlapping rollback", async () => {
     const storage = new MemoryStorage();
     const key = "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1";

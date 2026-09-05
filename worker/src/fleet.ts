@@ -29036,13 +29036,18 @@ export class AWSProvider implements CloudProvider {
 
   retirePromotedImage(imageID: string, region?: string): Promise<number> {
     return imageCatalogTransaction(this.storage, async (transaction) => {
+      const affectedRegions = new Set(region ? [region] : []);
       const retired = await deletePromotedAWSImageRecords(
         transaction,
         imageID,
         ["image:aws:catalog:", "image:aws:variant:", "image:aws:promoted"],
-        { ...(region ? { region } : {}), retireRevisions: true },
+        { ...(region ? { region } : {}), retireRevisions: true, affectedRegions },
       );
-      await retireAWSImage(transaction, imageID, region ?? this.region);
+      for (const affectedRegion of affectedRegions) {
+        // Regionless retirement must invalidate every revisionless alias region removed above.
+        // oxlint-disable-next-line eslint/no-await-in-loop
+        await retireAWSImage(transaction, imageID, affectedRegion);
+      }
       return retired;
     });
   }
@@ -29857,7 +29862,7 @@ async function deletePromotedAWSImageRecords(
   storage: ProviderStateStorageView,
   imageID: string,
   prefixes: string[],
-  options: { region?: string; retireRevisions?: boolean } = {},
+  options: { region?: string; retireRevisions?: boolean; affectedRegions?: Set<string> } = {},
 ): Promise<number> {
   const catalogs = await Promise.all(
     prefixes.map(async (prefix) => await storage.list<PromotedImageRecord>({ prefix })),
@@ -29871,6 +29876,7 @@ async function deletePromotedAWSImageRecords(
   const retiredRevisions = new Set<string>();
   await entries.reduce(async (pending, [key, image]) => {
     await pending;
+    if (image.region) options.affectedRegions?.add(image.region);
     await unpinCheckpointPromotion(storage, "aws", image, key);
     await storage.delete(key);
     if (!options.retireRevisions) return;
