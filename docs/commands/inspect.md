@@ -112,6 +112,22 @@ Brokered JSON records also expose the coordinator's provider-cleanup state:
 - `releaseDeletesServer`: whether release is intended to delete the provider
   resource.
 
+Failed provisioning records may also include:
+
+- `failureError`: the coordinator's retained, non-secret failure diagnostic.
+- `provisioningResourceMayExist`: whether the provisioning owner recorded that
+  a provider resource may exist. Explicit `true` and `false` are recorded facts;
+  omission means the coordinator has no value to report, including for older
+  records.
+- `provisioningFailureRetryable`: whether the provisioning owner classified the
+  failure as retryable. Explicit `false` is different from omission, which means
+  no retryability classification was recorded.
+
+These fields describe retained coordinator evidence, not a fresh provider
+inventory. No single field alone proves that a provider resource is absent.
+Interpret them with the exact lease identity, lifecycle state, cleanup metadata,
+and provider-specific evidence before taking recovery or cleanup action.
+
 Cleanup is terminal under Crabbox's coordinator predicate only when `state` is
 `released`, `cleanupStartedAt`, `cleanupError`, and `cleanupRetryAt` are all
 absent, and `releaseDeletesServer` is either omitted or `true`. An explicit

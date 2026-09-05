@@ -494,6 +494,114 @@ func TestCoordinatorInspectJSONPreservesCleanupState(t *testing.T) {
 	}
 }
 
+func TestCoordinatorInspectJSONPreservesProvisioningFailureState(t *testing.T) {
+	isolateTestUserDirs(t)
+	explicitTrue := true
+	explicitFalse := false
+	leases := map[string]CoordinatorLease{
+		"cbx_true": {
+			ID:                           "cbx_true",
+			Provider:                     "aws",
+			TargetOS:                     targetLinux,
+			State:                        "failed",
+			FailureError:                 "provider response was interrupted",
+			ProvisioningResourceMayExist: &explicitTrue,
+			ProvisioningFailureRetryable: &explicitTrue,
+		},
+		"cbx_false": {
+			ID:                           "cbx_false",
+			Provider:                     "aws",
+			TargetOS:                     targetLinux,
+			State:                        "failed",
+			FailureError:                 "provider confirmed no resource",
+			ProvisioningResourceMayExist: &explicitFalse,
+			ProvisioningFailureRetryable: &explicitFalse,
+		},
+		"cbx_omitted": {
+			ID:       "cbx_omitted",
+			Provider: "aws",
+			TargetOS: targetLinux,
+			State:    "failed",
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/v1/leases/") {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		leaseID := strings.TrimPrefix(r.URL.Path, "/v1/leases/")
+		lease, ok := leases[leaseID]
+		if !ok {
+			t.Fatalf("unexpected lease %q", leaseID)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+	}))
+	defer server.Close()
+
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "user-token")
+
+	for _, test := range []struct {
+		id            string
+		wantMayExist  *bool
+		wantRetryable *bool
+		wantError     string
+	}{
+		{
+			id:            "cbx_true",
+			wantMayExist:  &explicitTrue,
+			wantRetryable: &explicitTrue,
+			wantError:     "provider response was interrupted",
+		},
+		{
+			id:            "cbx_false",
+			wantMayExist:  &explicitFalse,
+			wantRetryable: &explicitFalse,
+			wantError:     "provider confirmed no resource",
+		},
+		{id: "cbx_omitted"},
+	} {
+		t.Run(test.id, func(t *testing.T) {
+			var stdout bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+			if err := app.inspect(context.Background(), []string{"--provider", "aws", "--id", test.id, "--json"}); err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got["state"] != "failed" || got["hasHost"] != false {
+				t.Fatalf("inspect JSON state=%#v hasHost=%#v, want failed hostless lease", got["state"], got["hasHost"])
+			}
+			for field, want := range map[string]*bool{
+				"provisioningResourceMayExist": test.wantMayExist,
+				"provisioningFailureRetryable": test.wantRetryable,
+			} {
+				value, present := got[field]
+				if want == nil {
+					if present {
+						t.Fatalf("%s=%#v, want omitted", field, value)
+					}
+					continue
+				}
+				if !present || value != *want {
+					t.Fatalf("%s=%#v present=%t, want %t", field, value, present, *want)
+				}
+			}
+			failureError, present := got["failureError"]
+			if test.wantError == "" {
+				if present {
+					t.Fatalf("failureError=%#v, want omitted", failureError)
+				}
+			} else if !present || failureError != test.wantError {
+				t.Fatalf("failureError=%#v present=%t, want %q", failureError, present, test.wantError)
+			}
+		})
+	}
+}
+
 func TestCoordinatorAcquireSendsTailscaleHostnameTemplate(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
