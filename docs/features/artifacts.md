@@ -25,6 +25,9 @@ delegated providers still need an advertised bounded-artifact capability. On
 macOS, the remote needs stock `/bin/bash`, `find` with `-print0`, `tar`,
 `base64`, and `/bin/rm`.
 
+An exact ASCII file path checks one candidate instead of walking its directory tree,
+so unrelated workspace files do not consume the artifact-discovery budget.
+
 Repeat `--require-artifact <glob>` when the run should fail unless a proof file,
 manifest, or report exists after the command exits successfully. Required
 artifacts use the same safe relative glob syntax and target limits as
