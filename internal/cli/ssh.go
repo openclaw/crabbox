@@ -309,7 +309,7 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 			if err == nil {
 				return nil
 			}
-			if setupErr := workspaceOwnerReadinessError(err, phase); setupErr != nil {
+			if setupErr := sshReadinessError(err, phase); setupErr != nil {
 				return setupErr
 			}
 			if IsWSLSFTPUnavailable(err) {
@@ -322,7 +322,7 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 			if err == nil {
 				return nil
 			}
-			if setupErr := workspaceOwnerReadinessError(err, phase); setupErr != nil {
+			if setupErr := sshReadinessError(err, phase); setupErr != nil {
 				return setupErr
 			}
 			lastPorts = "proxy"
@@ -346,7 +346,7 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 				}
 				// Successful readiness also proves transport. Diagnose authentication
 				// separately only when readiness fails, avoiding a healthy-path SSH call.
-				err = runSSHQuietWithOptions(probeCtx, probe, sshReadyCommand(probe), profile.connectTimeout, profile.connectionAttempts)
+				err = runSSHReadinessProbe(probeCtx, probe, sshReadyCommand(probe), profile.connectTimeout, profile.connectionAttempts)
 				if err == nil {
 					if target.Port != probe.Port {
 						fmt.Fprintf(stderr, "using ssh port %s for %s (configured %s not ready)\n", probe.Port, target.Host, target.Port)
@@ -354,11 +354,11 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 					}
 					return nil
 				}
-				if setupErr := workspaceOwnerReadinessError(err, phase); setupErr != nil {
+				if setupErr := sshReadinessError(err, phase); setupErr != nil {
 					return setupErr
 				}
-				if err := runSSHQuietWithOptions(probeCtx, probe, sshTransportProbeCommand(probe), profile.connectTimeout, profile.connectionAttempts); err != nil {
-					if setupErr := workspaceOwnerReadinessError(err, phase); setupErr != nil {
+				if err := runSSHReadinessProbe(probeCtx, probe, sshTransportProbeCommand(probe), profile.connectTimeout, profile.connectionAttempts); err != nil {
+					if setupErr := sshReadinessError(err, phase); setupErr != nil {
 						return setupErr
 					}
 					probes = append(probes, port+":tcp")
@@ -451,9 +451,9 @@ func probeProxySSHReady(ctx context.Context, target *SSHTarget, profile sshReadi
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		candidate := *target
 		candidate.Port, candidate.FallbackPorts = port, []string{}
-		if lastErr = runSSHQuietWithOptions(ctx, candidate, sshReadyCommand(candidate), profile.connectTimeout, profile.connectionAttempts); lastErr != nil {
+		if lastErr = runSSHReadinessProbe(ctx, candidate, sshReadyCommand(candidate), profile.connectTimeout, profile.connectionAttempts); lastErr != nil {
 			var setupErr *workspaceOwnerSetupError
-			if errors.As(lastErr, &setupErr) {
+			if errors.As(lastErr, &setupErr) || errors.Is(lastErr, errSSHHostKeyVerification) {
 				return lastErr
 			}
 			continue
@@ -476,10 +476,14 @@ func probeWSL2SSHReady(ctx context.Context, target *SSHTarget, profile sshReadin
 		probe.Port, probe.FallbackPorts = port, []string{}
 		run := func(remote string) error {
 			command := sshTransportPreparation{command: wsl2ReadinessCommand(remote)}
-			_, err := command.runOnce(ctx, probe, profile.connectTimeout, profile.connectionAttempts, io.Discard, io.Discard, false)
-			return err
+			diagnostic := synchronizedBuffer{limit: 64 * 1024}
+			_, err := command.runOnce(ctx, probe, profile.connectTimeout, profile.connectionAttempts, io.Discard, &diagnostic, false)
+			return sshReadinessProbeError(ctx, err, diagnostic.String())
 		}
 		if err := run(sshTransportProbeCommand(probe)); err != nil {
+			if errors.Is(err, errSSHHostKeyVerification) {
+				return err
+			}
 			outcomes = append(outcomes, outcome{err: err})
 			continue
 		}
@@ -491,7 +495,7 @@ func probeWSL2SSHReady(ctx context.Context, target *SSHTarget, profile sshReadin
 		// must pass the same staged witness setup as the subsequent workload.
 		if workspaceOwnerFromContext(ctx) != nil {
 			run = func(remote string) error {
-				return runSSHQuietWithOptions(ctx, probe, remote, profile.connectTimeout, profile.connectionAttempts)
+				return runSSHReadinessProbe(ctx, probe, remote, profile.connectTimeout, profile.connectionAttempts)
 			}
 		}
 		if err := run(sshReadyCommand(probe)); err == nil {
@@ -499,7 +503,7 @@ func probeWSL2SSHReady(ctx context.Context, target *SSHTarget, profile sshReadin
 			return nil
 		} else {
 			var setupErr *workspaceOwnerSetupError
-			if errors.As(err, &setupErr) {
+			if errors.As(err, &setupErr) || errors.Is(err, errSSHHostKeyVerification) {
 				return err
 			}
 			outcomes = append(outcomes, outcome{err: err})

@@ -69,6 +69,12 @@ precedence and Access integration.
 
 ## SSH host key or control socket fails
 
+Readiness stops immediately when SSH reports a host-key verification failure.
+Waiting for guest bootstrap cannot repair host trust. Verify the lease identity
+and the provider's host-key scope before reconnecting; Crabbox does not remove
+trusted keys or disable verification to recover. Other startup failures continue
+to use the bounded readiness wait.
+
 **Symptoms**
 
 - SSH warns that the host identification changed after a provider reused an IP;
