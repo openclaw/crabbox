@@ -1063,7 +1063,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			report.RunnerPhases = runnerPhasesFromLegacyReport(report, providerMs)
 			finalTimingReport = &report
 		}
-		delegatedReceiptEligible := runErr == nil || RunErrorKindForResult(result, runErr) == RunErrorCommandExit
+		delegatedReceiptEligible := runErr == nil || FinalizeRunResult(result, runErr).ErrorKind == RunErrorCommandExit
 		var preparedDelegatedReceipt *preparedRunReceipt
 		preparedDelegatedExitCode := -1
 		delegatedPreparationAttempted := false

@@ -44,6 +44,7 @@ func TestDelegatedSandboxLifecycle(t *testing.T) {
 		reuse, keep, keepOnFailure, noSync, syncOnly bool
 		commandCode                                  int
 		cleanupErr                                   error
+		closeErr                                     error
 		wantCode                                     int
 		wantStatus                                   core.RunStatus
 		wantKind                                     core.RunErrorKind
@@ -86,6 +87,17 @@ func TestDelegatedSandboxLifecycle(t *testing.T) {
 		{name: "keep canceled", phase: "exec", err: context.Canceled, keepOnFailure: true, wantCode: 1, wantStatus: core.RunStatusCanceled, wantKind: core.RunErrorCanceled, wantSession: true, wantKept: true},
 		{name: "timeout", phase: "exec", err: context.DeadlineExceeded, wantCode: 1, wantStatus: core.RunStatusTimedOut, wantKind: core.RunErrorTimeout, wantSession: true, wantCleanup: true},
 		{name: "cleanup", cleanupErr: cleanupFailure, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true, wantCleanup: true},
+		{name: "typed sandbox cleanup", cleanupErr: core.ExitError{Code: 5, Message: "delete failed"}, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true, wantCleanup: true},
+		{name: "command cleanup", closeErr: cleanupFailure, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantCleanup: true},
+		{name: "typed command cleanup", closeErr: core.ExitError{Code: 5, Message: "profile cleanup failed"}, wantCode: 5, wantKind: core.RunErrorProvider, wantSession: true, wantCleanup: true},
+		{name: "kept command cleanup", closeErr: core.ExitError{Code: 5, Message: "profile cleanup failed"}, keepOnFailure: true, wantCode: 5, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true},
+		{name: "reused command cleanup", closeErr: cleanupFailure, reuse: true, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true},
+		{name: "command cleanup deadline", closeErr: context.DeadlineExceeded, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantCleanup: true},
+		{name: "command and profile cleanup", commandCode: 7, closeErr: core.ExitError{Code: 5, Message: "profile cleanup failed"}, wantCode: 7, wantKind: core.RunErrorCommandExit, wantSession: true, wantCleanup: true},
+		{name: "command preparation and cleanup", phase: "command", err: failure, closeErr: cleanupFailure, keepOnFailure: true, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true},
+		{name: "transport and profile cancellation", phase: "exec", err: failure, closeErr: context.Canceled, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantCleanup: true},
+		{name: "transport and deletion timeout", phase: "exec", err: failure, cleanupErr: context.DeadlineExceeded, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true, wantCleanup: true},
+		{name: "cancel and profile cleanup", phase: "exec", err: context.Canceled, closeErr: context.DeadlineExceeded, wantCode: 1, wantStatus: core.RunStatusCanceled, wantKind: core.RunErrorCanceled, wantSession: true, wantCleanup: true},
 		{name: "sync only cleanup", syncOnly: true, cleanupErr: cleanupFailure, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true, wantCleanup: true},
 		{name: "command and cleanup", commandCode: 7, cleanupErr: cleanupFailure, wantCode: 7, wantKind: core.RunErrorCommandExit, wantSession: true, wantKept: true, wantCleanup: true},
 		{name: "setup and typed cleanup", phase: "setup", err: failure, cleanupErr: core.ExitError{Code: 4, Message: "claim changed"}, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true, wantCleanup: true},
@@ -163,7 +175,7 @@ func TestDelegatedSandboxLifecycle(t *testing.T) {
 							cancel()
 						}
 						return tc.commandCode, step("exec")
-					}, Close: func(ctx context.Context) { detached(ctx); _ = step("close-command") }}, step("command")
+					}, Close: func(ctx context.Context) error { detached(ctx); return errors.Join(step("close-command"), tc.closeErr) }}, step("command")
 				},
 				Retained: func(ctx context.Context) error {
 					detached(ctx)
@@ -197,6 +209,9 @@ func TestDelegatedSandboxLifecycle(t *testing.T) {
 			}
 			if tc.err != nil && !errors.Is(err, tc.err) {
 				t.Fatalf("lost primary cause: %v", err)
+			}
+			if tc.closeErr != nil && !errors.Is(err, tc.closeErr) {
+				t.Fatalf("lost command cleanup cause: %v", err)
 			}
 			if tc.cleanupErr != nil && !errors.Is(err, tc.cleanupErr) {
 				t.Fatalf("lost cleanup cause: %v", err)
@@ -293,7 +308,7 @@ func TestDelegatedSandboxSequence(t *testing.T) {
 		},
 		Command: func(context.Context) (DelegatedSandboxCommand, error) {
 			add("command")
-			return DelegatedSandboxCommand{Run: func(context.Context) (int, error) { add("exec"); return 0, nil }, Close: func(context.Context) { add("close-command") }}, nil
+			return DelegatedSandboxCommand{Run: func(context.Context) (int, error) { add("exec"); return 0, nil }, Close: func(context.Context) error { add("close-command"); return nil }}, nil
 		},
 		Cleanup: func(context.Context) error { add("cleanup"); return nil },
 	}
