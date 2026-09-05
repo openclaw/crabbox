@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import { loadRecipes } from "./generate-linux-readiness.mjs";
+import { writeExecutable } from "./test-support/smoke-fixtures.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const nodesourceSigningKeyFingerprint = "6F71F525282841EEDAF851B42F59B5F99B1BE0B4";
@@ -315,11 +316,6 @@ print_versions`;
     });
   }
 });
-
-function writeExecutable(file, body) {
-	fs.writeFileSync(file, body, "utf8");
-	fs.chmodSync(file, 0o755);
-}
 
 function writeFakeGPG(bin) {
 	writeExecutable(

@@ -4,13 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { writeExecutable } from "./test-support/smoke-fixtures.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
-
-function writeExecutable(file, body) {
-	fs.writeFileSync(file, body, "utf8");
-	fs.chmodSync(file, 0o755);
-}
 
 test("live doctor smoke stops when temporary directory creation fails", () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-doctor-smoke-"));

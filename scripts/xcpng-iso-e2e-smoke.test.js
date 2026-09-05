@@ -5,14 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { writeExecutable } from "./test-support/smoke-fixtures.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
-
-function writeExecutable(file, body) {
-  fs.writeFileSync(file, body, "utf8");
-  fs.chmodSync(file, 0o755);
-}
 
 function makeHelper(dir, behavior) {
   const helper = path.join(dir, "helper");
