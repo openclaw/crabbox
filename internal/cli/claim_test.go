@@ -94,6 +94,12 @@ func TestFixedLocalContainerClaimProviderCanonicalizesWithoutOverwritingMarker(t
 	}
 }
 
+func TestFixedProxmoxClaimProviderCanonicalizes(t *testing.T) {
+	if got := canonicalClaimProvider(FixedProxmoxClaimProvider); got != "proxmox" {
+		t.Fatalf("fixed Proxmox marker canonicalized to %q", got)
+	}
+}
+
 func TestClaimEndpointReservationDeadlineStartsAfterClaimLockAcquired(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const leaseID = "cbx_reservation_lock"

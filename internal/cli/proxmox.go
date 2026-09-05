@@ -838,6 +838,10 @@ func (c *ProxmoxClient) nextID(ctx context.Context) (int, error) {
 	}
 }
 
+func (c *ProxmoxClient) NextVMID(ctx context.Context) (int, error) {
+	return c.nextID(ctx)
+}
+
 type proxmoxVM struct {
 	VMID     int    `json:"vmid"`
 	Name     string `json:"name"`
@@ -998,15 +1002,22 @@ func (c *ProxmoxClient) VMExistsInCluster(ctx context.Context, id string) (bool,
 }
 
 func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool) (Server, error) {
+	vmid, err := c.nextID(ctx)
+	if err != nil {
+		return Server{}, err
+	}
+	return c.CreateServerWithVMID(ctx, cfg, publicKey, leaseID, slug, keep, vmid, nil)
+}
+
+func (c *ProxmoxClient) CreateServerWithVMID(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, vmid int, extraLabels map[string]string) (Server, error) {
 	if cfg.TargetOS != targetLinux {
 		return Server{}, exit(2, "proxmox provider currently supports target=linux only")
 	}
 	if cfg.Proxmox.TemplateID <= 0 {
 		return Server{}, exit(3, "proxmox templateId is required (set proxmox.templateId or CRABBOX_PROXMOX_TEMPLATE_ID)")
 	}
-	vmid, err := c.nextID(ctx)
-	if err != nil {
-		return Server{}, err
+	if vmid <= 0 {
+		return Server{}, exit(2, "proxmox VMID must be positive")
 	}
 	name := leaseProviderName(leaseID, slug)
 	full := "1"
@@ -1041,6 +1052,9 @@ func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey,
 
 	now := time.Now().UTC()
 	labels := directLeaseLabels(cfg, leaseID, slug, "proxmox", "", keep, now)
+	for key, value := range extraLabels {
+		labels[key] = value
+	}
 	labels["node"] = cfg.Proxmox.Node
 	labels["template_id"] = strconv.Itoa(cfg.Proxmox.TemplateID)
 	description := proxmoxDescription(labels)
