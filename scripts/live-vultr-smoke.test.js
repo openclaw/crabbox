@@ -23,7 +23,9 @@ exec ${JSON.stringify(python)} "$@"
 }
 
 const prepareSmokeRepo = (dir) =>
-  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-vultr-smoke.sh"));
+  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-vultr-smoke.sh"), [
+    "lib/live-smoke-common.sh",
+  ]);
 
 test("live vultr smoke embedded raw inventory Python compiles", () => {
   const script = fs.readFileSync(path.join(repoRoot, "scripts", "live-vultr-smoke.sh"), "utf8");
