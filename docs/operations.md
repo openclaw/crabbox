@@ -940,7 +940,7 @@ Before creating or reusing a signed release tag:
 - Finalize the `Unreleased` entries maintained as work lands into a versioned, dated release section in `CHANGELOG.md`, with user-facing changes first and contributor thanks / co-author notes intact.
 - Update every package metadata file that carries the project version. The current release surface is `worker/package.json` plus both root package entries in `worker/package-lock.json`; the removed root plugin package must not be recreated.
 - `go vet ./...`
-- `go test -race -timeout=15m ./...`
+- `go test -race -timeout=20m ./...`
 - `scripts/test-go-modules.sh`
 - `scripts/verify-go-install.sh v0.0.0 "$(git rev-parse HEAD)"`
 - `go build -trimpath -o bin/crabbox ./cmd/crabbox`

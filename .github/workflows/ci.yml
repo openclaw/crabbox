@@ -55,8 +55,8 @@ jobs:
           fi
 
       - name: Test
-        # The CLI race suite approaches Go's default 10m package limit.
-        run: go test -race -timeout=15m ./...
+        # Leave room for the CLI suite's final parallel timeout fixtures.
+        run: go test -race -timeout=20m ./...
 
       - name: Require executed Linux supervision fixtures
         shell: bash
