@@ -314,6 +314,25 @@ export interface AzureOwnedDeleteReleaseContext {
   resourceIdentity: string;
 }
 
+export interface AzureCleanupInspection {
+  providerScope: string;
+  observedAt: string;
+  claimUnchanged: boolean;
+  claim?: {
+    version: 1 | 2;
+    preparing?: true;
+    completed?: true;
+    stableResourceIdentity?: AzureReconciliationIdentityEntry[];
+    deletedStableResourceIdentity?: AzureReconciliationIdentityEntry[];
+    partialStableResourceIdentity?: AzureReconciliationIdentityEntry[];
+    pendingDeletion?: { kind: keyof AzureOwnedDeleteResources; deadline: number };
+  };
+  resources: Array<
+    AzureReconciliationIdentityEntry & { ownership: "matched" | "unclaimed" | "mismatched" }
+  >;
+  identityMatches: boolean | null;
+}
+
 interface AzureResourceList<T> {
   value?: T[];
   nextLink?: string;
@@ -833,6 +852,119 @@ export class AzureClient {
       // oxlint-disable-next-line eslint/no-await-in-loop -- the next delete attempt depends on this delay.
       await sleep(DELETE_RETRY_DELAY_MS);
     }
+  }
+
+  async inspectOwnedCleanup(lease: OwnedDeleteLease): Promise<AzureCleanupInspection> {
+    if (lease.providerScope !== this.providerScope()) {
+      throw new Error("Azure cleanup inspection requires the original provider scope");
+    }
+    if (!this.ownedDeleteClaimStorage) {
+      throw new Error("Azure cleanup inspection requires cleanup claim storage");
+    }
+    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(lease.cloudID)) {
+      throw new Error("Azure cleanup inspection requires a canonical resource name");
+    }
+    const claimKey = azureOwnedDeleteClaimKey(this.providerScope(), lease.cloudID, lease.id);
+    const claim = await this.ownedDeleteClaimStorage.get<AzureOwnedDeleteClaim>(claimKey);
+    if (claim) this.requireOwnedDeleteClaim(lease, claim);
+    const claimSnapshot = JSON.stringify(claim);
+    const identityEntries = (value: string) =>
+      azureStableResourceIdentityEntries(value).map(({ labels: _labels, ...entry }) => entry);
+    const name = lease.cloudID;
+    const [vm, nic, pip, disk] = await Promise.all([
+      this.ownedResource<AzureVM>(
+        vmPath(this.resourceGroup, name),
+        API_VERSIONS.compute,
+        "virtualMachines",
+        name,
+      ),
+      this.ownedResource<AzureNIC>(
+        networkPath(this.resourceGroup, "networkInterfaces", `${name}-nic`),
+        API_VERSIONS.network,
+        "networkInterfaces",
+        `${name}-nic`,
+      ),
+      this.ownedResource<AzurePublicIP>(
+        networkPath(this.resourceGroup, "publicIPAddresses", `${name}-pip`),
+        API_VERSIONS.network,
+        "publicIPAddresses",
+        `${name}-pip`,
+      ),
+      this.ownedResource<AzureDisk>(
+        `/resourceGroups/${this.resourceGroup}/providers/Microsoft.Compute/disks/${name}-osdisk`,
+        API_VERSIONS.disks,
+        "disks",
+        `${name}-osdisk`,
+      ),
+    ]);
+    const resources: AzureLeaseResource[] = [
+      ...(vm ? [{ kind: "virtualMachines" as const, resource: vm }] : []),
+      ...(nic ? [{ kind: "networkInterfaces" as const, resource: nic }] : []),
+      ...(pip ? [{ kind: "publicIPAddresses" as const, resource: pip }] : []),
+      ...(disk ? [{ kind: "disks" as const, resource: disk }] : []),
+    ];
+    const currentIdentity = azureStableResourceIdentity(resources);
+    const latestClaim = await this.ownedDeleteClaimStorage.get<AzureOwnedDeleteClaim>(claimKey);
+    const claimUnchanged = claimSnapshot === JSON.stringify(latestClaim);
+    // Observations never create/advance a claim or substitute for deletion authority.
+    return {
+      providerScope: this.providerScope(),
+      observedAt: new Date().toISOString(),
+      claimUnchanged,
+      ...(claim
+        ? {
+            claim: {
+              version: claim.version,
+              ...(claim.preparing ? { preparing: claim.preparing } : {}),
+              ...(claim.completed ? { completed: claim.completed } : {}),
+              ...(claim.stableResourceIdentity !== undefined
+                ? { stableResourceIdentity: identityEntries(claim.stableResourceIdentity) }
+                : {}),
+              ...(claim.deletedStableResourceIdentity !== undefined
+                ? {
+                    deletedStableResourceIdentity: identityEntries(
+                      claim.deletedStableResourceIdentity,
+                    ),
+                  }
+                : {}),
+              ...(claim.partialStableResourceIdentity !== undefined
+                ? {
+                    partialStableResourceIdentity: identityEntries(
+                      claim.partialStableResourceIdentity,
+                    ),
+                  }
+                : {}),
+              ...(claim.pendingDeletion
+                ? {
+                    pendingDeletion: {
+                      kind: claim.pendingDeletion.kind,
+                      deadline: claim.pendingDeletion.deadline,
+                    },
+                  }
+                : {}),
+            },
+          }
+        : {}),
+      resources: azureReconciliationIdentityEntries(resources, false).map((entry, index) => {
+        const labels = azureLabelsFromTags(resources[index]!.resource.tags ?? {});
+        return {
+          ...entry,
+          ownership: providerLabelsOwnedByLease(labels, lease, "azure")
+            ? "matched"
+            : azureHasOwnershipClaims(labels)
+              ? "mismatched"
+              : "unclaimed",
+        };
+      }),
+      identityMatches:
+        claimUnchanged && claim?.stableResourceIdentity !== undefined
+          ? azureStableResourceIdentityMatches(
+              claim.stableResourceIdentity,
+              currentIdentity,
+              claim.deletedStableResourceIdentity,
+            )
+          : null,
+    };
   }
 
   async deleteOwnedServer(

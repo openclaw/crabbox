@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Azure: expose read-only, lease-scoped cleanup identity diagnostics so blocked deletion can be investigated without changing claims, bypassing ownership guards, or accessing provider credentials locally. [PR 1889](https://github.com/openclaw/crabbox/pull/1889). Thanks @steipete.
 - Upstash Box: share run finalization so early failures honor `--keep-on-failure`, failed deletion reports a kept recovery session, and cleanup/timing errors preserve the primary exit; keep delegated command receipts when secondary cleanup fails. [PR 1885](https://github.com/openclaw/crabbox/pull/1885). Thanks @steipete.
 - Make `sync-plan --json` preview the configured provider's full-archive or dirty-delta guardrails accurately, without credentials or provider API calls. [PR 1882](https://github.com/openclaw/crabbox/pull/1882). Thanks @steipete.
 - Blaxel: prepare and validate sync archives before fresh allocation, freeze the pre-create snapshot, and share staged workspace replacement and cleanup while retaining native upload retries. [PR 1867](https://github.com/openclaw/crabbox/pull/1867). Thanks @steipete.
