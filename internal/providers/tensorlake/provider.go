@@ -18,13 +18,14 @@ func (Provider) Aliases() []string { return []string{"tl", "tensorlake-sbx"} }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:             providerName,
-		Family:           "firecracker",
-		Kind:             core.ProviderKindDelegatedRun,
-		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:         core.FeatureSet{core.FeatureRunSession},
-		Coordinator:      core.CoordinatorNever,
-		ClassDisposition: core.ProviderClassDispositionUnmapped,
+		SyncGuardrailFullCandidate: true,
+		Name:                       providerName,
+		Family:                     "firecracker",
+		Kind:                       core.ProviderKindDelegatedRun,
+		Targets:                    []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:                   core.FeatureSet{core.FeatureRunSession},
+		Coordinator:                core.CoordinatorNever,
+		ClassDisposition:           core.ProviderClassDispositionUnmapped,
 	}
 }
 

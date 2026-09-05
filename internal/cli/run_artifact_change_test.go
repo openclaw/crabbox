@@ -370,14 +370,14 @@ exit 0
 			}
 			if wantArchive {
 				if len(report.Artifacts) != 1 {
-					t.Fatalf("artifacts=%+v", report.Artifacts)
+					t.Fatalf("artifacts=%+v, want one committed archive", report.Artifacts)
 				}
 				names := tarGzNames(t, report.Artifacts[0].Path)
 				if !reflect.DeepEqual(names, []string{p}) {
 					t.Fatalf("archive admitted extra paths: %v", names)
 				}
 			} else if len(report.Artifacts) != 0 {
-				t.Fatalf("failed run archived evidence: %+v", report.Artifacts)
+				t.Fatalf("timing included uncommitted or failed artifacts: %+v", report.Artifacts)
 			}
 			if releases != 1 || report.LeaseStopped == nil || !*report.LeaseStopped {
 				t.Fatalf("cleanup releases=%d report=%+v", releases, report)

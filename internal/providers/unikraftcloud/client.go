@@ -253,24 +253,7 @@ func isUnikraftCloudMutation(method string) bool {
 }
 
 func sameUnikraftCloudOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveUnikraftCloudPort(a) == effectiveUnikraftCloudPort(b)
-}
-
-func effectiveUnikraftCloudPort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+	return shared.SameOrigin(a, b)
 }
 
 type unikraftCloudRedirectError struct {

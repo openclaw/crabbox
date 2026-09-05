@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"net"
 	"os"
 	"slices"
 	"strings"
@@ -18,7 +17,6 @@ import (
 
 const (
 	superserveCleanupTimeout = 15 * time.Second
-	statusViewReady          = "running"
 	NetworkPublic            = "public"
 
 	metadataProviderKey = "crabbox.provider"
@@ -853,20 +851,4 @@ func errorsJoin(errs ...error) error {
 		out = fmt.Errorf("%v; %w", out, err)
 	}
 	return out
-}
-
-func dataPlaneHostForSandbox(sandboxID, sandboxHost string) string {
-	sandboxID = strings.TrimSpace(sandboxID)
-	sandboxHost = strings.TrimSpace(sandboxHost)
-	if sandboxID == "" || sandboxHost == "" {
-		return ""
-	}
-	if strings.Contains(sandboxHost, "://") {
-		return ""
-	}
-	if _, _, err := net.SplitHostPort(sandboxHost); err == nil {
-		host, _, _ := net.SplitHostPort(sandboxHost)
-		sandboxHost = host
-	}
-	return "boxd-" + sandboxID + "." + sandboxHost
 }

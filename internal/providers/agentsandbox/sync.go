@@ -7,6 +7,8 @@ import (
 	"os"
 	"path"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, ready sandboxReadiness, req RunRequest, workdir string) ([]timingPhase, time.Duration, error) {
@@ -122,9 +124,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, re
 }
 
 func checkAgentSandboxSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {
-	archiveManifest := manifest
-	archiveManifest.Changed = nil
-	archiveManifest.ChangedBytes = 0
+	archiveManifest := core.FullSyncGuardrailManifest(manifest)
 	return checkSyncPreflight(archiveManifest, cfg, force, stderr)
 }
 

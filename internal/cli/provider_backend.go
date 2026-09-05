@@ -663,6 +663,9 @@ type ProviderSpec struct {
 	Coordinator      CoordinatorMode
 	ClassDisposition ProviderClassDisposition
 	SizeSelection    ProviderSizeSelector
+	// SyncGuardrailFullCandidate counts the complete ordinary workspace transfer.
+	// False preserves dirty-delta counting when the checkout has changes.
+	SyncGuardrailFullCandidate bool
 	// TailscaleEgressOnly marks FeatureTailscale as outbound userspace access,
 	// not a bidirectional peer endpoint.
 	TailscaleEgressOnly bool
@@ -1386,10 +1389,11 @@ func ValidateRunSessionForSpec(spec ProviderSpec, result RunResult) error {
 }
 
 type LeaseTarget struct {
-	Server      Server
-	SSH         SSHTarget
-	LeaseID     string
-	Coordinator *CoordinatorClient
+	Server       Server
+	SSH          SSHTarget
+	LeaseID      string
+	Coordinator  *CoordinatorClient
+	runnerTiming *runnerProviderTiming
 	// Recorded by the validated provider lookup, never inferred from absent SSH.
 	providerRelease *leaseReleaseConfirmation
 }

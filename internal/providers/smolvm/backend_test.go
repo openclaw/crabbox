@@ -685,6 +685,28 @@ func TestRunArchivePreparationPrecedesMutation(t *testing.T) {
 				rt := testRuntime()
 				if failure == "full guardrail" {
 					cfg.Sync.FailFiles = 2
+					configPath := filepath.Join(t.TempDir(), "config.yaml")
+					if err := os.WriteFile(configPath, []byte("provider: smolvm\nsync:\n  failFiles: 2\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					t.Setenv("CRABBOX_CONFIG", configPath)
+					t.Setenv("CRABBOX_PROVIDER", "smolvm")
+					t.Setenv("CRABBOX_SYNC_ALLOW_LARGE", "")
+					t.Chdir(repo)
+					var preview, diagnostics bytes.Buffer
+					if err := (core.App{Stdout: &preview, Stderr: &diagnostics}).Run(t.Context(), []string{"sync-plan", "--json"}); err != nil {
+						t.Fatalf("sync-plan: %v: %s", err, diagnostics.String())
+					}
+					var plan struct {
+						Guardrail struct {
+							Scope, Status string
+							Files         int
+						}
+						DirtyDelta struct{ Files int }
+					}
+					if err := json.Unmarshal(preview.Bytes(), &plan); err != nil || plan.Guardrail.Scope != "candidate" || plan.Guardrail.Status != "failed" || plan.Guardrail.Files != 2 || plan.DirtyDelta.Files != 1 {
+						t.Fatalf("preview disagrees with archive admission: %s err=%v", preview.String(), err)
+					}
 				} else {
 					calls := 0
 					rt.Clock = archivePreparationClock(func() time.Time {

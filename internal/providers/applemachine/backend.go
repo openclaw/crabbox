@@ -344,16 +344,15 @@ func (b *backend) createLease(ctx context.Context, repo Repo, reclaim bool, requ
 
 func (b *backend) waitMachineReady(ctx context.Context, claim core.LeaseClaim) error {
 	type observation struct {
-		result LocalCommandResult
-		err    error
+		err error
 	}
 	_, err := shared.Poll(ctx, 0, 500*time.Millisecond, shared.SleepContext,
 		func(ctx context.Context) (observation, error) {
 			if _, err := b.verifyMachineIdentity(ctx, claim); err != nil {
 				return observation{}, err
 			}
-			result, err := b.control(ctx, []string{"machine", "run", "--name", claim.CloudID, ":"})
-			return observation{result: result, err: err}, nil
+			_, err := b.control(ctx, []string{"machine", "run", "--name", claim.CloudID, ":"})
+			return observation{err: err}, nil
 		},
 		func(_ context.Context, current observation, identityErr error) (bool, error) {
 			if identityErr != nil {

@@ -1,7 +1,9 @@
 package blaxel
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -44,6 +46,9 @@ type lifecycleFakeClient struct {
 	stopContextErr error
 	getProcess     func(context.Context) (Process, error)
 	onGetSandbox   func()
+	onCreate       func()
+	onUpload       func(io.Reader) error
+	onExec         func(context.Context, ExecuteProcessRequest) (Process, error)
 }
 
 func newLifecycleFakeClient() *lifecycleFakeClient {
@@ -61,6 +66,9 @@ func (f *lifecycleFakeClient) Probe(context.Context) error {
 }
 func (f *lifecycleFakeClient) CreateSandbox(_ context.Context, req CreateSandboxRequest) (Sandbox, error) {
 	f.createReqs = append(f.createReqs, req)
+	if f.onCreate != nil {
+		f.onCreate()
+	}
 	id := f.nextSandboxID
 	if id == "" {
 		id = "sbx_1"
@@ -120,7 +128,10 @@ func (f *lifecycleFakeClient) DeleteSandbox(_ context.Context, id string) error 
 	delete(f.sandboxes, id)
 	return nil
 }
-func (f *lifecycleFakeClient) ExecuteProcess(_ context.Context, _ string, req ExecuteProcessRequest) (Process, error) {
+func (f *lifecycleFakeClient) ExecuteProcess(ctx context.Context, _ string, req ExecuteProcessRequest) (Process, error) {
+	if f.onExec != nil {
+		return f.onExec(ctx, req)
+	}
 	if f.processErr != nil {
 		return Process{}, f.processErr
 	}
@@ -146,6 +157,11 @@ func (f *lifecycleFakeClient) WriteFile(context.Context, string, WriteFileReques
 	return nil
 }
 func (f *lifecycleFakeClient) UploadFile(_ context.Context, _ string, remotePath string, r io.Reader) error {
+	if f.onUpload != nil {
+		if err := f.onUpload(r); err != nil {
+			return err
+		}
+	}
 	_, _ = io.ReadAll(r)
 	f.uploads = append(f.uploads, remotePath)
 	return nil
@@ -305,6 +321,199 @@ func TestRunPreservesCancellationAfterStoppingProcess(t *testing.T) {
 	if err := b.Stop(context.Background(), StopRequest{ID: result.LeaseID}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestRunPreparesArchiveBeforeCreate(t *testing.T) {
+	t.Run("create-failure-closes-archive", func(t *testing.T) {
+		b, fake, _, _, _ := newLifecycleBackend(t)
+		temp := t.TempDir()
+		t.Setenv("TMPDIR", temp)
+		t.Setenv("TMP", temp)
+		t.Setenv("TEMP", temp)
+		fake.updateErr = errors.New("synthetic create-label failure")
+		fake.onCreate = func() {
+			files, err := filepath.Glob(filepath.Join(temp, "crabbox-blaxel-sync-*.tgz"))
+			if err != nil || len(files) != 1 {
+				t.Fatalf("prepared archives at create=%v err=%v", files, err)
+			}
+		}
+		if _, err := b.Run(t.Context(), RunRequest{Repo: testRepo(t), SyncOnly: true}); err == nil {
+			t.Fatal("create failure was hidden")
+		}
+		files, err := filepath.Glob(filepath.Join(temp, "crabbox-blaxel-sync-*.tgz"))
+		if err != nil || len(files) != 0 {
+			t.Fatalf("prepared archives leaked after failed acquisition=%v err=%v", files, err)
+		}
+	})
+	t.Run("guardrail", func(t *testing.T) {
+		b, fake, _, _, _ := newLifecycleBackend(t)
+		b.cfg.Sync.FailFiles = 1
+		_, err := b.Run(t.Context(), RunRequest{Repo: testRepo(t), SyncOnly: true})
+		if err == nil || len(fake.createReqs) != 0 {
+			t.Fatalf("preflight err=%v creates=%d, want refusal before allocation", err, len(fake.createReqs))
+		}
+	})
+	t.Run("snapshot", func(t *testing.T) {
+		b, fake, _, _, _ := newLifecycleBackend(t)
+		repo := testRepo(t)
+		fake.onCreate = func() {
+			if err := os.WriteFile(filepath.Join(repo.Root, "main.go"), []byte("changed during provisioning\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var uploaded string
+		fake.onUpload = func(body io.Reader) error {
+			if _, ok := body.(io.Seeker); !ok {
+				return errors.New("upload lost native retry's seekable archive")
+			}
+			gz, err := gzip.NewReader(body)
+			if err != nil {
+				return err
+			}
+			defer gz.Close()
+			reader := tar.NewReader(gz)
+			for {
+				header, err := reader.Next()
+				if errors.Is(err, io.EOF) {
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+				if strings.TrimPrefix(header.Name, "./") == "main.go" {
+					data, err := io.ReadAll(reader)
+					uploaded = string(data)
+					if err != nil {
+						return err
+					}
+				}
+			}
+		}
+		if _, err := b.Run(t.Context(), RunRequest{Repo: repo, SyncOnly: true}); err != nil {
+			t.Fatal(err)
+		}
+		if uploaded != "package main\n" {
+			t.Fatalf("uploaded snapshot=%q, want pre-create bytes", uploaded)
+		}
+	})
+}
+
+func TestSharedArchiveSyncNativeWorkspace(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("native Bash fixture")
+	}
+	for _, scenario := range []string{"replace", "merge", "partial", "corrupt", "cancel"} {
+		t.Run(scenario, func(t *testing.T) {
+			b, fake, _, _, _ := newLifecycleBackend(t)
+			repo := testRepo(t)
+			workspace := filepath.Join(t.TempDir(), "workspace")
+			if err := os.Mkdir(workspace, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(workspace, "old"), []byte("retained"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			b.cfg.Sync.Delete = scenario != "merge"
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var archives []string
+			nativeExecs := 0
+			fake.onExec = func(callCtx context.Context, req ExecuteProcessRequest) (Process, error) {
+				nativeExecs++
+				command := exec.CommandContext(callCtx, req.Command, req.Args...)
+				command.Dir = repo.Root
+				command.Env = []string{"HOME=" + repo.Root, "PATH=/usr/bin:/bin"}
+				var stdout, stderr bytes.Buffer
+				command.Stdout = &stdout
+				command.Stderr = &stderr
+				err := command.Run()
+				code := 0
+				if err != nil {
+					var exitErr *exec.ExitError
+					if !errors.As(err, &exitErr) {
+						return Process{}, err
+					}
+					code = exitErr.ExitCode()
+				}
+				fake.logs = ProcessLogs{Stdout: stdout.String(), Stderr: stderr.String()}
+				return Process{ID: "native-sync", Status: "completed", ExitCode: &code}, nil
+			}
+			client := &nativeArchiveClient{lifecycleFakeClient: fake, upload: func(callCtx context.Context, remote string, body io.Reader) error {
+				archives = append(archives, remote)
+				if !strings.HasPrefix(filepath.Base(remote), "crabbox-blaxel-sync-") {
+					return errors.New("unexpected archive path")
+				}
+				file, err := os.OpenFile(remote, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+				if err != nil {
+					return err
+				}
+				t.Cleanup(func() { _ = os.Remove(remote) })
+				defer file.Close()
+				switch scenario {
+				case "partial", "cancel":
+					_, _ = io.CopyN(file, body, 1)
+					if scenario == "cancel" {
+						cancel()
+						return callCtx.Err()
+					}
+					return errors.New("synthetic partial upload")
+				case "corrupt":
+					_, err = file.WriteString("not a tar archive")
+					return err
+				default:
+					_, err = io.Copy(file, body)
+					return err
+				}
+			}}
+			_, _, err := b.syncWorkspace(ctx, client, "sbx-owned", RunRequest{Repo: repo}, workspace, nil)
+			success := scenario == "replace" || scenario == "merge"
+			if (err == nil) != success {
+				t.Fatalf("sync err=%v success=%t", err, success)
+			}
+			if scenario == "cancel" && !errors.Is(err, context.Canceled) {
+				t.Fatalf("lost upload cancellation: %v", err)
+			}
+			old, oldErr := os.ReadFile(filepath.Join(workspace, "old"))
+			if scenario == "replace" {
+				if !errors.Is(oldErr, os.ErrNotExist) {
+					t.Fatalf("old file survived replace: %v", oldErr)
+				}
+			} else if oldErr != nil || string(old) != "retained" {
+				t.Fatalf("old workspace changed: %q %v", old, oldErr)
+			}
+			if success {
+				data, err := os.ReadFile(filepath.Join(workspace, "main.go"))
+				if err != nil || string(data) != "package main\n" {
+					t.Fatalf("new workspace=%q err=%v", data, err)
+				}
+			}
+			for _, remote := range archives {
+				if _, err := os.Stat(remote); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("archive remains: %s %v", remote, err)
+				}
+			}
+			siblings, err := os.ReadDir(filepath.Dir(workspace))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(siblings) != 1 || siblings[0].Name() != "workspace" {
+				t.Fatalf("staging/backup left: %v", siblings)
+			}
+			if nativeExecs == 0 {
+				t.Fatal("no native cleanup/extraction ran")
+			}
+			t.Logf("%s: native Bash/tar commands=%d archives=%d original workspace preserved on failure=%t", scenario, nativeExecs, len(archives), !success)
+		})
+	}
+}
+
+type nativeArchiveClient struct {
+	*lifecycleFakeClient
+	upload func(context.Context, string, io.Reader) error
+}
+
+func (c *nativeArchiveClient) UploadFile(ctx context.Context, _ string, remote string, body io.Reader) error {
+	return c.upload(ctx, remote, body)
 }
 
 func TestRunSyncOnlyUploadsArchiveAndSkipsUserCommand(t *testing.T) {

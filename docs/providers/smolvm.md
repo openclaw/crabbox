@@ -108,8 +108,9 @@ Fresh runs upload the snapshot prepared before allocation, even if the checkout
 changes during startup. Reused runs authorize the existing machine before local
 preparation; manifest, full-archive guardrail, and archive-construction failures
 occur before clearing its workspace. The shared preparation owner includes all
-selected files in its limits, not only dirty files. `--force-sync-large` keeps
-the normal explicit override.
+selected files in its limits, not only dirty files. `sync-plan --json` previews
+those same full-archive limits. `--force-sync-large` keeps the normal explicit
+override.
 
 `sync.timeout` bounds archive construction and the remaining remote preparation
 and injection work. Manifest/preflight time and provisioning wait are excluded;

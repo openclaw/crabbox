@@ -29,8 +29,6 @@ type Server = core.Server
 type Repo = core.Repo
 type LeaseClaim = core.LeaseClaim
 type ExitError = core.ExitError
-type timingReport = core.TimingReport
-type timingPhase = core.TimingPhase
 
 const (
 	providerName             = "cua"
