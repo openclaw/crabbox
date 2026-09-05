@@ -2,6 +2,32 @@ package shared
 
 import "testing"
 
+func TestValidateResourceID(t *testing.T) {
+	for _, tt := range []struct {
+		name, expected, observed string
+		matches                  bool
+	}{
+		{"same", "sbx_a", "sbx_a", true},
+		{"different", "sbx_a", "sbx_b", false},
+		{"missing observed", "sbx_a", "", false},
+		{"missing expected", "", "", false},
+		{"blank expected", " ", " ", false},
+		{"no trimming", "sbx_a", " sbx_a", false},
+		{"no case folding", "sbx_a", "SBX_A", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			mismatch := ValidateResourceID(tt.expected, tt.observed)
+			if tt.matches {
+				if mismatch != nil {
+					t.Fatal(mismatch)
+				}
+			} else if mismatch == nil || mismatch.Field != "ID" || mismatch.Expected != tt.expected || mismatch.Observed != tt.observed {
+				t.Fatalf("mismatch=%v", mismatch)
+			}
+		})
+	}
+}
+
 func TestNamedResourceIdentity(t *testing.T) {
 	for _, tt := range []struct {
 		name               string
