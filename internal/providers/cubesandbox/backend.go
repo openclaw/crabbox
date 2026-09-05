@@ -230,10 +230,11 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		}
 		return result, nil
 	}
-	command := cubesandboxCommandString(req.Command, req.ShellMode)
-	if command == "" {
-		return finishResult(), exit(2, "missing command")
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+	if err != nil {
+		return finishResult(), exit(2, "%v", err)
 	}
+	command := intent.ShellSource()
 	commandStarted := b.now()
 	fmt.Fprintf(b.rt.Stderr, "running on cubesandbox %s\n", strings.Join(req.Command, " "))
 	commandEnv, strippedAuthEnv := cubeSandboxCommandEnv(req.Env)
@@ -853,19 +854,6 @@ func cubesandboxProcessUser(user string) (string, error) {
 		return "", exit(2, "invalid cubesandbox.user %q: use a login name, not a path", user)
 	}
 	return clean, nil
-}
-
-func cubesandboxCommandString(command []string, shellMode bool) string {
-	if len(command) == 0 {
-		return ""
-	}
-	if shellMode {
-		return strings.Join(command, " ")
-	}
-	if shouldUseShell(command) || leadingEnvAssignment(command) {
-		return shellScriptFromArgv(command)
-	}
-	return strings.Join(shellWords(command), " ")
 }
 
 func rejectCubeSandboxSyncOptions(req RunRequest) error {
