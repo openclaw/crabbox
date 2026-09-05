@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Preserve requested capacity market while coordinator provisioning is pending, and expose exact provisioning failure diagnostics in `crabbox inspect --json`.
+- Preserve requested capacity market for market-aware providers while coordinator provisioning is pending, and expose documented provisioning failure diagnostics in `crabbox inspect --json`.
 
 ## 0.50.0 - 2026-09-05
 
