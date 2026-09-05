@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -268,6 +269,41 @@ func TestRunForwardsEnvInProcessBodyAndReturnsRemoteExit(t *testing.T) {
 	}
 	if stdout.String() != "ok\n" || !strings.Contains(stderr.String(), "warn\n") {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestRunPreservesCancellationAfterStoppingProcess(t *testing.T) {
+	b, fake, _, _, _ := newLifecycleBackend(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake.processStatus = "running"
+	fake.getProcess = func(ctx context.Context) (Process, error) {
+		if len(fake.execReqs) == 1 {
+			return Process{ID: "proc_1", Status: "completed", ExitCode: intPtr(0)}, nil
+		}
+		cancel()
+		return Process{}, redactError(fmt.Errorf("fixture polling: %w", ctx.Err()))
+	}
+	result, err := b.Run(ctx, RunRequest{Repo: testRepo(t), NoSync: true, KeepOnFailure: true, Command: []string{"fixture-user"}})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Run error %v lost cancellation", err)
+	}
+	var exitErr core.ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 1 {
+		t.Errorf("Run error=%v, want exit code 1", err)
+	}
+	final := core.FinalizeRunResult(result, err)
+	if final.Status != core.RunStatusCanceled || final.ErrorKind != core.RunErrorCanceled {
+		t.Errorf("status=%s error kind=%s, want canceled", final.Status, final.ErrorKind)
+	}
+	if len(fake.stopped) != 1 || fake.stopped[0] != "proc_1" || !fake.stopDeadline || fake.stopContextErr != nil {
+		t.Errorf("stops=%v deadline=%t context=%v", fake.stopped, fake.stopDeadline, fake.stopContextErr)
+	}
+	if result.Session == nil || !result.Session.Kept || len(fake.deleted) != 0 {
+		t.Fatalf("session=%#v, deletes=%v", result.Session, fake.deleted)
+	}
+	if err := b.Stop(context.Background(), StopRequest{ID: result.LeaseID}); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -521,6 +523,125 @@ func TestRunCreatesExecsAndKillsEphemeral(t *testing.T) {
 	}
 }
 
+func TestRunPreservesCommandErrorCause(t *testing.T) {
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded, errors.New("fixture transport failed")} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			f := newFakeAPI(t)
+			backend := newAPIBackend(t, f)
+			transport := backend.rt.HTTP.Transport
+			backend.rt.HTTP.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if strings.HasSuffix(req.URL.Path, "/exec/run") {
+					body, err := req.GetBody()
+					if err != nil {
+						return nil, err
+					}
+					var command execRunRequest
+					err = json.NewDecoder(body).Decode(&command)
+					body.Close()
+					if err != nil {
+						return nil, err
+					}
+					if command.Cmd == "fixture-user" {
+						return nil, fmt.Errorf("fixture request: %w", cause)
+					}
+				}
+				return transport.RoundTrip(req)
+			})
+			result, err := backend.Run(context.Background(), RunRequest{
+				Repo: Repo{Name: "fixture", Root: t.TempDir()}, Command: []string{"fixture-user"}, NoSync: true,
+			})
+			if !errors.Is(err, cause) {
+				t.Errorf("Run error %v lost cause %v", err, cause)
+			}
+			var exitErr ExitError
+			if !errors.As(err, &exitErr) || exitErr.Code != 1 || !strings.HasPrefix(err.Error(), "opencomputer run failed: ") {
+				t.Errorf("Run error=%v, want provider failure with exit code 1", err)
+			}
+			wantStatus, wantKind := core.RunStatusFailed, core.RunErrorProvider
+			switch cause {
+			case context.Canceled:
+				wantStatus, wantKind = core.RunStatusCanceled, core.RunErrorCanceled
+			case context.DeadlineExceeded:
+				wantStatus, wantKind = core.RunStatusTimedOut, core.RunErrorTimeout
+			}
+			final := core.FinalizeRunResult(result, err)
+			if final.Status != wantStatus || final.ErrorKind != wantKind {
+				t.Errorf("status=%s error kind=%s, want %s/%s", final.Status, final.ErrorKind, wantStatus, wantKind)
+			}
+			if result.Session == nil || result.Session.Kept || f.calls(http.MethodDelete, "/api/sandboxes/") != 1 {
+				t.Fatalf("session=%#v, want ordinary ephemeral cleanup", result.Session)
+			}
+		})
+	}
+}
+
+func TestRunCancellationThroughNativeHTTPTransport(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		t.Run(fmt.Sprintf("keep_on_failure=%t", keep), func(t *testing.T) {
+			f := newFakeAPI(t)
+			backend := newAPIBackend(t, f)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			canceled := make(chan struct{})
+			f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/exec/run") {
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					r.Body = io.NopCloser(bytes.NewReader(body))
+					var command execRunRequest
+					if err := json.Unmarshal(body, &command); err != nil {
+						t.Error(err)
+						return
+					}
+					if command.Cmd == "fixture-user" {
+						cancel()
+						select {
+						case <-r.Context().Done():
+							close(canceled)
+						case <-time.After(5 * time.Second):
+							t.Error("canceled request did not close")
+						}
+						return
+					}
+				}
+				f.handle(w, r)
+			})
+			result, err := backend.Run(ctx, RunRequest{
+				Repo: Repo{Name: "fixture", Root: t.TempDir()}, Command: []string{"fixture-user"}, NoSync: true, KeepOnFailure: keep,
+			})
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("Run error %v lost native request cancellation", err)
+			}
+			var exitErr ExitError
+			if !errors.As(err, &exitErr) || exitErr.Code != 1 {
+				t.Errorf("Run error=%v, want exit code 1", err)
+			}
+			select {
+			case <-canceled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("native HTTP cancellation was not observed")
+			}
+			if result.Session == nil || result.Session.Kept != keep {
+				t.Fatalf("session=%#v, want kept=%t", result.Session, keep)
+			}
+			if got := f.calls(http.MethodDelete, "/api/sandboxes/"); (got == 0) != keep || got > 1 {
+				t.Fatalf("deletes=%d, keep-on-failure=%t", got, keep)
+			}
+			if keep {
+				if err := backend.Stop(context.Background(), StopRequest{ID: result.LeaseID}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if claim, err := readLeaseClaim(result.LeaseID); err != nil || claim.LeaseID != "" {
+				t.Fatalf("claim remains after cleanup: %#v, %v", claim, err)
+			}
+		})
+	}
+}
+
 func TestRunCleanupCannotBlockForever(t *testing.T) {
 	f := newFakeAPI(t)
 	f.blockDelete = true
@@ -534,11 +655,9 @@ func TestRunCleanupCannotBlockForever(t *testing.T) {
 	res, err := backend.Run(context.Background(), RunRequest{
 		Repo: Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true,
 	})
-	if err != nil {
-		t.Fatalf("Run err=%v", err)
-	}
-	if res.ExitCode != 0 {
-		t.Fatalf("exit=%d", res.ExitCode)
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 1 || res.ExitCode != 1 || res.ErrorKind != core.RunErrorProvider {
+		t.Fatalf("result=%#v err=%v, want cleanup failure", res, err)
 	}
 	if res.Session == nil || !res.Session.Kept {
 		t.Fatalf("session=%#v, want retained cleanup handle", res.Session)
@@ -549,9 +668,79 @@ func TestRunCleanupCannotBlockForever(t *testing.T) {
 	if f.calls(http.MethodDelete, "/api/sandboxes/") != 1 {
 		t.Fatalf("want 1 kill, got %d", f.calls(http.MethodDelete, "/api/sandboxes/"))
 	}
-	if !strings.Contains(stderr.String(), "context deadline exceeded") {
-		t.Fatalf("stderr=%q, want cleanup deadline warning", stderr.String())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run error=%v, want cleanup deadline cause", err)
 	}
+}
+
+func TestRunLifecycleFinalization(t *testing.T) {
+	for _, tc := range []struct {
+		name                                                         string
+		code                                                         int
+		cleanupFailure, timingFailure, missingCommand, keepOnFailure bool
+		wantCode                                                     int
+		wantKind                                                     core.RunErrorKind
+		wantDeletes                                                  int
+	}{
+		{name: "cleanup after success", cleanupFailure: true, wantCode: 1, wantKind: core.RunErrorProvider, wantDeletes: 1},
+		{name: "cleanup after exit", code: 7, cleanupFailure: true, wantCode: 7, wantKind: core.RunErrorCommandExit, wantDeletes: 1},
+		{name: "timing after exit", code: 7, timingFailure: true, keepOnFailure: true, wantCode: 7, wantKind: core.RunErrorCommandExit},
+		{name: "keep command preparation failure", missingCommand: true, keepOnFailure: true, wantCode: 1, wantKind: core.RunErrorProvider},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeAPI(t)
+			backend := newAPIBackend(t, fake)
+			fake.execReply = []execRunResult{{}, {ExitCode: tc.code}}
+			if tc.cleanupFailure {
+				fake.deleteStatus = http.StatusServiceUnavailable
+			}
+			var stderr bytes.Buffer
+			backend.rt.Stderr = &stderr
+			if tc.timingFailure {
+				backend.rt.Stderr = openComputerTimingFailureWriter{&stderr}
+			}
+			command := []string{"fixture-user"}
+			if tc.missingCommand {
+				command = nil
+			}
+			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "fixture", Root: t.TempDir()}, Command: command, NoSync: true, TimingJSON: true, KeepOnFailure: tc.keepOnFailure})
+			var exitErr ExitError
+			if !errors.As(err, &exitErr) || exitErr.Code != tc.wantCode || result.ExitCode != tc.wantCode || result.ErrorKind != tc.wantKind {
+				t.Errorf("result=%#v err=%v, want code=%d kind=%s", result, err, tc.wantCode, tc.wantKind)
+			}
+			if result.Session == nil || !result.Session.Kept || fake.calls(http.MethodDelete, "/api/sandboxes/") != tc.wantDeletes {
+				t.Fatalf("session=%#v deletes=%d", result.Session, fake.calls(http.MethodDelete, "/api/sandboxes/"))
+			}
+			if !tc.timingFailure {
+				var report core.TimingReport
+				count := 0
+				for _, line := range strings.Split(stderr.String(), "\n") {
+					if strings.HasPrefix(line, "{") {
+						count++
+						if err := json.Unmarshal([]byte(line), &report); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				if count != 1 || report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind || report.TotalMs != result.Total.Milliseconds() {
+					t.Errorf("timing count=%d report=%#v result=%#v", count, report, result)
+				}
+			}
+			fake.deleteStatus = 0
+			if err := backend.Stop(context.Background(), StopRequest{ID: result.LeaseID}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+type openComputerTimingFailureWriter struct{ io.Writer }
+
+func (w openComputerTimingFailureWriter) Write(p []byte) (int, error) {
+	if bytes.HasPrefix(p, []byte("{")) {
+		return 0, errors.New("fixture timing write failed")
+	}
+	return w.Writer.Write(p)
 }
 
 func TestRunClearsClaimWhenAcquiredSandboxAlreadyMissingAtCleanup(t *testing.T) {
