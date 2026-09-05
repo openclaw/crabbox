@@ -31,6 +31,17 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func newOpenSandboxTestClient(t *testing.T, server *httptest.Server) openSandboxClient {
+	t.Helper()
+	cfg := testConfig()
+	cfg.OpenSandbox.APIURL = server.URL
+	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
+
 func TestProviderSpec(t *testing.T) {
 	p := Provider{}
 	if p.Name() != "opensandbox" {
@@ -1589,13 +1600,8 @@ func TestSDKClientCreateUsesHeadersAndRequestBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := testConfig()
-	cfg.OpenSandbox.APIURL = server.URL
-	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = client.CreateSandbox(context.Background(), createSandboxOptions{
+	client := newOpenSandboxTestClient(t, server)
+	_, err := client.CreateSandbox(context.Background(), createSandboxOptions{
 		Image:        "ubuntu:test",
 		CPU:          "500m",
 		Memory:       "512Mi",
@@ -1627,17 +1633,12 @@ func TestSDKClientLifecycleRequestsAreBounded(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := testConfig()
-	cfg.OpenSandbox.APIURL = server.URL
-	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newOpenSandboxTestClient(t, server)
 	sdkClient := client.(*sdkOpenSandboxClient)
 	sdkClient.requestTimeoutOverride = 20 * time.Millisecond
 
 	start := time.Now()
-	err = client.Probe(context.Background())
+	err := client.Probe(context.Background())
 	if err == nil {
 		t.Fatal("expected stalled lifecycle request to time out")
 	}
@@ -1658,15 +1659,10 @@ func TestSDKClientMarksCreateRequestTimeoutAsAmbiguous(t *testing.T) {
 	defer server.Close()
 	defer close(release)
 
-	cfg := testConfig()
-	cfg.OpenSandbox.APIURL = server.URL
-	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newOpenSandboxTestClient(t, server)
 	client.(*sdkOpenSandboxClient).requestTimeoutOverride = 20 * time.Millisecond
 
-	_, err = client.CreateSandbox(context.Background(), createSandboxOptions{
+	_, err := client.CreateSandbox(context.Background(), createSandboxOptions{
 		Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
 	})
 	var ambiguous *ambiguousOpenSandboxCreateError
@@ -1693,13 +1689,8 @@ func TestSDKClientMarksSuccessfulCreateDecodeFailuresAsAmbiguous(t *testing.T) {
 			}))
 			defer server.Close()
 
-			cfg := testConfig()
-			cfg.OpenSandbox.APIURL = server.URL
-			client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = client.CreateSandbox(context.Background(), createSandboxOptions{
+			client := newOpenSandboxTestClient(t, server)
+			_, err := client.CreateSandbox(context.Background(), createSandboxOptions{
 				Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
 			})
 			var ambiguous *ambiguousOpenSandboxCreateError
@@ -1733,13 +1724,8 @@ func TestSDKClientMarksSuccessfulCreateWithoutIDAsAmbiguous(t *testing.T) {
 			}))
 			defer server.Close()
 
-			cfg := testConfig()
-			cfg.OpenSandbox.APIURL = server.URL
-			client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = client.CreateSandbox(context.Background(), createSandboxOptions{
+			client := newOpenSandboxTestClient(t, server)
+			_, err := client.CreateSandbox(context.Background(), createSandboxOptions{
 				Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
 			})
 			var ambiguous *ambiguousOpenSandboxCreateError
@@ -1758,15 +1744,10 @@ func TestSDKClientDoesNotDispatchPreCanceledCreate(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := testConfig()
-	cfg.OpenSandbox.APIURL = server.URL
-	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newOpenSandboxTestClient(t, server)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = client.CreateSandbox(ctx, createSandboxOptions{
+	_, err := client.CreateSandbox(ctx, createSandboxOptions{
 		Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
 	})
 	if !errors.Is(err, context.Canceled) {
@@ -1814,12 +1795,7 @@ func TestSDKClientCreateWaitsForRunningAndExecdPing(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := testConfig()
-	cfg.OpenSandbox.APIURL = server.URL
-	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newOpenSandboxTestClient(t, server)
 	info, err := client.CreateSandbox(context.Background(), createSandboxOptions{
 		Image:    "ubuntu:test",
 		CPU:      "500m",
@@ -1876,14 +1852,9 @@ func TestSDKClientRunningWaitHonorsDiscoveredExpiration(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := testConfig()
-	cfg.OpenSandbox.APIURL = server.URL
-	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newOpenSandboxTestClient(t, server)
 	start := time.Now()
-	_, err = client.CreateSandbox(context.Background(), createSandboxOptions{
+	_, err := client.CreateSandbox(context.Background(), createSandboxOptions{
 		Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "expired before reaching Running") {
@@ -1926,14 +1897,9 @@ func TestSDKClientRefreshesMissingCreateExpirationBeforeReadiness(t *testing.T) 
 	}))
 	defer server.Close()
 
-	cfg := testConfig()
-	cfg.OpenSandbox.APIURL = server.URL
-	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newOpenSandboxTestClient(t, server)
 	start := time.Now()
-	_, err = client.CreateSandbox(context.Background(), createSandboxOptions{
+	_, err := client.CreateSandbox(context.Background(), createSandboxOptions{
 		Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "did not become ready") {
@@ -1973,14 +1939,9 @@ func TestSDKClientUsesRefreshedExpirationForSecondRunningWait(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := testConfig()
-	cfg.OpenSandbox.APIURL = server.URL
-	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newOpenSandboxTestClient(t, server)
 	start := time.Now()
-	_, err = client.CreateSandbox(context.Background(), createSandboxOptions{
+	_, err := client.CreateSandbox(context.Background(), createSandboxOptions{
 		Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "wait for running after expiration refresh") {
@@ -2017,15 +1978,10 @@ func TestSDKClientCreateDeletesSandboxWhenReadinessFails(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := testConfig()
-	cfg.OpenSandbox.APIURL = server.URL
-	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newOpenSandboxTestClient(t, server)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err = client.CreateSandbox(ctx, createSandboxOptions{
+	_, err := client.CreateSandbox(ctx, createSandboxOptions{
 		Image:    "ubuntu:test",
 		CPU:      "500m",
 		Memory:   "512Mi",
@@ -2061,14 +2017,9 @@ func TestSDKClientCreateSurfacesPermanentReadinessFailureImmediately(t *testing.
 	}))
 	defer server.Close()
 
-	cfg := testConfig()
-	cfg.OpenSandbox.APIURL = server.URL
-	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newOpenSandboxTestClient(t, server)
 	start := time.Now()
-	_, err = client.CreateSandbox(context.Background(), createSandboxOptions{
+	_, err := client.CreateSandbox(context.Background(), createSandboxOptions{
 		Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "must use HTTPS unless it is loopback") {
@@ -2170,13 +2121,8 @@ func TestSDKClientRejectsPlaintextPublicExecdEndpoint(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := testConfig()
-	cfg.OpenSandbox.APIURL = server.URL
-	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = client.RunCommand(context.Background(), "sb-public", runCommandRequest{Command: "true"})
+	client := newOpenSandboxTestClient(t, server)
+	_, err := client.RunCommand(context.Background(), "sb-public", runCommandRequest{Command: "true"})
 	if err == nil || !strings.Contains(err.Error(), `endpoint host "198.51.100.10:44772" must use HTTPS unless it is loopback`) {
 		t.Fatalf("err=%v, want public plaintext endpoint rejection", err)
 	}
@@ -2207,12 +2153,7 @@ func TestSDKClientPreservesExecdEndpointQueryAcrossPaths(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := testConfig()
-	cfg.OpenSandbox.APIURL = server.URL
-	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newOpenSandboxTestClient(t, server)
 	if err := client.PingSandbox(context.Background(), "sb-signed"); err != nil {
 		t.Fatal(err)
 	}
@@ -2249,12 +2190,7 @@ func TestSDKClientRunCommandSendsTimeoutMillis(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := testConfig()
-	cfg.OpenSandbox.APIURL = server.URL
-	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newOpenSandboxTestClient(t, server)
 	exitCode, err := client.RunCommand(context.Background(), "sb-timeout", runCommandRequest{
 		Command:     "true",
 		TimeoutSecs: 3600,
@@ -2288,12 +2224,7 @@ func TestSDKClientRunCommandRejectsPrematureEOF(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := testConfig()
-	cfg.OpenSandbox.APIURL = server.URL
-	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newOpenSandboxTestClient(t, server)
 	exitCode, err := client.RunCommand(context.Background(), "sb-truncated", runCommandRequest{Command: "true"})
 	if err == nil || !strings.Contains(err.Error(), "stream ended before terminal event") {
 		t.Fatalf("err=%v, want premature EOF failure", err)
@@ -2319,16 +2250,11 @@ func TestSDKClientRunCommandBoundsEndpointDiscovery(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := testConfig()
-	cfg.OpenSandbox.APIURL = server.URL
-	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newOpenSandboxTestClient(t, server)
 	client.(*sdkOpenSandboxClient).execTimeoutOverride = 20 * time.Millisecond
 
 	start := time.Now()
-	_, err = client.RunCommand(context.Background(), "sb-discovery-stalled", runCommandRequest{
+	_, err := client.RunCommand(context.Background(), "sb-discovery-stalled", runCommandRequest{
 		Command:     "true",
 		TimeoutSecs: 3600,
 	})
@@ -2521,12 +2447,7 @@ func TestSDKClientRunCommandAddsConfiguredSchemeToBareEndpoint(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := testConfig()
-	cfg.OpenSandbox.APIURL = server.URL
-	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
+	client := newOpenSandboxTestClient(t, server)
 	exitCode, err := client.RunCommand(context.Background(), "sb-bare", runCommandRequest{Command: "true"})
 	if err != nil {
 		t.Fatal(err)

@@ -15,6 +15,17 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func newDigitalOceanTestClient(t *testing.T, server *httptest.Server, token string) *digitalOceanClient {
+	t.Helper()
+	t.Setenv("DIGITALOCEAN_TOKEN", token)
+	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	return client
+}
+
 func TestDigitalOceanClientCreateDropletRequestShape(t *testing.T) {
 	var requests []struct {
 		Method string
@@ -85,12 +96,7 @@ func TestDigitalOceanClientCreateDropletRequestShape(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "secret-token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "secret-token")
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
@@ -131,12 +137,7 @@ func TestDigitalOceanClientAccountIDPrefersTeamContext(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 	accountID, err := client.AccountID(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -197,18 +198,13 @@ func TestDigitalOceanClientCreateDropletRollsBackKeyOnSemanticTagCollision(t *te
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
 	cfg.ServerType = "s-1vcpu-1gb"
 
-	_, err = client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", "cbx_abcdef123456", "blue", false, time.Now())
+	_, err := client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", "cbx_abcdef123456", "blue", false, time.Now())
 	if err == nil || !strings.Contains(err.Error(), `conflicts with existing account tag "Crabbox:Slug:Blue"`) {
 		t.Fatalf("CreateDroplet err=%v", err)
 	}
@@ -256,12 +252,7 @@ func TestDigitalOceanClientCreateDropletRetriesWithCanonicalTags(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
@@ -308,13 +299,8 @@ func TestDigitalOceanClientReplaceDropletTagsDetachesObsoleteCrabboxTags(t *test
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
-	err = client.ReplaceDropletTags(
+	client := newDigitalOceanTestClient(t, server, "token")
+	err := client.ReplaceDropletTags(
 		context.Background(),
 		42,
 		[]string{tagCrabbox, "crabbox:lease:cbx_abcdef123456", "crabbox:state:running", "crabbox:last_touched_at:100", "other"},
@@ -369,12 +355,7 @@ func TestDigitalOceanClientReplaceDropletTagsUsesCanonicalTagName(t *testing.T) 
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 	if err := client.ReplaceDropletTags(
 		context.Background(),
 		42,
@@ -408,12 +389,7 @@ func TestDigitalOceanClientEnsureTagRejectsUnconfirmedConflict(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 	if _, err := client.EnsureTag(context.Background(), "crabbox:state:ready", map[string]string{}); err == nil {
 		t.Fatal("EnsureTag unexpectedly suppressed unconfirmed 422")
 	}
@@ -430,12 +406,7 @@ func TestDigitalOceanClientEnsureTagRejectsSemanticCanonicalCollision(t *testing
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 	if _, err := client.EnsureTag(context.Background(), "crabbox:slug:blue", map[string]string{}); err == nil {
 		t.Fatal("EnsureTag accepted semantic canonical collision")
 	}
@@ -458,12 +429,7 @@ func TestDigitalOceanClientReplaceDropletTagsSkipsUnchangedSet(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 	tags := []string{tagCrabbox, "crabbox:lease:cbx_111111111111", "crabbox:state:ready"}
 	if err := client.ReplaceDropletTags(context.Background(), 42, tags, append([]string(nil), tags...)); err != nil {
 		t.Fatal(err)
@@ -500,17 +466,12 @@ func TestDigitalOceanClientCreateDropletRollsBackNewSSHKeyOnCreateFailure(t *tes
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
 	cfg.ServerType = "s-1vcpu-1gb"
-	_, err = client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", "cbx_abcdef123456", "blue", false, time.Now())
+	_, err := client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", "cbx_abcdef123456", "blue", false, time.Now())
 	if err == nil {
 		t.Fatal("CreateDroplet succeeded")
 	}
@@ -543,12 +504,7 @@ func TestDigitalOceanClientCreateDropletPreservesKeyOnAmbiguousFailure(t *testin
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 	client.reconcileTimeout = 20 * time.Millisecond
 	client.reconcileInterval = time.Millisecond
 	cfg := core.BaseConfig()
@@ -556,7 +512,7 @@ func TestDigitalOceanClientCreateDropletPreservesKeyOnAmbiguousFailure(t *testin
 	cfg.TargetOS = core.TargetLinux
 	cfg.ServerType = "s-1vcpu-1gb"
 
-	_, err = client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", "cbx_abcdef123456", "blue", false, time.Now())
+	_, err := client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", "cbx_abcdef123456", "blue", false, time.Now())
 	var ambiguous *ambiguousDropletCreateError
 	if !errors.As(err, &ambiguous) {
 		t.Fatalf("CreateDroplet err=%v, want ambiguousDropletCreateError", err)
@@ -595,18 +551,13 @@ func TestDigitalOceanClientCreateDropletStopsReconciliationOnLeaseTagCollision(t
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
 	cfg.ServerType = "s-1vcpu-1gb"
 
-	_, err = client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", "cbx_abcdef123456", "blue", false, time.Now())
+	_, err := client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", "cbx_abcdef123456", "blue", false, time.Now())
 	var ambiguous *ambiguousDropletCreateError
 	if !errors.As(err, &ambiguous) || !strings.Contains(err.Error(), "conflicts with existing account tag") {
 		t.Fatalf("CreateDroplet err=%v", err)
@@ -637,14 +588,9 @@ func TestDigitalOceanClientRollbackCreatedSSHKeyUsesFreshContext(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 
-	err = client.rollbackCreatedSSHKey(sshKey{ID: 123, Name: "crabbox-cbx-abcdef123456"}, context.Canceled)
+	err := client.rollbackCreatedSSHKey(sshKey{ID: 123, Name: "crabbox-cbx-abcdef123456"}, context.Canceled)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("rollback err=%v", err)
 	}
@@ -666,14 +612,9 @@ func TestDigitalOceanClientRollbackCreatedSSHKeyReportsRetryableOwnership(t *tes
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 	cause := errors.New("droplet create failed")
-	err = client.rollbackCreatedSSHKey(sshKey{ID: 123, Name: "crabbox-cbx-abcdef123456"}, cause)
+	err := client.rollbackCreatedSSHKey(sshKey{ID: 123, Name: "crabbox-cbx-abcdef123456"}, cause)
 	var cleanup *sshKeyCleanupError
 	if !errors.As(err, &cleanup) || !errors.Is(err, cause) || cleanup.keyID != 123 {
 		t.Fatalf("rollback err=%v, want sshKeyCleanupError wrapping cause", err)
@@ -734,12 +675,7 @@ func TestDigitalOceanClientCreateDropletReconcilesLostResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 
 	item, err := client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", leaseID, slug, false, time.Now())
 	if err != nil {
@@ -802,12 +738,7 @@ func TestDigitalOceanClientCreateDropletReconcilesEmptySuccessBody(t *testing.T)
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 
 	item, err := client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", leaseID, slug, false, time.Now())
 	if err != nil {
@@ -846,12 +777,7 @@ func TestDigitalOceanClientCreateDropletPreservesKeyWhenEmptySuccessCannotReconc
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 	client.reconcileTimeout = 20 * time.Millisecond
 	client.reconcileInterval = time.Millisecond
 	cfg := core.BaseConfig()
@@ -859,7 +785,7 @@ func TestDigitalOceanClientCreateDropletPreservesKeyWhenEmptySuccessCannotReconc
 	cfg.TargetOS = core.TargetLinux
 	cfg.ServerType = "s-1vcpu-1gb"
 
-	_, err = client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", "cbx_abcdef123456", "empty-response", false, time.Now())
+	_, err := client.CreateDroplet(context.Background(), cfg, "ssh-ed25519 test", "cbx_abcdef123456", "empty-response", false, time.Now())
 	var ambiguous *ambiguousDropletCreateError
 	if !errors.As(err, &ambiguous) {
 		t.Fatalf("CreateDroplet err=%v, want ambiguousDropletCreateError", err)
@@ -1353,12 +1279,7 @@ func TestDigitalOceanClientEnsureSSHKeyReconcilesEmptySuccessBody(t *testing.T) 
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 	key, created, err := client.EnsureSSHKey(context.Background(), "crabbox-cbx-abcdef123456", "ssh-ed25519 test")
 	if err != nil {
 		t.Fatal(err)
@@ -1380,13 +1301,8 @@ func TestDigitalOceanClientEnsureSSHKeyRejectsMismatchedPublicKey(t *testing.T) 
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
-	_, _, err = client.EnsureSSHKey(context.Background(), "crabbox-cbx-abcdef123456", "ssh-ed25519 expected")
+	client := newDigitalOceanTestClient(t, server, "token")
+	_, _, err := client.EnsureSSHKey(context.Background(), "crabbox-cbx-abcdef123456", "ssh-ed25519 expected")
 	if err == nil || !strings.Contains(err.Error(), "exists with different public key") {
 		t.Fatalf("EnsureSSHKey err=%v", err)
 	}
@@ -1408,12 +1324,7 @@ func TestDigitalOceanClientEnsureSSHKeySelectsMatchingDuplicateName(t *testing.T
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 
 	key, created, err := client.EnsureSSHKey(context.Background(), "crabbox-cbx-abcdef123456", "ssh-ed25519 expected")
 	if err != nil {
@@ -1436,14 +1347,9 @@ func TestDigitalOceanClientFindSSHKeyRejectsDuplicatePublicKeyMatches(t *testing
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 
-	_, _, err = client.FindSSHKey(context.Background(), "crabbox-cbx-abcdef123456", "ssh-ed25519 expected")
+	_, _, err := client.FindSSHKey(context.Background(), "crabbox-cbx-abcdef123456", "ssh-ed25519 expected")
 	if err == nil || !strings.Contains(err.Error(), "multiple entries matching") {
 		t.Fatalf("FindSSHKey err=%v", err)
 	}
@@ -1504,15 +1410,10 @@ func TestDigitalOceanClientEnsureSSHKeyPreservesAmbiguousCreate(t *testing.T) {
 	}))
 	defer server.Close()
 
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 	client.reconcileTimeout = 20 * time.Millisecond
 	client.reconcileInterval = time.Millisecond
-	_, _, err = client.EnsureSSHKey(context.Background(), "crabbox-cbx-abcdef123456", "ssh-ed25519 test")
+	_, _, err := client.EnsureSSHKey(context.Background(), "crabbox-cbx-abcdef123456", "ssh-ed25519 test")
 	var ambiguous *ambiguousSSHKeyCreateError
 	if !errors.As(err, &ambiguous) {
 		t.Fatalf("EnsureSSHKey err=%v, want ambiguousSSHKeyCreateError", err)
@@ -1549,12 +1450,7 @@ func TestListCrabboxDropletsFiltersAndPaginates(t *testing.T) {
 		_, _ = w.Write([]byte(`{"droplets":[{"id":3,"name":"owned2","tags":["crabbox","crabbox:provider:digitalocean","crabbox:lease:cbx_222222222222","crabbox:slug:two","crabbox:target:linux"]}],"links":{"pages":{}}}`))
 	}))
 	defer server.Close()
-	t.Setenv("DIGITALOCEAN_TOKEN", "token")
-	client, err := newDigitalOceanClient(core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.baseURL = server.URL
+	client := newDigitalOceanTestClient(t, server, "token")
 	droplets, err := client.ListCrabboxDroplets(context.Background())
 	if err != nil {
 		t.Fatal(err)
