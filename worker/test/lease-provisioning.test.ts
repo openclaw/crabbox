@@ -282,6 +282,25 @@ async function publicLease(storage: ProvisioningTestStorage, azure: AzureFixture
 }
 
 describe("durable Azure admission and reconstruction", () => {
+  it("persists the requested market with the initial provisioning lease", async () => {
+    const storage = new ProvisioningTestStorage();
+    const azure = new AzureFixture();
+
+    const response = await fleet(storage, azure).coordinator.fetch(
+      request("POST", "/v1/leases", {
+        ...input(),
+        capacity: { market: "on-demand", fallback: "none" },
+      }),
+    );
+
+    expect(response.status).toBe(202);
+    expect(await storage.get<LeaseRecord>(`lease:${id}`)).toMatchObject({
+      state: "provisioning",
+      market: "on-demand",
+    });
+    expect(azure.mutations).toHaveLength(0);
+  });
+
   it("removes stale due markers without starving a valid operation", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const storage = new ProvisioningTestStorage();
