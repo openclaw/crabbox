@@ -137,19 +137,20 @@ export function verifyCatalogRollbackEvidence({
     promoted.revision === prior.revision ||
     promotedPrevious.state !== "present" ||
     promotedPrevious.imageId !== prior.id ||
-    promotedPrevious.revision !== prior.revision
+    promotedPrevious.revision !== prior.revision ||
+    !Array.isArray(promotedPrevious.aliases) ||
+    promotedPrevious.aliases.length === 0
   ) {
-    throw new Error("promotion receipt did not advance from the seeded default revision");
+    throw new Error("promotion receipt did not capture and advance from the seeded default");
   }
   if (
     rollbackPrevious.state !== "present" ||
     rollbackPrevious.imageId !== promoted.id ||
     rollbackPrevious.revision !== promoted.revision ||
     rollbackImage.id !== prior.id ||
-    rollbackImage.revision === prior.revision ||
-    rollbackImage.revision === promoted.revision
+    rollbackImage.revision !== prior.revision
   ) {
-    throw new Error("rollback receipt did not restore the base image under a fresh revision");
+    throw new Error("rollback receipt did not restore the exact seeded default revision");
   }
   if (restored.id !== rollbackImage.id || restored.revision !== rollbackImage.revision) {
     throw new Error("rollback receipt and restored candidate API readback do not match");
@@ -172,8 +173,8 @@ export function verifyCatalogRollbackEvidence({
     Number(staleStatus) !== 409 ||
     stale.error !== "image_promotion_precondition_failed" ||
     staleExpected.state !== "present" ||
-    staleExpected.imageId !== prior.id ||
-    staleExpected.revision !== prior.revision ||
+    staleExpected.imageId !== promoted.id ||
+    staleExpected.revision !== promoted.revision ||
     staleCurrent.state !== "present" ||
     staleCurrent.imageId !== rollbackImage.id ||
     staleCurrent.revision !== rollbackImage.revision
@@ -196,7 +197,7 @@ export function verifyCatalogRollbackEvidence({
     restoredRevisionDigest: digest(rollbackImage.revision),
     seededDefaultReadback: true,
     priorDefaultImageRestored: true,
-    rollbackRevisionAdvanced: true,
+    priorDefaultRevisionRestored: true,
     failedCatalogRevisionRetired: true,
     staleCASRejected: true,
     staleReadbackUnchanged: true,
@@ -524,8 +525,9 @@ export function verifyPublisherContract(source) {
     /CRABBOX_BIN="\$\{CRABBOX_BIN:-/,
     /trap cleanup EXIT/,
     /rollback_promoted_image\(\)/,
-    /--expected-current-image "\$current_id".*--expected-current-revision "\$current_revision".*--retire-expected-catalog "\$rollback_image"/,
+    /--restore-receipt "\$receipt" "\$current_id"/,
     /promote_args=\(image promote .*--expected-current-image capture\)/,
+    /\.previous\.aliases \| length > 0/,
     /restored previous default image=%s/,
   ];
   if (requiredPatterns.some((pattern) => !pattern.test(source))) {
@@ -1632,7 +1634,7 @@ export function verifyQualificationEvidence(attestation, proof) {
     proof?.fsr?.rejected !== true ||
     proof?.catalog?.seededDefaultReadback !== true ||
     proof?.catalog?.priorDefaultImageRestored !== true ||
-    proof?.catalog?.rollbackRevisionAdvanced !== true ||
+    proof?.catalog?.priorDefaultRevisionRestored !== true ||
     proof?.catalog?.failedCatalogRevisionRetired !== true ||
     proof?.catalog?.staleCASRejected !== true ||
     proof?.catalog?.staleReadbackUnchanged !== true ||

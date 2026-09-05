@@ -22,7 +22,7 @@ if [[ "$command_name" == image && "${2:-}" == promote ]]; then
   for argument in "$@"; do
     if [[ "$argument" == capture ]]; then
       receipt="$QUALIFICATION_ADAPTER_STATE/promotion-receipt.json"
-    elif [[ "$argument" == --retire-expected-catalog ]]; then
+    elif [[ "$argument" == --retire-expected-catalog || "$argument" == --restore-receipt ]]; then
       receipt="$QUALIFICATION_ADAPTER_STATE/rollback-receipt.json"
     fi
   done

@@ -477,40 +477,67 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var runFailure error
 	returnedRunError := &err
 	recorder := &runRecorder{}
+	var prepareTerminalRun func()
 	var finalizeTerminalRun func()
-	defer func() {
-		recorder.Failed(runFailure)
-	}()
-	defer func() {
-		if finalizeTerminalRun != nil {
-			finalizeTerminalRun()
-		}
-	}()
 	var finalTimingReport *timingReport
 	var artifactChangeResults []ArtifactChangeResult
 	var timingRecordRepo Repo
 	var timingRecordCommand []string
 	var timingRecordColdRun *bool
 	var delegatedTimingCapture *capturedTimingReportWriter
-	defer func() {
+	var runnerObservedStartedAt time.Time
+	var delegatedProviderEndedAt time.Time
+	delegatedRoute := false
+	snapshotFinalTimingReport := func(frozenAt time.Time) (timingReport, bool) {
 		if finalTimingReport == nil {
-			return
+			return timingReport{}, false
 		}
 		report := *finalTimingReport
 		report.ArtifactChanges = artifactChangeResults
+		report.Artifacts = append([]runArtifact(nil), report.Artifacts...)
+		if !runnerObservedStartedAt.IsZero() && !frozenAt.Before(runnerObservedStartedAt) {
+			report.RunnerTotalMs = durationMillisecondsCeil(frozenAt.Sub(runnerObservedStartedAt))
+		}
+		if delegatedRoute && !delegatedProviderEndedAt.IsZero() && report.RunnerTotalMs > 0 {
+			providerMs := durationMillisecondsCeil(delegatedProviderEndedAt.Sub(runnerObservedStartedAt))
+			clientMs := report.RunnerTotalMs - providerMs - cleanup.Duration.Milliseconds()
+			if clientMs > 0 {
+				report.RunnerPhases = append(report.RunnerPhases, RunnerPhase{Name: "unattributed", Ms: clientMs})
+			}
+		}
 		cleanup.apply(&report)
-		if timingRecordEnabled {
+		if err != nil && report.ExitCode == 0 {
+			report.ExitCode = exitCodeForError(err, 7)
+			report.RunStatus = ""
+			report.ErrorKind = ""
+		}
+		return finalizeTimingReport(report), true
+	}
+	defer func() {
+		if finalizeFailureDigest != nil {
+			finalizeFailureDigest()
+		}
+		if prepareTerminalRun != nil {
+			prepareTerminalRun()
+		}
+		frozenAt := time.Now()
+		report, hasReport := snapshotFinalTimingReport(frozenAt)
+		if hasReport && timingRecordEnabled {
 			recordColdRun := timingRecordColdRun
 			if benchmarkCtx.ColdRun != nil {
 				recordColdRun = benchmarkCtx.ColdRun
 			}
 			record := newBenchmarkTimingRecord(time.Now().UTC(), firstNonBlank(strings.TrimSpace(benchmarkCtx.Source), "run"), report, timingRecordRepo, timingRecordCommand, recordColdRun, benchmarkCtx.RepeatIndex)
 			if writeErr := appendBenchmarkTimingRecord(timingRecordPath, record); writeErr != nil {
-				if err == nil {
-					err = writeErr
-				} else {
+				if err != nil {
 					fmt.Fprintf(a.Stderr, "warning: benchmark timing record skipped: %v\n", writeErr)
 				}
+				err = errors.Join(err, writeErr)
+				runFailure = errors.Join(runFailure, writeErr)
+				if prepareTerminalRun != nil {
+					prepareTerminalRun()
+				}
+				report, _ = snapshotFinalTimingReport(frozenAt)
 			} else {
 				if benchmarkCtx.OnRecord != nil {
 					benchmarkCtx.OnRecord()
@@ -518,18 +545,20 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				fmt.Fprintf(a.Stderr, "benchmark timing record appended path=%s observations=1\n", timingRecordPath)
 			}
 		}
-		if !*timingJSON {
-			return
+		if hasReport && *timingJSON {
+			if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil {
+				timingErr := exit(7, "write timing JSON: %v", writeErr)
+				err = errors.Join(err, timingErr)
+				runFailure = errors.Join(runFailure, timingErr)
+				if prepareTerminalRun != nil {
+					prepareTerminalRun()
+				}
+			}
 		}
-		if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil && err == nil {
-			err = writeErr
+		if finalizeTerminalRun != nil {
+			finalizeTerminalRun()
 		}
-	}()
-	// Cleanup runs first; the final timing JSON must still be the last line.
-	defer func() {
-		if finalizeFailureDigest != nil {
-			finalizeFailureDigest()
-		}
+		recorder.Failed(runFailure)
 	}()
 	command := fs.Args()
 	if len(command) > 0 && command[0] == "--" {
@@ -831,7 +860,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		cfg.explicitSSHPort = ""
 	}
 	backendRuntime := runtimeForApp(a)
-	if timingRecordEnabled {
+	if timingRecordEnabled || *timingJSON {
 		delegatedTimingCapture = &capturedTimingReportWriter{writer: a.Stderr}
 		backendRuntime.Stderr = delegatedTimingCapture
 	}
@@ -867,6 +896,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if lifecycleOwner == nil {
 			return
 		}
+		cleanupStartedAt := time.Now()
+		defer func() {
+			cleanup.Duration += time.Since(cleanupStartedAt)
+		}()
 		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), lifecycleOwner.quiesceTimeout())
 		closeErr := lifecycleOwner.Close(releaseCtx)
 		cancel()
@@ -882,6 +915,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if borrowedPool == nil {
 			return
 		}
+		cleanupStartedAt := time.Now()
+		defer func() {
+			cleanup.Duration += time.Since(cleanupStartedAt)
+		}()
 		defer func() {
 			if stopReadyPoolHeartbeat != nil {
 				stopReadyPoolHeartbeat()
@@ -979,6 +1016,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok && !sshScriptRun {
+		delegatedRoute = true
 		if err := validateDelegatedRunRouting(backend.Spec(), runReq, *readyPool, len(requiredArtifactSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
 			return err
 		}
@@ -1004,7 +1042,69 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if runReq.Preflight {
 			printDelegatedPreflightUnsupported(a.Stderr, backend.Spec().Name)
 		}
+		attestPath := strings.TrimSpace(*attestOut)
+		var delegatedReceiptKey ed25519.PrivateKey
+		if attestPath != "" {
+			delegatedReceiptKey, err = resolveAttestKey(strings.TrimSpace(*attestKeyOverride))
+			if err != nil {
+				return exit(2, "attest key: %v", err)
+			}
+		}
+		runnerObservedStartedAt = time.Now()
 		result, runErr := delegated.Run(ctx, runReq)
+		delegatedProviderEndedAt = time.Now()
+		if *timingJSON || timingRecordEnabled {
+			report := timingReportFromDelegatedRunResult(runReq, result, backend.Spec().Name, runErr)
+			if delegatedTimingCapture != nil && delegatedTimingCapture.report != nil {
+				report = *delegatedTimingCapture.report
+			}
+			providerMs := durationMillisecondsCeil(delegatedProviderEndedAt.Sub(runnerObservedStartedAt))
+			report.RunnerTotalMs = providerMs
+			report.RunnerPhases = runnerPhasesFromLegacyReport(report, providerMs)
+			finalTimingReport = &report
+		}
+		delegatedReceiptEligible := runErr == nil || FinalizeRunResult(result, runErr).ErrorKind == RunErrorCommandExit
+		var preparedDelegatedReceipt *preparedRunReceipt
+		preparedDelegatedExitCode := -1
+		delegatedPreparationAttempted := false
+		prepareTerminalRun = func() {
+			if attestPath == "" || !delegatedReceiptEligible {
+				return
+			}
+			finalResult := result
+			finalFailure := runFailure
+			if finalFailure == nil {
+				finalFailure = err
+			}
+			if finalResult.ExitCode == 0 && finalFailure != nil {
+				finalResult.ExitCode = exitCodeForError(finalFailure, 7)
+			}
+			if delegatedPreparationAttempted && preparedDelegatedExitCode == finalResult.ExitCode {
+				return
+			}
+			delegatedPreparationAttempted = true
+			preparedDelegatedExitCode = finalResult.ExitCode
+			preparedDelegatedReceipt = nil
+			prepared, receiptErr := prepareDelegatedRunReceipt(attestPath, delegatedReceiptKey, cfg, finalResult, runReq)
+			if receiptErr != nil {
+				err = errors.Join(err, receiptErr)
+				runFailure = errors.Join(runFailure, receiptErr)
+				return
+			}
+			preparedDelegatedReceipt = &prepared
+		}
+		finalizeTerminalRun = func() {
+			if preparedDelegatedReceipt == nil {
+				return
+			}
+			receipt, receiptErr := persistPreparedRunReceipt(*preparedDelegatedReceipt)
+			if receiptErr != nil {
+				err = errors.Join(err, receiptErr)
+				runFailure = errors.Join(runFailure, receiptErr)
+				return
+			}
+			fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", receipt.Path, receipt.Bytes)
+		}
 		if runErr == nil || result.Command > 0 || result.Total > 0 {
 			a.syncExternalRunnersBestEffort(ctx, cfg, backend)
 		}
@@ -1029,25 +1129,12 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			result.Artifacts = append(result.Artifacts, proof)
 			fmt.Fprintf(a.Stderr, "artifact kind=proof path=%s bytes=%d template=%s\n", proof.Path, proof.Bytes, blank(proof.Template, "default"))
 		}
-		if strings.TrimSpace(*attestOut) != "" && (runErr == nil || FinalizeRunResult(result, runErr).ErrorKind == RunErrorCommandExit) {
-			receipt, err := writeDelegatedRunReceipt(strings.TrimSpace(*attestOut), strings.TrimSpace(*attestKeyOverride), cfg, result, runReq)
-			if err != nil {
-				return err
-			}
-			result.Artifacts = append(result.Artifacts, receipt)
-			fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", receipt.Path, receipt.Bytes)
-		}
 		if result.Session != nil {
 			coldRun := !result.Session.Reused
 			timingRecordColdRun = &coldRun
 		}
-		if timingRecordEnabled {
-			report := timingReportFromDelegatedRunResult(runReq, result, backend.Spec().Name, runErr)
-			if delegatedTimingCapture != nil && delegatedTimingCapture.report != nil {
-				report = *delegatedTimingCapture.report
-			}
-			report.Artifacts = result.Artifacts
-			finalTimingReport = &report
+		if finalTimingReport != nil {
+			finalTimingReport.Artifacts = result.Artifacts
 		}
 		return runErr
 	}
@@ -1055,12 +1142,19 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if !ok {
 		return exit(2, "provider=%s does not support run", backend.Spec().Name)
 	}
+	coord := backendCoordinator(backend)
+	var terminalReceiptKey ed25519.PrivateKey
+	if strings.TrimSpace(*attestOut) != "" || (coord != nil && !*syncOnly) {
+		terminalReceiptKey, err = resolveAttestKey(strings.TrimSpace(*attestKeyOverride))
+		if err != nil {
+			return exit(2, "attest key: %v", err)
+		}
+	}
 	if !*noSync && freshPR.Empty() {
 		if err := validateLocalWorkspaceSyncSource(repo); err != nil {
 			return err
 		}
 	}
-	coord := backendCoordinator(backend)
 	var registrationCoord *CoordinatorClient
 	if shouldRegisterCoordinatorLease(cfg) {
 		if client, configured, coordErr := newCoordinatorClient(cfg); coordErr != nil {
@@ -1076,6 +1170,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		runReq.Script = script
 	}
+	runnerObservedStartedAt = time.Now()
+	var runnerBorrowDuration time.Duration
 	if strings.TrimSpace(*readyPool) != "" {
 		if coord == nil {
 			return exit(2, "--pool requires a coordinator-backed SSH lease provider")
@@ -1095,6 +1191,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			}
 		}
 		var res CoordinatorReadyPoolResponse
+		borrowStartedAt := time.Now()
 		if readyPoolIdentity != nil {
 			delete(borrowInput, "allowMissingCommit")
 			borrowInput["identity"] = *readyPoolIdentity
@@ -1102,6 +1199,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		} else {
 			res, err = coord.BorrowReadyPoolLease(ctx, strings.TrimSpace(*readyPool), borrowInput)
 		}
+		runnerBorrowDuration = time.Since(borrowStartedAt)
 		if err != nil {
 			return err
 		}
@@ -1132,6 +1230,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	endToEndStartedAt := time.Now()
 	leaseStartedAt := endToEndStartedAt
+	var runnerProviderTiming *runnerProviderTiming
+	leasePhase := "provider.acquire"
 	claimAdmitted := false
 	releaseResolvedLease := false
 	keepFailedLease := false
@@ -1142,6 +1242,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if !releaseResolvedLease || (!releaseUnreportedLease && !shouldReleaseRunLease(acquired, *keep, keepFailedLease, *stopAfter, runFailure)) {
 			return
 		}
+		cleanupStartedAt := time.Now()
+		defer func() {
+			cleanup.Duration += time.Since(cleanupStartedAt)
+		}()
 		if lifecycleOwner != nil {
 			inspectCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), lifecycleOwner.quiesceTimeout())
 			ownerErr := lifecycleOwner.QuiesceForLeaseRelease(inspectCtx)
@@ -1259,6 +1363,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		return nil
 	}
 	if *leaseIDFlag != "" {
+		leasePhase = "provider.resolve"
 		var lease LeaseTarget
 		req := ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim, Prepare: true}
 		if borrowedPool == nil {
@@ -1278,6 +1383,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		if err == nil {
 			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+			runnerProviderTiming = lease.runnerTiming
 		}
 
 	} else {
@@ -1285,6 +1391,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		lease, err = sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim, RequestedSlug: requestedSlug})
 		if err == nil {
 			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+			runnerProviderTiming = lease.runnerTiming
 		}
 		acquired = true
 	}
@@ -1401,9 +1508,13 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return recordFailure(err)
 		}
 	}
+	var runnerConnectDuration time.Duration
 	if shouldAcquireWorkspaceOwner(target, acquired, acquiredRunMayRetainLease(*keep, *keepOnFailure, *stopAfter), sshBackend) {
 		target = bootstrapNetworkTarget(cfg, server, target)
-		if waitErr := waitForSSHReady(ctx, &target, a.Stderr, "workspace owner", 2*time.Minute); waitErr != nil {
+		connectStartedAt := time.Now()
+		waitErr := waitForSSHReady(ctx, &target, a.Stderr, "workspace owner", 2*time.Minute)
+		runnerConnectDuration += time.Since(connectStartedAt)
+		if waitErr != nil {
 			return recordFailure(waitErr)
 		}
 		a.refreshTailscaleMetadata(ctx, cfg, sshBackend, coord, useCoordinator, &server, target, leaseID)
@@ -1434,7 +1545,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	timings := runTimings{
 		started:           time.Now(),
 		endToEndStartedAt: endToEndStartedAt,
+		borrow:            runnerBorrowDuration,
 		lease:             leaseDuration,
+		leasePhase:        leasePhase,
+		providerTiming:    runnerProviderTiming,
+		connect:           runnerConnectDuration,
 	}
 	exitNodeEgressChecked := false
 	workdir = remoteJoin(cfg, leaseID, repo.Name)
@@ -1442,7 +1557,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	profileEnvFile := ""
 	actionsURL := ""
 	defer func() {
-		if len(requiredArtifactChanges) == 0 || finalTimingReport != nil || (!*timingJSON && !timingRecordEnabled) {
+		if finalTimingReport != nil || (!*timingJSON && !timingRecordEnabled) {
 			return
 		}
 		report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, time.Since(timings.started), exitCodeForError(err, 7), actionsURL)
@@ -1608,6 +1723,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		oldLease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord}
 		oldLeaseID := leaseID
 		oldSlug := serverSlug(server)
+		oldMachineType := server.ServerType.Name
 		fmt.Fprintf(a.Stderr, "warning: SSH became unavailable after sync on lease=%s slug=%s; replacing lease once and retrying sync\n", oldLeaseID, blank(oldSlug, "-"))
 		recorder.Event("lease.replace.started", "leasing", fmt.Sprintf("old_lease=%s old_slug=%s reason=ssh_before_command", oldLeaseID, blank(oldSlug, "-")))
 
@@ -1617,21 +1733,32 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if *timingJSON {
 			releaseApp.Stderr = io.Discard
 		}
-		if err := releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, cfg, oldLease); err != nil {
-			recorder.Event("lease.replace.failed", "leasing", err.Error())
-			return true, exit(7, "replace stale lease %s: release failed: %v", oldLeaseID, err)
+		oldLeaseCleanupStartedAt := time.Now()
+		oldLeaseCleanupErr := releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, cfg, oldLease)
+		oldLeaseCleanupDuration := time.Since(oldLeaseCleanupStartedAt)
+		if oldLeaseCleanupErr != nil {
+			recorder.Event("lease.replace.failed", "leasing", oldLeaseCleanupErr.Error())
+			return true, exit(7, "replace stale lease %s: release failed: %v", oldLeaseID, oldLeaseCleanupErr)
 		}
 		acquired = false
 
 		replacementLeaseStartedAt := time.Now()
 		newLease, err := sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim})
-		timings.lease += time.Since(replacementLeaseStartedAt)
+		replacementLeaseDuration := time.Since(replacementLeaseStartedAt)
 		if err != nil {
+			recordFailedReplacementLeaseDuration(&timings, replacementLeaseDuration)
 			recorder.Event("lease.replace.failed", "leasing", err.Error())
 			return true, err
 		}
 
+		oldAttemptReport := TimingReport{
+			Provider:    cfg.Provider,
+			LeaseID:     oldLeaseID,
+			Slug:        oldSlug,
+			MachineType: oldMachineType,
+		}
 		server, target, leaseID = newLease.Server, newLease.SSH, newLease.LeaseID
+		resetRunnerTimingsForReplacement(&timings, oldAttemptReport, oldLeaseCleanupDuration, replacementLeaseDuration, newLease.runnerTiming)
 		acquired = true
 		coord = newLease.Coordinator
 		useCoordinator = coord != nil
@@ -1716,7 +1843,10 @@ retrySync:
 		recorder.Event("bootstrap.waiting", "bootstrap", "waiting for SSH before sync")
 		target = bootstrapNetworkTarget(cfg, server, target)
 		bootstrapErr := waitForSSHReady(ctx, &target, a.Stderr, "before sync", 2*time.Minute)
-		timings.bootstrap += time.Since(stepStart)
+		connectDuration := time.Since(stepStart)
+		timings.bootstrap += connectDuration
+		timings.connect += connectDuration
+		timings.syncConnect += connectDuration
 		if bootstrapErr != nil {
 			return recordFailure(bootstrapErr)
 		}
@@ -1754,7 +1884,12 @@ retrySync:
 				target.Port = cfg.SSHPort
 				target.FallbackPorts = cfg.SSHFallbackPorts
 				target = bootstrapNetworkTarget(cfg, server, target)
-				if waitErr := waitForSSHReady(ctx, &target, a.Stderr, "before sync", 2*time.Minute); waitErr != nil {
+				connectStartedAt := time.Now()
+				waitErr := waitForSSHReady(ctx, &target, a.Stderr, "before sync", 2*time.Minute)
+				connectDuration := time.Since(connectStartedAt)
+				timings.connect += connectDuration
+				timings.syncConnect += connectDuration
+				if waitErr != nil {
 					return recordFailure(waitErr)
 				}
 				if resolved, resolveErr := resolveNetworkTarget(ctx, cfg, server, target); resolveErr != nil {
@@ -2164,8 +2299,21 @@ afterSync:
 			report.Label = runLabelValue
 			finalTimingReport = &report
 		}
-		if finishErr := recorder.Finish(ctx, target, 0, timings.sync, 0, "", false, nil, FailureClassification{}, nil); finishErr != nil {
-			return recordFailure(finishErr)
+		finalizeTerminalRun = func() {
+			finalFailure := runFailure
+			if finalFailure == nil {
+				finalFailure = err
+			}
+			finalCode := 0
+			classification := FailureClassification{}
+			if finalFailure != nil {
+				finalCode = exitCodeForError(finalFailure, 7)
+				classification = ClassifyRunFailure(finalCode, finalFailure.Error(), nil)
+			}
+			if finishErr := recorder.Finish(ctx, target, finalCode, timings.sync, 0, "", false, nil, classification, nil); finishErr != nil {
+				err = errors.Join(err, finishErr)
+				runFailure = errors.Join(runFailure, finishErr)
+			}
 		}
 		return nil
 	}
@@ -2173,7 +2321,9 @@ afterSync:
 	target = bootstrapNetworkTarget(cfg, server, target)
 	bootstrapStartedAt := time.Now()
 	bootstrapErr := waitForSSHReady(ctx, &target, a.Stderr, "before command", runBeforeCommandSSHReadyTimeout)
-	timings.bootstrap += time.Since(bootstrapStartedAt)
+	connectDuration := time.Since(bootstrapStartedAt)
+	timings.bootstrap += connectDuration
+	timings.connect += connectDuration
 	if bootstrapErr != nil {
 		replaced, replaceErr := replaceLeaseAfterBeforeCommandSSHFailure(bootstrapErr)
 		if replaceErr != nil {
@@ -2358,13 +2508,6 @@ afterSync:
 		stderrEvents = nil
 		stderr = io.MultiWriter(stderr, capturedRunLogWriter{&logBuffer})
 	}
-	var terminalReceiptKey ed25519.PrivateKey
-	if recorder.runID != "" || strings.TrimSpace(*attestOut) != "" {
-		terminalReceiptKey, err = resolveAttestKey(strings.TrimSpace(*attestKeyOverride))
-		if err != nil {
-			return recordFailure(exit(2, "attest key: %v", err))
-		}
-	}
 	resultsMarker := ""
 	if cfg.Results.Auto {
 		resultsMarker = remoteResultsMarker
@@ -2417,8 +2560,10 @@ afterSync:
 	var results *TestResultSummary
 	classification := FailureClassification{}
 	attestPath := strings.TrimSpace(*attestOut)
-	var writtenAttestReceipt terminalRunReceipt
-	attestReceiptWritten := false
+	var preparedTerminalReceipt terminalRunReceipt
+	var preparedTerminalReceiptFile *preparedRunReceipt
+	preparedTerminalExitCode := -1
+	terminalPreparationAttempted := false
 	terminalLog := logBuffer.Snapshot()
 	buildTerminalReceipt := func(finalCode int) (terminalRunReceipt, error) {
 		startedAt := recorder.startedAt
@@ -2449,7 +2594,7 @@ afterSync:
 			LogTruncated:      terminalLog.Truncated,
 		})
 	}
-	finalizeTerminalRun = func() {
+	prepareTerminalRun = func() {
 		if timings.command == 0 {
 			timings.command = time.Since(commandStart)
 		}
@@ -2471,50 +2616,74 @@ afterSync:
 			}
 			classification = classifyRunOutcomeFailure(finalCode, classificationLog, commandFailurePhases, failureEvidence, false)
 		}
-
-		receipt := writtenAttestReceipt
-		var receiptErr error
-		if !attestReceiptWritten || receipt.ExitCode != finalCode {
-			receipt, receiptErr = buildTerminalReceipt(finalCode)
+		if terminalPreparationAttempted && preparedTerminalExitCode == finalCode {
+			return
 		}
+		terminalPreparationAttempted = true
+		preparedTerminalExitCode = finalCode
+		preparedTerminalReceiptFile = nil
+		receipt, receiptErr := buildTerminalReceipt(finalCode)
 		if receiptErr != nil {
 			err = errors.Join(err, receiptErr)
 			recordRunFailure(&runFailure, receiptErr)
 			return
 		}
-		if attestPath != "" && (!attestReceiptWritten || writtenAttestReceipt.ExitCode != finalCode) {
-			artifact, writeErr := writeTerminalRunReceipt(attestPath, receipt)
+		prepared, receiptErr := prepareTerminalRunReceipt(attestPath, receipt)
+		if receiptErr != nil {
+			err = errors.Join(err, receiptErr)
+			recordRunFailure(&runFailure, receiptErr)
+			return
+		}
+		preparedTerminalReceipt = receipt
+		preparedTerminalReceiptFile = &prepared
+	}
+	finalizeTerminalRun = func() {
+		if preparedTerminalReceiptFile == nil {
+			return
+		}
+		localReceiptPersisted := attestPath == ""
+		if attestPath != "" {
+			artifact, writeErr := persistPreparedRunReceipt(*preparedTerminalReceiptFile)
 			if writeErr != nil {
 				err = errors.Join(err, writeErr)
 				recordRunFailure(&runFailure, writeErr)
+				prepareTerminalRun()
+				if preparedTerminalReceiptFile == nil || preparedTerminalReceipt.ExitCode == 0 {
+					return
+				}
 			} else {
-				writtenAttestReceipt = receipt
-				attestReceiptWritten = true
+				localReceiptPersisted = true
 				fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
 			}
 		}
-		if finishErr := recorder.Finish(ctx, target, finalCode, timings.sync, timings.command, terminalLog.Log, terminalLog.Truncated, results, classification, &receipt); finishErr != nil {
+		if finishErr := recorder.Finish(ctx, target, preparedTerminalReceipt.ExitCode, timings.sync, timings.command, terminalLog.Log, terminalLog.Truncated, results, classification, &preparedTerminalReceipt); finishErr != nil {
 			err = errors.Join(err, finishErr)
 			recordRunFailure(&runFailure, finishErr)
-			if attestPath != "" && receipt.ExitCode == 0 {
+			if localReceiptPersisted && attestPath != "" && preparedTerminalReceipt.ExitCode == 0 {
 				// The coordinator commit is now ambiguous. Preserve the exact receipt
 				// sent remotely, but make the local CLI failure impossible to miss.
 				failedReceipt, receiptErr := buildTerminalReceipt(exitCodeForError(finishErr, 7))
 				if receiptErr != nil {
 					err = errors.Join(err, receiptErr)
 					recordRunFailure(&runFailure, receiptErr)
-				} else if artifact, writeErr := writeTerminalRunReceipt(attestPath, failedReceipt); writeErr != nil {
-					err = errors.Join(err, writeErr)
-					recordRunFailure(&runFailure, writeErr)
 				} else {
-					writtenAttestReceipt = failedReceipt
-					attestReceiptWritten = true
-					fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
+					failedPrepared, prepareErr := prepareTerminalRunReceipt(attestPath, failedReceipt)
+					if prepareErr != nil {
+						err = errors.Join(err, prepareErr)
+						recordRunFailure(&runFailure, prepareErr)
+					} else if artifact, writeErr := persistPreparedRunReceipt(failedPrepared); writeErr != nil {
+						err = errors.Join(err, writeErr)
+						recordRunFailure(&runFailure, writeErr)
+					} else {
+						fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
+					}
 				}
 			}
 			if a.runOutcome != nil {
 				a.runOutcome.Recorded = false
 			}
+		} else if a.runOutcome != nil {
+			a.runOutcome.ExitCode = preparedTerminalReceipt.ExitCode
 		}
 	}
 	if code != 0 || streamErr != nil {
@@ -2542,6 +2711,16 @@ afterSync:
 	if err := waitWorkspaceOwnerNoChild(ctx, lifecycleOwner, lifecycleOwner.callTimeout()); err != nil {
 		return recordFailure(exit(7, "remote command child ownership remains active; refusing collection and cleanup: %v", err))
 	}
+	artifactStartedAt := time.Now()
+	artifactTimingDone := false
+	finishArtifactTiming := func() {
+		if artifactTimingDone {
+			return
+		}
+		timings.artifacts = time.Since(artifactStartedAt)
+		artifactTimingDone = true
+	}
+	defer finishArtifactTiming()
 	if failureDownloadEligible && ctx.Err() == nil {
 		collectFailureDownloads(ctx, target, workdir, failureDownloads, a.Stderr)
 	} else if len(failureDownloads) > 0 && code != 0 {
@@ -2601,6 +2780,8 @@ afterSync:
 			if err != nil {
 				return recordFailure(err)
 			}
+			timings.artifactTransferCount++
+			timings.artifactTransferBytes += int64(bytes)
 			fmt.Fprintf(a.Stderr, "downloaded %s bytes=%d\n", local, bytes)
 		}
 	}
@@ -2611,6 +2792,8 @@ afterSync:
 			return recordFailure(err)
 		}
 		runArtifacts = append(runArtifacts, collected...)
+		timings.artifactTransferCount += len(collected)
+		timings.artifactTransferBytes += runArtifactBytes(collected)
 		for _, artifact := range collected {
 			fmt.Fprintf(a.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
 		}
@@ -2624,12 +2807,15 @@ afterSync:
 			fmt.Fprintln(a.Stderr, strings.TrimSpace(artifactOutput))
 		}
 		runArtifacts = append(runArtifacts, collected...)
+		timings.artifactTransferCount += len(collected)
+		timings.artifactTransferBytes += runArtifactBytes(collected)
 		for _, artifact := range collected {
 			fmt.Fprintf(a.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
 		}
 	}
 	// JUnit policy follows workload evidence collection; it must neither suppress
 	// fresh artifacts nor authorize failure downloads after a zero workload exit.
+	finishArtifactTiming()
 	var testResultsFailure error
 	if failRunForTestResults(code, cfg.Results, results) {
 		code = 1
@@ -2677,22 +2863,6 @@ afterSync:
 		runArtifacts = append(runArtifacts, proof)
 		report.Artifacts = runArtifacts
 		fmt.Fprintf(a.Stderr, "artifact kind=proof path=%s bytes=%d template=%s\n", proof.Path, proof.Bytes, blank(proof.Template, "default"))
-	}
-	if attestPath != "" && code == 0 {
-		receipt, err := buildTerminalReceipt(code)
-		if err != nil {
-			return recordFailure(err)
-		}
-		artifact, err := writeTerminalRunReceipt(attestPath, receipt)
-		if err != nil {
-			return recordFailure(err)
-		} else {
-			writtenAttestReceipt = receipt
-			attestReceiptWritten = true
-			runArtifacts = append(runArtifacts, artifact)
-			report.Artifacts = runArtifacts
-			fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
-		}
 	}
 	if a.runOutcome != nil {
 		a.runOutcome.Recorded = true
@@ -2951,6 +3121,18 @@ func writeDelegatedRunProof(path, templateName string, cfg Config, result RunRes
 }
 
 func writeDelegatedRunReceipt(path, keyPath string, cfg Config, result RunResult, req RunRequest) (runArtifact, error) {
+	key, err := resolveAttestKey(keyPath)
+	if err != nil {
+		return runArtifact{}, exit(2, "attest key: %v", err)
+	}
+	prepared, err := prepareDelegatedRunReceipt(path, key, cfg, result, req)
+	if err != nil {
+		return runArtifact{}, err
+	}
+	return persistPreparedRunReceipt(prepared)
+}
+
+func prepareDelegatedRunReceipt(path string, key ed25519.PrivateKey, cfg Config, result RunResult, req RunRequest) (preparedRunReceipt, error) {
 	command := strings.TrimSpace(result.CommandText)
 	if command == "" {
 		command = runCommandDisplay(req.Command, req.ShellMode)
@@ -2972,7 +3154,7 @@ func writeDelegatedRunReceipt(path, keyPath string, cfg Config, result RunResult
 		receipt.ActionsURL = firstNonBlank(receipt.ActionsURL, session.ActionsURL)
 	}
 	receipt.Provider = firstNonBlank(receipt.Provider, cfg.Provider)
-	return writeRunReceipt(path, keyPath, receipt)
+	return prepareRunReceipt(path, key, receipt)
 }
 
 func delegatedRunID(req RunRequest, result RunResult) string {
@@ -3020,23 +3202,34 @@ func runStopCommand(cfg Config, id string) string {
 }
 
 type runTimings struct {
-	started            time.Time
-	endToEndStartedAt  time.Time
-	lease              time.Duration
-	bootstrap          time.Duration
-	sync               time.Duration
-	command            time.Duration
-	syncSteps          syncStepTimings
-	commandPhases      []timingPhase
-	syncSkipped        bool
-	syncMode           string
-	syncTransferFiles  int
-	syncTransferBytes  int64
-	syncFallbackReason string
-	blockedStage       string
-	resourceExhaustion ResourceExhaustionReason
-	failureEvidence    RunFailureEvidence
-	retryLikely        string
+	started               time.Time
+	endToEndStartedAt     time.Time
+	borrow                time.Duration
+	lease                 time.Duration
+	legacyLease           time.Duration
+	leasePhase            string
+	connect               time.Duration
+	syncConnect           time.Duration
+	bootstrap             time.Duration
+	legacyBootstrap       time.Duration
+	sync                  time.Duration
+	command               time.Duration
+	artifacts             time.Duration
+	artifactTransferCount int
+	artifactTransferBytes int64
+	providerTiming        *runnerProviderTiming
+	priorRunnerPhases     []RunnerPhase
+	syncSteps             syncStepTimings
+	commandPhases         []timingPhase
+	syncSkipped           bool
+	syncMode              string
+	syncTransferFiles     int
+	syncTransferBytes     int64
+	syncFallbackReason    string
+	blockedStage          string
+	resourceExhaustion    ResourceExhaustionReason
+	failureEvidence       RunFailureEvidence
+	retryLikely           string
 }
 
 type syncStepTimings struct {
@@ -3062,8 +3255,8 @@ type syncStepTimings struct {
 
 func formatRunSummary(timings runTimings, total time.Duration, exitCode int) string {
 	summary := fmt.Sprintf("run summary lease=%s bootstrap=%s sync=%s command=%s total=%s end_to_end=%s sync_skipped=%t exit=%d",
-		timings.lease.Round(time.Millisecond),
-		timings.bootstrap.Round(time.Millisecond),
+		legacyLeaseDuration(timings).Round(time.Millisecond),
+		legacyBootstrapDuration(timings).Round(time.Millisecond),
 		timings.sync.Round(time.Millisecond),
 		timings.command.Round(time.Millisecond),
 		total.Round(time.Millisecond),
@@ -3886,16 +4079,28 @@ type leaseCleanupResult struct {
 	Attempted bool
 	Stopped   bool
 	Err       error
+	Duration  time.Duration
 }
 
 func (result leaseCleanupResult) apply(report *timingReport) {
-	if !result.Attempted || report == nil {
+	if report == nil {
 		return
 	}
-	stopped := result.Stopped
-	report.LeaseStopped = &stopped
-	if result.Err != nil {
-		report.LeaseStopErr = result.Err.Error()
+	if result.Duration > 0 {
+		report.RunnerPhases = append(report.RunnerPhases, RunnerPhase{
+			Name:     "cleanup",
+			Ms:       result.Duration.Milliseconds(),
+			Provider: report.Provider,
+			LeaseID:  report.LeaseID,
+			Slug:     report.Slug,
+		})
+	}
+	if result.Attempted {
+		stopped := result.Stopped
+		report.LeaseStopped = &stopped
+		if result.Err != nil {
+			report.LeaseStopErr = result.Err.Error()
+		}
 	}
 }
 

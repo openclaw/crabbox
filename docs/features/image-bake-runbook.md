@@ -731,12 +731,11 @@ signer dispatch. The candidate publisher then boots source, candidate-image,
 and promoted-image leases sequentially. A trusted `CRABBOX_BIN` adapter
 delegates every command to the exact candidate CLI and captures the structured
 promotion and rollback receipts. Candidate API readbacks must prove the exact
-seeded base image was restored under a fresh rollback revision, distinct from
-both the seeded and failed promotion revisions, and the failed image revision
-lost its catalog role. A `200` readback for that AMI is accepted only as a
-matching provider-only record with no revision, promotion timestamp, or
-catalog-only marker; `404` is also valid. A stale request naming the seeded
-revision must then return 409 with the fresh rollback revision as current,
+seeded base image and revision were restored and the failed image revision lost
+its catalog role. A `200` readback for that AMI is accepted only as a matching
+provider-only record with no revision, promotion timestamp, or catalog-only
+marker; `404` is also valid. A stale request naming the failed revision must
+then return 409 with the seeded revision as current,
 while complete candidate API readbacks remain unchanged, including catalog,
 default, and FSR state. Candidate logs are supplemental only. The adapter
 returns exit 86 only after the promoted smoke succeeds. A credentialless child
