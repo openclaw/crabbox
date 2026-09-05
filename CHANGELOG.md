@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Blaxel: prepare and validate sync archives before fresh allocation, freeze the pre-create snapshot, and share staged workspace replacement and cleanup while retaining native upload retries. Thanks @steipete.
+
 - Blaxel: stop the original process after interrupted polling requests and preserve cancellation and timeout causes without exposing redacted credentials. [PR 1846](https://github.com/openclaw/crabbox/pull/1846). Thanks @steipete.
 
 ## 0.49.1 - 2026-09-04
