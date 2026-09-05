@@ -2651,19 +2651,25 @@ afterSync:
 		if preparedTerminalReceiptFile == nil {
 			return
 		}
+		localReceiptPersisted := attestPath == ""
 		if attestPath != "" {
 			artifact, writeErr := persistPreparedRunReceipt(*preparedTerminalReceiptFile)
 			if writeErr != nil {
 				err = errors.Join(err, writeErr)
 				recordRunFailure(&runFailure, writeErr)
+				prepareTerminalRun()
+				if preparedTerminalReceiptFile == nil || preparedTerminalReceipt.ExitCode == 0 {
+					return
+				}
 			} else {
+				localReceiptPersisted = true
 				fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
 			}
 		}
 		if finishErr := recorder.Finish(ctx, target, preparedTerminalReceipt.ExitCode, timings.sync, timings.command, terminalLog.Log, terminalLog.Truncated, results, classification, &preparedTerminalReceipt); finishErr != nil {
 			err = errors.Join(err, finishErr)
 			recordRunFailure(&runFailure, finishErr)
-			if attestPath != "" && preparedTerminalReceipt.ExitCode == 0 {
+			if localReceiptPersisted && attestPath != "" && preparedTerminalReceipt.ExitCode == 0 {
 				// The coordinator commit is now ambiguous. Preserve the exact receipt
 				// sent remotely, but make the local CLI failure impossible to miss.
 				failedReceipt, receiptErr := buildTerminalReceipt(exitCodeForError(finishErr, 7))
@@ -2686,6 +2692,8 @@ afterSync:
 			if a.runOutcome != nil {
 				a.runOutcome.Recorded = false
 			}
+		} else if a.runOutcome != nil {
+			a.runOutcome.ExitCode = preparedTerminalReceipt.ExitCode
 		}
 	}
 	if code != 0 || streamErr != nil {

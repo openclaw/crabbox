@@ -3851,6 +3851,191 @@ func TestRunCommandTerminalReceiptIncludesLateTimingRecordFailure(t *testing.T) 
 	}
 }
 
+func TestRunCommandReceiptPersistenceFailureFinishesWithRefreshedReceipt(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	receiptPath := filepath.Join(dir, "receipt.json")
+	keyPath := filepath.Join(dir, "signer.pem")
+	replacementPath := filepath.Join(dir, "replacement.pem")
+	_, originalKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, replacementKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRunTestAttestKey(t, keyPath, originalKey)
+	writeRunTestAttestKey(t, replacementPath, replacementKey)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+
+	const (
+		leaseID = "cbx_receipt_write_failure"
+		runID   = "run_receipt_write_failure"
+	)
+	lease := CoordinatorLease{
+		ID:         leaseID,
+		Slug:       "receipt-write-failure",
+		Provider:   "run-ready-pool-preflight-test",
+		Owner:      "test@example.com",
+		Org:        "test",
+		Class:      "standard",
+		ServerType: "test",
+		Host:       "127.0.0.1",
+		SSHUser:    "crabbox",
+		SSHPort:    sshPort,
+		WorkRoot:   "/work/crabbox",
+		State:      "active",
+	}
+	var (
+		mu            sync.Mutex
+		events        []string
+		finishCalls   int
+		finishCode    int
+		finishBlocked string
+		finishRetry   string
+		finishReceipt terminalRunReceipt
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/control":
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+leaseID:
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+leaseID+"/heartbeat":
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+			if err := os.Remove(keyPath); err != nil {
+				t.Errorf("remove original signer: %v", err)
+			}
+			if err := os.Rename(replacementPath, keyPath); err != nil {
+				t.Errorf("replace signer: %v", err)
+			}
+			if err := os.Mkdir(receiptPath, 0o700); err != nil {
+				t.Errorf("replace receipt path with directory: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"run": CoordinatorRun{
+				ID: runID, LeaseID: leaseID, Provider: lease.Provider, State: "running",
+				StartedAt: "2026-09-05T00:00:00Z",
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/"+runID+"/events":
+			_ = json.NewEncoder(w).Encode(map[string]any{"event": CoordinatorRunEvent{
+				RunID: runID, Seq: 1, Type: "run.event", CreatedAt: "2026-09-05T00:00:00Z",
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/"+runID+"/finish":
+			var body struct {
+				ExitCode     int                `json:"exitCode"`
+				BlockedStage string             `json:"blockedStage"`
+				RetryLikely  string             `json:"retryLikely"`
+				Receipt      terminalRunReceipt `json:"receipt"`
+			}
+			if decodeErr := json.NewDecoder(r.Body).Decode(&body); decodeErr != nil {
+				http.Error(w, decodeErr.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			events = append(events, "finish")
+			finishCalls++
+			finishCode = body.ExitCode
+			finishBlocked = body.BlockedStage
+			finishRetry = body.RetryLikely
+			finishReceipt = body.Receipt
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"run": CoordinatorRun{
+				ID: runID, LeaseID: leaseID, Provider: lease.Provider, State: "failed",
+				ExitCode: &body.ExitCode,
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/"+runID+"/receipt":
+			mu.Lock()
+			receipt := finishReceipt
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"receipt": receipt})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+
+	var stdout bytes.Buffer
+	stderr := &terminalOrderTimingWriter{mu: &mu, events: &events}
+	outcome := shardRunOutcome{}
+	err = (App{Stdout: &stdout, Stderr: stderr, runOutcome: &outcome}).runCommand(context.Background(), []string{
+		"--provider", "run-ready-pool-preflight-test",
+		"--id", leaseID,
+		"--no-sync",
+		"--stop-after", "never",
+		"--timing-json",
+		"--attest", receiptPath,
+		"--attest-key", keyPath,
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("error=%v, want receipt persistence exit 2\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if count := strings.Count(err.Error(), "write receipt"); count != 1 {
+		t.Fatalf("receipt persistence diagnostics=%d, want one attempt: %v", count, err)
+	}
+	if !outcome.Recorded || outcome.ExitCode != 2 {
+		t.Fatalf("run outcome=%+v, want recorded exit 2", outcome)
+	}
+	mu.Lock()
+	gotEvents := append([]string(nil), events...)
+	gotFinishCalls := finishCalls
+	gotFinishCode := finishCode
+	gotFinishBlocked := finishBlocked
+	gotFinishRetry := finishRetry
+	gotFinishReceipt := finishReceipt
+	mu.Unlock()
+	if !reflect.DeepEqual(gotEvents, []string{"timing", "finish"}) {
+		t.Fatalf("terminal events=%v, want timing then finish", gotEvents)
+	}
+	if gotFinishCalls != 1 || gotFinishCode != 2 || gotFinishReceipt.ExitCode != 2 {
+		t.Fatalf("finish calls=%d code=%d receipt exit=%d, want one failure finish", gotFinishCalls, gotFinishCode, gotFinishReceipt.ExitCode)
+	}
+	if err := verifyTerminalRunReceiptSignature(gotFinishReceipt); err != nil {
+		t.Fatalf("verify refreshed finish receipt: %v", err)
+	}
+	if gotFinishBlocked != "unknown" || gotFinishRetry != "unknown" {
+		t.Fatalf("finish classification blocked=%q retry=%q, want recomputed failure classification", gotFinishBlocked, gotFinishRetry)
+	}
+	originalPublicKey := originalKey.Public().(ed25519.PublicKey)
+	replacementPublicKey := replacementKey.Public().(ed25519.PublicKey)
+	if gotFinishReceipt.PublicKey != base64.StdEncoding.EncodeToString(originalPublicKey) || gotFinishReceipt.Signer != attestFingerprint(originalPublicKey) {
+		t.Fatalf("finish receipt signer=%q publicKey=%q, want cached original signer", gotFinishReceipt.Signer, gotFinishReceipt.PublicKey)
+	}
+	if gotFinishReceipt.PublicKey == base64.StdEncoding.EncodeToString(replacementPublicKey) {
+		t.Fatal("finish receipt used replacement signer")
+	}
+	if strings.Contains(stderr.String(), "artifact kind=receipt") {
+		t.Fatalf("failed receipt persistence reported an artifact:\n%s", stderr.String())
+	}
+}
+
 func TestRunCommandTimingJSONFailureIsTerminalAndUpdatesReceipt(t *testing.T) {
 	for _, withReceipt := range []bool{false, true} {
 		name := "without receipt"

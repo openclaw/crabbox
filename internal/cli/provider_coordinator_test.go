@@ -1056,7 +1056,14 @@ func TestCoordinatorRunnerTimingFallsBackWithoutFailingDecode(t *testing.T) {
 	for _, phases := range []string{
 		`"invalid"`,
 		`[{"name":3,"ms":1}]`,
+		`[{"name":"request","ms":"1"}]`,
 		`[{"name":"request","ms":1.5}]`,
+		`[{"name":"request","ms":1e3}]`,
+		`[{"name":"request","ms":null}]`,
+		`[{"name":"request"}]`,
+		`[{"name":"request","ms":0}]`,
+		`[{"name":"request","ms":-1}]`,
+		`[{"name":"request","ms":9223372036854775808}]`,
 	} {
 		t.Run(phases, func(t *testing.T) {
 			var lease CoordinatorLease
@@ -1117,8 +1124,36 @@ func TestCoordinatorAcquireProvisioningTimingDecode(t *testing.T) {
 		wantErr    bool
 	}{
 		{
-			name:       "malformed phases preserve scalar fallback",
+			name:       "decimal phase preserves scalar fallback",
 			timingJSON: `{"requestMs":2,"networkReadyMs":3,"totalMs":10,"phases":[{"name":"request","ms":1.5}]}`,
+		},
+		{
+			name:       "quoted phase preserves scalar fallback",
+			timingJSON: `{"requestMs":2,"networkReadyMs":3,"totalMs":10,"phases":[{"name":"request","ms":"1"}]}`,
+		},
+		{
+			name:       "exponent phase preserves scalar fallback",
+			timingJSON: `{"requestMs":2,"networkReadyMs":3,"totalMs":10,"phases":[{"name":"request","ms":1e3}]}`,
+		},
+		{
+			name:       "null phase preserves scalar fallback",
+			timingJSON: `{"requestMs":2,"networkReadyMs":3,"totalMs":10,"phases":[{"name":"request","ms":null}]}`,
+		},
+		{
+			name:       "missing phase preserves scalar fallback",
+			timingJSON: `{"requestMs":2,"networkReadyMs":3,"totalMs":10,"phases":[{"name":"request"}]}`,
+		},
+		{
+			name:       "zero phase preserves scalar fallback",
+			timingJSON: `{"requestMs":2,"networkReadyMs":3,"totalMs":10,"phases":[{"name":"request","ms":0}]}`,
+		},
+		{
+			name:       "negative phase preserves scalar fallback",
+			timingJSON: `{"requestMs":2,"networkReadyMs":3,"totalMs":10,"phases":[{"name":"request","ms":-1}]}`,
+		},
+		{
+			name:       "overflow phase preserves scalar fallback",
+			timingJSON: `{"requestMs":2,"networkReadyMs":3,"totalMs":10,"phases":[{"name":"request","ms":9223372036854775808}]}`,
 		},
 		{
 			name:       "malformed total is rejected",

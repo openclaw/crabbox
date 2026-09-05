@@ -213,25 +213,13 @@ func decodeCoordinatorProvisioningPhases(data json.RawMessage) []CoordinatorProv
 		if err := json.Unmarshal(phase.Name, &name); err != nil {
 			return nil
 		}
-		ms, ok := coordinatorOptionalInt64(phase.Ms)
-		if !ok {
+		var ms int64
+		if err := json.Unmarshal(phase.Ms, &ms); err != nil || ms <= 0 {
 			return nil
 		}
 		phases = append(phases, CoordinatorProvisioningPhase{Name: name, Ms: ms})
 	}
 	return phases
-}
-
-func coordinatorOptionalInt64(data json.RawMessage) (int64, bool) {
-	if len(data) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-		return 0, true
-	}
-	var number json.Number
-	if err := json.Unmarshal(data, &number); err != nil {
-		return 0, false
-	}
-	value, err := strconv.ParseInt(number.String(), 10, 64)
-	return value, err == nil
 }
 
 type CoordinatorLeaseRegistration struct {
