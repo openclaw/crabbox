@@ -371,6 +371,51 @@ func TestCleanCubeSandboxWorkspacePath(t *testing.T) {
 	}
 }
 
+func TestCubeSandboxClientBindsObservedSandboxID(t *testing.T) {
+	for _, operation := range []string{"get", "connect"} {
+		for _, observed := range []string{"sbx_a", "sbx_b", "", " ", "SBX_A", " sbx_a", "sbx_a ", "synthetic-api-token", "synthetic-envd-token"} {
+			t.Run(operation+"/"+observed, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					path, method := "/sandboxes/sbx_a", http.MethodGet
+					if operation == "connect" {
+						path, method = path+"/connect", http.MethodPost
+					}
+					if r.URL.Path != path || r.Method != method || r.Header.Get("Authorization") != "Bearer synthetic-api-token" {
+						t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"sandboxID": observed, "alias": "different-template-alias", "envdAccessToken": "synthetic-envd-token", "domain": "sandbox.example.test"})
+				}))
+				defer server.Close()
+				client, err := newCubeSandboxClient(Config{CubeSandbox: CubeSandboxConfig{APIKey: "synthetic-api-token", APIURL: server.URL}}, Runtime{HTTP: server.Client()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var id, token string
+				if operation == "connect" {
+					var session cubesandboxSession
+					session, err = client.ConnectSandbox(t.Context(), "sbx_a", 120)
+					id, token = session.SandboxID, session.EnvdAccessToken
+				} else {
+					var sandbox cubesandboxSandbox
+					sandbox, err = client.GetSandbox(t.Context(), "sbx_a")
+					id, token = sandbox.SandboxID, sandbox.EnvdAccessToken
+				}
+				if observed == "sbx_a" {
+					if err != nil || id != "sbx_a" || token != "synthetic-envd-token" {
+						t.Fatalf("exact observation: id=%q token preserved=%v err=%v", id, token == "synthetic-envd-token", err)
+					}
+				} else if err == nil || id != "" || token != "" {
+					t.Fatalf("unbound observation escaped: id=%q token present=%v err=%v", id, token != "", err)
+				} else if strings.Contains(err.Error(), "synthetic-api-token") || strings.Contains(err.Error(), "synthetic-envd-token") {
+					t.Fatal("identity refusal exposed a reflected credential")
+				}
+			})
+		}
+	}
+}
+
 func TestCubeSandboxClientCreateConnectListAndDeleteUseOfficialRESTShape(t *testing.T) {
 	var createBody map[string]any
 	listHits := 0
