@@ -663,6 +663,9 @@ type ProviderSpec struct {
 	Coordinator      CoordinatorMode
 	ClassDisposition ProviderClassDisposition
 	SizeSelection    ProviderSizeSelector
+	// SyncGuardrailFullCandidate counts the complete ordinary workspace transfer.
+	// False preserves dirty-delta counting when the checkout has changes.
+	SyncGuardrailFullCandidate bool
 	// TailscaleEgressOnly marks FeatureTailscale as outbound userspace access,
 	// not a bidirectional peer endpoint.
 	TailscaleEgressOnly bool

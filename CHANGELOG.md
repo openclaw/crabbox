@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Upstash Box: share run finalization so early failures honor `--keep-on-failure`, failed deletion reports a kept recovery session, and cleanup/timing errors preserve the primary exit; keep delegated command receipts when secondary cleanup fails. Thanks @steipete.
+- Upstash Box: share run finalization so early failures honor `--keep-on-failure`, failed deletion reports a kept recovery session, and cleanup/timing errors preserve the primary exit; keep delegated command receipts when secondary cleanup fails. [PR 1885](https://github.com/openclaw/crabbox/pull/1885). Thanks @steipete.
+- Make `sync-plan --json` preview the configured provider's full-archive or dirty-delta guardrails accurately, without credentials or provider API calls. [PR 1882](https://github.com/openclaw/crabbox/pull/1882). Thanks @steipete.
 - Blaxel: prepare and validate sync archives before fresh allocation, freeze the pre-create snapshot, and share staged workspace replacement and cleanup while retaining native upload retries. [PR 1867](https://github.com/openclaw/crabbox/pull/1867). Thanks @steipete.
 - CubeSandbox: share sandbox run finalization so failed cleanup retains an accurate recovery session, setup failures honor `--keep-on-failure`, and timing errors no longer mask command exits; preserve observed abnormal exit codes. [PR 1850](https://github.com/openclaw/crabbox/pull/1850). Thanks @steipete.
 - Limit literal run-artifact discovery to the parent directory, preserving existing matching, required-file, and symlink guards. [PR 1878](https://github.com/openclaw/crabbox/pull/1878). Thanks @steipete.
