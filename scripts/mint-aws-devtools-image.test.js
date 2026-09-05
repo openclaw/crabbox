@@ -98,9 +98,9 @@ case "$1" in
           exit 55
         fi
         if [[ "\${CRABBOX_FAKE_PREVIOUS_ABSENT:-0}" == "1" ]]; then
-          printf '{"image":{"id":"ami-devtools","revision":"rev-new"},"previous":{"state":"absent"}}\\n'
+          printf '{"image":{"id":"ami-devtools","revision":"rev-new"},"previous":{"state":"absent","aliases":[{"alias":"regional","state":"absent"}]}}\\n'
         else
-          printf '{"image":{"id":"ami-devtools","revision":"rev-new"},"previous":{"state":"present","imageId":"ami-previous","revision":"rev-old"}}\\n'
+          printf '{"image":{"id":"ami-devtools","revision":"rev-new"},"previous":{"state":"present","imageId":"ami-previous","revision":"rev-old","aliases":[{"alias":"regional","state":"present","image":{"id":"ami-previous","name":"previous","state":"available","provider":"aws","promotedAt":"2026-09-01T00:00:00Z","revision":"rev-old"}}]}}\\n'
         fi
       elif [[ "\${CRABBOX_FAKE_ROLLBACK_FAIL:-0}" == "1" ]]; then
         printf 'coordinator: http 409: image default changed\\n' >&2
@@ -285,7 +285,10 @@ test("AWS devtools mint wrapper fails when promoted selection is not proved", as
     /warmup did not prove image selection id=ami-devtools source=promoted/,
   );
   const log = await readFile(fake.log, "utf8");
-  assert.match(log, /image promote --json --target linux --expected-current-image ami-devtools --expected-current-revision rev-new --retire-expected-catalog ami-previous/);
+  assert.match(
+    log,
+    /image promote --json --target linux --restore-receipt \S+ ami-devtools/,
+  );
   assert.match(result.stderr, /restored previous default image=ami-previous/);
 });
 
@@ -329,7 +332,7 @@ test("AWS devtools mint wrapper clears a newly introduced default after smoke fa
   const log = await readFile(fake.log, "utf8");
   assert.match(
     log,
-    /image promote --json --target linux --expected-current-image ami-devtools --expected-current-revision rev-new --retire-expected-catalog none/,
+    /image promote --json --target linux --restore-receipt \S+ ami-devtools/,
   );
 });
 

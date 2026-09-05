@@ -20242,6 +20242,14 @@ function promotedAWSImageCatalogKey(image: PromotedImageRecord): string {
   return `${promotedAWSImageCatalogPrefix(image)}${encodeURIComponent(image.id)}`;
 }
 
+function retiredAWSImageRevisionKey(state: { imageId: string; revision: string }): string {
+  return `image:aws:retired:${encodeURIComponent(state.imageId)}:${encodeURIComponent(state.revision)}`;
+}
+
+function retiredAWSImageKey(imageID: string, region: string): string {
+  return `image:aws:retired-image:${encodeURIComponent(region)}:${encodeURIComponent(imageID)}`;
+}
+
 function promotedAWSImageVariantPrefix(
   image: Pick<ProviderImage, "target" | "architecture" | "region" | "serverType"> & {
     os?: string;
@@ -20255,29 +20263,36 @@ function promotedAWSImageVariantKey(image: PromotedImageRecord): string {
   return `${promotedAWSImageVariantPrefix(image)}${encodeURIComponent(image.id)}`;
 }
 
-function promotedAWSImageDefaultKeys(
+type ImageDefaultAliasName = "linux-os" | "legacy" | "regional";
+
+function promotedAWSImageDefaultAliases(
   image: Pick<ProviderImage, "target" | "architecture" | "region" | "serverType"> & {
     os?: string;
   },
-): string[] {
-  const keys: string[] = [];
+): Array<{ alias: ImageDefaultAliasName; key: string }> {
+  const aliases: Array<{ alias: ImageDefaultAliasName; key: string }> = [];
   if (image.target === "linux" && image.os) {
-    keys.push(promotedAWSLinuxOSImageKey(image));
+    aliases.push({ alias: "linux-os", key: promotedAWSLinuxOSImageKey(image) });
   }
   if (
     image.target === "linux" &&
     (!image.os || image.os === "ubuntu:24.04") &&
     legacyPromotedAWSImageCompatible(image)
   ) {
-    keys.push(legacyPromotedAWSImageKey());
+    aliases.push({ alias: "legacy", key: legacyPromotedAWSImageKey() });
   }
-  keys.push(promotedAWSImageKey(image));
-  return keys;
+  aliases.push({ alias: "regional", key: promotedAWSImageKey(image) });
+  return aliases;
 }
 
-type ImageDefaultState =
+type ImageDefaultAliasState =
+  | { alias: ImageDefaultAliasName; state: "absent" }
+  | { alias: ImageDefaultAliasName; state: "present"; image: PromotedImageRecord };
+
+type ImageDefaultState = (
   | { state: "absent" }
-  | { state: "present"; imageId: string; revision: string };
+  | { state: "present"; imageId: string; revision: string }
+) & { aliases?: ImageDefaultAliasState[] };
 
 type ImageDefaultExpectation = ImageDefaultState | { state: "capture" };
 
@@ -20312,6 +20327,94 @@ function imageDefaultState(image: PromotedImageRecord | undefined): ImageDefault
   };
 }
 
+function parseImageDefaultRestore(value: unknown): ImageDefaultState | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const aliasesInput = input["aliases"];
+  if (!Array.isArray(aliasesInput) || aliasesInput.length === 0) return undefined;
+  const base = parseImageDefaultState(
+    Object.fromEntries(Object.entries(input).filter(([key]) => key !== "aliases")),
+  );
+  if (!base || base.state === "capture") return undefined;
+  const aliases: ImageDefaultAliasState[] = [];
+  for (const aliasValue of aliasesInput) {
+    if (!aliasValue || typeof aliasValue !== "object" || Array.isArray(aliasValue))
+      return undefined;
+    const aliasInput = aliasValue as Record<string, unknown>;
+    const alias = aliasInput["alias"];
+    if (alias !== "linux-os" && alias !== "legacy" && alias !== "regional") return undefined;
+    if (
+      aliasInput["state"] === "absent" &&
+      Object.keys(aliasInput).every((key) => key === "alias" || key === "state")
+    ) {
+      aliases.push({ alias, state: "absent" });
+      continue;
+    }
+    const image = aliasInput["image"];
+    if (
+      aliasInput["state"] !== "present" ||
+      !image ||
+      typeof image !== "object" ||
+      Array.isArray(image) ||
+      Object.keys(aliasInput).some((key) => !["alias", "state", "image"].includes(key))
+    ) {
+      return undefined;
+    }
+    const record = image as Partial<PromotedImageRecord>;
+    if (
+      (record.provider !== undefined && record.provider !== "aws") ||
+      typeof record.id !== "string" ||
+      !record.id ||
+      typeof record.name !== "string" ||
+      typeof record.state !== "string" ||
+      typeof record.promotedAt !== "string" ||
+      !record.promotedAt
+    ) {
+      return undefined;
+    }
+    aliases.push({ alias, state: "present", image: record as PromotedImageRecord });
+  }
+  if (new Set(aliases.map(({ alias }) => alias)).size !== aliases.length) return undefined;
+  return { ...base, aliases };
+}
+
+async function captureAWSImageDefaultState(
+  storage: ProviderStateStorageView,
+  scope: {
+    target: TargetOS;
+    architecture: string;
+    os?: string;
+    serverType: string;
+    region: string;
+  },
+  current: PromotedImageRecord | undefined,
+): Promise<ImageDefaultState> {
+  const aliases: ImageDefaultAliasState[] = [];
+  for (const { alias, key } of promotedAWSImageDefaultAliases(scope)) {
+    // Alias order is the publication order; capture every overwritten slot before mutation.
+    // oxlint-disable-next-line eslint/no-await-in-loop
+    const image = await storage.get<PromotedImageRecord>(key);
+    aliases.push(image ? { alias, state: "present", image } : { alias, state: "absent" });
+  }
+  return { ...imageDefaultState(current), aliases };
+}
+
+function imageDefaultAliasRecordMatches(
+  alias: ImageDefaultAliasName,
+  key: string,
+  image: PromotedImageRecord,
+): boolean {
+  if (alias === "regional") return promotedAWSImageKey(image) === key;
+  if (alias === "linux-os") {
+    return (image.target ?? "linux") === "linux" && promotedAWSLinuxOSImageKey(image) === key;
+  }
+  return (
+    (image.target ?? "linux") === "linux" &&
+    (!image.os || image.os === "ubuntu:24.04") &&
+    legacyPromotedAWSImageCompatible(image)
+  );
+}
+
 function sameImageDefaultState(left: ImageDefaultState, right: ImageDefaultState): boolean {
   if (left.state !== right.state) return false;
   return (
@@ -20320,6 +20423,58 @@ function sameImageDefaultState(left: ImageDefaultState, right: ImageDefaultState
       left.imageId === right.imageId &&
       left.revision === right.revision)
   );
+}
+
+async function retireAWSImageRevision(
+  storage: ProviderStateStorageView,
+  state: Extract<ImageDefaultState, { state: "present" }>,
+): Promise<void> {
+  await storage.put(retiredAWSImageRevisionKey(state), {
+    retiredAt: new Date().toISOString(),
+  });
+}
+
+async function retireAWSImage(
+  storage: ProviderStateStorageView,
+  imageID: string,
+  region: string,
+): Promise<void> {
+  await storage.put(retiredAWSImageKey(imageID, region), {
+    retiredAt: new Date().toISOString(),
+  });
+}
+
+async function awsImageRevisionRetired(
+  storage: ProviderStateStorageView,
+  image: PromotedImageRecord,
+  fallbackRegion: string,
+): Promise<boolean> {
+  const state = imageDefaultState(image);
+  if (
+    state.state === "present" &&
+    (await storage.get(retiredAWSImageRevisionKey(state))) !== undefined
+  ) {
+    return true;
+  }
+  const retired = await storage.get<{ retiredAt?: unknown }>(
+    retiredAWSImageKey(image.id, image.region ?? fallbackRegion),
+  );
+  const promotedAt = Date.parse(image.promotedAt);
+  const retiredAt = typeof retired?.retiredAt === "string" ? Date.parse(retired.retiredAt) : NaN;
+  return Number.isFinite(promotedAt) && Number.isFinite(retiredAt) && promotedAt <= retiredAt;
+}
+
+async function nextAWSImagePromotionTimestamp(
+  storage: ProviderStateStorageView,
+  imageID: string,
+  region: string,
+): Promise<string> {
+  const retired = await storage.get<{ retiredAt?: unknown }>(retiredAWSImageKey(imageID, region));
+  const retiredAt =
+    typeof retired?.retiredAt === "string" ? Date.parse(retired.retiredAt) : Number.NaN;
+  return new Date(
+    Math.max(Date.now(), Number.isFinite(retiredAt) ? retiredAt + 1 : 0),
+  ).toISOString();
 }
 
 function imagePromotionConflict(
@@ -28848,13 +29003,19 @@ export class AWSProvider implements CloudProvider {
       await this.storage.put(awsImageDeletionClaimKey(imageID), claim);
     }
     await this.deleteMatchingImageRecords("image:aws:created:", imageID, this.region);
-    await this.deleteMatchingImageRecords(promotedAWSImagePrefix(), imageID, this.region);
+    await imageCatalogTransaction(this.storage, async (transaction) => {
+      await deletePromotedAWSImageRecords(transaction, imageID, [promotedAWSImagePrefix()], {
+        region: this.region,
+        retireRevisions: true,
+      });
+      await retireAWSImage(transaction, imageID, this.region);
+    });
     await imageCatalogTransaction(this.storage, async (transaction) => {
       await deletePromotedAWSImageRecords(
         transaction,
         imageID,
         ["image:aws:catalog:", "image:aws:variant:"],
-        { region: this.region },
+        { region: this.region, retireRevisions: true },
       );
       await transaction.delete(awsImageDeletionClaimKey(imageID));
     });
@@ -28874,16 +29035,16 @@ export class AWSProvider implements CloudProvider {
   }
 
   retirePromotedImage(imageID: string, region?: string): Promise<number> {
-    return imageCatalogTransaction(
-      this.storage,
-      async (transaction) =>
-        await deletePromotedAWSImageRecords(
-          transaction,
-          imageID,
-          ["image:aws:catalog:", "image:aws:variant:", "image:aws:promoted"],
-          region ? { region } : {},
-        ),
-    );
+    return imageCatalogTransaction(this.storage, async (transaction) => {
+      const retired = await deletePromotedAWSImageRecords(
+        transaction,
+        imageID,
+        ["image:aws:catalog:", "image:aws:variant:", "image:aws:promoted"],
+        { ...(region ? { region } : {}), retireRevisions: true },
+      );
+      await retireAWSImage(transaction, imageID, region ?? this.region);
+      return retired;
+    });
   }
 
   async storedImageMetadata(imageID: string): Promise<ProviderImage | undefined> {
@@ -29018,6 +29179,7 @@ export class AWSProvider implements CloudProvider {
       expectedCurrent?: unknown;
       clearDefault?: unknown;
       retireExpectedCatalog?: unknown;
+      restorePrevious?: unknown;
     } = await readJson<{
       target?: string;
       os?: string;
@@ -29032,6 +29194,7 @@ export class AWSProvider implements CloudProvider {
       expectedCurrent?: unknown;
       clearDefault?: unknown;
       retireExpectedCatalog?: unknown;
+      restorePrevious?: unknown;
     }>(request).catch(
       () =>
         ({}) as {
@@ -29052,6 +29215,33 @@ export class AWSProvider implements CloudProvider {
     }
     const clearDefault = boolFromUnknown(input.clearDefault);
     const retireExpectedCatalogRequested = input.retireExpectedCatalog === true;
+    const restorePrevious =
+      input.restorePrevious === undefined
+        ? undefined
+        : parseImageDefaultRestore(input.restorePrevious);
+    if (input.restorePrevious !== undefined && !restorePrevious) {
+      return json(
+        { error: "invalid_image_precondition", message: "restorePrevious is invalid" },
+        { status: 400 },
+      );
+    }
+    if (
+      restorePrevious &&
+      (clearDefault ||
+        !retireExpectedCatalogRequested ||
+        !expectedCurrentInput ||
+        expectedCurrentInput.state !== "present" ||
+        expectedCurrentInput.imageId !== imageID)
+    ) {
+      return json(
+        {
+          error: "invalid_image_precondition",
+          message:
+            "restoring an image default requires the exact current image id and revision plus catalog retirement",
+        },
+        { status: 400 },
+      );
+    }
     if (clearDefault) {
       if (
         !expectedCurrentInput ||
@@ -29305,6 +29495,30 @@ export class AWSProvider implements CloudProvider {
       os: imageOS ?? "",
       region: effectiveRegion,
     };
+    if (restorePrevious) {
+      const expectedAliases = promotedAWSImageDefaultAliases(nextScope);
+      const restoredAliases = restorePrevious.aliases?.map(({ alias }) => alias) ?? [];
+      if (
+        expectedAliases.length !== restoredAliases.length ||
+        expectedAliases.some(({ alias }) => !restoredAliases.includes(alias)) ||
+        expectedAliases.some(({ alias, key }) => {
+          const restored = restorePrevious.aliases?.find((entry) => entry.alias === alias);
+          return (
+            !restored ||
+            (restored.state === "present" &&
+              !imageDefaultAliasRecordMatches(alias, key, restored.image))
+          );
+        })
+      ) {
+        return json(
+          {
+            error: "invalid_image_precondition",
+            message: "restorePrevious does not match the promoted image scope",
+          },
+          { status: 400 },
+        );
+      }
+    }
     // A failed image ID may already have been republished. Retire only the exact
     // catalog revision named by the rollback receipt, never the reused entry.
     const retireExpectedCatalogRevision = async (
@@ -29312,6 +29526,9 @@ export class AWSProvider implements CloudProvider {
       expected: ImageDefaultState | undefined,
     ) => {
       if (!retireExpectedCatalogRequested || expected?.state !== "present") return;
+      // Retirement belongs to the failed receipt revision, even when a later
+      // publication already replaced its catalog row.
+      await retireAWSImageRevision(transaction, expected);
       const key = `${promotedAWSImageCatalogPrefix(nextScope)}${encodeURIComponent(expected.imageId)}`;
       const record = await transaction.get<PromotedImageRecord>(key);
       if (!record || !sameImageDefaultState(imageDefaultState(record), expected)) return;
@@ -29351,6 +29568,14 @@ export class AWSProvider implements CloudProvider {
           serverType: nextScope.serverType ?? "",
         });
         const previousDefault = imageDefaultState(currentDefault);
+        const receiptPrevious =
+          expectedCurrentInput?.state === "capture"
+            ? await captureAWSImageDefaultState(
+                transaction,
+                { ...nextScope, serverType: nextScope.serverType ?? "" },
+                currentDefault,
+              )
+            : previousDefault;
         const expectedCurrent =
           expectedCurrentInput?.state === "capture" ? previousDefault : expectedCurrentInput;
         if (expectedCurrent && !sameImageDefaultState(expectedCurrent, previousDefault)) {
@@ -29359,7 +29584,7 @@ export class AWSProvider implements CloudProvider {
         }
         if (clearDefault) {
           await retireExpectedCatalogRevision(transaction, expectedCurrent);
-          for (const recordKey of promotedAWSImageDefaultKeys(nextScope)) {
+          for (const { key: recordKey } of promotedAWSImageDefaultAliases(nextScope)) {
             // Catalog aliases carry independent promotion pins and must be retired in order.
             // oxlint-disable-next-line eslint/no-await-in-loop
             const record = await transaction.get<PromotedImageRecord>(recordKey);
@@ -29373,6 +29598,48 @@ export class AWSProvider implements CloudProvider {
           }
           return {
             image: { id: "none", name: "", state: "absent", provider: "aws" as const },
+            previous: previousDefault,
+          };
+        }
+        if (restorePrevious) {
+          await retireExpectedCatalogRevision(transaction, expectedCurrent);
+          for (const { alias, key } of promotedAWSImageDefaultAliases(nextScope)) {
+            // Restore only aliases still owned by this failed revision. A concurrent promotion
+            // on another alias remains authoritative and must not be overwritten.
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            const current = await transaction.get<PromotedImageRecord>(key);
+            if (!current || !sameImageDefaultState(imageDefaultState(current), previousDefault)) {
+              continue;
+            }
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            await unpinCheckpointPromotion(transaction, "aws", current, key);
+            const priorAlias = restorePrevious.aliases!.find((entry) => entry.alias === alias)!;
+            let priorRetired = false;
+            if (priorAlias.state === "present") {
+              // Alias restoration is intentionally serialized with pin changes in this transaction.
+              // oxlint-disable-next-line eslint/no-await-in-loop
+              priorRetired = await awsImageRevisionRetired(
+                transaction,
+                priorAlias.image,
+                effectiveRegion,
+              );
+            }
+            if (priorAlias.state === "absent" || priorRetired) {
+              // oxlint-disable-next-line eslint/no-await-in-loop
+              await transaction.delete(key);
+              continue;
+            }
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            await transaction.put(key, priorAlias.image);
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            await pinCheckpointPromotion(transaction, "aws", priorAlias.image, key);
+          }
+          const restored = await promotedAWSImageDefault(transaction, {
+            ...nextScope,
+            serverType: nextScope.serverType ?? "",
+          });
+          return {
+            image: restored ?? { id: "none", name: "", state: "absent", provider: "aws" as const },
             previous: previousDefault,
           };
         }
@@ -29393,7 +29660,7 @@ export class AWSProvider implements CloudProvider {
           ...validatedImage,
           ...(fastSnapshotRestores ? { fastSnapshotRestores } : {}),
           ...nextScope,
-          promotedAt: new Date().toISOString(),
+          promotedAt: await nextAWSImagePromotionTimestamp(transaction, imageID, effectiveRegion),
           revision: crypto.randomUUID(),
           ...(capabilities ? { capabilities } : {}),
           ...(catalogOnly && variantSelectors ? { catalogOnly: true, variantSelectors } : {}),
@@ -29411,16 +29678,16 @@ export class AWSProvider implements CloudProvider {
         };
         if (catalogOnly) {
           await publish(promotedAWSImageVariantKey(next));
-          return { image: next, previous: previousDefault };
+          return { image: next, previous: receiptPrevious };
         }
         await retireExpectedCatalogRevision(transaction, expectedCurrent);
         await publish(promotedAWSImageCatalogKey(next));
-        for (const key of promotedAWSImageDefaultKeys(next)) {
+        for (const { key } of promotedAWSImageDefaultAliases(next)) {
           // Promotion aliases carry independent checkpoint pins and publish in deterministic order.
           // oxlint-disable-next-line eslint/no-await-in-loop
           await publish(key);
         }
-        return { image: next, previous: previousDefault };
+        return { image: next, previous: receiptPrevious };
       });
       if ("conflict" in promoted) {
         return imagePromotionConflict(promoted.expected!, promoted.conflict, promotionScope);
@@ -29590,7 +29857,7 @@ async function deletePromotedAWSImageRecords(
   storage: ProviderStateStorageView,
   imageID: string,
   prefixes: string[],
-  options: { region?: string } = {},
+  options: { region?: string; retireRevisions?: boolean } = {},
 ): Promise<number> {
   const catalogs = await Promise.all(
     prefixes.map(async (prefix) => await storage.list<PromotedImageRecord>({ prefix })),
@@ -29601,10 +29868,18 @@ async function deletePromotedAWSImageRecords(
         image.id === imageID && (options.region === undefined || image.region === options.region),
     ),
   );
+  const retiredRevisions = new Set<string>();
   await entries.reduce(async (pending, [key, image]) => {
     await pending;
     await unpinCheckpointPromotion(storage, "aws", image, key);
     await storage.delete(key);
+    if (!options.retireRevisions) return;
+    const state = imageDefaultState(image);
+    if (state.state !== "present") return;
+    const retirementKey = retiredAWSImageRevisionKey(state);
+    if (retiredRevisions.has(retirementKey)) return;
+    await retireAWSImageRevision(storage, state);
+    retiredRevisions.add(retirementKey);
   }, Promise.resolve());
   return entries.length;
 }

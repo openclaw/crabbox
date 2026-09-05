@@ -133,6 +133,8 @@ Flags:
                          require or atomically capture the current AWS default
 --expected-current-revision <revision>
                          revision required with an expected current image id
+--restore-receipt <path>
+                         restore exact AWS default aliases from a promotion receipt
 --json                   print the promoted image record as JSON
 ```
 
@@ -167,14 +169,12 @@ older coordinators. Catalog-only promotion does not accept transactional
 expected-current or rollback-retirement flags.
 
 AWS publishers can use `--expected-current-image capture --json` to receive the
-exact prior scoped default and the new promotion revision in one transaction.
-To restore that default after a failed smoke, promote its prior image ID with
-the new image ID and revision as the expected current state, plus
-`--retire-expected-catalog` to authorize retiring that exact failed revision. If
-no default previously existed, use `image promote none` with the same
-expectation and retirement flag. A concurrent newer promotion returns HTTP 409
-and remains selected. An authorized rollback retires only the exact expected
-catalog revision; generic stale CAS requests do not mutate the catalog.
+exact prior default aliases and the new promotion revision in one transaction.
+To restore that state after a failed smoke, pass the receipt back with
+`image promote <failed-image-id> --restore-receipt <path>`. The coordinator
+restores only aliases still owned by that failed revision, preserves any
+concurrent newer alias, and retires the exact failed catalog revision. Generic
+stale compare-and-swap requests do not mutate the catalog.
 Transactional promotion requires an updated coordinator and fails before
 changing the default when that route is unavailable.
 

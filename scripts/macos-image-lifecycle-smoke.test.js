@@ -171,9 +171,9 @@ case "$1" in
     elif [[ "$2" == "promote" ]]; then
       if [[ " $* " == *" --expected-current-image capture"* ]]; then
         if [[ "\${CRABBOX_FAKE_PREVIOUS_PRESENT:-0}" == "1" ]]; then
-          printf '{"image":{"id":"ami-mock","target":"macos","region":"eu-west-1","revision":"rev-new"},"previous":{"state":"present","imageId":"ami-previous","revision":"rev-old"}}\\n'
+          printf '{"image":{"id":"ami-mock","target":"macos","region":"eu-west-1","revision":"rev-new"},"previous":{"state":"present","imageId":"ami-previous","revision":"rev-old","aliases":[{"alias":"regional","state":"present","image":{"id":"ami-previous","name":"previous","state":"available","provider":"aws","promotedAt":"2026-09-01T00:00:00Z","revision":"rev-old"}}]}}\\n'
         else
-          printf '{"image":{"id":"ami-mock","target":"macos","region":"eu-west-1","revision":"rev-new"},"previous":{"state":"absent"}}\\n'
+          printf '{"image":{"id":"ami-mock","target":"macos","region":"eu-west-1","revision":"rev-new"},"previous":{"state":"absent","aliases":[{"alias":"regional","state":"absent"}]}}\\n'
         fi
       elif [[ "\${CRABBOX_FAKE_ROLLBACK_FAIL:-0}" == "1" ]]; then
         printf 'coordinator: http 409: image default changed\\n' >&2
@@ -687,7 +687,7 @@ test("macOS lifecycle smoke clears a new default after promoted warmup failure",
   const fakeLog = await readFile(run.fakeLog, "utf8");
   assert.match(
     fakeLog,
-    /^image promote none --target macos --region eu-west-1 --type mac2\.metal --json --expected-current-image ami-mock --expected-current-revision rev-new --retire-expected-catalog$/m,
+    /^image promote ami-mock --target macos --region eu-west-1 --type mac2\.metal --json --restore-receipt \S+$/m,
   );
   const summary = await readJSON(path.join(run.artifacts, "summary.json"));
   assert.equal(summary.result, "failed");
@@ -717,7 +717,7 @@ test("macOS lifecycle smoke preserves the original failure when restoring a prio
   const fakeLog = await readFile(run.fakeLog, "utf8");
   assert.match(
     fakeLog,
-    /^image promote ami-previous --target macos --region eu-west-1 --type mac2\.metal --json --expected-current-image ami-mock --expected-current-revision rev-new --retire-expected-catalog$/m,
+    /^image promote ami-mock --target macos --region eu-west-1 --type mac2\.metal --json --restore-receipt \S+$/m,
   );
   const summary = await readJSON(path.join(run.artifacts, "summary.json"));
   assert.equal(summary.blocker.reason, "post-promotion failure and CAS rollback failed or was rejected");

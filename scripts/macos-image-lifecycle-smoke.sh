@@ -141,9 +141,8 @@ run_tee_combined() {
 }
 
 rollback_promoted_image() {
-  local current_id current_revision previous_state rollback_image
+  local current_id previous_state rollback_image
   if ! current_id="$(jq -er '.image.id' "$image_promote_log" 2>/dev/null)" ||
-    ! current_revision="$(jq -er '.image.revision' "$image_promote_log" 2>/dev/null)" ||
     ! previous_state="$(jq -er '.previous.state' "$image_promote_log" 2>/dev/null)"; then
     printf 'post-promotion failure; transactional promotion receipt is unavailable for rollback\n' >&2
     return 1
@@ -157,10 +156,9 @@ rollback_promoted_image() {
     return 1
   fi
   image_rollback_log="$evidence_dir/image-rollback.json"
-  if ! run_tee_combined "$image_rollback_log" "$CRABBOX_BIN" image promote "$rollback_image" \
+  if ! run_tee_combined "$image_rollback_log" "$CRABBOX_BIN" image promote "$current_id" \
     --target macos --region "$region" --type "$instance_type" --json \
-    --expected-current-image "$current_id" --expected-current-revision "$current_revision" \
-    --retire-expected-catalog; then
+    --restore-receipt "$image_promote_log"; then
     printf 'promoted-image smoke failed; CAS rollback failed or was rejected; a newer default was not overwritten\n' >&2
     return 1
   fi
@@ -1244,7 +1242,7 @@ image_promote_log="$evidence_dir/image-promote.json"
 rollback_pending=1
 run_tee "$image_promote_log" "$CRABBOX_BIN" image promote "$ami_id" \
   --target macos --region "$region" --type "$instance_type" --json --expected-current-image capture
-jq -e '.image.id and .image.revision and (.previous.state == "present" or .previous.state == "absent")' "$image_promote_log" >/dev/null
+jq -e '.image.id and .image.revision and (.previous.state == "present" or .previous.state == "absent") and (.previous.aliases | length > 0)' "$image_promote_log" >/dev/null
 
 write_summary running promoted-warmup
 promoted_lease="$(warmup_macos promoted)"

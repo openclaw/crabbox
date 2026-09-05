@@ -248,9 +248,8 @@ run_json_tee() {
 
 rollback_promoted_image() {
   local receipt="$1"
-  local current_id current_revision previous_state rollback_image rollback_log
+  local current_id previous_state rollback_image rollback_log
   if ! current_id="$(jq -er '.image.id' "$receipt" 2>/dev/null)" ||
-    ! current_revision="$(jq -er '.image.revision' "$receipt" 2>/dev/null)" ||
     ! previous_state="$(jq -er '.previous.state' "$receipt" 2>/dev/null)"; then
     printf 'post-promotion failure; transactional promotion receipt is unavailable for rollback\n' >&2
     return 1
@@ -266,7 +265,7 @@ rollback_promoted_image() {
   local -a args=(image promote --json --target "$target")
   [[ -n "$region" ]] && args+=(--region "$region")
   [[ -n "$server_type" ]] && args+=(--type "$server_type")
-  args+=(--expected-current-image "$current_id" --expected-current-revision "$current_revision" --retire-expected-catalog "$rollback_image")
+  args+=(--restore-receipt "$receipt" "$current_id")
   rollback_log="$(mktemp "$log_dir/image-mint-${log_image_name}-rollback-${log_id}.json.XXXXXX")"
   if ! run_json_tee "$rollback_log" "$CRABBOX_BIN" "${args[@]}"; then
     printf 'promoted-image smoke failed; CAS rollback failed or was rejected; a newer default was not overwritten\n' >&2
@@ -757,7 +756,7 @@ promote_args+=("$ami_id")
 promotion_log="$(mktemp "$log_dir/image-mint-${log_image_name}-promotion-${log_id}.json.XXXXXX")"
 rollback_pending=1
 run_json_tee "$promotion_log" "$CRABBOX_BIN" "${promote_args[@]}"
-jq -e '.image.id and .image.revision and (.previous.state == "present" or .previous.state == "absent")' "$promotion_log" >/dev/null
+jq -e '.image.id and .image.revision and (.previous.state == "present" or .previous.state == "absent") and (.previous.aliases | length > 0)' "$promotion_log" >/dev/null
 
 promoted_lease="$(warmup promoted)"
 smoke "$promoted_lease"

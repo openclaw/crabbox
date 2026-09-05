@@ -2266,6 +2266,11 @@ func TestImagePromoteCatalogOnlyValidation(t *testing.T) {
 			want: "--catalog-only is AWS-only",
 		},
 		{
+			name: "azure rejects restore receipt",
+			args: []string{"ami-variant", "--provider", "azure", "--restore-receipt", "promotion.json"},
+			want: "--restore-receipt is AWS-only",
+		},
+		{
 			name: "catalog only rejects expected current",
 			args: []string{"ami-variant", "--catalog-only", "--variant-runtime", "node=24", "--expected-current-image", "capture"},
 			want: "--catalog-only cannot be combined with transactional image promotion",
@@ -2547,6 +2552,10 @@ func TestImagePromoteCompareAndSwapContract(t *testing.T) {
 			t.Fatal(err)
 		}
 		requests = append(requests, body)
+		if body["restorePrevious"] != nil {
+			_, _ = w.Write([]byte(`{"image":{"id":"ami-old","revision":"rev-old"},"previous":{"state":"present","imageId":"ami-new","revision":"rev-new"}}`))
+			return
+		}
 		if body["clearDefault"] == true {
 			_, _ = w.Write([]byte(`{"previous":{"state":"present","imageId":"ami-new","revision":"rev-new"}}`))
 			return
@@ -2566,6 +2575,19 @@ func TestImagePromoteCompareAndSwapContract(t *testing.T) {
 	if err := app.imagePromote(context.Background(), []string{"none", "--json", "--target", "windows", "--expected-current-image", "ami-new", "--expected-current-revision", "rev-new", "--retire-expected-catalog"}); err != nil {
 		t.Fatal(err)
 	}
+	receiptPath := filepath.Join(t.TempDir(), "promotion.json")
+	if err := os.WriteFile(receiptPath, []byte(`{
+		"image":{"id":"ami-new","revision":"rev-new"},
+		"previous":{"state":"present","imageId":"ami-old","revision":"rev-old","aliases":[
+			{"alias":"regional","state":"present","image":{"id":"ami-old","name":"old","state":"available","provider":"aws","revision":"rev-old"}}
+		]}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := app.imagePromote(context.Background(), []string{"ami-new", "--json", "--target", "windows", "--restore-receipt", receiptPath}); err != nil {
+		t.Fatal(err)
+	}
 
 	if got := requests[0]["expectedCurrent"]; !reflect.DeepEqual(got, map[string]any{"state": "capture"}) {
 		t.Fatalf("capture body=%#v", requests[0])
@@ -2575,6 +2597,13 @@ func TestImagePromoteCompareAndSwapContract(t *testing.T) {
 	}
 	if got := requests[1]["expectedCurrent"]; !reflect.DeepEqual(got, map[string]any{"state": "present", "imageId": "ami-new", "revision": "rev-new"}) || requests[1]["clearDefault"] != true || requests[1]["retireExpectedCatalog"] != true {
 		t.Fatalf("clear body=%#v", requests[1])
+	}
+	if got := requests[2]["expectedCurrent"]; !reflect.DeepEqual(got, map[string]any{"state": "present", "imageId": "ami-new", "revision": "rev-new"}) || requests[2]["retireExpectedCatalog"] != true {
+		t.Fatalf("restore body=%#v", requests[2])
+	}
+	restore, ok := requests[2]["restorePrevious"].(map[string]any)
+	if !ok || restore["imageId"] != "ami-old" {
+		t.Fatalf("restore previous=%#v", requests[2]["restorePrevious"])
 	}
 }
 
@@ -2599,6 +2628,7 @@ func TestPromoteImageCASFailsClosedAgainstOldCoordinator(t *testing.T) {
 		CoordinatorImageDefaultState{State: "capture"},
 		false,
 		false,
+		nil,
 		CoordinatorImageRef{Provider: "aws", Target: "windows", Region: "eu-west-1"},
 	)
 	if err == nil || !strings.Contains(err.Error(), "upgrade the coordinator") {

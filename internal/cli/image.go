@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 )
@@ -72,6 +73,7 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	expectedCurrentImage := fs.String("expected-current-image", "", "expected current image id, none, or capture")
 	expectedCurrentRevision := fs.String("expected-current-revision", "", "expected current default revision when an image is present")
 	retireExpectedCatalog := fs.Bool("retire-expected-catalog", false, "retire the exact expected AWS catalog revision during rollback")
+	restoreReceipt := fs.String("restore-receipt", "", "restore the exact image default aliases captured in a promotion receipt")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
@@ -92,8 +94,17 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	if normalizedProvider == "azure" && flagWasSet(fs, "expected-current-image") {
 		return exit(2, "compare-and-swap image promotion is AWS-only")
 	}
+	if normalizedProvider == "azure" && *restoreReceipt != "" {
+		return exit(2, "--restore-receipt is AWS-only")
+	}
 	if *catalogOnly && (flagWasSet(fs, "expected-current-image") || *retireExpectedCatalog) {
 		return exit(2, "--catalog-only cannot be combined with transactional image promotion")
+	}
+	if *catalogOnly && *restoreReceipt != "" {
+		return exit(2, "--catalog-only cannot be combined with --restore-receipt")
+	}
+	if *restoreReceipt != "" && (flagWasSet(fs, "expected-current-image") || *retireExpectedCatalog) {
+		return exit(2, "--restore-receipt supplies the transactional image precondition and catalog retirement")
 	}
 	if *retireExpectedCatalog && !flagWasSet(fs, "expected-current-image") {
 		return exit(2, "--retire-expected-catalog requires --expected-current-image and --expected-current-revision")
@@ -176,7 +187,45 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 		VariantSelectors: variantSelectors,
 	}
 	var image CoordinatorImage
-	if flagWasSet(fs, "expected-current-image") {
+	if *restoreReceipt != "" {
+		receipt, err := readImagePromotionReceipt(*restoreReceipt)
+		if err != nil {
+			return err
+		}
+		if receipt.Image == nil || receipt.Image.ID == "" || receipt.Image.Revision == "" {
+			return exit(2, "promotion receipt does not name the promoted image and revision")
+		}
+		if fs.Arg(0) != receipt.Image.ID {
+			return exit(2, "rollback image id must match the promoted image in --restore-receipt")
+		}
+		if len(receipt.Previous.Aliases) == 0 {
+			return exit(2, "promotion receipt does not contain restorable image default aliases")
+		}
+		expected := CoordinatorImageDefaultState{
+			State:    "present",
+			ImageID:  receipt.Image.ID,
+			Revision: receipt.Image.Revision,
+		}
+		result, err := coord.PromoteImageCAS(
+			ctx,
+			receipt.Image.ID,
+			expected,
+			false,
+			true,
+			&receipt.Previous,
+			ref,
+		)
+		if err != nil {
+			return err
+		}
+		if *jsonOut {
+			return json.NewEncoder(a.Stdout).Encode(result)
+		}
+		if result.Image == nil {
+			return fmt.Errorf("coordinator did not return the restored image default")
+		}
+		image = *result.Image
+	} else if flagWasSet(fs, "expected-current-image") {
 		expected, err := imageExpectedCurrent(*expectedCurrentImage, *expectedCurrentRevision)
 		if err != nil {
 			return err
@@ -189,9 +238,9 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 			if expected.State != "present" {
 				return exit(2, "clearing a default requires an expected current image and revision")
 			}
-			result, err = coord.PromoteImageCAS(ctx, expected.ImageID, expected, true, *retireExpectedCatalog, ref)
+			result, err = coord.PromoteImageCAS(ctx, expected.ImageID, expected, true, *retireExpectedCatalog, nil, ref)
 		} else {
-			result, err = coord.PromoteImageCAS(ctx, fs.Arg(0), expected, false, *retireExpectedCatalog, ref)
+			result, err = coord.PromoteImageCAS(ctx, fs.Arg(0), expected, false, *retireExpectedCatalog, nil, ref)
 		}
 		if err != nil {
 			return err
@@ -228,6 +277,19 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintln(a.Stdout)
 	return nil
+}
+
+func readImagePromotionReceipt(path string) (CoordinatorImagePromotionResult, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return CoordinatorImagePromotionResult{}, exit(2, "read promotion receipt: %v", err)
+	}
+	defer file.Close()
+	var receipt CoordinatorImagePromotionResult
+	if err := json.NewDecoder(file).Decode(&receipt); err != nil {
+		return CoordinatorImagePromotionResult{}, exit(2, "decode promotion receipt: %v", err)
+	}
+	return receipt, nil
 }
 
 func imageExpectedCurrent(imageID, revision string) (CoordinatorImageDefaultState, error) {

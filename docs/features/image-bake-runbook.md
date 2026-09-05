@@ -208,10 +208,11 @@ portable selector such as `ubuntu:26.04`.
 
 ## Roll back
 
-Rollback is just another promotion to a known-good AMI:
+For transactional publisher runs, restore the exact captured aliases from the
+promotion receipt:
 
 ```bash
-crabbox image promote ami-previous-good --json
+crabbox image promote ami-failed --restore-receipt promotion.json --json
 ```
 
 Run the normal brokered smoke again. Do not delete the failed AMI immediately;
