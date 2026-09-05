@@ -133,13 +133,20 @@ class UnusedDeclarationsAuditTest(unittest.TestCase):
         self.assertNotIn("/private/source.go", str(raised.exception))
 
     def test_loader_error_is_incomplete(self) -> None:
-        with self.assertRaisesRegex(audit.AuditError, "go_list_loader_error"):
-            audit.summarize_packages(
-                [{"Dir": str(self.module), "Error": {"Err": "type failure"}}],
-                module_root=self.module,
-                source_root=self.source,
-                include_tests=False,
-            )
+        for error_field in ("Error", "DepsErrors"):
+            with self.subTest(error_field=error_field):
+                with self.assertRaisesRegex(audit.AuditError, "go_list_loader_error"):
+                    audit.summarize_packages(
+                        [
+                            {
+                                "Dir": str(self.module),
+                                error_field: [{"Err": "type failure"}],
+                            }
+                        ],
+                        module_root=self.module,
+                        source_root=self.source,
+                        include_tests=False,
+                    )
 
     def test_eligible_files_follow_tests_mode(self) -> None:
         (self.module / "main_test.go").write_text("package main\n", encoding="utf-8")
@@ -168,6 +175,257 @@ class UnusedDeclarationsAuditTest(unittest.TestCase):
             ["worker/module/main.go", "worker/module/main_test.go"],
         )
         self.assertEqual(main_packages, ["example.test/module"])
+
+    def test_synthetic_test_main_absolute_cache_file_is_skipped(self) -> None:
+        (self.module / "main_test.go").write_text("package main\n", encoding="utf-8")
+        documents = [
+            {
+                "Dir": str(self.module),
+                "ImportPath": "example.test/module",
+                "Name": "main",
+                "GoFiles": ["main.go"],
+                "TestGoFiles": ["main_test.go"],
+            },
+            {
+                "Dir": str(self.module),
+                "ImportPath": "example.test/module.test",
+                "Name": "main",
+                "GoFiles": [str(self.root / "go-build-cache" / "_testmain.go")],
+            },
+        ]
+        files, main_packages = audit.summarize_packages(
+            documents,
+            module_root=self.module,
+            source_root=self.source,
+            include_tests=True,
+        )
+        self.assertEqual(
+            files,
+            ["worker/module/main.go", "worker/module/main_test.go"],
+        )
+        self.assertEqual(main_packages, ["example.test/module"])
+
+    def test_synthetic_test_main_relative_file_is_skipped(self) -> None:
+        (self.module / "main_test.go").write_text("package main\n", encoding="utf-8")
+        documents = [
+            {
+                "Dir": str(self.module),
+                "ImportPath": "example.test/module",
+                "Name": "main",
+                "GoFiles": ["main.go"],
+                "TestGoFiles": ["main_test.go"],
+            },
+            {
+                "Dir": str(self.module),
+                "ImportPath": "example.test/module.test",
+                "Name": "main",
+                "GoFiles": ["_testmain.go"],
+            },
+        ]
+        files, _ = audit.summarize_packages(
+            documents,
+            module_root=self.module,
+            source_root=self.source,
+            include_tests=True,
+        )
+        self.assertNotIn("worker/module/_testmain.go", files)
+
+    def test_synthetic_test_main_does_not_depend_on_deponly(self) -> None:
+        (self.module / "main_test.go").write_text("package main\n", encoding="utf-8")
+        base = {
+            "Dir": str(self.module),
+            "ImportPath": "example.test/module",
+            "Name": "main",
+            "GoFiles": ["main.go"],
+            "TestGoFiles": ["main_test.go"],
+        }
+        for dep_only in ("absent", False):
+            with self.subTest(dep_only=dep_only):
+                generated = {
+                    "Dir": str(self.module),
+                    "ImportPath": "example.test/module.test",
+                    "Name": "main",
+                    "GoFiles": [str(self.root / "cache" / "_testmain.go")],
+                }
+                if dep_only != "absent":
+                    generated["DepOnly"] = dep_only
+                files, _ = audit.summarize_packages(
+                    [base, generated],
+                    module_root=self.module,
+                    source_root=self.source,
+                    include_tests=True,
+                )
+                self.assertNotIn("worker/module/_testmain.go", files)
+
+    def test_standalone_dot_test_main_is_retained(self) -> None:
+        (self.module / "_testmain.go").write_text("package main\n", encoding="utf-8")
+        files, main_packages = audit.summarize_packages(
+            [
+                {
+                    "Dir": str(self.module),
+                    "ImportPath": "example.test/standalone.test",
+                    "Name": "main",
+                    "GoFiles": ["_testmain.go"],
+                }
+            ],
+            module_root=self.module,
+            source_root=self.source,
+            include_tests=True,
+        )
+        self.assertEqual(files, ["worker/module/_testmain.go"])
+        self.assertEqual(main_packages, ["example.test/standalone.test"])
+
+    def test_for_test_and_external_test_documents_are_harvested(self) -> None:
+        (self.module / "main_test.go").write_text("package main\n", encoding="utf-8")
+        (self.module / "external_test.go").write_text(
+            "package main_test\n", encoding="utf-8"
+        )
+        base_import = "example.test/module"
+        documents = [
+            {
+                "Dir": str(self.module),
+                "ImportPath": base_import,
+                "Name": "main",
+                "GoFiles": ["main.go"],
+                "TestGoFiles": ["main_test.go"],
+                "XTestGoFiles": ["external_test.go"],
+            },
+            {
+                "Dir": str(self.module),
+                "ImportPath": f"{base_import} [{base_import}.test]",
+                "Name": "main",
+                "ForTest": base_import,
+                "GoFiles": ["main.go", "main_test.go"],
+            },
+            {
+                "Dir": str(self.module),
+                "ImportPath": f"{base_import}_test [{base_import}.test]",
+                "Name": "main_test",
+                "ForTest": base_import,
+                "GoFiles": ["external_test.go"],
+            },
+            {
+                "Dir": str(self.module),
+                "ImportPath": f"{base_import}.test",
+                "Name": "main",
+                "GoFiles": [str(self.root / "cache" / "_testmain.go")],
+            },
+        ]
+        files, _ = audit.summarize_packages(
+            documents,
+            module_root=self.module,
+            source_root=self.source,
+            include_tests=True,
+        )
+        self.assertEqual(
+            files,
+            [
+                "worker/module/external_test.go",
+                "worker/module/main.go",
+                "worker/module/main_test.go",
+            ],
+        )
+
+    def test_ordinary_external_file_is_rejected(self) -> None:
+        with self.assertRaisesRegex(audit.AuditError, "path_outside_source"):
+            audit.summarize_packages(
+                [
+                    {
+                        "Dir": str(self.module),
+                        "ImportPath": "example.test/module",
+                        "Name": "module",
+                        "GoFiles": [str(self.root / "external.go")],
+                    }
+                ],
+                module_root=self.module,
+                source_root=self.source,
+                include_tests=False,
+            )
+
+    def test_generated_shape_without_partner_is_rejected(self) -> None:
+        with self.assertRaisesRegex(audit.AuditError, "path_outside_source"):
+            audit.summarize_packages(
+                [
+                    {
+                        "Dir": str(self.module),
+                        "ImportPath": "example.test/module.test",
+                        "Name": "main",
+                        "GoFiles": [str(self.root / "cache" / "_testmain.go")],
+                    }
+                ],
+                module_root=self.module,
+                source_root=self.source,
+                include_tests=True,
+            )
+
+    def test_generated_shape_requires_one_file_and_same_directory_partner(self) -> None:
+        (self.module / "main_test.go").write_text("package main\n", encoding="utf-8")
+        other_module = self.source / "worker" / "other"
+        other_module.mkdir()
+        base = {
+            "Dir": str(self.module),
+            "ImportPath": "example.test/module",
+            "Name": "main",
+            "GoFiles": ["main.go"],
+            "TestGoFiles": ["main_test.go"],
+        }
+        cases = {
+            "multiple_go_files": (
+                base,
+                [
+                    str(self.root / "cache" / "_testmain.go"),
+                    "generated_support.go",
+                ],
+            ),
+            "different_partner_directory": (
+                {**base, "Dir": str(other_module)},
+                [str(self.root / "cache" / "_testmain.go")],
+            ),
+        }
+        for name, (partner, go_files) in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(audit.AuditError, "path_outside_source"):
+                    audit.summarize_packages(
+                        [
+                            partner,
+                            {
+                                "Dir": str(self.module),
+                                "ImportPath": "example.test/module.test",
+                                "Name": "main",
+                                "GoFiles": go_files,
+                            },
+                        ],
+                        module_root=self.module,
+                        source_root=self.source,
+                        include_tests=True,
+                    )
+
+    def test_malformed_test_metadata_is_rejected(self) -> None:
+        for malformed in (None, "main_test.go", [""], [1]):
+            with self.subTest(malformed=malformed):
+                with self.assertRaisesRegex(audit.AuditError, "go_list_malformed"):
+                    audit.summarize_packages(
+                        [
+                            {
+                                "Dir": str(self.module),
+                                "ImportPath": "example.test/module",
+                                "Name": "main",
+                                "GoFiles": ["main.go"],
+                                "TestGoFiles": malformed,
+                            },
+                            {
+                                "Dir": str(self.module),
+                                "ImportPath": "example.test/module.test",
+                                "Name": "main",
+                                "GoFiles": [
+                                    str(self.root / "cache" / "_testmain.go")
+                                ],
+                            },
+                        ],
+                        module_root=self.module,
+                        source_root=self.source,
+                        include_tests=True,
+                    )
 
     def test_path_outside_source_is_rejected(self) -> None:
         with self.assertRaisesRegex(audit.AuditError, "path_outside_source"):

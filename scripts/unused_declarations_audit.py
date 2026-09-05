@@ -376,30 +376,75 @@ def summarize_packages(
 ) -> tuple[list[str], list[str]]:
     files: set[str] = set()
     main_packages: set[str] = set()
+    module_directory = module_root.resolve()
+    packages: list[tuple[dict[str, Any], Path, dict[str, list[str]]]] = []
+
     for package in documents:
         if package.get("Error") or package.get("DepsErrors"):
             raise AuditError("go_list_loader_error")
         directory_value = package.get("Dir")
         if not isinstance(directory_value, str):
             continue
-        directory = Path(directory_value)
+        directory = Path(directory_value).resolve()
         try:
-            directory.resolve().relative_to(module_root.resolve())
+            directory.relative_to(module_directory)
         except ValueError:
+            continue
+
+        for_test = package.get("ForTest", "")
+        if not isinstance(for_test, str):
+            raise AuditError("go_list_malformed")
+        file_lists: dict[str, list[str]] = {}
+        for field in ("GoFiles", "CgoFiles", "TestGoFiles", "XTestGoFiles"):
+            values = package.get(field, [])
+            if not isinstance(values, list) or any(
+                not isinstance(value, str) or not value for value in values
+            ):
+                raise AuditError("go_list_malformed")
+            file_lists[field] = values
+        packages.append((package, directory, file_lists))
+
+    synthetic_test_mains: set[int] = set()
+    for index, (package, directory, file_lists) in enumerate(packages):
+        import_path = package.get("ImportPath")
+        if (
+            package.get("Name") != "main"
+            or package.get("ForTest", "")
+            or not isinstance(import_path, str)
+            or not import_path.endswith(".test")
+            or len(file_lists["GoFiles"]) != 1
+        ):
+            continue
+        base_import = import_path[: -len(".test")]
+        if not base_import:
+            continue
+        for partner_index, (partner, partner_directory, partner_files) in enumerate(
+            packages
+        ):
+            if partner_index == index:
+                continue
+            if (
+                partner.get("ImportPath") == base_import
+                and partner_directory == directory
+                and not partner.get("ForTest", "")
+                and (partner_files["TestGoFiles"] or partner_files["XTestGoFiles"])
+            ):
+                synthetic_test_mains.add(index)
+                break
+
+    for index, (package, directory, file_lists) in enumerate(packages):
+        if index in synthetic_test_mains:
             continue
         fields = ["GoFiles", "CgoFiles"]
         if include_tests:
             fields.extend(("TestGoFiles", "XTestGoFiles"))
         for field in fields:
-            values = package.get(field, [])
-            if values is None:
-                continue
-            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
-                raise AuditError("go_list_malformed")
-            for value in values:
+            for value in file_lists[field]:
                 files.add(
                     repo_relative_path(
-                        str(directory / value), module_root=module_root, source_root=source_root
+                        str(directory / value),
+                        module_root=module_root,
+                        source_root=source_root,
                     )
                 )
         import_path = package.get("ImportPath")
@@ -407,7 +452,6 @@ def summarize_packages(
             package.get("Name") == "main"
             and not package.get("ForTest")
             and isinstance(import_path, str)
-            and not import_path.endswith(".test")
         ):
             main_packages.add(import_path)
     if not files:

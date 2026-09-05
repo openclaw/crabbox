@@ -43,17 +43,7 @@ jobs:
             module_label: root
             goos: linux
             goarch: amd64
-            tests: "false"
-          - module: .
-            module_label: root
-            goos: linux
-            goarch: amd64
             tests: "true"
-          - module: .
-            module_label: root
-            goos: linux
-            goarch: arm64
-            tests: "false"
           - module: .
             module_label: root
             goos: linux
@@ -63,17 +53,7 @@ jobs:
             module_label: root
             goos: darwin
             goarch: amd64
-            tests: "false"
-          - module: .
-            module_label: root
-            goos: darwin
-            goarch: amd64
             tests: "true"
-          - module: .
-            module_label: root
-            goos: darwin
-            goarch: arm64
-            tests: "false"
           - module: .
             module_label: root
             goos: darwin
@@ -83,59 +63,29 @@ jobs:
             module_label: root
             goos: windows
             goarch: amd64
-            tests: "false"
-          - module: .
-            module_label: root
-            goos: windows
-            goarch: amd64
             tests: "true"
           - module: .
             module_label: root
             goos: windows
             goarch: arm64
-            tests: "false"
-          - module: .
-            module_label: root
-            goos: windows
-            goarch: arm64
             tests: "true"
           - module: worker/cloudflare-container-runner
-            module_label: cloudflare-container-runner
-            goos: linux
-            goarch: amd64
-            tests: "false"
-          - module: worker/cloudflare-container-runner
-            module_label: cloudflare-container-runner
+            module_label: worker-cloudflare-container-runner
             goos: linux
             goarch: amd64
             tests: "true"
           - module: worker/cloudflare-container-runner
-            module_label: cloudflare-container-runner
-            goos: linux
-            goarch: arm64
-            tests: "false"
-          - module: worker/cloudflare-container-runner
-            module_label: cloudflare-container-runner
+            module_label: worker-cloudflare-container-runner
             goos: linux
             goarch: arm64
             tests: "true"
           - module: worker/cloudflare-container-runner
-            module_label: cloudflare-container-runner
-            goos: darwin
-            goarch: amd64
-            tests: "false"
-          - module: worker/cloudflare-container-runner
-            module_label: cloudflare-container-runner
+            module_label: worker-cloudflare-container-runner
             goos: darwin
             goarch: amd64
             tests: "true"
           - module: worker/cloudflare-container-runner
-            module_label: cloudflare-container-runner
-            goos: darwin
-            goarch: arm64
-            tests: "false"
-          - module: worker/cloudflare-container-runner
-            module_label: cloudflare-container-runner
+            module_label: worker-cloudflare-container-runner
             goos: darwin
             goarch: arm64
             tests: "true"
