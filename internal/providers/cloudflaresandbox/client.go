@@ -82,10 +82,6 @@ type execResult struct {
 	ExitCode int    `json:"exitCode"`
 }
 
-type writeFileResponse struct {
-	OK bool `json:"ok,omitempty"`
-}
-
 type persistRequest struct {
 	Path string `json:"path,omitempty"`
 }

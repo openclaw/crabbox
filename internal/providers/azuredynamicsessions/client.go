@@ -71,16 +71,6 @@ type azureDynamicSessionsSession struct {
 	} `json:"properties"`
 }
 
-type azureDynamicSessionsErrorResponse struct {
-	Error *azureDynamicSessionsError `json:"error,omitempty"`
-}
-
-type azureDynamicSessionsError struct {
-	Code    string `json:"code,omitempty"`
-	Message string `json:"message,omitempty"`
-	Target  string `json:"target,omitempty"`
-}
-
 type azureDynamicSessionsAPIError struct {
 	StatusCode int
 	Status     string
