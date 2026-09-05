@@ -151,6 +151,11 @@ Tenki sessions cannot independently prove lost-claim ownership.
 
 The provider does not expose Tenki's internal node-agent, mesh IPs, or guest IPs.
 All SSH traffic goes through Tenki's supported cert-backed `ssh-proxy` path.
+Sandbox restores can present a different ephemeral SSH host key on consecutive
+proxy connections, so Crabbox mirrors the Tenki CLI's host-key policy and binds
+trust to the authenticated TLS proxy, exact session ID, identity key, and
+per-session SSH certificate instead of a `known_hosts` entry. Do not bypass the
+proxy or reuse this policy for a direct network SSH target.
 
 ## Capabilities
 

@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	posixpath "path"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -928,26 +927,17 @@ func (b *tenkiBackend) sshTarget(output tenkiSSHCommandOutput) SSHTarget {
 		port = strconv.Itoa(output.Port)
 	}
 	return SSHTarget{
-		User:            blank(strings.TrimSpace(output.User), "tenki"),
-		Host:            blank(strings.TrimSpace(output.Host), "sandbox"),
-		Key:             output.IdentityFile,
-		CertificateFile: output.CertificateFile,
-		KnownHostsFile:  tenkiKnownHostsFile(output),
-		Port:            port,
-		TargetOS:        targetLinux,
-		NetworkKind:     networkPublic,
-		SSHConfigProxy:  true,
-		ProxyCommand:    tenkiOpenSSHProxyCommand(output.ProxyCommand),
+		User:                   blank(strings.TrimSpace(output.User), "tenki"),
+		Host:                   blank(strings.TrimSpace(output.Host), "sandbox"),
+		Key:                    output.IdentityFile,
+		CertificateFile:        output.CertificateFile,
+		Port:                   port,
+		DisableHostKeyChecking: true,
+		TargetOS:               targetLinux,
+		NetworkKind:            networkPublic,
+		SSHConfigProxy:         true,
+		ProxyCommand:           tenkiOpenSSHProxyCommand(output.ProxyCommand),
 	}
-}
-
-func tenkiKnownHostsFile(output tenkiSSHCommandOutput) string {
-	dir := filepath.Dir(output.IdentityFile)
-	session := normalizeLeaseSlug(output.SessionID)
-	if session == "" {
-		session = "sandbox"
-	}
-	return filepath.Join(dir, "known_hosts_"+session)
 }
 
 func tenkiOpenSSHProxyCommand(command string) string {
