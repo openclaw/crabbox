@@ -1389,10 +1389,11 @@ func ValidateRunSessionForSpec(spec ProviderSpec, result RunResult) error {
 }
 
 type LeaseTarget struct {
-	Server      Server
-	SSH         SSHTarget
-	LeaseID     string
-	Coordinator *CoordinatorClient
+	Server       Server
+	SSH          SSHTarget
+	LeaseID      string
+	Coordinator  *CoordinatorClient
+	runnerTiming *runnerProviderTiming
 	// Recorded by the validated provider lookup, never inferred from absent SSH.
 	providerRelease *leaseReleaseConfirmation
 }

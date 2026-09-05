@@ -36626,7 +36626,15 @@ describe("fleet lease identity and idle", () => {
         requestMs: 200,
         networkReadyMs: 300,
         totalMs: 600,
+        phases: [
+          { name: "request", ms: 200 },
+          { name: "network_ready", ms: 300 },
+          { name: "unattributed", ms: 100 },
+        ],
       });
+      expect(result.provisioningTiming?.phases?.reduce((sum, phase) => sum + phase.ms, 0)).toBe(
+        result.provisioningTiming?.totalMs,
+      );
     } finally {
       now.mockRestore();
     }
