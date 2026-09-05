@@ -153,6 +153,17 @@ sandbox data plane.
 matching `crabbox stop --provider superserve --id ...` cleanup command for
 orchestrators that need to inspect or clean up retained sandboxes later.
 
+Run finalization makes one retention/deletion decision before the final timing
+record. A failed deletion retains the claim and session for recovery and fails
+an otherwise successful run with exit code 1. An earlier command exit or
+cancellation remains the primary outcome if cleanup or timing output also fails.
+`--keep-on-failure` also covers command-preparation failures after allocation.
+If a reused sandbox cannot activate, its authorized retained session is still
+returned, but no post-run activity refresh or automatic deletion is attempted.
+
+If initial metadata setup fails or returns a conflicting sandbox ID, rollback
+targets only the original create-response ID; no reusable claim is published.
+
 ## Capabilities
 
 - SSH: no.
