@@ -834,8 +834,8 @@ func commandRunnerWithChildCredentialBoundary(next CommandRunner, denied []strin
 	return childCredentialBoundaryCommandRunner{next: next, denied: denied}
 }
 
-// TrackLocalCommandCancellation records the caller cause when the command's
-// cancellation watcher stops a child. Install it after configuring cmd.Cancel,
+// TrackLocalCommandCancellation records the caller cause for a signaled child
+// stopped by the cancellation watcher. Install it after configuring cmd.Cancel,
 // before starting a CommandContext command. Apply the returned function only
 // after Run or Wait joins that watcher; ordinary observed exits stay primary.
 func TrackLocalCommandCancellation(ctx context.Context, cmd *exec.Cmd) func(error) error {

@@ -1,7 +1,9 @@
 package smolvm
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +19,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -642,12 +645,259 @@ func TestSyncWorkspaceUsesInject(t *testing.T) {
 	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
 	_, _, err := backend.syncWorkspace(context.Background(), fake, "mach_1", RunRequest{
 		Repo: Repo{Name: "repo", Root: newGitRepo(t)},
-	}, "/workspace", ".")
+	}, "/workspace", nil)
 	if err != nil {
 		t.Fatalf("sync err=%v", err)
 	}
 	if !reflect.DeepEqual(fake.verbs, []string{"exec", "inject"}) {
 		t.Fatalf("verbs=%v", fake.verbs)
+	}
+}
+
+type archivePreparationClock func() time.Time
+
+func (now archivePreparationClock) Now() time.Time { return now() }
+
+func TestRunArchivePreparationPrecedesMutation(t *testing.T) {
+	for _, reused := range []bool{false, true} {
+		for _, failure := range []string{"full guardrail", "archive creation"} {
+			t.Run(fmt.Sprintf("reused=%t/%s", reused, failure), func(t *testing.T) {
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				temp := t.TempDir()
+				t.Setenv("TMPDIR", temp)
+				t.Setenv("TMP", temp)
+				t.Setenv("TEMP", temp)
+				repo := newGitRepo(t)
+				if err := os.WriteFile(filepath.Join(repo, "second.txt"), []byte("second"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				runGit(t, repo, "add", "second.txt")
+				runGit(t, repo, "commit", "-m", "second file")
+				if err := os.WriteFile(filepath.Join(repo, "hello.txt"), []byte("dirty"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				fake := &fakeAPI{machine: ownedTestMachine()}
+				starts := 0
+				fake.startHook = func(context.Context, string) error { starts++; return nil }
+				withFakeAPI(t, fake)
+				cfg := testConfig()
+				cfg.Sync.Delete = true
+				rt := testRuntime()
+				if failure == "full guardrail" {
+					cfg.Sync.FailFiles = 2
+					configPath := filepath.Join(t.TempDir(), "config.yaml")
+					if err := os.WriteFile(configPath, []byte("provider: smolvm\nsync:\n  failFiles: 2\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					t.Setenv("CRABBOX_CONFIG", configPath)
+					t.Setenv("CRABBOX_PROVIDER", "smolvm")
+					t.Setenv("CRABBOX_SYNC_ALLOW_LARGE", "")
+					t.Chdir(repo)
+					var preview, diagnostics bytes.Buffer
+					if err := (core.App{Stdout: &preview, Stderr: &diagnostics}).Run(t.Context(), []string{"sync-plan", "--json"}); err != nil {
+						t.Fatalf("sync-plan: %v: %s", err, diagnostics.String())
+					}
+					var plan struct {
+						Guardrail struct {
+							Scope, Status string
+							Files         int
+						}
+						DirtyDelta struct{ Files int }
+					}
+					if err := json.Unmarshal(preview.Bytes(), &plan); err != nil || plan.Guardrail.Scope != "candidate" || plan.Guardrail.Status != "failed" || plan.Guardrail.Files != 2 || plan.DirtyDelta.Files != 1 {
+						t.Fatalf("preview disagrees with archive admission: %s err=%v", preview.String(), err)
+					}
+				} else {
+					calls := 0
+					rt.Clock = archivePreparationClock(func() time.Time {
+						calls++
+						// The manifest is captured, but the archive has not opened its members.
+						if calls == 6 {
+							if err := os.Remove(filepath.Join(repo, "hello.txt")); err != nil {
+								t.Fatal(err)
+							}
+						}
+						return time.Unix(0, int64(calls)*int64(time.Millisecond))
+					})
+				}
+				req := RunRequest{Repo: Repo{Root: repo, Name: "fixture"}, SyncOnly: true}
+				if reused {
+					req.ID = "cbx_123456789abc"
+					seedSmolvmClaim(t, req.ID, "blue", "mach_1", repo, nil)
+				}
+				b := NewBackend(Provider{}.Spec(), cfg, rt).(*backend)
+				_, err := b.Run(t.Context(), req)
+				if err == nil {
+					t.Fatalf("preparation unexpectedly succeeded: verbs=%v", fake.verbs)
+				}
+				want := "sync candidate too large: 2 files"
+				if failure == "archive creation" {
+					want = "stat sync path hello.txt"
+				}
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("wrong preparation failure: %v, want %q", err, want)
+				}
+				if len(fake.verbs) != 0 || starts != 0 {
+					t.Fatalf("preparation failure mutated provider: verbs=%v starts=%d", fake.verbs, starts)
+				}
+				claims, err := core.ListLeaseClaims()
+				if err != nil || (!reused && len(claims) != 0) || (reused && (len(claims) != 1 || claims[0].CloudID != "mach_1" || claims[0].RepoRoot != repo)) {
+					t.Fatalf("claims=%v err=%v", claims, err)
+				}
+				archives, err := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "crabbox-smolvm-sync-*.tgz"))
+				if err != nil || len(archives) != 0 {
+					t.Fatalf("archives leaked=%v err=%v", archives, err)
+				}
+			})
+		}
+	}
+}
+
+func TestRunUploadsPreparedSnapshotAndClosesIt(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repo := newGitRepo(t)
+	fake := &fakeAPI{}
+	withFakeAPI(t, fake)
+	fake.createHook = func(*fakeAPI) {
+		if err := os.WriteFile(filepath.Join(repo, "hello.txt"), []byte("changed during provisioning"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var archivePath string
+	fake.injectHook = func(_ context.Context, archive, target string) error {
+		archivePath = archive
+		if target != "/workspace" {
+			t.Fatalf("target=%q", target)
+		}
+		file, err := os.Open(archive)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		gz, err := gzip.NewReader(file)
+		if err != nil {
+			return err
+		}
+		defer gz.Close()
+		tr := tar.NewReader(gz)
+		h, err := tr.Next()
+		if err != nil {
+			return err
+		}
+		data, err := io.ReadAll(tr)
+		if h.Name != "hello.txt" || string(data) != "hello" {
+			t.Fatalf("snapshot %q=%q, want pre-create hello", h.Name, data)
+		}
+		return err
+	}
+	var stderr bytes.Buffer
+	rt := testRuntime()
+	rt.Stderr = &stderr
+	b := NewBackend(Provider{}.Spec(), testConfig(), rt).(*backend)
+	if _, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: repo}, SyncOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(stderr.String(), "sync candidate:") != 1 || archivePath == "" {
+		t.Fatalf("archive=%q diagnostics=%s", archivePath, stderr.String())
+	}
+	if _, err := os.Stat(archivePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("archive remains: %v", err)
+	}
+}
+
+func TestSyncArchivePreparationTiming(t *testing.T) {
+	repo := newGitRepo(t)
+	for _, external := range []bool{false, true} {
+		t.Run(fmt.Sprint(external), func(t *testing.T) {
+			calls := 0
+			rt := testRuntime()
+			rt.Clock = archivePreparationClock(func() time.Time {
+				calls++
+				return time.Unix(0, int64(calls)*int64(7*time.Millisecond))
+			})
+			b := NewBackend(Provider{}.Spec(), testConfig(), rt).(*backend)
+			req := RunRequest{Repo: Repo{Root: repo}}
+			var prepared *core.PreparedArchive
+			if external {
+				var err error
+				prepared, err = b.prepareArchive(t.Context(), req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer prepared.Close()
+			}
+			phases, total, err := b.syncWorkspace(t.Context(), &fakeAPI{}, "mach_1", req, "/workspace", prepared)
+			want := 77 * time.Millisecond
+			if external {
+				want = 56 * time.Millisecond
+			}
+			if err != nil || total != want || len(phases) != 6 || phases[5].Ms != want.Milliseconds() {
+				t.Fatalf("phases=%v total=%v err=%v want=%v", phases, total, err, want)
+			}
+			for i, name := range []string{"manifest", "preflight", "archive", "prepare", "inject"} {
+				if phases[i].Name != name || phases[i].Ms != 7 {
+					t.Fatalf("phase %d=%v", i, phases[i])
+				}
+			}
+		})
+	}
+}
+
+func TestSyncPreparedArchiveSharesRemainingBudget(t *testing.T) {
+	repo := newGitRepo(t)
+	for _, test := range []struct {
+		name                                string
+		timeout, parent, archive, remaining time.Duration
+	}{
+		{"remaining after archive", 5 * time.Second, 0, 2 * time.Second, 3 * time.Second},
+		{"parent wins", 5 * time.Second, time.Second, 0, time.Second},
+		{"disabled keeps parent", 0, time.Second, 0, time.Second},
+		{"disabled", 0, 0, 0, 0},
+		{"exhausted", time.Second, 0, 2 * time.Second, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+			prepared, err := b.prepareArchive(t.Context(), RunRequest{Repo: Repo{Root: repo}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Close()
+			prepared.ArchiveDuration = test.archive
+			b.cfg.Sync.Timeout = test.timeout
+			synctest.Test(t, func(t *testing.T) {
+				time.Sleep(time.Hour) // Provisioning must not consume transfer budget.
+				ctx := context.Background()
+				if test.parent > 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, test.parent)
+					defer cancel()
+				}
+				var prepareCtx context.Context
+				fake := &fakeAPI{execHook: func(ctx context.Context, _ string) (execResult, error) {
+					prepareCtx = ctx
+					deadline, bounded := ctx.Deadline()
+					if bounded != (test.timeout > 0 || test.parent > 0) || (bounded && time.Until(deadline) != test.remaining) {
+						t.Fatalf("deadline=%v bounded=%v remaining=%v", deadline, bounded, time.Until(deadline))
+					}
+					if bounded {
+						time.Sleep(test.remaining)
+						synctest.Wait()
+					}
+					return execResult{}, nil
+				}}
+				fake.injectHook = func(ctx context.Context, _, _ string) error {
+					if ctx != prepareCtx {
+						t.Fatal("injection restarted the workspace preparation budget")
+					}
+					return ctx.Err()
+				}
+				_, _, err := b.syncWorkspace(ctx, fake, "mach_1", RunRequest{}, "/workspace", prepared)
+				bounded := test.timeout > 0 || test.parent > 0
+				if (bounded && !errors.Is(err, context.DeadlineExceeded)) || (!bounded && err != nil) {
+					t.Fatalf("sync err=%v", err)
+				}
+			})
+		})
 	}
 }
 
@@ -768,6 +1018,7 @@ type fakeAPI struct {
 	streamErr      error
 	writeHook      func(context.Context, string, string) error
 	execHook       func(context.Context, string) (execResult, error)
+	injectHook     func(context.Context, string, string) error
 }
 
 func (f *fakeAPI) CreateMachine(_ context.Context, req createRequest) (machineData, error) {
@@ -852,10 +1103,13 @@ func (f *fakeAPI) ExecStream(_ context.Context, _ string, command, folder string
 	return 0, f.streamErr
 }
 
-func (f *fakeAPI) InjectArchive(_ context.Context, _, _, targetDir string) error {
+func (f *fakeAPI) InjectArchive(ctx context.Context, _, archive, targetDir string) error {
 	f.verbs = append(f.verbs, "inject")
 	f.injectTargets = append(f.injectTargets, targetDir)
 	f.injected = true
+	if f.injectHook != nil {
+		return f.injectHook(ctx, archive, targetDir)
+	}
 	return nil
 }
 
@@ -998,7 +1252,7 @@ func TestClientNativeUploadFailureAndPublication(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(repo, "uploaded"), []byte(content), 0o755); err != nil {
 					t.Fatal(err)
 				}
-				archive, err := core.CreateSyncArchive(t.Context(), Repo{Root: repo}, SyncManifest{Files: []string{"uploaded"}}, "crabbox-smolvm-native-*.tgz")
+				archive, err := core.CreateSyncArchive(t.Context(), Repo{Root: repo}, core.SyncManifest{Files: []string{"uploaded"}}, "crabbox-smolvm-native-*.tgz")
 				if err != nil {
 					t.Fatal(err)
 				}

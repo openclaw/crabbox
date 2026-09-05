@@ -235,7 +235,7 @@ timing errors add diagnostics without replacing an earlier command exit or
 provider failure. Final timing includes cleanup and agrees with the returned
 outcome. The automatic deletion request keeps its 15-second timeout.
 
-Interrupted bridge subprocesses preserve cancellation and deadline causes.
+On POSIX hosts, interrupted bridge subprocesses preserve cancellation and deadline causes.
 Successful bridge completion still reports the sandbox's observed command exit,
 including nonzero exits. The SDK persistence setting controls sandbox creation;
 it does not independently request Crabbox retention after a successful run.

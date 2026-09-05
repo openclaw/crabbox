@@ -95,7 +95,7 @@ Defaults: image `alpine` (lightweight; provides the standard shell tools needed 
 
 ## Lifecycle
 
-1. `warmup` / `run` without `--id` creates a microVM sandbox from the configured `--smolvm-image`.
+1. `warmup` / `run` without `--id` creates a microVM sandbox from the configured `--smolvm-image`. A syncing `run` first validates the complete archive candidate and builds its local snapshot; preparation failure does not allocate a machine.
 2. Before startup, Crabbox durably binds a local claim to the returned machine ID, name, creation timestamp, full API endpoint, normal `cbx_...` lease ID, and friendly slug.
 3. By default `run` archive-syncs the working tree using a direct API call to `/exec` (the tarball is base64-encoded and sent in a shell heredoc; the guest completes checked base64 decoding before extracting with `tar`).
 4. The user command executes inside the microVM. Because the smolfleet API does not stream live output, command output appears after the command completes.
@@ -103,6 +103,26 @@ Defaults: image `alpine` (lightweight; provides the standard shell tools needed 
 6. `run --lease-output <path>` writes the SmolVM lease ID, slug, reuse/retention state, and exact cleanup command for orchestration handoff.
 
 Note: `warmup` always keeps the sandbox until an explicit `crabbox stop`. If you pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
+
+Fresh runs upload the snapshot prepared before allocation, even if the checkout
+changes during startup. Reused runs authorize the existing machine before local
+preparation; manifest, full-archive guardrail, and archive-construction failures
+occur before clearing its workspace. The shared preparation owner includes all
+selected files in its limits, not only dirty files. `sync-plan --json` previews
+those same full-archive limits. `--force-sync-large` keeps the normal explicit
+override.
+
+`sync.timeout` bounds archive construction and the remaining remote preparation
+and injection work. Manifest/preflight time and provisioning wait are excluded;
+saved archive time reduces one shared remote budget. Earlier caller deadlines
+still apply. Timing includes preparation once, with archive construction before
+remote workspace preparation. The archive remains owned until injection ends.
+
+This is not transactional replacement: injection reads the temporary archive
+again and extracts into the prepared workspace. A later read, transfer, or
+extraction failure can follow workspace clearing. Root `/workspace` remains a
+mount whose contents are cleared in place; nested workdirs keep their existing
+replacement behavior. `--no-sync` creates the workdir without clearing it.
 
 Stream errors retain their cancellation or timeout cause for run status. Crabbox checks cancellation immediately before submitting the command, including after a successful environment upload; existing profile cleanup still runs.
 

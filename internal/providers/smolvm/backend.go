@@ -73,6 +73,14 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if err != nil {
 		return RunResult{}, err
 	}
+	var prepared *core.PreparedArchive
+	if req.ID == "" && !req.NoSync {
+		prepared, err = b.prepareArchive(ctx, req)
+		if err != nil {
+			return RunResult{}, err
+		}
+		defer prepared.Close()
+	}
 	effectiveKeep := req.Keep || b.cfg.Smolvm.Keep
 	leaseID, machineID, slug := "", "", ""
 	acquired := false
@@ -123,7 +131,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	syncDuration := time.Duration(0)
 	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
 	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, machineID, req, workdir, folder)
+		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, machineID, req, folder, prepared)
 		if err != nil {
 			return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
 		}
