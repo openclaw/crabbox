@@ -855,6 +855,16 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 	if req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
 		configureBoundedCommandCancellation(cmd)
 	}
+	stopCommand := cmd.Cancel
+	var interrupted error
+	cmd.Cancel = func() error {
+		cause := ctx.Err()
+		err := stopCommand()
+		if !errors.Is(err, os.ErrProcessDone) {
+			interrupted = cause
+		}
+		return err
+	}
 	env := req.Env
 	if env == nil {
 		env = os.Environ()
@@ -883,9 +893,15 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 		var finishCapture func() commandFileCaptureOutcome
 		if files != nil {
 			files.closeWriters()
-			finishCapture = files.watch(cancel, cmd.Cancel, cmd.WaitDelay)
+			finishCapture = files.watch(cancel, stopCommand, cmd.WaitDelay)
 		}
 		err = cmd.Wait()
+		// Wait joins its context watcher. Keep observed exits primary; only a
+		// signaled child gains the caller cause from that watcher's stop attempt.
+		var processErr *exec.ExitError
+		if interrupted != nil && errors.As(err, &processErr) && processErr.ExitCode() < 0 {
+			err = errors.Join(err, interrupted)
+		}
 		if finishCapture != nil {
 			observed := finishCapture()
 			err = errors.Join(err, observed.err)
@@ -893,18 +909,18 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 				return LocalCommandResult{ExitCode: exitCode(err)}, err
 			}
 			if readErr := files.read(&stdout, &stderr); readErr != nil {
-				_ = cmd.Cancel()
+				_ = stopCommand()
 				err = errors.Join(err, readErr)
 				return LocalCommandResult{ExitCode: exitCode(err)}, err
 			}
 			stdout.overflow = stdout.overflow || observed.overflow
 			if stdout.overflow || stderr.overflow || err != nil {
-				_ = cmd.Cancel()
+				_ = stopCommand()
 			}
 		}
 	}
 	if errors.Is(err, exec.ErrWaitDelay) && req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
-		_ = cmd.Cancel()
+		_ = stopCommand()
 	}
 	result := LocalCommandResult{ExitCode: exitCode(err), Stdout: stdout.String(), Stderr: stderr.String()}
 	if stdout.overflow || stderr.overflow {
