@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+json_matcher="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/live-smoke-json-match.py"
+
 provider_enabled() {
   local list="${CRABBOX_LIVE_PROVIDERS:-github-codespaces}"
   local item
@@ -100,34 +102,7 @@ validate_list_json_contains_slug() {
   local validation_output=""
   local status=0
   set +e
-  validation_output="$(CRABBOX_SMOKE_SLUG="$slug" "$python_bin" -c '
-import json
-import os
-import sys
-
-slug = os.environ["CRABBOX_SMOKE_SLUG"]
-try:
-    payload = json.load(sys.stdin)
-except Exception as exc:
-    print(f"invalid JSON: {exc}", file=sys.stderr)
-    sys.exit(1)
-
-def has_slug(value):
-    if isinstance(value, dict):
-        labels = value.get("labels")
-        if isinstance(labels, dict) and labels.get("slug") == slug:
-            return True
-        if value.get("slug") == slug or value.get("name") == slug or value.get("id") == slug or value.get("leaseId") == slug:
-            return True
-        return any(has_slug(child) for child in value.values())
-    if isinstance(value, list):
-        return any(has_slug(child) for child in value)
-    return False
-
-if not has_slug(payload):
-    print(f"list JSON did not include slug {slug}", file=sys.stderr)
-    sys.exit(1)
-' <<<"$output" 2>&1)"
+  validation_output="$(CRABBOX_SMOKE_SLUG="$slug" CRABBOX_SMOKE_FAILURE="list JSON did not include slug $slug" "$python_bin" "$json_matcher" standard contains <<<"$output" 2>&1)"
   status=$?
   set -e
   if [[ "$status" -ne 0 ]]; then
@@ -142,34 +117,7 @@ validate_list_json_missing_slug() {
   local validation_output=""
   local status=0
   set +e
-  validation_output="$(CRABBOX_SMOKE_SLUG="$slug" "$python_bin" -c '
-import json
-import os
-import sys
-
-slug = os.environ["CRABBOX_SMOKE_SLUG"]
-try:
-    payload = json.load(sys.stdin)
-except Exception as exc:
-    print(f"invalid JSON: {exc}", file=sys.stderr)
-    sys.exit(1)
-
-def has_slug(value):
-    if isinstance(value, dict):
-        labels = value.get("labels")
-        if isinstance(labels, dict) and labels.get("slug") == slug:
-            return True
-        if value.get("slug") == slug or value.get("name") == slug or value.get("id") == slug or value.get("leaseId") == slug:
-            return True
-        return any(has_slug(child) for child in value.values())
-    if isinstance(value, list):
-        return any(has_slug(child) for child in value)
-    return False
-
-if has_slug(payload):
-    print(f"list JSON still included slug {slug}", file=sys.stderr)
-    sys.exit(1)
-' <<<"$output" 2>&1)"
+  validation_output="$(CRABBOX_SMOKE_SLUG="$slug" CRABBOX_SMOKE_FAILURE="list JSON still included slug $slug" "$python_bin" "$json_matcher" standard absent <<<"$output" 2>&1)"
   status=$?
   set -e
   if [[ "$status" -ne 0 ]]; then
@@ -227,32 +175,7 @@ for item in json.load(sys.stdin):
 }
 
 local_inventory_has_slug() {
-  CRABBOX_SMOKE_SLUG="$slug" "$python_bin" -c '
-import json
-import os
-import sys
-
-slug = os.environ["CRABBOX_SMOKE_SLUG"]
-
-def has_slug(value):
-    if isinstance(value, dict):
-        labels = value.get("labels")
-        if isinstance(labels, dict) and labels.get("slug") == slug:
-            return True
-        if value.get("slug") == slug or value.get("name") == slug or value.get("id") == slug or value.get("leaseId") == slug:
-            return True
-        return any(has_slug(child) for child in value.values())
-    if isinstance(value, list):
-        return any(has_slug(child) for child in value)
-    return False
-
-try:
-    payload = json.load(sys.stdin)
-except Exception as exc:
-    print(f"invalid JSON: {exc}", file=sys.stderr)
-    sys.exit(2)
-sys.exit(0 if has_slug(payload) else 1)
-'
+  CRABBOX_SMOKE_SLUG="$slug" "$python_bin" "$json_matcher" standard probe
 }
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
