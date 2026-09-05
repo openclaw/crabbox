@@ -357,7 +357,7 @@ func TestCIGoContractRejectsMutations(t *testing.T) {
 			steps[3], steps[5] = steps[5], steps[3]
 		}},
 		{"comment out race command", func(d *yaml.Node) {
-			ciGoField(ciGoSteps(ciGoJob(d, "go-test"))[5], "run").Value = "# go test -race -timeout=15m ./...\ntrue\n"
+			ciGoField(ciGoSteps(ciGoJob(d, "go-test"))[5], "run").Value = "# go test -race -timeout=20m ./...\ntrue\n"
 		}},
 		{"implicit package timeout", func(d *yaml.Node) {
 			ciGoField(ciGoSteps(ciGoJob(d, "go-test"))[5], "run").Value = "go test -race ./..."
@@ -534,7 +534,7 @@ if [ -s "$output_file" ]; then
   exit 1
 fi
 `},
-	{"Test", "", "go test -race -timeout=15m ./..."},
+	{"Test", "", "go test -race -timeout=20m ./..."},
 	{"Require executed Linux supervision fixtures", "bash", `go test ./internal/cli -run '^(TestWorkspaceOwnerWSL2Watchdog.*|TestWSL2(OrdinaryShortFrameWatchdogCleansState|MarkerPublicationFailureLeavesUnarmedDiagnosticState|GuardSurvivesPublishedMarkerBeforeArm|ProductionCleanup.*))$' -count=1 -json | tee "$RUNNER_TEMP/wsl-linux-tests.jsonl"
 python3 - "$RUNNER_TEMP/wsl-linux-tests.jsonl" <<'PY'
 import json, sys
