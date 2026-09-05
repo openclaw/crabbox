@@ -103,10 +103,11 @@ before workspace preparation and sync.
 
 ## Lifecycle
 
-1. Create or resolve a Crabbox-owned Freestyle VM.
+1. Validate the workdir and prepare a bounded archive before creating a VM;
+   reused VMs are authorized before local preparation.
 2. Store a local lease ID with the `fsb_` prefix and a friendly slug.
-3. Validate the Freestyle workdir, build the Crabbox sync manifest, and upload a
-   gzipped archive into `/workspace/<freestyle.workdir>`.
+3. Upload the prepared archive and synchronize `/workspace/<freestyle.workdir>`
+   through Crabbox's shared archive transaction.
 4. Execute commands through Freestyle's exec API in that workdir via `bash -lc`.
 5. Stop deletes the VM and removes the local lease claim.
 
@@ -125,11 +126,25 @@ guest service is publicly exposed by default.
 When `sync.delete` is enabled, Crabbox extracts into a staging directory and
 replaces the retained workspace only after extraction succeeds. Failed uploads
 leave the prior workspace intact. `sync.timeout` bounds archive creation,
-upload, extraction, and replacement.
+upload, extraction, and replacement. Local manifest planning and VM provisioning
+are outside that budget; archive creation consumes part of the remaining
+transfer budget. Fresh runs upload the snapshot prepared before VM creation,
+even if the checkout changes during provisioning. Timing reports preparation
+once and separates upload, extraction and cleanup.
+
+File and byte guardrails apply to the complete archive, not only changed files.
+The provider also limits compressed archives to 64 MiB, checked before allocation
+and again by a bounded upload read. `--force-sync-large` overrides the normal
+sync guardrails but not this compressed transport limit.
 
 Archive upload tries Freestyle's file API first. When that endpoint is
 unavailable, Crabbox falls back to chunked base64 upload through exec. Sync still
-completes reliably through the fallback path.
+completes through the fallback path. The two attempts use separate temporary
+paths and publish only after acknowledged upload or successful decoding;
+shared sync owns extraction and workspace replacement. Failed publication is
+reported, and bounded cleanup preserves the primary error. An unknown remote
+write completing after cleanup can still leave its isolated attempt file; it
+cannot overwrite the archive consumed by the fallback.
 
 The raw VM ID, Crabbox VM name, and generated slug shown by `crabbox list` can
 identify a VM after local claim state is lost. Read-only status recovery still

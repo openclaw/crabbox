@@ -145,6 +145,14 @@ func (b *freestyleBackend) Run(ctx context.Context, req RunRequest) (result RunR
 	if err != nil {
 		return RunResult{}, err
 	}
+	var prepared *core.PreparedArchive
+	if req.ID == "" && !req.NoSync {
+		prepared, err = b.prepareArchive(ctx, req)
+		if err != nil {
+			return RunResult{}, err
+		}
+		defer prepared.Close()
+	}
 	leaseID, name, slug := "", "", ""
 	acquired := false
 	if req.ID == "" {
@@ -213,13 +221,13 @@ func (b *freestyleBackend) Run(ctx context.Context, req RunRequest) (result RunR
 	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
 	if !req.NoSync {
 		var err error
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, name, req)
+		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, name, req, prepared)
 		if err != nil {
 			handleDelegatedRunFailure(b.rt.Stderr, req, freestyleProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 			return RunResult{}, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, client, name, workspace, false); err != nil {
+	} else if err := b.prepareWorkspace(ctx, client, name, workspace); err != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, freestyleProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		return RunResult{}, err
 	}
