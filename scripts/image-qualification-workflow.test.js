@@ -102,6 +102,37 @@ test("workflow isolates candidate execution from protected credentials", () => {
   assert.match(protectedJobs, /candidate bytes as inert data/);
 });
 
+test("candidate downloads extract the artifact at the canonical path", () => {
+  const downloadSteps = [...workflow.matchAll(
+    /^      - name: [^\n]+\n        uses: actions\/download-artifact@[^\n]+\n        with:\n((?:          .+\n)+)/gm,
+  )];
+  const candidateDownloads = downloadSteps.filter(([, inputs]) =>
+    inputs.includes("artifact-ids:"),
+  );
+
+  assert.equal(candidateDownloads.length, 3);
+  for (const [, inputs] of candidateDownloads) {
+    assert.match(
+      inputs,
+      /^          artifact-ids: \$\{\{ needs\.build-candidate\.outputs\.candidate_artifact_id \}\}$/m,
+    );
+    assert.match(
+      inputs,
+      /^          path: \$\{\{ runner\.temp \}\}\/image-qualification-candidate$/m,
+    );
+    assert.match(inputs, /^          merge-multiple: true$/m);
+  }
+});
+
+test("finalization skips protected approval when deployment never started", () => {
+  const finalizeJob = workflow.slice(workflow.indexOf("  finalize:"));
+
+  assert.match(
+    finalizeJob,
+    /^    if: \$\{\{ always\(\) && needs\.deploy-enroll\.result != 'skipped' \}\}$/m,
+  );
+});
+
 test("all workflow actions use immutable repository-standard pins", () => {
   for (const source of [workflow, reaper]) {
     for (const line of source.matchAll(/uses:\s+([^@\s]+)@([^\s]+)/g)) {
