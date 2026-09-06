@@ -68,173 +68,84 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if err != nil {
 		return RunResult{}, err
 	}
-	started := b.now()
-	client, err := newAPI(b.cfg, b.rt)
-	if err != nil {
-		return RunResult{}, err
-	}
-	var prepared *core.PreparedArchive
-	if req.ID == "" && !req.NoSync {
-		prepared, err = b.prepareArchive(ctx, req)
-		if err != nil {
-			return RunResult{}, err
-		}
-		defer prepared.Close()
-	}
 	effectiveKeep := req.Keep || b.cfg.Smolvm.Keep
-	leaseID, machineID, slug := "", "", ""
-	acquired := false
+	lifecycleReq := req
+	lifecycleReq.Keep = effectiveKeep
+	var client api
 	var claim core.LeaseClaim
-	if req.ID == "" {
-		var machine machineData
-		claim, machine, err = b.createMachine(ctx, client, req.Repo, effectiveKeep, req.RequestedSlug)
-		if err != nil {
-			return RunResult{}, err
-		}
-		leaseID, slug = claim.LeaseID, claim.Slug
-		machineID = machine.ID
-		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s machine=%s name=%s\n", leaseID, slug, providerName, machine.ID, machine.Name)
-		acquired = true
-	} else {
-		claim, err = b.reuseMachine(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
-		if err != nil {
-			return RunResult{}, err
+	session := func() shared.DelegatedSandbox {
+		return shared.DelegatedSandbox{
+			LeaseID: claim.LeaseID, Slug: claim.Slug,
+			CleanupCommand: smolvmCleanupCommand(claim.LeaseID),
 		}
 	}
-	leaseID, machineID, slug = claim.LeaseID, claim.CloudID, claim.Slug
-	shouldStop := acquired && !effectiveKeep
-	session := &RunSessionHandle{
-		Provider:       providerName,
-		LeaseID:        leaseID,
-		Slug:           slug,
-		Reused:         !acquired,
-		Kept:           !shouldStop,
-		CleanupCommand: smolvmCleanupCommand(leaseID),
-	}
-	if shouldStop {
-		defer func() {
-			if !shouldStop {
-				session.Kept = true
-				return
+	return shared.RunDelegatedSandbox(ctx, lifecycleReq, shared.DelegatedSandboxLifecycle{
+		Provider: providerName, Runtime: b.rt, Workdir: workdir,
+		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL, CleanupTimeout: smolvmControlTimeout,
+		Preflight: func(context.Context) error {
+			var err error
+			client, err = newAPI(b.cfg, b.rt)
+			return err
+		},
+		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) { return b.prepareArchive(ctx, req) },
+		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var machine machineData
+			var err error
+			claim, machine, err = b.createMachine(ctx, client, req.Repo, effectiveKeep, req.RequestedSlug)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
 			}
-			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), smolvmControlTimeout)
-			defer cancel()
-			if err := b.deleteOwnedMachine(cleanupCtx, client, claim); err != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: smolvm delete failed for %s: %v\n", machineID, err)
-				session.Kept = true
-				return
+			fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s machine=%s name=%s\n", claim.LeaseID, claim.Slug, providerName, machine.ID, machine.Name)
+			return session(), nil
+		},
+		Resolve: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var err error
+			claim, err = b.reuseMachine(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
 			}
-			session.Kept = false
-		}()
-	}
-
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
-	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, machineID, req, folder, prepared)
-		if err != nil {
-			return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
-		}
-		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, client, machineID, folder, false); err != nil {
-		return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
-	}
-	if req.SyncOnly {
-		result := RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}
-		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
-		if req.TimingJSON {
-			err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-				Provider:      providerName,
-				LeaseID:       leaseID,
-				Slug:          slug,
-				SyncDelegated: true,
-				SyncMs:        syncDuration.Milliseconds(),
-				SyncPhases:    syncPhases,
-				SyncSkipped:   req.NoSync,
-				TotalMs:       result.Total.Milliseconds(),
-				ExitCode:      0,
-				Label:         strings.TrimSpace(req.Label),
-			}, result, nil))
-			return result, err
-		}
-		return result, nil
-	}
-
-	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
-	if err != nil {
-		return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
-	}
-	command := intent.ShellSource()
-	if req.EnvSummary {
-		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
-	}
-	if len(req.Env) > 0 {
-		envPath, cleanup, err := b.uploadEnvProfile(ctx, client, claim, req.Env, workdir)
-		if cleanup != nil {
-			defer func() {
-				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), envProfileCleanupTimeout)
-				defer cancel()
-				cleanup(cleanupCtx)
-			}()
-		}
-		if err != nil {
-			return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
-		}
-		command = shared.ShellScriptWithEnvProfile(command, envPath)
-	}
-	commandStarted := b.now()
-	exitCode := 0
-	commandErr := ctx.Err()
-	if commandErr == nil {
-		exitCode, commandErr = client.ExecStream(ctx, machineID, command, folder, b.rt.Stdout)
-	}
-	commandDuration := b.now().Sub(commandStarted)
-	result := RunResult{
-		ExitCode:      exitCode,
-		Command:       commandDuration,
-		Total:         b.now().Sub(started),
-		SyncDelegated: true,
-		Provider:      providerName,
-		LeaseID:       leaseID,
-		Slug:          slug,
-		CommandText:   strings.Join(req.Command, " "),
-		Session:       session,
-	}
-	if req.NoSync {
-		fmt.Fprintf(b.rt.Stderr, "smolvm run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
-	} else {
-		fmt.Fprintf(b.rt.Stderr, "smolvm run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
-	}
-	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-			Provider:      providerName,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			SyncDelegated: true,
-			SyncMs:        syncDuration.Milliseconds(),
-			SyncPhases:    syncPhases,
-			SyncSkipped:   req.NoSync,
-			CommandMs:     commandDuration.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      exitCode,
-			Label:         strings.TrimSpace(req.Label),
-		}, result, commandErr)); err != nil {
-			return result, err
-		}
-	}
-	if commandErr != nil {
-		failureReq := req
-		failureReq.Keep = effectiveKeep
-		handleDelegatedRunFailure(b.rt.Stderr, failureReq, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, shared.ExitErrorWithCause(1, fmt.Sprintf("smolvm run failed: %v", commandErr), commandErr)
-	}
-	if exitCode != 0 {
-		failureReq := req
-		failureReq.Keep = effectiveKeep
-		handleDelegatedRunFailure(b.rt.Stderr, failureReq, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("smolvm run exited %d", exitCode)}
-	}
-	return result, nil
+			return session(), nil
+		},
+		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+			return b.syncWorkspace(ctx, client, claim.CloudID, req, folder, prepared)
+		},
+		NoSync: func(ctx context.Context) error { return b.prepareWorkspace(ctx, client, claim.CloudID, folder, false) },
+		Command: func(ctx context.Context) (shared.DelegatedSandboxCommand, error) {
+			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+			if err != nil {
+				return shared.DelegatedSandboxCommand{}, err
+			}
+			command := intent.ShellSource()
+			if req.EnvSummary {
+				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+			}
+			var closeCommand func(context.Context) error
+			if len(req.Env) > 0 {
+				envPath, cleanup, err := b.uploadEnvProfile(ctx, client, claim, req.Env, workdir)
+				if cleanup != nil {
+					closeCommand = func(ctx context.Context) error {
+						// Profile cleanup has its own shorter budget and remains best-effort.
+						cleanupCtx, cancel := context.WithTimeout(ctx, envProfileCleanupTimeout)
+						defer cancel()
+						cleanup(cleanupCtx)
+						return nil
+					}
+				}
+				if err != nil {
+					return shared.DelegatedSandboxCommand{Close: closeCommand}, err
+				}
+				command = shared.ShellScriptWithEnvProfile(command, envPath)
+			}
+			return shared.DelegatedSandboxCommand{
+				Text:  strings.Join(req.Command, " "),
+				Close: closeCommand,
+				Run: func(ctx context.Context) (int, error) {
+					return client.ExecStream(ctx, claim.CloudID, command, folder, b.rt.Stdout)
+				},
+			}, nil
+		},
+		Cleanup: func(ctx context.Context) error { return b.deleteOwnedMachine(ctx, client, claim) },
+	})
 }
 
 func smolvmCleanupCommand(leaseID string) string {
