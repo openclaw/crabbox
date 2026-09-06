@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Stop SSH readiness promptly on host-key rejection, including WSL SFTP and split or oversized diagnostics, without changing host trust. [PR 1877](https://github.com/openclaw/crabbox/pull/1877). Thanks @shunkakinoki.
-- Apple Machine: fail runs when automatic deletion fails or remains unconfirmed, retain recovery sessions for early keep-on-failure errors, and preserve command outcomes while distinguishing native transport failures through the shared error handlers.
+- Apple Machine: fail runs when automatic deletion fails or remains unconfirmed, retain recovery sessions for early keep-on-failure errors, and preserve command outcomes while distinguishing native transport failures through the shared error handlers. [PR 1914](https://github.com/openclaw/crabbox/pull/1914).
 - Docker Sandbox: preserve primary failures through cleanup and timing errors, report retained sessions after failed removal, honor keep-on-failure during early preparation, and preserve successful clone commits across backend reporting failures. [PR 1913](https://github.com/openclaw/crabbox/pull/1913).
 - Allow protected image qualification to seal the current CLI by stripping debug metadata and accepting one artifact file up to the existing 128 MiB bundle cap without increasing the total limit. [PR 1910](https://github.com/openclaw/crabbox/pull/1910).
 - SmolVM: share sandbox run finalization so deletion failures no longer report success, early preparation failures honor keep-on-failure, and primary outcomes survive cleanup or timing errors while preserving provider keep policy and separate profile/resource cleanup budgets. [PR 1908](https://github.com/openclaw/crabbox/pull/1908).
