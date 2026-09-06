@@ -115,6 +115,16 @@ before workspace preparation and sync.
 matching `crabbox stop --provider freestyle --id ...` cleanup command for
 orchestrators that need to inspect or clean up retained VMs later.
 
+Run retention, cleanup, and timing use Crabbox's shared sandbox lifecycle.
+An automatic VM deletion failure after a successful command returns exit 1,
+reports a provider failure, and leaves the session and claim available for
+recovery; it is no longer a warning attached to a successful run. A prior
+command failure keeps its exit code even when deletion or timing output also
+fails. Transport and cancellation causes remain inspectable by callers.
+Setup failures honor `--keep-on-failure`, reused VMs remain kept, and cleanup
+uses an uncanceled 30-second budget. Freestyle still owns its HTTP transport,
+command encoding, and existing claim/reclaim rules.
+
 ## Sync
 
 Freestyle advertises archive sync (`FeatureArchiveSync`). Crabbox supports

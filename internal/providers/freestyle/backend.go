@@ -13,6 +13,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type Config = core.Config
@@ -29,7 +30,6 @@ type LeaseView = core.LeaseView
 type StatusRequest = core.StatusRequest
 type StatusView = core.StatusView
 type StopRequest = core.StopRequest
-type RunSessionHandle = core.RunSessionHandle
 type Server = core.Server
 type Repo = core.Repo
 type ExitError = core.ExitError
@@ -129,174 +129,73 @@ func (b *freestyleBackend) Warmup(ctx context.Context, req WarmupRequest) error 
 	return nil
 }
 
-func (b *freestyleBackend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
-	if err := delegatedSyncOptionsError(b.spec, req); err != nil {
-		return RunResult{}, err
+func (b *freestyleBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+	workspace, workspaceErr := freestyleWorkspacePath(b.cfg)
+	var client freestyleAPI
+	var leaseID, name, slug string
+	session := func() shared.DelegatedSandbox {
+		return shared.DelegatedSandbox{LeaseID: leaseID, Slug: slug, CleanupCommand: freestyleCleanupCommand(leaseID)}
 	}
-	workspace, err := freestyleWorkspacePath(b.cfg)
-	if err != nil {
-		return RunResult{}, err
-	}
-	if !req.SyncOnly && (len(req.Command) == 0 || (len(req.Command) == 1 && strings.TrimSpace(req.Command[0]) == "")) {
-		return RunResult{}, exit(2, "missing command")
-	}
-	started := b.now()
-	client, err := newFreestyleClient(b.cfg, b.rt)
-	if err != nil {
-		return RunResult{}, err
-	}
-	var prepared *core.PreparedArchive
-	if req.ID == "" && !req.NoSync {
-		prepared, err = b.prepareArchive(ctx, req)
-		if err != nil {
-			return RunResult{}, err
-		}
-		defer prepared.Close()
-	}
-	leaseID, name, slug := "", "", ""
-	acquired := false
-	if req.ID == "" {
-		leaseID, name, slug, err = b.createSandbox(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
-		if err != nil {
-			return RunResult{}, err
-		}
-		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=freestyle sandbox=%s\n", leaseID, slug, name)
-		acquired = true
-	} else {
-		leaseID, name, err = b.resolveLeaseID(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
-		if err != nil {
-			return RunResult{}, err
-		}
-		slug = freestyleClaimSlug(leaseID)
-	}
-	shouldStop := acquired && !req.Keep
-	cleanedUp := false
-	session := &RunSessionHandle{
-		Provider:       freestyleProvider,
-		LeaseID:        leaseID,
-		Slug:           slug,
-		Reused:         !acquired,
-		Kept:           !shouldStop,
-		CleanupCommand: freestyleCleanupCommand(leaseID),
-	}
-	finishResult := func(result RunResult) RunResult {
-		if result.Provider == "" {
-			result.Provider = freestyleProvider
-		}
-		if result.LeaseID == "" {
-			result.LeaseID = leaseID
-		}
-		if result.Slug == "" {
-			result.Slug = slug
-		}
-		result.Session = session
-		result.Session.Kept = !cleanedUp && !shouldStop
-		return result
-	}
-	defer func() {
-		result = finishResult(result)
-	}()
-	cleanupFreestyle := func() error {
-		if !shouldStop {
-			return nil
-		}
-		if err := deleteFreestyleVMForCleanup(client, name); err != nil {
-			shouldStop = false
-			return err
-		}
-		removeLeaseClaim(leaseID)
-		cleanedUp = true
-		shouldStop = false
-		return nil
-	}
-	if shouldStop {
-		defer func() {
-			if err := cleanupFreestyle(); err != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: freestyle stop failed for %s: %v\n", name, err)
+	return shared.RunDelegatedSandbox(ctx, req, shared.DelegatedSandboxLifecycle{
+		Provider: freestyleProvider, Runtime: b.rt, Workdir: workspace,
+		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL, CleanupTimeout: freestyleCleanupTimeout,
+		Preflight: func(context.Context) error {
+			if err := delegatedSyncOptionsError(b.spec, req); err != nil {
+				return err
 			}
-		}()
-	}
-	fmt.Fprintf(b.rt.Stderr, "provider=freestyle lease=%s sandbox=%s\n", leaseID, name)
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
-	if !req.NoSync {
-		var err error
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, name, req, prepared)
-		if err != nil {
-			handleDelegatedRunFailure(b.rt.Stderr, req, freestyleProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-			return RunResult{}, err
-		}
-		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, client, name, workspace); err != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, freestyleProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return RunResult{}, err
-	}
-	if req.SyncOnly {
-		result := RunResult{
-			Total:         b.now().Sub(started),
-			SyncDelegated: true,
-		}
-		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workspace)
-		if req.TimingJSON {
-			err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-				Provider:      freestyleProvider,
-				LeaseID:       leaseID,
-				Slug:          slug,
-				SyncDelegated: true,
-				SyncMs:        syncDuration.Milliseconds(),
-				SyncPhases:    syncPhases,
-				SyncSkipped:   req.NoSync,
-				TotalMs:       result.Total.Milliseconds(),
-				ExitCode:      0,
-				Label:         strings.TrimSpace(req.Label),
-			}, result, nil))
-			return result, err
-		}
-		return result, nil
-	}
-	if req.EnvSummary {
-		printEnvForwardingSummary(b.rt.Stderr, freestyleProvider, "forwarded", req.Options.EnvAllow, req.Env)
-	}
-	commandStart := b.now()
-	exitCode, runErr := b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, req.Env)
-	commandDuration := b.now().Sub(commandStart)
-	result = RunResult{
-		ExitCode:      exitCode,
-		Command:       commandDuration,
-		Total:         b.now().Sub(started),
-		SyncDelegated: true,
-	}
-	if req.NoSync {
-		fmt.Fprintf(b.rt.Stderr, "freestyle run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
-	} else {
-		fmt.Fprintf(b.rt.Stderr, "freestyle run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
-	}
-	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-			Provider:      freestyleProvider,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			SyncDelegated: true,
-			SyncMs:        syncDuration.Milliseconds(),
-			SyncPhases:    syncPhases,
-			SyncSkipped:   req.NoSync,
-			CommandMs:     result.Command.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      exitCode,
-			Label:         strings.TrimSpace(req.Label),
-		}, result, runErr)); err != nil {
-			return result, err
-		}
-	}
-	if runErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, freestyleProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, ExitError{Code: 1, Message: fmt.Sprintf("freestyle run failed: %v", runErr)}
-	}
-	if exitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, freestyleProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("freestyle run exited %d", exitCode)}
-	}
-	return result, nil
+			if workspaceErr != nil {
+				return workspaceErr
+			}
+			if !req.SyncOnly && (len(req.Command) == 0 || (len(req.Command) == 1 && strings.TrimSpace(req.Command[0]) == "")) {
+				return exit(2, "missing command")
+			}
+			var err error
+			client, err = newFreestyleClient(b.cfg, b.rt)
+			return err
+		},
+		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) { return b.prepareArchive(ctx, req) },
+		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var err error
+			leaseID, name, slug, err = b.createSandbox(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=freestyle sandbox=%s\n", leaseID, slug, name)
+			return session(), nil
+		},
+		Resolve: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var err error
+			leaseID, name, err = b.resolveLeaseID(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			slug = freestyleClaimSlug(leaseID)
+			return session(), nil
+		},
+		Setup: func(context.Context) error {
+			fmt.Fprintf(b.rt.Stderr, "provider=freestyle lease=%s sandbox=%s\n", leaseID, name)
+			return nil
+		},
+		Sync: func(ctx context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+			return b.syncWorkspace(ctx, client, name, req, archive)
+		},
+		NoSync: func(ctx context.Context) error { return b.prepareWorkspace(ctx, client, name, workspace) },
+		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
+			if req.EnvSummary {
+				printEnvForwardingSummary(b.rt.Stderr, freestyleProvider, "forwarded", req.Options.EnvAllow, req.Env)
+			}
+			return shared.DelegatedSandboxCommand{Run: func(ctx context.Context) (int, error) {
+				return b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, req.Env)
+			}}, nil
+		},
+		Cleanup: func(ctx context.Context) error {
+			if err := client.DeleteVM(ctx, name); err != nil {
+				return err
+			}
+			removeLeaseClaim(leaseID)
+			return nil
+		},
+	})
 }
 
 func (b *freestyleBackend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {

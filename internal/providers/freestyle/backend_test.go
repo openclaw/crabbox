@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -497,6 +498,7 @@ func TestFreestyleRunKeepsNewSandboxAfterPrepareFailureWhenRequested(t *testing.
 		Repo:          Repo{Root: t.TempDir(), Name: "repo"},
 		NoSync:        true,
 		KeepOnFailure: true,
+		TimingJSON:    true,
 		Command:       []string{"true"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "exec failed") {
@@ -517,6 +519,10 @@ func TestFreestyleRunKeepsNewSandboxAfterPrepareFailureWhenRequested(t *testing.
 	if result.Session.CleanupCommand == "" {
 		t.Fatal("cleanup command is empty")
 	}
+	if claim, ok, err := resolveExactFreestyleLeaseClaim(result.LeaseID); err != nil || !ok || claim.RepoRoot == "" {
+		t.Fatalf("retained claim=%#v exists=%t err=%v", claim, ok, err)
+	}
+	assertFreestyleLifecycleTiming(t, stderr.String(), result, err)
 }
 
 func TestFreestyleRunSyncOnlySkipsUserExec(t *testing.T) {
@@ -543,15 +549,17 @@ func TestFreestyleRunSyncOnlySkipsUserExec(t *testing.T) {
 	}
 	defer func() { newFreestyleClient = oldClient }()
 	var stdout bytes.Buffer
+	var stderr bytes.Buffer
 	backend := &freestyleBackend{
 		spec: Provider{}.Spec(),
 		cfg:  Config{Freestyle: FreestyleConfig{}},
-		rt:   Runtime{Stdout: &stdout, Stderr: io.Discard},
+		rt:   Runtime{Stdout: &stdout, Stderr: &stderr},
 	}
-	_, err := backend.Run(context.Background(), RunRequest{
-		Repo:     Repo{Root: root, Name: "repo"},
-		SyncOnly: true,
-		Command:  []string{"printf", "unexpected-user-command"},
+	result, err := backend.Run(context.Background(), RunRequest{
+		Repo:       Repo{Root: root, Name: "repo"},
+		SyncOnly:   true,
+		TimingJSON: true,
+		Command:    []string{"printf", "unexpected-user-command"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -564,6 +572,13 @@ func TestFreestyleRunSyncOnlySkipsUserExec(t *testing.T) {
 			t.Fatalf("unexpected user exec: %q", command)
 		}
 	}
+	if result.Session == nil || result.Session.Kept || result.Session.Reused || len(client.deleteIDs) != 1 || client.deleteIDs[0] != "vm-sync" {
+		t.Fatalf("sync-only disposition: session=%#v deletes=%v", result.Session, client.deleteIDs)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(result.LeaseID); err != nil || exists {
+		t.Fatalf("sync-only claim exists=%t err=%v", exists, err)
+	}
+	assertFreestyleLifecycleTiming(t, stderr.String(), result, err)
 }
 
 func TestFreestyleRunNoSyncDoesNotDeleteExistingWorkspace(t *testing.T) {
@@ -636,18 +651,20 @@ func TestFreestyleRunCleanupFailureReportsRetainedSession(t *testing.T) {
 		rt:   Runtime{Stderr: &stderr},
 	}
 	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
-		NoSync:  true,
-		Command: []string{"true"},
+		Repo:       Repo{Root: t.TempDir(), Name: "repo"},
+		NoSync:     true,
+		TimingJSON: true,
+		Command:    []string{"true"},
 	})
-	if err != nil {
-		t.Fatalf("Run err=%v", err)
+	var public ExitError
+	if !errors.Is(err, client.deleteErr) || !errors.As(err, &public) || public.Code != 1 || result.ExitCode != 1 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider {
+		t.Errorf("cleanup failure result=%#v err=%v", result, err)
 	}
 	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != "vm123" {
 		t.Fatalf("deleteIDs=%#v want vm123", client.deleteIDs)
 	}
-	if !strings.Contains(stderr.String(), "warning: freestyle stop failed for vm123") {
-		t.Fatalf("stderr=%q, want cleanup warning", stderr.String())
+	if err == nil || !strings.Contains(err.Error(), "cleanup failed") || !client.deleteDeadlineSet {
+		t.Errorf("cleanup diagnostic/budget missing: err=%v bounded=%t", err, client.deleteDeadlineSet)
 	}
 	if result.Session == nil {
 		t.Fatal("session=nil")
@@ -657,6 +674,201 @@ func TestFreestyleRunCleanupFailureReportsRetainedSession(t *testing.T) {
 	}
 	if result.Session.CleanupCommand != "crabbox stop --provider freestyle --id 'fsb_vm123'" {
 		t.Fatalf("cleanup command=%q", result.Session.CleanupCommand)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(result.LeaseID); err != nil || !exists {
+		t.Fatalf("failed cleanup lost claim: exists=%t err=%v", exists, err)
+	}
+	assertFreestyleLifecycleTiming(t, stderr.String(), result, err)
+}
+
+func freestyleLifecycleBackend(t *testing.T, client *fakeFreestyleClient, stderr io.Writer) *freestyleBackend {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	original := newFreestyleClient
+	newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) { return client, nil }
+	t.Cleanup(func() { newFreestyleClient = original })
+	return &freestyleBackend{spec: Provider{}.Spec(), cfg: Config{Freestyle: FreestyleConfig{}}, rt: Runtime{Stdout: io.Discard, Stderr: stderr}}
+}
+
+func assertFreestyleLifecycleTiming(t *testing.T, diagnostics string, result RunResult, runErr error) {
+	t.Helper()
+	result = core.FinalizeRunResult(result, runErr)
+	lines := strings.Split(strings.TrimSpace(diagnostics), "\n")
+	var report core.TimingReport
+	reports, finalLine := 0, -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "{") {
+			if err := json.Unmarshal([]byte(line), &report); err != nil {
+				t.Fatal(err)
+			}
+			reports++
+			finalLine = i
+		}
+	}
+	if reports != 1 || finalLine != len(lines)-1 || report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind || report.LeaseID != result.LeaseID || report.Slug != result.Slug {
+		t.Fatalf("final timing mismatch: reports=%d final_line=%d report=%#v result=%#v diagnostics=%s", reports, finalLine, report, result, diagnostics)
+	}
+}
+
+type freestyleTimingFailureWriter struct {
+	bytes.Buffer
+	cause error
+}
+
+func (w *freestyleTimingFailureWriter) Write(data []byte) (int, error) {
+	if len(data) > 0 && data[0] == '{' {
+		return 0, w.cause
+	}
+	return w.Buffer.Write(data)
+}
+
+func TestFreestyleRunFinalizationPreservesPrimaryOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		commandCode              int
+		keep, cleanup, badTiming bool
+	}{
+		{name: "command and cleanup", commandCode: 23, cleanup: true},
+		{name: "command cleanup and timing", commandCode: 23, cleanup: true, badTiming: true},
+		{name: "kept command and timing", commandCode: 23, keep: true, badTiming: true},
+		{name: "success then timing", keep: true, badTiming: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cleanupErr := errors.New("synthetic deletion failure")
+			writerErr := errors.New("synthetic timing failure")
+			client := &fakeFreestyleClient{createID: "vm-finalize"}
+			workloads := 0
+			client.exec = func(_ context.Context, command string) (int, error) {
+				if strings.Contains(command, "__lifecycle_workload__") {
+					workloads++
+					return tc.commandCode, nil
+				}
+				return 0, nil
+			}
+			if tc.cleanup {
+				client.deleteErr = cleanupErr
+			}
+			var stderr bytes.Buffer
+			var diagnostics io.Writer = &stderr
+			if tc.badTiming {
+				diagnostics = &freestyleTimingFailureWriter{cause: writerErr}
+			}
+			backend := freestyleLifecycleBackend(t, client, diagnostics)
+			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: tc.keep, TimingJSON: true, Command: []string{"__lifecycle_workload__"}})
+			wantCode, wantKind := tc.commandCode, core.RunErrorCommandExit
+			if wantCode == 0 {
+				wantCode, wantKind = 1, core.RunErrorProvider
+			}
+			var public ExitError
+			if !errors.As(err, &public) || public.Code != wantCode || result.ExitCode != wantCode || result.Status != core.RunStatusFailed || result.ErrorKind != wantKind || workloads != 1 {
+				t.Errorf("primary outcome lost: result=%#v err=%v public=%#v workloads=%d", result, err, public, workloads)
+			}
+			if tc.cleanup && !errors.Is(err, cleanupErr) || tc.badTiming && !errors.Is(err, writerErr) {
+				t.Errorf("secondary failure lost: %v", err)
+			}
+			wantKept := tc.commandCode != 0 && (tc.keep || tc.cleanup)
+			wantDeletes := 1
+			if tc.commandCode != 0 && tc.keep {
+				wantDeletes = 0
+			}
+			if result.Session == nil || result.Session.Kept != wantKept || result.Session.Reused || len(client.deleteIDs) != wantDeletes {
+				t.Errorf("disposition changed: session=%#v deletes=%v", result.Session, client.deleteIDs)
+			}
+			if _, exists, err := core.ReadLeaseClaimWithPresence(result.LeaseID); err != nil || exists != wantKept {
+				t.Fatalf("claim exists=%t want=%t err=%v", exists, wantKept, err)
+			}
+			if !tc.badTiming {
+				assertFreestyleLifecycleTiming(t, stderr.String(), result, err)
+			}
+		})
+	}
+}
+
+func TestFreestyleRunPreservesTransportCauses(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cause  error
+		status core.RunStatus
+		kind   core.RunErrorKind
+	}{
+		{"transport", io.ErrUnexpectedEOF, core.RunStatusFailed, core.RunErrorProvider},
+		{"cancellation", context.Canceled, core.RunStatusCanceled, core.RunErrorCanceled},
+		{"deadline", context.DeadlineExceeded, core.RunStatusTimedOut, core.RunErrorTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &fakeFreestyleClient{createID: "vm-transport"}
+			workloads := 0
+			client.exec = func(_ context.Context, command string) (int, error) {
+				if strings.Contains(command, "__lifecycle_workload__") {
+					workloads++
+					return 1, fmt.Errorf("synthetic command transport: %w", tc.cause)
+				}
+				return 0, nil
+			}
+			var stderr bytes.Buffer
+			backend := freestyleLifecycleBackend(t, client, &stderr)
+			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: true, TimingJSON: true, Command: []string{"__lifecycle_workload__"}})
+			var public ExitError
+			if !errors.Is(err, tc.cause) || !errors.As(err, &public) || public.Code != 1 || result.ExitCode != 1 || result.Status != tc.status || result.ErrorKind != tc.kind || workloads != 1 || t.Context().Err() != nil {
+				t.Errorf("transport cause/outcome lost: result=%#v err=%v workloads=%d", result, err, workloads)
+			}
+			if result.Session == nil || !result.Session.Kept || result.Session.Reused || len(client.deleteIDs) != 0 {
+				t.Fatalf("transport failure lost recovery: session=%#v deletes=%v", result.Session, client.deleteIDs)
+			}
+			if _, exists, err := core.ReadLeaseClaimWithPresence(result.LeaseID); err != nil || !exists {
+				t.Fatalf("retained claim missing: exists=%t err=%v", exists, err)
+			}
+			assertFreestyleLifecycleTiming(t, stderr.String(), result, err)
+		})
+	}
+}
+
+func TestFreestyleRunReusedLifecycleControls(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		syncOnly    bool
+		commandCode int
+	}{
+		{name: "success"},
+		{name: "command failure", commandCode: 23},
+		{name: "sync only", syncOnly: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &fakeFreestyleClient{}
+			workloads := 0
+			client.exec = func(_ context.Context, command string) (int, error) {
+				if strings.Contains(command, "__lifecycle_workload__") {
+					workloads++
+					return tc.commandCode, nil
+				}
+				return 0, nil
+			}
+			var stderr bytes.Buffer
+			backend := freestyleLifecycleBackend(t, client, &stderr)
+			repo := Repo{Root: t.TempDir(), Name: "fixture"}
+			if tc.syncOnly {
+				repo = freestyleArchiveRepo(t)
+			}
+			const leaseID = "fsb_vm-reused"
+			if err := claimLeaseForRepoProviderPond(leaseID, "reused", freestyleProvider, "", repo.Root, time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			result, err := backend.Run(t.Context(), RunRequest{ID: leaseID, Repo: repo, NoSync: !tc.syncOnly, SyncOnly: tc.syncOnly, TimingJSON: true, Command: []string{"__lifecycle_workload__"}})
+			if result.ExitCode != tc.commandCode || (err != nil) != (tc.commandCode != 0) || result.Session == nil || !result.Session.Kept || !result.Session.Reused || client.createReq != nil || len(client.deleteIDs) != 0 {
+				t.Fatalf("reused disposition: result=%#v err=%v creates=%#v deletes=%v", result, err, client.createReq, client.deleteIDs)
+			}
+			wantWorkloads := 1
+			if tc.syncOnly {
+				wantWorkloads = 0
+			}
+			if workloads != wantWorkloads {
+				t.Fatalf("workloads=%d want=%d", workloads, wantWorkloads)
+			}
+			if claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || !exists || claim.RepoRoot != repo.Root {
+				t.Fatalf("reused claim=%#v exists=%t err=%v", claim, exists, err)
+			}
+			assertFreestyleLifecycleTiming(t, stderr.String(), result, err)
+		})
 	}
 }
 
