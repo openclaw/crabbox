@@ -8,7 +8,7 @@
 - Azure: recognize completed Location polling responses and support explicit, audited recovery of expired disk-only cleanup blocked by missing public-IP completion evidence, preserving original identities, ownership checks, and actual deletion receipts. [PR 1893](https://github.com/openclaw/crabbox/pull/1893). Thanks @steipete.
 - Modal and Docker Sandbox: preserve native cancellation, deadline, and I/O causes; share strict native-exit recognition and delegated command-outcome classification with Tensorlake without conflating bridge failures with remote command exits. [PR 1903](https://github.com/openclaw/crabbox/pull/1903). Thanks @steipete.
 - Tensorlake: include claim-lock waiting in the bound-sandbox cleanup deadline, retaining ownership and avoiding native operations when the deadline expires before admission. [PR 1888](https://github.com/openclaw/crabbox/pull/1888). Thanks @steipete.
-- Tensorlake: share run finalization so early failures honor `--keep-on-failure`, failed cleanup reports a retained recovery session, and timing errors preserve the command outcome; retain quiet native-command error causes while keeping profile cleanup warning-only.
+- Tensorlake: share run finalization so early failures honor `--keep-on-failure`, failed cleanup reports a retained recovery session, and timing errors preserve the command outcome; retain quiet native-command error causes while keeping profile cleanup warning-only. [PR 1905](https://github.com/openclaw/crabbox/pull/1905). Thanks @steipete.
 
 ## 0.50.0 - 2026-09-05
 
