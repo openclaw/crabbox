@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Define a strict provider-neutral Linux developer-image recipe whose digest binds the executable contract and exact installer/readiness source hashes.
 - Extract protected image-qualification candidates at the canonical artifact path and avoid protected finalization when deployment never started.
 - Stop SSH readiness promptly on host-key rejection, including WSL SFTP and split or oversized diagnostics, without changing host trust. [PR 1877](https://github.com/openclaw/crabbox/pull/1877). Thanks @shunkakinoki.
 - Local containers: recognize Podman's exact quoted-ID absence diagnostic so a retried stop can finish cleanup after the container disappears, while retaining recovery state for ambiguous or inaccessible runtimes.
