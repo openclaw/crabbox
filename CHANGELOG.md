@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Freestyle: share sandbox run finalization so automatic deletion failures no longer report success, command failures survive later cleanup or timing errors, and transport cancellation causes remain available to callers.
+- Freestyle: share sandbox run finalization so automatic deletion failures no longer report success, command failures survive later cleanup or timing errors, and transport cancellation causes remain available to callers. [PR 1907](https://github.com/openclaw/crabbox/pull/1907).
 - Require a fenced provider-cleanup completion fact before coordinator leases retire local credentials, confirm AWS instance termination before completion, and preserve provider identity while clearing stale remote access. [PR 1901](https://github.com/openclaw/crabbox/pull/1901).
 - Group benchmark reports by record source and summarize successful runner totals, runner phases, sync phases, and sync skips without inventing telemetry for legacy rows. [PR 1896](https://github.com/openclaw/crabbox/pull/1896). Thanks @vincentkoc.
 - Preserve requested capacity market for market-aware providers while coordinator provisioning is pending, and expose documented provisioning failure diagnostics in `crabbox inspect --json`.
