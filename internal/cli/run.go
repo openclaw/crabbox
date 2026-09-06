@@ -2892,6 +2892,8 @@ afterSync:
 			CommandDisplay:        commandDisplay,
 			ShellMode:             *shellMode || useShell,
 			ScriptMode:            script != nil,
+			NoSync:                *noSync,
+			RequiredArtifactGlobs: append([]string(nil), requiredArtifactGlobs...),
 			Routing:               CommandRoutingFor(cfg, leaseID, CommandRoutingRetry),
 			SSHRouting:            CommandRoutingFor(cfg, leaseID, CommandRoutingRetry),
 			StopRouting:           CommandRoutingFor(cfg, leaseID, CommandRoutingStop),

@@ -3294,6 +3294,7 @@ exit 0
 		"--keep-on-failure",
 		"--timing-json",
 		"--require-artifact", "reports/data/manifest.json",
+		"--require-artifact", "reports/proof-*.json",
 		"--download", "reports/data/manifest.json=" + downloadPath,
 		"--", "fixture-stage-success",
 	})
@@ -3318,6 +3319,20 @@ exit 0
 	}
 	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease=cbx_env_profile_test") {
 		t.Fatalf("missing keep-on-failure hint after required artifact failure:\n%s", stderr.String())
+	}
+	retryHints := 0
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if strings.Contains(line, "next: crabbox run ") {
+			retryHints++
+			if !strings.Contains(line, "--no-sync") || strings.Contains(line, "--fresh-sync") ||
+				!strings.Contains(line, "--require-artifact reports/data/manifest.json") ||
+				!strings.Contains(line, "--require-artifact 'reports/proof-*.json'") {
+				t.Errorf("retry lost no-sync or required-artifact intent: %s", line)
+			}
+		}
+	}
+	if retryHints != 1 {
+		t.Errorf("retry hints=%d, want one runnable recovery", retryHints)
 	}
 	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
 	var report TimingReport

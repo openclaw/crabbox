@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Preserve explicit no-sync intent and required-artifact globs in failure-digest retries, avoiding an unintended workspace reset or weakened evidence checks. [Issue 1875](https://github.com/openclaw/crabbox/issues/1875), [Issue 1895](https://github.com/openclaw/crabbox/issues/1895). Thanks @coygeek.
 - Local containers: optionally omit the explicit hostname for runtimes sharing a host UTS namespace, support YAML and environment configuration, and reject incompatible fixed-ID reuse without changing existing default fingerprints. [PR 1813](https://github.com/openclaw/crabbox/pull/1813), [PR 1924](https://github.com/openclaw/crabbox/pull/1924). Thanks @atrawog.
 - Define a strict provider-neutral Linux developer-image recipe whose digest binds the executable contract and exact installer/readiness source hashes.
 - Extract protected image-qualification candidates at the canonical artifact path and avoid protected finalization when deployment never started.

@@ -757,8 +757,12 @@ its status before reuse, or retry the printed stop command to finish cleanup.
 The digest includes the failed phase when phase markers are known, a
 likely area (provider auth, SSH/connectivity, sync, install/setup, user command,
 model/tool/provider limit, or resource exhaustion), retryability when inferable, next commands
-(`logs`, `events`, `doctor --from-run`, `ssh`, retrying with `--fresh-sync`, and
-`stop`). After failure-bundle information and command hints, each stream has one
+(`logs`, `events`, `doctor --from-run`, `ssh`, retrying, and `stop`). A retry
+preserves an explicitly requested `--no-sync`, so it does not reset the retained
+workspace. Other retries retain the `--fresh-sync` guidance above. Each original
+`--require-artifact` glob is retained in the retry, so missing required evidence
+still fails the rerun. After failure-bundle information and command hints, each
+stream has one
 redacted tail section of up to 40 lines, or its capture path when explicitly
 captured. Live output and failure-bundle contents are unchanged. The digest does
 not reconstruct secrets or hidden local shell state. Short-circuit explanations are limited to simple
