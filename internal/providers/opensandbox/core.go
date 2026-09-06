@@ -17,7 +17,6 @@ type DoctorResult = core.DoctorResult
 type WarmupRequest = core.WarmupRequest
 type RunRequest = core.RunRequest
 type RunResult = core.RunResult
-type RunSessionHandle = core.RunSessionHandle
 type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
 type StatusRequest = core.StatusRequest
@@ -65,20 +64,6 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 
 func writeTimingJSON(w io.Writer, report timingReport) error {
 	return core.WriteTimingJSON(w, report)
-}
-
-func timingReportWithRunResult(report timingReport, result RunResult, err error) timingReport {
-	return core.TimingReportWithRunResult(report, result, err)
-}
-
-func timingReportWithProviderError(report timingReport) timingReport {
-	report.RunStatus = core.RunStatusFailed
-	report.ErrorKind = core.RunErrorProvider
-	return report
-}
-
-func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, slug string, idleTimeout, ttl time.Duration, acquired bool, shouldStop *bool) {
-	core.HandleDelegatedRunFailure(w, req, provider, leaseID, slug, idleTimeout, ttl, acquired, shouldStop)
 }
 
 func newLeaseSlug(leaseID string) string {
@@ -131,14 +116,6 @@ func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
 	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
-}
-
-func shouldUseShell(command []string) bool {
-	return core.ShouldUseShell(command)
-}
-
-func shellScriptFromArgv(command []string) string {
-	return core.ShellScriptFromArgv(command)
 }
 
 func shellQuote(s string) string {

@@ -51,11 +51,21 @@ func ClassifyRunFailureWithEvidence(exitCode int, text string, phases []TimingPh
 		return FailureClassification{BlockedStage: "ssh", RetryLikely: "true"}
 	case isKnownHTMLAuthBody(lower):
 		return FailureClassification{BlockedStage: "provider_auth", RetryLikely: "false"}
+	}
+	// Runtime phases outrank workload text that may describe an earlier phase.
+	switch phaseName := finalTimingPhaseName(phases); phaseName {
+	case "install", "hydrate", "setup":
+		return FailureClassification{BlockedStage: "install", RetryLikely: "unknown"}
+	case "build", "test":
+		return FailureClassification{BlockedStage: phaseName, RetryLikely: "unknown"}
+	case "", "user-command":
+		// No specific phase was reported; retain diagnostic-only classification.
+	default:
+		return FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"}
+	}
+	switch {
 	case strings.Contains(lower, "exdev") ||
-		strings.Contains(lower, "enomem") ||
-		strings.Contains(lower, "package-import-method") ||
-		strings.Contains(lower, "child-concurrency") ||
-		strings.Contains(lower, "network-concurrency"):
+		strings.Contains(lower, "enomem"):
 		return FailureClassification{BlockedStage: "install", RetryLikely: "unknown"}
 	case strings.Contains(lower, "model_call") ||
 		strings.Contains(lower, "model call") ||
@@ -64,9 +74,6 @@ func ClassifyRunFailureWithEvidence(exitCode int, text string, phases []TimingPh
 		strings.Contains(lower, "context window") ||
 		strings.Contains(lower, "tokens") && strings.Contains(lower, "maximum"):
 		return FailureClassification{BlockedStage: "model_call", RetryLikely: "unknown"}
-	}
-	if phaseName := finalTimingPhaseName(phases); strings.Contains(phaseName, "install") || strings.Contains(phaseName, "hydrate") || strings.Contains(phaseName, "setup") {
-		return FailureClassification{BlockedStage: "install", RetryLikely: "unknown"}
 	}
 	return FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"}
 }

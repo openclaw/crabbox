@@ -40,7 +40,10 @@ tenki login
 ```
 
 Crabbox shells out to `tenki`, so it reuses the Tenki CLI's normal config and
-auth state. Do not pass Tenki auth tokens as command-line arguments.
+auth state. The current Tenki CLI selects the workspace from the authenticated
+API key; it does not accept separate sandbox `--workspace` or `--project`
+selectors. Run `tenki login` again when you need a different workspace. Do not
+pass Tenki auth tokens as command-line arguments.
 
 ## Config
 
@@ -51,8 +54,6 @@ tenki:
   cliPath: tenki
   endpoint: https://api.example.test
   gateway: wss://sandbox-gateway.example.test
-  workspace: ws_...
-  project: proj_...
   image: ubuntu:tenki
   workRoot: /home/tenki/crabbox
   cpus: 4
@@ -94,6 +95,12 @@ CRABBOX_TENKI_DISK_GB
 
 `tenki.image` and `tenki.snapshot` are mutually exclusive.
 
+Workspace and project settings are retained only to match claims created by
+older Crabbox versions. Current Tenki authentication selects the workspace from
+the API key, and Crabbox rejects these settings for new leases. Keep them only
+while stopping an older scoped lease, then remove them and run `tenki login` for
+the intended workspace.
+
 ## Sizing
 
 Set sandbox size per run with Tenki-specific flags:
@@ -130,10 +137,12 @@ These map to Tenki create flags as `--cpu`, `--memory-mb`, and
 3. Return an SSH target using `ProxyCommand tenki sandbox ssh-proxy --session
    <session-id>` plus OpenSSH `CertificateFile=<cert-path>`.
 4. Let core Crabbox perform rsync, command execution, `ssh`, and artifacts.
-5. On release, verify the exact local claim, Tenki endpoint/workspace/project,
-   session ID, and fresh provider-side lease metadata, then run
-   `tenki sandbox terminate <session-id>` under the claim lock. Failed
-   termination preserves the claim for a safe retry.
+5. On release, verify the exact local claim, session ID, and fresh
+   provider-side lease metadata, then run `tenki sandbox terminate <session-id>`
+   under the claim lock. Crabbox removes the claim only after the same session
+   reports `TERMINATING` or `TERMINATED`. A mismatched or missing session ID,
+   lookup error, or cancellation preserves the claim for a safe retry; generic
+   "not found" diagnostics are not proof of session deletion.
 
 Session IDs and inventory metadata only discover sandboxes; they never
 authorize termination. Explicit `--reclaim` can adopt a session through a normal
@@ -168,8 +177,8 @@ bin/crabbox stop --provider tenki "$lease"
 bin/crabbox list --provider tenki --json
 ```
 
-The repository live-smoke harness also checks that a paused session stays
-paused while `status --wait` times out:
+The repository live-smoke harness also checks full inventory, claim cleanup,
+and that a paused session stays paused while `status --wait` times out:
 
 ```sh
 CRABBOX_LIVE=1 \

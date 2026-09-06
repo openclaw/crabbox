@@ -516,7 +516,7 @@ func TestWaitForSandboxReadinessRetriesTransientKubernetesErrors(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	ready, err := waitForSandboxReadiness(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), time.Millisecond)
+	ready, err := waitForSandboxReadinessWithTimeouts(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), 0, 0, time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -591,7 +591,7 @@ func TestWaitForSandboxReadinessRejectsTerminalStates(t *testing.T) {
 			tt.mutate(fake)
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
-			_, err := waitForSandboxReadiness(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), time.Millisecond)
+			_, err := waitForSandboxReadinessWithTimeouts(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), 0, 0, time.Millisecond)
 			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
 				t.Fatalf("err=%v want substring %q", err, tt.wantError)
 			}
@@ -683,7 +683,7 @@ func TestSandboxReadinessRejectsDownstreamIdentityMismatch(t *testing.T) {
 			tt.mutate(fake)
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
-			_, err := waitForSandboxReadiness(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), time.Millisecond)
+			_, err := waitForSandboxReadinessWithTimeouts(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), 0, 0, time.Millisecond)
 			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
 				t.Fatalf("err=%v want substring %q", err, tt.wantError)
 			}
@@ -909,7 +909,7 @@ func TestWaitForSandboxReadinessTimesOut(t *testing.T) {
 	delete(fake.objects, sandboxClaimResource+"/sandboxes/claim-a")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
-	_, err := waitForSandboxReadiness(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), time.Millisecond)
+	_, err := waitForSandboxReadinessWithTimeouts(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), 0, 0, time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "claim-a") {
 		t.Fatalf("err=%v", err)
 	}

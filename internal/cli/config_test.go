@@ -1725,6 +1725,65 @@ func TestVultrDefaultsAndIsolation(t *testing.T) {
 	}
 }
 
+func TestLinuxProviderConnectionDefaultsPreserveExplicitValues(t *testing.T) {
+	base := baseConfig()
+	for _, provider := range []struct {
+		name, user, port string
+		clearFallbacks   bool
+	}{
+		{"digitalocean", base.SSHUser, base.SSHPort, false},
+		{"vultr", "root", "22", true},
+		{"linode", base.SSHUser, base.SSHPort, false},
+		{"lambda", "ubuntu", "22", true},
+		{"nebius", "builder", base.SSHPort, false},
+		{"ovh", base.SSHUser, base.SSHPort, false},
+		{"scaleway", "root", "22", false},
+		{"tencentcloud", "ubuntu", "22", true},
+	} {
+		for _, explicit := range []string{"none", "base", "custom"} {
+			t.Run(provider.name+"/"+explicit, func(t *testing.T) {
+				cfg := baseConfig()
+				cfg.Provider = provider.name
+				cfg.TargetOS, cfg.WindowsMode = targetMacOS, windowsModeWSL2
+				cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort = "/previous", "previous", "2999"
+				cfg.Nebius.User = "builder"
+				cfg.SSHFallbackPorts = []string{"2022"}
+				cfg.sshFallbackPortsExplicit = true
+				cfg.explicitSSHFallbackPorts = []string{"2022"}
+				wantUser, wantPort, wantRoot := provider.user, provider.port, defaultPOSIXWorkRoot
+				if explicit != "none" {
+					wantUser, wantPort, wantRoot = base.SSHUser, base.SSHPort, base.WorkRoot
+					if explicit == "custom" {
+						wantUser, wantPort, wantRoot = "alice", "2200", "/srv/proof"
+					}
+					if err := applyFileConfig(&cfg, fileConfig{
+						WorkRoot: wantRoot,
+						SSH:      &fileSSHConfig{User: wantUser, Port: wantPort},
+						Windows:  &fileWindowsConfig{Mode: windowsModeNormal},
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := applyProviderConfigDefaults(&cfg); err != nil {
+					t.Fatal(err)
+				}
+				got := []string{cfg.TargetOS, cfg.WindowsMode, cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort}
+				want := []string{targetLinux, windowsModeNormal, wantRoot, wantUser, wantPort}
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("connection = %q, want %q", got, want)
+				}
+				wantFallbacks := "2022"
+				if provider.clearFallbacks {
+					wantFallbacks = ""
+				}
+				if got := strings.Join(cfg.SSHFallbackPorts, ","); got != wantFallbacks {
+					t.Fatalf("fallback ports = %q, want %q", got, wantFallbacks)
+				}
+			})
+		}
+	}
+}
+
 func TestVultrDefaultsPreserveExplicitGenericValues(t *testing.T) {
 	cfg := baseConfig()
 	applyFileConfig(&cfg, fileConfig{

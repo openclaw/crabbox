@@ -365,15 +365,17 @@ func TestWSL2ProductionCleanupKillsEntireStagingGroup(t *testing.T) {
 	}
 	t.Run("foreground child cancellation", func(t *testing.T) {
 		childPath := filepath.Join(t.TempDir(), "child")
+		readyPath := childPath + ".ready"
 		command := `sleep 60 &
 child=$!
 trap 'kill "$child" 2>/dev/null || :; wait "$child" 2>/dev/null || :; exit 74' TERM
-printf '%s' "$child" >` + shellQuote(childPath) + `
+printf '%s' "$child" >` + shellQuote(childPath) + ` && : >` + shellQuote(readyPath) + `
 wait "$child"
 `
 		f := startWSLLinuxFixture(t, command, nil, len(command), wslLinuxHelper, 500)
 		f.guard(t)
-		waitForTestFile(t, childPath, 5*time.Second)
+		// Redirection creates childPath before printf has published its PID.
+		waitForTestFile(t, readyPath, 5*time.Second)
 		data, err := os.ReadFile(childPath)
 		if err != nil {
 			t.Fatal(err)

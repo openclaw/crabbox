@@ -1,6 +1,11 @@
 import { AwsClient } from "aws4fetch";
 import { XMLParser } from "fast-xml-parser";
 
+import type {
+  AWSQualificationRequest,
+  AWSQualificationService,
+  AWSQualificationTransportBinding,
+} from "./aws-qualification-contract";
 import { requireAWSRegion, sanitizeAWSRegion } from "./aws-region";
 import { awsRunInstancesUserData } from "./bootstrap";
 import {
@@ -24,6 +29,7 @@ import {
   sshPublicKeyIdentity,
 } from "./provider-key";
 import { leaseProviderLabels } from "./provider-labels";
+import { ProvisioningAttemptHistory } from "./provisioning-attempts";
 import { leaseProviderName } from "./slug";
 import type {
   AWSCredentialProvider,
@@ -38,6 +44,7 @@ import type {
 
 const awsUbuntuOwner = "099720109477";
 const ec2Version = "2016-11-15";
+const awsDescribeInstancesMaxPages = 100;
 const stsVersion = "2011-06-15";
 const awsSpotQuotaCode = "L-34B43A08";
 const awsOnDemandQuotaCode = "L-1216C47A";
@@ -283,10 +290,77 @@ class RefreshingAWSFetchClient implements AWSFetchClient {
   }
 }
 
+class QualificationAWSFetchClient implements AWSFetchClient {
+  constructor(
+    private readonly binding: AWSQualificationTransportBinding,
+    private readonly service: AWSQualificationService,
+    private readonly region: string,
+  ) {}
+
+  async fetch(_input: string, init?: RequestInit): Promise<Response> {
+    const request = qualificationRequest(this.service, this.region, init);
+    let result;
+    try {
+      result = await this.binding.execute(request);
+    } catch {
+      // The authority keeps opId receipts and pending intents. A same-op retry is safe
+      // after a lost RPC response and never falls back to candidate-held credentials.
+      result = await this.binding.execute(request);
+    }
+    return new Response(result.body, { status: result.status });
+  }
+}
+
+class RejectedQualificationFetchClient implements AWSFetchClient {
+  async fetch(): Promise<Response> {
+    throw new Error("AWS qualification transport does not allow SSM actions");
+  }
+}
+
+function qualificationRequest(
+  service: AWSQualificationService,
+  region: string,
+  init?: RequestInit,
+): AWSQualificationRequest {
+  if (init?.method !== "POST" || typeof init.body !== "string") {
+    throw new Error("AWS qualification transport requires a bounded POST body");
+  }
+  const opId = crypto.randomUUID();
+  if (service === "ec2" || service === "sts") {
+    const body = new URLSearchParams(init.body);
+    const action = body.get("Action") ?? "";
+    body.delete("Action");
+    body.delete("Version");
+    if (!action) throw new Error("AWS qualification transport request is missing an action");
+    return { opId, region, service, action, parameters: Object.fromEntries(body) };
+  }
+  const target = new Headers(init.headers).get("x-amz-target") ?? "";
+  const action = target.split(".").at(-1) ?? "";
+  if (!action) throw new Error("AWS qualification transport request is missing a target");
+  const parsed = JSON.parse(init.body) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("AWS qualification transport request body must be an object");
+  }
+  return {
+    opId,
+    region,
+    service,
+    action,
+    parameters: parsed as Record<string, unknown>,
+  };
+}
+
 export function awsCredentialsConfigured(
-  env: Pick<Env, "awsCredentialProvider" | "AWS_ACCESS_KEY_ID" | "AWS_SECRET_ACCESS_KEY">,
+  env: Pick<
+    Env,
+    | "CRABBOX_AWS_QUALIFICATION_TRANSPORT"
+    | "awsCredentialProvider"
+    | "AWS_ACCESS_KEY_ID"
+    | "AWS_SECRET_ACCESS_KEY"
+  >,
 ): boolean {
   return Boolean(
+    env.CRABBOX_AWS_QUALIFICATION_TRANSPORT ||
     env.awsCredentialProvider ||
     (env.AWS_ACCESS_KEY_ID?.trim() && env.AWS_SECRET_ACCESS_KEY?.trim()),
   );
@@ -608,15 +682,27 @@ export class EC2SpotClient {
         `AWS region mismatch: expected ${expected.region}, configured ${this.region}`,
       );
     }
-    const credentials = awsCredentialProvider(env);
     this.endpoint = `https://ec2.${this.region}.amazonaws.com/`;
     this.serviceQuotasEndpoint = `https://servicequotas.${this.region}.amazonaws.com/`;
     this.stsEndpoint = `https://sts.${this.region}.amazonaws.com/`;
     this.ssmEndpoint = `https://ssm.${this.region}.amazonaws.com/`;
-    this.aws = new RefreshingAWSFetchClient(credentials, "ec2", this.region);
-    this.serviceQuotas = new RefreshingAWSFetchClient(credentials, "servicequotas", this.region);
-    this.stsClient = new RefreshingAWSFetchClient(credentials, "sts", this.region);
-    this.ssmClient = new RefreshingAWSFetchClient(credentials, "ssm", this.region);
+    const qualification = env.CRABBOX_AWS_QUALIFICATION_TRANSPORT;
+    if (qualification) {
+      this.aws = new QualificationAWSFetchClient(qualification, "ec2", this.region);
+      this.serviceQuotas = new QualificationAWSFetchClient(
+        qualification,
+        "servicequotas",
+        this.region,
+      );
+      this.stsClient = new QualificationAWSFetchClient(qualification, "sts", this.region);
+      this.ssmClient = new RejectedQualificationFetchClient();
+    } else {
+      const credentials = awsCredentialProvider(env);
+      this.aws = new RefreshingAWSFetchClient(credentials, "ec2", this.region);
+      this.serviceQuotas = new RefreshingAWSFetchClient(credentials, "servicequotas", this.region);
+      this.stsClient = new RefreshingAWSFetchClient(credentials, "sts", this.region);
+      this.ssmClient = new RefreshingAWSFetchClient(credentials, "ssm", this.region);
+    }
   }
 
   async capacityReadinessChecks(config: LeaseConfig): Promise<AWSCapacityReadinessCheck[]> {
@@ -857,7 +943,7 @@ export class EC2SpotClient {
   }
 
   async listCrabboxServers(): Promise<ProviderMachine[]> {
-    const root = await this.ec2("DescribeInstances", {
+    return this.describeAllInstances({
       "Filter.1.Name": "tag:crabbox",
       "Filter.1.Value.1": "true",
       "Filter.2.Name": "instance-state-name",
@@ -866,15 +952,10 @@ export class EC2SpotClient {
       "Filter.2.Value.3": "stopping",
       "Filter.2.Value.4": "stopped",
     });
-    return reservations(root).flatMap((reservation) =>
-      items(record(record(reservation)["instancesSet"])["item"]).map((instance) =>
-        this.withRegion(instanceToMachine(instance)),
-      ),
-    );
   }
 
   async findWorkspaceServerByLease(leaseID: string): Promise<ProviderMachine | undefined> {
-    const root = await this.ec2("DescribeInstances", {
+    const matches = await this.describeAllInstances({
       "Filter.1.Name": "tag:crabbox",
       "Filter.1.Value.1": "true",
       "Filter.2.Name": "tag:created_by",
@@ -891,15 +972,45 @@ export class EC2SpotClient {
       "Filter.6.Value.3": "stopping",
       "Filter.6.Value.4": "stopped",
     });
-    const matches = reservations(root).flatMap((reservation) =>
-      items(record(record(reservation)["instancesSet"])["item"]).map((instance) =>
-        this.withRegion(instanceToMachine(instance)),
-      ),
-    );
     if (matches.length > 1) {
       throw new Error(`AWS private workspace recovery is ambiguous for lease ${leaseID}`);
     }
     return matches[0];
+  }
+
+  private async describeAllInstances(params: Record<string, string>): Promise<ProviderMachine[]> {
+    const machines: ProviderMachine[] = [];
+    const seenTokens = new Set<string>();
+    let nextToken = "";
+    const incomplete = `aws DescribeInstances inventory incomplete in ${this.region}`;
+    for (let page = 0; page < awsDescribeInstancesMaxPages; page++) {
+      let root: Record<string, unknown>;
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- EC2 pagination depends on the previous token.
+        root = await this.ec2("DescribeInstances", {
+          ...params,
+          ...(nextToken ? { NextToken: nextToken } : {}),
+        });
+      } catch (error) {
+        if (page === 0) throw error;
+        // oxlint-disable-next-line eslint/preserve-caught-error -- Upstream causes can expose opaque tokens or credentials.
+        throw new Error(`${incomplete}: page ${page + 1} request failed`);
+      }
+      machines.push(
+        ...reservations(root).flatMap((reservation) =>
+          items(record(reservation["instancesSet"])["item"]).map((instance) =>
+            this.withRegion(instanceToMachine(instance)),
+          ),
+        ),
+      );
+      nextToken = asString(root["nextToken"]);
+      if (!nextToken) return machines;
+      if (seenTokens.has(nextToken)) {
+        throw new Error(`${incomplete}: repeated pagination token`);
+      }
+      seenTokens.add(nextToken);
+    }
+    throw new Error(`${incomplete}: pagination exceeded ${awsDescribeInstancesMaxPages} pages`);
   }
 
   async refreshSSHIngress(config: LeaseConfig, options: AWSIngressOptions = {}): Promise<void> {
@@ -954,8 +1065,7 @@ export class EC2SpotClient {
         );
       }
       const candidates = pinnedMacHostType ? [pinnedMacHostType] : awsLaunchCandidates(config);
-      const failures: string[] = [];
-      const attempts: ProvisioningAttempt[] = [];
+      const history = new ProvisioningAttemptHistory();
       const quotaCache = new Map<string, number | undefined>();
       const imageCache = new Map<string, string>();
       const marketFallbackCandidates: string[] = [];
@@ -1003,8 +1113,7 @@ export class EC2SpotClient {
           quotaCache,
         );
         if (preflight) {
-          attempts.push(preflight);
-          failures.push(`${serverType}: ${preflight.message}`);
+          history.record(preflight, `${serverType}: ${preflight.message}`);
           if (config.capacityMarket === "spot") {
             marketFallbackCandidates.push(serverType);
           }
@@ -1029,20 +1138,19 @@ export class EC2SpotClient {
             attempts?: ProvisioningAttempt[];
             imageID: string;
           } = { server, serverType, market: config.capacityMarket, imageID };
-          if (attempts.length > 0) {
-            result.attempts = attempts;
-          }
-          return result;
+          return { ...result, ...history.result() };
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          attempts.push({
-            region: this.region,
-            serverType,
-            market: config.capacityMarket,
-            category: awsProvisioningErrorCategory(message) || "fatal",
-            message: conciseAWSProvisioningMessage(message),
-          });
-          failures.push(`${serverType}: ${message}`);
+          history.record(
+            {
+              region: this.region,
+              serverType,
+              market: config.capacityMarket,
+              category: awsProvisioningErrorCategory(message) || "fatal",
+              message: conciseAWSProvisioningMessage(message),
+            },
+            `${serverType}: ${message}`,
+          );
           if (!isRetryableAWSProvisioningError(message)) {
             marketFallbackCandidates.length = 0;
             break;
@@ -1058,8 +1166,7 @@ export class EC2SpotClient {
           // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback must stay sequential.
           const preflight = await this.quotaPreflightAttempt(serverType, "on-demand", quotaCache);
           if (preflight) {
-            attempts.push(preflight);
-            failures.push(`on-demand ${serverType}: ${preflight.message}`);
+            history.record(preflight, `on-demand ${serverType}: ${preflight.message}`);
             continue;
           }
           try {
@@ -1085,20 +1192,19 @@ export class EC2SpotClient {
               attempts?: ProvisioningAttempt[];
               imageID: string;
             } = { server, serverType, market: "on-demand", imageID };
-            if (attempts.length > 0) {
-              result.attempts = attempts;
-            }
-            return result;
+            return { ...result, ...history.result() };
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            attempts.push({
-              region: this.region,
-              serverType,
-              market: "on-demand",
-              category: awsProvisioningErrorCategory(message) || "fatal",
-              message: conciseAWSProvisioningMessage(message),
-            });
-            failures.push(`on-demand ${serverType}: ${message}`);
+            history.record(
+              {
+                region: this.region,
+                serverType,
+                market: "on-demand",
+                category: awsProvisioningErrorCategory(message) || "fatal",
+                message: conciseAWSProvisioningMessage(message),
+              },
+              `on-demand ${serverType}: ${message}`,
+            );
             if (!isRetryableAWSProvisioningError(message)) {
               break;
             }
@@ -1106,11 +1212,11 @@ export class EC2SpotClient {
         }
       }
       if (config.serverTypeExplicit) {
-        throw new Error(
-          `requested exact AWS instance type ${config.serverType} failed; remove --type to allow class fallback: ${failures.join("; ")}`,
+        throw history.error(
+          `requested exact AWS instance type ${config.serverType} failed; remove --type to allow class fallback: `,
         );
       }
-      throw new Error(failures.join("; "));
+      throw history.error();
     } finally {
       if (transientImageID) {
         await this.ec2("DeregisterImage", { ImageId: transientImageID }).catch(() => undefined);
@@ -1322,6 +1428,10 @@ export class EC2SpotClient {
   }
 
   async deleteServer(instanceID: string): Promise<void> {
+    if (this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT) {
+      await this.terminateServerAndWait(instanceID);
+      return;
+    }
     await this.ec2("TerminateInstances", { "InstanceId.1": instanceID });
   }
 
@@ -1561,6 +1671,9 @@ export class EC2SpotClient {
     snapshotIDs: string[],
     availabilityZones: string[],
   ): Promise<ProviderFastSnapshotRestore[]> {
+    if (this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT) {
+      throw new Error("AWS qualification fast snapshot restore is disabled");
+    }
     const snapshots = uniqueStrings(snapshotIDs);
     const zones = uniqueStrings(availabilityZones);
     if (snapshots.length === 0 || zones.length === 0) {
@@ -1605,6 +1718,9 @@ export class EC2SpotClient {
     snapshotIDs: string[],
     availabilityZones: string[] = [],
   ): Promise<ProviderFastSnapshotRestore[]> {
+    if (this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT) {
+      return [];
+    }
     const snapshots = uniqueStrings(snapshotIDs);
     const zones = uniqueStrings(availabilityZones);
     if (snapshots.length === 0) {
@@ -2036,17 +2152,18 @@ export class EC2SpotClient {
   ): Promise<ProviderMachine> {
     const now = new Date();
     const name = leaseProviderName(leaseID, slug);
-    const labels = leaseProviderLabels(
-      { ...config, selectedImage: awsLeaseImageIdentity(config, imageID, this.region) },
-      leaseID,
-      slug,
-      owner,
-      "aws",
-      now,
-      {
-        market: config.capacityMarket,
-      },
-    );
+    // The resolver also accepts an environment AMI; preserve that provenance in tags and bootstrap.
+    const launchConfig: LeaseConfig = {
+      ...config,
+      selectedImage: awsLeaseImageIdentity(
+        { ...config, awsAMI: config.awsAMI || this.env.CRABBOX_AWS_AMI || "" },
+        imageID,
+        this.region,
+      ),
+    };
+    const labels = leaseProviderLabels(launchConfig, leaseID, slug, owner, "aws", now, {
+      market: config.capacityMarket,
+    });
     const rootGB = config.awsRootGB || positiveInt(this.env.CRABBOX_AWS_ROOT_GB) || 400;
     const instanceProfile = config.awsProfile || this.env.CRABBOX_AWS_INSTANCE_PROFILE || "";
     const subnetID = config.awsSubnetID || this.env.CRABBOX_AWS_SUBNET_ID || "";
@@ -2063,7 +2180,7 @@ export class EC2SpotClient {
     let lastMacHostID = "";
     const run = async (macHostID: string): Promise<ProviderMachine> => {
       const params = await awsRunInstancesParams({
-        config,
+        config: launchConfig,
         leaseID,
         imageID,
         securityGroupID,
@@ -2219,6 +2336,12 @@ export class EC2SpotClient {
         "GroupId.1": groupID,
       });
       group = items(record(existing["securityGroupInfo"])["item"])[0];
+      if (this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT) {
+        if (asString(record(group)["groupId"]) !== groupID) {
+          throw new Error(`AWS qualification security group is unavailable: ${groupID}`);
+        }
+        return groupID;
+      }
     } else {
       const vpcID = await this.securityGroupVPC(config);
       const name = awsManagedSecurityGroupName(config);

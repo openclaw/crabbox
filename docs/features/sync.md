@@ -325,18 +325,22 @@ default-off timing output retains its existing shape.
 
 ## Large-sync guardrails
 
-`crabbox run` prints a one-line size estimate before transferring. When the
-checkout is clean, the candidate counts the full file set. When the checkout is
-dirty, the guardrails count the dirty delta (changed plus new files) instead,
-but the line still shows the full candidate size so first-sync cost stays
-visible:
+`crabbox run` prints a one-line size estimate before transferring. Ordinary SSH
+sync counts the full candidate when the checkout is clean, or the dirty delta
+when there are changes. Providers with full-archive guardrails always count the
+complete candidate because they transfer that archive, even when only one file
+changed. Other provider transports retain their documented policy. The estimate
+still shows the full candidate size so first-sync cost stays visible:
 
 ```text
 sync candidate: 299 files, 14.2 MiB dirty_delta=7 files, 92.4 KiB
 ```
 
 The guardrail scope (candidate or dirty delta) is compared against the warn and
-fail thresholds. Crossing a warn threshold prints a warning plus the top source
+fail thresholds. `crabbox sync-plan --json` reports this scope for the configured
+provider's ordinary workspace sync, without contacting the provider. Compressed
+upload caps and native service limits remain separate. Crossing a warn threshold
+prints a warning plus the top source
 directories by file count, so accidental dependency repair or generated churn is
 easy to spot. Crossing a fail threshold aborts the run.
 

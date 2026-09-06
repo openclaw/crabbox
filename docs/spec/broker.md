@@ -72,12 +72,17 @@ big-endian UTF-8 byte length, and exact UTF-8 bytes. Each field is limited to
 operator metadata and is compared exactly; it is not independently verified,
 cryptographically attested, or a tenant-isolation boundary.
 
-Version 1 supports only AWS Linux leases whose provider adapter can confirm an
-immutable AMI, the lease's matching region, and canonical `amd64` or `arm64`
-architecture. Existing leases without persisted evidence, Azure snapshot
-leases, GCP leases, and other providers fail closed. Unknown schemas and
-structural mismatches fail closed; changed image/architecture evidence drains
-the entry before reuse or return.
+Version 1 supports AWS Linux leases whose provider adapter can confirm an
+immutable AMI and matching region, plus GCP Linux leases with an immutable
+numeric boot-image or disk-snapshot ID, exact source
+`projects/<project>/global/{images|snapshots}` namespace, and recorded execution
+project. The GCP zone is deliberately excluded so fallback zones preserve one
+cohort; source project and collection remain distinct to prevent collisions.
+Both providers require canonical `amd64` or `arm64` architecture. Existing
+leases without persisted evidence, GCP machine images, Azure snapshot leases,
+and other providers fail closed. Unknown schemas and structural mismatches fail
+closed; changed image/architecture evidence drains the entry before reuse or
+return.
 
 ## States
 

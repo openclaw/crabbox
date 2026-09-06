@@ -16,9 +16,15 @@ function prepareSmokeRepo(dir) {
   const tempRoot = path.join(dir, "repo");
   const tempScripts = path.join(tempRoot, "scripts");
   const fixtureDir = path.join(tempScripts, "fixtures", "github-codespaces");
+  const libDir = path.join(tempScripts, "lib");
   const smokeScript = path.join(tempScripts, "live-github-codespaces-smoke.sh");
   fs.mkdirSync(fixtureDir, { recursive: true });
+  fs.mkdirSync(libDir, { recursive: true });
   fs.copyFileSync(path.join(repoRoot, "scripts", "live-github-codespaces-smoke.sh"), smokeScript);
+  fs.copyFileSync(
+    path.join(repoRoot, "scripts", "lib", "live-smoke-json-match.py"),
+    path.join(libDir, "live-smoke-json-match.py"),
+  );
   fs.copyFileSync(
     path.join(repoRoot, "scripts", "fixtures", "github-codespaces", "devcontainer.json"),
     path.join(fixtureDir, "devcontainer.json"),

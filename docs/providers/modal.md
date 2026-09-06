@@ -112,6 +112,12 @@ variables; repository-local config cannot select a Modal environment or Secret.
 
 ## Lifecycle
 
+The Python bridge's process exit describes transport health; the remote command
+exit comes only from its result file. Bridge exit 125 remains a transport failure,
+while a remote command may legitimately exit 125. Returned cancellation, deadline,
+and I/O causes are preserved through streamed execution, uploads, and JSON control
+calls, so the shared run lifecycle can report cancellation and timeouts accurately.
+
 1. `warmup` / `run` without `--id` creates a Modal Sandbox in the configured
    `modal.app` from `modal.image`, with the sandbox timeout and Crabbox
    ownership tags, assigned atomically at creation. Crabbox durably stores a
@@ -214,7 +220,13 @@ pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
   `--artifact-glob`, `--require-artifact`, `--emit-proof`, and `--stop-after`.
 - Forwarded environment values are written to a temporary shell profile,
   uploaded into `/tmp`, sourced (`set -a`) for the command, and removed
-  best-effort afterward. They are never placed on the local Python process argv.
+  best-effort afterward. Each operation has its own unpredictable profile path;
+  the private local source is removed as soon as upload returns. Failed uploads
+  retain cleanup responsibility, and remote cleanup uses a bounded, uncanceled
+  context and the original ownership claim. The command does not run if sourcing
+  its profile fails. They are never placed on the local Python process argv.
+  Remote file permissions remain governed by the provider upload transport; this
+  does not establish a new remote permission guarantee.
 
 ## Related docs
 

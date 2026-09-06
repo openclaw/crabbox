@@ -53,40 +53,11 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, err := newLeaseID()
+	leaseID, slug, ready, _, err := b.createJob(ctx, client, req.Repo, req.RequestedSlug, req.Reclaim)
 	if err != nil {
 		return err
 	}
-	slug, err := allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
-	if err != nil {
-		return err
-	}
-	expiresAt := time.Time{}
-	if b.cfg.TTL > 0 {
-		expiresAt = b.now().UTC().Add(b.cfg.TTL)
-	}
-	jobID := jobIDForLease(leaseID)
-	job, err := buildJobSpec(b.cfg, jobSpecInput{LeaseID: leaseID, Slug: slug, JobID: jobID, ExpiresAt: expiresAt})
-	if err != nil {
-		return err
-	}
-	evalID, err := client.RegisterJob(ctx, job)
-	if err != nil {
-		return err
-	}
-	if evalID != "" {
-		if err := b.waitForEvaluation(ctx, client, evalID); err != nil {
-			return b.cleanupUnclaimedJob(ctx, client, job, err)
-		}
-	}
-	ready, err := b.waitForAllocation(ctx, client, jobID, b.allocReadyTimeout())
-	if err != nil {
-		return b.cleanupUnclaimedJob(ctx, client, job, err)
-	}
-	if _, err := writeNomadClaim(b.cfg, leaseID, slug, req.Repo, req.Reclaim, ready, expiresAt); err != nil {
-		return b.cleanupUnclaimedJob(ctx, client, job, err)
-	}
-	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s job=%s allocation=%s task=%s workdir=%s\n", leaseID, slug, providerName, jobID, ready.AllocationID, b.cfg.Nomad.Task, b.cfg.Nomad.Workdir)
+	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s job=%s allocation=%s task=%s workdir=%s\n", leaseID, slug, providerName, ready.JobID, ready.AllocationID, b.cfg.Nomad.Task, b.cfg.Nomad.Workdir)
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: nomad warmup keeps the job until explicit stop\n")
 	}
@@ -105,250 +76,123 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	return nil
 }
 
-func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
-	if req.Options.Tailscale.Enabled {
-		return RunResult{}, exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
-	}
-	if err := delegatedSyncOptionsError(b.spec, req); err != nil {
-		return RunResult{}, err
-	}
-	if !req.SyncOnly && (len(req.Command) == 0 || len(req.Command) == 1 && strings.TrimSpace(req.Command[0]) == "") {
-		return RunResult{}, exit(2, "missing command")
-	}
+func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+	req.ID = strings.TrimSpace(req.ID)
 	workdir := strings.TrimSpace(b.cfg.Nomad.Workdir)
-	started := b.now()
-	client, err := b.client()
-	if err != nil {
-		return RunResult{}, err
+	var client Client
+	var claim LeaseClaim
+	var ready allocationReadiness
+	bound := func() shared.DelegatedSandbox {
+		return shared.DelegatedSandbox{
+			LeaseID: claim.LeaseID, Slug: claim.Slug,
+			CleanupCommand: "crabbox stop --provider nomad " + shellQuote(claim.LeaseID),
+		}
 	}
-	var prepared *core.PreparedArchive
-	if strings.TrimSpace(req.ID) == "" && !req.NoSync {
-		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-			TempPattern: "crabbox-nomad-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
-		})
-		if err != nil {
-			return RunResult{}, err
-		}
-		defer prepared.Close()
-	}
-
-	leaseID, slug := "", ""
-	claim := LeaseClaim{}
-	ready := allocationReadiness{}
-	acquired := false
-	if strings.TrimSpace(req.ID) == "" {
-		leaseID, slug, ready, claim, err = b.createRunJob(ctx, client, req)
-		if err != nil {
-			return RunResult{}, err
-		}
-		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s job=%s allocation=%s task=%s\n", leaseID, slug, providerName, ready.JobID, ready.AllocationID, ready.Task)
-		acquired = true
-	} else {
-		claim, err = resolveNomadClaim(b.cfg, req.ID)
-		if err != nil {
-			return RunResult{}, err
-		}
-		leaseID, slug = claim.LeaseID, claim.Slug
-		jobID := claim.Labels[claimLabelJobID]
-		job, err := client.JobInfo(ctx, jobID)
-		if err != nil {
-			return RunResult{}, err
-		}
-		if err := validateRemoteOwnership(b.cfg, claim, job); err != nil {
-			return RunResult{}, err
-		}
-		claimedWorkdir := strings.TrimSpace(claim.Labels[claimLabelWorkdir])
-		if claimedWorkdir != "" && claimedWorkdir != workdir {
-			return RunResult{}, exit(2, "nomad lease %s uses workdir %s; requested workdir %s differs; stop the lease or rerun with the matching --nomad-workdir", leaseID, claimedWorkdir, workdir)
-		}
-		ready, err = b.waitForAllocation(ctx, client, jobID, b.allocReadyTimeout())
-		if err != nil {
-			return RunResult{}, err
-		}
-		if req.Repo.Root != "" {
-			if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claim.ProviderScope, b.cfg.Pond, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
-				return RunResult{}, err
+	return shared.RunDelegatedSandbox(ctx, req, shared.DelegatedSandboxLifecycle{
+		Provider: providerName, Runtime: b.rt, Workdir: workdir,
+		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL,
+		Preflight: func(context.Context) error {
+			if req.Options.Tailscale.Enabled {
+				return exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
 			}
-			updated, err := readLeaseClaim(leaseID)
+			if err := delegatedSyncOptionsError(b.spec, req); err != nil {
+				return err
+			}
+			if !req.SyncOnly && (len(req.Command) == 0 || len(req.Command) == 1 && strings.TrimSpace(req.Command[0]) == "") {
+				return exit(2, "missing command")
+			}
+			var err error
+			client, err = b.client()
+			return err
+		},
+		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
+			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
+				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
+				TempPattern: "crabbox-nomad-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+			})
+		},
+		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var err error
+			_, _, ready, claim, err = b.createJob(ctx, client, req.Repo, req.RequestedSlug, req.Reclaim)
 			if err != nil {
-				return RunResult{}, err
+				return shared.DelegatedSandbox{}, err
 			}
-			claim, err = updateLeaseClaimLabelsIfUnchanged(leaseID, updated, claimLabels(b.cfg, leaseID, slug, ready, claimExpiresAt(claim)))
+			fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s job=%s allocation=%s task=%s\n", claim.LeaseID, claim.Slug, providerName, ready.JobID, ready.AllocationID, ready.Task)
+			return bound(), nil
+		},
+		Resolve: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var err error
+			claim, err = resolveNomadClaim(b.cfg, req.ID)
 			if err != nil {
-				return RunResult{}, err
+				return shared.DelegatedSandbox{}, err
 			}
-		}
-	}
-
-	shouldStop := acquired && !req.Keep
-	finishResult := func(result RunResult) RunResult {
-		if result.Provider == "" {
-			result.Provider = providerName
-			result.LeaseID = leaseID
-			result.Slug = slug
-		}
-		return result
-	}
-	cleanupOwnedRunJob := func() error {
-		if !shouldStop {
-			return nil
-		}
-		shouldStop = false
-		cleanupCtx, cancel := b.cleanupContext(ctx)
-		defer cancel()
-		if err := b.deleteOwnedRunJob(cleanupCtx, client, claim); err != nil {
-			return fmt.Errorf("nomad stop failed for lease=%s job=%s: %w", leaseID, claim.Labels[claimLabelJobID], err)
-		}
-		return nil
-	}
-	defer func() {
-		if cleanupErr := cleanupOwnedRunJob(); cleanupErr != nil {
-			fmt.Fprintf(b.rt.Stderr, "warning: %v\n", cleanupErr)
-			if result.ExitCode == 0 {
-				result.ExitCode = 1
+			jobID := claim.Labels[claimLabelJobID]
+			job, err := client.JobInfo(ctx, jobID)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
 			}
-			if retErr == nil {
-				retErr = cleanupErr
-			} else {
-				retErr = errors.Join(retErr, cleanupErr)
+			if err := validateRemoteOwnership(b.cfg, claim, job); err != nil {
+				return shared.DelegatedSandbox{}, err
 			}
-		}
-		result = finishResult(result)
-	}()
-
-	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s job=%s allocation=%s task=%s workdir=%s\n", providerName, leaseID, ready.JobID, ready.AllocationID, ready.Task, workdir)
-
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
-	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, ready, req, workdir, prepared)
-		if err != nil {
-			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-			return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}, err
-		}
-		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.execShell(ctx, client, ready, "mkdir -p "+shellQuote(workdir)); err != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}, err
-	}
-
-	if req.SyncOnly {
-		result = RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}
-		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
-		if !shouldStop {
-			if err := refreshNomadLeaseActivity(b.cfg, claim); err != nil {
-				result.ExitCode = 1
-				if req.TimingJSON {
-					_ = writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-						Provider:      providerName,
-						LeaseID:       leaseID,
-						Slug:          slug,
-						SyncDelegated: true,
-						SyncMs:        syncDuration.Milliseconds(),
-						SyncPhases:    syncPhases,
-						SyncSkipped:   req.NoSync,
-						TotalMs:       result.Total.Milliseconds(),
-						ExitCode:      result.ExitCode,
-						Label:         strings.TrimSpace(req.Label),
-						Workdir:       workdir,
-					}, result, err))
+			claimedWorkdir := strings.TrimSpace(claim.Labels[claimLabelWorkdir])
+			if claimedWorkdir != "" && claimedWorkdir != workdir {
+				return shared.DelegatedSandbox{}, exit(2, "nomad lease %s uses workdir %s; requested workdir %s differs; stop the lease or rerun with the matching --nomad-workdir", claim.LeaseID, claimedWorkdir, workdir)
+			}
+			ready, err = b.waitForAllocation(ctx, client, jobID, b.allocReadyTimeout())
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			if req.Repo.Root != "" {
+				if err := ctx.Err(); err != nil {
+					return shared.DelegatedSandbox{}, err
 				}
-				return result, err
+				updated, err := core.ClaimLeaseForRepoProviderScopePondIfUnchanged(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, b.cfg.Pond, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim, claim, true)
+				if err != nil {
+					return shared.DelegatedSandbox{}, err
+				}
+				claim, err = updateLeaseClaimLabelsIfUnchanged(claim.LeaseID, updated, claimLabels(b.cfg, claim.LeaseID, claim.Slug, ready, claimExpiresAt(claim)))
+				if err != nil {
+					return shared.DelegatedSandbox{}, err
+				}
 			}
-		}
-		cleanupErr := cleanupOwnedRunJob()
-		if cleanupErr != nil {
-			result.ExitCode = 1
-		}
-		if req.TimingJSON {
-			if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-				Provider:      providerName,
-				LeaseID:       leaseID,
-				Slug:          slug,
-				SyncDelegated: true,
-				SyncMs:        syncDuration.Milliseconds(),
-				SyncPhases:    syncPhases,
-				SyncSkipped:   req.NoSync,
-				TotalMs:       result.Total.Milliseconds(),
-				ExitCode:      0,
-				Label:         strings.TrimSpace(req.Label),
-				Workdir:       workdir,
-			}, result, cleanupErr)); err != nil {
-				return result, errors.Join(cleanupErr, err)
-			}
-		}
-		return result, cleanupErr
-	}
-
-	commandStart := b.now()
-	exitCode, runErr := b.runCommand(ctx, client, ready, req, workdir)
-	commandDuration := b.now().Sub(commandStart)
-	result = RunResult{
-		Provider:      providerName,
-		LeaseID:       leaseID,
-		Slug:          slug,
-		ExitCode:      exitCode,
-		Command:       commandDuration,
-		Total:         b.now().Sub(started),
-		SyncDelegated: true,
-		CommandText:   strings.Join(req.Command, " "),
-	}
-	fmt.Fprintf(b.rt.Stderr, "nomad run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), commandDuration.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
-	writeRunTiming := func(finalErr error) error {
-		if !req.TimingJSON {
+			return bound(), nil
+		},
+		Setup: func(context.Context) error {
+			fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s job=%s allocation=%s task=%s workdir=%s\n", providerName, claim.LeaseID, ready.JobID, ready.AllocationID, ready.Task, workdir)
 			return nil
-		}
-		return writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-			Provider:      providerName,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			SyncDelegated: true,
-			SyncMs:        syncDuration.Milliseconds(),
-			SyncPhases:    syncPhases,
-			SyncSkipped:   req.NoSync,
-			CommandMs:     commandDuration.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      exitCode,
-			Label:         strings.TrimSpace(req.Label),
-			Workdir:       workdir,
-		}, result, finalErr))
-	}
-	if runErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
-			return result, errors.Join(runErr, writeRunTiming(runErr))
-		}
-		retErr := ExitError{Code: 1, Message: runErr.Error()}
-		return result, errors.Join(retErr, writeRunTiming(retErr))
-	}
-	if exitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		retErr := ExitError{Code: exitCode, Message: fmt.Sprintf("nomad run exited %d", exitCode)}
-		return result, errors.Join(retErr, writeRunTiming(retErr))
-	}
-	if !shouldStop {
-		if err := refreshNomadLeaseActivity(b.cfg, claim); err != nil {
-			result.ExitCode = 1
-			return result, err
-		}
-	}
-	cleanupErr := cleanupOwnedRunJob()
-	if cleanupErr != nil {
-		result.ExitCode = 1
-	}
-	if err := writeRunTiming(cleanupErr); err != nil {
-		return result, errors.Join(cleanupErr, err)
-	}
-	return result, cleanupErr
+		},
+		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+			return b.syncWorkspace(ctx, client, ready, req, workdir, prepared)
+		},
+		NoSync: func(ctx context.Context) error {
+			return b.execShell(ctx, client, ready, "mkdir -p "+shellQuote(workdir))
+		},
+		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
+			return shared.DelegatedSandboxCommand{
+				Text: strings.Join(req.Command, " "),
+				Run: func(ctx context.Context) (int, error) {
+					return b.runCommand(ctx, client, ready, req, workdir)
+				},
+			}, nil
+		},
+		Retained: func(context.Context) error {
+			return refreshNomadLeaseActivity(b.cfg, claim)
+		},
+		Cleanup: func(ctx context.Context) error {
+			if err := b.deleteOwnedRunJob(ctx, client, claim); err != nil {
+				return fmt.Errorf("nomad stop failed for lease=%s job=%s: %w", claim.LeaseID, claim.Labels[claimLabelJobID], err)
+			}
+			return nil
+		},
+	})
 }
 
-func (b *backend) createRunJob(ctx context.Context, client Client, req RunRequest) (string, string, allocationReadiness, LeaseClaim, error) {
+func (b *backend) createJob(ctx context.Context, client Client, repo Repo, requestedSlug string, reclaim bool) (string, string, allocationReadiness, LeaseClaim, error) {
 	leaseID, err := newLeaseID()
 	if err != nil {
 		return "", "", allocationReadiness{}, LeaseClaim{}, err
 	}
-	slug, err := allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
+	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return "", "", allocationReadiness{}, LeaseClaim{}, err
 	}
@@ -374,7 +218,7 @@ func (b *backend) createRunJob(ctx context.Context, client Client, req RunReques
 	if err != nil {
 		return "", "", allocationReadiness{}, LeaseClaim{}, b.cleanupUnclaimedJob(ctx, client, job, err)
 	}
-	claim, err := writeNomadClaim(b.cfg, leaseID, slug, req.Repo, req.Reclaim, ready, expiresAt)
+	claim, err := writeNomadClaim(b.cfg, leaseID, slug, repo, reclaim, ready, expiresAt)
 	if err != nil {
 		return "", "", allocationReadiness{}, LeaseClaim{}, b.cleanupUnclaimedJob(ctx, client, job, err)
 	}
@@ -493,14 +337,9 @@ func refreshNomadLeaseActivity(cfg Config, claim LeaseClaim) error {
 	if idleTimeout <= 0 && claim.IdleTimeoutSeconds > 0 {
 		idleTimeout = time.Duration(claim.IdleTimeoutSeconds) * time.Second
 	}
-	if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, claim.RepoRoot, idleTimeout, false); err != nil {
-		return err
-	}
-	updated, err := readLeaseClaim(claim.LeaseID)
-	if err != nil {
-		return err
-	}
-	_, err = updateLeaseClaimLabelsIfUnchanged(claim.LeaseID, updated, claim.Labels)
+	// Refresh only the captured claim; rereading after an unguarded claim write
+	// could recreate a retired lease or overwrite a successor's job identity.
+	_, err := core.ClaimLeaseForRepoProviderScopePondIfUnchanged(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, claim.RepoRoot, idleTimeout, false, claim, true)
 	return err
 }
 

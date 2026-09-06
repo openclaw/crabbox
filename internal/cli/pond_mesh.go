@@ -1236,20 +1236,3 @@ func runPondMeshForwards(ctx context.Context, opts pondConnectOptions, members [
 	wg.Wait()
 	return errors.Join(firstErr, closeErr)
 }
-
-// pondMeshDoctorCounts inspects a slice of servers (already filtered by
-// pond) and returns the per-plane summary doctor surfaces. The function is
-// intentionally pure: no network, no SSH, no provider calls. doctor invokes
-// it from doctorPondMeshSummary so the test suite exercises every branch
-// without spawning subprocesses.
-func pondMeshDoctorCounts(servers []Server) (memberCount, exposedCount, totalPorts int) {
-	for _, server := range servers {
-		memberCount++
-		ports := parseExposedPortsLabel(server.Labels[pondExposedPortsLabelKey])
-		if len(ports) > 0 {
-			exposedCount++
-			totalPorts += len(ports)
-		}
-	}
-	return memberCount, exposedCount, totalPorts
-}

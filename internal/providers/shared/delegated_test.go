@@ -22,6 +22,19 @@ type sandboxTestClock struct{ current time.Time }
 func (c *sandboxTestClock) Now() time.Time        { return c.current }
 func (c *sandboxTestClock) Sleep(d time.Duration) { c.current = c.current.Add(d) }
 
+func TestExitErrorWithCausePreservesSelectedCodeAndMessage(t *testing.T) {
+	inner := core.ExitError{Code: 7, Message: "raw provider diagnostic"}
+	cause := errors.Join(inner, context.Canceled)
+	err := ExitErrorWithCause(1, "safe provider error", cause)
+	var exitErr core.ExitError
+	if err.Error() != "safe provider error" || !errors.Is(err, cause) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cause or safe message lost: %v", err)
+	}
+	if !errors.As(err, &exitErr) || exitErr.Code != 1 {
+		t.Fatalf("selected exit code lost: %#v", exitErr)
+	}
+}
+
 func TestDelegatedSandboxLifecycle(t *testing.T) {
 	failure := errors.New("phase failed")
 	cleanupFailure := errors.New("delete unavailable")
@@ -31,6 +44,7 @@ func TestDelegatedSandboxLifecycle(t *testing.T) {
 		reuse, keep, keepOnFailure, noSync, syncOnly bool
 		commandCode                                  int
 		cleanupErr                                   error
+		closeErr                                     error
 		wantCode                                     int
 		wantStatus                                   core.RunStatus
 		wantKind                                     core.RunErrorKind
@@ -59,10 +73,31 @@ func TestDelegatedSandboxLifecycle(t *testing.T) {
 		{name: "command failure", commandCode: 7, wantCode: 7, wantKind: core.RunErrorCommandExit, wantSession: true, wantCleanup: true},
 		{name: "kept command failure", commandCode: 7, keepOnFailure: true, wantCode: 7, wantKind: core.RunErrorCommandExit, wantSession: true, wantKept: true},
 		{name: "transport failure", phase: "exec", err: failure, commandCode: 125, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantCleanup: true},
+		{name: "observed abnormal end", phase: "exec", err: ObservedProcessEndError("abnormal end"), commandCode: 137, wantCode: 137, wantKind: core.RunErrorCommandExit, wantSession: true, wantCleanup: true},
+		{name: "observed signal end", phase: "exec", err: ObservedProcessEndError("signal end"), commandCode: -1, wantCode: -1, wantKind: core.RunErrorCommandExit, wantSession: true, wantCleanup: true},
+		{name: "observed zero abnormal end", phase: "exec", err: ObservedProcessEndError("abnormal end"), wantCode: 1, wantKind: core.RunErrorCommandExit, wantSession: true, wantCleanup: true},
+		{name: "observed end and cleanup", phase: "exec", err: ObservedProcessEndError("abnormal end"), commandCode: 137, cleanupErr: cleanupFailure, wantCode: 137, wantKind: core.RunErrorCommandExit, wantSession: true, wantKept: true, wantCleanup: true},
+		{name: "kept observed end", phase: "exec", err: ObservedProcessEndError("abnormal end"), commandCode: 137, keepOnFailure: true, wantCode: 137, wantKind: core.RunErrorCommandExit, wantSession: true, wantKept: true},
+		{name: "typed exit is not observed end", phase: "exec", err: core.ExitError{Code: 137, Message: "not an end event"}, commandCode: 137, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantCleanup: true},
+		{name: "wrapped end is not direct observation", phase: "exec", err: fmt.Errorf("transport: %w", ObservedProcessEndError("abnormal end")), commandCode: 137, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantCleanup: true},
+		{name: "joined end is not direct observation", phase: "exec", err: errors.Join(failure, ObservedProcessEndError("abnormal end")), commandCode: 137, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantCleanup: true},
+		{name: "single joined end is not direct observation", phase: "exec", err: errors.Join(ObservedProcessEndError("abnormal end")), commandCode: 137, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantCleanup: true},
+		{name: "setup end is not command exit", phase: "setup", err: ObservedProcessEndError("setup end"), wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantCleanup: true},
 		{name: "cancel", phase: "exec", err: context.Canceled, wantCode: 1, wantStatus: core.RunStatusCanceled, wantKind: core.RunErrorCanceled, wantSession: true, wantCleanup: true},
 		{name: "keep canceled", phase: "exec", err: context.Canceled, keepOnFailure: true, wantCode: 1, wantStatus: core.RunStatusCanceled, wantKind: core.RunErrorCanceled, wantSession: true, wantKept: true},
 		{name: "timeout", phase: "exec", err: context.DeadlineExceeded, wantCode: 1, wantStatus: core.RunStatusTimedOut, wantKind: core.RunErrorTimeout, wantSession: true, wantCleanup: true},
 		{name: "cleanup", cleanupErr: cleanupFailure, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true, wantCleanup: true},
+		{name: "typed sandbox cleanup", cleanupErr: core.ExitError{Code: 5, Message: "delete failed"}, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true, wantCleanup: true},
+		{name: "command cleanup", closeErr: cleanupFailure, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantCleanup: true},
+		{name: "typed command cleanup", closeErr: core.ExitError{Code: 5, Message: "profile cleanup failed"}, wantCode: 5, wantKind: core.RunErrorProvider, wantSession: true, wantCleanup: true},
+		{name: "kept command cleanup", closeErr: core.ExitError{Code: 5, Message: "profile cleanup failed"}, keepOnFailure: true, wantCode: 5, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true},
+		{name: "reused command cleanup", closeErr: cleanupFailure, reuse: true, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true},
+		{name: "command cleanup deadline", closeErr: context.DeadlineExceeded, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantCleanup: true},
+		{name: "command and profile cleanup", commandCode: 7, closeErr: core.ExitError{Code: 5, Message: "profile cleanup failed"}, wantCode: 7, wantKind: core.RunErrorCommandExit, wantSession: true, wantCleanup: true},
+		{name: "command preparation and cleanup", phase: "command", err: failure, closeErr: cleanupFailure, keepOnFailure: true, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true},
+		{name: "transport and profile cancellation", phase: "exec", err: failure, closeErr: context.Canceled, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantCleanup: true},
+		{name: "transport and deletion timeout", phase: "exec", err: failure, cleanupErr: context.DeadlineExceeded, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true, wantCleanup: true},
+		{name: "cancel and profile cleanup", phase: "exec", err: context.Canceled, closeErr: context.DeadlineExceeded, wantCode: 1, wantStatus: core.RunStatusCanceled, wantKind: core.RunErrorCanceled, wantSession: true, wantCleanup: true},
 		{name: "sync only cleanup", syncOnly: true, cleanupErr: cleanupFailure, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true, wantCleanup: true},
 		{name: "command and cleanup", commandCode: 7, cleanupErr: cleanupFailure, wantCode: 7, wantKind: core.RunErrorCommandExit, wantSession: true, wantKept: true, wantCleanup: true},
 		{name: "setup and typed cleanup", phase: "setup", err: failure, cleanupErr: core.ExitError{Code: 4, Message: "claim changed"}, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true, wantCleanup: true},
@@ -140,7 +175,7 @@ func TestDelegatedSandboxLifecycle(t *testing.T) {
 							cancel()
 						}
 						return tc.commandCode, step("exec")
-					}, Close: func(ctx context.Context) { detached(ctx); _ = step("close-command") }}, step("command")
+					}, Close: func(ctx context.Context) error { detached(ctx); return errors.Join(step("close-command"), tc.closeErr) }}, step("command")
 				},
 				Retained: func(ctx context.Context) error {
 					detached(ctx)
@@ -174,6 +209,9 @@ func TestDelegatedSandboxLifecycle(t *testing.T) {
 			}
 			if tc.err != nil && !errors.Is(err, tc.err) {
 				t.Fatalf("lost primary cause: %v", err)
+			}
+			if tc.closeErr != nil && !errors.Is(err, tc.closeErr) {
+				t.Fatalf("lost command cleanup cause: %v", err)
 			}
 			if tc.cleanupErr != nil && !errors.Is(err, tc.cleanupErr) {
 				t.Fatalf("lost cleanup cause: %v", err)
@@ -233,6 +271,9 @@ func TestDelegatedSandboxLifecycle(t *testing.T) {
 			if reports != 1 || report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind || report.TotalMs != result.Total.Milliseconds() || report.CommandMs != result.Command.Milliseconds() || report.LeaseID != result.LeaseID || report.Label != "label" {
 				t.Fatalf("timing=%#v result=%#v stderr=%s", report, result, stderr.String())
 			}
+			if report.Workdir != "/workspace/repo" {
+				t.Fatalf("timing workdir=%q", report.Workdir)
+			}
 			if result.Total != clock.current.Sub(time.Unix(0, 0)) {
 				t.Fatalf("finalization missing from total: %v calls=%v", result.Total, calls)
 			}
@@ -267,7 +308,7 @@ func TestDelegatedSandboxSequence(t *testing.T) {
 		},
 		Command: func(context.Context) (DelegatedSandboxCommand, error) {
 			add("command")
-			return DelegatedSandboxCommand{Run: func(context.Context) (int, error) { add("exec"); return 0, nil }, Close: func(context.Context) { add("close-command") }}, nil
+			return DelegatedSandboxCommand{Run: func(context.Context) (int, error) { add("exec"); return 0, nil }, Close: func(context.Context) error { add("close-command"); return nil }}, nil
 		},
 		Cleanup: func(context.Context) error { add("cleanup"); return nil },
 	}
@@ -377,6 +418,65 @@ func TestDelegatedSandboxCancellationBetweenPhases(t *testing.T) {
 			}
 			if !errors.Is(err, context.Canceled) || result.Status != core.RunStatusCanceled || cleanups != wantCleanups {
 				t.Fatalf("result=%#v err=%v cleanups=%d", result, err, cleanups)
+			}
+		})
+	}
+}
+
+func TestDelegatedSandboxReuseAdmission(t *testing.T) {
+	failure := errors.New("reuse is not ready")
+	for _, stage := range []string{"before admission", "admission error", "admission cancellation", "after admission", "setup error"} {
+		t.Run(stage, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var stderr bytes.Buffer
+			var calls []string
+			result, err := RunDelegatedSandbox(ctx, core.RunRequest{ID: "lease", KeepOnFailure: true, TimingJSON: true}, DelegatedSandboxLifecycle{
+				Provider: "test", Runtime: core.Runtime{Stderr: &stderr},
+				Resolve: func(context.Context) (DelegatedSandbox, error) {
+					if stage == "before admission" {
+						cancel()
+					}
+					return DelegatedSandbox{LeaseID: "lease", Slug: "slug", Unlock: func() { calls = append(calls, "unlock") }}, nil
+				},
+				AdmitReuse: func(context.Context) error {
+					calls = append(calls, "admit")
+					if stage == "admission error" {
+						return failure
+					}
+					if stage == "admission cancellation" {
+						cancel()
+						return ctx.Err()
+					}
+					if stage == "after admission" {
+						cancel()
+					}
+					return nil
+				},
+				Setup:    func(context.Context) error { calls = append(calls, "setup"); return failure },
+				Retained: func(context.Context) error { calls = append(calls, "retained"); return nil },
+				Cleanup:  func(context.Context) error { t.Fatal("reused session must not be deleted"); return nil },
+			})
+			if err == nil || result.Session == nil || !result.Session.Kept || !result.Session.Reused {
+				t.Fatalf("result=%#v session=%#v err=%v", result, result.Session, err)
+			}
+			want := []string{"admit", "unlock"}
+			switch stage {
+			case "before admission":
+				want = []string{"unlock"}
+			case "after admission":
+				want = []string{"admit", "retained", "unlock"}
+			case "setup error":
+				want = []string{"admit", "setup", "retained", "unlock"}
+			}
+			if !slices.Equal(calls, want) {
+				t.Fatalf("calls=%v want=%v", calls, want)
+			}
+			if !slices.Contains(want, "retained") && strings.Contains(stderr.String(), "rerun:") {
+				t.Fatalf("unusable session got a rerun hint: %s", stderr.String())
+			}
+			if strings.Contains(stage, "admission") && stage != "admission error" && !errors.Is(err, context.Canceled) {
+				t.Fatalf("lost cancellation cause: %v", err)
 			}
 		})
 	}

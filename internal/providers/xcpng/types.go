@@ -14,12 +14,6 @@ type xapiVM struct {
 	Labels     map[string]string
 }
 
-type xapiObject struct {
-	Ref       string
-	UUID      string
-	NameLabel string
-}
-
 type xcpNgISOMediaRef struct {
 	VDIRef    string
 	UUID      string

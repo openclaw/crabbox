@@ -191,6 +191,13 @@ explicit `(none)` in their provider section. Shared flags are command-level
 `run` workflow flags; their presence does not bypass ordinary capability,
 target, provider-kind, or option-combination validation.
 
+The raw `capabilities.features` array supports feature detection without a
+version floor. For example, `prepared-artifact-workspace` identifies support for
+a [CI-prepared artifact workspace](../features/blacksmith-testbox.md#prepared-artifact-workspace).
+It describes the binary's implementation, not whether a particular lease has a
+valid binding. Consumers requiring that behavior must reject a missing feature
+or failed description rather than infer support from `run-artifacts` alone.
+
 ### JSON schema v2
 
 Providers that opt into native size selection also include the optional
@@ -592,7 +599,7 @@ profile and one fallback to show the richer record shape:
     "category": "ci-proof-runner",
     "aliases": ["blacksmith"],
     "targets": ["linux"],
-    "features": ["cache-volume", "run-proof", "run-session", "run-artifacts"],
+    "features": ["cache-volume", "run-proof", "run-session", "run-artifacts", "prepared-artifact-workspace"],
     "runtime": ["delegated-command", "ci-runner"],
     "evidence": ["proof", "artifacts", "session"],
     "lifecycle": ["run-session"],
@@ -712,7 +719,7 @@ Recommendation JSON returns ranked objects:
     "kind": "delegated-run",
     "category": "ci-proof-runner",
     "targets": ["linux"],
-    "features": ["cache-volume", "run-proof", "run-session", "run-artifacts"],
+    "features": ["cache-volume", "run-proof", "run-session", "run-artifacts", "prepared-artifact-workspace"],
     "runtime": ["delegated-command", "ci-runner"],
     "evidence": ["proof", "artifacts", "session"],
     "lifecycle": ["run-session"],

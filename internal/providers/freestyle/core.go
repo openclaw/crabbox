@@ -76,18 +76,6 @@ func removeLeaseClaim(leaseID string) {
 	core.RemoveLeaseClaim(leaseID)
 }
 
-func syncExcludes(root string, cfg Config) (core.SyncExcludeRules, error) {
-	return core.SyncExcludes(root, cfg)
-}
-
-func syncManifest(root string, excludes core.SyncExcludeRules, includes []string) (core.SyncManifest, error) {
-	return core.BuildSyncManifestFiltered(root, excludes, includes)
-}
-
-func checkSyncPreflight(manifest core.SyncManifest, cfg Config, force bool, stderr io.Writer) error {
-	return core.CheckSyncPreflight(manifest, cfg, force, stderr)
-}
-
 func shellQuote(s string) string {
 	return core.ShellQuote(s)
 }

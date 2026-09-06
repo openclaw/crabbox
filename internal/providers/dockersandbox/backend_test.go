@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1155,39 +1156,6 @@ func TestDockerSandboxSmallHelpers(t *testing.T) {
 	}
 }
 
-func TestBuildCommandShellModePreservesShellScript(t *testing.T) {
-	got, err := buildCommand([]string{"echo one && echo two"}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"sh", "-lc", "echo one && echo two"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("command=%#v want %#v", got, want)
-	}
-}
-
-func TestBuildCommandSingleShellStringStaysRaw(t *testing.T) {
-	got, err := buildCommand([]string{"echo one && echo two"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"sh", "-lc", "echo one && echo two"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("command=%#v want %#v", got, want)
-	}
-}
-
-func TestBuildCommandLeadingEnvAssignmentQuotesArgv(t *testing.T) {
-	got, err := buildCommand([]string{"GREETING=hello world", "printf", "%s\n", "$GREETING"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"sh", "-lc", "GREETING='hello world' 'printf' '%s\n' '$GREETING'"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("command=%#v want %#v", got, want)
-	}
-}
-
 func TestSBXErrorFormattingEdges(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	stderr.WriteString("plain failure")
@@ -1569,7 +1537,7 @@ func TestSBXErrorClassifiesTimeoutAndStreamedErrors(t *testing.T) {
 		t.Fatalf("streamed err code=%d err=%v", code, err)
 	}
 	runner = newRunner(map[string]scriptedReply{
-		"exec": {exitCode: 4, err: errors.New("exit status 4")},
+		"exec": {exitCode: 4},
 	}, nil)
 	cli, err = newSBXCLI(newTestConfig(), Runtime{Exec: runner})
 	if err != nil {
@@ -1599,7 +1567,7 @@ func TestRunPropagatesCommandExit(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	runner := newRunner(map[string]scriptedReply{
 		"create": {stdout: ""},
-		"exec":   {exitCode: 7, stderr: "failed\n", err: errors.New("exit status 7")},
+		"exec":   {exitCode: 7, stderr: "failed\n"},
 	}, nil)
 	backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
 	_, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, Command: []string{"deploy", "--token", "secret-token"}, Keep: true})
@@ -1613,25 +1581,40 @@ func TestRunPropagatesCommandExit(t *testing.T) {
 }
 
 func TestRunPropagatesStreamRuntimeErrorWithCommandExit(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	runner := newRunner(map[string]scriptedReply{
-		"create": {stdout: ""},
-		"exec":   {exitCode: 7, stderr: "failed\n", err: errors.New("stream transport failed")},
-	}, nil)
-	backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
-	result, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, Command: []string{"deploy", "--token", "secret-token"}, Keep: true})
-	var exitErr core.ExitError
-	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
-		t.Fatalf("err=%v want exit 7", err)
-	}
-	if !strings.Contains(err.Error(), "stream transport failed") {
-		t.Fatalf("err=%v missing runtime diagnostic", err)
-	}
-	if strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), "deploy --token") {
-		t.Fatalf("err=%v leaked command arguments", err)
-	}
-	if result.ExitCode != 7 {
-		t.Fatalf("result.ExitCode=%d want 7", result.ExitCode)
+	for _, tc := range []struct {
+		cause  error
+		status core.RunStatus
+		kind   core.RunErrorKind
+	}{
+		{errors.New("stream transport failed"), core.RunStatusFailed, core.RunErrorProvider},
+		{context.Canceled, core.RunStatusCanceled, core.RunErrorCanceled},
+		{context.DeadlineExceeded, core.RunStatusTimedOut, core.RunErrorTimeout},
+	} {
+		t.Run(tc.cause.Error(), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			runner := newRunner(map[string]scriptedReply{
+				"create": {stdout: ""},
+				"exec":   {exitCode: 7, stderr: "failed\n", err: tc.cause},
+			}, nil)
+			var stderr bytes.Buffer
+			backend := newTestBackend(newTestConfig(), runner, io.Discard, &stderr)
+			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, Command: []string{"deploy", "--token", "secret-token"}, Keep: true, TimingJSON: true})
+			var exitErr core.ExitError
+			if !errors.As(err, &exitErr) || exitErr.Code != 1 || !errors.Is(err, tc.cause) {
+				t.Fatalf("err=%v want transport exit 1 and original cause", err)
+			}
+			if strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), "deploy --token") {
+				t.Fatalf("err=%v leaked command arguments", err)
+			}
+			if result.ExitCode != 1 || result.Status != tc.status || result.ErrorKind != tc.kind || result.Session == nil || !result.Session.Kept {
+				t.Fatalf("result=%#v want normalized transport failure with kept session", result)
+			}
+			lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+			var report core.TimingReport
+			if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil || report.ExitCode != 1 || report.RunStatus != tc.status || report.ErrorKind != tc.kind {
+				t.Fatalf("timing=%#v err=%v", report, err)
+			}
+		})
 	}
 }
 
@@ -1661,5 +1644,66 @@ func TestRunKeepOnFailureMarksSessionKept(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease=") {
 		t.Fatalf("stderr missing keep-on-failure hint: %s", stderr.String())
+	}
+}
+
+func TestRunTimingFailureDoesNotReportSuccess(t *testing.T) {
+	for _, commandExit := range []int{0, 7} {
+		t.Run(strconv.Itoa(commandExit), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			runner := newRunner(map[string]scriptedReply{"create": {}, "exec": {exitCode: commandExit}}, nil)
+			backend := newTestBackend(newTestConfig(), runner, io.Discard, errWriter{})
+			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, Command: []string{"true"}, Keep: true, TimingJSON: true})
+			if err == nil || !strings.Contains(err.Error(), "write failed") {
+				t.Fatalf("timing error=%v", err)
+			}
+			result = core.FinalizeRunResult(result, err)
+			code, kind := commandExit, core.RunErrorCommandExit
+			if code == 0 {
+				code, kind = 1, core.RunErrorProvider
+			}
+			if result.ExitCode != code || result.Status != core.RunStatusFailed || result.ErrorKind != kind {
+				t.Fatalf("timing failure outcome=%#v, want failed code=%d kind=%s", result, code, kind)
+			}
+		})
+	}
+}
+
+func TestRunCommandIntentReachesNativeRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		command []string
+		literal map[int]bool
+		shell   bool
+		want    []string
+	}{
+		{"empty explicit source", []string{""}, nil, true, []string{"sh", "-lc", ""}},
+		{"ordinary", []string{"printf", "%s", "hello"}, nil, false, []string{"printf", "%s", "hello"}},
+		{"literal separator", []string{"printf", "%s", ";", "touch", "sentinel"}, map[int]bool{2: true}, false, []string{"printf", "%s", ";", "touch", "sentinel"}},
+		{"literal assignment executable", []string{"FOO=x", "argument"}, map[int]bool{0: true}, false, []string{"FOO=x", "argument"}},
+		{"literal singleton", []string{"literal command $(echo x)"}, map[int]bool{0: true}, false, []string{"literal command $(echo x)"}},
+		{"invalid assignment executable", []string{"bad-name=x", "argument"}, nil, false, []string{"bad-name=x", "argument"}},
+		{"mixed operators", []string{"printf", "%s", ";", "&&", "printf", "%s", "done"}, map[int]bool{2: true}, false, []string{"sh", "-lc", "'printf' '%s' ';' && 'printf' '%s' 'done'"}},
+		{"inferred source", []string{"printf one && printf two"}, nil, false, []string{"sh", "-lc", "printf one && printf two"}},
+		{"explicit source", []string{"printf one; exit 7"}, nil, true, []string{"sh", "-lc", "printf one; exit 7"}},
+		{"leading assignment", []string{"GREETING=hello world", "printf", "%s", "$GREETING"}, nil, false, []string{"sh", "-lc", "GREETING='hello world' 'printf' '%s' '$GREETING'"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			runner := newRunner(nil, nil)
+			backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+			_, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, Command: tc.command, ShellMode: tc.shell, CommandLiteralArgs: tc.literal})
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := findCall(runner, "exec")
+			if call == nil || len(call.Args) < 5 || call.Args[1] != "--workdir" {
+				t.Fatalf("exec=%#v", call)
+			}
+			got := call.Args[4:]
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("native command=%#v want %#v", got, tc.want)
+			}
+		})
 	}
 }

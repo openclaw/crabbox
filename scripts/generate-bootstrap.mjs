@@ -28,7 +28,7 @@ const artifactFields = {
   googleLinuxSigningKey: ["Fingerprint"],
 };
 /** @typedef {"ps-string" | "ps-strings" | "sh-string" | "sh-strings"} ParameterType */
-/** @typedef {{name: string, file: string, parameters: Record<string, ParameterType>, source: string}} Fragment */
+/** @typedef {{name: string, file: string, parameters: Record<string, ParameterType>, literal?: true, source: string}} Fragment */
 const parameterTypes = new Set(["ps-string", "ps-strings", "sh-string", "sh-strings"]);
 const identifier = /^[a-z][A-Za-z0-9]*$/u;
 
@@ -109,6 +109,10 @@ export const psQuote = (value) => `'${value.replaceAll("'", "''")}'`;
 export const shellQuote = (value) => `'${value.replaceAll("'", "'\\''").replaceAll("\n", () => "'$'\\n''").replaceAll("\r", () => "'$'\\r''")}'`;
 
 export function fragmentTokens(fragment, constants) {
+  if (Object.hasOwn(fragment, "literal")) {
+    if (fragment.literal !== true || Object.keys(fragment.parameters).length) throw new Error(`${fragment.name}: literal fragments require literal: true and no parameters`);
+    return [{ literal: fragment.source }];
+  }
   const used = new Set();
   const tokens = [];
   let offset = 0;
@@ -147,7 +151,7 @@ export async function loadSources(root = repoRoot) {
   const names = new Set();
   const fragments = [];
   for (const fragment of manifest.fragments) {
-    exactKeys(fragment, ["name", "file", "parameters"], "fragment");
+    exactKeys(fragment, ["name", "file", "parameters", ...(Object.hasOwn(fragment, "literal") ? ["literal"] : [])], "fragment");
     if (!identifier.test(fragment.name) || names.has(fragment.name)) throw new Error("invalid or duplicate fragment name");
     names.add(fragment.name);
     if (!new RegExp(`^${fragment.name}\\.(sh|ps1)$`, "u").test(fragment.file)) throw new Error("invalid fragment file");

@@ -8,6 +8,7 @@ import {
   windowsBootstrapPowerShell,
 } from "../src/bootstrap";
 import {
+  sharedGnomeDesktopTheme,
   sharedWindowsRuntime,
   sharedWindowsRuntimeGate,
   sharedWindowsCore,
@@ -196,6 +197,24 @@ async function gunzipBase64(value: string): Promise<string> {
 }
 
 describe("cloud-init bootstrap", () => {
+  it.each(["aws", "azure", "gcp", "hetzner"] as const)(
+    "keeps AWS archive policy out of shared %s cloud-init",
+    (provider) => {
+      const input: LeaseConfig = {
+        ...leaseConfig({ provider, sshPublicKey: "ssh-ed25519 fixture" }),
+        selectedImage: { id: "ami-stock", source: "stock", provider: "aws", kind: "aws-ami" },
+      };
+      const output = cloudInit(input, "echo additional-bootstrap");
+      expect(output).not.toContain("\napt:\n");
+      expect(output).toContain("echo additional-bootstrap");
+    },
+  );
+
+  it("does not assume an unclassified AWS image is stock", () => {
+    const input = leaseConfig({ provider: "aws", sshPublicKey: "ssh-ed25519 fixture" });
+    expect(awsUserData(input)).toBe(cloudInit(input));
+  });
+
   it("installs a coordinator-generated SSH host identity", () => {
     const got = cloudInit({
       ...config,
@@ -211,6 +230,7 @@ describe("cloud-init bootstrap", () => {
 
   it("uses retrying package installation in runcmd", () => {
     const got = cloudInit(config);
+    const minimalUpdate = "retry apt-get -o Acquire::Languages=none";
     expect(got).toContain("package_update: false");
     expect(got).toContain("bash -euxo pipefail <<'BOOT'");
     expect(got).toContain('Acquire::Retries "8";');
@@ -224,15 +244,17 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("test -s '/etc/ssl/certs/ca-certificates.crt'");
     expect(got).toContain("crabbox Linux readiness manifest verified; skipping apt bootstrap");
     expect(got).toContain("crabbox legacy image readiness migrated without package-manager work");
-    expect(got).toContain("retry apt-get update");
+    expect(got).toContain(minimalUpdate);
+    expect(got).toContain("-o Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false");
+    expect(got).toContain("-o Acquire::IndexTargets::deb::CNF::DefaultEnabled=false update");
     expect(got).toContain(
       "retry apt-get install -y --no-install-recommends $crabbox_readiness_packages",
     );
     expect(got).toContain(
       "crabbox_readiness_packages='ca-certificates curl git jq openssh-server rsync tmux util-linux'",
     );
-    expect(got.indexOf("systemctl restart ssh")).toBeLessThan(got.indexOf("retry apt-get update"));
-    expect(got.indexOf("retry apt-get update")).toBeLessThan(
+    expect(got.indexOf("systemctl restart ssh")).toBeLessThan(got.indexOf(minimalUpdate));
+    expect(got.indexOf(minimalUpdate)).toBeLessThan(
       got.indexOf("touch /var/lib/crabbox/bootstrapped"),
     );
     expect(got).toContain("curl --version >/dev/null");
@@ -422,6 +444,11 @@ describe("cloud-init bootstrap", () => {
 
   it("adds GNOME Wayland desktop services when requested", () => {
     const got = cloudInit({ ...config, desktop: true, desktopEnv: "gnome", browser: true });
+    const themeScript = sharedGnomeDesktopTheme()
+      .split("\n")
+      .map((line) => (line ? `    ${line}` : ""))
+      .join("\n");
+    expect(got.split(themeScript)).toHaveLength(2);
     expect(got).toContain(
       "labwc wayvnc swaybg librsvg2-common gnome-panel wlr-randr grim slurp wtype wl-clipboard",
     );

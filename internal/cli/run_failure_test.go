@@ -51,6 +51,9 @@ func TestClassifyRunFailureStages(t *testing.T) {
 		{name: "provider auth", text: "<!doctype html><html><title>Cloudflare Access</title><body>login</body></html>", want: "provider_auth", retry: "false"},
 		{name: "install", text: "pnpm install failed with ENOMEM", want: "install", retry: "unknown"},
 		{name: "model", text: "model call failed: context window maximum tokens exceeded", want: "model_call", retry: "unknown"},
+		{name: "import flag", text: "pnpm install --package-import-method=copy completed", want: "unknown", retry: "unknown"},
+		{name: "child flag", text: "pnpm install --child-concurrency=2 completed", want: "unknown", retry: "unknown"},
+		{name: "network flag", text: "pnpm install --network-concurrency=4 completed", want: "unknown", retry: "unknown"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -85,7 +88,7 @@ func TestRunOutcomeFailureKeepsMemoryEvidenceAcrossSecondaryFailures(t *testing.
 		t.Fatalf("classifyRunOutcomeFailure()=%#v, want memory exhaustion", got)
 	}
 
-	got = classifyRunOutcomeFailure(0, "", nil, RunFailureEvidence{}, true)
+	got = classifyRunOutcomeFailure(0, "", []TimingPhase{{Name: "build"}}, RunFailureEvidence{}, true)
 	if got.BlockedStage != "test" || got.ResourceExhaustion != "" || got.RetryLikely != "false" {
 		t.Fatalf("classifyRunOutcomeFailure()=%#v, want test failure", got)
 	}
@@ -172,26 +175,37 @@ func TestClassifyRunFailureDoesNotTreatUserCancellationAsBlacksmithInfra(t *test
 }
 
 func TestClassifyRunFailureUsesFinalPhaseAfterErrorSignatures(t *testing.T) {
-	got := ClassifyRunFailure(1, "pnpm install completed\nunit tests failed", []TimingPhase{
-		{Name: "install"},
-		{Name: "test"},
-	})
-	if got.BlockedStage != "unknown" {
-		t.Fatalf("ClassifyRunFailure()=%#v, want unknown", got)
-	}
-	got = ClassifyRunFailure(1, "test failed", []TimingPhase{
-		{Name: "install"},
-		{Name: "test"},
-	})
-	if got.BlockedStage != "unknown" {
-		t.Fatalf("ClassifyRunFailure()=%#v, want unknown", got)
-	}
-	got = ClassifyRunFailure(1, "exit status 1", []TimingPhase{
-		{Name: "test"},
-		{Name: "install"},
-	})
-	if got.BlockedStage != "install" {
-		t.Fatalf("ClassifyRunFailure()=%#v, want install", got)
+	for _, tt := range []struct {
+		name, text, phases, stage, retry string
+		code                             int
+	}{
+		{"test after install", "pnpm install --package-import-method=copy completed\nunit tests failed", "install build test", "test", "unknown", 1},
+		{"test without error signature", "exit status 23", "install build test", "test", "unknown", 23},
+		{"build", "pnpm install --child-concurrency=2 completed", "install build", "build", "unknown", 2},
+		{"install after test", "test failed", "test install", "install", "unknown", 1},
+		{"setup", "exit status 1", "setup", "install", "unknown", 1},
+		{"hydration", "exit status 1", "hydrate", "install", "unknown", 1},
+		{"stale install error", "EXDEV retry\nENOMEM retry\ninstall completed\nassertion failed", "install build test", "test", "unknown", 1},
+		{"stale model error", "model call rate limit; retry succeeded\ncompiler failed", "test build", "build", "unknown", 1},
+		{"unknown final phase", "ENOMEM retry succeeded", "install custom-check", "unknown", "unknown", 1},
+		{"custom phase is not a stage", "exit status 1", "test-setup", "unknown", "unknown", 1},
+		{"case normalized", "exit status 1", "INSTALL BUILD TEST", "test", "unknown", 1},
+		{"unmarked model error", "model call rate limit", "user-command", "model_call", "unknown", 1},
+		{"ssh precedence", "timed out waiting for SSH", "test", "ssh", "true", 255},
+		{"auth precedence", "<!doctype html><html><title>Cloudflare Access</title><body>login</body></html>", "test", "provider_auth", "false", 1},
+		{"cancellation precedence", "Testbox ready\nGitHub Actions run cancelled", "install build test", "actions_cancelled", "true", 130},
+		{"success", "ENOMEM\nmodel call failed", "install build test", "", "", 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var phases []TimingPhase
+			for _, name := range strings.Fields(tt.phases) {
+				phases = append(phases, TimingPhase{Name: name})
+			}
+			got := ClassifyRunFailure(tt.code, tt.text, phases)
+			if got.BlockedStage != tt.stage || got.RetryLikely != tt.retry {
+				t.Fatalf("ClassifyRunFailure()=%#v, want stage=%q retry=%q", got, tt.stage, tt.retry)
+			}
+		})
 	}
 }
 

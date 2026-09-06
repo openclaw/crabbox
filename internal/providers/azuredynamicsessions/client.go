@@ -71,16 +71,6 @@ type azureDynamicSessionsSession struct {
 	} `json:"properties"`
 }
 
-type azureDynamicSessionsErrorResponse struct {
-	Error *azureDynamicSessionsError `json:"error,omitempty"`
-}
-
-type azureDynamicSessionsError struct {
-	Code    string `json:"code,omitempty"`
-	Message string `json:"message,omitempty"`
-	Target  string `json:"target,omitempty"`
-}
-
 type azureDynamicSessionsAPIError struct {
 	StatusCode int
 	Status     string
@@ -279,7 +269,6 @@ func (c *azureDynamicSessionsClient) ExecStream(ctx context.Context, identifier 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	exitCode := 0
-	completed := false
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
@@ -303,7 +292,6 @@ func (c *azureDynamicSessionsClient) ExecStream(ctx context.Context, identifier 
 				}
 			}
 		case "complete":
-			completed = true
 			if event.ExitCode != nil {
 				exitCode = *event.ExitCode
 			}
@@ -321,10 +309,10 @@ func (c *azureDynamicSessionsClient) ExecStream(ctx context.Context, identifier 
 	if err := scanner.Err(); err != nil {
 		return exitCode, err
 	}
-	if !completed {
-		return exitCode, fmt.Errorf("%s stream ended before completion", providerName)
+	if err := ctx.Err(); err != nil {
+		return exitCode, err
 	}
-	return exitCode, nil
+	return exitCode, fmt.Errorf("%s stream ended before completion", providerName)
 }
 
 func (c *azureDynamicSessionsClient) GetSession(ctx context.Context, identifier string) (azureDynamicSessionsSession, error) {
@@ -502,24 +490,7 @@ func (c *azureDynamicSessionsClient) nextURL(next string) (string, error) {
 }
 
 func sameOriginURL(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveURLPort(a) == effectiveURLPort(b)
-}
-
-func effectiveURLPort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+	return shared.SameOrigin(a, b)
 }
 
 func (c *azureDynamicSessionsClient) url(path string, query url.Values) string {

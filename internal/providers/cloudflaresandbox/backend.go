@@ -179,11 +179,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			return b.ensureWorkspace(ctx, api, sandboxID, workdir)
 		},
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
-			command, err := buildCommand(req.Command, req.ShellMode)
+			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 			if err != nil {
 				return shared.DelegatedSandboxCommand{}, err
 			}
-			commandText := commandScript(command)
+			commandText := intent.ShellCommand("bash", "-lc")
 			commandEnv, strippedAuthEnv := cloudflareSandboxCommandEnv(req.Env)
 			if len(strippedAuthEnv) > 0 {
 				fmt.Fprintf(b.rt.Stderr, "warning: provider=%s did not forward provider authentication variables: %s\n", providerName, strings.Join(strippedAuthEnv, ","))
@@ -841,26 +841,6 @@ func newSandboxName(repo Repo) string {
 		return base + "-" + hex.EncodeToString(token[:])
 	}
 	return fmt.Sprintf("%s-%x", base, time.Now().UnixNano()&0xffffffff)
-}
-
-func buildCommand(command []string, shellMode bool) ([]string, error) {
-	if len(command) == 0 {
-		return nil, errors.New("missing command")
-	}
-	if shellMode {
-		return []string{"bash", "-lc", strings.Join(command, " ")}, nil
-	}
-	if shouldUseShell(command) || leadingEnvAssignment(command) {
-		if len(command) == 1 {
-			return []string{"bash", "-lc", command[0]}, nil
-		}
-		return []string{"bash", "-lc", shellScriptFromArgv(command)}, nil
-	}
-	return command, nil
-}
-
-func commandScript(command []string) string {
-	return shellScriptFromArgv(command)
 }
 
 type cloudflareSandboxNotFoundError struct {

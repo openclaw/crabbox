@@ -181,6 +181,12 @@ One logical `FleetCoordinator` (`worker/src/fleet.ts`) owns:
   through hooks such as `prepareLeaseCreate`,
   `createServerWithFallback`, `finalizeLeaseCreate`, and `hourlyPriceUSD`.
 
+Azure and GCP share an instance-scoped expiring-token cache. Concurrent requests
+on one client join the same refresh; failures clear the pending refresh so a
+later request can retry. Token acquisition, refresh margins, expiry calculation,
+and metadata-server trust/retry rules remain adapter-owned. Caches are neither
+global nor persisted, and do not fall back to expired credentials.
+
 Runtime-specific persistence and scheduling stay behind `CoordinatorRuntime`:
 
 | Runtime    | Durable state               | Scheduling                                     | WebSockets                               |

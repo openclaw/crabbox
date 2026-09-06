@@ -15,13 +15,13 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-// railwayAPI is the minimal Railway GraphQL surface the provider needs.
+// railwayAPI is the Railway GraphQL client surface.
 //
 // Railway has no synchronous exec endpoint, so the provider models a "sandbox"
-// as a Railway service inside a project. Run redeploys the latest deployment
-// via deploymentRedeploy and surfaces deployment logs; List enumerates
-// services across visible projects; Status fetches the latest deployment for a
-// service; Stop calls deploymentStop on that latest deployment.
+// as a Railway service inside a project. Run rejects arbitrary commands before
+// calling the API; List enumerates services across visible projects; Status
+// fetches the latest deployment for a service; Stop calls deploymentStop only
+// for the exact claimed deployment.
 type railwayAPI interface {
 	TriggerDeploy(ctx context.Context, projectID, environmentID, serviceID string) (string, error)
 	BuildLogs(ctx context.Context, deploymentID string, limit int) ([]string, error)

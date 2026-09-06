@@ -77,7 +77,7 @@ if [ -n "${CRABBOX_FAKE_SSH_STDIN_LOG:-}" ]; then`, 1))
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["delete"] != true || body["expectedProvider"] != "aws" {
 				t.Errorf("invalid release body=%v err=%v", body, err)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: id, Provider: "aws", State: "released"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": confirmedCoordinatorRelease(id, "aws")})
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)

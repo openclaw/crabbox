@@ -224,10 +224,14 @@ mutating workspaces.
 ### aws — Windows
 
 `--provider aws --target windows --windows-mode normal --desktop` creates a real
-AWS Windows Server lease. EC2Launch user data installs OpenSSH Server, Git for
-Windows, TightVNC Server, a per-lease local administrator named `crabbox`, and a
-loopback VNC password retrievable through `crabbox vnc --id <lease>`. The
-OpenSSH, Git, and TightVNC downloads are SHA-256 verified before use.
+AWS Windows Server lease. EC2Launch user data enables the initial OpenSSH
+connection on port `22`. Crabbox then runs its Windows bootstrap over that
+connection, installing Git for Windows and TightVNC, configuring the final SSH
+ports and a per-lease local administrator named `crabbox`, and preparing a
+loopback VNC password retrievable through `crabbox vnc --id <lease>`. Crabbox's
+OpenSSH, Git, and TightVNC downloads are SHA-256 verified before use. An explicitly
+selected workload port does not remove an advertised initial bootstrap route;
+see [Windows bootstrap](../features/vnc-windows.md).
 
 `--provider aws --target windows --windows-mode wsl2` still creates a Windows
 Server host, then enables WSL, VirtualMachinePlatform, and HypervisorPlatform,

@@ -18,6 +18,9 @@ func (Provider) Name() string      { return tenkiProvider }
 func (Provider) Aliases() []string { return nil }
 
 func (Provider) ClaimScope(cfg core.Config) string {
+	// Workspace and project no longer select Tenki CLI inventory. Keep them in
+	// the local claim identity so older scoped leases can still be resolved and
+	// released without weakening their original ownership fence.
 	endpoint := strings.TrimRight(strings.TrimSpace(cfg.Tenki.Endpoint), "/")
 	if endpoint == "" {
 		endpoint = "default"

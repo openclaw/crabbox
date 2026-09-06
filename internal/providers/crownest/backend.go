@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -158,11 +159,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 			}
 		}()
 	}
-	command, err := buildCommand(req.Command, req.ShellMode)
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
 		return RunResult{}, err
 	}
-	commandText := shellScriptFromArgv(command)
+	commandText := intent.ShellCommand("bash", "-lc")
 	commandEnv, stripped := commandEnv(req.Env)
 	if len(stripped) > 0 {
 		fmt.Fprintf(b.rt.Stderr, "warning: provider=crownest did not forward provider authentication variables: %s\n", strings.Join(stripped, ","))
@@ -864,22 +865,6 @@ func claimScope(baseURL string, cfg Config) string {
 		"project:" + strings.TrimSpace(cfg.Crownest.ProjectID),
 		"template:" + strings.TrimSpace(cfg.Crownest.Template),
 	}, "|")
-}
-
-func buildCommand(command []string, shellMode bool) ([]string, error) {
-	if len(command) == 0 {
-		return nil, errors.New("missing command")
-	}
-	if shellMode {
-		return []string{"bash", "-lc", strings.Join(command, " ")}, nil
-	}
-	if shouldUseShell(command) || leadingEnvAssignment(command) {
-		if len(command) == 1 {
-			return []string{"bash", "-lc", command[0]}, nil
-		}
-		return []string{"bash", "-lc", shellScriptFromArgv(command)}, nil
-	}
-	return command, nil
 }
 
 func commandEnv(env map[string]string) (map[string]string, []string) {

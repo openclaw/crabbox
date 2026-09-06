@@ -297,6 +297,12 @@ Resolution order:
 This is why `--id blue-lobster` can select both the canonical lease and its
 provider before provider credentials or configuration are validated. Exact IDs
 remain deterministic even when another claim uses the same text as a slug.
+Canonical IDs never fall back to a normalized local slug: if
+`cbx_abcdef123456` has no matching claim, a different lease named
+`cbx-abcdef123456` is not selected through that slug, nor is its provider. Exact
+native provider-ID matching remains available where supported. The normal
+provider-specific missing-claim or inventory-recovery behavior still applies.
+Use the hyphenated slug explicitly to select that other lease.
 
 ## Identifier Lifetime
 

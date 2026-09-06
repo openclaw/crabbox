@@ -1048,6 +1048,121 @@ func TestStaticLeaseBypassesCoordinatorAndUsesTargetServerType(t *testing.T) {
 	}
 }
 
+func TestCommandIntentArgv(t *testing.T) {
+	tests := []struct {
+		name    string
+		command []string
+		shell   bool
+		literal map[int]bool
+		want    []string
+	}{
+		{"literal argv", []string{"printf", "%s", "a b", ""}, false, nil, []string{"printf", "%s", "a b", ""}},
+		{"single inferred source", []string{"printf 'a b'"}, false, nil, []string{"bash", "-lc", "printf 'a b'"}},
+		{"explicit source", []string{"printf", "'%s'", "'a b'"}, true, nil, []string{"bash", "-lc", "printf '%s' 'a b'"}},
+		{"empty explicit source", []string{""}, true, nil, []string{"bash", "-lc", ""}},
+		{"operators", []string{"echo", "a b", "&&", "echo", "done"}, false, nil, []string{"bash", "-lc", "'echo' 'a b' && 'echo' 'done'"}},
+		{"assignment", []string{"FOO=a b", "printenv", "FOO"}, false, nil, []string{"bash", "-lc", "FOO='a b' 'printenv' 'FOO'"}},
+		{"invalid assignment is executable", []string{"bad-name=x", "arg"}, false, nil, []string{"bad-name=x", "arg"}},
+		{"literal assignment executable", []string{"FOO=x", "argument"}, false, map[int]bool{0: true}, []string{"FOO=x", "argument"}},
+		{"literal operator", []string{"echo", "&&"}, false, map[int]bool{1: true}, []string{"echo", "&&"}},
+		{"literal single source", []string{"echo ok && false"}, false, map[int]bool{0: true}, []string{"echo ok && false"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			intent, err := ParseCommandIntent(tt.command, tt.shell, tt.literal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := intent.Argv("bash", "-lc"); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("argv=%q want=%q", got, tt.want)
+			}
+			// Neither caller mutations nor a rendered transport may change the intent.
+			tt.command[0] = "changed"
+			prefix := []string{"bash", "-lc", "spare"}[:2]
+			first := intent.Argv(prefix...)
+			first[0] = "changed"
+			if got := intent.Argv("bash", "-lc"); !reflect.DeepEqual(got, tt.want) || prefix[0] != "bash" {
+				t.Fatalf("intent or prefix aliased caller storage: argv=%q prefix=%q", got, prefix)
+			}
+		})
+	}
+	if _, err := ParseCommandIntent(nil, false, nil); err == nil || err.Error() != "missing command" {
+		t.Fatalf("missing command error=%v", err)
+	}
+}
+
+func TestCommandIntentNativeTransport(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX command transport")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash unavailable")
+	}
+	home := t.TempDir()
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "FOO=x"), []byte("#!/bin/sh\nprintf literal-executable\nexit 42\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	marker := filepath.Join(home, "must-not-exist")
+	tests := []struct {
+		name    string
+		command []string
+		shell   bool
+		want    string
+		code    int
+		literal map[int]bool
+	}{
+		{"literal arguments", []string{"printf", "<%s>", "a b", "", "$HOME", "$(printf bad)", "`bad`", "*.go", "a'b"}, false, "<a b><><$HOME><$(printf bad)><`bad`><*.go><a'b>", 0, nil},
+		{"inferred source", []string{"printf '%s' 'raw source'"}, false, "raw source", 0, nil},
+		{"operators", []string{"printf", "%s", "first", "&&", "printf", "%s", "second"}, false, "firstsecond", 0, nil},
+		{"environment", []string{"CBX_NATIVE_VALUE=a b", "printenv", "CBX_NATIVE_VALUE"}, false, "a b\n", 0, nil},
+		{"explicit source", []string{"printf '%s' 'explicit source'"}, true, "explicit source", 0, nil},
+		{"empty source", []string{""}, true, "", 0, nil},
+		{"nonzero exit", []string{"exit 42"}, true, "", 42, nil},
+		{"literal assignment executable", []string{"FOO=x"}, false, "literal-executable", 42, nil},
+		{"literal assignment with argument", []string{"FOO=x", "argument"}, false, "literal-executable", 42, map[int]bool{0: true}},
+		{"literal separator", []string{"printf", "%s", ";", "touch", marker}, false, ";touch" + marker, 0, map[int]bool{2: true}},
+		{"literal mixed with intentional operator", []string{"printf", "%s", ";", "&&", "printf", "%s", "done"}, false, ";done", 0, map[int]bool{2: true}},
+	}
+	for _, tt := range tests {
+		for _, transport := range []string{"argv", "command", "source"} {
+			t.Run(fmt.Sprintf("%s/transport=%s", tt.name, transport), func(t *testing.T) {
+				intent, err := ParseCommandIntent(tt.command, tt.shell, tt.literal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				argv := intent.Argv(bash, "-lc")
+				if transport == "command" {
+					argv = []string{"/bin/sh", "-c", intent.ShellCommand(bash, "-lc")}
+				} else if transport == "source" {
+					argv = []string{"/bin/sh", "-c", intent.ShellSource()}
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+				cmd.Env = []string{"HOME=" + home, "PATH=" + bin + ":" + filepath.Dir(bash) + ":/usr/bin:/bin", "BASH_ENV=" + os.DevNull, "ENV=" + os.DevNull}
+				out, err := cmd.CombinedOutput()
+				code := 0
+				if err != nil {
+					var exitErr *exec.ExitError
+					if !errors.As(err, &exitErr) {
+						t.Fatal(err)
+					}
+					code = exitErr.ExitCode()
+				}
+				if string(out) != tt.want || code != tt.code {
+					t.Fatalf("output=%q exit=%d want=%q exit=%d", out, code, tt.want, tt.code)
+				}
+			})
+		}
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("literal separator created marker: %v", err)
+	}
+}
+
 func TestShouldUseShellForControlOperators(t *testing.T) {
 	if !shouldUseShell([]string{"pnpm", "install", "&&", "pnpm", "test"}) {
 		t.Fatal("expected shell mode for && token")
@@ -6321,5 +6436,54 @@ $t=$raw.WriteAsync($b,0,$b.Length);if(!$t.Wait(5000)){exit 74};$null=$t.GetAwait
 				t.Fatalf("post-preamble bytes=%x err=%v", got, err)
 			}
 		})
+	}
+}
+
+func TestCommandIntentShellSourceKeepsExistingShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell context")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh unavailable")
+	}
+	root := t.TempDir()
+	source, err := ParseCommandIntent([]string{`printf '%s:' "$hidden"; say "$1"; exit 7`}, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prelude := `hidden=local; say() { printf '%s' "$1"; }; set -- argument; trap 'printf :trap' EXIT; `
+	cmd := exec.Command(sh, "-c", prelude+source.ShellSource())
+	cmd.Env = []string{"HOME=" + root, "PATH=/usr/bin:/bin", "ENV=" + os.DevNull}
+	out, runErr := cmd.CombinedOutput()
+	var ee *exec.ExitError
+	if !errors.As(runErr, &ee) || ee.ExitCode() != 7 || string(out) != "local:argument:trap" {
+		t.Fatalf("existing shell output=%q err=%v", out, runErr)
+	}
+	program := filepath.Join(root, "argv-program")
+	if err := os.WriteFile(program, []byte("#!/bin/sh\nprintf argv\nexit 42\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	argv, err := ParseCommandIntent([]string{program}, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command(sh, "-c", `trap 'printf old-shell-trap' EXIT; `+argv.ShellSource()+`; printf old-shell-suffix`)
+	cmd.Env = []string{"HOME=" + root, "PATH=/usr/bin:/bin", "ENV=" + os.DevNull}
+	out, runErr = cmd.CombinedOutput()
+	if !errors.As(runErr, &ee) || ee.ExitCode() != 42 || string(out) != "argv" {
+		t.Fatalf("terminal exec output=%q err=%v", out, runErr)
+	}
+	for _, tc := range []struct {
+		shell bool
+		want  string
+	}{{true, ""}, {false, "exec ''"}} {
+		intent, err := ParseCommandIntent([]string{""}, tc.shell, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := intent.ShellSource(); got != tc.want {
+			t.Fatalf("empty source shell=%t got=%q want=%q", tc.shell, got, tc.want)
+		}
 	}
 }

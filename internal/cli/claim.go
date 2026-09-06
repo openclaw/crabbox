@@ -1189,6 +1189,14 @@ func canonicalClaimProvider(provider string) string {
 	return normalizeProviderName(provider)
 }
 
+func claimLookupSlug(identifier string) string {
+	// A missing canonical ID must not select a different lease's lookalike slug.
+	if isCanonicalLeaseID(identifier) {
+		return ""
+	}
+	return normalizeLeaseSlug(identifier)
+}
+
 func claimProviderForIdentifier(identifier string) (string, bool, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
@@ -1206,7 +1214,7 @@ func claimProviderForIdentifier(identifier string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	slug := normalizeLeaseSlug(identifier)
+	slug := claimLookupSlug(identifier)
 	provider := ""
 	for _, claim := range claims {
 		if claim.LeaseID != identifier && (slug == "" || normalizeLeaseSlug(claim.Slug) != slug) {
@@ -1253,7 +1261,7 @@ func resolveLeaseClaim(identifier string) (leaseClaim, bool, error) {
 	if err != nil {
 		return leaseClaim{}, false, exit(2, "read claims directory: %v", err)
 	}
-	slug := normalizeLeaseSlug(identifier)
+	slug := claimLookupSlug(identifier)
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
@@ -1377,7 +1385,7 @@ func leaseClaimMatchesIdentifier(claim leaseClaim, identifier string) bool {
 	if claim.LeaseID == identifier || claim.CloudID == identifier {
 		return true
 	}
-	slug := normalizeLeaseSlug(identifier)
+	slug := claimLookupSlug(identifier)
 	return slug != "" && normalizeLeaseSlug(claim.Slug) == slug
 }
 
@@ -1396,7 +1404,7 @@ func findLeaseClaim(identifier string, match func(leaseClaim) bool) (leaseClaim,
 	if err != nil {
 		return leaseClaim{}, false, exit(2, "read claims directory: %v", err)
 	}
-	slug := normalizeLeaseSlug(identifier)
+	slug := claimLookupSlug(identifier)
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
@@ -1428,7 +1436,7 @@ func findUniqueLeaseClaim(identifier string, match func(leaseClaim) bool) (lease
 	if err != nil {
 		return leaseClaim{}, false, exit(2, "read claims directory: %v", err)
 	}
-	slug := normalizeLeaseSlug(identifier)
+	slug := claimLookupSlug(identifier)
 	var found leaseClaim
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
@@ -1827,23 +1835,6 @@ func validateLeaseClaimFileIdentity(leaseID string, claim leaseClaim, exists boo
 		}
 	}
 	return nil
-}
-
-func leaseClaimExists(leaseID string) (bool, error) {
-	path, err := leaseClaimPath(leaseID)
-	if err != nil {
-		var invalid invalidLeaseClaimIDError
-		if errors.As(err, &invalid) {
-			return false, nil
-		}
-		return false, err
-	}
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	} else if err != nil {
-		return false, exit(2, "inspect claim %s: %v", path, err)
-	}
-	return true, nil
 }
 
 func readLeaseClaimPathWithPresence(path string) (leaseClaim, bool, error) {

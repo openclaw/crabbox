@@ -192,7 +192,13 @@ func writeArtifactGlobMatcher(b *strings.Builder) {
 }
 
 func writeArtifactGlobEnumeration(b *strings.Builder, glob, addFunction string) {
-	b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(artifactGlobSearchRoot(glob)) + "; if artifact_safe_search_root \"$artifact_root\"; then while IFS= read -r -d '' f; do rel=$(artifact_rel_path \"$f\") || continue; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then " + addFunction + " \"$f\"; fi; done < <(find \"$artifact_root\" \\( -name .git -o -name .crabbox \\) -prune -o \\( -type f -o -type l \\) -print0); fi\n")
+	depth := ""
+	// Literal globs need only their guarded parent. Keep case folding and
+	// filename normalization in the existing matcher rather than a name prefilter.
+	if !strings.ContainsAny(glob, "*?") {
+		depth = " -mindepth 1 -maxdepth 1"
+	}
+	b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(artifactGlobSearchRoot(glob)) + "; if artifact_safe_search_root \"$artifact_root\"; then while IFS= read -r -d '' f; do rel=$(artifact_rel_path \"$f\") || continue; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then " + addFunction + " \"$f\"; fi; done < <(find \"$artifact_root\"" + depth + " \\( -name .git -o -name .crabbox \\) -prune -o \\( -type f -o -type l \\) -print0); fi\n")
 }
 
 func runArtifactRequireScript(workdir string, globs []string) string {

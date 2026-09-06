@@ -187,7 +187,15 @@ and are not supported by Docker Sandbox.
 Coordinator-backed stops refresh guest connection state inside the release owner.
 A confirmed deletion skips guest SSH cleanup and repeats only local connection
 cleanup, without another provider release request. Retained machines and pending
-or failed provider cleanup do not count as confirmed deletion.
+or failed provider cleanup do not count as confirmed deletion. Confirmation
+requires the coordinator's `cleanupCompletedAt` fact and a hostless public record;
+`released` state or an accepted provider DELETE alone is insufficient.
+
+An explicit stop of a historical managed lease that still has provider identity
+but lacks `cleanupCompletedAt` asks the coordinator to re-observe and clean that
+exact owned resource. Local claims and SSH artifacts remain until the retry
+publishes completion. During rollout, deploy the coordinator Worker before using
+a CLI version that requires this completion fact.
 
 For SSH leases, shared connection cleanup makes best-effort attempts to signal
 [Actions hydration](../features/actions-hydration.md) shutdown, stop local

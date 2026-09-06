@@ -213,7 +213,7 @@ func TestStopCoordinatorStalledLookup(t *testing.T) {
 						http.Error(w, "invalid release", http.StatusBadRequest)
 						return
 					}
-					_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: "cbx_abcdef123456", Provider: "aws", State: "released"}})
+					_ = json.NewEncoder(w).Encode(map[string]any{"lease": confirmedCoordinatorRelease("cbx_abcdef123456", "aws")})
 				default:
 					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 					http.NotFound(w, r)

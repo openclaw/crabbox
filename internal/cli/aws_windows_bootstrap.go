@@ -5,36 +5,56 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 )
 
 func bootstrapManagedWindowsDesktop(ctx context.Context, cfg Config, target *SSHTarget, publicKey string, stderr io.Writer) error {
+	initial := managedWindowsBootstrapTarget(cfg, *target, sshPortCandidates(target.Port, target.FallbackPorts))
+	return bootstrapPreparedManagedWindowsDesktop(ctx, cfg, target, initial, publicKey, stderr)
+}
+
+func managedWindowsBootstrapTarget(cfg Config, target SSHTarget, authorizedPorts []string) SSHTarget {
+	initial := target
+	if cfg.TargetOS != targetWindows {
+		return initial
+	}
+	if cfg.Provider == "aws" || cfg.WindowsMode == windowsModeWSL2 {
+		initial.WindowsMode = windowsModeNormal
+		initial.ReadyCheck = powershellCommand(`$PSVersionTable.PSVersion | Out-Null`)
+	}
+	if cfg.Provider == "aws" {
+		initial.User = "Administrator"
+		// EC2Launch needs port 22 before workload port pinning takes effect.
+		// Retain only advertised routes, adding just that initial foothold.
+		initial.FallbackPorts = []string{}
+		for _, port := range uniqueSSHPorts(authorizedPorts) {
+			if port != initial.Port && (port == "22" || slices.Contains(target.FallbackPorts, port)) {
+				initial.FallbackPorts = append(initial.FallbackPorts, port)
+			}
+		}
+	}
+	return initial
+}
+
+func bootstrapPreparedManagedWindowsDesktop(ctx context.Context, cfg Config, target *SSHTarget, bootstrapTarget SSHTarget, publicKey string, stderr io.Writer) error {
 	if cfg.TargetOS != targetWindows {
 		return waitForSSHReady(ctx, target, stderr, "bootstrap", bootstrapWaitTimeout(cfg))
 	}
 	if cfg.WindowsMode == windowsModeWSL2 {
-		bootstrapTarget := *target
-		bootstrapTarget.WindowsMode = windowsModeNormal
-		bootstrapTarget.ReadyCheck = powershellCommand(`$PSVersionTable.PSVersion | Out-Null`)
 		if cfg.Provider == "aws" {
-			bootstrapTarget.User = "Administrator"
 			target.User = "Administrator"
 		}
 		return bootstrapManagedWindowsWSL2(ctx, cfg, target, bootstrapTarget, publicKey, stderr)
 	}
 	if cfg.Provider == "azure" && cfg.WindowsMode == windowsModeNormal && cfg.Desktop {
-		bootstrapTarget := *target
 		return runWindowsBootstrapOverSSH(ctx, cfg, target, bootstrapTarget, publicKey, stderr, "Windows desktop bootstrap")
 	}
 	if cfg.Provider != "aws" {
 		return waitForSSHReady(ctx, target, stderr, "bootstrap", bootstrapWaitTimeout(cfg))
 	}
-	bootstrapTarget := *target
-	bootstrapTarget.User = "Administrator"
-	bootstrapTarget.WindowsMode = windowsModeNormal
-	bootstrapTarget.ReadyCheck = powershellCommand(`$PSVersionTable.PSVersion | Out-Null`)
 	phase := "Windows core bootstrap"
 	if cfg.Desktop {
 		phase = "Windows desktop bootstrap"
@@ -171,6 +191,12 @@ func bootstrapManagedWindowsWSL2(ctx context.Context, cfg Config, target *SSHTar
 		err := runWindowsWSL2BootstrapAttempt(ctx, cfg, bootstrapTarget, publicKey, bootstrapWriter)
 		if err != nil {
 			writeWindowsBootstrapSSHWarning(stderr, "Windows WSL2 bootstrap", err, bootstrapOutput.String())
+		}
+		if cfg.Provider == "aws" && IsSSHPortExplicit(&cfg) {
+			// After initial setup, reboot readiness and later setup stages must
+			// use the workload route, never promote the initial foothold to it.
+			bootstrapTarget.Port = target.Port
+			bootstrapTarget.FallbackPorts = target.FallbackPorts
 		}
 		if err := waitForWindowsBootstrapSSHReady(ctx, &bootstrapTarget, stderr, 20*time.Minute); err != nil {
 			return err

@@ -30,6 +30,7 @@ import {
   awsMacOSInstanceTypeCandidates,
   awsPromotedAMIConfigKey,
   leaseConfig,
+  type LeaseConfig,
 } from "../src/config";
 
 afterEach(() => {
@@ -1661,31 +1662,74 @@ describe("aws provider", () => {
     expect(isRetryableAWSProvisioningError(imageMiss)).toBe(true);
   });
 
-  it("sends compressed Linux cloud-init user data to RunInstances", async () => {
-    let userData = "";
-    let runImage = "";
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const request = input instanceof Request ? input : new Request(input, init);
-        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
-          return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
-            headers: { "content-type": "application/json" },
-          });
-        }
-        const params = new URLSearchParams(await request.clone().text());
-        const action = params.get("Action") ?? "";
-        const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(action, params);
-        if (securityGroupResponse) {
-          return securityGroupResponse;
-        }
-        if (action === "DescribeKeyPairs") {
-          return ec2XMLResponse(
-            `<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-cbx</keyName><publicKey>ssh-rsa ${"a".repeat(724)}</publicKey></item></keySet></DescribeKeyPairsResponse>`,
-          );
-        }
-        if (action === "DescribeImages") {
-          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+  it.each<[string, Partial<LeaseConfig>, string, string, string, boolean]>([
+    ["stock", {}, "", "ami-linux", "stock", true],
+    ["forced stock", { awsUseStockImage: true }, "ami-env", "ami-linux", "stock", true],
+    ["environment AMI", {}, "ami-env", "ami-env", "explicit", false],
+    ["request AMI", { awsAMI: "ami-request" }, "", "ami-request", "explicit", false],
+    [
+      "request before environment AMI",
+      { awsAMI: "ami-request" },
+      "ami-env",
+      "ami-request",
+      "explicit",
+      false,
+    ],
+    ["explicit stock AMI", { awsAMI: "ami-linux" }, "", "ami-linux", "explicit", false],
+    [
+      "promoted AMI",
+      {
+        awsAMI: "ami-promoted",
+        selectedImage: {
+          id: "ami-promoted",
+          source: "promoted",
+          provider: "aws",
+          kind: "aws-ami",
+          region: "us-east-1",
+        },
+      },
+      "",
+      "ami-promoted",
+      "promoted",
+      false,
+    ],
+    [
+      "ARM stock",
+      { architecture: "arm64", serverType: "c7g.8xlarge" },
+      "",
+      "ami-linux",
+      "stock",
+      false,
+    ],
+    ["Ubuntu 24.04 stock", { os: "ubuntu:24.04" }, "", "ami-linux", "stock", false],
+  ])(
+    "sends image-owned Linux cloud-init for %s",
+    async (_name, overrides, envAMI, imageID, source, aptOverride) => {
+      let userData = "";
+      let runImage = "";
+      let runLabels: Record<string, string> = {};
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = input instanceof Request ? input : new Request(input, init);
+          if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+            return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
+              headers: { "content-type": "application/json" },
+            });
+          }
+          const params = new URLSearchParams(await request.clone().text());
+          const action = params.get("Action") ?? "";
+          const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(action, params);
+          if (securityGroupResponse) {
+            return securityGroupResponse;
+          }
+          if (action === "DescribeKeyPairs") {
+            return ec2XMLResponse(
+              `<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-cbx</keyName><publicKey>ssh-rsa ${"a".repeat(724)}</publicKey></item></keySet></DescribeKeyPairsResponse>`,
+            );
+          }
+          if (action === "DescribeImages") {
+            return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
 <DescribeImagesResponse>
   <imagesSet>
     <item>
@@ -1696,11 +1740,16 @@ describe("aws provider", () => {
     </item>
   </imagesSet>
 </DescribeImagesResponse>`);
-        }
-        if (action === "RunInstances") {
-          userData = params.get("UserData") ?? "";
-          runImage = params.get("ImageId") ?? "";
-          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+          }
+          if (action === "RunInstances") {
+            userData = params.get("UserData") ?? "";
+            runImage = params.get("ImageId") ?? "";
+            runLabels = Object.fromEntries(
+              [...params.entries()]
+                .filter(([key]) => /^TagSpecification\.1\.Tag\.\d+\.Key$/.test(key))
+                .map(([key, value]) => [value, params.get(key.replace(/\.Key$/, ".Value")) ?? ""]),
+            );
+            return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
 <RunInstancesResponse>
   <instancesSet>
     <item>
@@ -1711,49 +1760,66 @@ describe("aws provider", () => {
     </item>
   </instancesSet>
 </RunInstancesResponse>`);
-        }
-        return ec2XMLResponse(
-          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
-          500,
-        );
-      }),
-    );
-
-    const client = new EC2SpotClient(
-      {
-        AWS_ACCESS_KEY_ID: "test",
-        AWS_SECRET_ACCESS_KEY: "secret",
-        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
-        CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
-        CRABBOX_AWS_AMI: "ami-custom",
-      } as never,
-      "us-east-1",
-    );
-    await client.createServerWithFallback(
-      {
-        ...leaseConfig({
-          provider: "aws",
-          target: "linux",
-          class: "standard",
-          desktop: true,
-          browser: true,
-          sshPublicKey: `ssh-rsa ${"a".repeat(724)}`,
+          }
+          return ec2XMLResponse(
+            `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+            500,
+          );
         }),
-        awsUseStockImage: true,
-      },
-      "cbx_abcdef123456",
-      "violet-prawn",
-      "alice@example.com",
-    );
+      );
 
-    expect(runImage).toBe("ami-linux");
-    expect(atob(userData).length).toBeLessThan(16 * 1024);
-    expect(await gunzipBase64(userData)).toContain("crabbox-configure-desktop-theme");
-  });
+      const client = new EC2SpotClient(
+        {
+          AWS_ACCESS_KEY_ID: "test",
+          AWS_SECRET_ACCESS_KEY: "secret",
+          CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+          CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
+          CRABBOX_AWS_AMI: envAMI,
+        } as never,
+        "us-east-1",
+      );
+      await client.createServerWithFallback(
+        {
+          ...leaseConfig({
+            provider: "aws",
+            target: "linux",
+            class: "standard",
+            desktop: true,
+            browser: true,
+            sshPublicKey: `ssh-rsa ${"a".repeat(724)}`,
+          }),
+          ...overrides,
+        },
+        "cbx_abcdef123456",
+        "violet-prawn",
+        "alice@example.com",
+      );
+
+      expect(runImage).toBe(imageID);
+      expect(runLabels["image_id"]).toBe(imageID);
+      expect(runLabels["image_source"]).toBe(source);
+      expect(atob(userData).length).toBeLessThan(16 * 1024);
+      const decoded = await gunzipBase64(userData);
+      expect(decoded).toContain("crabbox-configure-desktop-theme");
+      expect(decoded.includes("\napt:\n")).toBe(aptOverride);
+      expect(
+        decoded.includes(
+          "primary:\n    - arches: [amd64]\n      uri: https://archive.ubuntu.com/ubuntu/",
+        ),
+      ).toBe(aptOverride);
+      expect(
+        decoded.includes(
+          "security:\n    - arches: [amd64]\n      uri: http://security.ubuntu.com/ubuntu/",
+        ),
+      ).toBe(aptOverride);
+      expect(decoded).not.toContain("preserve_sources_list:");
+    },
+  );
 
   it("uses the capability-selected AMI for a Linux region", async () => {
     let imageQueries = 0;
     let runImage = "";
+    let userData = "";
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1778,6 +1844,7 @@ describe("aws provider", () => {
         }
         if (action === "RunInstances") {
           runImage = params.get("ImageId") ?? "";
+          userData = params.get("UserData") ?? "";
           return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
 <RunInstancesResponse><instancesSet><item>
   <instanceId>i-linux</instanceId><instanceType>t3.small</instanceType>
@@ -1818,6 +1885,7 @@ describe("aws provider", () => {
 
     expect(runImage).toBe("ami-capable");
     expect(imageQueries).toBe(0);
+    expect(await gunzipBase64(userData)).not.toContain("\napt:\n");
   });
 
   it("resolves macOS AMIs per fallback instance type", async () => {
@@ -2680,18 +2748,9 @@ describe("aws provider", () => {
       ensureSecurityGroup: () => Promise<string>;
       quotaPreflightAttempt: () => Promise<undefined>;
       ec2: (action: string, params?: Record<string, string>) => Promise<unknown>;
-      createServer: (...args: unknown[]) => Promise<{
-        provider: "aws";
-        id: number;
-        cloudID: string;
-        name: string;
-        status: string;
-        serverType: string;
-        host: string;
-        labels: Record<string, string>;
-      }>;
     };
     const calls: string[] = [];
+    let userData = "";
     client.ensureSSHKey = async () => {
       calls.push("ensure-key");
     };
@@ -2710,20 +2769,19 @@ describe("aws provider", () => {
     client.quotaPreflightAttempt = async () => undefined;
     client.ec2 = async (action, params) => {
       calls.push(`${action}:${params?.ImageId ?? ""}`);
+      if (action === "RunInstances") {
+        userData = params?.UserData ?? "";
+        return {
+          instancesSet: {
+            item: {
+              instanceId: "i-123",
+              instanceType: "t3.small",
+              instanceState: { name: "running" },
+            },
+          },
+        };
+      }
       return {};
-    };
-    client.createServer = async (...args: unknown[]) => {
-      calls.push(`launch:${String(args[4])}`);
-      return {
-        provider: "aws",
-        id: 1,
-        cloudID: "i-123",
-        name: "crabbox-blue-lobster",
-        status: "running",
-        serverType: "t3.small",
-        host: "192.0.2.10",
-        labels: {},
-      };
     };
 
     await client.createServerWithFallback(
@@ -2745,9 +2803,10 @@ describe("aws provider", () => {
       "register-snapshot",
       "wait:ami-transient",
       "security-group",
-      "launch:ami-transient",
+      "RunInstances:ami-transient",
       "DeregisterImage:ami-transient",
     ]);
+    expect(await gunzipBase64(userData)).not.toContain("\napt:\n");
   });
 
   it("deregisters transient AMIs when snapshot image waiting fails", async () => {

@@ -2845,6 +2845,27 @@ func TestConfirmedAbsentLocalCleanupPreservesReplacedRouting(t *testing.T) {
 	}
 }
 
+func TestResolveClaimDoesNotTreatCanonicalIDAsSlug(t *testing.T) {
+	root := isolateCrabboxState(t)
+	cfg := testConfig()
+	const leaseID = "cbx_bbbbbbbbbbbb"
+	const requestedID = "cbx_aaaaaaaaaaaa"
+	claimExternalLease(t, cfg, leaseID, "cbx-aaaaaaaaaaaa", root, time.Minute, false)
+	backend := &leaseBackend{cfg: cfg}
+	if claim, ok, err := backend.resolveClaim(requestedID); err != nil || ok || claim.LeaseID != "" {
+		t.Errorf("missing canonical ID selected alias: claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+	if claim, ok, err := backend.resolveClaim("cbx-aaaaaaaaaaaa"); err != nil || !ok || claim.LeaseID != leaseID {
+		t.Fatalf("explicit slug: claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+	if err := core.UpdateLeaseClaimEndpoint(leaseID, core.Server{CloudID: requestedID}, core.SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	if claim, ok, err := backend.resolveClaim(requestedID); err != nil || !ok || claim.LeaseID != leaseID {
+		t.Fatalf("exact native ID must remain supported: claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+}
+
 func TestResolveClaimMatchesCloudID(t *testing.T) {
 	root := isolateCrabboxState(t)
 	cfg := testConfig()

@@ -95,6 +95,19 @@ test("artifact and catalog schemas reject malformed or ambiguous data", () => {
   assert.throws(() => fragmentTokens({ name: "test", source: "", parameters: { user: "sh-string" } }, sources.constants));
 });
 
+test("literal fragments preserve shell braces without relaxing templates", async () => {
+  assert.equal(shared.sharedGnomeDesktopTheme(), await readFile(resolve(repoRoot, "recipes/bootstrap/v1/gnomeDesktopTheme.sh"), "utf8"));
+  const source = '${1:-${CRABBOX_DESKTOP_THEME:-}} {{sh:defaultTailscaleVersion}} {{broken';
+  const fragment = { name: "theme", source, parameters: {}, literal: true };
+  assert.deepEqual(fragmentTokens(fragment, sources.constants), [{ literal: source }]);
+  const { literal, ...template } = fragment;
+  assert.throws(() => fragmentTokens(template, sources.constants), /malformed placeholder/);
+  for (const literal of [false, null, "true", 1, undefined]) {
+    assert.throws(() => fragmentTokens({ ...fragment, literal }, sources.constants), /literal fragments/);
+  }
+  assert.throws(() => fragmentTokens({ ...fragment, parameters: { user: "sh-string" } }, sources.constants), /no parameters/);
+});
+
 test("compiled Go and TypeScript agree exactly for every shared fragment and fixture", async (t) => {
   const directory = await temporary(t);
   const expected = {};

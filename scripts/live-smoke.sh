@@ -264,8 +264,8 @@ provider_smoke() (
   trap cleanup EXIT
 
   local out
-  capture_run out run_in_repo "$cb" warmup --provider "$provider" "$@"
-  printf '%s\n' "$out"
+  log_step "$provider warmup"
+  capture_run_live out run_in_repo "$cb" warmup --provider "$provider" "$@"
   lease="$(printf '%s\n' "$out" | extract_lease)"
   slug="$(printf '%s\n' "$out" | extract_slug)"
   test -n "$lease"
@@ -290,8 +290,8 @@ provider_smoke() (
 
   local runout
   # shellcheck disable=SC2016 # expanded by the remote shell.
-  capture_run runout run_in_repo "$cb" run --provider "$provider" --id "$slug" --shell -- "$live_command"
-  printf '%s\n' "$runout"
+  log_step "$provider run slug=$slug"
+  capture_run_live runout run_in_repo "$cb" run --provider "$provider" --id "$slug" --shell -- "$live_command"
   local runid
   runid="$(printf '%s\n' "$runout" | rg -o 'run_[a-f0-9]{12}' | tail -1 || true)"
   if needs_coordinator_preamble; then
@@ -1009,6 +1009,15 @@ tenki_smoke() {
     echo "tenki list JSON missing lease=$lease session=$session" >&2
     return 1
   fi
+  local all_list_json
+  capture_stdout all_list_json run_in_repo "$cb" list --provider tenki --all --json
+  printf '%s\n' "$all_list_json" | jq --arg lease "$lease" --arg session "$session" \
+    '{items:length, smoke_matches:(map(select(.id == $lease and .serverId == $session and .provider == "tenki")) | length), unmanaged:(map(select((.labels.crabbox // "") != "true")) | length)}'
+  if ! printf '%s\n' "$all_list_json" | jq -e --arg lease "$lease" --arg session "$session" \
+    'any(.[]; .id == $lease and .serverId == $session and .provider == "tenki")' >/dev/null; then
+    echo "tenki list --all JSON missing lease=$lease session=$session" >&2
+    return 1
+  fi
 
   "$tenki_cli" sandbox pause "${tenki_sandbox_args[@]}" --session "$session"
   local pause_timeout="${CRABBOX_LIVE_TENKI_PAUSE_TIMEOUT:-60}"
@@ -1044,6 +1053,13 @@ tenki_smoke() {
   echo "tenki paused-session readiness check preserved state=paused"
 
   stop_provider_lease tenki "$lease" "$slug"
+  local claims_json
+  capture_stdout claims_json run_in_repo "$cb" claims list --json
+  if ! printf '%s\n' "$claims_json" | jq -e --arg lease "$lease" \
+    '(.problems == []) and (.claims | type == "array") and all(.claims[]; (.leaseId | type == "string") and .leaseId != $lease)' >/dev/null; then
+    echo "tenki stop did not confirm local claim removal lease=$lease" >&2
+    return 1
+  fi
   lease=""
 }
 

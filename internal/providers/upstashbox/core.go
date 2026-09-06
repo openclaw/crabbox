@@ -1,10 +1,8 @@
 package upstashbox
 
 import (
-	"context"
 	"flag"
 	"io"
-	"os"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -20,7 +18,6 @@ type DoctorResult = core.DoctorResult
 type WarmupRequest = core.WarmupRequest
 type RunRequest = core.RunRequest
 type RunResult = core.RunResult
-type RunSessionHandle = core.RunSessionHandle
 type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
 type StatusRequest = core.StatusRequest
@@ -28,7 +25,6 @@ type StatusView = core.StatusView
 type StopRequest = core.StopRequest
 type Server = core.Server
 type Repo = core.Repo
-type SyncManifest = core.SyncManifest
 type ExitError = core.ExitError
 type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
@@ -80,20 +76,6 @@ func writeTimingJSON(w io.Writer, report timingReport) error {
 	return core.WriteTimingJSON(w, report)
 }
 
-func timingReportWithRunResult(report timingReport, result RunResult, err error) timingReport {
-	return core.TimingReportWithRunResult(report, result, err)
-}
-
-func timingReportWithProviderError(report timingReport) timingReport {
-	report.RunStatus = core.RunStatusFailed
-	report.ErrorKind = core.RunErrorProvider
-	return report
-}
-
-func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, slug string, idleTimeout, ttl time.Duration, acquired bool, shouldStop *bool) {
-	core.HandleDelegatedRunFailure(w, req, provider, leaseID, slug, idleTimeout, ttl, acquired, shouldStop)
-}
-
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
 	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
 }
@@ -104,38 +86,6 @@ func shellQuote(s string) string {
 
 func upstashBoxCleanupCommand(leaseID string) string {
 	return "crabbox stop --provider " + providerName + " " + shellQuote(leaseID)
-}
-
-func shellScriptFromArgv(command []string) string {
-	return core.ShellScriptFromArgv(command)
-}
-
-func shellWords(words []string) []string {
-	return core.ShellWords(words)
-}
-
-func shouldUseShell(command []string) bool {
-	return core.ShouldUseShell(command)
-}
-
-func leadingEnvAssignment(command []string) bool {
-	return core.LeadingEnvAssignment(command)
-}
-
-func syncExcludes(root string, cfg Config) (core.SyncExcludeRules, error) {
-	return core.SyncExcludes(root, cfg)
-}
-
-func syncManifest(root string, excludes core.SyncExcludeRules, includes []string) (SyncManifest, error) {
-	return core.BuildSyncManifestFiltered(root, excludes, includes)
-}
-
-func checkSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {
-	return core.CheckSyncPreflight(manifest, cfg, force, stderr)
-}
-
-func createPortableSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, tempPattern string) (*os.File, error) {
-	return core.CreateSyncArchive(ctx, repo, manifest, tempPattern)
 }
 
 func inventoryDoctorResult(provider string, leases int) DoctorResult {

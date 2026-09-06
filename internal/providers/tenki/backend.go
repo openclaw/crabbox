@@ -3,6 +3,7 @@ package tenki
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -36,8 +37,8 @@ func RegisterTenkiProviderFlags(fs *flag.FlagSet, defaults Config) any {
 		CLIPath:   fs.String("tenki-cli", defaults.Tenki.CLIPath, "Tenki CLI path"),
 		Endpoint:  fs.String("tenki-endpoint", defaults.Tenki.Endpoint, "Tenki sandbox API endpoint"),
 		Gateway:   fs.String("tenki-gateway", defaults.Tenki.Gateway, "Tenki sandbox SSH gateway WebSocket URL"),
-		Workspace: fs.String("tenki-workspace", defaults.Tenki.Workspace, "Tenki workspace ID"),
-		Project:   fs.String("tenki-project", defaults.Tenki.Project, "Tenki project ID"),
+		Workspace: fs.String("tenki-workspace", defaults.Tenki.Workspace, "legacy Tenki workspace claim scope for existing leases"),
+		Project:   fs.String("tenki-project", defaults.Tenki.Project, "legacy Tenki project claim scope for existing leases"),
 		Image:     fs.String("tenki-image", defaults.Tenki.Image, "Tenki sandbox registry image ref"),
 		Snapshot:  fs.String("tenki-snapshot", defaults.Tenki.Snapshot, "Tenki sandbox snapshot ID"),
 		WorkRoot:  fs.String("tenki-work-root", defaults.Tenki.WorkRoot, "Tenki remote work root"),
@@ -118,7 +119,13 @@ func NewTenkiBackend(spec ProviderSpec, cfg Config, rt Runtime) (Backend, error)
 	cfg.SSHFallbackPorts = nil
 	cfg.Network = networkPublic
 	cfg.WorkRoot = tenkiWorkRoot(cfg)
-	return &tenkiBackend{spec: spec, cfg: cfg, rt: rt, sleep: shared.SleepContext}, nil
+	return &tenkiBackend{
+		spec:                  spec,
+		cfg:                   cfg,
+		rt:                    rt,
+		sleep:                 shared.SleepContext,
+		terminationAckTimeout: 30 * time.Second,
+	}, nil
 }
 
 func validateTenkiOptions(cfg Config) error {
@@ -145,22 +152,57 @@ func validateTenkiOptions(cfg Config) error {
 	return nil
 }
 
+func validateTenkiAcquireScope(cfg Config) error {
+	legacy := make([]string, 0, 2)
+	if strings.TrimSpace(cfg.Tenki.Workspace) != "" {
+		legacy = append(legacy, "tenki.workspace/--tenki-workspace")
+	}
+	if strings.TrimSpace(cfg.Tenki.Project) != "" {
+		legacy = append(legacy, "tenki.project/--tenki-project")
+	}
+	if len(legacy) == 0 {
+		return nil
+	}
+	return exit(2, "provider=tenki cannot use %s for a new lease: the current Tenki CLI selects its workspace from the authenticated API key; remove the legacy setting and run `tenki login` for the intended workspace (legacy values remain accepted only to resolve or release existing leases)", strings.Join(legacy, " and "))
+}
+
 func normalizeTenkiProviderConfig(cfg *Config) {
 	cfg.Tenki.Image = strings.TrimSpace(cfg.Tenki.Image)
 	cfg.Tenki.Snapshot = strings.TrimSpace(cfg.Tenki.Snapshot)
 }
 
 type tenkiBackend struct {
-	spec  ProviderSpec
-	cfg   Config
-	rt    Runtime
-	sleep func(context.Context, time.Duration) error
+	spec                  ProviderSpec
+	cfg                   Config
+	rt                    Runtime
+	sleep                 func(context.Context, time.Duration) error
+	terminationAckTimeout time.Duration
+}
+
+type tenkiCLIContractError struct {
+	exitError ExitError
+}
+
+func (e *tenkiCLIContractError) Error() string {
+	return e.exitError.Error()
+}
+
+func (e *tenkiCLIContractError) Unwrap() error {
+	return e.exitError
+}
+
+func isTenkiCLIContractError(err error) bool {
+	var target *tenkiCLIContractError
+	return errors.As(err, &target)
 }
 
 func (b *tenkiBackend) Spec() ProviderSpec { return b.spec }
 
 func (b *tenkiBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
 	cfg := b.configForRun()
+	if err := validateTenkiAcquireScope(cfg); err != nil {
+		return LeaseTarget{}, err
+	}
 	leaseID := newLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
 	if err != nil {
@@ -178,7 +220,7 @@ func (b *tenkiBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTa
 		if req.Keep {
 			return
 		}
-		terminate := func() error { return b.terminateSession(context.Background(), session.ID) }
+		terminate := func() error { return b.terminateSessionAcknowledged(context.Background(), session.ID) }
 		if !claimed {
 			_ = terminate()
 			return
@@ -258,7 +300,12 @@ func (b *tenkiBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, 
 	}
 	out := make([]Server, 0, len(sessions))
 	for _, session := range sessions {
-		if !isCrabboxTenkiSession(session) {
+		managed := isCrabboxTenkiSession(session)
+		if !req.All && !managed {
+			continue
+		}
+		if !managed {
+			out = append(out, b.unmanagedSessionToServer(session))
 			continue
 		}
 		leaseID, slug := tenkiLeaseMetadata(session)
@@ -345,7 +392,7 @@ func (b *tenkiBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 		if project := claim.Labels["project_id"]; project != "" && session.ProjectID != project {
 			return exit(4, "refusing to terminate Tenki session %q: project does not match its ownership claim", sessionID)
 		}
-		return b.terminateSession(ctx, sessionID)
+		return b.terminateSessionAcknowledged(ctx, sessionID)
 	}); err != nil {
 		return err
 	}
@@ -395,7 +442,6 @@ func (b *tenkiBackend) configForRun() Config {
 
 func (b *tenkiBackend) createSession(ctx context.Context, cfg Config, name, leaseID, slug string, keep bool) (tenkiSession, error) {
 	args := b.sandboxArgs("create")
-	args = b.appendScopeArgs(args)
 	args = append(args,
 		"--no-wait",
 		"--output", "json",
@@ -438,11 +484,14 @@ func (b *tenkiBackend) createSession(ctx context.Context, cfg Config, name, leas
 	}
 	result, err := b.runTenki(ctx, args, nil, b.rt.Stderr)
 	if err != nil {
+		if isTenkiCLIContractError(err) {
+			return tenkiSession{}, err
+		}
 		return tenkiSession{}, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("tenki sandbox create failed: %v%s", err, tenkiCommandOutputDetail(result))}
 	}
 	var created tenkiSession
-	if err := json.Unmarshal([]byte(result.Stdout), &created); err != nil {
-		return tenkiSession{}, fmt.Errorf("parse tenki sandbox create JSON: %w", err)
+	if err := decodeTenkiJSON("create", result, &created); err != nil {
+		return tenkiSession{}, err
 	}
 	if strings.TrimSpace(created.ID) == "" {
 		return tenkiSession{}, exit(5, "tenki sandbox create JSON did not include a session id")
@@ -482,11 +531,14 @@ func (b *tenkiBackend) getSession(ctx context.Context, sessionID string) (tenkiS
 	args := append(b.sandboxArgs("get"), "--output", "json", sessionID)
 	result, err := b.runTenki(ctx, args, nil, nil)
 	if err != nil {
-		return tenkiSession{}, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("tenki sandbox get failed: %v", err)}
+		if isTenkiCLIContractError(err) {
+			return tenkiSession{}, err
+		}
+		return tenkiSession{}, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("tenki sandbox get failed: %v%s", err, tenkiCommandOutputDetail(result))}
 	}
 	var session tenkiSession
-	if err := json.Unmarshal([]byte(result.Stdout), &session); err != nil {
-		return tenkiSession{}, fmt.Errorf("parse tenki sandbox get JSON: %w", err)
+	if err := decodeTenkiJSON("get", result, &session); err != nil {
+		return tenkiSession{}, err
 	}
 	return session, nil
 }
@@ -527,6 +579,9 @@ func (b *tenkiBackend) resumeSession(ctx context.Context, sessionID string) erro
 	args = append(args, "--session", sessionID)
 	result, err := b.runTenki(ctx, args, nil, b.rt.Stderr)
 	if err != nil {
+		if isTenkiCLIContractError(err) {
+			return err
+		}
 		return ExitError{Code: result.ExitCode, Message: fmt.Sprintf("tenki sandbox resume failed: %v%s", err, tenkiCommandOutputDetail(result))}
 	}
 	return nil
@@ -570,6 +625,9 @@ func (b *tenkiBackend) waitForSessionState(ctx context.Context, sessionID string
 			if fetchErr == nil {
 				return done(session)
 			}
+			if isTenkiCLIContractError(fetchErr) {
+				return false, fetchErr
+			}
 			return false, nil
 		},
 		func(result shared.PollResult[tenkiSession]) {
@@ -591,19 +649,20 @@ func (b *tenkiBackend) waitForSessionState(ctx context.Context, sessionID string
 }
 
 func (b *tenkiBackend) listSessions(ctx context.Context, all bool) ([]tenkiSession, error) {
-	args := b.sandboxArgs("list")
-	args = b.appendScopeArgs(args)
-	args = append(args, "--output", "json", "--tags", "crabbox,crabbox-provider-tenki")
-	if all {
-		args = append(args, "--all")
+	args := append(b.sandboxArgs("list"), "--output", "json")
+	if !all {
+		args = append(args, "--tags", "crabbox,crabbox-provider-tenki")
 	}
 	result, err := b.runTenki(ctx, args, nil, nil)
 	if err != nil {
-		return nil, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("tenki sandbox list failed: %v", err)}
+		if isTenkiCLIContractError(err) {
+			return nil, err
+		}
+		return nil, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("tenki sandbox list failed: %v%s", err, tenkiCommandOutputDetail(result))}
 	}
 	var sessions []tenkiSession
-	if err := json.Unmarshal([]byte(result.Stdout), &sessions); err != nil {
-		return nil, fmt.Errorf("parse tenki sandbox list JSON: %w", err)
+	if err := decodeTenkiJSON("list", result, &sessions); err != nil {
+		return nil, err
 	}
 	return sessions, nil
 }
@@ -644,6 +703,8 @@ func (b *tenkiBackend) resolveSession(ctx context.Context, identifier string, re
 			slug = normalizeLeaseSlug(blank(session.Name, session.ID))
 		}
 		return session, leaseID, slug, nil
+	} else if isTenkiCLIContractError(err) {
+		return tenkiSession{}, "", "", err
 	}
 	sessions, err := b.listSessions(ctx, false)
 	if err != nil {
@@ -663,6 +724,8 @@ func (b *tenkiBackend) findSessionForClaim(ctx context.Context, claim LeaseClaim
 		if sessionID := strings.TrimSpace(claim.Labels["tenki_session_id"]); sessionID != "" {
 			if session, err := b.getSession(ctx, sessionID); err == nil {
 				return session, nil
+			} else if isTenkiCLIContractError(err) {
+				return tenkiSession{}, err
 			}
 		}
 	}
@@ -683,18 +746,73 @@ func (b *tenkiBackend) findSessionByLease(ctx context.Context, leaseID string) (
 }
 
 func (b *tenkiBackend) terminateSession(ctx context.Context, sessionID string) error {
-	args := b.sandboxArgs("terminate")
-	args = b.appendScopeArgs(args)
-	args = append(args, sessionID)
+	args := append(b.sandboxArgs("terminate"), sessionID)
 	result, err := b.runTenki(ctx, args, nil, b.rt.Stderr)
 	if err != nil {
-		combined := strings.ToLower(result.Stdout + "\n" + result.Stderr)
-		if strings.Contains(combined, "not found") || strings.Contains(combined, "no sandbox") {
-			return nil
+		if isTenkiCLIContractError(err) {
+			return err
 		}
-		return ExitError{Code: result.ExitCode, Message: fmt.Sprintf("tenki sandbox terminate failed: %v", err)}
+		return ExitError{Code: result.ExitCode, Message: fmt.Sprintf("tenki sandbox terminate failed: %v%s", err, tenkiCommandOutputDetail(result))}
 	}
 	return nil
+}
+
+func (b *tenkiBackend) terminateSessionAcknowledged(ctx context.Context, sessionID string) error {
+	if err := b.terminateSession(ctx, sessionID); err != nil {
+		return err
+	}
+	return b.waitForTerminationAcknowledged(ctx, sessionID)
+}
+
+func (b *tenkiBackend) waitForTerminationAcknowledged(ctx context.Context, sessionID string) error {
+	timeout := b.terminationAckTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	sleep := b.sleep
+	if sleep == nil {
+		sleep = shared.SleepContext
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := shared.Poll(waitCtx, 0, time.Second, sleep,
+		func(ctx context.Context) (tenkiSession, error) {
+			return b.getSession(ctx, sessionID)
+		},
+		func(ctx context.Context, session tenkiSession, fetchErr error) (bool, error) {
+			if err := context.Cause(ctx); err != nil {
+				return false, err
+			}
+			if fetchErr != nil {
+				if isTenkiCLIContractError(fetchErr) {
+					return false, fetchErr
+				}
+				// A lookup diagnostic does not prove this session is absent.
+				return false, nil
+			}
+			if session.ID == "" || session.ID != sessionID {
+				return false, exit(4, "refusing Tenki termination acknowledgement for session %q: live session identity is %q", sessionID, session.ID)
+			}
+			switch tenkiNormalizedState(session.State) {
+			case "terminating", "terminated":
+				return true, nil
+			default:
+				return false, nil
+			}
+		}, nil)
+	if err == nil {
+		return context.Cause(waitCtx)
+	}
+	if cause := context.Cause(ctx); cause != nil && err == cause {
+		return cause
+	}
+	if cause := context.Cause(waitCtx); cause != context.DeadlineExceeded || err != cause {
+		return err
+	}
+	if result.Err != nil {
+		return exit(5, "could not confirm Tenki session %s termination: %v", sessionID, result.Err)
+	}
+	return exit(5, "Tenki session %s did not acknowledge termination; last state=%s", sessionID, blank(result.Value.State, "unknown"))
 }
 
 func (b *tenkiBackend) waitForTenkiSSHCommand(ctx context.Context, sessionID string, timeout time.Duration) (tenkiSSHCommandOutput, error) {
@@ -719,14 +837,17 @@ func (b *tenkiBackend) waitForTenkiSSHCommand(ctx context.Context, sessionID str
 		result, err := b.runTenki(ctx, args, nil, nil)
 		if err == nil {
 			var output tenkiSSHCommandOutput
-			if materialErr := json.Unmarshal([]byte(result.Stdout), &output); materialErr != nil {
-				lastErr = fmt.Errorf("parse tenki sandbox ssh-command JSON: %w", materialErr)
+			if materialErr := decodeTenkiJSON("ssh-command", result, &output); materialErr != nil {
+				lastErr = materialErr
 			} else if materialErr := output.validate(sessionID); materialErr != nil {
 				lastErr = materialErr
 			} else {
 				return output, nil
 			}
 		} else {
+			if isTenkiCLIContractError(err) {
+				return tenkiSSHCommandOutput{}, err
+			}
 			lastErr = ExitError{Code: result.ExitCode, Message: fmt.Sprintf("tenki sandbox ssh-command failed: %v%s", err, tenkiCommandOutputDetail(result))}
 		}
 
@@ -742,6 +863,13 @@ func (b *tenkiBackend) waitForTenkiSSHCommand(ctx context.Context, sessionID str
 	}
 }
 
+func decodeTenkiJSON(command string, result LocalCommandResult, target any) error {
+	if err := json.Unmarshal([]byte(result.Stdout), target); err != nil {
+		return fmt.Errorf("parse tenki sandbox %s JSON: %w%s", command, err, tenkiCommandOutputDetail(result))
+	}
+	return nil
+}
+
 func tenkiCommandOutputDetail(result LocalCommandResult) string {
 	output := strings.TrimSpace(result.Stderr)
 	if output == "" {
@@ -750,7 +878,16 @@ func tenkiCommandOutputDetail(result LocalCommandResult) string {
 	if output == "" {
 		return ""
 	}
-	return ": " + output
+	return ": " + boundedTenkiDiagnostic(output)
+}
+
+func boundedTenkiDiagnostic(output string) string {
+	const maxRunes = 2048
+	runes := []rune(strings.TrimSpace(output))
+	if len(runes) <= maxRunes {
+		return string(runes)
+	}
+	return string(runes[:maxRunes]) + "…"
 }
 
 type tenkiSSHCommandOutput struct {
@@ -897,6 +1034,31 @@ func quoteOpenSSHProxyWord(word string) string {
 	return `"` + escaped + `"`
 }
 
+func (b *tenkiBackend) unmanagedSessionToServer(session tenkiSession) Server {
+	state := tenkiState(session.State)
+	serverType := tenkiServerType(Config{}, session)
+	labels := map[string]string{
+		"crabbox":          "false",
+		"name":             session.Name,
+		"provider":         tenkiProvider,
+		"server_type":      serverType,
+		"state":            state,
+		"tenki_session_id": session.ID,
+	}
+	if session.ProjectID != "" {
+		labels["project_id"] = session.ProjectID
+	}
+	server := Server{
+		CloudID:  session.ID,
+		Provider: tenkiProvider,
+		Name:     blank(session.Name, session.ID),
+		Status:   state,
+		Labels:   labels,
+	}
+	server.ServerType.Name = serverType
+	return server
+}
+
 func (b *tenkiBackend) sessionToServer(cfg Config, session tenkiSession, leaseID, slug string, keep bool) Server {
 	labels := directLeaseLabels(cfg, leaseID, slug, tenkiProvider, "", keep, time.Now().UTC())
 	for _, item := range tenkiPersistedLabelMetadata {
@@ -931,18 +1093,36 @@ func (b *tenkiBackend) sandboxArgs(command string) []string {
 	return args
 }
 
-func (b *tenkiBackend) appendScopeArgs(args []string) []string {
-	if b.cfg.Tenki.Workspace != "" {
-		args = append(args, "--workspace", b.cfg.Tenki.Workspace)
+func (b *tenkiBackend) runTenki(ctx context.Context, args []string, stdout, stderr io.Writer) (LocalCommandResult, error) {
+	result, err := b.rt.Exec.Run(ctx, LocalCommandRequest{Name: tenkiCLIPath(b.cfg), Args: args, Stdout: stdout, Stderr: stderr})
+	if diagnostic := tenkiCLIContractDiagnostic(result); diagnostic != "" {
+		if result.ExitCode == 0 {
+			result.ExitCode = 2
+		}
+		message := "Tenki CLI command contract mismatch: " + diagnostic
+		return result, &tenkiCLIContractError{exitError: exit(result.ExitCode, "%s", message)}
 	}
-	if b.cfg.Tenki.Project != "" {
-		args = append(args, "--project", b.cfg.Tenki.Project)
-	}
-	return args
+	return result, err
 }
 
-func (b *tenkiBackend) runTenki(ctx context.Context, args []string, stdout, stderr io.Writer) (LocalCommandResult, error) {
-	return b.rt.Exec.Run(ctx, LocalCommandRequest{Name: tenkiCLIPath(b.cfg), Args: args, Stdout: stdout, Stderr: stderr})
+func tenkiCLIContractDiagnostic(result LocalCommandResult) string {
+	for _, output := range []string{result.Stderr, result.Stdout} {
+		for _, line := range strings.Split(output, "\n") {
+			line = strings.TrimSpace(line)
+			lower := strings.ToLower(line)
+			for _, marker := range []string{
+				"incorrect usage:",
+				"flag provided but not defined:",
+				"no help topic for ",
+				"unknown command",
+			} {
+				if strings.HasPrefix(lower, marker) {
+					return boundedTenkiDiagnostic(output)
+				}
+			}
+		}
+	}
+	return ""
 }
 
 type tenkiSession struct {

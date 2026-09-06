@@ -32,8 +32,9 @@ func TestRunUploadsArchiveStreamsLogsAndCleansUp(t *testing.T) {
 	}
 
 	result, err := b.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: repoRoot, Name: "demo"},
-		Command: []string{"pnpm", "test"},
+		Repo:               Repo{Root: repoRoot, Name: "demo"},
+		Command:            []string{"pnpm", "test", "&&"},
+		CommandLiteralArgs: map[int]bool{2: true},
 	})
 	if err != nil {
 		t.Fatalf("Run err=%v", err)
@@ -66,6 +67,9 @@ func TestRunUploadsArchiveStreamsLogsAndCleansUp(t *testing.T) {
 	}
 	if claim, err := readLeaseClaim(result.LeaseID); err != nil || claim.LeaseID != "" {
 		t.Fatalf("claim=%#v err=%v, want one-shot local claim removed without sandbox delete", claim, err)
+	}
+	if result.CommandText != "'pnpm' 'test' '&&'" {
+		t.Fatalf("literal intent lost in final payload: %q", result.CommandText)
 	}
 }
 

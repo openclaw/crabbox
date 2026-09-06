@@ -1778,6 +1778,32 @@ func finalizeProviderSelection(cfg *Config) error {
 	return applyProviderConfigDefaults(cfg)
 }
 
+func applyLinuxConnectionDefaults(cfg *Config, defaultSSHUser, defaultSSHPort string) {
+	if !IsTargetExplicit(cfg) {
+		cfg.TargetOS = targetLinux
+	}
+	if cfg.explicitWindowsMode != "" {
+		cfg.WindowsMode = cfg.explicitWindowsMode
+	} else {
+		cfg.WindowsMode = windowsModeNormal
+	}
+	if cfg.explicitWorkRoot != "" {
+		cfg.WorkRoot = cfg.explicitWorkRoot
+	} else {
+		cfg.WorkRoot = defaultPOSIXWorkRoot
+	}
+	if cfg.explicitSSHUser != "" {
+		cfg.SSHUser = cfg.explicitSSHUser
+	} else {
+		cfg.SSHUser = defaultSSHUser
+	}
+	if cfg.explicitSSHPort != "" {
+		cfg.SSHPort = cfg.explicitSSHPort
+	} else {
+		cfg.SSHPort = defaultSSHPort
+	}
+}
+
 func applyProviderConfigDefaults(cfg *Config) error {
 	prepareProviderDefaults(cfg)
 	if normalized, err := normalizeArchitecture(cfg.Architecture); err != nil {
@@ -1814,29 +1840,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		} else if cfg.DigitalOcean.Image == "" {
 			cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
 		}
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetLinux
-		}
-		if cfg.explicitWindowsMode != "" {
-			cfg.WindowsMode = cfg.explicitWindowsMode
-		} else {
-			cfg.WindowsMode = windowsModeNormal
-		}
-		if cfg.explicitWorkRoot != "" {
-			cfg.WorkRoot = cfg.explicitWorkRoot
-		} else {
-			cfg.WorkRoot = defaultPOSIXWorkRoot
-		}
-		if cfg.explicitSSHUser != "" {
-			cfg.SSHUser = cfg.explicitSSHUser
-		} else {
-			cfg.SSHUser = baseConfig().SSHUser
-		}
-		if cfg.explicitSSHPort != "" {
-			cfg.SSHPort = cfg.explicitSSHPort
-		} else {
-			cfg.SSHPort = baseConfig().SSHPort
-		}
+		applyLinuxConnectionDefaults(cfg, baseConfig().SSHUser, baseConfig().SSHPort)
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
@@ -1847,29 +1851,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if cfg.Vultr.UserScheme == "" {
 			cfg.Vultr.UserScheme = "root"
 		}
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetLinux
-		}
-		if cfg.explicitWindowsMode != "" {
-			cfg.WindowsMode = cfg.explicitWindowsMode
-		} else {
-			cfg.WindowsMode = windowsModeNormal
-		}
-		if cfg.explicitWorkRoot != "" {
-			cfg.WorkRoot = cfg.explicitWorkRoot
-		} else {
-			cfg.WorkRoot = defaultPOSIXWorkRoot
-		}
-		if cfg.explicitSSHUser != "" {
-			cfg.SSHUser = cfg.explicitSSHUser
-		} else {
-			cfg.SSHUser = "root"
-		}
-		if cfg.explicitSSHPort != "" {
-			cfg.SSHPort = cfg.explicitSSHPort
-		} else {
-			cfg.SSHPort = "22"
-		}
+		applyLinuxConnectionDefaults(cfg, "root", "22")
 		cfg.SSHFallbackPorts = nil
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
@@ -1890,29 +1872,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if cfg.Linode.Type == "" {
 			cfg.Linode.Type = "g6-standard-1"
 		}
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetLinux
-		}
-		if cfg.explicitWindowsMode != "" {
-			cfg.WindowsMode = cfg.explicitWindowsMode
-		} else {
-			cfg.WindowsMode = windowsModeNormal
-		}
-		if cfg.explicitWorkRoot != "" {
-			cfg.WorkRoot = cfg.explicitWorkRoot
-		} else {
-			cfg.WorkRoot = defaultPOSIXWorkRoot
-		}
-		if cfg.explicitSSHUser != "" {
-			cfg.SSHUser = cfg.explicitSSHUser
-		} else {
-			cfg.SSHUser = baseConfig().SSHUser
-		}
-		if cfg.explicitSSHPort != "" {
-			cfg.SSHPort = cfg.explicitSSHPort
-		} else {
-			cfg.SSHPort = baseConfig().SSHPort
-		}
+		applyLinuxConnectionDefaults(cfg, baseConfig().SSHUser, baseConfig().SSHPort)
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
@@ -1932,29 +1892,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		} else if cfg.Lambda.Image == "" && cfg.Lambda.ImageFamily == "" {
 			cfg.Lambda.ImageFamily = "lambda-stack-24-04"
 		}
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetLinux
-		}
-		if cfg.explicitWindowsMode != "" {
-			cfg.WindowsMode = cfg.explicitWindowsMode
-		} else {
-			cfg.WindowsMode = windowsModeNormal
-		}
-		if cfg.explicitWorkRoot != "" {
-			cfg.WorkRoot = cfg.explicitWorkRoot
-		} else {
-			cfg.WorkRoot = defaultPOSIXWorkRoot
-		}
-		if cfg.explicitSSHUser != "" {
-			cfg.SSHUser = cfg.explicitSSHUser
-		} else {
-			cfg.SSHUser = "ubuntu"
-		}
-		if cfg.explicitSSHPort != "" {
-			cfg.SSHPort = cfg.explicitSSHPort
-		} else {
-			cfg.SSHPort = "22"
-		}
+		applyLinuxConnectionDefaults(cfg, "ubuntu", "22")
 		cfg.SSHFallbackPorts = nil
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
@@ -2042,29 +1980,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if cfg.Nebius.RecoveryPolicy == "" {
 			cfg.Nebius.RecoveryPolicy = "fail"
 		}
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetLinux
-		}
-		if cfg.explicitWindowsMode != "" {
-			cfg.WindowsMode = cfg.explicitWindowsMode
-		} else {
-			cfg.WindowsMode = windowsModeNormal
-		}
-		if cfg.explicitWorkRoot != "" {
-			cfg.WorkRoot = cfg.explicitWorkRoot
-		} else {
-			cfg.WorkRoot = defaultPOSIXWorkRoot
-		}
-		if cfg.explicitSSHUser != "" {
-			cfg.SSHUser = cfg.explicitSSHUser
-		} else {
-			cfg.SSHUser = cfg.Nebius.User
-		}
-		if cfg.explicitSSHPort != "" {
-			cfg.SSHPort = cfg.explicitSSHPort
-		} else {
-			cfg.SSHPort = baseConfig().SSHPort
-		}
+		applyLinuxConnectionDefaults(cfg, cfg.Nebius.User, baseConfig().SSHPort)
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
@@ -2078,29 +1994,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if cfg.OVH.Flavor == "" {
 			cfg.OVH.Flavor = "b3-8"
 		}
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetLinux
-		}
-		if cfg.explicitWindowsMode != "" {
-			cfg.WindowsMode = cfg.explicitWindowsMode
-		} else {
-			cfg.WindowsMode = windowsModeNormal
-		}
-		if cfg.explicitWorkRoot != "" {
-			cfg.WorkRoot = cfg.explicitWorkRoot
-		} else {
-			cfg.WorkRoot = defaultPOSIXWorkRoot
-		}
-		if cfg.explicitSSHUser != "" {
-			cfg.SSHUser = cfg.explicitSSHUser
-		} else {
-			cfg.SSHUser = baseConfig().SSHUser
-		}
-		if cfg.explicitSSHPort != "" {
-			cfg.SSHPort = cfg.explicitSSHPort
-		} else {
-			cfg.SSHPort = baseConfig().SSHPort
-		}
+		applyLinuxConnectionDefaults(cfg, baseConfig().SSHUser, baseConfig().SSHPort)
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
@@ -2123,29 +2017,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if cfg.Scaleway.Type == "" {
 			cfg.Scaleway.Type = "DEV1-S"
 		}
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetLinux
-		}
-		if cfg.explicitWindowsMode != "" {
-			cfg.WindowsMode = cfg.explicitWindowsMode
-		} else {
-			cfg.WindowsMode = windowsModeNormal
-		}
-		if cfg.explicitWorkRoot != "" {
-			cfg.WorkRoot = cfg.explicitWorkRoot
-		} else {
-			cfg.WorkRoot = defaultPOSIXWorkRoot
-		}
-		if cfg.explicitSSHUser != "" {
-			cfg.SSHUser = cfg.explicitSSHUser
-		} else {
-			cfg.SSHUser = "root"
-		}
-		if cfg.explicitSSHPort != "" {
-			cfg.SSHPort = cfg.explicitSSHPort
-		} else {
-			cfg.SSHPort = "22"
-		}
+		applyLinuxConnectionDefaults(cfg, "root", "22")
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
@@ -2168,29 +2040,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if cfg.TencentCloud.InternetMaxBandwidthOut == 0 {
 			cfg.TencentCloud.InternetMaxBandwidthOut = 5
 		}
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetLinux
-		}
-		if cfg.explicitWindowsMode != "" {
-			cfg.WindowsMode = cfg.explicitWindowsMode
-		} else {
-			cfg.WindowsMode = windowsModeNormal
-		}
-		if cfg.explicitWorkRoot != "" {
-			cfg.WorkRoot = cfg.explicitWorkRoot
-		} else {
-			cfg.WorkRoot = defaultPOSIXWorkRoot
-		}
-		if cfg.explicitSSHUser != "" {
-			cfg.SSHUser = cfg.explicitSSHUser
-		} else {
-			cfg.SSHUser = "ubuntu"
-		}
-		if cfg.explicitSSHPort != "" {
-			cfg.SSHPort = cfg.explicitSSHPort
-		} else {
-			cfg.SSHPort = "22"
-		}
+		applyLinuxConnectionDefaults(cfg, "ubuntu", "22")
 		cfg.SSHFallbackPorts = nil
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
@@ -4475,33 +4325,29 @@ func applyCloudflareFileConfig(cfg *Config, file *fileCloudflareConfig, source c
 	}
 }
 
+func applyOptional[T any](target, value *T) {
+	if value != nil {
+		*target = *value
+	}
+}
+
 func applyCloudflareSandboxFileConfig(cfg *Config, file *fileCloudflareSandboxConfig, trusted bool) error {
 	if file == nil {
 		return nil
 	}
 	if trusted {
-		if file.BridgeURL != nil {
-			cfg.CloudflareSandbox.BridgeURL = *file.BridgeURL
-		}
-		if file.URL != nil {
-			cfg.CloudflareSandbox.BridgeURL = *file.URL
-		}
-		if file.Token != nil {
-			cfg.CloudflareSandbox.Token = *file.Token
-		}
+		applyOptional(&cfg.CloudflareSandbox.BridgeURL, file.BridgeURL)
+		applyOptional(&cfg.CloudflareSandbox.BridgeURL, file.URL)
+		applyOptional(&cfg.CloudflareSandbox.Token, file.Token)
 	}
-	if file.Workdir != nil {
-		cfg.CloudflareSandbox.Workdir = *file.Workdir
-	}
+	applyOptional(&cfg.CloudflareSandbox.Workdir, file.Workdir)
 	if file.ExecTimeoutSecs != nil {
 		if *file.ExecTimeoutSecs < 0 {
 			return exit(2, "cloudflare-sandbox execTimeoutSecs must be non-negative")
 		}
 		cfg.CloudflareSandbox.ExecTimeoutSecs = *file.ExecTimeoutSecs
 	}
-	if file.ForgetMissing != nil {
-		cfg.CloudflareSandbox.ForgetMissing = *file.ForgetMissing
-	}
+	applyOptional(&cfg.CloudflareSandbox.ForgetMissing, file.ForgetMissing)
 	return nil
 }
 
@@ -5216,18 +5062,12 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		cfg.WindowsMode = file.Windows.Mode
 		cfg.explicitWindowsMode = file.Windows.Mode
 	}
-	if file.Desktop != nil {
-		cfg.Desktop = *file.Desktop
-	}
+	applyOptional(&cfg.Desktop, file.Desktop)
 	if file.DesktopEnv != "" {
 		cfg.DesktopEnv = file.DesktopEnv
 	}
-	if file.Browser != nil {
-		cfg.Browser = *file.Browser
-	}
-	if file.Code != nil {
-		cfg.Code = *file.Code
-	}
+	applyOptional(&cfg.Browser, file.Browser)
+	applyOptional(&cfg.Code, file.Code)
 	if file.Network != "" {
 		cfg.Network = NetworkMode(strings.ToLower(strings.TrimSpace(file.Network)))
 	}
@@ -5262,9 +5102,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.Broker.Mode != "" {
 			cfg.BrokerMode = BrokerMode(file.Broker.Mode)
 		}
-		if file.Broker.AutoWebVNC != nil {
-			cfg.BrokerAutoWebVNC = *file.Broker.AutoWebVNC
-		}
+		applyOptional(&cfg.BrokerAutoWebVNC, file.Broker.AutoWebVNC)
 		if trusted && len(file.Broker.LoginRedirectOrigins) > 0 {
 			cfg.BrokerLoginRedirectOrigins = normalizeList(file.Broker.LoginRedirectOrigins)
 		}
@@ -5621,9 +5459,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.AWSLambdaMicroVM.EgressConnectors != nil {
 			cfg.AWSLambdaMicroVM.EgressConnectors = append([]string(nil), (*file.AWSLambdaMicroVM.EgressConnectors)...)
 		}
-		if file.AWSLambdaMicroVM.ForgetMissing != nil {
-			cfg.AWSLambdaMicroVM.ForgetMissing = *file.AWSLambdaMicroVM.ForgetMissing
-		}
+		applyOptional(&cfg.AWSLambdaMicroVM.ForgetMissing, file.AWSLambdaMicroVM.ForgetMissing)
 	}
 	if file.Azure != nil {
 		if file.Azure.Backend != "" {
@@ -5777,9 +5613,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.Incus.TLSServerCert != "" {
 			cfg.Incus.TLSServerCert = expandUserPath(file.Incus.TLSServerCert)
 		}
-		if file.Incus.InsecureTLS != nil {
-			cfg.Incus.InsecureTLS = *file.Incus.InsecureTLS
-		}
+		applyOptional(&cfg.Incus.InsecureTLS, file.Incus.InsecureTLS)
 		if file.Incus.RemoteImageServer != "" {
 			cfg.Incus.RemoteImageServer = file.Incus.RemoteImageServer
 		}
@@ -5818,9 +5652,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.Proxmox.WorkRoot != "" {
 			cfg.Proxmox.WorkRoot = file.Proxmox.WorkRoot
 		}
-		if file.Proxmox.FullClone != nil {
-			cfg.Proxmox.FullClone = *file.Proxmox.FullClone
-		}
+		applyOptional(&cfg.Proxmox.FullClone, file.Proxmox.FullClone)
 		if file.Proxmox.InsecureTLS != nil {
 			cfg.Proxmox.InsecureTLS = *file.Proxmox.InsecureTLS
 			cfg.credentialProvenance.proxmoxInsecureTLS = credentialSource
@@ -5845,15 +5677,9 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.Firecracker.WorkRoot != "" {
 			cfg.Firecracker.WorkRoot = file.Firecracker.WorkRoot
 		}
-		if file.Firecracker.CPUs != nil {
-			cfg.Firecracker.CPUs = *file.Firecracker.CPUs
-		}
-		if file.Firecracker.MemoryMiB != nil {
-			cfg.Firecracker.MemoryMiB = *file.Firecracker.MemoryMiB
-		}
-		if file.Firecracker.DiskMiB != nil {
-			cfg.Firecracker.DiskMiB = *file.Firecracker.DiskMiB
-		}
+		applyOptional(&cfg.Firecracker.CPUs, file.Firecracker.CPUs)
+		applyOptional(&cfg.Firecracker.MemoryMiB, file.Firecracker.MemoryMiB)
+		applyOptional(&cfg.Firecracker.DiskMiB, file.Firecracker.DiskMiB)
 		if trusted && file.Firecracker.Network != "" {
 			cfg.Firecracker.Network = file.Firecracker.Network
 		}
@@ -6043,21 +5869,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		cfg.Sync.Excludes = appendOrderedStrings(cfg.Sync.Excludes, file.Sync.Excludes...)
 		cfg.Sync.Includes = appendUniqueStrings(cfg.Sync.Includes, file.Sync.Include...)
 		cfg.Sync.Includes = appendUniqueStrings(cfg.Sync.Includes, file.Sync.Includes...)
-		if file.Sync.Delete != nil {
-			cfg.Sync.Delete = *file.Sync.Delete
-		}
-		if file.Sync.Checksum != nil {
-			cfg.Sync.Checksum = *file.Sync.Checksum
-		}
-		if file.Sync.GitSeed != nil {
-			cfg.Sync.GitSeed = *file.Sync.GitSeed
-		}
-		if file.Sync.GitOverlay != nil {
-			cfg.Sync.GitOverlay = *file.Sync.GitOverlay
-		}
-		if file.Sync.Fingerprint != nil {
-			cfg.Sync.Fingerprint = *file.Sync.Fingerprint
-		}
+		applyOptional(&cfg.Sync.Delete, file.Sync.Delete)
+		applyOptional(&cfg.Sync.Checksum, file.Sync.Checksum)
+		applyOptional(&cfg.Sync.GitSeed, file.Sync.GitSeed)
+		applyOptional(&cfg.Sync.GitOverlay, file.Sync.GitOverlay)
+		applyOptional(&cfg.Sync.Fingerprint, file.Sync.Fingerprint)
 		if file.Sync.BaseRef != "" {
 			cfg.Sync.BaseRef = file.Sync.BaseRef
 		}
@@ -6078,9 +5894,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.Sync.FailBytes > 0 {
 			cfg.Sync.FailBytes = file.Sync.FailBytes
 		}
-		if file.Sync.AllowLarge != nil {
-			cfg.Sync.AllowLarge = *file.Sync.AllowLarge
-		}
+		applyOptional(&cfg.Sync.AllowLarge, file.Sync.AllowLarge)
 	}
 	if file.Run != nil && file.Run.PreflightTools != nil {
 		cfg.Run.PreflightTools = normalizePreflightToolNames(file.Run.PreflightTools)
@@ -6105,9 +5919,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if len(file.Capacity.AvailabilityZones) > 0 {
 			cfg.Capacity.AvailabilityZones = appendUniqueStrings(nil, file.Capacity.AvailabilityZones...)
 		}
-		if file.Capacity.Hints != nil {
-			cfg.Capacity.Hints = *file.Capacity.Hints
-		}
+		applyOptional(&cfg.Capacity.Hints, file.Capacity.Hints)
 	}
 	if file.Actions != nil {
 		if file.Actions.Repo != "" {
@@ -6131,9 +5943,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.Actions.RunnerVersion != "" {
 			cfg.Actions.RunnerVersion = file.Actions.RunnerVersion
 		}
-		if file.Actions.Ephemeral != nil {
-			cfg.Actions.Ephemeral = *file.Actions.Ephemeral
-		}
+		applyOptional(&cfg.Actions.Ephemeral, file.Actions.Ephemeral)
 	}
 	if file.Blacksmith != nil {
 		if file.Blacksmith.Org != "" {
@@ -6149,9 +5959,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Blacksmith.Ref = file.Blacksmith.Ref
 		}
 		applyLeaseDuration(&cfg.Blacksmith.IdleTimeout, file.Blacksmith.IdleTimeout)
-		if file.Blacksmith.Debug != nil {
-			cfg.Blacksmith.Debug = *file.Blacksmith.Debug
-		}
+		applyOptional(&cfg.Blacksmith.Debug, file.Blacksmith.Debug)
 	}
 	if file.KubeVirt != nil {
 		if file.KubeVirt.Kubectl != "" {
@@ -6282,9 +6090,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.AgentSandbox.DeleteOnRelease = *file.AgentSandbox.DeleteOnRelease
 			MarkDeleteOnReleaseExplicit(cfg, "agent-sandbox")
 		}
-		if file.AgentSandbox.ForgetMissing != nil {
-			cfg.AgentSandbox.ForgetMissing = *file.AgentSandbox.ForgetMissing
-		}
+		applyOptional(&cfg.AgentSandbox.ForgetMissing, file.AgentSandbox.ForgetMissing)
 	}
 	if file.External != nil {
 		if file.External.Command != "" {
@@ -6297,9 +6103,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.External.Config = file.External.Config
 			cfg.credentialProvenance.externalConfig = credentialSource
 		}
-		if file.External.Capabilities != nil {
-			cfg.External.Capabilities = *file.External.Capabilities
-		}
+		applyOptional(&cfg.External.Capabilities, file.External.Capabilities)
 		if file.External.Lifecycle != nil {
 			cfg.External.Lifecycle = *file.External.Lifecycle
 			cfg.credentialProvenance.externalLifecycle = credentialSource
@@ -6444,9 +6248,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.NamespaceInstance.WorkRoot != "" {
 			cfg.NamespaceInstance.WorkRoot = file.NamespaceInstance.WorkRoot
 		}
-		if file.NamespaceInstance.Bare != nil {
-			cfg.NamespaceInstance.Bare = *file.NamespaceInstance.Bare
-		}
+		applyOptional(&cfg.NamespaceInstance.Bare, file.NamespaceInstance.Bare)
 	}
 	if file.Phala != nil {
 		if trusted {
@@ -6511,15 +6313,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.Coder.WorkRoot != "" {
 			cfg.Coder.WorkRoot = file.Coder.WorkRoot
 		}
-		if file.Coder.DeleteOnRelease != nil {
-			cfg.Coder.DeleteOnRelease = *file.Coder.DeleteOnRelease
-		}
+		applyOptional(&cfg.Coder.DeleteOnRelease, file.Coder.DeleteOnRelease)
 		if file.Coder.Wait != "" {
 			cfg.Coder.Wait = file.Coder.Wait
 		}
-		if file.Coder.UseParameterDefaults != nil {
-			cfg.Coder.UseParameterDefaults = *file.Coder.UseParameterDefaults
-		}
+		applyOptional(&cfg.Coder.UseParameterDefaults, file.Coder.UseParameterDefaults)
 		if len(file.Coder.Parameters) > 0 {
 			cfg.Coder.Parameters = normalizeList(file.Coder.Parameters)
 		}
@@ -6550,9 +6348,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Morph.DeleteOnRelease = *file.Morph.DeleteOnRelease
 			MarkDeleteOnReleaseExplicit(cfg, "morph")
 		}
-		if file.Morph.WakeOnSSH != nil {
-			cfg.Morph.WakeOnSSH = *file.Morph.WakeOnSSH
-		}
+		applyOptional(&cfg.Morph.WakeOnSSH, file.Morph.WakeOnSSH)
 	}
 	if file.Daytona != nil {
 		if file.Daytona.APIURL != "" {
@@ -6655,9 +6451,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.ExeDev.WorkRoot != "" {
 			cfg.ExeDev.WorkRoot = file.ExeDev.WorkRoot
 		}
-		if file.ExeDev.NoEmail != nil {
-			cfg.ExeDev.NoEmail = *file.ExeDev.NoEmail
-		}
+		applyOptional(&cfg.ExeDev.NoEmail, file.ExeDev.NoEmail)
 	}
 	if file.Railway != nil {
 		if file.Railway.APIURL != "" {
@@ -6755,12 +6549,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.Vast.DiskGB != 0 {
 			cfg.Vast.DiskGB = file.Vast.DiskGB
 		}
-		if file.Vast.MaxDphTotal != nil {
-			cfg.Vast.MaxDphTotal = *file.Vast.MaxDphTotal
-		}
-		if file.Vast.MinReliability != nil {
-			cfg.Vast.MinReliability = *file.Vast.MinReliability
-		}
+		applyOptional(&cfg.Vast.MaxDphTotal, file.Vast.MaxDphTotal)
+		applyOptional(&cfg.Vast.MinReliability, file.Vast.MinReliability)
 		if file.Vast.Order != "" {
 			cfg.Vast.Order = file.Vast.Order
 		}
@@ -7010,23 +6800,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.Tensorlake.TimeoutSecs > 0 {
 			cfg.Tensorlake.TimeoutSecs = file.Tensorlake.TimeoutSecs
 		}
-		if file.Tensorlake.NoInternet != nil {
-			cfg.Tensorlake.NoInternet = *file.Tensorlake.NoInternet
-		}
+		applyOptional(&cfg.Tensorlake.NoInternet, file.Tensorlake.NoInternet)
 	}
 	if file.Cua != nil {
-		if file.Cua.Image != nil {
-			cfg.Cua.Image = *file.Cua.Image
-		}
-		if file.Cua.Kind != nil {
-			cfg.Cua.Kind = *file.Cua.Kind
-		}
-		if file.Cua.Region != nil {
-			cfg.Cua.Region = *file.Cua.Region
-		}
-		if file.Cua.Workdir != nil {
-			cfg.Cua.Workdir = *file.Cua.Workdir
-		}
+		applyOptional(&cfg.Cua.Image, file.Cua.Image)
+		applyOptional(&cfg.Cua.Kind, file.Cua.Kind)
+		applyOptional(&cfg.Cua.Region, file.Cua.Region)
+		applyOptional(&cfg.Cua.Workdir, file.Cua.Workdir)
 		if file.Cua.VCPUs != nil {
 			if *file.Cua.VCPUs < 0 {
 				return exit(2, "cua vcpus must be non-negative")
@@ -7074,47 +6854,25 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.OpenComputer.Workdir != "" {
 			cfg.OpenComputer.Workdir = file.OpenComputer.Workdir
 		}
-		if file.OpenComputer.CPU != nil {
-			cfg.OpenComputer.CPU = *file.OpenComputer.CPU
-		}
-		if file.OpenComputer.MemoryMB != nil {
-			cfg.OpenComputer.MemoryMB = *file.OpenComputer.MemoryMB
-		}
-		if file.OpenComputer.TimeoutSecs != nil {
-			cfg.OpenComputer.TimeoutSecs = *file.OpenComputer.TimeoutSecs
-		}
-		if file.OpenComputer.ExecTimeoutSecs != nil {
-			cfg.OpenComputer.ExecTimeoutSecs = *file.OpenComputer.ExecTimeoutSecs
-		}
-		if file.OpenComputer.Burst != nil {
-			cfg.OpenComputer.Burst = *file.OpenComputer.Burst
-		}
+		applyOptional(&cfg.OpenComputer.CPU, file.OpenComputer.CPU)
+		applyOptional(&cfg.OpenComputer.MemoryMB, file.OpenComputer.MemoryMB)
+		applyOptional(&cfg.OpenComputer.TimeoutSecs, file.OpenComputer.TimeoutSecs)
+		applyOptional(&cfg.OpenComputer.ExecTimeoutSecs, file.OpenComputer.ExecTimeoutSecs)
+		applyOptional(&cfg.OpenComputer.Burst, file.OpenComputer.Burst)
 	}
 	if file.CodeSandbox != nil {
-		if file.CodeSandbox.TemplateID != nil {
-			cfg.CodeSandbox.TemplateID = *file.CodeSandbox.TemplateID
-		}
-		if file.CodeSandbox.Workdir != nil {
-			cfg.CodeSandbox.Workdir = *file.CodeSandbox.Workdir
-		}
-		if file.CodeSandbox.VMTier != nil {
-			cfg.CodeSandbox.VMTier = *file.CodeSandbox.VMTier
-		}
-		if file.CodeSandbox.Privacy != nil {
-			cfg.CodeSandbox.Privacy = *file.CodeSandbox.Privacy
-		}
+		applyOptional(&cfg.CodeSandbox.TemplateID, file.CodeSandbox.TemplateID)
+		applyOptional(&cfg.CodeSandbox.Workdir, file.CodeSandbox.Workdir)
+		applyOptional(&cfg.CodeSandbox.VMTier, file.CodeSandbox.VMTier)
+		applyOptional(&cfg.CodeSandbox.Privacy, file.CodeSandbox.Privacy)
 		if file.CodeSandbox.HibernationTimeoutSecs != nil {
 			if *file.CodeSandbox.HibernationTimeoutSecs < 0 {
 				return exit(2, "codesandbox hibernationTimeoutSecs must be non-negative")
 			}
 			cfg.CodeSandbox.HibernationTimeoutSecs = *file.CodeSandbox.HibernationTimeoutSecs
 		}
-		if file.CodeSandbox.AutomaticWakeupHTTP != nil {
-			cfg.CodeSandbox.AutomaticWakeupHTTP = *file.CodeSandbox.AutomaticWakeupHTTP
-		}
-		if file.CodeSandbox.AutomaticWakeupWebSocket != nil {
-			cfg.CodeSandbox.AutomaticWakeupWebSocket = *file.CodeSandbox.AutomaticWakeupWebSocket
-		}
+		applyOptional(&cfg.CodeSandbox.AutomaticWakeupHTTP, file.CodeSandbox.AutomaticWakeupHTTP)
+		applyOptional(&cfg.CodeSandbox.AutomaticWakeupWebSocket, file.CodeSandbox.AutomaticWakeupWebSocket)
 		if trusted && file.CodeSandbox.BridgeCommand != nil {
 			cfg.CodeSandbox.BridgeCommand = *file.CodeSandbox.BridgeCommand
 		}
@@ -7135,18 +6893,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 	}
 	if file.OpenSandbox != nil {
-		if file.OpenSandbox.Image != nil {
-			cfg.OpenSandbox.Image = *file.OpenSandbox.Image
-		}
-		if file.OpenSandbox.Workdir != nil {
-			cfg.OpenSandbox.Workdir = *file.OpenSandbox.Workdir
-		}
-		if file.OpenSandbox.CPU != nil {
-			cfg.OpenSandbox.CPU = *file.OpenSandbox.CPU
-		}
-		if file.OpenSandbox.Memory != nil {
-			cfg.OpenSandbox.Memory = *file.OpenSandbox.Memory
-		}
+		applyOptional(&cfg.OpenSandbox.Image, file.OpenSandbox.Image)
+		applyOptional(&cfg.OpenSandbox.Workdir, file.OpenSandbox.Workdir)
+		applyOptional(&cfg.OpenSandbox.CPU, file.OpenSandbox.CPU)
+		applyOptional(&cfg.OpenSandbox.Memory, file.OpenSandbox.Memory)
 		if file.OpenSandbox.TimeoutSecs != nil {
 			if *file.OpenSandbox.TimeoutSecs < 0 {
 				return exit(2, "opensandbox timeoutSecs must be non-negative")
@@ -7159,18 +6909,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			}
 			cfg.OpenSandbox.ExecTimeoutSecs = *file.OpenSandbox.ExecTimeoutSecs
 		}
-		if file.OpenSandbox.PlatformOS != nil {
-			cfg.OpenSandbox.PlatformOS = *file.OpenSandbox.PlatformOS
-		}
-		if file.OpenSandbox.PlatformArch != nil {
-			cfg.OpenSandbox.PlatformArch = *file.OpenSandbox.PlatformArch
-		}
-		if file.OpenSandbox.SecureAccess != nil {
-			cfg.OpenSandbox.SecureAccess = *file.OpenSandbox.SecureAccess
-		}
-		if file.OpenSandbox.UseServerProxy != nil {
-			cfg.OpenSandbox.UseServerProxy = *file.OpenSandbox.UseServerProxy
-		}
+		applyOptional(&cfg.OpenSandbox.PlatformOS, file.OpenSandbox.PlatformOS)
+		applyOptional(&cfg.OpenSandbox.PlatformArch, file.OpenSandbox.PlatformArch)
+		applyOptional(&cfg.OpenSandbox.SecureAccess, file.OpenSandbox.SecureAccess)
+		applyOptional(&cfg.OpenSandbox.UseServerProxy, file.OpenSandbox.UseServerProxy)
 	}
 	if file.Nomad != nil {
 		if trusted && file.Nomad.Address != "" {
@@ -7206,18 +6948,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			if file.Nomad.Namespace != "" {
 				cfg.Nomad.Namespace = file.Nomad.Namespace
 			}
-			if file.Nomad.Task != nil {
-				cfg.Nomad.Task = *file.Nomad.Task
-			}
-			if file.Nomad.Driver != nil {
-				cfg.Nomad.Driver = *file.Nomad.Driver
-			}
-			if file.Nomad.Image != nil {
-				cfg.Nomad.Image = *file.Nomad.Image
-			}
-			if file.Nomad.Workdir != nil {
-				cfg.Nomad.Workdir = *file.Nomad.Workdir
-			}
+			applyOptional(&cfg.Nomad.Task, file.Nomad.Task)
+			applyOptional(&cfg.Nomad.Driver, file.Nomad.Driver)
+			applyOptional(&cfg.Nomad.Image, file.Nomad.Image)
+			applyOptional(&cfg.Nomad.Workdir, file.Nomad.Workdir)
 			if file.Nomad.JobSpecTemplate != "" {
 				cfg.Nomad.JobSpecTemplate = expandUserPath(file.Nomad.JobSpecTemplate)
 			}
@@ -7269,9 +7003,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.Blaxel.Region != "" {
 			cfg.Blaxel.Region = file.Blaxel.Region
 		}
-		if file.Blaxel.Image != nil {
-			cfg.Blaxel.Image = *file.Blaxel.Image
-		}
+		applyOptional(&cfg.Blaxel.Image, file.Blaxel.Image)
 		if file.Blaxel.MemoryMB != nil {
 			if *file.Blaxel.MemoryMB < 0 {
 				return exit(2, "blaxel memoryMB must be non-negative")
@@ -7284,18 +7016,14 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.Blaxel.IdleTTL != "" {
 			cfg.Blaxel.IdleTTL = file.Blaxel.IdleTTL
 		}
-		if file.Blaxel.Workdir != nil {
-			cfg.Blaxel.Workdir = *file.Blaxel.Workdir
-		}
+		applyOptional(&cfg.Blaxel.Workdir, file.Blaxel.Workdir)
 		if file.Blaxel.ExecTimeoutSecs != nil {
 			if *file.Blaxel.ExecTimeoutSecs < 0 {
 				return exit(2, "blaxel execTimeoutSecs must be non-negative")
 			}
 			cfg.Blaxel.ExecTimeoutSecs = *file.Blaxel.ExecTimeoutSecs
 		}
-		if file.Blaxel.ForgetMissing != nil {
-			cfg.Blaxel.ForgetMissing = *file.Blaxel.ForgetMissing
-		}
+		applyOptional(&cfg.Blaxel.ForgetMissing, file.Blaxel.ForgetMissing)
 	}
 	if err := cfg.VercelSandbox.applyFile(file.VercelSandbox); err != nil {
 		return err
@@ -7304,15 +7032,9 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if trusted && strings.TrimSpace(file.Superserve.BaseURL) != "" {
 			cfg.Superserve.BaseURL = file.Superserve.BaseURL
 		}
-		if file.Superserve.Template != nil {
-			cfg.Superserve.Template = *file.Superserve.Template
-		}
-		if file.Superserve.Snapshot != nil {
-			cfg.Superserve.Snapshot = *file.Superserve.Snapshot
-		}
-		if file.Superserve.Workdir != nil {
-			cfg.Superserve.Workdir = *file.Superserve.Workdir
-		}
+		applyOptional(&cfg.Superserve.Template, file.Superserve.Template)
+		applyOptional(&cfg.Superserve.Snapshot, file.Superserve.Snapshot)
+		applyOptional(&cfg.Superserve.Workdir, file.Superserve.Workdir)
 		if file.Superserve.TimeoutSecs != nil {
 			if *file.Superserve.TimeoutSecs < 0 {
 				return exit(2, "superserve timeoutSecs must be non-negative")
@@ -7331,29 +7053,21 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.Superserve.NetworkDenyOut != nil {
 			cfg.Superserve.NetworkDenyOut = normalizeList(file.Superserve.NetworkDenyOut)
 		}
-		if file.Superserve.ForgetMissing != nil {
-			cfg.Superserve.ForgetMissing = *file.Superserve.ForgetMissing
-		}
+		applyOptional(&cfg.Superserve.ForgetMissing, file.Superserve.ForgetMissing)
 	}
 	if file.Crownest != nil {
 		if trusted && strings.TrimSpace(file.Crownest.APIURL) != "" {
 			cfg.Crownest.APIURL = file.Crownest.APIURL
 		}
-		if file.Crownest.ProjectID != nil {
-			cfg.Crownest.ProjectID = *file.Crownest.ProjectID
-		}
-		if file.Crownest.Template != nil {
-			cfg.Crownest.Template = *file.Crownest.Template
-		}
+		applyOptional(&cfg.Crownest.ProjectID, file.Crownest.ProjectID)
+		applyOptional(&cfg.Crownest.Template, file.Crownest.Template)
 		if file.Crownest.TimeoutSecs != nil {
 			if *file.Crownest.TimeoutSecs < 0 {
 				return exit(2, "crownest timeoutSecs must be non-negative")
 			}
 			cfg.Crownest.TimeoutSecs = *file.Crownest.TimeoutSecs
 		}
-		if file.Crownest.ForgetMissing != nil {
-			cfg.Crownest.ForgetMissing = *file.Crownest.ForgetMissing
-		}
+		applyOptional(&cfg.Crownest.ForgetMissing, file.Crownest.ForgetMissing)
 	}
 	if file.DockerSandbox != nil {
 		if file.DockerSandbox.CLIPath != "" {
@@ -7362,24 +7076,16 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.DockerSandbox.Agent != "" {
 			cfg.DockerSandbox.Agent = file.DockerSandbox.Agent
 		}
-		if file.DockerSandbox.Template != nil {
-			cfg.DockerSandbox.Template = *file.DockerSandbox.Template
-		}
+		applyOptional(&cfg.DockerSandbox.Template, file.DockerSandbox.Template)
 		if file.DockerSandbox.CPUs != nil {
 			if *file.DockerSandbox.CPUs < 0 {
 				return exit(2, "docker-sandbox cpus must be non-negative")
 			}
 			cfg.DockerSandbox.CPUs = *file.DockerSandbox.CPUs
 		}
-		if file.DockerSandbox.Memory != nil {
-			cfg.DockerSandbox.Memory = *file.DockerSandbox.Memory
-		}
-		if file.DockerSandbox.Clone != nil {
-			cfg.DockerSandbox.Clone = *file.DockerSandbox.Clone
-		}
-		if file.DockerSandbox.Workdir != nil {
-			cfg.DockerSandbox.Workdir = *file.DockerSandbox.Workdir
-		}
+		applyOptional(&cfg.DockerSandbox.Memory, file.DockerSandbox.Memory)
+		applyOptional(&cfg.DockerSandbox.Clone, file.DockerSandbox.Clone)
+		applyOptional(&cfg.DockerSandbox.Workdir, file.DockerSandbox.Workdir)
 		if file.DockerSandbox.ExtraWorkspaces != nil {
 			cfg.DockerSandbox.ExtraWorkspaces = append([]string(nil), (*file.DockerSandbox.ExtraWorkspaces)...)
 		}
@@ -7394,12 +7100,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.AnthropicSRT.CLIPath != "" {
 			cfg.AnthropicSRT.CLIPath = file.AnthropicSRT.CLIPath
 		}
-		if file.AnthropicSRT.Settings != nil {
-			cfg.AnthropicSRT.Settings = *file.AnthropicSRT.Settings
-		}
-		if file.AnthropicSRT.Debug != nil {
-			cfg.AnthropicSRT.Debug = *file.AnthropicSRT.Debug
-		}
+		applyOptional(&cfg.AnthropicSRT.Settings, file.AnthropicSRT.Settings)
+		applyOptional(&cfg.AnthropicSRT.Debug, file.AnthropicSRT.Debug)
 	}
 	if file.CloudRunSandbox != nil {
 		if file.CloudRunSandbox.CLIPath != "" {
@@ -7408,12 +7110,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.CloudRunSandbox.Workdir != "" {
 			cfg.CloudRunSandbox.Workdir = file.CloudRunSandbox.Workdir
 		}
-		if file.CloudRunSandbox.AllowEgress != nil {
-			cfg.CloudRunSandbox.AllowEgress = *file.CloudRunSandbox.AllowEgress
-		}
-		if file.CloudRunSandbox.Write != nil {
-			cfg.CloudRunSandbox.Write = *file.CloudRunSandbox.Write
-		}
+		applyOptional(&cfg.CloudRunSandbox.AllowEgress, file.CloudRunSandbox.AllowEgress)
+		applyOptional(&cfg.CloudRunSandbox.Write, file.CloudRunSandbox.Write)
 		if file.CloudRunSandbox.Rootfs != "" {
 			cfg.CloudRunSandbox.Rootfs = file.CloudRunSandbox.Rootfs
 		}
@@ -7452,9 +7150,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.UpstashBox.Workdir != "" {
 			cfg.UpstashBox.Workdir = file.UpstashBox.Workdir
 		}
-		if file.UpstashBox.KeepAlive != nil {
-			cfg.UpstashBox.KeepAlive = *file.UpstashBox.KeepAlive
-		}
+		applyOptional(&cfg.UpstashBox.KeepAlive, file.UpstashBox.KeepAlive)
 	}
 	if file.Smolvm != nil {
 		if file.Smolvm.BaseURL != "" {
@@ -7476,9 +7172,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.Smolvm.Network != "" {
 			cfg.Smolvm.Network = file.Smolvm.Network
 		}
-		if file.Smolvm.Keep != nil {
-			cfg.Smolvm.Keep = *file.Smolvm.Keep
-		}
+		applyOptional(&cfg.Smolvm.Keep, file.Smolvm.Keep)
 	}
 	if file.AsciiBox != nil {
 		if file.AsciiBox.BaseURL != "" {
@@ -7553,9 +7247,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.LocalContainer.Network != "" {
 			cfg.LocalContainer.Network = file.LocalContainer.Network
 		}
-		if file.LocalContainer.DockerSocket != nil {
-			cfg.LocalContainer.DockerSocket = *file.LocalContainer.DockerSocket
-		}
+		applyOptional(&cfg.LocalContainer.DockerSocket, file.LocalContainer.DockerSocket)
 		// NOTE: localContainer.volumes is intentionally NOT loaded from
 		// repo-local config files. Bind mounts expose host paths and must
 		// be an explicit CLI action (--local-container-volume), not
@@ -7647,15 +7339,9 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.MXC.BlockedHosts != nil {
 			cfg.MXC.BlockedHosts = append([]string(nil), file.MXC.BlockedHosts...)
 		}
-		if file.MXC.AllowDACLMutation != nil {
-			cfg.MXC.AllowDACLMutation = *file.MXC.AllowDACLMutation
-		}
-		if file.MXC.AllowWindowsUI != nil {
-			cfg.MXC.AllowWindowsUI = *file.MXC.AllowWindowsUI
-		}
-		if file.MXC.Experimental != nil {
-			cfg.MXC.Experimental = *file.MXC.Experimental
-		}
+		applyOptional(&cfg.MXC.AllowDACLMutation, file.MXC.AllowDACLMutation)
+		applyOptional(&cfg.MXC.AllowWindowsUI, file.MXC.AllowWindowsUI)
+		applyOptional(&cfg.MXC.Experimental, file.MXC.Experimental)
 	}
 	if file.Multipass != nil {
 		if file.Multipass.CLIPath != "" {
@@ -7691,9 +7377,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.Machine0.Image != "" {
 			cfg.Machine0.Image = file.Machine0.Image
 		}
-		if file.Machine0.ImageVersion != nil {
-			cfg.Machine0.ImageVersion = *file.Machine0.ImageVersion
-		}
+		applyOptional(&cfg.Machine0.ImageVersion, file.Machine0.ImageVersion)
 		if file.Machine0.DesktopImage != "" {
 			cfg.Machine0.DesktopImage = file.Machine0.DesktopImage
 		}
@@ -7788,9 +7472,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.HyperV.GuestPassword != "" {
 			cfg.HyperV.GuestPassword = file.HyperV.GuestPassword
 		}
-		if file.HyperV.InitPassword != nil {
-			cfg.HyperV.InitPassword = *file.HyperV.InitPassword
-		}
+		applyOptional(&cfg.HyperV.InitPassword, file.HyperV.InitPassword)
 	}
 	if file.WindowsSandbox != nil {
 		if file.WindowsSandbox.Workdir != "" {
@@ -7827,9 +7509,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 	}
 	if file.Tailscale != nil {
-		if file.Tailscale.Enabled != nil {
-			cfg.Tailscale.Enabled = *file.Tailscale.Enabled
-		}
+		applyOptional(&cfg.Tailscale.Enabled, file.Tailscale.Enabled)
 		if file.Tailscale.Network != "" {
 			cfg.Network = NetworkMode(strings.ToLower(strings.TrimSpace(file.Tailscale.Network)))
 		}
@@ -7845,9 +7525,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.Tailscale.ExitNode != "" {
 			cfg.Tailscale.ExitNode = strings.TrimSpace(file.Tailscale.ExitNode)
 		}
-		if file.Tailscale.ExitNodeAllowLANAccess != nil {
-			cfg.Tailscale.ExitNodeAllowLANAccess = *file.Tailscale.ExitNodeAllowLANAccess
-		}
+		applyOptional(&cfg.Tailscale.ExitNodeAllowLANAccess, file.Tailscale.ExitNodeAllowLANAccess)
 	}
 	if file.Static != nil {
 		if file.Static.ID != "" {
@@ -7874,35 +7552,21 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.Results.JUnit != nil {
 			cfg.Results.JUnit = appendUniqueStrings(nil, file.Results.JUnit...)
 		}
-		if file.Results.Auto != nil {
-			cfg.Results.Auto = *file.Results.Auto
-		}
-		if file.Results.FailOnFailures != nil {
-			cfg.Results.FailOnFailures = *file.Results.FailOnFailures
-		}
+		applyOptional(&cfg.Results.Auto, file.Results.Auto)
+		applyOptional(&cfg.Results.FailOnFailures, file.Results.FailOnFailures)
 	}
 	if file.Shard != nil && file.Shard.MaxCount != nil {
 		cfg.Shard.MaxCount = *file.Shard.MaxCount
 	}
 	if file.Cache != nil {
-		if file.Cache.Pnpm != nil {
-			cfg.Cache.Pnpm = *file.Cache.Pnpm
-		}
-		if file.Cache.Npm != nil {
-			cfg.Cache.Npm = *file.Cache.Npm
-		}
-		if file.Cache.Docker != nil {
-			cfg.Cache.Docker = *file.Cache.Docker
-		}
-		if file.Cache.Git != nil {
-			cfg.Cache.Git = *file.Cache.Git
-		}
+		applyOptional(&cfg.Cache.Pnpm, file.Cache.Pnpm)
+		applyOptional(&cfg.Cache.Npm, file.Cache.Npm)
+		applyOptional(&cfg.Cache.Docker, file.Cache.Docker)
+		applyOptional(&cfg.Cache.Git, file.Cache.Git)
 		if file.Cache.MaxGB > 0 {
 			cfg.Cache.MaxGB = file.Cache.MaxGB
 		}
-		if file.Cache.PurgeOnRelease != nil {
-			cfg.Cache.PurgeOnRelease = *file.Cache.PurgeOnRelease
-		}
+		applyOptional(&cfg.Cache.PurgeOnRelease, file.Cache.PurgeOnRelease)
 		if file.Cache.Volumes != nil {
 			volumes, err := normalizeFileCacheVolumes(*file.Cache.Volumes)
 			if err != nil {
@@ -8009,9 +7673,7 @@ func applyFileProfileConfig(profile ProfileConfig, file fileProfileConfig) Profi
 }
 
 func applyFileDoctorProfileConfig(doctor DoctorProfileConfig, file fileDoctorProfileConfig) DoctorProfileConfig {
-	if file.Enabled != nil {
-		doctor.Enabled = *file.Enabled
-	}
+	applyOptional(&doctor.Enabled, file.Enabled)
 	if len(file.Tools) > 0 {
 		doctor.Tools = normalizePreflightToolNames(file.Tools)
 	}
@@ -8021,12 +7683,8 @@ func applyFileDoctorProfileConfig(doctor DoctorProfileConfig, file fileDoctorPro
 	if file.MinDiskGB > 0 {
 		doctor.MinDiskGB = file.MinDiskGB
 	}
-	if file.RequireDocker != nil {
-		doctor.RequireDocker = *file.RequireDocker
-	}
-	if file.RequireCompose != nil {
-		doctor.RequireCompose = *file.RequireCompose
-	}
+	applyOptional(&doctor.RequireDocker, file.RequireDocker)
+	applyOptional(&doctor.RequireCompose, file.RequireCompose)
 	return doctor
 }
 
@@ -8034,9 +7692,7 @@ func applyFilePresetConfig(preset PresetConfig, file filePresetConfig) PresetCon
 	if file.Command != "" {
 		preset.Command = file.Command
 	}
-	if file.Shell != nil {
-		preset.Shell = *file.Shell
-	}
+	applyOptional(&preset.Shell, file.Shell)
 	if len(file.Env) > 0 {
 		if preset.Env == nil {
 			preset.Env = map[string]string{}
@@ -8048,9 +7704,7 @@ func applyFilePresetConfig(preset PresetConfig, file filePresetConfig) PresetCon
 			}
 		}
 	}
-	if file.Preflight != nil {
-		preset.Preflight = *file.Preflight
-	}
+	applyOptional(&preset.Preflight, file.Preflight)
 	if len(file.ArtifactGlobs) > 0 {
 		preset.ArtifactGlobs = appendUniqueStrings(nil, file.ArtifactGlobs...)
 	}
@@ -8134,12 +7788,8 @@ func applyFileJobConfig(job JobConfig, file fileJobConfig) JobConfig {
 		job.Network = file.Network
 	}
 	if file.Hydrate != nil {
-		if file.Hydrate.Actions != nil {
-			job.Hydrate.Actions = *file.Hydrate.Actions
-		}
-		if file.Hydrate.GitHubRunner != nil {
-			job.Hydrate.GitHubRunner = *file.Hydrate.GitHubRunner
-		}
+		applyOptional(&job.Hydrate.Actions, file.Hydrate.Actions)
+		applyOptional(&job.Hydrate.GitHubRunner, file.Hydrate.GitHubRunner)
 		if file.Hydrate.WaitTimeout != "" {
 			if duration, err := time.ParseDuration(file.Hydrate.WaitTimeout); err == nil {
 				job.Hydrate.WaitTimeout = duration
@@ -8166,25 +7816,17 @@ func applyFileJobConfig(job JobConfig, file fileJobConfig) JobConfig {
 			job.Actions.Fields = appendUniqueStrings(nil, file.Actions.Fields...)
 		}
 	}
-	if file.Shell != nil {
-		job.Shell = *file.Shell
-	}
+	applyOptional(&job.Shell, file.Shell)
 	if file.Command != "" {
 		job.Command = file.Command
 	}
-	if file.NoSync != nil {
-		job.NoSync = *file.NoSync
-	}
-	if file.SyncOnly != nil {
-		job.SyncOnly = *file.SyncOnly
-	}
+	applyOptional(&job.NoSync, file.NoSync)
+	applyOptional(&job.SyncOnly, file.SyncOnly)
 	if file.Checksum != nil {
 		value := *file.Checksum
 		job.Checksum = &value
 	}
-	if file.ForceSyncLarge != nil {
-		job.ForceSyncLarge = *file.ForceSyncLarge
-	}
+	applyOptional(&job.ForceSyncLarge, file.ForceSyncLarge)
 	if len(file.JUnit) > 0 {
 		job.JUnit = appendUniqueStrings(nil, file.JUnit...)
 	}
