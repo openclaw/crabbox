@@ -26334,7 +26334,7 @@ describe("fleet lease identity and idle", () => {
               )
             : undefined,
       expectedError: "malformed AWS DescribeInstances response",
-      retryable: false,
+      retryable: true,
     },
     {
       name: "EC2 reported a different owner account",
@@ -26412,6 +26412,58 @@ describe("fleet lease identity and idle", () => {
       );
     },
   );
+
+  it("retries malformed AWS inventory reads and completes after a canonical response", async () => {
+    let malformed = true;
+    const fixture = awsIngressTestFleet(async (operation) => {
+      if (operation === "GetCallerIdentity") {
+        return awsIdentityResponse("123456789012");
+      }
+      if (operation === "DescribeInstances") {
+        return malformed
+          ? ec2XMLResponse(
+              "<DescribeInstancesResponse><requestId>req-bad</requestId><reservationSet /></Response>",
+            )
+          : awsEmptyDescribeInstancesResponse();
+      }
+      return undefined;
+    });
+    const { storage, activeID, fleet } = fixture;
+    storage.seed(`lease:${activeID}`, {
+      ...storage.value<LeaseRecord>(`lease:${activeID}`)!,
+      state: "released",
+      keep: false,
+      releaseDeletesServer: true,
+      cleanupError: "prior cleanup was inconclusive",
+      cleanupFailedAt: new Date(Date.now() - 60_000).toISOString(),
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+
+    await (fleet as unknown as { expireLeases(): Promise<void> }).expireLeases();
+
+    const retrying = storage.value<LeaseRecord>(`lease:${activeID}`)!;
+    expect(retrying).toMatchObject({
+      state: "released",
+      host: "192.0.2.1",
+      cleanupError: expect.stringContaining("malformed AWS DescribeInstances response"),
+      cleanupRetryAt: expect.any(String),
+    });
+    expect(retrying.cleanupCompletedAt).toBeUndefined();
+
+    malformed = false;
+    storage.seed(`lease:${activeID}`, {
+      ...retrying,
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    await (fleet as unknown as { expireLeases(): Promise<void> }).expireLeases();
+
+    expect(storage.value<LeaseRecord>(`lease:${activeID}`)).toMatchObject({
+      state: "released",
+      host: "",
+      cleanupCompletedAt: expect.any(String),
+    });
+    expect(storage.value<LeaseRecord>(`lease:${activeID}`)?.cleanupRetryAt).toBeUndefined();
+  });
 
   it("retries AWS cleanup after transient STS failure", async () => {
     const fixture = awsIngressTestFleet();
@@ -27397,6 +27449,8 @@ describe("fleet lease identity and idle", () => {
 
   it("uses one credential snapshot per AWS regional provisioning attempt", async () => {
     let generation = 0;
+    const importedKeyRegions = new Set<string>();
+    const keyName = providerKeyForLease("cbx_abcdef123457");
     const credentials = vi.fn<
       () => Promise<{ accessKeyId: string; secretAccessKey: string; sessionToken: string }>
     >(async () => {
@@ -27409,6 +27463,25 @@ describe("fleet lease identity and idle", () => {
     });
     const fixture = awsIngressTestFleet(
       async (action, _params, region) => {
+        if (action === "DescribeKeyPairs" && importedKeyRegions.has(region)) {
+          return ec2XMLResponse(`<DescribeKeyPairsResponse><keySet><item>
+            <keyName>${keyName}</keyName><keyPairId>key-${region}</keyPairId>
+            <publicKey>ssh-ed25519 test</publicKey>
+            <tagSet>
+              <item><key>crabbox</key><value>true</value></item>
+              <item><key>created_by</key><value>crabbox</value></item>
+              <item><key>lease</key><value>cbx_abcdef123457</value></item>
+            </tagSet>
+          </item></keySet></DescribeKeyPairsResponse>`);
+        }
+        if (action === "ImportKeyPair") {
+          importedKeyRegions.add(region);
+          return ec2XMLResponse("<ImportKeyPairResponse />");
+        }
+        if (action === "DeleteKeyPair") {
+          importedKeyRegions.delete(region);
+          return ec2XMLResponse("<DeleteKeyPairResponse />");
+        }
         if (action === "RunInstances" && region === "eu-west-1") {
           return ec2XMLResponse(
             "<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code></Error></Errors></Response>",
@@ -27426,6 +27499,15 @@ describe("fleet lease identity and idle", () => {
 
     expect(response.status).toBe(201);
     expect(credentials).toHaveBeenCalledTimes(3);
+    expect(importedKeyRegions).toEqual(new Set(["us-east-1"]));
+    expect(
+      fixture.requests.filter(
+        ({ action, region }) => action === "DeleteKeyPair" && region === "eu-west-1",
+      ),
+    ).toHaveLength(1);
+    expect(
+      fixture.storage.value<LeaseRecord>(`lease:${fixture.creatingID}`)?.providerKeyCleanupPending,
+    ).toBeUndefined();
     const attemptRequests = fixture.requests.slice(1);
     for (const [region, credential] of [
       ["eu-west-1", "ATTEMPT_2"],
@@ -27940,22 +28022,14 @@ describe("fleet lease identity and idle", () => {
             state: "released",
             cloudID: "",
             releaseDeletesServer: true,
-            cleanupStatus:
-              region === "eu-west-1" ? "complete" : action === "release" ? "pending" : "failed",
+            cleanupStatus: "complete",
             provisioningResourceMayExist: false,
           },
         });
         expect({
           cleanupError: observedBody.lease.cleanupError,
           providerKeyCleanupPending: observedBody.lease.providerKeyCleanupPending,
-        }).toEqual(
-          region === "eu-west-1"
-            ? { cleanupError: undefined, providerKeyCleanupPending: undefined }
-            : {
-                cleanupError: "create attempt was canceled before completion",
-                providerKeyCleanupPending: true,
-              },
-        );
+        }).toEqual({ cleanupError: undefined, providerKeyCleanupPending: undefined });
       } finally {
         finishPreparation.resolve();
         await Promise.allSettled([creating]);

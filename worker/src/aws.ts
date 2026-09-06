@@ -58,7 +58,7 @@ type AWSDescribeInstancesResult = {
 };
 
 function malformedAWSDescribeInstances(detail: string): never {
-  throw new AWSLeaseAuthorityError(`malformed AWS DescribeInstances response: ${detail}`);
+  throw new AWSLeaseObservationError(`malformed AWS DescribeInstances response: ${detail}`);
 }
 
 export class AWSLeaseAuthorityError extends Error {
@@ -3051,7 +3051,7 @@ export class EC2SpotClient {
         : (this.parser.parse(text) as unknown);
     } catch (error) {
       if (options.exactResponseEnvelope) {
-        throw new AWSLeaseAuthorityError(`malformed AWS ${action} response: invalid XML`, {
+        throw new AWSLeaseObservationError(`malformed AWS ${action} response: invalid XML`, {
           cause: error,
         });
       }
@@ -3062,13 +3062,13 @@ export class EC2SpotClient {
       const envelope = `${action}Response`;
       const payloadRoots = Object.keys(parsedRecord).filter((key) => key !== "?xml");
       if (payloadRoots.length !== 1 || payloadRoots[0] !== envelope) {
-        throw new AWSLeaseAuthorityError(
+        throw new AWSLeaseObservationError(
           `malformed AWS ${action} response: ${envelope} envelope is missing`,
         );
       }
       const root = parsedRecord[envelope];
       if (!root || typeof root !== "object" || Array.isArray(root)) {
-        throw new AWSLeaseAuthorityError(
+        throw new AWSLeaseObservationError(
           `malformed AWS ${action} response: ${envelope} envelope is invalid`,
         );
       }

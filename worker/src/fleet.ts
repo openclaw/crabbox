@@ -4746,6 +4746,24 @@ export class FleetCoordinator {
           throw new CreateAttemptCanceledError();
         }
       },
+      onProviderKeyCleanupComplete: async (target) => {
+        await this.state.runExclusive(async () => {
+          const current = await this.getLease(dispatched.id);
+          if (
+            !current ||
+            !sameLeaseReleaseIdentity(current, dispatched) ||
+            current.provisioningRequestStartedAt !== dispatched.provisioningRequestStartedAt ||
+            current.provider !== "aws" ||
+            current.region !== target.region
+          ) {
+            return;
+          }
+          delete current.providerKeyCleanupPending;
+          delete current.providerKeyCleanupID;
+          current.updatedAt = new Date().toISOString();
+          await this.putLease(current);
+        });
+      },
       onResourceCreated: (claim) => this.recordCreatedProviderResource(dispatched, claim),
       // Queued regional attempts must not restore access from their pre-provisioning snapshot.
       withLeaseAccess: (target, operation) =>
@@ -26740,6 +26758,7 @@ interface ProviderProvisioningContext {
   publishAccessBeforeProvisioning?: boolean;
   onTargetAttempt?: (target: ProviderProvisioningTarget) => Promise<void>;
   onProviderKeyCleanupPending?: (existingKey: boolean) => Promise<void>;
+  onProviderKeyCleanupComplete?: (target: ProviderProvisioningTarget) => Promise<void>;
   onResourceCreated?: (claim: ProviderProvisioningCleanupClaim) => Promise<boolean>;
   withLeaseAccess?: <T>(
     target: ProviderProvisioningTarget,
@@ -28869,6 +28888,7 @@ export class AWSProvider implements CloudProvider {
           };
     for (const region of regions) {
       const client = region === this.region ? this.client : new EC2SpotClient(this.env, region);
+      let cleanupRegionalKey: (() => Promise<void>) | undefined;
       let allocated:
         | {
             serverType: string;
@@ -28890,6 +28910,13 @@ export class AWSProvider implements CloudProvider {
           // Persist the target only after its fixed credential snapshot proves the recorded account.
           await provisioning?.onTargetAttempt?.({ region });
           const operationClient = session.client;
+          let ownedKeyRequiresCleanup = false;
+          cleanupRegionalKey = async () => {
+            if (!ownedKeyRequiresCleanup) return;
+            await operationClient.deleteSSHKey(config.providerKey, leaseID);
+            await provisioning.onProviderKeyCleanupComplete?.({ region });
+            ownedKeyRequiresCleanup = false;
+          };
           const requestStartedAt = Date.now();
           const { server, serverType, market, attempts, imageID } =
             await operationClient.createServerWithFallback(
@@ -28899,11 +28926,10 @@ export class AWSProvider implements CloudProvider {
               owner,
               {
                 ...ingressOptions,
-                ...(provisioning.onProviderKeyCleanupPending
-                  ? {
-                      onOwnedKeyCleanupRequired: provisioning.onProviderKeyCleanupPending,
-                    }
-                  : {}),
+                onOwnedKeyCleanupRequired: async (existingKey: boolean) => {
+                  await provisioning.onProviderKeyCleanupPending?.(existingKey);
+                  ownedKeyRequiresCleanup = true;
+                },
                 // Only ingress writes hold the fence; image, instance and address waits do not.
                 ...(!config.awsPrivate && withLeaseAccess
                   ? {
@@ -29075,9 +29101,23 @@ export class AWSProvider implements CloudProvider {
         ) {
           throw error;
         }
-        const message = error instanceof Error ? error.message : String(error);
+        let regionError = error;
+        let message = error instanceof Error ? error.message : String(error);
+        const retryableRegionFailure = isRetryableAWSRegionProvisioningError(message);
+        if (retryableRegionFailure && cleanupRegionalKey) {
+          try {
+            // Region-scoped key pairs must not survive a failed attempt when fallback advances.
+            // oxlint-disable-next-line eslint/no-await-in-loop -- cleanup must finish before the next Region owns the lease.
+            await cleanupRegionalKey();
+          } catch (cleanupError) {
+            const cleanupMessage =
+              cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+            message = `${message}; failed to clean AWS SSH key in ${region}: ${cleanupMessage}`;
+            regionError = new AggregateError([error, cleanupError], message, { cause: error });
+          }
+        }
         history.recordFailure(
-          error,
+          regionError,
           {
             region,
             serverType: allocated?.serverType ?? config.serverType,
@@ -29088,7 +29128,7 @@ export class AWSProvider implements CloudProvider {
           `${region}: ${message}`,
           allocated?.attempts,
         );
-        if (!isRetryableAWSRegionProvisioningError(message)) {
+        if (!retryableRegionFailure || regionError !== error) {
           break;
         }
       }
