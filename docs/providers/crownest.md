@@ -138,6 +138,23 @@ fragment, and must use HTTPS except for loopback development endpoints.
 7. One-shot sandboxes are deleted after successful `run` unless `--keep` is set.
    Retained sandboxes can be reused with `--id` and later removed with `stop`.
 
+Final timing includes cancellation and cleanup work and agrees with the selected
+run outcome. Command exit codes and primary failure causes survive later cleanup
+or reporting failures. A first cleanup failure preserves its public provider
+error code instead of being classified as a command exit.
+
+If the event stream fails before a terminal result, or the local run is canceled,
+Crabbox attempts Workspace Run cancellation before retiring its local claim. A
+failed cancellation retains the existing claim and recovery session for an
+explicit `stop`. A successful cancellation response uses Crownest's existing
+server-owned cleanup contract; Crabbox does not poll for terminal confirmation
+or claim that an accepted response proves hosted completion.
+
+Backend consumers can supply timing writers that return errors; these errors do
+not replace an earlier failure. The ordinary CLI captures provider timing
+internally before writing its final output, so a backend timing-writer failure
+is not the same path as a CLI stderr write failure.
+
 ## Capabilities
 
 - SSH: no.
@@ -149,6 +166,11 @@ fragment, and must use HTTPS except for loopback development endpoints.
 - Pause/resume: not advertised in v1.
 - Command env forwarding: no. Crownest Workspace Runs currently reject env
   values until secret-backed env storage is added on the Crownest side.
+  The exact core-owned bookkeeping names `CRABBOX_LEASE_ID`, `CRABBOX_RUN_ID`,
+  and `CRABBOX_SLUG` are accepted case-insensitively and omitted by this provider.
+  They are not user command environment variables and are not forwarded to the
+  Crownest command. Other names, including `CRABBOX_` prefix lookalikes, remain
+  unsupported; provider authentication filtering is unchanged.
 
 ## Limitations
 
