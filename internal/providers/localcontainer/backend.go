@@ -2147,6 +2147,10 @@ func (b *backend) exactContainerAbsent(ctx context.Context, id string) (bool, er
 		return false, commandError("confirm local-container absence", result, err)
 	}
 	containerID := strings.ToLower(strings.TrimSpace(id))
+	// Accept Podman's quoted-ID spelling only as the complete diagnostic.
+	if containerID != "" && detail == "error: no such container \""+containerID+"\"" {
+		return true, nil
+	}
 	for _, marker := range []string{
 		"no such object: " + containerID,
 		"no such container: " + containerID,
