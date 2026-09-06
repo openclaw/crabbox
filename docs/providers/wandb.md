@@ -164,9 +164,15 @@ the lesser of five minutes and the sandbox lifetime.
 - `Exec` is the unary RPC, so command output is buffered server-side and
   returned at completion rather than streamed; there is no interactive PTY.
 - Environment variables are applied at `Start` time only. When you target an
-  existing sandbox with `--id`, env vars cannot be forwarded onto it (the
-  `Exec` RPC has no env field), so an `--id` run with `--allow-env` is
-  rejected.
+  existing sandbox with `--id`, selected user env vars cannot be forwarded onto
+  it (the `Exec` RPC has no env field), so explicit `--allow-env` selections
+  containing such values are rejected, including `CI` and `NODE_OPTIONS`.
+  Crabbox's local run metadata (`CRABBOX_LEASE_ID`, `CRABBOX_RUN_ID`, and
+  `CRABBOX_SLUG`) may be omitted for reuse, including when an env summary is
+  requested. The built-in implicit `CI`/`NODE_OPTIONS` defaults retain their
+  existing omission exception. Neither exception forwards values through `Exec`
+  or refreshes the sandbox's original `Start`-time environment; similarly named
+  custom variables are not treated as reserved metadata.
 - `--reclaim`, `--shell`, `--sync-only`, `--checksum`, `--force-sync-large`,
   `--full-resync`, `--download`, `--artifact-glob`, and `--require-artifact`
   are rejected: W&B owns the sandbox lifecycle and there is no Crabbox
