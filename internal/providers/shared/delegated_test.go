@@ -35,6 +35,79 @@ func TestExitErrorWithCausePreservesSelectedCodeAndMessage(t *testing.T) {
 	}
 }
 
+func TestPinDelegatedRunFailure(t *testing.T) {
+	hidden := errors.New("hidden setup detail")
+	for _, tc := range []struct {
+		name   string
+		err    error
+		code   int
+		status core.RunStatus
+		kind   core.RunErrorKind
+	}{
+		{name: "opaque", err: errors.New("setup failed"), code: 1, status: core.RunStatusFailed, kind: core.RunErrorProvider},
+		{name: "public two", err: ExitErrorWithCause(2, "safe setup", hidden), code: 2, status: core.RunStatusFailed, kind: core.RunErrorProvider},
+		{name: "public six", err: ExitErrorWithCause(6, "safe setup", hidden), code: 6, status: core.RunStatusFailed, kind: core.RunErrorProvider},
+		{name: "zero setup code", err: ExitErrorWithCause(0, "safe setup", hidden), code: 1, status: core.RunStatusFailed, kind: core.RunErrorProvider},
+		{name: "signed setup process exit", err: ExitErrorWithCause(-1, "safe setup", hidden), code: -1, status: core.RunStatusFailed, kind: core.RunErrorProvider},
+		{name: "canceled", err: context.Canceled, code: 1, status: core.RunStatusCanceled, kind: core.RunErrorCanceled},
+		{name: "deadline", err: context.DeadlineExceeded, code: 1, status: core.RunStatusTimedOut, kind: core.RunErrorTimeout},
+		{name: "safe canceled", err: ExitErrorWithCause(2, "safe setup", errors.Join(hidden, context.Canceled)), code: 2, status: core.RunStatusCanceled, kind: core.RunErrorCanceled},
+		{name: "safe deadline", err: ExitErrorWithCause(6, "safe setup", errors.Join(hidden, context.DeadlineExceeded)), code: 6, status: core.RunStatusTimedOut, kind: core.RunErrorTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := core.RunResult{Provider: "fixture", LeaseID: "lease", Slug: "slug", Total: time.Second, Command: time.Millisecond, CommandText: "fixture", SyncDelegated: true, Session: &core.RunSessionHandle{Kept: true}}
+			result, err := PinDelegatedRunFailure(before, tc.err)
+			want := before
+			want.ExitCode, want.Status, want.ErrorKind = tc.code, tc.status, tc.kind
+			if !reflect.DeepEqual(result, want) || result.Session != before.Session {
+				t.Fatalf("result=%+v, want %+v", result, want)
+			}
+			var public core.ExitError
+			if !errors.As(err, &public) || public.Code != tc.code || public.Message != tc.err.Error() || !errors.Is(err, tc.err) {
+				t.Fatalf("primary code/message/cause lost: %v", err)
+			}
+			pinned, sameErr := PinDelegatedRunFailure(result, err)
+			if !reflect.DeepEqual(pinned, result) || sameErr != err {
+				t.Fatal("pinning was not idempotent")
+			}
+			secondaryCause := errors.Join(errors.New("hidden cleanup detail"), context.DeadlineExceeded)
+			secondary := ExitErrorWithCause(9, "safe cleanup", secondaryCause)
+			result, err = AppendDelegatedRunFailure(result, err, secondary, 1)
+			if !reflect.DeepEqual(result, want) || !errors.As(err, &public) || public.Code != tc.code {
+				t.Fatalf("secondary replaced pinned outcome: %+v %v", result, err)
+			}
+			if public.Message != tc.err.Error()+"\nsafe cleanup" || strings.Contains(err.Error(), "hidden") || !errors.Is(err, tc.err) || !errors.Is(err, secondaryCause) {
+				t.Fatalf("safe messages or inspectable causes lost: %v", err)
+			}
+		})
+	}
+}
+
+func TestPinDelegatedRunFailureLeavesSelectedOutcomesUntouched(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result core.RunResult
+		err    error
+	}{
+		{name: "nil unclassified"},
+		{name: "nil selected success", result: core.RunResult{Status: core.RunStatusSucceeded}},
+		{name: "command", result: core.RunResult{ExitCode: 23, Status: core.RunStatusFailed, ErrorKind: core.RunErrorCommandExit}, err: ExitErrorWithCause(23, "command failed", errors.New("cause"))},
+		{name: "negative observed command", result: FinalizeDelegatedCommandOutcome(-1, ObservedProcessEndError("signal")), err: ExitErrorWithCause(-1, "signal", errors.New("cause"))},
+		{name: "transport", result: FinalizeDelegatedCommandOutcome(23, io.ErrUnexpectedEOF), err: io.ErrUnexpectedEOF},
+		{name: "canceled", result: FinalizeDelegatedCommandOutcome(0, context.Canceled), err: context.Canceled},
+		{name: "deadline", result: FinalizeDelegatedCommandOutcome(0, context.DeadlineExceeded), err: context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.result.Provider = "fixture"
+			tc.result.Session = &core.RunSessionHandle{Kept: true}
+			result, err := PinDelegatedRunFailure(tc.result, tc.err)
+			if !reflect.DeepEqual(result, tc.result) || result.Session != tc.result.Session || err != tc.err {
+				t.Fatalf("selected result/error changed: %+v %v", result, err)
+			}
+		})
+	}
+}
+
 func TestAppendDelegatedRunFailurePreservesSelectedOutcome(t *testing.T) {
 	primaryCause := errors.New("hidden primary detail")
 	secondaryCause := errors.New("hidden secondary detail")
@@ -128,6 +201,7 @@ func TestDelegatedSandboxLifecycle(t *testing.T) {
 		{name: "acquire", phase: "acquire", err: failure, keepOnFailure: true, wantCode: 1, wantKind: core.RunErrorProvider},
 		{name: "resolve ownership", reuse: true, phase: "resolve", err: core.ExitError{Code: 4, Message: "not owned"}, wantCode: 4, wantKind: core.RunErrorProvider},
 		{name: "setup", phase: "setup", err: failure, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantCleanup: true},
+		{name: "signed workspace helper and typed cleanup", phase: "workspace", noSync: true, err: core.ExitError{Code: -15, Message: "workspace helper signaled"}, cleanupErr: core.ExitError{Code: 4, Message: "claim changed"}, wantCode: -15, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true, wantCleanup: true},
 		{name: "kept setup", phase: "setup", err: failure, keepOnFailure: true, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true},
 		{name: "sync", phase: "sync", err: core.ExitError{Code: 6, Message: "sync failed"}, wantCode: 6, wantKind: core.RunErrorProvider, wantSession: true, wantCleanup: true},
 		{name: "kept sync", phase: "sync", err: failure, keepOnFailure: true, wantCode: 1, wantKind: core.RunErrorProvider, wantSession: true, wantKept: true},

@@ -302,6 +302,12 @@ then retry stop. Orphan cleanup also preserves claims with bootstrap residue.
 Bootstrap paths from older releases under the current system temp root remain
 supported.
 
+If runtime removal fails after the container has disappeared, retry `stop` with
+the original configuration. Crabbox can finish cleanup after an exact-ID absence
+confirmation, including Podman's quoted-ID diagnostic. Connection, permission,
+authentication, and ambiguous errors still retain the claim and local recovery
+state; the original removal failure is not converted into success.
+
 1. `warmup` or a fresh `run` creates a per-lease SSH key.
 2. The provider writes its bootstrap script under the user's cache directory,
    normally shared with desktop Docker VMs, then runs
