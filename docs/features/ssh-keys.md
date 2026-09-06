@@ -84,6 +84,13 @@ Those connections use `StrictHostKeyChecking=yes`; an invalid key or unsafe
 local trust path fails closed without attempting SSH. A refreshed authoritative
 key replaces the prior isolated pin rather than appending stale trust.
 
+Readiness stops promptly when OpenSSH rejects a host key, including during the
+separate WSL SFTP probe. Waiting for guest startup cannot repair that rejection:
+verify the lease identity and its SSH host trust before reconnecting. Detection
+works across split writes and large diagnostics without retaining their text;
+it does not replace keys or relax host-key checking. Other startup failures keep
+their existing retry policy, and caller cancellation remains authoritative.
+
 Targets without authoritative host-key metadata preserve the existing behavior.
 Their SSH connections use:
 

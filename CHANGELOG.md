@@ -2,8 +2,10 @@
 
 ## Unreleased
 
-- Docker Sandbox: preserve primary failures through cleanup and timing errors, report retained sessions after failed removal, honor keep-on-failure during early preparation, and protect successful clone commits even when timing output fails. [PR 1913](https://github.com/openclaw/crabbox/pull/1913).
+- Stop SSH readiness promptly on host-key rejection, including WSL SFTP and split or oversized diagnostics, without changing host trust. [PR 1877](https://github.com/openclaw/crabbox/pull/1877). Thanks @shunkakinoki.
+- Docker Sandbox: preserve primary failures through cleanup and timing errors, report retained sessions after failed removal, honor keep-on-failure during early preparation, and preserve successful clone commits across backend reporting failures. [PR 1913](https://github.com/openclaw/crabbox/pull/1913).
 - SmolVM: share sandbox run finalization so deletion failures no longer report success, early preparation failures honor keep-on-failure, and primary outcomes survive cleanup or timing errors while preserving provider keep policy and separate profile/resource cleanup budgets. [PR 1908](https://github.com/openclaw/crabbox/pull/1908).
+- Allow protected AWS image qualification to pass Node toolchain setup by using the supported no-cache input while keeping Go caching disabled. [PR 1909](https://github.com/openclaw/crabbox/pull/1909).
 - Fix documentation table-of-contents links for repeated headings so each link reaches its own section, while preserving existing first-heading URLs. [PR 1787](https://github.com/openclaw/crabbox/pull/1787). Thanks @steipete.
 - Shared sandbox runs: keep secondary cleanup and timing errors visible in CLI diagnostics without replacing the primary exit code. [PR 1907](https://github.com/openclaw/crabbox/pull/1907).
 - Freestyle: share sandbox run finalization so automatic deletion failures no longer report success, command failures survive later cleanup or timing errors, and transport cancellation causes remain available to callers. [PR 1907](https://github.com/openclaw/crabbox/pull/1907).
