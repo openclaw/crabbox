@@ -1,3 +1,4 @@
+import { sha256Hex } from "./auth";
 import { azureWindowsBootstrapPowerShell, cloudInit } from "./bootstrap";
 import {
   azureSupportsEphemeralFullCaching,
@@ -14,6 +15,7 @@ import { ExpiringTokenCache, type ExpiringToken } from "./expiring-token-cache";
 import { leaseProviderLabels, providerLabelsOwnedByLease } from "./provider-labels";
 import {
   ProviderProvisioningCleanupError,
+  ProviderResourceUnresolvedError,
   providerProvisioningCleanupClaim,
 } from "./provider-provisioning";
 import { ProvisioningAttemptHistory } from "./provisioning-attempts";
@@ -101,6 +103,16 @@ export function azureOwnedDeleteClaimKey(
   leaseID: string,
 ): string {
   return ["provider:azure:delete-claim", providerScope, cloudID, leaseID]
+    .map((part) => encodeURIComponent(part))
+    .join(":");
+}
+
+export function azureCleanupRecoveryAuditKey(
+  providerScope: string,
+  cloudID: string,
+  leaseID: string,
+): string {
+  return ["provider:azure:cleanup-recovery", providerScope, cloudID, leaseID]
     .map((part) => encodeURIComponent(part))
     .join(":");
 }
@@ -283,7 +295,7 @@ export interface AzureOwnedDeleteTransport {
 }
 
 interface AzureOwnedDeleteClaim {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   provider: "azure";
   leaseID: string;
   slug: string;
@@ -304,6 +316,7 @@ interface AzureOwnedDeleteClaim {
   stableResourceIdentity?: string;
   partialStableResourceIdentity?: string;
   deletedStableResourceIdentity?: string;
+  recovery?: AzureCleanupRecoveryAudit;
   disk?: {
     resourceID: string;
     uniqueID: string;
@@ -314,12 +327,31 @@ export interface AzureOwnedDeleteReleaseContext {
   resourceIdentity: string;
 }
 
+export interface AzureCleanupRecoveryAudit {
+  version: 1;
+  basis: "operator-confirmed-public-ip-absence";
+  leaseID: string;
+  slug: string;
+  owner: string;
+  cloudID: string;
+  providerScope: string;
+  actor: string;
+  confirmedAt: string;
+  claimFingerprint: string;
+  originalStableResourceIdentity: AzureReconciliationIdentityEntry[];
+  previousDeletedStableResourceIdentity: AzureReconciliationIdentityEntry[];
+  acknowledgedMissingResourceIdentity: AzureReconciliationIdentityEntry;
+  remainingDiskIdentity: AzureReconciliationIdentityEntry;
+}
+
 export interface AzureCleanupInspection {
   providerScope: string;
   observedAt: string;
   claimUnchanged: boolean;
+  claimFingerprint?: string;
+  recoveryAudit?: AzureCleanupRecoveryAudit;
   claim?: {
-    version: 1 | 2;
+    version: 1 | 2 | 3;
     preparing?: true;
     completed?: true;
     stableResourceIdentity?: AzureReconciliationIdentityEntry[];
@@ -868,8 +900,10 @@ export class AzureClient {
     const claim = await this.ownedDeleteClaimStorage.get<AzureOwnedDeleteClaim>(claimKey);
     if (claim) this.requireOwnedDeleteClaim(lease, claim);
     const claimSnapshot = JSON.stringify(claim);
-    const identityEntries = (value: string) =>
-      azureStableResourceIdentityEntries(value).map(({ labels: _labels, ...entry }) => entry);
+    const claimFingerprint =
+      claimSnapshot === undefined ? undefined : await sha256Hex(claimSnapshot);
+    const recoveryAudit = await this.cleanupRecoveryAudit(lease);
+    const identityEntries = azureCleanupIdentityView;
     const name = lease.cloudID;
     const [vm, nic, pip, disk] = await Promise.all([
       this.ownedResource<AzureVM>(
@@ -911,6 +945,8 @@ export class AzureClient {
       providerScope: this.providerScope(),
       observedAt: new Date().toISOString(),
       claimUnchanged,
+      ...(claimFingerprint ? { claimFingerprint } : {}),
+      ...(recoveryAudit ? { recoveryAudit } : {}),
       ...(claim
         ? {
             claim: {
@@ -961,10 +997,175 @@ export class AzureClient {
           ? azureStableResourceIdentityMatches(
               claim.stableResourceIdentity,
               currentIdentity,
-              claim.deletedStableResourceIdentity,
+              azureEffectiveCleanupProgress(claim),
             )
           : null,
     };
+  }
+
+  private async cleanupRecoveryAudit(
+    lease: OwnedDeleteLease,
+  ): Promise<AzureCleanupRecoveryAudit | undefined> {
+    const audit = await this.ownedDeleteClaimStorage?.get<AzureCleanupRecoveryAudit>(
+      azureCleanupRecoveryAuditKey(this.providerScope(), lease.cloudID, lease.id),
+    );
+    if (!audit) return undefined;
+    if (!azureRecoveryAuditBoundToLease(audit, lease, this.providerScope())) {
+      throw new ProviderResourceUnresolvedError("Azure cleanup recovery audit binding changed");
+    }
+    return azureCleanupRecoveryAuditView(audit);
+  }
+
+  async recoverMissingPublicIP(
+    lease: OwnedDeleteLease,
+    expectedClaimFingerprint: string,
+    actor: string,
+    commitGuard?: <T>(commit: () => Promise<T>) => Promise<T>,
+  ): Promise<AzureCleanupRecoveryAudit> {
+    const storage = this.ownedDeleteClaimStorage;
+    if (
+      !storage?.transaction ||
+      lease.providerScope !== this.providerScope() ||
+      !/^[a-f0-9]{64}$/.test(expectedClaimFingerprint) ||
+      !actor.trim() ||
+      actor.length > 256
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        "Azure cleanup recovery requires an exact claim fingerprint, actor, scope, and transactional storage",
+      );
+    }
+    const claimKey = azureOwnedDeleteClaimKey(this.providerScope(), lease.cloudID, lease.id);
+    const auditKey = azureCleanupRecoveryAuditKey(this.providerScope(), lease.cloudID, lease.id);
+    const existing = await this.cleanupRecoveryAudit(lease);
+    if (existing) {
+      const current = await storage.get<AzureOwnedDeleteClaim>(claimKey);
+      if (current) this.requireOwnedDeleteClaim(lease, current);
+      if (
+        existing.claimFingerprint === expectedClaimFingerprint &&
+        (!current ||
+          (current.version === 3 && JSON.stringify(current.recovery) === JSON.stringify(existing)))
+      )
+        return existing;
+      throw new ProviderResourceUnresolvedError(
+        "Azure cleanup recovery was already recorded for another claim",
+      );
+    }
+    const inspection = await this.inspectOwnedCleanup(lease);
+    const claim = await storage.get<AzureOwnedDeleteClaim>(claimKey);
+    if (
+      !claim ||
+      !inspection.claimUnchanged ||
+      inspection.claimFingerprint !== expectedClaimFingerprint ||
+      (await sha256Hex(JSON.stringify(claim))) !== expectedClaimFingerprint
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        "Azure cleanup recovery claim changed; inspect again",
+      );
+    }
+    this.requireOwnedDeleteClaim(lease, claim);
+    if (
+      claim.version !== 2 ||
+      claim.preparing ||
+      claim.completed ||
+      claim.pendingDeletion ||
+      claim.resourceIdentity ||
+      claim.partialStableResourceIdentity ||
+      !claim.stableResourceIdentity ||
+      !claim.deletedStableResourceIdentity
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        "Azure cleanup recovery requires a complete version-2 ordinary cleanup baseline",
+      );
+    }
+    const stable = azureCleanupIdentityView(claim.stableResourceIdentity);
+    const deleted = azureCleanupIdentityView(claim.deletedStableResourceIdentity);
+    const expectedIDs = [
+      vmPath(this.resourceGroup, lease.cloudID),
+      networkPath(this.resourceGroup, "networkInterfaces", `${lease.cloudID}-nic`),
+      networkPath(this.resourceGroup, "publicIPAddresses", `${lease.cloudID}-pip`),
+      `/resourceGroups/${this.resourceGroup}/providers/Microsoft.Compute/disks/${lease.cloudID}-osdisk`,
+    ].map((path) => this.resourceID(path).toLowerCase());
+    if (
+      stable.length !== 4 ||
+      stable.some(
+        (entry, index) =>
+          entry.kind !== Object.values(azureOwnedDeleteResourceKind)[index] ||
+          entry.id !== expectedIDs[index] ||
+          !entry.immutableID.trim() ||
+          entry.location !== this.defaultLocation.trim().toLowerCase(),
+      ) ||
+      deleted.length !== 2 ||
+      deleted[0]?.kind !== "virtualMachines" ||
+      deleted[1]?.kind !== "networkInterfaces" ||
+      inspection.resources.length !== 1 ||
+      inspection.resources[0]?.kind !== "disks" ||
+      inspection.resources[0].ownership !== "matched"
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        "Azure cleanup recovery requires recorded VM/NIC deletion and only the original owned disk remaining",
+      );
+    }
+    const { ownership: _ownership, ...disk } = inspection.resources[0];
+    const acknowledged = stable[2]!;
+    if (
+      !azureRecoveryDiskDetached(disk) ||
+      !azureStableResourceIdentityMatches(
+        claim.stableResourceIdentity,
+        JSON.stringify([disk]),
+        JSON.stringify([...deleted, acknowledged]),
+      )
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        "Azure cleanup recovery disk identity, location, or attachment changed",
+      );
+    }
+    const audit: AzureCleanupRecoveryAudit = {
+      version: 1,
+      basis: "operator-confirmed-public-ip-absence",
+      leaseID: lease.id,
+      slug: lease.slug ?? "",
+      owner: lease.owner,
+      cloudID: lease.cloudID,
+      providerScope: this.providerScope(),
+      actor,
+      confirmedAt: new Date().toISOString(),
+      claimFingerprint: expectedClaimFingerprint,
+      originalStableResourceIdentity: stable,
+      previousDeletedStableResourceIdentity: deleted,
+      acknowledgedMissingResourceIdentity: acknowledged,
+      remainingDiskIdentity: disk,
+    };
+    // Version 3 makes older workers fail closed; it does not invent a PIP DELETE receipt.
+    const recovered: AzureOwnedDeleteClaim = { ...claim, version: 3, recovery: audit };
+    this.requireOwnedDeleteClaim(lease, recovered);
+    const transact = storage.transaction.bind(storage);
+    const commit = () =>
+      transact(async (transaction) => {
+        const latest = await transaction.get<AzureOwnedDeleteClaim>(claimKey);
+        const prior = await transaction.get<AzureCleanupRecoveryAudit>(auditKey);
+        if (prior && latest) this.requireOwnedDeleteClaim(lease, latest);
+        if (
+          prior &&
+          azureRecoveryAuditBoundToLease(prior, lease, this.providerScope()) &&
+          prior.claimFingerprint === expectedClaimFingerprint &&
+          (!latest ||
+            (latest.version === 3 && JSON.stringify(latest.recovery) === JSON.stringify(prior)))
+        )
+          return azureCleanupRecoveryAuditView(prior);
+        if (
+          prior ||
+          !latest ||
+          (await sha256Hex(JSON.stringify(latest))) !== expectedClaimFingerprint
+        ) {
+          throw new ProviderResourceUnresolvedError(
+            "Azure cleanup recovery claim changed before commit",
+          );
+        }
+        await transaction.put(auditKey, audit);
+        await transaction.put(claimKey, recovered);
+        return audit;
+      });
+    return commitGuard ? await commitGuard(commit) : await commit();
   }
 
   async deleteOwnedServer(
@@ -1039,6 +1240,14 @@ export class AzureClient {
       claim = await this.persistOwnedDeleteClaimTransition(claimKey, lease, claim, preparedClaim);
     }
     this.requireOwnedDeleteClaim(lease, claim);
+    if (claim.version === 3) {
+      if (context || transport)
+        throw new Error("Audited Azure cleanup must resume through ordinary release");
+      const audit = await this.cleanupRecoveryAudit(lease);
+      if (!audit || JSON.stringify(audit) !== JSON.stringify(claim.recovery)) {
+        throw new Error("Audited Azure cleanup requires its retained recovery record");
+      }
+    }
     if (claim.pendingDeletion) {
       if (!transport) throw new Error("Azure deletion continuation owns this cleanup claim");
       const pending = claim.pendingDeletion;
@@ -1525,7 +1734,7 @@ export class AzureClient {
       !azureStableResourceIdentityMatches(
         options.expectedStableResourceIdentity,
         currentStableResourceIdentity,
-        options.claim?.deletedStableResourceIdentity,
+        azureEffectiveCleanupProgress(options.claim),
       )
     ) {
       throw new Error(
@@ -1537,7 +1746,7 @@ export class AzureClient {
       !azureResourceIdentityMatches(
         options.expectedResourceIdentity,
         currentResourceIdentity,
-        options.claim?.deletedStableResourceIdentity,
+        azureEffectiveCleanupProgress(options.claim),
       )
     ) {
       throw new Error(
@@ -1559,7 +1768,7 @@ export class AzureClient {
     const staleCanonicalNICAttachmentAllowed =
       !vm &&
       azureStableResourceIdentityIncludesResourceID(
-        options.claim?.deletedStableResourceIdentity,
+        azureEffectiveCleanupProgress(options.claim),
         "virtualMachines",
         expectedVMID,
       );
@@ -1603,7 +1812,7 @@ export class AzureClient {
     const missingCanonicalPIPAllowed =
       !pip &&
       azureStableResourceIdentityIncludesResourceID(
-        options.claim?.deletedStableResourceIdentity,
+        azureEffectiveCleanupProgress(options.claim),
         "publicIPAddresses",
         expectedPIPID,
       );
@@ -1635,7 +1844,7 @@ export class AzureClient {
         expectedNICID,
         !nic &&
           azureStableResourceIdentityIncludesResourceID(
-            options.claim?.deletedStableResourceIdentity,
+            azureEffectiveCleanupProgress(options.claim),
             "networkInterfaces",
             expectedNICID,
           ),
@@ -1836,6 +2045,8 @@ export class AzureClient {
       networkPath(this.resourceGroup, "networkInterfaces", `${lease.cloudID}-nic`),
     );
     try {
+      if (!azureCleanupRecoveryValid(claim)) throw new Error("invalid cleanup recovery");
+      const deletionProgress = azureEffectiveCleanupProgress(claim);
       if (claim.resourceIdentity !== undefined) {
         if (
           claim.stableResourceIdentity !==
@@ -1863,7 +2074,7 @@ export class AzureClient {
           !azureStableResourceIdentityMatches(
             claim.stableResourceIdentity,
             pending.stableResourceIdentity,
-            claim.deletedStableResourceIdentity,
+            deletionProgress,
           ) ||
           !azureStableResourceIdentityEntries(pending.stableResourceIdentity).some(
             (entry) => entry.kind === azureOwnedDeleteResourceKind[pending.kind],
@@ -1875,18 +2086,14 @@ export class AzureClient {
       if (
         claim.completed &&
         (!claim.stableResourceIdentity ||
-          !azureStableResourceIdentityMatches(
-            claim.stableResourceIdentity,
-            "[]",
-            claim.deletedStableResourceIdentity,
-          ))
+          !azureStableResourceIdentityMatches(claim.stableResourceIdentity, "[]", deletionProgress))
       )
         throw new Error("incomplete deletion progress");
       if (
         !azureStableResourceIdentityDeletionProgressValid(
           claim.stableResourceIdentity,
           claim.partialStableResourceIdentity,
-          claim.deletedStableResourceIdentity,
+          deletionProgress,
         )
       ) {
         throw new Error("invalid deletion progress");
@@ -1906,7 +2113,7 @@ export class AzureClient {
       : claim.preparing === undefined &&
         (claim.version === 1 || claim.stableResourceIdentity !== undefined);
     if (
-      (claim.version !== 1 && claim.version !== 2) ||
+      (claim.version !== 1 && claim.version !== 2 && claim.version !== 3) ||
       !preparingValid ||
       claim.provider !== "azure" ||
       claim.leaseID !== lease.id ||
@@ -2898,8 +3105,8 @@ export class AzureClient {
   }
 
   private async awaitLRO(response: Response, token: string, opts?: AzureARMOptions): Promise<void> {
-    const asyncURL =
-      response.headers.get("azure-asyncoperation") ?? response.headers.get("location");
+    const asyncOperationURL = response.headers.get("azure-asyncoperation");
+    const asyncURL = asyncOperationURL ?? response.headers.get("location");
     if (!asyncURL) return;
     const interval = azureLROPollIntervalMS(response.headers.get("retry-after"));
     const timeoutMs = opts?.lroTimeoutMs;
@@ -2922,11 +3129,27 @@ export class AzureClient {
       }
       // oxlint-disable-next-line eslint/no-await-in-loop -- reading the LRO status payload is part of polling.
       const text = await poll.text();
-      const status = text ? (JSON.parse(text) as { status?: string }).status?.toLowerCase() : "";
-      if (status === "succeeded") return;
-      if (status === "failed" || status === "canceled") {
-        throw new Error(`azure LRO ${status}: ${text}`);
+      const body = text
+        ? (JSON.parse(text) as {
+            status?: string;
+            provisioningState?: string;
+            properties?: { provisioningState?: string };
+          })
+        : {};
+      const states = [body.status, body.provisioningState, body.properties?.provisioningState].map(
+        (state) => state?.toLowerCase() ?? "",
+      );
+      const failure = states.find((state) => state === "failed" || state === "canceled");
+      if (failure) {
+        throw new Error(`azure LRO ${failure}: ${text}`);
       }
+      // AsyncOperation requires a status document; Location completes by HTTP status.
+      // Explicit nonterminal body states override a seemingly complete response.
+      const completed =
+        asyncOperationURL !== null
+          ? states[0] === "succeeded"
+          : poll.status === 200 || poll.status === 204;
+      if (completed && states.every((state) => !state || state === "succeeded")) return;
       if (opts?.terminalResourceState) {
         // Azure can leave the extension LRO pending after the resource itself is terminal.
         // Match the direct CLI by accepting the resource state as the completion signal.
@@ -3755,6 +3978,171 @@ const azureOwnedDeleteResourceKind: Record<
   disk: "disks",
 };
 
+function azureCleanupIdentityView(value: string): AzureReconciliationIdentityEntry[] {
+  return azureStableResourceIdentityEntries(value).map(({ labels: _labels, ...entry }) => entry);
+}
+
+function azureRecoveryAuditBoundToLease(
+  audit: AzureCleanupRecoveryAudit,
+  lease: OwnedDeleteLease,
+  scope: string,
+): boolean {
+  return (
+    audit.version === 1 &&
+    audit.basis === "operator-confirmed-public-ip-absence" &&
+    audit.leaseID === lease.id &&
+    audit.slug === (lease.slug ?? "") &&
+    audit.owner === lease.owner &&
+    audit.cloudID === lease.cloudID &&
+    audit.providerScope === scope &&
+    typeof audit.actor === "string" &&
+    Boolean(audit.actor.trim()) &&
+    audit.actor.length <= 256 &&
+    typeof audit.confirmedAt === "string" &&
+    Number.isFinite(Date.parse(audit.confirmedAt)) &&
+    typeof audit.claimFingerprint === "string" &&
+    /^[a-f0-9]{64}$/.test(audit.claimFingerprint)
+  );
+}
+
+function azureCleanupRecoveryAuditView(
+  audit: AzureCleanupRecoveryAudit,
+): AzureCleanupRecoveryAudit {
+  return {
+    version: audit.version,
+    basis: audit.basis,
+    leaseID: audit.leaseID,
+    slug: audit.slug,
+    owner: audit.owner,
+    cloudID: audit.cloudID,
+    providerScope: audit.providerScope,
+    actor: audit.actor,
+    confirmedAt: audit.confirmedAt,
+    claimFingerprint: audit.claimFingerprint,
+    originalStableResourceIdentity: azureCleanupIdentityView(
+      JSON.stringify(audit.originalStableResourceIdentity),
+    ),
+    previousDeletedStableResourceIdentity: azureCleanupIdentityView(
+      JSON.stringify(audit.previousDeletedStableResourceIdentity),
+    ),
+    acknowledgedMissingResourceIdentity: azureCleanupIdentityView(
+      JSON.stringify([audit.acknowledgedMissingResourceIdentity]),
+    )[0]!,
+    remainingDiskIdentity: azureCleanupIdentityView(
+      JSON.stringify([audit.remainingDiskIdentity]),
+    )[0]!,
+  };
+}
+
+function azureRecoveryDiskDetached(entry: AzureReconciliationIdentityEntry): boolean {
+  return (
+    entry.kind === "disks" &&
+    (entry.topology["managedBy"] === undefined || entry.topology["managedBy"] === "") &&
+    (entry.topology["managedByExtended"] === undefined ||
+      (Array.isArray(entry.topology["managedByExtended"]) &&
+        entry.topology["managedByExtended"].length === 0))
+  );
+}
+
+// Keep operator-acknowledged absence separate from successful DELETE receipts.
+function azureEffectiveCleanupProgress(claim?: AzureOwnedDeleteClaim): string | undefined {
+  if (!claim?.recovery) return claim?.deletedStableResourceIdentity;
+  const deleted = azureStableResourceIdentityEntries(claim.deletedStableResourceIdentity ?? "[]");
+  const acknowledged = claim.recovery.acknowledgedMissingResourceIdentity;
+  if (deleted.some((entry) => entry.kind === acknowledged.kind)) {
+    throw new Error("Azure cleanup recovery duplicates deletion evidence");
+  }
+  const order = Object.values(azureOwnedDeleteResourceKind);
+  return JSON.stringify(
+    [...deleted, acknowledged].toSorted(
+      (left, right) => order.indexOf(left.kind) - order.indexOf(right.kind),
+    ),
+  );
+}
+
+function azureCleanupRecoveryValid(claim: AzureOwnedDeleteClaim): boolean {
+  if (claim.version !== 3) return claim.recovery === undefined;
+  try {
+    const audit = claim.recovery;
+    if (
+      !audit ||
+      audit.version !== 1 ||
+      audit.basis !== "operator-confirmed-public-ip-absence" ||
+      audit.leaseID !== claim.leaseID ||
+      audit.slug !== claim.slug ||
+      audit.owner !== claim.owner ||
+      audit.cloudID !== claim.cloudID ||
+      audit.providerScope !== claim.providerScope ||
+      typeof audit.actor !== "string" ||
+      !audit.actor.trim() ||
+      audit.actor.length > 256 ||
+      !Number.isFinite(Date.parse(audit.confirmedAt)) ||
+      !/^[a-f0-9]{64}$/.test(audit.claimFingerprint) ||
+      claim.preparing ||
+      claim.pendingDeletion ||
+      claim.partialStableResourceIdentity ||
+      claim.resourceIdentity ||
+      !claim.stableResourceIdentity ||
+      !claim.deletedStableResourceIdentity
+    )
+      return false;
+    const stable = azureCleanupIdentityView(claim.stableResourceIdentity);
+    const deleted = azureStableResourceIdentityEntries(claim.deletedStableResourceIdentity);
+    const before = azureStableResourceIdentityEntries(
+      JSON.stringify(audit.previousDeletedStableResourceIdentity),
+    );
+    if (
+      stable.length !== 4 ||
+      stable.some(
+        (entry, index) =>
+          entry.kind !== Object.values(azureOwnedDeleteResourceKind)[index] ||
+          !entry.id ||
+          !entry.immutableID ||
+          !entry.location,
+      ) ||
+      JSON.stringify(stable) !==
+        JSON.stringify(
+          azureCleanupIdentityView(JSON.stringify(audit.originalStableResourceIdentity)),
+        ) ||
+      before.length !== 2 ||
+      before[0]?.kind !== "virtualMachines" ||
+      before[1]?.kind !== "networkInterfaces" ||
+      deleted.length < 2 ||
+      deleted.length > 3 ||
+      !before.every((entry, index) =>
+        azureStableIdentityEntryExactlyMatches(entry, deleted[index]!),
+      ) ||
+      (deleted.length === 3 && deleted[2]?.kind !== "disks") ||
+      !azureStableResourceIdentityDeletionProgressValid(
+        claim.stableResourceIdentity,
+        undefined,
+        JSON.stringify(before),
+      ) ||
+      !azureStableIdentityEntryExactlyMatches(
+        stable[2]!,
+        audit.acknowledgedMissingResourceIdentity,
+      ) ||
+      !azureRecoveryDiskDetached(audit.remainingDiskIdentity)
+    )
+      return false;
+    const initialProgress = JSON.stringify([...before, audit.acknowledgedMissingResourceIdentity]);
+    return (
+      azureStableResourceIdentityMatches(
+        claim.stableResourceIdentity,
+        JSON.stringify([audit.remainingDiskIdentity]),
+        initialProgress,
+      ) &&
+      azureStableResourceIdentityDeletionProgressValid(
+        claim.stableResourceIdentity,
+        undefined,
+        azureEffectiveCleanupProgress(claim),
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
 function azureOwnedDeleteClaimsShareSequence(
   left: AzureOwnedDeleteClaim,
   right: AzureOwnedDeleteClaim,
@@ -3775,7 +4163,8 @@ function azureOwnedDeleteClaimsShareSequence(
     left.resourceIdentity === right.resourceIdentity &&
     left.stableResourceIdentity === right.stableResourceIdentity &&
     left.partialStableResourceIdentity === right.partialStableResourceIdentity &&
-    JSON.stringify(left.disk) === JSON.stringify(right.disk)
+    JSON.stringify(left.disk) === JSON.stringify(right.disk) &&
+    JSON.stringify(left.recovery) === JSON.stringify(right.recovery)
   );
 }
 
