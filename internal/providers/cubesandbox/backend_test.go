@@ -239,7 +239,7 @@ func TestCubeSandboxInjectedHTTPClientIsPreservedForBothPlanes(t *testing.T) {
 
 func TestCubeSandboxDataPlaneStreamOutlivesControlTimeout(t *testing.T) {
 	const controlTimeout = 20 * time.Millisecond
-	managementClient, dataPlaneClient := cubeSandboxHTTPClients(nil, controlTimeout)
+	managementClient, dataPlaneClient := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)

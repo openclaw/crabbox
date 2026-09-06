@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func TestRunBashExitCodeFieldPresence(t *testing.T) {
@@ -445,7 +447,7 @@ func TestOrgoFallbackBoundsControlAndPreservesCommand(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	control, data := orgoHTTPClients(nil, controlTimeout)
+	control, data := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	client := &orgoHTTPClient{baseURL: server.URL, apiKey: "test-key", http: control, dataHTTP: data}
 	started := time.Now()
 	_, err := client.GetComputer(context.Background(), "computer-1")

@@ -154,20 +154,13 @@ func newOrgoClient(cfg Config, rt Runtime) (orgoAPI, error) {
 	if parsed.Scheme != "https" && !isOrgoLoopbackHTTP(parsed) {
 		return nil, exit(2, "provider=%s API base URL %q must use https unless it targets localhost", providerName, baseURL)
 	}
-	client, dataClient := orgoHTTPClients(rt.HTTP, orgoControlTimeout)
+	client, dataClient := shared.ControlAndDataHTTPClients(rt.HTTP, orgoControlTimeout)
 	return &orgoHTTPClient{
 		baseURL:  strings.TrimRight(baseURL, "/"),
 		apiKey:   apiKey,
 		http:     client,
 		dataHTTP: dataClient,
 	}, nil
-}
-
-func orgoHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
-	if injected != nil {
-		return injected, injected
-	}
-	return &http.Client{Timeout: controlTimeout}, &http.Client{}
 }
 
 func isOrgoLoopbackHTTP(parsed *url.URL) bool {
