@@ -127,8 +127,10 @@ explicit feature covers the request. Providers that execute source modules
 instead of shell commands may declare `FeatureModuleRun`; then `--script` and
 `--script-stdin` are accepted as module source input, while trailing shell
 command argv remains rejected. Delegated artifact globs require
-`FeatureRunArtifacts` and `DelegatedRunArtifactBackend`. Delegated single-file
-downloads require `FeatureRunDownloads` and `DelegatedRunDownloadBackend`;
+`FeatureRunArtifacts`: the backend validates and collects them within `Run`,
+returns them in `RunResult.Artifacts`, and completes collection before cleanup.
+There is no separate post-run artifact dispatch. Delegated single-file downloads
+require `FeatureRunDownloads` and `DelegatedRunDownloadBackend`;
 required artifacts may use either capability, but download-only providers accept
 safe relative file paths instead of globs. Do not pretend a delegated provider
 is SSH-like unless it has a stable SSH contract. If Crabbox cannot run rsync and
@@ -415,11 +417,34 @@ core instead.
 for delegated POSIX command adapters. It reuses core shell inference and literal
 argument handling, snapshots the input, and rejects a missing command. The
 result's `Argv` method applies an adapter-supplied shell prefix only when needed;
-an explicitly empty shell source remains valid. Cloudflare Sandbox, Superserve,
-Crownest, Vercel Sandbox, and Nomad use this boundary. They retain their existing
-transport serialization, shell choice, working directory, environment, and
-execution lifecycle. These adapters currently pass no literal-argument map;
-the extraction does not change profile-literal propagation through transports.
+`ShellCommand` renders that execution argv for a string transport. An explicitly
+empty shell source remains valid. Pass all three request fields (`Command`,
+`ShellMode`, and `CommandLiteralArgs`) so profile arguments remain literal.
+Adapters retain their shell choice, working directory, environment transport,
+and execution lifecycle. Serialize the classified intent without running shell
+inference again.
+
+`ShellSource` targets a terminal workload in an already selected POSIX shell:
+shell intent stays source in that shell, while literal argv is quoted after
+`exec`. E2B and CubeSandbox use this boundary before their shared envd transport
+selects `/bin/bash -l -c`; SmolVM and Upstash Box likewise retain their existing
+source-only shell boundaries. Shell-local functions, builtins, and state require
+shell intent, not literal argv. Do not insert a second shell or reinterpret the
+rendered source before transport.
+
+`shared.WrapCommandWithShellEnvProfile` accepts execution argv, not unclassified
+user input. Its fallback quotes every word literally before terminal execution;
+it must not infer operators or assignments again. An exact three-word
+`bash -lc <body>` invocation reuses its body inside the existing profile wrapper,
+preserving the single login-shell boundary used by Modal and Tensorlake. Profile
+sourcing is failure-gated without adding global errexit to user source.
+
+Agent Sandbox and Nomad use `shared.ShellWorkspaceCommand` for their common
+POSIX-stdin wrapper: create and enter the workdir, export validated environment
+names in deterministic order, then execute the classified command. Pod and
+allocation readiness, stdin transport, timeout, and exit mapping remain local
+to each adapter. This wrapper is not the SSH command runner, whose environment
+and workspace setup contracts differ.
 
 Claim-only recovery adapters may use `shared.ResolveProviderClaimStrict` to
 resolve an exact provider/scope-bound claim before a slug while preventing a
@@ -464,6 +489,13 @@ grace, request encoding, and exact single-document decoding. Keep response
 envelopes, versions, identity checks, redaction, and provider error semantics in
 the adapter. Do not use it for noisy CLI output, streaming or NDJSON protocols,
 or commands with ambiguous side effects.
+
+The local command runner preserves caller cancellation/deadline causes when
+its context watcher interrupts a child that then exits by signal. It retains
+the underlying process error and does not relabel observed nonnegative exits,
+post-exit capture cleanup, or output-limit failures as cancellation. This is a
+POSIX signal-termination guarantee; Windows forced-termination codes remain
+unchanged. It does not prove that canceling a bridge stops its remote workload.
 
 Vanilla provider HTTP redirect policy also belongs in
 `internal/providers/shared`. `shared.SecureHTTPClient` clones an injected
@@ -558,8 +590,8 @@ a future proposal proves both behavior preservation and meaningful net value.
 `shared.RunDelegatedSandbox` owns the common sandbox run sequence: preflight,
 archive preparation, acquisition or resolution, setup, sync, command execution,
 and one final retention/cleanup decision before timing and session reporting.
-E2B, Modal, Cloudflare Sandbox, OpenSandbox, and Nomad's persistent shell
-allocations use this sequence. The shared
+E2B, Modal, Cloudflare Sandbox, OpenSandbox, Nomad's persistent shell
+allocations, Superserve, and Azure Dynamic Sessions use this sequence. The shared
 owner preserves the primary command/cancellation outcome when cleanup also
 fails, reports cleanup-only failure as a failed run, and keeps the session
 marked retained until deletion succeeds. Adapter-held operation locks span
@@ -584,6 +616,14 @@ is checked before mutating the local claim. Successful admission enables normal
 run finalization. Providers without this extra boundary keep their existing
 resolution behavior.
 
+Superserve keeps its lease-operation lock through final reporting and activates
+reused sandboxes in `AdmitReuse`; failed activation returns the retained session
+without the post-run activity refresh. Its acquisition rollback keeps the
+original create-response ID even when metadata setup fails or returns a different
+ID. Azure Dynamic Sessions supplies deletion behind its original claim snapshot
+and bounds both claim-lock waiting and the stop request. Neither adapter gives
+the shared sequencer authority to discover, adopt, or delete arbitrary resources.
+
 Other delegated backends can adopt this owner when their session model fits;
 do not copy its result, timing, keep-on-failure, and cleanup bookkeeping into a
 new adapter. Distinct operations remain explicit: a finite batch job, a
@@ -600,6 +640,15 @@ bounded subprocess JSON, `shared.Poll` for observations, operation locks for
 serialization, `core.RunDelegatedArchiveSync` for staged archive replacement,
 and scoped claim helpers for guarded local state. None of these grants native
 resource ownership or proves that canceling transport stopped a remote command.
+
+Archive preparation has one implementation with two caller lifetimes.
+`core.PrepareDelegatedArchive` returns an owned, seekable snapshot and cancels
+its preparation context before provisioning. A later sync charges the saved
+archive duration against a fresh transfer budget, excluding the provisioning
+gap. A sync that prepares its own archive keeps the same deadline continuously
+through archive construction and transfer; manifest planning and guardrails
+remain outside that budget. Both paths close and remove the owned archive on
+success or failure, and remote cleanup keeps its independent bounded context.
 
 ## Provider registration
 
@@ -740,6 +789,7 @@ cli.FeatureRunSession   // "run-session"
 cli.FeatureModuleRun    // "module-run"
 cli.FeatureSSHScriptRun // "ssh-script-run"
 cli.FeatureRunArtifacts // "run-artifacts"
+cli.FeaturePreparedArtifactWorkspace // "prepared-artifact-workspace"
 cli.FeatureRunDownloads // "run-downloads"
 cli.FeaturePauseResume  // "pause-resume"
 cli.FeatureMCP          // "mcp-attachments"
@@ -773,8 +823,13 @@ Checkpoint-related features are reserved for versioned workspaces:
   use this core-owned SSH contract; providers do not construct the handle
   themselves. A brokered run ID identifies coordinator history, while a direct
   run ID is only local correlation metadata.
-- `FeatureRunArtifacts`: delegated provider can validate and collect bounded run
-  artifact globs after a successful command, including required artifacts.
+- `FeatureRunArtifacts`: delegated provider validates and collects bounded run
+  artifact globs within `Run`, including required artifacts. Publication and
+  failure eligibility follow the provider's execution contract.
+- `FeaturePreparedArtifactWorkspace`: artifact supervision can capture a
+  CI-prepared workspace before workload code starts, independently of the
+  workload's entry directory. Requires `FeatureRunArtifacts`; this static fact
+  does not validate a particular lease's binding.
 - `FeatureRunDownloads`: delegated provider can materialize bounded single-file
   downloads and validate safe relative single-file required artifacts after a
   successful command.

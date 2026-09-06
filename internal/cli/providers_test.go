@@ -12,6 +12,24 @@ import (
 	"testing"
 )
 
+func recommendAliasForTest(t *testing.T, alias string) []providerRecommendationEntry {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
+		"recommend", alias,
+		"--limit", "1",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("providers recommend %s error=%v stderr=%q", alias, err, stderr.String())
+	}
+	var entries []providerRecommendationEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
+	}
+	return entries
+}
+
 func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	entries := providerMatrix()
 	var aws *providerMatrixEntry
@@ -712,19 +730,7 @@ func TestProvidersRecommendArtifactDownloadPrefersArtifactProviders(t *testing.T
 }
 
 func TestProvidersRecommendArtifactDownloadAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "run-artifacts",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend run-artifacts error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "run-artifacts")
 	if len(entries) != 1 || !providerRecommendationHasFeature(entries[0].Features, FeatureRunArtifacts) {
 		t.Fatalf("run-artifacts alias entries=%#v", entries)
 	}
@@ -766,19 +772,7 @@ func TestProvidersRecommendCodeInterpreterPrefersSandboxExecution(t *testing.T) 
 }
 
 func TestProvidersRecommendPythonSandboxAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "python-sandbox",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend python-sandbox error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "python-sandbox")
 	if len(entries) != 1 {
 		t.Fatalf("python-sandbox alias entries=%#v", entries)
 	}
@@ -822,19 +816,7 @@ func TestProvidersRecommendCostControlPrefersReusableOrGovernedCapacity(t *testi
 }
 
 func TestProvidersRecommendCostControlAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "budget",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend budget error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "budget")
 	if len(entries) != 1 || !strings.HasPrefix(entries[0].Category, "local-") {
 		t.Fatalf("budget alias entries=%#v", entries)
 	}
@@ -870,19 +852,7 @@ func TestProvidersRecommendDisposableExecutionRequiresCleanupSandboxes(t *testin
 }
 
 func TestProvidersRecommendEphemeralSandboxAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "ephemeral-sandbox",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend ephemeral-sandbox error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "ephemeral-sandbox")
 	if len(entries) != 1 {
 		t.Fatalf("ephemeral-sandbox alias entries=%#v", entries)
 	}
@@ -934,19 +904,7 @@ func TestProvidersRecommendOfflineValidationPrefersCredentiallessProviders(t *te
 }
 
 func TestProvidersRecommendNoCredentialsAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "no-credentials",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend no-credentials error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "no-credentials")
 	if len(entries) != 1 || !strings.HasPrefix(entries[0].Category, "local-") {
 		t.Fatalf("no-credentials alias entries=%#v", entries)
 	}
@@ -1051,19 +1009,7 @@ func TestProvidersRecommendWarmStartPrefersReusableState(t *testing.T) {
 }
 
 func TestProvidersRecommendWarmPoolAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "warm-pool",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend warm-pool error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "warm-pool")
 	if len(entries) != 1 {
 		t.Fatalf("warm-pool alias entries=%#v", entries)
 	}
@@ -1106,19 +1052,7 @@ func TestProvidersRecommendWebAppSmokeUsesReachableAppSurfaces(t *testing.T) {
 }
 
 func TestProvidersRecommendBrowserSmokeAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "browser-smoke",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend browser-smoke error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "browser-smoke")
 	if len(entries) != 1 {
 		t.Fatalf("browser-smoke alias entries=%#v", entries)
 	}
@@ -1132,19 +1066,7 @@ func TestProvidersRecommendBrowserSmokeAlias(t *testing.T) {
 }
 
 func TestProvidersRecommendFailedRunAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "failed-run",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend failed-run error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "failed-run")
 	if len(entries) != 1 || entries[0].Provider != "blacksmith-testbox" {
 		t.Fatalf("failed-run alias entries=%#v", entries)
 	}
@@ -1186,19 +1108,7 @@ func TestProvidersRecommendInteractiveDebugSurfaces(t *testing.T) {
 }
 
 func TestProvidersRecommendLiveDebugAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "live-debug",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend live-debug error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "live-debug")
 	if len(entries) != 1 {
 		t.Fatalf("live-debug alias entries=%#v", entries)
 	}
@@ -1238,19 +1148,7 @@ func TestProvidersRecommendFanoutTestingRequiresForkableWorkspaces(t *testing.T)
 }
 
 func TestProvidersRecommendBestOfNAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "best-of-n",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend best-of-n error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "best-of-n")
 	if len(entries) != 1 || !providerRecommendationHasFeature(entries[0].Features, FeatureFork) {
 		t.Fatalf("best-of-n alias entries=%#v", entries)
 	}
@@ -1312,19 +1210,7 @@ func TestProvidersRecommendResourceObservability(t *testing.T) {
 }
 
 func TestProvidersRecommendTelemetryAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "telemetry",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend telemetry error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "telemetry")
 	if len(entries) != 1 {
 		t.Fatalf("telemetry alias entries=%#v", entries)
 	}
@@ -1371,19 +1257,7 @@ func TestProvidersRecommendRunSessionPrefersInspectableRuns(t *testing.T) {
 }
 
 func TestProvidersRecommendRunSessionAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "inspectable-run",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend inspectable-run error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "inspectable-run")
 	if len(entries) != 1 || !providerRecommendationHasFeature(entries[0].Features, FeatureRunSession) {
 		t.Fatalf("inspectable-run alias entries=%#v", entries)
 	}
@@ -1465,15 +1339,7 @@ func TestProvidersRecommendIsolatedExecutionIncludesLocalSandboxes(t *testing.T)
 }
 
 func TestProvidersRecommendIsolatedExecutionAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"recommend", "secure-sandbox", "--limit", "1", "--json"})
-	if err != nil {
-		t.Fatalf("providers recommend secure-sandbox error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "secure-sandbox")
 	if len(entries) != 1 || entries[0].Kind != ProviderKindDelegatedRun {
 		t.Fatalf("secure-sandbox alias entries=%#v", entries)
 	}
@@ -1505,19 +1371,7 @@ func TestProvidersRecommendNetworkIsolationPrefersSandboxBoundaries(t *testing.T
 }
 
 func TestProvidersRecommendNetworkIsolationAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "egress-control",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend egress-control error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "egress-control")
 	if len(entries) != 1 || entries[0].Category != "delegated-sandbox" {
 		t.Fatalf("egress-control alias entries=%#v", entries)
 	}
@@ -1545,15 +1399,7 @@ func TestProvidersRecommendTeamCloudPrefersBrokerableProviders(t *testing.T) {
 }
 
 func TestProvidersRecommendTeamCloudAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"recommend", "brokered-cloud", "--limit", "1", "--json"})
-	if err != nil {
-		t.Fatalf("providers recommend brokered-cloud error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "brokered-cloud")
 	if len(entries) != 1 || entries[0].Category != "brokerable-cloud" {
 		t.Fatalf("brokered-cloud alias entries=%#v", entries)
 	}
@@ -1603,19 +1449,7 @@ func TestProvidersRecommendForkableWorkspaceAlias(t *testing.T) {
 }
 
 func TestProvidersRecommendWorkspaceReuseAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "workspace-reuse",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend workspace-reuse error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "workspace-reuse")
 	if len(entries) != 1 {
 		t.Fatalf("entry count=%d entries=%#v", len(entries), entries)
 	}
@@ -1640,19 +1474,7 @@ func TestProvidersRecommendMCPSandbox(t *testing.T) {
 }
 
 func TestProvidersRecommendMCPSandboxAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "mcp",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend mcp error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "mcp")
 	if len(entries) != 1 || !providerRecommendationHasFeature(entries[0].Features, FeatureMCP) {
 		t.Fatalf("mcp alias entries=%#v", entries)
 	}
@@ -1685,19 +1507,7 @@ func TestSealosDevboxIsRemoteDevProvider(t *testing.T) {
 }
 
 func TestProvidersRecommendRemoteDevAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "codespaces",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend codespaces error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "codespaces")
 	if len(entries) != 1 || !isRemoteDevProvider(entries[0].Provider) {
 		t.Fatalf("codespaces alias entries=%#v", entries)
 	}
@@ -1726,19 +1536,7 @@ func TestProvidersRecommendPreviewURLPrefersURLBridgeProviders(t *testing.T) {
 }
 
 func TestProvidersRecommendPreviewURLAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "app-preview",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend app-preview error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "app-preview")
 	if len(entries) != 1 || !providerRecommendationHasFeature(entries[0].Features, FeatureURLBridge) {
 		t.Fatalf("app-preview alias entries=%#v", entries)
 	}
@@ -1764,19 +1562,7 @@ func TestProvidersRecommendPauseResumePrefersResumableProviders(t *testing.T) {
 }
 
 func TestProvidersRecommendPauseResumeAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "resumable-workspace",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend resumable-workspace error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "resumable-workspace")
 	if len(entries) != 1 || !providerRecommendationHasFeature(entries[0].Features, FeaturePauseResume) {
 		t.Fatalf("resumable-workspace alias entries=%#v", entries)
 	}
@@ -1818,19 +1604,7 @@ func TestProvidersRecommendLiveSmokePrefersProvableLifecycle(t *testing.T) {
 }
 
 func TestProvidersRecommendLiveSmokeAlias(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{
-		"recommend", "provider-smoke",
-		"--limit", "1",
-		"--json",
-	})
-	if err != nil {
-		t.Fatalf("providers recommend provider-smoke error=%v stderr=%q", err, stderr.String())
-	}
-	var entries []providerRecommendationEntry
-	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid json: %v\n%s", err, stdout.String())
-	}
+	entries := recommendAliasForTest(t, "provider-smoke")
 	if len(entries) != 1 || entries[0].Score <= 0 {
 		t.Fatalf("provider-smoke alias entries=%#v", entries)
 	}

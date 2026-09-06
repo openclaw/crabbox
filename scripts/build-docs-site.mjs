@@ -2,6 +2,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { reserveHeadingAnchor } from "./lib/markdown-headings.mjs";
 
 const root = process.cwd();
 const docsDir = path.join(root, "docs");
@@ -300,6 +301,7 @@ function titleize(input) {
 export function markdownToHtml(markdown, currentRel) {
   const lines = markdown.replace(/\r\n/g, "\n").split("\n");
   const html = [];
+  const anchors = new Set();
   let paragraph = [];
   let list = null;
   let fence = null;
@@ -362,7 +364,8 @@ export function markdownToHtml(markdown, currentRel) {
       closeList();
       const level = heading[1].length;
       const text = heading[2].trim();
-      const id = slug(text);
+      const base = slug(text);
+      const id = base ? reserveHeadingAnchor(anchors, base) : base;
       const inner = inline(text, currentRel);
       if (level === 1) {
         html.push(`<h1 id="${id}">${inner}</h1>`);

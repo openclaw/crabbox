@@ -128,6 +128,17 @@ func TestStatusAndInspectRouteImplicitIdentifiersThroughLocalClaims(t *testing.T
 				assertClaimRoutingProvider(t, output, claimRoutingUsableProvider)
 			})
 
+			t.Run("missing canonical id does not select slug provider", func(t *testing.T) {
+				setupClaimRoutingCommandTest(t, claimRoutingConfiguredProvider)
+				mustWriteClaimRoutingTestClaim(t, "cbx_1293aa000002", "cbx-1293aa000001", claimRoutingUsableProvider)
+
+				output, err := runClaimRoutingCommand(command.run, []string{"--id", "cbx_1293aa000001"})
+				if err != nil {
+					t.Fatalf("%s missing canonical id: %v", command.name, err)
+				}
+				assertClaimRoutingProvider(t, output, claimRoutingConfiguredProvider)
+			})
+
 			t.Run("implicit unambiguous slug", func(t *testing.T) {
 				setupClaimRoutingCommandTest(t, claimRoutingConfiguredProvider)
 				mustWriteClaimRoutingTestClaim(t, "cbx_1293aa000003", "Claimed Slug", claimRoutingUsableProvider)

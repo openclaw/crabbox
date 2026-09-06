@@ -34,6 +34,14 @@ The trailing command after `--` is sent to the box verbatim as argv. Use
 `--shell` to run it through the remote shell instead, for multi-statement
 snippets, pipes, or shell expansion.
 
+On Cloudflare Sandbox, Superserve, Crownest, Vercel Sandbox, Nomad, CodeSandbox,
+OpenComputer, Docker Sandbox, Agent Sandbox, SmolVM, Upstash Box, Tensorlake,
+and OpenSandbox,
+quoted or interpolated profile arguments retain their literal meaning through
+the delegated command transport. A value such as `&&` does not become a shell
+operator, and an executable named `FOO=x` is invoked rather than treated as an
+environment assignment. Explicit `--shell` still selects shell source.
+
 On POSIX SSH targets, `--shell` runs in a Bash login shell. Its startup and
 logout files are part of that shell's behavior: for example, `set -e` plus a
 failing `~/.bash_logout` command can change an explicit `exit 7` to exit 1.
@@ -559,6 +567,9 @@ including non-zero exits. SSH terminal receipts use schema v2 and bind the final
 run outcome, raw command digest, timing, retained-log digest, and full observed
 stream digest. Delegated providers retain schema v1 when they report a
 definitive command exit. Check local receipts with [`crabbox verify`](verify.md).
+Secondary cleanup errors do not suppress a receipt for an already-observed
+delegated command exit; provider/transport failures without a definitive exit
+do not produce that receipt.
 
 Brokered runs submit a schema v2 terminal receipt with the finish request even
 when `--attest` is omitted. The CLI verifies that the coordinator returns the
@@ -614,7 +625,8 @@ fails the run. Limits remain 256 files and 10 MiB compressed, with existing
 protected-path and symlink checks. Remote Linux `timeout` with `--kill-after`
 is required for a separate 30-second collection budget; caller cancellation
 wins and the local post-exit wait is also bounded. Collection uses the initial
-remote cwd even if the child changes directory. Command timing ends at the
+remote cwd, or a CI-prepared artifact workspace captured before the child starts;
+the child's directory changes cannot redirect it. Command timing ends at the
 workload receipt, while collection and cleanup count toward total. Evidence
 retrieved after failure is not success proof or attestation of exact remote Git
 bytes; `--emit-proof` stays success-only. See the
@@ -763,7 +775,14 @@ Use `--timing-json` to emit a final JSON timing record with provider, lease ID,
 slug, run ID, machine type, repo path, remote workdir, lease acquisition,
 bootstrap, sync phases, command phases, command duration, command-path total,
 end-to-end duration, exit code, normalized `runStatus`, optional `errorKind`,
-stop command, artifacts, and Actions run URL when available. Failed runs also
+stop command, artifacts, and Actions run URL when available. `runnerTotalMs`
+measures local wall time through route cleanup. `runnerPhases` provides a
+bounded, timing-only breakdown; accepted phases never exceed the total, and
+unclassified remainder is reported as `unattributed` or, for delegated
+providers, an opaque delegated phase. Provider-supplied coordinator phases are
+limited to `request`, `network_ready`, `bootstrap`, and `unattributed`.
+Malformed vectors are discarded and valid legacy startup scalars remain the
+fallback. Failed runs also
 include `blockedStage`, `resourceExhaustion`, and `retryLikely` when classifiable.
 Optional `failureEvidence` contains the provider's classification, sanitized
 `hint`, and bounded string-valued `details`. Invalid optional presentation fields
@@ -772,8 +791,16 @@ failure bundles and the deferred digest, so one-shot deletion does not lose it.
 For [Local Container](../providers/local-container.md#memory-failure-evidence),
 actual container settings, total runtime RAM, and swap are separate observations,
 not an exact effective or free-memory bound.
-App finalization emits timing after cleanup and the failure digest; the executable
-can subsequently append its existing exit diagnostic.
+Runner timing is unsigned local telemetry. It is not part of receipt v2, does
+not change signing, and must not be treated as attested evidence. App
+finalization emits the failure digest, timing record, timing JSON, local receipt
+persistence, and coordinator finish in that order after cleanup. Timing sink
+failures are terminal and are reflected in the local receipt and process exit;
+the executable can subsequently append its existing exit diagnostic. Timing
+`artifacts` contains only files already committed when that timing payload is
+emitted. The terminal receipt is persisted afterward, so its metadata is
+intentionally excluded; successful persistence prints a separate
+`artifact kind=receipt path=... bytes=...` confirmation.
 After an automatic cleanup attempt, `leaseStopped` reports whether the release
 owner confirmed that lease-based recovery is no longer available. An accepted
 release alone does not set it to true. `leaseStopError` independently records a
@@ -803,7 +830,10 @@ timing payload to a local benchmark JSONL store. This is opt-in; ordinary
 `crabbox run` invocations do not persist timing rows. The persisted row wraps the
 same `TimingReport` payload with local benchmark context such as command
 fingerprint, repo fingerprint, provider family/kind, and cold/warm state when
-known. See [`crabbox bench`](bench.md) for reporting and privacy guidance.
+known. Timing rows, failure bundles, and receipts can contain sensitive local
+correlation artifacts such as repo paths, remote workdirs, labels, artifact
+paths, lease IDs, and run IDs. Keep them private and review them before sharing.
+See [`crabbox bench`](bench.md) for reporting and privacy guidance.
 
 When a coordinator is configured, Crabbox records each remote command as a run
 history item. [`crabbox history`](history.md) lists those records and [`crabbox

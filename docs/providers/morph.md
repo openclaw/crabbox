@@ -162,7 +162,7 @@ crabbox stop --provider morph blue-lobster
 ## Live testing
 
 Two opt-in entry points exercise the real Morph API. Neither runs in the
-default `go test -race -timeout=15m ./...` or `node --test scripts/*.test.js` CI jobs;
+default `go test -race -timeout=20m ./...` or `node --test scripts/*.test.js` CI jobs;
 both are skipped or fail-fast when the API key is absent. Both force
 `deleteOnRelease=true` so test instances are deleted instead of retained.
 

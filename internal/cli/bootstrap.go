@@ -14,15 +14,29 @@ func awsUserData(cfg Config, publicKey string) string {
 	case targetMacOS:
 		return macOSUserData(cfg, publicKey)
 	default:
-		return cloudInit(cfg, publicKey)
+		aptConfig := ""
+		if cfg.TargetOS == targetLinux && cfg.OSImage == "ubuntu:26.04" &&
+			cfg.AWSAMI == "" && cfg.AWSSnapshot == "" && effectiveArchitectureForConfig(cfg) == ArchitectureAMD64 {
+			// Only stock Canonical images use this policy; custom images own their sources.
+			// cloud-init copies primary into security unless security is explicit.
+			aptConfig = `apt:
+  primary:
+    - arches: [amd64]
+      uri: https://archive.ubuntu.com/ubuntu/
+  security:
+    - arches: [amd64]
+      uri: http://security.ubuntu.com/ubuntu/
+`
+		}
+		return cloudInitWithExtras(cfg, publicKey, aptConfig, "")
 	}
 }
 
 func cloudInit(cfg Config, publicKey string) string {
-	return cloudInitWithAdditionalBootstrap(cfg, publicKey, "")
+	return cloudInitWithExtras(cfg, publicKey, "", "")
 }
 
-func cloudInitWithAdditionalBootstrap(cfg Config, publicKey, additionalBootstrap string) string {
+func cloudInitWithExtras(cfg Config, publicKey, additionalConfig, additionalBootstrap string) string {
 	portLines := ""
 	for _, port := range sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts) {
 		portLines += fmt.Sprintf("      Port %s\n", port)
@@ -44,7 +58,7 @@ func cloudInitWithAdditionalBootstrap(cfg Config, publicKey, additionalBootstrap
 	return fmt.Sprintf(`#cloud-config
 package_update: false
 package_upgrade: false
-users:
+%[11]susers:
   - name: %[1]s
     groups: sudo
     shell: /bin/bash
@@ -96,7 +110,7 @@ runcmd:
     touch /var/lib/crabbox/bootstrapped
     crabbox-ready
     BOOT
-`, yamlSSHUser, yamlPublicKey, shellWorkRoot, portLines, readyChecks, writeFiles, shellSSHUser, bootstrap, readinessBootstrap, indentCloudInitRuncmd(sharedLinuxSSHRestart()))
+`, yamlSSHUser, yamlPublicKey, shellWorkRoot, portLines, readyChecks, writeFiles, shellSSHUser, bootstrap, readinessBootstrap, indentCloudInitRuncmd(sharedLinuxSSHRestart()), additionalConfig)
 }
 
 func CloudInitUserData(cfg Config, publicKey string) string {

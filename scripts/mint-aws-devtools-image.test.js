@@ -92,10 +92,29 @@ case "$1" in
     ;;
   image)
     if [[ "$2" == "promote" ]]; then
-      printf '{"image":{"id":"ami-devtools"}}\\n'
+      if [[ " $* " == *" --expected-current-image capture "* ]]; then
+        if [[ "\${CRABBOX_FAKE_PROMOTION_FAIL:-0}" == "1" ]]; then
+          printf 'transactional promotion unavailable\\n' >&2
+          exit 55
+        fi
+        if [[ "\${CRABBOX_FAKE_PREVIOUS_ABSENT:-0}" == "1" ]]; then
+          printf '{"image":{"id":"ami-devtools","revision":"rev-new"},"previous":{"state":"absent","aliases":[{"alias":"regional","state":"absent"}]}}\\n'
+        else
+          printf '{"image":{"id":"ami-devtools","revision":"rev-new"},"previous":{"state":"present","imageId":"ami-previous","revision":"rev-old","aliases":[{"alias":"regional","state":"present","image":{"id":"ami-previous","name":"previous","state":"available","provider":"aws","promotedAt":"2026-09-01T00:00:00Z","revision":"rev-old"}}]}}\\n'
+        fi
+      elif [[ "\${CRABBOX_FAKE_ROLLBACK_FAIL:-0}" == "1" ]]; then
+        printf 'coordinator: http 409: image default changed\\n' >&2
+        exit 19
+      else
+        printf '{"image":{"id":"ami-previous","revision":"rev-restored"},"previous":{"state":"present","imageId":"ami-devtools","revision":"rev-new"}}\\n'
+      fi
     fi
     ;;
   stop)
+    if [[ "\${CRABBOX_FAKE_STOP_FAIL_LEASE:-}" == "\${*: -1}" ]]; then
+      printf 'stop failed for %s\\n' "\${*: -1}" >&2
+      exit 27
+    fi
     printf 'stopped %s\\n' "\${*: -1}"
     ;;
   status)
@@ -148,6 +167,8 @@ test("AWS developer image smoke executes package managers and requires TruffleHo
     text,
     /command -v pnpm\ncommand -v trufflehog\ntrufflehog --no-update --version\ncommand -v docker\nnode --version\nnode -e .*\ncorepack --version\npnpm --version\n/,
   );
+  assert.match(text, /trap 'exit 130' INT\ntrap 'exit 143' TERM/);
+  assert.match(text, /rollback_pending=1\nrun_json_tee "\$promotion_log"/);
 });
 
 test("AWS Linux image production stages and invokes only the generated readiness producer", async () => {
@@ -218,7 +239,7 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
   assert.match(log, /docker image inspect hello-world ubuntu:24\.04 node:24-bookworm/);
   assert.match(log, /env CRABBOX_AWS_REGION=us-west-2 AWS_REGION=us-west-2 CRABBOX_AWS_AMI= args checkpoint create --provider aws --target linux --id cbx_source --name crabbox-linux-devtools-/);
   assert.match(log, /--mode native --strategy image --no-reboot=false --wait --wait-timeout 60m/);
-  assert.match(log, /image promote --target linux --json --region us-west-2 --fast-snapshot-restore --fsr-az us-west-2a ami-devtools/);
+  assert.match(log, /image promote --target linux --json --expected-current-image capture --region us-west-2 --fast-snapshot-restore --fsr-az us-west-2a ami-devtools/);
 });
 
 test("AWS devtools mint wrapper isolates warmup logs from explicit image names", async () => {
@@ -263,6 +284,81 @@ test("AWS devtools mint wrapper fails when promoted selection is not proved", as
     result.stderr,
     /warmup did not prove image selection id=ami-devtools source=promoted/,
   );
+  const log = await readFile(fake.log, "utf8");
+  assert.match(
+    log,
+    /image promote --json --target linux --restore-receipt \S+ ami-devtools/,
+  );
+  assert.match(result.stderr, /restored previous default image=ami-previous/);
+});
+
+test("AWS devtools mint wrapper reports rollback rejection without hiding smoke failure", async () => {
+  const fake = await setupFakeCrabbox();
+  const text = await readFile(fake.fake, "utf8");
+  await writeFile(
+    fake.fake,
+    text.replace(
+      "image selected id=ami-devtools source=promoted",
+      "image selected id=ami-other source=promoted",
+    ),
+  );
+  const result = await runScript(["--target", "linux", "--run", "--prep-script", fake.linuxPrep], {
+    CRABBOX_BIN: fake.fake,
+    CRABBOX_FAKE_LOG: fake.log,
+    CRABBOX_FAKE_ROLLBACK_FAIL: "1",
+  });
+
+  assert.equal(result.code, 1, result.stderr);
+  assert.match(result.stderr, /CAS rollback failed or was rejected; a newer default was not overwritten/);
+});
+
+test("AWS devtools mint wrapper clears a newly introduced default after smoke failure", async () => {
+  const fake = await setupFakeCrabbox();
+  const text = await readFile(fake.fake, "utf8");
+  await writeFile(
+    fake.fake,
+    text.replace(
+      "image selected id=ami-devtools source=promoted",
+      "image selected id=ami-other source=promoted",
+    ),
+  );
+  const result = await runScript(["--target", "linux", "--run", "--prep-script", fake.linuxPrep], {
+    CRABBOX_BIN: fake.fake,
+    CRABBOX_FAKE_LOG: fake.log,
+    CRABBOX_FAKE_PREVIOUS_ABSENT: "1",
+  });
+
+  assert.equal(result.code, 1, result.stderr);
+  const log = await readFile(fake.log, "utf8");
+  assert.match(
+    log,
+    /image promote --json --target linux --restore-receipt \S+ ami-devtools/,
+  );
+});
+
+test("AWS devtools mint wrapper finishes fallible candidate cleanup before promotion", async () => {
+  const fake = await setupFakeCrabbox();
+  const result = await runScript(["--target", "linux", "--run", "--prep-script", fake.linuxPrep], {
+    CRABBOX_BIN: fake.fake,
+    CRABBOX_FAKE_LOG: fake.log,
+    CRABBOX_FAKE_STOP_FAIL_LEASE: "cbx_candidate",
+  });
+
+  assert.equal(result.code, 27, result.stderr);
+  const log = await readFile(fake.log, "utf8");
+  assert.doesNotMatch(log, /image promote/);
+});
+
+test("AWS devtools mint wrapper preserves promotion failure while attempting receipt recovery", async () => {
+  const fake = await setupFakeCrabbox();
+  const result = await runScript(["--target", "linux", "--run", "--prep-script", fake.linuxPrep], {
+    CRABBOX_BIN: fake.fake,
+    CRABBOX_FAKE_LOG: fake.log,
+    CRABBOX_FAKE_PROMOTION_FAIL: "1",
+  });
+
+  assert.equal(result.code, 55, result.stderr);
+  assert.match(result.stderr, /transactional promotion receipt is unavailable for rollback/);
 });
 
 test("AWS devtools mint wrapper uses sg for first docker group member", async () => {

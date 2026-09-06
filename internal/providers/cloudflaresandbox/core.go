@@ -98,10 +98,6 @@ func cloudflareSandboxCleanupCommand(leaseID string) string {
 	return "crabbox stop --provider " + providerName + " --id " + shellQuote(leaseID)
 }
 
-func shellScriptFromArgv(command []string) string {
-	return core.ShellScriptFromArgv(command)
-}
-
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
 	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
 }

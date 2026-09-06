@@ -788,22 +788,6 @@ func resolveSandboxPod(
 	return podState{}, fmt.Errorf("%w: Sandbox %s has no pod annotation or selector", errNotReady, sandbox.Metadata.Name)
 }
 
-func waitForSandboxReadiness(ctx context.Context, client kubernetesClient, namespace, claimName string, identity claimIdentity, poll time.Duration) (sandboxReadiness, error) {
-	resource, err := waitForSandboxResourceReadiness(ctx, client, namespace, claimName, identity, poll)
-	if err != nil {
-		return sandboxReadiness{}, err
-	}
-	pod, err := waitForSandboxPodReadiness(ctx, client, namespace, resource.ClaimName, resource.Sandbox, identity, poll)
-	if err != nil {
-		return sandboxReadiness{}, err
-	}
-	container, err := resolvePodContainer(pod, identity.Container)
-	if err != nil {
-		return sandboxReadiness{}, err
-	}
-	return newSandboxReadiness(resource, pod, identity, container), nil
-}
-
 func waitForSandboxReadinessWithTimeouts(ctx context.Context, client kubernetesClient, namespace, claimName string, identity claimIdentity, sandboxTimeout, podTimeout, poll time.Duration) (sandboxReadiness, error) {
 	sandboxCtx := ctx
 	sandboxCancel := func() {}

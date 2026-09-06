@@ -147,7 +147,11 @@ crabbox run --provider opensandbox --allow-env API_TOKEN -- printenv API_TOKEN
    `--sync-only` syncs and stops without running a command.
 4. The command runs through OpenSandbox execd with `cwd` set to the workdir and
    `envs` carrying forwarded environment values. The remote exit code is
-   mirrored by Crabbox.
+   mirrored by Crabbox. Command intent is classified once: literal profile
+   arguments stay data through the final execd source string, including shell
+   operators and assignment-shaped executable names. Explicit or inferred shell
+   source retains the existing Bash login wrapper; cwd and envs remain native
+   request fields.
 5. A newly created sandbox is deleted after the run unless `--keep` was set;
    reused sandboxes are retained.
    `--keep-on-failure` retains a newly created sandbox after a sync, workspace

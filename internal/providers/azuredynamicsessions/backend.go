@@ -8,6 +8,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func NewAzureDynamicSessionsBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
@@ -65,199 +66,82 @@ func (b *azureDynamicSessionsBackend) Warmup(ctx context.Context, req WarmupRequ
 	return nil
 }
 
-func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
-	if err := delegatedSyncOptionsError(b.spec, req); err != nil {
-		return RunResult{}, err
-	}
-	if !req.SyncOnly && len(req.Command) == 0 {
-		return RunResult{}, exit(2, "missing command")
-	}
-	started := b.now()
-	client, err := newAzureDynamicSessionsClient(ctx, b.cfg, b.rt)
-	if err != nil {
-		return RunResult{}, err
-	}
-	var prepared *core.PreparedArchive
-	if req.ID == "" && !req.NoSync {
-		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-			TempPattern: "crabbox-azds-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
-		})
-		if err != nil {
-			return RunResult{}, err
-		}
-		defer prepared.Close()
-	}
-	leaseID, slug := "", ""
-	acquired := false
-	if req.ID == "" {
-		leaseID, slug, err = b.createSession(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
-		if err != nil {
-			return RunResult{}, err
-		}
-		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s session=%s\n", leaseID, slug, providerName, leaseID)
-		acquired = true
-	} else {
-		leaseID, slug, err = b.resolveSessionID(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
-		if err != nil {
-			return RunResult{}, err
-		}
-	}
-
-	shouldStop := acquired && !req.Keep
+func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+	workspace, workspaceErr := azureDynamicSessionsWorkspace(b.cfg)
+	var client azureDynamicSessionsAPI
+	var leaseID, slug string
 	var cleanupClaim LeaseClaim
-	if shouldStop {
-		cleanupClaim, err = b.sessionClaimForDeletion(leaseID)
-		if err != nil {
-			return RunResult{}, err
-		}
+	handle := func() shared.DelegatedSandbox {
+		return shared.DelegatedSandbox{LeaseID: leaseID, Slug: slug, CleanupCommand: azureDynamicSessionsCleanupCommand(leaseID)}
 	}
-	cleanedUp := false
-	session := &RunSessionHandle{
-		Provider:       providerName,
-		LeaseID:        leaseID,
-		Slug:           slug,
-		Reused:         !acquired,
-		Kept:           !shouldStop,
-		CleanupCommand: azureDynamicSessionsCleanupCommand(leaseID),
-	}
-	finishResult := func(result RunResult) RunResult {
-		if result.Provider == "" {
-			result.Provider = providerName
-		}
-		if result.LeaseID == "" {
-			result.LeaseID = leaseID
-		}
-		if result.Slug == "" {
-			result.Slug = slug
-		}
-		result.Session = session
-		result.Session.Kept = !cleanedUp && !shouldStop
-		return result
-	}
-	defer func() {
-		result = finishResult(result)
-	}()
-	cleanupSession := func() error {
-		if !shouldStop {
-			return nil
-		}
-		if err := b.deleteClaimedSessionBounded(client, leaseID, cleanupClaim); err != nil {
-			shouldStop = false
-			return err
-		}
-		cleanedUp = true
-		shouldStop = false
-		return nil
-	}
-	if shouldStop {
-		defer func() {
-			if err := cleanupSession(); err != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: %s stop failed for %s: %v\n", providerName, leaseID, err)
+	return shared.RunDelegatedSandbox(ctx, req, shared.DelegatedSandboxLifecycle{
+		Provider: providerName, Runtime: b.rt, Workdir: workspace,
+		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL, CleanupTimeout: azureDynamicSessionsDeleteTimeout,
+		Preflight: func(ctx context.Context) error {
+			if err := delegatedSyncOptionsError(b.spec, req); err != nil {
+				return err
 			}
-		}()
-	}
-
-	workspace, err := azureDynamicSessionsWorkspace(b.cfg)
-	if err != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return RunResult{}, err
-	}
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
-	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, leaseID, req, workspace, prepared)
-		if err != nil {
-			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-			return RunResult{Total: b.now().Sub(started), SyncDelegated: true, Provider: providerName, LeaseID: leaseID, Slug: slug}, err
-		}
-		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, client, leaseID, workspace); err != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return RunResult{}, err
-	}
-	if req.SyncOnly {
-		result := RunResult{Total: b.now().Sub(started), SyncDelegated: true, Provider: providerName, LeaseID: leaseID, Slug: slug}
-		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workspace)
-		if req.TimingJSON {
-			err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-				Provider:      providerName,
-				LeaseID:       leaseID,
-				Slug:          slug,
-				SyncDelegated: true,
-				SyncMs:        syncDuration.Milliseconds(),
-				SyncPhases:    syncPhases,
-				SyncSkipped:   req.NoSync,
-				TotalMs:       result.Total.Milliseconds(),
-				ExitCode:      0,
-				Label:         strings.TrimSpace(req.Label),
-			}, result, nil))
-			return result, err
-		}
-		return result, nil
-	}
-
-	command, err := buildAzureDynamicSessionsCommand(req.Command, req.ShellMode)
-	if err != nil {
-		return RunResult{}, err
-	}
-	if req.EnvSummary {
-		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
-	}
-	commandStarted := b.now()
-	fmt.Fprintf(b.rt.Stderr, "running on %s %s\n", providerName, strings.Join(req.Command, " "))
-	exitCode, commandErr := client.ExecStream(ctx, leaseID, azureDynamicSessionsExecRequest{
-		Command:   command,
-		Cwd:       workspace,
-		Env:       req.Env,
-		TimeoutMS: durationMillisecondsCeil(azureDynamicSessionsTimeout(b.cfg)),
-	}, b.rt.Stdout, b.rt.Stderr)
-	commandDuration := b.now().Sub(commandStarted)
-	if commandErr != nil && exitCode == 0 {
-		exitCode = 1
-	}
-
-	result = RunResult{
-		ExitCode:      exitCode,
-		Command:       commandDuration,
-		Total:         b.now().Sub(started),
-		SyncDelegated: true,
-		Provider:      providerName,
-		LeaseID:       leaseID,
-		Slug:          slug,
-		CommandText:   command,
-	}
-	if req.NoSync {
-		fmt.Fprintf(b.rt.Stderr, "%s run summary sync_skipped=true command=%s total=%s exit=%d\n", providerName, result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	} else {
-		fmt.Fprintf(b.rt.Stderr, "%s run summary sync=%s command=%s total=%s exit=%d\n", providerName, syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	}
-	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-			Provider:      providerName,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			SyncDelegated: true,
-			SyncMs:        syncDuration.Milliseconds(),
-			SyncPhases:    syncPhases,
-			SyncSkipped:   req.NoSync,
-			CommandMs:     commandDuration.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      result.ExitCode,
-			Label:         strings.TrimSpace(req.Label),
-		}, result, commandErr)); err != nil {
-			return result, err
-		}
-	}
-	if commandErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, ExitError{Code: 1, Message: fmt.Sprintf("%s run failed: %v", providerName, commandErr)}
-	}
-	if result.ExitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s run exited %d", providerName, result.ExitCode)}
-	}
-	return result, nil
+			if !req.SyncOnly && len(req.Command) == 0 {
+				return exit(2, "missing command")
+			}
+			var err error
+			client, err = newAzureDynamicSessionsClient(ctx, b.cfg, b.rt)
+			return err
+		},
+		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
+			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
+				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
+				TempPattern: "crabbox-azds-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+			})
+		},
+		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var err error
+			leaseID, slug, err = b.createSession(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			if !req.Keep {
+				cleanupClaim, err = b.sessionClaimForDeletion(leaseID)
+				if err != nil {
+					return shared.DelegatedSandbox{}, err
+				}
+			}
+			fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s session=%s\n", leaseID, slug, providerName, leaseID)
+			return handle(), nil
+		},
+		Resolve: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var err error
+			leaseID, slug, err = b.resolveSessionID(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
+			return handle(), err
+		},
+		// Keep invalid-workspace handling after acquisition, with normal retention.
+		Setup: func(context.Context) error { return workspaceErr },
+		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+			return b.syncWorkspace(ctx, client, leaseID, req, workspace, prepared)
+		},
+		NoSync: func(ctx context.Context) error { return b.prepareWorkspace(ctx, client, leaseID, workspace) },
+		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
+			command, err := buildAzureDynamicSessionsCommand(req.Command, req.ShellMode)
+			if err != nil {
+				return shared.DelegatedSandboxCommand{}, err
+			}
+			if req.EnvSummary {
+				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+			}
+			return shared.DelegatedSandboxCommand{Text: command, Run: func(ctx context.Context) (int, error) {
+				fmt.Fprintf(b.rt.Stderr, "running on %s %s\n", providerName, strings.Join(req.Command, " "))
+				return client.ExecStream(ctx, leaseID, azureDynamicSessionsExecRequest{
+					Command: command, Cwd: workspace, Env: req.Env,
+					TimeoutMS: durationMillisecondsCeil(azureDynamicSessionsTimeout(b.cfg)),
+				}, b.rt.Stdout, b.rt.Stderr)
+			}}, nil
+		},
+		Cleanup: func(ctx context.Context) error {
+			return core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, leaseID, cleanupClaim, true, func() error {
+				return client.DeleteSession(ctx, leaseID)
+			})
+		},
+	})
 }
 
 func (b *azureDynamicSessionsBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -434,14 +318,6 @@ func (b *azureDynamicSessionsBackend) deleteSessionBounded(client azureDynamicSe
 	ctx, cancel := context.WithTimeout(context.Background(), azureDynamicSessionsDeleteTimeout)
 	defer cancel()
 	return client.DeleteSession(ctx, leaseID)
-}
-
-func (b *azureDynamicSessionsBackend) deleteClaimedSessionBounded(client azureDynamicSessionsAPI, leaseID string, claim LeaseClaim) error {
-	ctx, cancel := context.WithTimeout(context.Background(), azureDynamicSessionsDeleteTimeout)
-	defer cancel()
-	return removeLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
-		return client.DeleteSession(ctx, leaseID)
-	})
 }
 
 func (b *azureDynamicSessionsBackend) sessionClaimForDeletion(leaseID string) (LeaseClaim, error) {

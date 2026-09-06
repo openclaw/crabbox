@@ -859,20 +859,22 @@ func mapMarket(spot bool) string {
 }
 
 func (c *AWSClient) waitForServerIP(ctx context.Context, id string) (Server, error) {
-	deadline := time.Now().Add(10 * time.Minute)
+	ctx, cancel := context.WithTimeoutCause(ctx, 10*time.Minute, exit(5, "timed out waiting for AWS instance public IP"))
+	defer cancel()
 	for {
 		server, err := c.GetServer(ctx, id)
-		if err != nil {
+		if ctx.Err() != nil {
+			return Server{}, context.Cause(ctx)
+		}
+		// RunInstances can return an ID before DescribeInstances can see it.
+		if err != nil && awsAPIErrorCode(err) != "InvalidInstanceID.NotFound" {
 			return Server{}, err
 		}
-		if server.PublicNet.IPv4.IP != "" {
+		if err == nil && server.PublicNet.IPv4.IP != "" {
 			return server, nil
 		}
-		if time.Now().After(deadline) {
-			return Server{}, exit(5, "timed out waiting for AWS instance public IP")
-		}
 		if err := sleepContext(ctx, 5*time.Second); err != nil {
-			return Server{}, err
+			return Server{}, context.Cause(ctx)
 		}
 	}
 }

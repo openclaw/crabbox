@@ -740,6 +740,96 @@ describe("private AWS workspaces", () => {
     expect(actions).toEqual(["TerminateInstances", "DescribeInstances"]);
   });
 
+  it("routes public managed lease release through confirmed termination", async () => {
+    const provider = new AWSProvider(expectedEnv(), region, {} as never);
+    const lease = publicManagedLease();
+    vi.spyOn(provider, "findServer").mockResolvedValue({
+      provider: "aws",
+      id: 0,
+      cloudID: lease.cloudID,
+      name: lease.serverName,
+      status: "running",
+      serverType: lease.serverType,
+      host: lease.host,
+      labels: {
+        crabbox: "true",
+        created_by: "crabbox",
+        lease: lease.id,
+        slug: lease.slug!,
+        owner: "alice_example.com",
+        provider: "aws",
+      },
+    });
+    const terminate = vi
+      .spyOn(EC2SpotClient.prototype, "terminateServerAndWait")
+      .mockResolvedValue();
+    const fireAndForget = vi.spyOn(EC2SpotClient.prototype, "deleteServer");
+
+    try {
+      await expect(provider.releaseLease(lease)).resolves.toBeUndefined();
+
+      expect(terminate).toHaveBeenCalledOnce();
+      expect(terminate).toHaveBeenCalledWith(lease.cloudID);
+      expect(fireAndForget).not.toHaveBeenCalled();
+    } finally {
+      terminate.mockRestore();
+      fireAndForget.mockRestore();
+    }
+  });
+
+  it("propagates public managed termination confirmation failure", async () => {
+    const provider = new AWSProvider(expectedEnv(), region, {} as never);
+    const lease = publicManagedLease();
+    vi.spyOn(provider, "findServer").mockResolvedValue({
+      provider: "aws",
+      id: 0,
+      cloudID: lease.cloudID,
+      name: lease.serverName,
+      status: "shutting-down",
+      serverType: lease.serverType,
+      host: lease.host,
+      labels: {
+        crabbox: "true",
+        created_by: "crabbox",
+        lease: lease.id,
+        slug: lease.slug!,
+        owner: "alice_example.com",
+        provider: "aws",
+      },
+    });
+    const terminate = vi
+      .spyOn(EC2SpotClient.prototype, "terminateServerAndWait")
+      .mockRejectedValue(new Error("timed out confirming AWS instance termination"));
+
+    try {
+      await expect(provider.releaseLease(lease)).rejects.toThrow(
+        "timed out confirming AWS instance termination",
+      );
+    } finally {
+      terminate.mockRestore();
+    }
+  });
+
+  it("keeps normal public deletion fire-and-forget", async () => {
+    const actions: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = requestFrom(input, init);
+        const action = new URLSearchParams(await request.clone().text()).get("Action") ?? "";
+        actions.push(action);
+        return ec2XMLResponse("<TerminateInstancesResponse />");
+      }),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      region,
+    );
+
+    await expect(client.deleteServer("i-public123")).resolves.toBeUndefined();
+    expect(actions).toEqual(["TerminateInstances"]);
+  });
+
   it("checks termination once more after the final backoff", async () => {
     let describeCalls = 0;
     const delays: number[] = [];
@@ -856,6 +946,36 @@ function privateLeaseConfig(): LeaseConfig {
     capacity: { market: "on-demand", fallback: "none", regions: [region], hints: false },
     providerKey: "crabbox-workspace-private",
   });
+}
+
+function publicManagedLease(): LeaseRecord {
+  return {
+    id: "cbx_abcdef123456",
+    slug: "public-release",
+    provider: "aws",
+    target: "linux",
+    cloudID: "i-public123",
+    owner: "alice@example.com",
+    org: "example-org",
+    profile: "default",
+    class: "standard",
+    serverType: "t3a.small",
+    serverID: 0,
+    serverName: "crabbox-public-release",
+    providerKey: "",
+    host: "192.0.2.10",
+    sshUser: "crabbox",
+    sshPort: "22",
+    workRoot: "/work/crabbox",
+    keep: false,
+    ttlSeconds: 3600,
+    estimatedHourlyUSD: 0.1,
+    maxEstimatedUSD: 0.1,
+    state: "released",
+    createdAt: "2026-09-06T00:00:00Z",
+    updatedAt: "2026-09-06T00:00:00Z",
+    expiresAt: "2026-09-06T01:00:00Z",
+  };
 }
 
 function privatePolicy(): AWSPrivateWorkspaceConfig {

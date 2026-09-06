@@ -27,7 +27,9 @@ exec ${JSON.stringify(python)} "$@"
 }
 
 const prepareSmokeRepo = (dir) =>
-  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-lambda-smoke.sh"));
+  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-lambda-smoke.sh"), [
+    "lib/live-smoke-json-match.py",
+  ]);
 
 test("live lambda smoke skips unless opted in", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-lambda-skip-"));

@@ -29,7 +29,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:           "blacksmith",
 		Kind:             core.ProviderKindDelegatedRun,
 		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:         core.FeatureSet{core.FeatureCacheVolume, core.FeatureRunProof, core.FeatureRunSession, core.FeatureRunArtifacts},
+		Features:         core.FeatureSet{core.FeatureCacheVolume, core.FeatureRunProof, core.FeatureRunSession, core.FeatureRunArtifacts, core.FeaturePreparedArtifactWorkspace},
 		Coordinator:      core.CoordinatorNever,
 		ClassDisposition: core.ProviderClassDispositionUnmapped,
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -556,4 +557,50 @@ type recordingRunner struct {
 func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
 	return r.result, nil
+}
+
+type azureDynamicSessionsStreamEOFTransport struct {
+	body io.ReadCloser
+}
+
+func (t azureDynamicSessionsStreamEOFTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/x-ndjson"}}, Body: t.body, Request: req}, nil
+}
+
+type azureDynamicSessionsCancelingEOFBody struct {
+	data   string
+	cancel context.CancelFunc
+}
+
+func (b *azureDynamicSessionsCancelingEOFBody) Read(p []byte) (int, error) {
+	n := copy(p, b.data)
+	b.data = b.data[n:]
+	if b.data == "" {
+		b.cancel()
+		return n, io.EOF
+	}
+	return n, nil
+}
+func (*azureDynamicSessionsCancelingEOFBody) Close() error { return nil }
+
+func TestAzureDynamicSessionsStreamCancellationAtCleanEOF(t *testing.T) {
+	for _, complete := range []bool{false, true} {
+		t.Run(fmt.Sprint(complete), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			data := ""
+			if complete {
+				data = "{\"type\":\"complete\",\"exitCode\":7}\n"
+			}
+			client := &azureDynamicSessionsClient{endpoint: "http://127.0.0.1", httpClient: &http.Client{Transport: azureDynamicSessionsStreamEOFTransport{body: &azureDynamicSessionsCancelingEOFBody{data: data, cancel: cancel}}}}
+			code, err := client.ExecStream(ctx, "fixture", azureDynamicSessionsExecRequest{Command: "true"}, io.Discard, io.Discard)
+			if complete {
+				if err != nil || code != 7 {
+					t.Fatalf("accepted completion changed: code=%d err=%v", code, err)
+				}
+			} else if !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancellation lost at clean EOF: %v", err)
+			}
+		})
+	}
 }

@@ -27,13 +27,14 @@ func (Provider) DiagnosticSecrets(core.Config) []string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:             providerName,
-		Family:           providerFamily,
-		Kind:             core.ProviderKindDelegatedRun,
-		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:         core.FeatureSet{core.FeatureArchiveSync, core.FeatureCleanup, core.FeaturePauseResume, core.FeatureRunSession},
-		Coordinator:      core.CoordinatorNever,
-		ClassDisposition: core.ProviderClassDispositionUnmapped,
+		SyncGuardrailFullCandidate: true,
+		Name:                       providerName,
+		Family:                     providerFamily,
+		Kind:                       core.ProviderKindDelegatedRun,
+		Targets:                    []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:                   core.FeatureSet{core.FeatureArchiveSync, core.FeatureCleanup, core.FeaturePauseResume, core.FeatureRunSession},
+		Coordinator:                core.CoordinatorNever,
+		ClassDisposition:           core.ProviderClassDispositionUnmapped,
 	}
 }
 

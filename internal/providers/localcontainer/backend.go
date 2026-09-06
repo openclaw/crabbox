@@ -1808,10 +1808,7 @@ func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.C
 	for i, volume := range cfg.Cache.Volumes {
 		args = append(args, "-e", fmt.Sprintf("CRABBOX_CACHE_VOLUME_PATH_%d=%s", i, strings.TrimSpace(volume.Path)))
 	}
-	// A hostname cannot be set when the container shares a host UTS namespace
-	// (rootless/root-posture nested runtimes); the no-hostname knob skips it so
-	// leases provision without sethostname requirements (OpenCharly crabbox loop
-	// cutover, exit 2).
+	// Runtimes sharing a host UTS namespace can reject an explicit hostname.
 	if !cfg.LocalContainer.NoHostname {
 		args = append(args, "--hostname", name)
 	}

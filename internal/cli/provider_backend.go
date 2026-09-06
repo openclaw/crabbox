@@ -363,11 +363,6 @@ type StopReclaimBackend interface {
 	ReclaimAndStop(ctx context.Context, req StopRequest) error
 }
 
-type DelegatedRunArtifactBackend interface {
-	Backend
-	CollectRunArtifacts(ctx context.Context, req DelegatedRunArtifactRequest) (DelegatedRunArtifactResult, error)
-}
-
 type DelegatedRunDownloadBackend interface {
 	Backend
 	FetchRunFile(ctx context.Context, req DelegatedRunDownloadRequest) ([]byte, error)
@@ -668,6 +663,9 @@ type ProviderSpec struct {
 	Coordinator      CoordinatorMode
 	ClassDisposition ProviderClassDisposition
 	SizeSelection    ProviderSizeSelector
+	// SyncGuardrailFullCandidate counts the complete ordinary workspace transfer.
+	// False preserves dirty-delta counting when the checkout has changes.
+	SyncGuardrailFullCandidate bool
 	// TailscaleEgressOnly marks FeatureTailscale as outbound userspace access,
 	// not a bidirectional peer endpoint.
 	TailscaleEgressOnly bool
@@ -721,6 +719,8 @@ const (
 	FeaturePauseResume  Feature = "pause-resume"
 	FeatureMCP          Feature = "mcp-attachments"
 )
+
+const FeaturePreparedArtifactWorkspace Feature = "prepared-artifact-workspace"
 
 type FeatureSet []Feature
 
@@ -776,6 +776,13 @@ type LocalCommandResult struct {
 	ExitCode int
 	Stdout   string
 	Stderr   string
+}
+
+// IsPlainLocalCommandExit recognizes an ordinary unsuccessful local process
+// completion, not a wrapped/joined error or proof of a remote command outcome.
+func IsPlainLocalCommandExit(result LocalCommandResult, err error) bool {
+	processErr, ok := err.(*exec.ExitError)
+	return ok && processErr != nil && processErr.ProcessState != nil && processErr.ExitCode() > 0 && processErr.ExitCode() == result.ExitCode
 }
 
 type DoctorRequest struct {
@@ -834,6 +841,30 @@ func commandRunnerWithChildCredentialBoundary(next CommandRunner, denied []strin
 	return childCredentialBoundaryCommandRunner{next: next, denied: denied}
 }
 
+// TrackLocalCommandCancellation records the caller cause for a signaled child
+// stopped by the cancellation watcher. Install it after configuring cmd.Cancel,
+// before starting a CommandContext command. Apply the returned function only
+// after Run or Wait joins that watcher; ordinary observed exits stay primary.
+func TrackLocalCommandCancellation(ctx context.Context, cmd *exec.Cmd) func(error) error {
+	stop := cmd.Cancel
+	var interrupted error
+	cmd.Cancel = func() error {
+		cause := ctx.Err()
+		err := stop()
+		if !errors.Is(err, os.ErrProcessDone) {
+			interrupted = cause
+		}
+		return err
+	}
+	return func(err error) error {
+		var processErr *exec.ExitError
+		if interrupted != nil && errors.As(err, &processErr) && processErr.ExitCode() < 0 {
+			return errors.Join(err, interrupted)
+		}
+		return err
+	}
+}
+
 func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	if req.CaptureOutputToFiles && (req.DisableOutputCapture || req.MaxCapturedOutputBytes <= 0 || req.Stdout != nil || req.Stderr != nil) {
 		return LocalCommandResult{ExitCode: 1}, errors.New("file output capture requires a positive limit and no streaming writers")
@@ -858,6 +889,8 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 	if req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
 		configureBoundedCommandCancellation(cmd)
 	}
+	stopCommand := cmd.Cancel
+	withCancellationCause := TrackLocalCommandCancellation(ctx, cmd)
 	env := req.Env
 	if env == nil {
 		env = os.Environ()
@@ -886,9 +919,9 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 		var finishCapture func() commandFileCaptureOutcome
 		if files != nil {
 			files.closeWriters()
-			finishCapture = files.watch(cancel, cmd.Cancel, cmd.WaitDelay)
+			finishCapture = files.watch(cancel, stopCommand, cmd.WaitDelay)
 		}
-		err = cmd.Wait()
+		err = withCancellationCause(cmd.Wait())
 		if finishCapture != nil {
 			observed := finishCapture()
 			err = errors.Join(err, observed.err)
@@ -896,18 +929,18 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 				return LocalCommandResult{ExitCode: exitCode(err)}, err
 			}
 			if readErr := files.read(&stdout, &stderr); readErr != nil {
-				_ = cmd.Cancel()
+				_ = stopCommand()
 				err = errors.Join(err, readErr)
 				return LocalCommandResult{ExitCode: exitCode(err)}, err
 			}
 			stdout.overflow = stdout.overflow || observed.overflow
 			if stdout.overflow || stderr.overflow || err != nil {
-				_ = cmd.Cancel()
+				_ = stopCommand()
 			}
 		}
 	}
 	if errors.Is(err, exec.ErrWaitDelay) && req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
-		_ = cmd.Cancel()
+		_ = stopCommand()
 	}
 	result := LocalCommandResult{ExitCode: exitCode(err), Stdout: stdout.String(), Stderr: stderr.String()}
 	if stdout.overflow || stderr.overflow {
@@ -1187,6 +1220,7 @@ type RunRequest struct {
 	FreshPR               FreshPRSpec
 	ApplyLocalPatch       bool
 	Command               []string
+	CommandLiteralArgs    map[int]bool // Profile argument positions that must not introduce shell syntax.
 	Label                 string
 	RequestedSlug         string
 	TimingJSON            bool
@@ -1315,18 +1349,6 @@ func RunErrorKindForResult(result RunResult, err error) RunErrorKind {
 	return RunErrorNone
 }
 
-type DelegatedRunArtifactRequest struct {
-	RunReq   RunRequest
-	Result   RunResult
-	MaxFiles int
-	MaxBytes int64
-}
-
-type DelegatedRunArtifactResult struct {
-	Artifacts []RunArtifact
-	Output    string
-}
-
 type RunSessionHandle struct {
 	Provider       string `json:"provider"`
 	LeaseID        string `json:"leaseId"`
@@ -1384,10 +1406,11 @@ func ValidateRunSessionForSpec(spec ProviderSpec, result RunResult) error {
 }
 
 type LeaseTarget struct {
-	Server      Server
-	SSH         SSHTarget
-	LeaseID     string
-	Coordinator *CoordinatorClient
+	Server       Server
+	SSH          SSHTarget
+	LeaseID      string
+	Coordinator  *CoordinatorClient
+	runnerTiming *runnerProviderTiming
 	// Recorded by the validated provider lookup, never inferred from absent SSH.
 	providerRelease *leaseReleaseConfirmation
 }

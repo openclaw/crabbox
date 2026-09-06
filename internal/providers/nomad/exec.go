@@ -10,6 +10,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type nomadExecRequest struct {
@@ -49,15 +50,14 @@ func (b *backend) execShell(ctx context.Context, client Client, ready allocation
 }
 
 func (b *backend) runCommand(ctx context.Context, client Client, ready allocationReadiness, req RunRequest, workdir string) (int, error) {
-	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, nil)
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
 		return 0, err
 	}
-	command := intent.Argv("bash", "-lc")
 	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
-	script := remoteCommandScript(workdir, req.Env, command)
+	script := shared.ShellWorkspaceCommand(workdir, req.Env, intent, "bash", "-lc")
 	execCtx, cancel := b.execContext(ctx)
 	defer cancel()
 	exitCode, err := b.allocationExec(execCtx, client, ready, []string{"sh", "-s"}, strings.NewReader(script), b.rt.Stdout, b.rt.Stderr)
@@ -99,42 +99,4 @@ func normalizeExitCode(code int) int {
 		return 1
 	}
 	return code
-}
-
-func remoteCommandScript(workdir string, env map[string]string, command []string) string {
-	var b strings.Builder
-	b.WriteString("mkdir -p ")
-	b.WriteString(shellQuote(workdir))
-	b.WriteString(" && cd ")
-	b.WriteString(shellQuote(workdir))
-	for key, value := range env {
-		if !validShellEnvName(key) {
-			continue
-		}
-		b.WriteString(" && export ")
-		b.WriteString(key)
-		b.WriteString("=")
-		b.WriteString(shellQuote(value))
-	}
-	b.WriteString(" && exec ")
-	b.WriteString(shellScriptFromArgv(command))
-	return b.String()
-}
-
-func validShellEnvName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i, r := range name {
-		if i == 0 {
-			if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || r == '_') {
-				return false
-			}
-			continue
-		}
-		if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_') {
-			return false
-		}
-	}
-	return true
 }

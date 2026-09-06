@@ -108,82 +108,219 @@ func readBlacksmithArchive(t *testing.T, path string) map[string]string {
 	}
 }
 
+func testPreparedBlacksmithArtifactRoot(t *testing.T, nativeRoot string) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "prepared artifact's workspace")
+	for _, dir := range []string{root, filepath.Join(nativeRoot, ".git")} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(root, filepath.Join(nativeRoot, ".git/crabbox-artifact-root")); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 func TestBlacksmithArtifactRunShellAndTerminalExit(t *testing.T) {
 	requireBlacksmithArtifactShell(t)
-	for _, tt := range []struct {
-		name, command, stdout, stderr string
-		argv                          []string
-		code                          int
-	}{
-		{name: "zero", command: "printf original > report; printf out; printf err >&2", stdout: "out", stderr: "err"},
-		{name: "one", command: "printf original > report; exit 1", code: 1},
-		{name: "explicit-exit", command: "printf original > report; exit 23; printf BAD", code: 23},
-		{name: "exec", command: "printf original > report; exec bash -c 'exit 23'", code: 23},
-		{name: "errexit", command: "set -e\nprintf original > report\nfalse\nprintf BAD", code: 1},
-		{name: "trap-cd", command: "trap 'printf trapped' EXIT; printf original > report; mkdir child; cd child; printf wrong > report; exit 23", code: 23, stdout: "trapped"},
-		{name: "argv", argv: []string{"printf", "%s", "a b", "'quoted'", "$HOME"}, stdout: "a b'quoted'$HOME"},
-		{name: "env", argv: []string{"VALUE=a b", "bash", "-c", `printf '%s' "$VALUE"`}, stdout: "a b"},
-		{name: "multiline", command: "printf 'line1\\nline2\\n'\nprintf original > report", stdout: "line1\nline2\n"},
-		{name: "literal-control-bytes", command: "printf 'out\\036bytes\\037tail'; printf 'err\\036bytes\\037tail' >&2; printf original > report", stdout: "out\x1ebytes\x1ftail", stderr: "err\x1ebytes\x1ftail"},
-		{name: "literal-control-bytes-failure", command: "printf 'out\\036bytes\\037tail'; printf 'err\\036bytes\\037tail' >&2; printf original > report; exit 23", stdout: "out\x1ebytes\x1ftail", stderr: "err\x1ebytes\x1ftail", code: 23},
-		{name: "stdin", command: "read value; printf 'read=%s' $?; printf original > report", stdout: "read=1"},
-		{name: "signal-like", command: "printf original > report; exit 137", code: 137},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, workspace := range []string{"native", "prepared"} {
+		for _, tt := range []struct {
+			name, command, stdout, stderr string
+			argv                          []string
+			code                          int
+		}{
+			{name: "zero", command: "printf original > report; printf out; printf err >&2", stdout: "out", stderr: "err"},
+			{name: "one", command: "printf original > report; exit 1", code: 1},
+			{name: "explicit-exit", command: "printf original > report; exit 23; printf BAD", code: 23},
+			{name: "exec", command: "printf original > report; exec bash -c 'exit 23'", code: 23},
+			{name: "errexit", command: "set -e\nprintf original > report\nfalse\nprintf BAD", code: 1},
+			{name: "trap-cd", command: "trap 'printf trapped' EXIT; printf original > report; mkdir child; cd child; printf wrong > report; exit 23", code: 23, stdout: "trapped"},
+			{name: "argv", argv: []string{"printf", "%s", "a b", "'quoted'", "$HOME"}, stdout: "a b'quoted'$HOME"},
+			{name: "env", argv: []string{"VALUE=a b", "bash", "-c", `printf '%s' "$VALUE"`}, stdout: "a b"},
+			{name: "multiline", command: "printf 'line1\\nline2\\n'\nprintf original > report", stdout: "line1\nline2\n"},
+			{name: "literal-control-bytes", command: "printf 'out\\036bytes\\037tail'; printf 'err\\036bytes\\037tail' >&2; printf original > report", stdout: "out\x1ebytes\x1ftail", stderr: "err\x1ebytes\x1ftail"},
+			{name: "literal-control-bytes-failure", command: "printf 'out\\036bytes\\037tail'; printf 'err\\036bytes\\037tail' >&2; printf original > report; exit 23", stdout: "out\x1ebytes\x1ftail", stderr: "err\x1ebytes\x1ftail", code: 23},
+			{name: "stdin", command: "read value; printf 'read=%s' $?; printf original > report", stdout: "read=1"},
+			{name: "signal-like", command: "printf original > report; exit 137", code: 137},
+			{name: "signal", command: "printf original > report; kill -TERM $$", code: 143},
+		} {
+			t.Run(workspace+"/"+tt.name, func(t *testing.T) {
+				isolateBlacksmithOwnership(t)
+				repo := t.TempDir()
+				t.Chdir(repo)
+				testWriteBlacksmithFile(t, repo, "report", "original")
+				if workspace == "prepared" {
+					artifactRoot := testPreparedBlacksmithArtifactRoot(t, repo)
+					testWriteBlacksmithFile(t, artifactRoot, "report", "original")
+					testWriteBlacksmithFile(t, repo, "report", "stale transport")
+					testWriteBlacksmithFile(t, repo, "transport-input", "uploaded")
+				}
+				const id = "tbx_supervisor"
+				testOwnedBlacksmithClaim(t, id, "jade-krill", repo)
+				runs := 0
+				runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+					runs++
+					if req.Dir != repo {
+						t.Error("native sync cwd changed")
+					}
+					return runSyntheticBlacksmithCommand(t, t.Context(), req)
+				}}
+				backend := newTestBlacksmithBackend(baseConfig(), runner)
+				var stdout, stderr bytes.Buffer
+				backend.rt.Stdout, backend.rt.Stderr = &stdout, &stderr
+				command, shell := tt.argv, false
+				if command == nil {
+					command, shell = []string{tt.command}, true
+				}
+				if workspace == "prepared" {
+					command = []string{"test -f transport-input || exit 90\ncd -P ./.git/crabbox-artifact-root || exit 91\n" + blacksmithCommandString(command, shell)}
+					shell = true
+				}
+				result, err := backend.Run(t.Context(), RunRequest{ID: id, Repo: Repo{Root: repo}, Command: command, ShellMode: shell, ArtifactGlobs: []string{"report"}, RequiredArtifactGlobs: []string{"report"}, TimingJSON: true})
+				if result.ExitCode != tt.code || (err == nil) != (tt.code == 0) || runs != 1 || result.CommandText != blacksmithCommandString(command, shell) {
+					t.Fatalf("code=%d err=%v runs=%d text=%q", result.ExitCode, err, runs, result.CommandText)
+				}
+				if stdout.String() != tt.stdout || !strings.Contains(stderr.String(), tt.stderr) {
+					t.Fatalf("streams stdout=%q stderr=%q", stdout.String(), stderr.String())
+				}
+				if strings.Contains(stdout.String()+stderr.String()+result.LogExcerpt, "__CRABBOX_ARTIFACT_") || strings.Contains(stdout.String()+stderr.String()+result.LogExcerpt, "\x1eCRABBOX_BS_") {
+					t.Fatal("protocol leaked")
+				}
+				if tt.code >= 128 {
+					if len(result.Artifacts) != 0 {
+						t.Fatal("signal-like exit published")
+					}
+					return
+				}
+				if len(result.Artifacts) != 1 || readBlacksmithArchive(t, result.Artifacts[0].Path)["report"] != "original" {
+					t.Fatalf("wrong archive: %+v", result.Artifacts)
+				}
+				info, err := os.Stat(result.Artifacts[0].Path)
+				if err != nil || info.Mode().Perm() != 0600 {
+					t.Fatal("archive is not private")
+				}
+				if tt.code != 0 {
+					bundles, _ := filepath.Glob(filepath.Join(repo, ".crabbox/captures/*.tar.gz"))
+					if len(bundles) != 1 {
+						t.Fatalf("failure bundles=%v", bundles)
+					}
+					for name, data := range readBlacksmithArchive(t, bundles[0]) {
+						if strings.Contains(data, "\x1eCRABBOX_BS_") || strings.Contains(data, "__CRABBOX_ARTIFACT_") || strings.Contains(data, "H4sI") {
+							t.Fatalf("payload leaked to %s", name)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestBlacksmithPreparedArtifactWorkspaceCapability(t *testing.T) {
+	for _, name := range []string{"blacksmith-testbox", "blacksmith"} {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			app := core.App{Stdout: &stdout, Stderr: &stderr}
+			if err := app.Run(t.Context(), []string{"providers", "describe", name, "--json"}); err != nil {
+				t.Fatalf("describe: %v: %s", err, stderr.String())
+			}
+			var description struct {
+				SchemaVersion int
+				Provider      struct{ Canonical string }
+				Capabilities  struct{ Features []string }
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &description); err != nil {
+				t.Fatal(err)
+			}
+			if description.SchemaVersion != 2 || description.Provider.Canonical != "blacksmith-testbox" || !containsString(description.Capabilities.Features, "prepared-artifact-workspace") {
+				t.Fatalf("prepared artifact capability missing from public description: %+v", description)
+			}
+		})
+	}
+}
+
+func TestBlacksmithArtifactWorkspaceBinding(t *testing.T) {
+	requireBlacksmithArtifactShell(t)
+	for _, mode := range []string{"relative", "retarget", "replace-directory", "created-by-workload", "file", "directory", "dangling", "file-target", "loop"} {
+		t.Run(mode, func(t *testing.T) {
 			isolateBlacksmithOwnership(t)
 			repo := t.TempDir()
 			t.Chdir(repo)
-			testWriteBlacksmithFile(t, repo, "report", "original")
-			const id = "tbx_supervisor"
-			testOwnedBlacksmithClaim(t, id, "jade-krill", repo)
-			runs := 0
-			runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
-				runs++
-				if req.Dir != repo {
-					t.Error("native sync cwd changed")
+			root := testPreparedBlacksmithArtifactRoot(t, repo)
+			binding := filepath.Join(repo, ".git/crabbox-artifact-root")
+			testWriteBlacksmithFile(t, repo, "report", "stale transport")
+			testWriteBlacksmithFile(t, root, "report", "before workload")
+			command := "printf started > workload-started\ncd -P ./.git/crabbox-artifact-root || exit 91\nprintf prepared > report\n"
+			invalid := false
+			switch mode {
+			case "relative":
+				relative, err := filepath.Rel(filepath.Dir(binding), root)
+				if err != nil {
+					t.Fatal(err)
 				}
-				return runSyntheticBlacksmithCommand(t, t.Context(), req)
-			}}
+				if err := os.Remove(binding); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(relative, binding); err != nil {
+					t.Fatal(err)
+				}
+			case "retarget", "created-by-workload":
+				other := t.TempDir()
+				testWriteBlacksmithFile(t, other, "report", "wrong binding")
+				retarget := "rm -f " + shellQuote(binding) + "\nln -s " + shellQuote(other) + " " + shellQuote(binding) + "\n"
+				if mode == "created-by-workload" {
+					if err := os.Remove(binding); err != nil {
+						t.Fatal(err)
+					}
+					command = "printf prepared > report\n" + retarget
+				} else {
+					command += retarget
+				}
+			case "replace-directory":
+				command += "mv " + shellQuote(root) + " " + shellQuote(root+"-moved") + "\nmkdir " + shellQuote(root) + "\nprintf replacement > " + shellQuote(filepath.Join(root, "report")) + "\n"
+			default:
+				invalid = true
+				if err := os.Remove(binding); err != nil {
+					t.Fatal(err)
+				}
+				switch mode {
+				case "file":
+					testWriteBlacksmithFile(t, repo, ".git/crabbox-artifact-root", root)
+				case "directory":
+					if err := os.Mkdir(binding, 0700); err != nil {
+						t.Fatal(err)
+					}
+				default:
+					target := filepath.Join(root, "missing")
+					if mode == "file-target" {
+						target = filepath.Join(root, "report")
+					} else if mode == "loop" {
+						target = binding
+					}
+					if err := os.Symlink(target, binding); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			runner := ownershipRunner(func(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+				return runSyntheticBlacksmithCommand(t, ctx, req)
+			})
 			backend := newTestBlacksmithBackend(baseConfig(), runner)
-			var stdout, stderr bytes.Buffer
-			backend.rt.Stdout, backend.rt.Stderr = &stdout, &stderr
-			command, shell := tt.argv, false
-			if command == nil {
-				command, shell = []string{tt.command}, true
-			}
-			result, err := backend.Run(t.Context(), RunRequest{ID: id, Repo: Repo{Root: repo}, Command: command, ShellMode: shell, ArtifactGlobs: []string{"report"}, TimingJSON: true})
-			if result.ExitCode != tt.code || (err == nil) != (tt.code == 0) || runs != 1 || result.CommandText != blacksmithCommandString(command, shell) {
-				t.Fatalf("code=%d err=%v runs=%d text=%q", result.ExitCode, err, runs, result.CommandText)
-			}
-			if stdout.String() != tt.stdout || !strings.Contains(stderr.String(), tt.stderr) {
-				t.Fatalf("streams stdout=%q stderr=%q", stdout.String(), stderr.String())
-			}
-			if strings.Contains(stdout.String()+stderr.String()+result.LogExcerpt, "__CRABBOX_ARTIFACT_") || strings.Contains(stdout.String()+stderr.String()+result.LogExcerpt, "\x1eCRABBOX_BS_") {
-				t.Fatal("protocol leaked")
-			}
-			if tt.code >= 128 {
-				if len(result.Artifacts) != 0 {
-					t.Fatal("signal-like exit published")
+			code, ended, result, err := backend.runArtifactTestbox(t.Context(), RunRequest{Repo: Repo{Root: repo}, Command: []string{command}, ShellMode: true, ArtifactGlobs: []string{"report"}, RequiredArtifactGlobs: []string{"report"}}, "tbx_workspace", nil, nil, nil, time.Second)
+			if invalid {
+				if code != 7 || err == nil || !ended.IsZero() || len(result) != 0 {
+					t.Fatalf("invalid binding reached workload: code=%d ended=%v result=%+v err=%v", code, ended, result, err)
+				}
+				if _, err := os.Stat(filepath.Join(repo, "workload-started")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("invalid binding allowed workload side effect: %v", err)
 				}
 				return
 			}
-			if len(result.Artifacts) != 1 || readBlacksmithArchive(t, result.Artifacts[0].Path)["report"] != "original" {
-				t.Fatalf("wrong archive: %+v", result.Artifacts)
+			if code != 0 || err != nil || len(result) != 1 {
+				t.Fatalf("code=%d result=%+v err=%v", code, result, err)
 			}
-			info, err := os.Stat(result.Artifacts[0].Path)
-			if err != nil || info.Mode().Perm() != 0600 {
-				t.Fatal("archive is not private")
-			}
-			if tt.code != 0 {
-				bundles, _ := filepath.Glob(filepath.Join(repo, ".crabbox/captures/*.tar.gz"))
-				if len(bundles) != 1 {
-					t.Fatalf("failure bundles=%v", bundles)
-				}
-				for name, data := range readBlacksmithArchive(t, bundles[0]) {
-					if strings.Contains(data, "\x1eCRABBOX_BS_") || strings.Contains(data, "__CRABBOX_ARTIFACT_") || strings.Contains(data, "H4sI") {
-						t.Fatalf("payload leaked to %s", name)
-					}
-				}
+			if got := readBlacksmithArchive(t, result[0].Path)["report"]; got != "prepared" {
+				t.Fatalf("collected %q instead of the captured artifact workspace", got)
 			}
 		})
 	}
@@ -348,10 +485,10 @@ func TestBlacksmithArtifactReceiptAdversarial(t *testing.T) {
 			backend.rt.Stdout, backend.rt.Stderr = &stdout, &stderr
 			code, _, collected, err := backend.runArtifactTestbox(ctx, RunRequest{Repo: Repo{Root: repo}, Command: []string{"true"}, ArtifactGlobs: []string{"report"}}, "tbx_receipt", nil, nil, nil, time.Second)
 			if kind == "valid" {
-				if err != nil || code != 0 || len(collected.Artifacts) != 1 {
+				if err != nil || code != 0 || len(collected) != 1 {
 					t.Fatalf("code=%d collected=%+v err=%v", code, collected, err)
 				}
-			} else if code == 0 && err == nil || len(collected.Artifacts) != 0 {
+			} else if code == 0 && err == nil || len(collected) != 0 {
 				t.Fatalf("accepted %s code=%d err=%v", kind, code, err)
 			}
 			if strings.Contains(stdout.String()+stderr.String(), "CRABBOX_") || strings.Contains(stdout.String()+stderr.String(), base64.StdEncoding.EncodeToString(archive)[:20]) || strings.Contains(stdout.String()+stderr.String(), "\x1e") {
@@ -369,7 +506,7 @@ func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 				isolateBlacksmithOwnership(t)
 				repo := t.TempDir()
 				t.Chdir(repo)
-				testWriteBlacksmithFile(t, repo, "report", "synthetic")
+				testWriteBlacksmithFile(t, testPreparedBlacksmithArtifactRoot(t, repo), "report", "synthetic")
 				if kind == "startup-failure" {
 					testWriteBlacksmithFile(t, repo, "bash-env", "exit 9\n")
 				}
@@ -444,12 +581,12 @@ func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 					}
 				}
 				if kind == "workload-outlives-budget" {
-					if err != nil || got != code || len(artifacts.Artifacts) != 1 || ended.Sub(begin) < budget {
+					if err != nil || got != code || len(artifacts) != 1 || ended.Sub(begin) < budget {
 						t.Fatalf("workload was bounded: code=%d err=%v", got, err)
 					}
 				} else if kind == "remote-collection-timeout" {
 					var ee ExitError
-					if got != code || ended.IsZero() || !errors.As(err, &ee) || ee.Code != 7 || ee.Message != "collection exited 124" || len(artifacts.Artifacts) != 0 || artifacts.Output != "" {
+					if got != code || ended.IsZero() || !errors.As(err, &ee) || ee.Code != 7 || ee.Message != "collection exited 124" || len(artifacts) != 0 {
 						t.Fatalf("remote collection timeout lost workload result: code=%d ended=%v artifacts=%+v err=%v", got, ended, artifacts, err)
 					}
 					path := core.LocalRunArtifactPath(repo, "", "tbx_budget", "blacksmith-artifacts.tgz")
@@ -458,7 +595,7 @@ func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 					}
 				} else {
 					var ee ExitError
-					if !errors.As(err, &ee) || ee.Code != 7 || len(artifacts.Artifacts) != 0 || artifacts.Output != "" {
+					if !errors.As(err, &ee) || ee.Code != 7 || len(artifacts) != 0 {
 						t.Fatalf("unconfirmed success code=%d err=%v", got, err)
 					}
 					want := 7
@@ -526,7 +663,7 @@ func TestBlacksmithArtifactCollectionTimeoutReceipt(t *testing.T) {
 					var ee ExitError
 					if boundary == "helper" {
 						got, ended, collected, err := backend.runArtifactTestbox(t.Context(), req, id, nil, nil, nil, 100*time.Millisecond)
-						if got != code || ended.IsZero() || !errors.As(err, &ee) || ee.Code != 7 || ee.Message != "collection exited 124" || len(collected.Artifacts) != 0 || collected.Output != "" {
+						if got != code || ended.IsZero() || !errors.As(err, &ee) || ee.Code != 7 || ee.Message != "collection exited 124" || len(collected) != 0 {
 							t.Fatalf("code=%d want=%d ended=%v collected=%+v err=%v", got, code, ended, collected, err)
 						}
 					} else {
@@ -596,11 +733,12 @@ func TestBlacksmithArtifactRunProtectedAndRequiredPaths(t *testing.T) {
 			isolateBlacksmithOwnership(t)
 			repo := t.TempDir()
 			t.Chdir(repo)
+			root := testPreparedBlacksmithArtifactRoot(t, repo)
 			for _, name := range []string{"report", "directory/file", ".git/private", ".crabbox/private"} {
-				testWriteBlacksmithFile(t, repo, name, "synthetic")
+				testWriteBlacksmithFile(t, root, name, "synthetic")
 			}
 			for name, target := range map[string]string{"dangling": "missing", "directory-link": "directory", "leaf-link": "report"} {
-				if err := os.Symlink(target, filepath.Join(repo, name)); err != nil {
+				if err := os.Symlink(target, filepath.Join(root, name)); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -610,7 +748,7 @@ func TestBlacksmithArtifactRunProtectedAndRequiredPaths(t *testing.T) {
 			backend := newTestBlacksmithBackend(baseConfig(), runner)
 			_, _, result, err := backend.runArtifactTestbox(t.Context(), RunRequest{Repo: Repo{Root: repo}, Command: []string{"true"}, ArtifactGlobs: []string{"**"}, RequiredArtifactGlobs: []string{required}}, "tbx_protected", nil, nil, nil, time.Second)
 			if required != "report" {
-				if err == nil || len(result.Artifacts) != 0 {
+				if err == nil || len(result) != 0 {
 					t.Fatal("required path bypassed")
 				}
 				return
@@ -618,7 +756,7 @@ func TestBlacksmithArtifactRunProtectedAndRequiredPaths(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			files := readBlacksmithArchive(t, result.Artifacts[0].Path)
+			files := readBlacksmithArchive(t, result[0].Path)
 			for name := range files {
 				if strings.Contains(name, ".git/") || strings.Contains(name, ".crabbox/") || strings.HasPrefix(name, "directory-link/") || name == "dangling" {
 					t.Fatalf("unsafe archive member %s", name)
@@ -691,8 +829,8 @@ func TestBlacksmithArtifactRunClaimFence(t *testing.T) {
 			go func() {
 				done <- backend.withOwnedTestbox(ctx, claim, func() error {
 					code, _, result, err := backend.runArtifactTestbox(ctx, RunRequest{Repo: Repo{Root: repo}, Command: []string{"exit 23"}, ArtifactGlobs: []string{"report"}}, id, nil, nil, nil, time.Second)
-					if code != 23 || (mode == "writer" && (err != nil || len(result.Artifacts) != 1)) || (mode == "stop" && (err == nil || len(result.Artifacts) != 0)) {
-						return fmt.Errorf("code=%d artifact count=%d err=%v", code, len(result.Artifacts), err)
+					if code != 23 || (mode == "writer" && (err != nil || len(result) != 1)) || (mode == "stop" && (err == nil || len(result) != 0)) {
+						return fmt.Errorf("code=%d artifact count=%d err=%v", code, len(result), err)
 					}
 					return nil
 				})

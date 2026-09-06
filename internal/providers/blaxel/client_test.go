@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,6 +18,194 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestRedactErrorPreservesCauseAndSafeFormatting(t *testing.T) {
+	if err := redactError(nil); err != nil {
+		t.Fatalf("redactError(nil)=%v", err)
+	}
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded, errors.New("fixture failure")} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			t.Setenv("CRABBOX_BLAXEL_API_KEY", "synthetic-first-key")
+			t.Setenv("BL_API_KEY", "synthetic-second-key")
+			original := &url.Error{Op: "Get", URL: "https://example.test/synthetic-first-key/synthetic-second-key", Err: cause}
+			want := redactString(original.Error())
+			err := redactError(original)
+			t.Setenv("CRABBOX_BLAXEL_API_KEY", "")
+			t.Setenv("BL_API_KEY", "")
+			if !errors.Is(err, cause) {
+				t.Errorf("redacted error lost cause %v", cause)
+			}
+			var urlErr *url.Error
+			if !errors.As(err, &urlErr) || urlErr != original {
+				t.Error("redacted error lost typed transport cause")
+			}
+			var exitErr core.ExitError
+			if errors.As(err, &exitErr) {
+				t.Error("client error invented a CLI exit code")
+			}
+			for _, text := range []string{err.Error(), fmt.Sprint(err), fmt.Sprintf("%+v", err), fmt.Sprintf("%s", err)} {
+				if text != want {
+					t.Errorf("display=%q, want frozen redacted message %q", text, want)
+				}
+			}
+			if got := fmt.Errorf("outer: %w", err).Error(); got != "outer: "+want {
+				t.Errorf("wrapped display=%q", got)
+			}
+		})
+	}
+}
+
+func TestRedactedNativeHTTPRequestPreservesCancellation(t *testing.T) {
+	for _, multipart := range []bool{false, true} {
+		t.Run(fmt.Sprintf("multipart=%t", multipart), func(t *testing.T) {
+			t.Setenv("CRABBOX_BLAXEL_API_KEY", "synthetic-query-key")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				cancel()
+				select {
+				case <-r.Context().Done():
+				case <-time.After(5 * time.Second):
+					t.Error("canceled HTTP request did not close")
+				}
+			}))
+			defer server.Close()
+			client := &restClient{http: server.Client(), dataHTTP: server.Client()}
+			values := url.Values{"fixture": {"synthetic-query-key"}}
+			var err error
+			if multipart {
+				_, err = client.doMultipartAt(ctx, server.URL, http.MethodPut, "/fixture", values, "application/octet-stream", strings.NewReader("fixture"), nil)
+			} else {
+				_, err = client.doAt(ctx, client.http, server.URL, http.MethodGet, "/fixture", values, nil, nil)
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("native HTTP error %v lost cancellation", err)
+			}
+			if err == nil || strings.Contains(fmt.Sprintf("%+v", err), "synthetic-query-key") || !strings.Contains(err.Error(), "<redacted>") {
+				t.Errorf("native error was not safely redacted: %v", err)
+			}
+		})
+	}
+}
+
+func TestWaitProcessStopsAfterNativeHTTPCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stops atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/sandboxes/sbx-owned":
+			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{
+				"name": "sbx-owned", "url": serverURL(r) + "/sandbox/sbx-owned",
+			}, "status": "DEPLOYED"})
+		case r.Method == http.MethodGet && r.URL.Path == "/sandbox/sbx-owned/process/proc-owned":
+			cancel()
+			select {
+			case <-r.Context().Done():
+			case <-time.After(5 * time.Second):
+				t.Error("canceled process request did not close")
+			}
+		case r.Method == http.MethodDelete && r.URL.Path == "/sandbox/sbx-owned/process/proc-owned":
+			stops.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client, err := newBlaxelClient(core.Config{Blaxel: core.BlaxelConfig{APIURL: server.URL, APIKey: "synthetic-key"}}, core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &backend{}
+	_, err = b.waitProcess(ctx, client, "sbx-owned", Process{ID: "proc-owned", Status: "running"})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("waitProcess error %v lost cancellation", err)
+	}
+	if got := stops.Load(); got != 1 {
+		t.Errorf("process stops=%d, want exactly the original process stopped", got)
+	}
+}
+
+func TestUploadFileRewindsArchiveAfterNativeMultipartFailure(t *testing.T) {
+	var attempts atomic.Int32
+	parts := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/sandboxes/sbx-owned":
+			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": "sbx-owned", "url": serverURL(r) + "/sandbox/sbx-owned"}, "status": "DEPLOYED"})
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/filesystem-multipart/initiate/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"uploadId": fmt.Sprintf("upload-%d", attempts.Add(1))})
+		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/part"):
+			if err := r.ParseMultipartForm(1024); err != nil {
+				t.Error(err)
+				w.WriteHeader(500)
+				return
+			}
+			defer r.MultipartForm.RemoveAll()
+			file, _, err := r.FormFile("file")
+			if err != nil {
+				t.Error(err)
+				w.WriteHeader(500)
+				return
+			}
+			defer file.Close()
+			data, err := io.ReadAll(file)
+			if err != nil {
+				t.Error(err)
+				w.WriteHeader(500)
+				return
+			}
+			select {
+			case parts <- string(data):
+			default:
+				t.Error("unexpected extra multipart attempt")
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if strings.Contains(r.URL.Path, "upload-1/") {
+				http.Error(w, "WORKLOAD_UNAVAILABLE", http.StatusServiceUnavailable)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"etag": "synthetic-etag", "partNumber": 1, "size": len(data)})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/complete"):
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client, err := newBlaxelClient(core.Config{Blaxel: core.BlaxelConfig{APIURL: server.URL, APIKey: "synthetic-key"}}, core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(t.TempDir(), "archive.tgz")
+	want := "archive-bytes\x00with-tail"
+	if err := os.WriteFile(archive, []byte(want), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := client.UploadFile(ctx, "sbx-owned", "/tmp/archive.tgz", file); err != nil {
+		t.Fatal(err)
+	}
+	if attempts.Load() != 2 || len(parts) != 2 {
+		t.Fatalf("attempts=%d parts=%d", attempts.Load(), len(parts))
+	}
+	for i := 0; i < 2; i++ {
+		if got := <-parts; got != want {
+			t.Fatalf("attempt %d body=%q want complete archive", i+1, got)
+		}
+	}
+}
 
 func TestBlaxelFallbackBoundsControlAndPreservesUpload(t *testing.T) {
 	const controlTimeout = 30 * time.Millisecond

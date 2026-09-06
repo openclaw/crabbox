@@ -14,7 +14,9 @@ import {
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
 const prepareSmokeRepo = (dir) =>
-  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-vast-smoke.sh"));
+  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-vast-smoke.sh"), [
+    "lib/live-smoke-json-match.py",
+  ]);
 
 function vastLiveEnv(overrides = {}) {
   return {

@@ -6,10 +6,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestWriteWindowsBootstrapSSHWarningIncludesDetail(t *testing.T) {
@@ -606,6 +609,71 @@ func TestAWSUserDataDefaultsToCloudInit(t *testing.T) {
 	got := awsUserData(baseConfig(), "ssh-ed25519 test")
 	if !strings.Contains(got, "#cloud-config") || !strings.Contains(got, "ssh-ed25519 test") {
 		t.Fatalf("awsUserData(default) did not return Linux cloud-init")
+	}
+}
+
+func TestAWSUserDataUbuntuAPTPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		modify func(*Config)
+		want   bool
+	}{
+		{name: "default Canonical amd64", want: true},
+		{name: "explicit amd64", modify: func(cfg *Config) { cfg.architectureExplicit = true }, want: true},
+		{name: "custom or captured AMI", modify: func(cfg *Config) { cfg.AWSAMI = "ami-custom" }},
+		{name: "snapshot fork", modify: func(cfg *Config) { cfg.AWSSnapshot = "snap-captured" }},
+		{name: "Ubuntu 24.04", modify: func(cfg *Config) { cfg.OSImage = "ubuntu:24.04" }},
+		{name: "explicit ARM", modify: func(cfg *Config) {
+			cfg.Architecture, cfg.architectureExplicit = ArchitectureARM64, true
+		}},
+		{name: "inferred Graviton", modify: func(cfg *Config) { cfg.ServerType = "m7g.large" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = "aws"
+			cfg.ServerType = "m7a.large"
+			if tc.modify != nil {
+				tc.modify(&cfg)
+			}
+			got := awsUserData(cfg, "ssh-ed25519 test")
+			var document map[string]any
+			if err := yaml.Unmarshal([]byte(got), &document); err != nil {
+				t.Fatalf("invalid cloud-config: %v", err)
+			}
+			if !tc.want {
+				if _, ok := document["apt"]; ok {
+					t.Fatal("custom image or unqualified target must retain its APT policy")
+				}
+				if got != cloudInit(cfg, "ssh-ed25519 test") {
+					t.Fatal("excluded image must retain the ordinary cloud-init bytes")
+				}
+				return
+			}
+			want := map[string]any{
+				"primary":  []any{map[string]any{"arches": []any{"amd64"}, "uri": "https://archive.ubuntu.com/ubuntu/"}},
+				"security": []any{map[string]any{"arches": []any{"amd64"}, "uri": "http://security.ubuntu.com/ubuntu/"}},
+			}
+			if !reflect.DeepEqual(document["apt"], want) {
+				t.Fatalf("APT policy = %#v, want primary HTTPS with the separate security archive", document["apt"])
+			}
+		})
+	}
+	for _, provider := range []string{"gcp", "hetzner", "azure"} {
+		t.Run(provider, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = provider
+			got := cloudInit(cfg, "ssh-ed25519 test")
+			if provider == "azure" {
+				got = azureLinuxCloudInit(cfg, "ssh-ed25519 test")
+			}
+			var document map[string]any
+			if err := yaml.Unmarshal([]byte(got), &document); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := document["apt"]; ok {
+				t.Fatal("AWS archive policy must not change another provider")
+			}
+		})
 	}
 }
 

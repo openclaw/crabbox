@@ -197,6 +197,24 @@ async function gunzipBase64(value: string): Promise<string> {
 }
 
 describe("cloud-init bootstrap", () => {
+  it.each(["aws", "azure", "gcp", "hetzner"] as const)(
+    "keeps AWS archive policy out of shared %s cloud-init",
+    (provider) => {
+      const input: LeaseConfig = {
+        ...leaseConfig({ provider, sshPublicKey: "ssh-ed25519 fixture" }),
+        selectedImage: { id: "ami-stock", source: "stock", provider: "aws", kind: "aws-ami" },
+      };
+      const output = cloudInit(input, "echo additional-bootstrap");
+      expect(output).not.toContain("\napt:\n");
+      expect(output).toContain("echo additional-bootstrap");
+    },
+  );
+
+  it("does not assume an unclassified AWS image is stock", () => {
+    const input = leaseConfig({ provider: "aws", sshPublicKey: "ssh-ed25519 fixture" });
+    expect(awsUserData(input)).toBe(cloudInit(input));
+  });
+
   it("installs a coordinator-generated SSH host identity", () => {
     const got = cloudInit({
       ...config,

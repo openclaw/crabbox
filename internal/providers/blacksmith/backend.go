@@ -1,7 +1,6 @@
 package blacksmith
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -70,7 +69,6 @@ type blacksmithBackend struct {
 	claim *core.LeaseClaim
 }
 
-var _ core.DelegatedRunArtifactBackend = (*blacksmithBackend)(nil)
 var _ core.RunOptionsValidator = (*blacksmithBackend)(nil)
 
 func (b *blacksmithBackend) Spec() ProviderSpec { return b.spec }
@@ -222,7 +220,7 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (runResult 
 	phaseTracker := core.NewCommandPhaseTracker(commandStart)
 	code := 0
 	var commandEnd time.Time
-	var collected core.DelegatedRunArtifactResult
+	var collected []core.RunArtifact
 	var artifactErr error
 	if err := b.withOwnedTestbox(ctx, claim, func() error {
 		if len(req.ArtifactGlobs) > 0 || len(req.RequiredArtifactGlobs) > 0 {
@@ -278,10 +276,10 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (runResult 
 		Total:         total,
 		SyncDelegated: true,
 	}
-	for _, artifact := range collected.Artifacts {
+	for _, artifact := range collected {
 		fmt.Fprintf(b.rt.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
 	}
-	result.Artifacts = append(result.Artifacts, collected.Artifacts...)
+	result.Artifacts = append(result.Artifacts, collected...)
 	if code != 0 && req.KeepOnFailure {
 		shouldStop = false
 	}
@@ -386,91 +384,6 @@ func blacksmithArtifactFailureExitCode(err error) int {
 	return 7
 }
 
-func (b *blacksmithBackend) CollectRunArtifacts(ctx context.Context, req core.DelegatedRunArtifactRequest) (core.DelegatedRunArtifactResult, error) {
-	leaseID := strings.TrimSpace(firstNonBlank(req.Result.LeaseID, req.RunReq.ID))
-	if leaseID == "" {
-		return core.DelegatedRunArtifactResult{}, exit(2, "blacksmith artifact retrieval requires a testbox id")
-	}
-	if err := core.ValidateRunArtifactGlobs(req.RunReq.ArtifactGlobs); err != nil {
-		return core.DelegatedRunArtifactResult{}, err
-	}
-	if err := core.ValidateRequiredRunArtifactGlobs(req.RunReq.RequiredArtifactGlobs); err != nil {
-		return core.DelegatedRunArtifactResult{}, err
-	}
-	collectGlobs := append([]string{}, req.RunReq.ArtifactGlobs...)
-	collectGlobs = append(collectGlobs, req.RunReq.RequiredArtifactGlobs...)
-	script := core.DelegatedRunArtifactScript(req.RunReq.RequiredArtifactGlobs, collectGlobs, req.MaxFiles, req.MaxBytes)
-	keyPath, err := testboxKeyPath(leaseID)
-	if err != nil {
-		return core.DelegatedRunArtifactResult{}, err
-	}
-	maxBytes := req.MaxBytes
-	if maxBytes <= 0 {
-		maxBytes = core.DelegatedRunArtifactDefaultMaxBytes
-	}
-	captureLimit := blacksmithArtifactOutputCaptureLimit(maxBytes)
-	stdout := newBlacksmithLimitedBuffer(captureLimit)
-	stderr := newBlacksmithLimitedBuffer(captureLimit)
-	args := blacksmithRunArgs(b.cfg, leaseID, keyPath, []string{script}, b.cfg.Blacksmith.Debug, true)
-	owned := b
-	var claim core.LeaseClaim
-	if b.claim != nil && b.claim.LeaseID == leaseID {
-		claim = *b.claim
-	} else {
-		owned, claim, err = b.ownedTestbox(ctx, leaseID, "", false)
-		if err != nil {
-			return core.DelegatedRunArtifactResult{}, err
-		}
-		if err := core.CheckLeaseClaimRepositoryOwner(leaseID, claim, req.RunReq.Repo.Root, false); err != nil {
-			return core.DelegatedRunArtifactResult{}, err
-		}
-	}
-	timedOut := false
-	err = owned.withOwnedTestbox(ctx, claim, func() error {
-		var commandErr error
-		_, timedOut, commandErr = owned.runCommandWithSyncGuardCapture(ctx, args, stdout, stderr, true)
-		return commandErr
-	})
-	output := strings.TrimSpace(stdout.String() + "\n" + stderr.String())
-	if stdout.exceeded || stderr.exceeded {
-		return core.DelegatedRunArtifactResult{}, exit(7, "blacksmith artifact output too large before archive validation: captured more than %d bytes", captureLimit)
-	}
-	if timedOut {
-		fmt.Fprintf(
-			b.rt.Stderr,
-			"Blacksmith Testbox sync did not print a completion marker for %s during artifact retrieval; terminating local runner. "+
-				"Rerun with CRABBOX_BLACKSMITH_SYNC_TIMEOUT_MS=0 to disable this guard.\n",
-			blacksmithSyncTimeout(os.Getenv),
-		)
-		return core.DelegatedRunArtifactResult{}, exit(124, "blacksmith artifact retrieval sync timed out: %s", output)
-	}
-	if err != nil {
-		return core.DelegatedRunArtifactResult{}, exit(7, "blacksmith artifact retrieval failed: %v: %s", err, output)
-	}
-	if len(collectGlobs) == 0 {
-		return core.DelegatedRunArtifactResult{Output: output}, nil
-	}
-	archive, cleanOutput, err := blacksmithExtractArtifactArchive(output, maxBytes)
-	if err != nil {
-		return core.DelegatedRunArtifactResult{}, err
-	}
-	path := core.LocalRunArtifactPath(req.RunReq.Repo.Root, "", leaseID, "blacksmith-artifacts.tgz")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return core.DelegatedRunArtifactResult{}, exit(2, "blacksmith artifact create %s: %v", filepath.Dir(path), err)
-	}
-	if err := os.WriteFile(path, archive, 0o600); err != nil {
-		return core.DelegatedRunArtifactResult{}, exit(2, "blacksmith artifact write %s: %v", path, err)
-	}
-	return core.DelegatedRunArtifactResult{
-		Output: strings.TrimSpace(cleanOutput),
-		Artifacts: []core.RunArtifact{{
-			Kind:  "artifact-glob",
-			Path:  path,
-			Bytes: len(archive),
-		}},
-	}, nil
-}
-
 func blacksmithExtractArtifactArchive(output string, maxBytes int64) ([]byte, string, error) {
 	begin := blacksmithArtifactMarkerLineIndex(output, core.DelegatedRunArtifactBeginMarker, 0)
 	end := -1
@@ -540,34 +453,6 @@ const (
 	blacksmithCleanupTimeout                       = 30 * time.Second
 	blacksmithArtifactDiagnosticCaptureBytes int64 = 64 * 1024
 )
-
-type blacksmithLimitedBuffer struct {
-	bytes.Buffer
-	limit    int64
-	exceeded bool
-}
-
-func newBlacksmithLimitedBuffer(limit int64) *blacksmithLimitedBuffer {
-	return &blacksmithLimitedBuffer{limit: limit}
-}
-
-func (b *blacksmithLimitedBuffer) Write(p []byte) (int, error) {
-	if b.limit <= 0 || b.exceeded {
-		b.exceeded = b.exceeded || b.limit > 0
-		return len(p), nil
-	}
-	remaining := b.limit - int64(b.Buffer.Len())
-	if remaining <= 0 {
-		b.exceeded = true
-		return len(p), nil
-	}
-	if int64(len(p)) > remaining {
-		_, _ = b.Buffer.Write(p[:int(remaining)])
-		b.exceeded = true
-		return len(p), nil
-	}
-	return b.Buffer.Write(p)
-}
 
 func blacksmithArtifactOutputCaptureLimit(maxBytes int64) int64 {
 	if maxBytes <= 0 {

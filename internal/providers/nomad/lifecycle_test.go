@@ -666,11 +666,12 @@ func TestRunNoSyncPropagatesRemoteExitAndCleansNewJob(t *testing.T) {
 	}
 	b, stdout, stderr := testBackend(t, fake)
 	result, err := b.Run(context.Background(), RunRequest{
-		ID:      " \t ",
-		Repo:    newNomadRunRepo(t),
-		NoSync:  true,
-		Env:     map[string]string{"TOKEN": "secret", "BAD-NAME": "skip"},
-		Command: []string{"go", "test", "./..."},
+		ID:                 " \t ",
+		Repo:               newNomadRunRepo(t),
+		NoSync:             true,
+		Env:                map[string]string{"TOKEN": "secret", "BAD-NAME": "skip"},
+		Command:            []string{"go", "test", "./...", "&&"},
+		CommandLiteralArgs: map[int]bool{3: true},
 	})
 	var exitErr ExitError
 	if !core.AsExitError(err, &exitErr) || exitErr.Code != 23 {
@@ -689,6 +690,9 @@ func TestRunNoSyncPropagatesRemoteExitAndCleansNewJob(t *testing.T) {
 	if len(fake.execs) < 2 || !strings.Contains(fake.execs[1].Stdin, "export TOKEN='secret'") ||
 		strings.Contains(fake.execs[1].Stdin, "BAD-NAME") {
 		t.Fatalf("execs=%#v", fake.execs)
+	}
+	if !strings.HasSuffix(fake.execs[1].Stdin, " && exec 'go' 'test' './...' '&&'") {
+		t.Fatalf("literal intent lost in final stdin: %q", fake.execs[1].Stdin)
 	}
 }
 
@@ -1100,4 +1104,35 @@ func mapValues(values map[string]string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+func TestRunLiteralArgumentsSurviveNativeStdinTransport(t *testing.T) {
+	if os.PathSeparator != '/' {
+		t.Skip("POSIX stdin transport")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh unavailable")
+	}
+	fake := newLifecycleFakeClient()
+	b, _, _ := testBackend(t, fake)
+	workdir := t.TempDir()
+	marker := filepath.Join(workdir, "must-not-exist")
+	_, err = b.runCommand(context.Background(), fake, allocationReadiness{JobID: "job", AllocationID: "alloc", Task: "task"}, RunRequest{Command: []string{"printf", "%s", ";", "touch", marker}, CommandLiteralArgs: map[int]bool{2: true}}, workdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.execs) != 1 {
+		t.Fatalf("execs=%+v", fake.execs)
+	}
+	cmd := exec.Command(sh, "-s")
+	cmd.Stdin = strings.NewReader(fake.execs[0].Stdin)
+	cmd.Env = []string{"HOME=" + workdir, "PATH=/usr/bin:/bin", "ENV=" + os.DevNull}
+	out, err := cmd.CombinedOutput()
+	if err != nil || string(out) != ";touch"+marker {
+		t.Fatalf("stdin=%q output=%q err=%v", fake.execs[0].Stdin, out, err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("literal semicolon created marker: %v", err)
+	}
 }

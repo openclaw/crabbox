@@ -19,6 +19,19 @@ import (
 	"time"
 )
 
+func uploadArtifactGrant(ctx context.Context, path string, grant CoordinatorArtifactUploadGrant) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return exit(2, "open artifact %s: %v", grant.Name, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return exit(2, "stat artifact %s: %v", grant.Name, err)
+	}
+	return uploadArtifactGrantReader(ctx, file, info.Size(), grant)
+}
+
 func TestParseArtifactPublishOptionsNormalizesStorage(t *testing.T) {
 	opts, err := parseArtifactPublishOptions([]string{
 		"--dir", "bundle",

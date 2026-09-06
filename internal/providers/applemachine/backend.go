@@ -61,7 +61,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	return nil
 }
 
-func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
 	if err := requireHost(); err != nil {
 		return RunResult{}, err
 	}
@@ -85,37 +85,54 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		return RunResult{}, err
 	}
 	leaseID, slug, name := claim.LeaseID, claim.Slug, claim.CloudID
-	session := &RunSessionHandle{
-		Provider:       providerName,
-		LeaseID:        leaseID,
-		Slug:           slug,
-		Reused:         !acquired,
-		Kept:           !acquired || req.Keep,
-		CleanupCommand: appleMachineCleanupCommand(leaseID),
+	result = RunResult{
+		Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true,
+		Session: &RunSessionHandle{
+			Provider: providerName, LeaseID: leaseID, Slug: slug, Reused: !acquired, Kept: true,
+			CleanupCommand: appleMachineCleanupCommand(leaseID),
+		},
 	}
-	failed := false
-	if acquired && !req.Keep {
-		defer func() {
-			if failed && req.KeepOnFailure {
-				fmt.Fprintf(b.rt.Stderr, "kept failed apple-machine lease=%s slug=%s\n", leaseID, slug)
-				session.Kept = true
-				return
+	defer func() {
+		if retErr != nil && result.Status == "" {
+			outcome := core.FinalizeRunResult(core.RunResult{}, retErr)
+			result.Status, result.ErrorKind = outcome.Status, outcome.ErrorKind
+			result.ExitCode = 1
+			var public core.ExitError
+			if errors.As(retErr, &public) && public.Code > 0 {
+				result.ExitCode = public.Code
 			}
-			if err := b.removeBoundLease(context.Background(), claim); err != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: %v\n", err)
-				session.Kept = true
-				return
+			retErr = shared.ExitErrorWithCause(result.ExitCode, retErr.Error(), retErr)
+		}
+		shouldStop := acquired && !req.Keep
+		if shouldStop && retErr != nil && req.KeepOnFailure {
+			shouldStop = false
+			fmt.Fprintf(b.rt.Stderr, "kept failed apple-machine lease=%s slug=%s\n", leaseID, slug)
+		}
+		if shouldStop {
+			if cleanupErr := b.removeBoundLease(context.Background(), claim); cleanupErr != nil {
+				result, retErr = shared.AppendDelegatedRunFailure(result, retErr, fmt.Errorf("apple-machine cleanup failed: %w", cleanupErr), 1)
+			} else {
+				result.Session.Kept = false
 			}
-			session.Kept = false
-		}()
-	}
+		}
+		result.Total = time.Since(started)
+		result = core.FinalizeRunResult(result, retErr)
+		if req.TimingJSON {
+			timingErr := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
+				Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true, SyncSkipped: true,
+				CommandMs: result.Command.Milliseconds(), TotalMs: result.Total.Milliseconds(),
+				ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label),
+			}, result, retErr))
+			result, retErr = shared.AppendDelegatedRunFailure(result, retErr, timingErr, 1)
+		}
+	}()
 	args := []string{"machine", "run", "--name", name}
 	if root := strings.TrimSpace(req.Repo.Root); root != "" {
 		args = append(args, "--cwd", root)
 	}
 	envFile, cleanup, err := writeEnvFile(req.Env, req.Options.EnvAllow)
 	if err != nil {
-		return RunResult{}, err
+		return result, err
 	}
 	if cleanup != nil {
 		defer cleanup()
@@ -126,23 +143,26 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		command = []string{"/bin/sh", "-lc", shellScriptFromArgv(req.Command)}
 	}
 	if len(command) == 0 {
-		return RunResult{}, exit(2, "provider=%s requires a command", providerName)
+		return result, exit(2, "provider=%s requires a command", providerName)
 	}
 	args = append(args, command...)
 	commandStarted := time.Now()
-	result, runErr := b.command(ctx, args, req.Repo.Root)
-	commandDuration := time.Since(commandStarted)
-	out := RunResult{ExitCode: result.ExitCode, Command: commandDuration, Total: time.Since(started), SyncDelegated: true, Provider: providerName, LeaseID: leaseID, Slug: slug, CommandText: strings.Join(req.Command, " "), Session: session}
-	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true, SyncSkipped: true, CommandMs: out.Command.Milliseconds(), TotalMs: out.Total.Milliseconds(), ExitCode: out.ExitCode, Label: strings.TrimSpace(req.Label)}, out, runErr)); err != nil {
-			return out, err
-		}
+	native, runErr := b.command(ctx, args, req.Repo.Root)
+	result.Command = time.Since(commandStarted)
+	result.CommandText = strings.Join(req.Command, " ")
+	classificationErr := runErr
+	if core.IsPlainLocalCommandExit(native, runErr) {
+		classificationErr = nil
 	}
+	outcome := shared.FinalizeDelegatedCommandOutcome(native.ExitCode, classificationErr)
+	result.ExitCode, result.Status, result.ErrorKind = outcome.ExitCode, outcome.Status, outcome.ErrorKind
 	if runErr != nil {
-		failed = true
-		return out, exit(result.ExitCode, "apple-machine command failed: %s", failureDetail(result, runErr))
+		return result, shared.ExitErrorWithCause(result.ExitCode, fmt.Sprintf("apple-machine command failed: %s", failureDetail(native, runErr)), runErr)
 	}
-	return out, nil
+	if result.ExitCode != 0 {
+		return result, exit(result.ExitCode, "apple-machine command exited %d", result.ExitCode)
+	}
+	return result, nil
 }
 
 func appleMachineCleanupCommand(leaseID string) string {
@@ -344,16 +364,15 @@ func (b *backend) createLease(ctx context.Context, repo Repo, reclaim bool, requ
 
 func (b *backend) waitMachineReady(ctx context.Context, claim core.LeaseClaim) error {
 	type observation struct {
-		result LocalCommandResult
-		err    error
+		err error
 	}
 	_, err := shared.Poll(ctx, 0, 500*time.Millisecond, shared.SleepContext,
 		func(ctx context.Context) (observation, error) {
 			if _, err := b.verifyMachineIdentity(ctx, claim); err != nil {
 				return observation{}, err
 			}
-			result, err := b.control(ctx, []string{"machine", "run", "--name", claim.CloudID, ":"})
-			return observation{result: result, err: err}, nil
+			_, err := b.control(ctx, []string{"machine", "run", "--name", claim.CloudID, ":"})
+			return observation{err: err}, nil
 		},
 		func(_ context.Context, current observation, identityErr error) (bool, error) {
 			if identityErr != nil {

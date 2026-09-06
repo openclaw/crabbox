@@ -59,6 +59,21 @@ Provider flags:
 - `run` maps to `container machine run` and preserves the host repository path.
 - `run --lease-output <path>` writes the Apple Machine lease ID, slug,
   reuse/retention state, and exact cleanup command for orchestration handoff.
+- Automatic deletion failure after a successful command fails the run with exit
+  1 and keeps its session and claim available for recovery. A primary command or
+  transport failure retains its outcome and inspectable cause when cleanup or
+  reporting also fails; secondary diagnostics remain visible.
+- Only a plain matching native process exit establishes a failed command's
+  exit code. Transport, cancellation, deadline, and I/O errors remain failures
+  with exit 1 even when the native result also carries a nonzero code.
+- `--keep-on-failure` covers environment or command preparation failures after
+  acquisition as well as failed commands. Reused machines remain kept. Private
+  environment-file cleanup runs on every path, including retained runs.
+- Timing is finalized after automatic cleanup, with the existing delegated,
+  skipped-sync fields for the home-mounted workspace. A reporting failure after
+  successful deletion cannot retroactively retain the machine. A failed timing
+  writer may leave no usable timing record, but still fails the run without
+  replacing an earlier failure.
 - `status` and `list` use machine JSON inspection.
 - `stop` deletes the machine and its persistent storage with `container machine rm`.
 - New leases bind the exact machine name and daemon-reported storage root to a

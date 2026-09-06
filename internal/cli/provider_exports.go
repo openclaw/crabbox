@@ -329,6 +329,12 @@ func WithLeaseClaimUnchanged(leaseID string, expected LeaseClaim, action func() 
 	return withLeaseClaimUnchanged(leaseID, expected, action)
 }
 
+// WithLeaseClaimUnchangedContext also bounds waiting for the exclusive fence.
+// The action must honor ctx itself and must not reenter claim operations.
+func WithLeaseClaimUnchangedContext(ctx context.Context, leaseID string, expected LeaseClaim, action func() error) error {
+	return withLeaseClaimUnchangedContext(ctx, leaseID, expected, false, action)
+}
+
 // WithLeaseClaimUnchangedShared excludes claim writers while allowing another
 // action on the same snapshot, such as cancelling a running command. Actions
 // must tolerate that concurrency, honor ctx and never mutate or reenter claims.

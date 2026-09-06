@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -374,6 +375,42 @@ func TestDurableGuardedClaimActionFailurePreventsPublication(t *testing.T) {
 	}
 	if claim, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || exists {
 		t.Fatalf("claim published after action failure: claim=%#v exists=%v err=%v", claim, exists, readErr)
+	}
+}
+
+func TestDurableGuardedClaimCompletedActionStillPublishesAfterCancellation(t *testing.T) {
+	for _, reclaim := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reclaim=%t", reclaim), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			const leaseID = "cbx_completed_action"
+			cfg := Config{Provider: "aws"}
+			server := Server{Provider: "aws", CloudID: "i-confirmed"}
+			var previous leaseClaim
+			if reclaim {
+				var err error
+				previous, err = claimLeaseTargetForRepoConfigScopeIfUnchangedDurable(
+					leaseID, "completed-action", cfg, "account:test", server, SSHTarget{}, t.TempDir(), time.Minute, false, leaseClaim{}, false,
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			repo := t.TempDir()
+			called := false
+			updated, err := ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfterContext(
+				ctx, leaseID, "completed-action", cfg, "account:test", server, SSHTarget{}, repo, time.Minute, reclaim, previous, reclaim,
+				func() error { called = true; cancel(); return nil },
+			)
+			if err != nil || !called || !errors.Is(ctx.Err(), context.Canceled) {
+				t.Fatalf("completed action was discarded: called=%t err=%v", called, err)
+			}
+			stored, exists, err := readLeaseClaimWithPresence(leaseID)
+			if err != nil || !exists || !reflect.DeepEqual(stored, updated) || stored.RepoRoot != repo || stored.Revision == "" || reclaim && stored.Revision == previous.Revision {
+				t.Fatalf("completed action was not durably published: stored=%+v updated=%+v err=%v", stored, updated, err)
+			}
+		})
 	}
 }
 
@@ -1802,15 +1839,6 @@ func TestConditionalClaimHelpersAndExactResolution(t *testing.T) {
 			t.Fatalf("leaseClaimMatchesIdentifier(%q)=%v want %v", identifier, got, want)
 		}
 	}
-	if exists, err := leaseClaimExists(leaseID); err != nil || !exists {
-		t.Fatalf("existing claim exists=%v err=%v", exists, err)
-	}
-	if exists, err := leaseClaimExists("cbx_missingclaim123"); err != nil || exists {
-		t.Fatalf("missing claim exists=%v err=%v", exists, err)
-	}
-	if exists, err := leaseClaimExists("../invalid"); err != nil || exists {
-		t.Fatalf("invalid claim exists=%v err=%v", exists, err)
-	}
 }
 
 func TestResolveLeaseClaimForProviderCloudIDRejectsDuplicates(t *testing.T) {
@@ -2378,6 +2406,71 @@ func TestReadLeaseClaimRejectsInvalidJSON(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "parse claim") {
 		t.Fatalf("expected parse claim error, got %v", err)
 	}
+}
+
+func TestResolveLeaseClaimDoesNotTreatCanonicalIDAsSlug(t *testing.T) {
+	const requestedID = "cbx_aaaaaaaaaaaa"
+	const otherID = "cbx_bbbbbbbbbbbb"
+	const scope = "endpoint:https://api.example.test"
+	lookups := []struct {
+		name    string
+		resolve func(string) (leaseClaim, bool, error)
+	}{
+		{"unscoped", resolveLeaseClaim},
+		{"provider", func(id string) (leaseClaim, bool, error) {
+			return resolveLeaseClaimForProvider(id, "e2b")
+		}},
+		{"provider exact", func(id string) (leaseClaim, bool, error) {
+			claim, ok, _, err := resolveLeaseClaimForProviderWithExact(id, "e2b")
+			return claim, ok, err
+		}},
+		{"scope exact", func(id string) (leaseClaim, bool, error) {
+			claim, ok, _, err := resolveLeaseClaimForProviderScopeWithExact(id, "e2b", scope)
+			return claim, ok, err
+		}},
+	}
+	for _, lookup := range lookups {
+		t.Run(lookup.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			if err := claimLeaseForRepoProviderScope(otherID, "cbx-aaaaaaaaaaaa", "e2b", scope, "/repo", time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			if claim, ok, err := lookup.resolve(requestedID); err != nil || ok || claim.LeaseID != "" {
+				t.Errorf("missing canonical ID selected alias: claim=%#v ok=%t err=%v", claim, ok, err)
+			}
+			if claim, ok, err := lookup.resolve("CBX AAAAAAAAAAAA"); err != nil || !ok || claim.LeaseID != otherID {
+				t.Fatalf("ordinary normalized slug: claim=%#v ok=%t err=%v", claim, ok, err)
+			}
+			if err := claimLeaseForRepoProviderScope(requestedID, "exact-lease", "e2b", scope, "/repo", time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			if claim, ok, err := lookup.resolve(requestedID); err != nil || !ok || claim.LeaseID != requestedID {
+				t.Fatalf("exact claim precedence: claim=%#v ok=%t err=%v", claim, ok, err)
+			}
+			if err := claimLeaseForRepoProviderScope("legacy-file", "cbx-not-canonical", "e2b", scope, "/repo", time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range []string{"legacy-file", "cbx_not_canonical"} {
+				if claim, ok, err := lookup.resolve(id); err != nil || !ok || claim.LeaseID != "legacy-file" {
+					t.Fatalf("legacy/literal identifier %q: claim=%#v ok=%t err=%v", id, claim, ok, err)
+				}
+			}
+		})
+	}
+	t.Run("foreign exact provider does not select alias", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		for _, claim := range []leaseClaim{
+			{LeaseID: requestedID, Slug: "exact-lease", Provider: "gcp"},
+			{LeaseID: otherID, Slug: "cbx-aaaaaaaaaaaa", Provider: "e2b"},
+		} {
+			if err := claimLeaseForRepoProvider(claim.LeaseID, claim.Slug, claim.Provider, "/repo", time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if claim, ok, err := resolveLeaseClaimForProvider(requestedID, "e2b"); err != nil || ok || claim.LeaseID != "" {
+			t.Fatalf("provider fallback selected alias: claim=%#v ok=%t err=%v", claim, ok, err)
+		}
+	})
 }
 
 func TestResolveLeaseClaimFindsSlug(t *testing.T) {

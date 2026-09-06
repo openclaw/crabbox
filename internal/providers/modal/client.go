@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type modalAPI interface {
@@ -105,14 +109,18 @@ func (c *modalPythonClient) Exec(ctx context.Context, req modalExecRequest) (int
 	defer os.Remove(resultPath)
 	payload["result_path"] = resultPath
 	res, err := c.runStreamed(ctx, modalExecScript, payload, req.Stdout, req.Stderr)
-	if err != nil {
+	if err != nil && !core.IsPlainLocalCommandExit(res, err) {
 		return res.ExitCode, err
 	}
 	if res.ExitCode != 0 {
+		message := fmt.Sprintf("modal exec client exited %d", res.ExitCode)
 		if res.ExitCode == modalTransportExitCode {
-			return res.ExitCode, fmt.Errorf("modal exec transport failed")
+			message = "modal exec transport failed"
 		}
-		return res.ExitCode, fmt.Errorf("modal exec client exited %d", res.ExitCode)
+		if err != nil {
+			return res.ExitCode, fmt.Errorf("%s: %w", message, err)
+		}
+		return res.ExitCode, errors.New(message)
 	}
 	data, err := os.ReadFile(resultPath)
 	if err != nil {
@@ -129,11 +137,11 @@ func (c *modalPythonClient) UploadFile(ctx context.Context, sandboxID, localPath
 	payload := c.sandboxPayload(sandboxID)
 	payload["local_path"], payload["remote_path"] = localPath, remotePath
 	res, err := c.runStreamed(ctx, modalUploadScript, payload, io.Discard, c.rt.Stderr)
-	if err != nil {
+	if err != nil && !core.IsPlainLocalCommandExit(res, err) {
 		return err
 	}
 	if res.ExitCode != 0 {
-		return exit(res.ExitCode, "modal upload %q exited %d", remotePath, res.ExitCode)
+		return shared.ExitErrorWithCause(res.ExitCode, fmt.Sprintf("modal upload %q exited %d", remotePath, res.ExitCode), err)
 	}
 	return nil
 }
@@ -200,26 +208,18 @@ func (c *modalPythonClient) runJSON(ctx context.Context, script string, payload 
 	return nil
 }
 
-func (c *modalPythonClient) runStreamed(ctx context.Context, script string, payload any, stdout, stderr io.Writer) (coreResult, error) {
+func (c *modalPythonClient) runStreamed(ctx context.Context, script string, payload any, stdout, stderr io.Writer) (core.LocalCommandResult, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return coreResult{}, err
+		return core.LocalCommandResult{}, err
 	}
-	res, err := c.rt.Exec.Run(ctx, LocalCommandRequest{
+	return c.rt.Exec.Run(ctx, LocalCommandRequest{
 		Name:   c.python(),
 		Args:   []string{"-c", script, string(data)},
 		Env:    c.env(),
 		Stdout: stdout,
 		Stderr: stderr,
 	})
-	if err != nil && res.ExitCode == 0 {
-		return coreResult{ExitCode: res.ExitCode}, err
-	}
-	return coreResult{ExitCode: res.ExitCode}, nil
-}
-
-type coreResult struct {
-	ExitCode int
 }
 
 func (c *modalPythonClient) python() string {
@@ -243,7 +243,7 @@ func modalCommandError(exitCode int, stdout, stderr *bytes.Buffer, runErr error)
 		tail = tail[:4096]
 	}
 	if runErr != nil {
-		return fmt.Errorf("modal python client (exit=%d): %v: %s", exitCode, runErr, tail)
+		return fmt.Errorf("modal python client (exit=%d): %w: %s", exitCode, runErr, tail)
 	}
 	return fmt.Errorf("modal python client exited %d: %s", exitCode, tail)
 }

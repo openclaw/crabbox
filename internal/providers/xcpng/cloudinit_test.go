@@ -1,6 +1,8 @@
 package xcpng
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -173,6 +175,19 @@ func TestBuildConfigDriveImageRejectsOversizedPayload(t *testing.T) {
 	}
 	if _, err := buildConfigDriveImage(payload); err == nil || !strings.Contains(err.Error(), "config-drive payload is too large") {
 		t.Fatalf("err=%v, want oversized payload validation", err)
+	}
+}
+
+func TestBuildFAT16ImagePreservesXCPngEncoding(t *testing.T) {
+	image, err := buildFAT16Image("cidata", []fatFile{
+		{Name: "user-data", Data: []byte("#cloud-config\nusers:\n- name: alice\n")},
+		{Name: "meta-data", Data: []byte("instance-id: crabbox-test\nlocal-hostname: my-app\n")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fmt.Sprintf("%x", sha256.Sum256(image)), "a752d9264be7b8d65d7aa76c88b29390db32c01aeb32583018ec5046df8ea2b6"; got != want {
+		t.Fatalf("sha256=%s, want %s", got, want)
 	}
 }
 

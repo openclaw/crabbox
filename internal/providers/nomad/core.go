@@ -80,10 +80,6 @@ func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []s
 	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
 }
 
-func shellScriptFromArgv(command []string) string {
-	return core.ShellScriptFromArgv(command)
-}
-
 func shellQuote(value string) string {
 	return core.ShellQuote(value)
 }

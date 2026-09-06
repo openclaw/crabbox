@@ -9,7 +9,9 @@ import { copySmokeRepo, writeExecutable, writeGoStub } from "./test-support/smok
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
 const prepareSmokeRepo = (dir) =>
-  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-ovh-smoke.sh"));
+  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-ovh-smoke.sh"), [
+    "lib/live-smoke-common.sh",
+  ]);
 
 test("live ovh smoke skips unless opted in", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-ovh-skip-"));

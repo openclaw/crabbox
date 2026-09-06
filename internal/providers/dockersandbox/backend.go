@@ -15,6 +15,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 var randomBytes = rand.Read
@@ -66,7 +67,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	return nil
 }
 
-func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
 	if err := rejectRunOptions(b.spec, req); err != nil {
 		return RunResult{}, err
 	}
@@ -80,45 +81,87 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		return RunResult{}, err
 	}
 	leaseID, sandboxName, slug := "", "", ""
-	acquired := false
-	if req.ID == "" {
+	acquired := req.ID == ""
+	if acquired {
 		leaseID, sandboxName, slug, err = b.createSandbox(ctx, cli, req.Repo, req.Reclaim, req.RequestedSlug)
 		if err != nil {
 			return RunResult{}, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s name=%s\n", leaseID, slug, providerName, sandboxName, sandboxName)
-		acquired = true
 	} else {
 		leaseID, sandboxName, slug, err = resolveLeaseID(req.ID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout)
 		if err != nil {
 			return RunResult{}, err
 		}
 	}
+	result = RunResult{
+		Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true,
+		Session: &core.RunSessionHandle{
+			Provider: providerName, LeaseID: leaseID, Slug: slug, Reused: !acquired, Kept: true,
+			CleanupCommand: fmt.Sprintf("crabbox stop --provider %s %s", providerName, slug),
+		},
+	}
 	shouldStop := acquired && !req.Keep
-	if shouldStop {
-		claim, err := dockerSandboxClaimForDeletion(leaseID)
-		if err != nil {
-			return RunResult{}, err
-		}
-		defer func() {
-			if !shouldStop {
-				return
+	var cleanupClaim core.LeaseClaim
+	commandRan := false
+	defer func() {
+		if retErr != nil && result.Status == "" {
+			outcome := core.FinalizeRunResult(core.RunResult{}, retErr)
+			result.Status, result.ErrorKind = outcome.Status, outcome.ErrorKind
+			result.ExitCode = 1
+			var public ExitError
+			if errors.As(retErr, &public) && public.Code != 0 {
+				result.ExitCode = public.Code
 			}
+			retErr = shared.ExitErrorWithCause(result.ExitCode, retErr.Error(), retErr)
+		}
+		if retErr != nil {
+			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		}
+		// Preserve clone commits based on command success, before reporting can fail.
+		if commandRan && retErr == nil && acquired && b.cfg.DockerSandbox.Clone && !req.Keep {
+			shouldStop = false
+			fmt.Fprintf(b.rt.Stderr, "docker-sandbox clone run kept sandbox to preserve unfetched commits; cleanup manually with: %s\n", result.Session.CleanupCommand)
+		}
+		if shouldStop {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), dockerSandboxCleanupTimeout)
-			defer cancel()
-			removeErr := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
+			removeErr := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, cleanupClaim, func() error {
 				return cli.remove(cleanupCtx, sandboxName)
 			})
+			cancel()
 			if removeErr != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: docker-sandbox rm failed for %s: %v\n", sandboxName, removeErr)
-				return
+				result, retErr = shared.AppendDelegatedRunFailure(result, retErr, fmt.Errorf("docker-sandbox cleanup failed for %s: %w", sandboxName, removeErr), 1)
+			} else {
+				result.Session.Kept = false
 			}
-		}()
+		}
+		result.Total = b.now().Sub(started)
+		result = core.FinalizeRunResult(result, retErr)
+		if commandRan {
+			fmt.Fprintf(b.rt.Stderr, "docker-sandbox run summary sync_delegated=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
+		}
+		if req.TimingJSON {
+			timingErr := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
+				Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true,
+				SyncPhases:  []timingPhase{{Name: "sync", Skipped: true, Reason: "provider-delegated workspace"}},
+				SyncSkipped: true, CommandMs: result.Command.Milliseconds(), TotalMs: result.Total.Milliseconds(),
+				ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label),
+			}, result, retErr))
+			result, retErr = shared.AppendDelegatedRunFailure(result, retErr, timingErr, 1)
+		}
+	}()
+	if shouldStop {
+		cleanupClaim, err = dockerSandboxClaimForDeletion(leaseID)
+		if err != nil {
+			shouldStop = false
+			return result, err
+		}
 	}
-	command, err := buildCommand(req.Command, req.ShellMode)
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
-		return RunResult{}, err
+		return result, err
 	}
+	command := intent.Argv("sh", "-lc")
 	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
@@ -127,89 +170,25 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		var cleanup func()
 		envFile, cleanup, err = writeDockerSandboxEnvFile(req.Env)
 		if err != nil {
-			return RunResult{}, err
+			return result, err
 		}
 		defer cleanup()
 	}
 	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s sync_delegated=true\n", providerName, leaseID, sandboxName, workdir)
 	commandStart := b.now()
 	exitCode, runErr := cli.execStream(ctx, sandboxName, workdir, envFile, command, b.rt.Stdout, b.rt.Stderr)
-	commandDuration := b.now().Sub(commandStart)
-	result := RunResult{
-		ExitCode:      exitCode,
-		Command:       commandDuration,
-		Total:         b.now().Sub(started),
-		SyncDelegated: true,
-		Provider:      providerName,
-		LeaseID:       leaseID,
-		Slug:          slug,
-		CommandText:   strings.Join(req.Command, " "),
-		Session: (&coreRunSessionHandle{
-			Provider:       providerName,
-			LeaseID:        leaseID,
-			Slug:           slug,
-			Reused:         !acquired,
-			Kept:           !shouldStop,
-			CleanupCommand: fmt.Sprintf("crabbox stop --provider %s %s", providerName, slug),
-		}).handle(),
-	}
-	fmt.Fprintf(b.rt.Stderr, "docker-sandbox run summary sync_delegated=true command=%s total=%s exit=%d\n", commandDuration.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
-	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-			Provider:      providerName,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			SyncDelegated: true,
-			SyncPhases:    []timingPhase{{Name: "sync", Skipped: true, Reason: "provider-delegated workspace"}},
-			SyncSkipped:   true,
-			CommandMs:     commandDuration.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      exitCode,
-			Label:         strings.TrimSpace(req.Label),
-		}, result, runErr)); err != nil {
-			return result, err
-		}
-	}
+	result.Command = b.now().Sub(commandStart)
+	result.CommandText = strings.Join(req.Command, " ")
+	commandRan = true
+	outcome := shared.FinalizeDelegatedCommandOutcome(exitCode, runErr)
+	result.ExitCode, result.Status, result.ErrorKind = outcome.ExitCode, outcome.Status, outcome.ErrorKind
 	if runErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		result.Session.Kept = !shouldStop
-		if exitCode != 0 {
-			return result, exit(exitCode, "docker-sandbox run failed: %v", runErr)
-		}
-		return result, exit(1, "docker-sandbox run failed: %v", runErr)
+		return result, shared.ExitErrorWithCause(result.ExitCode, fmt.Sprintf("docker-sandbox run failed: %v", shared.RedactErrorSecrets(runErr.Error())), runErr)
 	}
-	if exitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		result.Session.Kept = !shouldStop
-		return result, exit(exitCode, "docker-sandbox run exited %d", exitCode)
+	if result.ExitCode != 0 {
+		return result, exit(result.ExitCode, "docker-sandbox run exited %d", result.ExitCode)
 	}
-	if acquired && b.cfg.DockerSandbox.Clone && !req.Keep {
-		shouldStop = false
-		result.Session.Kept = true
-		fmt.Fprintf(b.rt.Stderr, "docker-sandbox clone run kept sandbox to preserve unfetched commits; cleanup manually with: %s\n", result.Session.CleanupCommand)
-	}
-	result.Session.Kept = !shouldStop
 	return result, nil
-}
-
-type coreRunSessionHandle struct {
-	Provider       string
-	LeaseID        string
-	Slug           string
-	Reused         bool
-	Kept           bool
-	CleanupCommand string
-}
-
-func (h coreRunSessionHandle) handle() *core.RunSessionHandle {
-	return &core.RunSessionHandle{
-		Provider:       h.Provider,
-		LeaseID:        h.LeaseID,
-		Slug:           h.Slug,
-		Reused:         h.Reused,
-		Kept:           h.Kept,
-		CleanupCommand: h.CleanupCommand,
-	}
 }
 
 func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
@@ -545,22 +524,6 @@ func validateCreateRepo(cfg Config, repo Repo) error {
 		}
 	}
 	return nil
-}
-
-func buildCommand(command []string, shellMode bool) ([]string, error) {
-	if len(command) == 0 {
-		return nil, errors.New("missing command")
-	}
-	if shellMode {
-		return []string{"sh", "-lc", strings.Join(command, " ")}, nil
-	}
-	if len(command) == 1 && shouldUseShell(command) {
-		return []string{"sh", "-lc", command[0]}, nil
-	}
-	if shouldUseShell(command) || leadingEnvAssignment(command) {
-		return []string{"sh", "-lc", shellScriptFromArgv(command)}, nil
-	}
-	return command, nil
 }
 
 func dockerSandboxAgent(cfg Config) string {

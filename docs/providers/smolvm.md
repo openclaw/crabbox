@@ -95,16 +95,64 @@ Defaults: image `alpine` (lightweight; provides the standard shell tools needed 
 
 ## Lifecycle
 
-1. `warmup` / `run` without `--id` creates a microVM sandbox from the configured `--smolvm-image`.
+1. `warmup` / `run` without `--id` creates a microVM sandbox from the configured `--smolvm-image`. A syncing `run` first validates the complete archive candidate and builds its local snapshot; preparation failure does not allocate a machine.
 2. Before startup, Crabbox durably binds a local claim to the returned machine ID, name, creation timestamp, full API endpoint, normal `cbx_...` lease ID, and friendly slug.
-3. By default `run` archive-syncs the working tree using a direct API call to `/exec` (the tarball is base64-encoded and sent in a shell heredoc; the guest decodes + extracts with `base64 -d | tar`).
+3. By default `run` archive-syncs the working tree using a direct API call to `/exec` (the tarball is base64-encoded and sent in a shell heredoc; the guest completes checked base64 decoding before extracting with `tar`).
 4. The user command executes inside the microVM. Because the smolfleet API does not stream live output, command output appears after the command completes.
 5. One-shot sandboxes are deleted after a `run` that did not pass `--keep`. `--keep` and `--keep-on-failure` retain the sandbox until `crabbox stop`.
 6. `run --lease-output <path>` writes the SmolVM lease ID, slug, reuse/retention state, and exact cleanup command for orchestration handoff.
 
 Note: `warmup` always keeps the sandbox until an explicit `crabbox stop`. If you pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
 
+Run finalization uses Crabbox's shared sandbox lifecycle. Automatic deletion or
+deletion-confirmation failure after a successful command returns exit 1 with a
+provider-error result, retaining the session and claim for recovery. A primary
+command, transport, or cancellation failure keeps its outcome when later cleanup
+or timing output also fails; secondary diagnostics remain visible in the CLI.
+Timing reflects final cleanup disposition when it can be written. A timing-write
+failure after successful deletion cannot retroactively retain the machine.
+`--keep-on-failure` also applies to workspace or environment preparation failures
+after acquisition. Reused machines stay kept, and `smolvm.keep: true` has the same
+all-outcomes retention and non-ephemeral creation policy as `--keep`.
+
+Fresh runs upload the snapshot prepared before allocation, even if the checkout
+changes during startup. Reused runs authorize the existing machine before local
+preparation; manifest, full-archive guardrail, and archive-construction failures
+occur before clearing its workspace. The shared preparation owner includes all
+selected files in its limits, not only dirty files. `sync-plan --json` previews
+those same full-archive limits. `--force-sync-large` keeps the normal explicit
+override.
+
+`sync.timeout` bounds archive construction and the remaining remote preparation
+and injection work. Manifest/preflight time and provisioning wait are excluded;
+saved archive time reduces one shared remote budget. Earlier caller deadlines
+still apply. Timing includes preparation once, with archive construction before
+remote workspace preparation. The archive remains owned until injection ends.
+
+This is not transactional replacement: injection reads the temporary archive
+again and extracts into the prepared workspace. A later read, transfer, or
+extraction failure can follow workspace clearing. Root `/workspace` remains a
+mount whose contents are cleared in place; nested workdirs keep their existing
+replacement behavior. `--no-sync` creates the workdir without clearing it.
+
+Stream errors retain their cancellation or timeout cause for run status. Crabbox checks cancellation immediately before submitting the command, including after a successful environment upload; existing profile cleanup still runs.
+
 Deletion and reuse require that exact local claim and a fresh matching machine response. Crabbox holds the unchanged claim through deletion and confirmed absence; run teardown and failed-start rollback use the same ownership checks with a fresh 60-second cleanup budget. Explicit stop preserves caller cancellation within that budget. A concurrent claim change, changed machine identity, failed delete, or uncertain confirmation retains the claim and reports the cleanup problem.
+
+Environment-profile cleanup remains warning-only and runs first with its own
+uncanceled 30-second budget, including after partial upload; machine teardown
+then receives a fresh 60-second budget that includes its claim-lock wait. A
+shorter explicit-stop caller deadline still applies. Ownership publication and
+reuse waits also honor caller cancellation. Failed-create rollback uses its own
+detached 60-second budget, including an absent-claim fence when publication did
+not complete; an appearing claim still vetoes deletion. Cleanup expiry before
+fence admission performs no cleanup call and leaves the claim or unclaimed
+machine for inspection. Rollback failure preserves the acquisition's CLI exit and both
+error causes.
+
+Completed fenced actions still finish their durable writes after late
+cancellation. Read-only discovery keeps its existing policy, and local
+filesystem syscalls are not forcibly interruptible.
 
 Older claims without the machine ID, endpoint, and creation timestamp do not authorize stop or reuse. Name-matched machines remain discoverable through `list` and `status`, which do not create or upgrade claims. `--reclaim` transfers repository ownership of an already proven binding; it never adopts an unclaimed or legacy machine. Review those machines in the provider console before any manual cleanup, or create a new lease for reuse.
 
@@ -125,6 +173,8 @@ The [hosted API](https://smolmachines.com/docs/cloud/api-reference) uses 404 bot
 - Defaults to the lightweight `alpine` image (provides `sh` + `base64` + `tar` for direct API-driven archive sync; user commands can `apk add` additional packages as needed).
 - Network is open by default.
 - Archive sync and small file writes use direct calls to the smolfleet `/exec` API (heredoc payload).
+- Archive and small-file uploads share a checked byte-transfer path: an invocation-private directory holds a fully decoded file before extraction or publication. Decoder, write, extraction and temporary-cleanup failures return nonzero status; an earlier failure remains primary. Small files are published from a private same-filesystem staging file, so failed decoding does not truncate an existing destination. Archive extraction retains the incoming file-mode mask.
+- Remote traps clean temporary upload files on ordinary completion and handled signals. They do not guarantee cleanup after SIGKILL or an ambiguous HTTP failure while the remote command may still run. This does not make workspace replacement transactional. Final environment profiles use the separate run-scoped owner described below.
 - No direct `crabbox ssh` / `crabbox vnc` (delegated execution model).
 - Supports `warmup`, `run`, `status`, `stop`, `list`, and `doctor`.
 
@@ -165,8 +215,18 @@ during the first exec.
 - Use `--sync-only` to pre-upload the archive into a kept sandbox before a later command (subject to delegated guardrails).
 - Delegated run/sync options that need an SSH target or proof surface are rejected: `--script` / `--script-stdin`, `--fresh-pr`, `--full-resync`, `--env-helper`, `--capture-stdout` / `--capture-stderr`, `--capture-on-fail`, `--download`, `--artifact-glob`, `--emit-proof`, and `--stop-after`.
 - IDs can be a Crabbox slug, a `cbx_...` lease ID, or a raw SmolVM identifier/name; stop and reuse require an unambiguous exact local claim, not just a Crabbox-looking name.
-- Forwarded environment values (if supported by the backend) are handled inside the injected workspace.
+- Forwarded environment values use an independently named profile in the validated workdir. The shared profile owner retains cleanup responsibility after a failed upload; cleanup runs before one-shot teardown with a fresh bounded context, checking the original local claim and native machine identity. Changed ownership retains the remote file and warns rather than authorizing stale cleanup. The source check uses the existing POSIX shell and does not require Bash or change user-command errexit behavior.
 - The direct archive sync sends the (base64) tar inside the `/exec` command body. Very large repos may hit request size limits (the usual preflight checks still apply).
+
+## Command interpretation
+
+Quoted and interpolated profile arguments remain literal through the source-only
+command transport. Unmarked single-string commands follow the shared shell-source
+inference, while explicit `--shell` remains source in the provider's existing
+shell. Literal argv retains terminal `exec`; Crabbox does not introduce another
+shell or a Bash dependency for this interpretation. Environment-profile and
+working-directory handling remain provider-specific.
+
 
 ## Related docs
 

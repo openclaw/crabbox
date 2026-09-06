@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"slices"
+	"strings"
 )
 
 // CommandIntent separates command meaning from an adapter's execution transport.
@@ -34,4 +35,19 @@ func (c CommandIntent) Argv(shellPrefix ...string) []string {
 		return append(slices.Clone(shellPrefix), c.source)
 	}
 	return slices.Clone(c.args)
+}
+
+// ShellCommand quotes execution argv for a POSIX source-only transport. Once
+// classified, arguments must not be reinterpreted as operators or assignments.
+func (c CommandIntent) ShellCommand(shellPrefix ...string) string {
+	return strings.Join(shellWords(c.Argv(shellPrefix...)), " ")
+}
+
+// ShellSource renders a terminal workload for the caller's existing POSIX shell.
+// Shell intent remains source in that shell; literal argv replaces it with exec.
+func (c CommandIntent) ShellSource() string {
+	if c.shell {
+		return c.source
+	}
+	return "exec " + strings.Join(shellWords(c.args), " ")
 }
