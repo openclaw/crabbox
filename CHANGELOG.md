@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- W&B: finalize run outcomes after automatic Stop, retain recovery sessions when cleanup fails, preserve primary command or gRPC failures and failure retention when cleanup or timing output also fails, and classify gRPC/API failures as provider errors instead of command exits.
 - Local containers: optionally omit the explicit hostname for runtimes sharing a host UTS namespace, support YAML and environment configuration, and reject incompatible fixed-ID reuse without changing existing default fingerprints. [PR 1813](https://github.com/openclaw/crabbox/pull/1813), [PR 1924](https://github.com/openclaw/crabbox/pull/1924). Thanks @atrawog.
 - Define a strict provider-neutral Linux developer-image recipe whose digest binds the executable contract and exact installer/readiness source hashes.
 - Extract protected image-qualification candidates at the canonical artifact path and avoid protected finalization when deployment never started.

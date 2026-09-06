@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"google.golang.org/grpc/codes"
 )
 
@@ -200,6 +201,7 @@ type fakeWandbAPI struct {
 	stopID           string
 	stopMissingOK    bool
 	stopErr          error
+	stopCalls        int
 	listValue        []wandbSandbox
 	listErr          error
 	listTags         []string
@@ -238,6 +240,7 @@ func (f *fakeWandbAPI) Exec(_ context.Context, req wandbExecRequest) (int, error
 }
 
 func (f *fakeWandbAPI) Stop(_ context.Context, id string, _ int, missingOK bool) error {
+	f.stopCalls++
 	f.stopID = id
 	f.stopMissingOK = missingOK
 	return f.stopErr
@@ -365,6 +368,7 @@ func TestWandbRunClosesCachedClientAfterOperation(t *testing.T) {
 			acquired: wandbSandbox{ID: "sb-abc", Status: "RUNNING"},
 			execCode: 0,
 		},
+		closeErr: errors.New("connection close failed"),
 	}
 	backend := newWandbBackendForTest(t, api)
 	if _, err := backend.Run(context.Background(), RunRequest{NoSync: true, Command: []string{"echo", "hello"}}); err != nil {
@@ -937,7 +941,7 @@ func TestWandbRunTimingJSONUsesExecErrorCode(t *testing.T) {
 	if report.ExitCode != 69 {
 		t.Fatalf("timing exit = %d, want 69; stderr=%s", report.ExitCode, stderr.String())
 	}
-	if report.RunStatus != "failed" || report.ErrorKind != "command-exit" {
+	if report.RunStatus != "failed" || report.ErrorKind != "provider-error" {
 		t.Fatalf("timing outcome status=%q kind=%q", report.RunStatus, report.ErrorKind)
 	}
 }
@@ -971,4 +975,129 @@ func contains(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// Fail only the timing record, so provisioning and recovery diagnostics remain observable.
+type wandbTimingWriter struct {
+	bytes.Buffer
+	err error
+}
+
+func (w *wandbTimingWriter) Write(p []byte) (int, error) {
+	if w.err != nil && bytes.HasPrefix(p, []byte("{")) {
+		return 0, w.err
+	}
+	return w.Buffer.Write(p)
+}
+
+func TestWandbRunTerminalFailures(t *testing.T) {
+	cleanupErr := errors.New("owned stop failed")
+	writerErr := errors.New("timing output failed")
+	transportErr := errors.New("exec transport failed")
+	for _, tc := range []struct {
+		name                     string
+		commandCode              int
+		execErr                  error
+		cleanupErr               error
+		writerErr                error
+		keep, keepFailure, reuse bool
+		wantCode                 int
+		wantKind                 core.RunErrorKind
+		wantKept                 bool
+		wantStops                int
+	}{
+		{name: "success", wantKind: core.RunErrorNone, wantStops: 1},
+		{name: "success cleanup fails", cleanupErr: cleanupErr, wantCode: 1, wantKind: core.RunErrorProvider, wantKept: true, wantStops: 1},
+		{name: "command cleanup fails", commandCode: 7, cleanupErr: cleanupErr, wantCode: 7, wantKind: core.RunErrorCommandExit, wantKept: true, wantStops: 1},
+		{name: "command writer fails", commandCode: 7, writerErr: writerErr, wantCode: 7, wantKind: core.RunErrorCommandExit, wantStops: 1},
+		{name: "command cleanup and writer fail", commandCode: 7, cleanupErr: cleanupErr, writerErr: writerErr, wantCode: 7, wantKind: core.RunErrorCommandExit, wantKept: true, wantStops: 1},
+		{name: "failure retention survives writer", commandCode: 7, writerErr: writerErr, keepFailure: true, wantCode: 7, wantKind: core.RunErrorCommandExit, wantKept: true},
+		{name: "success writer fails after deletion", writerErr: writerErr, wantCode: 1, wantKind: core.RunErrorProvider, wantStops: 1},
+		{name: "transport cleanup and writer fail", execErr: transportErr, cleanupErr: cleanupErr, writerErr: writerErr, wantCode: 1, wantKind: core.RunErrorProvider, wantKept: true, wantStops: 1},
+		{name: "cancellation writer fails", execErr: context.Canceled, writerErr: writerErr, keepFailure: true, wantCode: 1, wantKind: core.RunErrorCanceled, wantKept: true},
+		{name: "deadline writer fails", execErr: context.DeadlineExceeded, writerErr: writerErr, keepFailure: true, wantCode: 1, wantKind: core.RunErrorTimeout, wantKept: true},
+		{name: "keep success", keep: true, wantKind: core.RunErrorNone, wantKept: true},
+		{name: "reuse failure", reuse: true, commandCode: 7, wantCode: 7, wantKind: core.RunErrorCommandExit, wantKept: true},
+		{name: "grpc unavailable", execErr: &wandbAPIError{ExitCode: 69, Code: codes.Unavailable}, writerErr: writerErr, keepFailure: true, wantCode: 69, wantKind: core.RunErrorProvider, wantKept: true},
+		{name: "grpc permission", execErr: &wandbAPIError{ExitCode: 77, Code: codes.PermissionDenied}, cleanupErr: cleanupErr, wantCode: 77, wantKind: core.RunErrorProvider, wantKept: true, wantStops: 1},
+		{name: "grpc deadline", execErr: &wandbAPIError{ExitCode: 124, Code: codes.DeadlineExceeded}, cleanupErr: cleanupErr, wantCode: 124, wantKind: core.RunErrorProvider, wantKept: true, wantStops: 1},
+		{name: "grpc missing", execErr: &wandbAPIError{ExitCode: 4, Code: codes.NotFound}, cleanupErr: cleanupErr, wantCode: 4, wantKind: core.RunErrorProvider, wantKept: true, wantStops: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeWandbAPI{acquired: wandbSandbox{ID: "sb-terminal", Status: "running"}, execCode: tc.commandCode, execErr: tc.execErr, stopErr: tc.cleanupErr}
+			b := newWandbBackendForTest(t, api)
+			writer := &wandbTimingWriter{err: tc.writerErr}
+			b.rt.Stderr = writer
+			req := RunRequest{NoSync: true, TimingJSON: true, Command: []string{"true"}, Keep: tc.keep, KeepOnFailure: tc.keepFailure}
+			if tc.reuse {
+				seedWandbClaim(t, b, "sb-terminal")
+				req.ID = "sb-terminal"
+				api.listValue = []wandbSandbox{{ID: "sb-terminal", Status: "running"}}
+			}
+			result, err := b.Run(context.Background(), req)
+			// Match core's public normalization boundary for baseline controls.
+			result = core.FinalizeRunResult(result, err)
+			if result.ExitCode != tc.wantCode || result.ErrorKind != tc.wantKind {
+				t.Errorf("outcome code=%d kind=%q want code=%d kind=%q; err=%v", result.ExitCode, result.ErrorKind, tc.wantCode, tc.wantKind, err)
+			}
+			if result.Session == nil || result.Session.Kept != tc.wantKept || result.Session.Reused != tc.reuse {
+				t.Errorf("session=%+v want kept=%v reused=%v", result.Session, tc.wantKept, tc.reuse)
+			}
+			if api.stopCalls != tc.wantStops {
+				t.Errorf("stop calls=%d want=%d", api.stopCalls, tc.wantStops)
+			}
+			_, exists, claimErr := resolveWandbClaim("sb-terminal")
+			if claimErr != nil || exists != tc.wantKept {
+				t.Errorf("claim exists=%v err=%v want=%v", exists, claimErr, tc.wantKept)
+			}
+			if tc.wantCode == 0 {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			} else {
+				var public ExitError
+				if !errors.As(err, &public) || public.Code != tc.wantCode {
+					t.Errorf("public=%+v err=%v want code=%d", public, err, tc.wantCode)
+				}
+				for _, cause := range []error{tc.execErr, tc.cleanupErr, tc.writerErr} {
+					if cause != nil && (!errors.Is(err, cause) || !strings.Contains(public.Message, cause.Error())) {
+						t.Errorf("missing cause/display %q: public=%q err=%v", cause, public.Message, err)
+					}
+				}
+				if tc.commandCode != 0 && !strings.Contains(public.Message, "sandbox exit=7") {
+					t.Errorf("primary command diagnostic missing: %q", public.Message)
+				}
+			}
+			if tc.writerErr == nil {
+				var report timingReport
+				found := false
+				for _, line := range strings.Split(writer.String(), "\n") {
+					if strings.HasPrefix(line, "{") {
+						if decodeErr := json.Unmarshal([]byte(line), &report); decodeErr != nil {
+							t.Fatal(decodeErr)
+						}
+						found = true
+					}
+				}
+				if !found || report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind {
+					t.Errorf("timing found=%v report=%+v result=%+v", found, report, result)
+				}
+			}
+		})
+	}
+}
+
+func TestWandbRunTypedTimingWriterPreservesPublicCode(t *testing.T) {
+	writerErr := ExitError{Code: 69, Message: "custom timing writer unavailable"}
+	api := &fakeWandbAPI{acquired: wandbSandbox{ID: "sb-writer", Status: "running"}}
+	b := newWandbBackendForTest(t, api)
+	b.rt.Stderr = &wandbTimingWriter{err: writerErr}
+	result, err := b.Run(context.Background(), RunRequest{NoSync: true, TimingJSON: true, Command: []string{"true"}})
+	var public ExitError
+	if !errors.As(err, &public) || public.Code != 69 || !errors.Is(err, writerErr) {
+		t.Fatalf("publicCode=%d err=%v; want original writer code69 and cause", public.Code, err)
+	}
+	if result.Session == nil || result.Session.Kept || api.stopCalls != 1 {
+		t.Fatalf("typed writer changed actual deletion: session=%+v stops=%d", result.Session, api.stopCalls)
+	}
 }

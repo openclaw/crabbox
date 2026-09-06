@@ -121,6 +121,17 @@ Environment overrides:
    If claim persistence fails, Crabbox rolls back the acquired sandbox before
    returning.
 
+Run outcomes and timing are finalized after automatic Stop. A Stop failure
+makes an otherwise successful run fail with exit `1` and retains its recovery
+session and unchanged claim. Command failures and mapped gRPC exit codes stay
+primary when Stop or timing output also fails; secondary diagnostics remain
+visible. gRPC/API failures are classified as `provider-error`, not as observed
+command exits, while keeping their mapped numeric exit codes. `--keep-on-failure` is decided before timing output, so a reporting
+failure cannot discard an already-failed run's sandbox. A timing-output failure
+after successful Stop does not claim the sandbox is retained. Closing the local
+gRPC connection remains warning-only. Command timing measures Exec separately;
+total timing includes acquisition and automatic cleanup.
+
 `status` and `stop` enforce the same exact claim and tagged-inventory checks
 before issuing Get or Stop. A tagged sandbox without the matching local claim,
 or a claim from another endpoint, entity, or project, fails closed. Successful
