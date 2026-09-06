@@ -23,26 +23,30 @@ import (
 )
 
 type daytonaLifecycleFixture struct {
-	mu                sync.Mutex
-	server            *httptest.Server
-	sandbox           *api.Sandbox
-	classSnapshot     *api.SnapshotDto
-	responseTarget    string
-	rejectCreate      bool
-	responseMismatch  string
-	create            api.CreateSandbox
-	createState       api.SandboxState
-	createErrorStatus int
-	createCanceled    chan struct{}
-	sandboxCreates    int
-	recoveryDelay     int
-	recoveryReads     int
-	deletes           int
-	activity          int
-	autoStop          string
-	autoStopError     bool
-	deleteError       bool
-	paths             []string
+	mu                    sync.Mutex
+	server                *httptest.Server
+	sandbox               *api.Sandbox
+	classSnapshot         *api.SnapshotDto
+	responseTarget        string
+	rejectCreate          bool
+	responseMismatch      string
+	create                api.CreateSandbox
+	createState           api.SandboxState
+	createErrorStatus     int
+	createCanceled        chan struct{}
+	sandboxCreates        int
+	recoveryDelay         int
+	recoveryReads         int
+	deletes               int
+	activity              int
+	autoStop              string
+	autoStopError         bool
+	deleteError           bool
+	deleteErrorAfterApply bool
+	paths                 []string
+	identityOrganization  string
+	hideIdentitySandbox   bool
+	deletedLookupMissing  bool
 }
 
 func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *daytonaLeaseBackend, Repo) {
@@ -67,10 +71,18 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 			_ = json.NewEncoder(w).Encode(f.classSnapshot)
 		case r.Method == "GET" && r.URL.Path == "/sandbox":
 			items := []*api.Sandbox{}
-			if f.sandbox != nil && f.sandbox.GetState() != api.SANDBOXSTATE_DESTROYED {
+			if r.URL.Query().Get("states") == "destroyed" {
+				if f.sandbox != nil && f.sandbox.GetState() == api.SANDBOXSTATE_DESTROYED && !f.deletedLookupMissing {
+					items = append(items, f.sandbox)
+				}
+			} else if r.URL.Query().Get("limit") == "1" && f.identityOrganization != "" && !f.hideIdentitySandbox {
+				items = append(items, &api.Sandbox{Id: "identity-sandbox", OrganizationId: f.identityOrganization, Labels: map[string]string{}})
+			} else if f.sandbox != nil && f.sandbox.GetState() != api.SANDBOXSTATE_DESTROYED {
 				items = append(items, f.sandbox)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "nextCursor": nil})
+		case r.Method == "GET" && r.URL.Path == "/sandbox/identity-sandbox":
+			_ = json.NewEncoder(w).Encode(&api.Sandbox{Id: "identity-sandbox", OrganizationId: f.identityOrganization, Labels: map[string]string{}})
 		case r.Method == "POST" && r.URL.Path == "/sandbox":
 			if err := json.NewDecoder(r.Body).Decode(&f.create); err != nil {
 				t.Error(err)
@@ -84,6 +96,8 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 			f.sandbox = &api.Sandbox{}
 			f.sandbox.SetId("sandbox-test")
 			f.sandbox.SetName(f.create.GetName())
+			f.sandbox.SetOrganizationId(f.identityOrganization)
+			f.sandbox.SetUser(f.create.GetUser())
 			f.sandbox.SetLabels(f.create.GetLabels())
 			f.sandbox.SetState(f.createState)
 			f.sandbox.SetToolboxProxyUrl(f.server.URL + "/toolbox")
@@ -121,6 +135,11 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 			}
 			_ = json.NewEncoder(w).Encode(f.sandbox)
 		case r.Method == "GET" && r.URL.Path == "/sandbox/sandbox-test":
+			if f.identityOrganization != "" && f.sandbox.GetState() == api.SANDBOXSTATE_DESTROYED {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = io.WriteString(w, `{"message":"resource access could not be established"}`)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(f.sandbox)
 		case r.Method == "GET" && f.rejectCreate && r.URL.Path == "/sandbox/"+f.create.GetName():
 			f.recoveryReads++
@@ -141,6 +160,15 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 				return
 			}
 			f.sandbox.SetState(api.SANDBOXSTATE_DESTROYED)
+			if f.identityOrganization != "" {
+				f.sandbox.SetDesiredState(api.SANDBOXDESIREDSTATE_DESTROYED)
+				f.sandbox.SetName("DESTROYED_" + f.sandbox.GetName() + "_fixture")
+			}
+			if f.deleteErrorAfterApply {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = io.WriteString(w, `{"message":"deletion response unavailable"}`)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(f.sandbox)
 		case strings.HasSuffix(r.URL.Path, "/labels"):
 			var body api.SandboxLabels

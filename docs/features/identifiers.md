@@ -57,7 +57,7 @@ private token and generation never appear in public lease records. Fixed-ID
 to own replay, and caller cancellation never releases them.
 
 Automation may instead supply the canonical ID with `warmup --lease-id`. For
-direct AWS, direct Machine0, direct local-container, and managed coordinator
+direct AWS, direct Machine0, direct Daytona, direct local-container, and managed coordinator
 leases, that ID is an immutable create identity: an identical semantic replay
 returns the same lease, while intent drift returns `lease_id_conflict`. External
 providers also accept requested IDs when their protocol explicitly advertises
@@ -72,6 +72,14 @@ the durable attempt binds the first visible match to its Machine0 resource ID,
 and every later adoption requires that exact recorded ID. Its fixed claims use
 the downgrade-safe `machine0-fixed-v1` marker alongside AWS's `aws-fixed-v1`
 marker.
+
+Direct Daytona binds the API endpoint and observed native organization, then
+persists its exact create attempt before submission and the first observed
+sandbox UUID before readiness or deletion. Its `daytona-fixed-v1` claim marker
+prevents older clients from treating it as an ordinary lease. Submitted cleanup
+requires a positive exact destroyed-state inventory record; a 404 alone never
+retires the claim. See [Daytona fixed operation IDs](../providers/daytona.md#fixed-operation-ids)
+for organization discovery and recovery limits.
 
 Direct local-container binds the intent to its runtime and daemon scope,
 normalized container configuration, and deterministic container name before

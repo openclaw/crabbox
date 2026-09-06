@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -87,7 +88,10 @@ type daytonaLeaseBackend struct {
 func (b *daytonaLeaseBackend) Spec() ProviderSpec { return b.spec }
 
 func (b *daytonaLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
-	sandbox, leaseID, slug, err := b.createDaytonaSandbox(ctx, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
+	if req.RequestedLeaseID != "" {
+		return b.acquireFixed(ctx, req)
+	}
+	sandbox, leaseID, slug, err := b.createDaytonaSandbox(ctx, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug, req.CheckpointSource)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -124,6 +128,26 @@ func (b *daytonaLeaseBackend) resolve(ctx context.Context, req ResolveRequest, o
 	if req.RejectAuthSecret {
 		return LeaseTarget{}, exit(2, "crabbox connect does not support token-as-username SSH targets; use crabbox ssh --show-secret in a trusted terminal")
 	}
+	if original == nil {
+		claim, exists, err := resolveLeaseClaimForProvider(req.ID, daytonaProvider)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		if exists && claim.FixedCreateIntent != nil {
+			claim, err = b.reclaimFixed(ctx, claim, req.Repo.Root, req.Reclaim && !req.NoLocalStateMutations)
+			if err != nil {
+				return LeaseTarget{}, err
+			}
+			var lease LeaseTarget
+			err := core.WithLeaseClaimUnchangedShared(ctx, claim.LeaseID, claim, func() error {
+				var err error
+				lease, err = b.resolve(ctx, req, &claim)
+				return err
+			})
+			core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
+			return lease, err
+		}
+	}
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -142,8 +166,12 @@ func (b *daytonaLeaseBackend) resolve(ctx context.Context, req ResolveRequest, o
 		if err := validateExactDaytonaResourceClaim(leaseID, server.CloudID, *original, true); err != nil {
 			return LeaseTarget{}, err
 		}
-		if err := core.CheckLeaseClaimRepositoryOwner(leaseID, *original, req.Repo.Root, false); err != nil {
-			return LeaseTarget{}, err
+		// Status/heartbeat resolves native identity without an execution repo.
+		// Only command/SSH resolution grants use of the repository workspace.
+		if !req.StatusOnly {
+			if err := core.CheckLeaseClaimRepositoryOwner(leaseID, *original, req.Repo.Root, false); err != nil {
+				return LeaseTarget{}, err
+			}
 		}
 		if err := core.AuthorizeCheckpointRelease(*original, ""); err != nil {
 			return LeaseTarget{}, err
@@ -221,6 +249,17 @@ func (b *daytonaLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (Doct
 func (b *daytonaLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
 	ctx, cancel := context.WithTimeout(ctx, daytonaCleanupTimeout)
 	defer cancel()
+	if claim, exists, err := core.ReadLeaseClaimWithPresence(req.Lease.LeaseID); err != nil {
+		return err
+	} else if exists && claim.FixedCreateIntent != nil {
+		if snapshot, snapshotExists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server); set && (!snapshotExists || !reflect.DeepEqual(snapshot, claim)) {
+			return exit(4, "Daytona fixed lease claim changed after resolution; retry release")
+		}
+		if req.Lease.Server.CloudID != "" && claim.CloudID != "" && req.Lease.Server.CloudID != claim.CloudID {
+			return exit(4, "Daytona fixed release resource identity mismatch")
+		}
+		return b.releaseFixed(ctx, claim, req.CheckpointID)
+	}
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -242,7 +281,38 @@ func (b *daytonaLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Serv
 	if err != nil {
 		return req.Lease.Server, err
 	}
-	server := req.Lease.Server
+	claim, exists, err := core.ReadLeaseClaimWithPresence(req.Lease.LeaseID)
+	if err != nil {
+		return req.Lease.Server, err
+	}
+	if exists && claim.FixedCreateIntent != nil {
+		if snapshot, snapshotExists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server); set && (!snapshotExists || !reflect.DeepEqual(snapshot, claim)) {
+			return req.Lease.Server, exit(4, "Daytona fixed lease claim changed after resolution; retry touch")
+		}
+		var server Server
+		err := core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error {
+			if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+				return err
+			}
+			sandbox, err := loadFixedDaytonaSandbox(ctx, client, claim)
+			if err != nil {
+				return err
+			}
+			if req.Lease.Server.CloudID != sandbox.GetId() {
+				return exit(4, "Daytona fixed touch resource identity mismatch")
+			}
+			server, err = b.touchSandbox(ctx, client, req, daytonaSandboxToServer(sandbox))
+			return err
+		})
+		return server, err
+	}
+	if hasFixedDaytonaOwnershipLabels(req.Lease.Server.Labels) {
+		return req.Lease.Server, exit(4, "Daytona fixed sandbox requires its durable claim before touch")
+	}
+	return b.touchSandbox(ctx, client, req, req.Lease.Server)
+}
+
+func (b *daytonaLeaseBackend) touchSandbox(ctx context.Context, client daytonaAPI, req TouchRequest, server Server) (Server, error) {
 	if server.Labels == nil {
 		server.Labels = map[string]string{}
 	}
@@ -298,6 +368,37 @@ func waitForDaytonaReady(ctx context.Context, client daytonaAPI, id string, time
 }
 
 func resolveDaytonaSandbox(ctx context.Context, client daytonaAPI, cfg Config, id string) (*daytona.Sandbox, string, error) {
+	if claim, exists, err := resolveLeaseClaimForProvider(id, daytonaProvider); err != nil {
+		return nil, "", err
+	} else if exists && claim.FixedCreateIntent != nil {
+		sandbox, err := loadFixedDaytonaSandbox(ctx, client, claim)
+		return sandbox, claim.LeaseID, err
+	}
+	sandbox, leaseID, err := lookupDaytonaSandbox(ctx, client, cfg, id)
+	if err != nil {
+		return nil, "", err
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return nil, "", err
+	}
+	if exists && claim.FixedCreateIntent != nil {
+		exact, err := loadFixedDaytonaSandbox(ctx, client, claim)
+		if err != nil {
+			return nil, "", err
+		}
+		if exact.GetId() != sandbox.GetId() {
+			return nil, "", exit(4, "Daytona inventory resource does not match the fixed claim")
+		}
+		return exact, leaseID, nil
+	}
+	if hasFixedDaytonaOwnershipLabels(sandbox.GetLabels()) {
+		return nil, "", exit(4, "Daytona fixed sandbox requires its durable claim; refusing ordinary reclaim")
+	}
+	return sandbox, leaseID, nil
+}
+
+func lookupDaytonaSandbox(ctx context.Context, client daytonaAPI, cfg Config, id string) (*daytona.Sandbox, string, error) {
 	if id == "" {
 		return nil, "", exit(2, "provider=daytona requires --id <sandbox-id-or-slug>")
 	}
@@ -417,6 +518,9 @@ func requireExactDaytonaResourceClaim(leaseID, resourceID string) error {
 func validateExactDaytonaResourceClaim(leaseID, resourceID string, claim LeaseClaim, exists bool) error {
 	if !exists || strings.TrimSpace(claim.LeaseID) != strings.TrimSpace(leaseID) || strings.TrimSpace(claim.CloudID) != resourceID {
 		return exit(4, "daytona sandbox %s has no exact local claim for lease %s; use --reclaim from the owning repository before reuse or deletion", blank(resourceID, "-"), blank(leaseID, "-"))
+	}
+	if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State != "acquired" {
+		return exit(4, "Daytona fixed acquisition is incomplete; replay its original request or stop it")
 	}
 	return nil
 }

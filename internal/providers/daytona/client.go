@@ -39,9 +39,11 @@ type daytonaSSHAccess struct {
 }
 
 type daytonaSDKClient struct {
-	api   *daytona.APIClient
-	token string
-	orgID string
+	api    *daytona.APIClient
+	token  string
+	orgID  string
+	apiURL string
+	apiKey bool
 }
 
 const defaultDaytonaAPIURL = "https://app.daytona.io/api"
@@ -55,6 +57,9 @@ var newDaytonaClient = func(cfg Config, rt Runtime) (daytonaAPI, error) {
 	apiURL := daytonaAPIURL(cfg, auth)
 	apiCfg := daytona.NewConfiguration()
 	apiCfg.Servers = daytona.ServerConfigurations{{URL: apiURL}}
+	if auth.OrganizationID != "" {
+		apiCfg.AddDefaultHeader("X-Daytona-Organization-ID", auth.OrganizationID)
+	}
 	controlClient := rt.HTTP
 	if controlClient == nil {
 		controlClient = &http.Client{Timeout: daytonaControlTimeout}
@@ -63,7 +68,46 @@ var newDaytonaClient = func(cfg Config, rt Runtime) (daytonaAPI, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &daytonaSDKClient{api: daytona.NewAPIClient(apiCfg), token: auth.token(), orgID: auth.OrganizationID}, nil
+	return &daytonaSDKClient{api: daytona.NewAPIClient(apiCfg), token: auth.token(), orgID: auth.OrganizationID, apiURL: apiURL, apiKey: auth.APIKey != ""}, nil
+}
+
+// Resolve native organization identity using the same authenticated client.
+// An API key's optional organization header is not an attestation: Daytona
+// derives its organization from the key and ignores that header.
+func (c *daytonaSDKClient) fixedOrganization(ctx context.Context) (string, string, error) {
+	if !c.apiKey {
+		if c.orgID == "" {
+			return "", "", exit(4, "Daytona fixed leases require a selected organization")
+		}
+		organization, _, err := c.api.OrganizationsAPI.GetOrganization(c.ctx(ctx), c.orgID).Execute()
+		if err != nil {
+			return "", "", c.redactError(err)
+		}
+		if organization == nil || organization.GetId() != c.orgID {
+			return "", "", exit(4, "Daytona authenticated organization does not match the selected organization")
+		}
+		return c.apiURL, organization.GetId(), nil
+	}
+	items, _, err := c.api.SandboxAPI.ListSandboxes(c.ctx(ctx)).Limit(1).Execute()
+	if err != nil {
+		return "", "", c.redactError(err)
+	}
+	if items == nil || len(items.GetItems()) != 1 {
+		return "", "", exit(4, "Daytona API-key fixed leases need an existing sandbox to establish organization identity; use an authenticated Daytona CLI organization profile, or ordinary warmup without --lease-id")
+	}
+	item := items.GetItems()[0]
+	if item.GetId() == "" || item.GetOrganizationId() == "" {
+		return "", "", exit(4, "Daytona sandbox inventory did not establish organization identity")
+	}
+	sandbox, err := c.GetSandbox(ctx, item.GetId())
+	if err != nil {
+		return "", "", err
+	}
+	if sandbox == nil || sandbox.GetId() != item.GetId() || sandbox.GetOrganizationId() != item.GetOrganizationId() ||
+		(c.orgID != "" && c.orgID != sandbox.GetOrganizationId()) {
+		return "", "", exit(4, "Daytona authenticated sandbox organization does not match its selected scope")
+	}
+	return c.apiURL, sandbox.GetOrganizationId(), nil
 }
 
 type daytonaAuth struct {
@@ -400,12 +444,59 @@ func (c *daytonaSDKClient) StartSandbox(ctx context.Context, id string) (*dayton
 }
 
 func (c *daytonaSDKClient) DeleteSandbox(ctx context.Context, id string) error {
+	_, err := c.requestSandboxDeletion(ctx, id)
+	return err
+}
+
+func (c *daytonaSDKClient) requestSandboxDeletion(ctx context.Context, id string) (*daytona.Sandbox, error) {
 	req := c.api.SandboxAPI.DeleteSandbox(c.ctx(ctx), id)
 	if c.orgID != "" {
 		req = req.XDaytonaOrganizationID(c.orgID)
 	}
-	_, _, err := req.Execute()
-	return c.redactError(err)
+	out, _, err := req.Execute()
+	return out, c.redactError(err)
+}
+
+func (c *daytonaSDKClient) fixedSelection() (string, string) { return c.apiURL, c.orgID }
+
+func (c *daytonaSDKClient) findDestroyedSandbox(ctx context.Context, claim LeaseClaim) (*daytona.Sandbox, error) {
+	req := c.api.SandboxAPI.ListSandboxes(c.ctx(ctx)).States([]daytona.SandboxState{daytona.SANDBOXSTATE_DESTROYED}).Limit(1)
+	if c.orgID != "" {
+		req = req.XDaytonaOrganizationID(c.orgID)
+	}
+	if claim.CloudID != "" {
+		req = req.Id(claim.CloudID)
+	} else {
+		intent := claim.FixedCreateIntent
+		if !fixedDaytonaLeaseKind.IsFixedClaim(claim) || intent.Version != fixedDaytonaLeaseKind.IntentVersion || !isCanonicalLeaseID(claim.LeaseID) ||
+			intent.Fingerprint == "" || intent.Attempt["nonce"] == "" || intent.Attempt["organization"] == "" ||
+			intent.Attempt["snapshot_id"] == "" || intent.Attempt["snapshot"] == "" || intent.Attempt["user"] == "" {
+			return nil, exit(4, "Daytona terminal discovery requires a complete fixed create attempt")
+		}
+		filter, _ := json.Marshal(map[string]string{
+			"crabbox": "true", "provider": daytonaProvider, "lease": claim.LeaseID,
+			"fixed_claim_provider": claim.Provider, "fixed_intent_sha256": intent.Fingerprint, "fixed_attempt": intent.Attempt["nonce"],
+		})
+		// A bounded exact-attempt search must expose ambiguity, never pick a
+		// first match after native deletion has made the original name unusable.
+		req = req.Labels(string(filter)).Limit(2)
+	}
+	response, _, err := req.Execute()
+	if err != nil {
+		return nil, c.redactError(err)
+	}
+	if claim.CloudID == "" && response != nil && (len(response.GetItems()) > 1 || response.GetNextCursor() != "") {
+		return nil, exit(4, "Daytona terminal fixed attempt is ambiguous; retain its ownership record")
+	}
+	if response == nil || len(response.GetItems()) == 0 {
+		return nil, nil
+	}
+	item := response.GetItems()[0]
+	if claim.CloudID != "" && item.GetId() != claim.CloudID || item.GetState() != daytona.SANDBOXSTATE_DESTROYED {
+		return nil, nil
+	}
+	sandbox := daytonaSandboxFromListItem(item)
+	return &sandbox, nil
 }
 
 func (c *daytonaSDKClient) ReplaceLabels(ctx context.Context, id string, labels map[string]string) error {
