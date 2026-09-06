@@ -179,6 +179,42 @@ func newForwardSSHServer(t *testing.T, user string, allowedPorts ...int) *forwar
 
 func (s *forwardSSHServer) port() int { return s.listener.Addr().(*net.TCPAddr).Port }
 
+func TestWaitForSSHReadyRejectsChangedHostKeyWithoutWaiting(t *testing.T) {
+	isolateTestUserDirs(t)
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("OpenSSH unavailable")
+	}
+	for _, proxy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("proxy=%t", proxy), func(t *testing.T) {
+			server := newForwardSSHServer(t, "synthetic-host-trust")
+			close(server.release)
+			oldServer := newForwardSSHServer(t, "synthetic-host-trust")
+			close(oldServer.release)
+			knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+			pin := fmt.Sprintf("[127.0.0.1]:%d %s\n", server.port(), oldServer.hostKey)
+			if err := os.WriteFile(knownHosts, []byte(pin), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			target := SSHTarget{User: "synthetic-host-trust", Host: "127.0.0.1", Port: strconv.Itoa(server.port()),
+				KnownHostsFile: knownHosts, NoControlMaster: true, FallbackPorts: []string{}, SSHConfigProxy: proxy}
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			var progress strings.Builder
+			err := waitForSSHReady(ctx, &target, &progress, "test", time.Minute)
+			if err == nil || !strings.Contains(err.Error(), "SSH host-key verification failed") || ctx.Err() != nil {
+				t.Fatalf("expected immediate host-key rejection, got %v (context=%v progress=%q)", err, ctx.Err(), progress.String())
+			}
+			if progress.Len() != 0 {
+				t.Fatalf("permanent failure entered readiness backoff: %s", progress.String())
+			}
+			after, err := os.ReadFile(knownHosts)
+			if err != nil || string(after) != pin {
+				t.Fatalf("host trust changed: %q, %v", after, err)
+			}
+		})
+	}
+}
+
 func writeForwardSSHHostKeys(t *testing.T, f forwardBoundaryFixture, servers ...*forwardSSHServer) {
 	t.Helper()
 	var knownHosts strings.Builder
