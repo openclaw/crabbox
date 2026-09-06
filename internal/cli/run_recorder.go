@@ -156,7 +156,6 @@ func (r *runRecorder) CaptureTelemetryStart(ctx context.Context, target SSHTarge
 	}
 	r.telemetryStart = collectLeaseTelemetryBestEffort(contextWithoutWorkspaceOwner(ctx), leaseTelemetryCollectorForTarget(target))
 	r.recordTelemetrySample(r.telemetryStart)
-	r.appendTelemetryBestEffort(r.telemetryStart)
 }
 
 func (r *runRecorder) StartTelemetrySampler(ctx context.Context, target SSHTarget) {
@@ -175,16 +174,20 @@ func (r *runRecorder) StartTelemetrySampler(ctx context.Context, target SSHTarge
 	r.telemetryMu.Unlock()
 
 	collector := leaseTelemetryCollectorForTarget(target)
+	initial := r.telemetryStart
 	go func() {
 		defer close(done)
 		ticker := time.NewTicker(runTelemetrySampleInterval)
 		defer ticker.Stop()
+		// Preserve the pre-command baseline without making workload admission wait
+		// for its best-effort publication. This owner also joins it before finish.
+		r.appendTelemetryBestEffort(sampleCtx, initial)
 		for {
 			select {
 			case <-ticker.C:
 				sample := collectLeaseTelemetryBestEffort(sampleCtx, collector)
 				r.recordTelemetrySample(sample)
-				r.appendTelemetryBestEffort(sample)
+				r.appendTelemetryBestEffort(sampleCtx, sample)
 			case <-sampleCtx.Done():
 				return
 			}
@@ -344,13 +347,13 @@ func (r *runRecorder) telemetrySnapshot() []*LeaseTelemetry {
 	return samples
 }
 
-func (r *runRecorder) appendTelemetryBestEffort(sample *LeaseTelemetry) {
+func (r *runRecorder) appendTelemetryBestEffort(ctx context.Context, sample *LeaseTelemetry) {
 	if r == nil || r.coord == nil || r.runID == "" || sample == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	postCtx, cancel := context.WithTimeout(ctx, runRecorderRequestTimeout)
 	defer cancel()
-	if _, err := r.coord.AppendRunTelemetry(ctx, r.runID, sample); err != nil && !isCoordinatorNotFoundError(err) {
+	if _, err := r.coord.AppendRunTelemetry(postCtx, r.runID, sample); err != nil && ctx.Err() == nil && !isCoordinatorNotFoundError(err) {
 		r.warn("run telemetry append failed for %s: %v", r.runID, err)
 	}
 }
@@ -369,10 +372,7 @@ func (r *runRecorder) stopTelemetrySampler() {
 		return
 	}
 	cancel()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-	}
+	<-done
 }
 
 func (r *runRecorder) resetTelemetryForLeaseReplacement() {
