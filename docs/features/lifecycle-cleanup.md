@@ -101,8 +101,16 @@ workspace lookup read every `DescribeInstances` page, retaining duplicate
 matches for ambiguity checks. A repeated pagination token, more than 100 pages,
 or a later-page failure makes the inventory incomplete and rejects the entire
 lookup. Incomplete inventory retains cleanup debt and cannot confirm absence,
-even after the existing 30-minute absence confirmation window. A complete empty
-inventory remains subject to that window and the existing ownership checks.
+even after the existing 30-minute absence confirmation window. Cleanup resolves
+one direct-provider credential snapshot, verifies its account through STS, and
+uses that same snapshot for instance observation, termination confirmation, and
+owned SSH-key deletion. The separate image-qualification transport instead
+enforces its enrolled account and Region policy with immediate STS checks around
+protected operations; it does not claim one immutable credential object.
+Absence is accepted only when the lease persisted the same exact account scope
+and Region. A complete empty inventory for a historical lease without account
+scope remains unresolved; a still-present historical instance may proceed only
+when its exact lease ownership labels match.
 
 For an exact Azure lease whose provisioning stops before VM creation, ordinary
 owned-resource release can clean the observed creation prefix: an unattached
@@ -173,7 +181,10 @@ visibility or termination retains cleanup debt rather than reporting deletion.
 Managed public AWS release uses the same confirmed termination path as private
 workspaces: `TerminateInstances` must acknowledge the exact instance, followed
 by a terminal `terminated` read or exact `InvalidInstanceID.NotFound`.
-Allocation claims carry the prepared account scope for AWS Mac instances.
+New AWS allocation claims carry the prepared account scope and explicit Region.
+The coordinator persists each selected fallback Region before that regional
+provider path can mutate AWS, so interrupted recovery reads the same Region.
+Historical records missing either value are not upgraded during cleanup.
 Storage failures while publishing or checking an allocation preserve its cleanup
 claim without retrying creation.
 The CLI removes its local per-lease SSH connection directory only after final

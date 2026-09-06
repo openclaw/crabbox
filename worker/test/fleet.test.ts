@@ -8406,76 +8406,79 @@ describe("fleet lease identity and idle", () => {
         new MemoryStorage(),
       ),
     ];
-    await Promise.all(
-      providers.map(async (provider) => {
-        vi.spyOn(provider, "deleteServer").mockResolvedValue();
-        const terminateServerAndWait =
-          provider instanceof AWSProvider
-            ? vi.spyOn(EC2SpotClient.prototype, "terminateServerAndWait").mockResolvedValue()
-            : undefined;
-        const deleteSSHKey = vi.spyOn(provider, "deleteSSHKey").mockResolvedValue();
-        if (provider instanceof AWSProvider) {
-          vi.spyOn(provider, "findServer").mockResolvedValue(
-            ownedTestMachine("aws", "i-abcdef123456"),
+    const awsOperation = stubAWSLeaseOperation();
+    try {
+      await Promise.all(
+        providers.map(async (provider) => {
+          vi.spyOn(provider, "deleteServer").mockResolvedValue();
+          const deleteSSHKey =
+            provider instanceof AWSProvider
+              ? vi.spyOn(awsOperation.session, "deleteSSHKey")
+              : vi.spyOn(provider, "deleteSSHKey").mockResolvedValue();
+          const providerLease =
+            provider instanceof AWSProvider
+              ? {
+                  provider: "aws" as const,
+                  cloudID: "i-abcdef123456",
+                  region: "eu-west-1",
+                }
+              : {};
+          await provider.releaseLease(
+            testLease({
+              id: "cbx_abcdef123456",
+              providerKey: "crabbox-cbx-000000000001",
+              ...providerLease,
+            }),
           );
-        }
-        const providerLease =
-          provider instanceof AWSProvider
-            ? { provider: "aws" as const, cloudID: "i-abcdef123456" }
-            : {};
-        await provider.releaseLease(
-          testLease({
-            id: "cbx_abcdef123456",
-            providerKey: "crabbox-cbx-000000000001",
-            ...providerLease,
-          }),
-        );
-        expect(deleteSSHKey).not.toHaveBeenCalled();
+          expect(deleteSSHKey).not.toHaveBeenCalled();
 
-        await provider.releaseLease(
-          testLease({
-            id: "cbx_abcdef123456",
-            providerKey: "crabbox-cbx-abcdef123456",
-            providerKeyCleanupOwned: true,
-            ...providerLease,
-          }),
-        );
-        expect(deleteSSHKey).toHaveBeenCalledOnce();
-        expect(deleteSSHKey.mock.calls[0]?.slice(0, 2)).toEqual([
-          "crabbox-cbx-abcdef123456",
-          "cbx_abcdef123456",
-        ]);
-        terminateServerAndWait?.mockRestore();
-      }),
-    );
+          await provider.releaseLease(
+            testLease({
+              id: "cbx_abcdef123456",
+              providerKey: "crabbox-cbx-abcdef123456",
+              providerKeyCleanupOwned: true,
+              ...providerLease,
+            }),
+          );
+          expect(deleteSSHKey).toHaveBeenCalledOnce();
+          expect(deleteSSHKey.mock.calls[0]?.slice(0, 2)).toEqual([
+            "crabbox-cbx-abcdef123456",
+            "cbx_abcdef123456",
+          ]);
+        }),
+      );
+    } finally {
+      awsOperation.scope.mockRestore();
+    }
   });
 
   it("reads and verifies cloud ownership before AWS release", async () => {
-    await Promise.all(
-      workerCloudReleaseCases()
-        .filter(({ providerName }) => providerName === "aws")
-        .map(async ({ providerName, cloudID, provider }) => {
-          const findServer = vi
-            .spyOn(provider, "findServer")
-            .mockResolvedValue(ownedTestMachine(providerName, cloudID));
-          const deleteServer = vi.spyOn(provider, "deleteServer").mockResolvedValue();
-          const terminateServerAndWait = vi
-            .spyOn(EC2SpotClient.prototype, "terminateServerAndWait")
-            .mockResolvedValue();
-          const lease = testLease({
-            id: "cbx_abcdef123456",
-            provider: providerName,
-            cloudID,
-            providerKeyCleanupOwned: false,
-          });
+    const operation = stubAWSLeaseOperation();
+    const findServer = vi.spyOn(operation.session, "findServer");
+    const terminateServerAndWait = vi.spyOn(operation.session, "terminateServerAndWait");
+    try {
+      await Promise.all(
+        workerCloudReleaseCases()
+          .filter(({ providerName }) => providerName === "aws")
+          .map(async ({ providerName, cloudID, provider }) => {
+            const deleteServer = vi.spyOn(provider, "deleteServer").mockResolvedValue();
+            const lease = testLease({
+              id: "cbx_abcdef123456",
+              provider: providerName,
+              cloudID,
+              region: "eu-west-1",
+              providerKeyCleanupOwned: false,
+            });
 
-          await expect(provider.releaseLease(lease)).resolves.toBeUndefined();
-          expect(findServer).toHaveBeenCalledWith(cloudID);
-          expect(terminateServerAndWait).toHaveBeenCalledWith(cloudID);
-          expect(deleteServer).not.toHaveBeenCalled();
-          terminateServerAndWait.mockRestore();
-        }),
-    );
+            await expect(provider.releaseLease(lease)).resolves.toBeUndefined();
+            expect(findServer).toHaveBeenCalledWith(cloudID);
+            expect(terminateServerAndWait).toHaveBeenCalledWith(cloudID);
+            expect(deleteServer).not.toHaveBeenCalled();
+          }),
+      );
+    } finally {
+      operation.scope.mockRestore();
+    }
   });
 
   it("requires the persisted raw GCP instance id to match before release deletion", async () => {
@@ -8609,56 +8612,82 @@ describe("fleet lease identity and idle", () => {
   });
 
   it("fails cloud release closed when ownership does not match the lease", async () => {
-    await Promise.all(
-      workerCloudReleaseCases()
-        .filter(({ providerName }) => providerName !== "azure")
-        .map(async ({ providerName, cloudID, provider }) => {
-          const machine = ownedTestMachine(providerName, cloudID);
-          if (providerName === "gcp") {
-            machine.providerResourceID = "9223372036854775807";
-          }
-          vi.spyOn(provider, "findServer").mockResolvedValue({
-            ...machine,
-            labels: { ...machine.labels, lease: "cbx_000000000000" },
-          });
-          const deleteServer = vi.spyOn(provider, "deleteServer").mockResolvedValue();
+    const awsOperation = stubAWSLeaseOperation({
+      findServer: async (cloudID) => ({
+        ...ownedTestMachine("aws", cloudID),
+        labels: { ...ownedTestMachine("aws", cloudID).labels, lease: "cbx_000000000000" },
+      }),
+    });
+    try {
+      await Promise.all(
+        workerCloudReleaseCases()
+          .filter(({ providerName }) => providerName !== "azure")
+          .map(async ({ providerName, cloudID, provider }) => {
+            const machine = ownedTestMachine(providerName, cloudID);
+            if (providerName === "gcp") {
+              machine.providerResourceID = "9223372036854775807";
+            }
+            if (providerName !== "aws") {
+              vi.spyOn(provider, "findServer").mockResolvedValue({
+                ...machine,
+                labels: { ...machine.labels, lease: "cbx_000000000000" },
+              });
+            }
+            const deleteServer = vi.spyOn(provider, "deleteServer").mockResolvedValue();
 
-          await expect(
-            provider.releaseLease(
-              testLease({
-                id: "cbx_abcdef123456",
-                provider: providerName,
-                cloudID,
-                ...(providerName === "gcp" ? { providerResourceID: "9223372036854775807" } : {}),
-              }),
-            ),
-          ).rejects.toThrow(`ownership does not match lease cbx_abcdef123456`);
-          expect(deleteServer).not.toHaveBeenCalled();
-        }),
-    );
+            await expect(
+              provider.releaseLease(
+                testLease({
+                  id: "cbx_abcdef123456",
+                  provider: providerName,
+                  cloudID,
+                  ...(providerName === "aws" ? { region: "eu-west-1" } : {}),
+                  ...(providerName === "gcp" ? { providerResourceID: "9223372036854775807" } : {}),
+                }),
+              ),
+            ).rejects.toThrow(`ownership does not match lease cbx_abcdef123456`);
+            expect(deleteServer).not.toHaveBeenCalled();
+          }),
+      );
+    } finally {
+      awsOperation.scope.mockRestore();
+    }
   });
 
   it("completes AWS and GCP release only when the exact primary resource is absent", async () => {
-    await Promise.all(
-      workerCloudReleaseCases()
-        .filter(({ providerName }) => providerName !== "azure")
-        .map(async ({ providerName, cloudID, provider }) => {
-          vi.spyOn(provider, "findServer").mockResolvedValue(undefined);
-          const deleteServer = vi.spyOn(provider, "deleteServer").mockResolvedValue();
+    const awsOperation = stubAWSLeaseOperation({ findServer: async () => undefined });
+    try {
+      await Promise.all(
+        workerCloudReleaseCases()
+          .filter(({ providerName }) => providerName !== "azure")
+          .map(async ({ providerName, cloudID, provider }) => {
+            if (providerName !== "aws") {
+              vi.spyOn(provider, "findServer").mockResolvedValue(undefined);
+            }
+            const deleteServer = vi.spyOn(provider, "deleteServer").mockResolvedValue();
 
-          await expect(
-            provider.releaseLease(
-              testLease({
-                id: "cbx_abcdef123456",
-                provider: providerName,
-                cloudID,
-                ...(providerName === "gcp" ? { providerResourceID: "9223372036854775807" } : {}),
-              }),
-            ),
-          ).resolves.toBeUndefined();
-          expect(deleteServer).not.toHaveBeenCalled();
-        }),
-    );
+            await expect(
+              provider.releaseLease(
+                testLease({
+                  id: "cbx_abcdef123456",
+                  provider: providerName,
+                  cloudID,
+                  ...(providerName === "aws"
+                    ? {
+                        providerScope: "aws:account:123456789012",
+                        region: "eu-west-1",
+                      }
+                    : {}),
+                  ...(providerName === "gcp" ? { providerResourceID: "9223372036854775807" } : {}),
+                }),
+              ),
+            ).resolves.toBeUndefined();
+            expect(deleteServer).not.toHaveBeenCalled();
+          }),
+      );
+    } finally {
+      awsOperation.scope.mockRestore();
+    }
   });
 
   it("retains Azure cleanup when a missing VM leaves companion ownership unprovable", async () => {
@@ -8679,26 +8708,40 @@ describe("fleet lease identity and idle", () => {
   });
 
   it("fails cloud release closed on provider read errors", async () => {
-    await Promise.all(
-      workerCloudReleaseCases()
-        .filter(({ providerName }) => providerName !== "azure")
-        .map(async ({ providerName, cloudID, provider }) => {
-          vi.spyOn(provider, "findServer").mockRejectedValue(new Error("http 404: scope missing"));
-          const deleteServer = vi.spyOn(provider, "deleteServer").mockResolvedValue();
+    const awsOperation = stubAWSLeaseOperation({
+      findServer: async () => {
+        throw new Error("http 404: scope missing");
+      },
+    });
+    try {
+      await Promise.all(
+        workerCloudReleaseCases()
+          .filter(({ providerName }) => providerName !== "azure")
+          .map(async ({ providerName, cloudID, provider }) => {
+            if (providerName !== "aws") {
+              vi.spyOn(provider, "findServer").mockRejectedValue(
+                new Error("http 404: scope missing"),
+              );
+            }
+            const deleteServer = vi.spyOn(provider, "deleteServer").mockResolvedValue();
 
-          await expect(
-            provider.releaseLease(
-              testLease({
-                id: "cbx_abcdef123456",
-                provider: providerName,
-                cloudID,
-                ...(providerName === "gcp" ? { providerResourceID: "9223372036854775807" } : {}),
-              }),
-            ),
-          ).rejects.toThrow("scope missing");
-          expect(deleteServer).not.toHaveBeenCalled();
-        }),
-    );
+            await expect(
+              provider.releaseLease(
+                testLease({
+                  id: "cbx_abcdef123456",
+                  provider: providerName,
+                  cloudID,
+                  ...(providerName === "aws" ? { region: "eu-west-1" } : {}),
+                  ...(providerName === "gcp" ? { providerResourceID: "9223372036854775807" } : {}),
+                }),
+              ),
+            ).rejects.toThrow("scope missing");
+            expect(deleteServer).not.toHaveBeenCalled();
+          }),
+      );
+    } finally {
+      awsOperation.scope.mockRestore();
+    }
   });
 
   it("fails AWS release closed on a non-instance not-found DELETE", async () => {
@@ -8707,10 +8750,11 @@ describe("fleet lease identity and idle", () => {
       "eu-west-1",
       new MemoryStorage(),
     );
-    vi.spyOn(provider, "findServer").mockResolvedValue(ownedTestMachine("aws", "i-abcdef123456"));
-    const terminateServerAndWait = vi
-      .spyOn(EC2SpotClient.prototype, "terminateServerAndWait")
-      .mockRejectedValue(new Error("AWS resource group not found"));
+    const operation = stubAWSLeaseOperation({
+      terminateServerAndWait: async () => {
+        throw new Error("AWS resource group not found");
+      },
+    });
 
     try {
       await expect(
@@ -8719,12 +8763,13 @@ describe("fleet lease identity and idle", () => {
             id: "cbx_abcdef123456",
             provider: "aws",
             cloudID: "i-abcdef123456",
+            region: "eu-west-1",
             providerKeyCleanupOwned: false,
           }),
         ),
       ).rejects.toThrow("resource group not found");
     } finally {
-      terminateServerAndWait.mockRestore();
+      operation.scope.mockRestore();
     }
   });
 
@@ -14653,6 +14698,71 @@ describe("fleet lease identity and idle", () => {
     expect(storage.alarm()).toBe(Date.parse(lease?.cleanupRetryAt ?? ""));
   });
 
+  it("uses only authoritative scoped AWS recovery for an interrupted public no-ID lease", async () => {
+    const storage = new MemoryStorage();
+    const now = Date.now();
+    const leaseID = "cbx_000000000094";
+    const actions: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const action =
+          new URLSearchParams(await requestBodyForTest(input, init)).get("Action") ?? "";
+        actions.push(action);
+        if (action === "GetCallerIdentity") return awsIdentityResponse("123456789012");
+        if (action === "DescribeInstances") return awsEmptyDescribeInstancesResponse();
+        throw new Error(`unexpected AWS action ${action}`);
+      }),
+    );
+    const fleet = testFleet(
+      storage,
+      {},
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_ORPHAN_SWEEP_ENABLED: "0",
+        CF_VERSION_METADATA: {
+          id: "new-version",
+          timestamp: new Date(now - 10 * 60_000).toISOString(),
+        },
+      },
+    );
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "inventory",
+        provider: "aws",
+        providerScope: "aws:account:123456789012",
+        region: "eu-west-1",
+        owner: "alice@example.com",
+        org: "example-org",
+        cloudID: "",
+        serverID: 0,
+        serverName: "",
+        host: "",
+        state: "provisioning",
+        provisioningResourceMayExist: true,
+        provisioningRequestStartedAt: new Date(now - 60_000).toISOString(),
+        provisioningCoordinatorVersion: "old-version",
+        provisioningRecoveryObservedAt: new Date(now - 10 * 60_000).toISOString(),
+        expiresAt: new Date(now + 60 * 60_000).toISOString(),
+      }),
+    );
+
+    await fleet.alarm();
+
+    expect(actions).toEqual(["GetCallerIdentity", "DescribeInstances"]);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "provisioning",
+      providerScope: "aws:account:123456789012",
+      provisioningResourceMayExist: true,
+      provisioningFailureRetryable: true,
+      cleanupError: "provider provisioning was interrupted; provider resource not yet visible",
+      provisioningRecoveryMissingSince: expect.any(String),
+    });
+  });
+
   it.each([false, true])(
     "retains cleanup debt after incomplete AWS inventory (absence window elapsed: %s)",
     async (absenceWindowElapsed) => {
@@ -14663,6 +14773,7 @@ describe("fleet lease identity and idle", () => {
         : undefined;
       const leaseID = "cbx_000000000094";
       const calls: Array<{ action: string | null; token: string | null; host: string }> = [];
+      let inventoryPages = 0;
       vi.stubGlobal(
         "fetch",
         vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -14673,9 +14784,13 @@ describe("fleet lease identity and idle", () => {
             token: params.get("NextToken"),
             host: new URL(inventoryRequest.url).hostname,
           });
-          return calls.length === 1
+          if (params.get("Action") === "GetCallerIdentity") {
+            return awsIdentityResponse("123456789012");
+          }
+          inventoryPages += 1;
+          return inventoryPages === 1
             ? ec2XMLResponse(
-                "<DescribeInstancesResponse><reservationSet/><nextToken>next-page</nextToken></DescribeInstancesResponse>",
+                "<DescribeInstancesResponse><requestId>req-page-one</requestId><reservationSet/><nextToken>next-page</nextToken></DescribeInstancesResponse>",
               )
             : ec2XMLResponse(
                 "<Response><Errors><Error><Code>InvalidNextToken</Code><Message>unavailable page</Message></Error></Errors></Response>",
@@ -14702,6 +14817,7 @@ describe("fleet lease identity and idle", () => {
           id: leaseID,
           slug: "inventory",
           provider: "aws",
+          providerScope: "aws:account:123456789012",
           region: "eu-west-1",
           owner: "alice@example.com",
           org: "example-org",
@@ -14722,24 +14838,25 @@ describe("fleet lease identity and idle", () => {
       await fleet.alarm();
 
       expect(calls).toEqual([
+        { action: "GetCallerIdentity", token: null, host: "sts.eu-west-1.amazonaws.com" },
         { action: "DescribeInstances", token: null, host: "ec2.eu-west-1.amazonaws.com" },
         { action: "DescribeInstances", token: "next-page", host: "ec2.eu-west-1.amazonaws.com" },
       ]);
       const lease = storage.value<LeaseRecord>(`lease:${leaseID}`);
       expect(lease).toMatchObject({
-        state: "provisioning",
+        state: "failed",
         cloudID: "",
         provisioningResourceMayExist: true,
         provisioningCoordinatorVersion: "old-version",
-        cleanupAttempts: 1,
-        cleanupError:
-          "interrupted provisioning recovery failed: aws DescribeInstances inventory incomplete in eu-west-1: page 2 request failed",
+        cleanupError: expect.stringContaining(
+          "aws DescribeInstances inventory incomplete in eu-west-1: page 2 request failed",
+        ),
       });
       expect(lease?.provisioningRecoveryMissingSince).toBe(missingSince);
-      expect(lease?.failureError).toBeUndefined();
-      expect(lease?.endedAt).toBeUndefined();
-      expect(Date.parse(lease?.cleanupRetryAt ?? "")).toBeGreaterThan(now);
-      expect(storage.alarm()).toBe(Date.parse(lease?.cleanupRetryAt ?? ""));
+      expect(lease?.failureError).toContain("inventory incomplete");
+      expect(lease?.endedAt).toBeDefined();
+      expect(lease?.cleanupRetryAt).toBeUndefined();
+      expect(storage.alarm()).toBeUndefined();
     },
   );
 
@@ -24536,8 +24653,16 @@ describe("fleet lease identity and idle", () => {
 
   it("combines detected AWS outbound IPv4 with the authenticated IPv6 request source", async () => {
     let awsCIDRs: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => awsIdentityResponse("123456789012")),
+    );
     const storage = new MemoryStorage();
-    const aws = new AWSProvider({} as Env, "eu-west-1", storage);
+    const aws = new AWSProvider(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      "eu-west-1",
+      storage,
+    );
     const fleet = testFleet(storage, {
       aws: fakeProvider(undefined, {
         provider: "aws",
@@ -24573,7 +24698,15 @@ describe("fleet lease identity and idle", () => {
   });
 
   it("uses additive AWS ingress reconciliation while creates can overlap", async () => {
-    const provider = new AWSProvider({} as Env, "eu-west-1", new MemoryStorage());
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => awsIdentityResponse("123456789012")),
+    );
+    const provider = new AWSProvider(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      "eu-west-1",
+      new MemoryStorage(),
+    );
     const config = leaseConfig({
       provider: "aws",
       sshPublicKey: "ssh-ed25519 test",
@@ -24618,17 +24751,264 @@ describe("fleet lease identity and idle", () => {
     expect(otherPrepared.lease.network?.awsSecurityGroupName).not.toBe(managedGroupName);
   });
 
-  it("records the authenticated AWS account before creating a Mac host lease", async () => {
+  it.each([
+    { target: "linux" as const, serverType: "t3.small" },
+    { target: "macos" as const, serverType: "mac2.metal" },
+  ])(
+    "records the authenticated AWS account before preparing a $target lease",
+    async ({ target, serverType }) => {
+      const actions: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const params = new URLSearchParams(await requestBodyForTest(input, init));
+          actions.push(params.get("Action") ?? "");
+          return awsIdentityResponse("123456789012");
+        }),
+      );
+      const provider = new AWSProvider(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "test" } as Env,
+        "eu-west-1",
+        new MemoryStorage(),
+      );
+      const config = leaseConfig({
+        provider: "aws",
+        target,
+        serverType,
+        capacity: { market: "on-demand" },
+        sshPublicKey: "ssh-ed25519 test",
+      });
+      const lease = testLease({
+        id: "cbx_abcdef123456",
+        provider: "aws",
+        target,
+        state: "provisioning",
+        cloudID: "",
+      });
+
+      const prepared = await provider.prepareLeaseCreate(config, lease, {
+        requestSourceCIDRs: [],
+        activeLeases: [],
+      });
+
+      expect(prepared.lease.providerScope).toBe("aws:account:123456789012");
+      expect(actions).toEqual(["GetCallerIdentity"]);
+    },
+  );
+
+  it.each([
+    {
+      name: "malformed",
+      providerScope: "aws:account:not-an-account",
+      expectedError: "malformed AWS provider scope",
+      expectedActions: [],
+    },
+    {
+      name: "conflicting",
+      providerScope: "aws:account:999999999999",
+      expectedError: "AWS provider scope conflicts with authenticated account",
+      expectedActions: ["GetCallerIdentity"],
+    },
+  ])(
+    "rejects a $name existing AWS scope before provider mutation",
+    async ({ providerScope, expectedError, expectedActions }) => {
+      const actions: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const params = new URLSearchParams(await requestBodyForTest(input, init));
+          actions.push(params.get("Action") ?? "");
+          return awsIdentityResponse("123456789012");
+        }),
+      );
+      const provider = new AWSProvider(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "test" } as Env,
+        "eu-west-1",
+        new MemoryStorage(),
+      );
+      const config = leaseConfig({
+        provider: "aws",
+        target: "linux",
+        serverType: "t3.small",
+        capacity: { market: "on-demand" },
+        sshPublicKey: "ssh-ed25519 test",
+      });
+      const lease = testLease({
+        id: "cbx_abcdef123456",
+        provider: "aws",
+        target: "linux",
+        state: "provisioning",
+        cloudID: "",
+        providerScope,
+      });
+
+      await expect(
+        provider.prepareLeaseCreate(config, lease, {
+          requestSourceCIDRs: [],
+          activeLeases: [],
+        }),
+      ).rejects.toThrow(expectedError);
+      expect(actions).toEqual(expectedActions);
+      expect(actions).not.toContain("RunInstances");
+      expect(lease.providerScope).toBe(providerScope);
+    },
+  );
+
+  it("does not reuse cached AWS identity when authorizing bound recovery", async () => {
+    const actions: string[] = [];
+    let identityReads = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const params = new URLSearchParams(await requestBodyForTest(input, init));
-        expect(params.get("Action")).toBe("GetCallerIdentity");
-        return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
-        <GetCallerIdentityResponse><GetCallerIdentityResult>
-          <Arn>arn:aws:iam::123456789012:user/crabbox</Arn>
-          <UserId>AIDAEXAMPLE</UserId><Account>123456789012</Account>
-        </GetCallerIdentityResult></GetCallerIdentityResponse>`);
+        const action = params.get("Action") ?? "";
+        actions.push(action);
+        if (action === "GetCallerIdentity") {
+          identityReads += 1;
+          return awsIdentityResponse(identityReads === 1 ? "123456789012" : "999999999999");
+        }
+        if (action === "DescribeInstances") {
+          return awsOwnedInstanceResponse("i-recovered123");
+        }
+        throw new Error(`unexpected AWS action ${action}`);
+      }),
+    );
+    const provider = new AWSProvider(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "test",
+        CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012",
+        CRABBOX_AWS_EXPECTED_REGION: "eu-west-1",
+      } as Env,
+      "eu-west-1",
+      new MemoryStorage(),
+    );
+    const config = leaseConfig({
+      provider: "aws",
+      target: "linux",
+      serverType: "t3.small",
+      capacity: { market: "on-demand" },
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    await provider.prepareLeaseCreate(
+      config,
+      testLease({
+        id: "cbx_abcdef123456",
+        provider: "aws",
+        target: "linux",
+        state: "provisioning",
+        cloudID: "",
+        owner: "alice@example.com",
+        org: "example-org",
+      }),
+      { requestSourceCIDRs: [], activeLeases: [] },
+    );
+
+    await expect(
+      provider.recoverServer(
+        testLease({
+          id: "cbx_abcdef123456",
+          provider: "aws",
+          region: "eu-west-1",
+          cloudID: "i-recovered123",
+          providerScope: "aws:account:123456789012",
+          owner: "alice@example.com",
+          org: "example-org",
+        }),
+      ),
+    ).rejects.toBeInstanceOf(ProviderResourceUnresolvedError);
+    expect(actions).toEqual(["GetCallerIdentity", "GetCallerIdentity"]);
+  });
+
+  it.each([
+    { privateNetwork: false, cloudID: "i-recovered123" },
+    { privateNetwork: false, cloudID: "" },
+    { privateNetwork: true, cloudID: "" },
+  ])(
+    "rejects absent unbound AWS recovery as unresolved (private=$privateNetwork)",
+    async ({ privateNetwork, cloudID }) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const action =
+            new URLSearchParams(await requestBodyForTest(input, init)).get("Action") ?? "";
+          return action === "GetCallerIdentity"
+            ? awsIdentityResponse("123456789012")
+            : awsEmptyDescribeInstancesResponse();
+        }),
+      );
+      const provider = new AWSProvider(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "test" } as Env,
+        "eu-west-1",
+        new MemoryStorage(),
+      );
+
+      await expect(
+        provider.recoverServer(
+          testLease({
+            id: "cbx_abcdef123456",
+            provider: "aws",
+            region: "eu-west-1",
+            cloudID,
+            owner: "alice@example.com",
+            org: "example-org",
+            network: privateNetwork ? { awsPrivate: true } : {},
+          }),
+        ),
+      ).rejects.toBeInstanceOf(ProviderResourceUnresolvedError);
+    },
+  );
+
+  it.each([
+    { privateNetwork: false, cloudID: "i-recovered123" },
+    { privateNetwork: false, cloudID: "" },
+    { privateNetwork: true, cloudID: "" },
+  ])(
+    "recovers a present owned unbound AWS resource (private=$privateNetwork)",
+    async ({ privateNetwork, cloudID }) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const action =
+            new URLSearchParams(await requestBodyForTest(input, init)).get("Action") ?? "";
+          return action === "GetCallerIdentity"
+            ? awsIdentityResponse("123456789012")
+            : awsOwnedInstanceResponse("i-recovered123");
+        }),
+      );
+      const provider = new AWSProvider(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "test" } as Env,
+        "eu-west-1",
+        new MemoryStorage(),
+      );
+
+      await expect(
+        provider.recoverServer(
+          testLease({
+            id: "cbx_abcdef123456",
+            provider: "aws",
+            region: "eu-west-1",
+            cloudID,
+            owner: "alice@example.com",
+            org: "example-org",
+            network: privateNetwork ? { awsPrivate: true } : {},
+          }),
+        ),
+      ).resolves.toMatchObject({ cloudID: "i-recovered123" });
+    },
+  );
+
+  it("freshly verifies bound public no-ID recovery before accepting absence", async () => {
+    const actions: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const action =
+          new URLSearchParams(await requestBodyForTest(input, init)).get("Action") ?? "";
+        actions.push(action);
+        if (action === "GetCallerIdentity") return awsIdentityResponse("123456789012");
+        if (action === "DescribeInstances") return awsEmptyDescribeInstancesResponse();
+        throw new Error(`unexpected AWS action ${action}`);
       }),
     );
     const provider = new AWSProvider(
@@ -24636,26 +25016,83 @@ describe("fleet lease identity and idle", () => {
       "eu-west-1",
       new MemoryStorage(),
     );
-    const config = leaseConfig({
-      provider: "aws",
-      target: "macos",
-      serverType: "mac2.metal",
-      capacity: { market: "on-demand" },
-      sshPublicKey: "ssh-ed25519 test",
-    });
-    const lease = testLease({
-      id: "cbx_abcdef123456",
-      provider: "aws",
-      target: "macos",
-      state: "provisioning",
-    });
 
-    const prepared = await provider.prepareLeaseCreate(config, lease, {
-      requestSourceCIDRs: [],
-      activeLeases: [],
-    });
+    await expect(
+      provider.recoverServer(
+        testLease({
+          id: "cbx_abcdef123456",
+          provider: "aws",
+          region: "eu-west-1",
+          cloudID: "",
+          providerScope: "aws:account:123456789012",
+          owner: "alice@example.com",
+          org: "example-org",
+        }),
+      ),
+    ).resolves.toBeUndefined();
+    expect(actions).toEqual(["GetCallerIdentity", "DescribeInstances"]);
+  });
 
-    expect(prepared.lease.providerScope).toBe("aws:account:123456789012");
+  it("rejects ambiguous public no-ID AWS recovery", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const action =
+          new URLSearchParams(await requestBodyForTest(input, init)).get("Action") ?? "";
+        return action === "GetCallerIdentity"
+          ? awsIdentityResponse("123456789012")
+          : awsOwnedInstancesResponse(["i-recovered123", "i-recovered456"]);
+      }),
+    );
+    const provider = new AWSProvider(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "test" } as Env,
+      "eu-west-1",
+      new MemoryStorage(),
+    );
+
+    await expect(
+      provider.recoverServer(
+        testLease({
+          id: "cbx_abcdef123456",
+          provider: "aws",
+          region: "eu-west-1",
+          cloudID: "",
+          owner: "alice@example.com",
+          org: "example-org",
+        }),
+      ),
+    ).rejects.toThrow("AWS recovery is ambiguous for lease cbx_abcdef123456");
+  });
+
+  it("rejects a public no-ID AWS resource with mismatched ownership labels", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const action =
+          new URLSearchParams(await requestBodyForTest(input, init)).get("Action") ?? "";
+        return action === "GetCallerIdentity"
+          ? awsIdentityResponse("123456789012")
+          : awsOwnedInstancesResponse(["i-recovered123"], "other_owner");
+      }),
+    );
+    const provider = new AWSProvider(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "test" } as Env,
+      "eu-west-1",
+      new MemoryStorage(),
+    );
+
+    await expect(
+      provider.recoverServer(
+        testLease({
+          id: "cbx_abcdef123456",
+          provider: "aws",
+          region: "eu-west-1",
+          cloudID: "",
+          owner: "alice@example.com",
+          org: "example-org",
+        }),
+      ),
+    ).rejects.toBeInstanceOf(ProviderResourceUnresolvedError);
   });
 
   it("keeps explicitly pinned AWS SSH CIDRs authoritative when refreshing lease access", async () => {
@@ -25365,7 +25802,7 @@ describe("fleet lease identity and idle", () => {
           }
           if (operation === "DescribeInstances") {
             return ec2XMLResponse(
-              `<Response><reservationSet><item><instancesSet><item><instanceId>i-allocation</instanceId>${paused && betweenPolls ? "" : "<ipAddress>192.0.2.20</ipAddress>"}<instanceState><name>running</name></instanceState></item></instancesSet></item></reservationSet></Response>`,
+              `<DescribeInstancesResponse><requestId>req-readiness</requestId><reservationSet><item><instancesSet><item><instanceId>i-allocation</instanceId>${paused && betweenPolls ? "" : "<ipAddress>192.0.2.20</ipAddress>"}<instanceState><name>running</name></instanceState></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`,
             );
           }
           if (operation === "DescribeInstanceInformation") {
@@ -25487,7 +25924,7 @@ describe("fleet lease identity and idle", () => {
           );
         }
         return ec2XMLResponse(
-          `<Response><reservationSet><item><instancesSet><item><instanceId>i-new-instance</instanceId><instanceType>t3.small</instanceType><ipAddress>192.0.2.20</ipAddress><instanceState><name>running</name></instanceState><tagSet>${Object.entries(
+          `<DescribeInstancesResponse><requestId>req-allocation</requestId><reservationSet><item><instancesSet><item><instanceId>i-new-instance</instanceId><instanceType>t3.small</instanceType><ipAddress>192.0.2.20</ipAddress><instanceState><name>running</name></instanceState><tagSet>${Object.entries(
             {
               crabbox: "true",
               created_by: "crabbox",
@@ -25498,7 +25935,9 @@ describe("fleet lease identity and idle", () => {
             },
           )
             .map(([key, value]) => `<item><key>${key}</key><value>${value}</value></item>`)
-            .join("")}</tagSet></item></instancesSet></item></reservationSet></Response>`,
+            .join(
+              "",
+            )}</tagSet></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`,
         );
       });
       const { fleet, storage, creatingID, createAttemptID, headers, requests } = fixture;
@@ -25589,6 +26028,387 @@ describe("fleet lease identity and idle", () => {
     },
   );
 
+  it("completes matching account-bound AWS cleanup when the historical instance lookup is empty", async () => {
+    const credentials = vi.fn<
+      () => Promise<{ accessKeyId: string; secretAccessKey: string; sessionToken: string }>
+    >(async () => ({
+      accessKeyId: "SNAPSHOTKEY",
+      secretAccessKey: "snapshot-secret",
+      sessionToken: "snapshot-token",
+    }));
+    const fixture = awsIngressTestFleet(
+      async (operation) => {
+        if (operation === "GetCallerIdentity") {
+          return awsIdentityResponse("123456789012");
+        }
+        if (operation === "DescribeInstances") {
+          return awsEmptyDescribeInstancesResponse();
+        }
+        return undefined;
+      },
+      { awsCredentialProvider: credentials },
+    );
+    const { storage, activeID, fleet, headers, requests } = fixture;
+    const failedAt = new Date(Date.now() - 60_000).toISOString();
+    storage.seed(`lease:${activeID}`, {
+      ...storage.value<LeaseRecord>(`lease:${activeID}`)!,
+      state: "released",
+      keep: false,
+      providerScope: "aws:account:123456789012",
+      providerKey: "crabbox-cbx-abcdef123456",
+      providerKeyCleanupOwned: true,
+      releaseDeletesServer: true,
+      cleanupAttempts: 1,
+      cleanupError: "aws instance not found: i-active-instance",
+      cleanupFailedAt: failedAt,
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+      tailscale: { enabled: true, ipv4: "100.64.0.10" },
+      sshHostKey: "ssh-ed25519 historical",
+      providerAccessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    await fleet.alarm();
+
+    const completed = storage.value<LeaseRecord>(`lease:${activeID}`)!;
+    expect(completed).toMatchObject({
+      state: "released",
+      cloudID: "i-active-instance",
+      host: "",
+      cleanupCompletedAt: expect.any(String),
+      provisioningResourceMayExist: false,
+    });
+    expect(completed.tailscale).toBeUndefined();
+    expect(completed.sshHostKey).toBeUndefined();
+    expect(completed.providerAccessExpiresAt).toBeUndefined();
+    expect(completed.cleanupAttempts).toBeUndefined();
+    expect(completed.cleanupError).toBeUndefined();
+    expect(completed.cleanupFailedAt).toBeUndefined();
+    expect(completed.cleanupRetryAt).toBeUndefined();
+    expect(completed.cleanupStartedAt).toBeUndefined();
+    expect(completed.cleanupClaimExpiresAt).toBeUndefined();
+    expect(completed.releaseDeletesServer).toBeUndefined();
+    const observed = await fleet.fetch(request("GET", `/v1/leases/${activeID}`, { headers }));
+    await expect(observed.json()).resolves.toMatchObject({
+      lease: { state: "released", cleanupStatus: "complete", host: "" },
+    });
+    expect(requests.filter(({ action }) => action === "DescribeInstances").length).toBeGreaterThan(
+      0,
+    );
+    expect(requests.filter(({ action }) => action === "GetCallerIdentity")).toHaveLength(1);
+    expect(requests.filter(({ action }) => action === "TerminateInstances")).toHaveLength(0);
+    expect(requests.filter(({ action }) => action === "DescribeKeyPairs")).toHaveLength(1);
+    expect(
+      requests.every(
+        ({ authorization, sessionToken }) =>
+          authorization.includes("Credential=SNAPSHOTKEY/") && sessionToken === "snapshot-token",
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    {
+      name: "the historical lease has no account scope",
+      providerScope: undefined,
+      expectedError: "AWS lease account scope was not persisted",
+      expectedIdentityReads: 1,
+    },
+    {
+      name: "the current AWS account conflicts with its scope",
+      providerScope: "aws:account:999999999999",
+      expectedError: "AWS lease account scope does not match the authenticated account",
+      expectedIdentityReads: 1,
+    },
+  ])(
+    "retains settled AWS cleanup debt when absence is untrusted because $name",
+    async ({ providerScope, expectedError, expectedIdentityReads }) => {
+      const fixture = awsIngressTestFleet(async (operation) => {
+        if (operation === "GetCallerIdentity") {
+          return awsIdentityResponse("123456789012");
+        }
+        if (operation === "DescribeInstances") {
+          return awsEmptyDescribeInstancesResponse();
+        }
+        return undefined;
+      });
+      const { storage, activeID, fleet, requests } = fixture;
+      const failedAt = new Date(Date.now() - 60_000).toISOString();
+      storage.seed(`lease:${activeID}`, {
+        ...storage.value<LeaseRecord>(`lease:${activeID}`)!,
+        state: "released",
+        keep: false,
+        ...(providerScope ? { providerScope } : {}),
+        releaseDeletesServer: true,
+        cleanupAttempts: 1,
+        cleanupError: "prior cleanup was inconclusive",
+        cleanupFailedAt: failedAt,
+        cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+      });
+
+      await fleet.alarm();
+
+      expect(storage.value<LeaseRecord>(`lease:${activeID}`)).toMatchObject({
+        state: "released",
+        cloudID: "i-active-instance",
+        host: "192.0.2.1",
+        releaseDeletesServer: true,
+        cleanupError: expect.stringContaining(expectedError),
+        cleanupFailedAt: expect.any(String),
+      });
+      expect(storage.value<LeaseRecord>(`lease:${activeID}`)?.cleanupCompletedAt).toBeUndefined();
+      expect(storage.value<LeaseRecord>(`lease:${activeID}`)?.cleanupRetryAt).toBeUndefined();
+      expect(requests.filter(({ action }) => action === "GetCallerIdentity")).toHaveLength(
+        expectedIdentityReads,
+      );
+      expect(requests.filter(({ action }) => action === "TerminateInstances")).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    {
+      name: "the authenticated account changed",
+      region: "eu-west-1",
+      providerScope: "aws:account:123456789012",
+      env: {},
+      response: (operation: string) =>
+        operation === "GetCallerIdentity" ? awsIdentityResponse("999999999999") : undefined,
+      expectedError: "AWS lease account scope does not match the authenticated account",
+    },
+    {
+      name: "the persisted region is missing",
+      region: undefined,
+      providerScope: "aws:account:123456789012",
+      env: {},
+      response: () => undefined,
+      expectedError: "AWS lease region does not match the cleanup session",
+    },
+    {
+      name: "the persisted region changed",
+      region: "us-east-1",
+      providerScope: "aws:account:123456789012",
+      env: {
+        CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012",
+        CRABBOX_AWS_EXPECTED_REGION: "eu-west-1",
+      },
+      response: () => undefined,
+      expectedError: "AWS region mismatch",
+    },
+    {
+      name: "EC2 returned malformed empty XML",
+      region: "eu-west-1",
+      providerScope: "aws:account:123456789012",
+      env: {},
+      response: (operation: string) =>
+        operation === "GetCallerIdentity"
+          ? awsIdentityResponse("123456789012")
+          : operation === "DescribeInstances"
+            ? ec2XMLResponse(
+                "<DescribeInstancesResponse><requestId>req-bad</requestId><reservationSet /></Response>",
+              )
+            : undefined,
+      expectedError: "malformed AWS DescribeInstances response",
+    },
+    {
+      name: "EC2 reported a different owner account",
+      region: "eu-west-1",
+      providerScope: "aws:account:123456789012",
+      env: {},
+      response: (operation: string) =>
+        operation === "GetCallerIdentity"
+          ? awsIdentityResponse("123456789012")
+          : operation === "DescribeInstances"
+            ? ec2XMLResponse(`<DescribeInstancesResponse><requestId>req-owner</requestId>
+                <reservationSet><item><ownerId>999999999999</ownerId><instancesSet><item>
+                  <instanceId>i-active-instance</instanceId>
+                  <instanceState><name>running</name></instanceState>
+                </item></instancesSet></item></reservationSet>
+              </DescribeInstancesResponse>`)
+            : undefined,
+      expectedError: "ownerId 999999999999 does not match authenticated account 123456789012",
+    },
+    {
+      name: "the scoped credentials were revoked after STS",
+      region: "eu-west-1",
+      providerScope: "aws:account:123456789012",
+      env: {},
+      response: (operation: string) =>
+        operation === "GetCallerIdentity"
+          ? awsIdentityResponse("123456789012")
+          : operation === "DescribeInstances"
+            ? ec2XMLResponse(
+                "<Response><Errors><Error><Code>ExpiredToken</Code></Error></Errors></Response>",
+                403,
+              )
+            : undefined,
+      expectedError: "ExpiredToken",
+    },
+  ])(
+    "retains AWS access evidence when cleanup authority fails because $name",
+    async ({ region, providerScope, env, response, expectedError }) => {
+      const fixture = awsIngressTestFleet(async (operation) => response(operation), env);
+      const { storage, activeID, fleet } = fixture;
+      const tailscale = { enabled: true, ipv4: "100.64.0.10" };
+      const sshHostKey = "ssh-ed25519 historical";
+      const providerAccessExpiresAt = new Date(Date.now() + 60_000).toISOString();
+      storage.seed(`lease:${activeID}`, {
+        ...storage.value<LeaseRecord>(`lease:${activeID}`)!,
+        state: "released",
+        keep: false,
+        region,
+        providerScope,
+        releaseDeletesServer: true,
+        cleanupError: "prior cleanup was inconclusive",
+        cleanupFailedAt: new Date(Date.now() - 60_000).toISOString(),
+        cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+        tailscale,
+        sshHostKey,
+        providerAccessExpiresAt,
+      });
+
+      await fleet.alarm();
+
+      expect(storage.value<LeaseRecord>(`lease:${activeID}`)).toMatchObject({
+        state: "released",
+        host: "192.0.2.1",
+        releaseDeletesServer: true,
+        cleanupError: expect.stringContaining(expectedError),
+        tailscale,
+        sshHostKey,
+        providerAccessExpiresAt,
+      });
+      expect(storage.value<LeaseRecord>(`lease:${activeID}`)?.cleanupCompletedAt).toBeUndefined();
+    },
+  );
+
+  it("keeps one snapshot when credentials rotate during termination confirmation", async () => {
+    let generation = 0;
+    const credentials = vi.fn<
+      () => Promise<{ accessKeyId: string; secretAccessKey: string; sessionToken: string }>
+    >(async () => {
+      generation += 1;
+      return {
+        accessKeyId: generation === 1 ? "ACCOUNT_A" : "ACCOUNT_B",
+        secretAccessKey: `secret-${generation}`,
+        sessionToken: `token-${generation}`,
+      };
+    });
+    let terminated = false;
+    const fixture = awsIngressTestFleet(
+      async (operation, _params, _region, signedRequest) => {
+        const authorization = signedRequest.headers.get("authorization") ?? "";
+        if (operation === "GetCallerIdentity") return awsIdentityResponse("123456789012");
+        if (operation === "DescribeInstances" && !terminated) {
+          return awsOwnedInstanceResponse("i-active-instance");
+        }
+        if (operation === "TerminateInstances") {
+          terminated = true;
+          return ec2XMLResponse(
+            "<TerminateInstancesResponse><instancesSet><item><instanceId>i-active-instance</instanceId></item></instancesSet></TerminateInstancesResponse>",
+          );
+        }
+        if (operation === "DescribeInstances" && authorization.includes("ACCOUNT_A")) {
+          return ec2XMLResponse(
+            "<Response><Errors><Error><Code>ExpiredToken</Code></Error></Errors></Response>",
+            403,
+          );
+        }
+        if (operation === "DescribeInstances") return awsEmptyDescribeInstancesResponse();
+        return undefined;
+      },
+      { awsCredentialProvider: credentials },
+    );
+    const { storage, activeID, fleet, requests } = fixture;
+    const providerAccessExpiresAt = new Date(Date.now() + 60_000).toISOString();
+    storage.seed(`lease:${activeID}`, {
+      ...storage.value<LeaseRecord>(`lease:${activeID}`)!,
+      state: "released",
+      keep: false,
+      providerScope: "aws:account:123456789012",
+      releaseDeletesServer: true,
+      cleanupError: "prior cleanup was inconclusive",
+      cleanupFailedAt: new Date(Date.now() - 60_000).toISOString(),
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+      tailscale: { enabled: true, ipv4: "100.64.0.10" },
+      sshHostKey: "ssh-ed25519 historical",
+      providerAccessExpiresAt,
+    });
+
+    await fleet.alarm();
+
+    expect(credentials).toHaveBeenCalledTimes(2);
+    expect(requests.slice(0, 4).map(({ action }) => action)).toEqual([
+      "GetCallerIdentity",
+      "DescribeInstances",
+      "TerminateInstances",
+      "DescribeInstances",
+    ]);
+    expect(
+      requests
+        .slice(0, 4)
+        .every(({ authorization }) => authorization.includes("Credential=ACCOUNT_A/")),
+    ).toBe(true);
+    expect(requests.at(-1)?.authorization).toContain("Credential=ACCOUNT_B/");
+    expect(storage.value<LeaseRecord>(`lease:${activeID}`)).toMatchObject({
+      cleanupError: expect.stringContaining("ExpiredToken"),
+      tailscale: { enabled: true, ipv4: "100.64.0.10" },
+      sshHostKey: "ssh-ed25519 historical",
+      providerAccessExpiresAt,
+    });
+    expect(storage.value<LeaseRecord>(`lease:${activeID}`)?.cleanupCompletedAt).toBeUndefined();
+  });
+
+  it("terminates an owned unbound historical AWS instance when it is still present", async () => {
+    let terminated = false;
+    const fixture = awsIngressTestFleet(async (operation, params) => {
+      if (operation === "DescribeInstances") {
+        if (!params.get("InstanceId.1") || terminated) {
+          return awsEmptyDescribeInstancesResponse();
+        }
+        return ec2XMLResponse(
+          `<DescribeInstancesResponse><requestId>req-historical</requestId><reservationSet><item><instancesSet><item>
+            <instanceId>i-active-instance</instanceId><instanceState><name>running</name></instanceState>
+            <tagSet>
+              <item><key>crabbox</key><value>true</value></item>
+              <item><key>created_by</key><value>crabbox</value></item>
+              <item><key>lease</key><value>cbx_abcdef123456</value></item>
+              <item><key>owner</key><value>alice_example.com</value></item>
+              <item><key>provider</key><value>aws</value></item>
+              <item><key>slug</key><value>blue-lobster</value></item>
+            </tagSet>
+          </item></instancesSet></item></reservationSet></DescribeInstancesResponse>`,
+        );
+      }
+      if (operation === "TerminateInstances") {
+        terminated = true;
+        return ec2XMLResponse(
+          "<Response><instancesSet><item><instanceId>i-active-instance</instanceId></item></instancesSet></Response>",
+        );
+      }
+      return undefined;
+    });
+    const { storage, activeID, fleet, requests } = fixture;
+    const failedAt = new Date(Date.now() - 60_000).toISOString();
+    storage.seed(`lease:${activeID}`, {
+      ...storage.value<LeaseRecord>(`lease:${activeID}`)!,
+      state: "released",
+      keep: false,
+      releaseDeletesServer: true,
+      cleanupError: "prior cleanup was inconclusive",
+      cleanupFailedAt: failedAt,
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+
+    await fleet.alarm();
+
+    expect(storage.value<LeaseRecord>(`lease:${activeID}`)).toMatchObject({
+      state: "released",
+      host: "",
+      cleanupCompletedAt: expect.any(String),
+      provisioningResourceMayExist: false,
+    });
+    expect(requests.filter(({ action }) => action === "GetCallerIdentity")).toHaveLength(1);
+    expect(requests.filter(({ action }) => action === "TerminateInstances")).toHaveLength(1);
+  });
+
   it.each(
     [false, true].flatMap((privateNetwork) =>
       [false, true].flatMap((recoveredClaim) =>
@@ -25618,8 +26438,7 @@ describe("fleet lease identity and idle", () => {
           );
         }
         if (operation !== "DescribeInstances") return undefined;
-        if (!params.get("InstanceId.1"))
-          return ec2XMLResponse("<Response><reservationSet /></Response>");
+        if (!params.get("InstanceId.1")) return awsEmptyDescribeInstancesResponse();
         reads++;
         if (reads === 1 || !appears || terminated) {
           return ec2XMLResponse(
@@ -25628,7 +26447,7 @@ describe("fleet lease identity and idle", () => {
           );
         }
         return ec2XMLResponse(
-          `<Response><reservationSet><item><instancesSet><item><instanceId>i-active-instance</instanceId><instanceState><name>pending</name></instanceState><tagSet>${Object.entries(
+          `<DescribeInstancesResponse><requestId>req-propagated</requestId><reservationSet><item><instancesSet><item><instanceId>i-active-instance</instanceId><instanceState><name>pending</name></instanceState><tagSet>${Object.entries(
             {
               crabbox: "true",
               created_by: "crabbox",
@@ -25639,7 +26458,9 @@ describe("fleet lease identity and idle", () => {
             },
           )
             .map(([key, value]) => `<item><key>${key}</key><value>${value}</value></item>`)
-            .join("")}</tagSet></item></instancesSet></item></reservationSet></Response>`,
+            .join(
+              "",
+            )}</tagSet></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`,
         );
       });
       const { storage, activeID, fleet, headers, requests } = fixture;
@@ -25678,7 +26499,7 @@ describe("fleet lease identity and idle", () => {
         });
         const lease = storage.value<LeaseRecord>(`lease:${activeID}`)!;
         expect(Boolean(lease.cleanupError)).toBe(!appears);
-        expect(Boolean(lease.cleanupRetryAt)).toBe(!appears);
+        expect(lease.cleanupRetryAt).toBeUndefined();
         expect(terminated).toBe(appears);
         expect(delays).toEqual(appears ? [1_000] : [1_000, 2_000, 4_000, 8_000, 15_000, 30_000]);
         expect(requests.filter(({ action }) => action === "TerminateInstances")).toHaveLength(
@@ -25692,6 +26513,61 @@ describe("fleet lease identity and idle", () => {
     },
   );
 
+  it("retains explicit AWS allocation uncertainty after persistent empty visibility reads", async () => {
+    const delays: number[] = [];
+    vi.stubGlobal("setTimeout", ((callback: () => void, delay?: number) => {
+      delays.push(delay ?? 0);
+      queueMicrotask(callback);
+      return 0;
+    }) as typeof setTimeout);
+    const fixture = awsIngressTestFleet(async (operation) => {
+      if (operation === "DescribeInstances") {
+        return awsEmptyDescribeInstancesResponse();
+      }
+      return undefined;
+    });
+    const { storage, activeID, fleet, headers, requests } = fixture;
+    const failedAt = new Date(Date.now() - 60_000).toISOString();
+    storage.seed(`lease:${activeID}`, {
+      ...storage.value<LeaseRecord>(`lease:${activeID}`)!,
+      state: "failed",
+      slug: "newly-allocated",
+      providerKey: "",
+      releaseDeletesServer: true,
+      provisioningResourceMayExist: true,
+      provisioningFailureRetryable: false,
+      cleanupError: "provider allocation may exist",
+      cleanupFailedAt: failedAt,
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+
+    try {
+      await fleet.alarm();
+
+      const after = await fleet.fetch(request("GET", `/v1/leases/${activeID}`, { headers }));
+      await expect(after.json()).resolves.toMatchObject({
+        lease: { state: "failed", host: "192.0.2.1" },
+      });
+      expect(storage.value<LeaseRecord>(`lease:${activeID}`)).toMatchObject({
+        cloudID: "i-active-instance",
+        releaseDeletesServer: true,
+        provisioningResourceMayExist: true,
+        provisioningFailureRetryable: false,
+        cleanupError: expect.stringContaining("aws instance not found: i-active-instance"),
+        cleanupFailedAt: expect.any(String),
+      });
+      expect(storage.value<LeaseRecord>(`lease:${activeID}`)?.cleanupCompletedAt).toBeUndefined();
+      expect(storage.value<LeaseRecord>(`lease:${activeID}`)?.cleanupRetryAt).toBeUndefined();
+      expect(delays).toEqual([1_000, 2_000, 4_000, 8_000, 15_000, 30_000]);
+      expect(
+        requests.filter(({ action }) => action === "DescribeInstances").length,
+      ).toBeGreaterThanOrEqual(7);
+      expect(requests.filter(({ action }) => action === "TerminateInstances")).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it.each([false, true])(
     "retains AWS cleanup debt when termination is not acknowledged (private=%s)",
     async (privateNetwork) => {
@@ -25703,10 +26579,9 @@ describe("fleet lease identity and idle", () => {
           );
         }
         if (operation !== "DescribeInstances") return undefined;
-        if (!params.get("InstanceId.1"))
-          return ec2XMLResponse("<Response><reservationSet /></Response>");
+        if (!params.get("InstanceId.1")) return awsEmptyDescribeInstancesResponse();
         return ec2XMLResponse(
-          `<Response><reservationSet><item><instancesSet><item><instanceId>i-active-instance</instanceId><instanceState><name>pending</name></instanceState><tagSet>${Object.entries(
+          `<DescribeInstancesResponse><requestId>req-unacknowledged</requestId><reservationSet><item><instancesSet><item><instanceId>i-active-instance</instanceId><instanceState><name>pending</name></instanceState><tagSet>${Object.entries(
             {
               crabbox: "true",
               created_by: "crabbox",
@@ -25717,7 +26592,9 @@ describe("fleet lease identity and idle", () => {
             },
           )
             .map(([key, value]) => `<item><key>${key}</key><value>${value}</value></item>`)
-            .join("")}</tagSet></item></instancesSet></item></reservationSet></Response>`,
+            .join(
+              "",
+            )}</tagSet></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`,
         );
       });
       const { storage, activeID, fleet, headers, requests } = fixture;
@@ -25742,8 +26619,8 @@ describe("fleet lease identity and idle", () => {
         cloudID: "i-active-instance",
         releaseDeletesServer: true,
         cleanupError: expect.stringContaining("InvalidInstanceID.NotFound"),
-        cleanupRetryAt: expect.any(String),
       });
+      expect(storage.value<LeaseRecord>(`lease:${activeID}`)?.cleanupRetryAt).toBeUndefined();
       expect(requests.filter(({ action }) => action === "TerminateInstances")).toHaveLength(1);
     },
   );
@@ -26141,6 +27018,344 @@ describe("fleet lease identity and idle", () => {
       authorized.filter(({ region }) => region === "us-east-1").map(({ cidr }) => cidr),
     ).toEqual(["198.51.100.20/32"]);
   });
+
+  it("persists each AWS fallback region before RunInstances", async () => {
+    const observed: Array<{ region: string; persistedRegion: string | undefined }> = [];
+    let fixture: ReturnType<typeof awsIngressTestFleet>;
+    fixture = awsIngressTestFleet(async (action, _params, region) => {
+      if (action !== "RunInstances") return undefined;
+      observed.push({
+        region,
+        persistedRegion: fixture.storage.value<LeaseRecord>(`lease:${fixture.creatingID}`)?.region,
+      });
+      if (region === "eu-west-1") {
+        return ec2XMLResponse(
+          "<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code></Error></Errors></Response>",
+          400,
+        );
+      }
+      return undefined;
+    });
+
+    const response = await fixture.create({
+      capacity: { market: "on-demand", fallback: "none", regions: ["eu-west-1", "us-east-1"] },
+    });
+
+    expect(response.status).toBe(201);
+    expect(observed).toEqual([
+      { region: "eu-west-1", persistedRegion: "eu-west-1" },
+      { region: "us-east-1", persistedRegion: "us-east-1" },
+    ]);
+  });
+
+  it("recovers an interrupted AWS fallback create in its persisted region after restart", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const creating = testFleet(storage, {
+      aws: fakeProvider(undefined, {
+        provider: "aws",
+        onPrepareLeaseCreate(config, lease) {
+          return {
+            config,
+            lease: { ...lease, providerScope: "aws:account:123456789012" },
+            provisioning: {},
+          };
+        },
+        async onCreateProvisioning(provisioning) {
+          await provisioning?.onTargetAttempt?.({ region: "us-east-1" });
+          throw new ProviderProvisioningOutcomeUncertainError(
+            "connection lost before allocation claim",
+          );
+        },
+      }),
+    });
+    const response = await creating.fetch(
+      request("PUT", `/v1/leases/${leaseID}`, {
+        body: {
+          provider: "aws",
+          awsRegion: "eu-west-1",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(response.status).toBe(500);
+    const interrupted = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+    expect(interrupted).toMatchObject({
+      state: "failed",
+      cloudID: "",
+      region: "us-east-1",
+      provisioningResourceMayExist: true,
+      provisioningRequestSettledAt: expect.any(String),
+    });
+
+    const now = Date.now();
+    storage.seed(`lease:${leaseID}`, {
+      ...interrupted,
+      provisioningCoordinatorVersion: "old-version",
+      provisioningRecoveryObservedAt: new Date(now - 10 * 60_000).toISOString(),
+      cleanupRetryAt: new Date(now - 1_000).toISOString(),
+    });
+    const recoveryRequests: Array<{ action: string; region: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const signed = input instanceof Request ? input : new Request(input, init);
+        const action =
+          new URLSearchParams(await requestBodyForTest(input, init)).get("Action") ?? "";
+        const region = new URL(signed.url).hostname.split(".")[1] ?? "";
+        recoveryRequests.push({ action, region });
+        if (action === "GetCallerIdentity") return awsIdentityResponse("123456789012");
+        if (action === "DescribeInstances") {
+          return awsEmptyDescribeInstancesResponse();
+        }
+        throw new Error(`unexpected AWS recovery action: ${action}`);
+      }),
+    );
+    const restarted = testFleet(
+      storage,
+      {},
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "test",
+        CRABBOX_AWS_ORPHAN_SWEEP_ENABLED: "0",
+        CF_VERSION_METADATA: {
+          id: "new-version",
+          timestamp: new Date(now).toISOString(),
+        },
+      },
+    );
+
+    await restarted.alarm();
+
+    expect(recoveryRequests).toEqual([
+      { action: "GetCallerIdentity", region: "us-east-1" },
+      { action: "DescribeInstances", region: "us-east-1" },
+    ]);
+  });
+
+  it("does not mutate AWS when fallback-region persistence fails", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    let providerMutations = 0;
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, {
+        provider: "aws",
+        onPrepareLeaseCreate(config, lease) {
+          return { config, lease, provisioning: {} };
+        },
+        async onCreateProvisioning(provisioning) {
+          await provisioning?.onTargetAttempt?.({ region: "us-east-1" });
+          providerMutations += 1;
+        },
+      }),
+    });
+    storage.beforePut = async (key, value) => {
+      const lease = value as LeaseRecord;
+      if (
+        key === `lease:${leaseID}` &&
+        lease.state === "provisioning" &&
+        lease.region === "us-east-1" &&
+        !lease.cloudID
+      ) {
+        throw new Error("fallback region persistence failed");
+      }
+    };
+
+    const response = await fleet.fetch(
+      request("PUT", `/v1/leases/${leaseID}`, {
+        body: {
+          provider: "aws",
+          awsRegion: "eu-west-1",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(providerMutations).toBe(0);
+  });
+
+  it("fences interrupted provisioning recovery when the AWS region changes", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const now = Date.now();
+    const recoveryStarted = deferred<void>();
+    const finishRecovery = deferred<void>();
+    const observedRegions: Array<string | undefined> = [];
+    const fleet = testFleet(
+      storage,
+      {
+        aws: fakeProvider(undefined, {
+          provider: "aws",
+          async onRecoverServer(lease) {
+            observedRegions.push(lease.region);
+            recoveryStarted.resolve();
+            await finishRecovery.promise;
+            return undefined;
+          },
+        }),
+      },
+      {
+        CF_VERSION_METADATA: {
+          id: "new-version",
+          timestamp: new Date(now - 10 * 60_000).toISOString(),
+        },
+      },
+    );
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        provider: "aws",
+        region: "eu-west-1",
+        cloudID: "",
+        serverID: 0,
+        serverName: "",
+        host: "",
+        state: "provisioning",
+        provisioningRequestStartedAt: new Date(now - 60_000).toISOString(),
+        provisioningRequestSettledAt: new Date(now - 59_000).toISOString(),
+        provisioningCoordinatorVersion: "old-version",
+        provisioningRecoveryObservedAt: new Date(now - 10 * 60_000).toISOString(),
+        expiresAt: new Date(now + 60 * 60_000).toISOString(),
+      }),
+    );
+
+    const recovery = fleet.alarm();
+    await recoveryStarted.promise;
+    storage.seed(`lease:${leaseID}`, {
+      ...storage.value<LeaseRecord>(`lease:${leaseID}`)!,
+      region: "us-east-1",
+    });
+    finishRecovery.resolve();
+    await recovery;
+
+    expect(observedRegions).toEqual(["eu-west-1"]);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "provisioning",
+      region: "us-east-1",
+    });
+    expect(
+      storage.value<LeaseRecord>(`lease:${leaseID}`)?.provisioningRecoveryMissingSince,
+    ).toBeUndefined();
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.cleanupError).toBeUndefined();
+  });
+
+  it.each([
+    {
+      name: "ordinary POST cancellation",
+      method: "POST",
+      action: "cancel-create",
+      expected: {
+        status: 409,
+        error: "create_canceled",
+        message: "create attempt was canceled before completion",
+        leaseState: undefined,
+      },
+    },
+    {
+      name: "fixed PUT release",
+      method: "PUT",
+      action: "release",
+      expected: {
+        status: 409,
+        error: "lease_state_changed",
+        message: "lease changed state before provider mutation",
+        leaseState: "released",
+      },
+    },
+  ] as const)(
+    "aborts AWS dispatch when $name wins before the target fence",
+    async ({ method, action, expected }) => {
+      const fixture = awsIngressTestFleet();
+      const { storage, fleet, headers, create, creatingID, createAttemptID, requests } = fixture;
+      const raceReached = deferred<void>();
+      const finishFence = deferred<void>();
+      const prepare = AWSProvider.prototype.prepareLeaseCreate;
+      const prepared = vi
+        .spyOn(AWSProvider.prototype, "prepareLeaseCreate")
+        .mockImplementation(async function (...args) {
+          const result = await prepare.apply(this, args);
+          if (!result) return result;
+          const originalTargetAttempt = result.provisioning?.onTargetAttempt;
+          return {
+            ...result,
+            provisioning: {
+              ...result.provisioning,
+              onTargetAttempt: async (target) => {
+                await originalTargetAttempt?.(target);
+                let blocked = false;
+                storage.afterGet = async (key) => {
+                  if (blocked || key !== `create-attempt:${creatingID}`) return;
+                  blocked = true;
+                  raceReached.resolve();
+                  await finishFence.promise;
+                };
+              },
+            },
+          };
+        });
+      const creating = create({}, method);
+
+      try {
+        await Promise.race([
+          raceReached.promise,
+          creating.then(async (response) => {
+            throw new Error(await response.clone().text());
+          }),
+        ]);
+        const canceled = await fleet.fetch(
+          request("POST", `/v1/leases/${creatingID}/${action}`, {
+            headers,
+            body: action === "cancel-create" ? { createAttemptID } : { delete: true },
+          }),
+        );
+        expect(canceled.status).toBe(200);
+        const terminal = structuredClone(storage.value<LeaseRecord>(`lease:${creatingID}`));
+        const requestsBeforeResume = requests.length;
+
+        finishFence.resolve();
+        const response = await creating;
+        const body = (await response.json()) as {
+          error?: string;
+          message?: string;
+          lease?: LeaseRecord;
+        };
+        expect({
+          status: response.status,
+          error: body.error,
+          message: body.message,
+          leaseState: body.lease?.state,
+        }).toEqual(expected);
+        expect(
+          requests
+            .slice(requestsBeforeResume)
+            .filter(({ action: providerAction }) =>
+              [
+                "ImportKeyPair",
+                "AuthorizeSecurityGroupIngress",
+                "RevokeSecurityGroupIngress",
+                "RunInstances",
+              ].includes(providerAction),
+            ),
+        ).toEqual([]);
+        expect(
+          requests.filter(({ action: providerAction }) => providerAction === "RunInstances"),
+        ).toEqual([]);
+        expect(storage.value<LeaseRecord>(`lease:${creatingID}`)).toEqual(terminal);
+        expect(terminal).toMatchObject({
+          state: "released",
+          cloudID: "",
+          serverID: 0,
+          releaseDeletesServer: true,
+        });
+      } finally {
+        finishFence.resolve();
+        await Promise.allSettled([creating]);
+        prepared.mockRestore();
+      }
+    },
+  );
 
   it.each([
     { action: "cancel-create", region: "eu-west-1" },
@@ -29914,8 +31129,16 @@ describe("fleet lease identity and idle", () => {
 
   it("honors explicitly pinned AWS SSH ingress CIDRs without adding the request source", async () => {
     let awsCIDRs: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => awsIdentityResponse("123456789012")),
+    );
     const storage = new MemoryStorage();
-    const aws = new AWSProvider({} as Env, "eu-west-1", storage);
+    const aws = new AWSProvider(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      "eu-west-1",
+      storage,
+    );
     const fleet = testFleet(storage, {
       aws: fakeProvider(undefined, {
         provider: "aws",
@@ -47119,6 +48342,47 @@ function ec2XMLResponse(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "application/xml" } });
 }
 
+function awsIdentityResponse(account: string): Response {
+  return ec2XMLResponse(`<GetCallerIdentityResponse><GetCallerIdentityResult>
+    <Arn>arn:aws:iam::${account}:user/crabbox</Arn>
+    <UserId>AIDAEXAMPLE</UserId><Account>${account}</Account>
+  </GetCallerIdentityResult></GetCallerIdentityResponse>`);
+}
+
+function awsEmptyDescribeInstancesResponse(): Response {
+  return ec2XMLResponse(
+    "<DescribeInstancesResponse><requestId>req-empty</requestId><reservationSet /></DescribeInstancesResponse>",
+  );
+}
+
+function awsOwnedInstanceResponse(cloudID: string): Response {
+  return awsOwnedInstancesResponse([cloudID]);
+}
+
+function awsOwnedInstancesResponse(cloudIDs: string[], owner = "alice_example.com"): Response {
+  return ec2XMLResponse(`<DescribeInstancesResponse><requestId>req-owned</requestId>
+    <reservationSet><item><ownerId>123456789012</ownerId><instancesSet>
+      ${cloudIDs
+        .map(
+          (cloudID) => `<item>
+        <instanceId>${cloudID}</instanceId><instanceState><name>running</name></instanceState>
+        <tagSet>
+          <item><key>crabbox</key><value>true</value></item>
+          <item><key>created_by</key><value>crabbox</value></item>
+          <item><key>lease</key><value>cbx_abcdef123456</value></item>
+          <item><key>owner</key><value>${owner}</value></item>
+          <item><key>provider</key><value>aws</value></item>
+          <item><key>slug</key><value>blue-lobster</value></item>
+          <item><key>crabbox_workspace</key><value>true</value></item>
+          <item><key>access_mode</key><value>ssm</value></item>
+        </tagSet>
+      </item>`,
+        )
+        .join("")}
+    </instancesSet></item></reservationSet>
+  </DescribeInstancesResponse>`);
+}
+
 async function requestBodyForTest(input: RequestInfo | URL, init?: RequestInit): Promise<string> {
   if (init?.body !== undefined) {
     return String(init.body);
@@ -47197,14 +48461,22 @@ function awsIngressTestFleet(
     action: string,
     params: URLSearchParams,
     region: string,
+    request: Request,
   ) => Promise<Response | undefined> = async () => undefined,
+  env: Partial<Env> = {},
 ) {
   const storage = new MemoryStorage();
   const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
   const activeID = "cbx_abcdef123456";
   const creatingID = "cbx_abcdef123457";
   const createAttemptID = "cat_00000000000000000000000000000179";
-  const requests: Array<{ action: string; cidr: string; region: string }> = [];
+  const requests: Array<{
+    action: string;
+    authorization: string;
+    cidr: string;
+    region: string;
+    sessionToken: string;
+  }> = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -47217,11 +48489,16 @@ function awsIngressTestFleet(
       const action = params.get("Action") ?? "";
       requests.push({
         action,
+        authorization: fetchRequest.headers.get("authorization") ?? "",
         cidr: params.get("IpPermissions.1.IpRanges.1.CidrIp") ?? "",
         region,
+        sessionToken: fetchRequest.headers.get("x-amz-security-token") ?? "",
       });
-      const response = await onRequest(action, params, region);
+      const response = await onRequest(action, params, region, fetchRequest);
       if (response) return response;
+      if (action === "GetCallerIdentity") {
+        return awsIdentityResponse("123456789012");
+      }
       if (action === "DescribeKeyPairs") {
         return ec2XMLResponse(
           "<Response><Errors><Error><Code>InvalidKeyPair.NotFound</Code></Error></Errors></Response>",
@@ -47240,7 +48517,7 @@ function awsIngressTestFleet(
       }
       if (action === "DescribeInstances") {
         return ec2XMLResponse(
-          "<Response><reservationSet><item><instancesSet><item><instanceId>i-new-instance</instanceId><instanceType>t3.small</instanceType><ipAddress>192.0.2.20</ipAddress><instanceState><name>running</name></instanceState></item></instancesSet></item></reservationSet></Response>",
+          "<DescribeInstancesResponse><requestId>req-default</requestId><reservationSet><item><instancesSet><item><instanceId>i-new-instance</instanceId><instanceType>t3.small</instanceType><ipAddress>192.0.2.20</ipAddress><instanceState><name>running</name></instanceState></item></instancesSet></item></reservationSet></DescribeInstancesResponse>",
         );
       }
       if (
@@ -47264,6 +48541,7 @@ function awsIngressTestFleet(
     {
       AWS_ACCESS_KEY_ID: "test",
       AWS_SECRET_ACCESS_KEY: "test",
+      ...env,
     },
   );
   storage.seed(
@@ -48228,6 +49506,43 @@ function ownedTestMachine(provider: "aws" | "azure" | "gcp", cloudID: string): P
       slug: "blue-lobster",
     },
   });
+}
+
+function stubAWSLeaseOperation(
+  overrides: Partial<{
+    findServer: (instanceID: string) => Promise<ProviderMachine | undefined>;
+    terminateServerAndWait: (instanceID: string) => Promise<void>;
+    deleteSSHKey: (name: string, leaseID: string) => Promise<void>;
+  }> = {},
+) {
+  const session = {
+    region: "eu-west-1",
+    async verifiedIdentity() {
+      return {
+        account: "123456789012",
+        arn: "arn:aws:iam::123456789012:user/crabbox",
+        userId: "AIDAEXAMPLE",
+        region: "eu-west-1",
+      };
+    },
+    findServer:
+      overrides.findServer ?? (async (instanceID: string) => ownedTestMachine("aws", instanceID)),
+    async waitForServerVisibility(instanceID: string) {
+      return (await session.findServer(instanceID))!;
+    },
+    async findCrabboxServerByLease() {
+      return undefined;
+    },
+    async findWorkspaceServerByLease() {
+      return undefined;
+    },
+    terminateServerAndWait: overrides.terminateServerAndWait ?? (async () => undefined),
+    deleteSSHKey: overrides.deleteSSHKey ?? (async () => undefined),
+  };
+  const scope = vi
+    .spyOn(EC2SpotClient.prototype, "withLeaseOperation")
+    .mockImplementation(async (operation) => await operation(session));
+  return { scope, session };
 }
 
 function workerCloudReleaseCases() {

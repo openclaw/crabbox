@@ -55,7 +55,6 @@ import {
   awsProvisioningErrorCategory,
   awsRegionCandidates,
   awsLeaseImageIdentity,
-  isAWSInstanceNotFoundError,
   isAWSRunInstancesOutcomeUncertain,
   isRetryableAWSProvisioningError,
   isAWSSecurityGroupRuleLimitError,
@@ -4639,17 +4638,18 @@ export class FleetCoordinator {
                 : undefined;
               if (
                 !current ||
+                !sameLeaseReleaseIdentity(current, record) ||
                 current.state !== "provisioning" ||
-                (createAttempt && !currentAttempt)
+                (createAttempt &&
+                  (!currentAttempt || !createAttemptMatchesLease(currentAttempt, current)))
               ) {
-                return;
+                throw new ProviderDispatchFenceError(current);
               }
+              current.region = region;
+              current.updatedAt = new Date().toISOString();
+              await this.putLease(current);
               if (record.provider === "aws") {
-                await this.markAWSIngressReconcilePending({ ...current, region });
-              } else {
-                current.region = region;
-                current.updatedAt = new Date().toISOString();
-                await this.putLease(current);
+                await this.markAWSIngressReconcilePending(current);
               }
               await this.scheduleAlarm();
             });
@@ -4740,6 +4740,17 @@ export class FleetCoordinator {
     const provisioned = await provider
       .createServerWithFallback(config, leaseID, slug, owner, provisioning)
       .catch(async (error: unknown) => {
+        if (error instanceof ProviderDispatchFenceError) {
+          if (createAttempt && !fixedCreate) return createCanceledResponse();
+          return json(
+            {
+              error: "lease_state_changed",
+              message: error.message,
+              ...(error.current ? { lease: publicLeaseRecord(error.current) } : {}),
+            },
+            { status: 409 },
+          );
+        }
         const cleanupClaim = validatedProviderProvisioningCleanupClaim(error, config.provider);
         await this.state.runExclusive(async () => {
           if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
@@ -19540,6 +19551,12 @@ class CreateAttemptCanceledError extends Error {
   }
 }
 
+class ProviderDispatchFenceError extends Error {
+  constructor(readonly current: LeaseRecord | undefined) {
+    super("lease changed state before provider mutation");
+  }
+}
+
 interface ProviderReadiness {
   provider: Provider;
   configured: boolean;
@@ -25636,7 +25653,8 @@ function sameProvisioningAttempt(
     current.provisioningRequestSettledAt === expected.provisioningRequestSettledAt &&
     current.provisioningCoordinatorVersion === expected.provisioningCoordinatorVersion &&
     current.provisioningRecoveryObservedAt === expected.provisioningRecoveryObservedAt &&
-    current.provisioningRecoveryMissingSince === expected.provisioningRecoveryMissingSince,
+    current.provisioningRecoveryMissingSince === expected.provisioningRecoveryMissingSince &&
+    current.region === expected.region,
   );
 }
 
@@ -28130,7 +28148,27 @@ function awsCheckpointResourceAbsent(message: string, resourceID: string): boole
   );
 }
 
+function awsProviderScopeAccount(providerScope: string | undefined): string | undefined {
+  if (providerScope === undefined) return undefined;
+  const match = /^aws:account:(\d{12})$/.exec(providerScope);
+  if (!match) {
+    throw new Error("malformed AWS provider scope: expected aws:account:<12-digit-account-id>");
+  }
+  return match[1]!;
+}
+
+function authenticatedAWSAccount(account: string): string {
+  if (!/^\d{12}$/.test(account)) {
+    throw new Error("authenticated AWS identity did not return a 12-digit account ID");
+  }
+  return account;
+}
+
+type AWSLeaseOperationSession = Parameters<Parameters<EC2SpotClient["withLeaseOperation"]>[0]>[0];
+
 export class AWSProvider implements CloudProvider {
+  readonly recoveryIsAuthoritative = true;
+
   private clientValue?: EC2SpotClient;
   private readonly region: string;
 
@@ -28230,18 +28268,103 @@ export class AWSProvider implements CloudProvider {
     return this.client.findServer(id);
   }
 
-  async recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
-    if (lease.network?.awsPrivate) {
-      if (lease.cloudID) {
-        const server = await this.findServer(lease.cloudID);
-        return server && providerMachineOwnedByLease(server, lease, "aws") ? server : undefined;
-      }
-      const server = await this.client.findWorkspaceServerByLease(lease.id);
-      return server && providerLabelsOwnedByLease(server.labels, lease, "aws") ? server : undefined;
+  private async observeLeaseServer(
+    lease: LeaseRecord,
+    session: AWSLeaseOperationSession,
+    observe: () => Promise<ProviderMachine | undefined>,
+    ownership?: "machine" | "labels",
+  ): Promise<ProviderMachine | undefined> {
+    const leaseRegion = lease.region?.trim();
+    if (!leaseRegion || leaseRegion !== session.region) {
+      throw new ProviderResourceUnresolvedError(
+        `AWS lease region does not match the cleanup session: recorded ${leaseRegion || "missing"}, session ${session.region}`,
+      );
     }
-    if (!lease.cloudID) return undefined;
-    const server = await this.findServer(lease.cloudID);
-    return server && providerMachineOwnedByLease(server, lease, "aws") ? server : undefined;
+    let recordedAccount: string | undefined;
+    try {
+      recordedAccount = awsProviderScopeAccount(lease.providerScope);
+    } catch (error) {
+      throw new ProviderResourceUnresolvedError(
+        error instanceof Error ? error.message : "malformed AWS provider scope",
+        { cause: error },
+      );
+    }
+    let authenticatedAccount: string;
+    try {
+      authenticatedAccount = authenticatedAWSAccount((await session.verifiedIdentity()).account);
+      if (recordedAccount && recordedAccount !== authenticatedAccount) {
+        throw new ProviderResourceUnresolvedError(
+          `AWS lease account scope does not match the authenticated account: recorded ${recordedAccount}, authenticated ${authenticatedAccount}`,
+        );
+      }
+    } catch (error) {
+      if (error instanceof ProviderResourceUnresolvedError) throw error;
+      throw new ProviderResourceUnresolvedError(
+        "AWS lease account scope could not be freshly verified",
+        { cause: error },
+      );
+    }
+    let server: ProviderMachine | undefined;
+    try {
+      server = await observe();
+    } catch (error) {
+      if (error instanceof ProviderResourceUnresolvedError) throw error;
+      throw new ProviderResourceUnresolvedError(
+        `AWS lease resource observation failed: ${coordinatorErrorMessage(this.env, error)}`,
+        { cause: error },
+      );
+    }
+    if (!server && !recordedAccount) {
+      throw new ProviderResourceUnresolvedError(
+        "AWS lease account scope was not persisted; refusing to confirm instance absence",
+      );
+    }
+    if (
+      server &&
+      ((ownership === "machine" && !providerMachineOwnedByLease(server, lease, "aws")) ||
+        (ownership === "labels" && !providerLabelsOwnedByLease(server.labels, lease, "aws")))
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        `AWS recovery resource ${server.cloudID} ownership does not match lease ${lease.id}`,
+      );
+    }
+    return server;
+  }
+
+  private async withLeaseOperation<T>(
+    operation: (session: AWSLeaseOperationSession) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await this.client.withLeaseOperation(operation);
+    } catch (error) {
+      if (error instanceof ProviderResourceUnresolvedError) throw error;
+      throw new ProviderResourceUnresolvedError(
+        `AWS lease cleanup authority could not be established: ${coordinatorErrorMessage(this.env, error)}`,
+        { cause: error },
+      );
+    }
+  }
+
+  async recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
+    return await this.withLeaseOperation(async (session) => {
+      if (!lease.cloudID) {
+        return await this.observeLeaseServer(
+          lease,
+          session,
+          () =>
+            lease.network?.awsPrivate
+              ? session.findWorkspaceServerByLease(lease.id)
+              : session.findCrabboxServerByLease(lease.id),
+          "labels",
+        );
+      }
+      return await this.observeLeaseServer(
+        lease,
+        session,
+        () => session.findServer(lease.cloudID),
+        "machine",
+      );
+    });
   }
 
   async resumeRecoveredServer(
@@ -28376,12 +28499,17 @@ export class AWSProvider implements CloudProvider {
     lease: LeaseRecord,
     context: ProviderAccessContext,
   ): Promise<ProviderLeaseCreatePreparation> {
-    if (config.target === "macos") {
-      const identity = await this.client.verifiedIdentity();
-      if (!/^\d{12}$/.test(identity.account)) {
-        throw new Error("AWS Mac host ownership requires an authenticated 12-digit account ID");
-      }
-      lease = { ...lease, providerScope: `aws:account:${identity.account}` };
+    const recordedAccount = awsProviderScopeAccount(lease.providerScope);
+    const authenticatedAccount = authenticatedAWSAccount(
+      (await this.client.verifiedIdentity()).account,
+    );
+    if (recordedAccount && recordedAccount !== authenticatedAccount) {
+      throw new Error(
+        `AWS provider scope conflicts with authenticated account: recorded ${recordedAccount}, authenticated ${authenticatedAccount}`,
+      );
+    }
+    if (!recordedAccount) {
+      lease = { ...lease, providerScope: `aws:account:${authenticatedAccount}` };
     }
     if (config.awsPrivate) {
       const policy = awsPrivateWorkspaceConfig(this.env);
@@ -28776,10 +28904,11 @@ export class AWSProvider implements CloudProvider {
         }
         return { ...result, ...history.result(attempts) };
       } catch (error) {
-        // Keep cancellation typed so the create owner records cleanup debt before
-        // returning its terminal response, even after an earlier regional failure.
+        // Preserve owner fence types: cancellation after dispatch records cleanup
+        // debt, while a pre-mutation fence bypasses failure bookkeeping entirely.
         if (
           error instanceof CreateAttemptCanceledError ||
+          error instanceof ProviderDispatchFenceError ||
           providerProvisioningCleanupClaim(error) ||
           error instanceof ProviderResourceUnresolvedError
         ) {
@@ -28833,36 +28962,34 @@ export class AWSProvider implements CloudProvider {
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
-    const unsettledAllocation = Boolean(
-      lease.provisioningRequestStartedAt || lease.provisioningResourceMayExist,
-    );
-    // A new EC2 allocation can be absent from reads before its ID propagates.
-    const server = await ownedProviderMachineForRelease("aws", lease, (id) =>
-      unsettledAllocation ? this.client.waitForServerVisibility(id) : this.findServer(id),
-    );
-    try {
-      if (server) {
-        await this.client.terminateServerAndWait(lease.cloudID);
-      }
-    } catch (error) {
-      const message = coordinatorErrorMessage(this.env, error);
-      if (unsettledAllocation || !isAWSInstanceNotFoundError(message)) {
-        throw error;
-      }
-      console.warn(
-        `AWS lease cleanup found missing instance lease=${lease.id} cloud=${lease.cloudID}: ${message}`,
+    await this.withLeaseOperation(async (session) => {
+      const unsettledAllocation = Boolean(
+        lease.provisioningRequestStartedAt || lease.provisioningResourceMayExist,
       );
-    }
-    if (lease.network?.awsPrivate) {
-      privateAWSWorkspaceLifecycleLog("terminated", {
-        lease_id: lease.id,
-        cloud_id: lease.cloudID,
-        region: lease.region,
-      });
-    }
-    if (leaseUsesCanonicalProviderKey(lease)) {
-      await this.deleteSSHKey(lease.providerKey, lease.id);
-    }
+      // A new EC2 allocation can be absent from reads before its ID propagates.
+      const server = await ownedProviderMachineForRelease("aws", lease, (id) =>
+        this.observeLeaseServer(
+          lease,
+          session,
+          () =>
+            unsettledAllocation ? session.waitForServerVisibility(id) : session.findServer(id),
+          "machine",
+        ),
+      );
+      if (server) {
+        await session.terminateServerAndWait(lease.cloudID);
+      }
+      if (lease.network?.awsPrivate) {
+        privateAWSWorkspaceLifecycleLog("terminated", {
+          lease_id: lease.id,
+          cloud_id: lease.cloudID,
+          region: lease.region,
+        });
+      }
+      if (leaseUsesCanonicalProviderKey(lease)) {
+        await session.deleteSSHKey(lease.providerKey, lease.id);
+      }
+    });
   }
 
   supportsNativeImages(): boolean {
