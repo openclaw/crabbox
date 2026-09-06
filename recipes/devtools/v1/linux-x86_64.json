@@ -1,0 +1,23 @@
+{
+  "schema": "crabbox-devtools-image-recipe/v1",
+  "id": "linux-x86_64",
+  "platform": {
+    "os": "linux",
+    "architecture": "x86_64"
+  },
+  "execution": {
+    "command": "bash",
+    "arguments": ["scripts/install-linux-developer-tools.sh"],
+    "environment": {}
+  },
+  "inputs": [
+    {
+      "path": "scripts/install-linux-developer-tools.sh",
+      "sha256": "sha256:45bc70edfb4cd8e2aaf69bb562f2edde0f1a00dbcfeb2760bdba0627c5e1e86e"
+    },
+    {
+      "path": "scripts/linux-readiness.generated.sh",
+      "sha256": "sha256:d2f50feed717c99d2405165d25a37dc3c3aa19daabf1c0c1304ffd9e361ca56d"
+    }
+  ]
+}

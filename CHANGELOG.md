@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Blaxel: share sandbox run finalization so automatic deletion failures no longer report success, early setup failures retain recovery sessions, and primary command failures survive cleanup or timing errors; recheck original claim and remote ownership before automatic deletion. [PR 1919](https://github.com/openclaw/crabbox/pull/1919).
+- Define a strict provider-neutral Linux developer-image recipe whose digest binds the executable contract and exact installer/readiness source hashes.
 - Extract protected image-qualification candidates at the canonical artifact path and avoid protected finalization when deployment never started.
 - Stop SSH readiness promptly on host-key rejection, including WSL SFTP and split or oversized diagnostics, without changing host trust. [PR 1877](https://github.com/openclaw/crabbox/pull/1877). Thanks @shunkakinoki.
 - Apple Machine: fail runs when automatic deletion fails or remains unconfirmed, retain recovery sessions for early keep-on-failure errors, and preserve command outcomes while distinguishing native transport failures through the shared error handlers. [PR 1914](https://github.com/openclaw/crabbox/pull/1914).
@@ -15,6 +15,7 @@
 - Fix documentation table-of-contents links for repeated headings so each link reaches its own section, while preserving existing first-heading URLs. [PR 1787](https://github.com/openclaw/crabbox/pull/1787). Thanks @steipete.
 - Shared sandbox runs: keep secondary cleanup and timing errors visible in CLI diagnostics without replacing the primary exit code. [PR 1907](https://github.com/openclaw/crabbox/pull/1907).
 - Freestyle: share sandbox run finalization so automatic deletion failures no longer report success, command failures survive later cleanup or timing errors, and transport cancellation causes remain available to callers. [PR 1907](https://github.com/openclaw/crabbox/pull/1907).
+- Blaxel: share sandbox run finalization so automatic deletion failures no longer report success, early setup failures retain recovery sessions, and primary command failures survive cleanup or timing errors; recheck original claim and remote ownership before automatic deletion. [PR 1919](https://github.com/openclaw/crabbox/pull/1919).
 - Tensorlake: honor cancellation while waiting for run admission and ownership publication, and include claim-lock waiting in the detached failed-create rollback budget without losing the original failure or adopting a successor claim. [PR 1906](https://github.com/openclaw/crabbox/pull/1906).
 - Require a fenced provider-cleanup completion fact before coordinator leases retire local credentials, confirm AWS instance termination before completion, and preserve provider identity while clearing stale remote access. [PR 1901](https://github.com/openclaw/crabbox/pull/1901).
 - Group benchmark reports by record source and summarize successful runner totals, runner phases, sync phases, and sync skips without inventing telemetry for legacy rows. [PR 1896](https://github.com/openclaw/crabbox/pull/1896). Thanks @vincentkoc.
