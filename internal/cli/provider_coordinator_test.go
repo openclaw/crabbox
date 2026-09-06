@@ -25,6 +25,15 @@ import (
 	"time"
 )
 
+func mustNewCoordinatorClient(t *testing.T, cfg Config) *CoordinatorClient {
+	t.Helper()
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return coord
+}
+
 type coordinatorAcquireValidationBackend struct {
 	testSSHBackend
 	err   error
@@ -99,10 +108,7 @@ func TestCoordinatorListUsesUserLeasesWithoutAdminProbe(t *testing.T) {
 		CoordToken:      "user-token",
 		CoordAdminToken: "stale-admin-token",
 	}
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &stderr}}
 
 	servers, err := backend.List(context.Background(), ListRequest{})
@@ -149,10 +155,7 @@ func TestCoordinatorListAllFallsBackToUserLeasesWhenAdminTokenUnauthorized(t *te
 		CoordToken:      "user-token",
 		CoordAdminToken: "stale-admin-token",
 	}
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &stderr}}
 
 	servers, err := backend.List(context.Background(), ListRequest{All: true})
@@ -191,10 +194,7 @@ func TestCoordinatorListJSONUsesUserLeasesWhenAdminTokenMissing(t *testing.T) {
 	defer server.Close()
 
 	cfg := Config{Provider: "daytona", TargetOS: targetLinux, Coordinator: server.URL, CoordToken: "user-token"}
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	var stderr bytes.Buffer
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &stderr}}
 
@@ -248,10 +248,7 @@ func TestCoordinatorStatusRedactsDaytonaSSHAccessToken(t *testing.T) {
 		Coordinator: server.URL,
 		CoordToken:  "user-token",
 	}
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord}
 
 	status, err := backend.Status(context.Background(), StatusRequest{ID: "cbx_123"})
@@ -303,10 +300,7 @@ func TestCoordinatorStatusKeepsFourSecondWindowsSSHProbe(t *testing.T) {
 	cfg.Network = NetworkPublic
 	cfg.Coordinator = server.URL
 	cfg.CoordToken = "user-token"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord}
 	start := time.Now()
 	status, err := backend.Status(context.Background(), StatusRequest{ID: "cbx_windows_status"})
@@ -675,10 +669,7 @@ func TestCoordinatorAcquireSendsTailscaleHostnameTemplate(t *testing.T) {
 	cfg.CoordToken = "user-token"
 	cfg.Tailscale.Enabled = true
 	cfg.Tailscale.HostnameTemplate = "lease-{slug}"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
 
 	if _, err := backend.acquireOnce(context.Background(), false, "smoke"); err == nil || !strings.Contains(err.Error(), "stop after request capture") {
@@ -752,10 +743,7 @@ func TestCoordinatorAcquirePreservesAWSSSHCIDROwnership(t *testing.T) {
 			cfg.Coordinator = server.URL
 			cfg.CoordToken = "user-token"
 			cfg.AWSSSHCIDRs = test.cidrs
-			coord, _, err := newCoordinatorClient(cfg)
-			if err != nil {
-				t.Fatal(err)
-			}
+			coord := mustNewCoordinatorClient(t, cfg)
 			backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: io.Discard}}
 			if _, err := backend.acquireOnce(context.Background(), false, "cidr-source"); err == nil || !strings.Contains(err.Error(), "stop after request capture") {
 				t.Fatalf("err=%v, want captured request error", err)
@@ -803,10 +791,7 @@ func TestCoordinatorFixedAcquireUsesRequestedIDAndJoinsProvisioning(t *testing.T
 	cfg.TargetOS = targetLinux
 	cfg.Coordinator = server.URL
 	cfg.CoordToken = "user-token"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
 	lease, err := backend.createCoordinatorLeaseWithProgressMode(
 		context.Background(), cfg, "ssh-ed25519 test", true,
@@ -873,10 +858,7 @@ func TestCoordinatorAcquireRetainsCurrentProvisioningTiming(t *testing.T) {
 	cfg.TargetOS = targetLinux
 	cfg.Coordinator = server.URL
 	cfg.CoordToken = "user-token"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: io.Discard}}
 	acquired, err := backend.Acquire(context.Background(), AcquireRequest{
 		Keep: true, RequestedLeaseID: lease.ID, RequestedSlug: lease.Slug,
@@ -925,10 +907,7 @@ func TestCoordinatorAcquirePollsCanonicalIDFromProvisioningReplay(t *testing.T) 
 	cfg.TargetOS = targetLinux
 	cfg.Coordinator = server.URL
 	cfg.CoordToken = "user-token"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
 	lease, err := backend.createCoordinatorLeaseWithProgressMode(
 		context.Background(), cfg, "ssh-ed25519 test", true, requestedID, "retained-canonical", false,
@@ -988,10 +967,7 @@ func TestCoordinatorFixedAcquireInvokesOnAcquiredOnceAndPropagatesError(t *testi
 	cfg.TargetOS = targetLinux
 	cfg.Coordinator = server.URL
 	cfg.CoordToken = "user-token"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
 	want := errors.New("acknowledgment rejected")
 	callbacks := 0
@@ -1041,14 +1017,11 @@ func TestCoordinatorFixedAcquireDoesNotReleaseCommittedLeaseAfterClientBootstrap
 	cfg.TargetOS = targetLinux
 	cfg.Coordinator = server.URL
 	cfg.CoordToken = "user-token"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err = backend.Acquire(ctx, AcquireRequest{
+	_, err := backend.Acquire(ctx, AcquireRequest{
 		Keep: true, RequestedLeaseID: "cbx_abcdef123457", RequestedSlug: "fixed-bootstrap",
 	})
 	if err == nil {
@@ -1434,16 +1407,13 @@ func TestCoordinatorCreateLeaseTimesOutWithDiagnostics(t *testing.T) {
 	cfg.ServerType = "Standard_D32ads_v6"
 	cfg.Coordinator = server.URL
 	cfg.CoordToken = "user-token"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	var stderr bytes.Buffer
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &stderr}}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, err = backend.createCoordinatorLeaseWithProgress(ctx, cfg, "ssh-rsa test", false, "cbx_timeout", "crimson-lobster")
+	_, err := backend.createCoordinatorLeaseWithProgress(ctx, cfg, "ssh-rsa test", false, "cbx_timeout", "crimson-lobster")
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -1541,10 +1511,7 @@ func TestCoordinatorCreateLeaseCancellationUsesExactDurableAttemptToken(t *testi
 	cfg.TargetOS = targetLinux
 	cfg.Coordinator = server.URL
 	cfg.CoordToken = "user-token"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	var stderr bytes.Buffer
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &stderr}}
 
@@ -1638,10 +1605,7 @@ func TestCanceledCoordinatorCreateRetriesTransientCancelFailure(t *testing.T) {
 	cfg.TargetOS = targetLinux
 	cfg.Coordinator = server.URL
 	cfg.CoordToken = "user-token"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	backend := &coordinatorLeaseBackend{coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
 	recoverCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -1783,10 +1747,7 @@ func TestCoordinatorFixedCreateCancellationDoesNotReleaseDurableLease(t *testing
 	cfg.TargetOS = targetLinux
 	cfg.Coordinator = server.URL
 	cfg.CoordToken = "user-token"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
 	ctx, cancel := context.WithCancel(context.Background())
 	resultCh := make(chan coordinatorCreateLeaseResult, 1)
@@ -1883,10 +1844,7 @@ func TestCanceledCoordinatorCreateAcceptsDurableTombstoneWithoutLease(t *testing
 	cfg.TargetOS = targetLinux
 	cfg.Coordinator = server.URL
 	cfg.CoordToken = "user-token"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	backend := &coordinatorLeaseBackend{
 		cfg:   cfg,
 		coord: coord,
@@ -1946,13 +1904,10 @@ func TestCanceledCoordinatorCreateValidatesAttestation(t *testing.T) {
 			cfg.TargetOS = targetLinux
 			cfg.Coordinator = server.URL
 			cfg.CoordToken = "user-token"
-			coord, _, err := newCoordinatorClient(cfg)
-			if err != nil {
-				t.Fatal(err)
-			}
+			coord := mustNewCoordinatorClient(t, cfg)
 			backend := &coordinatorLeaseBackend{coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
 
-			err = backend.cancelCoordinatorLeaseCreate(
+			err := backend.cancelCoordinatorLeaseCreate(
 				context.Background(),
 				"cbx_cancel_expected",
 				"expected-crab",
@@ -2053,10 +2008,7 @@ func TestCoordinatorCreateLeaseRecoversWithSameTokenBoundPost(t *testing.T) {
 	cfg.WindowsMode = windowsModeNormal
 	cfg.Coordinator = server.URL
 	cfg.CoordToken = "user-token"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	var stderr bytes.Buffer
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &stderr}}
 
@@ -2108,10 +2060,7 @@ func TestCoordinatorCreateLeaseDefinitiveErrorDoesNotReconcile(t *testing.T) {
 	cfg.TargetOS = targetLinux
 	cfg.Coordinator = server.URL
 	cfg.CoordToken = "user-token"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	backend := &coordinatorLeaseBackend{
 		cfg:   cfg,
 		coord: coord,
@@ -2176,12 +2125,9 @@ func TestCoordinatorFixedCreateAmbiguousErrorRepeatsPutAndDoesNotAdoptConflictin
 	cfg.TargetOS = targetLinux
 	cfg.Coordinator = server.URL
 	cfg.CoordToken = "user-token"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
-	_, err = backend.createCoordinatorLeaseWithProgressMode(
+	_, err := backend.createCoordinatorLeaseWithProgressMode(
 		context.Background(), cfg, "ssh-ed25519 test", true,
 		"cbx_abcdef123462", "fixed-conflict", true,
 	)
@@ -2573,10 +2519,7 @@ func TestCoordinatorResolveFallsBackToAdminToken(t *testing.T) {
 		CoordToken:      "user-token",
 		CoordAdminToken: "admin-token",
 	}
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
 
 	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "cbx_admin"})
@@ -3063,10 +3006,7 @@ func newCoordinatorIdentityTestBackend(t *testing.T, serverURL, adminToken strin
 	cfg.Coordinator = serverURL
 	cfg.CoordToken = "user-token"
 	cfg.CoordAdminToken = adminToken
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	return &coordinatorLeaseBackend{
 		spec:  ProviderSpec{Name: "aws"},
 		cfg:   cfg,
@@ -3144,13 +3084,10 @@ func TestCoordinatorReleaseFallsBackToAdminToken(t *testing.T) {
 		CoordToken:      "user-token",
 		CoordAdminToken: "admin-token",
 	}
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
 
-	err = backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{
+	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{
 		LeaseID: "cbx_admin", Server: Server{Provider: "aws"},
 	}})
 	if err != nil {
@@ -3208,13 +3145,10 @@ func TestCoordinatorAcquireRollbackQueuesReleaseOnceWithoutObservation(t *testin
 	cfg.AWSSSHCIDRs = []string{"127.0.0.1/32"}
 	cfg.Coordinator = server.URL
 	cfg.CoordToken = "user-token"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	var stderr bytes.Buffer
 	backend := &coordinatorLeaseBackend{spec: ProviderSpec{Name: "aws"}, cfg: cfg, coord: coord, rt: Runtime{Stderr: &stderr}}
-	_, err = backend.acquireOnceWithLeaseID(context.Background(), false, "", "rollback-test")
+	_, err := backend.acquireOnceWithLeaseID(context.Background(), false, "", "rollback-test")
 	if err == nil || !strings.Contains(err.Error(), "did not provision desktop=true") {
 		t.Fatalf("acquire error=%v, want capability mismatch", err)
 	}
@@ -3300,14 +3234,11 @@ func TestCoordinatorAcquireCancelsStaleInstanceLease(t *testing.T) {
 	cfg.TargetOS = targetLinux
 	cfg.Coordinator = server.URL
 	cfg.CoordToken = "user-token"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	var stderr bytes.Buffer
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &stderr}}
 
-	_, err = backend.acquireOnce(context.Background(), false, "")
+	_, err := backend.acquireOnce(context.Background(), false, "")
 	if err == nil || !strings.Contains(err.Error(), "InvalidInstanceID.NotFound") {
 		t.Fatalf("err=%v", err)
 	}
@@ -3361,14 +3292,11 @@ func TestCoordinatorAcquireRetriesStaleInstanceAfterTokenCancellation(t *testing
 	cfg.TargetOS = targetLinux
 	cfg.Coordinator = server.URL
 	cfg.CoordToken = "user-token"
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	var stderr bytes.Buffer
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &stderr}}
 
-	_, err = backend.Acquire(context.Background(), AcquireRequest{})
+	_, err := backend.Acquire(context.Background(), AcquireRequest{})
 	if err == nil || !strings.Contains(err.Error(), "capacity exhausted after retry") {
 		t.Fatalf("err=%v", err)
 	}
@@ -3413,14 +3341,11 @@ func TestCoordinatorAcquireWrapsWorkerCleanupSignalWithoutRelease(t *testing.T) 
 	cfg.Coordinator = server.URL
 	cfg.CoordToken = "user-token"
 	cfg.AWSSSHCIDRs = []string{"0.0.0.0/0"}
-	coord, _, err := newCoordinatorClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	coord := mustNewCoordinatorClient(t, cfg)
 	var stderr bytes.Buffer
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &stderr}}
 
-	_, err = backend.acquireOnce(context.Background(), false, "")
+	_, err := backend.acquireOnce(context.Background(), false, "")
 	if err == nil || !strings.Contains(err.Error(), "InvalidInstanceID.NotFound") {
 		t.Fatalf("err=%v", err)
 	}
