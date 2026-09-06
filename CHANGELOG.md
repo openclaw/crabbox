@@ -3,6 +3,7 @@
 ## Unreleased
 
 - SmolVM: share sandbox run finalization so deletion failures no longer report success, early preparation failures honor keep-on-failure, and primary outcomes survive cleanup or timing errors while preserving provider keep policy and separate profile/resource cleanup budgets. [PR 1908](https://github.com/openclaw/crabbox/pull/1908).
+- Allow protected AWS image qualification to pass Node toolchain setup by omitting the unsupported `cache: false` input while keeping Go caching disabled. [PR 1909](https://github.com/openclaw/crabbox/pull/1909).
 - Fix documentation table-of-contents links for repeated headings so each link reaches its own section, while preserving existing first-heading URLs. [PR 1787](https://github.com/openclaw/crabbox/pull/1787). Thanks @steipete.
 - Shared sandbox runs: keep secondary cleanup and timing errors visible in CLI diagnostics without replacing the primary exit code. [PR 1907](https://github.com/openclaw/crabbox/pull/1907).
 - Freestyle: share sandbox run finalization so automatic deletion failures no longer report success, command failures survive later cleanup or timing errors, and transport cancellation causes remain available to callers. [PR 1907](https://github.com/openclaw/crabbox/pull/1907).
