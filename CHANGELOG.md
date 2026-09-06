@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- SmolVM: honor cancellation while waiting for ownership publication, reuse, and cleanup fences; include lock waiting in rollback budgets and preserve the acquisition exit when rollback also fails.
+- SmolVM: honor cancellation while waiting for ownership publication, reuse, and cleanup fences; include lock waiting in rollback budgets and preserve the acquisition exit when rollback also fails. [PR 1912](https://github.com/openclaw/crabbox/pull/1912).
 - SmolVM: share sandbox run finalization so deletion failures no longer report success, early preparation failures honor keep-on-failure, and primary outcomes survive cleanup or timing errors while preserving provider keep policy and separate profile/resource cleanup budgets. [PR 1908](https://github.com/openclaw/crabbox/pull/1908).
 - Fix documentation table-of-contents links for repeated headings so each link reaches its own section, while preserving existing first-heading URLs. [PR 1787](https://github.com/openclaw/crabbox/pull/1787). Thanks @steipete.
 - Shared sandbox runs: keep secondary cleanup and timing errors visible in CLI diagnostics without replacing the primary exit code. [PR 1907](https://github.com/openclaw/crabbox/pull/1907).
