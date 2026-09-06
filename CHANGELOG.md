@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Tensorlake: honor cancellation while waiting for run admission and ownership publication, and include claim-lock waiting in the detached failed-create rollback budget without losing the original failure or adopting a successor claim.
 - Require a fenced provider-cleanup completion fact before coordinator leases retire local credentials, confirm AWS instance termination before completion, and preserve provider identity while clearing stale remote access. [PR 1901](https://github.com/openclaw/crabbox/pull/1901).
 - Group benchmark reports by record source and summarize successful runner totals, runner phases, sync phases, and sync skips without inventing telemetry for legacy rows. [PR 1896](https://github.com/openclaw/crabbox/pull/1896). Thanks @vincentkoc.
 - Preserve requested capacity market for market-aware providers while coordinator provisioning is pending, and expose documented provisioning failure diagnostics in `crabbox inspect --json`.

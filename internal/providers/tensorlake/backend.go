@@ -67,7 +67,7 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		if err != nil {
 			return err
 		}
-		return core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error {
+		return core.WithLeaseClaimUnchangedContext(ctx, claim.LeaseID, claim, func() error {
 			item, err := cli.verifyBinding(ctx, binding)
 			if err == nil && item.State == "terminated" {
 				return exit(2, "Tensorlake sandbox has terminated; create a new lease")
@@ -331,8 +331,10 @@ func (b *tensorlakeBackend) createSandbox(ctx context.Context, cli *tensorlakeCL
 	}
 	binding := sandboxBinding{id, item.Namespace, scope}
 	rollback := func(cause error) (core.LeaseClaim, string, error) {
-		cleanupErr := core.CleanupLeaseClaimIfUnchangedAfter(leaseID, core.LeaseClaim{}, false, func() error {
-			return cli.terminateBound(context.Background(), binding)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), terminationTimeout)
+		defer cancel()
+		cleanupErr := core.CleanupLeaseClaimIfUnchangedAfterContext(cleanupCtx, leaseID, core.LeaseClaim{}, false, func() error {
+			return cli.terminateBound(cleanupCtx, binding)
 		})
 		if cleanupErr != nil {
 			return retained(errors.Join(cause, cleanupErr))
@@ -344,7 +346,7 @@ func (b *tensorlakeBackend) createSandbox(ctx context.Context, cli *tensorlakeCL
 		return rollback(err)
 	}
 	server := Server{Provider: providerName, CloudID: id, Name: name, Status: item.State, Labels: map[string]string{"provider": providerName, "lease": leaseID, "slug": slug, "target": targetLinux, "tensorlake_namespace": item.Namespace}}
-	claim, err := core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(leaseID, slug, b.cfg, scope, server, core.SSHTarget{}, repo.Root, b.cfg.IdleTimeout, reclaim, core.LeaseClaim{}, false, func() error {
+	claim, err := core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfterContext(ctx, leaseID, slug, b.cfg, scope, server, core.SSHTarget{}, repo.Root, b.cfg.IdleTimeout, reclaim, core.LeaseClaim{}, false, func() error {
 		item, err := cli.verifyBinding(ctx, binding)
 		if err == nil && item.State == "terminated" {
 			err = exit(2, "Tensorlake sandbox terminated before ownership publication")
@@ -379,7 +381,7 @@ func (b *tensorlakeBackend) resolveLease(ctx context.Context, cli *tensorlakeCLI
 	}
 	if repoRoot != "" {
 		server := Server{Provider: providerName, CloudID: claim.CloudID, Labels: shared.CloneLabels(claim.Labels)}
-		return core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(claim.LeaseID, claim.Slug, b.cfg, claim.ProviderScope, server, core.SSHTarget{}, repoRoot, timeoutOrDefault(b.cfg.IdleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), reclaim, claim, true, func() error {
+		return core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfterContext(ctx, claim.LeaseID, claim.Slug, b.cfg, claim.ProviderScope, server, core.SSHTarget{}, repoRoot, timeoutOrDefault(b.cfg.IdleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), reclaim, claim, true, func() error {
 			item, err := cli.verifyBinding(ctx, binding)
 			if err == nil && item.State == "terminated" {
 				err = exit(2, "Tensorlake sandbox has terminated; create a new lease")

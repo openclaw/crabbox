@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -197,9 +199,23 @@ func TestStaleCleanupRejectsBeforeNativeCalls(t *testing.T) {
 }
 
 func TestBoundCleanupDeadlineIncludesClaimWait(t *testing.T) {
+	assertTensorlakeClaimWaitDeadline(t, "cleanup")
+}
+
+func TestRunClaimDeadlineIncludesClaimWait(t *testing.T) {
+	for _, operation := range []string{"admission", "reclaim"} {
+		t.Run(operation, func(t *testing.T) {
+			assertTensorlakeClaimWaitDeadline(t, operation)
+		})
+	}
+}
+
+func assertTensorlakeClaimWaitDeadline(t *testing.T, operation string) {
+	t.Helper()
 	for _, shared := range []bool{false, true} {
 		t.Run(fmt.Sprintf("shared=%t", shared), func(t *testing.T) {
-			_, c, runner, claim := ownedTensorlakeFixture(t)
+			b, c, runner, claim := ownedTensorlakeFixture(t)
+			repoRoot := t.TempDir()
 			entered, release := make(chan struct{}), make(chan struct{})
 			holderDone := make(chan error, 1)
 			go func() {
@@ -214,7 +230,19 @@ func TestBoundCleanupDeadlineIncludesClaimWait(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 			defer cancel()
 			done := make(chan error, 1)
-			go func() { done <- c.removeBoundClaim(ctx, claim) }()
+			var result RunResult
+			go func() {
+				var err error
+				switch operation {
+				case "admission":
+					result, err = b.Run(ctx, RunRequest{ID: claim.LeaseID, NoSync: true, Command: []string{"user-workload"}})
+				case "reclaim":
+					_, err = b.resolveLease(ctx, c, claim.LeaseID, repoRoot, true)
+				default:
+					err = c.removeBoundClaim(ctx, claim)
+				}
+				done <- err
+			}()
 			var err error
 			returnedBeforeRelease := false
 			select {
@@ -231,7 +259,10 @@ func TestBoundCleanupDeadlineIncludesClaimWait(t *testing.T) {
 				err = <-done
 			}
 			if !returnedBeforeRelease || !errors.Is(err, context.DeadlineExceeded) || len(runner.calls) != 0 {
-				t.Fatalf("cleanup waited past deadline: returned=%t err=%v native_calls=%d", returnedBeforeRelease, err, len(runner.calls))
+				t.Fatalf("%s waited past deadline: returned=%t err=%v native_calls=%d", operation, returnedBeforeRelease, err, len(runner.calls))
+			}
+			if operation == "admission" && (result.Session == nil || !result.Session.Kept || !result.Session.Reused) {
+				t.Fatalf("canceled admission lost its reused session: %+v", result.Session)
 			}
 			assertTensorlakeClaimUnchanged(t, claim)
 		})
@@ -299,6 +330,132 @@ func TestRollbackRetainsAppearingClaim(t *testing.T) {
 		t.Fatal("rollback terminated successor")
 	}
 	assertTensorlakeClaimUnchanged(t, successor)
+}
+
+func TestCreatePublicationCancellationRetainsDeadlineAndSuccessor(t *testing.T) {
+	b, c, runner, claim := ownedTensorlakeFixture(t)
+	if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		t.Fatal(err)
+	}
+	runner.defaults = map[string]scriptedReply{"sbx create": {stdout: claim.CloudID + "\n"}}
+	repo := Repo{Root: t.TempDir()}
+	entered, release := make(chan struct{}), make(chan struct{})
+	holderDone := make(chan error, 1)
+	var successor core.LeaseClaim
+	go func() {
+		holderDone <- core.WithDurableLeaseClaimLockContext(t.Context(), claim.LeaseID, func(current *core.LeaseClaim, exists bool, persist func() error) error {
+			if exists {
+				return fmt.Errorf("expected an absent claim before creation")
+			}
+			close(entered)
+			<-release
+			*current = claim
+			if err := persist(); err != nil {
+				return err
+			}
+			successor = *current
+			return nil
+		})
+	}()
+	select {
+	case <-entered:
+	case err := <-holderDone:
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := b.createSandbox(ctx, c, repo, false, "")
+		done <- err
+	}()
+	<-ctx.Done()
+	close(release)
+	holderErr := <-holderDone
+	err := <-done
+	if holderErr != nil {
+		t.Fatal(holderErr)
+	}
+	counts := map[string]int{}
+	for _, call := range runner.calls {
+		counts[scriptKey(call.Args)]++
+	}
+	if counts["sbx create"] != 1 || counts["sbx describe"] != 1 || counts["sbx terminate"] != 0 {
+		t.Fatalf("unexpected native operations: %v", counts)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("publication lost its deadline or rollback refusal: %v", err)
+	}
+	assertTensorlakeClaimUnchanged(t, successor)
+}
+
+func TestCreateRollbackDefaultBudgetIncludesClaimWait(t *testing.T) {
+	b, c, runner, claim := ownedTensorlakeFixture(t)
+	if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		t.Fatal(err)
+	}
+	stateDir, err := core.CrabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "claims", "cbx_corrupt.json"), []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner.defaults = map[string]scriptedReply{"sbx create": {stdout: claim.CloudID + "\n"}}
+	repo := Repo{Root: t.TempDir()}
+	entered, release := make(chan struct{}), make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- core.WithDurableLeaseClaimLockContext(t.Context(), claim.LeaseID, func(_ *core.LeaseClaim, exists bool, _ func() error) error {
+			if exists {
+				return fmt.Errorf("expected absent rollback claim")
+			}
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-entered:
+	case err := <-holderDone:
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	started := time.Now()
+	go func() {
+		_, _, err := b.createSandbox(t.Context(), c, repo, false, "rollback-budget")
+		done <- err
+	}()
+	const expectedBudget = 30 * time.Second
+	returnedBeforeRelease := false
+	select {
+	case err = <-done:
+		returnedBeforeRelease = true
+	case <-time.After(expectedBudget + 2*time.Second):
+	}
+	elapsed := time.Since(started)
+	close(release)
+	holderErr := <-holderDone
+	if !returnedBeforeRelease {
+		err = <-done
+	}
+	if holderErr != nil {
+		t.Fatal(holderErr)
+	}
+	if !returnedBeforeRelease || elapsed < expectedBudget-time.Second || !errors.Is(err, context.DeadlineExceeded) || findCall(runner, "sbx terminate") != nil {
+		t.Fatalf("rollback exceeded its fence budget: returned=%t elapsed=%s err=%v", returnedBeforeRelease, elapsed, err)
+	}
+	counts := map[string]int{}
+	for _, call := range runner.calls {
+		counts[scriptKey(call.Args)]++
+	}
+	if counts["sbx create"] != 1 || counts["sbx describe"] != 1 || counts["whoami"] != 1 || !strings.Contains(err.Error(), "cbx_corrupt.json") {
+		t.Fatalf("rollback did not preserve its post-creation cause and original binding: calls=%v err=%v", counts, err)
+	}
+	if _, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID); readErr != nil || exists {
+		t.Fatalf("rollback published a claim: exists=%t err=%v", exists, readErr)
+	}
+	t.Logf("default rollback budget elapsed=%s before_release=%t native_termination=false", elapsed, returnedBeforeRelease)
 }
 
 func TestScopeProbeNeverEmitsCredentialPrefixes(t *testing.T) {

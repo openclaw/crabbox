@@ -187,8 +187,16 @@ checks or adding another provider-specific preparation policy.
 Cleanup of an existing bound claim has a single 30-second budget covering the
 claim-lock wait, identity recheck, termination, and confirmation. A shorter caller
 deadline still applies. Expiry before admission performs no native operation and
-retains the claim for retry. This does not bound separate create/publication or
-run-admission lock waits, or failed-create rollback before a claim exists.
+retains the claim for retry. Run-admission and create/reclaim publication waits
+also honor the caller's context. Failed-create rollback gets its own detached
+30-second budget before waiting for the absent-claim fence; caller cancellation
+does not prevent cleanup of the original verified resource, while an appearing
+claim still blocks termination. A rollback timeout retains the unclaimed sandbox
+for manual inspection.
+
+Successful provider actions still finish durable publication or removal if
+cancellation arrives afterward. Read-only List/Status fence waits retain their
+existing policy, and local filesystem syscalls are not forcibly interruptible.
 
 ### Legacy and uncertain ownership
 
