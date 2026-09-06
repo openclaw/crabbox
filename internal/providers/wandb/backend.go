@@ -94,12 +94,12 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResul
 			printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 		}
 	} else {
-		if len(req.Env) > 0 && !wandbExistingIDEnvIsImplicitDefault(req) {
+		if len(req.Env) > 0 && !wandbExistingIDEnvCanBeOmitted(req) {
 			// CoreWeave Sandboxes apply environment variables at Start time only;
 			// the v1beta2 Exec RPC has no env field, so we can't honour
-			// selected env on an already-running sandbox. The only exception is
-			// Crabbox's built-in implicit CI/NODE_OPTIONS allowlist, which older
-			// configs may select without the user asking for env forwarding.
+			// selected env on an already-running sandbox. Core-owned run metadata
+			// may be omitted, as can the built-in implicit CI/NODE_OPTIONS defaults;
+			// neither exception forwards new environment values through Exec.
 			return RunResult{}, exit(2, "provider=%s cannot forward env vars to an existing sandbox (--id); rerun without --id or omit --allow-env", providerName)
 		}
 		claim, sandboxID, err = requireWandbOwnership(ctx, client, sandboxID, providerScope)
@@ -488,12 +488,12 @@ func rejectWandbRunOptions(req RunRequest) error {
 	return nil
 }
 
-func wandbExistingIDEnvIsImplicitDefault(req RunRequest) bool {
-	if req.EnvSummary {
-		return false
-	}
+func wandbExistingIDEnvCanBeOmitted(req RunRequest) bool {
 	for name := range req.Env {
-		if name != "CI" && name != "NODE_OPTIONS" {
+		if core.IsRunExecutionMetadataEnvName(name) {
+			continue
+		}
+		if req.EnvSummary || (name != "CI" && name != "NODE_OPTIONS") {
 			return false
 		}
 	}

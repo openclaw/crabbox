@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Preserve explicit no-sync intent and required-artifact globs in failure-digest retries, avoiding an unintended workspace reset or weakened evidence checks. [Issue 1875](https://github.com/openclaw/crabbox/issues/1875), [Issue 1895](https://github.com/openclaw/crabbox/issues/1895). Thanks @coygeek.
+- Start commands without waiting for best-effort telemetry uploads, and cancel and join the telemetry publisher before run completion or lease replacement while preserving baseline samples and verified terminal receipts. [PR 1931](https://github.com/openclaw/crabbox/pull/1931).
+
 - Local containers: optionally omit the explicit hostname for runtimes sharing a host UTS namespace, support YAML and environment configuration, and reject incompatible fixed-ID reuse without changing existing default fingerprints. [PR 1813](https://github.com/openclaw/crabbox/pull/1813), [PR 1924](https://github.com/openclaw/crabbox/pull/1924). Thanks @atrawog.
 - Define a strict provider-neutral Linux developer-image recipe whose digest binds the executable contract and exact installer/readiness source hashes.
 - Extract protected image-qualification candidates at the canonical artifact path and avoid protected finalization when deployment never started.
@@ -32,6 +34,7 @@
 - Tensorlake: include claim-lock waiting in the bound-sandbox cleanup deadline, retaining ownership and avoiding native operations when the deadline expires before admission. [PR 1888](https://github.com/openclaw/crabbox/pull/1888). Thanks @steipete.
 - Tensorlake: share run finalization so early failures honor `--keep-on-failure`, failed cleanup reports a retained recovery session, and timing errors preserve the command outcome; retain quiet native-command error causes while keeping profile cleanup warning-only. [PR 1905](https://github.com/openclaw/crabbox/pull/1905). Thanks @steipete.
 - W&B: finalize run outcomes after automatic Stop, retain recovery sessions when cleanup fails, preserve primary command or gRPC failures and failure retention when cleanup or timing output also fails, and classify gRPC/API failures as provider errors instead of command exits. [PR 1929](https://github.com/openclaw/crabbox/pull/1929).
+- W&B: allow existing-sandbox runs to omit framework-owned run metadata while preserving explicit environment-forwarding restrictions. [PR 1930](https://github.com/openclaw/crabbox/pull/1930).
 
 ## 0.50.0 - 2026-09-05
 

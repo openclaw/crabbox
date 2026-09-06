@@ -400,7 +400,7 @@ func TestWandbRunWithExistingIDSkipsAcquireAndStop(t *testing.T) {
 		ID:      "sb-supplied",
 		NoSync:  true,
 		Command: []string{"echo"},
-		Env:     map[string]string{"CI": "true"},
+		Env:     map[string]string{"CI": "true", "CRABBOX_LEASE_ID": "sb-supplied", "CRABBOX_RUN_ID": "run-fixture", "CRABBOX_SLUG": "fixture"},
 	})
 	if err != nil {
 		t.Fatalf("Run err: %v", err)
@@ -1099,5 +1099,34 @@ func TestWandbRunTypedTimingWriterPreservesPublicCode(t *testing.T) {
 	}
 	if result.Session == nil || result.Session.Kept || api.stopCalls != 1 {
 		t.Fatalf("typed writer changed actual deletion: session=%+v stops=%d", result.Session, api.stopCalls)
+	}
+}
+
+func TestWandbExistingIDEnvironmentPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		env            map[string]string
+		explicit, want bool
+	}{
+		{name: "reserved-only", env: map[string]string{"CRABBOX_LEASE_ID": "sb", "CRABBOX_RUN_ID": "run", "CRABBOX_SLUG": "slug"}, want: true},
+		{name: "reserved-only-summary", env: map[string]string{"CRABBOX_RUN_ID": "run"}, explicit: true, want: true},
+		{name: "reserved-casefold", env: map[string]string{"CrAbBoX_SlUg": "slug"}, want: true},
+		{name: "implicit-defaults", env: map[string]string{"CI": "true", "NODE_OPTIONS": "fixture"}, want: true},
+		{name: "reserved-plus-implicit-defaults", env: map[string]string{"CRABBOX_RUN_ID": "run", "CI": "true", "NODE_OPTIONS": "fixture"}, want: true},
+		{name: "explicit-ci", env: map[string]string{"CRABBOX_RUN_ID": "run", "CI": "true"}, explicit: true},
+		{name: "explicit-node", env: map[string]string{"NODE_OPTIONS": "fixture"}, explicit: true},
+		{name: "custom", env: map[string]string{"CUSTOM": "fixture"}},
+		{name: "prefix-lookalike", env: map[string]string{"CRABBOX_RUN_ID_EXTRA": "fixture"}},
+		{name: "suffix-lookalike", env: map[string]string{"PREFIX_CRABBOX_RUN_ID": "fixture"}},
+		{name: "padded-lookalike", env: map[string]string{" CRABBOX_RUN_ID": "fixture"}},
+		{name: "lowercase-default-not-exception", env: map[string]string{"ci": "true"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := wandbExistingIDEnvCanBeOmitted(RunRequest{Env: tc.env, EnvSummary: tc.explicit})
+			t.Logf("actual=%t desired=%t explicit=%t", got, tc.want, tc.explicit)
+			if got != tc.want {
+				t.Errorf("reuse environment accepted=%t want=%t", got, tc.want)
+			}
+		})
 	}
 }

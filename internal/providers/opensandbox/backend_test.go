@@ -562,13 +562,15 @@ func TestRunDoesNotPublishClaimWhenCreationLockIsCanceled(t *testing.T) {
 	}
 	defer unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+	// Cancellation must follow creation so this case reaches unpublished-sandbox rollback.
+	fake.afterCreate = cancel
 	_, err = backend.Run(ctx, RunRequest{
 		Repo: Repo{Name: "my-app", Root: tempGitRepo(t)}, NoSync: true, Command: []string{"true"},
 	})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err=%v, want operation lock deadline", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v, want operation lock cancellation", err)
 	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != fake.sandbox.ID {
 		t.Fatalf("deleted=%#v want unpublished sandbox rollback", fake.deleted)
@@ -2842,6 +2844,7 @@ type fakeOpenSandboxClient struct {
 	listEmptyCount       int
 	listErr              error
 	listErrCount         int
+	afterCreate          func()
 	afterResume          func()
 	afterRun             func(runCommandRequest)
 	runStarted           chan struct{}
@@ -2880,6 +2883,9 @@ func (f *fakeOpenSandboxClient) CreateSandbox(_ context.Context, req createSandb
 	}
 	if f.createErr != nil {
 		return sandboxInfo{}, f.createErr
+	}
+	if f.afterCreate != nil {
+		f.afterCreate()
 	}
 	return created, nil
 }
