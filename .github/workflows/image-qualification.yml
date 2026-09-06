@@ -140,6 +140,7 @@ jobs:
         with:
           artifact-ids: ${{ needs.build-candidate.outputs.candidate_artifact_id }}
           path: ${{ runner.temp }}/image-qualification-candidate
+          merge-multiple: true
       - name: Verify manifest and rollback admission contract
         env:
           GH_TOKEN: ${{ github.token }}
@@ -187,6 +188,7 @@ jobs:
         with:
           artifact-ids: ${{ needs.build-candidate.outputs.candidate_artifact_id }}
           path: ${{ runner.temp }}/image-qualification-candidate
+          merge-multiple: true
       - name: Revalidate, deploy, read back, and enroll
         id: deploy
         env:
@@ -283,6 +285,7 @@ jobs:
         with:
           artifact-ids: ${{ needs.build-candidate.outputs.candidate_artifact_id }}
           path: ${{ runner.temp }}/image-qualification-candidate
+          merge-multiple: true
       - name: Run publisher rollback qualification
         env:
           QUALIFICATION_RELAY_URL: ${{ needs.deploy-enroll.outputs.relay_url }}
@@ -308,7 +311,7 @@ jobs:
 
   finalize:
     name: Protected finalization and zero-residue proof
-    if: always()
+    if: ${{ always() && needs.deploy-enroll.result != 'skipped' }}
     needs: [authorize, deploy-enroll, arm, execute]
     runs-on: ubuntu-latest
     timeout-minutes: 20
