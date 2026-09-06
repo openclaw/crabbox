@@ -5197,9 +5197,18 @@ export class FleetCoordinator {
       (attempt &&
         attempt.checkpointID === checkpointID &&
         createAttemptMatchesLease(attempt, existing));
-    if (!sameOwner || !sameIntent || !sameAttempt || !leaseIsLive(existing)) {
+    if (!sameOwner || !sameIntent || !sameAttempt) {
       return json(
         { error: "lease_id_conflict", message: "lease id is bound to another create intent" },
+        { status: 409 },
+      );
+    }
+    if (!leaseIsLive(existing)) {
+      return json(
+        {
+          error: "fixed_lease_terminal",
+          message: "lease id is bound to a terminal result for this create intent",
+        },
         { status: 409 },
       );
     }

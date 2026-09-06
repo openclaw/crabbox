@@ -2139,6 +2139,60 @@ func TestCoordinatorFixedCreateAmbiguousErrorRepeatsPutAndDoesNotAdoptConflictin
 	}
 }
 
+func TestCoordinatorFixedCreateAmbiguousErrorReportsSameIntentTerminalResult(t *testing.T) {
+	t.Setenv("CRABBOX_OWNER", "test@example.com")
+	oldRecoveryTimeout := coordinatorCreateLeaseRecoveryTimeout
+	oldRecoveryInterval := coordinatorCreateLeaseRecoveryInterval
+	coordinatorCreateLeaseRecoveryTimeout = time.Second
+	coordinatorCreateLeaseRecoveryInterval = time.Millisecond
+	defer func() {
+		coordinatorCreateLeaseRecoveryTimeout = oldRecoveryTimeout
+		coordinatorCreateLeaseRecoveryInterval = oldRecoveryInterval
+	}()
+
+	puts := 0
+	gets := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/leases/cbx_abcdef123463":
+			puts++
+			if puts == 1 {
+				http.Error(w, `{"error":"provider_failure","message":"hetzner POST /servers: http 412"}`, http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusConflict)
+			_, _ = io.WriteString(w, `{"error":"fixed_lease_terminal","message":"lease id is bound to a terminal result for this create intent"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/cbx_abcdef123463":
+			gets++
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "hetzner"
+	cfg.TargetOS = targetLinux
+	cfg.Coordinator = server.URL
+	cfg.CoordToken = "user-token"
+	coord := mustNewCoordinatorClient(t, cfg)
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
+	_, err := backend.createCoordinatorLeaseWithProgressMode(
+		context.Background(), cfg, "ssh-ed25519 test", true,
+		"cbx_abcdef123463", "fixed-terminal", true,
+	)
+	if err == nil || !strings.Contains(err.Error(), "fixed_lease_terminal") {
+		t.Fatalf("err=%v, want same-intent terminal result", err)
+	}
+	if strings.Contains(err.Error(), "another create intent") {
+		t.Fatalf("err=%v, must not misclassify the same intent as conflicting", err)
+	}
+	if puts != 2 || gets != 0 {
+		t.Fatalf("puts=%d gets=%d, want one exact PUT recovery and no GET adoption", puts, gets)
+	}
+}
+
 func TestCoordinatorRecoveredProvisioningKeepsCreationLifetime(t *testing.T) {
 	t.Setenv("CRABBOX_OWNER", "test@example.com")
 	for _, fixed := range []bool{true, false} {

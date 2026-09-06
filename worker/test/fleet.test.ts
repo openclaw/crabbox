@@ -21935,7 +21935,68 @@ describe("fleet lease identity and idle", () => {
       request("PUT", "/v1/leases/cbx_abcdef123456", { headers, body }),
     );
     expect(terminalReplay.status).toBe(409);
-    await expect(terminalReplay.json()).resolves.toMatchObject({ error: "lease_id_conflict" });
+    await expect(terminalReplay.json()).resolves.toMatchObject({
+      error: "fixed_lease_terminal",
+      message: "lease id is bound to a terminal result for this create intent",
+    });
+    expect(creates).toBe(1);
+  });
+
+  it("reports a same-intent terminal replay after a definitive Hetzner 412", async () => {
+    const storage = new MemoryStorage();
+    let creates = 0;
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(
+        () => {
+          creates += 1;
+          throw new HetznerProvisioningError(
+            "hetzner POST /servers: http 412: precondition_failed",
+            false,
+            false,
+          );
+        },
+        { provider: "hetzner" },
+      ),
+    });
+    const leaseID = "cbx_abcdef123477";
+    const body = {
+      leaseID,
+      slug: "fixed-412",
+      provider: "hetzner" as const,
+      serverType: "cx33",
+      sshPublicKey: "ssh-ed25519 fixed-412",
+    };
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+
+    const first = await fleet.fetch(request("PUT", `/v1/leases/${leaseID}`, { headers, body }));
+    expect(first.status).toBe(500);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      serverID: 0,
+      cloudID: "",
+      provisioningResourceMayExist: false,
+      provisioningFailureRetryable: false,
+      failureError: "hetzner POST /servers: http 412: precondition_failed",
+    });
+
+    const replay = await fleet.fetch(request("PUT", `/v1/leases/${leaseID}`, { headers, body }));
+    expect(replay.status).toBe(409);
+    await expect(replay.json()).resolves.toEqual({
+      error: "fixed_lease_terminal",
+      message: "lease id is bound to a terminal result for this create intent",
+    });
+
+    const drift = await fleet.fetch(
+      request("PUT", `/v1/leases/${leaseID}`, {
+        headers,
+        body: { ...body, serverType: "cx43" },
+      }),
+    );
+    expect(drift.status).toBe(409);
+    await expect(drift.json()).resolves.toMatchObject({ error: "lease_id_conflict" });
     expect(creates).toBe(1);
   });
 
