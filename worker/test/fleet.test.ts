@@ -8453,6 +8453,42 @@ describe("fleet lease identity and idle", () => {
     }
   });
 
+  it("rejects AWS key-only cleanup after the authenticated account changes", async () => {
+    const provider = new AWSProvider(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      "eu-west-1",
+      new MemoryStorage(),
+    );
+    const operation = stubAWSLeaseOperation({
+      verifiedIdentity: async () => ({
+        account: "999999999999",
+        arn: "arn:aws:iam::999999999999:user/crabbox",
+        userId: "AIDAEXAMPLE",
+        region: "eu-west-1",
+      }),
+    });
+    const deleteSSHKey = vi.spyOn(operation.session, "deleteSSHKey");
+    const lease = testLease({
+      id: "cbx_abcdef123456",
+      provider: "aws",
+      cloudID: "",
+      region: "eu-west-1",
+      providerScope: "aws:account:123456789012",
+      providerKey: "crabbox-cbx-abcdef123456",
+      providerKeyCleanupOwned: true,
+      providerKeyCleanupPending: true,
+    });
+
+    try {
+      await expect(provider.releaseLease(lease)).rejects.toThrow(
+        "AWS lease account scope does not match the authenticated account",
+      );
+      expect(deleteSSHKey).not.toHaveBeenCalled();
+    } finally {
+      operation.scope.mockRestore();
+    }
+  });
+
   it("reads and verifies cloud ownership before AWS release", async () => {
     const operation = stubAWSLeaseOperation();
     const findServer = vi.spyOn(operation.session, "findServer");
@@ -25622,7 +25658,7 @@ describe("fleet lease identity and idle", () => {
       id: "cbx_abcdef123457",
       provider: "aws",
       region: "eu-west-1",
-      providerScope: "aws:account:123456789012",
+      providerScope: undefined,
       sshPort: "22",
       network: {
         sshSourceCIDRs: ["198.51.100.10/32"],
@@ -25645,6 +25681,67 @@ describe("fleet lease identity and idle", () => {
     await provider.reconcileLeaseAccess(anchor, {
       requestSourceCIDRs: [],
       activeLeases: [legacy, explicit],
+    });
+
+    expect(revokedCIDRs.filter((cidr) => cidr !== "0.0.0.0/0")).toEqual([]);
+  });
+
+  it("keeps an unscoped legacy AWS anchor additive beside a scoped lease", async () => {
+    const revokedCIDRs: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const fetchRequest = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await fetchRequest.clone().text());
+        const action = params.get("Action") ?? "";
+        if (action === "GetCallerIdentity") {
+          return awsIdentityResponse("123456789012");
+        }
+        if (action === "DescribeSecurityGroups") {
+          return new Response(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-shared</groupId><ipPermissions><item><ipProtocol>tcp</ipProtocol><fromPort>22</fromPort><toPort>22</toPort><ipRanges><item><cidrIp>198.51.100.10/32</cidrIp><description>Crabbox SSH</description></item><item><cidrIp>198.51.100.20/32</cidrIp><description>Crabbox SSH</description></item><item><cidrIp>198.51.100.30/32</cidrIp><description>Crabbox SSH</description></item></ipRanges></item></ipPermissions></item></securityGroupInfo></DescribeSecurityGroupsResponse>`);
+        }
+        if (action === "RevokeSecurityGroupIngress") {
+          revokedCIDRs.push(params.get("IpPermissions.1.IpRanges.1.CidrIp") ?? "");
+        }
+        return new Response("<Response />");
+      }),
+    );
+    const provider = new AWSProvider(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      "eu-west-1",
+      new MemoryStorage(),
+    );
+    const legacy = testLease({
+      id: "cbx_abcdef123456",
+      provider: "aws",
+      state: "active",
+      region: "eu-west-1",
+      providerScope: undefined,
+      sshPort: "22",
+      network: {
+        awsSecurityGroupID: "sg-shared",
+        sshSourceCIDRs: ["198.51.100.10/32"],
+        sshSourceCIDRsComplete: true,
+      },
+    });
+    const scoped = testLease({
+      id: "cbx_abcdef123457",
+      provider: "aws",
+      state: "active",
+      region: "eu-west-1",
+      providerScope: "aws:account:123456789012",
+      sshPort: "22",
+      network: {
+        awsSecurityGroupID: "sg-shared",
+        sshSourceCIDRs: ["198.51.100.20/32"],
+        sshSourceCIDRsComplete: true,
+      },
+    });
+
+    await provider.reconcileLeaseAccess(legacy, {
+      requestSourceCIDRs: [],
+      activeLeases: [legacy, scoped],
     });
 
     expect(revokedCIDRs.filter((cidr) => cidr !== "0.0.0.0/0")).toEqual([]);

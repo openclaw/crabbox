@@ -26291,6 +26291,7 @@ function awsIngressAccessTargetKey(
   region: string,
   ports: string[],
   env: Env,
+  providerScope = lease.providerScope,
 ): string {
   const workspaceManaged = lease.providerKey.startsWith(workspaceProviderKeyPrefix);
   const securityGroupID =
@@ -26303,7 +26304,7 @@ function awsIngressAccessTargetKey(
     : securityGroupName
       ? `managed:${subnetID}:${securityGroupName}`
       : `auto:${subnetID}`;
-  return [lease.providerScope ?? "", region, group, ...ports.toSorted()].join("\u0000");
+  return [providerScope ?? "", region, group, ...ports.toSorted()].join("\u0000");
 }
 
 function awsIngressGroupMetadataUnknown(lease: LeaseRecord, env: Env): boolean {
@@ -28370,12 +28371,10 @@ export class AWSProvider implements CloudProvider {
     return this.client.findServer(id);
   }
 
-  private async observeLeaseServer(
+  private async verifyLeaseOperationAuthority(
     lease: LeaseRecord,
     session: AWSLeaseOperationSession,
-    observe: () => Promise<ProviderMachine | undefined>,
-    ownership?: "machine" | "labels",
-  ): Promise<ProviderMachine | undefined> {
+  ): Promise<string | undefined> {
     const leaseRegion = lease.region?.trim();
     if (!leaseRegion || leaseRegion !== session.region) {
       throw new ProviderResourceUnresolvedError(
@@ -28399,6 +28398,16 @@ export class AWSProvider implements CloudProvider {
         `AWS lease account scope does not match the authenticated account: recorded ${recordedAccount}, authenticated ${authenticatedAccount}`,
       );
     }
+    return recordedAccount;
+  }
+
+  private async observeLeaseServer(
+    lease: LeaseRecord,
+    session: AWSLeaseOperationSession,
+    observe: () => Promise<ProviderMachine | undefined>,
+    ownership?: "machine" | "labels",
+  ): Promise<ProviderMachine | undefined> {
+    const recordedAccount = await this.verifyLeaseOperationAuthority(lease, session);
     let server: ProviderMachine | undefined;
     try {
       server = await observe();
@@ -28727,62 +28736,82 @@ export class AWSProvider implements CloudProvider {
         { cause: error },
       );
     }
-    if (!recordedAccount) {
-      throw new AWSLeaseAuthorityError(
-        "AWS ingress reconciliation requires a persisted account scope",
-      );
-    }
+    const ingressLeases = [lease, ...context.activeLeases.filter(leaseOwnsAWSSSHAccess)];
+    if (!ingressLeases.some((candidate) => awsLeaseSSHPorts(candidate).length > 0)) return;
+    const clients = new Map<string, EC2SpotClient>();
+    let authorityScope = lease.providerScope;
+    const verifyRegion = async (region: string): Promise<void> => {
+      const regionalClient =
+        region === this.region ? this.client : new EC2SpotClient(this.env, region);
+      const operationClient = await regionalClient.withLeaseOperation(async (session) => {
+        const authenticatedAccount = authenticatedAWSAccount(
+          (await session.verifiedIdentity()).account,
+        );
+        if (recordedAccount && authenticatedAccount !== recordedAccount) {
+          throw new AWSLeaseAuthorityError(
+            `AWS provider scope conflicts with authenticated account: recorded ${recordedAccount}, authenticated ${authenticatedAccount}`,
+          );
+        }
+        const verifiedScope = `aws:account:${authenticatedAccount}`;
+        if (authorityScope && authorityScope !== verifiedScope) {
+          throw new AWSLeaseAuthorityError(
+            `AWS ingress reconciliation account changed between Regions: recorded ${authorityScope}, authenticated ${verifiedScope}`,
+          );
+        }
+        authorityScope = verifiedScope;
+        return session.client;
+      });
+      clients.set(awsIngressOperationScopeKey(authorityScope, region), operationClient);
+    };
+
+    await verifyRegion(lease.region || this.region);
     const accessLeases = context.activeLeases.filter(
       (candidate) =>
-        leaseOwnsAWSSSHAccess(candidate) && candidate.providerScope === lease.providerScope,
+        leaseOwnsAWSSSHAccess(candidate) &&
+        (!candidate.providerScope || candidate.providerScope === authorityScope),
     );
     const regions = uniqueNonEmpty(
       [lease, ...accessLeases].flatMap((candidate) =>
         awsLeaseSSHPorts(candidate).length > 0 ? [candidate.region || this.region] : [],
       ),
     );
-    const clients = new Map<string, EC2SpotClient>();
     for (const region of regions) {
-      const regionalClient =
-        region === this.region ? this.client : new EC2SpotClient(this.env, region);
+      if (clients.has(awsIngressOperationScopeKey(authorityScope, region))) continue;
       // oxlint-disable-next-line eslint/no-await-in-loop -- all account scopes are verified before ingress mutates.
-      const operationClient = await regionalClient.withLeaseOperation(async (session) => {
-        const authenticatedAccount = authenticatedAWSAccount(
-          (await session.verifiedIdentity()).account,
-        );
-        if (authenticatedAccount !== recordedAccount) {
-          throw new AWSLeaseAuthorityError(
-            `AWS provider scope conflicts with authenticated account: recorded ${recordedAccount}, authenticated ${authenticatedAccount}`,
-          );
-        }
-        return session.client;
-      });
-      clients.set(awsIngressOperationScopeKey(lease.providerScope, region), operationClient);
+      await verifyRegion(region);
     }
-    await this.reconcileLeaseAccessWithClients(lease, context, clients);
+    await this.reconcileLeaseAccessWithClients(lease, context, clients, authorityScope);
   }
 
   private async reconcileLeaseAccessWithClients(
     lease: LeaseRecord,
     context: ProviderAccessContext,
     clients = new Map<string, EC2SpotClient>(),
+    authorityScope = lease.providerScope,
   ): Promise<void> {
     if (lease.network?.awsPrivate) return;
     const globalCIDRs = awsGlobalSSHSourceCIDRs(this.env);
-    const providerScope = lease.providerScope;
     const accessLeases = context.activeLeases.filter(
-      (candidate) => leaseOwnsAWSSSHAccess(candidate) && candidate.providerScope === providerScope,
+      (candidate) =>
+        leaseOwnsAWSSSHAccess(candidate) &&
+        (!candidate.providerScope || candidate.providerScope === authorityScope),
     );
     const targets = new Map<string, { lease: LeaseRecord; port: string; region: string }>();
     const targetScopes = new Map<string, { identities: Set<string>; hasUnknownGroup: boolean }>();
     for (const candidate of [lease, ...accessLeases]) {
       const region = candidate.region || this.region;
       for (const port of awsLeaseSSHPorts(candidate)) {
-        const key = awsIngressAccessTargetKey(candidate, region, [port], this.env);
+        const key = awsIngressAccessTargetKey(
+          candidate,
+          region,
+          [port],
+          this.env,
+          candidate.providerScope ?? authorityScope,
+        );
         if (!targets.has(key)) {
           targets.set(key, { lease: candidate, port, region });
         }
-        const scopeKey = awsIngressPortScopeKey(providerScope, region, port);
+        const scopeKey = awsIngressPortScopeKey(authorityScope, region, port);
         const scope = targetScopes.get(scopeKey) ?? {
           identities: new Set<string>(),
           hasUnknownGroup: false,
@@ -28803,14 +28832,23 @@ export class AWSProvider implements CloudProvider {
         const region = candidate.region || this.region;
         return (
           awsLeaseSSHPorts(candidate).includes(target.port) &&
-          awsIngressAccessTargetKey(candidate, region, [target.port], this.env) === targetKey
+          awsIngressAccessTargetKey(
+            candidate,
+            region,
+            [target.port],
+            this.env,
+            candidate.providerScope ?? authorityScope,
+          ) === targetKey
         );
       });
       const cidrs = activeAWSSSHSourceCIDRs(targetLeases, globalCIDRs);
       const reconcile =
         ambiguousTargetScopes.has(
-          awsIngressPortScopeKey(targetLease.providerScope, target.region, target.port),
-        ) || hasUnknownActiveAWSSSHSource(targetLeases)
+          awsIngressPortScopeKey(authorityScope, target.region, target.port),
+        ) ||
+        !targetLease.providerScope ||
+        targetLeases.some((candidate) => !candidate.providerScope) ||
+        hasUnknownActiveAWSSSHSource(targetLeases)
           ? "additive"
           : "authoritative";
       const config = {
@@ -28841,7 +28879,7 @@ export class AWSProvider implements CloudProvider {
         awsSGName: targetLease.network?.awsSecurityGroupName ?? "",
       };
       const { region } = target;
-      const client = clients.get(awsIngressOperationScopeKey(targetLease.providerScope, region));
+      const client = clients.get(awsIngressOperationScopeKey(authorityScope, region));
       // A provisioning retry may only repair the region owned by its verified credential session.
       if (clients.size > 0 && !client) continue;
       const regionalClient =
@@ -29171,6 +29209,7 @@ export class AWSProvider implements CloudProvider {
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
     await this.withLeaseOperation(async (session) => {
+      const recordedAccount = await this.verifyLeaseOperationAuthority(lease, session);
       const unsettledAllocation = Boolean(
         lease.provisioningRequestStartedAt || lease.provisioningResourceMayExist,
       );
@@ -29197,6 +29236,11 @@ export class AWSProvider implements CloudProvider {
         });
       }
       if (leaseUsesCanonicalProviderKey(lease)) {
+        if (!lease.cloudID && !recordedAccount) {
+          throw new ProviderResourceUnresolvedError(
+            "AWS lease account scope was not persisted; refusing key-only cleanup",
+          );
+        }
         await session.deleteSSHKey(lease.providerKey, lease.id);
       }
     });
