@@ -265,6 +265,7 @@ func assertTensorlakeClaimWaitDeadline(t *testing.T, operation string) {
 				t.Fatalf("canceled admission lost its reused session: %+v", result.Session)
 			}
 			assertTensorlakeClaimUnchanged(t, claim)
+			t.Logf("CLAIM_WAIT operation=%s shared=%t returned_before_release=%t deadline=%t native_calls=%d claim_unchanged=true", operation, shared, returnedBeforeRelease, errors.Is(err, context.DeadlineExceeded), len(runner.calls))
 		})
 	}
 }
@@ -387,6 +388,7 @@ func TestCreatePublicationCancellationRetainsDeadlineAndSuccessor(t *testing.T) 
 		t.Fatalf("publication lost its deadline or rollback refusal: %v", err)
 	}
 	assertTensorlakeClaimUnchanged(t, successor)
+	t.Logf("CREATE_PUBLICATION deadline=%t rollback_refused=true creates=%d describes=%d terminations=%d successor_unchanged=true", errors.Is(err, context.DeadlineExceeded), counts["sbx create"], counts["sbx describe"], counts["sbx terminate"])
 }
 
 func TestCreateRollbackDefaultBudgetIncludesClaimWait(t *testing.T) {
