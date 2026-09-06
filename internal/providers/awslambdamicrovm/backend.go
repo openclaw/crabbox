@@ -137,29 +137,40 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		Kept:           !shouldStop,
 		CleanupCommand: "crabbox stop --provider " + providerName + " " + shellQuote(leaseID),
 	}
+	result = RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true, Session: session}
+	syncDuration := time.Duration(0)
+	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
+	commandRan := false
 	defer func() {
-		if !shouldStop {
-			session.Kept = true
-			return
-		}
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		defer cancel()
-		if cleanupErr := control.Terminate(cleanupCtx, vm.ID); cleanupErr != nil && !isNotFound(cleanupErr) {
-			session.Kept = true
-			if retErr == nil {
-				retErr = fmt.Errorf("terminate AWS Lambda MicroVM %s: %w", vm.ID, cleanupErr)
+		// Preserve the native primary outcome before termination or reporting
+		// can introduce another error, and publish timing only after cleanup.
+		result, retErr = shared.PinDelegatedRunFailure(result, retErr)
+		if shouldStop {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			cleanupErr := control.Terminate(cleanupCtx, vm.ID)
+			cancel()
+			if cleanupErr != nil && !isNotFound(cleanupErr) {
+				session.Kept = true
+				result, retErr = shared.AppendDelegatedRunFailure(result, retErr, fmt.Errorf("terminate AWS Lambda MicroVM %s: %w", vm.ID, cleanupErr), 1)
 			} else {
-				retErr = errors.Join(retErr, cleanupErr)
+				removeLeaseClaim(leaseID)
+				session.Kept = false
 			}
-			return
+		} else {
+			session.Kept = true
 		}
-		removeLeaseClaim(leaseID)
-		session.Kept = false
+		result.Total = now(b.rt).Sub(started)
+		result = core.FinalizeRunResult(result, retErr)
+		if commandRan {
+			fmt.Fprintf(b.rt.Stderr, "%s run summary sync=%s command=%s total=%s exit=%d\n", providerName, syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
+		}
+		if req.TimingJSON {
+			timingErr := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true, SyncMs: syncDuration.Milliseconds(), SyncPhases: syncPhases, SyncSkipped: req.NoSync, CommandMs: result.Command.Milliseconds(), TotalMs: result.Total.Milliseconds(), ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label)}, result, retErr))
+			result, retErr = shared.AppendDelegatedRunFailure(result, retErr, timingErr, 1)
+		}
 	}()
 
 	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s microvm=%s workdir=%s\n", providerName, leaseID, vm.ID, b.cfg.AWSLambdaMicroVM.Workdir)
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
 	if !req.NoSync {
 		syncPhases, syncDuration, err = b.syncWorkspace(ctx, runner, vm, req, prepared)
 	} else {
@@ -171,18 +182,14 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	}
 	if err != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: now(b.rt).Sub(started), SyncDelegated: true, Session: session}, err
+		return result, err
 	}
 	if !req.NoSync {
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
 	}
 	if req.SyncOnly {
-		result = RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: now(b.rt).Sub(started), SyncDelegated: true, Session: session}
 		fmt.Fprintf(b.rt.Stdout, "synced %s\n", b.cfg.AWSLambdaMicroVM.Workdir)
-		if req.TimingJSON {
-			retErr = writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true, SyncMs: syncDuration.Milliseconds(), SyncPhases: syncPhases, SyncSkipped: req.NoSync, TotalMs: result.Total.Milliseconds()}, result, nil))
-		}
-		return result, retErr
+		return result, nil
 	}
 
 	command := shellScriptFromArgv(req.Command)
@@ -190,28 +197,21 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		command = strings.Join(req.Command, " ")
 	}
 	if strings.TrimSpace(command) == "" {
-		return RunResult{}, exit(2, "provider=%s requires a command", providerName)
+		return result, exit(2, "provider=%s requires a command", providerName)
 	}
 	if req.EnvSummary {
 		printEnvForwardingSummary(b.rt.Stderr, req.Options.EnvAllow, req.Env)
 	}
 	commandStarted := now(b.rt)
 	exitCode, commandErr := runner.Exec(ctx, vm, command, b.cfg.AWSLambdaMicroVM.Workdir, req.Env, b.rt.Stdout, b.rt.Stderr)
-	commandDuration := now(b.rt).Sub(commandStarted)
-	result = RunResult{
-		Provider: providerName, LeaseID: leaseID, Slug: slug,
-		ExitCode: exitCode, Command: commandDuration, Total: now(b.rt).Sub(started),
-		SyncDelegated: true, CommandText: strings.Join(req.Command, " "), Session: session,
-	}
-	fmt.Fprintf(b.rt.Stderr, "%s run summary sync=%s command=%s total=%s exit=%d\n", providerName, syncDuration.Round(time.Millisecond), commandDuration.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
-	if req.TimingJSON {
-		if timingErr := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{Provider: providerName, LeaseID: leaseID, Slug: slug, SyncDelegated: true, SyncMs: syncDuration.Milliseconds(), SyncPhases: syncPhases, SyncSkipped: req.NoSync, CommandMs: commandDuration.Milliseconds(), TotalMs: result.Total.Milliseconds(), ExitCode: exitCode, Label: strings.TrimSpace(req.Label)}, result, commandErr)); timingErr != nil {
-			return result, timingErr
-		}
-	}
+	result.Command = now(b.rt).Sub(commandStarted)
+	result.CommandText = strings.Join(req.Command, " ")
+	commandRan = true
+	outcome := shared.FinalizeDelegatedCommandOutcome(exitCode, commandErr)
+	result.ExitCode, result.Status, result.ErrorKind = outcome.ExitCode, outcome.Status, outcome.ErrorKind
 	if commandErr != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, fmt.Errorf("%s run failed: %w", providerName, commandErr)
+		return result, shared.ExitErrorWithCause(result.ExitCode, fmt.Sprintf("%s run failed: %v", providerName, commandErr), commandErr)
 	}
 	if exitCode != 0 {
 		handleDelegatedRunFailure(b.rt.Stderr, req, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
@@ -219,7 +219,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	}
 	server.Labels = touchLeaseLabels(server.Labels, b.cfg, strings.ToLower(vm.State), now(b.rt))
 	if err := claimLease(leaseID, slug, b.scope(), req.Options.Pond, req.Repo.Root, b.cfg.IdleTimeout, true, server); err != nil {
-		return result, err
+		failure, failureErr := shared.PinDelegatedRunFailure(RunResult{}, err)
+		result.ExitCode, result.Status, result.ErrorKind = failure.ExitCode, failure.Status, failure.ErrorKind
+		return result, failureErr
 	}
 	return result, nil
 }
