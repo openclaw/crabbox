@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Start commands without waiting for best-effort telemetry uploads, and cancel and join the telemetry publisher before run completion or lease replacement while preserving baseline samples and verified terminal receipts.
+- Start commands without waiting for best-effort telemetry uploads, and cancel and join the telemetry publisher before run completion or lease replacement while preserving baseline samples and verified terminal receipts. [PR 1931](https://github.com/openclaw/crabbox/pull/1931).
 
 - Local containers: optionally omit the explicit hostname for runtimes sharing a host UTS namespace, support YAML and environment configuration, and reject incompatible fixed-ID reuse without changing existing default fingerprints. [PR 1813](https://github.com/openclaw/crabbox/pull/1813), [PR 1924](https://github.com/openclaw/crabbox/pull/1924). Thanks @atrawog.
 - Define a strict provider-neutral Linux developer-image recipe whose digest binds the executable contract and exact installer/readiness source hashes.
