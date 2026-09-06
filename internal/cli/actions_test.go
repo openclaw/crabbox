@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -17,6 +18,59 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+type exitCodeSelectionAsError struct{ code int }
+
+func (e exitCodeSelectionAsError) Error() string { return "adapted public exit" }
+
+func (e exitCodeSelectionAsError) As(target any) bool {
+	public, ok := target.(*ExitError)
+	if ok {
+		*public = ExitError{Code: e.code, Message: e.Error()}
+	}
+	return ok
+}
+
+// Preserve the behavior characterized before moving the selector to its shared owner.
+func TestExitCodeForErrorCompatibility(t *testing.T) {
+	public := ExitError{Code: 69, Message: "typed public exit"}
+	zero := ExitError{Code: 0, Message: "zero public exit"}
+	signed := ExitError{Code: -1, Message: "signed public exit"}
+	ordinary := errors.New("ordinary error")
+	var nilPublic *ExitError
+	for _, tc := range []struct {
+		name           string
+		err            error
+		fallback, want int
+	}{
+		{name: "nil with zero fallback", fallback: 0, want: 0},
+		{name: "nil with nonzero fallback", fallback: 7, want: 7},
+		{name: "ordinary error", err: ordinary, fallback: 7, want: 7},
+		{name: "signed fallback", err: ordinary, fallback: -9, want: -9},
+		{name: "nonzero value", err: public, fallback: 1, want: 69},
+		{name: "signed value", err: signed, fallback: 1, want: -1},
+		{name: "zero value", err: zero, fallback: 7, want: 7},
+		{name: "zero value with zero fallback", err: zero, fallback: 0, want: 0},
+		{name: "wrapped value", err: fmt.Errorf("wrapped: %w", public), fallback: 1, want: 69},
+		{name: "wrapped zero value", err: fmt.Errorf("wrapped: %w", zero), fallback: 7, want: 7},
+		{name: "pointer is not a value target", err: &public, fallback: 7, want: 7},
+		{name: "wrapped pointer is not a value target", err: fmt.Errorf("wrapped: %w", &public), fallback: 7, want: 7},
+		{name: "typed nil pointer", err: nilPublic, fallback: 7, want: 7},
+		{name: "custom As", err: exitCodeSelectionAsError{code: 69}, fallback: 1, want: 69},
+		{name: "wrapped custom As", err: fmt.Errorf("wrapped: %w", exitCodeSelectionAsError{code: 69}), fallback: 1, want: 69},
+		{name: "zero custom As", err: exitCodeSelectionAsError{}, fallback: 7, want: 7},
+		{name: "joined first public value", err: errors.Join(ExitError{Code: 23}, public), fallback: 1, want: 23},
+		{name: "joined first zero does not search later values", err: errors.Join(zero, public), fallback: 7, want: 7},
+		{name: "joined ordinary then public value", err: errors.Join(ordinary, public), fallback: 1, want: 69},
+		{name: "joined signed first value", err: errors.Join(signed, public), fallback: 1, want: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ExitCodeForError(tc.err, tc.fallback); got != tc.want {
+				t.Fatalf("ExitCodeForError fallback=%d: got %d, want %d", tc.fallback, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestParseGitHubRepo(t *testing.T) {
 	tests := map[string]string{

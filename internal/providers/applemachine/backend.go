@@ -306,11 +306,7 @@ func (b *backend) createLease(ctx context.Context, repo Repo, reclaim bool, requ
 		return core.LeaseClaim{}, fmt.Errorf("%w; retained machine=%s lease=%s: inspect container machine inspect %s before manual cleanup", err, name, leaseID, shellQuote(name))
 	}
 	retainedAfterRollback := func(primary, cleanup error) (core.LeaseClaim, error) {
-		code := 1
-		var public core.ExitError
-		if errors.As(primary, &public) && public.Code != 0 {
-			code = public.Code
-		}
+		code := core.ExitCodeForError(primary, 1)
 		_, combined := retained(errors.Join(primary, cleanup))
 		return core.LeaseClaim{}, shared.ExitErrorWithCause(code, combined.Error(), combined)
 	}

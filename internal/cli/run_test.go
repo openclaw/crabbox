@@ -4541,8 +4541,8 @@ exit 0
 	if decodeErr != nil {
 		t.Fatalf("decode terminal receipt: %v", decodeErr)
 	}
-	if receipt.ExitCode != exitCodeForError(err, 7) || receipt.ExitCode == 0 {
-		t.Fatalf("receipt exit=%d want=%d run error=%v", receipt.ExitCode, exitCodeForError(err, 7), err)
+	if receipt.ExitCode != ExitCodeForError(err, 7) || receipt.ExitCode == 0 {
+		t.Fatalf("receipt exit=%d want=%d run error=%v", receipt.ExitCode, ExitCodeForError(err, 7), err)
 	}
 	if !strings.Contains(stderr.String(), "artifact kind=receipt") {
 		t.Fatalf("missing terminal receipt output:\n%s", stderr.String())

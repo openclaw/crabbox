@@ -146,12 +146,7 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResul
 				CommandMs: result.Command.Milliseconds(), TotalMs: result.Total.Milliseconds(),
 				ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label),
 			}, result, retErr))
-			firstCode := 1
-			var public ExitError
-			if errors.As(timingErr, &public) && public.Code != 0 {
-				firstCode = public.Code
-			}
-			result, retErr = shared.AppendDelegatedRunFailure(result, retErr, timingErr, firstCode)
+			result, retErr = shared.AppendDelegatedRunFailure(result, retErr, timingErr, core.ExitCodeForError(timingErr, 1))
 		}
 	}()
 

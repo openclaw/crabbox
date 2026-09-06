@@ -247,7 +247,7 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (runResult 
 	if artifactErr != nil {
 		fmt.Fprintf(b.rt.Stderr, "blacksmith artifact retrieval failed: %v\n", artifactErr)
 		if code == 0 {
-			code = blacksmithArtifactFailureExitCode(artifactErr)
+			code = core.ExitCodeForError(artifactErr, 7)
 		}
 	}
 	if closeErr := stdoutCapture.Close(); closeErr != nil && code == 0 {
@@ -374,14 +374,6 @@ func printBlacksmithOneShotActionsWarning(w io.Writer, actionsURL string) {
 		fmt.Fprintf(w, " actions=%s", strings.TrimSpace(actionsURL))
 	}
 	fmt.Fprintln(w)
-}
-
-func blacksmithArtifactFailureExitCode(err error) int {
-	var exitErr ExitError
-	if core.AsExitError(err, &exitErr) && exitErr.Code != 0 {
-		return exitErr.Code
-	}
-	return 7
 }
 
 func blacksmithExtractArtifactArchive(output string, maxBytes int64) ([]byte, string, error) {

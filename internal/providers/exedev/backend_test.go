@@ -151,18 +151,34 @@ func TestExeDevAcquireReportsRollbackFailureAfterClaimFailure(t *testing.T) {
 }
 
 func TestExeDevProvisioningRollbackRejectsReplacementGeneration(t *testing.T) {
-	leaseID := "cbx_abcdef123456"
-	slug := "blue"
-	vm := ownedExeDevVM(leaseID, slug)
-	runner := exeDevInventoryRunner(t, vm)
-	backend := newExeDevTestBackend(Config{}, runner)
-	primaryErr := errors.New("ssh not ready")
+	for _, tc := range []struct {
+		name    string
+		primary error
+		code    int
+	}{
+		{name: "opaque", primary: errors.New("ssh not ready"), code: 1},
+		{name: "typed", primary: ExitError{Code: 69, Message: "ssh not ready"}, code: 69},
+		{name: "signed", primary: ExitError{Code: -1, Message: "ssh not ready"}, code: -1},
+		{name: "zero", primary: ExitError{Code: 0, Message: "ssh not ready"}, code: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			leaseID := "cbx_abcdef123456"
+			slug := "blue"
+			vm := ownedExeDevVM(leaseID, slug)
+			runner := exeDevInventoryRunner(t, vm)
+			backend := newExeDevTestBackend(Config{}, runner)
 
-	err := backend.rollbackCreatedVM(vm.Name(), leaseID, slug, "cbx_222222222222", primaryErr)
-	if err == nil || !strings.Contains(err.Error(), primaryErr.Error()) || !strings.Contains(err.Error(), "refused replacement VM") {
-		t.Fatalf("err=%v, want guarded rollback refusal", err)
+			err := backend.rollbackCreatedVM(vm.Name(), leaseID, slug, "cbx_222222222222", tc.primary)
+			if err == nil || !strings.Contains(err.Error(), tc.primary.Error()) || !strings.Contains(err.Error(), "refused replacement VM") {
+				t.Fatalf("err=%v, want guarded rollback refusal", err)
+			}
+			var public ExitError
+			if !errors.As(err, &public) || public.Code != tc.code {
+				t.Fatalf("rollback exit=%d, want primary code %d", public.Code, tc.code)
+			}
+			assertNoExeDevRM(t, runner)
+		})
 	}
-	assertNoExeDevRM(t, runner)
 }
 
 func newExeDevAcquireRollbackRunner() *exeDevRecordingRunner {

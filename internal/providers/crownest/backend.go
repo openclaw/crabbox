@@ -150,12 +150,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	defer func() {
 		result, retErr = shared.PinDelegatedRunFailure(result, retErr)
 		appendFailure := func(err error) {
-			code := 1
-			var public ExitError
-			if errors.As(err, &public) && public.Code != 0 {
-				code = public.Code
-			}
-			result, retErr = shared.AppendDelegatedRunFailure(result, retErr, err, code)
+			result, retErr = shared.AppendDelegatedRunFailure(result, retErr, err, core.ExitCodeForError(err, 1))
 		}
 		if cancelActiveRun && (ctx.Err() != nil || streamErr != nil) {
 			cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
