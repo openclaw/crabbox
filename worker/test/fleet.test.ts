@@ -13649,10 +13649,12 @@ describe("fleet lease identity and idle", () => {
       cloudID: "",
       failureError: "provider provisioning was interrupted; no provider resource found",
       provisioningResourceMayExist: false,
-      provisioningFailureRetryable: false,
       cleanupCompletedAt: expect.any(String),
       host: "",
     });
+    expect(
+      storage.value<LeaseRecord>("lease:cbx_000000000091")?.provisioningFailureRetryable,
+    ).toBeUndefined();
     expect(
       storage.value<LeaseRecord>("lease:cbx_000000000091")?.provisioningCoordinatorVersion,
     ).toBeUndefined();
@@ -14375,8 +14377,10 @@ describe("fleet lease identity and idle", () => {
       state: "failed",
       cloudID: "crabbox-delayed",
       provisioningResourceMayExist: false,
-      provisioningFailureRetryable: false,
     });
+    expect(
+      storage.value<LeaseRecord>(`lease:${leaseID}`)?.provisioningFailureRetryable,
+    ).toBeUndefined();
   });
 
   it("records the coordinator version only while provider provisioning is active", async () => {
@@ -14492,8 +14496,10 @@ describe("fleet lease identity and idle", () => {
       failureError:
         "provider provisioning was interrupted; recovered provider resource for cleanup",
       provisioningResourceMayExist: false,
-      provisioningFailureRetryable: false,
     });
+    expect(
+      storage.value<LeaseRecord>(`lease:${leaseID}`)?.provisioningFailureRetryable,
+    ).toBeUndefined();
     expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.cleanupError).toBeUndefined();
   });
 
@@ -22435,25 +22441,95 @@ describe("fleet lease identity and idle", () => {
     );
   });
 
-  it("re-observes a historical released resource before publishing cleanup completion", async () => {
+  it.each([
+    { state: "released", cleanupCompletedAt: undefined },
+    { state: "expired", cleanupCompletedAt: undefined },
+    { state: "active", cleanupCompletedAt: "2026-09-06T00:00:00Z" },
+    { state: "provisioning", cleanupCompletedAt: "2026-09-06T00:00:00Z" },
+  ] as const)(
+    "re-observes a $state resource before publishing cleanup completion",
+    async ({ state, cleanupCompletedAt }) => {
+      const storage = new MemoryStorage();
+      const lease = testLease({
+        id: "cbx_000000000095",
+        owner: "alice@example.com",
+        org: "example-org",
+        state,
+        cleanupCompletedAt,
+        region: "eu-west-1",
+        providerResourceID: "provider-resource-95",
+        tailscale: { enabled: true, ipv4: "100.64.0.95" },
+        sshHostKey: "ssh-ed25519 historical",
+        providerAccessExpiresAt: "2026-09-06T01:00:00.000Z",
+        exposedPorts: ["8080"],
+        network: { sshSourceCIDRs: ["192.0.2.95/32"], sshSourceCIDRsComplete: true },
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      const released: string[] = [];
+      const fleet = testFleet(storage, {
+        hetzner: fakeProvider(undefined, {}, async (id) => released.push(id)),
+      });
+      const headers = {
+        "x-crabbox-owner": lease.owner,
+        "x-crabbox-org": "example-org",
+      };
+
+      const response = await fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/release`, {
+          headers,
+          body: { delete: true },
+        }),
+      );
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        lease: { state: "released", cleanupStatus: "pending" },
+      });
+      expect(released).toEqual([]);
+
+      await fleet.alarm();
+
+      expect(released).toEqual([lease.cloudID]);
+      const completed = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+      expect(completed).toMatchObject({
+        state: "released",
+        cloudID: lease.cloudID,
+        providerResourceID: lease.providerResourceID,
+        serverID: lease.serverID,
+        serverName: lease.serverName,
+        region: lease.region,
+        network: lease.network,
+        exposedPorts: lease.exposedPorts,
+        workRoot: lease.workRoot,
+        host: "",
+        cleanupCompletedAt: expect.any(String),
+      });
+      expect(completed.tailscale).toBeUndefined();
+      expect(completed.sshHostKey).toBeUndefined();
+      expect(completed.providerAccessExpiresAt).toBeUndefined();
+      const observed = await fleet.fetch(request("GET", `/v1/leases/${lease.id}`, { headers }));
+      await expect(observed.json()).resolves.toMatchObject({
+        lease: { state: "released", cleanupStatus: "complete", host: "" },
+      });
+    },
+  );
+
+  it("accepts a confirmed expired cleanup without another provider call", async () => {
     const storage = new MemoryStorage();
     const lease = testLease({
-      id: "cbx_000000000095",
+      id: "cbx_000000000094",
       owner: "alice@example.com",
       org: "example-org",
-      state: "released",
-      region: "eu-west-1",
-      providerResourceID: "provider-resource-95",
-      tailscale: { enabled: true, ipv4: "100.64.0.95" },
-      sshHostKey: "ssh-ed25519 historical",
-      providerAccessExpiresAt: "2026-09-06T01:00:00.000Z",
-      exposedPorts: ["8080"],
-      network: { sshSourceCIDRs: ["192.0.2.95/32"], sshSourceCIDRsComplete: true },
+      state: "expired",
+      cleanupCompletedAt: "2026-09-06T00:00:00Z",
+      provisioningResourceMayExist: false,
+      host: "",
     });
     storage.seed(`lease:${lease.id}`, lease);
-    const released: string[] = [];
+    let providerReleases = 0;
     const fleet = testFleet(storage, {
-      hetzner: fakeProvider(undefined, {}, async (id) => released.push(id)),
+      hetzner: fakeProvider(undefined, {}, async () => {
+        providerReleases += 1;
+      }),
     });
     const headers = {
       "x-crabbox-owner": lease.owner,
@@ -22466,36 +22542,17 @@ describe("fleet lease identity and idle", () => {
         body: { delete: true },
       }),
     );
+
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
-      lease: { state: "released", cleanupStatus: "pending" },
+      lease: {
+        state: "released",
+        cleanupStatus: "complete",
+        cleanupCompletedAt: lease.cleanupCompletedAt,
+        host: "",
+      },
     });
-    expect(released).toEqual([]);
-
-    await fleet.alarm();
-
-    expect(released).toEqual([lease.cloudID]);
-    const completed = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
-    expect(completed).toMatchObject({
-      state: "released",
-      cloudID: lease.cloudID,
-      providerResourceID: lease.providerResourceID,
-      serverID: lease.serverID,
-      serverName: lease.serverName,
-      region: lease.region,
-      network: lease.network,
-      exposedPorts: lease.exposedPorts,
-      workRoot: lease.workRoot,
-      host: "",
-      cleanupCompletedAt: expect.any(String),
-    });
-    expect(completed.tailscale).toBeUndefined();
-    expect(completed.sshHostKey).toBeUndefined();
-    expect(completed.providerAccessExpiresAt).toBeUndefined();
-    const observed = await fleet.fetch(request("GET", `/v1/leases/${lease.id}`, { headers }));
-    await expect(observed.json()).resolves.toMatchObject({
-      lease: { state: "released", cleanupStatus: "complete", host: "" },
-    });
+    expect(providerReleases).toBe(0);
   });
 
   it.each(["manual release", "expiry"] as const)(
@@ -23198,7 +23255,13 @@ describe("fleet lease identity and idle", () => {
   it.each([
     {
       name: "confirmed deletion",
-      fields: { cleanupCompletedAt: "2026-09-06T00:00:00Z" },
+      fields: {
+        cleanupCompletedAt: "2026-09-06T00:00:00Z",
+        host: "",
+        tailscale: undefined,
+        sshHostKey: undefined,
+        providerAccessExpiresAt: undefined,
+      },
       status: "complete",
     },
     {
@@ -23206,8 +23269,17 @@ describe("fleet lease identity and idle", () => {
       fields: {
         cleanupCompletedAt: "2026-09-06T00:00:00Z",
         failureError: "creation failed before cleanup completed",
+        host: "",
+        tailscale: undefined,
+        sshHostKey: undefined,
+        providerAccessExpiresAt: undefined,
       },
       status: "complete",
+    },
+    {
+      name: "completion timestamp with stale access",
+      fields: { cleanupCompletedAt: "2026-09-06T00:00:00Z" },
+      status: "failed",
     },
     {
       name: "historical release without completion proof",
@@ -23378,35 +23450,83 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
-  it("normalizes access only for a completion-bearing terminal release", async () => {
+  it("canonicalizes retryable no-resource cancellation without provider cleanup", async () => {
     const storage = new MemoryStorage();
-    const lease = testLease({
-      id: "cbx_abcdef123455",
-      owner: "alice@example.com",
-      org: "example-org",
-      state: "released",
-      releaseDeletesServer: true,
-      cleanupCompletedAt: "2026-09-06T00:00:00Z",
-      tailscale: { enabled: true, ipv4: "100.64.0.5" },
-      sshHostKey: "ssh-ed25519 retained-history",
-      providerAccessExpiresAt: "2026-09-06T01:00:00Z",
+    const leaseID = "cbx_abcdef123456";
+    const createAttemptID = "cat_46000000000000000000000000000046";
+    const generation = "confirmed-no-resource-generation";
+    const now = new Date().toISOString();
+    const deleted: string[] = [];
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(undefined, { provider: "azure" }, async (id) => {
+        deleted.push(id);
+      }),
     });
-    storage.seed(`lease:${lease.id}`, lease);
-    const response = await testFleet(storage).fetch(
-      request("GET", `/v1/leases/${lease.id}`, {
-        headers: { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" },
+    storage.seed(`create-attempt:${leaseID}`, {
+      version: 1,
+      requestedLeaseID: leaseID,
+      token: createAttemptID,
+      owner: "alice@example.com",
+      org: orgKeyForLabel("example-org"),
+      state: "pending",
+      canonicalLeaseID: leaseID,
+      generation,
+      createdAt: now,
+      updatedAt: now,
+    });
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "slow-azure",
+        provider: "azure",
+        cloudID: "",
+        serverID: 0,
+        serverName: "",
+        host: "",
+        region: "eastus",
+        state: "failed",
+        createAttemptID,
+        createAttemptGeneration: generation,
+        provisioningResourceMayExist: false,
+        provisioningFailureRetryable: true,
+        failureError: "transient create failure confirmed no provider resource",
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       }),
     );
-    const body = (await response.json()) as { lease: LeaseRecord & { cleanupStatus: string } };
-    expect(body.lease).toMatchObject({
+
+    const release = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/cancel-create`, {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { createAttemptID },
+      }),
+    );
+
+    expect(release.status).toBe(200);
+    expect(deleted).toEqual([]);
+    const { lease } = (await release.json()) as { lease: LeaseRecord };
+    expect(lease).toMatchObject({
+      state: "released",
+      cloudID: "",
+      host: "",
       cleanupStatus: "complete",
+      cleanupCompletedAt: expect.any(String),
+      provisioningResourceMayExist: false,
+    });
+    expect(lease.provisioningFailureRetryable).toBeUndefined();
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
       cleanupCompletedAt: lease.cleanupCompletedAt,
+      provisioningResourceMayExist: false,
       host: "",
     });
-    expect(body.lease).not.toHaveProperty("tailscale");
-    expect(body.lease).not.toHaveProperty("sshHostKey");
-    expect(body.lease).not.toHaveProperty("providerAccessExpiresAt");
-    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toEqual(lease);
+    expect(
+      storage.value<LeaseRecord>(`lease:${leaseID}`)?.provisioningFailureRetryable,
+    ).toBeUndefined();
   });
 
   it("can release a provisioning lease before cloud resources are known", async () => {
@@ -28387,6 +28507,74 @@ describe("fleet lease identity and idle", () => {
         lease: { id: leaseID, state: "released", cleanupStatus: "complete" },
       });
       expect(deleted).toEqual(["123"]);
+    },
+  );
+
+  it.each(["failed", "expired"] as const)(
+    "preserves confirmed %s cleanup when provider creation publishes late",
+    async (state) => {
+      const storage = new MemoryStorage();
+      const leaseID = "cbx_ca1100000046";
+      const deleted: string[] = [];
+      const fleet = testFleet(storage, {
+        hetzner: fakeProvider(
+          () => {
+            const current = structuredClone(storage.value<LeaseRecord>(`lease:${leaseID}`)!);
+            const completedAt = new Date().toISOString();
+            current.state = state;
+            current.cloudID = "123";
+            current.serverID = 123;
+            current.serverName = "crabbox-late-cleanup";
+            current.host = "";
+            current.updatedAt = completedAt;
+            current.endedAt = completedAt;
+            current.cleanupCompletedAt = completedAt;
+            current.provisioningResourceMayExist = false;
+            delete current.tailscale;
+            delete current.sshHostKey;
+            delete current.providerAccessExpiresAt;
+            delete current.provisioningFailureRetryable;
+            delete current.provisioningRequestStartedAt;
+            delete current.provisioningRequestSettledAt;
+            delete current.provisioningCoordinatorVersion;
+            delete current.provisioningRecoveryObservedAt;
+            delete current.provisioningRecoveryMissingSince;
+            storage.seed(`lease:${leaseID}`, current);
+          },
+          {},
+          async (id) => {
+            deleted.push(id);
+          },
+        ),
+      });
+
+      const response = await fleet.fetch(
+        request("PUT", `/v1/leases/${leaseID}`, {
+          headers: {
+            "x-crabbox-owner": "alice@example.com",
+            "x-crabbox-org": "example-org",
+          },
+          body: {
+            provider: "hetzner",
+            sshPublicKey: "ssh-ed25519 late-cleanup",
+          },
+        }),
+      );
+
+      expect(response.status).toBe(409);
+      expect(deleted).toEqual([]);
+      const completed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+      expect(completed).toMatchObject({
+        state,
+        cloudID: "123",
+        serverID: 123,
+        serverName: "crabbox-late-cleanup",
+        host: "",
+        cleanupCompletedAt: expect.any(String),
+        provisioningResourceMayExist: false,
+      });
+      expect(completed.cleanupStartedAt).toBeUndefined();
+      expect(completed.provisioningFailureRetryable).toBeUndefined();
     },
   );
 

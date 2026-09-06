@@ -5,7 +5,7 @@ import {
   clearLeaseCleanupCompletion,
   completeLeaseProviderCleanup,
   leaseHasConfirmedNoProviderResource,
-  leaseProviderCleanupCompleted,
+  leaseProviderCleanupConfirmed,
 } from "./lease-cleanup";
 import {
   LeaseProvisioningController,
@@ -3484,11 +3484,7 @@ export class FleetCoordinator {
       }
       const shouldDelete = Boolean(
         lease.providerKeyCleanupPending ||
-        (lease.cloudID &&
-          (leaseIsLive(lease) ||
-            lease.releaseDeletesServer !== undefined ||
-            lease.cleanupError ||
-            (lease.state === "released" && !leaseProviderCleanupCompleted(lease)))),
+        (lease.cloudID && (leaseIsLive(lease) || !leaseProviderCleanupConfirmed(lease))),
       );
       const canceledBeforeProviderIdentity = Boolean(
         (lease.state === "provisioning" ||
@@ -19323,11 +19319,7 @@ export class FleetCoordinator {
       const shouldDelete = Boolean(
         deleteServer &&
         (current.providerKeyCleanupPending ||
-          (current.cloudID &&
-            (leaseIsLive(current) ||
-              current.releaseDeletesServer !== undefined ||
-              current.cleanupError ||
-              (current.state === "released" && !leaseProviderCleanupCompleted(current))))),
+          (current.cloudID && (leaseIsLive(current) || !leaseProviderCleanupConfirmed(current)))),
       );
       if (!shouldDelete) {
         const released = finalizedReleasedLease(current, deleteServer, options.keep);
@@ -25064,8 +25056,8 @@ function leaseHasCurrentCleanupOrFinalRelease(lease: LeaseRecord): boolean {
   const now = Date.now();
   return Boolean(
     (lease.cleanupStartedAt && cleanupClaimDeadline(lease) > now) ||
-    (lease.state === "released" &&
-      (lease.releaseDeletesServer === false || leaseProviderCleanupCompleted(lease))),
+    (lease.state === "released" && lease.releaseDeletesServer === false) ||
+    leaseProviderCleanupConfirmed(lease),
   );
 }
 
