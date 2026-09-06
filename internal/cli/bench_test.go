@@ -672,6 +672,36 @@ func TestBenchmarkReportGroupsBySourceAndKeepsLegacyTelemetryAbsent(t *testing.T
 	}
 }
 
+func TestBenchmarkReportRetainsCompletedZeroDurationSyncPhases(t *testing.T) {
+	now := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
+	command := []string{"true"}
+	records := []BenchmarkTimingRecord{
+		newBenchmarkTimingRecord(now.Add(-3*time.Minute), "bench-run", TimingReport{
+			Provider:   "aws",
+			TotalMs:    100,
+			SyncPhases: []TimingPhase{{Name: "fingerprint"}, {Name: "fingerprint"}, {Name: "git_hydrate", Skipped: true}},
+		}, Repo{}, command, nil, 1),
+		newBenchmarkTimingRecord(now.Add(-2*time.Minute), "bench-run", TimingReport{
+			Provider:   "aws",
+			TotalMs:    100,
+			SyncPhases: []TimingPhase{{Name: "fingerprint"}, {Name: "fingerprint", Skipped: true}, {Name: "git_hydrate", Skipped: true}, {Name: "git_hydrate", Skipped: true}},
+		}, Repo{}, command, nil, 2),
+		newBenchmarkTimingRecord(now.Add(-time.Minute), "bench-run", TimingReport{
+			Provider:   "aws",
+			TotalMs:    100,
+			SyncPhases: []TimingPhase{{Name: "fingerprint", Ms: 4}, {Name: "fingerprint", Ms: 6}, {Name: "git_hydrate", Skipped: true}},
+		}, Repo{}, command, nil, 3),
+	}
+
+	report := buildBenchmarkReport(records, benchmarkReportOptions{StorePath: "timings.jsonl", MinSamples: 1}, now)
+	if len(report.Groups) != 1 || len(report.Groups[0].SyncPhases) != 2 {
+		t.Fatalf("groups=%#v", report.Groups)
+	}
+	p95 := int64(10)
+	assertBenchmarkSyncPhase(t, report.Groups[0].SyncPhases[0], "fingerprint", 3, 0, &p95, 1)
+	assertBenchmarkSyncPhase(t, report.Groups[0].SyncPhases[1], "git_hydrate", 0, 0, nil, 3)
+}
+
 func TestPrintBenchmarkReportIncludesStructuredRunnerAndSyncSummaries(t *testing.T) {
 	median := int64(100)
 	p95 := int64(150)

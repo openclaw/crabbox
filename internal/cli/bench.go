@@ -626,8 +626,9 @@ func (b *benchmarkReportGroupBuilder) addRunnerPhases(phases []RunnerPhase) {
 
 func (b *benchmarkReportGroupBuilder) addSyncPhases(phases []TimingPhase) {
 	type observationPhase struct {
-		ms      int64
-		skipped bool
+		ms       int64
+		measured bool
+		skipped  bool
 	}
 	perObservation := map[string]observationPhase{}
 	for _, phase := range phases {
@@ -636,8 +637,9 @@ func (b *benchmarkReportGroupBuilder) addSyncPhases(phases []TimingPhase) {
 			continue
 		}
 		value := perObservation[name]
-		if phase.Ms > 0 {
+		if !phase.Skipped && phase.Ms >= 0 {
 			value.ms += phase.Ms
+			value.measured = true
 		}
 		value.skipped = value.skipped || phase.Skipped
 		perObservation[name] = value
@@ -654,7 +656,7 @@ func (b *benchmarkReportGroupBuilder) addSyncPhases(phases []TimingPhase) {
 			phase = &benchmarkSyncPhaseBuilder{}
 			b.syncPhases[name] = phase
 		}
-		if value.ms > 0 {
+		if value.measured {
 			phase.values = append(phase.values, value.ms)
 		}
 		if value.skipped {

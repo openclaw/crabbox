@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Group benchmark reports by record source and summarize successful runner totals, runner phases, sync phases, and sync skips without inventing telemetry for legacy rows.
+- Group benchmark reports by record source and summarize successful runner totals, runner phases, sync phases, and sync skips without inventing telemetry for legacy rows. [PR 1896](https://github.com/openclaw/crabbox/pull/1896). Thanks @vincentkoc.
 - Preserve requested capacity market for market-aware providers while coordinator provisioning is pending, and expose documented provisioning failure diagnostics in `crabbox inspect --json`.
 - Azure: recognize completed Location polling responses and support explicit, audited recovery of expired disk-only cleanup blocked by missing public-IP completion evidence, preserving original identities, ownership checks, and actual deletion receipts. [PR 1893](https://github.com/openclaw/crabbox/pull/1893). Thanks @steipete.
 
