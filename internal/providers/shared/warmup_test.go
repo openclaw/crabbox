@@ -78,14 +78,16 @@ func TestCompleteWarmupWritesTimingAfterStdoutFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := core.TimingReport{
-		Provider:  result.Provider,
-		LeaseID:   result.LeaseID,
-		Slug:      result.Slug,
-		TotalMs:   result.Total.Milliseconds(),
-		ExitCode:  0,
-		RunStatus: core.RunStatusSucceeded,
-		ErrorKind: core.RunErrorNone,
-		Workdir:   result.Workdir,
+		Provider:      result.Provider,
+		LeaseID:       result.LeaseID,
+		Slug:          result.Slug,
+		TotalMs:       result.Total.Milliseconds(),
+		RunnerTotalMs: 2345,
+		RunnerPhases:  []core.RunnerPhase{{Name: "unattributed", Ms: 2345}},
+		ExitCode:      0,
+		RunStatus:     core.RunStatusSucceeded,
+		ErrorKind:     core.RunErrorNone,
+		Workdir:       result.Workdir,
 	}
 	if !reflect.DeepEqual(writer.report, want) {
 		t.Fatalf("report=%+v, want %+v", writer.report, want)
