@@ -263,7 +263,7 @@ func TestSmolVMFallbackBoundsControlAndPreservesCommand(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	control, data := smolvmHTTPClients(nil, controlTimeout)
+	control, data := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	trusted, _ := url.Parse(server.URL)
 	client := &client{
 		apiKey:   "smk_key",

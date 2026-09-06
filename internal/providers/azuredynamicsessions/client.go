@@ -96,7 +96,7 @@ var newAzureDynamicSessionsClient = func(ctx context.Context, cfg Config, rt Run
 	if err != nil {
 		return nil, err
 	}
-	httpClient, dataHTTPClient := azureDynamicSessionsHTTPClients(rt.HTTP, azureDynamicSessionsControlTimeout)
+	httpClient, dataHTTPClient := shared.ControlAndDataHTTPClients(rt.HTTP, azureDynamicSessionsControlTimeout)
 	return &azureDynamicSessionsClient{
 		endpoint:             endpoint,
 		managementAPIVersion: blank(strings.TrimSpace(cfg.AzureDynamicSessions.APIVersion), "2025-02-02-preview"),
@@ -104,13 +104,6 @@ var newAzureDynamicSessionsClient = func(ctx context.Context, cfg Config, rt Run
 		httpClient:           httpClient,
 		dataHTTPClient:       dataHTTPClient,
 	}, nil
-}
-
-func azureDynamicSessionsHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
-	if injected != nil {
-		return injected, injected
-	}
-	return &http.Client{Timeout: controlTimeout}, &http.Client{}
 }
 
 func azureDynamicSessionsEndpoint(cfg Config) (string, error) {
