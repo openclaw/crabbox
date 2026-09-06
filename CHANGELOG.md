@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- SmolVM: share sandbox run finalization so deletion failures no longer report success, early preparation failures honor keep-on-failure, and primary outcomes survive cleanup or timing errors while preserving provider keep policy and separate profile/resource cleanup budgets.
 - Shared sandbox runs: keep secondary cleanup and timing errors visible in CLI diagnostics without replacing the primary exit code. [PR 1907](https://github.com/openclaw/crabbox/pull/1907).
 - Freestyle: share sandbox run finalization so automatic deletion failures no longer report success, command failures survive later cleanup or timing errors, and transport cancellation causes remain available to callers. [PR 1907](https://github.com/openclaw/crabbox/pull/1907).
 - Tensorlake: honor cancellation while waiting for run admission and ownership publication, and include claim-lock waiting in the detached failed-create rollback budget without losing the original failure or adopting a successor claim. [PR 1906](https://github.com/openclaw/crabbox/pull/1906).

@@ -584,18 +584,236 @@ func TestRunPreservesSessionAfterDeleteFailure(t *testing.T) {
 	rt.Stderr = &stderr
 	backend := NewBackend(Provider{}.Spec(), testConfig(), rt).(*backend)
 	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "repo", Root: t.TempDir()},
-		Command: []string{"echo", "hello"},
-		NoSync:  true,
+		Repo:       Repo{Name: "repo", Root: t.TempDir()},
+		Command:    []string{"echo", "hello"},
+		NoSync:     true,
+		TimingJSON: true,
 	})
-	if err != nil {
-		t.Fatal(err)
+	var public ExitError
+	if !errors.Is(err, fake.deleteErr) || !errors.As(err, &public) || public.Code != 1 || result.ExitCode != 1 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider {
+		t.Errorf("cleanup failure result=%+v err=%v", result, err)
 	}
 	if result.Session == nil || !result.Session.Kept || result.Session.CleanupCommand == "" {
 		t.Fatalf("session=%#v, want retained cleanup handle", result.Session)
 	}
-	if !strings.Contains(stderr.String(), "smolvm delete failed") {
-		t.Fatalf("stderr=%q", stderr.String())
+	if err == nil || !strings.Contains(err.Error(), "cleanup failed") {
+		t.Fatalf("cleanup diagnostic missing: %v", err)
+	}
+	if claim, exists, claimErr := core.ReadLeaseClaimWithPresence(result.LeaseID); claimErr != nil || !exists || claim.CloudID != fake.machine.ID {
+		t.Fatalf("cleanup lost original claim: claim=%+v exists=%t err=%v", claim, exists, claimErr)
+	}
+	assertLifecycleTiming(t, stderr.String(), result, err)
+}
+
+func assertLifecycleTiming(t *testing.T, stderr string, result RunResult, err error) {
+	t.Helper()
+	result = core.FinalizeRunResult(result, err)
+	var reports []core.TimingReport
+	for _, line := range strings.Split(strings.TrimSpace(stderr), "\n") {
+		if strings.HasPrefix(line, "{") {
+			var report core.TimingReport
+			if err := json.Unmarshal([]byte(line), &report); err != nil {
+				t.Fatal(err)
+			}
+			reports = append(reports, report)
+		}
+	}
+	if len(reports) != 1 {
+		t.Fatalf("timing records=%d stderr=%s", len(reports), stderr)
+	}
+	report := reports[0]
+	if report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind || report.LeaseID != result.LeaseID || report.Slug != result.Slug {
+		t.Fatalf("timing=%+v result=%+v", report, result)
+	}
+}
+
+type lifecycleTimingWriter struct {
+	bytes.Buffer
+	cause error
+}
+
+func (w *lifecycleTimingWriter) Write(data []byte) (int, error) {
+	if len(data) > 0 && data[0] == '{' {
+		return 0, w.cause
+	}
+	return w.Buffer.Write(data)
+}
+
+func TestRunFinalizationPreservesPrimaryOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name                                   string
+		code                                   int
+		cause                                  error
+		setup, cleanup, badTiming, keepFailure bool
+		wantCode                               int
+		wantStatus                             core.RunStatus
+		wantKind                               core.RunErrorKind
+	}{
+		{name: "command and cleanup", code: 23, cleanup: true, wantCode: 23, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorCommandExit},
+		{name: "command cleanup and timing", code: 23, cleanup: true, badTiming: true, wantCode: 23, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorCommandExit},
+		{name: "kept command and timing", code: 23, keepFailure: true, badTiming: true, wantCode: 23, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorCommandExit},
+		{name: "success then timing", keepFailure: true, badTiming: true, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "transport", cause: io.ErrUnexpectedEOF, keepFailure: true, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "cancellation", cause: context.Canceled, keepFailure: true, wantCode: 1, wantStatus: core.RunStatusCanceled, wantKind: core.RunErrorCanceled},
+		{name: "deadline and cleanup", cause: context.DeadlineExceeded, cleanup: true, wantCode: 1, wantStatus: core.RunStatusTimedOut, wantKind: core.RunErrorTimeout},
+		{name: "early setup retention", cause: io.ErrUnexpectedEOF, setup: true, keepFailure: true, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cleanupErr, writerErr := errors.New("synthetic deletion failure"), errors.New("synthetic timing failure")
+			fake := &fakeAPI{streamCode: tc.code, streamErr: tc.cause}
+			if tc.setup {
+				fake.execHook = func(context.Context, string) (execResult, error) { return execResult{}, tc.cause }
+			}
+			if tc.cleanup {
+				fake.deleteErr = cleanupErr
+			}
+			withFakeAPI(t, fake)
+			var stderr bytes.Buffer
+			rt := testRuntime()
+			rt.Stderr = &stderr
+			if tc.badTiming {
+				rt.Stderr = &lifecycleTimingWriter{cause: writerErr}
+			}
+			b := NewBackend(Provider{}.Spec(), testConfig(), rt).(*backend)
+			result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: tc.keepFailure, TimingJSON: true, Command: []string{"true"}})
+			var public ExitError
+			if !errors.As(err, &public) || public.Code != tc.wantCode || result.ExitCode != tc.wantCode || result.Status != tc.wantStatus || result.ErrorKind != tc.wantKind {
+				t.Errorf("primary outcome: result=%+v err=%v public=%+v", result, err, public)
+			}
+			for _, cause := range []error{tc.cause, fake.deleteErr} {
+				if cause != nil && !errors.Is(err, cause) {
+					t.Errorf("lost cause %v: %v", cause, err)
+				}
+			}
+			if tc.cleanup && !strings.Contains(public.Message, cleanupErr.Error()) {
+				t.Errorf("CLI cleanup diagnostic missing: %q", public.Message)
+			}
+			if tc.badTiming && (!errors.Is(err, writerErr) || !strings.Contains(public.Message, writerErr.Error())) {
+				t.Errorf("timing diagnostic lost: %v", err)
+			}
+			failedBeforeTiming := tc.code != 0 || tc.cause != nil
+			wantKept := tc.cleanup || tc.keepFailure && failedBeforeTiming
+			wantDelete := !(tc.keepFailure && failedBeforeTiming)
+			if result.Session == nil || result.Session.Kept != wantKept || result.Session.Reused || (fake.deletedID != "") != wantDelete {
+				t.Errorf("disposition: session=%+v deleted=%q", result.Session, fake.deletedID)
+			}
+			if _, exists, claimErr := core.ReadLeaseClaimWithPresence(result.LeaseID); claimErr != nil || exists != wantKept {
+				t.Errorf("claim exists=%t want=%t err=%v", exists, wantKept, claimErr)
+			}
+			wantStreams := 1
+			if tc.setup {
+				wantStreams = 0
+			}
+			if len(fake.streamCommands) != wantStreams || t.Context().Err() != nil {
+				t.Errorf("streams=%v parent=%v", fake.streamCommands, t.Context().Err())
+			}
+			if !tc.badTiming {
+				assertLifecycleTiming(t, stderr.String(), result, err)
+			}
+		})
+	}
+}
+
+func TestRunEffectiveKeepAndReuseControls(t *testing.T) {
+	for _, tc := range []struct {
+		name                                             string
+		providerKeep, keep, keepFailure, reuse, syncOnly bool
+		code                                             int
+	}{
+		{name: "default success"},
+		{name: "provider keep success", providerKeep: true},
+		{name: "provider keep failure", providerKeep: true, code: 23},
+		{name: "provider keep sync only", providerKeep: true, syncOnly: true},
+		{name: "CLI keep", keep: true, code: 23},
+		{name: "keep failure", keepFailure: true, code: 23},
+		{name: "sync only does not fail", keepFailure: true, syncOnly: true},
+		{name: "reused success", reuse: true},
+		{name: "reused failure", reuse: true, code: 23},
+		{name: "reused sync only", reuse: true, syncOnly: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := &fakeAPI{streamCode: tc.code}
+			withFakeAPI(t, fake)
+			cfg, rt := testConfig(), testRuntime()
+			cfg.Smolvm.Keep = tc.providerKeep
+			var stderr bytes.Buffer
+			rt.Stderr = &stderr
+			b := NewBackend(Provider{}.Spec(), cfg, rt).(*backend)
+			req := RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, Keep: tc.keep, KeepOnFailure: tc.keepFailure, SyncOnly: tc.syncOnly, NoSync: true, TimingJSON: true, Command: []string{"true"}}
+			if tc.reuse {
+				req.ID = "cbx_123456789abc"
+				seedSmolvmClaim(t, req.ID, "blue", "mach_1", req.Repo.Root, nil)
+			}
+			result, err := b.Run(t.Context(), req)
+			wantKept := tc.reuse || tc.keep || tc.providerKeep || tc.keepFailure && tc.code != 0
+			if result.ExitCode != tc.code || (err != nil) != (tc.code != 0) || result.Session == nil || result.Session.Kept != wantKept || result.Session.Reused != tc.reuse || fake.deleted != !wantKept {
+				t.Fatalf("result=%+v err=%v deleted=%t", result, err, fake.deleted)
+			}
+			if tc.reuse {
+				if fake.createReq.Name != "" {
+					t.Fatal("reused machine was recreated")
+				}
+			} else if fake.createReq.Ephemeral != !(tc.keep || tc.providerKeep) || (fake.createReq.TTLSeconds != 0) != !(tc.keep || tc.providerKeep) {
+				t.Fatalf("effective keep changed create request: %+v", fake.createReq)
+			}
+			if _, exists, err := core.ReadLeaseClaimWithPresence(result.LeaseID); err != nil || exists != wantKept {
+				t.Fatalf("claim exists=%t err=%v", exists, err)
+			}
+			wantStreams := 1
+			if tc.syncOnly {
+				wantStreams = 0
+			}
+			if len(fake.streamCommands) != wantStreams {
+				t.Fatalf("streams=%v", fake.streamCommands)
+			}
+			assertLifecycleTiming(t, stderr.String(), result, err)
+		})
+	}
+}
+
+func TestRunCleanupBudgetsRemainIndependent(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprint(partial), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var cleanupOrder []string
+			checkBudget := func(ctx context.Context, name string, budget time.Duration) {
+				t.Helper()
+				deadline, ok := ctx.Deadline()
+				remaining := time.Until(deadline)
+				if ctx.Err() != nil || !ok || remaining > budget || remaining < budget-5*time.Second {
+					t.Errorf("%s cleanup budget=%s err=%v", name, remaining, ctx.Err())
+				}
+				cleanupOrder = append(cleanupOrder, name)
+			}
+			fake := &fakeAPI{streamHook: cancel}
+			if partial {
+				fake.writeHook = func(context.Context, string, string) error { cancel(); return context.Canceled }
+			}
+			fake.execHook = func(ctx context.Context, command string) (execResult, error) {
+				if strings.HasPrefix(command, "rm -f ") {
+					checkBudget(ctx, "profile", 30*time.Second)
+				}
+				return execResult{}, nil
+			}
+			fake.deleteHook = func(ctx context.Context, _ string) error {
+				checkBudget(ctx, "machine", 60*time.Second)
+				fake.deleted = true
+				return nil
+			}
+			withFakeAPI(t, fake)
+			b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+			result, err := b.Run(ctx, RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, Command: []string{"true"}, Env: map[string]string{"FIXTURE": "synthetic"}})
+			if partial && !errors.Is(err, context.Canceled) || !partial && err != nil {
+				t.Errorf("result=%+v err=%v", result, err)
+			}
+			if !reflect.DeepEqual(cleanupOrder, []string{"profile", "machine"}) || result.Session == nil || result.Session.Kept {
+				t.Fatalf("cleanup=%v session=%+v", cleanupOrder, result.Session)
+			}
+		})
 	}
 }
 
@@ -1016,6 +1234,7 @@ type fakeAPI struct {
 	deleteHook     func(context.Context, string) error
 	streamHook     func()
 	streamErr      error
+	streamCode     int
 	writeHook      func(context.Context, string, string) error
 	execHook       func(context.Context, string) (execResult, error)
 	injectHook     func(context.Context, string, string) error
@@ -1100,7 +1319,7 @@ func (f *fakeAPI) ExecStream(_ context.Context, _ string, command, folder string
 	f.streamCommands = append(f.streamCommands, command)
 	f.streamFolders = append(f.streamFolders, folder)
 	_, _ = io.WriteString(stdout, "ok\n")
-	return 0, f.streamErr
+	return f.streamCode, f.streamErr
 }
 
 func (f *fakeAPI) InjectArchive(ctx context.Context, _, archive, targetDir string) error {
