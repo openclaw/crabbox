@@ -976,3 +976,67 @@ func TestRunTimingFailureKeepsPrimaryAndRetention(t *testing.T) {
 		})
 	}
 }
+
+type orgoTypedTimingReportWriter struct {
+	bytes.Buffer
+	err     error
+	reports []core.TimingReport
+}
+
+func (w *orgoTypedTimingReportWriter) WriteTimingReport(report core.TimingReport) error {
+	w.reports = append(w.reports, report)
+	return w.err
+}
+
+func TestRunTypedTimingReportFailurePreservesFirstPublicCode(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		commandCode int
+		cleanupErr  error
+		wantCode    int
+		wantKind    core.RunErrorKind
+	}{
+		{name: "first-writer", wantCode: 69, wantKind: core.RunErrorProvider},
+		{name: "command-first", commandCode: 7, wantCode: 7, wantKind: core.RunErrorCommandExit},
+		{name: "cleanup-first", cleanupErr: errors.New("synthetic cleanup failure"), wantCode: 1, wantKind: core.RunErrorProvider},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := newFakeOrgoAPI()
+			fake.bashExitCode = tc.commandCode
+			fake.deleteComputerErr = tc.cleanupErr
+			writerErr := core.ExitError{Code: 69, Message: "synthetic typed timing failure"}
+			writer := &orgoTypedTimingReportWriter{err: writerErr}
+			b := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "synthetic", WorkspaceID: "ws_existing"}}, Runtime{Stdout: io.Discard, Stderr: writer}).(*orgoBackend)
+			b.client = fake
+			result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir()}, Command: []string{"true"}, TimingJSON: true})
+			var public core.ExitError
+			if !core.AsExitError(err, &public) || public.Code != tc.wantCode || result.ExitCode != tc.wantCode || result.ErrorKind != tc.wantKind || !errors.Is(err, writerErr) {
+				t.Errorf("result=%+v public code=%d want=%d err=%v", result, public.Code, tc.wantCode, err)
+			}
+			if !strings.Contains(public.Message, writerErr.Message) {
+				t.Errorf("writer diagnostic lost: %v", err)
+			}
+			if tc.commandCode != 0 && !strings.Contains(public.Message, "exit=7") {
+				t.Errorf("command diagnostic lost: %v", err)
+			}
+			if tc.cleanupErr != nil && !errors.Is(err, tc.cleanupErr) {
+				t.Errorf("cleanup cause lost: %v", err)
+			}
+			if len(writer.reports) != 1 || len(fake.deletedComputers) != 1 {
+				t.Fatalf("reports=%v deletes=%v", writer.reports, fake.deletedComputers)
+			}
+			wantReported := tc.commandCode
+			if tc.cleanupErr != nil {
+				wantReported = 1
+			}
+			if writer.reports[0].ExitCode != wantReported {
+				t.Errorf("report before writer failure=%+v", writer.reports[0])
+			}
+			_, claimPresent, claimErr := core.ReadLeaseClaimWithPresence(result.LeaseID)
+			if claimErr != nil || claimPresent != (tc.cleanupErr != nil) {
+				t.Errorf("claim=%t err=%v", claimPresent, claimErr)
+			}
+		})
+	}
+}

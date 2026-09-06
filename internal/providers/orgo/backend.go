@@ -137,7 +137,12 @@ func (b *orgoBackend) Run(ctx context.Context, req RunRequest) (result RunResult
 				CommandMs: result.Command.Milliseconds(), TotalMs: result.Total.Milliseconds(),
 				ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label),
 			}, result, retErr))
-			result, retErr = shared.AppendDelegatedRunFailure(result, retErr, timingErr, 1)
+			firstCode := 1
+			var timingExit ExitError
+			if core.AsExitError(timingErr, &timingExit) && timingExit.Code != 0 {
+				firstCode = timingExit.Code
+			}
+			result, retErr = shared.AppendDelegatedRunFailure(result, retErr, timingErr, firstCode)
 		}
 	}()
 
