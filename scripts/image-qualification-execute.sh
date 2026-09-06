@@ -139,16 +139,20 @@ failed_status=$(curl --silent --show-error --max-time 30 \
   -H "@$relay_headers" -o "$raw/failed-readback.json" -w '%{http_code}' \
   "$QUALIFICATION_RELAY_URL/v1/images/$failed_image?provider=aws&target=linux&region=$QUALIFICATION_AWS_REGION")
 [[ "$failed_status" == 200 || "$failed_status" == 404 ]]
-node - "$raw/seed.json" "$raw/stale-cas-request.json" <<'NODE'
+node - "$QUALIFICATION_ADAPTER_STATE/promotion-receipt.json" "$raw/stale-cas-request.json" <<'NODE'
 const fs = require("node:fs");
-const seed = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-if (!/^ami-[0-9a-f]+$/.test(seed?.id ?? "") || typeof seed?.revision !== "string") {
-  throw new Error("seed receipt does not contain an exact image revision");
+const promotion = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (!/^ami-[0-9a-f]+$/.test(promotion?.image?.id ?? "") || typeof promotion?.image?.revision !== "string") {
+  throw new Error("promotion receipt does not contain an exact failed image revision");
 }
 fs.writeFileSync(
   process.argv[3],
   `${JSON.stringify({
-    expectedCurrent: { state: "present", imageId: seed.id, revision: seed.revision },
+    expectedCurrent: {
+      state: "present",
+      imageId: promotion.image.id,
+      revision: promotion.image.revision,
+    },
   })}\n`,
   { mode: 0o600 },
 );

@@ -67,258 +67,115 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	return nil
 }
 
-func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
-	if req.Options.Tailscale.Enabled {
-		return RunResult{}, exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
+func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+	workdir, workdirErr := vercelSandboxWorkdir(b.cfg)
+	var api vercelSandboxClient
+	var leaseID, sandboxID, slug string
+	session := func(unlock func()) shared.DelegatedSandbox {
+		return shared.DelegatedSandbox{LeaseID: leaseID, Slug: slug, Unlock: unlock, CleanupCommand: vercelSandboxCleanupCommand(leaseID)}
 	}
-	workdir, err := vercelSandboxWorkdir(b.cfg)
-	if err != nil {
-		return RunResult{}, err
-	}
-	started := b.now()
-	api, err := b.client()
-	if err != nil {
-		return RunResult{}, err
-	}
-	var prepared *core.PreparedArchive
-	if req.ID == "" && !req.NoSync {
-		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-			TempPattern: "crabbox-vercel-sandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
-		})
-		if err != nil {
-			return RunResult{}, err
-		}
-		defer prepared.Close()
-	}
-	if err := b.bindProviderScope(ctx, api, req.ID != ""); err != nil {
-		return RunResult{}, err
-	}
-	leaseID, sandboxID, slug := "", "", ""
-	acquired := false
-	var unlockOperation func()
-	defer func() {
-		if unlockOperation != nil {
-			unlockOperation()
-		}
-	}()
-	if req.ID == "" {
-		leaseID, sandboxID, slug, unlockOperation, err = b.createSandbox(ctx, api, req.Repo, req.Reclaim, req.RequestedSlug, req.Keep || req.KeepOnFailure)
-		if err != nil {
-			return RunResult{}, err
-		}
-		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s runtime=%s\n", leaseID, slug, providerName, sandboxID, vercelSandboxRuntime(b.cfg))
-		acquired = true
-	} else {
-		leaseID, sandboxID, _, err = b.resolveLeaseID(req.ID, "", false, 0)
-		if err != nil {
-			return RunResult{}, err
-		}
-		unlockOperation, err = lockVercelSandboxLeaseOperation(ctx, leaseID)
-		if err != nil {
-			return RunResult{}, err
-		}
-		leaseID, sandboxID, _, err = b.resolveLeaseID(leaseID, "", false, 0)
-		if err != nil {
-			return RunResult{}, err
-		}
-		if _, err := b.verifyClaim(ctx, api, leaseID, sandboxID); err != nil {
-			return RunResult{}, err
-		}
-		claim, err := readLeaseClaim(leaseID)
-		if err != nil {
-			return RunResult{}, err
-		}
-		_, _, slug, err = b.finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout)
-		if err != nil {
-			return RunResult{}, err
-		}
-	}
-	shouldStop := acquired && !req.Keep
-	cleanedUp := false
-	cleanupCreated := func() error {
-		cleanupPending := shouldStop
-		err := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, &shouldStop)
-		if cleanupPending && err == nil {
-			cleanedUp = true
-		}
-		return err
-	}
-	if shouldStop {
-		defer func() {
-			if cleanupErr := cleanupCreated(); cleanupErr != nil {
-				if result.ExitCode == 0 {
-					result.ExitCode = 1
+	return shared.RunDelegatedSandbox(ctx, req, shared.DelegatedSandboxLifecycle{
+		Provider: providerName, Runtime: b.rt, Workdir: workdir,
+		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL, CleanupTimeout: vercelSandboxCleanupTimeout,
+		Preflight: func(context.Context) error {
+			if req.Options.Tailscale.Enabled {
+				return exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
+			}
+			if workdirErr != nil {
+				return workdirErr
+			}
+			var err error
+			api, err = b.client()
+			return err
+		},
+		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
+			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
+				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
+				TempPattern: "crabbox-vercel-sandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+			})
+		},
+		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			if err := b.bindProviderScope(ctx, api, false); err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			var unlock func()
+			var err error
+			leaseID, sandboxID, slug, unlock, err = b.createSandbox(ctx, api, req.Repo, req.Reclaim, req.RequestedSlug, req.Keep || req.KeepOnFailure)
+			if err != nil {
+				return shared.DelegatedSandbox{Unlock: unlock}, err
+			}
+			fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s runtime=%s\n", leaseID, slug, providerName, sandboxID, vercelSandboxRuntime(b.cfg))
+			return session(unlock), nil
+		},
+		Resolve: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			if err := b.bindProviderScope(ctx, api, true); err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			var err error
+			leaseID, sandboxID, _, err = b.resolveLeaseID(req.ID, "", false, 0)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			unlock, err := lockVercelSandboxLeaseOperation(ctx, leaseID)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			unbound := shared.DelegatedSandbox{Unlock: unlock}
+			leaseID, sandboxID, _, err = b.resolveLeaseID(leaseID, "", false, 0)
+			if err != nil {
+				return unbound, err
+			}
+			if _, err := b.verifyClaim(ctx, api, leaseID, sandboxID); err != nil {
+				return unbound, err
+			}
+			claim, err := readLeaseClaim(leaseID)
+			if err != nil {
+				return unbound, err
+			}
+			_, _, slug, err = b.finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout)
+			if err != nil {
+				return unbound, err
+			}
+			return session(unlock), nil
+		},
+		Setup: func(context.Context) error {
+			fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
+			return nil
+		},
+		Sync: func(ctx context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+			return b.syncWorkspace(ctx, api, sandboxID, req, workdir, archive)
+		},
+		NoSync: func(ctx context.Context) error { return b.ensureWorkspace(ctx, api, sandboxID, workdir) },
+		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
+			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+			if err != nil {
+				return shared.DelegatedSandboxCommand{}, err
+			}
+			commandText := intent.ShellCommand("bash", "-lc")
+			commandEnv, strippedAuthEnv := vercelSandboxCommandEnv(req.Env)
+			if len(strippedAuthEnv) > 0 {
+				fmt.Fprintf(b.rt.Stderr, "warning: provider=%s did not forward provider authentication variables: %s\n", providerName, strings.Join(strippedAuthEnv, ","))
+			}
+			if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
+				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, commandEnv)
+			}
+			return shared.DelegatedSandboxCommand{Text: commandText, Run: func(ctx context.Context) (int, error) {
+				result, err := api.Exec(ctx, sandboxID, execRequest{Command: commandText, WorkingDir: workdir, Env: commandEnv, TimeoutSecs: b.execTimeoutSecs()}, b.rt.Stdout, b.rt.Stderr)
+				if err != nil {
+					return result.ExitCode, shared.ExitErrorWithCause(1, redactSecrets(err.Error()), err)
 				}
-				if retErr == nil {
-					retErr = exit(1, "%v", cleanupErr)
-				} else {
-					retErr = errors.Join(retErr, cleanupErr)
-				}
+				return result.ExitCode, err
+			}}, nil
+		},
+		Retained: func(context.Context) error {
+			err := b.refreshLeaseActivity(leaseID)
+			if err != nil {
+				fmt.Fprintf(b.rt.Stderr, "warning: refresh vercel-sandbox lease activity failed lease=%s: %v\n", leaseID, err)
 			}
-		}()
-	}
-	session := &RunSessionHandle{
-		Provider:       providerName,
-		LeaseID:        leaseID,
-		Slug:           slug,
-		Reused:         !acquired,
-		Kept:           !shouldStop,
-		CleanupCommand: vercelSandboxCleanupCommand(leaseID),
-	}
-	finishResult := func(result RunResult) RunResult {
-		result.Session = session
-		result.Session.Kept = !cleanedUp && !shouldStop
-		return result
-	}
-	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
-
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
-	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, api, sandboxID, req, workdir, prepared)
-		if err != nil {
-			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-			return finishResult(RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true}), err
-		}
-		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.ensureWorkspace(ctx, api, sandboxID, workdir); err != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return finishResult(RunResult{}), err
-	}
-
-	if req.SyncOnly {
-		result = finishResult(RunResult{
-			Provider:      providerName,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			Total:         b.now().Sub(started),
-			SyncDelegated: true,
-		})
-		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
-		activityErr := b.refreshLeaseActivityIfRetained(leaseID, shouldStop)
-		if activityErr != nil {
-			fmt.Fprintf(b.rt.Stderr, "warning: refresh vercel-sandbox lease activity failed lease=%s: %v\n", leaseID, activityErr)
-			result.ExitCode = 1
-		}
-		if cleanupErr := cleanupCreated(); cleanupErr != nil {
-			result.ExitCode = 1
-			result = finishResult(result)
-			return result, cleanupErr
-		}
-		result = finishResult(result)
-		if req.TimingJSON {
-			report := timingReportWithRunResult(timingReport{
-				Provider:      providerName,
-				LeaseID:       leaseID,
-				Slug:          slug,
-				SyncDelegated: true,
-				SyncMs:        syncDuration.Milliseconds(),
-				SyncPhases:    syncPhases,
-				SyncSkipped:   req.NoSync,
-				TotalMs:       result.Total.Milliseconds(),
-				ExitCode:      result.ExitCode,
-				Label:         strings.TrimSpace(req.Label),
-			}, result, activityErr)
-			if activityErr != nil {
-				report = timingReportWithProviderError(report)
-			}
-			if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
-				return result, err
-			}
-		}
-		return result, activityErr
-	}
-
-	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
-	if err != nil {
-		return finishResult(RunResult{}), err
-	}
-	commandText := intent.ShellCommand("bash", "-lc")
-	commandEnv, strippedAuthEnv := vercelSandboxCommandEnv(req.Env)
-	if len(strippedAuthEnv) > 0 {
-		fmt.Fprintf(b.rt.Stderr, "warning: provider=%s did not forward provider authentication variables: %s\n", providerName, strings.Join(strippedAuthEnv, ","))
-	}
-	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
-		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, commandEnv)
-	}
-	commandStart := b.now()
-	execRes, runErr := api.Exec(ctx, sandboxID, execRequest{
-		Command:     commandText,
-		WorkingDir:  workdir,
-		Env:         commandEnv,
-		TimeoutSecs: b.execTimeoutSecs(),
-	}, b.rt.Stdout, b.rt.Stderr)
-	commandDuration := b.now().Sub(commandStart)
-	result = finishResult(RunResult{
-		Provider:      providerName,
-		LeaseID:       leaseID,
-		Slug:          slug,
-		CommandText:   commandText,
-		ExitCode:      execRes.ExitCode,
-		Command:       commandDuration,
-		Total:         b.now().Sub(started),
-		SyncDelegated: true,
+			return err
+		},
+		Cleanup: func(ctx context.Context) error { return b.cleanupCreatedRun(ctx, api, leaseID, sandboxID) },
 	})
-	if req.NoSync {
-		fmt.Fprintf(b.rt.Stderr, "vercel-sandbox run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	} else {
-		fmt.Fprintf(b.rt.Stderr, "vercel-sandbox run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	}
-	var commandErr error
-	if runErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		if result.ExitCode == 0 {
-			result.ExitCode = 1
-		}
-		commandErr = ExitError{Code: 1, Message: fmt.Sprintf("vercel-sandbox run failed: %v", redactSecrets(runErr.Error()))}
-	} else if result.ExitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		commandErr = ExitError{Code: result.ExitCode, Message: fmt.Sprintf("vercel-sandbox run exited %d", result.ExitCode)}
-	}
-	activityErr := b.refreshLeaseActivityIfRetained(leaseID, shouldStop)
-	if activityErr != nil {
-		fmt.Fprintf(b.rt.Stderr, "warning: refresh vercel-sandbox lease activity failed lease=%s: %v\n", leaseID, activityErr)
-		if commandErr == nil {
-			result.ExitCode = 1
-		}
-	}
-	if cleanupErr := cleanupCreated(); cleanupErr != nil {
-		if result.ExitCode == 0 {
-			result.ExitCode = 1
-		}
-		commandErr = errors.Join(commandErr, cleanupErr)
-	}
-	result = finishResult(result)
-	if req.TimingJSON {
-		timingErr := commandErr
-		if timingErr == nil {
-			timingErr = activityErr
-		}
-		report := timingReportWithRunResult(timingReport{
-			Provider:      providerName,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			SyncDelegated: true,
-			SyncMs:        syncDuration.Milliseconds(),
-			SyncPhases:    syncPhases,
-			SyncSkipped:   req.NoSync,
-			CommandMs:     result.Command.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      result.ExitCode,
-			Label:         strings.TrimSpace(req.Label),
-		}, result, timingErr)
-		if commandErr == nil && activityErr != nil {
-			report = timingReportWithProviderError(report)
-		}
-		if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
-			return result, err
-		}
-	}
-	if commandErr != nil {
-		return result, commandErr
-	}
-	return result, activityErr
 }
 
 func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) {
@@ -883,13 +740,6 @@ func (b *backend) refreshLeaseActivity(leaseID string) error {
 	return claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, claim.RepoRoot, idleTimeout, false)
 }
 
-func (b *backend) refreshLeaseActivityIfRetained(leaseID string, shouldStop bool) error {
-	if shouldStop {
-		return nil
-	}
-	return b.refreshLeaseActivity(leaseID)
-}
-
 func (b *backend) cleanupCreateFailure(ctx context.Context, api vercelSandboxClient, sandboxID string, cause error) error {
 	cleanupCtx, cancel := b.cleanupContext(ctx)
 	defer cancel()
@@ -902,14 +752,8 @@ func (b *backend) cleanupCreateFailure(ctx context.Context, api vercelSandboxCli
 	return cause
 }
 
-func (b *backend) cleanupCreatedRun(ctx context.Context, api vercelSandboxClient, leaseID, sandboxID string, shouldStop *bool) error {
-	if !*shouldStop {
-		return nil
-	}
-	*shouldStop = false
-	cleanupCtx, cancel := b.cleanupContext(ctx)
-	defer cancel()
-	if err := api.DeleteSandbox(cleanupCtx, sandboxID); err != nil && !isVercelSandboxNotFound(err) {
+func (b *backend) cleanupCreatedRun(ctx context.Context, api vercelSandboxClient, leaseID, sandboxID string) error {
+	if err := api.DeleteSandbox(ctx, sandboxID); err != nil && !isVercelSandboxNotFound(err) {
 		return fmt.Errorf("vercel-sandbox delete failed for %s: %w", sandboxID, err)
 	}
 	removeLeaseClaim(leaseID)

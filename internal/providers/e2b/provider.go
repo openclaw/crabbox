@@ -18,13 +18,14 @@ func (Provider) Aliases() []string { return nil }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:             e2bProvider,
-		Family:           "e2b",
-		Kind:             core.ProviderKindDelegatedRun,
-		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:         core.FeatureSet{core.FeatureURLBridge, core.FeatureRunSession},
-		Coordinator:      core.CoordinatorNever,
-		ClassDisposition: core.ProviderClassDispositionUnmapped,
+		SyncGuardrailFullCandidate: true,
+		Name:                       e2bProvider,
+		Family:                     "e2b",
+		Kind:                       core.ProviderKindDelegatedRun,
+		Targets:                    []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:                   core.FeatureSet{core.FeatureURLBridge, core.FeatureRunSession},
+		Coordinator:                core.CoordinatorNever,
+		ClassDisposition:           core.ProviderClassDispositionUnmapped,
 	}
 }
 

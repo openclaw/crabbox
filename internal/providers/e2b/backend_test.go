@@ -139,6 +139,30 @@ func TestE2BProcessStreamRedactsReflectedCredential(t *testing.T) {
 	})
 }
 
+func TestE2BProcessEndAndStreamFailurePrecedence(t *testing.T) {
+	for _, exited := range []bool{false, true} {
+		for _, ending := range []string{"clean", "rpc error", "truncated"} {
+			t.Run(fmt.Sprintf("exited=%t/%s", exited, ending), func(t *testing.T) {
+				body := e2bTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 137, "exited": exited, "error": "fixture process end"}}})
+				switch ending {
+				case "rpc error":
+					body = append(body, e2bTestEnvelope(2, map[string]any{"error": map[string]any{"code": "internal", "message": "fixture RPC failure"}})...)
+				case "truncated":
+					body = append(body, 0)
+				}
+				code, err := parseE2BProcessStream(bytes.NewReader(body), io.Discard, io.Discard)
+				if ending == "clean" {
+					if code != 137 || err != nil {
+						t.Fatalf("observed end: code=%d err=%v", code, err)
+					}
+				} else if code != 1 || err == nil {
+					t.Fatalf("stream failure lost precedence: code=%d err=%v", code, err)
+				}
+			})
+		}
+	}
+}
+
 func TestParseE2BProcessStream(t *testing.T) {
 	body := bytes.Join([][]byte{
 		e2bTestEnvelope(0, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}}),

@@ -641,6 +641,15 @@ serialization, `core.RunDelegatedArchiveSync` for staged archive replacement,
 and scoped claim helpers for guarded local state. None of these grants native
 resource ownership or proves that canceling transport stopped a remote command.
 
+Archive preparation has one implementation with two caller lifetimes.
+`core.PrepareDelegatedArchive` returns an owned, seekable snapshot and cancels
+its preparation context before provisioning. A later sync charges the saved
+archive duration against a fresh transfer budget, excluding the provisioning
+gap. A sync that prepares its own archive keeps the same deadline continuously
+through archive construction and transfer; manifest planning and guardrails
+remain outside that budget. Both paths close and remove the owned archive on
+success or failure, and remote cleanup keeps its independent bounded context.
+
 ## Provider registration
 
 A provider implements `cli.Provider`:

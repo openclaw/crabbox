@@ -24,14 +24,14 @@ func TestRunCoordinatorCleanupOutcomes(t *testing.T) {
 		lease                                 CoordinatorLease
 		terminal, releaseError, artifactError bool
 	}{
-		{name: "deleted", lease: CoordinatorLease{State: "released", ReleaseDeletesServer: &deleting}, terminal: true},
+		{name: "deleted", lease: confirmedCoordinatorRelease("", ""), terminal: true},
 		{name: "retained", lease: CoordinatorLease{State: "released", ReleaseDeletesServer: &retained}},
 		{name: "pending", lease: CoordinatorLease{State: "released", CleanupStartedAt: "2026-08-31T00:00:00Z", ReleaseDeletesServer: &deleting}},
 		{name: "failed", lease: CoordinatorLease{State: "released", CleanupError: "synthetic provider failure", ReleaseDeletesServer: &deleting}},
 		{name: "retry scheduled", lease: CoordinatorLease{State: "released", CleanupRetryAt: "2026-08-31T00:05:00Z", ReleaseDeletesServer: &deleting}},
 		{name: "unknown", lease: CoordinatorLease{State: "released", CleanupStatus: "unknown"}},
 		{name: "release rejected", releaseError: true},
-		{name: "deleted with artifact error", lease: CoordinatorLease{State: "released"}, terminal: true, artifactError: true},
+		{name: "deleted with artifact error", lease: confirmedCoordinatorRelease("", ""), terminal: true, artifactError: true},
 	} {
 		for _, timing := range []bool{false, true} {
 			name := tc.name + "/text"
@@ -39,6 +39,7 @@ func TestRunCoordinatorCleanupOutcomes(t *testing.T) {
 				name = tc.name + "/timing"
 			}
 			t.Run(name, func(t *testing.T) {
+				sshPort := startTCPReadinessFixture(t)
 				setupRunCleanupWorkspaceOwnerTest(t)
 				const id = "cbx_abcdef123456"
 				provider := runReadyPoolPreflightTestProvider{}.Name()
@@ -57,7 +58,7 @@ func TestRunCoordinatorCleanupOutcomes(t *testing.T) {
 				var posts atomic.Int32
 				var artifactFailure atomic.Bool
 				outside := t.TempDir()
-				active := CoordinatorLease{ID: id, Provider: provider, State: "active", Host: "127.0.0.1", SSHPort: "22", SSHUser: "crabbox", TargetOS: targetLinux}
+				active := CoordinatorLease{ID: id, Provider: provider, State: "active", Host: "127.0.0.1", SSHPort: sshPort, SSHUser: "crabbox", TargetOS: targetLinux}
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					switch {
 					case strings.HasSuffix(r.URL.Path, "/release"):

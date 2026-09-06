@@ -142,6 +142,10 @@ func TestCoordinatorStopSharesCompletionBudget(t *testing.T) {
 					http.NotFound(w, r)
 					return
 				}
+				if lease.State == "released" && lease.CleanupStartedAt == "" {
+					lease = confirmedCoordinatorRelease(id, "aws")
+					lease.TargetOS = targetLinux
+				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
 			}))
 			defer server.Close()

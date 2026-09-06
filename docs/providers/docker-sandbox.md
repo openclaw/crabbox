@@ -151,6 +151,13 @@ CRABBOX_DOCKER_SANDBOX_KIT
 
 ## Lifecycle
 
+For streamed workload execution, ordinary positive native CLI exits remain
+command exits. Returned transport, cancellation, deadline, and I/O errors instead
+produce exit 1 and matching timing/result status, even when the native runner also
+reports a nonzero code. Later cancellation does not replace an already observed
+ordinary exit. A normal CLI diagnostic exit cannot be distinguished from a remote
+workload exit without stronger native protocol evidence.
+
 1. `warmup` or `run` without `--id` creates a Crabbox-owned sandbox name such as
    `crabbox-my-app-1a2b3c`.
 2. Crabbox runs `sbx create --name <name> ... shell <repo-root>` and records a

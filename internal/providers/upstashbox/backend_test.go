@@ -683,11 +683,8 @@ func TestRunCleanupDeleteUsesBoundedContext(t *testing.T) {
 		Command: []string{"echo", "hello"},
 		NoSync:  true,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.ExitCode != 0 {
-		t.Fatalf("result=%#v", result)
+	if !errors.Is(err, context.DeadlineExceeded) || result.ExitCode != 1 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider {
+		t.Fatalf("result=%#v err=%v, want failed deletion reported", result, err)
 	}
 	if result.Session == nil || !result.Session.Kept {
 		t.Fatalf("session=%#v, want retained session after cleanup failure", result.Session)
@@ -695,8 +692,70 @@ func TestRunCleanupDeleteUsesBoundedContext(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("Run took %s, want bounded cleanup", elapsed)
 	}
-	if !strings.Contains(stderr.String(), "warning: upstash-box delete failed for box_1: context deadline exceeded") {
-		t.Fatalf("stderr=%q, want bounded cleanup warning", stderr.String())
+	if claim, exists, err := core.ReadLeaseClaimWithPresence(result.LeaseID); err != nil || !exists || claim.LeaseID != result.LeaseID {
+		t.Fatalf("failed deletion lost claim: exists=%v err=%v", exists, err)
+	}
+}
+
+func TestRunKeepsFailuresBeforeCommand(t *testing.T) {
+	for _, phase := range []string{"workspace", "archive upload", "command preparation", "environment upload"} {
+		t.Run(phase, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := &fakeAPI{}
+			withFakeAPI(t, fake)
+			req := RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: true, TimingJSON: true, Command: []string{"true"}}
+			switch phase {
+			case "workspace":
+				fake.execHook = func(context.Context, string) (execResult, error) {
+					return execResult{}, errors.New("workspace unavailable")
+				}
+			case "archive upload":
+				req.NoSync = false
+				req.Repo.Root = newGitRepo(t)
+				fake.uploadHook = func(context.Context, string, string) error { return errors.New("archive upload unavailable") }
+			case "command preparation":
+				req.Command = nil
+			case "environment upload":
+				req.Env = map[string]string{"FIXTURE": "synthetic"}
+				fake.uploadHook = func(context.Context, string, string) error { return errors.New("environment upload unavailable") }
+			}
+			var stderr bytes.Buffer
+			b := NewBackend(Provider{}.Spec(), testConfig(), Runtime{Stdout: io.Discard, Stderr: &stderr}).(*backend)
+			result, err := b.Run(t.Context(), req)
+			if err == nil || result.Session == nil || !result.Session.Kept || result.Session.Reused || len(fake.deletedIDs) != 0 || len(fake.streamCommands) != 0 {
+				t.Fatalf("early failure lost retention: result=%#v err=%v calls=%v", result, err, fake.verbs)
+			}
+			if _, exists, err := core.ReadLeaseClaimWithPresence(result.LeaseID); err != nil || !exists {
+				t.Fatalf("retained claim missing: exists=%v err=%v", exists, err)
+			}
+			lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+			var report core.TimingReport
+			if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil || report.RunStatus != core.RunStatusFailed || report.ErrorKind != core.RunErrorProvider || report.ExitCode != result.ExitCode {
+				t.Fatalf("early failure timing=%#v err=%v", report, err)
+			}
+		})
+	}
+}
+
+type failingTimingWriter struct{ cause error }
+
+func (w failingTimingWriter) Write(data []byte) (int, error) {
+	if bytes.HasPrefix(data, []byte("{")) {
+		return 0, w.cause
+	}
+	return len(data), nil
+}
+
+func TestRunTimingFailurePreservesCommandAndRetention(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeAPI{streamCode: 42}
+	withFakeAPI(t, fake)
+	cause := errors.New("synthetic timing write failure")
+	b := NewBackend(Provider{}.Spec(), testConfig(), Runtime{Stdout: io.Discard, Stderr: failingTimingWriter{cause}}).(*backend)
+	result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: true, TimingJSON: true, Command: []string{"false"}})
+	var exitErr ExitError
+	if !errors.Is(err, cause) || !errors.As(err, &exitErr) || exitErr.Code != 42 || result.ExitCode != 42 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorCommandExit || result.Session == nil || !result.Session.Kept || len(fake.deletedIDs) != 0 {
+		t.Fatalf("timing masked command/retention: result=%#v err=%v deletes=%v", result, err, fake.deletedIDs)
 	}
 }
 
@@ -1325,7 +1384,9 @@ func TestEnvProfileRefusesChangedReceipt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = cleanup()
+			cleanupCtx, cancel := upstashBoxCleanupContext()
+			defer cancel()
+			err = cleanup(cleanupCtx)
 			if change == "unchanged legacy claim" {
 				if err != nil || len(fake.execCommands) != 1 {
 					t.Fatalf("legacy cleanup=%v commands=%v", err, fake.execCommands)
@@ -1376,7 +1437,9 @@ func TestEnvProfileDeniedUploadHasNoRemoteCustody(t *testing.T) {
 				t.Fatal("denied upload succeeded")
 			}
 			if cleanup != nil {
-				if err := cleanup(); err != nil {
+				cleanupCtx, cancel := upstashBoxCleanupContext()
+				defer cancel()
+				if err := cleanup(cleanupCtx); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -1410,7 +1473,7 @@ func TestRunPreservesStreamErrorCause(t *testing.T) {
 				if !errors.Is(err, cause) || !errors.As(err, &exitErr) || exitErr.Code != 1 || len(fake.streamCommands) != 1 || t.Context().Err() != nil {
 					t.Fatalf("stream cause lost: err=%v stream calls=%d parent=%v", err, len(fake.streamCommands), t.Context().Err())
 				}
-				if got, want := core.RunStatusForResult(result, err), core.RunStatusForResult(result, cause); got != want {
+				if got, want := core.FinalizeRunResult(result, err).Status, core.RunStatusForResult(result, cause); got != want {
 					t.Fatalf("primary status=%s, want %s", got, want)
 				}
 			})
@@ -1540,7 +1603,7 @@ func TestEnvProfilesOnSameBoxHaveIndependentCustody(t *testing.T) {
 		return os.WriteFile(filepath.Join(root, filepath.Base(remotePath)), data, 0o600)
 	}
 	var paths []string
-	var cleanups []func() error
+	var cleanups []func(context.Context) error
 	for range 2 {
 		path, cleanup, err := uploadEnvProfile(t.Context(), fake, "cbx_123456789abc", "box_1", "blue", map[string]string{"FIXTURE": "synthetic"})
 		if err != nil {
@@ -1560,16 +1623,16 @@ func TestEnvProfilesOnSameBoxHaveIndependentCustody(t *testing.T) {
 		}
 		return execResult{}, errors.New("unexpected cleanup target")
 	}
-	if err := cleanups[0](); err != nil {
+	if err := cleanups[0](t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(root, filepath.Base(paths[1]))); err != nil {
 		t.Fatalf("first cleanup affected second profile: %v", err)
 	}
-	if err := cleanups[0](); err != nil {
+	if err := cleanups[0](t.Context()); err != nil {
 		t.Fatalf("Close not idempotent: %v", err)
 	}
-	if err := cleanups[1](); err != nil {
+	if err := cleanups[1](t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(root)
@@ -1582,7 +1645,7 @@ func TestRunEnvProfileThroughNativeHTTPTransport(t *testing.T) {
 	if os.PathSeparator != '/' {
 		t.Skip("native POSIX transport")
 	}
-	for _, scenario := range []string{"healthy", "lost upload acknowledgement", "canceled upload", "changed generation", "source failure", "empty source"} {
+	for _, scenario := range []string{"healthy", "lost upload acknowledgement", "canceled upload", "changed generation", "source failure", "empty source", "owned success", "owned command exit", "owned workspace failure", "owned upload failure", "owned profile cleanup failure", "owned deletion failure", "owned timing failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			local := t.TempDir()
@@ -1593,7 +1656,8 @@ func TestRunEnvProfileThroughNativeHTTPTransport(t *testing.T) {
 			var mu sync.Mutex
 			box := boxData{ID: "box_fixture", Name: "crabbox-blue-123456789abc", CreatedAt: 1700000000, Status: "running"}
 			var profilePath string
-			uploads, removals, workloads, deletes := 0, 0, 0, 0
+			owned := strings.HasPrefix(scenario, "owned ")
+			uploads, removals, workloads, deletes, creates := 0, 0, 0, 0, 0
 			mapPath := func(value string) string { return strings.ReplaceAll(value, workspaceRoot, remote) }
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
@@ -1607,7 +1671,34 @@ func TestRunEnvProfileThroughNativeHTTPTransport(t *testing.T) {
 				case "/v2/box/box_fixture":
 					_ = json.NewEncoder(w).Encode(box)
 				case "/v2/box":
+					if owned && r.Method == http.MethodPost {
+						var request struct{ Name string }
+						if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+							t.Error(err)
+							return
+						}
+						creates++
+						box.Name = request.Name
+						_ = json.NewEncoder(w).Encode(box)
+						return
+					}
 					deletes++
+					if owned && r.Method == http.MethodDelete {
+						var request struct {
+							IDs []string `json:"ids"`
+						}
+						if err := json.NewDecoder(r.Body).Decode(&request); err != nil || len(request.IDs) != 1 || request.IDs[0] != box.ID {
+							t.Errorf("unexpected deletion target: ids=%v err=%v", request.IDs, err)
+							http.Error(w, "target", 400)
+							return
+						}
+						if scenario == "owned deletion failure" {
+							http.Error(w, "synthetic deletion failure", 500)
+						} else {
+							w.WriteHeader(http.StatusNoContent)
+						}
+						return
+					}
 					http.Error(w, "unexpected box mutation", 400)
 				case "/v2/box/box_fixture/files/upload", "/v2/box/box_fixture/files/write":
 					var content string
@@ -1643,7 +1734,7 @@ func TestRunEnvProfileThroughNativeHTTPTransport(t *testing.T) {
 					}
 					uploads++
 					switch scenario {
-					case "lost upload acknowledgement":
+					case "lost upload acknowledgement", "owned upload failure":
 						http.Error(w, "synthetic upload acknowledgement failure", 500)
 						return
 					case "canceled upload":
@@ -1668,6 +1759,10 @@ func TestRunEnvProfileThroughNativeHTTPTransport(t *testing.T) {
 						return
 					}
 					stream := strings.HasSuffix(r.URL.Path, "exec-stream")
+					if scenario == "owned workspace failure" && strings.HasPrefix(body.Command[2], "mkdir -p ") {
+						http.Error(w, "synthetic workspace failure", 500)
+						return
+					}
 					if stream {
 						workloads++
 					}
@@ -1678,6 +1773,10 @@ func TestRunEnvProfileThroughNativeHTTPTransport(t *testing.T) {
 							return
 						}
 						removals++
+						if scenario == "owned profile cleanup failure" {
+							_ = json.NewEncoder(w).Encode(execResult{ExitCode: 9, Error: "synthetic profile cleanup failure"})
+							return
+						}
 					}
 					cmd := exec.CommandContext(r.Context(), body.Command[0], body.Command[1], mapPath(body.Command[2]))
 					cmd.Dir = filepath.Join(remote, body.Folder)
@@ -1708,7 +1807,12 @@ func TestRunEnvProfileThroughNativeHTTPTransport(t *testing.T) {
 			cfg := testConfig()
 			cfg.UpstashBox.BaseURL, cfg.UpstashBox.APIKey = server.URL, "synthetic-fixture"
 			var stdout bytes.Buffer
-			b := NewBackend(Provider{}.Spec(), cfg, Runtime{HTTP: server.Client(), Stdout: &stdout, Stderr: io.Discard}).(*backend)
+			var stderr bytes.Buffer
+			var diagnostics io.Writer = &stderr
+			if scenario == "owned timing failure" {
+				diagnostics = failingTimingWriter{errors.New("synthetic timing write failure")}
+			}
+			b := NewBackend(Provider{}.Spec(), cfg, Runtime{HTTP: server.Client(), Stdout: &stdout, Stderr: diagnostics}).(*backend)
 			command := `printf '%s\n' "$FIXTURE"`
 			if scenario == "source failure" {
 				command = "printf first; printf escaped"
@@ -1716,12 +1820,20 @@ func TestRunEnvProfileThroughNativeHTTPTransport(t *testing.T) {
 			if scenario == "empty source" {
 				command = ""
 			}
-			result, err := b.Run(ctx, RunRequest{ID: "box_fixture", Repo: Repo{Root: t.TempDir()}, NoSync: true, Command: []string{command}, ShellMode: true, Env: map[string]string{"FIXTURE": "quote ' newline\n$literal"}})
+			if scenario == "owned command exit" || scenario == "owned timing failure" {
+				command = "exit 42"
+			}
+			req := RunRequest{ID: "box_fixture", Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, TimingJSON: true, Command: []string{command}, ShellMode: true, Env: map[string]string{"FIXTURE": "quote ' newline\n$literal"}}
+			if owned {
+				req.ID, req.KeepOnFailure = "", true
+			}
+			result, err := b.Run(ctx, req)
+			result = core.FinalizeRunResult(result, err)
 			mu.Lock()
 			defer mu.Unlock()
-			wantWorkloads, wantRemovals := 1, 1
+			wantWorkloads, wantRemovals, wantUploads, wantDeletes := 1, 1, 1, 0
 			switch scenario {
-			case "lost upload acknowledgement":
+			case "lost upload acknowledgement", "owned upload failure":
 				wantWorkloads = 0
 				if err == nil || !strings.Contains(err.Error(), "synthetic upload acknowledgement failure") {
 					t.Fatalf("lost primary upload error: %v", err)
@@ -1740,6 +1852,28 @@ func TestRunEnvProfileThroughNativeHTTPTransport(t *testing.T) {
 				if err == nil || result.ExitCode != 9 || strings.Contains(stdout.String(), "escaped") {
 					t.Fatalf("source failure escaped: code=%d err=%v out=%q", result.ExitCode, err, stdout.String())
 				}
+			case "owned workspace failure":
+				wantWorkloads, wantRemovals, wantUploads = 0, 0, 0
+				if err == nil || !strings.Contains(err.Error(), "synthetic workspace failure") {
+					t.Fatalf("workspace error lost: %v", err)
+				}
+			case "owned command exit", "owned timing failure":
+				var exitErr ExitError
+				if !errors.As(err, &exitErr) || exitErr.Code != 42 || result.ExitCode != 42 || result.ErrorKind != core.RunErrorCommandExit {
+					t.Fatalf("native command outcome lost: result=%#v err=%v", result, err)
+				}
+				if scenario == "owned timing failure" && !strings.Contains(err.Error(), "synthetic timing write failure") {
+					t.Fatalf("timing diagnostic lost: %v", err)
+				}
+			case "owned profile cleanup failure":
+				if err == nil || result.ExitCode != 5 || result.ErrorKind != core.RunErrorProvider {
+					t.Fatalf("mandatory cleanup lost: result=%#v err=%v", result, err)
+				}
+			case "owned deletion failure":
+				wantDeletes = 1
+				if err == nil || result.ExitCode != 1 || result.ErrorKind != core.RunErrorProvider {
+					t.Fatalf("deletion outcome lost: result=%#v err=%v", result, err)
+				}
 			default:
 				if err != nil || result.ExitCode != 0 {
 					t.Fatalf("result=%#v err=%v", result, err)
@@ -1748,18 +1882,40 @@ func TestRunEnvProfileThroughNativeHTTPTransport(t *testing.T) {
 					t.Fatalf("profile value changed: %q", stdout.String())
 				}
 			}
-			if uploads != 1 || removals != wantRemovals || workloads != wantWorkloads || deletes != 0 {
+			if scenario == "owned success" {
+				wantDeletes = 1
+			}
+			if uploads != wantUploads || removals != wantRemovals || workloads != wantWorkloads || deletes != wantDeletes {
 				t.Fatalf("uploads=%d removals=%d workloads=%d deletes=%d", uploads, removals, workloads, deletes)
 			}
 			_, statErr := os.Stat(mapPath(profilePath))
-			if wantRemovals == 1 && !errors.Is(statErr, os.ErrNotExist) {
+			if wantRemovals == 1 && scenario != "owned profile cleanup failure" && !errors.Is(statErr, os.ErrNotExist) {
 				t.Fatalf("remote residue: %v", statErr)
 			}
-			if wantRemovals == 0 && statErr != nil {
+			if (wantUploads > 0 && wantRemovals == 0 || scenario == "owned profile cleanup failure") && statErr != nil {
 				t.Fatalf("refused cleanup changed remote file: %v", statErr)
 			}
-			if _, exists, err := core.ReadLeaseClaimWithPresence("cbx_123456789abc"); err != nil || exists {
-				t.Fatalf("discovery claim changed: exists=%v err=%v", exists, err)
+			wantKept := scenario != "owned success"
+			if result.Session == nil || result.Session.Kept != wantKept || result.Session.Reused == owned || (creates == 1) != owned {
+				t.Fatalf("session=%#v creates=%d owned=%v", result.Session, creates, owned)
+			}
+			if _, exists, err := core.ReadLeaseClaimWithPresence(result.LeaseID); err != nil || exists != (owned && wantKept) {
+				t.Fatalf("claim custody changed: exists=%v owned=%v kept=%v err=%v", exists, owned, wantKept, err)
+			}
+			if scenario != "owned timing failure" {
+				var report core.TimingReport
+				reports := 0
+				for _, line := range strings.Split(stderr.String(), "\n") {
+					if strings.HasPrefix(line, "{") {
+						if err := json.Unmarshal([]byte(line), &report); err != nil {
+							t.Fatal(err)
+						}
+						reports++
+					}
+				}
+				if reports != 1 || report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind {
+					t.Fatalf("native reports=%d timing=%#v result=%#v", reports, report, result)
+				}
 			}
 			entries, err := os.ReadDir(local)
 			if err != nil || len(entries) != 0 {

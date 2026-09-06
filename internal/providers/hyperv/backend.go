@@ -43,10 +43,6 @@ type hypervVM struct {
 	State int    `json:"State"`
 }
 
-type hypervNetAdapter struct {
-	IPAddresses []string `json:"IPAddresses"`
-}
-
 func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	applyDefaults(&cfg)
 	return &backend{

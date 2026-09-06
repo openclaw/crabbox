@@ -34,11 +34,11 @@ tokens from bounded responses before returning them to the executor.
 The relay rejects an absent or expired run timestamp and rechecks expiry
 immediately before candidate dispatch.
 
-The publisher proof records a seeded base revision, failed candidate revision,
-and fresh rollback revision. It requires the rollback receipt to restore the
-base image under a new revision, retire the failed candidate revision, and
-reject a stale compare-and-swap request with the fresh rollback revision as the
-current default. Full candidate API readbacks before and after that stale
+The publisher proof records a seeded base revision and failed candidate revision.
+It requires the rollback receipt to restore the exact seeded default aliases and
+revision, retire the failed candidate revision, and reject a stale
+compare-and-swap request naming that failed revision. Full candidate API
+readbacks before and after that stale
 request must match, including catalog, default, and Fast Snapshot Restore state.
 A retired AMI may remain visible as a matching provider-only record, but it
 must have no revision, promotion timestamp, or catalog-only marker.

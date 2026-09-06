@@ -148,7 +148,12 @@ func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease Coordina
 	} else if err := prepareLeaseSSHTrust(&target, leaseID); err != nil {
 		return LeaseTarget{}, err
 	}
-	result := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord}
+	result := LeaseTarget{
+		Server:      server,
+		SSH:         target,
+		LeaseID:     leaseID,
+		Coordinator: coord,
+	}
 	if released {
 		result.providerRelease = &leaseReleaseConfirmation{backend: b, leaseID: leaseID}
 	}
@@ -320,7 +325,13 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 		}
 		return LeaseTarget{}, err
 	}
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: b.coord}, nil
+	return LeaseTarget{
+		Server:       server,
+		SSH:          target,
+		LeaseID:      leaseID,
+		Coordinator:  b.coord,
+		runnerTiming: coordinatorRunnerTiming(lease),
+	}, nil
 }
 
 func reportCoordinatorAcquisitionRollback(stderr io.Writer, leaseID, reason string, released CoordinatorLease, releaseErr error) {
@@ -373,6 +384,94 @@ func formatMilliseconds(value int64) string {
 		return "-"
 	}
 	return (time.Duration(value) * time.Millisecond).Round(time.Millisecond).String()
+}
+
+func coordinatorRunnerTiming(lease CoordinatorLease) *runnerProviderTiming {
+	timing := lease.ProvisioningTiming
+	if timing == nil || timing.TotalMs <= 0 {
+		return nil
+	}
+	if phases, ok := coordinatorRunnerPhases(timing.Phases, timing.TotalMs); ok {
+		return &runnerProviderTiming{TotalMs: timing.TotalMs, Phases: phases}
+	}
+	phases, ok := coordinatorLegacyRunnerPhases(timing)
+	if !ok {
+		phases = []RunnerPhase{{Name: "provider.unattributed", Ms: timing.TotalMs}}
+	}
+	return &runnerProviderTiming{TotalMs: timing.TotalMs, Phases: phases}
+}
+
+func coordinatorRunnerPhases(phases []CoordinatorProvisioningPhase, totalMs int64) ([]RunnerPhase, bool) {
+	if len(phases) == 0 || len(phases) > 4 || totalMs <= 0 {
+		return nil, false
+	}
+	seen := make(map[string]struct{}, len(phases))
+	result := make([]RunnerPhase, 0, len(phases)+1)
+	remaining := totalMs
+	unattributedIndex := -1
+	for _, phase := range phases {
+		name := strings.TrimSpace(phase.Name)
+		if phase.Ms <= 0 || phase.Ms > remaining {
+			return nil, false
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return nil, false
+		}
+		seen[name] = struct{}{}
+		runnerName := ""
+		switch name {
+		case "request":
+			runnerName = "provider.request"
+		case "network_ready":
+			runnerName = "connect.provider"
+		case "bootstrap":
+			runnerName = "bootstrap.readiness"
+		case "unattributed":
+			runnerName = "provider.unattributed"
+			unattributedIndex = len(result)
+		default:
+			return nil, false
+		}
+		result = append(result, RunnerPhase{Name: runnerName, Ms: phase.Ms})
+		remaining -= phase.Ms
+	}
+	if remaining > 0 {
+		if unattributedIndex >= 0 {
+			result[unattributedIndex].Ms += remaining
+		} else {
+			result = append(result, RunnerPhase{Name: "provider.unattributed", Ms: remaining})
+		}
+	}
+	return result, true
+}
+
+func coordinatorLegacyRunnerPhases(timing *CoordinatorProvisioningTiming) ([]RunnerPhase, bool) {
+	if timing == nil || timing.TotalMs <= 0 ||
+		timing.RequestMs < 0 || timing.NetworkReadyMs < 0 || timing.BootstrapMs < 0 {
+		return nil, false
+	}
+	remaining := timing.TotalMs
+	result := make([]RunnerPhase, 0, 4)
+	appendPhase := func(name string, ms int64) bool {
+		if ms == 0 {
+			return true
+		}
+		if ms > remaining {
+			return false
+		}
+		result = append(result, RunnerPhase{Name: name, Ms: ms})
+		remaining -= ms
+		return true
+	}
+	if !appendPhase("provider.request", timing.RequestMs) ||
+		!appendPhase("connect.provider", timing.NetworkReadyMs) ||
+		!appendPhase("bootstrap.readiness", timing.BootstrapMs) {
+		return nil, false
+	}
+	if remaining > 0 {
+		result = append(result, RunnerPhase{Name: "provider.unattributed", Ms: remaining})
+	}
+	return result, true
 }
 
 func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgress(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug string) (CoordinatorLease, error) {
@@ -778,38 +877,43 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		ready = probeSSHReady(ctx, &target, 4*time.Second)
 	}
 	return statusView{
-		ID:                   lease.ID,
-		Slug:                 lease.Slug,
-		Provider:             blank(lease.Provider, b.cfg.Provider),
-		TargetOS:             blank(target.TargetOS, b.cfg.TargetOS),
-		WindowsMode:          blank(target.WindowsMode, b.cfg.WindowsMode),
-		State:                lease.State,
-		ServerID:             leaseDisplayID(lease),
-		ServerType:           lease.ServerType,
-		Host:                 lease.Host,
-		Network:              resolved.Network,
-		Tailscale:            lease.Tailscale,
-		SSHHost:              target.Host,
-		SSHHostKey:           target.SSHHostKey,
-		SSHUser:              redactedSSHUser(b.cfg, server, target),
-		SSHPort:              target.Port,
-		SSHFallbackPorts:     target.FallbackPorts,
-		SSHKey:               target.Key,
-		LastTouchedAt:        lease.LastTouchedAt,
-		IdleFor:              idleForString(lease.LastTouchedAt, time.Now()),
-		IdleTimeout:          formatSecondsDuration(lease.IdleTimeoutSeconds),
-		ExpiresAt:            lease.ExpiresAt,
-		CleanupStatus:        lease.CleanupStatus,
-		ProviderCleanup:      lease.ProviderCleanup,
-		CleanupStartedAt:     lease.CleanupStartedAt,
-		CleanupError:         lease.CleanupError,
-		CleanupRetryAt:       lease.CleanupRetryAt,
-		ReleaseDeletesServer: lease.ReleaseDeletesServer,
-		Labels:               cloneStringMap(server.Labels),
-		HasHost:              hasHost,
-		Ready:                ready,
-		Telemetry:            lease.Telemetry,
-		TelemetryHistory:     lease.TelemetryHistory,
+		ID:                           lease.ID,
+		Slug:                         lease.Slug,
+		Provider:                     blank(lease.Provider, b.cfg.Provider),
+		TargetOS:                     blank(target.TargetOS, b.cfg.TargetOS),
+		WindowsMode:                  blank(target.WindowsMode, b.cfg.WindowsMode),
+		State:                        lease.State,
+		ServerID:                     leaseDisplayID(lease),
+		ServerType:                   lease.ServerType,
+		Host:                         lease.Host,
+		Network:                      resolved.Network,
+		Tailscale:                    lease.Tailscale,
+		SSHHost:                      target.Host,
+		SSHHostKey:                   target.SSHHostKey,
+		ProviderAccessExpiresAt:      lease.ProviderAccessExpiresAt,
+		SSHUser:                      redactedSSHUser(b.cfg, server, target),
+		SSHPort:                      target.Port,
+		SSHFallbackPorts:             target.FallbackPorts,
+		SSHKey:                       target.Key,
+		LastTouchedAt:                lease.LastTouchedAt,
+		IdleFor:                      idleForString(lease.LastTouchedAt, time.Now()),
+		IdleTimeout:                  formatSecondsDuration(lease.IdleTimeoutSeconds),
+		ExpiresAt:                    lease.ExpiresAt,
+		CleanupStatus:                lease.CleanupStatus,
+		ProviderCleanup:              lease.ProviderCleanup,
+		CleanupStartedAt:             lease.CleanupStartedAt,
+		CleanupCompletedAt:           lease.CleanupCompletedAt,
+		CleanupError:                 lease.CleanupError,
+		CleanupRetryAt:               lease.CleanupRetryAt,
+		ReleaseDeletesServer:         lease.ReleaseDeletesServer,
+		FailureError:                 lease.FailureError,
+		ProvisioningResourceMayExist: lease.ProvisioningResourceMayExist,
+		ProvisioningFailureRetryable: lease.ProvisioningFailureRetryable,
+		Labels:                       cloneStringMap(server.Labels),
+		HasHost:                      hasHost,
+		Ready:                        ready,
+		Telemetry:                    lease.Telemetry,
+		TelemetryHistory:             lease.TelemetryHistory,
 		ProviderMetadata: inspectProviderMetadata(
 			blank(lease.Provider, b.cfg.Provider),
 			lease.ProviderMetadata,

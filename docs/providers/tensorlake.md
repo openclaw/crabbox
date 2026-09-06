@@ -49,6 +49,13 @@ Tensorlake images, commands run as `tl-user`, which cannot create `/workspace`;
 either pin `tl-crabbox` or set `tensorlake.workdir` to a user-writable path such
 as `/home/tl-user/crabbox`.
 
+Ordinary nonzero native CLI exits remain command exits. Transport, cancellation,
+deadline, and output errors instead fail the run with exit code 1 and the matching
+timing status, even when the local process also reports a nonzero exit code.
+An already observed command exit is not replaced by later cancellation. Native
+CLI diagnostic exits cannot be distinguished from remote workload exits without
+stronger evidence from the native protocol.
+
 ## Auth
 
 ```sh
@@ -163,6 +170,33 @@ Reuse, one-shot teardown, and failed-acquisition rollback use the same exact
 identity checks. A changed claim blocks stale cleanup. Native control calls are
 bounded; authentication, malformed output, and missing metadata fail closed.
 An empty list or a `not found` response alone is not deletion proof.
+
+Run retention, cleanup outcomes, and final timing use the shared delegated
+lifecycle. Fresh setup, sync, and command-preparation failures honor
+`--keep-on-failure`; failed automatic termination returns a failed run with a
+kept recovery session. Later cleanup or timing errors do not replace an earlier
+command failure. Environment-profile cleanup remains warning-only. Profile and
+sandbox cleanup receive separate bounded contexts; a timing writer failure after
+successful deletion cannot make the deleted sandbox recoverable again.
+
+Local options and required configuration are validated first. Fresh archives
+are still prepared before allocation; reused leases are authorized before archive
+preparation. This normalizes failure ordering without changing exact ownership
+checks or adding another provider-specific preparation policy.
+
+Cleanup of an existing bound claim has a single 30-second budget covering the
+claim-lock wait, identity recheck, termination, and confirmation. A shorter caller
+deadline still applies. Expiry before admission performs no native operation and
+retains the claim for retry. Run-admission and create/reclaim publication waits
+also honor the caller's context. Failed-create rollback gets its own detached
+30-second budget before waiting for the absent-claim fence; caller cancellation
+does not prevent cleanup of the original verified resource, while an appearing
+claim still blocks termination. A rollback timeout retains the unclaimed sandbox
+for manual inspection.
+
+Successful provider actions still finish durable publication or removal if
+cancellation arrives afterward. Read-only List/Status fence waits retain their
+existing policy, and local filesystem syscalls are not forcibly interruptible.
 
 ### Legacy and uncertain ownership
 

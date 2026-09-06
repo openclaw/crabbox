@@ -350,12 +350,14 @@ export const coordinatorProviderRegistry = [
     label: "Hetzner",
     requiredSecrets: ["HETZNER_TOKEN"],
     adminAudit: false,
+    supportsCapacityMarket: false,
   },
   {
     provider: "aws",
     label: "AWS",
     requiredSecrets: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
     adminAudit: true,
+    supportsCapacityMarket: true,
   },
   {
     provider: "azure",
@@ -367,24 +369,28 @@ export const coordinatorProviderRegistry = [
       "AZURE_SUBSCRIPTION_ID",
     ],
     adminAudit: true,
+    supportsCapacityMarket: true,
   },
   {
     provider: "gcp",
     label: "GCP",
     requiredSecrets: ["GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"],
     adminAudit: false,
+    supportsCapacityMarket: true,
   },
   {
     provider: "daytona",
     label: "Daytona",
     requiredSecrets: ["DAYTONA_CRABBOX_KEY"],
     adminAudit: false,
+    supportsCapacityMarket: false,
   },
 ] as const satisfies readonly {
   provider: string;
   label: string;
   requiredSecrets: readonly (keyof Env)[];
   adminAudit: boolean;
+  supportsCapacityMarket: boolean;
 }[];
 
 export type CoordinatorProviderSpec = (typeof coordinatorProviderRegistry)[number];
@@ -534,6 +540,7 @@ export interface LeaseRecord {
   cleanupRetryAt?: string;
   cleanupStartedAt?: string;
   cleanupClaimExpiresAt?: string;
+  cleanupCompletedAt?: string;
   failureError?: string;
   provisioningResourceMayExist?: boolean;
   provisioningFailureRetryable?: boolean;
@@ -757,6 +764,12 @@ export interface LeaseProvisioningTiming {
   networkReadyMs?: number;
   bootstrapMs?: number;
   totalMs: number;
+  phases?: LeaseProvisioningPhase[];
+}
+
+export interface LeaseProvisioningPhase {
+  name: "request" | "network_ready" | "bootstrap" | "unattributed";
+  ms: number;
 }
 
 export interface CapacityHint {
@@ -954,6 +967,7 @@ export interface ProviderFastSnapshotRestore {
 
 export interface PromotedImageRecord extends ProviderImage {
   promotedAt: string;
+  revision?: string;
   catalogOnly?: boolean;
   variantSelectors?: ImageVariantSelectors;
 }

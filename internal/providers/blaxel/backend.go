@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -60,6 +61,18 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}
 	leaseID, sandboxID, slug := "", "", ""
 	acquired := false
+	var prepared *core.PreparedArchive
+	if req.ID == "" && !req.NoSync {
+		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
+			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
+			TempPattern: "crabbox-blaxel-sync-*.tgz", Stderr: b.rt.Stderr,
+			Now: func() time.Time { return now(b.rt) },
+		})
+		if err != nil {
+			return RunResult{}, err
+		}
+		defer prepared.Close()
+	}
 	if req.ID == "" {
 		var sb Sandbox
 		leaseID, sb, slug, err = b.createSandbox(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
@@ -106,7 +119,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	syncDuration := time.Duration(0)
 	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
 	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, sandboxID, req, workdir)
+		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, sandboxID, req, workdir, prepared)
 		if err != nil {
 			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 			return RunResult{Total: now(b.rt).Sub(started), SyncDelegated: true}, err

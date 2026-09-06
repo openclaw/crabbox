@@ -374,7 +374,10 @@ func testCoordinatorReleaseJoinsSSHControlMasters(t *testing.T, modes ...string)
 				t.Fatal(err)
 			}
 			broker := coordinatorReleaseTestServer(t, func() CoordinatorLease {
-				return CoordinatorLease{ID: releasedID, Provider: "aws", State: "released", CleanupStatus: "complete"}
+				return CoordinatorLease{
+					ID: releasedID, Provider: "aws", State: "released", CleanupStatus: "complete",
+					CleanupCompletedAt: "2026-09-06T00:00:00Z",
+				}
 			})
 			var blocked *net.UnixListener
 			if mode == "partial local failure" || mode == "stale local socket" {

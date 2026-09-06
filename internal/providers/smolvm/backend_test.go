@@ -1,7 +1,9 @@
 package smolvm
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +19,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -581,18 +584,236 @@ func TestRunPreservesSessionAfterDeleteFailure(t *testing.T) {
 	rt.Stderr = &stderr
 	backend := NewBackend(Provider{}.Spec(), testConfig(), rt).(*backend)
 	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "repo", Root: t.TempDir()},
-		Command: []string{"echo", "hello"},
-		NoSync:  true,
+		Repo:       Repo{Name: "repo", Root: t.TempDir()},
+		Command:    []string{"echo", "hello"},
+		NoSync:     true,
+		TimingJSON: true,
 	})
-	if err != nil {
-		t.Fatal(err)
+	var public ExitError
+	if !errors.Is(err, fake.deleteErr) || !errors.As(err, &public) || public.Code != 1 || result.ExitCode != 1 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider {
+		t.Errorf("cleanup failure result=%+v err=%v", result, err)
 	}
 	if result.Session == nil || !result.Session.Kept || result.Session.CleanupCommand == "" {
 		t.Fatalf("session=%#v, want retained cleanup handle", result.Session)
 	}
-	if !strings.Contains(stderr.String(), "smolvm delete failed") {
-		t.Fatalf("stderr=%q", stderr.String())
+	if err == nil || !strings.Contains(err.Error(), "cleanup failed") {
+		t.Fatalf("cleanup diagnostic missing: %v", err)
+	}
+	if claim, exists, claimErr := core.ReadLeaseClaimWithPresence(result.LeaseID); claimErr != nil || !exists || claim.CloudID != fake.machine.ID {
+		t.Fatalf("cleanup lost original claim: claim=%+v exists=%t err=%v", claim, exists, claimErr)
+	}
+	assertLifecycleTiming(t, stderr.String(), result, err)
+}
+
+func assertLifecycleTiming(t *testing.T, stderr string, result RunResult, err error) {
+	t.Helper()
+	result = core.FinalizeRunResult(result, err)
+	var reports []core.TimingReport
+	for _, line := range strings.Split(strings.TrimSpace(stderr), "\n") {
+		if strings.HasPrefix(line, "{") {
+			var report core.TimingReport
+			if err := json.Unmarshal([]byte(line), &report); err != nil {
+				t.Fatal(err)
+			}
+			reports = append(reports, report)
+		}
+	}
+	if len(reports) != 1 {
+		t.Fatalf("timing records=%d stderr=%s", len(reports), stderr)
+	}
+	report := reports[0]
+	if report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind || report.LeaseID != result.LeaseID || report.Slug != result.Slug {
+		t.Fatalf("timing=%+v result=%+v", report, result)
+	}
+}
+
+type lifecycleTimingWriter struct {
+	bytes.Buffer
+	cause error
+}
+
+func (w *lifecycleTimingWriter) Write(data []byte) (int, error) {
+	if len(data) > 0 && data[0] == '{' {
+		return 0, w.cause
+	}
+	return w.Buffer.Write(data)
+}
+
+func TestRunFinalizationPreservesPrimaryOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name                                   string
+		code                                   int
+		cause                                  error
+		setup, cleanup, badTiming, keepFailure bool
+		wantCode                               int
+		wantStatus                             core.RunStatus
+		wantKind                               core.RunErrorKind
+	}{
+		{name: "command and cleanup", code: 23, cleanup: true, wantCode: 23, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorCommandExit},
+		{name: "command cleanup and timing", code: 23, cleanup: true, badTiming: true, wantCode: 23, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorCommandExit},
+		{name: "kept command and timing", code: 23, keepFailure: true, badTiming: true, wantCode: 23, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorCommandExit},
+		{name: "success then timing", keepFailure: true, badTiming: true, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "transport", cause: io.ErrUnexpectedEOF, keepFailure: true, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "cancellation", cause: context.Canceled, keepFailure: true, wantCode: 1, wantStatus: core.RunStatusCanceled, wantKind: core.RunErrorCanceled},
+		{name: "deadline and cleanup", cause: context.DeadlineExceeded, cleanup: true, wantCode: 1, wantStatus: core.RunStatusTimedOut, wantKind: core.RunErrorTimeout},
+		{name: "early setup retention", cause: io.ErrUnexpectedEOF, setup: true, keepFailure: true, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cleanupErr, writerErr := errors.New("synthetic deletion failure"), errors.New("synthetic timing failure")
+			fake := &fakeAPI{streamCode: tc.code, streamErr: tc.cause}
+			if tc.setup {
+				fake.execHook = func(context.Context, string) (execResult, error) { return execResult{}, tc.cause }
+			}
+			if tc.cleanup {
+				fake.deleteErr = cleanupErr
+			}
+			withFakeAPI(t, fake)
+			var stderr bytes.Buffer
+			rt := testRuntime()
+			rt.Stderr = &stderr
+			if tc.badTiming {
+				rt.Stderr = &lifecycleTimingWriter{cause: writerErr}
+			}
+			b := NewBackend(Provider{}.Spec(), testConfig(), rt).(*backend)
+			result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: tc.keepFailure, TimingJSON: true, Command: []string{"true"}})
+			var public ExitError
+			if !errors.As(err, &public) || public.Code != tc.wantCode || result.ExitCode != tc.wantCode || result.Status != tc.wantStatus || result.ErrorKind != tc.wantKind {
+				t.Errorf("primary outcome: result=%+v err=%v public=%+v", result, err, public)
+			}
+			for _, cause := range []error{tc.cause, fake.deleteErr} {
+				if cause != nil && !errors.Is(err, cause) {
+					t.Errorf("lost cause %v: %v", cause, err)
+				}
+			}
+			if tc.cleanup && !strings.Contains(public.Message, cleanupErr.Error()) {
+				t.Errorf("CLI cleanup diagnostic missing: %q", public.Message)
+			}
+			if tc.badTiming && (!errors.Is(err, writerErr) || !strings.Contains(public.Message, writerErr.Error())) {
+				t.Errorf("timing diagnostic lost: %v", err)
+			}
+			failedBeforeTiming := tc.code != 0 || tc.cause != nil
+			wantKept := tc.cleanup || tc.keepFailure && failedBeforeTiming
+			wantDelete := !(tc.keepFailure && failedBeforeTiming)
+			if result.Session == nil || result.Session.Kept != wantKept || result.Session.Reused || (fake.deletedID != "") != wantDelete {
+				t.Errorf("disposition: session=%+v deleted=%q", result.Session, fake.deletedID)
+			}
+			if _, exists, claimErr := core.ReadLeaseClaimWithPresence(result.LeaseID); claimErr != nil || exists != wantKept {
+				t.Errorf("claim exists=%t want=%t err=%v", exists, wantKept, claimErr)
+			}
+			wantStreams := 1
+			if tc.setup {
+				wantStreams = 0
+			}
+			if len(fake.streamCommands) != wantStreams || t.Context().Err() != nil {
+				t.Errorf("streams=%v parent=%v", fake.streamCommands, t.Context().Err())
+			}
+			if !tc.badTiming {
+				assertLifecycleTiming(t, stderr.String(), result, err)
+			}
+		})
+	}
+}
+
+func TestRunEffectiveKeepAndReuseControls(t *testing.T) {
+	for _, tc := range []struct {
+		name                                             string
+		providerKeep, keep, keepFailure, reuse, syncOnly bool
+		code                                             int
+	}{
+		{name: "default success"},
+		{name: "provider keep success", providerKeep: true},
+		{name: "provider keep failure", providerKeep: true, code: 23},
+		{name: "provider keep sync only", providerKeep: true, syncOnly: true},
+		{name: "CLI keep", keep: true, code: 23},
+		{name: "keep failure", keepFailure: true, code: 23},
+		{name: "sync only does not fail", keepFailure: true, syncOnly: true},
+		{name: "reused success", reuse: true},
+		{name: "reused failure", reuse: true, code: 23},
+		{name: "reused sync only", reuse: true, syncOnly: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := &fakeAPI{streamCode: tc.code}
+			withFakeAPI(t, fake)
+			cfg, rt := testConfig(), testRuntime()
+			cfg.Smolvm.Keep = tc.providerKeep
+			var stderr bytes.Buffer
+			rt.Stderr = &stderr
+			b := NewBackend(Provider{}.Spec(), cfg, rt).(*backend)
+			req := RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, Keep: tc.keep, KeepOnFailure: tc.keepFailure, SyncOnly: tc.syncOnly, NoSync: true, TimingJSON: true, Command: []string{"true"}}
+			if tc.reuse {
+				req.ID = "cbx_123456789abc"
+				seedSmolvmClaim(t, req.ID, "blue", "mach_1", req.Repo.Root, nil)
+			}
+			result, err := b.Run(t.Context(), req)
+			wantKept := tc.reuse || tc.keep || tc.providerKeep || tc.keepFailure && tc.code != 0
+			if result.ExitCode != tc.code || (err != nil) != (tc.code != 0) || result.Session == nil || result.Session.Kept != wantKept || result.Session.Reused != tc.reuse || fake.deleted != !wantKept {
+				t.Fatalf("result=%+v err=%v deleted=%t", result, err, fake.deleted)
+			}
+			if tc.reuse {
+				if fake.createReq.Name != "" {
+					t.Fatal("reused machine was recreated")
+				}
+			} else if fake.createReq.Ephemeral != !(tc.keep || tc.providerKeep) || (fake.createReq.TTLSeconds != 0) != !(tc.keep || tc.providerKeep) {
+				t.Fatalf("effective keep changed create request: %+v", fake.createReq)
+			}
+			if _, exists, err := core.ReadLeaseClaimWithPresence(result.LeaseID); err != nil || exists != wantKept {
+				t.Fatalf("claim exists=%t err=%v", exists, err)
+			}
+			wantStreams := 1
+			if tc.syncOnly {
+				wantStreams = 0
+			}
+			if len(fake.streamCommands) != wantStreams {
+				t.Fatalf("streams=%v", fake.streamCommands)
+			}
+			assertLifecycleTiming(t, stderr.String(), result, err)
+		})
+	}
+}
+
+func TestRunCleanupBudgetsRemainIndependent(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprint(partial), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var cleanupOrder []string
+			checkBudget := func(ctx context.Context, name string, budget time.Duration) {
+				t.Helper()
+				deadline, ok := ctx.Deadline()
+				remaining := time.Until(deadline)
+				if ctx.Err() != nil || !ok || remaining > budget || remaining < budget-5*time.Second {
+					t.Errorf("%s cleanup budget=%s err=%v", name, remaining, ctx.Err())
+				}
+				cleanupOrder = append(cleanupOrder, name)
+			}
+			fake := &fakeAPI{streamHook: cancel}
+			if partial {
+				fake.writeHook = func(context.Context, string, string) error { cancel(); return context.Canceled }
+			}
+			fake.execHook = func(ctx context.Context, command string) (execResult, error) {
+				if strings.HasPrefix(command, "rm -f ") {
+					checkBudget(ctx, "profile", 30*time.Second)
+				}
+				return execResult{}, nil
+			}
+			fake.deleteHook = func(ctx context.Context, _ string) error {
+				checkBudget(ctx, "machine", 60*time.Second)
+				fake.deleted = true
+				return nil
+			}
+			withFakeAPI(t, fake)
+			b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+			result, err := b.Run(ctx, RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, Command: []string{"true"}, Env: map[string]string{"FIXTURE": "synthetic"}})
+			if partial && !errors.Is(err, context.Canceled) || !partial && err != nil {
+				t.Errorf("result=%+v err=%v", result, err)
+			}
+			if !reflect.DeepEqual(cleanupOrder, []string{"profile", "machine"}) || result.Session == nil || result.Session.Kept {
+				t.Fatalf("cleanup=%v session=%+v", cleanupOrder, result.Session)
+			}
+		})
 	}
 }
 
@@ -642,12 +863,259 @@ func TestSyncWorkspaceUsesInject(t *testing.T) {
 	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
 	_, _, err := backend.syncWorkspace(context.Background(), fake, "mach_1", RunRequest{
 		Repo: Repo{Name: "repo", Root: newGitRepo(t)},
-	}, "/workspace", ".")
+	}, "/workspace", nil)
 	if err != nil {
 		t.Fatalf("sync err=%v", err)
 	}
 	if !reflect.DeepEqual(fake.verbs, []string{"exec", "inject"}) {
 		t.Fatalf("verbs=%v", fake.verbs)
+	}
+}
+
+type archivePreparationClock func() time.Time
+
+func (now archivePreparationClock) Now() time.Time { return now() }
+
+func TestRunArchivePreparationPrecedesMutation(t *testing.T) {
+	for _, reused := range []bool{false, true} {
+		for _, failure := range []string{"full guardrail", "archive creation"} {
+			t.Run(fmt.Sprintf("reused=%t/%s", reused, failure), func(t *testing.T) {
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				temp := t.TempDir()
+				t.Setenv("TMPDIR", temp)
+				t.Setenv("TMP", temp)
+				t.Setenv("TEMP", temp)
+				repo := newGitRepo(t)
+				if err := os.WriteFile(filepath.Join(repo, "second.txt"), []byte("second"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				runGit(t, repo, "add", "second.txt")
+				runGit(t, repo, "commit", "-m", "second file")
+				if err := os.WriteFile(filepath.Join(repo, "hello.txt"), []byte("dirty"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				fake := &fakeAPI{machine: ownedTestMachine()}
+				starts := 0
+				fake.startHook = func(context.Context, string) error { starts++; return nil }
+				withFakeAPI(t, fake)
+				cfg := testConfig()
+				cfg.Sync.Delete = true
+				rt := testRuntime()
+				if failure == "full guardrail" {
+					cfg.Sync.FailFiles = 2
+					configPath := filepath.Join(t.TempDir(), "config.yaml")
+					if err := os.WriteFile(configPath, []byte("provider: smolvm\nsync:\n  failFiles: 2\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					t.Setenv("CRABBOX_CONFIG", configPath)
+					t.Setenv("CRABBOX_PROVIDER", "smolvm")
+					t.Setenv("CRABBOX_SYNC_ALLOW_LARGE", "")
+					t.Chdir(repo)
+					var preview, diagnostics bytes.Buffer
+					if err := (core.App{Stdout: &preview, Stderr: &diagnostics}).Run(t.Context(), []string{"sync-plan", "--json"}); err != nil {
+						t.Fatalf("sync-plan: %v: %s", err, diagnostics.String())
+					}
+					var plan struct {
+						Guardrail struct {
+							Scope, Status string
+							Files         int
+						}
+						DirtyDelta struct{ Files int }
+					}
+					if err := json.Unmarshal(preview.Bytes(), &plan); err != nil || plan.Guardrail.Scope != "candidate" || plan.Guardrail.Status != "failed" || plan.Guardrail.Files != 2 || plan.DirtyDelta.Files != 1 {
+						t.Fatalf("preview disagrees with archive admission: %s err=%v", preview.String(), err)
+					}
+				} else {
+					calls := 0
+					rt.Clock = archivePreparationClock(func() time.Time {
+						calls++
+						// The manifest is captured, but the archive has not opened its members.
+						if calls == 6 {
+							if err := os.Remove(filepath.Join(repo, "hello.txt")); err != nil {
+								t.Fatal(err)
+							}
+						}
+						return time.Unix(0, int64(calls)*int64(time.Millisecond))
+					})
+				}
+				req := RunRequest{Repo: Repo{Root: repo, Name: "fixture"}, SyncOnly: true}
+				if reused {
+					req.ID = "cbx_123456789abc"
+					seedSmolvmClaim(t, req.ID, "blue", "mach_1", repo, nil)
+				}
+				b := NewBackend(Provider{}.Spec(), cfg, rt).(*backend)
+				_, err := b.Run(t.Context(), req)
+				if err == nil {
+					t.Fatalf("preparation unexpectedly succeeded: verbs=%v", fake.verbs)
+				}
+				want := "sync candidate too large: 2 files"
+				if failure == "archive creation" {
+					want = "stat sync path hello.txt"
+				}
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("wrong preparation failure: %v, want %q", err, want)
+				}
+				if len(fake.verbs) != 0 || starts != 0 {
+					t.Fatalf("preparation failure mutated provider: verbs=%v starts=%d", fake.verbs, starts)
+				}
+				claims, err := core.ListLeaseClaims()
+				if err != nil || (!reused && len(claims) != 0) || (reused && (len(claims) != 1 || claims[0].CloudID != "mach_1" || claims[0].RepoRoot != repo)) {
+					t.Fatalf("claims=%v err=%v", claims, err)
+				}
+				archives, err := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "crabbox-smolvm-sync-*.tgz"))
+				if err != nil || len(archives) != 0 {
+					t.Fatalf("archives leaked=%v err=%v", archives, err)
+				}
+			})
+		}
+	}
+}
+
+func TestRunUploadsPreparedSnapshotAndClosesIt(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repo := newGitRepo(t)
+	fake := &fakeAPI{}
+	withFakeAPI(t, fake)
+	fake.createHook = func(*fakeAPI) {
+		if err := os.WriteFile(filepath.Join(repo, "hello.txt"), []byte("changed during provisioning"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var archivePath string
+	fake.injectHook = func(_ context.Context, archive, target string) error {
+		archivePath = archive
+		if target != "/workspace" {
+			t.Fatalf("target=%q", target)
+		}
+		file, err := os.Open(archive)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		gz, err := gzip.NewReader(file)
+		if err != nil {
+			return err
+		}
+		defer gz.Close()
+		tr := tar.NewReader(gz)
+		h, err := tr.Next()
+		if err != nil {
+			return err
+		}
+		data, err := io.ReadAll(tr)
+		if h.Name != "hello.txt" || string(data) != "hello" {
+			t.Fatalf("snapshot %q=%q, want pre-create hello", h.Name, data)
+		}
+		return err
+	}
+	var stderr bytes.Buffer
+	rt := testRuntime()
+	rt.Stderr = &stderr
+	b := NewBackend(Provider{}.Spec(), testConfig(), rt).(*backend)
+	if _, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: repo}, SyncOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(stderr.String(), "sync candidate:") != 1 || archivePath == "" {
+		t.Fatalf("archive=%q diagnostics=%s", archivePath, stderr.String())
+	}
+	if _, err := os.Stat(archivePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("archive remains: %v", err)
+	}
+}
+
+func TestSyncArchivePreparationTiming(t *testing.T) {
+	repo := newGitRepo(t)
+	for _, external := range []bool{false, true} {
+		t.Run(fmt.Sprint(external), func(t *testing.T) {
+			calls := 0
+			rt := testRuntime()
+			rt.Clock = archivePreparationClock(func() time.Time {
+				calls++
+				return time.Unix(0, int64(calls)*int64(7*time.Millisecond))
+			})
+			b := NewBackend(Provider{}.Spec(), testConfig(), rt).(*backend)
+			req := RunRequest{Repo: Repo{Root: repo}}
+			var prepared *core.PreparedArchive
+			if external {
+				var err error
+				prepared, err = b.prepareArchive(t.Context(), req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer prepared.Close()
+			}
+			phases, total, err := b.syncWorkspace(t.Context(), &fakeAPI{}, "mach_1", req, "/workspace", prepared)
+			want := 77 * time.Millisecond
+			if external {
+				want = 56 * time.Millisecond
+			}
+			if err != nil || total != want || len(phases) != 6 || phases[5].Ms != want.Milliseconds() {
+				t.Fatalf("phases=%v total=%v err=%v want=%v", phases, total, err, want)
+			}
+			for i, name := range []string{"manifest", "preflight", "archive", "prepare", "inject"} {
+				if phases[i].Name != name || phases[i].Ms != 7 {
+					t.Fatalf("phase %d=%v", i, phases[i])
+				}
+			}
+		})
+	}
+}
+
+func TestSyncPreparedArchiveSharesRemainingBudget(t *testing.T) {
+	repo := newGitRepo(t)
+	for _, test := range []struct {
+		name                                string
+		timeout, parent, archive, remaining time.Duration
+	}{
+		{"remaining after archive", 5 * time.Second, 0, 2 * time.Second, 3 * time.Second},
+		{"parent wins", 5 * time.Second, time.Second, 0, time.Second},
+		{"disabled keeps parent", 0, time.Second, 0, time.Second},
+		{"disabled", 0, 0, 0, 0},
+		{"exhausted", time.Second, 0, 2 * time.Second, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+			prepared, err := b.prepareArchive(t.Context(), RunRequest{Repo: Repo{Root: repo}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Close()
+			prepared.ArchiveDuration = test.archive
+			b.cfg.Sync.Timeout = test.timeout
+			synctest.Test(t, func(t *testing.T) {
+				time.Sleep(time.Hour) // Provisioning must not consume transfer budget.
+				ctx := context.Background()
+				if test.parent > 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, test.parent)
+					defer cancel()
+				}
+				var prepareCtx context.Context
+				fake := &fakeAPI{execHook: func(ctx context.Context, _ string) (execResult, error) {
+					prepareCtx = ctx
+					deadline, bounded := ctx.Deadline()
+					if bounded != (test.timeout > 0 || test.parent > 0) || (bounded && time.Until(deadline) != test.remaining) {
+						t.Fatalf("deadline=%v bounded=%v remaining=%v", deadline, bounded, time.Until(deadline))
+					}
+					if bounded {
+						time.Sleep(test.remaining)
+						synctest.Wait()
+					}
+					return execResult{}, nil
+				}}
+				fake.injectHook = func(ctx context.Context, _, _ string) error {
+					if ctx != prepareCtx {
+						t.Fatal("injection restarted the workspace preparation budget")
+					}
+					return ctx.Err()
+				}
+				_, _, err := b.syncWorkspace(ctx, fake, "mach_1", RunRequest{}, "/workspace", prepared)
+				bounded := test.timeout > 0 || test.parent > 0
+				if (bounded && !errors.Is(err, context.DeadlineExceeded)) || (!bounded && err != nil) {
+					t.Fatalf("sync err=%v", err)
+				}
+			})
+		})
 	}
 }
 
@@ -766,8 +1234,10 @@ type fakeAPI struct {
 	deleteHook     func(context.Context, string) error
 	streamHook     func()
 	streamErr      error
+	streamCode     int
 	writeHook      func(context.Context, string, string) error
 	execHook       func(context.Context, string) (execResult, error)
+	injectHook     func(context.Context, string, string) error
 }
 
 func (f *fakeAPI) CreateMachine(_ context.Context, req createRequest) (machineData, error) {
@@ -849,13 +1319,16 @@ func (f *fakeAPI) ExecStream(_ context.Context, _ string, command, folder string
 	f.streamCommands = append(f.streamCommands, command)
 	f.streamFolders = append(f.streamFolders, folder)
 	_, _ = io.WriteString(stdout, "ok\n")
-	return 0, f.streamErr
+	return f.streamCode, f.streamErr
 }
 
-func (f *fakeAPI) InjectArchive(_ context.Context, _, _, targetDir string) error {
+func (f *fakeAPI) InjectArchive(ctx context.Context, _, archive, targetDir string) error {
 	f.verbs = append(f.verbs, "inject")
 	f.injectTargets = append(f.injectTargets, targetDir)
 	f.injected = true
+	if f.injectHook != nil {
+		return f.injectHook(ctx, archive, targetDir)
+	}
 	return nil
 }
 
@@ -998,7 +1471,7 @@ func TestClientNativeUploadFailureAndPublication(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(repo, "uploaded"), []byte(content), 0o755); err != nil {
 					t.Fatal(err)
 				}
-				archive, err := core.CreateSyncArchive(t.Context(), Repo{Root: repo}, SyncManifest{Files: []string{"uploaded"}}, "crabbox-smolvm-native-*.tgz")
+				archive, err := core.CreateSyncArchive(t.Context(), Repo{Root: repo}, core.SyncManifest{Files: []string{"uploaded"}}, "crabbox-smolvm-native-*.tgz")
 				if err != nil {
 					t.Fatal(err)
 				}

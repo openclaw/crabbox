@@ -2,6 +2,12 @@ import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
 
 import { AzureResumableProvisioning } from "./azure-provisioning";
 import {
+  clearLeaseCleanupCompletion,
+  completeLeaseProviderCleanup,
+  leaseHasConfirmedNoProviderResource,
+  leaseProviderCleanupConfirmed,
+} from "./lease-cleanup";
+import {
   LeaseProvisioningController,
   cancelProvisioningOperation,
   provisioningOperationKey,
@@ -1155,6 +1161,9 @@ export class FleetCoordinator {
           ...(result.image ? { image: result.image } : {}),
         };
         clearProvisioningRecoveryMetadata(completed);
+        delete completed.provisioningResourceMayExist;
+        delete completed.provisioningFailureRetryable;
+        clearLeaseCleanupCompletion(completed);
         if (result.cost) {
           completed.estimatedHourlyUSD = result.cost.hourlyUSD;
           completed.maxEstimatedUSD = result.cost.maxUSD;
@@ -3475,8 +3484,7 @@ export class FleetCoordinator {
       }
       const shouldDelete = Boolean(
         lease.providerKeyCleanupPending ||
-        (lease.cloudID &&
-          (leaseIsLive(lease) || lease.releaseDeletesServer !== undefined || lease.cleanupError)),
+        (lease.cloudID && (leaseIsLive(lease) || !leaseProviderCleanupConfirmed(lease))),
       );
       const canceledBeforeProviderIdentity = Boolean(
         (lease.state === "provisioning" ||
@@ -3513,6 +3521,9 @@ export class FleetCoordinator {
           cleanupStarted.getTime() + leaseCleanupClaimStaleMs,
         ).toISOString();
         released.releaseDeletesServer = true;
+        clearLeaseCleanupCompletion(released);
+      } else if (leaseHasConfirmedNoProviderResource(released)) {
+        completeLeaseProviderCleanup(released, released.updatedAt);
       }
       await this.putLease(released);
       await this.putCreateAttempt(attempt);
@@ -4178,6 +4189,7 @@ export class FleetCoordinator {
         delete reactivated.provisioningRecoveryObservedAt;
         delete reactivated.provisioningRecoveryMissingSince;
         clearLeaseCleanupMetadata(reactivated);
+        clearLeaseCleanupCompletion(reactivated);
         const limitError = enforceCostLimitUsage(
           admission.costUsage,
           reactivated,
@@ -4379,6 +4391,9 @@ export class FleetCoordinator {
         class: config.class,
         serverType: config.serverType,
         requestedServerType: config.serverType,
+        ...(coordinatorProviderSpec(config.provider).supportsCapacityMarket
+          ? { market: config.capacityMarket }
+          : {}),
         serverID: 0,
         serverName: "",
         providerKey: config.providerKey,
@@ -4394,6 +4409,7 @@ export class FleetCoordinator {
         estimatedHourlyUSD: cost.hourlyUSD,
         maxEstimatedUSD: cost.maxUSD,
         state: "provisioning",
+        provisioningResourceMayExist: false,
         createdAt: now.toISOString(),
         updatedAt: now.toISOString(),
         lastTouchedAt: now.toISOString(),
@@ -4660,6 +4676,7 @@ export class FleetCoordinator {
         }
       }
       current.provisioningRequestStartedAt = new Date().toISOString();
+      delete current.provisioningResourceMayExist;
       delete current.provisioningRequestSettledAt;
       current.provisioningCoordinatorVersion = this.coordinatorGeneration;
       current.updatedAt = current.provisioningRequestStartedAt;
@@ -4783,6 +4800,7 @@ export class FleetCoordinator {
     record = structuredClone(current);
     record.state = "active";
     clearProvisioningRecoveryMetadata(record);
+    clearLeaseCleanupCompletion(record);
     record.cloudID = server.cloudID;
     record.serverType = serverType;
     if (server.hostID) {
@@ -4973,6 +4991,9 @@ export class FleetCoordinator {
         class: config.class,
         serverType: config.serverType,
         requestedServerType: config.serverType,
+        ...(coordinatorProviderSpec(config.provider).supportsCapacityMarket
+          ? { market: config.capacityMarket }
+          : {}),
         cloudID: "",
         serverID: 0,
         serverName: "",
@@ -4988,6 +5009,7 @@ export class FleetCoordinator {
         estimatedHourlyUSD: cost.hourlyUSD,
         maxEstimatedUSD: cost.maxUSD,
         state: "provisioning",
+        provisioningResourceMayExist: false,
         createdAt: now.toISOString(),
         updatedAt: now.toISOString(),
         lastTouchedAt: now.toISOString(),
@@ -6156,6 +6178,7 @@ export class FleetCoordinator {
             : recoveredServer.status === "running" && recoveredServer.host.trim()
         ) {
           current.state = "active";
+          clearLeaseCleanupCompletion(current);
           current.host = workspaceCapability
             ? workspaceCapability.recoveredHost(recoveredServer)
             : recoveredServer.host;
@@ -7242,6 +7265,9 @@ export class FleetCoordinator {
         current.failureError = message;
       }
       clearLeaseCleanupMetadata(current);
+      if (releaseRequested) {
+        completeLeaseProviderCleanup(current, failedAt);
+      }
       await this.putLease(current);
       return current;
     });
@@ -7282,10 +7308,134 @@ export class FleetCoordinator {
     return await this.releaseResolvedLease(lease, { deleteServer: true, keep: false });
   }
 
+  private cleanupRecoveryLeaseEligible(lease: LeaseRecord): boolean {
+    const expiry = Date.parse(lease.expiresAt);
+    return (
+      Number.isFinite(expiry) &&
+      expiry <= Date.now() &&
+      !lease.cleanupStartedAt &&
+      lease.releaseDeletesServer !== false &&
+      ["active", "released", "failed"].includes(lease.state) &&
+      Boolean(lease.cleanupError || lease.state === "released")
+    );
+  }
+
+  private cleanupRecoveryLeaseBinding(lease: LeaseRecord): string {
+    return JSON.stringify([
+      lease.id,
+      lease.provider,
+      lease.cloudID,
+      lease.providerScope,
+      lease.providerProject,
+      lease.providerResourceID,
+      lease.region,
+      lease.owner,
+      lease.org,
+      lease.createdAt,
+      lease.createAttemptID,
+      lease.createAttemptGeneration,
+      lease.lifecycle,
+    ]);
+  }
+
   private async leaseRoute(request: Request, leaseID: string, action?: string): Promise<Response> {
     const method = request.method.toUpperCase();
     if (method === "PUT" && action === "registration") {
       return await this.registerLease(request, leaseID);
+    }
+    if (method === "POST" && action === "cleanup") {
+      const admin = isAdminRequest(request);
+      const lease = await this.resolveLease(leaseID, request, admin);
+      if (!lease) return notFound();
+      if (
+        requestAuthType(request) === "device" ||
+        (!admin &&
+          (lease.owner !== requestOwner(request) || lease.org !== requestOrg(request, this.env)))
+      ) {
+        return json(
+          { error: "forbidden", message: "lease owner or admin access required" },
+          { status: 403 },
+        );
+      }
+      const input = await readJson<{ action?: unknown; expectedClaimFingerprint?: unknown }>(
+        request,
+      );
+      if (
+        !input ||
+        input.action !== "acknowledge-missing-resource" ||
+        typeof input.expectedClaimFingerprint !== "string" ||
+        !/^[a-f0-9]{64}$/.test(input.expectedClaimFingerprint)
+      ) {
+        return json({ error: "invalid_cleanup_recovery_request" }, { status: 400 });
+      }
+      const providerID = managedLeaseProvider(lease);
+      const provider =
+        !isRegisteredLease(lease) && lease.cloudID && providerID
+          ? this.provider(providerID, lease.region, lease.providerProject)
+          : undefined;
+      if (!provider?.recoverCleanup)
+        return json({ error: "cleanup_recovery_unsupported" }, { status: 501 });
+      if (!this.cleanupRecoveryLeaseEligible(lease)) {
+        return json({ error: "cleanup_recovery_requires_expired_blocked_lease" }, { status: 409 });
+      }
+      const expectedBinding = this.cleanupRecoveryLeaseBinding(lease);
+      try {
+        const recovery = await provider.recoverCleanup(
+          lease,
+          input.expectedClaimFingerprint,
+          requestOwner(request),
+          <T>(commit: () => Promise<T>) =>
+            this.state.runExclusive(async () => {
+              const current = await this.getLease(lease.id);
+              if (
+                !current ||
+                this.cleanupRecoveryLeaseBinding(current) !== expectedBinding ||
+                !this.cleanupRecoveryLeaseEligible(current)
+              ) {
+                throw new ProviderResourceUnresolvedError(
+                  "Cleanup recovery lease changed before commit",
+                );
+              }
+              return await commit();
+            }),
+        );
+        return json({ leaseID: lease.id, provider: providerID, recovery });
+      } catch (error) {
+        if (error instanceof ProviderResourceUnresolvedError) {
+          return json(
+            { error: "cleanup_recovery_refused", message: error.message },
+            { status: 409 },
+          );
+        }
+        throw error;
+      }
+    }
+    if (method === "GET" && action === "cleanup") {
+      const admin = isAdminRequest(request);
+      const lease = await this.resolveLease(leaseID, request, admin);
+      if (!lease) return notFound();
+      if (
+        requestAuthType(request) === "device" ||
+        !this.leaseManageableByRequest(lease, request, admin)
+      ) {
+        return json(
+          { error: "forbidden", message: "lease manage access required" },
+          { status: 403 },
+        );
+      }
+      const providerID = managedLeaseProvider(lease);
+      const provider =
+        !isRegisteredLease(lease) && lease.cloudID && providerID
+          ? this.provider(providerID, lease.region, lease.providerProject)
+          : undefined;
+      if (!provider?.inspectCleanup) {
+        return json({ error: "cleanup_inspection_unsupported" }, { status: 501 });
+      }
+      return json({
+        leaseID: lease.id,
+        provider: managedLeaseProvider(lease),
+        inspection: await provider.inspectCleanup(lease),
+      });
     }
     if (method === "GET" && action === undefined) {
       const admin = isAdminRequest(request);
@@ -7613,6 +7763,7 @@ export class FleetCoordinator {
     delete record.releasedAt;
     delete record.releaseDeletesServer;
     clearLeaseCleanupMetadata(record);
+    clearLeaseCleanupCompletion(record);
     if (!effectiveRuntimeAdapterID || !effectiveRuntimeAdapterWorkspaceID) {
       delete record.runtimeAdapterID;
       delete record.runtimeAdapterWorkspaceID;
@@ -7913,6 +8064,8 @@ export class FleetCoordinator {
             endedAt: canceled.updatedAt,
             releaseDeletesServer: true,
             cleanupStatus: "complete",
+            cleanupCompletedAt: canceled.updatedAt,
+            host: "",
           },
         });
       }));
@@ -16035,7 +16188,8 @@ export class FleetCoordinator {
       providerRegion === region ? imageProvider : this.provider(provider, providerRegion, project);
     const providerMutation =
       (method === "DELETE" && action === undefined) ||
-      (method === "POST" && (action === "promote" || action === "promote-catalog"));
+      (method === "POST" &&
+        (action === "promote" || action === "promote-cas" || action === "promote-catalog"));
     const checkpointMetadata =
       provider === "gcp" && project && metadata?.project && metadata.project !== project
         ? undefined
@@ -16200,7 +16354,61 @@ export class FleetCoordinator {
       await this.scheduleAlarm();
       return json({ imageID: decodedImageID, catalogOnly: true, retired });
     }
-    if (method === "POST" && (action === "promote" || action === "promote-catalog")) {
+    if (
+      method === "POST" &&
+      (action === "promote" || action === "promote-cas" || action === "promote-catalog")
+    ) {
+      const promotionRequest = await readJson<{
+        expectedCurrent?: unknown;
+        retireExpectedCatalog?: unknown;
+      }>(request.clone()).catch(
+        (): { expectedCurrent?: unknown; retireExpectedCatalog?: unknown } => ({}),
+      );
+      if (
+        action !== "promote-cas" &&
+        (promotionRequest.expectedCurrent !== undefined ||
+          promotionRequest.retireExpectedCatalog !== undefined)
+      ) {
+        return json(
+          {
+            error: "invalid_image_precondition",
+            message: "transactional image preconditions require transactional image promotion",
+          },
+          { status: 400 },
+        );
+      }
+      if (action === "promote-cas") {
+        if (provider !== "aws") {
+          return json(
+            {
+              error: "unsupported_provider",
+              message: "transactional image promotion is AWS-only",
+            },
+            { status: 400 },
+          );
+        }
+        if (promotionRequest.expectedCurrent === undefined) {
+          return json(
+            {
+              error: "image_promotion_precondition_required",
+              message: "transactional image promotion requires expectedCurrent",
+            },
+            { status: 400 },
+          );
+        }
+        if (
+          promotionRequest.retireExpectedCatalog === true &&
+          parseImageDefaultState(promotionRequest.expectedCurrent)?.state !== "present"
+        ) {
+          return json(
+            {
+              error: "invalid_image_precondition",
+              message: "retireExpectedCatalog requires an exact expected image id and revision",
+            },
+            { status: 400 },
+          );
+        }
+      }
       if (
         (managedCheckpoint &&
           (managedCheckpoint.state !== "ready" || managedCheckpoint.deleteClaim)) ||
@@ -16425,6 +16633,7 @@ export class FleetCoordinator {
         current.provisioningFailureRetryable = false;
         delete current.releaseDeletesServer;
         clearLeaseCleanupMetadata(current);
+        completeLeaseProviderCleanup(current, failedAt);
       }
       await this.putLease(current);
     });
@@ -16586,9 +16795,17 @@ export class FleetCoordinator {
           return;
         }
         if (lease.state === "provisioning" && !lease.cloudID) {
-          lease.state = "failed";
           lease.updatedAt = nowISO;
           lease.endedAt = nowISO;
+          if (leaseHasConfirmedNoProviderResource(lease)) {
+            lease.state = "expired";
+            lease.releaseDeletesServer = true;
+            clearLeaseCleanupMetadata(lease);
+            completeLeaseProviderCleanup(lease, nowISO);
+            await this.putLease(lease, { noCache: true });
+            return;
+          }
+          lease.state = "failed";
           if (lease.provisioningRequestStartedAt) lease.provisioningResourceMayExist = true;
           lease.cleanupFailedAt = nowISO;
           lease.cleanupError =
@@ -16603,6 +16820,7 @@ export class FleetCoordinator {
         lease.cleanupClaimExpiresAt = new Date(
           nowDate.getTime() + leaseCleanupClaimStaleMs,
         ).toISOString();
+        clearLeaseCleanupCompletion(lease);
         lease.updatedAt = nowISO;
         await this.putLease(lease, { noCache: true });
         claimed.push({ claim: nowISO, lease });
@@ -16653,6 +16871,7 @@ export class FleetCoordinator {
             delete current.providerKeyCleanupID;
             delete current.cleanupStartedAt;
             delete current.cleanupClaimExpiresAt;
+            completeLeaseProviderCleanup(current, nowISO);
             await this.putLease(current);
             await this.clearWorkspaceReleaseError(current);
             await this.markAWSIngressReconcilePending(current);
@@ -18887,6 +19106,7 @@ export class FleetCoordinator {
       cleanupLease.cleanupClaimExpiresAt = new Date(
         cleanupStarted.getTime() + leaseCleanupClaimStaleMs,
       ).toISOString();
+      clearLeaseCleanupCompletion(cleanupLease);
       delete cleanupLease.cleanupRetryAt;
       cleanupLease.updatedAt = cleanupStartedAt;
       if (cleanupLease.state === "released") {
@@ -18982,6 +19202,9 @@ export class FleetCoordinator {
           delete completed.cleanupClaimExpiresAt;
           delete completed.releaseDeletesServer;
           completed.updatedAt = new Date().toISOString();
+          if (completed.state === "released") {
+            completeLeaseProviderCleanup(completed, completed.updatedAt);
+          }
           await this.putLease(completed);
         } else {
           await this.state.storage.delete(leaseKey(record.id));
@@ -19151,13 +19374,13 @@ export class FleetCoordinator {
       const shouldDelete = Boolean(
         deleteServer &&
         (current.providerKeyCleanupPending ||
-          (current.cloudID &&
-            (leaseIsLive(current) ||
-              current.releaseDeletesServer !== undefined ||
-              current.cleanupError))),
+          (current.cloudID && (leaseIsLive(current) || !leaseProviderCleanupConfirmed(current)))),
       );
       if (!shouldDelete) {
         const released = finalizedReleasedLease(current, deleteServer, options.keep);
+        if (deleteServer && leaseHasConfirmedNoProviderResource(released)) {
+          completeLeaseProviderCleanup(released, released.updatedAt);
+        }
         await this.putLease(released);
         await this.clearWorkspaceReleaseError(released);
         await this.markAWSIngressReconcilePending(released);
@@ -19172,6 +19395,7 @@ export class FleetCoordinator {
         pending.releaseDeletesServer = true;
         pending.cleanupStartedAt = queuedAt;
         pending.cleanupClaimExpiresAt = queuedAt;
+        clearLeaseCleanupCompletion(pending);
         await this.putLease(pending);
         await this.markAWSIngressReconcilePending(pending);
         await this.armAlarmNoLaterThan(Date.now());
@@ -19184,6 +19408,7 @@ export class FleetCoordinator {
         now.getTime() + leaseCleanupClaimStaleMs,
       ).toISOString();
       claimed.releaseDeletesServer = true;
+      clearLeaseCleanupCompletion(claimed);
       await this.putLease(claimed);
       await this.markAWSIngressReconcilePending(claimed);
       await this.scheduleAlarm();
@@ -19254,6 +19479,7 @@ export class FleetCoordinator {
       clearProvisioningRecoveryMetadata(released);
       delete released.providerKeyCleanupPending;
       delete released.providerKeyCleanupID;
+      completeLeaseProviderCleanup(released, new Date().toISOString());
       await this.putLease(released);
       await this.clearWorkspaceReleaseError(released);
       await this.markAWSIngressReconcilePending(released);
@@ -20187,6 +20413,16 @@ function promotedAWSImageCatalogKey(image: PromotedImageRecord): string {
   return `${promotedAWSImageCatalogPrefix(image)}${encodeURIComponent(image.id)}`;
 }
 
+function retiredAWSImageRevisionKey(state: { imageId: string; revision: string }): string {
+  return `image:aws:retired:${encodeURIComponent(state.imageId)}:${encodeURIComponent(state.revision)}`;
+}
+
+function retiredAWSImageKey(imageID: string, region?: string): string {
+  return region === undefined
+    ? `image:aws:retired-image-global:${encodeURIComponent(imageID)}`
+    : `image:aws:retired-image:${encodeURIComponent(region)}:${encodeURIComponent(imageID)}`;
+}
+
 function promotedAWSImageVariantPrefix(
   image: Pick<ProviderImage, "target" | "architecture" | "region" | "serverType"> & {
     os?: string;
@@ -20198,6 +20434,302 @@ function promotedAWSImageVariantPrefix(
 
 function promotedAWSImageVariantKey(image: PromotedImageRecord): string {
   return `${promotedAWSImageVariantPrefix(image)}${encodeURIComponent(image.id)}`;
+}
+
+type ImageDefaultAliasName = "linux-os" | "legacy" | "regional";
+
+function promotedAWSImageDefaultAliases(
+  image: Pick<ProviderImage, "target" | "architecture" | "region" | "serverType"> & {
+    os?: string;
+  },
+): Array<{ alias: ImageDefaultAliasName; key: string }> {
+  const aliases: Array<{ alias: ImageDefaultAliasName; key: string }> = [];
+  if (image.target === "linux" && image.os) {
+    aliases.push({ alias: "linux-os", key: promotedAWSLinuxOSImageKey(image) });
+  }
+  if (
+    image.target === "linux" &&
+    (!image.os || image.os === "ubuntu:24.04") &&
+    legacyPromotedAWSImageCompatible(image)
+  ) {
+    aliases.push({ alias: "legacy", key: legacyPromotedAWSImageKey() });
+  }
+  aliases.push({ alias: "regional", key: promotedAWSImageKey(image) });
+  return aliases;
+}
+
+type ImageDefaultAliasState =
+  | { alias: ImageDefaultAliasName; state: "absent" }
+  | { alias: ImageDefaultAliasName; state: "present"; image: PromotedImageRecord };
+
+type ImageDefaultState = (
+  | { state: "absent" }
+  | { state: "present"; imageId: string; revision: string }
+) & { aliases?: ImageDefaultAliasState[] };
+
+type ImageDefaultExpectation = ImageDefaultState | { state: "capture" };
+
+function parseImageDefaultState(value: unknown): ImageDefaultExpectation | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  if (input["state"] === "capture" && Object.keys(input).length === 1) {
+    return { state: "capture" };
+  }
+  if (input["state"] === "absent" && Object.keys(input).length === 1) {
+    return { state: "absent" };
+  }
+  const imageId = typeof input["imageId"] === "string" ? input["imageId"].trim() : "";
+  const revision = typeof input["revision"] === "string" ? input["revision"].trim() : "";
+  if (
+    input["state"] !== "present" ||
+    !imageId ||
+    !revision ||
+    Object.keys(input).some((key) => !["state", "imageId", "revision"].includes(key))
+  ) {
+    return undefined;
+  }
+  return { state: "present", imageId, revision };
+}
+
+function imageDefaultState(image: PromotedImageRecord | undefined): ImageDefaultState {
+  if (!image) return { state: "absent" };
+  return {
+    state: "present",
+    imageId: image.id,
+    revision: image.revision?.trim() || `${image.id}@${image.promotedAt}`,
+  };
+}
+
+function parseImageDefaultRestore(value: unknown): ImageDefaultState | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const aliasesInput = input["aliases"];
+  if (!Array.isArray(aliasesInput) || aliasesInput.length === 0) return undefined;
+  const base = parseImageDefaultState(
+    Object.fromEntries(Object.entries(input).filter(([key]) => key !== "aliases")),
+  );
+  if (!base || base.state === "capture") return undefined;
+  const aliases: ImageDefaultAliasState[] = [];
+  for (const aliasValue of aliasesInput) {
+    if (!aliasValue || typeof aliasValue !== "object" || Array.isArray(aliasValue))
+      return undefined;
+    const aliasInput = aliasValue as Record<string, unknown>;
+    const alias = aliasInput["alias"];
+    if (alias !== "linux-os" && alias !== "legacy" && alias !== "regional") return undefined;
+    if (
+      aliasInput["state"] === "absent" &&
+      Object.keys(aliasInput).every((key) => key === "alias" || key === "state")
+    ) {
+      aliases.push({ alias, state: "absent" });
+      continue;
+    }
+    const image = aliasInput["image"];
+    if (
+      aliasInput["state"] !== "present" ||
+      !image ||
+      typeof image !== "object" ||
+      Array.isArray(image) ||
+      Object.keys(aliasInput).some((key) => !["alias", "state", "image"].includes(key))
+    ) {
+      return undefined;
+    }
+    const record = image as Partial<PromotedImageRecord>;
+    if (
+      (record.provider !== undefined && record.provider !== "aws") ||
+      typeof record.id !== "string" ||
+      !record.id ||
+      typeof record.name !== "string" ||
+      typeof record.state !== "string" ||
+      typeof record.promotedAt !== "string" ||
+      !record.promotedAt
+    ) {
+      return undefined;
+    }
+    aliases.push({ alias, state: "present", image: record as PromotedImageRecord });
+  }
+  if (new Set(aliases.map(({ alias }) => alias)).size !== aliases.length) return undefined;
+  return { ...base, aliases };
+}
+
+async function captureAWSImageDefaultState(
+  storage: ProviderStateStorageView,
+  scope: {
+    target: TargetOS;
+    architecture: string;
+    os?: string;
+    serverType: string;
+    region: string;
+  },
+  current: PromotedImageRecord | undefined,
+): Promise<ImageDefaultState> {
+  const aliases: ImageDefaultAliasState[] = [];
+  for (const { alias, key } of promotedAWSImageDefaultAliases(scope)) {
+    // Alias order is the publication order; capture every overwritten slot before mutation.
+    // oxlint-disable-next-line eslint/no-await-in-loop
+    const image = await storage.get<PromotedImageRecord>(key);
+    aliases.push(image ? { alias, state: "present", image } : { alias, state: "absent" });
+  }
+  return { ...imageDefaultState(current), aliases };
+}
+
+function imageDefaultAliasRecordMatches(
+  alias: ImageDefaultAliasName,
+  key: string,
+  image: PromotedImageRecord,
+): boolean {
+  if (alias === "regional") return promotedAWSImageKey(image) === key;
+  if (alias === "linux-os") {
+    return (image.target ?? "linux") === "linux" && promotedAWSLinuxOSImageKey(image) === key;
+  }
+  return (
+    (image.target ?? "linux") === "linux" &&
+    (!image.os || image.os === "ubuntu:24.04") &&
+    legacyPromotedAWSImageCompatible(image)
+  );
+}
+
+function sameImageDefaultState(left: ImageDefaultState, right: ImageDefaultState): boolean {
+  if (left.state !== right.state) return false;
+  return (
+    left.state === "absent" ||
+    (right.state === "present" &&
+      left.imageId === right.imageId &&
+      left.revision === right.revision)
+  );
+}
+
+async function retireAWSImageRevision(
+  storage: ProviderStateStorageView,
+  state: Extract<ImageDefaultState, { state: "present" }>,
+): Promise<void> {
+  await storage.put(retiredAWSImageRevisionKey(state), {
+    retiredAt: new Date().toISOString(),
+  });
+}
+
+async function retireAWSImage(
+  storage: ProviderStateStorageView,
+  imageID: string,
+  region?: string,
+): Promise<void> {
+  const { global, retiredAt, lastPromotedAt } = await awsImageRetirementState(
+    storage,
+    imageID,
+    region,
+  );
+  await storage.put(retiredAWSImageKey(imageID, region), {
+    ...(region === undefined ? global : {}),
+    retiredAt: new Date(Math.max(Date.now(), retiredAt, lastPromotedAt)).toISOString(),
+  });
+}
+
+async function awsImageRetirementState(
+  storage: ProviderStateStorageView,
+  imageID: string,
+  region?: string,
+) {
+  const global = await storage.get<{ retiredAt?: string; lastPromotedAt?: string }>(
+    retiredAWSImageKey(imageID),
+  );
+  const regional =
+    region === undefined
+      ? undefined
+      : await storage.get<{ retiredAt?: string }>(retiredAWSImageKey(imageID, region));
+  const [globalCutoff = 0, regionalCutoff = 0, lastPromotedAt = 0] = [
+    global?.retiredAt,
+    regional?.retiredAt,
+    global?.lastPromotedAt,
+  ].map((value) => {
+    const timestamp = Date.parse(value ?? "");
+    return Number.isFinite(timestamp) ? timestamp : 0;
+  });
+  return {
+    global,
+    retiredAt: Math.max(globalCutoff, regionalCutoff),
+    lastPromotedAt,
+  };
+}
+
+async function awsImageRevisionRetired(
+  storage: ProviderStateStorageView,
+  image: PromotedImageRecord,
+  fallbackRegion: string,
+): Promise<boolean> {
+  const state = imageDefaultState(image);
+  if (
+    state.state === "present" &&
+    (await storage.get(retiredAWSImageRevisionKey(state))) !== undefined
+  ) {
+    return true;
+  }
+  const { retiredAt } = await awsImageRetirementState(
+    storage,
+    image.id,
+    image.region ?? fallbackRegion,
+  );
+  const promotedAt = Date.parse(image.promotedAt);
+  return Number.isFinite(promotedAt) && promotedAt <= retiredAt;
+}
+
+async function nextAWSImagePromotionTimestamp(
+  storage: ProviderStateStorageView,
+  imageID: string,
+  region: string,
+): Promise<string> {
+  const { global, retiredAt, lastPromotedAt } = await awsImageRetirementState(
+    storage,
+    imageID,
+    region,
+  );
+  const promotedAt = new Date(Math.max(Date.now(), retiredAt + 1, lastPromotedAt)).toISOString();
+  // Retain the publication high-water mark even after its last catalog row disappears.
+  // A later retirement must cover receipts timestamped ahead of a frozen or regressed clock.
+  await storage.put(retiredAWSImageKey(imageID), { ...global, lastPromotedAt: promotedAt });
+  return promotedAt;
+}
+
+function imagePromotionConflict(
+  expected: ImageDefaultState,
+  current: ImageDefaultState,
+  scope: Record<string, string>,
+): Response {
+  return json(
+    {
+      error: "image_promotion_precondition_failed",
+      message: "image default changed before the requested catalog update",
+      expected,
+      current,
+      scope,
+    },
+    { status: 409 },
+  );
+}
+
+async function promotedAWSImageDefault(
+  storage: ProviderStateStorageView,
+  scope: {
+    target: TargetOS;
+    architecture: string;
+    os?: string;
+    serverType: string;
+    region: string;
+  },
+): Promise<PromotedImageRecord | undefined> {
+  const scoped = await storage.get<PromotedImageRecord>(promotedAWSImageKey(scope));
+  if (scoped) return scoped;
+  if (scope.target === "macos") {
+    return storage.get<PromotedImageRecord>(legacyScopedPromotedAWSImageKey(scope));
+  }
+  if (scope.target !== "linux") return undefined;
+  if (scope.os) {
+    const osScoped = await storage.get<PromotedImageRecord>(promotedAWSLinuxOSImageKey(scope));
+    if (osScoped) return osScoped;
+  }
+  if ((!scope.os || scope.os === "ubuntu:24.04") && scope.architecture === "x86_64") {
+    const legacy = await storage.get<PromotedImageRecord>(legacyPromotedAWSImageKey());
+    if (legacy && legacyPromotedAWSImageCompatible(legacy)) return legacy;
+  }
+  return undefined;
 }
 
 class ImageCapabilityMismatchError extends Error {
@@ -20779,6 +21311,7 @@ function sameLeaseCleanupClaim(current: LeaseRecord, claimed: LeaseRecord): bool
     current.providerKeyCleanupID === claimed.providerKeyCleanupID &&
     current.providerKeyCleanupOwned === claimed.providerKeyCleanupOwned &&
     current.providerKeyCleanupPending === claimed.providerKeyCleanupPending &&
+    current.cleanupCompletedAt === claimed.cleanupCompletedAt &&
     current.provisioningResourceMayExist === claimed.provisioningResourceMayExist &&
     current.provisioningRequestStartedAt === claimed.provisioningRequestStartedAt &&
     current.provisioningRequestSettledAt === claimed.provisioningRequestSettledAt &&
@@ -24754,6 +25287,7 @@ function leaseCleanupIsUnresolved(lease: LeaseRecord): boolean {
 }
 
 function retainUnresolvedProviderResource(lease: LeaseRecord, message: string, at: string): void {
+  clearLeaseCleanupCompletion(lease);
   if (leaseIsLive(lease)) {
     lease.state = "failed";
     lease.endedAt = at;
@@ -24777,6 +25311,7 @@ function recordLeaseCleanupFailure(
   message: string,
   at: string,
 ): void {
+  clearLeaseCleanupCompletion(lease);
   if (error instanceof ProviderResourceUnresolvedError) {
     retainUnresolvedProviderResource(lease, message, at);
   } else if (error instanceof ProviderCleanupManualResolutionError) {
@@ -24859,7 +25394,7 @@ function provisionedLeaseRecord(
   const providerKeyCleanupOwned =
     (config.provider === "aws" || config.provider === "hetzner") &&
     providerKey === providerKeyForLease(lease.id);
-  return {
+  const record: LeaseRecord = {
     ...lease,
     state: "active",
     cloudID: server.cloudID,
@@ -24874,16 +25409,16 @@ function provisionedLeaseRecord(
     ...(providerProject ? { providerProject } : {}),
     ...(server.hostID ? { hostId: server.hostID } : {}),
   };
+  clearLeaseCleanupCompletion(record);
+  return record;
 }
 
 function leaseHasCurrentCleanupOrFinalRelease(lease: LeaseRecord): boolean {
   const now = Date.now();
   return Boolean(
     (lease.cleanupStartedAt && cleanupClaimDeadline(lease) > now) ||
-    (lease.state === "released" &&
-      !lease.provisioningRequestStartedAt &&
-      lease.releaseDeletesServer !== true &&
-      !leaseNeedsCleanup(lease, now)),
+    (lease.state === "released" && lease.releaseDeletesServer === false) ||
+    leaseProviderCleanupConfirmed(lease),
   );
 }
 
@@ -25246,6 +25781,7 @@ function terminalizeManualProviderCleanup(
   error: string,
   terminalAt: string,
 ): void {
+  clearLeaseCleanupCompletion(lease);
   if (leaseIsLive(lease)) {
     lease.state = "expired";
   }
@@ -25345,6 +25881,9 @@ function finalizedReleasedLease(
   delete lease.cleanupClaimExpiresAt;
   if (keep !== undefined) {
     lease.keep = keep;
+  }
+  if (!deleteServer) {
+    clearLeaseCleanupCompletion(lease);
   }
   return lease;
 }
@@ -25966,6 +26505,14 @@ interface CloudProvider {
   releaseLease(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void>;
   deleteServer(id: string): Promise<void>;
   deleteOwnedServer?(lease: LeaseRecord): Promise<void>;
+  inspectCleanup?(lease: LeaseRecord): Promise<unknown>;
+  // Revalidate the lease after provider reads, before committing any recovery writes.
+  recoverCleanup?(
+    lease: LeaseRecord,
+    expectedClaimFingerprint: string,
+    actor: string,
+    commitGuard: <T>(commit: () => Promise<T>) => Promise<T>,
+  ): Promise<unknown>;
   supportsNativeImages(): boolean;
   nativeImagesUnsupportedMessage(): string;
   defaultImageStrategy(lease: LeaseRecord): "image" | "disk-snapshot";
@@ -26011,7 +26558,7 @@ interface CloudProvider {
     request: Request,
     url: URL,
     checkpoint?: Pick<CoordinatorCheckpointRecord, "id" | "generation">,
-  ): Promise<Response | { image: ProviderImage }>;
+  ): Promise<Response | { image: ProviderImage; previous?: ImageDefaultState }>;
   fastSnapshotRestoreForImage?(
     imageID: string,
     metadata: ProviderImage | undefined,
@@ -26232,6 +26779,24 @@ export class HetznerProvider implements CloudProvider {
   }
 }
 
+function withProvisioningPhases(
+  timing: Omit<LeaseProvisioningTiming, "phases">,
+): LeaseProvisioningTiming {
+  const totalMs = Number.isSafeInteger(timing.totalMs) && timing.totalMs > 0 ? timing.totalMs : 0;
+  const phases: NonNullable<LeaseProvisioningTiming["phases"]> = [];
+  let remaining = totalMs;
+  const append = (name: NonNullable<LeaseProvisioningTiming["phases"]>[number]["name"], ms = 0) => {
+    if (!Number.isSafeInteger(ms) || ms <= 0 || ms > remaining) return;
+    phases.push({ name, ms });
+    remaining -= ms;
+  };
+  append("request", timing.requestMs);
+  append("network_ready", timing.networkReadyMs);
+  append("bootstrap", timing.bootstrapMs);
+  append("unattributed", remaining);
+  return { ...timing, totalMs, phases };
+}
+
 export class AzureProvider implements CloudProvider {
   private clientValue?: AzureClient;
 
@@ -26382,16 +26947,48 @@ export class AzureProvider implements CloudProvider {
       return {
         ...result,
         ...(image ? { image } : {}),
-        provisioningTiming: {
+        provisioningTiming: withProvisioningPhases({
           requestMs: Date.now() - startedAt,
           totalMs: Date.now() - startedAt,
-        },
+        }),
       };
     });
   }
 
   deleteServer(id: string): Promise<void> {
     return this.client.deleteServer(id);
+  }
+
+  inspectCleanup(lease: LeaseRecord): ReturnType<AzureClient["inspectOwnedCleanup"]> {
+    const scope = azureProviderScope(lease.providerScope);
+    if (!scope) {
+      throw new Error("Azure cleanup inspection requires the original provider scope");
+    }
+    return new AzureClient(this.env, {
+      ...(lease.region ? { location: lease.region } : {}),
+      subscription: scope.subscription,
+      resourceGroup: scope.resourceGroup,
+      ...(this.storage ? { ownedDeleteClaimStorage: this.storage } : {}),
+    }).inspectOwnedCleanup(lease);
+  }
+
+  recoverCleanup(
+    lease: LeaseRecord,
+    expectedClaimFingerprint: string,
+    actor: string,
+    commitGuard?: <T>(commit: () => Promise<T>) => Promise<T>,
+  ): ReturnType<AzureClient["recoverMissingPublicIP"]> {
+    const scope = azureProviderScope(lease.providerScope);
+    if (!scope || !lease.region?.trim())
+      throw new ProviderResourceUnresolvedError(
+        "Azure cleanup recovery requires the original provider scope and region",
+      );
+    return new AzureClient(this.env, {
+      location: lease.region,
+      subscription: scope.subscription,
+      resourceGroup: scope.resourceGroup,
+      ...(this.storage ? { ownedDeleteClaimStorage: this.storage } : {}),
+    }).recoverMissingPublicIP(lease, expectedClaimFingerprint, actor, commitGuard);
   }
 
   deleteOwnedServer(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void> {
@@ -28167,12 +28764,12 @@ export class AWSProvider implements CloudProvider {
           server: { ...readyServer, region },
           serverType,
           image: awsLeaseImageIdentity(config, imageID, region),
-          provisioningTiming: {
+          provisioningTiming: withProvisioningPhases({
             requestMs,
             networkReadyMs: Date.now() - networkReadyStartedAt - bootstrapMs,
             ...(bootstrapMs > 0 ? { bootstrapMs } : {}),
             totalMs: Date.now() - totalStartedAt,
-          },
+          }),
         };
         if (market) {
           result.market = market;
@@ -28245,11 +28842,7 @@ export class AWSProvider implements CloudProvider {
     );
     try {
       if (server) {
-        if (lease.network?.awsPrivate) {
-          await this.client.terminateServerAndWait(lease.cloudID);
-        } else {
-          await this.deleteServer(lease.cloudID);
-        }
+        await this.client.terminateServerAndWait(lease.cloudID);
       }
     } catch (error) {
       const message = coordinatorErrorMessage(this.env, error);
@@ -28664,13 +29257,19 @@ export class AWSProvider implements CloudProvider {
       await this.storage.put(awsImageDeletionClaimKey(imageID), claim);
     }
     await this.deleteMatchingImageRecords("image:aws:created:", imageID, this.region);
-    await this.deleteMatchingImageRecords(promotedAWSImagePrefix(), imageID, this.region);
+    await imageCatalogTransaction(this.storage, async (transaction) => {
+      await deletePromotedAWSImageRecords(transaction, imageID, [promotedAWSImagePrefix()], {
+        region: this.region,
+        retireRevisions: true,
+      });
+      await retireAWSImage(transaction, imageID, this.region);
+    });
     await imageCatalogTransaction(this.storage, async (transaction) => {
       await deletePromotedAWSImageRecords(
         transaction,
         imageID,
         ["image:aws:catalog:", "image:aws:variant:"],
-        { region: this.region },
+        { region: this.region, retireRevisions: true },
       );
       await transaction.delete(awsImageDeletionClaimKey(imageID));
     });
@@ -28690,16 +29289,17 @@ export class AWSProvider implements CloudProvider {
   }
 
   retirePromotedImage(imageID: string, region?: string): Promise<number> {
-    return imageCatalogTransaction(
-      this.storage,
-      async (transaction) =>
-        await deletePromotedAWSImageRecords(
-          transaction,
-          imageID,
-          ["image:aws:catalog:", "image:aws:variant:", "image:aws:promoted"],
-          region ? { region } : {},
-        ),
-    );
+    return imageCatalogTransaction(this.storage, async (transaction) => {
+      const retired = await deletePromotedAWSImageRecords(
+        transaction,
+        imageID,
+        ["image:aws:catalog:", "image:aws:variant:", "image:aws:promoted"],
+        { ...(region ? { region } : {}), retireRevisions: true },
+      );
+      // Receipt-only aliases have no catalog rows from which to recover their retirement scope.
+      await retireAWSImage(transaction, imageID, region);
+      return retired;
+    });
   }
 
   async storedImageMetadata(imageID: string): Promise<ProviderImage | undefined> {
@@ -28819,7 +29419,7 @@ export class AWSProvider implements CloudProvider {
     request: Request,
     url: URL,
     checkpoint?: Pick<CoordinatorCheckpointRecord, "id" | "generation">,
-  ): Promise<Response | { image: ProviderImage }> {
+  ): Promise<Response | { image: ProviderImage; previous?: ImageDefaultState }> {
     const input: {
       target?: string;
       os?: string;
@@ -28831,6 +29431,10 @@ export class AWSProvider implements CloudProvider {
       variantSelectors?: ImageVariantSelectors;
       fastSnapshotRestore?: unknown;
       fastSnapshotRestoreAvailabilityZones?: string[];
+      expectedCurrent?: unknown;
+      clearDefault?: unknown;
+      retireExpectedCatalog?: unknown;
+      restorePrevious?: unknown;
     } = await readJson<{
       target?: string;
       os?: string;
@@ -28842,7 +29446,73 @@ export class AWSProvider implements CloudProvider {
       variantSelectors?: ImageVariantSelectors;
       fastSnapshotRestore?: unknown;
       fastSnapshotRestoreAvailabilityZones?: string[];
-    }>(request).catch(() => ({}));
+      expectedCurrent?: unknown;
+      clearDefault?: unknown;
+      retireExpectedCatalog?: unknown;
+      restorePrevious?: unknown;
+    }>(request).catch(
+      () =>
+        ({}) as {
+          expectedCurrent?: unknown;
+          clearDefault?: unknown;
+          retireExpectedCatalog?: unknown;
+        },
+    );
+    const expectedCurrentInput =
+      input.expectedCurrent === undefined
+        ? undefined
+        : parseImageDefaultState(input.expectedCurrent);
+    if (input.expectedCurrent !== undefined && !expectedCurrentInput) {
+      return json(
+        { error: "invalid_image_precondition", message: "expectedCurrent is invalid" },
+        { status: 400 },
+      );
+    }
+    const clearDefault = boolFromUnknown(input.clearDefault);
+    const retireExpectedCatalogRequested = input.retireExpectedCatalog === true;
+    const restorePrevious =
+      input.restorePrevious === undefined
+        ? undefined
+        : parseImageDefaultRestore(input.restorePrevious);
+    if (input.restorePrevious !== undefined && !restorePrevious) {
+      return json(
+        { error: "invalid_image_precondition", message: "restorePrevious is invalid" },
+        { status: 400 },
+      );
+    }
+    if (
+      restorePrevious &&
+      (clearDefault ||
+        !retireExpectedCatalogRequested ||
+        !expectedCurrentInput ||
+        expectedCurrentInput.state !== "present" ||
+        expectedCurrentInput.imageId !== imageID)
+    ) {
+      return json(
+        {
+          error: "invalid_image_precondition",
+          message:
+            "restoring an image default requires the exact current image id and revision plus catalog retirement",
+        },
+        { status: 400 },
+      );
+    }
+    if (clearDefault) {
+      if (
+        !expectedCurrentInput ||
+        expectedCurrentInput.state !== "present" ||
+        expectedCurrentInput.imageId !== imageID ||
+        url.searchParams.get("catalogOnly") === "true"
+      ) {
+        return json(
+          {
+            error: "invalid_image_precondition",
+            message: "clearing a default requires the exact current image id and revision",
+          },
+          { status: 400 },
+        );
+      }
+    }
     const requestedRegion = input.region ?? url.searchParams.get("region") ?? "";
     const requestedImageRegion = requestedRegion ? sanitizeAWSRegion(requestedRegion) : "";
     if (requestedRegion && !requestedImageRegion) {
@@ -28969,6 +29639,18 @@ export class AWSProvider implements CloudProvider {
         desktop: declaredCapabilities?.desktop ?? priorCapabilities?.desktop,
       });
     const catalogOnly = boolFromUnknown(url.searchParams.get("catalogOnly") ?? input.catalogOnly);
+    if (
+      catalogOnly &&
+      (input.expectedCurrent !== undefined || input.retireExpectedCatalog !== undefined)
+    ) {
+      return json(
+        {
+          error: "invalid_image_precondition",
+          message: "transactional image preconditions apply only to default image promotion",
+        },
+        { status: 400 },
+      );
+    }
     if (catalogOnly && !variantSelectors) {
       return json(
         {
@@ -29052,6 +29734,79 @@ export class AWSProvider implements CloudProvider {
         { status: 400 },
       );
     }
+    const nextScope = {
+      target,
+      ...(imageOS ? { os: imageOS } : {}),
+      region: effectiveRegion,
+      architecture:
+        image.architecture ?? awsImageArchitectureForTarget(target, image.serverType ?? ""),
+      ...(image.serverType ? { serverType: image.serverType } : {}),
+    };
+    const promotionScope = {
+      provider: "aws",
+      target,
+      architecture: nextScope.architecture,
+      serverType: nextScope.serverType ?? "",
+      os: imageOS ?? "",
+      region: effectiveRegion,
+    };
+    if (restorePrevious) {
+      const expectedAliases = promotedAWSImageDefaultAliases(nextScope);
+      const restoredAliases = restorePrevious.aliases?.map(({ alias }) => alias) ?? [];
+      if (
+        expectedAliases.length !== restoredAliases.length ||
+        expectedAliases.some(({ alias }) => !restoredAliases.includes(alias)) ||
+        expectedAliases.some(({ alias, key }) => {
+          const restored = restorePrevious.aliases?.find((entry) => entry.alias === alias);
+          return (
+            !restored ||
+            (restored.state === "present" &&
+              !imageDefaultAliasRecordMatches(alias, key, restored.image))
+          );
+        })
+      ) {
+        return json(
+          {
+            error: "invalid_image_precondition",
+            message: "restorePrevious does not match the promoted image scope",
+          },
+          { status: 400 },
+        );
+      }
+    }
+    // A failed image ID may already have been republished. Retire only the exact
+    // catalog revision named by the rollback receipt, never the reused entry.
+    const retireExpectedCatalogRevision = async (
+      transaction: ProviderStateStorageView,
+      expected: ImageDefaultState | undefined,
+    ) => {
+      if (!retireExpectedCatalogRequested || expected?.state !== "present") return;
+      // Retirement belongs to the failed receipt revision, even when a later
+      // publication already replaced its catalog row.
+      await retireAWSImageRevision(transaction, expected);
+      const key = `${promotedAWSImageCatalogPrefix(nextScope)}${encodeURIComponent(expected.imageId)}`;
+      const record = await transaction.get<PromotedImageRecord>(key);
+      if (!record || !sameImageDefaultState(imageDefaultState(record), expected)) return;
+      await unpinCheckpointPromotion(transaction, "aws", record, key);
+      await transaction.delete(key);
+    };
+    if (expectedCurrentInput && expectedCurrentInput.state !== "capture") {
+      // Image mutations stay in the durable object's lifecycle queue through FSR and commit.
+      // Reject known-stale requests before billed side effects; the transaction rechecks storage.
+      const preflightConflict = await imageCatalogTransaction(this.storage, async (transaction) => {
+        const currentDefault = await promotedAWSImageDefault(transaction, {
+          ...nextScope,
+          serverType: nextScope.serverType ?? "",
+        });
+        const currentState = imageDefaultState(currentDefault);
+        if (sameImageDefaultState(expectedCurrentInput, currentState)) return undefined;
+        await retireExpectedCatalogRevision(transaction, expectedCurrentInput);
+        return currentState;
+      });
+      if (preflightConflict) {
+        return imagePromotionConflict(expectedCurrentInput, preflightConflict, promotionScope);
+      }
+    }
     const fastSnapshotRestores =
       fastSnapshotRestoreAvailabilityZones.length > 0
         ? await provider.enableFastSnapshotRestore(
@@ -29063,6 +29818,86 @@ export class AWSProvider implements CloudProvider {
     void _providerCapabilities;
     try {
       const promoted = await imageCatalogTransaction(this.storage, async (transaction) => {
+        const currentDefault = await promotedAWSImageDefault(transaction, {
+          ...nextScope,
+          serverType: nextScope.serverType ?? "",
+        });
+        const previousDefault = imageDefaultState(currentDefault);
+        const receiptPrevious =
+          expectedCurrentInput?.state === "capture"
+            ? await captureAWSImageDefaultState(
+                transaction,
+                { ...nextScope, serverType: nextScope.serverType ?? "" },
+                currentDefault,
+              )
+            : previousDefault;
+        const expectedCurrent =
+          expectedCurrentInput?.state === "capture" ? previousDefault : expectedCurrentInput;
+        if (expectedCurrent && !sameImageDefaultState(expectedCurrent, previousDefault)) {
+          await retireExpectedCatalogRevision(transaction, expectedCurrent);
+          return { conflict: previousDefault, expected: expectedCurrent };
+        }
+        if (clearDefault) {
+          await retireExpectedCatalogRevision(transaction, expectedCurrent);
+          for (const { key: recordKey } of promotedAWSImageDefaultAliases(nextScope)) {
+            // Catalog aliases carry independent promotion pins and must be retired in order.
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            const record = await transaction.get<PromotedImageRecord>(recordKey);
+            if (!record || !sameImageDefaultState(imageDefaultState(record), previousDefault)) {
+              continue;
+            }
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            await unpinCheckpointPromotion(transaction, "aws", record, recordKey);
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            await transaction.delete(recordKey);
+          }
+          return {
+            image: { id: "none", name: "", state: "absent", provider: "aws" as const },
+            previous: previousDefault,
+          };
+        }
+        if (restorePrevious) {
+          await retireExpectedCatalogRevision(transaction, expectedCurrent);
+          for (const { alias, key } of promotedAWSImageDefaultAliases(nextScope)) {
+            // Restore only aliases still owned by this failed revision. A concurrent promotion
+            // on another alias remains authoritative and must not be overwritten.
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            const current = await transaction.get<PromotedImageRecord>(key);
+            if (!current || !sameImageDefaultState(imageDefaultState(current), previousDefault)) {
+              continue;
+            }
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            await unpinCheckpointPromotion(transaction, "aws", current, key);
+            const priorAlias = restorePrevious.aliases!.find((entry) => entry.alias === alias)!;
+            let priorRetired = false;
+            if (priorAlias.state === "present") {
+              // Alias restoration is intentionally serialized with pin changes in this transaction.
+              // oxlint-disable-next-line eslint/no-await-in-loop
+              priorRetired = await awsImageRevisionRetired(
+                transaction,
+                priorAlias.image,
+                effectiveRegion,
+              );
+            }
+            if (priorAlias.state === "absent" || priorRetired) {
+              // oxlint-disable-next-line eslint/no-await-in-loop
+              await transaction.delete(key);
+              continue;
+            }
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            await transaction.put(key, priorAlias.image);
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            await pinCheckpointPromotion(transaction, "aws", priorAlias.image, key);
+          }
+          const restored = await promotedAWSImageDefault(transaction, {
+            ...nextScope,
+            serverType: nextScope.serverType ?? "",
+          });
+          return {
+            image: restored ?? { id: "none", name: "", state: "absent", provider: "aws" as const },
+            previous: previousDefault,
+          };
+        }
         const currentCataloged = await this.promotedImageMetadataByID(
           imageID,
           effectiveRegion,
@@ -29079,12 +29914,9 @@ export class AWSProvider implements CloudProvider {
         const next: PromotedImageRecord = {
           ...validatedImage,
           ...(fastSnapshotRestores ? { fastSnapshotRestores } : {}),
-          target,
-          ...(imageOS ? { os: imageOS } : {}),
-          region: effectiveRegion,
-          architecture:
-            image.architecture ?? awsImageArchitectureForTarget(target, image.serverType ?? ""),
-          promotedAt: new Date().toISOString(),
+          ...nextScope,
+          promotedAt: await nextAWSImagePromotionTimestamp(transaction, imageID, effectiveRegion),
+          revision: crypto.randomUUID(),
           ...(capabilities ? { capabilities } : {}),
           ...(catalogOnly && variantSelectors ? { catalogOnly: true, variantSelectors } : {}),
         };
@@ -29101,23 +29933,21 @@ export class AWSProvider implements CloudProvider {
         };
         if (catalogOnly) {
           await publish(promotedAWSImageVariantKey(next));
-          return next;
+          return { image: next, previous: receiptPrevious };
         }
+        await retireExpectedCatalogRevision(transaction, expectedCurrent);
         await publish(promotedAWSImageCatalogKey(next));
-        if (target === "linux" && next.os) {
-          await publish(promotedAWSLinuxOSImageKey(next));
+        for (const { key } of promotedAWSImageDefaultAliases(next)) {
+          // Promotion aliases carry independent checkpoint pins and publish in deterministic order.
+          // oxlint-disable-next-line eslint/no-await-in-loop
+          await publish(key);
         }
-        if (
-          target === "linux" &&
-          (!next.os || next.os === "ubuntu:24.04") &&
-          legacyPromotedAWSImageCompatible(next)
-        ) {
-          await publish(legacyPromotedAWSImageKey());
-        }
-        await publish(promotedAWSImageKey(next));
-        return next;
+        return { image: next, previous: receiptPrevious };
       });
-      return { image: promoted };
+      if ("conflict" in promoted) {
+        return imagePromotionConflict(promoted.expected!, promoted.conflict, promotionScope);
+      }
+      return promoted;
     } catch (error) {
       if (error instanceof InvalidImageCapabilitiesError) {
         return json(
@@ -29198,48 +30028,13 @@ export class AWSProvider implements CloudProvider {
             left.image.id.localeCompare(right.image.id),
         )[0]?.image;
     }
-    const scoped = await this.storage.get<PromotedImageRecord>(
-      promotedAWSImageKey({
-        target: config.target,
-        ...(config.os ? { os: config.os } : {}),
-        architecture,
-        serverType: config.serverType,
-        region: config.awsRegion,
-      }),
-    );
-    if (scoped) {
-      return scoped;
-    }
-    if (config.target === "macos") {
-      return this.storage.get<PromotedImageRecord>(
-        legacyScopedPromotedAWSImageKey({
-          target: config.target,
-          architecture,
-          region: config.awsRegion,
-        }),
-      );
-    }
-    if (config.target !== "linux") {
-      return scoped;
-    }
-    if (config.os) {
-      const osScoped = await this.storage.get<PromotedImageRecord>(
-        promotedAWSLinuxOSImageKey({
-          os: config.os,
-          architecture,
-        }),
-      );
-      if (osScoped) {
-        return osScoped;
-      }
-    }
-    if ((!config.os || config.os === "ubuntu:24.04") && architecture === "x86_64") {
-      const legacy = await this.storage.get<PromotedImageRecord>(legacyPromotedAWSImageKey());
-      if (legacy && legacyPromotedAWSImageCompatible(legacy)) {
-        return legacy;
-      }
-    }
-    return undefined;
+    return promotedAWSImageDefault(this.storage, {
+      target: config.target,
+      ...(config.os ? { os: config.os } : {}),
+      architecture,
+      serverType: config.serverType,
+      region: config.awsRegion,
+    });
   }
 
   private async promotedImagesForFallback(config: LeaseConfig): Promise<Record<string, string>> {
@@ -29317,7 +30112,7 @@ async function deletePromotedAWSImageRecords(
   storage: ProviderStateStorageView,
   imageID: string,
   prefixes: string[],
-  options: { region?: string } = {},
+  options: { region?: string; retireRevisions?: boolean } = {},
 ): Promise<number> {
   const catalogs = await Promise.all(
     prefixes.map(async (prefix) => await storage.list<PromotedImageRecord>({ prefix })),
@@ -29328,10 +30123,18 @@ async function deletePromotedAWSImageRecords(
         image.id === imageID && (options.region === undefined || image.region === options.region),
     ),
   );
+  const retiredRevisions = new Set<string>();
   await entries.reduce(async (pending, [key, image]) => {
     await pending;
     await unpinCheckpointPromotion(storage, "aws", image, key);
     await storage.delete(key);
+    if (!options.retireRevisions) return;
+    const state = imageDefaultState(image);
+    if (state.state !== "present") return;
+    const retirementKey = retiredAWSImageRevisionKey(state);
+    if (retiredRevisions.has(retirementKey)) return;
+    await retireAWSImageRevision(storage, state);
+    retiredRevisions.add(retirementKey);
   }, Promise.resolve());
   return entries.length;
 }

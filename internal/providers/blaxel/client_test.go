@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -124,6 +126,84 @@ func TestWaitProcessStopsAfterNativeHTTPCancellation(t *testing.T) {
 	}
 	if got := stops.Load(); got != 1 {
 		t.Errorf("process stops=%d, want exactly the original process stopped", got)
+	}
+}
+
+func TestUploadFileRewindsArchiveAfterNativeMultipartFailure(t *testing.T) {
+	var attempts atomic.Int32
+	parts := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/sandboxes/sbx-owned":
+			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": "sbx-owned", "url": serverURL(r) + "/sandbox/sbx-owned"}, "status": "DEPLOYED"})
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/filesystem-multipart/initiate/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"uploadId": fmt.Sprintf("upload-%d", attempts.Add(1))})
+		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/part"):
+			if err := r.ParseMultipartForm(1024); err != nil {
+				t.Error(err)
+				w.WriteHeader(500)
+				return
+			}
+			defer r.MultipartForm.RemoveAll()
+			file, _, err := r.FormFile("file")
+			if err != nil {
+				t.Error(err)
+				w.WriteHeader(500)
+				return
+			}
+			defer file.Close()
+			data, err := io.ReadAll(file)
+			if err != nil {
+				t.Error(err)
+				w.WriteHeader(500)
+				return
+			}
+			select {
+			case parts <- string(data):
+			default:
+				t.Error("unexpected extra multipart attempt")
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if strings.Contains(r.URL.Path, "upload-1/") {
+				http.Error(w, "WORKLOAD_UNAVAILABLE", http.StatusServiceUnavailable)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"etag": "synthetic-etag", "partNumber": 1, "size": len(data)})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/complete"):
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client, err := newBlaxelClient(core.Config{Blaxel: core.BlaxelConfig{APIURL: server.URL, APIKey: "synthetic-key"}}, core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(t.TempDir(), "archive.tgz")
+	want := "archive-bytes\x00with-tail"
+	if err := os.WriteFile(archive, []byte(want), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := client.UploadFile(ctx, "sbx-owned", "/tmp/archive.tgz", file); err != nil {
+		t.Fatal(err)
+	}
+	if attempts.Load() != 2 || len(parts) != 2 {
+		t.Fatalf("attempts=%d parts=%d", attempts.Load(), len(parts))
+	}
+	for i := 0; i < 2; i++ {
+		if got := <-parts; got != want {
+			t.Fatalf("attempt %d body=%q want complete archive", i+1, got)
+		}
 	}
 }
 

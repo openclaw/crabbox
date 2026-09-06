@@ -17,7 +17,6 @@ import (
 const (
 	devboxGroupVersion = "devbox.sealos.io/v1alpha2"
 	devboxResource     = "devboxes.devbox.sealos.io"
-	devboxCRD          = "devboxes.devbox.sealos.io"
 )
 
 func (b *backend) kubectl(ctx context.Context, stdout io.Writer, namespace bool, args ...string) (string, error) {

@@ -264,8 +264,8 @@ provider_smoke() (
   trap cleanup EXIT
 
   local out
-  capture_run out run_in_repo "$cb" warmup --provider "$provider" "$@"
-  printf '%s\n' "$out"
+  log_step "$provider warmup"
+  capture_run_live out run_in_repo "$cb" warmup --provider "$provider" "$@"
   lease="$(printf '%s\n' "$out" | extract_lease)"
   slug="$(printf '%s\n' "$out" | extract_slug)"
   test -n "$lease"
@@ -290,8 +290,8 @@ provider_smoke() (
 
   local runout
   # shellcheck disable=SC2016 # expanded by the remote shell.
-  capture_run runout run_in_repo "$cb" run --provider "$provider" --id "$slug" --shell -- "$live_command"
-  printf '%s\n' "$runout"
+  log_step "$provider run slug=$slug"
+  capture_run_live runout run_in_repo "$cb" run --provider "$provider" --id "$slug" --shell -- "$live_command"
   local runid
   runid="$(printf '%s\n' "$runout" | rg -o 'run_[a-f0-9]{12}' | tail -1 || true)"
   if needs_coordinator_preamble; then

@@ -165,8 +165,8 @@ func TestSmolvmRunRetainsChangedClaim(t *testing.T) {
 	}
 	b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
 	result, err := b.Run(context.Background(), RunRequest{Repo: Repo{Root: t.TempDir()}, NoSync: true, Command: []string{"true"}})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || result.ExitCode != 1 || result.ErrorKind != core.RunErrorProvider {
+		t.Fatalf("changed claim cleanup result=%+v err=%v", result, err)
 	}
 	if fake.deletedID != "" || result.Session == nil || !result.Session.Kept {
 		t.Fatalf("deleted=%s session=%+v", fake.deletedID, result.Session)

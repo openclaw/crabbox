@@ -278,7 +278,7 @@ cleanup() {
 }
 trap cleanup EXIT
 rollback_promoted_image() {
-  args+=(--expected-current-image "$current_id" --expected-current-revision "$current_revision" --retire-expected-catalog "$rollback_image")
+  args+=(--restore-receipt "$receipt" "$current_id")
   printf 'promoted-image smoke failed; restored previous default image=%s\\n' "$rollback_image"
 }
 run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$candidate_lease"
@@ -286,6 +286,7 @@ candidate_lease=""
 promote_args=(image promote --target "$target" --json --expected-current-image capture)
 rollback_pending=1
 run_json_tee "$promotion_log" "$CRABBOX_BIN" "\${promote_args[@]}"
+jq -e '.previous.aliases | length > 0' "$promotion_log"
 promoted_lease="$(warmup promoted)"
 smoke "$promoted_lease"
 rollback_pending=0
@@ -478,7 +479,7 @@ test("attestation gate requires FSR denial and exact sequential launch order", a
     catalog: {
       seededDefaultReadback: true,
       priorDefaultImageRestored: true,
-      rollbackRevisionAdvanced: true,
+      priorDefaultRevisionRestored: true,
       failedCatalogRevisionRetired: true,
       staleCASRejected: true,
       staleReadbackUnchanged: true,
@@ -570,24 +571,24 @@ test("attestation gate requires FSR denial and exact sequential launch order", a
   );
 });
 
-test("catalog proof requires a fresh rollback revision and rejects stale CAS mutation", async () => {
+test("catalog proof requires exact default restoration and rejects stale CAS mutation", async () => {
   const module = await import(
     `${pathToFileURL(path.join(root, "scripts/image-qualification-control.mjs"))}?catalog=${Date.now()}`
   );
   const prior = { id: "ami-11111111", revision: "revision-prior", promotedAt: "before" };
   const failed = { id: "ami-22222222", revision: "revision-failed", promotedAt: "during" };
-  const restored = {
-    ...prior,
-    revision: "revision-rollback",
-    promotedAt: "after",
-    fastSnapshotRestores: [],
-  };
+  const restored = { ...prior, fastSnapshotRestores: [] };
   const input = {
     seed: prior,
     seededReadback: { image: prior },
     promotion: {
       image: failed,
-      previous: { state: "present", imageId: prior.id, revision: prior.revision },
+      previous: {
+        state: "present",
+        imageId: prior.id,
+        revision: prior.revision,
+        aliases: [{ alias: "regional", state: "present", image: prior }],
+      },
     },
     rollback: {
       image: restored,
@@ -598,7 +599,7 @@ test("catalog proof requires a fresh rollback revision and rejects stale CAS mut
     failedStatus: 200,
     staleResponse: {
       error: "image_promotion_precondition_failed",
-      expected: { state: "present", imageId: prior.id, revision: prior.revision },
+      expected: { state: "present", imageId: failed.id, revision: failed.revision },
       current: { state: "present", imageId: restored.id, revision: restored.revision },
     },
     staleStatus: 409,
@@ -610,19 +611,22 @@ test("catalog proof requires a fresh rollback revision and rejects stale CAS mut
   };
   const evidence = module.verifyCatalogRollbackEvidence(input);
   assert.equal(evidence.priorDefaultImageRestored, true);
-  assert.equal(evidence.rollbackRevisionAdvanced, true);
+  assert.equal(evidence.priorDefaultRevisionRestored, true);
   assert.equal(evidence.failedCatalogRevisionRetired, true);
   assert.equal(evidence.staleCASRejected, true);
   assert.equal(evidence.staleReadbackUnchanged, true);
   assert.match(evidence.restoredRevisionDigest, /^[0-9a-f]{64}$/);
-  assert.equal("priorDefaultRevisionRestored" in evidence, false);
+  assert.equal("rollbackRevisionAdvanced" in evidence, false);
   assert.throws(
     () =>
       module.verifyCatalogRollbackEvidence({
         ...input,
-        rollback: { ...input.rollback, image: prior },
+        rollback: {
+          ...input.rollback,
+          image: { ...prior, revision: "revision-mismatch" },
+        },
       }),
-    /fresh revision/,
+    /exact seeded default revision/,
   );
   assert.throws(
     () =>
@@ -641,7 +645,7 @@ test("catalog proof requires a fresh rollback revision and rejects stale CAS mut
           previous: { state: "present", imageId: failed.id, revision: prior.revision },
         },
       }),
-    /fresh revision/,
+    /exact seeded default revision/,
   );
   assert.throws(
     () =>
@@ -1081,7 +1085,7 @@ fi
     assert.equal(
       spawnSync(
         path.join(root, "scripts/image-qualification-crabbox-adapter.sh"),
-        ["image", "promote", "--retire-expected-catalog", "ami-11111111"],
+        ["image", "promote", "--restore-receipt", path.join(temp, "promotion.json"), "ami-11111111"],
         { env },
       ).status,
       0,

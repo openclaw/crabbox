@@ -208,21 +208,70 @@ fi
 source_lease=""
 candidate_lease=""
 promoted_lease=""
+promotion_log=""
+rollback_pending=0
 
 cleanup() {
-  [[ "$keep_lease" == "1" ]] && return 0
-  for lease in "$promoted_lease" "$candidate_lease" "$source_lease"; do
-    [[ -n "$lease" ]] || continue
-    "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" || true
-  done
+  local exit_status=$?
+  trap - EXIT
+  if [[ "$rollback_pending" == "1" ]]; then
+    rollback_pending=0
+    rollback_promoted_image "$promotion_log" || true
+  fi
+  if [[ "$keep_lease" != "1" ]]; then
+    for lease in "$promoted_lease" "$candidate_lease" "$source_lease"; do
+      [[ -n "$lease" ]] || continue
+      "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" || true
+    done
+  fi
+  exit "$exit_status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 run_cmd() {
   printf '+'
   printf ' %q' "$@"
   printf '\n'
   "$@"
+}
+
+run_json_tee() {
+  local out="$1"
+  shift
+  printf '+' >&2
+  printf ' %q' "$@" >&2
+  printf '\n' >&2
+  "$@" | tee "$out"
+}
+
+rollback_promoted_image() {
+  local receipt="$1"
+  local current_id previous_state rollback_image rollback_log
+  if ! current_id="$(jq -er '.image.id' "$receipt" 2>/dev/null)" ||
+    ! previous_state="$(jq -er '.previous.state' "$receipt" 2>/dev/null)"; then
+    printf 'post-promotion failure; transactional promotion receipt is unavailable for rollback\n' >&2
+    return 1
+  fi
+  if [[ "$previous_state" == "present" ]]; then
+    rollback_image="$(jq -er '.previous.imageId' "$receipt")"
+  elif [[ "$previous_state" == "absent" ]]; then
+    rollback_image="none"
+  else
+    printf 'promoted-image smoke failed; promotion receipt has invalid previous state\n' >&2
+    return 1
+  fi
+  local -a args=(image promote --json --target "$target")
+  [[ -n "$region" ]] && args+=(--region "$region")
+  [[ -n "$server_type" ]] && args+=(--type "$server_type")
+  args+=(--restore-receipt "$receipt" "$current_id")
+  rollback_log="$(mktemp "$log_dir/image-mint-${log_image_name}-rollback-${log_id}.json.XXXXXX")"
+  if ! run_json_tee "$rollback_log" "$CRABBOX_BIN" "${args[@]}"; then
+    printf 'promoted-image smoke failed; CAS rollback failed or was rejected; a newer default was not overwritten\n' >&2
+    return 1
+  fi
+  printf 'promoted-image smoke failed; restored previous default image=%s\n' "$rollback_image" >&2
 }
 
 duration_seconds() {
@@ -688,7 +737,12 @@ if [[ "$promote" != "1" ]]; then
   exit 0
 fi
 
-promote_args=(image promote --target "$target" --json)
+if [[ "$keep_lease" != "1" ]]; then
+  run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$candidate_lease"
+  candidate_lease=""
+fi
+
+promote_args=(image promote --target "$target" --json --expected-current-image capture)
 [[ -n "$region" ]] && promote_args+=(--region "$region")
 if [[ "$fast_snapshot_restore" == "1" ]]; then
   promote_args+=(--fast-snapshot-restore)
@@ -699,14 +753,13 @@ if [[ "$fast_snapshot_restore" == "1" ]]; then
   done
 fi
 promote_args+=("$ami_id")
-run_cmd "$CRABBOX_BIN" "${promote_args[@]}"
-
-if [[ "$keep_lease" != "1" ]]; then
-  run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$candidate_lease"
-  candidate_lease=""
-fi
+promotion_log="$(mktemp "$log_dir/image-mint-${log_image_name}-promotion-${log_id}.json.XXXXXX")"
+rollback_pending=1
+run_json_tee "$promotion_log" "$CRABBOX_BIN" "${promote_args[@]}"
+jq -e '.image.id and .image.revision and (.previous.state == "present" or .previous.state == "absent") and (.previous.aliases | length > 0)' "$promotion_log" >/dev/null
 
 promoted_lease="$(warmup promoted)"
 smoke "$promoted_lease"
+rollback_pending=0
 printf 'promoted image selection proved: %s\n' "$ami_id"
 printf 'promoted %s developer image passed: %s\n' "$target" "$ami_id"

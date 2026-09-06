@@ -208,10 +208,11 @@ portable selector such as `ubuntu:26.04`.
 
 ## Roll back
 
-Rollback is just another promotion to a known-good AMI:
+For transactional publisher runs, restore the exact captured aliases from the
+promotion receipt:
 
 ```bash
-crabbox image promote ami-previous-good --json
+crabbox image promote ami-failed --restore-receipt promotion.json --json
 ```
 
 Run the normal brokered smoke again. Do not delete the failed AMI immediately;
@@ -295,8 +296,14 @@ gh workflow run devtools-image-publish.yml \
 
 Use `macos_host=allocate` only when no suitable EC2 Mac Dedicated Host is
 available. The workflow uploads its complete mint logs and macOS lifecycle
-evidence as a 30-day Actions artifact. A failed candidate or promoted-image
-smoke fails the workflow and leaves the previous promoted image selected.
+evidence as a 30-day Actions artifact. Candidate failure leaves the default
+unchanged. Publication is serialized per target; promotion atomically captures
+the current scoped default, and promoted-image smoke failure attempts a
+compare-and-swap restore. If another operator promotes a newer image first,
+rollback fails visibly rather than overwriting it. Publisher rollback explicitly
+authorizes retiring the exact failed catalog revision so capability-aware leases
+cannot select it; generic stale compare-and-swap requests leave the catalog
+unchanged.
 
 ## Developer-image wrappers
 
@@ -731,12 +738,11 @@ signer dispatch. The candidate publisher then boots source, candidate-image,
 and promoted-image leases sequentially. A trusted `CRABBOX_BIN` adapter
 delegates every command to the exact candidate CLI and captures the structured
 promotion and rollback receipts. Candidate API readbacks must prove the exact
-seeded base image was restored under a fresh rollback revision, distinct from
-both the seeded and failed promotion revisions, and the failed image revision
-lost its catalog role. A `200` readback for that AMI is accepted only as a
-matching provider-only record with no revision, promotion timestamp, or
-catalog-only marker; `404` is also valid. A stale request naming the seeded
-revision must then return 409 with the fresh rollback revision as current,
+seeded base image and revision were restored and the failed image revision lost
+its catalog role. A `200` readback for that AMI is accepted only as a matching
+provider-only record with no revision, promotion timestamp, or catalog-only
+marker; `404` is also valid. A stale request naming the failed revision must
+then return 409 with the seeded revision as current,
 while complete candidate API readbacks remain unchanged, including catalog,
 default, and FSR state. Candidate logs are supplemental only. The adapter
 returns exit 86 only after the promoted smoke succeeds. A credentialless child

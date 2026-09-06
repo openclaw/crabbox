@@ -423,7 +423,7 @@ func TestCoordinatorReleaseRemovesOnlyPerLeaseConnectionArtifacts(t *testing.T) 
 			observation := observations.Add(1)
 			lease := CoordinatorLease{ID: leaseID, Provider: "aws", State: "released", CleanupStartedAt: "2026-08-19T00:00:00Z"}
 			if observation == 2 {
-				lease.CleanupStartedAt = ""
+				lease = confirmedCoordinatorRelease(leaseID, "aws")
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
 		default:
@@ -508,6 +508,7 @@ func TestCoordinatorReleaseObservesPendingCreation(t *testing.T) {
 							lease["cleanupRetryAt"] = "2026-08-30T00:06:00Z"
 						} else {
 							lease["cleanupStatus"] = "complete"
+							lease["cleanupCompletedAt"] = "2026-09-06T00:00:00Z"
 							delete(lease, "cleanupError")
 						}
 					}
@@ -574,7 +575,8 @@ func TestCoordinatorReleasePreservesArtifactsWithoutConfirmedDestroy(t *testing.
 		{name: "pending creation never confirms deletion", provider: "aws", postLease: CoordinatorLease{Provider: "aws", State: "released", CleanupStatus: "pending", ReleaseDeletesServer: &deleting}, getLease: CoordinatorLease{Provider: "aws", State: "released", CleanupStatus: "pending", ReleaseDeletesServer: &deleting}, wantErr: true, wantObservations: true, wantClaim: true},
 		{name: "automatic release defers pending creation", provider: "aws", postLease: CoordinatorLease{Provider: "aws", State: "released", CleanupStatus: "pending", ReleaseDeletesServer: &deleting}, deferObservation: true, wantClaim: true},
 		{name: "accepted release observation not found", provider: "aws", postLease: CoordinatorLease{Provider: "aws", State: "released", CleanupStartedAt: "2026-08-19T00:00:00Z", ReleaseDeletesServer: &deleting}, getNotFound: true, wantErr: true, wantObservations: true, wantClaim: true},
-		{name: "immediate final deletion", provider: "aws", postLease: CoordinatorLease{Provider: "aws", State: "released"}, wantRemoved: true},
+		{name: "historical release without completion proof", provider: "aws", postLease: CoordinatorLease{Provider: "aws", State: "released"}, wantErr: true, wantClaim: true},
+		{name: "immediate final deletion", provider: "aws", postLease: CoordinatorLease{Provider: "aws", State: "released", CleanupStatus: "complete", CleanupCompletedAt: "2026-09-06T00:00:00Z"}, wantRemoved: true},
 		{name: "ownership mismatch", provider: "external", wantErr: true, wantClaim: true},
 	}
 	for _, tc := range tests {
@@ -786,7 +788,10 @@ func TestCoordinatorReleasePreservesRemoteOutcomeWhenLocalArtifactCleanupFails(t
 			http.NotFound(w, r)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: leaseID, Provider: "aws", State: "released"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+			ID: leaseID, Provider: "aws", State: "released", CleanupStatus: "complete",
+			CleanupCompletedAt: "2026-09-06T00:00:00Z",
+		}})
 	}))
 	t.Cleanup(server.Close)
 	var stderr bytes.Buffer
@@ -838,7 +843,10 @@ func TestCoordinatorReleaseConfirmationIsBoundToItsLookup(t *testing.T) {
 				if r.Method == http.MethodPost {
 					posts.Add(1)
 				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: id, Provider: "aws", State: "released", CleanupStatus: "complete"}})
+				_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+					ID: id, Provider: "aws", State: "released", CleanupStatus: "complete",
+					CleanupCompletedAt: "2026-09-06T00:00:00Z",
+				}})
 			}))
 			t.Cleanup(server.Close)
 			backend := coordinatorReleaseTestBackend(server, io.Discard)
@@ -866,6 +874,70 @@ func TestCoordinatorReleaseConfirmationIsBoundToItsLookup(t *testing.T) {
 	}
 }
 
+func TestCoordinatorProviderReleaseConfirmationRequiresCompletionAndRetiredAccess(t *testing.T) {
+	explicitTrue := true
+	complete := CoordinatorLease{
+		Provider:           "aws",
+		State:              "released",
+		CleanupStatus:      "complete",
+		CleanupCompletedAt: "2026-09-06T00:00:00Z",
+	}
+	tests := []struct {
+		name  string
+		lease CoordinatorLease
+		want  bool
+	}{
+		{name: "complete hostless release", lease: complete, want: true},
+		{name: "missing completion", lease: func() CoordinatorLease {
+			lease := complete
+			lease.CleanupCompletedAt = ""
+			return lease
+		}()},
+		{name: "malformed completion", lease: func() CoordinatorLease {
+			lease := complete
+			lease.CleanupCompletedAt = "not-a-timestamp"
+			return lease
+		}()},
+		{name: "stale host", lease: func() CoordinatorLease {
+			lease := complete
+			lease.Host = "192.0.2.1"
+			return lease
+		}()},
+		{name: "stale tailscale", lease: func() CoordinatorLease {
+			lease := complete
+			lease.Tailscale = &TailscaleMetadata{IPv4: "100.64.0.1"}
+			return lease
+		}()},
+		{name: "stale host key", lease: func() CoordinatorLease {
+			lease := complete
+			lease.SSHHostKey = "ssh-ed25519 stale"
+			return lease
+		}()},
+		{name: "stale provider access", lease: func() CoordinatorLease {
+			lease := complete
+			lease.ProviderAccessExpiresAt = "2026-09-06T01:00:00Z"
+			return lease
+		}()},
+		{name: "resource may exist", lease: func() CoordinatorLease {
+			lease := complete
+			lease.ProvisioningResourceMayExist = &explicitTrue
+			return lease
+		}()},
+		{name: "provisioning retryable", lease: func() CoordinatorLease {
+			lease := complete
+			lease.ProvisioningFailureRetryable = &explicitTrue
+			return lease
+		}()},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := coordinatorProviderReleaseConfirmed(test.lease); got != test.want {
+				t.Fatalf("confirmed=%t want=%t lease=%+v", got, test.want, test.lease)
+			}
+		})
+	}
+}
+
 func coordinatorReleaseTestServer(t *testing.T, lease func() CoordinatorLease) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -877,6 +949,18 @@ func coordinatorReleaseTestServer(t *testing.T, lease func() CoordinatorLease) *
 	}))
 	t.Cleanup(server.Close)
 	return server
+}
+
+func confirmedCoordinatorRelease(id, provider string) CoordinatorLease {
+	deleting := true
+	return CoordinatorLease{
+		ID:                   id,
+		Provider:             provider,
+		State:                "released",
+		CleanupStatus:        "complete",
+		CleanupCompletedAt:   "2026-09-06T00:00:00Z",
+		ReleaseDeletesServer: &deleting,
+	}
 }
 
 func coordinatorReleaseTestBackend(server *httptest.Server, stderr io.Writer) *coordinatorLeaseBackend {

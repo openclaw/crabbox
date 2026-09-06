@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -374,6 +375,42 @@ func TestDurableGuardedClaimActionFailurePreventsPublication(t *testing.T) {
 	}
 	if claim, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || exists {
 		t.Fatalf("claim published after action failure: claim=%#v exists=%v err=%v", claim, exists, readErr)
+	}
+}
+
+func TestDurableGuardedClaimCompletedActionStillPublishesAfterCancellation(t *testing.T) {
+	for _, reclaim := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reclaim=%t", reclaim), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			const leaseID = "cbx_completed_action"
+			cfg := Config{Provider: "aws"}
+			server := Server{Provider: "aws", CloudID: "i-confirmed"}
+			var previous leaseClaim
+			if reclaim {
+				var err error
+				previous, err = claimLeaseTargetForRepoConfigScopeIfUnchangedDurable(
+					leaseID, "completed-action", cfg, "account:test", server, SSHTarget{}, t.TempDir(), time.Minute, false, leaseClaim{}, false,
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			repo := t.TempDir()
+			called := false
+			updated, err := ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfterContext(
+				ctx, leaseID, "completed-action", cfg, "account:test", server, SSHTarget{}, repo, time.Minute, reclaim, previous, reclaim,
+				func() error { called = true; cancel(); return nil },
+			)
+			if err != nil || !called || !errors.Is(ctx.Err(), context.Canceled) {
+				t.Fatalf("completed action was discarded: called=%t err=%v", called, err)
+			}
+			stored, exists, err := readLeaseClaimWithPresence(leaseID)
+			if err != nil || !exists || !reflect.DeepEqual(stored, updated) || stored.RepoRoot != repo || stored.Revision == "" || reclaim && stored.Revision == previous.Revision {
+				t.Fatalf("completed action was not durably published: stored=%+v updated=%+v err=%v", stored, updated, err)
+			}
+		})
 	}
 }
 

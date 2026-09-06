@@ -2,7 +2,6 @@ package upstashbox
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/url"
 	"path"
@@ -58,224 +57,90 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	return nil
 }
 
-func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
-	workdir, err := cleanWorkdir(workdir(b.cfg))
-	if err != nil {
-		return RunResult{}, err
+func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+	workdir, validationErr := cleanWorkdir(workdir(b.cfg))
+	folder := ""
+	if validationErr == nil {
+		folder, validationErr = workspaceFolder(workdir)
 	}
-	folder, err := workspaceFolder(workdir)
-	if err != nil {
-		return RunResult{}, err
+	var client api
+	var leaseID, boxID, slug string
+	session := func() shared.DelegatedSandbox {
+		return shared.DelegatedSandbox{LeaseID: leaseID, Slug: slug, CleanupCommand: upstashBoxCleanupCommand(leaseID)}
 	}
-	started := b.now()
-	var prepared *core.PreparedArchive
-	if !req.NoSync {
-		prepared, err = b.prepareArchive(ctx, req)
-		if err != nil {
-			return RunResult{}, err
-		}
-		defer prepared.Close()
-	}
-	client, err := newAPI(b.cfg, b.rt)
-	if err != nil {
-		return RunResult{}, err
-	}
-	leaseID, boxID, slug := "", "", ""
-	acquired := false
-	if req.ID == "" {
-		var box boxData
-		leaseID, box, slug, err = b.createBox(ctx, client, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
-		if err != nil {
-			return RunResult{}, err
-		}
-		boxID = box.ID
-		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s box=%s name=%s\n", leaseID, slug, providerName, box.ID, box.Name)
-		acquired = true
-	} else {
-		leaseID, boxID, slug, err = b.resolveBoxID(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
-		if err != nil {
-			return RunResult{}, err
-		}
-	}
-	shouldStop := acquired && !req.Keep
-	cleanedUp := false
-	session := &RunSessionHandle{
-		Provider:       providerName,
-		LeaseID:        leaseID,
-		Slug:           slug,
-		Reused:         !acquired,
-		Kept:           !shouldStop,
-		CleanupCommand: upstashBoxCleanupCommand(leaseID),
-	}
-	finishResult := func(result RunResult) RunResult {
-		if result.Provider == "" {
-			result.Provider = providerName
-		}
-		if result.LeaseID == "" {
-			result.LeaseID = leaseID
-		}
-		if result.Slug == "" {
-			result.Slug = slug
-		}
-		result.Session = session
-		result.Session.Kept = !cleanedUp && !shouldStop
-		return result
-	}
-	defer func() {
-		result = finishResult(result)
-	}()
-	cleanupBox := func() error {
-		if !shouldStop {
-			return nil
-		}
-		cleanupCtx, cancel := upstashBoxCleanupContext()
-		defer cancel()
-		if err := b.deleteClaimedBox(cleanupCtx, client, leaseID, boxID, slug); err != nil {
-			shouldStop = false
+	return shared.RunDelegatedSandbox(ctx, req, shared.DelegatedSandboxLifecycle{
+		Provider: providerName, Runtime: b.rt, Workdir: workdir,
+		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL, CleanupTimeout: upstashBoxCleanupTimeout,
+		Preflight: func(context.Context) error {
+			if validationErr != nil {
+				return validationErr
+			}
+			var err error
+			client, err = newAPI(b.cfg, b.rt)
 			return err
-		}
-		cleanedUp = true
-		shouldStop = false
-		return nil
-	}
-	if shouldStop {
-		defer func() {
-			if err := cleanupBox(); err != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: upstash-box delete failed for %s: %v\n", boxID, err)
+		},
+		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
+			return b.prepareArchive(ctx, req)
+		},
+		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var box boxData
+			var err error
+			leaseID, box, slug, err = b.createBox(ctx, client, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
 			}
-		}()
-	}
-
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
-	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, boxID, req, workdir, folder, prepared)
-		if err != nil {
-			return RunResult{Total: b.now().Sub(started), SyncDelegated: true}, err
-		}
-		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, client, boxID, folder); err != nil {
-		return RunResult{}, err
-	}
-	if req.SyncOnly {
-		result := RunResult{Total: b.now().Sub(started), SyncDelegated: true}
-		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
-		if req.TimingJSON {
-			err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-				Provider:      providerName,
-				LeaseID:       leaseID,
-				Slug:          slug,
-				SyncDelegated: true,
-				SyncMs:        syncDuration.Milliseconds(),
-				SyncPhases:    syncPhases,
-				SyncSkipped:   req.NoSync,
-				TotalMs:       result.Total.Milliseconds(),
-				ExitCode:      0,
-				Label:         strings.TrimSpace(req.Label),
-			}, result, nil))
-			return result, err
-		}
-		return result, nil
-	}
-
-	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
-	if err != nil {
-		return RunResult{}, err
-	}
-	command := intent.ShellSource()
-	if req.EnvSummary {
-		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
-	}
-	var cleanupEnv func() error
-	if len(req.Env) > 0 {
-		var envPath string
-		envPath, cleanupEnv, err = uploadEnvProfile(ctx, client, leaseID, boxID, slug, req.Env)
-		if cleanupEnv != nil {
-			defer func() { _ = cleanupEnv() }()
-		}
-		if err != nil {
-			if cleanupEnv != nil {
-				err = errors.Join(err, cleanupEnv())
+			boxID = box.ID
+			fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s box=%s name=%s\n", leaseID, slug, providerName, box.ID, box.Name)
+			return session(), nil
+		},
+		Resolve: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var err error
+			leaseID, boxID, slug, err = b.resolveBoxID(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
 			}
-			return RunResult{}, err
-		}
-		command = shared.ShellScriptWithEnvProfile(command, envPath)
-	}
-	commandStarted := b.now()
-	exitCode := 0
-	commandErr := ctx.Err()
-	if commandErr == nil {
-		exitCode, commandErr = client.ExecStream(ctx, boxID, command, folder, b.rt.Stdout)
-	}
-	commandDuration := b.now().Sub(commandStarted)
-	envCleanupErr := error(nil)
-	if cleanupEnv != nil {
-		envCleanupErr = cleanupEnv()
-	}
-	finalExitCode := exitCode
-	if commandErr != nil {
-		finalExitCode = 1
-	} else if exitCode == 0 && envCleanupErr != nil {
-		finalExitCode = 5
-	}
-	result = RunResult{
-		ExitCode:      finalExitCode,
-		Command:       commandDuration,
-		Total:         b.now().Sub(started),
-		SyncDelegated: true,
-		Provider:      providerName,
-		LeaseID:       leaseID,
-		Slug:          slug,
-		CommandText:   strings.Join(req.Command, " "),
-	}
-	if req.NoSync {
-		fmt.Fprintf(b.rt.Stderr, "upstash-box run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), finalExitCode)
-	} else {
-		fmt.Fprintf(b.rt.Stderr, "upstash-box run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), finalExitCode)
-	}
-	if req.TimingJSON {
-		timingErr := commandErr
-		if timingErr == nil {
-			timingErr = envCleanupErr
-		}
-		report := timingReportWithRunResult(timingReport{
-			Provider:      providerName,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			SyncDelegated: true,
-			SyncMs:        syncDuration.Milliseconds(),
-			SyncPhases:    syncPhases,
-			SyncSkipped:   req.NoSync,
-			CommandMs:     commandDuration.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      finalExitCode,
-			Label:         strings.TrimSpace(req.Label),
-		}, result, timingErr)
-		if commandErr == nil && envCleanupErr != nil {
-			report = timingReportWithProviderError(report)
-		}
-		if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
-			return result, err
-		}
-	}
-	if commandErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		if envCleanupErr != nil {
-			return result, shared.ExitErrorWithCause(1, fmt.Sprintf("upstash-box run failed: %v; %v", commandErr, envCleanupErr), commandErr)
-		}
-		return result, shared.ExitErrorWithCause(1, fmt.Sprintf("upstash-box run failed: %v", commandErr), commandErr)
-	}
-	if exitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		if envCleanupErr != nil {
-			return result, ExitError{Code: exitCode, Message: fmt.Sprintf("upstash-box run exited %d; %v", exitCode, envCleanupErr)}
-		}
-		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("upstash-box run exited %d", exitCode)}
-	}
-	if envCleanupErr != nil {
-		return result, ExitError{Code: 5, Message: envCleanupErr.Error()}
-	}
-	return result, nil
+			return session(), nil
+		},
+		Sync: func(ctx context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+			return b.syncWorkspace(ctx, client, boxID, req, workdir, folder, archive)
+		},
+		NoSync: func(ctx context.Context) error {
+			return b.prepareWorkspace(ctx, client, boxID, folder)
+		},
+		Command: func(ctx context.Context) (shared.DelegatedSandboxCommand, error) {
+			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+			if err != nil {
+				return shared.DelegatedSandboxCommand{}, err
+			}
+			command := intent.ShellSource()
+			if req.EnvSummary {
+				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+			}
+			var closeCommand func(context.Context) error
+			if len(req.Env) > 0 {
+				envPath, cleanup, err := uploadEnvProfile(ctx, client, leaseID, boxID, slug, req.Env)
+				if cleanup != nil {
+					closeCommand = func(ctx context.Context) error {
+						if err := cleanup(ctx); err != nil {
+							return shared.ExitErrorWithCause(5, err.Error(), err)
+						}
+						return nil
+					}
+				}
+				if err != nil {
+					return shared.DelegatedSandboxCommand{Close: closeCommand}, err
+				}
+				command = shared.ShellScriptWithEnvProfile(command, envPath)
+			}
+			return shared.DelegatedSandboxCommand{Text: strings.Join(req.Command, " "), Close: closeCommand,
+				Run: func(ctx context.Context) (int, error) {
+					return client.ExecStream(ctx, boxID, command, folder, b.rt.Stdout)
+				}}, nil
+		},
+		Cleanup: func(ctx context.Context) error {
+			return b.deleteClaimedBox(ctx, client, leaseID, boxID, slug)
+		},
+	})
 }
 
 func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
