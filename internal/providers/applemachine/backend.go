@@ -247,7 +247,7 @@ func (b *backend) List(ctx context.Context, _ ListRequest) ([]LeaseView, error) 
 		if !ok {
 			continue
 		}
-		if err := core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error {
+		if err := core.WithLeaseClaimUnchangedContext(ctx, claim.LeaseID, claim, func() error {
 			_, err := b.verifyMachineIdentity(ctx, claim)
 			return err
 		}); err != nil {
@@ -264,7 +264,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		return StatusView{}, err
 	}
 	var item machine
-	err = core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error {
+	err = core.WithLeaseClaimUnchangedContext(ctx, claim.LeaseID, claim, func() error {
 		var err error
 		item, err = b.verifyMachineIdentity(ctx, claim)
 		return err
@@ -314,6 +314,15 @@ func (b *backend) createLease(ctx context.Context, repo Repo, reclaim bool, requ
 	retained := func(err error) (core.LeaseClaim, error) {
 		return core.LeaseClaim{}, fmt.Errorf("%w; retained machine=%s lease=%s: inspect container machine inspect %s before manual cleanup", err, name, leaseID, shellQuote(name))
 	}
+	retainedAfterRollback := func(primary, cleanup error) (core.LeaseClaim, error) {
+		code := 1
+		var public core.ExitError
+		if errors.As(primary, &public) && public.Code != 0 {
+			code = public.Code
+		}
+		_, combined := retained(errors.Join(primary, cleanup))
+		return core.LeaseClaim{}, shared.ExitErrorWithCause(code, combined.Error(), combined)
+	}
 	currentRoot, err := b.storageRoot(ctx)
 	if err != nil {
 		return retained(err)
@@ -332,30 +341,32 @@ func (b *backend) createLease(ctx context.Context, repo Repo, reclaim bool, requ
 	server.ImmutableID = identity
 	server.Labels["apple_machine_storage"] = root
 	binding := core.LeaseClaim{Provider: providerName, ProviderScope: root, LeaseID: leaseID, Slug: slug, CloudID: name, CloudImmutableID: identity, Labels: server.Labels}
-	claim, err := core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(leaseID, slug, b.cfg, root, server, core.SSHTarget{}, repo.Root, b.cfg.IdleTimeout, reclaim, core.LeaseClaim{}, false, func() error {
+	claim, err := core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfterContext(ctx, leaseID, slug, b.cfg, root, server, core.SSHTarget{}, repo.Root, b.cfg.IdleTimeout, reclaim, core.LeaseClaim{}, false, func() error {
 		_, err := b.verifyMachineIdentity(ctx, binding)
 		return err
 	})
 	if err != nil {
-		cleanupErr := core.CleanupLeaseClaimIfUnchangedAfter(leaseID, core.LeaseClaim{}, false, func() error {
-			return b.deleteBoundMachine(context.Background(), binding)
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), machineCleanupTimeout)
+		cleanupErr := core.CleanupLeaseClaimIfUnchangedAfterContext(cleanupCtx, leaseID, core.LeaseClaim{}, false, func() error {
+			return b.deleteBoundMachine(cleanupCtx, binding)
 		})
+		cancel()
 		if cleanupErr != nil {
-			return retained(errors.Join(err, cleanupErr))
+			return retainedAfterRollback(err, cleanupErr)
 		}
 		return core.LeaseClaim{}, err
 	}
 	readyCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	err = core.WithLeaseClaimUnchanged(leaseID, claim, func() error {
+	err = core.WithLeaseClaimUnchangedContext(readyCtx, leaseID, claim, func() error {
 		if _, err := b.verifyMachineIdentity(readyCtx, claim); err != nil {
 			return err
 		}
 		return b.waitMachineReady(readyCtx, claim)
 	})
 	if err != nil {
-		if cleanupErr := b.removeBoundLease(context.Background(), claim); cleanupErr != nil {
-			return retained(errors.Join(err, cleanupErr))
+		if cleanupErr := b.removeBoundLease(context.WithoutCancel(ctx), claim); cleanupErr != nil {
+			return retainedAfterRollback(err, cleanupErr)
 		}
 		return core.LeaseClaim{}, err
 	}
@@ -404,7 +415,7 @@ func (b *backend) resolveLease(ctx context.Context, identifier, repoRoot string,
 		server := machineServer(machine{ID: claim.CloudID}, claim.LeaseID, claim.Slug, b.cfg)
 		server.ImmutableID = claim.CloudImmutableID
 		server.Labels = shared.CloneLabels(claim.Labels)
-		return core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(claim.LeaseID, claim.Slug, b.cfg, claim.ProviderScope, server, core.SSHTarget{}, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim, claim, true, func() error {
+		return core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfterContext(ctx, claim.LeaseID, claim.Slug, b.cfg, claim.ProviderScope, server, core.SSHTarget{}, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim, claim, true, func() error {
 			_, err := b.verifyMachineIdentity(ctx, claim)
 			return err
 		})

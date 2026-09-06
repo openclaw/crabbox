@@ -95,6 +95,20 @@ Provider flags:
 - Apple's native removal API does not offer an atomic expected-identity check.
   Crabbox fences its own claim changes and rejects observed replacements, but
   external tools must not replace machines concurrently with lifecycle commands.
+- Caller cancellation also bounds waiting for claim fences during publication,
+  reuse, status, list verification, and explicit stop. Read-only lookups do not
+  refresh or adopt claims. The existing readiness budget includes its claim wait.
+- Resource cleanup has one 30-second budget starting before its claim fence and
+  covering identity verification, native removal, and confirmed absence. Failed
+  acquisition rollback receives a fresh uncanceled budget, including when no
+  claim was published; a successor claim never authorizes deletion of the
+  original machine. Each standalone native control command still has its own
+  30-second limit. These bounds cover cooperative waits and subprocesses, not
+  forcible interruption of filesystem syscalls.
+- Native control failures preserve cancellation/deadline causes alongside their
+  existing messages and exit codes. A later rollback failure cannot replace the
+  original exit code or hide the retained-machine recovery diagnostic. Once a
+  guarded action succeeds, its durable claim publication/removal still completes.
 - The home directory is mounted read-write. Use `apple-container` when a narrower
   disposable filesystem boundary is more important than persistence.
 - The default is `alpine:latest`. Custom images must include `/sbin/init`, as
