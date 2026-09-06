@@ -181,11 +181,13 @@ tracked in https://github.com/openclaw/crabbox/issues/1157. See the [integration
 catalog](docs/integrations/README.md) for current support and lifecycle
 boundaries.
 
-Existing repositories that only need agent discovery can install the generic
-Skill with GitHub CLI:
+Repositories that only need agent discovery can install Crabbox's published
+Agent Skills with GitHub CLI:
 
 ```sh
 gh skill install openclaw/crabbox skills/crabbox \
+  --pin refs/heads/main --agent codex --scope project
+gh skill install openclaw/crabbox skills/crabbox-quickstart \
   --pin refs/heads/main --agent codex --scope project
 ```
 
@@ -193,15 +195,17 @@ Or use the cross-client Skills CLI:
 
 ```sh
 npx skills add https://github.com/openclaw/crabbox --skill crabbox
+npx skills add https://github.com/openclaw/crabbox --skill crabbox-quickstart
 ```
 
 Crabbox also publishes a digest-verified discovery index from its own domain:
 
 ```sh
 npx skills add https://crabbox.sh --skill crabbox
+npx skills add https://crabbox.sh --skill crabbox-quickstart
 ```
 
-Cross-vendor discovery services can index the same Skill through Crabbox's
+Cross-vendor discovery services can index both Skills through Crabbox's
 [draft-compatible AI Catalog](https://crabbox.sh/.well-known/ai-catalog.json).
 
 Herdr users can add Crabbox lease controls and repository workflows to the

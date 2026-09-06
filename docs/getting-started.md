@@ -9,7 +9,11 @@ Read this when:
 This is a cookbook, not a reference. It walks through one repo from install to
 `crabbox run -- pnpm test`. Each step links to deeper docs when you want more.
 If you are still deciding whether Crabbox fits your workflow, start with
-[What Crabbox is](README.md#what-crabbox-is).
+[What Crabbox is](README.md#what-crabbox-is). For a first run with no account
+at all, `--provider local-container` executes against Docker or Podman on your
+own machine; the
+[`crabbox-quickstart` skill](integrations/agents.md#install-through-ecosystem-skill-managers)
+walks that credential-free path end to end.
 
 ## Step 1. Install
 

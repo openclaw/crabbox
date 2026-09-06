@@ -18,6 +18,7 @@ or marketplace, even when they consume Crabbox.
 | Goal | Surface | Status |
 | --- | --- | --- |
 | Teach a local coding agent when and how to use Crabbox | [`crabbox init` Agent Skill](agents.md#local-agent-clients) | Available |
+| Give a coding agent the shortest path from install to a first successful run | [`crabbox-quickstart` skill](agents.md#install-through-ecosystem-skill-managers) | Available |
 | Run a repo-owned one-shot harness remotely | [`crabbox run` or a named job](agents.md#one-shot-harnesses) | Credential-free run-evidence pattern available |
 | Reuse repository setup on a warm lease | [GitHub Actions hydration](../features/actions-hydration.md) | Available |
 | Use Zed as a local Crabbox control surface | [Zed extension package](editors.md#zed-control-surface) | Package available; [registry submission not yet opened](https://github.com/openclaw/crabbox/issues/1157) |
