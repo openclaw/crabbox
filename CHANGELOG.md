@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Stop SSH readiness promptly on host-key rejection, including WSL SFTP and split or oversized diagnostics, without changing host trust. [PR 1877](https://github.com/openclaw/crabbox/pull/1877). Thanks @shunkakinoki.
+- Docker Sandbox: preserve primary failures through cleanup and timing errors, report retained sessions after failed removal, honor keep-on-failure during early preparation, and preserve successful clone commits across backend reporting failures. [PR 1913](https://github.com/openclaw/crabbox/pull/1913).
 - SmolVM: honor cancellation while waiting for ownership publication, reuse, and cleanup fences; include lock waiting in rollback budgets and preserve the acquisition exit when rollback also fails. [PR 1912](https://github.com/openclaw/crabbox/pull/1912).
 - SmolVM: share sandbox run finalization so deletion failures no longer report success, early preparation failures honor keep-on-failure, and primary outcomes survive cleanup or timing errors while preserving provider keep policy and separate profile/resource cleanup budgets. [PR 1908](https://github.com/openclaw/crabbox/pull/1908).
 - Allow protected AWS image qualification to pass Node toolchain setup by using the supported no-cache input while keeping Go caching disabled. [PR 1909](https://github.com/openclaw/crabbox/pull/1909).
