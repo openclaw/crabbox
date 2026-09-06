@@ -173,10 +173,19 @@ claim and remote ownership validation. `--no-sync` creates no archive.
    retains it. `stop` deletes a retained sandbox only after the local claim and
    remote ownership labels match.
 
+Run finalization is shared with other delegated sandboxes. Automatic sandbox
+deletion failures fail an otherwise successful run and retain a recovery
+session; later cleanup or timing-report errors cannot replace a primary
+command failure. Early setup failures also honor `--keep-on-failure` and retain
+their session metadata. Cleanup compares the original local claim and remote
+ownership labels before deletion, with its timeout covering the claim-lock wait.
+These run changes do not change explicit stop's `forgetMissing` policy.
+
 Sync timing counts preparation once and excludes provisioning wait. Archive
 construction uses `sync.timeout`; a prepared archive's construction time reduces
 the subsequent transfer budget. Manifest/preflight checks are outside that
-budget. Cleanup failures are warnings and preserve the primary sync error.
+budget. Archive temporary-file cleanup failures are warnings and preserve the
+primary sync error.
 
 Cancellation during process polling attempts to stop the original process with a bounded
 cleanup context, even when the interrupted HTTP request failed before response
