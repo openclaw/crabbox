@@ -101,7 +101,7 @@ jobs:
           (
             cd candidate
             GOTOOLCHAIN=local GOWORK=off CGO_ENABLED=0 GOFLAGS=-mod=readonly \
-              go build -trimpath -o "$ARTIFACT/bin/crabbox" ./cmd/crabbox
+              go build -trimpath -ldflags='-s -w' -o "$ARTIFACT/bin/crabbox" ./cmd/crabbox
           )
           (
             cd harness/worker
