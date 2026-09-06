@@ -31,7 +31,7 @@
 - Tensorlake: include claim-lock waiting in the bound-sandbox cleanup deadline, retaining ownership and avoiding native operations when the deadline expires before admission. [PR 1888](https://github.com/openclaw/crabbox/pull/1888). Thanks @steipete.
 - Tensorlake: share run finalization so early failures honor `--keep-on-failure`, failed cleanup reports a retained recovery session, and timing errors preserve the command outcome; retain quiet native-command error causes while keeping profile cleanup warning-only. [PR 1905](https://github.com/openclaw/crabbox/pull/1905). Thanks @steipete.
 - W&B: finalize run outcomes after automatic Stop, retain recovery sessions when cleanup fails, preserve primary command or gRPC failures and failure retention when cleanup or timing output also fails, and classify gRPC/API failures as provider errors instead of command exits. [PR 1929](https://github.com/openclaw/crabbox/pull/1929).
-- W&B: allow existing-sandbox runs to omit framework-owned run metadata while preserving explicit environment-forwarding restrictions.
+- W&B: allow existing-sandbox runs to omit framework-owned run metadata while preserving explicit environment-forwarding restrictions. [PR 1930](https://github.com/openclaw/crabbox/pull/1930).
 
 ## 0.50.0 - 2026-09-05
 
