@@ -89,6 +89,24 @@ func FinalizeDelegatedCommandOutcome(exitCode int, err error) core.RunResult {
 	return outcome
 }
 
+// AppendDelegatedRunFailure adds a terminal cleanup or reporting failure to an
+// already classified primary outcome. A first failure selects firstCode and a
+// provider-error result; later failures preserve the primary code/status and
+// expose each safe error message without formatting hidden underlying causes.
+func AppendDelegatedRunFailure(result core.RunResult, primary, secondary error, firstCode int) (core.RunResult, error) {
+	if secondary == nil {
+		return result, primary
+	}
+	if primary == nil {
+		result.ExitCode = firstCode
+		result.Status, result.ErrorKind = core.RunStatusFailed, core.RunErrorProvider
+		return result, ExitErrorWithCause(firstCode, secondary.Error(), secondary)
+	}
+	joined := errors.Join(primary, secondary)
+	// The CLI prints the selected ExitError message, not the joined error.
+	return result, ExitErrorWithCause(result.ExitCode, joined.Error(), joined)
+}
+
 // RunDelegatedSandbox owns the single sandbox run sequence and finalization.
 // The first failure determines the exit code/status; later cleanup failures are
 // joined as diagnostics. Sandbox cleanup alone fails with code 1. A failed deletion
@@ -146,19 +164,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 			retErr = ExitErrorWithCause(result.ExitCode, retErr.Error(), retErr)
 		}
 		appendFailure := func(err error, firstCode int) {
-			if err == nil {
-				return
-			}
-			if retErr == nil {
-				result.ExitCode = firstCode
-				result.Status, result.ErrorKind = core.RunStatusFailed, core.RunErrorProvider
-				retErr = ExitErrorWithCause(firstCode, err.Error(), err)
-			} else {
-				joined := errors.Join(retErr, err)
-				// The CLI prints the selected ExitError message, not the joined
-				// error. Keep secondary diagnostics in that public envelope too.
-				retErr = ExitErrorWithCause(result.ExitCode, joined.Error(), joined)
-			}
+			result, retErr = AppendDelegatedRunFailure(result, retErr, err, firstCode)
 		}
 		if command.Close != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)

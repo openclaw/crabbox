@@ -35,6 +35,52 @@ func TestExitErrorWithCausePreservesSelectedCodeAndMessage(t *testing.T) {
 	}
 }
 
+func TestAppendDelegatedRunFailurePreservesSelectedOutcome(t *testing.T) {
+	primaryCause := errors.New("hidden primary detail")
+	secondaryCause := errors.New("hidden secondary detail")
+	primary := ExitErrorWithCause(23, "safe primary", primaryCause)
+	secondary := ExitErrorWithCause(9, "safe secondary", secondaryCause)
+	for _, tc := range []struct {
+		name                 string
+		primary, secondary   error
+		beforeCode, wantCode int
+	}{
+		{name: "first failure", secondary: secondary, wantCode: 5},
+		{name: "secondary failure", primary: primary, secondary: secondary, beforeCode: 23, wantCode: 23},
+		{name: "no secondary", primary: primary, beforeCode: 23, wantCode: 23},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := core.FinalizeRunResult(core.RunResult{Provider: "fixture", LeaseID: "lease", Total: time.Second, Session: &core.RunSessionHandle{Kept: true}, ExitCode: tc.beforeCode}, tc.primary)
+			result, err := AppendDelegatedRunFailure(before, tc.primary, tc.secondary, 5)
+			var public core.ExitError
+			if !errors.As(err, &public) || public.Code != tc.wantCode || result.ExitCode != tc.wantCode || result.Status != core.RunStatusFailed {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			if tc.primary != nil && (!errors.Is(err, primaryCause) || !strings.Contains(public.Message, "safe primary")) {
+				t.Fatalf("primary lost: %v", err)
+			}
+			if tc.secondary != nil && (!errors.Is(err, secondaryCause) || !strings.Contains(public.Message, "safe secondary")) {
+				t.Fatalf("secondary lost: %v", err)
+			}
+			if strings.Contains(err.Error(), "hidden") {
+				t.Fatalf("unsafe cause exposed: %v", err)
+			}
+			want := before
+			want.ExitCode = tc.wantCode
+			if tc.primary == nil {
+				want.Status = core.RunStatusFailed
+				want.ErrorKind = core.RunErrorProvider
+			}
+			if !reflect.DeepEqual(result, want) {
+				t.Fatalf("unrelated state changed: result=%+v want=%+v", result, want)
+			}
+			if tc.secondary == nil && err != tc.primary {
+				t.Fatal("nil failure replaced the primary error")
+			}
+		})
+	}
+}
+
 func TestDelegatedSandboxSecondaryDiagnosticsKeepSafeMessages(t *testing.T) {
 	primary := errors.New("raw execution detail")
 	secondary := errors.New("raw cleanup detail")
