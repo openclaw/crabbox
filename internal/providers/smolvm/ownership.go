@@ -80,13 +80,13 @@ func (b *backend) resolveOwnedMachine(id string) (core.LeaseClaim, error) {
 	return matches[0], err
 }
 
-func (b *backend) publishMachineClaim(leaseID, slug string, machine machineData, repo Repo) (core.LeaseClaim, error) {
+func (b *backend) publishMachineClaim(ctx context.Context, leaseID, slug string, machine machineData, repo Repo) (core.LeaseClaim, error) {
 	scope, err := smolvmEndpoint(b.cfg)
 	if err != nil {
 		return core.LeaseClaim{}, err
 	}
 	var published core.LeaseClaim
-	err = core.WithDurableLeaseClaimLock(leaseID, func(claim *core.LeaseClaim, exists bool, persist func() error) error {
+	err = core.WithDurableLeaseClaimLockContext(ctx, leaseID, func(claim *core.LeaseClaim, exists bool, persist func() error) error {
 		if exists {
 			return exit(2, "smolvm lease %s acquired a claim during creation; retaining machine", leaseID)
 		}
@@ -115,7 +115,7 @@ func (b *backend) reuseMachine(ctx context.Context, client api, id, repoRoot str
 		return core.LeaseClaim{}, exit(2, "smolvm reuse requires repository context")
 	}
 	server := Server{Provider: providerName, CloudID: claim.CloudID, Labels: claim.Labels}
-	return core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(claim.LeaseID, claim.Slug, b.cfg, claim.ProviderScope, server, core.SSHTarget{}, repoRoot, b.cfg.IdleTimeout, reclaim, claim, true, func() error {
+	return core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfterContext(ctx, claim.LeaseID, claim.Slug, b.cfg, claim.ProviderScope, server, core.SSHTarget{}, repoRoot, b.cfg.IdleTimeout, reclaim, claim, true, func() error {
 		machine, err := client.GetMachine(ctx, claim.CloudID)
 		if err != nil {
 			return err
@@ -129,7 +129,7 @@ func (b *backend) deleteOwnedMachine(ctx context.Context, client api, claim core
 	if err != nil {
 		return err
 	}
-	return shared.RemoveExactClaimAfter(claim, binding, func() error {
+	return shared.RemoveExactClaimAfterContext(ctx, claim, binding, func() error {
 		return deleteExactMachine(ctx, client, machineFromClaim(claim))
 	})
 }

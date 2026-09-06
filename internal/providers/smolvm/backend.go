@@ -283,15 +283,22 @@ func (b *backend) createMachine(ctx context.Context, client api, repo Repo, keep
 		if claim.LeaseID != "" {
 			cleanupErr = b.deleteOwnedMachine(cleanupCtx, client, claim)
 		} else {
-			cleanupErr = core.CleanupLeaseClaimIfUnchangedAfter(leaseID, core.LeaseClaim{}, false, func() error {
+			cleanupErr = core.CleanupLeaseClaimIfUnchangedAfterContext(cleanupCtx, leaseID, core.LeaseClaim{}, false, func() error {
 				return deleteExactMachine(cleanupCtx, client, original)
 			})
 		}
 		if cleanupErr != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("smolvm rollback retained machine=%s lease=%s: %w", original.ID, leaseID, cleanupErr))
+			// A typed rollback error must not replace the acquisition's CLI exit.
+			code := 1
+			var primary ExitError
+			if errors.As(resultErr, &primary) && primary.Code != 0 {
+				code = primary.Code
+			}
+			joined := errors.Join(resultErr, fmt.Errorf("smolvm rollback retained machine=%s lease=%s: %w", original.ID, leaseID, cleanupErr))
+			resultErr = shared.ExitErrorWithCause(code, joined.Error(), joined)
 		}
 	}()
-	claim, err = b.publishMachineClaim(leaseID, slug, original, repo)
+	claim, err = b.publishMachineClaim(ctx, leaseID, slug, original, repo)
 	if err != nil {
 		return claim, machine, err
 	}

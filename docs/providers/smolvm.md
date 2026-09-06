@@ -141,8 +141,18 @@ Deletion and reuse require that exact local claim and a fresh matching machine r
 
 Environment-profile cleanup remains warning-only and runs first with its own
 uncanceled 30-second budget, including after partial upload; machine teardown
-then receives a fresh 60-second budget. These operation budgets do not change the
-existing contextless claim-lock waits used for machine cleanup and publication.
+then receives a fresh 60-second budget that includes its claim-lock wait. A
+shorter explicit-stop caller deadline still applies. Ownership publication and
+reuse waits also honor caller cancellation. Failed-create rollback uses its own
+detached 60-second budget, including an absent-claim fence when publication did
+not complete; an appearing claim still vetoes deletion. Cleanup expiry before
+fence admission performs no cleanup call and leaves the claim or unclaimed
+machine for inspection. Rollback failure preserves the acquisition's CLI exit and both
+error causes.
+
+Completed fenced actions still finish their durable writes after late
+cancellation. Read-only discovery keeps its existing policy, and local
+filesystem syscalls are not forcibly interruptible.
 
 Older claims without the machine ID, endpoint, and creation timestamp do not authorize stop or reuse. Name-matched machines remain discoverable through `list` and `status`, which do not create or upgrade claims. `--reclaim` transfers repository ownership of an already proven binding; it never adopts an unclaimed or legacy machine. Review those machines in the provider console before any manual cleanup, or create a new lease for reuse.
 
