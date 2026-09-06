@@ -89,6 +89,24 @@ func FinalizeDelegatedCommandOutcome(exitCode int, err error) core.RunResult {
 	return outcome
 }
 
+// PinDelegatedRunFailure classifies an unclassified setup failure before cleanup.
+// Nonzero public setup codes (including signed process exits) survive without
+// becoming user command exits. Already classified outcomes and their error
+// identities are left unchanged.
+func PinDelegatedRunFailure(result core.RunResult, err error) (core.RunResult, error) {
+	if err == nil || result.Status != "" {
+		return result, err
+	}
+	outcome := core.FinalizeRunResult(core.RunResult{}, err)
+	result.Status, result.ErrorKind = outcome.Status, outcome.ErrorKind
+	result.ExitCode = 1
+	var public core.ExitError
+	if errors.As(err, &public) && public.Code != 0 {
+		result.ExitCode = public.Code
+	}
+	return result, ExitErrorWithCause(result.ExitCode, err.Error(), err)
+}
+
 // AppendDelegatedRunFailure adds a terminal cleanup or reporting failure to an
 // already classified primary outcome. A first failure selects firstCode and a
 // provider-error result; later failures preserve the primary code/status and
@@ -149,20 +167,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 		if prepared != nil {
 			defer prepared.Close()
 		}
-		// Classify before secondary cleanup errors can obscure command/cancel
-		// outcomes. Setup exit codes are CLI failures, not user command exits.
-		if retErr != nil && result.Status == "" {
-			outcome := core.FinalizeRunResult(core.RunResult{}, retErr)
-			result.Status, result.ErrorKind = outcome.Status, outcome.ErrorKind
-			var ee core.ExitError
-			result.ExitCode = 1
-			if errors.As(retErr, &ee) && ee.Code != 0 {
-				result.ExitCode = ee.Code
-			}
-			// Pin the primary exit before joining cleanup errors, which may
-			// themselves contain an ExitError with a different code.
-			retErr = ExitErrorWithCause(result.ExitCode, retErr.Error(), retErr)
-		}
+		result, retErr = PinDelegatedRunFailure(result, retErr)
 		appendFailure := func(err error, firstCode int) {
 			result, retErr = AppendDelegatedRunFailure(result, retErr, err, firstCode)
 		}

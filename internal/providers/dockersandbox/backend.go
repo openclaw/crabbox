@@ -105,16 +105,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	var cleanupClaim core.LeaseClaim
 	commandRan := false
 	defer func() {
-		if retErr != nil && result.Status == "" {
-			outcome := core.FinalizeRunResult(core.RunResult{}, retErr)
-			result.Status, result.ErrorKind = outcome.Status, outcome.ErrorKind
-			result.ExitCode = 1
-			var public ExitError
-			if errors.As(retErr, &public) && public.Code != 0 {
-				result.ExitCode = public.Code
-			}
-			retErr = shared.ExitErrorWithCause(result.ExitCode, retErr.Error(), retErr)
-		}
+		result, retErr = shared.PinDelegatedRunFailure(result, retErr)
 		if retErr != nil {
 			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		}
