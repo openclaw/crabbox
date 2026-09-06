@@ -18,19 +18,20 @@ import (
 )
 
 type lifecycleFakeClient struct {
-	sandboxes map[string]sandboxSummary
-	scope     projectScope
-	nextID    int
-	calls     []string
-	uploads   []string
-	execs     []execRequest
-	deleteErr error
-	execErr   error
-	exitCode  int
-	stdout    string
-	stderr    string
-	useNameID bool
-	creates   []createSandboxRequest
+	sandboxes   map[string]sandboxSummary
+	scope       projectScope
+	nextID      int
+	calls       []string
+	uploads     []string
+	execs       []execRequest
+	deleteErr   error
+	execErr     error
+	workloadErr error
+	exitCode    int
+	stdout      string
+	stderr      string
+	useNameID   bool
+	creates     []createSandboxRequest
 }
 
 func newLifecycleFakeClient() *lifecycleFakeClient {
@@ -125,6 +126,9 @@ func (f *lifecycleFakeClient) Exec(_ context.Context, id string, req execRequest
 	}
 	if req.WorkingDir == "" {
 		return execResult{ExitCode: 0}, nil
+	}
+	if f.workloadErr != nil {
+		return execResult{}, f.workloadErr
 	}
 	return execResult{ExitCode: f.exitCode, Stdout: f.stdout, Stderr: f.stderr}, nil
 }
@@ -551,6 +555,131 @@ func TestRunKeepOnFailureRetainsClaim(t *testing.T) {
 	}
 	if report["runStatus"] != "failed" || report["errorKind"] != "command-exit" {
 		t.Fatalf("timing outcome status=%v kind=%v", report["runStatus"], report["errorKind"])
+	}
+}
+
+func TestRunEarlyFailureKeepsAccurateRecoveryState(t *testing.T) {
+	for _, tc := range []struct {
+		name                         string
+		workspace, keep, deleteFails bool
+	}{
+		{name: "workspace delete failure", workspace: true, deleteFails: true},
+		{name: "kept workspace failure", workspace: true, keep: true},
+		{name: "kept command preparation failure", keep: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := newLifecycleFakeClient()
+			primary, cleanup := errors.New("workspace failed"), errors.New("delete unavailable")
+			req := RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: tc.keep, TimingJSON: true}
+			if tc.workspace {
+				fake.execErr = primary
+				req.Command = []string{"true"}
+			}
+			if tc.deleteFails {
+				fake.deleteErr = cleanup
+			}
+			var stderr bytes.Buffer
+			b := testBackend(fake, io.Discard, &stderr)
+			result, err := b.Run(t.Context(), req)
+			if err == nil || result.ExitCode != 1 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider || result.Session == nil || !result.Session.Kept || result.Session.Reused {
+				t.Fatalf("early failure result=%#v session=%+v err=%v", result, result.Session, err)
+			}
+			if tc.workspace && !errors.Is(err, primary) || tc.deleteFails && !errors.Is(err, cleanup) {
+				t.Fatalf("failure cause lost: %v", err)
+			}
+			deletes := 0
+			for _, call := range fake.calls {
+				if strings.HasPrefix(call, "delete:") {
+					deletes++
+				}
+			}
+			if (deletes == 1) != tc.deleteFails || len(fake.sandboxes) != 1 {
+				t.Fatalf("cleanup calls=%v sandboxes=%v", fake.calls, fake.sandboxes)
+			}
+			if claim, err := readLeaseClaim(result.LeaseID); err != nil || claim.LeaseID != result.LeaseID {
+				t.Fatalf("recovery claim=%#v err=%v", claim, err)
+			}
+			var report core.TimingReport
+			lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+			if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil || report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind {
+				t.Fatalf("final timing=%#v err=%v diagnostics=%s", report, err, stderr.String())
+			}
+		})
+	}
+}
+
+type failingTimingWriter struct{ cause error }
+
+func (w failingTimingWriter) Write(data []byte) (int, error) {
+	if bytes.HasPrefix(data, []byte("{")) {
+		return 0, w.cause
+	}
+	return len(data), nil
+}
+
+func TestRunTimingFailurePreservesPrimaryExit(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		t.Run(map[bool]string{false: "cleanup fails", true: "kept"}[keep], func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := newLifecycleFakeClient()
+			fake.exitCode = 23
+			if !keep {
+				fake.deleteErr = errors.New("delete unavailable")
+			}
+			writeFailure := errors.New("timing output unavailable")
+			b := testBackend(fake, io.Discard, failingTimingWriter{writeFailure})
+			result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: keep, TimingJSON: true, Command: []string{"false"}})
+			var exitErr ExitError
+			if !errors.Is(err, writeFailure) || !errors.As(err, &exitErr) || exitErr.Code != 23 || result.ExitCode != 23 || result.ErrorKind != core.RunErrorCommandExit || result.Session == nil || !result.Session.Kept {
+				t.Fatalf("timing masked outcome: result=%#v err=%v", result, err)
+			}
+			if fake.deleteErr != nil && !errors.Is(err, fake.deleteErr) {
+				t.Fatalf("cleanup diagnostic lost: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunRejectedReuseReleasesOperationLock(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newLifecycleFakeClient()
+	b := testBackend(fake, io.Discard, io.Discard)
+	repo := Repo{Root: t.TempDir(), Name: "fixture"}
+	if err := b.Warmup(t.Context(), WarmupRequest{Repo: repo, Keep: true}); err != nil {
+		t.Fatal(err)
+	}
+	leaseID := leasePrefix + "sbx_a"
+	fake.sandboxes["sbx_a"].Metadata[metadataClaimKey] = "changed"
+	result, err := b.Run(t.Context(), RunRequest{ID: leaseID, Repo: repo, NoSync: true, Command: []string{"true"}})
+	if err == nil || result.Session != nil {
+		t.Fatalf("rejected reuse result=%#v err=%v", result, err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	unlock, err := lockVercelSandboxLeaseOperation(ctx, leaseID)
+	if err != nil {
+		t.Fatalf("failed reuse leaked operation lock: %v", err)
+	}
+	unlock()
+	if claim, err := readLeaseClaim(leaseID); err != nil || claim.RepoRoot != repo.Root || len(fake.sandboxes) != 1 {
+		t.Fatalf("rejected reuse changed custody: claim=%#v err=%v", claim, err)
+	}
+}
+
+func TestRunRedactsProviderTokenAndPreservesCause(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	token := "synthetic-lifecycle-token"
+	t.Setenv("VERCEL_TOKEN", token)
+	fake := newLifecycleFakeClient()
+	fake.workloadErr = errors.Join(errors.New("backend rejected "+token), context.DeadlineExceeded)
+	b := testBackend(fake, io.Discard, io.Discard)
+	result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: true, Command: []string{"true"}})
+	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "[REDACTED]") {
+		t.Fatalf("provider display redaction lost: %v", err)
+	}
+	if !errors.Is(err, fake.workloadErr) || !errors.Is(err, context.DeadlineExceeded) || result.Status != core.RunStatusTimedOut || result.Session == nil || !result.Session.Kept {
+		t.Fatalf("primary cause or retention lost: result=%#v err=%v", result, err)
 	}
 }
 

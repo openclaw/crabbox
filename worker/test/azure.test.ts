@@ -5,6 +5,7 @@ import {
   azureLinuxCloudInit,
   azureLabelsFromTags,
   azureLROPollIntervalMS,
+  azureOwnedDeleteClaimKey,
   azureProvisioningErrorCategory,
   azureRegionCandidates,
   azureRegionalName,
@@ -320,6 +321,369 @@ function testLeaseConfig(overrides: Partial<LeaseConfig> = {}): LeaseConfig {
     ...overrides,
   };
 }
+
+describe("Azure cleanup inspection", () => {
+  function fixture() {
+    const lease = ownedAzureLease();
+    const scope = lease.providerScope!;
+    const ids = {
+      vm: `${scope}/providers/Microsoft.Compute/virtualMachines/${lease.cloudID}`,
+      nic: `${scope}/providers/Microsoft.Network/networkInterfaces/${lease.cloudID}-nic`,
+      pip: `${scope}/providers/Microsoft.Network/publicIPAddresses/${lease.cloudID}-pip`,
+      disk: `${scope}/providers/Microsoft.Compute/disks/${lease.cloudID}-osdisk`,
+    };
+    const resource = (id: string, properties: Record<string, unknown>) => ({
+      id,
+      name: id.split("/").at(-1)!,
+      location: "eastus",
+      tags: ownedAzureTags({ diagnostic_secret: "synthetic-tag-secret" }),
+      properties,
+    });
+    const vm = resource(ids.vm, {
+      ...ownedAzureVMProperties(),
+      osProfile: {
+        adminPassword: "synthetic-admin-password",
+        customData: "synthetic-bootstrap-data",
+      },
+      customData: "synthetic-top-level-bootstrap-data",
+    });
+    const nic = resource(ids.nic, ownedAzureNICProperties());
+    const pip = resource(ids.pip, { resourceGuid: "pip-immutable-id" });
+    const disk = resource(ids.disk, { uniqueId: "disk-immutable-id" });
+    const resources = new Map<string, unknown>([
+      [ids.vm, vm],
+      [ids.nic, nic],
+      [ids.pip, pip],
+      [ids.disk, disk],
+    ]);
+    const baseline = [
+      {
+        kind: "virtualMachines",
+        id: ids.vm.toLowerCase(),
+        immutableID: "vm-immutable-id",
+        location: "eastus",
+        topology: {
+          managedDiskID: ids.disk.toLowerCase(),
+          networkInterfaceIDs: [ids.nic.toLowerCase()],
+        },
+      },
+      {
+        kind: "networkInterfaces",
+        id: ids.nic.toLowerCase(),
+        immutableID: "nic-immutable-id",
+        location: "eastus",
+        topology: { publicIPIDs: [ids.pip.toLowerCase()] },
+      },
+      {
+        kind: "publicIPAddresses",
+        id: ids.pip.toLowerCase(),
+        immutableID: "pip-immutable-id",
+        location: "eastus",
+        topology: {},
+      },
+      {
+        kind: "disks",
+        id: ids.disk.toLowerCase(),
+        immutableID: "disk-immutable-id",
+        location: "eastus",
+        topology: {},
+      },
+    ];
+    const { records, storage } = memoryAzureDeleteClaimStorage();
+    const claimKey = azureOwnedDeleteClaimKey(scope, lease.cloudID, lease.id);
+    const claim = {
+      version: 2,
+      provider: "azure",
+      leaseID: lease.id,
+      slug: lease.slug,
+      owner: lease.owner,
+      cloudID: lease.cloudID,
+      providerScope: scope,
+      stableResourceIdentity: JSON.stringify(baseline),
+    };
+    records.set(claimKey, claim);
+    const get = vi.spyOn(storage, "get");
+    const put = vi.spyOn(storage, "put");
+    const remove = vi.spyOn(storage, "delete");
+    const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
+    seedAzureAuthCache(client);
+    const fetcher = vi.fn<AzureClient["fetcher"]>(async (input, init) => {
+      const url = new URL(String(input));
+      expect(init?.method ?? "GET").toBe("GET");
+      expect(url.origin).toBe("https://management.azure.com");
+      expect(Object.values(ids)).toContain(url.pathname);
+      const value = resources.get(url.pathname);
+      return value ? Response.json(value) : azureResourceNotFoundResponse(url);
+    });
+    client.fetcher = fetcher;
+    return {
+      lease,
+      ids,
+      vm,
+      pip,
+      disk,
+      resources,
+      baseline,
+      records,
+      claimKey,
+      claim,
+      client,
+      fetcher,
+      expectReadOnly() {
+        expect(fetcher).toHaveBeenCalledTimes(4);
+        expect(get.mock.calls).toEqual([[claimKey], [claimKey]]);
+        expect(put).not.toHaveBeenCalled();
+        expect(remove).not.toHaveBeenCalled();
+      },
+    };
+  }
+
+  it("reads exact resources and projects a matching stable claim without secrets or writes", async () => {
+    const f = fixture();
+    const deadline = Date.now() + 60_000;
+    f.records.set(f.claimKey, {
+      ...f.claim,
+      pendingDeletion: {
+        kind: "vm",
+        stableResourceIdentity: f.claim.stableResourceIdentity,
+        operationURL: "https://management.azure.com/operations/synthetic-private-operation",
+        deadline,
+      },
+    });
+    const before = structuredClone(f.records);
+    const started = Date.now();
+
+    const inspection = await f.client.inspectOwnedCleanup(f.lease);
+
+    expect(inspection).toMatchObject({
+      providerScope: f.lease.providerScope,
+      claimUnchanged: true,
+      identityMatches: true,
+      claim: {
+        version: 2,
+        stableResourceIdentity: f.baseline,
+        pendingDeletion: { kind: "vm", deadline },
+      },
+      resources: f.baseline.map((entry) => ({ ...entry, ownership: "matched" })),
+    });
+    expect(Date.parse(inspection.observedAt)).toBeGreaterThanOrEqual(started);
+    expect(Date.parse(inspection.observedAt)).toBeLessThanOrEqual(Date.now());
+    const serialized = JSON.stringify(inspection);
+    for (const excluded of [
+      "synthetic-tag-secret",
+      "synthetic-admin-password",
+      "synthetic-bootstrap-data",
+      "synthetic-top-level-bootstrap-data",
+      "synthetic-private-operation",
+      "tags",
+      "labels",
+      "osProfile",
+      "customData",
+      "operationURL",
+    ]) {
+      expect(serialized).not.toContain(excluded);
+    }
+    expect(f.records).toEqual(before);
+    f.expectReadOnly();
+  });
+
+  it("reports absent resources rather than manufacturing missing members", async () => {
+    const f = fixture();
+    f.resources.delete(f.ids.vm);
+    f.records.set(f.claimKey, {
+      ...f.claim,
+      deletedStableResourceIdentity: JSON.stringify([f.baseline[0]]),
+      partialStableResourceIdentity: JSON.stringify(f.baseline.slice(1)),
+    });
+
+    const inspection = await f.client.inspectOwnedCleanup(f.lease);
+
+    expect(inspection.resources.map((entry) => entry.kind)).toEqual([
+      "networkInterfaces",
+      "publicIPAddresses",
+      "disks",
+    ]);
+    expect(inspection).toMatchObject({
+      claimUnchanged: true,
+      identityMatches: true,
+      claim: {
+        deletedStableResourceIdentity: [f.baseline[0]],
+        partialStableResourceIdentity: f.baseline.slice(1),
+      },
+    });
+    f.expectReadOnly();
+  });
+
+  it("reports a replacement generation as a mismatch without throwing", async () => {
+    const f = fixture();
+    f.vm.properties.vmId = "replacement-vm-generation";
+
+    const inspection = await f.client.inspectOwnedCleanup(f.lease);
+
+    expect(inspection.identityMatches).toBe(false);
+    expect(inspection.resources[0]).toMatchObject({
+      immutableID: "replacement-vm-generation",
+      ownership: "matched",
+    });
+    expect(inspection.claim?.stableResourceIdentity?.[0]?.immutableID).toBe("vm-immutable-id");
+    f.expectReadOnly();
+  });
+
+  it("classifies other-owner and untagged resources without revealing other-owner tags", async () => {
+    const f = fixture();
+    f.pip.tags = ownedAzureTags({ owner: "synthetic_other_owner", lease: "cbx_999999999999" });
+    f.disk.tags = {};
+
+    const inspection = await f.client.inspectOwnedCleanup(f.lease);
+
+    expect(inspection.resources.find((entry) => entry.kind === "publicIPAddresses")).toMatchObject({
+      ownership: "mismatched",
+    });
+    expect(inspection.resources.find((entry) => entry.kind === "disks")).toMatchObject({
+      ownership: "unclaimed",
+    });
+    expect(JSON.stringify(inspection)).not.toContain("synthetic_other_owner");
+    expect(JSON.stringify(inspection)).not.toContain("cbx_999999999999");
+    f.expectReadOnly();
+  });
+
+  it.each(["absent", "preparing", "legacy"] as const)(
+    "returns unknown identity for a %s claim without creating a baseline",
+    async (state) => {
+      const f = fixture();
+      if (state === "absent") f.records.delete(f.claimKey);
+      else {
+        const { stableResourceIdentity: _baseline, ...binding } = f.claim;
+        f.records.set(f.claimKey, {
+          ...binding,
+          ...(state === "preparing" ? { preparing: true } : { version: 1 }),
+        });
+      }
+      const before = structuredClone(f.records);
+
+      const inspection = await f.client.inspectOwnedCleanup(f.lease);
+
+      expect(inspection.identityMatches).toBeNull();
+      expect(inspection.claimUnchanged).toBe(true);
+      const expectedClaim = {
+        absent: undefined,
+        preparing: { version: 2, preparing: true },
+        legacy: { version: 1 },
+      }[state];
+      expect(Object.hasOwn(inspection, "claim")).toBe(state !== "absent");
+      expect(inspection.claim).toEqual(expectedClaim);
+      expect(f.records).toEqual(before);
+      f.expectReadOnly();
+    },
+  );
+
+  it.each(["replaced", "removed", "created"])(
+    "returns unknown identity when the claim is concurrently %s during resource GETs",
+    async (change) => {
+      const f = fixture();
+      if (change === "created") f.records.delete(f.claimKey);
+      const fetcher = f.client.fetcher;
+      let changed = false;
+      f.client.fetcher = async (input, init) => {
+        const response = await fetcher(input, init);
+        if (!changed) {
+          changed = true;
+          if (change === "removed") f.records.delete(f.claimKey);
+          else {
+            f.records.set(f.claimKey, {
+              ...f.claim,
+              stableResourceIdentity: f.claim.stableResourceIdentity.replace(
+                "vm-immutable-id",
+                "concurrent-vm-generation",
+              ),
+            });
+          }
+        }
+        return response;
+      };
+
+      const inspection = await f.client.inspectOwnedCleanup(f.lease);
+
+      expect(inspection.claimUnchanged).toBe(false);
+      expect(inspection.identityMatches).toBeNull();
+      expect(inspection.resources).toHaveLength(4);
+      f.expectReadOnly();
+    },
+  );
+
+  it("detects in-place claim mutation during provider reads", async () => {
+    const f = fixture();
+    const fetcher = f.client.fetcher;
+    f.client.fetcher = async (input, init) => {
+      const response = await fetcher(input, init);
+      f.claim.stableResourceIdentity = f.claim.stableResourceIdentity.replace(
+        "vm-immutable-id",
+        "concurrent-vm-generation",
+      );
+      return response;
+    };
+
+    const inspection = await f.client.inspectOwnedCleanup(f.lease);
+
+    expect(inspection.claimUnchanged).toBe(false);
+    expect(inspection.identityMatches).toBeNull();
+    f.expectReadOnly();
+  });
+
+  it("strips persisted label payloads from the projected stable baseline", async () => {
+    const f = fixture();
+    f.records.set(f.claimKey, {
+      ...f.claim,
+      stableResourceIdentity: JSON.stringify(
+        f.baseline.map((entry) => ({ ...entry, labels: "synthetic-persisted-label-secret" })),
+      ),
+    });
+
+    const inspection = await f.client.inspectOwnedCleanup(f.lease);
+
+    expect(inspection.claim?.stableResourceIdentity).toEqual(f.baseline);
+    expect(JSON.stringify(inspection)).not.toContain("synthetic-persisted-label-secret");
+    expect(JSON.stringify(inspection)).not.toContain("labels");
+    f.expectReadOnly();
+  });
+
+  it.each(["../other-vm", "crabbox-blue-lobster/child", "crabbox-blue-lobster?query=true", ""])(
+    "rejects malformed cloud ID %j before provider reads",
+    async (cloudID) => {
+      const f = fixture();
+
+      await expect(f.client.inspectOwnedCleanup({ ...f.lease, cloudID })).rejects.toThrow(
+        "Azure cleanup inspection requires a canonical resource name",
+      );
+      expect(f.fetcher).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects an original scope mismatch before any provider read", async () => {
+    const f = fixture();
+
+    await expect(
+      f.client.inspectOwnedCleanup({
+        ...f.lease,
+        providerScope: "/subscriptions/other-sub/resourceGroups/other-rg",
+      }),
+    ).rejects.toThrow(/scope/i);
+    expect(f.fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each(["provider", "leaseID", "slug", "owner", "cloudID", "providerScope"])(
+    "rejects a persisted claim with a different %s before provider reads",
+    async (field) => {
+      const f = fixture();
+      f.records.set(f.claimKey, { ...f.claim, [field]: "different-binding" });
+      const before = structuredClone(f.records);
+
+      await expect(f.client.inspectOwnedCleanup(f.lease)).rejects.toThrow(/claim mismatch/i);
+      expect(f.fetcher).not.toHaveBeenCalled();
+      expect(f.records).toEqual(before);
+    },
+  );
+});
 
 describe("azure provider", () => {
   it("treats only an exact missing VM as absent", async () => {

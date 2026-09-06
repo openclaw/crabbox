@@ -131,6 +131,28 @@ These fields report the coordinator's lifecycle observation. They are not an
 independent provider inventory check. `complete` does not override remaining
 cleanup metadata or an explicit retained-resource flag.
 
+### Azure cleanup identity diagnostics
+
+For a blocked brokered Azure lease, the authenticated coordinator API offers an
+explicit read-only `GET /v1/leases/{id}/cleanup`. Use the canonical lease ID and
+an existing owner, manage-share, or admin credential. View-only shares and device
+tokens cannot inspect cleanup identities; unsupported providers and registered
+leases return HTTP 501. This is an API diagnostic, not an `inspect` CLI flag.
+
+The response's `inspection` contains the retained cleanup claim's stable identity
+and deletion progress, fresh canonical VM/NIC/public-IP/disk identities and
+ownership-match classifications, and the original provider scope. Raw resource
+bodies, tags, bootstrap data, credentials, and operation URLs are not returned.
+`identityMatches` compares the stable resource set with recorded deletion progress;
+it is not an ownership verdict or authorization to delete. `ownership: unclaimed`
+means ownership labels are absent, not that the resource is safe to adopt.
+
+`claimUnchanged: false` means cleanup changed the claim during the reads;
+`identityMatches` is then `null`, as it is when no stable baseline was recorded.
+Provider observations are not an atomic inventory. Inspection never creates,
+updates, clears, or accepts a cleanup identity, and never issues a resource
+mutation. Keep local claims and SSH artifacts until normal stop confirms cleanup.
+
 For coordinator leases whose provider can inject an SSH host key before first
 boot, JSON also includes `sshHostKey`. Its value is exactly the public host-key
 algorithm and base64 payload, without a hostname or comment:

@@ -7287,6 +7287,33 @@ export class FleetCoordinator {
     if (method === "PUT" && action === "registration") {
       return await this.registerLease(request, leaseID);
     }
+    if (method === "GET" && action === "cleanup") {
+      const admin = isAdminRequest(request);
+      const lease = await this.resolveLease(leaseID, request, admin);
+      if (!lease) return notFound();
+      if (
+        requestAuthType(request) === "device" ||
+        !this.leaseManageableByRequest(lease, request, admin)
+      ) {
+        return json(
+          { error: "forbidden", message: "lease manage access required" },
+          { status: 403 },
+        );
+      }
+      const providerID = managedLeaseProvider(lease);
+      const provider =
+        !isRegisteredLease(lease) && lease.cloudID && providerID
+          ? this.provider(providerID, lease.region, lease.providerProject)
+          : undefined;
+      if (!provider?.inspectCleanup) {
+        return json({ error: "cleanup_inspection_unsupported" }, { status: 501 });
+      }
+      return json({
+        leaseID: lease.id,
+        provider: managedLeaseProvider(lease),
+        inspection: await provider.inspectCleanup(lease),
+      });
+    }
     if (method === "GET" && action === undefined) {
       const admin = isAdminRequest(request);
       const lease = await this.resolveLease(leaseID, request, false);
@@ -25966,6 +25993,7 @@ interface CloudProvider {
   releaseLease(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void>;
   deleteServer(id: string): Promise<void>;
   deleteOwnedServer?(lease: LeaseRecord): Promise<void>;
+  inspectCleanup?(lease: LeaseRecord): Promise<unknown>;
   supportsNativeImages(): boolean;
   nativeImagesUnsupportedMessage(): string;
   defaultImageStrategy(lease: LeaseRecord): "image" | "disk-snapshot";
@@ -26410,6 +26438,19 @@ export class AzureProvider implements CloudProvider {
 
   deleteServer(id: string): Promise<void> {
     return this.client.deleteServer(id);
+  }
+
+  inspectCleanup(lease: LeaseRecord): ReturnType<AzureClient["inspectOwnedCleanup"]> {
+    const scope = azureProviderScope(lease.providerScope);
+    if (!scope) {
+      throw new Error("Azure cleanup inspection requires the original provider scope");
+    }
+    return new AzureClient(this.env, {
+      ...(lease.region ? { location: lease.region } : {}),
+      subscription: scope.subscription,
+      resourceGroup: scope.resourceGroup,
+      ...(this.storage ? { ownedDeleteClaimStorage: this.storage } : {}),
+    }).inspectOwnedCleanup(lease);
   }
 
   deleteOwnedServer(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void> {

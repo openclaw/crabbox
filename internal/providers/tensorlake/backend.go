@@ -192,8 +192,15 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (result Run
 	commandStart := b.now()
 	exitCode, runErr := cli.execStream(ctx, sandboxID, workdir, command, b.rt.Stdout, b.rt.Stderr)
 	commandDuration := b.now().Sub(commandStart)
+	var outcome RunResult
+	if runErr != nil {
+		outcome = finalizeRunResult(RunResult{}, runErr)
+		exitCode = 1
+	}
 	result = RunResult{
 		ExitCode:      exitCode,
+		Status:        outcome.Status,
+		ErrorKind:     outcome.ErrorKind,
 		Command:       commandDuration,
 		Total:         b.now().Sub(started),
 		SyncDelegated: true,
@@ -226,7 +233,8 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (result Run
 	}
 	if runErr != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, ExitError{Code: 1, Message: fmt.Sprintf("tensorlake run failed: %v", runErr)}
+		message := "tensorlake run failed: " + shared.RedactErrorSecrets(runErr.Error(), b.cfg.Tensorlake.APIKey)
+		return result, shared.ExitErrorWithCause(1, message, runErr)
 	}
 	if exitCode != 0 {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
