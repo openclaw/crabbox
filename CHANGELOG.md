@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Local containers: optionally omit the explicit hostname for runtimes sharing a host UTS namespace, support YAML and environment configuration, and reject incompatible fixed-ID reuse without changing existing default fingerprints. [PR 1813](https://github.com/openclaw/crabbox/pull/1813). Thanks @atrawog.
+- Local containers: optionally omit the explicit hostname for runtimes sharing a host UTS namespace, support YAML and environment configuration, and reject incompatible fixed-ID reuse without changing existing default fingerprints. [PR 1813](https://github.com/openclaw/crabbox/pull/1813), [PR 1924](https://github.com/openclaw/crabbox/pull/1924). Thanks @atrawog.
 - Define a strict provider-neutral Linux developer-image recipe whose digest binds the executable contract and exact installer/readiness source hashes.
 - Extract protected image-qualification candidates at the canonical artifact path and avoid protected finalization when deployment never started.
 - Stop SSH readiness promptly on host-key rejection, including WSL SFTP and split or oversized diagnostics, without changing host trust. [PR 1877](https://github.com/openclaw/crabbox/pull/1877). Thanks @shunkakinoki.
