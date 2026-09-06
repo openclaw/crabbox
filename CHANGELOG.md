@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Docker Sandbox: preserve primary failures through cleanup and timing errors, report retained sessions after failed removal, honor keep-on-failure during early preparation, and protect successful clone commits even when timing output fails.
+- Docker Sandbox: preserve primary failures through cleanup and timing errors, report retained sessions after failed removal, honor keep-on-failure during early preparation, and protect successful clone commits even when timing output fails. [PR 1913](https://github.com/openclaw/crabbox/pull/1913).
 - SmolVM: share sandbox run finalization so deletion failures no longer report success, early preparation failures honor keep-on-failure, and primary outcomes survive cleanup or timing errors while preserving provider keep policy and separate profile/resource cleanup budgets. [PR 1908](https://github.com/openclaw/crabbox/pull/1908).
 - Fix documentation table-of-contents links for repeated headings so each link reaches its own section, while preserving existing first-heading URLs. [PR 1787](https://github.com/openclaw/crabbox/pull/1787). Thanks @steipete.
 - Shared sandbox runs: keep secondary cleanup and timing errors visible in CLI diagnostics without replacing the primary exit code. [PR 1907](https://github.com/openclaw/crabbox/pull/1907).
