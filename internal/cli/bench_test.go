@@ -526,6 +526,220 @@ func TestBenchmarkReportAggregatesAndMarksInsufficientEvidence(t *testing.T) {
 	}
 }
 
+func TestBenchmarkReportAggregatesRunnerAndSyncPhasesPerSuccessfulObservation(t *testing.T) {
+	now := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
+	command := []string{"go", "test", "./..."}
+	records := []BenchmarkTimingRecord{
+		newBenchmarkTimingRecord(now.Add(-4*time.Minute), "bench-run", TimingReport{
+			Provider:      "aws",
+			RunnerTotalMs: 1000,
+			RunnerPhases: []RunnerPhase{
+				{Name: "workspace.sync", Ms: 100},
+				{Name: "workspace.sync", Ms: 50},
+				{Name: "provider.wait", Ms: 200, Opaque: true},
+			},
+			SyncMs:    50,
+			CommandMs: 700,
+			TotalMs:   900,
+			SyncPhases: []TimingPhase{
+				{Name: "archive", Ms: 40},
+				{Name: "archive", Ms: 10},
+				{Name: "git_hydrate", Skipped: true},
+			},
+			SyncSkipped: true,
+			ExitCode:    0,
+		}, Repo{Name: "my-app"}, command, nil, 1),
+		newBenchmarkTimingRecord(now.Add(-3*time.Minute), "bench-run", TimingReport{
+			Provider:      "aws",
+			RunnerTotalMs: 1100,
+			RunnerPhases: []RunnerPhase{
+				{Name: "workspace.sync", Ms: 75},
+				{Name: "provider.wait", Ms: 250, Opaque: true},
+			},
+			SyncMs:    60,
+			CommandMs: 750,
+			TotalMs:   950,
+			SyncPhases: []TimingPhase{
+				{Name: "archive", Ms: 60},
+				{Name: "git_hydrate", Skipped: true},
+			},
+			ExitCode: 0,
+		}, Repo{Name: "my-app"}, command, nil, 2),
+		newBenchmarkTimingRecord(now.Add(-2*time.Minute), "bench-run", TimingReport{
+			Provider:      "aws",
+			RunnerTotalMs: 1200,
+			RunnerPhases: []RunnerPhase{
+				{Name: "workspace.sync", Ms: 100},
+				{Name: "provider.wait", Ms: 25},
+				{Name: "provider.wait", Ms: 300, Opaque: true},
+			},
+			SyncMs:    70,
+			CommandMs: 800,
+			TotalMs:   1000,
+			SyncPhases: []TimingPhase{
+				{Name: "archive", Ms: 70},
+			},
+			ExitCode: 0,
+		}, Repo{Name: "my-app"}, command, nil, 3),
+		newBenchmarkTimingRecord(now.Add(-time.Minute), "bench-run", TimingReport{
+			Provider:      "aws",
+			RunnerTotalMs: 9999,
+			RunnerPhases:  []RunnerPhase{{Name: "workspace.sync", Ms: 9999}},
+			SyncMs:        9999,
+			CommandMs:     9999,
+			TotalMs:       9999,
+			SyncPhases:    []TimingPhase{{Name: "archive", Ms: 9999}},
+			SyncSkipped:   true,
+			ExitCode:      1,
+		}, Repo{Name: "my-app"}, command, nil, 4),
+	}
+
+	report := buildBenchmarkReport(records, benchmarkReportOptions{StorePath: "timings.jsonl", MinSamples: 2}, now)
+	if len(report.Groups) != 1 {
+		t.Fatalf("groups=%d want 1: %#v", len(report.Groups), report.Groups)
+	}
+	group := report.Groups[0]
+	if group.Source != "bench-run" || group.N != 3 || group.FailureCount != 1 {
+		t.Fatalf("source/counts=%q/%d/%d", group.Source, group.N, group.FailureCount)
+	}
+	if group.MedianRunnerTotalMs == nil || *group.MedianRunnerTotalMs != 1100 {
+		t.Fatalf("median runner total=%v", group.MedianRunnerTotalMs)
+	}
+	if group.P95RunnerTotalMs == nil || *group.P95RunnerTotalMs != 1200 {
+		t.Fatalf("p95 runner total=%v", group.P95RunnerTotalMs)
+	}
+	if group.SyncSkippedCount != 1 {
+		t.Fatalf("sync skipped=%d want 1", group.SyncSkippedCount)
+	}
+
+	if len(group.RunnerPhases) != 3 {
+		t.Fatalf("runner phases=%#v", group.RunnerPhases)
+	}
+	assertBenchmarkRunnerPhase(t, group.RunnerPhases[0], "provider.wait", false, 1, 25, nil)
+	p95 := int64(300)
+	assertBenchmarkRunnerPhase(t, group.RunnerPhases[1], "provider.wait", true, 3, 250, &p95)
+	p95 = 150
+	assertBenchmarkRunnerPhase(t, group.RunnerPhases[2], "workspace.sync", false, 3, 100, &p95)
+
+	if len(group.SyncPhases) != 2 {
+		t.Fatalf("sync phases=%#v", group.SyncPhases)
+	}
+	p95 = 70
+	assertBenchmarkSyncPhase(t, group.SyncPhases[0], "archive", 3, 60, &p95, 0)
+	assertBenchmarkSyncPhase(t, group.SyncPhases[1], "git_hydrate", 0, 0, nil, 2)
+}
+
+func TestBenchmarkReportGroupsBySourceAndKeepsLegacyTelemetryAbsent(t *testing.T) {
+	now := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
+	command := []string{"true"}
+	records := []BenchmarkTimingRecord{
+		newBenchmarkTimingRecord(now.Add(-3*time.Minute), "run", TimingReport{Provider: "aws", TotalMs: 100, ExitCode: 0}, Repo{}, command, nil, 0),
+		{
+			SchemaVersion: benchmarkTimingSchemaVersion,
+			RecordedAt:    now.Add(-2 * time.Minute),
+			Source:        "",
+			Benchmark:     BenchmarkRecordContext{CommandFingerprint: benchmarkCommandFingerprint(command)},
+			Timing:        TimingReport{Provider: "aws", TotalMs: 200, ExitCode: 0},
+		},
+		{
+			SchemaVersion: benchmarkTimingSchemaVersion,
+			RecordedAt:    now.Add(-time.Minute),
+			Source:        " ",
+			Benchmark:     BenchmarkRecordContext{CommandFingerprint: benchmarkCommandFingerprint(command)},
+			Timing:        TimingReport{Provider: "aws", TotalMs: 300, ExitCode: 0},
+		},
+	}
+
+	report := buildBenchmarkReport(records, benchmarkReportOptions{StorePath: "timings.jsonl", MinSamples: 1}, now)
+	if len(report.Groups) != 2 {
+		t.Fatalf("groups=%d want 2: %#v", len(report.Groups), report.Groups)
+	}
+	if report.Groups[0].Source != "run" || report.Groups[1].Source != "unknown" {
+		t.Fatalf("sources=%q/%q", report.Groups[0].Source, report.Groups[1].Source)
+	}
+	legacy := report.Groups[1]
+	if legacy.N != 2 || legacy.MedianRunnerTotalMs != nil || legacy.P95RunnerTotalMs != nil || len(legacy.RunnerPhases) != 0 || len(legacy.SyncPhases) != 0 {
+		t.Fatalf("legacy group=%#v", legacy)
+	}
+	body, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"medianRunnerTotalMs", "p95RunnerTotalMs", "runnerPhases", "syncPhases", "syncSkippedCount"} {
+		if bytes.Contains(body, []byte(`"`+field+`"`)) {
+			t.Fatalf("legacy JSON unexpectedly contains %s: %s", field, body)
+		}
+	}
+}
+
+func TestPrintBenchmarkReportIncludesStructuredRunnerAndSyncSummaries(t *testing.T) {
+	median := int64(100)
+	p95 := int64(150)
+	report := benchmarkReport{
+		StorePath:        "timings.jsonl",
+		ObservationCount: 3,
+		MatchedCount:     3,
+		Filters:          benchmarkReportFilters{MinSamples: 2},
+		Groups: []benchmarkReportGroup{{
+			Source:              "bench-run",
+			Provider:            "aws",
+			N:                   3,
+			MedianRunnerTotalMs: &median,
+			P95RunnerTotalMs:    &p95,
+			RunnerPhases: []benchmarkRunnerPhaseSummary{{
+				Name: "provider.wait", Opaque: true, N: 3, MedianMs: &median, P95Ms: &p95,
+			}},
+			SyncPhases: []benchmarkSyncPhaseSummary{{
+				Name: "archive", N: 3, MedianMs: &median, P95Ms: &p95, SkippedCount: 1,
+			}},
+			SyncSkippedCount: 2,
+			Evidence:         "sufficient_local_samples",
+		}},
+	}
+	var out bytes.Buffer
+	printBenchmarkReport(&out, report)
+	text := out.String()
+	for _, want := range []string{
+		"aws source=bench-run",
+		"median_runner_total=100ms p95_runner_total=150ms",
+		"sync_skipped=2 failures=0",
+		"runner_phase name=provider.wait opaque=true n=3 median=100ms p95=150ms",
+		"sync_phase name=archive n=3 median=100ms p95=150ms skipped=1",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func assertBenchmarkRunnerPhase(t *testing.T, got benchmarkRunnerPhaseSummary, name string, opaque bool, n int, median int64, p95 *int64) {
+	t.Helper()
+	if got.Name != name || got.Opaque != opaque || got.N != n || got.MedianMs == nil || *got.MedianMs != median || !equalOptionalInt64(got.P95Ms, p95) {
+		t.Fatalf("runner phase=%#v want name=%q opaque=%t n=%d median=%d p95=%v", got, name, opaque, n, median, p95)
+	}
+}
+
+func assertBenchmarkSyncPhase(t *testing.T, got benchmarkSyncPhaseSummary, name string, n int, median int64, p95 *int64, skipped int) {
+	t.Helper()
+	if got.Name != name || got.N != n || got.SkippedCount != skipped || !equalOptionalInt64(got.P95Ms, p95) {
+		t.Fatalf("sync phase=%#v want name=%q n=%d median=%d p95=%v skipped=%d", got, name, n, median, p95, skipped)
+	}
+	if n == 0 {
+		if got.MedianMs != nil {
+			t.Fatalf("sync phase median=%v want nil", got.MedianMs)
+		}
+	} else if got.MedianMs == nil || *got.MedianMs != median {
+		t.Fatalf("sync phase median=%v want %d", got.MedianMs, median)
+	}
+}
+
+func equalOptionalInt64(got, want *int64) bool {
+	if got == nil || want == nil {
+		return got == nil && want == nil
+	}
+	return *got == *want
+}
+
 func TestBenchReportJSONFiltersStoreRows(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "timings.jsonl")
