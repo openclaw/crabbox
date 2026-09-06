@@ -154,7 +154,10 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 				result.Status, result.ErrorKind = core.RunStatusFailed, core.RunErrorProvider
 				retErr = ExitErrorWithCause(firstCode, err.Error(), err)
 			} else {
-				retErr = errors.Join(retErr, err)
+				joined := errors.Join(retErr, err)
+				// The CLI prints the selected ExitError message, not the joined
+				// error. Keep secondary diagnostics in that public envelope too.
+				retErr = ExitErrorWithCause(result.ExitCode, joined.Error(), joined)
 			}
 		}
 		if command.Close != nil {

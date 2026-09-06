@@ -35,6 +35,29 @@ func TestExitErrorWithCausePreservesSelectedCodeAndMessage(t *testing.T) {
 	}
 }
 
+func TestDelegatedSandboxSecondaryDiagnosticsKeepSafeMessages(t *testing.T) {
+	primary := errors.New("raw execution detail")
+	secondary := errors.New("raw cleanup detail")
+	result, err := RunDelegatedSandbox(t.Context(), core.RunRequest{NoSync: true, Keep: true}, DelegatedSandboxLifecycle{
+		Provider: "test",
+		Acquire:  func(context.Context) (DelegatedSandbox, error) { return DelegatedSandbox{LeaseID: "lease"}, nil },
+		NoSync:   func(context.Context) error { return nil },
+		Command: func(context.Context) (DelegatedSandboxCommand, error) {
+			return DelegatedSandboxCommand{
+				Run:   func(context.Context) (int, error) { return 1, ExitErrorWithCause(1, "safe execution", primary) },
+				Close: func(context.Context) error { return ExitErrorWithCause(5, "safe cleanup", secondary) },
+			}, nil
+		},
+	})
+	var public core.ExitError
+	if !core.AsExitError(err, &public) || public.Code != 1 || result.ExitCode != 1 || !errors.Is(err, primary) || !errors.Is(err, secondary) {
+		t.Fatalf("selected code or causes lost: result=%+v err=%v", result, err)
+	}
+	if !strings.Contains(public.Message, "safe execution") || !strings.Contains(public.Message, "safe cleanup") || strings.Contains(public.Message, "raw ") || strings.Contains(err.Error(), "raw ") {
+		t.Fatalf("safe diagnostics were lost or underlying details exposed: message=%q err=%v", public.Message, err)
+	}
+}
+
 func TestDelegatedSandboxLifecycle(t *testing.T) {
 	failure := errors.New("phase failed")
 	cleanupFailure := errors.New("delete unavailable")
@@ -227,6 +250,11 @@ func TestDelegatedSandboxLifecycle(t *testing.T) {
 				if !errors.As(err, &ee) || ee.Code != tc.wantCode {
 					t.Fatalf("exit error=%v", err)
 				}
+				for _, secondary := range []error{tc.closeErr, tc.cleanupErr} {
+					if secondary != nil && !strings.Contains(ee.Message, secondary.Error()) {
+						t.Fatalf("CLI exit message lost cleanup diagnostic: message=%q secondary=%v", ee.Message, secondary)
+					}
+				}
 			}
 			count := 0
 			for _, call := range calls {
@@ -366,6 +394,9 @@ func TestDelegatedSandboxTimingWriterFailureDoesNotSkipCleanupOrMaskExit(t *test
 			var ee core.ExitError
 			if !errors.Is(err, io.ErrClosedPipe) || !errors.As(err, &ee) || ee.Code != wantCode || result.ExitCode != wantCode || calls != wantCleanup {
 				t.Fatalf("calls=%d result=%#v err=%v", calls, result, err)
+			}
+			if !strings.Contains(ee.Message, io.ErrClosedPipe.Error()) {
+				t.Fatalf("CLI exit message lost timing diagnostic: %q", ee.Message)
 			}
 		})
 	}
