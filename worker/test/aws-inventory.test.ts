@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { EC2SpotClient } from "../src/aws";
+import { AWSLeaseAuthorityError, AWSLeaseObservationError, EC2SpotClient } from "../src/aws";
 
 const leaseID = "cbx_abcdef123456";
 const region = "eu-west-1";
@@ -115,7 +115,7 @@ describe.each([
       expect(result).toEqual(
         lookup === "inventory"
           ? expected(["i-first", secondID])
-          : new Error(
+          : new AWSLeaseAuthorityError(
               `AWS ${lookup === "workspace" ? "private workspace " : ""}recovery is ambiguous for lease ${leaseID}`,
             ),
       );
@@ -151,7 +151,7 @@ describe.each([
     const result = await read(createClient()).catch((error: unknown) => error);
     expect(result).toEqual(
       morePages
-        ? new Error(
+        ? new AWSLeaseObservationError(
             `aws DescribeInstances inventory incomplete in ${region}: pagination exceeded 100 pages`,
           )
         : expected(["i-last"]),
@@ -179,7 +179,9 @@ describe.each([
       vi.stubGlobal("fetch", fetchMock);
 
       await expect(read(createClient())).rejects.toEqual(
-        new Error(`aws DescribeInstances inventory incomplete in ${region}: page 2 request failed`),
+        new AWSLeaseObservationError(
+          `aws DescribeInstances inventory incomplete in ${region}: page 2 request failed`,
+        ),
       );
       expect(fetchMock).toHaveBeenCalledTimes(2);
     },

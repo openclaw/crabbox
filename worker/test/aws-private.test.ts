@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   EC2SpotClient,
+  AWSLeaseAuthorityError,
   awsAutomaticProbesConfigured,
   awsCredentialsConfigured,
   awsOrphanSweepCredentialsConfigured,
@@ -82,6 +83,21 @@ describe("private AWS workspaces", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const request = requestFrom(input, init);
+        const host = new URL(request.url).hostname;
+        if (host.startsWith("servicequotas.")) {
+          actions.push("GetServiceQuota");
+          authorizations.push(request.headers.get("authorization") ?? "");
+          sessionTokens.push(request.headers.get("x-amz-security-token") ?? "");
+          return jsonResponse({ Quota: { Value: 1024 } });
+        }
+        if (host.startsWith("ssm.")) {
+          actions.push("DescribeInstanceInformation");
+          authorizations.push(request.headers.get("authorization") ?? "");
+          sessionTokens.push(request.headers.get("x-amz-security-token") ?? "");
+          return jsonResponse({
+            InstanceInformationList: [{ InstanceId: "i-private123", PingStatus: "Online" }],
+          });
+        }
         const action = new URLSearchParams(await request.clone().text()).get("Action") ?? "";
         actions.push(action);
         authorizations.push(request.headers.get("authorization") ?? "");
@@ -132,6 +148,16 @@ describe("private AWS workspaces", () => {
       });
       await operation.terminateServerAndWait("i-private123");
       await operation.deleteSSHKey(keyName, leaseID);
+      await operation.client.capacityReadinessChecks(
+        leaseConfig({
+          provider: "aws",
+          target: "linux",
+          serverType: "t3.small",
+          capacity: { market: "on-demand" },
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+      );
+      await operation.client.waitForSSMOnline("i-private123");
     });
 
     expect(credentials).toHaveBeenCalledTimes(1);
@@ -142,9 +168,93 @@ describe("private AWS workspaces", () => {
       "DescribeInstances",
       "DescribeKeyPairs",
       "DeleteKeyPair",
+      "GetServiceQuota",
+      "DescribeInstanceInformation",
     ]);
     expect(authorizations.every((value) => value.includes("Credential=TASKKEY1/"))).toBe(true);
     expect(sessionTokens).toEqual(Array(actions.length).fill("task-token-1"));
+  });
+
+  it("uses the qualification transport through the operation session client", async () => {
+    const execute = vi.fn<
+      (request: { action: string; service: string }) => Promise<{ body: string; status: number }>
+    >(async (request) => {
+      if (request.action === "GetCallerIdentity") {
+        return { body: await stsIdentityResponse(expectedAccountID).text(), status: 200 };
+      }
+      if (request.action === "DescribeInstances") {
+        return {
+          body: "<DescribeInstancesResponse><requestId>req-empty</requestId><reservationSet /></DescribeInstancesResponse>",
+          status: 200,
+        };
+      }
+      throw new Error(`unexpected qualification action ${request.action}`);
+    });
+    const client = new EC2SpotClient(
+      { CRABBOX_AWS_QUALIFICATION_TRANSPORT: { execute } } as Env,
+      region,
+    );
+
+    await client.withLeaseOperation(async (operation) => {
+      await expect(operation.verifiedIdentity()).resolves.toMatchObject({
+        account: expectedAccountID,
+      });
+      await expect(operation.client.listCrabboxServers()).resolves.toEqual([]);
+    });
+
+    expect(execute.mock.calls.map(([request]) => [request.service, request.action])).toEqual([
+      ["sts", "GetCallerIdentity"],
+      ["ec2", "DescribeInstances"],
+    ]);
+  });
+
+  it.each([
+    {
+      name: "ownership tags do not match",
+      keyPairID: "key-123",
+      tags: "<item><key>lease</key><value>cbx_other000000</value></item>",
+      message: "ownership does not match",
+    },
+    {
+      name: "the immutable key id is missing",
+      keyPairID: "",
+      tags: `<item><key>crabbox</key><value>true</value></item>
+        <item><key>created_by</key><value>crabbox</value></item>
+        <item><key>lease</key><value>cbx_abcdef123456</value></item>`,
+      message: "missing its immutable key pair ID",
+    },
+  ])("treats SSH key cleanup as unauthorized when $name", async ({ keyPairID, tags, message }) => {
+    const leaseID = "cbx_abcdef123456";
+    const keyName = providerKeyForLease(leaseID);
+    const actions: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = requestFrom(input, init);
+        const action = new URLSearchParams(await request.text()).get("Action") ?? "";
+        actions.push(action);
+        if (action === "GetCallerIdentity") return stsIdentityResponse(expectedAccountID);
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse(`<DescribeKeyPairsResponse><keySet><item>
+            <keyName>${keyName}</keyName>${keyPairID ? `<keyPairId>${keyPairID}</keyPairId>` : ""}
+            <tagSet>${tags}</tagSet>
+          </item></keySet></DescribeKeyPairsResponse>`);
+        }
+        throw new Error(`unexpected AWS action ${action}`);
+      }),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      region,
+    );
+
+    const error = await client
+      .withLeaseOperation((operation) => operation.deleteSSHKey(keyName, leaseID))
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AWSLeaseAuthorityError);
+    expect(error).toMatchObject({ message: expect.stringContaining(message) });
+    expect(actions).not.toContain("DeleteKeyPair");
   });
 
   it("retries an expected identity check after a transient failure", async () => {

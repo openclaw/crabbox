@@ -58,7 +58,15 @@ type AWSDescribeInstancesResult = {
 };
 
 function malformedAWSDescribeInstances(detail: string): never {
-  throw new Error(`malformed AWS DescribeInstances response: ${detail}`);
+  throw new AWSLeaseAuthorityError(`malformed AWS DescribeInstances response: ${detail}`);
+}
+
+export class AWSLeaseAuthorityError extends Error {
+  override name = "AWSLeaseAuthorityError";
+}
+
+export class AWSLeaseObservationError extends Error {
+  override name = "AWSLeaseObservationError";
 }
 
 const awsMacHostQuotaSpecs: Record<string, { quotaCode: string; quotaName: string }> = {
@@ -282,6 +290,7 @@ interface AWSQueryOptions {
 
 interface AWSLeaseOperation {
   readonly region: string;
+  readonly client: EC2SpotClient;
   verifiedIdentity(): Promise<AWSIdentity>;
   findServer(instanceID: string): Promise<ProviderMachine | undefined>;
   waitForServerVisibility(instanceID: string): Promise<ProviderMachine>;
@@ -715,6 +724,7 @@ type DescribedSSHIngressRule = SSHIngressRule & { description: string };
 interface AWSIngressOptions {
   reconcile?: "authoritative" | "additive";
   allowEmpty?: boolean;
+  onOwnedKeyCleanupRequired?: (existingKey: boolean) => Promise<void>;
   withIngress?: (apply: (cidrs: string[]) => Promise<string>) => Promise<string>;
 }
 
@@ -762,11 +772,12 @@ export class EC2SpotClient {
   constructor(
     private readonly env: Env,
     region: string,
+    credentialSnapshot?: ResolvedAWSCredentials,
   ) {
     this.region = requireAWSRegion(region || env.CRABBOX_AWS_REGION || "eu-west-1");
     const expected = awsExpectedIdentityConfig(env);
     if (expected && expected.region !== this.region) {
-      throw new Error(
+      throw new AWSLeaseAuthorityError(
         `AWS region mismatch: expected ${expected.region}, configured ${this.region}`,
       );
     }
@@ -784,6 +795,15 @@ export class EC2SpotClient {
       );
       this.stsClient = new QualificationAWSFetchClient(qualification, "sts", this.region);
       this.ssmClient = new RejectedQualificationFetchClient();
+    } else if (credentialSnapshot) {
+      this.aws = new FixedAWSFetchClient(credentialSnapshot, "ec2", this.region);
+      this.serviceQuotas = new FixedAWSFetchClient(
+        credentialSnapshot,
+        "servicequotas",
+        this.region,
+      );
+      this.stsClient = new FixedAWSFetchClient(credentialSnapshot, "sts", this.region);
+      this.ssmClient = new FixedAWSFetchClient(credentialSnapshot, "ssm", this.region);
     } else {
       const credentials = awsCredentialProvider(env);
       this.credentialProvider = credentials;
@@ -795,15 +815,16 @@ export class EC2SpotClient {
   }
 
   async withLeaseOperation<T>(operation: (session: AWSLeaseOperation) => Promise<T>): Promise<T> {
-    // Bind identity and every destructive EC2 request to one credential-provider result.
+    // One snapshot owns the full regional operation, including quota and SSM calls.
     const snapshot = this.credentialProvider
       ? resolvedAWSCredentials(await this.credentialProvider())
       : undefined;
-    const ec2 = snapshot ? new FixedAWSFetchClient(snapshot, "ec2", this.region) : this.aws;
-    const sts = snapshot ? new FixedAWSFetchClient(snapshot, "sts", this.region) : this.stsClient;
+    const client = snapshot ? new EC2SpotClient(this.env, this.region, snapshot) : this;
+    const ec2 = client.aws;
+    const sts = client.stsClient;
     let identity: Promise<AWSIdentity> | undefined;
     const verifiedIdentity = (): Promise<AWSIdentity> => {
-      identity ??= this.identityWith(sts).then((value) => this.verifyExpectedIdentity(value));
+      identity ??= client.identityWith(sts).then((value) => client.verifyExpectedIdentity(value));
       return identity;
     };
     const withAccount = async <R>(run: (account: string) => Promise<R>): Promise<R> => {
@@ -820,19 +841,20 @@ export class EC2SpotClient {
     });
     return await operation({
       region: this.region,
+      client,
       verifiedIdentity,
       findServer: (instanceID) =>
-        withAccount((account) => this.findServerWith(instanceID, query(account))),
+        withAccount((account) => client.findServerWith(instanceID, query(account))),
       waitForServerVisibility: (instanceID) =>
-        withAccount((account) => this.waitForServerVisibilityWith(instanceID, query(account))),
+        withAccount((account) => client.waitForServerVisibilityWith(instanceID, query(account))),
       findCrabboxServerByLease: (leaseID) =>
-        withAccount((account) => this.findLeaseServer(leaseID, false, query(account))),
+        withAccount((account) => client.findLeaseServer(leaseID, false, query(account))),
       findWorkspaceServerByLease: (leaseID) =>
-        withAccount((account) => this.findLeaseServer(leaseID, true, query(account))),
+        withAccount((account) => client.findLeaseServer(leaseID, true, query(account))),
       terminateServerAndWait: (instanceID) =>
-        withAccount((account) => this.terminateServerAndWaitWith(instanceID, query(account))),
+        withAccount((account) => client.terminateServerAndWaitWith(instanceID, query(account))),
       deleteSSHKey: (name, leaseID) =>
-        withAccount((account) => this.deleteSSHKeyWith(name, leaseID, query(account))),
+        withAccount((account) => client.deleteSSHKeyWith(name, leaseID, query(account))),
     });
   }
 
@@ -874,7 +896,7 @@ export class EC2SpotClient {
     const expected = awsExpectedIdentityConfig(this.env);
     if (!expected) return identity;
     if (identity.account !== expected.accountID) {
-      throw new Error(
+      throw new AWSLeaseAuthorityError(
         `AWS account mismatch: expected ${expected.accountID}, authenticated ${identity.account || "unknown"}`,
       );
     }
@@ -883,7 +905,7 @@ export class EC2SpotClient {
       (identity.policyTarget?.source !== "assumed-role" ||
         identity.policyTarget.name !== expected.taskRoleName)
     ) {
-      throw new Error("AWS task role mismatch");
+      throw new AWSLeaseAuthorityError("AWS task role mismatch");
     }
     return identity;
   }
@@ -1143,7 +1165,7 @@ export class EC2SpotClient {
     );
     if (matches.length > 1) {
       const kind = privateWorkspace ? "private workspace " : "";
-      throw new Error(`AWS ${kind}recovery is ambiguous for lease ${leaseID}`);
+      throw new AWSLeaseAuthorityError(`AWS ${kind}recovery is ambiguous for lease ${leaseID}`);
     }
     return matches[0];
   }
@@ -1169,8 +1191,7 @@ export class EC2SpotClient {
         );
       } catch (error) {
         if (page === 0) throw error;
-        // oxlint-disable-next-line eslint/preserve-caught-error -- Upstream causes can expose opaque tokens or credentials.
-        throw new Error(`${incomplete}: page ${page + 1} request failed`);
+        throw new AWSLeaseObservationError(`${incomplete}: page ${page + 1} request failed`);
       }
       machines.push(
         ...described.reservations.flatMap((reservation) =>
@@ -1182,11 +1203,13 @@ export class EC2SpotClient {
       nextToken = asString(described.root["nextToken"]);
       if (!nextToken) return machines;
       if (seenTokens.has(nextToken)) {
-        throw new Error(`${incomplete}: repeated pagination token`);
+        throw new AWSLeaseObservationError(`${incomplete}: repeated pagination token`);
       }
       seenTokens.add(nextToken);
     }
-    throw new Error(`${incomplete}: pagination exceeded ${awsDescribeInstancesMaxPages} pages`);
+    throw new AWSLeaseObservationError(
+      `${incomplete}: pagination exceeded ${awsDescribeInstancesMaxPages} pages`,
+    );
   }
 
   async refreshSSHIngress(config: LeaseConfig, options: AWSIngressOptions = {}): Promise<void> {
@@ -1207,7 +1230,12 @@ export class EC2SpotClient {
     imageID: string;
   }> {
     if (!config.awsPrivate) {
-      await this.ensureSSHKey(config.providerKey, config.sshPublicKey, leaseID);
+      await this.ensureSSHKey(
+        config.providerKey,
+        config.sshPublicKey,
+        leaseID,
+        options.onOwnedKeyCleanupRequired,
+      );
     }
     let transientImageID = "";
     try {
@@ -1449,7 +1477,7 @@ export class EC2SpotClient {
           malformedAWSDescribeInstances("ownerId is invalid");
         }
         if (options.expectedAccount && ownerID !== options.expectedAccount) {
-          malformedAWSDescribeInstances(
+          throw new AWSLeaseAuthorityError(
             `ownerId ${ownerID} does not match authenticated account ${options.expectedAccount}`,
           );
         }
@@ -1501,7 +1529,7 @@ export class EC2SpotClient {
         const instance = record(instanceValue);
         const returnedID = asString(instance["instanceId"]).trim();
         if (returnedID !== instanceID) {
-          throw new Error(
+          throw new AWSLeaseAuthorityError(
             `AWS DescribeInstances returned instance ${returnedID} for ${instanceID}`,
           );
         }
@@ -1509,7 +1537,9 @@ export class EC2SpotClient {
       }
     }
     if (instances.length !== 1) {
-      malformedAWSDescribeInstances(`expected one instance, received ${instances.length}`);
+      throw new AWSLeaseAuthorityError(
+        `AWS DescribeInstances returned ${instances.length} instances for ${instanceID}`,
+      );
     }
     return { kind: "present", server: instances[0]! };
   }
@@ -1517,7 +1547,7 @@ export class EC2SpotClient {
   async getServer(instanceID: string): Promise<ProviderMachine> {
     const lookup = await this.describeServer(instanceID);
     if (lookup.kind === "present") return lookup.server;
-    throw new Error(`aws instance not found: ${instanceID}`);
+    throw new AWSLeaseObservationError(`aws instance not found: ${instanceID}`);
   }
 
   async findServer(instanceID: string): Promise<ProviderMachine | undefined> {
@@ -1555,7 +1585,7 @@ export class EC2SpotClient {
     }
     const server = await this.findServerWith(instanceID, options);
     if (server) return server;
-    throw new Error(`aws instance not found: ${instanceID}`);
+    throw new AWSLeaseObservationError(`aws instance not found: ${instanceID}`);
   }
 
   async waitForServerIP(
@@ -1733,16 +1763,23 @@ export class EC2SpotClient {
     options: AWSQueryOptions,
   ): Promise<void> {
     // NotFound before acknowledgement can be creation propagation, not termination.
-    const terminated = await this.ec2(
-      "TerminateInstances",
-      { "InstanceId.1": instanceID },
-      options,
-    );
+    let terminated: Record<string, unknown>;
+    try {
+      terminated = await this.ec2("TerminateInstances", { "InstanceId.1": instanceID }, options);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isAWSInstanceNotFoundError(message)) {
+        throw new AWSLeaseObservationError(message, { cause: error });
+      }
+      throw error;
+    }
     const returnedIDs = items(record(terminated["instancesSet"])["item"])
       .map((item) => asString(record(item)["instanceId"]))
       .filter(Boolean);
     if (!returnedIDs.includes(instanceID)) {
-      throw new Error(`AWS TerminateInstances did not confirm instance ${instanceID}`);
+      throw new AWSLeaseObservationError(
+        `AWS TerminateInstances did not confirm instance ${instanceID}`,
+      );
     }
     for (const delay of awsInstanceVisibilityBackoffMs) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- termination confirmation is ordered.
@@ -1753,7 +1790,9 @@ export class EC2SpotClient {
     }
     const server = await this.findServerWith(instanceID, options);
     if (!server || server.status === "terminated") return;
-    throw new Error(`timed out confirming AWS instance termination: ${instanceID}`);
+    throw new AWSLeaseObservationError(
+      `timed out confirming AWS instance termination: ${instanceID}`,
+    );
   }
 
   async createDiskSnapshot(
@@ -2366,12 +2405,13 @@ export class EC2SpotClient {
     }
     const existing = items(record(described["keySet"])["item"]).map(record)[0];
     if (!existing || !providerKeyOwnedByLease(tagMap(existing["tagSet"]), leaseID)) {
-      console.warn(`AWS SSH key cleanup skipped unowned key lease=${leaseID} key=${name}`);
-      return;
+      throw new AWSLeaseAuthorityError(
+        `AWS SSH key ${name} ownership does not match lease ${leaseID}`,
+      );
     }
     const keyPairID = asString(existing["keyPairId"]);
     if (!keyPairID) {
-      throw new Error(`AWS SSH key ${name} is missing its immutable key pair ID`);
+      throw new AWSLeaseAuthorityError(`AWS SSH key ${name} is missing its immutable key pair ID`);
     }
     await this.ec2("DeleteKeyPair", { KeyPairId: keyPairID }, options).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
@@ -2387,7 +2427,12 @@ export class EC2SpotClient {
     await this.ec2("CreateTags", params);
   }
 
-  private async ensureSSHKey(name: string, publicKey: string, leaseID: string): Promise<void> {
+  private async ensureSSHKey(
+    name: string,
+    publicKey: string,
+    leaseID: string,
+    onOwnedKeyCleanupRequired?: (existingKey: boolean) => Promise<void>,
+  ): Promise<void> {
     const keyLeaseID = leaseIDForProviderKey(name);
     if (keyLeaseID && keyLeaseID !== leaseID) {
       throw new Error(`aws ssh key ${name} is reserved for lease ${keyLeaseID}`);
@@ -2420,6 +2465,9 @@ export class EC2SpotClient {
       if (leaseOwned && !providerKeyOwnedByLease(tagMap(existing["tagSet"]), leaseID)) {
         throw new Error(`aws ssh key ${name} is not owned by lease ${leaseID}`);
       }
+      if (leaseOwned) {
+        await onOwnedKeyCleanupRequired?.(true);
+      }
       return;
     }
     const params: Record<string, string> = {
@@ -2434,6 +2482,7 @@ export class EC2SpotClient {
     if (leaseOwned) {
       params["TagSpecification.1.Tag.3.Key"] = "lease";
       params["TagSpecification.1.Tag.3.Value"] = leaseID;
+      await onOwnedKeyCleanupRequired?.(false);
     }
     await this.ec2("ImportKeyPair", params);
   }
@@ -3002,7 +3051,9 @@ export class EC2SpotClient {
         : (this.parser.parse(text) as unknown);
     } catch (error) {
       if (options.exactResponseEnvelope) {
-        throw new Error(`malformed AWS ${action} response: invalid XML`, { cause: error });
+        throw new AWSLeaseAuthorityError(`malformed AWS ${action} response: invalid XML`, {
+          cause: error,
+        });
       }
       throw error;
     }
@@ -3011,11 +3062,15 @@ export class EC2SpotClient {
       const envelope = `${action}Response`;
       const payloadRoots = Object.keys(parsedRecord).filter((key) => key !== "?xml");
       if (payloadRoots.length !== 1 || payloadRoots[0] !== envelope) {
-        throw new Error(`malformed AWS ${action} response: ${envelope} envelope is missing`);
+        throw new AWSLeaseAuthorityError(
+          `malformed AWS ${action} response: ${envelope} envelope is missing`,
+        );
       }
       const root = parsedRecord[envelope];
       if (!root || typeof root !== "object" || Array.isArray(root)) {
-        throw new Error(`malformed AWS ${action} response: ${envelope} envelope is invalid`);
+        throw new AWSLeaseAuthorityError(
+          `malformed AWS ${action} response: ${envelope} envelope is invalid`,
+        );
       }
       return root as Record<string, unknown>;
     }

@@ -156,7 +156,9 @@ describe("aws provider", () => {
     ).resolves.toBeUndefined();
 
     owned = false;
-    await client.deleteSSHKey("crabbox-cbx-abcdef123456", "cbx_abcdef123456");
+    await expect(
+      client.deleteSSHKey("crabbox-cbx-abcdef123456", "cbx_abcdef123456"),
+    ).rejects.toThrow("ownership does not match lease cbx_abcdef123456");
     owned = true;
     await client.deleteSSHKey("crabbox-cbx-abcdef123456", "cbx_abcdef123456");
     expect(actions).toEqual([
