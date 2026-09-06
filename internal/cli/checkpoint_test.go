@@ -361,6 +361,10 @@ func TestCheckpointRestoreDryRunDoesNotResolveLease(t *testing.T) {
 func TestCheckpointRestoreDryRunUsesStoredLeaseTarget(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-q")
+	runGit(t, repo, "remote", "add", "origin", "https://github.com/example-org/restore-target.git")
+	t.Chdir(repo)
 	store, err := defaultCheckpointStore()
 	if err != nil {
 		t.Fatal(err)
@@ -379,7 +383,7 @@ func TestCheckpointRestoreDryRunUsesStoredLeaseTarget(t *testing.T) {
 		"windows_mode": windowsModeNormal,
 		"work_root":    `C:\crabbox`,
 	}}
-	if err := claimLeaseTargetForRepoConfig(leaseID, "windows-dryrun", cfg, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, "windows-dryrun", cfg, server, SSHTarget{}, repo, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -388,7 +392,7 @@ func TestCheckpointRestoreDryRunUsesStoredLeaseTarget(t *testing.T) {
 	if err := app.checkpointRestore(context.Background(), []string{record.ID, "--id", leaseID, "--provider", "aws", "--dry-run"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), `workdir=C:\crabbox\`+leaseID+`\crabbox`) {
+	if !strings.Contains(stdout.String(), `workdir=C:\crabbox\`+leaseID+`\restore-target`) {
 		t.Fatalf("stdout=%q", stdout.String())
 	}
 	assertCheckpointLastUsedAt(t, store, record.ID, lastUsedAt)

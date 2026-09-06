@@ -3126,16 +3126,15 @@ func TestRunCommandRejectsExistingLeaseTargetBeforeTouch(t *testing.T) {
 	}
 }
 
-func TestRunCommandTimingJSONRemainsFinalLineWithCleanup(t *testing.T) {
-	dir := t.TempDir()
-	isolateRunTestUserDirs(t, dir)
-	sshPath := filepath.Join(dir, "ssh")
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+func startTCPReadinessFixture(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
@@ -3144,17 +3143,29 @@ func TestRunCommandTimingJSONRemainsFinalLineWithCleanup(t *testing.T) {
 			_ = conn.Close()
 		}
 	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		<-done
+	})
 	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
+	return sshPort
+}
+
+func TestRunCommandTimingJSONRemainsFinalLineWithCleanup(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	sshPort := startTCPReadinessFixture(t)
 	installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\nexit 0\n")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
 
 	var stdout, stderr bytes.Buffer
-	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
 		"--provider", "run-env-profile-test",
 		"--no-sync",
 		"--timing-json",

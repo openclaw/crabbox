@@ -39,6 +39,7 @@ func TestRunCoordinatorCleanupOutcomes(t *testing.T) {
 				name = tc.name + "/timing"
 			}
 			t.Run(name, func(t *testing.T) {
+				sshPort := startTCPReadinessFixture(t)
 				setupRunCleanupWorkspaceOwnerTest(t)
 				const id = "cbx_abcdef123456"
 				provider := runReadyPoolPreflightTestProvider{}.Name()
@@ -57,7 +58,7 @@ func TestRunCoordinatorCleanupOutcomes(t *testing.T) {
 				var posts atomic.Int32
 				var artifactFailure atomic.Bool
 				outside := t.TempDir()
-				active := CoordinatorLease{ID: id, Provider: provider, State: "active", Host: "127.0.0.1", SSHPort: "22", SSHUser: "crabbox", TargetOS: targetLinux}
+				active := CoordinatorLease{ID: id, Provider: provider, State: "active", Host: "127.0.0.1", SSHPort: sshPort, SSHUser: "crabbox", TargetOS: targetLinux}
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					switch {
 					case strings.HasSuffix(r.URL.Path, "/release"):
