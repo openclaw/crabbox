@@ -476,9 +476,9 @@ func probeWSL2SSHReady(ctx context.Context, target *SSHTarget, profile sshReadin
 		probe.Port, probe.FallbackPorts = port, []string{}
 		run := func(remote string) error {
 			command := sshTransportPreparation{command: wsl2ReadinessCommand(remote)}
-			diagnostic := synchronizedBuffer{limit: 64 * 1024}
+			var diagnostic sshReadinessDiagnostic
 			_, err := command.runOnce(ctx, probe, profile.connectTimeout, profile.connectionAttempts, io.Discard, &diagnostic, false)
-			return sshReadinessProbeError(ctx, err, diagnostic.String())
+			return sshReadinessProbeError(ctx, err, diagnostic.hostKeyRejected())
 		}
 		if err := run(sshTransportProbeCommand(probe)); err != nil {
 			if errors.Is(err, errSSHHostKeyVerification) {
@@ -487,7 +487,16 @@ func probeWSL2SSHReady(ctx context.Context, target *SSHTarget, profile sshReadin
 			outcomes = append(outcomes, outcome{err: err})
 			continue
 		}
-		if err := probeWSLSFTPSubsystem(ctx, probe, profile.connectTimeout, profile.connectionAttempts, stderr); err != nil {
+		var diagnostic sshReadinessDiagnostic
+		var diagnosticOutput io.Writer = &diagnostic
+		if stderr != nil {
+			diagnosticOutput = io.MultiWriter(&diagnostic, stderr)
+		}
+		sftpErr := probeWSLSFTPSubsystem(ctx, probe, profile.connectTimeout, profile.connectionAttempts, diagnosticOutput)
+		if err := sshReadinessProbeError(ctx, sftpErr, diagnostic.hostKeyRejected()); err != nil {
+			if errors.Is(err, errSSHHostKeyVerification) {
+				return err
+			}
 			outcomes = append(outcomes, outcome{err: err, missingSFTP: IsWSLSFTPUnavailable(err)})
 			continue
 		}

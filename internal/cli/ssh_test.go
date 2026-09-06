@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -2135,6 +2136,57 @@ func TestWSL2ReadinessAllMissingSFTPStopsWithoutRepollOrMutation(t *testing.T) {
 	calls, readErr := os.ReadFile(logPath)
 	if readErr != nil || strings.Count(string(calls), "\n") != 2 {
 		t.Fatalf("calls=%q err=%v, want one shell/auth attempt per port", calls, readErr)
+	}
+}
+
+func TestWSL2ReadinessSFTPHostKeyRejectionStopsWithoutFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake SSH fixture")
+	}
+	exit255 := exec.Command("sh", "-c", "exit 255").Run()
+	if exitCode(exit255) != 255 {
+		t.Fatalf("fixture exit status: %v", exit255)
+	}
+	for _, prefix := range []string{"", strings.Repeat("x", 64*1024)} {
+		t.Run(fmt.Sprintf("prefix-bytes=%d", len(prefix)), func(t *testing.T) {
+			target := SSHTarget{User: "fixture", Host: "readiness.example", Port: "2222", FallbackPorts: []string{"22"}, TargetOS: targetWindows, WindowsMode: windowsModeWSL2, ReadyCheck: "true"}
+			original := target
+			logPath := installWSL2ReadinessRecorder(t, "exit 0", target.ReadyCheck)
+			oldStart := startWSLSFTPSubsystem
+			t.Cleanup(func() { startWSLSFTPSubsystem = oldStart })
+			probes := 0
+			startWSLSFTPSubsystem = func(_ context.Context, candidate SSHTarget, _, _, subsystem string, stderr io.Writer) (io.Reader, io.WriteCloser, func() error, error) {
+				probes++
+				if candidate.Port != "2222" || subsystem != "sftp" {
+					t.Errorf("unexpected fallback/subsystem: port=%s subsystem=%s", candidate.Port, subsystem)
+				}
+				for _, fragment := range []string{prefix, "private-diagnostic-data\nHost key ver", "ification failed.\r\n"} {
+					if _, err := io.WriteString(stderr, fragment); err != nil {
+						t.Fatal(err)
+					}
+				}
+				clientConn, serverConn := net.Pipe()
+				_ = serverConn.Close()
+				return clientConn, clientConn, func() error { return exit255 }, nil
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			var progress bytes.Buffer
+			err := waitForSSHReady(ctx, &target, &progress, "before sync", time.Minute)
+			if !errors.Is(err, errSSHHostKeyVerification) || !errors.Is(err, exit255) || ctx.Err() != nil {
+				t.Errorf("readiness did not preserve immediate host-key failure: %v (context=%v)", err, ctx.Err())
+			}
+			if probes != 1 || !reflect.DeepEqual(target, original) {
+				t.Errorf("probes=%d target=%+v, want one probe and unchanged target", probes, target)
+			}
+			if strings.Contains(err.Error(), "private-diagnostic-data") || strings.Contains(progress.String(), "waiting for") {
+				t.Error("host-key failure leaked into its error or entered readiness backoff")
+			}
+			calls, readErr := os.ReadFile(logPath)
+			if readErr != nil || string(calls) != "ssh:2222:shell\n" {
+				t.Errorf("SSH calls=%q err=%v, want only the initial transport probe", calls, readErr)
+			}
+		})
 	}
 }
 
