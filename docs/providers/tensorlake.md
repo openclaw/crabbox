@@ -171,6 +171,25 @@ identity checks. A changed claim blocks stale cleanup. Native control calls are
 bounded; authentication, malformed output, and missing metadata fail closed.
 An empty list or a `not found` response alone is not deletion proof.
 
+Run retention, cleanup outcomes, and final timing use the shared delegated
+lifecycle. Fresh setup, sync, and command-preparation failures honor
+`--keep-on-failure`; failed automatic termination returns a failed run with a
+kept recovery session. Later cleanup or timing errors do not replace an earlier
+command failure. Environment-profile cleanup remains warning-only. Profile and
+sandbox cleanup receive separate bounded contexts; a timing writer failure after
+successful deletion cannot make the deleted sandbox recoverable again.
+
+Local options and required configuration are validated first. Fresh archives
+are still prepared before allocation; reused leases are authorized before archive
+preparation. This normalizes failure ordering without changing exact ownership
+checks or adding another provider-specific preparation policy.
+
+Cleanup of an existing bound claim has a single 30-second budget covering the
+claim-lock wait, identity recheck, termination, and confirmation. A shorter caller
+deadline still applies. Expiry before admission performs no native operation and
+retains the claim for retry. This does not bound separate create/publication or
+run-admission lock waits, or failed-create rollback before a claim exists.
+
 ### Legacy and uncertain ownership
 
 Older provider-only claims cannot prove account or resource ownership. Crabbox

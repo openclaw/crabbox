@@ -429,10 +429,6 @@ func TestRunCreatesExecsAndTerminatesEphemeralSandbox(t *testing.T) {
 		Command: []string{"echo", "hello"},
 		NoSync:  true,
 	}
-	defer func() {
-		// Best-effort cleanup of the lease claim store side effects.
-		_ = req
-	}()
 	result, err := backend.Run(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Run err=%v", err)
@@ -1471,13 +1467,14 @@ func TestRunTerminateFailureReportsRetainedSession(t *testing.T) {
 	rt.Stderr = &stderr
 	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), rt).(*tensorlakeBackend)
 	req := RunRequest{
-		Repo:    Repo{Name: "carbbox", Root: t.TempDir()},
-		Command: []string{"echo", "hi"},
-		NoSync:  true,
+		Repo:       Repo{Name: "carbbox", Root: t.TempDir()},
+		Command:    []string{"echo", "hi"},
+		NoSync:     true,
+		TimingJSON: true,
 	}
 	result, err := backend.Run(context.Background(), req)
-	if err != nil {
-		t.Fatalf("Run err=%v", err)
+	if err == nil || result.ExitCode != 1 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider {
+		t.Fatalf("cleanup failure result=%#v err=%v", result, err)
 	}
 	if result.Session == nil {
 		t.Fatal("session=nil")
@@ -1485,9 +1482,160 @@ func TestRunTerminateFailureReportsRetainedSession(t *testing.T) {
 	if result.Session.Provider != providerName || result.Session.Reused || !result.Session.Kept {
 		t.Fatalf("session=%#v", result.Session)
 	}
-	if !strings.Contains(stderr.String(), "warning: tensorlake terminate failed for termfail0123456789000") {
-		t.Fatalf("stderr=%q, want terminate warning", stderr.String())
+	if !strings.Contains(err.Error(), "cleanup failed") || !strings.Contains(stderr.String(), `"exitCode":1`) {
+		t.Fatalf("cleanup err=%v timing=%s", err, stderr.String())
 	}
+}
+
+func TestRunEarlyFailureHonorsKeepOnFailure(t *testing.T) {
+	for _, failure := range []string{"workspace", "intent", "env upload", "archive upload"} {
+		t.Run(failure, func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			const id = "3pryjysezwsnlex226i5h"
+			runner := newRunner(map[string]scriptedReply{"sbx create": {stdout: id + "\n"}}, map[string][]scriptedReply{})
+			var stderr bytes.Buffer
+			rt := newTestRuntime(runner)
+			rt.Stderr = &stderr
+			b := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), rt).(*tensorlakeBackend)
+			req := RunRequest{Repo: Repo{Root: t.TempDir()}, NoSync: true, KeepOnFailure: true, TimingJSON: true, Command: []string{"true"}}
+			switch failure {
+			case "workspace":
+				runner.scripts["sbx exec"] = []scriptedReply{{exitCode: 7}}
+			case "intent":
+				req.Command = nil
+			case "env upload":
+				req.Env = map[string]string{"FIXTURE": "value"}
+				runner.defaults["sbx cp"] = scriptedReply{exitCode: 1, err: errors.New("upload unavailable")}
+			case "archive upload":
+				req.NoSync = false
+				req.Repo.Root = newGitRepo(t)
+				runner.defaults["sbx cp"] = scriptedReply{exitCode: 1, err: errors.New("upload unavailable")}
+			}
+			result, err := b.Run(t.Context(), req)
+			if err == nil || result.Session == nil || !result.Session.Kept || findCall(runner, "sbx terminate") != nil {
+				t.Fatalf("early failure lost recovery: result=%#v err=%v verbs=%v", result, err, callMutationVerbs(runner))
+			}
+			claim, exists, readErr := core.ReadLeaseClaimWithPresence(leasePrefix + id)
+			if readErr != nil || !exists || claim.CloudID != id {
+				t.Fatalf("retained claim=%#v exists=%t err=%v", claim, exists, readErr)
+			}
+			var report core.TimingReport
+			lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+			if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil || report.ExitCode == 0 || report.RunStatus != core.RunStatusFailed || report.ErrorKind != core.RunErrorProvider {
+				t.Fatalf("failure timing=%#v err=%v", report, err)
+			}
+		})
+	}
+}
+
+func TestQuietErrorsPreserveCauses(t *testing.T) {
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded, io.ErrShortWrite} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			runner := newRunner(map[string]scriptedReply{"sbx cp": {exitCode: 1, err: cause}}, nil)
+			cli, err := newTensorlakeCLI(newTestConfig(), newTestRuntime(runner))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cli.uploadFile(t.Context(), "sandbox", "local", "/tmp/profile"); !errors.Is(err, cause) {
+				t.Fatalf("quiet command lost cause: %v", err)
+			}
+		})
+	}
+}
+
+type selectiveTimingFailureWriter struct{ bytes.Buffer }
+
+func (w *selectiveTimingFailureWriter) Write(data []byte) (int, error) {
+	if len(data) > 0 && data[0] == '{' {
+		return 0, io.ErrClosedPipe
+	}
+	return w.Buffer.Write(data)
+}
+
+func TestRunFinalizationPreservesPrimaryFailure(t *testing.T) {
+	for _, commandCode := range []int{0, 23} {
+		t.Run(fmt.Sprint(commandCode), func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			const id = "3pryjysezwsnlex226i5h"
+			runner := newRunner(map[string]scriptedReply{"sbx create": {stdout: id + "\n"}}, map[string][]scriptedReply{
+				"sbx exec": {{}, {exitCode: commandCode}},
+			})
+			if commandCode != 0 {
+				runner.defaults["sbx terminate"] = scriptedReply{exitCode: 1}
+			}
+			var stderr selectiveTimingFailureWriter
+			rt := newTestRuntime(runner)
+			rt.Stderr = &stderr
+			b := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), rt).(*tensorlakeBackend)
+			result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir()}, NoSync: true, Command: []string{"workload"}, TimingJSON: true, KeepOnFailure: commandCode == 0})
+			code, kind := commandCode, core.RunErrorCommandExit
+			if commandCode == 0 {
+				code, kind = 1, core.RunErrorProvider
+			}
+			var public ExitError
+			if !errors.As(err, &public) || public.Code != code || !errors.Is(err, io.ErrClosedPipe) || result.ExitCode != code || result.Status != core.RunStatusFailed || result.ErrorKind != kind {
+				t.Fatalf("result=%#v err=%v public=%#v", result, err, public)
+			}
+			if result.Session == nil || result.Session.Kept != (commandCode != 0) {
+				t.Fatalf("wrong post-cleanup recovery state: %#v", result.Session)
+			}
+			if commandCode != 0 && !strings.Contains(err.Error(), "cleanup failed") {
+				t.Fatalf("secondary cleanup failure lost: %v", err)
+			}
+			terminations := 0
+			for _, verb := range callMutationVerbs(runner) {
+				if verb == "sbx terminate" {
+					terminations++
+				}
+			}
+			if terminations != 1 {
+				t.Fatalf("termination attempts=%d", terminations)
+			}
+			_, exists, readErr := core.ReadLeaseClaimWithPresence(leasePrefix + id)
+			if readErr != nil || exists != (commandCode != 0) {
+				t.Fatalf("claim exists=%t err=%v", exists, readErr)
+			}
+		})
+	}
+}
+
+func TestRunProfileCleanupWarningDoesNotRetainSuccessfulSandbox(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	const id = "3pryjysezwsnlex226i5h"
+	runner := newRunner(map[string]scriptedReply{"sbx create": {stdout: id + "\n"}}, map[string][]scriptedReply{
+		"sbx exec": {{}, {}, {exitCode: 7}},
+	})
+	var stderr bytes.Buffer
+	rt := newTestRuntime(runner)
+	rt.Stderr = &stderr
+	b := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), rt).(*tensorlakeBackend)
+	result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir()}, NoSync: true, Command: []string{"workload"}, Env: map[string]string{"FIXTURE": "value"}, KeepOnFailure: true, TimingJSON: true})
+	if err != nil || result.ExitCode != 0 || result.Status != core.RunStatusSucceeded || result.Session == nil || result.Session.Kept {
+		t.Fatalf("best-effort profile cleanup changed success: result=%#v err=%v", result, err)
+	}
+	if !strings.Contains(stderr.String(), "env profile cleanup failed") || findCall(runner, "sbx terminate") == nil {
+		t.Fatalf("warning/disposition missing: %s", stderr.String())
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leasePrefix + id); exists || err != nil {
+		t.Fatalf("successful sandbox claim retained: exists=%t err=%v", exists, err)
+	}
+}
+
+func TestRunRejectedReuseKeepsClaimWithoutWorkOrHints(t *testing.T) {
+	b, _, runner, claim := ownedTensorlakeFixture(t)
+	item := runner.resources[claim.CloudID]
+	item.Namespace = "different-namespace"
+	runner.resources[claim.CloudID] = item
+	var stderr bytes.Buffer
+	b.rt.Stderr = &stderr
+	result, err := b.Run(t.Context(), RunRequest{ID: claim.LeaseID, NoSync: true, KeepOnFailure: true, Command: []string{"workload"}, TimingJSON: true})
+	if err == nil || result.Session == nil || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("rejected reuse result=%#v err=%v", result, err)
+	}
+	if findCall(runner, "sbx exec") != nil || findCall(runner, "sbx terminate") != nil || strings.Contains(stderr.String(), "keep-on-failure:") {
+		t.Fatalf("rejected reuse performed work or suggested rerun: %s", stderr.String())
+	}
+	assertTensorlakeClaimUnchanged(t, claim)
 }
 
 func TestStopRejectsUnclaimedID(t *testing.T) {

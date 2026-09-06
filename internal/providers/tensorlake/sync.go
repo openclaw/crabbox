@@ -8,11 +8,8 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-// rejectIncompatibleSyncOptions refuses Crabbox sync flags whose semantics
-// can't be honored on top of `tensorlake sbx cp`. SyncOnly and ChecksumSync
-// require Crabbox-side rsync semantics that the Tensorlake CLI doesn't
-// expose. ForceSyncLarge is rejected by the core delegated-sync gate before
-// we get here, so we don't repeat that check.
+// rejectIncompatibleSyncOptions keeps unsupported sync modes rejected before
+// archive preparation or provider work. ForceSyncLarge reaches the archive owner.
 func rejectIncompatibleSyncOptions(req RunRequest) error {
 	if req.SyncOnly {
 		return exit(2, "provider=tensorlake uses archive sync; --sync-only is not supported")

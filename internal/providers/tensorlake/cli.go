@@ -249,7 +249,7 @@ func tensorlakeError(action string, exitCode int, stdout, stderr *bytes.Buffer, 
 		tail = tail[:4096]
 	}
 	if runErr != nil {
-		return fmt.Errorf("tensorlake %s (exit=%d): %v: %s", action, exitCode, runErr, tail)
+		return fmt.Errorf("tensorlake %s (exit=%d): %w: %s", action, exitCode, runErr, tail)
 	}
 	return fmt.Errorf("tensorlake %s exited %d: %s", action, exitCode, tail)
 }
