@@ -27526,6 +27526,86 @@ describe("fleet lease identity and idle", () => {
     }
   });
 
+  it.each([
+    {
+      name: "the key ownership contradicts the lease",
+      keyLeaseID: "cbx_wronglease12",
+      deleteStatus: 200,
+      expectedError: "ownership does not match lease",
+      retryable: false,
+    },
+    {
+      name: "key deletion is temporarily unavailable",
+      keyLeaseID: "cbx_abcdef123457",
+      deleteStatus: 0,
+      expectedError: "failed to clean AWS SSH key",
+      retryable: true,
+    },
+  ])(
+    "does not enter another AWS Region when $name",
+    async ({ keyLeaseID, deleteStatus, expectedError, retryable }) => {
+      const leaseID = "cbx_abcdef123457";
+      const keyName = providerKeyForLease(leaseID);
+      const importedKeyRegions = new Set<string>();
+      const fixture = awsIngressTestFleet(async (action, _params, region) => {
+        if (action === "DescribeKeyPairs" && importedKeyRegions.has(region)) {
+          return ec2XMLResponse(`<DescribeKeyPairsResponse><keySet><item>
+            <keyName>${keyName}</keyName><keyPairId>key-${region}</keyPairId>
+            <publicKey>ssh-ed25519 test</publicKey>
+            <tagSet>
+              <item><key>crabbox</key><value>true</value></item>
+              <item><key>created_by</key><value>crabbox</value></item>
+              <item><key>lease</key><value>${keyLeaseID}</value></item>
+            </tagSet>
+          </item></keySet></DescribeKeyPairsResponse>`);
+        }
+        if (action === "ImportKeyPair") {
+          importedKeyRegions.add(region);
+          return ec2XMLResponse("<ImportKeyPairResponse />");
+        }
+        if (action === "DeleteKeyPair") {
+          if (deleteStatus === 0) {
+            throw new Error("temporary key delete failure");
+          }
+          return deleteStatus === 200
+            ? ec2XMLResponse("<DeleteKeyPairResponse />")
+            : ec2XMLResponse(
+                "<Response><Errors><Error><Code>ServiceUnavailable</Code></Error></Errors></Response>",
+                deleteStatus,
+              );
+        }
+        if (action === "RunInstances" && region === "eu-west-1") {
+          return ec2XMLResponse(
+            "<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code></Error></Errors></Response>",
+            400,
+          );
+        }
+        return undefined;
+      });
+
+      const response = await fixture.create({
+        capacity: { market: "on-demand", fallback: "none", regions: ["eu-west-1", "us-east-1"] },
+      });
+
+      expect(response.status).toBe(500);
+      expect(await response.text()).toContain(expectedError);
+      expect(
+        fixture.requests.filter(
+          ({ action, region }) =>
+            region === "us-east-1" && ["ImportKeyPair", "RunInstances"].includes(action),
+        ),
+      ).toEqual([]);
+      const failed = fixture.storage.value<LeaseRecord>(`lease:${fixture.creatingID}`)!;
+      expect(failed).toMatchObject({
+        state: "failed",
+        region: "eu-west-1",
+        providerKeyCleanupPending: true,
+        cleanupError: expect.stringContaining(expectedError),
+      });
+      expect(Boolean(failed.cleanupRetryAt)).toBe(retryable);
+    },
+  );
+
   it("fences AWS provisioning after cancellation while account verification is blocked", async () => {
     const verificationStarted = deferred<void>();
     const finishVerification = deferred<void>();

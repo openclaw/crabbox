@@ -29110,6 +29110,11 @@ export class AWSProvider implements CloudProvider {
             // oxlint-disable-next-line eslint/no-await-in-loop -- cleanup must finish before the next Region owns the lease.
             await cleanupRegionalKey();
           } catch (cleanupError) {
+            if (cleanupError instanceof AWSLeaseAuthorityError) {
+              throw new ProviderResourceUnresolvedError(cleanupError.message, {
+                cause: cleanupError,
+              });
+            }
             const cleanupMessage =
               cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
             message = `${message}; failed to clean AWS SSH key in ${region}: ${cleanupMessage}`;
