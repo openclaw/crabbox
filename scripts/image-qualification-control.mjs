@@ -451,7 +451,7 @@ export function createManifest(candidateDir, artifactDir, candidateSha, workflow
     }));
   if (
     files.length > 1024 ||
-    files.some((file) => file.bytes > 64 * 1024 * 1024) ||
+    files.some((file) => file.bytes > 128 * 1024 * 1024) ||
     files.reduce((total, file) => total + file.bytes, 0) > 128 * 1024 * 1024
   ) {
     throw new Error("candidate artifact exceeds the file or byte limit");
