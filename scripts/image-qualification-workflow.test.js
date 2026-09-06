@@ -40,7 +40,16 @@ test("workflow isolates candidate execution from protected credentials", () => {
   assert.match(buildJob, /\.\/node_modules\/\.bin\/wrangler deploy --dry-run/);
   assert.match(buildJob, /image-qualification-control\.mjs manifest/);
   assert.match(buildJob, /build-inputs\.json/);
-  assert.match(buildJob, /cache: false/g);
+  const setupGo = buildJob.slice(
+    buildJob.indexOf("      - name: Set up Go"),
+    buildJob.indexOf("      - name: Set up Node"),
+  );
+  const setupNode = buildJob.slice(
+    buildJob.indexOf("      - name: Set up Node"),
+    buildJob.indexOf("      - name: Install protected Worker toolchain"),
+  );
+  assert.match(setupGo, /cache: false/);
+  assert.doesNotMatch(setupNode, /cache:/);
   assert.match(
     buildJob,
     /AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN CLOUDFLARE_API_TOKEN QUALIFICATION_CONTROLLER_TOKEN/,
