@@ -12674,14 +12674,40 @@ describe("fleet lease identity and idle", () => {
       status: "failed",
       message: "hetzner POST /servers: http 400: invalid_input",
     });
-    const lease = [...(await storage.list<LeaseRecord>({ prefix: "lease:" })).values()][0];
-    expect(lease?.provisioningResourceMayExist).toBe(false);
+    const lease = [...(await storage.list<LeaseRecord>({ prefix: "lease:" })).values()][0]!;
+    expect(lease.provisioningResourceMayExist).toBe(false);
+    storage.seed(`lease:${lease.id}`, {
+      ...lease,
+      host: "192.0.2.117",
+      tailscale: { enabled: true, ipv4: "100.64.0.117" },
+      sshHostKey: "ssh-ed25519 workspace-stale-access",
+      providerAccessExpiresAt: "2026-09-06T03:00:00Z",
+    });
 
     const stopping = await fleet.fetch(request("DELETE", `/v1/workspaces/${body.id}`, { headers }));
     await expect(stopping.json()).resolves.toMatchObject({ status: "stopping" });
     await fleet.alarm();
     const stopped = await fleet.fetch(request("GET", `/v1/workspaces/${body.id}`, { headers }));
     await expect(stopped.json()).resolves.toMatchObject({ status: "stopped" });
+    const completed = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+    expect(Number.isFinite(Date.parse(completed.cleanupCompletedAt ?? ""))).toBe(true);
+    expect(completed).toMatchObject({ state: "released", host: "" });
+    expect(completed.tailscale).toBeUndefined();
+    expect(completed.sshHostKey).toBeUndefined();
+    expect(completed.providerAccessExpiresAt).toBeUndefined();
+    const inspected = await fleet.fetch(request("GET", `/v1/leases/${lease.id}`, { headers }));
+    const publicLease = (await inspected.json()) as {
+      lease: LeaseRecord & { cleanupStatus: string };
+    };
+    expect(publicLease.lease).toMatchObject({
+      state: "released",
+      cleanupStatus: "complete",
+      cleanupCompletedAt: completed.cleanupCompletedAt,
+      host: "",
+    });
+    expect(publicLease.lease.tailscale).toBeUndefined();
+    expect(publicLease.lease.sshHostKey).toBeUndefined();
+    expect(publicLease.lease.providerAccessExpiresAt).toBeUndefined();
     expect(providerLookups).toBe(0);
   });
 

@@ -7269,6 +7269,9 @@ export class FleetCoordinator {
         current.failureError = message;
       }
       clearLeaseCleanupMetadata(current);
+      if (releaseRequested) {
+        completeLeaseProviderCleanup(current, failedAt);
+      }
       await this.putLease(current);
       return current;
     });
