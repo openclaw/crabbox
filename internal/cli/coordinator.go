@@ -94,6 +94,7 @@ type CoordinatorLease struct {
 	SSHUser                      string                         `json:"sshUser"`
 	SSHPort                      string                         `json:"sshPort"`
 	SSHHostKey                   string                         `json:"sshHostKey,omitempty"`
+	ProviderAccessExpiresAt      string                         `json:"providerAccessExpiresAt,omitempty"`
 	SSHFallbackPorts             []string                       `json:"sshFallbackPorts,omitempty"`
 	WorkRoot                     string                         `json:"workRoot"`
 	Keep                         bool                           `json:"keep"`
@@ -110,6 +111,7 @@ type CoordinatorLease struct {
 	CleanupStatus                string                         `json:"cleanupStatus,omitempty"`
 	ProviderCleanup              *ProviderCleanupEvidence       `json:"providerCleanup,omitempty"`
 	CleanupStartedAt             string                         `json:"cleanupStartedAt,omitempty"`
+	CleanupCompletedAt           string                         `json:"cleanupCompletedAt,omitempty"`
 	CleanupError                 string                         `json:"cleanupError,omitempty"`
 	CleanupRetryAt               string                         `json:"cleanupRetryAt,omitempty"`
 	ReleaseDeletesServer         *bool                          `json:"releaseDeletesServer,omitempty"`

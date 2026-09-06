@@ -494,6 +494,50 @@ func TestCoordinatorInspectJSONPreservesCleanupState(t *testing.T) {
 	}
 }
 
+func TestCoordinatorInspectJSONPreservesCleanupCompletionAndAccessExpiry(t *testing.T) {
+	isolateTestUserDirs(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_cleanup_completion" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+			ID:                      "cbx_cleanup_completion",
+			Provider:                "aws",
+			TargetOS:                targetLinux,
+			State:                   "released",
+			CleanupStatus:           "complete",
+			CleanupCompletedAt:      "2026-09-06T00:00:00Z",
+			ProviderAccessExpiresAt: "2026-09-06T01:00:00Z",
+		}})
+	}))
+	defer server.Close()
+
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "user-token")
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	if err := app.inspect(context.Background(), []string{
+		"--provider", "aws", "--id", "cbx_cleanup_completion", "--json",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	for field, want := range map[string]any{
+		"cleanupCompletedAt":      "2026-09-06T00:00:00Z",
+		"providerAccessExpiresAt": "2026-09-06T01:00:00Z",
+	} {
+		if got[field] != want {
+			t.Fatalf("%s=%#v, want %#v", field, got[field], want)
+		}
+	}
+}
+
 func TestCoordinatorInspectJSONPreservesProvisioningFailureState(t *testing.T) {
 	isolateTestUserDirs(t)
 	explicitTrue := true
@@ -2817,9 +2861,7 @@ func TestStopCoordinatorInspectFailureKeepsProviderBinding(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&releaseBody); err != nil {
 				t.Fatal(err)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
-				ID: "cbx_stop_fallback", Provider: "aws", State: "released",
-			}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": confirmedCoordinatorRelease("cbx_stop_fallback", "aws")})
 		default:
 			http.NotFound(w, r)
 		}
@@ -2869,9 +2911,7 @@ func TestStopForceCoordinatorRequiresLiveExactLease(t *testing.T) {
 					}})
 				case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+test.id+"/release":
 					releases++
-					_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
-						ID: test.id, Provider: "aws", State: "released",
-					}})
+					_ = json.NewEncoder(w).Encode(map[string]any{"lease": confirmedCoordinatorRelease(test.id, "aws")})
 				default:
 					http.NotFound(w, r)
 				}
@@ -3068,7 +3108,7 @@ func TestCoordinatorReleaseFallsBackToAdminToken(t *testing.T) {
 				t.Fatalf("observation auth=%q, want admin token", r.Header.Get("Authorization"))
 			}
 			adminObservations++
-			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: "cbx_admin", Provider: "aws", State: "released"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": confirmedCoordinatorRelease("cbx_admin", "aws")})
 			return
 		}
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/admin/leases/cbx_admin/release" && r.URL.Path != "/v1/leases/cbx_admin/release" {
@@ -3155,7 +3195,7 @@ func TestCoordinatorAcquireRollbackQueuesReleaseOnceWithoutObservation(t *testin
 			}})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+leaseID:
 			observations++
-			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: leaseID, Provider: "aws", State: "released"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": confirmedCoordinatorRelease(leaseID, "aws")})
 		default:
 			http.NotFound(w, r)
 		}

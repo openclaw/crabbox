@@ -540,6 +540,7 @@ export interface LeaseRecord {
   cleanupRetryAt?: string;
   cleanupStartedAt?: string;
   cleanupClaimExpiresAt?: string;
+  cleanupCompletedAt?: string;
   failureError?: string;
   provisioningResourceMayExist?: boolean;
   provisioningFailureRetryable?: boolean;

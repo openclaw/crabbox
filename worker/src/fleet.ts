@@ -2,6 +2,12 @@ import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
 
 import { AzureResumableProvisioning } from "./azure-provisioning";
 import {
+  clearLeaseCleanupCompletion,
+  completeLeaseProviderCleanup,
+  leaseHasConfirmedNoProviderResource,
+  leaseProviderCleanupCompleted,
+} from "./lease-cleanup";
+import {
   LeaseProvisioningController,
   cancelProvisioningOperation,
   provisioningOperationKey,
@@ -1155,6 +1161,9 @@ export class FleetCoordinator {
           ...(result.image ? { image: result.image } : {}),
         };
         clearProvisioningRecoveryMetadata(completed);
+        delete completed.provisioningResourceMayExist;
+        delete completed.provisioningFailureRetryable;
+        clearLeaseCleanupCompletion(completed);
         if (result.cost) {
           completed.estimatedHourlyUSD = result.cost.hourlyUSD;
           completed.maxEstimatedUSD = result.cost.maxUSD;
@@ -3476,7 +3485,10 @@ export class FleetCoordinator {
       const shouldDelete = Boolean(
         lease.providerKeyCleanupPending ||
         (lease.cloudID &&
-          (leaseIsLive(lease) || lease.releaseDeletesServer !== undefined || lease.cleanupError)),
+          (leaseIsLive(lease) ||
+            lease.releaseDeletesServer !== undefined ||
+            lease.cleanupError ||
+            (lease.state === "released" && !leaseProviderCleanupCompleted(lease)))),
       );
       const canceledBeforeProviderIdentity = Boolean(
         (lease.state === "provisioning" ||
@@ -3513,6 +3525,9 @@ export class FleetCoordinator {
           cleanupStarted.getTime() + leaseCleanupClaimStaleMs,
         ).toISOString();
         released.releaseDeletesServer = true;
+        clearLeaseCleanupCompletion(released);
+      } else if (leaseHasConfirmedNoProviderResource(released)) {
+        completeLeaseProviderCleanup(released, released.updatedAt);
       }
       await this.putLease(released);
       await this.putCreateAttempt(attempt);
@@ -4178,6 +4193,7 @@ export class FleetCoordinator {
         delete reactivated.provisioningRecoveryObservedAt;
         delete reactivated.provisioningRecoveryMissingSince;
         clearLeaseCleanupMetadata(reactivated);
+        clearLeaseCleanupCompletion(reactivated);
         const limitError = enforceCostLimitUsage(
           admission.costUsage,
           reactivated,
@@ -4397,6 +4413,7 @@ export class FleetCoordinator {
         estimatedHourlyUSD: cost.hourlyUSD,
         maxEstimatedUSD: cost.maxUSD,
         state: "provisioning",
+        provisioningResourceMayExist: false,
         createdAt: now.toISOString(),
         updatedAt: now.toISOString(),
         lastTouchedAt: now.toISOString(),
@@ -4663,6 +4680,7 @@ export class FleetCoordinator {
         }
       }
       current.provisioningRequestStartedAt = new Date().toISOString();
+      delete current.provisioningResourceMayExist;
       delete current.provisioningRequestSettledAt;
       current.provisioningCoordinatorVersion = this.coordinatorGeneration;
       current.updatedAt = current.provisioningRequestStartedAt;
@@ -4786,6 +4804,7 @@ export class FleetCoordinator {
     record = structuredClone(current);
     record.state = "active";
     clearProvisioningRecoveryMetadata(record);
+    clearLeaseCleanupCompletion(record);
     record.cloudID = server.cloudID;
     record.serverType = serverType;
     if (server.hostID) {
@@ -4994,6 +5013,7 @@ export class FleetCoordinator {
         estimatedHourlyUSD: cost.hourlyUSD,
         maxEstimatedUSD: cost.maxUSD,
         state: "provisioning",
+        provisioningResourceMayExist: false,
         createdAt: now.toISOString(),
         updatedAt: now.toISOString(),
         lastTouchedAt: now.toISOString(),
@@ -6162,6 +6182,7 @@ export class FleetCoordinator {
             : recoveredServer.status === "running" && recoveredServer.host.trim()
         ) {
           current.state = "active";
+          clearLeaseCleanupCompletion(current);
           current.host = workspaceCapability
             ? workspaceCapability.recoveredHost(recoveredServer)
             : recoveredServer.host;
@@ -7743,6 +7764,7 @@ export class FleetCoordinator {
     delete record.releasedAt;
     delete record.releaseDeletesServer;
     clearLeaseCleanupMetadata(record);
+    clearLeaseCleanupCompletion(record);
     if (!effectiveRuntimeAdapterID || !effectiveRuntimeAdapterWorkspaceID) {
       delete record.runtimeAdapterID;
       delete record.runtimeAdapterWorkspaceID;
@@ -8043,6 +8065,8 @@ export class FleetCoordinator {
             endedAt: canceled.updatedAt,
             releaseDeletesServer: true,
             cleanupStatus: "complete",
+            cleanupCompletedAt: canceled.updatedAt,
+            host: "",
           },
         });
       }));
@@ -16555,6 +16579,7 @@ export class FleetCoordinator {
         current.provisioningFailureRetryable = false;
         delete current.releaseDeletesServer;
         clearLeaseCleanupMetadata(current);
+        completeLeaseProviderCleanup(current, failedAt);
       }
       await this.putLease(current);
     });
@@ -16716,9 +16741,17 @@ export class FleetCoordinator {
           return;
         }
         if (lease.state === "provisioning" && !lease.cloudID) {
-          lease.state = "failed";
           lease.updatedAt = nowISO;
           lease.endedAt = nowISO;
+          if (leaseHasConfirmedNoProviderResource(lease)) {
+            lease.state = "expired";
+            lease.releaseDeletesServer = true;
+            clearLeaseCleanupMetadata(lease);
+            completeLeaseProviderCleanup(lease, nowISO);
+            await this.putLease(lease, { noCache: true });
+            return;
+          }
+          lease.state = "failed";
           if (lease.provisioningRequestStartedAt) lease.provisioningResourceMayExist = true;
           lease.cleanupFailedAt = nowISO;
           lease.cleanupError =
@@ -16733,6 +16766,7 @@ export class FleetCoordinator {
         lease.cleanupClaimExpiresAt = new Date(
           nowDate.getTime() + leaseCleanupClaimStaleMs,
         ).toISOString();
+        clearLeaseCleanupCompletion(lease);
         lease.updatedAt = nowISO;
         await this.putLease(lease, { noCache: true });
         claimed.push({ claim: nowISO, lease });
@@ -16783,6 +16817,7 @@ export class FleetCoordinator {
             delete current.providerKeyCleanupID;
             delete current.cleanupStartedAt;
             delete current.cleanupClaimExpiresAt;
+            completeLeaseProviderCleanup(current, nowISO);
             await this.putLease(current);
             await this.clearWorkspaceReleaseError(current);
             await this.markAWSIngressReconcilePending(current);
@@ -19017,6 +19052,7 @@ export class FleetCoordinator {
       cleanupLease.cleanupClaimExpiresAt = new Date(
         cleanupStarted.getTime() + leaseCleanupClaimStaleMs,
       ).toISOString();
+      clearLeaseCleanupCompletion(cleanupLease);
       delete cleanupLease.cleanupRetryAt;
       cleanupLease.updatedAt = cleanupStartedAt;
       if (cleanupLease.state === "released") {
@@ -19112,6 +19148,9 @@ export class FleetCoordinator {
           delete completed.cleanupClaimExpiresAt;
           delete completed.releaseDeletesServer;
           completed.updatedAt = new Date().toISOString();
+          if (completed.state === "released") {
+            completeLeaseProviderCleanup(completed, completed.updatedAt);
+          }
           await this.putLease(completed);
         } else {
           await this.state.storage.delete(leaseKey(record.id));
@@ -19284,10 +19323,14 @@ export class FleetCoordinator {
           (current.cloudID &&
             (leaseIsLive(current) ||
               current.releaseDeletesServer !== undefined ||
-              current.cleanupError))),
+              current.cleanupError ||
+              (current.state === "released" && !leaseProviderCleanupCompleted(current))))),
       );
       if (!shouldDelete) {
         const released = finalizedReleasedLease(current, deleteServer, options.keep);
+        if (deleteServer && leaseHasConfirmedNoProviderResource(released)) {
+          completeLeaseProviderCleanup(released, released.updatedAt);
+        }
         await this.putLease(released);
         await this.clearWorkspaceReleaseError(released);
         await this.markAWSIngressReconcilePending(released);
@@ -19302,6 +19345,7 @@ export class FleetCoordinator {
         pending.releaseDeletesServer = true;
         pending.cleanupStartedAt = queuedAt;
         pending.cleanupClaimExpiresAt = queuedAt;
+        clearLeaseCleanupCompletion(pending);
         await this.putLease(pending);
         await this.markAWSIngressReconcilePending(pending);
         await this.armAlarmNoLaterThan(Date.now());
@@ -19314,6 +19358,7 @@ export class FleetCoordinator {
         now.getTime() + leaseCleanupClaimStaleMs,
       ).toISOString();
       claimed.releaseDeletesServer = true;
+      clearLeaseCleanupCompletion(claimed);
       await this.putLease(claimed);
       await this.markAWSIngressReconcilePending(claimed);
       await this.scheduleAlarm();
@@ -19384,6 +19429,7 @@ export class FleetCoordinator {
       clearProvisioningRecoveryMetadata(released);
       delete released.providerKeyCleanupPending;
       delete released.providerKeyCleanupID;
+      completeLeaseProviderCleanup(released, new Date().toISOString());
       await this.putLease(released);
       await this.clearWorkspaceReleaseError(released);
       await this.markAWSIngressReconcilePending(released);
@@ -20909,6 +20955,7 @@ function sameLeaseCleanupClaim(current: LeaseRecord, claimed: LeaseRecord): bool
     current.providerKeyCleanupID === claimed.providerKeyCleanupID &&
     current.providerKeyCleanupOwned === claimed.providerKeyCleanupOwned &&
     current.providerKeyCleanupPending === claimed.providerKeyCleanupPending &&
+    current.cleanupCompletedAt === claimed.cleanupCompletedAt &&
     current.provisioningResourceMayExist === claimed.provisioningResourceMayExist &&
     current.provisioningRequestStartedAt === claimed.provisioningRequestStartedAt &&
     current.provisioningRequestSettledAt === claimed.provisioningRequestSettledAt &&
@@ -24884,6 +24931,7 @@ function leaseCleanupIsUnresolved(lease: LeaseRecord): boolean {
 }
 
 function retainUnresolvedProviderResource(lease: LeaseRecord, message: string, at: string): void {
+  clearLeaseCleanupCompletion(lease);
   if (leaseIsLive(lease)) {
     lease.state = "failed";
     lease.endedAt = at;
@@ -24907,6 +24955,7 @@ function recordLeaseCleanupFailure(
   message: string,
   at: string,
 ): void {
+  clearLeaseCleanupCompletion(lease);
   if (error instanceof ProviderResourceUnresolvedError) {
     retainUnresolvedProviderResource(lease, message, at);
   } else if (error instanceof ProviderCleanupManualResolutionError) {
@@ -24989,7 +25038,7 @@ function provisionedLeaseRecord(
   const providerKeyCleanupOwned =
     (config.provider === "aws" || config.provider === "hetzner") &&
     providerKey === providerKeyForLease(lease.id);
-  return {
+  const record: LeaseRecord = {
     ...lease,
     state: "active",
     cloudID: server.cloudID,
@@ -25004,6 +25053,8 @@ function provisionedLeaseRecord(
     ...(providerProject ? { providerProject } : {}),
     ...(server.hostID ? { hostId: server.hostID } : {}),
   };
+  clearLeaseCleanupCompletion(record);
+  return record;
 }
 
 function leaseHasCurrentCleanupOrFinalRelease(lease: LeaseRecord): boolean {
@@ -25011,9 +25062,7 @@ function leaseHasCurrentCleanupOrFinalRelease(lease: LeaseRecord): boolean {
   return Boolean(
     (lease.cleanupStartedAt && cleanupClaimDeadline(lease) > now) ||
     (lease.state === "released" &&
-      !lease.provisioningRequestStartedAt &&
-      lease.releaseDeletesServer !== true &&
-      !leaseNeedsCleanup(lease, now)),
+      (lease.releaseDeletesServer === false || leaseProviderCleanupCompleted(lease))),
   );
 }
 
@@ -25376,6 +25425,7 @@ function terminalizeManualProviderCleanup(
   error: string,
   terminalAt: string,
 ): void {
+  clearLeaseCleanupCompletion(lease);
   if (leaseIsLive(lease)) {
     lease.state = "expired";
   }
@@ -25475,6 +25525,9 @@ function finalizedReleasedLease(
   delete lease.cleanupClaimExpiresAt;
   if (keep !== undefined) {
     lease.keep = keep;
+  }
+  if (!deleteServer) {
+    clearLeaseCleanupCompletion(lease);
   }
   return lease;
 }
@@ -28433,11 +28486,7 @@ export class AWSProvider implements CloudProvider {
     );
     try {
       if (server) {
-        if (lease.network?.awsPrivate) {
-          await this.client.terminateServerAndWait(lease.cloudID);
-        } else {
-          await this.deleteServer(lease.cloudID);
-        }
+        await this.client.terminateServerAndWait(lease.cloudID);
       }
     } catch (error) {
       const message = coordinatorErrorMessage(this.env, error);

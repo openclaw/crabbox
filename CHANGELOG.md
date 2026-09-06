@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Require a fenced provider-cleanup completion fact before coordinator leases retire local credentials, confirm AWS instance termination before completion, and preserve provider identity while clearing stale remote access.
 - Preserve requested capacity market for market-aware providers while coordinator provisioning is pending, and expose documented provisioning failure diagnostics in `crabbox inspect --json`.
 - Azure: recognize completed Location polling responses and support explicit, audited recovery of expired disk-only cleanup blocked by missing public-IP completion evidence, preserving original identities, ownership checks, and actual deletion receipts. [PR 1893](https://github.com/openclaw/crabbox/pull/1893). Thanks @steipete.
 

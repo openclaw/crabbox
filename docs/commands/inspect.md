@@ -106,6 +106,9 @@ Brokered JSON records also expose the coordinator's provider-cleanup state:
   `retained`. This is computed from the current lifecycle record, not persisted
   as a separate state or used as provider deletion authority.
 - `cleanupStartedAt`: cleanup has started but is not yet terminal.
+- `cleanupCompletedAt`: the coordinator finished provider cleanup while the
+  exact cleanup claim still owned the lease. It is omitted until that fenced
+  completion write succeeds.
 - `cleanupError`: cleanup remains unconfirmed; this can include legacy diagnostics
   for pending creation as well as observed failures.
 - `cleanupRetryAt`: the coordinator scheduled another cleanup attempt.
@@ -129,19 +132,28 @@ Interpret them with the exact lease identity, lifecycle state, cleanup metadata,
 and provider-specific evidence before taking recovery or cleanup action.
 
 Cleanup is terminal under Crabbox's coordinator predicate only when `state` is
-`released`, `cleanupStartedAt`, `cleanupError`, and `cleanupRetryAt` are all
-absent, and `releaseDeletesServer` is either omitted or `true`. An explicit
-`releaseDeletesServer: false` means the provider resource was intentionally
-retained and must not be treated as deletion-confirmed. Omitted and `false` are
-therefore distinct states.
+`released`, `cleanupStatus` is `complete`, `cleanupCompletedAt` is a valid
+timestamp, cleanup debt is absent, and `releaseDeletesServer` is not `false`.
+The public record must also be hostless: `host` is empty and `tailscale`,
+`sshHostKey`, and `providerAccessExpiresAt` are absent. Provider resource IDs,
+ownership labels, scope, network, ports, and work-root evidence remain available
+for audit and ingress reconciliation. An explicit `releaseDeletesServer: false`
+means the provider resource was intentionally retained and must not be treated
+as deletion-confirmed.
 
 `pending` includes an allocation response or cleanup attempt still being
 observed. An explicit stop keeps observing that state within its existing
 five-minute bound instead of treating it as a provider failure. A real cleanup
 failure or uncertain abandoned allocation remains `failed`; local claims and
-SSH files are retained. Older coordinators omit `cleanupStatus`, and clients
-continue using the existing conservative metadata checks. The original
-diagnostics remain available so older clients also fail closed.
+SSH files are retained. A historical managed lease with provider identity but
+no completion fact remains unconfirmed; an explicit stop re-observes and cleans
+that exact owned resource before establishing completion. Older coordinators
+omit `cleanupStatus` or `cleanupCompletedAt`, so current clients fail closed
+until the coordinator is upgraded and cleanup is observed again.
+Missing provider identity is not completion by itself. New pre-dispatch
+reservations carry explicit no-resource evidence, and only their fenced
+lifecycle owner may turn that evidence into `cleanupCompletedAt`; historical
+records that omit it remain unconfirmed.
 
 These fields report the coordinator's lifecycle observation. They are not an
 independent provider inventory check. `complete` does not override remaining
