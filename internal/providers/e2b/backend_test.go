@@ -233,7 +233,7 @@ func TestE2BControlClientBoundsStalledResponseBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	controlClient, _ := e2bHTTPClients(nil, controlTimeout)
+	controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	client := &e2bClient{apiKey: "e2b_test", apiURL: server.URL, httpClient: controlClient}
 	started := time.Now()
 	_, err := client.GetSandbox(context.Background(), "sbx_1")
@@ -254,7 +254,7 @@ func TestE2BControlClientBoundsWithheldHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	controlClient, _ := e2bHTTPClients(nil, controlTimeout)
+	controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	client := &e2bClient{apiKey: "e2b_test", apiURL: server.URL, httpClient: controlClient}
 	started := time.Now()
 	_, err := client.GetSandbox(context.Background(), "sbx_1")
@@ -281,7 +281,7 @@ func TestE2BDataPlaneStreamOutlivesControlTimeout(t *testing.T) {
 	}))
 	defer server.Close()
 
-	controlClient, _ := e2bHTTPClients(nil, controlTimeout)
+	controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	client := &e2bClient{
 		domain:     "e2b.test",
 		httpClient: controlClient,
@@ -330,7 +330,7 @@ func TestE2BDataPlaneUploadOutlivesControlTimeout(t *testing.T) {
 	defer server.Close()
 
 	payload := []byte("before-after")
-	controlClient, _ := e2bHTTPClients(nil, controlTimeout)
+	controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	client := &e2bClient{
 		domain:     "e2b.test",
 		httpClient: controlClient,

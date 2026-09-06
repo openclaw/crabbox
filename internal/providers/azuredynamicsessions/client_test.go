@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func TestAzureDynamicSessionsFallbackBoundsControlAndPreservesExecStream(t *testing.T) {
@@ -42,7 +44,7 @@ func TestAzureDynamicSessionsFallbackBoundsControlAndPreservesExecStream(t *test
 	}))
 	defer server.Close()
 
-	control, data := azureDynamicSessionsHTTPClients(nil, controlTimeout)
+	control, data := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	client := &azureDynamicSessionsClient{
 		endpoint:             server.URL,
 		managementAPIVersion: "2025-02-02-preview",
