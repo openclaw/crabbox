@@ -914,8 +914,16 @@ describe("durable Azure admission and reconstruction", () => {
         await step(storage, azure, overrides);
         expect((await storage.get<LeaseRecord>(`lease:${id}`))?.state).toBe("released");
       }
-      expect((await publicLease(storage, azure)).cleanupStatus).toBe(
-        action === "retain" ? "retained" : "complete",
+      const visible = await publicLease(storage, azure);
+      const completionTimestamp = expect.any(String);
+      expect(visible).toMatchObject(
+        action === "retain"
+          ? { cleanupStatus: "retained" }
+          : {
+              cleanupStatus: "complete",
+              cleanupCompletedAt: completionTimestamp,
+              host: "",
+            },
       );
       expect(azure.mutations.filter((entry) => entry.method === "DELETE")).toHaveLength(
         action === "retain" ? 0 : 4,
@@ -1017,6 +1025,11 @@ describe("durable Azure admission and reconstruction", () => {
       expect(response.status).toBe(200);
       for (let n = 0; n < 25; n++) await step(storage, azure);
       expect((await storage.get<LeaseRecord>(`lease:${id}`))?.state).toBe("released");
+      expect(await storage.get<LeaseRecord>(`lease:${id}`)).toMatchObject({
+        cleanupCompletedAt: expect.any(String),
+        host: "",
+        provisioningResourceMayExist: false,
+      });
       expect(
         (await storage.get<LeaseProvisioningOperation>(provisioningOperationKey(id)))?.step.phase,
       ).toBe("terminal");

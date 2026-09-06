@@ -540,6 +540,7 @@ export interface LeaseRecord {
   cleanupRetryAt?: string;
   cleanupStartedAt?: string;
   cleanupClaimExpiresAt?: string;
+  cleanupCompletedAt?: string;
   failureError?: string;
   provisioningResourceMayExist?: boolean;
   provisioningFailureRetryable?: boolean;
@@ -966,6 +967,7 @@ export interface ProviderFastSnapshotRestore {
 
 export interface PromotedImageRecord extends ProviderImage {
   promotedAt: string;
+  revision?: string;
   catalogOnly?: boolean;
   variantSelectors?: ImageVariantSelectors;
 }

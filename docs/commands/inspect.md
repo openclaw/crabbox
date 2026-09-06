@@ -106,6 +106,9 @@ Brokered JSON records also expose the coordinator's provider-cleanup state:
   `retained`. This is computed from the current lifecycle record, not persisted
   as a separate state or used as provider deletion authority.
 - `cleanupStartedAt`: cleanup has started but is not yet terminal.
+- `cleanupCompletedAt`: the coordinator finished provider cleanup while the
+  exact cleanup claim still owned the lease. It is omitted until that fenced
+  completion write succeeds.
 - `cleanupError`: cleanup remains unconfirmed; this can include legacy diagnostics
   for pending creation as well as observed failures.
 - `cleanupRetryAt`: the coordinator scheduled another cleanup attempt.
@@ -129,19 +132,28 @@ Interpret them with the exact lease identity, lifecycle state, cleanup metadata,
 and provider-specific evidence before taking recovery or cleanup action.
 
 Cleanup is terminal under Crabbox's coordinator predicate only when `state` is
-`released`, `cleanupStartedAt`, `cleanupError`, and `cleanupRetryAt` are all
-absent, and `releaseDeletesServer` is either omitted or `true`. An explicit
-`releaseDeletesServer: false` means the provider resource was intentionally
-retained and must not be treated as deletion-confirmed. Omitted and `false` are
-therefore distinct states.
+`released`, `cleanupStatus` is `complete`, `cleanupCompletedAt` is a valid
+timestamp, cleanup debt is absent, and `releaseDeletesServer` is not `false`.
+The public record must also be hostless: `host` is empty and `tailscale`,
+`sshHostKey`, and `providerAccessExpiresAt` are absent. Provider resource IDs,
+ownership labels, scope, network, ports, and work-root evidence remain available
+for audit and ingress reconciliation. An explicit `releaseDeletesServer: false`
+means the provider resource was intentionally retained and must not be treated
+as deletion-confirmed.
 
 `pending` includes an allocation response or cleanup attempt still being
 observed. An explicit stop keeps observing that state within its existing
 five-minute bound instead of treating it as a provider failure. A real cleanup
 failure or uncertain abandoned allocation remains `failed`; local claims and
-SSH files are retained. Older coordinators omit `cleanupStatus`, and clients
-continue using the existing conservative metadata checks. The original
-diagnostics remain available so older clients also fail closed.
+SSH files are retained. A historical managed lease with provider identity but
+no completion fact remains unconfirmed; an explicit stop re-observes and cleans
+that exact owned resource before establishing completion. Older coordinators
+omit `cleanupStatus` or `cleanupCompletedAt`, so current clients fail closed
+until the coordinator is upgraded and cleanup is observed again.
+Missing provider identity is not completion by itself. New pre-dispatch
+reservations carry explicit no-resource evidence, and only their fenced
+lifecycle owner may turn that evidence into `cleanupCompletedAt`; historical
+records that omit it remain unconfirmed.
 
 These fields report the coordinator's lifecycle observation. They are not an
 independent provider inventory check. `complete` does not override remaining
@@ -168,6 +180,54 @@ means ownership labels are absent, not that the resource is safe to adopt.
 Provider observations are not an atomic inventory. Inspection never creates,
 updates, clears, or accepts a cleanup identity, and never issues a resource
 mutation. Keep local claims and SSH artifacts until normal stop confirms cleanup.
+The optional `claimFingerprint` binds an explicit recovery request to the exact
+stored claim; do not use it when `claimUnchanged` is false. A retained
+`recoveryAudit`, when present, distinguishes operator-acknowledged absence from
+provider-confirmed deletion progress.
+
+### Audited Azure cleanup recovery
+
+If historical public-IP completion evidence was lost, an owner or admin may
+explicitly accept its absence **in the original provider scope**. This does not
+prove Azure deleted the public IP rather than moving it elsewhere, and must not
+be used when that distinction still requires investigation. Manage-share and
+device credentials cannot authorize this exception.
+
+After reviewing a fresh cleanup inspection, send the authenticated API request:
+
+```http
+POST /v1/leases/{id}/cleanup
+Content-Type: application/json
+
+{"action":"acknowledge-missing-resource","expectedClaimFingerprint":"<claimFingerprint from inspection>"}
+```
+
+Azure accepts only an expired, blocked lease with no active cleanup attempt:
+its complete version-2 ordinary cleanup baseline must retain all four original
+identities and successful VM/NIC deletion progress. Fresh exact-scope GETs must
+show VM, NIC, and public IP absent, with only the original owned, detached disk
+remaining in the original region. Pending operations, incomplete claims,
+replacements, conflicting ownership, changed attachments, and stale fingerprints
+are rejected. Explicit retained-resource disposition is also rejected, and the
+lease binding and eligibility are rechecked after provider reads, immediately
+before the atomic recovery commit. No resource is created, tagged, or deleted
+by this request.
+
+The transaction preserves the original baseline and actual DELETE receipts,
+persists a separate audit with basis `operator-confirmed-public-ip-absence`, and
+promotes the claim to version 3 so older workers reject it. The acknowledgement
+is never inserted into the actual deletion receipt list. The same fingerprint is
+idempotent; another claim cannot overwrite the audit. Normal `crabbox stop` then
+rechecks every survivor before deleting the original disk and retains local
+artifacts until cleanup is confirmed. The audit survives removal of the completed
+cleanup claim and remains available through the cleanup diagnostic.
+
+`identityMatches` accounts for this explicitly acknowledged absence on a recovered
+claim; consult `recoveryAudit` for its basis. It is still not deletion authority.
+Orphan/provisioning continuation paths cannot replace the recovered baseline;
+only ordinary release consumes this recovery.
+
+### Additional provider metadata
 
 For coordinator leases whose provider can inject an SSH host key before first
 boot, JSON also includes `sshHostKey`. Its value is exactly the public host-key
