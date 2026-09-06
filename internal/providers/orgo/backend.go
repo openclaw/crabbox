@@ -81,7 +81,7 @@ func (b *orgoBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	return nil
 }
 
-func (b *orgoBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *orgoBackend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
 	if err := b.rejectRunOptions(req); err != nil {
 		return RunResult{}, err
 	}
@@ -114,56 +114,51 @@ func (b *orgoBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 	}
 
 	shouldStop := acquired && !req.Keep
+	result = RunResult{Provider: providerName, LeaseID: lease.LeaseID, Slug: lease.Slug, SyncDelegated: true}
+	commandRan := false
 	defer func() {
-		if !shouldStop {
-			return
+		// HTTP failures expose provider-specific public codes. Pin the primary
+		// outcome before cleanup or reporting adds a different failure.
+		result, retErr = shared.PinDelegatedRunFailure(result, retErr)
+		if shouldStop {
+			if cleanupErr := b.cleanupLease(client, lease); cleanupErr != nil {
+				result, retErr = shared.AppendDelegatedRunFailure(result, retErr, fmt.Errorf("orgo cleanup failed for %s: %w", lease.Computer.ID, cleanupErr), 1)
+			}
 		}
-		if err := b.cleanupLease(client, lease); err != nil {
-			fmt.Fprintf(b.rt.Stderr, "warning: orgo cleanup failed for %s: %v\n", lease.Computer.ID, err)
+		result.Total = b.now().Sub(started)
+		result = core.FinalizeRunResult(result, retErr)
+		if commandRan {
+			fmt.Fprintf(b.rt.Stderr, "orgo run summary sync_delegated=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
+		}
+		if req.TimingJSON {
+			timingErr := writeTimingJSON(b.rt.Stderr, core.TimingReportWithRunResult(timingReport{
+				Provider: providerName, LeaseID: lease.LeaseID, Slug: lease.Slug,
+				SyncDelegated: true, SyncSkipped: true,
+				CommandMs: result.Command.Milliseconds(), TotalMs: result.Total.Milliseconds(),
+				ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label),
+			}, result, retErr))
+			result, retErr = shared.AppendDelegatedRunFailure(result, retErr, timingErr, 1)
 		}
 	}()
 
 	command, err := b.buildCommand(req)
 	if err != nil {
-		return RunResult{}, err
+		return result, err
 	}
-	commandText := orgoCommandText(req)
+	result.CommandText = orgoCommandText(req)
 	if req.EnvSummary {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
 	commandStarted := b.now()
 	exitCode, runErr := client.RunBash(ctx, lease.Computer.ID, command, b.rt.Stdout, b.rt.Stderr)
-	commandDuration := b.now().Sub(commandStarted)
-	result := RunResult{
-		ExitCode:      exitCode,
-		Command:       commandDuration,
-		Total:         b.now().Sub(started),
-		SyncDelegated: true,
-		Provider:      providerName,
-		LeaseID:       lease.LeaseID,
-		Slug:          lease.Slug,
-		CommandText:   commandText,
-	}
-	fmt.Fprintf(b.rt.Stderr, "orgo run summary sync_delegated=true command=%s total=%s exit=%d\n", commandDuration.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider:      providerName,
-			LeaseID:       lease.LeaseID,
-			Slug:          lease.Slug,
-			SyncDelegated: true,
-			SyncSkipped:   true,
-			CommandMs:     commandDuration.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      result.ExitCode,
-			Label:         strings.TrimSpace(req.Label),
-		}); err != nil {
-			return result, err
-		}
-	}
+	result.Command = b.now().Sub(commandStarted)
+	commandRan = true
 	if runErr != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, lease.LeaseID, lease.Slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		return result, runErr
 	}
+	outcome := shared.FinalizeDelegatedCommandOutcome(exitCode, nil)
+	result.ExitCode, result.Status, result.ErrorKind = outcome.ExitCode, outcome.Status, outcome.ErrorKind
 	if result.ExitCode != 0 {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, lease.LeaseID, lease.Slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s computer exit=%d", providerName, result.ExitCode)}

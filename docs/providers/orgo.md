@@ -118,6 +118,17 @@ custom credential destination. Non-loopback API endpoints must use HTTPS.
 `--keep-on-failure` preserves a newly created computer when the command fails,
 so it can be inspected with Orgo tooling before manual cleanup.
 
+Run outcomes and timing are finalized after automatic cleanup. Cleanup failure
+fails an otherwise successful command; later cleanup or timing-writer failures
+do not replace the primary command or API error. API failures retain their
+public exit codes, including 4 for not found, 77 for authentication/authorization,
+and 69 for rate limits or service failures. Cleanup still preserves configured
+workspaces and accepts successful deletion of an owned temporary workspace as
+cleanup of its contained computer.
+
+No local checkout is copied, whether or not `--no-sync` is supplied. This does
+not add persistent-session output support.
+
 ## Capabilities
 
 - SSH: no — Orgo command execution is HTTP API delegated.
