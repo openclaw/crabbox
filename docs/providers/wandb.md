@@ -126,7 +126,8 @@ makes an otherwise successful run fail with exit `1` and retains its recovery
 session and unchanged claim. Command failures and mapped gRPC exit codes stay
 primary when Stop or timing output also fails; secondary diagnostics remain
 visible. gRPC/API failures are classified as `provider-error`, not as observed
-command exits, while keeping their mapped numeric exit codes. `--keep-on-failure` is decided before timing output, so a reporting
+command exits, while keeping their mapped numeric exit codes. `--keep-on-failure`
+is decided before timing output, so a reporting
 failure cannot discard an already-failed run's sandbox. A timing-output failure
 after successful Stop does not claim the sandbox is retained. Closing the local
 gRPC connection remains warning-only. Command timing measures Exec separately;
