@@ -4058,11 +4058,19 @@ func coordinatorReleaseObservationError(leaseID, state string) error {
 }
 
 func coordinatorProviderReleaseConfirmed(lease CoordinatorLease) bool {
+	_, completionErr := time.Parse(time.RFC3339, lease.CleanupCompletedAt)
 	return lease.State == "released" &&
-		(lease.CleanupStatus == "" || lease.CleanupStatus == "complete") &&
+		lease.CleanupStatus == "complete" &&
+		completionErr == nil &&
+		lease.Host == "" &&
+		lease.Tailscale == nil &&
+		lease.SSHHostKey == "" &&
+		lease.ProviderAccessExpiresAt == "" &&
 		lease.CleanupStartedAt == "" &&
 		lease.CleanupError == "" &&
 		lease.CleanupRetryAt == "" &&
+		(lease.ProvisioningResourceMayExist == nil || !*lease.ProvisioningResourceMayExist) &&
+		(lease.ProvisioningFailureRetryable == nil || !*lease.ProvisioningFailureRetryable) &&
 		(lease.ReleaseDeletesServer == nil || *lease.ReleaseDeletesServer)
 }
 

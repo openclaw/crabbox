@@ -54,67 +54,71 @@ func (e CoordinatorHTTPError) Error() string {
 }
 
 type CoordinatorLease struct {
-	ID                    string                         `json:"id"`
-	Slug                  string                         `json:"slug,omitempty"`
-	Provider              string                         `json:"provider"`
-	Lifecycle             string                         `json:"lifecycle,omitempty"`
-	RuntimeAdapterID      string                         `json:"runtimeAdapterID,omitempty"`
-	RuntimeWorkspaceID    string                         `json:"runtimeAdapterWorkspaceID,omitempty"`
-	RuntimeRegistrationID string                         `json:"runtimeAdapterRegistrationID,omitempty"`
-	TargetOS              string                         `json:"target,omitempty"`
-	Architecture          string                         `json:"architecture,omitempty"`
-	WindowsMode           string                         `json:"windowsMode,omitempty"`
-	Desktop               bool                           `json:"desktop,omitempty"`
-	DesktopEnv            string                         `json:"desktopEnv,omitempty"`
-	Browser               bool                           `json:"browser,omitempty"`
-	Code                  bool                           `json:"code,omitempty"`
-	Tailscale             *TailscaleMetadata             `json:"tailscale,omitempty"`
-	Region                string                         `json:"region,omitempty"`
-	ProviderProject       string                         `json:"providerProject,omitempty"`
-	Owner                 string                         `json:"owner"`
-	Org                   string                         `json:"org"`
-	Share                 *CoordinatorShare              `json:"share,omitempty"`
-	Profile               string                         `json:"profile"`
-	Class                 string                         `json:"class"`
-	Pond                  string                         `json:"pond,omitempty"`
-	ExposedPorts          []string                       `json:"exposedPorts,omitempty"`
-	ServerType            string                         `json:"serverType"`
-	RequestedServerType   string                         `json:"requestedServerType,omitempty"`
-	HostID                string                         `json:"hostId,omitempty"`
-	HostIDCompat          string                         `json:"hostID,omitempty"`
-	Market                string                         `json:"market,omitempty"`
-	ProvisioningAttempts  []ProvisioningAttempt          `json:"provisioningAttempts,omitempty"`
-	Image                 *CoordinatorLeaseImage         `json:"image,omitempty"`
-	ProvisioningTiming    *CoordinatorProvisioningTiming `json:"provisioningTiming,omitempty"`
-	CapacityHints         []CapacityHint                 `json:"capacityHints,omitempty"`
-	ServerID              int64                          `json:"serverID"`
-	CloudID               string                         `json:"cloudID"`
-	ServerName            string                         `json:"serverName"`
-	Host                  string                         `json:"host"`
-	SSHUser               string                         `json:"sshUser"`
-	SSHPort               string                         `json:"sshPort"`
-	SSHHostKey            string                         `json:"sshHostKey,omitempty"`
-	SSHFallbackPorts      []string                       `json:"sshFallbackPorts,omitempty"`
-	WorkRoot              string                         `json:"workRoot"`
-	Keep                  bool                           `json:"keep"`
-	State                 string                         `json:"state"`
-	TTLSeconds            int                            `json:"ttlSeconds,omitempty"`
-	IdleTimeoutSeconds    int                            `json:"idleTimeoutSeconds,omitempty"`
-	CreatedAt             string                         `json:"createdAt,omitempty"`
-	UpdatedAt             string                         `json:"updatedAt,omitempty"`
-	LastTouchedAt         string                         `json:"lastTouchedAt,omitempty"`
-	ExpiresAt             string                         `json:"expiresAt"`
-	Telemetry             *LeaseTelemetry                `json:"telemetry,omitempty"`
-	TelemetryHistory      []*LeaseTelemetry              `json:"telemetryHistory,omitempty"`
-	CleanupAttempts       int                            `json:"cleanupAttempts,omitempty"`
-	CleanupStatus         string                         `json:"cleanupStatus,omitempty"`
-	ProviderCleanup       *ProviderCleanupEvidence       `json:"providerCleanup,omitempty"`
-	CleanupStartedAt      string                         `json:"cleanupStartedAt,omitempty"`
-	CleanupError          string                         `json:"cleanupError,omitempty"`
-	CleanupRetryAt        string                         `json:"cleanupRetryAt,omitempty"`
-	ReleaseDeletesServer  *bool                          `json:"releaseDeletesServer,omitempty"`
-	FailureError          string                         `json:"failureError,omitempty"`
-	ProviderMetadata      map[string]any                 `json:"providerMetadata,omitempty"`
+	ID                           string                         `json:"id"`
+	Slug                         string                         `json:"slug,omitempty"`
+	Provider                     string                         `json:"provider"`
+	Lifecycle                    string                         `json:"lifecycle,omitempty"`
+	RuntimeAdapterID             string                         `json:"runtimeAdapterID,omitempty"`
+	RuntimeWorkspaceID           string                         `json:"runtimeAdapterWorkspaceID,omitempty"`
+	RuntimeRegistrationID        string                         `json:"runtimeAdapterRegistrationID,omitempty"`
+	TargetOS                     string                         `json:"target,omitempty"`
+	Architecture                 string                         `json:"architecture,omitempty"`
+	WindowsMode                  string                         `json:"windowsMode,omitempty"`
+	Desktop                      bool                           `json:"desktop,omitempty"`
+	DesktopEnv                   string                         `json:"desktopEnv,omitempty"`
+	Browser                      bool                           `json:"browser,omitempty"`
+	Code                         bool                           `json:"code,omitempty"`
+	Tailscale                    *TailscaleMetadata             `json:"tailscale,omitempty"`
+	Region                       string                         `json:"region,omitempty"`
+	ProviderProject              string                         `json:"providerProject,omitempty"`
+	Owner                        string                         `json:"owner"`
+	Org                          string                         `json:"org"`
+	Share                        *CoordinatorShare              `json:"share,omitempty"`
+	Profile                      string                         `json:"profile"`
+	Class                        string                         `json:"class"`
+	Pond                         string                         `json:"pond,omitempty"`
+	ExposedPorts                 []string                       `json:"exposedPorts,omitempty"`
+	ServerType                   string                         `json:"serverType"`
+	RequestedServerType          string                         `json:"requestedServerType,omitempty"`
+	HostID                       string                         `json:"hostId,omitempty"`
+	HostIDCompat                 string                         `json:"hostID,omitempty"`
+	Market                       string                         `json:"market,omitempty"`
+	ProvisioningAttempts         []ProvisioningAttempt          `json:"provisioningAttempts,omitempty"`
+	Image                        *CoordinatorLeaseImage         `json:"image,omitempty"`
+	ProvisioningTiming           *CoordinatorProvisioningTiming `json:"provisioningTiming,omitempty"`
+	CapacityHints                []CapacityHint                 `json:"capacityHints,omitempty"`
+	ServerID                     int64                          `json:"serverID"`
+	CloudID                      string                         `json:"cloudID"`
+	ServerName                   string                         `json:"serverName"`
+	Host                         string                         `json:"host"`
+	SSHUser                      string                         `json:"sshUser"`
+	SSHPort                      string                         `json:"sshPort"`
+	SSHHostKey                   string                         `json:"sshHostKey,omitempty"`
+	ProviderAccessExpiresAt      string                         `json:"providerAccessExpiresAt,omitempty"`
+	SSHFallbackPorts             []string                       `json:"sshFallbackPorts,omitempty"`
+	WorkRoot                     string                         `json:"workRoot"`
+	Keep                         bool                           `json:"keep"`
+	State                        string                         `json:"state"`
+	TTLSeconds                   int                            `json:"ttlSeconds,omitempty"`
+	IdleTimeoutSeconds           int                            `json:"idleTimeoutSeconds,omitempty"`
+	CreatedAt                    string                         `json:"createdAt,omitempty"`
+	UpdatedAt                    string                         `json:"updatedAt,omitempty"`
+	LastTouchedAt                string                         `json:"lastTouchedAt,omitempty"`
+	ExpiresAt                    string                         `json:"expiresAt"`
+	Telemetry                    *LeaseTelemetry                `json:"telemetry,omitempty"`
+	TelemetryHistory             []*LeaseTelemetry              `json:"telemetryHistory,omitempty"`
+	CleanupAttempts              int                            `json:"cleanupAttempts,omitempty"`
+	CleanupStatus                string                         `json:"cleanupStatus,omitempty"`
+	ProviderCleanup              *ProviderCleanupEvidence       `json:"providerCleanup,omitempty"`
+	CleanupStartedAt             string                         `json:"cleanupStartedAt,omitempty"`
+	CleanupCompletedAt           string                         `json:"cleanupCompletedAt,omitempty"`
+	CleanupError                 string                         `json:"cleanupError,omitempty"`
+	CleanupRetryAt               string                         `json:"cleanupRetryAt,omitempty"`
+	ReleaseDeletesServer         *bool                          `json:"releaseDeletesServer,omitempty"`
+	FailureError                 string                         `json:"failureError,omitempty"`
+	ProvisioningResourceMayExist *bool                          `json:"provisioningResourceMayExist,omitempty"`
+	ProvisioningFailureRetryable *bool                          `json:"provisioningFailureRetryable,omitempty"`
+	ProviderMetadata             map[string]any                 `json:"providerMetadata,omitempty"`
 }
 
 // ProviderCleanupEvidence is recorded broker evidence, not a live provider observation.
@@ -378,11 +382,30 @@ type CoordinatorImage struct {
 	ServerType           string                           `json:"serverType,omitempty"`
 	Architecture         string                           `json:"architecture,omitempty"`
 	PromotedAt           string                           `json:"promotedAt,omitempty"`
+	Revision             string                           `json:"revision,omitempty"`
 	FastSnapshotRestores []CoordinatorFastSnapshotRestore `json:"fastSnapshotRestores,omitempty"`
 	Capabilities         *imageCapabilities               `json:"capabilities,omitempty"`
 	CatalogOnly          bool                             `json:"catalogOnly,omitempty"`
 	VariantSelectors     *imageVariantSelectors           `json:"variantSelectors,omitempty"`
 	managedCheckpoint    *coordinatorCheckpoint
+}
+
+type CoordinatorImageDefaultState struct {
+	State    string                              `json:"state"`
+	ImageID  string                              `json:"imageId,omitempty"`
+	Revision string                              `json:"revision,omitempty"`
+	Aliases  []CoordinatorImageDefaultAliasState `json:"aliases,omitempty"`
+}
+
+type CoordinatorImageDefaultAliasState struct {
+	Alias string          `json:"alias"`
+	State string          `json:"state"`
+	Image json.RawMessage `json:"image,omitempty"`
+}
+
+type CoordinatorImagePromotionResult struct {
+	Image    *CoordinatorImage            `json:"image,omitempty"`
+	Previous CoordinatorImageDefaultState `json:"previous"`
 }
 
 type CoordinatorFastSnapshotRestore struct {
@@ -2102,6 +2125,28 @@ func (c *CoordinatorClient) PromoteImage(ctx context.Context, imageID string, re
 		}
 	}
 	return res.Image, nil
+}
+
+func (c *CoordinatorClient) PromoteImageCAS(ctx context.Context, imageID string, expected CoordinatorImageDefaultState, clear, retireExpectedCatalog bool, restorePrevious *CoordinatorImageDefaultState, refs ...CoordinatorImageRef) (CoordinatorImagePromotionResult, error) {
+	var res CoordinatorImagePromotionResult
+	req := map[string]any{"expectedCurrent": expected}
+	if clear {
+		req["clearDefault"] = true
+	}
+	if retireExpectedCatalog {
+		req["retireExpectedCatalog"] = true
+	}
+	if restorePrevious != nil {
+		req["restorePrevious"] = restorePrevious
+	}
+	err := c.do(ctx, http.MethodPost, imagePath(imageID, "promote-cas", refs...), req, &res)
+	if isCoordinatorNotFound(err) {
+		return res, fmt.Errorf("coordinator does not support transactional image promotion; upgrade the coordinator before publishing images (%w)", err)
+	}
+	if err == nil && (res.Previous.State == "" || (!clear && res.Image == nil)) {
+		return res, fmt.Errorf("coordinator did not return a transactional image promotion receipt")
+	}
+	return res, err
 }
 
 func (c *CoordinatorClient) FastSnapshotRestoreStatus(ctx context.Context, imageID string, refs ...CoordinatorImageRef) (CoordinatorImage, error) {

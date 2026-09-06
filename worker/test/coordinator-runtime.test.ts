@@ -605,6 +605,7 @@ describe("coordinator runtimes", () => {
   it("serializes existing-image mutations while keeping image reads and creation direct", () => {
     for (const [method, path] of [
       ["POST", "/v1/images/ami-1/promote"],
+      ["POST", "/v1/images/ami-1/promote-cas"],
       ["POST", "/v1/images/ami-1/promote-catalog"],
       ["DELETE", "/v1/images/ami-1"],
       ["DELETE", "/v1/images/ami-1/promote-catalog"],

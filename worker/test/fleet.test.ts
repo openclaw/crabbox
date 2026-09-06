@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { adminGrantVersion, issueUserToken, sha256Hex } from "../src/auth";
 import { EC2SpotClient } from "../src/aws";
+import { AzureClient, azureOwnedDeleteClaimKey } from "../src/azure";
 import { codeOriginForLease } from "../src/code-origin";
 import {
   awsPromotedAMIConfigKey,
@@ -16,6 +17,7 @@ import {
 import { routeCoordinatorRequest } from "../src/coordinator-entry";
 import {
   CloudflareCoordinatorRuntime,
+  coordinatorRequestQueue,
   legacyAlarmKey,
   setLegacyWake,
   type CoordinatorRuntime,
@@ -675,6 +677,645 @@ class FakeCoordinatorRuntime implements CoordinatorRuntime {
     await this.storage.deleteAlarm();
   }
 }
+
+describe("fleet cleanup inspection", () => {
+  type CleanupCommitGuard = NonNullable<Parameters<AzureClient["recoverMissingPublicIP"]>[3]>;
+
+  function fixture(
+    supported = true,
+    recoverCleanup?: (
+      lease: LeaseRecord,
+      fingerprint: string,
+      actor: string,
+      commitGuard: CleanupCommitGuard,
+    ) => Promise<unknown>,
+  ) {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_abcdef123456",
+      slug: "blue-lobster",
+      provider: "azure",
+      cloudID: "crabbox-blue-lobster",
+      providerScope: "/subscriptions/original-sub/resourceGroups/original-rg",
+      owner: "alice@example.com",
+      org: "example-org",
+      state: "failed",
+      cleanupError: "synthetic cleanup interruption",
+      sshUser: "synthetic-private-access-token",
+      share: {
+        users: {
+          "manager@example.com": "manage",
+          "viewer@example.com": "use",
+        },
+      },
+    });
+    const inspection = {
+      providerScope: lease.providerScope,
+      observedAt: "2026-09-01T12:00:00.000Z",
+      claimUnchanged: true,
+      resources: [],
+      identityMatches: null,
+    };
+    const inspectCleanup = vi.fn<(lease: LeaseRecord) => Promise<typeof inspection>>(
+      async () => inspection,
+    );
+    const refreshLeaseAccessForResolution = vi.fn<() => Promise<undefined>>(async () => undefined);
+    const releaseLease = vi.fn<() => Promise<void>>(async () => undefined);
+    const provider = {
+      ...fakeProvider(undefined, { provider: "azure" }),
+      ...(supported ? { inspectCleanup } : {}),
+      ...(recoverCleanup ? { recoverCleanup } : {}),
+      refreshLeaseAccessForResolution,
+      releaseLease,
+    };
+    storage.seed(`lease:${lease.id}`, lease);
+    const fleet = testFleet(
+      storage,
+      { azure: provider },
+      { CRABBOX_PUBLIC_URL: "https://crabbox.test" },
+    );
+    return {
+      storage,
+      lease,
+      fleet,
+      inspection,
+      inspectCleanup,
+      expectNoLifecycleMutation(expectedLease = lease) {
+        expect(refreshLeaseAccessForResolution).not.toHaveBeenCalled();
+        expect(releaseLease).not.toHaveBeenCalled();
+        expect(storage.value(`lease:${lease.id}`)).toEqual(expectedLease);
+      },
+    };
+  }
+
+  function recoveryFixture(supported = true) {
+    const recovery = { basis: "operator-confirmed-public-ip-absence", actor: "alice@example.com" };
+    const controls: { duringProviderRead?: () => Promise<void> } = {};
+    const commit = vi.fn<() => Promise<void>>(async () => undefined);
+    const recoverCleanup = vi.fn<
+      (
+        lease: LeaseRecord,
+        fingerprint: string,
+        actor: string,
+        commitGuard: CleanupCommitGuard,
+      ) => Promise<typeof recovery>
+    >(async (_lease, _fingerprint, actor, commitGuard) => {
+      await controls.duringProviderRead?.();
+      return commitGuard(async () => {
+        await commit();
+        return { ...recovery, actor };
+      });
+    });
+    const f = fixture(true, supported ? recoverCleanup : undefined);
+    f.lease.expiresAt = new Date(Date.now() - 60_000).toISOString();
+    f.lease.region = "eastus";
+    f.storage.seed(`lease:${f.lease.id}`, f.lease);
+    const claimKey = azureOwnedDeleteClaimKey(f.lease.providerScope!, f.lease.cloudID, f.lease.id);
+    const claim = { version: 2, stableResourceIdentity: "synthetic-baseline" };
+    f.storage.seed(claimKey, claim);
+    const coreWrites: string[] = [];
+    f.storage.beforePut = async (key) => {
+      if (key === `lease:${f.lease.id}` || key === claimKey) coreWrites.push(key);
+    };
+    f.storage.beforeDelete = async (key) => {
+      if (key === `lease:${f.lease.id}` || key === claimKey) coreWrites.push(key);
+    };
+    const fingerprint = "a".repeat(64);
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    const body = { action: "acknowledge-missing-resource", expectedClaimFingerprint: fingerprint };
+    return {
+      ...f,
+      recovery,
+      recoverCleanup,
+      controls,
+      commit,
+      fingerprint,
+      headers,
+      body,
+      path: `/v1/leases/${f.lease.id}/cleanup`,
+      expectCoreReadOnly(expectedLease = f.lease) {
+        f.expectNoLifecycleMutation(expectedLease);
+        expect(f.inspectCleanup).not.toHaveBeenCalled();
+        expect(coreWrites).toEqual([]);
+        expect(f.storage.value(claimKey)).toEqual(claim);
+      },
+    };
+  }
+
+  describe("missing public IP recovery route", () => {
+    it("keeps recovery provider reads outside the lifecycle queue", () => {
+      expect(coordinatorRequestQueue(request("POST", "/v1/leases/cbx_abcdef123456/cleanup"))).toBe(
+        "direct",
+      );
+    });
+
+    it.each([
+      ["owner", "alice@example.com", "example-org", false],
+      ["admin", "admin@example.com", "other-org", true],
+    ] as const)(
+      "permits %s acknowledgement while retaining the original lease owner",
+      async (_role, actor, org, admin) => {
+        const f = recoveryFixture();
+
+        const response = await f.fleet.fetch(
+          request("POST", f.path, {
+            headers: {
+              "x-crabbox-owner": actor,
+              "x-crabbox-org": org,
+              ...(admin ? { "x-crabbox-admin": "true" } : {}),
+            },
+            body: f.body,
+          }),
+        );
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+          leaseID: f.lease.id,
+          provider: "azure",
+          recovery: { ...f.recovery, actor },
+        });
+        expect(f.recoverCleanup).toHaveBeenCalledExactlyOnceWith(
+          f.lease,
+          f.fingerprint,
+          actor,
+          expect.any(Function),
+        );
+        expect(f.commit).toHaveBeenCalledTimes(1);
+        expect(f.lease.owner).toBe("alice@example.com");
+        f.expectCoreReadOnly();
+      },
+    );
+
+    it.each(["manager@example.com", "viewer@example.com"])(
+      "denies %s acknowledgement even though the lease is shared",
+      async (owner) => {
+        const f = recoveryFixture();
+
+        const response = await f.fleet.fetch(
+          request("POST", f.path, {
+            headers: { "x-crabbox-owner": owner, "x-crabbox-org": "other-org" },
+            body: f.body,
+          }),
+        );
+
+        expect(response.status).toBe(403);
+        expect(f.recoverCleanup).not.toHaveBeenCalled();
+        f.expectCoreReadOnly();
+      },
+    );
+
+    it("denies device acknowledgement before provider access", async () => {
+      const f = recoveryFixture();
+
+      const response = await f.fleet.fetch(
+        request("POST", f.path, {
+          headers: {
+            ...f.headers,
+            origin: "https://crabbox.test",
+            authorization: `Bearer cbxd_00000000-0000-4000-8000-000000000001.${"A".repeat(43)}`,
+          },
+          body: f.body,
+        }),
+      );
+
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toEqual({ error: "device_scope_forbidden" });
+      expect(f.recoverCleanup).not.toHaveBeenCalled();
+      f.expectCoreReadOnly();
+    });
+
+    it.each(["active", "released", "failed"] as const)(
+      "accepts an expired blocked %s lease",
+      async (state) => {
+        const f = recoveryFixture();
+        f.lease.state = state;
+        f.storage.seed(`lease:${f.lease.id}`, f.lease);
+
+        const response = await f.fleet.fetch(
+          request("POST", f.path, { headers: f.headers, body: f.body }),
+        );
+
+        expect(response.status).toBe(200);
+        expect(f.recoverCleanup).toHaveBeenCalledExactlyOnceWith(
+          f.lease,
+          f.fingerprint,
+          "alice@example.com",
+          expect.any(Function),
+        );
+        expect(f.commit).toHaveBeenCalledTimes(1);
+        f.expectCoreReadOnly();
+      },
+    );
+
+    it.each([
+      "live expiry",
+      "invalid expiry",
+      "running cleanup",
+      "unblocked active",
+      "unblocked failed",
+      "provisioning",
+      "explicit retention",
+    ])("rejects %s with 409 without provider access", async (reason) => {
+      const f = recoveryFixture();
+      if (reason === "live expiry") f.lease.expiresAt = new Date(Date.now() + 60_000).toISOString();
+      if (reason === "invalid expiry") f.lease.expiresAt = "not-a-date";
+      if (reason === "running cleanup") f.lease.cleanupStartedAt = new Date().toISOString();
+      if (reason === "unblocked active") {
+        f.lease.state = "active";
+        delete f.lease.cleanupError;
+      }
+      if (reason === "unblocked failed") delete f.lease.cleanupError;
+      if (reason === "provisioning") f.lease.state = "provisioning";
+      if (reason === "explicit retention") f.lease.releaseDeletesServer = false;
+      f.storage.seed(`lease:${f.lease.id}`, f.lease);
+
+      const response = await f.fleet.fetch(
+        request("POST", f.path, { headers: f.headers, body: f.body }),
+      );
+
+      expect(response.status).toBe(409);
+      expect(f.recoverCleanup).not.toHaveBeenCalled();
+      f.expectCoreReadOnly();
+    });
+
+    describe.each(["replacement", "in-place"])("%s lease races", (mutationMode) => {
+      const changes: Record<string, Partial<LeaseRecord>> = {
+        owner: { owner: "other-owner@example.com" },
+        org: { org: orgKeyForLabel("other-org") },
+        provider: { provider: "hetzner" },
+        cloudID: { cloudID: "another-vm" },
+        scope: { providerScope: "/subscriptions/other-sub/resourceGroups/other-rg" },
+        region: { region: "westus" },
+        createdAt: { createdAt: "2026-08-01T00:00:00.000Z" },
+        lifecycle: { lifecycle: "registered" },
+        expiry: { expiresAt: "2999-01-01T00:00:00.000Z" },
+        retention: { releaseDeletesServer: false },
+        start: { cleanupStartedAt: "2026-08-01T00:00:00.000Z" },
+        state: { state: "provisioning" },
+      };
+      it.each(Object.keys(changes))(
+        "rejects a changed %s at the commit boundary without writing",
+        async (field) => {
+          const f = recoveryFixture();
+          const leaseKey = `lease:${f.lease.id}`;
+          let expectedLease = f.lease;
+          f.controls.duringProviderRead = async () => {
+            const current = f.storage.value<LeaseRecord>(leaseKey)!;
+            expectedLease = mutationMode === "in-place" ? current : structuredClone(current);
+            Object.assign(expectedLease, changes[field]);
+            if (mutationMode === "replacement") f.storage.seed(leaseKey, expectedLease);
+          };
+
+          const response = await f.fleet.fetch(
+            request("POST", f.path, { headers: f.headers, body: f.body }),
+          );
+
+          expect(response.status).toBe(409);
+          await expect(response.json()).resolves.toEqual({
+            error: "cleanup_recovery_refused",
+            message: "Cleanup recovery lease changed before commit",
+          });
+          expect(f.recoverCleanup).toHaveBeenCalledTimes(1);
+          expect(f.commit).not.toHaveBeenCalled();
+          expect(Object.is(expectedLease, f.lease)).toBe(mutationMode === "in-place");
+          f.expectCoreReadOnly(expectedLease);
+        },
+      );
+    });
+
+    it.each(["registered", "unbound", "unsupported"])(
+      "rejects a %s lease with 501",
+      async (reason) => {
+        const f = recoveryFixture(reason !== "unsupported");
+        if (reason === "registered") f.lease.lifecycle = "registered";
+        if (reason === "unbound") f.lease.cloudID = "";
+        f.storage.seed(`lease:${f.lease.id}`, f.lease);
+
+        const response = await f.fleet.fetch(
+          request("POST", f.path, { headers: f.headers, body: f.body }),
+        );
+
+        expect(response.status).toBe(501);
+        expect(f.recoverCleanup).not.toHaveBeenCalled();
+        f.expectCoreReadOnly();
+      },
+    );
+
+    it.each([
+      {},
+      { action: "delete", expectedClaimFingerprint: "a".repeat(64) },
+      { action: "acknowledge-missing-resource" },
+      { action: "acknowledge-missing-resource", expectedClaimFingerprint: "A".repeat(64) },
+      { action: "acknowledge-missing-resource", expectedClaimFingerprint: "a".repeat(63) },
+      { action: "acknowledge-missing-resource", expectedClaimFingerprint: 123 },
+    ])("rejects malformed recovery body %j", async (body) => {
+      const f = recoveryFixture();
+
+      const response = await f.fleet.fetch(request("POST", f.path, { headers: f.headers, body }));
+
+      expect(response.status).toBe(400);
+      expect(f.recoverCleanup).not.toHaveBeenCalled();
+      f.expectCoreReadOnly();
+    });
+
+    it("returns 404 for an unknown recovery lease", async () => {
+      const f = recoveryFixture();
+
+      const response = await f.fleet.fetch(
+        request("POST", "/v1/leases/cbx_999999999999/cleanup", {
+          headers: f.headers,
+          body: f.body,
+        }),
+      );
+
+      expect(response.status).toBe(404);
+      expect(f.recoverCleanup).not.toHaveBeenCalled();
+      f.expectCoreReadOnly();
+    });
+
+    it("maps provider identity refusal to 409 without lifecycle or claim edits", async () => {
+      const f = recoveryFixture();
+      f.recoverCleanup.mockRejectedValue(
+        new ProviderResourceUnresolvedError("synthetic original disk changed"),
+      );
+
+      const response = await f.fleet.fetch(
+        request("POST", f.path, { headers: f.headers, body: f.body }),
+      );
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        error: "cleanup_recovery_refused",
+        message: "synthetic original disk changed",
+      });
+      f.expectCoreReadOnly();
+    });
+
+    it("uses the Azure lease's original scope and region rather than changed deployment defaults", async () => {
+      const f = recoveryFixture();
+      const provider = new AzureProvider(
+        {
+          AZURE_TENANT_ID: "synthetic-tenant",
+          AZURE_CLIENT_ID: "synthetic-client",
+          AZURE_CLIENT_SECRET: "synthetic-client-secret",
+          AZURE_SUBSCRIPTION_ID: "new-default-sub",
+          CRABBOX_AZURE_RESOURCE_GROUP: "new-default-rg",
+          CRABBOX_AZURE_LOCATION: "westus",
+        } as Env,
+        undefined,
+        f.storage,
+      );
+      const observed: Array<{ scope: string; region: string }> = [];
+      const commitGuard = vi.fn<CleanupCommitGuard>(async (commit) => commit());
+      const recover = vi
+        .spyOn(AzureClient.prototype, "recoverMissingPublicIP")
+        .mockImplementation(function () {
+          observed.push({ scope: this.providerScope(), region: this.defaultLocation });
+          return Promise.reject(new ProviderResourceUnresolvedError("synthetic adapter boundary"));
+        });
+      try {
+        await expect(
+          provider.recoverCleanup(f.lease, f.fingerprint, "admin@example.com", commitGuard),
+        ).rejects.toThrow("synthetic adapter boundary");
+
+        expect(recover).toHaveBeenCalledExactlyOnceWith(
+          f.lease,
+          f.fingerprint,
+          "admin@example.com",
+          commitGuard,
+        );
+        expect(observed).toEqual([{ scope: f.lease.providerScope, region: "eastus" }]);
+      } finally {
+        recover.mockRestore();
+      }
+    });
+
+    it.each(["scope", "region"])(
+      "rejects recovery without the original Azure %s before client access",
+      async (missing) => {
+        const f = recoveryFixture();
+        if (missing === "scope") delete f.lease.providerScope;
+        else delete f.lease.region;
+        const provider = new AzureProvider({} as Env, undefined, f.storage);
+        const recover = vi.spyOn(AzureClient.prototype, "recoverMissingPublicIP");
+        try {
+          await expect(async () =>
+            provider.recoverCleanup(f.lease, f.fingerprint, "alice@example.com"),
+          ).rejects.toThrow(/original provider scope|original.*region/i);
+
+          expect(recover).not.toHaveBeenCalled();
+        } finally {
+          recover.mockRestore();
+        }
+      },
+    );
+  });
+
+  it.each([
+    ["owner", "alice@example.com", "example-org", false],
+    ["manage share", "manager@example.com", "other-org", false],
+    ["admin", "admin@example.com", "other-org", true],
+  ] as const)(
+    "allows %s to inspect cleanup without refresh or release",
+    async (_role, owner, org, admin) => {
+      const f = fixture();
+
+      const response = await f.fleet.fetch(
+        request("GET", `/v1/leases/${f.lease.id}/cleanup`, {
+          headers: {
+            "x-crabbox-owner": owner,
+            "x-crabbox-org": org,
+            ...(admin ? { "x-crabbox-admin": "true" } : {}),
+          },
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        leaseID: f.lease.id,
+        provider: "azure",
+        inspection: f.inspection,
+      });
+      expect(f.inspectCleanup).toHaveBeenCalledExactlyOnceWith(f.lease);
+      f.expectNoLifecycleMutation();
+    },
+  );
+
+  it.each([
+    ["view-only share", "viewer@example.com", "other-org", 403],
+    ["unshared org member", "member@example.com", "example-org", 404],
+    ["unrelated user", "outsider@example.com", "other-org", 404],
+    ["owner in another org", "alice@example.com", "other-org", 404],
+  ] as const)(
+    "denies cleanup inspection to a %s before provider access",
+    async (_role, owner, org, expectedStatus) => {
+      const f = fixture();
+
+      const response = await f.fleet.fetch(
+        request("GET", `/v1/leases/${f.lease.id}/cleanup`, {
+          headers: { "x-crabbox-owner": owner!, "x-crabbox-org": org! },
+        }),
+      );
+
+      expect(response.status).toBe(expectedStatus);
+      expect(f.inspectCleanup).not.toHaveBeenCalled();
+      expect(await response.text()).not.toContain("synthetic-private-access-token");
+      f.expectNoLifecycleMutation();
+    },
+  );
+
+  it("denies device tokens access to cleanup diagnostics even with owner headers", async () => {
+    const f = fixture();
+
+    const response = await f.fleet.fetch(
+      request("GET", `/v1/leases/${f.lease.id}/cleanup`, {
+        headers: {
+          authorization: `Bearer cbxd_00000000-0000-4000-8000-000000000001.${"A".repeat(43)}`,
+          origin: "https://crabbox.test",
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({ error: "device_scope_forbidden" });
+    expect(f.inspectCleanup).not.toHaveBeenCalled();
+    f.expectNoLifecycleMutation();
+  });
+
+  it("returns 404 for an unknown lease without provider access", async () => {
+    const f = fixture();
+
+    const response = await f.fleet.fetch(
+      request("GET", "/v1/leases/cbx_999999999999/cleanup", {
+        headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+      }),
+    );
+
+    expect(response.status).toBe(404);
+    expect(f.inspectCleanup).not.toHaveBeenCalled();
+    f.expectNoLifecycleMutation();
+  });
+
+  it("returns 501 for an unsupported hook only after authorization", async () => {
+    const f = fixture(false);
+    const path = `/v1/leases/${f.lease.id}/cleanup`;
+
+    const owner = await f.fleet.fetch(
+      request("GET", path, {
+        headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+      }),
+    );
+    const viewer = await f.fleet.fetch(
+      request("GET", path, {
+        headers: { "x-crabbox-owner": "viewer@example.com", "x-crabbox-org": "other-org" },
+      }),
+    );
+
+    expect(owner.status).toBe(501);
+    expect(viewer.status).toBe(403);
+    f.expectNoLifecycleMutation();
+  });
+
+  it.each(["registered", "unbound"])(
+    "returns 501 for a %s lease without invoking the provider",
+    async (kind) => {
+      const f = fixture();
+      if (kind === "registered") f.lease.lifecycle = "registered";
+      else f.lease.cloudID = "";
+      f.storage.seed(`lease:${f.lease.id}`, f.lease);
+
+      const response = await f.fleet.fetch(
+        request("GET", `/v1/leases/${f.lease.id}/cleanup`, {
+          headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+        }),
+      );
+
+      expect(response.status).toBe(501);
+      expect(f.inspectCleanup).not.toHaveBeenCalled();
+      f.expectNoLifecycleMutation();
+    },
+  );
+
+  it("routes Azure cleanup inspection to the original subscription and resource group", async () => {
+    const storage = new MemoryStorage();
+    const originalScope = "/subscriptions/original-sub/resourceGroups/original-rg";
+    const lease = testLease({
+      id: "cbx_abcdef123456",
+      slug: "blue-lobster",
+      provider: "azure",
+      cloudID: "crabbox-blue-lobster",
+      providerScope: originalScope,
+      owner: "alice@example.com",
+      org: "example-org",
+      state: "failed",
+      cleanupError: "synthetic cleanup interruption",
+    });
+    const env = {
+      AZURE_TENANT_ID: "tenant",
+      AZURE_CLIENT_ID: "client",
+      AZURE_CLIENT_SECRET: "synthetic-client-secret",
+      AZURE_SUBSCRIPTION_ID: "new-default-sub",
+      CRABBOX_AZURE_RESOURCE_GROUP: "new-default-rg",
+    };
+    const provider = new AzureProvider(env as Env, undefined, storage);
+    const release = vi.spyOn(provider, "releaseLease");
+    const reads: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const req = input instanceof Request ? input : new Request(input, init);
+        const url = new URL(req.url);
+        if (url.hostname === "login.microsoftonline.com") {
+          return Response.json({ access_token: "synthetic-azure-access-token", expires_in: 3600 });
+        }
+        expect(req.method).toBe("GET");
+        expect(url.origin).toBe("https://management.azure.com");
+        reads.push(url.pathname);
+        return Response.json(
+          {
+            error: {
+              code: "ResourceNotFound",
+              message: `The Resource '${url.pathname.slice(url.pathname.indexOf("/providers/") + 11)}' was not found.`,
+            },
+          },
+          { status: 404 },
+        );
+      }),
+    );
+    storage.seed(`lease:${lease.id}`, lease);
+    const fleet = testFleet(storage, { azure: provider }, env);
+
+    const response = await fleet.fetch(
+      request("GET", `/v1/leases/${lease.id}/cleanup`, {
+        headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      leaseID: lease.id,
+      provider: "azure",
+      inspection: {
+        providerScope: originalScope,
+        claimUnchanged: true,
+        identityMatches: null,
+        resources: [],
+      },
+    });
+    expect(reads.toSorted()).toEqual(
+      [
+        `${originalScope}/providers/Microsoft.Compute/virtualMachines/${lease.cloudID}`,
+        `${originalScope}/providers/Microsoft.Network/networkInterfaces/${lease.cloudID}-nic`,
+        `${originalScope}/providers/Microsoft.Network/publicIPAddresses/${lease.cloudID}-pip`,
+        `${originalScope}/providers/Microsoft.Compute/disks/${lease.cloudID}-osdisk`,
+      ].toSorted(),
+    );
+    expect(release).not.toHaveBeenCalled();
+    expect(storage.value(`lease:${lease.id}`)).toEqual(lease);
+  });
+});
 
 describe("runtime adapter relay", () => {
   it("revalidates active admin control sockets against the current grant source", async () => {
@@ -6143,7 +6784,8 @@ describe("fleet lease identity and idle", () => {
       state: "released",
       cleanupStatus: "complete",
       serverID: 123,
-      host: lease.host,
+      host: "",
+      cleanupCompletedAt: expect.any(String),
       providerCleanup: {
         version: 1,
         provider: "hetzner",
@@ -7758,11 +8400,19 @@ describe("fleet lease identity and idle", () => {
     );
     const providers = [
       testHetznerCleanupProvider(),
-      new AWSProvider({} as Env, "eu-west-1", new MemoryStorage()),
+      new AWSProvider(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+        "eu-west-1",
+        new MemoryStorage(),
+      ),
     ];
     await Promise.all(
       providers.map(async (provider) => {
         vi.spyOn(provider, "deleteServer").mockResolvedValue();
+        const terminateServerAndWait =
+          provider instanceof AWSProvider
+            ? vi.spyOn(EC2SpotClient.prototype, "terminateServerAndWait").mockResolvedValue()
+            : undefined;
         const deleteSSHKey = vi.spyOn(provider, "deleteSSHKey").mockResolvedValue();
         if (provider instanceof AWSProvider) {
           vi.spyOn(provider, "findServer").mockResolvedValue(
@@ -7795,6 +8445,7 @@ describe("fleet lease identity and idle", () => {
           "crabbox-cbx-abcdef123456",
           "cbx_abcdef123456",
         ]);
+        terminateServerAndWait?.mockRestore();
       }),
     );
   });
@@ -7808,6 +8459,9 @@ describe("fleet lease identity and idle", () => {
             .spyOn(provider, "findServer")
             .mockResolvedValue(ownedTestMachine(providerName, cloudID));
           const deleteServer = vi.spyOn(provider, "deleteServer").mockResolvedValue();
+          const terminateServerAndWait = vi
+            .spyOn(EC2SpotClient.prototype, "terminateServerAndWait")
+            .mockResolvedValue();
           const lease = testLease({
             id: "cbx_abcdef123456",
             provider: providerName,
@@ -7817,7 +8471,9 @@ describe("fleet lease identity and idle", () => {
 
           await expect(provider.releaseLease(lease)).resolves.toBeUndefined();
           expect(findServer).toHaveBeenCalledWith(cloudID);
-          expect(deleteServer).toHaveBeenCalledWith(cloudID);
+          expect(terminateServerAndWait).toHaveBeenCalledWith(cloudID);
+          expect(deleteServer).not.toHaveBeenCalled();
+          terminateServerAndWait.mockRestore();
         }),
     );
   });
@@ -8052,18 +8708,24 @@ describe("fleet lease identity and idle", () => {
       new MemoryStorage(),
     );
     vi.spyOn(provider, "findServer").mockResolvedValue(ownedTestMachine("aws", "i-abcdef123456"));
-    vi.spyOn(provider, "deleteServer").mockRejectedValue(new Error("AWS resource group not found"));
+    const terminateServerAndWait = vi
+      .spyOn(EC2SpotClient.prototype, "terminateServerAndWait")
+      .mockRejectedValue(new Error("AWS resource group not found"));
 
-    await expect(
-      provider.releaseLease(
-        testLease({
-          id: "cbx_abcdef123456",
-          provider: "aws",
-          cloudID: "i-abcdef123456",
-          providerKeyCleanupOwned: false,
-        }),
-      ),
-    ).rejects.toThrow("resource group not found");
+    try {
+      await expect(
+        provider.releaseLease(
+          testLease({
+            id: "cbx_abcdef123456",
+            provider: "aws",
+            cloudID: "i-abcdef123456",
+            providerKeyCleanupOwned: false,
+          }),
+        ),
+      ).rejects.toThrow("resource group not found");
+    } finally {
+      terminateServerAndWait.mockRestore();
+    }
   });
 
   it("adapts workspaces onto owner-scoped lease lifecycle", async () => {
@@ -12012,14 +12674,40 @@ describe("fleet lease identity and idle", () => {
       status: "failed",
       message: "hetzner POST /servers: http 400: invalid_input",
     });
-    const lease = [...(await storage.list<LeaseRecord>({ prefix: "lease:" })).values()][0];
-    expect(lease?.provisioningResourceMayExist).toBe(false);
+    const lease = [...(await storage.list<LeaseRecord>({ prefix: "lease:" })).values()][0]!;
+    expect(lease.provisioningResourceMayExist).toBe(false);
+    storage.seed(`lease:${lease.id}`, {
+      ...lease,
+      host: "192.0.2.117",
+      tailscale: { enabled: true, ipv4: "100.64.0.117" },
+      sshHostKey: "ssh-ed25519 workspace-stale-access",
+      providerAccessExpiresAt: "2026-09-06T03:00:00Z",
+    });
 
     const stopping = await fleet.fetch(request("DELETE", `/v1/workspaces/${body.id}`, { headers }));
     await expect(stopping.json()).resolves.toMatchObject({ status: "stopping" });
     await fleet.alarm();
     const stopped = await fleet.fetch(request("GET", `/v1/workspaces/${body.id}`, { headers }));
     await expect(stopped.json()).resolves.toMatchObject({ status: "stopped" });
+    const completed = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+    expect(Number.isFinite(Date.parse(completed.cleanupCompletedAt ?? ""))).toBe(true);
+    expect(completed).toMatchObject({ state: "released", host: "" });
+    expect(completed.tailscale).toBeUndefined();
+    expect(completed.sshHostKey).toBeUndefined();
+    expect(completed.providerAccessExpiresAt).toBeUndefined();
+    const inspected = await fleet.fetch(request("GET", `/v1/leases/${lease.id}`, { headers }));
+    const publicLease = (await inspected.json()) as {
+      lease: LeaseRecord & { cleanupStatus: string };
+    };
+    expect(publicLease.lease).toMatchObject({
+      state: "released",
+      cleanupStatus: "complete",
+      cleanupCompletedAt: completed.cleanupCompletedAt,
+      host: "",
+    });
+    expect(publicLease.lease.tailscale).toBeUndefined();
+    expect(publicLease.lease.sshHostKey).toBeUndefined();
+    expect(publicLease.lease.providerAccessExpiresAt).toBeUndefined();
     expect(providerLookups).toBe(0);
   });
 
@@ -12961,11 +13649,64 @@ describe("fleet lease identity and idle", () => {
       cloudID: "",
       failureError: "provider provisioning was interrupted; no provider resource found",
       provisioningResourceMayExist: false,
-      provisioningFailureRetryable: false,
+      cleanupCompletedAt: expect.any(String),
+      host: "",
     });
+    expect(
+      storage.value<LeaseRecord>("lease:cbx_000000000091")?.provisioningFailureRetryable,
+    ).toBeUndefined();
     expect(
       storage.value<LeaseRecord>("lease:cbx_000000000091")?.provisioningCoordinatorVersion,
     ).toBeUndefined();
+    const released = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_000000000091/release", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: true },
+      }),
+    );
+    await expect(released.json()).resolves.toMatchObject({
+      lease: {
+        state: "released",
+        cleanupStatus: "complete",
+        cleanupCompletedAt: expect.any(String),
+        host: "",
+      },
+    });
+  });
+
+  it("expires a fenced pre-dispatch reservation with no-resource completion", async () => {
+    const storage = new MemoryStorage();
+    let providerReleases = 0;
+    const lease = testLease({
+      id: "cbx_000000000090",
+      provider: "azure",
+      cloudID: "",
+      serverID: 0,
+      serverName: "",
+      host: "",
+      state: "provisioning",
+      provisioningResourceMayExist: false,
+      expiresAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(undefined, { provider: "azure" }, async () => {
+        providerReleases += 1;
+      }),
+    });
+
+    await fleet.alarm();
+
+    expect(providerReleases).toBe(0);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+      state: "expired",
+      cleanupCompletedAt: expect.any(String),
+      provisioningResourceMayExist: false,
+      host: "",
+    });
   });
 
   it("waits for the deployment settle window before reconciling interrupted provisioning", async () => {
@@ -13636,8 +14377,10 @@ describe("fleet lease identity and idle", () => {
       state: "failed",
       cloudID: "crabbox-delayed",
       provisioningResourceMayExist: false,
-      provisioningFailureRetryable: false,
     });
+    expect(
+      storage.value<LeaseRecord>(`lease:${leaseID}`)?.provisioningFailureRetryable,
+    ).toBeUndefined();
   });
 
   it("records the coordinator version only while provider provisioning is active", async () => {
@@ -13753,8 +14496,10 @@ describe("fleet lease identity and idle", () => {
       failureError:
         "provider provisioning was interrupted; recovered provider resource for cleanup",
       provisioningResourceMayExist: false,
-      provisioningFailureRetryable: false,
     });
+    expect(
+      storage.value<LeaseRecord>(`lease:${leaseID}`)?.provisioningFailureRetryable,
+    ).toBeUndefined();
     expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.cleanupError).toBeUndefined();
   });
 
@@ -20817,7 +21562,7 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("provider-access:cbx_abcdef123456")).toBeUndefined();
   });
 
-  it("persists brokered leases as provisioning before provider create returns", async () => {
+  it("persists requested market before provider create and records the actual fallback", async () => {
     const storage = new MemoryStorage();
     let storedDuringCreate: LeaseRecord | undefined;
     let injectedHostPrivateKey = "";
@@ -20829,7 +21574,12 @@ describe("fleet lease identity and idle", () => {
           injectedHostPublicKey = config.sshHostPublicKey;
           storedDuringCreate = structuredClone(storage.value("lease:cbx_abcdef123456"));
         },
-        { provider: "azure", cloudID: "vm-cbx-abcdef123456", region: "eastus" },
+        {
+          provider: "azure",
+          cloudID: "vm-cbx-abcdef123456",
+          region: "eastus",
+          market: "on-demand",
+        },
       ),
     });
 
@@ -20843,6 +21593,7 @@ describe("fleet lease identity and idle", () => {
           leaseID: "cbx_abcdef123456",
           provider: "azure",
           azureLocation: "eastus",
+          capacity: { market: "spot", fallback: "on-demand" },
           ttlSeconds: 1200,
           sshPublicKey: "ssh-ed25519 test",
         },
@@ -20855,6 +21606,7 @@ describe("fleet lease identity and idle", () => {
       provider: "azure",
       state: "provisioning",
       cloudID: "",
+      market: "spot",
     });
     expect(injectedHostPrivateKey).toContain("BEGIN OPENSSH PRIVATE KEY");
     const injectedHostKeyIdentity = injectedHostPublicKey
@@ -20872,13 +21624,56 @@ describe("fleet lease identity and idle", () => {
       provider: "azure",
       state: "active",
       cloudID: "vm-cbx-abcdef123456",
+      market: "on-demand",
       sshHostKey: injectedHostKeyIdentity,
     });
     const storedLease = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
     expect(storedLease?.state).toBe("active");
+    expect(storedLease?.market).toBe("on-demand");
     expect(storedLease?.sshHostKey).toBe(injectedHostKeyIdentity);
     expect(JSON.stringify(storedLease)).not.toContain("BEGIN OPENSSH PRIVATE KEY");
   });
+
+  it.each(["hetzner", "daytona"] as const)(
+    "omits capacity market from %s lease records",
+    async (provider) => {
+      const storage = new MemoryStorage();
+      let storedDuringCreate: LeaseRecord | undefined;
+      const fleet = testFleet(storage, {
+        [provider]: fakeProvider(
+          () => {
+            storedDuringCreate = structuredClone(storage.value("lease:cbx_abcdef123456"));
+          },
+          { provider, cloudID: `${provider}-cbx-abcdef123456` },
+        ),
+      });
+
+      const create = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers: {
+            "x-crabbox-owner": "alice@example.com",
+            "x-crabbox-org": "example-org",
+          },
+          body: {
+            leaseID: "cbx_abcdef123456",
+            provider,
+            capacity: { market: "on-demand", fallback: "none" },
+            sshPublicKey: "ssh-ed25519 test",
+          },
+        }),
+      );
+
+      expect(create.status).toBe(201);
+      expect(storedDuringCreate).toMatchObject({
+        provider,
+        state: "provisioning",
+      });
+      expect(storedDuringCreate).not.toHaveProperty("market");
+      const { lease } = (await create.json()) as { lease: LeaseRecord };
+      expect(lease).not.toHaveProperty("market");
+      expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).not.toHaveProperty("market");
+    },
+  );
 
   it("omits SSH host keys when a provider cannot inject them before boot", async () => {
     const storage = new MemoryStorage();
@@ -21627,7 +22422,9 @@ describe("fleet lease identity and idle", () => {
       releaseDeletesServer: true,
       cleanupError: "provider cleanup throttled",
       cleanupRetryAt: expect.any(String),
+      host: lease.host,
     });
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupCompletedAt).toBeUndefined();
     expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupStartedAt).toBeUndefined();
 
     const forcedRetry = await fleet.fetch(
@@ -21639,6 +22436,123 @@ describe("fleet lease identity and idle", () => {
     expect(providerReleases).toBe(2);
     expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupError).toBeUndefined();
     expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.releaseDeletesServer).toBeUndefined();
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupCompletedAt).toEqual(
+      expect.any(String),
+    );
+  });
+
+  it.each([
+    { state: "released", cleanupCompletedAt: undefined },
+    { state: "expired", cleanupCompletedAt: undefined },
+    { state: "active", cleanupCompletedAt: "2026-09-06T00:00:00Z" },
+    { state: "provisioning", cleanupCompletedAt: "2026-09-06T00:00:00Z" },
+  ] as const)(
+    "re-observes a $state resource before publishing cleanup completion",
+    async ({ state, cleanupCompletedAt }) => {
+      const storage = new MemoryStorage();
+      const lease = testLease({
+        id: "cbx_000000000095",
+        owner: "alice@example.com",
+        org: "example-org",
+        state,
+        cleanupCompletedAt,
+        region: "eu-west-1",
+        providerResourceID: "provider-resource-95",
+        tailscale: { enabled: true, ipv4: "100.64.0.95" },
+        sshHostKey: "ssh-ed25519 historical",
+        providerAccessExpiresAt: "2026-09-06T01:00:00.000Z",
+        exposedPorts: ["8080"],
+        network: { sshSourceCIDRs: ["192.0.2.95/32"], sshSourceCIDRsComplete: true },
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      const released: string[] = [];
+      const fleet = testFleet(storage, {
+        hetzner: fakeProvider(undefined, {}, async (id) => released.push(id)),
+      });
+      const headers = {
+        "x-crabbox-owner": lease.owner,
+        "x-crabbox-org": "example-org",
+      };
+
+      const response = await fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/release`, {
+          headers,
+          body: { delete: true },
+        }),
+      );
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        lease: { state: "released", cleanupStatus: "pending" },
+      });
+      expect(released).toEqual([]);
+
+      await fleet.alarm();
+
+      expect(released).toEqual([lease.cloudID]);
+      const completed = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+      expect(completed).toMatchObject({
+        state: "released",
+        cloudID: lease.cloudID,
+        providerResourceID: lease.providerResourceID,
+        serverID: lease.serverID,
+        serverName: lease.serverName,
+        region: lease.region,
+        network: lease.network,
+        exposedPorts: lease.exposedPorts,
+        workRoot: lease.workRoot,
+        host: "",
+        cleanupCompletedAt: expect.any(String),
+      });
+      expect(completed.tailscale).toBeUndefined();
+      expect(completed.sshHostKey).toBeUndefined();
+      expect(completed.providerAccessExpiresAt).toBeUndefined();
+      const observed = await fleet.fetch(request("GET", `/v1/leases/${lease.id}`, { headers }));
+      await expect(observed.json()).resolves.toMatchObject({
+        lease: { state: "released", cleanupStatus: "complete", host: "" },
+      });
+    },
+  );
+
+  it("accepts a confirmed expired cleanup without another provider call", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_000000000094",
+      owner: "alice@example.com",
+      org: "example-org",
+      state: "expired",
+      cleanupCompletedAt: "2026-09-06T00:00:00Z",
+      provisioningResourceMayExist: false,
+      host: "",
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    let providerReleases = 0;
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(undefined, {}, async () => {
+        providerReleases += 1;
+      }),
+    });
+    const headers = {
+      "x-crabbox-owner": lease.owner,
+      "x-crabbox-org": "example-org",
+    };
+
+    const response = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/release`, {
+        headers,
+        body: { delete: true },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      lease: {
+        state: "released",
+        cleanupStatus: "complete",
+        cleanupCompletedAt: lease.cleanupCompletedAt,
+        host: "",
+      },
+    });
+    expect(providerReleases).toBe(0);
   });
 
   it.each(["manual release", "expiry"] as const)(
@@ -21844,6 +22758,10 @@ describe("fleet lease identity and idle", () => {
       expect(current.cleanupError).toBeUndefined();
       expect(current.providerResourceID).toBe(beforePublication!.providerResourceID);
       expect(current.providerCleanup).toEqual(beforePublication!.providerCleanup);
+      expect(typeof current.cleanupCompletedAt).toBe(
+        drift === "unchanged" ? "string" : "undefined",
+      );
+      expect(current.host).toBe(drift === "unchanged" ? "" : beforePublication!.host);
     },
   );
 
@@ -21851,9 +22769,14 @@ describe("fleet lease identity and idle", () => {
     "finishes legacy GCP %s cleanup on unchanged exact absence",
     async (source) => {
       const storage = new MemoryStorage();
-      const lease = legacyGCPLease(
-        source === "expiry" ? { expiresAt: new Date(Date.now() - 60_000).toISOString() } : {},
-      );
+      const lease = legacyGCPLease({
+        ...(source === "expiry" ? { expiresAt: new Date(Date.now() - 60_000).toISOString() } : {}),
+        tailscale: { enabled: true, ipv4: "100.64.0.44" },
+        sshHostKey: "ssh-ed25519 cleanup-history",
+        providerAccessExpiresAt: "2026-09-06T01:00:00Z",
+        exposedPorts: ["8080"],
+        network: { sshSourceCIDRs: ["192.0.2.44/32"], sshSourceCIDRsComplete: true },
+      });
       let releases = 0;
       const fleet = testFleet(storage, {
         gcp: fakeProvider(undefined, {
@@ -21886,11 +22809,24 @@ describe("fleet lease identity and idle", () => {
       await fleet.alarm();
 
       expect(releases).toBe(0);
-      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+      const completed = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+      expect(completed).toMatchObject({
         state: source === "expiry" ? "expired" : "released",
+        cleanupCompletedAt: expect.any(String),
+        cloudID: lease.cloudID,
+        serverID: lease.serverID,
+        serverName: lease.serverName,
+        region: lease.region,
+        network: lease.network,
+        exposedPorts: lease.exposedPorts,
+        workRoot: lease.workRoot,
+        host: "",
       });
-      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.providerResourceID).toBeUndefined();
-      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupStartedAt).toBeUndefined();
+      expect(completed.providerResourceID).toBeUndefined();
+      expect(completed.cleanupStartedAt).toBeUndefined();
+      expect(completed.tailscale).toBeUndefined();
+      expect(completed.sshHostKey).toBeUndefined();
+      expect(completed.providerAccessExpiresAt).toBeUndefined();
     },
   );
 
@@ -22317,11 +23253,51 @@ describe("fleet lease identity and idle", () => {
   });
 
   it.each([
-    { name: "confirmed deletion", fields: {}, status: "complete" },
+    {
+      name: "confirmed deletion",
+      fields: {
+        cleanupCompletedAt: "2026-09-06T00:00:00Z",
+        host: "",
+        tailscale: undefined,
+        sshHostKey: undefined,
+        providerAccessExpiresAt: undefined,
+      },
+      status: "complete",
+    },
     {
       name: "completed cleanup with provisioning failure history",
-      fields: { failureError: "creation failed before cleanup completed" },
+      fields: {
+        cleanupCompletedAt: "2026-09-06T00:00:00Z",
+        failureError: "creation failed before cleanup completed",
+        host: "",
+        tailscale: undefined,
+        sshHostKey: undefined,
+        providerAccessExpiresAt: undefined,
+      },
       status: "complete",
+    },
+    {
+      name: "completion timestamp with stale access",
+      fields: { cleanupCompletedAt: "2026-09-06T00:00:00Z" },
+      status: "failed",
+    },
+    {
+      name: "historical release without completion proof",
+      fields: {},
+      status: "failed",
+    },
+    {
+      name: "historical no-resource release without completion proof",
+      fields: { cloudID: "" },
+      status: "failed",
+    },
+    {
+      name: "completion timestamp with retryable provisioning evidence",
+      fields: {
+        cleanupCompletedAt: "2026-09-06T00:00:00Z",
+        provisioningFailureRetryable: true,
+      },
+      status: "failed",
     },
     {
       name: "retained resource",
@@ -22404,6 +23380,9 @@ describe("fleet lease identity and idle", () => {
         org: "example-org",
         state: "released",
         releaseDeletesServer: true,
+        tailscale: { enabled: true, ipv4: "100.64.0.45" },
+        sshHostKey: "ssh-ed25519 retained-until-complete",
+        providerAccessExpiresAt: "2026-09-06T01:00:00Z",
         ...fields,
       });
       storage.seed(`lease:${lease.id}`, lease);
@@ -22414,11 +23393,141 @@ describe("fleet lease identity and idle", () => {
         }),
       );
       expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({ lease: { cleanupStatus: status } });
+      const body = (await response.json()) as { lease: LeaseRecord & { cleanupStatus: string } };
+      expect(body.lease.cleanupStatus).toBe(status);
+      expect({
+        host: body.lease.host,
+        tailscale: body.lease.tailscale,
+        sshHostKey: body.lease.sshHostKey,
+        providerAccessExpiresAt: body.lease.providerAccessExpiresAt,
+      }).toEqual(
+        status === "complete"
+          ? {
+              host: "",
+              tailscale: undefined,
+              sshHostKey: undefined,
+              providerAccessExpiresAt: undefined,
+            }
+          : {
+              host: lease.host,
+              tailscale: lease.tailscale,
+              sshHostKey: lease.sshHostKey,
+              providerAccessExpiresAt: lease.providerAccessExpiresAt,
+            },
+      );
       expect(storage.value(`lease:${lease.id}`)).toEqual(lease);
       expect(storage.value(`lease:${lease.id}`)).not.toHaveProperty("cleanupStatus");
     },
   );
+
+  it("preserves registered release access without provider cleanup proof", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_abcdef123454",
+      owner: "alice@example.com",
+      org: "example-org",
+      lifecycle: "registered",
+      state: "released",
+      tailscale: { enabled: true, ipv4: "100.64.0.4" },
+      sshHostKey: "ssh-ed25519 registered",
+      providerAccessExpiresAt: "2026-09-06T01:00:00Z",
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+
+    const response = await testFleet(storage).fetch(
+      request("GET", `/v1/leases/${lease.id}`, {
+        headers: { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" },
+      }),
+    );
+    await expect(response.json()).resolves.toMatchObject({
+      lease: {
+        cleanupStatus: "complete",
+        host: lease.host,
+        tailscale: lease.tailscale,
+        sshHostKey: lease.sshHostKey,
+        providerAccessExpiresAt: lease.providerAccessExpiresAt,
+      },
+    });
+  });
+
+  it("canonicalizes retryable no-resource cancellation without provider cleanup", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const createAttemptID = "cat_46000000000000000000000000000046";
+    const generation = "confirmed-no-resource-generation";
+    const now = new Date().toISOString();
+    const deleted: string[] = [];
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(undefined, { provider: "azure" }, async (id) => {
+        deleted.push(id);
+      }),
+    });
+    storage.seed(`create-attempt:${leaseID}`, {
+      version: 1,
+      requestedLeaseID: leaseID,
+      token: createAttemptID,
+      owner: "alice@example.com",
+      org: orgKeyForLabel("example-org"),
+      state: "pending",
+      canonicalLeaseID: leaseID,
+      generation,
+      createdAt: now,
+      updatedAt: now,
+    });
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: "slow-azure",
+        provider: "azure",
+        cloudID: "",
+        serverID: 0,
+        serverName: "",
+        host: "",
+        region: "eastus",
+        state: "failed",
+        createAttemptID,
+        createAttemptGeneration: generation,
+        provisioningResourceMayExist: false,
+        provisioningFailureRetryable: true,
+        failureError: "transient create failure confirmed no provider resource",
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    );
+
+    const release = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/cancel-create`, {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { createAttemptID },
+      }),
+    );
+
+    expect(release.status).toBe(200);
+    expect(deleted).toEqual([]);
+    const { lease } = (await release.json()) as { lease: LeaseRecord };
+    expect(lease).toMatchObject({
+      state: "released",
+      cloudID: "",
+      host: "",
+      cleanupStatus: "complete",
+      cleanupCompletedAt: expect.any(String),
+      provisioningResourceMayExist: false,
+    });
+    expect(lease.provisioningFailureRetryable).toBeUndefined();
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      cleanupCompletedAt: lease.cleanupCompletedAt,
+      provisioningResourceMayExist: false,
+      host: "",
+    });
+    expect(
+      storage.value<LeaseRecord>(`lease:${leaseID}`)?.provisioningFailureRetryable,
+    ).toBeUndefined();
+  });
 
   it("can release a provisioning lease before cloud resources are known", async () => {
     const storage = new MemoryStorage();
@@ -22437,6 +23546,7 @@ describe("fleet lease identity and idle", () => {
         cloudID: "",
         region: "eastus",
         state: "provisioning",
+        provisioningResourceMayExist: false,
         owner: "alice@example.com",
         org: "example-org",
         expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
@@ -22456,7 +23566,49 @@ describe("fleet lease identity and idle", () => {
     expect(release.status).toBe(200);
     expect(deleted).toEqual([]);
     const { lease } = (await release.json()) as { lease: LeaseRecord };
-    expect(lease.state).toBe("released");
+    expect(lease).toMatchObject({
+      state: "released",
+      cloudID: "",
+      host: "",
+      cleanupStatus: "complete",
+      cleanupCompletedAt: expect.any(String),
+      provisioningResourceMayExist: false,
+    });
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toMatchObject({
+      cleanupCompletedAt: lease.cleanupCompletedAt,
+      host: "",
+    });
+  });
+
+  it("does not infer no-resource completion for a legacy provisioning record", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_abcdef123457",
+      slug: "legacy-hostless",
+      provider: "azure",
+      cloudID: "",
+      state: "provisioning",
+      owner: "alice@example.com",
+      org: "example-org",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+
+    const release = await testFleet(storage).fetch(
+      request("POST", `/v1/leases/${lease.id}/release`, {
+        headers: {
+          "x-crabbox-owner": lease.owner,
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: true },
+      }),
+    );
+
+    expect(release.status).toBe(200);
+    await expect(release.json()).resolves.toMatchObject({
+      lease: { state: "released", cloudID: "", cleanupStatus: "failed" },
+    });
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupCompletedAt).toBeUndefined();
   });
 
   it("does not reactivate a provisioning lease released while provider create is pending", async () => {
@@ -22537,7 +23689,13 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(await observed.json()).toMatchObject({
-      lease: { state: "released", cloudID: "", cleanupStatus: "complete" },
+      lease: {
+        state: "released",
+        cloudID: "",
+        cleanupStatus: "complete",
+        cleanupCompletedAt: expect.any(String),
+        host: "",
+      },
     });
   });
 
@@ -24311,7 +25469,9 @@ describe("fleet lease identity and idle", () => {
           terminated = true;
           deleting.resolve();
           if (cleanupPending) await finishDelete.promise;
-          return ec2XMLResponse("<Response />");
+          return ec2XMLResponse(
+            `<Response><instancesSet><item><instanceId>${params.get("InstanceId.1")}</instanceId></item></instancesSet></Response>`,
+          );
         }
         if (operation !== "DescribeInstances") return undefined;
         const heldRead = firstRead;
@@ -25771,7 +26931,14 @@ describe("fleet lease identity and idle", () => {
     );
     expect(canceled.status).toBe(200);
     await expect(canceled.json()).resolves.toMatchObject({
-      lease: { id: leaseID, provider: "hetzner", state: "released", cleanupStatus: "complete" },
+      lease: {
+        id: leaseID,
+        provider: "hetzner",
+        state: "released",
+        cleanupStatus: "complete",
+        cleanupCompletedAt: expect.any(String),
+        host: "",
+      },
     });
     expect(storage.value(`lease:${leaseID}`)).toBeUndefined();
     const usage = await fleet.fetch(request("GET", "/v1/usage", { headers }));
@@ -25796,7 +26963,13 @@ describe("fleet lease identity and idle", () => {
         );
         expect(repeatedRelease.status).toBe(200);
         await expect(repeatedRelease.json()).resolves.toMatchObject({
-          lease: { id: leaseID, state: "released", cleanupStatus: "complete" },
+          lease: {
+            id: leaseID,
+            state: "released",
+            cleanupStatus: "complete",
+            cleanupCompletedAt: expect.any(String),
+            host: "",
+          },
         });
       }),
     );
@@ -25853,7 +27026,13 @@ describe("fleet lease identity and idle", () => {
     );
     expect(stopped.status).toBe(200);
     await expect.soft(stopped.json()).resolves.toMatchObject({
-      lease: { id: leaseID, state: "released", cleanupStatus: "complete" },
+      lease: {
+        id: leaseID,
+        state: "released",
+        cleanupStatus: "complete",
+        cleanupCompletedAt: expect.any(String),
+        host: "",
+      },
     });
     await Promise.all(
       [otherID, friendlySlug].map(async (identifier) => {
@@ -27181,14 +28360,26 @@ describe("fleet lease identity and idle", () => {
       const canceled = await release();
       expect(canceled.status).toBe(200);
       await expect(canceled.json()).resolves.toMatchObject({
-        lease: { id: leaseID, state: "released", cleanupStatus: "complete" },
+        lease: {
+          id: leaseID,
+          state: "released",
+          cleanupStatus: "complete",
+          cleanupCompletedAt: expect.any(String),
+          host: "",
+        },
       });
       finishPreparation.resolve();
       expect((await first).status).toBe(409);
       const repeated = await release();
       expect.soft(repeated.status).toBe(200);
       await expect.soft(repeated.json()).resolves.toMatchObject({
-        lease: { id: leaseID, state: "released", cleanupStatus: "complete" },
+        lease: {
+          id: leaseID,
+          state: "released",
+          cleanupStatus: "complete",
+          cleanupCompletedAt: expect.any(String),
+          host: "",
+        },
       });
       finishSecondConfig.resolve();
       expect.soft((await second).status).toBe(409);
@@ -27316,6 +28507,74 @@ describe("fleet lease identity and idle", () => {
         lease: { id: leaseID, state: "released", cleanupStatus: "complete" },
       });
       expect(deleted).toEqual(["123"]);
+    },
+  );
+
+  it.each(["failed", "expired"] as const)(
+    "preserves confirmed %s cleanup when provider creation publishes late",
+    async (state) => {
+      const storage = new MemoryStorage();
+      const leaseID = "cbx_ca1100000046";
+      const deleted: string[] = [];
+      const fleet = testFleet(storage, {
+        hetzner: fakeProvider(
+          () => {
+            const current = structuredClone(storage.value<LeaseRecord>(`lease:${leaseID}`)!);
+            const completedAt = new Date().toISOString();
+            current.state = state;
+            current.cloudID = "123";
+            current.serverID = 123;
+            current.serverName = "crabbox-late-cleanup";
+            current.host = "";
+            current.updatedAt = completedAt;
+            current.endedAt = completedAt;
+            current.cleanupCompletedAt = completedAt;
+            current.provisioningResourceMayExist = false;
+            delete current.tailscale;
+            delete current.sshHostKey;
+            delete current.providerAccessExpiresAt;
+            delete current.provisioningFailureRetryable;
+            delete current.provisioningRequestStartedAt;
+            delete current.provisioningRequestSettledAt;
+            delete current.provisioningCoordinatorVersion;
+            delete current.provisioningRecoveryObservedAt;
+            delete current.provisioningRecoveryMissingSince;
+            storage.seed(`lease:${leaseID}`, current);
+          },
+          {},
+          async (id) => {
+            deleted.push(id);
+          },
+        ),
+      });
+
+      const response = await fleet.fetch(
+        request("PUT", `/v1/leases/${leaseID}`, {
+          headers: {
+            "x-crabbox-owner": "alice@example.com",
+            "x-crabbox-org": "example-org",
+          },
+          body: {
+            provider: "hetzner",
+            sshPublicKey: "ssh-ed25519 late-cleanup",
+          },
+        }),
+      );
+
+      expect(response.status).toBe(409);
+      expect(deleted).toEqual([]);
+      const completed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+      expect(completed).toMatchObject({
+        state,
+        cloudID: "123",
+        serverID: 123,
+        serverName: "crabbox-late-cleanup",
+        host: "",
+        cleanupCompletedAt: expect.any(String),
+        provisioningResourceMayExist: false,
+      });
+      expect(completed.cleanupStartedAt).toBeUndefined();
+      expect(completed.provisioningFailureRetryable).toBeUndefined();
     },
   );
 
@@ -35635,6 +36894,209 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("image:aws:promoted")).toBeUndefined();
   });
 
+  it("serves transactional AWS promotion on a dedicated fail-closed route", async () => {
+    const aws = fakeProvider();
+    const promote = vi
+      .spyOn(aws, "promoteImage")
+      .mockImplementation(async (imageID, _known, promotionRequest) => {
+        await expect(promotionRequest.clone().json()).resolves.toMatchObject({
+          expectedCurrent: { state: "capture" },
+        });
+        return {
+          image: { id: imageID, name: imageID, state: "available", provider: "aws" },
+          previous: { state: "absent" },
+        };
+      });
+    const fleet = testFleet(new MemoryStorage(), { aws });
+    const response = await fleet.fetch(
+      request("POST", "/v1/images/ami-candidate/promote-cas?target=windows&region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { expectedCurrent: { state: "capture" } },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      image: { id: "ami-candidate" },
+      previous: { state: "absent" },
+    });
+    const missingPrecondition = await fleet.fetch(
+      request("POST", "/v1/images/ami-candidate/promote-cas?target=windows&region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {},
+      }),
+    );
+    expect(missingPrecondition.status).toBe(400);
+    await expect(missingPrecondition.json()).resolves.toMatchObject({
+      error: "image_promotion_precondition_required",
+    });
+    const captureRetirement = await fleet.fetch(
+      request("POST", "/v1/images/ami-candidate/promote-cas?target=windows&region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {
+          expectedCurrent: { state: "capture" },
+          retireExpectedCatalog: true,
+        },
+      }),
+    );
+    expect(captureRetirement.status).toBe(400);
+    await expect(captureRetirement.json()).resolves.toMatchObject({
+      error: "invalid_image_precondition",
+    });
+    const ordinaryExpectation = await fleet.fetch(
+      request("POST", "/v1/images/ami-candidate/promote?target=windows&region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { expectedCurrent: { state: "capture" } },
+      }),
+    );
+    expect(ordinaryExpectation.status).toBe(400);
+    await expect(ordinaryExpectation.json()).resolves.toMatchObject({
+      error: "invalid_image_precondition",
+    });
+    expect(promote).toHaveBeenCalledOnce();
+    const ordinaryRetirement = await fleet.fetch(
+      request("POST", "/v1/images/ami-candidate/promote?target=windows&region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {
+          expectedCurrent: {
+            state: "present",
+            imageId: "ami-candidate",
+            revision: "revision-candidate",
+          },
+          retireExpectedCatalog: true,
+        },
+      }),
+    );
+    expect(ordinaryRetirement.status).toBe(400);
+    const catalogExpectation = await fleet.fetch(
+      request("POST", "/v1/images/ami-candidate/promote-catalog?target=windows&region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { expectedCurrent: { state: "capture" } },
+      }),
+    );
+    expect(catalogExpectation.status).toBe(400);
+    await expect(catalogExpectation.json()).resolves.toMatchObject({
+      error: "invalid_image_precondition",
+    });
+    const catalogRetirement = await fleet.fetch(
+      request("POST", "/v1/images/ami-candidate/promote-catalog?target=windows&region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { retireExpectedCatalog: true },
+      }),
+    );
+    expect(catalogRetirement.status).toBe(400);
+    expect(promote).toHaveBeenCalledOnce();
+  });
+
+  it("rejects shared-token transactional promotion before provider or storage mutation", async () => {
+    const storage = new MemoryStorage();
+    const defaultKey = "image:aws:promoted:windows:x86_64:eu-west-1";
+    const catalogKey = "image:aws:catalog:windows:x86_64:eu-west-1:ami-candidate";
+    const current = {
+      id: "ami-candidate",
+      name: "candidate",
+      state: "available" as const,
+      provider: "aws" as const,
+      target: "windows" as const,
+      region: "eu-west-1",
+      architecture: "x86_64",
+      snapshots: ["snap-root"],
+      promotedAt: "2026-09-03T00:00:00Z",
+      revision: "revision-candidate",
+    };
+    storage.seed(defaultKey, current);
+    storage.seed(catalogKey, current);
+    const env = {
+      CRABBOX_SHARED_TOKEN: "shared-operator-token",
+      CRABBOX_SHARED_OWNER: "automation@example.com",
+      CRABBOX_DEFAULT_ORG: "example-org",
+    } as Env;
+    const aws = fakeProvider();
+    const fleet = testFleet(storage, { aws }, env);
+    await fleet.ready();
+    const storedImageMetadata = vi.spyOn(aws, "storedImageMetadata");
+    const promote = vi.spyOn(aws, "promoteImage");
+    const enableFastSnapshotRestore = vi.spyOn(aws, "enableFastSnapshotRestore");
+    const transaction = vi.spyOn(storage, "transaction");
+    const put = vi.spyOn(storage, "put");
+    const remove = vi.spyOn(storage, "delete");
+    const scheduleAlarm = vi.spyOn(
+      fleet as unknown as { scheduleAlarm: () => Promise<void> },
+      "scheduleAlarm",
+    );
+    const transactionPutCounts = [...storage.transactionPutCounts];
+
+    const response = await routeCoordinatorRequest(
+      new Request(
+        "https://crabbox.test/v1/images/ami-candidate/promote-cas?provider=aws&target=windows&region=eu-west-1&fastSnapshotRestore=true&fsrAz=eu-west-1a",
+        {
+          method: "POST",
+          headers: {
+            authorization: "Bearer shared-operator-token",
+            "content-type": "application/json",
+            "x-crabbox-admin": "true",
+          },
+          body: JSON.stringify({
+            clearDefault: true,
+            expectedCurrent: {
+              state: "present",
+              imageId: current.id,
+              revision: current.revision,
+            },
+            retireExpectedCatalog: true,
+            fastSnapshotRestore: true,
+            fastSnapshotRestoreAvailabilityZones: ["eu-west-1a"],
+          }),
+        },
+      ),
+      env,
+      async (prepared) => await fleet.fetch(prepared),
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({
+      error: "forbidden",
+      message: "admin token required",
+    });
+    expect(storedImageMetadata).not.toHaveBeenCalled();
+    expect(promote).not.toHaveBeenCalled();
+    expect(enableFastSnapshotRestore).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
+    expect(put).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(scheduleAlarm).not.toHaveBeenCalled();
+    expect(storage.transactionPutCounts).toEqual(transactionPutCounts);
+    expect(storage.value(defaultKey)).toEqual(current);
+    expect(storage.value(catalogKey)).toEqual(current);
+    expect(storage.alarm()).toBeUndefined();
+  });
+
+  it("rejects transactional promotion for Azure before provider mutation", async () => {
+    const azure = fakeProvider(undefined, { provider: "azure" });
+    const promote = vi.spyOn(azure, "promoteImage");
+    const fleet = testFleet(new MemoryStorage(), { azure });
+    const response = await fleet.fetch(
+      request(
+        "POST",
+        "/v1/images/checkpoint-azure/promote-cas?provider=azure&target=linux&region=eastus",
+        {
+          headers: { "x-crabbox-admin": "true" },
+          body: {
+            expectedCurrent: { state: "capture" },
+            retireExpectedCatalog: true,
+          },
+        },
+      ),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "unsupported_provider",
+      message: "transactional image promotion is AWS-only",
+    });
+    expect(promote).not.toHaveBeenCalled();
+  });
+
   it("stores declared image capabilities in the selectable AWS image catalog", async () => {
     const storage = new MemoryStorage();
     const provider = new AWSProvider({} as Env, "eu-west-1", storage);
@@ -35739,6 +37201,41 @@ describe("fleet lease identity and idle", () => {
       storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-variant"),
     ).toBeUndefined();
     await expect(storage.list({ prefix: "image:aws:catalog:" })).resolves.toHaveLength(0);
+  });
+
+  it("rejects transactional fields for direct catalog-only AWS promotion without mutation", async () => {
+    const storage = new MemoryStorage();
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-variant",
+      name: "variant",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-variant/promote?target=linux&region=eu-west-1&catalogOnly=true",
+    );
+    const responses = await Promise.all(
+      [{ expectedCurrent: { state: "capture" } }, { retireExpectedCatalog: true }].map(
+        async (body) =>
+          await provider.promoteImage(
+            "ami-variant",
+            undefined,
+            new Request(url, { method: "POST", body: JSON.stringify(body) }),
+            url,
+          ),
+      ),
+    );
+    for (const response of responses) {
+      expect(response).toBeInstanceOf(Response);
+      expect((response as Response).status).toBe(400);
+    }
+    expect(storage.value("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1")).toBeUndefined();
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-variant"),
+    ).toBeUndefined();
   });
 
   it("serves catalog-only promotion on its dedicated coordinator route", async () => {
@@ -36981,6 +38478,1019 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-a")).toEqual(
       expect.objectContaining({ capabilities: { runtimes: { node: "24.2" } } }),
     );
+  });
+
+  it("captures and restores AWS image defaults without clobbering a newer promotion", async () => {
+    const storage = new MemoryStorage();
+    const key = "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1";
+    const baseRevision = "revision-previous";
+    storage.seed(key, {
+      id: "ami-previous",
+      name: "previous",
+      state: "available",
+      provider: "aws",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-09-01T00:00:00Z",
+      revision: baseRevision,
+    });
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => ({
+      id: imageID,
+      name: imageID,
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    }));
+    const promote = async (
+      imageID: string,
+      expectedCurrent?: Record<string, string>,
+      clearDefault = false,
+      runtime = "",
+      retireExpectedCatalog = false,
+    ) => {
+      const url = new URL(
+        `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1${runtime ? `&runtime=node%3D${runtime}` : ""}`,
+      );
+      return provider.promoteImage(
+        imageID,
+        undefined,
+        new Request(url, {
+          method: "POST",
+          body: JSON.stringify({ expectedCurrent, clearDefault, retireExpectedCatalog }),
+        }),
+        url,
+      );
+    };
+
+    const published = await promote("ami-candidate", { state: "capture" }, false, "24");
+    expect(published).toMatchObject({
+      image: { id: "ami-candidate", revision: expect.any(String) },
+      previous: {
+        state: "present",
+        imageId: "ami-previous",
+        revision: baseRevision,
+      },
+    });
+    const candidateRevision = (published as { image: { revision: string } }).image.revision;
+    expect(candidateRevision).not.toBe(baseRevision);
+
+    const restored = await promote(
+      "ami-previous",
+      {
+        state: "present",
+        imageId: "ami-candidate",
+        revision: candidateRevision,
+      },
+      false,
+      "",
+      true,
+    );
+    expect(restored).toMatchObject({ image: { id: "ami-previous", revision: expect.any(String) } });
+    const restoredRevision = (restored as { image: { revision: string } }).image.revision;
+    expect(restoredRevision).not.toBe(baseRevision);
+    expect(restoredRevision).not.toBe(candidateRevision);
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-candidate"),
+    ).toBeUndefined();
+    await expect(
+      provider.prepareLeaseConfig(
+        leaseConfig({
+          provider: "aws",
+          sshPublicKey: "ssh-ed25519 test",
+          imageRequirements: { runtimes: { node: "24" } },
+        }),
+      ),
+    ).rejects.toThrow("no promoted AWS linux image satisfies the requested image capabilities");
+
+    const staleBase = await promote("ami-candidate", {
+      state: "present",
+      imageId: "ami-previous",
+      revision: baseRevision,
+    });
+    expect(staleBase).toBeInstanceOf(Response);
+    expect((staleBase as Response).status).toBe(409);
+    await expect((staleBase as Response).json()).resolves.toMatchObject({
+      error: "image_promotion_precondition_failed",
+      current: {
+        state: "present",
+        imageId: "ami-previous",
+        revision: restoredRevision,
+      },
+    });
+
+    const second = await promote("ami-candidate", { state: "capture" }, false, "24");
+    const secondRevision = (second as { image: { revision: string } }).image.revision;
+    await promote("ami-newer");
+    const genericStale = await promote("ami-previous", {
+      state: "present",
+      imageId: "ami-candidate",
+      revision: secondRevision,
+    });
+
+    expect(genericStale).toBeInstanceOf(Response);
+    expect((genericStale as Response).status).toBe(409);
+    await expect((genericStale as Response).json()).resolves.toMatchObject({
+      error: "image_promotion_precondition_failed",
+      current: { state: "present", imageId: "ami-newer" },
+    });
+    expect(storage.value(key)).toEqual(expect.objectContaining({ id: "ami-newer" }));
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-candidate"),
+    ).toEqual(expect.objectContaining({ id: "ami-candidate", revision: secondRevision }));
+
+    const staleRollback = await promote(
+      "ami-previous",
+      {
+        state: "present",
+        imageId: "ami-candidate",
+        revision: secondRevision,
+      },
+      false,
+      "",
+      true,
+    );
+    expect(staleRollback).toBeInstanceOf(Response);
+    expect((staleRollback as Response).status).toBe(409);
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-candidate"),
+    ).toBeUndefined();
+    await expect(
+      provider.prepareLeaseConfig(
+        leaseConfig({
+          provider: "aws",
+          sshPublicKey: "ssh-ed25519 test",
+          imageRequirements: { runtimes: { node: "24" } },
+        }),
+      ),
+    ).rejects.toThrow("no promoted AWS linux image satisfies the requested image capabilities");
+  });
+
+  it("restores cross-region AWS default aliases without overwriting a concurrent promotion", async () => {
+    const storage = new MemoryStorage();
+    const portableKey = "image:aws:promoted:linux:x86_64:ubuntu26.04";
+    const regionalKey = "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1";
+    const prior = {
+      id: "ami-prior-us-east",
+      name: "prior",
+      state: "available" as const,
+      provider: "aws" as const,
+      target: "linux" as const,
+      os: "ubuntu:26.04",
+      region: "us-east-2",
+      architecture: "x86_64",
+      promotedAt: "2026-09-01T00:00:00Z",
+      revision: "revision-prior",
+    };
+    storage.seed(portableKey, prior);
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const getImage = vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => ({
+      id: imageID,
+      name: imageID,
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    }));
+    const promote = async (imageID: string, body: Record<string, unknown>) => {
+      const url = new URL(
+        `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1`,
+      );
+      return provider.promoteImage(
+        imageID,
+        undefined,
+        new Request(url, { method: "POST", body: JSON.stringify(body) }),
+        url,
+      );
+    };
+
+    const published = (await promote("ami-candidate", {
+      expectedCurrent: { state: "capture" },
+    })) as {
+      image: { id: string; revision: string };
+      previous: {
+        state: string;
+        imageId: string;
+        revision: string;
+        aliases: Array<{ alias: string; state: string; image?: { id: string } }>;
+      };
+    };
+    expect(published.previous).toMatchObject({
+      state: "present",
+      imageId: prior.id,
+      revision: prior.revision,
+      aliases: [
+        { alias: "linux-os", state: "present", image: { id: prior.id } },
+        { alias: "regional", state: "absent" },
+      ],
+    });
+
+    const restored = await promote(published.image.id, {
+      expectedCurrent: {
+        state: "present",
+        imageId: published.image.id,
+        revision: published.image.revision,
+      },
+      restorePrevious: published.previous,
+      retireExpectedCatalog: true,
+    });
+    expect(restored).toMatchObject({ image: { id: prior.id, region: prior.region } });
+    expect(storage.value(portableKey)).toEqual(prior);
+    expect(storage.value(regionalKey)).toBeUndefined();
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-candidate"),
+    ).toBeUndefined();
+
+    const republished = (await promote("ami-candidate", {
+      expectedCurrent: { state: "capture" },
+    })) as typeof published;
+    const concurrent = {
+      ...prior,
+      id: "ami-concurrent",
+      name: "concurrent",
+      promotedAt: "2026-09-04T00:00:00Z",
+      revision: "revision-concurrent",
+    };
+    storage.seed(portableKey, concurrent);
+    const restoredAroundConcurrent = await promote(republished.image.id, {
+      expectedCurrent: {
+        state: "present",
+        imageId: republished.image.id,
+        revision: republished.image.revision,
+      },
+      restorePrevious: republished.previous,
+      retireExpectedCatalog: true,
+    });
+
+    expect(restoredAroundConcurrent).toMatchObject({
+      image: { id: concurrent.id, revision: concurrent.revision },
+    });
+    expect(storage.value(portableKey)).toEqual(concurrent);
+    expect(storage.value(regionalKey)).toBeUndefined();
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-candidate"),
+    ).toBeUndefined();
+    expect(getImage.mock.calls.map(([imageID]) => imageID)).toEqual([
+      "ami-candidate",
+      "ami-candidate",
+      "ami-candidate",
+      "ami-candidate",
+    ]);
+  });
+
+  it.each([
+    { region: "us-east-2", catalog: true, retirementRegion: undefined, restored: false },
+    { region: "eu-west-1", catalog: false, retirementRegion: undefined, restored: false },
+    { region: "us-east-2", catalog: false, retirementRegion: undefined, restored: false },
+    { region: undefined, catalog: false, retirementRegion: undefined, restored: false },
+    { region: "eu-west-1", catalog: false, retirementRegion: "eu-west-1", restored: false },
+    { region: undefined, catalog: false, retirementRegion: "eu-west-1", restored: false },
+    { region: "us-east-2", catalog: false, retirementRegion: "eu-west-1", restored: true },
+  ])(
+    "applies receipt-only retirement scope $region/$catalog/$retirementRegion",
+    async ({ region, catalog, retirementRegion, restored }) => {
+      const storage = new MemoryStorage();
+      const portableKey = "image:aws:promoted:linux:x86_64:ubuntu26.04";
+      const regionalKey = `${portableKey}:eu-west-1`;
+      const priorCatalogKey = "image:aws:catalog:linux:x86_64:ubuntu26.04:us-east-2:ami-prior";
+      const prior = {
+        id: "ami-prior",
+        name: "prior",
+        state: "available" as const,
+        provider: "aws" as const,
+        target: "linux" as const,
+        os: "ubuntu:26.04",
+        ...(region ? { region } : {}),
+        architecture: "x86_64",
+        promotedAt: "2026-09-01T00:00:00Z",
+      };
+      storage.seed(portableKey, prior);
+      if (catalog) {
+        storage.seed(priorCatalogKey, {
+          ...prior,
+          promotedAt: "2026-09-02T00:00:00Z",
+          revision: "revision-catalog",
+        });
+      }
+      const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+      vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => ({
+        id: imageID,
+        name: imageID,
+        state: "available",
+        provider: "aws",
+        region: "eu-west-1",
+        architecture: "x86_64",
+      }));
+      const promote = async (imageID: string, body: Record<string, unknown>) => {
+        const url = new URL(
+          `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1`,
+        );
+        return provider.promoteImage(
+          imageID,
+          undefined,
+          new Request(url, { method: "POST", body: JSON.stringify(body) }),
+          url,
+        );
+      };
+
+      const published = (await promote("ami-candidate", {
+        expectedCurrent: { state: "capture" },
+      })) as {
+        image: { id: string; revision: string };
+        previous: Record<string, unknown>;
+      };
+      await expect(provider.retirePromotedImage(prior.id, retirementRegion)).resolves.toBe(
+        catalog ? 1 : 0,
+      );
+      const rollback = await promote(published.image.id, {
+        expectedCurrent: {
+          state: "present",
+          imageId: published.image.id,
+          revision: published.image.revision,
+        },
+        restorePrevious: published.previous,
+        retireExpectedCatalog: true,
+      });
+
+      expect(rollback).toMatchObject({
+        image: restored ? prior : { id: "none", state: "absent" },
+      });
+      expect(storage.value(portableKey)).toEqual(restored ? prior : undefined);
+      expect(storage.value(regionalKey)).toBeUndefined();
+      expect(storage.value(priorCatalogKey)).toBeUndefined();
+    },
+  );
+
+  it.each([
+    { firstRegion: undefined, secondRegion: undefined },
+    { firstRegion: "eu-west-1", secondRegion: undefined },
+    { firstRegion: undefined, secondRegion: "eu-west-1" },
+    { firstRegion: "eu-west-1", secondRegion: "eu-west-1" },
+  ])(
+    "orders rowless retirement and republication at frozen time $firstRegion/$secondRegion",
+    async ({ firstRegion, secondRegion }) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-09-05T00:00:00Z"));
+      try {
+        const storage = new MemoryStorage();
+        const imageID = "ami-prior";
+        const portableKey = "image:aws:promoted:linux:x86_64:ubuntu26.04";
+        const regionalKey = `${portableKey}:eu-west-1`;
+        const catalogKey = `image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:${imageID}`;
+        const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+        vi.spyOn(provider, "getImage").mockImplementation(async (id) => ({
+          id,
+          name: id,
+          state: "available",
+          provider: "aws",
+          region: "eu-west-1",
+          architecture: "x86_64",
+        }));
+        const promote = async (id: string, body: Record<string, unknown>) => {
+          const url = new URL(
+            `https://crabbox.test/v1/images/${id}/promote?target=linux&region=eu-west-1`,
+          );
+          const result = await provider.promoteImage(
+            id,
+            undefined,
+            new Request(url, { method: "POST", body: JSON.stringify(body) }),
+            url,
+          );
+          expect(result).not.toBeInstanceOf(Response);
+          return result as {
+            image: { id: string; revision: string; promotedAt: string };
+            previous: Record<string, unknown>;
+          };
+        };
+        const restore = (receipt: Awaited<ReturnType<typeof promote>>) =>
+          promote(receipt.image.id, {
+            expectedCurrent: {
+              state: "present",
+              imageId: receipt.image.id,
+              revision: receipt.image.revision,
+            },
+            restorePrevious: receipt.previous,
+            retireExpectedCatalog: true,
+          });
+
+        await expect(provider.retirePromotedImage(imageID, firstRegion)).resolves.toBe(0);
+        const first = await promote(imageID, { expectedCurrent: { state: "capture" } });
+        expect.soft(Date.parse(first.image.promotedAt)).toBe(Date.now() + 1);
+        // Model a legacy receipt-only alias without a surviving exact-revision tombstone.
+        const { revision: _revision, ...revisionless } = first.image;
+        storage.seed(portableKey, revisionless);
+        storage.seed(regionalKey, revisionless);
+        await storage.delete(catalogKey);
+        const displaced = await promote("ami-candidate", { expectedCurrent: { state: "capture" } });
+        expect(await storage.list({ prefix: "image:aws:retired:" })).toEqual(new Map());
+        await expect(provider.retirePromotedImage(imageID, secondRegion)).resolves.toBe(0);
+        await expect(provider.retirePromotedImage(imageID, secondRegion)).resolves.toBe(0);
+        const rejected = await restore(displaced);
+        expect.soft(rejected.image).toMatchObject({ id: "none", state: "absent" });
+        expect.soft(storage.value(portableKey)).toBeUndefined();
+        expect.soft(storage.value(regionalKey)).toBeUndefined();
+
+        const fresh = await promote(imageID, { expectedCurrent: { state: "capture" } });
+        expect.soft(Date.parse(fresh.image.promotedAt)).toBe(Date.now() + 2);
+        const next = await promote("ami-next", { expectedCurrent: { state: "capture" } });
+        expect((await restore(next)).image).toEqual(fresh.image);
+        const latest = await promote("ami-latest", { expectedCurrent: { state: "capture" } });
+        expect((await restore({ ...latest, previous: displaced.previous })).image).toMatchObject({
+          id: "none",
+          state: "absent",
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([
+    "global retirement",
+    "regional retirement",
+    "publication watermark",
+    "publication alias",
+  ] as const)(
+    "keeps image markers, catalog, and checkpoint pins atomic on failed %s",
+    async (failure) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-09-05T00:00:00Z"));
+      try {
+        const storage = new MemoryStorage();
+        const imageID = "ami-prior";
+        const markerKey = `image:aws:retired-image-global:${imageID}`;
+        const regionalMarkerKey = `image:aws:retired-image:eu-west-1:${imageID}`;
+        const aliasKey = "image:aws:promoted:linux:x86_64:ubuntu26.04";
+        const checkpointID = "chk_image_atomic";
+        const scope = { accountID: "123456789012", region: "eu-west-1" };
+        storage.seed(`checkpoint:${checkpointID}`, {
+          id: checkpointID,
+          provider: "aws",
+          scope,
+          state: "ready",
+          image: { immutableID: imageID },
+          generation: 1,
+          revision: 1,
+          eventSequence: 0,
+          pinCount: 0,
+          activeUseCount: 0,
+          retention: { mode: "retain" },
+        });
+        storage.seed(`checkpoint-resource:aws:${imageID}`, {
+          checkpointID,
+          provider: "aws",
+          scope,
+          kind: "aws-ami",
+          resourceID: imageID,
+          immutableID: imageID,
+        });
+        const provider = new AWSProvider({} as Env, scope.region, storage);
+        vi.spyOn(provider, "getImage").mockResolvedValue({
+          id: imageID,
+          name: imageID,
+          state: "available",
+          provider: "aws",
+          architecture: "x86_64",
+          ...scope,
+        });
+        const promote = () => {
+          const url = new URL(
+            `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1`,
+          );
+          return provider.promoteImage(
+            imageID,
+            undefined,
+            new Request(url, { method: "POST", body: "{}" }),
+            url,
+          );
+        };
+        await provider.retirePromotedImage(imageID);
+        await promote();
+        expect(storage.value(`checkpoint:${checkpointID}`)).toMatchObject({ pinCount: 3 });
+        const before = await storage.list();
+        const deleted: string[] = [];
+        storage.beforeDelete = async (key) => {
+          deleted.push(key);
+        };
+        const failingKey =
+          failure === "regional retirement"
+            ? regionalMarkerKey
+            : failure === "publication alias"
+              ? aliasKey
+              : markerKey;
+        storage.beforePut = async (key) => {
+          if (key === failingKey) throw new Error("image marker transaction failed");
+        };
+        vi.setSystemTime(new Date(Date.now() + 1000));
+        await expect(
+          failure.includes("retirement")
+            ? provider.retirePromotedImage(
+                imageID,
+                failure === "regional retirement" ? scope.region : undefined,
+              )
+            : promote(),
+        ).rejects.toThrow("image marker transaction failed");
+        expect(await storage.list()).toEqual(before);
+        expect(deleted.filter((key) => key.startsWith("checkpoint-pin:"))).toHaveLength(
+          failure.includes("retirement") ? 3 : 0,
+        );
+        expect(deleted.includes(aliasKey)).toBe(failure.includes("retirement"));
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("does not restore a revision retired by an overlapping rollback", async () => {
+    const storage = new MemoryStorage();
+    const key = "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1";
+    const catalogPrefix = "image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:";
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => ({
+      id: imageID,
+      name: imageID,
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    }));
+    const promote = async (imageID: string, body: Record<string, unknown>, runtime = "") => {
+      const url = new URL(
+        `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1${runtime ? `&runtime=node%3D${runtime}` : ""}`,
+      );
+      return provider.promoteImage(
+        imageID,
+        undefined,
+        new Request(url, { method: "POST", body: JSON.stringify(body) }),
+        url,
+      );
+    };
+
+    const first = (await promote("ami-first", { expectedCurrent: { state: "capture" } }, "24")) as {
+      image: { id: string; revision: string };
+      previous: Record<string, unknown>;
+    };
+    const second = (await promote("ami-second", {
+      expectedCurrent: { state: "capture" },
+    })) as typeof first;
+
+    const staleFirstRollback = await promote(first.image.id, {
+      expectedCurrent: {
+        state: "present",
+        imageId: first.image.id,
+        revision: first.image.revision,
+      },
+      restorePrevious: first.previous,
+      retireExpectedCatalog: true,
+    });
+    expect(staleFirstRollback).toBeInstanceOf(Response);
+    expect((staleFirstRollback as Response).status).toBe(409);
+    expect(storage.value(`${catalogPrefix}${first.image.id}`)).toBeUndefined();
+
+    const secondRollback = await promote(second.image.id, {
+      expectedCurrent: {
+        state: "present",
+        imageId: second.image.id,
+        revision: second.image.revision,
+      },
+      restorePrevious: second.previous,
+      retireExpectedCatalog: true,
+    });
+
+    expect(secondRollback).toMatchObject({ image: { id: "none", state: "absent" } });
+    expect(storage.value(key)).toBeUndefined();
+    expect(storage.value(`${catalogPrefix}${first.image.id}`)).toBeUndefined();
+    expect(storage.value(`${catalogPrefix}${second.image.id}`)).toBeUndefined();
+    await expect(
+      provider.prepareLeaseConfig(
+        leaseConfig({
+          provider: "aws",
+          sshPublicKey: "ssh-ed25519 test",
+          imageRequirements: { runtimes: { node: "24" } },
+        }),
+      ),
+    ).rejects.toThrow("no promoted AWS linux image satisfies the requested image capabilities");
+  });
+
+  it("does not restore a failed revision after the same image is republished", async () => {
+    const storage = new MemoryStorage();
+    const key = "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1";
+    const catalogKey = "image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-candidate";
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => ({
+      id: imageID,
+      name: imageID,
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    }));
+    const promote = async (body: Record<string, unknown>) => {
+      const url = new URL(
+        "https://crabbox.test/v1/images/ami-candidate/promote?target=linux&region=eu-west-1",
+      );
+      return provider.promoteImage(
+        "ami-candidate",
+        undefined,
+        new Request(url, { method: "POST", body: JSON.stringify(body) }),
+        url,
+      );
+    };
+
+    const first = (await promote({ expectedCurrent: { state: "capture" } })) as {
+      image: { id: string; revision: string };
+      previous: Record<string, unknown>;
+    };
+    const second = (await promote({ expectedCurrent: { state: "capture" } })) as typeof first;
+    const staleFirstRollback = await promote({
+      expectedCurrent: {
+        state: "present",
+        imageId: first.image.id,
+        revision: first.image.revision,
+      },
+      restorePrevious: first.previous,
+      retireExpectedCatalog: true,
+    });
+
+    expect(staleFirstRollback).toBeInstanceOf(Response);
+    expect((staleFirstRollback as Response).status).toBe(409);
+    expect(storage.value(catalogKey)).toEqual(
+      expect.objectContaining({ id: second.image.id, revision: second.image.revision }),
+    );
+
+    const secondRollback = await promote({
+      expectedCurrent: {
+        state: "present",
+        imageId: second.image.id,
+        revision: second.image.revision,
+      },
+      restorePrevious: second.previous,
+      retireExpectedCatalog: true,
+    });
+
+    expect(secondRollback).toMatchObject({ image: { id: "none", state: "absent" } });
+    expect(storage.value(key)).toBeUndefined();
+    expect(storage.value(catalogKey)).toBeUndefined();
+  });
+
+  it.each(["promotion retirement", "provider deletion"] as const)(
+    "does not restore a saved revision after explicit AWS %s",
+    async (removal) => {
+      const storage = new MemoryStorage();
+      const key = "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1";
+      const catalogPrefix = "image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:";
+      const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+      vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => ({
+        id: imageID,
+        name: imageID,
+        state: "available",
+        provider: "aws",
+        region: "eu-west-1",
+        architecture: "x86_64",
+      }));
+      const promote = async (imageID: string, body: Record<string, unknown>) => {
+        const url = new URL(
+          `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1`,
+        );
+        return provider.promoteImage(
+          imageID,
+          undefined,
+          new Request(url, { method: "POST", body: JSON.stringify(body) }),
+          url,
+        );
+      };
+      const first = (await promote("ami-first", {
+        expectedCurrent: { state: "capture" },
+      })) as {
+        image: { id: string; revision: string };
+        previous: Record<string, unknown>;
+      };
+      const second = (await promote("ami-second", {
+        expectedCurrent: { state: "capture" },
+      })) as typeof first;
+
+      let removalProved = false;
+      if (removal === "promotion retirement") {
+        removalProved = (await provider.retirePromotedImage(first.image.id, "eu-west-1")) > 0;
+      } else {
+        const providerDelete = vi.fn<(imageID: string, snapshotIDs?: string[]) => Promise<void>>(
+          async () => {},
+        );
+        (
+          provider as unknown as {
+            clientValue: {
+              getImage: (imageID: string) => Promise<ProviderImage>;
+              deleteImage: typeof providerDelete;
+            };
+          }
+        ).clientValue = {
+          getImage: async (imageID) => ({
+            id: imageID,
+            name: imageID,
+            state: "available",
+            provider: "aws",
+            region: "eu-west-1",
+            architecture: "x86_64",
+            snapshots: [],
+          }),
+          deleteImage: providerDelete,
+        };
+        await provider.deleteImage(first.image.id);
+        removalProved =
+          providerDelete.mock.calls.length === 1 &&
+          providerDelete.mock.calls[0]?.[0] === first.image.id &&
+          providerDelete.mock.calls[0]?.[1]?.length === 0;
+      }
+      expect(removalProved).toBe(true);
+
+      const rollback = await promote(second.image.id, {
+        expectedCurrent: {
+          state: "present",
+          imageId: second.image.id,
+          revision: second.image.revision,
+        },
+        restorePrevious: second.previous,
+        retireExpectedCatalog: true,
+      });
+
+      expect(rollback).toMatchObject({ image: { id: "none", state: "absent" } });
+      expect(storage.value(key)).toBeUndefined();
+      expect(storage.value(`${catalogPrefix}${first.image.id}`)).toBeUndefined();
+      expect(storage.value(`${catalogPrefix}${second.image.id}`)).toBeUndefined();
+    },
+  );
+
+  it("upgrades revisionless AWS defaults through capture, restore, and stale rejection", async () => {
+    const storage = new MemoryStorage();
+    const key = "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1";
+    const catalogKey = "image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-previous";
+    const previous = {
+      id: "ami-previous",
+      name: "previous",
+      state: "available" as const,
+      provider: "aws" as const,
+      target: "linux" as const,
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-09-01T00:00:00Z",
+    };
+    storage.seed(key, previous);
+    storage.seed(catalogKey, previous);
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => ({
+      id: imageID,
+      name: imageID,
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    }));
+    const promote = async (
+      imageID: string,
+      expectedCurrent: Record<string, string>,
+      retireExpectedCatalog = false,
+    ) => {
+      const url = new URL(
+        `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1`,
+      );
+      return provider.promoteImage(
+        imageID,
+        undefined,
+        new Request(url, {
+          method: "POST",
+          body: JSON.stringify({ expectedCurrent, retireExpectedCatalog }),
+        }),
+        url,
+      );
+    };
+
+    const published = await promote("ami-candidate", { state: "capture" });
+    expect(published).toMatchObject({
+      previous: {
+        state: "present",
+        imageId: "ami-previous",
+        revision: "ami-previous@2026-09-01T00:00:00Z",
+      },
+    });
+    const candidateRevision = (published as { image: { revision: string } }).image.revision;
+    const restored = await promote(
+      "ami-previous",
+      {
+        state: "present",
+        imageId: "ami-candidate",
+        revision: candidateRevision,
+      },
+      true,
+    );
+    expect(restored).toMatchObject({ image: { id: "ami-previous" } });
+    const restoredRevision = (restored as { image: { revision: string } }).image.revision;
+    expect(restoredRevision).not.toBe("ami-previous@2026-09-01T00:00:00Z");
+
+    const stale = await promote(
+      "ami-candidate",
+      {
+        state: "present",
+        imageId: "ami-previous",
+        revision: "ami-previous@2026-09-01T00:00:00Z",
+      },
+      true,
+    );
+    expect(stale).toBeInstanceOf(Response);
+    expect((stale as Response).status).toBe(409);
+    expect(storage.value(key)).toEqual(
+      expect.objectContaining({ id: "ami-previous", revision: restoredRevision }),
+    );
+    expect(storage.value(catalogKey)).toEqual(
+      expect.objectContaining({ id: "ami-previous", revision: restoredRevision }),
+    );
+  });
+
+  it("does not restore a deleted receipt-only revisionless AWS default", async () => {
+    const storage = new MemoryStorage();
+    const imageID = "ami-legacy";
+    const key = "image:aws:promoted";
+    const osKey = "image:aws:promoted:linux:x86_64:ubuntu24.04";
+    const regionalKey = `${osKey}:eu-west-1`;
+    const legacy = {
+      id: imageID,
+      name: "legacy",
+      state: "available" as const,
+      provider: "aws" as const,
+      target: "linux" as const,
+      os: "ubuntu:24.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-09-01T00:00:00Z",
+    };
+    storage.seed(key, legacy);
+    storage.seed(`image:aws:created:${imageID}`, legacy);
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const getImage = vi.fn<(requestedImageID: string) => Promise<ProviderImage>>(
+      async (requestedImageID) => ({
+        ...legacy,
+        id: requestedImageID,
+        name: requestedImageID,
+        snapshots: [],
+      }),
+    );
+    const deleteImage = vi.fn<() => Promise<void>>(async () => undefined);
+    (
+      provider as unknown as {
+        clientValue: { getImage: typeof getImage; deleteImage: typeof deleteImage };
+      }
+    ).clientValue = { getImage, deleteImage };
+    const promote = async (imageIDToPromote: string, body: Record<string, unknown>) => {
+      const url = new URL(
+        `https://crabbox.test/v1/images/${imageIDToPromote}/promote?target=linux&region=eu-west-1`,
+      );
+      return provider.promoteImage(
+        imageIDToPromote,
+        undefined,
+        new Request(url, { method: "POST", body: JSON.stringify(body) }),
+        url,
+      );
+    };
+
+    const published = (await promote("ami-candidate", {
+      expectedCurrent: { state: "capture" },
+    })) as {
+      image: { id: string; revision: string };
+      previous: Record<string, unknown>;
+    };
+    await provider.deleteImage(imageID);
+    const rollback = await promote(published.image.id, {
+      expectedCurrent: {
+        state: "present",
+        imageId: published.image.id,
+        revision: published.image.revision,
+      },
+      restorePrevious: published.previous,
+      retireExpectedCatalog: true,
+    });
+
+    expect(deleteImage).toHaveBeenCalledOnce();
+    expect(rollback).toMatchObject({ image: { id: "none", state: "absent" } });
+    expect(storage.value(key)).toBeUndefined();
+    expect(storage.value(osKey)).toBeUndefined();
+    expect(storage.value(regionalKey)).toBeUndefined();
+
+    const republished = (await promote(imageID, {
+      expectedCurrent: { state: "capture" },
+    })) as typeof published;
+    const next = (await promote("ami-next", {
+      expectedCurrent: { state: "capture" },
+    })) as typeof published;
+    const restoredRepublished = await promote(next.image.id, {
+      expectedCurrent: {
+        state: "present",
+        imageId: next.image.id,
+        revision: next.image.revision,
+      },
+      restorePrevious: next.previous,
+      retireExpectedCatalog: true,
+    });
+
+    expect(restoredRepublished).toMatchObject({
+      image: { id: republished.image.id, revision: republished.image.revision },
+    });
+  });
+
+  it("CAS-clears a newly promoted AWS default when capture found no previous image", async () => {
+    const storage = new MemoryStorage();
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-candidate",
+      name: "candidate",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-candidate/promote?target=windows&region=eu-west-1",
+    );
+    const published = await provider.promoteImage(
+      "ami-candidate",
+      undefined,
+      new Request(url, {
+        method: "POST",
+        body: JSON.stringify({ expectedCurrent: { state: "capture" } }),
+      }),
+      url,
+    );
+    const revision = (published as { image: { revision: string } }).image.revision;
+    const cleared = await provider.promoteImage(
+      "ami-candidate",
+      undefined,
+      new Request(url, {
+        method: "POST",
+        body: JSON.stringify({
+          clearDefault: true,
+          expectedCurrent: { state: "present", imageId: "ami-candidate", revision },
+          retireExpectedCatalog: true,
+        }),
+      }),
+      url,
+    );
+
+    expect(cleared).toMatchObject({ previous: { state: "present", imageId: "ami-candidate" } });
+    expect(storage.value("image:aws:promoted:windows:x86_64:eu-west-1")).toBeUndefined();
+    expect(
+      storage.value("image:aws:catalog:windows:x86_64:eu-west-1:ami-candidate"),
+    ).toBeUndefined();
+  });
+
+  it("rejects stale AWS image CAS before enabling Fast Snapshot Restore", async () => {
+    const storage = new MemoryStorage();
+    storage.seed("image:aws:promoted:windows:x86_64:eu-west-1", {
+      id: "ami-current",
+      name: "current",
+      state: "available",
+      provider: "aws",
+      target: "windows",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-09-03T00:00:00Z",
+      revision: "revision-current",
+    });
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-candidate",
+      name: "candidate",
+      state: "available",
+      provider: "aws",
+      target: "windows",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      snapshots: ["snap-root"],
+    });
+    const enable = vi.spyOn(provider, "enableFastSnapshotRestore").mockResolvedValue([]);
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-candidate/promote?target=windows&region=eu-west-1&fastSnapshotRestore=true&fsrAz=eu-west-1a",
+    );
+    const response = await provider.promoteImage(
+      "ami-candidate",
+      undefined,
+      new Request(url, {
+        method: "POST",
+        body: JSON.stringify({
+          expectedCurrent: {
+            state: "present",
+            imageId: "ami-stale",
+            revision: "revision-stale",
+          },
+        }),
+      }),
+      url,
+    );
+
+    expect(response).toBeInstanceOf(Response);
+    expect((response as Response).status).toBe(409);
+    expect(enable).not.toHaveBeenCalled();
   });
 
   it("selects the newest promoted AWS image satisfying every requirement", async () => {
@@ -44734,14 +47244,16 @@ function awsIngressTestFleet(
         );
       }
       if (
-        [
-          "ImportKeyPair",
-          "AuthorizeSecurityGroupIngress",
-          "RevokeSecurityGroupIngress",
-          "TerminateInstances",
-        ].includes(action)
+        ["ImportKeyPair", "AuthorizeSecurityGroupIngress", "RevokeSecurityGroupIngress"].includes(
+          action,
+        )
       ) {
         return ec2XMLResponse("<Response />");
+      }
+      if (action === "TerminateInstances") {
+        return ec2XMLResponse(
+          `<Response><instancesSet><item><instanceId>${params.get("InstanceId.1")}</instanceId></item></instancesSet></Response>`,
+        );
       }
       throw new Error(`unexpected EC2 action: ${action}`);
     }),
@@ -45723,7 +48235,11 @@ function workerCloudReleaseCases() {
     {
       providerName: "aws" as const,
       cloudID: "i-abcdef123456",
-      provider: new AWSProvider({} as Env, "eu-west-1", new MemoryStorage()),
+      provider: new AWSProvider(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+        "eu-west-1",
+        new MemoryStorage(),
+      ),
     },
     {
       providerName: "azure" as const,
