@@ -1,9 +1,7 @@
 package islo
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -26,6 +24,7 @@ import (
 	gosdk "github.com/islo-labs/go-sdk"
 	sdkcore "github.com/islo-labs/go-sdk/core"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func isolateIsloTestHome(t *testing.T) {
@@ -1871,7 +1870,7 @@ func TestIsloSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	if repair.GetUser() == nil || *repair.GetUser() != isloAdminUser || !strings.Contains(client.prepareCommands[1], "chown -R 'islo:islo' '/workspace/repo'") {
 		t.Fatalf("ownership repair request=%#v command=%q", repair, client.prepareCommands[1])
 	}
-	if !tarGzipContains(t, client.uploaded.Bytes(), "go.mod") {
+	if !testutil.TarGzipContains(t, client.uploaded.Bytes(), "go.mod") {
 		t.Fatal("uploaded archive missing go.mod")
 	}
 }
@@ -2517,28 +2516,6 @@ func withIsloCleanupTimeout(t *testing.T, timeout time.Duration) {
 	original := isloCleanupTimeout
 	isloCleanupTimeout = timeout
 	t.Cleanup(func() { isloCleanupTimeout = original })
-}
-
-func tarGzipContains(t *testing.T, data []byte, name string) bool {
-	t.Helper()
-	gz, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			return false
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		if header.Name == name {
-			return true
-		}
-	}
 }
 
 // This writer fails only timing serialization, not earlier human diagnostics.

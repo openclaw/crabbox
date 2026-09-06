@@ -1,9 +1,7 @@
 package e2b
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -23,6 +21,7 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type e2bRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -93,7 +92,7 @@ func TestE2BClientRedactsReflectedCredentials(t *testing.T) {
 		defer server.Close()
 		client := &e2bClient{apiKey: secret, apiURL: server.URL, httpClient: server.Client()}
 		_, err := client.ListSandboxes(context.Background(), nil)
-		assertE2BRedactedError(t, err, secret)
+		testutil.RequireRedactedProviderError(t, err, secret)
 	})
 
 	t.Run("envd access token", func(t *testing.T) {
@@ -109,22 +108,15 @@ func TestE2BClientRedactsReflectedCredentials(t *testing.T) {
 		})}
 		client := &e2bClient{envdClient: httpClient}
 		_, err := client.StartProcess(context.Background(), e2bSession{SandboxID: "sbx_1", Domain: "example.test", EnvdAccessToken: secret}, e2bProcessRequest{Command: "true"})
-		assertE2BRedactedError(t, err, secret)
+		testutil.RequireRedactedProviderError(t, err, secret)
 	})
-}
-
-func assertE2BRedactedError(t *testing.T, err error, secret string) {
-	t.Helper()
-	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "quota exceeded") {
-		t.Fatalf("error=%v, want redacted useful provider error", err)
-	}
 }
 
 func TestE2BProcessStreamRedactsReflectedCredential(t *testing.T) {
 	const secret = "envd-stream-secret"
 
 	t.Run("process end diagnostic", func(t *testing.T) {
-		body := e2bTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 1, "exited": false, "error": "Bearer " + secret + " quota exceeded"}}})
+		body := testutil.GRPCWebEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 1, "exited": false, "error": "Bearer " + secret + " quota exceeded"}}})
 		var stderr bytes.Buffer
 		if _, err := parseE2BProcessStream(bytes.NewReader(body), io.Discard, &stderr, secret); err != nil {
 			t.Fatal(err)
@@ -227,11 +219,11 @@ func TestE2BDataPlaneStreamOutlivesControlTimeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		_, _ = io.Copy(io.Discard, req.Body)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(e2bTestEnvelope(0, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}}))
+		_, _ = w.Write(testutil.GRPCWebEnvelope(0, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}}))
 		w.(http.Flusher).Flush()
 		time.Sleep(3 * controlTimeout)
-		_, _ = w.Write(e2bTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 0, "exited": true}}}))
-		_, _ = w.Write(e2bTestEnvelope(2, map[string]any{}))
+		_, _ = w.Write(testutil.GRPCWebEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 0, "exited": true}}}))
+		_, _ = w.Write(testutil.GRPCWebEnvelope(2, map[string]any{}))
 	}))
 	defer server.Close()
 
@@ -756,7 +748,7 @@ func TestE2BSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	if client.uploadPath == "" || !strings.HasPrefix(client.uploadPath, "/tmp/crabbox-") {
 		t.Fatalf("upload path=%q", client.uploadPath)
 	}
-	if !tarGzipContains(t, client.uploaded.Bytes(), "go.mod") {
+	if !testutil.TarGzipContains(t, client.uploaded.Bytes(), "go.mod") {
 		t.Fatal("uploaded archive missing go.mod")
 	}
 	if !client.commandContains("mkdir -p '/home/ubuntu/repo'") || !client.commandContains("tar -xzf") {
@@ -1570,40 +1562,6 @@ func (f *fakeE2BSyncClient) userContains(value string) bool {
 	return false
 }
 
-func e2bTestEnvelope(flags byte, v any) []byte {
-	data, err := json.Marshal(v)
-	if err != nil {
-		panic(err)
-	}
-	var out bytes.Buffer
-	out.WriteByte(flags)
-	out.Write([]byte{byte(len(data) >> 24), byte(len(data) >> 16), byte(len(data) >> 8), byte(len(data))})
-	out.Write(data)
-	return out.Bytes()
-}
-
-func tarGzipContains(t *testing.T, data []byte, name string) bool {
-	t.Helper()
-	gz, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			return false
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		if header.Name == name {
-			return true
-		}
-	}
-}
-
 func TestE2BRunLifecycleArchiveGuardrailBeforeCreation(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeE2BSyncClient{}
@@ -1655,104 +1613,30 @@ func TestE2BRunLifecycleCleanupOutcomeAndTiming(t *testing.T) {
 }
 
 func TestRunCommandIntentReachesExistingShell(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX shell contract")
-	}
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skip("bash unavailable")
-	}
-	for _, name := range []string{"literal separator", "literal assignment", "literal singleton", "mixed operators", "quoted argv", "unmarked assignment", "explicit source", "empty source", "inferred source", "missing command"} {
-		t.Run(name, func(t *testing.T) {
-			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			root := t.TempDir()
-			marker := filepath.Join(root, "must-not-exist")
-			program := filepath.Join(root, "FOO=x")
-			if err := os.WriteFile(program, []byte("#!/bin/sh\nprintf 'literal:%s' \"$*\"\nexit 42\n"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			client := &fakeE2BSyncClient{}
-			restore := swapNewE2BClient(client)
-			defer restore()
-			backend := &e2bBackend{cfg: Config{E2B: E2BConfig{Template: "base", Workdir: root}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-			req := RunRequest{Repo: Repo{Root: root}, NoSync: true, Keep: true}
-			want, wantExit := "", 0
-			switch name {
-			case "literal separator":
-				req.Command = []string{"printf", "<%s>", ";", "touch", marker}
-				req.CommandLiteralArgs = map[int]bool{2: true}
-				want = "<;><touch><" + marker + ">"
-			case "literal assignment":
-				req.Command = []string{"FOO=x", "argument"}
-				req.CommandLiteralArgs = map[int]bool{0: true}
-				want, wantExit = "literal:argument", 42
-			case "literal singleton":
-				req.Command = []string{"FOO=x"}
-				req.CommandLiteralArgs = map[int]bool{0: true}
-				want, wantExit = "literal:", 42
-			case "mixed operators":
-				req.Command = []string{"printf", "%s", ";", "&&", "printf", "%s", "tail"}
-				req.CommandLiteralArgs = map[int]bool{2: true}
-				want = ";tail"
-			case "quoted argv":
-				req.Command = []string{"printf", "<%s>", "", "$literal", "a'b"}
-				want = "<><$literal><a'b>"
-			case "unmarked assignment":
-				req.Command = []string{"CBX_PROBE=value", "sh", "-c", `printf %s "$CBX_PROBE"`}
-				want = "value"
-			case "explicit source":
-				req.Command = []string{`printf %s "$unexported_fixture_state"; exit 7`}
-				req.ShellMode = true
-				want, wantExit = "existing-shell", 7
-			case "empty source":
-				req.Command = []string{""}
-				req.ShellMode = true
-			case "inferred source":
-				req.Command = []string{"printf %s inferred"}
-				want = "inferred"
-			}
-			_, runErr := backend.Run(t.Context(), req)
-			if name == "missing command" {
-				var ee core.ExitError
-				if !errors.As(runErr, &ee) || ee.Code != 2 {
-					t.Fatalf("missing command error=%v", runErr)
-				}
-				if len(client.commands) != 1 {
-					t.Fatalf("missing command reached workload: %v", client.commands)
-				}
-				return
-			}
-			if runErr != nil {
-				t.Fatal(runErr)
-			}
-			if len(client.commands) != 2 {
-				t.Fatalf("commands=%v want preparation and workload", client.commands)
-			}
-			// Exercise the captured workload in an existing shell; the separate
-			// native envd fixture verifies its actual login-shell transport.
-			source := "unexported_fixture_state=existing-shell\n" + client.commands[1]
-			cmd := exec.CommandContext(t.Context(), bash, "--noprofile", "--norc", "-c", source)
-			cmd.Dir = root
-			cmd.Env = []string{"HOME=" + root, "PATH=" + root + ":/usr/bin:/bin"}
-			var stdout, stderr bytes.Buffer
-			cmd.Stdout, cmd.Stderr = &stdout, &stderr
-			commandErr := cmd.Run()
-			code := 0
-			if commandErr != nil {
-				var ee *exec.ExitError
-				if !errors.As(commandErr, &ee) {
-					t.Fatal(commandErr)
-				}
-				code = ee.ExitCode()
-			}
-			if code != wantExit || stdout.String() != want {
-				t.Fatalf("source=%q stdout=%q stderr=%q exit=%d; want %q/%d", source, stdout.String(), stderr.String(), code, want, wantExit)
-			}
-			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("literal separator ran touch: %v", err)
-			}
+	testutil.VerifyExistingShellCommandIntent(t, func(t *testing.T, root string, intent testutil.CommandIntent) testutil.ExistingShellResult {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		client := &fakeE2BSyncClient{}
+		restore := swapNewE2BClient(client)
+		t.Cleanup(restore)
+		backend := &e2bBackend{cfg: Config{E2B: E2BConfig{Template: "base", Workdir: root}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+		_, runErr := backend.Run(t.Context(), RunRequest{
+			Repo:               Repo{Root: root},
+			NoSync:             true,
+			Keep:               true,
+			Command:            intent.Command,
+			CommandLiteralArgs: intent.LiteralArgs,
+			ShellMode:          intent.ShellMode,
 		})
-	}
+		result := testutil.ExistingShellResult{
+			Commands: append([]string(nil), client.commands...),
+			Err:      runErr,
+		}
+		var exitErr core.ExitError
+		if errors.As(runErr, &exitErr) {
+			result.ErrorCode = exitErr.Code
+		}
+		return result
+	})
 }
 
 func TestE2BRunCanonicalIDPreservesInventoryRecovery(t *testing.T) {
@@ -1863,9 +1747,9 @@ func TestE2BProcessEndPolicy(t *testing.T) {
 		})
 		for _, ending := range []string{"clean", "RPC failure", "read failure", "truncated"} {
 			t.Run(fmt.Sprintf("abnormal/%d/%s", code, ending), func(t *testing.T) {
-				body := e2bTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": code, "exited": false, "error": "fixture end"}}})
+				body := testutil.GRPCWebEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": code, "exited": false, "error": "fixture end"}}})
 				if ending == "RPC failure" {
-					body = append(body, e2bTestEnvelope(2, map[string]any{"error": map[string]any{"code": "internal", "message": "fixture RPC failure"}})...)
+					body = append(body, testutil.GRPCWebEnvelope(2, map[string]any{"error": map[string]any{"code": "internal", "message": "fixture RPC failure"}})...)
 				}
 				if ending == "truncated" {
 					body = append(body, 0)
