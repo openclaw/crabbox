@@ -64,8 +64,9 @@ crabbox bench record --timing-json timing.json -- pnpm test
 
 ## Report local observations
 
-`bench report` reads the local store and groups observations by provider,
-provider family/kind, machine type, command fingerprint, and cold/warm bucket.
+`bench report` reads the local store and groups observations by record source,
+provider, provider family/kind, machine type, command fingerprint, and
+cold/warm bucket. Records without a source use the `unknown` source bucket.
 
 ```sh
 crabbox bench report
@@ -75,9 +76,20 @@ crabbox bench report --command-fingerprint sha256:... --json
 
 Human output includes successful sample count (`n`), median total duration, p95
 total duration when enough samples exist, median sync and command duration,
-failure count, and an evidence marker. `bench report` marks groups as
-`insufficient_successful_samples` until the group has at least `--min-samples`
-successful observations. The default is `2`.
+failure count, and an evidence marker. When records contain runner telemetry,
+the report also includes median and p95 runner totals plus deterministic runner
+and sync phase summaries. Duplicate phase names within one observation are
+summed before that observation contributes one sample. Runner phases with the
+same name remain separate when one is opaque and the other is not.
+
+Only successful observations contribute duration and phase distributions.
+Failed observations contribute to `failureCount` only. P95 values require at
+least three samples for that specific metric or phase. Sync skip counts are
+counted once per successful observation. Legacy records without runner or phase
+fields omit those summaries.
+
+`bench report` marks groups as `insufficient_successful_samples` until the
+group has at least `--min-samples` successful observations. The default is `2`.
 
 JSON output uses the same grouped data:
 
@@ -92,6 +104,7 @@ JSON output uses the same grouped data:
   },
   "groups": [
     {
+      "source": "bench-run",
       "provider": "aws",
       "providerFamily": "aws",
       "providerKind": "ssh-lease",
@@ -99,8 +112,23 @@ JSON output uses the same grouped data:
       "commandFingerprint": "sha256:...",
       "n": 2,
       "medianTotalMs": 64000,
+      "medianRunnerTotalMs": 67000,
       "medianSyncMs": 12000,
       "medianCommandMs": 45000,
+      "runnerPhases": [
+        {
+          "name": "provider.acquire",
+          "n": 2,
+          "medianMs": 8500
+        }
+      ],
+      "syncPhases": [
+        {
+          "name": "rsync",
+          "n": 2,
+          "medianMs": 9200
+        }
+      ],
       "failureCount": 0,
       "insufficientEvidence": false,
       "evidence": "sufficient_local_samples"

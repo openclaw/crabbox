@@ -293,7 +293,7 @@ func TestPrewarmCoordinatorCleanupReleasesByIDWhenResolveFails(t *testing.T) {
 			http.Error(w, `{"error":"resolve unavailable"}`, http.StatusServiceUnavailable)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/cbx_abcdef123456/release":
 			released = true
-			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: "cbx_abcdef123456", Provider: "aws", State: "released"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": confirmedCoordinatorRelease("cbx_abcdef123456", "aws")})
 		default:
 			http.NotFound(w, r)
 		}

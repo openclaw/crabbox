@@ -4,6 +4,7 @@ import {
   type CoordinatorStorageView,
   type ProvisioningDueRecord,
 } from "./coordinator-runtime";
+import { completeLeaseProviderCleanup } from "./lease-cleanup";
 import type {
   FrozenProvisioningPlan,
   ProviderResumableProvisioning,
@@ -472,6 +473,7 @@ export class LeaseProvisioningController {
         latest.updatedAt = latest.endedAt;
         latest.provisioningResourceMayExist = false;
         latest.releaseDeletesServer = true;
+        completeLeaseProviderCleanup(latest, latest.updatedAt);
         if (!canceled)
           latest.failureError = "provisioning candidates exhausted after verified cleanup";
       }

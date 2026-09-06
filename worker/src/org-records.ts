@@ -1,3 +1,4 @@
+import { leaseProviderCleanupCompleted } from "./lease-cleanup";
 import {
   MISSING_ORG_KEY,
   isCurrentOrgKey,
@@ -21,6 +22,12 @@ export function publicLeaseRecord(record: LeaseRecord): PublicLeaseRecord {
   };
   if (record.state === "released") {
     publicRecord.cleanupStatus = releaseCleanupStatus(record);
+    if (leaseProviderCleanupCompleted(record)) {
+      publicRecord.host = "";
+      delete publicRecord.tailscale;
+      delete publicRecord.sshHostKey;
+      delete publicRecord.providerAccessExpiresAt;
+    }
   }
   delete publicRecord.provisioningCoordinatorVersion;
   delete publicRecord.provisioningRequestSettledAt;
@@ -35,6 +42,7 @@ export function publicLeaseRecord(record: LeaseRecord): PublicLeaseRecord {
 
 function releaseCleanupStatus(record: LeaseRecord): LeaseCleanupStatus {
   if (record.releaseDeletesServer === false) return "retained";
+  if (record.lifecycle === "registered") return "complete";
   // A retry's current claim supersedes historical failure diagnostics; failures
   // clear that claim. This is an observation, never provider deletion authority.
   if (record.cleanupStartedAt) {
@@ -54,7 +62,8 @@ function releaseCleanupStatus(record: LeaseRecord): LeaseCleanupStatus {
     // older clients while current observers wait for the create owner's outcome.
     return "pending";
   }
-  return record.cleanupError ||
+  if (
+    record.cleanupError ||
     record.cleanupRetryAt ||
     record.cleanupFailedAt ||
     record.cleanupAttempts ||
@@ -64,8 +73,10 @@ function releaseCleanupStatus(record: LeaseRecord): LeaseCleanupStatus {
     record.provisioningRecoveryMissingSince ||
     record.provisioningResourceMayExist ||
     record.providerKeyCleanupPending
-    ? "failed"
-    : "complete";
+  ) {
+    return "failed";
+  }
+  return leaseProviderCleanupCompleted(record) ? "complete" : "failed";
 }
 
 export function publicRunRecord(record: RunRecord): RunRecord {

@@ -4103,7 +4103,9 @@ func TestRunMissingOriginReplacementLeaseStaysPlainManifest(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease(id, "active")})
 		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/release"):
 			id := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/v1/leases/"), "/release")
-			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease(id, "released")})
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"lease": confirmedCoordinatorRelease(id, providerName),
+			})
 		default:
 			http.NotFound(w, request)
 		}

@@ -32,10 +32,11 @@ including when the original request used `keep=true`. A retention request cannot
 undo a deletion request that already owns cleanup.
 
 Healthy queued cleanup reports `cleanupStatus: pending` through release and GET.
-Verified final cleanup clears its transient metadata and reports `complete`;
-identity conflicts, missing successful-deletion proof and observed errors report
-`failed`. Retention reports `retained`. These states preserve the existing client
-rule to keep local credentials until cleanup is verified complete.
+Verified final cleanup writes `cleanupCompletedAt`, clears transient metadata and
+remote access fields, and reports `complete`; identity conflicts, missing
+successful-deletion proof and observed errors report `failed`. Retention reports
+`retained`. These states preserve the existing client rule to keep local
+credentials until cleanup is verified complete.
 
 Durable Azure cleanup uses the same owned-delete claims, immutable identity and
 attachment validation as ordinary release. Each bounded tick removes at most one
@@ -146,6 +147,17 @@ Both release and expiry call the same provider delete path:
   cloud server for every active lease past `expiresAt`, then sets state
   `expired`.
 
+Release and expiry publish provider-cleanup completion only after the provider
+delete path succeeds and the exact cleanup claim is revalidated. The stored
+record then clears `host`, `tailscale`, `sshHostKey`, and
+`providerAccessExpiresAt`. It retains provider resource IDs, server identity,
+ownership labels, provider scope, network, exposed ports, and `workRoot` for
+orphan recovery, audit, and AWS ingress reconciliation.
+When provisioning has not dispatched, the reservation owner persists explicit
+no-resource evidence before publishing the same completion fact. Missing cloud
+identity without that evidence is a legacy or unresolved state and remains
+unconfirmed.
+
 `keep=true` only suppresses the automatic release when a `run` command exits; it
 does **not** exempt a lease from idle or TTL expiry.
 
@@ -158,13 +170,17 @@ cleanup diagnostics remain intact for clients that predate this classification.
 New AWS instance IDs can be temporarily invisible. Cleanup observes visibility
 within the existing bound before verifying allocation ownership; unconfirmed
 visibility or termination retains cleanup debt rather than reporting deletion.
+Managed public AWS release uses the same confirmed termination path as private
+workspaces: `TerminateInstances` must acknowledge the exact instance, followed
+by a terminal `terminated` read or exact `InvalidInstanceID.NotFound`.
 Allocation claims carry the prepared account scope for AWS Mac instances.
 Storage failures while publishing or checking an allocation preserve its cleanup
 claim without retrying creation.
 The CLI removes its local per-lease SSH connection directory only after final
-cleanup state is observed. Pending or retrying cleanup, observation timeout or
-cancellation, provider errors, ownership mismatches, and retained resources keep
-the local claim and credentials available for a safe retry. Acquisition rollback
+cleanup state, `cleanupCompletedAt`, and hostless public access are observed.
+Pending or retrying cleanup, observation timeout or cancellation, provider
+errors, ownership mismatches, and retained resources keep the local claim and
+credentials available for a safe retry. Acquisition rollback
 and automatic post-run release only queue cleanup and do not wait for provider
 deletion; they preserve local state while cleanup is pending. Local cleanup is
 scoped to `<user-config>/crabbox/testboxes/<lease-id>` and its private short SSH
@@ -266,16 +282,20 @@ request markers alone cannot authorize the key-only path.
 Ordinary authenticated GET and `crabbox inspect --json` expose the nonsecret
 journal. Its confirmation timestamp records the provider API contract observed
 then, not physical hardware inspection or a fresh probe. `cleanupStatus` still
-governs finality. Historical released leases without evidence are not backfilled.
+governs finality. Historical released leases without evidence are not passively
+backfilled.
 
 For recovery, the ordinary owner should inspect the exact lease with
 `crabbox inspect --id <lease-id> --json` and retain local credentials and recorded
 evidence. Historical host fields, `released` state, or missing flags do not prove
-absence. A recorded action with a known ID resumes through the same lease owner
-and broker cleanup path. Missing no-resource evidence or dispatch acknowledgement
-authority requires operator reconciliation of the exact resource in its original
-provider project. Never manually clear cleanup flags or fabricate a receipt.
-There is no supported automatic historical backfill or population sweep.
+absence. An explicit stop of a historical managed lease with stored provider
+identity re-enters the same exact-owner cleanup path and establishes
+`cleanupCompletedAt` only after provider deletion succeeds. A recorded action
+with a known ID resumes through the same lease owner and broker cleanup path.
+Missing no-resource evidence or dispatch acknowledgement authority requires
+operator reconciliation of the exact resource in its original provider project.
+Never manually clear cleanup flags or fabricate a receipt. There is no supported
+automatic population sweep.
 
 ### Managed Daytona cleanup
 
@@ -372,6 +392,21 @@ legacy partial claim with an unexplained missing member fails closed because it
 cannot prove which cleanup deleted that member. A legacy claim can establish a
 new stable baseline only while the VM, NIC, public IP, and managed disk are all
 still present; an already-empty legacy claim can be cleared without mutation.
+
+Automatic cleanup does not relax that rule. For the specific expired, disk-only
+case with recorded VM/NIC deletion and an absent public IP, an owner or admin may
+use [audited cleanup recovery](../commands/inspect.md#audited-azure-cleanup-recovery)
+to explicitly accept original-scope public-IP absence. The resulting version-3
+claim retains its original baseline and actual DELETE receipts, records the
+operator acknowledgement separately, and requires the exact original owned disk
+to remain detached. Older workers reject this claim version. Normal release
+rechecks survivors before deleting the disk; it does not infer a historical
+public-IP DELETE receipt, and its separate audit survives claim cleanup.
+
+Azure polling distinguishes `Azure-AsyncOperation` status documents from
+`Location` completion responses. Location HTTP 202 remains pending; terminal
+200/204 completes only without an explicit pending/failure state. An empty
+Azure-AsyncOperation response never establishes success.
 
 ## Direct-provider lifecycle
 
