@@ -6316,6 +6316,14 @@ func TestExactContainerAbsenceRejectsRoutingNotFound(t *testing.T) {
 		{name: "missing object", detail: "Error: No such object: " + testRecoveredContainerID, wantAbsent: true},
 		{name: "missing container", detail: "container " + testRecoveredContainerID + " not found", wantAbsent: true},
 		{name: "missing podman container", detail: `Error: no container with name or ID "` + testRecoveredContainerID + `" found: no such container`, wantAbsent: true},
+		{name: "podman exact double-quoted container", detail: `Error: no such container "` + testRecoveredContainerID + `"`, wantAbsent: true},
+		{name: "podman wrong double-quoted container", detail: `Error: no such container "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"`, wantErr: true},
+		{name: "podman longer quoted ID", detail: `Error: no such container "` + testRecoveredContainerID + `b"`, wantErr: true},
+		{name: "generic missing container", detail: "Error: no such container", wantErr: true},
+		{name: "permission failure quoting container", detail: `Error: permission denied: no such container "` + testRecoveredContainerID + `"`, wantErr: true},
+		{name: "authentication failure quoting container", detail: `Error: unauthorized: no such container "` + testRecoveredContainerID + `"`, wantErr: true},
+		{name: "quoted missing container with extra permission failure", detail: `Error: no such container "` + testRecoveredContainerID + "\"\npermission denied", wantErr: true},
+		{name: "podman connection failure quoting container", detail: `cannot connect to Podman: no such container "` + testRecoveredContainerID + `"`, wantErr: true},
 		{name: "missing docker context", detail: `context "captured" not found`, wantErr: true},
 		{name: "missing podman connection", detail: `connection "captured" not found`, wantErr: true},
 		{name: "container runtime endpoint missing", detail: `container runtime endpoint not found while inspecting ` + testRecoveredContainerID, wantErr: true},
@@ -6326,7 +6334,7 @@ func TestExactContainerAbsenceRejectsRoutingNotFound(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runner := &recordingRunner{run: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
-				return core.LocalCommandResult{Stderr: tc.detail, ExitCode: 1}, errors.New("inspect failed")
+				return core.LocalCommandResult{Stdout: "[]\n", Stderr: tc.detail, ExitCode: 125}, errors.New("inspect failed")
 			}}
 			b := testBackend(runner)
 			absent, err := b.exactContainerAbsent(context.Background(), testRecoveredContainerID)
@@ -6334,6 +6342,63 @@ func TestExactContainerAbsenceRejectsRoutingNotFound(t *testing.T) {
 				t.Fatalf("absent=%v err=%v", absent, err)
 			}
 		})
+	}
+}
+
+func TestMissingReleaseQuotedPodmanAbsenceRetry(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_missing_quoted_retry"
+	keyPath := writeLocalContainerClaimAndKey(t, leaseID, "missing-quoted-retry", localContainerClaimScope("docker", "default"))
+	original, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err = core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, original,
+		core.Server{CloudID: testRecoveredContainerID, Provider: providerName, Labels: original.Labels}, core.SSHTarget{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	addDefaultLocalContainerScopeResponses(runner)
+	b := testBackend(runner)
+	b.confirmContainerAbsent = b.exactContainerAbsent
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := 0
+	detail := `Error: permission denied: no such container "` + original.CloudID + `"`
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if slices.Equal(req.Args, []string{"inspect", "--type", "container", original.CloudID}) {
+			checks++
+			return core.LocalCommandResult{Stdout: "[]\n", Stderr: detail, ExitCode: 125}, errors.New("inspect failed")
+		}
+		return runner.responses[commandKey(req.Args)], nil
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil {
+		t.Fatal("permission failure retired a missing-container claim")
+	}
+	retained, err := core.ReadLeaseClaim(leaseID)
+	if err != nil || !reflect.DeepEqual(retained, original) {
+		t.Fatalf("failed confirmation changed claim: %v", err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("failed confirmation removed key: %v", err)
+	}
+	// Retry the same snapshot only after the exact captured Podman diagnostic.
+	detail = `Error: no such container "` + original.CloudID + `"`
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
+		t.Fatalf("confirmed absent claim remains: %v", err)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("confirmed absent key remains: %v", err)
+	}
+	if checks != 2 || recordedCommandCount(runner, "rm") != 0 {
+		t.Fatalf("exact confirmations=%d; absent-container release must not remove a container", checks)
 	}
 }
 
