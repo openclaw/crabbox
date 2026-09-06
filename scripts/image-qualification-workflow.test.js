@@ -49,7 +49,8 @@ test("workflow isolates candidate execution from protected credentials", () => {
     buildJob.indexOf("      - name: Install protected Worker toolchain"),
   );
   assert.match(setupGo, /cache: false/);
-  assert.doesNotMatch(setupNode, /cache:/);
+  assert.doesNotMatch(setupNode, /^\s+cache:/m);
+  assert.match(setupNode, /package-manager-cache: false/);
   assert.match(
     buildJob,
     /AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN CLOUDFLARE_API_TOKEN QUALIFICATION_CONTROLLER_TOKEN/,
