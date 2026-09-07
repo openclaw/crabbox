@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Islo: report failed stdout/stderr delivery instead of silently succeeding after losing command output; preserve remote exit codes when stream decoding and delivery finish successfully.
+
 ## 0.52.0 - 2026-09-07
 
 ### Highlights
