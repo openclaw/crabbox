@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Report producer-confirmed checkpoint non-submission as structured JSON after verified reservation cleanup, without implying that source rollback succeeded. [PR 1952](https://github.com/openclaw/crabbox/pull/1952). Thanks @steipete.
+- Overlap the initial AWS quota lookup with security-group preparation, preserving per-candidate quota checks and joining both operations before launch or failure cleanup.
 - Preserve current-boot cloud-init completion records during Linux developer-image cleanup while still clearing cached initialization and seed data, and fail preparation if cleanup cannot complete safely. [PR 1954](https://github.com/openclaw/crabbox/pull/1954). Thanks @vincentkoc.
 - Stop SSH readiness probes and backoff at the shared deadline, reporting the active probe with authentication unknown instead of mislabeling expired checks as authentication failures. [PR 1949](https://github.com/openclaw/crabbox/pull/1949). Thanks @vincentkoc.
 - Keep AWS deletion and unrelated heartbeat alarm scans out of the ingress queue, and admit control WebSockets independently of lifecycle work, while preserving cleanup claims, alarm deadlines, authentication, and message serialization. [PR 1951](https://github.com/openclaw/crabbox/pull/1951).

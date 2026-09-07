@@ -201,6 +201,156 @@ describe("aws provider", () => {
     },
   );
 
+  it.each([
+    { first: "quota", ingressFails: false },
+    { first: "ingress", ingressFails: false },
+    { first: "quota", ingressFails: true },
+    { first: "ingress", ingressFails: true },
+  ])(
+    "overlaps quota and ingress, joining both before launch or failure ($first first, failure=$ingressFails)",
+    async ({ first, ingressFails }) => {
+      const log = vi.spyOn(console, "info").mockImplementation(() => {});
+      const { client, config, markets } = awsMarketFallbackHarness("");
+      const baseFetch = globalThis.fetch;
+      const quotaGate = Promise.withResolvers<void>();
+      const ingressGate = Promise.withResolvers<void>();
+      const entered = new Set<string>();
+      const completed = new Set<string>();
+      let quotaReads = 0;
+      vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+          quotaReads += 1;
+          entered.add("quota");
+          await quotaGate.promise;
+          const response = await baseFetch(request);
+          completed.add("quota");
+          return response;
+        }
+        return baseFetch(request);
+      });
+      const failure = new Error("ingress preparation failed");
+      let settled = false;
+      const creating = client
+        .createServerWithFallback(config, "cbx_abcdef123456", "violet-prawn", "alice@example.com", {
+          withIngress: async (apply) => {
+            entered.add("ingress");
+            await ingressGate.promise;
+            try {
+              if (ingressFails) throw failure;
+              return await apply(["198.51.100.1/32"]);
+            } finally {
+              completed.add("ingress");
+            }
+          },
+        })
+        .then(
+          (value) => {
+            settled = true;
+            return { value };
+          },
+          (error: unknown) => {
+            settled = true;
+            return { error };
+          },
+        );
+      try {
+        await vi.waitFor(() => expect(entered).toEqual(new Set(["quota", "ingress"])));
+        expect(markets).toEqual([]);
+        (first === "quota" ? quotaGate : ingressGate).resolve();
+        await vi.waitFor(() => expect(completed.has(first)).toBe(true));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(settled).toBe(false);
+        expect(markets).toEqual([]);
+        expect(log).not.toHaveBeenCalled();
+        (first === "quota" ? ingressGate : quotaGate).resolve();
+        const result = await creating;
+        expect(result.error ?? result.value?.server.cloudID).toBe(
+          ingressFails ? failure : "i-fallback",
+        );
+        expect(markets).toEqual(ingressFails ? [] : ["spot"]);
+        expect(quotaReads).toBe(1);
+        expect(log).toHaveBeenCalledTimes(1);
+        const diagnostic = JSON.parse(String(log.mock.calls[0]![0]));
+        expect(diagnostic.outcome).toBe(ingressFails ? "failure" : "success");
+        expect(diagnostic.steps).toContainEqual(
+          expect.objectContaining({ name: "quota", count: 1, errors: 0 }),
+        );
+      } finally {
+        quotaGate.resolve();
+        ingressGate.resolve();
+        await creating;
+      }
+    },
+  );
+
+  it.each([
+    {
+      market: "spot" as const,
+      quota: 32,
+      types: ["c7a.48xlarge", "t3.small"],
+      attempted: ["spot:t3.small"],
+      reads: ["spot"],
+    },
+    {
+      market: "spot" as const,
+      quota: 1,
+      types: ["t3.small"],
+      attempted: ["on-demand:t3.small"],
+      reads: ["spot", "on-demand"],
+    },
+    {
+      market: "on-demand" as const,
+      quota: 1,
+      types: ["t3.small"],
+      attempted: [],
+      reads: ["on-demand"],
+    },
+    {
+      market: "spot" as const,
+      quota: undefined,
+      types: ["t3.small"],
+      attempted: ["spot:t3.small"],
+      reads: ["spot"],
+    },
+  ])("keeps quota admission and market-scoped reuse ($market, quota=$quota)", async (scenario) => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const { client, config, attempted } = awsMarketFallbackHarness(
+      "",
+      scenario.market,
+      scenario.types,
+    );
+    const baseFetch = globalThis.fetch;
+    const reads: string[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (!new URL(request.url).hostname.startsWith("servicequotas.")) return baseFetch(request);
+      const body = (await request.json()) as { QuotaCode: string };
+      const market = body.QuotaCode === awsQuotaCodeForMarket("spot") ? "spot" : "on-demand";
+      reads.push(market);
+      return scenario.quota === undefined
+        ? new Response("quota unavailable", { status: 403 })
+        : Response.json({ Quota: { Value: market === scenario.market ? scenario.quota : 999 } });
+    });
+    const creating = client.createServerWithFallback(
+      config,
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+    );
+    const outcome = await creating.then(
+      () => "created",
+      (error: unknown) => String(error),
+    );
+    expect(outcome).toMatch(scenario.attempted.length ? /^created$/ : /quota/);
+    expect(attempted).toEqual(scenario.attempted);
+    expect(reads).toEqual(scenario.reads);
+    const diagnostic = JSON.parse(String(log.mock.calls[0]![0]));
+    expect(diagnostic.steps).toContainEqual(
+      expect.objectContaining({ name: "quota", count: reads.length }),
+    );
+  });
+
   it("tags every checkpoint AMI backing snapshot with its exact ownership claim", async () => {
     let submitted: URLSearchParams | undefined;
     vi.stubGlobal(
@@ -2939,6 +3089,11 @@ describe("aws provider", () => {
   });
 
   it("waits for transient AMIs before launching from EBS snapshots", async () => {
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      expect(new URL(request.url).hostname).toBe("servicequotas.eu-west-1.amazonaws.com");
+      return Response.json({ Quota: { Value: 999 } });
+    });
     const client = new EC2SpotClient(
       { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
       "eu-west-1",
@@ -2947,7 +3102,6 @@ describe("aws provider", () => {
       registerSnapshotImage: () => Promise<string>;
       waitForImageAvailable: (imageID: string) => Promise<string>;
       ensureSecurityGroup: () => Promise<string>;
-      quotaPreflightAttempt: () => Promise<undefined>;
       ec2: (action: string, params?: Record<string, string>) => Promise<unknown>;
     };
     const calls: string[] = [];
@@ -2967,7 +3121,6 @@ describe("aws provider", () => {
       calls.push("security-group");
       return "sg-123";
     };
-    client.quotaPreflightAttempt = async () => undefined;
     client.ec2 = async (action, params) => {
       calls.push(`${action}:${params?.ImageId ?? ""}`);
       if (action === "RunInstances") {
@@ -3018,7 +3171,6 @@ describe("aws provider", () => {
       ensureSSHKey: () => Promise<void>;
       registerSnapshotImage: () => Promise<string>;
       waitForImageAvailable: (imageID: string) => Promise<string>;
-      quotaPreflightAttempt: () => Promise<undefined>;
       ec2: (action: string, params?: Record<string, string>) => Promise<unknown>;
     };
     const calls: string[] = [];
@@ -3033,7 +3185,6 @@ describe("aws provider", () => {
       calls.push(`wait:${imageID}`);
       throw new Error("timed out waiting");
     };
-    client.quotaPreflightAttempt = async () => undefined;
     client.ec2 = async (action, params) => {
       calls.push(`${action}:${params?.ImageId ?? ""}`);
       return {};

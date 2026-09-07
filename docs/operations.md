@@ -1056,6 +1056,12 @@ rules have separate counters, so expected API errors remain distinguishable from
 failed provisioning. Key-pair preparation, image selection, quota checks and
 instance creation have separate buckets.
 
+The initial quota lookup overlaps security-group preparation within one regional
+create attempt. Its result is reused only by that attempt; every candidate still
+passes its market's quota check before launch. Both preparations settle before
+launch or failure cleanup. The quota bucket counts actual lookups, including a
+separate on-demand lookup only when that fallback is needed.
+
 Durations include each operation's awaited work, including its transport and
 retries; they are not AWS service-side timings. Nested buckets overlap and must
 not be added to their parent. Missing buckets mean the step was not observed,
