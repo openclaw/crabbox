@@ -284,8 +284,7 @@ func TestResolveSSHLeaseTargetAcceptsMinimalProviderClaim(t *testing.T) {
 }
 
 func TestResolveSSHLeaseTargetFindsExistingClaimByCloudID(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
+	isolateTestUserDirs(t)
 	cfg := baseConfig()
 	cfg.Provider = "aws"
 	leaseID := "cbx_cloudlookup123"
@@ -573,7 +572,7 @@ func TestResolveSSHLeaseTargetPreservesProviderManagedCredentials(t *testing.T) 
 }
 
 func TestCoordinatorLeaseBackendForwardsResolvedTargetRebinding(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateTestUserDirs(t)
 	leaseID := "cbx_coordinator123"
 	keyPath, err := testboxKeyPath(leaseID)
 	if err != nil {

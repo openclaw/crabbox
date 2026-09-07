@@ -6137,9 +6137,7 @@ func TestServerProviderKeyUsesOnlyCrabboxLeaseKeys(t *testing.T) {
 }
 
 func TestMoveStoredTestboxKeyHandlesCoordinatorRenamedLease(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	isolateTestUserDirs(t)
 	oldPath, err := testboxKeyPath("cbx_111111111111")
 	if err != nil {
 		t.Fatal(err)
