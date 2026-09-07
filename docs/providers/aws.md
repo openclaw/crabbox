@@ -153,6 +153,30 @@ Windows and macOS targets use their own candidate lists (Windows WSL2 uses
 nested-virtualization families; macOS uses `mac*.metal` types). The default
 class is `beast`.
 
+## Provisioning diagnostics
+
+Coordinator AWS create logs use the `crabbox_aws_provisioning` component. Each
+fixed operation bucket can include `transport` totals for its signed requests.
+Nested operations own their own totals; concurrent creates and preparation
+branches remain separate. These are bounded log counters, not stored lease
+state or permission decisions.
+
+`requests` counts calls entering credential preparation. `credentialsMs` and
+`credentialFailures` cover that preparation; `requestMs` and `requestFailures`
+cover the inherited SDK fetch call. A returned HTTP error response is not a
+transport failure. The operation's existing error count records how its caller
+handled that response. Response-body reading and decoding remain in the outer
+operation duration.
+
+`signInvocations`, `signCompletions`, `signFailures` and `signMs` observe the
+SDK's public signing method without changing its retry policy. Repeated signing
+invocations on a request indicate retry-loop re-entry; a completed signature
+alone does not prove that a server received the request. Signing time is part
+of `requestMs`, so do not add them together. These totals cannot distinguish
+network latency from SDK retry backoff or identify intermediate response status
+codes. They do not establish throttling. Requests outside a measured create
+operation and qualification-authority RPC transport do not add these totals.
+
 ## Configuration
 
 ```yaml

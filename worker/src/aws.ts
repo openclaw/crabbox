@@ -1,6 +1,6 @@
-import { AwsClient } from "aws4fetch";
 import { XMLParser } from "fast-xml-parser";
 
+import { RefreshingAWSFetchClient, type AWSFetchClient } from "./aws-fetch-client";
 import {
   createAWSProvisioningDiagnostics,
   type AWSProvisioningDiagnostics,
@@ -260,38 +260,6 @@ function assertPrivateWorkspaceSecurityGroupShape(group: Record<string, unknown>
     throw new Error(
       "AWS private workspace security group must have exactly one IPv4 TCP 443 egress rule",
     );
-  }
-}
-
-interface AWSFetchClient {
-  fetch(input: string, init?: RequestInit): Promise<Response>;
-}
-
-class RefreshingAWSFetchClient implements AWSFetchClient {
-  constructor(
-    private readonly credentials: AWSCredentialProvider,
-    private readonly service: string,
-    private readonly region: string,
-  ) {}
-
-  async fetch(input: string, init?: RequestInit): Promise<Response> {
-    const credentials = await this.credentials();
-    const accessKeyId = credentials.accessKeyId?.trim();
-    const secretAccessKey = credentials.secretAccessKey?.trim();
-    if (!accessKeyId || !secretAccessKey) {
-      throw new Error("AWS credential provider returned incomplete credentials");
-    }
-    const options: ConstructorParameters<typeof AwsClient>[0] = {
-      accessKeyId,
-      secretAccessKey,
-      service: this.service,
-      region: this.region,
-    };
-    const session = credentials.sessionToken?.trim();
-    if (session) {
-      options.sessionToken = session;
-    }
-    return await new AwsClient(options).fetch(input, init);
   }
 }
 
