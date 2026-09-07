@@ -562,6 +562,7 @@ describe("coordinator runtimes", () => {
       ["POST", "/v1/workspaces"],
       ["GET", "/v1/workspaces/fleet-is-101"],
       ["DELETE", "/v1/workspaces/fleet-is-101"],
+      ["GET", "/v1/control"],
       ["GET", "/v1/native-vnc/handoff"],
       ["GET", "/v1/leases/cbx_abcdef123456"],
       ["PUT", "/v1/leases/cbx_abcdef123456"],
