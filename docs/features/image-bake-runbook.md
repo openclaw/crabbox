@@ -358,7 +358,7 @@ scripts/mint-aws-devtools-image.sh \
 ### What the prep scripts install
 
 - **Linux** (`scripts/install-linux-developer-tools.sh`): common CLI/build
-  tooling, GitHub CLI, Node 24, corepack/pnpm, TruffleHog 3.95.9, Chrome or
+  tooling, GitHub CLI, Node 24.19.0 on x86_64, corepack/pnpm, TruffleHog 3.95.9, Chrome or
   Chromium for browser lanes, desktop/VNC helpers, Docker Engine, Compose,
   buildx, and a small default Docker image set. TruffleHog archives are pinned
   to reviewed SHA-256 digests for amd64 and arm64. NodeSource, Docker, and
@@ -391,6 +391,60 @@ before Docker starts; the wrapper detects the prep script's reboot marker,
 reboots the source lease, waits for Crabbox readiness, reruns the prep script to
 pull the configured Docker images, and only then runs the source smoke and AMI
 capture.
+
+### Linux public toolchain archives
+
+The x86_64 recipe installs the checksum-pinned upstream Node 24.19.0 archive,
+including its bundled Corepack 0.35.0, at
+`/opt/hostedtoolcache/node/24.19.0/x64`. The sibling `x64.complete` marker is
+written only after executable checks. This matches the GitHub tool-cache
+`$RUNNER_TOOL_CACHE/node/<version>/<architecture>` layout; it does not bind a
+runner to that root. Crabbox's GitHub runner defaults to
+`$HOME/actions-runner/_work/_tool`, and local Actions uses a disposable
+per-lease tools directory. Consumers must explicitly select the baked root or
+use the verified archives. Completion markers are availability hints, not
+authentication.
+
+Public archives are retained under `/opt/crabbox/toolchain-archives`:
+
+| Filename | Purpose |
+| --- | --- |
+| `node-v24.19.0-linux-x64.tar.xz` | Node, npm, and bundled Corepack |
+| `pnpm-11.22.0.tgz` | pnpm 11.22.0 |
+| `pnpm-12.3.4.tgz` | pnpm 12.3.4 JavaScript wrapper |
+| `exe.linux-x64-12.3.4.tgz` | pnpm 12.3.4 native executable for glibc Linux x64 |
+
+The SHA-256 Node pin and SHA-512 pnpm pins live in the installer's
+`toolchain_archive_spec`. Consumers must carry independently reviewed pins,
+copy archives into private staging, validate those exact bytes, and extract
+fresh trees. Do not authenticate a cached installation by running `--version`,
+reading `.complete`, or trusting Corepack's mutable `.corepack` metadata.
+No Corepack-packed bundle is provided: any future packed bundle needs its own
+trusted digest before import.
+
+For offline Corepack execution, the smoke extracts authenticated pnpm into a
+fresh `$COREPACK_HOME/v1/pnpm/<version>` and then creates compatibility metadata.
+pnpm 12 also needs the independently verified native archive's `package/pnpm`
+installed as `pnpm-native` in that fresh pnpm directory. The consumer's exact
+package-manager pin selects execution; these archives do not change the
+installer's pnpm default of 11.1.0. Existing `CRABBOX_LINUX_PNPM_VERSION` and
+`CRABBOX_LINUX_NODE_MAJOR` overrides remain supported. Other Node majors and
+the existing ARM installer route retain the fingerprint-checked NodeSource
+path; this recipe does not add an ARM image.
+
+The mint wrapper applies this archive contract only when its selected prep
+script is the bundled Linux builder. It forwards the existing
+`CRABBOX_LINUX_NODE_MAJOR` and `CRABBOX_LINUX_PNPM_VERSION` overrides to that
+builder and freezes the same Node-major declaration into each smoke. The smoke
+checks the guest's Debian package architecture, not the mint host's architecture.
+Only Node major 24 on guest `amd64` requires these archives. ARM guests, other
+Node-major overrides, and custom prep scripts retain the existing normal-tool
+smoke; their success does not qualify the x86_64 archive recipe. Missing or
+corrupt archives cannot disable the required probe for the supported builder.
+
+No repository checkout, project dependency tree, credential, or private
+package is added to the public archive cache. Existing dependency-cache keys
+and hydration behavior are unchanged.
 
 ### Tuning the prebake set
 
@@ -433,6 +487,19 @@ a safe same-filesystem rename and verified before capture. Later managed Linux
 boots independently rerun the declared probes under a sanitized system PATH
 before skipping baseline APT. Use the timing logs to compare provider request,
 network readiness, bootstrap, and end-to-end time before and after each bake.
+
+Linux source, candidate, and promoted smokes require a nonroot user and execute
+the normal `pnpm --version` command in that user's existing environment, preserving
+its readiness check and first-use cache warming. This normal command is not
+used to authenticate cached archives or skip their verification.
+
+For the bundled Node-24/amd64 builder, each smoke additionally revalidates public
+archive bytes in private temporary directories. It executes fresh Node and both
+pinned pnpm versions, with Corepack network access disabled, installs a local
+dependency using `--offline --ignore-scripts`, and loads that dependency. A failed
+probe stops the stage; `devtools-smoke-ok` is printed only after the required
+checks finish. These offline probes do not replace image-selection,
+credential-isolation, rollback, or cleanup qualification.
 
 ## macOS images
 

@@ -27,6 +27,8 @@ desktop="${CRABBOX_IMAGE_DESKTOP:-auto}"
 browser="${CRABBOX_IMAGE_BROWSER:-auto}"
 windows_mode="${CRABBOX_WINDOWS_MODE:-normal}"
 prep_script="${CRABBOX_IMAGE_PREP_SCRIPT:-}"
+linux_node_major="${CRABBOX_LINUX_NODE_MAJOR:-24}"
+linux_pnpm_version="${CRABBOX_LINUX_PNPM_VERSION:-11.1.0}"
 windows_reboot_marker='C:\ProgramData\crabbox\image-prep-reboot-required'
 
 usage() {
@@ -180,6 +182,10 @@ if [[ -z "$prep_script" ]]; then
   else
     prep_script="$ROOT/scripts/install-linux-developer-tools.sh"
   fi
+fi
+linux_developer_builder=0
+if [[ "$target" == "linux" && "$prep_script" -ef "$ROOT/scripts/install-linux-developer-tools.sh" ]]; then
+  linux_developer_builder=1
 fi
 if [[ "$browser" == "auto" ]]; then
   if [[ "$target" == "linux" ]]; then
@@ -519,7 +525,6 @@ smoke_script() {
   if [[ "$target" == "windows" ]]; then
     cat <<'POWERSHELL'
 $ErrorActionPreference = "Stop"
-Write-Output "devtools-smoke-ok"
 Get-ComputerInfo | Select-Object OsName, OsVersion, OsBuildNumber | Format-List
 git --version
 gh --version | Select-Object -First 1
@@ -537,11 +542,13 @@ trufflehog --no-update --version
 docker --version
 docker version
 docker image inspect mcr.microsoft.com/windows/servercore:ltsc2022 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Docker image smoke failed: $LASTEXITCODE" }
+Write-Output "devtools-smoke-ok"
 POWERSHELL
   else
     cat <<'SHELL'
 set -euo pipefail
-echo devtools-smoke-ok
+[[ "$(id -u)" -ne 0 ]] || { echo 'developer image smoke requires a nonroot user' >&2; exit 1; }
 uname -a
 command -v git
 command -v gh
@@ -589,6 +596,12 @@ test -d /var/cache/crabbox/pnpm
 test -f /var/lib/crabbox-readiness/linux.json
 test -f /var/lib/crabbox/image-ready
 SHELL
+    if [[ "$linux_developer_builder" == "1" ]]; then
+      # Only the bundled builder declares these archives; custom prep keeps its existing smoke contract.
+      CRABBOX_LINUX_NODE_MAJOR="$linux_node_major" \
+        bash -c 'source "$1"; node_pnpm_smoke_script' _ "$ROOT/scripts/install-linux-developer-tools.sh"
+    fi
+    printf '%s\n' 'echo devtools-smoke-ok'
   fi
 }
 
@@ -629,7 +642,14 @@ run_prep() {
     wait_windows_prep_task "$lease"
     return
   fi
-  run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync --script "$prep_script"
+  if [[ "$linux_developer_builder" == "1" ]]; then
+    # Prep and every smoke must use the same declared overrides, not ambient guest state.
+    run_cmd env CRABBOX_LINUX_NODE_MAJOR="$linux_node_major" CRABBOX_LINUX_PNPM_VERSION="$linux_pnpm_version" \
+      "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync \
+      --allow-env CRABBOX_LINUX_NODE_MAJOR,CRABBOX_LINUX_PNPM_VERSION --script "$prep_script"
+  else
+    run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync --script "$prep_script"
+  fi
 }
 
 stage_linux_readiness_producer() {
