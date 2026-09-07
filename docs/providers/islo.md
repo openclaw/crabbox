@@ -145,6 +145,38 @@ rejected before workspace preparation and sync.
 5. Require an `exit` event before treating a stream as successful.
 6. Delete the sandbox on release unless the lease is kept.
 
+Run outcomes and timing are finalized after retention or guarded cleanup. A
+cleanup-only failure exits `1`, reports `provider-error`, and keeps the recovery
+session and claim when teardown is unproven. An earlier command, setup, or
+artifact failure stays primary when cleanup or timing output also fails; the
+secondary diagnostics remain visible and reachable error causes are retained.
+Total time includes cleanup; command time excludes downloads and cleanup.
+
+Once a run has a bound session, `--keep-on-failure` also retains failures during
+workspace ownership repair, sync, and preparation. Errors before acquisition or
+reuse admission finishes remain with those operations' existing rollback and
+ownership policy. A later timing-output failure cannot undo successful deletion.
+
+For an enrolled reused lease, existing claim/scope/live-identity admission stays
+before the run session is bound. Resume, root health checks, daemon recovery, and
+metadata updates then run inside bound-session finalization: a failure returns a
+kept reused session and final timing, without running the workload or deleting
+the reused resource. Plain and legacy leases keep their existing admission
+semantics; this does not add a universal live lookup or upgrade an ID-less claim.
+Post-admission Tailscale errors retain their actual causes while preserving the
+existing public codes and messages, including fallback `1` for opaque validation
+errors. A status code alone does not create a context-cancellation cause.
+
+Observed SSE command exits keep their exact codes. Exec transport/cancellation
+failures return `1` with their known failure origin and reachable context cause.
+Setup/helper failures preserve their public code without being mislabeled as
+user-command exits. Required-artifact and download failures after command success
+are provider errors: required-artifact failures keep `7`, and local download-write
+failures keep `2`. A first typed timing-writer failure keeps its own public code.
+The final error message redacts the configured Islo API key; workload output and
+upstream errors that already discarded causes are not reconstructed by this run
+finalizer.
+
 `crabbox status --wait` polls the sandbox every 2 seconds until it reports
 `running`, bounded by `--wait-timeout` (default 5 minutes). If the sandbox
 enters a terminal state (`failed`, `stopped`, `stopping`, or `deleted`) before
@@ -194,6 +226,9 @@ running and billable.
   [why the provider kind stays delegated-run](../features/islo.md#why-the-provider-kind-stays-delegated-run).
 - Crabbox sync: yes, archive sync through the Islo files-archive API, with a
   base64 exec-upload fallback.
+  `--no-sync` creates the workspace directory if needed without deleting
+  existing files. Workspace replacement applies only during archive sync when
+  `sync.delete` is enabled; disabling it preserves existing files before upload.
 - URL bridge: yes. Exposed ports become public HTTPS shares through Islo's
   `/sandboxes/{name}/shares` API, surfaced by `--expose` and the pond bridge
   plane. Share creation is idempotent per port. Requested TTLs are clamped
