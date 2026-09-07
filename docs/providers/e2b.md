@@ -13,6 +13,10 @@ config, repo claims, sync manifests and guardrails, slugs, timing summaries, and
 normalized `list`/`status` rendering. There is no Crabbox SSH lease and no broker
 coordinator — the CLI talks to E2B directly.
 
+E2B and CubeSandbox share the envd Connect wire codec, but retain their own
+process-end interpretation. E2B continues reading after an end event; a later
+RPC or stream-read failure takes precedence over the reported command exit.
+
 ## When to use
 
 Use E2B when the remote Linux sandbox should be owned by E2B and commands run
