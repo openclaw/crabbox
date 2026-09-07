@@ -2101,6 +2101,10 @@ func TestCreateDirectAWSAMICheckpointValidatesConfigBeforePreparingSource(t *tes
 	if !strings.Contains(err.Error(), "CRABBOX_AWS_REGION or AWS_REGION is required") {
 		t.Fatalf("err=%v, want AWS config validation before source preparation", err)
 	}
+	var unsubmitted NativeCheckpointNotSubmittedError
+	if !errors.As(err, &unsubmitted) {
+		t.Fatalf("configuration failure lost non-submission certainty: %v", err)
+	}
 	if strings.Contains(err.Error(), "prepare native checkpoint source") {
 		t.Fatalf("source was prepared before AWS config validation: %v", err)
 	}

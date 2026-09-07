@@ -209,11 +209,20 @@ Before a native snapshot, Crabbox cleans the source: on Linux it runs
 `cloud-init clean --logs` (so a forked box regenerates SSH host keys) and
 `sync` to flush filesystem writes. Preparation uses the distro's
 `/usr/bin/python3` and installed cloud-init module to resolve its configured
-runtime directory. It requires completed initialization and a runtime directory
-on `tmpfs`, outside cloud-init's disk cache. The existing completion records are
+runtime directory. Before cleaning, it waits up to 30 seconds for cloud-init
+completion using `status --wait --format=json`; both a successful exit and
+`status: done` are required. Disabled initialization and recoverable errors
+remain failures. The runtime directory must be on `tmpfs`, outside cloud-init's
+disk cache. The existing completion records are
 copied there before cleaning, so the running source remains ready while a new
-VM must complete its own boot. Preparation errors stop capture before creating
-an image.
+VM must complete its own boot. An immediate status check after cleaning must
+still report successful completion; it does not wait to mask lost boot state.
+Status failures identify the pre-clean or post-clean phase and observed state.
+Preparation errors stop capture before creating an image. Direct AWS and
+Hetzner failures confirmed before their image-create request also release the
+fresh local reservation and can emit the non-submission JSON receipt above.
+This does not certify source rollback. Errors once the image request begins
+retain the checkpoint for recovery; existing uncertain records are unchanged.
 
 Direct AWS and Hetzner captures record the accepted image identity before
 waiting for readiness. If the process is interrupted during that wait, the
