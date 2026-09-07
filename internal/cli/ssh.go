@@ -36,6 +36,7 @@ type SSHTarget struct {
 	HostKeyAlias           string
 	Port                   string
 	FallbackPorts          []string
+	preparedEndpoint       string
 	TargetOS               string
 	WindowsMode            string
 	ReadyCheck             string
@@ -350,8 +351,8 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 				if err == nil {
 					if target.Port != probe.Port {
 						fmt.Fprintf(stderr, "using ssh port %s for %s (configured %s not ready)\n", probe.Port, target.Host, target.Port)
-						target.Port = probe.Port
 					}
+					target.recordPreparedEndpoint(probe.Port)
 					return nil
 				}
 				if setupErr := sshReadinessError(err, phase); setupErr != nil {
@@ -439,7 +440,7 @@ func probeSSHReady(ctx context.Context, target *SSHTarget, timeout time.Duration
 		}
 		_ = conn.Close()
 		if runSSHQuietWithOptions(ctx, probe, sshReadyCommand(probe), profile.connectTimeout, profile.connectionAttempts) == nil {
-			target.Port = probe.Port
+			target.recordPreparedEndpoint(probe.Port)
 			return true
 		}
 	}
@@ -458,7 +459,7 @@ func probeProxySSHReady(ctx context.Context, target *SSHTarget, profile sshReadi
 			}
 			continue
 		}
-		target.Port, target.FallbackPorts = port, []string{}
+		target.recordPreparedEndpoint(port)
 		return nil
 	}
 	return lastErr
@@ -508,7 +509,7 @@ func probeWSL2SSHReady(ctx context.Context, target *SSHTarget, profile sshReadin
 			}
 		}
 		if err := run(sshReadyCommand(probe)); err == nil {
-			target.Port, target.FallbackPorts = port, []string{}
+			target.recordPreparedEndpoint(port)
 			return nil
 		} else {
 			var setupErr *workspaceOwnerSetupError
@@ -552,7 +553,7 @@ func probeSSHTransport(ctx context.Context, target *SSHTarget, timeout time.Dura
 		}
 		_ = conn.Close()
 		if runSSHQuietWithOptions(ctx, probe, sshTransportProbeCommand(probe), "2", "1") == nil {
-			target.Port = probe.Port
+			target.recordPreparedEndpoint(probe.Port)
 			return true
 		}
 	}
@@ -608,14 +609,32 @@ func uniqueSSHPorts(ports []string) []string {
 	return out
 }
 
+// A prepared endpoint avoids rediscovery within one operation. Keep every
+// advertised candidate: network selection can retarget the same lease to a
+// different host whose reachable SSH port differs.
+func (target *SSHTarget) recordPreparedEndpoint(port string) {
+	if target.Port != port {
+		target.FallbackPorts = sshPortCandidates(target.Port, target.FallbackPorts)
+	}
+	target.Port = port
+	target.preparedEndpoint = net.JoinHostPort(target.Host, port)
+}
+
 // Port probes may retry before delivery; a delivered command must never replay.
+func resolvedSSHPortCandidates(target SSHTarget) []string {
+	if target.preparedEndpoint != "" && target.preparedEndpoint == net.JoinHostPort(target.Host, target.Port) {
+		return []string{target.Port}
+	}
+	return sshPortCandidates(target.Port, target.FallbackPorts)
+}
+
 func resolveSSHPortNoInput(ctx context.Context, target *SSHTarget, connectTimeout, connectionAttempts string, stderr io.Writer) error {
-	ports := sshPortCandidates(target.Port, target.FallbackPorts)
+	ports := resolvedSSHPortCandidates(*target)
 	if len(ports) == 0 {
 		ports = []string{"22"}
 	}
 	if len(ports) == 1 {
-		target.Port, target.FallbackPorts = ports[0], []string{}
+		target.Port = ports[0]
 		return nil
 	}
 	probe := *target
@@ -627,7 +646,7 @@ func resolveSSHPortNoInput(ctx context.Context, target *SSHTarget, connectTimeou
 		var diagnostic synchronizedBuffer
 		_, err = command.runOnce(ctx, probe, connectTimeout, connectionAttempts, io.Discard, &diagnostic, false)
 		if err == nil {
-			target.Port, target.FallbackPorts = port, []string{}
+			target.recordPreparedEndpoint(port)
 			return nil
 		}
 		if !shouldRetrySSHPort(err) || index == len(ports)-1 {

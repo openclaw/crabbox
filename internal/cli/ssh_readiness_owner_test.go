@@ -130,8 +130,15 @@ esac
 	if got, want := string(calls), "2222:-n:exit 0\n22:-n:exit 0\n"; got != want {
 		t.Fatalf("SSH calls=%q, want %q", got, want)
 	}
-	if target.Port != "22" || len(target.FallbackPorts) != 0 {
-		t.Fatalf("target.Port=%q FallbackPorts=%v, want pinned port 22 with no fallbacks", target.Port, target.FallbackPorts)
+	if target.Port != "22" {
+		t.Fatalf("target.Port=%q FallbackPorts=%v, want resolved port 22", target.Port, target.FallbackPorts)
+	}
+	if err := resolveSSHPortNoInput(t.Context(), &target, "5", "1", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(callsPath)
+	if err != nil || string(after) != string(calls) {
+		t.Fatalf("prepared target was probed again: %s error=%v", after, err)
 	}
 }
 

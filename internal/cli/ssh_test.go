@@ -1882,7 +1882,7 @@ exit 0
 	if err := runSSHQuietWithOptionsResolvePort(t.Context(), &target, "true", "1", "1"); err != nil {
 		t.Fatal(err)
 	}
-	if target.Port != "2222" || len(target.FallbackPorts) != 0 {
+	if target.Port != "2222" {
 		t.Fatalf("successful readiness target=%#v, want pinned port 2222", target)
 	}
 	calls, err := os.ReadFile(callsPath)
@@ -1933,12 +1933,19 @@ exit 0
 				User: "crabbox", Host: "proxy.example", Port: "2222", FallbackPorts: []string{"22"},
 				SSHConfigProxy: true, ReadyCheck: "true",
 			}
-			if !test.run(t.Context(), &target) || target.Port != "22" || len(target.FallbackPorts) != 0 {
+			if !test.run(t.Context(), &target) || target.Port != "22" {
 				t.Fatalf("readiness did not pin the fully ready fallback: %+v", target)
 			}
 			calls, err := os.ReadFile(callsPath)
 			if got, want := string(calls), "2222:true\n22:true\n"; err != nil || got != want {
 				t.Fatalf("readiness calls=%q error=%v want=%q", got, err, want)
+			}
+			if err := resolveSSHPortNoInput(t.Context(), &target, "5", "1", io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.ReadFile(callsPath)
+			if err != nil || string(after) != string(calls) {
+				t.Fatalf("proxy readiness route was rediscovered: %s error=%v", after, err)
 			}
 		})
 	}
@@ -2102,7 +2109,7 @@ func TestWSL2ReadinessUsesDirectNoInputWrapperAndPinsFullFallback(t *testing.T) 
 	if err := probeWSL2SSHReady(t.Context(), &target, sshReadinessProfileForTarget(target), io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if target.Port != "22" || len(target.FallbackPorts) != 0 {
+	if target.Port != "22" {
 		t.Fatalf("target=%+v, want fully-ready fallback pinned", target)
 	}
 	calls, err := os.ReadFile(logPath)
@@ -2111,6 +2118,13 @@ func TestWSL2ReadinessUsesDirectNoInputWrapperAndPinsFullFallback(t *testing.T) 
 	}
 	if got, want := string(calls), "ssh:2222:shell\nsftp:2222\nssh:22:shell\nsftp:22\nssh:22:ready\n"; got != want {
 		t.Fatalf("calls=%q want=%q", got, want)
+	}
+	if err := resolveSSHPortNoInput(t.Context(), &target, "10", "3", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(logPath)
+	if err != nil || string(after) != string(calls) {
+		t.Fatalf("WSL readiness route was rediscovered: %s error=%v", after, err)
 	}
 }
 
