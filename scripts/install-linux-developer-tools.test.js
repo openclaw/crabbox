@@ -73,6 +73,7 @@ test("linux developer image cloud-init cleanup preserves current-boot facts", as
     path.join(repoRoot, "scripts/install-linux-developer-tools.sh"),
     "utf8",
   );
+  assert.equal(source.split("/usr/bin/python3").length, 2, "one distro Python invocation");
   for (const scenario of [
     { name: "completed boot survives cache and seed cleanup", cleaned: true },
     { name: "cleanup failure after cache deletion", failure: "clean", cleaned: true },
@@ -88,10 +89,30 @@ test("linux developer image cloud-init cleanup preserves current-boot facts", as
     { name: "runtime symlink inside cleaned cache", failure: "overlap-link" },
     { name: "second completion copy fails", failure: "copy" },
     { name: "cloud-init absent", failure: "absent" },
+    { name: "hostile fixture paths preserve completed boot", cleaned: true, hostilePath: true },
+    {
+      name: "hostile fixture paths stop after failed cleanup",
+      failure: "clean",
+      cleaned: true,
+      hostilePath: true,
+    },
   ]) {
     await t.test(scenario.name, (t) => {
-      const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-cloud-init-")));
-      t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+      const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-cloud-init-")));
+      t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+      // Substitutions may only create file canaries in this fixture's working directory.
+      const root = scenario.hostilePath
+        ? path.join(cwd, "spaces $(>dollar-canary) `>backtick-canary` ' \" quotes")
+        : cwd;
+      const assertNoSubstitution = () => {
+        for (const name of ["dollar-canary", "backtick-canary"]) {
+          assert.equal(
+            fs.existsSync(path.join(cwd, name)),
+            false,
+            `fixture paths must not execute shell substitutions: ${name}`,
+          );
+        }
+      };
       const bin = path.join(root, "bin");
       const cache = path.join(root, "cloud");
       const data = path.join(cache, "data");
@@ -102,6 +123,8 @@ test("linux developer image cloud-init cleanup preserves current-boot facts", as
           : path.join(root, "run", "cloud-init");
       for (const directory of [bin, data, seed, runtime])
         fs.mkdirSync(directory, { recursive: true });
+      const interpreter = scenario.hostilePath ? path.join(root, "python") : python.stdout.trim();
+      if (scenario.hostilePath) fs.symlinkSync(python.stdout.trim(), interpreter);
       fs.writeFileSync(path.join(seed, "user-data"), "synthetic seed\n");
       let configuredRuntime = runtime;
       if (scenario.failure === "overlap-link") {
@@ -155,7 +178,7 @@ else:
       if (scenario.failure !== "absent") {
         writeExecutable(
           cloudInit,
-          `#!/bin/sh\nexec ${JSON.stringify(python.stdout.trim())} -I ${JSON.stringify(cli)} "$@"\n`,
+          '#!/bin/sh\nexec "$FIXTURE_PYTHON" -I "$FIXTURE_CLOUD_INIT_SCRIPT" "$@"\n',
         );
       }
       // Exercise the installer body with the existing checkpoint fixture's distro-module boundary.
@@ -185,7 +208,7 @@ exec(compile(sys.stdin.read(), "installer-cloud-init-preparation", "exec"))
       const wrapper = path.join(bin, "python-wrapper");
       writeExecutable(
         wrapper,
-        `#!/bin/sh\nexec ${JSON.stringify(python.stdout.trim())} -I ${JSON.stringify(fixture)} "$@"\n`,
+        '#!/bin/sh\nexec "$FIXTURE_PYTHON" -I "$FIXTURE_MODULE_SCRIPT" "$@"\n',
       );
       writeExecutable(
         path.join(bin, "stat"),
@@ -197,9 +220,9 @@ if [ "$FIXTURE_FAILURE" = disk ]; then printf 'ext4\\n'; else printf 'tmpfs\\n';
       const producer = path.join(bin, "producer");
       writeExecutable(producer, "#!/bin/sh\nexit 0\n");
       const installer = path.join(root, "install.sh");
-      fs.writeFileSync(installer, source.replaceAll("/usr/bin/python3", wrapper));
+      fs.writeFileSync(installer, source.replace("/usr/bin/python3", '"$FIXTURE_PYTHON_WRAPPER"'));
       const shell = `set -euo pipefail
-source ${JSON.stringify(installer)}
+source "$1"
 readiness_producer_path() { printf '%s\\n' "$FIXTURE_PRODUCER"; }
 install() { return 0; }
 systemctl() { return 0; }
@@ -218,26 +241,33 @@ print_versions`;
         FIXTURE_CLI: cloudInit,
         FIXTURE_EVENTS: events,
         FIXTURE_PRODUCER: producer,
+        FIXTURE_PYTHON: interpreter,
+        FIXTURE_CLOUD_INIT_SCRIPT: cli,
+        FIXTURE_MODULE_SCRIPT: fixture,
+        FIXTURE_PYTHON_WRAPPER: wrapper,
       };
       const fails = Boolean(scenario.failure && scenario.failure !== "absent");
       for (let attempt = 0; attempt < 2; attempt++) {
         fs.writeFileSync(events, "");
-        const result = spawnSync("/bin/bash", ["-c", shell], {
-          cwd: repoRoot,
+        const result = spawnSync("/bin/bash", ["-c", shell, "installer-fixture", installer], {
+          cwd,
           env,
           encoding: "utf8",
           timeout: 10000,
         });
+        assertNoSubstitution();
         assert.equal(result.error, undefined);
         assert.equal(result.signal, null);
         if (fails) assert.notEqual(result.status, 0, `${scenario.name}: cleanup must fail closed`);
         else assert.equal(result.status, 0, result.stderr || result.stdout);
         if (scenario.cleaned) {
           const status = spawnSync(cloudInit, ["status", "--format=json"], {
+            cwd,
             env: { ...env, FIXTURE_FAILURE: "" },
             encoding: "utf8",
             timeout: 10000,
           });
+          assertNoSubstitution();
           assert.equal(status.status, 0, status.stderr);
           assert.equal(
             JSON.parse(status.stdout).status,
@@ -273,10 +303,12 @@ print_versions`;
         // A new boot does not inherit tmpfs facts or the cleaned disk cache/seed.
         for (const name of Object.keys(facts)) fs.unlinkSync(path.join(runtime, name));
         const nextBoot = spawnSync(cloudInit, ["status", "--format=json"], {
+          cwd,
           env: { ...env, FIXTURE_FAILURE: "" },
           encoding: "utf8",
           timeout: 10000,
         });
+        assertNoSubstitution();
         assert.equal(nextBoot.status, 0, nextBoot.stderr);
         assert.equal(JSON.parse(nextBoot.stdout).status, "notstarted");
       }
