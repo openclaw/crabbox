@@ -21,7 +21,7 @@ func (b *openComputerBackend) syncWorkspace(ctx context.Context, api *ocAPIClien
 		PhaseName:           "opencomputer_sync",
 		Provider:            providerName,
 		Stderr:              b.rt.Stderr,
-		Now:                 b.now,
+		Now:                 func() time.Time { return core.ClockNow(b.rt.Clock) },
 		CleanupContext:      b.cleanupContext,
 		Upload: func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
 			return api.uploadFile(uploadCtx, sandboxID, remoteArchive, body)

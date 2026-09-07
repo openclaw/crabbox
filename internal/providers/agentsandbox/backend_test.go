@@ -1050,7 +1050,7 @@ func TestStatusReportsControllerClaimExpiredCondition(t *testing.T) {
 			liveClaim := fake.objects[sandboxClaimResource+"/"+cfg.AgentSandbox.Namespace+"/"+claimName]
 			liveClaim.Status.Conditions = append(liveClaim.Status.Conditions, conditionState{Type: "Ready", Status: "False", Reason: conditionReason})
 			wantReason := "controller reported " + conditionReason
-			if expired, reason := sandboxClaimExpired(claim, liveClaim, backend.now().UTC()); !expired || reason != wantReason {
+			if expired, reason := sandboxClaimExpired(claim, liveClaim, core.ClockNow(backend.rt.Clock).UTC()); !expired || reason != wantReason {
 				t.Fatalf("expired=%t reason=%q conditions=%#v", expired, reason, liveClaim.Status.Conditions)
 			}
 

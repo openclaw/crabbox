@@ -157,7 +157,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 	}()
 
-	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, b.now())
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, core.ClockNow(b.rt.Clock).UTC())
 	labels["namespace_tenant"] = cfg.NamespaceInstance.TenantID
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s machine_type=%s keep=%v\n", providerName, leaseID, slug, cfg.ServerType, req.Keep)
 	id, err := b.create(ctx, cfg, keyPath+".pub", labels)
@@ -407,7 +407,7 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	if err != nil {
 		return core.Server{}, err
 	}
-	now := b.now()
+	now := core.ClockNow(b.rt.Clock).UTC()
 	if remaining := namespaceRemainingLifetime(req.Lease.Server.Labels, now); remaining > 0 {
 		result, err := b.nsc(ctx, cfg, []string{"extend", req.Lease.Server.CloudID, "--ensure_minimum", remaining.String()}, b.rt.Stderr)
 		if err != nil {
@@ -474,8 +474,8 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		}
 		server := b.server(item, cfg)
 		mergeClaimLabels(&server, claim)
-		remove, reason := core.ShouldCleanupServer(server, b.now())
-		if recoveryRemove, recoveryReason, handled := namespaceRecoveryCleanup(claim, b.now()); handled {
+		remove, reason := core.ShouldCleanupServer(server, core.ClockNow(b.rt.Clock).UTC())
+		if recoveryRemove, recoveryReason, handled := namespaceRecoveryCleanup(claim, core.ClockNow(b.rt.Clock).UTC()); handled {
 			remove, reason = recoveryRemove, recoveryReason
 		}
 		if !remove {
@@ -511,7 +511,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		if _, ok := live[leaseID]; ok || claim.LeaseID == "" {
 			continue
 		}
-		if claim.Labels["recovery"] == "ambiguous-create" && namespaceRecoveryPending(claim, b.now()) {
+		if claim.Labels["recovery"] == "ambiguous-create" && namespaceRecoveryPending(claim, core.ClockNow(b.rt.Clock).UTC()) {
 			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=ambiguous create recovery pending\n", claim.LeaseID)
 			continue
 		}
@@ -1083,13 +1083,6 @@ func (b *backend) nsc(ctx context.Context, cfg core.Config, args []string, stder
 		Args:   global,
 		Stderr: stderr,
 	})
-}
-
-func (b *backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now().UTC()
-	}
-	return time.Now().UTC()
 }
 
 func commandError(action string, result core.LocalCommandResult, err error) error {

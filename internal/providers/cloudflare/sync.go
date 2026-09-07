@@ -16,7 +16,7 @@ import (
 func (b *cloudflareBackend) prepareArchive(ctx context.Context, req RunRequest) (*core.PreparedArchive, error) {
 	return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-		TempPattern: "crabbox-cloudflare-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+		TempPattern: "crabbox-cloudflare-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 	})
 }
 
@@ -32,17 +32,17 @@ func (b *cloudflareBackend) syncWorkspace(ctx context.Context, client *cloudflar
 	phases, total, err := core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge, Workdir: workdir,
 		Provider: providerName, PhaseName: "cloudflare_sync", RemoteArchivePrefix: "crabbox-cloudflare-sync-",
-		Stderr: b.rt.Stderr, Now: b.now,
+		Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 		CleanupContext: func(context.Context) (context.Context, context.CancelFunc) { return cloudflareCleanupContext() },
 		Upload: func(uploadCtx context.Context, remoteArchive string, _ io.Reader) error {
-			start := b.now()
+			start := core.ClockNow(b.rt.Clock)
 			if err := b.prepareWorkspace(uploadCtx, client, sandboxID, workdir); err != nil {
 				return err
 			}
 			if err := b.checkRemoteDiskForSync(uploadCtx, client, sandboxID, workdir, prepared.Manifest.Bytes, prepared.Size); err != nil {
 				return err
 			}
-			diskDuration = b.now().Sub(start)
+			diskDuration = core.ClockNow(b.rt.Clock).Sub(start)
 			// Reopen the same owned snapshot to preserve this transport's exact Content-Length.
 			if err := client.uploadFile(uploadCtx, sandboxID, prepared.File.Name(), remoteArchive); err != nil {
 				return fmt.Errorf("upload archive: %w", err)

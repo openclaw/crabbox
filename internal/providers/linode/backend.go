@@ -127,7 +127,7 @@ func (b *linodeLeaseBackend) acquireOnce(ctx context.Context, req core.AcquireRe
 	if err != nil {
 		return core.LeaseTarget{}, fmt.Errorf("generate linode root password: %w", err)
 	}
-	now := b.now()
+	now := core.ClockNow(b.RT.Clock).UTC()
 	created := linodeInstance{}
 	committed := false
 	defer func() {
@@ -365,7 +365,7 @@ func (b *linodeLeaseBackend) releaseTargetFromClaim(ctx context.Context, client 
 			grace = ambiguousCreateRecoveryGrace
 		}
 		createdAt, _ := strconv.ParseInt(claim.Labels["created_at"], 10, 64)
-		if createdAt <= 0 || b.now().Before(time.Unix(createdAt, 0).Add(grace)) {
+		if createdAt <= 0 || core.ClockNow(b.RT.Clock).UTC().Before(time.Unix(createdAt, 0).Add(grace)) {
 			return core.LeaseTarget{}, core.Exit(4, "linode ambiguous-create recovery is still pending for lease=%s; retry stop later", claim.LeaseID)
 		}
 		if target, found, err := b.reconcilePendingRecovery(ctx, client, claim, accountID); err != nil {
@@ -603,7 +603,7 @@ func (b *linodeLeaseBackend) updateFencedLinodeMetadata(ctx context.Context, lea
 	}
 	providerCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	now := b.now()
+	now := core.ClockNow(b.RT.Clock).UTC()
 	action := func() (core.Server, core.SSHTarget, bool, error) {
 		if err := providerCtx.Err(); err != nil {
 			return core.Server{}, core.SSHTarget{}, false, err
@@ -948,13 +948,6 @@ func (b *linodeLeaseBackend) waitForLinodeIP(ctx context.Context, client linodeA
 		result.Value = linodeInstance{}
 	}
 	return result.Value, err
-}
-
-func (b *linodeLeaseBackend) now() time.Time {
-	if b.RT.Clock != nil {
-		return b.RT.Clock.Now().UTC()
-	}
-	return time.Now().UTC()
 }
 
 func rollbackLinodeAcquire(client linodeAPI, linodeID int64) error {

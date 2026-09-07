@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -81,7 +82,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if b.cfg.UnikraftCloud.MemoryMB < 0 {
 		return exit(2, "provider=%s memory must be zero or greater", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	api, err := b.client()
 	if err != nil {
 		return err
@@ -196,7 +197,7 @@ func (b *backend) finishWarmup(started time.Time, claim LeaseClaim, instance ukc
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: %s warmup keeps the instance until explicit stop or eligible cleanup\n", providerName)
 	}
-	total := b.now().Sub(started)
+	total := core.ClockNow(b.rt.Clock).Sub(started)
 	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
 		Provider: providerName,
 		LeaseID:  claim.LeaseID,
@@ -606,11 +607,4 @@ func rejectUnikraftCloudRunOptions(req RunRequest) error {
 		return exit(2, "provider=%s cannot forward per-run environment variables", providerName)
 	}
 	return nil
-}
-
-func (b *backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }

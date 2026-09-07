@@ -86,10 +86,3 @@ func upstashBoxCleanupCommand(leaseID string) string {
 func inventoryDoctorResult(provider string, leases int) DoctorResult {
 	return core.InventoryDoctorResult(provider, leases)
 }
-
-func now(rt Runtime) time.Time {
-	if rt.Clock != nil {
-		return rt.Clock.Now()
-	}
-	return time.Now()
-}

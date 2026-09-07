@@ -97,7 +97,7 @@ func (b *cubesandboxBackend) Warmup(ctx context.Context, req WarmupRequest) erro
 	if err := validateCubeSandboxUser(b.cfg.CubeSandbox.User); err != nil {
 		return err
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := newCubeSandboxClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -110,7 +110,7 @@ func (b *cubesandboxBackend) Warmup(ctx context.Context, req WarmupRequest) erro
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: cubesandbox warmup keeps the sandbox until explicit stop\n")
 	}
-	total := b.now().Sub(started)
+	total := core.ClockNow(b.rt.Clock).Sub(started)
 	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
 		Provider: providerName,
 		LeaseID:  leaseID,
@@ -145,7 +145,7 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
 			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-cubesandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+				TempPattern: "crabbox-cubesandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 			})
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
@@ -260,9 +260,9 @@ func (b *cubesandboxBackend) Status(ctx context.Context, req StatusRequest) (sta
 	if err != nil {
 		return statusView{}, err
 	}
-	deadline := b.now().Add(req.WaitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
+		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
 	}
 	for {
 		sandbox, err := client.GetSandbox(ctx, sandboxID)
@@ -273,7 +273,7 @@ func (b *cubesandboxBackend) Status(ctx context.Context, req StatusRequest) (sta
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return statusView{}, exit(5, "timed out waiting for sandbox %s to become ready", sandboxID)
 		}
 		select {
@@ -402,7 +402,7 @@ func (b *cubesandboxBackend) createSandbox(ctx context.Context, client cubesandb
 	}
 	cfg.TTL = cubesandboxTimeoutDuration(cfg.TTL)
 	cfg.ServerType = template
-	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, b.now().UTC())
+	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, core.ClockNow(b.rt.Clock).UTC())
 	labels["state"] = "ready"
 	labels["workdir"] = workspace
 	labels["template"] = template
@@ -796,11 +796,4 @@ func cubesandboxError(action string, err error) error {
 		return nil
 	}
 	return fmt.Errorf("cubesandbox %s: %w", action, err)
-}
-
-func (b *cubesandboxBackend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }

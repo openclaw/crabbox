@@ -88,7 +88,7 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	}
 	cfg.SSHKey = keyPath
 	cfg.ProviderKey = providerKeyForLease(leaseID)
-	now := b.now()
+	now := core.ClockNow(b.RT.Clock).UTC()
 	committed := false
 	created := vultrInstance{}
 	defer func() {
@@ -275,7 +275,7 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 		delete(labels, "idle_timeout")
 		delete(labels, "idle_timeout_secs")
 	}
-	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, b.now())
+	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, core.ClockNow(b.RT.Clock).UTC())
 	preserveVultrIdentity(labels, server.Labels)
 	if err := client.UpdateInstanceTags(ctx, item.ID, tagsFromLabels(labels)); err != nil {
 		return core.Server{}, err
@@ -907,13 +907,6 @@ func applyVultrDefaults(cfg *core.Config) {
 	if cfg.ServerType == "" {
 		cfg.ServerType = vultrServerTypeForClass(cfg.Class)
 	}
-}
-
-func (b *backend) now() time.Time {
-	if b.RT.Clock != nil {
-		return b.RT.Clock.Now().UTC()
-	}
-	return time.Now().UTC()
 }
 
 func isVultrInstanceID(value string) bool {

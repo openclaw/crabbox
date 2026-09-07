@@ -30,7 +30,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if req.ActionsRunner {
 		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := newAPI(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -43,7 +43,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: upstash-box warmup keeps the box until explicit stop\n")
 	}
-	total := b.now().Sub(started)
+	total := core.ClockNow(b.rt.Clock).Sub(started)
 	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
 		Provider: providerName,
 		LeaseID:  leaseID,
@@ -177,7 +177,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		Network:     networkPublic,
 		Wait:        req.Wait,
 		WaitTimeout: req.WaitTimeout,
-		Now:         b.now,
+		Now:         func() time.Time { return core.ClockNow(b.rt.Clock) },
 		Resolve: func(id string) (string, string, string, error) {
 			return b.resolveBoxID(ctx, client, id, "", false)
 		},
@@ -344,10 +344,6 @@ func resolveBoxBySlug(ctx context.Context, client api, slug string) (boxData, er
 		}
 	}
 	return boxData{}, exit(4, "upstash-box %q was not found", slug)
-}
-
-func (b *backend) now() time.Time {
-	return now(b.rt)
 }
 
 func boxToServer(cfg Config, box boxData) Server {

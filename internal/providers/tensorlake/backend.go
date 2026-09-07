@@ -27,7 +27,7 @@ type tensorlakeBackend struct {
 func (b *tensorlakeBackend) Spec() ProviderSpec { return b.spec }
 
 func (b *tensorlakeBackend) Warmup(ctx context.Context, req WarmupRequest) error {
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	cli, err := newTensorlakeCLI(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -41,7 +41,7 @@ func (b *tensorlakeBackend) Warmup(ctx context.Context, req WarmupRequest) error
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: tensorlake warmup keeps the sandbox until explicit stop\n")
 	}
-	total := b.now().Sub(started)
+	total := core.ClockNow(b.rt.Clock).Sub(started)
 	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
 		Provider: providerName,
 		LeaseID:  leaseID,
@@ -225,9 +225,9 @@ func (b *tensorlakeBackend) Status(ctx context.Context, req StatusRequest) (Stat
 	if err != nil {
 		return StatusView{}, err
 	}
-	deadline := b.now().Add(req.WaitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
+		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
 	}
 	var lastDescribeErr error
 	for {
@@ -265,7 +265,7 @@ func (b *tensorlakeBackend) Status(ctx context.Context, req StatusRequest) (Stat
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			err := exit(5, "timed out waiting for tensorlake sandbox %s to become ready", sandboxID)
 			if lastDescribeErr != nil {
 				return StatusView{}, errors.Join(err, fmt.Errorf("last tensorlake describe failed: %w", lastDescribeErr))
@@ -442,11 +442,4 @@ func tensorlakeWorkdir(cfg Config) (string, error) {
 		return "", exit(2, "tensorlake workdir %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return clean, nil
-}
-
-func (b *tensorlakeBackend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }
