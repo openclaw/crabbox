@@ -602,6 +602,9 @@ func TestBenchmarkReportAggregatesRunnerAndSyncPhasesPerSuccessfulObservation(t 
 	if group.Source != "bench-run" || group.N != 3 || group.FailureCount != 1 {
 		t.Fatalf("source/counts=%q/%d/%d", group.Source, group.N, group.FailureCount)
 	}
+	if group.RunnerTotalN != 3 {
+		t.Fatalf("runner total n=%d want 3", group.RunnerTotalN)
+	}
 	if group.MedianRunnerTotalMs == nil || *group.MedianRunnerTotalMs != 1100 {
 		t.Fatalf("median runner total=%v", group.MedianRunnerTotalMs)
 	}
@@ -658,7 +661,7 @@ func TestBenchmarkReportGroupsBySourceAndKeepsLegacyTelemetryAbsent(t *testing.T
 		t.Fatalf("sources=%q/%q", report.Groups[0].Source, report.Groups[1].Source)
 	}
 	legacy := report.Groups[1]
-	if legacy.N != 2 || legacy.MedianRunnerTotalMs != nil || legacy.P95RunnerTotalMs != nil || len(legacy.RunnerPhases) != 0 || len(legacy.SyncPhases) != 0 {
+	if legacy.N != 2 || legacy.RunnerTotalN != 0 || legacy.MedianRunnerTotalMs != nil || legacy.P95RunnerTotalMs != nil || len(legacy.RunnerPhases) != 0 || len(legacy.SyncPhases) != 0 {
 		t.Fatalf("legacy group=%#v", legacy)
 	}
 	body, err := json.Marshal(legacy)
@@ -714,6 +717,7 @@ func TestPrintBenchmarkReportIncludesStructuredRunnerAndSyncSummaries(t *testing
 			Source:              "bench-run",
 			Provider:            "aws",
 			N:                   3,
+			RunnerTotalN:        3,
 			MedianRunnerTotalMs: &median,
 			P95RunnerTotalMs:    &p95,
 			RunnerPhases: []benchmarkRunnerPhaseSummary{{
@@ -731,7 +735,7 @@ func TestPrintBenchmarkReportIncludesStructuredRunnerAndSyncSummaries(t *testing
 	text := out.String()
 	for _, want := range []string{
 		"aws source=bench-run",
-		"median_runner_total=100ms p95_runner_total=150ms",
+		"runner_total_n=3 median_runner_total=100ms p95_runner_total=150ms",
 		"sync_skipped=2 failures=0",
 		"runner_phase name=provider.wait opaque=true n=3 median=100ms p95=150ms",
 		"sync_phase name=archive n=3 median=100ms p95=150ms skipped=1",
@@ -804,4 +808,347 @@ func TestBenchReportJSONFiltersStoreRows(t *testing.T) {
 	if report.Groups[0].InsufficientEvidence != true {
 		t.Fatalf("single sample should be insufficient by default: %#v", report.Groups[0])
 	}
+	if report.Groups[0].RunnerTotalN != 0 {
+		t.Fatalf("legacy report runner total n=%d want 0", report.Groups[0].RunnerTotalN)
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte(`"runnerTotalN":0`)) {
+		t.Fatalf("report JSON omitted runnerTotalN: %s", stdout.String())
+	}
+}
+
+func TestBenchCheckThresholdBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		runnerMs   int64
+		wantCode   int
+		wantPassed bool
+		wantReason string
+	}{
+		{name: "equality passes", runnerMs: 1000, wantPassed: true},
+		{name: "one millisecond over fails", runnerMs: 1001, wantCode: 1, wantReason: "p95_runner_total_exceeded"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			storePath := filepath.Join(t.TempDir(), "timings.jsonl")
+			now := time.Now().UTC()
+			for i := range 3 {
+				appendBenchmarkCheckTestRecord(t, storePath, newBenchmarkTimingRecord(
+					now.Add(time.Duration(i)*time.Millisecond),
+					"bench-run",
+					TimingReport{Provider: "aws", MachineType: "c7a.large", RunnerTotalMs: test.runnerMs, TotalMs: test.runnerMs, ExitCode: 0},
+					Repo{},
+					[]string{"go", "test", "./..."},
+					nil,
+					i+1,
+				))
+			}
+
+			result, raw, err := runBenchmarkCheckJSON(t, storePath, "--max-p95-runner-total", "1s")
+			assertBenchmarkCheckExitCode(t, err, test.wantCode)
+			if result.Passed != test.wantPassed || len(result.Groups) != 1 {
+				t.Fatalf("result=%#v\n%s", result, raw)
+			}
+			if result.Groups[0].RunnerTotalN != 3 || result.Groups[0].P95RunnerTotalMs == nil || *result.Groups[0].P95RunnerTotalMs != test.runnerMs {
+				t.Fatalf("group=%#v", result.Groups[0])
+			}
+			if test.wantReason != "" && !containsBenchmarkCheckReason(result.Groups[0].Reasons, test.wantReason) {
+				t.Fatalf("reasons=%v want %q", result.Groups[0].Reasons, test.wantReason)
+			}
+		})
+	}
+}
+
+func TestBenchCheckRequiresRunnerEvidenceAndHonorsFailurePolicy(t *testing.T) {
+	t.Run("legacy mix", func(t *testing.T) {
+		storePath := filepath.Join(t.TempDir(), "timings.jsonl")
+		now := time.Now().UTC()
+		for i, runnerMs := range []int64{900, 1000, 0} {
+			appendBenchmarkCheckTestRecord(t, storePath, newBenchmarkTimingRecord(
+				now.Add(time.Duration(i)*time.Millisecond),
+				"bench-run",
+				TimingReport{Provider: "aws", RunnerTotalMs: runnerMs, TotalMs: 1000, ExitCode: 0},
+				Repo{},
+				[]string{"true"},
+				nil,
+				i+1,
+			))
+		}
+
+		result, _, err := runBenchmarkCheckJSON(t, storePath, "--min-samples", "2", "--max-p95-runner-total", "2s")
+		assertBenchmarkCheckExitCode(t, err, 1)
+		group := result.Groups[0]
+		if group.RunnerTotalN != 2 ||
+			!containsBenchmarkCheckReason(group.Reasons, "insufficient_runner_total_samples") ||
+			!containsBenchmarkCheckReason(group.Reasons, "missing_p95_runner_total") {
+			t.Fatalf("group=%#v", group)
+		}
+	})
+
+	t.Run("failure allowance", func(t *testing.T) {
+		storePath := filepath.Join(t.TempDir(), "timings.jsonl")
+		now := time.Now().UTC()
+		for i := range 3 {
+			appendBenchmarkCheckTestRecord(t, storePath, newBenchmarkTimingRecord(
+				now.Add(time.Duration(i)*time.Millisecond),
+				"bench-run",
+				TimingReport{Provider: "aws", RunnerTotalMs: 1000, TotalMs: 1000, ExitCode: 0},
+				Repo{},
+				[]string{"true"},
+				nil,
+				i+1,
+			))
+		}
+		appendBenchmarkCheckTestRecord(t, storePath, newBenchmarkTimingRecord(
+			now.Add(time.Second),
+			"bench-run",
+			TimingReport{Provider: "aws", RunnerTotalMs: 900, TotalMs: 900, ExitCode: 1},
+			Repo{},
+			[]string{"true"},
+			nil,
+			4,
+		))
+
+		result, _, err := runBenchmarkCheckJSON(t, storePath, "--max-p95-runner-total", "2s")
+		assertBenchmarkCheckExitCode(t, err, 1)
+		if !containsBenchmarkCheckReason(result.Groups[0].Reasons, "max_failures_exceeded") {
+			t.Fatalf("group=%#v", result.Groups[0])
+		}
+
+		result, _, err = runBenchmarkCheckJSON(t, storePath, "--max-failures", "1", "--max-p95-runner-total", "2s")
+		assertBenchmarkCheckExitCode(t, err, 0)
+		if !result.Passed {
+			t.Fatalf("result=%#v", result)
+		}
+	})
+}
+
+func TestBenchCheckNoMatchesAndMultiGroupAllSemantics(t *testing.T) {
+	t.Run("no matches", func(t *testing.T) {
+		storePath := filepath.Join(t.TempDir(), "timings.jsonl")
+		appendBenchmarkCheckTestRecord(t, storePath, newBenchmarkTimingRecord(
+			time.Now().UTC(),
+			"bench-run",
+			TimingReport{Provider: "aws", RunnerTotalMs: 1000, TotalMs: 1000},
+			Repo{},
+			[]string{"true"},
+			nil,
+			1,
+		))
+		result, raw, err := runBenchmarkCheckJSON(t, storePath, "--provider", "gcp", "--max-p95-runner-total", "2s")
+		assertBenchmarkCheckExitCode(t, err, 1)
+		if result.Passed || result.MatchedCount != 0 || len(result.Groups) != 0 ||
+			!containsBenchmarkCheckReason(result.Reasons, "no_matching_observations") {
+			t.Fatalf("result=%#v\n%s", result, raw)
+		}
+	})
+
+	t.Run("every group is evaluated", func(t *testing.T) {
+		storePath := filepath.Join(t.TempDir(), "timings.jsonl")
+		now := time.Now().UTC()
+		for _, provider := range []string{"aws", "gcp"} {
+			runnerMs := int64(1000)
+			if provider == "gcp" {
+				runnerMs = 1001
+			}
+			for i := range 3 {
+				appendBenchmarkCheckTestRecord(t, storePath, newBenchmarkTimingRecord(
+					now.Add(time.Duration(i)*time.Millisecond),
+					"bench-run",
+					TimingReport{Provider: provider, RunnerTotalMs: runnerMs, TotalMs: runnerMs},
+					Repo{},
+					[]string{"true"},
+					nil,
+					i+1,
+				))
+			}
+		}
+		result, _, err := runBenchmarkCheckJSON(t, storePath, "--providers", "gcp,aws", "--max-p95-runner-total", "1s")
+		assertBenchmarkCheckExitCode(t, err, 1)
+		if result.Passed || result.GroupCount != 2 || len(result.Groups) != 2 {
+			t.Fatalf("result=%#v", result)
+		}
+		if result.Groups[0].Provider != "aws" || !result.Groups[0].Passed ||
+			result.Groups[1].Provider != "gcp" || result.Groups[1].Passed {
+			t.Fatalf("groups=%#v", result.Groups)
+		}
+	})
+}
+
+func TestBenchCheckReusesReportFilters(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "timings.jsonl")
+	now := time.Now().UTC()
+	selectedCommand := []string{"go", "test", "./..."}
+	selectedFingerprint := benchmarkCommandFingerprint(selectedCommand)
+	for _, record := range []BenchmarkTimingRecord{
+		newBenchmarkTimingRecord(now.Add(-time.Minute), "bench-run", TimingReport{Provider: "aws", RunnerTotalMs: 1000, TotalMs: 1000}, Repo{}, selectedCommand, nil, 1),
+		newBenchmarkTimingRecord(now.Add(-2*time.Hour), "bench-run", TimingReport{Provider: "aws", RunnerTotalMs: 1000, TotalMs: 1000}, Repo{}, selectedCommand, nil, 2),
+		newBenchmarkTimingRecord(now.Add(-time.Minute), "bench-run", TimingReport{Provider: "aws", RunnerTotalMs: 1000, TotalMs: 1000}, Repo{}, []string{"false"}, nil, 3),
+		newBenchmarkTimingRecord(now.Add(-time.Minute), "bench-run", TimingReport{Provider: "gcp", RunnerTotalMs: 1000, TotalMs: 1000}, Repo{}, selectedCommand, nil, 4),
+	} {
+		appendBenchmarkCheckTestRecord(t, storePath, record)
+	}
+
+	result, _, err := runBenchmarkCheckJSON(t, storePath,
+		"--provider", "aws",
+		"--since", "1h",
+		"--command-fingerprint", selectedFingerprint,
+		"--min-samples", "1",
+		"--max-p95-runner-total", "2s",
+	)
+	assertBenchmarkCheckExitCode(t, err, 1)
+	if result.MatchedCount != 1 || result.GroupCount != 1 || result.Groups[0].SuccessfulSamples != 1 {
+		t.Fatalf("result=%#v", result)
+	}
+	if !result.Filters.CommandFingerprintSet || result.Filters.Since != "1h" ||
+		len(result.Filters.Providers) != 1 || result.Filters.Providers[0] != "aws" {
+		t.Fatalf("filters=%#v", result.Filters)
+	}
+	if !containsBenchmarkCheckReason(result.Groups[0].Reasons, "insufficient_runner_total_samples") {
+		t.Fatalf("group=%#v", result.Groups[0])
+	}
+}
+
+func TestBenchCheckInvalidPolicyExitsTwo(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "timings.jsonl")
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "missing duration"},
+		{name: "invalid duration", args: []string{"--max-p95-runner-total", "fast"}},
+		{name: "zero duration", args: []string{"--max-p95-runner-total", "0s"}},
+		{name: "negative duration", args: []string{"--max-p95-runner-total", "-1s"}},
+		{name: "invalid samples", args: []string{"--min-samples", "0", "--max-p95-runner-total", "1s"}},
+		{name: "invalid failures", args: []string{"--max-failures", "-1", "--max-p95-runner-total", "1s"}},
+		{name: "disabled store", args: []string{"--store", "off", "--max-p95-runner-total", "1s"}},
+		{name: "positional argument", args: []string{"--max-p95-runner-total", "1s", "extra"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			args := append([]string{"--store", storePath, "--json"}, test.args...)
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).benchCheck(context.Background(), args)
+			assertBenchmarkCheckExitCode(t, err, 2)
+			if stdout.Len() != 0 {
+				t.Fatalf("invalid input emitted JSON: %s", stdout.String())
+			}
+		})
+	}
+}
+
+func TestBenchCheckJSONIsDeterministicAndSanitizedBeforeExitOne(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "private-store-name.jsonl")
+	now := time.Now().UTC()
+	command := []string{"secret-command", "--token", "not-a-real-token"}
+	for i := range 2 {
+		record := newBenchmarkTimingRecord(
+			now.Add(time.Duration(i)*time.Millisecond),
+			"bench-run",
+			TimingReport{
+				Provider:      "aws",
+				LeaseID:       "lease-sensitive",
+				RunID:         "run-sensitive",
+				MachineType:   "c7a.large",
+				RunnerTotalMs: 1000,
+				TotalMs:       1000,
+			},
+			Repo{Name: "private-repo", Head: "private-head"},
+			command,
+			nil,
+			i+1,
+		)
+		appendBenchmarkCheckTestRecord(t, storePath, record)
+	}
+
+	first, firstRaw, firstErr := runBenchmarkCheckJSON(t, storePath, "--max-p95-runner-total", "2s")
+	_, secondRaw, secondErr := runBenchmarkCheckJSON(t, storePath, "--max-p95-runner-total", "2s")
+	assertBenchmarkCheckExitCode(t, firstErr, 1)
+	assertBenchmarkCheckExitCode(t, secondErr, 1)
+	if !bytes.Equal(firstRaw, secondRaw) {
+		t.Fatalf("check JSON is not deterministic:\nfirst=%s\nsecond=%s", firstRaw, secondRaw)
+	}
+	if first.SchemaVersion != 1 || first.Passed || len(first.Groups) != 1 {
+		t.Fatalf("result=%#v", first)
+	}
+	for _, secret := range []string{
+		storePath,
+		"private-store-name",
+		"secret-command",
+		"not-a-real-token",
+		"lease-sensitive",
+		"run-sensitive",
+		"private-repo",
+		"private-head",
+		benchmarkCommandFingerprint(command),
+	} {
+		if bytes.Contains(firstRaw, []byte(secret)) {
+			t.Fatalf("check JSON leaked %q: %s", secret, firstRaw)
+		}
+	}
+}
+
+func TestBenchCheckKongHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), []string{"bench", "--help"})
+	if err != nil {
+		t.Fatalf("bench help error=%v stderr=%q", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "check") || !strings.Contains(stdout.String(), "Enforce a local runner timing policy") {
+		t.Fatalf("bench help omitted check command:\n%s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	err = (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), []string{"bench", "check", "--help"})
+	if err != nil {
+		var exitErr ExitError
+		if !AsExitError(err, &exitErr) || exitErr.Code != 0 {
+			t.Fatalf("bench check help error=%v stderr=%q", err, stderr.String())
+		}
+	}
+	for _, flag := range []string{"-max-p95-runner-total", "-max-failures", "-min-samples", "-command-fingerprint"} {
+		if !strings.Contains(stderr.String(), flag) {
+			t.Fatalf("bench check help omitted %q:\n%s", flag, stderr.String())
+		}
+	}
+}
+
+func appendBenchmarkCheckTestRecord(t *testing.T, storePath string, record BenchmarkTimingRecord) {
+	t.Helper()
+	if err := appendBenchmarkTimingRecord(storePath, record); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runBenchmarkCheckJSON(t *testing.T, storePath string, args ...string) (benchmarkCheckResult, []byte, error) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	fullArgs := append([]string{"--store", storePath, "--json"}, args...)
+	err := (App{Stdout: &stdout, Stderr: &stderr}).benchCheck(context.Background(), fullArgs)
+	var result benchmarkCheckResult
+	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
+		t.Fatalf("decode check JSON: %v\nstdout=%s\nstderr=%s", decodeErr, stdout.String(), stderr.String())
+	}
+	return result, append([]byte(nil), stdout.Bytes()...), err
+}
+
+func assertBenchmarkCheckExitCode(t *testing.T, err error, want int) {
+	t.Helper()
+	if want == 0 {
+		if err != nil {
+			t.Fatalf("error=%v want nil", err)
+		}
+		return
+	}
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != want {
+		t.Fatalf("error=%v want exit %d", err, want)
+	}
+}
+
+func containsBenchmarkCheckReason(reasons []string, want string) bool {
+	for _, reason := range reasons {
+		if reason == want {
+			return true
+		}
+	}
+	return false
 }

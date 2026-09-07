@@ -21016,19 +21016,17 @@ describe("fleet lease identity and idle", () => {
   });
 
   it("exposes admin Tailscale preflight without leaking minted keys", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url === "https://api.tailscale.com/api/v2/oauth/token") {
-          return jsonResponse({ access_token: "oauth-token" });
-        }
-        if (url === "https://api.tailscale.com/api/v2/tailnet/-/keys") {
-          return jsonResponse({ key: "tskey-preflight-secret" });
-        }
-        return jsonResponse({ message: `unexpected ${url}` }, 500);
-      }),
-    );
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url === "https://api.tailscale.com/api/v2/oauth/token") {
+        return jsonResponse({ access_token: "oauth-token" });
+      }
+      if (url === "https://api.tailscale.com/api/v2/tailnet/-/keys") {
+        return jsonResponse({ key: "tskey-preflight-secret" });
+      }
+      return jsonResponse({ message: `unexpected ${url}` }, 500);
+    });
+    vi.stubGlobal("fetch", fetchMock);
     const fleet = testFleet(
       new MemoryStorage(),
       {},
@@ -21038,6 +21036,10 @@ describe("fleet lease identity and idle", () => {
         CRABBOX_TAILSCALE_TAGS: "tag:ci",
       },
     );
+
+    const forbidden = await fleet.fetch(request("POST", "/v1/admin/tailscale-preflight"));
+    expect(forbidden.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
 
     const response = await fleet.fetch(
       request("POST", "/v1/admin/tailscale-preflight", {
@@ -21050,6 +21052,67 @@ describe("fleet lease identity and idle", () => {
     expect(text).toContain('"status":"ok"');
     expect(text).not.toContain("tskey-preflight-secret");
   });
+
+  it.each([
+    { operation: "oauth token", failure: "response", status: "oauth_token_failed" },
+    { operation: "create auth key", failure: "response", status: "auth_key_mint_failed" },
+    { operation: "oauth token", failure: "fetch", status: "auth_key_mint_failed" },
+    { operation: "create auth key", failure: "fetch", status: "auth_key_mint_failed" },
+  ])(
+    "redacts admin Tailscale preflight $operation $failure diagnostics",
+    async ({ operation, failure, status }) => {
+      const clientSecret = "synthetic-client-credential";
+      const token = "synthetic-runtime-credential";
+      const diagnostic =
+        `provider unavailable ${operation === "create auth key" ? `${clientSecret} ${token}` : clientSecret}` +
+        "\n    at providerDiagnostic (provider.js:42:7)";
+      const fetchMock = vi.fn<typeof fetch>();
+      if (operation === "create auth key") {
+        fetchMock.mockResolvedValueOnce(jsonResponse({ access_token: token }));
+      }
+      if (failure === "fetch") {
+        fetchMock.mockRejectedValueOnce(new Error(diagnostic));
+      } else {
+        fetchMock.mockResolvedValueOnce(new Response(diagnostic, { status: 503 }));
+      }
+      vi.stubGlobal("fetch", fetchMock);
+      const fleet = testFleet(
+        new MemoryStorage(),
+        {},
+        {
+          CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
+          CRABBOX_TAILSCALE_CLIENT_SECRET: clientSecret,
+          CRABBOX_TAILSCALE_TAGS: "tag:ci",
+        },
+      );
+
+      const response = await fleet.fetch(
+        request("POST", "/v1/admin/tailscale-preflight", {
+          headers: { "x-crabbox-admin": "true" },
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(text).not.toContain(clientSecret);
+      expect(text).not.toContain(token);
+      expect(text).not.toContain("providerDiagnostic");
+      expect(text).not.toContain("provider.js");
+      const safeDiagnostic =
+        operation === "create auth key" ? "[redacted] [redacted]" : "[redacted]";
+      const message =
+        failure === "fetch"
+          ? `tailscale ${operation} failed: provider unavailable ${safeDiagnostic}`
+          : `tailscale ${operation} failed: http 503`;
+      expect(JSON.parse(text)).toMatchObject({
+        tailscale: {
+          status,
+          message,
+        },
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(operation === "oauth token" ? 1 : 2);
+    },
+  );
 
   it("restricts Daytona snapshot bootstrap to confirmed, bounded admin requests", async () => {
     let activeProviderRequests = 0;
@@ -24469,45 +24532,60 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
   });
 
-  it("translates brokered Tailscale tag ownership denials", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn()
-        .mockResolvedValue(
-          jsonResponse({ message: "requested tags [tag:ci] are invalid or not permitted" }, 400),
+  it.each(["oauth token", "create auth key"])(
+    "translates brokered Tailscale %s tag ownership denials without raw diagnostics",
+    async (operation) => {
+      const fetchMock = vi.fn<typeof fetch>();
+      if (operation === "create auth key") {
+        fetchMock.mockResolvedValueOnce(jsonResponse({ access_token: "oauth-token" }));
+      }
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(
+          {
+            message:
+              "requested tags [tag:ci] are invalid or not permitted; client-secret oauth-token\n    at providerDiagnostic (provider.js:42:7)",
+          },
+          400,
         ),
-    );
-    const storage = new MemoryStorage();
-    const fleet = testFleet(
-      storage,
-      { hetzner: fakeProvider() },
-      {
-        CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
-        CRABBOX_TAILSCALE_CLIENT_SECRET: "client-secret",
-        CRABBOX_TAILSCALE_TAGS: "tag:crabbox,tag:ci",
-      },
-    );
-    const create = await fleet.fetch(
-      request("POST", "/v1/leases", {
-        body: {
-          leaseID: "cbx_abcdef123456",
-          provider: "hetzner",
-          tailscale: true,
-          tailscaleTags: ["tag:ci"],
-          sshPublicKey: "ssh-ed25519 test",
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const storage = new MemoryStorage();
+      const fleet = testFleet(
+        storage,
+        { hetzner: fakeProvider() },
+        {
+          CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
+          CRABBOX_TAILSCALE_CLIENT_SECRET: "client-secret",
+          CRABBOX_TAILSCALE_TAGS: "tag:crabbox,tag:ci",
         },
-      }),
-    );
-    expect(create.status).toBe(400);
-    const body = (await create.json()) as { error: string; message: string };
-    expect(body).toMatchObject({
-      error: "invalid_tailscale_tags",
-      message: expect.stringContaining("must exactly match the OAuth client's tags"),
-    });
-    expect(body.message).toContain("requested tags [tag:ci] are invalid or not permitted");
-    expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
-  });
+      );
+      const create = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          body: {
+            leaseID: "cbx_abcdef123456",
+            provider: "hetzner",
+            tailscale: true,
+            tailscaleTags: ["tag:ci"],
+            sshPublicKey: "ssh-ed25519 test",
+          },
+        }),
+      );
+      expect(create.status).toBe(400);
+      const text = await create.text();
+      expect(text).not.toContain("client-secret");
+      expect(text).not.toContain("oauth-token");
+      expect(text).not.toContain("providerDiagnostic");
+      expect(text).not.toContain("provider.js");
+      const body = JSON.parse(text) as { error: string; message: string };
+      expect(body).toMatchObject({
+        error: "invalid_tailscale_tags",
+        message: expect.stringContaining("must exactly match the OAuth client's tags"),
+      });
+      expect(body.message).toContain("dedicated deployment-owner tag");
+      expect(body.message).toContain(`tailscale ${operation} failed: http 400`);
+      expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
+    },
+  );
 
   it("reports brokered Tailscale disabled when OAuth secrets are absent", async () => {
     const storage = new MemoryStorage();

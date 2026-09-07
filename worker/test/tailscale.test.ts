@@ -35,10 +35,12 @@ describe("tailscale tag ownership errors", () => {
   it.each([
     {
       name: "OAuth token",
+      operation: "oauth token",
       responses: [
         new Response(
           JSON.stringify({
-            message: "requested tags [tag:ci] are invalid or not permitted",
+            message:
+              "requested tags [tag:ci] are invalid or not permitted; client-secret\n    at providerDiagnostic (provider.js:42:7)",
           }),
           { status: 400 },
         ),
@@ -46,17 +48,16 @@ describe("tailscale tag ownership errors", () => {
     },
     {
       name: "auth key",
+      operation: "create auth key",
       responses: [
         new Response(JSON.stringify({ access_token: "oauth-token" })),
         new Response(
-          JSON.stringify({
-            message: "requested tags [tag:ci] are invalid or not permitted",
-          }),
+          "requested tags [tag:ci] are invalid or not permitted; client-secret oauth-token\n    at providerDiagnostic (provider.js:42:7)",
           { status: 400 },
         ),
       ],
     },
-  ])("adds actionable guidance for $name tag denials", async ({ responses }) => {
+  ])("adds safe actionable guidance for $name tag denials", async ({ operation, responses }) => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => responses.shift()!),
@@ -82,8 +83,16 @@ describe("tailscale tag ownership errors", () => {
     const message = tailscaleTagOwnershipErrorMessage(caught);
     expect(message).toContain("must exactly match the OAuth client's tags");
     expect(message).toContain("dedicated deployment-owner tag");
-    expect(message).toContain("Raw Tailscale error: tailscale");
-    expect(message).toContain("requested tags [tag:ci] are invalid or not permitted");
+    expect(message).toContain(`tailscale ${operation} failed: http 400`);
+    expect(message).not.toContain("client-secret");
+    expect(message).not.toContain("oauth-token");
+    expect(message).not.toContain("providerDiagnostic");
+    expect(message).not.toContain("provider.js");
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe(`tailscale ${operation} failed: http 400`);
+    expect(JSON.stringify(caught)).not.toContain("client-secret");
+    expect(JSON.stringify(caught)).not.toContain("oauth-token");
+    expect(JSON.stringify(caught)).not.toContain("providerDiagnostic");
   });
 
   it("does not classify unrelated OAuth failures as tag ownership errors", async () => {
@@ -115,7 +124,7 @@ describe("tailscale tag ownership errors", () => {
 
     expect(tailscaleTagOwnershipErrorMessage(caught)).toBeUndefined();
     expect(caught).toBeInstanceOf(Error);
-    expect((caught as Error).message).toContain('http 401: {"message":"API token invalid"}');
+    expect((caught as Error).message).toBe("tailscale oauth token failed: http 401");
   });
 });
 
@@ -137,6 +146,63 @@ describe("tailscale preflight", () => {
 
     expect(result.status).toBe("missing_oauth_credentials");
     expect(result.enabled).toBe(true);
+  });
+
+  describe.each([
+    { operation: "oauth token", failureStatus: "oauth_token_failed", calls: 1 },
+    { operation: "create auth key", failureStatus: "auth_key_mint_failed", calls: 2 },
+  ])("$operation failures", ({ operation, failureStatus, calls }) => {
+    it.each(["text response", "JSON response", "fetch rejection"])(
+      "keeps diagnostics and credentials out of a %s",
+      async (failure) => {
+        const clientSecret = "synthetic-client-credential";
+        const token = "synthetic-runtime-credential";
+        const diagnostic =
+          `provider unavailable ${operation === "create auth key" ? `${clientSecret} ${token}` : clientSecret}` +
+          "\n    at providerDiagnostic (provider.js:42:7)";
+        const fetch = vi.fn<typeof globalThis.fetch>();
+        if (operation === "create auth key") {
+          fetch.mockResolvedValueOnce(new Response(JSON.stringify({ access_token: token })));
+        }
+        if (failure === "fetch rejection") {
+          fetch.mockRejectedValueOnce(new Error(diagnostic));
+        } else {
+          fetch.mockResolvedValueOnce(
+            new Response(
+              failure === "JSON response" ? JSON.stringify({ message: diagnostic }) : diagnostic,
+              { status: 503 },
+            ),
+          );
+        }
+        vi.stubGlobal("fetch", fetch);
+
+        const result = await tailscalePreflight({
+          CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
+          CRABBOX_TAILSCALE_CLIENT_SECRET: clientSecret,
+          CRABBOX_TAILSCALE_TAGS: "tag:ci",
+        });
+
+        // Fetch rejections retain the existing generic key-mint failure category.
+        expect(result.status).toBe(
+          failure === "fetch rejection" ? "auth_key_mint_failed" : failureStatus,
+        );
+        expect(result).toMatchObject({ enabled: true, tailnet: "-", tags: ["tag:ci"] });
+        expect(result.install.mode).toBe("package");
+        const safeDiagnostic =
+          operation === "create auth key" ? "[redacted] [redacted]" : "[redacted]";
+        const expectedMessage =
+          failure === "fetch rejection"
+            ? `tailscale ${operation} failed: provider unavailable ${safeDiagnostic}`
+            : `tailscale ${operation} failed: http 503`;
+        expect(result.message).toBe(expectedMessage);
+        const text = JSON.stringify(result);
+        expect(text).not.toContain(clientSecret);
+        expect(text).not.toContain(token);
+        expect(text).not.toContain("providerDiagnostic");
+        expect(text).not.toContain("provider.js");
+        expect(fetch).toHaveBeenCalledTimes(calls);
+      },
+    );
   });
 
   it("mints and redacts the one-off smoke key", async () => {
