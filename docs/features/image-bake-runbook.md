@@ -432,6 +432,14 @@ installer's pnpm default of 11.1.0. Existing `CRABBOX_LINUX_PNPM_VERSION` and
 the existing ARM installer route retain the fingerprint-checked NodeSource
 path; this recipe does not add an ARM image.
 
+When rebaking with a different Node major, the installer waits for APT success
+before removing its six exact Node 24.19.0 toolcache symlinks, including dangling
+ones. It leaves operator files, nonmatching symlinks, and cached archives and
+trees intact, clears the shell command cache, and checks the selected Node major
+before preparing Corepack. A conflicting operator-provided Node stops the
+rebake with a PATH diagnostic rather than being deleted. The alternate toolchain
+must provide npm and Corepack; this does not add packaging for newer Node majors.
+
 The mint wrapper applies this archive contract only when its selected prep
 script is the bundled Linux builder. It forwards the existing
 `CRABBOX_LINUX_NODE_MAJOR` and `CRABBOX_LINUX_PNPM_VERSION` overrides to that

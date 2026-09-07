@@ -371,7 +371,29 @@ install_node_pnpm() {
     export PATH="$node_link_dir:$PATH"
   else
     # Preserve the existing Node-major override and non-x86_64 installer route.
-    apt_install nodejs
+    apt_install nodejs || return $?
+    if [[ "$node_major" != "24" ]]; then
+      local tool link_target actual_node_version
+      # Only retire this installer's exact links after the replacement is installed.
+      for tool in node npm npx corepack pnpm pnpx; do
+        if [[ -L "$node_link_dir/$tool" ]]; then
+          # The sentinel preserves trailing newlines in operator-provided targets.
+          link_target="$(readlink -n "$node_link_dir/$tool" && printf '.')" || return 1
+          if [[ "$link_target" == "$node_toolcache_root/node/24.19.0/x64/bin/$tool." ]]; then
+            rm -- "$node_link_dir/$tool" || return 1
+          fi
+        fi
+      done
+      hash -r
+      actual_node_version="$(node --version)" || {
+        log "requested Node major $node_major is unavailable; resolve PATH before preparing Corepack"
+        return 1
+      }
+      if [[ "$actual_node_version" != "v$node_major."* ]]; then
+        log "requested Node major $node_major, but node reports $actual_node_version; resolve PATH shadowing before preparing Corepack"
+        return 1
+      fi
+    fi
   fi
   command -v npm >/dev/null
   command -v corepack >/dev/null
