@@ -85,12 +85,12 @@ func TestClassifyRunFailureUsesNormalizedMemoryEvidence(t *testing.T) {
 func TestRunOutcomeFailureKeepsMemoryEvidenceAcrossSecondaryFailures(t *testing.T) {
 	got := classifyRunOutcomeFailure(0, "", nil, RunFailureEvidence{
 		ResourceExhaustion: ResourceExhaustionMemory,
-	}, true)
+	}, true, false)
 	if got.BlockedStage != "resource_exhaustion" || got.ResourceExhaustion != ResourceExhaustionMemory || got.RetryLikely != "false" {
 		t.Fatalf("classifyRunOutcomeFailure()=%#v, want memory exhaustion", got)
 	}
 
-	got = classifyRunOutcomeFailure(0, "", []TimingPhase{{Name: "build"}}, RunFailureEvidence{}, true)
+	got = classifyRunOutcomeFailure(0, "", []TimingPhase{{Name: "build"}}, RunFailureEvidence{}, true, false)
 	if got.BlockedStage != "test" || got.ResourceExhaustion != "" || got.RetryLikely != "false" {
 		t.Fatalf("classifyRunOutcomeFailure()=%#v, want test failure", got)
 	}
@@ -1005,5 +1005,87 @@ func TestFailureDigestStoppedLeaseKeepsHistoryAndLocalEvidence(t *testing.T) {
 		if strings.Contains(out.String(), "next: crabbox "+command+" ") {
 			t.Errorf("stale recovery command %s: %s", command, out.String())
 		}
+	}
+}
+
+func TestRunArtifactFailureClassificationPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		artifact, testFailed bool
+		evidence             RunFailureEvidence
+		stage, retry         string
+	}{
+		{name: "known artifact", artifact: true, stage: "artifacts", retry: "unknown"},
+		{name: "artifact before test policy", artifact: true, testFailed: true, stage: "artifacts", retry: "unknown"},
+		{name: "positive memory evidence", artifact: true, testFailed: true, evidence: RunFailureEvidence{ResourceExhaustion: ResourceExhaustionMemory}, stage: "resource_exhaustion", retry: "false"},
+		{name: "genuine workload seven", stage: "test", retry: "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyRunOutcomeFailure(7, "", []TimingPhase{{Name: "test"}}, tc.evidence, tc.testFailed, tc.artifact)
+			if got.BlockedStage != tc.stage || got.RetryLikely != tc.retry || got.ResourceExhaustion != tc.evidence.ResourceExhaustion {
+				t.Fatalf("classification=%+v", got)
+			}
+		})
+	}
+}
+
+func TestApplyArtifactFailureOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		failure, observedContext error
+		memory                   ResourceExhaustionReason
+		wantStatus               RunStatus
+		wantKind                 RunErrorKind
+	}{
+		{name: "not artifact failure", wantStatus: RunStatusFailed, wantKind: RunErrorCommandExit},
+		{name: "validation", failure: exit(7, "missing proof"), wantStatus: RunStatusFailed, wantKind: RunErrorProvider},
+		{name: "observed cancellation", failure: exit(7, "flattened fetch failure"), observedContext: context.Canceled, wantStatus: RunStatusCanceled, wantKind: RunErrorCanceled},
+		{name: "observed deadline", failure: exit(7, "flattened fetch failure"), observedContext: context.DeadlineExceeded, wantStatus: RunStatusTimedOut, wantKind: RunErrorTimeout},
+		{name: "wrapped cancellation", failure: fmt.Errorf("fetch: %w", context.Canceled), wantStatus: RunStatusCanceled, wantKind: RunErrorCanceled},
+		{name: "memory outranks secondary validation", failure: exit(7, "missing proof"), memory: ResourceExhaustionMemory, wantStatus: RunStatusFailed, wantKind: RunErrorCommandExit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := TimingReport{ExitCode: 7, RunStatus: RunStatusFailed, ErrorKind: RunErrorCommandExit, ResourceExhaustion: tc.memory}
+			applyArtifactFailureOutcome(&report, tc.failure, tc.observedContext)
+			report = finalizeTimingReport(report)
+			if report.ExitCode != 7 || report.RunStatus != tc.wantStatus || report.ErrorKind != tc.wantKind || report.ResourceExhaustion != tc.memory {
+				t.Fatalf("report=%+v", report)
+			}
+		})
+	}
+}
+
+func TestArtifactFailureContextSnapshot(t *testing.T) {
+	for _, duringValidation := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancel_during_validation=%t", duringValidation), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			schema, err := parseArtifactSchema([]byte(`true`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			reader := func(context.Context, SSHTarget, string, string, int) ([]byte, error) {
+				if duringValidation {
+					cancel()
+					return nil, ctx.Err()
+				}
+				return nil, errors.New("missing proof")
+			}
+			_, _, failure := validateArtifactSchemasWithReader(ctx, SSHTarget{}, "/work", []loadedArtifactSchema{{remote: "proof", schemaPath: "schema.json", schema: schema}}, reader)
+			if failure == nil {
+				t.Fatal("expected failed schema fetch")
+			}
+			observedContextErr := ctx.Err()
+			cancel() // Later cleanup cancellation cannot reclassify validation.
+			report := TimingReport{ExitCode: 7}
+			applyArtifactFailureOutcome(&report, failure, observedContextErr)
+			wantStatus, wantKind := RunStatusFailed, RunErrorProvider
+			if duringValidation {
+				wantStatus, wantKind = RunStatusCanceled, RunErrorCanceled
+			}
+			if report.RunStatus != wantStatus || report.ErrorKind != wantKind || report.ExitCode != 7 {
+				t.Fatalf("report=%+v", report)
+			}
+		})
 	}
 }

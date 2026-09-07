@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Reject conflicting known provider identities before rebinding resolved SSH access, and retain alias keys unless an attested unchanged alias claim is removed. [PR 1936](https://github.com/openclaw/crabbox/pull/1936), [Issue 1900](https://github.com/openclaw/crabbox/issues/1900). Thanks @coygeek.
+- Distinguish required-artifact, artifact-change, and artifact-schema validation failures from workload exits in run timing and failure digests, preserving exit 7 and artifact enforcement. [PR 1934](https://github.com/openclaw/crabbox/pull/1934), [Issue 1894](https://github.com/openclaw/crabbox/issues/1894). Thanks @coygeek.
 
 ## 0.51.0 - 2026-09-06
 
