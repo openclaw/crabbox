@@ -539,7 +539,7 @@ func TestRunCommandInjectsReservedMetadataAcrossSSHCommandModes(t *testing.T) {
 			if !strings.Contains(logText, "CRABBOX_SLUG=''") {
 				t.Fatalf("empty slug metadata missing from SSH command:\n%s", logText)
 			}
-			runIDMatch := regexp.MustCompile(`CRABBOX_RUN_ID='(run_[a-f0-9]{12})'`).FindStringSubmatch(logText)
+			runIDMatch := regexp.MustCompile(`CRABBOX_RUN_ID='(run_[a-f0-9]{32})'`).FindStringSubmatch(logText)
 			if len(runIDMatch) != 2 {
 				t.Fatalf("CLI-generated run metadata missing from SSH command:\n%s", logText)
 			}
@@ -2001,7 +2001,7 @@ func TestRunCommandWritesFreshLocalContainerLeaseOutputAfterClaim(t *testing.T) 
 	if session.Provider != "local-container" || session.LeaseID != localContainerRunSessionTestLeaseID || session.Slug != "session-slug" || session.Reused || !session.Kept {
 		t.Fatalf("session=%#v", session)
 	}
-	if !regexp.MustCompile(`^run_[a-f0-9]{12}$`).MatchString(session.RunID) {
+	if !regexp.MustCompile(`^run_[a-f0-9]{32}$`).MatchString(session.RunID) {
 		t.Fatalf("runId=%q", session.RunID)
 	}
 	if want := "crabbox stop --provider local-container --target linux --id " + localContainerRunSessionTestLeaseID; session.CleanupCommand != want {
@@ -2083,7 +2083,6 @@ func TestRunCommandWritesBrokeredReusedAWSLeaseOutputBeforeCommand(t *testing.T)
 
 			const (
 				leaseID = "cbx_aws_session"
-				runID   = "run_aws_session"
 				slug    = "aws-session"
 			)
 			sessionPath := filepath.Join(dir, "session.json")
@@ -2117,33 +2116,39 @@ exit 0
 				IdleTimeoutSeconds: 1800,
 			}
 			var (
+				admittedRunID  atomic.Value
 				mu             sync.Mutex
 				createRunCalls atomic.Int32
 				storedReceipt  terminalRunReceipt
 			)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				runID := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/v1/runs/"), "/", 2)[0]
 				switch {
 				case r.Method == http.MethodGet && r.URL.Path == "/v1/control":
 					http.NotFound(w, r)
 				case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+leaseID:
 					_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
-				case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+				case r.Method == http.MethodPut && r.URL.Path == "/v1/runs/"+runID:
 					createRunCalls.Add(1)
 					if tc.createRunFail {
 						http.Error(w, "run store unavailable", http.StatusServiceUnavailable)
 						return
 					}
-					var body map[string]any
+					var body struct {
+						LeaseID string   `json:"leaseID"`
+						Command []string `json:"command"`
+					}
 					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 						http.Error(w, err.Error(), http.StatusBadRequest)
 						return
 					}
-					if body["leaseID"] != leaseID {
+					if body.LeaseID != leaseID {
 						http.Error(w, "wrong lease", http.StatusBadRequest)
 						return
 					}
+					admittedRunID.Store(runID)
 					_ = json.NewEncoder(w).Encode(map[string]any{"run": CoordinatorRun{
-						ID: runID, LeaseID: leaseID, Provider: "aws", State: "running",
+						ID: runID, LeaseID: leaseID, Provider: "aws", State: "running", Phase: "starting", Command: body.Command,
 						StartedAt: "2026-08-24T00:00:00Z",
 					}})
 				case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/"+runID+"/events":
@@ -2194,12 +2199,16 @@ exit 0
 				"--lease-output", sessionPath,
 				"--", "session-command-sentinel",
 			})
-			if calls := createRunCalls.Load(); calls != 1 {
-				t.Fatalf("create run calls=%d, want 1; error=%v\nstdout=%s\nstderr=%s", calls, err, stdout.String(), stderr.String())
+			wantCalls := int32(1)
+			if tc.createRunFail {
+				wantCalls = 2
+			}
+			if calls := createRunCalls.Load(); calls != wantCalls {
+				t.Fatalf("create run calls=%d, wrong bounded count; error=%v\nstdout=%s\nstderr=%s", calls, err, stdout.String(), stderr.String())
 			}
 			if tc.createRunFail {
 				var exitErr ExitError
-				if !AsExitError(err, &exitErr) || exitErr.Code != 7 || !strings.Contains(exitErr.Message, "coordinator run handle") {
+				if !AsExitError(err, &exitErr) || exitErr.Code != 7 || !strings.Contains(exitErr.Message, "unavailable before command") {
 					t.Fatalf("error=%v, want exit 7 coordinator handle failure\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
 				}
 				assertRunSessionValidationStoppedBeforeWork(t, sessionPath, commandMarker, filepath.Join(dir, "unused-sync-marker"))
@@ -2215,7 +2224,8 @@ exit 0
 			if session.Provider != "aws" || session.LeaseID != leaseID || session.Slug != slug || !session.Reused || !session.Kept {
 				t.Fatalf("session=%#v", session)
 			}
-			if session.RunID != runID {
+			runID, _ := admittedRunID.Load().(string)
+			if session.RunID != runID || len(runID) != 36 {
 				t.Fatalf("runId=%q want %q", session.RunID, runID)
 			}
 			if want := "crabbox stop --provider aws --target linux --id " + leaseID; session.CleanupCommand != want {
@@ -2706,7 +2716,7 @@ func TestRunCommandInjectsReservedMetadataIntoDelegatedRequest(t *testing.T) {
 	if env[runEnvLeaseID] != "cbx_delegated" || env[runEnvSlug] != "" {
 		t.Fatalf("delegated lease metadata=%#v", env)
 	}
-	if !regexp.MustCompile(`^run_[a-f0-9]{12}$`).MatchString(env[runEnvRunID]) {
+	if !regexp.MustCompile(`^run_[a-f0-9]{32}$`).MatchString(env[runEnvRunID]) {
 		t.Fatalf("delegated run ID=%q", env[runEnvRunID])
 	}
 	if runModuleRuntimeTestRequests[0].RunID != env[runEnvRunID] {
@@ -3925,7 +3935,6 @@ func TestRunCommandReceiptPersistenceFailureFinishesWithRefreshedReceipt(t *test
 
 	const (
 		leaseID = "cbx_receipt_write_failure"
-		runID   = "run_receipt_write_failure"
 	)
 	lease := CoordinatorLease{
 		ID:         leaseID,
@@ -3951,6 +3960,7 @@ func TestRunCommandReceiptPersistenceFailureFinishesWithRefreshedReceipt(t *test
 		finishReceipt terminalRunReceipt
 	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		runID := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/v1/runs/"), "/", 2)[0]
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/control":
 			http.NotFound(w, r)
@@ -3958,7 +3968,15 @@ func TestRunCommandReceiptPersistenceFailureFinishesWithRefreshedReceipt(t *test
 			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+leaseID+"/heartbeat":
 			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/runs/"+runID:
+			var body struct {
+				Command []string `json:"command"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
 			if err := os.Remove(keyPath); err != nil {
 				t.Errorf("remove original signer: %v", err)
 			}
@@ -3969,7 +3987,7 @@ func TestRunCommandReceiptPersistenceFailureFinishesWithRefreshedReceipt(t *test
 				t.Errorf("replace receipt path with directory: %v", err)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"run": CoordinatorRun{
-				ID: runID, LeaseID: leaseID, Provider: lease.Provider, State: "running",
+				ID: runID, LeaseID: leaseID, Provider: lease.Provider, State: "running", Phase: "starting", Command: body.Command,
 				StartedAt: "2026-09-05T00:00:00Z",
 			}})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/"+runID+"/events":
@@ -4242,7 +4260,6 @@ func runCommandSyncOnlyFinalization(t *testing.T, missingEvents bool) {
 
 	const (
 		leaseID = "cbx_sync_only"
-		runID   = "run_sync_only"
 	)
 	lease := CoordinatorLease{
 		ID:         leaseID,
@@ -4274,6 +4291,7 @@ func runCommandSyncOnlyFinalization(t *testing.T, missingEvents bool) {
 		events []string
 	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		runID := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/v1/runs/"), "/", 2)[0]
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/control":
 			http.NotFound(w, r)
@@ -4282,9 +4300,17 @@ func runCommandSyncOnlyFinalization(t *testing.T, missingEvents bool) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+leaseID+"/heartbeat":
 			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/runs/"+runID:
+			var body struct {
+				Command []string `json:"command"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
 			_ = json.NewEncoder(w).Encode(map[string]any{"run": CoordinatorRun{
-				ID: runID, LeaseID: leaseID, Provider: lease.Provider, State: "running",
+				ID: runID, LeaseID: leaseID, Provider: lease.Provider, State: "running", Phase: "starting", Command: body.Command,
 				StartedAt: "2026-09-04T00:00:00Z",
 			}})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/"+runID+"/events":
@@ -4392,7 +4418,6 @@ func TestRunCommandTerminalReceiptMarksCoordinatorFinishFailureLocally(t *testin
 
 	const (
 		leaseID = "cbx_finish_failure"
-		runID   = "run_finish_failure"
 	)
 	lease := CoordinatorLease{
 		ID:         leaseID,
@@ -4417,6 +4442,7 @@ func TestRunCommandTerminalReceiptMarksCoordinatorFinishFailureLocally(t *testin
 		unexpectedCalls     []string
 	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		runID := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/v1/runs/"), "/", 2)[0]
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/control":
 			http.NotFound(w, r)
@@ -4424,9 +4450,17 @@ func TestRunCommandTerminalReceiptMarksCoordinatorFinishFailureLocally(t *testin
 			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+leaseID+"/heartbeat":
 			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/runs/"+runID:
+			var body struct {
+				Command []string `json:"command"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
 			_ = json.NewEncoder(w).Encode(map[string]any{"run": CoordinatorRun{
-				ID: runID, LeaseID: leaseID, Provider: lease.Provider, State: "running",
+				ID: runID, LeaseID: leaseID, Provider: lease.Provider, State: "running", Phase: "starting", Command: body.Command,
 				StartedAt: "2026-08-24T00:00:00Z",
 			}})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/"+runID+"/events":
@@ -5016,7 +5050,7 @@ exit 0
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	if !strings.Contains(string(logData), "rm -f --") || !regexp.MustCompile(`\.crabbox/env/run_[a-f0-9]{12}\.env`).Match(logData) {
+	if !strings.Contains(string(logData), "rm -f --") || !regexp.MustCompile(`\.crabbox/env/run_[a-f0-9]{32}\.env`).Match(logData) {
 		t.Fatalf("cleanup command missing from ssh log:\n%s", logData)
 	}
 }

@@ -34,8 +34,12 @@ func NewLeaseID() string {
 	return newLeaseID()
 }
 
-func newRunID() string {
-	return "run_" + strings.TrimPrefix(newLeaseID(), "cbx_")
+func newRunID() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", err
+	}
+	return "run_" + hex.EncodeToString(value[:]), nil
 }
 
 func PublicKeyFor(privatePath string) (string, error) {

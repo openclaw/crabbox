@@ -4052,8 +4052,8 @@ func TestRunMissingOriginReplacementLeaseStaysPlainManifest(t *testing.T) {
 		receipt  terminalRunReceipt
 		mu       sync.Mutex
 	)
-	const runID = "run_missing_origin_replacement"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		runID := strings.SplitN(strings.TrimPrefix(request.URL.Path, "/v1/runs/"), "/", 2)[0]
 		lease := func(id, state string) CoordinatorLease {
 			return CoordinatorLease{
 				ID: id, Provider: providerName, TargetOS: targetLinux, State: state,
@@ -4061,9 +4061,16 @@ func TestRunMissingOriginReplacementLeaseStaysPlainManifest(t *testing.T) {
 			}
 		}
 		switch {
-		case request.Method == http.MethodPost && request.URL.Path == "/v1/runs":
+		case request.Method == http.MethodPut && request.URL.Path == "/v1/runs/"+runID:
+			var body struct {
+				Command []string `json:"command"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"run": CoordinatorRun{
-				ID: runID, Provider: providerName, State: "running", StartedAt: "2026-08-29T00:00:00Z",
+				ID: runID, Provider: providerName, State: "running", Phase: "starting", Command: body.Command, StartedAt: "2026-08-29T00:00:00Z",
 			}})
 		case request.Method == http.MethodPost && request.URL.Path == "/v1/runs/"+runID+"/events":
 			_ = json.NewEncoder(w).Encode(map[string]any{"event": CoordinatorRunEvent{

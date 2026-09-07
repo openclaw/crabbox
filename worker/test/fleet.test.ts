@@ -42258,6 +42258,123 @@ describe("fleet run history", () => {
     expect(storage.value("run:run_still_running")).toBeDefined();
   });
 
+  it("recovers a caller-known run admission without restarting its history", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    const body = { runID: `run_${"a".repeat(32)}`, provider: "aws", command: ["echo", "hello"] };
+    const create = () => fleet.fetch(request("PUT", `/v1/runs/${body.runID}`, { headers, body }));
+    const [first, second] = await Promise.all([create(), create()]);
+    expect([first.status, second.status].sort()).toEqual([200, 201]);
+    const { run } = (await first.json()) as { run: RunRecord };
+    expect(run.id).toBe(body.runID);
+    expect(run).not.toHaveProperty("createRequestSHA256");
+    const replay = await create();
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({ run });
+    const finish = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/finish`, {
+        headers,
+        body: { exitCode: 0, log: "hello" },
+      }),
+    );
+    expect(finish.status).toBe(200);
+    const terminal = await create();
+    expect(terminal.status).toBe(200);
+    expect(await terminal.json()).toEqual(await finish.json());
+    const events = await fleet.fetch(request("GET", `/v1/runs/${run.id}/events`, { headers }));
+    expect(
+      ((await events.json()) as { events: RunEventRecord[] }).events.map((event) => event.type),
+    ).toEqual(["run.started", "command.finished"]);
+  });
+
+  it("keeps run admission bound to its original caller and request after lease attribution", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    const body = { runID: `run_${"b".repeat(32)}`, provider: "aws", command: ["true"] };
+    const first = await fleet.fetch(request("PUT", `/v1/runs/${body.runID}`, { headers, body }));
+    expect(first.status).toBe(201);
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        owner: "alice@example.com",
+        org: "example-org",
+        provider: "aws",
+      }),
+    );
+    const attached = await fleet.fetch(
+      request("POST", `/v1/runs/${body.runID}/events`, {
+        headers,
+        body: { type: "lease.created", leaseID: "cbx_000000000001", provider: "aws" },
+      }),
+    );
+    expect(attached.status).toBe(201);
+    const replay = await fleet.fetch(request("PUT", `/v1/runs/${body.runID}`, { headers, body }));
+    expect(replay.status).toBe(200);
+    expect(((await replay.json()) as { run: RunRecord }).run.leaseID).toBe("cbx_000000000001");
+    const changed = await fleet.fetch(
+      request("PUT", `/v1/runs/${body.runID}`, {
+        headers,
+        body: { ...body, leaseID: "cbx_000000000001" },
+      }),
+    );
+    expect(changed.status).toBe(409);
+    const otherCaller = await fleet.fetch(
+      request("PUT", `/v1/runs/${body.runID}`, {
+        headers: { ...headers, "x-crabbox-owner": "bob@example.com" },
+        body,
+      }),
+    );
+    expect(otherCaller.status).toBe(404);
+    const otherOrg = await fleet.fetch(
+      request("PUT", `/v1/runs/${body.runID}`, {
+        headers: { ...headers, "x-crabbox-org": "other-org" },
+        body,
+      }),
+    );
+    expect(otherOrg.status).toBe(404);
+    const changedCommand = await fleet.fetch(
+      request("PUT", `/v1/runs/${body.runID}`, {
+        headers,
+        body: { ...body, command: ["echo", "changed"] },
+      }),
+    );
+    expect(changedCommand.status).toBe(409);
+    const events = await fleet.fetch(request("GET", `/v1/runs/${body.runID}/events`, { headers }));
+    expect(
+      ((await events.json()) as { events: RunEventRecord[] }).events.map((event) => event.type),
+    ).toEqual(["run.started", "lease.created"]);
+  });
+
+  it.each(["POST", "PUT"])(
+    "commits %s run admission and its first event together",
+    async (method) => {
+      const storage = new MemoryStorage();
+      const fleet = testFleet(storage);
+      const body = { runID: `run_${"c".repeat(32)}`, command: ["true"] };
+      const path = method === "POST" ? "/v1/runs" : `/v1/runs/${body.runID}`;
+      storage.beforePut = async (key) => {
+        if (key.startsWith("runevent:")) throw new Error("event storage unavailable");
+      };
+      expect((await fleet.fetch(request(method, path, { body }))).status).toBe(500);
+      expect((await storage.list({ prefix: "run:" })).size).toBe(0);
+      expect((await storage.list({ prefix: "runevent:" })).size).toBe(0);
+      storage.beforePut = undefined;
+      expect((await fleet.fetch(request(method, path, { body }))).status).toBe(201);
+    },
+  );
+
+  it.each(["run_short", `run_${"a".repeat(33)}`, "42"])(
+    "rejects invalid requested run identity %j",
+    async (runID) => {
+      const fleet = testFleet(new MemoryStorage());
+      const response = await fleet.fetch(request("PUT", `/v1/runs/${runID}`, { body: {} }));
+      expect(response.status).toBe(400);
+    },
+  );
+
   it("creates early run sessions and appends durable events", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);

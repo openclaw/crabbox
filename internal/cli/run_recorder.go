@@ -24,6 +24,11 @@ type runRecorder struct {
 	command            []string
 	label              string
 	runID              string
+	requestedRunID     string
+	createLeaseID      string
+	createConfig       *Config
+	createBaseURL      string
+	createErr          error
 	startedAt          time.Time
 	attachedAt         time.Time
 	stderr             io.Writer
@@ -45,40 +50,56 @@ type runRecorder struct {
 	telemetryDone      chan struct{}
 }
 
-func newRunRecorder(ctx context.Context, coord *CoordinatorClient, cfg Config, command []string, label string, stderr io.Writer, createAfterLease bool) *runRecorder {
+func newRunRecorder(ctx context.Context, coord *CoordinatorClient, cfg Config, command []string, label string, stderr io.Writer, createAfterLease bool, requestedRunID string) *runRecorder {
 	rec := &runRecorder{
 		coord:             coord,
-		command:           command,
+		command:           append([]string(nil), command...),
+		requestedRunID:    requestedRunID,
+		createPending:     true,
 		label:             strings.TrimSpace(label),
 		stderr:            stderr,
 		diagnosticConfig:  cfg,
 		diagnosticSecrets: configuredDiagnosticSecrets(cfg),
 	}
-	if coord == nil {
-		return rec
-	}
-	if createAfterLease {
-		rec.createPending = true
-		return rec
-	}
-	run, err := coord.CreateRun(ctx, "", cfg, command, rec.label)
-	if err != nil {
-		rec.createPending = true
-		if isInvalidLeaseIDCoordinatorError(err) {
-			return rec
+	if coord != nil && !createAfterLease {
+		if err := rec.createRun(ctx, "", cfg); err != nil {
+			rec.warnRunHistory("run admission %s failed before lease: %v", requestedRunID, err)
 		}
-		rec.warnRunHistory("run history create failed before lease; will retry after lease is available: %v", err)
-		return rec
 	}
-	rec.attachRun(run)
+
 	return rec
 }
 
-func (r *runRecorder) UseCoordinator(coord *CoordinatorClient) {
+func (r *runRecorder) UseCoordinator(coord *CoordinatorClient) error {
 	if r == nil || coord == nil {
-		return
+		return nil
+	}
+	if r.createBaseURL != "" && strings.TrimRight(coord.BaseURL, "/") != r.createBaseURL {
+		return exit(7, "run admission %s belongs to a different coordinator; restore the original route", r.requestedRunID)
 	}
 	r.coord = coord
+	return nil
+}
+
+func (r *runRecorder) createRun(ctx context.Context, leaseID string, cfg Config) error {
+	// Replay the first admission payload; lease.created owns later lease attribution.
+	if r.createConfig == nil {
+		r.createLeaseID = leaseID
+		r.createConfig = &Config{Provider: cfg.Provider, TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode, Class: cfg.Class, ServerType: cfg.ServerType}
+		r.createBaseURL = strings.TrimRight(r.coord.BaseURL, "/")
+		fmt.Fprintf(r.stderr, "run admission attempt %s\n", r.requestedRunID)
+	}
+	run, err := r.coord.CreateRun(ctx, r.requestedRunID, r.createLeaseID, *r.createConfig, r.command, r.label)
+	if err != nil {
+		r.historyUnavailable = true
+		r.createErr = err
+		var refusal ExitError
+		r.createPending = !AsExitError(err, &refusal) && runRecorderFinishRetryable(err)
+		return err
+	}
+	r.createErr = nil
+	r.attachRun(run)
+	return nil
 }
 
 func (r *runRecorder) historyIsUnavailable() bool {
@@ -88,6 +109,9 @@ func (r *runRecorder) historyIsUnavailable() bool {
 func (r *runRecorder) requireHandle() error {
 	if r == nil || r.coord == nil || r.runID != "" {
 		return nil
+	}
+	if r.createErr != nil {
+		return exit(7, "run admission %s unavailable before command: %v", r.requestedRunID, r.createErr)
 	}
 	return exit(7, "run history unavailable before command; refusing execution without a coordinator run handle")
 }
@@ -124,23 +148,21 @@ func (r *runRecorder) appendEvent(kind string, input CoordinatorRunEventInput) {
 	r.publisher.append(r.coord, r.runID, input)
 }
 
-func (r *runRecorder) AttachLease(leaseID, slug string, cfg Config) error {
+func (r *runRecorder) AttachLease(ctx context.Context, leaseID, slug string, cfg Config) error {
 	if r == nil || r.finished {
 		return nil
 	}
-	if r.runID == "" && r.createPending && r.coord != nil && leaseID != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), runRecorderRequestTimeout)
-		defer cancel()
-		run, err := r.coord.CreateRun(ctx, leaseID, cfg, r.command, r.label)
-		if err != nil {
-			r.historyUnavailable = true
-			r.warnRunHistory("run history create failed after lease; run history unavailable, use lease-based recovery commands: %v", err)
-			return nil
-		}
-		r.attachRun(run)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
+	if r.runID == "" && r.createPending && r.coord != nil && leaseID != "" {
+		if err := r.createRun(ctx, leaseID, cfg); err != nil {
+			return exit(7, "run admission %s unavailable before command: %v", r.requestedRunID, err)
+		}
+	}
+
 	if r.runID == "" {
-		return nil
+		return r.requireHandle()
 	}
 	input := CoordinatorRunEventInput{
 		Type:        "lease.created",
@@ -160,11 +182,14 @@ func (r *runRecorder) AttachLease(leaseID, slug string, cfg Config) error {
 	// replacement need acknowledgement before the command's receipt can bind it.
 	needsBinding := r.leaseID != leaseID || r.leaseSlug != slug || r.leaseProvider != cfg.Provider
 	if needsBinding {
-		if err := r.publisher.Bind(r.coord, r.runID, input); err != nil {
+		if err := r.publisher.Bind(ctx, r.coord, r.runID, input); err != nil {
 			return exit(7, "run history lease attribution failed for %s: %v", r.runID, err)
 		}
 	} else {
 		r.publisher.append(r.coord, r.runID, input)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	r.leaseID, r.leaseSlug, r.leaseProvider = leaseID, slug, cfg.Provider
 	return nil
@@ -423,8 +448,4 @@ func (r *runRecorder) handleRunEventAppendError(kind string, err error) bool {
 	}
 	r.warn("run event append failed for %s: %v", kind, err)
 	return true
-}
-
-func isInvalidLeaseIDCoordinatorError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "invalid_lease_id")
 }

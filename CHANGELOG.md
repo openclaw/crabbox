@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Recover lost run-admission responses using a caller-known identity and an atomic initial history record, preserving authenticated request binding and refusing remote command replay. Current clients require a coordinator supporting the new admission route. [Issue 1962](https://github.com/openclaw/crabbox/issues/1962).
+
 ## 0.52.0 - 2026-09-07
 
 ### Highlights

@@ -225,6 +225,7 @@ PATCH  /v1/checkpoints/{id}/retention
 POST   /v1/checkpoints/{id}/use
 DELETE /v1/checkpoints/{id}
 POST   /v1/runs
+PUT    /v1/runs/{run-id}
 GET    /v1/runs
 GET    /v1/runs/{run-id}
 GET    /v1/runs/{run-id}/logs
@@ -525,7 +526,9 @@ provider metadata, owner/org, `createdAt`, `lastTouchedAt`, `idleTimeoutSeconds`
 In brokered mode, `crabbox run` mirrors progress to the coordinator while executing
 directly against the runner over SSH:
 
-- `POST /v1/runs` creates a `RunRecord` (state `running`).
+- `PUT /v1/runs/{id}` atomically admits a caller-known run and its first event,
+  or returns the retained record for the same caller and original request.
+  Legacy `POST /v1/runs` creates a coordinator-issued `RunRecord` (state `running`).
 - `POST /v1/runs/{id}/events` streams phase-tagged events (leasing, bootstrap,
   sync, command start/finish, stdout/stderr chunks, lease release).
 - `POST /v1/runs/{id}/telemetry` posts periodic host samples.

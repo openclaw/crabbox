@@ -87,6 +87,7 @@ export function publicRunRecord(record: RunRecord): RunRecord {
   delete publicRecord.terminalReceipt;
   delete publicRecord.terminalFinishSHA256;
   delete publicRecord.terminalLogPrefix;
+  delete publicRecord.createRequestSHA256;
   if (!record.leaseOwners) {
     return publicRecord;
   }

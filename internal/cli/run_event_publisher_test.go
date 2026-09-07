@@ -125,7 +125,7 @@ func TestRunRecorderOrdersEventsAcrossLeaseReplacementAndFinish(t *testing.T) {
 	<-started
 	rec.UseCoordinator(&CoordinatorClient{BaseURL: server.URL, Token: "new", Client: server.Client()})
 	attached := make(chan error, 1)
-	go func() { attached <- rec.AttachLease("cbx_new", "new-slug", Config{}) }()
+	go func() { attached <- rec.AttachLease(t.Context(), "cbx_new", "new-slug", Config{}) }()
 	select {
 	case <-attached:
 		t.Error("replacement admitted before its authoritative lease attachment")
@@ -154,8 +154,8 @@ func TestRunRecorderExistingLeaseCreateDoesNotWaitForDiagnostic(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if req.URL.Path == "/v1/runs" {
-			io.WriteString(w, `{"run":{"id":"run_123","leaseID":"cbx_existing","slug":"existing","provider":"aws"}}`)
+		if req.URL.Path == "/v1/runs/"+admissionTestRunID {
+			io.WriteString(w, `{"run":{"id":"run_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","leaseID":"cbx_existing","slug":"existing","provider":"aws","state":"running","phase":"starting","command":["true"]}}`)
 			return
 		}
 		close(started)
@@ -164,9 +164,9 @@ func TestRunRecorderExistingLeaseCreateDoesNotWaitForDiagnostic(t *testing.T) {
 	}))
 	defer server.Close()
 	cfg := Config{Provider: "aws"}
-	rec := newRunRecorder(context.Background(), &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}, cfg, []string{"true"}, "", io.Discard, true)
+	rec := newRunRecorder(context.Background(), &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}, cfg, []string{"true"}, "", io.Discard, true, admissionTestRunID)
 	attached := make(chan error, 1)
-	go func() { attached <- rec.AttachLease("cbx_existing", "existing", cfg) }()
+	go func() { attached <- rec.AttachLease(t.Context(), "cbx_existing", "existing", cfg) }()
 	<-started
 	select {
 	case err := <-attached:
@@ -228,7 +228,7 @@ func TestRunRecorderBindingIgnoresDiagnosticBacklog(t *testing.T) {
 						rec.Event("sync.finished", "synced", "")
 					}
 				}
-				if err := rec.AttachLease("cbx_replacement", "replacement", Config{Provider: "aws"}); err != nil {
+				if err := rec.AttachLease(t.Context(), "cbx_replacement", "replacement", Config{Provider: "aws"}); err != nil {
 					t.Errorf("healthy binding rejected by diagnostic backlog: %v", err)
 				}
 				rec.Failed(nil)
@@ -247,7 +247,7 @@ func TestRunRecorderMissingBindingEndpointFailsAdmission(t *testing.T) {
 			}))
 			defer server.Close()
 			rec := &runRecorder{coord: &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}, runID: "run_123", leaseID: oldLease, stderr: io.Discard}
-			err := rec.AttachLease("cbx_next", "next", Config{Provider: "aws"})
+			err := rec.AttachLease(t.Context(), "cbx_next", "next", Config{Provider: "aws"})
 			if ExitCodeForError(err, 0) != 7 || !strings.Contains(err.Error(), "lease attribution") {
 				t.Fatalf("unbound run was admitted without a valid binding: %v", err)
 			}

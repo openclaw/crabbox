@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -2250,8 +2251,7 @@ func imagePath(imageID, action string, refs ...CoordinatorImageRef) string {
 	return path
 }
 
-func (c *CoordinatorClient) CreateRun(ctx context.Context, leaseID string, cfg Config, command []string, label string) (CoordinatorRun, error) {
-	var res CoordinatorRunResponse
+func (c *CoordinatorClient) CreateRun(ctx context.Context, runID, leaseID string, cfg Config, command []string, label string) (CoordinatorRun, error) {
 	body := map[string]any{
 		"leaseID":     leaseID,
 		"provider":    cfg.Provider,
@@ -2264,8 +2264,33 @@ func (c *CoordinatorClient) CreateRun(ctx context.Context, leaseID string, cfg C
 	if strings.TrimSpace(label) != "" {
 		body["label"] = strings.TrimSpace(label)
 	}
-	err := c.do(ctx, http.MethodPost, "/v1/runs", body, &res)
-	return res.Run, err
+	// Only identity-bound admission is replayed, within the caller's original budget.
+	ctx, cancel := context.WithTimeout(ctx, runRecorderRequestTimeout)
+	defer cancel()
+	var err error
+	for attempt := 0; attempt < 2 && ctx.Err() == nil; attempt++ {
+		var res CoordinatorRunResponse
+		err = c.do(ctx, http.MethodPut, "/v1/runs/"+url.PathEscape(runID), body, &res)
+		if err == nil {
+			if ctx.Err() != nil {
+				return CoordinatorRun{}, ctx.Err()
+			}
+			if res.Run.ID != runID || res.Run.State != "running" || res.Run.Phase != "starting" || !slices.Equal(res.Run.Command, command) {
+				return CoordinatorRun{}, exit(7, "coordinator returned a mismatched or already-started run admission for %s", runID)
+			}
+			return res.Run, nil
+		}
+		if !runRecorderFinishRetryable(err) {
+			break
+		}
+	}
+	if ctx.Err() != nil {
+		return CoordinatorRun{}, ctx.Err()
+	}
+	if isCoordinatorNotFoundError(err) {
+		return CoordinatorRun{}, fmt.Errorf("coordinator run admission unavailable; upgrade the coordinator: %w", err)
+	}
+	return CoordinatorRun{}, err
 }
 
 func (c *CoordinatorClient) FinishRun(ctx context.Context, runID string, exitCode int, sync, command time.Duration, log string, truncated bool, results *TestResultSummary, telemetry *RunTelemetrySummary, classification FailureClassification, receipt *terminalRunReceipt) (CoordinatorRun, error) {

@@ -68,31 +68,31 @@ func TestCoordinatorRunEvents(t *testing.T) {
 	var eventBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/runs/"+admissionTestRunID:
 			if err := json.NewDecoder(r.Body).Decode(&createBody); err != nil {
 				t.Fatal(err)
 			}
-			_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"label":"smoke","state":"running","phase":"starting","logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z"}}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/events":
+			_, _ = w.Write([]byte(`{"run":{"id":"run_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","leaseID":"","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"label":"smoke","state":"running","phase":"starting","logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/events":
 			if err := json.NewDecoder(r.Body).Decode(&eventBody); err != nil {
 				t.Fatal(err)
 			}
-			_, _ = w.Write([]byte(`{"event":{"runID":"run_123","seq":2,"type":"sync.started","phase":"sync","createdAt":"2026-05-02T00:00:01Z"}}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/run_123/events":
+			_, _ = w.Write([]byte(`{"event":{"runID":"run_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","seq":2,"type":"sync.started","phase":"sync","createdAt":"2026-05-02T00:00:01Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/run_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/events":
 			if got := r.URL.Query().Get("after"); got != "4" {
 				t.Fatalf("after query=%q", got)
 			}
 			if got := r.URL.Query().Get("limit"); got != "25" {
 				t.Fatalf("limit query=%q", got)
 			}
-			_, _ = w.Write([]byte(`{"events":[{"runID":"run_123","seq":1,"type":"run.started","phase":"starting","createdAt":"2026-05-02T00:00:00Z"}]}`))
+			_, _ = w.Write([]byte(`{"events":[{"runID":"run_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","seq":1,"type":"run.started","phase":"starting","createdAt":"2026-05-02T00:00:00Z"}]}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
 	}))
 	defer server.Close()
 	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
-	run, err := client.CreateRun(context.Background(), "", Config{
+	run, err := client.CreateRun(context.Background(), admissionTestRunID, "", Config{
 		Provider:   "aws",
 		Class:      "standard",
 		ServerType: "t3.small",
@@ -100,7 +100,7 @@ func TestCoordinatorRunEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.ID != "run_123" || run.Phase != "starting" {
+	if run.ID != "run_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || run.Phase != "starting" {
 		t.Fatalf("run=%#v", run)
 	}
 	if got, ok := createBody["leaseID"].(string); !ok || got != "" {
