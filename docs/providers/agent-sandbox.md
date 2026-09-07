@@ -247,6 +247,11 @@ activity refresh or keep-on-failure rerun hint. Explicit missing-root forgetting
 removes only local recovery state; it is not proof of controller or pod deletion.
 Creation/readiness rollback before a fresh run binds remains part of acquisition.
 
+Readiness deadlines and cancellation determine the reported run outcome even
+when the last probe returned a different error. The last diagnostic and its
+public exit code remain available; a stage timeout alone does not authorize
+TTL cleanup or missing-root forgetting.
+
 TTL expiry still forces one UID-checked release attempt even for reused or kept
 claims and when `deleteOnRelease` is false. Expiry before command admission keeps
 exit 4. Expiry after a successful command fails with code 1; an earlier command

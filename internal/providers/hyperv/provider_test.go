@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -2039,5 +2040,40 @@ func TestAcquireWaitsForGuestReadyBeforeLockdown(t *testing.T) {
 	}
 	if readyIdx >= stageIdx {
 		t.Fatalf("readiness probe (%d) must precede pre-network lockdown (%d)", readyIdx, stageIdx)
+	}
+}
+
+func TestWaitGuestReadyBackoffDeadlinePreservesProbeCodeAndCause(t *testing.T) {
+	for _, code := range []int{23, -9} {
+		t.Run(fmt.Sprintf("code_%d", code), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				runner := &recordingRunner{}
+				runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+					if !readinessProbe(req) {
+						t.Fatal("unexpected non-readiness command")
+					}
+					return core.LocalCommandResult{ExitCode: code, Stderr: "guest boot pending"}, errors.New("probe unavailable"), true
+				}
+				b := testBackend(runner)
+				b.guestReadyBudget = 100 * time.Millisecond
+				b.guestReadyProbeTimeout = time.Second
+				b.guestRetryBackoff = time.Hour
+				started := time.Now()
+				err := b.waitGuestReady(context.Background(), "crabbox-blue-1234", "crabbox")
+				if err == nil || !strings.Contains(err.Error(), "did not accept PowerShell Direct within 100ms") || !strings.Contains(err.Error(), "guest boot pending") || core.ExitCodeForError(err, 1) != code {
+					t.Fatalf("boot diagnostic/code changed: err=%v want code=%d", err, code)
+				}
+				var failure core.ExitError
+				if !core.AsExitError(err, &failure) || failure.Code != code || failure.Message != "guest readiness probe failed: probe unavailable: guest boot pending" {
+					t.Errorf("first typed probe error changed: %#v", failure)
+				}
+				if len(runner.calls) != 1 || time.Since(started) != b.guestReadyBudget {
+					t.Fatalf("backoff budget/first probe changed: calls=%d elapsed=%s", len(runner.calls), time.Since(started))
+				}
+				if !errors.Is(err, context.DeadlineExceeded) || core.RunStatusForResult(core.RunResult{}, err) != core.RunStatusTimedOut || core.RunErrorKindForResult(core.RunResult{}, err) != core.RunErrorTimeout {
+					t.Errorf("owned boot deadline lost: err=%v status=%s kind=%s", err, core.RunStatusForResult(core.RunResult{}, err), core.RunErrorKindForResult(core.RunResult{}, err))
+				}
+			})
+		})
 	}
 }

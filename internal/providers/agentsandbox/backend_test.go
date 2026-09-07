@@ -2084,11 +2084,13 @@ func TestBoundRunUnadmittedCustodyAndTiming(t *testing.T) {
 	for _, tc := range []struct {
 		name                         string
 		missing, forget, forgetFails bool
+		wantStatus                   core.RunStatus
+		wantKind                     core.RunErrorKind
 	}{
-		{name: "not ready"},
-		{name: "root missing", missing: true},
-		{name: "root forgotten", missing: true, forget: true},
-		{name: "forget failure", missing: true, forget: true, forgetFails: true},
+		{name: "not ready", wantStatus: core.RunStatusTimedOut, wantKind: core.RunErrorTimeout},
+		{name: "root missing", missing: true, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "root forgotten", missing: true, forget: true, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "forget failure", missing: true, forget: true, forgetFails: true, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := testAgentSandboxConfig(t)
@@ -2149,7 +2151,7 @@ func TestBoundRunUnadmittedCustodyAndTiming(t *testing.T) {
 				t.Fatalf("reports=%+v", w.reports)
 			}
 			report := w.reports[0]
-			if result.ExitCode != core.ExitCodeForError(err, 1) || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider || report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind {
+			if result.ExitCode != core.ExitCodeForError(err, 1) || result.Status != tc.wantStatus || result.ErrorKind != tc.wantKind || report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind {
 				t.Fatalf("result=%+v report=%+v err=%v", result, report, err)
 			}
 		})

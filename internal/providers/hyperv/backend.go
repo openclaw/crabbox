@@ -662,7 +662,8 @@ func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error
 		if lastErr == nil {
 			lastErr = budgetCtx.Err()
 		}
-		return fmt.Errorf("guest %s did not accept PowerShell Direct within %s: %w", vmName, b.guestReadyBudget, lastErr)
+		diagnostic := fmt.Errorf("guest %s did not accept PowerShell Direct within %s: %w", vmName, b.guestReadyBudget, lastErr)
+		return shared.PollTerminationError(budgetCtx, err, diagnostic)
 	}
 	return err
 }

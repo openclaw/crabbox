@@ -851,7 +851,8 @@ func waitForSandboxResourceReadiness(ctx context.Context, client kubernetesClien
 		if lastErr == nil {
 			lastErr = cause
 		}
-		return sandboxResourceReadiness{}, fmt.Errorf("agent-sandbox readiness timed out for claim %s: %w", claimName, lastErr)
+		diagnostic := fmt.Errorf("agent-sandbox readiness timed out for claim %s: %w", claimName, lastErr)
+		return sandboxResourceReadiness{}, shared.PollTerminationError(ctx, err, diagnostic)
 	}
 	return sandboxResourceReadiness{}, err
 }
@@ -891,7 +892,8 @@ func waitForSandboxPodReadiness(ctx context.Context, client kubernetesClient, na
 		if lastErr == nil {
 			lastErr = cause
 		}
-		return podState{}, fmt.Errorf("agent-sandbox pod readiness timed out for sandbox %s: %w", sandbox.Metadata.Name, lastErr)
+		diagnostic := fmt.Errorf("agent-sandbox pod readiness timed out for sandbox %s: %w", sandbox.Metadata.Name, lastErr)
+		return podState{}, shared.PollTerminationError(ctx, err, diagnostic)
 	}
 	return podState{}, err
 }

@@ -483,11 +483,16 @@ func (c *sdkOpenSandboxClient) waitForRunning(ctx context.Context, sandboxID str
 	if errors.Is(err, expiredErr) {
 		return nil, expiredErr
 	}
-	if result.Err == nil && errors.Is(context.Cause(ctx), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
-		return nil, fmt.Errorf("sandbox %s did not reach Running state within %s", sandboxID, time.Since(start).Round(time.Millisecond))
-	}
-	if result.Err == nil && context.Cause(ctx) != nil && errors.Is(err, context.Cause(ctx)) {
-		return nil, fmt.Errorf("sandbox %s did not reach Running state: %w", sandboxID, ctx.Err())
+	if cause := context.Cause(ctx); cause != nil && errors.Is(err, cause) {
+		diagnostic := err
+		if result.Err == nil {
+			if errors.Is(cause, context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
+				diagnostic = fmt.Errorf("sandbox %s did not reach Running state within %s", sandboxID, time.Since(start).Round(time.Millisecond))
+			} else {
+				diagnostic = fmt.Errorf("sandbox %s did not reach Running state: %w", sandboxID, ctx.Err())
+			}
+		}
+		return nil, shared.PollTerminationError(ctx, err, diagnostic)
 	}
 	return nil, err
 }
@@ -520,10 +525,13 @@ func (c *sdkOpenSandboxClient) waitUntilReady(ctx context.Context, sandboxID str
 		return nil
 	}
 	if context.Cause(ctx) != nil && errors.Is(err, context.Cause(ctx)) {
+		var diagnostic error
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return fmt.Errorf("sandbox %s did not become ready within %s: %w", sandboxID, time.Since(start).Round(time.Millisecond), result.Err)
+			diagnostic = fmt.Errorf("sandbox %s did not become ready within %s: %w", sandboxID, time.Since(start).Round(time.Millisecond), result.Err)
+		} else {
+			diagnostic = fmt.Errorf("sandbox %s did not become ready: %w", sandboxID, ctx.Err())
 		}
-		return fmt.Errorf("sandbox %s did not become ready: %w", sandboxID, ctx.Err())
+		return shared.PollTerminationError(ctx, err, diagnostic)
 	}
 	return err
 }

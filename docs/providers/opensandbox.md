@@ -169,6 +169,11 @@ the remaining absolute TTL, resumes if needed, and checks the budget again
 before updating the claim. Failed admission retains the authorized session
 without refreshing activity or printing a rerun hint for an unusable sandbox.
 
+Running-state and execd readiness report the terminating deadline or cancellation
+consistently, including when it happens between probes. Existing diagnostic text
+and exit codes are preserved. A discovered sandbox expiration remains a separate
+provider failure; it is not reclassified as a caller timeout.
+
 ## Capabilities
 
 - SSH: not driven by Crabbox.

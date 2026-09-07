@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Agent Sandbox, OpenSandbox, and Hyper-V: classify readiness deadlines and cancellation consistently without losing the last probe's diagnostic or changing public exit codes.
 - Report producer-confirmed checkpoint non-submission as structured JSON after verified reservation cleanup, without implying that source rollback succeeded. [PR 1952](https://github.com/openclaw/crabbox/pull/1952). Thanks @steipete.
 - Overlap the initial AWS quota lookup with security-group preparation, preserving per-candidate quota checks and joining both operations before launch or failure cleanup.
 - Preserve current-boot cloud-init completion records during Linux developer-image cleanup while still clearing cached initialization and seed data, and fail preparation if cleanup cannot complete safely. [PR 1954](https://github.com/openclaw/crabbox/pull/1954). Thanks @vincentkoc.
