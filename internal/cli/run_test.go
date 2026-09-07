@@ -3342,8 +3342,13 @@ exit 0
 	if report.ExitCode != 7 {
 		t.Fatalf("timing exitCode=%d, want 7\nreport=%#v", report.ExitCode, report)
 	}
-	if report.BlockedStage != "unknown" || finalTimingPhaseName(report.CommandPhases) != "test" {
+	if report.BlockedStage != "artifacts" || report.ErrorKind != RunErrorProvider || report.RunStatus != RunStatusFailed || report.RetryLikely != "unknown" || finalTimingPhaseName(report.CommandPhases) != "test" {
 		t.Fatalf("artifact failure blamed successful workload: %+v", report)
+	}
+	for _, want := range []string{"\n  phase: artifacts\n", "\n  area: artifacts\n"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("artifact digest missing %q:\n%s", want, stderr.String())
+		}
 	}
 	if strings.Contains(stderr.String(), "\n  failed_phase: test\n") {
 		t.Fatalf("failure digest blamed successful workload:\n%s", stderr.String())
