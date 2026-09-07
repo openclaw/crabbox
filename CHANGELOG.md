@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Distinguish required-artifact, artifact-change, and artifact-schema validation failures from workload exits in run timing and failure digests, preserving exit 7 and artifact enforcement. [Issue 1894](https://github.com/openclaw/crabbox/issues/1894). Thanks @coygeek.
 - Preserve explicit no-sync intent and required-artifact globs in failure-digest retries, avoiding an unintended workspace reset or weakened evidence checks. [PR 1933](https://github.com/openclaw/crabbox/pull/1933), [Issue 1875](https://github.com/openclaw/crabbox/issues/1875), [Issue 1895](https://github.com/openclaw/crabbox/issues/1895). Thanks @coygeek.
 - Start commands without waiting for best-effort telemetry uploads, and cancel and join the telemetry publisher before run completion or lease replacement while preserving baseline samples and verified terminal receipts. [PR 1931](https://github.com/openclaw/crabbox/pull/1931).
 
