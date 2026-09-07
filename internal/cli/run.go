@@ -1313,7 +1313,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return exit(2, "profile doctor is not supported for native Windows targets")
 		}
 		if useCoordinator {
-			recorder.AttachLease(leaseID, serverSlug(server), cfg)
+			if err := recorder.AttachLease(leaseID, serverSlug(server), cfg); err != nil {
+				return err
+			}
 		}
 		if recorder.runID != "" {
 			executionRunID = recorder.runID
@@ -1778,7 +1780,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return true, exit(2, "profile doctor is not supported for native Windows targets")
 		}
 		if useCoordinator {
-			recorder.AttachLease(leaseID, serverSlug(server), cfg)
+			if err := recorder.AttachLease(leaseID, serverSlug(server), cfg); err != nil {
+				return true, err
+			}
 			startRunHeartbeat(nil)
 		}
 		if recorder.runID != "" {

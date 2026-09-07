@@ -334,6 +334,7 @@ func TestRunRecorderRedactsCoordinatorDiagnosticEvents(t *testing.T) {
 			rec.runID = "run_123"
 
 			test.record(rec)
+			rec.waitForEvents(time.Second)
 
 			if len(events) != 1 {
 				t.Fatalf("events=%v, want one posted diagnostic", events)
@@ -381,7 +382,7 @@ func TestRunRecorderPreservesRawStreamEventData(t *testing.T) {
 		t.Fatal(err)
 	}
 	stdout.Flush()
-	rec.waitForOutputEvents(time.Second)
+	rec.waitForEvents(time.Second)
 
 	if len(events) != 1 || events[0].Type != "stdout" {
 		t.Fatalf("events=%#v, want one stdout event", events)
@@ -409,6 +410,7 @@ func TestRunRecorderRedactsRefreshedRuntimeDiagnosticSecrets(t *testing.T) {
 
 	rec.Event("actions.hydrate.failed", "hydrate", "original="+originalSecret+" refreshed="+refreshedSecret+" region=eu")
 
+	rec.waitForEvents(time.Second)
 	if len(events) != 1 {
 		t.Fatalf("events=%#v, want one posted diagnostic", events)
 	}
@@ -448,6 +450,7 @@ func TestRunRecorderRedactsDiagnosticSecretsAfterLateCoordinatorAttachment(t *te
 		"region=eu",
 	}, " "))
 
+	rec.waitForEvents(time.Second)
 	if len(events) != 1 {
 		t.Fatalf("events=%#v, want one posted diagnostic", events)
 	}
@@ -499,6 +502,7 @@ func TestRunRecorderRedactsPersistedCoordinatorDiagnosticEvents(t *testing.T) {
 		"region=eu",
 	}, " "))
 
+	rec.waitForEvents(time.Second)
 	events, err := client.RunEvents(context.Background(), run.ID, 0, 20)
 	if err != nil {
 		t.Fatalf("read persisted coordinator events: %v", err)
@@ -541,7 +545,7 @@ func TestRunEventStreamWriterCapsOutputEvents(t *testing.T) {
 		}
 	}
 	stdout.Flush()
-	rec.waitForOutputEvents(time.Second)
+	rec.waitForEvents(time.Second)
 
 	var outputBytes, outputEvents, truncatedEvents int
 	for _, event := range events {
@@ -604,7 +608,7 @@ func TestRunEventStreamWriterDoesNotBlockOnCoordinatorPost(t *testing.T) {
 	var joined chan struct{}
 	t.Cleanup(func() {
 		releasePost()
-		rec.waitForOutputEvents(time.Second)
+		rec.waitForEvents(time.Second)
 		if joined != nil {
 			select {
 			case <-joined:
@@ -634,10 +638,10 @@ func TestRunEventStreamWriterDoesNotBlockOnCoordinatorPost(t *testing.T) {
 	releasePost()
 	joined = make(chan struct{})
 	go func() {
-		rec.output.wg.Wait()
+		<-rec.publisher.done
 		close(joined)
 	}()
-	rec.waitForOutputEvents(time.Second)
+	rec.waitForEvents(time.Second)
 	select {
 	case <-joined:
 	case <-time.After(time.Second):
@@ -695,6 +699,7 @@ func TestRunRecorderDefersCreateWhenCoordinatorRequiresLeaseID(t *testing.T) {
 	if got := createBodies[1]["leaseID"]; got != "cbx_abcdef123456" {
 		t.Fatalf("second create leaseID=%#v", got)
 	}
+	rec.waitForEvents(time.Second)
 	if got := eventBody["type"]; got != "lease.created" {
 		t.Fatalf("event body=%#v", eventBody)
 	}
@@ -770,6 +775,7 @@ func TestRunRecorderDefersCreateForExplicitLeaseRuns(t *testing.T) {
 	if got := createBodies[0]["leaseID"]; got != "cbx_abcdef123456" {
 		t.Fatalf("create leaseID=%#v", got)
 	}
+	rec.waitForEvents(time.Second)
 	if got := eventBody["type"]; got != "lease.created" {
 		t.Fatalf("event body=%#v", eventBody)
 	}
@@ -828,6 +834,7 @@ func TestRunRecorderRetriesTransientCreateFailureAfterLease(t *testing.T) {
 	if got := createBodies[1]["leaseID"]; got != "cbx_abcdef123456" {
 		t.Fatalf("second create leaseID=%#v", got)
 	}
+	rec.waitForEvents(time.Second)
 	if got := eventBody["type"]; got != "lease.created" {
 		t.Fatalf("event body=%#v", eventBody)
 	}
@@ -955,6 +962,7 @@ func TestRunRecorderRetriesFailedLeaseCreateOnReplacementLease(t *testing.T) {
 	if got := createBodies[2]["leaseID"]; got != "cbx_replacement123" {
 		t.Fatalf("replacement create leaseID=%#v", got)
 	}
+	rec.waitForEvents(time.Second)
 	if got := eventBody["leaseID"]; got != "cbx_replacement123" {
 		t.Fatalf("lease.created body=%#v", eventBody)
 	}
@@ -1044,7 +1052,7 @@ func TestRunRecorderSuppressesMissingEventEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	stdout.Flush()
-	rec.waitForOutputEvents(time.Second)
+	rec.waitForEvents(time.Second)
 	rec.Finish(context.Background(), SSHTarget{TargetOS: targetWindows}, 0, time.Second, time.Second, "ok", false, nil, FailureClassification{}, nil)
 
 	if eventRequests != 1 {
