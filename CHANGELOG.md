@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Tailscale: keep provider diagnostics and OAuth credentials out of preflight and tag-ownership errors while preserving operation, HTTP status, and actionable tag guidance.
+- Tailscale: keep provider diagnostics and OAuth credentials out of preflight and tag-ownership errors while preserving operation, HTTP status, and actionable tag guidance. [PR 1940](https://github.com/openclaw/crabbox/pull/1940).
 
 ## 0.51.0 - 2026-09-06
 
