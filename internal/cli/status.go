@@ -427,6 +427,9 @@ func resolveSSHLeaseTarget(ctx context.Context, backend SSHLoginBackend, req Res
 		expectedRepoRoot = strings.TrimSpace(claimBefore.RepoRoot)
 	}
 	if claimExistedBefore {
+		if !resolvedLeaseClaimIdentityCompatible(claimBefore, lease.Server) {
+			return LeaseTarget{}, exit(2, "lease %s has an incompatible provider identity; refusing to rebind resolved access", claimBefore.LeaseID)
+		}
 		leaseIDChanged := lease.LeaseID != claimBefore.LeaseID
 		var discardedClaim leaseClaim
 		discardedClaimExists := false
@@ -465,8 +468,8 @@ func resolveSSHLeaseTarget(ctx context.Context, backend SSHLoginBackend, req Res
 				if err := removeLeaseClaimIfUnchanged(resolvedLeaseID, discardedClaim); err != nil {
 					return LeaseTarget{}, err
 				}
+				removeStoredTestboxKey(resolvedLeaseID)
 			}
-			removeStoredTestboxKey(resolvedLeaseID)
 		}
 	}
 	var claimAfter leaseClaim
@@ -543,6 +546,13 @@ func resolvedLeaseClaimBefore(snapshot leaseClaimsSnapshot, provider, providerSc
 	})
 }
 
+func resolvedLeaseClaimIdentityCompatible(claim leaseClaim, server Server) bool {
+	// Missing identities remain unknown; compatibility alone does not attest ownership.
+	return (claim.CloudID == "" || server.CloudID == "" || claim.CloudID == server.CloudID) &&
+		(claim.CloudImmutableID == "" || server.ImmutableID == "" || claim.CloudImmutableID == server.ImmutableID) &&
+		(claim.CloudNumericID == 0 || server.ID == 0 || claim.CloudNumericID == server.ID)
+}
+
 func resolvedLeaseClaimAttestsResult(claim leaseClaim, server Server, expectedRepoRoot, expectedProviderScope string) bool {
 	claimProvider := canonicalClaimProvider(claim.Provider)
 	serverProvider := canonicalClaimProvider(firstNonBlank(server.Labels["provider"], server.Provider))
@@ -550,7 +560,7 @@ func resolvedLeaseClaimAttestsResult(claim leaseClaim, server Server, expectedRe
 	serverState := strings.ToLower(strings.TrimSpace(firstNonBlank(server.Labels["state"], server.Status)))
 	return (claimProvider == "" || serverProvider == "" || claimProvider == serverProvider) &&
 		(strings.TrimSpace(expectedProviderScope) == "" || strings.TrimSpace(claim.ProviderScope) == strings.TrimSpace(expectedProviderScope)) &&
-		(claim.CloudID == "" || server.CloudID == "" || claim.CloudID == server.CloudID) &&
+		resolvedLeaseClaimIdentityCompatible(claim, server) &&
 		resolvedLeaseClaimStateAttests(claimState, serverState) &&
 		strings.TrimSpace(claim.RepoRoot) == expectedRepoRoot
 }
