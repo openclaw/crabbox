@@ -5,6 +5,7 @@
 - Add `crabbox bench check` to enforce sample, failure, and p95 runner timing policy across every matched local benchmark group. [PR 1899](https://github.com/openclaw/crabbox/pull/1899). Thanks @vincentkoc.
 - Distinguish required-artifact, artifact-change, and artifact-schema validation failures from workload exits in run timing and failure digests, preserving exit 7 and artifact enforcement. [PR 1934](https://github.com/openclaw/crabbox/pull/1934), [Issue 1894](https://github.com/openclaw/crabbox/issues/1894). Thanks @coygeek.
 - Tailscale: keep provider diagnostics and OAuth credentials out of preflight and tag-ownership errors while preserving operation, HTTP status, and actionable tag guidance. [PR 1940](https://github.com/openclaw/crabbox/pull/1940).
+- Publish run diagnostics without delaying workload admission, while preserving ordered lease attribution and joining pending publication before terminal recording. [PR 1937](https://github.com/openclaw/crabbox/pull/1937).
 
 ## 0.51.0 - 2026-09-06
 
