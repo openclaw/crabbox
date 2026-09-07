@@ -1314,7 +1314,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		if useCoordinator {
 			if err := recorder.AttachLease(leaseID, serverSlug(server), cfg); err != nil {
-				return err
+				if !*syncOnly {
+					return err
+				}
+				// Sync-only has no signed command receipt and permits unavailable history.
+				recorder.warnRunHistory("sync-only run history binding unavailable: %v", err)
 			}
 		}
 		if recorder.runID != "" {

@@ -1020,13 +1020,13 @@ func TestRunRecorderSuppressesMissingEventEndpoint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
-			_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"state":"running","phase":"starting","logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z"}}`))
+			_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"cbx_abcdef123456","slug":"blue-lobster","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"state":"running","phase":"starting","logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/events":
 			eventRequests++
 			http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/finish":
 			finishRequests++
-			_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"state":"succeeded","phase":"completed","exitCode":0,"logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z","finishedAt":"2026-05-02T00:00:01Z"}}`))
+			_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"cbx_abcdef123456","slug":"blue-lobster","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"state":"succeeded","phase":"completed","exitCode":0,"logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z","finishedAt":"2026-05-02T00:00:01Z"}}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -1038,22 +1038,27 @@ func TestRunRecorderSuppressesMissingEventEndpoint(t *testing.T) {
 		Provider:   "aws",
 		Class:      "standard",
 		ServerType: "t3.small",
-	}, []string{"pnpm", "test"}, "", &stderr, false)
-	if rec.runID != "run_123" || rec.finished {
-		t.Fatalf("run handle must exist before lease attach or finish: %#v", rec)
+	}, []string{"pnpm", "test"}, "", &stderr, true)
+	if rec.runID != "" || rec.finished {
+		t.Fatalf("existing-lease run must defer its handle until lease resolution: %#v", rec)
 	}
-	rec.AttachLease("cbx_abcdef123456", "blue-lobster", Config{
+	err := rec.AttachLease("cbx_abcdef123456", "blue-lobster", Config{
 		Provider:   "aws",
 		Class:      "standard",
 		ServerType: "t3.small",
 	})
+	if err != nil {
+		t.Fatalf("existing authoritative binding needs no event endpoint: %v", err)
+	}
 	stdout := rec.StreamWriter("stdout")
 	if _, err := stdout.Write([]byte("hello")); err != nil {
 		t.Fatal(err)
 	}
 	stdout.Flush()
 	rec.waitForEvents(time.Second)
-	rec.Finish(context.Background(), SSHTarget{TargetOS: targetWindows}, 0, time.Second, time.Second, "ok", false, nil, FailureClassification{}, nil)
+	if err := rec.Finish(context.Background(), SSHTarget{TargetOS: targetWindows}, 0, time.Second, time.Second, "ok", false, nil, FailureClassification{}, nil); err != nil {
+		t.Fatal(err)
+	}
 
 	if eventRequests != 1 {
 		t.Fatalf("event requests=%d, want 1", eventRequests)

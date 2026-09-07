@@ -18,7 +18,6 @@ const (
 type runEventPublication struct {
 	coord *CoordinatorClient
 	input CoordinatorRunEventInput
-	ack   chan error
 }
 
 type runEventPublisher struct {
@@ -52,7 +51,7 @@ func (q *runEventPublisher) Enqueue(coord *CoordinatorClient, runID, stream, dat
 		return
 	}
 	for _, input := range q.eventInputs(stream, data) {
-		q.append(coord, runID, input, false)
+		q.append(coord, runID, input)
 	}
 }
 
@@ -97,18 +96,15 @@ func outputTruncatedEventInput() CoordinatorRunEventInput {
 
 // One FIFO owns phase and stream publication so delayed output cannot overtake
 // lease attribution or terminal recording. Every queued request is joined.
-func (q *runEventPublisher) append(coord *CoordinatorClient, runID string, input CoordinatorRunEventInput, acknowledged bool) error {
+func (q *runEventPublisher) append(coord *CoordinatorClient, runID string, input CoordinatorRunEventInput) {
 	if coord == nil || runID == "" {
-		return nil
+		return
 	}
 	publication := runEventPublication{coord: coord, input: input}
-	if acknowledged {
-		publication.ack = make(chan error, 1)
-	}
 	q.queueMu.Lock()
 	if q.disabled || q.queueClosed {
 		q.queueMu.Unlock()
-		return fmt.Errorf("run event publisher is closed")
+		return
 	}
 	if q.events == nil {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -126,19 +122,21 @@ func (q *runEventPublisher) append(coord *CoordinatorClient, runID string, input
 		if q.onError != nil {
 			q.onError(input.Type, err)
 		}
+		return
+	}
+}
+
+// A binding owns admission, so queued diagnostics cannot consume its capacity
+// or HTTP budget. Drain and join before posting, then resume the same publisher.
+func (q *runEventPublisher) Bind(coord *CoordinatorClient, runID string, input CoordinatorRunEventInput) error {
+	q.CloseAndWait(runEventOutputPostWait)
+	if err := postRunEvent(context.Background(), coord, runID, input); err != nil {
 		return err
 	}
-	if publication.ack != nil {
-		timer := time.NewTimer(runRecorderRequestTimeout)
-		defer timer.Stop()
-		select {
-		case err := <-publication.ack:
-			return err
-		case <-timer.C:
-			q.CloseAndWait(0)
-			return context.DeadlineExceeded
-		}
-	}
+	q.queueMu.Lock()
+	q.events, q.done, q.cancel = nil, nil, nil
+	q.queueClosed, q.disabled = false, false
+	q.queueMu.Unlock()
 	return nil
 }
 
@@ -163,9 +161,6 @@ func (q *runEventPublisher) post(ctx context.Context, runID string) {
 		}
 		if err == nil {
 			err = postRunEvent(ctx, publication.coord, runID, publication.input)
-		}
-		if publication.ack != nil {
-			publication.ack <- err
 		}
 		if err != nil && ctx.Err() == nil && stopped == nil && q.onError != nil && !q.onError(publication.input.Type, err) {
 			stopped = err

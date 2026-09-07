@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -179,5 +180,81 @@ func TestRunRecorderExistingLeaseCreateDoesNotWaitForDiagnostic(t *testing.T) {
 	rec.waitForEvents(time.Second)
 	if err := rec.requireHandle(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunRecorderBindingIgnoresDiagnosticBacklog(t *testing.T) {
+	for _, full := range []bool{false, true} {
+		t.Run(fmt.Sprint("full=", full), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				started := make(chan struct{})
+				diagnosticDone := false
+				client := &CoordinatorClient{BaseURL: "https://example.test", Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					var input CoordinatorRunEventInput
+					json.NewDecoder(req.Body).Decode(&input)
+					if input.Type == "command.started" {
+						close(started)
+						select {
+						case <-time.After(8 * time.Second):
+						case <-req.Context().Done():
+							time.Sleep(time.Second)
+						}
+						diagnosticDone = true
+						if err := req.Context().Err(); err != nil {
+							return nil, err
+						}
+					}
+					if input.Type == "lease.created" {
+						if !diagnosticDone {
+							t.Error("binding overtook diagnostic publisher join")
+						}
+						deadline, ok := req.Context().Deadline()
+						if !ok || deadline.Sub(time.Now()) != runRecorderRequestTimeout {
+							t.Error("binding did not receive its own HTTP request budget")
+						}
+						select {
+						case <-time.After(3 * time.Second):
+						case <-req.Context().Done():
+							return nil, req.Context().Err()
+						}
+					}
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"event":{"type":"accepted"}}`)), Header: make(http.Header), Request: req}, nil
+				})}}
+				rec := &runRecorder{coord: client, runID: "run_123", stderr: io.Discard}
+				rec.Event("command.started", "command", "")
+				<-started
+				if full {
+					for range runEventOutputQueueSize {
+						rec.Event("sync.finished", "synced", "")
+					}
+				}
+				if err := rec.AttachLease("cbx_replacement", "replacement", Config{Provider: "aws"}); err != nil {
+					t.Errorf("healthy binding rejected by diagnostic backlog: %v", err)
+				}
+				rec.Failed(nil)
+			})
+		})
+	}
+}
+
+func TestRunRecorderMissingBindingEndpointFailsAdmission(t *testing.T) {
+	for _, oldLease := range []string{"", "cbx_initial"} {
+		t.Run("old="+oldLease, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				calls++
+				http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+			}))
+			defer server.Close()
+			rec := &runRecorder{coord: &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}, runID: "run_123", leaseID: oldLease, stderr: io.Discard}
+			err := rec.AttachLease("cbx_next", "next", Config{Provider: "aws"})
+			if ExitCodeForError(err, 0) != 7 || !strings.Contains(err.Error(), "lease attribution") {
+				t.Fatalf("unbound run was admitted without a valid binding: %v", err)
+			}
+			if calls != 1 || rec.leaseID != oldLease {
+				t.Fatalf("failed binding changed attribution: calls=%d lease=%q", calls, rec.leaseID)
+			}
+			rec.Failed(nil)
+		})
 	}
 }

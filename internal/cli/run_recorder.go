@@ -121,7 +121,7 @@ func (r *runRecorder) appendEvent(kind string, input CoordinatorRunEventInput) {
 		}
 		return
 	}
-	r.publisher.append(r.coord, r.runID, input, false)
+	r.publisher.append(r.coord, r.runID, input)
 }
 
 func (r *runRecorder) AttachLease(leaseID, slug string, cfg Config) error {
@@ -159,8 +159,12 @@ func (r *runRecorder) AttachLease(leaseID, slug string, cfg Config) error {
 	// CreateRun already binds an existing lease. Only initial attribution and
 	// replacement need acknowledgement before the command's receipt can bind it.
 	needsBinding := r.leaseID != leaseID || r.leaseSlug != slug || r.leaseProvider != cfg.Provider
-	if err := r.publisher.append(r.coord, r.runID, input, needsBinding); err != nil && needsBinding {
-		return exit(7, "run history lease attribution failed for %s: %v", r.runID, err)
+	if needsBinding {
+		if err := r.publisher.Bind(r.coord, r.runID, input); err != nil {
+			return exit(7, "run history lease attribution failed for %s: %v", r.runID, err)
+		}
+	} else {
+		r.publisher.append(r.coord, r.runID, input)
 	}
 	r.leaseID, r.leaseSlug, r.leaseProvider = leaseID, slug, cfg.Provider
 	return nil
