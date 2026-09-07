@@ -249,6 +249,8 @@ func TestExecCommandRunnerFileCaptureHelper(t *testing.T) {
 		if err := child.Start(); err != nil {
 			os.Exit(97)
 		}
+		// Start the post-exit capture deadline only after the retained writer has booted.
+		awaitCaptureMarker(t, filepath.Join(dir, "leaf-pgid"))
 		os.Exit(23)
 	case "orphan-leaf":
 		parent, _ := strconv.Atoi(os.Args[index+3])
@@ -289,6 +291,7 @@ func TestExecCommandRunnerFileCaptureHelper(t *testing.T) {
 		if err := child.Start(); err != nil {
 			os.Exit(97)
 		}
+		awaitCaptureMarker(t, filepath.Join(dir, "leaf-pgid"))
 		_, _ = io.WriteString(os.Stdout, "out")
 	case "leaf":
 		_ = os.WriteFile(filepath.Join(dir, "leaf-pgid"), []byte(strconv.Itoa(syscall.Getpgrp())), 0o600)
