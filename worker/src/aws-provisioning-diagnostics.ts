@@ -1,3 +1,24 @@
+/// <reference types="node/async_hooks" />
+import { AsyncLocalStorage } from "node:async_hooks";
+
+export type AWSTransportObservation = {
+  requests: number;
+  credentialsMs: number;
+  credentialFailures: number;
+  signInvocations: number;
+  signCompletions: number;
+  signFailures: number;
+  signMs: number;
+  requestMs: number;
+  requestFailures: number;
+};
+
+const transportScope = new AsyncLocalStorage<(value: AWSTransportObservation) => void>();
+
+export function currentAWSTransportObserver() {
+  return transportScope.getStore();
+}
+
 const stepNames = [
   "key_pair",
   "image",
@@ -26,7 +47,16 @@ export type AWSProvisioningDiagnostics = ReturnType<typeof createAWSProvisioning
 // These observations are logs, never lease state or permission decisions.
 export function createAWSProvisioningDiagnostics(leaseId: string, region: string) {
   const startedAt = Date.now();
-  const steps = new Map(stepNames.map((name) => [name, { name, count: 0, totalMs: 0, errors: 0 }]));
+  const steps = new Map<
+    Step,
+    {
+      name: Step;
+      count: number;
+      totalMs: number;
+      errors: number;
+      transport?: AWSTransportObservation;
+    }
+  >(stepNames.map((name) => [name, { name, count: 0, totalMs: 0, errors: 0 }]));
   const record = (name: Step, durationMs: number, failed = false) => {
     const step = steps.get(name);
     if (!step) return;
@@ -40,7 +70,28 @@ export function createAWSProvisioningDiagnostics(leaseId: string, region: string
       const start = Date.now();
       let failed = true;
       try {
-        const result = await operation();
+        // Scope the deepest measured operation, not a mutable shared EC2 client.
+        // Concurrent leases and sibling preparations must never share counters.
+        const result = await transportScope.run((observation) => {
+          const step = steps.get(name);
+          if (!step) return;
+          if (!step.transport) {
+            step.transport = { ...observation };
+            return;
+          }
+          for (const key of [
+            "requests",
+            "credentialsMs",
+            "credentialFailures",
+            "signInvocations",
+            "signCompletions",
+            "signFailures",
+            "signMs",
+            "requestMs",
+            "requestFailures",
+          ] as const)
+            step.transport[key] += observation[key];
+        }, operation);
         failed = false;
         return result;
       } finally {

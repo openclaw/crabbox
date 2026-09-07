@@ -26289,7 +26289,20 @@ describe("fleet lease identity and idle", () => {
         expect.arrayContaining([
           { name: "ingress_wait", count: 1, totalMs: 41, errors: 0 },
           { name: "lifecycle_wait", count: 1, totalMs: 0, errors: 0 },
-          { name: "authorize_ingress", count: 2, totalMs: 14, errors: 0 },
+          expect.objectContaining({
+            name: "authorize_ingress",
+            count: 2,
+            totalMs: 14,
+            errors: 0,
+            transport: expect.objectContaining({
+              requests: 2,
+              requestMs: 14,
+              signInvocations: 2,
+              signCompletions: 2,
+              signFailures: 0,
+              requestFailures: 0,
+            }),
+          }),
         ]),
       );
     } finally {
