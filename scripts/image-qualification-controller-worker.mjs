@@ -80,9 +80,12 @@ export default {
         case "/prepare-network":
           return json(await env.AUTHORITY.prepareNetwork(input.runId));
         case "/dispatch-network":
-          return json(await env.AUTHORITY.dispatchNetwork(input.runId));
+          return json(await env.AUTHORITY.dispatchNetwork(input.runId, input.attemptId));
         case "/confirm-network":
-          await env.AUTHORITY.confirmNetwork(input.runId, input.ruleId);
+          await env.AUTHORITY.confirmNetwork(input.runId, input.attemptId, input.ruleId);
+          return json({ confirmed: true });
+        case "/confirm-network-revocation":
+          await env.AUTHORITY.confirmNetworkRevocation(input.runId, input.attemptId, input.ruleId);
           return json({ confirmed: true });
         case "/clear-network":
           await env.AUTHORITY.clearNetwork(input.runId, input.attemptId);

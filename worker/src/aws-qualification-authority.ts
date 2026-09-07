@@ -150,6 +150,7 @@ interface AWSQualificationRunState {
     attemptId: string;
     dispatchedUntil?: string;
     ruleId?: string;
+    revokedAt?: string;
     clearedAt?: string;
   };
 }
@@ -231,12 +232,20 @@ export class AWSQualificationController extends WorkerEntrypoint<
     return await qualificationRun(this.env, runId).prepareNetwork(this.ctx.props);
   }
 
-  async dispatchNetwork(runId: string): Promise<{ dispatchedUntil: string }> {
-    return await qualificationRun(this.env, runId).dispatchNetwork(this.ctx.props);
+  async dispatchNetwork(runId: string, attemptId: string): Promise<{ dispatchedUntil: string }> {
+    return await qualificationRun(this.env, runId).dispatchNetwork(this.ctx.props, attemptId);
   }
 
-  async confirmNetwork(runId: string, ruleId: string): Promise<void> {
-    await qualificationRun(this.env, runId).confirmNetwork(this.ctx.props, ruleId);
+  async confirmNetwork(runId: string, attemptId: string, ruleId: string): Promise<void> {
+    await qualificationRun(this.env, runId).confirmNetwork(this.ctx.props, attemptId, ruleId);
+  }
+
+  async confirmNetworkRevocation(runId: string, attemptId: string, ruleId: string): Promise<void> {
+    await qualificationRun(this.env, runId).confirmNetworkRevocation(
+      this.ctx.props,
+      attemptId,
+      ruleId,
+    );
   }
 
   async clearNetwork(runId: string, attemptId: string): Promise<void> {
@@ -515,27 +524,64 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
 
   async dispatchNetwork(
     controller: AWSQualificationControllerProps,
+    attemptId: string,
   ): Promise<{ dispatchedUntil: string }> {
     return await this.serialized(async () => {
       const run = await this.controllerRun(controller, true);
-      if (!run.network || run.network.dispatchedUntil || run.network.clearedAt)
+      if (
+        !run.network ||
+        run.network.attemptId !== attemptId ||
+        run.network.dispatchedUntil ||
+        run.network.clearedAt
+      )
         throw new Error("network dispatch is not prepared");
-      // External CLI calls are bounded to 25 seconds. Cleanup also waits and reconciles
-      // an ambiguous in-flight write before it can attest absence.
+      // This bounds new native dispatch, not AWS visibility. An elapsed fence never
+      // resolves an unknown write; cleanup must retain its recovery owner.
       run.network.dispatchedUntil = new Date(Date.now() + 60_000).toISOString();
       await this.ctx.storage.put(stateKey, run);
       return { dispatchedUntil: run.network.dispatchedUntil };
     });
   }
 
-  async confirmNetwork(controller: AWSQualificationControllerProps, ruleId: string): Promise<void> {
+  async confirmNetwork(
+    controller: AWSQualificationControllerProps,
+    attemptId: string,
+    ruleId: string,
+  ): Promise<void> {
     await this.serialized(async () => {
       const run = await this.controllerRun(controller);
-      if (!/^sgr-[0-9a-f]+$/.test(ruleId) || !run.network?.dispatchedUntil || run.network.clearedAt)
+      if (
+        !/^sgr-[0-9a-f]+$/.test(ruleId) ||
+        !run.network?.dispatchedUntil ||
+        run.network.attemptId !== attemptId ||
+        run.network.clearedAt
+      )
         throw new Error("invalid network receipt");
       if (run.network.ruleId && run.network.ruleId !== ruleId)
         throw new Error("network receipt changed");
       run.network.ruleId = ruleId;
+      await this.ctx.storage.put(stateKey, run);
+    });
+  }
+
+  async confirmNetworkRevocation(
+    controller: AWSQualificationControllerProps,
+    attemptId: string,
+    ruleId: string,
+  ): Promise<void> {
+    await this.serialized(async () => {
+      const run = await this.controllerRun(controller);
+      if (
+        !run.finalizingAt ||
+        !run.network?.dispatchedUntil ||
+        run.network.attemptId !== attemptId ||
+        !run.network.ruleId ||
+        run.network.ruleId !== ruleId ||
+        Date.parse(run.network.dispatchedUntil) > Date.now()
+      ) {
+        throw new Error("invalid network revocation receipt");
+      }
+      run.network.revokedAt ??= new Date().toISOString();
       await this.ctx.storage.put(stateKey, run);
     });
   }
@@ -550,6 +596,8 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         throw new Error("network cleanup identity mismatch");
       if (Date.parse(run.network.dispatchedUntil ?? "") > Date.now())
         throw new Error("network dispatch is still in flight");
+      if (run.network.dispatchedUntil && (!run.network.ruleId || !run.network.revokedAt))
+        throw new Error("network authorization outcome is unresolved");
       run.network.clearedAt ??= new Date().toISOString();
       await this.ctx.storage.put(stateKey, run);
     });

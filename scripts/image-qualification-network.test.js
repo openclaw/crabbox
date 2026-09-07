@@ -39,13 +39,28 @@ function fixture({ lost = false, foreign = false, delayed = 0, account = receipt
       ]
     : [];
   let fenced = false;
+  const recorded = {};
   return {
     calls,
     requests,
+    receipt: () => ({ ...receipt, ...recorded }),
+    reveal: () => {
+      delayed = 0;
+    },
     dispatch: async () => {
       fenced = true;
       calls.push("dispatch");
-      return { dispatchedUntil: new Date(Date.now() + 60_000).toISOString() };
+      recorded.dispatchedUntil = new Date(Date.now() + 60_000).toISOString();
+      return { dispatchedUntil: recorded.dispatchedUntil };
+    },
+    confirm: async (ruleId) => {
+      calls.push("confirm");
+      recorded.ruleId = ruleId;
+    },
+    confirmRevocation: async (ruleId) => {
+      assert.equal(ruleId, recorded.ruleId);
+      calls.push("confirm-revocation");
+      recorded.revokedAt = new Date().toISOString();
     },
     sleep: async () => {},
     call: async (service, operation, input, region) => {
@@ -88,7 +103,10 @@ function fixture({ lost = false, foreign = false, delayed = 0, account = receipt
           SecurityGroupRuleIds: ["sgr-1234"],
         });
         rules = [];
-        return {};
+        return {
+          Return: true,
+          RevokedSecurityGroupRules: [{ SecurityGroupRuleId: "sgr-1234" }],
+        };
       }
       throw new Error("unexpected API");
     },
@@ -103,10 +121,9 @@ test("admission persists dispatch before exact /32 authorization and recovers a 
     1,
   );
   assert.ok(api.calls.indexOf("dispatch") < api.calls.indexOf("authorize-security-group-ingress"));
-  assert.deepEqual(
-    await qualificationNetwork({ ...receipt, ruleId: "sgr-1234" }, { ...api, remove: true }),
-    { cleared: true },
-  );
+  assert.deepEqual(await qualificationNetwork(api.receipt(), { ...api, remove: true }), {
+    cleared: true,
+  });
   assert.equal(api.calls.filter((action) => action === "revoke-security-group-ingress").length, 1);
   const capture = process.env.QUALIFICATION_POLICY_FIXTURE_DIR;
   if (capture) {
@@ -118,20 +135,23 @@ test("admission persists dispatch before exact /32 authorization and recovers a 
   }
 });
 
-test("a dispatch acknowledgement delayed past completed cleanup cannot create ingress", async () => {
+test("a delayed dispatch acknowledgement cannot create ingress after cleanup retains recovery", async () => {
   const api = fixture();
   let clock = Date.now();
   const initial = clock;
   const dispatchedUntil = new Date(initial + 60_000).toISOString();
-  let cleared = false;
+  let retained = false;
   const dispatch = async () => {
     await api.dispatch();
     clock = initial + 120_000;
-    await qualificationNetwork(
-      { ...receipt, dispatchedUntil },
-      { ...api, remove: true, now: () => clock },
+    await assert.rejects(
+      qualificationNetwork(
+        { ...receipt, dispatchedUntil },
+        { ...api, remove: true, now: () => clock },
+      ),
+      /outcome is unresolved/,
     );
-    cleared = true;
+    retained = true;
     clock = initial + 130_000;
     return { dispatchedUntil };
   };
@@ -146,8 +166,156 @@ test("a dispatch acknowledgement delayed past completed cleanup cannot create in
     ),
     /dispatch deadline expired/,
   );
-  assert.equal(cleared, true);
+  assert.equal(retained, true);
   assert.ok(!api.calls.includes("authorize-security-group-ingress"));
+});
+
+test("hidden accepted ingress remains pending beyond every cleanup read and is recovered later", async () => {
+  const api = fixture({ lost: true, delayed: 50 });
+  await assert.rejects(qualificationNetwork(receipt, api), /outcome is unresolved/);
+  await assert.rejects(
+    qualificationNetwork(api.receipt(), { ...api, remove: true }),
+    /outcome is unresolved/,
+  );
+  assert.equal(api.receipt().ruleId, undefined);
+  assert.equal(api.receipt().revokedAt, undefined);
+  assert.ok(!api.calls.includes("revoke-security-group-ingress"));
+  api.reveal();
+  assert.deepEqual(await qualificationNetwork(api.receipt(), { ...api, remove: true }), {
+    cleared: true,
+  });
+  assert.ok(api.calls.indexOf("confirm") < api.calls.indexOf("revoke-security-group-ingress"));
+  assert.equal(
+    api.calls.filter((action) => action === "authorize-security-group-ingress").length,
+    1,
+  );
+});
+
+test("positive authorization is persisted even when subsequent inventory stays empty", async () => {
+  const api = fixture({ delayed: 50 });
+  await assert.rejects(qualificationNetwork(receipt, api), /outcome is unresolved/);
+  assert.equal(api.receipt().ruleId, "sgr-1234");
+  await assert.rejects(
+    qualificationNetwork(api.receipt(), { ...api, remove: true }),
+    /outcome is unresolved/,
+  );
+  assert.ok(!api.calls.includes("revoke-security-group-ingress"));
+});
+
+test("receipt persistence must complete before revocation and survives a lost controller reply", async () => {
+  const api = fixture({ lost: true, delayed: 50 });
+  await assert.rejects(qualificationNetwork(receipt, api), /outcome is unresolved/);
+  api.reveal();
+  await assert.rejects(
+    qualificationNetwork(api.receipt(), {
+      ...api,
+      remove: true,
+      confirm: async (ruleId) => {
+        await api.confirm(ruleId);
+        throw new Error("receipt reply lost after commit");
+      },
+    }),
+    /receipt reply lost/,
+  );
+  assert.equal(api.receipt().ruleId, "sgr-1234");
+  assert.ok(!api.calls.includes("revoke-security-group-ingress"));
+  assert.deepEqual(await qualificationNetwork(api.receipt(), { ...api, remove: true }), {
+    cleared: true,
+  });
+});
+
+test("a durable revocation survives a lost controller reply without repeating the AWS write", async () => {
+  const api = fixture();
+  await qualificationNetwork(receipt, api);
+  await assert.rejects(
+    qualificationNetwork(api.receipt(), {
+      ...api,
+      remove: true,
+      confirmRevocation: async (ruleId) => {
+        await api.confirmRevocation(ruleId);
+        throw new Error("revocation reply lost after commit");
+      },
+    }),
+    /revocation reply lost/,
+  );
+  assert.ok(api.receipt().revokedAt);
+  assert.deepEqual(await qualificationNetwork(api.receipt(), { ...api, remove: true }), {
+    cleared: true,
+  });
+  assert.equal(api.calls.filter((action) => action === "revoke-security-group-ingress").length, 1);
+});
+
+test("ambiguous revocation stays pending even if the rule disappears", async () => {
+  const api = fixture();
+  await qualificationNetwork(receipt, api);
+  const call = api.call;
+  await assert.rejects(
+    qualificationNetwork(api.receipt(), {
+      ...api,
+      remove: true,
+      call: async (...args) => {
+        const response = await call(...args);
+        if (args[1] === "revoke-security-group-ingress") throw new Error("AWS reply lost");
+        return response;
+      },
+    }),
+    /AWS reply lost/,
+  );
+  assert.equal(api.receipt().revokedAt, undefined);
+  await assert.rejects(
+    qualificationNetwork(api.receipt(), { ...api, remove: true }),
+    /outcome is unresolved/,
+  );
+});
+
+test("revocation requires positive success and the exact revoked rule ID", async () => {
+  for (const response of [
+    {},
+    { Return: false, RevokedSecurityGroupRules: [{ SecurityGroupRuleId: "sgr-1234" }] },
+    { Return: true, RevokedSecurityGroupRules: [{ SecurityGroupRuleId: "sgr-9999" }] },
+  ]) {
+    const api = fixture();
+    await qualificationNetwork(receipt, api);
+    const call = api.call;
+    await assert.rejects(
+      qualificationNetwork(api.receipt(), {
+        ...api,
+        remove: true,
+        call: async (...args) => {
+          const result = await call(...args);
+          return args[1] === "revoke-security-group-ingress" ? response : result;
+        },
+      }),
+      /revocation outcome is unresolved/,
+    );
+    assert.equal(api.receipt().revokedAt, undefined);
+  }
+});
+
+test("authorization receipts require exact group, shape, tags and rule ID before persistence", async () => {
+  for (const change of [
+    { GroupId: "sg-9999" },
+    { FromPort: 23 },
+    { Tags: [] },
+    { SecurityGroupRuleId: "invalid" },
+  ]) {
+    const api = fixture();
+    const call = api.call;
+    await assert.rejects(
+      qualificationNetwork(receipt, {
+        ...api,
+        call: async (...args) => {
+          const result = await call(...args);
+          if (args[1] === "authorize-security-group-ingress")
+            Object.assign(result.SecurityGroupRules[0], change);
+          return result;
+        },
+      }),
+      /ownership mismatch/,
+    );
+    assert.equal(api.receipt().ruleId, undefined);
+    assert.ok(!api.calls.includes("revoke-security-group-ingress"));
+  }
 });
 
 test("admission reserves the full native-call budget in both absolute cutoffs", async () => {

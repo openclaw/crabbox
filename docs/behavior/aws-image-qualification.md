@@ -132,12 +132,22 @@ operation digest (`crabbox_qualification_network`). Exact readback precedes
 `armExecution`; the candidate transport rejects requests before this durable
 gate. A lost authorization response is reconciled by those tags, never retried
 blindly and never recovered by adopting a foreign duplicate.
+The protected owner persists an exact validated rule receipt from a successful
+authorization response or owned inventory before any revocation. A receipt
+persistence failure prevents deletion.
 
 Finalization fences execution first. Relay, compute, network, and candidate
 cleanup each receive an independent attempt. The network owner waits out bounded
 in-flight admission, reconciles run-owned rules, revokes exact rule IDs, and
 verifies absence before recording completion. A changed or foreign rule is not
-deleted. Compute cleanup may complete while network recovery remains pending;
+deleted. Empty inventory reads never resolve a dispatched authorization, even
+after every bounded poll and the dispatch deadline have elapsed. Only an intent
+that was never dispatched, or a recorded owned rule with a validated AWS
+revocation response, durable revocation acknowledgment, and observed absence,
+can be cleared. An ambiguous revocation response remains pending; a generic
+not-found response is not cleanup proof. A later reaper can recover a rule when
+it becomes visible, or resume from an already durable revocation acknowledgment.
+Compute cleanup may complete while network recovery remains pending;
 overall finalization and registry retirement wait for both. The controller is
 retained on incomplete teardown. The authority alarm fences and cleans compute;
 only the protected finalizer/reaper owns network writes.
@@ -171,7 +181,8 @@ metadata credentials, retries, and credential logging disabled.
 The authority returns its persisted absolute ingress-dispatch deadline. Before
 authorization, the helper requires the entire 25-second native-call budget to
 fit inside both that fence and the run expiry. A delayed acknowledgement after
-finalization cannot start a new write.
+finalization cannot start a new write. This deadline bounds dispatch, not AWS
+visibility, and cannot turn an unresolved write into verified absence.
 
 The provisioning owner must verify the unattended reaper can obtain this session,
 refresh it before expiry if recovery remains incomplete, and remove the temporary

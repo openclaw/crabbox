@@ -1276,11 +1276,19 @@ async function arm() {
     runId: expected.runId,
   });
   if (receipt.ipv4 !== network.ipv4) throw new Error("executor registration changed");
-  const { ruleId } = await qualificationNetwork(receipt, {
+  await qualificationNetwork(receipt, {
     dispatch: () =>
-      controllerCall(controllerURL, token, "dispatch-network", { runId: expected.runId }),
+      controllerCall(controllerURL, token, "dispatch-network", {
+        runId: expected.runId,
+        attemptId: receipt.attemptId,
+      }),
+    confirm: (ruleId) =>
+      controllerCall(controllerURL, token, "confirm-network", {
+        runId: expected.runId,
+        attemptId: receipt.attemptId,
+        ruleId,
+      }),
   });
-  await controllerCall(controllerURL, token, "confirm-network", { runId: expected.runId, ruleId });
   // Revalidate after the admission wait, immediately before releasing this executor.
   await verifyCandidateIdentity({ artifact: true });
   await verifyExecutionDeployment(cf, expected);
@@ -1698,7 +1706,21 @@ async function cleanupRun({
   await attempt("network", async () => {
     const network = await controllerCall(controllerURL, token, "network", { runId: run.runId });
     if (network.attemptId && !network.clearedAt) {
-      await qualificationNetwork(network, { remove: true });
+      await qualificationNetwork(network, {
+        remove: true,
+        confirm: (ruleId) =>
+          controllerCall(controllerURL, token, "confirm-network", {
+            runId: run.runId,
+            attemptId: network.attemptId,
+            ruleId,
+          }),
+        confirmRevocation: (ruleId) =>
+          controllerCall(controllerURL, token, "confirm-network-revocation", {
+            runId: run.runId,
+            attemptId: network.attemptId,
+            ruleId,
+          }),
+      });
       await controllerCall(controllerURL, token, "clear-network", {
         runId: run.runId,
         attemptId: network.attemptId,

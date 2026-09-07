@@ -32,7 +32,10 @@ function validate(receipt) {
     !isIPv4(receipt.ipv4) ||
     !Number.isFinite(Date.parse(receipt.expiresAt)) ||
     !Number.isFinite(Date.parse(receipt.cleanupNotAfter)) ||
-    Date.parse(receipt.cleanupNotAfter) <= Date.parse(receipt.expiresAt)
+    Date.parse(receipt.cleanupNotAfter) <= Date.parse(receipt.expiresAt) ||
+    (receipt.dispatchedUntil && !Number.isFinite(Date.parse(receipt.dispatchedUntil))) ||
+    (receipt.ruleId && !/^sgr-[0-9a-f]+$/.test(receipt.ruleId)) ||
+    (receipt.revokedAt && (!receipt.ruleId || !Number.isFinite(Date.parse(receipt.revokedAt))))
   ) {
     throw new Error("invalid protected network receipt");
   }
@@ -106,7 +109,7 @@ export function networkCLI(env = process.env, minimumExpiry = Date.now() + 60_00
 /* oxlint-disable eslint/no-await-in-loop -- AWS cursors and bounded reconciliation observe the preceding response before proceeding. */
 export async function qualificationNetwork(
   receipt,
-  { remove = false, call, dispatch, sleep = wait, now = Date.now } = {},
+  { remove = false, call, dispatch, confirm, confirmRevocation, sleep = wait, now = Date.now } = {},
 ) {
   validate(receipt);
   call ??= networkCLI(process.env, remove ? undefined : Date.parse(receipt.cleanupNotAfter));
@@ -116,9 +119,15 @@ export async function qualificationNetwork(
   if (!remove && now() >= Date.parse(receipt.expiresAt))
     throw new Error("network admission expired");
   const expectedTags = tags(receipt);
+  let recordedRuleId = receipt.ruleId;
+  let revoked = Boolean(receipt.revokedAt);
   const owned = (rule) => {
     const actual = Object.fromEntries((rule.Tags ?? []).map(({ Key, Value }) => [Key, Value]));
-    return Object.entries(expectedTags).every(([key, value]) => actual[key] === value);
+    return (
+      rule.Tags?.length === Object.keys(expectedTags).length &&
+      Object.keys(actual).length === Object.keys(expectedTags).length &&
+      Object.entries(expectedTags).every(([key, value]) => actual[key] === value)
+    );
   };
   const exact = (rule) =>
     rule.GroupId === receipt.securityGroupId &&
@@ -131,6 +140,19 @@ export async function qualificationNetwork(
     !rule.PrefixListId &&
     !rule.ReferencedGroupInfo &&
     /^sgr-[0-9a-f]+$/.test(rule.SecurityGroupRuleId);
+  const recordRule = async (rule) => {
+    if (
+      !exact(rule) ||
+      !owned(rule) ||
+      (recordedRuleId && recordedRuleId !== rule.SecurityGroupRuleId)
+    ) {
+      throw new Error("network rule ownership mismatch");
+    }
+    if (recordedRuleId === rule.SecurityGroupRuleId) return;
+    if (!confirm) throw new Error("network receipt persistence is absent");
+    await confirm(rule.SecurityGroupRuleId);
+    recordedRuleId = rule.SecurityGroupRuleId;
+  };
   const inventory = async () => {
     const rules = [];
     let NextToken;
@@ -152,7 +174,7 @@ export async function qualificationNetwork(
     if (
       matches.some((rule) => !exact(rule)) ||
       matches.length > 1 ||
-      (receipt.ruleId && matches.some((rule) => rule.SecurityGroupRuleId !== receipt.ruleId))
+      (recordedRuleId && matches.some((rule) => rule.SecurityGroupRuleId !== recordedRuleId))
     ) {
       throw new Error("network rule ownership mismatch");
     }
@@ -162,31 +184,52 @@ export async function qualificationNetwork(
     const remaining = Date.parse(receipt.dispatchedUntil ?? "") - now();
     if (remaining > 60_000) throw new Error("invalid network dispatch window");
     if (remaining > 0) await sleep(remaining);
-    // Reconcile lost responses and eventual visibility before confirming durable absence.
+    // Empty reads cannot resolve a dispatched write. Only a positively observed
+    // owned rule and durable revoke acknowledgment permit absence to finish cleanup.
     for (const delay of [0, 1_000, 2_000, 4_000, 8_000, 15_000, 30_000]) {
       await sleep(delay);
       const { matches, rules } = await inventory();
       if (
-        receipt.ruleId &&
-        rules.some((rule) => rule.SecurityGroupRuleId === receipt.ruleId && !owned(rule))
+        recordedRuleId &&
+        rules.some((rule) => rule.SecurityGroupRuleId === recordedRuleId && !owned(rule))
       ) {
         throw new Error("recorded network rule is no longer owned");
       }
       for (const rule of matches) {
-        await invoke("revoke-security-group-ingress", {
+        if (!receipt.dispatchedUntil) throw new Error("network rule has no recorded dispatch");
+        if (revoked) continue;
+        await recordRule(rule);
+        if (!confirmRevocation) throw new Error("network revocation persistence is absent");
+        const response = await invoke("revoke-security-group-ingress", {
           GroupId: receipt.securityGroupId,
           SecurityGroupRuleIds: [rule.SecurityGroupRuleId],
         });
+        if (
+          response.Return !== true ||
+          !Array.isArray(response.RevokedSecurityGroupRules) ||
+          response.RevokedSecurityGroupRules.length !== 1 ||
+          response.RevokedSecurityGroupRules[0].SecurityGroupRuleId !== recordedRuleId
+        ) {
+          throw new Error("network revocation outcome is unresolved");
+        }
+        await confirmRevocation(recordedRuleId);
+        revoked = true;
       }
     }
     if ((await inventory()).matches.length) throw new Error("network rule remains after cleanup");
+    if (receipt.dispatchedUntil && !revoked)
+      throw new Error("network authorization outcome is unresolved");
     return { cleared: true };
   }
   const { rules, matches } = await inventory();
   if (rules.some((rule) => rule.IsEgress === false && !owned(rule))) {
     throw new Error("qualification group has foreign ingress");
   }
-  if (matches.length) return { ruleId: matches[0].SecurityGroupRuleId };
+  if (matches.length) {
+    if (!receipt.dispatchedUntil) throw new Error("network rule has no recorded dispatch");
+    await recordRule(matches[0]);
+    return { ruleId: matches[0].SecurityGroupRuleId };
+  }
   if (receipt.dispatchedUntil) throw new Error("ambiguous network admission requires cleanup");
   if (!dispatch) throw new Error("network dispatch fence is absent");
   const dispatched = await dispatch();
@@ -221,6 +264,11 @@ export async function qualificationNetwork(
   } catch {
     // No blind retry: the persisted dispatch is recovered by run tags.
   }
+  if (created) {
+    if (!Array.isArray(created.SecurityGroupRules) || created.SecurityGroupRules.length !== 1)
+      throw new Error("network authorization receipt is invalid");
+    await recordRule(created.SecurityGroupRules[0]);
+  }
   for (const delay of [0, 1_000, 2_000, 4_000, 8_000]) {
     await sleep(delay);
     const { matches: readback, rules: current } = await inventory();
@@ -236,6 +284,7 @@ export async function qualificationNetwork(
       ) {
         throw new Error("network authorization readback mismatch");
       }
+      await recordRule(readback[0]);
       return { ruleId };
     }
   }

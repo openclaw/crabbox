@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
+import childProcess, { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
-import crypto from "node:crypto";
 import test from "node:test";
 
 const controller = "crabbox-image-qualification-controller";
@@ -30,9 +31,51 @@ function bindings(hash) {
 }
 
 function initialState(options = {}) {
+  const network = options.network
+    ? {
+        runId: "image-qualification-42-1",
+        attempt: "1",
+        attemptId: "c".repeat(64),
+        owner: "qualification@example.invalid",
+        candidateSha: "a".repeat(40),
+        deploymentHash,
+        accountId: "123456789012",
+        region: "us-west-2",
+        securityGroupId: "sg-12345678",
+        ipv4: "203.0.113.7",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        cleanupNotAfter: new Date(Date.now() + 31 * 60_000).toISOString(),
+        dispatchedUntil: new Date(Date.now() - 60_000).toISOString(),
+      }
+    : undefined;
   return {
     options,
     events: [],
+    network,
+    networkHiddenReads: options.networkHiddenReads ?? 0,
+    networkRules: network
+      ? [
+          {
+            SecurityGroupRuleId: "sgr-1234",
+            GroupId: network.securityGroupId,
+            IsEgress: false,
+            IpProtocol: "tcp",
+            FromPort: 22,
+            ToPort: 22,
+            CidrIpv4: `${network.ipv4}/32`,
+            Tags: options.networkForeign
+              ? []
+              : Object.entries({
+                  crabbox_qualification_run: network.runId,
+                  crabbox_qualification_attempt: network.attempt,
+                  crabbox_qualification_owner: network.owner,
+                  crabbox_qualification_sha: network.candidateSha,
+                  crabbox_qualification_expiry: network.expiresAt,
+                  crabbox_qualification_network: network.attemptId,
+                }).map(([Key, Value]) => ({ Key, Value })),
+          },
+        ]
+      : [],
     candidate: options.candidate ?? false,
     staleCandidate: options.staleCandidate ?? false,
     controller: options.controller
@@ -57,6 +100,42 @@ function installAPI(file) {
   let controllerReads = 0;
   let scriptLists = 0;
   process.on("exit", () => fs.writeFileSync(file, JSON.stringify(state)));
+  if (state.network) {
+    // The subprocess executes the real network adapter without invoking a native
+    // credentialed CLI. Persisted state survives each independent reaper process.
+    childProcess.execFileSync = (program, args) => {
+      assert.equal(program, "aws");
+      const operation = args[1];
+      const input = JSON.parse(args[args.indexOf("--cli-input-json") + 1]);
+      events.push(`AWS ${operation}`);
+      if (operation === "get-caller-identity")
+        return JSON.stringify({ Account: state.network.accountId });
+      if (operation === "describe-security-group-rules") {
+        if (state.networkHiddenReads > 0) {
+          state.networkHiddenReads -= 1;
+          return JSON.stringify({ SecurityGroupRules: [] });
+        }
+        return JSON.stringify({ SecurityGroupRules: state.networkRules });
+      }
+      assert.equal(operation, "revoke-security-group-ingress");
+      assert.equal(state.network.ruleId, "sgr-1234", "receipt must be durable before AWS deletion");
+      assert.deepEqual(input, {
+        GroupId: state.network.securityGroupId,
+        SecurityGroupRuleIds: ["sgr-1234"],
+      });
+      state.networkRules = [];
+      if (options.networkRevokeAmbiguous) throw new Error("AWS revocation response lost");
+      return JSON.stringify({
+        Return: true,
+        RevokedSecurityGroupRules: [{ SecurityGroupRuleId: "sgr-1234" }],
+      });
+    };
+    syncBuiltinESMExports();
+    globalThis.setTimeout = (callback) => {
+      queueMicrotask(callback);
+      return 0;
+    };
+  }
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(input);
     const method = init.method ?? "GET";
@@ -84,10 +163,33 @@ function installAPI(file) {
       if (route === "/begin-finalization") return json({ finalizing: true });
       if (route === "/network") {
         if (options.networkFailure) return json({ error: "unavailable" }, 503);
-        return json({});
+        return json(state.network ?? {});
+      }
+      if (route === "/confirm-network") {
+        const input = JSON.parse(init.body);
+        assert.equal(input.attemptId, state.network.attemptId);
+        if (options.networkPersistFailure) return json({ error: "unavailable" }, 503);
+        state.network.ruleId = input.ruleId;
+        return json({ confirmed: true });
+      }
+      if (route === "/confirm-network-revocation") {
+        const input = JSON.parse(init.body);
+        assert.equal(input.attemptId, state.network.attemptId);
+        assert.equal(input.ruleId, state.network.ruleId);
+        state.network.revokedAt = new Date().toISOString();
+        if (options.networkRevocationReplyLost) return json({ error: "reply lost" }, 503);
+        return json({ confirmed: true });
+      }
+      if (route === "/clear-network") {
+        assert.ok(state.network.ruleId && state.network.revokedAt);
+        state.network.clearedAt = new Date().toISOString();
+        return json({ cleared: true });
       }
       if (route === "/finalize") {
         if (options.computeFailure) return json({ error: "unavailable" }, 503);
+        state.computeCleared = true;
+        if (state.network && !state.network.clearedAt)
+          return json({ error: "network pending" }, 409);
         return json({ finalized: true });
       }
       if (route === "/attest") {
@@ -174,7 +276,7 @@ function installAPI(file) {
         if (options.uploadFailure === "before") throw new Error("upload response lost");
         const metadata = JSON.parse(await init.body.get("metadata").text());
         state.controller = {
-          bindings: metadata.bindings.map(({ text, ...binding }) => binding),
+          bindings: metadata.bindings.map(({ text: _text, ...binding }) => binding),
           version,
           tags: metadata.tags ?? [],
         };
@@ -198,7 +300,7 @@ function installAPI(file) {
 if (process.env.QUALIFICATION_TEST_STATE) {
   installAPI(process.env.QUALIFICATION_TEST_STATE);
 } else {
-  function fixture(t, options) {
+  function fixture(t, options = {}) {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-reaper-test-"));
     t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
     const stateFile = path.join(directory, "state.json");
@@ -217,6 +319,16 @@ if (process.env.QUALIFICATION_TEST_STATE) {
           QUALIFICATION_CONTROLLER_TOKEN: token,
           QUALIFICATION_PROOF_DIR: proofDirectory,
           QUALIFICATION_TEST_STATE: stateFile,
+          ...(options.network
+            ? {
+                AWS_ACCESS_KEY_ID: "synthetic",
+                AWS_SECRET_ACCESS_KEY: "synthetic",
+                AWS_SESSION_TOKEN: "synthetic",
+                QUALIFICATION_NETWORK_CREDENTIAL_EXPIRES_AT: new Date(
+                  Date.now() + 180 * 60_000,
+                ).toISOString(),
+              }
+            : {}),
         },
       });
       assert.equal(child.error, undefined);
@@ -235,6 +347,82 @@ if (process.env.QUALIFICATION_TEST_STATE) {
   const deletes = (state) =>
     state.events.filter((event) => event === `DELETE /workers/scripts/${controller}`);
   const calls = (state) => state.events.filter((event) => /^POST \/(?!workers)/.test(event));
+
+  test("late visible ingress preserves recovery while compute and Workers clean, then reaps exactly", (t) => {
+    const reap = fixture(t, {
+      active: true,
+      controller: true,
+      candidate: true,
+      network: true,
+      networkHiddenReads: 8,
+    });
+    const first = reap();
+    assert.equal(first.status, 1);
+    assert.equal(first.state.computeCleared, true);
+    assert.equal(first.state.candidate, false);
+    assert.ok(first.state.run && first.state.controller);
+    assert.ok(!first.state.events.includes("POST /clear-network"));
+    assert.ok(!first.state.events.includes("POST /retire"));
+    assert.ok(!first.state.events.includes("AWS revoke-security-group-ingress"));
+    const second = reap();
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(second.state.run, null);
+    assert.equal(second.state.controller, null);
+    assert.equal(second.state.networkRules.length, 0);
+    assert.ok(
+      second.state.events.indexOf("POST /confirm-network") <
+        second.state.events.indexOf("AWS revoke-security-group-ingress"),
+    );
+    assert.ok(second.state.network.revokedAt);
+  });
+
+  test("reaper resumes a durable revocation after a lost controller reply", (t) => {
+    const reap = fixture(t, {
+      active: true,
+      controller: true,
+      candidate: true,
+      network: true,
+      networkRevocationReplyLost: true,
+    });
+    const first = reap();
+    assert.equal(first.status, 1);
+    assert.ok(first.state.network.revokedAt);
+    assert.ok(first.state.run && first.state.controller);
+    assert.equal(first.state.candidate, false);
+    const second = reap();
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(second.state.run, null);
+    assert.equal(
+      second.state.events.filter((event) => event === "AWS revoke-security-group-ingress").length,
+      1,
+    );
+  });
+
+  for (const failure of ["networkPersistFailure", "networkRevokeAmbiguous", "networkForeign"]) {
+    test(`reaper preserves unresolved ownership across ${failure}`, (t) => {
+      const reap = fixture(t, {
+        active: true,
+        controller: true,
+        candidate: true,
+        network: true,
+        [failure]: true,
+      });
+      const first = reap();
+      assert.equal(first.status, 1);
+      assert.equal(first.state.computeCleared, true);
+      assert.equal(first.state.candidate, false);
+      assert.ok(first.state.run && first.state.controller);
+      assert.equal(first.state.network.revokedAt, undefined);
+      const second = reap();
+      assert.equal(second.status, 1);
+      assert.ok(second.state.run && second.state.controller);
+      assert.ok(!second.state.events.includes("POST /retire"));
+      if (failure !== "networkRevokeAmbiguous") {
+        assert.ok(!second.state.events.includes("AWS revoke-security-group-ingress"));
+        assert.equal(second.state.networkRules.length, 1);
+      }
+    });
+  }
 
   for (const failure of ["networkFailure", "computeFailure"]) {
     test(`cleanup continues across ${failure} and retains durable recovery`, (t) => {

@@ -36,6 +36,7 @@ export interface AWSQualificationNetwork {
   attemptId?: string;
   dispatchedUntil?: string;
   ruleId?: string;
+  revokedAt?: string;
   clearedAt?: string;
 }
 
