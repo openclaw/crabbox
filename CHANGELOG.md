@@ -9,7 +9,7 @@
 - Tailscale: keep provider diagnostics and OAuth credentials out of preflight and tag-ownership errors while preserving operation, HTTP status, and actionable tag guidance. [PR 1940](https://github.com/openclaw/crabbox/pull/1940).
 - Publish run diagnostics without delaying workload admission, while preserving ordered lease attribution and joining pending publication before terminal recording. [PR 1937](https://github.com/openclaw/crabbox/pull/1937).
 - Add bounded AWS provisioning logs that separate ingress queue and lifecycle waits from create-operation costs and count redundant security-group permission calls without logging request payloads. [PR 1938](https://github.com/openclaw/crabbox/pull/1938).
-- Deduplicate validated AWS coordinator SSH ranges after combining lease and global access, avoiding repeated authorization calls for identical port/range pairs while preserving ingress reconciliation.
+- Deduplicate validated AWS coordinator SSH ranges after combining lease and global access, avoiding repeated authorization calls for identical port/range pairs while preserving ingress reconciliation. [PR 1945](https://github.com/openclaw/crabbox/pull/1945).
 
 ## 0.51.0 - 2026-09-06
 
