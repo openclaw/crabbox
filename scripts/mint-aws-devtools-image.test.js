@@ -64,6 +64,15 @@ case "$1" in
         printf '%s\\n' "$last_arg" >"\${CRABBOX_FAKE_CAPTURE_RUN_SCRIPT}"
       fi
     fi
+    if [[ -n "\${CRABBOX_FAKE_NODE_CHECK_RUNNER:-}" && "\${@: -1}" == *"docker_probe="* ]]; then
+      lease=""
+      previous=""
+      for arg in "$@"; do
+        if [[ "$previous" == "--id" ]]; then lease="$arg"; break; fi
+        previous="$arg"
+      done
+      "\${CRABBOX_FAKE_NODE_CHECK_RUNNER}" "$lease" "\${@: -1}" || exit $?
+    fi
     if [[ "$*" == *"Test-Path 'C:\\ProgramData\\crabbox\\image-prep-reboot-required'"* ]]; then
       if [[ "\${CRABBOX_FAKE_WINDOWS_REBOOT:-0}" == "1" && ! -f "\${CRABBOX_FAKE_LOG}.rebooted" ]]; then
         printf 'crabbox-reboot-required\\n'
@@ -172,8 +181,9 @@ test("AWS developer image smoke executes package managers and requires TruffleHo
   assert.match(text, /pnpm --version\ntrufflehog --no-update --version\ndocker --version/);
   assert.match(
     text,
-    /command -v pnpm\ncommand -v trufflehog\ntrufflehog --no-update --version\ncommand -v docker\nnode --version\nnode -e .*\ncorepack --version\npnpm --version\n/,
+    /command -v pnpm\ncommand -v trufflehog\ntrufflehog --no-update --version\ncommand -v docker\nnode --version\n/,
   );
+  assert.match(text, /corepack --version\npnpm --version\ndocker_group_member/);
   assert.match(text, /trap 'exit 130' INT\ntrap 'exit 143' TERM/);
   assert.match(text, /rollback_pending=1\nrun_json_tee "\$promotion_log"/);
 });
@@ -272,6 +282,141 @@ for (const lease of ["cbx_source", "cbx_candidate", "cbx_promoted"]) {
   });
 }
 
+async function writeNodeVersionFixture(bin) {
+  const file = path.join(bin, "node");
+  await writeFile(
+    file,
+    `#!${process.execPath}
+const vm = require("node:vm");
+const args = process.argv.slice(2);
+const version = process.env.FIXTURE_NODE_VERSION || "24.0.0";
+if (args[0] === "--version") {
+  console.log("v" + version);
+} else {
+  if (args[0] !== "-e") throw new Error("unexpected Node fixture invocation");
+  const argv = args.slice(args[2] === "--" ? 3 : 2);
+  vm.runInNewContext(args[1], {
+    process: { version: "v" + version, versions: { node: version },
+      argv: [process.execPath, ...argv], env: process.env },
+    console,
+  });
+}
+`,
+  );
+  await chmod(file, 0o755);
+}
+
+async function runNodeMajorMint(
+  t,
+  { major = "24", actual = "24.0.0", versions = {}, customPrep = false, ambient = "99" } = {},
+) {
+  const fake = await setupFakeCrabbox();
+  t.after(() => rm(fake.dir, { recursive: true, force: true }));
+  const bin = path.join(fake.dir, "bin");
+  await mkdir(bin);
+  await writeNodeVersionFixture(bin);
+  const runner = path.join(fake.dir, "node-check.cjs");
+  await writeFile(
+    runner,
+    `#!${process.execPath}
+const { spawnSync } = require("node:child_process");
+const [lease, source] = process.argv.slice(2);
+const checks = source.split("\\n").filter(line => line.startsWith("node -e "));
+if (checks.length !== 1) throw new Error("expected one generated Node version check");
+const versions = JSON.parse(process.env.FIXTURE_NODE_VERSIONS);
+const result = spawnSync("bash", ["-c", checks[0]], {
+  env: {
+    PATH: ${JSON.stringify(bin)} + ":" + process.env.PATH,
+    HOME: ${JSON.stringify(fake.dir)},
+    FIXTURE_NODE_VERSION: versions[lease] || process.env.FIXTURE_NODE_VERSION,
+    CRABBOX_LINUX_NODE_MAJOR: process.env.FIXTURE_GUEST_NODE_MAJOR,
+  },
+  stdio: "inherit",
+});
+if (result.error) throw result.error;
+if (result.status === 0) console.log("node-major-checked " + lease);
+process.exit(result.status ?? 1);
+`,
+  );
+  await chmod(runner, 0o755);
+  const args = ["--target", "linux", "--run"];
+  if (customPrep) args.push("--prep-script", fake.linuxPrep);
+  const result = await runScript(args, {
+    CRABBOX_BIN: fake.fake,
+    CRABBOX_FAKE_LOG: fake.log,
+    CRABBOX_IMAGE_LOG_DIR: path.join(fake.dir, "logs"),
+    CRABBOX_FAKE_NODE_CHECK_RUNNER: runner,
+    CRABBOX_LINUX_NODE_MAJOR: major,
+    FIXTURE_NODE_VERSION: actual,
+    FIXTURE_NODE_VERSIONS: JSON.stringify(versions),
+    FIXTURE_GUEST_NODE_MAJOR: ambient,
+  });
+  return { fake, result, log: await readFile(fake.log, "utf8") };
+}
+
+for (const major of ["22", "26"]) {
+  test(`Node-major smoke accepts selected ${major} through source, candidate, and promoted checks`, async (t) => {
+    const { result, log } = await runNodeMajorMint(t, { major, actual: `${major}.0.0` });
+    assert.equal(result.code, 0, result.stderr);
+    for (const lease of ["cbx_source", "cbx_candidate", "cbx_promoted"]) {
+      assert.match(result.stdout, new RegExp(`node-major-checked ${lease}`));
+    }
+    assert.match(log, /checkpoint create/);
+    assert.match(log, /image promote/);
+    assert.match(result.stdout, /promoted linux developer image passed/);
+  });
+}
+
+for (const lease of ["cbx_source", "cbx_candidate", "cbx_promoted"]) {
+  test(`Node-major smoke rejects mismatched selected 26 on ${lease}`, async (t) => {
+    const { result, log } = await runNodeMajorMint(t, {
+      major: "26",
+      actual: "26.0.0",
+      versions: { [lease]: "24.0.0" },
+      ambient: "24",
+    });
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /Node\.js.*26.*required.*v24\.0\.0/);
+    assert.doesNotMatch(result.stdout, /promoted linux developer image passed/);
+    assert.match(log, new RegExp(`stop --provider aws --target linux ${lease}`));
+    if (lease === "cbx_source") assert.doesNotMatch(log, /checkpoint create/);
+    if (lease !== "cbx_promoted") assert.doesNotMatch(log, /image promote/);
+    else assert.match(log, /image promote --json --target linux --restore-receipt/);
+  });
+}
+
+for (const [name, options, passes] of [
+  ["default below 24", { actual: "22.0.0" }, false],
+  ["default newer major", { actual: "26.0.0" }, true],
+  ["custom prep ignores selected 22", { major: "22", actual: "26.0.0", customPrep: true }, true],
+  [
+    "custom prep still rejects below 24",
+    { major: "22", actual: "22.0.0", customPrep: true },
+    false,
+  ],
+  [
+    "ambient major cannot replace selected 22",
+    { major: "22", actual: "26.0.0", ambient: "26" },
+    false,
+  ],
+  [
+    "shell-sensitive selection stays data",
+    { major: '22; touch "$HOME/injected"', actual: "26.0.0" },
+    false,
+  ],
+]) {
+  test(`Node-major smoke ${name}`, async (t) => {
+    const { fake, result, log } = await runNodeMajorMint(t, options);
+    assert.equal(result.code === 0, passes, result.stderr);
+    if (passes) assert.match(result.stdout, /promoted linux developer image passed/);
+    else {
+      assert.match(result.stderr, /Node\.js.*required/);
+      assert.doesNotMatch(log, /checkpoint create|image promote/);
+    }
+    await assert.rejects(readFile(path.join(fake.dir, "injected")), { code: "ENOENT" });
+  });
+}
+
 async function linuxSmokeFixture(t, { major = "24", pnpm = "11.1.0", customPrep = false } = {}) {
   const fake = await setupFakeCrabbox();
   t.after(() => rm(fake.dir, { recursive: true, force: true }));
@@ -302,7 +447,7 @@ async function linuxSmokeFixture(t, { major = "24", pnpm = "11.1.0", customPrep 
   for (const name of ["git", "gh", "jq", "rg", "fd", "npm", "trufflehog", "docker"]) {
     await writeTool(name, "exit 0");
   }
-  await writeTool("node", "exit 0");
+  await writeNodeVersionFixture(bin);
   await writeTool("corepack", 'exit "${FIXTURE_TOOL_EXIT:-0}"');
   await writeTool("id", 'printf "%s\\n" "$FIXTURE_UID"');
   await writeTool("dpkg", '[[ "$*" == "--print-architecture" ]] || exit 65\nprintf "%s\\n" "$FIXTURE_ARCH"');
@@ -316,7 +461,7 @@ async function linuxSmokeFixture(t, { major = "24", pnpm = "11.1.0", customPrep 
     cwd: fake.dir,
     env: {
       PATH: `${bin}${path.delimiter}${process.env.PATH}`, HOME: fake.dir, TMPDIR: tmp,
-      FIXTURE_UID: "1000", FIXTURE_ARCH: "amd64", ...env,
+      FIXTURE_UID: "1000", FIXTURE_ARCH: "amd64", FIXTURE_NODE_VERSION: `${major}.0.0`, ...env,
     },
     encoding: "utf8",
     timeout: 10_000,
@@ -353,6 +498,7 @@ test("generated Linux smoke emits success only after nonroot, tool, and offline 
 
 for (const route of [
   { name: "ARM guest", arch: "arm64" },
+  { name: "ARM selected Node 22", arch: "arm64", major: "22" },
   { name: "Node major override", arch: "amd64", major: "26" },
   { name: "custom prep", arch: "amd64", customPrep: true },
 ]) {

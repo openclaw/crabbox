@@ -564,7 +564,15 @@ command -v trufflehog
 trufflehog --no-update --version
 command -v docker
 node --version
-node -e 'if (Number(process.versions.node.split(".")[0]) < 24) throw new Error(`Node.js 24 or newer is required, found ${process.version}`)'
+SHELL
+    local expected_node_major=""
+    if [[ "$linux_developer_builder" == "1" && "$linux_node_major" != "24" ]]; then
+      expected_node_major="$linux_node_major"
+    fi
+    printf 'node -e %q -- %q\n' \
+      'const major = process.versions.node.split(".")[0]; const expected = process.argv[1]; if (expected ? major !== expected : Number(major) < 24) throw new Error("Node.js " + (expected ? "major " + expected : "24 or newer") + " is required, found " + process.version)' \
+      "$expected_node_major"
+    cat <<'SHELL'
 corepack --version
 pnpm --version
 docker_group_member() {
