@@ -42265,7 +42265,7 @@ describe("fleet run history", () => {
     const body = { runID: `run_${"a".repeat(32)}`, provider: "aws", command: ["echo", "hello"] };
     const create = () => fleet.fetch(request("PUT", `/v1/runs/${body.runID}`, { headers, body }));
     const [first, second] = await Promise.all([create(), create()]);
-    expect([first.status, second.status].sort()).toEqual([200, 201]);
+    expect([first.status, second.status].toSorted()).toEqual([200, 201]);
     const { run } = (await first.json()) as { run: RunRecord };
     expect(run.id).toBe(body.runID);
     expect(run).not.toHaveProperty("createRequestSHA256");
