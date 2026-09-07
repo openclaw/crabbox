@@ -7,7 +7,7 @@
 - Islo: report failed stdout/stderr delivery instead of silently succeeding after losing command output; preserve remote exit codes when stream decoding and delivery finish successfully. [PR 1969](https://github.com/openclaw/crabbox/pull/1969).
 - Enforce controller and coordinator token-command output limits consistently during pipe copying, preserving the existing overflow errors and command deadlines. [PR 1971](https://github.com/openclaw/crabbox/pull/1971).
 - Share byte-prefix storage across command capture, controller responses, and coordinator token helpers while preserving each caller's limits, cancellation, and diagnostics. [PR 1972](https://github.com/openclaw/crabbox/pull/1972).
-- Reuse shared prefix storage for SSH diagnostics and artifact capture while preserving locked, cloned snapshots and truncation visibility.
+- Reuse shared prefix storage for SSH diagnostics and artifact capture while preserving locked, cloned snapshots and truncation visibility. [PR 1973](https://github.com/openclaw/crabbox/pull/1973).
 
 ## 0.52.0 - 2026-09-07
 
