@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -224,6 +225,45 @@ func TestHetznerNativeCheckpointCapabilityMatrix(t *testing.T) {
 	}
 }
 
+func TestCreateHetznerCheckpointSubmissionBoundary(t *testing.T) {
+	for _, phase := range []string{"source", "preparation", "submission"} {
+		t.Run(phase, func(t *testing.T) {
+			installHetznerClaimState(t)
+			source := checkpointHetznerServer()
+			seedHetznerClaim(t, source)
+			client := &fakeHetznerSnapshotClient{server: source}
+			events := installHetznerCheckpointHooks(t, client)
+			cause := core.Exit(7, "fixture %s failure", phase)
+			switch phase {
+			case "source":
+				client.serverErr = cause
+			case "preparation":
+				prepareHetznerCheckpointSource = func(context.Context, core.SSHTarget) error {
+					*events = append(*events, "prepare-source")
+					return cause
+				}
+			case "submission":
+				client.createErr = cause
+			}
+			result, err := (Provider{}).CreateNativeCheckpoint(t.Context(), checkpointCreateRequest(false, 0))
+			var unsubmitted core.NativeCheckpointNotSubmittedError
+			if !errors.Is(err, cause) || errors.As(err, &unsubmitted) != (phase != "submission") || result.Image.ID != "" {
+				t.Fatalf("phase=%s result=%+v err=%v, wrong submission certainty", phase, result, err)
+			}
+			want := []string{"get-server"}
+			if phase != "source" {
+				want = append(want, "prepare-source")
+			}
+			if phase == "submission" {
+				want = append(want, "create-snapshot")
+			}
+			if !reflect.DeepEqual(*events, want) {
+				t.Fatalf("events=%v, want %v", *events, want)
+			}
+		})
+	}
+}
+
 func TestCreateHetznerCheckpointWaitFalseRecordsBinding(t *testing.T) {
 	installHetznerClaimState(t)
 	source := checkpointHetznerServer()
@@ -432,6 +472,48 @@ func TestCreateHetznerCheckpointParentCancellationCancelsInFlightGet(t *testing.
 	}
 	if client.getImageCalls != 1 {
 		t.Fatalf("GetImage calls=%d, want 1", client.getImageCalls)
+	}
+}
+
+func TestCreateHetznerCheckpointPersistsBeforeReadiness(t *testing.T) {
+	for _, failPersist := range []bool{false, true} {
+		t.Run(fmt.Sprintf("persistence failure=%t", failPersist), func(t *testing.T) {
+			installHetznerClaimState(t)
+			source := checkpointHetznerServer()
+			seedHetznerClaim(t, source)
+			var saved core.NativeCheckpointCreateResult
+			client := &fakeHetznerSnapshotClient{
+				server:  source,
+				created: core.HetznerImage{ID: 99, Type: "snapshot", Status: "creating", Architecture: "x86"},
+				getImageFn: func(context.Context, int64) (core.HetznerImage, error) {
+					if saved.Image.ID != "99" || !reflect.DeepEqual(saved.Metadata, checkpointMetadata()) {
+						t.Errorf("snapshot cleanup identity was not persisted before readiness: %+v", saved)
+					}
+					return core.HetznerImage{ID: 99, Type: "snapshot", Status: "available", Architecture: "x86"}, nil
+				},
+			}
+			installHetznerCheckpointHooks(t, client)
+			request := checkpointCreateRequest(true, time.Second)
+			persistErr := errors.New("checkpoint store unavailable")
+			request.Persist = func(result core.NativeCheckpointCreateResult) error {
+				if failPersist {
+					return persistErr
+				}
+				saved = result
+				return nil
+			}
+			result, err := (Provider{}).CreateNativeCheckpoint(context.Background(), request)
+			if result.Image.ID != "99" {
+				t.Fatalf("creation identity lost: %+v", result)
+			}
+			if failPersist {
+				if !errors.Is(err, persistErr) || client.getImageCalls != 0 {
+					t.Fatalf("persistence failure reached readiness: err=%v reads=%d", err, client.getImageCalls)
+				}
+			} else if err != nil || client.getImageCalls != 1 {
+				t.Fatalf("creation failed: err=%v reads=%d", err, client.getImageCalls)
+			}
+		})
 	}
 }
 

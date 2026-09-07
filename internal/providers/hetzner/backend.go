@@ -96,7 +96,7 @@ func (b *hetznerLeaseBackend) acquireOnce(ctx context.Context, keep bool, reques
 			return
 		}
 		if cleanupErr := rollbackHetznerAcquire(client, rollbackServer, rollbackServerCreated, rollbackKey, rollbackKeyCreated); cleanupErr != nil {
-			err = errors.Join(err, fmt.Errorf("hetzner cleanup failed: %w", cleanupErr))
+			err = shared.JoinAcquireCleanupError(err, fmt.Errorf("hetzner cleanup failed: %w", cleanupErr))
 		}
 	}()
 	if cfg.ProviderKey != "" {
@@ -115,16 +115,26 @@ func (b *hetznerLeaseBackend) acquireOnce(ctx context.Context, keep bool, reques
 	if err != nil {
 		return LeaseTarget{}, err
 	}
+	identity := shared.NamedResourceIdentity{ID: strconv.FormatInt(server.ID, 10), Name: core.LeaseProviderName(leaseID, slug)}
+	ownership := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now())
+	if err := validateHetznerAcquireObservation(server, identity, ownership); err != nil {
+		return LeaseTarget{}, exit(1, "hetzner create response cannot bind lease=%s server=%d; server cleanup withheld: %v", leaseID, server.ID, err)
+	}
 	server = normalizeHetznerServer(server)
 	rollbackServer = server
+	// Readiness may return a different resource or mutate an aliased label map.
+	// Neither can replace the allocation/key ownership captured for rollback.
+	rollbackServer.Labels = shared.CloneLabels(server.Labels)
 	rollbackServerCreated = true
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%d type=%s\n", leaseID, server.ID, cfg.ServerType)
 	server, err = waitForServerIP(ctx, client, server.ID)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
+	if err := validateHetznerAcquireObservation(server, identity, ownership); err != nil {
+		return LeaseTarget{}, exit(1, "hetzner readiness rejected for lease=%s server=%s: %v", leaseID, identity.ID, err)
+	}
 	server = normalizeHetznerServer(server)
-	rollbackServer = server
 	ssh := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
 	if err := waitForSSHReady(ctx, &ssh, b.RT.Stderr, "bootstrap", bootstrapWaitTimeout(cfg)); err != nil {
 		return LeaseTarget{}, err
@@ -137,6 +147,25 @@ func (b *hetznerLeaseBackend) acquireOnce(ctx context.Context, keep bool, reques
 	target = LeaseTarget{Server: server, SSH: ssh, LeaseID: leaseID}
 	b.acquired.Store(leaseID, acquiredHetznerLease{LeaseID: leaseID, CloudID: server.CloudID, ID: server.ID})
 	return target, nil
+}
+
+func validateHetznerAcquireObservation(server Server, identity shared.NamedResourceIdentity, ownership map[string]string) error {
+	id := strconv.FormatInt(server.ID, 10)
+	if server.ID <= 0 || server.CloudID != "" && server.CloudID != id {
+		return fmt.Errorf("invalid native server identity: ID=%d cloud ID=%q", server.ID, server.CloudID)
+	}
+	if mismatch := identity.Validate(shared.NamedResourceIdentity{ID: id, Name: server.Name}); mismatch != nil {
+		return mismatch
+	}
+	if err := validateHetznerServerOwnership(server, false); err != nil {
+		return err
+	}
+	for _, key := range []string{"lease", "slug", "provider_key"} {
+		if server.Labels[key] != ownership[key] {
+			return fmt.Errorf("ownership label %s mismatch: got %q, want %q", key, server.Labels[key], ownership[key])
+		}
+	}
+	return nil
 }
 
 func (b *hetznerLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
@@ -189,6 +218,11 @@ func (b *hetznerLeaseBackend) List(ctx context.Context, req ListRequest) ([]Leas
 	return ownedHetznerServers(servers), nil
 }
 
+func (b *hetznerLeaseBackend) CheckpointSourceAbsent(context.Context, core.CheckpointSourceRequest) (bool, error) {
+	// A project-scoped token cannot distinguish deletion from another project.
+	return false, exit(2, "%s", hetznerRetirementUnsupported)
+}
+
 func (b *hetznerLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	servers, err := b.List(ctx, ListRequest{})
 	if err != nil {
@@ -200,8 +234,16 @@ func (b *hetznerLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) 
 }
 
 func (b *hetznerLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	if req.CheckpointID != "" {
+		return exit(2, "%s", hetznerRetirementUnsupported)
+	}
 	server := normalizeHetznerServer(req.Lease.Server)
 	claim, err := requireExactHetznerClaim(server, req.Lease.LeaseID)
+	if err == nil {
+		if err := core.AuthorizeCheckpointRelease(claim, req.CheckpointID); err != nil {
+			return err
+		}
+	}
 	if err != nil {
 		if !b.matchesAcquiredLease(server, req.Lease.LeaseID) {
 			return err
@@ -276,6 +318,10 @@ func (b *hetznerLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) e
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=exact local claim missing or stale\n", server.DisplayID(), server.Name)
 			continue
 		}
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s reason=checkpoint hold: %v\n", server.DisplayID(), err)
+			continue
+		}
 		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", server.DisplayID(), server.Name)
 		if req.DryRun {
 			continue
@@ -323,6 +369,9 @@ func deleteServerForRelease(ctx context.Context, cfg Config, server Server) (boo
 func deleteClaimedHetznerServer(ctx context.Context, client hetznerClient, server Server, claim core.LeaseClaim) (bool, error) {
 	serverGone := false
 	updated, err := core.UpdateLeaseClaimLabelsIfUnchangedAfter(claim.LeaseID, claim, claim.Labels, func() error {
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			return err
+		}
 		var deleteErr error
 		serverGone, deleteErr = deleteServerWithClient(ctx, client, server, true, claim.LeaseID)
 		return deleteErr
@@ -331,7 +380,7 @@ func deleteClaimedHetznerServer(ctx context.Context, client hetznerClient, serve
 		return false, err
 	}
 	if serverGone {
-		if err := core.RemoveLeaseClaimIfUnchanged(updated.LeaseID, updated); err != nil {
+		if err := core.RemoveLeaseClaimIfUnchangedAfter(updated.LeaseID, updated, func() error { return core.AuthorizeCheckpointRelease(updated, "") }); err != nil {
 			return false, fmt.Errorf("finalize Hetzner cleanup claim: %w", err)
 		}
 	}

@@ -243,7 +243,8 @@ func TestRemoteReadyPoolScrubUsesIsolatedTrustedGitMetadata(t *testing.T) {
 		"ready-pool scrub does not reuse Git filter-managed worktrees",
 		"safe_git branch --set-upstream-to=\"$remote_ref\" \"$ref\"",
 		"ready-pool scrub does not reuse submodule worktrees",
-		"safe_git check-ignore -q -- \"$cache_path\"",
+		"cache_lookup_path=\"$cache_path\"",
+		"safe_git check-ignore -q -z --stdin",
 		"/usr/bin/find -P .",
 		"-iname node_modules",
 		"ready-pool cache discovery failed",
@@ -260,6 +261,13 @@ func TestRemoteReadyPoolScrubUsesIsolatedTrustedGitMetadata(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("POSIX scrub missing %q in %q", want, got)
 		}
+	}
+	cleanScript := remoteIgnoredWarmCacheCleanScript("safe_git", "ready-pool")
+	if strings.Contains(cleanScript, "trap ") {
+		t.Fatal("ignored-cache cleanup must preserve the caller's EXIT trap")
+	}
+	if strings.Contains(cleanScript, ".git/crabbox-cache-paths.") || !strings.Contains(cleanScript, `cache_paths="$(/usr/bin/mktemp)"`) {
+		t.Fatal("ignored-cache cleanup must use an unpredictable manifest outside the reused workspace")
 	}
 }
 

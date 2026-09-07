@@ -57,6 +57,27 @@ interface EnsuredHetznerSSHKey {
   created: boolean;
 }
 
+export class HetznerHTTPError extends Error {
+  constructor(
+    readonly method: string,
+    readonly path: string,
+    readonly status: number,
+    body: string,
+  ) {
+    super(`hetzner ${method} ${path}: http ${status}: ${body}`);
+    this.name = "HetznerHTTPError";
+  }
+}
+
+export function hetznerExactNotFound(error: unknown, method: string, path: string): boolean {
+  return (
+    error instanceof HetznerHTTPError &&
+    error.method === method &&
+    error.path === path &&
+    error.status === 404
+  );
+}
+
 export class HetznerProvisioningError extends Error {
   constructor(
     message: string,
@@ -217,27 +238,41 @@ export class HetznerClient {
     }
   }
 
-  async deleteSSHKey(name: string, leaseID: string): Promise<void> {
+  async deleteSSHKey(
+    name: string,
+    leaseID: string,
+    deadline?: number,
+    beforeDelete?: () => Promise<void>,
+  ): Promise<void> {
     if (name !== providerKeyForLease(leaseID)) {
       return;
     }
     const byName = await this.request<HetznerListSSHKeysResponse>(
       "GET",
       `/ssh_keys?${new URLSearchParams({ name })}`,
+      undefined,
+      deadline,
     );
     const key = byName.ssh_keys.find((entry) => entry.name === name);
     if (key && providerKeyOwnedByLease(key.labels ?? {}, leaseID)) {
-      await this.request<void>("DELETE", `/ssh_keys/${key.id}`);
+      // Recheck after the lookup; an assertion cannot revoke a DELETE already dispatched.
+      await beforeDelete?.();
+      await this.request<void>("DELETE", `/ssh_keys/${key.id}`, undefined, deadline);
     } else if (key) {
       console.warn(`Hetzner SSH key cleanup skipped unowned key lease=${leaseID} key=${name}`);
     }
   }
 
-  async deleteSSHKeyByID(id: number): Promise<void> {
+  async deleteSSHKeyByID(
+    id: number,
+    deadline?: number,
+    beforeDelete?: () => Promise<void>,
+  ): Promise<void> {
+    await beforeDelete?.();
     try {
-      await this.request<void>("DELETE", `/ssh_keys/${id}`);
+      await this.request<void>("DELETE", `/ssh_keys/${id}`, undefined, deadline);
     } catch (error) {
-      if (!hetznerResourceNotFound(error)) {
+      if (!hetznerExactNotFound(error, "DELETE", `/ssh_keys/${id}`)) {
         throw error;
       }
     }
@@ -248,6 +283,7 @@ export class HetznerClient {
       const response = await this.request<HetznerListServerTypesResponse>(
         "GET",
         `/server_types?${new URLSearchParams({ per_page: "100" })}`,
+        undefined,
         undefined,
         signal,
       );
@@ -332,8 +368,17 @@ export class HetznerClient {
     );
   }
 
-  async getServer(id: number): Promise<HetznerServer> {
-    return (await this.request<HetznerServerResponse>("GET", `/servers/${id}`)).server;
+  async getServer(id: number, deadline?: number): Promise<HetznerServer> {
+    return (await this.request<HetznerServerResponse>("GET", `/servers/${id}`, undefined, deadline))
+      .server;
+  }
+
+  async deleteServerAction(id: number, deadline: number): Promise<unknown> {
+    return this.request("DELETE", `/servers/${id}`, undefined, deadline);
+  }
+
+  async getServerAction(id: number, deadline: number): Promise<unknown> {
+    return this.request("GET", `/servers/actions/${id}`, undefined, deadline);
   }
 
   async waitForServerIP(id: number, requireRunning = false): Promise<HetznerServer> {
@@ -449,6 +494,7 @@ export class HetznerClient {
     method: string,
     path: string,
     body?: unknown,
+    deadline?: number,
     signal?: AbortSignal,
   ): Promise<T> {
     const init: RequestInit = {
@@ -462,16 +508,32 @@ export class HetznerClient {
     if (body !== undefined) {
       init.body = JSON.stringify(body);
     }
-    const response = await fetch(`https://api.hetzner.cloud/v1${path}`, init);
-    if (!response.ok) {
-      throw new Error(
-        `hetzner ${method} ${path}: http ${response.status}: ${await safeBody(response)}`,
-      );
+    const perform = async (): Promise<T> => {
+      const response = await fetch(`https://api.hetzner.cloud/v1${path}`, init);
+      if (!response.ok) {
+        throw new HetznerHTTPError(method, path, response.status, await safeBody(response));
+      }
+      if (response.status === 204) return undefined as T;
+      return (await response.json()) as T;
+    };
+    if (deadline === undefined) return perform();
+    const remaining = Math.min(10_000, deadline - Date.now());
+    if (remaining <= 0) throw new Error(`Hetzner cleanup observation timed out: ${method} ${path}`);
+    const controller = new AbortController();
+    init.signal = controller.signal;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`Hetzner cleanup request timed out: ${method} ${path}`));
+        controller.abort();
+      }, remaining);
+    });
+    try {
+      // Bound the body read as well as fetch, including transports that ignore abort.
+      return await Promise.race([perform(), timeout]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
-    if (response.status === 204) {
-      return undefined as T;
-    }
-    return (await response.json()) as T;
   }
 }
 
@@ -546,7 +608,7 @@ function roundUSD(value: number): number {
 
 async function safeBody(response: Response): Promise<string> {
   const text = await response.text();
-  return text.length > 500 ? `${text.slice(0, 500)}...` : text;
+  return (text.length > 500 ? `${text.slice(0, 500)}...` : text).replace(/\s+/g, " ").trim();
 }
 
 function sleep(ms: number): Promise<void> {

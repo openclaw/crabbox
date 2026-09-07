@@ -633,8 +633,8 @@ func (b *linodeLeaseBackend) updateFencedLinodeMetadata(ctx context.Context, lea
 		labels := normalizedLinodeLabels(item.Tags)
 		if touch != nil {
 			exactLabels := map[string]string{}
-			for _, key := range tagLabelKeys() {
-				if value, ok := labels[key]; ok && exactTagValueKey(key) {
+			for _, key := range tagSchema.Keys() {
+				if value, ok := labels[key]; ok && tagSchema.Exact(key) {
 					exactLabels[key] = value
 				}
 			}
@@ -661,7 +661,7 @@ func (b *linodeLeaseBackend) updateFencedLinodeMetadata(ctx context.Context, lea
 	}
 	var updated core.LeaseClaim
 	if touch != nil {
-		updated, server, _, err = core.UpdateLeaseClaimTouchIfUnchangedAction(lease.LeaseID, expected, now, touch.IdleTimeoutOverride, action)
+		updated, server, _, err = core.UpdateLeaseClaimTouchIfUnchangedAction(providerCtx, lease.LeaseID, expected, now, touch.IdleTimeoutOverride, action)
 	} else {
 		updated, server, _, err = core.UpdateLeaseClaimEndpointIfUnchangedAction(lease.LeaseID, expected, action)
 	}

@@ -6,10 +6,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestWriteWindowsBootstrapSSHWarningIncludesDetail(t *testing.T) {
@@ -38,7 +41,9 @@ func TestCloudInitUsesRetryingBootstrap(t *testing.T) {
 		"test -s '/etc/ssl/certs/ca-certificates.crt'",
 		"crabbox Linux readiness manifest verified; skipping apt bootstrap",
 		"crabbox legacy image readiness migrated without package-manager work",
-		"retry apt-get update",
+		"retry apt-get -o Acquire::Languages=none",
+		"-o Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false",
+		"-o Acquire::IndexTargets::deb::CNF::DefaultEnabled=false update",
 		"retry apt-get install -y --no-install-recommends $crabbox_readiness_packages",
 		"crabbox_readiness_packages='ca-certificates curl git jq openssh-server rsync tmux util-linux'",
 		"curl --version >/dev/null",
@@ -48,7 +53,6 @@ func TestCloudInitUsesRetryingBootstrap(t *testing.T) {
 		"test -w '/work/crabbox'",
 		"      Port 2222\n      Port 22",
 		"systemctl enable ssh || true",
-		"timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true",
 		"touch /var/lib/crabbox/bootstrapped",
 	} {
 		if !strings.Contains(got, want) {
@@ -300,6 +304,10 @@ func TestCloudInitGnomeDesktopProfile(t *testing.T) {
 	cfg.Browser = true
 	cfg.DesktopEnv = "gnome"
 	got := cloudInit(cfg, "ssh-ed25519 test")
+	if strings.Count(got, indentCloudInitRuncmd(sharedGnomeDesktopTheme())) != 1 {
+		t.Fatal("GNOME cloud-init must install exactly one complete shared theme script")
+	}
+
 	for _, want := range []string{
 		"labwc wayvnc swaybg librsvg2-common gnome-panel wlr-randr grim slurp wtype wl-clipboard",
 		"swaybg librsvg2-common",
@@ -604,6 +612,71 @@ func TestAWSUserDataDefaultsToCloudInit(t *testing.T) {
 	}
 }
 
+func TestAWSUserDataUbuntuAPTPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		modify func(*Config)
+		want   bool
+	}{
+		{name: "default Canonical amd64", want: true},
+		{name: "explicit amd64", modify: func(cfg *Config) { cfg.architectureExplicit = true }, want: true},
+		{name: "custom or captured AMI", modify: func(cfg *Config) { cfg.AWSAMI = "ami-custom" }},
+		{name: "snapshot fork", modify: func(cfg *Config) { cfg.AWSSnapshot = "snap-captured" }},
+		{name: "Ubuntu 24.04", modify: func(cfg *Config) { cfg.OSImage = "ubuntu:24.04" }},
+		{name: "explicit ARM", modify: func(cfg *Config) {
+			cfg.Architecture, cfg.architectureExplicit = ArchitectureARM64, true
+		}},
+		{name: "inferred Graviton", modify: func(cfg *Config) { cfg.ServerType = "m7g.large" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = "aws"
+			cfg.ServerType = "m7a.large"
+			if tc.modify != nil {
+				tc.modify(&cfg)
+			}
+			got := awsUserData(cfg, "ssh-ed25519 test")
+			var document map[string]any
+			if err := yaml.Unmarshal([]byte(got), &document); err != nil {
+				t.Fatalf("invalid cloud-config: %v", err)
+			}
+			if !tc.want {
+				if _, ok := document["apt"]; ok {
+					t.Fatal("custom image or unqualified target must retain its APT policy")
+				}
+				if got != cloudInit(cfg, "ssh-ed25519 test") {
+					t.Fatal("excluded image must retain the ordinary cloud-init bytes")
+				}
+				return
+			}
+			want := map[string]any{
+				"primary":  []any{map[string]any{"arches": []any{"amd64"}, "uri": "https://archive.ubuntu.com/ubuntu/"}},
+				"security": []any{map[string]any{"arches": []any{"amd64"}, "uri": "http://security.ubuntu.com/ubuntu/"}},
+			}
+			if !reflect.DeepEqual(document["apt"], want) {
+				t.Fatalf("APT policy = %#v, want primary HTTPS with the separate security archive", document["apt"])
+			}
+		})
+	}
+	for _, provider := range []string{"gcp", "hetzner", "azure"} {
+		t.Run(provider, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = provider
+			got := cloudInit(cfg, "ssh-ed25519 test")
+			if provider == "azure" {
+				got = azureLinuxCloudInit(cfg, "ssh-ed25519 test")
+			}
+			var document map[string]any
+			if err := yaml.Unmarshal([]byte(got), &document); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := document["apt"]; ok {
+				t.Fatal("AWS archive policy must not change another provider")
+			}
+		})
+	}
+}
+
 func TestAWSUserDataWindowsProfile(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "aws"
@@ -734,12 +807,13 @@ func TestAWSUserDataWindowsCoreProfileSkipsDesktop(t *testing.T) {
 		}
 	}
 	setupIndex := strings.Index(got, "Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath")
+	sftpIndex := strings.Index(got, "Subsystem sftp internal-sftp")
 	restartIndex := strings.Index(got, "Restart-Service sshd -Force")
-	if setupIndex < 0 || restartIndex < 0 {
-		t.Fatalf("windows core bootstrap missing setup/restart markers")
+	if setupIndex < 0 || sftpIndex < 0 || restartIndex < 0 {
+		t.Fatalf("windows core bootstrap missing setup/SFTP/restart markers")
 	}
-	if setupIndex > restartIndex {
-		t.Fatalf("windows core bootstrap must mark setup complete before restarting sshd")
+	if setupIndex > restartIndex || sftpIndex > restartIndex {
+		t.Fatalf("windows core bootstrap must configure setup and SFTP before restarting sshd")
 	}
 	for _, notWant := range []string{
 		"tightvnc-2.8.85-gpl-setup-64bit.msi",
@@ -824,6 +898,9 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 	}
 	if verifyIndex, importIndex := strings.LastIndex(got, "Assert-CrabboxFileSHA256 $wslRootfs"), strings.Index(got, "wsl.exe --import $wslDistro"); verifyIndex < 0 || importIndex < 0 || verifyIndex > importIndex {
 		t.Fatalf("windows WSL2 bootstrap must verify the rootfs before import")
+	}
+	if sftpIndex, readyIndex := strings.Index(got, "Subsystem sftp internal-sftp"), strings.Index(got, "crabbox-ready"); sftpIndex < 0 || readyIndex < 0 || sftpIndex > readyIndex {
+		t.Fatalf("windows WSL2 bootstrap must configure SFTP before checking WSL readiness")
 	}
 }
 
@@ -917,7 +994,8 @@ func TestWindowsStableSSHProbeUsesWindowsReadinessProfile(t *testing.T) {
 		ProxyCommand:   "provider proxy %h %p",
 		ReadyCheck:     "true",
 	}
-	if !probeWindowsSSHStable(context.Background(), &target, time.Now().Add(time.Second)) {
+	// This checks readiness options; deadline enforcement is tested separately.
+	if !probeWindowsSSHStable(t.Context(), &target, time.Now().Add(30*time.Second)) {
 		t.Fatal("stable Windows SSH probe failed with fake ssh")
 	}
 	args := readSSHArgsRecorder(t, logPath)

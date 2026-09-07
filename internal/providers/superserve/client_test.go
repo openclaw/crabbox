@@ -678,16 +678,6 @@ func mustJSONLine(t *testing.T, v any) string {
 	return string(data)
 }
 
-func TestDataPlaneHostForSandbox(t *testing.T) {
-	got := dataPlaneHostForSandbox("sb_123", "sandbox.example.test")
-	if got != "boxd-sb_123.sandbox.example.test" {
-		t.Fatalf("host=%q", got)
-	}
-	if dataPlaneHostForSandbox("", "sandbox.example.test") != "" {
-		t.Fatal("empty sandbox id should not derive host")
-	}
-}
-
 func writeTestJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)

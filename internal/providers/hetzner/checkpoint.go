@@ -40,10 +40,19 @@ func (Provider) NativeCheckpointWorkdir(req core.NativeCheckpointWorkdirRequest)
 	return core.RemoteJoin(cfg, req.LeaseID, req.RepoName)
 }
 
-func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreateRequest) (core.NativeCheckpointCreateResult, error) {
+func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreateRequest) (_ core.NativeCheckpointCreateResult, err error) {
+	if req.Capture != nil {
+		return core.NativeCheckpointCreateResult{}, core.Exit(2, "%s", hetznerRetirementUnsupported)
+	}
 	if strings.TrimSpace(req.Config.Coordinator) != "" {
 		return core.NativeCheckpointCreateResult{}, core.Exit(2, "brokered Hetzner leases use archive checkpoints")
 	}
+	submissionStarted := false
+	defer func() {
+		if err != nil && !submissionStarted {
+			err = core.NativeCheckpointNotSubmittedError{Cause: err}
+		}
+	}()
 	if firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
 		return core.NativeCheckpointCreateResult{}, core.Exit(2, "Hetzner native checkpoints require a Linux lease")
 	}
@@ -109,6 +118,8 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		if err := prepareHetznerCheckpointSource(ctx, req.Target); err != nil {
 			return err
 		}
+		// From this call onward, even a lost or empty response retains custody.
+		submissionStarted = true
 		created, err := client.CreateServerSnapshot(ctx, serverID, description, labels)
 		if err != nil {
 			return err
@@ -125,6 +136,13 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		snapshot.Architecture = architecture
 	}
 	result := hetznerCheckpointResult(snapshot, location, metadata)
+	// Keep the exact image and ownership metadata recoverable while readiness
+	// polling is in flight, including after this process is interrupted.
+	if req.Persist != nil {
+		if err := req.Persist(result); err != nil {
+			return result, err
+		}
+	}
 	if err := validateCreatedHetznerSnapshot(snapshot, architecture); err != nil {
 		return result, err
 	}

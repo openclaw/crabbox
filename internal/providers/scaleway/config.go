@@ -10,7 +10,6 @@ const (
 	defaultRegion = "fr-par"
 	defaultZone   = "fr-par-1"
 	defaultImage  = "ubuntu_noble"
-	defaultType   = "DEV1-S"
 )
 
 func regionForConfig(cfg core.Config) string {

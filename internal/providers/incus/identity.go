@@ -3,9 +3,7 @@ package incus
 import (
 	"encoding/json"
 	"fmt"
-	"maps"
 	"strings"
-	"time"
 
 	"github.com/lxc/incus/v7/shared/api"
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -70,7 +68,7 @@ func validateClaimInstance(client instanceClient, claim core.LeaseClaim, inst ap
 		return err
 	}
 	intent := claim.FixedCreateIntent
-	if claim.Provider != providerName || claim.LeaseID != labels["lease"] || !isCrabboxInstance(inst) ||
+	if claim.Provider != providerName || labels["provider"] != providerName || claim.LeaseID != labels["lease"] || !isCrabboxInstance(inst) ||
 		intent.ProviderScope != claim.ProviderScope || intent.State == "released" || claim.Slug != intent.Slug ||
 		inst.Name != intent.Attempt["name"] || inst.Config["volatile.uuid"] != intent.Attempt["uuid"] || intent.Attempt["uuid"] == "" ||
 		labels["fixed_intent_sha256"] != intent.Fingerprint || labels[identityLabel] != claim.ProviderScope || labels["incus_uuid"] != intent.Attempt["uuid"] ||
@@ -109,15 +107,4 @@ func requireAcquiredIntent(claim core.LeaseClaim) error {
 		return core.Exit(4, "Incus lease acquisition is incomplete; replay warmup with the original intent or stop the lease")
 	}
 	return nil
-}
-
-// Generic cloud labels are length-limited and cannot carry an Incus connection
-// document or SHA-256. Only copy the lifecycle fields computed by core.
-func touchInstanceLabels(labels map[string]string, cfg Config, state string, now time.Time) map[string]string {
-	computed := core.TouchDirectLeaseLabels(labels, cfg, state, now)
-	result := maps.Clone(labels)
-	for _, key := range []string{"state", "created_at", "last_touched_at", "idle_timeout", "idle_timeout_secs", "ttl_secs", "expires_at"} {
-		result[key] = computed[key]
-	}
-	return result
 }

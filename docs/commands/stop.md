@@ -17,6 +17,21 @@ crabbox stop --provider ssh --static-host mac-studio.local mac-studio.local
 
 `crabbox release` is a compatibility alias for `crabbox stop`.
 
+For coordinator-backed leases, the preliminary lookup has a ten-second budget.
+If it stalls, ordinary stop warns and proceeds through the existing
+provider-scoped release request. Provider identity mismatches still block
+release; `--force` still requires successful inspection. Canceling the command
+does not start a release fallback. Cleanup must still be confirmed before local
+claim and SSH artifacts are removed.
+
+If a fixed-ID create was admitted by the coordinator but never allocated a
+machine, `stop` cancels that intent and confirms the cancellation even when
+the preliminary lease lookup returns 404. This includes a create rejected by
+a quota check. The owner, organization, and selected provider must match.
+Delayed creates cannot allocate after this confirmation; a genuinely unknown
+ID still fails, and an allocation already in progress must finish cleanup
+before Stop reports success.
+
 ## Identifying the lease
 
 Pass the lease as a positional argument or with `--id`; both accept the
@@ -33,8 +48,19 @@ Crabbox lease ID and local slug:
   required binding and still fail closed after upgrading; missing inventory
   alone never acknowledges cleanup. This does not extend to slug, raw instance,
   or ordinary non-fixed lookups. See [AWS fixed-ID replay](../providers/aws.md#fixed-id-replay).
-- `blacksmith-testbox` — accepts a `tbx_...` ID or local slug and forwards to
-  `blacksmith testbox stop`.
+- `blacksmith-testbox` — accepts a Testbox ID or slug only with an exact local
+  organization/API-scoped claim and matching native workflow identity. It stops
+  the Testbox (also cancelling its backing Actions run) and removes the claim/key
+  only after fresh native stdout confirms the exact ID in state `completed`.
+  Failed native stops can reconcile through the same confirmation; ambiguous,
+  failed or cancelled queries retain the original stop error and local state.
+  Verification and local artifact cleanup failures remain visible alongside the
+  native error and exit code. Failed artifact removal retains the exact claim;
+  an already absent lease key directory is safe to finalize.
+  Legacy or lost claims require independently verified native Blacksmith cleanup;
+  raw IDs alone never authorize stop. See
+  [Blacksmith Testbox](../features/blacksmith-testbox.md).
+
 - `blaxel` — accepts a Crabbox lease ID (`blx_<sandbox-id>`) or local slug and
   deletes the Blaxel sandbox only when the local claim and remote ownership
   labels match. Missing sandboxes keep the local claim unless
@@ -158,11 +184,47 @@ non-destructive post-create workflows on a running sandbox. The separate
 [`pause`](pause.md) and [`resume`](resume.md) commands are provider-dependent
 and are not supported by Docker Sandbox.
 
+Coordinator-backed stops refresh guest connection state inside the release owner.
+A confirmed deletion skips guest SSH cleanup and repeats only local connection
+cleanup, without another provider release request. Retained machines and pending
+or failed provider cleanup do not count as confirmed deletion. Confirmation
+requires the coordinator's `cleanupCompletedAt` fact and a hostless public record;
+`released` state or an accepted provider DELETE alone is insufficient.
+
+An explicit stop of a historical managed lease that still has provider identity
+but lacks `cleanupCompletedAt` asks the coordinator to re-observe and clean that
+exact owned resource. Local claims and SSH artifacts remain until the retry
+publishes completion. During rollout, deploy the coordinator Worker before using
+a CLI version that requires this completion fact.
+
 For SSH leases, shared connection cleanup makes best-effort attempts to signal
 [Actions hydration](../features/actions-hydration.md) shutdown, stop local
 mediated-egress daemon state and supported remote egress clients, and log out
 remote Tailscale when stored lease metadata marks it enabled. Providers can
-gate remote cleanup behind their ownership checks. Static SSH attempts cleanup
+gate remote cleanup behind their ownership checks. The ordered remote cleanup
+chain has a 35-second budget, including coordinator guest network selection and
+reserving five-second windows for later egress
+and Tailscale cleanup. Responsive hydrated jobs keep their normal 20-second
+stop-marker grace; cancellation or the phase deadline ends that wait early.
+The local egress daemon stays alive through guest cleanup. Coordinator-backed
+explicit stops share one five-minute cancellation budget from the first lease
+inspection through claim acquisition, guest cleanup, release requests, and cleanup
+observation; an earlier caller deadline wins. Phase limits cannot restart this
+budget. Pending or failed provider cleanup still returns an error and preserves
+the local claim and SSH artifacts for a later retry.
+
+After confirmed coordinator-backed deletion, SSH masters created with canonical
+lease credentials are explicitly closed and observed to exit before local
+artifacts are removed. If that step fails, Stop reports that remote deletion is
+confirmed but local cleanup remains pending;
+the retained claim permits a local-only retry.
+
+Local daemon lock waits also honor the operation context. Once provider deletion
+is confirmed, a canceled local daemon cleanup warns without undoing that result.
+Already-started local process teardown remains joined. Synchronous filesystem
+operations and existing process-inspection and termination helpers are not
+interrupted by this context, so this is not a strict wall-clock limit.
+Direct and delegated providers retain their existing caller lifetime. Static SSH attempts cleanup
 before local unclaiming, even without hydration state; remote failures warn
 but do not block unclaiming. See the [static provider details](../providers/ssh.md#connection-cleanup)
 for marker paths, Linux egress process-matching scope, and Tailscale limits.

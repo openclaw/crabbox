@@ -2,6 +2,10 @@
 
 `crabbox usage` reports lease cost and usage estimates from the broker, broken down by user, organization, or the whole fleet.
 
+For the authenticated owner's all-months/all-orgs admission count and effective
+owner limit, use [capacity](capacity.md). This separate read-only diagnostic does
+not change monthly usage filtering or access to lease records.
+
 This page is the command reference for cost visibility. Keep command-specific behavior here; broker policy and provider internals live in [../orchestrator.md](../orchestrator.md) and [../features/cost-usage.md](../features/cost-usage.md).
 
 ```sh
@@ -120,10 +124,12 @@ export CRABBOX_COST_RATES_JSON='{
 
 Hetzner prices are returned in EUR. The broker converts them to USD using `CRABBOX_EUR_TO_USD` (default `1.08`).
 
-Optional live pricing requests stop after five seconds, including response-body
-reads, and use the existing fallback rates on failure. This deadline applies only
-to pricing HTTP requests; Node AWS credential resolution keeps its existing SDK
-ownership.
+Optional live pricing lookups stop waiting after five seconds, including
+credential resolution, identity checks, and response-body reads, and use the
+existing fallback rates on failure. The expired quote aborts its HTTP request and
+cannot issue a later request or retry. An SDK credential lookup or authority RPC
+already in flight may continue under its existing owner; fallback does not wait
+for it. Ordinary provider operations keep their existing deadlines.
 
 ## Limits
 

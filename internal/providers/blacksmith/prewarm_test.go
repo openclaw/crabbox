@@ -38,7 +38,7 @@ func TestBlacksmithPrewarmProbeAdmission(t *testing.T) {
 						const leaseID = "tbx_prewarm123"
 						const existingID = "tbx_existing123"
 						repo, callsPath := blacksmithCallerFixture(t, "provider: blacksmith-testbox\nblacksmith:\n  org: example-org\n  workflow: testbox.yml\n  job: check\n  ref: main\n")
-						if err := claimLeaseForRepoProvider(existingID, "existing-box", blacksmithTestboxProvider, repo, time.Minute, false); err != nil {
+						if err := core.ClaimLeaseForRepoProvider(existingID, "existing-box", blacksmithTestboxProvider, repo, time.Minute, false); err != nil {
 							t.Fatal(err)
 						}
 						before, err := readLeaseClaim(existingID)
@@ -94,8 +94,8 @@ func TestBlacksmithPrewarmProbeAdmission(t *testing.T) {
 								if !strings.Contains(stdout.String(), "hydration=provider-owned") || claim.LeaseID != leaseID {
 									t.Errorf("plain prewarm did not retain a provider-owned lease: claim=%q stdout=%s", claim.LeaseID, &stdout)
 								}
-								if lines := strings.Split(strings.TrimSpace(string(calls)), "\n"); len(lines) != 2 || lines[0] != "keygen" || !strings.HasPrefix(lines[1], "blacksmith testbox warmup ") {
-									t.Errorf("plain prewarm calls=%q, want keygen and warmup only", calls)
+								if lines := strings.Split(strings.TrimSpace(string(calls)), "\n"); len(lines) != 3 || lines[0] != "keygen" || !strings.HasPrefix(lines[1], "blacksmith testbox warmup ") || !strings.HasPrefix(lines[2], "blacksmith testbox status ") {
+									t.Errorf("plain prewarm calls=%q, want keygen, warmup and exact status", calls)
 								}
 								return
 							}
@@ -145,13 +145,20 @@ func blacksmithCallerFixture(t *testing.T, config string) (string, string) {
 	bin := t.TempDir()
 	callsPath := filepath.Join(t.TempDir(), "calls")
 	t.Setenv("BLACKSMITH_CALLER_TEST_CALLS", callsPath)
+	statusPath := filepath.Join(t.TempDir(), "status.txt")
+	if err := os.WriteFile(statusPath, []byte(testBlacksmithStatus("tbx_prewarm123", "ready")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BLACKSMITH_CALLER_TEST_STATUS", statusPath)
 	fixtures := map[string]string{
 		"blacksmith": `#!/bin/sh
 set -eu
 if [ "$1" = --org ]; then shift 2; fi
 printf 'blacksmith %s\n' "$*" >> "$BLACKSMITH_CALLER_TEST_CALLS"
 case "$1 $2" in
-  'testbox warmup') printf 'ready tbx_prewarm123\n' ;;
+  'testbox warmup') printf 'tbx_prewarm123\n' ;;
+  'testbox status') cat "$BLACKSMITH_CALLER_TEST_STATUS" ;;
+  'auth status') printf 'Authenticated organizations:\n  * example-org (current)\n' ;;
   'testbox run'|'testbox stop') exit 0 ;;
   *) exit 99 ;;
 esac

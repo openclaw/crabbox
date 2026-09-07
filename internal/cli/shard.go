@@ -58,6 +58,7 @@ var shardOwnedOnlyFlags = map[string]bool{
 	"workdir":               true,
 	"clear":                 true,
 	"reclaim":               true,
+	"admin":                 true,
 	"slug":                  true,
 	"fail-on-test-failures": true,
 }
@@ -132,6 +133,7 @@ func (a App) shard(ctx context.Context, args []string) error {
 	workdirOverride := fs.String("workdir", "", "remote restore workdir")
 	clear := fs.Bool("clear", true, "clear the remote workdir before restoring")
 	reclaim := fs.Bool("reclaim", false, "claim these leases for the current repo")
+	admin := fs.Bool("admin", false, "use the configured coordinator admin credential")
 	failOnTestFailures := fs.Bool("fail-on-test-failures", false, "exit non-zero when the merged JUnit results contain failures or errors")
 	junitResults := fs.String("junit", "", "comma-separated remote JUnit XML paths to record")
 	resultsAuto := fs.Bool("results-auto", false, "scan common remote JUnit XML paths after the command")
@@ -142,6 +144,7 @@ func (a App) shard(ctx context.Context, args []string) error {
 	if err := parseFlags(fs, ownArgs); err != nil {
 		return err
 	}
+	ctx = withCheckpointAdmin(ctx, *admin)
 	if fs.NArg() > 0 {
 		return exit(2, "unexpected argument %q; place the command after --", fs.Arg(0))
 	}
@@ -162,7 +165,7 @@ func (a App) shard(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	record, paths, err := store.Read(strings.TrimSpace(*from))
+	record, paths, err := a.readCheckpointRecord(ctx, store, strings.TrimSpace(*from))
 	if err != nil {
 		return err
 	}
@@ -179,6 +182,11 @@ func (a App) shard(ctx context.Context, args []string) error {
 	}
 	if err := applyLeaseCreateFlags(&cfg, fs, leaseFlags); err != nil {
 		return err
+	}
+	if record.coordinatorManaged() {
+		if err := bindCheckpointCoordinatorCredential(ctx, &cfg); err != nil {
+			return err
+		}
 	}
 	if record.Kind != checkpointKindArchive && !nativeCheckpoint {
 		return exit(2, "checkpoint %s has kind=%s; shard requires %s or a native image checkpoint", record.ID, record.Kind, checkpointKindArchive)
@@ -295,7 +303,7 @@ func (a App) shardRun(ctx context.Context, opts shardOptions, mux *shardOutputMu
 					mux.printf(a.Stderr, "shard %d/%d canceled\n", index, opts.Count)
 					return
 				}
-				results[index-1] = shardResult{Index: index, Slug: slug, ExitCode: shardErrorExitCode(err), Err: err}
+				results[index-1] = shardResult{Index: index, Slug: slug, ExitCode: ExitCodeForError(err, 1), Err: err}
 				mux.printf(a.Stderr, "shard %d/%d failed error=%q\n", index, opts.Count, err.Error())
 				if opts.FailFast {
 					cancel()
@@ -315,7 +323,7 @@ func (a App) shardRun(ctx context.Context, opts shardOptions, mux *shardOutputMu
 			if outcome.Recorded {
 				result.ExitCode = outcome.ExitCode
 			} else {
-				result.ExitCode = shardErrorExitCode(err)
+				result.ExitCode = ExitCodeForError(err, 1)
 				if err == nil {
 					err = errors.New("run finished without recording an outcome")
 				}
@@ -354,14 +362,6 @@ func (a App) printShardStatus(mux *shardOutputMux, opts shardOptions, result sha
 		return
 	}
 	mux.printf(a.Stderr, "shard %d/%d done exit=%d\n", result.Index, opts.Count, result.ExitCode)
-}
-
-func shardErrorExitCode(err error) int {
-	var exitErr ExitError
-	if AsExitError(err, &exitErr) && exitErr.Code != 0 {
-		return exitErr.Code
-	}
-	return 1
 }
 
 func shardRunArgs(leaseID string, index, total int, runArgs, command []string) []string {

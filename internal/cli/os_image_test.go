@@ -123,3 +123,36 @@ func TestOSImageSharedFixtures(t *testing.T) {
 		}
 	}
 }
+
+func TestContainerDefaultsUseReviewedMultiPlatformReferences(t *testing.T) {
+	t.Parallel()
+	for _, selector := range []string{"ubuntu:24.04", "ubuntu:26.04"} {
+		for _, arch := range []string{ArchitectureAMD64, ArchitectureARM64} {
+			cfg := baseConfig()
+			cfg.OSImage, cfg.Architecture = selector, arch
+			cfg.architectureExplicit = true
+			applyOSImageProviderDefaults(&cfg, false)
+			for _, image := range []string{cfg.LocalContainer.Image, cfg.AppleContainer.Image} {
+				if !regexp.MustCompile(`^docker[.]io/library/ubuntu@sha256:[a-f0-9]{64}$`).MatchString(image) {
+					t.Fatalf("%s/%s container default is not immutable: %q", selector, arch, image)
+				}
+				if digest, known := DefaultContainerImageDigest(image); !known || len(digest) != 71 {
+					t.Fatalf("%s/%s default has no reviewed digest", selector, arch)
+				}
+			}
+		}
+	}
+	for _, custom := range []string{"ubuntu:26.04", "docker.io/library/ubuntu:24.04", "example-org/custom:latest"} {
+		cfg := baseConfig()
+		cfg.LocalContainer.Image, cfg.AppleContainer.Image = custom, custom
+		cfg.localContainerImageExplicit, cfg.appleContainerImageExplicit = true, true
+		cfg.OSImage = "ubuntu:24.04"
+		applyOSImageProviderDefaults(&cfg, false)
+		if cfg.LocalContainer.Image != custom || cfg.AppleContainer.Image != custom {
+			t.Fatal("explicit custom image replaced by catalog default")
+		}
+		if _, known := DefaultContainerImageDigest(custom); known {
+			t.Fatal("custom image classified as a reviewed default")
+		}
+	}
+}

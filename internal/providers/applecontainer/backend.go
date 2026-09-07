@@ -2,6 +2,7 @@ package applecontainer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -129,6 +130,10 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s keep=%v\n", providerName, leaseID, slug, cfg.AppleContainer.Image, req.Keep)
 	containerID, err := b.createContainer(ctx, cfg, name, leaseID, slug, publicKey, req.Keep)
 	if err != nil {
+		var retained *retainedImageContainerError
+		if errors.As(err, &retained) {
+			cleanupKey = false
+		}
 		return core.LeaseTarget{}, err
 	}
 	if req.Keep {
@@ -412,22 +417,20 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 
 func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
 	server := req.Lease.Server
-	if server.Labels == nil {
-		server.Labels = map[string]string{}
-	}
-	original := server.Labels
-	server.Labels = core.TouchDirectLeaseLabels(original, b.configForRun(), req.State, time.Now().UTC())
-	for _, key := range []string{"container_id", "image", "ssh_user", "ssh_port", "work_root"} {
-		if value := strings.TrimSpace(original[key]); value != "" {
-			server.Labels[key] = value
-		}
-	}
+	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.configForRun(), req.State, time.Now().UTC())
 	return server, nil
 }
 
 func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey string, keep bool) (string, error) {
+	digest, reviewedDefault := core.DefaultContainerImageDigest(cfg.AppleContainer.Image)
+	if reviewedDefault && digest == "" {
+		return "", exit(2, "compiled container image is missing its reviewed digest")
+	}
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
 	labels["image"] = cfg.AppleContainer.Image
+	if reviewedDefault {
+		labels["image_digest"] = digest
+	}
 	labels["ssh_user"] = cfg.AppleContainer.User
 	labels["ssh_port"] = sshPort
 	labels["work_root"] = cfg.AppleContainer.WorkRoot
@@ -478,6 +481,9 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 	}
 	args = append(args, cfg.AppleContainer.ExtraRunArgs...)
 	args = append(args, cfg.AppleContainer.Image, "/bin/sh", "-lc", bootstrapScript)
+	if reviewedDefault {
+		return b.createPinnedContainer(ctx, cfg, append([]string{"create"}, args[2:]...), name, leaseID, slug, digest)
+	}
 
 	result, err := b.container(ctx, args, nil, b.rt.Stderr)
 	if err != nil {

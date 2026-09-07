@@ -12,6 +12,14 @@ own their own file transfer and reject the local sync options. Native Windows
 targets use the same file list but ship it as a tar archive over OpenSSH instead
 of rsync.
 
+SSH-backed workspace sync uses a private, temporary OpenSSH configuration and a
+fixed host alias, so IPv6 addresses are not parsed as rsync host/path separators.
+The configuration preserves the resolved user, authentication, proxy route, and
+host-key policy, and is removed after transfer and workspace-owner cleanup.
+Windows keeps native rsync/SSH pairing or privately staged WSL credentials;
+native SSH-config routes stay on the native client. Artifact and egress uploads
+use the same private SSH configuration boundary.
+
 `--no-sync` skips local file transfer only on providers that support it.
 Blacksmith Testbox rejects it before lease access or execution because native
 Testbox runs own sync and offer no supported bypass, including when reusing an
@@ -67,6 +75,9 @@ for an ambiguous missing path that remains in the effective manifest scope.
 Git-ignored output, dependency folders, `.git`, and common local caches stay out
 of the transfer. This keeps a first sync close to what CI would see while still
 letting you test uncommitted local edits.
+
+Filesystem Git origins are resolved on the runner during Git seeding and must
+be readable from that runner; otherwise Crabbox falls back to a full manifest sync.
 
 ### Jujutsu workspaces
 
@@ -163,6 +174,17 @@ renewal and release fail closed. After a client crash, an expired owner is
 recoverable only when the exact witnessed child is no longer alive. POSIX,
 WSL2, and native Windows targets share these semantics.
 
+POSIX and WSL2 children register themselves before executing the requested
+workload. Registration waits at most five seconds for the owner lock; it does
+not leave a background child waiting indefinitely for a start file. A failed
+setup exits cooperatively and closes inherited SSH streams without requiring
+permission to signal the child. If the supervising shell disappears before
+handoff, the registration deadline and closed identity pipe still prevent the
+waiting child from running the workload. After handoff, the existing witnessed
+child and recovery rules continue to apply. A denied `kill -0` is never proof
+that a recorded child is dead: cleanup and recovery require independent PID
+absence evidence, and retain authority when observation is ambiguous.
+
 Once ownership is established, sync runs these steps:
 
 1. Resolve the local repository root.
@@ -200,28 +222,53 @@ files and config; Crabbox does not delete files there.
 
 When `sync.fingerprint` is enabled (the default), Crabbox derives a fingerprint
 from `HEAD`, the delete/checksum settings, the manifest, the deletion list, the
-excludes, and the content of every changed file. If the remote workdir already
-carries that fingerprint, the sync is skipped entirely. `--full-resync` ignores
-the remote fingerprint and forces a clean transfer.
+excludes, and the content of every changed regular file. Changed symlinks are
+hashed by their target text, without following the link, so retargeting a link
+invalidates the fingerprint even when both targets contain identical bytes.
+Dangling links and links to directories are supported. If the remote workdir
+already carries that fingerprint, the sync is skipped entirely. `--full-resync`
+ignores the remote fingerprint and forces a clean transfer.
 
 Git seeding (`sync.gitSeed`, default on) clones or fetches the base tree on the
 runner before rsync, so only your diff travels over the wire. It activates only
 when the local `HEAD` commit is reachable from a remote ref.
+Among local origin tracking branches that contain the selected commit, Crabbox
+prefers the explicit `sync.baseRef` (or the inferred repository base when unset),
+then origin's symbolic default branch, then
+the first eligible branch in ref-name order. A preferred branch may have newer
+commits; the selected commit and tree remain unchanged. Planning does not contact
+origin or prune tracking refs, so a local candidate may still be stale. On the
+runner, Git coherence fetches the chosen advertised branch and verifies target
+ancestry and tree before aligning metadata.
+
 Crabbox disables Git seeding when the origin is an HTTP(S) URL with embedded
 userinfo, warns without printing the URL, and uses the normal file sync instead.
 This prevents credentials stored in local Git remotes from reaching lease
 command arguments or the seeded worktree's Git configuration.
 
-If seeding fails, ordinary runs, local Actions hydration, and native Windows
-sync warn with a fixed phase, advisory failure category, and command exit
-status. Categories distinguish missing Git, authentication/access, DNS,
-connectivity, TLS, repository/ref, and verification failures when recognizable.
-Raw Git/SSH output, URLs, paths, and credential-helper messages are never
-replayed in this warning. Capture is limited to 16 KiB in memory; oversized or
-unrecognized output produces an `unknown` diagnosis instead of guessing.
-Crabbox continues with file sync, but this does not guarantee that later Git
-coherence checks or the workload will succeed. Existing Git metadata may still
-be present; the failed seed has not established that it is current or usable.
+Git seeding, coherence finalization, and Git-state probes run in non-login Bash
+shells with `BASH_ENV` and `ENV` disabled. Runner login and logout hooks cannot
+replace these control-command exit statuses. User workload commands keep their
+existing login-shell behavior.
+
+If an otherwise forwardable origin requires authentication or is unreachable
+due to DNS, connectivity, or TLS transport errors, ordinary POSIX/WSL2 sync
+and local Actions hydration fall back to the full, plain manifest sync. This
+includes a peer disconnect during connection setup reported by Git/libcurl as
+`getpeername() ... is not connected`, and a reused Git worktree whose fetch
+fails during finalization.
+Fallback warnings contain only a fixed reason. The plain manifest path clears
+reusable fingerprints and Git hydration markers and does not forward local
+credentials.
+
+Local Actions hydration keeps unclassified seeding failures fatal, including
+missing refs, verification failures, and HTTP 5xx or other server failures,
+and aborts before file sync. Seed failure diagnostics report a fixed phase,
+advisory category, and command exit status. Raw Git/SSH output, URLs, paths,
+and credential-helper messages are never replayed in warnings. Capture is
+limited to 16 KiB in memory; oversized or unrecognized output produces an
+`unknown` diagnosis instead of guessing. Existing Git metadata may still be
+present; a failed seed has not established that it is current or usable.
 
 ### Opt-in Git overlay
 
@@ -238,6 +285,13 @@ configured base ref, so `HEAD^`, `git merge-base`, and
 historical blobs. Origins that cannot support filtered history use ordinary
 sync instead.
 
+Before transferring an eligible overlay, Crabbox copies its payload to a local
+snapshot and checks it against the checkout's index, manifest, exclusions, and
+fingerprint. Rsync reads the accepted snapshot, so edits made after acceptance
+wait for the next sync. If preparation cannot produce a stable supported
+snapshot, Crabbox falls back to ordinary full-manifest sync after successful
+cleanup. Cleanup failures stop the run and report the retained snapshot path.
+
 The optimization is off by default and requires `sync.gitSeed: true`,
 `sync.delete: true`, an unrestricted, complete, conflict-free Git checkout
 without submodules, and an anonymous HTTP(S) or remotely readable filesystem
@@ -247,8 +301,15 @@ origins, private origins, unsafe Git configuration, and unavailable runner
 prerequisites fall back to the complete ordinary file manifest. Git commands
 never receive forwarded credentials, credential helpers, hooks, global Git
 configuration, external transports, or repository-defined filters.
-Anonymous HTTP authentication failures safely fall back; genuine DNS, TLS,
-firewall, and other eligible-origin transport failures remain fatal.
+Anonymous HTTP authentication failures and eligible-origin DNS, TLS, firewall,
+connection, and fetch failures safely fall back to the complete ordinary file
+manifest. HTTP authentication classification uses response statuses, not
+status-like digits in origin URLs.
+
+A fallback involving `assume-unchanged` or `skip-worktree` index flags does
+not reuse or publish a sync fingerprint: Git can hide edits behind those
+flags. Crabbox transfers the full ordinary manifest instead. An index
+inspection failure also disables fingerprint reuse for that fallback.
 
 Only dependency caches ignored by verified `.gitignore` files from the exact
 target tree may survive overlay preparation: `node_modules`, `.pnpm-store`,
@@ -264,18 +325,22 @@ default-off timing output retains its existing shape.
 
 ## Large-sync guardrails
 
-`crabbox run` prints a one-line size estimate before transferring. When the
-checkout is clean, the candidate counts the full file set. When the checkout is
-dirty, the guardrails count the dirty delta (changed plus new files) instead,
-but the line still shows the full candidate size so first-sync cost stays
-visible:
+`crabbox run` prints a one-line size estimate before transferring. Ordinary SSH
+sync counts the full candidate when the checkout is clean, or the dirty delta
+when there are changes. Providers with full-archive guardrails always count the
+complete candidate because they transfer that archive, even when only one file
+changed. Other provider transports retain their documented policy. The estimate
+still shows the full candidate size so first-sync cost stays visible:
 
 ```text
 sync candidate: 299 files, 14.2 MiB dirty_delta=7 files, 92.4 KiB
 ```
 
 The guardrail scope (candidate or dirty delta) is compared against the warn and
-fail thresholds. Crossing a warn threshold prints a warning plus the top source
+fail thresholds. `crabbox sync-plan --json` reports this scope for the configured
+provider's ordinary workspace sync, without contacting the provider. Compressed
+upload caps and native service limits remain separate. Crossing a warn threshold
+prints a warning plus the top source
 directories by file count, so accidental dependency repair or generated churn is
 easy to spot. Crossing a fail threshold aborts the run.
 

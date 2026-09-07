@@ -332,8 +332,8 @@ func TestReleaseLeaseCleansNamespaceSSHFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	lease := LeaseTarget{LeaseID: leaseID, Server: server}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
-		t.Fatal(err)
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil || !outcome.Terminal {
+		t.Fatalf("deletion outcome=%+v err=%v", outcome, err)
 	}
 	if len(runner.calls) != 1 || runner.calls[0] != "devbox delete crabbox-blue-lobster-deadbeef --force" {
 		t.Fatalf("calls=%#v", runner.calls)
@@ -459,8 +459,8 @@ func TestReleaseLeaseRetainsStoppedNamespaceClaimAndSSHFiles(t *testing.T) {
 	if lease.Server.Labels["release"] != "stop" || !backend.RetainLeaseClaimAfterRelease(lease) {
 		t.Fatalf("resolved lease=%#v", lease)
 	}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
-		t.Fatal(err)
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil || outcome.Terminal {
+		t.Fatalf("stop outcome=%+v err=%v", outcome, err)
 	}
 	if len(runner.calls) != 1 || runner.calls[0] != "devbox shutdown "+name+" --force" {
 		t.Fatalf("calls=%#v", runner.calls)

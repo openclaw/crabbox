@@ -56,16 +56,18 @@ const metadata = {
   tagObject: requireValue("CRABBOX_PUBLISH_TAG_OBJECT"),
   sourceCommit: requireValue("CRABBOX_PUBLISH_SOURCE_COMMIT"),
   verifierCommit,
-  workflowCommit: process.env.CRABBOX_PUBLISH_WORKFLOW_COMMIT || verifierCommit,
-  verifierRunId: Number(requireValue("CRABBOX_PUBLISH_VERIFIER_RUN_ID")),
-  defaultBranch: requireValue("CRABBOX_PUBLISH_DEFAULT_BRANCH"),
-  workflowPath: requireValue("CRABBOX_PUBLISH_WORKFLOW_PATH"),
-  workflowName: "Verify Release Assets",
 };
 positiveSafeInteger(metadata.releaseId, "release ID");
-positiveSafeInteger(metadata.verifierRunId, "verifier run ID");
 commitSha(metadata.verifierCommit, "verifier commit");
-commitSha(metadata.workflowCommit, "workflow commit");
+function requireWorkflowInputs() {
+  metadata.workflowCommit = process.env.CRABBOX_PUBLISH_WORKFLOW_COMMIT || verifierCommit;
+  metadata.verifierRunId = Number(requireValue("CRABBOX_PUBLISH_VERIFIER_RUN_ID"));
+  metadata.defaultBranch = requireValue("CRABBOX_PUBLISH_DEFAULT_BRANCH");
+  metadata.workflowPath = requireValue("CRABBOX_PUBLISH_WORKFLOW_PATH");
+  metadata.workflowName = "Verify Release Assets";
+  positiveSafeInteger(metadata.verifierRunId, "verifier run ID");
+  commitSha(metadata.workflowCommit, "workflow commit");
+}
 
 function expectedAssetNames(file) {
   const names = fs.readFileSync(file, "utf8").split("\n").filter(Boolean);
@@ -302,55 +304,31 @@ function validateProof(manifest, arch, expectedRecord, state = "draft") {
   return releaseRecord;
 }
 
-function publicProof(args) {
-  if (args.length !== 9) {
+function publicRelease(args) {
+  if (args.length !== 4) {
     fail(
-      "usage: validate-release-publication.mjs public-proof <release> <run> <workflow> <artifacts> <arm-proof> <x86-proof> <asset-names> <notes> <asset-directory>",
+      "usage: validate-release-publication.mjs public-release <release> <asset-names> <notes> <asset-directory>",
     );
   }
-  const [releaseFile, runFile, workflowFile, artifactsFile, armFile, x86File, namesFile, notesFile, assetDirectory] =
-    args;
-  const names = expectedAssetNames(namesFile);
-  const notes = fs.readFileSync(notesFile, "utf8");
-  const release = readJson(releaseFile, "public release");
-  const current = validateReleaseIdentity(release, names, notes, "published");
-  const runStartedAt = validateWorkflowRun(
-    readJson(runFile, "public native verifier run"),
-    readJson(workflowFile, "public native verifier workflow"),
-    "published",
-  );
-  validateArtifactList(readJson(artifactsFile, "public native verifier artifacts"));
-  for (const [label, value] of [
-    ["release updated_at", release.updated_at],
-    ["release published_at", release.published_at],
-    ...current.assets.map((asset) => [`updatedAt for ${asset.name}`, asset.updatedAt]),
-  ]) {
-    if (runStartedAt <= timestamp(value, label)) {
-      fail(`public native verifier run is not newer than ${label}`);
-    }
+  if (metadata.repository !== "openclaw/crabbox" || !/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(metadata.tag)) {
+    fail("public release requires the canonical repository and stable tag");
   }
-  const expectedRecord = {
-    title: current.title,
-    targetCommitish: current.targetCommitish,
-    notesBytes: Buffer.byteLength(notes, "utf8"),
-    notesSha256: current.bodySha256,
-    publishedAt: current.publishedAt,
-    releaseUpdatedAt: release.updated_at,
-    assets: current.assets,
-  };
-  const armProof = validateProof(
-    readJson(armFile, "arm64 public native proof"),
-    "arm64",
-    expectedRecord,
-    "published",
+  const [releaseFile, namesFile, notesFile, assetDirectory] = args;
+  const names = expectedAssetNames(namesFile);
+  const version = metadata.tag.slice(1);
+  const canonicalNames = [
+    "checksums.txt", "provenance.json",
+    ...[
+      "darwin_amd64.tar.gz", "darwin_arm64.tar.gz",
+      "linux_amd64.tar.gz", "linux_arm64.tar.gz",
+      "windows_amd64.zip", "windows_arm64.zip",
+    ].map((target) => `crabbox_${version}_${target}`),
+  ].sort((a, b) => a.localeCompare(b));
+  exactEqual(names, canonicalNames, "public release inventory is not canonical");
+  const notes = fs.readFileSync(notesFile, "utf8");
+  const current = validateReleaseIdentity(
+    readJson(releaseFile, "public release"), names, notes, "published",
   );
-  const x86Proof = validateProof(
-    readJson(x86File, "x86_64 public native proof"),
-    "x86_64",
-    expectedRecord,
-    "published",
-  );
-  exactEqual(armProof, x86Proof, "public native proofs do not bind the same exact release");
 
   const actualNames = fs.readdirSync(assetDirectory).sort((a, b) => a.localeCompare(b));
   exactEqual(actualNames, names, "local public asset inventory is not exact");
@@ -364,13 +342,7 @@ function publicProof(args) {
       fail(`local public asset digest differs from GitHub: ${asset.name}`);
     }
   }
-  process.stdout.write(
-    `${JSON.stringify({
-      ...current,
-      verifierCommit: metadata.verifierCommit,
-      workflowCommit: metadata.workflowCommit,
-    }, null, 2)}\n`,
-  );
+  process.stdout.write(`${JSON.stringify(current, null, 2)}\n`);
 }
 
 function preflight(args) {
@@ -487,10 +459,12 @@ function assertState(args) {
 
 try {
   const [command, ...args] = process.argv.slice(2);
-  if (command === "preflight") preflight(args);
-  else if (command === "public-proof") publicProof(args);
-  else if (command === "state") assertState(args);
-  else fail("usage: validate-release-publication.mjs <preflight|public-proof|state> ...");
+  if (command === "public-release") publicRelease(args);
+  else if (command === "preflight" || command === "state") {
+    requireWorkflowInputs();
+    if (command === "preflight") preflight(args);
+    else assertState(args);
+  } else fail("usage: validate-release-publication.mjs <preflight|public-release|state> ...");
 } catch (error) {
   console.error(`release publication validation failed: ${error.message}`);
   process.exit(1);

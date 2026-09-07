@@ -230,6 +230,10 @@ func (b *staticLeaseBackend) Doctor(ctx context.Context, req core.DoctorRequest)
 	if b.Cfg.Static.Host == "" {
 		return core.DoctorResult{}, exit(3, "missing static.host")
 	}
+	wsl2 := b.Cfg.TargetOS == core.TargetWindows && b.Cfg.WindowsMode == "wsl2"
+	if wsl2 && !req.ProbeSSH {
+		return core.DoctorResult{Provider: "ssh", Checks: []core.DoctorCheck{{Status: "skip", Check: "wsl2-sftp", Message: "runtime=unchecked transport=sftp_required mutation=false rerun=crabbox_doctor_--provider_ssh_--target_windows_--windows-mode_wsl2_--doctor-probe-ssh"}}}, nil
+	}
 	runtime := "unchecked"
 	api := "static_config"
 	if req.ProbeSSH {
@@ -238,10 +242,16 @@ func (b *staticLeaseBackend) Doctor(ctx context.Context, req core.DoctorRequest)
 			return core.DoctorResult{}, err
 		}
 		if err := waitForSSHReady(ctx, &target, b.RT.Stderr, "doctor", 10*time.Second); err != nil {
+			if wsl2 && isWSLSFTPUnavailable(err) {
+				return core.DoctorResult{Provider: "ssh", Checks: []core.DoctorCheck{{Status: "failed", Check: "wsl2-sftp", Message: "runtime=ssh_reachable transport=sftp_required mutation=false remediation=enable_internal-sftp_restart_sshd_then_rerun_with_--doctor-probe-ssh"}}}, nil
+			}
 			return core.DoctorResult{}, err
 		}
 		api = "ssh_probe"
 		runtime = "ssh_reachable"
+	}
+	if wsl2 {
+		return core.DoctorResult{Provider: "ssh", Checks: []core.DoctorCheck{{Status: "ok", Check: "wsl2-sftp", Message: "runtime=ssh_reachable transport=sftp_ready mutation=false"}}}, nil
 	}
 	return core.DoctorResult{
 		Provider: "ssh",
@@ -261,37 +271,33 @@ func (b *staticLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
 	return fmt.Sprintf("released static lease=%s host=%s", lease.LeaseID, lease.SSH.Host)
 }
 
-func (b *staticLeaseBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
-	expected, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server)
-	if !set || !exists {
-		return Server{}, exit(4, "static lease %s has no exact claim snapshot; refusing touch", req.Lease.LeaseID)
-	}
-	if err := validateStaticTouchIdentity(b.Cfg, req.Lease, expected); err != nil {
-		return Server{}, err
-	}
-	if req.IdleTimeoutOverride != nil && *req.IdleTimeoutOverride <= 0 {
-		return Server{}, exit(2, "static lease %s idle timeout override must be positive", req.Lease.LeaseID)
-	}
-
-	now := time.Now().UTC()
-	if b.RT.Clock != nil {
-		now = b.RT.Clock.Now().UTC()
-	}
-	cfg := b.Cfg
-	if expected.IdleTimeoutSeconds > 0 {
-		cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
-	}
-	labels := staticLeaseLabelsFromClaim(expected)
-	labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, req.State, now, req.IdleTimeoutOverride)
-	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+func (b *staticLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
+	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
+		Provider: "static",
+		Authorize: func(_ context.Context, lease LeaseTarget, claim core.LeaseClaim) error {
+			return validateStaticTouchIdentity(b.Cfg, lease, claim)
+		},
+		Prepare: func(expected core.LeaseClaim) (map[string]string, time.Time) {
+			now := time.Now().UTC()
+			if b.RT.Clock != nil {
+				now = b.RT.Clock.Now().UTC()
+			}
+			cfg := b.Cfg
+			if expected.IdleTimeoutSeconds > 0 {
+				cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
+			}
+			labels := core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(staticLeaseLabelsFromClaim(expected), cfg, req.State, now, req.IdleTimeoutOverride)
+			return labels, now
+		},
+	})
 	if err != nil {
 		return Server{}, err
 	}
 	server := req.Lease.Server
-	server.Labels = labels
+	server.Labels = updated.Labels
 	server.ServerType.Architecture = ""
 	historicalArchitecture(&server, req.Lease.SSH)
-	if state := strings.TrimSpace(labels["state"]); state != "" {
+	if state := strings.TrimSpace(server.Labels["state"]); state != "" {
 		server.Status = state
 	}
 	core.SetServerLeaseClaimSnapshot(&server, updated, true)
@@ -308,6 +314,7 @@ func serverSlug(server Server) string                           { return core.Se
 
 var waitForSSH = core.WaitForSSH
 var waitForSSHReady = core.WaitForSSHReady
+var isWSLSFTPUnavailable = core.IsWSLSFTPUnavailable
 
 func (b *staticLeaseBackend) rememberAcquiredLease(lease LeaseTarget) {
 	b.mu.Lock()

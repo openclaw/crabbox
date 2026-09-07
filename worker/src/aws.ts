@@ -1,6 +1,15 @@
 import { AwsClient } from "aws4fetch";
 import { XMLParser } from "fast-xml-parser";
 
+import {
+  createAWSProvisioningDiagnostics,
+  type AWSProvisioningDiagnostics,
+} from "./aws-provisioning-diagnostics";
+import type {
+  AWSQualificationRequest,
+  AWSQualificationService,
+  AWSQualificationTransportBinding,
+} from "./aws-qualification-contract";
 import { requireAWSRegion, sanitizeAWSRegion } from "./aws-region";
 import { awsRunInstancesUserData } from "./bootstrap";
 import {
@@ -25,19 +34,23 @@ import {
 } from "./provider-key";
 import { leaseProviderLabels } from "./provider-labels";
 import { withPricingDeadline } from "./provider-pricing";
+import { ProvisioningAttemptHistory } from "./provisioning-attempts";
 import { leaseProviderName } from "./slug";
 import type {
   AWSCredentialProvider,
   Env,
   ProviderFastSnapshotRestore,
   ProviderImage,
+  ProviderCheckpointOwnership,
   LeaseImageIdentity,
   ProviderMachine,
+  ProviderAccessTimingObserver,
   ProvisioningAttempt,
 } from "./types";
 
 const awsUbuntuOwner = "099720109477";
 const ec2Version = "2016-11-15";
+const awsDescribeInstancesMaxPages = 100;
 const stsVersion = "2011-06-15";
 const awsSpotQuotaCode = "L-34B43A08";
 const awsOnDemandQuotaCode = "L-1216C47A";
@@ -290,10 +303,81 @@ class RefreshingAWSFetchClient implements AWSFetchClient {
   }
 }
 
+class QualificationAWSFetchClient implements AWSFetchClient {
+  constructor(
+    private readonly binding: AWSQualificationTransportBinding,
+    private readonly service: AWSQualificationService,
+    private readonly region: string,
+    private readonly signal?: AbortSignal,
+  ) {}
+
+  async fetch(_input: string, init?: RequestInit): Promise<Response> {
+    this.signal?.throwIfAborted();
+    const request = qualificationRequest(this.service, this.region, init);
+    let result;
+    try {
+      result = await this.binding.execute(request);
+    } catch {
+      // The authority keeps opId receipts and pending intents. A same-op retry is safe
+      // after a lost RPC response and never falls back to candidate-held credentials.
+      this.signal?.throwIfAborted();
+      result = await this.binding.execute(request);
+    }
+    this.signal?.throwIfAborted();
+    return new Response(result.body, { status: result.status });
+  }
+}
+
+class RejectedQualificationFetchClient implements AWSFetchClient {
+  async fetch(): Promise<Response> {
+    throw new Error("AWS qualification transport does not allow SSM actions");
+  }
+}
+
+function qualificationRequest(
+  service: AWSQualificationService,
+  region: string,
+  init?: RequestInit,
+): AWSQualificationRequest {
+  if (init?.method !== "POST" || typeof init.body !== "string") {
+    throw new Error("AWS qualification transport requires a bounded POST body");
+  }
+  const opId = crypto.randomUUID();
+  if (service === "ec2" || service === "sts") {
+    const body = new URLSearchParams(init.body);
+    const action = body.get("Action") ?? "";
+    body.delete("Action");
+    body.delete("Version");
+    if (!action) throw new Error("AWS qualification transport request is missing an action");
+    return { opId, region, service, action, parameters: Object.fromEntries(body) };
+  }
+  const target = new Headers(init.headers).get("x-amz-target") ?? "";
+  const action = target.split(".").at(-1) ?? "";
+  if (!action) throw new Error("AWS qualification transport request is missing a target");
+  const parsed = JSON.parse(init.body) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("AWS qualification transport request body must be an object");
+  }
+  return {
+    opId,
+    region,
+    service,
+    action,
+    parameters: parsed as Record<string, unknown>,
+  };
+}
+
 export function awsCredentialsConfigured(
-  env: Pick<Env, "awsCredentialProvider" | "AWS_ACCESS_KEY_ID" | "AWS_SECRET_ACCESS_KEY">,
+  env: Pick<
+    Env,
+    | "CRABBOX_AWS_QUALIFICATION_TRANSPORT"
+    | "awsCredentialProvider"
+    | "AWS_ACCESS_KEY_ID"
+    | "AWS_SECRET_ACCESS_KEY"
+  >,
 ): boolean {
   return Boolean(
+    env.CRABBOX_AWS_QUALIFICATION_TRANSPORT ||
     env.awsCredentialProvider ||
     (env.AWS_ACCESS_KEY_ID?.trim() && env.AWS_SECRET_ACCESS_KEY?.trim()),
   );
@@ -569,7 +653,14 @@ type DescribedSSHIngressRule = SSHIngressRule & { description: string };
 interface AWSIngressOptions {
   reconcile?: "authoritative" | "additive";
   allowEmpty?: boolean;
+  withIngress?: (
+    apply: (cidrs: string[]) => Promise<string>,
+    observe: ProviderAccessTimingObserver,
+  ) => Promise<string>;
+  diagnostics?: AWSProvisioningDiagnostics;
 }
+
+type AWSReadinessCheck = () => Promise<void>;
 
 const sshIngressRangeFamilies = [
   {
@@ -613,20 +704,38 @@ export class EC2SpotClient {
         `AWS region mismatch: expected ${expected.region}, configured ${this.region}`,
       );
     }
-    const credentials = awsCredentialProvider(env);
     this.endpoint = `https://ec2.${this.region}.amazonaws.com/`;
     this.serviceQuotasEndpoint = `https://servicequotas.${this.region}.amazonaws.com/`;
     this.stsEndpoint = `https://sts.${this.region}.amazonaws.com/`;
     this.ssmEndpoint = `https://ssm.${this.region}.amazonaws.com/`;
-    this.aws = new RefreshingAWSFetchClient(credentials, "ec2", this.region, requestSignal);
-    this.serviceQuotas = new RefreshingAWSFetchClient(
-      credentials,
-      "servicequotas",
-      this.region,
-      requestSignal,
-    );
-    this.stsClient = new RefreshingAWSFetchClient(credentials, "sts", this.region, requestSignal);
-    this.ssmClient = new RefreshingAWSFetchClient(credentials, "ssm", this.region, requestSignal);
+    const qualification = env.CRABBOX_AWS_QUALIFICATION_TRANSPORT;
+    if (qualification) {
+      this.aws = new QualificationAWSFetchClient(qualification, "ec2", this.region, requestSignal);
+      this.serviceQuotas = new QualificationAWSFetchClient(
+        qualification,
+        "servicequotas",
+        this.region,
+        requestSignal,
+      );
+      this.stsClient = new QualificationAWSFetchClient(
+        qualification,
+        "sts",
+        this.region,
+        requestSignal,
+      );
+      this.ssmClient = new RejectedQualificationFetchClient();
+    } else {
+      const credentials = awsCredentialProvider(env);
+      this.aws = new RefreshingAWSFetchClient(credentials, "ec2", this.region, requestSignal);
+      this.serviceQuotas = new RefreshingAWSFetchClient(
+        credentials,
+        "servicequotas",
+        this.region,
+        requestSignal,
+      );
+      this.stsClient = new RefreshingAWSFetchClient(credentials, "sts", this.region, requestSignal);
+      this.ssmClient = new RefreshingAWSFetchClient(credentials, "ssm", this.region, requestSignal);
+    }
   }
 
   async capacityReadinessChecks(config: LeaseConfig): Promise<AWSCapacityReadinessCheck[]> {
@@ -867,7 +976,7 @@ export class EC2SpotClient {
   }
 
   async listCrabboxServers(): Promise<ProviderMachine[]> {
-    const root = await this.ec2("DescribeInstances", {
+    return this.describeAllInstances({
       "Filter.1.Name": "tag:crabbox",
       "Filter.1.Value.1": "true",
       "Filter.2.Name": "instance-state-name",
@@ -876,15 +985,10 @@ export class EC2SpotClient {
       "Filter.2.Value.3": "stopping",
       "Filter.2.Value.4": "stopped",
     });
-    return reservations(root).flatMap((reservation) =>
-      items(record(record(reservation)["instancesSet"])["item"]).map((instance) =>
-        this.withRegion(instanceToMachine(instance)),
-      ),
-    );
   }
 
   async findWorkspaceServerByLease(leaseID: string): Promise<ProviderMachine | undefined> {
-    const root = await this.ec2("DescribeInstances", {
+    const matches = await this.describeAllInstances({
       "Filter.1.Name": "tag:crabbox",
       "Filter.1.Value.1": "true",
       "Filter.2.Name": "tag:created_by",
@@ -901,15 +1005,45 @@ export class EC2SpotClient {
       "Filter.6.Value.3": "stopping",
       "Filter.6.Value.4": "stopped",
     });
-    const matches = reservations(root).flatMap((reservation) =>
-      items(record(record(reservation)["instancesSet"])["item"]).map((instance) =>
-        this.withRegion(instanceToMachine(instance)),
-      ),
-    );
     if (matches.length > 1) {
       throw new Error(`AWS private workspace recovery is ambiguous for lease ${leaseID}`);
     }
     return matches[0];
+  }
+
+  private async describeAllInstances(params: Record<string, string>): Promise<ProviderMachine[]> {
+    const machines: ProviderMachine[] = [];
+    const seenTokens = new Set<string>();
+    let nextToken = "";
+    const incomplete = `aws DescribeInstances inventory incomplete in ${this.region}`;
+    for (let page = 0; page < awsDescribeInstancesMaxPages; page++) {
+      let root: Record<string, unknown>;
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- EC2 pagination depends on the previous token.
+        root = await this.ec2("DescribeInstances", {
+          ...params,
+          ...(nextToken ? { NextToken: nextToken } : {}),
+        });
+      } catch (error) {
+        if (page === 0) throw error;
+        // oxlint-disable-next-line eslint/preserve-caught-error -- Upstream causes can expose opaque tokens or credentials.
+        throw new Error(`${incomplete}: page ${page + 1} request failed`);
+      }
+      machines.push(
+        ...reservations(root).flatMap((reservation) =>
+          items(record(reservation["instancesSet"])["item"]).map((instance) =>
+            this.withRegion(instanceToMachine(instance)),
+          ),
+        ),
+      );
+      nextToken = asString(root["nextToken"]);
+      if (!nextToken) return machines;
+      if (seenTokens.has(nextToken)) {
+        throw new Error(`${incomplete}: repeated pagination token`);
+      }
+      seenTokens.add(nextToken);
+    }
+    throw new Error(`${incomplete}: pagination exceeded ${awsDescribeInstancesMaxPages} pages`);
   }
 
   async refreshSSHIngress(config: LeaseConfig, options: AWSIngressOptions = {}): Promise<void> {
@@ -929,21 +1063,54 @@ export class EC2SpotClient {
     attempts?: ProvisioningAttempt[];
     imageID: string;
   }> {
-    if (!config.awsPrivate) {
-      await this.ensureSSHKey(config.providerKey, config.sshPublicKey, leaseID);
-    }
+    const diagnostics = createAWSProvisioningDiagnostics(leaseID, this.region);
+    options = { ...options, diagnostics };
+    let succeeded = false;
     let transientImageID = "";
     try {
+      if (!config.awsPrivate) {
+        await diagnostics.measure("key_pair", () =>
+          this.ensureSSHKey(config.providerKey, config.sshPublicKey, leaseID),
+        );
+      }
       const capabilityImageRequired = hasImageRequirements(config.imageRequirements);
-      const defaultImageID = config.awsSnapshot
-        ? await (async () => {
-            transientImageID = await this.registerSnapshotImage(config.awsSnapshot, leaseID);
-            return this.waitForImageAvailable(transientImageID);
-          })()
-        : config.target === "macos" || capabilityImageRequired
-          ? ""
-          : await this.resolveAMI(config);
-      const securityGroupID = await this.ensureSecurityGroup(config, options);
+      const defaultImageID = await diagnostics.measure("image", async () =>
+        config.awsSnapshot
+          ? await (async () => {
+              transientImageID = await this.registerSnapshotImage(config.awsSnapshot, leaseID);
+              return this.waitForImageAvailable(transientImageID);
+            })()
+          : config.target === "macos" || capabilityImageRequired
+            ? ""
+            : await this.resolveAMI(config),
+      );
+      const quotaCache = new Map<string, Promise<number | undefined>>();
+      const quotaForMarket = (market: LeaseConfig["capacityMarket"]) => {
+        const code = awsQuotaCodeForMarket(market);
+        let quota = quotaCache.get(code);
+        if (!quota) {
+          quota = diagnostics.measure("quota", () => this.appliedServiceQuota(code));
+          quotaCache.set(code, quota);
+        }
+        return quota;
+      };
+      // Quota reads do not own ingress. Join both preparations before launch or
+      // transient-image cleanup so a failed branch cannot leave work running.
+      const [securityGroup, initialQuota] = await Promise.allSettled([
+        options.withIngress
+          ? options.withIngress(
+              (cidrs) =>
+                diagnostics.measure("security_group", () =>
+                  this.ensureSecurityGroup({ ...config, awsSSHCIDRs: cidrs }, options),
+                ),
+              diagnostics.record,
+            )
+          : diagnostics.measure("security_group", () => this.ensureSecurityGroup(config, options)),
+        quotaForMarket(config.capacityMarket),
+      ]);
+      if (securityGroup.status === "rejected") throw securityGroup.reason;
+      if (initialQuota.status === "rejected") throw initialQuota.reason;
+      const securityGroupID = securityGroup.value;
       const pinnedMacHostID = config.target === "macos" ? config.hostID || config.awsMacHostID : "";
       // An explicit Mac host is tied to one hardware family. Resolve that family once so a
       // defaulted --type cannot send an incompatible instance type to the pinned host.
@@ -960,9 +1127,7 @@ export class EC2SpotClient {
         );
       }
       const candidates = pinnedMacHostType ? [pinnedMacHostType] : awsLaunchCandidates(config);
-      const failures: string[] = [];
-      const attempts: ProvisioningAttempt[] = [];
-      const quotaCache = new Map<string, number | undefined>();
+      const history = new ProvisioningAttemptHistory();
       const imageCache = new Map<string, string>();
       const marketFallbackCandidates: string[] = [];
       const pinnedMacOSImageID =
@@ -1002,15 +1167,15 @@ export class EC2SpotClient {
         return imageID;
       };
       for (const serverType of candidates) {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- quota preflight follows sequential fallback order.
-        const preflight = await this.quotaPreflightAttempt(
+        const preflight = awsQuotaPreflightAttempt(
           serverType,
           config.capacityMarket,
-          quotaCache,
+          this.region,
+          // oxlint-disable-next-line eslint/no-await-in-loop -- quota preflight follows sequential fallback order.
+          await quotaForMarket(config.capacityMarket),
         );
         if (preflight) {
-          attempts.push(preflight);
-          failures.push(`${serverType}: ${preflight.message}`);
+          history.record(preflight, `${serverType}: ${preflight.message}`);
           if (config.capacityMarket === "spot") {
             marketFallbackCandidates.push(serverType);
           }
@@ -1018,15 +1183,19 @@ export class EC2SpotClient {
         }
         try {
           // oxlint-disable-next-line eslint/no-await-in-loop -- instance-type fallback may need an architecture-specific AMI.
-          const imageID = await resolveCandidateImageID({ ...config, serverType });
+          const imageID = await diagnostics.measure("image", () =>
+            resolveCandidateImageID({ ...config, serverType }),
+          );
           // oxlint-disable-next-line eslint/no-await-in-loop -- instance-type fallback must stay sequential.
-          const server = await this.createServer(
-            { ...config, serverType },
-            leaseID,
-            slug,
-            owner,
-            imageID,
-            securityGroupID,
+          const server = await diagnostics.measure("instance_create", () =>
+            this.createServer(
+              { ...config, serverType },
+              leaseID,
+              slug,
+              owner,
+              imageID,
+              securityGroupID,
+            ),
           );
           const result: {
             server: ProviderMachine;
@@ -1035,20 +1204,20 @@ export class EC2SpotClient {
             attempts?: ProvisioningAttempt[];
             imageID: string;
           } = { server, serverType, market: config.capacityMarket, imageID };
-          if (attempts.length > 0) {
-            result.attempts = attempts;
-          }
-          return result;
+          succeeded = true;
+          return { ...result, ...history.result() };
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          attempts.push({
-            region: this.region,
-            serverType,
-            market: config.capacityMarket,
-            category: awsProvisioningErrorCategory(message) || "fatal",
-            message: conciseAWSProvisioningMessage(message),
-          });
-          failures.push(`${serverType}: ${message}`);
+          history.record(
+            {
+              region: this.region,
+              serverType,
+              market: config.capacityMarket,
+              category: awsProvisioningErrorCategory(message) || "fatal",
+              message: conciseAWSProvisioningMessage(message),
+            },
+            `${serverType}: ${message}`,
+          );
           if (!isRetryableAWSProvisioningError(message)) {
             marketFallbackCandidates.length = 0;
             break;
@@ -1061,28 +1230,36 @@ export class EC2SpotClient {
       // Retry only candidates whose Spot failure can be recovered by On-Demand.
       if (marketFallbackCandidates.length > 0 && config.capacityFallback.startsWith("on-demand")) {
         for (const serverType of marketFallbackCandidates) {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback must stay sequential.
-          const preflight = await this.quotaPreflightAttempt(serverType, "on-demand", quotaCache);
+          const preflight = awsQuotaPreflightAttempt(
+            serverType,
+            "on-demand",
+            this.region,
+            // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback must stay sequential.
+            await quotaForMarket("on-demand"),
+          );
           if (preflight) {
-            attempts.push(preflight);
-            failures.push(`on-demand ${serverType}: ${preflight.message}`);
+            history.record(preflight, `on-demand ${serverType}: ${preflight.message}`);
             continue;
           }
           try {
             // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback may need an architecture-specific AMI.
-            const imageID = await resolveCandidateImageID({
-              ...config,
-              capacityMarket: "on-demand",
-              serverType,
-            });
+            const imageID = await diagnostics.measure("image", () =>
+              resolveCandidateImageID({
+                ...config,
+                capacityMarket: "on-demand",
+                serverType,
+              }),
+            );
             // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback must stay sequential.
-            const server = await this.createServer(
-              { ...config, capacityMarket: "on-demand", serverType },
-              leaseID,
-              slug,
-              owner,
-              imageID,
-              securityGroupID,
+            const server = await diagnostics.measure("instance_create", () =>
+              this.createServer(
+                { ...config, capacityMarket: "on-demand", serverType },
+                leaseID,
+                slug,
+                owner,
+                imageID,
+                securityGroupID,
+              ),
             );
             const result: {
               server: ProviderMachine;
@@ -1091,20 +1268,20 @@ export class EC2SpotClient {
               attempts?: ProvisioningAttempt[];
               imageID: string;
             } = { server, serverType, market: "on-demand", imageID };
-            if (attempts.length > 0) {
-              result.attempts = attempts;
-            }
-            return result;
+            succeeded = true;
+            return { ...result, ...history.result() };
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            attempts.push({
-              region: this.region,
-              serverType,
-              market: "on-demand",
-              category: awsProvisioningErrorCategory(message) || "fatal",
-              message: conciseAWSProvisioningMessage(message),
-            });
-            failures.push(`on-demand ${serverType}: ${message}`);
+            history.record(
+              {
+                region: this.region,
+                serverType,
+                market: "on-demand",
+                category: awsProvisioningErrorCategory(message) || "fatal",
+                message: conciseAWSProvisioningMessage(message),
+              },
+              `on-demand ${serverType}: ${message}`,
+            );
             if (!isRetryableAWSProvisioningError(message)) {
               break;
             }
@@ -1112,15 +1289,20 @@ export class EC2SpotClient {
         }
       }
       if (config.serverTypeExplicit) {
-        throw new Error(
-          `requested exact AWS instance type ${config.serverType} failed; remove --type to allow class fallback: ${failures.join("; ")}`,
+        throw history.error(
+          `requested exact AWS instance type ${config.serverType} failed; remove --type to allow class fallback: `,
         );
       }
-      throw new Error(failures.join("; "));
+      throw history.error();
     } finally {
       if (transientImageID) {
-        await this.ec2("DeregisterImage", { ImageId: transientImageID }).catch(() => undefined);
+        await diagnostics
+          .measure("image_cleanup", () =>
+            this.ec2("DeregisterImage", { ImageId: transientImageID }),
+          )
+          .catch(() => undefined);
       }
+      diagnostics.finish(succeeded ? "success" : "failure");
     }
   }
 
@@ -1146,12 +1328,32 @@ export class EC2SpotClient {
     }
   }
 
-  async waitForServerIP(instanceID: string, allowPrivateAddress = false): Promise<ProviderMachine> {
+  async waitForServerVisibility(instanceID: string): Promise<ProviderMachine> {
+    for (const delay of awsInstanceVisibilityBackoffMs) {
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- newly allocated IDs propagate through EC2 reads.
+        return await this.getServer(instanceID);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!isAWSInstanceNotFoundError(message)) throw error;
+      }
+      // oxlint-disable-next-line eslint/no-await-in-loop -- reuse the existing bounded EC2 observation schedule.
+      await sleep(delay);
+    }
+    return this.getServer(instanceID);
+  }
+
+  async waitForServerIP(
+    instanceID: string,
+    allowPrivateAddress = false,
+    checkReadiness?: AWSReadinessCheck,
+  ): Promise<ProviderMachine> {
     const deadline = Date.now() + 600_000;
+    /* oxlint-disable eslint/no-await-in-loop -- Polling serially revalidates lease authority around each provider read. */
     while (Date.now() < deadline) {
+      await checkReadiness?.();
       let server: ProviderMachine | undefined;
       try {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- polling waits between EC2 reads.
         server = await this.getServer(instanceID);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1159,22 +1361,24 @@ export class EC2SpotClient {
           throw error;
         }
       }
+      await checkReadiness?.();
       const address = server?.host || (allowPrivateAddress ? server?.privateHost : "");
       if (server && address) {
         return { ...server, host: address };
       }
-      // oxlint-disable-next-line eslint/no-await-in-loop -- this delay is the polling interval.
       await sleep(5_000);
     }
+    /* oxlint-enable eslint/no-await-in-loop */
     throw new Error(`timed out waiting for AWS instance network address: ${instanceID}`);
   }
 
-  async waitForSSMOnline(instanceID: string): Promise<void> {
+  async waitForSSMOnline(instanceID: string, checkReadiness?: AWSReadinessCheck): Promise<void> {
     const deadline = Date.now() + 10 * 60_000;
+    /* oxlint-disable eslint/no-await-in-loop -- Polling serially revalidates lease authority around each provider read. */
     while (Date.now() < deadline) {
+      await checkReadiness?.();
       let result: Record<string, unknown>;
       try {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- SSM registration is polled serially.
         result = await this.ssm("DescribeInstanceInformation", {
           Filters: [{ Key: "InstanceIds", Values: [instanceID] }],
           MaxResults: 5,
@@ -1186,6 +1390,7 @@ export class EC2SpotClient {
         }
         result = {};
       }
+      await checkReadiness?.();
       const instances = items(result["InstanceInformationList"]).map(record);
       if (
         instances.some(
@@ -1196,9 +1401,9 @@ export class EC2SpotClient {
       ) {
         return;
       }
-      // oxlint-disable-next-line eslint/no-await-in-loop -- SSM registration is eventually consistent.
       await sleep(5_000);
     }
+    /* oxlint-enable eslint/no-await-in-loop */
     throw new Error(`timed out waiting for AWS SSM managed-node readiness: ${instanceID}`);
   }
 
@@ -1233,6 +1438,7 @@ export class EC2SpotClient {
     leaseID: string,
     command: string,
     logGroup: string,
+    checkReadiness?: AWSReadinessCheck,
   ): Promise<{ commandID: string; status: string }> {
     const bootstrapScript = [
       "set -euo pipefail",
@@ -1244,6 +1450,7 @@ export class EC2SpotClient {
     if (!command.trim() || new TextEncoder().encode(guardedCommand).byteLength > 24 * 1024) {
       throw new Error("AWS SSM workspace bootstrap command is empty or too large");
     }
+    await checkReadiness?.();
     const sent = await this.ssm("SendCommand", {
       CloudWatchOutputConfig: {
         CloudWatchLogGroupName: logGroup,
@@ -1258,18 +1465,21 @@ export class EC2SpotClient {
       },
       TimeoutSeconds: 900,
     });
+    await checkReadiness?.();
     const commandID = asString(record(sent["Command"])["CommandId"]);
     if (!commandID) {
       throw new Error("AWS SSM SendCommand returned no command ID");
     }
     const deadline = Date.now() + 17 * 60_000;
+    /* oxlint-disable eslint/no-await-in-loop -- Polling serially revalidates lease authority around each provider read. */
     while (Date.now() < deadline) {
+      await checkReadiness?.();
       try {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- command status is sequential.
         const invocation = await this.ssm("GetCommandInvocation", {
           CommandId: commandID,
           InstanceId: instanceID,
         });
+        await checkReadiness?.();
         const status = asString(invocation["Status"]);
         if (status === "Success") {
           return { commandID, status };
@@ -1282,9 +1492,9 @@ export class EC2SpotClient {
         const message = error instanceof Error ? error.message : String(error);
         if (!message.includes("InvocationDoesNotExist")) throw error;
       }
-      // oxlint-disable-next-line eslint/no-await-in-loop -- SSM command delivery is asynchronous.
       await sleep(2_000);
     }
+    /* oxlint-enable eslint/no-await-in-loop */
     throw new Error(`timed out waiting for AWS SSM workspace bootstrap: ${commandID}`);
   }
 
@@ -1305,18 +1515,16 @@ export class EC2SpotClient {
   }
 
   async deleteServer(instanceID: string): Promise<void> {
+    if (this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT) {
+      await this.terminateServerAndWait(instanceID);
+      return;
+    }
     await this.ec2("TerminateInstances", { "InstanceId.1": instanceID });
   }
 
   async terminateServerAndWait(instanceID: string): Promise<void> {
-    let terminated: Record<string, unknown>;
-    try {
-      terminated = await this.ec2("TerminateInstances", { "InstanceId.1": instanceID });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (isAWSInstanceNotFoundError(message)) return;
-      throw error;
-    }
+    // NotFound before acknowledgement can be creation propagation, not termination.
+    const terminated = await this.ec2("TerminateInstances", { "InstanceId.1": instanceID });
     const returnedIDs = items(record(terminated["instancesSet"])["item"])
       .map((item) => asString(record(item)["instanceId"]))
       .filter(Boolean);
@@ -1347,9 +1555,13 @@ export class EC2SpotClient {
     throw new Error(`timed out confirming AWS instance termination: ${instanceID}`);
   }
 
-  async createDiskSnapshot(instanceID: string, name: string): Promise<ProviderImage> {
+  async createDiskSnapshot(
+    instanceID: string,
+    name: string,
+    ownership?: ProviderCheckpointOwnership,
+  ): Promise<ProviderImage> {
     const source = await this.instanceRootVolumeMetadata(instanceID);
-    const root = await this.ec2("CreateSnapshot", {
+    const params: Record<string, string> = {
       VolumeId: source.volumeID,
       Description: `Crabbox checkpoint from ${instanceID}`,
       "TagSpecification.1.ResourceType": "snapshot",
@@ -1363,7 +1575,16 @@ export class EC2SpotClient {
       "TagSpecification.1.Tag.4.Value": source.rootDeviceName,
       "TagSpecification.1.Tag.5.Key": "crabbox_architecture",
       "TagSpecification.1.Tag.5.Value": source.architecture,
-    });
+    };
+    if (ownership) {
+      params["TagSpecification.1.Tag.6.Key"] = "crabbox_checkpoint_id";
+      params["TagSpecification.1.Tag.6.Value"] = ownership.checkpointID;
+      params["TagSpecification.1.Tag.7.Key"] = "crabbox_checkpoint_token";
+      params["TagSpecification.1.Tag.7.Value"] = ownership.tokenHash;
+      params["TagSpecification.1.Tag.8.Key"] = "crabbox_checkpoint_lease";
+      params["TagSpecification.1.Tag.8.Value"] = ownership.sourceLeaseID;
+    }
+    const root = await this.ec2("CreateSnapshot", params);
     const snapshotID = asString(root["snapshotId"]);
     if (!snapshotID) {
       throw new Error("aws returned no snapshot id");
@@ -1376,11 +1597,23 @@ export class EC2SpotClient {
       kind: "aws-ebs-snapshot",
       region: this.region,
       resourceID: snapshotID,
+      immutableID: snapshotID,
+      ...(ownership
+        ? {
+            checkpointOwnershipHash: ownership.tokenHash,
+            checkpointSourceLeaseID: ownership.sourceLeaseID,
+          }
+        : {}),
       snapshots: [snapshotID],
     };
   }
 
-  async createImage(instanceID: string, name: string, noReboot: boolean): Promise<ProviderImage> {
+  async createImage(
+    instanceID: string,
+    name: string,
+    noReboot: boolean,
+    ownership?: ProviderCheckpointOwnership,
+  ): Promise<ProviderImage> {
     const params: Record<string, string> = {
       InstanceId: instanceID,
       Name: name,
@@ -1393,6 +1626,25 @@ export class EC2SpotClient {
       "TagSpecification.1.Tag.3.Key": "Name",
       "TagSpecification.1.Tag.3.Value": name,
     };
+    if (ownership) {
+      params["TagSpecification.1.Tag.4.Key"] = "crabbox_checkpoint_id";
+      params["TagSpecification.1.Tag.4.Value"] = ownership.checkpointID;
+      params["TagSpecification.1.Tag.5.Key"] = "crabbox_checkpoint_token";
+      params["TagSpecification.1.Tag.5.Value"] = ownership.tokenHash;
+      params["TagSpecification.1.Tag.6.Key"] = "crabbox_checkpoint_lease";
+      params["TagSpecification.1.Tag.6.Value"] = ownership.sourceLeaseID;
+      params["TagSpecification.2.ResourceType"] = "snapshot";
+      params["TagSpecification.2.Tag.1.Key"] = "crabbox";
+      params["TagSpecification.2.Tag.1.Value"] = "true";
+      params["TagSpecification.2.Tag.2.Key"] = "created_by";
+      params["TagSpecification.2.Tag.2.Value"] = "crabbox";
+      params["TagSpecification.2.Tag.3.Key"] = "crabbox_checkpoint_id";
+      params["TagSpecification.2.Tag.3.Value"] = ownership.checkpointID;
+      params["TagSpecification.2.Tag.4.Key"] = "crabbox_checkpoint_token";
+      params["TagSpecification.2.Tag.4.Value"] = ownership.tokenHash;
+      params["TagSpecification.2.Tag.5.Key"] = "crabbox_checkpoint_lease";
+      params["TagSpecification.2.Tag.5.Value"] = ownership.sourceLeaseID;
+    }
     const root = await this.ec2("CreateImage", params);
     const imageID = asString(root["imageId"]);
     if (!imageID) {
@@ -1406,6 +1658,13 @@ export class EC2SpotClient {
       kind: "aws-ami",
       region: this.region,
       resourceID: imageID,
+      immutableID: imageID,
+      ...(ownership
+        ? {
+            checkpointOwnershipHash: ownership.tokenHash,
+            checkpointSourceLeaseID: ownership.sourceLeaseID,
+          }
+        : {}),
     };
   }
 
@@ -1429,6 +1688,16 @@ export class EC2SpotClient {
       kind: "aws-ami",
       region: this.region,
       resourceID: id,
+      immutableID: id,
+      ...(asString(image["imageOwnerId"]) || asString(image["ownerId"])
+        ? { accountID: asString(image["imageOwnerId"]) || asString(image["ownerId"]) }
+        : {}),
+      ...(tagValue(image, "crabbox_checkpoint_token")
+        ? { checkpointOwnershipHash: tagValue(image, "crabbox_checkpoint_token") }
+        : {}),
+      ...(tagValue(image, "crabbox_checkpoint_lease")
+        ? { checkpointSourceLeaseID: tagValue(image, "crabbox_checkpoint_lease") }
+        : {}),
       architecture: asString(image["architecture"]),
       snapshots: imageSnapshotIDs(image),
     };
@@ -1455,10 +1724,43 @@ export class EC2SpotClient {
     }
   }
 
+  async findCheckpointImage(
+    name: string,
+    strategy: "image" | "disk-snapshot",
+    ownership: ProviderCheckpointOwnership,
+  ): Promise<ProviderImage | undefined> {
+    const filters: Record<string, string> = {
+      "Filter.1.Name": "tag:crabbox_checkpoint_id",
+      "Filter.1.Value.1": ownership.checkpointID,
+      "Filter.2.Name": "tag:crabbox_checkpoint_token",
+      "Filter.2.Value.1": ownership.tokenHash,
+      "Filter.3.Name": "tag:crabbox_checkpoint_lease",
+      "Filter.3.Value.1": ownership.sourceLeaseID,
+      "Filter.4.Name": strategy === "image" ? "name" : "tag:Name",
+      "Filter.4.Value.1": name,
+    };
+    const root = await this.ec2(strategy === "image" ? "DescribeImages" : "DescribeSnapshots", {
+      ...filters,
+      ...(strategy === "image" ? { "Owner.1": "self" } : { "Owner.1": "self" }),
+    });
+    const entries = items(record(root[strategy === "image" ? "imagesSet" : "snapshotSet"])["item"]);
+    if (entries.length !== 1) {
+      if (entries.length > 1)
+        throw new Error("multiple resources match the checkpoint ownership reservation");
+      return undefined;
+    }
+    const entry = record(entries[0]);
+    const id = asString(entry[strategy === "image" ? "imageId" : "snapshotId"]);
+    return id ? await this.getImage(id) : undefined;
+  }
+
   async enableFastSnapshotRestore(
     snapshotIDs: string[],
     availabilityZones: string[],
   ): Promise<ProviderFastSnapshotRestore[]> {
+    if (this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT) {
+      throw new Error("AWS qualification fast snapshot restore is disabled");
+    }
     const snapshots = uniqueStrings(snapshotIDs);
     const zones = uniqueStrings(availabilityZones);
     if (snapshots.length === 0 || zones.length === 0) {
@@ -1503,6 +1805,9 @@ export class EC2SpotClient {
     snapshotIDs: string[],
     availabilityZones: string[] = [],
   ): Promise<ProviderFastSnapshotRestore[]> {
+    if (this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT) {
+      return [];
+    }
     const snapshots = uniqueStrings(snapshotIDs);
     const zones = uniqueStrings(availabilityZones);
     if (snapshots.length === 0) {
@@ -1709,6 +2014,14 @@ export class EC2SpotClient {
       kind: "aws-ebs-snapshot",
       region: this.region,
       resourceID: id,
+      immutableID: id,
+      ...(asString(snapshot["ownerId"]) ? { accountID: asString(snapshot["ownerId"]) } : {}),
+      ...(tagValue(snapshot, "crabbox_checkpoint_token")
+        ? { checkpointOwnershipHash: tagValue(snapshot, "crabbox_checkpoint_token") }
+        : {}),
+      ...(tagValue(snapshot, "crabbox_checkpoint_lease")
+        ? { checkpointSourceLeaseID: tagValue(snapshot, "crabbox_checkpoint_lease") }
+        : {}),
       snapshots: [id],
     };
   }
@@ -1926,17 +2239,18 @@ export class EC2SpotClient {
   ): Promise<ProviderMachine> {
     const now = new Date();
     const name = leaseProviderName(leaseID, slug);
-    const labels = leaseProviderLabels(
-      { ...config, selectedImage: awsLeaseImageIdentity(config, imageID, this.region) },
-      leaseID,
-      slug,
-      owner,
-      "aws",
-      now,
-      {
-        market: config.capacityMarket,
-      },
-    );
+    // The resolver also accepts an environment AMI; preserve that provenance in tags and bootstrap.
+    const launchConfig: LeaseConfig = {
+      ...config,
+      selectedImage: awsLeaseImageIdentity(
+        { ...config, awsAMI: config.awsAMI || this.env.CRABBOX_AWS_AMI || "" },
+        imageID,
+        this.region,
+      ),
+    };
+    const labels = leaseProviderLabels(launchConfig, leaseID, slug, owner, "aws", now, {
+      market: config.capacityMarket,
+    });
     const rootGB = config.awsRootGB || positiveInt(this.env.CRABBOX_AWS_ROOT_GB) || 400;
     const instanceProfile = config.awsProfile || this.env.CRABBOX_AWS_INSTANCE_PROFILE || "";
     const subnetID = config.awsSubnetID || this.env.CRABBOX_AWS_SUBNET_ID || "";
@@ -1953,7 +2267,7 @@ export class EC2SpotClient {
     let lastMacHostID = "";
     const run = async (macHostID: string): Promise<ProviderMachine> => {
       const params = await awsRunInstancesParams({
-        config,
+        config: launchConfig,
         leaseID,
         imageID,
         securityGroupID,
@@ -2082,14 +2396,20 @@ export class EC2SpotClient {
     config: LeaseConfig,
     options: AWSIngressOptions = {},
   ): Promise<string> {
+    const measure = <T>(
+      name: Parameters<AWSProvisioningDiagnostics["measure"]>[0],
+      operation: () => Promise<T>,
+    ) => (options.diagnostics ? options.diagnostics.measure(name, operation) : operation());
     const configuredGroupID = awsConfiguredSecurityGroupID(config, this.env);
     if (config.awsPrivate) {
       if (!configuredGroupID) {
         throw new Error("AWS private workspace security group is required");
       }
-      const existing = await this.ec2("DescribeSecurityGroups", {
-        "GroupId.1": configuredGroupID,
-      });
+      const existing = await measure("security_group_lookup", () =>
+        this.ec2("DescribeSecurityGroups", {
+          "GroupId.1": configuredGroupID,
+        }),
+      );
       const groups = items(record(existing["securityGroupInfo"])["item"]).map(record);
       const group = groups.find(
         (candidate) => asString(candidate["groupId"]) === configuredGroupID,
@@ -2105,26 +2425,35 @@ export class EC2SpotClient {
     let group: unknown;
     let groupID = configuredGroupID;
     if (groupID) {
-      const existing = await this.ec2("DescribeSecurityGroups", {
-        "GroupId.1": groupID,
-      });
+      const existing = await measure("security_group_lookup", () =>
+        this.ec2("DescribeSecurityGroups", {
+          "GroupId.1": groupID,
+        }),
+      );
       group = items(record(existing["securityGroupInfo"])["item"])[0];
+      if (this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT) {
+        if (asString(record(group)["groupId"]) !== groupID) {
+          throw new Error(`AWS qualification security group is unavailable: ${groupID}`);
+        }
+        return groupID;
+      }
     } else {
-      const vpcID = await this.securityGroupVPC(config);
+      const vpcID = await measure("security_group_vpc", () => this.securityGroupVPC(config));
       const name = awsManagedSecurityGroupName(config);
-      const existing = await this.ec2("DescribeSecurityGroups", {
-        "Filter.1.Name": "group-name",
-        "Filter.1.Value.1": name,
-        "Filter.2.Name": "vpc-id",
-        "Filter.2.Value.1": vpcID,
-      });
+      const existing = await measure("security_group_lookup", () =>
+        this.ec2("DescribeSecurityGroups", {
+          "Filter.1.Name": "group-name",
+          "Filter.1.Value.1": name,
+          "Filter.2.Name": "vpc-id",
+          "Filter.2.Value.1": vpcID,
+        }),
+      );
       group = items(record(existing["securityGroupInfo"])["item"])[0];
       groupID = asString(record(group)["groupId"]);
       if (!groupID) {
         try {
-          const created = await this.ec2(
-            "CreateSecurityGroup",
-            createSecurityGroupParams(name, vpcID),
+          const created = await measure("security_group_create", () =>
+            this.ec2("CreateSecurityGroup", createSecurityGroupParams(name, vpcID)),
           );
           groupID = asString(record(created)["groupId"]);
         } catch (error) {
@@ -2146,49 +2475,60 @@ export class EC2SpotClient {
       try {
         if (options.reconcile !== "additive") {
           // oxlint-disable-next-line eslint/no-await-in-loop -- the whole ingress pass retries only on group propagation.
-          await this.pruneStaleSSHIngress(groupID, group, ports, cidrs);
+          await measure("prune_ingress", () =>
+            this.pruneStaleSSHIngress(groupID, group, ports, cidrs),
+          );
         }
         let compactedAfterRuleLimit = false;
         for (const port of ports) {
           if (!cidrs.includes("0.0.0.0/0")) {
             // oxlint-disable-next-line eslint/no-await-in-loop -- cleanup is per port.
-            await this.revokeWorldTCP(groupID, port).catch((error: unknown) => {
-              const message = error instanceof Error ? error.message : String(error);
-              if (!message.includes("InvalidPermission.NotFound")) {
-                throw error;
-              }
-            });
+            await measure("revoke_world", () => this.revokeWorldTCP(groupID, port)).catch(
+              (error: unknown) => {
+                const message = error instanceof Error ? error.message : String(error);
+                if (!message.includes("InvalidPermission.NotFound")) {
+                  throw error;
+                }
+                options.diagnostics?.record("revoke_world_absent", 0);
+              },
+            );
           }
           for (const cidr of cidrs) {
             // oxlint-disable-next-line eslint/no-await-in-loop -- duplicate ingress handling is per CIDR.
-            await this.allowTCP(groupID, port, cidr).catch((error: unknown) => {
-              const message = error instanceof Error ? error.message : String(error);
-              if (message.includes("InvalidPermission.Duplicate")) {
-                return;
-              }
-              if (
-                options.reconcile !== "additive" &&
-                !compactedAfterRuleLimit &&
-                isAWSSecurityGroupRuleLimitError(message)
-              ) {
-                compactedAfterRuleLimit = true;
-                return this.compactSSHIngressForRuleLimit(groupID, ports, cidrs).then(
-                  (compacted) => {
+            await measure("authorize_ingress", () => this.allowTCP(groupID, port, cidr)).catch(
+              (error: unknown) => {
+                const message = error instanceof Error ? error.message : String(error);
+                if (message.includes("InvalidPermission.Duplicate")) {
+                  options.diagnostics?.record("authorize_duplicate", 0);
+                  return;
+                }
+                if (
+                  options.reconcile !== "additive" &&
+                  !compactedAfterRuleLimit &&
+                  isAWSSecurityGroupRuleLimitError(message)
+                ) {
+                  compactedAfterRuleLimit = true;
+                  return measure("compact_ingress", () =>
+                    this.compactSSHIngressForRuleLimit(groupID, ports, cidrs),
+                  ).then((compacted) => {
                     if (!compacted) {
                       throw error;
                     }
-                    return this.allowTCP(groupID, port, cidr).catch((retryError: unknown) => {
+                    return measure("authorize_ingress", () =>
+                      this.allowTCP(groupID, port, cidr),
+                    ).catch((retryError: unknown) => {
                       const retryMessage =
                         retryError instanceof Error ? retryError.message : String(retryError);
                       if (!retryMessage.includes("InvalidPermission.Duplicate")) {
                         throw retryError;
                       }
+                      options.diagnostics?.record("authorize_duplicate", 0);
                     });
-                  },
-                );
-              }
-              throw error;
-            });
+                  });
+                }
+                throw error;
+              },
+            );
           }
         }
         return groupID;
@@ -2543,20 +2883,6 @@ export class EC2SpotClient {
     return `aws ${action}: http ${status}: ${detail || trimBody(text).replace(/\s+/g, " ")}`;
   }
 
-  private async quotaPreflightAttempt(
-    serverType: string,
-    market: LeaseConfig["capacityMarket"],
-    quotaCache: Map<string, number | undefined>,
-  ): Promise<ProvisioningAttempt | undefined> {
-    const code = awsQuotaCodeForMarket(market);
-    let quota = quotaCache.get(code);
-    if (!quotaCache.has(code)) {
-      quota = await this.appliedServiceQuota(code);
-      quotaCache.set(code, quota);
-    }
-    return awsQuotaPreflightAttempt(serverType, market, this.region, quota);
-  }
-
   private async appliedServiceQuota(quotaCode: string): Promise<number | undefined> {
     await this.ensureExpectedIdentity();
     try {
@@ -2679,7 +3005,7 @@ function awsSSHCIDRs(config: LeaseConfig, env: Env, allowEmpty = false): string[
       "AWS SSH source CIDR is required; set CRABBOX_AWS_SSH_CIDRS or use Cloudflare request IP forwarding",
     );
   }
-  return cidrs;
+  return uniqueStrings(cidrs); // Access snapshots can already contain global CIDRs.
 }
 
 function reservations(root: Record<string, unknown>): Record<string, unknown>[] {
@@ -3588,16 +3914,6 @@ export function isAWSRunInstancesOutcomeUncertain(message: string): boolean {
 
 export function isAWSInvalidHostIDError(message: string): boolean {
   return message.includes("InvalidHostID.NotFound");
-}
-
-export function isAWSInstanceCleanedAfterReadinessFailure(
-  waitMessage: string,
-  cleanupMessage: string,
-): boolean {
-  if (cleanupMessage === "") {
-    return true;
-  }
-  return isAWSInstanceNotFoundError(waitMessage) && isAWSInstanceNotFoundError(cleanupMessage);
 }
 
 function trimBody(text: string): string {

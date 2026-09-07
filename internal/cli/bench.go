@@ -17,7 +17,10 @@ import (
 	"time"
 )
 
-const benchmarkTimingSchemaVersion = 1
+const (
+	benchmarkTimingSchemaVersion = 1
+	benchmarkCheckSchemaVersion  = 1
+)
 
 type BenchmarkTimingRecord struct {
 	SchemaVersion int                    `json:"schemaVersion"`
@@ -60,22 +63,86 @@ type benchmarkReportFilters struct {
 }
 
 type benchmarkReportGroup struct {
-	Provider             string `json:"provider"`
-	ProviderFamily       string `json:"providerFamily,omitempty"`
-	ProviderKind         string `json:"providerKind,omitempty"`
-	ProviderCategory     string `json:"providerCategory,omitempty"`
-	MachineType          string `json:"machineType,omitempty"`
-	CommandFingerprint   string `json:"commandFingerprint,omitempty"`
-	ColdRun              *bool  `json:"coldRun,omitempty"`
-	N                    int    `json:"n"`
-	ObservationCount     int    `json:"observationCount"`
-	FailureCount         int    `json:"failureCount"`
-	MedianTotalMs        *int64 `json:"medianTotalMs,omitempty"`
-	P95TotalMs           *int64 `json:"p95TotalMs,omitempty"`
-	MedianSyncMs         *int64 `json:"medianSyncMs,omitempty"`
-	MedianCommandMs      *int64 `json:"medianCommandMs,omitempty"`
-	InsufficientEvidence bool   `json:"insufficientEvidence"`
-	Evidence             string `json:"evidence"`
+	Source               string                        `json:"source"`
+	Provider             string                        `json:"provider"`
+	ProviderFamily       string                        `json:"providerFamily,omitempty"`
+	ProviderKind         string                        `json:"providerKind,omitempty"`
+	ProviderCategory     string                        `json:"providerCategory,omitempty"`
+	MachineType          string                        `json:"machineType,omitempty"`
+	CommandFingerprint   string                        `json:"commandFingerprint,omitempty"`
+	ColdRun              *bool                         `json:"coldRun,omitempty"`
+	N                    int                           `json:"n"`
+	ObservationCount     int                           `json:"observationCount"`
+	FailureCount         int                           `json:"failureCount"`
+	RunnerTotalN         int                           `json:"runnerTotalN"`
+	MedianTotalMs        *int64                        `json:"medianTotalMs,omitempty"`
+	P95TotalMs           *int64                        `json:"p95TotalMs,omitempty"`
+	MedianRunnerTotalMs  *int64                        `json:"medianRunnerTotalMs,omitempty"`
+	P95RunnerTotalMs     *int64                        `json:"p95RunnerTotalMs,omitempty"`
+	MedianSyncMs         *int64                        `json:"medianSyncMs,omitempty"`
+	MedianCommandMs      *int64                        `json:"medianCommandMs,omitempty"`
+	RunnerPhases         []benchmarkRunnerPhaseSummary `json:"runnerPhases,omitempty"`
+	SyncPhases           []benchmarkSyncPhaseSummary   `json:"syncPhases,omitempty"`
+	SyncSkippedCount     int                           `json:"syncSkippedCount,omitempty"`
+	InsufficientEvidence bool                          `json:"insufficientEvidence"`
+	Evidence             string                        `json:"evidence"`
+}
+
+type benchmarkCheckResult struct {
+	SchemaVersion int                   `json:"schemaVersion"`
+	Filters       benchmarkCheckFilters `json:"filters"`
+	Policy        benchmarkCheckPolicy  `json:"policy"`
+	MatchedCount  int                   `json:"matchedCount"`
+	GroupCount    int                   `json:"groupCount"`
+	Passed        bool                  `json:"passed"`
+	Reasons       []string              `json:"reasons"`
+	Groups        []benchmarkCheckGroup `json:"groups"`
+}
+
+type benchmarkCheckFilters struct {
+	Since                 string   `json:"since,omitempty"`
+	Providers             []string `json:"providers,omitempty"`
+	CommandFingerprintSet bool     `json:"commandFingerprintSet"`
+}
+
+type benchmarkCheckPolicy struct {
+	MinSamples                 int    `json:"minSamples"`
+	RequiredRunnerTotalSamples int    `json:"requiredRunnerTotalSamples"`
+	MaxFailures                int    `json:"maxFailures"`
+	MaxP95RunnerTotal          string `json:"maxP95RunnerTotal"`
+}
+
+type benchmarkCheckGroup struct {
+	Source            string   `json:"source"`
+	Provider          string   `json:"provider"`
+	ProviderFamily    string   `json:"providerFamily,omitempty"`
+	ProviderKind      string   `json:"providerKind,omitempty"`
+	ProviderCategory  string   `json:"providerCategory,omitempty"`
+	MachineType       string   `json:"machineType,omitempty"`
+	ColdRun           *bool    `json:"coldRun,omitempty"`
+	ObservationCount  int      `json:"observationCount"`
+	SuccessfulSamples int      `json:"successfulSamples"`
+	FailureCount      int      `json:"failureCount"`
+	RunnerTotalN      int      `json:"runnerTotalN"`
+	P95RunnerTotalMs  *int64   `json:"p95RunnerTotalMs"`
+	Passed            bool     `json:"passed"`
+	Reasons           []string `json:"reasons"`
+}
+
+type benchmarkRunnerPhaseSummary struct {
+	Name     string `json:"name"`
+	Opaque   bool   `json:"opaque,omitempty"`
+	N        int    `json:"n"`
+	MedianMs *int64 `json:"medianMs,omitempty"`
+	P95Ms    *int64 `json:"p95Ms,omitempty"`
+}
+
+type benchmarkSyncPhaseSummary struct {
+	Name         string `json:"name"`
+	N            int    `json:"n"`
+	MedianMs     *int64 `json:"medianMs,omitempty"`
+	P95Ms        *int64 `json:"p95Ms,omitempty"`
+	SkippedCount int    `json:"skippedCount,omitempty"`
 }
 
 type benchmarkReportOptions struct {
@@ -299,6 +366,181 @@ func (a App) benchReport(_ context.Context, args []string) error {
 	return nil
 }
 
+func (a App) benchCheck(_ context.Context, args []string) error {
+	fs := newFlagSet("bench check", a.Stderr)
+	store := fs.String("store", "default", "benchmark JSONL store: default or path")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	providers := fs.String("providers", "", "comma-separated providers to include")
+	provider := fs.String("provider", "", "single provider to include")
+	commandFingerprint := fs.String("command-fingerprint", "", "command fingerprint to include")
+	since := fs.String("since", "", "include records since a duration such as 7d or 24h")
+	minSamples := fs.Int("min-samples", 3, "minimum successful samples required in every matched group")
+	maxFailures := fs.Int("max-failures", 0, "maximum failed observations allowed in every matched group")
+	maxP95RunnerTotalRaw := fs.String("max-p95-runner-total", "", "required maximum p95 runner total duration")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return exit(2, "usage: crabbox bench check [--store default|path] [--providers a,b] [--command-fingerprint sha256:...] [--since 7d] [--min-samples n] [--max-failures n] --max-p95-runner-total 5s [--json]")
+	}
+	storePath, enabled, err := resolveBenchmarkTimingStore(*store)
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		return exit(2, "--store cannot be off for bench check")
+	}
+	if *minSamples < 1 {
+		return exit(2, "--min-samples must be >= 1")
+	}
+	if *maxFailures < 0 {
+		return exit(2, "--max-failures must be >= 0")
+	}
+	maxP95RunnerTotalValue := strings.TrimSpace(*maxP95RunnerTotalRaw)
+	if maxP95RunnerTotalValue == "" {
+		return exit(2, "--max-p95-runner-total is required")
+	}
+	maxP95RunnerTotal, err := time.ParseDuration(maxP95RunnerTotalValue)
+	if err != nil {
+		return exit(2, "--max-p95-runner-total must be a positive duration such as 5s")
+	}
+	if maxP95RunnerTotal <= 0 {
+		return exit(2, "--max-p95-runner-total must be greater than zero")
+	}
+
+	now := time.Now().UTC()
+	sinceTime, sinceLabel, err := parseBenchmarkSince(*since, now)
+	if err != nil {
+		return err
+	}
+	providerValues := append(splitCommaList(*providers), splitCommaList(*provider)...)
+	providerValues = normalizeBenchmarkProviderFilters(providerValues)
+	commandFingerprintValue := strings.TrimSpace(*commandFingerprint)
+	opts := benchmarkReportOptions{
+		StorePath:          storePath,
+		SinceRaw:           sinceLabel,
+		Since:              sinceTime,
+		Providers:          providerValues,
+		ProviderSet:        stringSet(providerValues),
+		CommandFingerprint: commandFingerprintValue,
+		MinSamples:         *minSamples,
+	}
+	records, err := readBenchmarkTimingRecords(storePath)
+	if err != nil {
+		return err
+	}
+	report := buildBenchmarkReport(records, opts, now)
+	result := evaluateBenchmarkCheck(report, benchmarkCheckPolicy{
+		MinSamples:                 *minSamples,
+		RequiredRunnerTotalSamples: max(*minSamples, 3),
+		MaxFailures:                *maxFailures,
+		MaxP95RunnerTotal:          maxP95RunnerTotal.String(),
+	}, maxP95RunnerTotal, commandFingerprintValue != "")
+	if *jsonOut {
+		encoder := json.NewEncoder(a.Stdout)
+		encoder.SetEscapeHTML(false)
+		if err := encoder.Encode(result); err != nil {
+			return err
+		}
+	} else {
+		printBenchmarkCheck(a.Stdout, result)
+	}
+	if !result.Passed {
+		return exit(1, "benchmark check failed")
+	}
+	return nil
+}
+
+func evaluateBenchmarkCheck(report benchmarkReport, policy benchmarkCheckPolicy, maxP95RunnerTotal time.Duration, commandFingerprintSet bool) benchmarkCheckResult {
+	result := benchmarkCheckResult{
+		SchemaVersion: benchmarkCheckSchemaVersion,
+		Filters: benchmarkCheckFilters{
+			Since:                 report.Filters.Since,
+			Providers:             append([]string(nil), report.Filters.Providers...),
+			CommandFingerprintSet: commandFingerprintSet,
+		},
+		Policy:       policy,
+		MatchedCount: report.MatchedCount,
+		GroupCount:   len(report.Groups),
+		Passed:       true,
+		Reasons:      []string{},
+		Groups:       make([]benchmarkCheckGroup, 0, len(report.Groups)),
+	}
+	if report.MatchedCount == 0 {
+		result.Passed = false
+		result.Reasons = append(result.Reasons, "no_matching_observations")
+	}
+	maxP95RunnerTotalMs := maxP95RunnerTotal.Milliseconds()
+	for _, reportGroup := range report.Groups {
+		group := benchmarkCheckGroup{
+			Source:            reportGroup.Source,
+			Provider:          reportGroup.Provider,
+			ProviderFamily:    reportGroup.ProviderFamily,
+			ProviderKind:      reportGroup.ProviderKind,
+			ProviderCategory:  reportGroup.ProviderCategory,
+			MachineType:       reportGroup.MachineType,
+			ColdRun:           cloneBoolPtr(reportGroup.ColdRun),
+			ObservationCount:  reportGroup.ObservationCount,
+			SuccessfulSamples: reportGroup.N,
+			FailureCount:      reportGroup.FailureCount,
+			RunnerTotalN:      reportGroup.RunnerTotalN,
+			P95RunnerTotalMs:  reportGroup.P95RunnerTotalMs,
+			Passed:            true,
+			Reasons:           []string{},
+		}
+		if reportGroup.N < policy.MinSamples {
+			group.Reasons = append(group.Reasons, "insufficient_successful_samples")
+		}
+		if reportGroup.FailureCount > policy.MaxFailures {
+			group.Reasons = append(group.Reasons, "max_failures_exceeded")
+		}
+		if reportGroup.RunnerTotalN < policy.RequiredRunnerTotalSamples {
+			group.Reasons = append(group.Reasons, "insufficient_runner_total_samples")
+		}
+		if reportGroup.P95RunnerTotalMs == nil {
+			group.Reasons = append(group.Reasons, "missing_p95_runner_total")
+		} else if *reportGroup.P95RunnerTotalMs > maxP95RunnerTotalMs {
+			group.Reasons = append(group.Reasons, "p95_runner_total_exceeded")
+		}
+		group.Passed = len(group.Reasons) == 0
+		result.Passed = result.Passed && group.Passed
+		result.Groups = append(result.Groups, group)
+	}
+	return result
+}
+
+func printBenchmarkCheck(w io.Writer, result benchmarkCheckResult) {
+	fmt.Fprintf(w, "benchmark check matched=%d groups=%d min_samples=%d runner_total_samples=%d max_failures=%d max_p95_runner_total=%s passed=%t\n",
+		result.MatchedCount,
+		result.GroupCount,
+		result.Policy.MinSamples,
+		result.Policy.RequiredRunnerTotalSamples,
+		result.Policy.MaxFailures,
+		result.Policy.MaxP95RunnerTotal,
+		result.Passed,
+	)
+	for _, reason := range result.Reasons {
+		fmt.Fprintf(w, "reason=%s\n", reason)
+	}
+	for _, group := range result.Groups {
+		fmt.Fprintf(w, "%s source=%s family=%s kind=%s machine=%s cold=%s observations=%d successful=%d failures=%d runner_total_n=%d p95_runner_total=%s passed=%t reasons=%s\n",
+			group.Provider,
+			group.Source,
+			blank(group.ProviderFamily, "-"),
+			blank(group.ProviderKind, "-"),
+			blank(group.MachineType, "-"),
+			benchmarkColdDisplay(group.ColdRun),
+			group.ObservationCount,
+			group.SuccessfulSamples,
+			group.FailureCount,
+			group.RunnerTotalN,
+			formatBenchmarkMs(group.P95RunnerTotalMs),
+			group.Passed,
+			firstNonBlank(strings.Join(group.Reasons, ","), "-"),
+		)
+	}
+}
+
 func readTimingReportInput(stdin io.Reader, path string) (TimingReport, error) {
 	var reader io.Reader
 	var file *os.File
@@ -485,6 +727,7 @@ func buildBenchmarkReport(records []BenchmarkTimingRecord, opts benchmarkReportO
 		builder := groups[key]
 		if builder == nil {
 			group := benchmarkReportGroup{
+				Source:             benchmarkRecordSource(record.Source),
 				Provider:           record.Timing.Provider,
 				ProviderFamily:     record.Benchmark.ProviderFamily,
 				ProviderKind:       record.Benchmark.ProviderKind,
@@ -542,10 +785,23 @@ func buildBenchmarkReport(records []BenchmarkTimingRecord, opts benchmarkReportO
 }
 
 type benchmarkReportGroupBuilder struct {
-	group     benchmarkReportGroup
-	totalMs   []int64
-	syncMs    []int64
-	commandMs []int64
+	group         benchmarkReportGroup
+	totalMs       []int64
+	runnerTotalMs []int64
+	syncMs        []int64
+	commandMs     []int64
+	runnerPhases  map[benchmarkRunnerPhaseKey][]int64
+	syncPhases    map[string]*benchmarkSyncPhaseBuilder
+}
+
+type benchmarkRunnerPhaseKey struct {
+	Name   string
+	Opaque bool
+}
+
+type benchmarkSyncPhaseBuilder struct {
+	values       []int64
+	skippedCount int
 }
 
 func (b *benchmarkReportGroupBuilder) add(record BenchmarkTimingRecord) {
@@ -556,18 +812,94 @@ func (b *benchmarkReportGroupBuilder) add(record BenchmarkTimingRecord) {
 	}
 	b.group.N++
 	b.totalMs = append(b.totalMs, record.Timing.TotalMs)
+	if record.Timing.RunnerTotalMs > 0 {
+		b.runnerTotalMs = append(b.runnerTotalMs, record.Timing.RunnerTotalMs)
+	}
 	b.syncMs = append(b.syncMs, record.Timing.SyncMs)
 	b.commandMs = append(b.commandMs, record.Timing.CommandMs)
+	if record.Timing.SyncSkipped {
+		b.group.SyncSkippedCount++
+	}
+	b.addRunnerPhases(record.Timing.RunnerPhases)
+	b.addSyncPhases(record.Timing.SyncPhases)
+}
+
+func (b *benchmarkReportGroupBuilder) addRunnerPhases(phases []RunnerPhase) {
+	perObservation := map[benchmarkRunnerPhaseKey]int64{}
+	for _, phase := range phases {
+		name := strings.TrimSpace(phase.Name)
+		if name == "" || phase.Ms <= 0 {
+			continue
+		}
+		perObservation[benchmarkRunnerPhaseKey{Name: name, Opaque: phase.Opaque}] += phase.Ms
+	}
+	if len(perObservation) == 0 {
+		return
+	}
+	if b.runnerPhases == nil {
+		b.runnerPhases = map[benchmarkRunnerPhaseKey][]int64{}
+	}
+	for key, value := range perObservation {
+		b.runnerPhases[key] = append(b.runnerPhases[key], value)
+	}
+}
+
+func (b *benchmarkReportGroupBuilder) addSyncPhases(phases []TimingPhase) {
+	type observationPhase struct {
+		ms       int64
+		measured bool
+		skipped  bool
+	}
+	perObservation := map[string]observationPhase{}
+	for _, phase := range phases {
+		name := strings.TrimSpace(phase.Name)
+		if name == "" {
+			continue
+		}
+		value := perObservation[name]
+		if !phase.Skipped && phase.Ms >= 0 {
+			value.ms += phase.Ms
+			value.measured = true
+		}
+		value.skipped = value.skipped || phase.Skipped
+		perObservation[name] = value
+	}
+	if len(perObservation) == 0 {
+		return
+	}
+	if b.syncPhases == nil {
+		b.syncPhases = map[string]*benchmarkSyncPhaseBuilder{}
+	}
+	for name, value := range perObservation {
+		phase := b.syncPhases[name]
+		if phase == nil {
+			phase = &benchmarkSyncPhaseBuilder{}
+			b.syncPhases[name] = phase
+		}
+		if value.measured {
+			phase.values = append(phase.values, value.ms)
+		}
+		if value.skipped {
+			phase.skippedCount++
+		}
+	}
 }
 
 func (b *benchmarkReportGroupBuilder) finish(minSamples int) benchmarkReportGroup {
 	group := b.group
+	group.RunnerTotalN = len(b.runnerTotalMs)
 	group.MedianTotalMs = medianInt64(b.totalMs)
+	group.MedianRunnerTotalMs = medianInt64(b.runnerTotalMs)
 	group.MedianSyncMs = medianInt64(b.syncMs)
 	group.MedianCommandMs = medianInt64(b.commandMs)
 	if group.N >= 3 {
 		group.P95TotalMs = percentileNearestRankInt64(b.totalMs, 0.95)
 	}
+	if len(b.runnerTotalMs) >= 3 {
+		group.P95RunnerTotalMs = percentileNearestRankInt64(b.runnerTotalMs, 0.95)
+	}
+	group.RunnerPhases = finishBenchmarkRunnerPhases(b.runnerPhases)
+	group.SyncPhases = finishBenchmarkSyncPhases(b.syncPhases)
 	group.InsufficientEvidence = group.N < minSamples
 	if group.N == 0 {
 		group.Evidence = fmt.Sprintf("insufficient_successful_samples need=%d", minSamples)
@@ -577,6 +909,57 @@ func (b *benchmarkReportGroupBuilder) finish(minSamples int) benchmarkReportGrou
 		group.Evidence = "sufficient_local_samples"
 	}
 	return group
+}
+
+func finishBenchmarkRunnerPhases(phases map[benchmarkRunnerPhaseKey][]int64) []benchmarkRunnerPhaseSummary {
+	keys := make([]benchmarkRunnerPhaseKey, 0, len(phases))
+	for key := range phases {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].Name != keys[j].Name {
+			return keys[i].Name < keys[j].Name
+		}
+		return !keys[i].Opaque && keys[j].Opaque
+	})
+	out := make([]benchmarkRunnerPhaseSummary, 0, len(keys))
+	for _, key := range keys {
+		values := phases[key]
+		summary := benchmarkRunnerPhaseSummary{
+			Name:     key.Name,
+			Opaque:   key.Opaque,
+			N:        len(values),
+			MedianMs: medianInt64(values),
+		}
+		if len(values) >= 3 {
+			summary.P95Ms = percentileNearestRankInt64(values, 0.95)
+		}
+		out = append(out, summary)
+	}
+	return out
+}
+
+func finishBenchmarkSyncPhases(phases map[string]*benchmarkSyncPhaseBuilder) []benchmarkSyncPhaseSummary {
+	names := make([]string, 0, len(phases))
+	for name := range phases {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]benchmarkSyncPhaseSummary, 0, len(names))
+	for _, name := range names {
+		phase := phases[name]
+		summary := benchmarkSyncPhaseSummary{
+			Name:         name,
+			N:            len(phase.values),
+			MedianMs:     medianInt64(phase.values),
+			SkippedCount: phase.skippedCount,
+		}
+		if len(phase.values) >= 3 {
+			summary.P95Ms = percentileNearestRankInt64(phase.values, 0.95)
+		}
+		out = append(out, summary)
+	}
+	return out
 }
 
 func benchmarkRecordMatches(record BenchmarkTimingRecord, opts benchmarkReportOptions) bool {
@@ -598,6 +981,7 @@ func benchmarkGroupKeyForRecord(record BenchmarkTimingRecord) string {
 		cold = strconv.FormatBool(*record.Benchmark.ColdRun)
 	}
 	parts := []string{
+		benchmarkRecordSource(record.Source),
 		normalizeProviderName(record.Timing.Provider),
 		record.Benchmark.ProviderFamily,
 		record.Benchmark.ProviderCategory,
@@ -607,6 +991,10 @@ func benchmarkGroupKeyForRecord(record BenchmarkTimingRecord) string {
 		cold,
 	}
 	return strings.Join(parts, "\x00")
+}
+
+func benchmarkRecordSource(source string) string {
+	return firstNonBlank(strings.TrimSpace(source), "unknown")
 }
 
 func printBenchmarkReport(w io.Writer, report benchmarkReport) {
@@ -620,8 +1008,9 @@ func printBenchmarkReport(w io.Writer, report benchmarkReport) {
 	}
 	fmt.Fprintf(w, "benchmark report store=%s observations=%d matched=%d min_samples=%d\n", report.StorePath, report.ObservationCount, report.MatchedCount, report.Filters.MinSamples)
 	for _, group := range report.Groups {
-		fmt.Fprintf(w, "%s family=%s kind=%s machine=%s command=%s cold=%s n=%d median_total=%s p95_total=%s median_sync=%s median_command=%s failures=%d evidence=%s\n",
+		fmt.Fprintf(w, "%s source=%s family=%s kind=%s machine=%s command=%s cold=%s n=%d median_total=%s p95_total=%s runner_total_n=%d median_runner_total=%s p95_runner_total=%s median_sync=%s median_command=%s sync_skipped=%d failures=%d evidence=%s\n",
 			group.Provider,
+			group.Source,
 			blank(group.ProviderFamily, "-"),
 			blank(group.ProviderKind, "-"),
 			blank(group.MachineType, "-"),
@@ -630,11 +1019,23 @@ func printBenchmarkReport(w io.Writer, report benchmarkReport) {
 			group.N,
 			formatBenchmarkMs(group.MedianTotalMs),
 			formatBenchmarkMs(group.P95TotalMs),
+			group.RunnerTotalN,
+			formatBenchmarkMs(group.MedianRunnerTotalMs),
+			formatBenchmarkMs(group.P95RunnerTotalMs),
 			formatBenchmarkMs(group.MedianSyncMs),
 			formatBenchmarkMs(group.MedianCommandMs),
+			group.SyncSkippedCount,
 			group.FailureCount,
 			group.Evidence,
 		)
+		for _, phase := range group.RunnerPhases {
+			fmt.Fprintf(w, "  runner_phase name=%s opaque=%t n=%d median=%s p95=%s\n",
+				phase.Name, phase.Opaque, phase.N, formatBenchmarkMs(phase.MedianMs), formatBenchmarkMs(phase.P95Ms))
+		}
+		for _, phase := range group.SyncPhases {
+			fmt.Fprintf(w, "  sync_phase name=%s n=%d median=%s p95=%s skipped=%d\n",
+				phase.Name, phase.N, formatBenchmarkMs(phase.MedianMs), formatBenchmarkMs(phase.P95Ms), phase.SkippedCount)
+		}
 	}
 }
 

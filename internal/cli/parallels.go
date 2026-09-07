@@ -189,7 +189,8 @@ func (c *ParallelsClient) Clone(ctx context.Context, source, snapshotID, leaseID
 	name := parallelsLeaseVMName(leaseID, slug)
 	args := []string{"clone", source, "--name", name}
 	if dst := strings.TrimSpace(c.Cfg.Parallels.VMRoot); dst != "" {
-		args = append(args, "--dst", filepath.Join(dst, name+".pvm"))
+		// --dst is the existing parent directory; Parallels names and creates the VM bundle.
+		args = append(args, "--dst", dst)
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Cfg.Parallels.CloneMode)) {
 	case "", "linked":

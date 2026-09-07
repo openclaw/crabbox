@@ -1,13 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { sha256Hex } from "../src/auth";
 import {
   AzureClient,
+  azureCleanupRecoveryAuditKey,
   azureLinuxCloudInit,
   azureLabelsFromTags,
   azureLROPollIntervalMS,
+  azureOwnedDeleteClaimKey,
   azureProvisioningErrorCategory,
   azureRegionCandidates,
   azureRegionalName,
+  azureSnapshotNotFound,
   azureSpotFallbackTimeoutMs,
   azureSupportsEphemeralFullCaching,
   azureSupportsEphemeralOS,
@@ -22,7 +26,7 @@ import {
 } from "../src/azure";
 import type { LeaseConfig } from "../src/config";
 import { providerProvisioningCleanupClaim } from "../src/provider-provisioning";
-import type { Env, LeaseRecord } from "../src/types";
+import type { Env, LeaseRecord, ProviderMachine } from "../src/types";
 
 const baseEnv: Env = {
   FLEET: {} as DurableObjectNamespace,
@@ -34,6 +38,21 @@ const baseEnv: Env = {
 };
 
 afterEach(() => vi.useRealTimers());
+
+it("preserves explicit provider scope when creating a regional client", () => {
+  const client = new AzureClient(baseEnv, {
+    subscription: "pinned-subscription",
+    resourceGroup: "pinned-resource-group",
+  });
+  const regional = (
+    Reflect.get(client, "clientForLocation") as (
+      location: string,
+      multiRegion: boolean,
+    ) => AzureClient
+  ).call(client, "westus", true);
+  expect(regional.subscription).toBe("pinned-subscription");
+  expect(regional.resourceGroup).toBe("pinned-resource-group");
+});
 
 it("installs pinned TruffleHog once in Azure Linux cloud-init", () => {
   const got = azureLinuxCloudInit(testLeaseConfig());
@@ -54,12 +73,12 @@ function isAzureLoginURL(value: string): boolean {
   return new URL(value).hostname === "login.microsoftonline.com";
 }
 
-function seedAzureAuthCache(client: AzureClient): void {
-  const valueKey = ["to", "ken"].join("");
-  Reflect.set(client, "cache", {
-    [valueKey]: baseEnv.AZURE_CLIENT_ID,
-    expiresAt: Date.now() + 3_600_000,
-  });
+function seedAzureAuthCache(
+  client: AzureClient,
+  token = baseEnv.AZURE_CLIENT_ID,
+  expiresAt = Date.now() + 3_600_000,
+): void {
+  Reflect.set(Reflect.get(client, "tokenCache"), "cached", { token, expiresAt });
 }
 
 function ownedAzureLease(): Pick<
@@ -85,6 +104,41 @@ function ownedAzureTags(overrides: Record<string, string> = {}): Record<string, 
     provider: "azure",
     slug: "blue-lobster",
     ...overrides,
+  };
+}
+
+function ownedAzureVMProperties() {
+  return {
+    vmId: "vm-immutable-id",
+    networkProfile: {
+      networkInterfaces: [
+        {
+          id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic",
+        },
+      ],
+    },
+    storageProfile: {
+      osDisk: {
+        managedDisk: {
+          id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/disks/crabbox-blue-lobster-osdisk",
+        },
+      },
+    },
+  };
+}
+
+function ownedAzureNICProperties() {
+  return {
+    resourceGuid: "nic-immutable-id",
+    ipConfigurations: [
+      {
+        properties: {
+          publicIPAddress: {
+            id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip",
+          },
+        },
+      },
+    ],
   };
 }
 
@@ -269,6 +323,1162 @@ function testLeaseConfig(overrides: Partial<LeaseConfig> = {}): LeaseConfig {
     ...overrides,
   };
 }
+
+describe("Azure LRO polling protocols", () => {
+  const scope = "/subscriptions/sub/resourceGroups/crabbox-leases";
+  const locationURL = `https://management.azure.com${scope}/providers/Microsoft.Network/operations/location-op`;
+  const asyncURL = `https://management.azure.com${scope}/providers/Microsoft.Network/operations/async-op`;
+  const resource = { id: `${scope}/providers/Microsoft.Network/publicIPAddresses/example-pip` };
+
+  function fixture(headers: Record<string, string> = { location: locationURL }) {
+    vi.useFakeTimers();
+    const client = new AzureClient(baseEnv);
+    const fetcher = vi.fn<typeof fetch>();
+    client.fetcher = fetcher;
+    const run = (lroTimeoutMs = 60_000) =>
+      (
+        Reflect.get(client, "awaitLRO") as (
+          response: Response,
+          token: string,
+          opts: { lroTimeoutMs: number },
+        ) => Promise<void>
+      ).call(client, new Response(null, { status: 202, headers }), "test-token", { lroTimeoutMs });
+    return { fetcher, run };
+  }
+
+  it.each([{}, { status: "Succeeded" }, { properties: { provisioningState: "Succeeded" } }])(
+    "keeps Location 202 pending despite body %j, then completes on 204",
+    async (body) => {
+      const { fetcher, run } = fixture();
+      fetcher
+        .mockResolvedValueOnce(Response.json(body, { status: 202 }))
+        .mockResolvedValueOnce(new Response(null, { status: 204 }));
+      const completed = vi.fn<() => void>();
+      const operation = run().then(completed);
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(completed).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(15_000);
+      await operation;
+      expect(completed).toHaveBeenCalledTimes(1);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([
+    resource,
+    { ...resource, properties: { provisioningState: "Succeeded" } },
+    { status: "Succeeded" },
+  ])("completes Location 200 with body %j", async (body) => {
+    const { fetcher, run } = fixture();
+    fetcher.mockResolvedValueOnce(Response.json(body));
+    const operation = run();
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(operation).resolves.toBeUndefined();
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith(locationURL, {
+      headers: { authorization: "Bearer test-token" },
+    });
+  });
+
+  it("prefers Azure-AsyncOperation over Location and requires its status document", async () => {
+    const { fetcher, run } = fixture({
+      "azure-asyncoperation": asyncURL,
+      location: locationURL,
+    });
+    fetcher
+      .mockResolvedValueOnce(Response.json(resource))
+      .mockResolvedValueOnce(Response.json({ status: "Succeeded" }));
+    const completed = vi.fn<() => void>();
+    const operation = run().then(completed);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(completed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(15_000);
+    await operation;
+    expect(completed).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([asyncURL, asyncURL]);
+  });
+
+  it.each([
+    { code: 200, body: resource },
+    { code: 200, body: { properties: { provisioningState: "Succeeded" } } },
+    { code: 204, body: undefined },
+  ])("does not complete Azure-AsyncOperation without status: %j", async ({ code, body }) => {
+    const { fetcher, run } = fixture({ "azure-asyncoperation": asyncURL });
+    fetcher.mockImplementation(async () =>
+      body ? Response.json(body, { status: code }) : new Response(null, { status: code }),
+    );
+    const result = run(31_000).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(31_000);
+    await expect(result).resolves.toEqual(
+      new Error("azure long-running operation timed out after 31s"),
+    );
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { status: "Failed" },
+    { status: "Canceled" },
+    { provisioningState: "Failed" },
+    { provisioningState: "Canceled" },
+    { status: "Succeeded", properties: { provisioningState: "Failed" } },
+    { status: "Succeeded", properties: { provisioningState: "Canceled" } },
+  ])("rejects explicit operation failures in body %j", async (body) => {
+    const { fetcher, run } = fixture();
+    fetcher.mockResolvedValueOnce(Response.json(body));
+    const result = run().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(result).resolves.toMatchObject({
+      message: expect.stringMatching(/azure LRO (failed|canceled):/),
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["Failed", "Canceled"])("rejects Location 202 with %s state", async (status) => {
+    const { fetcher, run } = fixture();
+    fetcher.mockResolvedValueOnce(
+      Response.json({ properties: { provisioningState: status } }, { status: 202 }),
+    );
+    const result = run().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(result).resolves.toMatchObject({
+      message: expect.stringContaining(`azure LRO ${status.toLowerCase()}:`),
+    });
+  });
+
+  it.each(["Failed", "Canceled"])("preserves Azure-AsyncOperation %s errors", async (status) => {
+    const { fetcher, run } = fixture({ "azure-asyncoperation": asyncURL });
+    fetcher.mockResolvedValueOnce(Response.json({ status }));
+    const result = run().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(result).resolves.toMatchObject({
+      message: expect.stringContaining(`azure LRO ${status.toLowerCase()}:`),
+    });
+  });
+
+  it.each([
+    { status: "InProgress" },
+    { provisioningState: "Deleting" },
+    { properties: { provisioningState: "Updating" } },
+    { status: "Succeeded", properties: { provisioningState: "InProgress" } },
+    { status: "InProgress", properties: { provisioningState: "Succeeded" } },
+  ])("does not complete Location 200 with contradictory nonterminal body %j", async (body) => {
+    const { fetcher, run } = fixture();
+    fetcher.mockImplementation(async () => Response.json(body));
+    const result = run(31_000).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(31_000);
+    await expect(result).resolves.toEqual(
+      new Error("azure long-running operation timed out after 31s"),
+    );
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("honors Retry-After for Location polling", async () => {
+    const { fetcher, run } = fixture({ location: locationURL, "retry-after": "30" });
+    fetcher.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const operation = run();
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(fetcher).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(operation).resolves.toBeUndefined();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not treat a Location polling 404 as completion", async () => {
+    const { fetcher, run } = fixture();
+    fetcher.mockResolvedValueOnce(azureResourceNotFoundResponse(new URL(locationURL)));
+    const result = run().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(result).resolves.toMatchObject({
+      message: expect.stringContaining("azure LRO poll: http 404:"),
+    });
+  });
+
+  it.each([200, 204])(
+    "persists owned PIP deletion progress only after Location completes with %s",
+    async (code) => {
+      vi.useFakeTimers();
+      const { records, storage } = memoryAzureDeleteClaimStorage();
+      const deleted = new Set<string>();
+      const deletes: string[] = [];
+      const { client, nicID, pipID, diskID } = azurePIPDiskCleanupClient({
+        storage,
+        deleted,
+        deletes,
+        failDelete: () => "disk",
+      });
+      const fetcher = client.fetcher;
+      let polls = 0;
+      client.fetcher = async (request, init) => {
+        const url = new URL(String(request));
+        if (init?.method === "DELETE" && url.pathname === pipID) {
+          deletes.push(pipID);
+          return new Response(null, { status: 202, headers: { location: locationURL } });
+        }
+        if (url.toString() === locationURL) {
+          polls += 1;
+          if (polls === 1) return Response.json({ status: "Succeeded" }, { status: 202 });
+          deleted.add(pipID);
+          return code === 204 ? new Response(null, { status: 204 }) : Response.json({ id: pipID });
+        }
+        return await fetcher(request, init);
+      };
+      const result = client.deleteOwnedServer(ownedAzureLease()).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(15_000);
+      const pending = [...records.values()][0] as { deletedStableResourceIdentity?: string };
+      expect(polls).toBe(1);
+      expect(pending.deletedStableResourceIdentity).toContain("nic-immutable-id");
+      expect(pending.deletedStableResourceIdentity).not.toContain("pip-immutable-id");
+      expect(deletes).toEqual([nicID, pipID]);
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      await expect(result).resolves.toMatchObject({
+        message: expect.stringContaining("injected disk interruption"),
+      });
+      const completed = [...records.values()][0] as { deletedStableResourceIdentity?: string };
+      expect(completed.deletedStableResourceIdentity).toContain("pip-immutable-id");
+      expect(deletes).toEqual([nicID, pipID, diskID]);
+      expect(deleted).toEqual(new Set([nicID, pipID]));
+      expect(records.size).toBe(1);
+    },
+  );
+});
+
+describe("Azure cleanup inspection", () => {
+  function fixture(store = memoryAzureDeleteClaimStorage()) {
+    const lease = ownedAzureLease();
+    const scope = lease.providerScope!;
+    const ids = {
+      vm: `${scope}/providers/Microsoft.Compute/virtualMachines/${lease.cloudID}`,
+      nic: `${scope}/providers/Microsoft.Network/networkInterfaces/${lease.cloudID}-nic`,
+      pip: `${scope}/providers/Microsoft.Network/publicIPAddresses/${lease.cloudID}-pip`,
+      disk: `${scope}/providers/Microsoft.Compute/disks/${lease.cloudID}-osdisk`,
+    };
+    const resource = (id: string, properties: Record<string, unknown>) => ({
+      id,
+      name: id.split("/").at(-1)!,
+      location: "eastus",
+      tags: ownedAzureTags({ diagnostic_secret: "synthetic-tag-secret" }),
+      properties,
+    });
+    const vm = resource(ids.vm, {
+      ...ownedAzureVMProperties(),
+      osProfile: {
+        adminPassword: "synthetic-admin-password",
+        customData: "synthetic-bootstrap-data",
+      },
+      customData: "synthetic-top-level-bootstrap-data",
+    });
+    const nic = resource(ids.nic, ownedAzureNICProperties());
+    const pip = resource(ids.pip, { resourceGuid: "pip-immutable-id" });
+    const disk = resource(ids.disk, { uniqueId: "disk-immutable-id" });
+    const resources = new Map<string, unknown>([
+      [ids.vm, vm],
+      [ids.nic, nic],
+      [ids.pip, pip],
+      [ids.disk, disk],
+    ]);
+    const baseline = [
+      {
+        kind: "virtualMachines",
+        id: ids.vm.toLowerCase(),
+        immutableID: "vm-immutable-id",
+        location: "eastus",
+        topology: {
+          managedDiskID: ids.disk.toLowerCase(),
+          networkInterfaceIDs: [ids.nic.toLowerCase()],
+        },
+      },
+      {
+        kind: "networkInterfaces",
+        id: ids.nic.toLowerCase(),
+        immutableID: "nic-immutable-id",
+        location: "eastus",
+        topology: { publicIPIDs: [ids.pip.toLowerCase()] },
+      },
+      {
+        kind: "publicIPAddresses",
+        id: ids.pip.toLowerCase(),
+        immutableID: "pip-immutable-id",
+        location: "eastus",
+        topology: {},
+      },
+      {
+        kind: "disks",
+        id: ids.disk.toLowerCase(),
+        immutableID: "disk-immutable-id",
+        location: "eastus",
+        topology: {},
+      },
+    ];
+    const { records, storage } = store;
+    const claimKey = azureOwnedDeleteClaimKey(scope, lease.cloudID, lease.id);
+    const auditKey = azureCleanupRecoveryAuditKey(scope, lease.cloudID, lease.id);
+    const claim = {
+      version: 2,
+      provider: "azure",
+      leaseID: lease.id,
+      slug: lease.slug,
+      owner: lease.owner,
+      cloudID: lease.cloudID,
+      providerScope: scope,
+      stableResourceIdentity: JSON.stringify(baseline),
+    };
+    records.set(claimKey, claim);
+    const get = vi.spyOn(storage, "get");
+    const put = vi.spyOn(storage, "put");
+    const remove = vi.spyOn(storage, "delete");
+    const client = new AzureClient(baseEnv, {
+      location: "eastus",
+      ownedDeleteClaimStorage: storage,
+    });
+    seedAzureAuthCache(client);
+    const fetcher = vi.fn<AzureClient["fetcher"]>(async (input, init) => {
+      const url = new URL(String(input));
+      expect(init?.method ?? "GET").toBe("GET");
+      expect(url.origin).toBe("https://management.azure.com");
+      expect(Object.values(ids)).toContain(url.pathname);
+      const value = resources.get(url.pathname);
+      return value ? Response.json(value) : azureResourceNotFoundResponse(url);
+    });
+    client.fetcher = fetcher;
+    return {
+      lease,
+      ids,
+      vm,
+      pip,
+      disk,
+      resources,
+      baseline,
+      records,
+      storage,
+      claimKey,
+      auditKey,
+      claim,
+      client,
+      fetcher,
+      expectReadOnly() {
+        expect(fetcher).toHaveBeenCalledTimes(4);
+        expect(get.mock.calls).toEqual([[claimKey], [auditKey], [claimKey]]);
+        expect(put).not.toHaveBeenCalled();
+        expect(remove).not.toHaveBeenCalled();
+      },
+    };
+  }
+
+  function recoveryFixture() {
+    const records = new Map<string, unknown>();
+    const putKeys: string[] = [];
+    const transactions: Array<Array<{ key: string; value: unknown }>> = [];
+    const controls: {
+      beforeTransaction?: () => Promise<void>;
+      failPutNumber?: number;
+      allowDiskDelete: boolean;
+    } = { allowDiskDelete: false };
+    let tail = Promise.resolve();
+    const storage: AzureOwnedDeleteClaimStorage = {
+      get: async <T>(key: string) => structuredClone(records.get(key)) as T | undefined,
+      put: async <T>(key: string, value: T) => {
+        putKeys.push(key);
+        records.set(key, structuredClone(value));
+      },
+      delete: async (key) => records.delete(key),
+      transaction: async (callback) => {
+        const previous = tail;
+        let release!: () => void;
+        tail = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        await previous;
+        try {
+          await controls.beforeTransaction?.();
+          const snapshot = structuredClone(records);
+          const writes: Array<{ key: string; value: unknown }> = [];
+          const result = await callback({
+            get: async <T>(key: string) => structuredClone(snapshot.get(key)) as T | undefined,
+            put: async <T>(key: string, value: T) => {
+              writes.push({ key, value: structuredClone(value) });
+              if (writes.length === controls.failPutNumber)
+                throw new Error("synthetic transaction write failure");
+              snapshot.set(key, structuredClone(value));
+            },
+            delete: async (key) => snapshot.delete(key),
+          });
+          records.clear();
+          for (const [key, value] of snapshot) records.set(key, value);
+          transactions.push(writes);
+          return result;
+        } finally {
+          release();
+        }
+      },
+    };
+    const f = fixture({ records, putKeys, storage });
+    const originalResources = structuredClone(f.resources);
+    f.resources.clear();
+    f.resources.set(f.ids.disk, f.disk);
+    const claim: Record<string, unknown> = {
+      ...f.claim,
+      deletedStableResourceIdentity: JSON.stringify(f.baseline.slice(0, 2)),
+      disk: { resourceID: f.ids.disk, uniqueID: "disk-immutable-id" },
+    };
+    records.set(f.claimKey, claim);
+    const requests: Array<{ method: string; path: string }> = [];
+    const deletes: string[] = [];
+    f.client.fetcher = vi.fn<AzureClient["fetcher"]>(async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? "GET";
+      requests.push({ method, path: url.pathname });
+      expect(url.origin).toBe("https://management.azure.com");
+      expect(Object.values(f.ids)).toContain(url.pathname);
+      expect(controls.allowDiskDelete ? ["GET", "DELETE"] : ["GET"]).toContain(method);
+      expect(method !== "DELETE" || url.pathname === f.ids.disk).toBe(true);
+      if (method === "DELETE") {
+        deletes.push(url.pathname);
+        f.resources.delete(url.pathname);
+        return new Response(null, { status: 204 });
+      }
+      expect(method).toBe("GET");
+      const resource = f.resources.get(url.pathname);
+      return resource ? Response.json(resource) : azureResourceNotFoundResponse(url);
+    });
+    return {
+      ...f,
+      claim,
+      controls,
+      originalResources,
+      transactions,
+      requests,
+      deletes,
+      fingerprint: () => sha256Hex(JSON.stringify(records.get(f.claimKey))),
+      recover: async () =>
+        f.client.recoverMissingPublicIP(
+          f.lease,
+          await sha256Hex(JSON.stringify(records.get(f.claimKey))),
+          "alice@example.com",
+        ),
+      expectNoCloudWrites() {
+        expect(deletes).toEqual([]);
+        expect(requests.every((entry) => entry.method === "GET")).toBe(true);
+        expect(putKeys).toEqual([]);
+      },
+    };
+  }
+
+  describe("missing public IP recovery", () => {
+    type CleanupCommitGuard = NonNullable<Parameters<AzureClient["recoverMissingPublicIP"]>[3]>;
+
+    it("keeps provider reads outside the commit guard and the transaction inside it", async () => {
+      const f = recoveryFixture();
+      let insideGuard = false;
+      const fetcher = f.client.fetcher;
+      f.client.fetcher = async (input, init) => {
+        expect(insideGuard).toBe(false);
+        return fetcher(input, init);
+      };
+      f.controls.beforeTransaction = async () => {
+        expect(insideGuard).toBe(true);
+      };
+      const commitGuard = vi.fn<CleanupCommitGuard>(async (commit) => {
+        expect(f.requests).toHaveLength(4);
+        expect(f.transactions).toEqual([]);
+        insideGuard = true;
+        try {
+          return await commit();
+        } finally {
+          insideGuard = false;
+        }
+      });
+
+      await f.client.recoverMissingPublicIP(
+        f.lease,
+        await f.fingerprint(),
+        "alice@example.com",
+        commitGuard,
+      );
+
+      expect(commitGuard).toHaveBeenCalledTimes(1);
+      expect(f.transactions).toHaveLength(1);
+      expect(insideGuard).toBe(false);
+      f.expectNoCloudWrites();
+    });
+
+    it("does not start a storage transaction when the commit guard refuses", async () => {
+      const f = recoveryFixture();
+      const before = structuredClone(f.records);
+      const transaction = vi.spyOn(f.storage, "transaction");
+      const commitGuard = vi.fn<CleanupCommitGuard>(async () => {
+        throw new Error("synthetic lease guard refusal");
+      });
+
+      await expect(
+        f.client.recoverMissingPublicIP(
+          f.lease,
+          await f.fingerprint(),
+          "alice@example.com",
+          commitGuard,
+        ),
+      ).rejects.toThrow("synthetic lease guard refusal");
+
+      expect(commitGuard).toHaveBeenCalledTimes(1);
+      expect(transaction).not.toHaveBeenCalled();
+      expect(f.records).toEqual(before);
+      f.expectNoCloudWrites();
+    });
+
+    it("returns the retained audit on idempotent retry without invoking a write guard", async () => {
+      const f = recoveryFixture();
+      const fingerprint = await f.fingerprint();
+      const audit = await f.recover();
+      const commitGuard = vi.fn<CleanupCommitGuard>(async () => {
+        throw new Error("unexpected guard invocation");
+      });
+      const before = structuredClone(f.records);
+
+      await expect(
+        f.client.recoverMissingPublicIP(f.lease, fingerprint, "alice@example.com", commitGuard),
+      ).resolves.toEqual(audit);
+
+      expect(commitGuard).not.toHaveBeenCalled();
+      expect(f.records).toEqual(before);
+      f.expectNoCloudWrites();
+    });
+
+    it("atomically records an operator acknowledgement without changing the baseline or real deletion receipts", async () => {
+      const f = recoveryFixture();
+      const fingerprint = await f.fingerprint();
+      const original = structuredClone(f.claim);
+      const before = await f.client.inspectOwnedCleanup(f.lease);
+      expect(before.claimFingerprint).toBe(fingerprint);
+      expect(before.identityMatches).toBe(false);
+      expect(before).not.toHaveProperty("recoveryAudit");
+
+      const audit = await f.client.recoverMissingPublicIP(
+        f.lease,
+        fingerprint,
+        "alice@example.com",
+      );
+
+      expect(audit).toMatchObject({
+        version: 1,
+        basis: "operator-confirmed-public-ip-absence",
+        leaseID: f.lease.id,
+        owner: f.lease.owner,
+        providerScope: f.lease.providerScope,
+        actor: "alice@example.com",
+        claimFingerprint: fingerprint,
+        originalStableResourceIdentity: f.baseline,
+        previousDeletedStableResourceIdentity: f.baseline.slice(0, 2),
+        acknowledgedMissingResourceIdentity: f.baseline[2],
+        remainingDiskIdentity: f.baseline[3],
+      });
+      expect(Number.isFinite(Date.parse(audit.confirmedAt))).toBe(true);
+      expect(f.records.get(f.claimKey)).toEqual({ ...original, version: 3, recovery: audit });
+      expect(f.records.get(f.auditKey)).toEqual(audit);
+      expect(f.transactions).toEqual([
+        [
+          { key: f.auditKey, value: audit },
+          { key: f.claimKey, value: { ...original, version: 3, recovery: audit } },
+        ],
+      ]);
+      const after = await f.client.inspectOwnedCleanup(f.lease);
+      expect(after.identityMatches).toBe(true);
+      expect(after.claimFingerprint).toBe(await f.fingerprint());
+      expect(after.claimFingerprint).not.toBe(fingerprint);
+      expect(after.recoveryAudit).toEqual(audit);
+      expect(after.claim?.deletedStableResourceIdentity).toEqual(f.baseline.slice(0, 2));
+      expect(JSON.stringify(after)).not.toContain("synthetic-tag-secret");
+      f.expectNoCloudWrites();
+    });
+
+    it("normal release deletes only the original disk, clears the claim, and retains the audit", async () => {
+      const f = recoveryFixture();
+      const audit = await f.recover();
+      f.controls.allowDiskDelete = true;
+
+      await expect(f.client.deleteOwnedServer(f.lease)).resolves.toBeUndefined();
+
+      expect(f.deletes).toEqual([f.ids.disk]);
+      expect(f.records.has(f.claimKey)).toBe(false);
+      expect(f.records.get(f.auditKey)).toEqual(audit);
+      const inspection = await f.client.inspectOwnedCleanup(f.lease);
+      expect(inspection).toMatchObject({
+        resources: [],
+        identityMatches: null,
+        recoveryAudit: audit,
+      });
+      expect(inspection).not.toHaveProperty("claim");
+      expect(inspection).not.toHaveProperty("claimFingerprint");
+      const writtenClaims = f.transactions.flat().filter((entry) => entry.key === f.claimKey);
+      expect(writtenClaims.length).toBeGreaterThan(1);
+      for (const { value } of writtenClaims) {
+        const claim = value as {
+          stableResourceIdentity: string;
+          deletedStableResourceIdentity: string;
+        };
+        expect(claim.stableResourceIdentity).toBe(f.claim.stableResourceIdentity);
+        expect(
+          JSON.parse(claim.deletedStableResourceIdentity).map(
+            (entry: { kind: string }) => entry.kind,
+          ),
+        ).not.toContain("publicIPAddresses");
+      }
+    });
+
+    it.each(["before release", "after release"])(
+      "retries the original fingerprint idempotently %s without reads or writes",
+      async (phase) => {
+        const f = recoveryFixture();
+        const fingerprint = await f.fingerprint();
+        const audit = await f.recover();
+        if (phase === "after release") {
+          f.controls.allowDiskDelete = true;
+          await f.client.deleteOwnedServer(f.lease);
+        }
+        const records = structuredClone(f.records);
+        const transactionCount = f.transactions.length;
+        const requestCount = f.requests.length;
+
+        await expect(
+          f.client.recoverMissingPublicIP(f.lease, fingerprint, "admin@example.com"),
+        ).resolves.toEqual(audit);
+        await expect(
+          f.client.recoverMissingPublicIP(f.lease, "f".repeat(64), "alice@example.com"),
+        ).rejects.toThrow(/another claim/i);
+
+        expect(f.records).toEqual(records);
+        expect(f.transactions).toHaveLength(transactionCount);
+        expect(f.requests).toHaveLength(requestCount);
+      },
+    );
+
+    it("rolls back both records when the second transactional write fails", async () => {
+      const f = recoveryFixture();
+      const before = structuredClone(f.records);
+      f.controls.failPutNumber = 2;
+
+      await expect(f.recover()).rejects.toThrow("synthetic transaction write failure");
+
+      expect(f.records).toEqual(before);
+      expect(f.records.has(f.auditKey)).toBe(false);
+      expect(f.transactions).toEqual([]);
+      f.expectNoCloudWrites();
+    });
+
+    it("rejects a stale fingerprint at the final transaction without overwriting the concurrent claim", async () => {
+      const f = recoveryFixture();
+      const concurrent = { ...f.claim, canonicalVMID: f.ids.vm };
+      f.controls.beforeTransaction = async () => {
+        f.records.set(f.claimKey, concurrent);
+      };
+
+      await expect(f.recover()).rejects.toThrow(/claim changed before commit/i);
+
+      expect(f.records.get(f.claimKey)).toEqual(concurrent);
+      expect(f.records.has(f.auditKey)).toBe(false);
+      expect(f.transactions).toEqual([]);
+      f.expectNoCloudWrites();
+    });
+
+    it("serializes concurrent acknowledgements into one audit and claim transition", async () => {
+      const f = recoveryFixture();
+      const fingerprint = await f.fingerprint();
+
+      const results = await Promise.all([
+        f.client.recoverMissingPublicIP(f.lease, fingerprint, "alice@example.com"),
+        f.client.recoverMissingPublicIP(f.lease, fingerprint, "admin@example.com"),
+      ]);
+
+      expect(results[0]).toEqual(results[1]);
+      expect(f.transactions.filter((writes) => writes.length > 0)).toHaveLength(1);
+      expect(f.records.get(f.auditKey)).toEqual(results[0]);
+      f.expectNoCloudWrites();
+    });
+
+    it.each(["missing", "changed"])(
+      "refuses a %s retained audit during normal release",
+      async (change) => {
+        const f = recoveryFixture();
+        const audit = await f.recover();
+        if (change === "missing") f.records.delete(f.auditKey);
+        else f.records.set(f.auditKey, { ...audit, actor: "other-admin@example.com" });
+        const before = structuredClone(f.records);
+
+        await expect(f.client.deleteOwnedServer(f.lease)).rejects.toThrow(
+          /retained recovery record/i,
+        );
+
+        expect(f.records).toEqual(before);
+        f.expectNoCloudWrites();
+      },
+    );
+
+    it.each(["orphan", "provisioning"])(
+      "rejects a recovered v3 claim in %s cleanup",
+      async (mode) => {
+        const f = recoveryFixture();
+        await f.recover();
+        const before = structuredClone(f.records);
+        const context = { resourceIdentity: String(f.claim.stableResourceIdentity) };
+        const transport = {
+          request: vi.fn<() => Promise<{ status: number; resource: unknown }>>(),
+        };
+        const deletion =
+          mode === "orphan"
+            ? f.client.deleteOwnedServer(f.lease, context)
+            : f.client.advanceOwnedServerDeletion(f.lease, transport, context);
+
+        await expect(deletion).rejects.toThrow(/ordinary release/i);
+
+        expect(transport.request).not.toHaveBeenCalled();
+        expect(f.records).toEqual(before);
+        f.expectNoCloudWrites();
+      },
+    );
+
+    it.each(["vm", "nic", "pip"] as const)(
+      "blocks normal release when the original %s reappears after acknowledgement",
+      async (kind) => {
+        const f = recoveryFixture();
+        await f.recover();
+        f.resources.set(f.ids[kind], f.originalResources.get(f.ids[kind]));
+        const before = structuredClone(f.records);
+
+        await expect(f.client.deleteOwnedServer(f.lease)).rejects.toThrow(
+          /identity|resource|ownership/i,
+        );
+
+        expect(f.records).toEqual(before);
+        f.expectNoCloudWrites();
+      },
+    );
+
+    it.each(["generation", "location", "owner", "attachment"])(
+      "blocks normal release when the remaining disk changes %s",
+      async (change) => {
+        const f = recoveryFixture();
+        await f.recover();
+        if (change === "generation") f.disk.properties.uniqueId = "replacement-disk";
+        if (change === "location") f.disk.location = "westus";
+        if (change === "owner") f.disk.tags = ownedAzureTags({ owner: "another_owner" });
+        if (change === "attachment")
+          f.resources.set(f.ids.disk, { ...f.disk, managedBy: f.ids.vm });
+        const before = structuredClone(f.records);
+
+        await expect(f.client.deleteOwnedServer(f.lease)).rejects.toThrow(
+          /identity|location|ownership|attached|attachment/i,
+        );
+
+        expect(f.records).toEqual(before);
+        f.expectNoCloudWrites();
+      },
+    );
+
+    it.each(["vm", "nic", "pip"] as const)(
+      "refuses acknowledgement while original %s remains",
+      async (kind) => {
+        const f = recoveryFixture();
+        f.resources.set(f.ids[kind], f.originalResources.get(f.ids[kind]));
+        const before = structuredClone(f.records);
+
+        await expect(f.recover()).rejects.toThrow(/original owned disk remaining/i);
+
+        expect(f.records).toEqual(before);
+        f.expectNoCloudWrites();
+      },
+    );
+
+    it.each([
+      "missing",
+      "generation",
+      "id",
+      "location",
+      "owner",
+      "untagged",
+      "managedBy",
+      "managedByExtended",
+    ])("rejects a disk with %s mismatch without persisting recovery", async (change) => {
+      const f = recoveryFixture();
+      if (change === "missing") f.resources.delete(f.ids.disk);
+      if (change === "generation") f.disk.properties.uniqueId = "replacement-disk";
+      if (change === "id") f.disk.id = f.ids.disk.replace("/sub/", "/other-sub/");
+      if (change === "location") f.disk.location = "westus";
+      if (change === "owner") f.disk.tags = ownedAzureTags({ owner: "another_owner" });
+      if (change === "untagged") f.disk.tags = {};
+      if (change === "managedBy") f.resources.set(f.ids.disk, { ...f.disk, managedBy: f.ids.vm });
+      if (change === "managedByExtended")
+        f.resources.set(f.ids.disk, { ...f.disk, managedByExtended: [f.ids.vm] });
+      const before = structuredClone(f.records);
+
+      await expect(f.recover()).rejects.toThrow(
+        /original owned disk remaining|disk identity, location, or attachment changed/i,
+      );
+
+      expect(f.records).toEqual(before);
+      expect(f.transactions).toEqual([]);
+      f.expectNoCloudWrites();
+    });
+
+    it.each([
+      "legacy",
+      "preparing",
+      "completed",
+      "pending",
+      "partial",
+      "orphan",
+      "incomplete baseline",
+      "no receipts",
+      "wrong receipt prefix",
+    ])("rejects the %s claim shape without modifying evidence", async (change) => {
+      const f = recoveryFixture();
+      if (change === "legacy") f.claim.version = 1;
+      if (change === "preparing") f.claim.preparing = true;
+      if (change === "completed") f.claim.completed = true;
+      if (change === "pending")
+        f.claim.pendingDeletion = {
+          kind: "pip",
+          stableResourceIdentity: JSON.stringify(f.baseline.slice(2)),
+          operationURL: "https://management.azure.com/operations/synthetic-operation",
+          deadline: Date.now() + 60_000,
+        };
+      if (change === "partial")
+        f.claim.partialStableResourceIdentity = JSON.stringify(f.baseline.slice(2));
+      if (change === "orphan") f.claim.resourceIdentity = f.claim.stableResourceIdentity;
+      if (change === "incomplete baseline")
+        f.claim.stableResourceIdentity = JSON.stringify(f.baseline.slice(0, 3));
+      if (change === "no receipts") delete f.claim.deletedStableResourceIdentity;
+      if (change === "wrong receipt prefix")
+        f.claim.deletedStableResourceIdentity = JSON.stringify([f.baseline[0]]);
+      const before = structuredClone(f.records);
+
+      await expect(f.recover()).rejects.toThrow(
+        /cleanup claim mismatch|complete version-2|recorded VM\/NIC/i,
+      );
+
+      expect(f.records).toEqual(before);
+      expect(f.transactions).toEqual([]);
+      f.expectNoCloudWrites();
+    });
+
+    it.each(["scope", "fingerprint", "actor", "transaction"])(
+      "rejects invalid %s before any Azure GET",
+      async (invalid) => {
+        const f = recoveryFixture();
+        const lease =
+          invalid === "scope"
+            ? { ...f.lease, providerScope: "/subscriptions/other/resourceGroups/other" }
+            : f.lease;
+        const fingerprint = invalid === "fingerprint" ? "A".repeat(64) : await f.fingerprint();
+        const actor = invalid === "actor" ? " " : "alice@example.com";
+        if (invalid === "transaction") delete f.storage.transaction;
+        const before = structuredClone(f.records);
+
+        await expect(f.client.recoverMissingPublicIP(lease, fingerprint, actor)).rejects.toThrow(
+          /exact claim fingerprint, actor, scope, and transactional storage/i,
+        );
+
+        expect(f.requests).toEqual([]);
+        expect(f.records).toEqual(before);
+      },
+    );
+
+    it.each([0, 1, 2, 3])(
+      "rejects original baseline member %i from another region",
+      async (index) => {
+        const f = recoveryFixture();
+        const baseline = structuredClone(f.baseline);
+        baseline[index]!.location = "westus";
+        f.claim.stableResourceIdentity = JSON.stringify(baseline);
+        f.claim.deletedStableResourceIdentity = JSON.stringify(baseline.slice(0, 2));
+        const before = structuredClone(f.records);
+
+        await expect(f.recover()).rejects.toThrow(
+          /recorded VM\/NIC.*original owned disk remaining/i,
+        );
+
+        expect(f.records).toEqual(before);
+        expect(f.transactions).toEqual([]);
+        f.expectNoCloudWrites();
+      },
+    );
+
+    it.each([1, 2])(
+      "keeps version-%i ordinary cleanup fail-closed without the missing PIP acknowledgement",
+      async (version) => {
+        const f = recoveryFixture();
+        f.claim.version = version;
+        const before = structuredClone(f.records);
+
+        await expect(f.client.deleteOwnedServer(f.lease)).rejects.toThrow(
+          /resource identity changed/i,
+        );
+
+        expect(f.records).toEqual(before);
+        expect(f.records.has(f.auditKey)).toBe(false);
+        f.expectNoCloudWrites();
+      },
+    );
+
+    it("rejects a valid-shaped stale fingerprint without adopting the current claim", async () => {
+      const f = recoveryFixture();
+      const before = structuredClone(f.records);
+
+      await expect(
+        f.client.recoverMissingPublicIP(f.lease, "f".repeat(64), "alice@example.com"),
+      ).rejects.toThrow(/claim changed; inspect again/i);
+
+      expect(f.records).toEqual(before);
+      expect(f.transactions).toEqual([]);
+      f.expectNoCloudWrites();
+    });
+  });
+
+  it("reads exact resources and projects a matching stable claim without secrets or writes", async () => {
+    const f = fixture();
+    const deadline = Date.now() + 60_000;
+    f.records.set(f.claimKey, {
+      ...f.claim,
+      pendingDeletion: {
+        kind: "vm",
+        stableResourceIdentity: f.claim.stableResourceIdentity,
+        operationURL: "https://management.azure.com/operations/synthetic-private-operation",
+        deadline,
+      },
+    });
+    const before = structuredClone(f.records);
+    const started = Date.now();
+
+    const inspection = await f.client.inspectOwnedCleanup(f.lease);
+
+    expect(inspection).toMatchObject({
+      providerScope: f.lease.providerScope,
+      claimUnchanged: true,
+      identityMatches: true,
+      claim: {
+        version: 2,
+        stableResourceIdentity: f.baseline,
+        pendingDeletion: { kind: "vm", deadline },
+      },
+      resources: f.baseline.map((entry) => ({ ...entry, ownership: "matched" })),
+    });
+    expect(Date.parse(inspection.observedAt)).toBeGreaterThanOrEqual(started);
+    expect(Date.parse(inspection.observedAt)).toBeLessThanOrEqual(Date.now());
+    const serialized = JSON.stringify(inspection);
+    for (const excluded of [
+      "synthetic-tag-secret",
+      "synthetic-admin-password",
+      "synthetic-bootstrap-data",
+      "synthetic-top-level-bootstrap-data",
+      "synthetic-private-operation",
+      "tags",
+      "labels",
+      "osProfile",
+      "customData",
+      "operationURL",
+    ]) {
+      expect(serialized).not.toContain(excluded);
+    }
+    expect(f.records).toEqual(before);
+    f.expectReadOnly();
+  });
+
+  it("reports absent resources rather than manufacturing missing members", async () => {
+    const f = fixture();
+    f.resources.delete(f.ids.vm);
+    f.records.set(f.claimKey, {
+      ...f.claim,
+      deletedStableResourceIdentity: JSON.stringify([f.baseline[0]]),
+      partialStableResourceIdentity: JSON.stringify(f.baseline.slice(1)),
+    });
+
+    const inspection = await f.client.inspectOwnedCleanup(f.lease);
+
+    expect(inspection.resources.map((entry) => entry.kind)).toEqual([
+      "networkInterfaces",
+      "publicIPAddresses",
+      "disks",
+    ]);
+    expect(inspection).toMatchObject({
+      claimUnchanged: true,
+      identityMatches: true,
+      claim: {
+        deletedStableResourceIdentity: [f.baseline[0]],
+        partialStableResourceIdentity: f.baseline.slice(1),
+      },
+    });
+    f.expectReadOnly();
+  });
+
+  it("reports a replacement generation as a mismatch without throwing", async () => {
+    const f = fixture();
+    f.vm.properties.vmId = "replacement-vm-generation";
+
+    const inspection = await f.client.inspectOwnedCleanup(f.lease);
+
+    expect(inspection.identityMatches).toBe(false);
+    expect(inspection.resources[0]).toMatchObject({
+      immutableID: "replacement-vm-generation",
+      ownership: "matched",
+    });
+    expect(inspection.claim?.stableResourceIdentity?.[0]?.immutableID).toBe("vm-immutable-id");
+    f.expectReadOnly();
+  });
+
+  it("classifies other-owner and untagged resources without revealing other-owner tags", async () => {
+    const f = fixture();
+    f.pip.tags = ownedAzureTags({ owner: "synthetic_other_owner", lease: "cbx_999999999999" });
+    f.disk.tags = {};
+
+    const inspection = await f.client.inspectOwnedCleanup(f.lease);
+
+    expect(inspection.resources.find((entry) => entry.kind === "publicIPAddresses")).toMatchObject({
+      ownership: "mismatched",
+    });
+    expect(inspection.resources.find((entry) => entry.kind === "disks")).toMatchObject({
+      ownership: "unclaimed",
+    });
+    expect(JSON.stringify(inspection)).not.toContain("synthetic_other_owner");
+    expect(JSON.stringify(inspection)).not.toContain("cbx_999999999999");
+    f.expectReadOnly();
+  });
+
+  it.each(["absent", "preparing", "legacy"] as const)(
+    "returns unknown identity for a %s claim without creating a baseline",
+    async (state) => {
+      const f = fixture();
+      if (state === "absent") f.records.delete(f.claimKey);
+      else {
+        const { stableResourceIdentity: _baseline, ...binding } = f.claim;
+        f.records.set(f.claimKey, {
+          ...binding,
+          ...(state === "preparing" ? { preparing: true } : { version: 1 }),
+        });
+      }
+      const before = structuredClone(f.records);
+
+      const inspection = await f.client.inspectOwnedCleanup(f.lease);
+
+      expect(inspection.identityMatches).toBeNull();
+      expect(inspection.claimUnchanged).toBe(true);
+      const expectedClaim = {
+        absent: undefined,
+        preparing: { version: 2, preparing: true },
+        legacy: { version: 1 },
+      }[state];
+      expect(Object.hasOwn(inspection, "claim")).toBe(state !== "absent");
+      expect(inspection.claim).toEqual(expectedClaim);
+      expect(f.records).toEqual(before);
+      f.expectReadOnly();
+    },
+  );
+
+  it.each(["replaced", "removed", "created"])(
+    "returns unknown identity when the claim is concurrently %s during resource GETs",
+    async (change) => {
+      const f = fixture();
+      if (change === "created") f.records.delete(f.claimKey);
+      const fetcher = f.client.fetcher;
+      let changed = false;
+      f.client.fetcher = async (input, init) => {
+        const response = await fetcher(input, init);
+        if (!changed) {
+          changed = true;
+          if (change === "removed") f.records.delete(f.claimKey);
+          else {
+            f.records.set(f.claimKey, {
+              ...f.claim,
+              stableResourceIdentity: f.claim.stableResourceIdentity.replace(
+                "vm-immutable-id",
+                "concurrent-vm-generation",
+              ),
+            });
+          }
+        }
+        return response;
+      };
+
+      const inspection = await f.client.inspectOwnedCleanup(f.lease);
+
+      expect(inspection.claimUnchanged).toBe(false);
+      expect(inspection.identityMatches).toBeNull();
+      expect(inspection.resources).toHaveLength(4);
+      f.expectReadOnly();
+    },
+  );
+
+  it("detects in-place claim mutation during provider reads", async () => {
+    const f = fixture();
+    const fetcher = f.client.fetcher;
+    f.client.fetcher = async (input, init) => {
+      const response = await fetcher(input, init);
+      f.claim.stableResourceIdentity = f.claim.stableResourceIdentity.replace(
+        "vm-immutable-id",
+        "concurrent-vm-generation",
+      );
+      return response;
+    };
+
+    const inspection = await f.client.inspectOwnedCleanup(f.lease);
+
+    expect(inspection.claimUnchanged).toBe(false);
+    expect(inspection.identityMatches).toBeNull();
+    f.expectReadOnly();
+  });
+
+  it("strips persisted label payloads from the projected stable baseline", async () => {
+    const f = fixture();
+    f.records.set(f.claimKey, {
+      ...f.claim,
+      stableResourceIdentity: JSON.stringify(
+        f.baseline.map((entry) => ({ ...entry, labels: "synthetic-persisted-label-secret" })),
+      ),
+    });
+
+    const inspection = await f.client.inspectOwnedCleanup(f.lease);
+
+    expect(inspection.claim?.stableResourceIdentity).toEqual(f.baseline);
+    expect(JSON.stringify(inspection)).not.toContain("synthetic-persisted-label-secret");
+    expect(JSON.stringify(inspection)).not.toContain("labels");
+    f.expectReadOnly();
+  });
+
+  it.each(["../other-vm", "crabbox-blue-lobster/child", "crabbox-blue-lobster?query=true", ""])(
+    "rejects malformed cloud ID %j before provider reads",
+    async (cloudID) => {
+      const f = fixture();
+
+      await expect(f.client.inspectOwnedCleanup({ ...f.lease, cloudID })).rejects.toThrow(
+        "Azure cleanup inspection requires a canonical resource name",
+      );
+      expect(f.fetcher).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects an original scope mismatch before any provider read", async () => {
+    const f = fixture();
+
+    await expect(
+      f.client.inspectOwnedCleanup({
+        ...f.lease,
+        providerScope: "/subscriptions/other-sub/resourceGroups/other-rg",
+      }),
+    ).rejects.toThrow(/scope/i);
+    expect(f.fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each(["provider", "leaseID", "slug", "owner", "cloudID", "providerScope"])(
+    "rejects a persisted claim with a different %s before provider reads",
+    async (field) => {
+      const f = fixture();
+      f.records.set(f.claimKey, { ...f.claim, [field]: "different-binding" });
+      const before = structuredClone(f.records);
+
+      await expect(f.client.inspectOwnedCleanup(f.lease)).rejects.toThrow(/claim mismatch/i);
+      expect(f.fetcher).not.toHaveBeenCalled();
+      expect(f.records).toEqual(before);
+    },
+  );
+});
 
 describe("azure provider", () => {
   it("treats only an exact missing VM as absent", async () => {
@@ -680,6 +1890,31 @@ describe("azure provider", () => {
     ]);
   });
 
+  it("recognizes only the exact managed snapshot in normal Azure resource-not-found responses", async () => {
+    const client = new AzureClient(baseEnv);
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (url.hostname === "login.microsoftonline.com") {
+        return Response.json({ access_token: "tkn", expires_in: 3600 });
+      }
+      void init;
+      return azureResourceNotFoundResponse(url);
+    };
+    let failure: unknown;
+    try {
+      await client.getImage("checkpoint-azure", "azure-os-disk-snapshot");
+    } catch (error) {
+      failure = error;
+    }
+    const exact =
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/snapshots/checkpoint-azure";
+    expect(azureSnapshotNotFound(failure, exact)).toBe(true);
+    expect(azureSnapshotNotFound(failure, exact.replace("checkpoint-azure", "other"))).toBe(false);
+    expect(azureSnapshotNotFound(failure, exact.replace("/snapshots/", "/virtualMachines/"))).toBe(
+      false,
+    );
+  });
+
   it("refuses createDiskSnapshot for VMs with an ephemeral OS disk", async () => {
     const client = new AzureClient(baseEnv);
     const calls: Array<{ method: string; pathname: string }> = [];
@@ -721,6 +1956,47 @@ describe("azure provider", () => {
     ).rejects.toThrow(/azure ephemeral OS disk on vm crabbox-blue-lobster cannot be snapshotted/);
     expect(calls.map((call) => `${call.method} ${call.pathname}`)).toEqual([
       "GET /subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/virtualMachines/crabbox-blue-lobster",
+    ]);
+  });
+
+  it("refuses to overwrite an existing coordinator-owned snapshot name", async () => {
+    const client = new AzureClient(baseEnv);
+    seedAzureAuthCache(client);
+    const requests: Array<{ method: string; ifNoneMatch: string | null }> = [];
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? "GET";
+      requests.push({ method, ifNoneMatch: new Headers(init?.headers).get("if-none-match") });
+      if (method === "GET" && url.pathname.includes("/virtualMachines/")) {
+        return Response.json({
+          location: "eastus",
+          properties: {
+            storageProfile: {
+              osDisk: {
+                managedDisk: {
+                  id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/disks/source-disk",
+                },
+              },
+            },
+          },
+        });
+      }
+      return Response.json({ error: { code: "PreconditionFailed" } }, { status: 412 });
+    };
+    let refused: unknown;
+    try {
+      await client.createDiskSnapshot("source-vm", "existing-unrelated-snapshot", {
+        checkpointID: "chk_conditional_create",
+        tokenHash: "a".repeat(64),
+        sourceLeaseID: "cbx_abcdef123456",
+      });
+    } catch (error) {
+      refused = error;
+    }
+    expect(refused).toMatchObject({ checkpointResourceMayExist: false });
+    expect(requests).toEqual([
+      { method: "GET", ifNoneMatch: null },
+      { method: "PUT", ifNoneMatch: "*" },
     ]);
   });
 
@@ -847,10 +2123,7 @@ describe("azure provider", () => {
 
   it("verifies every Azure companion before deleting an owned lease", async () => {
     const client = new AzureClient(baseEnv);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Date.now() + 3_600_000,
-    };
+    seedAzureAuthCache(client, "test-token");
     const deletes: string[] = [];
     const deleted = new Set<string>();
     client.fetcher = async (input, init) => {
@@ -866,31 +2139,19 @@ describe("azure provider", () => {
         return Response.json({
           id: url.pathname,
           name: "crabbox-blue-lobster",
+          location: "eastus",
           tags: ownedAzureTags(),
-          properties: {
-            networkProfile: {
-              networkInterfaces: [
-                {
-                  id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic",
-                },
-              ],
-            },
-            storageProfile: {
-              osDisk: {
-                managedDisk: {
-                  id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/disks/crabbox-blue-lobster-osdisk",
-                },
-              },
-            },
-          },
+          properties: ownedAzureVMProperties(),
         });
       }
       if (url.pathname.endsWith("/networkInterfaces/crabbox-blue-lobster-nic")) {
         return Response.json({
           id: url.pathname,
           name: "crabbox-blue-lobster-nic",
+          location: "eastus",
           tags: ownedAzureTags(),
           properties: {
+            resourceGuid: "nic-immutable-id",
             ipConfigurations: [
               {
                 id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic/ipConfigurations/ipconfig1",
@@ -908,8 +2169,10 @@ describe("azure provider", () => {
         return Response.json({
           id: url.pathname,
           name: "crabbox-blue-lobster-pip",
+          location: "eastus",
           tags: ownedAzureTags(),
           properties: {
+            resourceGuid: "pip-immutable-id",
             ipConfiguration: {
               id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic/ipConfigurations/ipconfig1",
             },
@@ -920,6 +2183,7 @@ describe("azure provider", () => {
         return Response.json({
           id: url.pathname,
           name: "crabbox-blue-lobster-osdisk",
+          location: "eastus",
           managedBy:
             "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/virtualMachines/crabbox-blue-lobster",
           tags: ownedAzureTags(),
@@ -1012,10 +2276,7 @@ describe("azure provider", () => {
     const { putKeys, storage } = memoryAzureDeleteClaimStorage();
     for (const cloudID of ["crabbox-blue-lobster-attempt-1", "crabbox-blue-lobster-attempt-2"]) {
       const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
-      (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-        token: "test-token",
-        expiresAt: Date.now() + 3_600_000,
-      };
+      seedAzureAuthCache(client, "test-token");
       client.fetcher = async (input) => azureResourceNotFoundResponse(new URL(String(input)));
       // oxlint-disable-next-line eslint/no-await-in-loop -- preserve deterministic claim-write order for the assertion.
       await expect(
@@ -1046,8 +2307,10 @@ describe("azure provider", () => {
         return Response.json({
           id: url.pathname,
           name: "crabbox-blue-lobster-nic",
+          location: "eastus",
           tags: ownedAzureTags(),
           properties: {
+            resourceGuid: "nic-immutable-id",
             ipConfigurations: [
               {
                 id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic/ipConfigurations/ipconfig1",
@@ -1065,8 +2328,10 @@ describe("azure provider", () => {
         return Response.json({
           id: url.pathname,
           name: "crabbox-blue-lobster-pip",
+          location: "eastus",
           tags: ownedAzureTags(),
           properties: {
+            resourceGuid: "pip-immutable-id",
             ipConfiguration: {
               id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic/ipConfigurations/ipconfig1",
             },
@@ -1077,6 +2342,7 @@ describe("azure provider", () => {
         return Response.json({
           id: url.pathname,
           name: "crabbox-blue-lobster-osdisk",
+          location: "eastus",
           tags: ownedAzureTags(),
           properties: { uniqueId: "disk-unique-id" },
         });
@@ -1090,6 +2356,479 @@ describe("azure provider", () => {
       "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip",
       "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/disks/crabbox-blue-lobster-osdisk",
     ]);
+  });
+
+  it("claims, deletes, and clears an exact VM-less Azure NIC and public IP set", async () => {
+    const { putKeys, records, storage } = memoryAzureDeleteClaimStorage();
+    const writtenClaims: unknown[] = [];
+    const put = storage.put;
+    storage.put = async (key, value) => {
+      writtenClaims.push(value);
+      await put(key, value);
+    };
+    const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
+    seedAzureAuthCache(client);
+    const deleted = new Set<string>();
+    const deletes: string[] = [];
+    const nicID =
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic";
+    const pipID =
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip";
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === "DELETE") {
+        deletes.push(url.pathname);
+        deleted.add(url.pathname);
+        return new Response(null, { status: 204 });
+      }
+      if (deleted.has(url.pathname)) return azureResourceNotFoundResponse(url);
+      if (url.pathname === nicID) {
+        return Response.json({
+          id: nicID,
+          name: "crabbox-blue-lobster-nic",
+          location: "eastus",
+          tags: ownedAzureTags(),
+          properties: {
+            resourceGuid: "nic-immutable-id",
+            ipConfigurations: [
+              {
+                id: `${nicID}/ipConfigurations/ipconfig1`,
+                properties: { publicIPAddress: { id: pipID } },
+              },
+            ],
+          },
+        });
+      }
+      if (url.pathname === pipID) {
+        return Response.json({
+          id: pipID,
+          name: "crabbox-blue-lobster-pip",
+          location: "eastus",
+          tags: ownedAzureTags(),
+          properties: {
+            resourceGuid: "pip-immutable-id",
+            ipConfiguration: { id: `${nicID}/ipConfigurations/ipconfig1` },
+          },
+        });
+      }
+      return azureResourceNotFoundResponse(url);
+    };
+
+    await expect(client.deleteOwnedServer(ownedAzureLease())).resolves.toBeUndefined();
+    expect(deletes).toEqual([nicID, pipID]);
+    expect([...new Set(putKeys)].map((key) => key.split(":").map(decodeURIComponent))).toEqual([
+      [
+        "provider:azure:delete-claim",
+        ownedAzureLease().providerScope,
+        ownedAzureLease().cloudID,
+        ownedAzureLease().id,
+      ],
+    ]);
+    const preparedClaim = writtenClaims.find(
+      (claim): claim is { stableResourceIdentity: string } =>
+        typeof claim === "object" &&
+        claim !== null &&
+        "stableResourceIdentity" in claim &&
+        typeof claim.stableResourceIdentity === "string",
+    );
+    expect(preparedClaim).toMatchObject({
+      version: 2,
+      provider: "azure",
+      leaseID: ownedAzureLease().id,
+      slug: ownedAzureLease().slug,
+      owner: ownedAzureLease().owner,
+      cloudID: ownedAzureLease().cloudID,
+      providerScope: ownedAzureLease().providerScope,
+    });
+    expect(preparedClaim).not.toHaveProperty("disk");
+    expect(JSON.parse(preparedClaim!.stableResourceIdentity)).toEqual([
+      expect.objectContaining({
+        kind: "networkInterfaces",
+        id: nicID.toLowerCase(),
+        immutableID: "nic-immutable-id",
+      }),
+      expect.objectContaining({
+        kind: "publicIPAddresses",
+        id: pipID.toLowerCase(),
+        immutableID: "pip-immutable-id",
+      }),
+    ]);
+    expect(records.size).toBe(0);
+  });
+
+  it("claims, deletes, and clears an exact Azure public IP before NIC creation", async () => {
+    const { putKeys, records, storage } = memoryAzureDeleteClaimStorage();
+    const writtenClaims: unknown[] = [];
+    const put = storage.put;
+    storage.put = async (key, value) => {
+      writtenClaims.push(value);
+      await put(key, value);
+    };
+    const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
+    seedAzureAuthCache(client);
+    const deleted = new Set<string>();
+    const deletes: string[] = [];
+    const pipID =
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip";
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === "DELETE") {
+        deletes.push(url.pathname);
+        deleted.add(url.pathname);
+        return new Response(null, { status: 204 });
+      }
+      if (deleted.has(url.pathname)) return azureResourceNotFoundResponse(url);
+      if (url.pathname === pipID) {
+        return Response.json({
+          id: pipID,
+          name: "crabbox-blue-lobster-pip",
+          location: "eastus",
+          tags: ownedAzureTags(),
+          properties: { resourceGuid: "pip-immutable-id" },
+        });
+      }
+      return azureResourceNotFoundResponse(url);
+    };
+
+    await expect(client.deleteOwnedServer(ownedAzureLease())).resolves.toBeUndefined();
+    expect(deletes).toEqual([pipID]);
+    expect([...new Set(putKeys)].map((key) => key.split(":").map(decodeURIComponent))).toEqual([
+      [
+        "provider:azure:delete-claim",
+        ownedAzureLease().providerScope,
+        ownedAzureLease().cloudID,
+        ownedAzureLease().id,
+      ],
+    ]);
+    const preparedClaim = writtenClaims.find(
+      (claim): claim is { stableResourceIdentity: string } =>
+        typeof claim === "object" &&
+        claim !== null &&
+        "stableResourceIdentity" in claim &&
+        typeof claim.stableResourceIdentity === "string",
+    );
+    expect(preparedClaim).toMatchObject({
+      version: 2,
+      provider: "azure",
+      leaseID: ownedAzureLease().id,
+      cloudID: ownedAzureLease().cloudID,
+      providerScope: ownedAzureLease().providerScope,
+    });
+    expect(JSON.parse(preparedClaim!.stableResourceIdentity)).toEqual([
+      expect.objectContaining({
+        kind: "publicIPAddresses",
+        id: pipID.toLowerCase(),
+        immutableID: "pip-immutable-id",
+      }),
+    ]);
+    expect(records.size).toBe(0);
+  });
+
+  it("refuses a fresh Azure NIC without durable public IP deletion progress", async () => {
+    const { records, storage } = memoryAzureDeleteClaimStorage();
+    const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
+    seedAzureAuthCache(client);
+    const deletes: string[] = [];
+    const nicID =
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic";
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === "DELETE") {
+        deletes.push(url.pathname);
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname === nicID) {
+        return Response.json({
+          id: nicID,
+          name: "crabbox-blue-lobster-nic",
+          location: "eastus",
+          tags: ownedAzureTags(),
+          properties: {
+            resourceGuid: "nic-immutable-id",
+            ipConfigurations: [],
+          },
+        });
+      }
+      return azureResourceNotFoundResponse(url);
+    };
+
+    await expect(client.deleteOwnedServer(ownedAzureLease())).rejects.toThrow(
+      "canonical companion set is incomplete",
+    );
+    expect(deletes).toEqual([]);
+    expect(records.size).toBe(1);
+  });
+
+  it.each([
+    {
+      scenario: "a public IP attached to a missing NIC",
+      missing: "nic",
+      expectedError: "public IP is attached to an unexpected configuration",
+    },
+    {
+      scenario: "a missing public IP",
+      missing: "pip",
+      expectedError: "NIC references an unexpected public IP",
+    },
+    {
+      scenario: "a public IP owned by another lease",
+      foreignPublicIP: true,
+      expectedError: "ownership does not match lease",
+    },
+    {
+      scenario: "a NIC attached to another VM",
+      foreignVMAttachment: true,
+      expectedError: "NIC is attached to an unexpected VM",
+    },
+    {
+      scenario: "a same-name public IP replacement after the claim is written",
+      replacePublicIPAfterClaim: true,
+      expectedError: "observed resource identity changed",
+    },
+  ])("refuses VM-less Azure cleanup with $scenario", async (testCase) => {
+    const { records, storage } = memoryAzureDeleteClaimStorage();
+    let publicIPIdentity = "pip-immutable-id";
+    if (testCase.replacePublicIPAfterClaim) {
+      const put = storage.put;
+      storage.put = async (key, value) => {
+        await put(key, value);
+        if (typeof value === "object" && value !== null && "stableResourceIdentity" in value) {
+          publicIPIdentity = "replacement-pip-immutable-id";
+        }
+      };
+    }
+    const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
+    seedAzureAuthCache(client);
+    const deletes: string[] = [];
+    const resourcePrefix = "/subscriptions/sub/resourceGroups/crabbox-leases/providers";
+    const nicID = `${resourcePrefix}/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic`;
+    const pipID = `${resourcePrefix}/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip`;
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === "DELETE") {
+        deletes.push(url.pathname);
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname === nicID && testCase.missing !== "nic") {
+        return Response.json({
+          id: nicID,
+          name: "crabbox-blue-lobster-nic",
+          location: "eastus",
+          tags: ownedAzureTags(),
+          properties: {
+            resourceGuid: "nic-immutable-id",
+            ...(testCase.foreignVMAttachment
+              ? {
+                  virtualMachine: {
+                    id: `${resourcePrefix}/Microsoft.Compute/virtualMachines/crabbox-other`,
+                  },
+                }
+              : {}),
+            ipConfigurations: [
+              {
+                id: `${nicID}/ipConfigurations/ipconfig`,
+                properties: { publicIPAddress: { id: pipID } },
+              },
+            ],
+          },
+        });
+      }
+      if (url.pathname === pipID && testCase.missing !== "pip") {
+        return Response.json({
+          id: pipID,
+          name: "crabbox-blue-lobster-pip",
+          location: "eastus",
+          tags: ownedAzureTags(testCase.foreignPublicIP ? { lease: "cbx_987654321abc" } : {}),
+          properties: {
+            resourceGuid: publicIPIdentity,
+            ipConfiguration: { id: `${nicID}/ipConfigurations/ipconfig` },
+          },
+        });
+      }
+      return azureResourceNotFoundResponse(url);
+    };
+
+    await expect(client.deleteOwnedServer(ownedAzureLease())).rejects.toThrow(
+      testCase.expectedError,
+    );
+    expect(deletes).toEqual([]);
+    expect(records.size).toBe(1);
+  });
+
+  it.each([
+    ["public IP resourceGuid", "pip-guid"],
+    ["public IP location", "pip-location"],
+    ["network interface resourceGuid", "nic-guid"],
+    ["network interface location", "nic-location"],
+  ] as const)("refuses Azure network cleanup without stable %s", async (_label, missing) => {
+    const client = new AzureClient(baseEnv);
+    seedAzureAuthCache(client);
+    const deletes: string[] = [];
+    const nicID =
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic";
+    const pipID =
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip";
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === "DELETE") {
+        deletes.push(url.pathname);
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname === nicID) {
+        return Response.json({
+          id: nicID,
+          name: "crabbox-blue-lobster-nic",
+          ...(missing === "nic-location" ? {} : { location: "eastus" }),
+          tags: ownedAzureTags(),
+          properties: {
+            ...(missing === "nic-guid" ? {} : { resourceGuid: "nic-immutable-id" }),
+            ipConfigurations: [
+              {
+                id: `${nicID}/ipConfigurations/ipconfig1`,
+                properties: { publicIPAddress: { id: pipID } },
+              },
+            ],
+          },
+        });
+      }
+      if (url.pathname === pipID) {
+        return Response.json({
+          id: pipID,
+          name: "crabbox-blue-lobster-pip",
+          ...(missing === "pip-location" ? {} : { location: "eastus" }),
+          tags: ownedAzureTags(),
+          properties: {
+            ...(missing === "pip-guid" ? {} : { resourceGuid: "pip-immutable-id" }),
+            ipConfiguration: { id: `${nicID}/ipConfigurations/ipconfig1` },
+          },
+        });
+      }
+      return azureResourceNotFoundResponse(url);
+    };
+
+    await expect(client.deleteOwnedServer(ownedAzureLease())).rejects.toThrow(
+      "stable resource identity is incomplete",
+    );
+    expect(deletes).toEqual([]);
+  });
+
+  it.each([
+    ["VM immutable identity", "vm-id", "stable resource identity is incomplete"],
+    ["VM location", "vm-location", "stable resource identity is incomplete"],
+    ["managed disk immutable identity", "disk-id", "immutable identity is missing"],
+    ["managed disk location", "disk-location", "stable resource identity is incomplete"],
+  ] as const)(
+    "refuses Azure VM cleanup without stable %s",
+    async (_label, missing, expectedError) => {
+      const { records, storage } = memoryAzureDeleteClaimStorage();
+      const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
+      seedAzureAuthCache(client);
+      const deletes: string[] = [];
+      const resourcePrefix = "/subscriptions/sub/resourceGroups/crabbox-leases/providers";
+      const vmID = `${resourcePrefix}/Microsoft.Compute/virtualMachines/crabbox-blue-lobster`;
+      const nicID = `${resourcePrefix}/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic`;
+      const pipID = `${resourcePrefix}/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip`;
+      const diskID = `${resourcePrefix}/Microsoft.Compute/disks/crabbox-blue-lobster-osdisk`;
+      client.fetcher = async (input, init) => {
+        const url = new URL(String(input));
+        if (init?.method === "DELETE") {
+          deletes.push(url.pathname);
+          return new Response(null, { status: 204 });
+        }
+        if (url.pathname === vmID) {
+          return Response.json({
+            id: vmID,
+            name: "crabbox-blue-lobster",
+            ...(missing === "vm-location" ? {} : { location: "eastus" }),
+            tags: ownedAzureTags(),
+            properties: {
+              ...(missing === "vm-id" ? {} : { vmId: "vm-immutable-id" }),
+              networkProfile: { networkInterfaces: [{ id: nicID }] },
+              storageProfile: { osDisk: { managedDisk: { id: diskID } } },
+            },
+          });
+        }
+        if (url.pathname === nicID) {
+          return Response.json({
+            id: nicID,
+            name: "crabbox-blue-lobster-nic",
+            location: "eastus",
+            tags: ownedAzureTags(),
+            properties: {
+              resourceGuid: "nic-immutable-id",
+              virtualMachine: { id: vmID },
+              ipConfigurations: [
+                {
+                  id: `${nicID}/ipConfigurations/ipconfig`,
+                  properties: { publicIPAddress: { id: pipID } },
+                },
+              ],
+            },
+          });
+        }
+        if (url.pathname === pipID) {
+          return Response.json({
+            id: pipID,
+            name: "crabbox-blue-lobster-pip",
+            location: "eastus",
+            tags: ownedAzureTags(),
+            properties: {
+              resourceGuid: "pip-immutable-id",
+              ipConfiguration: { id: `${nicID}/ipConfigurations/ipconfig` },
+            },
+          });
+        }
+        if (url.pathname === diskID) {
+          return Response.json({
+            id: diskID,
+            name: "crabbox-blue-lobster-osdisk",
+            ...(missing === "disk-location" ? {} : { location: "eastus" }),
+            managedBy: vmID,
+            tags: ownedAzureTags(),
+            properties: missing === "disk-id" ? {} : { uniqueId: "disk-immutable-id" },
+          });
+        }
+        return azureResourceNotFoundResponse(url);
+      };
+
+      await expect(client.deleteOwnedServer(ownedAzureLease())).rejects.toThrow(expectedError);
+      expect(deletes).toEqual([]);
+      expect(records.size).toBe(1);
+    },
+  );
+
+  it("refuses a same-name Azure public IP replacement without stable identity before delete", async () => {
+    const client = new AzureClient(baseEnv);
+    seedAzureAuthCache(client);
+    const deletes: string[] = [];
+    const pipID =
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip";
+    let reads = 0;
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === "DELETE") {
+        deletes.push(url.pathname);
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname === pipID) {
+        reads += 1;
+        return Response.json({
+          id: pipID,
+          name: "crabbox-blue-lobster-pip",
+          tags: ownedAzureTags(),
+          properties: {
+            ipAddress: reads === 1 ? "203.0.113.10" : "203.0.113.11",
+          },
+        });
+      }
+      return azureResourceNotFoundResponse(url);
+    };
+
+    await expect(client.deleteOwnedServer(ownedAzureLease())).rejects.toThrow(
+      "stable resource identity is incomplete",
+    );
+    expect(reads).toBe(1);
+    expect(deletes).toEqual([]);
   });
 
   it("releases a VM with an ephemeral OS disk and no managed disk resource", async () => {
@@ -1405,6 +3144,61 @@ describe("azure provider", () => {
     );
     expect(deletes).toEqual([]);
   });
+
+  it.each(["public IP", "network interface"] as const)(
+    "refuses a VM-less Azure managed disk with only its %s companion",
+    async (companion) => {
+      const { records, storage } = memoryAzureDeleteClaimStorage();
+      const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
+      seedAzureAuthCache(client);
+      const deletes: string[] = [];
+      const resourcePrefix = "/subscriptions/sub/resourceGroups/crabbox-leases/providers";
+      const nicID = `${resourcePrefix}/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic`;
+      const pipID = `${resourcePrefix}/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip`;
+      const diskID = `${resourcePrefix}/Microsoft.Compute/disks/crabbox-blue-lobster-osdisk`;
+      client.fetcher = async (input, init) => {
+        const url = new URL(String(input));
+        if (init?.method === "DELETE") {
+          deletes.push(url.pathname);
+          return new Response(null, { status: 204 });
+        }
+        if (url.pathname === diskID) {
+          return Response.json({
+            id: diskID,
+            name: "crabbox-blue-lobster-osdisk",
+            location: "eastus",
+            tags: ownedAzureTags(),
+            properties: { uniqueId: "disk-immutable-id" },
+          });
+        }
+        if (url.pathname === nicID && companion === "network interface") {
+          return Response.json({
+            id: nicID,
+            name: "crabbox-blue-lobster-nic",
+            location: "eastus",
+            tags: ownedAzureTags(),
+            properties: { resourceGuid: "nic-immutable-id", ipConfigurations: [] },
+          });
+        }
+        if (url.pathname === pipID && companion === "public IP") {
+          return Response.json({
+            id: pipID,
+            name: "crabbox-blue-lobster-pip",
+            location: "eastus",
+            tags: ownedAzureTags(),
+            properties: { resourceGuid: "pip-immutable-id" },
+          });
+        }
+        return azureResourceNotFoundResponse(url);
+      };
+
+      await expect(client.deleteOwnedServer(ownedAzureLease())).rejects.toThrow(
+        "canonical companion set is incomplete",
+      );
+      expect(deletes).toEqual([]);
+      expect(records.size).toBe(1);
+    },
+  );
 
   it("refuses to delete a disk attached through managedByExtended", async () => {
     const client = new AzureClient(baseEnv);
@@ -1775,10 +3569,7 @@ describe("azure provider", () => {
 
   it("does not delete an Azure VM before its referenced managed disk identity is visible", async () => {
     const client = new AzureClient(baseEnv);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Date.now() + 3_600_000,
-    };
+    seedAzureAuthCache(client, "test-token");
     const deletes: string[] = [];
     client.fetcher = async (input, init) => {
       const url = new URL(String(input));
@@ -1833,10 +3624,7 @@ describe("azure provider", () => {
     let failNICDelete = true;
     const client = (): AzureClient => {
       const value = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
-      (value as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-        token: "test-token",
-        expiresAt: Date.now() + 3_600_000,
-      };
+      seedAzureAuthCache(value, "test-token");
       value.fetcher = async (input, init) => {
         const url = new URL(String(input));
         const method = init?.method ?? "GET";
@@ -1863,26 +3651,13 @@ describe("azure provider", () => {
         const name = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
         const isVM = url.pathname.includes("/virtualMachines/");
         const isNIC = url.pathname.includes("/networkInterfaces/");
+        const isPIP = url.pathname.includes("/publicIPAddresses/");
         const isDisk = url.pathname.includes("/disks/");
         const properties = isVM
-          ? {
-              networkProfile: {
-                networkInterfaces: [
-                  {
-                    id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic",
-                  },
-                ],
-              },
-              storageProfile: {
-                osDisk: {
-                  managedDisk: {
-                    id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/disks/crabbox-blue-lobster-osdisk",
-                  },
-                },
-              },
-            }
+          ? ownedAzureVMProperties()
           : isNIC
             ? {
+                resourceGuid: "nic-immutable-id",
                 virtualMachine: {
                   id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/virtualMachines/crabbox-blue-lobster",
                 },
@@ -1896,12 +3671,15 @@ describe("azure provider", () => {
                   },
                 ],
               }
-            : isDisk
-              ? { uniqueId: "disk-unique-id" }
-              : {};
+            : isPIP
+              ? { resourceGuid: "pip-immutable-id" }
+              : isDisk
+                ? { uniqueId: "disk-unique-id" }
+                : {};
         return Response.json({
           id: url.pathname,
           name,
+          location: "eastus",
           managedBy:
             isDisk &&
             !deleted.has(
@@ -2210,10 +3988,7 @@ describe("azure provider", () => {
 
   it("refuses all Azure deletion when a companion belongs to another lease", async () => {
     const client = new AzureClient(baseEnv);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Date.now() + 3_600_000,
-    };
+    seedAzureAuthCache(client, "test-token");
     const deletes: string[] = [];
     client.fetcher = async (input, init) => {
       const url = new URL(String(input));
@@ -2365,10 +4140,7 @@ describe("azure provider", () => {
 
   it("binds an untagged Azure OS disk through the verified live VM before deletion", async () => {
     const client = new AzureClient(baseEnv);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Date.now() + 3_600_000,
-    };
+    seedAzureAuthCache(client, "test-token");
     let diskTagged = false;
     const deleted = new Set<string>();
     const methods: string[] = [];
@@ -2391,38 +4163,22 @@ describe("azure provider", () => {
         ? "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/virtualMachines/crabbox-blue-lobster"
         : undefined;
       const properties = url.pathname.includes("/virtualMachines/")
-        ? {
-            networkProfile: {
-              networkInterfaces: [
-                {
-                  id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic",
-                },
-              ],
-            },
-            storageProfile: {
-              osDisk: {
-                managedDisk: {
-                  id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/disks/crabbox-blue-lobster-osdisk",
-                },
-              },
-            },
-          }
+        ? ownedAzureVMProperties()
         : url.pathname.includes("/networkInterfaces/")
-          ? {
-              ipConfigurations: [
-                {
-                  properties: {
-                    publicIPAddress: {
-                      id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip",
-                    },
-                  },
-                },
-              ],
-            }
-          : url.pathname.includes("/disks/")
-            ? { uniqueId: "disk-unique-id" }
-            : {};
-      return Response.json({ id: url.pathname, name, managedBy, tags, properties });
+          ? ownedAzureNICProperties()
+          : url.pathname.includes("/publicIPAddresses/")
+            ? { resourceGuid: "pip-immutable-id" }
+            : url.pathname.includes("/disks/")
+              ? { uniqueId: "disk-unique-id" }
+              : {};
+      return Response.json({
+        id: url.pathname,
+        name,
+        location: "eastus",
+        managedBy,
+        tags,
+        properties,
+      });
     };
 
     await expect(client.deleteOwnedServer(ownedAzureLease())).resolves.toBeUndefined();
@@ -2447,10 +4203,7 @@ describe("azure provider", () => {
     "refuses to adopt an Azure disk with %s",
     async (_case, diskTags, diskManagedBy, expectedError = "ownership does not match") => {
       const client = new AzureClient(baseEnv);
-      (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-        token: "test-token",
-        expiresAt: Date.now() + 3_600_000,
-      };
+      seedAzureAuthCache(client, "test-token");
       const deletes: string[] = [];
       client.fetcher = async (input, init) => {
         const url = new URL(String(input));
@@ -2508,10 +4261,7 @@ describe("azure provider", () => {
 
   it("revalidates Azure companions after deleting the VM", async () => {
     const client = new AzureClient(baseEnv);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Date.now() + 3_600_000,
-    };
+    seedAzureAuthCache(client, "test-token");
     let vmDeleted = false;
     const deletes: string[] = [];
     client.fetcher = async (input, init) => {
@@ -2540,40 +4290,18 @@ describe("azure provider", () => {
           : ownedAzureTags();
       const isDisk = url.pathname.includes("/disks/");
       const properties = url.pathname.includes("/virtualMachines/")
-        ? {
-            networkProfile: {
-              networkInterfaces: [
-                {
-                  id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic",
-                },
-              ],
-            },
-            storageProfile: {
-              osDisk: {
-                managedDisk: {
-                  id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/disks/crabbox-blue-lobster-osdisk",
-                },
-              },
-            },
-          }
+        ? ownedAzureVMProperties()
         : url.pathname.includes("/networkInterfaces/")
-          ? {
-              ipConfigurations: [
-                {
-                  properties: {
-                    publicIPAddress: {
-                      id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip",
-                    },
-                  },
-                },
-              ],
-            }
-          : isDisk
-            ? { uniqueId: "disk-unique-id" }
-            : {};
+          ? ownedAzureNICProperties()
+          : url.pathname.includes("/publicIPAddresses/")
+            ? { resourceGuid: "pip-immutable-id" }
+            : isDisk
+              ? { uniqueId: "disk-unique-id" }
+              : {};
       return Response.json({
         id: url.pathname,
         name,
+        location: "eastus",
         managedBy: isDisk
           ? "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/virtualMachines/crabbox-blue-lobster"
           : undefined,
@@ -2591,10 +4319,7 @@ describe("azure provider", () => {
 
   it("fails closed when an owned Azure DELETE returns a scope-level 404", async () => {
     const client = new AzureClient(baseEnv);
-    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
-      token: "test-token",
-      expiresAt: Date.now() + 3_600_000,
-    };
+    seedAzureAuthCache(client, "test-token");
     client.fetcher = async (input, init) => {
       const url = new URL(String(input));
       if (init?.method === "DELETE") {
@@ -2611,40 +4336,18 @@ describe("azure provider", () => {
       const name = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
       const isDisk = url.pathname.includes("/disks/");
       const properties = url.pathname.includes("/virtualMachines/")
-        ? {
-            networkProfile: {
-              networkInterfaces: [
-                {
-                  id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic",
-                },
-              ],
-            },
-            storageProfile: {
-              osDisk: {
-                managedDisk: {
-                  id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/disks/crabbox-blue-lobster-osdisk",
-                },
-              },
-            },
-          }
+        ? ownedAzureVMProperties()
         : url.pathname.includes("/networkInterfaces/")
-          ? {
-              ipConfigurations: [
-                {
-                  properties: {
-                    publicIPAddress: {
-                      id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip",
-                    },
-                  },
-                },
-              ],
-            }
-          : isDisk
-            ? { uniqueId: "disk-unique-id" }
-            : {};
+          ? ownedAzureNICProperties()
+          : url.pathname.includes("/publicIPAddresses/")
+            ? { resourceGuid: "pip-immutable-id" }
+            : isDisk
+              ? { uniqueId: "disk-unique-id" }
+              : {};
       return Response.json({
         id: url.pathname,
         name,
+        location: "eastus",
         managedBy: isDisk
           ? "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/virtualMachines/crabbox-blue-lobster"
           : undefined,
@@ -3624,6 +5327,48 @@ describe("azure provider", () => {
     expect(puts.some((path) => path.includes("crabbox-nsg-westus3-eastus"))).toBe(false);
   });
 
+  it("shares one token exchange across concurrent resource reads", async () => {
+    const client = new AzureClient(baseEnv);
+    let tokenMints = 0;
+    const authorizations: string[] = [];
+    client.fetcher = async (input, init) => {
+      if (isAzureLoginURL(String(input))) {
+        tokenMints += 1;
+        return Response.json({ access_token: "parallel-token", expires_in: 3600 });
+      }
+      authorizations.push(new Headers(init?.headers).get("authorization") ?? "");
+      return Response.json({ value: [] });
+    };
+    await client.listReconciliationResources();
+    expect(tokenMints).toBe(1);
+    expect(authorizations).toEqual(Array(4).fill("Bearer parallel-token"));
+  });
+
+  it("refreshes at the thirty-second margin without sharing credentials between clients", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    let exchanges = 0;
+    const client = new AzureClient(baseEnv);
+    client.fetcher = async (input) => {
+      if (isAzureLoginURL(String(input))) {
+        exchanges += 1;
+        return Response.json({ access_token: `token-${exchanges}`, expires_in: 60 });
+      }
+      return Response.json({ value: [] });
+    };
+    await client.listCrabboxServers();
+    vi.advanceTimersByTime(29_999);
+    await client.listCrabboxServers();
+    expect(exchanges).toBe(1);
+    vi.advanceTimersByTime(1);
+    await client.listReconciliationResources();
+    expect(exchanges).toBe(2);
+    const other = new AzureClient({ ...baseEnv, AZURE_TENANT_ID: "other-tenant" });
+    other.fetcher = client.fetcher;
+    await other.listCrabboxServers();
+    expect(exchanges).toBe(3);
+  });
+
   it("caches the client_credentials token across calls", async () => {
     const client = new AzureClient(baseEnv);
     let tokenMints = 0;
@@ -3670,6 +5415,81 @@ describe("azure provider", () => {
         capacityFallback: "on-demand-after-120s",
       }),
     ).toBeUndefined();
+  });
+
+  it("retains Azure market failures across a region fallback", async () => {
+    const config = testLeaseConfig({
+      serverTypeExplicit: true,
+      serverType: "Standard_D2ads_v6",
+      azureLocation: "eastus",
+      capacityRegions: ["westus3"],
+      capacityMarket: "spot",
+      capacityFallback: "on-demand-after-120s",
+      azureOSDisk: "managed",
+    });
+    const events: string[] = [];
+    const infra = vi
+      .spyOn(AzureClient.prototype, "ensureSharedInfra")
+      .mockImplementation(async (location) => {
+        events.push(`infra:${location}`);
+        return { vnet: "fixture-vnet", nsg: "fixture-nsg" };
+      });
+    const internal = AzureClient.prototype as unknown as {
+      createVM(config: LeaseConfig, location: string): Promise<ProviderMachine>;
+    };
+    const create = vi
+      .spyOn(internal, "createVM")
+      .mockImplementation(async (candidate, location) => {
+        events.push(`create:${location}/${candidate.capacityMarket}`);
+        if (location === "eastus") {
+          throw new Error(
+            candidate.capacityMarket === "spot" ? "SkuNotAvailable" : "QuotaExceeded",
+          );
+        }
+        return {
+          provider: "azure",
+          id: 1,
+          cloudID: "fixture-vm",
+          name: "fixture-vm",
+          status: "running",
+          labels: {},
+        };
+      });
+    try {
+      const result = await new AzureClient(baseEnv).createServerWithFallback(
+        config,
+        "cbx_abcdef123456",
+        "fixture",
+        "alice@example.com",
+      );
+      expect(events).toEqual([
+        "infra:eastus",
+        "create:eastus/spot",
+        "create:eastus/on-demand",
+        "infra:westus3",
+        "create:westus3/spot",
+      ]);
+      expect(result.server.region).toBe("westus3");
+      expect(result.attempts).toEqual([
+        {
+          region: "eastus",
+          serverType: config.serverType,
+          market: "spot",
+          category: "capacity",
+          message: "SkuNotAvailable",
+        },
+        {
+          region: "eastus",
+          serverType: config.serverType,
+          market: "on-demand",
+          category: "quota",
+          message: "QuotaExceeded",
+        },
+      ]);
+    } finally {
+      infra.mockRestore();
+      create.mockRestore();
+    }
   });
 
   it("starts Azure on-demand fallback without waiting for timed-out Spot cleanup", async () => {
@@ -3948,6 +5768,183 @@ describe("azure provider", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("cleans each exact Azure SKU attempt before creating the next public IP", async () => {
+    const { records, storage } = memoryAzureDeleteClaimStorage();
+    const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
+    seedAzureAuthCache(client);
+    const resources = new Map<string, Record<string, unknown>>();
+    const deleted: string[] = [];
+    const vmSizes: string[] = [];
+    const vmNames: string[] = [];
+    let firstAttemptClearedBeforeNextNetwork = false;
+    const resourcePrefix = "/subscriptions/sub/resourceGroups/crabbox-leases/providers";
+    const unrelatedNIC = `${resourcePrefix}/Microsoft.Network/networkInterfaces/crabbox-unrelated-nic`;
+    const sharedNSG = `${resourcePrefix}/Microsoft.Network/networkSecurityGroups/crabbox-nsg`;
+    resources.set(unrelatedNIC, { id: unrelatedNIC, name: "crabbox-unrelated-nic" });
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      const path = url.pathname;
+      if (path.endsWith("/resourceGroups/crabbox-leases")) {
+        return Response.json({ tags: { managed_by: "crabbox" } });
+      }
+      if (path.endsWith("/virtualNetworks/crabbox-vnet")) {
+        return Response.json({ tags: { managed_by: "crabbox" } });
+      }
+      if (path.endsWith("/networkSecurityGroups/crabbox-nsg") && init?.method === "GET") {
+        return Response.json({
+          tags: { managed_by: "crabbox" },
+          properties: { securityRules: [] },
+        });
+      }
+      if (init?.method === "DELETE") {
+        deleted.push(path);
+        resources.delete(path);
+        if (path.includes("/virtualMachines/")) {
+          const name = path.split("/").pop() ?? "";
+          const diskID = `${resourcePrefix}/Microsoft.Compute/disks/${name}-osdisk`;
+          const disk = resources.get(diskID);
+          if (disk) resources.set(diskID, { ...disk, managedBy: undefined });
+        }
+        return new Response(null, { status: 204 });
+      }
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const name = path.split("/").pop() ?? "";
+        if (path.includes("/publicIPAddresses/") && vmNames.length === 1) {
+          const firstName = vmNames[0]!;
+          const firstNIC = `${resourcePrefix}/Microsoft.Network/networkInterfaces/${firstName}-nic`;
+          const firstPIP = `${resourcePrefix}/Microsoft.Network/publicIPAddresses/${firstName}-pip`;
+          firstAttemptClearedBeforeNextNetwork =
+            !resources.has(firstNIC) &&
+            !resources.has(firstPIP) &&
+            records.size === 0 &&
+            deleted.length === 2;
+        }
+        let diskID: string | undefined;
+        if (path.includes("/virtualMachines/")) {
+          const properties = body["properties"] as {
+            hardwareProfile?: { vmSize?: string };
+          };
+          vmSizes.push(properties.hardwareProfile?.vmSize ?? "");
+          vmNames.push(name);
+          if (vmSizes.length === 1) {
+            return Response.json(
+              { error: { code: "SkuNotAvailable", message: "requested size unavailable" } },
+              { status: 409 },
+            );
+          }
+          diskID = `${resourcePrefix}/Microsoft.Compute/disks/${name}-osdisk`;
+          resources.set(diskID, {
+            id: diskID,
+            name: `${name}-osdisk`,
+            location: body["location"],
+            managedBy: path,
+            tags: body["tags"],
+            properties: { uniqueId: `${name}-disk-guid` },
+          });
+        }
+        const bodyProperties = body["properties"] as Record<string, unknown>;
+        const storageProfile = bodyProperties["storageProfile"] as
+          | { osDisk?: Record<string, unknown> }
+          | undefined;
+        resources.set(path, {
+          ...body,
+          id: path,
+          name,
+          properties: {
+            ...bodyProperties,
+            ...(path.includes("/networkInterfaces/") ? { resourceGuid: `${name}-guid` } : {}),
+            ...(path.includes("/publicIPAddresses/")
+              ? { resourceGuid: `${name}-guid`, ipAddress: "192.0.2.10" }
+              : {}),
+            ...(path.includes("/virtualMachines/")
+              ? {
+                  vmId: `${name}-vm-guid`,
+                  provisioningState: "Succeeded",
+                  hardwareProfile: { vmSize: vmSizes.at(-1) },
+                  storageProfile: {
+                    ...storageProfile,
+                    osDisk: {
+                      ...storageProfile?.osDisk,
+                      managedDisk: {
+                        ...(storageProfile?.osDisk?.["managedDisk"] as object),
+                        id: diskID,
+                      },
+                    },
+                  },
+                }
+              : {}),
+          },
+        });
+        return Response.json(resources.get(path));
+      }
+      if (init?.method === "PATCH") {
+        const resource = resources.get(path);
+        if (!resource) return azureResourceNotFoundResponse(url);
+        const body = JSON.parse(String(init.body)) as { tags?: Record<string, string> };
+        resources.set(path, { ...resource, tags: body.tags ?? resource["tags"] });
+        return Response.json(resources.get(path));
+      }
+      const resource = resources.get(path);
+      return resource ? Response.json(resource) : azureResourceNotFoundResponse(url);
+    };
+
+    const result = await client.createServerWithFallback(
+      testLeaseConfig({
+        capacityMarket: "on-demand",
+        serverType: "Standard_D32ads_v6",
+        serverTypeExplicit: false,
+      }),
+      "cbx_123456789abc",
+      "blue-lobster",
+      "owner",
+    );
+
+    expect(vmSizes.slice(0, 2)).toEqual(["Standard_D32ads_v6", "Standard_D32ds_v6"]);
+    expect(result.serverType).toBe("Standard_D32ds_v6");
+    expect(result.attempts?.[0]).toMatchObject({
+      serverType: "Standard_D32ads_v6",
+      category: "capacity",
+    });
+    expect(firstAttemptClearedBeforeNextNetwork).toBe(true);
+    const [firstName, secondName] = vmNames as [string, string];
+    const firstNIC = `${resourcePrefix}/Microsoft.Network/networkInterfaces/${firstName}-nic`;
+    const firstPIP = `${resourcePrefix}/Microsoft.Network/publicIPAddresses/${firstName}-pip`;
+    const secondNIC = `${resourcePrefix}/Microsoft.Network/networkInterfaces/${secondName}-nic`;
+    const secondPIP = `${resourcePrefix}/Microsoft.Network/publicIPAddresses/${secondName}-pip`;
+    const secondVM = `${resourcePrefix}/Microsoft.Compute/virtualMachines/${secondName}`;
+    const secondDisk = `${resourcePrefix}/Microsoft.Compute/disks/${secondName}-osdisk`;
+    expect(deleted).toEqual([firstNIC, firstPIP]);
+    expect(resources.has(firstNIC)).toBe(false);
+    expect(resources.has(firstPIP)).toBe(false);
+    expect(resources.has(`${resourcePrefix}/Microsoft.Compute/virtualMachines/${firstName}`)).toBe(
+      false,
+    );
+    expect(resources.has(`${resourcePrefix}/Microsoft.Compute/disks/${firstName}-osdisk`)).toBe(
+      false,
+    );
+    expect(resources.has(secondNIC)).toBe(true);
+    expect(resources.has(secondPIP)).toBe(true);
+    expect(resources.has(secondVM)).toBe(true);
+    expect(resources.has(secondDisk)).toBe(true);
+    expect(resources.has(unrelatedNIC)).toBe(true);
+    expect(result.server.cloudID).toBe(secondName);
+    expect(records.size).toBe(0);
+
+    await client.deleteOwnedServer({
+      id: "cbx_123456789abc",
+      slug: "blue-lobster",
+      provider: "azure",
+      cloudID: secondName,
+      owner: "owner",
+      providerScope: "/subscriptions/sub/resourceGroups/crabbox-leases",
+    });
+
+    expect(deleted).toEqual([firstNIC, firstPIP, secondVM, secondNIC, secondPIP, secondDisk]);
+    expect([...resources.keys()]).toEqual([unrelatedNIC, sharedNSG]);
+    expect(records.size).toBe(0);
   });
 
   it("drops crabbox-ssh-* rules and preserves operator rules", () => {

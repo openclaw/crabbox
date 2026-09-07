@@ -3,6 +3,10 @@ import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { EC2SpotClient } from "../src/aws";
+import type {
+  AWSQualificationRequest,
+  AWSQualificationResponse,
+} from "../src/aws-qualification-contract";
 import { HetznerClient } from "../src/hetzner";
 import type { Env } from "../src/types";
 
@@ -143,7 +147,7 @@ describe("optional provider pricing", () => {
     }
   });
 
-  it("checks the quote deadline after resolving Node credentials before any HTTP request", async () => {
+  it("settles the complete quote deadline before Node credentials resolve", async () => {
     vi.useFakeTimers();
     const started = Promise.withResolvers<void>();
     const credentials = Promise.withResolvers<{ accessKeyId: string; secretAccessKey: string }>();
@@ -158,13 +162,109 @@ describe("optional provider pricing", () => {
       } as Env,
       region,
     );
-    const price = client.hourlySpotPriceUSD("t3.small").catch((error) => error);
-    await started.promise;
-    await vi.advanceTimersByTimeAsync(5_000);
-    credentials.resolve({ accessKeyId: "test", secretAccessKey: "test-secret" });
-    await expect(price).resolves.toMatchObject({ name: "TimeoutError" });
+    let settled = false;
+    const price = client
+      .hourlySpotPriceUSD("t3.small")
+      .catch((error) => error)
+      .finally(() => {
+        settled = true;
+      });
+    try {
+      await started.promise;
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+      await expect(price).resolves.toMatchObject({ name: "TimeoutError" });
+    } finally {
+      credentials.resolve({ accessKeyId: "test", secretAccessKey: "test-secret" });
+      await price;
+      await vi.advanceTimersByTimeAsync(0);
+    }
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["pending quote", "late rejection", "late STS success"] as const)(
+    "settles qualification pricing before its binding resolves: %s",
+    async (mode) => {
+      vi.useFakeTimers();
+      const started = Promise.withResolvers<void>();
+      const response = Promise.withResolvers<AWSQualificationResponse>();
+      const execute = vi.fn<
+        (request: AWSQualificationRequest) => Promise<AWSQualificationResponse>
+      >(async (_request) => {
+        started.resolve();
+        return await response.promise;
+      });
+      const fetchImpl = vi.fn<typeof fetch>();
+      vi.stubGlobal("fetch", fetchImpl);
+      const client = new EC2SpotClient(
+        {
+          CRABBOX_AWS_QUALIFICATION_TRANSPORT: { execute },
+          ...(mode === "late STS success"
+            ? {
+                CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012",
+                CRABBOX_AWS_EXPECTED_REGION: region,
+              }
+            : {}),
+        } as Env,
+        region,
+      );
+      let settled = false;
+      const price = client
+        .hourlySpotPriceUSD("t3.small")
+        .catch((error) => error)
+        .finally(() => {
+          settled = true;
+        });
+      try {
+        await started.promise;
+        expect(execute.mock.calls[0]![0].action).toBe(
+          mode === "late STS success" ? "GetCallerIdentity" : "DescribeSpotPriceHistory",
+        );
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        // Settlement must precede releasing authority-owned work, not depend on it.
+        expect.soft(settled).toBe(true);
+      } finally {
+        if (mode === "late rejection") {
+          response.reject(new Error("late binding failure"));
+        } else {
+          response.resolve({
+            status: 200,
+            body:
+              mode === "late STS success"
+                ? "<GetCallerIdentityResponse><GetCallerIdentityResult><Account>123456789012</Account><Arn>arn:aws:iam::123456789012:user/test</Arn><UserId>test</UserId></GetCallerIdentityResult></GetCallerIdentityResponse>"
+                : spotXML,
+          });
+        }
+        await price;
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      expect.soft(execute).toHaveBeenCalledTimes(1);
+      await expect(price).resolves.toMatchObject({ name: "TimeoutError" });
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it("preserves ordinary qualification same-operation retry", async () => {
+    const execute = vi
+      .fn<(request: AWSQualificationRequest) => Promise<AWSQualificationResponse>>()
+      .mockRejectedValueOnce(new Error("lost binding response"))
+      .mockResolvedValue({
+        status: 200,
+        body: "<GetCallerIdentityResponse><GetCallerIdentityResult><Account>123456789012</Account><Arn>arn:aws:iam::123456789012:user/test</Arn><UserId>test</UserId></GetCallerIdentityResult></GetCallerIdentityResponse>",
+      });
+    const client = new EC2SpotClient(
+      { CRABBOX_AWS_QUALIFICATION_TRANSPORT: { execute } } as Env,
+      region,
+    );
+    await expect(client.identity()).resolves.toMatchObject({ account: "123456789012" });
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute.mock.calls[1]![0]).toEqual(execute.mock.calls[0]![0]);
   });
 
   it("closes real HTTP connections stalled before headers and during the body", async () => {

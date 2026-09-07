@@ -43,6 +43,13 @@ Scripts should prefer the canonical ID. Add `--timing-json` to emit a final
 JSON timing record (provider, lease ID, slug, total duration, exit code) on
 stderr.
 
+For Blacksmith Testbox with a configured coordinator, the lease summary appears
+as soon as the ready Testbox is retained. Final completion and timing follow the
+optional portal inventory sync, and the total includes that bookkeeping. The
+sync has one five-second budget (or the caller's earlier cancellation/deadline).
+A sync failure prints a warning on stderr but warmup still succeeds and retains
+the ready lease; it does not allocate again or stop the Testbox.
+
 Warmup records a local claim binding the lease to the current repo checkout. Use
 `--reclaim` to overwrite an existing claim for that lease.
 
@@ -92,6 +99,12 @@ route. An older coordinator therefore rejects the request before provisioning;
 the CLI never falls back to slug lookup or legacy create behavior. After an
 ambiguous fixed create response, the CLI repeats that exact PUT to atomically
 confirm the same intent before it may poll lease status with GET.
+
+For coordinator-backed creates, recovering an uncertain response does not restart
+the provisioning deadline or shorten it to the recovery window. Once the same
+create is confirmed, readiness uses the remaining original creation budget and
+honors caller cancellation. Fixed-ID leases remain available for explicit recovery
+or stop; ordinary creates keep their token-bound cancellation cleanup.
 
 A fixed lease ID is single-use. Direct AWS, Machine0, Incus, and local-container
 acquisitions fail closed if their bound resource later disappears. Successful
@@ -211,10 +224,14 @@ mutating workspaces.
 ### aws — Windows
 
 `--provider aws --target windows --windows-mode normal --desktop` creates a real
-AWS Windows Server lease. EC2Launch user data installs OpenSSH Server, Git for
-Windows, TightVNC Server, a per-lease local administrator named `crabbox`, and a
-loopback VNC password retrievable through `crabbox vnc --id <lease>`. The
-OpenSSH, Git, and TightVNC downloads are SHA-256 verified before use.
+AWS Windows Server lease. EC2Launch user data enables the initial OpenSSH
+connection on port `22`. Crabbox then runs its Windows bootstrap over that
+connection, installing Git for Windows and TightVNC, configuring the final SSH
+ports and a per-lease local administrator named `crabbox`, and preparing a
+loopback VNC password retrievable through `crabbox vnc --id <lease>`. Crabbox's
+OpenSSH, Git, and TightVNC downloads are SHA-256 verified before use. An explicitly
+selected workload port does not remove an advertised initial bootstrap route;
+see [Windows bootstrap](../features/vnc-windows.md).
 
 `--provider aws --target windows --windows-mode wsl2` still creates a Windows
 Server host, then enables WSL, VirtualMachinePlatform, and HypervisorPlatform,

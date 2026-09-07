@@ -4,15 +4,19 @@ export async function withPricingDeadline(
   quote: (signal: AbortSignal) => Promise<number | undefined>,
 ): Promise<number | undefined> {
   const controller = new AbortController();
-  // Pricing is optional metadata. Abort its HTTP request/body and await settlement
-  // before admission or activation continues with the existing fallback rate.
-  const timeout = setTimeout(
-    () => controller.abort(new DOMException("Provider pricing timed out", "TimeoutError")),
-    pricingRequestTimeoutMs,
-  );
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      const error = new DOMException("Provider pricing timed out", "TimeoutError");
+      // Stop waiting even when SDK credentials or an authority RPC cannot be
+      // canceled. The quote's signal prevents subsequent requests and retries.
+      reject(error);
+      controller.abort(error);
+    }, pricingRequestTimeoutMs);
+  });
   try {
-    return await quote(controller.signal);
+    return await Promise.race([quote(controller.signal), deadline]);
   } finally {
-    clearTimeout(timeout);
+    if (timeout !== undefined) clearTimeout(timeout);
   }
 }

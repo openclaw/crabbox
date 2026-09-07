@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -122,11 +122,7 @@ func assertE2BRedactedError(t *testing.T, err error, secret string) {
 
 func TestE2BProcessStreamRedactsReflectedCredential(t *testing.T) {
 	const secret = "envd-stream-secret"
-	t.Run("end stream error", func(t *testing.T) {
-		body := e2bTestEnvelope(2, map[string]any{"error": map[string]any{"code": "unauthorized", "message": "Bearer " + secret + " quota exceeded"}})
-		_, err := parseE2BProcessStream(bytes.NewReader(body), io.Discard, io.Discard, secret)
-		assertE2BRedactedError(t, err, secret)
-	})
+
 	t.Run("process end diagnostic", func(t *testing.T) {
 		body := e2bTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 1, "exited": false, "error": "Bearer " + secret + " quota exceeded"}}})
 		var stderr bytes.Buffer
@@ -137,24 +133,6 @@ func TestE2BProcessStreamRedactsReflectedCredential(t *testing.T) {
 			t.Fatalf("stderr=%q, want redacted useful process diagnostic", stderr.String())
 		}
 	})
-}
-
-func TestParseE2BProcessStream(t *testing.T) {
-	body := bytes.Join([][]byte{
-		e2bTestEnvelope(0, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}}),
-		e2bTestEnvelope(0, map[string]any{"event": map[string]any{"data": map[string]any{"stdout": base64.StdEncoding.EncodeToString([]byte("hello"))}}}),
-		e2bTestEnvelope(0, map[string]any{"event": map[string]any{"data": map[string]any{"stderr": base64.StdEncoding.EncodeToString([]byte("warn"))}}}),
-		e2bTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 7, "exited": true}}}),
-		e2bTestEnvelope(2, map[string]any{}),
-	}, nil)
-	var stdout, stderr bytes.Buffer
-	code, err := parseE2BProcessStream(bytes.NewReader(body), &stdout, &stderr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if code != 7 || stdout.String() != "hello" || stderr.String() != "warn" {
-		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
 }
 
 func TestE2BDefaultHTTPClientsSeparateControlAndDataPlanes(t *testing.T) {
@@ -209,7 +187,7 @@ func TestE2BControlClientBoundsStalledResponseBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	controlClient, _ := e2bHTTPClients(nil, controlTimeout)
+	controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	client := &e2bClient{apiKey: "e2b_test", apiURL: server.URL, httpClient: controlClient}
 	started := time.Now()
 	_, err := client.GetSandbox(context.Background(), "sbx_1")
@@ -230,7 +208,7 @@ func TestE2BControlClientBoundsWithheldHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	controlClient, _ := e2bHTTPClients(nil, controlTimeout)
+	controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	client := &e2bClient{apiKey: "e2b_test", apiURL: server.URL, httpClient: controlClient}
 	started := time.Now()
 	_, err := client.GetSandbox(context.Background(), "sbx_1")
@@ -257,7 +235,7 @@ func TestE2BDataPlaneStreamOutlivesControlTimeout(t *testing.T) {
 	}))
 	defer server.Close()
 
-	controlClient, _ := e2bHTTPClients(nil, controlTimeout)
+	controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	client := &e2bClient{
 		domain:     "e2b.test",
 		httpClient: controlClient,
@@ -306,7 +284,7 @@ func TestE2BDataPlaneUploadOutlivesControlTimeout(t *testing.T) {
 	defer server.Close()
 
 	payload := []byte("before-after")
-	controlClient, _ := e2bHTTPClients(nil, controlTimeout)
+	controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	client := &e2bClient{
 		domain:     "e2b.test",
 		httpClient: controlClient,
@@ -365,33 +343,6 @@ func TestValidateE2BAPIURL(t *testing.T) {
 				t.Fatalf("validateE2BAPIURL(%q) = %q, want %q", tt.raw, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestParseE2BProcessStreamRequiresEndEvent(t *testing.T) {
-	body := bytes.Join([][]byte{
-		e2bTestEnvelope(0, map[string]any{"event": map[string]any{"data": map[string]any{"stdout": base64.StdEncoding.EncodeToString([]byte("partial"))}}}),
-		e2bTestEnvelope(2, map[string]any{}),
-	}, nil)
-	var stdout bytes.Buffer
-	code, err := parseE2BProcessStream(bytes.NewReader(body), &stdout, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "without end event") {
-		t.Fatalf("code=%d err=%v, want missing end event error", code, err)
-	}
-	if stdout.String() != "partial" {
-		t.Fatalf("stdout=%q", stdout.String())
-	}
-}
-
-func TestE2BCommandString(t *testing.T) {
-	if got := e2bCommandString([]string{"go", "test", "./..."}, false); got != "'go' 'test' './...'" {
-		t.Fatalf("plain command=%q", got)
-	}
-	if got := e2bCommandString([]string{"FOO=bar", "go", "test"}, false); !strings.Contains(got, "FOO=") || !strings.Contains(got, "'go'") {
-		t.Fatalf("env command=%q", got)
-	}
-	if got := e2bCommandString([]string{"pnpm install && pnpm test"}, true); got != "pnpm install && pnpm test" {
-		t.Fatalf("shell command=%q", got)
 	}
 }
 
@@ -496,6 +447,51 @@ func TestCleanE2BWorkspacePath(t *testing.T) {
 				t.Fatalf("workspace=%q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestE2BClientBindsObservedSandboxID(t *testing.T) {
+	for _, operation := range []string{"get", "connect"} {
+		for _, observed := range []string{"sbx_a", "sbx_b", "", " ", "SBX_A", " sbx_a", "sbx_a ", "synthetic-api-token", "synthetic-envd-token"} {
+			t.Run(operation+"/"+observed, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					path, method := "/sandboxes/sbx_a", http.MethodGet
+					if operation == "connect" {
+						path, method = path+"/connect", http.MethodPost
+					}
+					if r.URL.Path != path || r.Method != method || r.Header.Get("X-API-Key") != "synthetic-api-token" {
+						t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"sandboxID": observed, "alias": "different-template-alias", "envdAccessToken": "synthetic-envd-token", "domain": "sandbox.example.test"})
+				}))
+				defer server.Close()
+				client, err := newE2BClient(Config{E2B: E2BConfig{APIKey: "synthetic-api-token", APIURL: server.URL}}, Runtime{HTTP: server.Client()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var id, token string
+				if operation == "connect" {
+					var session e2bSession
+					session, err = client.ConnectSandbox(t.Context(), "sbx_a", 120)
+					id, token = session.SandboxID, session.EnvdAccessToken
+				} else {
+					var sandbox e2bSandbox
+					sandbox, err = client.GetSandbox(t.Context(), "sbx_a")
+					id, token = sandbox.SandboxID, sandbox.EnvdAccessToken
+				}
+				if observed == "sbx_a" {
+					if err != nil || id != "sbx_a" || token != "synthetic-envd-token" {
+						t.Fatalf("exact observation: id=%q token preserved=%v err=%v", id, token == "synthetic-envd-token", err)
+					}
+				} else if err == nil || id != "" || token != "" {
+					t.Fatalf("unbound observation escaped: id=%q token present=%v err=%v", id, token != "", err)
+				} else if strings.Contains(err.Error(), "synthetic-api-token") || strings.Contains(err.Error(), "synthetic-envd-token") {
+					t.Fatal("identity refusal exposed a reflected credential")
+				}
+			})
+		}
 	}
 }
 
@@ -1427,6 +1423,9 @@ type fakeE2BSyncClient struct {
 	createReq           e2bCreateSandboxRequest
 	createCalls         int
 	getIDs              []string
+	listFilters         []map[string]string
+	listedSandboxes     []e2bSandbox
+	connectIDs          []string
 	getErr              error
 	getWaitForCancel    bool
 	getWaitAfterCalls   int
@@ -1461,7 +1460,8 @@ func (f *fakeE2BSyncClient) CreateSandbox(_ context.Context, req e2bCreateSandbo
 	return f.sandbox, nil
 }
 
-func (f *fakeE2BSyncClient) ConnectSandbox(context.Context, string, int) (e2bSession, error) {
+func (f *fakeE2BSyncClient) ConnectSandbox(_ context.Context, sandboxID string, _ int) (e2bSession, error) {
+	f.connectIDs = append(f.connectIDs, sandboxID)
 	return e2bSession{}, f.connectErr
 }
 
@@ -1477,8 +1477,9 @@ func (f *fakeE2BSyncClient) GetSandbox(ctx context.Context, sandboxID string) (e
 	return f.sandbox, nil
 }
 
-func (f *fakeE2BSyncClient) ListSandboxes(context.Context, map[string]string) ([]e2bSandbox, error) {
-	return nil, nil
+func (f *fakeE2BSyncClient) ListSandboxes(_ context.Context, filter map[string]string) ([]e2bSandbox, error) {
+	f.listFilters = append(f.listFilters, filter)
+	return f.listedSandboxes, nil
 }
 
 func (f *fakeE2BSyncClient) DeleteSandbox(ctx context.Context, sandboxID string) error {
@@ -1650,5 +1651,256 @@ func TestE2BRunLifecycleCleanupOutcomeAndTiming(t *testing.T) {
 				t.Fatalf("report=%#v result=%#v", report, result)
 			}
 		})
+	}
+}
+
+func TestRunCommandIntentReachesExistingShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell contract")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash unavailable")
+	}
+	for _, name := range []string{"literal separator", "literal assignment", "literal singleton", "mixed operators", "quoted argv", "unmarked assignment", "explicit source", "empty source", "inferred source", "missing command"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			root := t.TempDir()
+			marker := filepath.Join(root, "must-not-exist")
+			program := filepath.Join(root, "FOO=x")
+			if err := os.WriteFile(program, []byte("#!/bin/sh\nprintf 'literal:%s' \"$*\"\nexit 42\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			client := &fakeE2BSyncClient{}
+			restore := swapNewE2BClient(client)
+			defer restore()
+			backend := &e2bBackend{cfg: Config{E2B: E2BConfig{Template: "base", Workdir: root}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+			req := RunRequest{Repo: Repo{Root: root}, NoSync: true, Keep: true}
+			want, wantExit := "", 0
+			switch name {
+			case "literal separator":
+				req.Command = []string{"printf", "<%s>", ";", "touch", marker}
+				req.CommandLiteralArgs = map[int]bool{2: true}
+				want = "<;><touch><" + marker + ">"
+			case "literal assignment":
+				req.Command = []string{"FOO=x", "argument"}
+				req.CommandLiteralArgs = map[int]bool{0: true}
+				want, wantExit = "literal:argument", 42
+			case "literal singleton":
+				req.Command = []string{"FOO=x"}
+				req.CommandLiteralArgs = map[int]bool{0: true}
+				want, wantExit = "literal:", 42
+			case "mixed operators":
+				req.Command = []string{"printf", "%s", ";", "&&", "printf", "%s", "tail"}
+				req.CommandLiteralArgs = map[int]bool{2: true}
+				want = ";tail"
+			case "quoted argv":
+				req.Command = []string{"printf", "<%s>", "", "$literal", "a'b"}
+				want = "<><$literal><a'b>"
+			case "unmarked assignment":
+				req.Command = []string{"CBX_PROBE=value", "sh", "-c", `printf %s "$CBX_PROBE"`}
+				want = "value"
+			case "explicit source":
+				req.Command = []string{`printf %s "$unexported_fixture_state"; exit 7`}
+				req.ShellMode = true
+				want, wantExit = "existing-shell", 7
+			case "empty source":
+				req.Command = []string{""}
+				req.ShellMode = true
+			case "inferred source":
+				req.Command = []string{"printf %s inferred"}
+				want = "inferred"
+			}
+			_, runErr := backend.Run(t.Context(), req)
+			if name == "missing command" {
+				var ee core.ExitError
+				if !errors.As(runErr, &ee) || ee.Code != 2 {
+					t.Fatalf("missing command error=%v", runErr)
+				}
+				if len(client.commands) != 1 {
+					t.Fatalf("missing command reached workload: %v", client.commands)
+				}
+				return
+			}
+			if runErr != nil {
+				t.Fatal(runErr)
+			}
+			if len(client.commands) != 2 {
+				t.Fatalf("commands=%v want preparation and workload", client.commands)
+			}
+			// Exercise the captured workload in an existing shell; the separate
+			// native envd fixture verifies its actual login-shell transport.
+			source := "unexported_fixture_state=existing-shell\n" + client.commands[1]
+			cmd := exec.CommandContext(t.Context(), bash, "--noprofile", "--norc", "-c", source)
+			cmd.Dir = root
+			cmd.Env = []string{"HOME=" + root, "PATH=" + root + ":/usr/bin:/bin"}
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			commandErr := cmd.Run()
+			code := 0
+			if commandErr != nil {
+				var ee *exec.ExitError
+				if !errors.As(commandErr, &ee) {
+					t.Fatal(commandErr)
+				}
+				code = ee.ExitCode()
+			}
+			if code != wantExit || stdout.String() != want {
+				t.Fatalf("source=%q stdout=%q stderr=%q exit=%d; want %q/%d", source, stdout.String(), stderr.String(), code, want, wantExit)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("literal separator ran touch: %v", err)
+			}
+		})
+	}
+}
+
+func TestE2BRunCanonicalIDPreservesInventoryRecovery(t *testing.T) {
+	const requestedID = "cbx_aaaaaaaaaaaa"
+	for _, state := range []string{"missing", "inventory", "legacy exact claim"} {
+		t.Run(state, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			client := &fakeE2BSyncClient{}
+			restore := swapNewE2BClient(client)
+			defer restore()
+			backend := &e2bBackend{cfg: Config{E2B: E2BConfig{APIURL: "https://api.example.test", Template: "base"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+			repo := Repo{Root: t.TempDir()}
+			otherID, _, _, err := backend.createSandbox(t.Context(), client, repo, true, false, "cbx-aaaaaaaaaaaa")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state != "missing" {
+				client.listedSandboxes = []e2bSandbox{{SandboxID: "sbx_requested", Metadata: map[string]string{"lease": requestedID, "slug": "requested", "provider": e2bProvider, "crabbox": "true"}}}
+			}
+			if state == "legacy exact claim" {
+				if err := claimLeaseForRepoProvider(requestedID, "legacy", e2bProvider, repo.Root, time.Minute, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, exists, err := core.ReadLeaseClaimWithPresence(otherID)
+			if err != nil || !exists {
+				t.Fatal(err)
+			}
+			result, err := backend.Run(t.Context(), RunRequest{ID: requestedID, Repo: repo, Command: []string{"true"}, NoSync: true, Keep: true})
+			if state == "missing" {
+				var ee core.ExitError
+				if !errors.As(err, &ee) || ee.Code != 4 || len(client.connectIDs) != 0 || len(client.commands) != 0 {
+					t.Errorf("missing canonical run: err=%v connects=%v commands=%v", err, client.connectIDs, client.commands)
+				}
+			} else if err != nil || result.Session.LeaseID != requestedID || len(client.connectIDs) != 1 || client.connectIDs[0] != "sbx_requested" {
+				t.Errorf("inventory recovery: result=%#v err=%v connects=%v", result, err, client.connectIDs)
+			}
+			if len(client.getIDs) != 0 || len(client.listFilters) != 1 || client.listFilters[0]["lease"] != requestedID || client.listFilters[0]["provider"] != e2bProvider {
+				t.Errorf("canonical lookup did not use its own inventory: gets=%v lists=%v", client.getIDs, client.listFilters)
+			}
+			after, exists, err := core.ReadLeaseClaimWithPresence(otherID)
+			beforeJSON, beforeErr := json.Marshal(before)
+			afterJSON, afterErr := json.Marshal(after)
+			if err != nil || !exists || beforeErr != nil || afterErr != nil || !bytes.Equal(beforeJSON, afterJSON) {
+				t.Errorf("unrelated claim changed: read=%v marshal=%v/%v", err, beforeErr, afterErr)
+			}
+		})
+	}
+}
+
+func TestE2BStopRejectsMissingCanonicalIDMatchingAnotherSlug(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeE2BSyncClient{}
+	restore := swapNewE2BClient(client)
+	defer restore()
+	backend := &e2bBackend{cfg: Config{E2B: E2BConfig{APIURL: "https://api.example.test", Template: "base"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	const missingID = "cbx_aaaaaaaaaaaa"
+	leaseID, sandbox, _, err := backend.createSandbox(t.Context(), client, Repo{Root: t.TempDir()}, true, false, "cbx-aaaaaaaaaaaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaseID == missingID {
+		t.Fatal("fixture unexpectedly allocated requested ID")
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists {
+		t.Fatalf("fixture claim exists=%v err=%v", exists, err)
+	}
+	before, err := json.Marshal(claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.getIDs = nil
+	err = backend.Stop(t.Context(), StopRequest{ID: missingID})
+	var ee core.ExitError
+	if !errors.As(err, &ee) || ee.Code != 4 {
+		t.Errorf("missing canonical ID selected a slug: err=%v", err)
+	}
+	if len(client.getIDs) != 0 || len(client.deleteIDs) != 0 {
+		t.Errorf("wrong target reached provider: gets=%v deletes=%v", client.getIDs, client.deleteIDs)
+	}
+	afterClaim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	after, marshalErr := json.Marshal(afterClaim)
+	if err != nil || marshalErr != nil || !exists || !bytes.Equal(before, after) {
+		t.Fatalf("unrelated claim changed: exists=%v err=%v marshal=%v", exists, err, marshalErr)
+	}
+	if err := backend.Stop(t.Context(), StopRequest{ID: leaseID}); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != sandbox.SandboxID {
+		t.Fatalf("exact positive target=%v", client.deleteIDs)
+	}
+}
+
+func parseE2BProcessStream(r io.Reader, stdout, stderr io.Writer, secrets ...string) (int, error) {
+	return shared.ParseEnvdProcessStream("e2b", r, stdout, stderr, interpretE2BProcessEnd, secrets...)
+}
+
+func TestE2BProcessEndPolicy(t *testing.T) {
+	readFailure := errors.New("fixture stream read failed")
+	for _, code := range []int{0, 7, -1, 137} {
+		t.Run(fmt.Sprintf("normal/%d", code), func(t *testing.T) {
+			var diagnostic bytes.Buffer
+			got, err := interpretE2BProcessEnd(shared.EnvdProcessEnd{ExitCode: code, Exited: true, Error: "ignored normal detail"}, &diagnostic)
+			if got != code || err != nil || diagnostic.Len() != 0 {
+				t.Fatalf("code=%d err=%v diagnostic=%q", got, err, diagnostic.String())
+			}
+		})
+		for _, ending := range []string{"clean", "RPC failure", "read failure", "truncated"} {
+			t.Run(fmt.Sprintf("abnormal/%d/%s", code, ending), func(t *testing.T) {
+				body := e2bTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": code, "exited": false, "error": "fixture end"}}})
+				if ending == "RPC failure" {
+					body = append(body, e2bTestEnvelope(2, map[string]any{"error": map[string]any{"code": "internal", "message": "fixture RPC failure"}})...)
+				}
+				if ending == "truncated" {
+					body = append(body, 0)
+				}
+				var reader io.Reader = bytes.NewReader(body)
+				if ending == "read failure" {
+					reader = io.MultiReader(reader, iotest.ErrReader(readFailure))
+				}
+				var diagnostic bytes.Buffer
+				got, err := parseE2BProcessStream(reader, io.Discard, &diagnostic)
+				want := code
+				if ending != "clean" {
+					want = 1
+				}
+				if got != want || (err != nil) != (ending != "clean") || diagnostic.String() != "fixture end\n" {
+					t.Fatalf("code=%d err=%v diagnostic=%q", got, err, diagnostic.String())
+				}
+				if ending == "RPC failure" && !strings.Contains(err.Error(), "fixture RPC failure") {
+					t.Fatalf("did not drain RPC error: %v", err)
+				}
+				if ending == "read failure" && !errors.Is(err, readFailure) {
+					t.Fatalf("did not preserve later read error: %v", err)
+				}
+				if ending == "truncated" && !errors.Is(err, io.ErrUnexpectedEOF) {
+					t.Fatalf("did not read later frame: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestE2BProcessEndDoesNotUseStatusAsDiagnostic(t *testing.T) {
+	var diagnostic bytes.Buffer
+	code, err := interpretE2BProcessEnd(shared.EnvdProcessEnd{ExitCode: -1, Status: "fixture status"}, &diagnostic)
+	if code != -1 || err != nil || diagnostic.Len() != 0 {
+		t.Fatalf("code=%d err=%v diagnostic=%q", code, err, diagnostic.String())
 	}
 }

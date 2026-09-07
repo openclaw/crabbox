@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -33,7 +34,7 @@ func TestFreestyleFallbackBoundsControlAndPreservesCommand(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	control, data := freestyleHTTPClients(nil, controlTimeout)
+	control, data := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	trusted, _ := url.Parse(server.URL)
 	client := &freestyleHTTPClient{
 		apiKey:         "test-key",
@@ -65,7 +66,16 @@ func TestFreestyleFallbackBoundsControlAndPreservesCommand(t *testing.T) {
 
 func TestFreestyleInjectedHTTPSettingsArePreservedForBothPlanes(t *testing.T) {
 	transport := &http.Transport{DisableKeepAlives: true}
-	injected := &http.Client{Transport: transport, Timeout: 17 * time.Second}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redirectErr := errors.New("caller redirect policy")
+	redirectCalls := 0
+	injected := &http.Client{Transport: transport, Jar: jar, Timeout: 17 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+		redirectCalls++
+		return redirectErr
+	}}
 	api, err := newFreestyleClient(Config{Freestyle: FreestyleConfig{
 		APIKey: "test-key",
 		APIURL: "http://127.0.0.1:8787",
@@ -74,11 +84,24 @@ func TestFreestyleInjectedHTTPSettingsArePreservedForBothPlanes(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := api.(*freestyleHTTPClient)
-	if client.httpClient.Transport != transport || client.dataHTTPClient.Transport != transport || client.httpClient.Timeout != injected.Timeout || client.dataHTTPClient.Timeout != injected.Timeout {
+	if client.httpClient.Transport != transport || client.dataHTTPClient.Transport != transport || client.httpClient.Jar != jar || client.dataHTTPClient.Jar != jar || client.httpClient.Timeout != injected.Timeout || client.dataHTTPClient.Timeout != injected.Timeout {
 		t.Fatalf("settings=control:(%T,%s) data:(%T,%s)", client.httpClient.Transport, client.httpClient.Timeout, client.dataHTTPClient.Transport, client.dataHTTPClient.Timeout)
 	}
-	if injected.CheckRedirect != nil {
-		t.Fatal("constructor mutated injected redirect policy")
+	if client.httpClient == injected || client.dataHTTPClient == injected || client.httpClient == client.dataHTTPClient {
+		t.Fatal("secure wrappers must isolate their redirect policies")
+	}
+	sameOrigin := &http.Request{URL: &url.URL{Scheme: "http", Host: "127.0.0.1:8787", Path: "/next"}}
+	crossOrigin := &http.Request{URL: &url.URL{Scheme: "https", Host: "example.invalid"}}
+	for _, secured := range []*http.Client{client.httpClient, client.dataHTTPClient} {
+		if !errors.Is(secured.CheckRedirect(sameOrigin, nil), redirectErr) {
+			t.Fatal("secure wrapper lost caller redirect policy")
+		}
+		if err := secured.CheckRedirect(crossOrigin, nil); err == nil || errors.Is(err, redirectErr) {
+			t.Fatal("cross-origin rejection no longer precedes the caller policy")
+		}
+	}
+	if !errors.Is(injected.CheckRedirect(crossOrigin, nil), redirectErr) || redirectCalls != 3 {
+		t.Fatalf("source redirect policy mutated: calls=%d", redirectCalls)
 	}
 }
 

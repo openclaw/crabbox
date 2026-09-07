@@ -349,7 +349,7 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
 	}
-	unlockDaemon, err := acquireEgressDaemonLock(leaseID)
+	unlockDaemon, err := acquireEgressDaemonLock(ctx, leaseID)
 	if err != nil {
 		return exit(2, "acquire egress daemon lock: %v", err)
 	}
@@ -485,7 +485,7 @@ func (a App) egressStop(ctx context.Context, args []string) error {
 			resolved = true
 		}
 	}
-	unlock, err := acquireEgressDaemonLocks(*id, leaseID)
+	unlock, err := acquireEgressDaemonLocks(ctx, *id, leaseID)
 	if err != nil {
 		return exit(2, "acquire egress daemon locks: %v", err)
 	}
@@ -1381,11 +1381,8 @@ func installRemoteEgressClient(ctx context.Context, target SSHTarget) error {
 		defer cancel()
 		_ = runSSHQuiet(cleanupCtx, target, "rm -f "+shellQuote(uploadPath))
 	}()
-	args := append(scpBaseArgs(target), exe, target.User+"@"+target.Host+":"+uploadPath)
-	cmd := exec.CommandContext(ctx, "scp", args...)
-	applyTargetChildEnvironment(cmd, target)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return exit(5, "copy egress client: %v: %s", err, strings.TrimSpace(string(out)))
+	if err := copyLocalFileToTarget(ctx, target, exe, uploadPath); err != nil {
+		return exit(5, "copy egress client: %v", err)
 	}
 	if err := runSSHQuiet(ctx, target, "chmod 700 "+shellQuote(uploadPath)+" && mv -f "+shellQuote(uploadPath)+" "+shellQuote(egressRemoteBinary)); err != nil {
 		return exit(5, "install egress client: %v", err)
@@ -1405,12 +1402,12 @@ func egressClientBinaryForTarget(ctx context.Context, target SSHTarget) (string,
 	if runtime.GOOS == "linux" {
 		return exe, func() {}, nil
 	}
-	repo, err := findRepo()
+	boundary, err := findRepositoryBoundary()
 	if err != nil {
 		return "", func() {}, exit(2, "cross-build egress client: %v", err)
 	}
 	out := filepath.Join(os.TempDir(), "crabbox-egress-client-linux-amd64-"+strconv.FormatInt(time.Now().UnixNano(), 36))
-	if err := crossBuildEgressClient(ctx, target, repo.Root, out); err != nil {
+	if err := crossBuildEgressClient(ctx, target, boundary.root, out); err != nil {
 		return "", func() {}, err
 	}
 	return out, func() { _ = os.Remove(out) }, nil
@@ -1428,33 +1425,6 @@ func crossBuildEgressClient(ctx context.Context, target SSHTarget, repoRoot, out
 		return exit(5, "cross-build linux egress client: %v: %s", err, strings.TrimSpace(string(data)))
 	}
 	return nil
-}
-
-func scpBaseArgs(target SSHTarget) []string {
-	args := sshForwardingDenyArgs()
-	if target.TargetOS == targetWindows && target.WindowsMode != windowsModeWSL2 {
-		args = append(args, "-O")
-	}
-	args = append(args,
-		"-o", "BatchMode=yes",
-	)
-	args = append(args, sshHostKeyVerificationArgs(target)...)
-	args = append(args,
-		"-o", "ConnectTimeout=10",
-		"-o", "ConnectionAttempts=3",
-		"-P", target.Port,
-	)
-	if strings.TrimSpace(target.SSHHostKey) != "" {
-		args = append(args,
-			"-o", "ControlMaster=no",
-			"-o", "ControlPath=none",
-			"-o", "ControlPersist=no",
-		)
-	}
-	if target.Key != "" {
-		args = append([]string{"-i", target.Key, "-o", "IdentitiesOnly=yes"}, args...)
-	}
-	return args
 }
 
 func remoteEgressClientCommand(coordinatorURL, leaseID, sessionID, listen string) string {
@@ -1512,7 +1482,7 @@ func egressRemoteProbeCommand(host, port string) string {
 // acquireEgressDaemonLock serializes every local egress daemon lifecycle
 // operation for a lease. It is keyed on the egress pid path, so it does not
 // contend with the WebVNC daemon lock for the same lease.
-func acquireEgressDaemonLock(leaseID string) (func(), error) {
+func acquireEgressDaemonLock(ctx context.Context, leaseID string) (func(), error) {
 	_, pidPath, err := egressDaemonPaths(leaseID)
 	if err != nil {
 		return nil, err
@@ -1524,10 +1494,10 @@ func acquireEgressDaemonLock(leaseID string) (func(), error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, err
 	}
-	return acquireDaemonFileLock(pidPath + ".lock")
+	return acquireDaemonFileLock(ctx, pidPath+".lock")
 }
 
-func acquireEgressDaemonLocks(leaseIDs ...string) (func(), error) {
+func acquireEgressDaemonLocks(ctx context.Context, leaseIDs ...string) (func(), error) {
 	unique := map[string]bool{}
 	ids := make([]string, 0, len(leaseIDs))
 	for _, leaseID := range leaseIDs {
@@ -1541,7 +1511,7 @@ func acquireEgressDaemonLocks(leaseIDs ...string) (func(), error) {
 	sort.Strings(ids)
 	unlocks := make([]func(), 0, len(ids))
 	for _, leaseID := range ids {
-		unlock, err := acquireEgressDaemonLock(leaseID)
+		unlock, err := acquireEgressDaemonLock(ctx, leaseID)
 		if err != nil {
 			for i := len(unlocks) - 1; i >= 0; i-- {
 				unlocks[i]()
@@ -1557,8 +1527,8 @@ func acquireEgressDaemonLocks(leaseIDs ...string) (func(), error) {
 	}, nil
 }
 
-func (a App) startEgressHostDaemon(leaseID string, args, childEnvDenylist []string) error {
-	unlock, err := acquireEgressDaemonLock(leaseID)
+func (a App) startEgressHostDaemon(ctx context.Context, leaseID string, args, childEnvDenylist []string) error {
+	unlock, err := acquireEgressDaemonLock(ctx, leaseID)
 	if err != nil {
 		return exit(2, "acquire egress daemon lock: %v", err)
 	}
@@ -1619,8 +1589,8 @@ func egressDaemonSupervisorCommand(exe string, args, childEnvDenylist []string) 
 	return cmd
 }
 
-func (a App) stopEgressHostDaemon(leaseID string) (bool, error) {
-	unlock, err := acquireEgressDaemonLock(leaseID)
+func (a App) stopEgressHostDaemon(ctx context.Context, leaseID string) (bool, error) {
+	unlock, err := acquireEgressDaemonLock(ctx, leaseID)
 	if err != nil {
 		return false, exit(2, "acquire egress daemon lock: %v", err)
 	}
@@ -1661,26 +1631,15 @@ func (a App) stopEgressHostDaemonLocked(leaseID string) (bool, error) {
 	return true, nil
 }
 
-func (a App) cleanupMediatedEgressBestEffort(ctx context.Context, requestedID string, lease LeaseTarget) {
-	seen := map[string]bool{}
-	for _, id := range []string{requestedID, lease.LeaseID} {
-		id = strings.TrimSpace(id)
-		if id == "" || seen[id] {
-			continue
-		}
-		seen[id] = true
-		if _, err := a.stopEgressHostDaemon(id); err != nil {
-			fmt.Fprintf(a.Stderr, "warning: egress host daemon cleanup failed for %s: %v\n", id, err)
-		}
-	}
-	a.cleanupMediatedEgressRemoteBestEffort(ctx, lease)
-}
-
 func (a App) cleanupMediatedEgressRemoteBestEffort(ctx context.Context, lease LeaseTarget) {
 	if !supportsRemoteEgressClientCleanup(lease.SSH) {
 		return
 	}
-	if err := runSSHQuiet(ctx, lease.SSH, remoteStopEgressClientCommand()); err != nil {
+	// Best-effort guest cleanup must leave the caller's budget for provider release,
+	// including when provisioning never made SSH reachable.
+	cleanupCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := runSSHQuiet(cleanupCtx, lease.SSH, remoteStopEgressClientCommand()); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: egress remote client cleanup failed for %s: %v\n", lease.LeaseID, err)
 	}
 }

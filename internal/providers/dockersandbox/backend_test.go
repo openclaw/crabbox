@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -270,18 +271,18 @@ func TestRunCleanupPreservesReplacedClaim(t *testing.T) {
 		Repo:    Repo{Name: "my-app", Root: t.TempDir()},
 		Command: []string{"echo", "ok"},
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || result.ExitCode != 1 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider || result.Session == nil || !result.Session.Kept {
+		t.Fatalf("changed claim cleanup result=%+v err=%v", result, err)
 	}
 	if findCall(runner, "rm") != nil {
 		t.Fatal("cleanup removed a sandbox after its local claim was replaced")
 	}
-	claim, ok, err := resolveLeaseClaimForProvider(result.LeaseID, providerName)
-	if err != nil || !ok || claim.RepoRoot != replacementRepo {
-		t.Fatalf("replacement claim=%#v ok=%t err=%v", claim, ok, err)
+	claim, ok, claimErr := resolveLeaseClaimForProvider(result.LeaseID, providerName)
+	if claimErr != nil || !ok || claim.RepoRoot != replacementRepo {
+		t.Fatalf("replacement claim=%#v ok=%t err=%v", claim, ok, claimErr)
 	}
-	if !strings.Contains(stderr.String(), "claim changed; retry") {
-		t.Fatalf("cleanup warning=%q", stderr.String())
+	if !strings.Contains(err.Error(), "claim changed; retry") {
+		t.Fatalf("cleanup diagnostic=%v", err)
 	}
 }
 
@@ -316,6 +317,200 @@ func TestRunCloneModeKeepsSandboxAfterSuccess(t *testing.T) {
 	}
 	if claim, ok, err := resolveLeaseClaimForProvider(result.LeaseID, providerName); err != nil || !ok || claim.LeaseID == "" {
 		t.Fatalf("kept clone claim claim=%#v ok=%t err=%v", claim, ok, err)
+	}
+}
+
+type terminalTimingWriter struct {
+	bytes.Buffer
+	cause error
+}
+
+func (w *terminalTimingWriter) Write(data []byte) (int, error) {
+	if len(data) > 0 && data[0] == '{' {
+		return 0, w.cause
+	}
+	return w.Buffer.Write(data)
+}
+
+func TestRunTerminalFailuresPreserveOutcomeAndDisposition(t *testing.T) {
+	for _, tc := range []struct {
+		name                                              string
+		code                                              int
+		cause                                             error
+		clone, cleanup, timing, keepFailure, badEnv, keep bool
+	}{
+		{name: "cleanup after success", cleanup: true},
+		{name: "command and cleanup", code: 23, cleanup: true},
+		{name: "command cleanup and timing", code: 23, cleanup: true, timing: true},
+		{name: "kept command and timing", code: 23, keepFailure: true, timing: true},
+		{name: "transport cleanup and timing", cause: io.ErrUnexpectedEOF, cleanup: true, timing: true},
+		{name: "cancellation cleanup and timing", cause: context.Canceled, cleanup: true, timing: true},
+		{name: "deadline cleanup and timing", cause: context.DeadlineExceeded, cleanup: true, timing: true},
+		{name: "clone success then timing", clone: true, timing: true},
+		{name: "clone failure then timing", clone: true, code: 23, timing: true},
+		{name: "ordinary success then timing", timing: true, keepFailure: true},
+		{name: "environment failure and cleanup", badEnv: true, cleanup: true},
+		{name: "kept environment failure", badEnv: true, keep: true},
+		{name: "early environment failure retained", badEnv: true, keepFailure: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cleanupErr, writerErr := errors.New("synthetic remove failure"), errors.New("synthetic timing failure")
+			replies := map[string]scriptedReply{"create": {}, "exec": {exitCode: tc.code, err: tc.cause}, "rm": {}}
+			if tc.cleanup {
+				replies["rm"] = scriptedReply{err: cleanupErr}
+			}
+			runner := newRunner(replies, nil)
+			var stderr bytes.Buffer
+			var diagnostics io.Writer = &stderr
+			if tc.timing {
+				diagnostics = &terminalTimingWriter{cause: writerErr}
+			}
+			cfg := newTestConfig()
+			cfg.DockerSandbox.Clone = tc.clone
+			repoRoot := t.TempDir()
+			if tc.clone {
+				runGit(t, repoRoot, "init", "-q")
+			}
+			req := RunRequest{Repo: Repo{Name: "fixture", Root: repoRoot}, Command: []string{"true"}, TimingJSON: true, KeepOnFailure: tc.keepFailure, Keep: tc.keep}
+			if tc.badEnv {
+				req.Env = map[string]string{"INVALID-NAME": "synthetic"}
+			}
+			backend := newTestBackend(cfg, runner, io.Discard, diagnostics)
+			result, err := backend.Run(t.Context(), req)
+			wantCode, wantStatus, wantKind := tc.code, core.RunStatusFailed, core.RunErrorCommandExit
+			if tc.cause != nil {
+				wantCode = 1
+				wantKind = core.RunErrorProvider
+				if tc.cause == context.Canceled {
+					wantStatus = core.RunStatusCanceled
+					wantKind = core.RunErrorCanceled
+				}
+				if tc.cause == context.DeadlineExceeded {
+					wantStatus = core.RunStatusTimedOut
+					wantKind = core.RunErrorTimeout
+				}
+			}
+			if tc.badEnv {
+				wantCode = 2
+				wantKind = core.RunErrorProvider
+			}
+			if wantCode == 0 {
+				wantCode = 1
+				wantKind = core.RunErrorProvider
+			}
+			var public ExitError
+			if !errors.As(err, &public) || public.Code != wantCode || result.ExitCode != wantCode || result.Status != wantStatus || result.ErrorKind != wantKind {
+				t.Errorf("primary outcome result=%+v err=%v public=%+v", result, err, public)
+			}
+			for _, cause := range []error{tc.cause, replies["rm"].err} {
+				if cause != nil && !errors.Is(err, cause) {
+					t.Errorf("cause %v lost: %v", cause, err)
+				}
+			}
+			if tc.cleanup && !strings.Contains(public.Message, cleanupErr.Error()) {
+				t.Errorf("cleanup diagnostic missing: %q", public.Message)
+			}
+			if tc.timing && (!errors.Is(err, writerErr) || !strings.Contains(public.Message, writerErr.Error())) {
+				t.Errorf("timing cause/diagnostic lost: %v", err)
+			}
+			commandFailed := tc.code != 0 || tc.cause != nil
+			wantStop := !tc.keep && !(tc.keepFailure && (commandFailed || tc.badEnv)) && !(tc.clone && !commandFailed && !tc.badEnv)
+			wantKept := !wantStop || tc.cleanup
+			if result.Session == nil || result.Session.Kept != wantKept || result.Session.Reused || result.Session.LeaseID != result.LeaseID {
+				t.Errorf("disposition session=%+v want kept=%t", result.Session, wantKept)
+			}
+			if (findCall(runner, "rm") != nil) != wantStop {
+				t.Errorf("remove calls=%v want stop=%t", callVerbs(runner), wantStop)
+			}
+			if claim, ok, claimErr := resolveLeaseClaimForProvider(result.LeaseID, providerName); claimErr != nil || ok != wantKept || ok && claim.RepoRoot != repoRoot {
+				t.Errorf("claim=%+v exists=%t want=%t err=%v", claim, ok, wantKept, claimErr)
+			}
+			if tc.badEnv && findCall(runner, "exec") != nil {
+				t.Error("invalid environment reached workload")
+			}
+			if tc.clone && !commandFailed && !strings.Contains(diagnostics.(*terminalTimingWriter).String(), "clone run kept sandbox") {
+				t.Error("clone preservation guidance missing")
+			}
+			if !tc.timing {
+				assertTerminalTiming(t, stderr.String(), result, err)
+			}
+		})
+	}
+}
+
+func assertTerminalTiming(t *testing.T, diagnostics string, result RunResult, err error) {
+	t.Helper()
+	var reports []core.TimingReport
+	for _, line := range strings.Split(strings.TrimSpace(diagnostics), "\n") {
+		if strings.HasPrefix(line, "{") {
+			var report core.TimingReport
+			if err := json.Unmarshal([]byte(line), &report); err != nil {
+				t.Fatal(err)
+			}
+			reports = append(reports, report)
+		}
+	}
+	if len(reports) != 1 {
+		t.Fatalf("timing records=%d diagnostics=%s", len(reports), diagnostics)
+	}
+	report := reports[0]
+	result = core.FinalizeRunResult(result, err)
+	if report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind || report.LeaseID != result.LeaseID || report.Slug != result.Slug || !report.SyncDelegated || !report.SyncSkipped || !reflect.DeepEqual(report.SyncPhases, []core.TimingPhase{{Name: "sync", Skipped: true, Reason: "provider-delegated workspace"}}) {
+		t.Fatalf("timing=%+v result=%+v", report, result)
+	}
+}
+
+func TestRunCloneFailureAndNativeWorkspaceControls(t *testing.T) {
+	for _, tc := range []struct {
+		name                                            string
+		clone, keep, keepFailure, reuse, noSync, badEnv bool
+		code                                            int
+	}{
+		{name: "clone success", clone: true},
+		{name: "clone command failure", clone: true, code: 23},
+		{name: "clone kept failure", clone: true, code: 23, keepFailure: true},
+		{name: "clone explicit keep", clone: true, code: 23, keep: true},
+		{name: "native workspace"},
+		{name: "explicit no sync", noSync: true},
+		{name: "reused failure", reuse: true, code: 23},
+		{name: "early failure cleanup", badEnv: true},
+		{name: "unexecuted clone cleanup", clone: true, badEnv: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cfg := newTestConfig()
+			cfg.DockerSandbox.Clone = tc.clone
+			repoRoot := t.TempDir()
+			if tc.clone {
+				runGit(t, repoRoot, "init", "-q")
+			}
+			runner := newRunner(map[string]scriptedReply{"create": {}, "exec": {exitCode: tc.code}, "rm": {}}, nil)
+			var stderr bytes.Buffer
+			backend := newTestBackend(cfg, runner, io.Discard, &stderr)
+			req := RunRequest{Repo: Repo{Name: "fixture", Root: repoRoot}, Command: []string{"true"}, TimingJSON: true, Keep: tc.keep, KeepOnFailure: tc.keepFailure, NoSync: tc.noSync}
+			if tc.reuse {
+				req.ID = "dsbx_crabbox-fixture-123456"
+				if err := claimLeaseForRepoProviderPond(req.ID, "fixture", providerName, "", repoRoot, time.Hour, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.badEnv {
+				req.Env = map[string]string{"INVALID-NAME": "synthetic"}
+			}
+			result, err := backend.Run(t.Context(), req)
+			wantKept := tc.keep || tc.reuse || tc.clone && tc.code == 0 && !tc.badEnv || tc.keepFailure && tc.code != 0
+			if (err != nil) != (tc.code != 0 || tc.badEnv) || (findCall(runner, "rm") != nil) == wantKept {
+				t.Fatalf("err=%v calls=%v", err, callVerbs(runner))
+			}
+			if tc.badEnv {
+				return
+			}
+			if result.ExitCode != tc.code || result.Session == nil || result.Session.Kept != wantKept || result.Session.Reused != tc.reuse {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			assertTerminalTiming(t, stderr.String(), result, err)
+		})
 	}
 }
 
@@ -1155,39 +1350,6 @@ func TestDockerSandboxSmallHelpers(t *testing.T) {
 	}
 }
 
-func TestBuildCommandShellModePreservesShellScript(t *testing.T) {
-	got, err := buildCommand([]string{"echo one && echo two"}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"sh", "-lc", "echo one && echo two"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("command=%#v want %#v", got, want)
-	}
-}
-
-func TestBuildCommandSingleShellStringStaysRaw(t *testing.T) {
-	got, err := buildCommand([]string{"echo one && echo two"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"sh", "-lc", "echo one && echo two"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("command=%#v want %#v", got, want)
-	}
-}
-
-func TestBuildCommandLeadingEnvAssignmentQuotesArgv(t *testing.T) {
-	got, err := buildCommand([]string{"GREETING=hello world", "printf", "%s\n", "$GREETING"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"sh", "-lc", "GREETING='hello world' 'printf' '%s\n' '$GREETING'"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("command=%#v want %#v", got, want)
-	}
-}
-
 func TestSBXErrorFormattingEdges(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	stderr.WriteString("plain failure")
@@ -1569,7 +1731,7 @@ func TestSBXErrorClassifiesTimeoutAndStreamedErrors(t *testing.T) {
 		t.Fatalf("streamed err code=%d err=%v", code, err)
 	}
 	runner = newRunner(map[string]scriptedReply{
-		"exec": {exitCode: 4, err: errors.New("exit status 4")},
+		"exec": {exitCode: 4},
 	}, nil)
 	cli, err = newSBXCLI(newTestConfig(), Runtime{Exec: runner})
 	if err != nil {
@@ -1599,7 +1761,7 @@ func TestRunPropagatesCommandExit(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	runner := newRunner(map[string]scriptedReply{
 		"create": {stdout: ""},
-		"exec":   {exitCode: 7, stderr: "failed\n", err: errors.New("exit status 7")},
+		"exec":   {exitCode: 7, stderr: "failed\n"},
 	}, nil)
 	backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
 	_, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, Command: []string{"deploy", "--token", "secret-token"}, Keep: true})
@@ -1613,25 +1775,40 @@ func TestRunPropagatesCommandExit(t *testing.T) {
 }
 
 func TestRunPropagatesStreamRuntimeErrorWithCommandExit(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	runner := newRunner(map[string]scriptedReply{
-		"create": {stdout: ""},
-		"exec":   {exitCode: 7, stderr: "failed\n", err: errors.New("stream transport failed")},
-	}, nil)
-	backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
-	result, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, Command: []string{"deploy", "--token", "secret-token"}, Keep: true})
-	var exitErr core.ExitError
-	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
-		t.Fatalf("err=%v want exit 7", err)
-	}
-	if !strings.Contains(err.Error(), "stream transport failed") {
-		t.Fatalf("err=%v missing runtime diagnostic", err)
-	}
-	if strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), "deploy --token") {
-		t.Fatalf("err=%v leaked command arguments", err)
-	}
-	if result.ExitCode != 7 {
-		t.Fatalf("result.ExitCode=%d want 7", result.ExitCode)
+	for _, tc := range []struct {
+		cause  error
+		status core.RunStatus
+		kind   core.RunErrorKind
+	}{
+		{errors.New("stream transport failed"), core.RunStatusFailed, core.RunErrorProvider},
+		{context.Canceled, core.RunStatusCanceled, core.RunErrorCanceled},
+		{context.DeadlineExceeded, core.RunStatusTimedOut, core.RunErrorTimeout},
+	} {
+		t.Run(tc.cause.Error(), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			runner := newRunner(map[string]scriptedReply{
+				"create": {stdout: ""},
+				"exec":   {exitCode: 7, stderr: "failed\n", err: tc.cause},
+			}, nil)
+			var stderr bytes.Buffer
+			backend := newTestBackend(newTestConfig(), runner, io.Discard, &stderr)
+			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, Command: []string{"deploy", "--token", "secret-token"}, Keep: true, TimingJSON: true})
+			var exitErr core.ExitError
+			if !errors.As(err, &exitErr) || exitErr.Code != 1 || !errors.Is(err, tc.cause) {
+				t.Fatalf("err=%v want transport exit 1 and original cause", err)
+			}
+			if strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), "deploy --token") {
+				t.Fatalf("err=%v leaked command arguments", err)
+			}
+			if result.ExitCode != 1 || result.Status != tc.status || result.ErrorKind != tc.kind || result.Session == nil || !result.Session.Kept {
+				t.Fatalf("result=%#v want normalized transport failure with kept session", result)
+			}
+			lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+			var report core.TimingReport
+			if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil || report.ExitCode != 1 || report.RunStatus != tc.status || report.ErrorKind != tc.kind {
+				t.Fatalf("timing=%#v err=%v", report, err)
+			}
+		})
 	}
 }
 
@@ -1661,5 +1838,66 @@ func TestRunKeepOnFailureMarksSessionKept(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease=") {
 		t.Fatalf("stderr missing keep-on-failure hint: %s", stderr.String())
+	}
+}
+
+func TestRunTimingFailureDoesNotReportSuccess(t *testing.T) {
+	for _, commandExit := range []int{0, 7} {
+		t.Run(strconv.Itoa(commandExit), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			runner := newRunner(map[string]scriptedReply{"create": {}, "exec": {exitCode: commandExit}}, nil)
+			backend := newTestBackend(newTestConfig(), runner, io.Discard, errWriter{})
+			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, Command: []string{"true"}, Keep: true, TimingJSON: true})
+			if err == nil || !strings.Contains(err.Error(), "write failed") {
+				t.Fatalf("timing error=%v", err)
+			}
+			result = core.FinalizeRunResult(result, err)
+			code, kind := commandExit, core.RunErrorCommandExit
+			if code == 0 {
+				code, kind = 1, core.RunErrorProvider
+			}
+			if result.ExitCode != code || result.Status != core.RunStatusFailed || result.ErrorKind != kind {
+				t.Fatalf("timing failure outcome=%#v, want failed code=%d kind=%s", result, code, kind)
+			}
+		})
+	}
+}
+
+func TestRunCommandIntentReachesNativeRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		command []string
+		literal map[int]bool
+		shell   bool
+		want    []string
+	}{
+		{"empty explicit source", []string{""}, nil, true, []string{"sh", "-lc", ""}},
+		{"ordinary", []string{"printf", "%s", "hello"}, nil, false, []string{"printf", "%s", "hello"}},
+		{"literal separator", []string{"printf", "%s", ";", "touch", "sentinel"}, map[int]bool{2: true}, false, []string{"printf", "%s", ";", "touch", "sentinel"}},
+		{"literal assignment executable", []string{"FOO=x", "argument"}, map[int]bool{0: true}, false, []string{"FOO=x", "argument"}},
+		{"literal singleton", []string{"literal command $(echo x)"}, map[int]bool{0: true}, false, []string{"literal command $(echo x)"}},
+		{"invalid assignment executable", []string{"bad-name=x", "argument"}, nil, false, []string{"bad-name=x", "argument"}},
+		{"mixed operators", []string{"printf", "%s", ";", "&&", "printf", "%s", "done"}, map[int]bool{2: true}, false, []string{"sh", "-lc", "'printf' '%s' ';' && 'printf' '%s' 'done'"}},
+		{"inferred source", []string{"printf one && printf two"}, nil, false, []string{"sh", "-lc", "printf one && printf two"}},
+		{"explicit source", []string{"printf one; exit 7"}, nil, true, []string{"sh", "-lc", "printf one; exit 7"}},
+		{"leading assignment", []string{"GREETING=hello world", "printf", "%s", "$GREETING"}, nil, false, []string{"sh", "-lc", "GREETING='hello world' 'printf' '%s' '$GREETING'"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			runner := newRunner(nil, nil)
+			backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+			_, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, Command: tc.command, ShellMode: tc.shell, CommandLiteralArgs: tc.literal})
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := findCall(runner, "exec")
+			if call == nil || len(call.Args) < 5 || call.Args[1] != "--workdir" {
+				t.Fatalf("exec=%#v", call)
+			}
+			got := call.Args[4:]
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("native command=%#v want %#v", got, tc.want)
+			}
+		})
 	}
 }

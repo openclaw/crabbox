@@ -207,10 +207,21 @@ so a lost delete reply can be reconciled by another stop or cleanup. Do not disc
 work around an ownership conflict.
 
 Release deletes the instance by default. With `incus.deleteOnRelease: false`,
-release stops it and retains the key and claim for later `--id` reuse. Retained
-leases created by older Crabbox versions remain usable through their original
-name-based scope, but cannot be captured natively; create a new lease to obtain
-the durable identity contract.
+release stops it and retains the key and claim for later `--id` reuse. Both stop
+policies and automatic cleanup require the exact durable ownership claim;
+`--force` does not bypass that requirement. Cleanup skips unclaimed and legacy
+label-only instances without deleting their keys or adopting their ownership.
+Retained leases created by older Crabbox versions remain usable with their
+existing name-based claim, but cannot be stopped, deleted, or captured natively
+through Crabbox. Inspect and retire those instances directly with Incus, then
+create a new lease to obtain the durable identity contract. `--reclaim` changes
+repository ownership only; it does not migrate legacy claims. Read-only status
+and discovery remain available without creating a claim.
+
+Deletion rechecks the recorded instance identity after stopping it. Incus stop
+and delete requests still address instances by name, so the local claim lock
+does not make them atomic against unrelated native Incus writers. Avoid manually
+replacing an instance while Crabbox is operating on it.
 
 ## Native disk checkpoints
 

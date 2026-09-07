@@ -208,10 +208,11 @@ portable selector such as `ubuntu:26.04`.
 
 ## Roll back
 
-Rollback is just another promotion to a known-good AMI:
+For transactional publisher runs, restore the exact captured aliases from the
+promotion receipt:
 
 ```bash
-crabbox image promote ami-previous-good --json
+crabbox image promote ami-failed --restore-receipt promotion.json --json
 ```
 
 Run the normal brokered smoke again. Do not delete the failed AMI immediately;
@@ -294,9 +295,17 @@ gh workflow run devtools-image-publish.yml \
 ```
 
 Use `macos_host=allocate` only when no suitable EC2 Mac Dedicated Host is
-available. The workflow uploads its complete mint logs and macOS lifecycle
-evidence as a 30-day Actions artifact. A failed candidate or promoted-image
-smoke fails the workflow and leaves the previous promoted image selected.
+available. Unmeasured publication uploads its complete mint logs and macOS lifecycle
+evidence as a 30-day diagnostic Actions artifact. These diagnostics are not
+sanitized public proof. Measured Linux publication uploads only its allowlisted
+manifest; its private evidence and diagnostics are excluded. Candidate failure leaves the default
+unchanged. Publication is serialized per target; promotion atomically captures
+the current scoped default, and promoted-image smoke failure attempts a
+compare-and-swap restore. If another operator promotes a newer image first,
+rollback fails visibly rather than overwriting it. Publisher rollback explicitly
+authorizes retiring the exact failed catalog revision so capability-aware leases
+cannot select it; generic stale compare-and-swap requests leave the catalog
+unchanged.
 
 ## Developer-image wrappers
 
@@ -377,6 +386,18 @@ scripts/mint-aws-devtools-image.sh \
   Linux TruffleHog 3.95.9 binary inside the managed WSL distro. This happens
   during environment setup and does not require autoreview-time installation.
 
+Linux preparation retains `cloud-init clean --logs --seed` while preserving
+the running source's completed initialization. Using the distro's isolated
+`/usr/bin/python3`, it requires cloud-init to report `done` and its configured
+runtime directory to be on `tmpfs`, outside the cleaned disk cache. Both
+existing completion records are atomically copied there with their original
+ownership and modes before cleaning. The source can then pass the subsequent
+readiness and smoke commands; a new boot must produce its own completion facts.
+Missing cloud-init is a no-op. Incomplete initialization, unsafe runtime storage,
+or preservation/cleanup errors stop preparation before sync and version output.
+Native checkpoint preparation and the wrapper's reboot-enabled capture remain
+unchanged.
+
 Windows developer bakes are headless by default for faster boot and fewer
 desktop-bootstrap moving parts. Pass `--desktop` only when the image must back
 interactive desktop leases. Windows container support can require one reboot
@@ -426,6 +447,84 @@ a safe same-filesystem rename and verified before capture. Later managed Linux
 boots independently rerun the declared probes under a sanitized system PATH
 before skipping baseline APT. Use the timing logs to compare provider request,
 network readiness, bootstrap, and end-to-end time before and after each bake.
+
+### Measured Linux publication
+
+Opt in with `--measured --max-p95-runner-total-ms <positive-integer>`.
+The workflow exposes the same opt-in as `measured=true` and
+`max_p95_runner_total_ms`. It is off by default. Windows, macOS, and the ordinary
+three-lease Linux lifecycle do not gain benchmark launches.
+
+The measured plan schedules **12 leases**, not three: three baseline
+measurements, three explicit-candidate measurements, three normal
+promoted-selection measurements, and the source/candidate/promoted lifecycle
+leases. The wrapper prints this plan, the threshold, and the per-lease TTL
+before paid work. These are planned successful allocations, not a hard cap:
+provider acquisition may retry and add launch attempts. The wrapper does not
+enforce an attempt or dollar cap, or estimate prices. Review the extra
+allocations and image storage costs before adding `--run`; do not reuse
+the separate qualification workflow's three-launch budget.
+
+Choose a positive absolute p95 runner-time cap before the campaign, based on
+the operator's acceptance policy. There is no default performance target.
+All three cohorts must pass that same cap. Their p95 values are also recorded
+side by side as a descriptive baseline comparison; passing `bench check` does
+not establish a speedup or statistical significance.
+
+Measured mode validates the bundled Linux recipe and its exact input hashes
+before the first CLI operation. It requires clean source, an explicit region
+and instance type, x86_64, desktop/browser capabilities, the bundled prep
+script without Linux installer overrides, promotion, and cleanup. Custom prep,
+`--keep-lease`, `--no-promote`, and FSR are rejected in this mode.
+Set the existing `CRABBOX_OWNER` and `CRABBOX_ORG` selectors for a bounded
+administrative lease listing. Before allocation, offline `config show` must
+report a managed coordinator with configured user/admin auth, the requested
+region, and an empty effective `aws.ami`. Clearing the environment override
+does not clear an AMI inherited from config; remove that override first.
+Offline config cannot inspect the coordinator's own environment. A
+coordinator-side image override is rejected from the first recorded selection,
+after stopping that allocation; this is not a no-spend server-side preflight.
+
+Each measurement uses a fresh `run --timing-record`, the same `true` command,
+source revision, machine request, region, capabilities, and
+`--full-resync --no-hydrate` policy. `--keep --stop-after never --lease-output`
+publishes a retained-lease handle before command execution. No `--id` or pool
+is supplied. The handle must say `reused=false` and `kept=true`; its lease and
+run IDs must match the timing record. The wrapper reads the exact lease from
+the existing bounded administrative list, checks actual instance and image
+regions, and rejects mixed baseline images or repeated provider instances.
+Missing or ambiguous records fail closed; it never guesses a lease from a slug.
+
+The wrapper confirms cleanup with exact-ID `stop` on success or failure before
+starting another sample. A failed run keeps its original exit status even if
+cleanup also fails. Interruptions recover an already-published retained handle
+without waiting for a final timing record. The original runner timing excludes the subsequent evidence
+read and cleanup wait, consistently across all cohorts. Warmup timings are not
+benchmark samples, and a `--cold` label alone is not evidence of fresh acquisition.
+Existing `bench report` and
+`bench check` own the timing distributions and acceptance policy. Missing,
+mixed, reused, or insufficient observations block promotion; measured `0ms`
+sync remains valid.
+
+Candidate lifecycle cleanup and all candidate measurements finish before
+transactional promotion. The original promotion receipt remains unchanged.
+The baseline image is reconciled with the receipt's captured previous default
+before the post-promotion smoke and again before final acceptance.
+The normal-selection path clears the environment AMI override, and
+all promoted measurements must prove the new image was selected normally.
+Rollback remains armed through the final measurements and manifest creation.
+Failure attempts the existing receipt-based restore and exact failed catalog
+revision retirement, retaining the original failure status. A concurrent
+newer promotion causes visible CAS rejection, never an overwrite.
+
+The public `manifest.json` contains only recipe/source/policy digests, fixed
+phase and outcome labels, numeric counts and measures, and check reasons.
+`plannedLeaseCount` is the campaign plan, not an observed provider-attempt count.
+Raw records, command text, paths, image/lease identities, promotion receipts,
+handles, and diagnostic logs remain in the private runner directory and are
+not uploaded for measured publication. Full config and administrative listings
+are never logged or persisted. A failed campaign does not emit a successful
+public manifest.
 
 ## macOS images
 
@@ -675,6 +774,123 @@ crabbox image create \
 
 crabbox image promote ami-1234567890abcdef0 --target macos --region us-east-1 --json
 ```
+
+## Pre-merge Linux AWS qualification
+
+The reviewer-gated `Image qualification` workflow qualifies an exact open,
+same-repository pull request against the credential-isolated authority described
+in [AWS image qualification](../behavior/aws-image-qualification.md). It is
+stacked on that authority and is not a general pull-request CI job.
+
+The workflow has separate trust zones:
+
+- `authorize` binds one first attempt to the protected default-branch workflow,
+  open same-repository pull request, and exact candidate SHA. The pull request
+  base must equal the protected workflow SHA, so a stale candidate must be
+  rebased before qualification.
+- `build-candidate` is a credentialless job in that protected workflow. It uses
+  the protected revision's Go version, Worker lockfile, Wrangler binary, config,
+  and other non-source build inputs. Candidate Go modules and non-source Worker
+  inputs must be byte-identical to that revision. The job copies only a bounded
+  regular-file candidate `worker/src` tree into the protected build root, never
+  runs candidate package tooling or hooks, and records the source and protected
+  input digests before publishing the one-day manifest-covered artifact. Later
+  jobs accept only that artifact ID and digest from the current first-attempt
+  protected workflow run.
+- `admit` runs without cloud credentials before environment approval. Trusted
+  tooling verifies the exact artifact manifest and rejects publishers that do
+  not implement injectable CLI delegation, pre-promotion candidate teardown,
+  transactional promotion receipts, compare-and-swap rollback, and failed
+  revision retirement in the required order.
+- `deploy-enroll` is environment-protected. It checks out only protected
+  tooling, downloads the exact artifact ID into runner temporary storage,
+  revalidates every manifest entry and the admission contract, treats the
+  candidate bundle as data, deploys through the Cloudflare API, reads the
+  resulting Worker version and settings back, rechecks the pull request and
+  build identity, and claims the singleton authority registry.
+- `arm` is the last protected job before candidate execution. It rechecks the
+  open pull request and artifact, exact final Worker version and binding
+  settings, registry claim, and authority attestation. Its execution-manifest
+  digest binds the deployed version to the candidate, deployment, authority,
+  policy, and enrollment timestamps.
+- `execute` receives only the relay URL and its distinct ephemeral executor
+  token. Candidate admin/shared tokens stay in the relay. The job receives no
+  AWS, Cloudflare, authority-controller, or production credentials.
+- `finalize` always runs behind the protected environment. It first persists the
+  authority and registry finalization fence, then disables and deletes the
+  public relay and verifies its absence before continuing AWS cleanup. It
+  deletes the candidate Fleet Durable Object and Worker, verifies absence,
+  repeats finalization idempotently, retires the registry record, and deletes
+  the transient controller.
+
+The exact live proof seeds the fixed base AMI as the prior default, verifies
+that a shared-token request to `promote-cas` returns 403 without changing the
+base-image readback, and records a Fast Snapshot Restore rejection before
+signer dispatch. The candidate publisher then boots source, candidate-image,
+and promoted-image leases sequentially. A trusted `CRABBOX_BIN` adapter
+delegates every command to the exact candidate CLI and captures the structured
+promotion and rollback receipts. Candidate API readbacks must prove the exact
+seeded base image and revision were restored and the failed image revision lost
+its catalog role. A `200` readback for that AMI is accepted only as a matching
+provider-only record with no revision, promotion timestamp, or catalog-only
+marker; `404` is also valid. A stale request naming the failed revision must
+then return 409 with the seeded revision as current,
+while complete candidate API readbacks remain unchanged, including catalog,
+default, and FSR state. Candidate logs are supplemental only. The adapter
+returns exit 86 only after the promoted smoke succeeds. A credentialless child
+is then killed while authority-owned image state remains for protected cleanup.
+
+The authority and candidate configuration fix the run to Linux, one
+`t3.small`/`t3a.small` on-demand instance at a time, exactly three launches,
+one active image/checkpoint set, encrypted bounded root storage, no instance
+profile, no Fast Snapshot Restore, a $10 usage ceiling, one attempt, and an
+absolute 120-minute expiry. Execution stops after 80 minutes so protected
+cleanup retains at least 20 minutes.
+
+The independent `Image qualification reaper` runs after workflow completion
+and hourly. It discovers the active run from the durable registry rather than
+workflow artifacts. If the controller Worker disappeared, it recovers the
+deployment hash from the isolated candidate's service-binding settings,
+recreates only the protected controller, and performs the same idempotent
+finalization and zero-residue checks.
+
+After clean teardown, both the controller and candidate are absent. The reaper
+then creates a transient controller solely to ask the authority registry whether
+it is empty. Only an authenticated `{ "run": null }` response establishes idle;
+an active run, malformed response, or failed request remains a failure. The
+probe cannot finalize or retire a run.
+
+The reaper checks controller absence before recovery and never replaces an
+existing controller because authentication or discovery failed. Each idle
+probe or candidate-recovery controller carries a unique ownership tag;
+cleanup rechecks its version, tag, and bindings before deletion and verifies
+absence before reporting idle. Partial
+deployment failures still attempt owned cleanup. Changed or unverifiable
+ownership preserves the Worker and reports failure for operator investigation,
+including both discovery and cleanup errors when applicable. Inspect the
+reaper's `finalization.json` before retrying; do not delete an unfamiliar
+controller to force recovery. A stale candidate hash can be skipped only after
+its owned recovery controller has been deleted and absence verified.
+
+Before enabling the workflow, maintainers must create the protected
+`image-qualification` GitHub environment and configure:
+
+- secret `CLOUDFLARE_API_TOKEN`, limited to deploying, inspecting, and deleting
+  the qualification candidate/controller Workers and their Durable Objects;
+- secret `CRABBOX_IMAGE_QUALIFICATION_CONTROLLER_TOKEN`;
+- variable `CLOUDFLARE_ACCOUNT_ID`;
+- variables `CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_SHA`,
+  `CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_VERSION`,
+  `CRABBOX_IMAGE_QUALIFICATION_POLICY_HASH`,
+  `CRABBOX_IMAGE_QUALIFICATION_AWS_REGION`,
+  `CRABBOX_IMAGE_QUALIFICATION_SUBNET_ID`,
+  `CRABBOX_IMAGE_QUALIFICATION_SECURITY_GROUP_ID`,
+  `CRABBOX_IMAGE_QUALIFICATION_BASE_AMI_ID`, and
+  `CRABBOX_IMAGE_QUALIFICATION_ROOT_GB`.
+
+The non-public authority Worker and its dedicated sandbox-account IAM deny
+contract must already be deployed. This repository change creates no
+environment, secret, Worker, Durable Object, AWS resource, or spend by itself.
 
 ## Hetzner status
 

@@ -26,31 +26,82 @@ func TestTenkiProviderSpec(t *testing.T) {
 	}
 }
 
+func TestTenkiClaimScopeRetainsLegacySelectorsForClaimRecovery(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{
+			name: "historical blank scope",
+			want: "endpoint:default|workspace:|project:",
+		},
+		{
+			name: "historical selected scope",
+			cfg: Config{Tenki: TenkiConfig{
+				Endpoint:  "https://api.tenki.test/",
+				Workspace: "workspace-legacy",
+				Project:   "project-legacy",
+			}},
+			want: "endpoint:https://api.tenki.test|workspace:workspace-legacy|project:project-legacy",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := (Provider{}).ClaimScope(tc.cfg); got != tc.want {
+				t.Fatalf("claim scope=%q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTenkiReleaseRequiresExactScopedClaimAndLiveOwnership(t *testing.T) {
 	for _, tc := range []struct {
-		name             string
-		claimedSessionID string
-		claimedWorkspace string
-		liveSessionID    string
-		liveLeaseID      string
-		terminateErr     error
-		wantErr          string
-		wantTerminated   bool
+		name               string
+		claimedSessionID   string
+		claimedEndpoint    string
+		claimedWorkspace   string
+		liveSessionID      string
+		liveLeaseID        string
+		postTerminateState string
+		postTerminateID    *string
+		postTerminateError string
+		cancelOnAck        bool
+		terminateErr       error
+		terminateStderr    string
+		exitZeroUsage      bool
+		ackTimeout         time.Duration
+		wantErr            string
+		wantTerminated     bool
 	}{
 		{name: "missing claim", wantErr: "no exact local ownership claim"},
 		{name: "exact claim", claimedSessionID: "session-owned", liveSessionID: "session-owned", liveLeaseID: "cbx_abcdef123456", wantTerminated: true},
 		{name: "wrong session", claimedSessionID: "session-other", wantErr: "cloud ID mismatch"},
+		{name: "wrong endpoint", claimedSessionID: "session-owned", claimedEndpoint: "https://api.other.test", wantErr: "provider scope mismatch"},
 		{name: "wrong workspace", claimedSessionID: "session-owned", claimedWorkspace: "workspace-other", wantErr: "provider scope mismatch"},
 		{name: "live identity mismatch", claimedSessionID: "session-owned", liveSessionID: "session-other", liveLeaseID: "cbx_abcdef123456", wantErr: "live session identity"},
 		{name: "live lease mismatch", claimedSessionID: "session-owned", liveSessionID: "session-owned", liveLeaseID: "cbx_999999999999", wantErr: "live lease"},
 		{name: "missing live ownership", claimedSessionID: "session-owned", liveSessionID: "session-owned", wantErr: "without exact Crabbox ownership metadata"},
 		{name: "failed termination retains claim", claimedSessionID: "session-owned", liveSessionID: "session-owned", liveLeaseID: "cbx_abcdef123456", terminateErr: errors.New("provider unavailable"), wantErr: "provider unavailable"},
+		{name: "exit-zero usage retains claim", claimedSessionID: "session-owned", liveSessionID: "session-owned", liveLeaseID: "cbx_abcdef123456", exitZeroUsage: true, wantErr: "contract"},
+		{name: "unacknowledged termination retains claim", claimedSessionID: "session-owned", liveSessionID: "session-owned", liveLeaseID: "cbx_abcdef123456", postTerminateState: "RUNNING", ackTimeout: 10 * time.Millisecond, wantErr: "termination", wantTerminated: true},
+		{name: "terminated exact session", claimedSessionID: "session-owned", liveSessionID: "session-owned", liveLeaseID: "cbx_abcdef123456", postTerminateState: "TERMINATED", wantTerminated: true},
+		{name: "acknowledgement identity mismatch retains claim", claimedSessionID: "session-owned", liveSessionID: "session-owned", liveLeaseID: "cbx_abcdef123456", postTerminateID: new("session-other"), wantErr: "identity", wantTerminated: true},
+		{name: "acknowledgement missing identity retains claim", claimedSessionID: "session-owned", liveSessionID: "session-owned", liveLeaseID: "cbx_abcdef123456", postTerminateID: new(""), wantErr: "identity", wantTerminated: true},
+		{name: "workspace lookup failure retains claim", claimedSessionID: "session-owned", liveSessionID: "session-owned", liveLeaseID: "cbx_abcdef123456", postTerminateError: "workspace not found", ackTimeout: 10 * time.Millisecond, wantErr: "workspace not found", wantTerminated: true},
+		{name: "config lookup failure retains claim", claimedSessionID: "session-owned", liveSessionID: "session-owned", liveLeaseID: "cbx_abcdef123456", postTerminateError: "configuration not found", ackTimeout: 10 * time.Millisecond, wantErr: "configuration not found", wantTerminated: true},
+		{name: "auth lookup failure retains claim", claimedSessionID: "session-owned", liveSessionID: "session-owned", liveLeaseID: "cbx_abcdef123456", postTerminateError: "API key not found", ackTimeout: 10 * time.Millisecond, wantErr: "API key not found", wantTerminated: true},
+		{name: "gateway lookup failure retains claim", claimedSessionID: "session-owned", liveSessionID: "session-owned", liveLeaseID: "cbx_abcdef123456", postTerminateError: "no sandbox gateway available", ackTimeout: 10 * time.Millisecond, wantErr: "no sandbox gateway available", wantTerminated: true},
+		{name: "ambiguous termination failure retains claim", claimedSessionID: "session-owned", liveSessionID: "session-owned", liveLeaseID: "cbx_abcdef123456", terminateErr: errors.New("exit status 1"), terminateStderr: "workspace not found", wantErr: "workspace not found"},
+		{name: "cancel during acknowledgement retains claim", claimedSessionID: "session-owned", liveSessionID: "session-owned", liveLeaseID: "cbx_abcdef123456", cancelOnAck: true, wantErr: "context canceled", wantTerminated: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			cfg := Config{Provider: tenkiProvider, Tenki: TenkiConfig{CLIPath: "tenki", Workspace: "workspace-owned"}}
 			if tc.claimedSessionID != "" {
 				claimCfg := cfg
+				if tc.claimedEndpoint != "" {
+					claimCfg.Tenki.Endpoint = tc.claimedEndpoint
+				}
 				if tc.claimedWorkspace != "" {
 					claimCfg.Tenki.Workspace = tc.claimedWorkspace
 				}
@@ -62,6 +113,8 @@ func TestTenkiReleaseRequiresExactScopedClaimAndLiveOwnership(t *testing.T) {
 				}
 			}
 			terminated := false
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			runner := &fakeRunner{run: func(req LocalCommandRequest) (LocalCommandResult, error) {
 				command := strings.Join(req.Args, " ")
 				switch {
@@ -70,10 +123,30 @@ func TestTenkiReleaseRequiresExactScopedClaimAndLiveOwnership(t *testing.T) {
 					if tc.liveLeaseID != "" {
 						metadata = fmt.Sprintf(`{"crabbox_provider":"tenki","crabbox_lease_id":"%s","crabbox_slug":"owned"}`, tc.liveLeaseID)
 					}
-					return LocalCommandResult{Stdout: fmt.Sprintf(`{"id":"%s","name":"owned","state":"RUNNING","metadata":%s}`, tc.liveSessionID, metadata)}, nil
+					state := "RUNNING"
+					id := tc.liveSessionID
+					if terminated {
+						if tc.cancelOnAck {
+							cancel()
+						}
+						if tc.postTerminateError != "" {
+							return LocalCommandResult{ExitCode: 1, Stderr: tc.postTerminateError}, errors.New("exit status 1")
+						}
+						if tc.postTerminateID != nil {
+							id = *tc.postTerminateID
+						}
+						state = blank(tc.postTerminateState, "TERMINATING")
+					}
+					return LocalCommandResult{Stdout: fmt.Sprintf(`{"id":"%s","name":"owned","state":"%s","metadata":%s}`, id, state, metadata)}, nil
 				case strings.HasPrefix(command, "sandbox terminate "):
+					if strings.Contains(command, "--workspace") || strings.Contains(command, "--project") {
+						t.Fatalf("legacy scope selector leaked into terminate command: %s", command)
+					}
+					if tc.exitZeroUsage {
+						return LocalCommandResult{Stderr: "Incorrect Usage: flag provided but not defined: -future-flag"}, nil
+					}
 					if tc.terminateErr != nil {
-						return LocalCommandResult{ExitCode: 1}, tc.terminateErr
+						return LocalCommandResult{ExitCode: 1, Stderr: tc.terminateStderr}, tc.terminateErr
 					}
 					terminated = true
 					return LocalCommandResult{}, nil
@@ -83,7 +156,14 @@ func TestTenkiReleaseRequiresExactScopedClaimAndLiveOwnership(t *testing.T) {
 				}
 			}}
 			backend := &tenkiBackend{cfg: cfg, rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
-			err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{
+			if tc.ackTimeout > 0 {
+				backend.terminationAckTimeout = tc.ackTimeout
+				backend.sleep = func(ctx context.Context, _ time.Duration) error {
+					<-ctx.Done()
+					return context.Cause(ctx)
+				}
+			}
+			err := backend.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: LeaseTarget{
 				LeaseID: "cbx_abcdef123456", Server: Server{CloudID: "session-owned", Labels: map[string]string{"slug": "owned"}},
 			}})
 			if tc.wantErr != "" {
@@ -97,6 +177,11 @@ func TestTenkiReleaseRequiresExactScopedClaimAndLiveOwnership(t *testing.T) {
 				}
 			} else if err != nil {
 				t.Fatal(err)
+			} else if _, exists, claimErr := core.ReadLeaseClaimWithPresence("cbx_abcdef123456"); claimErr != nil || exists {
+				t.Fatalf("successful release retained claim: exists=%t err=%v", exists, claimErr)
+			}
+			if tc.cancelOnAck && !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancellation identity lost: %v", err)
 			}
 			if terminated != tc.wantTerminated {
 				t.Fatalf("terminated=%t want=%t", terminated, tc.wantTerminated)
@@ -121,7 +206,11 @@ func TestTenkiLegacyReleaseRequiresExplicitAdoption(t *testing.T) {
 			terminated := false
 			runner := &fakeRunner{run: func(req LocalCommandRequest) (LocalCommandResult, error) {
 				if strings.HasPrefix(strings.Join(req.Args, " "), "sandbox get ") {
-					return LocalCommandResult{Stdout: `{"id":"session-1","name":"legacy","state":"RUNNING"}`}, nil
+					state := "RUNNING"
+					if terminated {
+						state = "TERMINATING"
+					}
+					return LocalCommandResult{Stdout: fmt.Sprintf(`{"id":"session-1","name":"legacy","state":"%s"}`, state)}, nil
 				}
 				terminated = true
 				return LocalCommandResult{}, nil
@@ -137,12 +226,15 @@ func TestTenkiLegacyReleaseRequiresExplicitAdoption(t *testing.T) {
 	}
 }
 
-func TestTenkiCreateAddsMetadata(t *testing.T) {
+func TestTenkiCreateUsesCredentialBoundScopeAndAddsMetadata(t *testing.T) {
 	runner := &fakeRunner{}
 	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
 		runner.calls = append(runner.calls, req)
 		args := strings.Join(req.Args, " ")
-		if strings.HasPrefix(args, "sandbox create --endpoint https://api.tenki.test --workspace ws_1 --project proj_1 --no-wait --output json --name crabbox-blue ") {
+		if strings.Contains(args, "--workspace") || strings.Contains(args, "--project") {
+			t.Fatalf("legacy scope selector leaked into current Tenki CLI args: %s", args)
+		}
+		if strings.HasPrefix(args, "sandbox create --endpoint https://api.tenki.test --no-wait --output json --name crabbox-blue ") {
 			for _, want := range []string{
 				"--metadata crabbox_provider=tenki",
 				"--metadata crabbox_lease_id=cbx_123",
@@ -233,6 +325,52 @@ func TestTenkiCreateTrimsImageAndSnapshotOptions(t *testing.T) {
 	}
 
 	if _, err := backend.(*tenkiBackend).createSession(context.Background(), backend.(*tenkiBackend).configForRun(), "crabbox-snap", "cbx_123", "snap", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTenkiAcquireRejectsLegacyScopeSelectorsBeforeMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  TenkiConfig
+	}{
+		{name: "workspace", cfg: TenkiConfig{Workspace: "workspace-legacy"}},
+		{name: "project", cfg: TenkiConfig{Project: "project-legacy"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &fakeRunner{run: func(req LocalCommandRequest) (LocalCommandResult, error) {
+				t.Fatalf("legacy scope selector reached Tenki CLI: %s", strings.Join(req.Args, " "))
+				return LocalCommandResult{}, nil
+			}}
+			backend := &tenkiBackend{
+				cfg: Config{Provider: tenkiProvider, Tenki: tc.cfg},
+				rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+			}
+			_, err := backend.Acquire(context.Background(), AcquireRequest{})
+			if err == nil || !strings.Contains(err.Error(), "API key") || !strings.Contains(err.Error(), "existing leases") {
+				t.Fatalf("err=%v, want credential-bound scope migration guidance", err)
+			}
+		})
+	}
+}
+
+func TestTenkiTerminateOmitsLegacyScopeSelectors(t *testing.T) {
+	runner := &fakeRunner{run: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		if got := strings.Join(req.Args, " "); got != "sandbox terminate --endpoint https://api.tenki.test session-1" {
+			t.Fatalf("terminate command=%q", got)
+		}
+		return LocalCommandResult{}, nil
+	}}
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{
+			CLIPath:   "tenki",
+			Endpoint:  "https://api.tenki.test",
+			Workspace: "workspace-legacy",
+			Project:   "project-legacy",
+		}},
+		rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+	}
+	if err := backend.terminateSession(context.Background(), "session-1"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -805,6 +943,133 @@ func TestTenkiListJSONUsesCrabboxLeaseID(t *testing.T) {
 	view := views[0]
 	if view.ID != "cbx_123" || view.ServerID != "session-1" || view.Slug != "blue" || view.Provider != tenkiProvider || view.State != "ready" {
 		t.Fatalf("unexpected JSON list entry: %#v", view)
+	}
+}
+
+func TestTenkiListAllUsesCurrentInventoryAndIncludesUnmanagedSessions(t *testing.T) {
+	runner := &fakeRunner{run: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		switch got := strings.Join(req.Args, " "); got {
+		case "sandbox list --endpoint https://api.tenki.test --output json --tags crabbox,crabbox-provider-tenki":
+			return LocalCommandResult{Stdout: `[
+				{"id":"session-owned","name":"crabbox-blue","state":"RUNNING","metadata":{"crabbox_provider":"tenki","crabbox_lease_id":"cbx_123","crabbox_slug":"blue"},"tags":["crabbox-provider-tenki"]}
+			]`}, nil
+		case "sandbox list --endpoint https://api.tenki.test --output json":
+			return LocalCommandResult{Stdout: `[
+				{"id":"session-owned","name":"crabbox-blue","state":"RUNNING","metadata":{"crabbox_provider":"tenki","crabbox_lease_id":"cbx_123","crabbox_slug":"blue"},"tags":["crabbox-provider-tenki"]},
+				{"id":"session-unmanaged","name":"manual","state":"PAUSED"}
+			]`}, nil
+		default:
+			t.Fatalf("list command=%q", got)
+			return LocalCommandResult{}, nil
+		}
+	}}
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{
+			CLIPath:   "tenki",
+			Endpoint:  "https://api.tenki.test",
+			Workspace: "workspace-legacy",
+			Project:   "project-legacy",
+		}},
+		rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+	}
+
+	owned, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(owned) != 1 || owned[0].CloudID != "session-owned" {
+		t.Fatalf("owned list=%#v", owned)
+	}
+	all, err := backend.List(context.Background(), ListRequest{All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 || all[1].CloudID != "session-unmanaged" {
+		t.Fatalf("all list=%#v", all)
+	}
+	unmanaged := all[1]
+	if unmanaged.Labels["crabbox"] != "false" || unmanaged.Labels["lease"] != "" || unmanaged.Labels["slug"] != "" || unmanaged.Labels["created_by"] != "" {
+		t.Fatalf("unmanaged session has fabricated ownership labels: %#v", unmanaged.Labels)
+	}
+}
+
+func TestTenkiCLIUsageDiagnosticIsContractFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result LocalCommandResult
+	}{
+		{name: "stderr", result: LocalCommandResult{Stderr: "Incorrect Usage: flag provided but not defined: -future-flag"}},
+		{name: "stdout", result: LocalCommandResult{Stdout: "No help topic for 'removed-command'"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &fakeRunner{run: func(LocalCommandRequest) (LocalCommandResult, error) { return tc.result, nil }}
+			backend := &tenkiBackend{cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}}, rt: Runtime{Exec: runner}}
+			result, err := backend.runTenki(context.Background(), []string{"sandbox", "list"}, nil, nil)
+			var exitErr ExitError
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), "contract") || result.ExitCode != 2 || !core.AsExitError(err, &exitErr) || exitErr.Code != 2 {
+				t.Fatalf("result=%#v exitErr=%#v err=%v, want normalized contract failure", result, exitErr, err)
+			}
+		})
+	}
+}
+
+func TestTenkiContractDetectionDoesNotInspectJSONValues(t *testing.T) {
+	result := LocalCommandResult{Stdout: `{"id":"session-1","last_resume_error":"unknown command in guest setup"}`}
+	runner := &fakeRunner{run: func(LocalCommandRequest) (LocalCommandResult, error) { return result, nil }}
+	backend := &tenkiBackend{cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}}, rt: Runtime{Exec: runner}}
+	got, err := backend.runTenki(context.Background(), []string{"sandbox", "get"}, nil, nil)
+	if err != nil || got.Stdout != result.Stdout {
+		t.Fatalf("result=%#v err=%v", got, err)
+	}
+}
+
+func TestTenkiPollingDoesNotRetryCLIContractFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*tenkiBackend) error
+	}{
+		{name: "session state", run: func(backend *tenkiBackend) error {
+			_, err := backend.waitForSessionReady(context.Background(), "session-1", time.Minute)
+			return err
+		}},
+		{name: "ssh command", run: func(backend *tenkiBackend) error {
+			_, err := backend.waitForTenkiSSHCommand(context.Background(), "session-1", time.Minute)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			runner := &fakeRunner{run: func(LocalCommandRequest) (LocalCommandResult, error) {
+				calls++
+				return LocalCommandResult{Stderr: "Incorrect Usage: flag provided but not defined: -future-flag"}, nil
+			}}
+			backend := &tenkiBackend{
+				cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+				rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+				sleep: func(context.Context, time.Duration) error {
+					t.Fatal("contract failure was retried")
+					return nil
+				},
+			}
+			err := tc.run(backend)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), "contract") || calls != 1 {
+				t.Fatalf("calls=%d err=%v", calls, err)
+			}
+		})
+	}
+}
+
+func TestTenkiListJSONReportsCLIUsageDiagnostics(t *testing.T) {
+	runner := &fakeRunner{run: func(LocalCommandRequest) (LocalCommandResult, error) {
+		return LocalCommandResult{Stderr: "Incorrect Usage: flag provided but not defined: -future-flag"}, nil
+	}}
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+	}
+	_, err := backend.ListJSON(context.Background(), ListRequest{})
+	if err == nil || !strings.Contains(err.Error(), "Incorrect Usage") {
+		t.Fatalf("err=%v, want Tenki CLI diagnostic", err)
 	}
 }
 

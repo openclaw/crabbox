@@ -47,7 +47,7 @@ The text output prints one line per lease with ID, slug, provider, state, server
 
 ## lease-audit
 
-Check coordinator lease records against the backing cloud provider. The audit currently reconciles AWS leases and reports, for each matching lease, whether its `cloudID` is still `found`, `missing`, or could not be checked (`error`). Each line also surfaces cleanup attempt counts and errors recorded by the broker's expiry sweep.
+Check coordinator lease records against the backing cloud provider. The audit currently reconciles AWS and Azure leases and reports, for each matching lease, whether its `cloudID` is still `found`, `missing`, or could not be checked (`error`). Each line also surfaces cleanup attempt counts and errors recorded by the broker's expiry sweep.
 
 Flags:
 

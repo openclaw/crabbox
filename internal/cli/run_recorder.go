@@ -31,12 +31,13 @@ type runRecorder struct {
 	diagnosticSecrets  []string
 	createPending      bool
 	historyUnavailable bool
-	eventsMu           sync.Mutex
-	eventsDisabled     bool
+	leaseID            string
+	leaseSlug          string
+	leaseProvider      string
 	finished           bool
 	warned             bool
 	warnMu             sync.Mutex
-	output             *runOutputEventQueue
+	publisher          *runEventPublisher
 	telemetryStart     *LeaseTelemetry
 	telemetryMu        sync.Mutex
 	telemetrySamples   []*LeaseTelemetry
@@ -103,7 +104,7 @@ func (r *runRecorder) Event(kind, phase, message string) {
 }
 
 func (r *runRecorder) appendEvent(kind string, input CoordinatorRunEventInput) {
-	if r == nil || r.coord == nil || r.runID == "" || !r.runEventsEnabled() {
+	if r == nil || r.coord == nil || r.runID == "" {
 		return
 	}
 	if input.Message != "" {
@@ -111,17 +112,21 @@ func (r *runRecorder) appendEvent(kind string, input CoordinatorRunEventInput) {
 		secrets = append(secrets, configuredDiagnosticSecrets(r.diagnosticConfig)...)
 		input.Message = RedactDiagnosticSecrets(input.Message, secrets...)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), runRecorderRequestTimeout)
-	defer cancel()
-	_, err := r.coord.AppendRunEvent(ctx, r.runID, input)
-	if err != nil {
-		r.handleRunEventAppendError(kind, err)
+	if r.publisher == nil {
+		r.publisher = newRunEventPublisher(r.handleRunEventAppendError)
 	}
+	if r.finished {
+		if err := postRunEvent(context.Background(), r.coord, r.runID, input); err != nil {
+			r.handleRunEventAppendError(kind, err)
+		}
+		return
+	}
+	r.publisher.append(r.coord, r.runID, input)
 }
 
-func (r *runRecorder) AttachLease(leaseID, slug string, cfg Config) {
+func (r *runRecorder) AttachLease(leaseID, slug string, cfg Config) error {
 	if r == nil || r.finished {
-		return
+		return nil
 	}
 	if r.runID == "" && r.createPending && r.coord != nil && leaseID != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), runRecorderRequestTimeout)
@@ -130,14 +135,14 @@ func (r *runRecorder) AttachLease(leaseID, slug string, cfg Config) {
 		if err != nil {
 			r.historyUnavailable = true
 			r.warnRunHistory("run history create failed after lease; run history unavailable, use lease-based recovery commands: %v", err)
-			return
+			return nil
 		}
 		r.attachRun(run)
 	}
 	if r.runID == "" {
-		return
+		return nil
 	}
-	r.appendEvent("lease.created", CoordinatorRunEventInput{
+	input := CoordinatorRunEventInput{
 		Type:        "lease.created",
 		Phase:       "leased",
 		LeaseID:     leaseID,
@@ -147,16 +152,30 @@ func (r *runRecorder) AttachLease(leaseID, slug string, cfg Config) {
 		WindowsMode: cfg.WindowsMode,
 		Class:       cfg.Class,
 		ServerType:  cfg.ServerType,
-	})
+	}
+	if r.publisher == nil {
+		r.publisher = newRunEventPublisher(r.handleRunEventAppendError)
+	}
+	// CreateRun already binds an existing lease. Only initial attribution and
+	// replacement need acknowledgement before the command's receipt can bind it.
+	needsBinding := r.leaseID != leaseID || r.leaseSlug != slug || r.leaseProvider != cfg.Provider
+	if needsBinding {
+		if err := r.publisher.Bind(r.coord, r.runID, input); err != nil {
+			return exit(7, "run history lease attribution failed for %s: %v", r.runID, err)
+		}
+	} else {
+		r.publisher.append(r.coord, r.runID, input)
+	}
+	r.leaseID, r.leaseSlug, r.leaseProvider = leaseID, slug, cfg.Provider
+	return nil
 }
 
 func (r *runRecorder) CaptureTelemetryStart(ctx context.Context, target SSHTarget) {
-	if r == nil || r.telemetryStart != nil {
+	if r == nil || r.coord == nil || r.runID == "" || r.telemetryStart != nil {
 		return
 	}
 	r.telemetryStart = collectLeaseTelemetryBestEffort(contextWithoutWorkspaceOwner(ctx), leaseTelemetryCollectorForTarget(target))
 	r.recordTelemetrySample(r.telemetryStart)
-	r.appendTelemetryBestEffort(r.telemetryStart)
 }
 
 func (r *runRecorder) StartTelemetrySampler(ctx context.Context, target SSHTarget) {
@@ -175,16 +194,20 @@ func (r *runRecorder) StartTelemetrySampler(ctx context.Context, target SSHTarge
 	r.telemetryMu.Unlock()
 
 	collector := leaseTelemetryCollectorForTarget(target)
+	initial := r.telemetryStart
 	go func() {
 		defer close(done)
 		ticker := time.NewTicker(runTelemetrySampleInterval)
 		defer ticker.Stop()
+		// Preserve the pre-command baseline without making workload admission wait
+		// for its best-effort publication. This owner also joins it before finish.
+		r.appendTelemetryBestEffort(sampleCtx, initial)
 		for {
 			select {
 			case <-ticker.C:
 				sample := collectLeaseTelemetryBestEffort(sampleCtx, collector)
 				r.recordTelemetrySample(sample)
-				r.appendTelemetryBestEffort(sample)
+				r.appendTelemetryBestEffort(sampleCtx, sample)
 			case <-sampleCtx.Done():
 				return
 			}
@@ -194,17 +217,18 @@ func (r *runRecorder) StartTelemetrySampler(ctx context.Context, target SSHTarge
 
 func (r *runRecorder) attachRun(run CoordinatorRun) {
 	r.runID = run.ID
+	r.leaseID, r.leaseSlug, r.leaseProvider = run.LeaseID, run.Slug, run.Provider
 	r.startedAt, _ = time.Parse(time.RFC3339Nano, run.StartedAt)
 	r.attachedAt = time.Now()
 	r.createPending = false
 	r.historyUnavailable = false
-	r.output = newRunOutputEventQueue(r.coord, run.ID, r.handleRunEventAppendError)
+	r.publisher = newRunEventPublisher(r.handleRunEventAppendError)
 	fmt.Fprintf(r.stderr, "recording run %s\n", run.ID)
 }
 
 func (r *runRecorder) StreamWriter(stream string) *runEventStreamWriter {
-	if r != nil && r.output == nil && r.coord != nil && r.runID != "" {
-		r.output = newRunOutputEventQueue(r.coord, r.runID, r.handleRunEventAppendError)
+	if r != nil && r.publisher == nil && r.coord != nil && r.runID != "" {
+		r.publisher = newRunEventPublisher(r.handleRunEventAppendError)
 	}
 	return &runEventStreamWriter{recorder: r, stream: stream}
 }
@@ -213,7 +237,7 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 	if r == nil || r.runID == "" || r.finished {
 		return nil
 	}
-	r.waitForOutputEvents(runEventOutputPostWait)
+	r.waitForEvents(runEventOutputPostWait)
 	r.stopTelemetrySampler()
 	telemetryEnd := collectLeaseTelemetryBestEffort(contextWithoutWorkspaceOwner(ctx), leaseTelemetryCollectorForTarget(target))
 	r.recordTelemetrySample(telemetryEnd)
@@ -222,13 +246,18 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 	defer cancel()
 	var lastErr error
 	attempts := 0
-	for attempt := 1; attempt <= runRecorderFinishAttempts; attempt++ {
+	for attempt := 1; attempt <= runRecorderFinishAttempts && ctx.Err() == nil; attempt++ {
 		attempts = attempt
 		_, finishErr := r.coord.FinishRun(ctx, r.runID, exitCode, sync, command, log, truncated, results, telemetry, classification, receipt)
 		if finishErr == nil && receipt == nil {
 			r.finished = true
 			return nil
 		}
+		lastErr = nil
+		if finishErr != nil {
+			lastErr = fmt.Errorf("submit terminal result: %w", finishErr)
+		}
+		retryErr := finishErr
 		if receipt != nil {
 			committed, receiptErr := r.coord.RunReceipt(ctx, r.runID)
 			if receiptErr == nil {
@@ -239,31 +268,24 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 				lastErr = fmt.Errorf("stored terminal receipt differs from the signed finish payload")
 				break
 			}
-			if finishErr == nil {
-				lastErr = fmt.Errorf("verify persisted terminal receipt: %w", receiptErr)
-				if attempt == runRecorderFinishAttempts || !runRecorderFinishRetryable(receiptErr) {
-					break
-				}
-			} else {
-				lastErr = finishErr
-				if attempt == runRecorderFinishAttempts || !runRecorderFinishRetryable(finishErr) {
-					break
-				}
+			lastErr = errors.Join(lastErr, fmt.Errorf("verify persisted terminal receipt: %w", receiptErr))
+			// Preserve both diagnostics without letting a secondary read error
+			// change whether the original finish request can be retried.
+			if retryErr == nil {
+				retryErr = receiptErr
 			}
-		} else {
-			lastErr = finishErr
-			if attempt == runRecorderFinishAttempts || !runRecorderFinishRetryable(finishErr) {
-				break
-			}
+		}
+		if attempt == runRecorderFinishAttempts || !runRecorderFinishRetryable(retryErr) {
+			break
 		}
 		timer := time.NewTimer(runRecorderFinishRetry)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return exit(7, "run history terminal commit failed for %s: %v", r.runID, ctx.Err())
 		case <-timer.C:
 		}
 	}
+	lastErr = errors.Join(lastErr, ctx.Err())
 	return exit(7, "run history terminal commit failed for %s after %d attempts: %v; recover with `crabbox receipt %s`", r.runID, attempts, lastErr, r.runID)
 }
 
@@ -279,12 +301,15 @@ func runRecorderFinishRetryable(err error) bool {
 }
 
 func (r *runRecorder) Failed(err error) {
-	if r == nil || r.runID == "" || r.finished || err == nil {
+	if r == nil {
 		return
 	}
-	r.waitForOutputEvents(runEventOutputPostWait)
-	r.finished = true
+	r.waitForEvents(runEventOutputPostWait)
 	r.stopTelemetrySampler()
+	if r.runID == "" || r.finished || err == nil {
+		return
+	}
+	r.finished = true
 	r.appendEvent("run.failed", CoordinatorRunEventInput{
 		Type:    "run.failed",
 		Phase:   "failed",
@@ -346,13 +371,13 @@ func (r *runRecorder) telemetrySnapshot() []*LeaseTelemetry {
 	return samples
 }
 
-func (r *runRecorder) appendTelemetryBestEffort(sample *LeaseTelemetry) {
+func (r *runRecorder) appendTelemetryBestEffort(ctx context.Context, sample *LeaseTelemetry) {
 	if r == nil || r.coord == nil || r.runID == "" || sample == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	postCtx, cancel := context.WithTimeout(ctx, runRecorderRequestTimeout)
 	defer cancel()
-	if _, err := r.coord.AppendRunTelemetry(ctx, r.runID, sample); err != nil && !isCoordinatorNotFoundError(err) {
+	if _, err := r.coord.AppendRunTelemetry(postCtx, r.runID, sample); err != nil && ctx.Err() == nil && !isCoordinatorNotFoundError(err) {
 		r.warn("run telemetry append failed for %s: %v", r.runID, err)
 	}
 }
@@ -371,10 +396,7 @@ func (r *runRecorder) stopTelemetrySampler() {
 		return
 	}
 	cancel()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-	}
+	<-done
 }
 
 func (r *runRecorder) resetTelemetryForLeaseReplacement() {
@@ -388,31 +410,15 @@ func (r *runRecorder) resetTelemetryForLeaseReplacement() {
 	r.telemetryMu.Unlock()
 }
 
-func (r *runRecorder) waitForOutputEvents(timeout time.Duration) {
-	if r == nil || r.output == nil {
+func (r *runRecorder) waitForEvents(timeout time.Duration) {
+	if r == nil || r.publisher == nil {
 		return
 	}
-	r.output.CloseAndWait(timeout)
-}
-
-func (r *runRecorder) runEventsEnabled() bool {
-	r.eventsMu.Lock()
-	defer r.eventsMu.Unlock()
-	return !r.eventsDisabled
-}
-
-func (r *runRecorder) disableRunEvents() {
-	r.eventsMu.Lock()
-	r.eventsDisabled = true
-	r.eventsMu.Unlock()
-	if r.output != nil {
-		r.output.Disable()
-	}
+	r.publisher.CloseAndWait(timeout)
 }
 
 func (r *runRecorder) handleRunEventAppendError(kind string, err error) bool {
 	if isCoordinatorNotFoundError(err) {
-		r.disableRunEvents()
 		return false
 	}
 	r.warn("run event append failed for %s: %v", kind, err)

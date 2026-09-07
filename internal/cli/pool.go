@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"path"
 	"reflect"
 	"regexp"
@@ -259,32 +260,57 @@ func emptyListViewLike(view any) any {
 	return reflect.MakeSlice(v.Type(), 0, 0).Interface()
 }
 
+const externalRunnerSyncTimeout = 5 * time.Second
+
 func (a App) syncExternalRunnersBestEffort(ctx context.Context, cfg Config, backend Backend) {
+	ctx, cancel := context.WithTimeout(ctx, externalRunnerSyncTimeout)
+	defer cancel()
+	if err := syncExternalRunners(ctx, cfg, backend); err != nil {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		message := strings.Join(strings.Fields(err.Error()), " ")
+		if len(message) > 240 {
+			message = message[:240] + "..."
+		}
+		fmt.Fprintf(a.Stderr, "warning: external runner portal sync failed: %s\n", message)
+	}
+}
+
+func syncExternalRunners(ctx context.Context, cfg Config, backend Backend) error {
 	if !isBlacksmithProvider(cfg.Provider) {
-		return
+		return nil
 	}
 	client, ok, err := newCoordinatorClient(cfg)
 	if err != nil || !ok {
-		return
+		return err
 	}
 	jsonBackend, ok := backend.(JSONListBackend)
 	if !ok {
-		return
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	view, err := jsonBackend.ListJSON(ctx, ListRequest{Options: leaseOptionsFromConfig(cfg), All: true})
 	if err != nil {
-		fmt.Fprintf(a.Stderr, "warning: external runner portal sync skipped: %v\n", err)
-		return
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	runners, err := coordinatorExternalRunnersFromListView(view)
 	if err != nil {
-		fmt.Fprintf(a.Stderr, "warning: external runner portal sync skipped: %v\n", err)
-		return
+		return err
 	}
 	enrichExternalRunnerActionsBestEffort(ctx, cfg, runners)
-	if _, err := client.SyncExternalRunners(ctx, "blacksmith-testbox", runners); err != nil {
-		fmt.Fprintf(a.Stderr, "warning: external runner portal sync failed: %v\n", err)
+	// A sync marks unseen rows stale. Never publish an inventory after its
+	// budget expired, even if a dependency returned partial data without error.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
+	_, err = client.SyncExternalRunners(ctx, "blacksmith-testbox", runners)
+	return err
 }
 
 func coordinatorExternalRunnersFromListView(view any) ([]CoordinatorExternalRunner, error) {
@@ -321,6 +347,9 @@ type externalRunnerActionsRun struct {
 func enrichExternalRunnerActionsBestEffort(ctx context.Context, cfg Config, runners []CoordinatorExternalRunner) {
 	cache := map[string][]externalRunnerActionsRun{}
 	for i := range runners {
+		if ctx.Err() != nil {
+			return
+		}
 		repo, ok := externalRunnerGitHubRepo(cfg, runners[i])
 		if !ok || runners[i].Workflow == "" {
 			continue
@@ -385,12 +414,16 @@ func externalRunnerGitHubRuns(ctx context.Context, cfg Config, repo GitHubRepo, 
 	if ref != "" {
 		args = append(args, "--branch", ref)
 	}
-	out, err := ghOutputWithChildEnvironment(ctx, "", externalDesktopChildEnvDenylist(cfg, cfg.TargetOS), args...)
+	result, err := (execCommandRunner{}).Run(ctx, LocalCommandRequest{
+		Name: "gh", Args: args,
+		Env:                    childEnvironmentWithout(os.Environ(), externalDesktopChildEnvDenylist(cfg, cfg.TargetOS)...),
+		MaxCapturedOutputBytes: 16 * 1024 * 1024,
+	})
 	if err != nil {
 		return nil, err
 	}
 	var runs []externalRunnerActionsRun
-	if err := json.Unmarshal([]byte(stripANSI(out)), &runs); err != nil {
+	if err := json.Unmarshal([]byte(stripANSI(result.Stdout)), &runs); err != nil {
 		return nil, err
 	}
 	return runs, nil

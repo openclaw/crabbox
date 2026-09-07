@@ -48,6 +48,7 @@ type crabboxKongCLI struct {
 	Unshare     unshareKongCmd     `cmd:"" passthrough:"" help:"Remove lease sharing."`
 	Image       imageKongCmd       `cmd:"" help:"Create provider images and promote brokered AWS runner images."`
 	Usage       usageKongCmd       `cmd:"" passthrough:"" help:"Show cost and usage estimates by user, org, or fleet."`
+	Capacity    capacityKongCmd    `cmd:"" passthrough:"" help:"Show self-owner admission count and effective owner limit."`
 	Marketplace marketplaceKongCmd `cmd:"" help:"Preview the Crabbox credits gateway and smart routing quotes."`
 	Admin       adminKongCmd       `cmd:"" help:"Lease admin controls for trusted operators."`
 	Actions     actionsKongCmd     `cmd:"" help:"Register GitHub Actions runners or dispatch workflows."`
@@ -176,6 +177,7 @@ type benchKongCmd struct {
 	Run    benchRunKongCmd    `cmd:"" passthrough:"" help:"Run a workload across providers and record benchmark timings."`
 	Record benchRecordKongCmd `cmd:"" passthrough:"" help:"Append a TimingReport JSON object to the local benchmark ledger."`
 	Report benchReportKongCmd `cmd:"" passthrough:"" help:"Aggregate local benchmark timing observations."`
+	Check  benchCheckKongCmd  `cmd:"" passthrough:"" help:"Enforce a local runner timing policy across benchmark groups."`
 }
 type benchRunKongCmd struct {
 	Args []string `arg:"" optional:""`
@@ -184,6 +186,9 @@ type benchRecordKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type benchReportKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type benchCheckKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type jobKongCmd struct {
@@ -254,6 +259,9 @@ type unshareKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type usageKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type capacityKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type marketplaceKongCmd struct {
@@ -503,8 +511,10 @@ type capsulePromoteKongCmd struct {
 
 type checkpointKongCmd struct {
 	Create  checkpointCreateKongCmd  `cmd:"" passthrough:"" help:"Create a VM or workspace checkpoint from a lease."`
-	List    checkpointListKongCmd    `cmd:"" passthrough:"" help:"List local checkpoints."`
+	Abandon checkpointAbandonKongCmd `cmd:"" passthrough:"" help:"Dispose of an exact source while retaining an unresolved checkpoint."`
+	List    checkpointListKongCmd    `cmd:"" passthrough:"" help:"List coordinator-owned and local checkpoints."`
 	Inspect checkpointInspectKongCmd `cmd:"" passthrough:"" help:"Inspect checkpoint metadata."`
+	Policy  checkpointPolicyKongCmd  `cmd:"" passthrough:"" help:"Update coordinator-managed checkpoint retention."`
 	Restore checkpointRestoreKongCmd `cmd:"" passthrough:"" help:"Restore a checkpoint onto an existing lease."`
 	Fork    checkpointForkKongCmd    `cmd:"" passthrough:"" help:"Lease a new box from a checkpoint."`
 	Delete  checkpointDeleteKongCmd  `cmd:"" passthrough:"" help:"Delete a checkpoint and provider snapshot."`
@@ -513,10 +523,16 @@ type checkpointKongCmd struct {
 type checkpointCreateKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
+type checkpointAbandonKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
 type checkpointListKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type checkpointInspectKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type checkpointPolicyKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type checkpointRestoreKongCmd struct {
@@ -656,6 +672,9 @@ func (c *benchRecordKongCmd) Run(ctx context.Context, app App) error {
 func (c *benchReportKongCmd) Run(ctx context.Context, app App) error {
 	return app.benchReport(ctx, c.Args)
 }
+func (c *benchCheckKongCmd) Run(ctx context.Context, app App) error {
+	return app.benchCheck(ctx, c.Args)
+}
 func (c *jobListKongCmd) Run(ctx context.Context, app App) error   { return app.jobList(ctx, c.Args) }
 func (c *jobRunKongCmd) Run(ctx context.Context, app App) error    { return app.jobRun(ctx, c.Args) }
 func (c *syncPlanKongCmd) Run(ctx context.Context, app App) error  { return app.syncPlan(ctx, c.Args) }
@@ -675,10 +694,11 @@ func (c *heartbeatKongCmd) Run(ctx context.Context, app App) error { return app.
 func (c *claimsListKongCmd) Run(_ context.Context, app App) error {
 	return app.claimsList(stripKongCommandPath(c.Args, "claims", "list"))
 }
-func (c *listKongCmd) Run(ctx context.Context, app App) error    { return app.list(ctx, c.Args) }
-func (c *shareKongCmd) Run(ctx context.Context, app App) error   { return app.share(ctx, c.Args) }
-func (c *unshareKongCmd) Run(ctx context.Context, app App) error { return app.unshare(ctx, c.Args) }
-func (c *usageKongCmd) Run(ctx context.Context, app App) error   { return app.usage(ctx, c.Args) }
+func (c *listKongCmd) Run(ctx context.Context, app App) error     { return app.list(ctx, c.Args) }
+func (c *shareKongCmd) Run(ctx context.Context, app App) error    { return app.share(ctx, c.Args) }
+func (c *unshareKongCmd) Run(ctx context.Context, app App) error  { return app.unshare(ctx, c.Args) }
+func (c *usageKongCmd) Run(ctx context.Context, app App) error    { return app.usage(ctx, c.Args) }
+func (c *capacityKongCmd) Run(ctx context.Context, app App) error { return app.capacity(ctx, c.Args) }
 func (c *marketplaceStatusKongCmd) Run(ctx context.Context, app App) error {
 	return app.marketplaceStatus(ctx, c.Args)
 }
@@ -846,11 +866,17 @@ func (c *capsulePromoteKongCmd) Run(ctx context.Context, app App) error {
 func (c *checkpointCreateKongCmd) Run(ctx context.Context, app App) error {
 	return app.checkpointCreate(ctx, stripKongCommandPath(c.Args, "checkpoint", "create"))
 }
+func (c *checkpointAbandonKongCmd) Run(ctx context.Context, app App) error {
+	return app.checkpointAbandon(ctx, stripKongCommandPath(c.Args, "checkpoint", "abandon"))
+}
 func (c *checkpointListKongCmd) Run(ctx context.Context, app App) error {
 	return app.checkpointList(ctx, stripKongCommandPath(c.Args, "checkpoint", "list"))
 }
 func (c *checkpointInspectKongCmd) Run(ctx context.Context, app App) error {
 	return app.checkpointInspect(ctx, stripKongCommandPath(c.Args, "checkpoint", "inspect"))
+}
+func (c *checkpointPolicyKongCmd) Run(ctx context.Context, app App) error {
+	return app.checkpointPolicy(ctx, stripKongCommandPath(c.Args, "checkpoint", "policy"))
 }
 func (c *checkpointRestoreKongCmd) Run(ctx context.Context, app App) error {
 	return app.checkpointRestore(ctx, stripKongCommandPath(c.Args, "checkpoint", "restore"))

@@ -448,8 +448,8 @@ func TestReleaseDeletesGeneratedKey(t *testing.T) {
 	if backend.RetainLeaseClaimAfterRelease(lease) {
 		t.Fatal("delete-on-release backend retained claim")
 	}
-	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
-		t.Fatal(err)
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil || !outcome.Terminal {
+		t.Fatalf("delete outcome=%+v err=%v", outcome, err)
 	}
 	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
 		t.Fatalf("generated key still exists: %v", err)
@@ -483,8 +483,8 @@ func TestReleaseRetainedVMPreservesClaimAndKey(t *testing.T) {
 	if !backend.RetainLeaseClaimAfterRelease(lease) {
 		t.Fatal("explicit retain policy did not override stored delete policy")
 	}
-	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
-		t.Fatal(err)
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil || outcome.Terminal {
+		t.Fatalf("stop outcome=%+v err=%v", outcome, err)
 	}
 	if _, err := os.Stat(keyPath); err != nil {
 		t.Fatalf("retained key missing: %v", err)

@@ -115,17 +115,28 @@ lease ID for each later operation.
 provider: local-container
 localContainer:
   runtime: docker          # Docker-compatible CLI to invoke; detects docker/podman by default
-  image: debian:bookworm   # base image for the lease
+  # image: debian:bookworm # optional trusted custom-image override
   user: crabbox            # SSH user created inside the container
   workRoot: /work/crabbox  # remote Crabbox work root
   cpus: 0                  # CPU limit; 0 leaves the runtime default
   memory: ""               # memory limit, e.g. 8g
   network: bridge          # container network
   dockerSocket: false      # mount the host Docker-compatible socket into the lease
+  noHostname: false        # omit the explicit container hostname when true
 ```
 
-Defaults applied when unset: `runtime=docker`, `image=debian:bookworm`,
-`user=crabbox`, `network=bridge`, `workRoot=/work/crabbox`, SSH port `2222`.
+Defaults applied when unset: `runtime=docker`, a reviewed Ubuntu OCI index
+selected by `--os` (default `ubuntu:26.04`), `user=crabbox`, `network=bridge`,
+`workRoot=/work/crabbox`, SSH port `2222`. The image reference includes an
+immutable SHA-256 digest; Docker/Podman select the native platform from that
+fixed index and validate its content before starting bootstrap. An unavailable
+or mismatched digest fails rather than falling back to a floating tag. The
+exact reference appears in provisioning output and the lease's image label.
+
+Explicit image overrides remain trusted operator configuration, including
+floating tags. Updating the OS catalog affects new leases, not retained
+containers; a fixed-ID operation may report an intent conflict after a default
+rotation. See [default-image rotation](../operations.md#default-container-image-pins).
 When `runtime` is unset or left at `docker`, Crabbox detects an installed
 container CLI. If both `docker` and `podman` are available, `docker` is selected
 unless `runtime` is set explicitly.
@@ -152,11 +163,42 @@ is reported as `resource_exhaustion=memory`; an OOM from an earlier command on a
 reused lease does not classify a later ordinary failure. Docker/Podman cgroup
 paths and counter parsing remain inside this provider.
 
-The failure digest marks this condition non-retryable with the unchanged
-configuration and suggests increasing `localContainer.memory` (or
-`--local-container-memory`) or reducing workload concurrency. If cgroup evidence
-cannot be read, Crabbox prints a diagnostic warning and preserves the original
-command failure and ordinary user-command classification.
+If the post-command counter cannot be read, a newly observed runtime
+`OOMKilled` transition can also establish OOM; a prior `OOMKilled=true`, reset
+counter, or exit 137 alone cannot. Evidence read failures are warnings and
+preserve the original exit and ordinary failure classification.
+
+After positive OOM evidence, the adapter optionally observes capacity through
+the same captured runtime/context/connection, with a 500ms aggregate budget
+(including bounded command-output draining), no retries, and bounded output.
+Probe failure never discards positive OOM evidence. Actual inspected container
+settings from **before the command** take precedence over invocation config;
+reusing `--id` does not apply a new `--local-container-memory` value. Legacy
+claims do not reconstruct the originally requested memory string.
+
+The digest, timing JSON `failureEvidence`, and local failure bundle keep these
+separate facts: container memory limit, combined memory-and-swap setting, and
+runtime total RAM when the captured runtime identity can still be verified.
+Limits are `finite`, `unlimited`, or `unknown`; a zero memory-and-swap setting is
+`default`, not a claim about available swap. Missing, malformed, overflowing,
+unverifiable, or timed-out observations remain unknown. There is no synthesized
+effective limit: total RAM is neither free memory nor necessarily the complete
+bound. Parent cgroups, rootless constraints, VM capacity, and swap availability
+can matter; Crabbox does not walk host cgroup ancestors or add privileged probes.
+The container's mounted Docker socket is not used to observe its runtime.
+
+Below observed RAM, advice to recreate with a larger limit is conditional on
+the limit being binding and actual headroom. At or above observed RAM, raising
+the flag does not add RAM; inspect runtime/VM, parent, and swap constraints.
+Unknown evidence advises reducing demand and checking active limits, not
+blindly raising a flag. No automatic resizing, refusal, or retry is introduced.
+
+`inspect` and non-wait `status --json` expose fresh facts in returned labels
+under `diagnostic.memory.*`, with `settings_phase=current`. These are output
+only, not stored claim/container labels or lifecycle authority. They do not
+reconstruct an old OOM. Failure snapshots survive one-shot deletion; fresh
+inspection requires a retained container. Ordinary resolution, heartbeat,
+checkpoint, release, and `status --wait` do not request capacity diagnostics.
 
 Provider flags:
 
@@ -201,7 +243,17 @@ CRABBOX_LOCAL_CONTAINER_CPUS
 CRABBOX_LOCAL_CONTAINER_MEMORY
 CRABBOX_LOCAL_CONTAINER_NETWORK
 CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET
+CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME
 ```
+
+Set `localContainer.noHostname: true` or
+`CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME=1` when the runtime rejects an explicit
+hostname, such as when it shares the host UTS namespace. By default Crabbox
+passes `--hostname` with the container name; this opt-in only omits that argument.
+It does not change the runtime's namespace, network, or capability settings.
+The configured runtime must still support the loopback-published SSH port.
+Changing this setting for a fixed lease ID returns `lease_id_conflict`; omitted
+or `false` preserves the existing fixed-lease fingerprint.
 
 Host bind mounts must be passed explicitly with `--local-container-volume`.
 Crabbox intentionally ignores `localContainer.volumes` from config files because
@@ -249,6 +301,12 @@ Restore the original cache settings, or explicitly remove the verified residue,
 then retry stop. Orphan cleanup also preserves claims with bootstrap residue.
 Bootstrap paths from older releases under the current system temp root remain
 supported.
+
+If runtime removal fails after the container has disappeared, retry `stop` with
+the original configuration. Crabbox can finish cleanup after an exact-ID absence
+confirmation, including Podman's quoted-ID diagnostic. Connection, permission,
+authentication, and ambiguous errors still retain the claim and local recovery
+state; the original removal failure is not converted into success.
 
 1. `warmup` or a fresh `run` creates a per-lease SSH key.
 2. The provider writes its bootstrap script under the user's cache directory,
@@ -364,8 +422,10 @@ container ID leaves both the container and claim untouched.
   relocates the saved workspace into the new lease path, and persists the scope
   for later lease commands even when ambient Docker settings change. The source
   container user and work root are also replayed so relocation keeps ownership
-  and path semantics intact. When host volumes are attached to a fork, Crabbox
-  resolves the restore workdir inside the container and rejects any overlap
+  and path semantics intact. Fixed-ID ownership belongs to each new allocation:
+  ordinary forks do not inherit the source's fixed intent, including when using
+  an older checkpoint image, and can be stopped normally. When host volumes are
+  attached to a fork, Crabbox resolves the restore workdir inside the container and rejects any overlap
   before clearing or extracting checkpoint data.
 - `warmup --actions-runner` is not supported. Use plain `crabbox run` for local
   container smoke tests, or a remote SSH provider for GitHub runner registration.
@@ -377,7 +437,7 @@ container ID leaves both the container and claim untouched.
 - Cache volumes persist as Docker-compatible named volumes after a container is
   stopped.
   Remove them with the Docker-compatible runtime when the cache key is obsolete.
-- The default `debian:bookworm` image bootstraps packages on first start. Use a
+- The pinned default Ubuntu image bootstraps packages on first start. Use a
   prebuilt image with SSH/Git/rsync/desktop/browser packages when startup time
   matters.
 

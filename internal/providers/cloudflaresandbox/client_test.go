@@ -39,7 +39,7 @@ func TestBridgeFallbackBoundsControlAndPreservesExecStream(t *testing.T) {
 	}))
 	defer server.Close()
 
-	control, data := cloudflareSandboxHTTPClients(nil, controlTimeout)
+	control, data := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	trusted, _ := url.Parse(server.URL)
 	client := &client{
 		baseURL:  server.URL,

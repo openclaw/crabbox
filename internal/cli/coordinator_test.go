@@ -445,12 +445,9 @@ func TestCoordinatorTokenCommandRefreshesBearer(t *testing.T) {
 	}))
 	defer server.Close()
 	client := CoordinatorClient{
-		BaseURL: server.URL,
-		TokenCommand: []string{
-			os.Args[0],
-			"-test.run=^TestCoordinatorTokenCommandHelper$",
-		},
-		Client: server.Client(),
+		BaseURL:      server.URL,
+		TokenCommand: synchronousTestHelperCommand("TestCoordinatorTokenCommandHelper"),
+		Client:       server.Client(),
 	}
 
 	if err := client.Health(context.Background()); err != nil {
@@ -473,7 +470,7 @@ func TestCoordinatorChildrenScrubExternalDesktopPassword(t *testing.T) {
 	t.Setenv("CRABBOX_TEST_KEEP", "preserved")
 	cfg := Config{
 		Coordinator:       "https://broker.example.test",
-		CoordTokenCommand: []string{os.Args[0], "-test.run=^TestCoordinatorTokenCommandHelper$"},
+		CoordTokenCommand: synchronousTestHelperCommand("TestCoordinatorTokenCommandHelper"),
 		Provider:          "external",
 		TargetOS:          targetMacOS,
 	}
@@ -525,7 +522,7 @@ func TestCoordinatorOwnerGitScrubsExternalDesktopPassword(t *testing.T) {
 	t.Setenv("GIT_CEILING_DIRECTORIES", "/safe/root")
 	t.Setenv("GIT_DENIED_ROUTING", "remove-me")
 	client := CoordinatorClient{ChildEnvDenylist: []string{"TEST_ARD_PASSWORD", "GIT_DENIED_ROUTING"}}
-	if got := client.localCoordinatorOwner(); got != "owner@example.test" {
+	if got := client.localCoordinatorOwner(context.Background()); got != "owner@example.test" {
 		t.Fatalf("owner=%q", got)
 	}
 }
@@ -547,7 +544,7 @@ func TestLocalCoordinatorOwnerGitUsesRepositoryEnvironmentWithoutDenylist(t *tes
 	t.Setenv("TEST_ARD_PASSWORD", "must-not-reach-git")
 	t.Setenv("CRABBOX_TEST_KEEP", "must-not-reach-git")
 	t.Setenv("GIT_CEILING_DIRECTORIES", "/safe/root")
-	if got := localCoordinatorOwnerWithEnvironment(nil); got != "owner@example.test" {
+	if got := localCoordinatorOwnerWithEnvironment(context.Background(), nil); got != "owner@example.test" {
 		t.Fatalf("owner=%q", got)
 	}
 }
@@ -572,7 +569,7 @@ func TestCoordinatorTokenCommandRejectsMultipleLines(t *testing.T) {
 	t.Setenv("CRABBOX_TOKEN_HELPER", "1")
 	t.Setenv("CRABBOX_TOKEN_HELPER_VALUE", "first\nsecond")
 	client := CoordinatorClient{
-		TokenCommand: []string{os.Args[0], "-test.run=^TestCoordinatorTokenCommandHelper$"},
+		TokenCommand: synchronousTestHelperCommand("TestCoordinatorTokenCommandHelper"),
 	}
 	if _, err := client.authorizationToken(context.Background()); err == nil || !strings.Contains(err.Error(), "exactly one token line") {
 		t.Fatalf("error=%v, want one-line validation", err)
@@ -1245,6 +1242,7 @@ func TestCoordinatorHeartbeatIncludesTelemetry(t *testing.T) {
 func TestCoordinatorHeartbeatUsesControlWebSocket(t *testing.T) {
 	bodies := make(chan string, 1)
 	httpHeartbeats := make(chan struct{}, 1)
+	handlerDone := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/control":
@@ -1253,7 +1251,8 @@ func TestCoordinatorHeartbeatUsesControlWebSocket(t *testing.T) {
 				t.Errorf("accept control websocket: %v", err)
 				return
 			}
-			defer conn.Close(websocket.StatusNormalClosure, "")
+			defer close(handlerDone)
+			defer conn.CloseNow()
 			_, data, err := conn.Read(r.Context())
 			if err != nil {
 				t.Errorf("read control heartbeat: %v", err)
@@ -1261,7 +1260,8 @@ func TestCoordinatorHeartbeatUsesControlWebSocket(t *testing.T) {
 			}
 			bodies <- string(data)
 			_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"type":"heartbeat","leaseID":"cbx_123","ok":true,"expiresAt":"2026-05-01T00:30:00Z"}`))
-			<-r.Context().Done()
+			// A hijacked request's HTTP context does not track peer closure.
+			_, _, _ = conn.Read(r.Context())
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/cbx_123/heartbeat":
 			httpHeartbeats <- struct{}{}
 			w.Header().Set("Content-Type", "application/json")
@@ -1296,6 +1296,12 @@ func TestCoordinatorHeartbeatUsesControlWebSocket(t *testing.T) {
 		t.Fatal("heartbeat fell back to HTTP despite websocket success")
 	default:
 	}
+	stop()
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("control websocket handler did not exit after heartbeat stopped")
+	}
 }
 
 func TestCoordinatorHeartbeatMintsTokenBeforeControlDialTimeout(t *testing.T) {
@@ -1304,6 +1310,7 @@ func TestCoordinatorHeartbeatMintsTokenBeforeControlDialTimeout(t *testing.T) {
 	t.Setenv("CRABBOX_TOKEN_HELPER_DELAY", "1600ms")
 	controlHeartbeats := make(chan struct{}, 1)
 	httpHeartbeats := make(chan struct{}, 1)
+	handlerDone := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/control":
@@ -1316,14 +1323,15 @@ func TestCoordinatorHeartbeatMintsTokenBeforeControlDialTimeout(t *testing.T) {
 				t.Errorf("accept control websocket: %v", err)
 				return
 			}
-			defer conn.Close(websocket.StatusNormalClosure, "")
+			defer close(handlerDone)
+			defer conn.CloseNow()
 			if _, _, err := conn.Read(r.Context()); err != nil {
 				t.Errorf("read control heartbeat: %v", err)
 				return
 			}
 			controlHeartbeats <- struct{}{}
 			_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"type":"heartbeat","leaseID":"cbx_123","ok":true}`))
-			<-r.Context().Done()
+			_, _, _ = conn.Read(r.Context())
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/cbx_123/heartbeat":
 			httpHeartbeats <- struct{}{}
 			w.Header().Set("Content-Type", "application/json")
@@ -1335,12 +1343,9 @@ func TestCoordinatorHeartbeatMintsTokenBeforeControlDialTimeout(t *testing.T) {
 	defer server.Close()
 
 	client := CoordinatorClient{
-		BaseURL: server.URL,
-		TokenCommand: []string{
-			os.Args[0],
-			"-test.run=^TestCoordinatorTokenCommandHelper$",
-		},
-		Client: server.Client(),
+		BaseURL:      server.URL,
+		TokenCommand: synchronousTestHelperCommand("TestCoordinatorTokenCommandHelper"),
+		Client:       server.Client(),
 	}
 	stop, err := startCoordinatorHeartbeat(context.Background(), &client, "cbx_123", "aws", 30*time.Minute, nil, nil, io.Discard)
 	if err != nil {
@@ -1357,6 +1362,12 @@ func TestCoordinatorHeartbeatMintsTokenBeforeControlDialTimeout(t *testing.T) {
 	case <-httpHeartbeats:
 		t.Fatal("heartbeat fell back to HTTP after successful control websocket dial")
 	default:
+	}
+	stop()
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("control websocket handler did not exit after heartbeat stopped")
 	}
 }
 
@@ -2255,6 +2266,21 @@ func TestImagePromoteCatalogOnlyValidation(t *testing.T) {
 			want: "--catalog-only is AWS-only",
 		},
 		{
+			name: "azure rejects restore receipt",
+			args: []string{"ami-variant", "--provider", "azure", "--restore-receipt", "promotion.json"},
+			want: "--restore-receipt is AWS-only",
+		},
+		{
+			name: "catalog only rejects expected current",
+			args: []string{"ami-variant", "--catalog-only", "--variant-runtime", "node=24", "--expected-current-image", "capture"},
+			want: "--catalog-only cannot be combined with transactional image promotion",
+		},
+		{
+			name: "catalog only rejects rollback retirement",
+			args: []string{"ami-variant", "--catalog-only", "--variant-runtime", "node=24", "--expected-current-image", "ami-current", "--expected-current-revision", "revision-current", "--retire-expected-catalog"},
+			want: "--catalog-only cannot be combined with transactional image promotion",
+		},
+		{
 			name: "conflicting repeated selector",
 			args: []string{"ami-variant", "--catalog-only", "--variant-sdk", "toolkit=2.0", "--variant-sdk", "toolkit=3.0"},
 			want: "--variant-sdk declares conflicting versions for toolkit",
@@ -2509,6 +2535,107 @@ func TestImagePromoteOrdinaryOutputCompatibility(t *testing.T) {
 	}
 	if _, ok := decoded["variantSelectors"]; ok {
 		t.Fatalf("ordinary JSON gained variantSelectors: %s", jsonOut.String())
+	}
+}
+
+func TestImagePromoteCompareAndSwapContract(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	var requests []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/promote-cas") {
+			t.Fatalf("path=%q", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, body)
+		if body["restorePrevious"] != nil {
+			_, _ = w.Write([]byte(`{"image":{"id":"ami-old","revision":"rev-old"},"previous":{"state":"present","imageId":"ami-new","revision":"rev-new"}}`))
+			return
+		}
+		if body["clearDefault"] == true {
+			_, _ = w.Write([]byte(`{"previous":{"state":"present","imageId":"ami-new","revision":"rev-new"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"image":{"id":"ami-new","revision":"rev-new"},"previous":{"state":"absent"}}`))
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "admin-token")
+
+	var out bytes.Buffer
+	app := App{Stdout: &out, Stderr: io.Discard}
+	if err := app.imagePromote(context.Background(), []string{"ami-new", "--json", "--target", "windows", "--expected-current-image", "capture"}); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := app.imagePromote(context.Background(), []string{"none", "--json", "--target", "windows", "--expected-current-image", "ami-new", "--expected-current-revision", "rev-new", "--retire-expected-catalog"}); err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := filepath.Join(t.TempDir(), "promotion.json")
+	if err := os.WriteFile(receiptPath, []byte(`{
+		"image":{"id":"ami-new","revision":"rev-new"},
+		"previous":{"state":"present","imageId":"ami-old","revision":"rev-old","aliases":[
+			{"alias":"regional","state":"present","image":{"id":"ami-old","name":"old","state":"available","provider":"aws","revision":"rev-old"}}
+		]}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := app.imagePromote(context.Background(), []string{"ami-new", "--json", "--target", "windows", "--restore-receipt", receiptPath}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := requests[0]["expectedCurrent"]; !reflect.DeepEqual(got, map[string]any{"state": "capture"}) {
+		t.Fatalf("capture body=%#v", requests[0])
+	}
+	if _, ok := requests[0]["retireExpectedCatalog"]; ok {
+		t.Fatalf("capture unexpectedly authorized retirement: %#v", requests[0])
+	}
+	if got := requests[1]["expectedCurrent"]; !reflect.DeepEqual(got, map[string]any{"state": "present", "imageId": "ami-new", "revision": "rev-new"}) || requests[1]["clearDefault"] != true || requests[1]["retireExpectedCatalog"] != true {
+		t.Fatalf("clear body=%#v", requests[1])
+	}
+	if got := requests[2]["expectedCurrent"]; !reflect.DeepEqual(got, map[string]any{"state": "present", "imageId": "ami-new", "revision": "rev-new"}) || requests[2]["retireExpectedCatalog"] != true {
+		t.Fatalf("restore body=%#v", requests[2])
+	}
+	restore, ok := requests[2]["restorePrevious"].(map[string]any)
+	if !ok || restore["imageId"] != "ami-old" {
+		t.Fatalf("restore previous=%#v", requests[2]["restorePrevious"])
+	}
+}
+
+func TestPromoteImageCASFailsClosedAgainstOldCoordinator(t *testing.T) {
+	var paths []string
+	mutated := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if strings.HasSuffix(r.URL.Path, "/promote") {
+			mutated = true
+			_, _ = w.Write([]byte(`{"image":{"id":"ami-new"}}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	_, err := client.PromoteImageCAS(
+		context.Background(),
+		"ami-new",
+		CoordinatorImageDefaultState{State: "capture"},
+		false,
+		false,
+		nil,
+		CoordinatorImageRef{Provider: "aws", Target: "windows", Region: "eu-west-1"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "upgrade the coordinator") {
+		t.Fatalf("error=%v", err)
+	}
+	if mutated || len(paths) != 1 || !strings.HasSuffix(paths[0], "/promote-cas") {
+		t.Fatalf("mutated=%v paths=%v", mutated, paths)
 	}
 }
 

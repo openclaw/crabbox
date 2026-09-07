@@ -12,6 +12,7 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type fakeLambdaAPI struct {
@@ -125,9 +126,7 @@ func (f *fakeLambdaAPI) ListFirewallRulesets(context.Context) ([]FirewallRuleset
 
 func newTestBackend(t *testing.T, api *fakeLambdaAPI) *backend {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", home)
+	testutil.IsolateUserDirs(t)
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux

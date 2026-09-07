@@ -1,5 +1,30 @@
 import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
 
+import { AzureResumableProvisioning } from "./azure-provisioning";
+import {
+  clearLeaseCleanupCompletion,
+  completeLeaseProviderCleanup,
+  leaseHasConfirmedNoProviderResource,
+  leaseProviderCleanupConfirmed,
+} from "./lease-cleanup";
+import {
+  LeaseProvisioningController,
+  cancelProvisioningOperation,
+  provisioningOperationKey,
+  provisioningPlanKey,
+  provisioningOwnsLease,
+  putProvisioningOperation,
+  validateProvisioningRecord,
+  type LeaseProvisioningOperation,
+} from "./lease-provisioning";
+import type { ProviderResumableProvisioning } from "./provider-provisioning";
+import { ProvisioningAttemptHistory } from "./provisioning-attempts";
+import {
+  provisioningMaterialConfigured,
+  provisioningMaterialKey,
+  sealProvisioningMaterial,
+} from "./provisioning-material";
+
 const { Client: SSHClientConstructor, utils: sshUtils } = ssh2;
 
 import { artifactUploadResponse, type ArtifactUploadRequest } from "./artifacts";
@@ -30,7 +55,6 @@ import {
   awsProvisioningErrorCategory,
   awsRegionCandidates,
   awsLeaseImageIdentity,
-  isAWSInstanceCleanedAfterReadinessFailure,
   isAWSInstanceNotFoundError,
   isAWSRunInstancesOutcomeUncertain,
   isRetryableAWSProvisioningError,
@@ -39,7 +63,12 @@ import {
   type AWSPrivateWorkspaceConfig,
 } from "./aws";
 import { InvalidAWSRegionError, sanitizeAWSRegion } from "./aws-region";
-import { AzureClient, azureRegionCandidates, type AzureDeferredCleanupRequest } from "./azure";
+import {
+  AzureClient,
+  azureRegionCandidates,
+  azureSnapshotNotFound,
+  type AzureDeferredCleanupRequest,
+} from "./azure";
 import {
   BridgeTickets,
   validBridgeTicket as validLeaseBridgeTicket,
@@ -49,6 +78,50 @@ import {
   type EgressRole,
   type LeaseBridgeTicketConsumption,
 } from "./bridge-tickets";
+import {
+  CheckpointError,
+  abortCheckpointProvisioningForLease,
+  acquireCheckpointUse,
+  backfillFailedCheckpointCreateRecovery,
+  bindCheckpointUseProvisioningInTransaction,
+  cancelFailedCheckpointCreate,
+  checkpointDuePrefix,
+  checkpointEventKey,
+  checkpointKey,
+  checkpointLeaseSourceIdentity,
+  checkpointLimits,
+  checkpointUseKey,
+  checkpointVisibleTo,
+  claimCheckpointDeletion,
+  expireCheckpointClaims,
+  failCheckpointCreateDefinitively,
+  finalizeCheckpointDeletion,
+  findManagedCheckpointImage,
+  finishCheckpointUse,
+  markCheckpointProviderMutationStarted,
+  markCheckpointProviderDeleted,
+  pinCheckpointPromotion,
+  publicCheckpointRecord,
+  publishCreatedCheckpoint,
+  publishRecoveredCheckpoint,
+  pruneCheckpointTombstone,
+  recoverCheckpointDeletion,
+  recordCheckpointCreateFailure,
+  recordCheckpointCreateRecoveryFailure,
+  recordCheckpointDeletionFailure,
+  recordCheckpointExpiryDue,
+  recordCheckpointProviderAbsence,
+  resolveRejectedCheckpointProvisioning,
+  renewCheckpointUse,
+  repairCheckpointDueMarker,
+  reserveCheckpointCreate,
+  unpinCheckpointPromotion,
+  updateCheckpointRetention,
+  validCheckpointID,
+  validCheckpointRetention,
+  validateCheckpointUse,
+  type CheckpointPrincipal,
+} from "./checkpoints";
 import {
   codeOriginForLease,
   codeProxyRequestBodyBytes,
@@ -76,6 +149,8 @@ import {
   bufferCoordinatorRequestBody,
   controlMessageOwnsTransaction,
   coordinatorRequestQueue,
+  legacyAlarmKey,
+  setLegacyWake,
   type CoordinatorRuntime,
   type CoordinatorStorage,
   type CoordinatorStorageView,
@@ -86,7 +161,14 @@ import {
   isDaytonaNotFound,
   type DaytonaSSHEndpoint,
 } from "./daytona";
-import { GCPClient, gcpProviderLabelValue } from "./gcp";
+import {
+  GCPClient,
+  gcpMachineImageNotFound,
+  gcpProviderLabelValue,
+  gcpReadyPoolImageScope,
+  gcpReadyPoolImageScopeSupported,
+  gcpSnapshotNotFound,
+} from "./gcp";
 import {
   githubMembershipPolicy,
   requireFreshGitHubMembership,
@@ -99,8 +181,12 @@ import {
   hetznerProvisioningFailureMayHaveResource,
   hetznerProvisioningFailureRetryable,
   hetznerProvisioningResourceID,
-  hetznerServerOwnedByLease,
 } from "./hetzner";
+import {
+  confirmHetznerServerCleanup,
+  hetznerDefiniteKeyOnlyFailure,
+  hetznerKeyOnlyCleanupID,
+} from "./hetzner-cleanup";
 import {
   bearerToken,
   errorMessage,
@@ -212,6 +298,7 @@ import {
   ProviderProvisioningCleanupError,
   ProviderResourceUnresolvedError,
   providerProvisioningCleanupClaim,
+  providerProvisioningOutcomeUncertain,
   type ProviderProvisioningCleanupClaim,
   validatedProviderProvisioningCleanupClaim,
   validateProviderProvisioningCleanupClaim,
@@ -263,12 +350,21 @@ import {
 import { timingSafeEqual } from "./timing-safe";
 import type {
   CapacityHint,
+  CoordinatorCheckpointDueIndex,
+  CoordinatorCheckpointEvent,
+  CoordinatorCheckpointProvider,
+  CoordinatorCheckpointRecord,
+  CoordinatorCheckpointRetention,
+  CoordinatorCheckpointScope,
+  CoordinatorCheckpointUseClaim,
+  CreateAttemptRecord,
   Env,
   ExternalRunnerInput,
   ExternalRunnerRecord,
   ExternalRunnerSyncRequest,
-  HetznerServer,
+  FixedLeaseCreateIntent,
   LeaseRecord,
+  ProviderCleanupEvidence,
   LeaseRegistrationRequest,
   LeaseRequest,
   LeaseShare,
@@ -278,10 +374,12 @@ import type {
   ImageVariantSelectors,
   Provider,
   ProviderFastSnapshotRestore,
+  ProviderCheckpointOwnership,
   LeaseImageIdentity,
   LeaseProvisioningTiming,
   ProviderImage,
   ProviderMachine,
+  ProviderAccessTimingObserver,
   ProvisioningAttempt,
   ReadyPoolBorrowRequest,
   ReadyPoolBorrowHeartbeatRequest,
@@ -317,6 +415,7 @@ import {
   isCoordinatorProvider,
 } from "./types";
 import {
+  activeLeaseLimitForOwner,
   addLeaseToCostLimitUsage,
   costLimits,
   createCostLimitUsage,
@@ -325,6 +424,7 @@ import {
   requestOrg,
   usageSummary,
   type CostLimitUsage,
+  type OwnerCapacity,
 } from "./usage";
 import { WebVNCCredentialHandoffs, type WebVNCCredentialHandoffResult } from "./webvnc-handoff";
 
@@ -376,6 +476,7 @@ const maxPendingWebVNCBytes = 1024 * 1024;
 const maxCodeWebSocketFrameChunkBytes = 15 * 1024;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+const runLogTextDecoder = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
 const fatalTextDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
 const awsOrphanSweepRecordKey = "aws-orphan-sweep:last";
 const awsOrphanSweepFirstAlarmKey = "aws-orphan-sweep:first-alarm";
@@ -384,6 +485,7 @@ const azureOrphanSweepFirstAlarmKey = "azure-orphan-sweep:first-alarm";
 const providerReconciliationCandidatePrefix = "provider-reconciliation:";
 const providerReconciliationCircuitPrefix = "provider-reconciliation-circuit:";
 const awsIngressReconcileRecordKey = "aws-ingress-reconcile:pending";
+const awsIngressReconcileMinDelayMs = 1000;
 const azureDeferredCleanupPrefix = "azure-cleanup:";
 const readyPoolPrefix = "ready-pool:";
 const readyPoolDesiredPrefix = "ready-pool-desired:";
@@ -393,6 +495,7 @@ const typedReadyPoolPrefix = "typed-ready-pool-v1:";
 const typedReadyPoolDesiredPrefix = "typed-ready-pool-v1-desired:";
 const typedReadyPoolFillClaimPrefix = "typed-ready-pool-v1-fill-claim:";
 const typedReadyPoolCountersPrefix = "typed-ready-pool-v1-counters:";
+const durableObjectStorageKeyMaxBytes = 2048;
 const readyPoolIdentitySchemaV1 = "crabbox-ready-pool-identity/v1";
 const readyPoolSeedFieldMaxBytes = 1024;
 const readyPoolBorrowTimeoutMs = 2 * 60_000;
@@ -451,6 +554,13 @@ function coordinatorDiagnosticSecrets(env: Env): Array<string | undefined> {
     env.CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY,
     env.CRABBOX_ARTIFACTS_SESSION_TOKEN,
   ];
+}
+
+interface CheckpointLeaseAuthorization {
+  checkpoint: CoordinatorCheckpointRecord;
+  principal: CheckpointPrincipal;
+  token: string;
+  tokenHash: string;
 }
 
 interface PortalViewerPrincipalRecord extends CachedBridgeGrant {
@@ -1007,6 +1117,7 @@ export class FleetCoordinator {
   private readonly runtimeAdapterDeleteQueues = new Map<string, Promise<void>>();
   private readonly daytonaSnapshotBootstrapQueues = new Map<string, Promise<void>>();
   private readonly controlSockets = new Map<string, WebSocket>();
+  private readonly failedControlSockets = new WeakSet<WebSocket>();
   private readonly workspaceTerminals = new Map<string, Set<WebSocket>>();
   private readonly restoredBridgeSockets = new Set<WebSocket>();
   private readonly adminGrantValidationTimes = new WeakMap<WebSocket, number>();
@@ -1019,9 +1130,11 @@ export class FleetCoordinator {
   private bridgeTicketQueue: Promise<void> = Promise.resolve();
   private readonly bridgeTickets: BridgeTickets;
   private awsIngressBarrier: Promise<void> = Promise.resolve();
-  private readonly awsIngressAdditiveOperations = new Set<Promise<void>>();
   private providerMaintenanceQueue: Promise<void> = Promise.resolve();
   private readonly webVNCCredentialHandoffs: WebVNCCredentialHandoffs;
+  private readonly leaseProvisioning: LeaseProvisioningController;
+  private maintenanceRun: Promise<void> | undefined;
+  private maintenanceFollowup: { grantVersion?: string; preserve: boolean } | undefined;
 
   constructor(
     private readonly state: CoordinatorRuntime,
@@ -1030,6 +1143,44 @@ export class FleetCoordinator {
     private readonly authContext: AuthRequestContext = {},
     private readonly coordinatorGeneration: string = crypto.randomUUID(),
   ) {
+    this.leaseProvisioning = new LeaseProvisioningController(
+      state,
+      env,
+      (provider) => this.provider(provider).resumableProvisioning?.(),
+      async (transaction, lease, result) => {
+        const now = new Date().toISOString();
+        const completed: LeaseRecord = {
+          ...lease,
+          state: "active",
+          updatedAt: now,
+          cloudID: result.server.cloudID,
+          serverID: result.server.id,
+          serverName: result.server.name,
+          serverType: result.serverType,
+          host: result.server.host,
+          market: result.market,
+          ...(result.server.region ? { region: result.server.region } : {}),
+          ...(result.image ? { image: result.image } : {}),
+        };
+        clearProvisioningRecoveryMetadata(completed);
+        delete completed.provisioningResourceMayExist;
+        delete completed.provisioningFailureRetryable;
+        clearLeaseCleanupCompletion(completed);
+        if (result.cost) {
+          completed.estimatedHourlyUSD = result.cost.hourlyUSD;
+          completed.maxEstimatedUSD = result.cost.maxUSD;
+        }
+        await transaction.put(leaseKey(lease.id), completed);
+        const attempt = await transaction.get<CreateAttemptRecord>(createAttemptKey(lease.id));
+        if (attempt && createAttemptMatchesLease(attempt, lease))
+          await transaction.put(createAttemptKey(lease.id), {
+            ...attempt,
+            cloudID: completed.cloudID,
+            updatedAt: now,
+          });
+      },
+    );
+    state.provisioning?.registerProvisioningTick(() => this.leaseProvisioning.tick());
     this.bridgeTickets = new BridgeTickets(state.storage, {
       withLock: (operation) => this.withBridgeTicketLock(operation),
       getLease: (id) => this.getLease(id),
@@ -1046,6 +1197,11 @@ export class FleetCoordinator {
         const authenticated = await this.authenticatedDeviceRequest(request);
         if (authenticated instanceof Response) return authenticated;
         request = authenticated;
+      }
+      // The lifecycle request queue already holds the admission snapshot boundary.
+      // This read must not trigger bridge reconciliation or other maintenance.
+      if (request.method === "GET" && pathParts(request).join("/") === "v1/capacity") {
+        return await this.capacity(request);
       }
       await this.reconcileAdminGrantVersion(request);
       if (!(await this.restoredBridgesReady())) {
@@ -1187,6 +1343,9 @@ export class FleetCoordinator {
       if (parts[0] === "v1" && parts[1] === "runs" && parts[2]) {
         return await this.runRoute(request, parts[2], parts[3]);
       }
+      if (parts[0] === "v1" && parts[1] === "checkpoints") {
+        return await this.checkpointRoute(request, parts);
+      }
       if (method === "POST" && parts.join("/") === "v1/images") {
         return await this.createImage(request);
       }
@@ -1201,6 +1360,19 @@ export class FleetCoordinator {
       }
       if (method === "POST" && parts.join("/") === "v1/leases/capability-aware") {
         return await this.createLease(request);
+      }
+      if (method === "POST" && parts.join("/") === "v1/leases/from-checkpoint") {
+        return await this.createCheckpointLease(request);
+      }
+      if (
+        method === "PUT" &&
+        parts[0] === "v1" &&
+        parts[1] === "leases" &&
+        parts[2] &&
+        parts[3] === "from-checkpoint" &&
+        parts.length === 4
+      ) {
+        return await this.createCheckpointLease(request, parts[2]);
       }
       if (
         method === "POST" &&
@@ -1717,6 +1889,7 @@ export class FleetCoordinator {
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (this.failedControlSockets.has(socket)) return;
     const attachment = this.bridgeAttachment(socket);
     if (!attachment) {
       this.rejectRestoredBridgeSocket(socket, undefined);
@@ -2259,7 +2432,8 @@ export class FleetCoordinator {
     });
   }
 
-  private bridgeAttachment(socket: WebSocket): BridgeAttachment | undefined {
+  protected bridgeAttachment(socket: WebSocket): BridgeAttachment | undefined {
+    if (this.failedControlSockets.has(socket)) return undefined;
     return bridgeAttachment(this.state.socketAttachment(socket));
   }
 
@@ -2625,6 +2799,7 @@ export class FleetCoordinator {
     attachment: BridgeAttachment,
     message: string | ArrayBuffer | Blob,
   ): Promise<void> {
+    if (this.failedControlSockets.has(socket)) return;
     if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
       await this.hydrateEgressSessionState(attachment.leaseID);
     }
@@ -2933,11 +3108,57 @@ export class FleetCoordinator {
   }
 
   async alarm(): Promise<void> {
-    await this.runScheduledMaintenance();
+    await this.provisioningAlarm();
   }
 
   protected async durableObjectAlarm(): Promise<void> {
-    await this.runScheduledMaintenance(undefined, true);
+    await this.provisioningAlarm(undefined, true);
+  }
+
+  private async provisioningAlarm(grantVersion?: string, preserve = false): Promise<void> {
+    if (!this.state.provisioning) return this.runScheduledMaintenance(grantVersion, preserve);
+    try {
+      await this.state.provisioning.commitAndWake(async (transaction) => {
+        const legacy = await transaction.get<number | null>(legacyAlarmKey);
+        if (legacy != null && legacy <= Date.now()) await setLegacyWake(transaction);
+      });
+      await this.leaseProvisioning.tick();
+    } catch {
+      console.error("durable provisioning tick failed; committed claims remain scheduled");
+    } finally {
+      await this.state.provisioning.commitAndWake(async () => undefined);
+      this.startMaintenance(grantVersion, preserve);
+    }
+  }
+
+  private startMaintenance(grantVersion?: string, preserve = false): void {
+    if (this.maintenanceRun) {
+      if (grantVersion !== undefined || !preserve)
+        this.maintenanceFollowup = {
+          ...(grantVersion === undefined ? {} : { grantVersion }),
+          preserve,
+        };
+      return;
+    }
+    const run = this.runScheduledMaintenance(grantVersion, preserve)
+      .catch(async () => {
+        const retryAt = Date.now() + 15_000;
+        console.error("coordinator maintenance failed; scheduling retry");
+        try {
+          await this.state.runExclusive(() => this.armAlarmNoLaterThan(retryAt));
+        } catch {
+          console.error("coordinator maintenance retry wake failed");
+          throw new Error("coordinator maintenance retry wake failed");
+        }
+      })
+      .finally(() => {
+        this.maintenanceRun = undefined;
+        const followup = this.maintenanceFollowup;
+        this.maintenanceFollowup = undefined;
+        if (followup) this.startMaintenance(followup.grantVersion, followup.preserve);
+      });
+    this.maintenanceRun = run;
+    this.state.provisioning!.ownMaintenance(run);
   }
 
   private async runScheduledMaintenance(
@@ -2962,6 +3183,7 @@ export class FleetCoordinator {
     await this.maintainWorkspacePrewarm();
     await this.pruneTerminalWorkspaces();
     await this.pruneTerminalRuns();
+    await this.maintainCheckpoints();
     await this.runAzureDeferredCleanups();
     await this.runAWSOrphanSweepIfDue("alarm");
     await this.runAzureOrphanSweepIfDue("alarm");
@@ -2973,56 +3195,74 @@ export class FleetCoordinator {
     if (request.headers.get("x-crabbox-internal") !== "scheduled") {
       return json({ error: "unauthorized" }, { status: 401 });
     }
-    await this.runScheduledMaintenance(trustedAdminGrantVersion(request));
+    await this.provisioningAlarm(trustedAdminGrantVersion(request));
     return json({ ok: true });
   }
 
   private async reserveCreateAttempt(
     requestedLeaseID: string,
-    token: string,
+    source: string | FixedLeaseCreateIntent,
     owner: string,
     org: string,
+    checkpointID?: string,
+    checkpointUseClaimHash?: string,
   ): Promise<{ attempt: CreateAttemptRecord; replayLease?: LeaseRecord } | Response> {
+    if (
+      (checkpointID !== undefined || checkpointUseClaimHash !== undefined) &&
+      (!validCheckpointID(checkpointID) ||
+        typeof checkpointUseClaimHash !== "string" ||
+        !/^[a-f0-9]{64}$/.test(checkpointUseClaimHash))
+    ) {
+      return createAttemptBindingConflictResponse();
+    }
     return await this.state.runExclusive(async () => {
+      let existing = await this.getCreateAttempt(requestedLeaseID);
+      const fixedCreate = typeof source === "string" ? undefined : source;
+      // Fixed callers have no private token. Mint one only at admission; a token
+      // derived from their public ID could be pre-canceled by another owner.
+      const token =
+        typeof source === "string"
+          ? source
+          : existing?.fixedCreate
+            ? existing.token
+            : `cat_${crypto.randomUUID().replaceAll("-", "")}`;
       const canceled = await this.getArchivedCanceledCreateAttempt(requestedLeaseID, token);
       if (canceled) {
         return canceled.owner === owner && canceled.org === org
           ? createCanceledResponse()
           : createAttemptConflictResponse();
       }
-      const existing = await this.getCreateAttempt(requestedLeaseID);
-      if (existing) {
-        if (existing.token !== token) {
-          if (unboundCanceledCreateAttempt(existing, requestedLeaseID)) {
-            const [exactLease, workspaceReservation] = await Promise.all([
-              this.getLease(requestedLeaseID),
-              this.state.storage.get(workspaceLeaseReservationKey(requestedLeaseID)),
-            ]);
-            if (workspaceReservation) {
-              return workspaceManagedLeaseResponse();
-            }
-            if (exactLease) {
-              return createAttemptIDConflictResponse();
-            }
-            await this.archiveCanceledCreateAttempt(existing);
-            const now = new Date().toISOString();
-            const attempt: CreateAttemptRecord = {
-              version: 1,
+      if (existing?.token === token) {
+        if (existing.owner !== owner || existing.org !== org) {
+          return createAttemptConflictResponse();
+        }
+        if (!sameFixedCreateIntent(existing.fixedCreate, fixedCreate)) {
+          return createAttemptBindingConflictResponse();
+        }
+        if (
+          checkpointID !== undefined &&
+          existing.checkpointID === undefined &&
+          existing.checkpointUseClaimHash === undefined
+        ) {
+          try {
+            existing = await backfillCheckpointCreateAttempt(this.state.storage, {
               requestedLeaseID,
               token,
               owner,
               org,
-              state: "pending",
-              createdAt: now,
-              updatedAt: now,
-            };
-            await this.putCreateAttempt(attempt);
-            return { attempt };
+              checkpointID,
+              checkpointUseClaimHash: checkpointUseClaimHash!,
+            });
+          } catch (error) {
+            if (error instanceof CheckpointError) return createAttemptBindingConflictResponse();
+            throw error;
           }
-          return createAttemptConflictResponse();
         }
-        if (existing.owner !== owner || existing.org !== org) {
-          return createAttemptConflictResponse();
+        if (
+          !fixedCreate &&
+          !createAttemptMatchesCheckpoint(existing, checkpointID, checkpointUseClaimHash)
+        ) {
+          return createAttemptBindingConflictResponse();
         }
         if (existing.state === "canceled") {
           return createCanceledResponse();
@@ -3036,20 +3276,32 @@ export class FleetCoordinator {
         }
         return { attempt: existing, replayLease };
       }
+      if (existing && !unboundCanceledCreateAttempt(existing, requestedLeaseID)) {
+        return createAttemptConflictResponse();
+      }
       if (await this.state.storage.get(workspaceLeaseReservationKey(requestedLeaseID))) {
         return workspaceManagedLeaseResponse();
       }
       if (await this.getLease(requestedLeaseID)) {
         return createAttemptIDConflictResponse();
       }
+      if (existing) {
+        await this.archiveCanceledCreateAttempt(existing);
+      }
       const now = new Date().toISOString();
       const attempt: CreateAttemptRecord = {
-        version: 1,
+        // Old coordinators only recycle version-1 unbound cancellations. Keep
+        // admitted fixed IDs fenced even if the coordinator is rolled back.
+        version: fixedCreate ? 2 : 1,
         requestedLeaseID,
         token,
         owner,
         org,
         state: "pending",
+        ...(fixedCreate ? { fixedCreate } : {}),
+        ...(checkpointID === undefined
+          ? {}
+          : { checkpointID, checkpointUseClaimHash: checkpointUseClaimHash! }),
         createdAt: now,
         updatedAt: now,
       };
@@ -3063,6 +3315,8 @@ export class FleetCoordinator {
     token: string,
     owner: string,
     org: string,
+    checkpointID?: string,
+    checkpointUseClaimHash?: string,
   ): Promise<Response | undefined> {
     return await this.state.runExclusive(async () => {
       const canceled = await this.getArchivedCanceledCreateAttempt(requestedLeaseID, token);
@@ -3071,7 +3325,7 @@ export class FleetCoordinator {
           ? createCanceledResponse()
           : createAttemptConflictResponse();
       }
-      const existing = await this.getCreateAttempt(requestedLeaseID);
+      let existing = await this.getCreateAttempt(requestedLeaseID);
       if (!existing) {
         return undefined;
       }
@@ -3083,6 +3337,28 @@ export class FleetCoordinator {
       if (existing.owner !== owner || existing.org !== org) {
         return createAttemptConflictResponse();
       }
+      if (
+        checkpointID !== undefined &&
+        existing.checkpointID === undefined &&
+        existing.checkpointUseClaimHash === undefined
+      ) {
+        try {
+          existing = await backfillCheckpointCreateAttempt(this.state.storage, {
+            requestedLeaseID,
+            token,
+            owner,
+            org,
+            checkpointID,
+            checkpointUseClaimHash: checkpointUseClaimHash!,
+          });
+        } catch (error) {
+          if (error instanceof CheckpointError) return createAttemptBindingConflictResponse();
+          throw error;
+        }
+      }
+      if (!createAttemptMatchesCheckpoint(existing, checkpointID, checkpointUseClaimHash)) {
+        return createAttemptBindingConflictResponse();
+      }
       if (existing.state === "canceled") {
         return createCanceledResponse();
       }
@@ -3090,7 +3366,11 @@ export class FleetCoordinator {
         return undefined;
       }
       const replayLease = await this.getLease(existing.canonicalLeaseID);
-      if (!replayLease || !createAttemptMatchesLease(existing, replayLease)) {
+      if (
+        !replayLease ||
+        replayLease.checkpointID !== checkpointID ||
+        !createAttemptMatchesLease(existing, replayLease)
+      ) {
         return createAttemptBindingConflictResponse();
       }
       return createAttemptReplayResponse(replayLease);
@@ -3104,7 +3384,7 @@ export class FleetCoordinator {
     org: string,
   ): Promise<CreateAttemptRecord | undefined> {
     const attempt = await this.getCreateAttempt(requestedLeaseID);
-    return attempt?.version === 1 &&
+    return (attempt?.version === 1 || attempt?.version === 2) &&
       attempt.requestedLeaseID === requestedLeaseID &&
       attempt.token === token &&
       attempt.owner === owner &&
@@ -3189,6 +3469,16 @@ export class FleetCoordinator {
         await this.putCreateAttempt(attempt);
         return createAttemptBindingConflictResponse();
       }
+      if (this.state.provisioning) {
+        const released = await this.state.provisioning.commitAndWake(async (transaction) => {
+          const latest = await transaction.get<LeaseRecord>(leaseKey(lease.id));
+          if (!latest || !createAttemptMatchesLease(attempt, latest)) return undefined;
+          const canceled = await cancelProvisioningOperation(transaction, latest, Date.now());
+          if (canceled) await transaction.put(createAttemptKey(requestedLeaseID), attempt);
+          return canceled;
+        });
+        if (released) return { attempt, lease: released };
+      }
       if (lease.cleanupStartedAt) {
         await this.putCreateAttempt(attempt);
         await this.scheduleAlarm();
@@ -3196,8 +3486,7 @@ export class FleetCoordinator {
       }
       const shouldDelete = Boolean(
         lease.providerKeyCleanupPending ||
-        (lease.cloudID &&
-          (leaseIsLive(lease) || lease.releaseDeletesServer !== undefined || lease.cleanupError)),
+        (lease.cloudID && (leaseIsLive(lease) || !leaseProviderCleanupConfirmed(lease))),
       );
       const canceledBeforeProviderIdentity = Boolean(
         (lease.state === "provisioning" ||
@@ -3234,6 +3523,9 @@ export class FleetCoordinator {
           cleanupStarted.getTime() + leaseCleanupClaimStaleMs,
         ).toISOString();
         released.releaseDeletesServer = true;
+        clearLeaseCleanupCompletion(released);
+      } else if (leaseHasConfirmedNoProviderResource(released)) {
+        completeLeaseProviderCleanup(released, released.updatedAt);
       }
       await this.putLease(released);
       await this.putCreateAttempt(attempt);
@@ -3255,13 +3547,16 @@ export class FleetCoordinator {
       released = cancellation.lease;
       await this.closeLeaseBridges(cancellation.lease.id, 1008, "lease ended");
       if ("cleanup" in cancellation && cancellation.cleanup) {
-        const cleanup = () => this.finishLeaseCleanupClaim(cancellation.cleanup!);
-        released =
-          managedLeaseProvider(cancellation.cleanup.lease) === "aws" &&
-          !cancellation.cleanup.lease.network?.awsPrivate
-            ? await this.withAWSIngressOperationLock(cleanup)
-            : await cleanup();
+        released = await this.finishLeaseCleanupClaim(cancellation.cleanup);
       }
+    }
+    if (!released?.provisioningResourceMayExist && !released?.cleanupStartedAt) {
+      await abortCheckpointProvisioningForLease(this.state.storage, requestedLeaseID, token, {
+        owner,
+        org,
+        admin,
+      });
+      await this.state.runExclusive(async () => await this.scheduleAlarm());
     }
     return json({
       canceledCreate: {
@@ -3294,7 +3589,14 @@ export class FleetCoordinator {
         current.createAttemptID !== reservation.createAttemptID ||
         current.fixedCreateIntentHash !== reservation.fixedCreateIntentHash ||
         current.providerScope !== reservation.providerScope ||
-        (current.cloudID && current.cloudID !== claim.cloudID) ||
+        (current.cloudID &&
+          (current.cloudID !== claim.cloudID ||
+            (claim.region && current.region !== claim.region) ||
+            (current.providerResourceID &&
+              claim.providerResourceID &&
+              current.providerResourceID !== claim.providerResourceID))) ||
+        (claim.providerProject && current.providerProject !== claim.providerProject) ||
+        (claim.providerProject && claim.region && current.region !== claim.region) ||
         (!current.cloudID &&
           current.provisioningRequestStartedAt !== reservation.provisioningRequestStartedAt)
       ) {
@@ -3308,15 +3610,27 @@ export class FleetCoordinator {
           "provider create attempt changed before identity publication",
         );
       }
+      const continueReadiness =
+        current.state === "provisioning" &&
+        Date.parse(current.expiresAt) > Date.now() &&
+        (!attempt || attempt.state === "pending");
+      // Rechecks must not reopen terminal cleanup; expired provisioning still needs its failed transition.
+      if (
+        current.cloudID === claim.cloudID &&
+        (!claim.providerResourceID || current.providerResourceID === claim.providerResourceID) &&
+        (continueReadiness || current.state !== "provisioning")
+      ) {
+        return continueReadiness;
+      }
       const lease = structuredClone(current);
       const now = new Date();
-      const continueReadiness =
-        lease.state === "provisioning" &&
-        Date.parse(lease.expiresAt) > now.getTime() &&
-        (!attempt || attempt.state === "pending");
       lease.cloudID = claim.cloudID;
       lease.serverID = claim.serverID ?? 0;
+      if (claim.providerResourceID) {
+        lease.providerResourceID = claim.providerResourceID;
+      }
       lease.serverName = claim.cloudID;
+      if (claim.region) lease.region = claim.region;
       lease.updatedAt = now.toISOString();
       if (
         !continueReadiness &&
@@ -3356,6 +3670,7 @@ export class FleetCoordinator {
     workspaceID?: string,
     workspaceCapability?: ProviderWorkspaceCapability,
     fixedLeaseID?: string,
+    checkpointAuthorization?: CheckpointLeaseAuthorization,
   ): Promise<Response> {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
@@ -3386,10 +3701,21 @@ export class FleetCoordinator {
       return json({ error: "invalid_create_attempt_id" }, { status: 400 });
     }
     const leaseID = fixedLeaseID ?? (validLeaseID(input.leaseID) ? input.leaseID : newLeaseID());
+    if (fixedLeaseID && !checkpointAuthorization) {
+      const replay = await this.replayDurableFixedRequest(request, input, fixedLeaseID, owner, org);
+      if (replay) return replay;
+    }
     if (ordinaryCreate && input.createAttemptID !== undefined) {
-      const replay = await this.replayCreateAttempt(leaseID, input.createAttemptID, owner, org);
+      const replay = await this.replayCreateAttempt(
+        leaseID,
+        input.createAttemptID,
+        owner,
+        org,
+        checkpointAuthorization?.checkpoint.id,
+        checkpointAuthorization?.tokenHash,
+      );
       if (replay) {
-        return replay;
+        return this.preferredCreateReplay(request, leaseID, replay);
       }
     }
     const requestedSlugInput = input.slug ?? input.requestedSlug;
@@ -3463,26 +3789,40 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
-    let fixedCreateIntentHash: string | undefined;
+    let fixedCreate: FixedLeaseCreateIntent | undefined;
     if (fixedLeaseID) {
       if (!config.providerKey) {
         config = { ...config, providerKey: providerKeyForLease(fixedLeaseID) };
       }
-      fixedCreateIntentHash = await fixedLeaseCreateIntentHash(config, requestedSlug);
+      fixedCreate = {
+        version: fixedLeaseCreateIntentVersion,
+        hash: await fixedLeaseCreateIntentHash(
+          config,
+          requestedSlug,
+          checkpointAuthorization?.checkpoint,
+        ),
+        provider: config.provider,
+      };
       const replay = await this.state.runExclusive(async () => {
-        if (createAttemptBlocksLeaseID(await this.getCreateAttempt(fixedLeaseID))) {
-          return createAttemptIDConflictResponse();
-        }
         return this.fixedLeaseReplayResponse(
-          await this.getLease(fixedLeaseID),
+          fixedLeaseID,
           owner,
           org,
-          fixedCreateIntentHash!,
+          fixedCreate!,
+          checkpointAuthorization,
         );
       });
       if (replay) {
-        return replay;
+        return this.preferredCreateReplay(request, leaseID, replay);
       }
+    }
+    if (fixedLeaseID && checkpointAuthorization) {
+      await validateCheckpointUse(
+        this.state.storage,
+        checkpointAuthorization.checkpoint.id,
+        checkpointAuthorization.token,
+        checkpointAuthorization.principal,
+      );
     }
     if (deferredSlugError) {
       return json({ error: "invalid_slug", message: deferredSlugError.message }, { status: 400 });
@@ -3493,7 +3833,15 @@ export class FleetCoordinator {
       providerProjectForConfig(config),
     );
     if (!workspaceID && !isAdminRequest(request)) {
-      const restrictedFields = configProvider.restrictedLeaseRequestFields?.(input) ?? [];
+      const restrictedFields = (configProvider.restrictedLeaseRequestFields?.(input) ?? []).filter(
+        (field) =>
+          !checkpointAuthorization ||
+          !(
+            field === "awsAMI" ||
+            (field === "gcpProject" &&
+              input.gcpProject === checkpointAuthorization.checkpoint.scope.project)
+          ),
+      );
       if (restrictedFields.length > 0) {
         return json(
           {
@@ -3505,7 +3853,7 @@ export class FleetCoordinator {
         );
       }
     }
-    if (!isAdminRequest(request) && hasNativeLeaseSource(config)) {
+    if (!isAdminRequest(request) && hasNativeLeaseSource(config) && !checkpointAuthorization) {
       return json(
         {
           error: "admin_required",
@@ -3525,7 +3873,12 @@ export class FleetCoordinator {
           )
         : undefined;
     const reusesOwnedReleasedMacHost = Boolean(retainedMacHostLease);
-    if (!isAdminRequest(request) && requestedHostID && !reusesOwnedReleasedMacHost) {
+    if (
+      !isAdminRequest(request) &&
+      requestedHostID &&
+      !reusesOwnedReleasedMacHost &&
+      requestedHostID !== checkpointAuthorization?.checkpoint.hostID
+    ) {
       return json(
         {
           error: "admin_required",
@@ -3610,15 +3963,38 @@ export class FleetCoordinator {
       );
     }
     let createAttempt: CreateAttemptRecord | undefined;
-    if (ordinaryCreate && input.createAttemptID !== undefined) {
-      const reserved = await this.reserveCreateAttempt(leaseID, input.createAttemptID, owner, org);
+    const attemptSource = fixedCreate ?? (ordinaryCreate ? input.createAttemptID : undefined);
+    if (attemptSource !== undefined) {
+      const reserved = await this.reserveCreateAttempt(
+        leaseID,
+        attemptSource,
+        owner,
+        org,
+        fixedCreate ? undefined : checkpointAuthorization?.checkpoint.id,
+        fixedCreate ? undefined : checkpointAuthorization?.tokenHash,
+      );
       if (reserved instanceof Response) {
-        return reserved;
+        return this.preferredCreateReplay(request, leaseID, reserved);
       }
       createAttempt = reserved.attempt;
       if (reserved.replayLease) {
-        return createAttemptReplayResponse(reserved.replayLease);
+        const replay = fixedCreate
+          ? await this.state.runExclusive(
+              async () =>
+                (await this.fixedLeaseReplayResponse(
+                  leaseID,
+                  owner,
+                  org,
+                  fixedCreate,
+                  checkpointAuthorization,
+                )) ?? createAttemptBindingConflictResponse(),
+            )
+          : createAttemptReplayResponse(reserved.replayLease);
+        return this.preferredCreateReplay(request, leaseID, replay);
       }
+    }
+    if (fixedLeaseID && checkpointAuthorization) {
+      await this.validateCheckpointLeaseSource(checkpointAuthorization.checkpoint);
     }
     try {
       config = (await configProvider.prepareLeaseConfig?.(config)) ?? config;
@@ -3662,6 +4038,38 @@ export class FleetCoordinator {
       config.ttlSeconds,
       providerHourlyUSD,
     );
+    const continuation =
+      !workspaceID && !checkpointAuthorization && !reservationGuard
+        ? provider.resumableProvisioning?.()
+        : undefined;
+    if (
+      this.env.CRABBOX_DURABLE_PROVISIONING_ADMISSION === "true" &&
+      continuation?.supports(config)
+    ) {
+      if (!this.state.provisioning || !provisioningMaterialConfigured(this.env)) {
+        return json(
+          {
+            error: "continuation_unavailable",
+            message:
+              "durable provisioning requires transactional wake support and a stable CRABBOX_SESSION_SECRET distinct from the shared token (at least 32 characters)",
+          },
+          { status: 424 },
+        );
+      }
+      return this.createDurableLease(
+        request,
+        input,
+        config,
+        leaseID,
+        requestedSlug,
+        owner,
+        org,
+        cost,
+        continuation,
+        createAttempt,
+        fixedCreate,
+      );
+    }
     if (!workspaceID && retainedMacHostLease) {
       const reactivation = await this.state.runExclusive(async () => {
         const reservedAttempt = await this.getCreateAttempt(leaseID);
@@ -3720,6 +4128,9 @@ export class FleetCoordinator {
           : undefined;
         let reactivated: LeaseRecord = {
           ...current,
+          ...(checkpointAuthorization
+            ? { checkpointID: checkpointAuthorization.checkpoint.id }
+            : {}),
           createAttemptGeneration,
           ...(boundAttempt
             ? {
@@ -3775,6 +4186,7 @@ export class FleetCoordinator {
         delete reactivated.provisioningRecoveryObservedAt;
         delete reactivated.provisioningRecoveryMissingSince;
         clearLeaseCleanupMetadata(reactivated);
+        clearLeaseCleanupCompletion(reactivated);
         const limitError = enforceCostLimitUsage(
           admission.costUsage,
           reactivated,
@@ -3890,6 +4302,16 @@ export class FleetCoordinator {
       if (createAttempt && !currentAttempt) {
         return createCanceledResponse();
       }
+      if (fixedLeaseID) {
+        const replay = await this.fixedLeaseReplayResponse(
+          leaseID,
+          owner,
+          org,
+          fixedCreate!,
+          checkpointAuthorization,
+        );
+        if (replay) return replay;
+      }
       if (
         !createAttempt &&
         reservedAttempt &&
@@ -3905,9 +4327,7 @@ export class FleetCoordinator {
         return workspaceManagedLeaseResponse();
       }
       const existingLease = await this.getLease(leaseID);
-      if (existingLease && fixedLeaseID) {
-        return this.fixedLeaseReplayResponse(existingLease, owner, org, fixedCreateIntentHash!)!;
-      }
+
       if (
         existingLease &&
         currentAttempt &&
@@ -3938,16 +4358,17 @@ export class FleetCoordinator {
       let record: LeaseRecord = {
         id: leaseID,
         slug,
+        ...(checkpointAuthorization ? { checkpointID: checkpointAuthorization.checkpoint.id } : {}),
         ...(currentAttempt
           ? {
               createAttemptID: currentAttempt.token,
               createAttemptGeneration: createAttemptGeneration!,
             }
           : {}),
-        ...(fixedCreateIntentHash
+        ...(fixedCreate
           ? {
-              fixedCreateIntentVersion: fixedLeaseCreateIntentVersion,
-              fixedCreateIntentHash,
+              fixedCreateIntentVersion: fixedCreate.version,
+              fixedCreateIntentHash: fixedCreate.hash,
             }
           : {}),
         ...(workspaceID ? { workspaceID } : {}),
@@ -3967,6 +4388,9 @@ export class FleetCoordinator {
         class: config.class,
         serverType: config.serverType,
         requestedServerType: config.serverType,
+        ...(coordinatorProviderSpec(config.provider).supportsCapacityMarket
+          ? { market: config.capacityMarket }
+          : {}),
         serverID: 0,
         serverName: "",
         providerKey: config.providerKey,
@@ -3982,6 +4406,7 @@ export class FleetCoordinator {
         estimatedHourlyUSD: cost.hourlyUSD,
         maxEstimatedUSD: cost.maxUSD,
         state: "provisioning",
+        provisioningResourceMayExist: false,
         createdAt: now.toISOString(),
         updatedAt: now.toISOString(),
         lastTouchedAt: now.toISOString(),
@@ -4020,15 +4445,53 @@ export class FleetCoordinator {
       if (limitError) {
         return json({ error: "cost_limit_exceeded", message: limitError }, { status: 429 });
       }
-      if (currentAttempt) {
-        await this.putCreateAttempt({
-          ...currentAttempt,
-          canonicalLeaseID: leaseID,
-          generation: createAttemptGeneration!,
-          updatedAt: now.toISOString(),
-        });
-      }
-      await this.putLease(record);
+      const persist = async (storage: CoordinatorStorageView) => {
+        if (fixedLeaseID && checkpointAuthorization) {
+          const admitted = await storage.get<CreateAttemptRecord>(createAttemptKey(leaseID));
+          if (
+            !admitted ||
+            !currentAttempt ||
+            !sameCreateAttempt(admitted, currentAttempt) ||
+            (await storage.get(leaseKey(leaseID))) ||
+            (await storage.get(workspaceLeaseReservationKey(leaseID)))
+          ) {
+            throw new CheckpointError(
+              "lease_id_conflict",
+              "lease identity changed during checkpoint admission",
+            );
+          }
+        }
+        if (currentAttempt) {
+          await storage.put(createAttemptKey(leaseID), {
+            ...currentAttempt,
+            ...(fixedLeaseID && checkpointAuthorization
+              ? {
+                  checkpointID: checkpointAuthorization.checkpoint.id,
+                  checkpointUseClaimHash: checkpointAuthorization.tokenHash,
+                }
+              : {}),
+            canonicalLeaseID: leaseID,
+            generation: createAttemptGeneration!,
+            updatedAt: now.toISOString(),
+          } satisfies CreateAttemptRecord);
+        }
+        if (fixedLeaseID && checkpointAuthorization) {
+          await bindCheckpointUseProvisioningInTransaction(
+            storage,
+            checkpointAuthorization.checkpoint.id,
+            checkpointAuthorization.tokenHash,
+            checkpointAuthorization.principal,
+            currentAttempt!.token,
+            leaseID,
+            checkpointLeaseSourceIdentity(checkpointAuthorization.checkpoint),
+          );
+        }
+        await storage.put(leaseKey(leaseID), record);
+      };
+      // Admission remains cancellable; only the winning allocation binds its
+      // private attempt, image fence, and lease together.
+      if (fixedLeaseID && checkpointAuthorization) await this.state.storage.transaction(persist);
+      else await persist(this.state.storage);
       await this.scheduleAlarm();
       return { record, slug };
     });
@@ -4145,12 +4608,10 @@ export class FleetCoordinator {
     config = preparation.config;
     const { prepared } = preparation;
     record = preparation.record;
-    let lastProvisioningTarget: ProviderProvisioningTarget | undefined;
     const targetProvisioning = prepared?.provisioning
       ? {
           ...prepared.provisioning,
           onTargetAttempt: async (target: ProviderProvisioningTarget) => {
-            lastProvisioningTarget = { ...target };
             if (
               createAttempt &&
               !(await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org))
@@ -4212,6 +4673,7 @@ export class FleetCoordinator {
         }
       }
       current.provisioningRequestStartedAt = new Date().toISOString();
+      delete current.provisioningResourceMayExist;
       delete current.provisioningRequestSettledAt;
       current.provisioningCoordinatorVersion = this.coordinatorGeneration;
       current.updatedAt = current.provisioningRequestStartedAt;
@@ -4244,49 +4706,47 @@ export class FleetCoordinator {
     const dispatched = structuredClone(record);
     const provisioning: ProviderProvisioningContext = {
       ...targetProvisioning,
+      ...(dispatched.providerScope ? { providerScope: dispatched.providerScope } : {}),
       onResourceCreated: (claim) => this.recordCreatedProviderResource(dispatched, claim),
-    };
-    const provision = () =>
-      provider.createServerWithFallback(config, leaseID, slug, owner, provisioning);
-    const provisioned =
-      config.provider !== "aws" || config.awsPrivate
-        ? provision()
-        : prepared?.provisioning?.sshIngressReconcile === "additive"
-          ? this.withAWSIngressAdditiveOperation(provision).catch(async (error: unknown) => {
-              if (!isAWSSecurityGroupRuleLimitError(coordinatorErrorMessage(this.env, error))) {
-                throw error;
+      // Queued regional attempts must not restore access from their pre-provisioning snapshot.
+      withLeaseAccess: (target, operation, observe) => {
+        const ingressQueuedAt = Date.now();
+        return this.withAWSIngressOperationLock(async () => {
+          observe?.("ingress_wait", Date.now() - ingressQueuedAt);
+          const lifecycleQueuedAt = Date.now();
+          const access = await this.state.runExclusive(async () => {
+            const snapshotStartedAt = Date.now();
+            observe?.("lifecycle_wait", snapshotStartedAt - lifecycleQueuedAt);
+            try {
+              const current = await this.getLease(dispatched.id);
+              const attempt = createAttempt
+                ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
+                : undefined;
+              if (
+                !current ||
+                !sameLeaseReleaseIdentity(current, dispatched) ||
+                current.state !== "provisioning" ||
+                current.provisioningRequestStartedAt !== dispatched.provisioningRequestStartedAt ||
+                Date.parse(current.expiresAt) <= Date.now() ||
+                (createAttempt && (!attempt || !createAttemptMatchesLease(attempt, current)))
+              ) {
+                throw new CreateAttemptCanceledError();
               }
-              return await this.withAWSIngressOperationLock(async () => {
-                const recovery = await this.state.runExclusive(async () => {
-                  const current = await this.getLease(record.id);
-                  if (!current || current.state !== "provisioning") {
-                    return undefined;
-                  }
-                  const accessLeases = await this.providerAccessLeaseRecords();
-                  const recoveryRegion = lastProvisioningTarget?.region;
-                  const recoveryLease = recoveryRegion
-                    ? { ...current, region: recoveryRegion }
-                    : current;
-                  return {
-                    current: structuredClone(recoveryLease),
-                    accessState: structuredClone(
-                      replaceProviderAccessState(accessLeases, recoveryLease),
-                    ),
-                  };
-                });
-                if (!recovery) {
-                  throw error;
-                }
-                await provider.reconcileLeaseAccess?.(
-                  recovery.current,
-                  providerAccessContext([], recovery.accessState),
-                );
-                return await provision();
-              });
-            })
-          : this.withAWSIngressOperationLock(provision);
-    const { server, serverType, market, attempts, image, provisioningTiming } =
-      await provisioned.catch(async (error: unknown) => {
+              return {
+                lease: { ...current, ...(target.region ? { region: target.region } : {}) },
+                context: providerAccessContext([], await this.providerAccessLeaseRecords()),
+              };
+            } finally {
+              observe?.("access_snapshot", Date.now() - snapshotStartedAt);
+            }
+          });
+          return operation(access.lease, access.context);
+        });
+      },
+    };
+    const provisioned = await provider
+      .createServerWithFallback(config, leaseID, slug, owner, provisioning)
+      .catch(async (error: unknown) => {
         const cleanupClaim = validatedProviderProvisioningCleanupClaim(error, config.provider);
         await this.state.runExclusive(async () => {
           if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
@@ -4325,8 +4785,11 @@ export class FleetCoordinator {
           await this.markAWSIngressReconcilePending(record);
           await this.scheduleAlarm();
         });
+        if (error instanceof CreateAttemptCanceledError) return createCanceledResponse();
         throw error;
       });
+    if (provisioned instanceof Response) return provisioned;
+    const { server, serverType, market, attempts, image, provisioningTiming } = provisioned;
     let current = await this.getLease(record.id);
     const pendingAfterProvision = createAttempt
       ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
@@ -4344,6 +4807,7 @@ export class FleetCoordinator {
     record = structuredClone(current);
     record.state = "active";
     clearProvisioningRecoveryMetadata(record);
+    clearLeaseCleanupCompletion(record);
     record.cloudID = server.cloudID;
     record.serverType = serverType;
     if (server.hostID) {
@@ -4362,6 +4826,11 @@ export class FleetCoordinator {
       record.provisioningTiming = provisioningTiming;
     }
     record.serverID = server.id;
+    if (server.providerResourceID) {
+      record.providerResourceID = server.providerResourceID;
+    } else {
+      delete record.providerResourceID;
+    }
     record.serverName = server.name;
     record.host = server.host;
     const finalized = await provider.finalizeLeaseCreate?.(config, record, server, attempts ?? []);
@@ -4425,21 +4894,334 @@ export class FleetCoordinator {
     return json({ lease: publicLeaseRecord(record) }, { status: 201 });
   }
 
-  private fixedLeaseReplayResponse(
-    existing: LeaseRecord | undefined,
+  private async replayDurableFixedRequest(
+    request: Request,
+    input: LeaseRequest,
+    leaseID: string,
     owner: string,
     org: string,
-    intentHash: string,
-  ): Response | undefined {
+  ): Promise<Response | undefined> {
+    const fingerprint = await fixedRequestFingerprint(input);
+    return this.state.storage.transaction(async (transaction) => {
+      const operation = await transaction.get<LeaseProvisioningOperation>(
+        provisioningOperationKey(leaseID),
+      );
+      if (
+        !operation ||
+        operation.fixedRequestFingerprint !== fingerprint ||
+        operation.owner !== owner ||
+        operation.org !== org
+      )
+        return undefined;
+      const lease = await transaction.get<LeaseRecord>(leaseKey(leaseID));
+      const attempt = await transaction.get<CreateAttemptRecord>(createAttemptKey(leaseID));
+      if (
+        !lease ||
+        !attempt?.fixedCreate ||
+        !leaseIsLive(lease) ||
+        operation.generation !== lease.createAttemptGeneration ||
+        operation.provider !== lease.provider ||
+        operation.scope !== lease.providerScope ||
+        !createAttemptMatchesLease(attempt, lease)
+      )
+        return undefined;
+      const replay = await this.fixedLeaseReplayResponse(
+        leaseID,
+        owner,
+        org,
+        attempt.fixedCreate,
+        undefined,
+        transaction,
+      );
+      return replay?.ok && lease.state === "provisioning" && prefersAsyncProvisioning(request)
+        ? acceptedProvisioningLease(lease)
+        : replay;
+    });
+  }
+
+  private async preferredCreateReplay(
+    request: Request,
+    requestedID: string,
+    response: Response,
+  ): Promise<Response> {
+    if (!prefersAsyncProvisioning(request) || !response.ok) return response;
+    const attempt = await this.getCreateAttempt(requestedID);
+    const id = attempt?.canonicalLeaseID ?? requestedID;
+    if (!(await provisioningOwnsLease(this.state.storage, id))) return response;
+    const lease = await this.getLease(id);
+    return lease?.state === "provisioning" ? acceptedProvisioningLease(lease) : response;
+  }
+
+  private async createDurableLease(
+    request: Request,
+    input: LeaseRequest,
+    config: LeaseConfig,
+    leaseID: string,
+    requestedSlug: string,
+    owner: string,
+    org: string,
+    cost: ReturnType<typeof leaseCost>,
+    capability: ProviderResumableProvisioning,
+    attempt?: CreateAttemptRecord,
+    fixedCreate?: FixedLeaseCreateIntent,
+  ): Promise<Response> {
+    const now = new Date();
+    const generation = newCreateAttemptGeneration();
+    const operationID = crypto.randomUUID();
+    const leases = [...(await this.state.storage.list<LeaseRecord>({ prefix: "lease:" })).values()];
+    const slug = allocateLeaseSlug(
+      requestedSlug || leaseSlugFromID(leaseID),
+      leaseID,
+      owner,
+      org,
+      leases,
+    );
+    const tailscaleError = await this.prepareTailscaleConfig(config, input, leaseID, slug);
+    if (tailscaleError) return tailscaleError;
+    const record: LeaseRecord = withRequestedTailscaleMetadata(
+      {
+        id: leaseID,
+        slug,
+        provider: config.provider,
+        owner,
+        providerOwner: owner,
+        org,
+        target: config.target,
+        windowsMode: config.windowsMode,
+        architecture: config.architecture,
+        os: config.os,
+        desktop: config.desktop,
+        desktopEnv: config.desktopEnv,
+        browser: config.browser,
+        code: config.code,
+        profile: config.profile,
+        class: config.class,
+        serverType: config.serverType,
+        requestedServerType: config.serverType,
+        ...(coordinatorProviderSpec(config.provider).supportsCapacityMarket
+          ? { market: config.capacityMarket }
+          : {}),
+        cloudID: "",
+        serverID: 0,
+        serverName: "",
+        host: "",
+        providerKey: config.providerKey,
+        sshUser: config.sshUser,
+        sshPort: config.sshPort,
+        sshFallbackPorts: config.sshFallbackPorts,
+        workRoot: config.workRoot,
+        keep: config.keep,
+        ttlSeconds: config.ttlSeconds,
+        idleTimeoutSeconds: config.idleTimeoutSeconds,
+        estimatedHourlyUSD: cost.hourlyUSD,
+        maxEstimatedUSD: cost.maxUSD,
+        state: "provisioning",
+        provisioningResourceMayExist: false,
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+        lastTouchedAt: now.toISOString(),
+        expiresAt: leaseExpiresAt(
+          now,
+          now,
+          config.ttlSeconds,
+          config.idleTimeoutSeconds,
+        ).toISOString(),
+        createAttemptGeneration: generation,
+        ...(attempt ? { createAttemptID: attempt.token } : {}),
+        ...(fixedCreate
+          ? {
+              fixedCreateIntentVersion: fixedCreate.version,
+              fixedCreateIntentHash: fixedCreate.hash,
+            }
+          : {}),
+        ...(config.pond ? { pond: config.pond } : {}),
+        ...(config.exposedPorts.length ? { exposedPorts: config.exposedPorts } : {}),
+      },
+      config,
+    );
+    // Rendering, randomness, crypto and read-only provider discovery stay outside retried transactions.
+    const prepared = await capability.prepare(config, record);
+    record.providerScope = prepared.plan.scope;
+    const operation: LeaseProvisioningOperation = {
+      schema: 1,
+      leaseID,
+      operationID,
+      generation,
+      scope: prepared.plan.scope,
+      owner,
+      org,
+      provider: config.provider,
+      createdAt: now.getTime(),
+      deadline: now.getTime() + 30 * 60_000,
+      revision: 0,
+      step: prepared.step,
+      ...(fixedCreate ? { fixedRequestFingerprint: await fixedRequestFingerprint(input) } : {}),
+    };
+    validateProvisioningRecord(prepared.plan);
+    const sealed = await sealProvisioningMaterial(this.env, operation, prepared.material);
+    validateProvisioningRecord(sealed);
+    const admission = await this.state.provisioning!.commitAndWake(async (transaction) => {
+      const currentAttempt = await transaction.get<CreateAttemptRecord>(createAttemptKey(leaseID));
+      const existing = await transaction.get<LeaseRecord>(leaseKey(leaseID));
+      if (attempt) {
+        const tombstone = await transaction.get(
+          archivedCanceledCreateAttemptKey(leaseID, attempt.token),
+        );
+        if (tombstone || currentAttempt?.state === "canceled") return createCanceledResponse();
+        if (
+          !currentAttempt ||
+          currentAttempt.token !== attempt.token ||
+          currentAttempt.owner !== owner ||
+          currentAttempt.org !== org ||
+          !sameFixedCreateIntent(currentAttempt.fixedCreate, fixedCreate)
+        )
+          return createAttemptBindingConflictResponse();
+        if (existing && createAttemptMatchesLease(currentAttempt, existing))
+          return { lease: existing, replay: true };
+      } else if (currentAttempt && createAttemptBlocksLeaseID(currentAttempt))
+        return createAttemptIDConflictResponse();
+      if (existing || (await transaction.get(provisioningOperationKey(leaseID))))
+        return createAttemptIDConflictResponse();
+      if (await transaction.get(`legacy-provider-mutation:${leaseID}`))
+        return createAttemptIDConflictResponse();
+      if (await transaction.get(workspaceLeaseReservationKey(leaseID)))
+        return workspaceManagedLeaseResponse();
+      await capability.validateAdmission?.(transaction, prepared.plan, record);
+      const storedLeases = [
+        ...(await transaction.list<LeaseRecord>({ prefix: "lease:" })).values(),
+      ];
+      const providerAccess = [
+        ...(await transaction.list<LeaseRecord>({ prefix: providerAccessPrefix() })).values(),
+      ];
+      const merged = new Map(storedLeases.map((lease) => [lease.id, lease]));
+      for (const lease of providerAccess) merged.set(lease.id, lease);
+      if (
+        allocateLeaseSlug(requestedSlug || leaseSlugFromID(leaseID), leaseID, owner, org, [
+          ...merged.values(),
+        ]) !== slug
+      ) {
+        return json(
+          {
+            error: "lease_slug_conflict",
+            message: "lease slug changed during admission; retry the same create intent",
+          },
+          { status: 409 },
+        );
+      }
+      const usage = createCostLimitUsage(record, now);
+      for (const lease of merged.values()) addLeaseToCostLimitUsage(usage, lease, now);
+      const limit = enforceCostLimitUsage(usage, record, costLimits(this.env));
+      if (limit) return json({ error: "cost_limit_exceeded", message: limit }, { status: 429 });
+      if (currentAttempt && attempt)
+        await transaction.put(createAttemptKey(leaseID), {
+          ...currentAttempt,
+          canonicalLeaseID: leaseID,
+          generation,
+          updatedAt: now.toISOString(),
+        });
+      await transaction.put(leaseKey(leaseID), record);
+      await transaction.put(provisioningPlanKey(operationID), prepared.plan);
+      await transaction.put(provisioningMaterialKey(operationID), sealed);
+      await putProvisioningOperation(transaction, operation);
+      return { lease: record, replay: false };
+    });
+    if (admission instanceof Response) return admission;
+    if (admission.replay) {
+      // A concurrent release may commit before admission's acknowledgement returns.
+      // Replay must observe the current attempt rather than its earlier lease snapshot.
+      const replay = fixedCreate
+        ? await this.state.runExclusive(() =>
+            this.fixedLeaseReplayResponse(leaseID, owner, org, fixedCreate),
+          )
+        : await this.replayCreateAttempt(leaseID, attempt!.token, owner, org);
+      return this.preferredCreateReplay(
+        request,
+        leaseID,
+        replay ?? createAttemptBindingConflictResponse(),
+      );
+    }
+    if (prefersAsyncProvisioning(request) && admission.lease.state === "provisioning")
+      return acceptedProvisioningLease(admission.lease);
+    while (Date.now() < operation.deadline) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- legacy callers retain a synchronous facade over durable work.
+      await this.leaseProvisioning.advance(leaseID);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- observe only the admitted canonical lease.
+      const current = await this.getLease(leaseID);
+      if (!current || current.createAttemptGeneration !== generation)
+        return createAttemptBindingConflictResponse();
+      if (current.state === "active")
+        return json({ lease: publicLeaseRecord(current) }, { status: 201 });
+      if (current.state !== "provisioning") return createAttemptReplayResponse(current);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- waiting does not own the coordinator lifecycle queue.
+      await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+    }
+    return json(
+      {
+        error: "provisioning_deadline_exceeded",
+        lease: publicLeaseRecord((await this.getLease(leaseID)) ?? record),
+      },
+      { status: 504 },
+    );
+  }
+
+  private async fixedLeaseReplayResponse(
+    leaseID: string,
+
+    owner: string,
+    org: string,
+    intent: FixedLeaseCreateIntent,
+    checkpointAuthorization?: CheckpointLeaseAuthorization,
+    storage: CoordinatorStorageView = this.state.storage,
+  ): Promise<Response | undefined> {
+    const checkpointID = checkpointAuthorization?.checkpoint.id;
+    // Durable non-checkpoint replay keeps every identity read in its transaction.
+    const existing = await storage.get<LeaseRecord>(leaseKey(leaseID));
+    const attempt = await storage.get<CreateAttemptRecord>(createAttemptKey(leaseID));
+    if (attempt && createAttemptBlocksLeaseID(attempt)) {
+      if (
+        attempt.owner !== owner ||
+        attempt.org !== org ||
+        !sameFixedCreateIntent(attempt.fixedCreate, intent)
+      ) {
+        return createAttemptIDConflictResponse();
+      }
+      if (attempt.state === "canceled") return createCanceledResponse();
+      if (
+        attempt.canonicalLeaseID &&
+        (!existing || !createAttemptMatchesLease(attempt, existing))
+      ) {
+        return createAttemptBindingConflictResponse();
+      }
+    }
     if (!existing) return undefined;
     const sameOwner = existing.owner === owner && existing.org === org;
     const sameIntent =
-      existing.fixedCreateIntentVersion === fixedLeaseCreateIntentVersion &&
-      existing.fixedCreateIntentHash === intentHash;
-    if (!sameOwner || !sameIntent || !leaseIsLive(existing)) {
+      existing.fixedCreateIntentVersion === intent.version &&
+      existing.fixedCreateIntentHash === intent.hash &&
+      existing.checkpointID === checkpointID;
+    const sameAttempt =
+      !checkpointID ||
+      (attempt &&
+        attempt.checkpointID === checkpointID &&
+        createAttemptMatchesLease(attempt, existing));
+    if (!sameOwner || !sameIntent || !sameAttempt || !leaseIsLive(existing)) {
       return json(
         { error: "lease_id_conflict", message: "lease id is bound to another create intent" },
         { status: 409 },
+      );
+    }
+    // Only the original attempt retains replay authority after claim consumption.
+    // Consume replacements before returning the lease, without releasing its provisioning fence.
+    if (
+      checkpointAuthorization &&
+      checkpointAuthorization.tokenHash !== attempt?.checkpointUseClaimHash
+    ) {
+      await finishCheckpointUse(
+        this.state.storage,
+        checkpointAuthorization.checkpoint.id,
+        checkpointAuthorization.token,
+        checkpointAuthorization.principal,
+        false,
       );
     }
     return json(
@@ -5403,6 +6185,7 @@ export class FleetCoordinator {
             : recoveredServer.status === "running" && recoveredServer.host.trim()
         ) {
           current.state = "active";
+          clearLeaseCleanupCompletion(current);
           current.host = workspaceCapability
             ? workspaceCapability.recoveredHost(recoveredServer)
             : recoveredServer.host;
@@ -6471,6 +7254,7 @@ export class FleetCoordinator {
       current.endedAt = failedAt;
       current.cloudID = "";
       current.serverID = 0;
+      delete current.providerResourceID;
       current.serverName = "";
       current.host = "";
       current.provisioningResourceMayExist = false;
@@ -6488,6 +7272,9 @@ export class FleetCoordinator {
         current.failureError = message;
       }
       clearLeaseCleanupMetadata(current);
+      if (releaseRequested) {
+        completeLeaseProviderCleanup(current, failedAt);
+      }
       await this.putLease(current);
       return current;
     });
@@ -6528,10 +7315,134 @@ export class FleetCoordinator {
     return await this.releaseResolvedLease(lease, { deleteServer: true, keep: false });
   }
 
+  private cleanupRecoveryLeaseEligible(lease: LeaseRecord): boolean {
+    const expiry = Date.parse(lease.expiresAt);
+    return (
+      Number.isFinite(expiry) &&
+      expiry <= Date.now() &&
+      !lease.cleanupStartedAt &&
+      lease.releaseDeletesServer !== false &&
+      ["active", "released", "failed"].includes(lease.state) &&
+      Boolean(lease.cleanupError || lease.state === "released")
+    );
+  }
+
+  private cleanupRecoveryLeaseBinding(lease: LeaseRecord): string {
+    return JSON.stringify([
+      lease.id,
+      lease.provider,
+      lease.cloudID,
+      lease.providerScope,
+      lease.providerProject,
+      lease.providerResourceID,
+      lease.region,
+      lease.owner,
+      lease.org,
+      lease.createdAt,
+      lease.createAttemptID,
+      lease.createAttemptGeneration,
+      lease.lifecycle,
+    ]);
+  }
+
   private async leaseRoute(request: Request, leaseID: string, action?: string): Promise<Response> {
     const method = request.method.toUpperCase();
     if (method === "PUT" && action === "registration") {
       return await this.registerLease(request, leaseID);
+    }
+    if (method === "POST" && action === "cleanup") {
+      const admin = isAdminRequest(request);
+      const lease = await this.resolveLease(leaseID, request, admin);
+      if (!lease) return notFound();
+      if (
+        requestAuthType(request) === "device" ||
+        (!admin &&
+          (lease.owner !== requestOwner(request) || lease.org !== requestOrg(request, this.env)))
+      ) {
+        return json(
+          { error: "forbidden", message: "lease owner or admin access required" },
+          { status: 403 },
+        );
+      }
+      const input = await readJson<{ action?: unknown; expectedClaimFingerprint?: unknown }>(
+        request,
+      );
+      if (
+        !input ||
+        input.action !== "acknowledge-missing-resource" ||
+        typeof input.expectedClaimFingerprint !== "string" ||
+        !/^[a-f0-9]{64}$/.test(input.expectedClaimFingerprint)
+      ) {
+        return json({ error: "invalid_cleanup_recovery_request" }, { status: 400 });
+      }
+      const providerID = managedLeaseProvider(lease);
+      const provider =
+        !isRegisteredLease(lease) && lease.cloudID && providerID
+          ? this.provider(providerID, lease.region, lease.providerProject)
+          : undefined;
+      if (!provider?.recoverCleanup)
+        return json({ error: "cleanup_recovery_unsupported" }, { status: 501 });
+      if (!this.cleanupRecoveryLeaseEligible(lease)) {
+        return json({ error: "cleanup_recovery_requires_expired_blocked_lease" }, { status: 409 });
+      }
+      const expectedBinding = this.cleanupRecoveryLeaseBinding(lease);
+      try {
+        const recovery = await provider.recoverCleanup(
+          lease,
+          input.expectedClaimFingerprint,
+          requestOwner(request),
+          <T>(commit: () => Promise<T>) =>
+            this.state.runExclusive(async () => {
+              const current = await this.getLease(lease.id);
+              if (
+                !current ||
+                this.cleanupRecoveryLeaseBinding(current) !== expectedBinding ||
+                !this.cleanupRecoveryLeaseEligible(current)
+              ) {
+                throw new ProviderResourceUnresolvedError(
+                  "Cleanup recovery lease changed before commit",
+                );
+              }
+              return await commit();
+            }),
+        );
+        return json({ leaseID: lease.id, provider: providerID, recovery });
+      } catch (error) {
+        if (error instanceof ProviderResourceUnresolvedError) {
+          return json(
+            { error: "cleanup_recovery_refused", message: error.message },
+            { status: 409 },
+          );
+        }
+        throw error;
+      }
+    }
+    if (method === "GET" && action === "cleanup") {
+      const admin = isAdminRequest(request);
+      const lease = await this.resolveLease(leaseID, request, admin);
+      if (!lease) return notFound();
+      if (
+        requestAuthType(request) === "device" ||
+        !this.leaseManageableByRequest(lease, request, admin)
+      ) {
+        return json(
+          { error: "forbidden", message: "lease manage access required" },
+          { status: 403 },
+        );
+      }
+      const providerID = managedLeaseProvider(lease);
+      const provider =
+        !isRegisteredLease(lease) && lease.cloudID && providerID
+          ? this.provider(providerID, lease.region, lease.providerProject)
+          : undefined;
+      if (!provider?.inspectCleanup) {
+        return json({ error: "cleanup_inspection_unsupported" }, { status: 501 });
+      }
+      return json({
+        leaseID: lease.id,
+        provider: managedLeaseProvider(lease),
+        inspection: await provider.inspectCleanup(lease),
+      });
     }
     if (method === "GET" && action === undefined) {
       const admin = isAdminRequest(request);
@@ -6859,6 +7770,7 @@ export class FleetCoordinator {
     delete record.releasedAt;
     delete record.releaseDeletesServer;
     clearLeaseCleanupMetadata(record);
+    clearLeaseCleanupCompletion(record);
     if (!effectiveRuntimeAdapterID || !effectiveRuntimeAdapterWorkspaceID) {
       delete record.runtimeAdapterID;
       delete record.runtimeAdapterWorkspaceID;
@@ -6963,10 +7875,14 @@ export class FleetCoordinator {
         }
         const merged = applyLeaseRecordChanges(latest, snapshot.lease, refreshed);
         await this.putLease(merged);
-        if (managedProvider === "aws") {
+        if (managedProvider === "aws" && leaseHasPublishedAWSAccess(merged)) {
           await this.markAWSIngressReconcilePending(merged);
+          // This write makes ingress reconciliation due. Preserve its scheduling floor
+          // without scanning unrelated fleet state while holding the ingress fence.
+          await this.armAlarmNoLaterThan(Date.now() + awsIngressReconcileMinDelayMs);
+        } else {
+          await this.scheduleAlarm();
         }
-        await this.scheduleAlarm();
         return merged;
       });
     };
@@ -7037,7 +7953,7 @@ export class FleetCoordinator {
     lease.expiresAt = recomputeLeaseExpiresAt(lease, now).toISOString();
     clearLeaseCleanupMetadata(lease);
     await this.putLease(lease);
-    await this.scheduleAlarm();
+    await this.armAlarmNoLaterThan(nextLeaseAlarmTime(lease, this.coordinatorGeneration));
     return lease;
   }
 
@@ -7116,9 +8032,56 @@ export class FleetCoordinator {
       runtimeAdapterDeleteCompletion?: unknown;
       runtimeAdapterLegacyDeleteCompletion?: unknown;
     }>(request);
-    const lease = await this.resolveLease(leaseID, request, admin);
-    if (!lease) {
-      return notFound();
+    const lease =
+      (await this.resolveLease(leaseID, request, admin)) ??
+      (await this.state.runExclusive(async () => {
+        const current = await this.getLease(leaseID);
+        if (current)
+          return this.leaseVisibleToRequest(current, request, admin) ? current : notFound();
+        const attempt = validLeaseID(leaseID) ? await this.getCreateAttempt(leaseID) : undefined;
+        if (
+          !attempt?.fixedCreate ||
+          (!admin &&
+            (attempt.owner !== requestOwner(request) ||
+              attempt.org !== requestOrg(request, this.env))) ||
+          body.runtimeAdapterDeleteCompletion !== undefined ||
+          body.runtimeAdapterLegacyDeleteCompletion !== undefined
+        ) {
+          return notFound();
+        }
+        const providerError = mutationExpectedProviderError(
+          body.expectedProvider,
+          attempt.fixedCreate,
+        );
+        if (providerError) return providerError;
+        if (attempt.canonicalLeaseID) return createAttemptBindingConflictResponse();
+        // Admission is not allocation. Fence the owned intent without a synthetic
+        // lease row, which would charge rejected creations against capacity and cost.
+        const canceled: CreateAttemptRecord = {
+          ...attempt,
+          state: "canceled",
+          updatedAt: attempt.state === "canceled" ? attempt.updatedAt : new Date().toISOString(),
+        };
+        await this.putCreateAttempt(canceled);
+        return json({
+          lease: {
+            id: leaseID,
+            provider: attempt.fixedCreate.provider,
+            owner: attempt.owner,
+            org: orgLabelForDisplay(attempt.org),
+            state: "released",
+            createdAt: attempt.createdAt,
+            updatedAt: canceled.updatedAt,
+            endedAt: canceled.updatedAt,
+            releaseDeletesServer: true,
+            cleanupStatus: "complete",
+            cleanupCompletedAt: canceled.updatedAt,
+            host: "",
+          },
+        });
+      }));
+    if (lease instanceof Response) {
+      return lease;
     }
     if (!this.leaseManageableByRequest(lease, request, admin)) {
       return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
@@ -7224,7 +8187,7 @@ export class FleetCoordinator {
           { status: 409 },
         );
       }
-      await this.scheduleAlarm();
+      await this.state.runExclusive(() => this.armAlarmNoLaterThan(Date.now()));
       return json({ lease: this.leaseForRequest(lease, request, admin) });
     }
     let released: LeaseRecord;
@@ -7572,6 +8535,50 @@ export class FleetCoordinator {
       readiness.checks = await this.awsProviderCapacityChecks(url.searchParams);
     } else if (provider === "daytona" && readiness.configured && !this.testProviders.daytona) {
       readiness.checks = await new DaytonaProvider(this.env).readinessChecks();
+    }
+    if (readiness.configured) {
+      const adapter = this.provider(provider);
+      const capability = adapter.resumableProvisioning?.();
+      if (capability) {
+        let supported = false;
+        try {
+          let config = leaseConfig(
+            {
+              provider,
+              target: normalizeReadinessTarget(url.searchParams.get("target")),
+              windowsMode: normalizeReadinessWindowsMode(url.searchParams.get("windowsMode")),
+              architecture: url.searchParams.get("architecture") ?? "amd64",
+            },
+            {
+              allowAzurePromotedImage: true,
+              ...(this.env.CRABBOX_AZURE_OS_DISK
+                ? { azureOSDisk: this.env.CRABBOX_AZURE_OS_DISK }
+                : {}),
+              ...(this.env.CRABBOX_AZURE_IMAGE ? { azureImage: this.env.CRABBOX_AZURE_IMAGE } : {}),
+            },
+          );
+          config = (await adapter.prepareLeaseConfig?.(config)) ?? config;
+          supported = capability.supports(config);
+        } catch {
+          supported = false;
+        }
+        const admissionEnabled = this.env.CRABBOX_DURABLE_PROVISIONING_ADMISSION === "true";
+        const materialConfigured = provisioningMaterialConfigured(this.env);
+        return json({
+          ...readiness,
+          resumableProvisioning: {
+            version: 1,
+            supported,
+            admissionEnabled,
+            available:
+              supported &&
+              admissionEnabled &&
+              materialConfigured &&
+              Boolean(this.state.provisioning),
+            missing: materialConfigured ? [] : ["CRABBOX_SESSION_SECRET"],
+          },
+        });
+      }
     }
     return json(readiness);
   }
@@ -11903,17 +12910,6 @@ export class FleetCoordinator {
     if (lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
       return json({ error: "lease_not_active" }, { status: 409 });
     }
-    const image = this.readyPoolLeaseImageIdentity(lease);
-    if (!image || lease.target !== "linux" || !canonicalReadyPoolArchitecture(lease.architecture)) {
-      return json(
-        {
-          error: "unsupported_ready_pool_lease_identity",
-          message:
-            "lease lacks provider-owned immutable image, scope, or canonical architecture evidence",
-        },
-        { status: 409 },
-      );
-    }
     const cacheCompatibility = input.cacheCompatibility;
     if (!validReadyPoolIdentityValue(cacheCompatibility)) {
       return json({ error: "invalid_cache_compatibility" }, { status: 400 });
@@ -11927,10 +12923,27 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
+    const observed = await this.observeReadyPoolLeaseImageIdentity(lease, request);
+    if (observed instanceof Response) return observed;
+    const image = this.readyPoolLeaseImageIdentity(observed);
+    if (
+      !image ||
+      observed.target !== "linux" ||
+      !canonicalReadyPoolArchitecture(observed.architecture)
+    ) {
+      return json(
+        {
+          error: "unsupported_ready_pool_lease_identity",
+          message:
+            "lease lacks provider-owned immutable image, scope, or canonical architecture evidence",
+        },
+        { status: 409 },
+      );
+    }
     const identity: ReadyPoolIdentityV1 = {
       schema: readyPoolIdentitySchemaV1,
       image,
-      architecture: lease.architecture!,
+      architecture: observed.architecture!,
       seedDigest,
       cacheCompatibility,
     };
@@ -11993,7 +13006,13 @@ export class FleetCoordinator {
     if (resolvedLease.state !== "active" || Date.parse(resolvedLease.expiresAt) <= Date.now()) {
       return json({ error: "lease_not_active" }, { status: 409 });
     }
-    if (typed && !this.readyPoolIdentityMatchesLease(input.identity!, resolvedLease)) {
+    let checkedLease = resolvedLease;
+    if (typed) {
+      const observed = await this.observeReadyPoolLeaseImageIdentity(resolvedLease, request);
+      if (observed instanceof Response) return observed;
+      checkedLease = observed;
+    }
+    if (typed && !this.readyPoolIdentityMatchesLease(input.identity!, checkedLease)) {
       return json(
         {
           error: "ready_pool_lease_identity_mismatch",
@@ -12004,7 +13023,8 @@ export class FleetCoordinator {
     }
     return await this.withReadyPoolBorrowLock(() =>
       this.state.runExclusive(async () => {
-        const lease = (await this.getLease(leaseID)) ?? resolvedLease;
+        const lease = await this.getLease(leaseID);
+        if (!lease) return notFound();
         if (!this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
           return json(
             { error: "forbidden", message: "lease manage access required" },
@@ -12013,6 +13033,15 @@ export class FleetCoordinator {
         }
         if (lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
           return json({ error: "lease_not_active" }, { status: 409 });
+        }
+        if (typed && !sameReadyPoolObservationLease(lease, checkedLease)) {
+          return json(
+            {
+              error: "ready_pool_image_observation_conflict",
+              message: "lease changed after immutable image evidence was observed",
+            },
+            { status: 409 },
+          );
         }
         if (typed && !this.readyPoolIdentityMatchesLease(input.identity!, lease)) {
           return json({ error: "ready_pool_lease_identity_mismatch" }, { status: 409 });
@@ -12047,7 +13076,7 @@ export class FleetCoordinator {
         }
         const existingPoolEntries = [
           ...(await this.readyPoolEntries()),
-          ...(typed ? await this.readyPoolEntries(true) : []),
+          ...(await this.readyPoolEntries(true)),
         ].filter((entry) => entry.leaseID === leaseID);
         if (existingPoolEntries.some((entry) => entry.state === "busy")) {
           return json(
@@ -12055,6 +13084,12 @@ export class FleetCoordinator {
               error: "lease_pool_busy",
               message: "lease is currently borrowed from a ready pool",
             },
+            { status: 409 },
+          );
+        }
+        if (existingPoolEntries.some((entry) => entry.state === "quarantined")) {
+          return json(
+            { error: "pool_entry_quarantined", message: "quarantined leases must be drained" },
             { status: 409 },
           );
         }
@@ -12132,6 +13167,8 @@ export class FleetCoordinator {
     const input = await readJson<ReadyPoolBorrowRequest>(request);
     const identityError = readyPoolIdentityRequestError(input.identity, typed);
     if (identityError) return identityError;
+    const providerError = normalizeReadyPoolIdentityProvider(input);
+    if (providerError) return providerError;
     const seedError = await readyPoolSeedIdentityRequestError(input.identity, input);
     if (seedError) return seedError;
     const compatibilityKey = normalizeReadyPoolCompatibilityKey(input.compatibilityKey);
@@ -12149,6 +13186,13 @@ export class FleetCoordinator {
         const entries = (await this.readyPoolStatusSnapshot(request, key, typed)).filter((entry) =>
           readyPoolEntryMatches(entry, input),
         );
+        // Older coordinators could register the same lease in both namespaces.
+        // Preserve an existing borrow or quarantine instead of lending its duplicate.
+        const unavailableLeases = new Set(
+          (await this.readyPoolEntries(!typed))
+            .filter((entry) => entry.state === "busy" || entry.state === "quarantined")
+            .map((entry) => entry.leaseID),
+        );
         const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
         const nowMs = Date.now();
         const candidates: Array<{ entry: ReadyPoolEntry; lease: LeaseRecord }> = [];
@@ -12158,6 +13202,7 @@ export class FleetCoordinator {
           if (
             lease &&
             entry.state === "ready" &&
+            !unavailableLeases.has(entry.leaseID) &&
             lease.state === "active" &&
             Date.parse(lease.expiresAt) > nowMs
           ) {
@@ -12311,6 +13356,8 @@ export class FleetCoordinator {
     const input = await readJson<ReadyPoolReconcileRequest>(request);
     const identityError = readyPoolIdentityRequestError(input.identity, typed);
     if (identityError) return identityError;
+    const providerError = normalizeReadyPoolIdentityProvider(input);
+    if (providerError) return providerError;
     const seedError = await readyPoolSeedIdentityRequestError(input.identity, input);
     if (seedError) return seedError;
     if (typed && !this.readyPoolImageIdentitySupported(input.identity!.image)) {
@@ -12356,14 +13403,63 @@ export class FleetCoordinator {
         await this.maintainReadyPools(nowMs);
         const owner = requestOwner(request);
         const org = requestOrg(request, this.env);
-        const policyKey = readyPoolDesiredKey(owner, org, key, compatibilityKey, input.identity);
-        const previous = await this.state.storage.get<ReadyPoolDesiredCapacity>(policyKey);
+        let policyKey: string;
+        let previous: ReadyPoolDesiredCapacity | undefined;
+        let legacyPolicyKey: string | undefined;
+        if (input.identity) {
+          policyKey = await readyPoolDesiredCapacityKeyV2({
+            org,
+            owner,
+            key,
+            compatibilityKey,
+            identity: input.identity,
+          });
+          const current = await this.state.storage.get<ReadyPoolDesiredCapacity>(policyKey);
+          const candidateLegacyKey = readyPoolLegacyTypedDesiredKey(
+            owner,
+            org,
+            key,
+            compatibilityKey,
+            input.identity,
+          );
+          const legacy = storageKeyWithinLimit(candidateLegacyKey)
+            ? await this.state.storage.get<ReadyPoolDesiredCapacity>(candidateLegacyKey)
+            : undefined;
+          for (const [storedKey, stored] of [
+            [policyKey, current],
+            [candidateLegacyKey, legacy],
+          ] as const) {
+            if (!stored) continue;
+            const storedProvider = stored.criteria.provider;
+            if (
+              !readyPoolDesiredCapacityScopeMatches(stored, owner, org, key, compatibilityKey) ||
+              !readyPoolIdentityEqual(stored.criteria.identity, input.identity) ||
+              (storedProvider !== undefined && storedProvider !== input.identity.image.provider) ||
+              (storedKey === policyKey && !readyPoolIdentityEqual(stored.identity, input.identity))
+            ) {
+              return json(
+                {
+                  error: "typed_ready_pool_desired_identity_mismatch",
+                  message:
+                    "stored typed desired capacity does not match the requested provider identity",
+                },
+                { status: 409 },
+              );
+            }
+            previous ??= stored;
+            if (storedKey !== policyKey) legacyPolicyKey = storedKey;
+          }
+        } else {
+          policyKey = readyPoolLegacyDesiredKey(owner, org, key, compatibilityKey);
+          previous = await this.state.storage.get<ReadyPoolDesiredCapacity>(policyKey);
+        }
         const now = new Date(nowMs).toISOString();
         const desired: ReadyPoolDesiredCapacity = {
           key,
           owner,
           org,
           criteria,
+          ...(input.identity ? { identity: input.identity } : {}),
           minReady,
           maxReady,
           createdAt: previous?.createdAt ?? now,
@@ -12371,6 +13467,9 @@ export class FleetCoordinator {
           ...(compatibilityKey ? { compatibilityKey } : {}),
         };
         await this.state.storage.put(policyKey, desired);
+        if (legacyPolicyKey) {
+          await this.state.storage.delete(legacyPolicyKey);
+        }
 
         const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
         const entries = (await this.readyPoolEntries(typed)).filter((entry) => {
@@ -12544,10 +13643,26 @@ export class FleetCoordinator {
         );
       }
       let result = String(input.result ?? "ready");
+      let typedReturnError: Response | undefined;
       if (result !== "ready" && result !== "drain" && result !== "release") {
         return json(
           { error: "invalid_result", message: "result must be ready, drain, or release" },
           { status: 400 },
+        );
+      }
+      const nowMs = Date.now();
+      const deadline = readyPoolBorrowDeadline(current);
+      if (
+        result === "ready" &&
+        current.state === "busy" &&
+        deadline !== undefined &&
+        deadline <= nowMs
+      ) {
+        await this.quarantineReadyPoolEntry(current, "borrow heartbeat expired", nowMs, typed);
+        await this.state.runExclusive(() => this.scheduleAlarm());
+        return json(
+          { error: "borrow_expired", message: "pool borrow heartbeat expired" },
+          { status: 409 },
         );
       }
       if ((current.state === "quarantined" || current.state === "stale") && result === "ready") {
@@ -12559,16 +13674,27 @@ export class FleetCoordinator {
           { status: 409 },
         );
       }
-      if (
-        typed &&
-        result === "ready" &&
-        (!validReadyPoolIdentityV1(input.identity) ||
-          !readyPoolIdentityEqual(current.identity, input.identity) ||
-          !lease ||
-          !this.readyPoolIdentityMatchesLease(input.identity, lease))
-      ) {
-        result = "drain";
-        input.reason = "typed ready-pool identity evidence changed on return";
+      if (typed && result === "ready") {
+        typedReturnError = readyPoolIdentityRequestError(input.identity, true);
+        if (
+          !typedReturnError &&
+          (!readyPoolIdentityEqual(current.identity, input.identity) ||
+            !lease ||
+            !this.readyPoolIdentityMatchesLease(input.identity!, lease))
+        ) {
+          typedReturnError = json(
+            {
+              error: "ready_pool_lease_identity_mismatch",
+              message: "typed ready-pool identity does not match stored or lease evidence",
+            },
+            { status: 409 },
+          );
+        }
+        if (typedReturnError) {
+          result = "drain";
+          input.reason =
+            nonSecretString(input.reason) || "typed ready-pool identity evidence changed on return";
+        }
       }
       if (result === "release" || result === "drain") {
         if (!canManage) {
@@ -12579,18 +13705,22 @@ export class FleetCoordinator {
         }
         const drained = this.nextReturnedReadyPoolEntry(current, lease, "draining", input.reason);
         await this.putReadyPoolEntry(drained, typed);
+        let returnedLease = lease;
         if (lease && lease.state === "active") {
-          return json({
-            entry: publicReadyPoolEntry(drained),
-            lease: publicLeaseRecord(
-              await this.releaseResolvedLease(lease, { deleteServer: true, keep: false }),
-            ),
+          returnedLease = await this.releaseResolvedLease(lease, {
+            deleteServer: true,
+            keep: false,
           });
         }
-        return json({
+        const returned = {
           entry: publicReadyPoolEntry(drained),
-          lease: lease ? publicLeaseRecord(lease) : undefined,
-        });
+          lease: returnedLease ? publicLeaseRecord(returnedLease) : undefined,
+        };
+        if (typedReturnError) {
+          const error = (await typedReturnError.json()) as Record<string, unknown>;
+          return json({ ...error, ...returned }, { status: typedReturnError.status });
+        }
+        return json(returned);
       }
       if (!lease || lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
         const stale = this.nextReturnedReadyPoolEntry(current, lease, "stale", input.reason);
@@ -12619,23 +13749,8 @@ export class FleetCoordinator {
   ): ReadyPoolEntry {
     const now = new Date().toISOString();
     const failures = state === "ready" ? 0 : (current.failureCount ?? 0) + 1;
-    const {
-      borrowedAt: _borrowedAt,
-      borrowedBy: _borrowedBy,
-      borrowHeartbeatRequired: _borrowHeartbeatRequired,
-      borrowHeartbeatAt: _borrowHeartbeatAt,
-      borrowExpiresAt: _borrowExpiresAt,
-      borrowToken: _borrowToken,
-      ...base
-    } = current;
-    void _borrowedAt;
-    void _borrowedBy;
-    void _borrowHeartbeatRequired;
-    void _borrowHeartbeatAt;
-    void _borrowExpiresAt;
-    void _borrowToken;
     const returned: ReadyPoolEntry = {
-      ...base,
+      ...withoutReadyPoolBorrow(current),
       state,
       lastResult: nonSecretString(reason) || state,
       failureCount: failures,
@@ -12696,7 +13811,13 @@ export class FleetCoordinator {
         lease.state !== "active" ||
         !Number.isFinite(backingLeaseExpiresAt) ||
         backingLeaseExpiresAt <= nowMs;
-      if (leaseStale && entry.state !== "stale") {
+      const providerCleanupPending =
+        lease?.state === "released" && lease.releaseDeletesServer === true;
+      if (
+        leaseStale &&
+        entry.state !== "stale" &&
+        !(entry.state === "draining" && providerCleanupPending)
+      ) {
         // oxlint-disable-next-line eslint/no-await-in-loop -- ordered writes prevent stale maintenance from racing a newer entry transition.
         await this.putReadyPoolEntry(
           withoutReadyPoolBorrow({
@@ -12794,11 +13915,72 @@ export class FleetCoordinator {
     );
   }
 
+  private async observeReadyPoolLeaseImageIdentity(
+    lease: LeaseRecord,
+    request: Request,
+  ): Promise<LeaseRecord | Response> {
+    const providerName = managedLeaseProvider(lease);
+    if (!providerName) return lease;
+    const provider = this.provider(providerName, lease.region, lease.providerProject);
+    if (!provider.observeReadyPoolImageIdentity) return lease;
+    let image: LeaseImageIdentity | undefined;
+    let observationError: unknown;
+    try {
+      image = await provider.observeReadyPoolImageIdentity(lease);
+    } catch (error) {
+      observationError = error;
+    }
+    return await this.state.runExclusive(async () => {
+      const current = await this.getLease(lease.id);
+      if (!current) {
+        return readyPoolImageObservationConflict(
+          "lease changed while immutable image evidence was being observed",
+        );
+      }
+      if (!this.leaseManageableByRequest(current, request, isAdminRequest(request))) {
+        return json(
+          { error: "forbidden", message: "lease manage access required" },
+          { status: 403 },
+        );
+      }
+      if (current.state !== "active" || Date.parse(current.expiresAt) <= Date.now()) {
+        return json({ error: "lease_not_active" }, { status: 409 });
+      }
+      if (!sameReadyPoolObservationLease(current, lease)) {
+        return readyPoolImageObservationConflict(
+          "lease changed while immutable image evidence was being observed",
+        );
+      }
+      if (observationError !== undefined) {
+        return json(
+          {
+            error: "ready_pool_image_observation_failed",
+            message: `provider immutable image observation failed: ${coordinatorErrorMessage(this.env, observationError)}`,
+          },
+          { status: 502 },
+        );
+      }
+      if (!image) {
+        const masked = structuredClone(current);
+        delete masked.image;
+        return masked;
+      }
+      if (current.image) {
+        return sameLeaseImageIdentity(current.image, image)
+          ? current
+          : readyPoolImageObservationConflict(
+              "lease already records different immutable image evidence",
+            );
+      }
+      const updated = { ...current, image, updatedAt: new Date().toISOString() };
+      await this.putLease(updated);
+      return updated;
+    });
+  }
+
   private readyPoolImageIdentitySupported(image: ReadyPoolImageIdentity): boolean {
     if (!isCoordinatorProvider(image.provider)) return false;
-    return (
-      this.provider(image.provider, image.scope).supportsReadyPoolImageIdentity?.(image) === true
-    );
+    return this.provider(image.provider).supportsReadyPoolImageIdentity?.(image) === true;
   }
 
   private async drainMismatchedReadyPoolEntry(
@@ -13283,7 +14465,7 @@ export class FleetCoordinator {
     return json({ config, sweep });
   }
 
-  private async auditAWSLeaseCloud(lease: LeaseRecord): Promise<LeaseCloudAudit> {
+  private leaseCloudAuditBase(lease: LeaseRecord): LeaseCloudAudit {
     const audit: LeaseCloudAudit = {
       leaseID: lease.id,
       provider: lease.provider,
@@ -13312,6 +14494,11 @@ export class FleetCoordinator {
     if (lease.cleanupRetryAt) {
       audit.cleanupRetryAt = lease.cleanupRetryAt;
     }
+    return audit;
+  }
+
+  private async auditAWSLeaseCloud(lease: LeaseRecord): Promise<LeaseCloudAudit> {
+    const audit = this.leaseCloudAuditBase(lease);
     try {
       const server = await this.awsLeaseServer(lease);
       if (isAWSTerminalInstanceState(server.status)) {
@@ -13354,34 +14541,7 @@ export class FleetCoordinator {
   }
 
   private async auditAzureLeaseCloud(lease: LeaseRecord): Promise<LeaseCloudAudit> {
-    const audit: LeaseCloudAudit = {
-      leaseID: lease.id,
-      provider: lease.provider,
-      state: lease.state,
-      target: lease.target,
-      owner: lease.owner,
-      org: orgLabelForDisplay(lease.org),
-      cloudID: lease.cloudID,
-      host: lease.host,
-      serverType: lease.serverType,
-      expiresAt: lease.expiresAt,
-      cloudStatus: "error",
-    };
-    if (lease.slug) {
-      audit.slug = lease.slug;
-    }
-    if (lease.region) {
-      audit.region = lease.region;
-    }
-    if (lease.cleanupAttempts !== undefined) {
-      audit.cleanupAttempts = lease.cleanupAttempts;
-    }
-    if (lease.cleanupError) {
-      audit.cleanupError = coordinatorDiagnosticText(this.env, lease.cleanupError);
-    }
-    if (lease.cleanupRetryAt) {
-      audit.cleanupRetryAt = lease.cleanupRetryAt;
-    }
+    const audit = this.leaseCloudAuditBase(lease);
     try {
       const machines = await this.provider("azure", lease.region).listCrabboxServers();
       const server = machines.find(
@@ -13965,6 +15125,26 @@ export class FleetCoordinator {
     });
   }
 
+  private async capacity(request: Request): Promise<Response> {
+    if (new URL(request.url).searchParams.size > 0) {
+      return json({ error: "capacity does not accept query parameters" }, { status: 400 });
+    }
+    const now = new Date();
+    const owner = requestOwner(request);
+    const { costUsage } = await this.mergedLeaseAdmissionState(
+      { owner, org: requestOrg(request, this.env) },
+      now,
+      await this.readProviderAccessRecords(now.getTime()),
+    );
+    const capacity: OwnerCapacity = {
+      owner,
+      activeLeases: costUsage.ownerActiveLeases,
+      effectiveLimit: activeLeaseLimitForOwner(costLimits(this.env), owner),
+      observedAt: now.toISOString(),
+    };
+    return json(capacity);
+  }
+
   private async usage(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const requestedScope = url.searchParams.get("scope") ?? "user";
@@ -13998,6 +15178,908 @@ export class FleetCoordinator {
       owner: requestOwner(request),
       org: requestOrgLabel(request, this.env),
     });
+  }
+
+  private checkpointPrincipal(request: Request): CheckpointPrincipal {
+    return {
+      owner: requestOwner(request),
+      org: requestOrg(request, this.env),
+      admin: isAdminRequest(request),
+    };
+  }
+
+  private async scheduleCheckpointAlarm(): Promise<void> {
+    await this.state.runExclusive(() => this.scheduleAlarm());
+  }
+
+  private async checkpointRoute(request: Request, parts: string[]): Promise<Response> {
+    try {
+      if (isDeviceTokenRequest(request)) {
+        return json(
+          { error: "checkpoint_forbidden", message: "device tokens cannot manage checkpoints" },
+          { status: 403 },
+        );
+      }
+      const method = request.method.toUpperCase();
+      const principal = this.checkpointPrincipal(request);
+      if (parts.length === 2 && method === "GET") {
+        const records = await this.state.storage.list<CoordinatorCheckpointRecord>({
+          prefix: "checkpoint:",
+        });
+        return json({
+          checkpoints: [...records.values()]
+            .filter(
+              (record) => record.state !== "deleted" && checkpointVisibleTo(record, principal),
+            )
+            .toSorted((left, right) => right.createdAt.localeCompare(left.createdAt))
+            .map(publicCheckpointRecord),
+        });
+      }
+      if (parts.length === 2 && method === "POST") {
+        return await this.createCheckpoint(request, principal);
+      }
+      const checkpointID = parts[2];
+      if (!validCheckpointID(checkpointID)) {
+        return json(
+          { error: "invalid_checkpoint_id", message: "invalid checkpoint identifier" },
+          { status: 400 },
+        );
+      }
+      const current = await this.state.storage.get<CoordinatorCheckpointRecord>(
+        checkpointKey(checkpointID),
+      );
+      if (!current || !checkpointVisibleTo(current, principal)) return notFound();
+      if (parts.length === 3 && method === "GET") {
+        if (current.state === "deleted") return notFound();
+        if (new URL(request.url).searchParams.get("verify") === "true") {
+          if (current.state !== "ready" || !current.image) {
+            throw new CheckpointError(
+              "checkpoint_pending",
+              "checkpoint provider resource is not ready",
+            );
+          }
+          const provider = this.provider(
+            current.provider,
+            current.scope.region,
+            current.scope.project,
+          );
+          const image = await provider.getImage(current.image.id, current.image.kind);
+          if (
+            image.id !== current.image.id ||
+            image.resourceID !== current.image.resourceID ||
+            image.immutableID !== current.image.immutableID ||
+            image.region !== current.scope.region ||
+            (current.provider === "gcp" && image.project !== current.scope.project) ||
+            (current.provider === "aws" &&
+              image.accountID &&
+              image.accountID !== current.scope.accountID)
+          ) {
+            throw new CheckpointError(
+              "checkpoint_source_mismatch",
+              "provider resource no longer matches checkpoint ownership",
+            );
+          }
+          return json({ checkpoint: publicCheckpointRecord(current), image });
+        }
+        return json({ checkpoint: publicCheckpointRecord(current) });
+      }
+      if (parts.length === 4 && parts[3] === "events" && method === "GET") {
+        const limit = clampLimit(new URL(request.url).searchParams.get("limit"), 100);
+        const events = await this.state.storage.list<CoordinatorCheckpointEvent>({
+          prefix: checkpointEventKey(checkpointID, 0).replace(/0{12}$/, ""),
+          limit,
+        });
+        return json({ events: [...events.values()] });
+      }
+      if (
+        parts.length === 4 &&
+        (parts[3] === "retention" || parts[3] === "policy") &&
+        method === "PATCH"
+      ) {
+        const body = await readJson<{
+          retention?: unknown;
+          mode?: unknown;
+          unusedForSeconds?: unknown;
+        }>(request);
+        const retention = body.retention ?? body;
+        if (!validCheckpointRetention(retention)) {
+          return json(
+            {
+              error: "invalid_checkpoint_retention",
+              message: "retention must be manual or a bounded positive unused duration",
+            },
+            { status: 400 },
+          );
+        }
+        const checkpoint = await updateCheckpointRetention(
+          this.state.storage,
+          checkpointID,
+          principal,
+          retention,
+        );
+        await this.scheduleCheckpointAlarm();
+        return json({ checkpoint: publicCheckpointRecord(checkpoint) });
+      }
+      if (parts.length === 4 && parts[3] === "use" && method === "POST") {
+        const body = await readJson<{ action?: unknown; claim?: unknown }>(request);
+        if (body.action === "begin") {
+          const claim = await acquireCheckpointUse(
+            this.state.storage,
+            checkpointID,
+            principal,
+            checkpointLimits(this.env),
+          );
+          await this.scheduleCheckpointAlarm();
+          return json(
+            {
+              checkpoint: publicCheckpointRecord(claim.checkpoint),
+              claim: claim.token,
+              expiresAt: claim.expiresAt,
+            },
+            { status: 201 },
+          );
+        }
+        if (typeof body.claim !== "string" || !body.claim) {
+          return json(
+            { error: "checkpoint_claim_invalid", message: "checkpoint use claim is required" },
+            { status: 400 },
+          );
+        }
+        if (body.action === "renew") {
+          const renewed = await renewCheckpointUse(
+            this.state.storage,
+            checkpointID,
+            body.claim,
+            principal,
+          );
+          await this.scheduleCheckpointAlarm();
+          return json({
+            checkpoint: publicCheckpointRecord(renewed.checkpoint),
+            expiresAt: renewed.expiresAt,
+          });
+        }
+        if (body.action === "complete" || body.action === "abort") {
+          const checkpoint = await finishCheckpointUse(
+            this.state.storage,
+            checkpointID,
+            body.claim,
+            principal,
+            body.action === "complete",
+          );
+          await this.scheduleCheckpointAlarm();
+          return json({ checkpoint: publicCheckpointRecord(checkpoint) });
+        }
+        return json(
+          { error: "invalid_checkpoint_use", message: "unknown checkpoint use action" },
+          { status: 400 },
+        );
+      }
+      if (parts.length === 3 && method === "DELETE") {
+        if (current.state === "deleted") return json({ checkpointID, deleted: true });
+        if (
+          (current.state === "creating" || current.state === "failed") &&
+          current.createClaim &&
+          !current.image
+        ) {
+          if (
+            current.createClaim.definitiveRefusal ||
+            current.createClaim.providerMutationPhase === "reserved" ||
+            current.createClaim.providerAbsenceVerifiedAt
+          ) {
+            await cancelFailedCheckpointCreate(this.state.storage, checkpointID, principal);
+            await this.scheduleCheckpointAlarm();
+            return json({ checkpointID, deleted: true });
+          }
+          const provider = this.provider(
+            current.provider,
+            current.scope.region,
+            current.scope.project,
+          );
+          if (!provider.recoverCheckpointImage) {
+            throw new CheckpointError(
+              "checkpoint_pending",
+              "checkpoint provider cannot prove its exact creation resource is absent",
+            );
+          }
+          const recovered = await provider.recoverCheckpointImage(current);
+          if (recovered) {
+            await publishRecoveredCheckpoint(this.state.storage, checkpointID, recovered);
+            return await this.deleteManagedCheckpoint(checkpointID, principal, "create-recovery");
+          }
+          const observed = await recordCheckpointProviderAbsence(this.state.storage, checkpointID);
+          if (observed.createClaim?.providerAbsenceVerifiedAt) {
+            await cancelFailedCheckpointCreate(this.state.storage, checkpointID, principal);
+            await this.scheduleCheckpointAlarm();
+            return json({ checkpointID, deleted: true });
+          }
+          await this.scheduleCheckpointAlarm();
+          throw new CheckpointError(
+            "checkpoint_pending",
+            "checkpoint creation resource may still appear; its ownership reservation remains active",
+          );
+        }
+        return await this.deleteManagedCheckpoint(checkpointID, principal, "manual");
+      }
+      return notFound();
+    } catch (error) {
+      if (error instanceof CheckpointError) {
+        return json(
+          { error: error.code, message: coordinatorErrorMessage(this.env, error) },
+          { status: error.status },
+        );
+      }
+      return json(
+        { error: "checkpoint_failure", message: coordinatorErrorMessage(this.env, error) },
+        { status: 500 },
+      );
+    }
+  }
+
+  private async createCheckpoint(
+    request: Request,
+    principal: CheckpointPrincipal,
+  ): Promise<Response> {
+    const input = await readJson<{
+      id?: unknown;
+      leaseID?: unknown;
+      name?: unknown;
+      strategy?: unknown;
+      noReboot?: unknown;
+      retention?: unknown;
+      workdir?: unknown;
+      repo?: { name?: unknown; head?: unknown; baseRef?: unknown };
+    }>(request);
+    if (!validCheckpointID(input.id)) {
+      return json(
+        { error: "invalid_checkpoint_id", message: "invalid checkpoint identifier" },
+        { status: 400 },
+      );
+    }
+    if (typeof input.leaseID !== "string" || !validLeaseID(input.leaseID)) {
+      return json(
+        { error: "invalid_lease_id", message: "invalid source lease identifier" },
+        { status: 400 },
+      );
+    }
+    const name = typeof input.name === "string" ? input.name.trim() : "";
+    if (!validImageName(name)) {
+      return json(
+        { error: "invalid_image_name", message: "invalid checkpoint name" },
+        { status: 400 },
+      );
+    }
+    const retention: CoordinatorCheckpointRetention =
+      input.retention === undefined
+        ? { mode: "manual" }
+        : (input.retention as CoordinatorCheckpointRetention);
+    if (!validCheckpointRetention(retention)) {
+      return json(
+        { error: "invalid_checkpoint_retention", message: "invalid checkpoint retention" },
+        { status: 400 },
+      );
+    }
+    const lease = await this.resolveLease(input.leaseID, request, true);
+    if (
+      !lease ||
+      (!principal.admin &&
+        (lease.owner !== principal.owner || !sameOrgIdentityKey(lease.org, principal.org)))
+    ) {
+      return notFound();
+    }
+    const managed = managedLeaseProvider(lease);
+    if (!managed || !["aws", "azure", "gcp"].includes(managed) || !lease.cloudID) {
+      return json(
+        {
+          error: "checkpoint_source_mismatch",
+          message: "managed checkpoints require a brokered AWS, Azure, or GCP source lease",
+        },
+        { status: 400 },
+      );
+    }
+    const providerName = managed as CoordinatorCheckpointProvider;
+    const provider = this.provider(providerName, lease.region, lease.providerProject);
+    if (!provider.checkpointScope || !provider.createCheckpointImage) {
+      return json(
+        {
+          error: "checkpoint_source_mismatch",
+          message: "provider does not support coordinator-owned checkpoints",
+        },
+        { status: 409 },
+      );
+    }
+    const strategy = checkpointStrategy(
+      typeof input.strategy === "string" ? input.strategy : provider.defaultImageStrategy(lease),
+    );
+    if (!strategy) {
+      return json(
+        {
+          error: "invalid_strategy",
+          message: "checkpoint strategy must be image or disk-snapshot",
+        },
+        { status: 400 },
+      );
+    }
+    const unsupported = provider.validateLeaseImageStrategy(lease, strategy);
+    if (unsupported) {
+      return json({ error: "unsupported_strategy", message: unsupported }, { status: 400 });
+    }
+    const scope = await provider.checkpointScope(lease);
+    const ownershipToken = crypto.randomUUID() + crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const resourceName = await checkpointProviderResourceName(
+      providerName,
+      name,
+      input.id,
+      lease.id,
+    );
+    const repoName = boundedCheckpointString(input.repo?.name, 128);
+    const repoHead = boundedCheckpointString(input.repo?.head, 128);
+    const repoBaseRef = boundedCheckpointString(input.repo?.baseRef, 128);
+    const workdir = boundedCheckpointString(input.workdir, 1024);
+    const hostID = lease.hostId ?? lease.hostID;
+    const repo = {
+      ...(repoName ? { name: repoName } : {}),
+      ...(repoHead ? { head: repoHead } : {}),
+      ...(repoBaseRef ? { baseRef: repoBaseRef } : {}),
+    };
+    const reservation = await reserveCheckpointCreate(
+      this.state.storage,
+      {
+        record: {
+          id: input.id,
+          owner: lease.owner,
+          org: lease.org,
+          leaseID: lease.id,
+          provider: providerName,
+          scope,
+          name,
+          strategy,
+          noReboot: input.noReboot !== false,
+          retention,
+          createdAt,
+          lastUsedAt: createdAt,
+          target: lease.target,
+          ...(lease.windowsMode ? { windowsMode: lease.windowsMode } : {}),
+          ...(lease.desktop ? { desktop: lease.desktop } : {}),
+          ...(lease.serverType ? { serverType: lease.serverType } : {}),
+          ...(hostID ? { hostID } : {}),
+          ...(lease.slug ? { slug: lease.slug } : {}),
+          ...(workdir ? { workdir } : {}),
+          ...(Object.keys(repo).length ? { repo } : {}),
+        },
+        ownershipToken,
+        resourceName,
+        coordinatorGeneration: this.coordinatorGeneration,
+      },
+      checkpointLimits(this.env),
+    );
+    await this.scheduleCheckpointAlarm();
+    try {
+      const ownership: ProviderCheckpointOwnership = {
+        checkpointID: reservation.id,
+        tokenHash: reservation.createClaim!.tokenHash,
+        sourceLeaseID: lease.id,
+      };
+      await markCheckpointProviderMutationStarted(
+        this.state.storage,
+        reservation.id,
+        ownershipToken,
+      );
+      const image = await provider.createCheckpointImage(
+        lease,
+        resourceName,
+        input.noReboot !== false,
+        strategy,
+        ownership,
+        scope,
+      );
+      const checkpoint = await publishCreatedCheckpoint(
+        this.state.storage,
+        reservation.id,
+        ownershipToken,
+        image,
+      );
+      await this.scheduleCheckpointAlarm();
+      return json({ checkpoint: publicCheckpointRecord(checkpoint), image }, { status: 201 });
+    } catch (error) {
+      const message = coordinatorErrorMessage(this.env, error);
+      if (checkpointProviderMutationDefinitivelyRefused(error)) {
+        await failCheckpointCreateDefinitively(
+          this.state.storage,
+          reservation.id,
+          ownershipToken,
+          message,
+        );
+      } else {
+        await recordCheckpointCreateFailure(
+          this.state.storage,
+          reservation.id,
+          ownershipToken,
+          message,
+        );
+      }
+      await this.scheduleCheckpointAlarm();
+      return json(
+        {
+          error: "checkpoint_pending",
+          message:
+            "checkpoint creation did not complete; durable ownership is retained for recovery",
+          checkpointID: reservation.id,
+        },
+        { status: 503 },
+      );
+    }
+  }
+
+  private async createCheckpointLease(request: Request, fixedLeaseID?: string): Promise<Response> {
+    try {
+      const input = await readJson<LeaseRequest>(request);
+      if (
+        fixedLeaseID &&
+        (!validLeaseID(fixedLeaseID) ||
+          (input.leaseID !== undefined && input.leaseID !== fixedLeaseID))
+      ) {
+        return json({ error: "invalid_lease_id" }, { status: 400 });
+      }
+      const checkpointID = input.checkpointID;
+      const token = input.checkpointUseClaim;
+      if (!validCheckpointID(checkpointID) || typeof token !== "string" || !token) {
+        return json(
+          {
+            error: "checkpoint_claim_invalid",
+            message: "a checkpoint identifier and use claim are required",
+          },
+          { status: 400 },
+        );
+      }
+      const principal = this.checkpointPrincipal(request);
+      const checkpointUseClaimHash = await sha256Hex(token);
+      const authorizedCheckpoint = await this.state.storage.get<CoordinatorCheckpointRecord>(
+        checkpointKey(checkpointID),
+      );
+      if (!authorizedCheckpoint || !checkpointVisibleTo(authorizedCheckpoint, principal)) {
+        return notFound();
+      }
+      if (
+        !fixedLeaseID &&
+        validCreateAttemptID(input.createAttemptID) &&
+        validLeaseID(input.leaseID)
+      ) {
+        const existingAttemptReplay = await this.replayCreateAttempt(
+          input.leaseID,
+          input.createAttemptID,
+          principal.owner,
+          principal.org,
+          checkpointID,
+          checkpointUseClaimHash,
+        );
+        if (existingAttemptReplay && !existingAttemptReplay.ok) return existingAttemptReplay;
+      }
+      // Finish surviving claims for already-active children before replay;
+      // the prior create may have committed its lease but failed to record completion.
+      await expireCheckpointClaims(this.state.storage, checkpointID);
+      let checkpoint: CoordinatorCheckpointRecord = authorizedCheckpoint;
+      let completedReplay: Response | undefined;
+      try {
+        // An unpublished capture cannot be a replay; retain the canonical claim refusal.
+        if (!fixedLeaseID || !authorizedCheckpoint.image)
+          checkpoint = await validateCheckpointUse(
+            this.state.storage,
+            checkpointID,
+            token,
+            principal,
+          );
+      } catch (error) {
+        if (
+          !(error instanceof CheckpointError) ||
+          error.code !== "checkpoint_claim_invalid" ||
+          !validCreateAttemptID(input.createAttemptID) ||
+          !validLeaseID(input.leaseID)
+        ) {
+          throw error;
+        }
+        const [existingCheckpoint, attempt] = await Promise.all([
+          this.state.storage.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)),
+          this.getCreateAttempt(input.leaseID),
+        ]);
+        const lease = attempt?.canonicalLeaseID
+          ? await this.getLease(attempt.canonicalLeaseID)
+          : undefined;
+        if (
+          !existingCheckpoint ||
+          !checkpointVisibleTo(existingCheckpoint, principal) ||
+          !lease ||
+          lease.checkpointID !== checkpointID ||
+          !attempt ||
+          attempt.token !== input.createAttemptID ||
+          !createAttemptMatchesLease(attempt, lease) ||
+          !createAttemptMatchesCheckpoint(attempt, checkpointID, checkpointUseClaimHash)
+        ) {
+          throw error;
+        }
+        completedReplay = await this.replayCreateAttempt(
+          input.leaseID,
+          input.createAttemptID,
+          principal.owner,
+          principal.org,
+          checkpointID,
+          checkpointUseClaimHash,
+        );
+        if (!completedReplay?.ok) throw error;
+        checkpoint = existingCheckpoint;
+      }
+      const image = checkpoint.image!;
+      const expectedSelector =
+        image.kind === "aws-ami"
+          ? input.awsAMI
+          : image.kind === "aws-ebs-snapshot"
+            ? input.awsSnapshot
+            : image.kind === "azure-os-disk-snapshot"
+              ? input.azureSnapshot
+              : image.kind === "gcp-machine-image"
+                ? input.gcpMachineImage
+                : input.gcpSnapshot;
+      const selectors = [
+        input.awsAMI,
+        input.awsSnapshot,
+        input.azureSnapshot,
+        input.gcpMachineImage,
+        input.gcpSnapshot,
+      ].filter(Boolean);
+      const foreignScope =
+        checkpoint.provider === "aws"
+          ? Boolean(input.azureLocation || input.gcpZone || input.gcpProject)
+          : checkpoint.provider === "azure"
+            ? Boolean(input.awsRegion || input.gcpZone || input.gcpProject)
+            : Boolean(input.awsRegion || input.azureLocation);
+      const region =
+        checkpoint.provider === "aws"
+          ? input.awsRegion
+          : checkpoint.provider === "azure"
+            ? input.azureLocation
+            : input.gcpZone;
+      if (
+        input.provider !== checkpoint.provider ||
+        foreignScope ||
+        (input.target && input.target !== checkpoint.target) ||
+        selectors.length !== 1 ||
+        (expectedSelector !== image.id && expectedSelector !== image.resourceID) ||
+        (region && region !== checkpoint.scope.region) ||
+        (input.gcpProject && input.gcpProject !== checkpoint.scope.project) ||
+        (input.architecture &&
+          image.architecture &&
+          normalizeArchitecture(input.architecture) !== normalizeArchitecture(image.architecture))
+      ) {
+        return json(
+          {
+            error: "checkpoint_source_mismatch",
+            message: "lease source does not match the exact owned checkpoint resource",
+          },
+          { status: 409 },
+        );
+      }
+      if (
+        !fixedLeaseID &&
+        (!validCreateAttemptID(input.createAttemptID) || !validLeaseID(input.leaseID))
+      ) {
+        return json(
+          {
+            error: "checkpoint_claim_invalid",
+            message: "checkpoint-backed provisioning requires an exact lease and create attempt",
+          },
+          { status: 400 },
+        );
+      }
+      if (completedReplay) return completedReplay;
+      const requestedLeaseID = fixedLeaseID ?? input.leaseID!;
+      const createAttemptID = input.createAttemptID!;
+      if (!fixedLeaseID) await this.validateCheckpointLeaseSource(checkpoint);
+      const {
+        checkpointID: _checkpointID,
+        checkpointUseClaim: _checkpointUseClaim,
+        ...leaseInput
+      } = input;
+      void _checkpointID;
+      void _checkpointUseClaim;
+      if (checkpoint.provider === "aws") {
+        leaseInput.awsRegion = checkpoint.scope.region;
+      } else if (checkpoint.provider === "azure") {
+        leaseInput.azureLocation = checkpoint.scope.region;
+      } else {
+        leaseInput.gcpZone = checkpoint.scope.region;
+        leaseInput.gcpProject = checkpoint.scope.project!;
+      }
+      if (!fixedLeaseID) {
+        const reserved = await this.reserveCreateAttempt(
+          requestedLeaseID,
+          createAttemptID,
+          principal.owner,
+          principal.org,
+          checkpointID,
+          checkpointUseClaimHash,
+        );
+        if (reserved instanceof Response) return reserved;
+        if (
+          reserved.replayLease &&
+          (reserved.replayLease.checkpointID !== checkpointID ||
+            reserved.replayLease.owner !== principal.owner ||
+            reserved.replayLease.org !== principal.org ||
+            !createAttemptMatchesLease(reserved.attempt, reserved.replayLease))
+        ) {
+          return createAttemptBindingConflictResponse();
+        }
+        if (reserved.replayLease && !leaseIsLive(reserved.replayLease)) {
+          return createAttemptReplayResponse(reserved.replayLease);
+        }
+        const bound = await this.state.runExclusive(async () => {
+          const current = await this.getCreateAttempt(requestedLeaseID);
+          if (!current || current.token !== createAttemptID) {
+            return createAttemptConflictResponse();
+          }
+          if (current.owner !== principal.owner || current.org !== principal.org) {
+            return createAttemptConflictResponse();
+          }
+          if (current.state === "canceled") return createCanceledResponse();
+          if (!sameCreateAttempt(current, reserved.attempt)) {
+            return createAttemptBindingConflictResponse();
+          }
+          return await this.state.storage.transaction((transaction) =>
+            bindCheckpointUseProvisioningInTransaction(
+              transaction,
+              checkpointID,
+              checkpointUseClaimHash,
+              principal,
+              createAttemptID,
+              requestedLeaseID,
+            ),
+          );
+        });
+        if (bound instanceof Response) return bound;
+        await this.scheduleCheckpointAlarm();
+        if (reserved.replayLease) {
+          await finishCheckpointUse(
+            this.state.storage,
+            checkpointID,
+            token,
+            principal,
+            true,
+            createAttemptID,
+            {
+              requestedLeaseID,
+              generation: checkpoint.generation,
+              createdAt: checkpoint.createdAt,
+            },
+          );
+          await this.scheduleCheckpointAlarm();
+          return createAttemptReplayResponse(reserved.replayLease);
+        }
+      }
+      const leaseRequest = new Request(request.url, {
+        method: "POST",
+        headers: request.headers,
+        body: JSON.stringify(leaseInput),
+      });
+      const response = await this.createLease(
+        leaseRequest,
+        undefined,
+        undefined,
+        undefined,
+        fixedLeaseID,
+        { checkpoint, principal, token, tokenHash: checkpointUseClaimHash },
+      );
+      if (fixedLeaseID && response.ok && response.status !== 201) {
+        await this.scheduleCheckpointAlarm();
+        return response;
+      }
+      const admittedAttemptID = fixedLeaseID
+        ? (await this.getCreateAttempt(requestedLeaseID))?.token
+        : createAttemptID;
+      if (response.ok) {
+        await finishCheckpointUse(
+          this.state.storage,
+          checkpointID,
+          token,
+          principal,
+          true,
+          admittedAttemptID,
+          { requestedLeaseID, generation: checkpoint.generation, createdAt: checkpoint.createdAt },
+        );
+        await this.scheduleCheckpointAlarm();
+      } else if (admittedAttemptID) {
+        const resolved = await this.state.runExclusive(() =>
+          resolveRejectedCheckpointProvisioning(
+            this.state.storage,
+            checkpointID,
+            token,
+            principal,
+            admittedAttemptID,
+            requestedLeaseID,
+          ),
+        );
+        if (resolved) await this.scheduleCheckpointAlarm();
+      }
+      return response;
+    } catch (error) {
+      if (error instanceof CheckpointError) {
+        return json(
+          { error: error.code, message: coordinatorErrorMessage(this.env, error) },
+          { status: error.status },
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async validateCheckpointLeaseSource(
+    checkpoint: CoordinatorCheckpointRecord,
+  ): Promise<void> {
+    const checkpointProvider = this.provider(
+      checkpoint.provider,
+      checkpoint.scope.region,
+      checkpoint.scope.project,
+    );
+    await checkpointProvider.validateCheckpointLeaseScope?.(checkpoint);
+    if (!checkpointProvider.validateCheckpointImage) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "checkpoint provider cannot verify its exact owned source resource",
+      );
+    }
+    await checkpointProvider.validateCheckpointImage(checkpoint);
+  }
+
+  private async deleteManagedCheckpoint(
+    checkpointID: string,
+    principal: CheckpointPrincipal | undefined,
+    reason: "manual" | "unused-expiry" | "create-recovery",
+  ): Promise<Response> {
+    const claimed = await claimCheckpointDeletion(
+      this.state.storage,
+      checkpointID,
+      principal,
+      reason,
+    );
+    if (claimed.checkpoint.state === "deleted") return json({ checkpointID, deleted: true });
+    await this.scheduleCheckpointAlarm();
+    const provider = this.provider(
+      claimed.checkpoint.provider,
+      claimed.checkpoint.scope.region,
+      claimed.checkpoint.scope.project,
+    );
+    try {
+      if (!provider.deleteCheckpointImage) {
+        throw new CheckpointError(
+          "checkpoint_delete_failed",
+          "provider does not support exact checkpoint deletion",
+        );
+      }
+      await provider.deleteCheckpointImage(claimed.checkpoint);
+      await markCheckpointProviderDeleted(this.state.storage, checkpointID, claimed.token);
+      await finalizeCheckpointDeletion(this.state.storage, checkpointID, claimed.token);
+      await this.scheduleCheckpointAlarm();
+      return json({ checkpointID, deleted: true });
+    } catch (error) {
+      const message = coordinatorErrorMessage(this.env, error);
+      const current = await this.state.storage.get<CoordinatorCheckpointRecord>(
+        checkpointKey(checkpointID),
+      );
+      if (current?.state === "deleting" && current.deleteClaim?.phase === "provider-deleted") {
+        await this.scheduleCheckpointAlarm();
+        return json(
+          {
+            error: "checkpoint_delete_failed",
+            message: "checkpoint provider deletion succeeded; coordinator finalization will retry",
+            checkpoint: publicCheckpointRecord(current),
+          },
+          { status: 503 },
+        );
+      }
+      const checkpoint = await recordCheckpointDeletionFailure(
+        this.state.storage,
+        checkpointID,
+        claimed.token,
+        message,
+      );
+      await this.scheduleCheckpointAlarm();
+      return json(
+        {
+          error: "checkpoint_delete_failed",
+          message: "checkpoint deletion failed; coordinator will retry",
+          checkpoint: publicCheckpointRecord(checkpoint),
+        },
+        { status: 503 },
+      );
+    }
+  }
+
+  private async maintainCheckpoints(): Promise<void> {
+    await backfillFailedCheckpointCreateRecovery(this.state.storage, checkpointLimits(this.env));
+    const due = await this.state.storage.list<CoordinatorCheckpointDueIndex>({
+      prefix: checkpointDuePrefix,
+      limit: 32,
+    });
+    const now = Date.now();
+    await Promise.all(
+      [...due]
+        .filter(([, marker]) => Date.parse(marker.nextSweepAt) <= now)
+        .map(async ([key, marker]) => await this.maintainCheckpointDueMarker(key, marker, now)),
+    );
+  }
+
+  private async maintainCheckpointDueMarker(
+    key: string,
+    marker: CoordinatorCheckpointDueIndex,
+    now: number,
+  ): Promise<void> {
+    let checkpoint = await repairCheckpointDueMarker(this.state.storage, key, marker);
+    if (!checkpoint) return;
+    if (checkpoint.state === "deleted") {
+      await pruneCheckpointTombstone(this.state.storage, checkpoint.id);
+      return;
+    }
+    if (
+      checkpoint.state === "creating" ||
+      (checkpoint.state === "failed" &&
+        checkpoint.createClaim &&
+        checkpoint.createClaim.providerMutationPhase !== "reserved" &&
+        checkpoint.retryAt)
+    ) {
+      if (!checkpoint.createClaim || checkpoint.createClaim.providerMutationPhase === "reserved") {
+        await recordCheckpointCreateRecoveryFailure(
+          this.state.storage,
+          checkpoint.id,
+          "checkpoint provider mutation never started",
+        );
+        return;
+      }
+      const provider = this.provider(
+        checkpoint.provider,
+        checkpoint.scope.region,
+        checkpoint.scope.project,
+      );
+      try {
+        if (!provider.recoverCheckpointImage || !checkpoint.createClaim) {
+          throw new Error("provider cannot recover the exact checkpoint creation reservation");
+        }
+        const image = await provider.recoverCheckpointImage(checkpoint);
+        if (image) {
+          await publishRecoveredCheckpoint(this.state.storage, checkpoint.id, image);
+        } else {
+          await recordCheckpointProviderAbsence(this.state.storage, checkpoint.id);
+        }
+      } catch (error) {
+        await recordCheckpointCreateRecoveryFailure(
+          this.state.storage,
+          checkpoint.id,
+          coordinatorErrorMessage(this.env, error),
+        );
+      }
+      return;
+    }
+    if (checkpoint.state === "ready") {
+      checkpoint = await expireCheckpointClaims(this.state.storage, checkpoint.id);
+      if (
+        checkpoint &&
+        checkpoint.retention.mode === "expire-unused" &&
+        checkpoint.pinCount === 0 &&
+        checkpoint.activeUseCount === 0 &&
+        Date.parse(checkpoint.lastUsedAt) + checkpoint.retention.unusedForSeconds * 1000 <= now
+      ) {
+        await recordCheckpointExpiryDue(this.state.storage, checkpoint.id);
+        await this.deleteManagedCheckpoint(checkpoint.id, undefined, "unused-expiry");
+      }
+      return;
+    }
+    if (checkpoint.state === "delete-pending" && Date.parse(checkpoint.retryAt ?? "") <= now) {
+      await this.deleteManagedCheckpoint(checkpoint.id, undefined, "manual");
+      return;
+    }
+    if (checkpoint.state === "deleting") {
+      const recovered = await recoverCheckpointDeletion(this.state.storage, checkpoint.id);
+      if (recovered.state === "delete-pending") {
+        await this.deleteManagedCheckpoint(recovered.id, undefined, "manual");
+      }
+    }
   }
 
   private async marketplaceQuote(request: Request): Promise<Response> {
@@ -14115,6 +16197,74 @@ export class FleetCoordinator {
     const providerRegion = region || knownRegion;
     const providerForRegion =
       providerRegion === region ? imageProvider : this.provider(provider, providerRegion, project);
+    const providerMutation =
+      (method === "DELETE" && action === undefined) ||
+      (method === "POST" &&
+        (action === "promote" || action === "promote-cas" || action === "promote-catalog"));
+    const checkpointMetadata =
+      provider === "gcp" && project && metadata?.project && metadata.project !== project
+        ? undefined
+        : metadata;
+    let managedCheckpoint: CoordinatorCheckpointRecord | undefined;
+    if (providerMutation) {
+      managedCheckpoint = await findManagedCheckpointImage(
+        this.state.storage,
+        provider as CoordinatorCheckpointProvider,
+        {
+          id: decodedImageID,
+          ...(checkpointMetadata?.resourceID ? { resourceID: checkpointMetadata.resourceID } : {}),
+          ...(checkpointMetadata?.kind ? { kind: checkpointMetadata.kind } : kind ? { kind } : {}),
+          ...(checkpointMetadata?.immutableID
+            ? { immutableID: checkpointMetadata.immutableID }
+            : {}),
+          ...(checkpointMetadata?.snapshots ? { snapshots: checkpointMetadata.snapshots } : {}),
+          ...(provider === "gcp" && project && !decodedImageID.includes("/")
+            ? { project }
+            : checkpointMetadata?.project
+              ? { project: checkpointMetadata.project }
+              : {}),
+        },
+      );
+      if (
+        !managedCheckpoint &&
+        provider === "aws" &&
+        /^(?:ami|snap)-[a-z0-9-]+$/i.test(decodedImageID)
+      ) {
+        const pending = await this.state.storage.list({
+          prefix: "checkpoint-intent:aws:",
+          limit: 1,
+        });
+        if (pending.size > 0) {
+          const observed = await providerForRegion.getImage(decodedImageID, kind);
+          managedCheckpoint = await findManagedCheckpointImage(this.state.storage, "aws", observed);
+        }
+      }
+      if (managedCheckpoint) {
+        const conflictingRegion =
+          region !== undefined &&
+          region.toLowerCase() !== managedCheckpoint.scope.region.toLowerCase();
+        const conflictingProject =
+          project !== undefined && project !== managedCheckpoint.scope.project;
+        if (conflictingRegion || conflictingProject) {
+          return json(
+            {
+              error: "checkpoint_source_mismatch",
+              message: "requested provider scope conflicts with durable checkpoint ownership",
+            },
+            { status: 409 },
+          );
+        }
+        if (managedCheckpoint.state === "creating" || managedCheckpoint.state === "failed") {
+          return json(
+            {
+              error: "checkpoint_pending",
+              message: "provider resource is reserved by a pending checkpoint creation",
+            },
+            { status: 409 },
+          );
+        }
+      }
+    }
     if (method === "GET" && action === undefined) {
       let image: ProviderImage;
       try {
@@ -14147,6 +16297,15 @@ export class FleetCoordinator {
       return result instanceof Response ? result : json(result);
     }
     if (method === "DELETE" && action === undefined) {
+      if (managedCheckpoint) {
+        return json(
+          {
+            error: "checkpoint_managed",
+            message: `image belongs to checkpoint ${managedCheckpoint.id}; delete the checkpoint instead`,
+          },
+          { status: 409 },
+        );
+      }
       const ownershipMetadata = providerForRegion.storedImageDeleteMetadata
         ? await providerForRegion.storedImageDeleteMetadata(decodedImageID)
         : metadata;
@@ -14168,7 +16327,24 @@ export class FleetCoordinator {
       await providerForRegion.deleteImage(decodedImageID, kind, metadata);
       return json({ imageID: decodedImageID, deleted: true });
     }
-    if (method === "DELETE" && action === "promote-catalog") {
+    if (method === "DELETE" && (action === "promote-catalog" || action === "promote")) {
+      if (!isAdminRequest(request)) {
+        return json({ error: "forbidden", message: "admin token required" }, { status: 403 });
+      }
+      if (action === "promote") {
+        if (!providerForRegion.retirePromotedImage) {
+          return json(
+            {
+              error: "unsupported_provider",
+              message: "image promotion retirement is supported for AWS and Azure",
+            },
+            { status: 400 },
+          );
+        }
+        const retired = await providerForRegion.retirePromotedImage(decodedImageID, region);
+        await this.scheduleAlarm();
+        return json({ imageID: decodedImageID, retired });
+      }
       const retirementRegion = region === undefined ? undefined : sanitizeAWSRegion(region);
       if (region !== undefined && !retirementRegion) {
         return json(
@@ -14186,9 +16362,79 @@ export class FleetCoordinator {
         );
       }
       const retired = await providerForRegion.retireCatalogImage(decodedImageID, retirementRegion);
+      await this.scheduleAlarm();
       return json({ imageID: decodedImageID, catalogOnly: true, retired });
     }
-    if (method === "POST" && (action === "promote" || action === "promote-catalog")) {
+    if (
+      method === "POST" &&
+      (action === "promote" || action === "promote-cas" || action === "promote-catalog")
+    ) {
+      const promotionRequest = await readJson<{
+        expectedCurrent?: unknown;
+        retireExpectedCatalog?: unknown;
+      }>(request.clone()).catch(
+        (): { expectedCurrent?: unknown; retireExpectedCatalog?: unknown } => ({}),
+      );
+      if (
+        action !== "promote-cas" &&
+        (promotionRequest.expectedCurrent !== undefined ||
+          promotionRequest.retireExpectedCatalog !== undefined)
+      ) {
+        return json(
+          {
+            error: "invalid_image_precondition",
+            message: "transactional image preconditions require transactional image promotion",
+          },
+          { status: 400 },
+        );
+      }
+      if (action === "promote-cas") {
+        if (provider !== "aws") {
+          return json(
+            {
+              error: "unsupported_provider",
+              message: "transactional image promotion is AWS-only",
+            },
+            { status: 400 },
+          );
+        }
+        if (promotionRequest.expectedCurrent === undefined) {
+          return json(
+            {
+              error: "image_promotion_precondition_required",
+              message: "transactional image promotion requires expectedCurrent",
+            },
+            { status: 400 },
+          );
+        }
+        if (
+          promotionRequest.retireExpectedCatalog === true &&
+          parseImageDefaultState(promotionRequest.expectedCurrent)?.state !== "present"
+        ) {
+          return json(
+            {
+              error: "invalid_image_precondition",
+              message: "retireExpectedCatalog requires an exact expected image id and revision",
+            },
+            { status: 400 },
+          );
+        }
+      }
+      if (
+        (managedCheckpoint &&
+          (managedCheckpoint.state !== "ready" || managedCheckpoint.deleteClaim)) ||
+        (!managedCheckpoint &&
+          (checkpointMetadata?.checkpointOwnershipHash ||
+            checkpointMetadata?.checkpointSourceLeaseID))
+      ) {
+        return json(
+          {
+            error: "checkpoint_delete_in_progress",
+            message: "checkpoint ownership is unavailable for image promotion",
+          },
+          { status: 409 },
+        );
+      }
       url.searchParams.set("catalogOnly", action === "promote-catalog" ? "true" : "false");
       if (!providerForRegion.promoteImage) {
         return json(
@@ -14199,7 +16445,24 @@ export class FleetCoordinator {
           { status: 400 },
         );
       }
-      const result = await providerForRegion.promoteImage(decodedImageID, metadata, request, url);
+      let result: Response | { image: ProviderImage };
+      try {
+        result = await providerForRegion.promoteImage(
+          decodedImageID,
+          metadata,
+          request,
+          url,
+          managedCheckpoint
+            ? { id: managedCheckpoint.id, generation: managedCheckpoint.generation }
+            : undefined,
+        );
+      } catch (error) {
+        if (error instanceof CheckpointError) {
+          return json({ error: error.code, message: error.message }, { status: error.status });
+        }
+        throw error;
+      }
+      await this.scheduleAlarm();
       return result instanceof Response ? result : json(result);
     }
     return json({ error: "not_found" }, { status: 404 });
@@ -14213,6 +16476,7 @@ export class FleetCoordinator {
         if (due.length >= interruptedProvisioningRecoveryBatchSize) {
           return;
         }
+        if (await provisioningOwnsLease(this.state.storage, lease.id)) return;
         const recoveryAt = interruptedProvisioningRecoveryAt(
           lease,
           this.coordinatorGeneration,
@@ -14243,19 +16507,51 @@ export class FleetCoordinator {
   }
 
   private async reconcileInterruptedLease(lease: LeaseRecord): Promise<void> {
+    if (await provisioningOwnsLease(this.state.storage, lease.id)) return;
     const providerName = managedLeaseProvider(lease);
     if (!providerName) {
       return;
     }
     const provider = this.provider(providerName, lease.region, lease.providerProject);
     let server: ProviderMachine | undefined;
+    let recoveryFence: { lease: LeaseRecord; attempt: CreateAttemptRecord } | undefined;
     try {
-      server = await this.recoverProviderServer(providerName, provider, lease);
+      const unbound = await this.recoverUnboundInterruptedProvisioningResource(provider, lease);
+      if (unbound) {
+        recoveryFence = { lease: unbound.lease, attempt: unbound.attempt };
+        lease = unbound.lease;
+        if (unbound.server) {
+          const strictLease = structuredClone(unbound.lease);
+          strictLease.cloudID = unbound.server.cloudID;
+          strictLease.serverName = unbound.server.name;
+          server = await this.recoverProviderServer(providerName, provider, strictLease);
+          if (!server) {
+            throw new ProviderResourceUnresolvedError(
+              "captured provider resource disappeared before strict recovery",
+            );
+          }
+          if (
+            server.providerResourceID !== unbound.server.providerResourceID ||
+            server.cloudID !== unbound.server.cloudID ||
+            server.name !== unbound.server.name
+          ) {
+            throw new ProviderResourceUnresolvedError(
+              "captured provider resource changed during strict recovery",
+            );
+          }
+        }
+      } else {
+        server = await this.recoverProviderServer(providerName, provider, lease);
+      }
     } catch (error) {
       const failure = `interrupted provisioning recovery failed: ${coordinatorErrorMessage(this.env, error)}`;
       await this.state.runExclusive(async () => {
         const current = await this.getLease(lease.id);
-        if (!sameProvisioningAttempt(current, lease)) {
+        if (
+          !current ||
+          (await provisioningOwnsLease(this.state.storage, current.id)) ||
+          !(await this.interruptedProvisioningRecoveryMatches(current, lease, recoveryFence))
+        ) {
           return;
         }
         const failedAt = new Date();
@@ -14277,12 +16573,16 @@ export class FleetCoordinator {
     }
     await this.state.runExclusive(async () => {
       const current = await this.getLease(lease.id);
-      if (!sameProvisioningAttempt(current, lease)) {
+      if (
+        !current ||
+        (await provisioningOwnsLease(this.state.storage, current.id)) ||
+        !(await this.interruptedProvisioningRecoveryMatches(current, lease, recoveryFence))
+      ) {
         return;
       }
       const failedAtDate = new Date();
       const failedAt = failedAtDate.toISOString();
-      const interruption = "coordinator deployment interrupted provider provisioning";
+      const interruption = "provider provisioning was interrupted";
       current.updatedAt = failedAt;
       if (server) {
         current.state = lease.state === "released" ? "released" : "failed";
@@ -14336,6 +16636,7 @@ export class FleetCoordinator {
         delete current.provisioningRecoveryMissingSince;
         current.cloudID = "";
         current.serverID = 0;
+        delete current.providerResourceID;
         current.serverName = "";
         current.host = "";
         current.failureError = `${interruption}; no provider resource found`;
@@ -14343,9 +16644,114 @@ export class FleetCoordinator {
         current.provisioningFailureRetryable = false;
         delete current.releaseDeletesServer;
         clearLeaseCleanupMetadata(current);
+        completeLeaseProviderCleanup(current, failedAt);
       }
       await this.putLease(current);
     });
+  }
+
+  private async recoverUnboundInterruptedProvisioningResource(
+    provider: CloudProvider,
+    expected: LeaseRecord,
+  ): Promise<
+    | {
+        lease: LeaseRecord;
+        attempt: CreateAttemptRecord;
+        server?: ProviderMachine;
+      }
+    | undefined
+  > {
+    if (!provider.recoverUnboundProvisioningResource) return undefined;
+    const snapshot = await this.state.runExclusive(async () => {
+      const current = await this.getLease(expected.id);
+      const attempt = current?.createAttemptID
+        ? await this.getCreateAttempt(current.id)
+        : undefined;
+      if (
+        !sameProvisioningAttempt(current, expected) ||
+        !unboundProvisioningRecoveryEligible(current, attempt)
+      ) {
+        return undefined;
+      }
+      return {
+        lease: structuredClone(current),
+        attempt: structuredClone(attempt),
+      };
+    });
+    if (!snapshot) return undefined;
+    const server = await provider.recoverUnboundProvisioningResource(snapshot.lease);
+    if (!server) {
+      if (snapshot.lease.providerResourceID !== undefined) {
+        throw new ProviderResourceUnresolvedError(
+          "captured provider resource disappeared before strict recovery retry",
+        );
+      }
+      return snapshot;
+    }
+    const providerResourceID = server.providerResourceID;
+    if (
+      server.provider !== snapshot.lease.provider ||
+      !server.cloudID ||
+      server.cloudID !== server.name ||
+      !providerResourceID
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        "provider returned invalid unbound provisioning identity",
+      );
+    }
+    if (snapshot.lease.providerResourceID !== undefined) {
+      if (snapshot.lease.providerResourceID !== providerResourceID) {
+        throw new ProviderResourceUnresolvedError(
+          "captured provider resource identity changed before strict recovery retry",
+        );
+      }
+      return {
+        lease: snapshot.lease,
+        attempt: snapshot.attempt,
+        server,
+      };
+    }
+    return await this.state.runExclusive(async () => {
+      const current = await this.getLease(snapshot.lease.id);
+      const attempt = current?.createAttemptID
+        ? await this.getCreateAttempt(current.id)
+        : undefined;
+      if (
+        !current ||
+        !attempt ||
+        !sameUnboundProvisioningRecoveryLease(current, snapshot.lease) ||
+        !sameCreateAttempt(attempt, snapshot.attempt) ||
+        !unboundProvisioningRecoveryEligible(current, attempt)
+      ) {
+        throw new ProviderResourceUnresolvedError(
+          "provider resource identity changed before unbound recovery capture",
+        );
+      }
+      const captured: LeaseRecord = {
+        ...current,
+        providerResourceID,
+        updatedAt: new Date().toISOString(),
+      };
+      await this.putLease(captured);
+      return {
+        lease: captured,
+        attempt: snapshot.attempt,
+        server,
+      };
+    });
+  }
+
+  private async interruptedProvisioningRecoveryMatches(
+    current: LeaseRecord | undefined,
+    expected: LeaseRecord,
+    fence: { lease: LeaseRecord; attempt: CreateAttemptRecord } | undefined,
+  ): Promise<boolean> {
+    if (!fence) return sameProvisioningAttempt(current, expected);
+    if (!current || !sameUnboundProvisioningRecoveryLease(current, fence.lease)) {
+      return false;
+    }
+    const attempt = current.createAttemptID ? await this.getCreateAttempt(current.id) : undefined;
+    return Boolean(attempt && sameCreateAttempt(attempt, fence.attempt));
   }
 
   private async expireLeases(): Promise<void> {
@@ -14353,6 +16759,7 @@ export class FleetCoordinator {
       const now = Date.now();
       const claimed: Array<{ claim: string; lease: LeaseRecord }> = [];
       await this.visitLeaseRecords(async (stored) => {
+        if (await provisioningOwnsLease(this.state.storage, stored.id)) return;
         if (!leaseIsLive(stored)) {
           await this.closeLeaseBridges(stored.id, 1008, "lease ended");
         }
@@ -14399,9 +16806,17 @@ export class FleetCoordinator {
           return;
         }
         if (lease.state === "provisioning" && !lease.cloudID) {
-          lease.state = "failed";
           lease.updatedAt = nowISO;
           lease.endedAt = nowISO;
+          if (leaseHasConfirmedNoProviderResource(lease)) {
+            lease.state = "expired";
+            lease.releaseDeletesServer = true;
+            clearLeaseCleanupMetadata(lease);
+            completeLeaseProviderCleanup(lease, nowISO);
+            await this.putLease(lease, { noCache: true });
+            return;
+          }
+          lease.state = "failed";
           if (lease.provisioningRequestStartedAt) lease.provisioningResourceMayExist = true;
           lease.cleanupFailedAt = nowISO;
           lease.cleanupError =
@@ -14416,6 +16831,7 @@ export class FleetCoordinator {
         lease.cleanupClaimExpiresAt = new Date(
           nowDate.getTime() + leaseCleanupClaimStaleMs,
         ).toISOString();
+        clearLeaseCleanupCompletion(lease);
         lease.updatedAt = nowISO;
         await this.putLease(lease, { noCache: true });
         claimed.push({ claim: nowISO, lease });
@@ -14424,55 +16840,68 @@ export class FleetCoordinator {
     });
     await Promise.all(
       claims.map(async ({ claim, lease }) => {
-        const cleanup = async () => {
-          let failure: { error: unknown; message: string } | undefined;
-          try {
-            await this.deleteLeaseServer(lease);
-          } catch (error) {
-            failure = { error, message: coordinatorErrorMessage(this.env, error) };
-          }
-          await this.state.runExclusive(async () => {
-            const current = await this.getLease(lease.id);
-            if (!current || current.cleanupStartedAt !== claim) {
-              return;
-            }
-            const nowDate = new Date();
-            const nowISO = nowDate.toISOString();
-            if (failure) {
-              recordLeaseCleanupFailure(current, failure.error, failure.message, nowISO);
-              await this.putLease(current);
-              console.warn(
-                `lease cleanup failed lease=${current.id} provider=${current.provider} cloud=${current.cloudID}: ${failure.message}`,
-              );
-              return;
-            }
-            current.state = leaseIsLive(current) ? "expired" : current.state;
-            current.updatedAt = nowISO;
-            current.endedAt = nowISO;
-            if (current.provisioningResourceMayExist) {
-              if (!current.failureError && current.cleanupError) {
-                current.failureError = current.cleanupError;
-              }
-            }
-            clearProvisioningRecoveryMetadata(current);
-            delete current.releaseDeletesServer;
-            clearLeaseCleanupMetadata(current);
-            delete current.providerKeyCleanupPending;
-            delete current.providerKeyCleanupID;
-            delete current.cleanupStartedAt;
-            delete current.cleanupClaimExpiresAt;
-            await this.putLease(current);
-            await this.clearWorkspaceReleaseError(current);
-            await this.markAWSIngressReconcilePending(current);
-          });
-        };
-        if (managedLeaseProvider(lease) === "aws" && !lease.network?.awsPrivate) {
-          await this.withAWSIngressOperationLock(cleanup);
-        } else {
-          await cleanup();
+        let failure: { error: unknown; message: string } | undefined;
+        try {
+          await this.deleteLeaseServer(lease);
+        } catch (error) {
+          failure = { error, message: coordinatorErrorMessage(this.env, error) };
         }
+        await this.withLeaseCleanupState(lease, async () => {
+          const current = await this.getLease(lease.id);
+          if (
+            !current ||
+            current.cleanupStartedAt !== claim ||
+            !sameLeaseCleanupClaim(current, lease) ||
+            (await provisioningOwnsLease(this.state.storage, lease.id))
+          ) {
+            return;
+          }
+          const nowDate = new Date();
+          const nowISO = nowDate.toISOString();
+          if (failure) {
+            recordLeaseCleanupFailure(current, failure.error, failure.message, nowISO);
+            await this.putLease(current);
+            console.warn(
+              `lease cleanup failed lease=${current.id} provider=${current.provider} cloud=${current.cloudID}: ${failure.message}`,
+            );
+            return;
+          }
+          current.state = leaseIsLive(current) ? "expired" : current.state;
+          current.updatedAt = nowISO;
+          current.endedAt = nowISO;
+          if (current.provisioningResourceMayExist) {
+            if (!current.failureError && current.cleanupError) {
+              current.failureError = current.cleanupError;
+            }
+          }
+          clearProvisioningRecoveryMetadata(current);
+          delete current.releaseDeletesServer;
+          clearLeaseCleanupMetadata(current);
+          delete current.providerKeyCleanupPending;
+          delete current.providerKeyCleanupID;
+          delete current.cleanupStartedAt;
+          delete current.cleanupClaimExpiresAt;
+          completeLeaseProviderCleanup(current, nowISO);
+          await this.putLease(current);
+          await this.clearWorkspaceReleaseError(current);
+          await this.markAWSIngressReconcilePending(current);
+        });
       }),
     );
+  }
+
+  // Callers hold the lifecycle mutex, shared with full alarm reconciliation.
+  private async armAlarmNoLaterThan(deadline: number | undefined): Promise<void> {
+    if (deadline === undefined || !Number.isFinite(deadline)) {
+      return;
+    }
+    const current = await this.state.getAlarm();
+    // A due timestamp can outlive its consumed runtime job, so re-arm without postponing it.
+    if (current === undefined || current <= Date.now() || deadline < current) {
+      await this.state.scheduleAlarm(
+        current === undefined ? deadline : Math.min(current, deadline),
+      );
+    }
   }
 
   private async scheduleAlarm(): Promise<void> {
@@ -14602,6 +17031,12 @@ export class FleetCoordinator {
     retainAlarm(azureCleanupAlarm);
     const awsIngressAlarm = await this.nextAWSIngressReconcileAlarmTime();
     retainAlarm(awsIngressAlarm);
+    const nextCheckpoint = await this.state.storage.list<CoordinatorCheckpointDueIndex>({
+      prefix: checkpointDuePrefix,
+      limit: 1,
+    });
+    const checkpointDeadline = [...nextCheckpoint.values()][0]?.nextSweepAt;
+    if (checkpointDeadline) retainAlarm(Math.max(now + 1, Date.parse(checkpointDeadline)));
     if ((await this.state.storage.get<string>(runPruneCursorKey)) !== undefined) {
       retainAlarm(now + 1000);
     }
@@ -14619,7 +17054,9 @@ export class FleetCoordinator {
     const retryTimes = awsIngressReconcileTargets(record)
       .map((target) => Date.parse(target.retryAt))
       .filter((time) => Number.isFinite(time));
-    return retryTimes.length > 0 ? Math.max(Date.now() + 1000, Math.min(...retryTimes)) : undefined;
+    return retryTimes.length > 0
+      ? Math.max(Date.now() + awsIngressReconcileMinDelayMs, Math.min(...retryTimes))
+      : undefined;
   }
 
   private async markAWSIngressReconcilePending(anchor: LeaseRecord): Promise<void> {
@@ -14814,15 +17251,18 @@ export class FleetCoordinator {
         try {
           const lease = azureDeferredCleanupLease(record);
           const scope = azureProviderScope(lease.providerScope)!;
-          await new AzureClient(this.env, {
-            location: record.location,
-            subscription: scope.subscription,
-            resourceGroup: scope.resourceGroup,
-            ownedDeleteClaimStorage: this.state.storage,
-          }).deleteOwnedServer(lease);
+          await this.withLegacyProviderMutation(lease.id, () =>
+            new AzureClient(this.env, {
+              location: record.location,
+              subscription: scope.subscription,
+              resourceGroup: scope.resourceGroup,
+              ownedDeleteClaimStorage: this.state.storage,
+            }).deleteOwnedServer(lease),
+          );
         } catch (error) {
           await this.state.runExclusive(async () => {
             const current = await this.state.storage.get<AzureDeferredCleanupRecord>(key);
+            if (await provisioningOwnsLease(this.state.storage, record.leaseID)) return;
             if (!current || current.updatedAt !== record.updatedAt) {
               return;
             }
@@ -14848,6 +17288,7 @@ export class FleetCoordinator {
         }
         await this.state.runExclusive(async () => {
           const current = await this.state.storage.get<AzureDeferredCleanupRecord>(key);
+          if (await provisioningOwnsLease(this.state.storage, record.leaseID)) return;
           if (current?.updatedAt === record.updatedAt) {
             await this.state.storage.delete(key);
           }
@@ -15319,9 +17760,11 @@ export class FleetCoordinator {
         try {
           // Azure release uses the persisted provider scope and resumable owned-resource deletion.
           // oxlint-disable-next-line eslint/no-await-in-loop -- release failures must stay attached to the candidate.
-          await this.provider("azure", region).releaseLease(exactOwnershipLease, {
-            resourceIdentity: machine.resourceIdentity ?? "",
-          });
+          await this.withLegacyProviderMutation(exactOwnershipLease.id, () =>
+            this.provider("azure", region).releaseLease(exactOwnershipLease, {
+              resourceIdentity: machine.resourceIdentity ?? "",
+            }),
+          );
           candidate.action = "terminated";
           released = true;
         } catch (error) {
@@ -15446,6 +17889,8 @@ export class FleetCoordinator {
     if (exact) {
       return this.leaseVisibleToRequest(exact, request, admin) ? exact : undefined;
     }
+    // Canonical IDs never become aliases for another lease's normalized slug.
+    if (validLeaseID(identifier)) return undefined;
     const slug = normalizeLeaseSlug(identifier);
     if (!slug) {
       return undefined;
@@ -15534,6 +17979,15 @@ export class FleetCoordinator {
     excludedLeaseID?: string,
   ): Promise<{ accessLeases: LeaseRecord[]; costUsage: CostLimitUsage }> {
     const providerAccessLeases = await this.providerAccessRecords();
+    return this.mergedLeaseAdmissionState(candidate, now, providerAccessLeases, excludedLeaseID);
+  }
+
+  private async mergedLeaseAdmissionState(
+    candidate: Pick<LeaseRecord, "owner" | "org">,
+    now: Date,
+    providerAccessLeases: LeaseRecord[],
+    excludedLeaseID?: string,
+  ): Promise<{ accessLeases: LeaseRecord[]; costUsage: CostLimitUsage }> {
     const providerAccessByID = new Map(providerAccessLeases.map((lease) => [lease.id, lease]));
     const accessLeases: LeaseRecord[] = [];
     const costUsage = createCostLimitUsage(candidate, now);
@@ -15649,11 +18103,19 @@ export class FleetCoordinator {
     }
   }
 
+  private async readProviderAccessRecords(now: number): Promise<LeaseRecord[]> {
+    const active: LeaseRecord[] = [];
+    await this.visitStorageRecords<LeaseRecord>(providerAccessPrefix(), (record) => {
+      if (isActiveProviderAccessRecord(record, now)) active.push(record);
+    });
+    return active;
+  }
+
   private async providerAccessRecords(): Promise<LeaseRecord[]> {
     const now = Date.now();
     const active: LeaseRecord[] = [];
     await this.visitStorageRecords<LeaseRecord>(providerAccessPrefix(), async (record, key) => {
-      if (leaseIsLive(record) && Date.parse(record.expiresAt) > now) {
+      if (isActiveProviderAccessRecord(record, now)) {
         active.push(record);
         return;
       }
@@ -15788,34 +18250,9 @@ export class FleetCoordinator {
     });
     this.awsIngressBarrier = previous.then(() => gate);
     await previous;
-    await Promise.all(this.awsIngressAdditiveOperations);
     try {
       return await operation();
     } finally {
-      release();
-    }
-  }
-
-  private async withAWSIngressAdditiveOperation<T>(operation: () => Promise<T>): Promise<T> {
-    let release!: () => void;
-    let active!: Promise<void>;
-    for (;;) {
-      const barrier = this.awsIngressBarrier;
-      // oxlint-disable-next-line eslint/no-await-in-loop -- retry only when an authoritative fence arrived first.
-      await barrier.catch(() => {});
-      if (barrier !== this.awsIngressBarrier) {
-        continue;
-      }
-      active = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      this.awsIngressAdditiveOperations.add(active);
-      break;
-    }
-    try {
-      return await operation();
-    } finally {
-      this.awsIngressAdditiveOperations.delete(active);
       release();
     }
   }
@@ -16279,29 +18716,25 @@ export class FleetCoordinator {
       }
       await this.deleteProviderAccess(reservation.id);
       await this.state.storage.delete(leaseKey(reservation.id));
-      await this.unbindPendingCreateAttemptReservation(current);
+      await this.unbindCreateAttemptReservation(current);
       await this.scheduleAlarm();
     });
   }
 
-  private async unbindPendingCreateAttemptReservation(reservation: LeaseRecord): Promise<void> {
+  private async unbindCreateAttemptReservation(reservation: LeaseRecord): Promise<void> {
     if (!reservation.createAttemptID || !reservation.createAttemptGeneration) {
       return;
     }
     const attempt = await this.getCreateAttempt(reservation.id);
     if (
       !attempt ||
-      attempt.state !== "pending" ||
-      attempt.requestedLeaseID !== reservation.id ||
-      attempt.token !== reservation.createAttemptID ||
-      attempt.owner !== reservation.owner ||
-      attempt.org !== reservation.org ||
-      attempt.canonicalLeaseID !== reservation.id ||
-      attempt.generation !== reservation.createAttemptGeneration
+      (attempt.state !== "pending" && !attempt.fixedCreate) ||
+      !createAttemptMatchesLease(attempt, reservation)
     ) {
       return;
     }
     const unbound = { ...attempt, updatedAt: new Date().toISOString() };
+    if (reservation.state === "released") unbound.state = "canceled";
     delete unbound.canonicalLeaseID;
     delete unbound.cloudID;
     delete unbound.generation;
@@ -16325,6 +18758,9 @@ export class FleetCoordinator {
       }
       await this.deleteProviderAccess(reservation.id);
       await this.state.storage.delete(leaseKey(reservation.id));
+      // This owner proved no provider request started; preserve cancellation
+      // without leaving a charged lease row or a dangling canonical binding.
+      await this.unbindCreateAttemptReservation(latest);
       await this.markAWSIngressReconcilePending(reservation);
       await this.scheduleAlarm();
       return undefined;
@@ -16390,16 +18826,18 @@ export class FleetCoordinator {
   }
 
   private async broadcastRunEvent(run: RunRecord, event: RunEventRecord): Promise<void> {
-    for (const socket of this.controlSockets.values()) {
+    for (const [clientID, socket] of this.controlSockets) {
       if (socket.readyState !== WebSocket.OPEN) {
         continue;
       }
-      const attachment = this.bridgeAttachment(socket);
-      if (!attachment || attachment.kind !== "control") {
+      let attachment: BridgeAttachment | undefined;
+      try {
+        attachment = this.bridgeAttachment(socket);
+      } catch {
+        this.retireFailedControlSocket(clientID, socket);
         continue;
       }
-      // oxlint-disable-next-line eslint/no-await-in-loop -- validate each control before its event can be sent.
-      if (!(await this.activeBridgeGrantIsCurrent(socket, attachment))) {
+      if (!attachment || attachment.kind !== "control") {
         continue;
       }
       const after = attachment.subscriptions?.[run.id];
@@ -16410,8 +18848,17 @@ export class FleetCoordinator {
       ) {
         continue;
       }
-      attachment.subscriptions = { ...attachment.subscriptions, [run.id]: event.seq };
-      this.serializeBridgeAttachment(socket, attachment);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- validate each subscriber before its event can be sent.
+      if (!(await this.activeBridgeGrantIsCurrent(socket, attachment))) {
+        continue;
+      }
+      try {
+        attachment.subscriptions = { ...attachment.subscriptions, [run.id]: event.seq };
+        this.serializeBridgeAttachment(socket, attachment);
+      } catch {
+        this.retireFailedControlSocket(clientID, socket);
+        continue;
+      }
       sendControl(socket, {
         type: "run_events",
         runID: run.id,
@@ -16419,6 +18866,15 @@ export class FleetCoordinator {
         nextSeq: event.seq,
       });
     }
+  }
+
+  private retireFailedControlSocket(clientID: string, socket: WebSocket): void {
+    // Retire before closing: delayed callbacks must not read the failed attachment again.
+    this.failedControlSockets.add(socket);
+    if (this.controlSockets.get(clientID) === socket) this.controlSockets.delete(clientID);
+    this.restoredBridgeSockets.delete(socket);
+    this.adminGrantValidationTimes.delete(socket);
+    closeSocket(socket, 1011, "control notification failed");
   }
 
   private provider(provider: Provider, region?: string, project?: string): CloudProvider {
@@ -16455,7 +18911,157 @@ export class FleetCoordinator {
     if (!provider) {
       return;
     }
-    await this.provider(provider, lease.region, lease.providerProject).releaseLease(lease);
+    const cloudProvider = this.provider(provider, lease.region, lease.providerProject);
+    const operation = await this.state.storage.get<LeaseProvisioningOperation>(
+      provisioningOperationKey(lease.id),
+    );
+    const publication = operation?.step.publication;
+    const resourceIdentity =
+      operation?.generation === lease.createAttemptGeneration &&
+      publication?.server.cloudID === lease.cloudID
+        ? publication.server.resourceIdentity
+        : undefined;
+    const currentCleanupLease = async () => {
+      const current = await this.getLease(lease.id);
+      if (
+        !current ||
+        !sameLeaseCleanupClaim(current, lease) ||
+        cleanupClaimDeadline(current) <= Date.now() ||
+        (await provisioningOwnsLease(this.state.storage, lease.id))
+      ) {
+        throw new Error("lease cleanup owner or resource identity changed");
+      }
+      return current;
+    };
+    let expectedCleanupEvidence = structuredClone(lease.providerCleanup);
+    const context: ProviderReleaseContext = {
+      ...(resourceIdentity ? { resourceIdentity } : {}),
+      assertCleanupOwner: async () => {
+        await this.state.runExclusive(async () => {
+          const current = await currentCleanupLease();
+          if (
+            canonicalJSONStringify(current.providerCleanup) !==
+            canonicalJSONStringify(expectedCleanupEvidence)
+          ) {
+            throw new Error("lease cleanup evidence changed");
+          }
+        });
+      },
+      saveCleanupEvidence: async (evidence) => {
+        await this.state.runExclusive(async () => {
+          const current = await currentCleanupLease();
+          const nextEvidence = structuredClone(evidence);
+          await this.putLease({ ...current, providerCleanup: nextEvidence });
+          expectedCleanupEvidence = nextEvidence;
+        });
+      },
+    };
+    await this.withLegacyProviderMutation(lease.id, async () => {
+      let releaseLease = lease;
+      if (
+        lease.providerResourceID === undefined &&
+        cloudProvider.observeLegacyCleanupIdentity &&
+        legacyCleanupIdentityCaptureEligible(lease)
+      ) {
+        const expected = await this.state.runExclusive(async () => {
+          const current = await this.getLease(lease.id);
+          if (
+            !current ||
+            !sameLeaseRecord(current, lease) ||
+            (await provisioningOwnsLease(this.state.storage, lease.id))
+          ) {
+            throw new ProviderResourceUnresolvedError(
+              "lease cleanup claim changed before legacy provider identity observation",
+            );
+          }
+          return structuredClone(current);
+        });
+        const observed = await cloudProvider.observeLegacyCleanupIdentity(expected, context);
+        if (
+          observed &&
+          (!observed.providerResourceID ||
+            observed.providerResourceID !== observed.providerResourceID.trim())
+        ) {
+          throw new ProviderResourceUnresolvedError(
+            "provider returned an invalid legacy cleanup identity",
+          );
+        }
+        const resolvedLease = await this.state.runExclusive(async () => {
+          const current = await this.getLease(expected.id);
+          if (!current || (await provisioningOwnsLease(this.state.storage, expected.id))) {
+            throw new ProviderResourceUnresolvedError(
+              "lease cleanup authority changed before legacy provider identity capture",
+            );
+          }
+          if (!observed) {
+            if (
+              !sameLeaseRecord(current, expected) ||
+              !legacyCleanupIdentityCaptureEligible(current)
+            ) {
+              throw new ProviderResourceUnresolvedError(
+                "lease cleanup claim changed after legacy provider absence observation",
+              );
+            }
+            return undefined;
+          }
+          const providerResourceID = observed.providerResourceID;
+          if (
+            current.providerResourceID === providerResourceID &&
+            sameLeaseAfterLegacyCleanupIdentityCapture(current, expected)
+          ) {
+            return current;
+          }
+          if (
+            !sameLeaseRecord(current, expected) ||
+            !legacyCleanupIdentityCaptureEligible(current)
+          ) {
+            throw new ProviderResourceUnresolvedError(
+              "lease cleanup claim changed before legacy provider identity capture",
+            );
+          }
+          const captured: LeaseRecord = {
+            ...current,
+            providerResourceID,
+            updatedAt: new Date().toISOString(),
+          };
+          await this.putLease(captured);
+          return captured;
+        });
+        if (!resolvedLease) return;
+        releaseLease = resolvedLease;
+      }
+      await cloudProvider.releaseLease(releaseLease, context);
+    });
+  }
+
+  private async withLegacyProviderMutation<T>(
+    leaseID: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const key = `legacy-provider-mutation:${leaseID}`;
+    const claimID = crypto.randomUUID();
+    await this.state.storage.transaction(async (transaction) => {
+      if (await provisioningOwnsLease(transaction, leaseID))
+        throw new ProviderResourceUnresolvedError(
+          "durable provisioning owns this lease's provider mutations",
+        );
+      const claims = (await transaction.get<string[]>(key)) ?? [];
+      await transaction.put(key, [...claims, claimID]);
+    });
+    const result = await operation();
+    // Uncertain failures retain this admission fence along with their existing cleanup journal.
+    await this.state.storage.transaction(async (transaction) => {
+      if (await provisioningOwnsLease(transaction, leaseID))
+        throw new ProviderResourceUnresolvedError(
+          "durable provisioning owns this lease's provider mutations",
+        );
+      const claims = ((await transaction.get<string[]>(key)) ?? []).filter(
+        (claim) => claim !== claimID,
+      );
+      if (claims.length) await transaction.put(key, claims);
+      else await transaction.delete(key);
+    });
+    return result;
   }
 
   private async abortProvisionedLeaseAfterStateChange(
@@ -16474,11 +19080,17 @@ export class FleetCoordinator {
         latest &&
         (!sameLeaseReleaseIdentity(latest, record) ||
           latest.providerScope !== record.providerScope ||
-          (latest.cloudID && latest.cloudID !== server.cloudID))
+          (latest.cloudID &&
+            (latest.cloudID !== server.cloudID ||
+              (server.region && latest.region && latest.region !== server.region))))
       ) {
         throw new ProviderResourceUnresolvedError(
           "lease incarnation changed before provider rollback",
         );
+      }
+      if (latest?.cloudID === server.cloudID && leaseHasCurrentCleanupOrFinalRelease(latest)) {
+        // The exact allocation is already owned by cleanup or has a final release receipt.
+        return { cleanup: false as const, lease: latest };
       }
       const previous = latest ? structuredClone(latest) : undefined;
       const cleanupLease = provisionedLeaseRecord(latest ?? record, config, server, serverType);
@@ -16491,7 +19103,7 @@ export class FleetCoordinator {
         await this.putLease(cleanupLease);
         await this.markAWSIngressReconcilePending(cleanupLease);
         await this.scheduleAlarm();
-        return { keep: true as const, lease: cleanupLease };
+        return { cleanup: false as const, lease: cleanupLease };
       }
       const cleanupStarted = new Date();
       const cleanupStartedAt = cleanupStarted.toISOString();
@@ -16500,6 +19112,7 @@ export class FleetCoordinator {
       cleanupLease.cleanupClaimExpiresAt = new Date(
         cleanupStarted.getTime() + leaseCleanupClaimStaleMs,
       ).toISOString();
+      clearLeaseCleanupCompletion(cleanupLease);
       delete cleanupLease.cleanupRetryAt;
       cleanupLease.updatedAt = cleanupStartedAt;
       if (cleanupLease.state === "released") {
@@ -16509,14 +19122,14 @@ export class FleetCoordinator {
       await this.markAWSIngressReconcilePending(cleanupLease);
       await this.scheduleAlarm();
       return {
-        keep: false as const,
+        cleanup: true as const,
         lease: cleanupLease,
         cleanupStartedAt,
         claimed: structuredClone(cleanupLease),
         previous,
       };
     });
-    if (preparation.keep) {
+    if (!preparation.cleanup) {
       return json(
         {
           error: "lease_state_changed",
@@ -16548,7 +19161,7 @@ export class FleetCoordinator {
           await this.scheduleAlarm();
           return { suppressed: true as const, lease: cleanupLease };
         }
-        if (latest?.cleanupStartedAt !== preparation.cleanupStartedAt) {
+        if (!latest || !sameLeaseCleanupClaim(latest, preparation.lease)) {
           return { suppressed: true as const, lease: latest ?? cleanupLease };
         }
         const failedAt = new Date().toISOString();
@@ -16582,7 +19195,7 @@ export class FleetCoordinator {
     }
     const latest = await this.state.runExclusive(async () => {
       const current = await this.getLease(record.id);
-      if (current?.cleanupStartedAt === preparation.cleanupStartedAt) {
+      if (current && sameLeaseCleanupClaim(current, preparation.lease)) {
         if (preparation.previous) {
           const completed = applyLeaseRecordChanges(
             current,
@@ -16595,6 +19208,9 @@ export class FleetCoordinator {
           delete completed.cleanupClaimExpiresAt;
           delete completed.releaseDeletesServer;
           completed.updatedAt = new Date().toISOString();
+          if (completed.state === "released") {
+            completeLeaseProviderCleanup(completed, completed.updatedAt);
+          }
           await this.putLease(completed);
         } else {
           await this.state.storage.delete(leaseKey(record.id));
@@ -16645,6 +19261,17 @@ export class FleetCoordinator {
     ) {
       return current;
     }
+    if (this.state.provisioning) {
+      const released = await this.state.provisioning.commitAndWake(async (transaction) => {
+        const latest = await transaction.get<LeaseRecord>(leaseKey(current.id));
+        if (!latest || !sameLeaseReleaseIdentity(latest, current)) return undefined;
+        return cancelProvisioningOperation(transaction, latest, Date.now(), options);
+      });
+      if (released) {
+        await this.closeLeaseBridges(released.id, 1008, "lease ended");
+        return released;
+      }
+    }
     await this.markWorkspaceReleaseRequested(current);
     if (
       !options.expectedCreateAttempt &&
@@ -16658,12 +19285,7 @@ export class FleetCoordinator {
       await this.state.runExclusive(() => this.scheduleAlarm());
       return current;
     }
-    const release = () => this.releaseResolvedLeaseOperation(current, options);
-    return managedLeaseProvider(current) === "aws" &&
-      !current.network?.awsPrivate &&
-      (current.state === "active" || Boolean(current.cloudID))
-      ? this.withAWSIngressOperationLock(release)
-      : release();
+    return this.releaseResolvedLeaseOperation(current, options);
   }
 
   private async markWorkspaceReleaseRequested(lease: LeaseRecord): Promise<void> {
@@ -16697,7 +19319,7 @@ export class FleetCoordinator {
       expectedProvider?: string;
     },
   ): Promise<LeaseRecord> {
-    const preparation = await this.state.runExclusive(async () => {
+    const prepare = async () => {
       const stored = await this.getLease(lease.id);
       if (
         stored &&
@@ -16729,6 +19351,14 @@ export class FleetCoordinator {
       if (current.runtimeAdapterDeleteRequestedAt) {
         return { cleanup: false as const, blocked: true as const, lease: current };
       }
+      const attempt = current.createAttemptID ? await this.getCreateAttempt(current.id) : undefined;
+      if (attempt?.state === "pending" && createAttemptMatchesLease(attempt, current)) {
+        await this.putCreateAttempt({
+          ...attempt,
+          state: "canceled",
+          updatedAt: new Date().toISOString(),
+        });
+      }
       if (current.cleanupStartedAt) {
         if (options.awaitProviderCleanup && cleanupClaimDeadline(current) <= Date.now()) {
           // Reclaim the expired claim below. Its prior owner remains fenced by the
@@ -16737,6 +19367,7 @@ export class FleetCoordinator {
           if (options.awaitProviderCleanup) {
             throw new LeaseCleanupInProgressError();
           }
+          await this.armAlarmNoLaterThan(Date.now());
           return { cleanup: false as const, blocked: false as const, lease: current };
         }
       }
@@ -16744,17 +19375,17 @@ export class FleetCoordinator {
       const shouldDelete = Boolean(
         deleteServer &&
         (current.providerKeyCleanupPending ||
-          (current.cloudID &&
-            (leaseIsLive(current) ||
-              current.releaseDeletesServer !== undefined ||
-              current.cleanupError))),
+          (current.cloudID && (leaseIsLive(current) || !leaseProviderCleanupConfirmed(current)))),
       );
       if (!shouldDelete) {
         const released = finalizedReleasedLease(current, deleteServer, options.keep);
+        if (deleteServer && leaseHasConfirmedNoProviderResource(released)) {
+          completeLeaseProviderCleanup(released, released.updatedAt);
+        }
         await this.putLease(released);
         await this.clearWorkspaceReleaseError(released);
         await this.markAWSIngressReconcilePending(released);
-        await this.scheduleAlarm();
+        await this.armAlarmNoLaterThan(Date.now());
         return { cleanup: false as const, blocked: false as const, lease: released };
       }
       if (!options.awaitProviderCleanup) {
@@ -16765,9 +19396,10 @@ export class FleetCoordinator {
         pending.releaseDeletesServer = true;
         pending.cleanupStartedAt = queuedAt;
         pending.cleanupClaimExpiresAt = queuedAt;
+        clearLeaseCleanupCompletion(pending);
         await this.putLease(pending);
         await this.markAWSIngressReconcilePending(pending);
-        await this.scheduleAlarm();
+        await this.armAlarmNoLaterThan(Date.now());
         return { cleanup: false as const, blocked: false as const, lease: pending };
       }
       const now = new Date();
@@ -16777,6 +19409,7 @@ export class FleetCoordinator {
         now.getTime() + leaseCleanupClaimStaleMs,
       ).toISOString();
       claimed.releaseDeletesServer = true;
+      clearLeaseCleanupCompletion(claimed);
       await this.putLease(claimed);
       await this.markAWSIngressReconcilePending(claimed);
       await this.scheduleAlarm();
@@ -16786,7 +19419,10 @@ export class FleetCoordinator {
         claim: claimed.cleanupStartedAt,
         lease: structuredClone(claimed),
       };
-    });
+    };
+    const preparation = await (lease.state === "active" || lease.cloudID
+      ? this.withLeaseCleanupState(lease, prepare)
+      : this.state.runExclusive(prepare));
     if (preparation.blocked) {
       return preparation.lease;
     }
@@ -16801,17 +19437,33 @@ export class FleetCoordinator {
     });
   }
 
+  // Provider I/O stays outside ingress serialization; state changes still wait for
+  // active ingress writers and revalidate their cleanup claim before committing.
+  private withLeaseCleanupState<T>(lease: LeaseRecord, operation: () => Promise<T>): Promise<T> {
+    const commit = () => this.state.runExclusive(operation);
+    return managedLeaseProvider(lease) === "aws" && !lease.network?.awsPrivate
+      ? this.withAWSIngressOperationLock(commit)
+      : commit();
+  }
+
   private async finishLeaseCleanupClaim(preparation: {
     lease: LeaseRecord;
     claim: string;
     keep?: boolean;
   }): Promise<LeaseRecord> {
+    if (await provisioningOwnsLease(this.state.storage, preparation.lease.id))
+      return (await this.getLease(preparation.lease.id)) ?? preparation.lease;
     try {
       await this.deleteLeaseServer(preparation.lease);
     } catch (error) {
-      await this.state.runExclusive(async () => {
+      await this.withLeaseCleanupState(preparation.lease, async () => {
         const current = await this.getLease(preparation.lease.id);
-        if (!current || current.cleanupStartedAt !== preparation.claim) {
+        if (
+          !current ||
+          current.cleanupStartedAt !== preparation.claim ||
+          !sameLeaseCleanupClaim(current, preparation.lease) ||
+          (await provisioningOwnsLease(this.state.storage, preparation.lease.id))
+        ) {
           return;
         }
         current.releaseDeletesServer = true;
@@ -16826,15 +19478,21 @@ export class FleetCoordinator {
       });
       throw error;
     }
-    return await this.state.runExclusive(async () => {
+    return await this.withLeaseCleanupState(preparation.lease, async () => {
       const current = await this.getLease(preparation.lease.id);
-      if (!current || current.cleanupStartedAt !== preparation.claim) {
+      if (
+        !current ||
+        current.cleanupStartedAt !== preparation.claim ||
+        !sameLeaseCleanupClaim(current, preparation.lease) ||
+        (await provisioningOwnsLease(this.state.storage, preparation.lease.id))
+      ) {
         return current ?? preparation.lease;
       }
       const released = finalizedReleasedLease(current, true, preparation.keep);
       clearProvisioningRecoveryMetadata(released);
       delete released.providerKeyCleanupPending;
       delete released.providerKeyCleanupID;
+      completeLeaseProviderCleanup(released, new Date().toISOString());
       await this.putLease(released);
       await this.clearWorkspaceReleaseError(released);
       await this.markAWSIngressReconcilePending(released);
@@ -16871,26 +19529,12 @@ export class FleetDurableObject extends FleetCoordinator implements DurableObjec
   }
 
   override webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    const attachment = this.runtime.socketAttachment<{ kind?: string }>(socket);
+    const attachment = this.bridgeAttachment(socket);
     if (attachment?.kind !== "control" || controlMessageOwnsTransaction(message)) {
       return super.webSocketMessage(socket, message);
     }
     return this.runtime.runExclusive(() => super.webSocketMessage(socket, message));
   }
-}
-
-interface CreateAttemptRecord {
-  version: 1;
-  requestedLeaseID: string;
-  token: string;
-  owner: string;
-  org: string;
-  state: "pending" | "canceled";
-  canonicalLeaseID?: string;
-  cloudID?: string;
-  generation?: string;
-  createdAt: string;
-  updatedAt: string;
 }
 
 class CreateAttemptConflictError extends Error {}
@@ -16901,7 +19545,13 @@ class LeaseProviderIdentityMismatchError extends Error {}
 
 class LeaseCleanupInProgressError extends Error {}
 
-class CreateAttemptCanceledError extends Error {}
+const createAttemptCanceledMessage = "create attempt was canceled before completion";
+
+class CreateAttemptCanceledError extends Error {
+  constructor() {
+    super(createAttemptCanceledMessage);
+  }
+}
 
 interface ProviderReadiness {
   provider: Provider;
@@ -17071,6 +19721,36 @@ function readyPoolIdentityRequestError(value: unknown, required: boolean): Respo
   return undefined;
 }
 
+function normalizeReadyPoolIdentityProvider(input: ReadyPoolBorrowRequest): Response | undefined {
+  if (!input.identity) {
+    return undefined;
+  }
+  const identityProvider = input.identity.image.provider;
+  if (input.provider === undefined) {
+    if (!isCoordinatorProvider(identityProvider)) {
+      return json(
+        {
+          error: "invalid_ready_pool_provider",
+          message: "typed ready-pool identity requires a canonical coordinator provider",
+        },
+        { status: 400 },
+      );
+    }
+    input.provider = identityProvider;
+    return undefined;
+  }
+  if (!isCoordinatorProvider(input.provider) || input.provider !== identityProvider) {
+    return json(
+      {
+        error: "invalid_ready_pool_provider",
+        message: "typed ready-pool provider must match identity.image.provider",
+      },
+      { status: 400 },
+    );
+  }
+  return undefined;
+}
+
 async function readyPoolSeedIdentityRequestError(
   identity: ReadyPoolIdentityV1 | undefined,
   metadata: Pick<ReadyPoolBorrowRequest, "repo" | "ref" | "commit" | "fingerprint">,
@@ -17116,7 +19796,15 @@ export async function readyPoolSeedDigestV1(
     }
     return { tag: index + 1, encoded };
   });
-  const domain = textEncoder.encode("crabbox-ready-pool-seed/v1\0");
+  const digest = await readyPoolTaggedDigest("crabbox-ready-pool-seed/v1\0", fields);
+  return `sha256:${digest}`;
+}
+
+async function readyPoolTaggedDigest(
+  domainLabel: string,
+  fields: readonly { tag: number; encoded: Uint8Array }[],
+): Promise<string> {
+  const domain = textEncoder.encode(domainLabel);
   const payload = new Uint8Array(
     domain.byteLength + fields.reduce((size, field) => size + 5 + field.encoded.byteLength, 0),
   );
@@ -17131,9 +19819,7 @@ export async function readyPoolSeedDigestV1(
     offset += field.encoded.byteLength;
   }
   const digest = await crypto.subtle.digest("SHA-256", payload);
-  return `sha256:${[...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("")}`;
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function validUnicodeScalarString(value: string): boolean {
@@ -17263,6 +19949,14 @@ function readyPoolCriteriaEqual(
 ): boolean {
   const normalizedLeft = readyPoolCriteria(left);
   const normalizedRight = readyPoolCriteria(right);
+  for (const criteria of [normalizedLeft, normalizedRight]) {
+    if (
+      criteria.identity &&
+      (!validReadyPoolIdentityV1(criteria.identity) || normalizeReadyPoolIdentityProvider(criteria))
+    ) {
+      return false;
+    }
+  }
   for (const key of [
     "repo",
     "ref",
@@ -17411,27 +20105,84 @@ function readyPoolKey(key: string, leaseID: string, typed = false): string {
   return `${typed ? typedReadyPoolPrefix : readyPoolPrefix}${key}:${leaseID}`;
 }
 
-function readyPoolDesiredKey(
+function readyPoolLegacyDesiredKey(
   owner: string,
   org: string,
   key: string,
   compatibilityKey?: string,
-  identity?: ReadyPoolIdentityV1,
 ): string {
   const parts = [org, owner, key, compatibilityKey ?? ""];
-  if (identity) {
-    parts.push(
-      identity.image.provider,
-      identity.image.scope,
-      identity.image.id,
-      identity.architecture,
-      identity.seedDigest,
-      identity.cacheCompatibility,
-    );
-  }
-  return `${identity ? typedReadyPoolDesiredPrefix : readyPoolDesiredPrefix}${parts
-    .map((part) => encodeURIComponent(part))
-    .join(":")}`;
+  return `${readyPoolDesiredPrefix}${parts.map((part) => encodeURIComponent(part)).join(":")}`;
+}
+
+function readyPoolLegacyTypedDesiredKey(
+  owner: string,
+  org: string,
+  key: string,
+  compatibilityKey: string | undefined,
+  identity: ReadyPoolIdentityV1,
+): string {
+  const parts = [
+    org,
+    owner,
+    key,
+    compatibilityKey ?? "",
+    identity.image.provider,
+    identity.image.scope,
+    identity.image.id,
+    identity.architecture,
+    identity.seedDigest,
+    identity.cacheCompatibility,
+  ];
+  return `${typedReadyPoolDesiredPrefix}${parts.map((part) => encodeURIComponent(part)).join(":")}`;
+}
+
+export async function readyPoolDesiredCapacityKeyV2(input: {
+  org: string;
+  owner: string;
+  key: string;
+  compatibilityKey: string | undefined;
+  identity: ReadyPoolIdentityV1;
+}): Promise<string> {
+  const fields = [
+    input.org,
+    input.owner,
+    input.key,
+    input.compatibilityKey ?? "",
+    input.identity.schema,
+    input.identity.image.provider,
+    input.identity.image.scope,
+    input.identity.image.id,
+    input.identity.architecture,
+    input.identity.seedDigest,
+    input.identity.cacheCompatibility,
+  ].map((value, index) => {
+    if (!validUnicodeScalarString(value)) {
+      throw new Error(`ready-pool desired field ${index + 1} must be valid UTF-8`);
+    }
+    return { tag: index + 1, encoded: textEncoder.encode(value) };
+  });
+  const digest = await readyPoolTaggedDigest("crabbox-ready-pool-desired/v2\0", fields);
+  return `typed-ready-pool-v2-desired:sha256:${digest}`;
+}
+
+function readyPoolDesiredCapacityScopeMatches(
+  desired: ReadyPoolDesiredCapacity,
+  owner: string,
+  org: string,
+  key: string,
+  compatibilityKey: string | undefined,
+): boolean {
+  return (
+    desired.owner === owner &&
+    desired.org === org &&
+    desired.key === key &&
+    desired.compatibilityKey === compatibilityKey
+  );
+}
+
+function storageKeyWithinLimit(key: string): boolean {
+  return textEncoder.encode(key).byteLength <= durableObjectStorageKeyMaxBytes;
 }
 
 function readyPoolFillClaimKey(token: string, typed = false): string {
@@ -17569,6 +20320,33 @@ function createdProviderImageKey(provider: Provider, imageID: string): string {
   return `image:${provider}:created:${encodeURIComponent(imageID)}`;
 }
 
+async function checkpointCreatedImageMetadata(
+  storage: ProviderStateStorage | undefined,
+  checkpoint: CoordinatorCheckpointRecord,
+): Promise<ProviderImage> {
+  const image = checkpoint.image;
+  const metadata = image
+    ? await storage?.get<ProviderImage>(createdProviderImageKey(checkpoint.provider, image.id))
+    : undefined;
+  if (
+    !image ||
+    !metadata ||
+    metadata.provider !== checkpoint.provider ||
+    metadata.id !== image.id ||
+    metadata.kind !== image.kind ||
+    metadata.immutableID !== image.immutableID ||
+    metadata.region !== checkpoint.scope.region ||
+    !/^[a-f0-9]{64}$/.test(metadata.checkpointOwnershipHash ?? "") ||
+    metadata.checkpointSourceLeaseID !== checkpoint.leaseID
+  ) {
+    throw new CheckpointError(
+      "checkpoint_source_mismatch",
+      "checkpoint trusted provider creation identity or ownership evidence is missing or changed",
+    );
+  }
+  return metadata;
+}
+
 function promotedAzureImageKey(
   image: Pick<ProviderImage, "target" | "architecture" | "region" | "serverType"> & {
     os?: string;
@@ -17648,6 +20426,16 @@ function promotedAWSImageCatalogKey(image: PromotedImageRecord): string {
   return `${promotedAWSImageCatalogPrefix(image)}${encodeURIComponent(image.id)}`;
 }
 
+function retiredAWSImageRevisionKey(state: { imageId: string; revision: string }): string {
+  return `image:aws:retired:${encodeURIComponent(state.imageId)}:${encodeURIComponent(state.revision)}`;
+}
+
+function retiredAWSImageKey(imageID: string, region?: string): string {
+  return region === undefined
+    ? `image:aws:retired-image-global:${encodeURIComponent(imageID)}`
+    : `image:aws:retired-image:${encodeURIComponent(region)}:${encodeURIComponent(imageID)}`;
+}
+
 function promotedAWSImageVariantPrefix(
   image: Pick<ProviderImage, "target" | "architecture" | "region" | "serverType"> & {
     os?: string;
@@ -17659,6 +20447,302 @@ function promotedAWSImageVariantPrefix(
 
 function promotedAWSImageVariantKey(image: PromotedImageRecord): string {
   return `${promotedAWSImageVariantPrefix(image)}${encodeURIComponent(image.id)}`;
+}
+
+type ImageDefaultAliasName = "linux-os" | "legacy" | "regional";
+
+function promotedAWSImageDefaultAliases(
+  image: Pick<ProviderImage, "target" | "architecture" | "region" | "serverType"> & {
+    os?: string;
+  },
+): Array<{ alias: ImageDefaultAliasName; key: string }> {
+  const aliases: Array<{ alias: ImageDefaultAliasName; key: string }> = [];
+  if (image.target === "linux" && image.os) {
+    aliases.push({ alias: "linux-os", key: promotedAWSLinuxOSImageKey(image) });
+  }
+  if (
+    image.target === "linux" &&
+    (!image.os || image.os === "ubuntu:24.04") &&
+    legacyPromotedAWSImageCompatible(image)
+  ) {
+    aliases.push({ alias: "legacy", key: legacyPromotedAWSImageKey() });
+  }
+  aliases.push({ alias: "regional", key: promotedAWSImageKey(image) });
+  return aliases;
+}
+
+type ImageDefaultAliasState =
+  | { alias: ImageDefaultAliasName; state: "absent" }
+  | { alias: ImageDefaultAliasName; state: "present"; image: PromotedImageRecord };
+
+type ImageDefaultState = (
+  | { state: "absent" }
+  | { state: "present"; imageId: string; revision: string }
+) & { aliases?: ImageDefaultAliasState[] };
+
+type ImageDefaultExpectation = ImageDefaultState | { state: "capture" };
+
+function parseImageDefaultState(value: unknown): ImageDefaultExpectation | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  if (input["state"] === "capture" && Object.keys(input).length === 1) {
+    return { state: "capture" };
+  }
+  if (input["state"] === "absent" && Object.keys(input).length === 1) {
+    return { state: "absent" };
+  }
+  const imageId = typeof input["imageId"] === "string" ? input["imageId"].trim() : "";
+  const revision = typeof input["revision"] === "string" ? input["revision"].trim() : "";
+  if (
+    input["state"] !== "present" ||
+    !imageId ||
+    !revision ||
+    Object.keys(input).some((key) => !["state", "imageId", "revision"].includes(key))
+  ) {
+    return undefined;
+  }
+  return { state: "present", imageId, revision };
+}
+
+function imageDefaultState(image: PromotedImageRecord | undefined): ImageDefaultState {
+  if (!image) return { state: "absent" };
+  return {
+    state: "present",
+    imageId: image.id,
+    revision: image.revision?.trim() || `${image.id}@${image.promotedAt}`,
+  };
+}
+
+function parseImageDefaultRestore(value: unknown): ImageDefaultState | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const aliasesInput = input["aliases"];
+  if (!Array.isArray(aliasesInput) || aliasesInput.length === 0) return undefined;
+  const base = parseImageDefaultState(
+    Object.fromEntries(Object.entries(input).filter(([key]) => key !== "aliases")),
+  );
+  if (!base || base.state === "capture") return undefined;
+  const aliases: ImageDefaultAliasState[] = [];
+  for (const aliasValue of aliasesInput) {
+    if (!aliasValue || typeof aliasValue !== "object" || Array.isArray(aliasValue))
+      return undefined;
+    const aliasInput = aliasValue as Record<string, unknown>;
+    const alias = aliasInput["alias"];
+    if (alias !== "linux-os" && alias !== "legacy" && alias !== "regional") return undefined;
+    if (
+      aliasInput["state"] === "absent" &&
+      Object.keys(aliasInput).every((key) => key === "alias" || key === "state")
+    ) {
+      aliases.push({ alias, state: "absent" });
+      continue;
+    }
+    const image = aliasInput["image"];
+    if (
+      aliasInput["state"] !== "present" ||
+      !image ||
+      typeof image !== "object" ||
+      Array.isArray(image) ||
+      Object.keys(aliasInput).some((key) => !["alias", "state", "image"].includes(key))
+    ) {
+      return undefined;
+    }
+    const record = image as Partial<PromotedImageRecord>;
+    if (
+      (record.provider !== undefined && record.provider !== "aws") ||
+      typeof record.id !== "string" ||
+      !record.id ||
+      typeof record.name !== "string" ||
+      typeof record.state !== "string" ||
+      typeof record.promotedAt !== "string" ||
+      !record.promotedAt
+    ) {
+      return undefined;
+    }
+    aliases.push({ alias, state: "present", image: record as PromotedImageRecord });
+  }
+  if (new Set(aliases.map(({ alias }) => alias)).size !== aliases.length) return undefined;
+  return { ...base, aliases };
+}
+
+async function captureAWSImageDefaultState(
+  storage: ProviderStateStorageView,
+  scope: {
+    target: TargetOS;
+    architecture: string;
+    os?: string;
+    serverType: string;
+    region: string;
+  },
+  current: PromotedImageRecord | undefined,
+): Promise<ImageDefaultState> {
+  const aliases: ImageDefaultAliasState[] = [];
+  for (const { alias, key } of promotedAWSImageDefaultAliases(scope)) {
+    // Alias order is the publication order; capture every overwritten slot before mutation.
+    // oxlint-disable-next-line eslint/no-await-in-loop
+    const image = await storage.get<PromotedImageRecord>(key);
+    aliases.push(image ? { alias, state: "present", image } : { alias, state: "absent" });
+  }
+  return { ...imageDefaultState(current), aliases };
+}
+
+function imageDefaultAliasRecordMatches(
+  alias: ImageDefaultAliasName,
+  key: string,
+  image: PromotedImageRecord,
+): boolean {
+  if (alias === "regional") return promotedAWSImageKey(image) === key;
+  if (alias === "linux-os") {
+    return (image.target ?? "linux") === "linux" && promotedAWSLinuxOSImageKey(image) === key;
+  }
+  return (
+    (image.target ?? "linux") === "linux" &&
+    (!image.os || image.os === "ubuntu:24.04") &&
+    legacyPromotedAWSImageCompatible(image)
+  );
+}
+
+function sameImageDefaultState(left: ImageDefaultState, right: ImageDefaultState): boolean {
+  if (left.state !== right.state) return false;
+  return (
+    left.state === "absent" ||
+    (right.state === "present" &&
+      left.imageId === right.imageId &&
+      left.revision === right.revision)
+  );
+}
+
+async function retireAWSImageRevision(
+  storage: ProviderStateStorageView,
+  state: Extract<ImageDefaultState, { state: "present" }>,
+): Promise<void> {
+  await storage.put(retiredAWSImageRevisionKey(state), {
+    retiredAt: new Date().toISOString(),
+  });
+}
+
+async function retireAWSImage(
+  storage: ProviderStateStorageView,
+  imageID: string,
+  region?: string,
+): Promise<void> {
+  const { global, retiredAt, lastPromotedAt } = await awsImageRetirementState(
+    storage,
+    imageID,
+    region,
+  );
+  await storage.put(retiredAWSImageKey(imageID, region), {
+    ...(region === undefined ? global : {}),
+    retiredAt: new Date(Math.max(Date.now(), retiredAt, lastPromotedAt)).toISOString(),
+  });
+}
+
+async function awsImageRetirementState(
+  storage: ProviderStateStorageView,
+  imageID: string,
+  region?: string,
+) {
+  const global = await storage.get<{ retiredAt?: string; lastPromotedAt?: string }>(
+    retiredAWSImageKey(imageID),
+  );
+  const regional =
+    region === undefined
+      ? undefined
+      : await storage.get<{ retiredAt?: string }>(retiredAWSImageKey(imageID, region));
+  const [globalCutoff = 0, regionalCutoff = 0, lastPromotedAt = 0] = [
+    global?.retiredAt,
+    regional?.retiredAt,
+    global?.lastPromotedAt,
+  ].map((value) => {
+    const timestamp = Date.parse(value ?? "");
+    return Number.isFinite(timestamp) ? timestamp : 0;
+  });
+  return {
+    global,
+    retiredAt: Math.max(globalCutoff, regionalCutoff),
+    lastPromotedAt,
+  };
+}
+
+async function awsImageRevisionRetired(
+  storage: ProviderStateStorageView,
+  image: PromotedImageRecord,
+  fallbackRegion: string,
+): Promise<boolean> {
+  const state = imageDefaultState(image);
+  if (
+    state.state === "present" &&
+    (await storage.get(retiredAWSImageRevisionKey(state))) !== undefined
+  ) {
+    return true;
+  }
+  const { retiredAt } = await awsImageRetirementState(
+    storage,
+    image.id,
+    image.region ?? fallbackRegion,
+  );
+  const promotedAt = Date.parse(image.promotedAt);
+  return Number.isFinite(promotedAt) && promotedAt <= retiredAt;
+}
+
+async function nextAWSImagePromotionTimestamp(
+  storage: ProviderStateStorageView,
+  imageID: string,
+  region: string,
+): Promise<string> {
+  const { global, retiredAt, lastPromotedAt } = await awsImageRetirementState(
+    storage,
+    imageID,
+    region,
+  );
+  const promotedAt = new Date(Math.max(Date.now(), retiredAt + 1, lastPromotedAt)).toISOString();
+  // Retain the publication high-water mark even after its last catalog row disappears.
+  // A later retirement must cover receipts timestamped ahead of a frozen or regressed clock.
+  await storage.put(retiredAWSImageKey(imageID), { ...global, lastPromotedAt: promotedAt });
+  return promotedAt;
+}
+
+function imagePromotionConflict(
+  expected: ImageDefaultState,
+  current: ImageDefaultState,
+  scope: Record<string, string>,
+): Response {
+  return json(
+    {
+      error: "image_promotion_precondition_failed",
+      message: "image default changed before the requested catalog update",
+      expected,
+      current,
+      scope,
+    },
+    { status: 409 },
+  );
+}
+
+async function promotedAWSImageDefault(
+  storage: ProviderStateStorageView,
+  scope: {
+    target: TargetOS;
+    architecture: string;
+    os?: string;
+    serverType: string;
+    region: string;
+  },
+): Promise<PromotedImageRecord | undefined> {
+  const scoped = await storage.get<PromotedImageRecord>(promotedAWSImageKey(scope));
+  if (scoped) return scoped;
+  if (scope.target === "macos") {
+    return storage.get<PromotedImageRecord>(legacyScopedPromotedAWSImageKey(scope));
+  }
+  if (scope.target !== "linux") return undefined;
+  if (scope.os) {
+    const osScoped = await storage.get<PromotedImageRecord>(promotedAWSLinuxOSImageKey(scope));
+    if (osScoped) return osScoped;
+  }
+  if ((!scope.os || scope.os === "ubuntu:24.04") && scope.architecture === "x86_64") {
+    const legacy = await storage.get<PromotedImageRecord>(legacyPromotedAWSImageKey());
+    if (legacy && legacyPromotedAWSImageCompatible(legacy)) return legacy;
+  }
+  return undefined;
 }
 
 class ImageCapabilityMismatchError extends Error {
@@ -18172,7 +21256,7 @@ function createCanceledResponse(): Response {
   return json(
     {
       error: "create_canceled",
-      message: "create attempt was canceled before completion",
+      message: createAttemptCanceledMessage,
     },
     { status: 409 },
   );
@@ -18202,6 +21286,54 @@ function createAttemptReplayResponse(lease: LeaseRecord): Response {
   );
 }
 
+function prefersAsyncProvisioning(request: Request): boolean {
+  return (request.headers.get("prefer") ?? "")
+    .split(",")
+    .some((value) => value.trim().toLowerCase() === "respond-async");
+}
+
+function acceptedProvisioningLease(lease: LeaseRecord): Response {
+  return json(
+    { lease: publicLeaseRecord(lease) },
+    {
+      status: 202,
+      headers: {
+        location: `/v1/leases/${encodeURIComponent(lease.id)}`,
+        "retry-after": "2",
+        "preference-applied": "respond-async",
+      },
+    },
+  );
+}
+
+function sameLeaseCleanupClaim(current: LeaseRecord, claimed: LeaseRecord): boolean {
+  return (
+    !!claimed.cleanupStartedAt &&
+    current.cleanupStartedAt === claimed.cleanupStartedAt &&
+    sameLeaseReleaseIdentity(current, claimed) &&
+    current.provider === claimed.provider &&
+    current.cloudID === claimed.cloudID &&
+    current.serverID === claimed.serverID &&
+    current.providerScope === claimed.providerScope &&
+    current.providerProject === claimed.providerProject &&
+    current.region === claimed.region &&
+    current.slug === claimed.slug &&
+    current.serverName === claimed.serverName &&
+    current.providerOwner === claimed.providerOwner &&
+    current.providerKey === claimed.providerKey &&
+    current.providerKeyCleanupID === claimed.providerKeyCleanupID &&
+    current.providerKeyCleanupOwned === claimed.providerKeyCleanupOwned &&
+    current.providerKeyCleanupPending === claimed.providerKeyCleanupPending &&
+    current.cleanupCompletedAt === claimed.cleanupCompletedAt &&
+    current.provisioningResourceMayExist === claimed.provisioningResourceMayExist &&
+    current.provisioningRequestStartedAt === claimed.provisioningRequestStartedAt &&
+    current.provisioningRequestSettledAt === claimed.provisioningRequestSettledAt &&
+    current.provisioningRecoveryObservedAt === claimed.provisioningRecoveryObservedAt &&
+    current.provisioningRecoveryMissingSince === claimed.provisioningRecoveryMissingSince &&
+    current.provisioningCoordinatorVersion === claimed.provisioningCoordinatorVersion
+  );
+}
+
 function sameLeaseReleaseIdentity(left: LeaseRecord, right: LeaseRecord): boolean {
   return (
     left.id === right.id &&
@@ -18213,18 +21345,61 @@ function sameLeaseReleaseIdentity(left: LeaseRecord, right: LeaseRecord): boolea
   );
 }
 
+function sameReadyPoolObservationLease(left: LeaseRecord, right: LeaseRecord): boolean {
+  return (
+    sameLeaseReleaseIdentity(left, right) &&
+    left.createAttemptID === right.createAttemptID &&
+    left.provider === right.provider &&
+    left.cloudID === right.cloudID &&
+    left.serverID === right.serverID &&
+    left.providerResourceID === right.providerResourceID &&
+    left.serverName === right.serverName &&
+    left.slug === right.slug &&
+    left.owner === right.owner &&
+    left.providerOwner === right.providerOwner &&
+    left.workspaceID === right.workspaceID &&
+    left.region === right.region &&
+    left.providerProject === right.providerProject &&
+    left.providerScope === right.providerScope &&
+    left.lifecycle === right.lifecycle &&
+    left.target === right.target &&
+    left.architecture === right.architecture &&
+    left.state === right.state &&
+    left.expiresAt === right.expiresAt
+  );
+}
+
+function sameLeaseImageIdentity(left: LeaseImageIdentity, right: LeaseImageIdentity): boolean {
+  return (
+    left.id === right.id &&
+    left.source === right.source &&
+    left.provider === right.provider &&
+    left.kind === right.kind &&
+    left.region === right.region &&
+    left.promotedAt === right.promotedAt &&
+    left.sourceID === right.sourceID
+  );
+}
+
+function readyPoolImageObservationConflict(message: string): Response {
+  return json({ error: "ready_pool_image_observation_conflict", message }, { status: 409 });
+}
+
 function sameCreateAttempt(left: CreateAttemptRecord, right: CreateAttemptRecord): boolean {
   return (
-    left.version === 1 &&
-    right.version === 1 &&
+    (left.version === 1 || left.version === 2) &&
+    left.version === right.version &&
     left.requestedLeaseID === right.requestedLeaseID &&
     left.token === right.token &&
     left.owner === right.owner &&
     left.org === right.org &&
     left.state === right.state &&
+    sameFixedCreateIntent(left.fixedCreate, right.fixedCreate) &&
     left.canonicalLeaseID === right.canonicalLeaseID &&
     left.cloudID === right.cloudID &&
     left.generation === right.generation &&
+    left.checkpointID === right.checkpointID &&
+    left.checkpointUseClaimHash === right.checkpointUseClaimHash &&
     left.createdAt === right.createdAt &&
     left.updatedAt === right.updatedAt
   );
@@ -18246,9 +21421,128 @@ function createAttemptBlocksLeaseID(attempt: CreateAttemptRecord | undefined): b
   return Boolean(attempt && !unboundCanceledCreateAttempt(attempt));
 }
 
+function sameFixedCreateIntent(
+  left: FixedLeaseCreateIntent | undefined,
+  right: FixedLeaseCreateIntent | undefined,
+): boolean {
+  return (
+    left?.version === right?.version &&
+    left?.hash === right?.hash &&
+    left?.provider === right?.provider
+  );
+}
+
+export async function backfillCheckpointCreateAttempt(
+  storage: CoordinatorStorage,
+  input: {
+    requestedLeaseID: string;
+    token: string;
+    owner: string;
+    org: string;
+    checkpointID: string;
+    checkpointUseClaimHash: string;
+  },
+): Promise<CreateAttemptRecord> {
+  return storage.transaction(async (transaction) => {
+    const attemptKey = createAttemptKey(input.requestedLeaseID);
+    const attempt = await transaction.get<CreateAttemptRecord>(attemptKey);
+    if (
+      !attempt ||
+      attempt.version !== 1 ||
+      attempt.requestedLeaseID !== input.requestedLeaseID ||
+      attempt.token !== input.token ||
+      attempt.owner !== input.owner ||
+      attempt.org !== input.org ||
+      attempt.state !== "pending" ||
+      !validCheckpointID(input.checkpointID) ||
+      !/^[a-f0-9]{64}$/.test(input.checkpointUseClaimHash)
+    ) {
+      throw new CheckpointError(
+        "create_attempt_binding_conflict",
+        "checkpoint lease attempt is invalid",
+      );
+    }
+    if (attempt.checkpointID !== undefined || attempt.checkpointUseClaimHash !== undefined) {
+      if (
+        createAttemptMatchesCheckpoint(attempt, input.checkpointID, input.checkpointUseClaimHash)
+      ) {
+        return attempt;
+      }
+      throw new CheckpointError(
+        "create_attempt_binding_conflict",
+        "create attempt checkpoint evidence conflicts",
+      );
+    }
+    const [checkpoint, claim, lease] = await Promise.all([
+      transaction.get<CoordinatorCheckpointRecord>(checkpointKey(input.checkpointID)),
+      transaction.get<CoordinatorCheckpointUseClaim>(
+        checkpointUseKey(input.checkpointID, input.checkpointUseClaimHash),
+      ),
+      transaction.get<LeaseRecord>(`lease:${attempt.canonicalLeaseID ?? input.requestedLeaseID}`),
+    ]);
+    const bound: CreateAttemptRecord = {
+      ...attempt,
+      checkpointID: input.checkpointID,
+      checkpointUseClaimHash: input.checkpointUseClaimHash,
+      updatedAt: new Date().toISOString(),
+    };
+    const exactCheckpoint = Boolean(checkpoint && checkpoint.id === input.checkpointID);
+    const exactClaim = Boolean(
+      exactCheckpoint &&
+      claim &&
+      claim.checkpointID === input.checkpointID &&
+      claim.tokenHash === input.checkpointUseClaimHash &&
+      claim.state === "provisioning" &&
+      claim.generation === checkpoint!.generation &&
+      claim.leaseID === input.requestedLeaseID &&
+      claim.attemptID === input.token &&
+      claim.owner === input.owner &&
+      claim.org === input.org,
+    );
+    const exactLease = Boolean(
+      exactCheckpoint &&
+      lease &&
+      lease.checkpointID === input.checkpointID &&
+      lease.owner === input.owner &&
+      lease.org === input.org &&
+      createAttemptMatchesLease(bound, lease),
+    );
+    if (
+      (!exactClaim && !exactLease) ||
+      (claim && !exactClaim) ||
+      (lease && !exactLease) ||
+      (attempt.canonicalLeaseID && !exactLease)
+    ) {
+      throw new CheckpointError(
+        "create_attempt_binding_conflict",
+        "create attempt has no exact checkpoint evidence",
+      );
+    }
+    await transaction.put(attemptKey, bound);
+    return bound;
+  });
+}
+
+function createAttemptMatchesCheckpoint(
+  attempt: CreateAttemptRecord,
+  checkpointID?: string,
+  checkpointUseClaimHash?: string,
+): boolean {
+  if (checkpointID === undefined && checkpointUseClaimHash === undefined) {
+    return attempt.checkpointID === undefined && attempt.checkpointUseClaimHash === undefined;
+  }
+  return (
+    validCheckpointID(checkpointID) &&
+    typeof checkpointUseClaimHash === "string" &&
+    /^[a-f0-9]{64}$/.test(checkpointUseClaimHash) &&
+    attempt.checkpointID === checkpointID &&
+    attempt.checkpointUseClaimHash === checkpointUseClaimHash
+  );
+}
+
 function createAttemptMatchesLease(attempt: CreateAttemptRecord, lease: LeaseRecord): boolean {
   return (
-    attempt.version === 1 &&
+    (attempt.version === 1 || attempt.version === 2) &&
     validLeaseID(attempt.requestedLeaseID) &&
     validCreateAttemptID(attempt.token) &&
     Boolean(attempt.canonicalLeaseID) &&
@@ -18259,6 +21553,11 @@ function createAttemptMatchesLease(attempt: CreateAttemptRecord, lease: LeaseRec
     Boolean(attempt.generation) &&
     attempt.generation === lease.createAttemptGeneration &&
     (attempt.cloudID === undefined || attempt.cloudID === lease.cloudID) &&
+    (!attempt.fixedCreate ||
+      (attempt.fixedCreate.version === lease.fixedCreateIntentVersion &&
+        attempt.fixedCreate.hash === lease.fixedCreateIntentHash &&
+        attempt.fixedCreate.provider === lease.provider)) &&
+    createAttemptMatchesCheckpoint(attempt, lease.checkpointID, attempt.checkpointUseClaimHash) &&
     (attempt.requestedLeaseID === lease.id ||
       (lease.provider === "aws" && lease.target === "macos")) &&
     !lease.workspaceID &&
@@ -20037,6 +23336,10 @@ function validImageName(value: string): boolean {
   return /^[A-Za-z0-9()[\]./_ -]{3,128}$/.test(value);
 }
 
+function boundedCheckpointString(value: unknown, max: number): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim().slice(0, max) : undefined;
+}
+
 function hasNativeLeaseSource(config: LeaseConfig): boolean {
   return Boolean(
     config.awsSnapshot || config.azureSnapshot || config.gcpMachineImage || config.gcpSnapshot,
@@ -20174,6 +23477,28 @@ function providerImageResourceName(provider: Provider, name: string, leaseID: st
   return provider === "gcp"
     ? truncated.replaceAll(/-+$/g, "")
     : truncated.replaceAll(/[-.]+$/g, "");
+}
+
+async function checkpointProviderResourceName(
+  provider: CoordinatorCheckpointProvider,
+  name: string,
+  checkpointID: string,
+  leaseID: string,
+): Promise<string> {
+  const suffix = `-${(await sha256Hex(checkpointID)).slice(0, 20)}`;
+  const maxLength = provider === "gcp" ? 63 : provider === "azure" ? 80 : 128;
+  const normalized = providerImageResourceName(provider, name, leaseID);
+  const prefix = normalized.slice(0, maxLength - suffix.length).replace(/[-.]+$/g, "");
+  return `${prefix || "checkpoint"}${suffix}`;
+}
+
+function checkpointProviderMutationDefinitivelyRefused(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "checkpointResourceMayExist" in error &&
+    error.checkpointResourceMayExist === false
+  );
 }
 
 function unsupportedProviderImageLifecycle(provider: Provider) {
@@ -20514,7 +23839,10 @@ function sanitizeRunnerProvider(value: unknown): string {
   return /^[a-z0-9][a-z0-9-]{1,63}$/.test(provider) ? provider : "";
 }
 
-function mutationExpectedProviderError(value: unknown, lease: LeaseRecord): Response | undefined {
+function mutationExpectedProviderError(
+  value: unknown,
+  lease: Pick<LeaseRecord, "provider">,
+): Response | undefined {
   const code = mutationExpectedProviderErrorCode(value, lease);
   if (code === "invalid_expected_provider") {
     return json(
@@ -20533,7 +23861,7 @@ function mutationExpectedProviderError(value: unknown, lease: LeaseRecord): Resp
 
 function mutationExpectedProviderErrorCode(
   value: unknown,
-  lease: LeaseRecord,
+  lease: Pick<LeaseRecord, "provider">,
 ): "invalid_expected_provider" | "provider_identity_mismatch" | undefined {
   if (value === undefined) {
     return undefined;
@@ -21327,13 +24655,12 @@ function normalizeRunLogInput(input: RunFinishRequest): {
     ? input.logChunks.map((chunk) => String(chunk)).join("")
     : "";
   const rawLog = chunkLog || input.log || "";
-  const bounded = truncateUtf8Tail(rawLog, maxStoredRunLogBytes);
-  const rawBytes = textEncoder.encode(rawLog).byteLength;
+  const bounded = retainedRunLogText(rawLog, maxStoredRunLogBytes);
   return {
     log: bounded,
     source: rawLog,
-    bytes: Math.min(rawBytes, maxStoredRunLogBytes),
-    truncated: Boolean(input.logTruncated) || rawBytes > maxStoredRunLogBytes,
+    bytes: textEncoder.encode(bounded).byteLength,
+    truncated: Boolean(input.logTruncated) || bounded !== rawLog,
   };
 }
 
@@ -21347,7 +24674,7 @@ async function writeTerminalRunLog(
     return;
   }
   await Promise.all(
-    splitRunLogByBytes(log, runLogChunkBytes).map((chunk, index) =>
+    splitRunLogByBytes(log).map((chunk, index) =>
       storage.put(terminalRunLogChunkKey(prefix, index), chunk),
     ),
   );
@@ -21367,32 +24694,24 @@ async function deleteStoragePrefix(
   }
 }
 
-function splitRunLogByBytes(log: string, maxBytes: number): string[] {
+function splitRunLogByBytes(log: string): string[] {
+  const encoded = textEncoder.encode(log);
   const chunks: string[] = [];
-  let current = "";
-  let currentBytes = 0;
-  for (const char of log) {
-    const charBytes = textEncoder.encode(char).byteLength;
-    if (current && currentBytes + charBytes > maxBytes) {
-      chunks.push(current);
-      current = "";
-      currentBytes = 0;
-    }
-    current += char;
-    currentBytes += charBytes;
-  }
-  if (current) {
-    chunks.push(current);
+  for (let start = 0; start < encoded.byteLength;) {
+    let end = Math.min(start + runLogChunkBytes, encoded.byteLength);
+    while (end < encoded.byteLength && (encoded[end]! & 0xc0) === 0x80) end--;
+    chunks.push(runLogTextDecoder.decode(encoded.subarray(start, end)));
+    start = end;
   }
   return chunks;
 }
 
-function truncateUtf8Tail(value: string, maxBytes: number): string {
+function retainedRunLogText(value: string, maxBytes: number): string {
   const encoded = textEncoder.encode(value);
-  if (encoded.byteLength <= maxBytes) {
-    return value;
-  }
-  return textDecoder.decode(encoded.slice(encoded.byteLength - maxBytes));
+  let start = Math.max(0, encoded.byteLength - maxBytes);
+  while (start < encoded.byteLength && (encoded[start]! & 0xc0) === 0x80) start++;
+  // Normalize lone surrogates even below the cap, but preserve a literal BOM.
+  return runLogTextDecoder.decode(encoded.subarray(start));
 }
 
 const MAX_RESULT_FILES = 50;
@@ -21460,6 +24779,10 @@ function boundedRunEvent(
 }
 
 function applyRunEventSummary(run: RunRecord, event: RunEventRecord): void {
+  // Late deliveries remain in the audit trail without rewriting committed terminal evidence.
+  if (run.terminalFinishSHA256) {
+    return;
+  }
   if (event.phase) {
     run.phase = event.phase;
   } else {
@@ -21793,9 +25116,17 @@ function boundedTelemetrySamples(samples: LeaseTelemetry[], max: number): LeaseT
 
 const fixedLeaseCreateIntentVersion = 2;
 
+async function fixedRequestFingerprint(input: LeaseRequest): Promise<string> {
+  const request = { ...input };
+  // The URL already binds the ID; its optional duplicate in the body is not a new intent.
+  delete request.leaseID;
+  return sha256Hex(`crabbox-fixed-request-v1\0${canonicalJSONStringify(request)}`);
+}
+
 export async function fixedLeaseCreateIntentHash(
   config: LeaseConfig,
   requestedSlug: string,
+  checkpoint?: CoordinatorCheckpointRecord,
 ): Promise<string> {
   const { keep, ...normalizedConfig } = config;
   const semanticConfig: Record<string, unknown> = { ...normalizedConfig };
@@ -21810,6 +25141,7 @@ export async function fixedLeaseCreateIntentHash(
   return await sha256Hex(
     `crabbox-fixed-lease-create-v${fixedLeaseCreateIntentVersion}\0${canonicalJSONStringify({
       requestedSlug,
+      ...(checkpoint ? { checkpoint: checkpointLeaseSourceIdentity(checkpoint) } : {}),
       lifecycle: { keep },
       config: semanticConfig,
     })}`,
@@ -21880,6 +25212,10 @@ function activeSlugCollision(
   );
 }
 
+function isActiveProviderAccessRecord(lease: LeaseRecord, now: number): boolean {
+  return leaseIsLive(lease) && Date.parse(lease.expiresAt) > now;
+}
+
 function leaseIsLive(lease: LeaseRecord): boolean {
   return lease.state === "active" || lease.state === "provisioning";
 }
@@ -21909,6 +25245,50 @@ function managedLeaseProvider(lease: LeaseRecord): Provider | undefined {
     : undefined;
 }
 
+function legacyCleanupIdentityCaptureEligible(lease: LeaseRecord): boolean {
+  const cleanupStartedAt = Date.parse(lease.cleanupStartedAt ?? "");
+  const cleanupClaimExpiresAt = Date.parse(lease.cleanupClaimExpiresAt ?? "");
+  const deletionIntended =
+    (lease.state === "released" && lease.releaseDeletesServer === true) ||
+    (leaseIsLive(lease) && Date.parse(lease.expiresAt) <= Date.now());
+  return (
+    lease.lifecycle !== "registered" &&
+    lease.providerResourceID === undefined &&
+    !lease.workspaceID &&
+    lease.cloudID.length > 0 &&
+    lease.cloudID === lease.cloudID.trim() &&
+    lease.serverName === lease.cloudID &&
+    Boolean(lease.region?.trim()) &&
+    Number.isFinite(cleanupStartedAt) &&
+    Number.isFinite(cleanupClaimExpiresAt) &&
+    cleanupClaimExpiresAt >= cleanupStartedAt &&
+    deletionIntended &&
+    !lease.providerKeyCleanupPending &&
+    lease.state !== "provisioning" &&
+    lease.provisioningResourceMayExist === undefined &&
+    lease.provisioningFailureRetryable === undefined &&
+    lease.provisioningRequestStartedAt === undefined &&
+    lease.provisioningRequestSettledAt === undefined &&
+    lease.provisioningCoordinatorVersion === undefined &&
+    lease.provisioningRecoveryObservedAt === undefined &&
+    lease.provisioningRecoveryMissingSince === undefined
+  );
+}
+
+function sameLeaseRecord(left: LeaseRecord, right: LeaseRecord): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function sameLeaseAfterLegacyCleanupIdentityCapture(
+  current: LeaseRecord,
+  expected: LeaseRecord,
+): boolean {
+  const normalized = structuredClone(current);
+  delete normalized.providerResourceID;
+  normalized.updatedAt = expected.updatedAt;
+  return sameLeaseRecord(normalized, expected);
+}
+
 function leaseCleanupIsUnresolved(lease: LeaseRecord): boolean {
   return Boolean(
     lease.provisioningResourceMayExist === true &&
@@ -21920,6 +25300,7 @@ function leaseCleanupIsUnresolved(lease: LeaseRecord): boolean {
 }
 
 function retainUnresolvedProviderResource(lease: LeaseRecord, message: string, at: string): void {
+  clearLeaseCleanupCompletion(lease);
   if (leaseIsLive(lease)) {
     lease.state = "failed";
     lease.endedAt = at;
@@ -21943,6 +25324,7 @@ function recordLeaseCleanupFailure(
   message: string,
   at: string,
 ): void {
+  clearLeaseCleanupCompletion(lease);
   if (error instanceof ProviderResourceUnresolvedError) {
     retainUnresolvedProviderResource(lease, message, at);
   } else if (error instanceof ProviderCleanupManualResolutionError) {
@@ -22025,11 +25407,12 @@ function provisionedLeaseRecord(
   const providerKeyCleanupOwned =
     (config.provider === "aws" || config.provider === "hetzner") &&
     providerKey === providerKeyForLease(lease.id);
-  return {
+  const record: LeaseRecord = {
     ...lease,
     state: "active",
     cloudID: server.cloudID,
     serverID: server.id,
+    ...(server.providerResourceID ? { providerResourceID: server.providerResourceID } : {}),
     serverName: server.name,
     serverType,
     providerKey,
@@ -22039,6 +25422,17 @@ function provisionedLeaseRecord(
     ...(providerProject ? { providerProject } : {}),
     ...(server.hostID ? { hostId: server.hostID } : {}),
   };
+  clearLeaseCleanupCompletion(record);
+  return record;
+}
+
+function leaseHasCurrentCleanupOrFinalRelease(lease: LeaseRecord): boolean {
+  const now = Date.now();
+  return Boolean(
+    (lease.cleanupStartedAt && cleanupClaimDeadline(lease) > now) ||
+    (lease.state === "released" && lease.releaseDeletesServer === false) ||
+    leaseProviderCleanupConfirmed(lease),
+  );
 }
 
 function mergeProvisioningFailureMetadata(
@@ -22049,6 +25443,20 @@ function mergeProvisioningFailureMetadata(
   message: string,
   failedAt: string,
 ): void {
+  if (
+    cleanupClaim &&
+    lease.provider === cleanupClaim.provider &&
+    lease.cloudID === cleanupClaim.cloudID &&
+    lease.providerResourceID === cleanupClaim.providerResourceID &&
+    (!cleanupClaim.region || lease.region === cleanupClaim.region) &&
+    (!cleanupClaim.providerProject || lease.providerProject === cleanupClaim.providerProject) &&
+    lease.providerScope === cleanupClaim.providerScope &&
+    leaseHasCurrentCleanupOrFinalRelease(lease)
+  ) {
+    // Release may win after readiness reports failure but before this merge.
+    // Only a newly discovered allocation can invalidate another cleanup's custody.
+    return;
+  }
   if (error instanceof ProviderResourceUnresolvedError) {
     retainUnresolvedProviderResource(lease, message, failedAt);
     return;
@@ -22056,6 +25464,7 @@ function mergeProvisioningFailureMetadata(
   const retainResource = lease.state === "released" && lease.releaseDeletesServer === false;
   const awsOutcomeUncertain =
     config.provider === "aws" && config.awsPrivate && isAWSRunInstancesOutcomeUncertain(message);
+  const providerOutcomeUncertain = providerProvisioningOutcomeUncertain(error);
   const hetznerResourceMayExist =
     config.provider === "hetzner" && hetznerProvisioningFailureMayHaveResource(error);
   const hetznerRetryable =
@@ -22067,8 +25476,9 @@ function mergeProvisioningFailureMetadata(
   const resourceMayExist = Boolean(
     cleanupClaim ||
     awsOutcomeUncertain ||
+    providerOutcomeUncertain ||
     hetznerResourceMayExist ||
-    lease.provisioningResourceMayExist,
+    (lease.provisioningResourceMayExist && !hetznerDefiniteKeyOnlyFailure(lease, error)),
   );
 
   lease.updatedAt = failedAt;
@@ -22078,6 +25488,7 @@ function mergeProvisioningFailureMetadata(
   lease.provisioningFailureRetryable = Boolean(
     !cleanupClaim &&
     !awsOutcomeUncertain &&
+    !providerOutcomeUncertain &&
     (hetznerRetryable || lease.provisioningFailureRetryable),
   );
 
@@ -22114,7 +25525,10 @@ function mergeProvisioningFailureMetadata(
     clearLeaseCleanupMetadata(lease);
     delete lease.cleanupStartedAt;
     delete lease.cleanupClaimExpiresAt;
-    delete lease.provisioningResourceMayExist;
+    // Retained key-only cleanup still needs the definite no-resource evidence.
+    if (lease.provisioningResourceMayExist !== false || !lease.providerKeyCleanupPending) {
+      delete lease.provisioningResourceMayExist;
+    }
     delete lease.provisioningFailureRetryable;
     return;
   }
@@ -22143,6 +25557,9 @@ function retainProvisioningCleanupClaim(
   lease.cloudID = claim.cloudID;
   lease.serverName = claim.cloudID;
   lease.serverID = claim.serverID ?? 0;
+  if (claim.providerResourceID) {
+    lease.providerResourceID = claim.providerResourceID;
+  }
   lease.updatedAt = failedAt;
   if (claim.region) lease.region = claim.region;
   if (claim.providerProject) lease.providerProject = claim.providerProject;
@@ -22236,6 +25653,62 @@ function sameProvisioningAttempt(
   );
 }
 
+function unboundProvisioningRecoveryEligible(
+  lease: LeaseRecord,
+  attempt: CreateAttemptRecord | undefined,
+): attempt is CreateAttemptRecord {
+  const validState =
+    lease.state === "provisioning" ||
+    (lease.state === "failed" && lease.provisioningResourceMayExist === true) ||
+    (lease.state === "released" &&
+      lease.provisioningResourceMayExist === true &&
+      lease.releaseDeletesServer === true);
+  const validAttemptState =
+    lease.state === "released" ? attempt?.state === "canceled" : attempt?.state === "pending";
+  const validTimestamps = [
+    lease.createdAt,
+    lease.updatedAt,
+    lease.expiresAt,
+    lease.provisioningRequestStartedAt,
+    lease.provisioningRecoveryObservedAt,
+    attempt?.createdAt,
+    attempt?.updatedAt,
+  ].every((value) => Number.isFinite(Date.parse(value ?? "")));
+  return Boolean(
+    validState &&
+    validAttemptState &&
+    validTimestamps &&
+    (lease.provisioningRequestSettledAt === undefined ||
+      Number.isFinite(Date.parse(lease.provisioningRequestSettledAt))) &&
+    !isRegisteredLease(lease) &&
+    !lease.workspaceID &&
+    managedLeaseProvider(lease) &&
+    lease.cloudID === "" &&
+    lease.serverID === 0 &&
+    (lease.providerResourceID === undefined ||
+      (lease.providerResourceID.length > 0 &&
+        lease.providerResourceID === lease.providerResourceID.trim())) &&
+    lease.serverName === "" &&
+    lease.host === "" &&
+    !lease.cleanupStartedAt &&
+    !lease.cleanupClaimExpiresAt &&
+    !lease.providerKeyCleanupPending &&
+    validCreateAttemptID(lease.createAttemptID) &&
+    Boolean(lease.createAttemptGeneration?.trim()) &&
+    attempt &&
+    attempt.cloudID === undefined &&
+    createAttemptMatchesLease(attempt, lease),
+  );
+}
+
+function sameUnboundProvisioningRecoveryLease(
+  current: LeaseRecord,
+  expected: LeaseRecord,
+): boolean {
+  // Fail closed on any lease field drift; object key reordering can only cause a safe retry.
+  return JSON.stringify(current) === JSON.stringify(expected);
+}
+
 function nextLeaseAlarmTime(lease: LeaseRecord, coordinatorGeneration: string): number | undefined {
   const now = Date.now();
   const expiresAt = Date.parse(lease.expiresAt);
@@ -22321,6 +25794,7 @@ function terminalizeManualProviderCleanup(
   error: string,
   terminalAt: string,
 ): void {
+  clearLeaseCleanupCompletion(lease);
   if (leaseIsLive(lease)) {
     lease.state = "expired";
   }
@@ -22420,6 +25894,9 @@ function finalizedReleasedLease(
   delete lease.cleanupClaimExpiresAt;
   if (keep !== undefined) {
     lease.keep = keep;
+  }
+  if (!deleteServer) {
+    clearLeaseCleanupCompletion(lease);
   }
   return lease;
 }
@@ -22652,6 +26129,32 @@ function withLeaseSSHSourceCIDRs(
       sshSourceCIDRsComplete: complete,
     },
   };
+}
+
+function awsCreateSSHSourceCIDRs(
+  config: LeaseConfig,
+  lease: LeaseRecord,
+  context: ProviderAccessContext,
+  env: Env,
+  providerRegion: string,
+): string[] {
+  const targetKey = awsIngressAccessTargetKey(
+    lease,
+    lease.region || config.awsRegion,
+    awsLeaseSSHPorts(lease),
+    env,
+  );
+  const targetLeases = replaceProviderAccessState(context.activeLeases, lease).filter(
+    (candidate) =>
+      leaseOwnsAWSSSHAccess(candidate) &&
+      awsIngressAccessTargetKey(
+        candidate,
+        candidate.region || providerRegion,
+        awsLeaseSSHPorts(candidate),
+        env,
+      ) === targetKey,
+  );
+  return activeAWSSSHSourceCIDRs(targetLeases, awsGlobalSSHSourceCIDRs(env));
 }
 
 function leaseOwnsAWSSSHAccess(lease: LeaseRecord): boolean {
@@ -22951,7 +26454,9 @@ function parseProviderLabelTime(value: string | undefined): number {
 }
 
 interface CloudProvider {
+  resumableProvisioning?(): ProviderResumableProvisioning;
   readyPoolImageIdentity?(lease: LeaseRecord): ReadyPoolImageIdentity | undefined;
+  observeReadyPoolImageIdentity?(lease: LeaseRecord): Promise<LeaseImageIdentity | undefined>;
   supportsReadyPoolImageIdentity?(identity: ReadyPoolImageIdentity): boolean;
   listCrabboxServers(): Promise<ProviderMachine[]>;
   listReconciliationResources?(): Promise<ProviderMachine[]>;
@@ -22963,6 +26468,11 @@ interface CloudProvider {
   restrictedLeaseRequestFields?(input: LeaseRequest): string[];
   ownershipLabelValue?(value: string): string;
   recoveryIsAuthoritative?: true;
+  recoverUnboundProvisioningResource?(lease: LeaseRecord): Promise<ProviderMachine | undefined>;
+  observeLegacyCleanupIdentity?(
+    lease: LeaseRecord,
+    context?: ProviderReleaseContext,
+  ): Promise<{ providerResourceID: string } | undefined>;
   recoverServer?(lease: LeaseRecord): Promise<ProviderMachine | undefined>;
   resumeRecoveredServer?(
     config: ReturnType<typeof leaseConfig>,
@@ -23008,6 +26518,14 @@ interface CloudProvider {
   releaseLease(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void>;
   deleteServer(id: string): Promise<void>;
   deleteOwnedServer?(lease: LeaseRecord): Promise<void>;
+  inspectCleanup?(lease: LeaseRecord): Promise<unknown>;
+  // Revalidate the lease after provider reads, before committing any recovery writes.
+  recoverCleanup?(
+    lease: LeaseRecord,
+    expectedClaimFingerprint: string,
+    actor: string,
+    commitGuard: <T>(commit: () => Promise<T>) => Promise<T>,
+  ): Promise<unknown>;
   supportsNativeImages(): boolean;
   nativeImagesUnsupportedMessage(): string;
   defaultImageStrategy(lease: LeaseRecord): "image" | "disk-snapshot";
@@ -23021,9 +26539,25 @@ interface CloudProvider {
     noReboot: boolean,
     strategy: "image" | "disk-snapshot",
   ): Promise<ProviderImage>;
+  checkpointScope?(lease: LeaseRecord): Promise<CoordinatorCheckpointScope>;
+  validateCheckpointLeaseScope?(checkpoint: CoordinatorCheckpointRecord): Promise<void>;
+  validateCheckpointImage?(checkpoint: CoordinatorCheckpointRecord): Promise<void>;
+  createCheckpointImage?(
+    lease: LeaseRecord,
+    name: string,
+    noReboot: boolean,
+    strategy: "image" | "disk-snapshot",
+    ownership: ProviderCheckpointOwnership,
+    scope: CoordinatorCheckpointScope,
+  ): Promise<ProviderImage>;
+  recoverCheckpointImage?(
+    checkpoint: CoordinatorCheckpointRecord,
+  ): Promise<ProviderImage | undefined>;
+  deleteCheckpointImage?(checkpoint: CoordinatorCheckpointRecord): Promise<void>;
   getImage(imageID: string, kind?: string): Promise<ProviderImage>;
   deleteImage(imageID: string, kind?: string, metadata?: ProviderImage): Promise<void>;
   retireCatalogImage?(imageID: string, region?: string): Promise<number>;
+  retirePromotedImage?(imageID: string, region?: string): Promise<number>;
   storedImageMetadata(imageID: string): Promise<ProviderImage | undefined>;
   storedImageDeleteMetadata?(imageID: string): Promise<ProviderImage | undefined>;
   decorateImage(image: ProviderImage, metadata?: Partial<ProviderImage>): ProviderImage;
@@ -23036,7 +26570,8 @@ interface CloudProvider {
     metadata: ProviderImage | undefined,
     request: Request,
     url: URL,
-  ): Promise<Response | { image: ProviderImage }>;
+    checkpoint?: Pick<CoordinatorCheckpointRecord, "id" | "generation">,
+  ): Promise<Response | { image: ProviderImage; previous?: ImageDefaultState }>;
   fastSnapshotRestoreForImage?(
     imageID: string,
     metadata: ProviderImage | undefined,
@@ -23096,6 +26631,8 @@ interface ProviderAccessContext {
 
 interface ProviderReleaseContext {
   resourceIdentity?: string;
+  assertCleanupOwner?: () => Promise<void>;
+  saveCleanupEvidence?: (evidence: ProviderCleanupEvidence) => Promise<void>;
 }
 
 interface ProviderLeaseCreatePreparation {
@@ -23110,11 +26647,17 @@ interface ProviderLeaseCreateFinalization {
 }
 
 interface ProviderProvisioningContext {
+  providerScope?: string;
   sshIngressReconcile?: "authoritative" | "additive";
   allowEmptySSHIngress?: boolean;
   publishAccessBeforeProvisioning?: boolean;
   onTargetAttempt?: (target: ProviderProvisioningTarget) => Promise<void>;
   onResourceCreated?: (claim: ProviderProvisioningCleanupClaim) => Promise<boolean>;
+  withLeaseAccess?: <T>(
+    target: ProviderProvisioningTarget,
+    operation: (lease: LeaseRecord, context: ProviderAccessContext) => Promise<T>,
+    observe?: ProviderAccessTimingObserver,
+  ) => Promise<T>;
 }
 
 interface ProviderProvisioningTarget {
@@ -23182,53 +26725,31 @@ export class HetznerProvider implements CloudProvider {
     };
   }
 
-  async releaseLease(lease: LeaseRecord): Promise<void> {
-    let serverID = Number(lease.serverID);
-    let server: HetznerServer | undefined;
-    if (
-      (!Number.isSafeInteger(serverID) || serverID <= 0) &&
-      lease.providerKeyCleanupPending &&
-      lease.provisioningResourceMayExist
-    ) {
-      server = await this.client.findServerByLease(lease.id);
-      serverID = server?.id ?? Number.NaN;
+  async releaseLease(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void> {
+    const keyOnlyID = hetznerKeyOnlyCleanupID(lease);
+    if (keyOnlyID !== undefined) {
+      if (!context?.assertCleanupOwner)
+        throw new Error("Hetzner key cleanup requires a current cleanup owner");
+      const deadline = Date.now() + 60_000;
+      await this.client.deleteSSHKeyByID(keyOnlyID, deadline, context.assertCleanupOwner);
+      return;
     }
-    if (Number.isSafeInteger(serverID) && serverID > 0) {
-      try {
-        server ??= await this.client.getServer(serverID);
-      } catch (error) {
-        if (!providerResourceNotFound(error)) {
-          throw error;
-        }
-      }
-      if (server) {
-        if (
-          server.id !== serverID ||
-          !hetznerServerOwnedByLease(server, lease.id, lease.slug, lease.serverName)
-        ) {
-          throw new Error(
-            `refusing to delete Hetzner server ${serverID}: ownership does not match lease ${lease.id}`,
-          );
-        }
-        try {
-          await this.deleteServer(String(serverID));
-        } catch (error) {
-          if (!providerResourceNotFound(error)) {
-            throw error;
-          }
-        }
-      }
-    }
+    if (!context?.saveCleanupEvidence)
+      throw new Error("Hetzner cleanup requires durable evidence storage");
+    if (!context.assertCleanupOwner)
+      throw new Error("Hetzner key cleanup requires a current cleanup owner");
+    const deadline = Date.now() + 60_000;
+    await confirmHetznerServerCleanup(this.client, lease, context.saveCleanupEvidence, deadline);
     if (lease.providerKeyCleanupPending) {
       const providerKeyID = Number(lease.providerKeyCleanupID);
       if (!Number.isSafeInteger(providerKeyID) || providerKeyID <= 0) {
         throw new Error("invalid pending Hetzner SSH key cleanup id");
       }
-      await this.client.deleteSSHKeyByID(providerKeyID);
+      await this.client.deleteSSHKeyByID(providerKeyID, deadline, context.assertCleanupOwner);
       return;
     }
     if (leaseUsesCanonicalProviderKey(lease)) {
-      await this.deleteSSHKey(lease.providerKey, lease.id);
+      await this.deleteSSHKey(lease.providerKey, lease.id, deadline, context.assertCleanupOwner);
     }
   }
 
@@ -23255,8 +26776,13 @@ export class HetznerProvider implements CloudProvider {
   decorateImage = passthroughProviderImage;
   validateDeleteImage = allowProviderImageDelete;
 
-  async deleteSSHKey(name: string, leaseID: string): Promise<void> {
-    await this.client.deleteSSHKey(name, leaseID);
+  async deleteSSHKey(
+    name: string,
+    leaseID: string,
+    deadline?: number,
+    beforeDelete?: () => Promise<void>,
+  ): Promise<void> {
+    await this.client.deleteSSHKey(name, leaseID, deadline, beforeDelete);
   }
 
   hourlyPriceUSD(
@@ -23267,8 +26793,30 @@ export class HetznerProvider implements CloudProvider {
   }
 }
 
+function withProvisioningPhases(
+  timing: Omit<LeaseProvisioningTiming, "phases">,
+): LeaseProvisioningTiming {
+  const totalMs = Number.isSafeInteger(timing.totalMs) && timing.totalMs > 0 ? timing.totalMs : 0;
+  const phases: NonNullable<LeaseProvisioningTiming["phases"]> = [];
+  let remaining = totalMs;
+  const append = (name: NonNullable<LeaseProvisioningTiming["phases"]>[number]["name"], ms = 0) => {
+    if (!Number.isSafeInteger(ms) || ms <= 0 || ms > remaining) return;
+    phases.push({ name, ms });
+    remaining -= ms;
+  };
+  append("request", timing.requestMs);
+  append("network_ready", timing.networkReadyMs);
+  append("bootstrap", timing.bootstrapMs);
+  append("unattributed", remaining);
+  return { ...timing, totalMs, phases };
+}
+
 export class AzureProvider implements CloudProvider {
   private clientValue?: AzureClient;
+
+  resumableProvisioning(): ProviderResumableProvisioning {
+    return new AzureResumableProvisioning(this.env, undefined, this.storage);
+  }
 
   constructor(
     private readonly env: Env,
@@ -23413,16 +26961,48 @@ export class AzureProvider implements CloudProvider {
       return {
         ...result,
         ...(image ? { image } : {}),
-        provisioningTiming: {
+        provisioningTiming: withProvisioningPhases({
           requestMs: Date.now() - startedAt,
           totalMs: Date.now() - startedAt,
-        },
+        }),
       };
     });
   }
 
   deleteServer(id: string): Promise<void> {
     return this.client.deleteServer(id);
+  }
+
+  inspectCleanup(lease: LeaseRecord): ReturnType<AzureClient["inspectOwnedCleanup"]> {
+    const scope = azureProviderScope(lease.providerScope);
+    if (!scope) {
+      throw new Error("Azure cleanup inspection requires the original provider scope");
+    }
+    return new AzureClient(this.env, {
+      ...(lease.region ? { location: lease.region } : {}),
+      subscription: scope.subscription,
+      resourceGroup: scope.resourceGroup,
+      ...(this.storage ? { ownedDeleteClaimStorage: this.storage } : {}),
+    }).inspectOwnedCleanup(lease);
+  }
+
+  recoverCleanup(
+    lease: LeaseRecord,
+    expectedClaimFingerprint: string,
+    actor: string,
+    commitGuard?: <T>(commit: () => Promise<T>) => Promise<T>,
+  ): ReturnType<AzureClient["recoverMissingPublicIP"]> {
+    const scope = azureProviderScope(lease.providerScope);
+    if (!scope || !lease.region?.trim())
+      throw new ProviderResourceUnresolvedError(
+        "Azure cleanup recovery requires the original provider scope and region",
+      );
+    return new AzureClient(this.env, {
+      location: lease.region,
+      subscription: scope.subscription,
+      resourceGroup: scope.resourceGroup,
+      ...(this.storage ? { ownedDeleteClaimStorage: this.storage } : {}),
+    }).recoverMissingPublicIP(lease, expectedClaimFingerprint, actor, commitGuard);
   }
 
   deleteOwnedServer(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void> {
@@ -23520,6 +27100,156 @@ export class AzureProvider implements CloudProvider {
     return enriched;
   }
 
+  async checkpointScope(lease: LeaseRecord): Promise<CoordinatorCheckpointScope> {
+    const scope = azureProviderScope(lease.providerScope);
+    const region = lease.region?.trim().toLowerCase();
+    if (
+      !scope ||
+      !region ||
+      this.client.providerScope().toLowerCase() !== lease.providerScope?.toLowerCase()
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "Azure source lease has no exact subscription, resource group, and location",
+      );
+    }
+    return { region, subscriptionID: scope.subscription, resourceGroup: scope.resourceGroup };
+  }
+
+  async validateCheckpointLeaseScope(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
+    const expected = `/subscriptions/${checkpoint.scope.subscriptionID}/resourceGroups/${checkpoint.scope.resourceGroup}`;
+    if (this.client.providerScope().toLowerCase() !== expected.toLowerCase()) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "Azure checkpoint lease subscription or resource group does not match durable ownership",
+      );
+    }
+  }
+
+  async validateCheckpointImage(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
+    const metadata = await checkpointCreatedImageMetadata(this.storage, checkpoint);
+    const image = checkpoint.image!;
+    const expected = `/subscriptions/${checkpoint.scope.subscriptionID}/resourceGroups/${checkpoint.scope.resourceGroup}/providers/Microsoft.Compute/snapshots/${image.id}`;
+    if (
+      metadata.resourceID?.toLowerCase() !== image.resourceID.toLowerCase() ||
+      image.resourceID.toLowerCase() !== expected.toLowerCase()
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "Azure checkpoint snapshot durable resource scope does not match its source lease",
+      );
+    }
+    let current: ProviderImage;
+    try {
+      current = await this.client.getImage(image.id, image.kind);
+    } catch (error) {
+      if (!azureSnapshotNotFound(error, image.resourceID)) throw error;
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "Azure checkpoint snapshot no longer exists",
+      );
+    }
+    if (
+      current.provider !== "azure" ||
+      current.kind !== image.kind ||
+      current.resourceID?.toLowerCase() !== image.resourceID.toLowerCase() ||
+      current.immutableID !== image.immutableID ||
+      current.region !== checkpoint.scope.region ||
+      current.checkpointOwnershipHash !== metadata.checkpointOwnershipHash ||
+      current.checkpointSourceLeaseID !== checkpoint.leaseID
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "Azure checkpoint snapshot identity, location, or ownership evidence has changed",
+      );
+    }
+  }
+
+  async createCheckpointImage(
+    lease: LeaseRecord,
+    name: string,
+    _noReboot: boolean,
+    _strategy: "image" | "disk-snapshot",
+    ownership: ProviderCheckpointOwnership,
+    _scope: CoordinatorCheckpointScope,
+  ): Promise<ProviderImage> {
+    await this.client.createDiskSnapshot(lease.cloudID, name, ownership);
+    const image = await this.client.getImage(name, "azure-os-disk-snapshot");
+    const enriched: ProviderImage = {
+      ...image,
+      provider: "azure",
+      ...(image.region ? { region: image.region.toLowerCase() } : {}),
+      serverType: lease.serverType,
+    };
+    return enriched;
+  }
+
+  async recoverCheckpointImage(
+    checkpoint: CoordinatorCheckpointRecord,
+  ): Promise<ProviderImage | undefined> {
+    if (!checkpoint.createClaim) return undefined;
+    await this.validateCheckpointLeaseScope(checkpoint);
+    try {
+      const image = await this.client.getImage(
+        checkpoint.createClaim.resourceName,
+        "azure-os-disk-snapshot",
+      );
+      if (
+        image.checkpointOwnershipHash !== checkpoint.createClaim.tokenHash ||
+        image.checkpointSourceLeaseID !== checkpoint.leaseID
+      ) {
+        throw new CheckpointError(
+          "checkpoint_source_mismatch",
+          "existing Azure snapshot does not match the exact checkpoint ownership claim",
+        );
+      }
+      return image;
+    } catch (error) {
+      const expected = `/subscriptions/${checkpoint.scope.subscriptionID}/resourceGroups/${checkpoint.scope.resourceGroup}/providers/Microsoft.Compute/snapshots/${checkpoint.createClaim.resourceName}`;
+      if (azureSnapshotNotFound(error, expected)) return undefined;
+      throw error;
+    }
+  }
+
+  async deleteCheckpointImage(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
+    const image = checkpoint.image;
+    const expectedScope = `/subscriptions/${checkpoint.scope.subscriptionID}/resourceGroups/${checkpoint.scope.resourceGroup}`;
+    if (!image || this.client.providerScope().toLowerCase() !== expectedScope.toLowerCase()) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "Azure checkpoint subscription or resource group does not match its durable ownership",
+      );
+    }
+    let current: ProviderImage | undefined;
+    try {
+      current = await this.client.getImage(image.id, image.kind);
+    } catch (error) {
+      if (!azureSnapshotNotFound(error, image.resourceID)) throw error;
+    }
+    if (current) {
+      if (
+        current.resourceID?.toLowerCase() !== image.resourceID.toLowerCase() ||
+        current.immutableID !== image.immutableID ||
+        current.region?.toLowerCase() !== checkpoint.scope.region.toLowerCase()
+      ) {
+        throw new CheckpointError(
+          "checkpoint_source_mismatch",
+          "Azure checkpoint snapshot immutable identity or location has changed",
+        );
+      }
+      await this.client.deleteImage(image.resourceID, image.kind);
+      try {
+        await this.client.getImage(image.id, image.kind);
+        throw new CheckpointError(
+          "checkpoint_delete_failed",
+          "Azure checkpoint snapshot remains present after deletion",
+        );
+      } catch (error) {
+        if (!azureSnapshotNotFound(error, image.resourceID)) throw error;
+      }
+    }
+  }
+
   getImage(imageID: string, kind?: string): Promise<ProviderImage> {
     return this.client.getImage(imageID, kind);
   }
@@ -23555,6 +27285,7 @@ export class AzureProvider implements CloudProvider {
     known: ProviderImage | undefined,
     request: Request,
     url: URL,
+    checkpoint?: Pick<CoordinatorCheckpointRecord, "id" | "generation">,
   ): Promise<Response | { image: ProviderImage }> {
     if (!this.storage) {
       return json(
@@ -23717,8 +27448,39 @@ export class AzureProvider implements CloudProvider {
       serverType,
       promotedAt: new Date().toISOString(),
     };
-    await this.storage.put(promotedAzureImageKey(promoted), promoted);
+    await imageCatalogTransaction(this.storage, async (transaction) => {
+      const key = promotedAzureImageKey(promoted);
+      const previous = await transaction.get<PromotedImageRecord>(key);
+      if (
+        previous &&
+        (previous.id !== promoted.id || previous.resourceID !== promoted.resourceID)
+      ) {
+        await unpinCheckpointPromotion(transaction, "azure", previous, key);
+      }
+      await transaction.put(key, promoted);
+      await pinCheckpointPromotion(transaction, "azure", promoted, key, checkpoint);
+    });
     return { image: promoted };
+  }
+
+  async retirePromotedImage(imageID: string, region?: string): Promise<number> {
+    if (!this.storage) throw new Error("Azure image catalog storage is unavailable");
+    return await imageCatalogTransaction(this.storage, async (transaction) => {
+      const records = await transaction.list<PromotedImageRecord>({
+        prefix: "image:azure:promoted:",
+      });
+      const matching = [...records].filter(
+        ([, image]) =>
+          (image.id === imageID || image.resourceID === imageID) &&
+          (!region || image.region?.toLowerCase() === region.toLowerCase()),
+      );
+      await matching.reduce(async (previous, [key, image]) => {
+        await previous;
+        await unpinCheckpointPromotion(transaction, "azure", image, key);
+        await transaction.delete(key);
+      }, Promise.resolve());
+      return matching.length;
+    });
   }
 
   async deleteSSHKey(): Promise<void> {
@@ -23731,6 +27493,8 @@ export class AzureProvider implements CloudProvider {
 }
 
 export class GCPProvider implements CloudProvider {
+  readonly recoveryIsAuthoritative = true;
+
   private clientValue?: GCPClient;
 
   constructor(
@@ -23743,6 +27507,30 @@ export class GCPProvider implements CloudProvider {
   private get client(): GCPClient {
     this.clientValue ??= new GCPClient(this.env, this.zone, this.project);
     return this.clientValue;
+  }
+
+  readyPoolImageIdentity(lease: LeaseRecord): ReadyPoolImageIdentity | undefined {
+    const image = lease.image;
+    if (
+      lease.provider !== "gcp" ||
+      !image ||
+      image.provider !== "gcp" ||
+      !lease.providerProject ||
+      lease.providerProject.trim() !== lease.providerProject ||
+      !/^[0-9]+$/.test(image.id)
+    ) {
+      return undefined;
+    }
+    const scope = gcpReadyPoolImageScope(image.sourceID, image.kind);
+    return scope ? { provider: "gcp", scope, id: image.id } : undefined;
+  }
+
+  supportsReadyPoolImageIdentity(identity: ReadyPoolImageIdentity): boolean {
+    return (
+      identity.provider === "gcp" &&
+      /^[0-9]+$/.test(identity.id) &&
+      gcpReadyPoolImageScopeSupported(identity.scope)
+    );
   }
 
   restrictedLeaseRequestFields(input: LeaseRequest): string[] {
@@ -23777,7 +27565,11 @@ export class GCPProvider implements CloudProvider {
   }
 
   recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
-    return this.client.recoverServerForLease(lease.id, lease.slug);
+    return this.client.recoverServerForLease(lease);
+  }
+
+  recoverUnboundProvisioningResource(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
+    return this.client.recoverUnboundProvisioningResource(lease);
   }
 
   async prepareLeaseConfig(
@@ -23790,6 +27582,17 @@ export class GCPProvider implements CloudProvider {
       ...config,
       gcpProject: this.env.CRABBOX_GCP_PROJECT?.trim() || this.env.GCP_PROJECT_ID?.trim() || "",
     };
+  }
+
+  observeReadyPoolImageIdentity(lease: LeaseRecord): Promise<LeaseImageIdentity | undefined> {
+    return this.client.observeReadyPoolImageIdentity(lease);
+  }
+
+  observeLegacyCleanupIdentity(
+    lease: LeaseRecord,
+    context?: ProviderReleaseContext,
+  ): Promise<{ providerResourceID: string } | undefined> {
+    return this.client.observeLegacyCleanupIdentity(lease, context);
   }
 
   prepareLeaseCreate(
@@ -23835,11 +27638,25 @@ export class GCPProvider implements CloudProvider {
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
     if (
-      !(await ownedProviderMachineForRelease("gcp", lease, (id) => this.findServer(id), {
-        labelValue: gcpProviderLabelValue,
-      }))
+      !lease.providerResourceID ||
+      lease.providerResourceID !== lease.providerResourceID.trim() ||
+      !/^[0-9]+$/.test(lease.providerResourceID)
     ) {
-      return;
+      throw new ProviderResourceUnresolvedError(
+        `refusing to delete GCP instance ${lease.cloudID}: lease ${lease.id} has no numeric resource id`,
+      );
+    }
+    const machine = await ownedProviderMachineForRelease(
+      "gcp",
+      lease,
+      (id) => this.findServer(id),
+      { labelValue: gcpProviderLabelValue },
+    );
+    if (!machine) return;
+    if (machine.providerResourceID !== lease.providerResourceID) {
+      throw new ProviderResourceUnresolvedError(
+        `refusing to delete GCP instance ${lease.cloudID}: numeric resource id does not match lease ${lease.id}`,
+      );
     }
     await this.deleteServer(lease.cloudID);
   }
@@ -23892,6 +27709,184 @@ export class GCPProvider implements CloudProvider {
       await storeCreatedProviderImage(this.storage, "gcp", enriched);
     }
     return enriched;
+  }
+
+  async checkpointScope(lease: LeaseRecord): Promise<CoordinatorCheckpointScope> {
+    const project = lease.providerProject?.trim();
+    const region = lease.region?.trim();
+    if (!project || !region || this.client.project !== project || this.client.zone !== region) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "GCP source lease has no exact project and source zone",
+      );
+    }
+    return { region, project };
+  }
+
+  async validateCheckpointLeaseScope(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
+    if (
+      this.client.project !== checkpoint.scope.project ||
+      this.client.zone !== checkpoint.scope.region
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "GCP checkpoint lease project or zone does not match durable ownership",
+      );
+    }
+  }
+
+  async validateCheckpointImage(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
+    const metadata = await checkpointCreatedImageMetadata(this.storage, checkpoint);
+    const image = checkpoint.image!;
+    const collection =
+      image.kind === "gcp-disk-snapshot"
+        ? "snapshots"
+        : image.kind === "gcp-machine-image"
+          ? "machineImages"
+          : "";
+    const expected = `projects/${checkpoint.scope.project}/global/${collection}/${image.id}`;
+    if (
+      !collection ||
+      metadata.project !== checkpoint.scope.project ||
+      metadata.resourceID !== image.resourceID ||
+      (image.resourceID !== expected && !image.resourceID.endsWith(`/${expected}`))
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "GCP checkpoint durable resource kind or project does not match its source lease",
+      );
+    }
+    let current: ProviderImage;
+    try {
+      current = await this.client.getImage(image.id, image.kind);
+    } catch (error) {
+      const missing =
+        image.kind === "gcp-machine-image"
+          ? gcpMachineImageNotFound(error, checkpoint.scope.project!, image.id)
+          : gcpSnapshotNotFound(error, checkpoint.scope.project!, image.id);
+      if (!missing) throw error;
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "GCP checkpoint source resource no longer exists",
+      );
+    }
+    if (
+      current.provider !== "gcp" ||
+      current.id !== image.id ||
+      current.kind !== image.kind ||
+      current.project !== checkpoint.scope.project ||
+      current.region !== checkpoint.scope.region ||
+      current.resourceID !== image.resourceID ||
+      current.immutableID !== image.immutableID ||
+      current.checkpointOwnershipHash !== metadata.checkpointOwnershipHash ||
+      current.checkpointSourceLeaseID !== checkpoint.leaseID
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "GCP checkpoint resource identity, project, zone, or ownership evidence has changed",
+      );
+    }
+  }
+
+  async createCheckpointImage(
+    lease: LeaseRecord,
+    name: string,
+    _noReboot: boolean,
+    strategy: "image" | "disk-snapshot",
+    ownership: ProviderCheckpointOwnership,
+    _scope: CoordinatorCheckpointScope,
+  ): Promise<ProviderImage> {
+    const created =
+      strategy === "image"
+        ? await this.client.createImage(lease.cloudID, name, ownership)
+        : await this.client.createDiskSnapshot(lease.cloudID, name, ownership);
+    const image = await this.client.getImage(created.id, created.kind);
+    const enriched: ProviderImage = {
+      ...image,
+      provider: "gcp",
+    };
+    return enriched;
+  }
+
+  async recoverCheckpointImage(
+    checkpoint: CoordinatorCheckpointRecord,
+  ): Promise<ProviderImage | undefined> {
+    if (!checkpoint.createClaim) return undefined;
+    const kind = checkpoint.strategy === "image" ? "gcp-machine-image" : "gcp-disk-snapshot";
+    try {
+      const image = await this.client.getImage(checkpoint.createClaim.resourceName, kind);
+      if (
+        image.checkpointOwnershipHash !== checkpoint.createClaim.tokenHash ||
+        image.checkpointSourceLeaseID !== checkpoint.leaseID
+      ) {
+        throw new CheckpointError(
+          "checkpoint_source_mismatch",
+          "existing GCP resource does not match the exact checkpoint ownership claim",
+        );
+      }
+      return image;
+    } catch (error) {
+      const missing =
+        kind === "gcp-machine-image"
+          ? gcpMachineImageNotFound(
+              error,
+              checkpoint.scope.project!,
+              checkpoint.createClaim.resourceName,
+            )
+          : gcpSnapshotNotFound(
+              error,
+              checkpoint.scope.project!,
+              checkpoint.createClaim.resourceName,
+            );
+      if (missing) return undefined;
+      throw error;
+    }
+  }
+
+  async deleteCheckpointImage(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
+    const image = checkpoint.image;
+    if (
+      !image ||
+      this.client.project !== checkpoint.scope.project ||
+      this.client.zone !== checkpoint.scope.region
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "GCP checkpoint project or source zone does not match its durable ownership",
+      );
+    }
+    const missing = (error: unknown): boolean =>
+      image.kind === "gcp-machine-image"
+        ? gcpMachineImageNotFound(error, checkpoint.scope.project!, image.id)
+        : gcpSnapshotNotFound(error, checkpoint.scope.project!, image.id);
+    let current: ProviderImage | undefined;
+    try {
+      current = await this.client.getImage(image.id, image.kind);
+    } catch (error) {
+      if (!missing(error)) throw error;
+    }
+    if (current) {
+      if (
+        current.project !== checkpoint.scope.project ||
+        current.resourceID !== image.resourceID ||
+        current.immutableID !== image.immutableID
+      ) {
+        throw new CheckpointError(
+          "checkpoint_source_mismatch",
+          "GCP checkpoint resource numeric identity or project has changed",
+        );
+      }
+      await this.client.deleteImage(image.id, image.kind);
+      try {
+        await this.client.getImage(image.id, image.kind);
+        throw new CheckpointError(
+          "checkpoint_delete_failed",
+          "GCP checkpoint resource remains present after deletion",
+        );
+      } catch (error) {
+        if (!missing(error)) throw error;
+      }
+    }
   }
 
   getImage(imageID: string, kind?: string): Promise<ProviderImage> {
@@ -24139,6 +28134,14 @@ export class DaytonaProvider implements CloudProvider {
   hourlyPriceUSD(): Promise<number | undefined> {
     return Promise.resolve(undefined);
   }
+}
+
+function awsCheckpointResourceAbsent(message: string, resourceID: string): boolean {
+  const snapshot = resourceID.startsWith("snap-");
+  return (
+    message.includes(snapshot ? "InvalidSnapshot.NotFound" : "InvalidAMIID.NotFound") ||
+    message === `aws ${snapshot ? "snapshot" : "image"} not found: ${resourceID}`
+  );
 }
 
 export class AWSProvider implements CloudProvider {
@@ -24462,28 +28465,11 @@ export class AWSProvider implements CloudProvider {
         ...(config.awsSubnetID ? { awsSubnetID: config.awsSubnetID } : {}),
       },
     };
-    const activeLeases = replaceProviderAccessState(context.activeLeases, nextLease);
-    const targetKey = awsIngressAccessTargetKey(
-      nextLease,
-      nextLease.region || config.awsRegion,
-      awsLeaseSSHPorts(nextLease),
-      this.env,
-    );
-    const targetLeases = activeLeases.filter(
-      (candidate) =>
-        leaseOwnsAWSSSHAccess(candidate) &&
-        awsIngressAccessTargetKey(
-          candidate,
-          candidate.region || this.region,
-          awsLeaseSSHPorts(candidate),
-          this.env,
-        ) === targetKey,
-    );
     return {
       config: {
         ...config,
         awsSGName: configuredSecurityGroupID ? "" : managedSecurityGroupName,
-        awsSSHCIDRs: activeAWSSSHSourceCIDRs(targetLeases, [...sourceCIDRs, ...globalCIDRs]),
+        awsSSHCIDRs: awsCreateSSHSourceCIDRs(config, nextLease, context, this.env, this.region),
       },
       lease: nextLease,
       provisioning: {
@@ -24613,9 +28599,9 @@ export class AWSProvider implements CloudProvider {
     provisioningTiming?: LeaseProvisioningTiming;
   }> {
     const regions = awsRegionCandidates(config, this.env, this.region);
+    const withLeaseAccess = provisioning?.withLeaseAccess;
     const totalStartedAt = Date.now();
-    const failures: string[] = [];
-    const regionAttempts: ProvisioningAttempt[] = [];
+    const history = new ProvisioningAttemptHistory();
     const ingressOptions =
       provisioning?.sshIngressReconcile === undefined && !provisioning?.allowEmptySSHIngress
         ? undefined
@@ -24627,6 +28613,13 @@ export class AWSProvider implements CloudProvider {
           };
     for (const region of regions) {
       const client = region === this.region ? this.client : new EC2SpotClient(this.env, region);
+      let allocated:
+        | {
+            serverType: string;
+            market: string | undefined;
+            attempts: ProvisioningAttempt[] | undefined;
+          }
+        | undefined;
       try {
         // Record only regions whose provisioning path is about to mutate provider state.
         // oxlint-disable-next-line eslint/no-await-in-loop -- region fallback is intentionally ordered.
@@ -24639,18 +28632,92 @@ export class AWSProvider implements CloudProvider {
             leaseID,
             slug,
             owner,
-            ingressOptions,
+            {
+              ...ingressOptions,
+              // Only ingress writes hold the fence; image, instance and address waits do not.
+              ...(!config.awsPrivate && withLeaseAccess
+                ? {
+                    withIngress: (
+                      apply: (cidrs: string[]) => Promise<string>,
+                      observe: ProviderAccessTimingObserver,
+                    ) =>
+                      withLeaseAccess(
+                        { region },
+                        async (lease, context) => {
+                          const cidrs = awsCreateSSHSourceCIDRs(
+                            { ...config, awsRegion: region },
+                            lease,
+                            context,
+                            this.env,
+                            this.region,
+                          );
+                          try {
+                            return await apply(cidrs);
+                          } catch (error) {
+                            if (
+                              !isAWSSecurityGroupRuleLimitError(
+                                coordinatorErrorMessage(this.env, error),
+                              )
+                            ) {
+                              throw error;
+                            }
+                            await this.reconcileLeaseAccess(lease, context);
+                            return apply(cidrs);
+                          }
+                        },
+                        observe,
+                      ),
+                  }
+                : {}),
+            },
           );
+        allocated = { serverType, market, attempts };
         const requestMs = Date.now() - requestStartedAt;
         const networkReadyStartedAt = Date.now();
         let bootstrapMs = 0;
-        let readyServer: ProviderMachine;
+        const claim: ProviderProvisioningCleanupClaim = {
+          provider: "aws",
+          cloudID: server.cloudID,
+          serverID: server.id,
+          region,
+          ...(provisioning?.providerScope ? { providerScope: provisioning.providerScope } : {}),
+        };
+        const onResourceCreated = provisioning?.onResourceCreated;
+        const publishResource = onResourceCreated
+          ? async (readinessError?: unknown) => {
+              try {
+                return await onResourceCreated(claim);
+              } catch (error) {
+                if (error instanceof ProviderResourceUnresolvedError) throw error;
+                const message = coordinatorErrorMessage(this.env, error);
+                const cause =
+                  readinessError === undefined
+                    ? error
+                    : new AggregateError([readinessError, error], message, {
+                        cause: readinessError,
+                      });
+                throw new ProviderProvisioningCleanupError(message, claim, cause);
+              }
+            }
+          : undefined;
+        const checkReadiness = publishResource
+          ? async () => {
+              if (!(await publishResource())) throw new CreateAttemptCanceledError();
+            }
+          : undefined;
+        let readyServer = server;
         try {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- publish the allocation before readiness can perform provider I/O.
+          await checkReadiness?.();
           // oxlint-disable-next-line eslint/no-await-in-loop -- wait on the region that created the instance.
-          readyServer = await client.waitForServerIP(server.cloudID, config.awsPrivate);
+          readyServer = await client.waitForServerIP(
+            server.cloudID,
+            config.awsPrivate,
+            checkReadiness,
+          );
           if (config.awsRequireSSM) {
             // oxlint-disable-next-line eslint/no-await-in-loop -- private readiness belongs to the selected region.
-            await client.waitForSSMOnline(server.cloudID);
+            await client.waitForSSMOnline(server.cloudID, checkReadiness);
             const bootstrapStartedAt = Date.now();
             // oxlint-disable-next-line eslint/no-await-in-loop -- bootstrap must finish before the lease becomes active.
             const bootstrap = await client.runSSMBootstrap(
@@ -24658,6 +28725,7 @@ export class AWSProvider implements CloudProvider {
               leaseID,
               config.awsSSMBootstrapCommand,
               config.awsSSMLogGroup,
+              checkReadiness,
             );
             bootstrapMs = Date.now() - bootstrapStartedAt;
             readyServer = {
@@ -24668,35 +28736,43 @@ export class AWSProvider implements CloudProvider {
             };
           }
         } catch (error) {
+          if (error instanceof ProviderResourceUnresolvedError) throw error;
+          // Publication failures already carry the allocation; retrying publication could lose that evidence.
+          if (providerProvisioningCleanupClaim(error)) throw error;
           const waitMessage = error instanceof Error ? error.message : String(error);
-          try {
-            if (config.awsPrivate) {
-              // oxlint-disable-next-line eslint/no-await-in-loop -- clean up the exact instance before any fallback.
-              await client.terminateServerAndWait(server.cloudID);
-            } else {
-              // oxlint-disable-next-line eslint/no-await-in-loop -- clean up the exact instance before any fallback.
-              await client.deleteServer(server.cloudID);
+          if (publishResource) {
+            // The published owner decides current retain/delete intent; readiness never deletes behind it.
+            if (
+              !(error instanceof CreateAttemptCanceledError) &&
+              // oxlint-disable-next-line eslint/no-await-in-loop -- revalidate retain/delete intent after the failed provider read.
+              (await publishResource(error))
+            ) {
+              throw new ProviderProvisioningCleanupError(waitMessage, claim, error);
             }
-          } catch (deleteError) {
-            const deleteMessage =
-              deleteError instanceof Error ? deleteError.message : String(deleteError);
-            if (!isAWSInstanceCleanedAfterReadinessFailure(waitMessage, deleteMessage)) {
+            readyServer = server;
+          } else {
+            try {
+              if (config.awsPrivate) {
+                // oxlint-disable-next-line eslint/no-await-in-loop -- clean up the exact instance before any fallback.
+                await client.terminateServerAndWait(server.cloudID);
+              } else {
+                // oxlint-disable-next-line eslint/no-await-in-loop -- clean up the exact instance before any fallback.
+                await client.deleteServer(server.cloudID);
+              }
+            } catch (deleteError) {
+              const deleteMessage =
+                deleteError instanceof Error ? deleteError.message : String(deleteError);
               throw new ProviderProvisioningCleanupError(
                 `${waitMessage}; cleanup failed for AWS instance ${server.cloudID}: ${deleteMessage}`,
-                {
-                  provider: "aws",
-                  cloudID: server.cloudID,
-                  region,
-                  serverID: server.id,
-                },
+                claim,
                 deleteError,
               );
             }
+            throw new Error(
+              `${waitMessage}; crabbox_aws_stale_instance_cleaned; deleted AWS instance ${server.cloudID} after readiness failure`,
+              { cause: error },
+            );
           }
-          throw new Error(
-            `${waitMessage}; crabbox_aws_stale_instance_cleaned; deleted AWS instance ${server.cloudID} after readiness failure`,
-            { cause: error },
-          );
         }
         const result: {
           server: ProviderMachine;
@@ -24709,38 +28785,46 @@ export class AWSProvider implements CloudProvider {
           server: { ...readyServer, region },
           serverType,
           image: awsLeaseImageIdentity(config, imageID, region),
-          provisioningTiming: {
+          provisioningTiming: withProvisioningPhases({
             requestMs,
             networkReadyMs: Date.now() - networkReadyStartedAt - bootstrapMs,
             ...(bootstrapMs > 0 ? { bootstrapMs } : {}),
             totalMs: Date.now() - totalStartedAt,
-          },
+          }),
         };
         if (market) {
           result.market = market;
         }
-        const allAttempts = [...regionAttempts, ...(attempts ?? [])];
-        if (allAttempts.length > 0) {
-          result.attempts = allAttempts;
-        }
-        return result;
+        return { ...result, ...history.result(attempts) };
       } catch (error) {
-        if (providerProvisioningCleanupClaim(error)) throw error;
+        // Keep cancellation typed so the create owner records cleanup debt before
+        // returning its terminal response, even after an earlier regional failure.
+        if (
+          error instanceof CreateAttemptCanceledError ||
+          providerProvisioningCleanupClaim(error) ||
+          error instanceof ProviderResourceUnresolvedError
+        ) {
+          throw error;
+        }
         const message = error instanceof Error ? error.message : String(error);
-        regionAttempts.push({
-          region,
-          serverType: config.serverType,
-          market: config.capacityMarket,
-          category: awsProvisioningErrorCategory(message) || "region",
-          message: `region ${region}: ${message}`,
-        });
-        failures.push(`${region}: ${message}`);
+        history.recordFailure(
+          error,
+          {
+            region,
+            serverType: allocated?.serverType ?? config.serverType,
+            market: allocated?.market ?? config.capacityMarket,
+            category: awsProvisioningErrorCategory(message) || "region",
+            message: `region ${region}: ${message}`,
+          },
+          `${region}: ${message}`,
+          allocated?.attempts,
+        );
         if (!isRetryableAWSRegionProvisioningError(message)) {
           break;
         }
       }
     }
-    throw new Error(failures.join("; "));
+    throw history.error();
   }
 
   async deleteServer(id: string): Promise<void> {
@@ -24770,18 +28854,20 @@ export class AWSProvider implements CloudProvider {
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
-    const server = await ownedProviderMachineForRelease("aws", lease, (id) => this.findServer(id));
+    const unsettledAllocation = Boolean(
+      lease.provisioningRequestStartedAt || lease.provisioningResourceMayExist,
+    );
+    // A new EC2 allocation can be absent from reads before its ID propagates.
+    const server = await ownedProviderMachineForRelease("aws", lease, (id) =>
+      unsettledAllocation ? this.client.waitForServerVisibility(id) : this.findServer(id),
+    );
     try {
       if (server) {
-        if (lease.network?.awsPrivate) {
-          await this.client.terminateServerAndWait(lease.cloudID);
-        } else {
-          await this.deleteServer(lease.cloudID);
-        }
+        await this.client.terminateServerAndWait(lease.cloudID);
       }
     } catch (error) {
       const message = coordinatorErrorMessage(this.env, error);
-      if (!isAWSInstanceNotFoundError(message)) {
+      if (unsettledAllocation || !isAWSInstanceNotFoundError(message)) {
         throw error;
       }
       console.warn(
@@ -24832,6 +28918,324 @@ export class AWSProvider implements CloudProvider {
     return enriched;
   }
 
+  async checkpointScope(lease: LeaseRecord): Promise<CoordinatorCheckpointScope> {
+    const region = lease.region?.trim();
+    if (!region || region !== this.region) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS source lease has no exact provider region",
+      );
+    }
+    const identity = await this.client.verifiedIdentity();
+    if (!/^\d{12}$/.test(identity.account) || identity.region !== region) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS source lease account could not be verified",
+      );
+    }
+    return { region, accountID: identity.account };
+  }
+
+  async validateCheckpointLeaseScope(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
+    const identity = await this.client.verifiedIdentity();
+    if (
+      identity.account !== checkpoint.scope.accountID ||
+      identity.region !== checkpoint.scope.region
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS checkpoint lease account or region does not match durable ownership",
+      );
+    }
+  }
+
+  async validateCheckpointImage(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
+    const metadata = await checkpointCreatedImageMetadata(this.storage, checkpoint);
+    const image = checkpoint.image!;
+    if (
+      metadata.resourceID !== image.resourceID ||
+      metadata.accountID !== checkpoint.scope.accountID ||
+      (image.kind !== "aws-ami" && image.kind !== "aws-ebs-snapshot")
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS checkpoint durable resource identity or account does not match its source lease",
+      );
+    }
+    const describe = async (imageID: string): Promise<ProviderImage> => {
+      try {
+        return await this.client.getImage(imageID);
+      } catch (error) {
+        const message = coordinatorErrorMessage(this.env, error);
+        if (!awsCheckpointResourceAbsent(message, imageID)) {
+          throw error;
+        }
+        throw new CheckpointError(
+          "checkpoint_source_mismatch",
+          "AWS checkpoint source image or backing snapshot no longer exists",
+        );
+      }
+    };
+    const current = await describe(image.id);
+    const snapshots = [...new Set(current.snapshots ?? [])].toSorted();
+    const expectedSnapshots = [...new Set(image.snapshotIDs)].toSorted();
+    if (
+      current.provider !== "aws" ||
+      current.id !== image.id ||
+      current.kind !== image.kind ||
+      current.resourceID !== image.resourceID ||
+      current.immutableID !== image.immutableID ||
+      current.accountID !== checkpoint.scope.accountID ||
+      current.region !== checkpoint.scope.region ||
+      current.checkpointOwnershipHash !== metadata.checkpointOwnershipHash ||
+      current.checkpointSourceLeaseID !== checkpoint.leaseID ||
+      snapshots.length !== expectedSnapshots.length ||
+      snapshots.some((snapshot, index) => snapshot !== expectedSnapshots[index]) ||
+      (image.kind === "aws-ami" && snapshots.length === 0)
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS checkpoint image identity, account, backing snapshots, or ownership evidence has changed",
+      );
+    }
+    if (image.kind !== "aws-ami") return;
+    await Promise.all(
+      snapshots.map(async (snapshotID) => {
+        const snapshot = await describe(snapshotID);
+        if (
+          snapshot.provider !== "aws" ||
+          snapshot.id !== snapshotID ||
+          snapshot.kind !== "aws-ebs-snapshot" ||
+          snapshot.resourceID !== snapshotID ||
+          snapshot.immutableID !== snapshotID ||
+          snapshot.accountID !== checkpoint.scope.accountID ||
+          snapshot.region !== checkpoint.scope.region ||
+          snapshot.checkpointOwnershipHash !== metadata.checkpointOwnershipHash ||
+          snapshot.checkpointSourceLeaseID !== checkpoint.leaseID
+        ) {
+          throw new CheckpointError(
+            "checkpoint_source_mismatch",
+            "AWS checkpoint AMI backing snapshot identity or ownership evidence has changed",
+          );
+        }
+      }),
+    );
+  }
+
+  async createCheckpointImage(
+    lease: LeaseRecord,
+    name: string,
+    noReboot: boolean,
+    strategy: "image" | "disk-snapshot",
+    ownership: ProviderCheckpointOwnership,
+    scope: CoordinatorCheckpointScope,
+  ): Promise<ProviderImage> {
+    const created =
+      strategy === "image"
+        ? await this.client.createImage(lease.cloudID, name, noReboot, ownership)
+        : await this.client.createDiskSnapshot(lease.cloudID, name, ownership);
+    const image = await this.client.getImage(created.id);
+    if (image.kind === "aws-ami") {
+      const described = image;
+      if (
+        described.id !== created.id ||
+        described.accountID !== scope.accountID ||
+        described.checkpointOwnershipHash !== ownership.tokenHash ||
+        described.checkpointSourceLeaseID !== ownership.sourceLeaseID ||
+        !(described.snapshots ?? []).length
+      ) {
+        throw new CheckpointError(
+          "checkpoint_source_mismatch",
+          "AWS checkpoint AMI or its exact backing snapshots could not be verified",
+        );
+      }
+      await Promise.all(
+        described.snapshots!.map(async (snapshotID) => {
+          const snapshot = await this.client.getImage(snapshotID);
+          if (
+            snapshot.id !== snapshotID ||
+            snapshot.accountID !== scope.accountID ||
+            snapshot.checkpointOwnershipHash !== ownership.tokenHash ||
+            snapshot.checkpointSourceLeaseID !== ownership.sourceLeaseID
+          ) {
+            throw new CheckpointError(
+              "checkpoint_source_mismatch",
+              "AWS checkpoint AMI backing snapshot ownership could not be verified",
+            );
+          }
+        }),
+      );
+    }
+    if (
+      image.id !== created.id ||
+      image.accountID !== scope.accountID ||
+      image.checkpointOwnershipHash !== ownership.tokenHash ||
+      image.checkpointSourceLeaseID !== ownership.sourceLeaseID
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS checkpoint provider ownership could not be verified from a fresh read",
+      );
+    }
+    const enriched = {
+      ...enrichAWSImage(image, lease),
+      immutableID: image.id,
+      accountID: scope.accountID!,
+    };
+    return enriched;
+  }
+
+  async recoverCheckpointImage(
+    checkpoint: CoordinatorCheckpointRecord,
+  ): Promise<ProviderImage | undefined> {
+    if (!checkpoint.createClaim) return undefined;
+    const identity = await this.client.verifiedIdentity();
+    if (
+      identity.account !== checkpoint.scope.accountID ||
+      identity.region !== checkpoint.scope.region
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS checkpoint recovery account or region has changed",
+      );
+    }
+    const image = await this.client.findCheckpointImage(
+      checkpoint.createClaim.resourceName,
+      checkpoint.strategy,
+      {
+        checkpointID: checkpoint.id,
+        tokenHash: checkpoint.createClaim.tokenHash,
+        sourceLeaseID: checkpoint.leaseID,
+      },
+    );
+    if (!image) return undefined;
+    if (image.accountID && image.accountID !== identity.account) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS checkpoint recovery returned an image from another account",
+      );
+    }
+    if (image.kind === "aws-ami") {
+      if (!(image.snapshots ?? []).length) {
+        throw new CheckpointError(
+          "checkpoint_source_mismatch",
+          "recovered AWS checkpoint AMI has no verified backing snapshots",
+        );
+      }
+      await Promise.all(
+        image.snapshots!.map(async (snapshotID) => {
+          const snapshot = await this.client.getImage(snapshotID);
+          if (
+            snapshot.accountID !== identity.account ||
+            snapshot.checkpointOwnershipHash !== checkpoint.createClaim!.tokenHash ||
+            snapshot.checkpointSourceLeaseID !== checkpoint.leaseID
+          ) {
+            throw new CheckpointError(
+              "checkpoint_source_mismatch",
+              "recovered AWS checkpoint backing snapshot ownership does not match",
+            );
+          }
+        }),
+      );
+    }
+    return { ...image, accountID: identity.account };
+  }
+
+  async deleteCheckpointImage(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
+    const image = checkpoint.image;
+    if (!image)
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS checkpoint resource identity is missing",
+      );
+    const identity = await this.client.verifiedIdentity();
+    if (
+      identity.account !== checkpoint.scope.accountID ||
+      identity.region !== checkpoint.scope.region
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS checkpoint deletion account or region has changed",
+      );
+    }
+    let claim = await this.imageDeletionClaim(image.id);
+    if (!claim) {
+      let described: ProviderImage;
+      try {
+        described = await this.client.getImage(image.id);
+      } catch (error) {
+        const message = coordinatorErrorMessage(this.env, error);
+        if (awsCheckpointResourceAbsent(message, image.id)) {
+          if (image.kind === "aws-ami" && image.snapshotIDs.length === 0) {
+            throw new CheckpointError(
+              "checkpoint_delete_failed",
+              "AWS AMI is absent but its backing snapshot identities were never recorded",
+            );
+          }
+          described = {
+            id: image.id,
+            name: checkpoint.name,
+            state: "missing",
+            provider: "aws",
+            kind: image.kind,
+            region: checkpoint.scope.region,
+            resourceID: image.resourceID,
+            immutableID: image.immutableID,
+            accountID: checkpoint.scope.accountID,
+            snapshots: image.snapshotIDs,
+          };
+        } else {
+          throw error;
+        }
+      }
+      if (
+        described.id !== image.id ||
+        described.immutableID !== image.immutableID ||
+        (described.accountID && described.accountID !== checkpoint.scope.accountID)
+      ) {
+        throw new CheckpointError(
+          "checkpoint_source_mismatch",
+          "AWS checkpoint provider resource identity has changed",
+        );
+      }
+      claim = {
+        version: awsImageDeletionClaimVersion,
+        imageID: image.id,
+        metadata: awsImageDeletionMetadata(image.id, described, {
+          ...described,
+          snapshots: [...new Set([...image.snapshotIDs, ...(described.snapshots ?? [])])],
+        }),
+        snapshotIDs: [...new Set([...image.snapshotIDs, ...(described.snapshots ?? [])])],
+        phase: "claimed",
+        claimedAt: new Date().toISOString(),
+      };
+      await this.storage.put(awsImageDeletionClaimKey(image.id), claim);
+    }
+    if (claim.phase !== "provider-deleted") {
+      await this.client.deleteImage(image.id, claim.snapshotIDs);
+      const resourceIDs = [...new Set([image.id, ...claim.snapshotIDs])];
+      await Promise.all(
+        resourceIDs.map(async (resourceID) => {
+          try {
+            await this.client.getImage(resourceID);
+            throw new CheckpointError(
+              "checkpoint_delete_failed",
+              `AWS checkpoint resource ${resourceID} remains present after deletion`,
+            );
+          } catch (error) {
+            const message = coordinatorErrorMessage(this.env, error);
+            if (!awsCheckpointResourceAbsent(message, resourceID)) throw error;
+          }
+        }),
+      );
+      await this.storage.put(awsImageDeletionClaimKey(image.id), {
+        ...claim,
+        phase: "provider-deleted",
+        providerDeletedAt: new Date().toISOString(),
+      } satisfies AWSImageDeletionClaim);
+    }
+  }
+
   getImage(imageID: string): Promise<ProviderImage> {
     return this.client.getImage(imageID);
   }
@@ -24874,13 +29278,19 @@ export class AWSProvider implements CloudProvider {
       await this.storage.put(awsImageDeletionClaimKey(imageID), claim);
     }
     await this.deleteMatchingImageRecords("image:aws:created:", imageID, this.region);
-    await this.deleteMatchingImageRecords(promotedAWSImagePrefix(), imageID, this.region);
+    await imageCatalogTransaction(this.storage, async (transaction) => {
+      await deletePromotedAWSImageRecords(transaction, imageID, [promotedAWSImagePrefix()], {
+        region: this.region,
+        retireRevisions: true,
+      });
+      await retireAWSImage(transaction, imageID, this.region);
+    });
     await imageCatalogTransaction(this.storage, async (transaction) => {
       await deletePromotedAWSImageRecords(
         transaction,
         imageID,
         ["image:aws:catalog:", "image:aws:variant:"],
-        { region: this.region },
+        { region: this.region, retireRevisions: true },
       );
       await transaction.delete(awsImageDeletionClaimKey(imageID));
     });
@@ -24897,6 +29307,20 @@ export class AWSProvider implements CloudProvider {
           region ? { region } : {},
         ),
     );
+  }
+
+  retirePromotedImage(imageID: string, region?: string): Promise<number> {
+    return imageCatalogTransaction(this.storage, async (transaction) => {
+      const retired = await deletePromotedAWSImageRecords(
+        transaction,
+        imageID,
+        ["image:aws:catalog:", "image:aws:variant:", "image:aws:promoted"],
+        { ...(region ? { region } : {}), retireRevisions: true },
+      );
+      // Receipt-only aliases have no catalog rows from which to recover their retirement scope.
+      await retireAWSImage(transaction, imageID, region);
+      return retired;
+    });
   }
 
   async storedImageMetadata(imageID: string): Promise<ProviderImage | undefined> {
@@ -25015,7 +29439,8 @@ export class AWSProvider implements CloudProvider {
     known: ProviderImage | undefined,
     request: Request,
     url: URL,
-  ): Promise<Response | { image: ProviderImage }> {
+    checkpoint?: Pick<CoordinatorCheckpointRecord, "id" | "generation">,
+  ): Promise<Response | { image: ProviderImage; previous?: ImageDefaultState }> {
     const input: {
       target?: string;
       os?: string;
@@ -25027,6 +29452,10 @@ export class AWSProvider implements CloudProvider {
       variantSelectors?: ImageVariantSelectors;
       fastSnapshotRestore?: unknown;
       fastSnapshotRestoreAvailabilityZones?: string[];
+      expectedCurrent?: unknown;
+      clearDefault?: unknown;
+      retireExpectedCatalog?: unknown;
+      restorePrevious?: unknown;
     } = await readJson<{
       target?: string;
       os?: string;
@@ -25038,7 +29467,73 @@ export class AWSProvider implements CloudProvider {
       variantSelectors?: ImageVariantSelectors;
       fastSnapshotRestore?: unknown;
       fastSnapshotRestoreAvailabilityZones?: string[];
-    }>(request).catch(() => ({}));
+      expectedCurrent?: unknown;
+      clearDefault?: unknown;
+      retireExpectedCatalog?: unknown;
+      restorePrevious?: unknown;
+    }>(request).catch(
+      () =>
+        ({}) as {
+          expectedCurrent?: unknown;
+          clearDefault?: unknown;
+          retireExpectedCatalog?: unknown;
+        },
+    );
+    const expectedCurrentInput =
+      input.expectedCurrent === undefined
+        ? undefined
+        : parseImageDefaultState(input.expectedCurrent);
+    if (input.expectedCurrent !== undefined && !expectedCurrentInput) {
+      return json(
+        { error: "invalid_image_precondition", message: "expectedCurrent is invalid" },
+        { status: 400 },
+      );
+    }
+    const clearDefault = boolFromUnknown(input.clearDefault);
+    const retireExpectedCatalogRequested = input.retireExpectedCatalog === true;
+    const restorePrevious =
+      input.restorePrevious === undefined
+        ? undefined
+        : parseImageDefaultRestore(input.restorePrevious);
+    if (input.restorePrevious !== undefined && !restorePrevious) {
+      return json(
+        { error: "invalid_image_precondition", message: "restorePrevious is invalid" },
+        { status: 400 },
+      );
+    }
+    if (
+      restorePrevious &&
+      (clearDefault ||
+        !retireExpectedCatalogRequested ||
+        !expectedCurrentInput ||
+        expectedCurrentInput.state !== "present" ||
+        expectedCurrentInput.imageId !== imageID)
+    ) {
+      return json(
+        {
+          error: "invalid_image_precondition",
+          message:
+            "restoring an image default requires the exact current image id and revision plus catalog retirement",
+        },
+        { status: 400 },
+      );
+    }
+    if (clearDefault) {
+      if (
+        !expectedCurrentInput ||
+        expectedCurrentInput.state !== "present" ||
+        expectedCurrentInput.imageId !== imageID ||
+        url.searchParams.get("catalogOnly") === "true"
+      ) {
+        return json(
+          {
+            error: "invalid_image_precondition",
+            message: "clearing a default requires the exact current image id and revision",
+          },
+          { status: 400 },
+        );
+      }
+    }
     const requestedRegion = input.region ?? url.searchParams.get("region") ?? "";
     const requestedImageRegion = requestedRegion ? sanitizeAWSRegion(requestedRegion) : "";
     if (requestedRegion && !requestedImageRegion) {
@@ -25165,6 +29660,18 @@ export class AWSProvider implements CloudProvider {
         desktop: declaredCapabilities?.desktop ?? priorCapabilities?.desktop,
       });
     const catalogOnly = boolFromUnknown(url.searchParams.get("catalogOnly") ?? input.catalogOnly);
+    if (
+      catalogOnly &&
+      (input.expectedCurrent !== undefined || input.retireExpectedCatalog !== undefined)
+    ) {
+      return json(
+        {
+          error: "invalid_image_precondition",
+          message: "transactional image preconditions apply only to default image promotion",
+        },
+        { status: 400 },
+      );
+    }
     if (catalogOnly && !variantSelectors) {
       return json(
         {
@@ -25248,6 +29755,79 @@ export class AWSProvider implements CloudProvider {
         { status: 400 },
       );
     }
+    const nextScope = {
+      target,
+      ...(imageOS ? { os: imageOS } : {}),
+      region: effectiveRegion,
+      architecture:
+        image.architecture ?? awsImageArchitectureForTarget(target, image.serverType ?? ""),
+      ...(image.serverType ? { serverType: image.serverType } : {}),
+    };
+    const promotionScope = {
+      provider: "aws",
+      target,
+      architecture: nextScope.architecture,
+      serverType: nextScope.serverType ?? "",
+      os: imageOS ?? "",
+      region: effectiveRegion,
+    };
+    if (restorePrevious) {
+      const expectedAliases = promotedAWSImageDefaultAliases(nextScope);
+      const restoredAliases = restorePrevious.aliases?.map(({ alias }) => alias) ?? [];
+      if (
+        expectedAliases.length !== restoredAliases.length ||
+        expectedAliases.some(({ alias }) => !restoredAliases.includes(alias)) ||
+        expectedAliases.some(({ alias, key }) => {
+          const restored = restorePrevious.aliases?.find((entry) => entry.alias === alias);
+          return (
+            !restored ||
+            (restored.state === "present" &&
+              !imageDefaultAliasRecordMatches(alias, key, restored.image))
+          );
+        })
+      ) {
+        return json(
+          {
+            error: "invalid_image_precondition",
+            message: "restorePrevious does not match the promoted image scope",
+          },
+          { status: 400 },
+        );
+      }
+    }
+    // A failed image ID may already have been republished. Retire only the exact
+    // catalog revision named by the rollback receipt, never the reused entry.
+    const retireExpectedCatalogRevision = async (
+      transaction: ProviderStateStorageView,
+      expected: ImageDefaultState | undefined,
+    ) => {
+      if (!retireExpectedCatalogRequested || expected?.state !== "present") return;
+      // Retirement belongs to the failed receipt revision, even when a later
+      // publication already replaced its catalog row.
+      await retireAWSImageRevision(transaction, expected);
+      const key = `${promotedAWSImageCatalogPrefix(nextScope)}${encodeURIComponent(expected.imageId)}`;
+      const record = await transaction.get<PromotedImageRecord>(key);
+      if (!record || !sameImageDefaultState(imageDefaultState(record), expected)) return;
+      await unpinCheckpointPromotion(transaction, "aws", record, key);
+      await transaction.delete(key);
+    };
+    if (expectedCurrentInput && expectedCurrentInput.state !== "capture") {
+      // Image mutations stay in the durable object's lifecycle queue through FSR and commit.
+      // Reject known-stale requests before billed side effects; the transaction rechecks storage.
+      const preflightConflict = await imageCatalogTransaction(this.storage, async (transaction) => {
+        const currentDefault = await promotedAWSImageDefault(transaction, {
+          ...nextScope,
+          serverType: nextScope.serverType ?? "",
+        });
+        const currentState = imageDefaultState(currentDefault);
+        if (sameImageDefaultState(expectedCurrentInput, currentState)) return undefined;
+        await retireExpectedCatalogRevision(transaction, expectedCurrentInput);
+        return currentState;
+      });
+      if (preflightConflict) {
+        return imagePromotionConflict(expectedCurrentInput, preflightConflict, promotionScope);
+      }
+    }
     const fastSnapshotRestores =
       fastSnapshotRestoreAvailabilityZones.length > 0
         ? await provider.enableFastSnapshotRestore(
@@ -25259,6 +29839,86 @@ export class AWSProvider implements CloudProvider {
     void _providerCapabilities;
     try {
       const promoted = await imageCatalogTransaction(this.storage, async (transaction) => {
+        const currentDefault = await promotedAWSImageDefault(transaction, {
+          ...nextScope,
+          serverType: nextScope.serverType ?? "",
+        });
+        const previousDefault = imageDefaultState(currentDefault);
+        const receiptPrevious =
+          expectedCurrentInput?.state === "capture"
+            ? await captureAWSImageDefaultState(
+                transaction,
+                { ...nextScope, serverType: nextScope.serverType ?? "" },
+                currentDefault,
+              )
+            : previousDefault;
+        const expectedCurrent =
+          expectedCurrentInput?.state === "capture" ? previousDefault : expectedCurrentInput;
+        if (expectedCurrent && !sameImageDefaultState(expectedCurrent, previousDefault)) {
+          await retireExpectedCatalogRevision(transaction, expectedCurrent);
+          return { conflict: previousDefault, expected: expectedCurrent };
+        }
+        if (clearDefault) {
+          await retireExpectedCatalogRevision(transaction, expectedCurrent);
+          for (const { key: recordKey } of promotedAWSImageDefaultAliases(nextScope)) {
+            // Catalog aliases carry independent promotion pins and must be retired in order.
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            const record = await transaction.get<PromotedImageRecord>(recordKey);
+            if (!record || !sameImageDefaultState(imageDefaultState(record), previousDefault)) {
+              continue;
+            }
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            await unpinCheckpointPromotion(transaction, "aws", record, recordKey);
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            await transaction.delete(recordKey);
+          }
+          return {
+            image: { id: "none", name: "", state: "absent", provider: "aws" as const },
+            previous: previousDefault,
+          };
+        }
+        if (restorePrevious) {
+          await retireExpectedCatalogRevision(transaction, expectedCurrent);
+          for (const { alias, key } of promotedAWSImageDefaultAliases(nextScope)) {
+            // Restore only aliases still owned by this failed revision. A concurrent promotion
+            // on another alias remains authoritative and must not be overwritten.
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            const current = await transaction.get<PromotedImageRecord>(key);
+            if (!current || !sameImageDefaultState(imageDefaultState(current), previousDefault)) {
+              continue;
+            }
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            await unpinCheckpointPromotion(transaction, "aws", current, key);
+            const priorAlias = restorePrevious.aliases!.find((entry) => entry.alias === alias)!;
+            let priorRetired = false;
+            if (priorAlias.state === "present") {
+              // Alias restoration is intentionally serialized with pin changes in this transaction.
+              // oxlint-disable-next-line eslint/no-await-in-loop
+              priorRetired = await awsImageRevisionRetired(
+                transaction,
+                priorAlias.image,
+                effectiveRegion,
+              );
+            }
+            if (priorAlias.state === "absent" || priorRetired) {
+              // oxlint-disable-next-line eslint/no-await-in-loop
+              await transaction.delete(key);
+              continue;
+            }
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            await transaction.put(key, priorAlias.image);
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            await pinCheckpointPromotion(transaction, "aws", priorAlias.image, key);
+          }
+          const restored = await promotedAWSImageDefault(transaction, {
+            ...nextScope,
+            serverType: nextScope.serverType ?? "",
+          });
+          return {
+            image: restored ?? { id: "none", name: "", state: "absent", provider: "aws" as const },
+            previous: previousDefault,
+          };
+        }
         const currentCataloged = await this.promotedImageMetadataByID(
           imageID,
           effectiveRegion,
@@ -25275,37 +29935,40 @@ export class AWSProvider implements CloudProvider {
         const next: PromotedImageRecord = {
           ...validatedImage,
           ...(fastSnapshotRestores ? { fastSnapshotRestores } : {}),
-          target,
-          ...(imageOS ? { os: imageOS } : {}),
-          region: effectiveRegion,
-          architecture:
-            image.architecture ?? awsImageArchitectureForTarget(target, image.serverType ?? ""),
-          promotedAt: new Date().toISOString(),
+          ...nextScope,
+          promotedAt: await nextAWSImagePromotionTimestamp(transaction, imageID, effectiveRegion),
+          revision: crypto.randomUUID(),
           ...(capabilities ? { capabilities } : {}),
           ...(catalogOnly && variantSelectors ? { catalogOnly: true, variantSelectors } : {}),
         };
         await deletePromotedAWSImageRecords(transaction, imageID, ["image:aws:variant:"], {
           region: effectiveRegion,
         });
+        const publish = async (key: string): Promise<void> => {
+          const previous = await transaction.get<PromotedImageRecord>(key);
+          if (previous && (previous.id !== next.id || previous.region !== next.region)) {
+            await unpinCheckpointPromotion(transaction, "aws", previous, key);
+          }
+          await transaction.put(key, next);
+          await pinCheckpointPromotion(transaction, "aws", next, key, checkpoint);
+        };
         if (catalogOnly) {
-          await transaction.put(promotedAWSImageVariantKey(next), next);
-          return next;
+          await publish(promotedAWSImageVariantKey(next));
+          return { image: next, previous: receiptPrevious };
         }
-        await transaction.put(promotedAWSImageCatalogKey(next), next);
-        if (target === "linux" && next.os) {
-          await transaction.put(promotedAWSLinuxOSImageKey(next), next);
+        await retireExpectedCatalogRevision(transaction, expectedCurrent);
+        await publish(promotedAWSImageCatalogKey(next));
+        for (const { key } of promotedAWSImageDefaultAliases(next)) {
+          // Promotion aliases carry independent checkpoint pins and publish in deterministic order.
+          // oxlint-disable-next-line eslint/no-await-in-loop
+          await publish(key);
         }
-        if (
-          target === "linux" &&
-          (!next.os || next.os === "ubuntu:24.04") &&
-          legacyPromotedAWSImageCompatible(next)
-        ) {
-          await transaction.put(legacyPromotedAWSImageKey(), next);
-        }
-        await transaction.put(promotedAWSImageKey(next), next);
-        return next;
+        return { image: next, previous: receiptPrevious };
       });
-      return { image: promoted };
+      if ("conflict" in promoted) {
+        return imagePromotionConflict(promoted.expected!, promoted.conflict, promotionScope);
+      }
+      return promoted;
     } catch (error) {
       if (error instanceof InvalidImageCapabilitiesError) {
         return json(
@@ -25386,48 +30049,13 @@ export class AWSProvider implements CloudProvider {
             left.image.id.localeCompare(right.image.id),
         )[0]?.image;
     }
-    const scoped = await this.storage.get<PromotedImageRecord>(
-      promotedAWSImageKey({
-        target: config.target,
-        ...(config.os ? { os: config.os } : {}),
-        architecture,
-        serverType: config.serverType,
-        region: config.awsRegion,
-      }),
-    );
-    if (scoped) {
-      return scoped;
-    }
-    if (config.target === "macos") {
-      return this.storage.get<PromotedImageRecord>(
-        legacyScopedPromotedAWSImageKey({
-          target: config.target,
-          architecture,
-          region: config.awsRegion,
-        }),
-      );
-    }
-    if (config.target !== "linux") {
-      return scoped;
-    }
-    if (config.os) {
-      const osScoped = await this.storage.get<PromotedImageRecord>(
-        promotedAWSLinuxOSImageKey({
-          os: config.os,
-          architecture,
-        }),
-      );
-      if (osScoped) {
-        return osScoped;
-      }
-    }
-    if ((!config.os || config.os === "ubuntu:24.04") && architecture === "x86_64") {
-      const legacy = await this.storage.get<PromotedImageRecord>(legacyPromotedAWSImageKey());
-      if (legacy && legacyPromotedAWSImageCompatible(legacy)) {
-        return legacy;
-      }
-    }
-    return undefined;
+    return promotedAWSImageDefault(this.storage, {
+      target: config.target,
+      ...(config.os ? { os: config.os } : {}),
+      architecture,
+      serverType: config.serverType,
+      region: config.awsRegion,
+    });
   }
 
   private async promotedImagesForFallback(config: LeaseConfig): Promise<Record<string, string>> {
@@ -25505,21 +30133,31 @@ async function deletePromotedAWSImageRecords(
   storage: ProviderStateStorageView,
   imageID: string,
   prefixes: string[],
-  options: { region?: string } = {},
+  options: { region?: string; retireRevisions?: boolean } = {},
 ): Promise<number> {
   const catalogs = await Promise.all(
     prefixes.map(async (prefix) => await storage.list<PromotedImageRecord>({ prefix })),
   );
-  const keys = catalogs.flatMap((catalog) =>
-    [...catalog.entries()]
-      .filter(
-        ([, image]) =>
-          image.id === imageID && (options.region === undefined || image.region === options.region),
-      )
-      .map(([key]) => key),
+  const entries = catalogs.flatMap((catalog) =>
+    [...catalog.entries()].filter(
+      ([, image]) =>
+        image.id === imageID && (options.region === undefined || image.region === options.region),
+    ),
   );
-  await Promise.all(keys.map(async (key) => await storage.delete(key)));
-  return keys.length;
+  const retiredRevisions = new Set<string>();
+  await entries.reduce(async (pending, [key, image]) => {
+    await pending;
+    await unpinCheckpointPromotion(storage, "aws", image, key);
+    await storage.delete(key);
+    if (!options.retireRevisions) return;
+    const state = imageDefaultState(image);
+    if (state.state !== "present") return;
+    const retirementKey = retiredAWSImageRevisionKey(state);
+    if (retiredRevisions.has(retirementKey)) return;
+    await retireAWSImageRevision(storage, state);
+    retiredRevisions.add(retirementKey);
+  }, Promise.resolve());
+  return entries.length;
 }
 
 async function imageCatalogTransaction<T>(

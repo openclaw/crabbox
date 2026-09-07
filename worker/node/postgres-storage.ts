@@ -4,7 +4,7 @@ import type { CoordinatorStorage, CoordinatorStorageView } from "../src/coordina
 
 const schema = "crabbox";
 const table = `${schema}.coordinator_kv`;
-const transactionAttempts = 3;
+const transactionAttempts = 12;
 const retryableTransactionErrorCodes = new Set(["40001", "40P01"]);
 
 export class PostgresCoordinatorStorage implements CoordinatorStorage {
@@ -105,6 +105,9 @@ export class PostgresCoordinatorStorage implements CoordinatorStorage {
         return await this.transactionAttempt(callback);
       } catch (error) {
         if (remaining > 1 && retryablePostgresTransactionError(error)) {
+          const retries = transactionAttempts - remaining;
+          const delay = Math.min(50, 2 ** Math.min(retries, 5)) + Math.floor(Math.random() * 8);
+          await new Promise<void>((resolve) => setTimeout(resolve, delay));
           return attempt(remaining - 1);
         }
         throw error;

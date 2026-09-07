@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -507,6 +508,10 @@ func (b *leaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, 
 		return nil, err
 	}
 	return b.listServers(ctx, client, req.All)
+}
+
+func (b *leaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	return core.ReleaseLeaseOutcome{}, b.ReleaseLease(ctx, req)
 }
 
 func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
@@ -1359,7 +1364,9 @@ func (b *leaseBackend) ensureBootstrap(ctx context.Context, cfg Config, lease Le
 			return exit(5, "timed out bootstrapping hostinger vps %s during %s: %v", lease.Server.DisplayID(), phase, err)
 		}
 		fmt.Fprintf(b.rt.Stderr, "waiting for hostinger bootstrap lease=%s vm=%s phase=%s\n", lease.LeaseID, lease.Server.DisplayID(), phase)
-		hostingerSleep(5 * time.Second)
+		if err := shared.SleepContext(ctx, 5*time.Second); err != nil {
+			return err
+		}
 	}
 }
 

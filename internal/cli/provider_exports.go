@@ -106,10 +106,6 @@ func ClaimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repo
 	return claimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repoRoot, idleTimeout, reclaim)
 }
 
-func ClaimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return claimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot, idleTimeout, reclaim)
-}
-
 func AppendDirectPondTailscaleTag(cfg *Config) {
 	appendPondTailscaleTag(cfg, true)
 }
@@ -184,6 +180,12 @@ func ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug string, 
 // lock across action and the durable guarded claim publication.
 func ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool, action func() error) (LeaseClaim, error) {
 	return claimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, action)
+}
+
+// ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfterContext also bounds
+// waiting for the exclusive claim fence. The action must honor ctx itself.
+func ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfterContext(ctx context.Context, leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool, action func() error) (LeaseClaim, error) {
+	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, leaseClaimTargetOptions{context: ctx, directory: claimDirectoryDurableNamespace, action: action})
 }
 
 // ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged binds an
@@ -270,6 +272,12 @@ func RemoveLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, actio
 func CleanupLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, expectedExists bool, action func() error) error {
 	return cleanupLeaseClaimIfUnchangedAfter(leaseID, expected, expectedExists, action)
 }
+
+// CleanupLeaseClaimIfUnchangedAfterContext also bounds waiting for the claim
+// fence. The action must honor ctx itself and must not reenter claim operations.
+func CleanupLeaseClaimIfUnchangedAfterContext(ctx context.Context, leaseID string, expected LeaseClaim, expectedExists bool, action func() error) error {
+	return cleanupLeaseClaimIfUnchangedAfterContext(ctx, leaseID, expected, expectedExists, action, syncControllerDirectory)
+}
 func RestoreLeaseClaimIfUnchanged(leaseID string, current, previous LeaseClaim, previousExists bool) error {
 	return restoreLeaseClaimIfUnchanged(leaseID, current, previous, previousExists)
 }
@@ -321,10 +329,29 @@ func WithLeaseClaimUnchanged(leaseID string, expected LeaseClaim, action func() 
 	return withLeaseClaimUnchanged(leaseID, expected, action)
 }
 
+// WithLeaseClaimUnchangedContext also bounds waiting for the exclusive fence.
+// The action must honor ctx itself and must not reenter claim operations.
+func WithLeaseClaimUnchangedContext(ctx context.Context, leaseID string, expected LeaseClaim, action func() error) error {
+	return withLeaseClaimUnchangedContext(ctx, leaseID, expected, false, action)
+}
+
+// WithLeaseClaimUnchangedShared excludes claim writers while allowing another
+// action on the same snapshot, such as cancelling a running command. Actions
+// must tolerate that concurrency, honor ctx and never mutate or reenter claims.
+func WithLeaseClaimUnchangedShared(ctx context.Context, leaseID string, expected LeaseClaim, action func() error) error {
+	return withLeaseClaimUnchangedContext(ctx, leaseID, expected, true, action)
+}
+
 // WithDurableLeaseClaimLock serializes a provider operation on the existing
 // claim lock and exposes explicit durable checkpoints before side effects.
 func WithDurableLeaseClaimLock(leaseID string, action func(*LeaseClaim, bool, func() error) error) error {
 	return withDurableLeaseClaimLock(leaseID, action)
+}
+
+// WithDurableLeaseClaimLockContext also bounds lock acquisition. The action
+// must honor ctx itself and must not reenter claim operations for this ID.
+func WithDurableLeaseClaimLockContext(ctx context.Context, leaseID string, action func(*LeaseClaim, bool, func() error) error) error {
+	return withDurableLeaseClaimLockContext(ctx, leaseID, action)
 }
 
 func ResolveLeaseClaimAfterActionIfUnchanged(
@@ -366,14 +393,14 @@ func UpdateLeaseClaimLabelsAndLastUsedIfUnchanged(leaseID string, expected Lease
 
 // UpdateLeaseClaimTouchIfUnchanged atomically commits touched lifecycle labels,
 // last-use time, and an explicitly requested idle-timeout replacement.
-func UpdateLeaseClaimTouchIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string, lastUsed time.Time, idleTimeoutOverride *time.Duration) (LeaseClaim, error) {
-	return updateLeaseClaimTouchIfUnchanged(leaseID, expected, labels, lastUsed, idleTimeoutOverride)
+func UpdateLeaseClaimTouchIfUnchanged(ctx context.Context, leaseID string, expected LeaseClaim, labels map[string]string, lastUsed time.Time, idleTimeoutOverride *time.Duration) (LeaseClaim, error) {
+	return updateLeaseClaimTouchIfUnchanged(ctx, leaseID, expected, labels, lastUsed, idleTimeoutOverride)
 }
 
 // UpdateLeaseClaimTouchIfUnchangedAction fences a provider mutation and commits
 // its endpoint, lifecycle timestamps, and optional timeout in one claim write.
-func UpdateLeaseClaimTouchIfUnchangedAction(leaseID string, expected LeaseClaim, lastUsed time.Time, idleTimeoutOverride *time.Duration, action func() (Server, SSHTarget, bool, error)) (LeaseClaim, Server, SSHTarget, error) {
-	return updateLeaseClaimEndpointIfUnchangedActionMode(leaseID, expected, action, claimEndpointUpdate, &leaseClaimTouchPayload{
+func UpdateLeaseClaimTouchIfUnchangedAction(ctx context.Context, leaseID string, expected LeaseClaim, lastUsed time.Time, idleTimeoutOverride *time.Duration, action func() (Server, SSHTarget, bool, error)) (LeaseClaim, Server, SSHTarget, error) {
+	return updateLeaseClaimEndpointIfUnchangedActionMode(ctx, leaseID, expected, action, claimEndpointUpdate, &leaseClaimTouchPayload{
 		lastUsed:            lastUsed,
 		idleTimeoutOverride: idleTimeoutOverride,
 	})
@@ -451,6 +478,12 @@ func ImageRequirementsIntent(cfg Config) (string, error) {
 
 func ClassWasExplicit(cfg Config) bool {
 	return cfg.classExplicitOrder != 0
+}
+
+// ClassFlagWasExplicit preserves CLI intent until checkpoint routing is final.
+// Config-file and environment selections still use ClassWasExplicit.
+func ClassFlagWasExplicit(cfg Config) bool {
+	return cfg.classFlagExplicit
 }
 
 func MarkClassExplicit(cfg *Config) {
@@ -668,6 +701,10 @@ func ProbeSSHReady(ctx context.Context, target *SSHTarget, timeout time.Duration
 
 func PowershellCommand(script string) string {
 	return powershellCommand(script)
+}
+
+func GnomeDesktopThemeScript() string {
+	return sharedGnomeDesktopTheme()
 }
 
 func WindowsBootstrapPowerShell(cfg Config, publicKey string) string {

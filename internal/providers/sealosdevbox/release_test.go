@@ -30,8 +30,8 @@ func TestReleaseRetainsLeaseByPausingAndClearingEndpoint(t *testing.T) {
 		"patched",
 	}}
 	backend := lifecycleBackend(cfg, runner)
-	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
-		t.Fatal(err)
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil || outcome.Terminal {
+		t.Fatalf("pause outcome=%+v err=%v", outcome, err)
 	}
 	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
@@ -89,8 +89,8 @@ func TestReleaseDeleteRemovesDevboxClaimAndKeyAfterValidation(t *testing.T) {
 		"deleted",
 	}}
 	backend := lifecycleBackend(cfg, runner)
-	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
-		t.Fatal(err)
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil || !outcome.Terminal {
+		t.Fatalf("delete outcome=%+v err=%v", outcome, err)
 	}
 	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
 		t.Fatalf("claim exists=%v err=%v", exists, err)

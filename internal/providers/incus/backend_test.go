@@ -14,6 +14,7 @@ import (
 	"github.com/lxc/incus/v7/shared/api"
 	"github.com/lxc/incus/v7/shared/cliconfig"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type fakeClient struct {
@@ -770,6 +771,7 @@ func TestAcquireResolveListTouchReleaseAndCleanup(t *testing.T) {
 	}
 	fake.instances[stale.Name] = stale
 	fake.states[stale.Name] = &api.InstanceState{Status: "Stopped", StatusCode: api.Stopped}
+	claimDurableFixture(t, fake, stale.Name)
 	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
@@ -1080,6 +1082,7 @@ func TestResolveUsesPersistedProxyEndpointWhenFlagsAreOmitted(t *testing.T) {
 	if _, _, err := core.EnsureTestboxKeyForConfig(cfg, "cbx_abcd12345678"); err != nil {
 		t.Fatalf("EnsureTestboxKeyForConfig: %v", err)
 	}
+	claimLegacyFixture(t, fake, "crabbox-retained", t.TempDir())
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
 	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_abcd12345678"})
@@ -1145,6 +1148,7 @@ func TestResolveStartsStoppedInstanceAndPersistsReadyLabels(t *testing.T) {
 	if _, _, err := core.EnsureTestboxKeyForConfig(cfg, "cbx_deadbeefcafe"); err != nil {
 		t.Fatalf("EnsureTestboxKeyForConfig: %v", err)
 	}
+	claimLegacyFixture(t, fake, "crabbox-retained", t.TempDir())
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
 	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_deadbeefcafe"})
@@ -1225,9 +1229,11 @@ func TestResolveRestoresRepoClaimWhenStartFails(t *testing.T) {
 				Status:     "Stopped",
 				StatusCode: api.Stopped,
 				InstancePut: api.InstancePut{Config: map[string]string{
-					labelKey("crabbox"): "true",
-					labelKey("lease"):   "cbx_failing",
-					labelKey("slug"):    "failing",
+					labelKey("crabbox"):    "true",
+					labelKey("lease"):      "cbx_failing",
+					labelKey("slug"):       "failing",
+					labelKey("provider"):   providerName,
+					labelKey("created_at"): core.LeaseLabelTime(time.Now().UTC()),
 				}},
 			},
 		},
@@ -1241,16 +1247,18 @@ func TestResolveRestoresRepoClaimWhenStartFails(t *testing.T) {
 
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
+	repoRoot := t.TempDir()
+	previous := claimLegacyFixture(t, fake, "crabbox-failing", repoRoot)
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	_, err := b.Resolve(context.Background(), ResolveRequest{
 		ID:   "crabbox-failing",
-		Repo: core.Repo{Root: t.TempDir()},
+		Repo: core.Repo{Root: repoRoot},
 	})
-	if err == nil {
-		t.Fatal("Resolve succeeded")
+	if err == nil || !strings.Contains(err.Error(), io.ErrUnexpectedEOF.Error()) {
+		t.Fatalf("Resolve error=%v want start failure", err)
 	}
-	if _, exists, err := core.ReadLeaseClaimWithPresence("cbx_failing"); err != nil || exists {
-		t.Fatalf("failed resolve retained claim exists=%v err=%v", exists, err)
+	if claim, exists, err := core.ReadLeaseClaimWithPresence("cbx_failing"); err != nil || !exists || claim.RepoRoot != previous.RepoRoot || claim.Labels[incusClaimReservationUntilLabel] != "" {
+		t.Fatalf("failed resolve did not restore claim exists=%v err=%v claim=%#v", exists, err, claim)
 	}
 }
 
@@ -1305,6 +1313,7 @@ func TestResolveFallsBackToConfiguredKeyWhenStoredKeyIsMissing(t *testing.T) {
 	if err := os.WriteFile(cfg.SSHKey, []byte("fake"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	claimLegacyFixture(t, fake, "crabbox-nokey", t.TempDir())
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
 	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_a1b2c3d4e5f6"})
@@ -1365,6 +1374,7 @@ func TestResolveUsesLeaseLabelsForSSHUserAndPort(t *testing.T) {
 
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
+	claimLegacyFixture(t, fake, "crabbox-label", t.TempDir())
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
 	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_1abe1e55f00d"})
@@ -1444,6 +1454,7 @@ func TestResolveIgnoresStaleHostLabelWhileWaitingForLiveAddress(t *testing.T) {
 	if _, _, err := core.EnsureTestboxKeyForConfig(cfg, "cbx_deadbeefcafe"); err != nil {
 		t.Fatalf("EnsureTestboxKeyForConfig: %v", err)
 	}
+	claimLegacyFixture(t, fake, "crabbox-stale-host", t.TempDir())
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
 	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_deadbeefcafe"})
@@ -1516,6 +1527,7 @@ func TestResolvePrefersLiveAddressOverStoredHost(t *testing.T) {
 	if _, _, err := core.EnsureTestboxKeyForConfig(cfg, "cbx_feedfaceb00c"); err != nil {
 		t.Fatalf("EnsureTestboxKeyForConfig: %v", err)
 	}
+	claimLegacyFixture(t, fake, "crabbox-running", t.TempDir())
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
 	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: "cbx_feedfaceb00c"})
@@ -1673,14 +1685,15 @@ func TestReleaseLeaseRetainsStoppedInstanceWhenDeleteOnReleaseFalse(t *testing.T
 	if err := core.UpdateLeaseClaimEndpoint("cbx_retain123456", core.Server{Labels: map[string]string{"state": "ready"}}, core.SSHTarget{Host: "198.51.100.24", Port: "22"}); err != nil {
 		t.Fatalf("UpdateLeaseClaimEndpoint: %v", err)
 	}
+	claimDurableFixture(t, fake, "crabbox-retained")
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
 	lease := core.LeaseTarget{LeaseID: "cbx_retain123456", Server: core.Server{Name: "crabbox-retained", CloudID: "crabbox-retained", Labels: map[string]string{"lease": "cbx_retain123456", "slug": "retained-slug", "release": "delete"}}}
 	if !b.RetainLeaseClaimAfterRelease(lease) {
 		t.Fatal("explicit retain policy did not override stored delete policy")
 	}
-	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
-		t.Fatal(err)
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil || outcome.Terminal {
+		t.Fatalf("stop outcome=%+v err=%v", outcome, err)
 	}
 	if len(fake.deleted) != 0 {
 		t.Fatalf("deleted=%v want retained instance to be stopped, not deleted", fake.deleted)
@@ -1749,6 +1762,7 @@ func TestReleaseLeaseRetainIsIdempotentWhenInstanceAlreadyStopped(t *testing.T) 
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.Incus.DeleteOnRelease = false
+	claimDurableFixture(t, fake, "crabbox-retained")
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
 	lease := core.LeaseTarget{LeaseID: "cbx_abcdef123456", Server: core.Server{Name: "crabbox-retained", CloudID: "crabbox-retained"}}
@@ -1763,7 +1777,7 @@ func TestReleaseLeaseRetainIsIdempotentWhenInstanceAlreadyStopped(t *testing.T) 
 	}
 }
 
-func TestReleaseLeaseDeleteOnReleaseRemovesClaimAndKey(t *testing.T) {
+func TestReleaseLeaseDeleteOnReleaseFinalizesClaimAndRemovesKey(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
@@ -1803,11 +1817,12 @@ func TestReleaseLeaseDeleteOnReleaseRemovesClaimAndKey(t *testing.T) {
 	if err := core.ClaimLeaseForRepoProviderScopePond("cbx_delete12345", "delete-slug", providerName, "instance:crabbox-delete", "", t.TempDir(), cfg.IdleTimeout, false); err != nil {
 		t.Fatalf("ClaimLeaseForRepoProviderScopePond: %v", err)
 	}
+	claimDurableFixture(t, fake, "crabbox-delete")
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
 	lease := core.LeaseTarget{LeaseID: "cbx_delete12345", Server: core.Server{Name: "crabbox-delete", CloudID: "crabbox-delete", Labels: map[string]string{"lease": "cbx_delete12345", "slug": "delete-slug"}}}
-	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
-		t.Fatal(err)
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil || !outcome.Terminal {
+		t.Fatalf("delete outcome=%+v err=%v", outcome, err)
 	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != "crabbox-delete" {
 		t.Fatalf("deleted=%v want crabbox-delete removed", fake.deleted)
@@ -1819,8 +1834,13 @@ func TestReleaseLeaseDeleteOnReleaseRemovesClaimAndKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadLeaseClaim: %v", err)
 	}
-	if claim.LeaseID != "" {
-		t.Fatalf("expected delete-on-release to remove lease claim, got %#v", claim)
+	if claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "released" {
+		t.Fatalf("expected delete-on-release to finalize durable claim, got %#v", claim)
+	}
+	b.cfg.Incus.DeleteOnRelease = false
+	core.MarkDeleteOnReleaseExplicit(&b.cfg, providerName)
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil || !outcome.Terminal || len(fake.deleted) != 1 {
+		t.Fatalf("terminal receipt under stop policy: outcome=%+v err=%v deletes=%v", outcome, err, fake.deleted)
 	}
 	keyPath, err := core.TestboxKeyPath("cbx_delete12345")
 	if err != nil {
@@ -1921,6 +1941,7 @@ func TestResolveSkipsForeignInstancesBeforeManagedOnes(t *testing.T) {
 }
 
 func TestCleanupContinuesPastForeignAndFreshInstances(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	oldNewClient := newClient
 	now := time.Now().UTC()
 	fake := &fakeClient{
@@ -1981,6 +2002,7 @@ func TestCleanupContinuesPastForeignAndFreshInstances(t *testing.T) {
 
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
+	claimDurableFixture(t, fake, "crabbox-stale")
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
 	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
@@ -1992,6 +2014,7 @@ func TestCleanupContinuesPastForeignAndFreshInstances(t *testing.T) {
 }
 
 func TestCleanupStopsRunningStaleInstancesBeforeDelete(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	oldNewClient := newClient
 	now := time.Now().UTC()
 	fake := &fakeClient{
@@ -2027,6 +2050,7 @@ func TestCleanupStopsRunningStaleInstancesBeforeDelete(t *testing.T) {
 
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
+	claimDurableFixture(t, fake, "crabbox-stale")
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 
 	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {

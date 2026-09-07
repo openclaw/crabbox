@@ -67,6 +67,7 @@ jobs:
           [[ "$RELEASE_TAG" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]
           [[ "$VERIFIER_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_REPOSITORY" == openclaw/crabbox ]]
           expected_ref="refs/heads/$DEFAULT_BRANCH"
           expected_workflow_ref="$GITHUB_REPOSITORY/.github/workflows/release-assets.yml@$expected_ref"
           [[ "$GITHUB_REF" == "$expected_ref" ]]
@@ -183,7 +184,7 @@ jobs:
       - name: Download exact numeric release without executing its bytes
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ inputs.draft && github.token || '' }}
           RELEASE_ID: ${{ inputs.release_id }}
           RELEASE_TAG: ${{ inputs.tag }}
           RELEASE_COMMIT: ${{ inputs.tag_commit }}
@@ -192,11 +193,19 @@ jobs:
           EXPECTED_NOTES_SHA256: ${{ needs.guard.outputs.notes_sha256 }}
         run: |
           set -euo pipefail
-          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]] || exit 1
+          [[ "$GITHUB_REPOSITORY" == openclaw/crabbox ]] || exit 1
           input="$RUNNER_TEMP/release-input"
           mkdir -m 700 "$input" "$input/assets"
-          gh api --method GET "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-            >"$input/release.json"
+          if [[ "$EXPECTED_DRAFT" == true ]]; then
+            gh api --method GET "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+              >"$input/release.json"
+          else
+            curl --disable --fail --silent --show-error --location --retry 3 \
+              "https://api.github.com/repos/openclaw/crabbox/releases/$RELEASE_ID" \
+              >"$input/release.json"
+          fi
           RELEASE_FILE="$input/release.json" node <<'NODE'
           const crypto = require('node:crypto');
           const fs = require('node:fs');
@@ -236,14 +245,20 @@ jobs:
             );
           if (!valid) throw new Error('numeric release does not match the exact immutable draft input');
           NODE
-          while IFS=$'\t' read -r asset_id expected_size expected_digest; do
+          while IFS=$'\t' read -r asset_id asset_name expected_size expected_digest; do
             destination="$input/assets/$asset_id"
-            gh api --method GET --header 'Accept: application/octet-stream' \
-              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >"$destination"
+            if [[ "$EXPECTED_DRAFT" == true ]]; then
+              gh api --method GET --header 'Accept: application/octet-stream' \
+                "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >"$destination"
+            else
+              curl --disable --fail --silent --show-error --location --retry 3 \
+                "https://github.com/openclaw/crabbox/releases/download/$RELEASE_TAG/$asset_name" \
+                >"$destination"
+            fi
             actual_size=$(wc -c <"$destination" | tr -d '[:space:]')
             actual_digest="sha256:$(shasum -a 256 "$destination" | awk '{print $1}')"
-            [[ "$actual_size" == "$expected_size" && "$actual_digest" == "$expected_digest" ]]
-          done < <(jq -r '.assets[] | [.id, .size, .digest] | @tsv' "$input/release.json")
+            [[ "$actual_size" == "$expected_size" && "$actual_digest" == "$expected_digest" ]] || exit 1
+          done < <(jq -r '.assets[] | [.id, .name, .size, .digest] | @tsv' "$input/release.json")
 
       - name: Freeze opaque candidate input
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -324,6 +339,7 @@ jobs:
               "$RELEASE_TAG" "$RUNNER_TEMP/release-assets" \
               "$RELEASE_TAG_OBJECT" "$RELEASE_COMMIT" "$VERIFIER_COMMIT"
       - name: Freeze exact static proof before candidate execution
+        if: inputs.draft
         shell: bash
         env:
           RELEASE_ID: ${{ inputs.release_id }}
@@ -384,6 +400,7 @@ jobs:
           );
           NODE
       - name: Preserve exact verified asset identity
+        if: inputs.draft
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: verified-assets-${{ matrix.arch }}

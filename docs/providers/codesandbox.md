@@ -126,6 +126,14 @@ Crabbox rejects broad paths such as `/` and `/project`.
    `pause` hibernates the sandbox and keeps the local claim so `resume`, `run`,
    `status`, and `stop` can target it later.
 
+Run outcomes and timing are finalized after automatic cleanup. A failed deletion
+returns a failure and a retained recovery session instead of success with a
+stopped session. An existing command failure keeps its exit code when cleanup or
+timing output also fails. `--keep-on-failure` includes canceled and timed-out
+commands; their original causes remain available for outcome classification.
+Reused sandboxes are never automatically deleted. Ownership checks and the SDK's
+command, environment-file, and deletion transports remain provider-specific.
+
 ## Ports And Preview URLs
 
 CodeSandbox exposes HTTP ports through provider-owned `csb.app` hosts.

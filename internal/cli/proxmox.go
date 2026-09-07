@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
@@ -35,7 +36,7 @@ type ProxmoxReadinessCheck struct {
 
 var (
 	proxmoxRunSSHQuietWithOptions = runSSHQuietWithOptions
-	proxmoxRunSSHInputQuiet       = runSSHInputQuiet
+	proxmoxRunSSHInput            = runSSHInput
 	proxmoxAPITokenPattern        = regexp.MustCompile(`PVEAPIToken=[A-Za-z0-9@._!%+=:/~-]+`)
 )
 
@@ -1101,12 +1102,45 @@ func (c *ProxmoxClient) waitServerIP(ctx context.Context, vmid int) (Server, err
 	}
 }
 
+const proxmoxBootstrapDiagnosticLimit = 16 << 10
+
+// Display only the safe diagnostic; keep the native cause without promoting its
+// status to the CLI's separate ExitError contract.
+type proxmoxBootstrapError struct {
+	message string
+	cause   error
+}
+
+func (e *proxmoxBootstrapError) Error() string { return e.message }
+func (e *proxmoxBootstrapError) Unwrap() error { return e.cause }
+
 func (c *ProxmoxClient) bootstrapSSH(ctx context.Context, host string, cfg Config) error {
 	target := SSHTargetFromConfig(cfg, host)
 	deadline := time.Now().Add(10 * time.Minute)
 	for {
 		if proxmoxRunSSHQuietWithOptions(ctx, target, sshTransportProbeCommand(target), "5", "1") == nil {
-			return proxmoxRunSSHInputQuiet(ctx, target, "sudo /bin/bash -s", proxmoxBootstrapScript(cfg))
+			out := synchronizedBuffer{limit: proxmoxBootstrapDiagnosticLimit}
+			err := proxmoxRunSSHInput(ctx, target, "sudo /bin/bash -s", strings.NewReader(proxmoxBootstrapScript(cfg)), &out, &out)
+			if err == nil {
+				return nil
+			}
+			status := "unknown"
+			var native *exec.ExitError
+			if errors.As(err, &native) && native.ExitCode() >= 0 {
+				status = strconv.Itoa(native.ExitCode())
+			}
+			diagnostic, truncated := out.boundedString()
+			if truncated {
+				// A cut credential cannot be reliably redacted from a partial capture.
+				diagnostic = "diagnostics truncated; captured output omitted"
+			}
+			message := fmt.Sprintf("proxmox guest bootstrap exit=%s: %v", status, err)
+			if diagnostic = strings.TrimSpace(diagnostic); diagnostic != "" {
+				message += ": " + diagnostic
+			}
+			message = RedactDiagnosticSecrets(message, c.TokenID, c.TokenSecret, cfg.Proxmox.TokenID, cfg.Proxmox.TokenSecret)
+			message = proxmoxAPITokenPattern.ReplaceAllString(message, "PVEAPIToken=<redacted>")
+			return &proxmoxBootstrapError{message: message, cause: err}
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timeout waiting for proxmox ssh bootstrap transport")
@@ -1157,6 +1191,10 @@ func (c *ProxmoxClient) DeleteServer(ctx context.Context, id string) error {
 		vmid = int(server.ID)
 	}
 	_ = c.stopVM(ctx, vmid)
+	return c.purgeVM(ctx, vmid)
+}
+
+func (c *ProxmoxClient) purgeVM(ctx context.Context, vmid int) error {
 	q := url.Values{}
 	q.Set("purge", "1")
 	var upid string
@@ -1184,6 +1222,34 @@ func (c *ProxmoxClient) DeleteServerOnNode(ctx context.Context, node, id string)
 	scoped := *c
 	scoped.Node = node
 	return scoped.DeleteServer(ctx, id)
+}
+
+// DeleteServerOnNodeChecked lets the provider adapter authorize both destructive
+// steps against freshly read VM configuration, including after stop completes.
+func (c *ProxmoxClient) DeleteServerOnNodeChecked(ctx context.Context, node, id string, check func(Server) error) error {
+	vmid, err := strconv.Atoi(id)
+	if err != nil || vmid <= 0 || strconv.Itoa(vmid) != id || node == "" || check == nil {
+		return fmt.Errorf("checked Proxmox deletion requires an exact node, VMID, and authorization check")
+	}
+	scoped := *c
+	scoped.Node = node
+	validate := func() error {
+		server, err := scoped.getServer(ctx, id, true)
+		if err != nil {
+			return err
+		}
+		return check(server)
+	}
+	if err := validate(); err != nil {
+		return err
+	}
+	if err := scoped.stopVM(ctx, vmid); err != nil {
+		return err
+	}
+	if err := validate(); err != nil {
+		return err
+	}
+	return scoped.purgeVM(ctx, vmid)
 }
 
 func (c *ProxmoxClient) GetServer(ctx context.Context, id string) (Server, error) {
@@ -1222,10 +1288,36 @@ func (c *ProxmoxClient) getServer(ctx context.Context, id string, requireConfig 
 	}
 	ip, _ := c.guestIPv4(ctx, vmid)
 	server := proxmoxVMToServer(c.Node, status, labels, ip)
+	if generation, ok := config["vmgenid"].(string); ok {
+		server.ImmutableID = proxmoxGenerationID(generation)
+	}
 	if server.Name == "" {
 		server.Name = "vm-" + strconv.Itoa(vmid)
 	}
 	return server, nil
+}
+
+func proxmoxGenerationID(value string) string {
+	if len(value) != 36 {
+		return ""
+	}
+	nonzero := false
+	for i, c := range value {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return ""
+			}
+			continue
+		}
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return ""
+		}
+		nonzero = nonzero || c != '0'
+	}
+	if !nonzero {
+		return ""
+	}
+	return strings.ToLower(value)
 }
 
 func (c *ProxmoxClient) getServerByName(ctx context.Context, name string) (Server, error) {
@@ -1305,19 +1397,6 @@ func (c *ProxmoxClient) waitTask(ctx context.Context, upid string) error {
 		}
 	}
 }
-
-type proxmoxAgentExecStart struct {
-	PID int `json:"pid"`
-}
-
-type proxmoxAgentExecStatus struct {
-	Exited   proxmoxBool `json:"exited"`
-	ExitCode int         `json:"exitcode"`
-	OutData  string      `json:"out-data"`
-	ErrData  string      `json:"err-data"`
-}
-
-type proxmoxBool bool
 
 type proxmoxAgentInterface struct {
 	Name        string `json:"name"`

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -31,178 +32,125 @@ func (b *tensorlakeBackend) Warmup(ctx context.Context, req WarmupRequest) error
 	if err != nil {
 		return err
 	}
-	leaseID, sandboxID, name, slug, err := b.createSandbox(ctx, cli, req.Repo, req.Reclaim, req.RequestedSlug)
+	claim, name, err := b.createSandbox(ctx, cli, req.Repo, req.Reclaim, req.RequestedSlug)
 	if err != nil {
 		return err
 	}
+	leaseID, sandboxID, slug := claim.LeaseID, claim.CloudID, claim.Slug
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s sandbox=%s name=%s\n", leaseID, slug, providerName, sandboxID, name)
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: tensorlake warmup keeps the sandbox until explicit stop\n")
 	}
 	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
-func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
-	if err := rejectIncompatibleSyncOptions(req); err != nil {
-		return RunResult{}, err
+func (b *tensorlakeBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+	workdir, workdirErr := tensorlakeWorkdir(b.cfg)
+	var cli *tensorlakeCLI
+	var claim core.LeaseClaim
+	session := func() shared.DelegatedSandbox {
+		return shared.DelegatedSandbox{LeaseID: claim.LeaseID, Slug: claim.Slug, CleanupCommand: tensorlakeCleanupCommand(claim.LeaseID)}
 	}
-	workdir, err := tensorlakeWorkdir(b.cfg)
-	if err != nil {
-		return RunResult{}, err
-	}
-	started := b.now()
-	cli, err := newTensorlakeCLI(b.cfg, b.rt)
-	if err != nil {
-		return RunResult{}, err
-	}
-	leaseID, sandboxID, slug := "", "", ""
-	acquired := false
-	if req.ID == "" {
-		var name string
-		leaseID, sandboxID, name, slug, err = b.createSandbox(ctx, cli, req.Repo, req.Reclaim, req.RequestedSlug)
+	admit := func(ctx context.Context) error {
+		_, binding, err := bindingForClaim(claim)
 		if err != nil {
-			return RunResult{}, err
+			return err
 		}
-		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s name=%s\n", leaseID, slug, providerName, sandboxID, name)
-		acquired = true
-	} else {
-		leaseID, sandboxID, slug, err = resolveLeaseID(req.ID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout)
-		if err != nil {
-			return RunResult{}, err
-		}
-	}
-	shouldStop := acquired && !req.Keep
-	cleanedUp := false
-	session := &RunSessionHandle{
-		Provider:       providerName,
-		LeaseID:        leaseID,
-		Slug:           slug,
-		Reused:         !acquired,
-		Kept:           !shouldStop,
-		CleanupCommand: tensorlakeCleanupCommand(leaseID),
-	}
-	finishResult := func(result RunResult) RunResult {
-		if result.Provider == "" {
-			result.Provider = providerName
-		}
-		if result.LeaseID == "" {
-			result.LeaseID = leaseID
-		}
-		if result.Slug == "" {
-			result.Slug = slug
-		}
-		result.Session = session
-		result.Session.Kept = !cleanedUp && !shouldStop
-		return result
-	}
-	defer func() {
-		result = finishResult(result)
-	}()
-	cleanupSandbox := func() error {
-		if !shouldStop {
-			return nil
-		}
-		if termErr := cli.terminate(context.Background(), sandboxID); termErr != nil {
-			shouldStop = false
-			return termErr
-		}
-		removeLeaseClaim(leaseID)
-		cleanedUp = true
-		shouldStop = false
-		return nil
-	}
-	if shouldStop {
-		defer func() {
-			if termErr := cleanupSandbox(); termErr != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: tensorlake terminate failed for %s: %v\n", sandboxID, termErr)
+		return core.WithLeaseClaimUnchangedContext(ctx, claim.LeaseID, claim, func() error {
+			item, err := cli.verifyBinding(ctx, binding)
+			if err == nil && item.State == "terminated" {
+				return exit(2, "Tensorlake sandbox has terminated; create a new lease")
 			}
-		}()
+			return err
+		})
 	}
-	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
-
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
-	if !req.NoSync {
-		var err error
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, cli, sandboxID, req, workdir)
-		if err != nil {
-			return RunResult{Total: b.now().Sub(started), SyncDelegated: true}, err
-		}
-		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, cli, sandboxID, workdir); err != nil {
-		return RunResult{}, err
-	}
-
-	command, err := buildCommand(req.Command, req.ShellMode)
-	if err != nil {
-		return RunResult{}, err
-	}
-	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
-		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
-	}
-	if len(req.Env) > 0 {
-		envPath, cleanup, err := b.uploadEnvProfile(ctx, cli, sandboxID, req.Env)
-		if err != nil {
-			return RunResult{}, err
-		}
-		defer cleanup()
-		command = wrapCommandWithEnvProfile(command, envPath)
-	}
-	commandStart := b.now()
-	exitCode, runErr := cli.execStream(ctx, sandboxID, workdir, command, b.rt.Stdout, b.rt.Stderr)
-	commandDuration := b.now().Sub(commandStart)
-	result = RunResult{
-		ExitCode:      exitCode,
-		Command:       commandDuration,
-		Total:         b.now().Sub(started),
-		SyncDelegated: true,
-	}
-	result = finalizeRunResult(result, runErr)
-	if req.NoSync {
-		fmt.Fprintf(b.rt.Stderr, "tensorlake run summary sync_skipped=true command=%s total=%s exit=%d\n",
-			result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
-	} else {
-		fmt.Fprintf(b.rt.Stderr, "tensorlake run summary sync=%s command=%s total=%s exit=%d\n",
-			syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
-	}
-	if req.TimingJSON {
-		report := timingReportWithRunResult(timingReport{
-			Provider:      providerName,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			SyncDelegated: true,
-			SyncMs:        syncDuration.Milliseconds(),
-			SyncPhases:    syncPhases,
-			SyncSkipped:   req.NoSync,
-			CommandMs:     result.Command.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      exitCode,
-			Label:         strings.TrimSpace(req.Label),
-		}, result, runErr)
-		if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
-			return result, err
-		}
-	}
-	if runErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, ExitError{Code: 1, Message: fmt.Sprintf("tensorlake run failed: %v", runErr)}
-	}
-	if exitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("tensorlake run exited %d", exitCode)}
-	}
-	return result, nil
+	return shared.RunDelegatedSandbox(ctx, req, shared.DelegatedSandboxLifecycle{
+		Provider: providerName, Runtime: b.rt, Workdir: workdir,
+		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL, CleanupTimeout: envProfileCleanupTimeout,
+		Preflight: func(context.Context) error {
+			if err := rejectIncompatibleSyncOptions(req); err != nil {
+				return err
+			}
+			if workdirErr != nil {
+				return workdirErr
+			}
+			var err error
+			cli, err = newTensorlakeCLI(b.cfg, b.rt)
+			return err
+		},
+		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) { return b.prepareArchive(ctx, req) },
+		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var name string
+			var err error
+			claim, name, err = b.createSandbox(ctx, cli, req.Repo, req.Reclaim, req.RequestedSlug)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s name=%s\n", claim.LeaseID, claim.Slug, providerName, claim.CloudID, name)
+			return session(), nil
+		},
+		Resolve: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var err error
+			claim, err = b.resolveLease(ctx, cli, req.ID, req.Repo.Root, req.Reclaim)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			return session(), nil
+		},
+		AdmitReuse: admit,
+		Setup: func(ctx context.Context) error {
+			if req.ID == "" {
+				if err := admit(ctx); err != nil {
+					return err
+				}
+			}
+			fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, claim.LeaseID, claim.CloudID, workdir)
+			return nil
+		},
+		Sync: func(ctx context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+			return b.syncWorkspace(ctx, cli, claim.CloudID, req, workdir, archive)
+		},
+		NoSync: func(ctx context.Context) error { return b.prepareWorkspace(ctx, cli, claim.CloudID, workdir) },
+		Command: func(ctx context.Context) (shared.DelegatedSandboxCommand, error) {
+			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+			if err != nil {
+				return shared.DelegatedSandboxCommand{}, err
+			}
+			args := intent.Argv("bash", "-lc")
+			if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
+				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+			}
+			var command shared.DelegatedSandboxCommand
+			if len(req.Env) > 0 {
+				envPath, cleanup, err := b.uploadEnvProfile(ctx, cli, claim, req.Env)
+				if cleanup != nil {
+					command.Close = func(ctx context.Context) error {
+						cleanup(ctx)
+						return nil
+					}
+				}
+				if err != nil {
+					return command, err
+				}
+				args = shared.WrapCommandWithShellEnvProfile(args, envPath)
+			}
+			command.Run = func(ctx context.Context) (int, error) {
+				code, err := cli.execStream(ctx, claim.CloudID, workdir, args, b.rt.Stdout, b.rt.Stderr)
+				if err != nil {
+					return code, shared.ExitErrorWithCause(1, shared.RedactErrorSecrets(err.Error(), b.cfg.Tensorlake.APIKey), err)
+				}
+				return code, nil
+			}
+			return command, nil
+		},
+		Cleanup: func(ctx context.Context) error { return cli.removeBoundClaim(ctx, claim) },
+	})
 }
 
 func (b *tensorlakeBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -218,21 +166,37 @@ func (b *tensorlakeBackend) List(ctx context.Context, req ListRequest) ([]LeaseV
 	servers := make([]Server, 0, len(ids))
 	for _, id := range ids {
 		leaseID := leasePrefix + id
-		claim, ok, err := resolveLeaseClaim(leaseID)
-		if err != nil || !ok || claim.Provider != providerName {
+		claim, ok, err := core.ReadLeaseClaimWithPresence(leaseID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok || claim.Provider != providerName {
 			continue
 		}
+		_, binding, err := bindingForClaim(claim)
+		if err != nil {
+			return nil, err
+		}
+		var item sandboxIdentity
+		if err := core.WithLeaseClaimUnchanged(leaseID, claim, func() error {
+			var err error
+			item, err = cli.verifyBinding(ctx, binding)
+			return err
+		}); err != nil {
+			return nil, err
+		}
+
 		servers = append(servers, Server{
 			Provider: providerName,
 			CloudID:  id,
 			Name:     id,
-			Status:   "running",
+			Status:   item.State,
 			Labels: map[string]string{
 				"provider": providerName,
 				"lease":    claim.LeaseID,
 				"slug":     claim.Slug,
 				"target":   targetLinux,
-				"state":    "running",
+				"state":    item.State,
 			},
 		})
 	}
@@ -252,7 +216,12 @@ func (b *tensorlakeBackend) Status(ctx context.Context, req StatusRequest) (Stat
 	if err != nil {
 		return StatusView{}, err
 	}
-	leaseID, sandboxID, slug, err := resolveLeaseID(req.ID, "", false, 0)
+	claim, err := b.resolveLease(ctx, cli, req.ID, "", false)
+	if err != nil {
+		return StatusView{}, err
+	}
+	leaseID, sandboxID, slug := claim.LeaseID, claim.CloudID, claim.Slug
+	_, binding, err := bindingForClaim(claim)
 	if err != nil {
 		return StatusView{}, err
 	}
@@ -262,8 +231,13 @@ func (b *tensorlakeBackend) Status(ctx context.Context, req StatusRequest) (Stat
 	}
 	var lastDescribeErr error
 	for {
-		out, describeErr := cli.describe(ctx, sandboxID)
-		state := parseDescribeState(out)
+		var item sandboxIdentity
+		describeErr := core.WithLeaseClaimUnchanged(leaseID, claim, func() error {
+			var err error
+			item, err = cli.verifyBinding(ctx, binding)
+			return err
+		})
+		state := item.State
 		if describeErr != nil {
 			if !req.Wait {
 				return StatusView{}, describeErr
@@ -315,76 +289,102 @@ func (b *tensorlakeBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, sandboxID, _, err := resolveLeaseID(req.ID, "", false, 0)
+	claim, err := b.resolveLease(ctx, cli, req.ID, "", false)
 	if err != nil {
 		return err
 	}
-	if err := cli.terminate(ctx, sandboxID); err != nil {
+	if err := cli.removeBoundClaim(ctx, claim); err != nil {
 		return err
 	}
-	removeLeaseClaim(leaseID)
-	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", leaseID, sandboxID)
+	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", claim.LeaseID, claim.CloudID)
 	return nil
 }
 
-// createSandbox returns (leaseID, sandboxID, name, slug, err). The Tensorlake
-// CLI returns the assigned sandbox ID on stdout; that ID is the canonical
-// identifier we key the local claim by. The Crabbox-prefixed name is set on
-// the Tensorlake side for human-readable `tensorlake sbx ls` output but is
-// not used for subsequent API calls.
-func (b *tensorlakeBackend) createSandbox(ctx context.Context, cli *tensorlakeCLI, repo Repo, reclaim bool, requestedSlug string) (string, string, string, string, error) {
-	name := newSandboxName(repo)
-	sandboxID, err := cli.createSandbox(ctx, name)
-	if err != nil {
-		return "", "", "", "", err
+func (b *tensorlakeBackend) createSandbox(ctx context.Context, cli *tensorlakeCLI, repo Repo, reclaim bool, requestedSlug string) (core.LeaseClaim, string, error) {
+	if strings.TrimSpace(repo.Root) == "" {
+		return core.LeaseClaim{}, "", exit(2, "Tensorlake acquisition requires a repository root for durable ownership")
 	}
-	leaseID := leasePrefix + sandboxID
+	scope, err := cli.observeScope(ctx)
+	if err != nil {
+		return core.LeaseClaim{}, "", err
+	}
+	name := newSandboxName(repo)
+	id, err := cli.createSandbox(ctx, name)
+	if err != nil {
+		return core.LeaseClaim{}, "", fmt.Errorf("%w; inspect Tensorlake sandbox name=%s before manual cleanup of an uncertain creation", err, name)
+	}
+	leaseID := leasePrefix + id
+	retained := func(err error) (core.LeaseClaim, string, error) {
+		return core.LeaseClaim{}, "", fmt.Errorf("%w; retained Tensorlake sandbox=%s lease=%s for manual inspection", err, id, leaseID)
+	}
+	item, err := cli.inspectIdentity(ctx, id)
+	if err != nil {
+		return retained(err)
+	}
+	if item.Name != name || item.State == "terminated" {
+		return retained(exit(2, "Tensorlake creation returned an unexpected sandbox identity or state"))
+	}
+	binding := sandboxBinding{id, item.Namespace, scope}
+	rollback := func(cause error) (core.LeaseClaim, string, error) {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), terminationTimeout)
+		defer cancel()
+		cleanupErr := core.CleanupLeaseClaimIfUnchangedAfterContext(cleanupCtx, leaseID, core.LeaseClaim{}, false, func() error {
+			return cli.terminateBound(cleanupCtx, binding)
+		})
+		if cleanupErr != nil {
+			return retained(errors.Join(cause, cleanupErr))
+		}
+		return core.LeaseClaim{}, "", cause
+	}
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
-		_ = cli.terminate(context.Background(), sandboxID)
-		return "", "", "", "", err
+		return rollback(err)
 	}
-	if err := claimLeaseForRepoProviderPond(leaseID, slug, providerName, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
-		_ = cli.terminate(context.Background(), sandboxID)
-		return "", "", "", "", err
+	server := Server{Provider: providerName, CloudID: id, Name: name, Status: item.State, Labels: map[string]string{"provider": providerName, "lease": leaseID, "slug": slug, "target": targetLinux, "tensorlake_namespace": item.Namespace}}
+	claim, err := core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfterContext(ctx, leaseID, slug, b.cfg, scope, server, core.SSHTarget{}, repo.Root, b.cfg.IdleTimeout, reclaim, core.LeaseClaim{}, false, func() error {
+		item, err := cli.verifyBinding(ctx, binding)
+		if err == nil && item.State == "terminated" {
+			err = exit(2, "Tensorlake sandbox terminated before ownership publication")
+		}
+		return err
+	})
+	if err != nil {
+		return rollback(err)
 	}
-	return leaseID, sandboxID, name, slug, nil
+	return claim, name, nil
 }
 
-// resolveLeaseID resolves a user-supplied identifier (slug, lease ID, or
-// raw Tensorlake sandbox ID) to a (leaseID, sandboxID, slug) tuple. Resolution is
-// strict: only locally-claimed Crabbox sandboxes are accepted, mirroring
-// islo. Raw IDs are accepted only when a matching `tlsbx_<id>` claim exists.
-func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration) (string, string, string, error) {
+func (b *tensorlakeBackend) resolveLease(ctx context.Context, cli *tensorlakeCLI, id, repoRoot string, reclaim bool) (core.LeaseClaim, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return "", "", "", exit(2, "provider=tensorlake requires a Crabbox-created sandbox slug or lease id")
+		return core.LeaseClaim{}, exit(2, "provider=tensorlake requires a Crabbox-created sandbox slug or lease id")
 	}
-	probes := []string{id}
-	if !strings.HasPrefix(id, leasePrefix) {
-		probes = append(probes, leasePrefix+id)
+	strict := strings.HasPrefix(id, leasePrefix) || isLikelySandboxID(id)
+	if isLikelySandboxID(id) {
+		id = leasePrefix + id
 	}
-	for _, probe := range probes {
-		claim, ok, err := resolveLeaseClaimForProvider(probe, providerName)
-		if err != nil {
-			return "", "", "", err
-		}
-		if !ok {
-			continue
-		}
-		if repoRoot != "" {
-			if err := claimLeaseForRepoProvider(claim.LeaseID, claim.Slug, providerName, repoRoot,
-				timeoutOrDefault(idleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), reclaim); err != nil {
-				return "", "", "", err
+	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExact(id, providerName)
+	if err != nil {
+		return core.LeaseClaim{}, err
+	}
+	if !ok || (strict || exact) && (!exact || claim.LeaseID != id) {
+		return core.LeaseClaim{}, exit(4, "tensorlake sandbox %q is not exactly claimed by Crabbox", id)
+	}
+	_, binding, err := bindingForClaim(claim)
+	if err != nil {
+		return core.LeaseClaim{}, err
+	}
+	if repoRoot != "" {
+		server := Server{Provider: providerName, CloudID: claim.CloudID, Labels: shared.CloneLabels(claim.Labels)}
+		return core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfterContext(ctx, claim.LeaseID, claim.Slug, b.cfg, claim.ProviderScope, server, core.SSHTarget{}, repoRoot, timeoutOrDefault(b.cfg.IdleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), reclaim, claim, true, func() error {
+			item, err := cli.verifyBinding(ctx, binding)
+			if err == nil && item.State == "terminated" {
+				err = exit(2, "Tensorlake sandbox has terminated; create a new lease")
 			}
-		}
-		slug := claim.Slug
-		if strings.TrimSpace(slug) == "" {
-			slug = newLeaseSlug(claim.LeaseID)
-		}
-		return claim.LeaseID, strings.TrimPrefix(claim.LeaseID, leasePrefix), slug, nil
+			return err
+		})
 	}
-	return "", "", "", exit(4, "tensorlake sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-id>", id, leasePrefix)
+	return claim, nil
 }
 
 func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
@@ -413,22 +413,6 @@ func newSandboxName(repo Repo) string {
 	return namePrefix + base + "-" + randomSuffix()
 }
 
-// parseDescribeState extracts the Status field from `tensorlake sbx describe`
-// stdout. The CLI prints key/value lines like "Status: running"; an empty
-// string is returned when no Status line is present.
-func parseDescribeState(out string) string {
-	for _, line := range strings.Split(out, "\n") {
-		key, value, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(key), "status") {
-			return strings.ToLower(strings.TrimSpace(value))
-		}
-	}
-	return ""
-}
-
 func isReadyState(state string) bool {
 	switch strings.TrimSpace(strings.ToLower(state)) {
 	case "running", "ready", "started", "active":
@@ -440,23 +424,6 @@ func isReadyState(state string) bool {
 
 func randomSuffix() string {
 	return shared.RandomSuffix()
-}
-
-func buildCommand(command []string, shellMode bool) ([]string, error) {
-	if len(command) == 0 {
-		return nil, errors.New("missing command")
-	}
-	if shellMode {
-		return []string{"bash", "-lc", strings.Join(command, " ")}, nil
-	}
-	if shouldUseShell(command) || leadingEnvAssignment(command) {
-		return []string{"bash", "-lc", shellScriptFromArgv(command)}, nil
-	}
-	return command, nil
-}
-
-func leadingEnvAssignment(command []string) bool {
-	return len(command) > 1 && strings.Contains(command[0], "=") && !strings.HasPrefix(command[0], "-")
 }
 
 // tensorlakeWorkdir returns the configured absolute workspace path inside the

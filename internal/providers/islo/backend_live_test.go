@@ -5,6 +5,7 @@ package islo
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"regexp"
@@ -136,13 +137,57 @@ func TestLiveIsloPauseResumeLifecycle(t *testing.T) {
 		t.Fatalf("warmup lease not found in output: %q", stdout.String())
 	}
 	leaseID := match[1]
-	defer func() {
+	resourceID := ""
+	sandboxName := strings.TrimPrefix(leaseID, isloLeasePrefix)
+	stopCompleted, cleanupVerified := false, false
+	cleanup := func() error {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cleanupCancel()
-		if err := backend.Stop(cleanupCtx, StopRequest{ID: leaseID}); err != nil {
-			t.Logf("cleanup stop failed: %v", err)
+		if !stopCompleted {
+			if err := backend.Stop(cleanupCtx, StopRequest{ID: leaseID}); err != nil {
+				return fmt.Errorf("stop lease %s: %w", leaseID, err)
+			}
+			stopCompleted = true
+		}
+		if _, ok, err := resolveExactIsloLeaseClaim(leaseID); err != nil || ok {
+			return fmt.Errorf("claim after stop: present=%t err=%v", ok, err)
+		}
+		client, err := newIsloClient(cfg, backend.rt)
+		if err != nil {
+			return err
+		}
+		if resourceID == "" {
+			return fmt.Errorf("no immutable resource ID recorded for lease %s", leaseID)
+		}
+		tombstone, err := client.GetSandboxByID(cleanupCtx, resourceID)
+		if err != nil {
+			return fmt.Errorf("read deleted resource %s: %w", resourceID, err)
+		}
+		if tombstone == nil || tombstone.GetID() != resourceID || !strings.EqualFold(strings.TrimSpace(tombstone.GetStatus()), "deleted") {
+			return fmt.Errorf("resource %s has no matching terminal tombstone", resourceID)
+		}
+		if _, err := client.GetSandbox(cleanupCtx, sandboxName); !isloNotFound(err) {
+			return fmt.Errorf("deleted sandbox name %s did not return not-found: %v", sandboxName, err)
+		}
+		t.Logf("cleanup verified: lease=%s resource=%s status=deleted name=not-found claim=absent", leaseID, resourceID)
+		return nil
+	}
+	defer func() {
+		if !cleanupVerified {
+			if err := cleanup(); err != nil {
+				t.Errorf("cleanup failed: %v", err)
+			}
 		}
 	}()
+	claim, ok, err := resolveExactIsloLeaseClaim(leaseID)
+	if err != nil || !ok || claim.CloudImmutableID == "" {
+		t.Fatalf("immutable claim after warmup: present=%t resource=%q err=%v", ok, claim.CloudImmutableID, err)
+	}
+	resourceID = claim.CloudImmutableID
+	sandboxName = claim.Labels[isloSandboxNameLabel]
+	if sandboxName == "" || claim.CloudID != resourceID || claim.ProviderScope != isloClaimScope(cfg) {
+		t.Fatalf("incomplete sandbox identity for lease %s", leaseID)
+	}
 
 	if err := backend.Pause(ctx, PauseRequest{ID: leaseID}); err != nil {
 		t.Fatalf("pause: %v", err)
@@ -159,7 +204,7 @@ func TestLiveIsloPauseResumeLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status after resume: %v", err)
 	}
-	if !status.Ready || status.State != "running" {
+	if !status.Ready || status.State != "running" || status.ProviderResourceID != resourceID {
 		t.Fatalf("status after resume=%#v", status)
 	}
 
@@ -177,6 +222,10 @@ func TestLiveIsloPauseResumeLifecycle(t *testing.T) {
 	if result.ExitCode != 0 || !strings.Contains(stdout.String(), "crabbox-islo-resume-ok") {
 		t.Fatalf("run result=%#v stdout=%q", result, stdout.String())
 	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	cleanupVerified = true
 }
 
 func waitForLiveIsloState(t *testing.T, ctx context.Context, backend *isloBackend, leaseID, want string) {

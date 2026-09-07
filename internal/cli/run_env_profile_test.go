@@ -142,6 +142,19 @@ func TestAllowedEnvFromProfilesOnlyForAllowlist(t *testing.T) {
 	}
 }
 
+func TestIsRunExecutionMetadataEnvName(t *testing.T) {
+	for _, name := range []string{"CRABBOX_LEASE_ID", "CRABBOX_RUN_ID", "CRABBOX_SLUG", "crabbox_run_id", "CrAbBoX_SlUg"} {
+		if !IsRunExecutionMetadataEnvName(name) {
+			t.Errorf("framework-owned name not recognized: %q", name)
+		}
+	}
+	for _, name := range []string{"", "FOO", "CRABBOX_CUSTOM", "CRABBOX_RUN_ID_EXTRA", "PREFIX_CRABBOX_RUN_ID", "CRABBOX_SLUG_PREFIX", "CRABBOX_LEASE_ID_SUFFIX", " CRABBOX_RUN_ID", "CRABBOX_RUN_ID "} {
+		if IsRunExecutionMetadataEnvName(name) {
+			t.Errorf("nonreserved name treated as framework-owned: %q", name)
+		}
+	}
+}
+
 func TestRunExecutionMetadataOverridesForwardedValues(t *testing.T) {
 	selection := runEnvSelection{
 		Profile: map[string]string{

@@ -39,8 +39,9 @@ When the lease comes up, Crabbox bootstraps the box for SSH and Screen Sharing:
   key;
 - generates a 16-character VNC password, sets it as the `ec2-user` account
   password, and stores it at `/var/db/crabbox/vnc.password` (mode `0600`);
-- enables and starts `com.apple.screensharing`, bound to loopback and reached
-  only through the SSH tunnel.
+- enables and starts `com.apple.screensharing`, reached through loopback over
+  SSH. The listener can also bind other interfaces; Crabbox adds security-group
+  ingress for SSH ports only, so keep VNC port `5900` closed in any custom rules.
 
 The default work root is `/Users/ec2-user/crabbox`, because the macOS system
 volume is read-only. `crabbox vnc` reads the stored password back over SSH and

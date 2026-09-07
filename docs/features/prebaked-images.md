@@ -184,6 +184,13 @@ artifacts. The direct Hetzner deletion exception is described below.
   Hetzner, this runs directly and requires exactly one matching local native
   checkpoint record; it does not provide general delete-by-ID access.
 
+Promoting a coordinator-managed AWS AMI or Azure snapshot creates a durable pin
+alongside each matching default, scoped catalog entry, or AWS catalog-only
+variant. Pins prevent both manual checkpoint deletion and opted-in automatic
+expiry; replacement or retirement removes only its matching pin. Generic
+`image delete` refuses a managed checkpoint image and AWS backing snapshots,
+so retire the relevant promotion and delete its owning checkpoint explicitly.
+
 See the [image command reference](../commands/image.md) for full flags.
 
 ## Related docs

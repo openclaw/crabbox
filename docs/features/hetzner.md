@@ -109,7 +109,16 @@ The Hetzner adapter advertises `ssh`, `crabbox-sync`, `cleanup`, `desktop`,
 ## Cleanup
 
 In brokered mode, expiry and teardown are owned by the coordinator's Durable
-Object alarm. In direct mode, cleanup is best-effort through the `crabbox=true`
+Object alarm. The lease retains a versioned cleanup journal: a validated delete
+action must succeed and an exact server GET must report absence before managed
+key cleanup. A definitive key-only creation failure can instead retry the
+retained owned key ID without a server receipt. Pending actions and uncertain
+acknowledgements survive retries;
+an early GET 404 cannot resolve them. See
+[brokered cleanup confirmation](lifecycle-cleanup.md#brokered-hetzner-cleanup-confirmation)
+for bounds, ownership requirements, and the distinct already-absent basis.
+`crabbox inspect --json` exposes this recorded evidence alongside cleanup status.
+In direct mode, cleanup is best-effort through the `crabbox=true`
 provider labels: `crabbox cleanup --provider hetzner` deletes expired
 direct-provider servers and skips machines that were kept.
 

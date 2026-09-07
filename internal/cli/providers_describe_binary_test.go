@@ -18,11 +18,9 @@ import (
 
 func TestProvidersDescribeBuiltBinaryContract(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
-	binary := filepath.Join(t.TempDir(), "crabbox")
-	build := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/crabbox")
-	build.Dir = root
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go build ./cmd/crabbox: %v\n%s", err, output)
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	isolation := t.TempDir()
@@ -66,7 +64,19 @@ func TestProvidersDescribeBuiltBinaryContract(t *testing.T) {
 	if err := json.Unmarshal(matrixOut, &entries); err != nil {
 		t.Fatalf("providers --json: %v\n%s", err, matrixOut)
 	}
-	for _, entry := range entries {
+	var rows []map[string]any
+	if err := json.Unmarshal(matrixOut, &rows); err != nil {
+		t.Fatal(err)
+	}
+	for i, entry := range entries {
+		row := rows[i]
+		wantSelection := any(nil)
+		if entry.Provider == "machine0" {
+			wantSelection = "type"
+		}
+		if row["sizeSelection"] != wantSelection {
+			t.Errorf("provider=%s sizeSelection=%v want=%v", entry.Provider, row["sizeSelection"], wantSelection)
+		}
 		stdout, stderr, exitCode := runDescribeTestBinary(binary, root, env, "providers", "describe", entry.Provider, "--json")
 		switch entry.Kind {
 		case ProviderKindSSHLease, ProviderKindDelegatedRun:
@@ -81,6 +91,13 @@ func TestProvidersDescribeBuiltBinaryContract(t *testing.T) {
 			}
 			if !description.Runnable || description.Provider.Canonical != entry.Provider {
 				t.Errorf("describe %s identity=%#v runnable=%t", entry.Provider, description.Provider, description.Runnable)
+			}
+			var described map[string]any
+			if err := json.Unmarshal(stdout, &described); err != nil {
+				t.Fatal(err)
+			}
+			if described["sizeSelection"] != wantSelection || description.SchemaVersion != 2 {
+				t.Errorf("describe %s sizeSelection=%v want=%v schema=%d", entry.Provider, described["sizeSelection"], wantSelection, description.SchemaVersion)
 			}
 		case ProviderKindServiceControl:
 			if exitCode != 2 || len(stdout) != 0 || !strings.Contains(string(stderr), "not runnable") {
@@ -165,9 +182,9 @@ func TestProvidersDescribeBuiltBinaryContract(t *testing.T) {
 		t.Fatalf("run --help exit=%d stdout=%q stderr=%q", helpCode, helpStdout, helpStderr)
 	}
 	digest := sha256.Sum256(helpStderr)
-	const baselineSHA256 = "dabee7181e3b5d02252ec5c922d3d02cadff961a4232ba84b73988436c7a3a5f"
-	if got := hex.EncodeToString(digest[:]); got != baselineSHA256 || len(helpStderr) != 61216 {
-		t.Fatalf("run --help changed: sha256=%s bytes=%d, want sha256=%s bytes=61216", got, len(helpStderr), baselineSHA256)
+	const baselineSHA256 = "4d42952e1fa3123866b127fdad11eb6667694d9d78464d3edb222bf1c71ad7a2"
+	if got := hex.EncodeToString(digest[:]); got != baselineSHA256 || len(helpStderr) != 61897 {
+		t.Fatalf("run --help changed: sha256=%s bytes=%d, want sha256=%s bytes=61897", got, len(helpStderr), baselineSHA256)
 	}
 }
 

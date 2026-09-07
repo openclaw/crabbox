@@ -311,26 +311,36 @@ func TestCrossBuildEgressClientStripsDesktopPasswordEnvironment(t *testing.T) {
 	}
 }
 
-func TestSCPBaseArgsUseLegacyProtocolForNativeWindows(t *testing.T) {
-	native := scpBaseArgs(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal})
-	if !slices.Contains(native, "-O") {
-		t.Fatalf("native Windows scp args should include -O for OpenSSH servers without SFTP subsystem: %v", native)
-	}
-	wsl2 := scpBaseArgs(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2})
-	if slices.Contains(wsl2, "-O") {
-		t.Fatalf("WSL2 scp args should not force legacy protocol: %v", wsl2)
-	}
-	linux := scpBaseArgs(SSHTarget{TargetOS: targetLinux})
-	if slices.Contains(linux, "-O") {
-		t.Fatalf("Linux scp args should not force legacy protocol: %v", linux)
-	}
-	for name, args := range map[string][]string{"native Windows": native, "WSL2": wsl2, "Linux": linux} {
-		got := strings.Join(args, " ")
-		for _, want := range []string{"ForwardAgent=no", "ForwardX11=no", "ForwardX11Trusted=no"} {
-			if !strings.Contains(got, want) {
-				t.Fatalf("%s scp args missing %s: %v", name, want, args)
+func TestResolvedSCPUploadUsesLegacyProtocolForNativeWindows(t *testing.T) {
+	for name, target := range map[string]SSHTarget{
+		"native Windows": {TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+		"WSL2":           {TargetOS: targetWindows, WindowsMode: windowsModeWSL2},
+		"Linux":          {TargetOS: targetLinux},
+	} {
+		t.Run(name, func(t *testing.T) {
+			target.Host, target.User, target.Port = "2001:db8::1", "fixture", "22"
+			session, err := newSSHTransportSession(t.Context(), target, false)
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
+			defer func() { _ = session.Close() }()
+			args := resolvedSCPUploadArgs(session, target, "source", "/work/result")
+			if slices.Contains(args, "-O") != (name == "native Windows") {
+				t.Fatalf("wrong SCP protocol selection: %v", args)
+			}
+			if args[len(args)-1] != sshTransportHostAlias+":/work/result" {
+				t.Fatalf("unresolved SCP destination: %q", args[len(args)-1])
+			}
+			config, err := os.ReadFile(session.configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{"ForwardAgent no", "ForwardX11 no", "ForwardX11Trusted no"} {
+				if !strings.Contains(string(config), want) {
+					t.Fatalf("SCP transport missing %s", want)
+				}
+			}
+		})
 	}
 }
 

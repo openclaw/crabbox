@@ -64,7 +64,7 @@ func (a App) status(ctx context.Context, args []string) error {
 			state, err = delegated.Status(statusCtx, StatusRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, Wait: *wait, WaitTimeout: *waitTimeout})
 		} else if isSSH {
 			var lease LeaseTarget
-			lease, err = sshBackend.Resolve(statusCtx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, StatusOnly: true, ReadyProbe: *wait, NoLocalStateMutations: true})
+			lease, err = sshBackend.Resolve(statusCtx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, StatusOnly: true, ReadyProbe: *wait, NoLocalStateMutations: true, IncludeDiagnostics: *jsonOut && !*wait})
 			if err == nil {
 				state, err = statusViewFromLeaseTarget(statusCtx, cfg, lease)
 				if err == nil && *wait && !statusTerminalState(state.State) {
@@ -206,6 +206,10 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		tailscale = &meta
 	}
 	provider := blank(server.Provider, cfg.Provider)
+	serverID := ""
+	if server.CloudID != "" || server.ID != 0 {
+		serverID = server.DisplayID()
+	}
 	return statusView{
 		ID:               lease.LeaseID,
 		Slug:             serverSlug(server),
@@ -213,7 +217,7 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		TargetOS:         blank(server.Labels["target"], cfg.TargetOS),
 		WindowsMode:      blank(server.Labels["windows_mode"], cfg.WindowsMode),
 		State:            state,
-		ServerID:         server.DisplayID(),
+		ServerID:         serverID,
 		ServerType:       server.ServerType.Name,
 		Host:             server.PublicNet.IPv4.IP,
 		Pond:             blank(server.Labels[pondLabelKey], cfg.Pond),
@@ -255,50 +259,62 @@ func leaseStatusStateCanBeReady(lease LeaseTarget, state string) bool {
 }
 
 type StatusView struct {
-	ID                   string             `json:"id"`
-	Slug                 string             `json:"slug,omitempty"`
-	Provider             string             `json:"provider"`
-	TargetOS             string             `json:"target"`
-	WindowsMode          string             `json:"windowsMode,omitempty"`
-	State                string             `json:"state"`
-	ServerID             string             `json:"serverId"`
-	ServerType           string             `json:"serverType"`
-	Host                 string             `json:"host"`
-	Pond                 string             `json:"pond,omitempty"`
-	Network              NetworkMode        `json:"network"`
-	Tailscale            *TailscaleMetadata `json:"tailscale,omitempty"`
-	SSHHost              string             `json:"sshHost"`
-	SSHHostKey           string             `json:"sshHostKey,omitempty"`
-	SSHUser              string             `json:"sshUser"`
-	SSHPort              string             `json:"sshPort"`
-	SSHFallbackPorts     []string           `json:"sshFallbackPorts,omitempty"`
-	SSHKey               string             `json:"sshKey"`
-	LastTouchedAt        string             `json:"lastTouchedAt,omitempty"`
-	IdleFor              string             `json:"idleFor,omitempty"`
-	IdleTimeout          string             `json:"idleTimeout,omitempty"`
-	ExpiresAt            string             `json:"expiresAt,omitempty"`
-	CleanupStartedAt     string             `json:"cleanupStartedAt,omitempty"`
-	CleanupError         string             `json:"cleanupError,omitempty"`
-	CleanupRetryAt       string             `json:"cleanupRetryAt,omitempty"`
-	ReleaseDeletesServer *bool              `json:"releaseDeletesServer,omitempty"`
-	Labels               map[string]string  `json:"labels,omitempty"`
-	ProviderMetadata     map[string]any     `json:"providerMetadata,omitempty"`
-	HasHost              bool               `json:"hasHost"`
-	Ready                bool               `json:"ready"`
-	Telemetry            *LeaseTelemetry    `json:"telemetry,omitempty"`
-	TelemetryHistory     []*LeaseTelemetry  `json:"telemetryHistory,omitempty"`
+	ID          string `json:"id"`
+	Slug        string `json:"slug,omitempty"`
+	Provider    string `json:"provider"`
+	TargetOS    string `json:"target"`
+	WindowsMode string `json:"windowsMode,omitempty"`
+	State       string `json:"state"`
+	ServerID    string `json:"serverId"`
+	ServerType  string `json:"serverType"`
+	// ProviderResourceID optionally exposes an immutable provider resource ID.
+	// ServerID keeps each provider's existing identity semantics; for Islo it
+	// is the sandbox name rather than the immutable sandbox ID.
+	ProviderResourceID           string                   `json:"providerResourceId,omitempty"`
+	Host                         string                   `json:"host"`
+	Pond                         string                   `json:"pond,omitempty"`
+	Network                      NetworkMode              `json:"network"`
+	Tailscale                    *TailscaleMetadata       `json:"tailscale,omitempty"`
+	SSHHost                      string                   `json:"sshHost"`
+	SSHHostKey                   string                   `json:"sshHostKey,omitempty"`
+	ProviderAccessExpiresAt      string                   `json:"providerAccessExpiresAt,omitempty"`
+	SSHUser                      string                   `json:"sshUser"`
+	SSHPort                      string                   `json:"sshPort"`
+	SSHFallbackPorts             []string                 `json:"sshFallbackPorts,omitempty"`
+	SSHKey                       string                   `json:"sshKey"`
+	LastTouchedAt                string                   `json:"lastTouchedAt,omitempty"`
+	IdleFor                      string                   `json:"idleFor,omitempty"`
+	IdleTimeout                  string                   `json:"idleTimeout,omitempty"`
+	ExpiresAt                    string                   `json:"expiresAt,omitempty"`
+	CleanupStatus                string                   `json:"cleanupStatus,omitempty"`
+	ProviderCleanup              *ProviderCleanupEvidence `json:"providerCleanup,omitempty"`
+	CleanupStartedAt             string                   `json:"cleanupStartedAt,omitempty"`
+	CleanupCompletedAt           string                   `json:"cleanupCompletedAt,omitempty"`
+	CleanupError                 string                   `json:"cleanupError,omitempty"`
+	CleanupRetryAt               string                   `json:"cleanupRetryAt,omitempty"`
+	ReleaseDeletesServer         *bool                    `json:"releaseDeletesServer,omitempty"`
+	FailureError                 string                   `json:"failureError,omitempty"`
+	ProvisioningResourceMayExist *bool                    `json:"provisioningResourceMayExist,omitempty"`
+	ProvisioningFailureRetryable *bool                    `json:"provisioningFailureRetryable,omitempty"`
+	Labels                       map[string]string        `json:"labels,omitempty"`
+	ProviderMetadata             map[string]any           `json:"providerMetadata,omitempty"`
+	HasHost                      bool                     `json:"hasHost"`
+	Ready                        bool                     `json:"ready"`
+	Telemetry                    *LeaseTelemetry          `json:"telemetry,omitempty"`
+	TelemetryHistory             []*LeaseTelemetry        `json:"telemetryHistory,omitempty"`
 }
 
 type statusView = StatusView
 
 func (a App) leaseStatus(ctx context.Context, cfg Config, id string) (statusView, error) {
-	return a.leaseStatusWithRequest(ctx, cfg, StatusRequest{Options: leaseOptionsFromConfig(cfg), ID: id})
+	return a.leaseStatusWithRequest(ctx, cfg, StatusRequest{Options: leaseOptionsFromConfig(cfg), ID: id}, false)
 }
 
 func (a App) leaseStatusWithRequest(
 	ctx context.Context,
 	cfg Config,
 	req StatusRequest,
+	includeDiagnostics bool,
 ) (statusView, error) {
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
@@ -316,7 +332,7 @@ func (a App) leaseStatusWithRequest(
 	if !ok {
 		return statusView{}, exit(2, "provider=%s does not support status", backend.Spec().Name)
 	}
-	lease, err := sshBackend.Resolve(ctx, ResolveRequest{Options: req.Options, ID: req.ID, StatusOnly: true, NoLocalStateMutations: true})
+	lease, err := sshBackend.Resolve(ctx, ResolveRequest{Options: req.Options, ID: req.ID, StatusOnly: true, NoLocalStateMutations: true, IncludeDiagnostics: includeDiagnostics})
 	if err != nil {
 		return statusView{}, err
 	}
@@ -411,6 +427,9 @@ func resolveSSHLeaseTarget(ctx context.Context, backend SSHLoginBackend, req Res
 		expectedRepoRoot = strings.TrimSpace(claimBefore.RepoRoot)
 	}
 	if claimExistedBefore {
+		if !resolvedLeaseClaimIdentityCompatible(claimBefore, lease.Server) {
+			return LeaseTarget{}, exit(2, "lease %s has an incompatible provider identity; refusing to rebind resolved access", claimBefore.LeaseID)
+		}
 		leaseIDChanged := lease.LeaseID != claimBefore.LeaseID
 		var discardedClaim leaseClaim
 		discardedClaimExists := false
@@ -449,8 +468,8 @@ func resolveSSHLeaseTarget(ctx context.Context, backend SSHLoginBackend, req Res
 				if err := removeLeaseClaimIfUnchanged(resolvedLeaseID, discardedClaim); err != nil {
 					return LeaseTarget{}, err
 				}
+				removeStoredTestboxKey(resolvedLeaseID)
 			}
-			removeStoredTestboxKey(resolvedLeaseID)
 		}
 	}
 	var claimAfter leaseClaim
@@ -527,6 +546,13 @@ func resolvedLeaseClaimBefore(snapshot leaseClaimsSnapshot, provider, providerSc
 	})
 }
 
+func resolvedLeaseClaimIdentityCompatible(claim leaseClaim, server Server) bool {
+	// Missing identities remain unknown; compatibility alone does not attest ownership.
+	return (claim.CloudID == "" || server.CloudID == "" || claim.CloudID == server.CloudID) &&
+		(claim.CloudImmutableID == "" || server.ImmutableID == "" || claim.CloudImmutableID == server.ImmutableID) &&
+		(claim.CloudNumericID == 0 || server.ID == 0 || claim.CloudNumericID == server.ID)
+}
+
 func resolvedLeaseClaimAttestsResult(claim leaseClaim, server Server, expectedRepoRoot, expectedProviderScope string) bool {
 	claimProvider := canonicalClaimProvider(claim.Provider)
 	serverProvider := canonicalClaimProvider(firstNonBlank(server.Labels["provider"], server.Provider))
@@ -534,7 +560,7 @@ func resolvedLeaseClaimAttestsResult(claim leaseClaim, server Server, expectedRe
 	serverState := strings.ToLower(strings.TrimSpace(firstNonBlank(server.Labels["state"], server.Status)))
 	return (claimProvider == "" || serverProvider == "" || claimProvider == serverProvider) &&
 		(strings.TrimSpace(expectedProviderScope) == "" || strings.TrimSpace(claim.ProviderScope) == strings.TrimSpace(expectedProviderScope)) &&
-		(claim.CloudID == "" || server.CloudID == "" || claim.CloudID == server.CloudID) &&
+		resolvedLeaseClaimIdentityCompatible(claim, server) &&
 		resolvedLeaseClaimStateAttests(claimState, serverState) &&
 		strings.TrimSpace(claim.RepoRoot) == expectedRepoRoot
 }

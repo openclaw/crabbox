@@ -33,6 +33,7 @@ require (
 	github.com/islo-labs/go-sdk v0.0.0-20260719125711-521c0d4b53aa
 	github.com/lima-vm/go-qcow2reader v0.7.1
 	github.com/lxc/incus/v7 v7.1.0
+	github.com/pkg/sftp v1.13.10
 	github.com/scaleway/scaleway-sdk-go v1.0.0-beta.36
 	github.com/sirupsen/logrus v1.9.4
 	github.com/tailscale/hujson v0.0.0-20260722022634-78b5b162ee49
@@ -138,7 +139,6 @@ require (
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/pkg/sftp v1.13.10 // indirect
 	github.com/rogpeppe/go-internal v1.15.0 // indirect
 	github.com/rootless-containers/proto/go-proto v0.0.0-20260207013450-f6ee952d53d9 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect

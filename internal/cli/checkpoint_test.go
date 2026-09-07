@@ -158,15 +158,32 @@ func TestCheckpointRecordRoundTripAndListOrder(t *testing.T) {
 
 func TestCleanupUncommittedCheckpointDirOnCreateError(t *testing.T) {
 	dir := t.TempDir()
-	cleanupUncommittedCheckpointDir(dir, false, io.ErrUnexpectedEOF)
+	if err := cleanupUncommittedCheckpointDir(dir, false, io.ErrUnexpectedEOF); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("partial checkpoint dir still exists: err=%v", err)
 	}
 
 	committedDir := t.TempDir()
-	cleanupUncommittedCheckpointDir(committedDir, true, io.ErrUnexpectedEOF)
+	if err := cleanupUncommittedCheckpointDir(committedDir, true, io.ErrUnexpectedEOF); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(committedDir); err != nil {
 		t.Fatalf("committed checkpoint dir removed: %v", err)
+	}
+}
+
+func TestCleanupUncommittedCheckpointDirReportsRemovalFailure(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(file, []byte("retain"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupUncommittedCheckpointDir(filepath.Join(file, "checkpoint"), false, io.ErrUnexpectedEOF); err == nil {
+		t.Fatal("inaccessible reservation cleanup was reported successful")
+	}
+	if data, err := os.ReadFile(file); err != nil || string(data) != "retain" {
+		t.Fatalf("cleanup changed the unrelated file: %q %v", data, err)
 	}
 }
 
@@ -361,6 +378,10 @@ func TestCheckpointRestoreDryRunDoesNotResolveLease(t *testing.T) {
 func TestCheckpointRestoreDryRunUsesStoredLeaseTarget(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-q")
+	runGit(t, repo, "remote", "add", "origin", "https://github.com/example-org/restore-target.git")
+	t.Chdir(repo)
 	store, err := defaultCheckpointStore()
 	if err != nil {
 		t.Fatal(err)
@@ -379,7 +400,7 @@ func TestCheckpointRestoreDryRunUsesStoredLeaseTarget(t *testing.T) {
 		"windows_mode": windowsModeNormal,
 		"work_root":    `C:\crabbox`,
 	}}
-	if err := claimLeaseTargetForRepoConfig(leaseID, "windows-dryrun", cfg, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+	if err := claimLeaseTargetForRepoConfig(leaseID, "windows-dryrun", cfg, server, SSHTarget{}, repo, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -388,7 +409,7 @@ func TestCheckpointRestoreDryRunUsesStoredLeaseTarget(t *testing.T) {
 	if err := app.checkpointRestore(context.Background(), []string{record.ID, "--id", leaseID, "--provider", "aws", "--dry-run"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), `workdir=C:\crabbox\`+leaseID+`\crabbox`) {
+	if !strings.Contains(stdout.String(), `workdir=C:\crabbox\`+leaseID+`\restore-target`) {
 		t.Fatalf("stdout=%q", stdout.String())
 	}
 	assertCheckpointLastUsedAt(t, store, record.ID, lastUsedAt)
@@ -1261,8 +1282,8 @@ func TestParallelsSnapshotCheckpointViewMarksForkablePoweroffOnly(t *testing.T) 
 
 func TestDirectParallelsCheckpointRefusesRunningVMWithNoReboot(t *testing.T) {
 	runner := &checkpointParallelsRunner{vmState: "running", snapshotState: "poweroff"}
-	_, err := (directParallelsCheckpointDriver{Runner: runner}).Create(context.Background(), checkpointNativeCreateRequest{
-		Cfg:      Config{Provider: "parallels"},
+	_, err := (directParallelsCheckpointDriver{Runner: runner}).Create(context.Background(), NativeCheckpointCreateRequest{
+		Config:   Config{Provider: "parallels"},
 		Server:   Server{CloudID: "vm1", Labels: map[string]string{}},
 		LeaseID:  "cbx_123",
 		RepoName: "my-app",
@@ -1278,8 +1299,8 @@ func TestDirectParallelsCheckpointRefusesRunningVMWithNoReboot(t *testing.T) {
 
 func TestDirectParallelsCheckpointStopsAndRestartsForForkableSnapshot(t *testing.T) {
 	runner := &checkpointParallelsRunner{vmState: "running", snapshotState: "poweroff"}
-	image, err := (directParallelsCheckpointDriver{Runner: runner}).Create(context.Background(), checkpointNativeCreateRequest{
-		Cfg:      Config{Provider: "parallels"},
+	image, err := (directParallelsCheckpointDriver{Runner: runner}).Create(context.Background(), NativeCheckpointCreateRequest{
+		Config:   Config{Provider: "parallels"},
 		Server:   Server{CloudID: "vm1", Labels: map[string]string{}},
 		LeaseID:  "cbx_123",
 		RepoName: "my-app",
@@ -2080,6 +2101,10 @@ func TestCreateDirectAWSAMICheckpointValidatesConfigBeforePreparingSource(t *tes
 	if !strings.Contains(err.Error(), "CRABBOX_AWS_REGION or AWS_REGION is required") {
 		t.Fatalf("err=%v, want AWS config validation before source preparation", err)
 	}
+	var unsubmitted NativeCheckpointNotSubmittedError
+	if !errors.As(err, &unsubmitted) {
+		t.Fatalf("configuration failure lost non-submission certainty: %v", err)
+	}
 	if strings.Contains(err.Error(), "prepare native checkpoint source") {
 		t.Fatalf("source was prepared before AWS config validation: %v", err)
 	}
@@ -2108,8 +2133,12 @@ func TestWaitForDirectAWSImagePreservesAccountID(t *testing.T) {
 }
 
 func TestApplyNativeImageCheckpointRecordPersistsSnapshotIDs(t *testing.T) {
-	record := checkpointRecord{Kind: checkpointKindArchive, Provider: "aws"}
-	applyNativeImageCheckpointRecord(&record, CoordinatorImage{
+	store := checkpointStore{root: t.TempDir()}
+	record, err := store.Create(checkpointRecord{ID: "chk_progress", Kind: checkpointKindArchive, Provider: "aws"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteNativeProgress(&record, NativeCheckpointCreateResult{Image: NativeCheckpointImage{
 		ID:          "ami-12345678",
 		Name:        "checkpoint",
 		State:       "available",
@@ -2120,7 +2149,13 @@ func TestApplyNativeImageCheckpointRecordPersistsSnapshotIDs(t *testing.T) {
 		ResourceID:  "ami-12345678",
 		SnapshotIDs: []string{"snap-1", "snap-2"},
 		Direct:      true,
-	}, true)
+	}}, true); err != nil {
+		t.Fatal(err)
+	}
+	record, _, err = store.Read(record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if record.Kind != checkpointKindAWSAMI {
 		t.Fatalf("Kind=%q, want %q", record.Kind, checkpointKindAWSAMI)
@@ -2198,22 +2233,11 @@ func TestCreateNativeCheckpointRejectsAzureImageBeforeAdminAndCloudInit(t *testi
 	cfg.Coordinator = "https://coordinator.example"
 	cfg.TargetOS = targetLinux
 
-	_, _, err := (App{Stdout: io.Discard, Stderr: io.Discard}).createNativeCheckpoint(
-		context.Background(),
-		cfg,
-		Server{Provider: "azure", CloudID: "crabbox-source"},
-		SSHTarget{TargetOS: targetLinux},
-		"chk_test",
-		"cbx_123",
-		"",
-		"repo",
-		"",
-		checkpointStrategyImage,
-		true,
-		false,
-		0,
-		nil,
-	)
+	_, _, err := (App{Stdout: io.Discard, Stderr: io.Discard}).createNativeCheckpointRequest(context.Background(), NativeCheckpointCreateRequest{
+		Config: cfg, Server: Server{Provider: "azure", CloudID: "crabbox-source"},
+		Target: SSHTarget{TargetOS: targetLinux}, CheckpointID: "chk_test", LeaseID: "cbx_123",
+		RepoName: "repo", Strategy: checkpointStrategyImage, NoReboot: true, Stderr: io.Discard,
+	})
 	if err == nil {
 		t.Fatal("expected Azure image strategy to fail")
 	}
@@ -2224,7 +2248,7 @@ func TestCreateNativeCheckpointRejectsAzureImageBeforeAdminAndCloudInit(t *testi
 
 func TestDirectAzureWindowsCheckpointRejectsImageStrategy(t *testing.T) {
 	t.Parallel()
-	_, err := (directAzureOSDiskCheckpointDriver{}).Create(context.Background(), checkpointNativeCreateRequest{
+	_, err := (directAzureOSDiskCheckpointDriver{}).Create(context.Background(), NativeCheckpointCreateRequest{
 		Strategy: checkpointStrategyImage,
 	})
 	if err == nil || !strings.Contains(err.Error(), "require --strategy disk-snapshot") {
@@ -2234,7 +2258,7 @@ func TestDirectAzureWindowsCheckpointRejectsImageStrategy(t *testing.T) {
 
 func TestDirectAzureWindowsCheckpointRequiresRebootOptIn(t *testing.T) {
 	t.Parallel()
-	_, err := (directAzureOSDiskCheckpointDriver{}).Create(context.Background(), checkpointNativeCreateRequest{
+	_, err := (directAzureOSDiskCheckpointDriver{}).Create(context.Background(), NativeCheckpointCreateRequest{
 		Strategy: checkpointStrategyDiskSnapshot,
 		NoReboot: true,
 	})
@@ -2261,21 +2285,12 @@ func TestAzureOSDiskSnapshotNamePreservesTimestampWithinProviderLimit(t *testing
 func TestDirectAzureWindowsCheckpointRejectsInvalidSnapshotName(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{strings.Repeat("a", azureSnapshotNameMaxLength+1), "snapshot with spaces"} {
-		_, err := (directAzureOSDiskCheckpointDriver{}).Create(context.Background(), checkpointNativeCreateRequest{
+		_, err := (directAzureOSDiskCheckpointDriver{}).Create(context.Background(), NativeCheckpointCreateRequest{
 			Strategy: checkpointStrategyDiskSnapshot,
 			Name:     name,
 		})
 		if err == nil || !strings.Contains(err.Error(), "Azure snapshot name") {
 			t.Fatalf("name=%q err=%v", name, err)
-		}
-	}
-}
-
-func TestRemotePrepareNativeImageCommandFlushesFilesystem(t *testing.T) {
-	cmd := remotePrepareNativeImageCommand()
-	for _, want := range []string{"cloud-init clean --logs", "sync"} {
-		if !strings.Contains(cmd, want) {
-			t.Fatalf("command missing %q: %s", want, cmd)
 		}
 	}
 }
@@ -2425,12 +2440,33 @@ func TestCheckpointInspectVerifyDirectAWSUsesLocalPathBeforeCoordinator(t *testi
 	t.Setenv("AWS_REGION", "")
 	t.Setenv("AWS_DEFAULT_REGION", "")
 
-	var coordinatorHits int
+	var coordinatorHits, providerHits int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/" {
+			if err := r.ParseForm(); err != nil {
+				t.Error(err)
+				return
+			}
+			if r.Form.Get("Action") == "DescribeImages" && r.Form.Get("ImageId.1") == "ami-12345678" {
+				providerHits++
+				writeEC2Error(w, "UnauthorizedOperation", "fixture image inspection denied", http.StatusForbidden)
+				return
+			}
+		}
 		coordinatorHits++
 		http.Error(w, "not found", http.StatusNotFound)
 	}))
 	defer server.Close()
+	t.Setenv("AWS_ENDPOINT_URL_EC2", server.URL)
+	t.Setenv("AWS_EC2_METADATA_SERVICE_ENDPOINT", server.URL)
+	// The routing contract needs an EC2 error, not host credential discovery.
+	for key, value := range map[string]string{
+		"AWS_ACCESS_KEY_ID": "fixture", "AWS_SECRET_ACCESS_KEY": "fixture", "AWS_SESSION_TOKEN": "",
+		"AWS_PROFILE": "", "AWS_DEFAULT_PROFILE": "",
+		"AWS_CONFIG_FILE": filepath.Join(t.TempDir(), "config"), "AWS_SHARED_CREDENTIALS_FILE": filepath.Join(t.TempDir(), "credentials"),
+	} {
+		t.Setenv(key, value)
+	}
 	t.Setenv("CRABBOX_COORDINATOR", server.URL)
 	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "admin")
 	cfgPath := filepath.Join(t.TempDir(), "crabbox.yaml")
@@ -2452,7 +2488,7 @@ func TestCheckpointInspectVerifyDirectAWSUsesLocalPathBeforeCoordinator(t *testi
 	}
 	record.Native.Provider = "aws"
 	record.Native.ImageID = "ami-12345678"
-	record.Native.Region = "not a valid region"
+	record.Native.Region = "eu-west-1"
 	record.Native.Direct = true
 	if _, err := store.Create(record); err != nil {
 		t.Fatal(err)
@@ -2467,14 +2503,14 @@ func TestCheckpointInspectVerifyDirectAWSUsesLocalPathBeforeCoordinator(t *testi
 	if err := json.Unmarshal(stdout.Bytes(), &audit); err != nil {
 		t.Fatal(err)
 	}
-	if coordinatorHits != 0 {
-		t.Fatalf("direct AWS verification hit coordinator %d time(s)", coordinatorHits)
+	if coordinatorHits != 0 || providerHits != 1 {
+		t.Fatalf("direct AWS verification: coordinator/metadata requests=%d provider requests=%d; want one local provider request", coordinatorHits, providerHits)
 	}
 	if audit.ProviderState != "unknown" || audit.NextAction != "check_auth_or_provider" {
 		t.Fatalf("audit=%#v", audit)
 	}
-	if audit.Error == "" {
-		t.Fatal("expected local AWS verification error")
+	if !strings.Contains(audit.Error, "UnauthorizedOperation") {
+		t.Fatalf("expected local AWS verification error, got %q", audit.Error)
 	}
 }
 

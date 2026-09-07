@@ -156,7 +156,8 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 		}
 		MarkSSHPortExplicit(cfg)
 	}
-	if flagWasSet(fs, "class") {
+	cfg.classFlagExplicit = flagWasSet(fs, "class")
+	if cfg.classFlagExplicit {
 		MarkClassExplicit(cfg)
 	}
 	if flagWasSet(fs, "arch") {
@@ -659,11 +660,11 @@ func (a App) claimAndTouchLeaseTarget(ctx context.Context, cfg Config, server *S
 	if cause := context.Cause(ctx); cause != nil {
 		return cause
 	}
-	repo, err := findRepo()
+	boundary, err := findRepositoryBoundary()
 	if err != nil {
 		return err
 	}
-	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(*server), cfg, server, target, repo.Root, reclaim); err != nil {
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(*server), cfg, server, target, boundary.root, reclaim); err != nil {
 		return err
 	}
 	*server = a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: *server, SSH: target, LeaseID: leaseID}, "")

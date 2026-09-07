@@ -142,7 +142,7 @@ See [cache](commands/cache.md).
 ### Checkpoints, capsules, images, Actions
 
 ```text
-crabbox checkpoint create|list|inspect|restore|fork|delete|prune
+crabbox checkpoint create|list|inspect|policy|restore|fork|delete|prune
 crabbox capsule from-actions|replay|inspect|promote
 crabbox image create|promote|fsr-status|delete
 crabbox actions hydrate|register|dispatch
@@ -150,6 +150,10 @@ crabbox actions hydrate|register|dispatch
 
 See [checkpoint](commands/checkpoint.md), [capsule](commands/capsule.md),
 [image](commands/image.md), [actions](commands/actions.md).
+
+Brokered native checkpoints support `checkpoint create --expire-unused-after
+<duration>`, `checkpoint policy <id> --manual|--expire-unused-after <duration>`,
+and `checkpoint list --local-only` for explicit offline inspection.
 
 ### Pond (peer discovery / SSH-mesh)
 
@@ -168,12 +172,14 @@ See [pond](commands/pond.md) and the [pond feature](features/pond.md).
 crabbox providers                             show provider capabilities
 crabbox providers describe <provider>         show compiled run flags for one runnable provider
 crabbox usage [--scope user|org|all]          cost and usage estimates
+crabbox capacity [--json]                   self-owner admission count and limit
 crabbox marketplace status|quote              preview the credits gateway and smart-routing quotes
 crabbox admin leases|lease-audit|providers|hosts|release|delete
 crabbox admin aws-identity|aws-policy|mac-hosts
 ```
 
 See [providers](commands/providers.md), [usage](commands/usage.md),
+[capacity](commands/capacity.md),
 [marketplace](commands/marketplace.md), [admin](commands/admin.md).
 
 ### Config and auth

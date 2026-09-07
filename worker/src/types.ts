@@ -1,3 +1,5 @@
+import type { AWSQualificationTransportBinding } from "./aws-qualification-contract";
+
 export interface AWSCredentials {
   accessKeyId: string;
   secretAccessKey: string;
@@ -15,6 +17,7 @@ export interface Env {
     timestamp: string;
   };
   HETZNER_TOKEN: string;
+  CRABBOX_AWS_QUALIFICATION_TRANSPORT?: AWSQualificationTransportBinding;
   awsCredentialProvider?: AWSCredentialProvider;
   AWS_ACCESS_KEY_ID?: string;
   AWS_SECRET_ACCESS_KEY?: string;
@@ -97,6 +100,7 @@ export interface Env {
   CRABBOX_SHARED_OWNER?: string;
   CRABBOX_ADMIN_TOKEN?: string;
   CRABBOX_SESSION_SECRET?: string;
+  CRABBOX_DURABLE_PROVISIONING_ADMISSION?: string;
   CRABBOX_USER_TOKEN_TTL_SECONDS?: string;
   CRABBOX_RUN_RETENTION_DAYS?: string;
   CRABBOX_GITHUB_CLIENT_ID?: string;
@@ -149,6 +153,12 @@ export interface Env {
   CRABBOX_MAX_ACTIVE_LEASES?: string;
   CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER?: string;
   CRABBOX_MAX_ACTIVE_LEASES_PER_ORG?: string;
+  CRABBOX_MAX_CHECKPOINTS?: string;
+  CRABBOX_MAX_CHECKPOINTS_PER_OWNER?: string;
+  CRABBOX_MAX_CHECKPOINTS_PER_ORG?: string;
+  CRABBOX_MAX_CHECKPOINT_USE_CLAIMS?: string;
+  CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_PER_OWNER?: string;
+  CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_TOTAL?: string;
   CRABBOX_CAPACITY_ADMIN_OWNERS?: string;
   CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN?: string;
   CRABBOX_MAX_MONTHLY_USD?: string;
@@ -255,6 +265,31 @@ export interface LeaseRequest {
   sshPublicKey?: string;
   pond?: string;
   exposedPorts?: string[];
+  checkpointID?: string;
+  checkpointUseClaim?: string;
+}
+
+export interface FixedLeaseCreateIntent {
+  version: number;
+  hash: string;
+  provider: Provider;
+}
+
+export interface CreateAttemptRecord {
+  version: 1 | 2;
+  requestedLeaseID: string;
+  token: string;
+  owner: string;
+  org: string;
+  state: "pending" | "canceled";
+  fixedCreate?: FixedLeaseCreateIntent;
+  canonicalLeaseID?: string;
+  cloudID?: string;
+  generation?: string;
+  checkpointID?: string;
+  checkpointUseClaimHash?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ImageCapabilities {
@@ -315,12 +350,14 @@ export const coordinatorProviderRegistry = [
     label: "Hetzner",
     requiredSecrets: ["HETZNER_TOKEN"],
     adminAudit: false,
+    supportsCapacityMarket: false,
   },
   {
     provider: "aws",
     label: "AWS",
     requiredSecrets: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
     adminAudit: true,
+    supportsCapacityMarket: true,
   },
   {
     provider: "azure",
@@ -332,24 +369,28 @@ export const coordinatorProviderRegistry = [
       "AZURE_SUBSCRIPTION_ID",
     ],
     adminAudit: true,
+    supportsCapacityMarket: true,
   },
   {
     provider: "gcp",
     label: "GCP",
     requiredSecrets: ["GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"],
     adminAudit: false,
+    supportsCapacityMarket: true,
   },
   {
     provider: "daytona",
     label: "Daytona",
     requiredSecrets: ["DAYTONA_CRABBOX_KEY"],
     adminAudit: false,
+    supportsCapacityMarket: false,
   },
 ] as const satisfies readonly {
   provider: string;
   label: string;
   requiredSecrets: readonly (keyof Env)[];
   adminAudit: boolean;
+  supportsCapacityMarket: boolean;
 }[];
 
 export type CoordinatorProviderSpec = (typeof coordinatorProviderRegistry)[number];
@@ -393,6 +434,25 @@ export interface RunTelemetrySummary {
   samples?: LeaseTelemetry[];
 }
 
+export interface HetznerCleanupEvidence {
+  version: 1;
+  provider: "hetzner";
+  leaseID: string;
+  serverID: number;
+  dispatchStartedAt?: string;
+  deleteNotFoundAt?: string;
+  action?: { id: number; status: "running" | "success" | "error" };
+  confirmation?: {
+    method:
+      | "delete-action-success-and-server-absent"
+      | "already-absent"
+      | "delete-not-found-and-server-absent";
+    at: string;
+  };
+}
+
+export type ProviderCleanupEvidence = HetznerCleanupEvidence;
+
 export interface LeaseRecord {
   id: string;
   slug?: string;
@@ -400,6 +460,7 @@ export interface LeaseRecord {
   fixedCreateIntentHash?: string;
   createAttemptID?: string;
   createAttemptGeneration?: string;
+  checkpointID?: string;
   workspaceID?: string;
   provider: string;
   lifecycle?: LeaseLifecycle;
@@ -447,6 +508,7 @@ export interface LeaseRecord {
   awsSSMLogGroup?: string;
   capacityHints?: CapacityHint[];
   serverID: number;
+  providerResourceID?: string;
   serverName: string;
   providerKey: string;
   providerKeyCleanupOwned?: boolean;
@@ -472,11 +534,13 @@ export interface LeaseRecord {
   telemetry?: LeaseTelemetry;
   telemetryHistory?: LeaseTelemetry[];
   cleanupAttempts?: number;
+  providerCleanup?: ProviderCleanupEvidence;
   cleanupError?: string;
   cleanupFailedAt?: string;
   cleanupRetryAt?: string;
   cleanupStartedAt?: string;
   cleanupClaimExpiresAt?: string;
+  cleanupCompletedAt?: string;
   failureError?: string;
   provisioningResourceMayExist?: boolean;
   provisioningFailureRetryable?: boolean;
@@ -629,6 +693,7 @@ export interface ReadyPoolDesiredCapacity {
   owner: string;
   org: string;
   criteria: ReadyPoolBorrowRequest;
+  identity?: ReadyPoolIdentityV1;
   compatibilityKey?: string;
   minReady: number;
   maxReady: number;
@@ -694,11 +759,23 @@ export interface LeaseImageIdentity {
   promotedAt?: string;
 }
 
+// Request-local observations; never persisted or used to authorize provider access.
+export type ProviderAccessTimingObserver = (
+  step: "ingress_wait" | "lifecycle_wait" | "access_snapshot",
+  durationMs: number,
+) => void;
+
 export interface LeaseProvisioningTiming {
   requestMs: number;
   networkReadyMs?: number;
   bootstrapMs?: number;
   totalMs: number;
+  phases?: LeaseProvisioningPhase[];
+}
+
+export interface LeaseProvisioningPhase {
+  name: "request" | "network_ready" | "bootstrap" | "unattributed";
+  ms: number;
 }
 
 export interface CapacityHint {
@@ -726,9 +803,165 @@ export interface ProviderImage {
   architecture?: string;
   project?: string;
   resourceID?: string;
+  immutableID?: string;
+  accountID?: string;
+  checkpointOwnershipHash?: string;
+  checkpointSourceLeaseID?: string;
   snapshots?: string[];
   fastSnapshotRestores?: ProviderFastSnapshotRestore[];
   capabilities?: ImageCapabilities;
+}
+
+export interface ProviderCheckpointOwnership {
+  checkpointID: string;
+  tokenHash: string;
+  sourceLeaseID: string;
+}
+
+export type CoordinatorCheckpointProvider = "aws" | "azure" | "gcp";
+
+export type CoordinatorCheckpointRetention =
+  | { mode: "manual" }
+  | { mode: "expire-unused"; unusedForSeconds: number };
+
+export interface CoordinatorCheckpointScope {
+  region: string;
+  accountID?: string;
+  subscriptionID?: string;
+  resourceGroup?: string;
+  project?: string;
+}
+
+export interface CoordinatorCheckpointImage {
+  id: string;
+  resourceID: string;
+  kind: string;
+  immutableID: string;
+  snapshotIDs: string[];
+  state: string;
+  architecture?: string;
+}
+
+export interface CoordinatorCheckpointCreateClaim {
+  tokenHash: string;
+  resourceName: string;
+  expiresAt: string;
+  coordinatorGeneration: string;
+  definitiveRefusal?: boolean;
+  providerMutationPhase?: "reserved" | "started";
+  providerMutationStartedAt?: string;
+  providerAbsenceFirstObservedAt?: string;
+  providerAbsenceLastObservedAt?: string;
+  providerAbsenceVerifiedAt?: string;
+}
+
+export interface CoordinatorCheckpointDeleteClaim {
+  tokenHash: string;
+  generation: number;
+  expiresAt: string;
+  reason: "manual" | "unused-expiry" | "create-recovery";
+  phase: "claimed" | "provider-deleted";
+}
+
+export interface CoordinatorCheckpointRecord {
+  version: 1;
+  id: string;
+  owner: string;
+  org: string;
+  leaseID: string;
+  provider: CoordinatorCheckpointProvider;
+  scope: CoordinatorCheckpointScope;
+  name: string;
+  strategy: "image" | "disk-snapshot";
+  noReboot: boolean;
+  image?: CoordinatorCheckpointImage;
+  state: "creating" | "ready" | "delete-pending" | "deleting" | "deleted" | "failed";
+  retention: CoordinatorCheckpointRetention;
+  generation: number;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt: string;
+  nextSweepAt?: string;
+  createClaim?: CoordinatorCheckpointCreateClaim;
+  deleteClaim?: CoordinatorCheckpointDeleteClaim;
+  deleteRequestedAt?: string;
+  deletedAt?: string;
+  attempts: number;
+  retryAt?: string;
+  lastError?: string;
+  pinCount: number;
+  activeUseCount: number;
+  eventSequence: number;
+  target: TargetOS;
+  windowsMode?: WindowsMode;
+  desktop?: boolean;
+  serverType?: string;
+  hostID?: string;
+  workdir?: string;
+  slug?: string;
+  repo?: { name?: string; head?: string; baseRef?: string; remoteURL?: string };
+}
+
+export interface CoordinatorCheckpointUseClaim {
+  checkpointID: string;
+  tokenHash: string;
+  owner: string;
+  org: string;
+  generation: number;
+  createdAt: string;
+  expiresAt: string;
+  state: "available" | "provisioning";
+  attemptID?: string;
+  leaseID?: string;
+}
+
+export interface CoordinatorCheckpointResourceIntent {
+  checkpointID: string;
+  provider: CoordinatorCheckpointProvider;
+  scope: CoordinatorCheckpointScope;
+  kind: string;
+  resourceName: string;
+  resourceID?: string;
+  generation: number;
+}
+
+export interface CoordinatorCheckpointDueIndex {
+  checkpointID: string;
+  generation: number;
+  revision: number;
+  nextSweepAt: string;
+}
+
+export interface CoordinatorCheckpointResourceClaim {
+  checkpointID: string;
+  provider: CoordinatorCheckpointProvider;
+  scope: CoordinatorCheckpointScope;
+  kind: string;
+  resourceID: string;
+  immutableID: string;
+  generation: number;
+}
+
+export interface CoordinatorCheckpointPin {
+  checkpointID: string;
+  generation: number;
+  catalogKey: string;
+  createdAt: string;
+}
+
+export interface CoordinatorCheckpointEvent {
+  checkpointID: string;
+  sequence: number;
+  type: string;
+  createdAt: string;
+  actor: string;
+  provider: CoordinatorCheckpointProvider;
+  scope: CoordinatorCheckpointScope;
+  generation: number;
+  reason?: string;
+  error?: string;
+  retryAt?: string;
 }
 
 export interface ProviderFastSnapshotRestore {
@@ -740,6 +973,7 @@ export interface ProviderFastSnapshotRestore {
 
 export interface PromotedImageRecord extends ProviderImage {
   promotedAt: string;
+  revision?: string;
   catalogOnly?: boolean;
   variantSelectors?: ImageVariantSelectors;
 }
@@ -974,6 +1208,7 @@ export interface MachineView {
 export interface ProviderMachine {
   provider: Provider;
   id: number;
+  providerResourceID?: string;
   cloudID: string;
   region?: string;
   name: string;

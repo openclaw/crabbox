@@ -45,6 +45,32 @@ crabbox cleanup --provider tencentcloud --dry-run
 Cloud instance id (`ins-...`). `--type` is the generic Crabbox server type
 override; `--tencentcloud-type` is the CVM instance type override.
 
+## Capacity Market
+
+An explicit `--market spot` requests CVM `SPOTPAID`; `--market on-demand`
+requests `POSTPAID_BY_HOUR`. The same choice can come from `capacity.market`
+in a config file, `CRABBOX_CAPACITY_MARKET`, or a named job's `market` or
+`capacity.market` setting. CLI flags override environment values, which
+override config files. Invalid explicit values fail before provider access.
+
+```sh
+crabbox warmup --provider tencentcloud --market spot --tencentcloud-image img-xxxxxxxx
+crabbox run --provider tencentcloud --market on-demand --tencentcloud-image img-xxxxxxxx -- pnpm test
+```
+
+When no market is explicitly configured, Tencent retains its historical hourly
+billing even though the generic config default says `spot`. **Upgrade note:**
+an existing config that explicitly sets `capacity.market: spot` now requests
+interruptible Spot instances instead of silently receiving hourly instances.
+Set `on-demand` explicitly to retain hourly behavior for that configuration.
+
+Tencent uses its default fixed discounted Spot bid when `InstanceMarketOptions`
+is omitted, as documented by the [RunInstances API](https://cloud.tencent.com/document/api/213/15730).
+Crabbox does not set a custom maximum price. There is no Tencent market,
+instance-type, or region fallback: capacity rejection is returned to the caller
+without substituting on-demand capacity. The generic `capacity.fallback`
+setting does not enable fallback for this provider.
+
 ## Configuration
 
 ```yaml

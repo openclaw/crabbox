@@ -151,6 +151,29 @@ CRABBOX_DOCKER_SANDBOX_KIT
 
 ## Lifecycle
 
+For streamed workload execution, ordinary positive native CLI exits remain
+command exits. Returned transport, cancellation, deadline, and I/O errors instead
+produce exit 1 and matching timing/result status, even when the native runner also
+reports a nonzero code. Later cancellation does not replace an already observed
+ordinary exit. A normal CLI diagnostic exit cannot be distinguished from a remote
+workload exit without stronger native protocol evidence.
+
+Run finalization shares Crabbox's terminal error merger while keeping Docker's
+clone retention and native-workspace telemetry provider-specific. A failed
+automatic removal returns exit 1 after command success and leaves the session
+marked kept with its claim available for recovery. After a command or setup
+failure, later removal or timing errors remain visible without replacing the
+primary exit code or cause. `--keep-on-failure` also retains an acquired sandbox
+when command or environment preparation fails before execution.
+
+Clone retention is decided from successful command execution, before timing
+output: a later timing-write failure returns an error but does not discard
+unfetched commits. Failed or unexecuted clone commands are still cleaned up
+unless `--keep` or `--keep-on-failure` applies. Non-clone sandboxes already removed
+before a timing-write failure remain removed; reporting cannot retain them
+retroactively. Timing continues to mark sync skipped because the workspace is
+provider-delegated, not because Crabbox silently applies `--no-sync`.
+
 1. `warmup` or `run` without `--id` creates a Crabbox-owned sandbox name such as
    `crabbox-my-app-1a2b3c`.
 2. Crabbox runs `sbx create --name <name> ... shell <repo-root>` and records a

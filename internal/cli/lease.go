@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -299,16 +300,17 @@ func moveStoredTestboxKey(oldLeaseID, newLeaseID string) error {
 	return os.Rename(oldDir, newDir)
 }
 
-func MoveStoredTestboxKey(oldLeaseID, newLeaseID string) error {
-	return moveStoredTestboxKey(oldLeaseID, newLeaseID)
-}
-
 func removeStoredTestboxKey(leaseID string) {
-	_ = removeStoredTestboxConnectionArtifacts(leaseID)
+	_ = removeStoredTestboxConnectionArtifacts(context.Background(), leaseID)
 }
 
 func RemoveStoredTestboxKey(leaseID string) {
 	removeStoredTestboxKey(leaseID)
+}
+
+// RemoveStoredTestboxConnectionArtifacts closes lease-owned SSH masters and removes canonical credentials.
+func RemoveStoredTestboxConnectionArtifacts(leaseID string) error {
+	return removeStoredTestboxConnectionArtifacts(context.Background(), leaseID)
 }
 
 func providerKeyForLease(leaseID string) string {

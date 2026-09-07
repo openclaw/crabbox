@@ -31,10 +31,49 @@ describe("wrangler config", () => {
     }
   });
 
+  it("keeps deployed and preview checkpoint and use-claim admission bounded", () => {
+    expect(configValues("CRABBOX_MAX_CHECKPOINTS")).toEqual([20, 20]);
+    expect(configValues("CRABBOX_MAX_CHECKPOINTS_PER_OWNER")).toEqual([10, 10]);
+    expect(configValues("CRABBOX_MAX_CHECKPOINTS_PER_ORG")).toEqual([20, 20]);
+    expect(configValues("CRABBOX_MAX_CHECKPOINT_USE_CLAIMS")).toEqual([16, 16]);
+    expect(configValues("CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_PER_OWNER")).toEqual([64, 64]);
+    expect(configValues("CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_TOTAL")).toEqual([256, 256]);
+  });
+
   it("routes deployed and preview workspaces through the verified AWS backend", () => {
     expect(configStringValues("CRABBOX_WORKSPACE_PROVIDER")).toEqual(["aws", "aws"]);
     expect(configStringValues("CRABBOX_AWS_SSH_CIDRS")).toEqual([]);
     expect(configStringValues("CRABBOX_PUBLIC_URL")).toEqual(["https://crabbox.openclaw.ai"]);
+  });
+
+  it("configures the production-only R2 artifact backend without credentials or public reads", () => {
+    const productionVars = wranglerConfig.match(/"vars"\s*:\s*\{([^}]*)\}/)?.[1] ?? "";
+    const artifactVars = {
+      CRABBOX_ARTIFACTS_BACKEND: "r2",
+      CRABBOX_ARTIFACTS_BUCKET: "openclaw-crabbox-artifacts",
+      CRABBOX_ARTIFACTS_PREFIX: "crabbox-artifacts",
+      CRABBOX_ARTIFACTS_REGION: "auto",
+      CRABBOX_ARTIFACTS_ENDPOINT_URL:
+        "https://91b59577e757131d68d55a471fe32aca.r2.cloudflarestorage.com",
+    };
+    for (const [name, value] of Object.entries(artifactVars)) {
+      expect(productionVars).toContain(`"${name}": "${value}"`);
+      expect(configStringValues(name)).toEqual([value]);
+    }
+
+    const previewConfig = wranglerConfig.split(/"previews"\s*:/)[1];
+    expect(previewConfig).toBeDefined();
+    expect(previewConfig).not.toContain("CRABBOX_ARTIFACTS_");
+    for (const name of [
+      "CRABBOX_ARTIFACTS_ACCESS_KEY_ID",
+      "CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY",
+      "CRABBOX_ARTIFACTS_SESSION_TOKEN",
+      "CRABBOX_ARTIFACTS_BASE_URL",
+      "CRABBOX_ARTIFACTS_PUBLIC_READS",
+    ]) {
+      expect(wranglerConfig).not.toContain(name);
+    }
+    expect(wranglerConfig).not.toContain('"r2_buckets"');
   });
 
   it("binds deployment version metadata for interrupted provisioning recovery", () => {

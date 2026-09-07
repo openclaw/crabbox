@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type sandboxSummary struct {
@@ -327,16 +329,17 @@ func (c *bridgeClient) sandboxListCommand() commandSpec {
 
 func runBridgeCommand(ctx context.Context, spec commandSpec) error {
 	cmd := exec.CommandContext(ctx, spec.Name, spec.Args...)
+	withCancellationCause := core.TrackLocalCommandCancellation(ctx, cmd)
 	cmd.Env = spec.Env
 	out := bridgeCaptureBuffer{limit: bridgeExecCaptureLimit, stream: "output"}
 	cmd.Stdout = &out
 	cmd.Stderr = &out
-	err := cmd.Run()
+	err := withCancellationCause(cmd.Run())
 	if out.exceeded && err == nil {
 		return fmt.Errorf("sandbox command output exceeded %d-byte limit: %s", out.limit, out.truncationMarker())
 	}
 	if err != nil {
-		return fmt.Errorf("%s: %s", err, redactSecrets(out.String()))
+		return fmt.Errorf("%w: %s", err, redactSecrets(out.String()))
 	}
 	return nil
 }
@@ -364,18 +367,19 @@ func runBridgeJSONWithPayload(ctx context.Context, spec commandSpec, req bridgeR
 		return err
 	}
 	cmd := exec.CommandContext(ctx, spec.Name, spec.Args...)
+	withCancellationCause := core.TrackLocalCommandCancellation(ctx, cmd)
 	cmd.Env = spec.Env
 	cmd.Stdin = bytes.NewReader(buf)
 	stdout := bridgeCaptureBuffer{limit: bridgeExecCaptureLimit, stream: "stdout"}
 	stderr := bridgeCaptureBuffer{limit: bridgeExecCaptureLimit, stream: "stderr"}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	runErr := cmd.Run()
+	runErr := withCancellationCause(cmd.Run())
 	if stdout.exceeded {
 		return fmt.Errorf("vercel-sandbox bridge %s stdout exceeded %d-byte output limit: %s", req.Action, stdout.limit, stdout.truncationMarker())
 	}
 	if runErr != nil {
-		return fmt.Errorf("vercel-sandbox bridge %s failed: %s: %s", req.Action, runErr, redactSecrets(stderr.String()))
+		return fmt.Errorf("vercel-sandbox bridge %s failed: %w: %s", req.Action, runErr, redactSecrets(stderr.String()))
 	}
 	if out == nil {
 		return nil
@@ -449,6 +453,7 @@ func runBridgeExec(ctx context.Context, spec commandSpec, req bridgeRequest, std
 		return execResult{}, err
 	}
 	cmd := exec.CommandContext(ctx, spec.Name, spec.Args...)
+	withCancellationCause := core.TrackLocalCommandCancellation(ctx, cmd)
 	cmd.Env = spec.Env
 	cmd.Stdin = bytes.NewReader(buf)
 	bridgeStdout, err := cmd.StdoutPipe()
@@ -470,7 +475,10 @@ func runBridgeExec(ctx context.Context, spec commandSpec, req bridgeRequest, std
 			break
 		} else if err != nil {
 			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
+			waitErr := withCancellationCause(cmd.Wait())
+			if errors.Is(waitErr, context.Canceled) || errors.Is(waitErr, context.DeadlineExceeded) {
+				err = errors.Join(err, waitErr)
+			}
 			return execResult{}, fmt.Errorf("decode vercel-sandbox bridge exec frame: %w", err)
 		}
 		switch frame.Type {
@@ -516,9 +524,9 @@ func runBridgeExec(ctx context.Context, spec commandSpec, req bridgeRequest, std
 			return execResult{}, fmt.Errorf("unsupported vercel-sandbox bridge exec frame %q", frame.Type)
 		}
 	}
-	waitErr := cmd.Wait()
+	waitErr := withCancellationCause(cmd.Wait())
 	if waitErr != nil {
-		return execResult{}, fmt.Errorf("vercel-sandbox bridge exec failed: %s: %s", waitErr, redactSecrets(bridgeStderr.String()))
+		return execResult{}, fmt.Errorf("vercel-sandbox bridge exec failed: %w: %s", waitErr, redactSecrets(bridgeStderr.String()))
 	}
 	if !sawResult {
 		return execResult{}, errors.New("vercel-sandbox bridge exec returned no result frame")

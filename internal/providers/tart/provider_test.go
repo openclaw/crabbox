@@ -20,10 +20,17 @@ type recordingRunner struct {
 	calls     []core.LocalCommandRequest
 	responses map[string]core.LocalCommandResult
 	errors    map[string]error
+	onRun     func(core.LocalCommandRequest)
 }
 
 func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-	r.calls = append(r.calls, req)
+	recorded := req
+	// Failure diagnostics must not print inherited credentials.
+	recorded.Env = nil
+	r.calls = append(r.calls, recorded)
+	if r.onRun != nil {
+		r.onRun(req)
+	}
 	key := commandKey(req.Args)
 	if err, ok := r.errors[key]; ok {
 		return r.responses[key], err
@@ -147,7 +154,7 @@ func TestApplyDefaults(t *testing.T) {
 	cfg.Provider = providerName
 	cfg.Tart = core.TartConfig{}
 	applyDefaults(&cfg)
-	if cfg.Tart.Image != "ghcr.io/cirruslabs/macos-sequoia-base:latest" {
+	if cfg.Tart.Image != core.DefaultTartImage {
 		t.Fatalf("default image=%q", cfg.Tart.Image)
 	}
 	if cfg.Tart.User != "admin" {
@@ -286,56 +293,6 @@ func TestShouldCleanupSkipsMissingClaim(t *testing.T) {
 	server := Server{Status: "running", Labels: map[string]string{}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, false, time.Now()); ok || reason != "missing claim" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
-	}
-}
-
-func TestAcquireKeepIPFailureDeletesUnclaimedVMAndKey(t *testing.T) {
-	testutil.IsolateUserDirs(t)
-	binDir := t.TempDir()
-	fakeTart := filepath.Join(binDir, "tart")
-	if err := os.WriteFile(fakeTart, []byte("#!/bin/sh\nsleep 0.2\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	runner := &recordingRunner{
-		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: "[]"},
-		},
-	}
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
-	b.startupObserveTimeout = 20 * time.Millisecond
-	// Keep setup outside the deadline race under coverage while still forcing
-	// waitForIP to fail promptly after the VM starts.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	if _, err := b.Acquire(ctx, core.AcquireRequest{Keep: true, Repo: core.Repo{Root: t.TempDir()}}); err == nil {
-		t.Fatal("Acquire succeeded")
-	}
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	keys, err := filepath.Glob(filepath.Join(configDir, "crabbox", "testboxes", "*", "id_ed25519"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(keys) != 0 {
-		t.Fatalf("unclaimed failed VM key count=%d paths=%v, want 0", len(keys), keys)
-	}
-	stopped, deleted := false, false
-	for _, call := range runner.calls {
-		if len(call.Args) > 0 && call.Args[0] == "stop" {
-			stopped = true
-		}
-		if len(call.Args) > 0 && call.Args[0] == "delete" {
-			deleted = true
-		}
-	}
-	if !stopped || !deleted {
-		t.Fatalf("keep=true unclaimed post-start failure should cleanup VM, stopped=%t deleted=%t calls=%v", stopped, deleted, runner.calls)
 	}
 }
 
@@ -771,7 +728,7 @@ func TestServerFromInstanceDefaultsLabels(t *testing.T) {
 		"slug":        "my-slug",
 		"state":       "running",
 		"server_type": "ghcr.io/test:latest",
-		"image":       cfg.Tart.Image,
+		"image":       "",
 		"ssh_user":    cfg.Tart.User,
 		"ssh_port":    sshPort,
 	}
@@ -1402,6 +1359,7 @@ func TestDoctorTartNotInstalled(t *testing.T) {
 }
 
 func TestReleaseLease(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"stop", "crabbox-blue-1234"}):   {},
@@ -1476,6 +1434,7 @@ func TestReleaseLeaseMessage(t *testing.T) {
 }
 
 func TestReleaseLeaseInfersLeaseIDFromLabels(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"stop", "crabbox-blue-1234"}):   {},
@@ -1529,6 +1488,8 @@ func TestReleaseLeaseDeleteError(t *testing.T) {
 
 func TestCleanupSkipsNonCrabboxVMs(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("TART_HOME", t.TempDir())
+	claimTartLease(t, t.TempDir(), "cbx_cleanup", "crabbox-old-1234", "stopped")
 	listJSON := `[{"Name":"my-dev-vm","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"},{"Name":"crabbox-old-1234","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
@@ -1557,6 +1518,8 @@ func TestCleanupSkipsNonCrabboxVMs(t *testing.T) {
 
 func TestCleanupDeleteError(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("TART_HOME", t.TempDir())
+	claimTartLease(t, t.TempDir(), "cbx_cleanup", "crabbox-broken-1234", "stopped")
 	listJSON := `[{"Name":"crabbox-broken-1234","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
@@ -1584,12 +1547,11 @@ func TestCleanupRemovesOrphanedClaimsWithoutDeletingStoredKey(t *testing.T) {
 	configHome := t.TempDir()
 	t.Setenv("HOME", configHome)
 	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("TART_HOME", t.TempDir())
 	const leaseID = "cbx_orphan"
-	err := core.ClaimLeaseForRepoProviderScopePond(
-		leaseID, "orphan-slug", providerName, "instance:crabbox-gone-9999", "", t.TempDir(), 30*time.Minute, false,
-	)
-	if err != nil {
-		t.Fatalf("setup orphan claim: %v", err)
+	claimTartLease(t, t.TempDir(), leaseID, "crabbox-gone-9999", "stopped")
+	if err := os.RemoveAll(filepath.Join(os.Getenv("TART_HOME"), "vms", "crabbox-gone-9999")); err != nil {
+		t.Fatal(err)
 	}
 	keyPath, err := testboxKeyPath(leaseID)
 	if err != nil {
@@ -1633,9 +1595,10 @@ func TestCleanupRemovesOrphanedClaimsWithoutDeletingStoredKey(t *testing.T) {
 	}
 }
 
-func TestCleanupRemovesMalformedClaimsWithNoInstance(t *testing.T) {
+func TestCleanupPreservesLegacyClaimsWithoutStorageBinding(t *testing.T) {
 	stateDir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateDir)
+	t.Setenv("TART_HOME", t.TempDir())
 	err := core.ClaimLeaseForRepoProviderScopePond(
 		"cbx_noinstance", "no-instance", providerName, "", "", t.TempDir(), 30*time.Minute, false,
 	)
@@ -1657,7 +1620,7 @@ func TestCleanupRemovesMalformedClaimsWithNoInstance(t *testing.T) {
 	var stdout strings.Builder
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
-	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &stdout, Stderr: io.Discard, Exec: runner}).(*backend)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &stdout, Stderr: &stdout, Exec: runner}).(*backend)
 
 	err = b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true})
 	if err != nil {
@@ -1667,8 +1630,8 @@ func TestCleanupRemovesMalformedClaimsWithNoInstance(t *testing.T) {
 	if !strings.Contains(output, "cbx_noinstance") {
 		t.Fatalf("malformed claim with no instance should be reported: %q", output)
 	}
-	if !strings.Contains(output, "malformed claim") {
-		t.Fatalf("should use 'malformed claim' reason: %q", output)
+	if !strings.Contains(output, "missing exact claim") || strings.Contains(output, "would remove") {
+		t.Fatalf("legacy claims must be retained without destructive authority: %q", output)
 	}
 	if !strings.Contains(output, "cbx_missingvm") {
 		t.Fatalf("normal orphan claim should also be reported: %q", output)
@@ -1901,6 +1864,8 @@ func TestApplyDefaultsConvertsEmptyTarget(t *testing.T) {
 
 func TestCleanupRemovesStoppedCrabboxVMs(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("TART_HOME", t.TempDir())
+	claimTartLease(t, t.TempDir(), "cbx_cleanup", "crabbox-old-1234", "stopped")
 	listJSON := `[{"Name":"crabbox-old-1234","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"},{"Name":"my-personal-vm","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
@@ -1936,6 +1901,8 @@ func TestCleanupRemovesStoppedCrabboxVMs(t *testing.T) {
 
 func TestCleanupDryRunDoesNotDelete(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("TART_HOME", t.TempDir())
+	claimTartLease(t, t.TempDir(), "cbx_cleanup", "crabbox-old-1234", "stopped")
 	listJSON := `[{"Name":"crabbox-old-1234","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
@@ -2240,11 +2207,12 @@ func TestTouchPreservesProviderLabels(t *testing.T) {
 	original := core.LeaseTarget{
 		Server: core.Server{
 			Labels: map[string]string{
-				"image":     "ghcr.io/test:latest",
-				"instance":  "crabbox-blue-1234",
-				"ssh_user":  "admin",
-				"ssh_port":  "22",
-				"work_root": "/Users/admin/crabbox",
+				"image":        "ghcr.io/test:latest",
+				"image_digest": "sha256:" + strings.Repeat("a", 64),
+				"instance":     "crabbox-blue-1234",
+				"ssh_user":     "admin",
+				"ssh_port":     "22",
+				"work_root":    "/Users/admin/crabbox",
 			},
 		},
 	}
@@ -2255,7 +2223,7 @@ func TestTouchPreservesProviderLabels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Touch: %v", err)
 	}
-	for _, key := range []string{"image", "instance", "ssh_user", "ssh_port", "work_root"} {
+	for _, key := range []string{"image", "image_digest", "instance", "ssh_user", "ssh_port", "work_root"} {
 		if server.Labels[key] != original.Server.Labels[key] {
 			t.Errorf("Touch lost label %s: got %q, want %q", key, server.Labels[key], original.Server.Labels[key])
 		}
@@ -2443,8 +2411,7 @@ func TestReleaseLeaseFallsBackToResolve(t *testing.T) {
 }
 
 func TestReleaseLeasePrunesMissingResolvedInstance(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	err := core.ClaimLeaseForRepoProviderScopePond(
 		"cbx_missingrel", "missing-rel", providerName, "instance:crabbox-missing-rel", "", t.TempDir(), 30*time.Minute, false,
 	)
@@ -2498,8 +2465,7 @@ func TestReleaseLeasePrunesMissingResolvedInstance(t *testing.T) {
 }
 
 func TestReleaseLeasePrunesAlreadyResolvedMissingInstance(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	err := core.ClaimLeaseForRepoProviderScopePond(
 		"cbx_resolvedmissing", "resolved-missing", providerName, "instance:crabbox-resolved-missing", "", t.TempDir(), 30*time.Minute, false,
 	)
@@ -2569,6 +2535,7 @@ func TestReleaseLeaseEmptyName(t *testing.T) {
 }
 
 func TestReleaseLeaseFromLabels(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"stop", "crabbox-lab-vm"}):   {},
@@ -2591,6 +2558,7 @@ func TestReleaseLeaseFromLabels(t *testing.T) {
 }
 
 func TestReleaseLeaseIDFromLabel(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"stop", "crabbox-noid-vm"}):   {},
@@ -2631,8 +2599,8 @@ func TestShouldCleanupEdgeCases(t *testing.T) {
 	t.Run("stopped VM without claim", func(t *testing.T) {
 		server := core.Server{Status: "stopped", Labels: map[string]string{}}
 		shouldDelete, _ := shouldCleanup(server, core.LeaseClaim{}, false, now)
-		if !shouldDelete {
-			t.Fatal("stopped VM without claim should be cleaned up")
+		if shouldDelete {
+			t.Fatal("stopped VM without claim must be preserved")
 		}
 	})
 

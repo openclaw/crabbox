@@ -57,6 +57,70 @@ the coordinator. The dedicated
 SSM-only workspace API path. See [Architecture](../architecture.md) for the full
 topology.
 
+## Durable Azure provisioning
+
+`CRABBOX_DURABLE_PROVISIONING_ADMISSION=true` opts new eligible creates into the
+versioned durable provisioning controller. It defaults to off. Eligibility is
+evaluated after provider defaults and promoted images resolve: initially only
+ordinary and fixed-ID Azure native Windows `normal`, amd64, managed OS disks
+created from VM images qualify. Snapshot/copy-disk, ephemeral, WSL2, workspace,
+registered and other-provider requests keep their existing provisioning paths.
+An unsupported effective default is not advertised as resumable by readiness.
+
+The existing server-only `CRABBOX_SESSION_SECRET` must be stable, distinct from
+the shared token, and at least 32 characters. Missing or unsuitable material
+configuration returns `424 continuation_unavailable` before durable admission;
+the coordinator does not create a key or fall back to a provider/shared token.
+Provider readiness includes `resumableProvisioning` with scope support,
+admission availability, and missing material configuration.
+
+Clients opt into an asynchronous create response with `Prefer: respond-async`.
+An admitted supported job returns `202 {lease}` with `lease.state=provisioning`,
+`Location`, `Retry-After`, and `Preference-Applied: respond-async`. The envelope
+does not change. A create-attempt token alone is not async negotiation. Initial
+requests without the preference retain a synchronous facade; ordinary token
+replay and fixed PUT keep their existing status/intent contracts. Older brokers
+may ignore the preference. Clients must confirm the canonical create intent,
+then observe readiness within their original acquisition budget.
+Durable fixed-ID admission also retains a private request fingerprint, allowing
+the same request to rebind after deployment defaults change without serializing
+the lease configuration or accepting a changed caller intent.
+
+Admission commits the canonical attempt, lease, private operation, sealed
+material and due entry atomically. Restarted controllers use the frozen
+provider plan and original deadline. Disabling new admissions does not disable
+existing journals. Publication is a separate durable phase; cancellation and
+expiry remain authoritative over late provider results. Fixed-ID caller
+disconnection does not cancel the retained operation; explicit release does.
+
+Operation plans, attempt journals, claims and sealed bootstrap/admin-password
+material live outside lease records and are never returned by lease GET/list or
+portal serialization. Material is purged at terminal publication or when durable
+cancellation, retention or expiry irrevocably disables forward work. Settlement
+and exact owned cleanup use the nonsecret journals and provider authentication,
+so retiring the VM password/bootstrap or losing the session key does not prevent
+cleanup. Key loss or tampering still blocks forward replay. Unsupported or
+quarantined records retain their material until their authority is understood;
+resource and deletion evidence are preserved independently.
+
+## CLI request budgets
+
+The CLI bounds individual lease reads (including authoritative provider
+metadata), health, identity, provider readiness, and HTTP heartbeat requests to
+30 seconds. The same deadline covers authentication, response-body reads, and
+any eligible read-only curl fallback; an earlier caller deadline still wins.
+Best-effort foreground lease touches retain their shorter 20-second budget.
+Provisioning and image operations retain the 30-minute HTTP budget.
+
+Before releasing a lease, `stop` allows ten seconds for its preliminary lookup.
+If that lookup fails, ordinary stop can use the existing provider-scoped release
+request; provider identity errors still fail closed, and `stop --force` still
+requires successful inspection. Caller cancellation stops the command rather
+than starting this fallback. Release attempts and cleanup observation retain
+their existing separate budgets. An uncertain cleanup result preserves the
+local claim and SSH artifacts; a request timeout is not proof of remote failure
+or successful deletion and does not add mutation retries.
+
 ## Responsibilities
 
 The fleet coordinator owns:
@@ -65,6 +129,9 @@ The fleet coordinator owns:
 - lease lifecycle: create, look up, heartbeat, release, expire, share;
 - provider credentials and provider operations (provision, release, images,
   identity, Mac hosts, capacity fallback, orphan sweep);
+- owner/org-scoped brokered native checkpoint records, opt-in unused expiry,
+  bounded checkpoint/fork-claim admission, generation-fenced fork claims,
+  recent checkpoint audit events, promotion pins, and exact provider cleanup;
 - cost and active-lease guardrails enforced at create time;
 - usage aggregation by owner, org, provider, and instance type;
 - run records, run events, run logs, and per-run telemetry;
@@ -73,6 +140,10 @@ The fleet coordinator owns:
 - artifact-upload credentials and scoped upload URLs;
 - expiry and cleanup, driven by Durable Object alarms or durable pg-boss jobs
   plus periodic reconciliation.
+
+The PostgreSQL runtime retries serialization/deadlock contention with bounded
+jittered backoff so parallel checkpoint shard claims do not lose authoritative
+use counts or replay provider mutations inside retried storage transactions.
 
 ## Authentication
 
@@ -133,6 +204,8 @@ GET    /v1/whoami
 GET    /v1/providers/{provider}/readiness
 GET    /v1/control                       (websocket: run events + heartbeats)
 POST   /v1/leases
+POST   /v1/leases/from-checkpoint
+PUT    /v1/leases/{canonical-id}/from-checkpoint
 PUT    /v1/leases/{canonical-id}       (fixed-ID idempotent create)
 PUT    /v1/leases/{id}/registration
 GET    /v1/leases
@@ -144,6 +217,13 @@ POST   /v1/leases/{id-or-slug}/tailscale
 GET    /v1/leases/{id-or-slug}/share
 PUT    /v1/leases/{id-or-slug}/share
 DELETE /v1/leases/{id-or-slug}/share
+POST   /v1/checkpoints
+GET    /v1/checkpoints
+GET    /v1/checkpoints/{id}
+GET    /v1/checkpoints/{id}/events
+PATCH  /v1/checkpoints/{id}/retention
+POST   /v1/checkpoints/{id}/use
+DELETE /v1/checkpoints/{id}
 POST   /v1/runs
 GET    /v1/runs
 GET    /v1/runs/{run-id}
@@ -179,6 +259,18 @@ begin, do not roll the coordinator back to a version that ignores their
 tombstones. A newer CLI against an older coordinator fails cancellation closed
 rather than falling back to an unsafe ID-only release.
 
+Checkpoint creation derives owner, canonical organization, provider, and exact
+provider scope from the authoritative source lease. Global/owner/org admission
+and the durable `creating` reservation share one serializable transaction
+before provider mutation; only an exactly owned AWS, Azure, or GCP resource
+can publish the checkpoint. Forks use transactionally bounded, renewable,
+generation-bound claims and the narrowly validated
+`/v1/leases/from-checkpoint` route instead of relaxing ordinary lease image
+overrides. Manual retention is the default; explicit unused expiry, use claims,
+deletion retries, and audit tombstones share the coordinator's sorted
+checkpoint due index and scheduler. `/v1/checkpoints/{id}/events` exposes only
+the retained recent audit suffix: at most 256 ordered events per checkpoint,
+not complete lifetime history.
 Receipt-bearing run finishes use the same fail-closed rollout rule. After every
 successful finish response, the CLI retrieves the stored receipt and requires
 an exact signed match before marking the run recorded. A coordinator that
@@ -198,6 +290,17 @@ If the PUT response is ambiguous, the CLI repeats the full identical PUT until
 the coordinator atomically confirms the same stored intent or returns a
 conflict/definite error. Public GET is used only after that PUT confirmation,
 never to adopt an unverified fixed-ID record.
+
+Fixed checkpoint forks use `PUT /v1/leases/{canonical-id}/from-checkpoint` with
+the existing checkpoint ID and use claim fields. Admission records a cancellable
+fixed intent before remote source validation or preparation, without consuming
+the claim. Allocation atomically binds the winning claim, the lease, and the
+checkpoint's provisioning fence to that same private attempt. Its immutable
+intent also binds the checkpoint incarnation and provider artifact. Replays preserve that original binding and consume only
+an unused caller claim; they do not advance `lastUsedAt` again. An in-request
+retry may adopt its child after source deletion, but a fresh CLI invocation still
+requires a valid new checkpoint use claim. Older coordinators reject this route
+without ordinary-create fallback.
 
 Registration accepts generic provider and SSH metadata. Repeating the same
 owner/org/id/provider tuple refreshes it and reactivates an expired record.
@@ -311,6 +414,14 @@ runner leases stay visible without leaking to normal users. External runner rows
 Actions links and stale markers; clicking one opens its visibility-only detail
 page at `/portal/runners/{provider}/{runner-id}`.
 
+The CLI's best-effort external-runner sync has a single five-second budget
+covering inventory, optional Actions enrichment, credential resolution, and the
+HTTP request/response. Earlier caller deadlines still apply. Once canceled, the
+CLI does not publish partial inventory or start further lookups. A warning does
+not change a successful allocation or retained lease; Blacksmith warmup emits
+final completion/timing after the sync attempt. An upload whose response is lost
+may already have been accepted, so it is not retried.
+
 `/portal/leases/{id-or-slug}` shows lease state, bridge status, the latest Linux
 telemetry, copy-ready `ssh`/`run`/WebVNC/code commands, a recent-runs grid, and a
 stop action. `/portal/runs/{run-id}` shows the command, owner, lease, exit
@@ -334,10 +445,12 @@ fallback, persists the record, and returns 201 `{lease}`. The CLI then starts a
 heartbeat goroutine and a lease watch.
 
 **Heartbeat.** `POST /v1/leases/{id}/heartbeat` bumps `lastTouchedAt`,
-recomputes `expiresAt`, clears cleanup metadata, and reschedules the alarm. It
+recomputes `expiresAt`, clears cleanup metadata, and arms the alarm no later
+than the lease's next deadline, preserving an already-earlier wakeup. It
 updates the idle timeout **only** when the request explicitly sends a positive
 `idleTimeoutSeconds` (clamped to `86400`); telemetry samples may ride along in
-the same body.
+the same body. HTTP and control-websocket heartbeats use the same alarm arming;
+an explicitly shortened idle timeout advances the wakeup when necessary.
 
 **Cancel create.** If the caller cancels an ordinary create, the CLI sends
 `POST /v1/leases/{requested-id}/cancel-create` with the exact create-attempt
@@ -347,8 +460,19 @@ canonical lease exists, its released state and durable cleanup claim are written
 under the same state lock before provider deletion, so ordinary maintenance can
 resume cleanup after a restart. It releases a reserved, provisioning, or
 retained canonical lease only when its private token, owner/org, and retained
-generation match; otherwise it fails closed. Fixed-ID `PUT` creates remain
-replay-owned and never use cancellation cleanup.
+generation match; otherwise it fails closed.
+
+Fixed-ID `PUT` creates record an owner/org/provider-bound intent before
+asynchronous preparation or capacity checks. They remain replay-owned, without
+a caller-supplied cancellation token. `POST /v1/leases/{id}/release` also
+cancels an admitted fixed intent that has not allocated a machine, including
+one rejected by a quota check. The cancellation survives coordinator restart
+and prevents a delayed or repeated create from allocating. Admission alone
+does not create a lease row or reserve usage. Unknown IDs still return 404;
+missing records from older coordinators do not prove cancellation or cleanup.
+Fixed admissions use version-2 attempt records: an older coordinator refuses
+to reuse these IDs, but only the upgraded coordinator can confirm cancellation
+before a lease row exists.
 
 **Release.** `POST /v1/leases/{id}/release` (body `{delete?}`, defaulting to
 `!keep`) deletes the cloud server when the lease is still active and sets state
@@ -365,6 +489,23 @@ claim and credentials for retry. Acquisition rollback queues release without
 waiting, as does automatic post-run release, so asynchronous provider cleanup
 does not delay an otherwise completed run. Isolated local lease credentials are
 removed only after final deletion is observed; retained releases preserve them.
+
+Ordinary heartbeat and release acknowledgements arm alarms under the lifecycle
+mutex without scanning global workspace or lease collections for scheduling.
+Release retains durable cleanup intent and requests immediate maintenance;
+retries preserve that wakeup, including after coordinator reconstruction.
+An already-due stored alarm time is rearmed at the earlier of that time and the
+requested deadline: a consumed runtime job can leave its timestamp behind.
+An earlier future alarm is preserved without another scheduling write.
+AWS heartbeat access refresh also arms its recorded ingress reconciliation at the
+existing one-second minimum delay instead of rescanning unrelated fleet metadata
+while holding the ingress lock. Earlier alarms remain scheduled.
+Alarm storage errors still fail the request and do not certify cleanup success.
+The existing full scheduler shares the lifecycle mutex with this arming, so a
+scan cannot race an acknowledgement's earlier wakeup. Full maintenance scans,
+slug resolution, provider access refresh, and provider ingress locking retain
+their existing behavior; their work and other shared-queue stalls are not
+bounded by this acknowledgement path.
 
 **Expiry and cleanup.** A DO alarm and the cron both run maintenance:
 `expireLeases` deletes cloud servers for active leases past `expiresAt`
@@ -394,10 +535,24 @@ directly against the runner over SSH:
 
 Read back with `GET /v1/runs`, `/v1/runs/{id}`, `/logs`, and `/events`. The
 `/v1/control` websocket lets clients subscribe to live run events and send lease
-heartbeats. A run keeps its initiating actor in `owner`/`org` plus every backing
+heartbeats. Control socket admission does not wait for unrelated lifecycle work;
+authentication, restored bridge checks, and per-message lifecycle fences still
+apply. A run keeps its initiating actor in `owner`/`org` plus every backing
 lease identity used by replacement flows. Each backing lease owner can read and
 subscribe for audit purposes, while only the actor or an admin can append
 events or telemetry and finish the run.
+
+Terminal finish atomically persists the run, signed receipt when supplied, log
+pointer, and terminal event before notifying control subscribers. Attachment
+read or serialization failures retire the affected socket and allow delivery
+to other authorized subscribers without failing the durable acknowledgement.
+Late close, error, and queued message callbacks for a retired notification
+socket are ignored without rereading its attachment; a replacement socket with
+the same client ID is unaffected.
+Subscription relevance is checked before asynchronous grant revalidation;
+both run access and a current grant are still required before sending. Receipt
+validation, storage, and grant-validation errors remain errors. Identical finish
+replays are idempotent; conflicting terminal evidence still returns `409`.
 
 ## CLI responsibilities
 

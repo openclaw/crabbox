@@ -3,6 +3,7 @@ package nomad
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -647,6 +648,16 @@ func TestSyncWorkspaceStreamsArchiveThroughAllocationExec(t *testing.T) {
 	}
 }
 
+func assertNomadRunSession(t *testing.T, result RunResult, reused, kept bool) {
+	t.Helper()
+	if err := core.ValidateRunSessionForSpec(Provider{}.Spec(), result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Session == nil || result.Session.LeaseID != result.LeaseID || result.Session.Slug != result.Slug || result.Session.Reused != reused || result.Session.Kept != kept || result.Session.CleanupCommand != "crabbox stop --provider nomad "+shellQuote(result.LeaseID) {
+		t.Fatalf("session=%#v result=%#v", result.Session, result)
+	}
+}
+
 func TestRunNoSyncPropagatesRemoteExitAndCleansNewJob(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	fake.execResults = []fakeNomadExecResult{
@@ -655,16 +666,19 @@ func TestRunNoSyncPropagatesRemoteExitAndCleansNewJob(t *testing.T) {
 	}
 	b, stdout, stderr := testBackend(t, fake)
 	result, err := b.Run(context.Background(), RunRequest{
-		Repo:    newNomadRunRepo(t),
-		NoSync:  true,
-		Env:     map[string]string{"TOKEN": "secret", "BAD-NAME": "skip"},
-		Command: []string{"go", "test", "./..."},
+		ID:                 " \t ",
+		Repo:               newNomadRunRepo(t),
+		NoSync:             true,
+		Env:                map[string]string{"TOKEN": "secret", "BAD-NAME": "skip"},
+		Command:            []string{"go", "test", "./...", "&&"},
+		CommandLiteralArgs: map[int]bool{3: true},
 	})
 	var exitErr ExitError
 	if !core.AsExitError(err, &exitErr) || exitErr.Code != 23 {
 		t.Fatalf("err=%v exitErr=%#v", err, exitErr)
 	}
-	if result.ExitCode != 23 || result.Provider != providerName || result.Session != nil {
+	assertNomadRunSession(t, result, false, false)
+	if result.ExitCode != 23 || result.Provider != providerName {
 		t.Fatalf("result=%#v", result)
 	}
 	if len(fake.deregisters) != 1 {
@@ -677,35 +691,51 @@ func TestRunNoSyncPropagatesRemoteExitAndCleansNewJob(t *testing.T) {
 		strings.Contains(fake.execs[1].Stdin, "BAD-NAME") {
 		t.Fatalf("execs=%#v", fake.execs)
 	}
+	if !strings.HasSuffix(fake.execs[1].Stdin, " && exec 'go' 'test' './...' '&&'") {
+		t.Fatalf("literal intent lost in final stdin: %q", fake.execs[1].Stdin)
+	}
 }
 
-func TestRunNoSyncPropagatesCleanupFailureAfterSuccessfulCommand(t *testing.T) {
-	fake := newLifecycleFakeClient()
-	fake.execResults = []fakeNomadExecResult{
-		{ExitCode: 0},
-		{ExitCode: 0, Stdout: "out\n"},
-	}
-	fake.deregisterErr = errors.New("nomad deregister unavailable")
-	b, stdout, stderr := testBackend(t, fake)
-	result, err := b.Run(context.Background(), RunRequest{
-		Repo:    newNomadRunRepo(t),
-		NoSync:  true,
-		Command: []string{"true"},
-	})
-	if err == nil || !strings.Contains(err.Error(), "nomad stop failed") || !strings.Contains(err.Error(), "nomad deregister unavailable") {
-		t.Fatalf("err=%v, want cleanup failure", err)
-	}
-	if result.ExitCode != 1 || result.Provider != providerName || result.Session != nil {
-		t.Fatalf("result=%#v", result)
-	}
-	if len(fake.deregisters) != 1 {
-		t.Fatalf("deregisters=%v", fake.deregisters)
-	}
-	if stdout.String() != "out\n" {
-		t.Fatalf("stdout=%q", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "nomad run summary") {
-		t.Fatalf("stderr=%q", stderr.String())
+func TestRunCleanupFailurePreservesFinalOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		commandCode int
+		commandErr  error
+		wantCode    int
+		wantStatus  core.RunStatus
+	}{
+		{name: "cleanup only", wantCode: 1, wantStatus: core.RunStatusFailed},
+		{name: "command exit", commandCode: 42, wantCode: 42, wantStatus: core.RunStatusFailed},
+		{name: "cancellation", commandErr: context.Canceled, wantCode: 1, wantStatus: core.RunStatusCanceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newLifecycleFakeClient()
+			fake.execResults = []fakeNomadExecResult{{}, {ExitCode: tc.commandCode, Err: tc.commandErr, Stdout: "out\n"}}
+			cleanupErr := errors.New("nomad deregister unavailable")
+			fake.deregisterErr = cleanupErr
+			b, stdout, stderr := testBackend(t, fake)
+			result, err := b.Run(context.Background(), RunRequest{Repo: newNomadRunRepo(t), NoSync: true, TimingJSON: true, Command: []string{"true"}})
+			var ee ExitError
+			if !errors.Is(err, cleanupErr) || !core.AsExitError(err, &ee) || ee.Code != tc.wantCode || tc.commandErr != nil && !errors.Is(err, tc.commandErr) {
+				t.Fatalf("err=%v exit=%#v", err, ee)
+			}
+			assertNomadRunSession(t, result, false, true)
+			if result.ExitCode != tc.wantCode || result.Status != tc.wantStatus || len(fake.deregisters) != 1 || stdout.String() != "out\n" {
+				t.Fatalf("result=%#v purges=%v stdout=%q", result, fake.deregisters, stdout.String())
+			}
+			claim, err := readLeaseClaim(result.LeaseID)
+			if err != nil || claim.LeaseID != result.LeaseID {
+				t.Fatalf("recovery claim lost: %#v %v", claim, err)
+			}
+			lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+			var report core.TimingReport
+			if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
+				t.Fatalf("final diagnostic is not timing JSON: %v\n%s", err, stderr.String())
+			}
+			if report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind || report.Workdir != b.cfg.Nomad.Workdir || strings.Count(stderr.String(), `"provider":"nomad"`) != 1 {
+				t.Fatalf("final timing=%#v result=%#v", report, result)
+			}
+		})
 	}
 }
 
@@ -725,7 +755,8 @@ func TestRunNoSyncTransportFailureUsesNonZeroResultExitCode(t *testing.T) {
 	if !core.AsExitError(err, &exitErr) || exitErr.Code != 1 || !strings.Contains(err.Error(), "websocket closed") {
 		t.Fatalf("err=%v exitErr=%#v", err, exitErr)
 	}
-	if result.ExitCode != 1 || result.Provider != providerName || result.Session != nil {
+	assertNomadRunSession(t, result, false, false)
+	if result.ExitCode != 1 || result.Provider != providerName {
 		t.Fatalf("result=%#v", result)
 	}
 	if len(fake.deregisters) != 1 {
@@ -747,7 +778,8 @@ func TestRunKeepOnFailureRetainsNewJob(t *testing.T) {
 	if !core.AsExitError(err, &exitErr) || exitErr.Code != 7 {
 		t.Fatalf("err=%v exitErr=%#v", err, exitErr)
 	}
-	if len(fake.deregisters) != 0 || result.Session != nil {
+	assertNomadRunSession(t, result, false, true)
+	if len(fake.deregisters) != 0 {
 		t.Fatalf("deregisters=%v result=%#v", fake.deregisters, result)
 	}
 	if !strings.Contains(stderr.String(), "rerun: crabbox run --provider nomad") {
@@ -770,7 +802,7 @@ func TestRunRejectsReusedLeaseWithDifferentWorkdir(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "requested workdir") {
 		t.Fatalf("err=%v, want workdir mismatch", err)
 	}
-	if result.Provider != "" || len(fake.execs) != 0 {
+	if result.Provider != providerName || result.Session != nil || len(fake.execs) != 0 {
 		t.Fatalf("result=%#v execs=%#v", result, fake.execs)
 	}
 	retained, err := readLeaseClaim(claim.LeaseID)
@@ -789,7 +821,8 @@ func TestRunSyncOnlyUsesArchiveSyncAndCleansOneShot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ExitCode != 0 || !result.SyncDelegated || result.Session != nil {
+	assertNomadRunSession(t, result, false, false)
+	if result.ExitCode != 0 || !result.SyncDelegated {
 		t.Fatalf("result=%#v", result)
 	}
 	if len(fake.deregisters) != 1 || !strings.Contains(stdout.String(), "synced /workspace/crabbox") {
@@ -809,9 +842,7 @@ func TestRunSyncFailureCleansNewJob(t *testing.T) {
 	if !core.AsExitError(err, &exitErr) || exitErr.Code != 19 {
 		t.Fatalf("err=%v exitErr=%#v", err, exitErr)
 	}
-	if result.Session != nil {
-		t.Fatalf("result=%#v", result)
-	}
+	assertNomadRunSession(t, result, false, false)
 	if len(fake.deregisters) != 1 {
 		t.Fatalf("deregisters=%v", fake.deregisters)
 	}
@@ -1073,4 +1104,35 @@ func mapValues(values map[string]string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+func TestRunLiteralArgumentsSurviveNativeStdinTransport(t *testing.T) {
+	if os.PathSeparator != '/' {
+		t.Skip("POSIX stdin transport")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh unavailable")
+	}
+	fake := newLifecycleFakeClient()
+	b, _, _ := testBackend(t, fake)
+	workdir := t.TempDir()
+	marker := filepath.Join(workdir, "must-not-exist")
+	_, err = b.runCommand(context.Background(), fake, allocationReadiness{JobID: "job", AllocationID: "alloc", Task: "task"}, RunRequest{Command: []string{"printf", "%s", ";", "touch", marker}, CommandLiteralArgs: map[int]bool{2: true}}, workdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.execs) != 1 {
+		t.Fatalf("execs=%+v", fake.execs)
+	}
+	cmd := exec.Command(sh, "-s")
+	cmd.Stdin = strings.NewReader(fake.execs[0].Stdin)
+	cmd.Env = []string{"HOME=" + workdir, "PATH=/usr/bin:/bin", "ENV=" + os.DevNull}
+	out, err := cmd.CombinedOutput()
+	if err != nil || string(out) != ";touch"+marker {
+		t.Fatalf("stdin=%q output=%q err=%v", fake.execs[0].Stdin, out, err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("literal semicolon created marker: %v", err)
+	}
 }

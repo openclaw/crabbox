@@ -162,23 +162,9 @@ func (c *runpodClient) do(ctx context.Context, method, path string, body any, ou
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	data, readErr := io.ReadAll(io.LimitReader(resp.Body, runpodMaxResponseBytes+1))
-	if readErr != nil {
-		return readErr
-	}
-	if len(data) > runpodMaxResponseBytes {
-		return fmt.Errorf("runpod response exceeds %d bytes", runpodMaxResponseBytes)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &runpodAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(strings.TrimSpace(string(data)), c.apiKey)}
-	}
-	if out != nil && len(strings.TrimSpace(string(data))) > 0 {
-		if err := json.Unmarshal(data, out); err != nil {
-			return fmt.Errorf("decode runpod data: %w", err)
-		}
-	}
-	return nil
+	return shared.DecodeBoundedJSONResponse(resp, runpodMaxResponseBytes, out, providerName, func(code int, status, body string) error {
+		return &runpodAPIError{StatusCode: code, Status: status, Body: shared.RedactErrorSecrets(body, c.apiKey)}
+	})
 }
 
 func normalizeRunpodPod(pod runpodPod) runpodPod {

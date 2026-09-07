@@ -50,23 +50,23 @@ func validLinuxBootID(value string) bool {
 	return true
 }
 
-func webVNCDaemonProcessStartIdentity(pid int) (string, error) {
+func inspectProcessSnapshot(pid int) (processSnapshot, error) {
 	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
 	if err != nil {
-		return "", err
+		return processSnapshot{}, err
 	}
 	// The command name is parenthesized and may itself contain spaces or ')'.
 	// Fields after the final ')' begin at field 3; starttime is field 22.
 	end := strings.LastIndexByte(string(data), ')')
 	if end < 0 {
-		return "", fmt.Errorf("parse /proc/%d/stat command", pid)
+		return processSnapshot{}, fmt.Errorf("parse /proc/%d/stat command", pid)
 	}
 	fields := strings.Fields(string(data[end+1:]))
 	if len(fields) <= 19 {
-		return "", fmt.Errorf("parse /proc/%d/stat start time", pid)
+		return processSnapshot{}, fmt.Errorf("parse /proc/%d/stat start time", pid)
 	}
 	if _, err := strconv.ParseUint(fields[19], 10, 64); err != nil {
-		return "", fmt.Errorf("parse /proc/%d/stat start time: %w", pid, err)
+		return processSnapshot{}, fmt.Errorf("parse /proc/%d/stat start time: %w", pid, err)
 	}
-	return fields[19], nil
+	return processSnapshot{started: fields[19], exited: fields[0] == "Z" || fields[0] == "X"}, nil
 }

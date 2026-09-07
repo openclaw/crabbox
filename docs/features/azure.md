@@ -59,6 +59,12 @@ Each class maps to an ordered list of VM sizes. Crabbox falls back through the
 list when Azure rejects a SKU for capacity or quota. An explicit `--type` is
 exact and fails clearly when the SKU cannot be created.
 
+If Azure rejects a VM after its lease-owned public IP and NIC already exist,
+Crabbox verifies their canonical ownership and immutable identities, deletes
+both, and clears the durable cleanup claim before creating the next SKU's
+public IP. Unexplained NIC-only fragments and incomplete disk-backed resource
+sets remain fail-closed.
+
 Linux classes:
 
 ```text

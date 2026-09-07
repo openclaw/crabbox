@@ -225,7 +225,7 @@ func blacksmithSyncTimeout(env func(string) string) time.Duration {
 	return 5 * time.Minute
 }
 
-func resolveBlacksmithLeaseID(identifier, repoRoot string, reclaim bool) (string, error) {
+func resolveBlacksmithDiscoveryID(identifier string) (string, error) {
 	if identifier == "" {
 		return "", exit(2, "blacksmith-testbox requires --id <tbx-id-or-slug>")
 	}
@@ -242,23 +242,7 @@ func resolveBlacksmithLeaseID(identifier, repoRoot string, reclaim bool) (string
 	if claim.Provider != "" && claim.Provider != blacksmithTestboxProvider {
 		return "", exit(4, "%q is claimed by provider %s", identifier, claim.Provider)
 	}
-	if repoRoot != "" && claim.RepoRoot != "" && claim.RepoRoot != repoRoot && !reclaim {
-		return "", exit(2, "lease %s is claimed by repo %s; use --reclaim to claim it for %s", claim.LeaseID, claim.RepoRoot, repoRoot)
-	}
 	return claim.LeaseID, nil
-}
-
-func blacksmithClaimSlug(identifier, leaseID string) (string, error) {
-	for _, candidate := range []string{identifier, leaseID} {
-		claim, ok, err := resolveLeaseClaim(candidate)
-		if err != nil {
-			return "", err
-		}
-		if ok && claim.LeaseID == leaseID {
-			return claim.Slug, nil
-		}
-	}
-	return "", nil
 }
 
 func blacksmithCommandString(command []string, shellMode bool) string {

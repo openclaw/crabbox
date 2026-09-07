@@ -398,7 +398,19 @@ if (-not $result.TcpTestSucceeded) { exit 1 }`)
 	return "ss -ltn | grep -q '127.0.0.1:5900'"
 }
 
-func vncPasswordCommand(target SSHTarget) string {
+const vncPasswordSSHWait = 30 * time.Second
+
+// Transport budget, not the VNC DES key size: ARD uses the full account password.
+const vncPasswordSSHMaxBytes = 64 << 10
+
+func runVNCPasswordSSH(ctx context.Context, target SSHTarget, remote string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, vncPasswordSSHWait)
+	defer cancel()
+	return runSSHOutputBoundedWithOptions(ctx, target, remote, vncPasswordSSHMaxBytes, vncPasswordSSHWait, "10", "3")
+}
+
+// remoteVNCCredentialReadCommand builds a remote read operation, not a credential value.
+func remoteVNCCredentialReadCommand(target SSHTarget) string {
 	if isWindowsNativeTarget(target) {
 		return powershellCommand("Get-Content -Raw -LiteralPath " + psQuote(windowsVNCPasswordPath))
 	}

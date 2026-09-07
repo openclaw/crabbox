@@ -112,6 +112,11 @@ func validateRunArtifactGlobsForFlag(flag string, globs []string) error {
 		if !safeArtifactGlob(glob) {
 			return exit(2, "%s contains unsupported characters or non-relative path: %s", flag, glob)
 		}
+		for _, component := range strings.Split(filepath.ToSlash(strings.TrimSpace(glob)), "/") {
+			if component == ".git" || component == ".crabbox" {
+				return exit(2, "%s excludes protected path components: %s", flag, glob)
+			}
+		}
 	}
 	return nil
 }
@@ -133,12 +138,17 @@ func validateRunArtifactGlobTargetForFlag(target SSHTarget, globs []string, flag
 
 func safeArtifactGlob(glob string) bool {
 	glob = strings.TrimSpace(glob)
-	if glob == "" || strings.HasPrefix(glob, "-") || strings.HasPrefix(glob, "/") || strings.Contains(glob, "..") || strings.ContainsAny(glob, "{}") {
+	if glob == "" || strings.HasPrefix(glob, "-") || strings.HasPrefix(glob, "/") || strings.ContainsAny(glob, "{}") {
 		return false
 	}
 	rel := strings.TrimPrefix(filepath.ToSlash(glob), "./")
 	if strings.HasPrefix(rel, "/") {
 		return false
+	}
+	for _, component := range strings.Split(rel, "/") {
+		if component == ".." {
+			return false
+		}
 	}
 	return regexp.MustCompile(`^[A-Za-z0-9_./*?@+=:,-]+$`).MatchString(glob)
 }
@@ -182,7 +192,13 @@ func writeArtifactGlobMatcher(b *strings.Builder) {
 }
 
 func writeArtifactGlobEnumeration(b *strings.Builder, glob, addFunction string) {
-	b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(artifactGlobSearchRoot(glob)) + "; if artifact_safe_search_root \"$artifact_root\"; then while IFS= read -r -d '' f; do rel=$(artifact_rel_path \"$f\") || continue; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then " + addFunction + " \"$f\"; fi; done < <(find \"$artifact_root\" \\( -name .git -o -name .crabbox \\) -prune -o \\( -type f -o -type l \\) -print0); fi\n")
+	depth := ""
+	// Literal globs need only their guarded parent. Keep case folding and
+	// filename normalization in the existing matcher rather than a name prefilter.
+	if !strings.ContainsAny(glob, "*?") {
+		depth = " -mindepth 1 -maxdepth 1"
+	}
+	b.WriteString("artifact_regex=" + shellQuote(artifactGlobRegex(glob)) + "; artifact_root=" + shellQuote(artifactGlobSearchRoot(glob)) + "; if artifact_safe_search_root \"$artifact_root\"; then while IFS= read -r -d '' f; do rel=$(artifact_rel_path \"$f\") || continue; if [[ \"$rel\" =~ $artifact_regex || \"./$rel\" =~ $artifact_regex ]]; then " + addFunction + " \"$f\"; fi; done < <(find \"$artifact_root\"" + depth + " \\( -name .git -o -name .crabbox \\) -prune -o \\( -type f -o -type l \\) -print0); fi\n")
 }
 
 func runArtifactRequireScript(workdir string, globs []string) string {

@@ -5,7 +5,8 @@ set -euo pipefail
 #
 # Generates a disposable ed25519 key, authorizes it for the current user,
 # ensures a local sshd is running, then drives the static SSH provider
-# through warmup -> status -> run -> cp upload/download -> tunnel -> list ->
+# through warmup -> status -> run -> retained script failure bundle ->
+# cp upload/download -> tunnel -> list ->
 # stop. No cloud resources, no credentials beyond the throwaway keypair; the
 # authorized_keys entry is removed again on exit.
 #
@@ -16,11 +17,16 @@ set -euo pipefail
 
 slug="ssh-localhost-smoke-$(date +%Y%m%d%H%M%S)-$$"
 bin="${CRABBOX_BIN:-./bin/crabbox}"
+# Keep relative binary paths valid after entering the owned fixture project.
+if [[ "$bin" != /* ]]; then
+  bin="$PWD/$bin"
+fi
 ssh_user="${CRABBOX_SSH_LOCALHOST_USER:-$(id -un)}"
 ssh_port="${CRABBOX_SSH_LOCALHOST_PORT:-22}"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/crabbox-ssh-localhost-XXXXXX")"
 key_file="$work_dir/id_ed25519"
 work_root="$work_dir/workroot"
+failure_project="$work_dir/failure-project"
 authorized_keys="$HOME/.ssh/authorized_keys"
 authorized_entry=""
 cleanup_armed=0
@@ -108,7 +114,9 @@ if [ ! -x "$bin" ]; then
   exit 2
 fi
 
-mkdir -p "$work_root"
+mkdir -p "$work_root" "$failure_project"
+# Every CLI call must share the RepoRoot that warmup binds to the lease.
+cd "$failure_project"
 ssh-keygen -t ed25519 -N "" -q -f "$key_file" -C "crabbox-ssh-localhost-smoke"
 mkdir -p "$HOME/.ssh"
 chmod 700 "$HOME/.ssh"
@@ -157,6 +165,92 @@ if [[ "$run_output" != *crabbox-ssh-localhost-ok* ]]; then
   classify_validation_failure "$bin run --provider ssh --id $slug" 1 "run output did not include crabbox-ssh-localhost-ok"
   exit 1
 fi
+
+# Keep all local captures and remote payloads in this smoke's owned workspace.
+# Expected workload exits are validation inputs, not environment blockers.
+cat >"$failure_project/first success ' script.sh" <<'SH'
+#!/bin/sh
+set -eu
+case "$0" in
+  /*) printf '%s\n' "$0" ;;
+  *) printf '%s/%s\n' "$PWD" "$0" ;;
+esac
+SH
+cat >"$failure_project/current failure ' script.sh" <<'SH'
+#!/bin/sh
+set -eu
+store=$(dirname "$0")
+dd if=/dev/urandom of="$store/arbitrary.bin" bs=1048576 count=8 2>/dev/null
+printf 'selected prior log\n' > "$store/prior.log"
+printf '<testsuite/>\n' > "$store/junit.xml"
+printf '<testsuite/>\n' > "$store/TEST-prior.xml"
+mkdir -p test-results
+printf 'current report\n' > test-results/failure.log
+printf 'current stdout\n'
+printf 'current stderr\n' >&2
+exit 23
+SH
+(
+  first_upload="$(run_capture "$bin run first retained script" "$bin" run --provider ssh --id "$slug" --no-sync --keep \
+    --script "$failure_project/first success ' script.sh")"
+  workload_status=0
+  "$bin" run --provider ssh --id "$slug" --no-sync --keep-on-failure --timing-json \
+    --download-on-failure ".crabbox/scripts/prior.log=$failure_project/selected.log" \
+    --download ".crabbox/scripts/prior.log=$failure_project/success-only.log" \
+    --script "$failure_project/current failure ' script.sh" \
+    >"$work_dir/failure-stdout" 2>"$work_dir/failure-stderr" || workload_status=$?
+  cat "$work_dir/failure-stdout"
+  cat "$work_dir/failure-stderr" >&2
+  if [ "$workload_status" -ne 23 ]; then
+    classify_validation_failure "$bin run current failure script" "$workload_status" "expected workload exit 23, got $workload_status"
+    exit 1
+  fi
+  validation_status=0
+  validation_output="$(python3 - "$failure_project" "$first_upload" "$work_root" "$work_dir/failure-stderr" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+import tarfile
+
+project, first, root, stderr = map(Path, sys.argv[1:])
+assert first.is_relative_to(root) and first.is_file(), f"missing retained earlier upload: {first}"
+assert first.read_bytes() == (project / "first success ' script.sh").read_bytes(), "earlier upload changed"
+source = project / "current failure ' script.sh"
+data = source.read_bytes()
+current = ".crabbox/scripts/" + hashlib.sha256(data).hexdigest()[:12] + "-currentfailurescript.sh"
+bundles = list((project / ".crabbox/captures").glob("*.tar.gz"))
+assert len(bundles) == 1, bundles
+prefix = "crabbox-artifacts/remote/"
+with tarfile.open(bundles[0]) as archive:
+    names = archive.getnames()
+    scripts = [name for name in names if name.startswith(prefix + ".crabbox/scripts/")]
+    assert scripts == [prefix + current], scripts
+    assert archive.extractfile(prefix + current).read() == data, "current script bytes differ"
+    assert names.count(prefix + "test-results/failure.log") == 1, "report missing or duplicated"
+    metadata = json.load(archive.extractfile("crabbox-artifacts/crabbox-run.json"))
+    assert metadata["exitCode"] == 23, metadata
+    assert archive.extractfile("crabbox-artifacts/stdout.log").read() == b"current stdout\n"
+    assert archive.extractfile("crabbox-artifacts/stderr.log").read() == b"current stderr\n"
+assert (project / "selected.log").read_bytes() == b"selected prior log\n", "explicit failure download lost"
+assert not (project / "success-only.log").exists(), "success download ran after failure"
+assert (first.parent / "arbitrary.bin").stat().st_size == 8 * 1024 * 1024
+assert not list(first.parent.parent.glob("*.tar.gz")), "remote capture archive leaked"
+timings = [json.loads(line) for line in stderr.read_text().splitlines() if line.startswith('{"')]
+assert len(timings) == 1 and timings[0]["exitCode"] == 23, timings
+# Reused retained leases skip release entirely; no-attempt cleanup fields are omitted.
+# Retention is also checked via the earlier upload above and the status call below.
+assert "leaseStopped" not in timings[0] and "leaseStopError" not in timings[0], timings
+print(f"failure_bundle=passed exit=23 current_bytes={len(data)} stale=absent neighbors=absent noise_bytes=8388608 explicit_download=passed retained=true remote_archives=0 bundle_bytes={bundles[0].stat().st_size}")
+PY
+  )" || validation_status=$?
+  if [ "$validation_status" -ne 0 ]; then
+    classify_validation_failure "failure bundle contents and lifecycle" "$validation_status" "$validation_output"
+    exit "$validation_status"
+  fi
+  printf '%s\n' "$validation_output"
+)
+run_capture "$bin status after expected script failure" "$bin" status --provider ssh --id "$slug" --wait --wait-timeout 60s >/dev/null
 
 printf 'crabbox-ssh-cp-roundtrip\n' >"$work_dir/cp upload.txt"
 RSYNC_OLD_ARGS=1 RSYNC_PROTECT_ARGS=1 run_capture "$bin cp upload over resolved SSH" "$bin" cp --provider ssh --id "$slug" \
@@ -290,4 +384,7 @@ fi
 
 run_capture "$bin stop --provider ssh $slug" "$bin" stop --provider ssh "$slug" >/dev/null
 cleanup_armed=0
+cleanup
+trap - EXIT
+test ! -e "$work_dir"
 printf 'classification=live_ssh_localhost_smoke_passed slug=%s host=127.0.0.1 cp=roundtrip tunnel=%s cleanup=complete\n' "$slug" "$tunnel_result"

@@ -1,3 +1,4 @@
+import { sha256Hex } from "./auth";
 import { azureWindowsBootstrapPowerShell, cloudInit } from "./bootstrap";
 import {
   azureSupportsEphemeralFullCaching,
@@ -10,15 +11,19 @@ import {
   validatedCIDRs,
   type LeaseConfig,
 } from "./config";
+import { ExpiringTokenCache, type ExpiringToken } from "./expiring-token-cache";
 import { leaseProviderLabels, providerLabelsOwnedByLease } from "./provider-labels";
 import {
   ProviderProvisioningCleanupError,
+  ProviderResourceUnresolvedError,
   providerProvisioningCleanupClaim,
 } from "./provider-provisioning";
+import { ProvisioningAttemptHistory } from "./provisioning-attempts";
 import { leaseProviderName } from "./slug";
 import type {
   Env,
   LeaseRecord,
+  ProviderCheckpointOwnership,
   ProviderImage,
   ProviderMachine,
   ProvisioningAttempt,
@@ -92,18 +97,27 @@ function azureLinuxTruffleHogBootstrap(): string {
     trufflehog --no-update --version`;
 }
 
-function azureOwnedDeleteClaimKey(providerScope: string, cloudID: string, leaseID: string): string {
+export function azureOwnedDeleteClaimKey(
+  providerScope: string,
+  cloudID: string,
+  leaseID: string,
+): string {
   return ["provider:azure:delete-claim", providerScope, cloudID, leaseID]
     .map((part) => encodeURIComponent(part))
     .join(":");
 }
 
-interface TokenCache {
-  token: string;
-  expiresAt: number;
+export function azureCleanupRecoveryAuditKey(
+  providerScope: string,
+  cloudID: string,
+  leaseID: string,
+): string {
+  return ["provider:azure:cleanup-recovery", providerScope, cloudID, leaseID]
+    .map((part) => encodeURIComponent(part))
+    .join(":");
 }
 
-interface AzureVM {
+export interface AzureVM {
   id?: string;
   name?: string;
   location?: string;
@@ -147,10 +161,11 @@ interface AzureSnapshot {
   id?: string;
   name?: string;
   location?: string;
-  properties?: { provisioningState?: string; completionPercent?: number };
+  tags?: Record<string, string>;
+  properties?: { provisioningState?: string; completionPercent?: number; uniqueId?: string };
 }
 
-interface AzurePublicIP {
+export interface AzurePublicIP {
   id?: string;
   name?: string;
   location?: string;
@@ -184,7 +199,7 @@ interface AzureNICIPConfiguration {
   };
 }
 
-interface AzureNIC {
+export interface AzureNIC {
   id?: string;
   name?: string;
   location?: string;
@@ -200,7 +215,7 @@ interface AzureNIC {
   };
 }
 
-interface AzureDisk {
+export interface AzureDisk {
   id?: string;
   name?: string;
   location?: string;
@@ -248,13 +263,39 @@ interface AzureOwnedDeleteResources {
 }
 
 interface AzureOwnedDeleteInspection extends AzureOwnedDeleteResources {
+  resourceIdentity: string;
   diskResource?: AzureDisk;
   stableResourceIdentity: string;
   ephemeralOSDisk: boolean;
 }
 
+type OwnedDeleteLease = Pick<
+  LeaseRecord,
+  "id" | "slug" | "provider" | "cloudID" | "owner" | "providerScope"
+>;
+type AzureResourceRequest = <T>(
+  method: string,
+  path: string,
+  api: string,
+  body?: unknown,
+) => Promise<T>;
+
+export interface AzureOwnedDeleteTransport {
+  request(
+    method: string,
+    path: string,
+    api: string,
+    body?: unknown,
+    operation?: boolean,
+  ): Promise<{
+    status: number;
+    resource: unknown;
+    operationURL?: string;
+  }>;
+}
+
 interface AzureOwnedDeleteClaim {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   provider: "azure";
   leaseID: string;
   slug: string;
@@ -262,12 +303,20 @@ interface AzureOwnedDeleteClaim {
   cloudID: string;
   providerScope: string;
   preparing?: true;
+  completed?: true;
+  pendingDeletion?: {
+    kind: keyof AzureOwnedDeleteResources;
+    stableResourceIdentity: string;
+    operationURL: string;
+    deadline: number;
+  };
   canonicalVMID?: string;
   canonicalNICID?: string;
   resourceIdentity?: string;
   stableResourceIdentity?: string;
   partialStableResourceIdentity?: string;
   deletedStableResourceIdentity?: string;
+  recovery?: AzureCleanupRecoveryAudit;
   disk?: {
     resourceID: string;
     uniqueID: string;
@@ -276,6 +325,44 @@ interface AzureOwnedDeleteClaim {
 
 export interface AzureOwnedDeleteReleaseContext {
   resourceIdentity: string;
+}
+
+export interface AzureCleanupRecoveryAudit {
+  version: 1;
+  basis: "operator-confirmed-public-ip-absence";
+  leaseID: string;
+  slug: string;
+  owner: string;
+  cloudID: string;
+  providerScope: string;
+  actor: string;
+  confirmedAt: string;
+  claimFingerprint: string;
+  originalStableResourceIdentity: AzureReconciliationIdentityEntry[];
+  previousDeletedStableResourceIdentity: AzureReconciliationIdentityEntry[];
+  acknowledgedMissingResourceIdentity: AzureReconciliationIdentityEntry;
+  remainingDiskIdentity: AzureReconciliationIdentityEntry;
+}
+
+export interface AzureCleanupInspection {
+  providerScope: string;
+  observedAt: string;
+  claimUnchanged: boolean;
+  claimFingerprint?: string;
+  recoveryAudit?: AzureCleanupRecoveryAudit;
+  claim?: {
+    version: 1 | 2 | 3;
+    preparing?: true;
+    completed?: true;
+    stableResourceIdentity?: AzureReconciliationIdentityEntry[];
+    deletedStableResourceIdentity?: AzureReconciliationIdentityEntry[];
+    partialStableResourceIdentity?: AzureReconciliationIdentityEntry[];
+    pendingDeletion?: { kind: keyof AzureOwnedDeleteResources; deadline: number };
+  };
+  resources: Array<
+    AzureReconciliationIdentityEntry & { ownership: "matched" | "unclaimed" | "mismatched" }
+  >;
+  identityMatches: boolean | null;
 }
 
 interface AzureResourceList<T> {
@@ -317,9 +404,10 @@ interface AzureSharedInfraNames {
 interface AzureARMOptions {
   lroTimeoutMs?: number;
   terminalResourceState?: { path: string; apiVersion: string };
+  headers?: Record<string, string>;
 }
 
-class AzureHTTPError extends Error {
+export class AzureHTTPError extends Error {
   constructor(
     readonly method: string,
     readonly path: string,
@@ -354,7 +442,7 @@ export class AzureClient {
   readonly image: string;
   readonly sshCIDRs: string[];
   readonly defaultLocation: string;
-  private cache?: TokenCache;
+  private readonly tokenCache = new ExpiringTokenCache();
   private ephemeralOSSupport?: Map<string, boolean>;
   private readonly deferredCleanup:
     | ((request: AzureDeferredCleanupRequest) => Promise<void>)
@@ -615,8 +703,7 @@ export class AzureClient {
   }> {
     const locations = azureRegionCandidates(config, this.env, this.defaultLocation);
     const multiRegion = locations.length > 1;
-    const failures: string[] = [];
-    const attempts: ProvisioningAttempt[] = [];
+    const history = new ProvisioningAttemptHistory();
     for (const location of locations) {
       const client = this.clientForLocation(location, multiRegion);
       try {
@@ -628,30 +715,30 @@ export class AzureClient {
           slug,
           owner,
         );
-        const allAttempts = [...attempts, ...(result.attempts ?? [])];
         const server = {
           ...result.server,
           region: location,
           labels: { ...result.server.labels, region: location },
         };
-        return allAttempts.length > 0
-          ? { ...result, server, attempts: allAttempts }
-          : { ...result, server };
+        return { ...result, server, ...history.result(result.attempts) };
       } catch (error) {
         if (providerProvisioningCleanupClaim(error)) throw error;
         const message = error instanceof Error ? error.message : String(error);
-        attempts.push({
-          region: location,
-          serverType: config.serverType,
-          market: config.capacityMarket,
-          category: azureProvisioningErrorCategory(message) || "region",
-          message: conciseAzureProvisioningMessage(message),
-        });
-        failures.push(`${location}: ${message}`);
+        history.recordFailure(
+          error,
+          {
+            region: location,
+            serverType: config.serverType,
+            market: config.capacityMarket,
+            category: azureProvisioningErrorCategory(message) || "region",
+            message: conciseAzureProvisioningMessage(message),
+          },
+          `${location}: ${message}`,
+        );
         if (!isRetryableProvisioningError(message)) break;
       }
     }
-    throw new Error(failures.join("; "));
+    throw history.error();
   }
 
   private clientForLocation(location: string, multiRegion: boolean): AzureClient {
@@ -660,10 +747,14 @@ export class AzureClient {
       location: string;
       vnet: string;
       nsg: string;
+      subscription: string;
+      resourceGroup: string;
       deferredCleanup?: (request: AzureDeferredCleanupRequest) => Promise<void>;
       ownedDeleteClaimStorage?: AzureOwnedDeleteClaimStorage;
     } = {
       location,
+      subscription: this.subscription,
+      resourceGroup: this.resourceGroup,
       vnet: multiRegion ? azureRegionalName(this.vnet, location) : this.vnet,
       nsg: multiRegion ? azureRegionalName(this.nsg, location) : this.nsg,
     };
@@ -689,8 +780,7 @@ export class AzureClient {
     attempts?: ProvisioningAttempt[];
   }> {
     const candidates = azureProvisioningCandidatesForConfig(config);
-    const failures: string[] = [];
-    const attempts: ProvisioningAttempt[] = [];
+    const history = new ProvisioningAttemptHistory();
     let infra: AzureSharedInfraNames | undefined;
     for (let index = 0; index < candidates.length; index += 1) {
       const vmSize = candidates[index] ?? config.serverType;
@@ -715,20 +805,20 @@ export class AzureClient {
           infra,
           azureAttemptNameSeed(leaseID, location, config.capacityMarket, index),
         );
-        return attempts.length > 0
-          ? { server, serverType: vmSize, market: config.capacityMarket, attempts }
-          : { server, serverType: vmSize, market: config.capacityMarket };
+        return { server, serverType: vmSize, market: config.capacityMarket, ...history.result() };
       } catch (error) {
         if (providerProvisioningCleanupClaim(error)) throw error;
         const message = error instanceof Error ? error.message : String(error);
-        attempts.push({
-          region: location,
-          serverType: vmSize,
-          market: config.capacityMarket,
-          category: azureProvisioningErrorCategory(message) || "fatal",
-          message: conciseAzureProvisioningMessage(message),
-        });
-        failures.push(`${vmSize}: ${message}`);
+        history.record(
+          {
+            region: location,
+            serverType: vmSize,
+            market: config.capacityMarket,
+            category: azureProvisioningErrorCategory(message) || "fatal",
+            message: conciseAzureProvisioningMessage(message),
+          },
+          `${vmSize}: ${message}`,
+        );
         if (!isRetryableProvisioningError(message)) break;
       }
     }
@@ -759,25 +849,25 @@ export class AzureClient {
             infra,
             azureAttemptNameSeed(leaseID, location, "on-demand", index),
           );
-          return attempts.length > 0
-            ? { server, serverType: vmSize, market: "on-demand", attempts }
-            : { server, serverType: vmSize, market: "on-demand" };
+          return { server, serverType: vmSize, market: "on-demand", ...history.result() };
         } catch (error) {
           if (providerProvisioningCleanupClaim(error)) throw error;
           const message = error instanceof Error ? error.message : String(error);
-          attempts.push({
-            region: location,
-            serverType: vmSize,
-            market: "on-demand",
-            category: azureProvisioningErrorCategory(message) || "fatal",
-            message: conciseAzureProvisioningMessage(message),
-          });
-          failures.push(`on-demand ${vmSize}: ${message}`);
+          history.record(
+            {
+              region: location,
+              serverType: vmSize,
+              market: "on-demand",
+              category: azureProvisioningErrorCategory(message) || "fatal",
+              message: conciseAzureProvisioningMessage(message),
+            },
+            `on-demand ${vmSize}: ${message}`,
+          );
           if (!isRetryableProvisioningError(message)) break;
         }
       }
     }
-    throw new Error(failures.join("; "));
+    throw history.error();
   }
 
   async deleteServer(name: string): Promise<void> {
@@ -796,10 +886,318 @@ export class AzureClient {
     }
   }
 
+  async inspectOwnedCleanup(lease: OwnedDeleteLease): Promise<AzureCleanupInspection> {
+    if (lease.providerScope !== this.providerScope()) {
+      throw new Error("Azure cleanup inspection requires the original provider scope");
+    }
+    if (!this.ownedDeleteClaimStorage) {
+      throw new Error("Azure cleanup inspection requires cleanup claim storage");
+    }
+    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(lease.cloudID)) {
+      throw new Error("Azure cleanup inspection requires a canonical resource name");
+    }
+    const claimKey = azureOwnedDeleteClaimKey(this.providerScope(), lease.cloudID, lease.id);
+    const claim = await this.ownedDeleteClaimStorage.get<AzureOwnedDeleteClaim>(claimKey);
+    if (claim) this.requireOwnedDeleteClaim(lease, claim);
+    const claimSnapshot = JSON.stringify(claim);
+    const claimFingerprint =
+      claimSnapshot === undefined ? undefined : await sha256Hex(claimSnapshot);
+    const recoveryAudit = await this.cleanupRecoveryAudit(lease);
+    const identityEntries = azureCleanupIdentityView;
+    const name = lease.cloudID;
+    const [vm, nic, pip, disk] = await Promise.all([
+      this.ownedResource<AzureVM>(
+        vmPath(this.resourceGroup, name),
+        API_VERSIONS.compute,
+        "virtualMachines",
+        name,
+      ),
+      this.ownedResource<AzureNIC>(
+        networkPath(this.resourceGroup, "networkInterfaces", `${name}-nic`),
+        API_VERSIONS.network,
+        "networkInterfaces",
+        `${name}-nic`,
+      ),
+      this.ownedResource<AzurePublicIP>(
+        networkPath(this.resourceGroup, "publicIPAddresses", `${name}-pip`),
+        API_VERSIONS.network,
+        "publicIPAddresses",
+        `${name}-pip`,
+      ),
+      this.ownedResource<AzureDisk>(
+        `/resourceGroups/${this.resourceGroup}/providers/Microsoft.Compute/disks/${name}-osdisk`,
+        API_VERSIONS.disks,
+        "disks",
+        `${name}-osdisk`,
+      ),
+    ]);
+    const resources: AzureLeaseResource[] = [
+      ...(vm ? [{ kind: "virtualMachines" as const, resource: vm }] : []),
+      ...(nic ? [{ kind: "networkInterfaces" as const, resource: nic }] : []),
+      ...(pip ? [{ kind: "publicIPAddresses" as const, resource: pip }] : []),
+      ...(disk ? [{ kind: "disks" as const, resource: disk }] : []),
+    ];
+    const currentIdentity = azureStableResourceIdentity(resources);
+    const latestClaim = await this.ownedDeleteClaimStorage.get<AzureOwnedDeleteClaim>(claimKey);
+    const claimUnchanged = claimSnapshot === JSON.stringify(latestClaim);
+    // Observations never create/advance a claim or substitute for deletion authority.
+    return {
+      providerScope: this.providerScope(),
+      observedAt: new Date().toISOString(),
+      claimUnchanged,
+      ...(claimFingerprint ? { claimFingerprint } : {}),
+      ...(recoveryAudit ? { recoveryAudit } : {}),
+      ...(claim
+        ? {
+            claim: {
+              version: claim.version,
+              ...(claim.preparing ? { preparing: claim.preparing } : {}),
+              ...(claim.completed ? { completed: claim.completed } : {}),
+              ...(claim.stableResourceIdentity !== undefined
+                ? { stableResourceIdentity: identityEntries(claim.stableResourceIdentity) }
+                : {}),
+              ...(claim.deletedStableResourceIdentity !== undefined
+                ? {
+                    deletedStableResourceIdentity: identityEntries(
+                      claim.deletedStableResourceIdentity,
+                    ),
+                  }
+                : {}),
+              ...(claim.partialStableResourceIdentity !== undefined
+                ? {
+                    partialStableResourceIdentity: identityEntries(
+                      claim.partialStableResourceIdentity,
+                    ),
+                  }
+                : {}),
+              ...(claim.pendingDeletion
+                ? {
+                    pendingDeletion: {
+                      kind: claim.pendingDeletion.kind,
+                      deadline: claim.pendingDeletion.deadline,
+                    },
+                  }
+                : {}),
+            },
+          }
+        : {}),
+      resources: azureReconciliationIdentityEntries(resources, false).map((entry, index) => {
+        const labels = azureLabelsFromTags(resources[index]!.resource.tags ?? {});
+        return {
+          ...entry,
+          ownership: providerLabelsOwnedByLease(labels, lease, "azure")
+            ? "matched"
+            : azureHasOwnershipClaims(labels)
+              ? "mismatched"
+              : "unclaimed",
+        };
+      }),
+      identityMatches:
+        claimUnchanged && claim?.stableResourceIdentity !== undefined
+          ? azureStableResourceIdentityMatches(
+              claim.stableResourceIdentity,
+              currentIdentity,
+              azureEffectiveCleanupProgress(claim),
+            )
+          : null,
+    };
+  }
+
+  private async cleanupRecoveryAudit(
+    lease: OwnedDeleteLease,
+  ): Promise<AzureCleanupRecoveryAudit | undefined> {
+    const audit = await this.ownedDeleteClaimStorage?.get<AzureCleanupRecoveryAudit>(
+      azureCleanupRecoveryAuditKey(this.providerScope(), lease.cloudID, lease.id),
+    );
+    if (!audit) return undefined;
+    if (!azureRecoveryAuditBoundToLease(audit, lease, this.providerScope())) {
+      throw new ProviderResourceUnresolvedError("Azure cleanup recovery audit binding changed");
+    }
+    return azureCleanupRecoveryAuditView(audit);
+  }
+
+  async recoverMissingPublicIP(
+    lease: OwnedDeleteLease,
+    expectedClaimFingerprint: string,
+    actor: string,
+    commitGuard?: <T>(commit: () => Promise<T>) => Promise<T>,
+  ): Promise<AzureCleanupRecoveryAudit> {
+    const storage = this.ownedDeleteClaimStorage;
+    if (
+      !storage?.transaction ||
+      lease.providerScope !== this.providerScope() ||
+      !/^[a-f0-9]{64}$/.test(expectedClaimFingerprint) ||
+      !actor.trim() ||
+      actor.length > 256
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        "Azure cleanup recovery requires an exact claim fingerprint, actor, scope, and transactional storage",
+      );
+    }
+    const claimKey = azureOwnedDeleteClaimKey(this.providerScope(), lease.cloudID, lease.id);
+    const auditKey = azureCleanupRecoveryAuditKey(this.providerScope(), lease.cloudID, lease.id);
+    const existing = await this.cleanupRecoveryAudit(lease);
+    if (existing) {
+      const current = await storage.get<AzureOwnedDeleteClaim>(claimKey);
+      if (current) this.requireOwnedDeleteClaim(lease, current);
+      if (
+        existing.claimFingerprint === expectedClaimFingerprint &&
+        (!current ||
+          (current.version === 3 && JSON.stringify(current.recovery) === JSON.stringify(existing)))
+      )
+        return existing;
+      throw new ProviderResourceUnresolvedError(
+        "Azure cleanup recovery was already recorded for another claim",
+      );
+    }
+    const inspection = await this.inspectOwnedCleanup(lease);
+    const claim = await storage.get<AzureOwnedDeleteClaim>(claimKey);
+    if (
+      !claim ||
+      !inspection.claimUnchanged ||
+      inspection.claimFingerprint !== expectedClaimFingerprint ||
+      (await sha256Hex(JSON.stringify(claim))) !== expectedClaimFingerprint
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        "Azure cleanup recovery claim changed; inspect again",
+      );
+    }
+    this.requireOwnedDeleteClaim(lease, claim);
+    if (
+      claim.version !== 2 ||
+      claim.preparing ||
+      claim.completed ||
+      claim.pendingDeletion ||
+      claim.resourceIdentity ||
+      claim.partialStableResourceIdentity ||
+      !claim.stableResourceIdentity ||
+      !claim.deletedStableResourceIdentity
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        "Azure cleanup recovery requires a complete version-2 ordinary cleanup baseline",
+      );
+    }
+    const stable = azureCleanupIdentityView(claim.stableResourceIdentity);
+    const deleted = azureCleanupIdentityView(claim.deletedStableResourceIdentity);
+    const expectedIDs = [
+      vmPath(this.resourceGroup, lease.cloudID),
+      networkPath(this.resourceGroup, "networkInterfaces", `${lease.cloudID}-nic`),
+      networkPath(this.resourceGroup, "publicIPAddresses", `${lease.cloudID}-pip`),
+      `/resourceGroups/${this.resourceGroup}/providers/Microsoft.Compute/disks/${lease.cloudID}-osdisk`,
+    ].map((path) => this.resourceID(path).toLowerCase());
+    if (
+      stable.length !== 4 ||
+      stable.some(
+        (entry, index) =>
+          entry.kind !== Object.values(azureOwnedDeleteResourceKind)[index] ||
+          entry.id !== expectedIDs[index] ||
+          !entry.immutableID.trim() ||
+          entry.location !== this.defaultLocation.trim().toLowerCase(),
+      ) ||
+      deleted.length !== 2 ||
+      deleted[0]?.kind !== "virtualMachines" ||
+      deleted[1]?.kind !== "networkInterfaces" ||
+      inspection.resources.length !== 1 ||
+      inspection.resources[0]?.kind !== "disks" ||
+      inspection.resources[0].ownership !== "matched"
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        "Azure cleanup recovery requires recorded VM/NIC deletion and only the original owned disk remaining",
+      );
+    }
+    const { ownership: _ownership, ...disk } = inspection.resources[0];
+    const acknowledged = stable[2]!;
+    if (
+      !azureRecoveryDiskDetached(disk) ||
+      !azureStableResourceIdentityMatches(
+        claim.stableResourceIdentity,
+        JSON.stringify([disk]),
+        JSON.stringify([...deleted, acknowledged]),
+      )
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        "Azure cleanup recovery disk identity, location, or attachment changed",
+      );
+    }
+    const audit: AzureCleanupRecoveryAudit = {
+      version: 1,
+      basis: "operator-confirmed-public-ip-absence",
+      leaseID: lease.id,
+      slug: lease.slug ?? "",
+      owner: lease.owner,
+      cloudID: lease.cloudID,
+      providerScope: this.providerScope(),
+      actor,
+      confirmedAt: new Date().toISOString(),
+      claimFingerprint: expectedClaimFingerprint,
+      originalStableResourceIdentity: stable,
+      previousDeletedStableResourceIdentity: deleted,
+      acknowledgedMissingResourceIdentity: acknowledged,
+      remainingDiskIdentity: disk,
+    };
+    // Version 3 makes older workers fail closed; it does not invent a PIP DELETE receipt.
+    const recovered: AzureOwnedDeleteClaim = { ...claim, version: 3, recovery: audit };
+    this.requireOwnedDeleteClaim(lease, recovered);
+    const transact = storage.transaction.bind(storage);
+    const commit = () =>
+      transact(async (transaction) => {
+        const latest = await transaction.get<AzureOwnedDeleteClaim>(claimKey);
+        const prior = await transaction.get<AzureCleanupRecoveryAudit>(auditKey);
+        if (prior && latest) this.requireOwnedDeleteClaim(lease, latest);
+        if (
+          prior &&
+          azureRecoveryAuditBoundToLease(prior, lease, this.providerScope()) &&
+          prior.claimFingerprint === expectedClaimFingerprint &&
+          (!latest ||
+            (latest.version === 3 && JSON.stringify(latest.recovery) === JSON.stringify(prior)))
+        )
+          return azureCleanupRecoveryAuditView(prior);
+        if (
+          prior ||
+          !latest ||
+          (await sha256Hex(JSON.stringify(latest))) !== expectedClaimFingerprint
+        ) {
+          throw new ProviderResourceUnresolvedError(
+            "Azure cleanup recovery claim changed before commit",
+          );
+        }
+        await transaction.put(auditKey, audit);
+        await transaction.put(claimKey, recovered);
+        return audit;
+      });
+    return commitGuard ? await commitGuard(commit) : await commit();
+  }
+
   async deleteOwnedServer(
     lease: Pick<LeaseRecord, "id" | "slug" | "provider" | "cloudID" | "owner" | "providerScope">,
     context?: AzureOwnedDeleteReleaseContext,
   ): Promise<void> {
+    await this.deleteOwnedServerOperation(lease, context);
+  }
+
+  // Same claims and ownership policy as ordinary release; one bounded mutation/poll per tick.
+  async advanceOwnedServerDeletion(
+    lease: OwnedDeleteLease,
+    transport: AzureOwnedDeleteTransport,
+    context: AzureOwnedDeleteReleaseContext,
+  ): Promise<boolean> {
+    if (!this.ownedDeleteClaimStorage?.transaction) throw new Error("cleanup storage unavailable");
+    return this.deleteOwnedServerOperation(lease, context, transport);
+  }
+
+  private async deleteOwnedServerOperation(
+    lease: OwnedDeleteLease,
+    context?: AzureOwnedDeleteReleaseContext,
+    transport?: AzureOwnedDeleteTransport,
+  ): Promise<boolean> {
+    const request: AzureResourceRequest = transport
+      ? async <T>(method: string, path: string, api: string, body?: unknown): Promise<T> => {
+          const reply = await transport.request(method, path, api, body);
+          if (reply.status < 200 || reply.status >= 300)
+            throw new AzureHTTPError(method, path, reply.status, JSON.stringify(reply.resource));
+          return reply.resource as T;
+        }
+      : this.arm.bind(this);
     if (this.ownedDeleteClaimStorage && !this.ownedDeleteClaimStorage.transaction) {
       throw new Error(
         `refusing to delete Azure lease ${lease.id}: transactional cleanup claim storage is required`,
@@ -824,6 +1222,7 @@ export class AzureClient {
     }
     if (claim.preparing) {
       const inspection = await this.ownedDeleteResources(lease, {
+        request,
         prepareClaim: true,
         ...(context?.resourceIdentity
           ? { expectedResourceIdentity: context.resourceIdentity }
@@ -835,12 +1234,55 @@ export class AzureClient {
       const preparedClaim = this.ownedDeleteClaim(
         lease,
         inspection.diskResource,
-        context?.resourceIdentity,
+        transport ? inspection.resourceIdentity : context?.resourceIdentity,
         observedStableResourceIdentity ?? inspection.stableResourceIdentity,
       );
       claim = await this.persistOwnedDeleteClaimTransition(claimKey, lease, claim, preparedClaim);
     }
     this.requireOwnedDeleteClaim(lease, claim);
+    if (claim.version === 3) {
+      if (context || transport)
+        throw new Error("Audited Azure cleanup must resume through ordinary release");
+      const audit = await this.cleanupRecoveryAudit(lease);
+      if (!audit || JSON.stringify(audit) !== JSON.stringify(claim.recovery)) {
+        throw new Error("Audited Azure cleanup requires its retained recovery record");
+      }
+    }
+    if (claim.pendingDeletion) {
+      if (!transport) throw new Error("Azure deletion continuation owns this cleanup claim");
+      const pending = claim.pendingDeletion;
+      if (Date.now() >= pending.deadline) throw new Error("Azure deletion outcome unresolved");
+      const reply = await transport.request(
+        "GET",
+        pending.operationURL,
+        API_VERSIONS.compute,
+        undefined,
+        true,
+      );
+      if (reply.status !== 200) throw new Error("Azure deletion operation unavailable");
+      const operation = reply.resource as { status?: string };
+      const status = operation.status?.toLowerCase();
+      if (status === "succeeded") {
+        const next = {
+          ...claim,
+          deletedStableResourceIdentity: azureStableResourceIdentityWithDeletedMember(
+            claim.deletedStableResourceIdentity,
+            pending.stableResourceIdentity,
+            pending.kind,
+          ),
+        };
+        delete next.pendingDeletion;
+        await this.persistOwnedDeleteClaimTransition(claimKey, lease, claim, next);
+        return false;
+      }
+      if (status === "failed" || status === "canceled") {
+        const next = { ...claim };
+        delete next.pendingDeletion;
+        await this.persistOwnedDeleteClaimTransition(claimKey, lease, claim, next);
+        throw new Error("Azure deletion operation failed; fresh ownership verification required");
+      }
+      return false;
+    }
     const canonicalVMID = this.resourceID(vmPath(this.resourceGroup, lease.cloudID));
     const canonicalNICID = this.resourceID(
       networkPath(this.resourceGroup, "networkInterfaces", `${lease.cloudID}-nic`),
@@ -867,9 +1309,11 @@ export class AzureClient {
         observedStableResourceIdentity,
       )
     ) {
+      if (transport) throw new Error("Azure deletion claim does not match the frozen candidate");
       const previousPartialStableResourceIdentity =
         claim.partialStableResourceIdentity ?? claim.stableResourceIdentity;
       const currentInspection = await this.ownedDeleteResources(lease, {
+        request,
         claim,
         prepareClaim: true,
         ...(claim.resourceIdentity ? { expectedResourceIdentity: claim.resourceIdentity } : {}),
@@ -883,6 +1327,7 @@ export class AzureClient {
         ),
       );
       const inspection = await this.ownedDeleteResources(lease, {
+        request,
         claim,
         prepareClaim: true,
         ...(context?.resourceIdentity
@@ -917,7 +1362,9 @@ export class AzureClient {
     }
     let expectedStableResourceIdentity =
       claim.stableResourceIdentity ?? observedStableResourceIdentity;
-    const expectedResourceIdentity = context?.resourceIdentity || claim.resourceIdentity;
+    const expectedResourceIdentity = transport
+      ? claim.resourceIdentity
+      : context?.resourceIdentity || claim.resourceIdentity;
 
     const order: (keyof AzureOwnedDeleteResources)[] = ["vm", "nic", "pip", "disk"];
     for (const kind of order) {
@@ -926,14 +1373,13 @@ export class AzureClient {
         // a same-name replacement cannot inherit authorization from an older read.
         // oxlint-disable-next-line eslint/no-await-in-loop -- every delete requires fresh ownership proof.
         const resources = await this.ownedDeleteResources(lease, {
+          request,
           claim,
           ...(expectedResourceIdentity ? { expectedResourceIdentity } : {}),
           ...(expectedStableResourceIdentity ? { expectedStableResourceIdentity } : {}),
         });
         if (!resources.vm && !resources.nic && !resources.pip && !resources.disk) {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- clear only after the fresh inventory and claim sequence both prove cleanup complete.
-          await this.clearOwnedDeleteClaim(claimKey, lease, claim);
-          return;
+          return this.completeOwnedDeletion(claimKey, lease, claim, Boolean(transport));
         }
         if (!claim.stableResourceIdentity) {
           if (
@@ -971,6 +1417,8 @@ export class AzureClient {
           disk: false,
         };
         selected[kind] = true;
+        if (transport)
+          return this.dispatchOwnedDeletion(claimKey, lease, claim, resources, kind, transport);
         // oxlint-disable-next-line eslint/no-await-in-loop -- each delete uses the fresh ownership proof above.
         const result = await this.deleteServerOnce(lease.cloudID, selected, true);
         if (result.errors.length === 0) {
@@ -999,6 +1447,80 @@ export class AzureClient {
       }
     }
     await this.clearOwnedDeleteClaim(claimKey, lease, claim);
+    return true;
+  }
+
+  private async completeOwnedDeletion(
+    claimKey: string,
+    lease: OwnedDeleteLease,
+    claim: AzureOwnedDeleteClaim,
+    retainEvidence: boolean,
+  ): Promise<true> {
+    if (retainEvidence) {
+      // Completion survives a lost provisioning-result commit; it is not inferred from intent.
+      if (!claim.completed)
+        await this.persistOwnedDeleteClaimTransition(claimKey, lease, claim, {
+          ...claim,
+          completed: true,
+        });
+    } else await this.clearOwnedDeleteClaim(claimKey, lease, claim);
+    return true;
+  }
+
+  private async dispatchOwnedDeletion(
+    claimKey: string,
+    lease: OwnedDeleteLease,
+    claim: AzureOwnedDeleteClaim,
+    resources: AzureOwnedDeleteInspection,
+    kind: keyof AzureOwnedDeleteResources,
+    transport: AzureOwnedDeleteTransport,
+  ): Promise<false> {
+    const paths = {
+      vm: vmPath(this.resourceGroup, lease.cloudID),
+      nic: networkPath(this.resourceGroup, "networkInterfaces", `${lease.cloudID}-nic`),
+      pip: networkPath(this.resourceGroup, "publicIPAddresses", `${lease.cloudID}-pip`),
+      disk: `/resourceGroups/${this.resourceGroup}/providers/Microsoft.Compute/disks/${lease.cloudID}-osdisk`,
+    };
+    const api =
+      kind === "vm"
+        ? API_VERSIONS.compute
+        : kind === "disk"
+          ? API_VERSIONS.disks
+          : API_VERSIONS.network;
+    const reply = await transport.request("DELETE", paths[kind], api);
+    if (reply.status === 202 || reply.status === 201) {
+      if (!reply.operationURL)
+        throw new Error("Azure deletion acknowledgement lacks operation evidence");
+      // Accepted is not successful progress. Only an observed successful operation can advance it.
+      await this.persistOwnedDeleteClaimTransition(claimKey, lease, claim, {
+        ...claim,
+        pendingDeletion: {
+          kind,
+          stableResourceIdentity: resources.stableResourceIdentity,
+          operationURL: reply.operationURL,
+          deadline: Date.now() + 20 * 60_000,
+        },
+      });
+    } else if (reply.status === 200 || reply.status === 204) {
+      await this.persistOwnedDeleteProgress(claimKey, lease, {
+        ...claim,
+        deletedStableResourceIdentity: azureStableResourceIdentityWithDeletedMember(
+          claim.deletedStableResourceIdentity,
+          resources.stableResourceIdentity,
+          kind,
+        ),
+      });
+    } else {
+      const failure = new AzureHTTPError(
+        "DELETE",
+        paths[kind],
+        reply.status,
+        JSON.stringify(reply.resource),
+      );
+      if (!isRetryableDeleteError(failure)) throw failure;
+      // Retry on the next tick, after re-reading every survivor with this same frozen claim.
+    }
+    return false;
   }
 
   private async clearOwnedDeleteClaim(
@@ -1138,36 +1660,47 @@ export class AzureClient {
   private async ownedDeleteResources(
     lease: Pick<LeaseRecord, "id" | "slug" | "provider" | "cloudID" | "owner">,
     options: {
+      request?: AzureResourceRequest;
       claim?: AzureOwnedDeleteClaim;
       prepareClaim?: boolean;
       expectedResourceIdentity?: string;
       expectedStableResourceIdentity?: string;
     } = {},
   ): Promise<AzureOwnedDeleteInspection> {
+    const request = options.request ?? this.arm.bind(this);
     const name = lease.cloudID;
     const vmResourcePath = vmPath(this.resourceGroup, name);
     const nicResourcePath = networkPath(this.resourceGroup, "networkInterfaces", `${name}-nic`);
     const pipResourcePath = networkPath(this.resourceGroup, "publicIPAddresses", `${name}-pip`);
     const diskResourcePath = `/resourceGroups/${this.resourceGroup}/providers/Microsoft.Compute/disks/${name}-osdisk`;
     const [vm, nic, pip, initialDisk] = await Promise.all([
-      this.ownedResource<AzureVM>(vmResourcePath, API_VERSIONS.compute, "virtualMachines", name),
+      this.ownedResource<AzureVM>(
+        vmResourcePath,
+        API_VERSIONS.compute,
+        "virtualMachines",
+        name,
+        request,
+      ),
       this.ownedResource<AzureNIC>(
         nicResourcePath,
         API_VERSIONS.network,
         "networkInterfaces",
         `${name}-nic`,
+        request,
       ),
       this.ownedResource<AzurePublicIP>(
         pipResourcePath,
         API_VERSIONS.network,
         "publicIPAddresses",
         `${name}-pip`,
+        request,
       ),
       this.ownedResource<AzureDisk>(
         diskResourcePath,
         API_VERSIONS.disks,
         "disks",
         `${name}-osdisk`,
+        request,
       ),
     ]);
 
@@ -1178,7 +1711,11 @@ export class AzureClient {
       options.prepareClaim &&
       !options.claim &&
       Boolean(vm || nic || pip || initialDisk) &&
-      (!nic || !pip || (!initialDisk && !azureVMUsesEphemeralOSDisk(vm)));
+      (vm
+        ? !nic || !pip || (!initialDisk && !azureVMUsesEphemeralOSDisk(vm))
+        : initialDisk
+          ? !nic || !pip
+          : Boolean(nic && !pip));
 
     const expectedNICID = this.resourceID(nicResourcePath);
     const expectedPIPID = this.resourceID(pipResourcePath);
@@ -1197,7 +1734,7 @@ export class AzureClient {
       !azureStableResourceIdentityMatches(
         options.expectedStableResourceIdentity,
         currentStableResourceIdentity,
-        options.claim?.deletedStableResourceIdentity,
+        azureEffectiveCleanupProgress(options.claim),
       )
     ) {
       throw new Error(
@@ -1209,7 +1746,7 @@ export class AzureClient {
       !azureResourceIdentityMatches(
         options.expectedResourceIdentity,
         currentResourceIdentity,
-        options.claim?.deletedStableResourceIdentity,
+        azureEffectiveCleanupProgress(options.claim),
       )
     ) {
       throw new Error(
@@ -1231,7 +1768,7 @@ export class AzureClient {
     const staleCanonicalNICAttachmentAllowed =
       !vm &&
       azureStableResourceIdentityIncludesResourceID(
-        options.claim?.deletedStableResourceIdentity,
+        azureEffectiveCleanupProgress(options.claim),
         "virtualMachines",
         expectedVMID,
       );
@@ -1275,7 +1812,7 @@ export class AzureClient {
     const missingCanonicalPIPAllowed =
       !pip &&
       azureStableResourceIdentityIncludesResourceID(
-        options.claim?.deletedStableResourceIdentity,
+        azureEffectiveCleanupProgress(options.claim),
         "publicIPAddresses",
         expectedPIPID,
       );
@@ -1307,7 +1844,7 @@ export class AzureClient {
         expectedNICID,
         !nic &&
           azureStableResourceIdentityIncludesResourceID(
-            options.claim?.deletedStableResourceIdentity,
+            azureEffectiveCleanupProgress(options.claim),
             "networkInterfaces",
             expectedNICID,
           ),
@@ -1366,10 +1903,10 @@ export class AzureClient {
         // Azure-created OS disks do not inherit VM tags. Bind the disk while
         // the verified VM association is live. The immutable identity check
         // prevents a concurrent same-name replacement from receiving the claim.
-        await this.arm("PATCH", diskResourcePath, API_VERSIONS.disks, {
+        await request("PATCH", diskResourcePath, API_VERSIONS.disks, {
           tags: { ...disk.tags, ...ownershipTags },
         });
-        const taggedDisk = await this.arm<AzureDisk>("GET", diskResourcePath, API_VERSIONS.disks);
+        const taggedDisk = await request<AzureDisk>("GET", diskResourcePath, API_VERSIONS.disks);
         this.requireOwnedResource("disk", taggedDisk, diskResourcePath, lease);
         if (
           this.requireDiskUniqueID(taggedDisk, lease.id) !== uniqueID ||
@@ -1428,6 +1965,14 @@ export class AzureClient {
         `refusing to delete Azure resources for ${name}: canonical companion set is incomplete`,
       );
     }
+    if (
+      options.prepareClaim &&
+      currentResources.some((resource) => !azureReconciliationMemberHasStableIdentity(resource))
+    ) {
+      throw new Error(
+        `refusing to delete Azure resources for ${name}: stable resource identity is incomplete`,
+      );
+    }
 
     return {
       vm: Boolean(vm),
@@ -1435,6 +1980,11 @@ export class AzureClient {
       pip: Boolean(pip),
       disk: Boolean(disk),
       stableResourceIdentity: currentStableResourceIdentity,
+      resourceIdentity: azureReconciliationResourceIdentity(
+        currentResources.map((entry) =>
+          entry.kind === "disks" && disk ? { kind: "disks", resource: disk } : entry,
+        ),
+      ),
       ephemeralOSDisk: azureVMUsesEphemeralOSDisk(vm),
       ...(disk ? { diskResource: disk } : {}),
     };
@@ -1495,6 +2045,8 @@ export class AzureClient {
       networkPath(this.resourceGroup, "networkInterfaces", `${lease.cloudID}-nic`),
     );
     try {
+      if (!azureCleanupRecoveryValid(claim)) throw new Error("invalid cleanup recovery");
+      const deletionProgress = azureEffectiveCleanupProgress(claim);
       if (claim.resourceIdentity !== undefined) {
         if (
           claim.stableResourceIdentity !==
@@ -1509,11 +2061,39 @@ export class AzureClient {
       if (claim.partialStableResourceIdentity !== undefined) {
         azureStableResourceIdentityEntries(claim.partialStableResourceIdentity);
       }
+      if (claim.completed !== undefined && claim.completed !== true)
+        throw new Error("invalid completion");
+      if (claim.pendingDeletion) {
+        const pending = claim.pendingDeletion;
+        if (
+          claim.completed ||
+          !["vm", "nic", "pip", "disk"].includes(pending.kind) ||
+          typeof pending.operationURL !== "string" ||
+          !Number.isFinite(pending.deadline) ||
+          !claim.stableResourceIdentity ||
+          !azureStableResourceIdentityMatches(
+            claim.stableResourceIdentity,
+            pending.stableResourceIdentity,
+            deletionProgress,
+          ) ||
+          !azureStableResourceIdentityEntries(pending.stableResourceIdentity).some(
+            (entry) => entry.kind === azureOwnedDeleteResourceKind[pending.kind],
+          )
+        ) {
+          throw new Error("invalid pending deletion");
+        }
+      }
+      if (
+        claim.completed &&
+        (!claim.stableResourceIdentity ||
+          !azureStableResourceIdentityMatches(claim.stableResourceIdentity, "[]", deletionProgress))
+      )
+        throw new Error("incomplete deletion progress");
       if (
         !azureStableResourceIdentityDeletionProgressValid(
           claim.stableResourceIdentity,
           claim.partialStableResourceIdentity,
-          claim.deletedStableResourceIdentity,
+          deletionProgress,
         )
       ) {
         throw new Error("invalid deletion progress");
@@ -1523,6 +2103,8 @@ export class AzureClient {
     }
     const preparingValid = claim.preparing
       ? claim.version === 2 &&
+        claim.completed === undefined &&
+        claim.pendingDeletion === undefined &&
         claim.resourceIdentity === undefined &&
         claim.stableResourceIdentity === undefined &&
         claim.partialStableResourceIdentity === undefined &&
@@ -1531,7 +2113,7 @@ export class AzureClient {
       : claim.preparing === undefined &&
         (claim.version === 1 || claim.stableResourceIdentity !== undefined);
     if (
-      (claim.version !== 1 && claim.version !== 2) ||
+      (claim.version !== 1 && claim.version !== 2 && claim.version !== 3) ||
       !preparingValid ||
       claim.provider !== "azure" ||
       claim.leaseID !== lease.id ||
@@ -1566,9 +2148,10 @@ export class AzureClient {
     apiVersion: string,
     kind: string,
     name: string,
+    request: AzureResourceRequest = this.arm.bind(this),
   ): Promise<T | undefined> {
     try {
-      return await this.arm<T>("GET", path, apiVersion);
+      return await request<T>("GET", path, apiVersion);
     } catch (error) {
       if (azureResourceNotFound(error, kind, name)) return undefined;
       throw error;
@@ -1732,6 +2315,27 @@ export class AzureClient {
   }
 
   async ensureSharedInfra(location: string, config: LeaseConfig): Promise<AzureSharedInfraNames> {
+    const storage = this.ownedDeleteClaimStorage;
+    if (!storage?.transaction) return this.ensureSharedInfraUnlocked(location, config);
+    const key = `provisioning-lock:${this.providerScope().toLowerCase()}`;
+    const owner = `legacy:${crypto.randomUUID()}`;
+    await storage.transaction(async (transaction) => {
+      if (await transaction.get(key))
+        throw new Error("Azure shared infrastructure has an unresolved operation");
+      await transaction.put(key, owner);
+    });
+    // A failed legacy call retains the fence: no LRO journal proves its last write settled.
+    const result = await this.ensureSharedInfraUnlocked(location, config);
+    await storage.transaction(async (transaction) => {
+      if ((await transaction.get(key)) === owner) await transaction.delete(key);
+    });
+    return result;
+  }
+
+  private async ensureSharedInfraUnlocked(
+    location: string,
+    config: LeaseConfig,
+  ): Promise<AzureSharedInfraNames> {
     const tags = { crabbox: "true", managed_by: "crabbox" };
     const rg = await this.arm<{ tags?: Record<string, string> }>(
       "GET",
@@ -2215,7 +2819,11 @@ export class AzureClient {
     );
   }
 
-  async createDiskSnapshot(vmName: string, name: string): Promise<ProviderImage> {
+  async createDiskSnapshot(
+    vmName: string,
+    name: string,
+    ownership?: ProviderCheckpointOwnership,
+  ): Promise<ProviderImage> {
     const vm = await this.arm<AzureVM>(
       "GET",
       vmPath(this.resourceGroup, vmName),
@@ -2244,7 +2852,17 @@ export class AzureClient {
       API_VERSIONS.disks,
       {
         location,
-        tags: { crabbox: "true", managed_by: "crabbox" },
+        tags: {
+          crabbox: "true",
+          managed_by: "crabbox",
+          ...(ownership
+            ? {
+                crabbox_checkpoint_id: ownership.checkpointID,
+                crabbox_checkpoint_token: ownership.tokenHash,
+                crabbox_checkpoint_lease: ownership.sourceLeaseID,
+              }
+            : {}),
+        },
         properties: {
           creationData: {
             createOption: "Copy",
@@ -2252,6 +2870,7 @@ export class AzureClient {
           },
         },
       },
+      ownership ? { headers: { "if-none-match": "*" } } : undefined,
     );
     return azureSnapshotProviderImage(snapshot, name, location);
   }
@@ -2324,12 +2943,13 @@ export class AzureClient {
   }
 
   private async deleteDiskSnapshot(name: string): Promise<void> {
+    const snapshotName = azureResourceName(name);
     await this.arm(
       "DELETE",
-      azureSnapshotPath(this.resourceGroup, azureResourceName(name)),
+      azureSnapshotPath(this.resourceGroup, snapshotName),
       API_VERSIONS.disks,
     ).catch((error) => {
-      if (isNotFound(error)) return undefined;
+      if (azureResourceNotFound(error, "snapshots", snapshotName)) return undefined;
       throw error;
     });
   }
@@ -2394,12 +3014,17 @@ export class AzureClient {
       headers: {
         authorization: `Bearer ${token}`,
         "content-type": "application/json",
+        ...opts?.headers,
       },
     };
     if (body !== undefined) init.body = JSON.stringify(body);
     const response = await this.fetcher(url, init);
     if (!response.ok && response.status !== 201 && response.status !== 202) {
-      throw new AzureHTTPError(method, path, response.status, await safeBody(response));
+      const failure = new AzureHTTPError(method, path, response.status, await safeBody(response));
+      if (opts?.headers?.["if-none-match"] === "*" && response.status === 412) {
+        Object.defineProperty(failure, "checkpointResourceMayExist", { value: false });
+      }
+      throw failure;
     }
     const initialText = await response.text();
     if (response.status === 201 || response.status === 202) {
@@ -2480,8 +3105,8 @@ export class AzureClient {
   }
 
   private async awaitLRO(response: Response, token: string, opts?: AzureARMOptions): Promise<void> {
-    const asyncURL =
-      response.headers.get("azure-asyncoperation") ?? response.headers.get("location");
+    const asyncOperationURL = response.headers.get("azure-asyncoperation");
+    const asyncURL = asyncOperationURL ?? response.headers.get("location");
     if (!asyncURL) return;
     const interval = azureLROPollIntervalMS(response.headers.get("retry-after"));
     const timeoutMs = opts?.lroTimeoutMs;
@@ -2504,11 +3129,27 @@ export class AzureClient {
       }
       // oxlint-disable-next-line eslint/no-await-in-loop -- reading the LRO status payload is part of polling.
       const text = await poll.text();
-      const status = text ? (JSON.parse(text) as { status?: string }).status?.toLowerCase() : "";
-      if (status === "succeeded") return;
-      if (status === "failed" || status === "canceled") {
-        throw new Error(`azure LRO ${status}: ${text}`);
+      const body = text
+        ? (JSON.parse(text) as {
+            status?: string;
+            provisioningState?: string;
+            properties?: { provisioningState?: string };
+          })
+        : {};
+      const states = [body.status, body.provisioningState, body.properties?.provisioningState].map(
+        (state) => state?.toLowerCase() ?? "",
+      );
+      const failure = states.find((state) => state === "failed" || state === "canceled");
+      if (failure) {
+        throw new Error(`azure LRO ${failure}: ${text}`);
       }
+      // AsyncOperation requires a status document; Location completes by HTTP status.
+      // Explicit nonterminal body states override a seemingly complete response.
+      const completed =
+        asyncOperationURL !== null
+          ? states[0] === "succeeded"
+          : poll.status === 200 || poll.status === 204;
+      if (completed && states.every((state) => !state || state === "succeeded")) return;
       if (opts?.terminalResourceState) {
         // Azure can leave the extension LRO pending after the resource itself is terminal.
         // Match the direct CLI by accepting the resource state as the completion signal.
@@ -2544,7 +3185,10 @@ export class AzureClient {
   }
 
   private async token(): Promise<string> {
-    if (this.cache && this.cache.expiresAt > Date.now() + 30_000) return this.cache.token;
+    return this.tokenCache.get(Date.now() + 30_000, () => this.loadToken());
+  }
+
+  private async loadToken(): Promise<ExpiringToken> {
     const body = new URLSearchParams({
       grant_type: "client_credentials",
       client_id: this.clientID,
@@ -2564,19 +3208,18 @@ export class AzureClient {
     }
     const json = (await response.json()) as { access_token?: string; expires_in?: number };
     if (!json.access_token) throw new Error("azure token response missing access_token");
-    this.cache = {
+    return {
       token: json.access_token,
       expiresAt: Date.now() + (json.expires_in ?? 3600) * 1000,
     };
-    return this.cache.token;
   }
 }
 
-function azureWindowsBootstrapCommand(): string {
+export function azureWindowsBootstrapCommand(): string {
   return `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$p=Join-Path $env:SystemDrive 'AzureData\\CustomData.bin'; $d=Join-Path $env:SystemDrive 'AzureData\\crabbox-bootstrap.ps1'; Copy-Item -Force $p $d; & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $d"`;
 }
 
-function azureRandomAdminPassword(): string {
+export function azureRandomAdminPassword(): string {
   const bytes = new Uint8Array(18);
   crypto.getRandomValues(bytes);
   let binary = "";
@@ -2601,7 +3244,7 @@ function networkPath(rg: string, kind: string, name: string): string {
   return `/resourceGroups/${rg}/providers/Microsoft.Network/${kind}/${name}`;
 }
 
-function azureImageReference(value: string):
+export function azureImageReference(value: string):
   | { id: string }
   | {
       publisher: string;
@@ -2750,7 +3393,7 @@ function azureDiskAttachmentIDs(disk: AzureDisk): string[] {
   ].toSorted();
 }
 
-function azureDiskAttachmentsMatchVM(
+export function azureDiskAttachmentsMatchVM(
   disk: AzureDisk,
   expectedVMID: string,
   requireAttachment = false,
@@ -2765,13 +3408,13 @@ function azureDiskAttachmentsMatchVM(
   );
 }
 
-function azureVMReferencesOnlyNIC(vm: AzureVM, expectedNICID: string): boolean {
+export function azureVMReferencesOnlyNIC(vm: AzureVM, expectedNICID: string): boolean {
   return (vm.properties?.networkProfile?.networkInterfaces ?? []).every((networkInterface) =>
     azureResourceIDsEqual(networkInterface.id, expectedNICID),
   );
 }
 
-function azureVMHasDataDisks(vm: AzureVM): boolean {
+export function azureVMHasDataDisks(vm: AzureVM): boolean {
   return (vm.properties?.storageProfile?.dataDisks ?? []).length > 0;
 }
 
@@ -2787,7 +3430,7 @@ function azureDeleteOptionIsSafe(value: string | undefined): boolean {
   return !normalized || normalized === "detach";
 }
 
-function azureVMHasCascadeDelete(vm: AzureVM): boolean {
+export function azureVMHasCascadeDelete(vm: AzureVM): boolean {
   const osDisk = vm.properties?.storageProfile?.osDisk;
   if (!azureVMUsesEphemeralOSDisk(vm) && !azureDeleteOptionIsSafe(osDisk?.deleteOption)) {
     return true;
@@ -2800,7 +3443,7 @@ function azureVMHasCascadeDelete(vm: AzureVM): boolean {
   );
 }
 
-function azureNICHasCascadeDelete(nic: AzureNIC): boolean {
+export function azureNICHasCascadeDelete(nic: AzureNIC): boolean {
   return (nic.properties?.ipConfigurations ?? []).some(
     (configuration) =>
       !azureDeleteOptionIsSafe(configuration.properties?.publicIPAddress?.deleteOption),
@@ -2902,13 +3545,13 @@ function azureNICServiceAssociationTopology(nic: AzureNIC): Record<string, strin
   };
 }
 
-function azureNICHasDisqualifyingServiceAssociation(nic: AzureNIC): boolean {
+export function azureNICHasDisqualifyingServiceAssociation(nic: AzureNIC): boolean {
   return Object.values(azureNICServiceAssociationTopology(nic)).some(
     (associations) => associations.length > 0,
   );
 }
 
-function azureNICReferencesOnlyPIP(
+export function azureNICReferencesOnlyPIP(
   nic: AzureNIC,
   expectedPIPID: string,
   canonicalPIPPresent: boolean,
@@ -2924,7 +3567,7 @@ function azureNICReferencesOnlyPIP(
   );
 }
 
-function azurePublicIPAttachmentMatchesNIC(
+export function azurePublicIPAttachmentMatchesNIC(
   pip: AzurePublicIP,
   nic: AzureNIC | undefined,
   expectedPIPID: string | undefined,
@@ -3139,7 +3782,7 @@ function azureReconciliationIdentityEntries(
   });
 }
 
-function azureReconciliationResourceIdentity(resources: AzureLeaseResource[]): string {
+export function azureReconciliationResourceIdentity(resources: AzureLeaseResource[]): string {
   return JSON.stringify(azureReconciliationIdentityEntries(resources, true));
 }
 
@@ -3335,6 +3978,171 @@ const azureOwnedDeleteResourceKind: Record<
   disk: "disks",
 };
 
+function azureCleanupIdentityView(value: string): AzureReconciliationIdentityEntry[] {
+  return azureStableResourceIdentityEntries(value).map(({ labels: _labels, ...entry }) => entry);
+}
+
+function azureRecoveryAuditBoundToLease(
+  audit: AzureCleanupRecoveryAudit,
+  lease: OwnedDeleteLease,
+  scope: string,
+): boolean {
+  return (
+    audit.version === 1 &&
+    audit.basis === "operator-confirmed-public-ip-absence" &&
+    audit.leaseID === lease.id &&
+    audit.slug === (lease.slug ?? "") &&
+    audit.owner === lease.owner &&
+    audit.cloudID === lease.cloudID &&
+    audit.providerScope === scope &&
+    typeof audit.actor === "string" &&
+    Boolean(audit.actor.trim()) &&
+    audit.actor.length <= 256 &&
+    typeof audit.confirmedAt === "string" &&
+    Number.isFinite(Date.parse(audit.confirmedAt)) &&
+    typeof audit.claimFingerprint === "string" &&
+    /^[a-f0-9]{64}$/.test(audit.claimFingerprint)
+  );
+}
+
+function azureCleanupRecoveryAuditView(
+  audit: AzureCleanupRecoveryAudit,
+): AzureCleanupRecoveryAudit {
+  return {
+    version: audit.version,
+    basis: audit.basis,
+    leaseID: audit.leaseID,
+    slug: audit.slug,
+    owner: audit.owner,
+    cloudID: audit.cloudID,
+    providerScope: audit.providerScope,
+    actor: audit.actor,
+    confirmedAt: audit.confirmedAt,
+    claimFingerprint: audit.claimFingerprint,
+    originalStableResourceIdentity: azureCleanupIdentityView(
+      JSON.stringify(audit.originalStableResourceIdentity),
+    ),
+    previousDeletedStableResourceIdentity: azureCleanupIdentityView(
+      JSON.stringify(audit.previousDeletedStableResourceIdentity),
+    ),
+    acknowledgedMissingResourceIdentity: azureCleanupIdentityView(
+      JSON.stringify([audit.acknowledgedMissingResourceIdentity]),
+    )[0]!,
+    remainingDiskIdentity: azureCleanupIdentityView(
+      JSON.stringify([audit.remainingDiskIdentity]),
+    )[0]!,
+  };
+}
+
+function azureRecoveryDiskDetached(entry: AzureReconciliationIdentityEntry): boolean {
+  return (
+    entry.kind === "disks" &&
+    (entry.topology["managedBy"] === undefined || entry.topology["managedBy"] === "") &&
+    (entry.topology["managedByExtended"] === undefined ||
+      (Array.isArray(entry.topology["managedByExtended"]) &&
+        entry.topology["managedByExtended"].length === 0))
+  );
+}
+
+// Keep operator-acknowledged absence separate from successful DELETE receipts.
+function azureEffectiveCleanupProgress(claim?: AzureOwnedDeleteClaim): string | undefined {
+  if (!claim?.recovery) return claim?.deletedStableResourceIdentity;
+  const deleted = azureStableResourceIdentityEntries(claim.deletedStableResourceIdentity ?? "[]");
+  const acknowledged = claim.recovery.acknowledgedMissingResourceIdentity;
+  if (deleted.some((entry) => entry.kind === acknowledged.kind)) {
+    throw new Error("Azure cleanup recovery duplicates deletion evidence");
+  }
+  const order = Object.values(azureOwnedDeleteResourceKind);
+  return JSON.stringify(
+    [...deleted, acknowledged].toSorted(
+      (left, right) => order.indexOf(left.kind) - order.indexOf(right.kind),
+    ),
+  );
+}
+
+function azureCleanupRecoveryValid(claim: AzureOwnedDeleteClaim): boolean {
+  if (claim.version !== 3) return claim.recovery === undefined;
+  try {
+    const audit = claim.recovery;
+    if (
+      !audit ||
+      audit.version !== 1 ||
+      audit.basis !== "operator-confirmed-public-ip-absence" ||
+      audit.leaseID !== claim.leaseID ||
+      audit.slug !== claim.slug ||
+      audit.owner !== claim.owner ||
+      audit.cloudID !== claim.cloudID ||
+      audit.providerScope !== claim.providerScope ||
+      typeof audit.actor !== "string" ||
+      !audit.actor.trim() ||
+      audit.actor.length > 256 ||
+      !Number.isFinite(Date.parse(audit.confirmedAt)) ||
+      !/^[a-f0-9]{64}$/.test(audit.claimFingerprint) ||
+      claim.preparing ||
+      claim.pendingDeletion ||
+      claim.partialStableResourceIdentity ||
+      claim.resourceIdentity ||
+      !claim.stableResourceIdentity ||
+      !claim.deletedStableResourceIdentity
+    )
+      return false;
+    const stable = azureCleanupIdentityView(claim.stableResourceIdentity);
+    const deleted = azureStableResourceIdentityEntries(claim.deletedStableResourceIdentity);
+    const before = azureStableResourceIdentityEntries(
+      JSON.stringify(audit.previousDeletedStableResourceIdentity),
+    );
+    if (
+      stable.length !== 4 ||
+      stable.some(
+        (entry, index) =>
+          entry.kind !== Object.values(azureOwnedDeleteResourceKind)[index] ||
+          !entry.id ||
+          !entry.immutableID ||
+          !entry.location,
+      ) ||
+      JSON.stringify(stable) !==
+        JSON.stringify(
+          azureCleanupIdentityView(JSON.stringify(audit.originalStableResourceIdentity)),
+        ) ||
+      before.length !== 2 ||
+      before[0]?.kind !== "virtualMachines" ||
+      before[1]?.kind !== "networkInterfaces" ||
+      deleted.length < 2 ||
+      deleted.length > 3 ||
+      !before.every((entry, index) =>
+        azureStableIdentityEntryExactlyMatches(entry, deleted[index]!),
+      ) ||
+      (deleted.length === 3 && deleted[2]?.kind !== "disks") ||
+      !azureStableResourceIdentityDeletionProgressValid(
+        claim.stableResourceIdentity,
+        undefined,
+        JSON.stringify(before),
+      ) ||
+      !azureStableIdentityEntryExactlyMatches(
+        stable[2]!,
+        audit.acknowledgedMissingResourceIdentity,
+      ) ||
+      !azureRecoveryDiskDetached(audit.remainingDiskIdentity)
+    )
+      return false;
+    const initialProgress = JSON.stringify([...before, audit.acknowledgedMissingResourceIdentity]);
+    return (
+      azureStableResourceIdentityMatches(
+        claim.stableResourceIdentity,
+        JSON.stringify([audit.remainingDiskIdentity]),
+        initialProgress,
+      ) &&
+      azureStableResourceIdentityDeletionProgressValid(
+        claim.stableResourceIdentity,
+        undefined,
+        azureEffectiveCleanupProgress(claim),
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
 function azureOwnedDeleteClaimsShareSequence(
   left: AzureOwnedDeleteClaim,
   right: AzureOwnedDeleteClaim,
@@ -3348,12 +4156,15 @@ function azureOwnedDeleteClaimsShareSequence(
     left.cloudID === right.cloudID &&
     left.providerScope === right.providerScope &&
     left.preparing === right.preparing &&
+    left.completed === right.completed &&
+    JSON.stringify(left.pendingDeletion) === JSON.stringify(right.pendingDeletion) &&
     left.canonicalVMID === right.canonicalVMID &&
     left.canonicalNICID === right.canonicalNICID &&
     left.resourceIdentity === right.resourceIdentity &&
     left.stableResourceIdentity === right.stableResourceIdentity &&
     left.partialStableResourceIdentity === right.partialStableResourceIdentity &&
-    JSON.stringify(left.disk) === JSON.stringify(right.disk)
+    JSON.stringify(left.disk) === JSON.stringify(right.disk) &&
+    JSON.stringify(left.recovery) === JSON.stringify(right.recovery)
   );
 }
 
@@ -3641,6 +4452,13 @@ function azureSnapshotProviderImage(
     out.resourceID = snapshot.id;
     out.snapshots = [snapshot.id];
   }
+  if (snapshot.properties?.uniqueId) out.immutableID = snapshot.properties.uniqueId;
+  if (snapshot.tags?.["crabbox_checkpoint_token"]) {
+    out.checkpointOwnershipHash = snapshot.tags["crabbox_checkpoint_token"];
+  }
+  if (snapshot.tags?.["crabbox_checkpoint_lease"]) {
+    out.checkpointSourceLeaseID = snapshot.tags["crabbox_checkpoint_lease"];
+  }
   return out;
 }
 
@@ -3691,9 +4509,29 @@ function azureVMNotFound(error: unknown, name: string): boolean {
   return azureResourceNotFound(error, "virtualMachines", name);
 }
 
+export function azureSnapshotNotFound(error: unknown, canonicalResourceID: string): boolean {
+  if (!(error instanceof AzureHTTPError) || error.status !== 404) return false;
+  const body = error.body.toLowerCase();
+  if (!body.includes("resourcenotfound")) return false;
+  const expected = canonicalResourceID.toLowerCase();
+  if (body.includes(expected)) return true;
+  const scope = expected.match(
+    /^\/subscriptions\/([^/]+)\/resourcegroups\/([^/]+)\/providers\/(microsoft\.compute\/snapshots\/[^/]+)$/,
+  );
+  if (!scope || !body.includes(scope[3]!)) return false;
+  const mentionedSubscription = body.match(/\/subscriptions\/([^/\s'"]+)/);
+  const mentionedGroup = body.match(/\/resourcegroups\/([^/\s'"]+)/);
+  return (
+    (!mentionedSubscription || mentionedSubscription[1] === scope[1]) &&
+    (!mentionedGroup || mentionedGroup[1] === scope[2])
+  );
+}
+
 function azureResourceNotFound(error: unknown, kind: string, name: string): boolean {
   if (!(error instanceof AzureHTTPError) || error.status !== 404) return false;
-  const namespace = kind === "virtualMachines" || kind === "disks" ? "compute" : "network";
+  const namespace = ["virtualMachines", "disks", "snapshots", "images"].includes(kind)
+    ? "compute"
+    : "network";
   const body = error.body.toLowerCase();
   return (
     body.includes("resourcenotfound") &&
@@ -3756,7 +4594,10 @@ export function preserveNonCrabboxRules(rules: AzureSecurityRule[]): AzureSecuri
   return rules.filter((rule) => !rule.name?.startsWith("crabbox-ssh-"));
 }
 
-function azureCrabboxSSHRulesMatch(existing: AzureSecurityRule[], desired: AzureSecurityRule[]) {
+export function azureCrabboxSSHRulesMatch(
+  existing: AzureSecurityRule[],
+  desired: AzureSecurityRule[],
+) {
   const existingCrabbox = existing.filter((rule) => rule.name?.startsWith("crabbox-ssh-"));
   if (existingCrabbox.length !== desired.length) return false;
   const existingKeys = new Set(existingCrabbox.map(azureSecurityRuleKey));
@@ -3963,7 +4804,7 @@ function azureVMCreateTimeoutMs(
   return azureSpotFallbackTimeoutMs(config) ?? DEFAULT_AZURE_VM_CREATE_TIMEOUT_MS;
 }
 
-function azureAttemptNameSeed(
+export function azureAttemptNameSeed(
   leaseID: string,
   location: string,
   market: "spot" | "on-demand",

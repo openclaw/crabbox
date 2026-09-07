@@ -583,10 +583,17 @@ func (b *backend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseV
 }
 
 func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *backend) ReleaseLeaseWithOutcome(ctx context.Context, req core.ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	var outcome core.ReleaseLeaseOutcome
 	if err := core.ValidateLeaseTargetProviderIdentity(req.Lease, req.ExpectedProviderIdentity); err != nil {
-		return err
+		return outcome, err
 	}
-	return b.deleteServer(ctx, b.cfg, req.Lease.Server)
+	err := b.deleteServerWithOutcome(ctx, req.Lease.Server, &outcome)
+	return outcome, err
 }
 
 func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
@@ -602,15 +609,11 @@ func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, 
 	if err := validateVastServer(server); err != nil {
 		return core.Server{}, err
 	}
-	claimMetadata := server.Labels
 	cfg := b.cfg
 	if req.IdleTimeout > 0 {
 		cfg.IdleTimeout = req.IdleTimeout
 	}
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, b.now())
-	// Provider labels are deliberately sanitized, but these local-only values
-	// must remain exact so cleanup stays bound to the original endpoint/account.
-	server.Labels = preserveVastClaimMetadata(server.Labels, claimMetadata)
 	if claim, ok, err := core.ReadLeaseClaimWithPresence(req.Lease.LeaseID); err == nil && ok {
 		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, claim, server.Labels); err != nil {
 			return core.Server{}, err
@@ -666,6 +669,10 @@ func (b *backend) prepareCleanupServer(server core.Server) (core.Server, error) 
 }
 
 func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.Server) error {
+	return b.deleteServerWithOutcome(ctx, server, &core.ReleaseLeaseOutcome{})
+}
+
+func (b *backend) deleteServerWithOutcome(ctx context.Context, server core.Server, outcome *core.ReleaseLeaseOutcome) error {
 	if err := validateVastServer(server); err != nil {
 		return err
 	}
@@ -720,6 +727,7 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 			if err := client.DestroyInstance(ctx, instanceID); err != nil && !isVastNotFound(err) {
 				return err
 			}
+			outcome.Terminal = true
 			return nil
 		}); err != nil {
 			return fmt.Errorf("finalize vast cleanup claim: %w", err)

@@ -200,8 +200,8 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	if err != nil {
 		return LeaseTarget{}, rollback(err)
 	}
-	if item.Name != name {
-		return LeaseTarget{}, rollback(exit(5, "machine0 create returned mismatched machine name: expected %s, found %s", name, item.Name))
+	if err := validateCreatedMachine(item, name, cfg.Machine0.Size); err != nil {
+		return LeaseTarget{}, rollback(err)
 	}
 	cfg = effectiveMachine0Config(cfg, item)
 	boundClaim, err := b.bindRecoveryClaim(recoveryClaim, item, cfg)
@@ -327,18 +327,88 @@ func machine0BarePublicKey(value string) ssh.PublicKey {
 	return key
 }
 
+func resolveClaim(identifier string) (LeaseClaim, bool, error) {
+	identifier = strings.TrimSpace(identifier)
+	claim, exists, err := core.ResolveLeaseClaimForProvider(identifier, providerName)
+	if err != nil || !exists {
+		return claim, exists, err
+	}
+	if err := validateResolvedMachine0Claim(identifier, claim); err != nil {
+		return LeaseClaim{}, false, err
+	}
+	return claim, true, nil
+}
+
+func validateResolvedMachine0Claim(identifier string, claim LeaseClaim) error {
+	if claim.Provider == core.FixedMachine0ClaimProvider || claim.FixedCreateIntent != nil {
+		var err error
+		if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == fixedMachine0IntentReleased {
+			err = fixedMachine0LeaseKind.ValidateTerminalClaim(claim, LeaseClaim{}, claim.LeaseID, validateFixedMachine0TerminalClaimExtra)
+		} else {
+			_, err = fixedMachine0ClaimAttempt(claim)
+		}
+		if err != nil {
+			return err
+		}
+	} else if firstNonBlank(claim.Labels["machine0_name"], claim.CloudID) == "" {
+		return exit(4, "machine0 lease %q has no bound native resource", identifier)
+	}
+	return nil
+}
+
 func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+	return b.resolve(ctx, req, nil)
+}
+
+func (b *backend) ResolveRunLeaseUnderClaim(ctx context.Context, req ResolveRequest, original core.LeaseClaim) (LeaseTarget, error) {
+	return b.resolve(ctx, req, &original)
+}
+
+func (b *backend) resolve(ctx context.Context, req ResolveRequest, original *LeaseClaim) (LeaseTarget, error) {
+	if req.Reclaim && req.Repo.Root == "" {
+		return LeaseTarget{}, exit(2, "machine0 --reclaim requires repository context")
+	}
 	baseCfg := b.configForRun()
-	claim, claimed, err := resolveClaim(req.ID)
+	var claim LeaseClaim
+	var claimed bool
+	var err error
+	if original == nil {
+		claim, claimed, err = resolveClaim(req.ID)
+	} else {
+		claim, claimed = *original, true
+		err = validateResolvedMachine0Claim(req.ID, claim)
+	}
 	if err != nil {
 		return LeaseTarget{}, err
 	}
 	lookup := strings.TrimSpace(req.ID)
 	if claimed {
-		lookup = firstNonBlank(claim.Labels["machine0_name"], claim.CloudID, lookup)
+		lookup = firstNonBlank(claim.Labels["machine0_name"], claim.CloudID)
 	}
 	var item machine
-	if !claimed && core.IsCanonicalLeaseID(lookup) {
+	if claimed && (claim.Provider == core.FixedMachine0ClaimProvider || claim.FixedCreateIntent != nil) {
+		if req.Repo.Root != "" && claim.RepoRoot != "" && req.Repo.Root != claim.RepoRoot && !req.Reclaim {
+			return LeaseTarget{}, exit(4, "lease_id_conflict: fixed Machine0 lease %s is bound to another repository", claim.LeaseID)
+		}
+		item, err = b.resolveFixedMachine0(ctx, claim)
+		if err == nil && item.ID != "" && original == nil && !req.NoLocalStateMutations {
+			claim, err = b.bindFixedMachine0Claim(claim, item)
+		}
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		if item.ID == "" {
+			if claim.CloudID == "" && claim.FixedCreateIntent.State != fixedMachine0IntentReleased {
+				return LeaseTarget{}, exit(4, "fixed Machine0 lease %s has no observed resource; retain its claim and inspect the create attempt", claim.LeaseID)
+			}
+			server := Server{Provider: providerName, CloudID: claim.CloudID, ImmutableID: claim.CloudImmutableID, Status: "deleted", Labels: map[string]string{"lease": claim.LeaseID, "slug": claim.Slug, "state": "deleted"}}
+			if claim.FixedCreateIntent.State == fixedMachine0IntentReleased {
+				server.Status, server.Labels["state"] = "released", "released"
+			}
+			core.SetServerLeaseClaimSnapshot(&server, claim, true)
+			return LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
+		}
+	} else if !claimed && core.IsCanonicalLeaseID(lookup) {
 		machines, err := b.api.List(ctx)
 		if err != nil {
 			return LeaseTarget{}, err
@@ -367,6 +437,7 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	if claimed && claim.CloudID != "" && claim.CloudID != item.ID {
 		return LeaseTarget{}, exit(4, "machine0 lease=%s resource identity changed: expected %s, found %s", claim.LeaseID, claim.CloudID, item.ID)
 	}
+	// Explicit-name status probes may discover SSH access without adopting a claim.
 	if !claimed && !req.Reclaim && !req.ReleaseOnly && !req.StatusOnly {
 		return LeaseTarget{}, exit(4, "machine0 machine %q has no Crabbox lease claim; reuse it with explicit --reclaim", item.Name)
 	}
@@ -384,29 +455,67 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		claim = LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: machineScope(item.ID)}
 	}
 	server := b.serverFromMachine(item, claim, cfg)
+	if fixedMachine0LeaseKind.IsFixedClaim(claim) {
+		core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	}
 	if req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe) {
 		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
-	resetHostTrust := !machineRunning(item.Status)
-	if resetHostTrust {
-		item, err = b.waitForResolveRunning(ctx, item, cfg.Machine0.CreateTimeout)
-		if err != nil {
+	prepare := func() (LeaseTarget, error) {
+		resetHostTrust := !machineRunning(item.Status)
+		if resetHostTrust {
+			item, err = b.waitForResolveRunning(ctx, item, cfg.Machine0.CreateTimeout, true, func(previous, observed machine) (machine, error) {
+				if fixedMachine0LeaseKind.IsFixedClaim(claim) {
+					return attestFixedMachine0Detail(claim, previous, observed)
+				}
+				return observed, nil
+			})
+			if err != nil {
+				return LeaseTarget{}, err
+			}
+			cfg = effectiveMachine0Config(baseCfg, item)
+			server = b.serverFromMachine(item, claim, cfg)
+		}
+		return b.prepareLeaseWithOptions(ctx, item, server, leaseID, machine0PrepareOptions{Check: req.Prepare || req.ReadyProbe, ResetHostTrust: resetHostTrust})
+	}
+	if original != nil {
+		// Core already owns the claim transaction; preparation keeps its
+		// checkpoint fence without reentering endpoint publication.
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
 			return LeaseTarget{}, err
 		}
-		cfg = effectiveMachine0Config(baseCfg, item)
-		server = b.serverFromMachine(item, claim, cfg)
+		return prepare()
 	}
-	lease, err := b.prepareLeaseWithOptions(ctx, item, server, leaseID, machine0PrepareOptions{Check: req.Prepare || req.ReadyProbe, ResetHostTrust: resetHostTrust})
+	if claimed {
+		var lease LeaseTarget
+		updated, _, _, err := core.UpdateLeaseClaimEndpointIfUnchangedAction(leaseID, claim, func() (Server, SSHTarget, bool, error) {
+			// Admission reserves under this claim fence, even before it binds a
+			// new revision. Check the journal here and hold through Start/SSH/write.
+			if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+				return Server{}, SSHTarget{}, false, err
+			}
+			var err error
+			lease, err = prepare()
+			return lease.Server, lease.SSH, err == nil, err
+		})
+		if err == nil && req.Reclaim {
+			expected := updated
+			updated, err = core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(leaseID, slug, cfg, expected.ProviderScope, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, true, expected, true, func() error {
+				return core.AuthorizeCheckpointRelease(expected, "")
+			})
+		}
+		if err == nil && fixedMachine0LeaseKind.IsFixedClaim(updated) {
+			core.SetServerLeaseClaimSnapshot(&lease.Server, updated, true)
+		}
+		return lease, err
+	}
+	lease, err := prepare()
 	if err != nil {
 		return LeaseTarget{}, err
 	}
 	if !claimed && req.Reclaim {
 		lease.Server.Labels = machineLabels(cfg, item, leaseID, slug, true, b.now())
 		if err := claimLease(leaseID, slug, cfg, req.Repo.Root, true, lease.Server, lease.SSH); err != nil {
-			return LeaseTarget{}, err
-		}
-	} else if claimed {
-		if _, err := updateClaim(leaseID, claim, lease.Server, lease.SSH); err != nil {
 			return LeaseTarget{}, err
 		}
 	}
@@ -438,6 +547,9 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 }
 
 func (b *backend) AuthorizeStatusTouchClaim(_ context.Context, lease LeaseTarget, claim LeaseClaim) error {
+	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+		return err
+	}
 	resourceID := strings.TrimSpace(lease.Server.CloudID)
 	if !core.IsCanonicalLeaseID(lease.LeaseID) || claim.LeaseID != lease.LeaseID ||
 		lease.Server.Provider != providerName || !isMachine0ClaimProvider(claim.Provider) ||
@@ -451,30 +563,23 @@ func (b *backend) AuthorizeStatusTouchClaim(_ context.Context, lease LeaseTarget
 }
 
 func (b *backend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
-	expected, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server)
-	if !set || !exists {
-		return Server{}, exit(4, "machine0 lease %s has no exact claim snapshot; refusing touch", req.Lease.LeaseID)
-	}
-	if err := b.AuthorizeStatusTouchClaim(ctx, req.Lease, expected); err != nil {
-		return Server{}, err
-	}
-	if req.IdleTimeoutOverride != nil && *req.IdleTimeoutOverride <= 0 {
-		return Server{}, exit(2, "machine0 lease %s idle timeout override must be positive", req.Lease.LeaseID)
-	}
-
-	cfg := b.configForRun()
-	if expected.IdleTimeoutSeconds > 0 {
-		cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
-	}
-	labels := shared.CloneLabels(expected.Labels)
-	for _, key := range machineLabelKeys {
-		if value := req.Lease.Server.Labels[key]; value != "" {
-			labels[key] = value
-		}
-	}
-	now := b.now()
-	labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, req.State, now, req.IdleTimeoutOverride)
-	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
+		Provider: "machine0", Authorize: b.AuthorizeStatusTouchClaim,
+		Prepare: func(expected LeaseClaim) (map[string]string, time.Time) {
+			cfg := b.configForRun()
+			if expected.IdleTimeoutSeconds > 0 {
+				cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
+			}
+			labels := shared.CloneLabels(expected.Labels)
+			for _, key := range machineLabelKeys {
+				if value := req.Lease.Server.Labels[key]; value != "" {
+					labels[key] = value
+				}
+			}
+			now := b.now()
+			return core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, req.State, now, req.IdleTimeoutOverride), now
+		},
+	})
 	if err != nil {
 		return Server{}, err
 	}
@@ -485,15 +590,32 @@ func (b *backend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
 }
 
 func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *backend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	var outcome core.ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *backend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	if err := core.ValidateLeaseTargetProviderIdentity(req.Lease, req.ExpectedProviderIdentity); err != nil {
 		return err
+	}
+	if req.CheckpointID != "" {
+		return b.releaseCheckpointSource(ctx, req, outcome)
 	}
 	identifier := firstNonBlank(req.Lease.LeaseID, req.Lease.Server.Labels["lease"], req.Lease.Server.CloudID, req.Lease.Server.Name)
 	claim, claimed, err := resolveClaim(identifier)
 	if err != nil {
 		return err
 	}
-	if claimed && claim.CloudID == "" && claim.Labels["recovery"] == "create-pending" {
+	if claimed && fixedMachine0LeaseKind.IsFixedClaim(claim) && (claim.FixedCreateIntent.State == fixedMachine0IntentReleased || normalizeReleasePolicy(b.configForRun().Machine0.ReleasePolicy) == "destroy") {
+		return b.destroyClaimedMachineWithOutcome(ctx, claim, req.Lease, outcome)
+	}
+	if claimed && claim.Provider == providerName && claim.CloudID == "" && claim.Labels["recovery"] == "create-pending" {
 		name := machine0MachineName(claim.LeaseID, claim.Slug)
 		if claim.ProviderScope != machine0NameScope(name) || claim.Labels["machine0_name"] != name {
 			return exit(2, "refusing machine0 recovery release for lease=%s: pending machine name does not match its durable claim", claim.LeaseID)
@@ -502,16 +624,23 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 			return exit(2, "pending machine0 lease=%s cannot be suspended before its resource identity is known; use --machine0-release-policy destroy", claim.LeaseID)
 		}
 		// Pending claims retain only the exact-name deletion already authorized by create rollback.
-		return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error { return b.api.Remove(ctx, name) })
+		return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+			err := b.api.Remove(ctx, name)
+			outcome.Terminal = err == nil
+			return err
+		})
 	}
 	claim, item, err := b.releaseTarget(ctx, req.Lease)
 	if err != nil {
 		return err
 	}
+	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+		return err
+	}
 	if normalizeReleasePolicy(b.configForRun().Machine0.ReleasePolicy) == "suspend" {
 		return b.suspendClaimedMachine(ctx, claim, item)
 	}
-	return fixedMachine0LeaseKind.FinalizeAfterCleanup(claim, func() error { return b.api.Remove(ctx, item.Name) })
+	return b.destroyClaimedMachineWithOutcome(ctx, claim, LeaseTarget{LeaseID: claim.LeaseID, Server: b.serverFromMachine(item, claim, b.configForRun())}, outcome)
 }
 
 func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
@@ -528,6 +657,11 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	removed := 0
 	for _, item := range machines {
 		claim := claims[item.ID]
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			liveClaims[claim.LeaseID] = true
+			fmt.Fprintf(b.rt.Stderr, "skip machine name=%s reason=checkpoint hold: %v\n", item.Name, err)
+			continue
+		}
 		if claim.LeaseID != "" {
 			liveClaims[claim.LeaseID] = true
 		}
@@ -554,18 +688,29 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			if err := b.suspendClaimedMachine(ctx, claim, item); err != nil {
 				return err
 			}
-		} else if err := fixedMachine0LeaseKind.FinalizeAfterCleanup(claim, func() error { return b.api.Remove(ctx, item.Name) }); err != nil {
+		} else if err := b.destroyClaimedMachine(ctx, claim, LeaseTarget{LeaseID: claim.LeaseID, Server: server}); err != nil {
 			return err
 		}
 		removed++
 	}
 	claimsRemoved := 0
 	for _, claim := range claims {
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=checkpoint hold: %v\n", claim.LeaseID, err)
+			continue
+		}
 		if claim.LeaseID == "" || liveClaims[claim.LeaseID] {
 			continue
 		}
 		if fixedMachine0LeaseKind.IsFixedClaim(claim) && claim.FixedCreateIntent.State == fixedMachine0IntentReleased {
 			continue
+		}
+		if fixedMachine0LeaseKind.IsFixedClaim(claim) {
+			item, err := b.resolveFixedMachine0(ctx, claim)
+			if err != nil || item.ID != "" {
+				fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=unresolved fixed ownership: %v\n", claim.LeaseID, err)
+				continue
+			}
 		}
 		if claim.CloudID == "" || claim.ProviderScope != machineScope(claim.CloudID) {
 			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=ownership: incomplete Machine0 identity\n", claim.LeaseID)
@@ -575,7 +720,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s reason=missing machine\n", claim.LeaseID)
 			continue
 		}
-		if err := fixedMachine0LeaseKind.FinalizeAfterCleanup(claim, nil); err != nil {
+		if err := b.destroyClaimedMachine(ctx, claim, LeaseTarget{LeaseID: claim.LeaseID}); err != nil {
 			return err
 		}
 		claimsRemoved++
@@ -605,17 +750,39 @@ func (b *backend) Pause(ctx context.Context, req PauseRequest) error {
 	if err != nil {
 		return err
 	}
+	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+		return err
+	}
 	return b.suspendClaimedMachine(ctx, claim, item)
 }
 
 func (b *backend) Resume(ctx context.Context, req ResumeRequest) error {
+	claim, _, err := resolveClaim(req.ID)
+	if err != nil {
+		return err
+	}
+	if fixedMachine0LeaseKind.IsFixedClaim(claim) {
+		lease, err := b.Resolve(ctx, ResolveRequest{ID: req.ID, Prepare: true})
+		if err == nil && lease.Server.Status != "ready" {
+			return exit(4, "fixed Machine0 lease %s has no live resource to resume", claim.LeaseID)
+		}
+		return err
+	}
 	claim, item, err := b.releaseTarget(ctx, LeaseTarget{LeaseID: req.ID})
 	if err != nil {
 		return err
 	}
+	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+		return err
+	}
 	resetHostTrust := !machineRunning(item.Status)
 	if resetHostTrust {
-		if err := withClaimUnchanged(claim.LeaseID, claim, func() error { return b.api.Start(ctx, item.Name) }); err != nil {
+		if err := withClaimUnchanged(claim.LeaseID, claim, func() error {
+			if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+				return err
+			}
+			return b.api.Start(ctx, item.Name)
+		}); err != nil {
 			return err
 		}
 		item, err = b.waitForRunningAfterStart(ctx, item.Name, b.configForRun().Machine0.CreateTimeout)
@@ -690,6 +857,10 @@ func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, 
 	return DoctorResult{Provider: providerName, Message: fmt.Sprintf("cli=ready auth=ready control_plane=ready inventory=ready ssh_key_prerequisites=checked mutation=false leases=%d sizes=%d runtime=%s version=%s", len(machines), len(sizes), probe, firstLine(version))}, nil
 }
 
+func (b *backend) SizeSelection() core.ProviderSizeSelection {
+	return core.ProviderSizeSelection{Selector: core.ProviderSizeSelectorType, EffectiveType: b.cfg.Machine0.Size, Region: b.cfg.Machine0.Region}
+}
+
 func (b *backend) SizeCatalog(ctx context.Context, _ bool) ([]core.ProviderSize, error) {
 	sizes, err := b.api.Sizes(ctx)
 	if err != nil {
@@ -735,15 +906,25 @@ func (b *backend) validateCatalogSelection(ctx context.Context, sizeName, region
 	return exit(2, "machine0 size %q is not in the live catalog; available: %s", sizeName, strings.Join(available, ","))
 }
 
+func validateCreatedMachine(item machine, name, size string) error {
+	if item.Name != name {
+		return exit(5, "machine0 create returned mismatched machine name: expected %s, found %s", name, item.Name)
+	}
+	if item.Size != size {
+		return exit(5, "machine0 create returned mismatched machine size: expected %s, found %s", size, item.Size)
+	}
+	return nil
+}
+
 func (b *backend) waitForRunning(ctx context.Context, name string, timeout time.Duration) (machine, error) {
 	return b.waitForRunningState(ctx, name, timeout, "")
 }
 
-func (b *backend) waitForRunningAfterStart(ctx context.Context, name string, timeout time.Duration) (machine, error) {
-	return b.waitForRunningState(ctx, name, timeout, "RUNNING after start")
+func (b *backend) waitForRunningAfterStart(ctx context.Context, name string, timeout time.Duration, observe ...func(machine, machine) (machine, error)) (machine, error) {
+	return b.waitForRunningState(ctx, name, timeout, "RUNNING after start", observe...)
 }
 
-func (b *backend) waitForRunningState(ctx context.Context, name string, timeout time.Duration, target string) (machine, error) {
+func (b *backend) waitForRunningState(ctx context.Context, name string, timeout time.Duration, target string, observe ...func(machine, machine) (machine, error)) (machine, error) {
 	return b.pollMachine(ctx, name, timeout, target, nil, func(_ context.Context, item machine) (bool, error) {
 		if done, err := runningMachineResult(item); done || err != nil {
 			return done, err
@@ -759,32 +940,36 @@ func (b *backend) waitForRunningState(ctx context.Context, name string, timeout 
 			return false, exit(5, "machine0 machine %s entered unexpected state %s after start", item.Name, item.Status)
 		}
 		return false, nil
-	})
+	}, observe...)
 }
 
-func (b *backend) waitForResolveRunning(ctx context.Context, initial machine, timeout time.Duration) (machine, error) {
+func (b *backend) waitForResolveRunning(ctx context.Context, initial machine, timeout time.Duration, allowStart bool, observe func(machine, machine) (machine, error)) (machine, error) {
 	started := false
-	return b.pollMachine(ctx, initial.Name, timeout, "RUNNING during resolve", &initial, func(observeCtx context.Context, item machine) (bool, error) {
+	first := &initial
+	if initial.ID == "" {
+		first = nil
+	}
+	return b.pollMachine(ctx, initial.Name, timeout, "RUNNING during resolve", first, func(observeCtx context.Context, item machine) (bool, error) {
 		if done, err := runningMachineResult(item); done || err != nil {
 			return done, err
 		}
 		switch {
-		case machineStopped(item.Status) && !started:
+		case machineStopped(item.Status) && allowStart && !started:
 			if err := b.api.Start(observeCtx, item.Name); err != nil {
 				return false, err
 			}
 			started = true
-		case !machinePending(item.Status) && !machineStopped(item.Status):
+		case !machineAcquirePending(item.Status) && !(allowStart && (machinePending(item.Status) || machineStopped(item.Status))):
 			return false, exit(5, "machine0 machine %s entered unexpected state %s while resolving", item.Name, item.Status)
 		}
 		return false, nil
-	})
+	}, observe)
 }
 
-func (b *backend) waitForSuspended(ctx context.Context, name string, timeout time.Duration) (machine, error) {
+func (b *backend) waitForSuspended(ctx context.Context, name string, timeout time.Duration, attest ...func(machine) error) (machine, error) {
 	item, err := b.waitForExactMachine(ctx, name, timeout, "SUSPENDED", "suspending", func(item machine) bool {
 		return machineRunning(item.Status) || machineStopped(item.Status) || machineSuspending(item.Status)
-	})
+	}, attest...)
 	if err == nil {
 		item.IP = ""
 	}
@@ -797,8 +982,13 @@ func (b *backend) waitForStopped(ctx context.Context, name string, timeout time.
 	})
 }
 
-func (b *backend) waitForExactMachine(ctx context.Context, name string, timeout time.Duration, target, phase string, pending func(machine) bool) (machine, error) {
+func (b *backend) waitForExactMachine(ctx context.Context, name string, timeout time.Duration, target, phase string, pending func(machine) bool, attest ...func(machine) error) (machine, error) {
 	return b.pollMachine(ctx, name, timeout, target, nil, func(_ context.Context, item machine) (bool, error) {
+		for _, check := range attest {
+			if err := check(item); err != nil {
+				return false, err
+			}
+		}
 		if strings.EqualFold(strings.TrimSpace(item.Status), target) {
 			return true, nil
 		}
@@ -819,16 +1009,34 @@ func (b *backend) pollMachine(
 	target string,
 	initial *machine,
 	check func(context.Context, machine) (bool, error),
+	observe ...func(machine, machine) (machine, error),
 ) (machine, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	var previous machine
+	if initial != nil {
+		previous = *initial
+	}
 	result, err := shared.Poll(waitCtx, 0, b.configForRun().Machine0.PollInterval, b.sleep, func(observeCtx context.Context) (machine, error) {
+		var item machine
+		var err error
 		if initial != nil {
-			item := *initial
+			item = *initial
 			initial = nil
-			return item, nil
+		} else {
+			item, err = b.api.Get(observeCtx, name)
+			if err != nil {
+				return machine{}, err
+			}
 		}
-		return b.api.Get(observeCtx, name)
+		for _, merge := range observe {
+			item, err = merge(previous, item)
+			if err != nil {
+				return machine{}, err
+			}
+		}
+		previous = item
+		return item, nil
 	}, func(checkCtx context.Context, item machine, fetchErr error) (bool, error) {
 		if fetchErr != nil {
 			return false, fetchErr
@@ -860,13 +1068,31 @@ func runningMachineResult(item machine) (bool, error) {
 
 func (b *backend) suspendClaimedMachine(ctx context.Context, claim LeaseClaim, item machine) error {
 	_, _, _, err := updateClaimAction(claim.LeaseID, claim, func() (Server, SSHTarget, bool, error) {
-		suspended := item
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			return Server{}, SSHTarget{}, false, err
+		}
 		var err error
+		if fixedMachine0LeaseKind.IsFixedClaim(claim) {
+			item, err = b.resolveFixedMachine0(ctx, claim)
+			if err != nil {
+				return Server{}, SSHTarget{}, false, err
+			}
+			if item.ID == "" {
+				return Server{}, SSHTarget{}, false, exit(4, "fixed Machine0 lease %s has no live resource", claim.LeaseID)
+			}
+		}
+		suspended := item
 		if !strings.EqualFold(strings.TrimSpace(item.Status), "SUSPENDED") {
 			if err := b.api.Suspend(ctx, item.Name); err != nil {
 				return Server{}, SSHTarget{}, false, err
 			}
-			suspended, err = b.waitForSuspended(ctx, item.Name, b.configForRun().Machine0.CreateTimeout)
+			suspended, err = b.waitForSuspended(ctx, item.Name, b.configForRun().Machine0.CreateTimeout, func(observed machine) error {
+				if fixedMachine0LeaseKind.IsFixedClaim(claim) {
+					_, err := attestFixedMachine0Detail(claim, item, observed)
+					return err
+				}
+				return nil
+			})
 			if err != nil {
 				return Server{}, SSHTarget{}, false, err
 			}
@@ -1005,6 +1231,17 @@ func (b *backend) releaseTarget(ctx context.Context, lease LeaseTarget) (LeaseCl
 		return LeaseClaim{}, machine{}, exit(2, "refusing to release machine0 machine without an exact local Crabbox claim")
 	}
 	lookup := firstNonBlank(claim.Labels["machine0_name"], claim.CloudID)
+	if fixedMachine0LeaseKind.IsFixedClaim(claim) {
+		item, err := b.resolveFixedMachine0(ctx, claim)
+		if err != nil {
+			return LeaseClaim{}, machine{}, err
+		}
+		if item.ID == "" {
+			return LeaseClaim{}, machine{}, exit(4, "fixed Machine0 lease %s has no live resource", claim.LeaseID)
+		}
+		claim, err = b.bindFixedMachine0Claim(claim, item)
+		return claim, item, err
+	}
 	item, err := b.api.Get(ctx, lookup)
 	if err != nil {
 		return LeaseClaim{}, machine{}, err
@@ -1141,6 +1378,9 @@ func machine0LeaseSuffix(leaseID string) string {
 }
 
 func shouldCleanupMachine0(server Server, claim LeaseClaim, hasClaim bool, now time.Time) (bool, string) {
+	if fixedMachine0LeaseKind.IsFixedClaim(claim) && claim.FixedCreateIntent.State == fixedMachine0IntentPrepared {
+		return false, "fixed creation incomplete; use stop with its lease ID"
+	}
 	if strings.EqualFold(server.Labels["keep"], "true") {
 		return false, "keep=true"
 	}

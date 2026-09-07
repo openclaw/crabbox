@@ -32,6 +32,12 @@ type ProviderConfigValidator interface {
 	ValidateConfig(cfg Config) error
 }
 
+// CoordinatorAcquireValidator keeps provider-owned creation policy at broker
+// acquisition; configuration checks must not prevent existing-lease cleanup.
+type CoordinatorAcquireValidator interface {
+	ValidateCoordinatorAcquire() error
+}
+
 // ProviderConfigDefaulter owns provider-specific defaults that must be applied
 // after generic config parsing and before target validation.
 type ProviderConfigDefaulter interface {
@@ -50,6 +56,24 @@ type ProviderArchitectureCapability interface {
 	SupportsArchitecture(cfg Config, architecture string) bool
 }
 
+type ProviderReadyPoolLeaseImageIdentity struct {
+	Provider string
+	Region   string
+	Project  string
+	Image    *CoordinatorLeaseImage
+}
+
+type ProviderReadyPoolImageIdentityRequest struct {
+	Identity CoordinatorReadyPoolImageIdentity
+	Lease    ProviderReadyPoolLeaseImageIdentity
+}
+
+// ProviderReadyPoolImageIdentityCapability owns provider-specific validation
+// of immutable image evidence returned with a typed ready-pool lease.
+type ProviderReadyPoolImageIdentityCapability interface {
+	ReadyPoolImageIdentityMatchesLease(ProviderReadyPoolImageIdentityRequest) bool
+}
+
 // ProviderConfigArchitectureDescriber describes an omitted architecture for
 // config diagnostics only. It must not probe the runtime or change execution.
 type ProviderConfigArchitectureDescriber interface {
@@ -61,6 +85,13 @@ type ProviderConfigArchitectureDescriber interface {
 // The adapter must preserve its historical normalization, including whitespace.
 type ProviderClaimScoper interface {
 	ClaimScope(cfg Config) string
+}
+
+// RunLeaseClaimResolver prepares an already-bound canonical lease while core
+// holds its claim lock. It must honor cancellation and must not acquire claim
+// locks or publish local claims; core validates and publishes the result once.
+type RunLeaseClaimResolver interface {
+	ResolveRunLeaseUnderClaim(context.Context, ResolveRequest, LeaseClaim) (LeaseTarget, error)
 }
 
 // ProviderDiagnosticSecretSource contributes runtime-only credentials to the
@@ -182,6 +213,25 @@ type ProviderSizeCatalogBackend interface {
 	SizeCatalog(ctx context.Context, refresh bool) ([]ProviderSize, error)
 }
 
+// ProviderSizeSelector declares how a live catalog name selects a machine.
+type ProviderSizeSelector string
+
+// ProviderSizeSelectorType uses catalog Name verbatim as the existing --type value.
+const ProviderSizeSelectorType ProviderSizeSelector = "type"
+
+// ProviderSizeSelectionBackend reports already-resolved provider configuration;
+// resource facts remain owned by SizeCatalog.
+type ProviderSizeSelectionBackend interface {
+	ProviderSizeCatalogBackend
+	SizeSelection() ProviderSizeSelection
+}
+
+type ProviderSizeSelection struct {
+	Selector      ProviderSizeSelector `json:"selector"`
+	EffectiveType string               `json:"effectiveType"`
+	Region        string               `json:"region"`
+}
+
 type ProviderSize struct {
 	Name                string            `json:"name"`
 	VCPU                int               `json:"vcpu"`
@@ -220,6 +270,12 @@ type SSHLeaseBackend interface {
 	ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error
 }
 
+// SSHRunActivityBackend keeps provider-owned idle activity alive after lease
+// admission, including setup and sync. Stop must cancel and join its work.
+type SSHRunActivityBackend interface {
+	BeginSSHRunActivity(context.Context, LeaseTarget) (stop func(), err error)
+}
+
 // SSHRunFailureEvidenceBackend optionally captures provider-owned state just
 // before an SSH command starts. The returned collector retains that baseline
 // inside the provider and returns only normalized evidence to core after a
@@ -236,7 +292,10 @@ type RunFailureEvidenceRequest struct {
 type RunFailureEvidenceCollector func(context.Context) (RunFailureEvidence, error)
 
 type RunFailureEvidence struct {
-	ResourceExhaustion ResourceExhaustionReason
+	ResourceExhaustion ResourceExhaustionReason `json:"resourceExhaustion,omitempty"`
+	// Hint and Details are optional, bounded presentation data, not classification inputs.
+	Hint    string            `json:"hint,omitempty"`
+	Details map[string]string `json:"details,omitempty"`
 }
 
 type ResourceExhaustionReason string
@@ -291,6 +350,8 @@ type DelegatedRunBackend interface {
 	Run(ctx context.Context, req RunRequest) (RunResult, error)
 	List(ctx context.Context, req ListRequest) ([]LeaseView, error)
 	Status(ctx context.Context, req StatusRequest) (StatusView, error)
+	// Stop owns local claim finalization, including retention. Callers must not
+	// remove the claim afterward: a replacement may exist once Stop returns.
 	Stop(ctx context.Context, req StopRequest) error
 }
 
@@ -300,11 +361,6 @@ type DelegatedRunBackend interface {
 type StopReclaimBackend interface {
 	Backend
 	ReclaimAndStop(ctx context.Context, req StopRequest) error
-}
-
-type DelegatedRunArtifactBackend interface {
-	Backend
-	CollectRunArtifacts(ctx context.Context, req DelegatedRunArtifactRequest) (DelegatedRunArtifactResult, error)
 }
 
 type DelegatedRunDownloadBackend interface {
@@ -357,6 +413,22 @@ type ReleaseLeaseReporter interface {
 	ReleaseLeaseMessage(lease LeaseTarget) string
 }
 
+// ReleaseLeaseOutcome describes the lease recovery outcome of one release invocation,
+// independently of errors finalizing local state. Zero means retained or unconfirmed.
+type ReleaseLeaseOutcome struct {
+	// Terminal means the release owner confirmed the end of the recoverable lease.
+	Terminal bool
+}
+
+// ReleaseLeaseOutcomeBackend performs the same guarded operation as ReleaseLease
+// once, preserving its ordinary error. Providers with retained or asynchronous
+// release semantics must implement this capability. Without it, a successful
+// ReleaseLease ends the recoverable lease; an error leaves the outcome unconfirmed.
+// Claim retention (including terminal receipts) does not determine this outcome.
+type ReleaseLeaseOutcomeBackend interface {
+	ReleaseLeaseWithOutcome(context.Context, ReleaseLeaseRequest) (ReleaseLeaseOutcome, error)
+}
+
 // ReleaseLeaseConnectionCleanupPolicy lets a provider defer generic connection
 // cleanup until after its guarded release succeeds.
 type ReleaseLeaseConnectionCleanupPolicy interface {
@@ -400,6 +472,9 @@ type NativeCheckpointCapability struct {
 	Kind              string
 	Direct            bool
 	CreateUnsupported string
+	RetireUnsupported string
+	ReplayCapture     bool
+	RetireSource      bool
 }
 
 type NativeCheckpointRequest struct {
@@ -427,7 +502,9 @@ type NativeCheckpointImage struct {
 	Provider     string
 	Kind         string
 	Region       string
+	AccountID    string
 	ResourceID   string
+	SnapshotIDs  []string
 	Architecture string
 	Direct       bool
 }
@@ -449,12 +526,37 @@ type NativeCheckpointCreateRequest struct {
 	Wait         bool
 	WaitTimeout  time.Duration
 	Stderr       io.Writer
+	Capture      *NativeCheckpointCapture
+	Metadata     map[string]string
+}
+
+// NativeCheckpointCapture is the host-owned operation journal. Provider metadata
+// is correlation only; source authority comes from the bound local claim.
+type NativeCheckpointCapture struct {
+	SourceDisposition string `json:"sourceDisposition"`
+	Phase             string `json:"phase"`
+	StrategyExplicit  bool   `json:"strategyExplicit,omitempty"`
+	SourceID          string `json:"sourceId"`
+	SourceName        string `json:"sourceName"`
+	SourceScope       string `json:"sourceScope"`
+	SourceRevision    string `json:"sourceRevision"`
+	SourceClaimedAt   string `json:"sourceClaimedAt"`
+	SourceIntent      string `json:"sourceIntent,omitempty"`
+	Error             string `json:"error,omitempty"`
+	DiscardFailed     bool   `json:"discardFailed,omitempty"`
 }
 
 type NativeCheckpointCreateResult struct {
 	Image    NativeCheckpointImage
 	Metadata map[string]string
 }
+
+// NativeCheckpointNotSubmittedError attests that this invocation never attempted
+// image submission. An empty result or a failed request cannot establish this.
+type NativeCheckpointNotSubmittedError struct{ Cause error }
+
+func (e NativeCheckpointNotSubmittedError) Error() string { return e.Cause.Error() }
+func (e NativeCheckpointNotSubmittedError) Unwrap() error { return e.Cause }
 
 type NativeCheckpointWorkdirRequest struct {
 	Config   Config
@@ -471,6 +573,26 @@ type NativeCheckpointResourceRequest struct {
 	LoadConfig func() (Config, error)
 	Image      NativeCheckpointImage
 	Metadata   map[string]string
+	Capture    *NativeCheckpointCapture
+}
+
+// NativeCheckpointAbandonProvider binds positive source-cleanup evidence without
+// asserting that the original image was submitted, absent, or safe to discard.
+type NativeCheckpointAbandonProvider interface {
+	PrepareNativeCheckpointAbandon(context.Context, NativeCheckpointCreateRequest) (map[string]string, error)
+}
+
+// CheckpointSourceVerifier must use provider authority, not a filtered lease
+// inventory or a missing local claim, to confirm the captured source is gone.
+type CheckpointSourceVerifier interface {
+	CheckpointSourceAbsent(context.Context, CheckpointSourceRequest) (bool, error)
+}
+
+type CheckpointSourceRequest struct {
+	LeaseID   string
+	Capture   NativeCheckpointCapture
+	Resource  NativeCheckpointResourceRequest
+	AccountID string
 }
 
 type NativeCheckpointVerifyResult struct {
@@ -540,6 +662,10 @@ type ProviderSpec struct {
 	Features         FeatureSet
 	Coordinator      CoordinatorMode
 	ClassDisposition ProviderClassDisposition
+	SizeSelection    ProviderSizeSelector
+	// SyncGuardrailFullCandidate counts the complete ordinary workspace transfer.
+	// False preserves dirty-delta counting when the checkout has changes.
+	SyncGuardrailFullCandidate bool
 	// TailscaleEgressOnly marks FeatureTailscale as outbound userspace access,
 	// not a bidirectional peer endpoint.
 	TailscaleEgressOnly bool
@@ -587,9 +713,14 @@ const (
 	FeatureRunArtifacts Feature = "run-artifacts"
 	FeatureRunDownloads Feature = "run-downloads"
 	FeatureModuleRun    Feature = "module-run"
+	// FeatureSSHScriptRun routes explicit scripts through the core SSH owner,
+	// while a hybrid backend may delegate ordinary commands.
+	FeatureSSHScriptRun Feature = "ssh-script-run"
 	FeaturePauseResume  Feature = "pause-resume"
 	FeatureMCP          Feature = "mcp-attachments"
 )
+
+const FeaturePreparedArtifactWorkspace Feature = "prepared-artifact-workspace"
 
 type FeatureSet []Feature
 
@@ -631,6 +762,9 @@ type LocalCommandRequest struct {
 	Stdout               io.Writer
 	Stderr               io.Writer
 	DisableOutputCapture bool
+	// CaptureOutputToFiles gives POSIX children synchronous regular-file output.
+	// Requires a positive capture limit and no streaming writers.
+	CaptureOutputToFiles bool
 	// MaxCapturedOutputBytes bounds each internally captured output stream.
 	// On overflow the command context is canceled so a continuously emitting
 	// child cannot block forever after the capture buffer fills.
@@ -642,6 +776,13 @@ type LocalCommandResult struct {
 	ExitCode int
 	Stdout   string
 	Stderr   string
+}
+
+// IsPlainLocalCommandExit recognizes an ordinary unsuccessful local process
+// completion, not a wrapped/joined error or proof of a remote command outcome.
+func IsPlainLocalCommandExit(result LocalCommandResult, err error) bool {
+	processErr, ok := err.(*exec.ExitError)
+	return ok && processErr != nil && processErr.ProcessState != nil && processErr.ExitCode() > 0 && processErr.ExitCode() == result.ExitCode
 }
 
 type DoctorRequest struct {
@@ -700,7 +841,34 @@ func commandRunnerWithChildCredentialBoundary(next CommandRunner, denied []strin
 	return childCredentialBoundaryCommandRunner{next: next, denied: denied}
 }
 
+// TrackLocalCommandCancellation records the caller cause for a signaled child
+// stopped by the cancellation watcher. Install it after configuring cmd.Cancel,
+// before starting a CommandContext command. Apply the returned function only
+// after Run or Wait joins that watcher; ordinary observed exits stay primary.
+func TrackLocalCommandCancellation(ctx context.Context, cmd *exec.Cmd) func(error) error {
+	stop := cmd.Cancel
+	var interrupted error
+	cmd.Cancel = func() error {
+		cause := ctx.Err()
+		err := stop()
+		if !errors.Is(err, os.ErrProcessDone) {
+			interrupted = cause
+		}
+		return err
+	}
+	return func(err error) error {
+		var processErr *exec.ExitError
+		if interrupted != nil && errors.As(err, &processErr) && processErr.ExitCode() < 0 {
+			return errors.Join(err, interrupted)
+		}
+		return err
+	}
+}
+
 func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	if req.CaptureOutputToFiles && (req.DisableOutputCapture || req.MaxCapturedOutputBytes <= 0 || req.Stdout != nil || req.Stderr != nil) {
+		return LocalCommandResult{ExitCode: 1}, errors.New("file output capture requires a positive limit and no streaming writers")
+	}
 	commandCtx := ctx
 	var cancel context.CancelFunc
 	if req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
@@ -719,26 +887,10 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 		cmd.WaitDelay = req.CancelGracePeriod
 	}
 	if req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
-		// Provider commands are untrusted process trees. Once bounded capture
-		// overflows, terminate descendants too: a grandchild retaining stdout or
-		// stderr would otherwise keep os/exec's pipe drain blocked indefinitely.
-		// A controller child already belongs to a durable outer process group;
-		// nesting a new group here would let provider descendants escape recovery.
-		controllerOwnsTree := os.Getenv(controllerProcessTreeOwnedEnv) == "1"
-		if !controllerOwnsTree {
-			configureDaemonCommand(cmd)
-		}
-		cmd.Cancel = func() error {
-			if cmd.Process == nil {
-				return os.ErrProcessDone
-			}
-			if controllerOwnsTree {
-				return cmd.Process.Kill()
-			}
-			return stopDaemonProcess(cmd.Process, cmd.Process.Pid)
-		}
-		cmd.WaitDelay = controllerChildWaitDelay
+		configureBoundedCommandCancellation(cmd)
 	}
+	stopCommand := cmd.Cancel
+	withCancellationCause := TrackLocalCommandCancellation(ctx, cmd)
 	env := req.Env
 	if env == nil {
 		env = os.Environ()
@@ -750,33 +902,46 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 	cmd.Stdin = req.Stdin
 	stdout := commandCaptureBuffer{limit: req.MaxCapturedOutputBytes, cancel: cancel}
 	stderr := commandCaptureBuffer{limit: req.MaxCapturedOutputBytes, cancel: cancel}
-	if req.Stdout != nil {
-		if req.DisableOutputCapture {
-			cmd.Stdout = req.Stdout
-		} else {
-			cmd.Stdout = io.MultiWriter(req.Stdout, &stdout)
+	cmd.Stdout = commandOutputWriter(req.Stdout, &stdout, req.DisableOutputCapture)
+	cmd.Stderr = commandOutputWriter(req.Stderr, &stderr, req.DisableOutputCapture)
+	var files *commandFileCapture
+	if req.CaptureOutputToFiles {
+		var err error
+		files, err = newCommandFileCapture(req.MaxCapturedOutputBytes)
+		if err != nil {
+			return LocalCommandResult{ExitCode: 1}, err
 		}
-	} else {
-		if req.DisableOutputCapture {
-			cmd.Stdout = io.Discard
-		} else {
-			cmd.Stdout = &stdout
+		defer files.close()
+		cmd.Stdout, cmd.Stderr = files.streams[0].writer, files.streams[1].writer
+	}
+	err := cmd.Start()
+	if err == nil {
+		var finishCapture func() commandFileCaptureOutcome
+		if files != nil {
+			files.closeWriters()
+			finishCapture = files.watch(cancel, stopCommand, cmd.WaitDelay)
+		}
+		err = withCancellationCause(cmd.Wait())
+		if finishCapture != nil {
+			observed := finishCapture()
+			err = errors.Join(err, observed.err)
+			if !observed.settled {
+				return LocalCommandResult{ExitCode: exitCode(err)}, err
+			}
+			if readErr := files.read(&stdout, &stderr); readErr != nil {
+				_ = stopCommand()
+				err = errors.Join(err, readErr)
+				return LocalCommandResult{ExitCode: exitCode(err)}, err
+			}
+			stdout.overflow = stdout.overflow || observed.overflow
+			if stdout.overflow || stderr.overflow || err != nil {
+				_ = stopCommand()
+			}
 		}
 	}
-	if req.Stderr != nil {
-		if req.DisableOutputCapture {
-			cmd.Stderr = req.Stderr
-		} else {
-			cmd.Stderr = io.MultiWriter(req.Stderr, &stderr)
-		}
-	} else {
-		if req.DisableOutputCapture {
-			cmd.Stderr = io.Discard
-		} else {
-			cmd.Stderr = &stderr
-		}
+	if errors.Is(err, exec.ErrWaitDelay) && req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
+		_ = stopCommand()
 	}
-	err := cmd.Run()
 	result := LocalCommandResult{ExitCode: exitCode(err), Stdout: stdout.String(), Stderr: stderr.String()}
 	if stdout.overflow || stderr.overflow {
 		err = fmt.Errorf("captured command output exceeded %d-byte limit", req.MaxCapturedOutputBytes)
@@ -786,6 +951,36 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 		result.ExitCode = 0
 	}
 	return result, err
+}
+
+func commandOutputWriter(writer io.Writer, capture *commandCaptureBuffer, disabled bool) io.Writer {
+	if writer == nil {
+		writer = io.Discard
+	}
+	if disabled {
+		return writer
+	}
+	return io.MultiWriter(writer, capture)
+}
+
+// Bound pipe draining as well as process exit: CommandContext alone cannot
+// interrupt descendants retaining stdout/stderr after their parent exits.
+func configureBoundedCommandCancellation(cmd *exec.Cmd) {
+	// Controller children must stay in their durable outer process group.
+	controllerOwnsTree := os.Getenv(controllerProcessTreeOwnedEnv) == "1"
+	if !controllerOwnsTree {
+		configureDaemonCommand(cmd)
+	}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		if controllerOwnsTree {
+			return cmd.Process.Kill()
+		}
+		return stopDaemonProcess(cmd.Process, cmd.Process.Pid)
+	}
+	cmd.WaitDelay = controllerChildWaitDelay
 }
 
 type commandCaptureBuffer struct {
@@ -867,6 +1062,9 @@ type ResolveRequest struct {
 	StatusOnly  bool
 	ReadyProbe  bool
 	Prepare     bool
+	// IncludeDiagnostics opts explicit presentation callers into optional observations.
+	// It is not a provider protocol field or authority to modify lease state.
+	IncludeDiagnostics bool `json:"-"`
 	// RejectAuthSecret prevents interactive callers from launching SSH probes
 	// for token-as-username targets they cannot safely execute.
 	RejectAuthSecret bool
@@ -885,6 +1083,7 @@ func (r ResolveRequest) IsReadOnlyStatus() bool {
 
 type ReleaseLeaseRequest struct {
 	Lease                    LeaseTarget
+	CheckpointID             string
 	Force                    bool
 	ExpectedProviderIdentity ProviderIdentityExpectation
 	// DeferProviderCleanupObservation queues coordinator cleanup without waiting
@@ -1021,6 +1220,7 @@ type RunRequest struct {
 	FreshPR               FreshPRSpec
 	ApplyLocalPatch       bool
 	Command               []string
+	CommandLiteralArgs    map[int]bool // Profile argument positions that must not introduce shell syntax.
 	Label                 string
 	RequestedSlug         string
 	TimingJSON            bool
@@ -1040,6 +1240,10 @@ type WarmupRequest struct {
 	ActionsRunner bool
 	RequestedSlug string
 	TimingJSON    bool
+	// BeforeComplete runs synchronous, best-effort core bookkeeping once after
+	// successful acquisition/retention and before final output. Providers opting
+	// in must include it in total timing; it cannot fail or roll back the lease.
+	BeforeComplete func()
 }
 
 type StatusRequest struct {
@@ -1116,7 +1320,38 @@ func FinalizeRunResult(result RunResult, err error) RunResult {
 	return result
 }
 
+// PrimaryRunClassificationCause finds an explicit classification cause only on
+// the primary error path. Ordinary errors retain their full-graph classification;
+// joined secondary failures cannot supply an override through this lookup.
+func PrimaryRunClassificationCause(err error) error {
+	for err != nil {
+		if classified, ok := err.(interface{ RunClassificationCause() error }); ok {
+			if cause := classified.RunClassificationCause(); cause != nil {
+				return cause
+			}
+		}
+		switch wrapped := err.(type) {
+		case interface{ Unwrap() error }:
+			err = wrapped.Unwrap()
+		case interface{ Unwrap() []error }:
+			err = nil
+			for _, child := range wrapped.Unwrap() {
+				if child != nil {
+					err = child
+					break
+				}
+			}
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
 func RunStatusForResult(result RunResult, err error) RunStatus {
+	if cause := PrimaryRunClassificationCause(err); cause != nil {
+		err = cause
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return RunStatusTimedOut
 	}
@@ -1130,6 +1365,9 @@ func RunStatusForResult(result RunResult, err error) RunStatus {
 }
 
 func RunErrorKindForResult(result RunResult, err error) RunErrorKind {
+	if cause := PrimaryRunClassificationCause(err); cause != nil {
+		err = cause
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return RunErrorTimeout
 	}
@@ -1143,18 +1381,6 @@ func RunErrorKindForResult(result RunResult, err error) RunErrorKind {
 		return RunErrorProvider
 	}
 	return RunErrorNone
-}
-
-type DelegatedRunArtifactRequest struct {
-	RunReq   RunRequest
-	Result   RunResult
-	MaxFiles int
-	MaxBytes int64
-}
-
-type DelegatedRunArtifactResult struct {
-	Artifacts []RunArtifact
-	Output    string
 }
 
 type RunSessionHandle struct {
@@ -1214,10 +1440,22 @@ func ValidateRunSessionForSpec(spec ProviderSpec, result RunResult) error {
 }
 
 type LeaseTarget struct {
-	Server      Server
-	SSH         SSHTarget
-	LeaseID     string
-	Coordinator *CoordinatorClient
+	Server       Server
+	SSH          SSHTarget
+	LeaseID      string
+	Coordinator  *CoordinatorClient
+	runnerTiming *runnerProviderTiming
+	// Recorded by the validated provider lookup, never inferred from absent SSH.
+	providerRelease *leaseReleaseConfirmation
+}
+
+type leaseReleaseConfirmation struct {
+	backend Backend
+	leaseID string
+}
+
+func (lease LeaseTarget) providerReleaseConfirmedBy(backend Backend) bool {
+	return lease.providerRelease != nil && lease.providerRelease.backend == backend && lease.providerRelease.leaseID == lease.LeaseID
 }
 
 type LeaseView = Server
@@ -1597,7 +1835,7 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	if ssh, ok := backend.(SSHLeaseBackend); ok && shouldUseCoordinator(cfg, provider.Spec()) {
+	if ssh, ok := backend.(SSHLeaseBackend); ok && ShouldUseCoordinator(cfg, provider.Spec()) {
 		coord, _, err := newCoordinatorClient(cfg)
 		if err != nil {
 			return nil, err
@@ -1616,7 +1854,9 @@ func configureProviderBackend(provider Provider, cfg *Config, rt Runtime) (Backe
 	return provider.Configure(*cfg, rt)
 }
 
-func shouldUseCoordinator(cfg Config, spec ProviderSpec) bool {
+// ShouldUseCoordinator reports whether provider allocations use the coordinator.
+// Registered mode keeps allocation with the direct provider.
+func ShouldUseCoordinator(cfg Config, spec ProviderSpec) bool {
 	return cfg.BrokerMode != BrokerModeRegistered &&
 		spec.Coordinator == CoordinatorSupported && strings.TrimSpace(cfg.Coordinator) != ""
 }

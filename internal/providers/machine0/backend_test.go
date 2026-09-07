@@ -25,6 +25,8 @@ import (
 )
 
 type fakeAPI struct {
+	accountID              string
+	accountErr             error
 	machine                machine
 	machines               []machine
 	listCalls              int
@@ -60,6 +62,13 @@ type fakeAPI struct {
 	doctorDelay            time.Duration
 	imageSnapshotReady     bool
 	rejectStartBeforeReady bool
+}
+
+func (f *fakeAPI) AccountID(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return firstNonBlank(f.accountID, "fixture-account"), f.accountErr
 }
 
 func (f *fakeAPI) Version(ctx context.Context) (string, error) {
@@ -218,6 +227,12 @@ func (f *fakeAPI) SaveImage(_ context.Context, vm, image string, _ map[string]st
 }
 func (f *fakeAPI) RemoveImage(_ context.Context, image string) error {
 	f.removedImage = append(f.removedImage, image)
+	for i, candidate := range f.images {
+		if candidate.Name == image {
+			f.images = append(f.images[:i], f.images[i+1:]...)
+			break
+		}
+	}
 	return nil
 }
 func (f *fakeAPI) RemoveImageVersion(_ context.Context, image string, version int) error {
@@ -680,6 +695,7 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 		removeErr     error
 		ready         bool
 		bindingFails  bool
+		wrongSize     bool
 		claimChanged  bool
 		sshErr        error
 		wantClaim     bool
@@ -695,6 +711,8 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 		{name: "successful rollback removes claim", wantRemovals: 1},
 		{name: "failed ID binding rolls back pending claim", ready: true, bindingFails: true, wantRemovals: 1},
 		{name: "success upgrades claim", keep: true, ready: true, wantClaim: true, wantCloudID: "vm-123"},
+		{name: "substituted size rolls back", ready: true, wrongSize: true, wantRemovals: 1, wantErrorPart: "mismatched machine size"},
+		{name: "kept substituted size remains stoppable", keep: true, ready: true, wrongSize: true, wantClaim: true, wantRecovery: true, stopRecovery: true, wantErrorPart: "mismatched machine size"},
 		{name: "SSH failure retains ID-scoped recovery claim", keep: true, ready: true, sshErr: errors.New("SSH authentication failed"), wantClaim: true, wantRecovery: true, wantCloudID: "vm-123"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -726,6 +744,9 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 				if tc.bindingFails {
 					item.ID = ""
 				}
+				if tc.wrongSize {
+					item.Size = "medium"
+				}
 				api.machine = item
 				if tc.ready {
 					return item, nil
@@ -733,7 +754,7 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 				return machine{}, context.Canceled
 			}
 			b := testBackendWithAPI(api)
-			if tc.ready && !tc.bindingFails {
+			if tc.ready && !tc.bindingFails && !tc.wrongSize {
 				b.waitSSH = func(context.Context, *SSHTarget, time.Duration) error {
 					bound, ok, err := resolveClaim(observed.LeaseID)
 					if err != nil || !ok || bound.CloudID != "vm-123" || bound.ProviderScope != machineScope("vm-123") {
@@ -743,7 +764,7 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 				}
 			}
 			lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}, RequestedSlug: "recovery", Keep: tc.keep})
-			if tc.ready && !tc.bindingFails && tc.sshErr == nil {
+			if tc.ready && !tc.bindingFails && !tc.wrongSize && tc.sshErr == nil {
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -753,7 +774,7 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 			if len(api.removed) != tc.wantRemovals {
 				t.Fatalf("rollback removals=%v", api.removed)
 			}
-			claim, ok, claimErr := resolveClaim(observed.LeaseID)
+			claim, ok, claimErr := core.ReadLeaseClaimWithPresence(observed.LeaseID)
 			if claimErr != nil || ok != tc.wantClaim {
 				t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, claimErr)
 			}
@@ -775,7 +796,7 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 				if releaseErr := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: claim.LeaseID}}); releaseErr != nil {
 					t.Fatalf("recovery stop: %v", releaseErr)
 				}
-				if _, remains, resolveErr := resolveClaim(claim.LeaseID); resolveErr != nil || remains {
+				if _, remains, resolveErr := core.ReadLeaseClaimWithPresence(claim.LeaseID); resolveErr != nil || remains {
 					t.Fatalf("released recovery claim remains=%v err=%v", remains, resolveErr)
 				}
 			}
@@ -995,14 +1016,14 @@ func TestAcquirePublicSSHKeyFileKinds(t *testing.T) {
 				}, getSequence: []machine{readyMachine("203.0.113.10")}}
 				b := testBackendWithAPI(api)
 				runner := &recordingRunner{run: func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					// Bound a blocked FIFO extraction, not unrelated durable claim writes.
+					ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+					defer cancel()
 					output, err := exec.CommandContext(ctx, req.Name, req.Args...).Output()
 					return core.LocalCommandResult{Stdout: string(output)}, err
 				}}
 				b.rt.Exec = runner
-				// Bound the regression: ssh-keygen blocks opening an unwritten FIFO.
-				ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-				defer cancel()
-				_, err := b.Acquire(ctx, AcquireRequest{RequestedLeaseID: leaseID, Repo: core.Repo{Root: repo}})
+				_, err := b.Acquire(t.Context(), AcquireRequest{RequestedLeaseID: leaseID, Repo: core.Repo{Root: repo}})
 				wantExtractions := 0
 				if kind == "symlink regular" {
 					wantExtractions = 1
@@ -1318,6 +1339,103 @@ func TestResolveRunningMachinePreservesIsolatedHostTrust(t *testing.T) {
 	got, err := os.ReadFile(resolved.SSH.KnownHostsFile)
 	if err != nil || string(got) != staleTrust || resolved.SSH.KnownHostsFile != lease.SSH.KnownHostsFile {
 		t.Fatalf("known hosts=%q path=%q original=%q err=%v", got, resolved.SSH.KnownHostsFile, lease.SSH.KnownHostsFile, err)
+	}
+}
+
+func TestMachine0RunResolutionPreparesWithoutPublishingClaim(t *testing.T) {
+	for _, fixed := range []bool{false, true} {
+		for _, scenario := range []string{"ready", "stopped", "replacement", "checkpoint hold", "canceled readiness"} {
+			name := "ordinary/" + scenario
+			if fixed {
+				name = "fixed/" + scenario
+			}
+			t.Run(name, func(t *testing.T) {
+				b, api, req := fixedMachine0TestFixture(t)
+				if !fixed {
+					req.RequestedLeaseID = ""
+				}
+				lease, err := b.Acquire(t.Context(), req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "checkpoint hold" {
+					if err := core.WithDurableLeaseClaimLock(lease.LeaseID, func(claim *LeaseClaim, _ bool, persist func() error) error {
+						claim.CheckpointCapture = &core.CheckpointCaptureBinding{ID: "chk_runhold", Revision: claim.Revision, BoundRevision: claim.Revision}
+						return persist()
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before, err := core.ReadLeaseClaim(lease.LeaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				const trust = "203.0.113.10 ssh-ed25519 synthetic-host-key\n"
+				if err := os.WriteFile(lease.SSH.KnownHostsFile, []byte(trust), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				ready := api.machine
+				ready.IP = "203.0.113.99"
+				api.machine, api.machines = ready, []machine{ready}
+				if scenario == "stopped" || scenario == "checkpoint hold" {
+					stopped := ready
+					stopped.Status, stopped.IP = "STOPPED", ""
+					api.machine, api.machines = stopped, []machine{stopped}
+					api.getSequence = []machine{stopped, ready}
+				}
+				if scenario == "replacement" {
+					api.machine.ID = "vm-replacement"
+					api.machines = []machine{api.machine}
+				}
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				prepared := false
+				b.waitSSH = func(prepareCtx context.Context, target *SSHTarget, _ time.Duration) error {
+					prepared = true
+					if target.Host != ready.IP || target.KnownHostsFile != lease.SSH.KnownHostsFile {
+						t.Fatal("readiness lost the exact endpoint or isolated trust path")
+					}
+					if scenario == "canceled readiness" {
+						cancel()
+						return context.Cause(prepareCtx)
+					}
+					return nil
+				}
+				resolved, resolveErr := b.ResolveRunLeaseUnderClaim(ctx, ResolveRequest{ID: lease.LeaseID, Repo: req.Repo, Prepare: true}, before)
+				if scenario == "ready" || scenario == "stopped" {
+					if resolveErr != nil || !prepared || resolved.Server.CloudID != before.CloudID || resolved.SSH.Host != ready.IP {
+						t.Fatalf("run resolution did not prepare the bound machine: %v", resolveErr)
+					}
+				} else if resolveErr == nil {
+					t.Fatal("run resolution accepted failed authority or canceled readiness")
+				}
+				if scenario == "canceled readiness" && !errors.Is(resolveErr, context.Canceled) {
+					t.Fatalf("readiness lost caller cancellation: %v", resolveErr)
+				}
+				wantStarts := 0
+				if scenario == "stopped" {
+					wantStarts = 1
+				}
+				if len(api.started) != wantStarts || len(api.removed)+len(api.primed) != 0 {
+					t.Fatalf("unexpected preparation effects: starts=%v removals=%v primes=%v", api.started, api.removed, api.primed)
+				}
+				if (scenario == "replacement" || scenario == "checkpoint hold") && prepared {
+					t.Fatal("rejected authority reached SSH readiness")
+				}
+				trustAfter, trustErr := os.ReadFile(lease.SSH.KnownHostsFile)
+				if scenario == "stopped" {
+					if !errors.Is(trustErr, os.ErrNotExist) {
+						t.Fatalf("restart retained stale host trust: %v", trustErr)
+					}
+				} else if trustErr != nil || string(trustAfter) != trust {
+					t.Fatalf("resolution unexpectedly changed host trust: %v", trustErr)
+				}
+				after, err := core.ReadLeaseClaim(lease.LeaseID)
+				if err != nil || !reflect.DeepEqual(before, after) {
+					t.Fatalf("provider run resolution published a claim: %v", err)
+				}
+			})
+		}
 	}
 }
 
@@ -1876,6 +1994,12 @@ func checkpointCreateFixture(t *testing.T) (*backend, *fakeAPI, LeaseTarget, Lea
 	return b, api, lease, claim, req
 }
 
+func checkpointSource(req core.NativeCheckpointCreateRequest, ip string) machine {
+	item := readyMachine(ip)
+	item.Name = req.Server.Name
+	return item
+}
+
 func readyCheckpointImage(req core.NativeCheckpointCreateRequest, claim LeaseClaim, version int) machineImageDetail {
 	return machineImageDetail{
 		Image: machineImage{ID: "img-1", Name: req.Name, Status: "READY"},
@@ -1901,11 +2025,12 @@ func TestCreateNativeCheckpointStopsSavesRestartsAndRefreshesClaimEndpoint(t *te
 	}
 	api.rejectStartBeforeReady = true
 	api.getSequence = []machine{
-		readyMachine("203.0.113.10"),
-		func() machine { item := readyMachine("203.0.113.10"); item.Status = "STOPPING"; return item }(),
-		func() machine { item := readyMachine("203.0.113.10"); item.Status = "STOPPED"; return item }(),
-		func() machine { item := readyMachine("203.0.113.77"); item.Status = "STARTING"; return item }(),
-		readyMachine("203.0.113.77"),
+		checkpointSource(req, "203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPING"; return item }(),
+		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPED"; return item }(),
+		func() machine { item := checkpointSource(req, "203.0.113.77"); item.Status = "STARTING"; return item }(),
+		checkpointSource(req, "203.0.113.77"),
 	}
 	b.prepareNativeImageSource = func(context.Context, SSHTarget) error {
 		api.actions = append(api.actions, "prepare")
@@ -1963,9 +2088,10 @@ func TestCreateNativeCheckpointSaveFailureRestartsSource(t *testing.T) {
 	b, api, _, claim, req := checkpointCreateFixture(t)
 	api.saveErr = errors.New("image save rejected")
 	api.getSequence = []machine{
-		readyMachine("203.0.113.10"),
-		func() machine { item := readyMachine("203.0.113.10"); item.Status = "STOPPED"; return item }(),
-		readyMachine("203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPED"; return item }(),
+		checkpointSource(req, "203.0.113.10"),
 	}
 
 	result, err := b.createNativeCheckpoint(context.Background(), req, claim)
@@ -1985,8 +2111,9 @@ func TestCreateNativeCheckpointJoinsSaveAndRestartFailures(t *testing.T) {
 	api.saveErr = errors.New("image save rejected")
 	api.startErr = errors.New("start rejected")
 	api.getSequence = []machine{
-		readyMachine("203.0.113.10"),
-		func() machine { item := readyMachine("203.0.113.10"); item.Status = "STOPPED"; return item }(),
+		checkpointSource(req, "203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPED"; return item }(),
 	}
 
 	_, err := b.createNativeCheckpoint(context.Background(), req, claim)
@@ -2002,8 +2129,9 @@ func TestCreateNativeCheckpointRestartFailureKeepsObservedImageIdentity(t *testi
 	b, api, _, claim, req := checkpointCreateFixture(t)
 	api.startErr = errors.New("start rejected")
 	api.getSequence = []machine{
-		readyMachine("203.0.113.10"),
-		func() machine { item := readyMachine("203.0.113.10"); item.Status = "STOPPED"; return item }(),
+		checkpointSource(req, "203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPED"; return item }(),
 	}
 
 	result, err := b.createNativeCheckpoint(context.Background(), req, claim)
@@ -2019,9 +2147,10 @@ func TestCreateNativeCheckpointRestartsAfterTerminalSnapshotState(t *testing.T) 
 	b, api, _, claim, req := checkpointCreateFixture(t)
 	api.imageDetail = checkpointImageSnapshotState(req, claim, 1, "FAILED")
 	api.getSequence = []machine{
-		readyMachine("203.0.113.10"),
-		func() machine { item := readyMachine("203.0.113.10"); item.Status = "STOPPED"; return item }(),
-		readyMachine("203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPED"; return item }(),
+		checkpointSource(req, "203.0.113.10"),
 	}
 
 	result, err := b.createNativeCheckpoint(context.Background(), req, claim)
@@ -2041,8 +2170,9 @@ func TestCreateNativeCheckpointJoinsSnapshotAndRestartFailures(t *testing.T) {
 	api.imageDetail = checkpointImageSnapshotState(req, claim, 1, "FAILED")
 	api.startErr = errors.New("start rejected")
 	api.getSequence = []machine{
-		readyMachine("203.0.113.10"),
-		func() machine { item := readyMachine("203.0.113.10"); item.Status = "STOPPED"; return item }(),
+		checkpointSource(req, "203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPED"; return item }(),
 	}
 
 	result, err := b.createNativeCheckpoint(context.Background(), req, claim)
@@ -2061,9 +2191,10 @@ func TestCreateNativeCheckpointRestartsAfterSnapshotTimeout(t *testing.T) {
 	b.sleep = sleepContext
 	api.imageDetail = checkpointImageSnapshotState(req, claim, 1, "CREATING")
 	api.getSequence = []machine{
-		readyMachine("203.0.113.10"),
-		func() machine { item := readyMachine("203.0.113.10"); item.Status = "STOPPED"; return item }(),
-		readyMachine("203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPED"; return item }(),
+		checkpointSource(req, "203.0.113.10"),
 	}
 
 	result, err := b.createNativeCheckpoint(context.Background(), req, claim)
@@ -2083,9 +2214,10 @@ func TestCreateNativeCheckpointRestartsAfterCallerCancellation(t *testing.T) {
 	b.sleep = sleepContext
 	api.imageDetail = checkpointImageSnapshotState(req, claim, 1, "CREATING")
 	api.getSequence = []machine{
-		readyMachine("203.0.113.10"),
-		func() machine { item := readyMachine("203.0.113.10"); item.Status = "STOPPED"; return item }(),
-		readyMachine("203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPED"; return item }(),
+		checkpointSource(req, "203.0.113.10"),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -2115,9 +2247,9 @@ func TestCreateNativeCheckpointStopTimeoutRestartsWithoutSaving(t *testing.T) {
 	b, api, _, claim, req := checkpointCreateFixture(t)
 	b.cfg.Machine0.CreateTimeout = time.Nanosecond
 	b.sleep = sleepContext
-	stopping := readyMachine("203.0.113.10")
+	stopping := checkpointSource(req, "203.0.113.10")
 	stopping.Status = "STOPPING"
-	api.getSequence = []machine{readyMachine("203.0.113.10"), stopping, readyMachine("203.0.113.10")}
+	api.getSequence = []machine{checkpointSource(req, "203.0.113.10"), checkpointSource(req, "203.0.113.10"), stopping, checkpointSource(req, "203.0.113.10")}
 
 	result, err := b.createNativeCheckpoint(context.Background(), req, claim)
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
@@ -2135,7 +2267,7 @@ func TestCreateNativeCheckpointPreservesAlreadyStoppedSource(t *testing.T) {
 		checkpointImageSnapshotState(req, claim, 1, "CREATING"),
 		readyCheckpointImage(req, claim, 1),
 	}
-	stopped := readyMachine("203.0.113.10")
+	stopped := checkpointSource(req, "203.0.113.10")
 	stopped.Status = "STOPPED"
 	api.getSequence = []machine{stopped}
 	b.prepareNativeImageSource = func(context.Context, SSHTarget) error {
@@ -2163,7 +2295,7 @@ func TestCreateNativeCheckpointRejectsMismatchedClaimScopeBeforeMutation(t *test
 	if err != nil || !ok || claim.ProviderScope != machineScope("vm-other") {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
 	}
-	api.getSequence = []machine{readyMachine("203.0.113.10")}
+	api.getSequence = []machine{checkpointSource(req, "203.0.113.10")}
 
 	_, err = b.createNativeCheckpoint(context.Background(), req, claim)
 	if err == nil || !strings.Contains(err.Error(), "provider scope mismatch") {
@@ -2238,6 +2370,7 @@ func TestCheckpointImageRequiresExactVersionAndRemoteOwnershipMetadata(t *testin
 		}}},
 	}}
 	b := testBackendWithAPI(api)
+	api.images = []machineImage{api.imageDetail.Image}
 	req := core.NativeCheckpointResourceRequest{
 		Image:    core.NativeCheckpointImage{Provider: providerName, Kind: core.CheckpointKindMachine0, Direct: true, ResourceID: "img-1"},
 		Metadata: map[string]string{metadataImageName: "baseline", metadataImageID: "img-1", metadataImageVersion: "2", metadataSourceMachine: "vm-123", "crabbox_checkpoint": "chk_123", "crabbox_lease": "cbx_123"},
@@ -2248,6 +2381,21 @@ func TestCheckpointImageRequiresExactVersionAndRemoteOwnershipMetadata(t *testin
 	api.imageDetail.Versions[0].Metadata["crabbox_source"] = "vm-other"
 	if _, _, err := b.loadCheckpointImage(context.Background(), req); err == nil || !strings.Contains(err.Error(), "mismatched crabbox_source") {
 		t.Fatalf("err=%v", err)
+	}
+	for _, versions := range [][]machineImageVersion{nil, {{Version: 3}}} {
+		api.imageDetail.Versions = versions
+		_, _, err := b.loadCheckpointImage(context.Background(), req)
+		var exitErr core.ExitError
+		if !errors.As(err, &exitErr) || exitErr.Code != 4 || exitErr.Message != "Machine0 image baseline version 2 was not found" || errors.Is(err, core.ErrNativeCheckpointAbsent) {
+			t.Fatalf("missing recorded version was not an ordinary inspection error: %v", err)
+		}
+		for _, createdImage := range []string{"false", "true"} {
+			req.Metadata[metadataCreatedImage] = createdImage
+			err := b.deleteNativeCheckpoint(context.Background(), req)
+			if !errors.As(err, &exitErr) || exitErr.Code != 4 || len(api.removedImage) != 0 {
+				t.Fatalf("initial missing version authorized deletion: createdImage=%s err=%v removed=%v", createdImage, err, api.removedImage)
+			}
+		}
 	}
 }
 
@@ -2262,6 +2410,7 @@ func TestWholeImageCheckpointDeleteRefusesUnrelatedLaterVersions(t *testing.T) {
 		Versions: []machineImageVersion{owned, {Version: 2, Status: "DRAFT", DisplayStatus: "DRAFT", SnapshotStatus: "READY"}},
 	}}
 	b := testBackendWithAPI(api)
+	api.images = []machineImage{api.imageDetail.Image}
 	req := core.NativeCheckpointResourceRequest{
 		Image: core.NativeCheckpointImage{Provider: providerName, Kind: core.CheckpointKindMachine0, Direct: true, ResourceID: "img-1"},
 		Metadata: map[string]string{
@@ -2420,34 +2569,5 @@ func TestImageWaitSelectsMatchingConcurrentSaveVersion(t *testing.T) {
 	}
 	if version.Version != 2 {
 		t.Fatalf("selected concurrent version v%d, want owned v2", version.Version)
-	}
-}
-
-func TestCLIProvidersSizesUsesMachine0LiveCatalog(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell fixture is POSIX-only")
-	}
-	setupState(t)
-	dir := t.TempDir()
-	cli := filepath.Join(dir, "machine0")
-	script := `#!/bin/sh
-if [ "$1" = "sizes" ]; then
-  printf '%s\n' '[{"size":"gpu-l40s-1","vcpu":8,"ramGb":64,"diskGb":500,"gpu":{"label":"1x L40S","vramGb":48},"regions":["eu"],"pricePerHourMicro":1727000}]'
-  exit 0
-fi
-exit 1
-`
-	if err := os.WriteFile(cli, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CRABBOX_MACHINE0_CLI", cli)
-	t.Setenv("CRABBOX_PROVIDER", providerName)
-	var stdout, stderr bytes.Buffer
-	app := core.App{Stdout: &stdout, Stderr: &stderr}
-	if err := app.Run(context.Background(), []string{"providers", "sizes", "machine0", "--json"}); err != nil {
-		t.Fatalf("providers sizes: %v stderr=%s", err, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), `"name":"gpu-l40s-1"`) || !strings.Contains(stdout.String(), `"pricePerHourMicro":1727000`) || !strings.Contains(stdout.String(), `"vramGb":48`) {
-		t.Fatalf("stdout=%s", stdout.String())
 	}
 }

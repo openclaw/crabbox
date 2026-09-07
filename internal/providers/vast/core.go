@@ -26,7 +26,6 @@ type SSHTarget = core.SSHTarget
 
 const (
 	providerName = "vast"
-	targetLinux  = core.TargetLinux
 )
 
 func exit(code int, format string, args ...any) core.ExitError {

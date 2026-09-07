@@ -49,7 +49,7 @@ func TestFailedWarmupDoesNotStopConcurrentUnclaimedTestbox(t *testing.T) {
 	cfg.Blacksmith.Ref = "main"
 	backend := newTestBlacksmithBackend(cfg, runner)
 
-	if _, _, err := backend.warmupLease(context.Background(), Repo{Root: "/repo-a"}, false, ""); err == nil {
+	if _, err := backend.warmupLease(context.Background(), Repo{Root: "/repo-a"}, false, ""); err == nil {
 		t.Fatal("expected warmup failure")
 	}
 	if stopped != "" || !boxExists {

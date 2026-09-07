@@ -210,6 +210,10 @@ warning. Individual stop failures are logged as warnings and do not block the
 remaining peers; the first error is returned so callers can tell whether the
 release was fully clean.
 
+Delegated providers own claim cleanup or retention, just as for `crabbox stop`.
+After a delegated stop succeeds, `pond release` leaves its resulting local state
+intact, including a replacement claim published before the stop returned.
+
 ## `doctor --pond`
 
 [`crabbox doctor --pond <name>`](doctor.md) runs the Tailscale ACL check (when the

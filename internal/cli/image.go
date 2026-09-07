@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 )
@@ -69,6 +70,10 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	fastSnapshotRestore := fs.Bool("fast-snapshot-restore", false, "enable AWS Fast Snapshot Restore for the promoted AMI snapshots")
 	var fastSnapshotRestoreAZs stringListFlag
 	fs.Var(&fastSnapshotRestoreAZs, "fsr-az", "availability zone for Fast Snapshot Restore; repeatable")
+	expectedCurrentImage := fs.String("expected-current-image", "", "expected current image id, none, or capture")
+	expectedCurrentRevision := fs.String("expected-current-revision", "", "expected current default revision when an image is present")
+	retireExpectedCatalog := fs.Bool("retire-expected-catalog", false, "retire the exact expected AWS catalog revision during rollback")
+	restoreReceipt := fs.String("restore-receipt", "", "restore the exact image default aliases captured in a promotion receipt")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
@@ -85,6 +90,24 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	}
 	if normalizedProvider == "azure" && (*fastSnapshotRestore || len(fastSnapshotRestoreAZs) > 0) {
 		return exit(2, "Fast Snapshot Restore is AWS-only")
+	}
+	if normalizedProvider == "azure" && flagWasSet(fs, "expected-current-image") {
+		return exit(2, "compare-and-swap image promotion is AWS-only")
+	}
+	if normalizedProvider == "azure" && *restoreReceipt != "" {
+		return exit(2, "--restore-receipt is AWS-only")
+	}
+	if *catalogOnly && (flagWasSet(fs, "expected-current-image") || *retireExpectedCatalog) {
+		return exit(2, "--catalog-only cannot be combined with transactional image promotion")
+	}
+	if *catalogOnly && *restoreReceipt != "" {
+		return exit(2, "--catalog-only cannot be combined with --restore-receipt")
+	}
+	if *restoreReceipt != "" && (flagWasSet(fs, "expected-current-image") || *retireExpectedCatalog) {
+		return exit(2, "--restore-receipt supplies the transactional image precondition and catalog retirement")
+	}
+	if *retireExpectedCatalog && !flagWasSet(fs, "expected-current-image") {
+		return exit(2, "--retire-expected-catalog requires --expected-current-image and --expected-current-revision")
 	}
 	if *serverType == "" {
 		*serverType = *serverTypeAlias
@@ -143,7 +166,7 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	image, err := coord.PromoteImage(ctx, fs.Arg(0), CoordinatorImageRef{
+	ref := CoordinatorImageRef{
 		Provider:               normalizedProvider,
 		Region:                 *region,
 		Target:                 *target,
@@ -162,7 +185,86 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 			Desktop:   *desktop,
 		},
 		VariantSelectors: variantSelectors,
-	})
+	}
+	var image CoordinatorImage
+	if *restoreReceipt != "" {
+		receipt, err := readImagePromotionReceipt(*restoreReceipt)
+		if err != nil {
+			return err
+		}
+		if receipt.Image == nil || receipt.Image.ID == "" || receipt.Image.Revision == "" {
+			return exit(2, "promotion receipt does not name the promoted image and revision")
+		}
+		if fs.Arg(0) != receipt.Image.ID {
+			return exit(2, "rollback image id must match the promoted image in --restore-receipt")
+		}
+		if len(receipt.Previous.Aliases) == 0 {
+			return exit(2, "promotion receipt does not contain restorable image default aliases")
+		}
+		expected := CoordinatorImageDefaultState{
+			State:    "present",
+			ImageID:  receipt.Image.ID,
+			Revision: receipt.Image.Revision,
+		}
+		result, err := coord.PromoteImageCAS(
+			ctx,
+			receipt.Image.ID,
+			expected,
+			false,
+			true,
+			&receipt.Previous,
+			ref,
+		)
+		if err != nil {
+			return err
+		}
+		if *jsonOut {
+			return json.NewEncoder(a.Stdout).Encode(result)
+		}
+		if result.Image == nil {
+			return fmt.Errorf("coordinator did not return the restored image default")
+		}
+		image = *result.Image
+	} else if flagWasSet(fs, "expected-current-image") {
+		expected, err := imageExpectedCurrent(*expectedCurrentImage, *expectedCurrentRevision)
+		if err != nil {
+			return err
+		}
+		if *retireExpectedCatalog && expected.State != "present" {
+			return exit(2, "--retire-expected-catalog requires an exact expected current image and revision")
+		}
+		var result CoordinatorImagePromotionResult
+		if fs.Arg(0) == "none" {
+			if expected.State != "present" {
+				return exit(2, "clearing a default requires an expected current image and revision")
+			}
+			result, err = coord.PromoteImageCAS(ctx, expected.ImageID, expected, true, *retireExpectedCatalog, nil, ref)
+		} else {
+			result, err = coord.PromoteImageCAS(ctx, fs.Arg(0), expected, false, *retireExpectedCatalog, nil, ref)
+		}
+		if err != nil {
+			return err
+		}
+		if *jsonOut {
+			return json.NewEncoder(a.Stdout).Encode(result)
+		}
+		if fs.Arg(0) == "none" {
+			fmt.Fprintln(a.Stdout, "promoted image=none")
+			return nil
+		}
+		if result.Image == nil {
+			return fmt.Errorf("coordinator did not return the promoted image")
+		}
+		image = *result.Image
+	} else {
+		if fs.Arg(0) == "none" {
+			return exit(2, "promoting image none requires --expected-current-image and --expected-current-revision")
+		}
+		if flagWasSet(fs, "expected-current-revision") {
+			return exit(2, "--expected-current-revision requires --expected-current-image")
+		}
+		image, err = coord.PromoteImage(ctx, fs.Arg(0), ref)
+	}
 	if err != nil {
 		return err
 	}
@@ -175,6 +277,43 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintln(a.Stdout)
 	return nil
+}
+
+func readImagePromotionReceipt(path string) (CoordinatorImagePromotionResult, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return CoordinatorImagePromotionResult{}, exit(2, "read promotion receipt: %v", err)
+	}
+	defer file.Close()
+	var receipt CoordinatorImagePromotionResult
+	if err := json.NewDecoder(file).Decode(&receipt); err != nil {
+		return CoordinatorImagePromotionResult{}, exit(2, "decode promotion receipt: %v", err)
+	}
+	return receipt, nil
+}
+
+func imageExpectedCurrent(imageID, revision string) (CoordinatorImageDefaultState, error) {
+	imageID = strings.TrimSpace(imageID)
+	revision = strings.TrimSpace(revision)
+	if imageID == "none" {
+		if revision != "" {
+			return CoordinatorImageDefaultState{}, exit(2, "--expected-current-revision is invalid when --expected-current-image=none")
+		}
+		return CoordinatorImageDefaultState{State: "absent"}, nil
+	}
+	if imageID == "capture" {
+		if revision != "" {
+			return CoordinatorImageDefaultState{}, exit(2, "--expected-current-revision is invalid when --expected-current-image=capture")
+		}
+		return CoordinatorImageDefaultState{State: "capture"}, nil
+	}
+	if imageID == "" {
+		return CoordinatorImageDefaultState{}, exit(2, "--expected-current-image must be an image id, none, or capture")
+	}
+	if revision == "" {
+		return CoordinatorImageDefaultState{}, exit(2, "--expected-current-revision is required when the expected current image is present")
+	}
+	return CoordinatorImageDefaultState{State: "present", ImageID: imageID, Revision: revision}, nil
 }
 
 func (a App) imageFSRStatus(ctx context.Context, args []string) error {
@@ -226,11 +365,12 @@ func (a App) imageDelete(ctx context.Context, args []string) error {
 	region := fs.String("region", "", "region, location, or zone containing the image")
 	project := fs.String("project", "", "GCP project containing the image")
 	catalogOnly := fs.Bool("catalog-only", false, "unpublish AWS catalog-only variants without deleting the AMI")
+	retirePromotions := fs.Bool("retire-promotions", false, "retire AWS or Azure image catalog/default roles without deleting provider resources")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox image delete <image-id> [--provider aws|azure|gcp|hetzner] [--region <region>] [--project <project>] [--catalog-only]")
+		return exit(2, "usage: crabbox image delete <image-id> [--provider aws|azure|gcp|hetzner] [--region <region>] [--project <project>] [--catalog-only|--retire-promotions]")
 	}
 	normalizedProvider := normalizeProviderName(*provider)
 	if normalizedProvider != "aws" && normalizedProvider != "azure" && normalizedProvider != "gcp" && normalizedProvider != "hetzner" {
@@ -238,6 +378,12 @@ func (a App) imageDelete(ctx context.Context, args []string) error {
 	}
 	if *catalogOnly && normalizedProvider != "aws" {
 		return exit(2, "--catalog-only is AWS-only")
+	}
+	if *retirePromotions && normalizedProvider != "aws" && normalizedProvider != "azure" {
+		return exit(2, "--retire-promotions supports AWS and Azure only")
+	}
+	if *retirePromotions && *catalogOnly {
+		return exit(2, "--catalog-only and --retire-promotions are mutually exclusive")
 	}
 	if normalizedProvider == "hetzner" {
 		if strings.TrimSpace(*project) != "" {
@@ -263,6 +409,14 @@ func (a App) imageDelete(ctx context.Context, args []string) error {
 		return err
 	}
 	ref := CoordinatorImageRef{Provider: normalizedProvider, Region: *region, Project: *project}
+	if *retirePromotions {
+		retired, err := coord.RetirePromotedImage(ctx, fs.Arg(0), ref)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(a.Stdout, "retired promoted image=%s provider=%s roles=%d\n", fs.Arg(0), normalizedProvider, retired.Retired)
+		return nil
+	}
 	if *catalogOnly {
 		retired, err := coord.RetireCatalogImage(ctx, fs.Arg(0), ref)
 		if err != nil {
@@ -298,6 +452,9 @@ func deleteHetznerCheckpointImage(ctx context.Context, store checkpointStore, li
 	record := matches[0]
 	if region != "" && region != record.Native.Region {
 		return checkpointRecord{}, exit(2, "Hetzner snapshot %s location mismatch: recorded=%s requested=%s", imageID, blank(record.Native.Region, "unknown"), region)
+	}
+	if unresolvedCheckpoint(record) {
+		return checkpointRecord{}, exit(2, "checkpoint %s is unresolved; reconcile its capture before deletion", record.ID)
 	}
 	if err := lifecycle.DeleteNativeCheckpoint(ctx, nativeCheckpointResourceRequest(record)); err != nil {
 		return checkpointRecord{}, err

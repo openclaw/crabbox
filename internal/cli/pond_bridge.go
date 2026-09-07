@@ -220,7 +220,6 @@ func (a App) pondRelease(ctx context.Context, args []string) error {
 				}
 				fmt.Fprintf(a.Stderr, "warning: %s/%s stop failed: %v\n", claim.Provider, claim.LeaseID, serr)
 			} else {
-				removeLeaseClaim(claim.LeaseID)
 				fmt.Fprintf(a.Stderr, "released %s/%s slug=%s\n", claim.Provider, claim.LeaseID, blank(claim.Slug, "-"))
 			}
 			continue

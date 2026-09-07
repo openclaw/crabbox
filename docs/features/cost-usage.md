@@ -17,6 +17,13 @@ accounted for.
 
 ## Reading `crabbox usage`
 
+For a self-owner admission snapshot across all months and organizations, use
+[`crabbox capacity`](../commands/capacity.md). It reports only resolved owner,
+existing admission count, effective owner limit, and observation time. It does
+not add a candidate lease or expose capacity-admin membership. A successful
+snapshot is not a reservation or approval to allocate: fleet, org, budget, and
+provider gates may still reject. Monthly usage below keeps its existing scope.
+
 `crabbox usage` requires a configured coordinator and prints the current month by default.
 
 ```bash
@@ -80,14 +87,15 @@ hourly USD number; non-positive or non-numeric entries are ignored. Hetzner live
 are quoted in EUR and converted to USD by multiplying with `CRABBOX_EUR_TO_USD`
 (default `1.08`).
 
-Optional AWS and Hetzner pricing requests have a five-second deadline, including
-response-body reads. A timeout aborts that request and uses the existing fallback
-rate. Pricing cannot leave admission or activation waiting indefinitely for HTTP;
-capacity provisioning keeps its existing deadlines.
+Optional AWS and Hetzner pricing lookups have a five-second deadline covering
+credential resolution, identity checks, HTTP requests and response-body reads.
+A timeout releases the pricing caller to use the existing fallback rate and
+aborts the quote's HTTP request. Capacity provisioning keeps its own deadlines.
 AWS pricing makes one signed attempt and keeps its identity check separate from
-other provider operations. On Node coordinators, credential resolution still
-belongs to the AWS SDK credential chain; an expired quote starts no HTTP request
-after that chain returns.
+other provider operations. Node credential resolution still belongs to the AWS
+SDK credential chain; an authority RPC already in flight also retains its own
+owner. Fallback does not wait for either to settle. An expired quote cannot start
+a subsequent HTTP request or authority RPC, including a retry after a late error.
 
 ## Budget guardrails
 

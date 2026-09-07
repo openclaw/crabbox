@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
@@ -42,10 +41,6 @@ const (
 type hypervVM struct {
 	Name  string `json:"Name"`
 	State int    `json:"State"`
-}
-
-type hypervNetAdapter struct {
-	IPAddresses []string `json:"IPAddresses"`
 }
 
 func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
@@ -667,7 +662,8 @@ func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error
 		if lastErr == nil {
 			lastErr = budgetCtx.Err()
 		}
-		return fmt.Errorf("guest %s did not accept PowerShell Direct within %s: %w", vmName, b.guestReadyBudget, lastErr)
+		diagnostic := fmt.Errorf("guest %s did not accept PowerShell Direct within %s: %w", vmName, b.guestReadyBudget, lastErr)
+		return shared.PollTerminationError(budgetCtx, err, diagnostic)
 	}
 	return err
 }
@@ -1491,21 +1487,6 @@ func parseFirstIPv4(raw string) string {
 func isUsableIPv4(s string) bool {
 	addr, err := netip.ParseAddr(strings.TrimSpace(s))
 	return err == nil && addr.Is4() && addr.IsGlobalUnicast()
-}
-
-func isIPv4(s string) bool {
-	s = strings.TrimSpace(s)
-	parts := strings.Split(s, ".")
-	if len(parts) != 4 {
-		return false
-	}
-	for _, p := range parts {
-		n, err := strconv.Atoi(p)
-		if err != nil || n < 0 || n > 255 {
-			return false
-		}
-	}
-	return true
 }
 
 func escapePSString(s string) string {

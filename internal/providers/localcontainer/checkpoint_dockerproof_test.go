@@ -22,7 +22,7 @@ func TestDockerCommitCheckpointLifecycleProof(t *testing.T) {
 	if err := os.WriteFile(bootstrapDir+"/bootstrap.sh", []byte("#!/bin/sh\nmkdir -p /work\nexec sleep 600\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command(runtime, "run", "-d", "-v", bootstrapDir+":/tmp/crabbox-bootstrap:ro", "alpine:3", "/bin/sh", "/tmp/crabbox-bootstrap/bootstrap.sh").CombinedOutput()
+	out, err := exec.Command(runtime, "run", "-d", "--label", "fixed_intent_sha256=source-fixed-intent", "-v", bootstrapDir+":/tmp/crabbox-bootstrap:ro", "alpine:3", "/bin/sh", "/tmp/crabbox-bootstrap/bootstrap.sh").CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker run: %v: %s", err, out)
 	}
@@ -45,11 +45,11 @@ func TestDockerCommitCheckpointLifecycleProof(t *testing.T) {
 	t.Cleanup(func() { _ = exec.Command(runtime, "rmi", "-f", img.ID).Run() })
 	t.Logf("CREATE: image=%s id=%s", img.Name, shortCheckpointID(img.ID))
 
-	labelsOut, err := exec.Command(runtime, "image", "inspect", img.Name, "--format", `{{index .Config.Labels "crabbox"}}|{{index .Config.Labels "provider"}}|{{index .Config.Labels "lease"}}`).CombinedOutput()
+	labelsOut, err := exec.Command(runtime, "image", "inspect", img.Name, "--format", `{{index .Config.Labels "crabbox"}}|{{index .Config.Labels "provider"}}|{{index .Config.Labels "lease"}}|{{index .Config.Labels "fixed_intent_sha256"}}`).CombinedOutput()
 	if err != nil {
 		t.Fatalf("inspect checkpoint labels: %v: %s", err, labelsOut)
 	}
-	if got := strings.TrimSpace(string(labelsOut)); got != "||" {
+	if got := strings.TrimSpace(string(labelsOut)); got != "|||" {
 		t.Fatalf("checkpoint retained lease labels: %q", got)
 	}
 
@@ -86,7 +86,7 @@ func TestDockerCommitCheckpointLifecycleProof(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	if verify.ProviderState != "available" || verify.NextAction != "delete" {
+	if verify.ProviderState != "available" || verify.NextAction != "fork_or_delete" {
 		t.Fatalf("verify=%+v", verify)
 	}
 	if err := (Provider{}).DeleteNativeCheckpoint(context.Background(), resource); err != nil {

@@ -2,6 +2,28 @@ package cli
 
 import "strings"
 
+// DefaultContainerImageDigest identifies catalog-owned references. A known
+// default with an invalid digest stays known so adapters cannot treat it as a
+// trusted custom override and silently launch it.
+func DefaultContainerImageDigest(image string) (digest string, known bool) {
+	for _, spec := range osImageSpecs {
+		if image != spec.ContainerName {
+			continue
+		}
+		_, digest, ok := strings.Cut(image, "@")
+		if !ok || len(digest) != 71 || !strings.HasPrefix(digest, "sha256:") {
+			return "", true
+		}
+		for _, ch := range digest[7:] {
+			if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
+				return "", true
+			}
+		}
+		return digest, true
+	}
+	return "", false
+}
+
 const (
 	ArchitectureAMD64 = "amd64"
 	ArchitectureARM64 = "arm64"

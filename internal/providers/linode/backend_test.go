@@ -13,6 +13,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type fakeClock struct {
@@ -151,9 +152,7 @@ func removeLinodeByID(items []linodeInstance, id int64) []linodeInstance {
 
 func newTestBackend(t *testing.T, api *fakeLinodeAPI) *linodeLeaseBackend {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", home)
+	testutil.IsolateUserDirs(t)
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
@@ -358,10 +357,8 @@ func TestAcquireConfiguresFirewallForLinodeInterfaces(t *testing.T) {
 }
 
 func TestAcquireRejectsUnsupportedExplicitPortableOSBeforeCreate(t *testing.T) {
-	home := t.TempDir()
+	home := testutil.IsolateUserDirs(t).Home
 	configPath := home + "/config.yaml"
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", home)
 	t.Setenv("CRABBOX_CONFIG", configPath)
 	if err := os.WriteFile(configPath, []byte("provider: linode\nos: ubuntu:26.04\n"), 0o600); err != nil {
 		t.Fatal(err)

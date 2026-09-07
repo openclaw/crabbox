@@ -98,12 +98,6 @@ func timingReportWithRunResult(report core.TimingReport, result RunResult, err e
 	return core.TimingReportWithRunResult(report, result, err)
 }
 
-func timingReportWithProviderError(report core.TimingReport) core.TimingReport {
-	report.RunStatus = core.RunStatusFailed
-	report.ErrorKind = core.RunErrorProvider
-	return report
-}
-
 func handleDelegatedRunFailure(w io.Writer, cfg Config, req RunRequest, leaseID, slug string, acquired bool, shouldStop *bool) {
 	if !req.KeepOnFailure {
 		return
@@ -172,14 +166,6 @@ func updateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labe
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
 	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
-}
-
-func shouldUseShell(command []string) bool {
-	return core.ShouldUseShell(command)
-}
-
-func shellScriptFromArgv(command []string) string {
-	return core.ShellScriptFromArgv(command)
 }
 
 func shellQuote(s string) string {

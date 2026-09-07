@@ -59,8 +59,56 @@ Provider flags:
 - `run` maps to `container machine run` and preserves the host repository path.
 - `run --lease-output <path>` writes the Apple Machine lease ID, slug,
   reuse/retention state, and exact cleanup command for orchestration handoff.
+- Automatic deletion failure after a successful command fails the run with exit
+  1 and keeps its session and claim available for recovery. A primary command or
+  transport failure retains its outcome and inspectable cause when cleanup or
+  reporting also fails; secondary diagnostics remain visible.
+- Only a plain matching native process exit establishes a failed command's
+  exit code. Transport, cancellation, deadline, and I/O errors remain failures
+  with exit 1 even when the native result also carries a nonzero code.
+- `--keep-on-failure` covers environment or command preparation failures after
+  acquisition as well as failed commands. Reused machines remain kept. Private
+  environment-file cleanup runs on every path, including retained runs.
+- Timing is finalized after automatic cleanup, with the existing delegated,
+  skipped-sync fields for the home-mounted workspace. A reporting failure after
+  successful deletion cannot retroactively retain the machine. A failed timing
+  writer may leave no usable timing record, but still fails the run without
+  replacing an earlier failure.
 - `status` and `list` use machine JSON inspection.
 - `stop` deletes the machine and its persistent storage with `container machine rm`.
+- New leases bind the exact machine name and daemon-reported storage root to a
+  private ownership marker in the machine bundle. Reuse, status, and deletion
+  verify that binding without booting the machine to inspect it. Cleanup holds
+  the unchanged local claim until a complete inventory response and missing
+  bundle confirm deletion; uncertainty retains the claim. A later `stop` can
+  confirm an already-absent machine without issuing another deletion.
+- Older leases without this binding are not adopted or deleted automatically,
+  even with `--reclaim`. Inspect them with `container machine inspect <name>`
+  and, only after confirming ownership and accepting loss of persistent storage,
+  remove them manually with `container machine rm <name>`. Create a new Crabbox
+  lease to obtain an ownership binding. Do not copy or regenerate ownership
+  markers for replacement machines.
+- The storage root comes from `container system status --format json`, not the
+  calling shell's `CONTAINER_APP_ROOT`. Missing daemon storage evidence or an
+  unexpected bundle layout fails closed. Apple currently stores machine bundles
+  under `appRoot/plugin-state/machine-apiserver/machines`.
+- Apple's native removal API does not offer an atomic expected-identity check.
+  Crabbox fences its own claim changes and rejects observed replacements, but
+  external tools must not replace machines concurrently with lifecycle commands.
+- Caller cancellation also bounds waiting for claim fences during publication,
+  reuse, status, list verification, and explicit stop. Read-only lookups do not
+  refresh or adopt claims. The existing readiness budget includes its claim wait.
+- Resource cleanup has one 30-second budget starting before its claim fence and
+  covering identity verification, native removal, and confirmed absence. Failed
+  acquisition rollback receives a fresh uncanceled budget, including when no
+  claim was published; a successor claim never authorizes deletion of the
+  original machine. Each standalone native control command still has its own
+  30-second limit. These bounds cover cooperative waits and subprocesses, not
+  forcible interruption of filesystem syscalls.
+- Native control failures preserve cancellation/deadline causes alongside their
+  existing messages and exit codes. A later rollback failure cannot replace the
+  original exit code or hide the retained-machine recovery diagnostic. Once a
+  guarded action succeeds, its durable claim publication/removal still completes.
 - The home directory is mounted read-write. Use `apple-container` when a narrower
   disposable filesystem boundary is more important than persistence.
 - The default is `alpine:latest`. Custom images must include `/sbin/init`, as

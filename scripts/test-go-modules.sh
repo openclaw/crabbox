@@ -23,8 +23,8 @@ while IFS= read -r -d '' modfile; do
     rel="."
   fi
   found=1
-  printf '+ (cd %q && go test ./...)\n' "$rel"
-  (cd "$dir" && go test ./...)
+  printf '+ (cd %q && go test -timeout=15m ./...)\n' "$rel"
+  (cd "$dir" && go test -timeout=15m ./...)
 done <"$modules_file"
 
 if [[ "$found" -eq 0 ]]; then

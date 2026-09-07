@@ -16,6 +16,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type testClock struct{}
@@ -1084,7 +1085,7 @@ func TestResolveStatusOnlyAllowsIncompleteSSHTarget(t *testing.T) {
 func TestResolveStatusKeepsReadySSHTarget(t *testing.T) {
 	for _, readyProbe := range []bool{false, true} {
 		t.Run(fmt.Sprintf("ready_probe_%t", readyProbe), func(t *testing.T) {
-			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			testutil.IsolateUserDirs(t)
 			debugKeyHit := false
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == "GET" && r.URL.Path == "/api/v1alpha/jobs/job-123" {

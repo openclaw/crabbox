@@ -7,7 +7,13 @@ import { WebSocket as NodeWebSocket, WebSocketServer, type RawData } from "ws";
 
 import {
   controlMessageOwnsTransaction,
+  earliestProvisioningWake,
+  legacyAlarmKey,
+  mergedCoordinatorWake,
+  setLegacyWake,
   type CoordinatorRuntime,
+  type CoordinatorStorageView,
+  type ProvisioningRuntime,
   type CoordinatorSocketHandlers,
   type CoordinatorWebSocketUpgrade,
   type CoordinatorWebSocketUpgradeOptions,
@@ -36,6 +42,7 @@ export interface NodeUpgradeContext {
 }
 
 export class NodeCoordinatorRuntime implements CoordinatorRuntime {
+  readonly provisioning: ProvisioningRuntime = this;
   readonly storage: PostgresCoordinatorStorage;
   readonly ephemeralWebSocketMaxPayloadBytes = 1024 * 1024;
   private readonly boss: PgBoss;
@@ -52,6 +59,12 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
   private operationRunner = async <T>(callback: () => Promise<T>): Promise<T> => callback();
   private alarmRun: Promise<void> = Promise.resolve();
   private readonly pingInterval: ReturnType<typeof setInterval>;
+  private provisioningTick?: () => Promise<void>;
+  private provisioningRun: Promise<void> | undefined;
+  private wakeHintRun: Promise<void> | undefined;
+  private wakeHintPending = false;
+  private provisioningScanner?: ReturnType<typeof setInterval>;
+  private readonly maintenance = new Set<Promise<void>>();
 
   constructor(connectionString: string) {
     this.storage = new PostgresCoordinatorStorage(connectionString);
@@ -70,6 +83,11 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
   async start(alarmHandler: () => Promise<void>): Promise<void> {
     this.alarmHandler = alarmHandler;
     await this.storage.initialize();
+    await this.scanProvisioning();
+    this.provisioningScanner = setInterval(() => {
+      void this.scanProvisioning();
+    }, 1_000);
+    this.provisioningScanner.unref();
     await this.boss.start();
     await this.boss.createQueue(alarmQueue, {
       // "short" permits one queued successor while the current alarm is active.
@@ -111,6 +129,7 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
   beginShutdown(): void {
     this.shuttingDown = true;
     clearInterval(this.pingInterval);
+    clearInterval(this.provisioningScanner);
     this.closeSocketsForShutdown();
   }
 
@@ -124,6 +143,9 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
     await Promise.allSettled(this.socketClosures ?? []);
     await this.drainSocketOperations();
     await this.alarmRun;
+    await this.provisioningRun;
+    await this.drainMaintenance();
+    if (this.wakeHintRun) await boundedWakeHint(this.wakeHintRun);
     await this.boss.stop({ graceful: true, timeout: 10_000 });
     await this.storage.close();
   }
@@ -235,25 +257,100 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
     return this.storage.take<T>(key);
   }
 
-  async scheduleAlarm(time: number): Promise<void> {
-    await this.boss.deleteQueuedJobs(alarmQueue);
-    await this.boss.send(alarmQueue, null, {
-      startAfter: new Date(Math.max(Date.now(), time)),
-      singletonKey: "fleet",
-      retryLimit: 5,
-      retryDelay: 5,
-      retryBackoff: true,
+  async commitAndWake<T>(
+    callback: (transaction: CoordinatorStorageView) => Promise<T>,
+  ): Promise<T> {
+    const result = await this.storage.transaction(async (transaction) => {
+      if ((await transaction.get(legacyAlarmKey)) === undefined) {
+        await transaction.put(
+          legacyAlarmKey,
+          (await transaction.get<number>(alarmTimeStorageKey)) ?? null,
+        );
+      }
+      const value = await callback(transaction);
+      const time = await mergedCoordinatorWake(transaction);
+      if (time === undefined) await transaction.delete(alarmTimeStorageKey);
+      else await transaction.put(alarmTimeStorageKey, time);
+      return value;
     });
-    await this.storage.put(alarmTimeStorageKey, time);
+    // A hung queue must not hold a committed provisioning claim or its scanner.
+    this.wakeHintPending = true;
+    if (!this.wakeHintRun) {
+      this.wakeHintRun = this.drainWakeHints().finally(() => {
+        this.wakeHintRun = undefined;
+      });
+      await boundedWakeHint(this.wakeHintRun);
+    }
+    return result;
+  }
+
+  private async drainWakeHints(): Promise<void> {
+    while (this.wakeHintPending && !this.shuttingDown) {
+      this.wakeHintPending = false;
+      // oxlint-disable-next-line eslint/no-await-in-loop -- one queue writer re-reads the latest committed outbox.
+      await this.sendWakeHint();
+    }
+  }
+
+  private async sendWakeHint(): Promise<void> {
+    try {
+      const time = await this.getAlarm();
+      await this.boss.deleteQueuedJobs(alarmQueue);
+      if (time !== undefined) {
+        await this.boss.send(alarmQueue, null, {
+          startAfter: new Date(Math.max(Date.now(), time)),
+          singletonKey: "fleet",
+          retryLimit: 5,
+          retryDelay: 5,
+          retryBackoff: true,
+        });
+      }
+    } catch {
+      console.error("coordinator wake hint failed; committed due work remains scheduled");
+    }
+  }
+
+  registerProvisioningTick(tick: () => Promise<void>): void {
+    this.provisioningTick = tick;
+  }
+
+  ownMaintenance(operation: Promise<void>): void {
+    this.maintenance.add(operation);
+    void operation.then(
+      () => this.maintenance.delete(operation),
+      () => this.maintenance.delete(operation),
+    );
+  }
+
+  private async scanProvisioning(): Promise<void> {
+    if (this.shuttingDown || this.provisioningRun || !this.provisioningTick) return;
+    const run = async () => {
+      try {
+        const wake = await earliestProvisioningWake(this.storage);
+        if (wake !== undefined && wake <= Date.now()) await this.provisioningTick!();
+      } catch {
+        console.error("coordinator provisioning scan failed; retrying on next scan");
+      }
+    };
+    this.provisioningRun = run();
+    try {
+      await this.provisioningRun;
+    } finally {
+      this.provisioningRun = undefined;
+    }
+  }
+
+  async scheduleAlarm(time: number): Promise<void> {
+    await this.commitAndWake(async (transaction) => setLegacyWake(transaction, time));
   }
 
   async clearAlarm(): Promise<void> {
-    await this.boss.deleteQueuedJobs(alarmQueue);
-    await this.storage.delete(alarmTimeStorageKey);
+    await this.commitAndWake(async (transaction) => setLegacyWake(transaction));
   }
 
   private runAlarm(): Promise<void> {
     const run = this.alarmRun.then(async () => {
+      if (this.shuttingDown) return;
       if (!this.alarmHandler) {
         throw new Error("coordinator alarm handler is unavailable");
       }
@@ -261,6 +358,13 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
     });
     this.alarmRun = run.catch(() => undefined);
     return run;
+  }
+
+  private async drainMaintenance(): Promise<void> {
+    while (this.maintenance.size > 0) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- completion can latch a follow-up maintenance pass.
+      await Promise.allSettled(this.maintenance);
+    }
   }
 
   private pingSockets(): void {
@@ -331,6 +435,18 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
     if (active.length === 0) return;
     await Promise.allSettled(active);
     return this.drainSocketOperations();
+  }
+}
+
+async function boundedWakeHint(hint: Promise<void>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, 1000);
+  });
+  try {
+    await Promise.race([hint, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

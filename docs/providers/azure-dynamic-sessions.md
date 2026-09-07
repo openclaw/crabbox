@@ -192,6 +192,13 @@ Sessions are tracked by **local claims** scoped to the endpoint. `run`,
 `status`, and `stop` accept kept Crabbox lease IDs or slugs only — raw Dynamic
 Sessions identifiers are rejected unless they are already claimed.
 
+Run cleanup completes before final timing is written. If stopping a newly
+created session fails or its original claim has changed, the claim and session
+remain available for recovery; an otherwise successful run now fails with exit
+code 1 instead of reporting a warning and success. Command exits and cancellation
+keep their original outcome when cleanup or timing output also fails. The cleanup
+timeout covers waiting for the claim lock as well as the stop request.
+
 ## Limitations
 
 - Targets `linux` only.
@@ -204,3 +211,8 @@ Sessions identifiers are rejected unless they are already claimed.
 - `--actions-runner` is rejected.
 - Sync is archive upload/extract, not rsync, so rsync-specific options
   (for example `--checksum`) are rejected.
+
+If a command stream ends before its completion event while the caller context is
+canceled, Crabbox reports cancellation rather than a missing-completion error.
+An accepted completion event and explicit stream-read errors retain their
+existing precedence.

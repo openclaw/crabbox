@@ -72,12 +72,17 @@ big-endian UTF-8 byte length, and exact UTF-8 bytes. Each field is limited to
 operator metadata and is compared exactly; it is not independently verified,
 cryptographically attested, or a tenant-isolation boundary.
 
-Version 1 supports only AWS Linux leases whose provider adapter can confirm an
-immutable AMI, the lease's matching region, and canonical `amd64` or `arm64`
-architecture. Existing leases without persisted evidence, Azure snapshot
-leases, GCP leases, and other providers fail closed. Unknown schemas and
-structural mismatches fail closed; changed image/architecture evidence drains
-the entry before reuse or return.
+Version 1 supports AWS Linux leases whose provider adapter can confirm an
+immutable AMI and matching region, plus GCP Linux leases with an immutable
+numeric boot-image or disk-snapshot ID, exact source
+`projects/<project>/global/{images|snapshots}` namespace, and recorded execution
+project. The GCP zone is deliberately excluded so fallback zones preserve one
+cohort; source project and collection remain distinct to prevent collisions.
+Both providers require canonical `amd64` or `arm64` architecture. Existing
+leases without persisted evidence, GCP machine images, Azure snapshot leases,
+and other providers fail closed. Unknown schemas and structural mismatches fail
+closed; changed image/architecture evidence drains the entry before reuse or
+return.
 
 ## States
 
@@ -91,6 +96,9 @@ stale      broker entry exists but the backing lease is gone or expired
 
 Only `ready` entries can be borrowed. Borrow marks exactly one entry `busy`.
 Return marks it `ready`, `draining`, or releases the backing lease.
+Lease ownership spans both pool protocols: a busy or quarantined lease cannot
+be registered or borrowed through another pool or protocol. Explicitly
+registering an idle ready lease in another pool removes its previous entry.
 
 ## Control plane
 
@@ -125,12 +133,19 @@ POST /v1/ready-pools/:key/release-fill-claim-identity
 Routes alone are not the rollback boundary. Typed entries, fill claims,
 desired-capacity policies, and counters use independent
 `typed-ready-pool-v1:`, `typed-ready-pool-v1-fill-claim:`,
-`typed-ready-pool-v1-desired:`, and `typed-ready-pool-v1-counters:` storage
-namespaces. Neither Durable Object prefix scans nor PostgreSQL prefix scans
-used by deployed legacy coordinators can enumerate or borrow typed capacity
-after a rollback. Legacy clients continue using unchanged legacy records;
-typed clients fail explicitly against old coordinators and never retry legacy
-routes.
+`typed-ready-pool-v2-desired:sha256:<digest>`, and
+`typed-ready-pool-v1-counters:` storage namespaces. The
+`typed-ready-pool-v1-desired:` namespace is exact-policy migration-only: the
+coordinator deletes a v1 key only after writing the matching v2 policy
+successfully. Counters remain in the v1 namespace. Neither Durable Object
+prefix scans nor PostgreSQL prefix scans used by deployed legacy coordinators
+can enumerate or borrow typed capacity after a rollback. Existing typed fill
+claims that omitted `provider` retain their capacity reservation: their valid
+typed image identity supplies the provider for comparison, while an explicit
+conflicting provider never matches. This prevents a migration from issuing
+duplicate fill claims. Legacy clients
+continue using unchanged legacy records; typed clients fail explicitly against
+old coordinators and never retry legacy routes.
 
 The broker stores pool entries in coordinator storage. The CLI owns SSH
 keys, source sync, and Actions hydration, so it registers a lease only after it
@@ -210,9 +225,11 @@ Borrow heartbeat enforcement is negotiated per borrow. `crabbox run --pool`
 opts in and refreshes its two-minute deadline every 30 seconds. Manual and
 older-client borrows have no deadline until their first successful
 `pool heartbeat`, which opts them in. A missed negotiated deadline quarantines
-the entry so a late borrower cannot silently return it to ready. This keeps a
-new worker compatible with already-deployed CLIs during rollout. Stale and
-quarantined records are pruned after 24 hours. The metrics route reports current
+the entry so a late borrower cannot silently return it to ready, even before
+the next maintenance pass. The deadline is expired at equality, not only after
+it. Quarantined leases cannot be re-registered; drain or release them instead.
+This keeps a new worker compatible with already-deployed CLIs during rollout.
+Stale and quarantined records are pruned after 24 hours. The metrics route reports current
 state counts plus borrow, hit/miss, fill, heartbeat, quarantine, and prune
 counters.
 

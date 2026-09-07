@@ -1,5 +1,43 @@
 # Azure Provider
 
+## Coordinator continuation rollout
+
+The coordinator has an opt-in durable creation path for native Windows
+`normal`/amd64, managed OS disks, and VM-image-based ordinary/fixed-ID leases.
+Enable new admissions only with `CRABBOX_DURABLE_PROVISIONING_ADMISSION=true`
+and a stable, suitable existing `CRABBOX_SESSION_SECRET`; both prerequisites
+are reported by coordinator readiness. The gate defaults to off. Promoted OS
+disk snapshots, explicit snapshots/copy disks, ephemeral disks and WSL2 stay
+on their existing paths, including when a default resolves to one of them.
+Plans are bounded to 64 resolved region/SKU/market candidates. Each normal Windows
+class currently has five SKU candidates, so six regions with spot/on-demand
+fallback fit. Larger configured expansions remain on the existing path and are
+not advertised as resumable; readiness evaluates the effective defaults.
+
+The durable plan freezes region/SKU/market ordering, candidate names,
+subscription/resource group, exact marketplace image versions, resource tags,
+network settings, bootstrap bytes and the extension timestamp before allocation.
+Subsequent deployments do not rebuild that plan from changed defaults. VM PUTs
+use `If-None-Match: *` with Compute API `2024-07-01`; network/disk writes are not
+assumed to support create-only conditions. A missing network resource after an
+ambiguous dispatch remains unresolved. Fallback waits for definitive rejection
+or settled allocation plus verified owned cleanup, rather than starting a
+second candidate merely because a timeout elapsed.
+
+Shared infrastructure writes are fenced by exact provider scope. An unresolved
+shared-infrastructure write retains that fence instead of authorizing another
+writer. Windows continuation observes the original VM's `CustomData.bin` and
+matching extension; a succeeded extension is not PUT again. Protected replay
+material is stored once outside public lease records, encrypted with a
+provisioning-specific derivation and lease/operation/generation/scope binding.
+
+This is not migration of existing interrupted creates, universal Azure/provider
+resumability, or proof of live recovery. Roll out journal-aware scheduling and
+cleanup readers before enabling admission, and do not roll back below that
+version while operations or cleanup debt remain. Deployment interruption plus
+SSH/immutable-identity/owned-cleanup proof still requires a separately authorized
+isolated deployment and a fresh test lease.
+
 Read this when you are:
 
 - choosing `provider: azure`;
@@ -235,6 +273,19 @@ until the required service-principal secrets are present.
     coordinator's canonical-resource, quarantine, and fresh-preflight rules; see
     [Lifecycle and cleanup](../features/lifecycle-cleanup.md).
 
+### Brokered checkpoint ownership
+
+New brokered Azure managed-OS-disk snapshots are coordinator-owned but manually
+retained unless `checkpoint create --expire-unused-after <duration>` or
+`checkpoint policy` explicitly opts in. Records bind the authoritative source
+lease, Azure subscription, resource group, location, canonical snapshot ID,
+and immutable snapshot identity. Provider cleanup succeeds only after exact
+scoped deletion is confirmed; authentication failures, wrong resource groups,
+and ambiguous API errors retain ownership for retry. Promoting the snapshot
+creates a durable pin that blocks expiry and manual checkpoint deletion until
+the exact promotion is replaced. Direct Azure snapshots and older image records
+remain operator-managed.
+
 ## Classes
 
 Default Linux SKU candidates (first that provisions wins):
@@ -261,7 +312,10 @@ beast     Standard_D16ads_v6, Standard_D16ds_v6, Standard_D16ads_v5, Standard_D1
 
 Class-based provisioning falls back across the candidate list when Azure rejects a
 SKU for capacity or quota (`SkuNotAvailable`, `QuotaExceeded`, `AllocationFailed`,
-`OverconstrainedAllocationRequest`). When `capacity.regions` (or broker-side
+`OverconstrainedAllocationRequest`). If the rejected attempt already created its
+exact lease-owned NIC and public IP, Crabbox verifies and removes both and clears
+their durable cleanup claim before the next SKU creates a new public IP. When
+`capacity.regions` (or broker-side
 `CRABBOX_AZURE_REGIONS`) is set, Crabbox also tries those Azure regions in order
 and uses region-scoped shared network names for the fallback path. Spot leases
 fall back to on-demand when `capacity.fallback` starts with `on-demand`. Azure

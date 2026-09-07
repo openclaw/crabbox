@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -678,6 +679,106 @@ func TestForceRFBMacOSAuthenticationHandlesUpstreamNoneResultByVersion(t *testin
 	}
 }
 
+func TestForceRFBMacOSAuthenticationPreservesTimeoutCause(t *testing.T) {
+	for _, transportErr := range []error{os.ErrDeadlineExceeded, net.ErrClosed} {
+		for _, phase := range []string{"read RFB server version", "write RFB server version", "read RFB browser version"} {
+			t.Run(transportErr.Error()+"/"+phase, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					viewer, browser := net.Pipe()
+					server, upstream := net.Pipe()
+					defer viewer.Close()
+					defer browser.Close()
+					defer server.Close()
+					defer upstream.Close()
+					if phase != "read RFB server version" {
+						go func() {
+							if _, err := server.Write([]byte("RFB 003.008\n")); err != nil {
+								t.Error(err)
+							}
+						}()
+					}
+					if phase == "read RFB browser version" {
+						go func() {
+							if _, err := io.ReadFull(viewer, make([]byte, 12)); err != nil {
+								t.Error(err)
+							}
+						}()
+					}
+					err := forceRFBMacOSAuthenticationWithTimeout(context.Background(),
+						rfbTimeoutErrorConn{browser, transportErr}, rfbTimeoutErrorConn{upstream, transportErr},
+						rfbCredentials{}, localWebVNCAuthARD, 20*time.Millisecond)
+					if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, transportErr) {
+						t.Fatalf("negotiation error=%v, want deadline and transport causes", err)
+					}
+					if !strings.Contains(err.Error(), phase) {
+						t.Fatalf("negotiation error=%v, want phase %q", err, phase)
+					}
+				})
+			})
+		}
+	}
+}
+
+func TestForceRFBMacOSAuthenticationPreservesNonTimeoutErrors(t *testing.T) {
+	for _, cancelParent := range []bool{false, true} {
+		name := "early disconnect"
+		if cancelParent {
+			name = "parent cancellation"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancelCause(context.Background())
+				defer cancel(nil)
+				viewer, browser := net.Pipe()
+				server, upstream := net.Pipe()
+				defer viewer.Close()
+				defer browser.Close()
+				defer server.Close()
+				defer upstream.Close()
+				wantErr := error(io.EOF)
+				if cancelParent {
+					wantErr = errors.New("bridge stopped by caller")
+				}
+				go func() {
+					time.Sleep(time.Millisecond)
+					if cancelParent {
+						cancel(wantErr)
+					} else {
+						_ = server.Close()
+					}
+				}()
+				err := forceRFBMacOSAuthenticationWithTimeout(ctx, browser, upstream,
+					rfbCredentials{}, localWebVNCAuthARD, time.Second)
+				if !errors.Is(err, wantErr) || errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("negotiation error=%v, want %v without timeout classification", err, wantErr)
+				}
+			})
+		})
+	}
+}
+
+// WebSocket deadlines can surface as a closed connection instead of a timeout.
+type rfbTimeoutErrorConn struct {
+	net.Conn
+	timeoutErr error
+}
+
+func (c rfbTimeoutErrorConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		err = c.timeoutErr
+	}
+	return n, err
+}
+
+func (c rfbTimeoutErrorConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		err = c.timeoutErr
+	}
+	return n, err
+}
+
 func TestRelayWebSocketVNCWithARDAuthenticationTimeoutIsConfigurable(t *testing.T) {
 	t.Run("short timeout", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -714,6 +815,9 @@ func TestRelayWebSocketVNCWithARDAuthenticationTimeoutIsConfigurable(t *testing.
 		case err := <-relayResult:
 			if err == nil || !strings.Contains(err.Error(), "timed out") {
 				t.Fatalf("relay error=%v, want timeout", err)
+			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("relay error=%v, want deadline cause", err)
 			}
 		case <-time.After(time.Second):
 			t.Fatal("relay did not time out")

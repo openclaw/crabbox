@@ -67,7 +67,7 @@ func TestWebVNCDaemonStopRefusesOrphanedProcessGroupWithoutSupervisorIdentity(t 
 		t.Fatal("fixture descendant did not survive its supervisor")
 	}
 	var stdout bytes.Buffer
-	stopped, err := (App{Stdout: &stdout, Stderr: io.Discard}).stopWebVNCDaemonIfRunning("workspace-orphan")
+	stopped, err := (App{Stdout: &stdout, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(t.Context(), "workspace-orphan")
 	if err == nil || stopped || !strings.Contains(err.Error(), "without its recorded supervisor identity") {
 		t.Fatalf("stopped=%t output=%q err=%v", stopped, stdout.String(), err)
 	}

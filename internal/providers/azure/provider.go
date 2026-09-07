@@ -323,7 +323,7 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 			CreateUnsupported: "Azure managed images require a stopped/generalized source VM; use --strategy disk-snapshot for active Azure leases",
 		}, true
 	}
-	return core.NativeCheckpointCapability{Kind: core.CheckpointKindAzureOS}, true
+	return core.NativeCheckpointCapability{Kind: core.CheckpointKindAzureOS, RetireSource: true}, true
 }
 
 func firstNonBlank(values ...string) string {

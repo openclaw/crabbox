@@ -23,6 +23,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:           providerName,
 		Kind:             core.ProviderKindSSHLease,
 		ClassDisposition: core.ProviderClassDispositionMapped,
+		SizeSelection:    core.ProviderSizeSelectorType,
 		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
 		Features: core.FeatureSet{
 			core.FeatureSSH,

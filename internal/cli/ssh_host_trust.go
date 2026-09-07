@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -193,23 +194,30 @@ func secureAuthoritativeKnownHostsPath(path string, directory bool) error {
 	return nil
 }
 
-func removeStoredTestboxConnectionArtifacts(leaseID string) error {
+func removeStoredTestboxConnectionArtifacts(ctx context.Context, leaseID string) error {
+	key, err := testboxKeyPath(leaseID)
+	if err != nil {
+		return err
+	}
 	dir, err := inspectTestboxLeaseDirectory(leaseID)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return closeLeaseSSHControlMasters(ctx, filepath.Dir(key))
 	}
 	if err != nil {
 		return err
 	}
 	info, err := os.Lstat(dir)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return closeLeaseSSHControlMasters(ctx, dir)
 	}
 	if err != nil {
 		return fmt.Errorf("inspect lease SSH directory: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return fmt.Errorf("refusing to remove non-directory lease SSH path")
+	}
+	if err := closeLeaseSSHControlMasters(ctx, dir); err != nil {
+		return err
 	}
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("remove lease SSH directory: %w", err)

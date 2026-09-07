@@ -298,7 +298,7 @@ func TestParseCheckpointImageIDIgnoresNonDigestOutput(t *testing.T) {
 
 func TestCheckpointResetLeaseLabelsClearsOwnershipSelectors(t *testing.T) {
 	change := checkpointResetLeaseLabelsChange()
-	for _, key := range []string{"crabbox", "provider", "lease", "slug", "keep", "expires_at"} {
+	for _, key := range []string{"crabbox", "provider", "lease", "slug", "keep", "expires_at", "fixed_intent_sha256"} {
 		if !strings.Contains(change, ` `+key+`=""`) {
 			t.Fatalf("label reset missing %s", key)
 		}

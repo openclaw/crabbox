@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -24,6 +27,11 @@ func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	isolateTestUserDirs(t)
 	for _, key := range []string{
+		"CRABBOX_ENV_ALLOW",
+		"CRABBOX_RESULTS_JUNIT",
+		"CRABBOX_RESULTS_AUTO",
+		"CRABBOX_RESULTS_FAIL_ON_FAILURES",
+		"CRABBOX_PREFLIGHT_TOOLS",
 		"CRABBOX_COORDINATOR",
 		"CRABBOX_COORDINATOR_MODE",
 		"CRABBOX_COORDINATOR_AUTO_WEBVNC",
@@ -471,6 +479,7 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_LOCAL_CONTAINER_MEMORY",
 		"CRABBOX_LOCAL_CONTAINER_NETWORK",
 		"CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET",
+		"CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME",
 		"CRABBOX_NAMESPACE_IMAGE",
 		"CRABBOX_NAMESPACE_SIZE",
 		"CRABBOX_NAMESPACE_REPOSITORY",
@@ -1717,6 +1726,65 @@ func TestVultrDefaultsAndIsolation(t *testing.T) {
 	}
 }
 
+func TestLinuxProviderConnectionDefaultsPreserveExplicitValues(t *testing.T) {
+	base := baseConfig()
+	for _, provider := range []struct {
+		name, user, port string
+		clearFallbacks   bool
+	}{
+		{"digitalocean", base.SSHUser, base.SSHPort, false},
+		{"vultr", "root", "22", true},
+		{"linode", base.SSHUser, base.SSHPort, false},
+		{"lambda", "ubuntu", "22", true},
+		{"nebius", "builder", base.SSHPort, false},
+		{"ovh", base.SSHUser, base.SSHPort, false},
+		{"scaleway", "root", "22", false},
+		{"tencentcloud", "ubuntu", "22", true},
+	} {
+		for _, explicit := range []string{"none", "base", "custom"} {
+			t.Run(provider.name+"/"+explicit, func(t *testing.T) {
+				cfg := baseConfig()
+				cfg.Provider = provider.name
+				cfg.TargetOS, cfg.WindowsMode = targetMacOS, windowsModeWSL2
+				cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort = "/previous", "previous", "2999"
+				cfg.Nebius.User = "builder"
+				cfg.SSHFallbackPorts = []string{"2022"}
+				cfg.sshFallbackPortsExplicit = true
+				cfg.explicitSSHFallbackPorts = []string{"2022"}
+				wantUser, wantPort, wantRoot := provider.user, provider.port, defaultPOSIXWorkRoot
+				if explicit != "none" {
+					wantUser, wantPort, wantRoot = base.SSHUser, base.SSHPort, base.WorkRoot
+					if explicit == "custom" {
+						wantUser, wantPort, wantRoot = "alice", "2200", "/srv/proof"
+					}
+					if err := applyFileConfig(&cfg, fileConfig{
+						WorkRoot: wantRoot,
+						SSH:      &fileSSHConfig{User: wantUser, Port: wantPort},
+						Windows:  &fileWindowsConfig{Mode: windowsModeNormal},
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := applyProviderConfigDefaults(&cfg); err != nil {
+					t.Fatal(err)
+				}
+				got := []string{cfg.TargetOS, cfg.WindowsMode, cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort}
+				want := []string{targetLinux, windowsModeNormal, wantRoot, wantUser, wantPort}
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("connection = %q, want %q", got, want)
+				}
+				wantFallbacks := "2022"
+				if provider.clearFallbacks {
+					wantFallbacks = ""
+				}
+				if got := strings.Join(cfg.SSHFallbackPorts, ","); got != wantFallbacks {
+					t.Fatalf("fallback ports = %q, want %q", got, wantFallbacks)
+				}
+			})
+		}
+	}
+}
+
 func TestVultrDefaultsPreserveExplicitGenericValues(t *testing.T) {
 	cfg := baseConfig()
 	applyFileConfig(&cfg, fileConfig{
@@ -2354,7 +2422,7 @@ func TestProviderOverrideReappliesExplicitOSImageDefaults(t *testing.T) {
 	if err := applyProviderConfigDefaults(&cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.TargetOS != targetLinux || cfg.LocalContainer.Image != "ubuntu:24.04" {
+	if cfg.TargetOS != targetLinux || cfg.LocalContainer.Image != osImageSpecs["ubuntu:24.04"].ContainerName {
 		t.Fatalf("provider override target=%q image=%q", cfg.TargetOS, cfg.LocalContainer.Image)
 	}
 }
@@ -5217,6 +5285,124 @@ func TestRepoConfigBareEnvWildcardDoesNotForwardEveryLocalVariable(t *testing.T)
 	}
 }
 
+func writeReplacementListConfig(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConfigReplacementListsAcrossYAMLLayers(t *testing.T) {
+	for _, layers := range []struct{ lower, upper string }{
+		{"defaults", "user"},
+		{"defaults", "crabbox.yaml"},
+		{"defaults", ".crabbox.yaml"},
+		{"user", "crabbox.yaml"},
+		{"user", ".crabbox.yaml"},
+		{"crabbox.yaml", ".crabbox.yaml"},
+	} {
+		for _, value := range []struct {
+			name, yaml string
+		}{
+			{"absent", "{}\n"},
+			{"omitted", "env: {}\nresults: {}\nrun: {}\n"},
+			{"empty", "env:\n  allow: []\nresults:\n  junit: []\nrun:\n  preflightTools: []\n"},
+			{"replacement", "env:\n  allow: [BUILD_FLAVOR, BUILD_FLAVOR]\nresults:\n  junit: [new-report.xml, new-report.xml]\nrun:\n  preflightTools: [go, GO]\n"},
+		} {
+			t.Run(layers.lower+"/"+layers.upper+"/"+value.name, func(t *testing.T) {
+				clearConfigEnv(t)
+				t.Setenv("CRABBOX_CONFIG", "")
+				t.Chdir(t.TempDir())
+				path := func(layer string) string {
+					if layer == "user" {
+						return userConfigPath()
+					}
+					return layer
+				}
+				wantAllow, wantJUnit, wantTools := "CI,NODE_OPTIONS", "", ""
+				if layers.lower != "defaults" {
+					writeReplacementListConfig(t, path(layers.lower), "env:\n  allow: [CI, NODE_OPTIONS, BUILD_FLAVOR]\nresults:\n  junit: [old-report.xml]\n  auto: true\nrun:\n  preflightTools: [cmake]\n")
+					wantAllow, wantJUnit, wantTools = "CI,NODE_OPTIONS,BUILD_FLAVOR", "old-report.xml", "cmake"
+				}
+				writeReplacementListConfig(t, path(layers.upper), value.yaml)
+				if value.name == "empty" {
+					wantAllow, wantJUnit, wantTools = "", "", ""
+				} else if value.name == "replacement" {
+					wantAllow, wantJUnit, wantTools = "BUILD_FLAVOR", "new-report.xml", "go"
+				}
+				cfg, err := loadConfig()
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, list := range []struct {
+					name string
+					got  []string
+					want string
+				}{
+					{"env.allow", cfg.EnvAllow, wantAllow},
+					{"results.junit", cfg.Results.JUnit, wantJUnit},
+					{"run.preflightTools", cfg.Run.PreflightTools, wantTools},
+				} {
+					if got := strings.Join(list.got, ","); got != list.want {
+						t.Errorf("%s=%q, want %q", list.name, got, list.want)
+					}
+				}
+				if cfg.Results.Auto != (layers.lower != "defaults") {
+					t.Error("replacing results.junit changed independent results.auto")
+				}
+				if value.name == "empty" {
+					for _, name := range []string{"CI", "NODE_OPTIONS", "BUILD_FLAVOR"} {
+						t.Setenv(name, "synthetic-local-proof")
+					}
+					if got := allowedEnv(cfg.EnvAllow); len(got) != 0 {
+						t.Error("cleared allowlist still forwards local environment")
+					}
+					if got := preflightToolsForTarget(SSHTarget{TargetOS: targetLinux}, cfg.Run.PreflightTools); len(got) != 0 {
+						t.Errorf("cleared preflight tools restored probes: %v", got)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestConfigReplacementListsStayClearedAndRespectOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Chdir(t.TempDir())
+	writeReplacementListConfig(t, userConfigPath(), "env:\n  allow: [BUILD_FLAVOR]\nresults:\n  junit: [old-report.xml]\nrun:\n  preflightTools: [cmake]\n")
+	writeReplacementListConfig(t, "crabbox.yaml", "env:\n  allow: []\nresults:\n  junit: []\nrun:\n  preflightTools: []\n")
+	writeReplacementListConfig(t, ".crabbox.yaml", "env: {}\nresults: {}\nrun: {}\n")
+	for _, name := range []string{"CRABBOX_ENV_ALLOW", "CRABBOX_RESULTS_JUNIT", "CRABBOX_PREFLIGHT_TOOLS"} {
+		t.Setenv(name, "")
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.EnvAllow)+len(cfg.Results.JUnit)+len(cfg.Run.PreflightTools) != 0 {
+		t.Fatal("omitted fields or empty environment overrides restored cleared lists")
+	}
+	applyRunEnvAllowFlags(&cfg, []string{"BUILD_FLAVOR,BUILD_FLAVOR"})
+	if got := strings.Join(cfg.EnvAllow, ","); got != "BUILD_FLAVOR" {
+		t.Fatalf("CLI append after clear=%q", got)
+	}
+	t.Setenv("CRABBOX_ENV_ALLOW", "CI")
+	t.Setenv("CRABBOX_RESULTS_JUNIT", "env-report.xml")
+	t.Setenv("CRABBOX_PREFLIGHT_TOOLS", "go")
+	cfg, err = loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyRunEnvAllowFlags(&cfg, []string{"BUILD_FLAVOR"})
+	if strings.Join(cfg.EnvAllow, ",") != "CI,BUILD_FLAVOR" || strings.Join(cfg.Results.JUnit, ",") != "env-report.xml" || strings.Join(cfg.Run.PreflightTools, ",") != "go" {
+		t.Fatalf("higher precedence overrides not applied: allow=%v junit=%v tools=%v", cfg.EnvAllow, cfg.Results.JUnit, cfg.Run.PreflightTools)
+	}
+}
+
 func TestProfileEnvConfigYAMLShape(t *testing.T) {
 	var env fileProfileEnvConfig
 	if err := yaml.Unmarshal([]byte("CI: 1\nNODE_OPTIONS: --max-old-space-size=4096\nallow:\n  - CUSTOM_*\n"), &env); err != nil {
@@ -5467,6 +5653,59 @@ func TestExplicitConfigSymlinkIntoRepoRemainsUntrusted(t *testing.T) {
 	}
 	if trust.repositoryRoot != wantRoot {
 		t.Fatalf("repository root=%q, want %q", trust.repositoryRoot, wantRoot)
+	}
+}
+
+func TestConfigDiscoveryDoesNotReadRepositoryMetadata(t *testing.T) {
+	clearConfigEnv(t)
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	t.Chdir(repo)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	writeFile(t, configPath, "provider: aws\nprofile: root-discovery\n")
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	tracePath := filepath.Join(t.TempDir(), "git-trace.jsonl")
+	// Git's global Trace2 setting observes real commands without changing the
+	// credential-filtered environment used by repository discovery.
+	runGit(t, repo, "config", "--file", filepath.Join(os.Getenv("HOME"), ".gitconfig"), "trace2.eventTarget", tracePath)
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	if err := app.Run(context.Background(), []string{"config", "show", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var config struct{ Profile string }
+	if err := json.Unmarshal(stdout.Bytes(), &config); err != nil || config.Profile != "root-discovery" {
+		t.Fatalf("config show profile=%q decode=%v", config.Profile, err)
+	}
+	trace, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	discoveredRoot := false
+	decoder := json.NewDecoder(bytes.NewReader(trace))
+	for {
+		var event struct {
+			Event string
+			Argv  []string
+		}
+		if err := decoder.Decode(&event); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if event.Event != "start" {
+			continue
+		}
+		command := strings.Join(event.Argv[1:], " ")
+		if strings.Contains(command, "--show-toplevel") {
+			discoveredRoot = true
+		}
+		if strings.HasPrefix(command, "remote ") || strings.HasPrefix(command, "symbolic-ref ") || strings.HasPrefix(command, "branch ") || command == "rev-parse HEAD" {
+			t.Errorf("config discovery read unused repository metadata: git %s", command)
+		}
+	}
+	if !discoveredRoot {
+		t.Fatal("config discovery did not resolve the active repository root")
 	}
 }
 
@@ -6860,6 +7099,69 @@ localContainer:
 	}
 	if cfg.Image != "ubuntu-26.04" || cfg.AzureImage != defaultAzureLinuxImage || cfg.Islo.Image != "docker.io/library/ubuntu:26.04" || cfg.LocalContainer.Image != "ubuntu:26.04" {
 		t.Fatalf("explicit images were overwritten: hetzner=%q azure=%q islo=%q local=%q", cfg.Image, cfg.AzureImage, cfg.Islo.Image, cfg.LocalContainer.Image)
+	}
+}
+
+func TestLocalContainerNoHostnameConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name, yaml, env string
+		want            bool
+	}{
+		{name: "omitted default", yaml: "{}"},
+		{name: "YAML enabled", yaml: "{noHostname: true}", want: true},
+		{name: "YAML disabled", yaml: "{noHostname: false}"},
+		{name: "environment enabled", yaml: "{}", env: "1", want: true},
+		{name: "environment overrides true", yaml: "{noHostname: true}", env: "0"},
+		{name: "environment overrides false", yaml: "{noHostname: false}", env: "true", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			cfgPath := filepath.Join(home, "crabbox.yaml")
+			t.Setenv("CRABBOX_CONFIG", cfgPath)
+			t.Setenv("CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME", tc.env)
+			if err := os.WriteFile(cfgPath, []byte("provider: local-container\nlocalContainer: "+tc.yaml+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := loadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.LocalContainer.NoHostname != tc.want {
+				t.Fatalf("NoHostname=%t, want %t", cfg.LocalContainer.NoHostname, tc.want)
+			}
+		})
+	}
+}
+
+func TestLocalContainerNoHostnameFileLayering(t *testing.T) {
+	for _, tc := range []struct {
+		name, yaml string
+		want       bool
+	}{
+		{name: "omitted preserves enabled", yaml: "{}", want: true},
+		{name: "explicit false clears enabled", yaml: "{noHostname: false}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			filePath := filepath.Join(t.TempDir(), "crabbox.yaml")
+			if err := os.WriteFile(filePath, []byte("localContainer: "+tc.yaml+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file, err := readFileConfig(filePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := baseConfig()
+			cfg.LocalContainer.NoHostname = true
+			if err := applyFileConfig(&cfg, file); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.LocalContainer.NoHostname != tc.want {
+				t.Fatalf("NoHostname=%t, want %t", cfg.LocalContainer.NoHostname, tc.want)
+			}
+		})
 	}
 }
 

@@ -80,7 +80,7 @@ target: linux
 architecture: arm64        # native default; set amd64 for an x86_64 guest
 appleContainer:
   cliPath: container        # path to Apple's container CLI
-  image: ubuntu:26.04       # base image; defaults to the Crabbox OS image (--os)
+  # image: example-org/runner:tag # optional trusted custom-image override
   user: crabbox             # SSH user created inside the container
   workRoot: /work/crabbox   # remote Crabbox work root
   cpus: 0                   # CPU limit; 0 leaves the runtime default
@@ -88,11 +88,33 @@ appleContainer:
   extraRunArgs: []          # extra args appended to `container run`
 ```
 
-Defaults applied when unset: `cliPath=container`, `image=` the Crabbox OS image
-default (follows `--os`; currently `ubuntu:26.04`), `user=crabbox`,
+Defaults applied when unset: `cliPath=container`, `image=` the reviewed Ubuntu
+OCI index (follows `--os`; default selector `ubuntu:26.04`), `user=crabbox`,
 `workRoot=/work/crabbox`, SSH port `22`. If provider code is constructed
 directly without the normal config layer, an empty `appleContainer.image` falls
 back to the same Crabbox OS image default.
+
+Shipped images use fully qualified SHA-256 index references for both supported
+architectures. For these catalog references, Crabbox uses `container create`,
+verifies the exact created target's ownership labels, image reference, and
+`configuration.image.descriptor.digest`, then starts that stored configuration.
+It never runs guest bootstrap before the digest check. The index digest and
+reference remain in the lease's image labels. This inspect contract is supported
+by Apple Container 0.10.0 and 1.0.0; missing or ambiguous metadata fails closed.
+
+A well-identified stopped container with the wrong image digest is removed only
+after a fresh unchanged-configuration check under the local claim fence. If
+creation, identity, rollback, or startup is uncertain, Crabbox retains the
+target and its SSH key and reports the exact name/lease for manual native
+inspection and cleanup. Do not start an unverified retained container. After
+independently confirming the reported target belongs to this failed attempt,
+inspect it with `container inspect <name>` and remove it with
+`container delete --force <name>`; preserve unrelated containers and claims.
+External native operators are outside the local Crabbox claim fence.
+
+Explicit custom image overrides keep the existing native `container run` path
+and remain an operator trust decision, including floating tags. Pin rotations
+affect new leases only. See [default-image rotation](../operations.md#default-container-image-pins).
 
 The implicit guest architecture is native `arm64`. Explicit `--arch arm64` and
 `--arch amd64` selections are forwarded to `container run --arch`, so the

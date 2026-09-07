@@ -90,6 +90,10 @@ func TestClientValidationAndRedaction(t *testing.T) {
 	if strings.Contains(err.Error(), "secret-token") || !strings.Contains(err.Error(), "[redacted]") {
 		t.Fatalf("token was not redacted: %v", err)
 	}
+	var apiErr *hostingerAPIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized || apiErr.Status != "401 Unauthorized" || !strings.Contains(apiErr.Body, "is invalid") {
+		t.Fatalf("API error classification changed: %v", err)
+	}
 }
 
 func TestClientRejectsRedirectBeforeForwardingToken(t *testing.T) {
@@ -709,6 +713,54 @@ func TestHostingerAcquireBootstrapsBeforeSSHReady(t *testing.T) {
 	}
 }
 
+func TestEnsureBootstrapHonorsCancelDuringWait(t *testing.T) {
+	// Cancel must be observed during the 5s backoff, not only at the top of the loop.
+	backend := NewLeaseBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
+	oldRunSSHQuiet := hostingerRunSSHQuiet
+	probed := make(chan struct{}, 1)
+	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error {
+		select {
+		case probed <- struct{}{}:
+		default:
+		}
+		return errors.New("ssh unavailable")
+	}
+	t.Cleanup(func() { hostingerRunSSHQuiet = oldRunSSHQuiet })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		errCh <- backend.ensureBootstrap(ctx, core.Config{}, LeaseTarget{
+			LeaseID: "lease-wait",
+			Server:  core.Server{CloudID: "vm-wait"},
+		}, "bootstrap")
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	select {
+	case <-probed:
+	case err := <-errCh:
+		t.Fatalf("ensureBootstrap returned before backoff: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("ensureBootstrap did not probe before backoff")
+	}
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ensureBootstrap returned %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ensureBootstrap did not return within 3s after cancel; still blocked on bare sleep")
+	}
+}
+
 func TestAcquireResolveListReleaseCleanupDoctorWithFakeAPI(t *testing.T) {
 	isolateHostingerTestState(t)
 	api := &fakeAPI{
@@ -806,8 +858,8 @@ func TestAcquireResolveListReleaseCleanupDoctorWithFakeAPI(t *testing.T) {
 	if api.stopCalls != 0 {
 		t.Fatal("dry-run cleanup stopped a VM")
 	}
-	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
-		t.Fatal(err)
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil || outcome.Terminal {
+		t.Fatalf("stop outcome=%+v err=%v", outcome, err)
 	}
 	if api.stopCalls != 1 || api.stopped[0] != "vm-new" {
 		t.Fatalf("stops=%v", api.stopped)
@@ -1210,6 +1262,7 @@ func TestAcquireFailureStopsPaidVPSButRetainsRecoveryState(t *testing.T) {
 	oldRunSSHQuiet := hostingerRunSSHQuiet
 	oldSleep := hostingerSleep
 	hostingerRunSSHQuiet = func(context.Context, SSHTarget, string) error {
+		cancel()
 		return errors.New("ssh unavailable")
 	}
 	hostingerSleep = func(time.Duration) { cancel() }
@@ -1271,6 +1324,7 @@ func TestAcquireFailureDoesNotStopPaidVPSWhenClaimDisappears(t *testing.T) {
 		for _, claim := range claims {
 			core.RemoveLeaseClaim(claim.LeaseID)
 		}
+		cancel()
 		return errors.New("ssh unavailable")
 	}
 	hostingerSleep = func(time.Duration) { cancel() }

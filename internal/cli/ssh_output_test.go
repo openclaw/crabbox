@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"io"
 	"os"
@@ -91,35 +92,84 @@ func TestRunSSHOutputBoundedCancellationBeforeTransport(t *testing.T) {
 	}
 }
 
-func TestRunSSHOutputBoundedTargetWrapping(t *testing.T) {
+func TestRunSSHOutputBoundedNativeWindowsWrapping(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell transport fixture")
 	}
-	for _, mode := range []string{windowsModeNormal, windowsModeWSL2} {
-		t.Run(mode, func(t *testing.T) {
-			dir := t.TempDir()
-			log := filepath.Join(dir, "args")
-			if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+shellQuote(log)+"\nprintf arm64\n"), 0700); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-			target := SSHTarget{Host: "win.example.test", Port: "2207", FallbackPorts: []string{}, TargetOS: targetWindows, WindowsMode: mode}
-			command := "/bin/sh -c 'uname -m'"
-			if mode == windowsModeNormal {
-				command = "[Console]::WriteLine('arm64')"
-			}
-			if _, err := RunSSHOutputBounded(context.Background(), target, command, 32); err != nil {
-				t.Fatal(err)
-			}
-			data, err := os.ReadFile(log)
-			if err != nil {
-				t.Fatal(err)
-			}
-			want := wrapRemoteForTarget(target, command)
-			if !strings.Contains(string(data), want) || !strings.HasPrefix(want, "powershell.exe ") {
-				t.Fatalf("wrapper not used: %s", data)
-			}
-		})
+	dir := t.TempDir()
+	log := filepath.Join(dir, "args")
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+shellQuote(log)+"\nprintf arm64\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	target := SSHTarget{Host: "win.example.test", Port: "2207", FallbackPorts: []string{}, TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	command := "[Console]::WriteLine('arm64')"
+	if _, err := RunSSHOutputBounded(context.Background(), target, command, 32); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := wrapRemoteForTarget(target, command)
+	if !strings.Contains(string(data), want) || !strings.HasPrefix(want, "powershell.exe ") {
+		t.Fatalf("wrapper not used: %s", data)
+	}
+}
+
+func TestRunSSHOutputBoundedWSL2StagesCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell transport fixture")
+	}
+	dir := t.TempDir()
+	executions, remotePath, stdinPath := filepath.Join(dir, "executions"), filepath.Join(dir, "remote"), filepath.Join(dir, "stdin")
+	script := "#!/bin/sh\nprintf x >> " + shellQuote(executions) + "\nlast=; for arg; do last=$arg; done\nprintf '%s' \"$last\" > " + shellQuote(remotePath) + "\ncat > " + shellQuote(stdinPath) + "\nprintf arm64\n"
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	const nonce = "0123456789abcdef0123456789abcdef"
+	var stageCount int
+	var stagedCommand string
+	var payload []byte
+	var size int64
+	var digest [sha256.Size]byte
+	oldStage := stageWSLSpool
+	stageWSLSpool = func(spool *wslStageSpool, _ context.Context, target *SSHTarget, _ wslStageTiming, _, _ string, _ io.Writer) (string, error) {
+		stageCount++
+		spool.shell = wslStageCMD
+		target.NoControlMaster = true
+		reader, err := spool.input.reset()
+		if err != nil {
+			return "", err
+		}
+		raw, err := io.ReadAll(reader)
+		if err == nil {
+			_, _, stagedCommand, payload = decodeWSLStage(t, raw)
+			size, digest = spool.size, spool.digest()
+		}
+		return nonce, err
+	}
+	t.Cleanup(func() { stageWSLSpool = oldStage })
+
+	target := SSHTarget{Host: "win.example.test", Port: "2207", FallbackPorts: []string{}, TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
+	got, err := RunSSHOutputBounded(context.Background(), target, "/bin/sh -c 'uname -m'", 32)
+	if err != nil || got != "arm64" {
+		t.Fatalf("output=%q err=%v", got, err)
+	}
+	if stageCount != 1 || stagedCommand != "/bin/sh -c 'uname -m'" || len(payload) != 0 {
+		t.Fatalf("stages=%d command=%q payload=%d", stageCount, stagedCommand, len(payload))
+	}
+	launcher := wslStageLauncherCommand(nonce, size, digest, wslStageCMD)
+	remote, remoteErr := os.ReadFile(remotePath)
+	stdin, stdinErr := os.ReadFile(stdinPath)
+	runs, runsErr := os.ReadFile(executions)
+	if remoteErr != nil || stdinErr != nil || runsErr != nil {
+		t.Fatalf("remote=%v stdin=%v executions=%v", remoteErr, stdinErr, runsErr)
+	}
+	if launcher == "" || len(launcher) >= wslStageLauncherCommandLimit || string(remote) != launcher || len(stdin) != 0 || string(runs) != "x" {
+		t.Fatalf("launcher=%d remote=%t stdin=%d executions=%q", len(launcher), string(remote) == launcher, len(stdin), runs)
 	}
 }
 
@@ -157,7 +207,7 @@ exit 255
 				if err == nil || got != "" || string(data) != "2222\n" {
 					t.Fatalf("got=%q err=%v attempts=%s", got, err, data)
 				}
-			} else if err != nil || got != "arm64" || string(data) != "2222\n22\n" {
+			} else if err != nil || got != "arm64" || string(data) != "2222\n22\n22\n" {
 				t.Fatalf("got=%q err=%v attempts=%s", got, err, data)
 			}
 		})

@@ -2,10 +2,13 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +27,22 @@ func (r *recordingCommandRunner) Run(_ context.Context, req LocalCommandRequest)
 
 func testRuntimeWithRunner(r CommandRunner) Runtime {
 	return Runtime{Stdout: io.Discard, Stderr: io.Discard, Clock: realClock{}, Exec: r}
+}
+
+func parseAndApplyProviderFlagsForTest(t *testing.T, defaults Config, args []string) Config {
+	t.Helper()
+	fs := newFlagSet("test", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	values := registerProviderFlags(fs, defaults)
+	if err := parseFlags(fs, args); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaults
+	cfg.Provider = *provider
+	if err := applyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	return cfg
 }
 
 func TestLoadBackendRequiresActionableProviderSelection(t *testing.T) {
@@ -121,6 +140,51 @@ func TestFinalizeRunResultClassifiesStatus(t *testing.T) {
 	}
 }
 
+type runClassificationTestError struct {
+	err   error
+	cause error
+}
+
+func (e runClassificationTestError) Error() string                 { return e.err.Error() }
+func (e runClassificationTestError) Unwrap() error                 { return e.err }
+func (e runClassificationTestError) RunClassificationCause() error { return e.cause }
+
+type runClassificationTestJoin []error
+
+func (e runClassificationTestJoin) Error() string   { return "joined failures" }
+func (e runClassificationTestJoin) Unwrap() []error { return e }
+
+func TestRunClassificationUsesOnlyPrimaryMarker(t *testing.T) {
+	primary := runClassificationTestError{err: context.DeadlineExceeded, cause: context.Canceled}
+	providerErr := errors.New("provider failed")
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status RunStatus
+		kind   RunErrorKind
+	}{
+		{name: "direct", err: primary, status: RunStatusCanceled, kind: RunErrorCanceled},
+		{name: "single wrapper", err: fmt.Errorf("readiness: %w", primary), status: RunStatusCanceled, kind: RunErrorCanceled},
+		{name: "primary join", err: errors.Join(primary, context.DeadlineExceeded), status: RunStatusCanceled, kind: RunErrorCanceled},
+		{name: "first nonnil child", err: runClassificationTestJoin{nil, primary, providerErr}, status: RunStatusCanceled, kind: RunErrorCanceled},
+		{name: "nil marker continues", err: runClassificationTestError{err: primary}, status: RunStatusCanceled, kind: RunErrorCanceled},
+		{name: "secondary marker keeps legacy graph", err: errors.Join(providerErr, primary), status: RunStatusTimedOut, kind: RunErrorTimeout},
+		{name: "ordinary join unchanged", err: errors.Join(context.Canceled, context.DeadlineExceeded), status: RunStatusTimedOut, kind: RunErrorTimeout},
+		{name: "ordinary provider unchanged", err: providerErr, status: RunStatusFailed, kind: RunErrorProvider},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := FinalizeRunResult(RunResult{}, tc.err)
+			if result.Status != tc.status || result.ErrorKind != tc.kind {
+				t.Fatalf("outcome=%s/%s want=%s/%s", result.Status, result.ErrorKind, tc.status, tc.kind)
+			}
+		})
+	}
+	pinned := RunResult{ExitCode: 23, Status: RunStatusFailed, ErrorKind: RunErrorCommandExit}
+	if got := FinalizeRunResult(pinned, primary); got.ExitCode != pinned.ExitCode || got.Status != pinned.Status || got.ErrorKind != pinned.ErrorKind {
+		t.Fatalf("pinned outcome changed: %#v", got)
+	}
+}
+
 func TestExecCommandRunnerBoundsCapturedOutputAndStopsChild(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
@@ -166,6 +230,15 @@ func TestExecCommandRunnerOutputLimitHelperProcess(t *testing.T) {
 	child.Stderr = os.Stderr
 	if err := child.Start(); err != nil {
 		os.Exit(97)
+	}
+	if mode == "retained-pipe" {
+		pidPath := os.Getenv("CRABBOX_TEST_OUTPUT_LIMIT_CHILD_PID")
+		if err := os.WriteFile(pidPath, []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+			os.Exit(98)
+		}
+		os.Exit(0)
 	}
 	_, _ = io.WriteString(os.Stdout, strings.Repeat("x", 1<<20))
 	time.Sleep(time.Hour)
@@ -612,22 +685,12 @@ func TestRegisteredBrokerKeepsProviderLifecycleDirect(t *testing.T) {
 
 func TestProviderFlagsApplyNamespaceWithoutCoreEdits(t *testing.T) {
 	defaults := baseConfig()
-	fs := newFlagSet("test", io.Discard)
-	provider := fs.String("provider", defaults.Provider, "")
-	values := registerProviderFlags(fs, defaults)
-	if err := parseFlags(fs, []string{
+	cfg := parseAndApplyProviderFlagsForTest(t, defaults, []string{
 		"--provider", "namespace-devbox",
 		"--namespace-image", "crabbox-ready",
 		"--namespace-size", "L",
 		"--namespace-work-root", "/workspaces/test",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	cfg := defaults
-	cfg.Provider = *provider
-	if err := applyProviderFlags(&cfg, fs, values); err != nil {
-		t.Fatal(err)
-	}
+	})
 	if cfg.Namespace.Image != "crabbox-ready" || cfg.Namespace.Size != "L" || cfg.Namespace.WorkRoot != "/workspaces/test" {
 		t.Fatalf("namespace flags not applied: %#v", cfg.Namespace)
 	}
@@ -635,24 +698,14 @@ func TestProviderFlagsApplyNamespaceWithoutCoreEdits(t *testing.T) {
 
 func TestProviderFlagsApplyMorphWithoutCoreEdits(t *testing.T) {
 	defaults := baseConfig()
-	fs := newFlagSet("test", io.Discard)
-	provider := fs.String("provider", defaults.Provider, "")
-	values := registerProviderFlags(fs, defaults)
-	if err := parseFlags(fs, []string{
+	cfg := parseAndApplyProviderFlagsForTest(t, defaults, []string{
 		"--provider", "morph",
 		"--morph-api-url", "https://morph.example.test",
 		"--morph-snapshot", "snapshot_123",
 		"--morph-work-root", "/tmp/morph-work",
 		"--morph-delete-on-release",
 		"--morph-wake-on-ssh=false",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	cfg := defaults
-	cfg.Provider = *provider
-	if err := applyProviderFlags(&cfg, fs, values); err != nil {
-		t.Fatal(err)
-	}
+	})
 	if cfg.Morph.APIURL != "https://morph.example.test" || cfg.Morph.Snapshot != "snapshot_123" || cfg.Morph.WorkRoot != "/tmp/morph-work" || cfg.WorkRoot != "/tmp/morph-work" || !cfg.Morph.DeleteOnRelease || cfg.Morph.WakeOnSSH {
 		t.Fatalf("morph flags not applied: %#v workRoot=%q", cfg.Morph, cfg.WorkRoot)
 	}
@@ -660,23 +713,13 @@ func TestProviderFlagsApplyMorphWithoutCoreEdits(t *testing.T) {
 
 func TestProviderFlagsApplyExeDevWithoutCoreEdits(t *testing.T) {
 	defaults := baseConfig()
-	fs := newFlagSet("test", io.Discard)
-	provider := fs.String("provider", defaults.Provider, "")
-	values := registerProviderFlags(fs, defaults)
-	if err := parseFlags(fs, []string{
+	cfg := parseAndApplyProviderFlagsForTest(t, defaults, []string{
 		"--provider", "exe",
 		"--exe-dev-control-host", "ssh.exe.example.test",
 		"--exe-dev-image", "ubuntu:24.04",
 		"--exe-dev-user", "runner",
 		"--exe-dev-work-root", "/tmp/work",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	cfg := defaults
-	cfg.Provider = *provider
-	if err := applyProviderFlags(&cfg, fs, values); err != nil {
-		t.Fatal(err)
-	}
+	})
 	if cfg.ExeDev.ControlHost != "ssh.exe.example.test" || cfg.ExeDev.Image != "ubuntu:24.04" || cfg.ExeDev.User != "runner" || cfg.SSHUser != "runner" || cfg.WorkRoot != "/tmp/work" {
 		t.Fatalf("exe-dev flags not applied: %#v", cfg.ExeDev)
 	}
@@ -684,10 +727,7 @@ func TestProviderFlagsApplyExeDevWithoutCoreEdits(t *testing.T) {
 
 func TestProviderFlagsApplyLocalContainerWithoutCoreEdits(t *testing.T) {
 	defaults := baseConfig()
-	fs := newFlagSet("test", io.Discard)
-	provider := fs.String("provider", defaults.Provider, "")
-	values := registerProviderFlags(fs, defaults)
-	if err := parseFlags(fs, []string{
+	cfg := parseAndApplyProviderFlagsForTest(t, defaults, []string{
 		"--provider", "docker",
 		"--local-container-runtime", "docker",
 		"--local-container-image", "ubuntu:24.04",
@@ -699,14 +739,7 @@ func TestProviderFlagsApplyLocalContainerWithoutCoreEdits(t *testing.T) {
 		"--local-container-docker-socket",
 		"--local-container-volume", "/host/cache:/cache:ro",
 		"--local-container-volume", "/host/tmp:/tmp/host",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	cfg := defaults
-	cfg.Provider = *provider
-	if err := applyProviderFlags(&cfg, fs, values); err != nil {
-		t.Fatal(err)
-	}
+	})
 	if cfg.Provider != "local-container" || cfg.LocalContainer.Runtime != "docker" || cfg.LocalContainer.Image != "ubuntu:24.04" || cfg.LocalContainer.User != "runner" || cfg.SSHUser != "runner" || cfg.WorkRoot != "/workspace/crabbox" || cfg.LocalContainer.CPUs != 4 || cfg.LocalContainer.Memory != "8g" || cfg.LocalContainer.Network != "bridge" || !cfg.LocalContainer.DockerSocket || len(cfg.LocalContainer.Volumes) != 2 || cfg.LocalContainer.Volumes[0] != "/host/cache:/cache:ro" || cfg.LocalContainer.Volumes[1] != "/host/tmp:/tmp/host" {
 		t.Fatalf("local-container flags not applied: provider=%s cfg=%#v", cfg.Provider, cfg.LocalContainer)
 	}
@@ -738,10 +771,7 @@ func TestSSHCommandConfigAppliesProviderFlags(t *testing.T) {
 
 func TestProviderFlagsApplyProxmoxWithoutSecrets(t *testing.T) {
 	defaults := baseConfig()
-	fs := newFlagSet("test", io.Discard)
-	provider := fs.String("provider", defaults.Provider, "")
-	values := registerProviderFlags(fs, defaults)
-	if err := parseFlags(fs, []string{
+	cfg := parseAndApplyProviderFlagsForTest(t, defaults, []string{
 		"--provider", "proxmox",
 		"--proxmox-api-url", "https://pve.example.test:8006",
 		"--proxmox-node", "pve1",
@@ -749,14 +779,7 @@ func TestProviderFlagsApplyProxmoxWithoutSecrets(t *testing.T) {
 		"--proxmox-user", "runner",
 		"--proxmox-work-root", "/work/test",
 		"--proxmox-insecure-tls",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	cfg := defaults
-	cfg.Provider = *provider
-	if err := applyProviderFlags(&cfg, fs, values); err != nil {
-		t.Fatal(err)
-	}
+	})
 	if cfg.Proxmox.APIURL != "https://pve.example.test:8006" || cfg.Proxmox.Node != "pve1" || cfg.Proxmox.TemplateID != 9000 || cfg.Proxmox.User != "runner" || cfg.SSHUser != "runner" || cfg.WorkRoot != "/work/test" || !cfg.Proxmox.InsecureTLS {
 		t.Fatalf("proxmox flags not applied: %#v", cfg.Proxmox)
 	}
@@ -1257,7 +1280,6 @@ func TestLeaseCreateFlagsRejectSnapshotSandboxResourceNoops(t *testing.T) {
 		name string
 		args []string
 	}{
-		{name: "class", args: []string{"--provider", "daytona", "--class", "standard"}},
 		{name: "type", args: []string{"--provider", "daytona", "--type", "large"}},
 		{name: "e2b class", args: []string{"--provider", "e2b", "--class", "standard"}},
 		{name: "e2b type", args: []string{"--provider", "e2b", "--type", "large"}},
@@ -1482,100 +1504,50 @@ func TestValidateRunSessionForSpec(t *testing.T) {
 
 func TestProviderFlagsApplyDaytonaAndIsloWithoutCoreEdits(t *testing.T) {
 	defaults := baseConfig()
-	fs := newFlagSet("test", io.Discard)
-	provider := fs.String("provider", defaults.Provider, "")
-	values := registerProviderFlags(fs, defaults)
-	if err := parseFlags(fs, []string{
+	cfg := parseAndApplyProviderFlagsForTest(t, defaults, []string{
 		"--provider", "daytona",
 		"--daytona-snapshot", "snap-crabbox",
 		"--daytona-target", "us",
 		"--daytona-work-root", "/home/daytona/work",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	cfg := defaults
-	cfg.Provider = *provider
-	if err := applyProviderFlags(&cfg, fs, values); err != nil {
-		t.Fatal(err)
-	}
+	})
 	if cfg.Daytona.Snapshot != "snap-crabbox" || cfg.Daytona.Target != "us" || cfg.Daytona.WorkRoot != "/home/daytona/work" {
 		t.Fatalf("daytona flags not applied: %#v", cfg.Daytona)
 	}
 
-	fs = newFlagSet("test", io.Discard)
-	provider = fs.String("provider", defaults.Provider, "")
-	values = registerProviderFlags(fs, defaults)
-	if err := parseFlags(fs, []string{
+	cfg = parseAndApplyProviderFlagsForTest(t, defaults, []string{
 		"--provider", "islo",
 		"--islo-image", "ubuntu:24.04",
 		"--islo-vcpus", "4",
 		"--islo-memory-mb", "8192",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	cfg = defaults
-	cfg.Provider = *provider
-	if err := applyProviderFlags(&cfg, fs, values); err != nil {
-		t.Fatal(err)
-	}
+	})
 	if cfg.Islo.Image != "ubuntu:24.04" || cfg.Islo.VCPUs != 4 || cfg.Islo.MemoryMB != 8192 {
 		t.Fatalf("islo flags not applied: %#v", cfg.Islo)
 	}
 
-	fs = newFlagSet("test", io.Discard)
-	provider = fs.String("provider", defaults.Provider, "")
-	values = registerProviderFlags(fs, defaults)
-	if err := parseFlags(fs, []string{
+	cfg = parseAndApplyProviderFlagsForTest(t, defaults, []string{
 		"--provider", "e2b",
 		"--e2b-template", "crabbox-ready",
 		"--e2b-workdir", "work/repo",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	cfg = defaults
-	cfg.Provider = *provider
-	if err := applyProviderFlags(&cfg, fs, values); err != nil {
-		t.Fatal(err)
-	}
+	})
 	if cfg.E2B.Template != "crabbox-ready" || cfg.E2B.Workdir != "work/repo" {
 		t.Fatalf("e2b flags not applied: %#v", cfg.E2B)
 	}
 
-	fs = newFlagSet("test", io.Discard)
-	provider = fs.String("provider", defaults.Provider, "")
-	values = registerProviderFlags(fs, defaults)
-	if err := parseFlags(fs, []string{
+	cfg = parseAndApplyProviderFlagsForTest(t, defaults, []string{
 		"--provider", "modal",
 		"--modal-app", "crabbox-test",
 		"--modal-image", "python:3.13-slim",
 		"--modal-workdir", "/workspace/test",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	cfg = defaults
-	cfg.Provider = *provider
-	if err := applyProviderFlags(&cfg, fs, values); err != nil {
-		t.Fatal(err)
-	}
+	})
 	if cfg.Modal.App != "crabbox-test" || cfg.Modal.Image != "python:3.13-slim" || cfg.Modal.Workdir != "/workspace/test" {
 		t.Fatalf("modal flags not applied: %#v", cfg.Modal)
 	}
 
-	fs = newFlagSet("test", io.Discard)
-	provider = fs.String("provider", defaults.Provider, "")
-	values = registerProviderFlags(fs, defaults)
-	if err := parseFlags(fs, []string{
+	cfg = parseAndApplyProviderFlagsForTest(t, defaults, []string{
 		"--provider", "sprites",
 		"--sprites-api-url", "https://sprites.example.test",
 		"--sprites-work-root", "/home/sprite/work",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	cfg = defaults
-	cfg.Provider = *provider
-	if err := applyProviderFlags(&cfg, fs, values); err != nil {
-		t.Fatal(err)
-	}
+	})
 	if cfg.Sprites.APIURL != "https://sprites.example.test" || cfg.Sprites.WorkRoot != "/home/sprite/work" {
 		t.Fatalf("sprites flags not applied: %#v", cfg.Sprites)
 	}
@@ -1583,24 +1555,14 @@ func TestProviderFlagsApplyDaytonaAndIsloWithoutCoreEdits(t *testing.T) {
 
 func TestProviderFlagsApplyIncusWithoutCoreEdits(t *testing.T) {
 	defaults := baseConfig()
-	fs := newFlagSet("test", io.Discard)
-	provider := fs.String("provider", defaults.Provider, "")
-	values := registerProviderFlags(fs, defaults)
-	if err := parseFlags(fs, []string{
+	cfg := parseAndApplyProviderFlagsForTest(t, defaults, []string{
 		"--provider", "incus",
 		"--incus-instance-type", "vm",
 		"--incus-image", "images:ubuntu/24.04/cloud",
 		"--incus-user", "ubuntu",
 		"--incus-work-root", "/workspace/incus",
 		"--incus-proxy-listen-port", "2201",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	cfg := defaults
-	cfg.Provider = *provider
-	if err := applyProviderFlags(&cfg, fs, values); err != nil {
-		t.Fatal(err)
-	}
+	})
 	if cfg.Incus.InstanceType != "virtual-machine" || cfg.Incus.User != "ubuntu" || cfg.Incus.WorkRoot != "/workspace/incus" {
 		t.Fatalf("incus flags not applied: %#v", cfg.Incus)
 	}

@@ -35,6 +35,9 @@ import (
 )
 
 func TestEgressOpenRemoteTimeoutLeaksPendingAndNeverClosesHostConn(t *testing.T) {
+	// The bridge and server are private to this test, so its full open timeout
+	// need not delay the package's other deadline tests.
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("waits out the real 20s egressOpenTimeout")
 	}

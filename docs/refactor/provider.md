@@ -565,7 +565,7 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	if ssh, ok := backend.(SSHLeaseBackend); ok && shouldUseCoordinator(cfg, provider.Spec()) {
+	if ssh, ok := backend.(SSHLeaseBackend); ok && ShouldUseCoordinator(cfg, provider.Spec()) {
 		coord, _, err := newCoordinatorClient(cfg)
 		if err != nil {
 			return nil, err
@@ -590,8 +590,9 @@ Coordinator (broker) routing is a wrapper around `SSHLeaseBackend`, not a specia
 provider path inside every command.
 
 ```go
-func shouldUseCoordinator(cfg Config, spec ProviderSpec) bool {
-	return spec.Coordinator == CoordinatorSupported && strings.TrimSpace(cfg.Coordinator) != ""
+func ShouldUseCoordinator(cfg Config, spec ProviderSpec) bool {
+	return cfg.BrokerMode != BrokerModeRegistered &&
+		spec.Coordinator == CoordinatorSupported && strings.TrimSpace(cfg.Coordinator) != ""
 }
 ```
 

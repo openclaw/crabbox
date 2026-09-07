@@ -75,6 +75,12 @@ until explicit `stop` or `cleanup`, even if `--keep` is omitted. A `run` without
 `--id` creates a fresh job and deletes it after the command unless `--keep` or
 `--keep-on-failure` retains it. A reused `--id` run leaves the job running.
 
+`run --keep --lease-output session.json` writes the standard run-session handle,
+including the exact lease ID, whether it was reused or kept, and its cleanup
+command. Run timing is finalized after retention or cleanup, preserves the
+command exit code when cleanup also fails, and reports cleanup-only failures as
+failed runs with a retained recovery session.
+
 ## Config
 
 ```yaml
@@ -226,9 +232,12 @@ ID is unused, so a collision cannot retarget an existing job.
 2. `status` and `list` start from local `cbx_...` claims scoped to the selected
    Nomad address, namespace, region, and task. They verify remote job ownership
    before reporting readiness.
-3. `stop` and cleanup retain the local claim unless the remote job has matching
-   ownership metadata and its removal is confirmed, or an exact Nomad `404`
-   proves it is already absent. Auth, transport, and other lookup failures keep
+3. `stop`, cleanup, and automatic run teardown hold the original local claim
+   unchanged under the claim lock while rechecking remote ownership, purging the
+   job, confirming absence, and removing the claim. A replaced or removed claim
+   prevents teardown; an old run never adopts a successor claim. An exact Nomad
+   `404` may retire a stale claim, but cleanup rechecks absence under the lock and
+   retains a job that reappears. Auth, transport, and other lookup failures keep
    the claim for a safe retry.
 4. Unless `--no-sync` is set, `run` creates a portable archive of the checkout,
    uploads it through allocation exec, and extracts it inside `nomad.workdir`.
@@ -245,6 +254,29 @@ ID is unused, so a collision cannot retarget an existing job.
    stale claims, and skips active claims. `--dry-run` prints the planned action
    without mutating Nomad or local claim state.
 
+Destructive remote work under the claim lock shares one `nomad.evalTimeout`
+budget (default `5m`), including ownership lookup, deregistration evaluation,
+and absence confirmation. Explicit stop and cleanup preserve caller
+cancellation. Local claim-lock acquisition is not itself cancelable; a waiter
+whose deadline has expired performs no remote work once admitted. Automatic
+run teardown and setup rollback retain their independent `30s` cleanup budget
+after command cancellation.
+
+Setup rollback is allowed only while the lease still has no local claim and
+the remote job matches the original registration metadata. Any claim published
+in the meantime, including a partial publication, retains the job for explicit
+inspection instead of guessing who now owns it. These locks serialize Crabbox
+claim writers; they do not fence external Nomad operators changing jobs directly.
+
+Warmup and fresh runs share one Nomad job-creation path. Run sequencing and final
+retention/cleanup use the common sandbox lifecycle; Nomad still owns job metadata
+authorization, allocation selection, exec, purge evaluation, and absence checks.
+Reuse admission and retained activity refresh require the originally validated
+claim revision: an old run cannot recreate a removed claim or overwrite a
+successor's job/allocation identity, including with `--reclaim`. Kept and reused
+runs refresh idle activity after failures as well as successes, without extending
+the absolute expiry label. The existing local claim-lock wait is not cancelable.
+
 ## Capabilities
 
 - Provider ID: `nomad`.
@@ -259,7 +291,8 @@ ID is unused, so a collision cannot retarget an existing job.
   env-forwarding flags.
 - Config show: yes; `crabbox config show --json` reports the token env name and
   auth source as `env` or `missing`, never the token value.
-- Unsupported: run artifacts, artifact downloads, run session, interactive TTY,
+- Run session: yes; `--lease-output` reports retained/reused identity and cleanup.
+- Unsupported: run artifacts, artifact downloads, interactive TTY,
   SSH, VNC, desktop, browser, code, Tailscale, URL bridge, MCP attachments, run
   proof, checkpoints, forks, restores, provider-managed coordinator routing, and
   mandatory live CI.

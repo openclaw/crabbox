@@ -21,7 +21,11 @@ if (
 
 let info;
 try {
-  info = JSON.parse(execFileSync("go", ["version", "-m", "-json", binary], { encoding: "utf8" }));
+  info = JSON.parse(execFileSync("go", ["version", "-m", "-json", binary], {
+    encoding: "utf8",
+    // Reading build info must not select or download the checkout's toolchain.
+    env: { ...process.env, GOTOOLCHAIN: "local" },
+  }));
 } catch (error) {
   throw new Error(`cannot read Go build info from ${binary}: ${error.message}`);
 }
@@ -49,4 +53,3 @@ for (const [key, value] of expected) {
     );
   }
 }
-

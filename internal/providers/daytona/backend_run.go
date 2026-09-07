@@ -247,7 +247,7 @@ func (b *daytonaLeaseBackend) Status(ctx context.Context, req StatusRequest) (st
 		if err != nil {
 			return statusView{}, err
 		}
-		view := daytonaStatusView(leaseID, sandbox, b.cfg)
+		view := daytonaStatusView(leaseID, sandbox)
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
@@ -308,7 +308,7 @@ func (b *daytonaLeaseBackend) resolveDaytonaToolboxSandbox(ctx context.Context, 
 	if err != nil {
 		return nil, "", err
 	}
-	server := daytonaSandboxToServer(apiSandbox, b.cfg)
+	server := daytonaSandboxToServer(apiSandbox)
 	if reclaim {
 		if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), b.cfg, server, SSHTarget{}, repo.Root, b.cfg.IdleTimeout, true); err != nil {
 			return nil, "", err
@@ -478,8 +478,8 @@ func daytonaCommandString(command []string, shellMode bool) string {
 	return strings.Join(shellWords(command), " ")
 }
 
-func daytonaStatusView(leaseID string, sandbox *apidaytona.Sandbox, cfg Config) statusView {
-	server := daytonaSandboxToServer(sandbox, cfg)
+func daytonaStatusView(leaseID string, sandbox *apidaytona.Sandbox) statusView {
+	server := daytonaSandboxToServer(sandbox)
 	state := server.Status
 	return statusView{
 		ID:         leaseID,

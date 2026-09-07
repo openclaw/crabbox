@@ -160,7 +160,7 @@ func TestRunCreatesExecsAndTerminatesEphemeralSandbox(t *testing.T) {
 	if fake.createReq.Tags["provider"] != "modal" || fake.createReq.Tags["crabbox"] != "true" || fake.createReq.Tags["repo"] != "repo" {
 		t.Fatalf("tags=%#v", fake.createReq.Tags)
 	}
-	if !reflect.DeepEqual(fake.verbs, []string{"create", "exec", "exec", "terminate"}) {
+	if !reflect.DeepEqual(fake.verbs, []string{"create", "inspect", "exec", "exec", "terminate"}) {
 		t.Fatalf("verbs=%v", fake.verbs)
 	}
 	userCommand := fake.execCommands[1]
@@ -171,24 +171,18 @@ func TestRunCreatesExecsAndTerminatesEphemeralSandbox(t *testing.T) {
 
 func TestRunNoSyncDoesNotDeleteExistingWorkspace(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	fake := &fakeModalAPI{
-		sandbox: modalSandbox{
-			ID:     "sb-123",
-			Status: "running",
-			Tags: map[string]string{
-				"provider": "modal",
-				"crabbox":  "true",
-				"lease":    "cbx_123",
-			},
-		},
-	}
+	fake := &fakeModalAPI{}
 	withFakeModalAPI(t, fake)
 	cfg := newTestConfig()
 	cfg.Sync.Delete = true
 	backend := NewModalBackend(Provider{}.Spec(), cfg, testRuntime()).(*modalBackend)
+	repo := Repo{Name: "repo", Root: t.TempDir()}
+	if _, _, err := backend.createSandbox(t.Context(), fake, repo, true, false, ""); err != nil {
+		t.Fatal(err)
+	}
 	req := RunRequest{
 		ID:      "sb-123",
-		Repo:    Repo{Name: "repo", Root: t.TempDir()},
+		Repo:    repo,
 		Command: []string{"test", "-f", "kept.txt"},
 		NoSync:  true,
 	}
@@ -236,7 +230,7 @@ func TestRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
 	}
 }
 
-func TestRunByRemoteIdentifierEnforcesRepoClaim(t *testing.T) {
+func TestRunByRemoteIdentifierRejectsForeignClaimEvenWithReclaim(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		id   string
@@ -269,8 +263,8 @@ func TestRunByRemoteIdentifierEnforcesRepoClaim(t *testing.T) {
 				Command: []string{"true"},
 				NoSync:  true,
 			})
-			if err == nil || !strings.Contains(err.Error(), oldRepo) || !strings.Contains(err.Error(), "--reclaim") {
-				t.Fatalf("Run err=%v, want repo claim rejection", err)
+			if err == nil {
+				t.Fatal("Run accepted a foreign or incomplete claim")
 			}
 			if containsVerb(fake.verbs, "exec") {
 				t.Fatalf("run executed despite claim rejection: %v", fake.verbs)
@@ -282,15 +276,15 @@ func TestRunByRemoteIdentifierEnforcesRepoClaim(t *testing.T) {
 				Command: []string{"true"},
 				NoSync:  true,
 				Reclaim: true,
-			}); err != nil {
-				t.Fatalf("Run with reclaim err=%v", err)
+			}); err == nil {
+				t.Fatal("Run with reclaim adopted a foreign claim")
 			}
 			claim, ok, err := core.ResolveLeaseClaim("cbx_123")
 			if err != nil || !ok {
 				t.Fatalf("claim ok=%v err=%v", ok, err)
 			}
-			if claim.Provider != providerName || claim.RepoRoot != newRepo {
-				t.Fatalf("claim after reclaim=%#v, want provider=%s repo=%s", claim, providerName, newRepo)
+			if claim.Provider != "other-provider" || claim.RepoRoot != oldRepo || len(fake.verbs) != 0 {
+				t.Fatalf("reclaim modified foreign ownership or contacted provider: claim=%#v verbs=%v", claim, fake.verbs)
 			}
 		})
 	}
@@ -299,11 +293,11 @@ func TestRunByRemoteIdentifierEnforcesRepoClaim(t *testing.T) {
 func TestCreateSandboxReportsCleanupFailureAfterClaimFailure(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	claimErr := errors.New("claim write failed")
-	oldClaim := claimLeaseForRepoProviderPond
-	claimLeaseForRepoProviderPond = func(string, string, string, string, string, time.Duration, bool) error {
-		return claimErr
+	oldClaim := publishModalClaim
+	publishModalClaim = func(*modalBackend, context.Context, modalAPI, modalBinding, modalSandbox, Repo, bool) (core.LeaseClaim, error) {
+		return core.LeaseClaim{}, claimErr
 	}
-	t.Cleanup(func() { claimLeaseForRepoProviderPond = oldClaim })
+	t.Cleanup(func() { publishModalClaim = oldClaim })
 
 	fake := &fakeModalAPI{terminateErr: errors.New("terminate failed")}
 	var stderr bytes.Buffer
@@ -311,21 +305,18 @@ func TestCreateSandboxReportsCleanupFailureAfterClaimFailure(t *testing.T) {
 	rt.Stderr = &stderr
 	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), rt).(*modalBackend)
 
-	_, _, _, err := backend.createSandbox(context.Background(), fake, Repo{Name: "repo", Root: t.TempDir()}, false, false, "")
+	_, _, err := backend.createSandbox(context.Background(), fake, Repo{Name: "repo", Root: t.TempDir()}, false, false, "")
 	if err == nil {
 		t.Fatal("createSandbox err=nil, want claim and cleanup failure")
 	}
 	msg := err.Error()
-	for _, want := range []string{"claim write failed", "cleanup modal sandbox sb-123", "terminate failed", "crabbox stop --provider modal --id sb-123"} {
+	for _, want := range []string{"claim write failed", "retain and inspect Modal sandbox=sb-123", "terminate failed"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("err=%q missing %q", msg, want)
 		}
 	}
 	if !reflect.DeepEqual(fake.verbs, []string{"create", "terminate"}) {
 		t.Fatalf("verbs=%v want create then terminate", fake.verbs)
-	}
-	if !strings.Contains(stderr.String(), "warning: cleanup modal sandbox sb-123") {
-		t.Fatalf("stderr=%q missing cleanup warning", stderr.String())
 	}
 }
 
@@ -460,7 +451,26 @@ type fakeModalAPI struct {
 	uploadWaitForCancel  bool
 	uploadDeadlineSet    bool
 	terminateDeadlineSet bool
+	terminateRemaining   time.Duration
 	cleanupDeadlineSet   bool
+	onInspect            func(modalBinding) error
+	onTerminate          func(modalBinding) error
+}
+
+func (f *fakeModalAPI) Bind(modalBinding) modalAPI { return f }
+
+func modalTestScope() modalScope {
+	return modalScope{Endpoint: "https://api.modal.com,https://api.modal2.com", Workspace: "example-workspace", EnvironmentID: "en-123", Environment: "main", AppID: "ap-123", App: "crabbox"}
+}
+
+func (f *fakeModalAPI) InspectSandbox(_ context.Context, binding modalBinding) (modalSandbox, error) {
+	f.verbs = append(f.verbs, "inspect")
+	if f.onInspect != nil {
+		if err := f.onInspect(binding); err != nil {
+			return modalSandbox{}, err
+		}
+	}
+	return f.sandbox, nil
 }
 
 func (f *fakeModalAPI) CreateSandbox(_ context.Context, req modalCreateSandboxRequest) (modalSandbox, error) {
@@ -469,7 +479,13 @@ func (f *fakeModalAPI) CreateSandbox(_ context.Context, req modalCreateSandboxRe
 	if f.sandbox.ID != "" {
 		return f.sandbox, nil
 	}
-	return modalSandbox{ID: "sb-123", Status: "running", Tags: req.Tags}, nil
+	scope := modalTestScope()
+	scope.App = req.App
+	if req.Environment != "" {
+		scope.Environment = req.Environment
+	}
+	f.sandbox = modalSandbox{ID: "sb-123", Status: "running", Tags: req.Tags, Scope: scope}
+	return f.sandbox, nil
 }
 
 func (f *fakeModalAPI) Exec(ctx context.Context, req modalExecRequest) (int, error) {
@@ -512,10 +528,25 @@ func (f *fakeModalAPI) ListSandboxes(context.Context, map[string]string) ([]moda
 	return []modalSandbox{{ID: "sb-123", Status: "running", Tags: map[string]string{"provider": "modal", "crabbox": "true", "lease": "cbx_123"}}}, nil
 }
 
-func (f *fakeModalAPI) Terminate(ctx context.Context, _ string) error {
+func (f *fakeModalAPI) Terminate(ctx context.Context, binding modalBinding) error {
 	f.verbs = append(f.verbs, "terminate")
 	_, f.terminateDeadlineSet = ctx.Deadline()
-	return f.terminateErr
+	if deadline, ok := ctx.Deadline(); ok {
+		f.terminateRemaining = time.Until(deadline)
+	}
+	if f.onTerminate != nil {
+		if err := f.onTerminate(binding); err != nil {
+			return err
+		}
+	}
+	if f.terminateErr != nil {
+		return f.terminateErr
+	}
+	if err := binding.validate(f.sandbox); err != nil {
+		return err
+	}
+	f.sandbox.Status = "finished"
+	return nil
 }
 
 func containsArg(args []string, want string) bool {
@@ -679,7 +710,7 @@ func TestRunEnvCleanupPrecedesSandboxTermination(t *testing.T) {
 	withFakeModalAPI(t, fake)
 	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
 	_, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, Env: map[string]string{"EXAMPLE": "value"}})
-	want := []string{"create", "exec", "upload", "exec", "exec", "terminate"}
+	want := []string{"create", "inspect", "exec", "upload", "exec", "exec", "terminate"}
 	if err != nil || !reflect.DeepEqual(fake.verbs, want) || !fake.cleanupDeadlineSet {
 		t.Fatalf("err=%v verbs=%v bounded=%t", err, fake.verbs, fake.cleanupDeadlineSet)
 	}
@@ -691,7 +722,7 @@ func TestRunCleansPartialEnvUploadBeforeRetainingSandbox(t *testing.T) {
 	withFakeModalAPI(t, fake)
 	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
 	result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, KeepOnFailure: true, Env: map[string]string{"EXAMPLE": "value"}})
-	want := []string{"create", "exec", "upload", "exec"}
+	want := []string{"create", "inspect", "exec", "upload", "exec"}
 	if err == nil || result.Session == nil || !result.Session.Kept || !reflect.DeepEqual(fake.verbs, want) || !fake.cleanupDeadlineSet {
 		t.Fatalf("result=%#v err=%v verbs=%v bounded=%t", result, err, fake.verbs, fake.cleanupDeadlineSet)
 	}

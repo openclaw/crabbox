@@ -1,10 +1,10 @@
 package blacksmith
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -62,12 +62,13 @@ func NewBlacksmithBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 }
 
 type blacksmithBackend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec  ProviderSpec
+	cfg   Config
+	rt    Runtime
+	route *blacksmithRoute
+	claim *core.LeaseClaim
 }
 
-var _ core.DelegatedRunArtifactBackend = (*blacksmithBackend)(nil)
 var _ core.RunOptionsValidator = (*blacksmithBackend)(nil)
 
 func (b *blacksmithBackend) Spec() ProviderSpec { return b.spec }
@@ -77,28 +78,25 @@ func (b *blacksmithBackend) Warmup(ctx context.Context, req WarmupRequest) error
 		return exit(2, "--actions-runner is not supported for provider=%s; Blacksmith owns runner hydration", b.cfg.Provider)
 	}
 	started := b.rt.Clock.Now()
-	leaseID, slug, err := b.warmupLease(ctx, req.Repo, req.Reclaim, req.RequestedSlug)
+	claim, err := b.warmupLease(ctx, req.Repo, req.Reclaim, req.RequestedSlug)
 	if err != nil {
 		return err
 	}
+	leaseID, slug := claim.LeaseID, claim.Slug
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s idle_timeout=%s\n", leaseID, slug, blacksmithTestboxProvider, blacksmithIdleTimeout(b.cfg))
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: blacksmith warmup keeps the testbox until idle timeout or explicit stop\n")
 	}
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", b.rt.Clock.Now().Sub(started).Round(time.Millisecond))
-	if req.TimingJSON {
-		total := b.rt.Clock.Now().Sub(started)
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: blacksmithTestboxProvider,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		}); err != nil {
-			return err
-		}
+	if req.BeforeComplete != nil {
+		req.BeforeComplete()
 	}
-	return nil
+	total := b.rt.Clock.Now().Sub(started)
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: blacksmithTestboxProvider,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
 func (b *blacksmithBackend) ValidateRunOptions(req RunRequest) error {
@@ -112,8 +110,14 @@ func validateBlacksmithRunOptions(spec ProviderSpec, req RunRequest) error {
 	return core.RejectDelegatedSyncOptionsForSpec(spec, req)
 }
 
-func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (runResult RunResult, runErr error) {
 	if err := b.ValidateRunOptions(req); err != nil {
+		return RunResult{}, err
+	}
+	if err := core.ValidateRunArtifactGlobs(req.ArtifactGlobs); err != nil {
+		return RunResult{}, err
+	}
+	if err := core.ValidateRequiredRunArtifactGlobs(req.RequiredArtifactGlobs); err != nil {
 		return RunResult{}, err
 	}
 	if blacksmithEnvForwardingRequested(req) {
@@ -138,52 +142,56 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		)
 	}
 	started := b.rt.Clock.Now()
-	leaseID := req.ID
-	slug := ""
+	var claim core.LeaseClaim
 	acquired := false
 	var err error
-	if leaseID == "" {
-		leaseID, slug, err = b.warmupLease(ctx, req.Repo, req.Reclaim, req.RequestedSlug)
+	if req.ID == "" {
+		claim, err = b.warmupLease(ctx, req.Repo, req.Reclaim, req.RequestedSlug)
 		if err != nil {
 			return RunResult{}, err
 		}
+		route, _, _ := blacksmithClaimBinding(claim)
+		bound := *b
+		bound.route, bound.claim = &route, &claim
+		b = &bound
 		acquired = true
 	} else {
-		leaseID, err = resolveBlacksmithLeaseID(leaseID, req.Repo.Root, req.Reclaim)
+		b, claim, err = b.ownedTestbox(ctx, req.ID, req.Repo.Root, req.Reclaim)
 		if err != nil {
-			return RunResult{}, err
-		}
-		slug, err = blacksmithClaimSlug(req.ID, leaseID)
-		if err != nil {
-			return RunResult{}, err
-		}
-		if err := claimLeaseForRepoProvider(leaseID, slug, blacksmithTestboxProvider, req.Repo.Root, blacksmithIdleTimeout(b.cfg), req.Reclaim); err != nil {
 			return RunResult{}, err
 		}
 	}
+	leaseID, slug := claim.LeaseID, claim.Slug
 	shouldStop := acquired && !req.Keep
-	finalExitCode := -1
-	finalActionsURL := ""
-	if shouldStop {
-		claim, err := readLeaseClaim(leaseID)
-		if err != nil {
-			return RunResult{}, err
+	cleanupAttempted := false
+	cleanup := func() error {
+		if !shouldStop || cleanupAttempted {
+			return nil
 		}
-		defer func() {
-			if !shouldStop {
-				return
-			}
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), blacksmithCleanupTimeout)
-			defer cancel()
-			if err := b.stopClaimedTestbox(cleanupCtx, leaseID, claim); err != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: blacksmith cleanup failed stage=cleanup lease=%s retry_likely=true: %v\n", leaseID, err)
-				return
-			}
-			if finalExitCode == 0 {
-				printBlacksmithOneShotActionsWarning(b.rt.Stderr, finalActionsURL)
-			}
-		}()
+		cleanupAttempted = true
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), blacksmithCleanupTimeout)
+		defer cancel()
+		if err := b.stopClaimedTestbox(cleanupCtx, leaseID, claim); err != nil {
+			shouldStop = false
+			fmt.Fprintf(b.rt.Stderr, "warning: blacksmith cleanup failed stage=cleanup lease=%s retry_likely=true: %v\n", leaseID, err)
+			return err
+		}
+		return nil
 	}
+	defer func() {
+		if err := cleanup(); err != nil {
+			if runResult.Session == nil {
+				runResult.Provider, runResult.LeaseID, runResult.Slug = blacksmithTestboxProvider, leaseID, slug
+				runResult.Session = &core.RunSessionHandle{Provider: blacksmithTestboxProvider, LeaseID: leaseID, Slug: slug, CleanupCommand: fmt.Sprintf("crabbox stop --provider %s %s", blacksmithTestboxProvider, leaseID)}
+			}
+			runResult.Session.Kept = true
+			if runErr == nil {
+				runResult.ExitCode = 1
+				runResult.ErrorKind = core.RunErrorProvider
+				runErr = exit(1, "Blacksmith cleanup unconfirmed; retained lease %s: %v", leaseID, err)
+			}
+		}
+	}()
 	fmt.Fprintf(b.rt.Stderr, "provider=blacksmith-testbox id=%s sync=delegated auth=blacksmith\n", leaseID)
 	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 		core.PrintEnvForwardingSummary(b.rt.Stderr, blacksmithTestboxProvider, "unsupported", req.Options.EnvAllow, req.Env)
@@ -203,16 +211,38 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 	stderrProof := newBlacksmithProofTailBuffer()
 	commandStart := b.rt.Clock.Now()
 	phaseTracker := core.NewCommandPhaseTracker(commandStart)
-	code := b.runTestbox(
-		ctx,
-		leaseID,
-		req.Command,
-		req.DebugSync,
-		req.ShellMode,
-		phaseTracker,
-		mergeWriters(stdoutCapture, stdoutProof),
-		mergeWriters(stderrCapture, stderrProof),
-	)
+	code := 0
+	var commandEnd time.Time
+	var collected []core.RunArtifact
+	var artifactErr error
+	if err := b.withOwnedTestbox(ctx, claim, func() error {
+		if len(req.ArtifactGlobs) > 0 || len(req.RequiredArtifactGlobs) > 0 {
+			code, commandEnd, collected, artifactErr = b.runArtifactTestbox(ctx, req, leaseID, phaseTracker,
+				mergeWriters(stdoutCapture, stdoutProof), mergeWriters(stderrCapture, stderrProof), blacksmithCollectionTimeout)
+			return nil
+		}
+		code = b.runTestbox(
+			ctx,
+			leaseID,
+			req.Command,
+			req.DebugSync,
+			req.ShellMode,
+			phaseTracker,
+			mergeWriters(stdoutCapture, stdoutProof),
+			mergeWriters(stderrCapture, stderrProof),
+		)
+		return nil
+	}); err != nil {
+		return RunResult{}, err
+	}
+	// Artifact diagnostics must not reclassify an earlier workload failure.
+	artifactFailedSuccess := artifactErr != nil && code == 0
+	if artifactErr != nil {
+		fmt.Fprintf(b.rt.Stderr, "blacksmith artifact retrieval failed: %v\n", artifactErr)
+		if code == 0 {
+			code = core.ExitCodeForError(artifactErr, 7)
+		}
+	}
 	if closeErr := stdoutCapture.Close(); closeErr != nil && code == 0 {
 		return RunResult{}, core.Exit(2, "blacksmith failure bundle stdout close: %v", closeErr)
 	}
@@ -220,8 +250,11 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		return RunResult{}, core.Exit(2, "blacksmith failure bundle stderr close: %v", closeErr)
 	}
 	finished := b.rt.Clock.Now()
-	commandDuration := finished.Sub(commandStart)
-	commandPhases := core.FinishCommandPhaseTracker(phaseTracker, finished)
+	if commandEnd.IsZero() {
+		commandEnd = finished
+	}
+	commandDuration := commandEnd.Sub(commandStart)
+	commandPhases := core.FinishCommandPhaseTracker(phaseTracker, commandEnd)
 	total := finished.Sub(started)
 	actionsURL := firstNonBlank(stdoutProof.ActionsURL(), stderrProof.ActionsURL())
 	result := RunResult{
@@ -236,38 +269,38 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		Total:         total,
 		SyncDelegated: true,
 	}
-	var artifactErr error
-	if code == 0 && (len(req.ArtifactGlobs) > 0 || len(req.RequiredArtifactGlobs) > 0) {
-		collected, err := b.CollectRunArtifacts(ctx, core.DelegatedRunArtifactRequest{
-			RunReq:   req,
-			Result:   result,
-			MaxFiles: core.DelegatedRunArtifactDefaultMaxFiles,
-			MaxBytes: core.DelegatedRunArtifactDefaultMaxBytes,
-		})
-		if err != nil {
-			artifactErr = err
-			fmt.Fprintf(b.rt.Stderr, "blacksmith artifact retrieval failed: %v\n", err)
-			code = blacksmithArtifactFailureExitCode(err)
-			result.ExitCode = code
-		} else {
-			if strings.TrimSpace(collected.Output) != "" {
-				fmt.Fprintln(b.rt.Stderr, strings.TrimSpace(collected.Output))
-			}
-			for _, artifact := range collected.Artifacts {
-				fmt.Fprintf(b.rt.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
-			}
-			result.Artifacts = append(result.Artifacts, collected.Artifacts...)
-		}
+	for _, artifact := range collected {
+		fmt.Fprintf(b.rt.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
 	}
+	result.Artifacts = append(result.Artifacts, collected...)
+	if code != 0 && req.KeepOnFailure {
+		shouldStop = false
+	}
+	cleanupErr := cleanup()
+	if cleanupErr != nil && code == 0 {
+		code = 1
+		result.ExitCode = code
+		result.ErrorKind = core.RunErrorProvider
+	}
+	if cleanupErr == nil && cleanupAttempted && code == 0 {
+		printBlacksmithOneShotActionsWarning(b.rt.Stderr, result.ActionsURL)
+	}
+	total = b.rt.Clock.Now().Sub(started)
+	result.Total = total
 	report := delegatedTimingReport(blacksmithTestboxProvider, leaseID, slug, "blacksmith-testbox owns sync", commandDuration, commandPhases, total, code)
-	report = core.TimingReportWithRunResult(report, result, nil)
+	report = core.TimingReportWithRunResult(report, result, cleanupErr)
 	if code != 0 {
 		classificationInput := string(stdoutProof.Bytes()) + "\n" + string(stderrProof.Bytes())
-		if artifactErr != nil {
-			classificationInput += "\n" + artifactErr.Error()
+		failurePhases := commandPhases
+		if artifactFailedSuccess {
+			classificationInput = artifactErr.Error()
+			failurePhases = nil
 		}
-		classification := core.ClassifyRunFailure(code, classificationInput, commandPhases)
+		classification := core.ClassifyRunFailure(code, classificationInput, failurePhases)
 		core.ApplyFailureClassification(&report, classification)
+	}
+	if cleanupErr != nil && result.ErrorKind == core.RunErrorProvider {
+		report.BlockedStage, report.RetryLikely = "cleanup", "true"
 	}
 	fmt.Fprintf(b.rt.Stderr, "blacksmith run summary sync=delegated command=%s total=%s exit=%d%s\n", commandDuration.Round(time.Millisecond), total.Round(time.Millisecond), code, core.FormatFailureClassificationFields(core.FailureClassification{BlockedStage: report.BlockedStage, RetryLikely: report.RetryLikely}))
 	report.Label = strings.TrimSpace(req.Label)
@@ -289,8 +322,6 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 		result.ActionsURL = proof.ActionsURL
 		result.Artifacts = append(result.Artifacts, proof.Artifacts...)
 	}
-	finalExitCode = code
-	finalActionsURL = result.ActionsURL
 	result.Session = &core.RunSessionHandle{
 		Provider:       blacksmithTestboxProvider,
 		LeaseID:        leaseID,
@@ -336,81 +367,6 @@ func printBlacksmithOneShotActionsWarning(w io.Writer, actionsURL string) {
 		fmt.Fprintf(w, " actions=%s", strings.TrimSpace(actionsURL))
 	}
 	fmt.Fprintln(w)
-}
-
-func blacksmithArtifactFailureExitCode(err error) int {
-	var exitErr ExitError
-	if core.AsExitError(err, &exitErr) && exitErr.Code != 0 {
-		return exitErr.Code
-	}
-	return 7
-}
-
-func (b *blacksmithBackend) CollectRunArtifacts(ctx context.Context, req core.DelegatedRunArtifactRequest) (core.DelegatedRunArtifactResult, error) {
-	leaseID := strings.TrimSpace(firstNonBlank(req.Result.LeaseID, req.RunReq.ID))
-	if leaseID == "" {
-		return core.DelegatedRunArtifactResult{}, exit(2, "blacksmith artifact retrieval requires a testbox id")
-	}
-	if err := core.ValidateRunArtifactGlobs(req.RunReq.ArtifactGlobs); err != nil {
-		return core.DelegatedRunArtifactResult{}, err
-	}
-	if err := core.ValidateRequiredRunArtifactGlobs(req.RunReq.RequiredArtifactGlobs); err != nil {
-		return core.DelegatedRunArtifactResult{}, err
-	}
-	collectGlobs := append([]string{}, req.RunReq.ArtifactGlobs...)
-	collectGlobs = append(collectGlobs, req.RunReq.RequiredArtifactGlobs...)
-	script := core.DelegatedRunArtifactScript(req.RunReq.RequiredArtifactGlobs, collectGlobs, req.MaxFiles, req.MaxBytes)
-	keyPath, err := testboxKeyPath(leaseID)
-	if err != nil {
-		return core.DelegatedRunArtifactResult{}, err
-	}
-	maxBytes := req.MaxBytes
-	if maxBytes <= 0 {
-		maxBytes = core.DelegatedRunArtifactDefaultMaxBytes
-	}
-	captureLimit := blacksmithArtifactOutputCaptureLimit(maxBytes)
-	stdout := newBlacksmithLimitedBuffer(captureLimit)
-	stderr := newBlacksmithLimitedBuffer(captureLimit)
-	args := blacksmithRunArgs(b.cfg, leaseID, keyPath, []string{script}, b.cfg.Blacksmith.Debug, true)
-	_, timedOut, err := b.runCommandWithSyncGuardCapture(ctx, args, stdout, stderr, true)
-	output := strings.TrimSpace(stdout.String() + "\n" + stderr.String())
-	if stdout.exceeded || stderr.exceeded {
-		return core.DelegatedRunArtifactResult{}, exit(7, "blacksmith artifact output too large before archive validation: captured more than %d bytes", captureLimit)
-	}
-	if timedOut {
-		fmt.Fprintf(
-			b.rt.Stderr,
-			"Blacksmith Testbox sync did not print a completion marker for %s during artifact retrieval; terminating local runner. "+
-				"Rerun with CRABBOX_BLACKSMITH_SYNC_TIMEOUT_MS=0 to disable this guard.\n",
-			blacksmithSyncTimeout(os.Getenv),
-		)
-		return core.DelegatedRunArtifactResult{}, exit(124, "blacksmith artifact retrieval sync timed out: %s", output)
-	}
-	if err != nil {
-		return core.DelegatedRunArtifactResult{}, exit(7, "blacksmith artifact retrieval failed: %v: %s", err, output)
-	}
-	if len(collectGlobs) == 0 {
-		return core.DelegatedRunArtifactResult{Output: output}, nil
-	}
-	archive, cleanOutput, err := blacksmithExtractArtifactArchive(output, maxBytes)
-	if err != nil {
-		return core.DelegatedRunArtifactResult{}, err
-	}
-	path := core.LocalRunArtifactPath(req.RunReq.Repo.Root, "", leaseID, "blacksmith-artifacts.tgz")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return core.DelegatedRunArtifactResult{}, exit(2, "blacksmith artifact create %s: %v", filepath.Dir(path), err)
-	}
-	if err := os.WriteFile(path, archive, 0o600); err != nil {
-		return core.DelegatedRunArtifactResult{}, exit(2, "blacksmith artifact write %s: %v", path, err)
-	}
-	return core.DelegatedRunArtifactResult{
-		Output: strings.TrimSpace(cleanOutput),
-		Artifacts: []core.RunArtifact{{
-			Kind:  "artifact-glob",
-			Path:  path,
-			Bytes: len(archive),
-		}},
-	}, nil
 }
 
 func blacksmithExtractArtifactArchive(output string, maxBytes int64) ([]byte, string, error) {
@@ -482,34 +438,6 @@ const (
 	blacksmithCleanupTimeout                       = 30 * time.Second
 	blacksmithArtifactDiagnosticCaptureBytes int64 = 64 * 1024
 )
-
-type blacksmithLimitedBuffer struct {
-	bytes.Buffer
-	limit    int64
-	exceeded bool
-}
-
-func newBlacksmithLimitedBuffer(limit int64) *blacksmithLimitedBuffer {
-	return &blacksmithLimitedBuffer{limit: limit}
-}
-
-func (b *blacksmithLimitedBuffer) Write(p []byte) (int, error) {
-	if b.limit <= 0 || b.exceeded {
-		b.exceeded = b.exceeded || b.limit > 0
-		return len(p), nil
-	}
-	remaining := b.limit - int64(b.Buffer.Len())
-	if remaining <= 0 {
-		b.exceeded = true
-		return len(p), nil
-	}
-	if int64(len(p)) > remaining {
-		_, _ = b.Buffer.Write(p[:int(remaining)])
-		b.exceeded = true
-		return len(p), nil
-	}
-	return b.Buffer.Write(p)
-}
 
 func blacksmithArtifactOutputCaptureLimit(maxBytes int64) int64 {
 	if maxBytes <= 0 {
@@ -765,7 +693,7 @@ func (b *blacksmithBackend) listArgs(req ListRequest) []string {
 }
 
 func (b *blacksmithBackend) Status(ctx context.Context, req StatusRequest) (statusView, error) {
-	leaseID, err := resolveBlacksmithLeaseID(req.ID, "", false)
+	leaseID, err := resolveBlacksmithDiscoveryID(req.ID)
 	if err != nil {
 		return statusView{}, err
 	}
@@ -806,81 +734,141 @@ func (b *blacksmithBackend) Status(ctx context.Context, req StatusRequest) (stat
 }
 
 func (b *blacksmithBackend) Stop(ctx context.Context, req StopRequest) error {
-	leaseID, err := resolveBlacksmithLeaseID(req.ID, "", false)
+	claim, err := resolveOwnedBlacksmithClaim(req.ID)
 	if err != nil {
 		return err
 	}
-	claim, err := readLeaseClaim(leaseID)
-	if err != nil {
-		return err
-	}
-	return b.stopClaimedTestbox(ctx, leaseID, claim)
+	return b.stopClaimedTestbox(ctx, claim.LeaseID, claim)
 }
 
-func (b *blacksmithBackend) stopClaimedTestbox(ctx context.Context, leaseID string, claim core.LeaseClaim) error {
-	stop := func() error {
-		_, err := b.runCommand(ctx, blacksmithStopArgs(b.cfg, leaseID), b.rt.Stdout, b.rt.Stderr)
+func (b *blacksmithBackend) stopClaimedTestbox(ctx context.Context, leaseID string, claim core.LeaseClaim) (stopErr error) {
+	defer func() { stopErr = blacksmithExitDiagnostics(stopErr) }()
+	_, _, err := blacksmithClaimBinding(claim)
+	if err != nil {
 		return err
 	}
-	if claim.LeaseID == leaseID {
-		if err := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, stop); err != nil {
+	if claim.LeaseID != leaseID {
+		return exit(2, "Blacksmith exact claim identifier mismatch")
+	}
+	ctx, cancel := context.WithTimeout(ctx, blacksmithCleanupTimeout)
+	defer cancel()
+	var bound *blacksmithBackend
+	var reconciled *blacksmithReconciledStop
+	if err := core.WithLeaseClaimUnchangedShared(ctx, leaseID, claim, func() error {
+		var err error
+		bound, err = b.withRoute(ctx)
+		if err != nil {
 			return err
 		}
-	} else if err := stop(); err != nil {
+		reconciled, err = bound.terminateTestbox(ctx, claim)
+		return err
+	}); err != nil {
 		return err
 	}
-	removeStoredTestboxKey(leaseID)
-	return nil
+	// Release the shared fence before taking the exclusive one. A replacement
+	// published in between must survive: only the original snapshot authorizes
+	// finalization, and a stuck command must not make this wait unbounded.
+	err = core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, leaseID, claim, true, func() error {
+		identity, err := bound.verifyTestbox(ctx, claim)
+		if err != nil {
+			return err
+		}
+		if !identity.terminal() {
+			return exit(2, "Blacksmith termination is not confirmed; retaining claim and key")
+		}
+		if err := core.RemoveStoredTestboxConnectionArtifacts(leaseID); err != nil {
+			return fmt.Errorf("Blacksmith local connection artifacts cleanup failed; retaining claim: %w", err)
+		}
+		return nil
+	})
+	if err != nil && reconciled != nil {
+		bound.printStopOutput(reconciled.result)
+		return errors.Join(reconciled.err, err)
+	}
+	if reconciled != nil {
+		fmt.Fprintf(b.rt.Stderr, "blacksmith cleanup reconciled lease=%s state=completed: stop failed; native status confirmed completion\n", leaseID)
+	}
+	return err
 }
 
-func (b *blacksmithBackend) warmupLease(ctx context.Context, repo Repo, reclaim bool, requestedSlug string) (string, string, error) {
+func (b *blacksmithBackend) warmupLease(ctx context.Context, repo Repo, reclaim bool, requestedSlug string) (core.LeaseClaim, error) {
+	if repo.Root == "" {
+		return core.LeaseClaim{}, exit(2, "Blacksmith acquisition requires a repository owner")
+	}
+	bound, err := b.withRoute(ctx)
+	if err != nil {
+		return core.LeaseClaim{}, err
+	}
+	b = bound
 	pendingID := "tbx_pending_" + strings.TrimPrefix(newLeaseID(), "cbx_")
-	cleanupKeyID := pendingID
-	defer func() {
-		if cleanupKeyID != "" {
-			removeStoredTestboxKey(cleanupKeyID)
-		}
-	}()
 	_, publicKey, err := ensureTestboxKey(pendingID)
 	if err != nil {
-		return "", "", err
+		return core.LeaseClaim{}, err
 	}
 	args, err := blacksmithWarmupArgs(b.cfg, publicKey)
 	if err != nil {
-		return "", "", err
+		removeStoredTestboxKey(pendingID)
+		return core.LeaseClaim{}, err
 	}
-	result, err := b.runCommand(ctx, args, b.rt.Stdout, b.rt.Stderr)
-	output := result.Stdout + result.Stderr
-	if err != nil {
-		if leaseID := parseBlacksmithID(output); leaseID != "" {
-			_ = b.Stop(ctx, StopRequest{ID: leaseID})
-		}
-		return "", "", exit(result.ExitCode, "blacksmith testbox warmup failed: %v; if the delegated queue is unavailable, rerun with a coordinator-backed provider such as --provider aws", err)
+	result, warmupErr := b.runCommand(ctx, args, b.rt.Stdout, b.rt.Stderr)
+	leaseID := blacksmithCreationReceipt(result.Stdout)
+	failureCode := 5
+	if warmupErr != nil && result.ExitCode > 0 {
+		failureCode = result.ExitCode
 	}
-	leaseID := parseBlacksmithID(output)
 	if leaseID == "" {
-		return "", "", exit(5, "blacksmith testbox warmup did not print a tbx_ id")
+		// Allocation may have succeeded even when its receipt cannot be trusted.
+		// Keep the invocation's recovery key without granting resource authority.
+		return core.LeaseClaim{}, exit(failureCode, "Blacksmith warmup returned no unambiguous creation receipt; retained pending_key=%s for native recovery; inspect Blacksmith inventory; no resource was selected for rollback: %v", pendingID, warmupErr)
 	}
-	if err := moveStoredTestboxKey(pendingID, leaseID); err != nil {
-		_ = b.Stop(ctx, StopRequest{ID: leaseID})
-		return "", "", exit(2, "store blacksmith key for %s: %v", leaseID, err)
+	if warmupErr != nil {
+		b.rollbackTestbox(leaseID, pendingID, repo.Root)
+		return core.LeaseClaim{}, exit(failureCode, "blacksmith testbox warmup failed: %v; inspect the exact receipt %s or use another provider", warmupErr, leaseID)
 	}
-	cleanupKeyID = leaseID
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
-		_ = b.Stop(ctx, StopRequest{ID: leaseID})
-		return "", "", err
+		b.rollbackTestbox(leaseID, pendingID, repo.Root)
+		return core.LeaseClaim{}, err
 	}
-	if err := claimLeaseForRepoProvider(leaseID, slug, blacksmithTestboxProvider, repo.Root, blacksmithIdleTimeout(b.cfg), reclaim); err != nil {
-		_ = b.Stop(ctx, StopRequest{ID: leaseID})
-		return "", "", err
+	scope, _ := b.route.canonical()
+	keyID := pendingID
+	var identity blacksmithIdentity
+	// Publication owns the absent-claim fence before moving this invocation's
+	// key. A partial publication is retained rather than reinterpreted as absent.
+	var published core.LeaseClaim
+	err = core.WithDurableLeaseClaimLockContext(ctx, leaseID, func(current *core.LeaseClaim, exists bool, checkpoint func() error) error {
+		if exists {
+			return exit(2, "Blacksmith acquisition conflicts with existing claim; retaining resource")
+		}
+		identity, err = b.inspectTestbox(ctx, leaseID)
+		if err != nil {
+			return err
+		}
+		if err := identity.usable(); err != nil {
+			return err
+		}
+		if err := moveFreshBlacksmithKey(pendingID, leaseID); err != nil {
+			return err
+		}
+		keyID = leaseID
+		*current = blacksmithIdentityClaim(leaseID, slug, repo.Root, *b.route, identity)
+		current.ClaimedAt = time.Now().UTC().Format(time.RFC3339)
+		current.LastUsedAt = current.ClaimedAt
+		current.TargetOS = targetLinux
+		current.IdleTimeoutSeconds = int(blacksmithIdleTimeout(b.cfg).Seconds())
+		current.CacheVolumes = append([]string(nil), core.CacheVolumeStickyDiskSpecs(b.cfg.Cache.Volumes)...)
+		current.ProviderScope = scope
+		if err := checkpoint(); err != nil {
+			return err
+		}
+		published = *current
+		return nil
+	})
+	if err != nil {
+		b.rollbackTestbox(leaseID, keyID, repo.Root)
+		return core.LeaseClaim{}, err
 	}
-	if err := core.UpdateLeaseClaimCacheVolumes(leaseID, core.CacheVolumeStickyDiskSpecs(b.cfg.Cache.Volumes)); err != nil {
-		_ = b.Stop(ctx, StopRequest{ID: leaseID})
-		return "", "", err
-	}
-	cleanupKeyID = ""
-	return leaseID, slug, nil
+	return published, nil
 }
 
 func (b *blacksmithBackend) openFailureStreamCapture(label string) (io.WriteCloser, string, func(), error) {
@@ -960,13 +948,24 @@ func (b *blacksmithBackend) runCommand(ctx context.Context, args []string, stdou
 }
 
 func (b *blacksmithBackend) runCommandCapture(ctx context.Context, args []string, stdout, stderr io.Writer, disableOutputCapture bool) (LocalCommandResult, error) {
-	request := LocalCommandRequest{Name: "blacksmith", Args: args, Stdout: stdout, Stderr: stderr, DisableOutputCapture: disableOutputCapture}
+	return b.runCommandCaptureInDir(ctx, args, stdout, stderr, disableOutputCapture, "")
+}
+
+func (b *blacksmithBackend) runCommandCaptureInDir(ctx context.Context, args []string, stdout, stderr io.Writer, disableOutputCapture bool, dir string) (LocalCommandResult, error) {
+	if b.route != nil {
+		args = append(append([]string(nil), args...), "--api-url", b.route.API, "--org", b.route.Org)
+	}
+	request := LocalCommandRequest{Name: "blacksmith", Args: args, Dir: dir, Stdout: stdout, Stderr: stderr, DisableOutputCapture: disableOutputCapture}
+	if dir != "" {
+		// Artifact supervision must also bound local pipe draining on cancel.
+		request.CancelGracePeriod = time.Second
+	}
 	if !disableOutputCapture {
 		request.MaxCapturedOutputBytes = blacksmithCommandCaptureBytes
 	}
 	result, err := b.rt.Exec.Run(ctx, request)
 	if err != nil {
-		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("blacksmith failed: %v", err)}
+		return result, blacksmithCommandError{ExitError: ExitError{Code: result.ExitCode, Message: fmt.Sprintf("blacksmith failed: %v", err)}, cause: err}
 	}
 	return result, nil
 }
@@ -976,25 +975,39 @@ func (b *blacksmithBackend) runCommandWithSyncGuard(ctx context.Context, args []
 }
 
 func (b *blacksmithBackend) runCommandWithSyncGuardCapture(ctx context.Context, args []string, stdout, stderr io.Writer, disableOutputCapture bool) (LocalCommandResult, bool, error) {
+	return b.runCommandWithSyncGuardFiltered(ctx, args, stdout, stderr, disableOutputCapture, "", nil)
+}
+
+// Filter before sync observation as well as console, proof, and failure capture.
+func (b *blacksmithBackend) runCommandWithSyncGuardFiltered(ctx context.Context, args []string, stdout, stderr io.Writer, disableOutputCapture bool, dir string, filter func(io.Writer, io.Writer) (io.Writer, io.Writer)) (LocalCommandResult, bool, error) {
 	timeout := blacksmithSyncTimeout(os.Getenv)
 	if timeout <= 0 {
-		result, err := b.runCommandCapture(ctx, args, stdout, stderr, disableOutputCapture)
+		if filter != nil {
+			stdout, stderr = filter(stdout, stderr)
+		}
+		result, err := b.runCommandCaptureInDir(ctx, args, stdout, stderr, disableOutputCapture, dir)
 		return result, false, err
 	}
 	guardCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	tracker := &blacksmithSyncTracker{}
+	stdout = blacksmithSyncGuardWriter{w: stdout, tracker: tracker}
+	stderr = blacksmithSyncGuardWriter{w: stderr, tracker: tracker}
+	if filter != nil {
+		stdout, stderr = filter(stdout, stderr)
+	}
 	resultCh := make(chan struct {
 		result LocalCommandResult
 		err    error
 	}, 1)
 	go func() {
-		result, err := b.runCommandCapture(
+		result, err := b.runCommandCaptureInDir(
 			guardCtx,
 			args,
-			blacksmithSyncGuardWriter{w: stdout, tracker: tracker},
-			blacksmithSyncGuardWriter{w: stderr, tracker: tracker},
+			stdout,
+			stderr,
 			disableOutputCapture,
+			dir,
 		)
 		resultCh <- struct {
 			result LocalCommandResult
@@ -1157,16 +1170,8 @@ func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
 }
 
-func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
-}
-
 func ensureTestboxKey(leaseID string) (string, string, error) {
 	return core.EnsureTestboxKey(leaseID)
-}
-
-func moveStoredTestboxKey(oldLeaseID, newLeaseID string) error {
-	return core.MoveStoredTestboxKey(oldLeaseID, newLeaseID)
 }
 
 func removeStoredTestboxKey(leaseID string) {
