@@ -188,8 +188,11 @@ Automatic fallback behavior:
   followed by each fallback port;
 - it tries the primary first, then each fallback in order;
 - the first port that connects wins for that operation;
-- the probe is repeated per operation, so a later command re-evaluates the
-  candidates from scratch.
+- a successful readiness or transport probe prepares that host and port for
+  the current operation, so its subsequent SSH requests avoid another login
+  probe; each request still authenticates and enforces workspace ownership;
+- a fresh command or a changed host or port evaluates the advertised candidates
+  again, including when switching between public and tailnet addresses.
 
 Set `ssh.fallbackPorts: []` or `CRABBOX_SSH_FALLBACK_PORTS=none` to disable
 fallback entirely. Some networks prefer this so a misconfigured `2222` rule

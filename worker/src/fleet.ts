@@ -379,6 +379,7 @@ import type {
   LeaseProvisioningTiming,
   ProviderImage,
   ProviderMachine,
+  ProviderAccessTimingObserver,
   ProvisioningAttempt,
   ReadyPoolBorrowRequest,
   ReadyPoolBorrowHeartbeatRequest,
@@ -4712,30 +4713,40 @@ export class FleetCoordinator {
       ...(dispatched.providerScope ? { providerScope: dispatched.providerScope } : {}),
       onResourceCreated: (claim) => this.recordCreatedProviderResource(dispatched, claim),
       // Queued regional attempts must not restore access from their pre-provisioning snapshot.
-      withLeaseAccess: (target, operation) =>
-        this.withAWSIngressOperationLock(async () => {
+      withLeaseAccess: (target, operation, observe) => {
+        const ingressQueuedAt = Date.now();
+        return this.withAWSIngressOperationLock(async () => {
+          observe?.("ingress_wait", Date.now() - ingressQueuedAt);
+          const lifecycleQueuedAt = Date.now();
           const access = await this.state.runExclusive(async () => {
-            const current = await this.getLease(dispatched.id);
-            const attempt = createAttempt
-              ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
-              : undefined;
-            if (
-              !current ||
-              !sameLeaseReleaseIdentity(current, dispatched) ||
-              current.state !== "provisioning" ||
-              current.provisioningRequestStartedAt !== dispatched.provisioningRequestStartedAt ||
-              Date.parse(current.expiresAt) <= Date.now() ||
-              (createAttempt && (!attempt || !createAttemptMatchesLease(attempt, current)))
-            ) {
-              throw new CreateAttemptCanceledError();
+            const snapshotStartedAt = Date.now();
+            observe?.("lifecycle_wait", snapshotStartedAt - lifecycleQueuedAt);
+            try {
+              const current = await this.getLease(dispatched.id);
+              const attempt = createAttempt
+                ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
+                : undefined;
+              if (
+                !current ||
+                !sameLeaseReleaseIdentity(current, dispatched) ||
+                current.state !== "provisioning" ||
+                current.provisioningRequestStartedAt !== dispatched.provisioningRequestStartedAt ||
+                Date.parse(current.expiresAt) <= Date.now() ||
+                (createAttempt && (!attempt || !createAttemptMatchesLease(attempt, current)))
+              ) {
+                throw new CreateAttemptCanceledError();
+              }
+              return {
+                lease: { ...current, ...(target.region ? { region: target.region } : {}) },
+                context: providerAccessContext([], await this.providerAccessLeaseRecords()),
+              };
+            } finally {
+              observe?.("access_snapshot", Date.now() - snapshotStartedAt);
             }
-            return {
-              lease: { ...current, ...(target.region ? { region: target.region } : {}) },
-              context: providerAccessContext([], await this.providerAccessLeaseRecords()),
-            };
           });
           return operation(access.lease, access.context);
-        }),
+        });
+      },
     };
     const provisioned = await provider
       .createServerWithFallback(config, leaseID, slug, owner, provisioning)
@@ -26643,6 +26654,7 @@ interface ProviderProvisioningContext {
   withLeaseAccess?: <T>(
     target: ProviderProvisioningTarget,
     operation: (lease: LeaseRecord, context: ProviderAccessContext) => Promise<T>,
+    observe?: ProviderAccessTimingObserver,
   ) => Promise<T>;
 }
 
@@ -28623,29 +28635,36 @@ export class AWSProvider implements CloudProvider {
               // Only ingress writes hold the fence; image, instance and address waits do not.
               ...(!config.awsPrivate && withLeaseAccess
                 ? {
-                    withIngress: (apply: (cidrs: string[]) => Promise<string>) =>
-                      withLeaseAccess({ region }, async (lease, context) => {
-                        const cidrs = awsCreateSSHSourceCIDRs(
-                          { ...config, awsRegion: region },
-                          lease,
-                          context,
-                          this.env,
-                          this.region,
-                        );
-                        try {
-                          return await apply(cidrs);
-                        } catch (error) {
-                          if (
-                            !isAWSSecurityGroupRuleLimitError(
-                              coordinatorErrorMessage(this.env, error),
-                            )
-                          ) {
-                            throw error;
+                    withIngress: (
+                      apply: (cidrs: string[]) => Promise<string>,
+                      observe: ProviderAccessTimingObserver,
+                    ) =>
+                      withLeaseAccess(
+                        { region },
+                        async (lease, context) => {
+                          const cidrs = awsCreateSSHSourceCIDRs(
+                            { ...config, awsRegion: region },
+                            lease,
+                            context,
+                            this.env,
+                            this.region,
+                          );
+                          try {
+                            return await apply(cidrs);
+                          } catch (error) {
+                            if (
+                              !isAWSSecurityGroupRuleLimitError(
+                                coordinatorErrorMessage(this.env, error),
+                              )
+                            ) {
+                              throw error;
+                            }
+                            await this.reconcileLeaseAccess(lease, context);
+                            return apply(cidrs);
                           }
-                          await this.reconcileLeaseAccess(lease, context);
-                          return apply(cidrs);
-                        }
-                      }),
+                        },
+                        observe,
+                      ),
                   }
                 : {}),
             },

@@ -29,7 +29,6 @@ type LeaseClaim = core.LeaseClaim
 type Repo = core.Repo
 type Server = core.Server
 type ExitError = core.ExitError
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 
 const providerName = "nomad"
@@ -70,10 +69,6 @@ func updateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labe
 
 func delegatedSyncOptionsError(spec ProviderSpec, req RunRequest) error {
 	return core.RejectDelegatedSyncOptionsForSpec(spec, req)
-}
-
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
 }
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {

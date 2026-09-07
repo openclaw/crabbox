@@ -26,7 +26,6 @@ type Server = core.Server
 type Repo = core.Repo
 type LeaseClaim = core.LeaseClaim
 type ExitError = core.ExitError
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 
 const (
@@ -49,10 +48,6 @@ func exit(code int, format string, args ...any) core.ExitError {
 
 func flagWasSet(fs *flag.FlagSet, name string) bool {
 	return core.FlagWasSet(fs, name)
-}
-
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
 }
 
 func newLeaseSlug(leaseID string) string {

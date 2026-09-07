@@ -6,7 +6,6 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -72,11 +72,7 @@ func assertCubeSandboxRedactedError(t *testing.T, err error, secret string) {
 
 func TestCubeSandboxProcessStreamRedactsReflectedCredential(t *testing.T) {
 	const secret = "envd-stream-secret"
-	t.Run("end stream error", func(t *testing.T) {
-		body := cubesandboxTestEnvelope(2, map[string]any{"error": map[string]any{"code": "unauthorized", "message": "Bearer " + secret + " quota exceeded"}})
-		_, err := parseCubeSandboxProcessStream(bytes.NewReader(body), io.Discard, io.Discard, secret)
-		assertCubeSandboxRedactedError(t, err, secret)
-	})
+
 	t.Run("process end diagnostic", func(t *testing.T) {
 		body := cubesandboxTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 1, "exited": false, "error": "Bearer " + secret + " quota exceeded"}}})
 		var stderr bytes.Buffer
@@ -96,52 +92,6 @@ func TestCubeSandboxProcessStreamRedactsReflectedCredential(t *testing.T) {
 			t.Fatalf("code=%d err=%v, want abnormal termination failure", code, err)
 		}
 	})
-}
-
-func TestParseCubeSandboxProcessStream(t *testing.T) {
-	body := bytes.Join([][]byte{
-		cubesandboxTestEnvelope(0, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}}),
-		cubesandboxTestEnvelope(0, map[string]any{"event": map[string]any{"data": map[string]any{"stdout": base64.StdEncoding.EncodeToString([]byte("hello"))}}}),
-		cubesandboxTestEnvelope(0, map[string]any{"event": map[string]any{"data": map[string]any{"stderr": base64.StdEncoding.EncodeToString([]byte("warn"))}}}),
-		cubesandboxTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 7, "exited": true}}}),
-		cubesandboxTestEnvelope(2, map[string]any{}),
-	}, nil)
-	var stdout, stderr bytes.Buffer
-	code, err := parseCubeSandboxProcessStream(bytes.NewReader(body), &stdout, &stderr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if code != 7 || stdout.String() != "hello" || stderr.String() != "warn" {
-		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-}
-
-func TestCubeSandboxProcessEndAndStreamFailurePrecedence(t *testing.T) {
-	for _, exited := range []bool{false, true} {
-		for _, ending := range []string{"clean", "rpc error", "truncated"} {
-			t.Run(fmt.Sprintf("exited=%t/%s", exited, ending), func(t *testing.T) {
-				body := cubesandboxTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 137, "exited": exited, "error": "fixture process end"}}})
-				switch ending {
-				case "rpc error":
-					body = append(body, cubesandboxTestEnvelope(2, map[string]any{"error": map[string]any{"code": "internal", "message": "fixture RPC failure"}})...)
-				case "truncated":
-					body = append(body, 0)
-				}
-				code, err := parseCubeSandboxProcessStream(bytes.NewReader(body), io.Discard, io.Discard)
-				if !exited {
-					if code != 137 || err == nil || !strings.Contains(err.Error(), "fixture process end") {
-						t.Fatalf("abnormal end lost precedence: code=%d err=%v", code, err)
-					}
-				} else if ending == "clean" {
-					if code != 137 || err != nil {
-						t.Fatalf("normal end: code=%d err=%v", code, err)
-					}
-				} else if code != 1 || err == nil {
-					t.Fatalf("stream failure lost precedence: code=%d err=%v", code, err)
-				}
-			})
-		}
-	}
 }
 
 func TestValidateCubeSandboxAPIURL(t *testing.T) {
@@ -278,21 +228,6 @@ func TestCubeSandboxDataPlaneStreamOutlivesControlTimeout(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed <= controlTimeout {
 		t.Fatalf("stream completed in %v, want it to remain active beyond %v", elapsed, controlTimeout)
-	}
-}
-
-func TestParseCubeSandboxProcessStreamRequiresEndEvent(t *testing.T) {
-	body := bytes.Join([][]byte{
-		cubesandboxTestEnvelope(0, map[string]any{"event": map[string]any{"data": map[string]any{"stdout": base64.StdEncoding.EncodeToString([]byte("partial"))}}}),
-		cubesandboxTestEnvelope(2, map[string]any{}),
-	}, nil)
-	var stdout bytes.Buffer
-	code, err := parseCubeSandboxProcessStream(bytes.NewReader(body), &stdout, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "without end event") {
-		t.Fatalf("code=%d err=%v, want missing end event error", code, err)
-	}
-	if stdout.String() != "partial" {
-		t.Fatalf("stdout=%q", stdout.String())
 	}
 }
 
@@ -1889,6 +1824,72 @@ func TestCubeSandboxRejectsMissingCanonicalIDMatchingAnotherSlug(t *testing.T) {
 			after, marshalErr := json.Marshal(afterClaim)
 			if err != nil || marshalErr != nil || !exists || !bytes.Equal(before, after) {
 				t.Fatalf("unrelated claim changed: exists=%v err=%v marshal=%v", exists, err, marshalErr)
+			}
+		})
+	}
+}
+
+func parseCubeSandboxProcessStream(r io.Reader, stdout, stderr io.Writer, secrets ...string) (int, error) {
+	return shared.ParseEnvdProcessStream("cubesandbox", r, stdout, stderr, interpretCubeSandboxProcessEnd, secrets...)
+}
+
+func TestCubeSandboxProcessEndPolicy(t *testing.T) {
+	readFailure := errors.New("fixture stream read failed")
+	for _, code := range []int{0, 7, -1, 137} {
+		t.Run(fmt.Sprintf("normal/%d", code), func(t *testing.T) {
+			var diagnostic bytes.Buffer
+			got, err := interpretCubeSandboxProcessEnd(shared.EnvdProcessEnd{ExitCode: code, Exited: true, Error: "ignored normal detail"}, &diagnostic)
+			if got != code || err != nil || diagnostic.Len() != 0 {
+				t.Fatalf("code=%d err=%v diagnostic=%q", got, err, diagnostic.String())
+			}
+		})
+		for _, ending := range []string{"clean", "RPC failure", "read failure", "truncated"} {
+			t.Run(fmt.Sprintf("abnormal/%d/%s", code, ending), func(t *testing.T) {
+				body := cubesandboxTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": code, "exited": false, "error": "fixture end"}}})
+				var tailBytes []byte
+				if ending == "RPC failure" {
+					tailBytes = cubesandboxTestEnvelope(2, map[string]any{"error": map[string]any{"code": "internal", "message": "fixture RPC failure"}})
+				}
+				if ending == "truncated" {
+					tailBytes = []byte{0}
+				}
+				tail := bytes.NewReader(tailBytes)
+				var reader io.Reader = io.MultiReader(bytes.NewReader(body), tail)
+				if ending == "read failure" {
+					reader = io.MultiReader(reader, iotest.ErrReader(readFailure))
+				}
+				var diagnostic bytes.Buffer
+				got, err := parseCubeSandboxProcessStream(reader, io.Discard, &diagnostic)
+				want := code
+				if want == 0 {
+					want = 1
+				}
+				if got != want || err == nil || diagnostic.String() != "fixture end\n" {
+					t.Fatalf("code=%d err=%v diagnostic=%q", got, err, diagnostic.String())
+				}
+				outcome := shared.FinalizeDelegatedCommandOutcome(got, err)
+				if outcome.ExitCode != want || outcome.ErrorKind != core.RunErrorCommandExit {
+					t.Fatalf("lost signed observed end: %+v", outcome)
+				}
+				if errors.Is(err, readFailure) || !strings.Contains(err.Error(), "fixture end") || tail.Len() != len(tailBytes) {
+					t.Fatalf("abnormal end did not stop decoding: err=%v unread=%d/%d", err, tail.Len(), len(tailBytes))
+				}
+			})
+		}
+	}
+}
+
+func TestCubeSandboxProcessEndDiagnosticPrecedence(t *testing.T) {
+	for _, tc := range []struct{ name, detail, status, want string }{
+		{"error before status", " detail ", "status", "detail"},
+		{"status fallback", " ", " status ", "status"},
+		{"empty fallback", " ", " ", "process did not exit normally"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var diagnostic bytes.Buffer
+			code, err := interpretCubeSandboxProcessEnd(shared.EnvdProcessEnd{ExitCode: -1, Error: tc.detail, Status: tc.status}, &diagnostic)
+			if code != -1 || err == nil || diagnostic.String() != tc.want+"\n" || !strings.HasSuffix(err.Error(), ": "+tc.want) {
+				t.Fatalf("code=%d err=%v diagnostic=%q", code, err, diagnostic.String())
 			}
 		})
 	}

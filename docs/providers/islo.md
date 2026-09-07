@@ -267,6 +267,25 @@ running and billable.
   claim. Names that require case, whitespace, or punctuation normalization and
   non-Crabbox sandboxes are rejected.
 
+## Create deadlines and uncertain responses
+
+Sandbox creation has a five-minute total client budget, including authentication,
+response headers, response body, and existing SDK retries. An earlier caller
+cancellation or deadline still wins. The internally owned create transport does
+not apply the ordinary 30-second response-header cutoff; ordinary API and auth
+requests retain it. Command streams remain governed by their caller context,
+cleanup retains its separate 15-second budget, and bounded run-file reads retain
+20 seconds. Explicitly supplied HTTP clients keep their own transport/timeouts.
+
+These are client limits, not a provider provisioning SLA, resource TTL, or
+billing cap. A create timeout, lost response, or incomplete response can leave a sandbox running even
+though Crabbox has no acquired lease. The error reports the requested name as an
+**unconfirmed attempt locator**, not an ownership claim. Inspect the resource's
+identity and the intended repository/account before explicitly using the
+existing `--reclaim` adoption flow and `crabbox stop`. Crabbox does not
+invent a pending claim, automatically adopt/delete by that name, or add a create
+retry. The locator is not a crash-safe journal or an exactly-once guarantee.
+
 ## Live testing
 
 Two opt-in smoke tests in `internal/providers/islo/backend_live_test.go`

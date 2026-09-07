@@ -1996,6 +1996,7 @@ type fakeIsloSyncClient struct {
 	rejectCanceledContext    bool
 	closeUploadReader        bool
 	createRequest            *gosdk.CreateSandboxRequest
+	createErr                error
 	createSandboxHook        func()
 	createName               string
 	createID                 string
@@ -2071,6 +2072,9 @@ func (f *fakeIsloSyncClient) liveSandbox(name string) *gosdk.SandboxResponse {
 
 func (f *fakeIsloSyncClient) CreateSandbox(_ context.Context, req *gosdk.CreateSandboxRequest) (*gosdk.SandboxResponse, error) {
 	f.createRequest = req
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
 	if f.createID == "" {
 		f.createID = isloTestResourceID
 	}
@@ -2717,6 +2721,97 @@ func TestIsloRunPreservesPlainAndLegacyReuseAdmission(t *testing.T) {
 			}
 			if client.deleteCalls != 0 || client.createRequest != nil {
 				t.Error("reuse created or deleted a resource")
+			}
+		})
+	}
+}
+
+func TestIsloCreateFailureReportsUnconfirmedAttemptWithoutAcquisition(t *testing.T) {
+	for _, mode := range []string{"run", "warmup"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			isolateIsloTestHome(t)
+			cause := errors.Join(ExitError{Code: 69, Message: "synthetic create failure with synthetic-key"}, context.DeadlineExceeded)
+			client := &fakeIsloSyncClient{createErr: cause}
+			restore := swapNewIsloClient(client)
+			defer restore()
+			cfg := core.BaseConfig()
+			cfg.Islo.APIKey = "synthetic-key"
+			var output bytes.Buffer
+			backend := &isloBackend{cfg: cfg, rt: Runtime{Stdout: &output, Stderr: &output}}
+			repo := Repo{Root: t.TempDir(), Name: "proof"}
+			var result RunResult
+			var err error
+			if mode == "run" {
+				result, err = backend.Run(context.Background(), RunRequest{Repo: repo, Command: []string{"true"}})
+			} else {
+				err = backend.Warmup(context.Background(), WarmupRequest{Repo: repo})
+			}
+			if err == nil || core.ExitCodeForError(err, 1) != 69 || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("typed cause/code lost: %v", err)
+			}
+			name := *client.createRequest.Name
+			if !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), "unconfirmed") || strings.Contains(err.Error(), cfg.Islo.APIKey) {
+				t.Fatalf("missing unconfirmed attempt locator: %v", err)
+			}
+			if result.LeaseID != "" || result.Session != nil || strings.Contains(output.String(), "leased ") {
+				t.Fatalf("failed create reported acquired result: %#v %s", result, output.String())
+			}
+			if client.deleteCalls != 0 || len(client.execRequests) != 0 || client.uploadPath != "" {
+				t.Fatal("failed create caused cleanup or workload")
+			}
+			entries, readErr := os.ReadDir(filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims"))
+			if !errors.Is(readErr, os.ErrNotExist) && (readErr != nil || len(entries) != 0) {
+				t.Fatalf("failed create published claim: %v %v", entries, readErr)
+			}
+		})
+	}
+}
+
+type incompleteIsloCreateClient struct {
+	fakeIsloSyncClient
+	response *gosdk.SandboxResponse
+}
+
+func (f *incompleteIsloCreateClient) CreateSandbox(_ context.Context, req *gosdk.CreateSandboxRequest) (*gosdk.SandboxResponse, error) {
+	f.createRequest = req
+	return f.response, nil
+}
+
+func TestIsloIncompleteCreateResponseReportsUnconfirmedAttempt(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		response *gosdk.SandboxResponse
+	}{
+		{"nil response", nil},
+		{"missing name", &gosdk.SandboxResponse{ID: "synthetic-id"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			isolateIsloTestHome(t)
+			client := &incompleteIsloCreateClient{response: tc.response}
+			restore := swapNewIsloClient(client)
+			defer restore()
+			cfg := core.BaseConfig()
+			cfg.Islo.APIKey = "synthetic-key"
+			var output bytes.Buffer
+			backend := &isloBackend{cfg: cfg, rt: Runtime{Stdout: &output, Stderr: &output}}
+			result, err := backend.Run(context.Background(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: cfg.Islo.APIKey}, Command: []string{"true"}})
+			if err == nil || core.ExitCodeForError(err, 1) != 5 {
+				t.Fatalf("incomplete response changed exit5: %v", err)
+			}
+			if !strings.Contains(err.Error(), "unconfirmed") || !strings.Contains(err.Error(), "name=\"crabbox-") || strings.Contains(err.Error(), cfg.Islo.APIKey) {
+				t.Fatalf("missing safe unconfirmed name: %v", err)
+			}
+			if result.LeaseID != "" || result.Session != nil || strings.Contains(output.String(), "leased ") {
+				t.Fatalf("incomplete response reported acquisition: %#v %s", result, output.String())
+			}
+			if client.deleteCalls != 0 || len(client.execRequests) != 0 || client.uploadPath != "" {
+				t.Fatal("incomplete response caused cleanup or workload")
+			}
+			entries, readErr := os.ReadDir(filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims"))
+			if !errors.Is(readErr, os.ErrNotExist) && (readErr != nil || len(entries) != 0) {
+				t.Fatalf("incomplete response published claim: %v %v", entries, readErr)
 			}
 		})
 	}

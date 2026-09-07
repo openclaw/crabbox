@@ -88,7 +88,7 @@ type wslStageBudgets struct {
 // A route owns preparation, size-scaled upload, process exit and exact
 // cleanup. No candidate may borrow the next candidate's complete allocation.
 func wslStageRouteBudgets(target SSHTarget, timing wslStageTiming, size int64) wslStageBudgets {
-	ports := sshPortCandidates(target.Port, target.FallbackPorts)
+	ports := resolvedSSHPortCandidates(target)
 	if len(ports) == 0 {
 		ports = []string{"22"}
 	}
@@ -149,7 +149,7 @@ func sshTransportCallBudget(target SSHTarget, size int64, limit sshCommandLimit)
 		return 0
 	}
 	if !isWindowsWSL2Target(target) {
-		routes := len(sshPortCandidates(target.Port, target.FallbackPorts))
+		routes := len(resolvedSSHPortCandidates(target))
 		attempts := 1
 		if routes > 1 {
 			attempts += routes
@@ -508,7 +508,8 @@ func (s *wslStageSpool) stage(ctx context.Context, target *SSHTarget, timing wsl
 		cleanupPhase.cancel()
 		cancelCandidate()
 		if err == nil {
-			target.Port, target.FallbackPorts, target.NoControlMaster = port, []string{}, true
+			target.recordPreparedEndpoint(port)
+			target.NoControlMaster = true
 			return nonce, nil
 		}
 		if cause := context.Cause(stageCtx); cause != nil {

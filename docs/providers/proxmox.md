@@ -441,8 +441,18 @@ the SSH port.
 
 `proxmox guest bootstrap exit=...`
 
-SSH connected and the bootstrap ran but failed (typically an `apt-get` error).
-SSH into a kept lease if available, or check the Proxmox task and guest logs.
+The initial SSH readiness probe succeeded, but the subsequent bootstrap SSH
+command failed. The error includes its observed native exit status and redacted
+stdout/stderr diagnostics, even if acquisition rollback removes the VM. A later
+SSH transport failure is still possible; exit `255` does not establish that a
+guest setup command ran. The underlying process error remains inspectable, while
+the CLI retains its ordinary bootstrap-failure exit `1`.
+
+Successful bootstrap remains quiet. Diagnostic capture is limited to 16 KiB;
+when that limit is exceeded, all captured text is omitted and a fixed truncation
+notice is shown so a cut credential cannot leak. Check guest or Proxmox logs if
+the diagnostic is unavailable. Existing rollback and kept-lease policy are
+unchanged.
 
 ## Related
 

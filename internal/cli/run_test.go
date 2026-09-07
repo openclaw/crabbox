@@ -4208,6 +4208,13 @@ func TestRunCommandDelegatedTerminalOrder(t *testing.T) {
 }
 
 func TestRunCommandSyncOnlyFinalizesAfterTiming(t *testing.T) {
+	for _, missingEvents := range []bool{false, true} {
+		t.Run(fmt.Sprint("missing-events=", missingEvents), func(t *testing.T) { runCommandSyncOnlyFinalization(t, missingEvents) })
+	}
+}
+
+func runCommandSyncOnlyFinalization(t *testing.T, missingEvents bool) {
+	t.Helper()
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
 	sshPath := filepath.Join(dir, "ssh")
@@ -4281,6 +4288,10 @@ func TestRunCommandSyncOnlyFinalizesAfterTiming(t *testing.T) {
 				StartedAt: "2026-09-04T00:00:00Z",
 			}})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/"+runID+"/events":
+			if missingEvents {
+				http.NotFound(w, r)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"event": CoordinatorRunEvent{
 				RunID: runID, Seq: 1, Type: "run.event", CreatedAt: "2026-09-04T00:00:00Z",
 			}})
@@ -4312,6 +4323,9 @@ func TestRunCommandSyncOnlyFinalizesAfterTiming(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if missingEvents && !strings.Contains(stderr.String(), "warning: sync-only run history binding unavailable") {
+		t.Fatalf("optional history failure was not visible: %s", stderr.String())
 	}
 	mu.Lock()
 	gotEvents := append([]string(nil), events...)

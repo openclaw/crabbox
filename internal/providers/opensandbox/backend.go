@@ -85,17 +85,12 @@ func (b *openSandboxBackend) Warmup(ctx context.Context, req WarmupRequest) erro
 		fmt.Fprintf(b.rt.Stderr, "warning: opensandbox warmup keeps the sandbox until explicit stop\n")
 	}
 	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
 func (b *openSandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {

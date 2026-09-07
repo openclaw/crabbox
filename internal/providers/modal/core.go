@@ -28,7 +28,6 @@ type Server = core.Server
 type Repo = core.Repo
 type ExitError = core.ExitError
 type LocalCommandRequest = core.LocalCommandRequest
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 
 const (
@@ -68,10 +67,6 @@ func directLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep 
 
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
-}
-
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
 }
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {

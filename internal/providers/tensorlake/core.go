@@ -25,7 +25,6 @@ type StopRequest = core.StopRequest
 type Server = core.Server
 type Repo = core.Repo
 type ExitError = core.ExitError
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 type LocalCommandRequest = core.LocalCommandRequest
 
@@ -48,10 +47,6 @@ func exit(code int, format string, args ...any) core.ExitError {
 
 func flagWasSet(fs *flag.FlagSet, name string) bool {
 	return core.FlagWasSet(fs, name)
-}
-
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
 }
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
