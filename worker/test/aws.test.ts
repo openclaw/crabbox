@@ -26,6 +26,7 @@ import {
   isRetryableAWSProvisioningError,
   staleCrabboxSSHIngressRules,
 } from "../src/aws";
+import { createAWSProvisioningDiagnostics } from "../src/aws-provisioning-diagnostics";
 import {
   awsMacOSInstanceTypeCandidates,
   awsPromotedAMIConfigKey,
@@ -36,9 +37,147 @@ import {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("aws provider", () => {
+  it("bounds repeated diagnostic buckets and records failures without error payloads", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const diagnostics = createAWSProvisioningDiagnostics("x".repeat(10_000), "r".repeat(10_000));
+    for (let index = 0; index < 10_000; index += 1) diagnostics.record("authorize_duplicate", 0);
+    const failure = new Error("private-error-canary");
+    await expect(
+      diagnostics.measure("instance_create", async () => {
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+    diagnostics.finish("failure");
+    const encoded = String(log.mock.calls[0]![0]);
+    const result = JSON.parse(encoded);
+    expect(result).toMatchObject({
+      outcome: "failure",
+      leaseId: "x".repeat(64),
+      region: "r".repeat(32),
+    });
+    expect(result.steps).toHaveLength(2);
+    expect(result.steps).toEqual(
+      expect.arrayContaining([
+        { name: "authorize_duplicate", count: 10_000, totalMs: 0, errors: 0 },
+        expect.objectContaining({ name: "instance_create", count: 1, errors: 1 }),
+      ]),
+    );
+    expect(encoded).not.toContain("private-error-canary");
+    expect(encoded.length).toBeLessThan(8192);
+  });
+
+  it("keeps overlapping creates on a shared client in separate diagnostic records", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const { client, config } = awsMarketFallbackHarness("");
+    let release!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = client.createServerWithFallback(
+      config,
+      "cbx_000000000001",
+      "first",
+      "alice@example.com",
+      {
+        withIngress: async (apply) => {
+          entered();
+          await gate;
+          return apply(["198.51.100.1/32"]);
+        },
+      },
+    );
+    try {
+      await waiting;
+      await client.createServerWithFallback(
+        config,
+        "cbx_000000000002",
+        "second",
+        "alice@example.com",
+      );
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(String(log.mock.calls[0]![0])).leaseId).toBe("cbx_000000000002");
+    } finally {
+      release();
+      await first;
+    }
+    const records = log.mock.calls.map(([value]) => JSON.parse(String(value)));
+    expect(records.map((value) => value.leaseId)).toEqual(["cbx_000000000002", "cbx_000000000001"]);
+    expect(
+      records.map(
+        (value) =>
+          value.steps.find((step: { name: string }) => step.name === "authorize_ingress").count,
+      ),
+    ).toEqual([2, 4]);
+  });
+
+  it("reports request step costs and redundant ingress calls without logging payloads", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-05-02T00:00:00Z"));
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const { client, config } = awsMarketFallbackHarness("");
+    const baseFetch = globalThis.fetch;
+    const actions: string[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const action = new URLSearchParams(await request.clone().text()).get("Action") ?? "";
+      if (action) actions.push(action);
+      if (action === "AuthorizeSecurityGroupIngress" || action === "RevokeSecurityGroupIngress") {
+        const authorize = action === "AuthorizeSecurityGroupIngress";
+        vi.setSystemTime(Date.now() + (authorize ? 7 : 3));
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>${authorize ? "InvalidPermission.Duplicate" : "InvalidPermission.NotFound"}</Code><Message>private-rule-canary</Message></Error></Errors></Response>`,
+          400,
+        );
+      }
+      return baseFetch(request);
+    });
+    const result = await client.createServerWithFallback(
+      { ...config, sshPort: "22", sshFallbackPorts: ["443"] },
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+      { withIngress: (apply) => apply(["203.0.113.7/32", "2001:db8::1/128"]) },
+    );
+    expect(result.server.id).toBeDefined();
+    expect(actions.filter((action) => action === "AuthorizeSecurityGroupIngress")).toHaveLength(6);
+    expect(actions.filter((action) => action === "RevokeSecurityGroupIngress")).toHaveLength(2);
+    expect(log).toHaveBeenCalledTimes(1);
+    const encoded = String(log.mock.calls[0]![0]);
+    const diagnostic = JSON.parse(encoded);
+    expect(diagnostic).toMatchObject({
+      component: "crabbox_aws_provisioning",
+      leaseId: "cbx_abcdef123456",
+      region: "eu-west-1",
+      outcome: "success",
+    });
+    expect(diagnostic.steps).toEqual(
+      expect.arrayContaining([
+        { name: "authorize_ingress", count: 6, totalMs: 42, errors: 6 },
+        { name: "authorize_duplicate", count: 6, totalMs: 0, errors: 0 },
+        { name: "revoke_world", count: 2, totalMs: 6, errors: 2 },
+        { name: "revoke_world_absent", count: 2, totalMs: 0, errors: 0 },
+      ]),
+    );
+    for (const privateValue of [
+      "private-rule-canary",
+      "alice@example.com",
+      "203.0.113.7",
+      "2001:db8",
+      "ssh-ed25519",
+    ])
+      expect(encoded).not.toContain(privateValue);
+    expect(encoded.length).toBeLessThan(8192);
+    log.mockRestore();
+  });
+
   it("tags every checkpoint AMI backing snapshot with its exact ownership claim", async () => {
     let submitted: URLSearchParams | undefined;
     vi.stubGlobal(

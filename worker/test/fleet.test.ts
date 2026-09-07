@@ -26128,6 +26128,76 @@ describe("fleet lease identity and idle", () => {
     }
   });
 
+  it("measures queued AWS ingress separately from permission API calls", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-05-02T00:00:00Z"));
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const refreshStarted = deferred<void>();
+    const finishRefresh = deferred<void>();
+    const queued = deferred<void>();
+    let refreshing = true;
+    const fixture = awsIngressTestFleet(async (action) => {
+      if (action === "AuthorizeSecurityGroupIngress") {
+        if (refreshing) {
+          refreshStarted.resolve();
+          await finishRefresh.promise;
+        } else vi.setSystemTime(Date.now() + 7);
+      }
+      return undefined;
+    });
+    const original = EC2SpotClient.prototype.createServerWithFallback;
+    const createSpy = vi
+      .spyOn(EC2SpotClient.prototype, "createServerWithFallback")
+      .mockImplementation(function (config, id, slug, owner, options) {
+        if (!options?.withIngress) throw new Error("AWS fixture did not provide its ingress fence");
+        const withIngress = options.withIngress;
+        return original.call(this, config, id, slug, owner, {
+          ...options,
+          withIngress: (apply, observe) => {
+            const pending = withIngress(apply, observe);
+            queued.resolve();
+            return pending;
+          },
+        });
+      });
+    const refresh = fixture.fleet.fetch(
+      request("POST", `/v1/leases/${fixture.activeID}/heartbeat`, {
+        headers: { ...fixture.headers, "cf-connecting-ip": "198.51.100.30" },
+        body: { idleTimeoutSeconds: 600 },
+      }),
+    );
+    let creating: Promise<Response> | undefined;
+    try {
+      await refreshStarted.promise;
+      creating = fixture.create();
+      await queued.promise;
+      vi.setSystemTime(Date.now() + 41);
+      refreshing = false;
+      finishRefresh.resolve();
+      expect((await refresh).status).toBe(200);
+      expect((await creating).status).toBe(201);
+      const entries = log.mock.calls
+        .map(([value]) => JSON.parse(String(value)))
+        .filter(
+          (value) =>
+            value.component === "crabbox_aws_provisioning" && value.leaseId === fixture.creatingID,
+        );
+      expect(entries).toHaveLength(1);
+      expect(entries[0].steps).toEqual(
+        expect.arrayContaining([
+          { name: "ingress_wait", count: 1, totalMs: 41, errors: 0 },
+          { name: "lifecycle_wait", count: 1, totalMs: 0, errors: 0 },
+          { name: "authorize_ingress", count: 2, totalMs: 14, errors: 0 },
+        ]),
+      );
+    } finally {
+      finishRefresh.resolve();
+      await Promise.allSettled([refresh, ...(creating ? [creating] : [])]);
+      createSpy.mockRestore();
+      log.mockRestore();
+    }
+  });
+
   it("refreshes queued AWS ingress after an earlier release removes a lease", async () => {
     const refreshStarted = deferred<void>();
     const finishRefresh = deferred<void>();
