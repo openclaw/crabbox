@@ -3546,12 +3546,7 @@ export class FleetCoordinator {
       released = cancellation.lease;
       await this.closeLeaseBridges(cancellation.lease.id, 1008, "lease ended");
       if ("cleanup" in cancellation && cancellation.cleanup) {
-        const cleanup = () => this.finishLeaseCleanupClaim(cancellation.cleanup!);
-        released =
-          managedLeaseProvider(cancellation.cleanup.lease) === "aws" &&
-          !cancellation.cleanup.lease.network?.awsPrivate
-            ? await this.withAWSIngressOperationLock(cleanup)
-            : await cleanup();
+        released = await this.finishLeaseCleanupClaim(cancellation.cleanup);
       }
     }
     if (!released?.provisioningResourceMayExist && !released?.cleanupStartedAt) {
@@ -16840,59 +16835,52 @@ export class FleetCoordinator {
     });
     await Promise.all(
       claims.map(async ({ claim, lease }) => {
-        const cleanup = async () => {
-          let failure: { error: unknown; message: string } | undefined;
-          try {
-            await this.deleteLeaseServer(lease);
-          } catch (error) {
-            failure = { error, message: coordinatorErrorMessage(this.env, error) };
-          }
-          await this.state.runExclusive(async () => {
-            const current = await this.getLease(lease.id);
-            if (
-              !current ||
-              current.cleanupStartedAt !== claim ||
-              !sameLeaseCleanupClaim(current, lease) ||
-              (await provisioningOwnsLease(this.state.storage, lease.id))
-            ) {
-              return;
-            }
-            const nowDate = new Date();
-            const nowISO = nowDate.toISOString();
-            if (failure) {
-              recordLeaseCleanupFailure(current, failure.error, failure.message, nowISO);
-              await this.putLease(current);
-              console.warn(
-                `lease cleanup failed lease=${current.id} provider=${current.provider} cloud=${current.cloudID}: ${failure.message}`,
-              );
-              return;
-            }
-            current.state = leaseIsLive(current) ? "expired" : current.state;
-            current.updatedAt = nowISO;
-            current.endedAt = nowISO;
-            if (current.provisioningResourceMayExist) {
-              if (!current.failureError && current.cleanupError) {
-                current.failureError = current.cleanupError;
-              }
-            }
-            clearProvisioningRecoveryMetadata(current);
-            delete current.releaseDeletesServer;
-            clearLeaseCleanupMetadata(current);
-            delete current.providerKeyCleanupPending;
-            delete current.providerKeyCleanupID;
-            delete current.cleanupStartedAt;
-            delete current.cleanupClaimExpiresAt;
-            completeLeaseProviderCleanup(current, nowISO);
-            await this.putLease(current);
-            await this.clearWorkspaceReleaseError(current);
-            await this.markAWSIngressReconcilePending(current);
-          });
-        };
-        if (managedLeaseProvider(lease) === "aws" && !lease.network?.awsPrivate) {
-          await this.withAWSIngressOperationLock(cleanup);
-        } else {
-          await cleanup();
+        let failure: { error: unknown; message: string } | undefined;
+        try {
+          await this.deleteLeaseServer(lease);
+        } catch (error) {
+          failure = { error, message: coordinatorErrorMessage(this.env, error) };
         }
+        await this.withLeaseCleanupState(lease, async () => {
+          const current = await this.getLease(lease.id);
+          if (
+            !current ||
+            current.cleanupStartedAt !== claim ||
+            !sameLeaseCleanupClaim(current, lease) ||
+            (await provisioningOwnsLease(this.state.storage, lease.id))
+          ) {
+            return;
+          }
+          const nowDate = new Date();
+          const nowISO = nowDate.toISOString();
+          if (failure) {
+            recordLeaseCleanupFailure(current, failure.error, failure.message, nowISO);
+            await this.putLease(current);
+            console.warn(
+              `lease cleanup failed lease=${current.id} provider=${current.provider} cloud=${current.cloudID}: ${failure.message}`,
+            );
+            return;
+          }
+          current.state = leaseIsLive(current) ? "expired" : current.state;
+          current.updatedAt = nowISO;
+          current.endedAt = nowISO;
+          if (current.provisioningResourceMayExist) {
+            if (!current.failureError && current.cleanupError) {
+              current.failureError = current.cleanupError;
+            }
+          }
+          clearProvisioningRecoveryMetadata(current);
+          delete current.releaseDeletesServer;
+          clearLeaseCleanupMetadata(current);
+          delete current.providerKeyCleanupPending;
+          delete current.providerKeyCleanupID;
+          delete current.cleanupStartedAt;
+          delete current.cleanupClaimExpiresAt;
+          completeLeaseProviderCleanup(current, nowISO);
+          await this.putLease(current);
+          await this.clearWorkspaceReleaseError(current);
+          await this.markAWSIngressReconcilePending(current);
+        });
       }),
     );
   }
@@ -19290,12 +19278,7 @@ export class FleetCoordinator {
       await this.state.runExclusive(() => this.scheduleAlarm());
       return current;
     }
-    const release = () => this.releaseResolvedLeaseOperation(current, options);
-    return managedLeaseProvider(current) === "aws" &&
-      !current.network?.awsPrivate &&
-      (current.state === "active" || Boolean(current.cloudID))
-      ? this.withAWSIngressOperationLock(release)
-      : release();
+    return this.releaseResolvedLeaseOperation(current, options);
   }
 
   private async markWorkspaceReleaseRequested(lease: LeaseRecord): Promise<void> {
@@ -19329,7 +19312,7 @@ export class FleetCoordinator {
       expectedProvider?: string;
     },
   ): Promise<LeaseRecord> {
-    const preparation = await this.state.runExclusive(async () => {
+    const prepare = async () => {
       const stored = await this.getLease(lease.id);
       if (
         stored &&
@@ -19429,7 +19412,10 @@ export class FleetCoordinator {
         claim: claimed.cleanupStartedAt,
         lease: structuredClone(claimed),
       };
-    });
+    };
+    const preparation = await (lease.state === "active" || lease.cloudID
+      ? this.withLeaseCleanupState(lease, prepare)
+      : this.state.runExclusive(prepare));
     if (preparation.blocked) {
       return preparation.lease;
     }
@@ -19444,6 +19430,15 @@ export class FleetCoordinator {
     });
   }
 
+  // Provider I/O stays outside ingress serialization; state changes still wait for
+  // active ingress writers and revalidate their cleanup claim before committing.
+  private withLeaseCleanupState<T>(lease: LeaseRecord, operation: () => Promise<T>): Promise<T> {
+    const commit = () => this.state.runExclusive(operation);
+    return managedLeaseProvider(lease) === "aws" && !lease.network?.awsPrivate
+      ? this.withAWSIngressOperationLock(commit)
+      : commit();
+  }
+
   private async finishLeaseCleanupClaim(preparation: {
     lease: LeaseRecord;
     claim: string;
@@ -19454,7 +19449,7 @@ export class FleetCoordinator {
     try {
       await this.deleteLeaseServer(preparation.lease);
     } catch (error) {
-      await this.state.runExclusive(async () => {
+      await this.withLeaseCleanupState(preparation.lease, async () => {
         const current = await this.getLease(preparation.lease.id);
         if (
           !current ||
@@ -19476,7 +19471,7 @@ export class FleetCoordinator {
       });
       throw error;
     }
-    return await this.state.runExclusive(async () => {
+    return await this.withLeaseCleanupState(preparation.lease, async () => {
       const current = await this.getLease(preparation.lease.id);
       if (
         !current ||
