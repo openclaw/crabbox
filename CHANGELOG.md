@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Report image qualification reaping as idle after clean teardown, while preserving failed recovery evidence and checking transient controller ownership before cleanup. Thanks @vincentkoc.
+
 ## 0.51.0 - 2026-09-06
 
 ### Highlights
