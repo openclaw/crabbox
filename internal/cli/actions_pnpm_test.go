@@ -89,30 +89,70 @@ func TestLocalActionsHydrateScriptSetupNodeCache(t *testing.T) {
 }
 
 func TestLocalActionsSetupPnpmBootstrapsNode(t *testing.T) {
-	root := t.TempDir()
-	bin := filepath.Join(root, "bin")
-	if err := os.MkdirAll(bin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// An allowlisted PATH proves setup does not depend on an operator's Node/npm.
-	for _, name := range []string{"mkdir", "rm", "cat", "chmod"} {
-		target, err := exec.LookPath(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(target, filepath.Join(bin, name)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	script := "set -euo pipefail\n" + localActionsRuntimeShell() + `
-__crabbox_setup_node() {
-  [ "$1" = 24 ]
-  mkdir -p "$RUNNER_TOOL_CACHE/node/bin"
-  cat >"$RUNNER_TOOL_CACHE/node/bin/node" <<'NODE'
-#!/bin/sh
-printf '24.0.0\n'
-NODE
-  cat >"$RUNNER_TOOL_CACHE/node/bin/npm" <<'NPM'
+	for _, initialNode := range []string{"absent", "system without npm", "managed without npm"} {
+		t.Run(initialNode, func(t *testing.T) {
+			root := t.TempDir()
+			bin := filepath.Join(root, "bin")
+			tools := filepath.Join(root, "tools")
+			if err := os.MkdirAll(bin, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// Keep the real setup helper, but isolate tools and stub its downloads.
+			for _, name := range []string{"mkdir", "rm", "cat", "chmod", "tr", "wc", "awk", "ln", "mv"} {
+				target, err := exec.LookPath(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, filepath.Join(bin, name)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			node := []byte("#!/bin/sh\nprintf '24.0.0\\n'\n")
+			digest := strings.Repeat("a", 64)
+			if initialNode == "system without npm" {
+				if err := os.WriteFile(filepath.Join(bin, "node"), node, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else if initialNode == "managed without npm" {
+				dir := filepath.Join(tools, "node-v24.0.0-linux-x64")
+				if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "bin", "node"), node, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, ".crabbox-node-sha256"), []byte(digest+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(dir, filepath.Join(tools, "node")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			commands := map[string]string{
+				"uname": "#!/bin/sh\nprintf 'x86_64\\n'\n",
+				"xz":    "#!/bin/sh\nexit 0\n",
+				"curl": `#!/bin/sh
+out=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then shift; out="$1"; else url="$1"; fi
+  shift
+done
+case "$url" in
+  */index.tab) printf 'version\nv24.0.0\n' ;;
+  */SHASUMS256.txt) printf '%s  node-v24.0.0-linux-x64.tar.xz\n' "$TEST_DIGEST" >"$out" ;;
+  *) printf archive >"$out" ;;
+esac
+`,
+				"sha256sum": "#!/bin/sh\nprintf '%s  %s\\n' \"$TEST_DIGEST\" \"$1\"\n",
+				"tar": `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -C ]; then shift; dir="$1"; fi
+  shift
+done
+dir="$dir/node-v24.0.0-linux-x64/bin"
+mkdir -p "$dir"
+printf '#!/bin/sh\nprintf "24.0.0\\n"\n' >"$dir/node"
+cat >"$dir/npm" <<'NPM'
 #!/bin/sh
 printf '%s\n' "$@" >"$NPM_ARGS"
 prefix=
@@ -124,28 +164,35 @@ mkdir -p "$prefix/bin"
 printf '#!/bin/sh\nprintf "11.25.0\\n"\n' >"$prefix/bin/pnpm"
 chmod +x "$prefix/bin/pnpm"
 NPM
-  chmod +x "$RUNNER_TOOL_CACHE/node/bin/node" "$RUNNER_TOOL_CACHE/node/bin/npm"
-  export PATH="$RUNNER_TOOL_CACHE/node/bin:$PATH"
-}
-! command -v node
+chmod +x "$dir/node" "$dir/npm"
+`,
+			}
+			for name, script := range commands {
+				if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			script := "set -euo pipefail\n" + localActionsRuntimeShell() + `
 ! command -v npm
 ! command -v corepack
 __crabbox_setup_pnpm 11.25.0
 [ "$(pnpm --version)" = 11.25.0 ]
 `
-	cmd := exec.Command("bash", "-c", script)
-	cmd.Env = []string{"PATH=" + bin, "RUNNER_TOOL_CACHE=" + filepath.Join(root, "tools"), "RUNNER_TEMP=" + filepath.Join(root, "tmp"), "NPM_ARGS=" + filepath.Join(root, "npm-args")}
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("pnpm bootstrap: %v\n%s", err, output)
-	}
-	args, err := os.ReadFile(filepath.Join(root, "npm-args"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"--global\n", "--ignore-scripts\n", "--no-audit\n", "--no-fund\n", "--registry=https://registry.npmjs.org\n", "pnpm@11.25.0\n"} {
-		if !strings.Contains(string(args), want) {
-			t.Fatalf("npm args missing %q: %s", want, args)
-		}
+			cmd := exec.Command("bash", "-c", script)
+			cmd.Env = []string{"PATH=" + filepath.Join(tools, "node", "bin") + ":" + bin, "GITHUB_WORKSPACE=" + root, "RUNNER_TOOL_CACHE=" + tools, "RUNNER_TEMP=" + filepath.Join(root, "tmp"), "NPM_ARGS=" + filepath.Join(root, "npm-args"), "TEST_DIGEST=" + digest}
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("pnpm bootstrap: %v\n%s", err, output)
+			}
+			args, err := os.ReadFile(filepath.Join(root, "npm-args"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{"--global\n", "--ignore-scripts\n", "--no-audit\n", "--no-fund\n", "--registry=https://registry.npmjs.org\n", "pnpm@11.25.0\n"} {
+				if !strings.Contains(string(args), want) {
+					t.Fatalf("npm args missing %q: %s", want, args)
+				}
+			}
+		})
 	}
 }
 

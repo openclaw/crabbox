@@ -1982,7 +1982,7 @@ __crabbox_ensure_xz() {
   command -v xz >/dev/null 2>&1
 }
 __crabbox_setup_node() {
-  local requested="${1:-}"
+  local requested="${1:-}" require_npm="${2:-false}"
   if [ -n "$requested" ] && [ -f "$GITHUB_WORKSPACE/$requested" ]; then
     if [ "$(basename "$requested")" = "package.json" ]; then
       requested="$(sed -nE 's/.*"node"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$GITHUB_WORKSPACE/$requested" | head -n 1 | tr -d '[:space:]')"
@@ -2009,7 +2009,7 @@ __crabbox_setup_node() {
   local want dots
   want="${requested#v}"
   dots="$(printf '%s' "$want" | tr -cd '.' | wc -c | tr -d ' ')"
-  if command -v node >/dev/null 2>&1; then
+  if command -v node >/dev/null 2>&1 && { [ "$require_npm" != true ] || command -v npm >/dev/null 2>&1; }; then
     local actual
     actual="$(node -p 'process.versions.node' 2>/dev/null || true)"
     case "$dots" in
@@ -2043,7 +2043,7 @@ __crabbox_setup_node() {
     echo "Node release checksums did not contain a valid digest for $archive" >&2
     return 2
   fi
-  if [ ! -x "$dir/bin/node" ] || [ ! -f "$marker" ] || [ "$(cat "$marker" 2>/dev/null || true)" != "$expected" ]; then
+  if [ ! -x "$dir/bin/node" ] || { [ "$require_npm" = true ] && [ ! -x "$dir/bin/npm" ]; } || [ ! -f "$marker" ] || [ "$(cat "$marker" 2>/dev/null || true)" != "$expected" ]; then
     curl -fsSL -o "$tmp" "https://nodejs.org/dist/${version}/${archive}"
     if command -v sha256sum >/dev/null 2>&1; then
       actual="$(sha256sum "$tmp" | awk '{ print $1 }')"
@@ -2064,6 +2064,10 @@ __crabbox_setup_node() {
     mkdir -p "$extract"
     tar -xJf "$tmp" -C "$extract"
     [ -x "$extract/node-${version}-linux-${arch}/bin/node" ] || { echo "Node archive has an unexpected layout" >&2; return 2; }
+    if [ "$require_npm" = true ] && [ ! -x "$extract/node-${version}-linux-${arch}/bin/npm" ]; then
+      echo "Node archive did not provide npm required by pnpm/action-setup" >&2
+      return 2
+    fi
     rm -rf "$dir"
     mv "$extract/node-${version}-linux-${arch}" "$dir"
     printf '%s\n' "$expected" >"$marker"
@@ -2078,7 +2082,7 @@ __crabbox_setup_pnpm() {
   local requested="$1"
   # pnpm/action-setup can precede setup-node on a minimal runner image.
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-    __crabbox_setup_node 24
+    __crabbox_setup_node 24 true
   fi
   if ! command -v npm >/dev/null 2>&1; then
     echo "pnpm/action-setup requires npm; install Node with npm or rerun with --github-runner" >&2
