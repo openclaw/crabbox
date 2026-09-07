@@ -3,16 +3,24 @@
 ## Unreleased
 
 - Report producer-confirmed checkpoint non-submission as structured JSON after verified reservation cleanup, without implying that source rollback succeeded. [PR 1952](https://github.com/openclaw/crabbox/pull/1952). Thanks @steipete.
+- Preserve current-boot cloud-init completion records during Linux developer-image cleanup while still clearing cached initialization and seed data, and fail preparation if cleanup cannot complete safely. [PR 1954](https://github.com/openclaw/crabbox/pull/1954). Thanks @vincentkoc.
 - Stop SSH readiness probes and backoff at the shared deadline, reporting the active probe with authentication unknown instead of mislabeling expired checks as authentication failures. [PR 1949](https://github.com/openclaw/crabbox/pull/1949). Thanks @vincentkoc.
+- Keep AWS deletion and unrelated heartbeat alarm scans out of the ingress queue, and admit control WebSockets independently of lifecycle work, while preserving cleanup claims, alarm deadlines, authentication, and message serialization. [PR 1951](https://github.com/openclaw/crabbox/pull/1951).
+
 - Reuse verified SSH endpoints within an operation, preserving advertised fallbacks when switching hosts or ports and avoiding redundant login probes across direct, proxy, and WSL execution. [PR 1941](https://github.com/openclaw/crabbox/pull/1941).
 - Report image qualification reaping as idle after clean teardown, while preserving failed recovery evidence and checking transient controller ownership before cleanup. [PR 1942](https://github.com/openclaw/crabbox/pull/1942). Thanks @vincentkoc.
 - Add `crabbox bench check` to enforce sample, failure, and p95 runner timing policy across every matched local benchmark group. [PR 1899](https://github.com/openclaw/crabbox/pull/1899). Thanks @vincentkoc.
 - Distinguish required-artifact, artifact-change, and artifact-schema validation failures from workload exits in run timing and failure digests, preserving exit 7 and artifact enforcement. [PR 1934](https://github.com/openclaw/crabbox/pull/1934), [Issue 1894](https://github.com/openclaw/crabbox/issues/1894). Thanks @coygeek.
+- Islo: finalize bound-run outcomes after guarded cleanup, retain setup failures with `--keep-on-failure` and reused sessions after admitted Tailscale preparation fails, and preserve primary codes/causes through cleanup or timing failures while distinguishing provider/artifact errors from command exits. [PR 1947](https://github.com/openclaw/crabbox/pull/1947).
 - Reject conflicting known provider identities before rebinding resolved SSH access, and retain alias keys unless an attested unchanged alias claim is removed. [PR 1936](https://github.com/openclaw/crabbox/pull/1936), [Issue 1900](https://github.com/openclaw/crabbox/issues/1900). Thanks @coygeek.
 - Tailscale: keep provider diagnostics and OAuth credentials out of preflight and tag-ownership errors while preserving operation, HTTP status, and actionable tag guidance. [PR 1940](https://github.com/openclaw/crabbox/pull/1940).
+- Proxmox: retain bounded, redacted guest bootstrap diagnostics and native error causes after acquisition cleanup, preserving quiet success and CLI failure status. [PR 1948](https://github.com/openclaw/crabbox/pull/1948), [Issue 1873](https://github.com/openclaw/crabbox/issues/1873). Thanks @coygeek.
 - Publish run diagnostics without delaying workload admission, while preserving ordered lease attribution and joining pending publication before terminal recording. [PR 1937](https://github.com/openclaw/crabbox/pull/1937).
 - Add bounded AWS provisioning logs that separate ingress queue and lifecycle waits from create-operation costs and count redundant security-group permission calls without logging request payloads. [PR 1938](https://github.com/openclaw/crabbox/pull/1938).
+- Give Islo sandbox creation its own five-minute operation budget without shortening command streams or relaxing ordinary API deadlines; report failed create names as unconfirmed locators for explicit identity-checked recovery. [PR 1955](https://github.com/openclaw/crabbox/pull/1955).
+- Islo: preserve existing workspace files during `--no-sync` runs even when sync deletion is enabled, while retaining normal archive-sync replacement behavior. [PR 1959](https://github.com/openclaw/crabbox/pull/1959).
 - Deduplicate validated AWS coordinator SSH ranges after combining lease and global access, avoiding repeated authorization calls for identical port/range pairs while preserving ingress reconciliation. [PR 1945](https://github.com/openclaw/crabbox/pull/1945).
+- Local Actions hydration: support `pnpm/action-setup` with an explicit exact version, including pnpm-before-Node workflows, preserve the managed pnpm for later commands, and accept setup-node's `cache: pnpm` as an explicitly uncached run. [PR 1953](https://github.com/openclaw/crabbox/pull/1953).
 
 ## 0.51.0 - 2026-09-06
 

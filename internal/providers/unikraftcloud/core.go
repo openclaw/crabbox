@@ -2,7 +2,6 @@ package unikraftcloud
 
 import (
 	"flag"
-	"io"
 	"strings"
 	"time"
 
@@ -99,9 +98,3 @@ var replaceLeaseClaimIfUnchangedDurable = core.ReplaceLeaseClaimIfUnchangedDurab
 func shouldCleanupServer(server Server, now time.Time) (bool, string) {
 	return core.ShouldCleanupServer(server, now)
 }
-
-func writeTimingJSON(w io.Writer, report core.TimingReport) error {
-	return core.WriteTimingJSON(w, report)
-}
-
-type timingReport = core.TimingReport

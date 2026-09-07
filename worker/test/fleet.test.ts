@@ -26033,6 +26033,108 @@ describe("fleet lease identity and idle", () => {
     },
   );
 
+  it.each([
+    { mode: "expiry", region: "eu-west-1", group: "sg-shared" },
+    { mode: "cancel", region: "eu-west-1", group: "sg-shared" },
+    { mode: "expiry", region: "us-east-1", group: "sg-other" },
+    { mode: "cancel", region: "us-east-1", group: "sg-other" },
+  ])(
+    "allows ingress during $region $mode deletion but fences its terminal commit",
+    async ({ mode, region, group }) => {
+      const deleteStarted = deferred<void>();
+      const finishDelete = deferred<void>();
+      const finishIngress = deferred<void>();
+      let ingressStarted = false;
+      let providerFinished = false;
+      const fixture = awsIngressTestFleet(async (action) => {
+        if (action === "AuthorizeSecurityGroupIngress") {
+          ingressStarted = true;
+          await finishIngress.promise;
+        }
+        return undefined;
+      });
+      const { storage, activeID, creatingID, fleet, headers } = fixture;
+      const cancelToken = "cat_10000000000000000000000000000000";
+      const generation = "cleanup-ingress-generation";
+      storage.seed(`lease:${activeID}`, {
+        ...storage.value<LeaseRecord>(`lease:${activeID}`)!,
+        region,
+        expiresAt: new Date(Date.now() + (mode === "expiry" ? -1_000 : 60_000)).toISOString(),
+        createAttemptID: cancelToken,
+        createAttemptGeneration: generation,
+        network: {
+          awsSecurityGroupID: group,
+          sshSourceCIDRs: ["198.51.100.10/32"],
+          sshSourceCIDRsComplete: true,
+        },
+      });
+      storage.seed(`create-attempt:${activeID}`, {
+        version: 1,
+        requestedLeaseID: activeID,
+        token: cancelToken,
+        owner: "alice@example.com",
+        org: orgKeyForLabel("example-org"),
+        state: "pending",
+        canonicalLeaseID: activeID,
+        cloudID: "i-active-instance",
+        generation,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+      const deletion = vi
+        .spyOn(AWSProvider.prototype, "releaseLease")
+        .mockImplementation(async () => {
+          deleteStarted.resolve();
+          await finishDelete.promise;
+          providerFinished = true;
+        });
+      const cleanup =
+        mode === "expiry"
+          ? fleet.alarm()
+          : fleet.fetch(
+              request("POST", `/v1/leases/${activeID}/cancel-create`, {
+                headers,
+                body: { createAttemptID: cancelToken },
+              }),
+            );
+      let creating: Promise<Response> | undefined;
+      try {
+        await deleteStarted.promise;
+        creating = fixture.create();
+        await vi.waitFor(() => expect(ingressStarted).toBe(true));
+        expect(providerFinished).toBe(false);
+        finishDelete.resolve();
+        await vi.waitFor(() => expect(providerFinished).toBe(true));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(storage.value<LeaseRecord>(`lease:${activeID}`)).toMatchObject({
+          state: mode === "expiry" ? "active" : "released",
+          cleanupStartedAt: expect.any(String),
+        });
+        expect(storage.value<LeaseRecord>(`lease:${activeID}`)?.cleanupCompletedAt).toBeUndefined();
+        finishIngress.resolve();
+        expect((await creating).status).toBe(201);
+        const completed = await cleanup;
+        expect(completed instanceof Response ? completed.status : undefined).toBe(
+          mode === "expiry" ? undefined : 200,
+        );
+        expect(storage.value<LeaseRecord>(`lease:${activeID}`)).toMatchObject({
+          state: mode === "expiry" ? "expired" : "released",
+          cleanupCompletedAt: expect.any(String),
+        });
+        expect(storage.value<LeaseRecord>(`lease:${creatingID}`)).toMatchObject({
+          state: "active",
+          network: { sshSourceCIDRs: ["198.51.100.20/32"] },
+        });
+        expect(deletion).toHaveBeenCalledTimes(1);
+      } finally {
+        finishDelete.resolve();
+        finishIngress.resolve();
+        await Promise.allSettled([cleanup, ...(creating ? [creating] : [])]);
+        deletion.mockRestore();
+      }
+    },
+  );
+
   it("releases an unrelated AWS lease while a new instance waits for its address", async () => {
     const waitingForAddress = deferred<void>();
     const addressReady = deferred<ProviderMachine>();
@@ -46993,6 +47095,68 @@ describe("synthetic acknowledgement reliability", () => {
         ).toBeUndefined();
         expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.cleanupError).toBeUndefined();
       } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([undefined, -100, 500, 60_000])(
+    "arms refreshed AWS ingress without scanning unrelated workspaces (prior alarm offset %s)",
+    async (priorOffset) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const storage = new MemoryStorage();
+      const lease = {
+        ...seedLease(storage),
+        provider: "aws" as const,
+        region: "eu-west-1",
+        network: { awsSecurityGroupID: "sg-heartbeat", sshSourceCIDRsComplete: true },
+      };
+      storage.seed(`lease:${lease.id}`, lease);
+      const fleet = testFleet(storage, {
+        aws: fakeProvider(undefined, {
+          provider: "aws",
+          onRefreshLeaseAccess(current, context) {
+            return {
+              ...current,
+              network: { ...current.network, sshSourceCIDRs: context.requestSourceCIDRs },
+            };
+          },
+        }),
+      });
+      await fleet.ready();
+      const now = Date.now();
+      if (priorOffset !== undefined) await alarmRuntime(storage).scheduleAlarm(now + priorOffset);
+      const entered = deferred<void>();
+      const resume = deferred<void>();
+      storage.beforeList = async (options) => {
+        if (options?.prefix === "workspace:") {
+          entered.resolve();
+          await resume.promise;
+        }
+      };
+      const heartbeat = fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+          headers: { ...headers, "cf-connecting-ip": "198.51.100.44" },
+        }),
+      );
+      try {
+        expect(
+          await Promise.race([
+            heartbeat.then(() => "acknowledged"),
+            entered.promise.then(() => "unrelated scan blocked"),
+          ]),
+        ).toBe("acknowledged");
+        expect((await heartbeat).status).toBe(200);
+        const pending = storage.value<{ targets: Array<{ anchor: LeaseRecord; retryAt: string }> }>(
+          "aws-ingress-reconcile:pending",
+        );
+        expect(pending?.targets).toHaveLength(1);
+        expect(pending?.targets[0]?.anchor.network?.sshSourceCIDRs).toEqual(["198.51.100.44/32"]);
+        expect(pending?.targets[0]?.retryAt).toBe(new Date(now).toISOString());
+        expect(storage.alarm()).toBe(Math.min(now + 1000, now + (priorOffset ?? 1000)));
+      } finally {
+        resume.resolve();
+        await heartbeat;
         vi.useRealTimers();
       }
     },

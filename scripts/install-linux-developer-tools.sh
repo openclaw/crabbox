@@ -335,6 +335,54 @@ readiness_producer_path() {
   printf '%s\n' "$producer"
 }
 
+clean_cloud_init_state() {
+  if ! command -v cloud-init >/dev/null 2>&1; then
+    return 0
+  fi
+  # Match native checkpoint preparation: preserve real completion facts only in
+  # tmpfs, so cleaning the image does not invalidate this boot or certify a clone.
+  /usr/bin/python3 -I - <<'PY'
+import json, os, pathlib, shutil, subprocess, sys, tempfile
+from cloudinit.cmd.devel import read_cfg_paths
+
+cloud_init = [sys.executable, "-I", "-m", "cloudinit.cmd.main"]
+def require_done():
+    result = subprocess.run(cloud_init + ["status", "--format=json"], check=True, capture_output=True, text=True, timeout=30)
+    if json.loads(result.stdout)["status"] != "done":
+        raise RuntimeError("developer image preparation requires completed cloud-init initialization")
+
+require_done()
+paths = read_cfg_paths()
+runtime = pathlib.Path(paths.run_dir).absolute()
+cache = pathlib.Path(paths.cloud_dir).resolve()
+for ancestor in (runtime, *runtime.parents):
+    resolved = ancestor.resolve()
+    if resolved == cache or cache in resolved.parents:
+        raise RuntimeError("cloud-init runtime directory must be outside its cleaned disk cache")
+runtime = runtime.resolve()
+filesystem = subprocess.check_output(["stat", "-f", "-c", "%T", str(runtime)], text=True).strip()
+if filesystem != "tmpfs":
+    raise RuntimeError("cloud-init runtime directory must use tmpfs to exclude completion state from the image")
+files = [runtime / "status.json", runtime / "result.json"]
+for path in files:
+    if not path.is_file():
+        raise RuntimeError("cloud-init completion file is missing: " + str(path))
+for path in files:
+    fd, temporary = tempfile.mkstemp(prefix="." + path.name + "-", dir=runtime)
+    os.close(fd)
+    try:
+        original = path.stat()
+        shutil.copy2(path, temporary)
+        os.chown(temporary, original.st_uid, original.st_gid)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+subprocess.run(cloud_init + ["clean", "--logs", "--seed"], check=True)
+require_done()
+PY
+}
+
 prepare_fast_boot() {
   local readiness_producer
   readiness_producer="$(readiness_producer_path)" || return 1
@@ -342,7 +390,7 @@ prepare_fast_boot() {
   "$readiness_producer"
   systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
   systemctl mask apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
-  cloud-init clean --logs --seed 2>/dev/null || true
+  clean_cloud_init_state || return $?
   sync
 }
 

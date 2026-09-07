@@ -143,6 +143,13 @@ crabbox stop --provider islo blue-lobster
 - The sandbox is deleted on release unless kept. `--keep-on-failure` keeps a
   newly created failed sandbox until an explicit `stop` or provider-side expiry.
 
+## Create deadlines and uncertain responses
+
+Creation has a five-minute client budget; an earlier caller deadline still wins.
+A failed or incomplete create response reports an unconfirmed name, not an
+acquired lease. See [create deadlines and uncertain responses](../providers/islo.md#create-deadlines-and-uncertain-responses)
+for transport boundaries and explicit identity-checked recovery.
+
 ## URL bridge (per-port shares)
 
 Islo declares the `url-bridge` capability. Crabbox publishes a per-port public

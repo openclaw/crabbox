@@ -2,7 +2,6 @@ package cubesandbox
 
 import (
 	"flag"
-	"io"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -28,7 +27,6 @@ type Server = core.Server
 type SSHTarget = core.SSHTarget
 type Repo = core.Repo
 type ExitError = core.ExitError
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 
 const (
@@ -96,10 +94,6 @@ func providerClaimScope(cfg Config) string {
 
 func isCanonicalLeaseID(value string) bool {
 	return core.IsCanonicalLeaseID(value)
-}
-
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
 }
 
 func shellQuote(s string) string {
