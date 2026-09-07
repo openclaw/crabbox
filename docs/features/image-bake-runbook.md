@@ -837,6 +837,24 @@ deployment hash from the isolated candidate's service-binding settings,
 recreates only the protected controller, and performs the same idempotent
 finalization and zero-residue checks.
 
+After clean teardown, both the controller and candidate are absent. The reaper
+then creates a transient controller solely to ask the authority registry whether
+it is empty. Only an authenticated `{ "run": null }` response establishes idle;
+an active run, malformed response, or failed request remains a failure. The
+probe cannot finalize or retire a run.
+
+The reaper checks controller absence before recovery and never replaces an
+existing controller because authentication or discovery failed. Each idle
+probe or candidate-recovery controller carries a unique ownership tag;
+cleanup rechecks its version, tag, and bindings before deletion and verifies
+absence before reporting idle. Partial
+deployment failures still attempt owned cleanup. Changed or unverifiable
+ownership preserves the Worker and reports failure for operator investigation,
+including both discovery and cleanup errors when applicable. Inspect the
+reaper's `finalization.json` before retrying; do not delete an unfamiliar
+controller to force recovery. A stale candidate hash can be skipped only after
+its owned recovery controller has been deleted and absence verified.
+
 Before enabling the workflow, maintainers must create the protected
 `image-qualification` GitHub environment and configure:
 
