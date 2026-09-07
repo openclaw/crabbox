@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reuse verified SSH endpoints within an operation, preserving advertised fallbacks when switching hosts or ports and avoiding redundant login probes across direct, proxy, and WSL execution. [PR 1941](https://github.com/openclaw/crabbox/pull/1941).
 - Report image qualification reaping as idle after clean teardown, while preserving failed recovery evidence and checking transient controller ownership before cleanup. [PR 1942](https://github.com/openclaw/crabbox/pull/1942). Thanks @vincentkoc.
 - Add `crabbox bench check` to enforce sample, failure, and p95 runner timing policy across every matched local benchmark group. [PR 1899](https://github.com/openclaw/crabbox/pull/1899). Thanks @vincentkoc.
 - Distinguish required-artifact, artifact-change, and artifact-schema validation failures from workload exits in run timing and failure digests, preserving exit 7 and artifact enforcement. [PR 1934](https://github.com/openclaw/crabbox/pull/1934), [Issue 1894](https://github.com/openclaw/crabbox/issues/1894). Thanks @coygeek.
