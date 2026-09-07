@@ -2655,11 +2655,11 @@ func TestSSHWaitProgressIncludesElapsedAndRemaining(t *testing.T) {
 	}
 }
 
-func TestSSHWaitProgressDistinguishesAuthFromReadiness(t *testing.T) {
+func TestSSHWaitProgressDistinguishesTransportFromReadiness(t *testing.T) {
 	target := &SSHTarget{Host: "203.0.113.10", Port: "2222"}
 	got := sshWaitProgressMessage(target, "bootstrap", "2222", "", "2222:tcp", 5*time.Second, time.Minute)
-	if !strings.Contains(got, "bootstrap ssh-auth") {
-		t.Fatalf("TCP-only progress should report ssh-auth stage: %q", got)
+	if !strings.Contains(got, "bootstrap ssh-transport") {
+		t.Fatalf("TCP-only progress should report ssh-transport stage: %q", got)
 	}
 	got = sshWaitProgressMessage(target, "bootstrap", "2222", "2222", "2222:auth", 5*time.Second, time.Minute)
 	if !strings.Contains(got, "bootstrap ready-check") {
