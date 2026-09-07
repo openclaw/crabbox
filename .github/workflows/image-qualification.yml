@@ -166,6 +166,8 @@ jobs:
       relay_binding_digest: ${{ steps.deploy.outputs.relay_binding_digest }}
       relay_url: ${{ steps.deploy.outputs.relay_url }}
       executor_token: ${{ steps.deploy.outputs.executor_token }}
+      preflight_token: ${{ steps.deploy.outputs.preflight_token }}
+      controller_url: ${{ steps.deploy.outputs.controller_url }}
       deployment_hash: ${{ steps.deploy.outputs.deployment_hash }}
       manifest_sha: ${{ steps.deploy.outputs.manifest_sha }}
       binding_digest: ${{ steps.deploy.outputs.binding_digest }}
@@ -223,7 +225,7 @@ jobs:
     name: Protected final deployment admission
     needs: [authorize, build-candidate, deploy-enroll]
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     environment: image-qualification
     steps:
       - name: Check out protected tooling only
@@ -234,6 +236,10 @@ jobs:
       - name: Revalidate exact Worker version and arm execution
         id: arm
         env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_NETWORK_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_NETWORK_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_NETWORK_SESSION_TOKEN }}
+          QUALIFICATION_NETWORK_CREDENTIAL_EXPIRES_AT: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_NETWORK_EXPIRES_AT }}
           GH_TOKEN: ${{ github.token }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -270,7 +276,7 @@ jobs:
 
   execute:
     name: Execute candidate without cloud credentials
-    needs: [authorize, build-candidate, deploy-enroll, arm]
+    needs: [authorize, build-candidate, deploy-enroll]
     runs-on: ubuntu-latest
     timeout-minutes: 80
     steps:
@@ -280,6 +286,12 @@ jobs:
           ref: ${{ github.workflow_sha }}
           path: harness
           persist-credentials: false
+      - name: Register this executor and wait for protected network admission
+        env:
+          QUALIFICATION_PREFLIGHT_URL: ${{ needs.deploy-enroll.outputs.controller_url }}
+          QUALIFICATION_PREFLIGHT_TOKEN: ${{ needs.deploy-enroll.outputs.preflight_token }}
+          QUALIFICATION_RUN_ID: ${{ needs.deploy-enroll.outputs.run_id }}
+        run: node harness/scripts/image-qualification-control.mjs executor-preflight
       - name: Download exact candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -330,6 +342,10 @@ jobs:
           path: ${{ runner.temp }}/image-qualification-execute-proof
       - name: Revalidate identity and finalize idempotently
         env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_NETWORK_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_NETWORK_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_NETWORK_SESSION_TOKEN }}
+          QUALIFICATION_NETWORK_CREDENTIAL_EXPIRES_AT: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_NETWORK_EXPIRES_AT }}
           GH_TOKEN: ${{ github.token }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

@@ -1,7 +1,11 @@
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import controllerWorker from "../../scripts/image-qualification-controller-worker.mjs";
+import { qualificationNetwork } from "../../scripts/image-qualification-network.mjs";
 import { EC2SpotClient } from "../src/aws";
 import {
   AWSQualificationController,
@@ -39,6 +43,303 @@ afterEach(() => {
 });
 
 describe("AWS qualification authority deployment", () => {
+  it("admits one immutable executor and consumes its capability before candidate execution", async () => {
+    const fixture = authorityFixture();
+    const token = "c".repeat(64);
+    const tokenDigest = createHash("sha256").update(token).digest("hex");
+    await fixture.run.enroll(controller, identity);
+    await expect(fixture.run.execute(identity, request("GetCallerIdentity"))).rejects.toThrow(
+      "not armed",
+    );
+    expect(fixture.signer.calls).toHaveLength(0);
+    await fixture.run.prepareExecutor(controller, tokenDigest);
+    await expect(fixture.run.prepareExecutor(controller, "d".repeat(64))).rejects.toThrow(
+      "already bound",
+    );
+    await expect(
+      fixture.run.executorReady(controller, "e".repeat(64), "203.0.113.7"),
+    ).rejects.toThrow("capability");
+    await expect(fixture.run.executorReady(controller, token, "203.0.113.7")).resolves.toEqual({
+      armed: false,
+    });
+    await expect(fixture.run.executorReady(controller, token, "203.0.113.8")).rejects.toThrow(
+      "immutable",
+    );
+    await expect(fixture.run.armExecution(controller)).rejects.toThrow("not confirmed");
+    const network = await fixture.run.prepareNetwork(controller);
+    expect(network.securityGroupId).toBe("sg-fixed");
+    expect(network.attempt).toBe("1");
+    expect(Date.parse(network.cleanupNotAfter) - Date.parse(identity.expiresAt)).toBe(30 * 60_000);
+    const dispatch = await fixture.run.dispatchNetwork(controller, network.attemptId!);
+    expect(Date.parse(dispatch.dispatchedUntil)).toBeGreaterThan(Date.now());
+    await expect(fixture.run.dispatchNetwork(controller, network.attemptId!)).rejects.toThrow(
+      "not prepared",
+    );
+    await fixture.run.confirmNetwork(controller, network.attemptId!, "sgr-1234");
+    await expect(
+      fixture.run.confirmNetwork(controller, network.attemptId!, "sgr-5678"),
+    ).rejects.toThrow("changed");
+    await fixture.run.armExecution(controller);
+    await expect(fixture.run.executorReady(controller, token, "203.0.113.7")).resolves.toEqual({
+      armed: true,
+    });
+    await expect(fixture.run.executorReady(controller, token, "203.0.113.7")).rejects.toThrow(
+      "consumed",
+    );
+    await expect(
+      fixture.run.execute(identity, request("GetCallerIdentity")),
+    ).resolves.toMatchObject({ status: 200 });
+    const attestation = JSON.stringify(await fixture.run.attest(controller));
+    for (const privateValue of [token, tokenDigest, "203.0.113.7", "sg-fixed", "sgr-1234"]) {
+      expect(attestation).not.toContain(privateValue);
+    }
+    expect(new AWSQualificationTransport({} as never, identity)).not.toHaveProperty("armExecution");
+    expect(new AWSQualificationTransport({} as never, identity)).not.toHaveProperty(
+      "confirmNetworkRevocation",
+    );
+  });
+
+  it("keeps compute cleanup independent and retains recovery until the exact network intent is cleared", async () => {
+    vi.useFakeTimers();
+    const fixture = authorityFixture();
+    const token = "c".repeat(64);
+    await fixture.run.enroll(controller, identity);
+    await fixture.run.prepareExecutor(controller, createHash("sha256").update(token).digest("hex"));
+    await fixture.run.executorReady(controller, token, "203.0.113.7");
+    const network = await fixture.run.prepareNetwork(controller);
+    await fixture.run.dispatchNetwork(controller, network.attemptId!);
+    await fixture.run.confirmNetwork(controller, network.attemptId!, "sgr-1234");
+    await expect(fixture.run.clearNetwork(controller, network.attemptId!)).rejects.toThrow(
+      "identity mismatch",
+    );
+    await Promise.all([
+      expect(fixture.run.finalize(controller)).rejects.toThrow("network cleanup incomplete"),
+      vi.runAllTimersAsync(),
+    ]);
+    expect((await fixture.run.attest(controller)).finalized).toBe(false);
+    await expect(fixture.run.armExecution(controller)).rejects.toThrow("finalizing");
+    await expect(fixture.run.clearNetwork(controller, "f".repeat(64))).rejects.toThrow(
+      "identity mismatch",
+    );
+    await vi.advanceTimersByTimeAsync(60_001);
+    await expect(fixture.run.clearNetwork(controller, network.attemptId!)).rejects.toThrow(
+      "outcome is unresolved",
+    );
+    await expect(
+      fixture.run.confirmNetworkRevocation(controller, "f".repeat(64), "sgr-1234"),
+    ).rejects.toThrow("revocation receipt");
+    await expect(
+      fixture.run.confirmNetworkRevocation(controller, network.attemptId!, "sgr-9999"),
+    ).rejects.toThrow("revocation receipt");
+    await fixture.run.confirmNetworkRevocation(controller, network.attemptId!, "sgr-1234");
+    const restarted = new AWSQualificationRun(
+      { storage: fixture.storage } as never,
+      fixture.env as never,
+      fixture.signer,
+    );
+    expect((await restarted.networkStatus(controller)).revokedAt).toBeTruthy();
+    await fixture.run.clearNetwork(controller, network.attemptId!);
+    const before = fixture.signer.calls.length;
+    await fixture.run.finalize(controller);
+    expect(fixture.signer.calls).toHaveLength(before);
+    expect((await fixture.run.attest(controller)).finalized).toBe(true);
+  });
+
+  it("clears a fenced prepared intent that was never dispatched", async () => {
+    vi.useFakeTimers();
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    const token = "c".repeat(64);
+    await fixture.run.prepareExecutor(controller, createHash("sha256").update(token).digest("hex"));
+    await fixture.run.executorReady(controller, token, "203.0.113.7");
+    const network = await fixture.run.prepareNetwork(controller);
+    await fixture.run.beginFinalization(controller);
+    await fixture.run.clearNetwork(controller, network.attemptId!);
+    await Promise.all([fixture.run.finalize(controller), vi.runAllTimersAsync()]);
+    expect((await fixture.run.attest(controller)).finalized).toBe(true);
+  });
+
+  it("cannot clear an unresolved dispatch regardless of age", async () => {
+    vi.useFakeTimers();
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    const token = "c".repeat(64);
+    await fixture.run.prepareExecutor(controller, createHash("sha256").update(token).digest("hex"));
+    await fixture.run.executorReady(controller, token, "203.0.113.7");
+    const network = await fixture.run.prepareNetwork(controller);
+    await fixture.run.dispatchNetwork(controller, network.attemptId!);
+    await fixture.run.beginFinalization(controller);
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
+    await expect(fixture.run.clearNetwork(controller, network.attemptId!)).rejects.toThrow(
+      "outcome is unresolved",
+    );
+    await expect(
+      fixture.run.confirmNetworkRevocation(controller, network.attemptId!, "sgr-1234"),
+    ).rejects.toThrow("revocation receipt");
+  });
+
+  it("binds the real controller, entrypoint, DO and network helper to final AWS effects", async () => {
+    vi.useFakeTimers();
+    const fixture = authorityFixture();
+    fixture.env.CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID = "sg-12345678";
+    const runIdentity = { ...identity, runId: "image-qualification-42-1" };
+    const registry = new AWSQualificationRegistry(
+      { storage: new MemoryStorage() } as never,
+      {} as never,
+    );
+    const env = {
+      AWS_QUALIFICATION_RUNS: {
+        idFromName: (name: string) => name,
+        get: (name: string) => (name === runIdentity.runId ? fixture.run : authorityFixture().run),
+      },
+      AWS_QUALIFICATION_REGISTRY: { idFromName: () => "registry", get: () => registry },
+    } as never;
+    const binding = new AWSQualificationController(env, controller);
+    const wrongBinding = new AWSQualificationController(env, { deploymentHash: "e".repeat(64) });
+    const controllerToken = "f".repeat(64);
+    const rpc = async (
+      route: string,
+      input: Record<string, unknown>,
+      authority = binding,
+      token = controllerToken,
+    ) => {
+      const response = await controllerWorker.fetch(
+        new Request(`https://controller.example.workers.dev/${route}`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}` },
+          body: JSON.stringify(input),
+        }),
+        { CONTROLLER_TOKEN: controllerToken, AUTHORITY: authority },
+      );
+      if (!response.ok) throw new Error(`controller ${response.status}`);
+      return await response.json();
+    };
+    const preflightToken = "c".repeat(64);
+    const preflight = async () => {
+      const edgeRequest = new Request("https://controller.example.workers.dev/executor", {
+        method: "POST",
+        headers: { authorization: `Bearer ${preflightToken}`, "cf-connecting-ip": "203.0.113.7" },
+        body: JSON.stringify({ runId: runIdentity.runId }),
+      });
+      Object.defineProperty(edgeRequest, "cf", { value: { colo: "TEST" } });
+      return await controllerWorker.fetch(edgeRequest, { AUTHORITY: binding });
+    };
+    await binding.enroll(runIdentity);
+    await rpc("prepare-executor", {
+      runId: runIdentity.runId,
+      tokenDigest: createHash("sha256").update(preflightToken).digest("hex"),
+    });
+    expect((await preflight()).status).toBe(200);
+    const receipt = await rpc("prepare-network", { runId: runIdentity.runId });
+    const effects: string[] = [];
+    let revokeInput: Record<string, unknown> | undefined;
+    let ruleAtRevoke: string | undefined;
+    let rules: Array<Record<string, unknown>> = [];
+    const call = async (_service: string, operation: string, input: Record<string, unknown>) => {
+      effects.push(operation);
+      if (operation === "get-caller-identity") return { Account: "123456789012" };
+      if (operation === "describe-security-group-rules")
+        return { SecurityGroupRules: structuredClone(rules) };
+      if (operation === "authorize-security-group-ingress") {
+        const specs = input["TagSpecifications"] as Array<{ Tags: unknown }>;
+        rules = [
+          {
+            SecurityGroupRuleId: "sgr-1234",
+            GroupId: input["GroupId"],
+            IsEgress: false,
+            IpProtocol: "tcp",
+            FromPort: 22,
+            ToPort: 22,
+            CidrIpv4: "203.0.113.7/32",
+            Tags: specs[0]!.Tags,
+          },
+        ];
+        return { SecurityGroupRules: structuredClone(rules) };
+      }
+      if (operation === "revoke-security-group-ingress") {
+        revokeInput = input;
+        ruleAtRevoke = (await fixture.run.networkStatus(controller)).ruleId;
+        rules = [];
+        return { Return: true, RevokedSecurityGroupRules: [{ SecurityGroupRuleId: "sgr-1234" }] };
+      }
+      throw new Error("unexpected AWS call");
+    };
+    const dispatch = () =>
+      rpc("dispatch-network", {
+        runId: runIdentity.runId,
+        attemptId: receipt.attemptId,
+      });
+    const confirm = (ruleId: string) =>
+      rpc("confirm-network", {
+        runId: runIdentity.runId,
+        attemptId: receipt.attemptId,
+        ruleId,
+      });
+    const cleanup = {
+      remove: true,
+      call,
+      confirm,
+      sleep: async () => {},
+      confirmRevocation: (ruleId: string) =>
+        rpc("confirm-network-revocation", {
+          runId: runIdentity.runId,
+          attemptId: receipt.attemptId,
+          ruleId,
+        }),
+    };
+    await expect(
+      rpc("dispatch-network", { runId: runIdentity.runId }, binding, "wrong"),
+    ).rejects.toThrow("403");
+    await expect(
+      rpc("dispatch-network", { runId: runIdentity.runId }, wrongBinding),
+    ).rejects.toThrow("409");
+    await expect(rpc("dispatch-network", { runId: "image-qualification-43-1" })).rejects.toThrow(
+      "409",
+    );
+    expect(effects).toEqual([]);
+    await expect(
+      rpc("dispatch-network", { runId: runIdentity.runId, attemptId: "0".repeat(64) }),
+    ).rejects.toThrow("409");
+    expect(effects).toEqual([]);
+    await qualificationNetwork(receipt, { call, dispatch, confirm, sleep: async () => {} });
+    expect(effects.filter((action) => action === "authorize-security-group-ingress")).toHaveLength(
+      1,
+    );
+    await rpc("arm-execution", { runId: runIdentity.runId });
+    expect(await (await preflight()).json()).toEqual({ armed: true });
+    expect((await preflight()).status).toBe(409);
+    await rpc("begin-finalization", { runId: runIdentity.runId });
+    await expect(
+      qualificationNetwork(receipt, { call, dispatch, confirm, sleep: async () => {} }),
+    ).rejects.toThrow("no recorded dispatch");
+    expect(effects.filter((action) => action === "authorize-security-group-ingress")).toHaveLength(
+      1,
+    );
+    await vi.advanceTimersByTimeAsync(60_001);
+    const pending = await rpc("network", { runId: runIdentity.runId });
+    await expect(
+      qualificationNetwork(
+        { ...pending, ruleId: undefined },
+        {
+          ...cleanup,
+          confirm: (ruleId: string) =>
+            rpc("confirm-network", {
+              runId: runIdentity.runId,
+              attemptId: "0".repeat(64),
+              ruleId,
+            }),
+        },
+      ),
+    ).rejects.toThrow("409");
+    expect(effects).not.toContain("revoke-security-group-ingress");
+    await qualificationNetwork(pending, cleanup);
+    expect(revokeInput).toEqual({ GroupId: "sg-12345678", SecurityGroupRuleIds: ["sgr-1234"] });
+    expect(ruleAtRevoke).toBe("sgr-1234");
+    await rpc("clear-network", { runId: runIdentity.runId, attemptId: pending.attemptId });
+    expect((await fixture.run.networkStatus(controller)).clearedAt).toBeTruthy();
+    expect(effects.filter((action) => action === "revoke-security-group-ingress")).toHaveLength(1);
+  });
+
   it("has no public route, preview URL, workers.dev URL, or cron", () => {
     expect(authorityConfig).toContain('"workers_dev": false');
     expect(authorityConfig).toContain('"preview_urls": false');
@@ -155,7 +456,7 @@ describe("AWS qualification authority deployment", () => {
 
   it("fences an admitted candidate before signer dispatch when finalization wins the run hop", async () => {
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     const candidateEntered = Promise.withResolvers<void>();
     const releaseCandidate = Promise.withResolvers<void>();
     const cleanupEntered = Promise.withResolvers<void>();
@@ -284,12 +585,112 @@ describe("AWS qualification authority deployment", () => {
 });
 
 describe("AWS qualification authority", () => {
+  it("stamps the protected attempt on every resource type and rejects candidate tag overrides", async () => {
+    const fixture = authorityFixture();
+    await expect(
+      fixture.run.enroll(controller, { ...identity, runId: "qualification-without-attempt" }),
+    ).rejects.toThrow("must end with its attempt");
+    await enrollForCandidate(fixture, identity);
+    const spoof = {
+      "TagSpecification.1.Tag.1.Key": "crabbox_qualification_attempt",
+      "TagSpecification.1.Tag.1.Value": "999",
+    };
+    await fixture.run.execute(
+      identity,
+      request(
+        "ImportKeyPair",
+        {
+          KeyName: "crabbox-cbx-abcdef123456",
+          PublicKeyMaterial: btoa("ssh-ed25519 AAAAqualification"),
+          "TagSpecification.1.ResourceType": "key-pair",
+          ...spoof,
+        },
+        "ec2",
+      ),
+    );
+    await fixture.run.execute(
+      identity,
+      request(
+        "RunInstances",
+        {
+          ...runInstancesParams(),
+          "TagSpecification.1.ResourceType": "instance",
+          ...spoof,
+        },
+        "ec2",
+      ),
+    );
+    await fixture.run.execute(
+      identity,
+      request(
+        "CreateImage",
+        {
+          InstanceId: "i-owned",
+          Name: "qualification-image",
+          NoReboot: "true",
+          "TagSpecification.1.ResourceType": "image",
+          ...spoof,
+        },
+        "ec2",
+      ),
+    );
+    await fixture.run.execute(
+      identity,
+      request(
+        "CreateTags",
+        {
+          "ResourceId.1": "i-owned",
+          "Tag.1.Key": "crabbox_qualification_attempt",
+          "Tag.1.Value": "999",
+        },
+        "ec2",
+      ),
+    );
+    const types: string[] = [];
+    for (const call of fixture.signer.calls) {
+      for (const [key, type] of Object.entries(call.parameters)) {
+        if (!/^TagSpecification\.[12]\.ResourceType$/.test(key)) continue;
+        types.push(String(type));
+        const prefix = key.replace("ResourceType", "Tag.");
+        const attemptKey = Object.keys(call.parameters).find(
+          (name) =>
+            name.startsWith(prefix) &&
+            name.endsWith(".Key") &&
+            call.parameters[name] === "crabbox_qualification_attempt",
+        );
+        expect(attemptKey).toBeDefined();
+        expect(call.parameters[attemptKey!.replace(/Key$/, "Value")]).toBe("1");
+      }
+    }
+    expect(types.toSorted()).toEqual(["image", "instance", "key-pair", "snapshot", "volume"]);
+    const tagged = fixture.signer.calls.find((call) => call.action === "CreateTags")!;
+    const attemptKey = Object.keys(tagged.parameters).find(
+      (name) => tagged.parameters[name] === "crabbox_qualification_attempt",
+    )!;
+    expect(tagged.parameters[attemptKey.replace(/Key$/, "Value")]).toBe("1");
+    const capture = process.env.QUALIFICATION_POLICY_FIXTURE_DIR;
+    if (capture) {
+      mkdirSync(capture, { recursive: true });
+      writeFileSync(
+        path.join(capture, "authority-requests.json"),
+        JSON.stringify(
+          {
+            identity,
+            requests: fixture.signer.calls,
+          },
+          null,
+          2,
+        ),
+      );
+    }
+  });
+
   it("rejects cross-run identity, policy drift, FSR, and foreign resources", async () => {
     const fixture = authorityFixture();
     await expect(fixture.run.enroll({ deploymentHash: "e".repeat(64) }, identity)).rejects.toThrow(
       "not bound",
     );
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
 
     await expect(
       fixture.run.execute(
@@ -314,7 +715,7 @@ describe("AWS qualification authority", () => {
       authorityFixture().run.enroll(controller, { ...identity, candidateWorker: "bad/worker" }),
     ).rejects.toThrow("candidate Worker is malformed");
     const authorityDrift = authorityFixture();
-    await authorityDrift.run.enroll(controller, identity);
+    await enrollForCandidate(authorityDrift, identity);
     authorityDrift.env.CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA = "c".repeat(40);
     await expect(
       authorityDrift.run.execute(identity, request("GetCallerIdentity")),
@@ -324,7 +725,7 @@ describe("AWS qualification authority", () => {
   it("attests persisted operation and finalization evidence without sensitive values", async () => {
     useImmediateTimeouts();
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     const denied = request("TerminateInstances", { "InstanceId.1": "i-sensitive-foreign" }, "ec2");
     await expect(fixture.run.execute(identity, denied)).rejects.toThrow("outside the run ledger");
     const smuggledAction = request("https://private.example.invalid", {}, "ec2");
@@ -413,7 +814,7 @@ describe("AWS qualification authority", () => {
   it("rings saturated cleanup evidence without blocking teardown", async () => {
     useImmediateTimeouts();
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await importKey(fixture);
     const counts = { images: 0, instances: 0, keyPairs: 1, snapshots: 0, volumes: 0 };
     const startedAt = new Date().toISOString();
@@ -479,7 +880,7 @@ describe("AWS qualification authority", () => {
   it("keeps candidate dispatch fenced after a failed finalization", async () => {
     useImmediateTimeouts();
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     fixture.signer.accountId = "999999999999";
 
     await expect(fixture.run.finalize(controller)).rejects.toThrow("wrong account");
@@ -501,7 +902,7 @@ describe("AWS qualification authority", () => {
 
   it("bounds persisted operation evidence and keeps retries idempotent", async () => {
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     const read = request("GetCallerIdentity");
     await fixture.run.execute(identity, read);
     await fixture.run.execute(identity, read);
@@ -526,7 +927,7 @@ describe("AWS qualification authority", () => {
 
   it("accepts the real EC2SpotClient key contract and owns only the verified physical key", async () => {
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     const client = new EC2SpotClient(
       {
         CRABBOX_AWS_QUALIFICATION_TRANSPORT: {
@@ -557,7 +958,7 @@ describe("AWS qualification authority", () => {
 
   it("serializes concurrent launches and enforces three confirmed sequential launches", async () => {
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await importKey(fixture);
 
     const outcomes = await Promise.allSettled([
@@ -584,7 +985,7 @@ describe("AWS qualification authority", () => {
       return 0;
     }) as typeof setTimeout);
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     const env = {
       CRABBOX_AWS_QUALIFICATION_TRANSPORT: {
         execute: (value: AWSQualificationRequest) => fixture.run.execute(identity, value),
@@ -675,7 +1076,7 @@ describe("AWS qualification authority", () => {
 
   it("reconciles an ambiguous launch with a run-and-op scoped client token", async () => {
     const fixture = authorityFixture({ failOnce: "RunInstances" });
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await importKey(fixture);
     const launch = request("RunInstances", runInstancesParams(), "ec2");
 
@@ -696,7 +1097,7 @@ describe("AWS qualification authority", () => {
     vi.setSystemTime(now);
     const expiring = { ...identity, expiresAt: new Date(now.getTime() + 1_000).toISOString() };
     const fixture = authorityFixture({ failOnce: "RunInstances" });
-    await fixture.run.enroll(controller, expiring);
+    await enrollForCandidate(fixture, expiring);
     await fixture.run.execute(
       expiring,
       request(
@@ -736,7 +1137,7 @@ describe("AWS qualification authority", () => {
     vi.setSystemTime(now);
     const expiring = { ...identity, expiresAt: new Date(now.getTime() + 1_000).toISOString() };
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, expiring);
+    await enrollForCandidate(fixture, expiring);
     await importKey(fixture, expiring);
     fixture.signer.advanceNextIdentityByMs = 2_000;
 
@@ -762,7 +1163,7 @@ describe("AWS qualification authority", () => {
   it("does not recover a prepared mutation that never reached the signer", async () => {
     useImmediateTimeouts();
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await importKey(fixture);
     const prepared = request(
       "CreateTags",
@@ -792,7 +1193,7 @@ describe("AWS qualification authority", () => {
     vi.setSystemTime(now);
     const expiring = { ...identity, expiresAt: new Date(now.getTime() + 1_000).toISOString() };
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, expiring);
+    await enrollForCandidate(fixture, expiring);
     await importKey(fixture, expiring);
     const dispatched = request(
       "CreateTags",
@@ -824,7 +1225,7 @@ describe("AWS qualification authority", () => {
     vi.setSystemTime(now);
     const expiring = { ...identity, expiresAt: new Date(now.getTime() + 1_000).toISOString() };
     const fixture = authorityFixture({ loseAfterEffect: "RunInstances" });
-    await fixture.run.enroll(controller, expiring);
+    await enrollForCandidate(fixture, expiring);
     await fixture.run.execute(
       expiring,
       request(
@@ -855,7 +1256,7 @@ describe("AWS qualification authority", () => {
 
   it("captures the CreateImage child snapshot and permits only one active checkpoint set", async () => {
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await importKey(fixture);
     await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
     const create = request(
@@ -877,7 +1278,7 @@ describe("AWS qualification authority", () => {
 
   it("keeps bounded deletion tombstones for provider verification and retry", async () => {
     const fixture = authorityFixture({ deleteNotFound: "DeregisterImage" });
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await importKey(fixture);
     await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
     await fixture.run.execute(
@@ -949,7 +1350,7 @@ describe("AWS qualification authority", () => {
 
   it("allows only the fixed base AMI or an active run-derived AMI", async () => {
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await importKey(fixture);
     await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
     await fixture.run.execute(
@@ -997,7 +1398,7 @@ describe("AWS qualification authority", () => {
       delayedKeyVisibility: 2,
       loseAfterEffect: "ImportKeyPair",
     });
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     const keyRequest = request(
       "ImportKeyPair",
       {
@@ -1020,7 +1421,7 @@ describe("AWS qualification authority", () => {
       delayedImageVisibility: 3,
       http500AfterEffect: "CreateImage",
     });
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await importKey(fixture);
     await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
     const create = request(
@@ -1038,7 +1439,7 @@ describe("AWS qualification authority", () => {
   it("retires a no-effect ImportKeyPair intent after authoritative absence", async () => {
     useImmediateTimeouts();
     const fixture = authorityFixture({ failOnce: "ImportKeyPair" });
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await expect(importKey(fixture)).rejects.toThrow("lost response");
 
     await expect(fixture.run.finalize(controller)).resolves.toBeDefined();
@@ -1049,7 +1450,7 @@ describe("AWS qualification authority", () => {
   it("retires a no-effect CreateImage intent after authoritative cleanup", async () => {
     useImmediateTimeouts();
     const fixture = authorityFixture({ failOnce: "CreateImage" });
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await importKey(fixture);
     await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
     await expect(
@@ -1074,7 +1475,7 @@ describe("AWS qualification authority", () => {
       delayedImageVisibility: 8,
       loseAfterEffect: "CreateImage",
     });
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await importKey(fixture);
     await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
     await expect(
@@ -1100,7 +1501,7 @@ describe("AWS qualification authority", () => {
       delayedKeyVisibility: 8,
       loseAfterEffect: "ImportKeyPair",
     });
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await expect(importKey(fixture)).rejects.toThrow("lost response");
 
     await expect(fixture.run.finalize(controller)).resolves.toBeDefined();
@@ -1114,7 +1515,7 @@ describe("AWS qualification authority", () => {
       deleteNotFound: "DeleteSnapshot",
       loseAfterEffect: "DeleteSnapshot",
     });
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await importKey(fixture);
     await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
     await fixture.run.execute(
@@ -1140,7 +1541,7 @@ describe("AWS qualification authority", () => {
 
   it("revalidates the expected STS account before every mutation", async () => {
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await importKey(fixture);
     fixture.signer.accountId = "999999999999";
 
@@ -1153,7 +1554,7 @@ describe("AWS qualification authority", () => {
   it("revalidates the expected STS account before finalization and reconciliation", async () => {
     useImmediateTimeouts();
     const finalizeFixture = authorityFixture();
-    await finalizeFixture.run.enroll(controller, identity);
+    await enrollForCandidate(finalizeFixture, identity);
     await importKey(finalizeFixture);
     finalizeFixture.signer.accountId = "999999999999";
     await expect(finalizeFixture.run.finalize(controller)).rejects.toThrow("wrong account");
@@ -1162,7 +1563,7 @@ describe("AWS qualification authority", () => {
     ).toHaveLength(0);
 
     const reconcileFixture = authorityFixture({ loseAfterEffect: "CreateImage" });
-    await reconcileFixture.run.enroll(controller, identity);
+    await enrollForCandidate(reconcileFixture, identity);
     await importKey(reconcileFixture);
     await reconcileFixture.run.execute(
       identity,
@@ -1183,7 +1584,7 @@ describe("AWS qualification authority", () => {
 
   it("retains active instance ownership until Describe confirms termination", async () => {
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await importKey(fixture);
     await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
     await fixture.run.execute(
@@ -1213,7 +1614,7 @@ describe("AWS qualification authority", () => {
   it("retires an acknowledged missing instance before the next public launch", async () => {
     useImmediateTimeouts();
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await importKey(fixture);
     await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
     fixture.signer.instanceDescribeNotFound = true;
@@ -1253,7 +1654,7 @@ describe("AWS qualification authority", () => {
 
   it("confirms mixed DescribeInstances absence one instance at a time", async () => {
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await importKey(fixture);
     await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
     await fixture.run.execute(
@@ -1301,7 +1702,7 @@ describe("AWS qualification authority", () => {
       loseAfterEffect: "TerminateInstances",
       terminationDescribeNotFound: true,
     });
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await importKey(fixture);
     await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
 
@@ -1336,7 +1737,7 @@ describe("AWS qualification authority", () => {
   it("never adopts or deletes a duplicate foreign physical key", async () => {
     useImmediateTimeouts();
     const fixture = authorityFixture({ duplicateForeignKey: true });
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     const result = await fixture.run.execute(
       identity,
       request(
@@ -1361,7 +1762,7 @@ describe("AWS qualification authority", () => {
     vi.setSystemTime(now);
     const expiring = { ...identity, expiresAt: new Date(now.getTime() + 1_000).toISOString() };
     const fixture = authorityFixture({ unknownTaggedInstance: true, unknownVisibilityDelay: 2 });
-    await fixture.run.enroll(controller, expiring);
+    await enrollForCandidate(fixture, expiring);
     vi.setSystemTime(new Date(now.getTime() + 2_000));
 
     await expect(fixture.run.execute(expiring, request("GetCallerIdentity"))).rejects.toThrow(
@@ -1378,14 +1779,14 @@ describe("AWS qualification authority", () => {
   it("requires one parsed security group from a successful response", async () => {
     useImmediateTimeouts();
     const errorFixture = authorityFixture({ securityGroupErrorWithId: true });
-    await errorFixture.run.enroll(controller, identity);
+    await enrollForCandidate(errorFixture, identity);
 
     await expect(errorFixture.run.finalize(controller)).rejects.toThrow(
       "DescribeSecurityGroups verification http 403",
     );
 
     const duplicateFixture = authorityFixture({ duplicateSecurityGroup: true });
-    await duplicateFixture.run.enroll(controller, identity);
+    await enrollForCandidate(duplicateFixture, identity);
     await expect(duplicateFixture.run.finalize(controller)).rejects.toThrow(
       "preprovisioned security group is missing",
     );
@@ -1393,7 +1794,7 @@ describe("AWS qualification authority", () => {
 
   it("rejects oversized and privileged candidate payloads before AWS", async () => {
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     await expect(
       fixture.run.execute(identity, request("GetCallerIdentity", { value: "x".repeat(70 * 1024) })),
     ).rejects.toThrow("64 KiB");
@@ -1412,7 +1813,7 @@ describe("AWS qualification authority", () => {
 
   it("bounds the complete envelope and rejects unknown, cyclic, and nested input", async () => {
     const fixture = authorityFixture();
-    await fixture.run.enroll(controller, identity);
+    await enrollForCandidate(fixture, identity);
     const cyclic: Record<string, unknown> = {};
     cyclic["self"] = cyclic;
     await expect(
@@ -1488,6 +1889,20 @@ function authorityFixture(
   };
   const run = new AWSQualificationRun({ storage } as never, env as never, signer);
   return { env, run, signer, storage };
+}
+
+async function enrollForCandidate(
+  fixture: ReturnType<typeof authorityFixture>,
+  runIdentity: AWSQualificationRunIdentity,
+): Promise<void> {
+  await fixture.run.enroll(controller, runIdentity);
+  // Signer lifecycle tests start after protected admission. The real admission/cleanup
+  // state machine is exercised above; this fixture deliberately owns no network rule.
+  const state = await fixture.storage.get<Record<string, unknown>>("run");
+  await fixture.storage.put("run", {
+    ...state,
+    executor: { tokenDigest: "c".repeat(64), armedAt: new Date().toISOString() },
+  });
 }
 
 async function importKey(

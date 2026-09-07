@@ -1,4 +1,5 @@
 export const awsQualificationMaxRunMs = 120 * 60 * 1000;
+export const awsQualificationCleanupGraceMs = 30 * 60 * 1000;
 
 export const awsQualificationInstanceTypes = ["t3.small", "t3a.small"] as const;
 
@@ -17,6 +18,26 @@ export interface AWSQualificationRunIdentity {
 
 export interface AWSQualificationControllerProps {
   deploymentHash: string;
+}
+
+// This receipt is controller-only. Public attestations expose digests, never network IDs.
+export interface AWSQualificationNetwork {
+  runId: string;
+  attempt: string;
+  owner: string;
+  deploymentHash: string;
+  candidateSha: string;
+  expiresAt: string;
+  cleanupNotAfter: string;
+  accountId: string;
+  region: string;
+  securityGroupId: string;
+  ipv4?: string;
+  attemptId?: string;
+  dispatchedUntil?: string;
+  ruleId?: string;
+  revokedAt?: string;
+  clearedAt?: string;
 }
 
 export interface AWSQualificationRequest {
@@ -134,6 +155,13 @@ export interface AWSQualificationAttestation {
   finalizingAt?: string;
   finalized: boolean;
   finalizedAt?: string;
+  executionArmedAt?: string;
+  network?: {
+    registered: boolean;
+    intentDigest?: string;
+    ruleDigest?: string;
+    clearedAt?: string;
+  };
   operations: AWSQualificationOperationEvidence[];
   finalReceipt?: AWSQualificationFinalReceipt;
 }

@@ -90,7 +90,10 @@ candidate-image, and promoted-image smoke phases while bounding compute to
 at most 120 minutes of aggregate instance runtime.
 Each launch has an encrypted
 `gp3` root volume, no instance profile, IMDSv2 required, and authority-injected
-owner/run/SHA/expiry/operation tags.
+owner/run/attempt/SHA/expiry/operation tags. The protected workflow constructs
+`image-qualification-<workflow-run-id>-<attempt>`; the signer derives
+`crabbox_qualification_attempt` from the positive decimal attempt suffix, never
+from candidate request tags. Enrollment rejects a run ID without that suffix.
 
 The run may own one physical key pair and one active AMI with at most one child
 snapshot. Candidate traffic is capped at 64 operations, eight unresolved
@@ -100,10 +103,94 @@ before normalization, and requires a flat map of at most 256 string parameters.
 Responses are also capped at 64 KiB. Cleanup and inventory calls do not consume
 candidate capacity.
 
-The preprovisioned security group is read-only to qualification runs. Its ingress
-must already admit the trusted smoke executor. The authority neither creates nor
-edits security groups, so final verification proves that the configured group
-still exists rather than claiming that it was ephemeral.
+The preprovisioned security group is read-only to the candidate and authority
+signer. A separate protected network owner admits one TCP port 22 IPv4 `/32` for
+the actual executor, then removes that exact run-tagged rule. Neither candidate
+nor signer receives security-group write permissions.
+
+### Executor admission and network recovery
+
+After deployment, `execute` and protected `arm` start concurrently. On the same
+executor VM that will run the candidate, trusted preflight code registers through
+the controller before downloading the candidate artifact or invoking its Worker.
+The controller uses only Cloudflare's observed `CF-Connecting-IP`, rejects Worker
+subrequests and address override paths, and accepts no caller-selected CIDR,
+account, Region, or security group. Missing edge metadata fails closed.
+
+A distinct random run-bound preflight capability permits one immutable address
+registration and bounded readiness polling. Its digest, registration, network
+intent, rule receipt, and execution-arm state live in the existing run Durable
+Object. The successful readiness response consumes the capability durably before
+candidate bytes run; a lost response fails closed. No privileged OIDC permission,
+AWS session, Cloudflare token, or reusable controller capability enters `execute`.
+
+The protected arm job reads the fixed policy from the controller, verifies the
+AWS account, persists the network intent and dispatch fence, then authorizes only
+the observed `/32`. The group must contain no foreign ingress. AWS rule tags bind
+the run, numeric workflow attempt, owner, candidate SHA, expiry, and network
+operation digest (`crabbox_qualification_network`). Exact readback precedes
+`armExecution`; the candidate transport rejects requests before this durable
+gate. A lost authorization response is reconciled by those tags, never retried
+blindly and never recovered by adopting a foreign duplicate.
+The protected owner persists an exact validated rule receipt from a successful
+authorization response or owned inventory before any revocation. A receipt
+persistence failure prevents deletion.
+
+Finalization fences execution first. Relay, compute, network, and candidate
+cleanup each receive an independent attempt. The network owner waits out bounded
+in-flight admission, reconciles run-owned rules, revokes exact rule IDs, and
+verifies absence before recording completion. A changed or foreign rule is not
+deleted. Empty inventory reads never resolve a dispatched authorization, even
+after every bounded poll and the dispatch deadline have elapsed. Only an intent
+that was never dispatched, or a recorded owned rule with a validated AWS
+revocation response, durable revocation acknowledgment, and observed absence,
+can be cleared. An ambiguous revocation response remains pending; a generic
+not-found response is not cleanup proof. A later reaper can recover a rule when
+it becomes visible, or resume from an already durable revocation acknowledgment.
+Compute cleanup may complete while network recovery remains pending;
+overall finalization and registry retirement wait for both. The controller is
+retained on incomplete teardown. The authority alarm fences and cleans compute;
+only the protected finalizer/reaper owns network writes.
+
+### Hosted network credentials
+
+The private infrastructure owner must establish the sandbox account, fixed group,
+network role, permissions boundary, state backend, and recovery custody before
+cloud execution. Source changes do not provision these resources or credentials.
+The network role needs only `sts:GetCallerIdentity`,
+`ec2:DescribeSecurityGroupRules`, `ec2:AuthorizeSecurityGroupIngress`,
+`ec2:RevokeSecurityGroupIngress`, and the tag-on-create `ec2:CreateTags` permission.
+Its IAM policies must restrict writes to the fixed sandbox group, approved Region,
+and qualification request/resource tags. Do not add these permissions to the
+candidate authority role.
+
+Only protected `arm`, `finalize`, and reaper steps receive the environment secrets
+`CRABBOX_IMAGE_QUALIFICATION_NETWORK_ACCESS_KEY_ID`,
+`CRABBOX_IMAGE_QUALIFICATION_NETWORK_SECRET_ACCESS_KEY`,
+`CRABBOX_IMAGE_QUALIFICATION_NETWORK_SESSION_TOKEN`, and
+`CRABBOX_IMAGE_QUALIFICATION_NETWORK_EXPIRES_AT`. These must be one short-lived STS
+session owned by the approved network principal, with its real ISO-8601 expiration;
+never IAM-user keys, an SSO cache, or candidate-controlled values. Admission
+requires validity through the authority's `cleanupNotAfter`: run expiry plus
+30 minutes. The reaper runs every ten minutes with a twenty-minute job bound;
+both fit this explicit cleanup window. A three-hour network session leaves
+thirty minutes for provisioning before the maximum two-hour run. Scheduling
+delays or approval gates must not be treated as a guarantee of cleanup.
+The native AWS CLI uses only those environment credentials, with profile files,
+metadata credentials, retries, and credential logging disabled.
+The authority returns its persisted absolute ingress-dispatch deadline. Before
+authorization, the helper requires the entire 25-second native-call budget to
+fit inside both that fence and the run expiry. A delayed acknowledgement after
+finalization cannot start a new write. This deadline bounds dispatch, not AWS
+visibility, and cannot turn an unresolved write into verified absence.
+
+The provisioning owner must verify the unattended reaper can obtain this session,
+refresh it before expiry if recovery remains incomplete, and remove the temporary
+secret material after confirmed teardown. Expired or missing credentials leave
+the durable recovery record intact and fail visibly; compute cleanup still runs.
+A successful local SSO login is not proof of this hosted credential delivery.
+Cloud qualification remains blocked until this custody and recovery route is
+established and verified separately.
 
 Fast Snapshot Restore is rejected by the Worker. The AWS permissions boundary or
 SCP must also explicitly deny:
@@ -136,7 +223,8 @@ ec2:TerminateInstances
 
 Apply `aws:RequestedRegion` to all regional allows. Create and tag allows must
 require the `crabbox_qualification_run`, `crabbox_qualification_owner`,
-`crabbox_qualification_sha`, and `crabbox_qualification_expiry` request tags.
+`crabbox_qualification_attempt`, `crabbox_qualification_sha`, and
+`crabbox_qualification_expiry` request tags.
 Mutation of existing resources must require the same run resource tag. Restrict
 `RunInstances` to the configured base AMI ARN or an AMI carrying the complete
 authority-injected qualification tag set, plus the configured subnet and
@@ -162,7 +250,7 @@ identity:
   "binding": "CRABBOX_AWS_QUALIFICATION_TRANSPORT",
   "service": "crabbox-aws-qualification-authority",
   "props": {
-    "runId": "image-qualification-<run>",
+    "runId": "image-qualification-<run>-<attempt>",
     "owner": "<reviewed-owner>",
     "candidateSha": "<40-hex-same-repo-sha>",
     "candidateWorker": "<isolated-candidate-worker-name>",

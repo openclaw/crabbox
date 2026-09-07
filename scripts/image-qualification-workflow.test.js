@@ -81,10 +81,7 @@ test("workflow isolates candidate execution from protected credentials", () => {
   assert.match(workflow, /deploy-enroll:[\s\S]*needs: \[authorize, build-candidate, admit\]/);
   assert.match(workflow, /arm:[\s\S]*environment: image-qualification/);
   assert.match(workflow, /image-qualification-control\.mjs arm/);
-  assert.match(
-    workflow,
-    /execute:[\s\S]*needs: \[authorize, build-candidate, deploy-enroll, arm\]/,
-  );
+  assert.match(workflow, /execute:[\s\S]*needs: \[authorize, build-candidate, deploy-enroll\]/);
   const executeJob = workflow.slice(
     workflow.indexOf("  execute:"),
     workflow.indexOf("  finalize:"),
@@ -95,6 +92,11 @@ test("workflow isolates candidate execution from protected credentials", () => {
   );
   assert.match(executeJob, /QUALIFICATION_RELAY_URL/);
   assert.match(executeJob, /QUALIFICATION_EXECUTOR_TOKEN/);
+  assert.doesNotMatch(executeJob, /environment:|secrets\.|id-token:/);
+  assert.ok(
+    executeJob.indexOf("executor-preflight") < executeJob.indexOf("Download exact candidate"),
+  );
+  assert.match(executeJob, /QUALIFICATION_PREFLIGHT_TOKEN/);
   assert.doesNotMatch(executeJob, /QUALIFICATION_ADMIN_TOKEN|QUALIFICATION_SHARED_TOKEN/);
   assert.doesNotMatch(executeJob, /QUALIFICATION_EXPECTED_CANDIDATE_VERSION/);
   const protectedJobs = workflow.slice(workflow.indexOf("  deploy-enroll:"));
@@ -144,6 +146,7 @@ test("all workflow actions use immutable repository-standard pins", () => {
 test("reaper is protected, serialized, and artifact-independent", () => {
   assert.match(reaper, /workflow_run:/);
   assert.match(reaper, /schedule:/);
+  assert.match(reaper, /cron: "\*\/10 \* \* \* \*"/);
   assert.match(reaper, /environment: image-qualification/);
   assert.match(reaper, /group: image-qualification/);
   assert.doesNotMatch(reaper, /download-artifact|needs\./);
@@ -179,7 +182,7 @@ test("control tool fixes the reviewed policy and recovery boundary", () => {
   );
   assert.match(
     control,
-    /controllerCall\(controllerURL, token, "begin-finalization"[\s\S]*await deleteRelay\(cf, relayWorker\);[\s\S]*controllerCall\(controllerURL, token, "finalize"/,
+    /controllerCall\(controllerURL, token, "begin-finalization"[\s\S]*deleteRelay\(cf, relayWorker\)[\s\S]*controllerCall\(controllerURL, token, "finalize"/,
   );
   assert.match(
     control,
@@ -503,6 +506,17 @@ test("attestation gate requires FSR denial and exact sequential launch order", a
   });
   const attestation = {
     finalized: true,
+    enrolledAt: "2026-09-04T00:00:00.000Z",
+    expiresAt: "2026-09-04T01:00:00.000Z",
+    executionArmedAt: "2026-09-04T00:00:00.500Z",
+    finalizingAt: "2026-09-04T00:00:07.000Z",
+    finalizedAt: "2026-09-04T00:00:09.000Z",
+    network: {
+      registered: true,
+      intentDigest: "a".repeat(64),
+      ruleDigest: "b".repeat(64),
+      clearedAt: "2026-09-04T00:00:08.000Z",
+    },
     operations: [
       operation("DescribeImages", "2026-09-04T00:00:00.900Z"),
       operation("DescribeImages", "2026-09-04T00:00:01.200Z"),
@@ -551,6 +565,16 @@ test("attestation gate requires FSR denial and exact sequential launch order", a
     log: "supplemental log can be empty of rollback assertions",
   };
   assert.doesNotThrow(() => module.verifyQualificationEvidence(attestation, proof));
+  for (const network of [
+    undefined,
+    { ...attestation.network, registered: false },
+    { ...attestation.network, clearedAt: undefined },
+  ]) {
+    assert.throws(
+      () => module.verifyQualificationEvidence({ ...attestation, network }, proof),
+      /network cleanup/,
+    );
+  }
   assert.throws(
     () =>
       module.verifyQualificationEvidence(
