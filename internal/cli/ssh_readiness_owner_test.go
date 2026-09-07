@@ -83,6 +83,29 @@ exit "$CRABBOX_FAKE_TRANSPORT_EXIT"
 	}
 }
 
+func sshReadinessDeadlineFixture(t *testing.T, blocked string) string {
+	t.Helper()
+	dir := t.TempDir()
+	callsPath := filepath.Join(dir, "calls")
+	script := `#!/bin/sh
+for remote; do :; done
+kind=transport
+if [ "$remote" = "$CRABBOX_FAKE_READY_COMMAND" ]; then kind=readiness; fi
+printf 'private-readiness-stderr\n' >&2
+printf '%s\n' "$kind" >> "$CRABBOX_FAKE_SSH_OWNER_CALLS"
+if [ "$kind" = "$CRABBOX_FAKE_BLOCKED_PROBE" ]; then exec sleep 30; fi
+if [ "$kind" = readiness ]; then exit 1; fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_OWNER_CALLS", callsPath)
+	t.Setenv("CRABBOX_FAKE_BLOCKED_PROBE", blocked)
+	return callsPath
+}
+
 func TestWaitForSSHReadyDeadlineStopsAtActiveProbe(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell ssh fixture")
@@ -98,24 +121,7 @@ func TestWaitForSSHReadyDeadlineStopsAtActiveProbe(t *testing.T) {
 		{"WSL readiness", "wsl", "readiness", "readiness", "transport\nreadiness\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			dir := t.TempDir()
-			callsPath := filepath.Join(dir, "calls")
-			script := `#!/bin/sh
-for remote; do :; done
-kind=transport
-if [ "$remote" = "$CRABBOX_FAKE_READY_COMMAND" ]; then kind=readiness; fi
-printf '%s\n' "$kind" >> "$CRABBOX_FAKE_SSH_OWNER_CALLS"
-printf 'private-readiness-stderr\n' >&2
-if [ "$kind" = "$CRABBOX_FAKE_BLOCKED_PROBE" ]; then exec sleep 30; fi
-if [ "$kind" = readiness ]; then exit 1; fi
-exit 0
-`
-			if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-			t.Setenv("CRABBOX_FAKE_SSH_OWNER_CALLS", callsPath)
-			t.Setenv("CRABBOX_FAKE_BLOCKED_PROBE", test.blocked)
+			callsPath := sshReadinessDeadlineFixture(t, test.blocked)
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
@@ -142,13 +148,20 @@ exit 0
 				}
 				dialed <- err == nil
 			}()
-			defer fallback.Close()
+			fallbackJoined := false
+			defer func() {
+				fallback.Close()
+				if !fallbackJoined {
+					<-dialed
+				}
+			}()
 			target := SSHTarget{
 				User: "runner", Host: host, Port: port, FallbackPorts: []string{fallbackPort},
 				ReadyCheck: "fixture-ready", NoControlMaster: true,
 			}
 			readyCommand := target.ReadyCheck
 			sftpCalls := 0
+			sftpEntered := make(chan struct{})
 			switch test.route {
 			case "proxy":
 				target.SSHConfigProxy = true
@@ -159,6 +172,7 @@ exit 0
 				probeWSLSFTPSubsystem = func(ctx context.Context, _ SSHTarget, _, _ string, _ io.Writer) error {
 					sftpCalls++
 					if test.blocked == "sftp" {
+						close(sftpEntered)
 						<-ctx.Done()
 						return ctx.Err()
 					}
@@ -169,13 +183,57 @@ exit 0
 			t.Setenv("CRABBOX_FAKE_READY_COMMAND", readyCommand)
 			ctx, cancel := context.WithCancelCause(t.Context())
 			defer cancel(nil)
+			probeCtx, stopProbe := context.WithCancelCause(ctx)
 			var progress bytes.Buffer
-			err = waitForSSHReady(ctx, &target, &progress, "before sync", 250*time.Millisecond)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				start := time.Now()
+				err = waitForSSHReadyWithProbeContext(ctx, probeCtx, &target, &progress, "before sync", start, start.Add(250*time.Millisecond))
+			}()
+			defer func() {
+				stopProbe(nil)
+				<-done
+			}()
+			// Establish the active stage independently of startup latency.
+			// The wrapper's actual deadline is covered separately below.
+			poll := time.NewTicker(time.Millisecond)
+			defer poll.Stop()
+		waitForProbe:
+			for {
+				select {
+				case <-done:
+					t.Fatalf("readiness returned before the selected probe: %v", err)
+				case <-poll.C:
+					calls, readErr := os.ReadFile(callsPath)
+					if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+						t.Fatal(readErr)
+					}
+					if !strings.HasPrefix(test.wantCalls, string(calls)) {
+						t.Fatalf("unexpected SSH calls before the selected probe: %q", calls)
+					}
+					if string(calls) != test.wantCalls {
+						continue
+					}
+					if test.blocked == "sftp" {
+						select {
+						case <-sftpEntered:
+						default:
+							continue
+						}
+					}
+					break waitForProbe
+				}
+			}
+			stopProbe(context.DeadlineExceeded)
+			<-done
 			if deadlineErr := fallback.(*net.TCPListener).SetDeadline(time.Now().Add(10 * time.Millisecond)); deadlineErr != nil {
 				t.Error(deadlineErr)
 				fallback.Close()
 			}
-			if <-dialed {
+			fallbackDialed := <-dialed
+			fallbackJoined = true
+			if fallbackDialed {
 				t.Error("dialed a fallback after the active probe exhausted the deadline")
 			}
 			fallback.Close()
@@ -209,6 +267,70 @@ exit 0
 			}
 		})
 	}
+}
+
+func TestWaitForSSHReadyLocalDeadlineAtActiveProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell ssh fixture")
+	}
+	synctest.Test(t, func(t *testing.T) {
+		callsPath := sshReadinessDeadlineFixture(t, "")
+		target := SSHTarget{
+			User: "runner", Host: "ssh-readiness.example", Port: "2222", FallbackPorts: []string{"22"},
+			ReadyCheck: "fixture-ready", NoControlMaster: true, TargetOS: targetWindows, WindowsMode: windowsModeWSL2,
+		}
+		t.Setenv("CRABBOX_FAKE_READY_COMMAND", wsl2ReadinessCommand(target.ReadyCheck))
+		original := probeWSLSFTPSubsystem
+		t.Cleanup(func() { probeWSLSFTPSubsystem = original })
+		sftpCalls := 0
+		var activeCtx context.Context
+		probeWSLSFTPSubsystem = func(ctx context.Context, _ SSHTarget, _, _ string, _ io.Writer) error {
+			sftpCalls++
+			activeCtx = ctx
+			// The preceding SSH process is joined before this hook. Only the
+			// local deadline blocks here, so virtual time can advance.
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		ctx, cancel := context.WithCancelCause(t.Context())
+		defer cancel(nil)
+		var progress bytes.Buffer
+		start := time.Now()
+		err := waitForSSHReady(ctx, &target, &progress, "before sync", 250*time.Millisecond)
+		var exitErr ExitError
+		if !AsExitError(err, &exitErr) || exitErr.Code != 5 || !isBootstrapWaitError(err) {
+			t.Fatalf("readiness=%v, want retry-classified exit 5", err)
+		}
+		for _, want := range []string{
+			"timed out waiting for SSH", "probe=transport", "cause=deadline_exceeded", "authentication=unknown",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error=%q, missing %q", err, want)
+			}
+		}
+		for _, forbidden := range []string{"ssh-auth", "private-readiness-stderr", "fixture-ready", "2222:tcp"} {
+			if strings.Contains(err.Error()+progress.String(), forbidden) {
+				t.Errorf("deadline misclassification or disclosure: %q", forbidden)
+			}
+		}
+		if elapsed := time.Since(start); elapsed != 250*time.Millisecond {
+			t.Errorf("active probe consumed %s, want the 250ms local deadline", elapsed)
+		}
+		if sftpCalls != 1 || activeCtx == nil {
+			t.Fatalf("sftp=%d context=%v, want one active SFTP probe", sftpCalls, activeCtx)
+		}
+		deadline, ok := activeCtx.Deadline()
+		if !ok || deadline.Sub(start) != 250*time.Millisecond || activeCtx.Err() != context.DeadlineExceeded || context.Cause(activeCtx) != context.DeadlineExceeded {
+			t.Errorf("probe deadline=%v error=%v cause=%v, want the wrapper's elapsed local deadline", deadline, activeCtx.Err(), context.Cause(activeCtx))
+		}
+		calls, readErr := os.ReadFile(callsPath)
+		if readErr != nil || string(calls) != "transport\n" {
+			t.Errorf("SSH calls=%q error=%v, want only the initial transport", calls, readErr)
+		}
+		if target.Port != "2222" || target.preparedEndpoint != "" || ctx.Err() != nil {
+			t.Errorf("target=%+v parent=%v, want unchanged target and live parent", target, ctx.Err())
+		}
+	})
 }
 
 func TestWaitForSSHReadyLocalDeadlineDuringBackoff(t *testing.T) {

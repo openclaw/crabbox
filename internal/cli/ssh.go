@@ -291,9 +291,13 @@ func sshReadinessProfileForTarget(target SSHTarget) sshReadinessProfile {
 func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 	start := time.Now()
 	deadline := time.Now().Add(timeout)
-	profile := sshReadinessProfileForTarget(*target)
 	probeCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
+	return waitForSSHReadyWithProbeContext(ctx, probeCtx, target, stderr, phase, start, deadline)
+}
+
+func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHTarget, stderr io.Writer, phase string, start, deadline time.Time) error {
+	profile := sshReadinessProfileForTarget(*target)
 	lastPorts := ""
 	lastProbe := "transport"
 	check := func(probeErr error) error {
