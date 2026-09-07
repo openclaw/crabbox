@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -122,11 +122,7 @@ func assertE2BRedactedError(t *testing.T, err error, secret string) {
 
 func TestE2BProcessStreamRedactsReflectedCredential(t *testing.T) {
 	const secret = "envd-stream-secret"
-	t.Run("end stream error", func(t *testing.T) {
-		body := e2bTestEnvelope(2, map[string]any{"error": map[string]any{"code": "unauthorized", "message": "Bearer " + secret + " quota exceeded"}})
-		_, err := parseE2BProcessStream(bytes.NewReader(body), io.Discard, io.Discard, secret)
-		assertE2BRedactedError(t, err, secret)
-	})
+
 	t.Run("process end diagnostic", func(t *testing.T) {
 		body := e2bTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 1, "exited": false, "error": "Bearer " + secret + " quota exceeded"}}})
 		var stderr bytes.Buffer
@@ -137,48 +133,6 @@ func TestE2BProcessStreamRedactsReflectedCredential(t *testing.T) {
 			t.Fatalf("stderr=%q, want redacted useful process diagnostic", stderr.String())
 		}
 	})
-}
-
-func TestE2BProcessEndAndStreamFailurePrecedence(t *testing.T) {
-	for _, exited := range []bool{false, true} {
-		for _, ending := range []string{"clean", "rpc error", "truncated"} {
-			t.Run(fmt.Sprintf("exited=%t/%s", exited, ending), func(t *testing.T) {
-				body := e2bTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 137, "exited": exited, "error": "fixture process end"}}})
-				switch ending {
-				case "rpc error":
-					body = append(body, e2bTestEnvelope(2, map[string]any{"error": map[string]any{"code": "internal", "message": "fixture RPC failure"}})...)
-				case "truncated":
-					body = append(body, 0)
-				}
-				code, err := parseE2BProcessStream(bytes.NewReader(body), io.Discard, io.Discard)
-				if ending == "clean" {
-					if code != 137 || err != nil {
-						t.Fatalf("observed end: code=%d err=%v", code, err)
-					}
-				} else if code != 1 || err == nil {
-					t.Fatalf("stream failure lost precedence: code=%d err=%v", code, err)
-				}
-			})
-		}
-	}
-}
-
-func TestParseE2BProcessStream(t *testing.T) {
-	body := bytes.Join([][]byte{
-		e2bTestEnvelope(0, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}}),
-		e2bTestEnvelope(0, map[string]any{"event": map[string]any{"data": map[string]any{"stdout": base64.StdEncoding.EncodeToString([]byte("hello"))}}}),
-		e2bTestEnvelope(0, map[string]any{"event": map[string]any{"data": map[string]any{"stderr": base64.StdEncoding.EncodeToString([]byte("warn"))}}}),
-		e2bTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 7, "exited": true}}}),
-		e2bTestEnvelope(2, map[string]any{}),
-	}, nil)
-	var stdout, stderr bytes.Buffer
-	code, err := parseE2BProcessStream(bytes.NewReader(body), &stdout, &stderr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if code != 7 || stdout.String() != "hello" || stderr.String() != "warn" {
-		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
 }
 
 func TestE2BDefaultHTTPClientsSeparateControlAndDataPlanes(t *testing.T) {
@@ -233,7 +187,7 @@ func TestE2BControlClientBoundsStalledResponseBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	controlClient, _ := e2bHTTPClients(nil, controlTimeout)
+	controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	client := &e2bClient{apiKey: "e2b_test", apiURL: server.URL, httpClient: controlClient}
 	started := time.Now()
 	_, err := client.GetSandbox(context.Background(), "sbx_1")
@@ -254,7 +208,7 @@ func TestE2BControlClientBoundsWithheldHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	controlClient, _ := e2bHTTPClients(nil, controlTimeout)
+	controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	client := &e2bClient{apiKey: "e2b_test", apiURL: server.URL, httpClient: controlClient}
 	started := time.Now()
 	_, err := client.GetSandbox(context.Background(), "sbx_1")
@@ -281,7 +235,7 @@ func TestE2BDataPlaneStreamOutlivesControlTimeout(t *testing.T) {
 	}))
 	defer server.Close()
 
-	controlClient, _ := e2bHTTPClients(nil, controlTimeout)
+	controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	client := &e2bClient{
 		domain:     "e2b.test",
 		httpClient: controlClient,
@@ -330,7 +284,7 @@ func TestE2BDataPlaneUploadOutlivesControlTimeout(t *testing.T) {
 	defer server.Close()
 
 	payload := []byte("before-after")
-	controlClient, _ := e2bHTTPClients(nil, controlTimeout)
+	controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	client := &e2bClient{
 		domain:     "e2b.test",
 		httpClient: controlClient,
@@ -389,21 +343,6 @@ func TestValidateE2BAPIURL(t *testing.T) {
 				t.Fatalf("validateE2BAPIURL(%q) = %q, want %q", tt.raw, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestParseE2BProcessStreamRequiresEndEvent(t *testing.T) {
-	body := bytes.Join([][]byte{
-		e2bTestEnvelope(0, map[string]any{"event": map[string]any{"data": map[string]any{"stdout": base64.StdEncoding.EncodeToString([]byte("partial"))}}}),
-		e2bTestEnvelope(2, map[string]any{}),
-	}, nil)
-	var stdout bytes.Buffer
-	code, err := parseE2BProcessStream(bytes.NewReader(body), &stdout, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "without end event") {
-		t.Fatalf("code=%d err=%v, want missing end event error", code, err)
-	}
-	if stdout.String() != "partial" {
-		t.Fatalf("stdout=%q", stdout.String())
 	}
 }
 
@@ -1905,5 +1844,63 @@ func TestE2BStopRejectsMissingCanonicalIDMatchingAnotherSlug(t *testing.T) {
 	}
 	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != sandbox.SandboxID {
 		t.Fatalf("exact positive target=%v", client.deleteIDs)
+	}
+}
+
+func parseE2BProcessStream(r io.Reader, stdout, stderr io.Writer, secrets ...string) (int, error) {
+	return shared.ParseEnvdProcessStream("e2b", r, stdout, stderr, interpretE2BProcessEnd, secrets...)
+}
+
+func TestE2BProcessEndPolicy(t *testing.T) {
+	readFailure := errors.New("fixture stream read failed")
+	for _, code := range []int{0, 7, -1, 137} {
+		t.Run(fmt.Sprintf("normal/%d", code), func(t *testing.T) {
+			var diagnostic bytes.Buffer
+			got, err := interpretE2BProcessEnd(shared.EnvdProcessEnd{ExitCode: code, Exited: true, Error: "ignored normal detail"}, &diagnostic)
+			if got != code || err != nil || diagnostic.Len() != 0 {
+				t.Fatalf("code=%d err=%v diagnostic=%q", got, err, diagnostic.String())
+			}
+		})
+		for _, ending := range []string{"clean", "RPC failure", "read failure", "truncated"} {
+			t.Run(fmt.Sprintf("abnormal/%d/%s", code, ending), func(t *testing.T) {
+				body := e2bTestEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": code, "exited": false, "error": "fixture end"}}})
+				if ending == "RPC failure" {
+					body = append(body, e2bTestEnvelope(2, map[string]any{"error": map[string]any{"code": "internal", "message": "fixture RPC failure"}})...)
+				}
+				if ending == "truncated" {
+					body = append(body, 0)
+				}
+				var reader io.Reader = bytes.NewReader(body)
+				if ending == "read failure" {
+					reader = io.MultiReader(reader, iotest.ErrReader(readFailure))
+				}
+				var diagnostic bytes.Buffer
+				got, err := parseE2BProcessStream(reader, io.Discard, &diagnostic)
+				want := code
+				if ending != "clean" {
+					want = 1
+				}
+				if got != want || (err != nil) != (ending != "clean") || diagnostic.String() != "fixture end\n" {
+					t.Fatalf("code=%d err=%v diagnostic=%q", got, err, diagnostic.String())
+				}
+				if ending == "RPC failure" && !strings.Contains(err.Error(), "fixture RPC failure") {
+					t.Fatalf("did not drain RPC error: %v", err)
+				}
+				if ending == "read failure" && !errors.Is(err, readFailure) {
+					t.Fatalf("did not preserve later read error: %v", err)
+				}
+				if ending == "truncated" && !errors.Is(err, io.ErrUnexpectedEOF) {
+					t.Fatalf("did not read later frame: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestE2BProcessEndDoesNotUseStatusAsDiagnostic(t *testing.T) {
+	var diagnostic bytes.Buffer
+	code, err := interpretE2BProcessEnd(shared.EnvdProcessEnd{ExitCode: -1, Status: "fixture status"}, &diagnostic)
+	if code != -1 || err != nil || diagnostic.Len() != 0 {
+		t.Fatalf("code=%d err=%v diagnostic=%q", code, err, diagnostic.String())
 	}
 }

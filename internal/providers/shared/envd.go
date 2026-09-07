@@ -80,20 +80,22 @@ func UploadEnvdFile(ctx context.Context, upload EnvdUploadFileRequest) error {
 }
 
 type EnvdProcessRequest struct {
-	Endpoint       string
-	Command        string
-	CWD            string
-	Env            map[string]string
-	User           string
-	Timeout        time.Duration
-	Stdout         io.Writer
-	Stderr         io.Writer
-	AccessToken    string
-	HTTPClient     *http.Client
-	SetHeaders     func(*http.Request)
-	RedirectError  func(*url.URL) error
-	EncodeEnvelope func(any) ([]byte, error)
-	ParseStream    func(io.Reader, io.Writer, io.Writer, ...string) (int, error)
+	Provider      string
+	Endpoint      string
+	Command       string
+	CWD           string
+	Env           map[string]string
+	User          string
+	Timeout       time.Duration
+	Stdout        io.Writer
+	Stderr        io.Writer
+	AccessToken   string
+	HTTPClient    *http.Client
+	SetHeaders    func(*http.Request)
+	RedirectError func(*url.URL) error
+	// InterpretEnd retains the provider's completion policy. A returned error
+	// stops decoding immediately with that code; nil continues the RPC stream.
+	InterpretEnd   func(EnvdProcessEnd, io.Writer, ...string) (int, error)
 	SummarizeError func([]byte) string
 	APIError       func(int, string, string) error
 }
@@ -118,7 +120,7 @@ func StartEnvdProcess(ctx context.Context, process EnvdProcessRequest) (int, err
 		},
 		"stdin": false,
 	}
-	body, err := process.EncodeEnvelope(start)
+	body, err := encodeConnectJSONEnvelope(start)
 	if err != nil {
 		return 1, err
 	}
@@ -147,7 +149,7 @@ func StartEnvdProcess(ctx context.Context, process EnvdProcessRequest) (int, err
 		body := RedactErrorSecrets(process.SummarizeError(data), process.AccessToken)
 		return 1, process.APIError(resp.StatusCode, resp.Status, body)
 	}
-	return process.ParseStream(resp.Body, process.Stdout, process.Stderr, process.AccessToken)
+	return ParseEnvdProcessStream(process.Provider, resp.Body, process.Stdout, process.Stderr, process.InterpretEnd, process.AccessToken)
 }
 
 func durationMillisCeil(duration time.Duration) int64 {

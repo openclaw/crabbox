@@ -379,6 +379,7 @@ import type {
   LeaseProvisioningTiming,
   ProviderImage,
   ProviderMachine,
+  ProviderAccessTimingObserver,
   ProvisioningAttempt,
   ReadyPoolBorrowRequest,
   ReadyPoolBorrowHeartbeatRequest,
@@ -484,6 +485,7 @@ const azureOrphanSweepFirstAlarmKey = "azure-orphan-sweep:first-alarm";
 const providerReconciliationCandidatePrefix = "provider-reconciliation:";
 const providerReconciliationCircuitPrefix = "provider-reconciliation-circuit:";
 const awsIngressReconcileRecordKey = "aws-ingress-reconcile:pending";
+const awsIngressReconcileMinDelayMs = 1000;
 const azureDeferredCleanupPrefix = "azure-cleanup:";
 const readyPoolPrefix = "ready-pool:";
 const readyPoolDesiredPrefix = "ready-pool-desired:";
@@ -3547,12 +3549,7 @@ export class FleetCoordinator {
       released = cancellation.lease;
       await this.closeLeaseBridges(cancellation.lease.id, 1008, "lease ended");
       if ("cleanup" in cancellation && cancellation.cleanup) {
-        const cleanup = () => this.finishLeaseCleanupClaim(cancellation.cleanup!);
-        released =
-          managedLeaseProvider(cancellation.cleanup.lease) === "aws" &&
-          !cancellation.cleanup.lease.network?.awsPrivate
-            ? await this.withAWSIngressOperationLock(cleanup)
-            : await cleanup();
+        released = await this.finishLeaseCleanupClaim(cancellation.cleanup);
       }
     }
     if (!released?.provisioningResourceMayExist && !released?.cleanupStartedAt) {
@@ -4766,30 +4763,40 @@ export class FleetCoordinator {
       },
       onResourceCreated: (claim) => this.recordCreatedProviderResource(dispatched, claim),
       // Queued regional attempts must not restore access from their pre-provisioning snapshot.
-      withLeaseAccess: (target, operation) =>
-        this.withAWSIngressOperationLock(async () => {
+      withLeaseAccess: (target, operation, observe) => {
+        const ingressQueuedAt = Date.now();
+        return this.withAWSIngressOperationLock(async () => {
+          observe?.("ingress_wait", Date.now() - ingressQueuedAt);
+          const lifecycleQueuedAt = Date.now();
           const access = await this.state.runExclusive(async () => {
-            const current = await this.getLease(dispatched.id);
-            const attempt = createAttempt
-              ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
-              : undefined;
-            if (
-              !current ||
-              !sameLeaseReleaseIdentity(current, dispatched) ||
-              current.state !== "provisioning" ||
-              current.provisioningRequestStartedAt !== dispatched.provisioningRequestStartedAt ||
-              Date.parse(current.expiresAt) <= Date.now() ||
-              (createAttempt && (!attempt || !createAttemptMatchesLease(attempt, current)))
-            ) {
-              throw new CreateAttemptCanceledError();
+            const snapshotStartedAt = Date.now();
+            observe?.("lifecycle_wait", snapshotStartedAt - lifecycleQueuedAt);
+            try {
+              const current = await this.getLease(dispatched.id);
+              const attempt = createAttempt
+                ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
+                : undefined;
+              if (
+                !current ||
+                !sameLeaseReleaseIdentity(current, dispatched) ||
+                current.state !== "provisioning" ||
+                current.provisioningRequestStartedAt !== dispatched.provisioningRequestStartedAt ||
+                Date.parse(current.expiresAt) <= Date.now() ||
+                (createAttempt && (!attempt || !createAttemptMatchesLease(attempt, current)))
+              ) {
+                throw new CreateAttemptCanceledError();
+              }
+              return {
+                lease: { ...current, ...(target.region ? { region: target.region } : {}) },
+                context: providerAccessContext([], await this.providerAccessLeaseRecords()),
+              };
+            } finally {
+              observe?.("access_snapshot", Date.now() - snapshotStartedAt);
             }
-            return {
-              lease: { ...current, ...(target.region ? { region: target.region } : {}) },
-              context: providerAccessContext([], await this.providerAccessLeaseRecords()),
-            };
           });
           return operation(access.lease, access.context);
-        }),
+        });
+      },
     };
     const provisioned = await provider
       .createServerWithFallback(config, leaseID, slug, owner, provisioning)
@@ -7933,10 +7940,14 @@ export class FleetCoordinator {
         }
         const merged = applyLeaseRecordChanges(latest, snapshot.lease, refreshed);
         await this.putLease(merged);
-        if (managedProvider === "aws") {
+        if (managedProvider === "aws" && leaseHasPublishedAWSAccess(merged)) {
           await this.markAWSIngressReconcilePending(merged);
+          // This write makes ingress reconciliation due. Preserve its scheduling floor
+          // without scanning unrelated fleet state while holding the ingress fence.
+          await this.armAlarmNoLaterThan(Date.now() + awsIngressReconcileMinDelayMs);
+        } else {
+          await this.scheduleAlarm();
         }
-        await this.scheduleAlarm();
         return merged;
       });
     };
@@ -16905,59 +16916,52 @@ export class FleetCoordinator {
     });
     await Promise.all(
       claims.map(async ({ claim, lease }) => {
-        const cleanup = async () => {
-          let failure: { error: unknown; message: string } | undefined;
-          try {
-            await this.deleteLeaseServer(lease);
-          } catch (error) {
-            failure = { error, message: coordinatorErrorMessage(this.env, error) };
-          }
-          await this.state.runExclusive(async () => {
-            const current = await this.getLease(lease.id);
-            if (
-              !current ||
-              current.cleanupStartedAt !== claim ||
-              !sameLeaseCleanupClaim(current, lease) ||
-              (await provisioningOwnsLease(this.state.storage, lease.id))
-            ) {
-              return;
-            }
-            const nowDate = new Date();
-            const nowISO = nowDate.toISOString();
-            if (failure) {
-              recordLeaseCleanupFailure(current, failure.error, failure.message, nowISO);
-              await this.putLease(current);
-              console.warn(
-                `lease cleanup failed lease=${current.id} provider=${current.provider} cloud=${current.cloudID}: ${failure.message}`,
-              );
-              return;
-            }
-            current.state = leaseIsLive(current) ? "expired" : current.state;
-            current.updatedAt = nowISO;
-            current.endedAt = nowISO;
-            if (current.provisioningResourceMayExist) {
-              if (!current.failureError && current.cleanupError) {
-                current.failureError = current.cleanupError;
-              }
-            }
-            clearProvisioningRecoveryMetadata(current);
-            delete current.releaseDeletesServer;
-            clearLeaseCleanupMetadata(current);
-            delete current.providerKeyCleanupPending;
-            delete current.providerKeyCleanupID;
-            delete current.cleanupStartedAt;
-            delete current.cleanupClaimExpiresAt;
-            completeLeaseProviderCleanup(current, nowISO);
-            await this.putLease(current);
-            await this.clearWorkspaceReleaseError(current);
-            await this.markAWSIngressReconcilePending(current);
-          });
-        };
-        if (managedLeaseProvider(lease) === "aws" && !lease.network?.awsPrivate) {
-          await this.withAWSIngressOperationLock(cleanup);
-        } else {
-          await cleanup();
+        let failure: { error: unknown; message: string } | undefined;
+        try {
+          await this.deleteLeaseServer(lease);
+        } catch (error) {
+          failure = { error, message: coordinatorErrorMessage(this.env, error) };
         }
+        await this.withLeaseCleanupState(lease, async () => {
+          const current = await this.getLease(lease.id);
+          if (
+            !current ||
+            current.cleanupStartedAt !== claim ||
+            !sameLeaseCleanupClaim(current, lease) ||
+            (await provisioningOwnsLease(this.state.storage, lease.id))
+          ) {
+            return;
+          }
+          const nowDate = new Date();
+          const nowISO = nowDate.toISOString();
+          if (failure) {
+            recordLeaseCleanupFailure(current, failure.error, failure.message, nowISO);
+            await this.putLease(current);
+            console.warn(
+              `lease cleanup failed lease=${current.id} provider=${current.provider} cloud=${current.cloudID}: ${failure.message}`,
+            );
+            return;
+          }
+          current.state = leaseIsLive(current) ? "expired" : current.state;
+          current.updatedAt = nowISO;
+          current.endedAt = nowISO;
+          if (current.provisioningResourceMayExist) {
+            if (!current.failureError && current.cleanupError) {
+              current.failureError = current.cleanupError;
+            }
+          }
+          clearProvisioningRecoveryMetadata(current);
+          delete current.releaseDeletesServer;
+          clearLeaseCleanupMetadata(current);
+          delete current.providerKeyCleanupPending;
+          delete current.providerKeyCleanupID;
+          delete current.cleanupStartedAt;
+          delete current.cleanupClaimExpiresAt;
+          completeLeaseProviderCleanup(current, nowISO);
+          await this.putLease(current);
+          await this.clearWorkspaceReleaseError(current);
+          await this.markAWSIngressReconcilePending(current);
+        });
       }),
     );
   }
@@ -17126,7 +17130,9 @@ export class FleetCoordinator {
     const retryTimes = awsIngressReconcileTargets(record)
       .map((target) => Date.parse(target.retryAt))
       .filter((time) => Number.isFinite(time));
-    return retryTimes.length > 0 ? Math.max(Date.now() + 1000, Math.min(...retryTimes)) : undefined;
+    return retryTimes.length > 0
+      ? Math.max(Date.now() + awsIngressReconcileMinDelayMs, Math.min(...retryTimes))
+      : undefined;
   }
 
   private async markAWSIngressReconcilePending(anchor: LeaseRecord): Promise<void> {
@@ -19355,12 +19361,7 @@ export class FleetCoordinator {
       await this.state.runExclusive(() => this.scheduleAlarm());
       return current;
     }
-    const release = () => this.releaseResolvedLeaseOperation(current, options);
-    return managedLeaseProvider(current) === "aws" &&
-      !current.network?.awsPrivate &&
-      (current.state === "active" || Boolean(current.cloudID))
-      ? this.withAWSIngressOperationLock(release)
-      : release();
+    return this.releaseResolvedLeaseOperation(current, options);
   }
 
   private async markWorkspaceReleaseRequested(lease: LeaseRecord): Promise<void> {
@@ -19394,7 +19395,7 @@ export class FleetCoordinator {
       expectedProvider?: string;
     },
   ): Promise<LeaseRecord> {
-    const preparation = await this.state.runExclusive(async () => {
+    const prepare = async () => {
       const stored = await this.getLease(lease.id);
       if (
         stored &&
@@ -19494,7 +19495,10 @@ export class FleetCoordinator {
         claim: claimed.cleanupStartedAt,
         lease: structuredClone(claimed),
       };
-    });
+    };
+    const preparation = await (lease.state === "active" || lease.cloudID
+      ? this.withLeaseCleanupState(lease, prepare)
+      : this.state.runExclusive(prepare));
     if (preparation.blocked) {
       return preparation.lease;
     }
@@ -19509,6 +19513,15 @@ export class FleetCoordinator {
     });
   }
 
+  // Provider I/O stays outside ingress serialization; state changes still wait for
+  // active ingress writers and revalidate their cleanup claim before committing.
+  private withLeaseCleanupState<T>(lease: LeaseRecord, operation: () => Promise<T>): Promise<T> {
+    const commit = () => this.state.runExclusive(operation);
+    return managedLeaseProvider(lease) === "aws" && !lease.network?.awsPrivate
+      ? this.withAWSIngressOperationLock(commit)
+      : commit();
+  }
+
   private async finishLeaseCleanupClaim(preparation: {
     lease: LeaseRecord;
     claim: string;
@@ -19519,7 +19532,7 @@ export class FleetCoordinator {
     try {
       await this.deleteLeaseServer(preparation.lease);
     } catch (error) {
-      await this.state.runExclusive(async () => {
+      await this.withLeaseCleanupState(preparation.lease, async () => {
         const current = await this.getLease(preparation.lease.id);
         if (
           !current ||
@@ -19541,7 +19554,7 @@ export class FleetCoordinator {
       });
       throw error;
     }
-    return await this.state.runExclusive(async () => {
+    return await this.withLeaseCleanupState(preparation.lease, async () => {
       const current = await this.getLease(preparation.lease.id);
       if (
         !current ||
@@ -26764,6 +26777,7 @@ interface ProviderProvisioningContext {
   withLeaseAccess?: <T>(
     target: ProviderProvisioningTarget,
     operation: (lease: LeaseRecord, context: ProviderAccessContext) => Promise<T>,
+    observe?: ProviderAccessTimingObserver,
   ) => Promise<T>;
 }
 
@@ -28971,38 +28985,45 @@ export class AWSProvider implements CloudProvider {
                 // Only ingress writes hold the fence; image, instance and address waits do not.
                 ...(!config.awsPrivate && withLeaseAccess
                   ? {
-                      withIngress: (apply: (cidrs: string[]) => Promise<string>) =>
-                        withLeaseAccess({ region }, async (lease, context) => {
-                          const cidrs = awsCreateSSHSourceCIDRs(
-                            { ...config, awsRegion: region },
-                            lease,
-                            context,
-                            this.env,
-                            this.region,
-                          );
-                          try {
-                            return await apply(cidrs);
-                          } catch (error) {
-                            if (
-                              !isAWSSecurityGroupRuleLimitError(
-                                coordinatorErrorMessage(this.env, error),
-                              )
-                            ) {
-                              throw error;
-                            }
-                            await this.reconcileLeaseAccessWithClients(
+                      withIngress: (
+                        apply: (cidrs: string[]) => Promise<string>,
+                        observe: ProviderAccessTimingObserver,
+                      ) =>
+                        withLeaseAccess(
+                          { region },
+                          async (lease, context) => {
+                            const cidrs = awsCreateSSHSourceCIDRs(
+                              { ...config, awsRegion: region },
                               lease,
                               context,
-                              new Map([
-                                [
-                                  awsIngressOperationScopeKey(providerScope, region),
-                                  operationClient,
-                                ],
-                              ]),
+                              this.env,
+                              this.region,
                             );
-                            return apply(cidrs);
-                          }
-                        }),
+                            try {
+                              return await apply(cidrs);
+                            } catch (error) {
+                              if (
+                                !isAWSSecurityGroupRuleLimitError(
+                                  coordinatorErrorMessage(this.env, error),
+                                )
+                              ) {
+                                throw error;
+                              }
+                              await this.reconcileLeaseAccessWithClients(
+                                lease,
+                                context,
+                                new Map([
+                                  [
+                                    awsIngressOperationScopeKey(providerScope, region),
+                                    operationClient,
+                                  ],
+                                ]),
+                              );
+                              return apply(cidrs);
+                            }
+                          },
+                          observe,
+                        ),
                     }
                   : {}),
               },

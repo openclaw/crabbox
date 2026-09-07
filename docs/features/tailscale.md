@@ -207,8 +207,9 @@ trusted authorization for a privileged tailnet operation. One-off nodes are
 ephemeral and age out in Tailscale if remote logout is unavailable.
 
 If Tailscale rejects a requested subset or unowned tag, the coordinator returns
-`invalid_tailscale_tags` with exact-match/`tagOwners` guidance and preserves the raw
-Tailscale HTTP status and response body for diagnosis.
+`invalid_tailscale_tags` with exact-match/`tagOwners` guidance, the failed
+operation, and the HTTP status. Raw Tailscale response bodies are withheld from
+coordinator responses.
 
 Preflight the coordinator without leasing a machine:
 

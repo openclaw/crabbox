@@ -51,13 +51,15 @@ type IsloShare struct {
 }
 
 type isloSDKClient struct {
-	sdk        *client.Client
-	auth       *customauth.Provider
-	baseURL    string
-	httpClient *http.Client
+	sdk              *client.Client
+	auth             *customauth.Provider
+	baseURL          string
+	httpClient       *http.Client
+	createHTTPClient *http.Client
 }
 
 const isloDefaultResponseHeaderTimeout = 30 * time.Second
+const isloCreateTimeout = 5 * time.Minute
 
 // isloDefaultBaseURL is the Islo control-plane host. It is the default endpoint
 // the SDK client and the claim scope are both built from.
@@ -95,8 +97,18 @@ var newIsloClient = func(cfg Config, rt Runtime) (isloAPI, error) {
 		Timeout:       timeout,
 		CheckRedirect: isloSameOriginRedirectGuard(baseURL, nil),
 	}
+	var createHTTPClient *http.Client
+	if rt.HTTP == nil {
+		// Provisioning can outlast ordinary API headers. Only our private create
+		// transport delegates that wait to the bounded operation context.
+		transport := httpClient.Transport.(*http.Transport).Clone()
+		transport.ResponseHeaderTimeout = 0
+		createClient := *sdkHTTPClient
+		createClient.Transport = customauth.NewTransport(transport, auth)
+		createHTTPClient = &createClient
+	}
 	sdk := client.NewClient(option.WithBaseURL(baseURL), option.WithHTTPClient(sdkHTTPClient))
-	return &isloSDKClient{sdk: sdk, auth: auth, baseURL: baseURL, httpClient: httpClient}, nil
+	return &isloSDKClient{sdk: sdk, auth: auth, baseURL: baseURL, httpClient: httpClient, createHTTPClient: createHTTPClient}, nil
 }
 
 func isloCleanupContext() (context.Context, context.CancelFunc) {
@@ -191,7 +203,13 @@ func isloURLEffectiveOrigin(value *url.URL) string {
 }
 
 func (c *isloSDKClient) CreateSandbox(ctx context.Context, req *gosdk.CreateSandboxRequest) (*gosdk.SandboxResponse, error) {
-	sandbox, err := c.sdk.Sandboxes.CreateSandbox(ctx, req)
+	ctx, cancel := context.WithTimeout(ctx, isloCreateTimeout)
+	defer cancel()
+	var opts []option.RequestOption
+	if c.createHTTPClient != nil {
+		opts = append(opts, option.WithHTTPClient(c.createHTTPClient))
+	}
+	sandbox, err := c.sdk.Sandboxes.CreateSandbox(ctx, req, opts...)
 	if err != nil {
 		return nil, isloSanitizeRedirectError(err)
 	}

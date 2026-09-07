@@ -40,6 +40,7 @@ func TestRunRecorderCapturesTelemetryOnlyWithRunHandle(t *testing.T) {
 			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			t.Setenv("CRABBOX_FAKE_TELEMETRY_CALLS", callsPath)
 			posts := 0
+			posted := make(chan struct{}, 1)
 			var client *CoordinatorClient
 			if test.coordinator {
 				client = &CoordinatorClient{BaseURL: "https://example.test", Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -53,6 +54,7 @@ func TestRunRecorderCapturesTelemetryOnlyWithRunHandle(t *testing.T) {
 						t.Fatalf("telemetry=%+v error=%v", body.Telemetry, err)
 					}
 					posts++
+					posted <- struct{}{}
 					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"run":{"id":"run_123"}}`)), Header: make(http.Header)}, nil
 				})}}
 			}
@@ -61,6 +63,12 @@ func TestRunRecorderCapturesTelemetryOnlyWithRunHandle(t *testing.T) {
 			target := SSHTarget{User: "runner", Host: "example.test", Port: "22", FallbackPorts: []string{}}
 			rec.CaptureTelemetryStart(t.Context(), target)
 			rec.CaptureTelemetryStart(t.Context(), target)
+			rec.StartTelemetrySampler(t.Context(), target)
+			rec.StartTelemetrySampler(t.Context(), target)
+			if test.runID != "" {
+				<-posted
+			}
+			rec.stopTelemetrySampler()
 			calls, err := os.ReadFile(callsPath)
 			if test.runID == "" {
 				if !os.IsNotExist(err) || posts != 0 || rec.telemetryStart != nil || len(rec.telemetrySnapshot()) != 0 {
@@ -69,6 +77,197 @@ func TestRunRecorderCapturesTelemetryOnlyWithRunHandle(t *testing.T) {
 			} else if err != nil || string(calls) != "telemetry\n" || posts != 1 || len(rec.telemetrySnapshot()) != 1 {
 				t.Fatalf("recorded run needs one start sample: SSH=%q posts=%d error=%v", calls, posts, err)
 			}
+		})
+	}
+}
+
+func TestRunRecorderTelemetryUploadDoesNotBlockCommandAdmission(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell ssh fixture")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte("#!/bin/sh\nprintf 'cpuCount=2\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	synctest.Test(t, func(t *testing.T) {
+		posting := make(chan struct{})
+		release := make(chan struct{})
+		client := &CoordinatorClient{BaseURL: "https://example.test", Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method != http.MethodPost || req.URL.Path != "/v1/runs/run_123/telemetry" {
+				return nil, fmt.Errorf("unexpected request %s %s", req.Method, req.URL.Path)
+			}
+			close(posting)
+			<-release
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"run":{"id":"run_123"}}`)), Header: make(http.Header)}, nil
+		})}}
+		rec := newRunRecorder(t.Context(), client, Config{}, []string{"true"}, "", io.Discard, true)
+		rec.runID = "run_123"
+		target := SSHTarget{User: "runner", Host: "example.test", Port: "22", FallbackPorts: []string{}}
+		admitted := make(chan struct{})
+		go func() {
+			rec.CaptureTelemetryStart(t.Context(), target)
+			rec.StartTelemetrySampler(t.Context(), target)
+			close(admitted)
+		}()
+		<-posting
+		synctest.Wait()
+		select {
+		case <-admitted:
+		default:
+			t.Error("best-effort telemetry upload blocked command admission")
+		}
+		close(release)
+		<-admitted
+		rec.stopTelemetrySampler()
+		if rec.telemetryStart == nil || len(rec.telemetrySnapshot()) != 1 {
+			t.Fatal("command admission lost the pre-command telemetry baseline")
+		}
+	})
+}
+
+func TestRunRecorderSlowInitialUploadPreservesSamplingCadence(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell ssh fixture")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte("#!/bin/sh\nprintf 'cpuCount=2\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	synctest.Test(t, func(t *testing.T) {
+		started := time.Now()
+		var posts []time.Duration
+		sampled := make(chan struct{})
+		client := &CoordinatorClient{BaseURL: "https://example.test", Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			posts = append(posts, time.Since(started))
+			if len(posts) == 1 {
+				time.Sleep(5 * time.Second)
+			} else {
+				close(sampled)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"run":{"id":"run_123"}}`)), Header: make(http.Header)}, nil
+		})}}
+		rec := &runRecorder{coord: client, runID: "run_123", stderr: io.Discard, telemetryStart: &LeaseTelemetry{CapturedAt: "2026-05-02T00:00:00Z"}}
+		rec.StartTelemetrySampler(t.Context(), SSHTarget{User: "runner", Host: "example.test", Port: "22", FallbackPorts: []string{}})
+		<-sampled
+		rec.stopTelemetrySampler()
+		if len(posts) != 2 || posts[0] != 0 || posts[1] != runTelemetrySampleInterval {
+			t.Fatalf("telemetry publication shifted sampling cadence: %v", posts)
+		}
+	})
+}
+
+func TestRunRecorderJoinsTelemetryBeforeTerminalOrReplacement(t *testing.T) {
+	for _, action := range []string{"finish", "failed", "replacement"} {
+		t.Run(action, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				posting := make(chan struct{})
+				cancelled := make(chan struct{})
+				release := make(chan struct{})
+				var samplerDone <-chan struct{}
+				receipt := runRecorderTestReceipt(t)
+				baseline := &LeaseTelemetry{CapturedAt: "2026-05-02T00:00:00Z"}
+				var terminalCalls []string
+				client := &CoordinatorClient{BaseURL: "https://example.test", Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if req.URL.Path == "/v1/runs/run_123/telemetry" {
+						close(posting)
+						<-req.Context().Done()
+						close(cancelled)
+						// Cancellation alone is not a join: the transport still owns work.
+						<-release
+						return nil, req.Context().Err()
+					}
+					select {
+					case <-samplerDone:
+					default:
+						t.Error("terminal publication overtook the telemetry owner")
+					}
+					terminalCalls = append(terminalCalls, req.URL.Path)
+					body := `{"run":{"id":"run_123"}}`
+					switch req.URL.Path {
+					case "/v1/runs/run_123/finish":
+						var input struct {
+							Telemetry *RunTelemetrySummary `json:"telemetry"`
+						}
+						if err := json.NewDecoder(req.Body).Decode(&input); err != nil || input.Telemetry == nil || input.Telemetry.Start == nil || *input.Telemetry.Start != *baseline {
+							t.Errorf("terminal summary lost baseline: %+v, error=%v", input.Telemetry, err)
+						}
+					case "/v1/runs/run_123/receipt":
+						encoded, _ := json.Marshal(map[string]any{"receipt": receipt})
+						body = string(encoded)
+					case "/v1/runs/run_123/events":
+						body = `{"event":{"runID":"run_123","seq":1,"type":"run.failed"}}`
+					default:
+						t.Errorf("unexpected request %s %s", req.Method, req.URL.Path)
+					}
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+				})}}
+				rec := &runRecorder{coord: client, runID: "run_123", stderr: io.Discard, telemetryStart: baseline, telemetrySamples: []*LeaseTelemetry{baseline}}
+				rec.StartTelemetrySampler(t.Context(), SSHTarget{})
+				samplerDone = rec.telemetryDone
+				<-posting
+				completed := make(chan struct{})
+				go func() {
+					defer close(completed)
+					switch action {
+					case "finish":
+						if err := rec.Finish(t.Context(), SSHTarget{}, 1, 0, 0, "", false, nil, FailureClassification{}, &receipt); err != nil {
+							t.Errorf("Finish: %v", err)
+						}
+					case "failed":
+						rec.Failed(errors.New("command preparation failed"))
+					case "replacement":
+						rec.resetTelemetryForLeaseReplacement()
+					}
+				}()
+				<-cancelled
+				time.Sleep(2 * time.Second)
+				select {
+				case <-completed:
+					t.Error("operation returned while telemetry publication was still owned")
+				default:
+				}
+				close(release)
+				<-completed
+				select {
+				case <-samplerDone:
+				default:
+					t.Fatal("telemetry sampler was not joined")
+				}
+				if rec.warned {
+					t.Error("normal sampler cancellation consumed the diagnostic warning slot")
+				}
+				if action == "finish" && (len(terminalCalls) != 2 || terminalCalls[0] != "/v1/runs/run_123/finish" || terminalCalls[1] != "/v1/runs/run_123/receipt" || !rec.finished) {
+					t.Fatalf("terminal receipt was not committed and verified: %v", terminalCalls)
+				}
+				if action == "replacement" && (rec.telemetryStart != nil || len(rec.telemetrySnapshot()) != 0 || rec.telemetryDone != nil || len(terminalCalls) != 0) {
+					t.Fatal("replacement retained the old telemetry owner or samples")
+				}
+				if action == "replacement" {
+					nextPosted := make(chan struct{})
+					next := &LeaseTelemetry{CapturedAt: "2026-05-02T00:01:00Z"}
+					rec.UseCoordinator(&CoordinatorClient{BaseURL: "https://replacement.test", Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						var input struct {
+							Telemetry LeaseTelemetry `json:"telemetry"`
+						}
+						if err := json.NewDecoder(req.Body).Decode(&input); err != nil || input.Telemetry != *next || req.URL.Path != "/v1/runs/run_456/telemetry" {
+							t.Errorf("replacement published an old sample or run: %+v, error=%v", input.Telemetry, err)
+						}
+						close(nextPosted)
+						return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"run":{"id":"run_456"}}`)), Header: make(http.Header)}, nil
+					})}})
+					rec.runID = "run_456"
+					rec.telemetryStart = next
+					rec.recordTelemetrySample(next)
+					rec.StartTelemetrySampler(t.Context(), SSHTarget{})
+					<-nextPosted
+					rec.stopTelemetrySampler()
+					if samples := rec.telemetrySnapshot(); len(samples) != 1 || samples[0] != next {
+						t.Fatal("replacement sample set contains old lease telemetry")
+					}
+				}
+			})
 		})
 	}
 }
@@ -135,6 +334,7 @@ func TestRunRecorderRedactsCoordinatorDiagnosticEvents(t *testing.T) {
 			rec.runID = "run_123"
 
 			test.record(rec)
+			rec.waitForEvents(time.Second)
 
 			if len(events) != 1 {
 				t.Fatalf("events=%v, want one posted diagnostic", events)
@@ -182,7 +382,7 @@ func TestRunRecorderPreservesRawStreamEventData(t *testing.T) {
 		t.Fatal(err)
 	}
 	stdout.Flush()
-	rec.waitForOutputEvents(time.Second)
+	rec.waitForEvents(time.Second)
 
 	if len(events) != 1 || events[0].Type != "stdout" {
 		t.Fatalf("events=%#v, want one stdout event", events)
@@ -210,6 +410,7 @@ func TestRunRecorderRedactsRefreshedRuntimeDiagnosticSecrets(t *testing.T) {
 
 	rec.Event("actions.hydrate.failed", "hydrate", "original="+originalSecret+" refreshed="+refreshedSecret+" region=eu")
 
+	rec.waitForEvents(time.Second)
 	if len(events) != 1 {
 		t.Fatalf("events=%#v, want one posted diagnostic", events)
 	}
@@ -249,6 +450,7 @@ func TestRunRecorderRedactsDiagnosticSecretsAfterLateCoordinatorAttachment(t *te
 		"region=eu",
 	}, " "))
 
+	rec.waitForEvents(time.Second)
 	if len(events) != 1 {
 		t.Fatalf("events=%#v, want one posted diagnostic", events)
 	}
@@ -300,6 +502,7 @@ func TestRunRecorderRedactsPersistedCoordinatorDiagnosticEvents(t *testing.T) {
 		"region=eu",
 	}, " "))
 
+	rec.waitForEvents(time.Second)
 	events, err := client.RunEvents(context.Background(), run.ID, 0, 20)
 	if err != nil {
 		t.Fatalf("read persisted coordinator events: %v", err)
@@ -342,7 +545,7 @@ func TestRunEventStreamWriterCapsOutputEvents(t *testing.T) {
 		}
 	}
 	stdout.Flush()
-	rec.waitForOutputEvents(time.Second)
+	rec.waitForEvents(time.Second)
 
 	var outputBytes, outputEvents, truncatedEvents int
 	for _, event := range events {
@@ -405,7 +608,7 @@ func TestRunEventStreamWriterDoesNotBlockOnCoordinatorPost(t *testing.T) {
 	var joined chan struct{}
 	t.Cleanup(func() {
 		releasePost()
-		rec.waitForOutputEvents(time.Second)
+		rec.waitForEvents(time.Second)
 		if joined != nil {
 			select {
 			case <-joined:
@@ -435,10 +638,10 @@ func TestRunEventStreamWriterDoesNotBlockOnCoordinatorPost(t *testing.T) {
 	releasePost()
 	joined = make(chan struct{})
 	go func() {
-		rec.output.wg.Wait()
+		<-rec.publisher.done
 		close(joined)
 	}()
-	rec.waitForOutputEvents(time.Second)
+	rec.waitForEvents(time.Second)
 	select {
 	case <-joined:
 	case <-time.After(time.Second):
@@ -496,6 +699,7 @@ func TestRunRecorderDefersCreateWhenCoordinatorRequiresLeaseID(t *testing.T) {
 	if got := createBodies[1]["leaseID"]; got != "cbx_abcdef123456" {
 		t.Fatalf("second create leaseID=%#v", got)
 	}
+	rec.waitForEvents(time.Second)
 	if got := eventBody["type"]; got != "lease.created" {
 		t.Fatalf("event body=%#v", eventBody)
 	}
@@ -571,6 +775,7 @@ func TestRunRecorderDefersCreateForExplicitLeaseRuns(t *testing.T) {
 	if got := createBodies[0]["leaseID"]; got != "cbx_abcdef123456" {
 		t.Fatalf("create leaseID=%#v", got)
 	}
+	rec.waitForEvents(time.Second)
 	if got := eventBody["type"]; got != "lease.created" {
 		t.Fatalf("event body=%#v", eventBody)
 	}
@@ -629,6 +834,7 @@ func TestRunRecorderRetriesTransientCreateFailureAfterLease(t *testing.T) {
 	if got := createBodies[1]["leaseID"]; got != "cbx_abcdef123456" {
 		t.Fatalf("second create leaseID=%#v", got)
 	}
+	rec.waitForEvents(time.Second)
 	if got := eventBody["type"]; got != "lease.created" {
 		t.Fatalf("event body=%#v", eventBody)
 	}
@@ -756,6 +962,7 @@ func TestRunRecorderRetriesFailedLeaseCreateOnReplacementLease(t *testing.T) {
 	if got := createBodies[2]["leaseID"]; got != "cbx_replacement123" {
 		t.Fatalf("replacement create leaseID=%#v", got)
 	}
+	rec.waitForEvents(time.Second)
 	if got := eventBody["leaseID"]; got != "cbx_replacement123" {
 		t.Fatalf("lease.created body=%#v", eventBody)
 	}
@@ -813,13 +1020,13 @@ func TestRunRecorderSuppressesMissingEventEndpoint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
-			_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"state":"running","phase":"starting","logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z"}}`))
+			_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"cbx_abcdef123456","slug":"blue-lobster","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"state":"running","phase":"starting","logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/events":
 			eventRequests++
 			http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/finish":
 			finishRequests++
-			_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"state":"succeeded","phase":"completed","exitCode":0,"logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z","finishedAt":"2026-05-02T00:00:01Z"}}`))
+			_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"cbx_abcdef123456","slug":"blue-lobster","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"state":"succeeded","phase":"completed","exitCode":0,"logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z","finishedAt":"2026-05-02T00:00:01Z"}}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -831,22 +1038,27 @@ func TestRunRecorderSuppressesMissingEventEndpoint(t *testing.T) {
 		Provider:   "aws",
 		Class:      "standard",
 		ServerType: "t3.small",
-	}, []string{"pnpm", "test"}, "", &stderr, false)
-	if rec.runID != "run_123" || rec.finished {
-		t.Fatalf("run handle must exist before lease attach or finish: %#v", rec)
+	}, []string{"pnpm", "test"}, "", &stderr, true)
+	if rec.runID != "" || rec.finished {
+		t.Fatalf("existing-lease run must defer its handle until lease resolution: %#v", rec)
 	}
-	rec.AttachLease("cbx_abcdef123456", "blue-lobster", Config{
+	err := rec.AttachLease("cbx_abcdef123456", "blue-lobster", Config{
 		Provider:   "aws",
 		Class:      "standard",
 		ServerType: "t3.small",
 	})
+	if err != nil {
+		t.Fatalf("existing authoritative binding needs no event endpoint: %v", err)
+	}
 	stdout := rec.StreamWriter("stdout")
 	if _, err := stdout.Write([]byte("hello")); err != nil {
 		t.Fatal(err)
 	}
 	stdout.Flush()
-	rec.waitForOutputEvents(time.Second)
-	rec.Finish(context.Background(), SSHTarget{TargetOS: targetWindows}, 0, time.Second, time.Second, "ok", false, nil, FailureClassification{}, nil)
+	rec.waitForEvents(time.Second)
+	if err := rec.Finish(context.Background(), SSHTarget{TargetOS: targetWindows}, 0, time.Second, time.Second, "ok", false, nil, FailureClassification{}, nil); err != nil {
+		t.Fatal(err)
+	}
 
 	if eventRequests != 1 {
 		t.Fatalf("event requests=%d, want 1", eventRequests)

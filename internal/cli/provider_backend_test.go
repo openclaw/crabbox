@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -135,6 +137,51 @@ func TestFinalizeRunResultClassifiesStatus(t *testing.T) {
 				t.Fatalf("status/error=%q/%q want %q/%q", got.Status, got.ErrorKind, tc.want, tc.wantError)
 			}
 		})
+	}
+}
+
+type runClassificationTestError struct {
+	err   error
+	cause error
+}
+
+func (e runClassificationTestError) Error() string                 { return e.err.Error() }
+func (e runClassificationTestError) Unwrap() error                 { return e.err }
+func (e runClassificationTestError) RunClassificationCause() error { return e.cause }
+
+type runClassificationTestJoin []error
+
+func (e runClassificationTestJoin) Error() string   { return "joined failures" }
+func (e runClassificationTestJoin) Unwrap() []error { return e }
+
+func TestRunClassificationUsesOnlyPrimaryMarker(t *testing.T) {
+	primary := runClassificationTestError{err: context.DeadlineExceeded, cause: context.Canceled}
+	providerErr := errors.New("provider failed")
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status RunStatus
+		kind   RunErrorKind
+	}{
+		{name: "direct", err: primary, status: RunStatusCanceled, kind: RunErrorCanceled},
+		{name: "single wrapper", err: fmt.Errorf("readiness: %w", primary), status: RunStatusCanceled, kind: RunErrorCanceled},
+		{name: "primary join", err: errors.Join(primary, context.DeadlineExceeded), status: RunStatusCanceled, kind: RunErrorCanceled},
+		{name: "first nonnil child", err: runClassificationTestJoin{nil, primary, providerErr}, status: RunStatusCanceled, kind: RunErrorCanceled},
+		{name: "nil marker continues", err: runClassificationTestError{err: primary}, status: RunStatusCanceled, kind: RunErrorCanceled},
+		{name: "secondary marker keeps legacy graph", err: errors.Join(providerErr, primary), status: RunStatusTimedOut, kind: RunErrorTimeout},
+		{name: "ordinary join unchanged", err: errors.Join(context.Canceled, context.DeadlineExceeded), status: RunStatusTimedOut, kind: RunErrorTimeout},
+		{name: "ordinary provider unchanged", err: providerErr, status: RunStatusFailed, kind: RunErrorProvider},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := FinalizeRunResult(RunResult{}, tc.err)
+			if result.Status != tc.status || result.ErrorKind != tc.kind {
+				t.Fatalf("outcome=%s/%s want=%s/%s", result.Status, result.ErrorKind, tc.status, tc.kind)
+			}
+		})
+	}
+	pinned := RunResult{ExitCode: 23, Status: RunStatusFailed, ErrorKind: RunErrorCommandExit}
+	if got := FinalizeRunResult(pinned, primary); got.ExitCode != pinned.ExitCode || got.Status != pinned.Status || got.ErrorKind != pinned.ErrorKind {
+		t.Fatalf("pinned outcome changed: %#v", got)
 	}
 }
 

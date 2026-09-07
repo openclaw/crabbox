@@ -977,9 +977,13 @@ func TestExistingRunReleasesClaimExpiringDuringReadiness(t *testing.T) {
 	liveClaim.Spec["lifecycle"] = map[string]any{"shutdownTime": expiresAt, "shutdownPolicy": "Retain"}
 	liveClaim.Status.Sandbox.Name = ""
 
-	result, err := backend.Run(context.Background(), RunRequest{Repo: repo, ID: claim.LeaseID, NoSync: true, Command: []string{"true"}})
+	result, err := backend.Run(context.Background(), RunRequest{Repo: repo, ID: claim.LeaseID, NoSync: true, TimingJSON: true, Command: []string{"true"}})
 	if err == nil || !strings.Contains(err.Error(), "TTL expiry before becoming ready") {
 		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	report := decodeLastTimingReport(t, backend.rt.Stderr.(*bytes.Buffer).String())
+	if result.ExitCode != 4 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider || report.ExitCode != result.ExitCode || report.ErrorKind != result.ErrorKind || result.Session == nil || result.Session.Kept {
+		t.Fatalf("readiness expiry result=%+v report=%+v", result, report)
 	}
 	if fake.deletes != 1 {
 		t.Fatalf("deletes=%d want=1", fake.deletes)
@@ -1463,7 +1467,7 @@ func TestReadinessRunErrorForgetsOnlyAfterRootClaimRecheck(t *testing.T) {
 	claimName := claim.Labels[claimLabelClaimName]
 	delete(fake.objects, sandboxClaimResource+"/"+cfg.AgentSandbox.Namespace+"/"+claimName)
 
-	err = backend.readinessRunError(context.Background(), fake, claim, claimName, fmt.Errorf("pod disappeared: %w", errKubernetesNotFound))
+	_, err = backend.readinessRunError(context.Background(), fake, claim, claimName, fmt.Errorf("pod disappeared: %w", errKubernetesNotFound))
 	if err == nil || !strings.Contains(err.Error(), "local claim forgotten") {
 		t.Fatalf("err=%v", err)
 	}
@@ -1851,4 +1855,488 @@ func tarFiles(t *testing.T, data []byte) map[string]bool {
 		files[header.Name] = true
 	}
 	return files
+}
+
+// These callbacks change only fixture outcomes/time; production exec and claim
+// validation still pass through the existing fake Kubernetes boundary.
+type finalizationClient struct {
+	*fakeKubernetesClient
+	afterExec   func(podExecRequest, error) error
+	deleteCalls int
+	afterDelete func()
+}
+
+func (f *finalizationClient) Exec(ctx context.Context, req podExecRequest) error {
+	err := f.fakeKubernetesClient.Exec(ctx, req)
+	if f.afterExec != nil {
+		return f.afterExec(req, err)
+	}
+	return err
+}
+
+func (f *finalizationClient) Delete(ctx context.Context, ref resourceRef, namespace, name, uid string) error {
+	f.deleteCalls++
+	err := f.fakeKubernetesClient.Delete(ctx, ref, namespace, name, uid)
+	if f.afterDelete != nil {
+		f.afterDelete()
+	}
+	return err
+}
+
+func backdateRunActivity(t *testing.T, claim LeaseClaim) LeaseClaim {
+	t.Helper()
+	replacement := claim
+	replacement.LastUsedAt = "2001-01-01T00:00:00Z"
+	if err := core.ReplaceLeaseClaimIfUnchanged(claim.LeaseID, claim, replacement); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := readLeaseClaim(claim.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return updated
+}
+
+type agentTimingWriter struct {
+	bytes.Buffer
+	reports  []core.TimingReport
+	err      error
+	onReport func(core.TimingReport)
+}
+
+func (w *agentTimingWriter) WriteTimingReport(report core.TimingReport) error {
+	w.reports = append(w.reports, report)
+	if w.onReport != nil {
+		w.onReport(report)
+	}
+	return w.err
+}
+
+func TestBoundRunPreservesPrimaryAcrossTTLAndCleanup(t *testing.T) {
+	for _, tc := range []struct {
+		name                               string
+		commandErr                         error
+		keep, reuse, noDelete, deleteFails bool
+		code                               int
+		status                             core.RunStatus
+		kind                               core.RunErrorKind
+	}{
+		{name: "command and delete", commandErr: testExitError{code: 23}, keep: true, deleteFails: true, code: 23, status: core.RunStatusFailed, kind: core.RunErrorCommandExit},
+		{name: "cancel and delete", commandErr: context.Canceled, keep: true, deleteFails: true, code: 1, status: core.RunStatusCanceled, kind: core.RunErrorCanceled},
+		{name: "success", code: 1, status: core.RunStatusFailed, kind: core.RunErrorProvider},
+		{name: "kept success", keep: true, code: 1, status: core.RunStatusFailed, kind: core.RunErrorProvider},
+		{name: "reused success", reuse: true, code: 1, status: core.RunStatusFailed, kind: core.RunErrorProvider},
+		{name: "no default deletion", noDelete: true, code: 1, status: core.RunStatusFailed, kind: core.RunErrorProvider},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testAgentSandboxConfig(t)
+			cfg.AgentSandbox.DeleteOnRelease = !tc.noDelete
+			fake := readyFakeClient(cfg)
+			b := testBackend(cfg, fake, nil, nil)
+			clock := &mutableClock{now: time.Now().UTC().Truncate(time.Second)}
+			b.rt.Clock = clock
+			repo := testGitRepo(t)
+			req := RunRequest{Repo: repo, NoSync: true, Keep: tc.keep, KeepOnFailure: true, TimingJSON: true, Command: []string{"fixture"}}
+			if tc.reuse {
+				if err := b.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "ttl-reuse"}); err != nil {
+					t.Fatal(err)
+				}
+				req.ID = "ttl-reuse"
+			}
+			start := clock.now
+			cleanupErr := errors.New("fixture deletion failed")
+			if tc.deleteFails {
+				fake.deleteErrs = []error{cleanupErr}
+			}
+			client := &finalizationClient{fakeKubernetesClient: fake, afterExec: func(req podExecRequest, err error) error {
+				if len(req.Command) > 1 && req.Command[1] == "-s" {
+					if tc.deleteFails {
+						claims, err := listAgentSandboxLeaseClaims()
+						if err != nil || len(claims) != 1 {
+							t.Fatalf("claims=%+v err=%v", claims, err)
+						}
+						backdateRunActivity(t, claims[0])
+					}
+					clock.now = start.Add(cfg.TTL + time.Second)
+					return tc.commandErr
+				}
+				return err
+			}, afterDelete: func() { clock.now = clock.now.Add(2 * time.Second) }}
+			b.newClient = func(context.Context, Config, Runtime) (kubernetesClient, error) { return client, nil }
+			w := &agentTimingWriter{}
+			b.rt.Stderr = w
+			result, err := b.Run(context.Background(), req)
+			if err == nil || !strings.Contains(err.Error(), "TTL expiry") || core.ExitCodeForError(err, 0) != tc.code {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			if result.ExitCode != tc.code || result.Status != tc.status || result.ErrorKind != tc.kind {
+				t.Fatalf("outcome=%+v", result)
+			}
+			if tc.commandErr == context.Canceled && !errors.Is(err, context.Canceled) {
+				t.Fatalf("lost cancellation: %v", err)
+			}
+			if tc.deleteFails && !errors.Is(err, cleanupErr) {
+				t.Fatalf("lost cleanup cause: %v", err)
+			}
+			if client.deleteCalls != 1 || result.Session == nil || result.Session.Kept != tc.deleteFails {
+				t.Fatalf("deletes=%d session=%+v", fake.deletes, result.Session)
+			}
+			if tc.deleteFails {
+				retained, err := readLeaseClaim(result.LeaseID)
+				if err != nil || retained.LastUsedAt != "2001-01-01T00:00:00Z" {
+					t.Fatalf("expired recovery claim activity changed: %+v err=%v", retained, err)
+				}
+			}
+			if result.Total != clock.now.Sub(start) {
+				t.Fatalf("total=%s want=%s", result.Total, clock.now.Sub(start))
+			}
+			if len(w.reports) != 1 {
+				t.Fatalf("reports=%d", len(w.reports))
+			}
+			report := w.reports[0]
+			if report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind || report.TotalMs != result.Total.Milliseconds() {
+				t.Fatalf("report=%+v result=%+v", report, result)
+			}
+		})
+	}
+}
+
+func TestBoundRunTimingFailureIsTerminalWithoutChangingCustody(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		primary   int
+		syncOnly  bool
+		writerErr error
+		want      int
+	}{
+		{name: "generic", writerErr: errors.New("timing sink failed"), want: 1},
+		{name: "typed", writerErr: exit(69, "timing sink failed"), want: 69},
+		{name: "sync-only", syncOnly: true, writerErr: exit(69, "timing sink failed"), want: 69},
+		{name: "primary", primary: 23, writerErr: exit(69, "timing sink failed"), want: 23},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testAgentSandboxConfig(t)
+			fake := readyFakeClient(cfg)
+			if tc.primary != 0 {
+				fake.execErrs = []error{nil, testExitError{code: tc.primary}}
+			}
+			b := testBackend(cfg, fake, nil, nil)
+			w := &agentTimingWriter{err: tc.writerErr}
+			b.rt.Stderr = w
+			w.onReport = func(report core.TimingReport) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+				defer cancel()
+				unlock, err := lockAgentSandboxLeaseOperation(ctx, report.LeaseID)
+				if err == nil {
+					unlock()
+					t.Error("operation lock released before timing")
+				}
+			}
+			result, err := b.Run(context.Background(), RunRequest{Repo: testGitRepo(t), NoSync: true, SyncOnly: tc.syncOnly, TimingJSON: true, Command: []string{"fixture"}})
+			if err == nil || !errors.Is(err, tc.writerErr) || core.ExitCodeForError(err, 0) != tc.want || result.ExitCode != tc.want {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			wantKind := core.RunErrorProvider
+			if tc.primary != 0 {
+				wantKind = core.RunErrorCommandExit
+			}
+			if result.Status != core.RunStatusFailed || result.ErrorKind != wantKind {
+				t.Fatalf("result=%+v", result)
+			}
+			if len(w.reports) != 1 || w.reports[0].ExitCode != tc.primary {
+				t.Fatalf("attempted reports=%+v", w.reports)
+			}
+			if fake.deletes != 1 || result.Session == nil || result.Session.Kept {
+				t.Fatalf("deletes=%d session=%+v", fake.deletes, result.Session)
+			}
+		})
+	}
+}
+
+// Characterize the existing public error contract independently of the old
+// RunResult drift: the CLI selects the first typed ExitError through wrapping.
+func TestBoundRunTypedErrorPublicCodeCompatibility(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		errs []error
+		code int
+	}{
+		{name: "setup four", errs: []error{testExitError{code: 4}}, code: 4},
+		{name: "setup six", errs: []error{testExitError{code: 6}}, code: 6},
+		{name: "typed command transport", errs: []error{nil, exit(6, "fixture transport failure")}, code: 6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testAgentSandboxConfig(t)
+			fake := readyFakeClient(cfg)
+			fake.execErrs = tc.errs
+			fake.deleteErrs = []error{errors.New("fixture cleanup failure")}
+			b := testBackend(cfg, fake, nil, nil)
+			_, err := b.Run(context.Background(), RunRequest{Repo: testGitRepo(t), NoSync: true, Command: []string{"fixture"}})
+			var public core.ExitError
+			if !core.AsExitError(err, &public) || public.Code != tc.code || core.ExitCodeForError(err, 1) != tc.code {
+				t.Fatalf("public error changed: %v", err)
+			}
+		})
+	}
+}
+
+func TestBoundRunUnadmittedCustodyAndTiming(t *testing.T) {
+	for _, tc := range []struct {
+		name                         string
+		missing, forget, forgetFails bool
+		wantStatus                   core.RunStatus
+		wantKind                     core.RunErrorKind
+	}{
+		{name: "not ready", wantStatus: core.RunStatusTimedOut, wantKind: core.RunErrorTimeout},
+		{name: "root missing", missing: true, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "root forgotten", missing: true, forget: true, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "forget failure", missing: true, forget: true, forgetFails: true, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testAgentSandboxConfig(t)
+			cfg.AgentSandbox.SandboxReadyTimeout = time.Millisecond
+			cfg.AgentSandbox.ForgetMissing = tc.forget
+			fake := readyFakeClient(cfg)
+			b := testBackend(cfg, fake, nil, nil)
+			repo := testGitRepo(t)
+			if err := b.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "admission"}); err != nil {
+				t.Fatal(err)
+			}
+			claim, err := resolveLocalClaim("admission")
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim = backdateRunActivity(t, claim)
+			before, _ := json.Marshal(claim)
+			if tc.missing {
+				fake.getErrs = []error{nil, errKubernetesNotFound, errKubernetesNotFound}
+			} else {
+				fake.objects[sandboxClaimResource+"/"+cfg.AgentSandbox.Namespace+"/"+claimNameFromLocalClaim(claim)].Status.Sandbox.Name = ""
+			}
+			forgetErr := errors.New("fixture forget failed")
+			if tc.forgetFails {
+				b.removeClaim = func(string, LeaseClaim) error { return forgetErr }
+			}
+			w := &agentTimingWriter{}
+			b.rt.Stderr = w
+			result, err := b.Run(context.Background(), RunRequest{Repo: repo, ID: claim.LeaseID, NoSync: true, KeepOnFailure: true, TimingJSON: true, Command: []string{"not-run"}})
+			if err == nil || result.Session == nil || !result.Session.Reused || result.Session.LeaseID != claim.LeaseID {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			forgotten := tc.forget && !tc.forgetFails
+			if result.Session.Kept == forgotten || fake.deletes != 0 || len(fake.execs) != 0 {
+				t.Fatalf("custody=%+v deletes=%d execs=%d", result.Session, fake.deletes, len(fake.execs))
+			}
+			if tc.forgetFails && !errors.Is(err, forgetErr) {
+				t.Fatalf("lost forget cause: %v", err)
+			}
+			after, readErr := readLeaseClaim(claim.LeaseID)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if forgotten {
+				if after.LeaseID != "" {
+					t.Fatalf("forgotten claim retained: %+v", after)
+				}
+			} else {
+				raw, _ := json.Marshal(after)
+				if string(raw) != string(before) {
+					t.Fatalf("unadmitted claim activity or metadata changed: before=%s after=%s", before, raw)
+				}
+			}
+			if strings.Contains(w.String(), "rerun:") || strings.Contains(w.String(), "deleted") {
+				t.Fatalf("unadmitted/forgotten run advertised recovery or deletion: %s", w.String())
+			}
+			if len(w.reports) != 1 {
+				t.Fatalf("reports=%+v", w.reports)
+			}
+			report := w.reports[0]
+			if result.ExitCode != core.ExitCodeForError(err, 1) || result.Status != tc.wantStatus || result.ErrorKind != tc.wantKind || report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind {
+				t.Fatalf("result=%+v report=%+v err=%v", result, report, err)
+			}
+		})
+	}
+}
+
+func TestBoundRunEarlyExpiryDeletesOnceAndPreservesError(t *testing.T) {
+	for _, failDelete := range []bool{false, true} {
+		t.Run(fmt.Sprint(failDelete), func(t *testing.T) {
+			cfg := testAgentSandboxConfig(t)
+			cfg.AgentSandbox.DeleteOnRelease = false
+			fake := readyFakeClient(cfg)
+			b := testBackend(cfg, fake, nil, nil)
+			clock := &mutableClock{now: time.Now().UTC().Truncate(time.Second)}
+			b.rt.Clock = clock
+			repo := testGitRepo(t)
+			if err := b.Warmup(context.Background(), WarmupRequest{Repo: repo, RequestedSlug: "expired"}); err != nil {
+				t.Fatal(err)
+			}
+			claim, err := resolveLocalClaim("expired")
+			if err != nil {
+				t.Fatal(err)
+			}
+			deleteErr := errors.New("fixture delete failed")
+			if failDelete {
+				fake.deleteErrs = []error{deleteErr}
+			}
+			client := &finalizationClient{fakeKubernetesClient: fake}
+			b.newClient = func(context.Context, Config, Runtime) (kubernetesClient, error) { return client, nil }
+			clock.now = clock.now.Add(cfg.TTL + time.Second)
+			w := &agentTimingWriter{}
+			b.rt.Stderr = w
+			result, err := b.Run(context.Background(), RunRequest{Repo: repo, ID: claim.LeaseID, Keep: true, KeepOnFailure: true, TimingJSON: true, NoSync: true, Command: []string{"not-run"}})
+			if result.ExitCode != 4 || core.ExitCodeForError(err, 1) != 4 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			if !strings.Contains(err.Error(), "reached its TTL expiry; command not run") || strings.Contains(err.Error(), "during the run") {
+				t.Fatalf("early expiry message changed: %v", err)
+			}
+			if failDelete && (!errors.Is(err, deleteErr) || !strings.Contains(err.Error(), "release expired agent-sandbox claim "+claim.LeaseID+":")) {
+				t.Fatalf("cleanup prefix/cause lost: %v", err)
+			}
+			if client.deleteCalls != 1 || len(fake.execs) != 0 || result.Session == nil || result.Session.Kept != failDelete {
+				t.Fatalf("attempts=%d result=%+v", client.deleteCalls, result)
+			}
+			if len(w.reports) != 1 || w.reports[0].ExitCode != 4 || w.reports[0].ErrorKind != core.RunErrorProvider {
+				t.Fatalf("reports=%+v", w.reports)
+			}
+		})
+	}
+}
+
+func TestBoundRunDoesNotAdoptFailedCreateRecovery(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	cfg.AgentSandbox.SandboxReadyTimeout = time.Millisecond
+	fake := readyFakeClient(cfg)
+	fake.createPending = true
+	fake.deleteErrs = []error{errors.New("creation rollback failed")}
+	b := testBackend(cfg, fake, nil, nil)
+	w := &agentTimingWriter{}
+	b.rt.Stderr = w
+	client := &finalizationClient{fakeKubernetesClient: fake}
+	b.newClient = func(context.Context, Config, Runtime) (kubernetesClient, error) { return client, nil }
+	result, err := b.Run(context.Background(), RunRequest{Repo: testGitRepo(t), KeepOnFailure: true, TimingJSON: true, Command: []string{"not-run"}})
+	if err == nil || !strings.Contains(err.Error(), "creation rollback failed") || result.Session != nil || len(w.reports) != 0 || client.deleteCalls != 1 {
+		t.Fatalf("result=%+v err=%v reports=%d attempts=%d", result, err, len(w.reports), client.deleteCalls)
+	}
+}
+
+func TestBoundRunTypedSetupFailureMatchesFinalTiming(t *testing.T) {
+	for _, noSync := range []bool{false, true} {
+		for _, code := range []int{4, 6} {
+			t.Run(fmt.Sprintf("no-sync=%t/code=%d", noSync, code), func(t *testing.T) {
+				cfg := testAgentSandboxConfig(t)
+				fake := readyFakeClient(cfg)
+				fake.execErrs = []error{testExitError{code: code}}
+				cleanupErr := errors.New("fixture cleanup failed")
+				fake.deleteErrs = []error{cleanupErr}
+				b := testBackend(cfg, fake, nil, nil)
+				w := &agentTimingWriter{}
+				b.rt.Stderr = w
+				result, err := b.Run(context.Background(), RunRequest{Repo: testGitRepo(t), NoSync: noSync, TimingJSON: true, Command: []string{"not-run"}})
+				if core.ExitCodeForError(err, 1) != code || !errors.Is(err, cleanupErr) || result.ExitCode != code || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider {
+					t.Fatalf("result=%+v err=%v", result, err)
+				}
+				if len(w.reports) != 1 || w.reports[0].ExitCode != code || w.reports[0].ErrorKind != core.RunErrorProvider || result.Session == nil || !result.Session.Kept {
+					t.Fatalf("result=%+v reports=%+v", result, w.reports)
+				}
+			})
+		}
+	}
+}
+
+func TestBoundRunRetainsLocalRecoveryAfterRemoteRelease(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	fake := readyFakeClient(cfg)
+	b := testBackend(cfg, fake, nil, nil)
+	removeErr := errors.New("fixture local remove failed")
+	b.removeClaim = func(string, LeaseClaim) error { return removeErr }
+	w := &agentTimingWriter{}
+	b.rt.Stderr = w
+	client := &finalizationClient{fakeKubernetesClient: fake}
+	b.newClient = func(context.Context, Config, Runtime) (kubernetesClient, error) { return client, nil }
+	result, err := b.Run(context.Background(), RunRequest{Repo: testGitRepo(t), NoSync: true, TimingJSON: true, Command: []string{"true"}})
+	if !errors.Is(err, removeErr) || result.ExitCode != 1 || result.ErrorKind != core.RunErrorProvider || result.Session == nil || !result.Session.Kept {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if fake.deletes != 1 || client.deleteCalls != 1 {
+		t.Fatalf("deletes=%d attempts=%d", fake.deletes, client.deleteCalls)
+	}
+	claim, readErr := readLeaseClaim(result.LeaseID)
+	if readErr != nil || claim.LeaseID == "" {
+		t.Fatalf("recovery claim=%+v err=%v", claim, readErr)
+	}
+	if len(w.reports) != 1 || w.reports[0].ExitCode != 1 {
+		t.Fatalf("reports=%+v", w.reports)
+	}
+}
+
+type activityFailureClient struct {
+	*fakeKubernetesClient
+	t               *testing.T
+	syncOnly        bool
+	replacementRepo string
+}
+
+func (f *activityFailureClient) Exec(ctx context.Context, req podExecRequest) error {
+	err := f.fakeKubernetesClient.Exec(ctx, req)
+	trigger := "-s"
+	if f.syncOnly {
+		trigger = "-lc"
+	}
+	if len(req.Command) > 1 && req.Command[1] == trigger {
+		claims, readErr := listAgentSandboxLeaseClaims()
+		if readErr != nil || len(claims) != 1 {
+			f.t.Fatalf("claims=%+v err=%v", claims, readErr)
+		}
+		current := claims[0]
+		replacement := current
+		replacement.RepoRoot = f.replacementRepo
+		if writeErr := core.ReplaceLeaseClaimIfUnchanged(current.LeaseID, current, replacement); writeErr != nil {
+			f.t.Fatal(writeErr)
+		}
+	}
+	return err
+}
+
+func TestAgentActivityPublicCodeCompatibility(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		syncOnly      bool
+		primary, want int
+	}{
+		{name: "ordinary success", want: 2},
+		{name: "sync-only success", syncOnly: true, want: 1},
+		{name: "earlier command", primary: 23, want: 23},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testAgentSandboxConfig(t)
+			fake := readyFakeClient(cfg)
+			if tc.primary != 0 {
+				fake.execErrs = []error{nil, testExitError{code: tc.primary}}
+			}
+			b := testBackend(cfg, fake, nil, nil)
+			client := &activityFailureClient{fakeKubernetesClient: fake, t: t, syncOnly: tc.syncOnly, replacementRepo: t.TempDir()}
+			b.newClient = func(context.Context, Config, Runtime) (kubernetesClient, error) { return client, nil }
+			result, err := b.Run(context.Background(), RunRequest{Repo: testGitRepo(t), Keep: true, NoSync: true, SyncOnly: tc.syncOnly, TimingJSON: true, Command: []string{"fixture"}})
+			var public core.ExitError
+			if !core.AsExitError(err, &public) || public.Code != tc.want || core.ExitCodeForError(err, 1) != tc.want {
+				t.Fatalf("result=%+v public=%+v err=%v", result, public, err)
+			}
+			if !strings.Contains(b.rt.Stderr.(*bytes.Buffer).String(), "claimed by repo") {
+				t.Fatalf("fixture missed real activity error: %s", b.rt.Stderr)
+			}
+			report := decodeLastTimingReport(t, b.rt.Stderr.(*bytes.Buffer).String())
+			kind := core.RunErrorProvider
+			if tc.primary != 0 {
+				kind = core.RunErrorCommandExit
+			}
+			if result.ExitCode != tc.want || result.Status != core.RunStatusFailed || result.ErrorKind != kind || report.ExitCode != tc.want || report.RunStatus != result.Status || report.ErrorKind != kind {
+				t.Fatalf("result=%+v report=%+v public=%d", result, report, public.Code)
+			}
+			if result.Session == nil || !result.Session.Kept || fake.deletes != 0 {
+				t.Fatalf("activity failure changed custody: result=%+v deletes=%d", result, fake.deletes)
+			}
+		})
+	}
 }

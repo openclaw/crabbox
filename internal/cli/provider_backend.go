@@ -1320,7 +1320,38 @@ func FinalizeRunResult(result RunResult, err error) RunResult {
 	return result
 }
 
+// PrimaryRunClassificationCause finds an explicit classification cause only on
+// the primary error path. Ordinary errors retain their full-graph classification;
+// joined secondary failures cannot supply an override through this lookup.
+func PrimaryRunClassificationCause(err error) error {
+	for err != nil {
+		if classified, ok := err.(interface{ RunClassificationCause() error }); ok {
+			if cause := classified.RunClassificationCause(); cause != nil {
+				return cause
+			}
+		}
+		switch wrapped := err.(type) {
+		case interface{ Unwrap() error }:
+			err = wrapped.Unwrap()
+		case interface{ Unwrap() []error }:
+			err = nil
+			for _, child := range wrapped.Unwrap() {
+				if child != nil {
+					err = child
+					break
+				}
+			}
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
 func RunStatusForResult(result RunResult, err error) RunStatus {
+	if cause := PrimaryRunClassificationCause(err); cause != nil {
+		err = cause
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return RunStatusTimedOut
 	}
@@ -1334,6 +1365,9 @@ func RunStatusForResult(result RunResult, err error) RunStatus {
 }
 
 func RunErrorKindForResult(result RunResult, err error) RunErrorKind {
+	if cause := PrimaryRunClassificationCause(err); cause != nil {
+		err = cause
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return RunErrorTimeout
 	}

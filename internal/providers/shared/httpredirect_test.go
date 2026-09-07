@@ -3,9 +3,48 @@ package shared
 import (
 	"errors"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
+	"reflect"
 	"testing"
+	"time"
 )
+
+func TestControlAndDataHTTPClients(t *testing.T) {
+	control, data := ControlAndDataHTTPClients(nil, 23*time.Second)
+	if control == nil || data == nil || control == data || control.Timeout != 23*time.Second || data.Timeout != 0 {
+		t.Fatalf("default clients control=%+v data=%+v", control, data)
+	}
+	control.Timeout = time.Second
+	if data.Timeout != 0 {
+		t.Fatal("default control and data settings are coupled")
+	}
+
+	transport := &http.Transport{DisableKeepAlives: true}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redirectErr := errors.New("caller redirect policy")
+	redirectCalls := 0
+	redirect := func(*http.Request, []*http.Request) error { redirectCalls++; return redirectErr }
+	injected := &http.Client{Transport: transport, Jar: jar, Timeout: 17 * time.Second, CheckRedirect: redirect}
+	control, data = ControlAndDataHTTPClients(injected, time.Second)
+	if control != injected || data != injected {
+		t.Fatal("injected client identity changed")
+	}
+	if injected.Transport != transport || injected.Jar != jar || injected.Timeout != 17*time.Second || reflect.ValueOf(injected.CheckRedirect).Pointer() != reflect.ValueOf(redirect).Pointer() {
+		t.Fatal("constructor mutated the injected client")
+	}
+	for _, client := range []*http.Client{control, data, injected} {
+		if !errors.Is(client.CheckRedirect(nil, nil), redirectErr) {
+			t.Fatal("caller redirect policy changed")
+		}
+	}
+	if redirectCalls != 3 {
+		t.Fatalf("redirect calls=%d", redirectCalls)
+	}
+}
 
 func TestSameOrigin(t *testing.T) {
 	t.Parallel()

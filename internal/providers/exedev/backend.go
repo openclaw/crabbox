@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type exeDevLeaseBackend struct {
@@ -855,16 +857,16 @@ func (b *exeDevLeaseBackend) rollbackCreatedVM(name, leaseID, slug, generation s
 	defer cancel()
 	vm, err := b.findVMByExactName(cleanupCtx, name)
 	if err != nil {
-		return exit(exitCodeForError(cause), "%v; exe.dev cleanup could not verify VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
+		return exit(core.ExitCodeForError(cause, 1), "%v; exe.dev cleanup could not verify VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
 	}
 	if err := validateExeDevVMOwnership(vm, leaseID, slug, "provisioning rollback"); err != nil {
-		return exit(exitCodeForError(cause), "%v; exe.dev cleanup refused unverified VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
+		return exit(core.ExitCodeForError(cause, 1), "%v; exe.dev cleanup refused unverified VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
 	}
 	if err := validateExeDevClaimGeneration(vm, generation); err != nil {
-		return exit(exitCodeForError(cause), "%v; exe.dev cleanup refused replacement VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
+		return exit(core.ExitCodeForError(cause, 1), "%v; exe.dev cleanup refused replacement VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
 	}
 	if err := b.deleteVM(cleanupCtx, name); err != nil {
-		return exit(exitCodeForError(cause), "%v; exe.dev cleanup failed for VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
+		return exit(core.ExitCodeForError(cause, 1), "%v; exe.dev cleanup failed for VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
 	}
 	return cause
 }
@@ -879,14 +881,6 @@ func (b *exeDevLeaseBackend) manualDeleteCommand(name string) string {
 		args = append(args, "-p", port)
 	}
 	return shellQuoteArgs(append(args, dest, "rm", name))
-}
-
-func exitCodeForError(err error) int {
-	var exitErr ExitError
-	if errors.As(err, &exitErr) && exitErr.Code != 0 {
-		return exitErr.Code
-	}
-	return 1
 }
 
 func exeDevControlDestination(value string) (string, string, error) {

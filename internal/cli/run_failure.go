@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -78,12 +79,25 @@ func ClassifyRunFailureWithEvidence(exitCode int, text string, phases []TimingPh
 	return FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"}
 }
 
-func classifyRunOutcomeFailure(exitCode int, text string, phases []TimingPhase, evidence RunFailureEvidence, testResultsFailed bool) FailureClassification {
+func classifyRunOutcomeFailure(exitCode int, text string, phases []TimingPhase, evidence RunFailureEvidence, testResultsFailed, artifactValidationFailed bool) FailureClassification {
 	classification := ClassifyRunFailureWithEvidence(exitCode, text, phases, evidence)
+	if artifactValidationFailed && classification.ResourceExhaustion == "" {
+		return FailureClassification{BlockedStage: "artifacts", RetryLikely: "unknown"}
+	}
 	if testResultsFailed && classification.ResourceExhaustion == "" {
 		return FailureClassification{BlockedStage: "test", RetryLikely: "false"}
 	}
 	return classification
+}
+
+func applyArtifactFailureOutcome(report *TimingReport, artifactFailure, observedContextErr error) {
+	if artifactFailure == nil || report.ResourceExhaustion != "" {
+		return
+	}
+	// The workload succeeded; the synthetic gate code is not a command exit.
+	failure := errors.Join(artifactFailure, observedContextErr)
+	report.RunStatus = RunStatusForResult(RunResult{}, failure)
+	report.ErrorKind = RunErrorKindForResult(RunResult{}, failure)
 }
 
 func isBlacksmithActionsCancelled(lower string) bool {
@@ -296,6 +310,8 @@ type runFailureDigestInput struct {
 	CommandDisplay        string
 	ShellMode             bool
 	ScriptMode            bool
+	NoSync                bool
+	RequiredArtifactGlobs []string
 	Routing               CommandRouting
 	SSHRouting            CommandRouting
 	StopRouting           CommandRouting
@@ -381,6 +397,8 @@ func failureDigestPhase(classification FailureClassification, phases []TimingPha
 
 func failureDigestArea(classification FailureClassification, phase string) string {
 	switch classification.BlockedStage {
+	case "artifacts":
+		return "artifacts"
 	case "provider_auth":
 		return "provider_auth"
 	case "ssh":
@@ -425,7 +443,14 @@ func failureDigestNextCommands(input runFailureDigestInput, retry string) []stri
 			if len(routing.Args) == 0 {
 				routing = fallbackFailureDigestRouting(input, CommandRoutingRetry)
 			}
-			runArgs := append(append([]string{"crabbox", "run"}, routing.Args...), "--id", leaseRef, "--fresh-sync")
+			syncFlag := "--fresh-sync"
+			if input.NoSync {
+				syncFlag = "--no-sync"
+			}
+			runArgs := append(append([]string{"crabbox", "run"}, routing.Args...), "--id", leaseRef, syncFlag)
+			for _, glob := range input.RequiredArtifactGlobs {
+				runArgs = append(runArgs, "--require-artifact", glob)
+			}
 			if input.ShellMode {
 				runArgs = append(runArgs, "--shell")
 			}

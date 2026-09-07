@@ -3294,6 +3294,7 @@ exit 0
 		"--keep-on-failure",
 		"--timing-json",
 		"--require-artifact", "reports/data/manifest.json",
+		"--require-artifact", "reports/proof-*.json",
 		"--download", "reports/data/manifest.json=" + downloadPath,
 		"--", "fixture-stage-success",
 	})
@@ -3319,6 +3320,20 @@ exit 0
 	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease=cbx_env_profile_test") {
 		t.Fatalf("missing keep-on-failure hint after required artifact failure:\n%s", stderr.String())
 	}
+	retryHints := 0
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if strings.Contains(line, "next: crabbox run ") {
+			retryHints++
+			if !strings.Contains(line, "--no-sync") || strings.Contains(line, "--fresh-sync") ||
+				!strings.Contains(line, "--require-artifact reports/data/manifest.json") ||
+				!strings.Contains(line, "--require-artifact 'reports/proof-*.json'") {
+				t.Errorf("retry lost no-sync or required-artifact intent: %s", line)
+			}
+		}
+	}
+	if retryHints != 1 {
+		t.Errorf("retry hints=%d, want one runnable recovery", retryHints)
+	}
 	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
 	var report TimingReport
 	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
@@ -3327,8 +3342,13 @@ exit 0
 	if report.ExitCode != 7 {
 		t.Fatalf("timing exitCode=%d, want 7\nreport=%#v", report.ExitCode, report)
 	}
-	if report.BlockedStage != "unknown" || finalTimingPhaseName(report.CommandPhases) != "test" {
+	if report.BlockedStage != "artifacts" || report.ErrorKind != RunErrorProvider || report.RunStatus != RunStatusFailed || report.RetryLikely != "unknown" || finalTimingPhaseName(report.CommandPhases) != "test" {
 		t.Fatalf("artifact failure blamed successful workload: %+v", report)
+	}
+	for _, want := range []string{"\n  phase: artifacts\n", "\n  area: artifacts\n"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("artifact digest missing %q:\n%s", want, stderr.String())
+		}
 	}
 	if strings.Contains(stderr.String(), "\n  failed_phase: test\n") {
 		t.Fatalf("failure digest blamed successful workload:\n%s", stderr.String())
@@ -4188,6 +4208,13 @@ func TestRunCommandDelegatedTerminalOrder(t *testing.T) {
 }
 
 func TestRunCommandSyncOnlyFinalizesAfterTiming(t *testing.T) {
+	for _, missingEvents := range []bool{false, true} {
+		t.Run(fmt.Sprint("missing-events=", missingEvents), func(t *testing.T) { runCommandSyncOnlyFinalization(t, missingEvents) })
+	}
+}
+
+func runCommandSyncOnlyFinalization(t *testing.T, missingEvents bool) {
+	t.Helper()
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
 	sshPath := filepath.Join(dir, "ssh")
@@ -4261,6 +4288,10 @@ func TestRunCommandSyncOnlyFinalizesAfterTiming(t *testing.T) {
 				StartedAt: "2026-09-04T00:00:00Z",
 			}})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/"+runID+"/events":
+			if missingEvents {
+				http.NotFound(w, r)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"event": CoordinatorRunEvent{
 				RunID: runID, Seq: 1, Type: "run.event", CreatedAt: "2026-09-04T00:00:00Z",
 			}})
@@ -4292,6 +4323,9 @@ func TestRunCommandSyncOnlyFinalizesAfterTiming(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if missingEvents && !strings.Contains(stderr.String(), "warning: sync-only run history binding unavailable") {
+		t.Fatalf("optional history failure was not visible: %s", stderr.String())
 	}
 	mu.Lock()
 	gotEvents := append([]string(nil), events...)
@@ -4541,8 +4575,8 @@ exit 0
 	if decodeErr != nil {
 		t.Fatalf("decode terminal receipt: %v", decodeErr)
 	}
-	if receipt.ExitCode != exitCodeForError(err, 7) || receipt.ExitCode == 0 {
-		t.Fatalf("receipt exit=%d want=%d run error=%v", receipt.ExitCode, exitCodeForError(err, 7), err)
+	if receipt.ExitCode != ExitCodeForError(err, 7) || receipt.ExitCode == 0 {
+		t.Fatalf("receipt exit=%d want=%d run error=%v", receipt.ExitCode, ExitCodeForError(err, 7), err)
 	}
 	if !strings.Contains(stderr.String(), "artifact kind=receipt") {
 		t.Fatalf("missing terminal receipt output:\n%s", stderr.String())

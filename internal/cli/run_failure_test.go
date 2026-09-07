@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -83,12 +85,12 @@ func TestClassifyRunFailureUsesNormalizedMemoryEvidence(t *testing.T) {
 func TestRunOutcomeFailureKeepsMemoryEvidenceAcrossSecondaryFailures(t *testing.T) {
 	got := classifyRunOutcomeFailure(0, "", nil, RunFailureEvidence{
 		ResourceExhaustion: ResourceExhaustionMemory,
-	}, true)
+	}, true, false)
 	if got.BlockedStage != "resource_exhaustion" || got.ResourceExhaustion != ResourceExhaustionMemory || got.RetryLikely != "false" {
 		t.Fatalf("classifyRunOutcomeFailure()=%#v, want memory exhaustion", got)
 	}
 
-	got = classifyRunOutcomeFailure(0, "", []TimingPhase{{Name: "build"}}, RunFailureEvidence{}, true)
+	got = classifyRunOutcomeFailure(0, "", []TimingPhase{{Name: "build"}}, RunFailureEvidence{}, true, false)
 	if got.BlockedStage != "test" || got.ResourceExhaustion != "" || got.RetryLikely != "false" {
 		t.Fatalf("classifyRunOutcomeFailure()=%#v, want test failure", got)
 	}
@@ -731,6 +733,96 @@ func TestFailureDigestSuppressesScriptRetryCommand(t *testing.T) {
 	}
 }
 
+func TestFailureDigestPreservesRecoveryIntent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX rendered-shell argv fixture")
+	}
+	for _, tc := range []struct {
+		name                                    string
+		noSync, shell, script, stopped, noRetry bool
+		globs                                   []string
+	}{
+		{name: "default keeps fresh sync"},
+		{name: "no sync", noSync: true},
+		{name: "requirements", globs: []string{"reports/manifest.json", "reports/proof-*.json"}},
+		{name: "no sync requirements shell", noSync: true, shell: true, globs: []string{"reports/manifest.json", "reports/proof-*.json"}},
+		{name: "script suppressed", script: true, noSync: true, globs: []string{"proof.json"}},
+		{name: "retry suppressed", noRetry: true, noSync: true, globs: []string{"proof.json"}},
+		{name: "stopped suppressed", stopped: true, noSync: true, globs: []string{"proof.json"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(dir, "reports"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "reports", "proof-local.json"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			capture := filepath.Join(dir, "argv")
+			if err := os.WriteFile(filepath.Join(dir, "crabbox"), []byte("#!/bin/sh\nprintf '%s\\000' \"$@\" > \"$FIXTURE_ARGV\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			display := "printf '%s\\n' 'two words'"
+			if tc.shell {
+				display = "printf first && printf second"
+			}
+			routing := CommandRouting{Args: []string{"--provider", "local-container", "--local-container-runtime", "docker"}}
+			input := runFailureDigestInput{LeaseID: "cbx_fixture", CommandDisplay: display, ShellMode: tc.shell, ScriptMode: tc.script, LeaseStopped: tc.stopped, NoSync: tc.noSync, RequiredArtifactGlobs: tc.globs, Routing: routing}
+			retry := "unknown"
+			if tc.noRetry {
+				retry = "false"
+			}
+			var hint string
+			for _, command := range failureDigestNextCommands(input, retry) {
+				if strings.HasPrefix(command, "crabbox run ") {
+					if hint != "" {
+						t.Fatal("multiple retry commands")
+					}
+					hint = command
+				}
+			}
+			if tc.script || tc.stopped || tc.noRetry {
+				if hint != "" {
+					t.Fatalf("unexpected retry: %s", hint)
+				}
+				return
+			}
+			if hint == "" {
+				t.Fatal("missing retry")
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", hint)
+			cmd.Dir = dir
+			cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "FIXTURE_ARGV=" + capture}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("replay: %v %s", err, out)
+			}
+			data, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00")
+			syncFlag := "--fresh-sync"
+			if tc.noSync {
+				syncFlag = "--no-sync"
+			}
+			want := append(append([]string{"run"}, routing.Args...), "--id", "cbx_fixture", syncFlag)
+			for _, glob := range tc.globs {
+				want = append(want, "--require-artifact", glob)
+			}
+			if tc.shell {
+				want = append(want, "--shell", "--", display)
+			} else {
+				want = append(want, "--", "printf", "%s\\n", "two words")
+			}
+			if !reflect.DeepEqual(args, want) {
+				t.Fatalf("args=%q want=%q", args, want)
+			}
+		})
+	}
+}
+
 func TestFailureDigestRoutesNextCommands(t *testing.T) {
 	commands := failureDigestNextCommands(runFailureDigestInput{
 		Provider:       "aws",
@@ -913,5 +1005,87 @@ func TestFailureDigestStoppedLeaseKeepsHistoryAndLocalEvidence(t *testing.T) {
 		if strings.Contains(out.String(), "next: crabbox "+command+" ") {
 			t.Errorf("stale recovery command %s: %s", command, out.String())
 		}
+	}
+}
+
+func TestRunArtifactFailureClassificationPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		artifact, testFailed bool
+		evidence             RunFailureEvidence
+		stage, retry         string
+	}{
+		{name: "known artifact", artifact: true, stage: "artifacts", retry: "unknown"},
+		{name: "artifact before test policy", artifact: true, testFailed: true, stage: "artifacts", retry: "unknown"},
+		{name: "positive memory evidence", artifact: true, testFailed: true, evidence: RunFailureEvidence{ResourceExhaustion: ResourceExhaustionMemory}, stage: "resource_exhaustion", retry: "false"},
+		{name: "genuine workload seven", stage: "test", retry: "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyRunOutcomeFailure(7, "", []TimingPhase{{Name: "test"}}, tc.evidence, tc.testFailed, tc.artifact)
+			if got.BlockedStage != tc.stage || got.RetryLikely != tc.retry || got.ResourceExhaustion != tc.evidence.ResourceExhaustion {
+				t.Fatalf("classification=%+v", got)
+			}
+		})
+	}
+}
+
+func TestApplyArtifactFailureOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		failure, observedContext error
+		memory                   ResourceExhaustionReason
+		wantStatus               RunStatus
+		wantKind                 RunErrorKind
+	}{
+		{name: "not artifact failure", wantStatus: RunStatusFailed, wantKind: RunErrorCommandExit},
+		{name: "validation", failure: exit(7, "missing proof"), wantStatus: RunStatusFailed, wantKind: RunErrorProvider},
+		{name: "observed cancellation", failure: exit(7, "flattened fetch failure"), observedContext: context.Canceled, wantStatus: RunStatusCanceled, wantKind: RunErrorCanceled},
+		{name: "observed deadline", failure: exit(7, "flattened fetch failure"), observedContext: context.DeadlineExceeded, wantStatus: RunStatusTimedOut, wantKind: RunErrorTimeout},
+		{name: "wrapped cancellation", failure: fmt.Errorf("fetch: %w", context.Canceled), wantStatus: RunStatusCanceled, wantKind: RunErrorCanceled},
+		{name: "memory outranks secondary validation", failure: exit(7, "missing proof"), memory: ResourceExhaustionMemory, wantStatus: RunStatusFailed, wantKind: RunErrorCommandExit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := TimingReport{ExitCode: 7, RunStatus: RunStatusFailed, ErrorKind: RunErrorCommandExit, ResourceExhaustion: tc.memory}
+			applyArtifactFailureOutcome(&report, tc.failure, tc.observedContext)
+			report = finalizeTimingReport(report)
+			if report.ExitCode != 7 || report.RunStatus != tc.wantStatus || report.ErrorKind != tc.wantKind || report.ResourceExhaustion != tc.memory {
+				t.Fatalf("report=%+v", report)
+			}
+		})
+	}
+}
+
+func TestArtifactFailureContextSnapshot(t *testing.T) {
+	for _, duringValidation := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancel_during_validation=%t", duringValidation), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			schema, err := parseArtifactSchema([]byte(`true`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			reader := func(context.Context, SSHTarget, string, string, int) ([]byte, error) {
+				if duringValidation {
+					cancel()
+					return nil, ctx.Err()
+				}
+				return nil, errors.New("missing proof")
+			}
+			_, _, failure := validateArtifactSchemasWithReader(ctx, SSHTarget{}, "/work", []loadedArtifactSchema{{remote: "proof", schemaPath: "schema.json", schema: schema}}, reader)
+			if failure == nil {
+				t.Fatal("expected failed schema fetch")
+			}
+			observedContextErr := ctx.Err()
+			cancel() // Later cleanup cancellation cannot reclassify validation.
+			report := TimingReport{ExitCode: 7}
+			applyArtifactFailureOutcome(&report, failure, observedContextErr)
+			wantStatus, wantKind := RunStatusFailed, RunErrorProvider
+			if duringValidation {
+				wantStatus, wantKind = RunStatusCanceled, RunErrorCanceled
+			}
+			if report.RunStatus != wantStatus || report.ErrorKind != wantKind || report.ExitCode != 7 {
+				t.Fatalf("report=%+v", report)
+			}
+		})
 	}
 }

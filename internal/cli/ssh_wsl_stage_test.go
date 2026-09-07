@@ -1042,7 +1042,7 @@ func TestWSLStagePinsOnlySuccessfulRetryableFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Join(ports, ",") != "2222,22" || len(nonces) != 2 || nonces[0] == nonces[1] ||
-		target.Port != "22" || len(target.FallbackPorts) != 0 || !target.NoControlMaster {
+		target.Port != "22" || !target.NoControlMaster {
 		t.Fatalf("ports=%v nonces=%v target=%+v", ports, nonces, target)
 	}
 
@@ -1118,8 +1118,25 @@ func TestWSLStagePreparesExactRouteBeforeEachUpload(t *testing.T) {
 			if _, err := spool.stage(t.Context(), &target, wslStageTiming{stage: time.Second, idle: time.Second}, "10", "3", io.Discard); err != nil {
 				t.Fatal(err)
 			}
-			if got := strings.Join(events, ","); got != test.want || len(target.FallbackPorts) != 0 {
+			if got := strings.Join(events, ","); got != test.want {
 				t.Fatalf("probe/ACL/upload route ordering=%q final target=%+v", got, target)
+			}
+			for _, retarget := range []bool{false, true} {
+				events = nil
+				probeDeadline = time.Time{}
+				if retarget {
+					target.Host = "retarget.example"
+				}
+				if _, err := spool.stage(t.Context(), &target, wslStageTiming{stage: time.Second, idle: time.Second}, "10", "3", io.Discard); err != nil {
+					t.Fatal(err)
+				}
+				want := "prepare:" + target.Port + ",upload:" + target.Port
+				if retarget && test.name == "distinct fallbacks" {
+					want = "probe:" + target.Port + "," + want
+				}
+				if got := strings.Join(events, ","); got != want {
+					t.Fatalf("retarget=%t route preparation=%s want=%s", retarget, got, want)
+				}
 			}
 		})
 	}
@@ -1188,7 +1205,7 @@ func TestWSLStageUnreachablePrimaryFallsBackWithoutProofCleanup(t *testing.T) {
 		t.Fatalf("healthy fallback blocked: prepared=%v uploaded=%v cleaned=%v error=%v", prepared, uploaded, cleaned, err)
 	}
 	if strings.Join(prepared, ",") != "22" || strings.Join(uploaded, ",") != "22" || strings.Join(cleaned, ",") != "22" ||
-		target.Port != "22" || len(target.FallbackPorts) != 0 || !target.NoControlMaster {
+		target.Port != "22" || !target.NoControlMaster {
 		t.Fatalf("route delivery: prepared=%v uploaded=%v cleaned=%v target=%+v", prepared, uploaded, cleaned, target)
 	}
 	for i, port := range []string{refusedPort, "22", "22"} {

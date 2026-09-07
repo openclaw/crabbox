@@ -17,6 +17,8 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func TestRedactErrorPreservesCauseAndSafeFormatting(t *testing.T) {
@@ -237,7 +239,7 @@ func TestBlaxelFallbackBoundsControlAndPreservesUpload(t *testing.T) {
 	}))
 	defer server.Close()
 
-	control, data := blaxelHTTPClients(nil, controlTimeout)
+	control, data := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	client := &restClient{
 		base:     server.URL,
 		apiKey:   "test-key",

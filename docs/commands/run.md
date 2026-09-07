@@ -607,7 +607,15 @@ proof file, manifest, report, or other evidence artifact. Required artifact glob
 are checked after the remote command exits 0 and before `--download` files are
 written locally. They are also collected into the run artifact tarball. If any
 required glob matches nothing, the run fails even though the command itself
-succeeded. Matches must resolve to regular files, so dangling symlinks and
+succeeded. On SSH-backed runs, required-glob, required-change, and artifact-schema
+validation failures
+retain exit 7 and report `blockedStage=artifacts` with `errorKind=provider-error`,
+so they are distinct from a workload that exits 7 (`command-exit`). The failure
+digest identifies the artifacts phase and area. Cancellation or deadline
+observed when validation fails retains its normalized outcome; positive memory
+exhaustion evidence keeps priority. Artifact classification alone does not
+change retry eligibility. Matches must resolve to regular files, so dangling
+symlinks and
 symlinks to directories do not satisfy the proof gate. The same SSH-run target
 limits as `--artifact-glob` apply. Delegated providers that support bounded run
 artifact retrieval enforce provider-owned file and byte limits before returning
@@ -757,8 +765,12 @@ its status before reuse, or retry the printed stop command to finish cleanup.
 The digest includes the failed phase when phase markers are known, a
 likely area (provider auth, SSH/connectivity, sync, install/setup, user command,
 model/tool/provider limit, or resource exhaustion), retryability when inferable, next commands
-(`logs`, `events`, `doctor --from-run`, `ssh`, retrying with `--fresh-sync`, and
-`stop`). After failure-bundle information and command hints, each stream has one
+(`logs`, `events`, `doctor --from-run`, `ssh`, retrying, and `stop`). A retry
+preserves an explicitly requested `--no-sync`, so it does not reset the retained
+workspace. Other retries retain the `--fresh-sync` guidance above. Each original
+`--require-artifact` glob is retained in the retry, so missing required evidence
+still fails the rerun. After failure-bundle information and command hints, each
+stream has one
 redacted tail section of up to 40 lines, or its capture path when explicitly
 captured. Live output and failure-bundle contents are unchanged. The digest does
 not reconstruct secrets or hidden local shell state. Short-circuit explanations are limited to simple

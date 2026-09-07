@@ -201,10 +201,13 @@ artifacts. Local failure preserves the confirmed remote outcome and local claim;
 a fresh confirmed-deletion lookup retries only local cleanup, not provider deletion.
 
 For public AWS leases, shared security-group writes remain serialized with release
-and authoritative ingress reconciliation. Image selection, instance creation and
-network-address readiness do not hold that fence, so a slow new instance does
-not delay release of another lease. Every regional ingress attempt rechecks the
-creating lease and derives access from current lease records before writing.
+state changes and authoritative ingress reconciliation. Image selection, instance
+creation, network readiness and provider deletion do not hold that fence, so a
+slow instance or termination does not block another lease's ingress work. Cleanup
+still waits for its provider result, then reacquires the ingress fence and
+revalidates its exact claim before publishing success or failure. Every regional
+ingress attempt rechecks the creating lease and derives access from current lease
+records before writing.
 
 If a create attempt is canceled or its lease is released during AWS region
 preparation, the in-flight create returns `409 create_canceled` with the reason.

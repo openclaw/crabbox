@@ -71,17 +71,12 @@ func (b *cloudflareBackend) Warmup(ctx context.Context, req WarmupRequest) error
 		fmt.Fprintf(b.rt.Stderr, "warning: %s warmup keeps the container until explicit stop\n", providerName)
 	}
 	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  claim.LeaseID,
-			Slug:     claim.Slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  claim.LeaseID,
+		Slug:     claim.Slug,
+		Total:    total,
+	})
 }
 
 func (b *cloudflareBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {

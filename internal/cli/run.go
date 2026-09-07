@@ -507,7 +507,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		cleanup.apply(&report)
 		if err != nil && report.ExitCode == 0 {
-			report.ExitCode = exitCodeForError(err, 7)
+			report.ExitCode = ExitCodeForError(err, 7)
 			report.RunStatus = ""
 			report.ErrorKind = ""
 		}
@@ -1077,7 +1077,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				finalFailure = err
 			}
 			if finalResult.ExitCode == 0 && finalFailure != nil {
-				finalResult.ExitCode = exitCodeForError(finalFailure, 7)
+				finalResult.ExitCode = ExitCodeForError(finalFailure, 7)
 			}
 			if delegatedPreparationAttempted && preparedDelegatedExitCode == finalResult.ExitCode {
 				return
@@ -1313,7 +1313,13 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return exit(2, "profile doctor is not supported for native Windows targets")
 		}
 		if useCoordinator {
-			recorder.AttachLease(leaseID, serverSlug(server), cfg)
+			if err := recorder.AttachLease(leaseID, serverSlug(server), cfg); err != nil {
+				if !*syncOnly {
+					return err
+				}
+				// Sync-only has no signed command receipt and permits unavailable history.
+				recorder.warnRunHistory("sync-only run history binding unavailable: %v", err)
+			}
 		}
 		if recorder.runID != "" {
 			executionRunID = recorder.runID
@@ -1560,7 +1566,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if finalTimingReport != nil || (!*timingJSON && !timingRecordEnabled) {
 			return
 		}
-		report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, time.Since(timings.started), exitCodeForError(err, 7), actionsURL)
+		report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, time.Since(timings.started), ExitCodeForError(err, 7), actionsURL)
 		populateRunTimingMetadata(&report, cfg, repo, server, leaseID, executionRunID, workdir, nil)
 		report.Label = runLabelValue
 		finalTimingReport = &report
@@ -1778,7 +1784,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return true, exit(2, "profile doctor is not supported for native Windows targets")
 		}
 		if useCoordinator {
-			recorder.AttachLease(leaseID, serverSlug(server), cfg)
+			if err := recorder.AttachLease(leaseID, serverSlug(server), cfg); err != nil {
+				return true, err
+			}
 			startRunHeartbeat(nil)
 		}
 		if recorder.runID != "" {
@@ -2307,7 +2315,7 @@ afterSync:
 			finalCode := 0
 			classification := FailureClassification{}
 			if finalFailure != nil {
-				finalCode = exitCodeForError(finalFailure, 7)
+				finalCode = ExitCodeForError(finalFailure, 7)
 				classification = ClassifyRunFailure(finalCode, finalFailure.Error(), nil)
 			}
 			if finishErr := recorder.Finish(ctx, target, finalCode, timings.sync, 0, "", false, nil, classification, nil); finishErr != nil {
@@ -2604,7 +2612,7 @@ afterSync:
 			finalFailure = err
 		}
 		if finalCode == 0 && finalFailure != nil {
-			finalCode = exitCodeForError(finalFailure, 7)
+			finalCode = ExitCodeForError(finalFailure, 7)
 		}
 		if recorder.runID == "" && attestPath == "" {
 			return
@@ -2614,7 +2622,7 @@ afterSync:
 			if finalFailure != nil {
 				classificationLog = strings.TrimSpace(classificationLog + "\n" + finalFailure.Error())
 			}
-			classification = classifyRunOutcomeFailure(finalCode, classificationLog, commandFailurePhases, failureEvidence, false)
+			classification = classifyRunOutcomeFailure(finalCode, classificationLog, commandFailurePhases, failureEvidence, false, false)
 		}
 		if terminalPreparationAttempted && preparedTerminalExitCode == finalCode {
 			return
@@ -2662,7 +2670,7 @@ afterSync:
 			if localReceiptPersisted && attestPath != "" && preparedTerminalReceipt.ExitCode == 0 {
 				// The coordinator commit is now ambiguous. Preserve the exact receipt
 				// sent remotely, but make the local CLI failure impossible to miss.
-				failedReceipt, receiptErr := buildTerminalReceipt(exitCodeForError(finishErr, 7))
+				failedReceipt, receiptErr := buildTerminalReceipt(ExitCodeForError(finishErr, 7))
 				if receiptErr != nil {
 					err = errors.Join(err, receiptErr)
 					recordRunFailure(&runFailure, receiptErr)
@@ -2736,6 +2744,8 @@ afterSync:
 		}
 	}
 	var artifactFailure error
+	// Artifact helpers flatten transport errors; snapshot context before cleanup.
+	var artifactFailureContextErr error
 	var schemaValidationResults []SchemaValidationResult
 	var afterArtifacts []artifactChangeSnapshot
 	if len(requiredArtifactChanges) > 0 && code == 0 && (streamErr != nil || ctx.Err() != nil) {
@@ -2746,17 +2756,19 @@ afterSync:
 		if artifactFailure == nil {
 			artifactChangeResults, artifactFailure = compareArtifactChanges(requiredArtifactChanges, beforeArtifacts, afterArtifacts)
 		}
+		if artifactFailure != nil {
+			artifactFailureContextErr = ctx.Err()
+			code = 7
+		}
 		for _, result := range artifactChangeResults {
 			fmt.Fprintf(a.Stderr, "required artifact change path=%s status=%s\n", result.Path, result.Status)
-		}
-		if artifactFailure != nil {
-			code = 7
 		}
 	}
 	if code == 0 && len(requiredArtifactGlobs) > 0 {
 		requireOutput, err := requireRunArtifactGlobs(ctx, target, workdir, requiredArtifactGlobs)
 		if err != nil {
 			artifactFailure = err
+			artifactFailureContextErr = ctx.Err()
 			code = 7
 		}
 		if strings.TrimSpace(requireOutput) != "" {
@@ -2766,12 +2778,13 @@ afterSync:
 	if code == 0 && len(loadedArtifactSchemas) > 0 {
 		results, schemaOutput, schemaErr := validateRemoteArtifactSchemas(ctx, target, workdir, loadedArtifactSchemas)
 		schemaValidationResults = results
-		if strings.TrimSpace(schemaOutput) != "" {
-			fmt.Fprintln(a.Stderr, strings.TrimSpace(schemaOutput))
-		}
 		if schemaErr != nil {
 			artifactFailure = schemaErr
+			artifactFailureContextErr = ctx.Err()
 			code = 7
+		}
+		if strings.TrimSpace(schemaOutput) != "" {
+			fmt.Fprintln(a.Stderr, strings.TrimSpace(schemaOutput))
 		}
 	}
 	if code == 0 {
@@ -2828,13 +2841,14 @@ afterSync:
 		if artifactFailure != nil {
 			classificationLog = strings.TrimSpace(classificationLog + "\n" + artifactFailure.Error())
 		}
-		classification = classifyRunOutcomeFailure(code, classificationLog, commandFailurePhases, failureEvidence, testResultsFailure != nil)
+		classification = classifyRunOutcomeFailure(code, classificationLog, commandFailurePhases, failureEvidence, testResultsFailure != nil, artifactFailure != nil)
 		timings.blockedStage = classification.BlockedStage
 		timings.resourceExhaustion = classification.ResourceExhaustion
 		timings.retryLikely = classification.RetryLikely
 		failureClassificationPrinted = true
 	}
 	report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, code, actionsURL)
+	applyArtifactFailureOutcome(&report, artifactFailure, artifactFailureContextErr)
 	populateRunTimingMetadata(&report, cfg, repo, server, leaseID, executionRunID, workdir, runArtifacts)
 	report.Label = runLabelValue
 	report.SchemaValidations = schemaValidationResults
@@ -2892,6 +2906,8 @@ afterSync:
 			CommandDisplay:        commandDisplay,
 			ShellMode:             *shellMode || useShell,
 			ScriptMode:            script != nil,
+			NoSync:                *noSync,
+			RequiredArtifactGlobs: append([]string(nil), requiredArtifactGlobs...),
 			Routing:               CommandRoutingFor(cfg, leaseID, CommandRoutingRetry),
 			SSHRouting:            CommandRoutingFor(cfg, leaseID, CommandRoutingRetry),
 			StopRouting:           CommandRoutingFor(cfg, leaseID, CommandRoutingStop),

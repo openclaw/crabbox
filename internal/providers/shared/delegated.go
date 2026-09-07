@@ -89,6 +89,20 @@ func FinalizeDelegatedCommandOutcome(exitCode int, err error) core.RunResult {
 	return outcome
 }
 
+// PinDelegatedRunFailure classifies an unclassified setup failure before cleanup.
+// Nonzero public setup codes (including signed process exits) survive without
+// becoming user command exits. Already classified outcomes and their error
+// identities are left unchanged.
+func PinDelegatedRunFailure(result core.RunResult, err error) (core.RunResult, error) {
+	if err == nil || result.Status != "" {
+		return result, err
+	}
+	outcome := core.FinalizeRunResult(core.RunResult{}, err)
+	result.Status, result.ErrorKind = outcome.Status, outcome.ErrorKind
+	result.ExitCode = core.ExitCodeForError(err, 1)
+	return result, ExitErrorWithCause(result.ExitCode, err.Error(), err)
+}
+
 // AppendDelegatedRunFailure adds a terminal cleanup or reporting failure to an
 // already classified primary outcome. A first failure selects firstCode and a
 // provider-error result; later failures preserve the primary code/status and
@@ -149,20 +163,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 		if prepared != nil {
 			defer prepared.Close()
 		}
-		// Classify before secondary cleanup errors can obscure command/cancel
-		// outcomes. Setup exit codes are CLI failures, not user command exits.
-		if retErr != nil && result.Status == "" {
-			outcome := core.FinalizeRunResult(core.RunResult{}, retErr)
-			result.Status, result.ErrorKind = outcome.Status, outcome.ErrorKind
-			var ee core.ExitError
-			result.ExitCode = 1
-			if errors.As(retErr, &ee) && ee.Code != 0 {
-				result.ExitCode = ee.Code
-			}
-			// Pin the primary exit before joining cleanup errors, which may
-			// themselves contain an ExitError with a different code.
-			retErr = ExitErrorWithCause(result.ExitCode, retErr.Error(), retErr)
-		}
+		result, retErr = PinDelegatedRunFailure(result, retErr)
 		appendFailure := func(err error, firstCode int) {
 			result, retErr = AppendDelegatedRunFailure(result, retErr, err, firstCode)
 		}
@@ -170,12 +171,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 			closeErr := command.Close(cleanupCtx)
 			cancel()
-			code := 1
-			var ee core.ExitError
-			if errors.As(closeErr, &ee) && ee.Code != 0 {
-				code = ee.Code
-			}
-			appendFailure(closeErr, code)
+			appendFailure(closeErr, core.ExitCodeForError(closeErr, 1))
 		}
 		if result.Session != nil {
 			shouldStop := acquired && !req.Keep
@@ -320,6 +316,10 @@ type sandboxRunError struct {
 }
 
 func (e sandboxRunError) Unwrap() []error { return []error{e.ExitError, e.cause} }
+
+func (e sandboxRunError) RunClassificationCause() error {
+	return core.PrimaryRunClassificationCause(e.cause)
+}
 
 // ExitErrorWithCause keeps the selected exit code and a display-safe message
 // while retaining the cause for errors.Is/As without printing it again.

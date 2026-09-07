@@ -21186,19 +21186,17 @@ describe("fleet lease identity and idle", () => {
   });
 
   it("exposes admin Tailscale preflight without leaking minted keys", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url === "https://api.tailscale.com/api/v2/oauth/token") {
-          return jsonResponse({ access_token: "oauth-token" });
-        }
-        if (url === "https://api.tailscale.com/api/v2/tailnet/-/keys") {
-          return jsonResponse({ key: "tskey-preflight-secret" });
-        }
-        return jsonResponse({ message: `unexpected ${url}` }, 500);
-      }),
-    );
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url === "https://api.tailscale.com/api/v2/oauth/token") {
+        return jsonResponse({ access_token: "oauth-token" });
+      }
+      if (url === "https://api.tailscale.com/api/v2/tailnet/-/keys") {
+        return jsonResponse({ key: "tskey-preflight-secret" });
+      }
+      return jsonResponse({ message: `unexpected ${url}` }, 500);
+    });
+    vi.stubGlobal("fetch", fetchMock);
     const fleet = testFleet(
       new MemoryStorage(),
       {},
@@ -21208,6 +21206,10 @@ describe("fleet lease identity and idle", () => {
         CRABBOX_TAILSCALE_TAGS: "tag:ci",
       },
     );
+
+    const forbidden = await fleet.fetch(request("POST", "/v1/admin/tailscale-preflight"));
+    expect(forbidden.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
 
     const response = await fleet.fetch(
       request("POST", "/v1/admin/tailscale-preflight", {
@@ -21220,6 +21222,67 @@ describe("fleet lease identity and idle", () => {
     expect(text).toContain('"status":"ok"');
     expect(text).not.toContain("tskey-preflight-secret");
   });
+
+  it.each([
+    { operation: "oauth token", failure: "response", status: "oauth_token_failed" },
+    { operation: "create auth key", failure: "response", status: "auth_key_mint_failed" },
+    { operation: "oauth token", failure: "fetch", status: "auth_key_mint_failed" },
+    { operation: "create auth key", failure: "fetch", status: "auth_key_mint_failed" },
+  ])(
+    "redacts admin Tailscale preflight $operation $failure diagnostics",
+    async ({ operation, failure, status }) => {
+      const clientSecret = "synthetic-client-credential";
+      const token = "synthetic-runtime-credential";
+      const diagnostic =
+        `provider unavailable ${operation === "create auth key" ? `${clientSecret} ${token}` : clientSecret}` +
+        "\n    at providerDiagnostic (provider.js:42:7)";
+      const fetchMock = vi.fn<typeof fetch>();
+      if (operation === "create auth key") {
+        fetchMock.mockResolvedValueOnce(jsonResponse({ access_token: token }));
+      }
+      if (failure === "fetch") {
+        fetchMock.mockRejectedValueOnce(new Error(diagnostic));
+      } else {
+        fetchMock.mockResolvedValueOnce(new Response(diagnostic, { status: 503 }));
+      }
+      vi.stubGlobal("fetch", fetchMock);
+      const fleet = testFleet(
+        new MemoryStorage(),
+        {},
+        {
+          CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
+          CRABBOX_TAILSCALE_CLIENT_SECRET: clientSecret,
+          CRABBOX_TAILSCALE_TAGS: "tag:ci",
+        },
+      );
+
+      const response = await fleet.fetch(
+        request("POST", "/v1/admin/tailscale-preflight", {
+          headers: { "x-crabbox-admin": "true" },
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(text).not.toContain(clientSecret);
+      expect(text).not.toContain(token);
+      expect(text).not.toContain("providerDiagnostic");
+      expect(text).not.toContain("provider.js");
+      const safeDiagnostic =
+        operation === "create auth key" ? "[redacted] [redacted]" : "[redacted]";
+      const message =
+        failure === "fetch"
+          ? `tailscale ${operation} failed: provider unavailable ${safeDiagnostic}`
+          : `tailscale ${operation} failed: http 503`;
+      expect(JSON.parse(text)).toMatchObject({
+        tailscale: {
+          status,
+          message,
+        },
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(operation === "oauth token" ? 1 : 2);
+    },
+  );
 
   it("restricts Daytona snapshot bootstrap to confirmed, bounded admin requests", async () => {
     let activeProviderRequests = 0;
@@ -24639,45 +24702,60 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
   });
 
-  it("translates brokered Tailscale tag ownership denials", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn()
-        .mockResolvedValue(
-          jsonResponse({ message: "requested tags [tag:ci] are invalid or not permitted" }, 400),
+  it.each(["oauth token", "create auth key"])(
+    "translates brokered Tailscale %s tag ownership denials without raw diagnostics",
+    async (operation) => {
+      const fetchMock = vi.fn<typeof fetch>();
+      if (operation === "create auth key") {
+        fetchMock.mockResolvedValueOnce(jsonResponse({ access_token: "oauth-token" }));
+      }
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse(
+          {
+            message:
+              "requested tags [tag:ci] are invalid or not permitted; client-secret oauth-token\n    at providerDiagnostic (provider.js:42:7)",
+          },
+          400,
         ),
-    );
-    const storage = new MemoryStorage();
-    const fleet = testFleet(
-      storage,
-      { hetzner: fakeProvider() },
-      {
-        CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
-        CRABBOX_TAILSCALE_CLIENT_SECRET: "client-secret",
-        CRABBOX_TAILSCALE_TAGS: "tag:crabbox,tag:ci",
-      },
-    );
-    const create = await fleet.fetch(
-      request("POST", "/v1/leases", {
-        body: {
-          leaseID: "cbx_abcdef123456",
-          provider: "hetzner",
-          tailscale: true,
-          tailscaleTags: ["tag:ci"],
-          sshPublicKey: "ssh-ed25519 test",
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const storage = new MemoryStorage();
+      const fleet = testFleet(
+        storage,
+        { hetzner: fakeProvider() },
+        {
+          CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
+          CRABBOX_TAILSCALE_CLIENT_SECRET: "client-secret",
+          CRABBOX_TAILSCALE_TAGS: "tag:crabbox,tag:ci",
         },
-      }),
-    );
-    expect(create.status).toBe(400);
-    const body = (await create.json()) as { error: string; message: string };
-    expect(body).toMatchObject({
-      error: "invalid_tailscale_tags",
-      message: expect.stringContaining("must exactly match the OAuth client's tags"),
-    });
-    expect(body.message).toContain("requested tags [tag:ci] are invalid or not permitted");
-    expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
-  });
+      );
+      const create = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          body: {
+            leaseID: "cbx_abcdef123456",
+            provider: "hetzner",
+            tailscale: true,
+            tailscaleTags: ["tag:ci"],
+            sshPublicKey: "ssh-ed25519 test",
+          },
+        }),
+      );
+      expect(create.status).toBe(400);
+      const text = await create.text();
+      expect(text).not.toContain("client-secret");
+      expect(text).not.toContain("oauth-token");
+      expect(text).not.toContain("providerDiagnostic");
+      expect(text).not.toContain("provider.js");
+      const body = JSON.parse(text) as { error: string; message: string };
+      expect(body).toMatchObject({
+        error: "invalid_tailscale_tags",
+        message: expect.stringContaining("must exactly match the OAuth client's tags"),
+      });
+      expect(body.message).toContain("dedicated deployment-owner tag");
+      expect(body.message).toContain(`tailscale ${operation} failed: http 400`);
+      expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
+    },
+  );
 
   it("reports brokered Tailscale disabled when OAuth secrets are absent", async () => {
     const storage = new MemoryStorage();
@@ -27273,6 +27351,108 @@ describe("fleet lease identity and idle", () => {
     },
   );
 
+  it.each([
+    { mode: "expiry", region: "eu-west-1", group: "sg-shared" },
+    { mode: "cancel", region: "eu-west-1", group: "sg-shared" },
+    { mode: "expiry", region: "us-east-1", group: "sg-other" },
+    { mode: "cancel", region: "us-east-1", group: "sg-other" },
+  ])(
+    "allows ingress during $region $mode deletion but fences its terminal commit",
+    async ({ mode, region, group }) => {
+      const deleteStarted = deferred<void>();
+      const finishDelete = deferred<void>();
+      const finishIngress = deferred<void>();
+      let ingressStarted = false;
+      let providerFinished = false;
+      const fixture = awsIngressTestFleet(async (action) => {
+        if (action === "AuthorizeSecurityGroupIngress") {
+          ingressStarted = true;
+          await finishIngress.promise;
+        }
+        return undefined;
+      });
+      const { storage, activeID, creatingID, fleet, headers } = fixture;
+      const cancelToken = "cat_10000000000000000000000000000000";
+      const generation = "cleanup-ingress-generation";
+      storage.seed(`lease:${activeID}`, {
+        ...storage.value<LeaseRecord>(`lease:${activeID}`)!,
+        region,
+        expiresAt: new Date(Date.now() + (mode === "expiry" ? -1_000 : 60_000)).toISOString(),
+        createAttemptID: cancelToken,
+        createAttemptGeneration: generation,
+        network: {
+          awsSecurityGroupID: group,
+          sshSourceCIDRs: ["198.51.100.10/32"],
+          sshSourceCIDRsComplete: true,
+        },
+      });
+      storage.seed(`create-attempt:${activeID}`, {
+        version: 1,
+        requestedLeaseID: activeID,
+        token: cancelToken,
+        owner: "alice@example.com",
+        org: orgKeyForLabel("example-org"),
+        state: "pending",
+        canonicalLeaseID: activeID,
+        cloudID: "i-active-instance",
+        generation,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+      const deletion = vi
+        .spyOn(AWSProvider.prototype, "releaseLease")
+        .mockImplementation(async () => {
+          deleteStarted.resolve();
+          await finishDelete.promise;
+          providerFinished = true;
+        });
+      const cleanup =
+        mode === "expiry"
+          ? fleet.alarm()
+          : fleet.fetch(
+              request("POST", `/v1/leases/${activeID}/cancel-create`, {
+                headers,
+                body: { createAttemptID: cancelToken },
+              }),
+            );
+      let creating: Promise<Response> | undefined;
+      try {
+        await deleteStarted.promise;
+        creating = fixture.create();
+        await vi.waitFor(() => expect(ingressStarted).toBe(true));
+        expect(providerFinished).toBe(false);
+        finishDelete.resolve();
+        await vi.waitFor(() => expect(providerFinished).toBe(true));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(storage.value<LeaseRecord>(`lease:${activeID}`)).toMatchObject({
+          state: mode === "expiry" ? "active" : "released",
+          cleanupStartedAt: expect.any(String),
+        });
+        expect(storage.value<LeaseRecord>(`lease:${activeID}`)?.cleanupCompletedAt).toBeUndefined();
+        finishIngress.resolve();
+        expect((await creating).status).toBe(201);
+        const completed = await cleanup;
+        expect(completed instanceof Response ? completed.status : undefined).toBe(
+          mode === "expiry" ? undefined : 200,
+        );
+        expect(storage.value<LeaseRecord>(`lease:${activeID}`)).toMatchObject({
+          state: mode === "expiry" ? "expired" : "released",
+          cleanupCompletedAt: expect.any(String),
+        });
+        expect(storage.value<LeaseRecord>(`lease:${creatingID}`)).toMatchObject({
+          state: "active",
+          network: { sshSourceCIDRs: ["198.51.100.20/32"] },
+        });
+        expect(deletion).toHaveBeenCalledTimes(1);
+      } finally {
+        finishDelete.resolve();
+        finishIngress.resolve();
+        await Promise.allSettled([cleanup, ...(creating ? [creating] : [])]);
+        deletion.mockRestore();
+      }
+    },
+  );
+
   it("releases an unrelated AWS lease while a new instance waits for its address", async () => {
     const waitingForAddress = deferred<void>();
     const addressReady = deferred<ProviderMachine>();
@@ -27365,6 +27545,76 @@ describe("fleet lease identity and idle", () => {
       finishAddress.resolve(ownedTestMachine("aws", "i-new-instance"));
       await Promise.allSettled([creating, ...(releasing ? [releasing] : [])]);
       wait.mockRestore();
+    }
+  });
+
+  it("measures queued AWS ingress separately from permission API calls", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-05-02T00:00:00Z"));
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const refreshStarted = deferred<void>();
+    const finishRefresh = deferred<void>();
+    const queued = deferred<void>();
+    let refreshing = true;
+    const fixture = awsIngressTestFleet(async (action) => {
+      if (action === "AuthorizeSecurityGroupIngress") {
+        if (refreshing) {
+          refreshStarted.resolve();
+          await finishRefresh.promise;
+        } else vi.setSystemTime(Date.now() + 7);
+      }
+      return undefined;
+    });
+    const original = EC2SpotClient.prototype.createServerWithFallback;
+    const createSpy = vi
+      .spyOn(EC2SpotClient.prototype, "createServerWithFallback")
+      .mockImplementation(function (config, id, slug, owner, options) {
+        if (!options?.withIngress) throw new Error("AWS fixture did not provide its ingress fence");
+        const withIngress = options.withIngress;
+        return original.call(this, config, id, slug, owner, {
+          ...options,
+          withIngress: (apply, observe) => {
+            const pending = withIngress(apply, observe);
+            queued.resolve();
+            return pending;
+          },
+        });
+      });
+    const refresh = fixture.fleet.fetch(
+      request("POST", `/v1/leases/${fixture.activeID}/heartbeat`, {
+        headers: { ...fixture.headers, "cf-connecting-ip": "198.51.100.30" },
+        body: { idleTimeoutSeconds: 600 },
+      }),
+    );
+    let creating: Promise<Response> | undefined;
+    try {
+      await refreshStarted.promise;
+      creating = fixture.create();
+      await queued.promise;
+      vi.setSystemTime(Date.now() + 41);
+      refreshing = false;
+      finishRefresh.resolve();
+      expect((await refresh).status).toBe(200);
+      expect((await creating).status).toBe(201);
+      const entries = log.mock.calls
+        .map(([value]) => JSON.parse(String(value)))
+        .filter(
+          (value) =>
+            value.component === "crabbox_aws_provisioning" && value.leaseId === fixture.creatingID,
+        );
+      expect(entries).toHaveLength(1);
+      expect(entries[0].steps).toEqual(
+        expect.arrayContaining([
+          { name: "ingress_wait", count: 1, totalMs: 41, errors: 0 },
+          { name: "lifecycle_wait", count: 1, totalMs: 0, errors: 0 },
+          { name: "authorize_ingress", count: 2, totalMs: 14, errors: 0 },
+        ]),
+      );
+    } finally {
+      finishRefresh.resolve();
+      await Promise.allSettled([refresh, ...(creating ? [creating] : [])]);
+      createSpy.mockRestore();
+      log.mockRestore();
     }
   });
 
@@ -48909,6 +49159,68 @@ describe("synthetic acknowledgement reliability", () => {
         ).toBeUndefined();
         expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.cleanupError).toBeUndefined();
       } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([undefined, -100, 500, 60_000])(
+    "arms refreshed AWS ingress without scanning unrelated workspaces (prior alarm offset %s)",
+    async (priorOffset) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const storage = new MemoryStorage();
+      const lease = {
+        ...seedLease(storage),
+        provider: "aws" as const,
+        region: "eu-west-1",
+        network: { awsSecurityGroupID: "sg-heartbeat", sshSourceCIDRsComplete: true },
+      };
+      storage.seed(`lease:${lease.id}`, lease);
+      const fleet = testFleet(storage, {
+        aws: fakeProvider(undefined, {
+          provider: "aws",
+          onRefreshLeaseAccess(current, context) {
+            return {
+              ...current,
+              network: { ...current.network, sshSourceCIDRs: context.requestSourceCIDRs },
+            };
+          },
+        }),
+      });
+      await fleet.ready();
+      const now = Date.now();
+      if (priorOffset !== undefined) await alarmRuntime(storage).scheduleAlarm(now + priorOffset);
+      const entered = deferred<void>();
+      const resume = deferred<void>();
+      storage.beforeList = async (options) => {
+        if (options?.prefix === "workspace:") {
+          entered.resolve();
+          await resume.promise;
+        }
+      };
+      const heartbeat = fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+          headers: { ...headers, "cf-connecting-ip": "198.51.100.44" },
+        }),
+      );
+      try {
+        expect(
+          await Promise.race([
+            heartbeat.then(() => "acknowledged"),
+            entered.promise.then(() => "unrelated scan blocked"),
+          ]),
+        ).toBe("acknowledged");
+        expect((await heartbeat).status).toBe(200);
+        const pending = storage.value<{ targets: Array<{ anchor: LeaseRecord; retryAt: string }> }>(
+          "aws-ingress-reconcile:pending",
+        );
+        expect(pending?.targets).toHaveLength(1);
+        expect(pending?.targets[0]?.anchor.network?.sshSourceCIDRs).toEqual(["198.51.100.44/32"]);
+        expect(pending?.targets[0]?.retryAt).toBe(new Date(now).toISOString());
+        expect(storage.alarm()).toBe(Math.min(now + 1000, now + (priorOffset ?? 1000)));
+      } finally {
+        resume.resolve();
+        await heartbeat;
         vi.useRealTimers();
       }
     },

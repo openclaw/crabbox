@@ -26,6 +26,7 @@ import {
   isRetryableAWSProvisioningError,
   staleCrabboxSSHIngressRules,
 } from "../src/aws";
+import { createAWSProvisioningDiagnostics } from "../src/aws-provisioning-diagnostics";
 import {
   awsMacOSInstanceTypeCandidates,
   awsPromotedAMIConfigKey,
@@ -36,9 +37,320 @@ import {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("aws provider", () => {
+  it("bounds repeated diagnostic buckets and records failures without error payloads", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const diagnostics = createAWSProvisioningDiagnostics("x".repeat(10_000), "r".repeat(10_000));
+    for (let index = 0; index < 10_000; index += 1) diagnostics.record("authorize_duplicate", 0);
+    const failure = new Error("private-error-canary");
+    await expect(
+      diagnostics.measure("instance_create", async () => {
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+    diagnostics.finish("failure");
+    const encoded = String(log.mock.calls[0]![0]);
+    const result = JSON.parse(encoded);
+    expect(result).toMatchObject({
+      outcome: "failure",
+      leaseId: "x".repeat(64),
+      region: "r".repeat(32),
+    });
+    expect(result.steps).toHaveLength(2);
+    expect(result.steps).toEqual(
+      expect.arrayContaining([
+        { name: "authorize_duplicate", count: 10_000, totalMs: 0, errors: 0 },
+        expect.objectContaining({ name: "instance_create", count: 1, errors: 1 }),
+      ]),
+    );
+    expect(encoded).not.toContain("private-error-canary");
+    expect(encoded.length).toBeLessThan(8192);
+  });
+
+  it("keeps overlapping creates on a shared client in separate diagnostic records", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const { client, config } = awsMarketFallbackHarness("");
+    let release!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = client.createServerWithFallback(
+      config,
+      "cbx_000000000001",
+      "first",
+      "alice@example.com",
+      {
+        withIngress: async (apply) => {
+          entered();
+          await gate;
+          return apply(["198.51.100.1/32"]);
+        },
+      },
+    );
+    try {
+      await waiting;
+      await client.createServerWithFallback(
+        config,
+        "cbx_000000000002",
+        "second",
+        "alice@example.com",
+      );
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(String(log.mock.calls[0]![0])).leaseId).toBe("cbx_000000000002");
+    } finally {
+      release();
+      await first;
+    }
+    const records = log.mock.calls.map(([value]) => JSON.parse(String(value)));
+    expect(records.map((value) => value.leaseId)).toEqual(["cbx_000000000002", "cbx_000000000001"]);
+    expect(
+      records.map(
+        (value) =>
+          value.steps.find((step: { name: string }) => step.name === "authorize_ingress").count,
+      ),
+    ).toEqual([2, 4]);
+  });
+
+  it.each([
+    { cidrs: [" 203.0.113.7/32 ", "2001:db8::1/128"] },
+    { cidrs: ["203.0.113.7/32", "2001:db8::1/128", " 2001:db8::1/128 "] },
+  ])(
+    "reports request step costs and deduplicates desired ingress without logging payloads ($cidrs)",
+    async ({ cidrs }) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-05-02T00:00:00Z"));
+      const log = vi.spyOn(console, "info").mockImplementation(() => {});
+      const { client, config } = awsMarketFallbackHarness("");
+      const baseFetch = globalThis.fetch;
+      const actions: string[] = [];
+      const authorized: Array<[string | null, string | null]> = [];
+      vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        if (action === "AuthorizeSecurityGroupIngress") {
+          authorized.push([
+            params.get("IpPermissions.1.FromPort"),
+            params.get("IpPermissions.1.IpRanges.1.CidrIp") ??
+              params.get("IpPermissions.1.Ipv6Ranges.1.CidrIpv6"),
+          ]);
+        }
+        if (action) actions.push(action);
+        if (action === "AuthorizeSecurityGroupIngress" || action === "RevokeSecurityGroupIngress") {
+          const authorize = action === "AuthorizeSecurityGroupIngress";
+          vi.setSystemTime(Date.now() + (authorize ? 7 : 3));
+          return ec2XMLResponse(
+            `<Response><Errors><Error><Code>${authorize ? "InvalidPermission.Duplicate" : "InvalidPermission.NotFound"}</Code><Message>private-rule-canary</Message></Error></Errors></Response>`,
+            400,
+          );
+        }
+        return baseFetch(request);
+      });
+      const result = await client.createServerWithFallback(
+        { ...config, sshPort: "22", sshFallbackPorts: ["443"] },
+        "cbx_abcdef123456",
+        "violet-prawn",
+        "alice@example.com",
+        { withIngress: (apply) => apply(cidrs) },
+      );
+      expect(result.server.id).toBeDefined();
+      expect(actions.filter((action) => action === "AuthorizeSecurityGroupIngress")).toHaveLength(
+        4,
+      );
+      expect(authorized).toEqual([
+        ["22", "203.0.113.7/32"],
+        ["22", "2001:db8::1/128"],
+        ["443", "203.0.113.7/32"],
+        ["443", "2001:db8::1/128"],
+      ]);
+      expect(actions.filter((action) => action === "RevokeSecurityGroupIngress")).toHaveLength(2);
+      expect(log).toHaveBeenCalledTimes(1);
+      const encoded = String(log.mock.calls[0]![0]);
+      const diagnostic = JSON.parse(encoded);
+      expect(diagnostic).toMatchObject({
+        component: "crabbox_aws_provisioning",
+        leaseId: "cbx_abcdef123456",
+        region: "eu-west-1",
+        outcome: "success",
+      });
+      expect(diagnostic.steps).toEqual(
+        expect.arrayContaining([
+          { name: "authorize_ingress", count: 4, totalMs: 28, errors: 4 },
+          { name: "authorize_duplicate", count: 4, totalMs: 0, errors: 0 },
+          { name: "revoke_world", count: 2, totalMs: 6, errors: 2 },
+          { name: "revoke_world_absent", count: 2, totalMs: 0, errors: 0 },
+        ]),
+      );
+      for (const privateValue of [
+        "private-rule-canary",
+        "alice@example.com",
+        "203.0.113.7",
+        "2001:db8",
+        "ssh-ed25519",
+      ])
+        expect(encoded).not.toContain(privateValue);
+      expect(encoded.length).toBeLessThan(8192);
+      log.mockRestore();
+    },
+  );
+
+  it.each([
+    { first: "quota", ingressFails: false },
+    { first: "ingress", ingressFails: false },
+    { first: "quota", ingressFails: true },
+    { first: "ingress", ingressFails: true },
+  ])(
+    "overlaps quota and ingress, joining both before launch or failure ($first first, failure=$ingressFails)",
+    async ({ first, ingressFails }) => {
+      const log = vi.spyOn(console, "info").mockImplementation(() => {});
+      const { client, config, markets } = awsMarketFallbackHarness("");
+      const baseFetch = globalThis.fetch;
+      const quotaGate = Promise.withResolvers<void>();
+      const ingressGate = Promise.withResolvers<void>();
+      const entered = new Set<string>();
+      const completed = new Set<string>();
+      let quotaReads = 0;
+      vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+          quotaReads += 1;
+          entered.add("quota");
+          await quotaGate.promise;
+          const response = await baseFetch(request);
+          completed.add("quota");
+          return response;
+        }
+        return baseFetch(request);
+      });
+      const failure = new Error("ingress preparation failed");
+      let settled = false;
+      const creating = client
+        .createServerWithFallback(config, "cbx_abcdef123456", "violet-prawn", "alice@example.com", {
+          withIngress: async (apply) => {
+            entered.add("ingress");
+            await ingressGate.promise;
+            try {
+              if (ingressFails) throw failure;
+              return await apply(["198.51.100.1/32"]);
+            } finally {
+              completed.add("ingress");
+            }
+          },
+        })
+        .then(
+          (value) => {
+            settled = true;
+            return { value };
+          },
+          (error: unknown) => {
+            settled = true;
+            return { error };
+          },
+        );
+      try {
+        await vi.waitFor(() => expect(entered).toEqual(new Set(["quota", "ingress"])));
+        expect(markets).toEqual([]);
+        (first === "quota" ? quotaGate : ingressGate).resolve();
+        await vi.waitFor(() => expect(completed.has(first)).toBe(true));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(settled).toBe(false);
+        expect(markets).toEqual([]);
+        expect(log).not.toHaveBeenCalled();
+        (first === "quota" ? ingressGate : quotaGate).resolve();
+        const result = await creating;
+        expect(result.error ?? result.value?.server.cloudID).toBe(
+          ingressFails ? failure : "i-fallback",
+        );
+        expect(markets).toEqual(ingressFails ? [] : ["spot"]);
+        expect(quotaReads).toBe(1);
+        expect(log).toHaveBeenCalledTimes(1);
+        const diagnostic = JSON.parse(String(log.mock.calls[0]![0]));
+        expect(diagnostic.outcome).toBe(ingressFails ? "failure" : "success");
+        expect(diagnostic.steps).toContainEqual(
+          expect.objectContaining({ name: "quota", count: 1, errors: 0 }),
+        );
+      } finally {
+        quotaGate.resolve();
+        ingressGate.resolve();
+        await creating;
+      }
+    },
+  );
+
+  it.each([
+    {
+      market: "spot" as const,
+      quota: 32,
+      types: ["c7a.48xlarge", "t3.small"],
+      attempted: ["spot:t3.small"],
+      reads: ["spot"],
+    },
+    {
+      market: "spot" as const,
+      quota: 1,
+      types: ["t3.small"],
+      attempted: ["on-demand:t3.small"],
+      reads: ["spot", "on-demand"],
+    },
+    {
+      market: "on-demand" as const,
+      quota: 1,
+      types: ["t3.small"],
+      attempted: [],
+      reads: ["on-demand"],
+    },
+    {
+      market: "spot" as const,
+      quota: undefined,
+      types: ["t3.small"],
+      attempted: ["spot:t3.small"],
+      reads: ["spot"],
+    },
+  ])("keeps quota admission and market-scoped reuse ($market, quota=$quota)", async (scenario) => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const { client, config, attempted } = awsMarketFallbackHarness(
+      "",
+      scenario.market,
+      scenario.types,
+    );
+    const baseFetch = globalThis.fetch;
+    const reads: string[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (!new URL(request.url).hostname.startsWith("servicequotas.")) return baseFetch(request);
+      const body = (await request.json()) as { QuotaCode: string };
+      const market = body.QuotaCode === awsQuotaCodeForMarket("spot") ? "spot" : "on-demand";
+      reads.push(market);
+      return scenario.quota === undefined
+        ? new Response("quota unavailable", { status: 403 })
+        : Response.json({ Quota: { Value: market === scenario.market ? scenario.quota : 999 } });
+    });
+    const creating = client.createServerWithFallback(
+      config,
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+    );
+    const outcome = await creating.then(
+      () => "created",
+      (error: unknown) => String(error),
+    );
+    expect(outcome).toMatch(scenario.attempted.length ? /^created$/ : /quota/);
+    expect(attempted).toEqual(scenario.attempted);
+    expect(reads).toEqual(scenario.reads);
+    const diagnostic = JSON.parse(String(log.mock.calls[0]![0]));
+    expect(diagnostic.steps).toContainEqual(
+      expect.objectContaining({ name: "quota", count: reads.length }),
+    );
+  });
+
   it("tags every checkpoint AMI backing snapshot with its exact ownership claim", async () => {
     let submitted: URLSearchParams | undefined;
     vi.stubGlobal(
@@ -780,14 +1092,16 @@ describe("aws provider", () => {
     },
   );
 
-  it("rejects invalid configured AWS SSH CIDRs before changing ingress", async () => {
-    const calls: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        calls.push(typeof init?.body === "string" ? init.body : String(input));
-        return new Response(
-          `<DescribeSecurityGroupsResponse>
+  it.each(["999.999.999.999/32", "2001:db8::1/129", " 203.0.113.7/32 ,203.0.113.7/32,invalid"])(
+    "rejects invalid configured AWS SSH CIDRs before changing ingress: %s",
+    async (cidrs) => {
+      const calls: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          calls.push(typeof init?.body === "string" ? init.body : String(input));
+          return new Response(
+            `<DescribeSecurityGroupsResponse>
   <securityGroupInfo>
     <item>
       <groupId>sg-123</groupId>
@@ -795,29 +1109,30 @@ describe("aws provider", () => {
     </item>
   </securityGroupInfo>
 </DescribeSecurityGroupsResponse>`,
-        );
-      }),
-    );
-    const client = new EC2SpotClient(
-      {
-        AWS_ACCESS_KEY_ID: "test",
-        AWS_SECRET_ACCESS_KEY: "secret",
-        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
-        CRABBOX_AWS_SSH_CIDRS: "999.999.999.999/32",
-      } as never,
-      "us-east-1",
-    );
-
-    await expect(
-      client.refreshSSHIngress(
-        leaseConfig({
-          provider: "aws",
-          sshPublicKey: "ssh-ed25519 test",
+          );
         }),
-      ),
-    ).rejects.toThrow("CRABBOX_AWS_SSH_CIDRS entries must be valid");
-    expect(calls).toHaveLength(1);
-  });
+      );
+      const client = new EC2SpotClient(
+        {
+          AWS_ACCESS_KEY_ID: "test",
+          AWS_SECRET_ACCESS_KEY: "secret",
+          CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+          CRABBOX_AWS_SSH_CIDRS: cidrs,
+        } as never,
+        "us-east-1",
+      );
+
+      await expect(
+        client.refreshSSHIngress(
+          leaseConfig({
+            provider: "aws",
+            sshPublicKey: "ssh-ed25519 test",
+          }),
+        ),
+      ).rejects.toThrow("CRABBOX_AWS_SSH_CIDRS entries must be valid");
+      expect(calls).toHaveLength(1);
+    },
+  );
 
   it("waits through transient EC2 instance visibility after RunInstances", async () => {
     vi.useFakeTimers();
@@ -1522,6 +1837,7 @@ describe("aws provider", () => {
   });
 
   it("falls back from unfulfillable spot capacity to on-demand", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
     const { client, config, markets } = awsMarketFallbackHarness("UnfulfillableCapacity");
 
     const result = await client.createServerWithFallback(
@@ -1531,6 +1847,9 @@ describe("aws provider", () => {
       "alice@example.com",
     );
 
+    expect(JSON.parse(String(log.mock.calls[0]![0])).steps).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "image", count: 3, errors: 0 })]),
+    );
     expect(markets).toEqual(["spot", "on-demand"]);
     expect(result.market).toBe("on-demand");
     expect(result.attempts?.[0]).toMatchObject({ market: "spot", category: "capacity" });
@@ -2078,7 +2397,10 @@ describe("aws provider", () => {
     expect(await gunzipBase64(userData)).not.toContain("\napt:\n");
   });
 
-  it("resolves macOS AMIs per fallback instance type", async () => {
+  it.each([false, true])("times macOS fallback AMI discovery (failure: %s)", async (failImage) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-05-02T00:00:00Z"));
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
     const imageQueries: string[] = [];
     const hostTypes: string[] = [];
     const runImages: string[] = [];
@@ -2105,6 +2427,13 @@ describe("aws provider", () => {
           );
         }
         if (action === "DescribeImages") {
+          vi.setSystemTime(Date.now() + 37);
+          if (failImage) {
+            return ec2XMLResponse(
+              "<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>private-image-canary</Message></Error></Errors></Response>",
+              403,
+            );
+          }
           const architecture = params.get("Filter.1.Value.1") ?? "";
           const name = params.get("Filter.2.Value.1") ?? "";
           imageQueries.push(`${name}:${architecture}`);
@@ -2175,7 +2504,7 @@ describe("aws provider", () => {
       } as never,
       "eu-west-1",
     );
-    const result = await client.createServerWithFallback(
+    const creating = client.createServerWithFallback(
       leaseConfig({
         provider: "aws",
         target: "macos",
@@ -2187,16 +2516,38 @@ describe("aws provider", () => {
       "alice@example.com",
     );
 
-    expect(imageQueries).toEqual([
-      "amzn-ec2-macos-14.*-arm64:arm64_mac",
-      "amzn-ec2-macos-15.*-arm64:arm64_mac",
-      "amzn-ec2-macos-14.*:x86_64_mac",
-    ]);
-    expect(hostTypes).toEqual(awsMacOSInstanceTypeCandidates);
-    expect(runTypes).toEqual(["mac1.metal"]);
-    expect(runImages).toEqual(["ami-x86-mac"]);
-    expect(result.serverType).toBe("mac1.metal");
-    expect(result.server.hostID).toBe("h-mac1");
+    const outcome = await creating.then(
+      (result) => ({ result, error: "" }),
+      (error: unknown) => ({ result: undefined, error: String(error) }),
+    );
+    expect(outcome.error).toMatch(failImage ? /UnauthorizedOperation/ : /^$/);
+    const encoded = String(log.mock.calls[0]![0]);
+    expect(JSON.parse(encoded)).toMatchObject({
+      outcome: failImage ? "failure" : "success",
+      steps: expect.arrayContaining([
+        {
+          name: "image",
+          count: failImage ? 2 : 1 + awsMacOSInstanceTypeCandidates.length,
+          totalMs: failImage ? 37 : 111,
+          errors: failImage ? 1 : 0,
+        },
+      ]),
+    });
+    expect(encoded).not.toContain("private-image-canary");
+    expect(imageQueries).toEqual(
+      failImage
+        ? []
+        : [
+            "amzn-ec2-macos-14.*-arm64:arm64_mac",
+            "amzn-ec2-macos-15.*-arm64:arm64_mac",
+            "amzn-ec2-macos-14.*:x86_64_mac",
+          ],
+    );
+    expect(hostTypes).toEqual(failImage ? [] : awsMacOSInstanceTypeCandidates);
+    expect(runTypes).toEqual(failImage ? [] : ["mac1.metal"]);
+    expect(runImages).toEqual(failImage ? [] : ["ami-x86-mac"]);
+    expect(outcome.result?.serverType).toBe(failImage ? undefined : "mac1.metal");
+    expect(outcome.result?.server.hostID).toBe(failImage ? undefined : "h-mac1");
   });
 
   it("retries macOS launch on another discovered host after host capacity is exhausted", async () => {
@@ -2928,6 +3279,11 @@ describe("aws provider", () => {
   });
 
   it("waits for transient AMIs before launching from EBS snapshots", async () => {
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      expect(new URL(request.url).hostname).toBe("servicequotas.eu-west-1.amazonaws.com");
+      return Response.json({ Quota: { Value: 999 } });
+    });
     const client = new EC2SpotClient(
       { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
       "eu-west-1",
@@ -2936,7 +3292,6 @@ describe("aws provider", () => {
       registerSnapshotImage: () => Promise<string>;
       waitForImageAvailable: (imageID: string) => Promise<string>;
       ensureSecurityGroup: () => Promise<string>;
-      quotaPreflightAttempt: () => Promise<undefined>;
       ec2: (action: string, params?: Record<string, string>) => Promise<unknown>;
     };
     const calls: string[] = [];
@@ -2956,7 +3311,6 @@ describe("aws provider", () => {
       calls.push("security-group");
       return "sg-123";
     };
-    client.quotaPreflightAttempt = async () => undefined;
     client.ec2 = async (action, params) => {
       calls.push(`${action}:${params?.ImageId ?? ""}`);
       if (action === "RunInstances") {
@@ -3007,7 +3361,6 @@ describe("aws provider", () => {
       ensureSSHKey: () => Promise<void>;
       registerSnapshotImage: () => Promise<string>;
       waitForImageAvailable: (imageID: string) => Promise<string>;
-      quotaPreflightAttempt: () => Promise<undefined>;
       ec2: (action: string, params?: Record<string, string>) => Promise<unknown>;
     };
     const calls: string[] = [];
@@ -3022,7 +3375,6 @@ describe("aws provider", () => {
       calls.push(`wait:${imageID}`);
       throw new Error("timed out waiting");
     };
-    client.quotaPreflightAttempt = async () => undefined;
     client.ec2 = async (action, params) => {
       calls.push(`${action}:${params?.ImageId ?? ""}`);
       return {};

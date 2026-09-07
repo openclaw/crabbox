@@ -71,6 +71,17 @@ const (
 
 var reservedRunEnvNames = []string{runEnvLeaseID, runEnvRunID, runEnvSlug}
 
+// IsRunExecutionMetadataEnvName reports whether core owns this exact environment
+// name. Providers without command-env support may omit this local run metadata.
+func IsRunExecutionMetadataEnvName(name string) bool {
+	for _, reserved := range reservedRunEnvNames {
+		if strings.EqualFold(name, reserved) {
+			return true
+		}
+	}
+	return false
+}
+
 func runExecutionMetadata(leaseID, runID, slug string) map[string]string {
 	return map[string]string{
 		runEnvLeaseID: strings.TrimSpace(leaseID),

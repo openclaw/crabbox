@@ -135,7 +135,7 @@ func newBlaxelClient(cfg Config, rt Runtime) (Client, error) {
 		return nil, exit(2, "provider=blaxel needs an API key; load CRABBOX_BLAXEL_API_KEY or BL_API_KEY from a secret manager")
 	}
 	workspace := strings.TrimSpace(cfg.Blaxel.Workspace)
-	httpClient, dataHTTPClient := blaxelHTTPClients(rt.HTTP, blaxelControlTimeout)
+	httpClient, dataHTTPClient := shared.ControlAndDataHTTPClients(rt.HTTP, blaxelControlTimeout)
 	return &restClient{
 		base:      baseURL,
 		apiKey:    apiKey,
@@ -144,13 +144,6 @@ func newBlaxelClient(cfg Config, rt Runtime) (Client, error) {
 		http:      secureHTTPClient(httpClient),
 		dataHTTP:  secureHTTPClient(dataHTTPClient),
 	}, nil
-}
-
-func blaxelHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
-	if injected != nil {
-		return injected, injected
-	}
-	return &http.Client{Timeout: controlTimeout}, &http.Client{}
 }
 
 func BlaxelAPIKey(cfg Config) string {
