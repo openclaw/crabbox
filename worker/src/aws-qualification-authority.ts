@@ -5,11 +5,13 @@ import { XMLParser } from "fast-xml-parser";
 import { sha256Hex } from "./auth";
 import {
   awsQualificationAttestationVersion,
+  awsQualificationCleanupGraceMs,
   awsQualificationInstanceTypes,
   awsQualificationMaxRunMs,
   type AWSQualificationAttestation,
   type AWSQualificationControllerProps,
   type AWSQualificationFinalReceipt,
+  type AWSQualificationNetwork,
   type AWSQualificationOperationEvidence,
   type AWSQualificationRegistryRecord,
   type AWSQualificationRequest,
@@ -137,6 +139,19 @@ interface AWSQualificationRunState {
   policyHash: string;
   finalizingAt?: string;
   finalizedAt?: string;
+  computeFinalizedAt?: string;
+  executor?: {
+    tokenDigest: string;
+    ipv4?: string;
+    armedAt?: string;
+    consumedAt?: string;
+  };
+  network?: {
+    attemptId: string;
+    dispatchedUntil?: string;
+    ruleId?: string;
+    clearedAt?: string;
+  };
 }
 
 interface AWSQualificationRegistryRetirement {
@@ -200,6 +215,38 @@ export class AWSQualificationController extends WorkerEntrypoint<
   AWSQualificationAuthorityEnv,
   AWSQualificationControllerProps
 > {
+  async prepareExecutor(runId: string, tokenDigest: string): Promise<void> {
+    await qualificationRun(this.env, runId).prepareExecutor(this.ctx.props, tokenDigest);
+  }
+
+  async executorReady(runId: string, token: string, ipv4: string): Promise<{ armed: boolean }> {
+    return await qualificationRun(this.env, runId).executorReady(this.ctx.props, token, ipv4);
+  }
+
+  async network(runId: string): Promise<AWSQualificationNetwork> {
+    return await qualificationRun(this.env, runId).networkStatus(this.ctx.props);
+  }
+
+  async prepareNetwork(runId: string): Promise<AWSQualificationNetwork> {
+    return await qualificationRun(this.env, runId).prepareNetwork(this.ctx.props);
+  }
+
+  async dispatchNetwork(runId: string): Promise<{ dispatchedUntil: string }> {
+    return await qualificationRun(this.env, runId).dispatchNetwork(this.ctx.props);
+  }
+
+  async confirmNetwork(runId: string, ruleId: string): Promise<void> {
+    await qualificationRun(this.env, runId).confirmNetwork(this.ctx.props, ruleId);
+  }
+
+  async clearNetwork(runId: string, attemptId: string): Promise<void> {
+    await qualificationRun(this.env, runId).clearNetwork(this.ctx.props, attemptId);
+  }
+
+  async armExecution(runId: string): Promise<void> {
+    await qualificationRun(this.env, runId).armExecution(this.ctx.props);
+  }
+
   async enroll(identity: AWSQualificationRunIdentity): Promise<void> {
     await this.claim(identity);
   }
@@ -387,6 +434,148 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     this.signer = signer;
   }
 
+  async prepareExecutor(
+    controller: AWSQualificationControllerProps,
+    tokenDigest: string,
+  ): Promise<void> {
+    await this.serialized(async () => {
+      const run = await this.controllerRun(controller, true);
+      if (!/^[0-9a-f]{64}$/.test(tokenDigest)) throw new Error("invalid preflight digest");
+      if (run.executor && run.executor.tokenDigest !== tokenDigest)
+        throw new Error("preflight already bound");
+      run.executor ??= { tokenDigest };
+      await this.ctx.storage.put(stateKey, run);
+    });
+  }
+
+  async executorReady(
+    controller: AWSQualificationControllerProps,
+    token: string,
+    ipv4: string,
+  ): Promise<{ armed: boolean }> {
+    return await this.serialized(async () => {
+      const run = await this.controllerRun(controller, true);
+      if (!/^[0-9a-f]{64}$/.test(token) || (await sha256Hex(token)) !== run.executor?.tokenDigest) {
+        throw new Error("invalid preflight capability");
+      }
+      const executor = run.executor;
+      if (!executor || executor.consumedAt) throw new Error("preflight capability consumed");
+      const octets = ipv4.split(".");
+      if (
+        octets.length !== 4 ||
+        octets.some((part) => !/^(0|[1-9][0-9]{0,2})$/.test(part) || Number(part) > 255)
+      ) {
+        throw new Error("invalid executor IPv4");
+      }
+      if (executor.ipv4 && executor.ipv4 !== ipv4) throw new Error("executor address is immutable");
+      executor.ipv4 = ipv4;
+      // The only successful release burns the capability before candidate bytes may run.
+      if (executor.armedAt) executor.consumedAt = new Date().toISOString();
+      await this.ctx.storage.put(stateKey, run);
+      return { armed: Boolean(executor.armedAt) };
+    });
+  }
+
+  async networkStatus(
+    controller: AWSQualificationControllerProps,
+  ): Promise<AWSQualificationNetwork> {
+    const run = await this.controllerRun(controller);
+    return {
+      runId: run.identity.runId,
+      attempt: qualificationAttempt(run.identity.runId),
+      owner: run.identity.owner,
+      deploymentHash: run.identity.deploymentHash,
+      candidateSha: run.identity.candidateSha,
+      expiresAt: run.identity.expiresAt,
+      cleanupNotAfter: new Date(
+        Date.parse(run.identity.expiresAt) + awsQualificationCleanupGraceMs,
+      ).toISOString(),
+      accountId: run.policy.accountId,
+      region: run.policy.region,
+      securityGroupId: run.policy.securityGroupId,
+      ...(run.executor?.ipv4 ? { ipv4: run.executor.ipv4 } : {}),
+      ...run.network,
+    };
+  }
+
+  async prepareNetwork(
+    controller: AWSQualificationControllerProps,
+  ): Promise<AWSQualificationNetwork> {
+    await this.serialized(async () => {
+      const run = await this.controllerRun(controller, true);
+      if (!run.executor?.ipv4) throw new Error("executor not registered");
+      run.network ??= {
+        attemptId: await sha256Hex(`network:${run.identity.runId}:${run.identity.deploymentHash}`),
+      };
+      if (run.network.clearedAt) throw new Error("network already cleared");
+      await this.ctx.storage.put(stateKey, run);
+    });
+    return await this.networkStatus(controller);
+  }
+
+  async dispatchNetwork(
+    controller: AWSQualificationControllerProps,
+  ): Promise<{ dispatchedUntil: string }> {
+    return await this.serialized(async () => {
+      const run = await this.controllerRun(controller, true);
+      if (!run.network || run.network.dispatchedUntil || run.network.clearedAt)
+        throw new Error("network dispatch is not prepared");
+      // External CLI calls are bounded to 25 seconds. Cleanup also waits and reconciles
+      // an ambiguous in-flight write before it can attest absence.
+      run.network.dispatchedUntil = new Date(Date.now() + 60_000).toISOString();
+      await this.ctx.storage.put(stateKey, run);
+      return { dispatchedUntil: run.network.dispatchedUntil };
+    });
+  }
+
+  async confirmNetwork(controller: AWSQualificationControllerProps, ruleId: string): Promise<void> {
+    await this.serialized(async () => {
+      const run = await this.controllerRun(controller);
+      if (!/^sgr-[0-9a-f]+$/.test(ruleId) || !run.network?.dispatchedUntil || run.network.clearedAt)
+        throw new Error("invalid network receipt");
+      if (run.network.ruleId && run.network.ruleId !== ruleId)
+        throw new Error("network receipt changed");
+      run.network.ruleId = ruleId;
+      await this.ctx.storage.put(stateKey, run);
+    });
+  }
+
+  async clearNetwork(
+    controller: AWSQualificationControllerProps,
+    attemptId: string,
+  ): Promise<void> {
+    await this.serialized(async () => {
+      const run = await this.controllerRun(controller);
+      if (!run.finalizingAt || run.network?.attemptId !== attemptId)
+        throw new Error("network cleanup identity mismatch");
+      if (Date.parse(run.network.dispatchedUntil ?? "") > Date.now())
+        throw new Error("network dispatch is still in flight");
+      run.network.clearedAt ??= new Date().toISOString();
+      await this.ctx.storage.put(stateKey, run);
+    });
+  }
+
+  async armExecution(controller: AWSQualificationControllerProps): Promise<void> {
+    await this.serialized(async () => {
+      const run = await this.controllerRun(controller, true);
+      if (!run.executor?.ipv4 || !run.network?.ruleId || run.network.clearedAt)
+        throw new Error("network admission is not confirmed");
+      run.executor.armedAt ??= new Date().toISOString();
+      await this.ctx.storage.put(stateKey, run);
+    });
+  }
+
+  private async controllerRun(
+    controller: AWSQualificationControllerProps,
+    active = false,
+  ): Promise<AWSQualificationRunState> {
+    const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
+    if (!run) throw new Error("AWS qualification run is not enrolled");
+    validateController(controller, run.identity.deploymentHash);
+    if (active) return await this.requireActiveRun(run.identity, false);
+    return run;
+  }
+
   async enroll(
     controller: AWSQualificationControllerProps,
     identity: AWSQualificationRunIdentity,
@@ -481,6 +670,13 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         ...(run.finalizingAt ? { finalizingAt: run.finalizingAt } : {}),
         finalized: Boolean(run.finalizedAt),
         ...(run.finalizedAt ? { finalizedAt: run.finalizedAt } : {}),
+        ...(run.executor?.armedAt ? { executionArmedAt: run.executor.armedAt } : {}),
+        network: {
+          registered: Boolean(run.executor?.ipv4),
+          ...(run.network ? { intentDigest: run.network.attemptId } : {}),
+          ...(run.network?.ruleId ? { ruleDigest: await sha256Hex(run.network.ruleId) } : {}),
+          ...(run.network?.clearedAt ? { clearedAt: run.network.clearedAt } : {}),
+        },
         operations,
         ...(finalReceipt ? { finalReceipt } : {}),
       };
@@ -943,6 +1139,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
 
   private async requireActiveRun(
     identity: AWSQualificationRunIdentity,
+    requireArmed = true,
   ): Promise<AWSQualificationRunState> {
     const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
     if (!run || canonicalJSON(run.identity) !== canonicalJSON(identity)) {
@@ -961,6 +1158,8 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     if (authority.sha !== run.authoritySha || authority.version !== run.authorityVersion) {
       throw new Error("AWS qualification authority deployment changed after enrollment");
     }
+    if (requireArmed && !run.executor?.armedAt)
+      throw new Error("AWS qualification execution is not armed");
     return run;
   }
 
@@ -970,6 +1169,16 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     const run = await this.persistFinalizationFence(controller);
     if (!run) return await this.ledger();
     if (run.finalizedAt) return await this.ledger();
+    if (run.computeFinalizedAt) {
+      if (run.network && !run.network.clearedAt) {
+        await this.ctx.storage.setAlarm(Date.now() + cleanupRetryMs);
+        throw new Error("AWS qualification network cleanup incomplete");
+      }
+      run.finalizedAt = new Date().toISOString();
+      await this.ctx.storage.put(stateKey, run);
+      await this.ctx.storage.deleteAlarm();
+      return await this.ledger();
+    }
     const ledger = await this.ledger();
     const policy = run.policy;
     const failures: string[] = [];
@@ -1045,9 +1254,14 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       throw new Error(`AWS qualification cleanup incomplete: ${failures.join("; ")}`);
     }
     await this.ctx.storage.put(ledgerKey, emptyLedger(recoveredLedger.launchCount));
-    run.finalizedAt = new Date().toISOString();
+    run.computeFinalizedAt = new Date().toISOString();
+    if (!run.network || run.network.clearedAt) run.finalizedAt = run.computeFinalizedAt;
     await this.ctx.storage.put(stateKey, run);
     await this.completeFinalReceipt(emptyLedger(recoveredLedger.launchCount), []);
+    if (!run.finalizedAt) {
+      await this.ctx.storage.setAlarm(Date.now() + cleanupRetryMs);
+      throw new Error("AWS qualification network cleanup incomplete");
+    }
     await this.ctx.storage.deleteAlarm();
     return recoveredLedger;
   }
@@ -2133,6 +2347,7 @@ function injectAuthorityTags(
 ): void {
   tags.set("crabbox_qualification_owner", boundedText(identity.owner, 256));
   tags.set("crabbox_qualification_run", identity.runId);
+  tags.set("crabbox_qualification_attempt", qualificationAttempt(identity.runId));
   tags.set("crabbox_qualification_sha", identity.candidateSha);
   tags.set("crabbox_qualification_expiry", identity.expiresAt);
   tags.set("crabbox_qualification_op", opId);
@@ -2259,10 +2474,19 @@ function updateLedgerFromResponse(
   }
 }
 
+function qualificationAttempt(runId: string): string {
+  // Protected deployment constructs run IDs from the workflow run and attempt.
+  // Candidate-supplied tags cannot select or override this ownership boundary.
+  const attempt = /-([1-9][0-9]*)$/.exec(runId)?.[1];
+  if (!attempt) throw new Error("AWS qualification run id must end with its attempt");
+  return attempt;
+}
+
 function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(identity.runId)) {
     throw new Error("AWS qualification run id is malformed");
   }
+  qualificationAttempt(identity.runId);
   if (!/^[0-9a-f]{40}$/.test(identity.candidateSha)) {
     throw new Error("AWS qualification candidate SHA must be exact");
   }

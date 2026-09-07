@@ -5,7 +5,7 @@ on:
     workflows: ["Image qualification"]
     types: [completed]
   schedule:
-    - cron: "23 * * * *"
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -37,6 +37,10 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$GITHUB_WORKFLOW_SHA" ]]
       - name: Discover, finalize, verify, and retire
         env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_NETWORK_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_NETWORK_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_NETWORK_SESSION_TOKEN }}
+          QUALIFICATION_NETWORK_CREDENTIAL_EXPIRES_AT: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_NETWORK_EXPIRES_AT }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           QUALIFICATION_CONTROLLER_TOKEN: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_CONTROLLER_TOKEN }}

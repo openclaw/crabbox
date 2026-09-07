@@ -82,7 +82,14 @@ function installAPI(file) {
       }
       assert.ok(state.run, "no active mutation without a registered run");
       if (route === "/begin-finalization") return json({ finalizing: true });
-      if (route === "/finalize") return json({ finalized: true });
+      if (route === "/network") {
+        if (options.networkFailure) return json({ error: "unavailable" }, 503);
+        return json({});
+      }
+      if (route === "/finalize") {
+        if (options.computeFailure) return json({ error: "unavailable" }, 503);
+        return json({ finalized: true });
+      }
       if (route === "/attest") {
         return json({ finalized: true, finalReceipt: { finalCounts: { instances: 0 } } });
       }
@@ -229,6 +236,24 @@ if (process.env.QUALIFICATION_TEST_STATE) {
     state.events.filter((event) => event === `DELETE /workers/scripts/${controller}`);
   const calls = (state) => state.events.filter((event) => /^POST \/(?!workers)/.test(event));
 
+  for (const failure of ["networkFailure", "computeFailure"]) {
+    test(`cleanup continues across ${failure} and retains durable recovery`, (t) => {
+      const result = fixture(t, {
+        active: true,
+        controller: true,
+        candidate: true,
+        [failure]: true,
+      })();
+      assert.equal(result.status, 1);
+      assert.ok(result.state.events.includes("POST /network"));
+      assert.ok(result.state.events.includes("POST /finalize"));
+      assert.ok(result.state.events.includes(`DELETE /workers/scripts/${candidate}`));
+      assert.ok(result.state.run);
+      assert.ok(result.state.controller);
+      assert.ok(!result.state.events.includes("POST /retire"));
+    });
+  }
+
   test("a second reap is idle after successful finalization removed the controller", (t) => {
     const reap = fixture(t, { active: true, controller: true, candidate: true });
     const first = reap();
@@ -267,6 +292,7 @@ if (process.env.QUALIFICATION_TEST_STATE) {
     assert.deepEqual(calls(result.state), [
       "POST /discover",
       "POST /begin-finalization",
+      "POST /network",
       "POST /finalize",
       "POST /attest",
       "POST /finalize",

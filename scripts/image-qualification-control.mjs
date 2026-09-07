@@ -7,6 +7,8 @@ import process from "node:process";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { qualificationNetwork } from "./image-qualification-network.mjs";
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sha40 = /^[0-9a-f]{40}$/;
 const sha64 = /^[0-9a-f]{64}$/;
@@ -927,6 +929,7 @@ async function controllerCall(url, token, action, value = {}) {
       "content-type": "application/json",
     },
     body: JSON.stringify(value),
+    signal: AbortSignal.timeout(150_000),
   });
   const data = await response.json();
   if (!response.ok)
@@ -1018,6 +1021,7 @@ async function deploy() {
   const adminToken = crypto.randomBytes(32).toString("hex");
   const sharedToken = crypto.randomBytes(32).toString("hex");
   const executorToken = crypto.randomBytes(32).toString("hex");
+  const preflightToken = crypto.randomBytes(32).toString("hex");
   const controllerToken = required("QUALIFICATION_CONTROLLER_TOKEN");
   const placeholderIdentity = { ...baseIdentity, deploymentHash: "0".repeat(64) };
   const stagingBindings = candidateBindings(placeholderIdentity, adminToken, sharedToken, config);
@@ -1089,7 +1093,9 @@ async function deploy() {
         admin: digest(adminToken),
         shared: digest(sharedToken),
         executor: digest(executorToken),
+        preflight: digest(preflightToken),
       },
+      controllerSourceSha256: digest(fs.readFileSync(controllerSource)),
     }),
   );
   const identity = { ...baseIdentity, deploymentHash };
@@ -1147,6 +1153,10 @@ async function deploy() {
   const record = await controllerCall(controllerURL, controllerToken, "claim", { identity });
   if (record.runId !== runId || record.cleanupState !== "claimed")
     throw new Error("authority claim readback mismatch");
+  await controllerCall(controllerURL, controllerToken, "prepare-executor", {
+    runId,
+    tokenDigest: digest(preflightToken),
+  });
   const attestation = await controllerCall(controllerURL, controllerToken, "attest", { runId });
   const protectedIdentity = {
     ...identity,
@@ -1222,6 +1232,8 @@ async function deploy() {
   appendOutput("relay_binding_digest", relayBindingDigest);
   appendOutput("relay_url", relayURL);
   appendOutput("executor_token", executorToken);
+  appendOutput("preflight_token", preflightToken);
+  appendOutput("controller_url", controllerURL);
   appendOutput("deployment_hash", deploymentHash);
   appendOutput("candidate_sha", identity.candidateSha);
   appendOutput("candidate_version", candidateVersion);
@@ -1259,6 +1271,20 @@ async function arm() {
     runId: expected.runId,
   });
   verifyAttestationIdentity(attestation, expected, { finalized: false });
+  const network = await waitForRegistration(controllerURL, token, expected);
+  const receipt = await controllerCall(controllerURL, token, "prepare-network", {
+    runId: expected.runId,
+  });
+  if (receipt.ipv4 !== network.ipv4) throw new Error("executor registration changed");
+  const { ruleId } = await qualificationNetwork(receipt, {
+    dispatch: () =>
+      controllerCall(controllerURL, token, "dispatch-network", { runId: expected.runId }),
+  });
+  await controllerCall(controllerURL, token, "confirm-network", { runId: expected.runId, ruleId });
+  // Revalidate after the admission wait, immediately before releasing this executor.
+  await verifyCandidateIdentity({ artifact: true });
+  await verifyExecutionDeployment(cf, expected);
+  await controllerCall(controllerURL, token, "arm-execution", { runId: expected.runId });
   const armedAt = new Date().toISOString();
   if (Date.parse(armedAt) >= Date.parse(expected.expiresAt)) {
     throw new Error("qualification expired before protected execution admission");
@@ -1282,6 +1308,63 @@ async function arm() {
     armedAt,
   });
   appendOutput("armed_at", armedAt);
+}
+
+async function waitForRegistration(url, token, expected) {
+  const deadline = Math.min(Date.now() + 240_000, Date.parse(expected.expiresAt));
+  while (Date.now() < deadline) {
+    const network = await controllerCall(url, token, "network", { runId: expected.runId });
+    if (network.runId !== expected.runId || network.deploymentHash !== expected.deploymentHash) {
+      throw new Error("network registration identity mismatch");
+    }
+    if (network.ipv4) return network;
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  throw new Error("executor registration timed out");
+}
+
+async function executorPreflight() {
+  for (const name of [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "CLOUDFLARE_API_TOKEN",
+    "QUALIFICATION_CONTROLLER_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_URL",
+  ]) {
+    if (Object.hasOwn(process.env, name))
+      throw new Error("privileged executor capability is present");
+  }
+  const url = new URL(required("QUALIFICATION_PREFLIGHT_URL"));
+  if (
+    url.protocol !== "https:" ||
+    !url.hostname.endsWith(".workers.dev") ||
+    url.pathname !== "/" ||
+    url.search ||
+    url.hash ||
+    url.username ||
+    url.password
+  )
+    throw new Error("invalid preflight endpoint");
+  const token = required("QUALIFICATION_PREFLIGHT_TOKEN", sha64);
+  const runId = required("QUALIFICATION_RUN_ID", runIdPattern);
+  const deadline = Date.now() + 300_000;
+  while (Date.now() < deadline) {
+    const response = await fetch(new URL("/executor", url), {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ runId }),
+      signal: AbortSignal.timeout(15_000),
+      redirect: "error",
+    });
+    const state = await response.json();
+    if (!response.ok || typeof state.armed !== "boolean")
+      throw new Error("executor preflight rejected");
+    if (state.armed) return;
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  throw new Error("protected execution admission timed out");
 }
 
 async function namespaceResidue(cf, worker) {
@@ -1598,12 +1681,34 @@ async function cleanupRun({
       recordQualificationFailure(error);
     }
   }
+  const cleanupFailures = [];
+  const attempt = async (label, operation) => {
+    try {
+      return await operation();
+    } catch {
+      cleanupFailures.push(`${label} cleanup incomplete`);
+    }
+  };
+  // Each owner gets a teardown attempt even if another owner is unavailable.
+  // Keep the controller and registry recovery record until every path is verified.
+  await attempt("fence", () =>
+    controllerCall(controllerURL, token, "begin-finalization", { runId: run.runId }),
+  );
+  await attempt("relay", () => deleteRelay(cf, relayWorker));
+  await attempt("network", async () => {
+    const network = await controllerCall(controllerURL, token, "network", { runId: run.runId });
+    if (network.attemptId && !network.clearedAt) {
+      await qualificationNetwork(network, { remove: true });
+      await controllerCall(controllerURL, token, "clear-network", {
+        runId: run.runId,
+        attemptId: network.attemptId,
+      });
+    }
+  });
+  await attempt("compute", () =>
+    controllerCall(controllerURL, token, "finalize", { runId: run.runId }),
+  );
   try {
-    // Persist the authority fence before revoking ingress. Requests already admitted
-    // by the relay can then reach neither the signer nor a reopened run.
-    await controllerCall(controllerURL, token, "begin-finalization", { runId: run.runId });
-    await deleteRelay(cf, relayWorker);
-    await controllerCall(controllerURL, token, "finalize", { runId: run.runId });
     firstAttestation = await controllerCall(controllerURL, token, "attest", { runId: run.runId });
     if (requireProof) {
       try {
@@ -1613,7 +1718,12 @@ async function cleanupRun({
         recordQualificationFailure(error);
       }
     }
-    await deleteCandidate(cf, run.candidateWorker);
+  } catch {
+    cleanupFailures.push("attestation cleanup incomplete");
+  }
+  await attempt("candidate", () => deleteCandidate(cf, run.candidateWorker));
+  try {
+    if (cleanupFailures.length) throw new Error(cleanupFailures.join("; "));
     await controllerCall(controllerURL, token, "finalize", { runId: run.runId });
     const finalAttestation = await controllerCall(controllerURL, token, "attest", {
       runId: run.runId,
@@ -1687,6 +1797,22 @@ function readExecutionProof() {
 }
 
 export function verifyQualificationEvidence(attestation, proof) {
+  const armedAt = Date.parse(attestation.executionArmedAt ?? "");
+  const clearedAt = Date.parse(attestation.network?.clearedAt ?? "");
+  if (
+    !Number.isFinite(armedAt) ||
+    !Number.isFinite(clearedAt) ||
+    attestation.network?.registered !== true ||
+    !sha64.test(attestation.network?.intentDigest ?? "") ||
+    !sha64.test(attestation.network?.ruleDigest ?? "") ||
+    armedAt < Date.parse(attestation.enrolledAt) ||
+    armedAt >= Date.parse(attestation.expiresAt) ||
+    clearedAt < Date.parse(attestation.finalizingAt) ||
+    clearedAt > Date.parse(attestation.finalizedAt) ||
+    (attestation.operations ?? []).some((operation) => Date.parse(operation.requestedAt) < armedAt)
+  ) {
+    throw new Error("attestation does not prove executor admission and network cleanup");
+  }
   const operations = attestation?.operations ?? [];
   const millisecondTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
   const probeStarted = proof?.spoof?.startedAt ?? "";
@@ -1880,6 +2006,7 @@ async function main() {
   }
   if (command === "deploy") return await deploy();
   if (command === "arm") return await arm();
+  if (command === "executor-preflight") return await executorPreflight();
   if (command === "finalize") {
     let identityFailure;
     try {
