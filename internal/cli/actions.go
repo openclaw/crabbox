@@ -1188,6 +1188,7 @@ func interpolateLocalActionsValue(value string, inputs, env map[string]string, w
 
 var localActionsExpressionPattern = regexp.MustCompile(`\$\{\{\s*([^}]+?)\s*\}\}`)
 var localActionsDirectSecretPattern = regexp.MustCompile(`^secrets\.[A-Za-z_][A-Za-z0-9_]*$`)
+var localActionsPnpmVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 
 func shouldSkipLocalHydrateStep(expr string, inputs, env map[string]string, stepOutputs map[string]map[string]string) (bool, error) {
 	expr = strings.TrimSpace(expr)
@@ -1218,9 +1219,28 @@ func localHydrateUsesScript(step localHydrateStep, ctx localHydrateScriptContext
 			return "", nil, err
 		}
 		return "# actions/checkout handled by Crabbox sync/git seed\n", nil, nil
-	case strings.HasPrefix(uses, "actions/setup-node@"):
-		if err := validateLocalActionWithKeys("actions/setup-node", step.With, "node-version", "node-version-file", "check-latest"); err != nil {
+	case strings.HasPrefix(uses, "pnpm/action-setup@"):
+		if err := validateLocalActionWithKeys("pnpm/action-setup", step.With, "version"); err != nil {
 			return "", nil, err
+		}
+		version, err := localHydrateWithInput(step, []string{"version"}, "", ctx.Inputs, env, ctx.Workdir, ctx.RepoRoot, ctx.StepOutputs)
+		if err != nil {
+			return "", nil, err
+		}
+		if !localActionsPnpmVersionPattern.MatchString(version) {
+			return "", nil, exit(2, "local Actions hydration requires pnpm/action-setup to specify an explicit exact version (major.minor.patch); rerun with --github-runner for version ranges or package.json inference")
+		}
+		return "__crabbox_setup_pnpm " + shellQuote(version) + "\n", nil, nil
+	case strings.HasPrefix(uses, "actions/setup-node@"):
+		if err := validateLocalActionWithKeys("actions/setup-node", step.With, "node-version", "node-version-file", "check-latest", "cache"); err != nil {
+			return "", nil, err
+		}
+		cache, err := localHydrateWithInput(step, []string{"cache"}, "", ctx.Inputs, env, ctx.Workdir, ctx.RepoRoot, ctx.StepOutputs)
+		if err != nil {
+			return "", nil, err
+		}
+		if cache != "" && cache != "pnpm" {
+			return "", nil, exit(2, "local Actions hydration does not support actions/setup-node cache %q; rerun with --github-runner when the workflow needs full GitHub Actions semantics", cache)
 		}
 		version, err := localHydrateWithInput(step, []string{"node-version", "node-version-file"}, "", ctx.Inputs, env, ctx.Workdir, ctx.RepoRoot, ctx.StepOutputs)
 		if err != nil {
@@ -1230,7 +1250,11 @@ func localHydrateUsesScript(step localHydrateStep, ctx localHydrateScriptContext
 		if strings.TrimSpace(step.With["node-version"]) != "" && !supportedLocalNodeVersionSpec(version) {
 			return "", nil, exit(2, "local Actions hydration does not support actions/setup-node version %q; rerun with --github-runner when the workflow needs full GitHub Actions semantics", version)
 		}
-		return "__crabbox_setup_node " + shellQuote(version) + "\n", nil, nil
+		script := "__crabbox_setup_node " + shellQuote(version) + "\n"
+		if cache == "pnpm" {
+			script += "echo 'local actions: pnpm cache restore/save skipped (uncached local hydration)'\n"
+		}
+		return script, nil, nil
 	case strings.HasPrefix(uses, "actions/setup-go@"):
 		if err := validateLocalActionWithKeys("actions/setup-go", step.With, "go-version", "go-version-file"); err != nil {
 			return "", nil, err
@@ -2047,8 +2071,24 @@ __crabbox_setup_node() {
   fi
   rm -f "$RUNNER_TOOL_CACHE/node"
   ln -s "$dir" "$RUNNER_TOOL_CACHE/node"
-  export PATH="$RUNNER_TOOL_CACHE/node/bin:$PATH"
+  export PATH="$RUNNER_TOOL_CACHE/pnpm/bin:$RUNNER_TOOL_CACHE/node/bin:$PATH"
   corepack enable >/dev/null 2>&1 || true
+}
+__crabbox_setup_pnpm() {
+  local requested="$1"
+  # pnpm/action-setup can precede setup-node on a minimal runner image.
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    __crabbox_setup_node 24
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "pnpm/action-setup requires npm; install Node with npm or rerun with --github-runner" >&2
+    return 2
+  fi
+  local dir="$RUNNER_TOOL_CACHE/pnpm"
+  mkdir -p "$dir"
+  npm install --global --prefix "$dir" --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org "pnpm@$requested"
+  [ -x "$dir/bin/pnpm" ] || { echo "pnpm installation did not provide an executable" >&2; return 2; }
+  export PATH="$dir/bin:$PATH"
 }
 __crabbox_setup_go() {
   local requested="${1:-}"
@@ -2763,6 +2803,12 @@ if [ -f "$env_file" ]; then
     {
       printf '%s\n' '# CRABBOX_LOCAL_ACTIONS_NODE_PATH'
       printf '%s\n' 'export PATH="${RUNNER_TOOL_CACHE}/node/bin:$PATH"'
+    } >> "$env_file"
+  fi
+  if [ -n "${RUNNER_TOOL_CACHE:-}" ] && [ -x "$RUNNER_TOOL_CACHE/pnpm/bin/pnpm" ] && ! grep -q '^# CRABBOX_LOCAL_ACTIONS_PNPM_PATH$' "$env_file"; then
+    {
+      printf '%s\n' '# CRABBOX_LOCAL_ACTIONS_PNPM_PATH'
+      printf '%s\n' 'export PATH="${RUNNER_TOOL_CACHE}/pnpm/bin:$PATH"'
     } >> "$env_file"
   fi
 fi
