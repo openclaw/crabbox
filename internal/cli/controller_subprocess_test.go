@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/prefixbuffer"
 )
 
 func controllerSubprocessTestTimeout(base time.Duration) time.Duration {
@@ -1678,54 +1680,19 @@ func TestControllerAbsenceIdentitySetUsesEveryPersistedIdentity(t *testing.T) {
 	}
 }
 
-func TestControllerLimitedBufferReportsOverflow(t *testing.T) {
-	var output controllerLimitedBuffer
-	output.limit = 4
-	if n, err := output.Write([]byte("12345")); err != nil || n != 5 {
-		t.Fatalf("write bytes=%d err=%v", n, err)
+func TestControllerOutputReportsOverflow(t *testing.T) {
+	output := prefixbuffer.NewLimited(4)
+	if err := controllerOutputOverflowError(output.Exceeded(), "controller provider inventory", 4); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := io.Copy(&output, struct{ io.Reader }{strings.NewReader("12345")}); err != nil || n != 5 {
+		t.Fatalf("copied bytes=%d err=%v", n, err)
 	}
 	if got := output.String(); got != "1234" {
 		t.Fatalf("retained output=%q", got)
 	}
-	if err := output.overflowError("controller provider inventory"); err == nil || !strings.Contains(err.Error(), "exceeded 4-byte output limit") {
+	if err := controllerOutputOverflowError(output.Exceeded(), "controller provider inventory", 4); err == nil || err.Error() != "controller provider inventory exceeded 4-byte output limit" {
 		t.Fatalf("overflow error=%v", err)
-	}
-}
-
-func TestControllerLimitedBufferCopyRespectsLimit(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		limit    int
-		prefix   string
-		input    string
-		want     string
-		overflow bool
-	}{
-		{name: "empty zero limit"},
-		{name: "zero limit", input: "ab", overflow: true},
-		{name: "negative limit", limit: -1, input: "ab", overflow: true},
-		{name: "exact fill", limit: 4, input: "abcd", want: "abcd"},
-		{name: "overflow", limit: 4, input: "abcde", want: "abcd", overflow: true},
-		{name: "split overflow", limit: 4, prefix: "abc", input: "de", want: "abcd", overflow: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			output := controllerLimitedBuffer{limit: tc.limit}
-			if _, err := output.Write([]byte(tc.prefix)); err != nil {
-				t.Fatal(err)
-			}
-			// Hide the source's WriterTo so copying exercises destination dispatch.
-			n, err := io.Copy(&output, struct{ io.Reader }{strings.NewReader(tc.input)})
-			if err != nil || n != int64(len(tc.input)) {
-				t.Fatalf("copied=%d err=%v", n, err)
-			}
-			if output.String() != tc.want || string(output.Bytes()) != tc.want || output.overflow != tc.overflow {
-				t.Fatalf("output=%q overflow=%v, want %q/%v", output.String(), output.overflow, tc.want, tc.overflow)
-			}
-			_, _ = output.Write(nil)
-			if output.overflow != tc.overflow {
-				t.Fatal("empty write changed overflow observation")
-			}
-		})
 	}
 }
 

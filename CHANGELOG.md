@@ -6,6 +6,7 @@
 - Add bounded AWS provisioning transport diagnostics for credential preparation, signing and SDK request time, including retry-loop signing counts, without changing retry behavior. [PR 1968](https://github.com/openclaw/crabbox/pull/1968). Thanks @steipete.
 - Islo: report failed stdout/stderr delivery instead of silently succeeding after losing command output; preserve remote exit codes when stream decoding and delivery finish successfully. [PR 1969](https://github.com/openclaw/crabbox/pull/1969).
 - Enforce controller and coordinator token-command output limits consistently during pipe copying, preserving the existing overflow errors and command deadlines. [PR 1971](https://github.com/openclaw/crabbox/pull/1971).
+- Share byte-prefix storage across command capture, controller responses, and coordinator token helpers while preserving each caller's limits, cancellation, and diagnostics.
 
 ## 0.52.0 - 2026-09-07
 

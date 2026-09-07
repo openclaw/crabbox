@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/prefixbuffer"
 )
 
 type CoordinatorClient struct {
@@ -2527,7 +2529,7 @@ func (c *CoordinatorClient) authorizationToken(ctx context.Context) (string, err
 	cmd := exec.CommandContext(commandCtx, c.TokenCommand[0], c.TokenCommand[1:]...)
 	configureBoundedCommandCancellation(cmd)
 	c.applyChildEnvironment(cmd)
-	var output limitedCoordinatorTokenOutput
+	output := prefixbuffer.NewLimited(maxCoordinatorTokenBytes)
 	cmd.Stdout = &output
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
@@ -2539,7 +2541,7 @@ func (c *CoordinatorClient) authorizationToken(ctx context.Context) (string, err
 		}
 		return "", fmt.Errorf("coordinator token command failed: %w", err)
 	}
-	if output.overflow {
+	if output.Exceeded() {
 		return "", fmt.Errorf("coordinator token command output exceeds %d bytes", maxCoordinatorTokenBytes)
 	}
 	token := strings.TrimSuffix(output.String(), "\n")
@@ -2551,29 +2553,6 @@ func (c *CoordinatorClient) authorizationToken(ctx context.Context) (string, err
 		return "", errors.New("coordinator token command must return exactly one token line")
 	}
 	return token, nil
-}
-
-// Embedding bytes.Buffer would expose uncapped copy methods.
-type limitedCoordinatorTokenOutput struct {
-	buffer   bytes.Buffer
-	overflow bool
-}
-
-func (w *limitedCoordinatorTokenOutput) String() string { return w.buffer.String() }
-
-func (w *limitedCoordinatorTokenOutput) Write(p []byte) (int, error) {
-	originalLength := len(p)
-	remaining := maxCoordinatorTokenBytes - w.buffer.Len()
-	if remaining <= 0 {
-		w.overflow = w.overflow || originalLength > 0
-		return originalLength, nil
-	}
-	if len(p) > remaining {
-		p = p[:remaining]
-		w.overflow = true
-	}
-	_, _ = w.buffer.Write(p)
-	return originalLength, nil
 }
 
 func (c *CoordinatorClient) doCurl(ctx context.Context, method, path string, data []byte, hasBody bool, out any) error {

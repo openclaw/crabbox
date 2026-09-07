@@ -483,6 +483,13 @@ semaphore, advisory file lock, retry cadence, and idempotent release. Adapters
 retain provider-specific lease ID validation, namespace preparation, and
 diagnostics; the provider name selects the existing on-disk lock filename.
 
+Raw byte-prefix storage lives in `internal/prefixbuffer`. Core command capture,
+controller responses, and coordinator token helpers share it. Finite nonpositive
+limits discard output; unlimited capture requires explicit construction. Callers
+retain cancellation, labelled errors, and independent file-watcher overflow.
+The buffer has no locking or truncation markers, and `Bytes` returns a borrowed
+view. Byte tails, line tails, and UTF-8-aware logs remain separate storage policies.
+
 Strict one-request/one-response JSON subprocesses may use
 `internal/providers/shared/procjson`. It owns bounded capture, cancellation
 grace, request encoding, and exact single-document decoding. Keep response
