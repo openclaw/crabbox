@@ -118,65 +118,88 @@ describe("aws provider", () => {
     ).toEqual([2, 4]);
   });
 
-  it("reports request step costs and redundant ingress calls without logging payloads", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(new Date("2026-05-02T00:00:00Z"));
-    const log = vi.spyOn(console, "info").mockImplementation(() => {});
-    const { client, config } = awsMarketFallbackHarness("");
-    const baseFetch = globalThis.fetch;
-    const actions: string[] = [];
-    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
-      const request = input instanceof Request ? input : new Request(input, init);
-      const action = new URLSearchParams(await request.clone().text()).get("Action") ?? "";
-      if (action) actions.push(action);
-      if (action === "AuthorizeSecurityGroupIngress" || action === "RevokeSecurityGroupIngress") {
-        const authorize = action === "AuthorizeSecurityGroupIngress";
-        vi.setSystemTime(Date.now() + (authorize ? 7 : 3));
-        return ec2XMLResponse(
-          `<Response><Errors><Error><Code>${authorize ? "InvalidPermission.Duplicate" : "InvalidPermission.NotFound"}</Code><Message>private-rule-canary</Message></Error></Errors></Response>`,
-          400,
-        );
-      }
-      return baseFetch(request);
-    });
-    const result = await client.createServerWithFallback(
-      { ...config, sshPort: "22", sshFallbackPorts: ["443"] },
-      "cbx_abcdef123456",
-      "violet-prawn",
-      "alice@example.com",
-      { withIngress: (apply) => apply(["203.0.113.7/32", "2001:db8::1/128"]) },
-    );
-    expect(result.server.id).toBeDefined();
-    expect(actions.filter((action) => action === "AuthorizeSecurityGroupIngress")).toHaveLength(6);
-    expect(actions.filter((action) => action === "RevokeSecurityGroupIngress")).toHaveLength(2);
-    expect(log).toHaveBeenCalledTimes(1);
-    const encoded = String(log.mock.calls[0]![0]);
-    const diagnostic = JSON.parse(encoded);
-    expect(diagnostic).toMatchObject({
-      component: "crabbox_aws_provisioning",
-      leaseId: "cbx_abcdef123456",
-      region: "eu-west-1",
-      outcome: "success",
-    });
-    expect(diagnostic.steps).toEqual(
-      expect.arrayContaining([
-        { name: "authorize_ingress", count: 6, totalMs: 42, errors: 6 },
-        { name: "authorize_duplicate", count: 6, totalMs: 0, errors: 0 },
-        { name: "revoke_world", count: 2, totalMs: 6, errors: 2 },
-        { name: "revoke_world_absent", count: 2, totalMs: 0, errors: 0 },
-      ]),
-    );
-    for (const privateValue of [
-      "private-rule-canary",
-      "alice@example.com",
-      "203.0.113.7",
-      "2001:db8",
-      "ssh-ed25519",
-    ])
-      expect(encoded).not.toContain(privateValue);
-    expect(encoded.length).toBeLessThan(8192);
-    log.mockRestore();
-  });
+  it.each([
+    { cidrs: [" 203.0.113.7/32 ", "2001:db8::1/128"] },
+    { cidrs: ["203.0.113.7/32", "2001:db8::1/128", " 2001:db8::1/128 "] },
+  ])(
+    "reports request step costs and deduplicates desired ingress without logging payloads ($cidrs)",
+    async ({ cidrs }) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-05-02T00:00:00Z"));
+      const log = vi.spyOn(console, "info").mockImplementation(() => {});
+      const { client, config } = awsMarketFallbackHarness("");
+      const baseFetch = globalThis.fetch;
+      const actions: string[] = [];
+      const authorized: Array<[string | null, string | null]> = [];
+      vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        if (action === "AuthorizeSecurityGroupIngress") {
+          authorized.push([
+            params.get("IpPermissions.1.FromPort"),
+            params.get("IpPermissions.1.IpRanges.1.CidrIp") ??
+              params.get("IpPermissions.1.Ipv6Ranges.1.CidrIpv6"),
+          ]);
+        }
+        if (action) actions.push(action);
+        if (action === "AuthorizeSecurityGroupIngress" || action === "RevokeSecurityGroupIngress") {
+          const authorize = action === "AuthorizeSecurityGroupIngress";
+          vi.setSystemTime(Date.now() + (authorize ? 7 : 3));
+          return ec2XMLResponse(
+            `<Response><Errors><Error><Code>${authorize ? "InvalidPermission.Duplicate" : "InvalidPermission.NotFound"}</Code><Message>private-rule-canary</Message></Error></Errors></Response>`,
+            400,
+          );
+        }
+        return baseFetch(request);
+      });
+      const result = await client.createServerWithFallback(
+        { ...config, sshPort: "22", sshFallbackPorts: ["443"] },
+        "cbx_abcdef123456",
+        "violet-prawn",
+        "alice@example.com",
+        { withIngress: (apply) => apply(cidrs) },
+      );
+      expect(result.server.id).toBeDefined();
+      expect(actions.filter((action) => action === "AuthorizeSecurityGroupIngress")).toHaveLength(
+        4,
+      );
+      expect(authorized).toEqual([
+        ["22", "203.0.113.7/32"],
+        ["22", "2001:db8::1/128"],
+        ["443", "203.0.113.7/32"],
+        ["443", "2001:db8::1/128"],
+      ]);
+      expect(actions.filter((action) => action === "RevokeSecurityGroupIngress")).toHaveLength(2);
+      expect(log).toHaveBeenCalledTimes(1);
+      const encoded = String(log.mock.calls[0]![0]);
+      const diagnostic = JSON.parse(encoded);
+      expect(diagnostic).toMatchObject({
+        component: "crabbox_aws_provisioning",
+        leaseId: "cbx_abcdef123456",
+        region: "eu-west-1",
+        outcome: "success",
+      });
+      expect(diagnostic.steps).toEqual(
+        expect.arrayContaining([
+          { name: "authorize_ingress", count: 4, totalMs: 28, errors: 4 },
+          { name: "authorize_duplicate", count: 4, totalMs: 0, errors: 0 },
+          { name: "revoke_world", count: 2, totalMs: 6, errors: 2 },
+          { name: "revoke_world_absent", count: 2, totalMs: 0, errors: 0 },
+        ]),
+      );
+      for (const privateValue of [
+        "private-rule-canary",
+        "alice@example.com",
+        "203.0.113.7",
+        "2001:db8",
+        "ssh-ed25519",
+      ])
+        expect(encoded).not.toContain(privateValue);
+      expect(encoded.length).toBeLessThan(8192);
+      log.mockRestore();
+    },
+  );
 
   it("tags every checkpoint AMI backing snapshot with its exact ownership claim", async () => {
     let submitted: URLSearchParams | undefined;
@@ -739,14 +762,16 @@ describe("aws provider", () => {
     },
   );
 
-  it("rejects invalid configured AWS SSH CIDRs before changing ingress", async () => {
-    const calls: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        calls.push(typeof init?.body === "string" ? init.body : String(input));
-        return new Response(
-          `<DescribeSecurityGroupsResponse>
+  it.each(["999.999.999.999/32", "2001:db8::1/129", " 203.0.113.7/32 ,203.0.113.7/32,invalid"])(
+    "rejects invalid configured AWS SSH CIDRs before changing ingress: %s",
+    async (cidrs) => {
+      const calls: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          calls.push(typeof init?.body === "string" ? init.body : String(input));
+          return new Response(
+            `<DescribeSecurityGroupsResponse>
   <securityGroupInfo>
     <item>
       <groupId>sg-123</groupId>
@@ -754,29 +779,30 @@ describe("aws provider", () => {
     </item>
   </securityGroupInfo>
 </DescribeSecurityGroupsResponse>`,
-        );
-      }),
-    );
-    const client = new EC2SpotClient(
-      {
-        AWS_ACCESS_KEY_ID: "test",
-        AWS_SECRET_ACCESS_KEY: "secret",
-        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
-        CRABBOX_AWS_SSH_CIDRS: "999.999.999.999/32",
-      } as never,
-      "us-east-1",
-    );
-
-    await expect(
-      client.refreshSSHIngress(
-        leaseConfig({
-          provider: "aws",
-          sshPublicKey: "ssh-ed25519 test",
+          );
         }),
-      ),
-    ).rejects.toThrow("CRABBOX_AWS_SSH_CIDRS entries must be valid");
-    expect(calls).toHaveLength(1);
-  });
+      );
+      const client = new EC2SpotClient(
+        {
+          AWS_ACCESS_KEY_ID: "test",
+          AWS_SECRET_ACCESS_KEY: "secret",
+          CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+          CRABBOX_AWS_SSH_CIDRS: cidrs,
+        } as never,
+        "us-east-1",
+      );
+
+      await expect(
+        client.refreshSSHIngress(
+          leaseConfig({
+            provider: "aws",
+            sshPublicKey: "ssh-ed25519 test",
+          }),
+        ),
+      ).rejects.toThrow("CRABBOX_AWS_SSH_CIDRS entries must be valid");
+      expect(calls).toHaveLength(1);
+    },
+  );
 
   it("waits through transient EC2 instance visibility after RunInstances", async () => {
     vi.useFakeTimers();

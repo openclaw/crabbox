@@ -187,6 +187,12 @@ Explicit AMIs (including `CRABBOX_AWS_AMI`), promoted images, checkpoint forks,
 ARM64, and Ubuntu 24.04 retain their existing source policy. The private AWS
 workspace service keeps its separate SSM bootstrap and HTTPS-only source policy.
 
+For brokered SSH access, the coordinator validates the combined lease and global
+source ranges, then removes exact duplicates before reconciling each SSH port.
+Whitespace is trimmed; distinct IPv4 and IPv6 ranges keep their order. This does
+not reuse observed permissions: each unique desired range is still authorized,
+and stale-rule pruning and world-access revocation keep their existing policy.
+
 ### Environment variables (direct mode)
 
 ```text

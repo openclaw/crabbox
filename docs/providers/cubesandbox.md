@@ -163,6 +163,9 @@ observed process exits and preserve cancellation/timeout causes. CubeSandbox's
 existing immediate return on an abnormal end is unchanged; this does not certify
 that a later stream trailer or sandbox deletion succeeded.
 
+The envd Connect wire codec is shared with E2B; this abnormal-end policy and
+CubeProxy routing remain CubeSandbox-owned.
+
 ## Gotchas
 
 - `--class` and `--type` are rejected; choose the template and CubeSandbox node
