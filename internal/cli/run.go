@@ -2614,7 +2614,7 @@ afterSync:
 			if finalFailure != nil {
 				classificationLog = strings.TrimSpace(classificationLog + "\n" + finalFailure.Error())
 			}
-			classification = classifyRunOutcomeFailure(finalCode, classificationLog, commandFailurePhases, failureEvidence, false)
+			classification = classifyRunOutcomeFailure(finalCode, classificationLog, commandFailurePhases, failureEvidence, false, false)
 		}
 		if terminalPreparationAttempted && preparedTerminalExitCode == finalCode {
 			return
@@ -2736,6 +2736,8 @@ afterSync:
 		}
 	}
 	var artifactFailure error
+	// Artifact helpers flatten transport errors; snapshot context before cleanup.
+	var artifactFailureContextErr error
 	var schemaValidationResults []SchemaValidationResult
 	var afterArtifacts []artifactChangeSnapshot
 	if len(requiredArtifactChanges) > 0 && code == 0 && (streamErr != nil || ctx.Err() != nil) {
@@ -2746,17 +2748,19 @@ afterSync:
 		if artifactFailure == nil {
 			artifactChangeResults, artifactFailure = compareArtifactChanges(requiredArtifactChanges, beforeArtifacts, afterArtifacts)
 		}
+		if artifactFailure != nil {
+			artifactFailureContextErr = ctx.Err()
+			code = 7
+		}
 		for _, result := range artifactChangeResults {
 			fmt.Fprintf(a.Stderr, "required artifact change path=%s status=%s\n", result.Path, result.Status)
-		}
-		if artifactFailure != nil {
-			code = 7
 		}
 	}
 	if code == 0 && len(requiredArtifactGlobs) > 0 {
 		requireOutput, err := requireRunArtifactGlobs(ctx, target, workdir, requiredArtifactGlobs)
 		if err != nil {
 			artifactFailure = err
+			artifactFailureContextErr = ctx.Err()
 			code = 7
 		}
 		if strings.TrimSpace(requireOutput) != "" {
@@ -2766,12 +2770,13 @@ afterSync:
 	if code == 0 && len(loadedArtifactSchemas) > 0 {
 		results, schemaOutput, schemaErr := validateRemoteArtifactSchemas(ctx, target, workdir, loadedArtifactSchemas)
 		schemaValidationResults = results
-		if strings.TrimSpace(schemaOutput) != "" {
-			fmt.Fprintln(a.Stderr, strings.TrimSpace(schemaOutput))
-		}
 		if schemaErr != nil {
 			artifactFailure = schemaErr
+			artifactFailureContextErr = ctx.Err()
 			code = 7
+		}
+		if strings.TrimSpace(schemaOutput) != "" {
+			fmt.Fprintln(a.Stderr, strings.TrimSpace(schemaOutput))
 		}
 	}
 	if code == 0 {
@@ -2828,13 +2833,14 @@ afterSync:
 		if artifactFailure != nil {
 			classificationLog = strings.TrimSpace(classificationLog + "\n" + artifactFailure.Error())
 		}
-		classification = classifyRunOutcomeFailure(code, classificationLog, commandFailurePhases, failureEvidence, testResultsFailure != nil)
+		classification = classifyRunOutcomeFailure(code, classificationLog, commandFailurePhases, failureEvidence, testResultsFailure != nil, artifactFailure != nil)
 		timings.blockedStage = classification.BlockedStage
 		timings.resourceExhaustion = classification.ResourceExhaustion
 		timings.retryLikely = classification.RetryLikely
 		failureClassificationPrinted = true
 	}
 	report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, code, actionsURL)
+	applyArtifactFailureOutcome(&report, artifactFailure, artifactFailureContextErr)
 	populateRunTimingMetadata(&report, cfg, repo, server, leaseID, executionRunID, workdir, runArtifacts)
 	report.Label = runLabelValue
 	report.SchemaValidations = schemaValidationResults
