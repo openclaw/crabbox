@@ -2969,7 +2969,7 @@ function awsSSHCIDRs(config: LeaseConfig, env: Env, allowEmpty = false): string[
       "AWS SSH source CIDR is required; set CRABBOX_AWS_SSH_CIDRS or use Cloudflare request IP forwarding",
     );
   }
-  return cidrs;
+  return uniqueStrings(cidrs); // Access snapshots can already contain global CIDRs.
 }
 
 function reservations(root: Record<string, unknown>): Record<string, unknown>[] {
