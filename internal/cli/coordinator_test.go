@@ -40,6 +40,40 @@ func TestCoordinatorMachineIDAcceptsStringOrNumber(t *testing.T) {
 	}
 }
 
+func TestCoordinatorTokenOutputCopy(t *testing.T) {
+	var output limitedCoordinatorTokenOutput
+	if n, err := io.Copy(&output, struct{ io.Reader }{strings.NewReader("ab")}); err != nil || n != 2 {
+		t.Fatalf("copied=%d err=%v", n, err)
+	}
+	if n, err := io.WriteString(&output, "cd"); err != nil || n != 2 {
+		t.Fatalf("written=%d err=%v", n, err)
+	}
+	if output.String() != "abcd" || output.overflow {
+		t.Fatalf("output=%q overflow=%v", output.String(), output.overflow)
+	}
+	output.overflow = true
+	_, _ = output.Write(nil)
+	if !output.overflow {
+		t.Fatal("empty write cleared overflow observation")
+	}
+}
+
+func TestCappedOutputBuffersDoNotPromoteMutationMethods(t *testing.T) {
+	for name, output := range map[string]io.Writer{
+		"controller": &controllerLimitedBuffer{limit: 4},
+		"token":      &limitedCoordinatorTokenOutput{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, ok := output.(io.ReaderFrom); ok {
+				t.Error("capture exposes ReaderFrom outside its capped Write")
+			}
+			if _, ok := output.(io.StringWriter); ok {
+				t.Error("capture exposes WriteString outside its capped Write")
+			}
+		})
+	}
+}
+
 func TestSplitCurlResponseParsesTrailingStatus(t *testing.T) {
 	body, status, err := splitCurlResponse([]byte("{\"ok\":true}\n200"))
 	if err != nil {

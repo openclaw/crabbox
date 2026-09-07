@@ -1692,6 +1692,43 @@ func TestControllerLimitedBufferReportsOverflow(t *testing.T) {
 	}
 }
 
+func TestControllerLimitedBufferCopyRespectsLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		limit    int
+		prefix   string
+		input    string
+		want     string
+		overflow bool
+	}{
+		{name: "empty zero limit"},
+		{name: "zero limit", input: "ab", overflow: true},
+		{name: "negative limit", limit: -1, input: "ab", overflow: true},
+		{name: "exact fill", limit: 4, input: "abcd", want: "abcd"},
+		{name: "overflow", limit: 4, input: "abcde", want: "abcd", overflow: true},
+		{name: "split overflow", limit: 4, prefix: "abc", input: "de", want: "abcd", overflow: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output := controllerLimitedBuffer{limit: tc.limit}
+			if _, err := output.Write([]byte(tc.prefix)); err != nil {
+				t.Fatal(err)
+			}
+			// Hide the source's WriterTo so copying exercises destination dispatch.
+			n, err := io.Copy(&output, struct{ io.Reader }{strings.NewReader(tc.input)})
+			if err != nil || n != int64(len(tc.input)) {
+				t.Fatalf("copied=%d err=%v", n, err)
+			}
+			if output.String() != tc.want || string(output.Bytes()) != tc.want || output.overflow != tc.overflow {
+				t.Fatalf("output=%q overflow=%v, want %q/%v", output.String(), output.overflow, tc.want, tc.overflow)
+			}
+			_, _ = output.Write(nil)
+			if output.overflow != tc.overflow {
+				t.Fatal("empty write changed overflow observation")
+			}
+		})
+	}
+}
+
 func controllerDesktopTestRequest(leaseID string) controllerWorkspaceRequest {
 	suffix := strings.TrimPrefix(leaseID, "cbx_")
 	return controllerWorkspaceRequest{

@@ -1813,21 +1813,25 @@ func (r *execControllerWorkspaceRunner) adapterChildEnv(overrides map[string]str
 	return merged
 }
 
+// Keep storage private so optimized copies cannot bypass the capped Write.
 type controllerLimitedBuffer struct {
-	bytes.Buffer
+	buffer   bytes.Buffer
 	limit    int
 	overflow bool
 }
 
+func (b *controllerLimitedBuffer) Bytes() []byte  { return b.buffer.Bytes() }
+func (b *controllerLimitedBuffer) String() string { return b.buffer.String() }
+
 func (b *controllerLimitedBuffer) Write(data []byte) (int, error) {
 	original := len(data)
-	remaining := b.limit - b.Len()
+	remaining := b.limit - b.buffer.Len()
 	if remaining > 0 {
 		if len(data) > remaining {
 			b.overflow = true
 			data = data[:remaining]
 		}
-		_, _ = b.Buffer.Write(data)
+		_, _ = b.buffer.Write(data)
 	} else if original > 0 {
 		b.overflow = true
 	}

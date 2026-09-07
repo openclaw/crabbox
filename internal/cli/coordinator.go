@@ -2553,14 +2553,17 @@ func (c *CoordinatorClient) authorizationToken(ctx context.Context) (string, err
 	return token, nil
 }
 
+// Embedding bytes.Buffer would expose uncapped copy methods.
 type limitedCoordinatorTokenOutput struct {
-	bytes.Buffer
+	buffer   bytes.Buffer
 	overflow bool
 }
 
+func (w *limitedCoordinatorTokenOutput) String() string { return w.buffer.String() }
+
 func (w *limitedCoordinatorTokenOutput) Write(p []byte) (int, error) {
 	originalLength := len(p)
-	remaining := maxCoordinatorTokenBytes - w.Len()
+	remaining := maxCoordinatorTokenBytes - w.buffer.Len()
 	if remaining <= 0 {
 		w.overflow = w.overflow || originalLength > 0
 		return originalLength, nil
@@ -2569,7 +2572,7 @@ func (w *limitedCoordinatorTokenOutput) Write(p []byte) (int, error) {
 		p = p[:remaining]
 		w.overflow = true
 	}
-	_, _ = w.Buffer.Write(p)
+	_, _ = w.buffer.Write(p)
 	return originalLength, nil
 }
 
