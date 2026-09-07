@@ -47,17 +47,40 @@ function writeTool(file, body) {
 
 function writeNodeToolchain(bin, version) {
   const major = version.split(".")[0];
+  const dist = path.resolve(bin, "../lib/node_modules/corepack/dist");
   fs.mkdirSync(bin, { recursive: true });
+  fs.mkdirSync(dist, { recursive: true });
   writeTool(path.join(bin, "node"), `printf "v${version}\\n"`);
   for (const tool of ["npm", "npx"]) writeTool(path.join(bin, tool), `printf "npm-${major}\\n"`);
+  for (const tool of ["pnpm", "pnpx", "yarn", "yarnpkg"]) {
+    writeTool(path.join(dist, `${tool}.js`), `printf "${tool}-${major}\\n"`);
+  }
+  fs.symlinkSync("../lib/node_modules/corepack/dist/corepack.js", path.join(bin, "corepack"));
   writeTool(
-    path.join(bin, "corepack"),
+    path.join(dist, "corepack.js"),
     `
 if [[ "$1" == "--version" ]]; then printf 'corepack-${major}\\n'; exit 0; fi
 printf '${major} %s node=%s\\n' "$*" "$(node --version)" >>"$HOME/corepack.log"
 if [[ "$1" == "enable" ]]; then
-  directory="\${3:-$(dirname "$0")}"
-  for tool in pnpm pnpx; do ln -sfn corepack "$directory/$tool"; done
+  # Corepack 0.35.0 resolves the public directory through which, not its real binary.
+  python3 - "$0" "\${3:-}" <<'PY'
+import os
+from pathlib import Path
+import shutil
+import sys
+
+binary, selected = sys.argv[1:]
+directory = Path(selected or Path(shutil.which("corepack")).parent).resolve()
+dist = Path(binary).resolve().parent
+for name in ("pnpm", "pnpx", "yarn", "yarnpkg"):
+    link = directory / name
+    target = os.path.relpath(dist / (name + ".js"), directory)
+    if os.path.lexists(link):
+        if link.is_symlink() and os.readlink(link) == target:
+            continue
+        link.unlink()
+    link.symlink_to(target)
+PY
 elif [[ "$1" != "prepare" ]]; then
   exit 64
 fi`,
@@ -78,14 +101,14 @@ function nodeArchiveFixture(t) {
     );
     return createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
   };
-  const shell = `
+  const setup = `
 public_toolchain_archive_dir="$PWD/archives"
 node_toolcache_root="$PWD/tools"
 node_link_dir="$PWD/links"
 toolchain_archive_spec() { printf 'sha256 %s https://example.invalid/node.tar.xz\\n' "$FIXTURE_DIGEST"; }
-install_pinned_node
 `;
-  return { ...context, bin, archive, pack, shell };
+  const shell = `${setup}install_pinned_node\n`;
+  return { ...context, bin, archive, pack, setup, shell };
 }
 
 function nodeRebakeFixture(t) {
@@ -226,6 +249,177 @@ test("Node toolcache replaces a same-version poisoned tree and publishes complet
     "failure must remove private extraction state",
   );
   success(spawnSync(path.join(destination, "bin", "npm"), ["--version"], { encoding: "utf8" }));
+});
+
+const publicNodeTools = ["node", "npm", "npx", "corepack", "pnpm", "pnpx"];
+const defaultNodePreparation = `
+dpkg() { printf 'amd64\\n'; }
+cache_public_toolchain_archives() { printf 'cache\\n' >>"$HOME/preparation.log"; }
+curl() { printf 'network\\n' >>"$HOME/preparation.log"; return 89; }
+`;
+
+function fileState(file) {
+  let stat;
+  try {
+    stat = fs.lstatSync(file);
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  if (stat.isSymbolicLink()) return { link: fs.readlinkSync(file) };
+  if (stat.isDirectory()) {
+    return Object.fromEntries(
+      fs
+        .readdirSync(file)
+        .sort()
+        .map((name) => [name, fileState(path.join(file, name))]),
+    );
+  }
+  return { mode: stat.mode, contents: fs.readFileSync(file).toString("base64") };
+}
+
+for (const state of ["fresh", "current", "dangling"]) {
+  test(`default Node complete flow preserves public ownership and Yarn on ${state} repeat`, (t) => {
+    const { root, run, setup, shell, pack } = nodeArchiveFixture(t);
+    const digest = pack();
+    const destination = path.join(root, "tools", "node", "24.19.0", "x64");
+    const links = path.join(root, "links");
+    if (state !== "fresh") {
+      success(run(shell, { FIXTURE_DIGEST: digest }));
+      if (state === "dangling") fs.rmSync(path.join(destination, "bin"), { recursive: true });
+    }
+    fs.mkdirSync(links, { recursive: true });
+    writeTool(path.join(links, "yarn"), "echo operator-yarn");
+    writeTool(path.join(root, "operator-yarnpkg"), "echo operator-yarnpkg");
+    fs.symlinkSync(path.join(root, "operator-yarnpkg"), path.join(links, "yarnpkg"));
+    const yarn = fileState(path.join(links, "yarn"));
+    const yarnpkg = fileState(path.join(links, "yarnpkg"));
+    const result = run(
+      `${setup}${defaultNodePreparation}
+: >"$HOME/corepack.log"
+for pass in 1 2; do
+  install_node_pnpm
+  [[ "$(node --version)" == v24.19.0 ]] || exit 91
+  for tool in node npm npx corepack pnpm pnpx; do
+    [[ "$(command -v "$tool")" == "$node_link_dir/$tool" ]] || exit 92
+    "$tool" --version
+  done
+done
+`,
+      { FIXTURE_DIGEST: digest },
+    );
+    success(result);
+    for (const tool of publicNodeTools) {
+      assert.equal(fs.readlinkSync(path.join(links, tool)), path.join(destination, "bin", tool));
+    }
+    assert.deepEqual(fileState(path.join(links, "yarn")), yarn);
+    assert.deepEqual(fileState(path.join(links, "yarnpkg")), yarnpkg);
+    const calls = fs
+      .readFileSync(path.join(root, "home", "corepack.log"), "utf8")
+      .trim()
+      .split("\n");
+    assert.equal(calls.length, 4, "each pass enables only private shims, then prepares pnpm");
+    assert.equal(calls.filter((line) => line.includes("enable --install-directory")).length, 2);
+    assert.equal(
+      calls.filter((line) => line === "24 prepare pnpm@11.1.0 --activate node=v24.19.0").length,
+      2,
+    );
+    assert.equal(fs.existsSync(`${destination}.complete`), true);
+    assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);
+    assert.deepEqual(fs.readdirSync(links).sort(), [...publicNodeTools, "yarn", "yarnpkg"].sort());
+  });
+}
+
+for (const entry of ["install_node_pnpm", "install_pinned_node"]) {
+  for (const kind of [
+    "regular",
+    "directory",
+    "foreign",
+    "wrong-name",
+    "relative",
+    "newline",
+    "legacy-corepack",
+  ]) {
+    test(`default Node ${entry} rejects last ${kind} alias before changing prepared state`, (t) => {
+      const { root, run, setup, shell, pack } = nodeArchiveFixture(t);
+      const digest = pack();
+      success(run(shell, { FIXTURE_DIGEST: digest }));
+      const destination = path.join(root, "tools", "node", "24.19.0", "x64");
+      const links = path.join(root, "links");
+      const conflict = path.join(links, "pnpx");
+      fs.unlinkSync(conflict);
+      if (kind === "regular") {
+        writeTool(conflict, "echo operator-pnpx");
+      } else if (kind === "directory") {
+        fs.mkdirSync(conflict);
+        fs.writeFileSync(path.join(conflict, "keep"), "operator directory");
+      } else {
+        const target = {
+          foreign: path.join(root, "foreign", "pnpx"),
+          "wrong-name": path.join(destination, "bin", "node"),
+          relative: path.relative(links, path.join(destination, "bin", "pnpx")),
+          newline: path.join(destination, "bin", "pnpx") + "\n",
+          "legacy-corepack": path.relative(
+            links,
+            path.join(destination, "lib/node_modules/corepack/dist/pnpx.js"),
+          ),
+        }[kind];
+        fs.symlinkSync(target, conflict);
+      }
+      fs.writeFileSync(path.join(destination, "keep"), "existing tree");
+      fs.writeFileSync(`${destination}.complete`, "existing marker");
+      const before = {
+        links: fileState(links),
+        tree: fileState(destination),
+        marker: fileState(`${destination}.complete`),
+        archives: fileState(path.join(root, "archives")),
+      };
+      const result = run(
+        `${setup}${defaultNodePreparation}
+if ${entry}; then exit 91; fi
+`,
+        { FIXTURE_DIGEST: digest },
+      );
+      success(result);
+      assert.match(result.stderr, /public tool.*pnpx.*resolve before rebake/i);
+      assert.deepEqual(fileState(links), before.links);
+      assert.deepEqual(fileState(destination), before.tree);
+      assert.deepEqual(fileState(`${destination}.complete`), before.marker);
+      assert.deepEqual(fileState(path.join(root, "archives")), before.archives);
+      assert.equal(fs.existsSync(path.join(root, "home", "preparation.log")), false);
+      assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);
+    });
+  }
+}
+
+test("default Node rechecks all aliases after preparation before replacing the image slot", (t) => {
+  const { root, run, setup, shell, pack } = nodeArchiveFixture(t);
+  const digest = pack();
+  success(run(shell, { FIXTURE_DIGEST: digest }));
+  const destination = path.join(root, "tools", "node", "24.19.0", "x64");
+  const links = path.join(root, "links");
+  fs.writeFileSync(path.join(destination, "keep"), "existing tree");
+  fs.writeFileSync(`${destination}.complete`, "existing marker");
+  const tree = fileState(destination);
+  const marker = fileState(`${destination}.complete`);
+  const result = run(
+    `${setup}${defaultNodePreparation}
+cache_public_toolchain_archives() {
+  rm "$node_link_dir/pnpx"
+  printf 'operator-pnpx\\n' >"$node_link_dir/pnpx"
+}
+if install_node_pnpm; then exit 91; fi
+`,
+    { FIXTURE_DIGEST: digest },
+  );
+  success(result);
+  assert.match(result.stderr, /public tool.*pnpx.*resolve before rebake/i);
+  assert.equal(fs.readFileSync(path.join(links, "pnpx"), "utf8"), "operator-pnpx\n");
+  for (const tool of publicNodeTools.slice(0, -1)) {
+    assert.equal(fs.readlinkSync(path.join(links, tool)), path.join(destination, "bin", tool));
+  }
+  assert.deepEqual(fileState(destination), tree);
+  assert.deepEqual(fileState(`${destination}.complete`), marker);
 });
 
 for (const dangling of [false, true]) {
@@ -382,6 +576,8 @@ for (const [major, arch, pnpm, pinned] of [
     const { run } = fixture(t);
     const result = run(
       `
+node_link_dir="$PWD/links"
+node_toolcache_root="$PWD/tools"
 dpkg() { printf '%s\\n' "$FIXTURE_ARCH"; }
 cache_public_toolchain_archives() { echo public-archives; }
 install_pinned_node() { echo pinned-node; }

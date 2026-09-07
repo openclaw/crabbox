@@ -336,38 +336,69 @@ with open(filename, "x") as metadata:
 PY
 }
 
+public_tool_links() {
+  python3 - "$@" <<'PY'
+import os
+import sys
+import tempfile
+
+action, link_dir, bin_dir, *tools = sys.argv[1:]
+if action not in ("check", "publish") or not os.path.isabs(bin_dir):
+    sys.exit("invalid public tool link operation")
+
+def check(tool):
+    link = os.path.join(link_dir, tool)
+    target = os.path.join(bin_dir, tool)
+    if os.path.lexists(link) and (not os.path.islink(link) or os.readlink(link) != target):
+        sys.exit("linux-tools: public tool conflict at " + link + "; resolve before rebake")
+
+for tool in tools:
+    check(tool)
+if action == "publish":
+    # Each rename replaces one entry, never a directory's contents; not a group transaction.
+    with tempfile.TemporaryDirectory(prefix=".crabbox-tool-links-", dir=link_dir) as staging:
+        for tool in tools:
+            check(tool)
+            pending = os.path.join(staging, tool)
+            os.symlink(os.path.join(bin_dir, tool), pending)
+            os.replace(pending, os.path.join(link_dir, tool))
+PY
+}
+
 install_pinned_node() (
   set -euo pipefail
   umask 022
-  local staging destination tool node_path
-  staging="$(mktemp -d)"
+  local staging destination node_path
+  destination="$node_toolcache_root/node/$pinned_node_version/x64"
+  public_tool_links check "$node_link_dir" "$destination/bin" node npm npx corepack pnpm pnpx || return $?
+  staging="$(mktemp -d)" || return $?
   # shellcheck disable=SC2064
   trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
-  stage_toolchain_archive node-v24.19.0-linux-x64.tar.xz "$staging"
-  destination="$node_toolcache_root/node/$pinned_node_version/x64"
-  install -d -m 0755 "$(dirname "$destination")"
-  rm -f "$destination.complete"
-  mkdir "$staging/node"
-  tar --no-same-owner -xJf "$staging/node-v24.19.0-linux-x64.tar.xz" -C "$staging/node" --strip-components=1
+  stage_toolchain_archive node-v24.19.0-linux-x64.tar.xz "$staging" || return $?
+  install -d -m 0755 "$(dirname "$destination")" || return $?
+  rm -f "$destination.complete" || return $?
+  mkdir "$staging/node" || return $?
+  tar --no-same-owner -xJf "$staging/node-v24.19.0-linux-x64.tar.xz" -C "$staging/node" --strip-components=1 || return $?
   node_path="$staging/node/bin:$PATH"
-  [[ "$("$staging/node/bin/node" --version)" == "v$pinned_node_version" ]]
-  env PATH="$node_path" "$staging/node/bin/npm" --version
-  env PATH="$node_path" "$staging/node/bin/corepack" --version
-  env PATH="$node_path" "$staging/node/bin/corepack" enable --install-directory "$staging/node/bin"
+  [[ "$("$staging/node/bin/node" --version)" == "v$pinned_node_version" ]] || return 1
+  env PATH="$node_path" "$staging/node/bin/npm" --version || return $?
+  env PATH="$node_path" "$staging/node/bin/corepack" --version || return $?
+  env PATH="$node_path" "$staging/node/bin/corepack" enable --install-directory "$staging/node/bin" || return $?
   # The image recipe owns this exact version slot. Markers never justify reusing its bytes.
-  rm -rf "$destination"
-  mv "$staging/node" "$destination"
-  install -d -m 0755 "$node_link_dir"
-  for tool in node npm npx corepack pnpm pnpx; do
-    ln -sfn "$destination/bin/$tool" "$node_link_dir/$tool"
-  done
+  rm -rf "$destination" || return $?
+  mv "$staging/node" "$destination" || return $?
+  install -d -m 0755 "$node_link_dir" || return $?
+  public_tool_links publish "$node_link_dir" "$destination/bin" node npm npx corepack pnpm pnpx || return $?
   touch "$destination.complete"
 )
 
 install_node_pnpm() {
+  local use_pinned_node=0
   if pinned_node_supported; then
+    use_pinned_node=1
+    public_tool_links check "$node_link_dir" "$node_toolcache_root/node/$pinned_node_version/x64/bin" node npm npx corepack pnpm pnpx || return $?
     cache_public_toolchain_archives
-    install_pinned_node
+    install_pinned_node || return $?
     export PATH="$node_link_dir:$PATH"
   else
     # Preserve the existing Node-major override and non-x86_64 installer route.
@@ -397,7 +428,9 @@ install_node_pnpm() {
   fi
   command -v npm >/dev/null
   command -v corepack >/dev/null
-  corepack enable
+  if [[ "$use_pinned_node" == "0" ]]; then
+    corepack enable
+  fi
   corepack prepare "pnpm@$pnpm_version" --activate
   command -v pnpm >/dev/null
 }

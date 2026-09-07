@@ -405,6 +405,21 @@ per-lease tools directory. Consumers must explicitly select the baked root or
 use the verified archives. Completion markers are availability hints, not
 authentication.
 
+Before cache or network preparation, the pinned Node route checks all six
+public aliases: `node`, `npm`, `npx`, `corepack`, `pnpm`, and `pnpx`. It repeats
+the check before replacing the image toolcache slot. Each alias must be absent
+or an absolute symlink to its same-named binary in the exact Node 24.19.0 x64
+slot; dangling matching links are allowed. Files, directories, and other link
+targets stop the bake with a resolve-before-rebake diagnostic. Relative aliases,
+including those from earlier unshipped builder revisions, require operator
+resolution rather than automatic ownership inference.
+
+Corepack enables its shims only inside the private staged Node tree. The
+installer publishes each public alias using a private temporary symlink and
+rename, then prepares the selected pnpm version without running public
+`corepack enable`. Existing public `yarn` and `yarnpkg` entries remain untouched.
+Each alias replacement is atomic; the six replacements are not one transaction.
+
 Public archives are retained under `/opt/crabbox/toolchain-archives`:
 
 | Filename | Purpose |
