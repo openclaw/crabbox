@@ -17,14 +17,21 @@ func TestNativeImagePreparationPreservesCurrentBootStatus(t *testing.T) {
 		t.Skip("preparation fixture requires Python 3")
 	}
 	for _, tt := range []struct {
-		name    string
-		failure string
-		cleaned bool
+		name      string
+		failure   string
+		cleaned   bool
+		wantError string
 	}{
 		{name: "clean succeeds", cleaned: true},
+		{name: "initialization completes while waiting", failure: "wait", cleaned: true},
 		{name: "clean fails after deleting cache", failure: "clean", cleaned: true},
 		{name: "initialization still running", failure: "running"},
-		{name: "cloud-init disabled", failure: "disabled"},
+		{name: "cloud-init disabled", failure: "disabled", wantError: "pre-clean: status='disabled' exit=0"},
+		{name: "recoverable errors remain failures", failure: "degraded", wantError: "pre-clean: status='done' exit=2"},
+		{name: "cloud-init errors remain failures", failure: "error", wantError: "pre-clean: status='error' exit=1"},
+		{name: "initialization wait deadline", failure: "timeout", wantError: "pre-clean: status=unknown timeout=30s"},
+		{name: "malformed status response", failure: "malformed", wantError: "pre-clean: status=invalid-response exit=0"},
+		{name: "post-clean initialization incomplete", failure: "post-running", cleaned: true, wantError: "post-clean: status='running' exit=0"},
 		{name: "persistent runtime filesystem", failure: "disk"},
 		{name: "runtime inside cleaned cache", failure: "overlap"},
 		{name: "runtime symlink inside cleaned cache", failure: "overlap-link"},
@@ -62,7 +69,21 @@ func TestNativeImagePreparationPreservesCurrentBootStatus(t *testing.T) {
 			clean := `#!/bin/sh
 set -eu
 if [ "$1" = status ]; then
+  printf '%s\n' "$*" >> "$FIXTURE_STATUS_LOG"
   case "$FIXTURE_FAILURE" in
+    wait)
+      case "$*" in
+        *--wait*) printf '{"status":"done"}\n';;
+        *) if [ -f "$FIXTURE_CLEANED" ]; then printf '{"status":"done"}\n'; else printf '{"status":"running"}\n'; fi;;
+      esac;;
+    degraded) printf '{"status":"done"}\n'; exit 2;;
+    error) printf '{"status":"error"}\n'; exit 1;;
+    malformed) printf '{'; exit 0;;
+    post-running)
+      case "$*" in
+        *--wait*) printf '{"status":"done"}\n';;
+        *) printf '{"status":"running"}\n';;
+      esac;;
     running|disabled) printf '{"status":"%s"}\n' "$FIXTURE_FAILURE";;
     *) printf '{"status":"done"}\n';;
   esac
@@ -82,6 +103,11 @@ sys.modules["cloudinit.cmd.devel"] = module
 run = subprocess.run
 def fixture_run(args, **kwargs):
     if args[:4] == [sys.executable, "-I", "-m", "cloudinit.cmd.main"]:
+        if args[4] == "status":
+            assert kwargs["timeout"] == 30
+            if os.environ["FIXTURE_FAILURE"] == "timeout":
+                assert "--wait" in args
+                raise subprocess.TimeoutExpired(args, kwargs["timeout"])
         args = [os.environ["FIXTURE_CLI"]] + args[4:]
     return run(args, **kwargs)
 subprocess.run = fixture_run
@@ -112,10 +138,13 @@ exec(compile(sys.argv[3], "remote-image-preparation", "exec"))
 				if tt.failure == "absent" {
 					path = binDir
 				}
-				cmd.Env = []string{"PATH=" + path, "FIXTURE_FAILURE=" + tt.failure, "FIXTURE_CLEANED=" + filepath.Join(root, "cleaned"), "FIXTURE_DATA=" + dataDir, "FIXTURE_RUN=" + configuredRun, "FIXTURE_CLI=" + filepath.Join(binDir, "cloud-init"), "FIXTURE_SYNC=" + filepath.Join(root, "synced")}
+				cmd.Env = []string{"PATH=" + path, "FIXTURE_FAILURE=" + tt.failure, "FIXTURE_CLEANED=" + filepath.Join(root, "cleaned"), "FIXTURE_DATA=" + dataDir, "FIXTURE_RUN=" + configuredRun, "FIXTURE_CLI=" + filepath.Join(binDir, "cloud-init"), "FIXTURE_SYNC=" + filepath.Join(root, "synced"), "FIXTURE_STATUS_LOG=" + filepath.Join(root, "status-commands")}
 				out, err := cmd.CombinedOutput()
-				if (err != nil) != (tt.failure != "" && tt.failure != "absent") {
+				if (err != nil) != (tt.failure != "" && tt.failure != "absent" && tt.failure != "wait") {
 					t.Fatalf("preparation error=%v, injected failure=%s: %s", err, tt.failure, out)
+				}
+				if tt.wantError != "" && !strings.Contains(string(out), tt.wantError) {
+					t.Fatalf("preparation output=%s, want diagnostic %q", out, tt.wantError)
 				}
 				for file, want := range facts {
 					path := filepath.Join(runDir, file)
@@ -135,12 +164,22 @@ exec(compile(sys.argv[3], "remote-image-preparation", "exec"))
 					t.Fatalf("clone disk still contains cloud-init cache: %v", err)
 				}
 			}
+			if tt.failure == "wait" || tt.failure == "post-running" {
+				commands, err := os.ReadFile(filepath.Join(root, "status-commands"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := strings.Repeat("status --format=json --wait\nstatus --format=json\n", 2)
+				if string(commands) != want {
+					t.Fatalf("status commands=%q, want pre-clean wait and immediate post-clean check %q", commands, want)
+				}
+			}
 			_, cleanErr := os.Stat(filepath.Join(root, "cleaned"))
 			if os.IsNotExist(cleanErr) == tt.cleaned {
 				t.Fatalf("clean invoked=%v, want=%v", cleanErr == nil, tt.cleaned)
 			}
 			_, syncErr := os.Stat(filepath.Join(root, "synced"))
-			if (tt.failure != "" && tt.failure != "absent") != os.IsNotExist(syncErr) {
+			if (tt.failure != "" && tt.failure != "absent" && tt.failure != "wait") != os.IsNotExist(syncErr) {
 				t.Fatalf("sync must follow successful preparation only: failure=%s sync err=%v", tt.failure, syncErr)
 			}
 		})
