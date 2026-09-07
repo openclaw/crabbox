@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Stop SSH readiness probes and backoff at the shared deadline, reporting the active probe with authentication unknown instead of mislabeling expired checks as authentication failures. Thanks @vincentkoc.
+- Stop SSH readiness probes and backoff at the shared deadline, reporting the active probe with authentication unknown instead of mislabeling expired checks as authentication failures. [PR 1949](https://github.com/openclaw/crabbox/pull/1949). Thanks @vincentkoc.
 - Reuse verified SSH endpoints within an operation, preserving advertised fallbacks when switching hosts or ports and avoiding redundant login probes across direct, proxy, and WSL execution. [PR 1941](https://github.com/openclaw/crabbox/pull/1941).
 - Report image qualification reaping as idle after clean teardown, while preserving failed recovery evidence and checking transient controller ownership before cleanup. [PR 1942](https://github.com/openclaw/crabbox/pull/1942). Thanks @vincentkoc.
 - Add `crabbox bench check` to enforce sample, failure, and p95 runner timing policy across every matched local benchmark group. [PR 1899](https://github.com/openclaw/crabbox/pull/1899). Thanks @vincentkoc.
