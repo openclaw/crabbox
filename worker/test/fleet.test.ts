@@ -26899,6 +26899,7 @@ describe("fleet lease identity and idle", () => {
     const failedAt = new Date(Date.now() - 60_000).toISOString();
     storage.seed(`lease:${activeID}`, {
       ...storage.value<LeaseRecord>(`lease:${activeID}`)!,
+      providerScope: undefined,
       state: "released",
       keep: false,
       releaseDeletesServer: true,
@@ -26906,6 +26907,7 @@ describe("fleet lease identity and idle", () => {
       cleanupFailedAt: failedAt,
       cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
     });
+    expect(storage.value<LeaseRecord>(`lease:${activeID}`)?.providerScope).toBeUndefined();
 
     await fleet.alarm();
 
@@ -26915,6 +26917,7 @@ describe("fleet lease identity and idle", () => {
       cleanupCompletedAt: expect.any(String),
       provisioningResourceMayExist: false,
     });
+    expect(storage.value<LeaseRecord>(`lease:${activeID}`)?.providerScope).toBeUndefined();
     expect(requests.filter(({ action }) => action === "GetCallerIdentity")).toHaveLength(2);
     expect(requests.filter(({ action }) => action === "TerminateInstances")).toHaveLength(1);
   });
