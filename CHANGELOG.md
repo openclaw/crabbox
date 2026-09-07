@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Recover lost run-admission responses using a caller-known identity and an atomic initial history record, preserving authenticated request binding and refusing remote command replay. Current clients require a coordinator supporting the new admission route. [Issue 1962](https://github.com/openclaw/crabbox/issues/1962).
+- Recover lost run-admission responses using a caller-known identity and an atomic initial history record, preserving authenticated request binding and refusing remote command replay. Current clients require a coordinator supporting the new admission route. [PR 1970](https://github.com/openclaw/crabbox/pull/1970), [Issue 1962](https://github.com/openclaw/crabbox/issues/1962). Thanks @steipete.
+- Add bounded AWS provisioning transport diagnostics for credential preparation, signing and SDK request time, including retry-loop signing counts, without changing retry behavior. [PR 1968](https://github.com/openclaw/crabbox/pull/1968). Thanks @steipete.
 
 ## 0.52.0 - 2026-09-07
 

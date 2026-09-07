@@ -182,9 +182,35 @@ describe("aws provider", () => {
       });
       expect(diagnostic.steps).toEqual(
         expect.arrayContaining([
-          { name: "authorize_ingress", count: 4, totalMs: 28, errors: 4 },
+          expect.objectContaining({
+            name: "authorize_ingress",
+            count: 4,
+            totalMs: 28,
+            errors: 4,
+            transport: expect.objectContaining({
+              requests: 4,
+              requestMs: 28,
+              signInvocations: 4,
+              signCompletions: 4,
+              signFailures: 0,
+              requestFailures: 0,
+            }),
+          }),
           { name: "authorize_duplicate", count: 4, totalMs: 0, errors: 0 },
-          { name: "revoke_world", count: 2, totalMs: 6, errors: 2 },
+          expect.objectContaining({
+            name: "revoke_world",
+            count: 2,
+            totalMs: 6,
+            errors: 2,
+            transport: expect.objectContaining({
+              requests: 2,
+              requestMs: 6,
+              signInvocations: 2,
+              signCompletions: 2,
+              signFailures: 0,
+              requestFailures: 0,
+            }),
+          }),
           { name: "revoke_world_absent", count: 2, totalMs: 0, errors: 0 },
         ]),
       );
@@ -2335,12 +2361,20 @@ describe("aws provider", () => {
     expect(JSON.parse(encoded)).toMatchObject({
       outcome: failImage ? "failure" : "success",
       steps: expect.arrayContaining([
-        {
+        expect.objectContaining({
           name: "image",
           count: failImage ? 2 : 1 + awsMacOSInstanceTypeCandidates.length,
           totalMs: failImage ? 37 : 111,
           errors: failImage ? 1 : 0,
-        },
+          transport: expect.objectContaining({
+            requests: failImage ? 1 : 3,
+            requestMs: failImage ? 37 : 111,
+            signInvocations: failImage ? 1 : 3,
+            signCompletions: failImage ? 1 : 3,
+            signFailures: 0,
+            requestFailures: 0,
+          }),
+        }),
       ]),
     });
     expect(encoded).not.toContain("private-image-canary");
