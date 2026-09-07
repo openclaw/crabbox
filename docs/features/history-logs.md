@@ -37,6 +37,19 @@ secret encodings while preserving useful diagnostic context. Raw `stdout` and
 `stderr` event data and retained command logs remain caller-owned output and are
 not automatically redacted.
 
+Phase and stream diagnostics publish through one bounded queue while the workload
+continues. An existing lease's run creation already records its binding; a new
+or replacement lease binding first drains and joins diagnostics, then gets its
+own acknowledged request before command admission. Missing diagnostic endpoints
+do not block an already bound run; a changed binding must be accepted because
+the signed terminal receipt requires the exact lease, slug, and provider.
+Sync-only runs keep their optional-history behavior and warn when binding is
+unavailable. Before
+terminal recording, the CLI drains diagnostics for up to two seconds, cancels
+remaining publication, and joins the publisher. Queue overflow or drain expiry
+produces a warning; retained logs and verified terminal receipts remain the
+completion record.
+
 Each event carries a sequence number, type, phase, and stream. Streamed output
 events are capped at **64 KiB total per run**; once the cap is hit the CLI emits
 a single `output.truncated` marker pointing you at `crabbox logs` for the full

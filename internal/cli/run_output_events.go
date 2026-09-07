@@ -15,31 +15,29 @@ const (
 	runEventOutputPostWait   = 2 * time.Second
 )
 
-type runOutputEventQueue struct {
-	coord           *CoordinatorClient
-	runID           string
+type runEventPublication struct {
+	coord *CoordinatorClient
+	input CoordinatorRunEventInput
+}
+
+type runEventPublisher struct {
 	onError         func(string, error) bool
 	outputMu        sync.Mutex
 	outputBytes     int
 	outputTruncated bool
-	queueOnce       sync.Once
-	closeOnce       sync.Once
 	queueMu         sync.Mutex
 	queueClosed     bool
 	disabled        bool
-	events          chan CoordinatorRunEventInput
-	wg              sync.WaitGroup
+	events          chan runEventPublication
+	cancel          context.CancelFunc
+	done            chan struct{}
 }
 
-func newRunOutputEventQueue(coord *CoordinatorClient, runID string, onError func(string, error) bool) *runOutputEventQueue {
-	return &runOutputEventQueue{
-		coord:   coord,
-		runID:   runID,
-		onError: onError,
-	}
+func newRunEventPublisher(onError func(string, error) bool) *runEventPublisher {
+	return &runEventPublisher{onError: onError}
 }
 
-func (q *runOutputEventQueue) Closed() bool {
+func (q *runEventPublisher) Closed() bool {
 	if q == nil {
 		return true
 	}
@@ -48,17 +46,16 @@ func (q *runOutputEventQueue) Closed() bool {
 	return q.outputTruncated
 }
 
-func (q *runOutputEventQueue) Enqueue(stream, data string) {
-	if q == nil || data == "" || q.coord == nil || q.runID == "" {
+func (q *runEventPublisher) Enqueue(coord *CoordinatorClient, runID, stream, data string) {
+	if q == nil || data == "" {
 		return
 	}
-	if q.Disabled() {
-		return
+	for _, input := range q.eventInputs(stream, data) {
+		q.append(coord, runID, input)
 	}
-	q.enqueue(q.eventInputs(stream, data))
 }
 
-func (q *runOutputEventQueue) eventInputs(stream, data string) []CoordinatorRunEventInput {
+func (q *runEventPublisher) eventInputs(stream, data string) []CoordinatorRunEventInput {
 	q.outputMu.Lock()
 	defer q.outputMu.Unlock()
 	if q.outputTruncated {
@@ -97,79 +94,111 @@ func outputTruncatedEventInput() CoordinatorRunEventInput {
 	}
 }
 
-func (q *runOutputEventQueue) enqueue(events []CoordinatorRunEventInput) {
-	if len(events) == 0 {
+// One FIFO owns phase and stream publication so delayed output cannot overtake
+// lease attribution or terminal recording. Every queued request is joined.
+func (q *runEventPublisher) append(coord *CoordinatorClient, runID string, input CoordinatorRunEventInput) {
+	if coord == nil || runID == "" {
 		return
 	}
-	q.queueOnce.Do(func() {
-		q.events = make(chan CoordinatorRunEventInput, runEventOutputQueueSize)
-		q.wg.Add(1)
-		go q.post(q.events)
-	})
+	publication := runEventPublication{coord: coord, input: input}
 	q.queueMu.Lock()
-	defer q.queueMu.Unlock()
-	if q.queueClosed || q.disabled {
+	if q.disabled || q.queueClosed {
+		q.queueMu.Unlock()
 		return
 	}
-	for _, event := range events {
-		select {
-		case q.events <- event:
-		default:
-			return
+	if q.events == nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		q.cancel = cancel
+		q.events = make(chan runEventPublication, runEventOutputQueueSize)
+		q.done = make(chan struct{})
+		go q.post(ctx, runID)
+	}
+	select {
+	case q.events <- publication:
+		q.queueMu.Unlock()
+	default:
+		q.queueMu.Unlock()
+		err := fmt.Errorf("run event queue full; diagnostic event dropped")
+		if q.onError != nil {
+			q.onError(input.Type, err)
 		}
+		return
 	}
 }
 
-func (q *runOutputEventQueue) post(events <-chan CoordinatorRunEventInput) {
-	defer q.wg.Done()
-	for event := range events {
-		ctx, cancel := context.WithTimeout(context.Background(), runEventOutputPostWait)
-		_, err := q.coord.AppendRunEvent(ctx, q.runID, event)
-		cancel()
-		if err != nil && q.onError != nil && !q.onError(event.Type, err) {
-			q.Disable()
-			return
-		}
-	}
-}
-
-func (q *runOutputEventQueue) Disable() {
-	if q == nil {
-		return
+// A binding owns admission, so queued diagnostics cannot consume its capacity
+// or HTTP budget. Drain and join before posting, then resume the same publisher.
+func (q *runEventPublisher) Bind(coord *CoordinatorClient, runID string, input CoordinatorRunEventInput) error {
+	q.CloseAndWait(runEventOutputPostWait)
+	if err := postRunEvent(context.Background(), coord, runID, input); err != nil {
+		return err
 	}
 	q.queueMu.Lock()
-	q.disabled = true
+	q.events, q.done, q.cancel = nil, nil, nil
+	q.queueClosed, q.disabled = false, false
 	q.queueMu.Unlock()
+	return nil
 }
 
-func (q *runOutputEventQueue) Disabled() bool {
-	if q == nil {
-		return true
+func postRunEvent(ctx context.Context, coord *CoordinatorClient, runID string, input CoordinatorRunEventInput) error {
+	timeout := runRecorderRequestTimeout
+	if input.Stream != "" || input.Type == "output.truncated" {
+		timeout = runEventOutputPostWait
 	}
-	q.queueMu.Lock()
-	defer q.queueMu.Unlock()
-	return q.disabled
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	_, err := coord.AppendRunEvent(ctx, runID, input)
+	return err
 }
 
-func (q *runOutputEventQueue) CloseAndWait(timeout time.Duration) {
-	if q == nil || q.events == nil {
+func (q *runEventPublisher) post(ctx context.Context, runID string) {
+	defer close(q.done)
+	var stopped error
+	for publication := range q.events {
+		err := ctx.Err()
+		if err == nil {
+			err = stopped
+		}
+		if err == nil {
+			err = postRunEvent(ctx, publication.coord, runID, publication.input)
+		}
+		if err != nil && ctx.Err() == nil && stopped == nil && q.onError != nil && !q.onError(publication.input.Type, err) {
+			stopped = err
+			q.queueMu.Lock()
+			q.disabled = true
+			q.queueMu.Unlock()
+		}
+	}
+}
+
+func (q *runEventPublisher) CloseAndWait(timeout time.Duration) {
+	if q == nil {
 		return
 	}
-	q.closeOnce.Do(func() {
-		q.queueMu.Lock()
-		defer q.queueMu.Unlock()
+	q.queueMu.Lock()
+	if q.events == nil {
+		q.queueClosed = true
+		q.queueMu.Unlock()
+		return
+	}
+	if !q.queueClosed {
 		q.queueClosed = true
 		close(q.events)
-	})
-	done := make(chan struct{})
-	go func() {
-		q.wg.Wait()
-		close(done)
-	}()
+	}
+	done, cancel := q.done, q.cancel
+	q.queueMu.Unlock()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case <-done:
-	case <-time.After(timeout):
+	case <-timer.C:
+		cancel()
+		if q.onError != nil {
+			q.onError("publication", fmt.Errorf("run event drain deadline expired; remaining diagnostics dropped"))
+		}
+		<-done
 	}
+	cancel()
 }
 
 type runEventStreamWriter struct {
@@ -179,11 +208,11 @@ type runEventStreamWriter struct {
 }
 
 func (w *runEventStreamWriter) Write(p []byte) (int, error) {
-	if w == nil || w.recorder == nil || w.recorder.runID == "" || w.recorder.finished || w.recorder.output == nil {
+	if w == nil || w.recorder == nil || w.recorder.runID == "" || w.recorder.finished || w.recorder.publisher == nil {
 		return len(p), nil
 	}
 	written := len(p)
-	for len(p) > 0 && !w.recorder.output.Closed() {
+	for len(p) > 0 && !w.recorder.publisher.Closed() {
 		space := runEventOutputChunkBytes - w.data.Len()
 		if space <= 0 {
 			w.Flush()
@@ -202,10 +231,10 @@ func (w *runEventStreamWriter) Write(p []byte) (int, error) {
 }
 
 func (w *runEventStreamWriter) Flush() {
-	if w == nil || w.recorder == nil || w.recorder.runID == "" || w.recorder.finished || w.recorder.output == nil || w.data.Len() == 0 {
+	if w == nil || w.recorder == nil || w.recorder.runID == "" || w.recorder.finished || w.recorder.publisher == nil || w.data.Len() == 0 {
 		return
 	}
 	data := w.data.String()
 	w.data.Reset()
-	w.recorder.output.Enqueue(w.stream, data)
+	w.recorder.publisher.Enqueue(w.recorder.coord, w.recorder.runID, w.stream, data)
 }

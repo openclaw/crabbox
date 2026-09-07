@@ -34,6 +34,7 @@ type resolveResultBackend struct {
 	testSSHBackend
 	lease                  LeaseTarget
 	rebindStoredTestboxKey bool
+	onRebind               func()
 }
 
 type providerManagedResolveBackend struct {
@@ -119,6 +120,9 @@ func (b recreatingClaimResolveBackend) Resolve(context.Context, ResolveRequest) 
 }
 
 func (b resolveResultBackend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
+	if b.onRebind != nil {
+		b.onRebind()
+	}
 	if b.rebindStoredTestboxKey {
 		useStoredTestboxKey(&target.SSH, leaseID)
 	}
@@ -413,8 +417,7 @@ func TestResolvedLeaseClaimBeforeRejectsSlugWithDifferentCloudID(t *testing.T) {
 }
 
 func TestResolveSSHLeaseTargetRemovesProviderCreatedAliasClaim(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
+	isolateTestUserDirs(t)
 	cfg := baseConfig()
 	cfg.Provider = "aws"
 	leaseID := "cbx_canonical123456"
@@ -465,9 +468,66 @@ func TestResolveSSHLeaseTargetRemovesProviderCreatedAliasClaim(t *testing.T) {
 	}
 }
 
+func TestResolveSSHLeaseTargetPreservesUnclaimedAliasArtifacts(t *testing.T) {
+	isolateTestUserDirs(t)
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	const leaseID = "cbx_canonicalmarker"
+	const aliasID = "cbx_aliasmarker"
+	server := Server{
+		CloudID:     "synthetic-matching-resource",
+		ImmutableID: "matching-generation",
+		Provider:    "aws",
+		Labels:      map[string]string{"provider": "aws", "lease": leaseID, "slug": "canonical", "state": "ready"},
+	}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "canonical", cfg, server, SSHTarget{}, "/repo", time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	before, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactPath, err := testboxKeyPath(aliasID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markerPath := filepath.Join(filepath.Dir(artifactPath), "noncredential-marker.txt")
+	if err := os.MkdirAll(filepath.Dir(markerPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const marker = "ordinary connection-artifact preservation marker"
+	if err := os.WriteFile(markerPath, []byte(marker), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server.Labels = cloneStringMap(server.Labels)
+	server.Labels["lease"] = aliasID
+	lease, err := resolveSSHLeaseTarget(context.Background(), resolveResultBackend{
+		testSSHBackend: testSSHBackend{spec: ProviderSpec{Name: "aws"}},
+		lease:          LeaseTarget{LeaseID: aliasID, Server: server},
+	}, ResolveRequest{ID: server.CloudID, Repo: Repo{Root: "/repo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID || lease.Server.Labels["lease"] != leaseID {
+		t.Fatalf("resolved lease=%q label=%q, want canonical %q", lease.LeaseID, lease.Server.Labels["lease"], leaseID)
+	}
+	if contents, err := os.ReadFile(markerPath); err != nil || string(contents) != marker {
+		t.Fatalf("unclaimed alias marker changed: contents=%q err=%v", contents, err)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(aliasID); err != nil || exists {
+		t.Fatalf("alias claim: exists=%v err=%v, want absent", exists, err)
+	}
+	after, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("matching-identity resolution changed canonical claim metadata")
+	}
+}
+
 func TestResolveSSHLeaseTargetPreservesProviderManagedCredentials(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
+	isolateTestUserDirs(t)
 	cfg := baseConfig()
 	cfg.Provider = "tenki"
 	leaseID := "cbx_tenki123456"
@@ -1774,5 +1834,87 @@ func TestConfirmedAbsenceCoordinatorDeregistrationTreatsMissingAsClean(t *testin
 	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
 	if err := app.releaseRegisteredCoordinatorLeaseAfterConfirmedAbsence(context.Background(), cfg, "cbx_123"); err != nil {
 		t.Fatalf("already absent coordinator registration: %v", err)
+	}
+}
+
+func TestResolveSSHLeaseTargetChecksIdentityBeforeRebinding(t *testing.T) {
+	isolateTestUserDirs(t)
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	const leaseID = "cbx_guardclaim12"
+	server := Server{
+		CloudID:     "synthetic-resource",
+		ImmutableID: "generation-a",
+		Provider:    "aws",
+		Labels:      map[string]string{"provider": "aws", "lease": leaseID, "slug": "guard", "state": "ready"},
+	}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "guard", cfg, server, SSHTarget{}, "/repo", time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	before, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.ImmutableID = "generation-b"
+	rebound := false
+	_, err = resolveSSHLeaseTarget(context.Background(), resolveResultBackend{
+		testSSHBackend: testSSHBackend{spec: ProviderSpec{Name: "aws"}},
+		lease:          LeaseTarget{LeaseID: "cbx_guardresult1", Server: server},
+		onRebind:       func() { rebound = true },
+	}, ResolveRequest{ID: server.CloudID, Repo: Repo{Root: "/repo"}})
+	if ExitCodeForError(err, 0) != 2 || !strings.Contains(err.Error(), "incompatible provider identity") {
+		t.Fatalf("error=%v, want provider identity refusal with exit 2", err)
+	}
+	if rebound {
+		t.Fatal("identity refusal invoked the rebind callback")
+	}
+	after, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("identity refusal changed stored claim metadata")
+	}
+}
+
+func TestResolvedLeaseClaimAttestsResultIdentityCompatibility(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		claim  leaseClaim
+		server Server
+		want   bool
+	}{
+		{name: "unknown", want: true},
+		{name: "cloud ID equal", claim: leaseClaim{CloudID: "resource"}, server: Server{CloudID: "resource"}, want: true},
+		{name: "cloud ID different", claim: leaseClaim{CloudID: "a"}, server: Server{CloudID: "b"}},
+		{name: "claim cloud ID unknown", server: Server{CloudID: "resource"}, want: true},
+		{name: "server cloud ID unknown", claim: leaseClaim{CloudID: "resource"}, want: true},
+		{name: "immutable ID equal", claim: leaseClaim{CloudImmutableID: "generation"}, server: Server{ImmutableID: "generation"}, want: true},
+		{name: "immutable ID different", claim: leaseClaim{CloudImmutableID: "a"}, server: Server{ImmutableID: "b"}},
+		{name: "claim immutable ID unknown", server: Server{ImmutableID: "generation"}, want: true},
+		{name: "server immutable ID unknown", claim: leaseClaim{CloudImmutableID: "generation"}, want: true},
+		{name: "numeric ID equal", claim: leaseClaim{CloudNumericID: 42}, server: Server{ID: 42}, want: true},
+		{name: "numeric ID different", claim: leaseClaim{CloudNumericID: 42}, server: Server{ID: 43}},
+		{name: "claim numeric ID unknown", server: Server{ID: 42}, want: true},
+		{name: "server numeric ID unknown", claim: leaseClaim{CloudNumericID: 42}, want: true},
+		{name: "nonzero negative ID equal", claim: leaseClaim{CloudNumericID: -1}, server: Server{ID: -1}, want: true},
+		{name: "nonzero negative ID different", claim: leaseClaim{CloudNumericID: -1}, server: Server{ID: 42}},
+		{name: "numeric match does not override immutable mismatch", claim: leaseClaim{CloudNumericID: 42, CloudImmutableID: "a"}, server: Server{ID: 42, ImmutableID: "b"}},
+		{name: "immutable match does not override numeric mismatch", claim: leaseClaim{CloudNumericID: 42, CloudImmutableID: "generation"}, server: Server{ID: 43, ImmutableID: "generation"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.claim.Provider = "example"
+			tt.claim.ProviderScope = "scope"
+			tt.claim.RepoRoot = "/repo"
+			tt.claim.Labels = map[string]string{"state": "ready"}
+			tt.server.Provider = "example"
+			tt.server.Status = "leased"
+			if got := resolvedLeaseClaimIdentityCompatible(tt.claim, tt.server); got != tt.want {
+				t.Fatalf("resolvedLeaseClaimIdentityCompatible() = %v, want %v", got, tt.want)
+			}
+			if got := resolvedLeaseClaimAttestsResult(tt.claim, tt.server, "/repo", "scope"); got != tt.want {
+				t.Fatalf("resolvedLeaseClaimAttestsResult() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

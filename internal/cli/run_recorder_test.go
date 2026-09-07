@@ -334,6 +334,7 @@ func TestRunRecorderRedactsCoordinatorDiagnosticEvents(t *testing.T) {
 			rec.runID = "run_123"
 
 			test.record(rec)
+			rec.waitForEvents(time.Second)
 
 			if len(events) != 1 {
 				t.Fatalf("events=%v, want one posted diagnostic", events)
@@ -381,7 +382,7 @@ func TestRunRecorderPreservesRawStreamEventData(t *testing.T) {
 		t.Fatal(err)
 	}
 	stdout.Flush()
-	rec.waitForOutputEvents(time.Second)
+	rec.waitForEvents(time.Second)
 
 	if len(events) != 1 || events[0].Type != "stdout" {
 		t.Fatalf("events=%#v, want one stdout event", events)
@@ -409,6 +410,7 @@ func TestRunRecorderRedactsRefreshedRuntimeDiagnosticSecrets(t *testing.T) {
 
 	rec.Event("actions.hydrate.failed", "hydrate", "original="+originalSecret+" refreshed="+refreshedSecret+" region=eu")
 
+	rec.waitForEvents(time.Second)
 	if len(events) != 1 {
 		t.Fatalf("events=%#v, want one posted diagnostic", events)
 	}
@@ -448,6 +450,7 @@ func TestRunRecorderRedactsDiagnosticSecretsAfterLateCoordinatorAttachment(t *te
 		"region=eu",
 	}, " "))
 
+	rec.waitForEvents(time.Second)
 	if len(events) != 1 {
 		t.Fatalf("events=%#v, want one posted diagnostic", events)
 	}
@@ -499,6 +502,7 @@ func TestRunRecorderRedactsPersistedCoordinatorDiagnosticEvents(t *testing.T) {
 		"region=eu",
 	}, " "))
 
+	rec.waitForEvents(time.Second)
 	events, err := client.RunEvents(context.Background(), run.ID, 0, 20)
 	if err != nil {
 		t.Fatalf("read persisted coordinator events: %v", err)
@@ -541,7 +545,7 @@ func TestRunEventStreamWriterCapsOutputEvents(t *testing.T) {
 		}
 	}
 	stdout.Flush()
-	rec.waitForOutputEvents(time.Second)
+	rec.waitForEvents(time.Second)
 
 	var outputBytes, outputEvents, truncatedEvents int
 	for _, event := range events {
@@ -604,7 +608,7 @@ func TestRunEventStreamWriterDoesNotBlockOnCoordinatorPost(t *testing.T) {
 	var joined chan struct{}
 	t.Cleanup(func() {
 		releasePost()
-		rec.waitForOutputEvents(time.Second)
+		rec.waitForEvents(time.Second)
 		if joined != nil {
 			select {
 			case <-joined:
@@ -634,10 +638,10 @@ func TestRunEventStreamWriterDoesNotBlockOnCoordinatorPost(t *testing.T) {
 	releasePost()
 	joined = make(chan struct{})
 	go func() {
-		rec.output.wg.Wait()
+		<-rec.publisher.done
 		close(joined)
 	}()
-	rec.waitForOutputEvents(time.Second)
+	rec.waitForEvents(time.Second)
 	select {
 	case <-joined:
 	case <-time.After(time.Second):
@@ -695,6 +699,7 @@ func TestRunRecorderDefersCreateWhenCoordinatorRequiresLeaseID(t *testing.T) {
 	if got := createBodies[1]["leaseID"]; got != "cbx_abcdef123456" {
 		t.Fatalf("second create leaseID=%#v", got)
 	}
+	rec.waitForEvents(time.Second)
 	if got := eventBody["type"]; got != "lease.created" {
 		t.Fatalf("event body=%#v", eventBody)
 	}
@@ -770,6 +775,7 @@ func TestRunRecorderDefersCreateForExplicitLeaseRuns(t *testing.T) {
 	if got := createBodies[0]["leaseID"]; got != "cbx_abcdef123456" {
 		t.Fatalf("create leaseID=%#v", got)
 	}
+	rec.waitForEvents(time.Second)
 	if got := eventBody["type"]; got != "lease.created" {
 		t.Fatalf("event body=%#v", eventBody)
 	}
@@ -828,6 +834,7 @@ func TestRunRecorderRetriesTransientCreateFailureAfterLease(t *testing.T) {
 	if got := createBodies[1]["leaseID"]; got != "cbx_abcdef123456" {
 		t.Fatalf("second create leaseID=%#v", got)
 	}
+	rec.waitForEvents(time.Second)
 	if got := eventBody["type"]; got != "lease.created" {
 		t.Fatalf("event body=%#v", eventBody)
 	}
@@ -955,6 +962,7 @@ func TestRunRecorderRetriesFailedLeaseCreateOnReplacementLease(t *testing.T) {
 	if got := createBodies[2]["leaseID"]; got != "cbx_replacement123" {
 		t.Fatalf("replacement create leaseID=%#v", got)
 	}
+	rec.waitForEvents(time.Second)
 	if got := eventBody["leaseID"]; got != "cbx_replacement123" {
 		t.Fatalf("lease.created body=%#v", eventBody)
 	}
@@ -1012,13 +1020,13 @@ func TestRunRecorderSuppressesMissingEventEndpoint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
-			_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"state":"running","phase":"starting","logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z"}}`))
+			_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"cbx_abcdef123456","slug":"blue-lobster","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"state":"running","phase":"starting","logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/events":
 			eventRequests++
 			http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/finish":
 			finishRequests++
-			_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"state":"succeeded","phase":"completed","exitCode":0,"logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z","finishedAt":"2026-05-02T00:00:01Z"}}`))
+			_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"cbx_abcdef123456","slug":"blue-lobster","owner":"peter@example.com","org":"openclaw","provider":"aws","class":"standard","serverType":"t3.small","command":["pnpm","test"],"state":"succeeded","phase":"completed","exitCode":0,"logBytes":0,"logTruncated":false,"startedAt":"2026-05-02T00:00:00Z","finishedAt":"2026-05-02T00:00:01Z"}}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -1030,22 +1038,27 @@ func TestRunRecorderSuppressesMissingEventEndpoint(t *testing.T) {
 		Provider:   "aws",
 		Class:      "standard",
 		ServerType: "t3.small",
-	}, []string{"pnpm", "test"}, "", &stderr, false)
-	if rec.runID != "run_123" || rec.finished {
-		t.Fatalf("run handle must exist before lease attach or finish: %#v", rec)
+	}, []string{"pnpm", "test"}, "", &stderr, true)
+	if rec.runID != "" || rec.finished {
+		t.Fatalf("existing-lease run must defer its handle until lease resolution: %#v", rec)
 	}
-	rec.AttachLease("cbx_abcdef123456", "blue-lobster", Config{
+	err := rec.AttachLease("cbx_abcdef123456", "blue-lobster", Config{
 		Provider:   "aws",
 		Class:      "standard",
 		ServerType: "t3.small",
 	})
+	if err != nil {
+		t.Fatalf("existing authoritative binding needs no event endpoint: %v", err)
+	}
 	stdout := rec.StreamWriter("stdout")
 	if _, err := stdout.Write([]byte("hello")); err != nil {
 		t.Fatal(err)
 	}
 	stdout.Flush()
-	rec.waitForOutputEvents(time.Second)
-	rec.Finish(context.Background(), SSHTarget{TargetOS: targetWindows}, 0, time.Second, time.Second, "ok", false, nil, FailureClassification{}, nil)
+	rec.waitForEvents(time.Second)
+	if err := rec.Finish(context.Background(), SSHTarget{TargetOS: targetWindows}, 0, time.Second, time.Second, "ok", false, nil, FailureClassification{}, nil); err != nil {
+		t.Fatal(err)
+	}
 
 	if eventRequests != 1 {
 		t.Fatalf("event requests=%d, want 1", eventRequests)
