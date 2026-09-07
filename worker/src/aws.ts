@@ -1141,7 +1141,9 @@ export class EC2SpotClient {
         }
         try {
           // oxlint-disable-next-line eslint/no-await-in-loop -- instance-type fallback may need an architecture-specific AMI.
-          const imageID = await resolveCandidateImageID({ ...config, serverType });
+          const imageID = await diagnostics.measure("image", () =>
+            resolveCandidateImageID({ ...config, serverType }),
+          );
           // oxlint-disable-next-line eslint/no-await-in-loop -- instance-type fallback must stay sequential.
           const server = await diagnostics.measure("instance_create", () =>
             this.createServer(
@@ -1196,11 +1198,13 @@ export class EC2SpotClient {
           }
           try {
             // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback may need an architecture-specific AMI.
-            const imageID = await resolveCandidateImageID({
-              ...config,
-              capacityMarket: "on-demand",
-              serverType,
-            });
+            const imageID = await diagnostics.measure("image", () =>
+              resolveCandidateImageID({
+                ...config,
+                capacityMarket: "on-demand",
+                serverType,
+              }),
+            );
             // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback must stay sequential.
             const server = await diagnostics.measure("instance_create", () =>
               this.createServer(

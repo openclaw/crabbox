@@ -1471,6 +1471,7 @@ describe("aws provider", () => {
   });
 
   it("falls back from unfulfillable spot capacity to on-demand", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
     const { client, config, markets } = awsMarketFallbackHarness("UnfulfillableCapacity");
 
     const result = await client.createServerWithFallback(
@@ -1480,6 +1481,9 @@ describe("aws provider", () => {
       "alice@example.com",
     );
 
+    expect(JSON.parse(String(log.mock.calls[0]![0])).steps).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "image", count: 3, errors: 0 })]),
+    );
     expect(markets).toEqual(["spot", "on-demand"]);
     expect(result.market).toBe("on-demand");
     expect(result.attempts?.[0]).toMatchObject({ market: "spot", category: "capacity" });
@@ -2027,7 +2031,10 @@ describe("aws provider", () => {
     expect(await gunzipBase64(userData)).not.toContain("\napt:\n");
   });
 
-  it("resolves macOS AMIs per fallback instance type", async () => {
+  it.each([false, true])("times macOS fallback AMI discovery (failure: %s)", async (failImage) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-05-02T00:00:00Z"));
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
     const imageQueries: string[] = [];
     const hostTypes: string[] = [];
     const runImages: string[] = [];
@@ -2054,6 +2061,13 @@ describe("aws provider", () => {
           );
         }
         if (action === "DescribeImages") {
+          vi.setSystemTime(Date.now() + 37);
+          if (failImage) {
+            return ec2XMLResponse(
+              "<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>private-image-canary</Message></Error></Errors></Response>",
+              403,
+            );
+          }
           const architecture = params.get("Filter.1.Value.1") ?? "";
           const name = params.get("Filter.2.Value.1") ?? "";
           imageQueries.push(`${name}:${architecture}`);
@@ -2124,7 +2138,7 @@ describe("aws provider", () => {
       } as never,
       "eu-west-1",
     );
-    const result = await client.createServerWithFallback(
+    const creating = client.createServerWithFallback(
       leaseConfig({
         provider: "aws",
         target: "macos",
@@ -2136,16 +2150,38 @@ describe("aws provider", () => {
       "alice@example.com",
     );
 
-    expect(imageQueries).toEqual([
-      "amzn-ec2-macos-14.*-arm64:arm64_mac",
-      "amzn-ec2-macos-15.*-arm64:arm64_mac",
-      "amzn-ec2-macos-14.*:x86_64_mac",
-    ]);
-    expect(hostTypes).toEqual(awsMacOSInstanceTypeCandidates);
-    expect(runTypes).toEqual(["mac1.metal"]);
-    expect(runImages).toEqual(["ami-x86-mac"]);
-    expect(result.serverType).toBe("mac1.metal");
-    expect(result.server.hostID).toBe("h-mac1");
+    const outcome = await creating.then(
+      (result) => ({ result, error: "" }),
+      (error: unknown) => ({ result: undefined, error: String(error) }),
+    );
+    expect(outcome.error).toMatch(failImage ? /UnauthorizedOperation/ : /^$/);
+    const encoded = String(log.mock.calls[0]![0]);
+    expect(JSON.parse(encoded)).toMatchObject({
+      outcome: failImage ? "failure" : "success",
+      steps: expect.arrayContaining([
+        {
+          name: "image",
+          count: failImage ? 2 : 1 + awsMacOSInstanceTypeCandidates.length,
+          totalMs: failImage ? 37 : 111,
+          errors: failImage ? 1 : 0,
+        },
+      ]),
+    });
+    expect(encoded).not.toContain("private-image-canary");
+    expect(imageQueries).toEqual(
+      failImage
+        ? []
+        : [
+            "amzn-ec2-macos-14.*-arm64:arm64_mac",
+            "amzn-ec2-macos-15.*-arm64:arm64_mac",
+            "amzn-ec2-macos-14.*:x86_64_mac",
+          ],
+    );
+    expect(hostTypes).toEqual(failImage ? [] : awsMacOSInstanceTypeCandidates);
+    expect(runTypes).toEqual(failImage ? [] : ["mac1.metal"]);
+    expect(runImages).toEqual(failImage ? [] : ["ami-x86-mac"]);
+    expect(outcome.result?.serverType).toBe(failImage ? undefined : "mac1.metal");
+    expect(outcome.result?.server.hostID).toBe(failImage ? undefined : "h-mac1");
   });
 
   it("retries macOS launch on another discovered host after host capacity is exhausted", async () => {
