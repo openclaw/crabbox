@@ -177,6 +177,13 @@ network latency from SDK retry backoff or identify intermediate response status
 codes. They do not establish throttling. Requests outside a measured create
 operation and qualification-authority RPC transport do not add these totals.
 
+These durations use `Date.now()`. In deployed Cloudflare Workers,
+[timers advance only after I/O](https://developers.cloudflare.com/workers/runtime-apis/performance/).
+A `0` in `credentialsMs` or `signMs` therefore does not establish zero CPU work
+or zero elapsed time. Local Node fixtures use different timer behavior; their
+timings validate attribution, not deployed CPU cost. Invocation, completion and
+failure counters remain observations independent of this timer limitation.
+
 ## Configuration
 
 ```yaml
