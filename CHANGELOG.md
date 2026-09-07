@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Stop SSH readiness probes and backoff at the shared deadline, reporting the active probe with authentication unknown instead of mislabeling expired checks as authentication failures. [PR 1949](https://github.com/openclaw/crabbox/pull/1949). Thanks @vincentkoc.
-- Keep AWS provider deletion outside the shared ingress queue while retaining serialized, claim-validated cleanup commits, so slow expiry or cancellation cleanup does not block another lease’s SSH access preparation. [PR 1951](https://github.com/openclaw/crabbox/pull/1951).
+- Keep AWS provider deletion and unrelated heartbeat alarm scans out of the shared ingress queue while preserving claim-validated cleanup commits, recorded reconciliation deadlines, and earlier alarms. [PR 1951](https://github.com/openclaw/crabbox/pull/1951).
 
 - Reuse verified SSH endpoints within an operation, preserving advertised fallbacks when switching hosts or ports and avoiding redundant login probes across direct, proxy, and WSL execution. [PR 1941](https://github.com/openclaw/crabbox/pull/1941).
 - Report image qualification reaping as idle after clean teardown, while preserving failed recovery evidence and checking transient controller ownership before cleanup. [PR 1942](https://github.com/openclaw/crabbox/pull/1942). Thanks @vincentkoc.

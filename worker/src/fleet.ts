@@ -485,6 +485,7 @@ const azureOrphanSweepFirstAlarmKey = "azure-orphan-sweep:first-alarm";
 const providerReconciliationCandidatePrefix = "provider-reconciliation:";
 const providerReconciliationCircuitPrefix = "provider-reconciliation-circuit:";
 const awsIngressReconcileRecordKey = "aws-ingress-reconcile:pending";
+const awsIngressReconcileMinDelayMs = 1000;
 const azureDeferredCleanupPrefix = "azure-cleanup:";
 const readyPoolPrefix = "ready-pool:";
 const readyPoolDesiredPrefix = "ready-pool-desired:";
@@ -7874,10 +7875,14 @@ export class FleetCoordinator {
         }
         const merged = applyLeaseRecordChanges(latest, snapshot.lease, refreshed);
         await this.putLease(merged);
-        if (managedProvider === "aws") {
+        if (managedProvider === "aws" && leaseHasPublishedAWSAccess(merged)) {
           await this.markAWSIngressReconcilePending(merged);
+          // This write makes ingress reconciliation due. Preserve its scheduling floor
+          // without scanning unrelated fleet state while holding the ingress fence.
+          await this.armAlarmNoLaterThan(Date.now() + awsIngressReconcileMinDelayMs);
+        } else {
+          await this.scheduleAlarm();
         }
-        await this.scheduleAlarm();
         return merged;
       });
     };
@@ -17049,7 +17054,9 @@ export class FleetCoordinator {
     const retryTimes = awsIngressReconcileTargets(record)
       .map((target) => Date.parse(target.retryAt))
       .filter((time) => Number.isFinite(time));
-    return retryTimes.length > 0 ? Math.max(Date.now() + 1000, Math.min(...retryTimes)) : undefined;
+    return retryTimes.length > 0
+      ? Math.max(Date.now() + awsIngressReconcileMinDelayMs, Math.min(...retryTimes))
+      : undefined;
   }
 
   private async markAWSIngressReconcilePending(anchor: LeaseRecord): Promise<void> {

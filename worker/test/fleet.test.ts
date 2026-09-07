@@ -47100,6 +47100,68 @@ describe("synthetic acknowledgement reliability", () => {
     },
   );
 
+  it.each([undefined, -100, 500, 60_000])(
+    "arms refreshed AWS ingress without scanning unrelated workspaces (prior alarm offset %s)",
+    async (priorOffset) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const storage = new MemoryStorage();
+      const lease = {
+        ...seedLease(storage),
+        provider: "aws" as const,
+        region: "eu-west-1",
+        network: { awsSecurityGroupID: "sg-heartbeat", sshSourceCIDRsComplete: true },
+      };
+      storage.seed(`lease:${lease.id}`, lease);
+      const fleet = testFleet(storage, {
+        aws: fakeProvider(undefined, {
+          provider: "aws",
+          onRefreshLeaseAccess(current, context) {
+            return {
+              ...current,
+              network: { ...current.network, sshSourceCIDRs: context.requestSourceCIDRs },
+            };
+          },
+        }),
+      });
+      await fleet.ready();
+      const now = Date.now();
+      if (priorOffset !== undefined) await alarmRuntime(storage).scheduleAlarm(now + priorOffset);
+      const entered = deferred<void>();
+      const resume = deferred<void>();
+      storage.beforeList = async (options) => {
+        if (options?.prefix === "workspace:") {
+          entered.resolve();
+          await resume.promise;
+        }
+      };
+      const heartbeat = fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+          headers: { ...headers, "cf-connecting-ip": "198.51.100.44" },
+        }),
+      );
+      try {
+        expect(
+          await Promise.race([
+            heartbeat.then(() => "acknowledged"),
+            entered.promise.then(() => "unrelated scan blocked"),
+          ]),
+        ).toBe("acknowledged");
+        expect((await heartbeat).status).toBe(200);
+        const pending = storage.value<{ targets: Array<{ anchor: LeaseRecord; retryAt: string }> }>(
+          "aws-ingress-reconcile:pending",
+        );
+        expect(pending?.targets).toHaveLength(1);
+        expect(pending?.targets[0]?.anchor.network?.sshSourceCIDRs).toEqual(["198.51.100.44/32"]);
+        expect(pending?.targets[0]?.retryAt).toBe(new Date(now).toISOString());
+        expect(storage.alarm()).toBe(Math.min(now + 1000, now + (priorOffset ?? 1000)));
+      } finally {
+        resume.resolve();
+        await heartbeat;
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it.each(["workspace:", "lease:"])(
     "keeps run and release progress during repeated heartbeats with slow unrelated %s pages",
     async (prefix) => {

@@ -497,6 +497,9 @@ retries preserve that wakeup, including after coordinator reconstruction.
 An already-due stored alarm time is rearmed at the earlier of that time and the
 requested deadline: a consumed runtime job can leave its timestamp behind.
 An earlier future alarm is preserved without another scheduling write.
+AWS heartbeat access refresh also arms its recorded ingress reconciliation at the
+existing one-second minimum delay instead of rescanning unrelated fleet metadata
+while holding the ingress lock. Earlier alarms remain scheduled.
 Alarm storage errors still fail the request and do not certify cleanup success.
 The existing full scheduler shares the lifecycle mutex with this arming, so a
 scan cannot race an acknowledgement's earlier wakeup. Full maintenance scans,
