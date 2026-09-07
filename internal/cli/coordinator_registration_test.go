@@ -417,8 +417,7 @@ func TestResolvedLeaseClaimBeforeRejectsSlugWithDifferentCloudID(t *testing.T) {
 }
 
 func TestResolveSSHLeaseTargetRemovesProviderCreatedAliasClaim(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
+	isolateTestUserDirs(t)
 	cfg := baseConfig()
 	cfg.Provider = "aws"
 	leaseID := "cbx_canonical123456"
@@ -469,9 +468,66 @@ func TestResolveSSHLeaseTargetRemovesProviderCreatedAliasClaim(t *testing.T) {
 	}
 }
 
+func TestResolveSSHLeaseTargetPreservesUnclaimedAliasArtifacts(t *testing.T) {
+	isolateTestUserDirs(t)
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	const leaseID = "cbx_canonicalmarker"
+	const aliasID = "cbx_aliasmarker"
+	server := Server{
+		CloudID:     "synthetic-matching-resource",
+		ImmutableID: "matching-generation",
+		Provider:    "aws",
+		Labels:      map[string]string{"provider": "aws", "lease": leaseID, "slug": "canonical", "state": "ready"},
+	}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "canonical", cfg, server, SSHTarget{}, "/repo", time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	before, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactPath, err := testboxKeyPath(aliasID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markerPath := filepath.Join(filepath.Dir(artifactPath), "noncredential-marker.txt")
+	if err := os.MkdirAll(filepath.Dir(markerPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const marker = "ordinary connection-artifact preservation marker"
+	if err := os.WriteFile(markerPath, []byte(marker), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server.Labels = cloneStringMap(server.Labels)
+	server.Labels["lease"] = aliasID
+	lease, err := resolveSSHLeaseTarget(context.Background(), resolveResultBackend{
+		testSSHBackend: testSSHBackend{spec: ProviderSpec{Name: "aws"}},
+		lease:          LeaseTarget{LeaseID: aliasID, Server: server},
+	}, ResolveRequest{ID: server.CloudID, Repo: Repo{Root: "/repo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID || lease.Server.Labels["lease"] != leaseID {
+		t.Fatalf("resolved lease=%q label=%q, want canonical %q", lease.LeaseID, lease.Server.Labels["lease"], leaseID)
+	}
+	if contents, err := os.ReadFile(markerPath); err != nil || string(contents) != marker {
+		t.Fatalf("unclaimed alias marker changed: contents=%q err=%v", contents, err)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(aliasID); err != nil || exists {
+		t.Fatalf("alias claim: exists=%v err=%v, want absent", exists, err)
+	}
+	after, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("matching-identity resolution changed canonical claim metadata")
+	}
+}
+
 func TestResolveSSHLeaseTargetPreservesProviderManagedCredentials(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
+	isolateTestUserDirs(t)
 	cfg := baseConfig()
 	cfg.Provider = "tenki"
 	leaseID := "cbx_tenki123456"
@@ -1782,7 +1838,7 @@ func TestConfirmedAbsenceCoordinatorDeregistrationTreatsMissingAsClean(t *testin
 }
 
 func TestResolveSSHLeaseTargetChecksIdentityBeforeRebinding(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	isolateTestUserDirs(t)
 	cfg := baseConfig()
 	cfg.Provider = "aws"
 	const leaseID = "cbx_guardclaim12"
