@@ -4,16 +4,75 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
+
+func TestCloudRunNativeExitFixture(t *testing.T) {
+	if value := os.Getenv("CRABBOX_CLOUDRUN_EXIT_FIXTURE"); value != "" {
+		code, err := strconv.Atoi(value)
+		if err != nil {
+			os.Exit(99)
+		}
+		os.Exit(code)
+	}
+}
+
+func cloudRunNativeExit(t *testing.T, code int) error {
+	t.Helper()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, "-test.run=^TestCloudRunNativeExitFixture$")
+	cmd.Env = append(os.Environ(), "CRABBOX_CLOUDRUN_EXIT_FIXTURE="+strconv.Itoa(code))
+	err = cmd.Run()
+	if !core.IsPlainLocalCommandExit(core.LocalCommandResult{ExitCode: code}, err) {
+		t.Fatalf("native fixture did not establish plain exit %d: %v", code, err)
+	}
+	return err
+}
+
+func TestDirectTransportExecPreservesNativeBoundary(t *testing.T) {
+	plain := cloudRunNativeExit(t, 23)
+	for _, tc := range []struct {
+		name  string
+		code  int
+		err   error
+		plain bool
+	}{
+		{name: "plain exit", code: 23, err: plain, plain: true},
+		{name: "wrapped exit", code: 23, err: fmt.Errorf("transport: %w", plain)},
+		{name: "joined exit", code: 23, err: errors.Join(plain, io.ErrUnexpectedEOF)},
+		{name: "mismatched exit", code: 17, err: plain},
+		{name: "nonzero transport", code: 23, err: io.ErrUnexpectedEOF},
+		{name: "canceled exit", code: 23, err: errors.Join(plain, context.Canceled)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := &directTransport{rt: Runtime{Exec: recordingLocalExec{handler: func(LocalCommandRequest) (LocalCommandResult, error) {
+				return LocalCommandResult{ExitCode: tc.code}, tc.err
+			}}}}
+			code, err := transport.Exec(t.Context(), "fixture", "true", execOptions{}, io.Discard, io.Discard)
+			if code != tc.code || tc.plain && err != nil || !tc.plain && !errors.Is(err, tc.err) {
+				t.Fatalf("code=%d err=%v", code, err)
+			}
+		})
+	}
+}
 
 func TestValidateGatewayURL(t *testing.T) {
 	t.Parallel()

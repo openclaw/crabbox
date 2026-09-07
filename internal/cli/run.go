@@ -507,7 +507,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		cleanup.apply(&report)
 		if err != nil && report.ExitCode == 0 {
-			report.ExitCode = exitCodeForError(err, 7)
+			report.ExitCode = ExitCodeForError(err, 7)
 			report.RunStatus = ""
 			report.ErrorKind = ""
 		}
@@ -1077,7 +1077,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				finalFailure = err
 			}
 			if finalResult.ExitCode == 0 && finalFailure != nil {
-				finalResult.ExitCode = exitCodeForError(finalFailure, 7)
+				finalResult.ExitCode = ExitCodeForError(finalFailure, 7)
 			}
 			if delegatedPreparationAttempted && preparedDelegatedExitCode == finalResult.ExitCode {
 				return
@@ -1560,7 +1560,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if finalTimingReport != nil || (!*timingJSON && !timingRecordEnabled) {
 			return
 		}
-		report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, time.Since(timings.started), exitCodeForError(err, 7), actionsURL)
+		report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, time.Since(timings.started), ExitCodeForError(err, 7), actionsURL)
 		populateRunTimingMetadata(&report, cfg, repo, server, leaseID, executionRunID, workdir, nil)
 		report.Label = runLabelValue
 		finalTimingReport = &report
@@ -2307,7 +2307,7 @@ afterSync:
 			finalCode := 0
 			classification := FailureClassification{}
 			if finalFailure != nil {
-				finalCode = exitCodeForError(finalFailure, 7)
+				finalCode = ExitCodeForError(finalFailure, 7)
 				classification = ClassifyRunFailure(finalCode, finalFailure.Error(), nil)
 			}
 			if finishErr := recorder.Finish(ctx, target, finalCode, timings.sync, 0, "", false, nil, classification, nil); finishErr != nil {
@@ -2604,7 +2604,7 @@ afterSync:
 			finalFailure = err
 		}
 		if finalCode == 0 && finalFailure != nil {
-			finalCode = exitCodeForError(finalFailure, 7)
+			finalCode = ExitCodeForError(finalFailure, 7)
 		}
 		if recorder.runID == "" && attestPath == "" {
 			return
@@ -2662,7 +2662,7 @@ afterSync:
 			if localReceiptPersisted && attestPath != "" && preparedTerminalReceipt.ExitCode == 0 {
 				// The coordinator commit is now ambiguous. Preserve the exact receipt
 				// sent remotely, but make the local CLI failure impossible to miss.
-				failedReceipt, receiptErr := buildTerminalReceipt(exitCodeForError(finishErr, 7))
+				failedReceipt, receiptErr := buildTerminalReceipt(ExitCodeForError(finishErr, 7))
 				if receiptErr != nil {
 					err = errors.Join(err, receiptErr)
 					recordRunFailure(&runFailure, receiptErr)
@@ -2892,6 +2892,8 @@ afterSync:
 			CommandDisplay:        commandDisplay,
 			ShellMode:             *shellMode || useShell,
 			ScriptMode:            script != nil,
+			NoSync:                *noSync,
+			RequiredArtifactGlobs: append([]string(nil), requiredArtifactGlobs...),
 			Routing:               CommandRoutingFor(cfg, leaseID, CommandRoutingRetry),
 			SSHRouting:            CommandRoutingFor(cfg, leaseID, CommandRoutingRetry),
 			StopRouting:           CommandRoutingFor(cfg, leaseID, CommandRoutingStop),

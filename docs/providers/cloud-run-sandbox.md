@@ -401,6 +401,15 @@ CRABBOX_CLOUD_RUN_SANDBOX_ROOTFS
    command execution, stop, and reclaim so cleanup cannot remove ownership
    while work is in flight.
 
+Run results and timing are finalized after activity bookkeeping and teardown.
+Direct mode preserves ordinary native command exits. Command-execution
+cancellation remains 130 and command deadlines remain 124. The first failure
+keeps its public exit code and inspectable cause when later cleanup or reporting
+also fails, including typed claim-bookkeeping errors. Teardown errors report a
+kept recovery-session handle
+instead of successful cleanup; local claim errors remain visible. These changes
+leave ownership tokens, activity guards, TTL and deletion policy unchanged.
+
 ## Doctor
 
 `crabbox doctor --provider cloud-run-sandbox` is non-mutating:

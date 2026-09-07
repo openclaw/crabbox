@@ -126,6 +126,63 @@ func TestBackendAdvertisesAcquireCapabilities(t *testing.T) {
 	}
 }
 
+func TestFixedLocalContainerFingerprintNoHostnameCompatibility(t *testing.T) {
+	cfg := core.Config{
+		LocalContainer: core.LocalContainerConfig{
+			Runtime: "docker", Image: "example.org/runner:stable", User: "runner",
+			WorkRoot: "/work", CPUs: 2, Memory: "2g", Network: "bridge",
+		},
+		DesktopEnv: "xfce", TTL: 90 * time.Second, IdleTimeout: 30 * time.Second,
+	}
+	req := core.AcquireRequest{Keep: true, RequestedSlug: "legacy-shape"}
+	// Existing fixed leases persist this fingerprint; the default must not gain a JSON field.
+	const legacyFingerprint = "7b7b7ee1fa690a3fcaa079e3351cea2f16440391a18895ee71cc011103f0776c"
+	for _, noHostname := range []bool{false, true, false} {
+		cfg.LocalContainer.NoHostname = noHostname
+		got, err := fixedLocalContainerFingerprint(cfg, req, "ssh-ed25519 fixture")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (got == legacyFingerprint) == noHostname {
+			t.Fatalf("NoHostname=%t fingerprint=%q, legacy=%q", noHostname, got, legacyFingerprint)
+		}
+	}
+}
+
+func TestFixedAcquireNoHostnameReplayAndDrift(t *testing.T) {
+	for _, noHostname := range []bool{false, true} {
+		t.Run(fmt.Sprintf("noHostname=%t", noHostname), func(t *testing.T) {
+			b, runner, _, _, _, _ := pendingAcquireBackend(t)
+			b.cfg.LocalContainer.NoHostname = noHostname
+			b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+			req := core.AcquireRequest{
+				Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+				RequestedLeaseID: "cbx_abcdef123467", RequestedSlug: "hostname-replay",
+			}
+			lease, err := b.Acquire(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restarted := testBackend(runner)
+			restarted.cfg.LocalContainer.NoHostname = noHostname
+			restarted.waitForSSHReady = b.waitForSSHReady
+			replayed, err := restarted.Acquire(context.Background(), req)
+			if err != nil || replayed.Server.CloudID != lease.Server.CloudID {
+				t.Fatalf("same-intent replay cloudID=%q err=%v", replayed.Server.CloudID, err)
+			}
+			restarted.cfg.LocalContainer.NoHostname = !noHostname
+			_, err = restarted.Acquire(context.Background(), req)
+			requireFixedLocalContainerConflict(t, err)
+			if creates := localContainerCreateCalls(runner); creates != 1 {
+				t.Fatalf("container creates after hostname drift=%d, want 1", creates)
+			}
+			if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: replayed}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestFixedLocalContainerFingerprintPreservesSubsecondLifecycleDurations(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -2348,6 +2405,36 @@ func TestCreateContainerUsesDockerCompatibleSSHLease(t *testing.T) {
 	}
 	if strings.Contains(args, "-v\n/var/run/docker.sock:/var/run/docker.sock") {
 		t.Fatalf("docker socket should be opt-in:\n%s", args)
+	}
+}
+
+func TestCreateContainerNoHostname(t *testing.T) {
+	for _, noHostname := range []bool{false, true} {
+		t.Run(fmt.Sprintf("noHostname=%t", noHostname), func(t *testing.T) {
+			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+				"run": {Stdout: "container123456\n"},
+			}}
+			b := testBackend(runner)
+			cfg := b.configForRun()
+			cfg.LocalContainer.NoHostname = noHostname
+			_, bootstrapDir, err := b.createContainer(context.Background(), cfg, "crabbox-hostname", "cbx_123", "hostname", "ssh-ed25519 fixture", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(bootstrapDir) })
+			args := recordedArgsForCommand(t, runner, "run")
+			if strings.Contains(args, "--hostname\n") == noHostname {
+				t.Fatalf("NoHostname=%t hostname argument mismatch", noHostname)
+			}
+			if !noHostname && !strings.Contains(args, "--hostname\ncrabbox-hostname\n") {
+				t.Fatal("default hostname must remain the container name")
+			}
+			for _, want := range []string{"--name\ncrabbox-hostname", "--network\nbridge", "-p\n127.0.0.1::2222"} {
+				if !strings.Contains(args, want) {
+					t.Fatalf("container args missing %q", want)
+				}
+			}
+		})
 	}
 }
 
@@ -6316,6 +6403,14 @@ func TestExactContainerAbsenceRejectsRoutingNotFound(t *testing.T) {
 		{name: "missing object", detail: "Error: No such object: " + testRecoveredContainerID, wantAbsent: true},
 		{name: "missing container", detail: "container " + testRecoveredContainerID + " not found", wantAbsent: true},
 		{name: "missing podman container", detail: `Error: no container with name or ID "` + testRecoveredContainerID + `" found: no such container`, wantAbsent: true},
+		{name: "podman exact double-quoted container", detail: `Error: no such container "` + testRecoveredContainerID + `"`, wantAbsent: true},
+		{name: "podman wrong double-quoted container", detail: `Error: no such container "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"`, wantErr: true},
+		{name: "podman longer quoted ID", detail: `Error: no such container "` + testRecoveredContainerID + `b"`, wantErr: true},
+		{name: "generic missing container", detail: "Error: no such container", wantErr: true},
+		{name: "permission failure quoting container", detail: `Error: permission denied: no such container "` + testRecoveredContainerID + `"`, wantErr: true},
+		{name: "authentication failure quoting container", detail: `Error: unauthorized: no such container "` + testRecoveredContainerID + `"`, wantErr: true},
+		{name: "quoted missing container with extra permission failure", detail: `Error: no such container "` + testRecoveredContainerID + "\"\npermission denied", wantErr: true},
+		{name: "podman connection failure quoting container", detail: `cannot connect to Podman: no such container "` + testRecoveredContainerID + `"`, wantErr: true},
 		{name: "missing docker context", detail: `context "captured" not found`, wantErr: true},
 		{name: "missing podman connection", detail: `connection "captured" not found`, wantErr: true},
 		{name: "container runtime endpoint missing", detail: `container runtime endpoint not found while inspecting ` + testRecoveredContainerID, wantErr: true},
@@ -6326,7 +6421,7 @@ func TestExactContainerAbsenceRejectsRoutingNotFound(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runner := &recordingRunner{run: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
-				return core.LocalCommandResult{Stderr: tc.detail, ExitCode: 1}, errors.New("inspect failed")
+				return core.LocalCommandResult{Stdout: "[]\n", Stderr: tc.detail, ExitCode: 125}, errors.New("inspect failed")
 			}}
 			b := testBackend(runner)
 			absent, err := b.exactContainerAbsent(context.Background(), testRecoveredContainerID)
@@ -6334,6 +6429,63 @@ func TestExactContainerAbsenceRejectsRoutingNotFound(t *testing.T) {
 				t.Fatalf("absent=%v err=%v", absent, err)
 			}
 		})
+	}
+}
+
+func TestMissingReleaseQuotedPodmanAbsenceRetry(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_missing_quoted_retry"
+	keyPath := writeLocalContainerClaimAndKey(t, leaseID, "missing-quoted-retry", localContainerClaimScope("docker", "default"))
+	original, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err = core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, original,
+		core.Server{CloudID: testRecoveredContainerID, Provider: providerName, Labels: original.Labels}, core.SSHTarget{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	addDefaultLocalContainerScopeResponses(runner)
+	b := testBackend(runner)
+	b.confirmContainerAbsent = b.exactContainerAbsent
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := 0
+	detail := `Error: permission denied: no such container "` + original.CloudID + `"`
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if slices.Equal(req.Args, []string{"inspect", "--type", "container", original.CloudID}) {
+			checks++
+			return core.LocalCommandResult{Stdout: "[]\n", Stderr: detail, ExitCode: 125}, errors.New("inspect failed")
+		}
+		return runner.responses[commandKey(req.Args)], nil
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil {
+		t.Fatal("permission failure retired a missing-container claim")
+	}
+	retained, err := core.ReadLeaseClaim(leaseID)
+	if err != nil || !reflect.DeepEqual(retained, original) {
+		t.Fatalf("failed confirmation changed claim: %v", err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("failed confirmation removed key: %v", err)
+	}
+	// Retry the same snapshot only after the exact captured Podman diagnostic.
+	detail = `Error: no such container "` + original.CloudID + `"`
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
+		t.Fatalf("confirmed absent claim remains: %v", err)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("confirmed absent key remains: %v", err)
+	}
+	if checks != 2 || recordedCommandCount(runner, "rm") != 0 {
+		t.Fatalf("exact confirmations=%d; absent-container release must not remove a container", checks)
 	}
 }
 

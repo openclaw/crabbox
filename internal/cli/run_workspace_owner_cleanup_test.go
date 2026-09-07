@@ -586,6 +586,14 @@ func TestRunFailureDigestCleanupOutcomes(t *testing.T) {
 					t.Errorf("recovery %s present=%v, stopped=%v:\n%s", command, got, test.wantStop, out)
 				}
 			}
+			if !test.wantStop {
+				for _, line := range strings.Split(out, "\n") {
+					if strings.Contains(line, "next: crabbox run ") &&
+						(!strings.Contains(line, "--no-sync") || strings.Contains(line, "--fresh-sync")) {
+						t.Errorf("retained retry lost no-sync intent: %s", line)
+					}
+				}
+			}
 			if (test.wantStop || test.stopErr != nil || test.retained) != (releaseCalls == 1) {
 				t.Errorf("release calls=%d", releaseCalls)
 			}

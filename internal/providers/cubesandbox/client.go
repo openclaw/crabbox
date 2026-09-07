@@ -101,7 +101,7 @@ func (e *cubesandboxAPIError) Error() string {
 
 var newCubeSandboxClient = func(cfg Config, rt Runtime) (cubesandboxAPI, error) {
 	apiKey := strings.TrimSpace(cfg.CubeSandbox.APIKey)
-	httpClient, dataPlaneClient := cubeSandboxHTTPClients(rt.HTTP, cubesandboxControlTimeout)
+	httpClient, dataPlaneClient := shared.ControlAndDataHTTPClients(rt.HTTP, cubesandboxControlTimeout)
 	apiURL, err := validateCubeSandboxAPIURL(blank(cfg.CubeSandbox.APIURL, "http://127.0.0.1:3000"))
 	if err != nil {
 		return nil, err
@@ -132,13 +132,6 @@ var newCubeSandboxClient = func(cfg Config, rt Runtime) (cubesandboxAPI, error) 
 		httpClient:  httpClient,
 		envdClient:  envdClient,
 	}, nil
-}
-
-func cubeSandboxHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
-	if injected != nil {
-		return injected, injected
-	}
-	return &http.Client{Timeout: controlTimeout}, &http.Client{Timeout: 0}
 }
 
 func cubeSandboxDataPlaneHTTPClient(source *http.Client, proxyHost string, proxyPort int) (*http.Client, error) {

@@ -99,11 +99,7 @@ func PinDelegatedRunFailure(result core.RunResult, err error) (core.RunResult, e
 	}
 	outcome := core.FinalizeRunResult(core.RunResult{}, err)
 	result.Status, result.ErrorKind = outcome.Status, outcome.ErrorKind
-	result.ExitCode = 1
-	var public core.ExitError
-	if errors.As(err, &public) && public.Code != 0 {
-		result.ExitCode = public.Code
-	}
+	result.ExitCode = core.ExitCodeForError(err, 1)
 	return result, ExitErrorWithCause(result.ExitCode, err.Error(), err)
 }
 
@@ -175,12 +171,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 			closeErr := command.Close(cleanupCtx)
 			cancel()
-			code := 1
-			var ee core.ExitError
-			if errors.As(closeErr, &ee) && ee.Code != 0 {
-				code = ee.Code
-			}
-			appendFailure(closeErr, code)
+			appendFailure(closeErr, core.ExitCodeForError(closeErr, 1))
 		}
 		if result.Session != nil {
 			shouldStop := acquired && !req.Keep

@@ -59,7 +59,7 @@ func TestRunCommandRejectsLeaseOutputCollisionsBeforeAcquire(t *testing.T) {
 					"--provider", "local-container", "--keep", "--stop-after", "never",
 					"--lease-output", " " + lease + " ", flag, value, "--", "true",
 				})
-				if exitCodeForError(err, 0) != 2 || !strings.Contains(fmt.Sprint(err), "lease output/") || !strings.Contains(fmt.Sprint(err), "paths must be different") || calls != 0 {
+				if ExitCodeForError(err, 0) != 2 || !strings.Contains(fmt.Sprint(err), "lease output/") || !strings.Contains(fmt.Sprint(err), "paths must be different") || calls != 0 {
 					t.Fatalf("error=%v acquisition calls=%d; want collision before acquisition", err, calls)
 				}
 				for _, path := range []string{lease, other} {
@@ -100,7 +100,7 @@ exec sh -c "$cmd"
 				"--lease-output", lease, flag, "report=" + report,
 				"--shell", "--", fmt.Sprintf("printf evidence > report; exit %d", code),
 			})
-			if exitCodeForError(err, 0) != code {
+			if ExitCodeForError(err, 0) != code {
 				t.Fatalf("run: %v\n%s", err, stderr.String())
 			}
 			session, _, _ := readRunSessionHandleTest(t, lease)

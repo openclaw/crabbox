@@ -142,23 +142,53 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	}
 	keepSandbox := false
 	shouldStop := acquired && !req.Keep
-	if shouldStop {
-		defer func() {
-			if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, keepSandbox, &shouldStop); cleanupErr != nil {
-				if result.ExitCode == 0 {
-					result.ExitCode = 1
-				}
+	var syncPhases []timingPhase
+	var syncDuration time.Duration
+	var streamErr error
+	var cancelRunID string
+	commandRan, cancelActiveRun := false, false
+	defer func() {
+		result, retErr = shared.PinDelegatedRunFailure(result, retErr)
+		appendFailure := func(err error) {
+			result, retErr = shared.AppendDelegatedRunFailure(result, retErr, err, core.ExitCodeForError(err, 1))
+		}
+		if cancelActiveRun && (ctx.Err() != nil || streamErr != nil) {
+			cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+			canceled, cancelErr := api.CancelWorkspaceRun(cancelCtx, cancelRunID, idempotencyKey("cancel", cancelRunID))
+			cancel()
+			if cancelErr != nil {
+				// Keep recovery bookkeeping until cancellation has been accepted.
+				shouldStop = false
 				if result.Session != nil {
 					result.Session.Kept = true
 				}
-				if retErr == nil {
-					retErr = cleanupErr
-				} else {
-					retErr = errors.Join(retErr, cleanupErr)
-				}
+				appendFailure(cancelErr)
+			} else if canceled.SandboxID != "" {
+				sandboxID = canceled.SandboxID
 			}
-		}()
-	}
+		}
+		if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, keepSandbox, &shouldStop); cleanupErr != nil {
+			if result.Session != nil {
+				result.Session.Kept = true
+			}
+			appendFailure(cleanupErr)
+		}
+		result.Total = b.now().Sub(started)
+		result = core.FinalizeRunResult(result, retErr)
+		if !commandRan {
+			return
+		}
+		fmt.Fprintf(b.rt.Stderr, "crownest run summary sync=%s command=%s total=%s exit=%d\n",
+			syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
+		if req.TimingJSON {
+			appendFailure(writeTimingJSON(b.rt.Stderr, core.TimingReportWithRunResult(timingReport{
+				Provider: providerName, LeaseID: leaseID, Slug: slug,
+				SyncDelegated: true, SyncMs: syncDuration.Milliseconds(), SyncPhases: syncPhases,
+				CommandMs: result.Command.Milliseconds(), TotalMs: result.Total.Milliseconds(),
+				ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label),
+			}, result, retErr)))
+		}
+	}()
 	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
 		return RunResult{}, err
@@ -174,7 +204,8 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "not-forwarded", req.Options.EnvAllow, commandEnv)
 	}
-	archive, archiveSHA, archiveBytes, syncPhases, syncDuration, err := b.prepareArchive(ctx, req)
+	archive, archiveSHA, archiveBytes, phases, duration, err := b.prepareArchive(ctx, req)
+	syncPhases, syncDuration = phases, duration
 	if err != nil {
 		return RunResult{Total: b.now().Sub(started), SyncDelegated: true}, err
 	}
@@ -255,24 +286,8 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	}
 	session := b.crownestRunSession(leaseID, slug, !acquired, req.Keep || !acquired)
 	commandStart := b.now()
-	cancelActiveRun := true
-	var streamErr error
-	defer func(runID string) {
-		if !cancelActiveRun || (ctx.Err() == nil && streamErr == nil) {
-			return
-		}
-		cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
-		defer cancel()
-		if canceled, cancelErr := api.CancelWorkspaceRun(cancelCtx, runID, idempotencyKey("cancel", runID)); cancelErr != nil {
-			if retErr == nil {
-				retErr = cancelErr
-			} else {
-				retErr = errors.Join(retErr, cancelErr)
-			}
-		} else if canceled.SandboxID != "" {
-			sandboxID = canceled.SandboxID
-		}
-	}(workspaceRun.ID)
+	commandRan, cancelActiveRun = true, true
+	cancelRunID = workspaceRun.ID
 	terminal, streamErr := b.streamRun(ctx, api, workspaceRun.ID)
 	commandDuration := b.now().Sub(commandStart)
 	if terminal.ID == "" && ctx.Err() == nil {
@@ -302,63 +317,28 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		SyncDelegated: true,
 		Session:       session,
 	}
-	fmt.Fprintf(b.rt.Stderr, "crownest run summary sync=%s command=%s total=%s exit=%d\n",
-		syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	failedBeforeCleanup := result.ExitCode != 0 ||
-		streamErr != nil ||
-		ctx.Err() != nil ||
-		missingExitStatusFailure ||
-		(terminalStatus == "failed" && terminal.FailureReason != "command_exit")
-	if failedBeforeCleanup {
+	switch {
+	case ctx.Err() != nil:
+		retErr = ctx.Err()
+	case streamErr != nil:
+		retErr = shared.ExitErrorWithCause(1, fmt.Sprintf("crownest stream failed: %v", streamErr), streamErr)
+	case missingExitStatusFailure:
+		retErr = exit(5, "crownest workspace run ended status=%s reason=%s class=%s without command exit code", blank(terminalStatus, "unknown"), blank(terminal.FailureReason, "unknown"), blank(terminal.FailureClass, "unknown"))
+	case terminalStatus == "failed" && terminal.FailureReason != "command_exit":
+		retErr = exit(5, "crownest workspace run failed reason=%s class=%s", blank(terminal.FailureReason, "unknown"), blank(terminal.FailureClass, "unknown"))
+	default:
+		result = core.FinalizeRunResult(result, nil)
+		if result.ExitCode != 0 {
+			retErr = ExitError{Code: result.ExitCode, Message: fmt.Sprintf("crownest run exited %d", result.ExitCode)}
+		}
+	}
+	if retErr != nil {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		if result.Session != nil {
 			result.Session.Kept = !shouldStop
 		}
 	}
-	if cleanupErr := b.cleanupCreatedRun(ctx, api, leaseID, sandboxID, keepSandbox, &shouldStop); cleanupErr != nil {
-		if result.ExitCode == 0 {
-			result.ExitCode = 1
-		}
-		if result.Session != nil {
-			result.Session.Kept = true
-		}
-		retErr = cleanupErr
-	}
-	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider:      providerName,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			SyncDelegated: true,
-			SyncMs:        syncDuration.Milliseconds(),
-			SyncPhases:    syncPhases,
-			CommandMs:     result.Command.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      result.ExitCode,
-			Label:         strings.TrimSpace(req.Label),
-		}); err != nil {
-			return result, err
-		}
-	}
-	if retErr != nil {
-		return result, retErr
-	}
-	if ctx.Err() != nil {
-		return result, ctx.Err()
-	}
-	if streamErr != nil {
-		return result, ExitError{Code: 1, Message: fmt.Sprintf("crownest stream failed: %v", streamErr)}
-	}
-	if missingExitStatusFailure {
-		return result, exit(5, "crownest workspace run ended status=%s reason=%s class=%s without command exit code", blank(terminalStatus, "unknown"), blank(terminal.FailureReason, "unknown"), blank(terminal.FailureClass, "unknown"))
-	}
-	if terminalStatus == "failed" && terminal.FailureReason != "command_exit" {
-		return result, exit(5, "crownest workspace run failed reason=%s class=%s", blank(terminal.FailureReason, "unknown"), blank(terminal.FailureClass, "unknown"))
-	}
-	if result.ExitCode != 0 {
-		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("crownest run exited %d", result.ExitCode)}
-	}
-	return result, nil
+	return result, retErr
 }
 
 func (b *backend) claimAcquiredSandbox(ctx context.Context, api client, req RunRequest, currentLeaseID, sandboxID, currentSlug string, leaseID, slug *string) error {
@@ -874,6 +854,9 @@ func commandEnv(env map[string]string) (map[string]string, []string) {
 	out := make(map[string]string, len(env))
 	var stripped []string
 	for name, value := range env {
+		if core.IsRunExecutionMetadataEnvName(name) {
+			continue
+		}
 		if isProviderAuthEnv(name) {
 			stripped = append(stripped, name)
 			continue

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 	"google.golang.org/grpc/codes"
 )
@@ -38,7 +39,7 @@ func (b *wandbBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	return exit(2, "provider=%s does not support warmup; sandboxes are acquired per-run", providerName)
 }
 
-func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
 	if err := rejectWandbRunOptions(req); err != nil {
 		return RunResult{}, err
 	}
@@ -93,12 +94,12 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 			printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 		}
 	} else {
-		if len(req.Env) > 0 && !wandbExistingIDEnvIsImplicitDefault(req) {
+		if len(req.Env) > 0 && !wandbExistingIDEnvCanBeOmitted(req) {
 			// CoreWeave Sandboxes apply environment variables at Start time only;
 			// the v1beta2 Exec RPC has no env field, so we can't honour
-			// selected env on an already-running sandbox. The only exception is
-			// Crabbox's built-in implicit CI/NODE_OPTIONS allowlist, which older
-			// configs may select without the user asking for env forwarding.
+			// selected env on an already-running sandbox. Core-owned run metadata
+			// may be omitted, as can the built-in implicit CI/NODE_OPTIONS defaults;
+			// neither exception forwards new environment values through Exec.
 			return RunResult{}, exit(2, "provider=%s cannot forward env vars to an existing sandbox (--id); rerun without --id or omit --allow-env", providerName)
 		}
 		claim, sandboxID, err = requireWandbOwnership(ctx, client, sandboxID, providerScope)
@@ -112,32 +113,42 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 	// retain) and --keep-on-failure (retain only when the run fails) so
 	// users can debug a sandbox after a bad command.
 	shouldStop := acquired && !req.Keep
-	defer func() {
-		if !shouldStop {
-			return
-		}
-		stopCtx, cancel := context.WithTimeout(context.Background(), wandbStopTimeout)
-		defer cancel()
-		if err := removeWandbClaimAfter(claim, func() error {
-			return client.Stop(stopCtx, sandboxID, 10, true)
-		}); err != nil {
-			fmt.Fprintf(b.rt.Stderr, "warning: wandb stop failed for %s: %v\n", sandboxID, err)
-		}
-	}()
-	result := RunResult{
+	result = RunResult{
 		Session: &RunSessionHandle{
 			Provider:       providerName,
 			LeaseID:        sandboxID,
 			Slug:           sandboxID,
 			Reused:         !acquired,
-			Kept:           !shouldStop,
+			Kept:           true,
 			CleanupCommand: wandbCleanupCommand(sandboxID),
 		},
 	}
-	finishResult := func() RunResult {
-		result.Session.Kept = !shouldStop
-		return result
-	}
+	defer func() {
+		// Finalize only after the primary command or provider failure is
+		// classified; secondary diagnostics must not replace that outcome.
+		result = core.FinalizeRunResult(result, retErr)
+		if shouldStop {
+			stopCtx, cancel := context.WithTimeout(context.Background(), wandbStopTimeout)
+			cleanupErr := removeWandbClaimAfter(claim, func() error {
+				return client.Stop(stopCtx, sandboxID, 10, true)
+			})
+			cancel()
+			if cleanupErr != nil {
+				result, retErr = shared.AppendDelegatedRunFailure(result, retErr, fmt.Errorf("wandb stop failed for %s: %w", sandboxID, cleanupErr), 1)
+			} else {
+				result.Session.Kept = false
+			}
+		}
+		result.Total = b.now().Sub(started)
+		if req.TimingJSON {
+			timingErr := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
+				Provider: providerName, Slug: sandboxID,
+				CommandMs: result.Command.Milliseconds(), TotalMs: result.Total.Milliseconds(),
+				ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label),
+			}, result, retErr))
+			result, retErr = shared.AppendDelegatedRunFailure(result, retErr, timingErr, core.ExitCodeForError(timingErr, 1))
+		}
+	}()
 
 	commandStarted := b.now()
 	var exitCode int
@@ -152,47 +163,25 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 			Stderr:    b.rt.Stderr,
 		})
 	}
-	if execErr != nil && exitCode == 0 {
-		var ee ExitError
-		if errors.As(execErr, &ee) && ee.Code != 0 {
-			exitCode = ee.Code
-		} else {
-			exitCode = 1
-		}
-	}
+
 	// Command measures just the user's exec; Total includes Acquire+poll.
 	// Conflating them (the previous bug) made commandMs == totalMs on every
 	// fresh-sandbox run, hiding provisioning time from --timing-json users.
 	commandDuration := b.now().Sub(commandStarted)
 	result.ExitCode = exitCode
 	result.Command = commandDuration
-	result.Total = b.now().Sub(started)
-
-	// Emit timing JSON before any failure return so automation consuming
-	// `--timing-json` still gets a report when the user's command exits
-	// non-zero or the exec itself errors. Mirrors railway / modal / e2b.
-	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-			Provider:  providerName,
-			Slug:      sandboxID,
-			CommandMs: commandDuration.Milliseconds(),
-			TotalMs:   result.Total.Milliseconds(),
-			ExitCode:  result.ExitCode,
-			Label:     strings.TrimSpace(req.Label),
-		}, result, execErr)); err != nil {
-			return finishResult(), err
-		}
-	}
 
 	if execErr != nil {
+		result, execErr = shared.PinDelegatedRunFailure(result, execErr)
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, sandboxID, sandboxID, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return finishResult(), execErr
+		return result, execErr
 	}
+	result = core.FinalizeRunResult(result, nil)
 	if result.ExitCode != 0 {
 		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, sandboxID, sandboxID, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return finishResult(), ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s sandbox exit=%d", providerName, result.ExitCode)}
+		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s sandbox exit=%d", providerName, result.ExitCode)}
 	}
-	return finishResult(), nil
+	return result, nil
 }
 
 func wandbCleanupCommand(sandboxID string) string {
@@ -494,12 +483,12 @@ func rejectWandbRunOptions(req RunRequest) error {
 	return nil
 }
 
-func wandbExistingIDEnvIsImplicitDefault(req RunRequest) bool {
-	if req.EnvSummary {
-		return false
-	}
+func wandbExistingIDEnvCanBeOmitted(req RunRequest) bool {
 	for name := range req.Env {
-		if name != "CI" && name != "NODE_OPTIONS" {
+		if core.IsRunExecutionMetadataEnvName(name) {
+			continue
+		}
+		if req.EnvSummary || (name != "CI" && name != "NODE_OPTIONS") {
 			return false
 		}
 	}

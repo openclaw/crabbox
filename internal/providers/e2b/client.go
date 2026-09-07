@@ -98,7 +98,7 @@ var newE2BClient = func(cfg Config, rt Runtime) (e2bAPI, error) {
 	if apiKey == "" {
 		return nil, exit(2, "provider=e2b requires E2B_API_KEY")
 	}
-	httpClient, envdClient := e2bHTTPClients(rt.HTTP, e2bControlTimeout)
+	httpClient, envdClient := shared.ControlAndDataHTTPClients(rt.HTTP, e2bControlTimeout)
 	apiURL, err := validateE2BAPIURL(blank(cfg.E2B.APIURL, "https://api.e2b.app"))
 	if err != nil {
 		return nil, err
@@ -120,13 +120,6 @@ func validateE2BAPIURL(raw string) (string, error) {
 		Components: exit(2, "provider=e2b API URL must not contain userinfo, query parameters, or a fragment"),
 		Insecure:   exit(2, "provider=e2b API URL must use HTTPS except for loopback development endpoints"),
 	})
-}
-
-func e2bHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
-	if injected != nil {
-		return injected, injected
-	}
-	return &http.Client{Timeout: controlTimeout}, &http.Client{Timeout: 0}
 }
 
 func e2bRedirectError(destination *url.URL) error {

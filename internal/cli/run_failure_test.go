@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -728,6 +730,96 @@ func TestFailureDigestSuppressesScriptRetryCommand(t *testing.T) {
 		if strings.Contains(command, "crabbox run") {
 			t.Fatalf("script retry command should be suppressed: %v", commands)
 		}
+	}
+}
+
+func TestFailureDigestPreservesRecoveryIntent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX rendered-shell argv fixture")
+	}
+	for _, tc := range []struct {
+		name                                    string
+		noSync, shell, script, stopped, noRetry bool
+		globs                                   []string
+	}{
+		{name: "default keeps fresh sync"},
+		{name: "no sync", noSync: true},
+		{name: "requirements", globs: []string{"reports/manifest.json", "reports/proof-*.json"}},
+		{name: "no sync requirements shell", noSync: true, shell: true, globs: []string{"reports/manifest.json", "reports/proof-*.json"}},
+		{name: "script suppressed", script: true, noSync: true, globs: []string{"proof.json"}},
+		{name: "retry suppressed", noRetry: true, noSync: true, globs: []string{"proof.json"}},
+		{name: "stopped suppressed", stopped: true, noSync: true, globs: []string{"proof.json"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(dir, "reports"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "reports", "proof-local.json"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			capture := filepath.Join(dir, "argv")
+			if err := os.WriteFile(filepath.Join(dir, "crabbox"), []byte("#!/bin/sh\nprintf '%s\\000' \"$@\" > \"$FIXTURE_ARGV\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			display := "printf '%s\\n' 'two words'"
+			if tc.shell {
+				display = "printf first && printf second"
+			}
+			routing := CommandRouting{Args: []string{"--provider", "local-container", "--local-container-runtime", "docker"}}
+			input := runFailureDigestInput{LeaseID: "cbx_fixture", CommandDisplay: display, ShellMode: tc.shell, ScriptMode: tc.script, LeaseStopped: tc.stopped, NoSync: tc.noSync, RequiredArtifactGlobs: tc.globs, Routing: routing}
+			retry := "unknown"
+			if tc.noRetry {
+				retry = "false"
+			}
+			var hint string
+			for _, command := range failureDigestNextCommands(input, retry) {
+				if strings.HasPrefix(command, "crabbox run ") {
+					if hint != "" {
+						t.Fatal("multiple retry commands")
+					}
+					hint = command
+				}
+			}
+			if tc.script || tc.stopped || tc.noRetry {
+				if hint != "" {
+					t.Fatalf("unexpected retry: %s", hint)
+				}
+				return
+			}
+			if hint == "" {
+				t.Fatal("missing retry")
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", hint)
+			cmd.Dir = dir
+			cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "FIXTURE_ARGV=" + capture}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("replay: %v %s", err, out)
+			}
+			data, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := strings.Split(strings.TrimSuffix(string(data), "\x00"), "\x00")
+			syncFlag := "--fresh-sync"
+			if tc.noSync {
+				syncFlag = "--no-sync"
+			}
+			want := append(append([]string{"run"}, routing.Args...), "--id", "cbx_fixture", syncFlag)
+			for _, glob := range tc.globs {
+				want = append(want, "--require-artifact", glob)
+			}
+			if tc.shell {
+				want = append(want, "--shell", "--", display)
+			} else {
+				want = append(want, "--", "printf", "%s\\n", "two words")
+			}
+			if !reflect.DeepEqual(args, want) {
+				t.Fatalf("args=%q want=%q", args, want)
+			}
+		})
 	}
 }
 

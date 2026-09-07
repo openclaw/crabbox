@@ -303,7 +303,7 @@ func (a App) shardRun(ctx context.Context, opts shardOptions, mux *shardOutputMu
 					mux.printf(a.Stderr, "shard %d/%d canceled\n", index, opts.Count)
 					return
 				}
-				results[index-1] = shardResult{Index: index, Slug: slug, ExitCode: shardErrorExitCode(err), Err: err}
+				results[index-1] = shardResult{Index: index, Slug: slug, ExitCode: ExitCodeForError(err, 1), Err: err}
 				mux.printf(a.Stderr, "shard %d/%d failed error=%q\n", index, opts.Count, err.Error())
 				if opts.FailFast {
 					cancel()
@@ -323,7 +323,7 @@ func (a App) shardRun(ctx context.Context, opts shardOptions, mux *shardOutputMu
 			if outcome.Recorded {
 				result.ExitCode = outcome.ExitCode
 			} else {
-				result.ExitCode = shardErrorExitCode(err)
+				result.ExitCode = ExitCodeForError(err, 1)
 				if err == nil {
 					err = errors.New("run finished without recording an outcome")
 				}
@@ -362,14 +362,6 @@ func (a App) printShardStatus(mux *shardOutputMux, opts shardOptions, result sha
 		return
 	}
 	mux.printf(a.Stderr, "shard %d/%d done exit=%d\n", result.Index, opts.Count, result.ExitCode)
-}
-
-func shardErrorExitCode(err error) int {
-	var exitErr ExitError
-	if AsExitError(err, &exitErr) && exitErr.Code != 0 {
-		return exitErr.Code
-	}
-	return 1
 }
 
 func shardRunArgs(leaseID string, index, total int, runArgs, command []string) []string {

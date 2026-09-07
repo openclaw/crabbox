@@ -95,7 +95,7 @@ var newFreestyleClient = func(cfg Config, rt Runtime) (freestyleAPI, error) {
 	if err != nil {
 		return nil, err
 	}
-	httpClient, dataHTTPClient := freestyleHTTPClients(rt.HTTP, freestyleControlTimeout)
+	httpClient, dataHTTPClient := shared.ControlAndDataHTTPClients(rt.HTTP, freestyleControlTimeout)
 	trusted, _ := url.Parse(apiURL)
 	return &freestyleHTTPClient{
 		apiKey:         apiKey,
@@ -103,13 +103,6 @@ var newFreestyleClient = func(cfg Config, rt Runtime) (freestyleAPI, error) {
 		httpClient:     shared.SecureHTTPClient(httpClient, trusted, freestyleRedirectError),
 		dataHTTPClient: shared.SecureHTTPClient(dataHTTPClient, trusted, freestyleRedirectError),
 	}, nil
-}
-
-func freestyleHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
-	if injected != nil {
-		return injected, injected
-	}
-	return &http.Client{Timeout: controlTimeout}, &http.Client{}
 }
 
 func validateFreestyleAPIURL(raw string) (string, error) {

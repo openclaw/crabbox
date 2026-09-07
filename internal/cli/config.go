@@ -1309,6 +1309,7 @@ type LocalContainerConfig struct {
 	Memory             string
 	Network            string
 	DockerSocket       bool
+	NoHostname         bool
 	Volumes            []string
 	CheckpointMetadata map[string]string `yaml:"-" json:"-"`
 }
@@ -4484,6 +4485,7 @@ type fileLocalContainerConfig struct {
 	Memory       string `yaml:"memory,omitempty"`
 	Network      string `yaml:"network,omitempty"`
 	DockerSocket *bool  `yaml:"dockerSocket,omitempty"`
+	NoHostname   *bool  `yaml:"noHostname,omitempty"`
 }
 
 type fileAppleContainerConfig struct {
@@ -7248,6 +7250,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.LocalContainer.Network = file.LocalContainer.Network
 		}
 		applyOptional(&cfg.LocalContainer.DockerSocket, file.LocalContainer.DockerSocket)
+		applyOptional(&cfg.LocalContainer.NoHostname, file.LocalContainer.NoHostname)
 		// NOTE: localContainer.volumes is intentionally NOT loaded from
 		// repo-local config files. Bind mounts expose host paths and must
 		// be an explicit CLI action (--local-container-volume), not
@@ -9241,6 +9244,9 @@ func applyEnv(cfg *Config) error {
 	cfg.LocalContainer.Network = getenv("CRABBOX_LOCAL_CONTAINER_NETWORK", cfg.LocalContainer.Network)
 	if value, ok := getenvBool("CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET"); ok {
 		cfg.LocalContainer.DockerSocket = value
+	}
+	if value, ok := getenvBool("CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME"); ok {
+		cfg.LocalContainer.NoHostname = value
 	}
 	cfg.AppleContainer.CLIPath = getenv("CRABBOX_APPLE_CONTAINER_CLI", cfg.AppleContainer.CLIPath)
 	if image := os.Getenv("CRABBOX_APPLE_CONTAINER_IMAGE"); image != "" {

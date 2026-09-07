@@ -39,7 +39,7 @@ func TestRunArtifactChangeRejectsBlankPathBeforeNormalization(t *testing.T) {
 			isolateRunTestUserDirs(t, dir)
 			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "config.yaml"))
 			err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(context.Background(), []string{"--provider", "run-env-profile-test", "--require-artifact-change", p, "--", "true"})
-			if exitCodeForError(err, 0) != 2 || !strings.Contains(fmt.Sprint(err), "--require-artifact-change") {
+			if ExitCodeForError(err, 0) != 2 || !strings.Contains(fmt.Sprint(err), "--require-artifact-change") {
 				t.Fatalf("invalid exact path was normalized away: %v", err)
 			}
 		})
@@ -191,7 +191,7 @@ func TestRunArtifactChangeRejectsUnsupportedRoutes(t *testing.T) {
 			var stderr bytes.Buffer
 			args := append(append([]string{}, flags...), "--require-artifact-change", "proof", "--", "true")
 			err := (App{Stdout: io.Discard, Stderr: &stderr}).runCommand(context.Background(), args)
-			if exitCodeForError(err, 0) != 2 || !strings.Contains(fmt.Sprint(err), "--require-artifact-change") {
+			if ExitCodeForError(err, 0) != 2 || !strings.Contains(fmt.Sprint(err), "--require-artifact-change") {
 				t.Fatalf("err=%v stderr=%s", err, stderr.String())
 			}
 		})
@@ -323,7 +323,7 @@ exit 0
 			}
 			args = append(args, "--", "sh", "-c", command)
 			err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), args)
-			if exitCodeForError(err, 0) != tc.code {
+			if ExitCodeForError(err, 0) != tc.code {
 				t.Fatalf("err=%v stdout=%s stderr=%s", err, stdout.String(), stderr.String())
 			}
 			if strings.HasSuffix(tc.name, "before nested JUnit") {

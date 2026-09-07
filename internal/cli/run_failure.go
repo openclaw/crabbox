@@ -296,6 +296,8 @@ type runFailureDigestInput struct {
 	CommandDisplay        string
 	ShellMode             bool
 	ScriptMode            bool
+	NoSync                bool
+	RequiredArtifactGlobs []string
 	Routing               CommandRouting
 	SSHRouting            CommandRouting
 	StopRouting           CommandRouting
@@ -425,7 +427,14 @@ func failureDigestNextCommands(input runFailureDigestInput, retry string) []stri
 			if len(routing.Args) == 0 {
 				routing = fallbackFailureDigestRouting(input, CommandRoutingRetry)
 			}
-			runArgs := append(append([]string{"crabbox", "run"}, routing.Args...), "--id", leaseRef, "--fresh-sync")
+			syncFlag := "--fresh-sync"
+			if input.NoSync {
+				syncFlag = "--no-sync"
+			}
+			runArgs := append(append([]string{"crabbox", "run"}, routing.Args...), "--id", leaseRef, syncFlag)
+			for _, glob := range input.RequiredArtifactGlobs {
+				runArgs = append(runArgs, "--require-artifact", glob)
+			}
 			if input.ShellMode {
 				runArgs = append(runArgs, "--shell")
 			}

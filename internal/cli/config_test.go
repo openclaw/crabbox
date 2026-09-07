@@ -479,6 +479,7 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_LOCAL_CONTAINER_MEMORY",
 		"CRABBOX_LOCAL_CONTAINER_NETWORK",
 		"CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET",
+		"CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME",
 		"CRABBOX_NAMESPACE_IMAGE",
 		"CRABBOX_NAMESPACE_SIZE",
 		"CRABBOX_NAMESPACE_REPOSITORY",
@@ -7098,6 +7099,69 @@ localContainer:
 	}
 	if cfg.Image != "ubuntu-26.04" || cfg.AzureImage != defaultAzureLinuxImage || cfg.Islo.Image != "docker.io/library/ubuntu:26.04" || cfg.LocalContainer.Image != "ubuntu:26.04" {
 		t.Fatalf("explicit images were overwritten: hetzner=%q azure=%q islo=%q local=%q", cfg.Image, cfg.AzureImage, cfg.Islo.Image, cfg.LocalContainer.Image)
+	}
+}
+
+func TestLocalContainerNoHostnameConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name, yaml, env string
+		want            bool
+	}{
+		{name: "omitted default", yaml: "{}"},
+		{name: "YAML enabled", yaml: "{noHostname: true}", want: true},
+		{name: "YAML disabled", yaml: "{noHostname: false}"},
+		{name: "environment enabled", yaml: "{}", env: "1", want: true},
+		{name: "environment overrides true", yaml: "{noHostname: true}", env: "0"},
+		{name: "environment overrides false", yaml: "{noHostname: false}", env: "true", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			cfgPath := filepath.Join(home, "crabbox.yaml")
+			t.Setenv("CRABBOX_CONFIG", cfgPath)
+			t.Setenv("CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME", tc.env)
+			if err := os.WriteFile(cfgPath, []byte("provider: local-container\nlocalContainer: "+tc.yaml+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := loadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.LocalContainer.NoHostname != tc.want {
+				t.Fatalf("NoHostname=%t, want %t", cfg.LocalContainer.NoHostname, tc.want)
+			}
+		})
+	}
+}
+
+func TestLocalContainerNoHostnameFileLayering(t *testing.T) {
+	for _, tc := range []struct {
+		name, yaml string
+		want       bool
+	}{
+		{name: "omitted preserves enabled", yaml: "{}", want: true},
+		{name: "explicit false clears enabled", yaml: "{noHostname: false}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			filePath := filepath.Join(t.TempDir(), "crabbox.yaml")
+			if err := os.WriteFile(filePath, []byte("localContainer: "+tc.yaml+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file, err := readFileConfig(filePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := baseConfig()
+			cfg.LocalContainer.NoHostname = true
+			if err := applyFileConfig(&cfg, file); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.LocalContainer.NoHostname != tc.want {
+				t.Fatalf("NoHostname=%t, want %t", cfg.LocalContainer.NoHostname, tc.want)
+			}
+		})
 	}
 }
 

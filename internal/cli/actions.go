@@ -225,7 +225,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 			}
 			return nil
 		} else {
-			return exit(exitCodeForError(err, 7), "local Actions hydration failed for %s: %v; rerun with --github-runner when the workflow needs full GitHub Actions semantics", leaseID, err)
+			return exit(ExitCodeForError(err, 7), "local Actions hydration failed for %s: %v; rerun with --github-runner when the workflow needs full GitHub Actions semantics", leaseID, err)
 		}
 	}
 	ghRepo, err := resolveGitHubRepo(repo, cfg.Actions.Repo)
@@ -517,14 +517,6 @@ func dispatchGitHubActionsWorkflow(ctx context.Context, dir string, repo GitHubR
 		cmdArgs = append(cmdArgs, "-f", field)
 	}
 	return runGHWithChildEnvironment(ctx, dir, childEnvDenylist, cmdArgs...)
-}
-
-func exitCodeForError(err error, fallback int) int {
-	var exitErr ExitError
-	if AsExitError(err, &exitErr) && exitErr.Code != 0 {
-		return exitErr.Code
-	}
-	return fallback
 }
 
 type localActionsHydrationPlan struct {

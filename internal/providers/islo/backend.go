@@ -278,11 +278,7 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		downloadBackend := isloRunDownloadBackend{isloBackend: b, user: workloadUser}
 		result.Artifacts, artifactErr = core.MaterializeDelegatedRunDownloads(ctx, downloadBackend, req, leaseID, b.rt.Stderr)
 		if artifactErr != nil {
-			result.ExitCode = 7
-			var exitErr ExitError
-			if core.AsExitError(artifactErr, &exitErr) && exitErr.Code != 0 {
-				result.ExitCode = exitErr.Code
-			}
+			result.ExitCode = core.ExitCodeForError(artifactErr, 7)
 		}
 	}
 	result.Total = b.now().Sub(started)
