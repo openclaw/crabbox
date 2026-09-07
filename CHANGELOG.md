@@ -5,7 +5,7 @@
 - Recover lost run-admission responses using a caller-known identity and an atomic initial history record, preserving authenticated request binding and refusing remote command replay. Current clients require a coordinator supporting the new admission route. [PR 1970](https://github.com/openclaw/crabbox/pull/1970), [Issue 1962](https://github.com/openclaw/crabbox/issues/1962). Thanks @steipete.
 - Add bounded AWS provisioning transport diagnostics for credential preparation, signing and SDK request time, including retry-loop signing counts, without changing retry behavior. [PR 1968](https://github.com/openclaw/crabbox/pull/1968). Thanks @steipete.
 - Islo: report failed stdout/stderr delivery instead of silently succeeding after losing command output; preserve remote exit codes when stream decoding and delivery finish successfully. [PR 1969](https://github.com/openclaw/crabbox/pull/1969).
-- Enforce controller and coordinator token-command output limits consistently during pipe copying, preserving the existing overflow errors and command deadlines.
+- Enforce controller and coordinator token-command output limits consistently during pipe copying, preserving the existing overflow errors and command deadlines. [PR 1971](https://github.com/openclaw/crabbox/pull/1971).
 
 ## 0.52.0 - 2026-09-07
 
