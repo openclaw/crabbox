@@ -384,6 +384,18 @@ scripts/mint-aws-devtools-image.sh \
   Linux TruffleHog 3.95.9 binary inside the managed WSL distro. This happens
   during environment setup and does not require autoreview-time installation.
 
+Linux preparation retains `cloud-init clean --logs --seed` while preserving
+the running source's completed initialization. Using the distro's isolated
+`/usr/bin/python3`, it requires cloud-init to report `done` and its configured
+runtime directory to be on `tmpfs`, outside the cleaned disk cache. Both
+existing completion records are atomically copied there with their original
+ownership and modes before cleaning. The source can then pass the subsequent
+readiness and smoke commands; a new boot must produce its own completion facts.
+Missing cloud-init is a no-op. Incomplete initialization, unsafe runtime storage,
+or preservation/cleanup errors stop preparation before sync and version output.
+Native checkpoint preparation and the wrapper's reboot-enabled capture remain
+unchanged.
+
 Windows developer bakes are headless by default for faster boot and fewer
 desktop-bootstrap moving parts. Pass `--desktop` only when the image must back
 interactive desktop leases. Windows container support can require one reboot

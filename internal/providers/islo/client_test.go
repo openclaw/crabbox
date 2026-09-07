@@ -2,12 +2,15 @@ package islo
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	gosdk "github.com/islo-labs/go-sdk"
@@ -137,6 +140,8 @@ func TestIsloRedirectErrorsHideRejectedLocation(t *testing.T) {
 			_, _ = io.WriteString(w, `{"session_token":"test-token"}`)
 		case r.URL.Path == "/sandboxes/raw-location":
 			http.Redirect(w, r, crossOrigin.URL+"/stolen?token=redirect-secret#fragment-secret", http.StatusTemporaryRedirect)
+		case r.URL.Path == "/sandboxes":
+			http.Redirect(w, r, crossOrigin.URL+"/sdk-stolen?token=redirect-secret#fragment-secret", http.StatusTemporaryRedirect)
 		case r.URL.Path == "/sandboxes/sdk-location":
 			http.Redirect(w, r, crossOrigin.URL+"/sdk-stolen?token=redirect-secret#fragment-secret", http.StatusTemporaryRedirect)
 		case r.URL.Path == "/sandboxes/redirect-limit":
@@ -172,6 +177,17 @@ func TestIsloRedirectErrorsHideRejectedLocation(t *testing.T) {
 	}{
 		"raw delete": {
 			call: func() error { return client.DeleteSandbox(context.Background(), "raw-location") },
+			want: "refusing islo redirect",
+		},
+		"default create override": {
+			call: func() error {
+				defaultClient, err := newIsloClient(cfg, Runtime{})
+				if err != nil {
+					return err
+				}
+				_, err = defaultClient.CreateSandbox(context.Background(), &gosdk.CreateSandboxRequest{})
+				return err
+			},
 			want: "refusing islo redirect",
 		},
 		"sdk get": {
@@ -290,5 +306,199 @@ func TestIsloShareFromAPIMarksInvalidExpiryAsSet(t *testing.T) {
 	}
 	if !share.ExpiresAt.IsZero() {
 		t.Fatalf("ExpiresAt=%s want zero for invalid expiry", share.ExpiresAt.Format(time.RFC3339))
+	}
+}
+
+type isloCreateRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f isloCreateRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type isloCreateContextBody struct{ ctx context.Context }
+
+func (b isloCreateContextBody) Read([]byte) (int, error) { <-b.ctx.Done(); return 0, b.ctx.Err() }
+func (isloCreateContextBody) Close() error               { return nil }
+
+func TestIsloCreateHasBoundedOperationContext(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		parent time.Duration
+		body   bool
+		want   time.Duration
+	}{
+		{"headers", 6 * time.Minute, false, 5 * time.Minute},
+		{"body", 6 * time.Minute, true, 5 * time.Minute},
+		{"earlier caller deadline", time.Minute, false, time.Minute},
+		{"earlier body deadline", time.Minute, true, time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				creates := 0
+				transport := isloCreateRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+					if r.URL.Path == "/auth/token" {
+						return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"session_token":"synthetic-token"}`)), Header: http.Header{}}, nil
+					}
+					creates++
+					if tc.body {
+						return &http.Response{StatusCode: 201, Body: isloCreateContextBody{r.Context()}, Header: http.Header{}}, nil
+					}
+					<-r.Context().Done()
+					return nil, r.Context().Err()
+				})
+				api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "synthetic-key", BaseURL: "https://example.invalid"}}, Runtime{HTTP: &http.Client{Transport: transport}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), tc.parent)
+				defer cancel()
+				start := time.Now()
+				_, err = api.CreateSandbox(ctx, &gosdk.CreateSandboxRequest{})
+				if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) != tc.want || creates != 1 {
+					t.Fatalf("error=%v elapsed=%s creates=%d; want deadline after %s, one create", err, time.Since(start), creates, tc.want)
+				}
+			})
+		})
+	}
+}
+
+func TestIsloCreateSeparatesDefaultHeaderBudget(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/token" {
+			io.WriteString(w, `{"session_token":"synthetic-token"}`)
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+		io.WriteString(w, `{"id":"synthetic-id","name":"crabbox-proof-abcdef"}`)
+	}))
+	defer server.Close()
+	api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "synthetic-key", BaseURL: server.URL}}, Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := api.(*isloSDKClient)
+	if _, err := client.auth.Token(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Scale the ordinary API guard without weakening the create transport.
+	normal := client.httpClient.Transport.(*http.Transport)
+	normal.ResponseHeaderTimeout = 10 * time.Millisecond
+	sandbox, err := client.CreateSandbox(context.Background(), &gosdk.CreateSandboxRequest{})
+	if err != nil || sandbox.GetID() != "synthetic-id" {
+		t.Fatalf("create did not survive ordinary header bound: sandbox=%v err=%v", sandbox, err)
+	}
+	if _, err := client.GetSandbox(context.Background(), "crabbox-proof-abcdef"); err == nil {
+		t.Fatal("ordinary read lost header bound")
+	}
+	if normal.ResponseHeaderTimeout != 10*time.Millisecond {
+		t.Fatal("create mutated ordinary transport")
+	}
+}
+
+func TestIsloCreatePreservesAuthAndInjectedTimeouts(t *testing.T) {
+	for _, mode := range []string{"default auth", "injected create"} {
+		t.Run(mode, func(t *testing.T) {
+			var creates atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/auth/token" {
+					creates.Add(1)
+				}
+				if (mode == "default auth" && r.URL.Path == "/auth/token") || r.URL.Path != "/auth/token" {
+					select {
+					case <-r.Context().Done():
+						return
+					case <-time.After(100 * time.Millisecond):
+					}
+				}
+				if r.URL.Path == "/auth/token" {
+					io.WriteString(w, `{"session_token":"synthetic-token"}`)
+				} else {
+					io.WriteString(w, `{"id":"synthetic-id","name":"crabbox-proof-abcdef"}`)
+				}
+			}))
+			defer server.Close()
+			rt := Runtime{}
+			var injected *http.Client
+			if mode == "injected create" {
+				injected = server.Client()
+				injected.Timeout = 10 * time.Millisecond
+				rt.HTTP = injected
+			}
+			api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "synthetic-key", BaseURL: server.URL}}, rt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := api.(*isloSDKClient)
+			if injected == nil {
+				client.httpClient.Transport.(*http.Transport).ResponseHeaderTimeout = 10 * time.Millisecond
+			} else {
+				if client.createHTTPClient != nil || client.httpClient.Transport != injected.Transport || injected.Timeout != 10*time.Millisecond {
+					t.Fatal("explicit HTTP client changed")
+				}
+				if _, err := client.auth.Token(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := client.CreateSandbox(context.Background(), &gosdk.CreateSandboxRequest{}); err == nil {
+				t.Fatal("create relaxed existing auth/injected timeout")
+			}
+			if mode == "default auth" && creates.Load() != 0 {
+				t.Fatal("create followed failed authentication")
+			}
+		})
+	}
+}
+
+func TestIsloCreateCallerCancellationBeforeRequest(t *testing.T) {
+	calls := 0
+	api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "synthetic-key", BaseURL: "https://example.invalid"}}, Runtime{HTTP: &http.Client{Transport: isloCreateRoundTripFunc(func(*http.Request) (*http.Response, error) { calls++; return nil, errors.New("unexpected request") })}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := api.CreateSandbox(ctx, &gosdk.CreateSandboxRequest{}); !errors.Is(err, context.Canceled) || calls != 0 {
+		t.Fatalf("cancellation err=%v calls=%d", err, calls)
+	}
+}
+
+func TestIsloCreateTransportKeepsStreamingBodyUnbounded(t *testing.T) {
+	original := http.DefaultTransport
+	originalHeader := original.(*http.Transport).ResponseHeaderTimeout
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/token" {
+			io.WriteString(w, `{"session_token":"synthetic-token"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "event: stdout\ndata: started\n\n")
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+		io.WriteString(w, "event: exit\ndata: 0\n\n")
+	}))
+	defer server.Close()
+	api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "synthetic-key", BaseURL: server.URL}}, Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := api.(*isloSDKClient)
+	if _, err := client.auth.Token(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	client.httpClient.Transport.(*http.Transport).ResponseHeaderTimeout = 10 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	code, err := client.ExecStream(ctx, "crabbox-proof-abcdef", &gosdk.ExecRequest{}, io.Discard, io.Discard)
+	if err != nil || code != 0 {
+		t.Fatalf("stream body stopped at header bound: %d %v", code, err)
+	}
+	if http.DefaultTransport != original || original.(*http.Transport).ResponseHeaderTimeout != originalHeader {
+		t.Fatal("global transport mutated")
 	}
 }

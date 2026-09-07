@@ -91,19 +91,12 @@ func (b *blacksmithBackend) Warmup(ctx context.Context, req WarmupRequest) error
 		req.BeforeComplete()
 	}
 	total := b.rt.Clock.Now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: blacksmithTestboxProvider,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: blacksmithTestboxProvider,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
 func (b *blacksmithBackend) ValidateRunOptions(req RunRequest) error {

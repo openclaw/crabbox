@@ -31,7 +31,6 @@ type Repo = core.Repo
 type ExitError = core.ExitError
 type FeatureSet = core.FeatureSet
 type Feature = core.Feature
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 
 const (
@@ -71,10 +70,6 @@ func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTim
 
 func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaimForProvider(identifier, provider)
-}
-
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
 }
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {

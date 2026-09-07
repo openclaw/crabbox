@@ -497,6 +497,9 @@ retries preserve that wakeup, including after coordinator reconstruction.
 An already-due stored alarm time is rearmed at the earlier of that time and the
 requested deadline: a consumed runtime job can leave its timestamp behind.
 An earlier future alarm is preserved without another scheduling write.
+AWS heartbeat access refresh also arms its recorded ingress reconciliation at the
+existing one-second minimum delay instead of rescanning unrelated fleet metadata
+while holding the ingress lock. Earlier alarms remain scheduled.
 Alarm storage errors still fail the request and do not certify cleanup success.
 The existing full scheduler shares the lifecycle mutex with this arming, so a
 scan cannot race an acknowledgement's earlier wakeup. Full maintenance scans,
@@ -532,7 +535,9 @@ directly against the runner over SSH:
 
 Read back with `GET /v1/runs`, `/v1/runs/{id}`, `/logs`, and `/events`. The
 `/v1/control` websocket lets clients subscribe to live run events and send lease
-heartbeats. A run keeps its initiating actor in `owner`/`org` plus every backing
+heartbeats. Control socket admission does not wait for unrelated lifecycle work;
+authentication, restored bridge checks, and per-message lifecycle fences still
+apply. A run keeps its initiating actor in `owner`/`org` plus every backing
 lease identity used by replacement flows. Each backing lease owner can read and
 subscribe for audit purposes, while only the actor or an admin can append
 events or telemetry and finish the run.

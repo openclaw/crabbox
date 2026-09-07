@@ -34,7 +34,6 @@ type Server = core.Server
 type Repo = core.Repo
 type LeaseClaim = core.LeaseClaim
 type ExitError = core.ExitError
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 type LocalCommandRequest = core.LocalCommandRequest
 
@@ -66,10 +65,6 @@ func inventoryDoctorResult(provider string, leases int) DoctorResult {
 
 func delegatedSyncOptionsError(spec ProviderSpec, req RunRequest) error {
 	return core.RejectDelegatedSyncOptionsForSpec(spec, req)
-}
-
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
 }
 
 func newLeaseSlug(leaseID string) string {

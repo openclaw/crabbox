@@ -36,7 +36,6 @@ type LocalCommandRequest = core.LocalCommandRequest
 type LocalCommandResult = core.LocalCommandResult
 type ExitError = core.ExitError
 type LeaseClaim = core.LeaseClaim
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 
 const (
@@ -102,10 +101,6 @@ func removeLeaseClaimIfUnchangedAfter(leaseID string, claim LeaseClaim, action f
 
 func listLeaseClaims() ([]core.LeaseClaim, error) {
 	return core.ListLeaseClaims()
-}
-
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
 }
 
 func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {

@@ -1882,7 +1882,7 @@ exit 0
 	if err := runSSHQuietWithOptionsResolvePort(t.Context(), &target, "true", "1", "1"); err != nil {
 		t.Fatal(err)
 	}
-	if target.Port != "2222" || len(target.FallbackPorts) != 0 {
+	if target.Port != "2222" {
 		t.Fatalf("successful readiness target=%#v, want pinned port 2222", target)
 	}
 	calls, err := os.ReadFile(callsPath)
@@ -1933,12 +1933,19 @@ exit 0
 				User: "crabbox", Host: "proxy.example", Port: "2222", FallbackPorts: []string{"22"},
 				SSHConfigProxy: true, ReadyCheck: "true",
 			}
-			if !test.run(t.Context(), &target) || target.Port != "22" || len(target.FallbackPorts) != 0 {
+			if !test.run(t.Context(), &target) || target.Port != "22" {
 				t.Fatalf("readiness did not pin the fully ready fallback: %+v", target)
 			}
 			calls, err := os.ReadFile(callsPath)
 			if got, want := string(calls), "2222:true\n22:true\n"; err != nil || got != want {
 				t.Fatalf("readiness calls=%q error=%v want=%q", got, err, want)
+			}
+			if err := resolveSSHPortNoInput(t.Context(), &target, "5", "1", io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.ReadFile(callsPath)
+			if err != nil || string(after) != string(calls) {
+				t.Fatalf("proxy readiness route was rediscovered: %s error=%v", after, err)
 			}
 		})
 	}
@@ -2102,7 +2109,7 @@ func TestWSL2ReadinessUsesDirectNoInputWrapperAndPinsFullFallback(t *testing.T) 
 	if err := probeWSL2SSHReady(t.Context(), &target, sshReadinessProfileForTarget(target), io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if target.Port != "22" || len(target.FallbackPorts) != 0 {
+	if target.Port != "22" {
 		t.Fatalf("target=%+v, want fully-ready fallback pinned", target)
 	}
 	calls, err := os.ReadFile(logPath)
@@ -2111,6 +2118,13 @@ func TestWSL2ReadinessUsesDirectNoInputWrapperAndPinsFullFallback(t *testing.T) 
 	}
 	if got, want := string(calls), "ssh:2222:shell\nsftp:2222\nssh:22:shell\nsftp:22\nssh:22:ready\n"; got != want {
 		t.Fatalf("calls=%q want=%q", got, want)
+	}
+	if err := resolveSSHPortNoInput(t.Context(), &target, "10", "3", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(logPath)
+	if err != nil || string(after) != string(calls) {
+		t.Fatalf("WSL readiness route was rediscovered: %s error=%v", after, err)
 	}
 }
 
@@ -2641,11 +2655,11 @@ func TestSSHWaitProgressIncludesElapsedAndRemaining(t *testing.T) {
 	}
 }
 
-func TestSSHWaitProgressDistinguishesAuthFromReadiness(t *testing.T) {
+func TestSSHWaitProgressDistinguishesTransportFromReadiness(t *testing.T) {
 	target := &SSHTarget{Host: "203.0.113.10", Port: "2222"}
 	got := sshWaitProgressMessage(target, "bootstrap", "2222", "", "2222:tcp", 5*time.Second, time.Minute)
-	if !strings.Contains(got, "bootstrap ssh-auth") {
-		t.Fatalf("TCP-only progress should report ssh-auth stage: %q", got)
+	if !strings.Contains(got, "bootstrap ssh-transport") {
+		t.Fatalf("TCP-only progress should report ssh-transport stage: %q", got)
 	}
 	got = sshWaitProgressMessage(target, "bootstrap", "2222", "2222", "2222:auth", 5*time.Second, time.Minute)
 	if !strings.Contains(got, "bootstrap ready-check") {
@@ -6137,9 +6151,7 @@ func TestServerProviderKeyUsesOnlyCrabboxLeaseKeys(t *testing.T) {
 }
 
 func TestMoveStoredTestboxKeyHandlesCoordinatorRenamedLease(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	isolateTestUserDirs(t)
 	oldPath, err := testboxKeyPath("cbx_111111111111")
 	if err != nil {
 		t.Fatal(err)

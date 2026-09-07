@@ -14,6 +14,7 @@ import (
 
 	gosdk "github.com/islo-labs/go-sdk"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type Config = core.Config
@@ -265,7 +266,7 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 			return finishResult(), err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, client, name, workspace, workloadUser); err != nil {
+	} else if err := b.prepareWorkspace(ctx, client, name, workspace, workloadUser, false); err != nil {
 		return finishResult(), err
 	}
 	commandStart := b.now()
@@ -669,10 +670,10 @@ func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Re
 	}
 	sandbox, err := client.CreateSandbox(ctx, create)
 	if err != nil {
-		return "", "", "", core.LeaseClaim{}, isloError("create sandbox", err)
+		return "", "", "", core.LeaseClaim{}, b.unconfirmedCreateError(name, isloError("create sandbox", err))
 	}
 	if sandbox == nil || sandbox.GetName() == "" {
-		return "", "", "", core.LeaseClaim{}, exit(5, "islo create sandbox returned no name")
+		return "", "", "", core.LeaseClaim{}, b.unconfirmedCreateError(name, exit(5, "islo create sandbox returned no name"))
 	}
 	leaseID := isloLeasePrefix + sandbox.GetName()
 	identity := isloIdentityFromSandbox(sandbox)
@@ -701,6 +702,14 @@ func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Re
 		return "", "", "", core.LeaseClaim{}, err
 	}
 	return leaseID, sandbox.GetName(), slug, acquired, nil
+}
+
+// The requested name is an operator-review locator, never acquisition or
+// adoption/deletion authority after a failed or incomplete create response.
+func (b *isloBackend) unconfirmedCreateError(name string, cause error) error {
+	message := fmt.Sprintf("%v; unconfirmed create attempt name=%q: a sandbox may exist, but no lease was acquired; verify its identity before explicit --reclaim and stop", cause, name)
+	message = shared.RedactErrorSecrets(message, b.cfg.Islo.APIKey)
+	return shared.ExitErrorWithCause(core.ExitCodeForError(cause, 1), message, cause)
 }
 
 func isloUnclaimedCleanupError(cause error, name string, cleanupErr error) error {
