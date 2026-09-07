@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Distinguish required-artifact, artifact-change, and artifact-schema validation failures from workload exits in run timing and failure digests, preserving exit 7 and artifact enforcement. [PR 1934](https://github.com/openclaw/crabbox/pull/1934), [Issue 1894](https://github.com/openclaw/crabbox/issues/1894). Thanks @coygeek.
-- Linux developer images: bake verified Node 24.19.0 and reusable public pnpm 11.22.0/12.3.4 archives, preserve version overrides, and require nonroot offline toolchain checks before reporting image-smoke success.
+- Linux developer images: bake verified Node 24.19.0 and reusable public pnpm 11.22.0/12.3.4 archives, preserve version overrides, and require nonroot offline toolchain checks before reporting image-smoke success. [PR 1944](https://github.com/openclaw/crabbox/pull/1944). Thanks @vincentkoc.
 
 ## 0.51.0 - 2026-09-06
 
