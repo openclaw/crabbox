@@ -136,6 +136,29 @@ crabbox checkpoint create --id swift-crab --mode native --json
 --discard-failed            Explicitly discard a verified failed capture and retire.
 ```
 
+On success, `--json` prints the checkpoint record. A direct native provider that
+can prove it never attempted image submission may instead return this failure
+object, with a nonzero exit status, after the exact local reservation is removed
+and its absence is verified:
+
+```json
+{
+  "schema": "crabbox.checkpoint.create.failure.v1",
+  "outcome": "not_submitted",
+  "provider": "machine0",
+  "leaseId": "cbx_abcdef012345",
+  "checkpointId": "chk_0123456789abcdef",
+  "localReservation": "removed"
+}
+```
+
+The provider, lease, and checkpoint identify this invocation only. This result
+does not mean the source restarted successfully or is ready for use; source
+cleanup remains the lease owner's responsibility. Failed local cleanup emits no
+such result. Coordinator-managed captures, lost replies, interrupted commands,
+and failures after submission retain their existing recovery behavior. Never
+infer non-submission from an empty image ID, a missing checkpoint, or error text.
+
 `--mode` also accepts the aliases `provider-native`/`vm` (native),
 `ami`/`image` (image), `snapshot`/`disk`/`disk-snapshot` (disk snapshot),
 `workspace`/`workspace-archive` (archive), and `recipe`. `--strategy auto`

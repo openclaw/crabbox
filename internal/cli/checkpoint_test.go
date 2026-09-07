@@ -158,15 +158,32 @@ func TestCheckpointRecordRoundTripAndListOrder(t *testing.T) {
 
 func TestCleanupUncommittedCheckpointDirOnCreateError(t *testing.T) {
 	dir := t.TempDir()
-	cleanupUncommittedCheckpointDir(dir, false, io.ErrUnexpectedEOF)
+	if err := cleanupUncommittedCheckpointDir(dir, false, io.ErrUnexpectedEOF); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("partial checkpoint dir still exists: err=%v", err)
 	}
 
 	committedDir := t.TempDir()
-	cleanupUncommittedCheckpointDir(committedDir, true, io.ErrUnexpectedEOF)
+	if err := cleanupUncommittedCheckpointDir(committedDir, true, io.ErrUnexpectedEOF); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(committedDir); err != nil {
 		t.Fatalf("committed checkpoint dir removed: %v", err)
+	}
+}
+
+func TestCleanupUncommittedCheckpointDirReportsRemovalFailure(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(file, []byte("retain"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupUncommittedCheckpointDir(filepath.Join(file, "checkpoint"), false, io.ErrUnexpectedEOF); err == nil {
+		t.Fatal("inaccessible reservation cleanup was reported successful")
+	}
+	if data, err := os.ReadFile(file); err != nil || string(data) != "retain" {
+		t.Fatalf("cleanup changed the unrelated file: %q %v", data, err)
 	}
 }
 
