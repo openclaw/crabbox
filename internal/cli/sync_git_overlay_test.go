@@ -3625,7 +3625,7 @@ exit 99
 				credentialMarker = installGitOverlayCredentialCanary(t)
 			}
 			var stdout bytes.Buffer
-			var stderr synchronizedBuffer
+			stderr := newSynchronizedBuffer(0)
 			app := App{Stdout: &stdout, Stderr: &stderr}
 			runArgs := []string{"--provider", providerName, "--no-hydrate", "--sync-only"}
 			if mode == "workload-cleanup" {

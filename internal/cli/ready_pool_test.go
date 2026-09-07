@@ -475,7 +475,7 @@ func TestRunReadyPoolEndpointPrecedesExplicitSSHPort(t *testing.T) {
 			args = append(args, "--", "true")
 			reachedOwner := errors.New("stop after exact pool endpoint reaches workspace owner")
 			ownerCalls := 0
-			var output synchronizedBuffer
+			output := newSynchronizedBuffer(0)
 			app := App{Stdout: &output, Stderr: &output, workspaceOwnerAcquirer: func(_ context.Context, target SSHTarget, id string, _ io.Writer) (*workspaceOwner, error) {
 				ownerCalls++
 				if id != leaseID || target.Port != port || target.Host != lease.Host || target.User != lease.SSHUser || target.SSHHostKey != key {
