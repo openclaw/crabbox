@@ -1060,17 +1060,33 @@ export class EC2SpotClient {
             ? ""
             : await this.resolveAMI(config),
       );
-      const securityGroupID = options.withIngress
-        ? await options.withIngress(
-            (cidrs) =>
-              diagnostics.measure("security_group", () =>
-                this.ensureSecurityGroup({ ...config, awsSSHCIDRs: cidrs }, options),
-              ),
-            diagnostics.record,
-          )
-        : await diagnostics.measure("security_group", () =>
-            this.ensureSecurityGroup(config, options),
-          );
+      const quotaCache = new Map<string, Promise<number | undefined>>();
+      const quotaForMarket = (market: LeaseConfig["capacityMarket"]) => {
+        const code = awsQuotaCodeForMarket(market);
+        let quota = quotaCache.get(code);
+        if (!quota) {
+          quota = diagnostics.measure("quota", () => this.appliedServiceQuota(code));
+          quotaCache.set(code, quota);
+        }
+        return quota;
+      };
+      // Quota reads do not own ingress. Join both preparations before launch or
+      // transient-image cleanup so a failed branch cannot leave work running.
+      const [securityGroup, initialQuota] = await Promise.allSettled([
+        options.withIngress
+          ? options.withIngress(
+              (cidrs) =>
+                diagnostics.measure("security_group", () =>
+                  this.ensureSecurityGroup({ ...config, awsSSHCIDRs: cidrs }, options),
+                ),
+              diagnostics.record,
+            )
+          : diagnostics.measure("security_group", () => this.ensureSecurityGroup(config, options)),
+        quotaForMarket(config.capacityMarket),
+      ]);
+      if (securityGroup.status === "rejected") throw securityGroup.reason;
+      if (initialQuota.status === "rejected") throw initialQuota.reason;
+      const securityGroupID = securityGroup.value;
       const pinnedMacHostID = config.target === "macos" ? config.hostID || config.awsMacHostID : "";
       // An explicit Mac host is tied to one hardware family. Resolve that family once so a
       // defaulted --type cannot send an incompatible instance type to the pinned host.
@@ -1088,7 +1104,6 @@ export class EC2SpotClient {
       }
       const candidates = pinnedMacHostType ? [pinnedMacHostType] : awsLaunchCandidates(config);
       const history = new ProvisioningAttemptHistory();
-      const quotaCache = new Map<string, number | undefined>();
       const imageCache = new Map<string, string>();
       const marketFallbackCandidates: string[] = [];
       const pinnedMacOSImageID =
@@ -1128,9 +1143,12 @@ export class EC2SpotClient {
         return imageID;
       };
       for (const serverType of candidates) {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- quota preflight follows sequential fallback order.
-        const preflight = await diagnostics.measure("quota", () =>
-          this.quotaPreflightAttempt(serverType, config.capacityMarket, quotaCache),
+        const preflight = awsQuotaPreflightAttempt(
+          serverType,
+          config.capacityMarket,
+          this.region,
+          // oxlint-disable-next-line eslint/no-await-in-loop -- quota preflight follows sequential fallback order.
+          await quotaForMarket(config.capacityMarket),
         );
         if (preflight) {
           history.record(preflight, `${serverType}: ${preflight.message}`);
@@ -1188,9 +1206,12 @@ export class EC2SpotClient {
       // Retry only candidates whose Spot failure can be recovered by On-Demand.
       if (marketFallbackCandidates.length > 0 && config.capacityFallback.startsWith("on-demand")) {
         for (const serverType of marketFallbackCandidates) {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback must stay sequential.
-          const preflight = await diagnostics.measure("quota", () =>
-            this.quotaPreflightAttempt(serverType, "on-demand", quotaCache),
+          const preflight = awsQuotaPreflightAttempt(
+            serverType,
+            "on-demand",
+            this.region,
+            // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback must stay sequential.
+            await quotaForMarket("on-demand"),
           );
           if (preflight) {
             history.record(preflight, `on-demand ${serverType}: ${preflight.message}`);
@@ -2831,20 +2852,6 @@ export class EC2SpotClient {
       detail = "";
     }
     return `aws ${action}: http ${status}: ${detail || trimBody(text).replace(/\s+/g, " ")}`;
-  }
-
-  private async quotaPreflightAttempt(
-    serverType: string,
-    market: LeaseConfig["capacityMarket"],
-    quotaCache: Map<string, number | undefined>,
-  ): Promise<ProvisioningAttempt | undefined> {
-    const code = awsQuotaCodeForMarket(market);
-    let quota = quotaCache.get(code);
-    if (!quotaCache.has(code)) {
-      quota = await this.appliedServiceQuota(code);
-      quotaCache.set(code, quota);
-    }
-    return awsQuotaPreflightAttempt(serverType, market, this.region, quota);
   }
 
   private async appliedServiceQuota(quotaCode: string): Promise<number | undefined> {
