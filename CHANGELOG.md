@@ -1,8 +1,6 @@
 # Changelog
 
-## Unreleased
-
-Planned for **0.52.0**.
+## 0.52.0 - 2026-09-07
 
 ### Highlights
 
