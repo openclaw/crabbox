@@ -142,15 +142,15 @@ writeAgentSkillsDiscovery();
 writeAgentMap();
 console.log(`built docs site: ${path.relative(root, outDir)}`);
 
-// Sorted so the published discovery entries have a stable order.
-function readAgentSkills() {
+// Preserve the original first entry; sort any additional skills by name.
+export function readAgentSkills(sourceDir = skillsDir, metadata = catalogMetadata) {
   return fs
-    .readdirSync(skillsDir, { withFileTypes: true })
+    .readdirSync(sourceDir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
-    .sort()
+    .sort((a, b) => (a === b ? 0 : a === "crabbox" ? -1 : b === "crabbox" ? 1 : a < b ? -1 : 1))
     .map((name) => {
-      const sourcePath = path.join(skillsDir, name, "SKILL.md");
+      const sourcePath = path.join(sourceDir, name, "SKILL.md");
       const skill = fs.readFileSync(sourcePath, "utf8");
       const frontmatter = skill.match(/^---\n([\s\S]*?)\n---\n/);
       if (!frontmatter) throw new Error(`${path.relative(root, sourcePath)} has no YAML frontmatter`);
@@ -163,9 +163,18 @@ function readAgentSkills() {
       if (declared !== name) {
         throw new Error(`${path.relative(root, sourcePath)} declares name ${declared} but lives in skills/${name}`);
       }
-      const catalog = catalogMetadata[name];
+      const catalog = Object.hasOwn(metadata, name) ? metadata[name] : undefined;
       if (!catalog) {
         throw new Error(`skills/${name} has no AI Catalog metadata in build-docs-site.mjs`);
+      }
+      if (typeof catalog.displayName !== "string" || !catalog.displayName.trim()) {
+        throw new Error(`skills/${name} AI Catalog displayName must be a non-empty string`);
+      }
+      for (const field of ["tags", "capabilities", "representativeQueries"]) {
+        if (!Array.isArray(catalog[field]) || !catalog[field].length ||
+            catalog[field].some((value) => typeof value !== "string" || !value.trim())) {
+          throw new Error(`skills/${name} AI Catalog ${field} must be a non-empty array of non-empty strings`);
+        }
       }
       return {
         name,

@@ -191,12 +191,18 @@ gh skill install openclaw/crabbox skills/crabbox-quickstart \
   --pin refs/heads/main --agent codex --scope project
 ```
 
-Or use the cross-client Skills CLI:
+Or install the sandbox execution skill with the [skills.sh](https://skills.sh) CLI:
 
 ```sh
-npx skills add https://github.com/openclaw/crabbox --skill crabbox
-npx skills add https://github.com/openclaw/crabbox --skill crabbox-quickstart
+npx skills add openclaw/crabbox --skill crabbox
+npx skills add openclaw/crabbox --skill crabbox-quickstart
 ```
+
+Choose `crabbox` for sandbox execution and remote testing, or
+`crabbox-quickstart` for a first local Docker/Podman run. Skills teach your agent
+how to use Crabbox; install the CLI separately using the instructions above.
+See the [skill installation guide](docs/integrations/agents.md#install-through-ecosystem-skill-managers)
+for discovery and supported clients.
 
 Crabbox also publishes a digest-verified discovery index from its own domain:
 

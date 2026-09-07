@@ -2,17 +2,18 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import test from "node:test";
 
-import { markdownToHtml } from "./build-docs-site.mjs";
+import { markdownToHtml, readAgentSkills } from "./build-docs-site.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const providersDir = path.join(repoRoot, "docs", "providers");
 const integrationsDir = path.join(repoRoot, "docs", "integrations");
 const useCasesFile = path.join(repoRoot, "docs", "use-cases.md");
 const siteDir = path.join(repoRoot, "dist", "docs-site");
-const providerIndexFile = path.join(siteDir, "providers", "index.html");
-const generatedTest = fs.existsSync(providerIndexFile) ? test : test.skip;
+// Importing the builder generates the site before these tests register.
+const generatedTest = test;
 
 const providerMarkdown = fs
   .readdirSync(providersDir)
@@ -123,7 +124,7 @@ generatedTest("every publishable skill appears once in discovery and the AI cata
     .readdirSync(skillsDir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
-    .sort();
+    .sort((a, b) => (a === b ? 0 : a === "crabbox" ? -1 : b === "crabbox" ? 1 : a < b ? -1 : 1));
   const index = JSON.parse(
     fs.readFileSync(path.join(siteDir, ".well-known", "agent-skills", "index.json"), "utf8"),
   );
@@ -555,3 +556,50 @@ const voidElements = new Set([
   "track",
   "wbr",
 ]);
+
+
+test("skill discovery preserves crabbox first even when another skill sorts earlier", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-skills-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const metadata = {};
+  for (const name of ["zeta", "crabbox", "alpha"]) {
+    fs.mkdirSync(path.join(directory, name));
+    fs.writeFileSync(path.join(directory, name, "SKILL.md"),
+      `---\nname: ${name}\ndescription: "Use when testing ${name}"\n---\n`);
+    metadata[name] = {
+      displayName: name,
+      tags: ["sandbox"],
+      capabilities: ["Execution"],
+      representativeQueries: ["run a test"],
+    };
+  }
+  assert.deepEqual(readAgentSkills(directory, metadata).map(({ name }) => name),
+    ["crabbox", "alpha", "zeta"]);
+  fs.rmSync(path.join(directory, "crabbox"), { recursive: true });
+  assert.deepEqual(readAgentSkills(directory, metadata).map(({ name }) => name), ["alpha", "zeta"]);
+});
+
+test("skill discovery rejects malformed catalog metadata before publishing", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-catalog-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(directory, "crabbox"));
+  fs.writeFileSync(path.join(directory, "crabbox", "SKILL.md"),
+    '---\nname: crabbox\ndescription: "Use when testing"\n---\n');
+  const valid = {
+    displayName: "Crabbox",
+    tags: ["sandbox"],
+    capabilities: ["Execution"],
+    representativeQueries: ["run a test"],
+  };
+  assert.throws(() => readAgentSkills(directory, {}), /no AI Catalog metadata/);
+  for (const value of [undefined, null, "", " ", 42, []]) {
+    assert.throws(() => readAgentSkills(directory, { crabbox: { ...valid, displayName: value } }),
+      /displayName must be a non-empty string/);
+  }
+  for (const field of ["tags", "capabilities", "representativeQueries"]) {
+    for (const value of [undefined, null, "sandbox", [], [""], [" "], [42], ["valid", null]]) {
+      assert.throws(() => readAgentSkills(directory, { crabbox: { ...valid, [field]: value } }),
+        new RegExp(`${field} must be a non-empty array of non-empty strings`));
+    }
+  }
+});

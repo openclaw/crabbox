@@ -102,10 +102,10 @@ Crabbox also publishes its generic Skills at the non-hidden
 authoritative generic Skills visible to installers instead of requiring them to
 search Crabbox's repo-local `.agents` projection. Two ship today:
 
-| Skill | Answers | Install source |
-| --- | --- | --- |
-| `crabbox` | How do I run this repository's commands on a remote machine and collect the evidence? | `skills/crabbox` |
-| `crabbox-quickstart` | I am new to Crabbox: what is the shortest path from installing the CLI to one successful run? | `skills/crabbox-quickstart` |
+- **`crabbox`** (`skills/crabbox`): run repository commands in sandbox
+  environments, reuse remote machines, and collect execution evidence.
+- **`crabbox-quickstart`** (`skills/crabbox-quickstart`): get from CLI
+  installation to a first disposable local-container run and explicit cleanup.
 
 Install `crabbox-quickstart` for first contact, or when the repository has no
 `crabbox.yaml` yet; it hands off to `crabbox` as soon as a task needs a
@@ -129,8 +129,12 @@ npx skills add https://github.com/openclaw/crabbox --skill crabbox
 npx skills add https://github.com/openclaw/crabbox --skill crabbox-quickstart
 ```
 
-The `crabbox` source has an [official-repository skills.sh
-listing](https://www.skills.sh/openclaw/crabbox/crabbox).
+These are the GitHub sources used by [skills.sh](https://skills.sh). Its
+[leaderboard discovers skills through CLI installation telemetry](https://skills.sh/docs/faq);
+publishing a domain discovery index alone does not submit a listing.
+Use `npx skills add openclaw/crabbox --list` to check available skills.
+Installing a skill adds agent instructions; install the Crabbox CLI separately
+to create and run sandboxes.
 Every checked-in `skills/<name>` source and its `.agents/skills/<name>`
 projection are byte-identical and CI rejects drift. Use `crabbox init` when the
 repository also needs Crabbox configuration, Actions hydration, and detected

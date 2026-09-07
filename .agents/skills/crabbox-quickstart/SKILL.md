@@ -137,8 +137,8 @@ crabbox stop <slug>
 crabbox list --provider local-container
 ```
 
-An empty `list` means nothing is left running on that provider. A forgotten
-box expires on its own, but that is a backstop, not a plan.
+An empty `list` means no leases remain on that provider. Local containers kept
+by `warmup` or `--keep` require explicit `stop`; they do not expire on their own.
 
 ## When you outgrow this page
 
