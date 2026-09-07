@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Report image qualification reaping as idle after clean teardown, while preserving failed recovery evidence and checking transient controller ownership before cleanup. Thanks @vincentkoc.
+- Report image qualification reaping as idle after clean teardown, while preserving failed recovery evidence and checking transient controller ownership before cleanup. [PR 1942](https://github.com/openclaw/crabbox/pull/1942). Thanks @vincentkoc.
 
 ## 0.51.0 - 2026-09-06
 
