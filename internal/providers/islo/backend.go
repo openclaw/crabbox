@@ -285,7 +285,7 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (result RunResult
 			return result, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, client, name, workspace, workloadUser); err != nil {
+	} else if err := b.prepareWorkspace(ctx, client, name, workspace, workloadUser, false); err != nil {
 		return result, err
 	}
 	commandStart := b.now()

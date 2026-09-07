@@ -226,6 +226,9 @@ running and billable.
   [why the provider kind stays delegated-run](../features/islo.md#why-the-provider-kind-stays-delegated-run).
 - Crabbox sync: yes, archive sync through the Islo files-archive API, with a
   base64 exec-upload fallback.
+  `--no-sync` creates the workspace directory if needed without deleting
+  existing files. Workspace replacement applies only during archive sync when
+  `sync.delete` is enabled; disabling it preserves existing files before upload.
 - URL bridge: yes. Exposed ports become public HTTPS shares through Islo's
   `/sandboxes/{name}/shares` API, surfaced by `--expose` and the pond bridge
   plane. Share creation is idempotent per port. Requested TTLs are clamped
