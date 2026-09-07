@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Islo: report failed stdout/stderr delivery instead of silently succeeding after losing command output; preserve remote exit codes when stream decoding and delivery finish successfully.
+- Islo: report failed stdout/stderr delivery instead of silently succeeding after losing command output; preserve remote exit codes when stream decoding and delivery finish successfully. [PR 1969](https://github.com/openclaw/crabbox/pull/1969).
 
 ## 0.52.0 - 2026-09-07
 
