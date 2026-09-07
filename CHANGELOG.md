@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Tailscale: keep provider diagnostics and OAuth credentials out of preflight and tag-ownership errors while preserving operation, HTTP status, and actionable tag guidance.
+
 ## 0.51.0 - 2026-09-06
 
 ### Highlights
