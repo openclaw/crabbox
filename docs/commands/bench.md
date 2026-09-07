@@ -90,6 +90,8 @@ fields omit those summaries.
 
 `bench report` marks groups as `insufficient_successful_samples` until the
 group has at least `--min-samples` successful observations. The default is `2`.
+`runnerTotalN` reports how many successful observations contained runner total
+telemetry.
 
 JSON output uses the same grouped data:
 
@@ -111,6 +113,7 @@ JSON output uses the same grouped data:
       "machineType": "c7a.large",
       "commandFingerprint": "sha256:...",
       "n": 2,
+      "runnerTotalN": 2,
       "medianTotalMs": 64000,
       "medianRunnerTotalMs": 67000,
       "medianSyncMs": 12000,
@@ -136,6 +139,31 @@ JSON output uses the same grouped data:
   ]
 }
 ```
+
+## Check runner timing policy
+
+`bench check` applies one policy to every group selected by the existing store,
+provider, command fingerprint, and recency filters:
+
+```sh
+crabbox bench check --since 24h --providers aws,hetzner \
+  --max-p95-runner-total 5s
+crabbox bench check --command-fingerprint sha256:... \
+  --min-samples 5 --max-failures 1 --max-p95-runner-total 8s --json
+```
+
+Every matched group must have at least `--min-samples` successful observations,
+no more than `--max-failures`, enough runner total observations to calculate a
+p95, and a p95 runner total at or below the required duration. Runner total
+evidence must contain at least three samples even when `--min-samples` is lower.
+The defaults are three successful samples and zero failures.
+
+The command exits `0` only when every matched group passes. It exits `1` for no
+matches or any policy failure, including missing runner telemetry, and exits `2`
+for invalid flags, durations, or stores. With `--json`, schema version 1 output
+is written before a policy exit of `1`. Check JSON is deterministic and excludes
+the store path, raw timing records, command text, command fingerprints, and
+lease or run IDs.
 
 ## Privacy and interpretation
 
@@ -176,4 +204,15 @@ bench report:
 --since <duration>          include records since 7d, 24h, etc.
 --min-samples <n>           successful samples required for sufficient evidence
 --json                      print machine-readable report JSON
+
+bench check:
+--store default|path        JSONL store to read (default: default)
+--provider <name>           include one provider
+--providers a,b             include comma-separated providers
+--command-fingerprint <id>  include one command fingerprint
+--since <duration>          include records since 7d, 24h, etc.
+--min-samples <n>           successful samples required per group (default: 3)
+--max-failures <n>          failed observations allowed per group (default: 0)
+--max-p95-runner-total <d>  required positive p95 runner total limit
+--json                      print deterministic machine-readable check JSON
 ```

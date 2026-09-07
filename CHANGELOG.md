@@ -2,8 +2,10 @@
 
 ## Unreleased
 
-- Reject conflicting known provider identities before rebinding resolved SSH access, and retain alias keys unless an attested unchanged alias claim is removed. [PR 1936](https://github.com/openclaw/crabbox/pull/1936), [Issue 1900](https://github.com/openclaw/crabbox/issues/1900). Thanks @coygeek.
+- Add `crabbox bench check` to enforce sample, failure, and p95 runner timing policy across every matched local benchmark group. [PR 1899](https://github.com/openclaw/crabbox/pull/1899). Thanks @vincentkoc.
 - Distinguish required-artifact, artifact-change, and artifact-schema validation failures from workload exits in run timing and failure digests, preserving exit 7 and artifact enforcement. [PR 1934](https://github.com/openclaw/crabbox/pull/1934), [Issue 1894](https://github.com/openclaw/crabbox/issues/1894). Thanks @coygeek.
+- Reject conflicting known provider identities before rebinding resolved SSH access, and retain alias keys unless an attested unchanged alias claim is removed. [PR 1936](https://github.com/openclaw/crabbox/pull/1936), [Issue 1900](https://github.com/openclaw/crabbox/issues/1900). Thanks @coygeek.
+- Tailscale: keep provider diagnostics and OAuth credentials out of preflight and tag-ownership errors while preserving operation, HTTP status, and actionable tag guidance. [PR 1940](https://github.com/openclaw/crabbox/pull/1940).
 
 ## 0.51.0 - 2026-09-06
 

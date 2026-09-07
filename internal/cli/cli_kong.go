@@ -177,6 +177,7 @@ type benchKongCmd struct {
 	Run    benchRunKongCmd    `cmd:"" passthrough:"" help:"Run a workload across providers and record benchmark timings."`
 	Record benchRecordKongCmd `cmd:"" passthrough:"" help:"Append a TimingReport JSON object to the local benchmark ledger."`
 	Report benchReportKongCmd `cmd:"" passthrough:"" help:"Aggregate local benchmark timing observations."`
+	Check  benchCheckKongCmd  `cmd:"" passthrough:"" help:"Enforce a local runner timing policy across benchmark groups."`
 }
 type benchRunKongCmd struct {
 	Args []string `arg:"" optional:""`
@@ -185,6 +186,9 @@ type benchRecordKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type benchReportKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type benchCheckKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type jobKongCmd struct {
@@ -667,6 +671,9 @@ func (c *benchRecordKongCmd) Run(ctx context.Context, app App) error {
 }
 func (c *benchReportKongCmd) Run(ctx context.Context, app App) error {
 	return app.benchReport(ctx, c.Args)
+}
+func (c *benchCheckKongCmd) Run(ctx context.Context, app App) error {
+	return app.benchCheck(ctx, c.Args)
 }
 func (c *jobListKongCmd) Run(ctx context.Context, app App) error   { return app.jobList(ctx, c.Args) }
 func (c *jobRunKongCmd) Run(ctx context.Context, app App) error    { return app.jobRun(ctx, c.Args) }
