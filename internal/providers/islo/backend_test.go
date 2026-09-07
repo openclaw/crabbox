@@ -742,6 +742,83 @@ func TestNewIsloClientAcceptsExplicitClientWithUnsupportedDefault(t *testing.T) 
 	}
 }
 
+func TestIsloRunWorkspacePreparationRespectsSyncIntent(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is required to exercise workspace preparation")
+	}
+	for _, tt := range []struct {
+		name     string
+		noSync   bool
+		delete   bool
+		preserve bool
+	}{
+		{name: "no sync preserves with delete enabled", noSync: true, delete: true, preserve: true},
+		{name: "sync replaces with delete enabled", delete: true},
+		{name: "sync preserves with delete disabled", preserve: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			client := &fakeIsloSyncClient{createName: "crabbox-workspace-abcdef"}
+			restore := swapNewIsloClient(client)
+			defer restore()
+			repo := t.TempDir()
+			init := exec.Command("git", "init", repo)
+			if output, err := init.CombinedOutput(); err != nil {
+				t.Fatalf("git init: %v\n%s", err, output)
+			}
+			if err := os.WriteFile(filepath.Join(repo, "input.txt"), []byte("sync input"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := Config{Islo: IsloConfig{Workdir: "repo"}}
+			cfg.Sync.Delete = tt.delete
+			backend := &isloBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+			if _, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Root: repo, Name: "repo"}, Keep: true, NoSync: tt.noSync, Command: []string{"true"}}); err != nil {
+				t.Fatal(err)
+			}
+			if len(client.execRequests) != 2 {
+				t.Fatalf("exec requests=%d, want preparation and workload", len(client.execRequests))
+			}
+			if got := client.uploaded.Len() > 0; got == tt.noSync {
+				t.Fatalf("archive uploaded=%v, no-sync=%v", got, tt.noSync)
+			}
+			workspace := filepath.Join(t.TempDir(), "workspace")
+			if err := os.Mkdir(workspace, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(workspace, "retained.txt")
+			if err := os.WriteFile(marker, []byte("retained workspace data"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// Replay only the emitted preparation against a test-owned directory.
+			command := client.execRequests[0].GetCommand()
+			if len(command) != 3 || command[0] != "bash" || command[1] != "-lc" {
+				t.Fatalf("unexpected preparation command: %q", command)
+			}
+			local := strings.ReplaceAll(command[2], shellQuote("/workspace/repo"), shellQuote(workspace))
+			if local == command[2] {
+				t.Fatal("preparation did not target the configured workspace")
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			if output, err := exec.CommandContext(ctx, bash, "-lc", local).CombinedOutput(); err != nil {
+				t.Fatalf("prepare workspace: %v\n%s", err, output)
+			}
+			data, err := os.ReadFile(marker)
+			if tt.preserve {
+				if err != nil || string(data) != "retained workspace data" {
+					t.Fatalf("workspace marker not preserved: data=%q err=%v", data, err)
+				}
+			} else if !os.IsNotExist(err) {
+				t.Fatalf("sync replacement left marker: err=%v", err)
+			}
+			if backend.cfg.Sync.Delete != tt.delete {
+				t.Fatal("workspace preparation changed sync configuration")
+			}
+		})
+	}
+}
+
 func TestIsloRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}

@@ -13,6 +13,7 @@
 - Publish run diagnostics without delaying workload admission, while preserving ordered lease attribution and joining pending publication before terminal recording. [PR 1937](https://github.com/openclaw/crabbox/pull/1937).
 - Add bounded AWS provisioning logs that separate ingress queue and lifecycle waits from create-operation costs and count redundant security-group permission calls without logging request payloads. [PR 1938](https://github.com/openclaw/crabbox/pull/1938).
 - Give Islo sandbox creation its own five-minute operation budget without shortening command streams or relaxing ordinary API deadlines; report failed create names as unconfirmed locators for explicit identity-checked recovery. [PR 1955](https://github.com/openclaw/crabbox/pull/1955).
+- Islo: preserve existing workspace files during `--no-sync` runs even when sync deletion is enabled, while retaining normal archive-sync replacement behavior.
 - Deduplicate validated AWS coordinator SSH ranges after combining lease and global access, avoiding repeated authorization calls for identical port/range pairs while preserving ingress reconciliation. [PR 1945](https://github.com/openclaw/crabbox/pull/1945).
 - Local Actions hydration: support `pnpm/action-setup` with an explicit exact version, including pnpm-before-Node workflows, preserve the managed pnpm for later commands, and accept setup-node's `cache: pnpm` as an explicitly uncached run. [PR 1953](https://github.com/openclaw/crabbox/pull/1953).
 

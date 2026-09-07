@@ -51,7 +51,7 @@ func (b *isloBackend) syncWorkspace(ctx context.Context, client isloAPI, name st
 		return nil, 0, err
 	}
 	prepareStarted := b.now()
-	if err := b.prepareWorkspace(ctx, client, name, workspace, user); err != nil {
+	if err := b.prepareWorkspace(ctx, client, name, workspace, user, b.cfg.Sync.Delete); err != nil {
 		return nil, 0, err
 	}
 	prepareDuration := b.now().Sub(prepareStarted)
@@ -97,9 +97,9 @@ func (b *isloBackend) syncWorkspace(ctx context.Context, client isloAPI, name st
 	}, total, nil
 }
 
-func (b *isloBackend) prepareWorkspace(ctx context.Context, client isloAPI, name, workspace, user string) error {
+func (b *isloBackend) prepareWorkspace(ctx context.Context, client isloAPI, name, workspace, user string, replace bool) error {
 	command := "mkdir -p " + shellQuote(workspace)
-	if b.cfg.Sync.Delete {
+	if replace {
 		command = "rm -rf " + shellQuote(workspace) + " && " + command
 	}
 	return b.execShellAs(ctx, client, name, command, user, io.Discard)
