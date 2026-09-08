@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Keep WSL2 workspace-owner renewal small and allow bounded workload contention without weakening token, expiry, or child-state checks. Thanks @steipete.
+- Keep WSL2 workspace-owner renewal small and allow bounded workload contention without weakening token, expiry, or child-state checks. https://github.com/openclaw/crabbox/pull/2011. Thanks @steipete.
 
 - Disable the unused WSLg compositor on headless managed Windows WSL2 leases to avoid service-session crashes that stall commands and workspace-owner renewal; preserve other WSL settings and existing execution deadlines. https://github.com/openclaw/crabbox/pull/2005. Thanks @steipete.
 
