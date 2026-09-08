@@ -323,6 +323,15 @@ later command invocations. Bootstrap restarts the distro and verifies its Linux
 ready check before publishing the setup marker; warmup also checks the WSL SSH
 runtime. `inspect` and `status` allow a 30-second WSL2 readiness probe.
 
+Headless managed WSL2 leases also disable WSLg with `guiApplications=false` in
+the Windows SSH user's `.wslconfig`, preserving other settings. The GUI/RDP
+compositor is unnecessary for these leases and can crash in a Windows service
+session, blocking later Linux commands and workspace-owner renewal. Explicit
+desktop or browser requests retain their existing GUI configuration. Bootstrap
+applies a changed WSL configuration before starting the distro; existing leases
+need reprovisioning to receive this policy. Command execution and owner-control
+timeout budgets are unchanged.
+
 ## Normal SSH lifecycle
 
 1. Import or reuse the per-lease SSH key (RSA for native Windows, ed25519

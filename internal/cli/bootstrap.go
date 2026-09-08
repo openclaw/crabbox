@@ -178,7 +178,13 @@ func windowsManagedCorePreludePowerShell(cfg Config) string {
 
 func windowsWSL2BootstrapPowerShell(cfg Config) string {
 	workRoot := windowsWSLWorkRoot(cfg)
+	headless := ""
+	if !cfg.Desktop && !cfg.Browser {
+		headless = windowsWSL2HeadlessConfigPowerShell
+	}
 	return `
+	$wslConfigChanged = $false
+` + headless + `
 	$wslDistro = "Crabbox"
 	$wslRoot = "C:\ProgramData\crabbox\wsl\Crabbox"
 	$wslRootfs = "C:\ProgramData\crabbox\wsl\ubuntu-noble-wsl-amd64.rootfs.tar.gz"
@@ -211,6 +217,10 @@ func windowsWSL2BootstrapPowerShell(cfg Config) string {
 	  wsl.exe --update --web-download | Out-Host
 	  if ($LASTEXITCODE -ne 0) { throw "wsl --update --web-download failed with exit $LASTEXITCODE" }
 	  Restart-CrabboxBootstrap $wslKernelMarker
+	}
+	if ($wslConfigChanged) {
+	  wsl.exe --shutdown | Out-Host
+	  if ($LASTEXITCODE -ne 0) { throw "apply headless WSL configuration failed with exit $LASTEXITCODE" }
 	}
 	wsl.exe --set-default-version 2 | Out-Host
 	if ($LASTEXITCODE -ne 0) { throw "wsl --set-default-version 2 failed with exit $LASTEXITCODE" }
@@ -297,6 +307,42 @@ crabbox-ready
 	Restart-Service sshd -Force
 	`
 }
+
+// WSLg's RDP compositor is unnecessary for headless SSH leases and can crash
+// in Windows service sessions, leaving even non-GUI distro launches blocked.
+const windowsWSL2HeadlessConfigPowerShell = `
+function ConvertTo-CrabboxHeadlessWSLConfig([string]$Text) {
+  $result = [Collections.Generic.List[string]]::new()
+  $inWSL2 = $false
+  $hasSection = $false
+  $hasKey = $false
+  if ($Text.Length -gt 0) {
+    foreach ($line in ($Text -split '\r?\n')) {
+      if ($line -match '^\s*\[([^\]]+)\]\s*(?:[;#].*)?$') {
+        if ($inWSL2 -and -not $hasKey) { $result.Add('guiApplications=false') }
+        $inWSL2 = $Matches[1].Trim() -eq 'wsl2'
+        $hasSection = $hasSection -or $inWSL2
+        $hasKey = $false
+      }
+      if ($inWSL2 -and $line -match '^\s*guiApplications\s*=') {
+        $result.Add('guiApplications=false')
+        $hasKey = $true
+      } else { $result.Add($line) }
+    }
+  }
+  if (-not $hasSection) { $result.Add('[wsl2]'); $inWSL2 = $true; $hasKey = $false }
+  if ($inWSL2 -and -not $hasKey) { $result.Add('guiApplications=false') }
+  return $result -join [char]10
+}
+$wslConfigPath = Join-Path $HOME '.wslconfig'
+$wslConfig = ''
+if (Test-Path -LiteralPath $wslConfigPath) { $wslConfig = [IO.File]::ReadAllText($wslConfigPath) }
+$headlessWSLConfig = ConvertTo-CrabboxHeadlessWSLConfig $wslConfig
+$wslConfigChanged = $headlessWSLConfig -cne $wslConfig
+if ($wslConfigChanged) {
+  [IO.File]::WriteAllText($wslConfigPath, $headlessWSLConfig, [Text.UTF8Encoding]::new($false))
+}
+`
 
 func windowsDesktopBootstrapPowerShell() string {
 	return windowsDesktopLauncherServicePowerShell() + sharedWindowsDesktop()
