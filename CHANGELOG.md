@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- AWS: overlap SSH ingress authorization in bounded batches while preserving revocation, recovery and cleanup ordering. https://github.com/openclaw/crabbox/pull/1976. Thanks @steipete.
+
+- Overlap default-VPC and managed security-group discovery during AWS provisioning while retaining scope validation and joined failure handling. [PR 1974](https://github.com/openclaw/crabbox/pull/1974). Thanks @steipete.
 - Recover lost run-admission responses using a caller-known identity and an atomic initial history record, preserving authenticated request binding and refusing remote command replay. Current clients require a coordinator supporting the new admission route. [PR 1970](https://github.com/openclaw/crabbox/pull/1970), [Issue 1962](https://github.com/openclaw/crabbox/issues/1962). Thanks @steipete.
 - Add bounded AWS provisioning transport diagnostics for credential preparation, signing and SDK request time, including retry-loop signing counts, without changing retry behavior. [PR 1968](https://github.com/openclaw/crabbox/pull/1968). Thanks @steipete.
 - Islo: report failed stdout/stderr delivery instead of silently succeeding after losing command output; preserve remote exit codes when stream decoding and delivery finish successfully. [PR 1969](https://github.com/openclaw/crabbox/pull/1969).

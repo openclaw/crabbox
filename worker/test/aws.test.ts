@@ -131,6 +131,10 @@ describe("aws provider", () => {
       const baseFetch = globalThis.fetch;
       const actions: string[] = [];
       const authorized: Array<[string | null, string | null]> = [];
+      const authorizationGates = new Map<
+        string,
+        { arrived: number; gate: ReturnType<typeof Promise.withResolvers<void>> }
+      >();
       vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
         const request = input instanceof Request ? input : new Request(input, init);
         const params = new URLSearchParams(await request.clone().text());
@@ -145,7 +149,21 @@ describe("aws provider", () => {
         if (action) actions.push(action);
         if (action === "AuthorizeSecurityGroupIngress" || action === "RevokeSecurityGroupIngress") {
           const authorize = action === "AuthorizeSecurityGroupIngress";
-          vi.setSystemTime(Date.now() + (authorize ? 7 : 3));
+          if (authorize) {
+            const port = params.get("IpPermissions.1.FromPort")!;
+            const batch = authorizationGates.get(port) ?? {
+              arrived: 0,
+              gate: Promise.withResolvers<void>(),
+            };
+            authorizationGates.set(port, batch);
+            if (++batch.arrived === 2) {
+              vi.setSystemTime(Date.now() + 7);
+              batch.gate.resolve();
+            }
+            await batch.gate.promise;
+          } else {
+            vi.setSystemTime(Date.now() + 3);
+          }
           return ec2XMLResponse(
             `<Response><Errors><Error><Code>${authorize ? "InvalidPermission.Duplicate" : "InvalidPermission.NotFound"}</Code><Message>private-rule-canary</Message></Error></Errors></Response>`,
             400,
@@ -164,12 +182,14 @@ describe("aws provider", () => {
       expect(actions.filter((action) => action === "AuthorizeSecurityGroupIngress")).toHaveLength(
         4,
       );
-      expect(authorized).toEqual([
-        ["22", "203.0.113.7/32"],
-        ["22", "2001:db8::1/128"],
-        ["443", "203.0.113.7/32"],
-        ["443", "2001:db8::1/128"],
-      ]);
+      expect(authorized.toSorted()).toEqual(
+        [
+          ["22", "203.0.113.7/32"],
+          ["22", "2001:db8::1/128"],
+          ["443", "203.0.113.7/32"],
+          ["443", "2001:db8::1/128"],
+        ].toSorted(),
+      );
       expect(actions.filter((action) => action === "RevokeSecurityGroupIngress")).toHaveLength(2);
       expect(log).toHaveBeenCalledTimes(1);
       const encoded = String(log.mock.calls[0]![0]);
@@ -654,9 +674,9 @@ describe("aws provider", () => {
         }
         if (action === "DescribeSecurityGroups") {
           describedGroupID = params.get("GroupId.1") ?? "";
-          describedGroupName = params.get("Filter.1.Value.1") ?? "";
+          describedGroupName = params.get("GroupName.1") ?? "";
           return ec2XMLResponse(
-            "<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-workspaces</groupId><groupName>crabbox-workspaces</groupName><ipPermissions /></item></securityGroupInfo></DescribeSecurityGroupsResponse>",
+            "<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-workspaces</groupId><groupName>crabbox-workspaces</groupName><vpcId>vpc-default</vpcId><ipPermissions /></item></securityGroupInfo></DescribeSecurityGroupsResponse>",
           );
         }
         if (action === "RevokeSecurityGroupIngress") {
@@ -715,8 +735,9 @@ describe("aws provider", () => {
           describeSecurityGroups += 1;
           return ec2XMLResponse(
             describeSecurityGroups === 1
-              ? "<DescribeSecurityGroupsResponse><securityGroupInfo /></DescribeSecurityGroupsResponse>"
+              ? "<Response><Errors><Error><Code>InvalidGroup.NotFound</Code><Message>not yet visible</Message></Error></Errors></Response>"
               : "<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-raced</groupId><ipPermissions /></item></securityGroupInfo></DescribeSecurityGroupsResponse>",
+            describeSecurityGroups === 1 ? 400 : 200,
           );
         }
         if (action === "CreateSecurityGroup") {
