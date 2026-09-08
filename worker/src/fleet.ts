@@ -16837,12 +16837,16 @@ export class FleetCoordinator {
   }
 
   private async expireLeases(): Promise<void> {
+    let scanned = 0;
+    let bridgeClosures = 0;
     const claims = await this.state.runExclusive(async () => {
       const now = Date.now();
       const claimed: Array<{ claim: string; lease: LeaseRecord }> = [];
       await this.visitLeaseRecords(async (stored) => {
+        scanned += 1;
         if (await provisioningOwnsLease(this.state.storage, stored.id)) return;
         if (!leaseIsLive(stored)) {
+          bridgeClosures += 1;
           await this.closeLeaseBridges(stored.id, 1008, "lease ended");
         }
         const workspace = stored.workspaceID
@@ -16920,6 +16924,14 @@ export class FleetCoordinator {
       });
       return claimed;
     });
+    console.info(
+      JSON.stringify({
+        component: "crabbox_expiry",
+        scanned,
+        bridgeClosures,
+        claims: claims.length,
+      }),
+    );
     await Promise.all(
       claims.map(async ({ claim, lease }) => {
         let failure: { error: unknown; message: string } | undefined;
