@@ -256,6 +256,10 @@ func windowsWSL2BootstrapPowerShell(cfg Config) string {
 	$linuxSetup = @'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+mkdir -p /etc/cloud
+# Crabbox owns this distro's setup. WSL datasource discovery can block systemd
+# and root login while trying to invoke Windows tools from an SSH session.
+touch /etc/cloud/cloud-init.disabled
 mkdir -p ` + shellQuote(workRoot) + ` /var/cache/crabbox/pnpm /var/cache/crabbox/npm /var/lib/crabbox
 cat >/etc/apt/apt.conf.d/80-crabbox-retries <<'APT'
 Acquire::Retries "8";
@@ -285,6 +289,10 @@ crabbox-ready
 	[IO.File]::WriteAllText($wslSetup, $linuxSetup, (New-Object Text.UTF8Encoding($false)))
 	wsl.exe -d $wslDistro --user root --exec bash /mnt/c/ProgramData/crabbox/wsl/linux-setup.sh
 	if ($LASTEXITCODE -ne 0) { throw "WSL setup failed with exit $LASTEXITCODE" }
+	wsl.exe --terminate $wslDistro | Out-Host
+	if ($LASTEXITCODE -ne 0) { throw "WSL restart failed with exit $LASTEXITCODE" }
+	wsl.exe -d $wslDistro --user root --exec /usr/local/bin/crabbox-ready
+	if ($LASTEXITCODE -ne 0) { throw "WSL cold-start readiness failed with exit $LASTEXITCODE" }
 	Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
 	Restart-Service sshd -Force
 	`

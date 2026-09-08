@@ -906,7 +906,7 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		if err := prepareLeaseSSHTrust(&target, leaseID); err != nil {
 			return statusView{}, err
 		}
-		ready = probeSSHReady(ctx, &target, 4*time.Second)
+		ready = probeSSHReady(ctx, &target, statusSSHReadinessTimeout(target))
 	}
 	return statusView{
 		ID:                           lease.ID,

@@ -2,8 +2,11 @@
 
 ## Unreleased
 
-- Retry an exact coordinator lease read once on HTTP 5xx during run preparation, sharing the original deadline without replaying SSH, scripts, or permanent failures. [PR 1999](https://github.com/openclaw/crabbox/pull/1999).
+- Fix managed Windows WSL2 command timeouts by disabling redundant cloud-init discovery, verifying cold-start readiness, and allowing a target-specific status probe budget for fixed-ID orchestrators. https://github.com/openclaw/crabbox/pull/1996. Thanks @steipete.
+
 - Describe Anthropic Sandbox Runtime configuration bindings once, preserving inherited binary paths for empty YAML, explicit settings/debug clearing, and native runtime defaults. [PR 1993](https://github.com/openclaw/crabbox/pull/1993). Thanks @steipete.
+- Reduce coordinator maintenance work for large lease histories by selecting bridge cleanup from live owners and existing records, and limiting pool and provisioning lookups to relevant leases. [PR 1997](https://github.com/openclaw/crabbox/pull/1997). Thanks @steipete.
+- Retry an exact coordinator lease read once on HTTP 5xx during run preparation, sharing the original deadline without replaying SSH, scripts, or permanent failures. [PR 1999](https://github.com/openclaw/crabbox/pull/1999).
 
 ## 0.53.0 - 2026-09-08
 

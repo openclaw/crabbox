@@ -34613,56 +34613,123 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
-  it("clears replaced egress session tombstones on lease release", async () => {
-    const storage = new MemoryStorage();
-    const fleet = testWebSocketCoordinator(storage);
-    const leaseID = "cbx_000000000001";
-    const headers = {
-      "x-crabbox-owner": "alice@example.com",
-      "x-crabbox-org": "example-org",
-    };
-    storage.seed(
-      `lease:${leaseID}`,
-      testLease({
-        id: leaseID,
-        slug: "released-egress",
-        provider: "external",
-        lifecycle: "registered",
-        owner: "alice@example.com",
-        org: "example-org",
-        keep: true,
-        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-      }),
-    );
-    const createTicket = (sessionID: string) =>
-      fleet.fetch(
-        request("POST", "/v1/leases/released-egress/egress/ticket", {
-          headers,
-          body: { role: "host", sessionID, allow: ["example.com"] },
+  it.each(["none", "active-egress-session", "replaced-egress-sessions", "reactivation"])(
+    "keeps egress cleanup bounded across retirement and %s storage failure",
+    async (failure) => {
+      const storage = new MemoryStorage();
+      let fleet = testWebSocketCoordinator(storage);
+      const leaseID = "cbx_000000000001";
+      const headers = {
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+      };
+      storage.seed(
+        `lease:${leaseID}`,
+        testLease({
+          id: leaseID,
+          slug: "released-egress",
+          provider: "external",
+          lifecycle: "registered",
+          owner: "alice@example.com",
+          org: "example-org",
+          keep: true,
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
         }),
       );
-    expect((await createTicket("egress_release_a")).status).toBe(200);
-    expect((await createTicket("egress_release_b")).status).toBe(200);
-    const relay = fleet as unknown as { replacedEgressSessions: Map<string, string[]> };
-    expect(relay.replacedEgressSessions.get(leaseID)).toEqual(["egress_release_a"]);
-    expect(storage.value(`replaced-egress-sessions:${leaseID}`)).toEqual(["egress_release_a"]);
-    expect(storage.value(`active-egress-session:${leaseID}`)).toMatchObject({
-      leaseID,
-      sessionID: "egress_release_b",
-    });
+      const createTicket = (sessionID: string) =>
+        fleet.fetch(
+          request("POST", "/v1/leases/released-egress/egress/ticket", {
+            headers,
+            body: { role: "host", sessionID, allow: ["example.com"] },
+          }),
+        );
+      expect((await createTicket("egress_release_a")).status).toBe(200);
+      expect((await createTicket("egress_release_b")).status).toBe(200);
+      expect(storage.value(`replaced-egress-sessions:${leaseID}`)).toEqual(["egress_release_a"]);
+      expect(storage.value(`active-egress-session:${leaseID}`)).toMatchObject({
+        leaseID,
+        sessionID: "egress_release_b",
+      });
 
-    const released = await fleet.fetch(
-      request("POST", "/v1/leases/released-egress/release", {
-        headers,
-        body: { delete: false },
-      }),
-    );
-    expect(released.status).toBe(200);
-    await expect(released.json()).resolves.toMatchObject({ lease: { state: "released" } });
-    expect(relay.replacedEgressSessions.has(leaseID)).toBe(false);
-    expect(storage.value(`active-egress-session:${leaseID}`)).toBeUndefined();
-    expect(storage.value(`replaced-egress-sessions:${leaseID}`)).toBeUndefined();
-  });
+      const deletes: string[] = [];
+      const failsDelete =
+        failure === "active-egress-session" || failure === "replaced-egress-sessions";
+      let failOnce = failsDelete;
+      storage.beforeDelete = async (key) => {
+        if (!key.endsWith(leaseID) || !key.includes("egress-session")) return;
+        deletes.push(key);
+        if (failOnce && key === `${failure}:${leaseID}`) {
+          failOnce = false;
+          throw new Error("synthetic egress delete failure");
+        }
+      };
+      const release = () =>
+        fleet.fetch(
+          request("POST", "/v1/leases/released-egress/release", {
+            headers,
+            body: { delete: false },
+          }),
+        );
+      const released = await release();
+      expect(released.status).toBe(failsDelete ? 500 : 200);
+      fleet = testWebSocketCoordinator(storage);
+      await fleet.alarm();
+      expect(storage.value(`active-egress-session:${leaseID}`)).toBeUndefined();
+      expect(storage.value(`replaced-egress-sessions:${leaseID}`)).toBeUndefined();
+      const completedDeletes = deletes.length;
+      expect(completedDeletes).toBeGreaterThanOrEqual(2);
+      await fleet.alarm();
+      await fleet.alarm();
+      expect(deletes).toHaveLength(completedDeletes);
+
+      const refreshed = await fleet.fetch(
+        request("PUT", `/v1/leases/${leaseID}/registration`, {
+          headers,
+          body: {
+            provider: "external",
+            target: "linux",
+            host: "127.0.0.1",
+            slug: "released-egress",
+          },
+        }),
+      );
+      expect(refreshed.status).toBe(200);
+      const failsActivation = failure === "reactivation";
+      if (failsActivation) {
+        storage.beforePut = async (key, value) => {
+          if (key !== `active-egress-session:${leaseID}`) return;
+          storage.seed(key, value);
+          throw new Error("synthetic lost write acknowledgement");
+        };
+      }
+      const reactivatedSessions = failsActivation
+        ? ["egress_reactivated_a"]
+        : ["egress_reactivated_a", "egress_reactivated_b"];
+      const responses: number[] = [];
+      for (const sessionID of reactivatedSessions) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- replacement follows the preceding activation.
+        responses.push((await createTicket(sessionID)).status);
+      }
+      storage.beforePut = undefined;
+      expect(responses).toEqual(failsActivation ? [500] : [200, 200]);
+      expect(storage.value(`active-egress-session:${leaseID}`)).toMatchObject({
+        sessionID: reactivatedSessions.at(-1),
+      });
+      expect(storage.value(`replaced-egress-sessions:${leaseID}`)).toEqual(
+        failsActivation ? undefined : ["egress_reactivated_a"],
+      );
+      expect((await release()).status).toBe(200);
+      expect(storage.value(`active-egress-session:${leaseID}`)).toBeUndefined();
+      expect(storage.value(`replaced-egress-sessions:${leaseID}`)).toBeUndefined();
+      expect(deletes.length).toBeGreaterThan(completedDeletes);
+      const reactivatedDeletes = deletes.length;
+      await fleet.alarm();
+      expect(deletes).toHaveLength(reactivatedDeletes);
+      fleet = testWebSocketCoordinator(storage);
+      await fleet.alarm();
+      expect(deletes).toHaveLength(reactivatedDeletes);
+    },
+  );
 
   it("keeps replaced egress session tombstones on bridge authorization revocation", async () => {
     const storage = new MemoryStorage();
