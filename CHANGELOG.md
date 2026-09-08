@@ -2,9 +2,9 @@
 
 ## Unreleased
 
-- Run managed WSL2 workloads as the non-root `crabbox` user with passwordless sudo, writable work/cache directories, and the shared Node baseline on PATH. PR link pending.
+- Run managed WSL2 workloads as the non-root `crabbox` user with passwordless sudo, writable work/cache directories, and the shared Node baseline on PATH. https://github.com/openclaw/crabbox/pull/2016. Thanks @steipete.
 
-- Keep managed WSL2 distributions alive between commands so detached Linux daemons survive until lease cleanup; preserve command and ownership deadlines. PR link pending.
+- Keep managed WSL2 distributions alive between commands so detached Linux daemons survive until lease cleanup; preserve command and ownership deadlines. https://github.com/openclaw/crabbox/pull/2016. Thanks @steipete.
 
 - Install the shared Linux Node/npm baseline during managed WSL2 bootstrap and require both tools for readiness. https://github.com/openclaw/crabbox/pull/2008. Thanks @steipete.
 - Keep WSL2 workspace-owner renewal small and allow bounded workload contention without weakening token, expiry, or child-state checks. https://github.com/openclaw/crabbox/pull/2011. Thanks @steipete.
