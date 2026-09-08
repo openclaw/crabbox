@@ -575,23 +575,22 @@ func TestRunFailureDigestCleanupOutcomes(t *testing.T) {
 			if report.ExitCode != 23 || (report.LeaseStopped != nil && *report.LeaseStopped) != test.wantStop {
 				t.Fatalf("timing outcome disagrees with cleanup: %#v", report)
 			}
-			if report.RunStatus != "failed" || (report.LeaseStopErr != "") != (test.stopErr != nil) {
+			if report.RunStatus != "failed" || report.RetryLikely != "unknown" || (report.LeaseStopErr != "") != (test.stopErr != nil) {
 				t.Errorf("run status or release error changed: %#v", report)
 			}
 			if !strings.Contains(out, "failure digest") {
 				t.Fatalf("missing failure digest:\n%s", out)
 			}
-			for _, command := range []string{"ssh", "run", "stop"} {
-				if got := strings.Contains(out, "next: crabbox "+command+" "); got == test.wantStop {
-					t.Errorf("recovery %s present=%v, stopped=%v:\n%s", command, got, test.wantStop, out)
-				}
-			}
-			if !test.wantStop {
-				for _, line := range strings.Split(out, "\n") {
-					if strings.Contains(line, "next: crabbox run ") &&
-						(!strings.Contains(line, "--no-sync") || strings.Contains(line, "--fresh-sync")) {
-						t.Errorf("retained retry lost no-sync intent: %s", line)
-					}
+			for _, command := range []struct {
+				name string
+				want bool
+			}{
+				{name: "ssh", want: !test.wantStop},
+				{name: "run"},
+				{name: "stop", want: !test.wantStop},
+			} {
+				if got := strings.Contains(out, "next: crabbox "+command.name+" "); got != command.want {
+					t.Errorf("recovery %s present=%v want=%v, stopped=%v:\n%s", command.name, got, command.want, test.wantStop, out)
 				}
 			}
 			if (test.wantStop || test.stopErr != nil || test.retained) != (releaseCalls == 1) {

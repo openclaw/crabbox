@@ -664,6 +664,16 @@ Unix-like hosts, Crabbox-created download, capture, proof,
 and failure-bundle files use owner-only permissions (`0600`), and newly created
 output directories use `0700`.
 
+SSH downloads stream into a private temporary file and publish atomically only
+after the remote command and advertised byte count pass. Ordinary downloads
+intentionally enforce a 1 GiB per-file limit and retain at least 1 GiB of local
+free space as an upgrade safety boundary. A failed, canceled, oversized, or
+size-mismatched transfer leaves an existing destination unchanged. Automatic
+remote failure-capture payloads use a tighter 64 MiB limit; their scratch
+manifests and file lists live outside the tested checkout and are removed on
+every exit. Failed or canceled capture preparation also removes its partial
+remote archive with bounded cleanup that does not inherit caller cancellation.
+
 Use repeatable `--download-on-failure remote=local` to retrieve explicitly
 selected evidence after a nonzero workload exit on ordinary Linux SSH runs.
 Crabbox requires a fresh owned workload-start/exit marker pair and successful
@@ -765,9 +775,11 @@ its status before reuse, or retry the printed stop command to finish cleanup.
 The digest includes the failed phase when phase markers are known, a
 likely area (provider auth, SSH/connectivity, sync, install/setup, user command,
 model/tool/provider limit, or resource exhaustion), retryability when inferable, next commands
-(`logs`, `events`, `doctor --from-run`, `ssh`, retrying, and `stop`). A retry
-preserves an explicitly requested `--no-sync`, so it does not reset the retained
-workspace. Other retries retain the `--fresh-sync` guidance above. Each original
+(`logs`, `events`, `doctor --from-run`, `ssh`, retrying, and `stop`). Unknown
+failures stop at the run-scoped diagnostic commands instead of advertising a
+full rerun. A retry is printed only when the failure is classified as retryable
+and preserves an explicitly requested `--no-sync`, so it does not reset the
+retained workspace. Other retries retain the `--fresh-sync` guidance above. Each original
 `--require-artifact` glob is retained in the retry, so missing required evidence
 still fails the rerun. After failure-bundle information and command hints, each
 stream has one

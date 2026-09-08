@@ -858,20 +858,27 @@ func captureFailureArtifacts(ctx context.Context, target SSHTarget, workdir, lea
 	}
 	name := safeCaptureName(firstNonBlank(runID, leaseID, "run")) + "-" + time.Now().UTC().Format("20060102T150405Z") + ".tar.gz"
 	remotePath := ".crabbox/" + name
-	if out, err := runSSHCombinedOutput(ctx, target, remoteFailureCaptureCommand(workdir, remotePath, meta.RemoteScriptPath)); err != nil {
+	out, prepareErr := runSSHCombinedOutput(ctx, target, remoteFailureCaptureCommand(workdir, remotePath, meta.RemoteScriptPath))
+	if prepareErr != nil {
+		if remoteFailureCaptureOwned(out, remotePath) {
+			cleanupOut, cleanupErr := cleanupRemoteFailureCapture(ctx, target, workdir, remotePath, runSSHCombinedOutput)
+			if cleanupErr != nil {
+				out = strings.TrimSpace(out) + "; remote cleanup: " + cleanupErr.Error() + ": " + strings.TrimSpace(cleanupOut)
+			}
+		}
 		local, bytes, bundleErr := writeLocalFailureBundle(name, "", meta)
 		if bundleErr != nil {
-			return local, bytes, exit(7, "capture-on-fail prepare: %v: %s; local bundle: %v", err, strings.TrimSpace(out), bundleErr)
+			return local, bytes, exit(7, "capture-on-fail prepare: %v: %s; local bundle: %v", prepareErr, strings.TrimSpace(out), bundleErr)
 		}
-		return local, bytes, exit(7, "capture-on-fail prepare: %v: %s", err, strings.TrimSpace(out))
+		return local, bytes, exit(7, "capture-on-fail prepare: %v: %s", prepareErr, strings.TrimSpace(out))
 	}
 	defer func() {
-		if out, cleanupErr := runSSHCombinedOutput(ctx, target, remoteRemoveFailureCaptureCommand(workdir, remotePath)); cleanupErr != nil && err == nil {
+		if out, cleanupErr := cleanupRemoteFailureCapture(ctx, target, workdir, remotePath, runSSHCombinedOutput); cleanupErr != nil && err == nil {
 			err = exit(7, "capture-on-fail remote cleanup: %v: %s", cleanupErr, strings.TrimSpace(out))
 		}
 	}()
 	remoteLocalPath := filepath.Join(os.TempDir(), safeCaptureName(firstNonBlank(runID, leaseID, "run"))+"-remote-"+name)
-	_, remoteLocal, downloadErr := downloadRemoteFile(ctx, target, workdir, remotePath+"="+remoteLocalPath)
+	_, remoteLocal, downloadErr := downloadRemoteFileWithLimits(ctx, target, workdir, remotePath+"="+remoteLocalPath, failureCaptureDownloadLimits)
 	if downloadErr != nil {
 		local, bytes, bundleErr := writeLocalFailureBundle(name, "", meta)
 		if bundleErr != nil {
@@ -1237,16 +1244,32 @@ func remoteFailureCaptureCommand(workdir, remotePath, scriptPath string) string 
 	script.WriteString("mkdir -p .crabbox\n")
 	script.WriteString("out=" + shellQuote(remotePath) + "\n")
 	script.WriteString("script=" + shellQuote(scriptPath) + "\n")
-	script.WriteString(`manifest=.crabbox/capture-manifest.txt
-files=.crabbox/capture-files.txt
+	script.WriteString(`if [ -e "$out" ] || [ -L "$out" ]; then
+  printf 'failure capture destination already exists: %s\n' "$out" >&2
+  exit 7
+fi
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/crabbox-failure-capture.XXXXXX")
+cleanup_capture_scratch() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$status" -ne 0 ]; then rm -f -- "$out" || true; fi
+  rm -rf -- "$scratch" || true
+}
+trap cleanup_capture_scratch EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+printf '` + remoteFailureCaptureOwnedPrefix + `%s\n' "$out"
+mkdir -p "$scratch/.crabbox"
+manifest="$scratch/.crabbox/capture-manifest.txt"
+files="$scratch/capture-files.txt"
 {
   printf 'captured_at=%s\n' "$(date -Is 2>/dev/null || date)"
   printf 'host=%s\n' "$(hostname 2>/dev/null || printf unknown)"
   printf 'pwd=%s\n' "$(pwd -P 2>/dev/null || pwd)"
   printf 'note=%s\n' 'local-only failure capture; caller owns redaction before sharing'
 } > "$manifest"
-gateway_tail=.crabbox/gateway-log-tail.txt
-rm -f "$gateway_tail"
+gateway_tail="$scratch/.crabbox/gateway-log-tail.txt"
 for path in /tmp/crabbox-gateway.log /tmp/gateway.log gateway.log logs/gateway.log .crabbox/gateway.log; do
   if [ -f "$path" ]; then
     tail -n 400 "$path" > "$gateway_tail" 2>/dev/null || true
@@ -1257,7 +1280,7 @@ done
 if [ -n "$script" ] && [ -f "$script" ] && [ ! -L "$script" ]; then
   printf '%s\n' "$script" >> "$files"
 fi
-for path in test-results playwright-report coverage junit.xml results.xml .crabbox/capture-manifest.txt .crabbox/gateway-log-tail.txt; do
+for path in test-results playwright-report coverage junit.xml results.xml; do
   if [ -e "$path" ]; then printf '%s\n' "$path" >> "$files"; fi
 done
 find . -maxdepth 3 -path './.crabbox/scripts' -prune -o \
@@ -1267,7 +1290,19 @@ find . -maxdepth 3 -path './.crabbox/scripts' -prune -o \
   ! -path './coverage/*' \
   -print 2>/dev/null | sed 's#^\./##' >> "$files" || true
 sort -u "$files" > "$files.sorted"
-tar -czf "$out" -T "$files.sorted" 2>/dev/null || tar -czf "$out" "$manifest"
+archive_list="$scratch/archive-files.txt"
+checkout=$(pwd -P 2>/dev/null || pwd)
+{
+  printf '%s\n' -C "$checkout"
+while IFS= read -r path; do
+  case "$path" in -*) path="./$path";; esac
+    printf '%s\n' "$path"
+done < "$files.sorted"
+  printf '%s\n' -C "$scratch" .crabbox/capture-manifest.txt
+  if [ -f "$gateway_tail" ]; then printf '%s\n' .crabbox/gateway-log-tail.txt; fi
+} > "$archive_list"
+COPYFILE_DISABLE=1 tar -czf "$out" -T "$archive_list" 2>/dev/null ||
+  COPYFILE_DISABLE=1 tar -czf "$out" -C "$scratch" .crabbox/capture-manifest.txt
 printf '%s\n' "$out"
 `)
 	return "bash -lc " + shellQuote(script.String())
@@ -1276,6 +1311,29 @@ printf '%s\n' "$out"
 func remoteRemoveFailureCaptureCommand(workdir, remotePath string) string {
 	script := "set -eu\ncd " + shellQuote(workdir) + "\nrm -f -- " + shellQuote(remotePath)
 	return "bash -lc " + shellQuote(script)
+}
+
+const (
+	remoteFailureCaptureOwnedPrefix = "CRABBOX_FAILURE_CAPTURE_OWNED="
+	remoteFailureCaptureCleanupTime = 10 * time.Second
+)
+
+type remoteFailureCaptureRunner func(context.Context, SSHTarget, string) (string, error)
+
+func remoteFailureCaptureOwned(output, remotePath string) bool {
+	want := remoteFailureCaptureOwnedPrefix + remotePath
+	for _, line := range strings.Split(output, "\n") {
+		if strings.TrimSpace(line) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func cleanupRemoteFailureCapture(ctx context.Context, target SSHTarget, workdir, remotePath string, run remoteFailureCaptureRunner) (string, error) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), remoteFailureCaptureCleanupTime)
+	defer cancel()
+	return run(cleanupCtx, target, remoteRemoveFailureCaptureCommand(workdir, remotePath))
 }
 
 func printFailureTail(w io.Writer, label string, tail *streamTailBuffer, capturedPath string) {

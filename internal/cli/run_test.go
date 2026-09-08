@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -7160,6 +7161,213 @@ func TestRemoteFailureCaptureCommandAvoidsDuplicateDirectoryChildren(t *testing.
 	}
 	if counts["test-results/failure.log"] != 1 {
 		t.Fatalf("test-results/failure.log count=%d entries=%#v", counts["test-results/failure.log"], counts)
+	}
+}
+
+func TestRemoteFailureCaptureLeavesCheckoutStatusUnchanged(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for POSIX capture command test")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for checkout cleanliness test")
+	}
+	workdir := t.TempDir()
+	tempRoot := t.TempDir()
+	t.Setenv("TMPDIR", tempRoot)
+	if out, err := exec.Command("git", "-C", workdir, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	for name, data := range map[string]string{
+		".crabbox/capture-manifest.txt":     "user manifest",
+		".crabbox/capture-files.txt.sorted": "user sorted list",
+		".crabbox/gateway-log-tail.txt":     "user gateway tail",
+		"test-results/failure.log":          "failure",
+		"user-target.txt":                   "user target",
+	} {
+		path := filepath.Join(workdir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(workdir, ".crabbox", "capture-files.txt")
+	if err := os.Symlink("../user-target.txt", link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	status := func() string {
+		t.Helper()
+		cmd := exec.Command("git", "-C", workdir, "status", "--porcelain=v1", "--untracked-files=all")
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(out)
+	}
+	before := status()
+	command := remoteFailureCaptureCommand(workdir, ".crabbox/run-capture.tar.gz", "")
+	if out, err := exec.Command("bash", "-lc", command).CombinedOutput(); err != nil {
+		t.Fatalf("capture command failed: %v\n%s", err, out)
+	}
+	archive := filepath.Join(workdir, ".crabbox", "run-capture.tar.gz")
+	contents := readTarGzContents(t, archive)
+	if manifest := contents[".crabbox/capture-manifest.txt"]; !bytes.Contains(manifest, []byte("captured_at=")) || bytes.Contains(manifest, []byte("user manifest")) {
+		t.Fatalf("capture metadata=%q", manifest)
+	}
+	cleanup := remoteRemoveFailureCaptureCommand(workdir, ".crabbox/run-capture.tar.gz")
+	if out, err := exec.Command("bash", "-lc", cleanup).CombinedOutput(); err != nil {
+		t.Fatalf("capture cleanup failed: %v\n%s", err, out)
+	}
+	if after := status(); after != before {
+		t.Fatalf("failure capture changed checkout status:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	for name, want := range map[string]string{
+		".crabbox/capture-manifest.txt":     "user manifest",
+		".crabbox/capture-files.txt.sorted": "user sorted list",
+		".crabbox/gateway-log-tail.txt":     "user gateway tail",
+		"user-target.txt":                   "user target",
+	} {
+		data, err := os.ReadFile(filepath.Join(workdir, filepath.FromSlash(name)))
+		if err != nil || string(data) != want {
+			t.Fatalf("user path %s=%q err=%v", name, data, err)
+		}
+	}
+	if target, err := os.Readlink(link); err != nil || target != "../user-target.txt" {
+		t.Fatalf("user symlink target=%q err=%v", target, err)
+	}
+	if entries, err := os.ReadDir(tempRoot); err != nil || len(entries) != 0 {
+		t.Fatalf("failure capture scratch retained: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestRemoteFailureCaptureRemovesPartialArchiveOnFailure(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for POSIX capture command test")
+	}
+	workdir := t.TempDir()
+	tempRoot := t.TempDir()
+	binDir := t.TempDir()
+	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	fakeTar := filepath.Join(binDir, "tar")
+	if err := os.WriteFile(fakeTar, []byte(`#!/bin/sh
+previous=
+for argument do
+  if [ "$previous" = "-czf" ]; then
+    printf partial > "$argument"
+    exit 42
+  fi
+  previous=$argument
+done
+exit 42
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := remoteFailureCaptureCommand(workdir, ".crabbox/capture.tar.gz", "")
+	command = strings.Replace(command, "bash -lc ", "bash --noprofile --norc -c ", 1)
+	out, err := exec.Command("bash", "-c", command).CombinedOutput()
+	if err == nil {
+		t.Fatalf("capture unexpectedly succeeded:\n%s", out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 42 {
+		t.Fatalf("capture exit=%v want=42:\n%s", err, out)
+	}
+	archive := filepath.Join(workdir, ".crabbox", "capture.tar.gz")
+	if _, err := os.Lstat(archive); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial capture remains at %s: %v", archive, err)
+	}
+	if entries, err := os.ReadDir(tempRoot); err != nil || len(entries) != 0 {
+		t.Fatalf("failure capture scratch retained: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestRemoteFailureCaptureKeepsLargeFileListOffArgv(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for POSIX capture command test")
+	}
+	realTar, err := exec.LookPath("tar")
+	if err != nil {
+		t.Skip("tar is required for POSIX capture command test")
+	}
+	workdir := t.TempDir()
+	tempRoot := t.TempDir()
+	binDir := t.TempDir()
+	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	const argumentBudget = 256
+	var fileListBytes int
+	var want []string
+	for i := range 40 {
+		name := fmt.Sprintf("evidence-%02d-%s.log", i, strings.Repeat("x", 64))
+		if err := os.WriteFile(filepath.Join(workdir, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fileListBytes += len(name) + 1
+		want = append(want, name)
+	}
+	if fileListBytes <= argumentBudget {
+		t.Fatalf("file-list fixture bytes=%d want>%d", fileListBytes, argumentBudget)
+	}
+	fakeTar := filepath.Join(binDir, "tar")
+	wrapper := `#!/bin/sh
+budget=` + strconv.Itoa(argumentBudget) + `
+bytes=0
+list=no
+previous=
+for argument do
+  bytes=$((bytes + ${#argument} + 1))
+  if [ "$previous" = "-T" ]; then list=yes; fi
+  previous=$argument
+done
+[ "$bytes" -le "$budget" ] || exit 91
+[ "$list" = yes ] || exit 92
+exec ` + shellQuote(realTar) + ` "$@"
+`
+	if err := os.WriteFile(fakeTar, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := remoteFailureCaptureCommand(workdir, ".crabbox/capture.tar.gz", "")
+	command = strings.Replace(command, "bash -lc ", "bash --noprofile --norc -c ", 1)
+	if out, err := exec.Command("bash", "-c", command).CombinedOutput(); err != nil {
+		t.Fatalf("capture command failed: %v\n%s", err, out)
+	}
+	contents := readTarGzContents(t, filepath.Join(workdir, ".crabbox", "capture.tar.gz"))
+	for _, name := range append(want, ".crabbox/capture-manifest.txt") {
+		if _, ok := contents[name]; !ok {
+			t.Fatalf("capture missing %q", name)
+		}
+	}
+	if entries, err := os.ReadDir(tempRoot); err != nil || len(entries) != 0 {
+		t.Fatalf("failure capture scratch retained: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestCleanupRemoteFailureCaptureUsesBoundedUncancelledContext(t *testing.T) {
+	parent, cancel := context.WithCancel(t.Context())
+	cancel()
+	called := false
+	_, err := cleanupRemoteFailureCapture(parent, SSHTarget{}, "/work", ".crabbox/capture.tar.gz", func(ctx context.Context, _ SSHTarget, command string) (string, error) {
+		called = true
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("cleanup inherited cancellation: %v", err)
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("cleanup context is not bounded")
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 || remaining > remoteFailureCaptureCleanupTime {
+			t.Fatalf("cleanup deadline remaining=%s", remaining)
+		}
+		if !strings.Contains(command, "capture.tar.gz") {
+			t.Fatalf("cleanup command=%q", command)
+		}
+		return "", nil
+	})
+	if err != nil || !called {
+		t.Fatalf("cleanup called=%t err=%v", called, err)
 	}
 }
 

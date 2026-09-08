@@ -491,11 +491,13 @@ func TestPrintRunFailureDigest(t *testing.T) {
 		"area: user_command",
 		"next: crabbox logs run_123 --tail 80",
 		"next: crabbox doctor --from-run run_123",
-		"next: crabbox run --id blue-lobster --fresh-sync -- go test ./...",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("digest missing %q:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "next: crabbox run ") {
+		t.Fatalf("unknown failure advertised a blind rerun:\n%s", out)
 	}
 }
 
@@ -513,7 +515,6 @@ func TestPrintRunFailureDigestExplainsUnavailableRunHistory(t *testing.T) {
 	for _, want := range []string{
 		"run_history: unavailable",
 		"next: crabbox ssh --id blue-lobster",
-		"next: crabbox run --id blue-lobster --fresh-sync -- go test ./...",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("digest missing %q:\n%s", want, out)
@@ -523,6 +524,7 @@ func TestPrintRunFailureDigestExplainsUnavailableRunHistory(t *testing.T) {
 		"crabbox logs run_",
 		"crabbox events run_",
 		"crabbox doctor --from-run run_",
+		"next: crabbox run ",
 	} {
 		if strings.Contains(out, unexpected) {
 			t.Fatalf("digest should not include run-based command %q:\n%s", unexpected, out)
@@ -553,15 +555,15 @@ func TestFailureDigestNextCommandsRespectRunHistoryAvailability(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			commands := failureDigestNextCommands(runFailureDigestInput{
+			commands := classifiedFailureDigestNextCommands(runFailureDigestInput{
 				Provider:              "local-container",
 				LeaseID:               "cbx_123",
 				Slug:                  "retained-direct",
 				RunID:                 tt.runID,
 				RunHistoryUnavailable: tt.historyUnavailable,
 				CommandDisplay:        "go test ./...",
-				Classification:        FailureClassification{RetryLikely: "unknown"},
-			}, "unknown")
+				Classification:        FailureClassification{RetryLikely: "true"},
+			}, "true")
 			joined := strings.Join(commands, "\n")
 			for _, command := range historyCommands {
 				if got := strings.Contains(joined, command); got != tt.wantHistory {
@@ -572,6 +574,32 @@ func TestFailureDigestNextCommandsRespectRunHistoryAvailability(t *testing.T) {
 				if !strings.Contains(joined, command) {
 					t.Fatalf("lease recovery command missing %q:\n%s", command, joined)
 				}
+			}
+		})
+	}
+}
+
+func TestFailureDigestRetryAdviceByClassification(t *testing.T) {
+	for _, test := range []struct {
+		retry   string
+		wantRun bool
+	}{
+		{retry: "true", wantRun: true},
+		{retry: "false"},
+		{retry: "unknown"},
+	} {
+		t.Run(test.retry, func(t *testing.T) {
+			commands := classifiedFailureDigestNextCommands(runFailureDigestInput{
+				LeaseID:        "cbx_123",
+				RunID:          "run_123",
+				CommandDisplay: "go test ./...",
+			}, test.retry)
+			joined := strings.Join(commands, "\n")
+			if got := strings.Contains(joined, "crabbox run "); got != test.wantRun {
+				t.Fatalf("retry=%s run advice=%t want=%t:\n%s", test.retry, got, test.wantRun, joined)
+			}
+			if !strings.Contains(joined, "crabbox doctor --from-run run_123") {
+				t.Fatalf("retry=%s lost run-scoped diagnosis:\n%s", test.retry, joined)
 			}
 		})
 	}
@@ -629,7 +657,7 @@ func TestPrintRunFailureDigestExplainsAndChainShortCircuit(t *testing.T) {
 		LeaseID:        "cbx_123",
 		CommandDisplay: "pnpm check && pnpm test",
 		ShellMode:      true,
-		Classification: FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"},
+		Classification: FailureClassification{BlockedStage: "unknown", RetryLikely: "true"},
 	})
 	out := buf.String()
 	for _, want := range []string{
@@ -724,8 +752,8 @@ func TestFailureDigestSuppressesScriptRetryCommand(t *testing.T) {
 		LeaseID:        "cbx_123",
 		CommandDisplay: "'--script=./smoke test.sh' arg",
 		ScriptMode:     true,
-		Classification: FailureClassification{RetryLikely: "unknown"},
-	}, "unknown")
+		Classification: FailureClassification{RetryLikely: "true"},
+	}, "true")
 	for _, command := range commands {
 		if strings.Contains(command, "crabbox run") {
 			t.Fatalf("script retry command should be suppressed: %v", commands)
@@ -768,7 +796,7 @@ func TestFailureDigestPreservesRecoveryIntent(t *testing.T) {
 			}
 			routing := CommandRouting{Args: []string{"--provider", "local-container", "--local-container-runtime", "docker"}}
 			input := runFailureDigestInput{LeaseID: "cbx_fixture", CommandDisplay: display, ShellMode: tc.shell, ScriptMode: tc.script, LeaseStopped: tc.stopped, NoSync: tc.noSync, RequiredArtifactGlobs: tc.globs, Routing: routing}
-			retry := "unknown"
+			retry := "true"
 			if tc.noRetry {
 				retry = "false"
 			}
@@ -830,9 +858,9 @@ func TestFailureDigestRoutesNextCommands(t *testing.T) {
 		WindowsMode:    windowsModeWSL2,
 		LeaseID:        "cbx_123",
 		CommandDisplay: "go test ./...",
-		Classification: FailureClassification{RetryLikely: "unknown"},
+		Classification: FailureClassification{RetryLikely: "true"},
 		StopCommand:    "crabbox stop --provider aws --target windows --windows-mode wsl2 cbx_123",
-	}, "unknown")
+	}, "true")
 	joined := strings.Join(commands, "\n")
 	for _, want := range []string{
 		"crabbox ssh --provider aws --target windows --windows-mode wsl2 --id cbx_123",
@@ -854,9 +882,9 @@ func TestFailureDigestRoutesProviderArgsToSSH(t *testing.T) {
 		Routing:        CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
 		SSHRouting:     CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
 		StopRouting:    CommandRoutingFor(cfg, "cbx_123", CommandRoutingStop),
-		Classification: FailureClassification{RetryLikely: "unknown"},
+		Classification: FailureClassification{RetryLikely: "true"},
 		StopCommand:    "crabbox stop --provider proxmox --proxmox-api-url https://pve.example cbx_123",
-	}, "unknown")
+	}, "true")
 	if len(commands) < 3 {
 		t.Fatalf("commands=%v", commands)
 	}
@@ -887,8 +915,8 @@ func TestFailureDigestPreservesInheritedKubeconfigForKubeVirt(t *testing.T) {
 		Routing:        CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
 		SSHRouting:     CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
 		StopRouting:    CommandRoutingFor(cfg, "cbx_123", CommandRoutingStop),
-		Classification: FailureClassification{RetryLikely: "unknown"},
-	}, "unknown")
+		Classification: FailureClassification{RetryLikely: "true"},
+	}, "true")
 	joined := strings.Join(commands, "\n")
 	for _, want := range []string{
 		"KUBECONFIG='/tmp/base.yaml:/tmp/cluster.yaml' crabbox ssh --provider kubevirt",
@@ -929,8 +957,8 @@ func TestFailureDigestPreservesSealosRouting(t *testing.T) {
 		Routing:        CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
 		SSHRouting:     CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
 		StopRouting:    CommandRoutingFor(cfg, "cbx_123", CommandRoutingStop),
-		Classification: FailureClassification{RetryLikely: "unknown"},
-	}, "unknown")
+		Classification: FailureClassification{RetryLikely: "true"},
+	}, "true")
 	joined := strings.Join(commands, "\n")
 	for _, want := range []string{
 		"KUBECONFIG='/tmp/base.yaml:/tmp/cluster.yaml' crabbox ssh --provider sealos-devbox",
