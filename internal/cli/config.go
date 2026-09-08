@@ -759,13 +759,6 @@ type RailwayConfig struct {
 	EnvironmentID string
 }
 
-type FastAPICloudConfig struct {
-	Token  string
-	APIURL string
-	AppID  string
-	TeamID string
-}
-
 type UnikraftCloudConfig struct {
 	APIKey   string
 	APIURL   string
@@ -2880,9 +2873,7 @@ func baseConfig() Config {
 		Railway: RailwayConfig{
 			APIURL: "https://backboard.railway.com/graphql/v2",
 		},
-		FastAPICloud: FastAPICloudConfig{
-			APIURL: "https://api.fastapicloud.com/api/v1",
-		},
+		FastAPICloud: defaultFastAPICloudConfig(),
 		UnikraftCloud: UnikraftCloudConfig{
 			Metro: "fra",
 		},
@@ -3864,12 +3855,6 @@ type fileRailwayConfig struct {
 	APIURL        string `yaml:"apiUrl,omitempty"`
 	ProjectID     string `yaml:"projectId,omitempty"`
 	EnvironmentID string `yaml:"environmentId,omitempty"`
-}
-
-type fileFastAPICloudConfig struct {
-	APIURL string `yaml:"apiUrl,omitempty"`
-	AppID  string `yaml:"appId,omitempty"`
-	TeamID string `yaml:"teamId,omitempty"`
 }
 
 type fileUnikraftCloudConfig struct {
@@ -6295,16 +6280,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Railway.EnvironmentID = file.Railway.EnvironmentID
 		}
 	}
-	if file.FastAPICloud != nil {
-		if file.FastAPICloud.APIURL != "" {
-			cfg.FastAPICloud.APIURL = file.FastAPICloud.APIURL
+	{
+		applied, err := cfg.FastAPICloud.applyFile(file.FastAPICloud)
+		if applied.APIURL {
 			cfg.credentialProvenance.fastAPICloudAPIURL = credentialSource
 		}
-		if file.FastAPICloud.AppID != "" {
-			cfg.FastAPICloud.AppID = file.FastAPICloud.AppID
-		}
-		if file.FastAPICloud.TeamID != "" {
-			cfg.FastAPICloud.TeamID = file.FastAPICloud.TeamID
+		if err != nil {
+			return err
 		}
 	}
 	if file.UnikraftCloud != nil {
@@ -8417,16 +8399,18 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.Railway.ProjectID = getenv("CRABBOX_RAILWAY_PROJECT_ID", getenv("RAILWAY_PROJECT_ID", cfg.Railway.ProjectID))
 	cfg.Railway.EnvironmentID = getenv("CRABBOX_RAILWAY_ENVIRONMENT_ID", getenv("RAILWAY_ENVIRONMENT_ID", cfg.Railway.EnvironmentID))
-	if value, ok := firstNonEmptyEnv("CRABBOX_FASTAPI_CLOUD_TOKEN", "FASTAPI_CLOUD_TOKEN"); ok {
-		cfg.FastAPICloud.Token = value
-		cfg.credentialProvenance.fastAPICloudToken = credentialSourceEnvironment
+	{
+		applied, err := cfg.FastAPICloud.applyEnv()
+		if applied.Token {
+			cfg.credentialProvenance.fastAPICloudToken = credentialSourceEnvironment
+		}
+		if applied.APIURL {
+			cfg.credentialProvenance.fastAPICloudAPIURL = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FASTAPI_CLOUD_API_URL", "FASTAPI_CLOUD_API_URL"); ok {
-		cfg.FastAPICloud.APIURL = value
-		cfg.credentialProvenance.fastAPICloudAPIURL = credentialSourceEnvironment
-	}
-	cfg.FastAPICloud.AppID = getenv("CRABBOX_FASTAPI_CLOUD_APP_ID", getenv("FASTAPI_CLOUD_APP_ID", cfg.FastAPICloud.AppID))
-	cfg.FastAPICloud.TeamID = getenv("CRABBOX_FASTAPI_CLOUD_TEAM_ID", getenv("FASTAPI_CLOUD_TEAM_ID", cfg.FastAPICloud.TeamID))
 	if value, ok := firstNonEmptyEnv("CRABBOX_UNIKRAFT_CLOUD_API_KEY", "UNIKRAFT_CLOUD_API_KEY", "UKC_API_KEY", "UKC_TOKEN"); ok {
 		cfg.UnikraftCloud.APIKey = value
 		cfg.credentialProvenance.unikraftCloudAPIKey = credentialSourceEnvironment

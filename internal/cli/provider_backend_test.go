@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -43,6 +44,50 @@ func parseAndApplyProviderFlagsForTest(t *testing.T, defaults Config, args []str
 		t.Fatal(err)
 	}
 	return cfg
+}
+
+type fastAPIFlagPhaseTestProvider struct {
+	Provider
+	applyErr       error
+	observedSource *credentialValueSource
+}
+
+func (p fastAPIFlagPhaseTestProvider) ApplyFlags(cfg *Config, _ *flag.FlagSet, _ any) error {
+	*p.observedSource = cfg.credentialProvenance.fastAPICloudAPIURL
+	return p.applyErr
+}
+
+func TestFastAPICloudFlagSourceCentralPhase(t *testing.T) {
+	original := providerRegistry["aws"]
+	t.Cleanup(func() { providerRegistry["aws"] = original })
+	for _, fail := range []bool{false, true} {
+		cfg := baseConfig()
+		cfg.Provider = "aws"
+		cfg.FastAPICloud.APIURL = "https://example.invalid/prior"
+		cfg.credentialProvenance.fastAPICloudAPIURL = credentialSourceTrustedFile
+		seen := credentialSourceUnknown
+		var applyErr error
+		if fail {
+			applyErr = exit(2, "synthetic invalid configuration")
+		}
+		providerRegistry["aws"] = fastAPIFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observedSource: &seen}
+		fs := newFlagSet("test", io.Discard)
+		fs.String("fastapi-cloud-url", "", "")
+		if err := fs.Parse([]string{"--fastapi-cloud-url=https://example.invalid/flag"}); err != nil {
+			t.Fatal(err)
+		}
+		err := applyProviderFlags(&cfg, fs, providerFlagValues{})
+		if (err != nil) != fail {
+			t.Fatalf("central apply error=%v", err)
+		}
+		want := credentialSourceFlag
+		if fail {
+			want = credentialSourceTrustedFile
+		}
+		if seen != credentialSourceTrustedFile || cfg.credentialProvenance.fastAPICloudAPIURL != want || cfg.FastAPICloud.APIURL != "https://example.invalid/prior" {
+			t.Fatal("central marker timing or unselected-field behavior changed")
+		}
+	}
 }
 
 func TestLoadBackendRequiresActionableProviderSelection(t *testing.T) {

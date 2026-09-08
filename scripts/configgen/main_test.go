@@ -400,6 +400,12 @@ func TestCloudRunSandboxGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestFastAPICloudGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_fastapi_cloud.go", "../../internal/cli/config_fastapi_cloud_generated.go", "FastAPICloudConfig", "fastapi-cloud", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -494,5 +500,168 @@ func splitCommaList(string) []string { panic("stub") }
 	}
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("compile generated config: %v\n%s", err, output)
+	}
+}
+
+const appliedSample = "package cli\ntype PilotConfig struct {\n" +
+	" Input string `sources:\"env\" env:\"PILOT_INPUT\" envAlias:\"PILOT_INPUT_ALIAS\" reportApplied:\"true\"`\n" +
+	" Name string `sources:\"user,env,flag\" config:\"name\" env:\"PILOT_NAME\" flag:\"pilot-name\" help:\"Name\" fileIgnoreEmpty:\"true\" reportApplied:\"true\" default:\"same\"`\n" +
+	" Enabled bool `sources:\"user,repo,env,flag\" config:\"enabled\" env:\"PILOT_ENABLED\" flag:\"pilot-enabled\" help:\"Enabled\" reportApplied:\"true\"`\n" +
+	" Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"PILOT_COUNT\" flag:\"pilot-count\" help:\"Count\" nonnegative:\"true\"`\n" +
+	" Tail string `sources:\"user,repo,env,flag\" config:\"tail\" env:\"PILOT_TAIL\" flag:\"pilot-tail\" help:\"Tail\" reportApplied:\"true\"`\n}"
+
+func TestSchemaEnvironmentOnlyAndReportingFailsClosed(t *testing.T) {
+	for _, tag := range []string{"config", "flag", "help", "default"} {
+		for _, value := range []string{"", "binding"} {
+			t.Run(tag+"/"+value, func(t *testing.T) {
+				source := strings.Replace(appliedSample, `sources:"env"`, `sources:"env" `+tag+`:"`+value+`"`, 1)
+				_, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+				if err == nil || !strings.Contains(err.Error(), "absent "+tag+" tag") {
+					t.Fatalf("contradictory env-only tag: %v", err)
+				}
+			})
+		}
+	}
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"missing env", `env:"PILOT_INPUT"`, "", "invalid env binding"},
+		{"empty alias", `envAlias:"PILOT_INPUT_ALIAS"`, `envAlias:""`, "invalid env binding"},
+		{"alias collision", `envAlias:"PILOT_INPUT_ALIAS"`, `envAlias:"PILOT_NAME"`, "duplicate env binding"},
+		{"env bool", "Input string", "Input bool", "env sources support only string"},
+		{"report false", `reportApplied:"true"`, `reportApplied:"false"`, "reportApplied is supported only as true"},
+		{"report empty", `reportApplied:"true"`, `reportApplied:""`, "reportApplied is supported only as true"},
+		{"report int", `help:"Count"`, `help:"Count" reportApplied:"true"`, "reportApplied is supported only as true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(appliedSample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+	for _, kind := range []string{"float64", "[]string"} {
+		source := strings.Replace(appliedSample, "Enabled bool", "Enabled "+kind, 1)
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "reportApplied is supported only as true") {
+			t.Fatalf("unsupported reporting kind %s: %v", kind, err)
+		}
+	}
+}
+
+func TestGenerateAppliedAndVisitedBindings(t *testing.T) {
+	s, err := parseSchema([]byte(appliedSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic reporting output: %v", err)
+	}
+	text := string(output)
+	for _, name := range []string{"filePilotConfig", "PilotConfigFlagValues", "PilotConfigVisitedFlags"} {
+		body := strings.SplitN(strings.SplitN(text, "type "+name+" struct {", 2)[1], "}", 2)[0]
+		if strings.Contains(body, "Input") {
+			t.Fatalf("env-only field exposed in %s", name)
+		}
+	}
+	if !strings.Contains(text, `firstNonEmptyEnv("PILOT_INPUT", "PILOT_INPUT_ALIAS")`) || !strings.Contains(text, "visited := PilotConfigFlagPresence(fs)") {
+		t.Fatal("missing shared input/flag presence queries")
+	}
+	if strings.Count(text, `flagWasSet(fs, "pilot-name")`) != 1 || strings.Count(text, `getenvBool("PILOT_ENABLED")`) != 1 {
+		t.Fatal("tracked acceptance predicate duplicated")
+	}
+	// Keep the existing compile-only helper intact; this fixture supplies its new helper signature.
+	typecheckGenerated(t, appliedSample+"\nfunc firstNonEmptyEnv(...string) (string, bool) { panic(\"stub\") }\n", output)
+	runAppliedFixture(t, output)
+}
+
+func runAppliedFixture(t *testing.T, generated []byte) {
+	t.Helper()
+	// Benign in-memory inputs control helper acceptance; no provider or host environment is read.
+	const behavior = `package cli
+import ("flag"; "fmt"; "testing")
+var input map[string]string
+var selections map[string]int
+var boolValue, boolAccepted bool
+var boolCalls int
+var intError bool
+func firstNonEmptyEnv(names ...string) (string, bool) {
+ selections[names[0]]++
+ for _, name := range names { if value := input[name]; value != "" { return value, true } }
+ return "", false
+}
+func getenvBool(string) (bool, bool) { boolCalls++; return boolValue, boolAccepted }
+func getenvNonNegativeInt(_ string, prior int) (int, error) { if intError { return 0, fmt.Errorf("bad integer") }; return prior, nil }
+func flagWasSet(fs *flag.FlagSet, name string) bool { found := false; fs.Visit(func(f *flag.Flag) { if f.Name == name { found = true } }); return found }
+func exit(_ int, message string) error { return fmt.Errorf("%s", message) }
+func TestAcceptedAssignments(t *testing.T) {
+ name, empty, tail, enabled, bad := "same", "", "later", false, -1
+ cfg := defaultPilotConfig(); cfg.Input = "prior"; cfg.Enabled = true; cfg.Count = 8; cfg.Tail = "prior"
+ if got, err := cfg.applyFile(nil, true); err != nil || got != (PilotConfigApplied{}) { t.Fatalf("nil file: %+v %v", got, err) }
+ got, err := cfg.applyFile(&filePilotConfig{Name:&name, Enabled:&enabled, Count:&bad, Tail:&tail}, true)
+ if err == nil || !got.Name || !got.Enabled || got.Input || got.Tail || cfg.Count != 8 || cfg.Tail != "prior" { t.Fatalf("partial file: %+v %+v %v", got, cfg, err) }
+ got, err = cfg.applyFile(&filePilotConfig{Name:&name, Tail:&empty}, false)
+ if err != nil || got.Name || !got.Tail || cfg.Tail != "" { t.Fatalf("trust/empty: %+v %+v %v", got, cfg, err) }
+ got, _ = cfg.applyFile(&filePilotConfig{Name:&empty}, true)
+ if got.Name || cfg.Name != name { t.Fatal("ignored empty marked") }
+ for _, tc := range []struct{ primary, alias, want string; applied bool }{{"", "", "prior", false}, {"", "alias", "alias", true}, {"same", "alias", "same", true}, {" ", "alias", " ", true}} {
+  cfg.Input = "prior"; input = map[string]string{"PILOT_INPUT":tc.primary,"PILOT_INPUT_ALIAS":tc.alias}; selections = map[string]int{}; boolCalls = 0; boolAccepted = false; intError = false
+  got, err = cfg.applyEnv()
+  if err != nil || got.Input != tc.applied || cfg.Input != tc.want || got.Enabled || selections["PILOT_INPUT"] != 1 || boolCalls != 1 { t.Fatalf("env selection: %+v %+v %v", got, cfg, err) }
+ }
+ cfg.Name = "same"; cfg.Count = 8; cfg.Tail = "prior"; input = map[string]string{"PILOT_NAME":"same","PILOT_TAIL":"later"}; selections = map[string]int{}; boolAccepted = true; boolValue = false; intError = true
+ got, err = cfg.applyEnv()
+ if err == nil || !got.Name || !got.Enabled || got.Tail || cfg.Count != 0 || cfg.Tail != "prior" { t.Fatalf("partial env: %+v %+v %v", got, cfg, err) }
+ fs := flag.NewFlagSet("fixture", flag.ContinueOnError); values := RegisterPilotConfigFlags(fs, cfg)
+ if got := values.Apply(&cfg, fs); got != (PilotConfigApplied{}) { t.Fatalf("registration applied: %+v", got) }
+ if err := fs.Parse([]string{"--pilot-name=", "--pilot-enabled=false"}); err != nil { t.Fatal(err) }
+ visited := PilotConfigFlagPresence(fs)
+ if !visited.Name || !visited.Enabled || visited.Tail || cfg.Name != "same" { t.Fatalf("visits changed config: %+v %+v", visited, cfg) }
+ got = values.Apply(&cfg, fs)
+ if !got.Name || !got.Enabled || got.Input || got.Tail || cfg.Name != "" || cfg.Enabled { t.Fatalf("flag application: %+v %+v", got, cfg) }
+}
+`
+	dir := t.TempDir()
+	for _, file := range []struct{ name, content string }{{"source.go", appliedSample}, {"generated.go", string(generated)}, {"behavior_test.go", behavior}} {
+		if err := os.WriteFile(filepath.Join(dir, file.name), []byte(file.content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	command := exec.Command("go", "test", "source.go", "generated.go", "behavior_test.go")
+	command.Dir = dir
+	command.Env = []string{"GOTOOLCHAIN=local", "GOWORK=off", "GOPROXY=off", "GOSUMDB=off", "GOENV=off"}
+	for _, name := range []string{"PATH", "HOME", "USERPROFILE", "LOCALAPPDATA", "SystemRoot", "WINDIR", "TMPDIR", "TEMP", "TMP", "GOCACHE", "GOROOT", "GOFLAGS"} {
+		if value, ok := os.LookupEnv(name); ok {
+			command.Env = append(command.Env, name+"="+value)
+		}
+	}
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("applied scalar fixture: %v\n%s", err, output)
+	}
+}
+
+func TestGenerateOnlyEnvironmentField(t *testing.T) {
+	for _, tracked := range []bool{false, true} {
+		source := "package cli\ntype PilotConfig struct { Input string `sources:\"env\" env:\"PILOT_INPUT\" envAlias:\"PILOT_ALIAS\"` }"
+		if tracked {
+			source = strings.Replace(source, `sources:"env"`, `sources:"env" reportApplied:"true"`, 1)
+		}
+		s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+		if err != nil {
+			t.Fatal(err)
+		}
+		output, err := generate(s, "pilot.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(output), "VisitedFlags") || strings.Contains(string(output), "FlagPresence") {
+			t.Fatal("env-only schema emitted unused flag presence surface")
+		}
+		if !tracked && !strings.Contains(string(output), `cfg.Input = getenv("PILOT_INPUT", getenv("PILOT_ALIAS", cfg.Input))`) {
+			t.Fatal("untracked env-only fallback changed")
+		}
+		typecheckGenerated(t, source+"\nfunc firstNonEmptyEnv(...string) (string, bool) { panic(\"stub\") }\n", output)
 	}
 }

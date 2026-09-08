@@ -3,24 +3,16 @@ package fastapicloud
 import (
 	"flag"
 	"strings"
-)
 
-type fastAPICloudFlagValues struct {
-	APIURL *string
-	AppID  *string
-	TeamID *string
-}
+	core "github.com/openclaw/crabbox/internal/cli"
+)
 
 // RegisterFastAPICloudProviderFlags exposes only non-secret provider flags.
 // Deploy tokens are sourced from FASTAPI_CLOUD_TOKEN /
 // CRABBOX_FASTAPI_CLOUD_TOKEN so they are not passed as command-line
 // arguments.
 func RegisterFastAPICloudProviderFlags(fs *flag.FlagSet, defaults Config) any {
-	return fastAPICloudFlagValues{
-		APIURL: fs.String("fastapi-cloud-url", defaults.FastAPICloud.APIURL, "FastAPI Cloud API URL"),
-		AppID:  fs.String("fastapi-cloud-app-id", defaults.FastAPICloud.AppID, "FastAPI Cloud app ID"),
-		TeamID: fs.String("fastapi-cloud-team-id", defaults.FastAPICloud.TeamID, "FastAPI Cloud team ID for listing apps"),
-	}
+	return core.RegisterFastAPICloudConfigFlags(fs, defaults.FastAPICloud)
 }
 
 func ApplyFastAPICloudProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
@@ -32,19 +24,11 @@ func ApplyFastAPICloudProviderFlags(cfg *Config, fs *flag.FlagSet, values any) e
 			return exit(2, "--type is not supported for provider=%s", providerName)
 		}
 	}
-	v, ok := values.(fastAPICloudFlagValues)
+	v, ok := values.(core.FastAPICloudConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "fastapi-cloud-url") {
-		cfg.FastAPICloud.APIURL = *v.APIURL
-	}
-	if flagWasSet(fs, "fastapi-cloud-app-id") {
-		cfg.FastAPICloud.AppID = *v.AppID
-	}
-	if flagWasSet(fs, "fastapi-cloud-team-id") {
-		cfg.FastAPICloud.TeamID = *v.TeamID
-	}
+	v.Apply(&cfg.FastAPICloud, fs)
 	return nil
 }
 

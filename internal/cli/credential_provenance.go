@@ -212,7 +212,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if flagWasSet(fs, "railway-url") {
 		provenance.railwayAPIURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "fastapi-cloud-url") {
+	if FastAPICloudConfigFlagPresence(fs).APIURL {
 		provenance.fastAPICloudAPIURL = credentialSourceFlag
 	}
 	if flagWasSet(fs, "orgo-api-base") {

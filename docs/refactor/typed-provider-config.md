@@ -1,16 +1,17 @@
 # Typed provider config bindings
 
-Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime, and
-Cloud Run Sandbox describe their mechanical config bindings
+Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
+Cloud Run Sandbox, and FastAPI Cloud describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
 `internal/cli/config_opensandbox.go`,
-`internal/cli/config_anthropic_sandbox_runtime.go`, and
-`internal/cli/config_cloud_run_sandbox.go`.
+`internal/cli/config_anthropic_sandbox_runtime.go`,
+`internal/cli/config_cloud_run_sandbox.go`, and
+`internal/cli/config_fastapi_cloud.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
-pointer-valued YAML input fields, compiled defaults, file/environment overlays,
-and flag storage, registration, and presence-based application.
+source-admitted YAML input fields, compiled defaults, file/environment overlays,
+and storage, registration, and presence-based application for admitted flags.
 
 This is a wiring refactor, not a behavior correction. Other providers retain
 their existing configuration code. Provider selection, command routing, config
@@ -36,7 +37,7 @@ machine-specific paths. Its header identifies the generator and source file.
 
 1. Add an exported, singly named field to the provider's config struct. Supported types
    are `string`, `int`, `float64`, `bool`, and `[]string`.
-2. Set its `flag` spelling and `help` text. Environment-supported fields need an
+2. Flag-supported fields need their `flag` spelling and `help` text. Environment-supported fields need an
    `env` variable, and file-supported fields also need a `config` YAML key.
    Explicitly set `sources:"user,repo,env,flag"` only after establishing that the
    value is safe in repository configuration and on argv. Use the exact
@@ -45,6 +46,10 @@ machine-specific paths. Its header identifies the generator and source file.
    environment/flag-only field uses `sources:"env,flag"` and must omit the
    `config` tag entirely, including an empty tag. A CLI-only field uses
    `sources:"flag"` and must omit `config`, `env`, and `envAlias` tags entirely.
+   An existing environment-only string uses `sources:"env"`: require its
+   primary `env`, allow an existing alias, and omit `config`, `flag`, `help`, and
+   `default` tags entirely. This mode retains a zero default and exposes no YAML
+   or command-line field; it does not generate credential presentation or policy.
    There is no implicit source grant. An optional `default` tag supplies a scalar default checked
    against the field type; otherwise the Go zero value applies. Current integer
    fields require `nonnegative:"true"` for eager file/environment validation.
@@ -56,6 +61,9 @@ machine-specific paths. Its header identifies the generator and source file.
    `fileIgnoreEmpty:"true"`. This is valid only for strings with a file source;
    it adds an exact nonempty check without trimming, changing environment/flag
    behavior, or changing other fields' presence semantics.
+   Use `reportApplied:"true"` only on string/bool fields whose accepted-input
+   events are needed by an existing handwritten policy. See the report boundary
+   below; this is not a new source grant.
 3. Keep semantic and cross-field checks in the provider's
    validation function. Wire actual provider behavior there or in its
    existing client code as appropriate. Config presentation remains explicit in
@@ -63,7 +71,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -79,6 +87,32 @@ The generated-output freshness tests perform the same checks in ordinary
 `go test ./...`. Generator tests cover deterministic output, missing/stale output
 without writes, duplicate/missing bindings, unsupported types, default parsing,
 and explicit source permissions. Do not edit the output by hand.
+
+## Accepted input and flag presence
+
+Opted-in declarations generate a provider-specific `Applied` report containing only
+tracked fields. File/environment application returns the report with its error;
+flag application returns the report. Bits are set inside the same accepted-input
+branches that assign values, including assignments equal to the previous value.
+Absent or ignored input, input disallowed by the field's source grant, and
+parsing failures do not count as applied. Reports cover only opted-in fields.
+Earlier accepted bits survive a later error, just as earlier config
+mutations do; the report is not a transactional overlay. Defaults and flag
+registration do not report input events.
+
+Tracked fields with flags also produce a separate typed `VisitedFlags` query.
+Generated assignment and existing core policy share this query's declaration and
+visit predicate, but visits are not called applied values. Core retains its
+existing post-success flag-provenance phase; provider wrappers do not acquire
+that policy as a side effect. A declaration with no tracked flags emits no empty
+visited-flags type or query. Non-opted-in providers keep their existing generated
+signatures and output unchanged.
+
+Reports contain mechanical facts, not permission decisions. Handwritten owners
+map those facts to source enums, precedence, or other existing policy without
+re-reading YAML predicates, reparsing environment values, or inferring intent
+from value changes. Authentication, destination checks, redaction, and source
+trust remain outside the generator.
 
 ## Preserved contracts and security boundary
 
@@ -154,7 +188,17 @@ workdir helper use the generated CLI/workdir defaults. Raw-zero config, operatio
 option precedence, keeper workdir omission, helper cwd, and timeouts retain their
 separate semantics; generated defaults do not fill every empty runtime option.
 
-The generator accepts only these four exact source grants. Credential handling,
+FastAPI Cloud's four fields include an environment-only token and three
+file/environment/flag values. All four existing environment aliases retain raw
+nonempty precedence. Empty YAML values are ignored; a repository API URL still
+records repository provenance and remains subject to the existing later
+credential-destination checks. Applied reports carry accepted token/URL events
+to the existing file/environment source mapping, while central flag provenance
+uses the distinct visited query at its unchanged phase. Client token checks,
+endpoint validation, redirects, service-control restrictions, and redacted
+presentation remain handwritten and deferred as before.
+
+The generator accepts only these five exact source grants. Credential handling,
 destination validation and provenance, provider aliases, and provider selection
 policy stay handwritten. A declared environment alias copies the existing string
 fallback only; it does not define credential forwarding or destination authority.

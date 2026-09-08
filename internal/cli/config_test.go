@@ -1543,6 +1543,131 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestFastAPICloudFileAcceptanceAndProvenance(t *testing.T) {
+	if _, ok := reflect.TypeOf(fileFastAPICloudConfig{}).FieldByName("Token"); ok {
+		t.Fatal("token must not have a YAML source")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "whitespace", "equal"} {
+			t.Run(fmt.Sprintf("trusted=%t/%s", trusted, mode), func(t *testing.T) {
+				cfg := baseConfig()
+				cfg.Provider = "fastapi-cloud"
+				cfg.FastAPICloud = FastAPICloudConfig{Token: "inert", APIURL: "https://example.invalid/api", AppID: "example-app", TeamID: "example-team"}
+				cfg.credentialProvenance.fastAPICloudAPIURL = credentialSourceEnvironment
+				cfg.credentialProvenance.fastAPICloudToken = credentialSourceEnvironment
+				want := cfg.FastAPICloud
+				wantSource := credentialSourceEnvironment
+				body := "fastapiCloud:\n  token: ignored-inert-value\n"
+				if mode != "omitted" {
+					url, app, team := "null", "null", "null"
+					if mode == "empty" {
+						url, app, team = "''", "''", "''"
+					}
+					if mode == "whitespace" {
+						url, app, team = "'  '", "'  '", "'  '"
+						want.APIURL, want.AppID, want.TeamID = "  ", "  ", "  "
+					}
+					if mode == "equal" {
+						url, app, team = want.APIURL, want.AppID, want.TeamID
+					}
+					if mode == "whitespace" || mode == "equal" {
+						wantSource = credentialSourceForFile(trusted)
+					}
+					body += "  apiUrl: " + url + "\n  appId: " + app + "\n  teamId: " + team + "\n"
+				}
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte(body), &file); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				if cfg.FastAPICloud != want || cfg.credentialProvenance.fastAPICloudAPIURL != wantSource || cfg.credentialProvenance.fastAPICloudToken != credentialSourceEnvironment {
+					t.Fatal("file acceptance/value/provenance mismatch")
+				}
+				if mode == "equal" {
+					err := validateProviderCredentialDestination(cfg)
+					if (err != nil) != !trusted {
+						t.Fatalf("later destination policy trusted=%t error=%v", trusted, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestFastAPICloudEnvironmentAcceptanceAndProvenance(t *testing.T) {
+	for _, mode := range []string{"primary", "alias", "empty", "whitespace", "equal", "token only", "URL only"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.FastAPICloud = FastAPICloudConfig{Token: "inert-prior", APIURL: "https://example.invalid/prior", AppID: "prior-app", TeamID: "prior-team"}
+			cfg.credentialProvenance.fastAPICloudAPIURL, cfg.credentialProvenance.fastAPICloudToken = credentialSourceTrustedFile, credentialSourceTrustedFile
+			want := cfg.FastAPICloud
+			for _, item := range []struct {
+				primary, alias, primaryValue, aliasValue string
+				target                                   *string
+			}{
+				{"CRABBOX_FASTAPI_CLOUD_TOKEN", "FASTAPI_CLOUD_TOKEN", "inert-primary", "inert-alias", &want.Token},
+				{"CRABBOX_FASTAPI_CLOUD_API_URL", "FASTAPI_CLOUD_API_URL", "https://example.invalid/primary", "https://example.invalid/alias", &want.APIURL},
+				{"CRABBOX_FASTAPI_CLOUD_APP_ID", "FASTAPI_CLOUD_APP_ID", "primary-app", "alias-app", &want.AppID},
+				{"CRABBOX_FASTAPI_CLOUD_TEAM_ID", "FASTAPI_CLOUD_TEAM_ID", "primary-team", "alias-team", &want.TeamID},
+			} {
+				primary, alias := item.primaryValue, item.aliasValue
+				switch mode {
+				case "alias":
+					primary = ""
+					*item.target = alias
+				case "empty":
+					primary, alias = "", ""
+				case "whitespace":
+					primary = "  "
+					*item.target = primary
+				case "equal":
+					primary = *item.target
+				default:
+					*item.target = primary
+				}
+				if mode == "token only" || mode == "URL only" {
+					accept := (mode == "token only" && item.primary == "CRABBOX_FASTAPI_CLOUD_TOKEN") || (mode == "URL only" && item.primary == "CRABBOX_FASTAPI_CLOUD_API_URL")
+					if !accept {
+						primary, alias = "", ""
+						switch item.primary {
+						case "CRABBOX_FASTAPI_CLOUD_TOKEN":
+							*item.target = cfg.FastAPICloud.Token
+						case "CRABBOX_FASTAPI_CLOUD_API_URL":
+							*item.target = cfg.FastAPICloud.APIURL
+						case "CRABBOX_FASTAPI_CLOUD_APP_ID":
+							*item.target = cfg.FastAPICloud.AppID
+						case "CRABBOX_FASTAPI_CLOUD_TEAM_ID":
+							*item.target = cfg.FastAPICloud.TeamID
+						}
+					}
+				}
+				t.Setenv(item.primary, primary)
+				t.Setenv(item.alias, alias)
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			wantSource := credentialSourceEnvironment
+			if mode == "empty" {
+				wantSource = credentialSourceTrustedFile
+			}
+			wantURLSource, wantTokenSource := wantSource, wantSource
+			if mode == "token only" {
+				wantURLSource = credentialSourceTrustedFile
+			}
+			if mode == "URL only" {
+				wantTokenSource = credentialSourceTrustedFile
+			}
+			if cfg.FastAPICloud != want || cfg.credentialProvenance.fastAPICloudAPIURL != wantURLSource || cfg.credentialProvenance.fastAPICloudToken != wantTokenSource {
+				t.Fatal("environment acceptance/value/provenance mismatch")
+			}
+		})
+	}
+}
+
 func TestCloudRunSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
