@@ -69,6 +69,7 @@ if [[ "$probe" == python3 && "\${1:-}" == -c ]]; then
     exec "$CRABBOX_FIXTURE_PYTHON" "$@"
   fi
 fi
+printf '%s\\n' "$probe" >>"$CRABBOX_FIXTURE_ROOT/probes.log"
 if [[ -f "$CRABBOX_FIXTURE_ROOT/disabled-$probe" ]]; then exit 91; fi
 printf '%s fixture\\n' "$probe"`,
     );
@@ -195,7 +196,10 @@ stat() {
     const producer = producerSource(minimal, builder, options);
     return run(producer.slice(producer.indexOf("crabbox_readiness_manifest_path=")), overrides);
   }
-  return { root, bin, state, readiness, manifest, marker, ca, sshd, aptConfig, packageLog, minimal, builder, ownerUID, ownerGID, options, shell, writeManifest, writeMarker, packageCalls, run, runProducer, actualGenerated };
+  function runVerifier(profile, overrides = {}) {
+    return run(`set -- --verify ${quote(profile)}\n${producerSource(minimal, builder, options)}`, overrides);
+  }
+  return { root, bin, state, readiness, manifest, marker, ca, sshd, aptConfig, packageLog, minimal, builder, ownerUID, ownerGID, options, shell, writeManifest, writeMarker, packageCalls, run, runProducer, runVerifier, actualGenerated };
 }
 
 test("strict profile and manifest schemas validate recipes and both generated manifests", async () => {
@@ -362,6 +366,80 @@ test("valid minimal and builder manifests rerun their complete probes without pa
       assert.deepEqual(await fixture.packageCalls(), []);
     });
   }
+});
+
+test("standalone verifier requires an explicit supported profile without privilege escalation", () => {
+  const producer = resolve(repoRoot, "scripts/linux-readiness.generated.sh");
+  for (const args of [["--verify"], ["--verify", "unknown"], ["--verify", "linux-builder", "extra"]]) {
+    const result = spawnSync(producer, args, { encoding: "utf8" });
+    assert.equal(result.status, 2, result.stderr || result.stdout);
+  }
+});
+
+test("standalone verifier proves the exact profile without rewriting manifest or marker", async (t) => {
+  for (const profile of ["linux-minimal", "linux-builder"]) {
+    await t.test(profile, async (subtest) => {
+      const fixture = await createFixture(subtest);
+      await fixture.writeManifest(profile);
+      await fixture.writeMarker();
+      for (const command of ["sudo", "id"]) await executable(join(fixture.bin, command), "exit 98");
+      const before = await Promise.all([fixture.manifest, fixture.marker].map((path) => stat(path)));
+      const result = fixture.runVerifier(profile);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.match(result.stdout, new RegExp(`readiness verified: ${profile}`));
+      const after = await Promise.all([fixture.manifest, fixture.marker].map((path) => stat(path)));
+      for (const key of ["ino", "mtimeMs", "ctimeMs", "mode", "uid", "gid", "size"]) {
+        assert.deepEqual(after.map((entry) => entry[key]), before.map((entry) => entry[key]), key);
+      }
+      assert.equal(JSON.parse(await readFile(fixture.manifest, "utf8")).profile, profile);
+      assert.equal(await readFile(fixture.marker, "utf8"), "crabbox-devtools-v1\n");
+      assert.deepEqual(await fixture.packageCalls(), []);
+      assert.deepEqual(await readdir(fixture.readiness), ["linux.json"]);
+    });
+  }
+});
+
+test("standalone verifier rejects untrusted or wrong-profile claims before any capability probe", async (t) => {
+  for (const [name, prepare] of [
+    ["missing", async () => ({})],
+    ["minimal", async (fixture) => { await fixture.writeManifest(); return {}; }],
+    ["stale", async (fixture) => { await fixture.writeManifest("linux-builder", "{}\n"); return {}; }],
+    ["noncanonical", async (fixture) => { await fixture.writeManifest("linux-builder", JSON.stringify(manifestFor("linux-builder", digest(fixture.builder)), null, 2)); return {}; }],
+    ["wrong owner", async (fixture) => { await fixture.writeManifest("linux-builder"); return { CRABBOX_STAT_OVERRIDE_PATH: fixture.manifest, CRABBOX_STAT_OWNER: String(Number(fixture.ownerUID) + 1) }; }],
+    ["wrong mode", async (fixture) => { await fixture.writeManifest("linux-builder"); await chmod(fixture.manifest, 0o666); return {}; }],
+    ["writable parent", async (fixture) => { await fixture.writeManifest("linux-builder"); await chmod(fixture.readiness, 0o777); return {}; }],
+    ["symlink", async (fixture) => { await fixture.writeManifest("linux-builder"); await writeFile(`${fixture.manifest}.target`, await readFile(fixture.manifest)); await rm(fixture.manifest); await symlink(`${fixture.manifest}.target`, fixture.manifest); return {}; }],
+  ]) {
+    await t.test(name, async (subtest) => {
+      const fixture = await createFixture(subtest);
+      const environment = await prepare(fixture);
+      await fixture.writeMarker();
+      const before = await readFile(fixture.manifest, "utf8").catch(() => null);
+      const result = fixture.runVerifier("linux-builder", environment);
+      assert.notEqual(result.status, 0, result.stderr || result.stdout);
+      assert.equal(await readFile(fixture.manifest, "utf8").catch(() => null), before);
+      assert.equal(await readFile(fixture.marker, "utf8"), "crabbox-devtools-v1\n");
+      await assert.rejects(readFile(join(fixture.root, "probes.log")), { code: "ENOENT" });
+      assert.deepEqual(await fixture.packageCalls(), []);
+    });
+  }
+});
+
+test("standalone verifier never downgrades a builder claim after a failed probe", async (t) => {
+  const fixture = await createFixture(t);
+  await fixture.writeManifest("linux-builder");
+  await writeFile(join(fixture.root, "disabled-git-lfs"), "1");
+  const before = await stat(fixture.manifest);
+  const result = fixture.runVerifier("linux-builder");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /linux-builder capability proof failed/);
+  const after = await stat(fixture.manifest);
+  for (const key of ["ino", "mtimeMs", "ctimeMs", "mode", "uid", "gid", "size"]) {
+    assert.equal(after[key], before[key], key);
+  }
+  assert.equal(JSON.parse(await readFile(fixture.manifest, "utf8")).profile, "linux-builder");
+  await assert.rejects(readFile(fixture.marker), { code: "ENOENT" });
+  assert.deepEqual(await fixture.packageCalls(), []);
 });
 
 test("bootstrap and producer parse metadata in the C locale without changing probe locales", async (t) => {

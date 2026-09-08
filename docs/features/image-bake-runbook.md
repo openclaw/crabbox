@@ -378,6 +378,8 @@ scripts/mint-aws-devtools-image.sh \
   `python3-venv`). The standalone generated readiness producer verifies every
   functional probe, including creating and checking a disposable pip-enabled
   virtual environment, before atomically emitting the strongest supported profile.
+  Developer-image preparation then requires `linux-builder` verification before
+  cloud-init cleanup. A missing builder capability stops preparation.
 - **Windows** (`scripts/install-windows-developer-tools.ps1`): common CLI/build
   tooling, GitHub CLI, Node 24, corepack/pnpm, TruffleHog 3.95.9, and Windows
   Server container support with Docker Engine. It deliberately avoids Docker
@@ -438,18 +440,33 @@ warmup prints its exact `log=` path. Candidate proof requires
 `source=explicit`; final proof requires `source=promoted` with the exact AMI ID
 created by the run. For Linux, the wrapper stages
 `scripts/linux-readiness.generated.sh` before preparation, the installer invokes
-that standalone producer after installing its packages, and the wrapper reruns
-the producer before any image capture. This proves the canonical, root-owned
-`/var/lib/crabbox-readiness/linux.json` manifest and emits the legacy
-`/var/lib/crabbox/image-ready` marker only after all profile probes pass. A
-missing builder capability downgrades the manifest to `linux-minimal`; a missing
-minimal capability stops preparation before AMI capture. The authoritative
-readiness directory is root-owned even when `/var/lib/crabbox` belongs to the
-runtime user; the marker is only a backwards-compatibility hint, written through
-a safe same-filesystem rename and verified before capture. Later managed Linux
-boots independently rerun the declared probes under a sanitized system PATH
-before skipping baseline APT. Use the timing logs to compare provider request,
-network readiness, bootstrap, and end-to-end time before and after each bake.
+that producer after installing its packages, and preparation requires
+`--verify linux-builder` before cloud-init cleanup.
+
+Every Linux source, candidate, and promoted smoke runs the verifier from the
+wrapper's trusted source tree, not the copy installed in the image.
+Verification rejects untrusted paths, noncanonical manifest bytes, and the wrong
+profile before running capability probes. It does not install packages, repair
+evidence, downgrade the profile, or write the manifest or compatibility marker.
+Generic bootstrap still accepts verified `linux-minimal` images and retains its
+normal fallback behavior.
+
+The Linux smoke runs as the runtime user. It compiles and executes a small C
+program, checks Python SSL and SQLite, runs Node package scripts offline, and
+tests shared-cache writes. Docker checks use the prebaked images without pulls
+or container networking, exercise Compose, and build a small offline image.
+The smoke refreshes Docker group membership when necessary without running the
+whole script as root. Enabled browser and desktop checks render local HTML and
+capture the active display. When both are enabled, the smoke verifies pixels
+from its own browser window on that display. Cleanup stops only that browser
+and removes disposable files, containers, and the test image on success or failure.
+
+Later managed Linux boots independently rerun the declared readiness probes
+before skipping baseline APT. A successful post-boot smoke proves current
+capabilities, not pristine image contents before bootstrap or project hydration.
+Keep scenario state out of the source image as described in
+[prebaked images](prebaked-images.md). Use the timing logs to compare provider
+request, network readiness, bootstrap, and end-to-end time before and after each bake.
 
 ### Measured Linux publication
 

@@ -59,6 +59,10 @@ case "$1" in
     fi
     ;;
   run)
+    if [[ -n "\${CRABBOX_FAKE_READINESS_FAIL_LEASE:-}" && "$*" == *"--id \${CRABBOX_FAKE_READINESS_FAIL_LEASE} "* && "$*" == *"-- --verify linux-builder"* ]]; then
+      printf 'Linux readiness verification: linux-builder manifest required\\n' >&2
+      exit 74
+    fi
     if [[ "\${CRABBOX_FAKE_READINESS_FAIL:-0}" == "1" && "$*" == *"linux-readiness.generated.sh"* && "$*" != *"-- --install"* ]]; then
       printf 'Linux readiness producer: minimal capability proof failed\\n' >&2
       exit 74
@@ -190,16 +194,17 @@ test("AWS developer image smoke executes package managers and requires TruffleHo
   assert.doesNotMatch(text, /\bBASHPID\b/);
 });
 
-test("AWS Linux image production stages and invokes only the generated readiness producer", async () => {
+test("AWS Linux image verification uses trusted source bytes instead of the installed producer", async () => {
   const source = await readFile(script, "utf8");
   const smoke = await readFile(path.join(scriptDir, "devtools-image-smoke-linux.sh"), "utf8");
   assert.match(source, /--script "\$ROOT\/scripts\/linux-readiness\.generated\.sh" -- --install/);
   assert.equal(
     (source.match(/--script "\$ROOT\/scripts\/linux-readiness\.generated\.sh"/g) ?? []).length,
-    1,
+    2,
   );
-  assert.match(source, /--shell -- \/usr\/local\/libexec\/crabbox\/linux-readiness\.generated\.sh/);
-  assert.match(smoke, /test -f \/var\/lib\/crabbox-readiness\/linux\.json/);
+  assert.match(source, /--script "\$ROOT\/scripts\/linux-readiness\.generated\.sh" -- --verify linux-builder/);
+  assert.doesNotMatch(source, /--shell -- \/usr\/local\/libexec\/crabbox\/linux-readiness\.generated\.sh/);
+  assert.doesNotMatch(smoke, /test -f \/var\/lib\/crabbox.*(?:linux\.json|image-ready)/);
   assert.doesNotMatch(source, /sudo tee \/var\/lib\/crabbox\/image-ready/);
   assert.doesNotMatch(source, /printf 'crabbox-devtools-v1/);
 });
@@ -260,14 +265,13 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
   assert.doesNotMatch(log, /warmup .*--region us-west-2/);
   assert.match(log, /run --provider aws --target linux --id cbx_source --no-sync --script/);
   assert.match(log, /linux-readiness\.generated\.sh -- --install/);
-  assert.equal((log.match(/linux-readiness\.generated\.sh/g) ?? []).length, 2);
+  assert.equal((log.match(/linux-readiness\.generated\.sh/g) ?? []).length, 4);
+  for (const phase of ["source", "candidate", "promoted"]) {
+    assert.ok(log.includes(`run --provider aws --target linux --id cbx_${phase} --no-sync --script ${path.join(scriptDir, "linux-readiness.generated.sh")} -- --verify linux-builder`));
+  }
   assert.match(
     log,
-    /run --provider aws --target linux --id cbx_source --no-sync --shell -- \/usr\/local\/libexec\/crabbox\/linux-readiness\.generated\.sh/,
-  );
-  assert.match(
-    log,
-    /run --provider aws --target linux --id cbx_source --no-sync --shell -- set -euo pipefail/,
+    /run --provider aws --target linux --id cbx_source --no-sync --shell -- export CRABBOX_LINUX_DESKTOP_TOOLS=1 CRABBOX_LINUX_BROWSER=1\nset -euo pipefail/,
   );
   assert.equal((log.match(/corepack --version/g) ?? []).length, 3);
   assert.equal((log.match(/pnpm --version/g) ?? []).length, 3);
@@ -411,109 +415,169 @@ test("AWS devtools mint wrapper preserves promotion failure while attempting rec
   assert.match(result.stderr, /transactional promotion receipt is unavailable for rollback/);
 });
 
-test("AWS devtools mint wrapper uses sg for first docker group member", async () => {
-  const fake = await setupFakeCrabbox();
-  const smokeScript = path.join(fake.dir, "smoke.sh");
-  const result = await runScript(
-    ["--target", "linux", "--run", "--no-promote", "--prep-script", fake.linuxPrep],
-    {
-      CRABBOX_BIN: fake.fake,
-      CRABBOX_FAKE_LOG: fake.log,
-      CRABBOX_FAKE_CAPTURE_RUN_SCRIPT: smokeScript,
-    },
-  );
-  assert.equal(result.code, 0, result.stderr);
-
-  const bin = path.join(fake.dir, "smoke-bin");
-  await mkdir(bin);
-  const sgMarker = path.join(fake.dir, "sg-used");
-  const sudoMarker = path.join(fake.dir, "sudo-used");
+async function runLinuxSmoke(t, options = {}) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "crabbox-linux-smoke-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bin = path.join(root, "bin");
+  const scratch = path.join(root, "scratch");
+  const caches = path.join(root, "caches");
+  const events = path.join(root, "events");
+  const browserPID = path.join(root, "browser.pid");
+  for (const directory of [bin, scratch, ...["pnpm", "npm", "corepack", "docker"].map((name) => path.join(caches, name))]) {
+    await mkdir(directory, { recursive: true });
+  }
+  if (options.fail === "cache") await rm(path.join(caches, "pnpm"), { recursive: true });
   const writeTool = async (name, body) => {
     const file = path.join(bin, name);
-    await writeFile(file, body);
+    await writeFile(file, `#!/usr/bin/env bash
+set -eu
+printf '%s %s\\n' '${name}' "$*" >>"$CRABBOX_SMOKE_EVENTS"
+[[ "\${CRABBOX_SMOKE_FAIL:-}" != '${name}' ]] || exit 37
+${body}
+`);
     await chmod(file, 0o755);
   };
-  for (const name of [
-    "git",
-    "gh",
-    "jq",
-    "rg",
-    "fd",
-    "python3",
-    "npm",
-    "corepack",
-    "pnpm",
-    "trufflehog",
-  ]) {
-    await writeTool(name, "#!/usr/bin/env bash\nexit 0\n");
+  for (const name of ["git", "gh", "jq", "rg", "fd", "python3", "trufflehog", "xset"]) {
+    await writeTool(name, "exit 0");
   }
-  await writeTool(
-    "node",
-    '#!/usr/bin/env bash\n[[ "${1:-}" == "--version" ]] && printf \'v24.0.0\\n\'\nexit 0\n',
-  );
-  await writeTool("id", '#!/usr/bin/env bash\n[[ "$*" == "-nG" ]] && printf \'users\\n\'\n');
-  await writeTool("whoami", "#!/usr/bin/env bash\nprintf 'alice\\n'\n");
-  await writeTool(
-    "getent",
-    '#!/usr/bin/env bash\n[[ "$*" == "group docker" ]] && printf \'docker:x:999:alice,bob\\n\'\n',
-  );
-  await writeTool(
-    "docker",
-    `#!/usr/bin/env bash
-if [[ "\${CRABBOX_FAKE_IN_SG:-0}" == "1" ]]; then
-  exit 0
-fi
-exit 1
-`,
-  );
-  await writeTool(
-    "sg",
-    `#!/usr/bin/env bash
-touch "${sgMarker}"
-shift
-[[ "\${1:-}" == "-c" ]] || exit 64
-shift
-CRABBOX_FAKE_IN_SG=1 bash -c "$1"
-`,
-  );
-  await writeTool(
-    "sudo",
-    `#!/usr/bin/env bash
-touch "${sudoMarker}"
-exit 80
-`,
-  );
+  for (const name of ["npm", "corepack", "pnpm"]) {
+    await writeTool(name, '[[ "$COREPACK_ENABLE_NETWORK" == 0 && "$npm_config_offline" == true ]]');
+  }
+  await writeTool("node", `exec ${JSON.stringify(process.execPath)} "$@"`);
+  await writeTool("cc", `[[ "$2" == -o ]]
+printf '#!/bin/sh\\nexit 0\\n' >"$3"
+chmod +x "$3"`);
+  await writeTool("id", 'case "$*" in -u) echo 1000 ;; -nG) echo users ;; esac');
+  await writeTool("whoami", "echo alice");
+  await writeTool("getent", `[[ "\${CRABBOX_SMOKE_FAIL:-}" != access ]] || exit 1
+echo 'docker:x:999:alice,bob'`);
+  await writeTool("docker", `if [[ "$1" == version && "\${CRABBOX_SMOKE_REFRESH:-0}" == 1 && "\${CRABBOX_FAKE_IN_SG:-0}" != 1 ]]; then exit 1; fi
+if [[ "\${CRABBOX_SMOKE_FAIL:-}" == access && "$1" == version ]]; then exit 1; fi
+if [[ "\${CRABBOX_SMOKE_FAIL:-}" == buildx && "$1 \${2:-}" == "buildx build" ]]; then exit 37; fi
+if [[ "\${CRABBOX_SMOKE_FAIL:-}" == compose && "$*" == *" run --rm "* ]]; then exit 37; fi
+exit 0`);
+  await writeTool("sg", '[[ "$1 $2" == "docker -c" ]]\nCRABBOX_FAKE_IN_SG=1 sh -c "$3"');
+  await writeTool("sudo", "exit 80");
+  await writeTool("timeout", '[[ "$1" != --kill-after=* ]] || shift\nshift\nexec "$@"');
+  await writeTool("crabbox-browser", `if [[ "$*" == *"--headless"* ]]; then echo '<p>crabbox-browser-smoke</p>'; exit 0; fi
+exec ${JSON.stringify(process.execPath)} -e 'const fs=require("node:fs"); const file=process.env.CRABBOX_SMOKE_BROWSER_PID; process.on("SIGTERM",()=>{fs.unlinkSync(file); process.exit(0)}); fs.writeFileSync(file,String(process.pid)); setInterval(()=>{},1000)'`);
+  await writeTool("xdotool", `if [[ "$1" == search ]]; then
+  [[ "\${CRABBOX_SMOKE_FAIL:-}" != window && -f "$CRABBOX_SMOKE_BROWSER_PID" ]] || exit 1
+  echo 12345
+fi`);
+  await writeTool("ffmpeg", `exec ${JSON.stringify(process.execPath)} -e 'require("node:fs").writeFileSync(process.argv[1],Buffer.alloc(768,Buffer.from(process.env.CRABBOX_SMOKE_FAIL === "render" ? [0,0,0] : [25,163,91])))' "\${*: -1}"`);
+  await writeTool("sleep", "/bin/sleep 0.05");
+  await writeTool("scrot", 'printf png >"$1"');
+  await writeTool("ffprobe", "echo 1280,720");
+  const smoke = path.join(root, "smoke.sh");
+  const source = await readFile(path.join(scriptDir, "devtools-image-smoke-linux.sh"), "utf8");
+  await writeFile(smoke, source.replaceAll("/var/cache/crabbox", caches));
+  const result = await runScript([], {
+    PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+    TMPDIR: scratch,
+    DISPLAY: ":99",
+    CRABBOX_SMOKE_EVENTS: events,
+    CRABBOX_SMOKE_BROWSER_PID: browserPID,
+    CRABBOX_SMOKE_FAIL: options.fail ?? "",
+    CRABBOX_SMOKE_REFRESH: options.refresh ? "1" : "0",
+    CRABBOX_LINUX_BROWSER: options.browser ?? "1",
+    CRABBOX_LINUX_DESKTOP_TOOLS: options.desktop ?? "1",
+  }, smoke);
+  assert.deepEqual(await readdir(scratch), [], "smoke must remove all disposable fixtures");
+  for (const cache of await readdir(caches)) {
+    assert.deepEqual(await readdir(path.join(caches, cache)), [], "cache write probes must be removed");
+  }
+  await assert.rejects(readFile(browserPID), { code: "ENOENT" }, "smoke must stop its own visible browser");
+  return { ...result, events: await readFile(events, "utf8") };
+}
 
-  const generated = (await readFile(smokeScript, "utf8"))
-    .replace("test -d /var/cache/crabbox/pnpm", "true")
-    .replace("test -f /var/lib/crabbox-readiness/linux.json", "true")
-    .replace("test -f /var/lib/crabbox/image-ready", "true");
-  const smoke = await new Promise((resolve, reject) => {
-    const child = spawn("bash", ["-c", generated], {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
+test("Linux image smoke runs offline functional checks and cleans its fixtures", async (t) => {
+  const result = await runLinuxSmoke(t);
+  assert.equal(result.code, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /devtools-smoke-ok/);
+  assert.match(result.events, /npm --offline run check/);
+  assert.match(result.events, /pnpm run check/);
+  assert.match(result.events, /docker run --rm --pull=never --network=none/);
+  assert.match(result.events, /docker buildx build --builder default --pull=false --network=none/);
+  assert.match(result.events, /docker compose .* run --rm --no-deps --pull never check/);
+  assert.match(result.events, /docker compose .* down --remove-orphans/);
+  assert.match(result.events, /docker image rm crabbox-smoke-/);
+  assert.match(result.events, /crabbox-browser --headless/);
+  assert.match(result.events, /scrot /);
+  assert.match(result.events, /xdotool search --onlyvisible --limit 1 --name crabbox-render-/);
+  assert.match(result.events, /ffmpeg .* -f x11grab -draw_mouse 0 -window_id 12345 -i :99 /);
+  assert.doesNotMatch(result.events, /sudo |docker pull |apt-get |npm install/);
+});
+
+test("Linux image smoke refreshes the first Docker group member without root execution", async (t) => {
+  const result = await runLinuxSmoke(t, { refresh: true });
+  assert.equal(result.code, 0, result.stderr || result.stdout);
+  assert.match(result.events, /sg docker -c/);
+  assert.doesNotMatch(result.events, /sudo /);
+});
+
+test("Linux image smoke rejects failed capabilities without success output and cleans fixtures", async (t) => {
+  for (const fail of ["cc", "python3", "npm", "pnpm", "cache", "buildx", "compose", "access", "crabbox-browser", "xset", "ffprobe", "window", "render"]) {
+    await t.test(fail, async (subtest) => {
+      const result = await runLinuxSmoke(subtest, { fail });
+      assert.notEqual(result.code, 0, result.stderr || result.stdout);
+      assert.doesNotMatch(result.stdout, /devtools-smoke-ok/);
+      assert.doesNotMatch(result.events, /sudo /);
+      if (fail === "buildx" || fail === "compose") {
+        assert.equal(result.code, 37, "cleanup must preserve the original failure");
+        assert.match(result.events, /docker image rm crabbox-smoke-/);
+      }
+      if (fail === "window" || fail === "render") {
+        assert.match(result.stderr, /browser did not render the local fixture/);
+      }
     });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
+  }
+});
+
+test("Linux image smoke respects disabled browser and desktop capabilities", async (t) => {
+  for (const [browser, desktop] of [["0", "0"], ["1", "0"], ["0", "1"]]) {
+    await t.test(`browser=${browser} desktop=${desktop}`, async (subtest) => {
+      const result = await runLinuxSmoke(subtest, { browser, desktop });
+      assert.equal(result.code, 0, result.stderr || result.stdout);
+      if (browser === "0") assert.doesNotMatch(result.events, /crabbox-browser/);
+      if (desktop === "0") assert.doesNotMatch(result.events, /xset|xdotool|scrot|ffprobe/);
+      assert.doesNotMatch(result.events, /ffmpeg |--app=/);
     });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
+  }
+});
+
+test("publisher checks the builder profile in every Linux lifecycle phase", async (t) => {
+  for (const phase of ["source", "candidate", "promoted"]) {
+    await t.test(phase, async (subtest) => {
+      const fake = await setupFakeCrabbox();
+      subtest.after(() => rm(fake.dir, { recursive: true, force: true }));
+      const result = await runScript(["--target", "linux", "--run", "--prep-script", fake.linuxPrep], {
+        CRABBOX_BIN: fake.fake,
+        CRABBOX_FAKE_LOG: fake.log,
+        CRABBOX_IMAGE_LOG_DIR: path.join(fake.dir, "logs"),
+        CRABBOX_FAKE_READINESS_FAIL_LEASE: `cbx_${phase}`,
+      });
+      assert.equal(result.code, 74, result.stderr);
+      const log = await readFile(fake.log, "utf8");
+      assert.match(log, new RegExp(`stop --provider aws --target linux cbx_${phase}`));
+      if (phase === "source") assert.doesNotMatch(log, /checkpoint create/);
+      if (phase === "candidate") assert.doesNotMatch(log, /image promote/);
+      if (phase === "promoted") assert.match(log, /image promote .*--restore-receipt/);
     });
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  }
+});
+
+test("publisher carries disabled Linux capability flags into every smoke", async (t) => {
+  const fake = await setupFakeCrabbox();
+  t.after(() => rm(fake.dir, { recursive: true, force: true }));
+  const result = await runScript(["--target", "linux", "--run", "--no-browser", "--no-desktop", "--prep-script", fake.linuxPrep], {
+    CRABBOX_BIN: fake.fake,
+    CRABBOX_FAKE_LOG: fake.log,
+    CRABBOX_IMAGE_LOG_DIR: path.join(fake.dir, "logs"),
   });
-
-  assert.equal(smoke.code, 0, smoke.stderr || smoke.stdout);
-  assert.equal(await readFile(sgMarker, "utf8"), "");
-  await assert.rejects(readFile(sudoMarker, "utf8"));
+  assert.equal(result.code, 0, result.stderr);
+  const log = await readFile(fake.log, "utf8");
+  assert.equal((log.match(/export CRABBOX_LINUX_DESKTOP_TOOLS=0 CRABBOX_LINUX_BROWSER=0/g) ?? []).length, 3);
 });
 
 test("AWS devtools mint wrapper maps windows flags", async () => {

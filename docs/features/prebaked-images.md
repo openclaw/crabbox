@@ -74,9 +74,12 @@ baseline. It atomically writes the strict root-owned
 packages and their functional probes; `linux-builder` additionally proves
 generic native-build, Git LFS, package-config, and Python virtual-environment
 capabilities. The Python probe creates a disposable pip-enabled virtual
-environment and runs its pip before cleaning up. Images missing a builder
-capability are truthfully downgraded to `linux-minimal`, while images missing a
-baseline capability cannot be marked.
+environment and runs its pip before removing it. The generic producer can
+downgrade a missing builder capability to `linux-minimal`. Developer-image
+preparation instead requires `--verify linux-builder` before cloud-init cleanup
+and fails if that profile cannot be proved. The publisher uses trusted source
+bytes to repeat this nonwriting verification on the source, candidate, and
+promoted leases. Images missing a baseline capability cannot be marked.
 
 Later boots verify exact canonical manifest bytes, its trusted non-symlink path,
 root ownership/group, file mode and bounded size, and every declared profile

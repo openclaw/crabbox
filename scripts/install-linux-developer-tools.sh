@@ -387,7 +387,8 @@ prepare_fast_boot() {
   local readiness_producer
   readiness_producer="$(readiness_producer_path)" || return 1
   install -d -m 1777 /var/cache/crabbox /var/cache/crabbox/pnpm /var/cache/crabbox/npm /var/cache/crabbox/corepack /var/cache/crabbox/docker
-  "$readiness_producer"
+  "$readiness_producer" || return $?
+  "$readiness_producer" --verify linux-builder || return $?
   systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
   systemctl mask apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
   clean_cloud_init_state || return $?

@@ -621,7 +621,7 @@ if test "\${1:-}" = '--print-packages'; then
   exit 0
 fi
 
-if test "$(id -u)" -ne 0; then
+if test "\${1:-}" != '--verify' && test "$(id -u)" -ne 0; then
   command -v sudo >/dev/null 2>&1 || { echo 'Linux readiness producer requires root' >&2; exit 1; }
   exec sudo -H bash "$0" "$@"
 fi
@@ -631,9 +631,33 @@ if test "\${1:-}" = '--install'; then
   install -m 0755 -o root -g root "$0" /usr/local/libexec/crabbox/linux-readiness.generated.sh
   exit 0
 fi
-test "$#" -eq 0 || { echo 'usage: linux-readiness.generated.sh [--install|--print-packages PROFILE]' >&2; exit 2; }
+if test "\${1:-}" = '--verify'; then
+  test "$#" -eq 2 || { echo 'usage: linux-readiness.generated.sh --verify PROFILE' >&2; exit 2; }
+  case "$2" in
+    linux-minimal|linux-builder) ;;
+    *) echo 'unknown Linux readiness profile' >&2; exit 2 ;;
+  esac
+else
+  test "$#" -eq 0 || { echo 'usage: linux-readiness.generated.sh [--install|--print-packages PROFILE|--verify PROFILE]' >&2; exit 2; }
+fi
 
 ${readinessFunctions(minimal, builder, overrides)}
+
+if test "\${1:-}" = '--verify'; then
+  # Verification never repairs or downgrades image evidence, and rejects its claim before probing.
+  crabbox_readiness_manifest_metadata_matches || { echo 'Linux readiness verification: untrusted or noncanonical manifest' >&2; exit 1; }
+  case "$2" in
+    linux-minimal) crabbox_required_sha256="$crabbox_minimal_manifest_sha256" ;;
+    linux-builder) crabbox_required_sha256="$crabbox_builder_manifest_sha256" ;;
+  esac
+  test "$crabbox_file_sha256" = "$crabbox_required_sha256" || { echo "Linux readiness verification: $2 manifest required" >&2; exit 1; }
+  case "$2" in
+    linux-minimal) crabbox_minimal_readiness_probes ;;
+    linux-builder) crabbox_builder_readiness_probes ;;
+  esac || { echo "Linux readiness verification: $2 capability proof failed" >&2; exit 1; }
+  echo "crabbox Linux readiness verified: $2"
+  exit 0
+fi
 
 if ! crabbox_minimal_readiness_probes; then
   echo 'Linux readiness producer: minimal capability proof failed' >&2

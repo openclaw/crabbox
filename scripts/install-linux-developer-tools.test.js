@@ -42,7 +42,11 @@ test("linux developer image executes the standalone producer and stops when capa
   );
   writeExecutable(
     path.join(scriptRoot, "linux-readiness.generated.sh"),
-    `#!/usr/bin/env bash\nprintf 'verified\\n' >${JSON.stringify(marker)}\nexit \"\${CRABBOX_FAKE_PRODUCER_EXIT:-0}\"\n`,
+    `#!/usr/bin/env bash
+printf '%s\\n' "$*" >>${JSON.stringify(marker)}
+if [[ "\${1:-}" == --verify ]]; then exit "\${CRABBOX_FAKE_VERIFY_EXIT:-0}"; fi
+exit "\${CRABBOX_FAKE_PRODUCER_EXIT:-0}"
+`,
   );
   const shell = `set -euo pipefail
 source ${JSON.stringify(path.join(scriptRoot, "install.sh"))}
@@ -53,7 +57,7 @@ sync() { return 0; }
 prepare_fast_boot`;
   const successful = spawnSync("bash", ["-c", shell], { cwd: repoRoot, encoding: "utf8" });
   assert.equal(successful.status, 0, successful.stderr || successful.stdout);
-  assert.equal(fs.readFileSync(marker, "utf8"), "verified\n");
+  assert.equal(fs.readFileSync(marker, "utf8"), "\n--verify linux-builder\n");
   assert.equal(fs.readFileSync(cleaned, "utf8"), "cleaned\n");
   fs.unlinkSync(cleaned);
   const failed = spawnSync("bash", ["-c", shell], {
@@ -63,6 +67,13 @@ prepare_fast_boot`;
   });
   assert.equal(failed.status, 73, failed.stderr || failed.stdout);
   assert.equal(fs.existsSync(cleaned), false);
+  const downgraded = spawnSync("bash", ["-c", shell], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: { ...process.env, CRABBOX_FAKE_VERIFY_EXIT: "74" },
+  });
+  assert.equal(downgraded.status, 74, downgraded.stderr || downgraded.stdout);
+  assert.equal(fs.existsSync(cleaned), false, "minimal producer success must not reach cleanup");
 });
 
 test("linux developer image cloud-init cleanup preserves current-boot facts", async (t) => {
@@ -403,6 +414,7 @@ done
 					CRABBOX_FAKE_SUDO_LOG: sudoLog,
 				},
 				encoding: "utf8",
+				timeout: 10000,
 			},
 		),
 		sudoLog,
@@ -439,6 +451,7 @@ test("linux developer tool setup isolates root HOME and preserves approved confi
 		...expectedEnv,
 		[unrelatedName]: unrelatedValue,
 	});
+	assert.equal(result.error, undefined);
 	assert.equal(result.status, 0, result.stderr || result.stdout);
 	const lines = fs.readFileSync(sudoLog, "utf8").trim().split("\n");
 	const args = lines.filter((line) => line.startsWith("arg=")).map((line) => line.slice(4));
