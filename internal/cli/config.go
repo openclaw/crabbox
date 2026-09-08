@@ -752,13 +752,6 @@ type ExeDevConfig struct {
 	NoEmail     bool
 }
 
-type RailwayConfig struct {
-	APIToken      string
-	APIURL        string
-	ProjectID     string
-	EnvironmentID string
-}
-
 type UnikraftCloudConfig struct {
 	APIKey   string
 	APIURL   string
@@ -2870,9 +2863,7 @@ func baseConfig() Config {
 			Disk:        "10GB",
 			NoEmail:     true,
 		},
-		Railway: RailwayConfig{
-			APIURL: "https://backboard.railway.com/graphql/v2",
-		},
+		Railway:      defaultRailwayConfig(),
 		FastAPICloud: defaultFastAPICloudConfig(),
 		UnikraftCloud: UnikraftCloudConfig{
 			Metro: "fra",
@@ -3849,12 +3840,6 @@ type fileExeDevConfig struct {
 	User        string `yaml:"user,omitempty"`
 	WorkRoot    string `yaml:"workRoot,omitempty"`
 	NoEmail     *bool  `yaml:"noEmail,omitempty"`
-}
-
-type fileRailwayConfig struct {
-	APIURL        string `yaml:"apiUrl,omitempty"`
-	ProjectID     string `yaml:"projectId,omitempty"`
-	EnvironmentID string `yaml:"environmentId,omitempty"`
 }
 
 type fileUnikraftCloudConfig struct {
@@ -6268,16 +6253,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		applyOptional(&cfg.ExeDev.NoEmail, file.ExeDev.NoEmail)
 	}
-	if file.Railway != nil {
-		if file.Railway.APIURL != "" {
-			cfg.Railway.APIURL = file.Railway.APIURL
+	{
+		applied, err := cfg.Railway.applyFile(file.Railway)
+		if applied.APIURL {
 			cfg.credentialProvenance.railwayAPIURL = credentialSource
 		}
-		if file.Railway.ProjectID != "" {
-			cfg.Railway.ProjectID = file.Railway.ProjectID
-		}
-		if file.Railway.EnvironmentID != "" {
-			cfg.Railway.EnvironmentID = file.Railway.EnvironmentID
+		if err != nil {
+			return err
 		}
 	}
 	{
@@ -8389,16 +8371,18 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_EXE_DEV_NO_EMAIL"); ok {
 		cfg.ExeDev.NoEmail = value
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_RAILWAY_API_TOKEN", "RAILWAY_API_TOKEN"); ok {
-		cfg.Railway.APIToken = value
-		cfg.credentialProvenance.railwayAPIToken = credentialSourceEnvironment
+	{
+		applied, err := cfg.Railway.applyEnv()
+		if applied.APIToken {
+			cfg.credentialProvenance.railwayAPIToken = credentialSourceEnvironment
+		}
+		if applied.APIURL {
+			cfg.credentialProvenance.railwayAPIURL = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_RAILWAY_API_URL", "RAILWAY_API_URL"); ok {
-		cfg.Railway.APIURL = value
-		cfg.credentialProvenance.railwayAPIURL = credentialSourceEnvironment
-	}
-	cfg.Railway.ProjectID = getenv("CRABBOX_RAILWAY_PROJECT_ID", getenv("RAILWAY_PROJECT_ID", cfg.Railway.ProjectID))
-	cfg.Railway.EnvironmentID = getenv("CRABBOX_RAILWAY_ENVIRONMENT_ID", getenv("RAILWAY_ENVIRONMENT_ID", cfg.Railway.EnvironmentID))
 	{
 		applied, err := cfg.FastAPICloud.applyEnv()
 		if applied.Token {

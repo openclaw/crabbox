@@ -209,7 +209,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if flagWasSet(fs, "cubesandbox-proxy-scheme") {
 		provenance.cubeSandboxProxyProto = credentialSourceFlag
 	}
-	if flagWasSet(fs, "railway-url") {
+	if RailwayConfigFlagPresence(fs).APIURL {
 		provenance.railwayAPIURL = credentialSourceFlag
 	}
 	if FastAPICloudConfigFlagPresence(fs).APIURL {

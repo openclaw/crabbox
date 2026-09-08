@@ -32,6 +32,115 @@ func TestRailwayProviderSpec(t *testing.T) {
 	}
 }
 
+func TestRailwayBindingFlagsRemainDeferredAndLocal(t *testing.T) {
+	for _, name := range []string{"railway", "rail", "railwayapp", " Railway "} {
+		cfg := Config{Provider: name, Railway: RailwayConfig{APIURL: "https://example.invalid/prior", ProjectID: "prior-app", EnvironmentID: "prior-team"}}
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		values := RegisterRailwayProviderFlags(fs, cfg)
+		fs.VisitAll(func(f *flag.Flag) {
+			if strings.Contains(f.Name, "token") {
+				t.Fatal("token flag registered")
+			}
+		})
+		cfg.Railway.ProjectID = "later-app"
+		before := cfg
+		if err := ApplyRailwayProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(cfg, before) {
+			t.Fatal("unvisited flags changed config")
+		}
+		if err := fs.Parse([]string{"--railway-url=", "--railway-project=", "--railway-environment="}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyRailwayProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatalf("wrapper performed deferred client validation: %v", err)
+		}
+		before.Railway.APIURL, before.Railway.ProjectID, before.Railway.EnvironmentID = "", "", ""
+		if !reflect.DeepEqual(cfg, before) {
+			t.Fatal("wrapper copies or global provenance side effects changed")
+		}
+		if _, err := (Provider{}).Configure(cfg, Runtime{}); err != nil {
+			t.Fatalf("Configure performed client validation: %v", err)
+		}
+		if err := ApplyRailwayProviderFlags(&cfg, fs, struct{}{}); err != nil {
+			t.Fatal(err)
+		}
+		for _, args := range [][]string{{"--type=vm"}, {"--type=vm", "--class=large"}} {
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			want := "--type"
+			if len(args) == 2 {
+				want = "--class"
+			}
+			for _, v := range []any{nil, struct{}{}, values} {
+				before := cfg
+				err := ApplyRailwayProviderFlags(&cfg, fs, v)
+				if err == nil || err.Error() != want+" is not supported for provider=railway" {
+					t.Fatalf("alias %q guard=%v", name, err)
+				}
+				if !reflect.DeepEqual(cfg, before) {
+					t.Fatal("guard applied values or provenance")
+				}
+			}
+		}
+	}
+}
+
+func TestRailwayClientDefaultAndValidationOrder(t *testing.T) {
+	for _, rawToken := range []string{"", "  "} {
+		cfg := Config{Railway: RailwayConfig{APIToken: rawToken, APIURL: "relative"}}
+		if _, err := newRailwayClient(cfg, Runtime{}); err == nil || err.Error() != "provider=railway requires RAILWAY_API_TOKEN" {
+			t.Fatalf("token validation order=%v", err)
+		}
+	}
+	for _, tc := range []struct {
+		raw, want string
+		invalid   bool
+	}{
+		{raw: "", want: "https://backboard.railway.com/graphql/v2"},
+		{raw: "  ", invalid: true},
+		{raw: " https://example.invalid/api/ ", want: "https://example.invalid/api"},
+	} {
+		cfg := Config{Railway: RailwayConfig{APIToken: "inert-constructor-only", APIURL: tc.raw}}
+		before := cfg.Railway
+		api, err := newRailwayClient(cfg, Runtime{})
+		if tc.invalid {
+			if err == nil || err.Error() != `railway url "" is invalid` {
+				t.Fatalf("whitespace endpoint=%v", err)
+			}
+		} else {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if api.(*railwayClient).apiURL != tc.want {
+				t.Fatalf("endpoint=%q want=%q", api.(*railwayClient).apiURL, tc.want)
+			}
+		}
+		if cfg.Railway != before {
+			t.Fatal("constructor changed raw config")
+		}
+	}
+}
+
+func TestRailwayClaimScopeKeepsRawEndpointContract(t *testing.T) {
+	cfg := Config{Railway: RailwayConfig{ProjectID: " project ", EnvironmentID: " environment "}}
+	if got := (Provider{}).ClaimScope(cfg); got != "" {
+		t.Fatalf("empty endpoint must not gain client default scope: %q", got)
+	}
+	cfg.Railway.APIURL = " https://example.invalid/api/ "
+	if got := (Provider{}).ClaimScope(cfg); got != "endpoint:https://example.invalid/api|project:project|environment:environment" {
+		t.Fatalf("legacy scope=%q", got)
+	}
+	cfg.Railway.EnvironmentID = ""
+	if got := (Provider{}).ClaimScope(cfg); got != "" {
+		t.Fatalf("incomplete scope=%q", got)
+	}
+}
+
 func TestRailwayClientRequiresAPIToken(t *testing.T) {
 	cfg := Config{}
 	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"

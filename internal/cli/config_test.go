@@ -1543,6 +1543,113 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestRailwayFileAcceptanceAndSource(t *testing.T) {
+	if _, ok := reflect.TypeOf(fileRailwayConfig{}).FieldByName("APIToken"); ok {
+		t.Fatal("APIToken must not be a YAML field")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, raw := range []string{"null", "''", "'  '", "equal"} {
+			cfg := baseConfig()
+			cfg.Provider = "railway"
+			cfg.Railway = RailwayConfig{APIToken: "inert", APIURL: "https://example.invalid/api", ProjectID: "project", EnvironmentID: "environment"}
+			cfg.credentialProvenance.railwayAPIURL, cfg.credentialProvenance.railwayAPIToken = credentialSourceEnvironment, credentialSourceEnvironment
+			want := cfg.Railway
+			wantSource := credentialSourceEnvironment
+			url, project, environment := raw, raw, raw
+			if raw == "equal" {
+				url, project, environment = want.APIURL, want.ProjectID, want.EnvironmentID
+			}
+			if raw == "'  '" {
+				want.APIURL, want.ProjectID, want.EnvironmentID = "  ", "  ", "  "
+			}
+			if raw == "equal" || raw == "'  '" {
+				wantSource = credentialSourceForFile(trusted)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte("railway:\n  apiToken: ignored-inert\n  apiUrl: "+url+"\n  projectId: "+project+"\n  environmentId: "+environment+"\n"), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Railway != want || cfg.credentialProvenance.railwayAPIURL != wantSource || cfg.credentialProvenance.railwayAPIToken != credentialSourceEnvironment {
+				t.Fatalf("file contract changed trusted=%t raw=%q", trusted, raw)
+			}
+			if raw == "equal" {
+				err := validateProviderCredentialDestination(cfg)
+				if (err != nil) != !trusted {
+					t.Fatalf("later policy trusted=%t err=%v", trusted, err)
+				}
+			}
+			before := cfg
+			if err := applyFileConfigWithTrust(&cfg, fileConfig{Railway: &fileRailwayConfig{}}, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Railway != before.Railway || !reflect.DeepEqual(cfg.credentialProvenance, before.credentialProvenance) {
+				t.Fatal("omitted fields changed value/source")
+			}
+		}
+	}
+}
+
+func TestRailwayEnvironmentAcceptanceAndSource(t *testing.T) {
+	for _, mode := range []string{"primary", "alias", "empty", "whitespace", "equal", "token only", "URL only"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Railway = RailwayConfig{APIToken: "inert", APIURL: "https://example.invalid/prior", ProjectID: "project", EnvironmentID: "environment"}
+			cfg.credentialProvenance.railwayAPIURL, cfg.credentialProvenance.railwayAPIToken = credentialSourceTrustedFile, credentialSourceTrustedFile
+			want := cfg.Railway
+			for _, item := range []struct {
+				suffix, primaryValue, aliasValue string
+				target                           *string
+			}{
+				{"API_TOKEN", "inert-primary", "inert-alias", &want.APIToken},
+				{"API_URL", "https://example.invalid/primary", "https://example.invalid/alias", &want.APIURL},
+				{"PROJECT_ID", "primary-project", "alias-project", &want.ProjectID},
+				{"ENVIRONMENT_ID", "primary-environment", "alias-environment", &want.EnvironmentID},
+			} {
+				primary, alias := item.primaryValue, item.aliasValue
+				switch mode {
+				case "empty":
+					primary, alias = "", ""
+				case "equal":
+					primary = *item.target
+				case "whitespace":
+					primary = "  "
+					*item.target = primary
+				case "alias":
+					primary = ""
+					*item.target = alias
+				case "token only", "URL only":
+					if (mode == "token only" && item.suffix == "API_TOKEN") || (mode == "URL only" && item.suffix == "API_URL") {
+						*item.target = primary
+					} else {
+						primary, alias = "", ""
+					}
+				default:
+					*item.target = primary
+				}
+				t.Setenv("CRABBOX_RAILWAY_"+item.suffix, primary)
+				t.Setenv("RAILWAY_"+item.suffix, alias)
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			urlSource, tokenSource := credentialSourceEnvironment, credentialSourceEnvironment
+			if mode == "empty" || mode == "token only" {
+				urlSource = credentialSourceTrustedFile
+			}
+			if mode == "empty" || mode == "URL only" {
+				tokenSource = credentialSourceTrustedFile
+			}
+			if cfg.Railway != want || cfg.credentialProvenance.railwayAPIURL != urlSource || cfg.credentialProvenance.railwayAPIToken != tokenSource {
+				t.Fatal("environment value/acceptance changed")
+			}
+		})
+	}
+}
+
 func TestFastAPICloudFileAcceptanceAndProvenance(t *testing.T) {
 	if _, ok := reflect.TypeOf(fileFastAPICloudConfig{}).FieldByName("Token"); ok {
 		t.Fatal("token must not have a YAML source")

@@ -1,13 +1,13 @@
 # Typed provider config bindings
 
 Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
-Cloud Run Sandbox, and FastAPI Cloud describe their mechanical config bindings
+Cloud Run Sandbox, FastAPI Cloud, and Railway describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
 `internal/cli/config_opensandbox.go`,
 `internal/cli/config_anthropic_sandbox_runtime.go`,
-`internal/cli/config_cloud_run_sandbox.go`, and
-`internal/cli/config_fastapi_cloud.go`.
+`internal/cli/config_cloud_run_sandbox.go`,
+`internal/cli/config_fastapi_cloud.go`, and `internal/cli/config_railway.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -71,7 +71,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -197,6 +197,15 @@ to the existing file/environment source mapping, while central flag provenance
 uses the distinct visited query at its unchanged phase. Client token checks,
 endpoint validation, redirects, service-control restrictions, and redacted
 presentation remain handwritten and deferred as before.
+
+Railway's four fields use the same existing mechanisms: an environment-only API
+token, three nonempty-only YAML bindings, four environment alias chains, and
+three flags. Accepted token/URL reports feed core's existing source mapping;
+raw URL flag visits remain a separate post-success provenance step. The real
+client shares the generated endpoint default, while claim scope and command
+routing keep their existing behavior for an empty configured endpoint. Token-first
+validation, Railway's own URL validator, provider aliases, bridge behavior,
+HTTP timeout, and service lifecycle remain outside generation.
 
 The generator accepts only these five exact source grants. Credential handling,
 destination validation and provenance, provider aliases, and provider selection

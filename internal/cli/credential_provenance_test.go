@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestExternalDesktopTransientCredentialIsExactAndRedacted(t *testing.T) {
@@ -664,6 +666,10 @@ func TestConfigMergeTracksCredentialDestinationSources(t *testing.T) {
 }
 
 func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
+	var railwayFile fileConfig
+	if err := yaml.Unmarshal([]byte("railway:\n  apiUrl: https://repo.example.test\n"), &railwayFile); err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		name          string
 		provider      string
@@ -687,7 +693,7 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 		{
 			name:          "railway",
 			provider:      "railway",
-			file:          fileConfig{Railway: &fileRailwayConfig{APIURL: "https://repo.example.test"}},
+			file:          railwayFile,
 			credentialEnv: "CRABBOX_RAILWAY_API_TOKEN",
 			approveEnv:    "CRABBOX_RAILWAY_API_URL",
 		},
