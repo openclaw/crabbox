@@ -1008,7 +1008,9 @@ func newCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {
 					Timeout:   5 * time.Second,
 					KeepAlive: 30 * time.Second,
 				}).DialContext,
-				TLSHandshakeTimeout:   10 * time.Second,
+				TLSHandshakeTimeout: 10 * time.Second,
+				// Custom dialing otherwise disables HTTP/2 and its independent streams.
+				ForceAttemptHTTP2:     true,
 				ResponseHeaderTimeout: coordinatorHTTPTimeout,
 				IdleConnTimeout:       90 * time.Second,
 			},

@@ -90,7 +90,9 @@ func (c *coordinatorControlConn) close() {
 	if c == nil || c.conn == nil {
 		return
 	}
-	_ = c.conn.Close(websocket.StatusNormalClosure, "")
+	// Control has no terminal message to flush. Join local I/O without making
+	// a finished or canceled owner wait for the peer's close handshake.
+	_ = c.conn.CloseNow()
 }
 
 func (c *coordinatorControlConn) write(ctx context.Context, payload any) error {
