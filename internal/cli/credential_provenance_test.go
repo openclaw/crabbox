@@ -553,6 +553,10 @@ func TestRepositoryNomadDestinationWithoutSelectedTokenRemainsInspectable(t *tes
 }
 
 func TestRepositoryProviderSettingsRemainApplied(t *testing.T) {
+	var cloudflareFile fileConfig
+	if err := yaml.Unmarshal([]byte("cloudflare:\n  apiUrl: https://runner.repo.example.test\n  workdir: /workspace/project\n"), &cloudflareFile); err != nil {
+		t.Fatal(err)
+	}
 	cfg := baseConfig()
 	file := fileConfig{
 		Morph: &fileMorphConfig{
@@ -561,10 +565,7 @@ func TestRepositoryProviderSettingsRemainApplied(t *testing.T) {
 			SSHGatewayHost: "ssh.repo.example.test",
 			WorkRoot:       "/workspace/project",
 		},
-		Cloudflare: &fileCloudflareConfig{
-			APIURL:  "https://runner.repo.example.test",
-			Workdir: "/workspace/project",
-		},
+		Cloudflare: cloudflareFile.Cloudflare,
 		Semaphore: &fileSemaphoreConfig{
 			Host:        "repo.example.test",
 			Project:     "project",

@@ -1036,12 +1036,6 @@ type AsciiBoxConfig struct {
 	Workdir string
 }
 
-type CloudflareConfig struct {
-	APIURL  string
-	Token   string
-	Workdir string
-}
-
 const DefaultCloudflareDynamicWorkersCompatibilityDate = "2026-06-12"
 
 type CloudflareDynamicWorkersConfig struct {
@@ -2999,9 +2993,7 @@ func baseConfig() Config {
 			CLIPath: "box",
 			Workdir: "/home/user/crabbox",
 		},
-		Cloudflare: CloudflareConfig{
-			Workdir: "/workspace/crabbox",
-		},
+		Cloudflare: defaultCloudflareConfig(),
 		CloudflareDynamicWorkers: CloudflareDynamicWorkersConfig{
 			CompatibilityDate: DefaultCloudflareDynamicWorkersCompatibilityDate,
 			CacheMode:         "stable",
@@ -4065,12 +4057,6 @@ type fileAsciiBoxConfig struct {
 	Workdir string `yaml:"workdir,omitempty"`
 }
 
-type fileCloudflareConfig struct {
-	APIURL  string `yaml:"apiUrl,omitempty"`
-	Token   string `yaml:"token,omitempty"`
-	Workdir string `yaml:"workdir,omitempty"`
-}
-
 type fileCloudflareDynamicWorkersConfig struct {
 	LoaderURL          string            `yaml:"loaderUrl,omitempty"`
 	URL                string            `yaml:"url,omitempty"`
@@ -4083,23 +4069,6 @@ type fileCloudflareDynamicWorkersConfig struct {
 	Subrequests        int               `yaml:"subrequests,omitempty"`
 	TimeoutSecs        int               `yaml:"timeoutSecs,omitempty"`
 	Metadata           map[string]string `yaml:"metadata,omitempty"`
-}
-
-func applyCloudflareFileConfig(cfg *Config, file *fileCloudflareConfig, source credentialValueSource) {
-	if file == nil {
-		return
-	}
-	if file.APIURL != "" {
-		cfg.Cloudflare.APIURL = file.APIURL
-		cfg.credentialProvenance.cloudflareAPIURL = source
-	}
-	if file.Token != "" {
-		cfg.Cloudflare.Token = file.Token
-		cfg.credentialProvenance.cloudflareToken = source
-	}
-	if file.Workdir != "" {
-		cfg.Cloudflare.Workdir = file.Workdir
-	}
 }
 
 func applyOptional[T any](target, value *T) {
@@ -6844,7 +6813,18 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.AsciiBox.Workdir = file.AsciiBox.Workdir
 		}
 	}
-	applyCloudflareFileConfig(cfg, file.Cloudflare, credentialSource)
+	{
+		applied, err := cfg.Cloudflare.applyFile(file.Cloudflare)
+		if applied.APIURL {
+			cfg.credentialProvenance.cloudflareAPIURL = credentialSource
+		}
+		if applied.Token {
+			cfg.credentialProvenance.cloudflareToken = credentialSource
+		}
+		if err != nil {
+			return err
+		}
+	}
 	if err := applyCloudflareSandboxFileConfig(cfg, file.CloudflareSandbox, trusted); err != nil {
 		return err
 	}
@@ -8745,15 +8725,18 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.AsciiBox.CLIPath = getenv("CRABBOX_ASCII_BOX_CLI", getenv("BOX_CLI", cfg.AsciiBox.CLIPath))
 	cfg.AsciiBox.Workdir = getenv("CRABBOX_ASCII_BOX_WORKDIR", cfg.AsciiBox.Workdir)
-	if value := os.Getenv("CRABBOX_CLOUDFLARE_RUNNER_URL"); value != "" {
-		cfg.Cloudflare.APIURL = value
-		cfg.credentialProvenance.cloudflareAPIURL = credentialSourceEnvironment
+	{
+		applied, err := cfg.Cloudflare.applyEnv()
+		if applied.APIURL {
+			cfg.credentialProvenance.cloudflareAPIURL = credentialSourceEnvironment
+		}
+		if applied.Token {
+			cfg.credentialProvenance.cloudflareToken = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
-	if value := os.Getenv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN"); value != "" {
-		cfg.Cloudflare.Token = value
-		cfg.credentialProvenance.cloudflareToken = credentialSourceEnvironment
-	}
-	cfg.Cloudflare.Workdir = getenv("CRABBOX_CLOUDFLARE_WORKDIR", cfg.Cloudflare.Workdir)
 	cfg.Crownest.APIURL = getenv("CRABBOX_CROWNEST_API_URL", getenv("CROWNEST_API_URL", cfg.Crownest.APIURL))
 	cfg.Crownest.ProjectID = getenv("CRABBOX_CROWNEST_PROJECT_ID", getenv("CROWNEST_PROJECT_ID", cfg.Crownest.ProjectID))
 	cfg.Crownest.Template = getenv("CRABBOX_CROWNEST_TEMPLATE", getenv("CROWNEST_TEMPLATE", cfg.Crownest.Template))

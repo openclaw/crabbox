@@ -1543,6 +1543,87 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestCloudflareConfigAcceptanceAndSource(t *testing.T) {
+	for _, source := range []string{"user", "repository", "environment"} {
+		for _, mode := range []string{"omitted", "empty", "null", "equal", "whitespace", "token only", "URL only"} {
+			t.Run(source+"/"+mode, func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := baseConfig()
+				cfg.Provider = "cloudflare"
+				cfg.Cloudflare = CloudflareConfig{APIURL: "https://example.invalid/api", Token: "inert", Workdir: "/workspace/app"}
+				cfg.credentialProvenance.cloudflareAPIURL, cfg.credentialProvenance.cloudflareToken = credentialSourceFlag, credentialSourceFlag
+				want := cfg.Cloudflare
+				urlSource, tokenSource := credentialSourceFlag, credentialSourceFlag
+				acceptedSource := credentialSourceTrustedFile
+				if source == "repository" {
+					acceptedSource = credentialSourceRepository
+				}
+				if source == "environment" {
+					acceptedSource = credentialSourceEnvironment
+				}
+				fields := map[string]any{}
+				for _, field := range []struct {
+					key, env string
+					value    *string
+				}{{"apiUrl", "CRABBOX_CLOUDFLARE_RUNNER_URL", &want.APIURL}, {"token", "CRABBOX_CLOUDFLARE_RUNNER_TOKEN", &want.Token}, {"workdir", "CRABBOX_CLOUDFLARE_WORKDIR", &want.Workdir}} {
+					if mode == "omitted" || (mode == "token only" && field.key != "token") || (mode == "URL only" && field.key != "apiUrl") {
+						continue
+					}
+					var raw any = *field.value
+					if mode == "empty" {
+						raw = ""
+					}
+					if mode == "null" {
+						raw = nil
+					}
+					if mode == "whitespace" {
+						raw = "  "
+					}
+					fields[field.key] = raw
+					if v, ok := raw.(string); ok && v != "" {
+						*field.value = v
+						if field.key == "apiUrl" {
+							urlSource = acceptedSource
+						}
+						if field.key == "token" {
+							tokenSource = acceptedSource
+						}
+					}
+					if source == "environment" {
+						v, _ := raw.(string)
+						t.Setenv(field.env, v)
+					}
+				}
+				if source == "environment" {
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					data, err := yaml.Marshal(map[string]any{"cloudflare": fields})
+					if err != nil {
+						t.Fatal(err)
+					}
+					var file fileConfig
+					if err := yaml.Unmarshal(data, &file); err != nil {
+						t.Fatal(err)
+					}
+					if err := applyFileConfigWithTrust(&cfg, file, source == "user"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if cfg.Cloudflare != want || cfg.credentialProvenance.cloudflareAPIURL != urlSource || cfg.credentialProvenance.cloudflareToken != tokenSource {
+					t.Fatal("Cloudflare value/source acceptance changed")
+				}
+				if source == "repository" && mode == "equal" {
+					if err := validateProviderCredentialDestination(cfg); err != nil {
+						t.Fatalf("actual same-source repository token contract changed: %v", err)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestUpstashBoxFileAcceptanceAndSource(t *testing.T) {
 	if _, ok := reflect.TypeOf(fileUpstashBoxConfig{}).FieldByName("APIKey"); ok {
 		t.Fatal("APIKey must not be a YAML field")

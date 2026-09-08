@@ -1,14 +1,15 @@
 # Typed provider config bindings
 
 Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
-Cloud Run Sandbox, FastAPI Cloud, Railway, and Upstash Box describe their mechanical config bindings
+Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, and Cloudflare's container
+runner describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
 `internal/cli/config_opensandbox.go`,
 `internal/cli/config_anthropic_sandbox_runtime.go`,
 `internal/cli/config_cloud_run_sandbox.go`,
-`internal/cli/config_fastapi_cloud.go`, `internal/cli/config_railway.go`, and
-`internal/cli/config_upstash_box.go`.
+`internal/cli/config_fastapi_cloud.go`, `internal/cli/config_railway.go`,
+`internal/cli/config_upstash_box.go`, and `internal/cli/config_cloudflare.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -51,6 +52,12 @@ machine-specific paths. Its header identifies the generator and source file.
    primary `env`, allow an existing alias, and omit `config`, `flag`, `help`, and
    `default` tags entirely. This mode retains a zero default and exposes no YAML
    or command-line field; it does not generate credential presentation or policy.
+   An existing string with file/environment input but no flag uses the exact
+   `sources:"user,repo,env"` grant: require `config` and primary `env`, and omit
+   `flag`, `help`, and `default` tags entirely. It retains a zero default and
+   uses existing file predicates and applied reports without adding a flag or
+   changing trust policy. This grant does not permit a file input on an
+   environment-only field.
    There is no implicit source grant. An optional `default` tag supplies a scalar default checked
    against the field type; otherwise the Go zero value applies. Current integer
    fields require `nonnegative:"true"` for eager file/environment validation.
@@ -72,7 +79,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -218,7 +225,18 @@ and narrower provider spelling match. Exact provider alias guards, subsequent
 validation, the fixed workspace root, uploads, and lifecycle policy stay with
 their existing owners.
 
-The generator accepts only these five exact source grants. Credential handling,
+Cloudflare's container runner declares all three string fields. Its token keeps
+existing nonempty file/environment admission without a flag; the URL and workdir
+retain flags. Accepted URL/token reports feed the same core source mapping, and
+raw URL flag visits stay in the central post-success phase. Provider class/type
+normalization still precedes flag-value assertion, and URL/token/type validation
+remains deferred to the client. The Go workdir fallback uses the generated
+constant. The bundled Worker's omitted-field HTTP defaults remain a separate
+protocol contract because the Go client supplies its resolved workdir explicitly.
+This migration does not include the distinct Cloudflare Sandbox provider or its
+ordered YAML aliases.
+
+The generator accepts only these six exact source grants. Credential handling,
 destination validation and provenance, provider aliases, and provider selection
 policy stay handwritten. A declared environment alias copies the existing string
 fallback only; it does not define credential forwarding or destination authority.

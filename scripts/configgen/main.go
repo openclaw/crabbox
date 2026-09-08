@@ -116,6 +116,13 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			if _, ok := tags.Lookup("config"); ok {
 				return s, fmt.Errorf("%s: env,flag sources require an absent config tag", f.name)
 			}
+		case "user,repo,env":
+			f.noFlag = true
+			for _, tag := range []string{"flag", "help", "default"} {
+				if _, ok := tags.Lookup(tag); ok {
+					return s, fmt.Errorf("%s: user,repo,env sources require an absent %s tag", f.name, tag)
+				}
+			}
 		case "env":
 			f.noFile, f.noFlag = true, true
 			for _, tag := range []string{"config", "flag", "help", "default"} {
@@ -131,7 +138,7 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 				}
 			}
 		default:
-			return s, fmt.Errorf("%s requires explicit sources user,repo,env,flag, user,env,flag, env,flag, flag, or env", f.name)
+			return s, fmt.Errorf("%s requires explicit sources user,repo,env,flag, user,env,flag, env,flag, flag, env, or user,repo,env", f.name)
 		}
 		var bindings []struct{ label, value string }
 		if !f.noFlag {
@@ -172,7 +179,7 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			return s, fmt.Errorf("%s: unsupported config type %s", f.name, f.kind)
 		}
 		if f.noFlag && f.kind != "string" {
-			return s, fmt.Errorf("%s: env sources support only string fields", f.name)
+			return s, fmt.Errorf("%s: %s sources support only string fields", f.name, tags.Get("sources"))
 		}
 		if value, ok := tags.Lookup("reportApplied"); ok {
 			if value != "true" || (f.kind != "string" && f.kind != "bool") {

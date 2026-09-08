@@ -418,6 +418,12 @@ func TestUpstashBoxGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestCloudflareGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_cloudflare.go", "../../internal/cli/config_cloudflare_generated.go", "CloudflareConfig", "cloudflare", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -676,4 +682,81 @@ func TestGenerateOnlyEnvironmentField(t *testing.T) {
 		}
 		typecheckGenerated(t, source+"\nfunc firstNonEmptyEnv(...string) (string, bool) { panic(\"stub\") }\n", output)
 	}
+}
+
+const fileEnvSample = "package cli\ntype PilotConfig struct {\n" +
+	" Input string `sources:\"user,repo,env\" config:\"input\" env:\"PILOT_INPUT\" envAlias:\"PILOT_ALIAS\" fileIgnoreEmpty:\"true\" reportApplied:\"true\"`\n}"
+
+func TestSchemaFileEnvironmentOnlyFailsClosed(t *testing.T) {
+	for _, tag := range []string{"flag", "help", "default"} {
+		for _, value := range []string{"", "binding"} {
+			source := strings.Replace(fileEnvSample, `config:"input"`, `config:"input" `+tag+`:"`+value+`"`, 1)
+			_, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), "absent "+tag+" tag") {
+				t.Fatalf("contradictory %s=%q: %v", tag, value, err)
+			}
+		}
+	}
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"missing config", `config:"input"`, "", "invalid config binding"},
+		{"empty config", `config:"input"`, `config:""`, "invalid config binding"},
+		{"missing env", `env:"PILOT_INPUT"`, "", "invalid env binding"},
+		{"empty env", `env:"PILOT_INPUT"`, `env:""`, "invalid env binding"},
+		{"empty alias", `envAlias:"PILOT_ALIAS"`, `envAlias:""`, "invalid env binding"},
+		{"collision", `envAlias:"PILOT_ALIAS"`, `envAlias:"PILOT_INPUT"`, "duplicate env binding"},
+		{"env-only still excludes YAML", `sources:"user,repo,env"`, `sources:"env"`, "absent config tag"},
+		{"different grant", `sources:"user,repo,env"`, `sources:"user,env"`, "explicit sources"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(fileEnvSample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+	for _, kind := range []string{"bool", "int", "float64", "[]string"} {
+		_, err := parseSchema([]byte(strings.Replace(fileEnvSample, "Input string", "Input "+kind, 1)), "PilotConfig", "pilot")
+		if err == nil || !strings.Contains(err.Error(), "user,repo,env sources support only string fields") {
+			t.Fatalf("kind %s: %v", kind, err)
+		}
+	}
+}
+
+func TestGenerateFileEnvironmentOnlyBindings(t *testing.T) {
+	s, err := parseSchema([]byte(fileEnvSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	field := s.fields[0]
+	if !field.noFlag || field.noFile || field.noEnv || field.trustedFileOnly || !field.reportApplied || !field.fileIgnoreEmpty {
+		t.Fatalf("incorrect source facts: %+v", field)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic file/environment output: %v", err)
+	}
+	text := string(output)
+	for _, want := range []string{
+		`Input *string ` + "`yaml:\"input,omitempty\"`",
+		"if file.Input != nil && *file.Input != \"\" {\n\t\tcfg.Input = *file.Input\n\t\tapplied.Input = true",
+		"if value, ok := firstNonEmptyEnv(\"PILOT_INPUT\", \"PILOT_ALIAS\"); ok {\n\t\tcfg.Input = value\n\t\tapplied.Input = true",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing accepted-source binding %q", want)
+		}
+	}
+	flagFields := strings.SplitN(strings.SplitN(text, "type PilotConfigFlagValues struct {", 2)[1], "}", 2)[0]
+	if strings.TrimSpace(flagFields) != "" {
+		t.Fatal("file/environment-only field exposed as flag storage")
+	}
+	for _, absent := range []string{"trusted bool", "VisitedFlags", "FlagPresence", "values.Input", "fs.String(", "PilotConfigDefaultInput"} {
+		if strings.Contains(text, absent) {
+			t.Fatalf("ungranted surface %q", absent)
+		}
+	}
+	typecheckGenerated(t, fileEnvSample+"\nfunc firstNonEmptyEnv(...string) (string, bool) { panic(\"stub\") }\n", output)
 }

@@ -248,7 +248,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if flagWasSet(fs, "ascii-box-base-url") {
 		provenance.asciiBoxBaseURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "cloudflare-url") {
+	if CloudflareConfigFlagPresence(fs).APIURL {
 		provenance.cloudflareAPIURL = credentialSourceFlag
 	}
 	if flagWasSet(fs, "nomad-address") {

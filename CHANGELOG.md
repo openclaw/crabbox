@@ -23,6 +23,8 @@
 
 - Describe Upstash Box configuration bindings once, keeping runtime, size, endpoint, and workdir defaults consistent across clients, claims, and display without changing source precedence. [PR 2010](https://github.com/openclaw/crabbox/pull/2010). Thanks @steipete.
 
+- Describe Cloudflare container-runner configuration bindings once, sharing the CLI workdir default while preserving token sources, instance-type mapping, and Worker protocol defaults. Thanks @steipete.
+
 ## 0.53.0 - 2026-09-08
 
 ### Highlights
