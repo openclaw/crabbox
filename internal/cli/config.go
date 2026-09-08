@@ -1018,15 +1018,6 @@ type ModalConfig struct {
 	Secrets     []string
 }
 
-type UpstashBoxConfig struct {
-	APIKey    string
-	BaseURL   string
-	Runtime   string
-	Size      string
-	Workdir   string
-	KeepAlive bool
-}
-
 type SmolvmConfig struct {
 	APIKey   string
 	BaseURL  string
@@ -2994,12 +2985,7 @@ func baseConfig() Config {
 			Workdir: "/workspace/crabbox",
 			Python:  "python3",
 		},
-		UpstashBox: UpstashBoxConfig{
-			BaseURL: "https://us-east-1.box.upstash.com",
-			Runtime: "node",
-			Size:    "small",
-			Workdir: "/workspace/home/crabbox",
-		},
+		UpstashBox: defaultUpstashBoxConfig(),
 		Smolvm: SmolvmConfig{
 			BaseURL:  "https://api.smolmachines.com",
 			Image:    "alpine",
@@ -4061,14 +4047,6 @@ type fileModalConfig struct {
 	Python      string   `yaml:"python,omitempty"`
 	Environment string   `yaml:"environment,omitempty"`
 	Secrets     []string `yaml:"secrets,omitempty"`
-}
-
-type fileUpstashBoxConfig struct {
-	BaseURL   string `yaml:"baseUrl,omitempty"`
-	Runtime   string `yaml:"runtime,omitempty"`
-	Size      string `yaml:"size,omitempty"`
-	Workdir   string `yaml:"workdir,omitempty"`
-	KeepAlive *bool  `yaml:"keepAlive,omitempty"`
 }
 
 type fileSmolvmConfig struct {
@@ -6823,21 +6801,14 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Modal.Secrets = append([]string(nil), file.Modal.Secrets...)
 		}
 	}
-	if file.UpstashBox != nil {
-		if file.UpstashBox.BaseURL != "" {
-			cfg.UpstashBox.BaseURL = file.UpstashBox.BaseURL
+	{
+		applied, err := cfg.UpstashBox.applyFile(file.UpstashBox)
+		if applied.BaseURL {
 			cfg.credentialProvenance.upstashBoxBaseURL = credentialSource
 		}
-		if file.UpstashBox.Runtime != "" {
-			cfg.UpstashBox.Runtime = file.UpstashBox.Runtime
+		if err != nil {
+			return err
 		}
-		if file.UpstashBox.Size != "" {
-			cfg.UpstashBox.Size = file.UpstashBox.Size
-		}
-		if file.UpstashBox.Workdir != "" {
-			cfg.UpstashBox.Workdir = file.UpstashBox.Workdir
-		}
-		applyOptional(&cfg.UpstashBox.KeepAlive, file.UpstashBox.KeepAlive)
 	}
 	if file.Smolvm != nil {
 		if file.Smolvm.BaseURL != "" {
@@ -8736,19 +8707,17 @@ func applyEnv(cfg *Config) error {
 	if values, ok := getenvList("CRABBOX_MODAL_SECRETS"); ok {
 		cfg.Modal.Secrets = values
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_UPSTASH_BOX_API_KEY", "UPSTASH_BOX_API_KEY"); ok {
-		cfg.UpstashBox.APIKey = value
-		cfg.credentialProvenance.upstashBoxAPIKey = credentialSourceEnvironment
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_UPSTASH_BOX_BASE_URL", "UPSTASH_BOX_BASE_URL"); ok {
-		cfg.UpstashBox.BaseURL = value
-		cfg.credentialProvenance.upstashBoxBaseURL = credentialSourceEnvironment
-	}
-	cfg.UpstashBox.Runtime = getenv("CRABBOX_UPSTASH_BOX_RUNTIME", cfg.UpstashBox.Runtime)
-	cfg.UpstashBox.Size = getenv("CRABBOX_UPSTASH_BOX_SIZE", cfg.UpstashBox.Size)
-	cfg.UpstashBox.Workdir = getenv("CRABBOX_UPSTASH_BOX_WORKDIR", cfg.UpstashBox.Workdir)
-	if value, ok := getenvBool("CRABBOX_UPSTASH_BOX_KEEP_ALIVE"); ok {
-		cfg.UpstashBox.KeepAlive = value
+	{
+		applied, err := cfg.UpstashBox.applyEnv()
+		if applied.APIKey {
+			cfg.credentialProvenance.upstashBoxAPIKey = credentialSourceEnvironment
+		}
+		if applied.BaseURL {
+			cfg.credentialProvenance.upstashBoxBaseURL = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_SMOLVM_API_KEY", "SMOLMACHINES_API_KEY", "SMK_API_KEY"); ok {
 		cfg.Smolvm.APIKey = value
@@ -9206,7 +9175,7 @@ func serverTypeForConfig(cfg Config) string {
 		return blank(cfg.Modal.Image, "python:3.13-slim")
 	}
 	if cfg.Provider == "upstash-box" || cfg.Provider == "upstash" {
-		return blank(cfg.UpstashBox.Size, "small")
+		return blank(cfg.UpstashBox.Size, UpstashBoxConfigDefaultSize)
 	}
 	if cfg.Provider == "daytona" {
 		return "snapshot"

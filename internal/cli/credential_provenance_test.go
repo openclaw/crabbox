@@ -666,6 +666,10 @@ func TestConfigMergeTracksCredentialDestinationSources(t *testing.T) {
 }
 
 func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
+	var upstashFile fileConfig
+	if err := yaml.Unmarshal([]byte("upstashBox:\n  baseUrl: https://repo.example.test\n"), &upstashFile); err != nil {
+		t.Fatal(err)
+	}
 	var railwayFile fileConfig
 	if err := yaml.Unmarshal([]byte("railway:\n  apiUrl: https://repo.example.test\n"), &railwayFile); err != nil {
 		t.Fatal(err)
@@ -741,7 +745,7 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 		{
 			name:          "upstash box",
 			provider:      "upstash-box",
-			file:          fileConfig{UpstashBox: &fileUpstashBoxConfig{BaseURL: "https://repo.example.test"}},
+			file:          upstashFile,
 			credentialEnv: "CRABBOX_UPSTASH_BOX_API_KEY",
 			approveEnv:    "CRABBOX_UPSTASH_BOX_BASE_URL",
 		},

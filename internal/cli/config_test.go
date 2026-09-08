@@ -1543,6 +1543,152 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestUpstashBoxFileAcceptanceAndSource(t *testing.T) {
+	if _, ok := reflect.TypeOf(fileUpstashBoxConfig{}).FieldByName("APIKey"); ok {
+		t.Fatal("APIKey must not be a YAML field")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, raw := range []string{"null", "''", "'  '", "equal"} {
+			cfg := baseConfig()
+			cfg.Provider = "upstash-box"
+			cfg.UpstashBox = UpstashBoxConfig{APIKey: "inert", BaseURL: "https://example.invalid/api", Runtime: "python", Size: "large", Workdir: "/workspace/home/app", KeepAlive: true}
+			cfg.credentialProvenance.upstashBoxBaseURL, cfg.credentialProvenance.upstashBoxAPIKey = credentialSourceEnvironment, credentialSourceEnvironment
+			want := cfg.UpstashBox
+			wantSource := credentialSourceEnvironment
+			base, runtime, size, workdir := raw, raw, raw, raw
+			if raw == "equal" {
+				base, runtime, size, workdir = want.BaseURL, want.Runtime, want.Size, want.Workdir
+			}
+			if raw == "'  '" {
+				want.BaseURL, want.Runtime, want.Size, want.Workdir = "  ", "  ", "  ", "  "
+			}
+			if raw == "equal" || raw == "'  '" {
+				wantSource = credentialSourceForFile(trusted)
+			}
+			keep := "null"
+			if raw != "null" {
+				keep = "false"
+				want.KeepAlive = false
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte("upstashBox:\n  apiKey: ignored-inert\n  baseUrl: "+base+"\n  runtime: "+runtime+"\n  size: "+size+"\n  workdir: "+workdir+"\n  keepAlive: "+keep+"\n"), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.UpstashBox != want || cfg.credentialProvenance.upstashBoxBaseURL != wantSource || cfg.credentialProvenance.upstashBoxAPIKey != credentialSourceEnvironment {
+				t.Fatalf("file contract trusted=%t raw=%s", trusted, raw)
+			}
+			if raw == "equal" {
+				err := validateProviderCredentialDestination(cfg)
+				if (err != nil) != !trusted {
+					t.Fatalf("later policy=%v", err)
+				}
+			}
+			before := cfg
+			if err := applyFileConfigWithTrust(&cfg, fileConfig{UpstashBox: &fileUpstashBoxConfig{}}, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.UpstashBox != before.UpstashBox || !reflect.DeepEqual(cfg.credentialProvenance, before.credentialProvenance) {
+				t.Fatal("omission changed config/source")
+			}
+		}
+	}
+}
+
+func TestUpstashBoxEnvironmentAcceptanceAndSource(t *testing.T) {
+	for _, mode := range []string{"primary", "alias", "empty", "whitespace", "equal", "key only", "URL only"} {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		cfg.UpstashBox = UpstashBoxConfig{APIKey: "inert", BaseURL: "https://example.invalid/prior", Runtime: "node", Size: "small", Workdir: "/workspace/home/app"}
+		cfg.credentialProvenance.upstashBoxBaseURL, cfg.credentialProvenance.upstashBoxAPIKey = credentialSourceTrustedFile, credentialSourceTrustedFile
+		want := cfg.UpstashBox
+		for _, item := range []struct {
+			suffix, alias, value string
+			target               *string
+		}{
+			{"API_KEY", "UPSTASH_BOX_API_KEY", "inert-new", &want.APIKey}, {"BASE_URL", "UPSTASH_BOX_BASE_URL", "https://example.invalid/new", &want.BaseURL},
+			{"RUNTIME", "", "python", &want.Runtime}, {"SIZE", "", "large", &want.Size}, {"WORKDIR", "", "/workspace/home/new", &want.Workdir},
+		} {
+			primary, alias := item.value, item.value+"-alias"
+			if mode == "equal" {
+				primary = *item.target
+			} else if mode == "whitespace" {
+				primary = "  "
+			}
+			accept := mode != "empty" && !(mode == "key only" && item.suffix != "API_KEY") && !(mode == "URL only" && item.suffix != "BASE_URL")
+			if mode == "alias" {
+				primary = ""
+				accept = item.alias != ""
+			}
+			if !accept {
+				primary, alias = "", ""
+			} else if primary != "" {
+				*item.target = primary
+			} else {
+				*item.target = alias
+			}
+			t.Setenv("CRABBOX_UPSTASH_BOX_"+item.suffix, primary)
+			if item.alias != "" {
+				t.Setenv(item.alias, alias)
+			}
+		}
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		urlSource, keySource := credentialSourceEnvironment, credentialSourceEnvironment
+		if mode == "empty" || mode == "key only" {
+			urlSource = credentialSourceTrustedFile
+		}
+		if mode == "empty" || mode == "URL only" {
+			keySource = credentialSourceTrustedFile
+		}
+		if cfg.UpstashBox != want || cfg.credentialProvenance.upstashBoxBaseURL != urlSource || cfg.credentialProvenance.upstashBoxAPIKey != keySource {
+			t.Fatalf("env contract changed mode=%s", mode)
+		}
+	}
+	for _, prior := range []bool{false, true} {
+		for _, raw := range []string{"", "invalid", "no", "yes"} {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_UPSTASH_BOX_KEEP_ALIVE", raw)
+			cfg := baseConfig()
+			cfg.UpstashBox.KeepAlive = prior
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			want := prior
+			if raw == "no" {
+				want = false
+			}
+			if raw == "yes" {
+				want = true
+			}
+			if cfg.UpstashBox.KeepAlive != want {
+				t.Fatalf("bool raw=%q prior=%t", raw, prior)
+			}
+		}
+	}
+}
+
+func TestUpstashBoxCoreSizePresentationUsesExactAliases(t *testing.T) {
+	for _, name := range []string{"upstash-box", "upstash", "box", "upstashbox", " Upstash "} {
+		for _, size := range []string{"", "  ", "medium"} {
+			cfg := Config{Provider: name, UpstashBox: UpstashBoxConfig{Size: size}}
+			want := ""
+			if name == "upstash-box" || name == "upstash" {
+				want = size
+				if want == "" {
+					want = "small"
+				}
+			}
+			if got := serverTypeForConfig(cfg); got != want {
+				t.Fatalf("name=%q raw=%q type=%q want=%q", name, size, got, want)
+			}
+		}
+	}
+}
+
 func TestRailwayFileAcceptanceAndSource(t *testing.T) {
 	if _, ok := reflect.TypeOf(fileRailwayConfig{}).FieldByName("APIToken"); ok {
 		t.Fatal("APIToken must not be a YAML field")

@@ -123,6 +123,39 @@ func TestRailwayFlagSourceCentralPhase(t *testing.T) {
 	}
 }
 
+func TestUpstashBoxFlagSourceCentralPhase(t *testing.T) {
+	original := providerRegistry["aws"]
+	t.Cleanup(func() { providerRegistry["aws"] = original })
+	for _, fail := range []bool{false, true} {
+		cfg := baseConfig()
+		cfg.Provider = "aws"
+		cfg.UpstashBox.BaseURL = "https://example.invalid/prior"
+		cfg.credentialProvenance.upstashBoxBaseURL = credentialSourceTrustedFile
+		seen := credentialSourceUnknown
+		var applyErr error
+		if fail {
+			applyErr = exit(2, "synthetic invalid configuration")
+		}
+		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.upstashBoxBaseURL }}
+		fs := newFlagSet("test", io.Discard)
+		fs.String("upstash-box-base-url", "", "")
+		if err := fs.Parse([]string{"--upstash-box-base-url=https://example.invalid/flag"}); err != nil {
+			t.Fatal(err)
+		}
+		err := applyProviderFlags(&cfg, fs, providerFlagValues{})
+		if (err != nil) != fail {
+			t.Fatalf("central apply error=%v", err)
+		}
+		want := credentialSourceFlag
+		if fail {
+			want = credentialSourceTrustedFile
+		}
+		if seen != credentialSourceTrustedFile || cfg.credentialProvenance.upstashBoxBaseURL != want || cfg.UpstashBox.BaseURL != "https://example.invalid/prior" {
+			t.Fatal("central marker timing or unselected-field behavior changed")
+		}
+	}
+}
+
 func TestLoadBackendRequiresActionableProviderSelection(t *testing.T) {
 	t.Setenv(controllerProviderScopeEnv, "")
 	t.Setenv("HCLOUD_TOKEN", "")

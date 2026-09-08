@@ -412,6 +412,12 @@ func TestRailwayGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestUpstashBoxGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_upstash_box.go", "../../internal/cli/config_upstash_box_generated.go", "UpstashBoxConfig", "upstash-box", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {

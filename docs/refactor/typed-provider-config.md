@@ -1,13 +1,14 @@
 # Typed provider config bindings
 
 Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
-Cloud Run Sandbox, FastAPI Cloud, and Railway describe their mechanical config bindings
+Cloud Run Sandbox, FastAPI Cloud, Railway, and Upstash Box describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
 `internal/cli/config_opensandbox.go`,
 `internal/cli/config_anthropic_sandbox_runtime.go`,
 `internal/cli/config_cloud_run_sandbox.go`,
-`internal/cli/config_fastapi_cloud.go`, and `internal/cli/config_railway.go`.
+`internal/cli/config_fastapi_cloud.go`, `internal/cli/config_railway.go`, and
+`internal/cli/config_upstash_box.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -71,7 +72,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -206,6 +207,16 @@ client shares the generated endpoint default, while claim scope and command
 routing keep their existing behavior for an empty configured endpoint. Token-first
 validation, Railway's own URL validator, provider aliases, bridge behavior,
 HTTP timeout, and service lifecycle remain outside generation.
+
+Upstash Box's six fields include an environment-only API key, four nonempty-only
+YAML strings, and a presence-based `keepAlive` boolean. Accepted key/endpoint
+reports feed the existing source mapping; endpoint flag visits retain central
+post-success provenance. Generated constants also supply the client, endpoint
+host and claim scope, runtime, size, workdir, and core server-type fallbacks.
+Their existing normalization is preserved, including core's raw size fallback
+and narrower provider spelling match. Exact provider alias guards, subsequent
+validation, the fixed workspace root, uploads, and lifecycle policy stay with
+their existing owners.
 
 The generator accepts only these five exact source grants. Credential handling,
 destination validation and provenance, provider aliases, and provider selection

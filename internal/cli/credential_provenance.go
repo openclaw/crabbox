@@ -239,7 +239,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if flagWasSet(fs, "tensorlake-api-url") {
 		provenance.tensorlakeAPIURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "upstash-box-base-url") {
+	if UpstashBoxConfigFlagPresence(fs).BaseURL {
 		provenance.upstashBoxBaseURL = credentialSourceFlag
 	}
 	if flagWasSet(fs, "smolvm-base-url") {
