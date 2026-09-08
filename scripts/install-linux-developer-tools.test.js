@@ -1074,12 +1074,30 @@ test("linux developer image reports TruffleHog from the configured install direc
 		path.join(goLinkDir, "go"),
 		"#!/usr/bin/env bash\nprintf 'go version go1.27.0 linux/amd64\\n'\n",
 	);
-	for (const command of ["git", "gh", "jq", "rg", "fd", "python3", "node", "npm", "corepack", "pnpm", "docker"]) {
+	for (const command of [
+		"git",
+		"gh",
+		"jq",
+		"rg",
+		"fd",
+		"python3",
+		"node",
+		"npm",
+		"corepack",
+		"pnpm",
+		"bun",
+		"docker",
+	]) {
 		writeExecutable(
 			path.join(fixture.bin, command),
 			`#!/usr/bin/env bash\nprintf '${command} test-version\\n'\n`,
 		);
 	}
+	writeExecutable(path.join(fixture.bin, "bunx"), "#!/usr/bin/env bash\nexit 0\n");
+	writeExecutable(
+		path.join(fixture.bin, "getconf"),
+		"#!/usr/bin/env bash\n[[ \"$*\" == \"GNU_LIBC_VERSION\" ]] && printf 'glibc 2.39\\n'\n",
+	);
 	writeExecutable(
 		path.join(fixture.bin, "uname"),
 		"#!/usr/bin/env bash\ncase \"${1:-}\" in\n  -s) printf 'Linux\\n' ;;\n  -m) printf 'x86_64\\n' ;;\nesac\n",
@@ -1106,6 +1124,8 @@ test("linux developer image reports TruffleHog from the configured install direc
 
 	assert.equal(result.status, 0, result.stderr || result.stdout);
 	assert.match(result.stdout, /go version go1\.27\.0 linux\/amd64/);
+	assert.match(result.stdout, /bun test-version/);
+	assert.match(result.stdout, new RegExp(`${fixture.bin}/bunx`));
 	assert.match(result.stdout, /trufflehog 3\.95\.9/);
 });
 

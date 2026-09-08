@@ -290,7 +290,11 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
     (log.match(/\n  offline_node_pnpm_probe\nfi\npublic_toolchain_archive_dir=/g) ?? []).length,
     3,
   );
-  assert.equal((log.match(/\n  offline_go_probe\nfi\n}/g) ?? []).length, 3);
+  assert.equal(
+    (log.match(/\n  offline_go_probe\nfi\npublic_toolchain_archive_dir=/g) ?? []).length,
+    3,
+  );
+  assert.equal((log.match(/\n  offline_bun_probe\nfi\n}/g) ?? []).length, 3);
   assert.equal((log.match(/\ndeveloper_archive_probe\necho devtools-smoke-ok/g) ?? []).length, 3);
   assert.equal((log.match(/\npnpm --version\n/g) ?? []).length, 3);
   assert.match(log, /docker image inspect hello-world ubuntu:24\.04 node:24-bookworm/);
@@ -499,10 +503,13 @@ async function linuxSmokeFixture(t, { major = "24", pnpm = "11.1.0", customPrep 
   await writeNodeVersionFixture(bin);
   await writeTool("go", "printf 'go version go1.27.0 linux/amd64\\n'");
   await writeTool("gofmt", "exit 0");
+  await writeTool("bun", '[[ "$*" == "--version" ]] && printf "1.4.0\\n" || printf "42\\n"');
+  await writeTool("bunx", 'printf "42\\n"');
   await writeTool(
     "uname",
-    'if [[ "$*" == "-s" ]]; then printf "Linux\\n"; else printf "x86_64\\n"; fi',
+    'if [[ "$*" == "-s" ]]; then printf "%s\\n" "${FIXTURE_OS:-Linux}"; else printf "x86_64\\n"; fi',
   );
+  await writeTool("getconf", 'printf "%s\\n" "${FIXTURE_LIBC:-glibc 2.39}"');
   await writeTool("corepack", 'exit "${FIXTURE_TOOL_EXIT:-0}"');
   await writeTool("id", 'printf "%s\\n" "$FIXTURE_UID"');
   await writeTool("dpkg", '[[ "$*" == "--print-architecture" ]] || exit 65\nprintf "%s\\n" "$FIXTURE_ARCH"');
@@ -551,13 +558,20 @@ test("generated Linux smoke emits success only after nonroot, tool, and offline 
   // The real artifact probe is covered separately; this assertion owns marker ordering.
   const successful = execute(
     {},
-    generated.replace(
-      /\n[ \t]*offline_(?:node_pnpm|go)_probe\n/g,
-      "\nprintf 'offline-proof-done\\n'\n",
-    ),
+    generated
+      .replace(/\n[ \t]*offline_node_pnpm_probe\n/, "\nprintf 'node-proof-done\\n'\n")
+      .replace(/\n[ \t]*offline_go_probe\n/, "\nprintf 'go-proof-done\\n'\n")
+      .replace(/\n[ \t]*offline_bun_probe\n/, "\nprintf 'bun-proof-done\\n'\n"),
   );
   assert.equal(successful.status, 0, successful.stderr);
-  assert.match(successful.stdout, /offline-proof-done\ndevtools-smoke-ok\n$/);
+  const orderedMarkers = [
+    "node-proof-done\n",
+    "go-proof-done\n",
+    "bun-proof-done\n",
+    "devtools-smoke-ok\n",
+  ].map((marker) => successful.stdout.indexOf(marker));
+  assert.ok(orderedMarkers.every((index) => index >= 0), successful.stdout);
+  assert.deepEqual(orderedMarkers, [...orderedMarkers].sort((left, right) => left - right));
 });
 
 for (const route of [
@@ -590,6 +604,35 @@ test("generated Go smoke requires its own archive under an alternate Node major"
   assert.notEqual(corrupt.status, 0);
   assert.match(corrupt.stderr, /checksum mismatch/);
   assert.doesNotMatch(corrupt.stdout, /devtools-smoke-ok/);
+});
+
+test("generated Bun smoke is required independently of Node overrides and cannot be disabled by cache absence", async (t) => {
+  const { fake, tmp, generated, execute } = await linuxSmokeFixture(t, { major: "26" });
+  const source = generated.replace(/\n[ \t]*offline_go_probe\n/, "\ntrue\n");
+  const missing = execute({}, source);
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /unavailable offline: bun-v1\.4\.0-linux-x64-baseline\.zip/);
+  assert.doesNotMatch(missing.stdout, /devtools-smoke-ok/);
+  assert.deepEqual(await readdir(tmp), []);
+  await mkdir(path.join(fake.dir, "missing-archives"));
+  await writeFile(
+    path.join(fake.dir, "missing-archives", "bun-v1.4.0-linux-x64-baseline.zip"),
+    "corrupt",
+  );
+  const corrupt = execute({}, source);
+  assert.notEqual(corrupt.status, 0);
+  assert.match(corrupt.stderr, /checksum mismatch/);
+  assert.doesNotMatch(corrupt.stdout, /devtools-smoke-ok/);
+  assert.deepEqual(await readdir(tmp), []);
+  for (const env of [
+    { FIXTURE_ARCH: "arm64" },
+    { FIXTURE_LIBC: "musl" },
+    { FIXTURE_OS: "Darwin" },
+  ]) {
+    const unsupported = execute(env, source);
+    assert.equal(unsupported.status, 0, unsupported.stderr);
+    assert.match(unsupported.stdout, /devtools-smoke-ok/);
+  }
 });
 
 test("generated Linux smoke requires the normal nonroot pnpm command even when private probes pass", async (t) => {
@@ -1202,6 +1245,7 @@ for (const failure of [
   "missing smoke owner",
   "Node archive probe rendering",
   "Go archive probe rendering",
+  "Bun archive probe rendering",
 ]) {
   test(`AWS mint stops before capture when ${failure} fails`, async (t) => {
     const fake = await measuredFixture(t);
@@ -1209,10 +1253,13 @@ for (const failure of [
       await rm(path.join(fake.root, "scripts/devtools-image-smoke-linux.sh"));
     } else {
       const installer = path.join(fake.root, "scripts/install-linux-developer-tools.sh");
-      const renderer =
-        failure === "Node archive probe rendering"
-          ? "node_pnpm_smoke_script() { echo partial-node-probe; return 47; }"
-          : "go_smoke_script() { echo partial-go-probe; return 48; }";
+      const renderer = {
+        "Node archive probe rendering":
+          "node_pnpm_smoke_script() { echo partial-node-probe; return 47; }",
+        "Go archive probe rendering": "go_smoke_script() { echo partial-go-probe; return 48; }",
+        "Bun archive probe rendering":
+          "bun_smoke_script() { echo partial-bun-probe; return 49; }",
+      }[failure];
       await writeFile(
         installer,
         `${await readFile(installer, "utf8")}\n${renderer}\n`,
@@ -1223,13 +1270,14 @@ for (const failure of [
       "missing smoke owner": 1,
       "Node archive probe rendering": 47,
       "Go archive probe rendering": 48,
+      "Bun archive probe rendering": 49,
     }[failure];
     assert.equal(result.code, expected, result.stderr);
     const log = await readFile(fake.log, "utf8");
     assert.match(log, /stop --provider aws --target linux cbx_source/);
     assert.doesNotMatch(
       log,
-      /checkpoint create|image promote|docker_probe=|partial-(?:node|go)-probe/,
+      /checkpoint create|image promote|docker_probe=|partial-(?:node|go|bun)-probe/,
     );
   });
 }

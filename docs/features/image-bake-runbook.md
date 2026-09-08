@@ -363,7 +363,8 @@ scripts/mint-aws-devtools-image.sh \
 ### What the prep scripts install
 
 - **Linux** (`scripts/install-linux-developer-tools.sh`): common CLI/build
-  tooling, GitHub CLI, Node 24.19.0 on x86_64, corepack/pnpm, TruffleHog 3.95.9, Chrome or
+  tooling, GitHub CLI, Node 24.19.0, Go 1.27.0, and Bun 1.4.0 on x86_64,
+  corepack/pnpm, TruffleHog 3.95.9, Chrome or
   Chromium for browser lanes, desktop/VNC helpers, Docker Engine, Compose,
   buildx, and a small default Docker image set. TruffleHog archives are pinned
   to reviewed SHA-256 digests for amd64 and arm64. NodeSource, Docker, and
@@ -446,8 +447,10 @@ Public archives are retained under `/opt/crabbox/toolchain-archives`:
 | `pnpm-12.3.4.tgz` | pnpm 12.3.4 JavaScript wrapper |
 | `exe.linux-x64-12.3.4.tgz` | pnpm 12.3.4 native executable for glibc Linux x64 |
 | `go1.27.0.linux-amd64.tar.gz` | Complete Go 1.27.0 distribution |
+| `bun-v1.4.0-linux-x64-baseline.zip` | Original Bun 1.4.0 baseline Linux glibc ZIP |
+| `bun-v1.4.0-linux-x64.zip` | Original Bun 1.4.0 optimized Linux glibc ZIP |
 
-The SHA-256 Node/Go pins and SHA-512 pnpm pins live in the installer's
+The SHA-256 Node/Go/Bun pins and SHA-512 pnpm pins live in the installer's
 `toolchain_archive_spec`. Consumers must carry independently reviewed pins,
 copy archives into private staging, validate those exact bytes, and extract
 fresh trees. Do not authenticate a cached installation by running `--version`,
@@ -485,11 +488,12 @@ script is the bundled Linux builder. It forwards the existing
 `CRABBOX_LINUX_NODE_MAJOR` and `CRABBOX_LINUX_PNPM_VERSION` overrides to that
 builder and freezes the same Node-major declaration into each smoke. The smoke
 checks the guest's Debian package architecture, not the mint host's architecture.
-Only Node major 24 on guest `amd64` requires the Node/pnpm archives. Go has an
-independent Linux `amd64` contract, including when the Node major is overridden.
-ARM guests and custom prep scripts retain the existing normal-tool smoke;
-their success does not qualify the x86_64 archive recipe. Missing or corrupt
-archives cannot disable either required probe for the supported builder.
+Only Node major 24 on guest `amd64` requires the Node/pnpm archives. Go and Bun
+have independent Linux `amd64` contracts, including when the Node major is
+overridden. Bun additionally requires glibc. ARM guests and custom prep scripts
+retain the existing normal-tool smoke; their success does not qualify the
+x86_64 archive recipe. Missing or corrupt archives cannot disable any required
+probe for the supported builder.
 
 Go 1.27.0 installs at `/opt/hostedtoolcache/go/1.27.0/x64`, with image-owned
 `/usr/local/bin/go` and `gofmt` links. The installer authenticates a private
@@ -508,6 +512,46 @@ allowed. Files, directories and other targets require operator resolution
 before rebaking; a conflict preserves the existing tree, marker and aliases.
 Publication uses the same private temporary-symlink replacement as Node,
 without treating the pair as one atomic transaction.
+
+The bundled builder retains both Bun 1.4.0 x64 ZIPs on glibc Linux `amd64`,
+independently of the Node-major override. Their versioned cache filenames do
+not change the upstream ZIP bytes. After Node and Go setup, the baseline
+executable is installed at
+`/opt/crabbox/toolchains/bun/1.4.0/linux-x64-baseline/bun`, with a private
+`bunx -> bun` link beside it. `/usr/local/bin/bun` and
+`/usr/local/bin/bunx` are absolute links to those same-name backing paths. The
+baseline remains the generic image default even when the build guest supports
+AVX2 because a subsequent guest may have a different CPU. The optimized
+executable is run only when every visible CPU in that guest's `/proc/cpuinfo`
+exposes both AVX and AVX2. Absent or incomplete CPU evidence keeps baseline
+execution.
+
+Bun installation downloads the pinned original archive only on a cache miss.
+A present corrupt archive, symlink, malformed ZIP, or malformed cache root is a
+hard error, not permission to download a replacement. Each extraction uses a
+fresh private copy authenticated with its independently pinned SHA-256 first.
+Before modifying archives, the backing slot, or public aliases, installation
+accepts only absent public paths or exact current managed links, including
+dangling links. Operator files, directories, and other link targets fail with
+a conflict diagnostic and remain unchanged. The unpublished regular `bun` and
+relative public `bunx` layout is not migrated.
+
+Repeated installation rebuilds the exact image-owned slot from verified bytes,
+including an incomplete slot with absent public aliases. Symlinked directories
+in its path are rejected. New image directories and executables are mode 0755
+so nonroot users can traverse and execute them; no ownership changes are made.
+Neither the installed version nor a marker authenticates cached code. The
+aarch64 digest is retained only for pinned fallback compatibility. This producer
+does not install or qualify an ARM image, add musl/non-Linux routes, change
+custom prep scripts, or integrate a consumer-owned Bun cache.
+
+Each nonroot bundled-builder smoke checks normal-PATH `bun` and `bunx` after
+Node and Go setup, then authenticates and freshly extracts both ZIPs. Baseline,
+and optimized when the guest supports it, must execute local TypeScript, pass
+`bun test`, bundle the TypeScript, and execute the bundle. The proof uses a
+private home and dependency-free fixtures with auto-install disabled; `bunx`
+executes a local binary with `--no-install`. A missing cache fails this offline
+proof even though installation supports a pinned download fallback.
 
 Native GitHub runner registration seeds only `node/24.19.0/x64` and
 `go/1.27.0/x64` after configuration and before service start. It reads the

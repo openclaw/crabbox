@@ -28,6 +28,9 @@ pinned_node_version="24.19.0"
 go_toolcache_root="/opt/hostedtoolcache"
 go_link_dir="/usr/local/bin"
 pinned_go_version="1.27.0"
+bun_bin_dir="/usr/local/bin"
+bun_toolchain_root="/opt/crabbox/toolchains/bun"
+pinned_bun_version="1.4.0"
 
 log() {
   printf 'linux-tools: %s\n' "$*" >&2
@@ -251,6 +254,12 @@ toolchain_archive_spec() {
       printf '%s\n' "sha512 961aa41fb077da3a04a441d9f8e15ebc0c96da8ef710b2eb67bf9ee7cb0610eabd48f1fd85f51cffe73846785fa0f87c56a3a872a1d893f8446741b5cce45457 https://registry.npmjs.org/pnpm/-/$1" ;;
     exe.linux-x64-12.3.4.tgz)
       printf '%s\n' "sha512 d99a8e9523e47f05f5879711f853e259ff3e17eda1653ff74ef8542b9b22807ab06900888aaf11ec21b186774ab3adc9b5c2e2d9ad50a68fb05ff128c9f8f225 https://registry.npmjs.org/@pnpm/exe.linux-x64/-/$1" ;;
+    bun-v1.4.0-linux-x64.zip)
+      printf '%s\n' "sha256 2d03fb5fb83ac8b567aca0a281b2ce1a1a19d488f56c2968d88c3f25e92fe452 https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64.zip" ;;
+    bun-v1.4.0-linux-x64-baseline.zip)
+      printf '%s\n' "sha256 184fb4595f0d401a217cf7c78c1bc430ba83314dab7a8b94805babbf7fa7097f https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64-baseline.zip" ;;
+    bun-v1.4.0-linux-aarch64.zip)
+      printf '%s\n' "sha256 4b1a332ee861983eb93bcfe6f770fff94e3e31b2c388bdaea3c8ed35e58eed0e https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-aarch64.zip" ;;
     *) log "no reviewed public toolchain archive: $1"; return 1 ;;
   esac
 }
@@ -656,6 +665,181 @@ node_pnpm_smoke_script() {
   printf '%s\n' 'if pinned_node_supported; then' '  offline_node_pnpm_probe' 'fi'
 }
 
+pinned_bun_supported() {
+  [[ "$(uname -s)" == "Linux" && "$(dpkg --print-architecture)" == "amd64" &&
+    "$(getconf GNU_LIBC_VERSION 2>/dev/null)" == glibc\ * ]]
+}
+
+bun_optimized_supported() {
+  # Every visible guest CPU must support both flags; missing evidence means baseline.
+  awk '
+    function finish_cpu() {
+      if (cpu) {
+        seen = 1
+        if (!flags || !avx || !avx2) missing = 1
+      }
+      cpu = flags = avx = avx2 = 0
+    }
+    /^processor[[:space:]]*:/ {
+      finish_cpu()
+      cpu = 1
+    }
+    /^[[:space:]]*$/ { finish_cpu() }
+    /^flags[[:space:]]*:/ {
+      if (!cpu || flags) missing = 1
+      flags = 1
+      avx = avx2 = 0
+      for (i = 3; i <= NF; i++) {
+        if ($i == "avx") avx = 1
+        if ($i == "avx2") avx2 = 1
+      }
+      if (!avx || !avx2) missing = 1
+    }
+    END { finish_cpu(); exit !seen || missing }
+  ' /proc/cpuinfo 2>/dev/null
+}
+
+stage_bun_archive() {
+  local name="$1" staging="$2" allow_download="${3:-0}"
+  case "$name" in
+    bun-v1.4.0-linux-x64.zip|bun-v1.4.0-linux-x64-baseline.zip|bun-v1.4.0-linux-aarch64.zip) ;;
+    *) log "unsupported pinned Bun archive: $name"; return 1 ;;
+  esac
+  if [[ -L "$public_toolchain_archive_dir" ||
+    ( -e "$public_toolchain_archive_dir" && ! -d "$public_toolchain_archive_dir" ) ]]; then
+    log "malformed Bun archive cache"
+    return 1
+  fi
+  if [[ -e "$public_toolchain_archive_dir/$name" || -L "$public_toolchain_archive_dir/$name" ]]; then
+    # A present cache is evidence to authenticate, never permission to redownload.
+    if [[ ! -f "$public_toolchain_archive_dir/$name" || -L "$public_toolchain_archive_dir/$name" ]]; then
+      log "malformed Bun archive: $name"
+      return 1
+    fi
+    allow_download=0
+  fi
+  stage_toolchain_archive "$name" "$staging" "$allow_download"
+}
+
+extract_bun_archive() {
+  local variant="$1" staging="$2"
+  stage_bun_archive "bun-v$pinned_bun_version-$variant.zip" "$staging" || return 1
+  python3 - "$staging/bun-v$pinned_bun_version-$variant.zip" "$variant" "$staging/$variant" <<'PY'
+import os
+import shutil
+import stat
+import sys
+import zipfile
+
+filename, variant, destination = sys.argv[1:]
+member = "bun-" + variant + "/bun"
+with zipfile.ZipFile(filename) as archive:
+    entries = archive.infolist()
+    files = [entry for entry in entries if not entry.is_dir()]
+    if len(files) != 1 or files[0].filename != member or stat.S_ISLNK(files[0].external_attr >> 16):
+        sys.exit("malformed Bun ZIP: expected one regular " + member)
+    os.mkdir(destination, 0o700)
+    with archive.open(files[0]) as source, open(destination + "/bun", "xb") as target:
+        shutil.copyfileobj(source, target)
+    os.chmod(destination + "/bun", 0o755)
+PY
+}
+
+install_bun() {
+  pinned_bun_supported || return 0
+  local destination="$bun_toolchain_root/$pinned_bun_version/linux-x64-baseline" directory
+  public_tool_links check "$bun_bin_dir" "$destination" bun bunx || return $?
+  # Check only this managed path's ancestors before any write can follow a symlink.
+  directory="$destination"
+  while [[ "$directory" != "/" ]]; do
+    [[ ! -L "$directory" ]] || { log "symlinked Bun managed directory: $directory"; return 1; }
+    directory="$(dirname "$directory")" || return $?
+  done
+  (
+    set -euo pipefail
+    umask 077
+    local staging name pending variant
+    staging="$(mktemp -d)" || return $?
+    # shellcheck disable=SC2064
+    trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
+    for variant in linux-x64-baseline linux-x64; do
+      name="bun-v$pinned_bun_version-$variant.zip"
+      stage_bun_archive "$name" "$staging" 1 || return $?
+      install -d -m 0755 "$public_toolchain_archive_dir" || return $?
+      pending="$(mktemp "$public_toolchain_archive_dir/.bun-archive.XXXXXX")" || return $?
+      # shellcheck disable=SC2064
+      trap "$(printf 'rm -rf -- %q %q' "$staging" "$pending")" EXIT
+      install -m 0644 "$staging/$name" "$pending" || return $?
+      python3 - "$pending" "$public_toolchain_archive_dir/$name" <<'PY' || return $?
+import os
+import sys
+os.replace(sys.argv[1], sys.argv[2])
+PY
+    done
+    extract_bun_archive linux-x64-baseline "$staging" || return $?
+    [[ "$("$staging/linux-x64-baseline/bun" --version)" == "$pinned_bun_version" ]] ||
+      { log "installed Bun version does not match $pinned_bun_version"; exit 1; }
+    # The installed image can move to a less capable guest. Keep its default baseline.
+    chmod 0755 "$staging/linux-x64-baseline" || return $?
+    ln -s bun "$staging/linux-x64-baseline/bunx" || return $?
+    public_tool_links check "$bun_bin_dir" "$destination" bun bunx || return $?
+    (umask 022; install -d -m 0755 "$(dirname "$destination")" "$bun_bin_dir") || return $?
+    # The exact image-owned slot may be incomplete; never reuse its executable bytes.
+    rm -rf -- "$destination" || return $?
+    mv "$staging/linux-x64-baseline" "$destination" || return $?
+    public_tool_links publish "$bun_bin_dir" "$destination" bun bunx || return $?
+  ) || return $?
+  export PATH="$bun_bin_dir:$PATH"
+  hash -r
+}
+
+offline_bun_probe() (
+  set -euo pipefail
+  umask 077
+  [[ "$(id -u)" -ne 0 ]] || { log "offline Bun smoke must run as a nonroot user"; return 1; }
+  local staging variant bun_path
+  staging="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
+  mkdir -p "$staging/home" "$staging/project/node_modules/.bin"
+  printf 'const answer: number = 42; console.log(answer);\n' >"$staging/project/main.ts"
+  printf 'import { test, expect } from "bun:test"; test("offline", () => expect(6 * 7).toBe(42));\n' >"$staging/project/main.test.ts"
+  printf '#!/usr/bin/env bun\nconsole.log(42);\n' >"$staging/project/node_modules/.bin/offline-smoke"
+  chmod 0755 "$staging/project/node_modules/.bin/offline-smoke"
+  # No dependencies, auto-install, or ambient home/config/cache in this proof.
+  local -a offline_env=(env -i "HOME=$staging/home" "TMPDIR=$staging" "PATH=$PATH"
+    BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 DO_NOT_TRACK=1 CI=1)
+  cd "$staging/project"
+  [[ "$("${offline_env[@]}" bun --version)" == "$pinned_bun_version" ]] ||
+    { log "normal PATH Bun version does not match $pinned_bun_version"; return 1; }
+  [[ "$("${offline_env[@]}" bunx --no-install --bun offline-smoke)" == "42" ]] ||
+    { log "normal PATH bunx offline execution failed"; return 1; }
+  [[ "$("${offline_env[@]}" bun --no-install main.ts)" == "42" ]] ||
+    { log "normal PATH Bun TypeScript execution failed"; return 1; }
+  for variant in linux-x64-baseline linux-x64; do
+    extract_bun_archive "$variant" "$staging"
+    if [[ "$variant" == "linux-x64" ]] && ! bun_optimized_supported; then
+      continue
+    fi
+    bun_path="$staging/$variant/bun"
+    [[ "$("${offline_env[@]}" "$bun_path" --version)" == "$pinned_bun_version" ]] ||
+      { log "$variant Bun version does not match $pinned_bun_version"; return 1; }
+    [[ "$("${offline_env[@]}" "$bun_path" --no-install main.ts)" == "42" ]] ||
+      { log "$variant Bun TypeScript execution failed"; return 1; }
+    "${offline_env[@]}" "$bun_path" test --no-install main.test.ts
+    "${offline_env[@]}" "$bun_path" build --target=bun --outfile=bundle.js main.ts
+    [[ "$("${offline_env[@]}" "$bun_path" --no-install bundle.js)" == "42" ]] ||
+      { log "$variant Bun bundle execution failed"; return 1; }
+  done
+)
+
+bun_smoke_script() {
+  printf 'public_toolchain_archive_dir=%q\n' "$public_toolchain_archive_dir"
+  printf 'pinned_bun_version=%q\n' "$pinned_bun_version"
+  declare -f log toolchain_archive_spec verify_toolchain_archive stage_toolchain_archive pinned_bun_supported bun_optimized_supported stage_bun_archive extract_bun_archive offline_bun_probe
+  printf '%s\n' 'if pinned_bun_supported; then' '  offline_bun_probe' 'fi'
+}
+
 trufflehog_sha256_for_arch() {
   case "$1" in
     amd64) printf '%s\n' "f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e" ;;
@@ -828,6 +1012,10 @@ print_versions() {
   if linux_x64_supported; then
     "$go_link_dir/go" version
   fi
+  if pinned_bun_supported; then
+    bun --version
+    command -v bunx
+  fi
   "$trufflehog_bin_dir/trufflehog" --no-update --version
   docker --version
   docker compose version
@@ -896,6 +1084,7 @@ APT
   fi
   install_node_pnpm
   install_go_toolchain
+  install_bun
   install_trufflehog
   install_docker
   prepare_fast_boot

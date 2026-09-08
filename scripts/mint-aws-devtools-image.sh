@@ -793,11 +793,14 @@ smoke_script() {
         CRABBOX_LINUX_NODE_MAJOR="$linux_node_major" \
           bash -c 'source "$1"; node_pnpm_smoke_script' _ "$ROOT/scripts/install-linux-developer-tools.sh"
       )" || return $?
-      local go_archive_probe
+      local go_archive_probe bun_archive_probe
       go_archive_probe="$(
         bash -c 'source "$1"; go_smoke_script' _ "$ROOT/scripts/install-linux-developer-tools.sh"
       )" || return $?
-      archive_probe+=$'\n'"$go_archive_probe"
+      bun_archive_probe="$(
+        bash -c 'source "$1"; bun_smoke_script' _ "$ROOT/scripts/install-linux-developer-tools.sh"
+      )" || return $?
+      archive_probe+=$'\n'"$go_archive_probe"$'\n'"$bun_archive_probe"
     fi
     printf -v smoke_script_value 'set -euo pipefail\nexpected_node_major=%q\ndeveloper_archive_probe() {\n%s\n}\n%s' \
       "$expected_node_major" "$archive_probe" "$smoke_script_value"
