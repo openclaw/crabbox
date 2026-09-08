@@ -264,7 +264,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if flagWasSet(fs, "sprites-api-url") {
 		provenance.spritesAPIURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "azure-dynamic-sessions-endpoint") {
+	if AzureDynamicSessionsConfigFlagPresence(fs).Endpoint {
 		provenance.azSessionsEndpoint = credentialSourceFlag
 	}
 	if flagWasSet(fs, "parallels-host") {

@@ -19,8 +19,8 @@ import (
 )
 
 type field struct {
-	name, kind, key, configAlias, env, envAlias, flag, help, defaultExpr                                string
-	nonnegative, trustedFileOnly, noFile, noEnv, noFlag, fileIgnoreEmpty, reportApplied, envIntFallback bool
+	name, kind, key, configAlias, env, envAlias, flag, help, defaultExpr                                                 string
+	nonnegative, trustedFileOnly, noFile, noEnv, noFlag, fileIgnoreEmpty, reportApplied, envIntFallback, fileIntPositive bool
 }
 
 type fileBinding struct {
@@ -236,6 +236,12 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		if f.kind == "int" && !f.nonnegative {
 			return s, fmt.Errorf("%s: pilot int fields require nonnegative policy", f.name)
 		}
+		if value, ok := tags.Lookup("fileInt"); ok {
+			if value != "positive" || f.kind != "int" || f.noFile || !f.nonnegative {
+				return s, fmt.Errorf("%s: fileInt is supported only as positive for file-admitted nonnegative int fields", f.name)
+			}
+			f.fileIntPositive = true
+		}
 		if value, ok := tags.Lookup("envInt"); ok {
 			if value != "fallback" || f.kind != "int" || f.noEnv || !f.nonnegative {
 				return s, fmt.Errorf("%s: envInt is supported only as fallback for environment-admitted nonnegative int fields", f.name)
@@ -353,8 +359,11 @@ func generate(s schema, source string) ([]byte, error) {
 			if f.fileIgnoreEmpty {
 				fileCondition += fmt.Sprintf(" && *file.%s != \"\"", binding.member)
 			}
+			if f.fileIntPositive {
+				fileCondition += fmt.Sprintf(" && *file.%s > 0", binding.member)
+			}
 			p("if %s {\n", fileCondition)
-			if f.nonnegative {
+			if f.nonnegative && !f.fileIntPositive {
 				p("if *file.%s < 0 { return %sexit(2, %q) }\n", binding.member, resultPrefix, s.provider+" "+f.key+" must be non-negative")
 			}
 			value := "*file." + binding.member

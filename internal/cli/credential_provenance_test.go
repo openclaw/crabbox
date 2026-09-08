@@ -665,6 +665,10 @@ func TestConfigMergeTracksCredentialDestinationSources(t *testing.T) {
 }
 
 func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
+	var azSessionsFile fileConfig
+	if err := yaml.Unmarshal([]byte("azureDynamicSessions:\n  endpoint: https://repo.example.test\n"), &azSessionsFile); err != nil {
+		t.Fatal(err)
+	}
 	var upstashFile fileConfig
 	if err := yaml.Unmarshal([]byte("upstashBox:\n  baseUrl: https://repo.example.test\n"), &upstashFile); err != nil {
 		t.Fatal(err)
@@ -683,7 +687,7 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 		{
 			name:       "azure dynamic sessions",
 			provider:   "azure-dynamic-sessions",
-			file:       fileConfig{AzureDynamicSessions: &fileAzureDynamicSessionsConfig{Endpoint: "https://repo.example.test"}},
+			file:       azSessionsFile,
 			approveEnv: "CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT",
 		},
 		{

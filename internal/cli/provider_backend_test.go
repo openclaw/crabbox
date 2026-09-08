@@ -189,6 +189,39 @@ func TestCloudflareFlagSourceCentralPhase(t *testing.T) {
 	}
 }
 
+func TestAzureDynamicSessionsFlagSourceCentralPhase(t *testing.T) {
+	original := providerRegistry["aws"]
+	t.Cleanup(func() { providerRegistry["aws"] = original })
+	for _, fail := range []bool{false, true} {
+		cfg := baseConfig()
+		cfg.Provider = "aws"
+		cfg.AzureDynamicSessions.Endpoint = "https://example.invalid/prior"
+		cfg.credentialProvenance.azSessionsEndpoint = credentialSourceTrustedFile
+		seen := credentialSourceUnknown
+		var applyErr error
+		if fail {
+			applyErr = exit(2, "synthetic invalid configuration")
+		}
+		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.azSessionsEndpoint }}
+		fs := newFlagSet("test", io.Discard)
+		fs.String("azure-dynamic-sessions-endpoint", "", "")
+		if err := fs.Parse([]string{"--azure-dynamic-sessions-endpoint=https://example.invalid/flag"}); err != nil {
+			t.Fatal(err)
+		}
+		err := applyProviderFlags(&cfg, fs, providerFlagValues{})
+		if (err != nil) != fail {
+			t.Fatalf("central apply error=%v", err)
+		}
+		want := credentialSourceFlag
+		if fail {
+			want = credentialSourceTrustedFile
+		}
+		if seen != credentialSourceTrustedFile || cfg.credentialProvenance.azSessionsEndpoint != want || cfg.AzureDynamicSessions.Endpoint != "https://example.invalid/prior" {
+			t.Fatal("central marker timing or unselected-field behavior changed")
+		}
+	}
+}
+
 func TestE2BFlagSourcesCentralPhase(t *testing.T) {
 	original := providerRegistry["aws"]
 	t.Cleanup(func() { providerRegistry["aws"] = original })

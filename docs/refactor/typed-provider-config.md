@@ -2,7 +2,7 @@
 
 Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
-runner, Cloudflare Sandbox, E2B, and Blaxel describe their mechanical config bindings
+runner, Cloudflare Sandbox, E2B, Blaxel, and Azure Dynamic Sessions describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
 `internal/cli/config_opensandbox.go`,
@@ -10,8 +10,8 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_cloud_run_sandbox.go`,
 `internal/cli/config_fastapi_cloud.go`, `internal/cli/config_railway.go`,
 `internal/cli/config_upstash_box.go`, `internal/cli/config_cloudflare.go`,
-`internal/cli/config_cloudflare_sandbox.go`, `internal/cli/config_e2b.go`, and
-`internal/cli/config_blaxel.go`.
+`internal/cli/config_cloudflare_sandbox.go`, `internal/cli/config_e2b.go`,
+`internal/cli/config_blaxel.go`, and `internal/cli/config_azure_dynamic_sessions.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -72,6 +72,11 @@ machine-specific paths. Its header identifies the generator and source file.
    rejected. File/default checks stay nonnegative, flags remain deferred, and
    malformed environment input keeps the previous value while parsed negatives
    reach the existing later validator. No parser function is supplied by the tag.
+   An existing positive-only integer file binding can opt into
+   `fileInt:"positive"`: only a present value greater than zero assigns;
+   omitted/null/zero/negative input is ignored. It requires an int with file
+   admission and the existing nonnegative default policy. This fixed predicate
+   changes no environment or flag behavior and accepts no custom expressions.
    A string field may name one existing fallback environment variable with
    `envAlias`; primary and alias names share collision checks. Empty aliases
    are invalid. The primary value wins, then the alias, then the prior value;
@@ -95,7 +100,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -281,6 +286,14 @@ No provenance reporting is added where none existed. The seven configured
 default consumers share generated values without changing their normalization.
 API versions, lifecycle budgets, memory service defaults, upload and retry policy
 remain separate owners.
+
+Azure Dynamic Sessions declares all five fields, including legacy Pool without
+a flag. Its timeout uses positive-only file admission and tolerant environment
+parsing; neither moves validation or short-circuits the configured-positive,
+TTL-positive, final-default timeout chain. Endpoint reports and central visits
+retain core provenance policy. API version and workdir share their Go defaults;
+Azure routing, native authentication and session behavior stay with their
+existing owners.
 
 The generator accepts only these seven exact source grants. Credential handling,
 destination validation and provenance, provider aliases, and provider selection

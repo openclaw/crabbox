@@ -707,14 +707,6 @@ type CubeSandboxConfig struct {
 	ProxyScheme   string
 }
 
-type AzureDynamicSessionsConfig struct {
-	Endpoint    string
-	Pool        string
-	APIVersion  string
-	Workdir     string
-	TimeoutSecs int
-}
-
 const (
 	AzureBackendVM              = "vm"
 	AzureBackendDynamicSessions = "dynamic-sessions"
@@ -2621,24 +2613,20 @@ func baseConfig() Config {
 		AWSLambdaMicroVM: AWSLambdaMicroVMConfig{
 			Workdir: "/workspace/crabbox",
 		},
-		AzureBackend:       "vm",
-		AzureLocation:      "eastus",
-		AzureResourceGroup: "crabbox-leases",
-		AzureImage:         azureImage,
-		AzureOSDisk:        AzureOSDiskManaged,
-		AzureVNet:          "crabbox-vnet",
-		AzureSubnet:        "crabbox-subnet",
-		AzureNSG:           "crabbox-nsg",
-		AzureDynamicSessions: AzureDynamicSessionsConfig{
-			APIVersion:  "2025-02-02-preview",
-			Workdir:     "/workspace/crabbox",
-			TimeoutSecs: 1800,
-		},
-		GCPZone:    "europe-west2-a",
-		GCPImage:   gcpImage,
-		GCPNetwork: "default",
-		GCPTags:    []string{"crabbox-ssh"},
-		GCPRootGB:  400,
+		AzureBackend:         "vm",
+		AzureLocation:        "eastus",
+		AzureResourceGroup:   "crabbox-leases",
+		AzureImage:           azureImage,
+		AzureOSDisk:          AzureOSDiskManaged,
+		AzureVNet:            "crabbox-vnet",
+		AzureSubnet:          "crabbox-subnet",
+		AzureNSG:             "crabbox-nsg",
+		AzureDynamicSessions: defaultAzureDynamicSessionsConfig(),
+		GCPZone:              "europe-west2-a",
+		GCPImage:             gcpImage,
+		GCPNetwork:           "default",
+		GCPTags:              []string{"crabbox-ssh"},
+		GCPRootGB:            400,
 		Linode: LinodeConfig{
 			Region: "us-ord",
 			Image:  linodeImage,
@@ -3734,14 +3722,6 @@ type fileCubeSandboxConfig struct {
 	ProxyNodeIP   string `yaml:"proxyNodeIp,omitempty"`
 	ProxyPortHTTP int    `yaml:"proxyPortHttp,omitempty"`
 	ProxyScheme   string `yaml:"proxyScheme,omitempty"`
-}
-
-type fileAzureDynamicSessionsConfig struct {
-	Endpoint    string `yaml:"endpoint,omitempty"`
-	Pool        string `yaml:"pool,omitempty"`
-	APIVersion  string `yaml:"apiVersion,omitempty"`
-	Workdir     string `yaml:"workdir,omitempty"`
-	TimeoutSecs int    `yaml:"timeoutSecs,omitempty"`
 }
 
 type fileFreestyleConfig struct {
@@ -5158,22 +5138,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.AzureNetwork = file.Azure.Network
 		}
 	}
-	if file.AzureDynamicSessions != nil {
-		if file.AzureDynamicSessions.Endpoint != "" {
-			cfg.AzureDynamicSessions.Endpoint = file.AzureDynamicSessions.Endpoint
+	{
+		applied, err := cfg.AzureDynamicSessions.applyFile(file.AzureDynamicSessions)
+		if applied.Endpoint {
 			cfg.credentialProvenance.azSessionsEndpoint = credentialSource
 		}
-		if file.AzureDynamicSessions.Pool != "" {
-			cfg.AzureDynamicSessions.Pool = file.AzureDynamicSessions.Pool
-		}
-		if file.AzureDynamicSessions.APIVersion != "" {
-			cfg.AzureDynamicSessions.APIVersion = file.AzureDynamicSessions.APIVersion
-		}
-		if file.AzureDynamicSessions.Workdir != "" {
-			cfg.AzureDynamicSessions.Workdir = file.AzureDynamicSessions.Workdir
-		}
-		if file.AzureDynamicSessions.TimeoutSecs > 0 {
-			cfg.AzureDynamicSessions.TimeoutSecs = file.AzureDynamicSessions.TimeoutSecs
+		if err != nil {
+			return err
 		}
 	}
 	if file.GCP != nil {
@@ -7543,14 +7514,15 @@ func applyEnv(cfg *Config) error {
 		cfg.AzureSSHCIDRs = splitCommaList(cidrs)
 	}
 	cfg.AzureNetwork = getenv("CRABBOX_AZURE_NETWORK", cfg.AzureNetwork)
-	if value := os.Getenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT"); value != "" {
-		cfg.AzureDynamicSessions.Endpoint = value
-		cfg.credentialProvenance.azSessionsEndpoint = credentialSourceEnvironment
+	{
+		applied, err := cfg.AzureDynamicSessions.applyEnv()
+		if applied.Endpoint {
+			cfg.credentialProvenance.azSessionsEndpoint = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
-	cfg.AzureDynamicSessions.Pool = getenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_POOL", cfg.AzureDynamicSessions.Pool)
-	cfg.AzureDynamicSessions.APIVersion = getenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_API_VERSION", cfg.AzureDynamicSessions.APIVersion)
-	cfg.AzureDynamicSessions.Workdir = getenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_WORKDIR", cfg.AzureDynamicSessions.Workdir)
-	cfg.AzureDynamicSessions.TimeoutSecs = getenvInt("CRABBOX_AZURE_DYNAMIC_SESSIONS_TIMEOUT_SECS", cfg.AzureDynamicSessions.TimeoutSecs)
 	if project := os.Getenv("CRABBOX_GCP_PROJECT"); project != "" {
 		cfg.GCPProject = project
 		cfg.gcpProjectExplicit = true

@@ -5271,6 +5271,107 @@ func TestVercelSandboxConfigYAMLAndEnv(t *testing.T) {
 	}
 }
 
+func TestAzureDynamicSessionsFilePositiveTimeoutAndSources(t *testing.T) {
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace"} {
+			for _, timeout := range []any{nil, 0, -1, 17} {
+				cfg := baseConfig()
+				cfg.AzureDynamicSessions = AzureDynamicSessionsConfig{Endpoint: "https://example.invalid/pool", Pool: "legacy", APIVersion: "version", Workdir: "/workspace/prior", TimeoutSecs: 12}
+				cfg.credentialProvenance.azSessionsEndpoint = credentialSourceFlag
+				want := cfg.AzureDynamicSessions
+				wantSource := credentialSourceFlag
+				fields := map[string]any{}
+				for _, f := range []struct {
+					key string
+					v   *string
+				}{{"endpoint", &want.Endpoint}, {"pool", &want.Pool}, {"apiVersion", &want.APIVersion}, {"workdir", &want.Workdir}} {
+					if mode == "omitted" {
+						continue
+					}
+					var value any = *f.v
+					if mode == "null" {
+						value = nil
+					}
+					if mode == "empty" {
+						value = ""
+					}
+					if mode == "whitespace" {
+						value = "  "
+						*f.v = "  "
+					}
+					fields[f.key] = value
+				}
+				if mode == "equal" || mode == "whitespace" {
+					wantSource = credentialSourceForFile(trusted)
+				}
+				fields["timeoutSecs"] = timeout
+				if v, ok := timeout.(int); ok && v > 0 {
+					want.TimeoutSecs = v
+				}
+				data, err := yaml.Marshal(map[string]any{"azureDynamicSessions": fields})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var file fileConfig
+				if err := yaml.Unmarshal(data, &file); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				if cfg.AzureDynamicSessions != want || cfg.credentialProvenance.azSessionsEndpoint != wantSource {
+					t.Fatalf("file mode=%s timeout=%v trusted=%t", mode, timeout, trusted)
+				}
+			}
+		}
+	}
+}
+
+func TestAzureDynamicSessionsEnvironmentRawTimeoutAndSources(t *testing.T) {
+	for _, mode := range []string{"empty", "equal", "whitespace", "changed"} {
+		for _, tc := range []struct {
+			raw  string
+			want int
+		}{{"", 12}, {"invalid", 12}, {" 17 ", 12}, {"9999999999999999999999999", 12}, {"0", 0}, {"-1", -1}, {"17", 17}} {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.AzureDynamicSessions = AzureDynamicSessionsConfig{Endpoint: "https://example.invalid/pool", Pool: "legacy", APIVersion: "version", Workdir: "/workspace/prior", TimeoutSecs: 12}
+			cfg.credentialProvenance.azSessionsEndpoint = credentialSourceFlag
+			want := cfg.AzureDynamicSessions
+			source := credentialSourceEnvironment
+			if mode == "empty" {
+				source = credentialSourceFlag
+			}
+			for _, f := range []struct {
+				suffix string
+				v      *string
+			}{{"ENDPOINT", &want.Endpoint}, {"POOL", &want.Pool}, {"API_VERSION", &want.APIVersion}, {"WORKDIR", &want.Workdir}} {
+				raw := *f.v
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+					*f.v = raw
+				}
+				if mode == "changed" {
+					raw += "-new"
+					*f.v = raw
+				}
+				t.Setenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_"+f.suffix, raw)
+			}
+			t.Setenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_TIMEOUT_SECS", tc.raw)
+			want.TimeoutSecs = tc.want
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.AzureDynamicSessions != want || cfg.credentialProvenance.azSessionsEndpoint != source {
+				t.Fatalf("env mode=%s raw=%q", mode, tc.raw)
+			}
+		}
+	}
+}
+
 func TestBlaxelFilePresenceTrustAndPartialErrors(t *testing.T) {
 	if _, ok := reflect.TypeOf(fileBlaxelConfig{}).FieldByName("APIKey"); ok {
 		t.Fatal("API key YAML source introduced")
@@ -9411,6 +9512,10 @@ func TestConfigServerTypeHelperBranches(t *testing.T) {
 }
 
 func TestApplyFileConfigCloudProviderBranches(t *testing.T) {
+	var azSessionsFile fileConfig
+	if err := yaml.Unmarshal([]byte("azureDynamicSessions:\n  endpoint: https://pool.env.eastus.azurecontainerapps.io\n  pool: pool\n  apiVersion: 2025-02-02-preview\n  workdir: /workspace/file\n  timeoutSecs: 120\n"), &azSessionsFile); err != nil {
+		t.Fatal(err)
+	}
 	enabled := true
 	disabled := false
 	cfg := Config{}
@@ -9451,13 +9556,7 @@ func TestApplyFileConfigCloudProviderBranches(t *testing.T) {
 			SSHCIDRs:       []string{"198.51.100.2/32"},
 			Network:        "public",
 		},
-		AzureDynamicSessions: &fileAzureDynamicSessionsConfig{
-			Endpoint:    "https://pool.env.eastus.azurecontainerapps.io",
-			Pool:        "pool",
-			APIVersion:  "2025-02-02-preview",
-			Workdir:     "/workspace/file",
-			TimeoutSecs: 120,
-		},
+		AzureDynamicSessions: azSessionsFile.AzureDynamicSessions,
 		GCP: &fileGCPConfig{
 			Project:        "project",
 			Zone:           "europe-west1-b",
