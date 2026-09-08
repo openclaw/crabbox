@@ -1,8 +1,9 @@
 # Typed provider config bindings
 
-Vercel Sandbox, CodeSandbox, and CUA describe their mechanical config bindings
+Vercel Sandbox, CodeSandbox, CUA, and OpenSandbox describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
-`internal/cli/config_codesandbox.go`, and `internal/cli/config_cua.go`.
+`internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`, and
+`internal/cli/config_opensandbox.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 pointer-valued YAML input fields, compiled defaults, file/environment overlays,
@@ -32,15 +33,16 @@ machine-specific paths. Its header identifies the generator and source file.
 
 1. Add an exported, singly named field to the provider's config struct. Supported types
    are `string`, `int`, `float64`, `bool`, and `[]string`.
-2. Set its `env` variable, `flag` spelling, and `help` text; file-supported fields
-   also need a `config` YAML key.
+2. Set its `flag` spelling and `help` text. Environment-supported fields need an
+   `env` variable, and file-supported fields also need a `config` YAML key.
    Explicitly set `sources:"user,repo,env,flag"` only after establishing that the
    value is safe in repository configuration and on argv. Use the exact
    `sources:"user,env,flag"` grant for an existing trusted-file-only binding;
    the loader's existing trust decision gates its file application. An existing
    environment/flag-only field uses `sources:"env,flag"` and must omit the
-   `config` tag entirely, including an empty tag. There is no implicit source
-   grant. An optional `default` tag supplies a scalar default checked
+   `config` tag entirely, including an empty tag. A CLI-only field uses
+   `sources:"flag"` and must omit `config`, `env`, and `envAlias` tags entirely.
+   There is no implicit source grant. An optional `default` tag supplies a scalar default checked
    against the field type; otherwise the Go zero value applies. Current integer
    fields require `nonnegative:"true"` for eager file/environment validation.
    A string field may name one existing fallback environment variable with
@@ -54,7 +56,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -110,7 +112,15 @@ settings retain trusted-file-only admission; the other nine YAML fields remain
 repository-safe. Its sizing guard still precedes the flag-value type assertion,
 unlike CodeSandbox's wrapper. Read-only lifecycle restrictions are unchanged.
 
-The generator accepts only these three exact source grants. Credential handling,
+OpenSandbox's twelve runtime/flag fields include ten YAML fields and eleven
+environment fields. `APIURL` has no YAML source; `CRABBOX_OPENSANDBOX_API_URL`
+retains precedence over `OPEN_SANDBOX_API_URL`. `ForgetMissing` remains CLI-only:
+file and environment overlays leave it untouched, and only a visited flag copies
+its parsed value. Early provider validation still checks only the two timeout
+integers; URL, platform/resource and request-budget checks stay at their later
+owners. No configuration layer gains cleanup authority.
+
+The generator accepts only these four exact source grants. Credential handling,
 destination validation and provenance, provider aliases, and provider selection
 policy stay handwritten. A declared environment alias copies the existing string
 fallback only; it does not define credential forwarding or destination authority.

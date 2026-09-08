@@ -164,6 +164,99 @@ func TestGenerateEnvironmentOnlyAliasBindings(t *testing.T) {
 	}
 }
 
+const flagOnlySample = "package cli\ntype PilotConfig struct {\n" +
+	" Name string `sources:\"flag\" flag:\"pilot-name\" help:\"Name\" default:\"test\"`\n" +
+	" Count int `sources:\"flag\" flag:\"pilot-count\" help:\"Count\" default:\"7\" nonnegative:\"true\"`\n" +
+	" CPUs float64 `sources:\"flag\" flag:\"pilot-cpus\" help:\"CPUs\" default:\"0.5\"`\n" +
+	" Enabled bool `sources:\"flag\" flag:\"pilot-enabled\" help:\"Enabled\" default:\"true\"`\n" +
+	" Ports []string `sources:\"flag\" flag:\"pilot-ports\" help:\"Ports\"`\n}"
+
+func TestSchemaFlagOnlyFailsClosed(t *testing.T) {
+	for _, tag := range []string{"config", "env", "envAlias"} {
+		for _, value := range []string{"", "binding"} {
+			t.Run(tag+"/"+value, func(t *testing.T) {
+				source := strings.Replace(flagOnlySample, `sources:"flag"`, `sources:"flag" `+tag+`:"`+value+`"`, 1)
+				_, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+				if err == nil || !strings.Contains(err.Error(), "absent "+tag+" tag") {
+					t.Fatalf("contradictory %s tag: %v", tag, err)
+				}
+			})
+		}
+	}
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"missing flag", `flag:"pilot-name"`, "", "invalid flag binding"},
+		{"missing help", `help:"Name"`, "", "needs flag help"},
+		{"duplicate flag", `flag:"pilot-count"`, `flag:"pilot-name"`, "duplicate flag binding"},
+		{"integer policy", `nonnegative:"true"`, "", "require nonnegative policy"},
+		{"list default", `help:"Ports"`, `help:"Ports" default:"one"`, "defaults for []string are not supported"},
+		{"unsupported type", "Name string", "Name map[string]string", "unsupported config type"},
+		{"unsupported grant", `sources:"flag"`, `sources:"user,flag"`, "explicit sources"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(flagOnlySample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestGenerateFlagOnlyBindings(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "flag-only lists", true: "later environment list"}[mixed], func(t *testing.T) {
+			source := flagOnlySample
+			if mixed {
+				source = strings.TrimSuffix(source, "}") + " Later []string `config:\"later\" env:\"PILOT_LATER\" flag:\"pilot-later\" sources:\"user,repo,env,flag\" help:\"Later\"`\n}"
+			}
+			s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+			if err != nil {
+				t.Fatal(err)
+			}
+			output, err := generate(s, "pilot.go")
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := generate(s, "pilot.go")
+			if err != nil || !bytes.Equal(output, again) {
+				t.Fatalf("nondeterministic output: %v", err)
+			}
+			text := string(output)
+			if strings.Contains(text, `"os"`) != mixed || !strings.Contains(text, `"strings"`) {
+				t.Fatal("imports do not match list source grants")
+			}
+			fileType := strings.SplitN(strings.SplitN(text, "type filePilotConfig struct {", 2)[1], "}", 2)[0]
+			envBody := strings.SplitN(strings.SplitN(text, "func (cfg *PilotConfig) applyEnv() error {", 2)[1], "// PilotConfigFlagValues", 2)[0]
+			for _, f := range s.fields[:5] {
+				if !f.noFile || !f.noEnv || f.trustedFileOnly {
+					t.Fatalf("unexpected flag-only source facts for %s", f.name)
+				}
+				if strings.Contains(fileType, f.name) || strings.Contains(text, "file."+f.name) || strings.Contains(envBody, "cfg."+f.name) {
+					t.Fatalf("flag-only field %s admitted to file/environment", f.name)
+				}
+				if !strings.Contains(text, `if flagWasSet(fs, "`+f.flag+`")`) {
+					t.Fatalf("missing explicit flag application for %s", f.name)
+				}
+			}
+			for _, want := range []string{
+				`const PilotConfigDefaultName string = "test"`,
+				`const PilotConfigDefaultCount int = 7`,
+				`const PilotConfigDefaultCPUs float64 = 0.5`,
+				`const PilotConfigDefaultEnabled bool = true`,
+				`fs.String("pilot-ports", strings.Join(defaults.Ports, ","), "Ports")`,
+				`cfg.Ports = splitCommaList(*values.Ports)`,
+			} {
+				if !strings.Contains(text, want) {
+					t.Fatalf("missing flag/default binding %q", want)
+				}
+			}
+			if mixed && !strings.Contains(envBody, `os.Getenv("PILOT_LATER")`) {
+				t.Fatal("later list lost environment binding")
+			}
+			typecheckGenerated(t, source, output)
+		})
+	}
+}
+
 func TestCheckMissingFreshAndStaleOutput(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "pilot.go")
@@ -217,6 +310,12 @@ func TestCodeSandboxGeneratedConfigIsCurrent(t *testing.T) {
 
 func TestCuaGeneratedConfigIsCurrent(t *testing.T) {
 	if err := run("../../internal/cli/config_cua.go", "../../internal/cli/config_cua_generated.go", "CuaConfig", "cua", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenSandboxGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_opensandbox.go", "../../internal/cli/config_opensandbox_generated.go", "OpenSandboxConfig", "opensandbox", true); err != nil {
 		t.Fatal(err)
 	}
 }

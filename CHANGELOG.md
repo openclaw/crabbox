@@ -29,6 +29,8 @@
 
 - Describe CUA configuration bindings once, preserving environment/flag-only API URL selection and its alias, trusted-only bridge settings, defaults, and validation order. [PR 1989](https://github.com/openclaw/crabbox/pull/1989). Thanks @steipete.
 
+- Describe OpenSandbox configuration bindings once, preserving CLI-only stale-claim cleanup, environment/flag-only API URL selection, defaults, and validation timing.
+
 ## 0.52.0 - 2026-09-07
 
 ### Highlights

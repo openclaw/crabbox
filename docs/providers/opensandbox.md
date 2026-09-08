@@ -66,8 +66,10 @@ config and never placed on argv. If no key is resolvable, operations fail with
 a clear error before any sandbox is created.
 
 The API base URL can come from `--opensandbox-api-url`,
-`CRABBOX_OPENSANDBOX_API_URL`, or `OPEN_SANDBOX_API_URL`. Repository YAML cannot
-set the API URL. That prevents a checked-in config from redirecting an
+`CRABBOX_OPENSANDBOX_API_URL`, or `OPEN_SANDBOX_API_URL`. Neither user nor
+repository YAML can set the API URL. A nonempty `CRABBOX_OPENSANDBOX_API_URL`
+takes precedence over `OPEN_SANDBOX_API_URL`; empty values fall through.
+The YAML restriction prevents a checked-in config from redirecting an
 automatically loaded API key. Overrides must be absolute HTTP(S) URLs; plain
 HTTP is accepted only for `localhost` or loopback IPs during local development.
 Userinfo, query parameters, and fragments are rejected.
@@ -114,6 +116,9 @@ Provider flags:
 --opensandbox-use-server-proxy
 --opensandbox-forget-missing
 ```
+
+`--opensandbox-forget-missing` is CLI-only. It has no YAML setting or environment
+override; pass the flag explicitly when you intend stale-claim cleanup.
 
 Configuration flags have matching `CRABBOX_OPENSANDBOX_*` environment
 overrides, for example `CRABBOX_OPENSANDBOX_IMAGE`,

@@ -926,25 +926,6 @@ type OpenComputerConfig struct {
 	ForgetMissing   bool
 }
 
-// OpenSandboxConfig configures the delegated OpenSandbox provider. The API key
-// is intentionally absent: it is read at runtime from
-// CRABBOX_OPENSANDBOX_API_KEY / OPEN_SANDBOX_API_KEY and sent only in request
-// headers, never persisted in Crabbox config or placed on argv.
-type OpenSandboxConfig struct {
-	APIURL          string
-	Image           string
-	Workdir         string
-	CPU             string
-	Memory          string
-	TimeoutSecs     int
-	ExecTimeoutSecs int
-	PlatformOS      string
-	PlatformArch    string
-	SecureAccess    bool
-	UseServerProxy  bool
-	ForgetMissing   bool
-}
-
 // NomadConfig configures the delegated Nomad provider. The ACL token is
 // intentionally absent: it is read at runtime from NOMAD_TOKEN or TokenEnv and
 // is never persisted in Crabbox config or placed on argv.
@@ -3003,18 +2984,7 @@ func baseConfig() Config {
 			ExecTimeoutSecs: 3600,
 		},
 		CodeSandbox: defaultCodeSandboxConfig(),
-		OpenSandbox: OpenSandboxConfig{
-			// APIURL is intentionally unset here so repository YAML cannot
-			// redirect a shell-provided API key. The provider requires an
-			// explicit trusted endpoint from flags or environment.
-			Image:           "ubuntu:24.04",
-			Workdir:         "/workspace/crabbox",
-			CPU:             "1",
-			Memory:          "2Gi",
-			ExecTimeoutSecs: 600,
-			PlatformOS:      "linux",
-			PlatformArch:    "amd64",
-		},
+		OpenSandbox: defaultOpenSandboxConfig(),
 		Nomad: NomadConfig{
 			TokenEnv:          "NOMAD_TOKEN",
 			Task:              "crabbox",
@@ -4059,19 +4029,6 @@ type fileOpenComputerConfig struct {
 	TimeoutSecs     *int   `yaml:"timeoutSecs,omitempty"`
 	ExecTimeoutSecs *int   `yaml:"execTimeoutSecs,omitempty"`
 	Burst           *bool  `yaml:"burst,omitempty"`
-}
-
-type fileOpenSandboxConfig struct {
-	Image           *string `yaml:"image,omitempty"`
-	Workdir         *string `yaml:"workdir,omitempty"`
-	CPU             *string `yaml:"cpu,omitempty"`
-	Memory          *string `yaml:"memory,omitempty"`
-	TimeoutSecs     *int    `yaml:"timeoutSecs,omitempty"`
-	ExecTimeoutSecs *int    `yaml:"execTimeoutSecs,omitempty"`
-	PlatformOS      *string `yaml:"platformOS,omitempty"`
-	PlatformArch    *string `yaml:"platformArch,omitempty"`
-	SecureAccess    *bool   `yaml:"secureAccess,omitempty"`
-	UseServerProxy  *bool   `yaml:"useServerProxy,omitempty"`
 }
 
 type fileNomadConfig struct {
@@ -6733,27 +6690,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	if err := cfg.CodeSandbox.applyFile(file.CodeSandbox, trusted); err != nil {
 		return err
 	}
-	if file.OpenSandbox != nil {
-		applyOptional(&cfg.OpenSandbox.Image, file.OpenSandbox.Image)
-		applyOptional(&cfg.OpenSandbox.Workdir, file.OpenSandbox.Workdir)
-		applyOptional(&cfg.OpenSandbox.CPU, file.OpenSandbox.CPU)
-		applyOptional(&cfg.OpenSandbox.Memory, file.OpenSandbox.Memory)
-		if file.OpenSandbox.TimeoutSecs != nil {
-			if *file.OpenSandbox.TimeoutSecs < 0 {
-				return exit(2, "opensandbox timeoutSecs must be non-negative")
-			}
-			cfg.OpenSandbox.TimeoutSecs = *file.OpenSandbox.TimeoutSecs
-		}
-		if file.OpenSandbox.ExecTimeoutSecs != nil {
-			if *file.OpenSandbox.ExecTimeoutSecs < 0 {
-				return exit(2, "opensandbox execTimeoutSecs must be non-negative")
-			}
-			cfg.OpenSandbox.ExecTimeoutSecs = *file.OpenSandbox.ExecTimeoutSecs
-		}
-		applyOptional(&cfg.OpenSandbox.PlatformOS, file.OpenSandbox.PlatformOS)
-		applyOptional(&cfg.OpenSandbox.PlatformArch, file.OpenSandbox.PlatformArch)
-		applyOptional(&cfg.OpenSandbox.SecureAccess, file.OpenSandbox.SecureAccess)
-		applyOptional(&cfg.OpenSandbox.UseServerProxy, file.OpenSandbox.UseServerProxy)
+	if err := cfg.OpenSandbox.applyFile(file.OpenSandbox); err != nil {
+		return err
 	}
 	if file.Nomad != nil {
 		if trusted && file.Nomad.Address != "" {
@@ -8750,26 +8688,8 @@ func applyEnv(cfg *Config) error {
 	if err := cfg.CodeSandbox.applyEnv(); err != nil {
 		return err
 	}
-	cfg.OpenSandbox.APIURL = getenv("CRABBOX_OPENSANDBOX_API_URL", getenv("OPEN_SANDBOX_API_URL", cfg.OpenSandbox.APIURL))
-	cfg.OpenSandbox.Image = getenv("CRABBOX_OPENSANDBOX_IMAGE", cfg.OpenSandbox.Image)
-	cfg.OpenSandbox.Workdir = getenv("CRABBOX_OPENSANDBOX_WORKDIR", cfg.OpenSandbox.Workdir)
-	cfg.OpenSandbox.CPU = getenv("CRABBOX_OPENSANDBOX_CPU", cfg.OpenSandbox.CPU)
-	cfg.OpenSandbox.Memory = getenv("CRABBOX_OPENSANDBOX_MEMORY", cfg.OpenSandbox.Memory)
-	cfg.OpenSandbox.TimeoutSecs, err = getenvNonNegativeInt("CRABBOX_OPENSANDBOX_TIMEOUT_SECS", cfg.OpenSandbox.TimeoutSecs)
-	if err != nil {
+	if err := cfg.OpenSandbox.applyEnv(); err != nil {
 		return err
-	}
-	cfg.OpenSandbox.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS", cfg.OpenSandbox.ExecTimeoutSecs)
-	if err != nil {
-		return err
-	}
-	cfg.OpenSandbox.PlatformOS = getenv("CRABBOX_OPENSANDBOX_PLATFORM_OS", cfg.OpenSandbox.PlatformOS)
-	cfg.OpenSandbox.PlatformArch = getenv("CRABBOX_OPENSANDBOX_PLATFORM_ARCH", cfg.OpenSandbox.PlatformArch)
-	if v, ok := getenvBool("CRABBOX_OPENSANDBOX_SECURE_ACCESS"); ok {
-		cfg.OpenSandbox.SecureAccess = v
-	}
-	if v, ok := getenvBool("CRABBOX_OPENSANDBOX_USE_SERVER_PROXY"); ok {
-		cfg.OpenSandbox.UseServerProxy = v
 	}
 	if value := os.Getenv("CRABBOX_NOMAD_ADDR"); value != "" {
 		cfg.Nomad.Address = value
