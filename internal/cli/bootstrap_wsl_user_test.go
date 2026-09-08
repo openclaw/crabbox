@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -76,6 +77,10 @@ func wslBootstrapHereDoc(t *testing.T, marker string) string {
 
 func TestManagedWSLDefaultUserPreservesDistroSettings(t *testing.T) {
 	script := wslBootstrapHereDoc(t, "WSL_USER")
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("Python is unavailable")
+	}
 	for _, test := range []struct{ name, input string }{
 		{"missing", ""},
 		{"existing", "[boot]\nsystemd=true\n[automount]\nmountFsTab=false\n[interop]\nappendWindowsPath=false\n[user]\ndefault=root\n"},
@@ -87,10 +92,10 @@ func TestManagedWSLDefaultUserPreservesDistroSettings(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			command := strings.Replace(script, "/etc/wsl.conf", path, 1)
+			command := strings.Replace(script, "Path('/etc/wsl.conf')", "Path(__import__('sys').argv[1])", 1)
 			var previous string
 			for pass := 0; pass < 2; pass++ {
-				if out, err := exec.CommandContext(t.Context(), "python3", "-c", command).CombinedOutput(); err != nil {
+				if out, err := exec.CommandContext(t.Context(), python, "-c", command, path).CombinedOutput(); err != nil {
 					t.Fatalf("configure default user: %v: %s", err, out)
 				}
 				data, err := os.ReadFile(path)
@@ -111,6 +116,9 @@ func TestManagedWSLDefaultUserPreservesDistroSettings(t *testing.T) {
 }
 
 func TestManagedWSLReadinessRequiresWorkerIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executes POSIX readiness fixtures locally")
+	}
 	ready := wslBootstrapHereDoc(t, "READY")
 	for _, test := range []struct{ name, uid, user, home, failingTool string }{
 		{"worker", "1001", "crabbox", "worker", ""},
