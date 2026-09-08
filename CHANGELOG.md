@@ -34,7 +34,7 @@
 
 - Describe Blaxel configuration bindings once, sharing client and execution defaults while preserving tolerant memory environment parsing, trusted inputs, and validation order. [PR 2015](https://github.com/openclaw/crabbox/pull/2015). Thanks @steipete.
 
-- Describe Azure Dynamic Sessions configuration bindings once, preserving positive-only YAML timeouts, legacy-pool rejection, endpoint provenance, and TTL fallback order. Thanks @steipete.
+- Describe Azure Dynamic Sessions configuration bindings once, preserving positive-only YAML timeouts, legacy-pool rejection, endpoint provenance, and TTL fallback order. [PR 2017](https://github.com/openclaw/crabbox/pull/2017). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 
