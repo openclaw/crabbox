@@ -562,9 +562,13 @@ type runDownloadReserveWriter struct {
 
 func (writer *runDownloadReserveWriter) Write(data []byte) (int, error) {
 	if err := checkRunDownloadDiskReserve(writer.path, int64(len(data)), writer.reserve, writer.available); err != nil {
-		return 0, err
+		return 0, runDownloadLocalError{err}
 	}
-	return writer.writer.Write(data)
+	written, err := writer.writer.Write(data)
+	if err != nil {
+		return written, runDownloadLocalError{err}
+	}
+	return written, nil
 }
 
 type contextRunDownloadReader struct {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -277,6 +278,58 @@ func TestStageRunDownloadCancellationPreservesDestination(t *testing.T) {
 		t.Fatalf("stage=%#v err=%v", stage, err)
 	}
 	assertRunDownloadDestinationAndTemps(t, path, "keep")
+}
+
+func TestStageRunDownloadClassifiesMidStreamDiskFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "output.bin")
+	if err := os.WriteFile(path, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var checks int
+	stage, err := stageRunDownload(t.Context(), encodedRunDownload(4, []byte("data")), path, runDownloadLimits{
+		MaxBytes:         4,
+		DiskReserveBytes: 10,
+	}, func(string) (int64, error) {
+		checks++
+		if checks == 1 {
+			return 100, nil
+		}
+		return 10, nil
+	})
+	var localErr runDownloadLocalError
+	if stage != nil || !errors.As(err, &localErr) || !strings.Contains(localErr.Error(), "insufficient disk") {
+		t.Fatalf("stage=%#v err=%v local=%v", stage, err, localErr)
+	}
+	if checks < 2 {
+		t.Fatalf("available disk checks=%d want at least 2", checks)
+	}
+	assertRunDownloadDestinationAndTemps(t, path, "keep")
+}
+
+func TestRunDownloadReserveWriterClassifiesPartialWriteFailure(t *testing.T) {
+	wantErr := errors.New("write failed")
+	writer := &runDownloadReserveWriter{
+		writer: runDownloadWriterFunc(func([]byte) (int, error) {
+			return 2, wantErr
+		}),
+		path:    ".",
+		reserve: 10,
+		available: func(string) (int64, error) {
+			return 100, nil
+		},
+	}
+	written, err := writer.Write([]byte("data"))
+	var localErr runDownloadLocalError
+	if written != 2 || !errors.As(err, &localErr) || localErr.Error() != wantErr.Error() {
+		t.Fatalf("written=%d err=%v local=%v", written, err, localErr)
+	}
+}
+
+type runDownloadWriterFunc func([]byte) (int, error)
+
+func (write runDownloadWriterFunc) Write(data []byte) (int, error) {
+	return write(data)
 }
 
 func encodedRunDownload(advertised int64, payload []byte) io.Reader {

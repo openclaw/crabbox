@@ -7250,16 +7250,9 @@ func TestRemoteFailureCaptureRemovesPartialArchiveOnFailure(t *testing.T) {
 	binDir := t.TempDir()
 	t.Setenv("TMPDIR", tempRoot)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	fakeTar := filepath.Join(binDir, "tar")
-	if err := os.WriteFile(fakeTar, []byte(`#!/bin/sh
-previous=
-for argument do
-  if [ "$previous" = "-czf" ]; then
-    printf partial > "$argument"
-    exit 42
-  fi
-  previous=$argument
-done
+	fakeGzip := filepath.Join(binDir, "gzip")
+	if err := os.WriteFile(fakeGzip, []byte(`#!/bin/sh
+printf partial
 exit 42
 `), 0o700); err != nil {
 		t.Fatal(err)
@@ -7291,14 +7284,18 @@ func TestRemoteFailureCaptureKeepsLargeFileListOffArgv(t *testing.T) {
 	if err != nil {
 		t.Skip("tar is required for POSIX capture command test")
 	}
-	tarVersion, _ := exec.Command(realTar, "--version").CombinedOutput()
-	isBSDTar := bytes.Contains(tarVersion, []byte("bsdtar"))
 	workdir := t.TempDir()
 	tempRoot := t.TempDir()
 	binDir := t.TempDir()
 	t.Setenv("TMPDIR", tempRoot)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	const argumentBudget = 1024
+	dfLog := filepath.Join(binDir, "df.log")
+	fakeDF := filepath.Join(binDir, "df")
+	dfScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuote(dfLog) + "\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nfake 9999999 0 9999999 0%% /\\n'\n"
+	if err := os.WriteFile(fakeDF, []byte(dfScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	var fileListBytes int
 	var want []string
 	scriptPath := filepath.Join("scripts", "capture.sh ")
@@ -7332,41 +7329,33 @@ func TestRemoteFailureCaptureKeepsLargeFileListOffArgv(t *testing.T) {
 	fakeTar := filepath.Join(binDir, "tar")
 	wrapper := `#!/bin/sh
 budget=` + strconv.Itoa(argumentBudget) + `
-bsd=` + strconv.FormatBool(isBSDTar) + `
 bytes=0
+mode=
 list=no
 null=no
-output=
-checkout=
-scratch=
-list_path=
+directories=0
+manifest=no
 previous=
 for argument do
   bytes=$((bytes + ${#argument} + 1))
   case "$previous" in
-    -czf) output=$argument ;;
-    -T) list=yes; list_path=$argument ;;
-    -C)
-      if [ -z "$checkout" ]; then checkout=$argument; else scratch=$argument; fi
-      ;;
+    -T) list=yes ;;
+    -C) directories=$((directories + 1)) ;;
   esac
-  if [ "$argument" = "--null" ]; then null=yes; fi
+  case "$argument" in
+    -cf) mode=create ;;
+    -rf) mode=append ;;
+    --null) null=yes ;;
+    .crabbox/capture-manifest.txt) manifest=yes ;;
+  esac
   previous=$argument
 done
 [ "$bytes" -le "$budget" ] || exit 91
-[ "$list" = yes ] || exit 92
-[ "$null" = yes ] || exit 93
-if [ "$bsd" = true ]; then
-  combined="$list_path.bsdtar"
-  manifest="$checkout/.crabbox/capture-manifest.txt"
-  cp "$list_path" "$combined" || exit 94
-  cp "$scratch/.crabbox/capture-manifest.txt" "$manifest" || exit 95
-  printf '%s\0' .crabbox/capture-manifest.txt >> "$combined"
-  ` + shellQuote(realTar) + ` -czf "$output" -C "$checkout" --null -T "$combined"
-  result=$?
-  rm "$combined" "$manifest"
-  exit "$result"
-fi
+case "$mode" in
+  create) [ "$list" = yes ] && [ "$null" = yes ] && [ "$directories" -eq 1 ] || exit 92 ;;
+  append) [ "$list" = no ] && [ "$directories" -eq 1 ] && [ "$manifest" = yes ] || exit 93 ;;
+  *) exit 94 ;;
+esac
 exec ` + shellQuote(realTar) + ` "$@"
 `
 	if err := os.WriteFile(fakeTar, []byte(wrapper), 0o700); err != nil {
@@ -7377,11 +7366,119 @@ exec ` + shellQuote(realTar) + ` "$@"
 	if out, err := exec.Command("bash", "-c", command).CombinedOutput(); err != nil {
 		t.Fatalf("capture command failed: %v\n%s", err, out)
 	}
+	dfCalls, err := os.ReadFile(dfLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(dfCalls)), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], tempRoot) || lines[1] != "-Pk .crabbox" {
+		t.Fatalf("disk admission calls=%q", lines)
+	}
 	contents := readTarGzContents(t, filepath.Join(workdir, ".crabbox", "capture.tar.gz"))
 	for _, name := range append(want, ".crabbox/capture-manifest.txt") {
 		if _, ok := contents[name]; !ok {
 			t.Fatalf("capture missing %q", name)
 		}
+	}
+	if entries, err := os.ReadDir(tempRoot); err != nil || len(entries) != 0 {
+		t.Fatalf("failure capture scratch retained: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestRemoteFailureCaptureRejectsLowOrUnknownDiskAdmission(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for POSIX capture command test")
+	}
+	for _, test := range []struct {
+		name   string
+		dfBody string
+		want   string
+	}{
+		{
+			name:   "low",
+			dfBody: "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nfake 100 65 35 65%% /\\n'",
+			want:   "required_blocks=36",
+		},
+		{
+			name:   "unknown",
+			dfBody: "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'",
+			want:   "disk availability unknown",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workdir := t.TempDir()
+			tempRoot := t.TempDir()
+			binDir := t.TempDir()
+			t.Setenv("TMPDIR", tempRoot)
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			fakeDF := filepath.Join(binDir, "df")
+			if err := os.WriteFile(fakeDF, []byte("#!/bin/sh\n"+test.dfBody+"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			command := remoteFailureCaptureCommandWithLimits(workdir, ".crabbox/capture.tar.gz", "", runDownloadLimits{
+				MaxBytes:         16 << 10,
+				DiskReserveBytes: 4 << 10,
+			})
+			command = strings.Replace(command, "bash -lc ", "bash --noprofile --norc -c ", 1)
+			out, err := exec.Command("bash", "-c", command).CombinedOutput()
+			if err == nil || !strings.Contains(string(out), test.want) {
+				t.Fatalf("capture err=%v want=%q:\n%s", err, test.want, out)
+			}
+			assertRemoteFailureCaptureFilesRemoved(t, workdir, tempRoot)
+		})
+	}
+}
+
+func TestRemoteFailureCaptureEnforcesWriterCaps(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for POSIX capture command test")
+	}
+	for _, test := range []struct {
+		name       string
+		maxBytes   int64
+		evidence   int
+		fakeGzip   bool
+		lowerLimit bool
+	}{
+		{name: "raw tar", maxBytes: 32 << 10, evidence: 64 << 10},
+		{name: "gzip output", maxBytes: 64 << 10, evidence: 1, fakeGzip: true},
+		{name: "lower inherited limit", maxBytes: 64 << 10, evidence: 1, lowerLimit: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workdir := t.TempDir()
+			tempRoot := t.TempDir()
+			binDir := t.TempDir()
+			t.Setenv("TMPDIR", tempRoot)
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			if err := os.WriteFile(filepath.Join(workdir, "evidence.log"), bytes.Repeat([]byte("x"), test.evidence), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if test.fakeGzip {
+				fakeGzip := filepath.Join(binDir, "gzip")
+				if err := os.WriteFile(fakeGzip, []byte("#!/bin/sh\nexec dd if=/dev/zero bs=1024 count=128 2>/dev/null\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			command := remoteFailureCaptureCommandWithLimits(workdir, ".crabbox/capture.tar.gz", "", runDownloadLimits{
+				MaxBytes:         test.maxBytes,
+				DiskReserveBytes: 0,
+			})
+			command = strings.Replace(command, "bash -lc ", "bash --noprofile --norc -c ", 1)
+			if test.lowerLimit {
+				command = "ulimit -f 1; " + command
+			}
+			if out, err := exec.Command("bash", "-c", command).CombinedOutput(); err == nil {
+				t.Fatalf("capture unexpectedly succeeded:\n%s", out)
+			}
+			assertRemoteFailureCaptureFilesRemoved(t, workdir, tempRoot)
+		})
+	}
+}
+
+func assertRemoteFailureCaptureFilesRemoved(t *testing.T, workdir, tempRoot string) {
+	t.Helper()
+	if _, err := os.Lstat(filepath.Join(workdir, ".crabbox", "capture.tar.gz")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial capture remains: %v", err)
 	}
 	if entries, err := os.ReadDir(tempRoot); err != nil || len(entries) != 0 {
 		t.Fatalf("failure capture scratch retained: entries=%v err=%v", entries, err)

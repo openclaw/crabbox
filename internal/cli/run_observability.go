@@ -16,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -1238,14 +1239,24 @@ func safeCaptureName(value string) string {
 }
 
 func remoteFailureCaptureCommand(workdir, remotePath, scriptPath string) string {
+	return remoteFailureCaptureCommandWithLimits(workdir, remotePath, scriptPath, failureCaptureDownloadLimits)
+}
+
+func remoteFailureCaptureCommandWithLimits(workdir, remotePath, scriptPath string, limits runDownloadLimits) string {
 	var script bytes.Buffer
 	script.WriteString("set -eu\n")
 	script.WriteString("cd " + shellQuote(workdir) + "\n")
 	script.WriteString("mkdir -p .crabbox\n")
 	script.WriteString("out=" + shellQuote(remotePath) + "\n")
 	script.WriteString("script=" + shellQuote(scriptPath) + "\n")
+	script.WriteString("capture_max_bytes=" + strconv.FormatInt(limits.MaxBytes, 10) + "\n")
+	script.WriteString("capture_reserve_bytes=" + strconv.FormatInt(limits.DiskReserveBytes, 10) + "\n")
 	script.WriteString(`if [ -e "$out" ] || [ -L "$out" ]; then
   printf 'failure capture destination already exists: %s\n' "$out" >&2
+  exit 7
+fi
+if [ "$capture_max_bytes" -le 0 ] || [ $((capture_max_bytes % 1024)) -ne 0 ] || [ "$capture_reserve_bytes" -lt 0 ]; then
+  printf 'invalid failure capture limits: max=%s reserve=%s\n' "$capture_max_bytes" "$capture_reserve_bytes" >&2
   exit 7
 fi
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/crabbox-failure-capture.XXXXXX")
@@ -1260,6 +1271,43 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 printf '` + remoteFailureCaptureOwnedPrefix + `%s\n' "$out"
+capture_file_blocks=$((capture_max_bytes / 1024))
+capture_required_blocks=$(((capture_reserve_bytes + 2 * capture_max_bytes + 1023) / 1024))
+capture_require_space() {
+  label=$1
+  path=$2
+  if ! blocks=$(LC_ALL=C df -Pk "$path" 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ { print $4; found=1; exit } END { if (!found) exit 1 }'); then
+    printf 'failure capture disk availability unknown: %s path=%s\n' "$label" "$path" >&2
+    return 7
+  fi
+  if [ "$blocks" -lt "$capture_required_blocks" ]; then
+    printf 'failure capture disk reserve unavailable: %s path=%s available_blocks=%s required_blocks=%s\n' "$label" "$path" "$blocks" "$capture_required_blocks" >&2
+    return 7
+  fi
+}
+capture_apply_file_limit() {
+  if ! inherited=$(ulimit -Sf 2>/dev/null); then
+    printf 'failure capture file limit unavailable\n' >&2
+    return 7
+  fi
+  case "$inherited" in
+    unlimited) ;;
+    ''|*[!0-9]*)
+      printf 'failure capture file limit unknown: %s\n' "$inherited" >&2
+      return 7
+      ;;
+    *)
+      if [ "$inherited" -lt "$capture_file_blocks" ]; then
+        printf 'failure capture inherited file limit is lower: inherited=%s required=%s\n' "$inherited" "$capture_file_blocks" >&2
+        return 7
+      fi
+      ;;
+  esac
+  ulimit -f "$capture_file_blocks"
+}
+out_dir=$(dirname "$out")
+capture_require_space scratch "$scratch"
+capture_require_space output "$out_dir"
 mkdir -p "$scratch/.crabbox"
 manifest="$scratch/.crabbox/capture-manifest.txt"
 files="$scratch/capture-files.txt"
@@ -1297,8 +1345,19 @@ while IFS= read -r path; do
 done < "$files.sorted" > "$archive_list"
 metadata=(.crabbox/capture-manifest.txt)
 if [ -f "$gateway_tail" ]; then metadata+=(.crabbox/gateway-log-tail.txt); fi
-COPYFILE_DISABLE=1 tar -czf "$out" -C "$checkout" --null -T "$archive_list" -C "$scratch" "${metadata[@]}" 2>/dev/null ||
-  COPYFILE_DISABLE=1 tar -czf "$out" -C "$scratch" .crabbox/capture-manifest.txt
+raw_archive="$scratch/capture.tar"
+(
+  capture_apply_file_limit
+  COPYFILE_DISABLE=1 tar -cf "$raw_archive" -C "$checkout" --null -T "$archive_list" 2>/dev/null
+)
+(
+  capture_apply_file_limit
+  COPYFILE_DISABLE=1 tar -rf "$raw_archive" -C "$scratch" "${metadata[@]}" 2>/dev/null
+)
+(
+  capture_apply_file_limit
+  gzip -c "$raw_archive"
+) > "$out"
 printf '%s\n' "$out"
 `)
 	return "bash -lc " + shellQuote(script.String())
