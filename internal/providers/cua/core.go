@@ -31,18 +31,10 @@ type LeaseClaim = core.LeaseClaim
 type ExitError = core.ExitError
 
 const (
-	providerName             = "cua"
-	defaultImage             = "ubuntu:24.04"
-	defaultKind              = "container"
-	defaultRegion            = ""
-	defaultWorkdir           = "/workspace/crabbox"
-	defaultBridgeCommand     = "python3"
-	defaultSDKPackage        = "cua"
-	defaultSDKImport         = "cua"
-	defaultSDKFallbackImport = "cua_sandbox"
-	targetLinux              = core.TargetLinux
-	cuaTrackingIssue         = "https://github.com/openclaw/crabbox/issues/381"
-	maxBridgeTimeoutSeconds  = int64((1<<63 - 1) / int64(time.Second))
+	providerName            = "cua"
+	targetLinux             = core.TargetLinux
+	cuaTrackingIssue        = "https://github.com/openclaw/crabbox/issues/381"
+	maxBridgeTimeoutSeconds = int64((1<<63 - 1) / int64(time.Second))
 )
 
 func provisioningUnsupported() error {

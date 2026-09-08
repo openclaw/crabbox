@@ -112,6 +112,14 @@ settings retain trusted-file-only admission; the other nine YAML fields remain
 repository-safe. Its sizing guard still precedes the flag-value type assertion,
 unlike CodeSandbox's wrapper. Read-only lifecycle restrictions are unchanged.
 
+CUA's runtime fallbacks use the generated defaults as well. The Go bridge
+resolves an empty or whitespace-only fallback import before supplying both JSON
+and environment settings, preserving the effective SDK choice formerly supplied
+by Python. Python retains request-over-environment precedence but no longer owns
+duplicate import defaults. Other string fields retain their existing
+blank-before-trim behavior. The fixed 15-second doctor budget and the Python
+version check for the actual `cua_sandbox` module remain separate contracts.
+
 OpenSandbox's twelve runtime/flag fields include ten YAML fields and eleven
 environment fields. `APIURL` has no YAML source; `CRABBOX_OPENSANDBOX_API_URL`
 retains precedence over `OPEN_SANDBOX_API_URL`. `ForgetMissing` remains CLI-only:

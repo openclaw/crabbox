@@ -16,8 +16,8 @@ func claimLabels(cfg Config, sandboxName, createdAt string, missing bool) map[st
 	workdir, _ := cuaWorkdir(cfg)
 	labels := map[string]string{
 		labelSandboxName: sandboxName,
-		labelImage:       strings.TrimSpace(blank(cfg.Cua.Image, defaultImage)),
-		labelKind:        strings.ToLower(strings.TrimSpace(blank(cfg.Cua.Kind, defaultKind))),
+		labelImage:       strings.TrimSpace(blank(cfg.Cua.Image, core.CuaConfigDefaultImage)),
+		labelKind:        strings.ToLower(strings.TrimSpace(blank(cfg.Cua.Kind, core.CuaConfigDefaultKind))),
 		labelRegion:      strings.TrimSpace(cfg.Cua.Region),
 		labelWorkdir:     workdir,
 		labelCreatedAt:   strings.TrimSpace(createdAt),
