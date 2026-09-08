@@ -20,7 +20,7 @@
 
 - Describe Railway configuration bindings once, sharing the client endpoint default while preserving environment-only tokens, source precedence, and existing claim routing. [PR 2007](https://github.com/openclaw/crabbox/pull/2007). Thanks @steipete.
 
-- Describe Upstash Box configuration bindings once, keeping runtime, size, endpoint, and workdir defaults consistent across clients, claims, and display without changing source precedence. Thanks @steipete.
+- Describe Upstash Box configuration bindings once, keeping runtime, size, endpoint, and workdir defaults consistent across clients, claims, and display without changing source precedence. [PR 2010](https://github.com/openclaw/crabbox/pull/2010). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 
