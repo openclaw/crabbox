@@ -26237,13 +26237,21 @@ describe("fleet lease identity and idle", () => {
     const refreshStarted = deferred<void>();
     const finishRefresh = deferred<void>();
     const queued = deferred<void>();
+    const finishAuthorizations = deferred<void>();
+    let authorizations = 0;
     let refreshing = true;
     const fixture = awsIngressTestFleet(async (action) => {
       if (action === "AuthorizeSecurityGroupIngress") {
         if (refreshing) {
           refreshStarted.resolve();
           await finishRefresh.promise;
-        } else vi.setSystemTime(Date.now() + 7);
+        } else {
+          if (++authorizations === 2) {
+            vi.setSystemTime(Date.now() + 7);
+            finishAuthorizations.resolve();
+          }
+          await finishAuthorizations.promise;
+        }
       }
       return undefined;
     });
@@ -26307,6 +26315,7 @@ describe("fleet lease identity and idle", () => {
       );
     } finally {
       finishRefresh.resolve();
+      finishAuthorizations.resolve();
       await Promise.allSettled([refresh, ...(creating ? [creating] : [])]);
       createSpy.mockRestore();
       log.mockRestore();

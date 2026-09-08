@@ -84,6 +84,8 @@ const awsMacHostQuotaSpecs: Record<string, { quotaCode: string; quotaName: strin
 const snapshotDeleteBackoffMs = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
 const securityGroupVisibilityBackoffMs = [100, 200, 400, 800, 1_600, 3_200];
 const awsInstanceVisibilityBackoffMs = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
+// Leave room below Workers' six-connection limit for concurrent quota discovery.
+const awsIngressBatchSize = 4;
 
 class AWSQueryError extends Error {
   constructor(
@@ -2481,42 +2483,54 @@ export class EC2SpotClient {
               },
             );
           }
-          for (const cidr of cidrs) {
-            // oxlint-disable-next-line eslint/no-await-in-loop -- duplicate ingress handling is per CIDR.
-            await measure("authorize_ingress", () => this.allowTCP(groupID, port, cidr)).catch(
-              (error: unknown) => {
+          for (let offset = 0; offset < cidrs.length; offset += awsIngressBatchSize) {
+            const batch = cidrs.slice(offset, offset + awsIngressBatchSize);
+            const canCompact = options.reconcile !== "additive" && !compactedAfterRuleLimit;
+            // Join every request before compaction, propagation retry or releasing
+            // the ingress owner. One failed request must not leave writes running.
+            // oxlint-disable-next-line eslint/no-await-in-loop -- bound each batch before starting more requests.
+            const results = await Promise.allSettled(
+              batch.map((cidr) =>
+                measure("authorize_ingress", () => this.allowTCP(groupID, port, cidr)),
+              ),
+            );
+            for (const [index, result] of results.entries()) {
+              if (result.status === "rejected") {
+                const error: unknown = result.reason;
+                const cidr = batch[index]!;
                 const message = error instanceof Error ? error.message : String(error);
                 if (message.includes("InvalidPermission.Duplicate")) {
                   options.diagnostics?.record("authorize_duplicate", 0);
-                  return;
+                  continue;
                 }
-                if (
-                  options.reconcile !== "additive" &&
-                  !compactedAfterRuleLimit &&
-                  isAWSSecurityGroupRuleLimitError(message)
-                ) {
-                  compactedAfterRuleLimit = true;
-                  return measure("compact_ingress", () =>
-                    this.compactSSHIngressForRuleLimit(groupID, ports, cidrs),
-                  ).then((compacted) => {
+                if (canCompact && isAWSSecurityGroupRuleLimitError(message)) {
+                  if (!compactedAfterRuleLimit) {
+                    compactedAfterRuleLimit = true;
+                    // oxlint-disable-next-line eslint/no-await-in-loop -- compact once after the entire batch has settled.
+                    const compacted = await measure("compact_ingress", () =>
+                      this.compactSSHIngressForRuleLimit(groupID, ports, cidrs),
+                    );
                     if (!compacted) {
                       throw error;
                     }
-                    return measure("authorize_ingress", () =>
-                      this.allowTCP(groupID, port, cidr),
-                    ).catch((retryError: unknown) => {
-                      const retryMessage =
-                        retryError instanceof Error ? retryError.message : String(retryError);
-                      if (!retryMessage.includes("InvalidPermission.Duplicate")) {
-                        throw retryError;
-                      }
-                      options.diagnostics?.record("authorize_duplicate", 0);
-                    });
+                  }
+                  // Every rule rejected before this batch's compaction gets one retry.
+                  // oxlint-disable-next-line eslint/no-await-in-loop -- recovery retries remain ordered after all initial writes finish.
+                  await measure("authorize_ingress", () =>
+                    this.allowTCP(groupID, port, cidr),
+                  ).catch((retryError: unknown) => {
+                    const retryMessage =
+                      retryError instanceof Error ? retryError.message : String(retryError);
+                    if (!retryMessage.includes("InvalidPermission.Duplicate")) {
+                      throw retryError;
+                    }
+                    options.diagnostics?.record("authorize_duplicate", 0);
                   });
+                  continue;
                 }
                 throw error;
-              },
-            );
+              }
+            }
           }
         }
         return groupID;

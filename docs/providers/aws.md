@@ -230,6 +230,10 @@ source ranges, then removes exact duplicates before reconciling each SSH port.
 Whitespace is trimmed; distinct IPv4 and IPv6 ranges keep their order. This does
 not reuse observed permissions: each unique desired range is still authorized,
 and stale-rule pruning and world-access revocation keep their existing policy.
+For each port, up to four authorization requests run together after revocation
+finishes. Every batch settles before recovery, another batch or the next port;
+rule-limit recovery compacts once and retries each affected rule. Diagnostic
+request-duration totals include overlapping requests and can exceed wall time.
 
 ### Environment variables (direct mode)
 
