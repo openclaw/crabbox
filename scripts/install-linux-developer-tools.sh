@@ -25,6 +25,9 @@ public_toolchain_archive_dir="/opt/crabbox/toolchain-archives"
 node_toolcache_root="/opt/hostedtoolcache"
 node_link_dir="/usr/local/bin"
 pinned_node_version="24.19.0"
+go_toolcache_root="/opt/hostedtoolcache"
+go_link_dir="/usr/local/bin"
+pinned_go_version="1.27.0"
 
 log() {
   printf 'linux-tools: %s\n' "$*" >&2
@@ -118,6 +121,10 @@ docker_packages_installed() {
 
 pinned_node_supported() {
   [[ "$node_major" == "24" && "$(dpkg --print-architecture)" == "amd64" ]]
+}
+
+linux_x64_supported() {
+  [[ "$(uname -s)" == "Linux" && "$(dpkg --print-architecture)" == "amd64" ]]
 }
 
 add_nodesource() {
@@ -234,6 +241,8 @@ EOF
 toolchain_archive_spec() {
   # Digests bind upstream bytes, not a mutable installation or Corepack metadata.
   case "$1" in
+    go1.27.0.linux-amd64.tar.gz)
+      printf '%s\n' "sha256 675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685 https://go.dev/dl/$1" ;;
     node-v24.19.0-linux-x64.tar.xz)
       printf '%s\n' "sha256 14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647 https://nodejs.org/dist/v24.19.0/$1" ;;
     pnpm-11.22.0.tgz)
@@ -292,7 +301,10 @@ cache_public_toolchain_archives() (
   trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
   [[ ! -L "$public_toolchain_archive_dir" ]] || return 1
   install -d -m 0755 "$public_toolchain_archive_dir"
-  for name in node-v24.19.0-linux-x64.tar.xz pnpm-11.22.0.tgz pnpm-12.3.4.tgz exe.linux-x64-12.3.4.tgz; do
+  if [[ "$#" -eq 0 ]]; then
+    set -- node-v24.19.0-linux-x64.tar.xz pnpm-11.22.0.tgz pnpm-12.3.4.tgz exe.linux-x64-12.3.4.tgz
+  fi
+  for name in "$@"; do
     stage_toolchain_archive "$name" "$staging" 1
     pending="$(mktemp "$public_toolchain_archive_dir/.archive.XXXXXX")"
     # shellcheck disable=SC2064
@@ -305,6 +317,95 @@ os.replace(sys.argv[1], sys.argv[2])
 PY
   done
 )
+
+check_go_toolchain() (
+  set -euo pipefail
+  local distribution="$1" scratch="$2"
+  mkdir -p "$scratch/home" "$scratch/cache" "$scratch/mod" "$scratch/path"
+  export HOME="$scratch/home" GOROOT="$distribution" GOCACHE="$scratch/cache"
+  export GOMODCACHE="$scratch/mod" GOPATH="$scratch/path" GOENV=off GOTOOLCHAIN=local
+  export GOPROXY=off GOSUMDB=off GOWORK=off GO111MODULE=off GOFLAGS="" CGO_ENABLED=1 CC=gcc CXX=g++
+  unset GOOS GOARCH GOEXPERIMENT
+  [[ "$("$distribution/bin/go" version)" == "go version go$pinned_go_version linux/amd64" ]] || {
+    log "unexpected Go version or architecture"
+    return 1
+  }
+  [[ "$("$distribution/bin/go" env GOOS GOARCH)" == $'linux\namd64' ]]
+  cd "$scratch"
+  cat >main.go <<'GO'
+package main
+
+// static int answer(void) { return 42; }
+import "C"
+import "fmt"
+
+func main() {
+	if int(C.answer()) != 42 {
+		panic("CGO result mismatch")
+	}
+	fmt.Println("go-cgo-ok")
+}
+GO
+  "$distribution/bin/gofmt" main.go >formatted.go
+  mv formatted.go main.go
+  "$distribution/bin/go" test bytes crypto/sha256
+  [[ "$("$distribution/bin/go" run main.go)" == "go-cgo-ok" ]]
+)
+
+install_pinned_go() (
+  set -euo pipefail
+  umask 022
+  local staging destination
+  destination="$go_toolcache_root/go/$pinned_go_version/x64"
+  public_tool_links check "$go_link_dir" "$destination/bin" go gofmt || return $?
+  staging="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
+  install -d -m 0755 "$(dirname "$destination")"
+  rm -f "$destination.complete"
+  stage_toolchain_archive go1.27.0.linux-amd64.tar.gz "$staging"
+  mkdir "$staging/go"
+  tar --no-same-owner -xzf "$staging/go1.27.0.linux-amd64.tar.gz" -C "$staging/go" --strip-components=1
+  check_go_toolchain "$staging/go" "$staging/check"
+  # This image-owned slot is always rebuilt from authenticated private bytes.
+  rm -rf "$destination"
+  mv "$staging/go" "$destination"
+  install -d -m 0755 "$go_link_dir"
+  public_tool_links publish "$go_link_dir" "$destination/bin" go gofmt
+  touch "$destination.complete"
+)
+
+install_go_toolchain() {
+  if linux_x64_supported; then
+    public_tool_links check "$go_link_dir" "$go_toolcache_root/go/$pinned_go_version/x64/bin" go gofmt || return $?
+    cache_public_toolchain_archives go1.27.0.linux-amd64.tar.gz
+    install_pinned_go
+  fi
+}
+
+offline_go_probe() (
+  set -euo pipefail
+  umask 077
+  [[ "$(id -u)" -ne 0 ]] || { log "offline Go smoke must run as a nonroot user"; return 1; }
+  local staging
+  staging="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
+  stage_toolchain_archive go1.27.0.linux-amd64.tar.gz "$staging"
+  mkdir "$staging/go"
+  tar --no-same-owner -xzf "$staging/go1.27.0.linux-amd64.tar.gz" -C "$staging/go" --strip-components=1
+  check_go_toolchain "$staging/go" "$staging/check"
+)
+
+go_smoke_script() {
+  printf 'public_toolchain_archive_dir=%q\n' "$public_toolchain_archive_dir"
+  printf 'pinned_go_version=%q\n' "$pinned_go_version"
+  declare -f log linux_x64_supported toolchain_archive_spec verify_toolchain_archive stage_toolchain_archive check_go_toolchain offline_go_probe
+  # shellcheck disable=SC2016
+  printf '%s\n' 'if linux_x64_supported; then' \
+    '  [[ "$(GOTOOLCHAIN=local GOENV=off go version)" == "go version go1.27.0 linux/amd64" ]]' \
+    '  command -v gofmt' '  offline_go_probe' 'fi'
+}
 
 seed_offline_pnpm() {
   local version="$1" staging="$2" corepack_home="$3"
@@ -724,6 +825,9 @@ print_versions() {
   npm --version
   corepack --version
   pnpm --version
+  if linux_x64_supported; then
+    "$go_link_dir/go" version
+  fi
   "$trufflehog_bin_dir/trufflehog" --no-update --version
   docker --version
   docker compose version
@@ -791,6 +895,7 @@ APT
     install_chrome_or_chromium
   fi
   install_node_pnpm
+  install_go_toolchain
   install_trufflehog
   install_docker
   prepare_fast_boot

@@ -13,6 +13,47 @@ const nodesourceSigningKeyFingerprint = "6F71F525282841EEDAF851B42F59B5F99B1BE0B
 const dockerSigningKeyFingerprint = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88";
 const googleLinuxSigningKeyFingerprint = "EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796";
 
+for (const [platform, arch, major, expected] of [
+  ["Linux", "amd64", "24", true],
+  ["Linux", "amd64", "22", true],
+  ["Linux", "arm64", "24", false],
+  ["Darwin", "amd64", "24", false],
+]) {
+  test(`Go bake routing is independent of Node ${major} on ${platform}/${arch}`, (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-go-route-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const result = spawnSync(
+      "bash",
+      [
+        "-c",
+        `
+source scripts/install-linux-developer-tools.sh
+uname() { printf '%s\\n' "$FIXTURE_PLATFORM"; }
+dpkg() { printf '%s\\n' "$FIXTURE_ARCH"; }
+cache_public_toolchain_archives() { printf 'archive=%s\\n' "$@"; }
+install_pinned_go() { echo go-installed; }
+install_go_toolchain
+`,
+      ],
+      {
+        cwd: repoRoot,
+        env: {
+          PATH: process.env.PATH,
+          HOME: root,
+          TMPDIR: root,
+          CRABBOX_LINUX_NODE_MAJOR: major,
+          FIXTURE_ARCH: arch,
+          FIXTURE_PLATFORM: platform,
+        },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.includes("go-installed"), expected);
+    assert.equal(result.stdout.includes("archive=go1.27.0.linux-amd64.tar.gz"), expected);
+  });
+}
+
 test("linux developer image installs every readiness package from the generated effective builder profile", async () => {
   const { minimal, builder } = await loadRecipes();
   const source = fs.readFileSync(path.join(repoRoot, "scripts/install-linux-developer-tools.sh"), "utf8");

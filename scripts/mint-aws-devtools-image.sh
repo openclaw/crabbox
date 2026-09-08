@@ -789,8 +789,15 @@ smoke_script() {
     if [[ "$linux_developer_builder" == "1" ]]; then
       [[ "$linux_node_major" == "24" ]] || expected_node_major="$linux_node_major"
       # Only the bundled builder declares archives. Freeze its selection, not guest environment.
-      archive_probe="$(CRABBOX_LINUX_NODE_MAJOR="$linux_node_major" \
-        bash -c 'source "$1"; node_pnpm_smoke_script' _ "$ROOT/scripts/install-linux-developer-tools.sh")" || return $?
+      archive_probe="$(
+        CRABBOX_LINUX_NODE_MAJOR="$linux_node_major" \
+          bash -c 'source "$1"; node_pnpm_smoke_script' _ "$ROOT/scripts/install-linux-developer-tools.sh"
+      )" || return $?
+      local go_archive_probe
+      go_archive_probe="$(
+        bash -c 'source "$1"; go_smoke_script' _ "$ROOT/scripts/install-linux-developer-tools.sh"
+      )" || return $?
+      archive_probe+=$'\n'"$go_archive_probe"
     fi
     printf -v smoke_script_value 'set -euo pipefail\nexpected_node_major=%q\ndeveloper_archive_probe() {\n%s\n}\n%s' \
       "$expected_node_major" "$archive_probe" "$smoke_script_value"

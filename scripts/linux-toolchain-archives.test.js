@@ -10,6 +10,7 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 const installer = path.join(repoRoot, "scripts/install-linux-developer-tools.sh");
 const publicArchives = process.env.CRABBOX_TEST_TOOLCHAIN_ARCHIVES;
 const nodeArchive = "node-v24.19.0-linux-x64.tar.xz";
+const goArchive = "go1.27.0.linux-amd64.tar.gz";
 const archiveNames = [
   nodeArchive,
   "pnpm-11.22.0.tgz",
@@ -199,6 +200,253 @@ fixture_after_apt() { :; }
     destination: path.join(root, "tools", "node", "24.19.0", "x64"),
   };
 }
+
+function goArchiveFixture(t) {
+  const context = fixture(t);
+  const { root } = context;
+  const bin = path.join(root, "payload", "go", "bin");
+  fs.mkdirSync(bin, { recursive: true });
+  // These executables model publication ordering, not Linux Go/CGO execution.
+  writeTool(
+    path.join(bin, "go"),
+    `
+[[ "$GOTOOLCHAIN" == local && "$GOPROXY" == off && "$GOENV" == off ]]
+[[ -d "$GOCACHE" && "$GOCACHE" == "$TMPDIR/"* ]]
+[[ ! -f "$FIXTURE_MARKER" ]] || exit 92
+printf '%s\\n' "$*" >>"$FIXTURE_LOG"
+case "$*" in
+  version) printf 'go version go1.27.0 linux/amd64\\n' ;;
+  'env GOOS GOARCH') printf 'linux\\namd64\\n' ;;
+  'test bytes crypto/sha256') exit "\${FIXTURE_GO_FAILURE:-0}" ;;
+  'run main.go') [[ "$CGO_ENABLED" == 1 ]]; grep -q 'C.answer()' main.go; printf 'go-cgo-ok\\n' ;;
+  *) exit 93 ;;
+esac`,
+  );
+  writeTool(path.join(bin, "gofmt"), 'cat "$1"');
+  const archive = path.join(root, "archives", goArchive);
+  const pack = () => {
+    success(
+      spawnSync("tar", ["-czf", archive, "-C", path.join(root, "payload"), "go"], {
+        encoding: "utf8",
+      }),
+    );
+    return createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
+  };
+  const destination = path.join(root, "tools", "go", "1.27.0", "x64");
+  const shell = `
+public_toolchain_archive_dir="$PWD/archives"
+go_toolcache_root="$PWD/tools"
+go_link_dir="$PWD/links"
+toolchain_archive_spec() { printf 'sha256 %s https://example.invalid/go.tar.gz\\n' "$FIXTURE_DIGEST"; }
+`;
+  return {
+    ...context,
+    bin,
+    archive,
+    pack,
+    shell,
+    destination,
+    runGo: (body, env = {}) =>
+      context.run(shell + body, {
+        FIXTURE_DIGEST: pack(),
+        FIXTURE_MARKER: `${destination}.complete`,
+        FIXTURE_LOG: path.join(root, "home", "go.calls"),
+        ...env,
+      }),
+  };
+}
+
+const defaultGoPreparation = `
+uname() { printf 'Linux\\n'; }
+dpkg() { printf 'amd64\\n'; }
+cache_public_toolchain_archives() { printf 'cache\\n' >>"$HOME/preparation.log"; }
+curl() { printf 'network\\n' >>"$HOME/preparation.log"; return 89; }
+`;
+
+test("Go image publication uses fresh authenticated bytes and marks completion after functional checks", (t) => {
+  const { root, destination, runGo } = goArchiveFixture(t);
+  fs.mkdirSync(path.join(destination, "bin"), { recursive: true });
+  writeTool(path.join(destination, "bin", "go"), 'touch "$HOME/poison-executed"; exit 0');
+  fs.writeFileSync(`${destination}.complete`, "");
+  success(runGo("install_pinned_go"));
+  assert.equal(fs.existsSync(path.join(root, "home", "poison-executed")), false);
+  assert.equal(fs.existsSync(`${destination}.complete`), true);
+  for (const tool of ["go", "gofmt"]) {
+    assert.equal(
+      fs.readlinkSync(path.join(root, "links", tool)),
+      path.join(destination, "bin", tool),
+    );
+  }
+  assert.match(
+    fs.readFileSync(path.join(root, "home", "go.calls"), "utf8"),
+    /test bytes crypto\/sha256\nrun main.go\n/,
+  );
+  assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);
+
+  const failed = runGo(`${defaultGoPreparation}install_go_toolchain`, { FIXTURE_GO_FAILURE: "47" });
+  assert.equal(failed.status, 47, failed.stderr);
+  assert.equal(fs.existsSync(`${destination}.complete`), false);
+  assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);
+});
+
+for (const failure of ["tamper", "wrong architecture"]) {
+  test(`Go image publication rejects ${failure} without executing a cached tree`, (t) => {
+    const { root, bin, destination, runGo } = goArchiveFixture(t);
+    if (failure === "wrong architecture") {
+      writeTool(path.join(bin, "go"), "printf 'go version go1.27.0 linux/arm64\\n'");
+    }
+    const result = runGo(`
+${failure === "tamper" ? `printf corrupt >"$public_toolchain_archive_dir/${goArchive}"` : ""}
+install_pinned_go
+`);
+    assert.notEqual(result.status, 0);
+    if (failure === "tamper") assert.match(result.stderr, /checksum mismatch/);
+    else assert.match(result.stderr, /unexpected Go version or architecture/);
+    assert.equal(fs.existsSync(`${destination}.complete`), false);
+    assert.equal(fs.existsSync(path.join(root, "links", "go")), false);
+    assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);
+  });
+}
+
+for (const state of ["fresh", "current", "dangling"]) {
+  test(`Go public aliases retain exact ownership on ${state} complete-flow repeat`, (t) => {
+    const { root, destination, runGo } = goArchiveFixture(t);
+    if (state !== "fresh") {
+      success(runGo("install_pinned_go"));
+      if (state === "dangling") fs.rmSync(path.join(destination, "bin"), { recursive: true });
+    }
+    const result = runGo(`${defaultGoPreparation}
+node_major=22
+export PATH="$go_link_dir:$PATH"
+for pass in 1 2; do
+  install_go_toolchain
+  for tool in go gofmt; do
+    [[ "$(command -v "$tool")" == "$go_link_dir/$tool" ]] || exit 91
+  done
+  printf 'package fixture\\n' >"$HOME/input.go"
+  [[ "$(gofmt "$HOME/input.go")" == 'package fixture' ]] || exit 92
+done
+`);
+    success(result);
+    for (const tool of ["go", "gofmt"]) {
+      assert.equal(
+        fs.readlinkSync(path.join(root, "links", tool)),
+        path.join(destination, "bin", tool),
+      );
+    }
+    assert.equal(fs.existsSync(`${destination}.complete`), true);
+    assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);
+    assert.deepEqual(fs.readdirSync(path.join(root, "links")).sort(), ["go", "gofmt"]);
+  });
+}
+
+for (const entry of ["install_go_toolchain", "install_pinned_go"]) {
+  for (const kind of ["regular", "directory", "foreign", "wrong-name", "relative", "newline"]) {
+    test(`Go public aliases reject last ${kind} conflict through ${entry} before preparation`, (t) => {
+      const { root, destination, runGo, run, shell, pack } = goArchiveFixture(t);
+      success(runGo("install_pinned_go"));
+      const links = path.join(root, "links");
+      const conflict = path.join(links, "gofmt");
+      fs.unlinkSync(conflict);
+      if (kind === "regular") {
+        writeTool(conflict, "echo operator-gofmt");
+      } else if (kind === "directory") {
+        fs.mkdirSync(conflict);
+        fs.writeFileSync(path.join(conflict, "keep"), "operator directory");
+      } else {
+        const target = {
+          foreign: path.join(root, "foreign", "gofmt"),
+          "wrong-name": path.join(destination, "bin", "go"),
+          relative: path.relative(links, path.join(destination, "bin", "gofmt")),
+          newline: path.join(destination, "bin", "gofmt") + "\n",
+        }[kind];
+        fs.symlinkSync(target, conflict);
+      }
+      fs.writeFileSync(path.join(destination, "keep"), "existing tree");
+      fs.writeFileSync(`${destination}.complete`, "existing marker");
+      const digest = pack();
+      const calls = path.join(root, "home", "go.calls");
+      const before = {
+        links: fileState(links),
+        tree: fileState(destination),
+        marker: fileState(`${destination}.complete`),
+        archives: fileState(path.join(root, "archives")),
+        calls: fileState(calls),
+      };
+      const result = run(`${shell}${defaultGoPreparation}${entry}`, {
+        FIXTURE_DIGEST: digest,
+        FIXTURE_MARKER: `${destination}.complete`,
+        FIXTURE_LOG: calls,
+      });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /public tool.*gofmt.*resolve before rebake/i);
+      assert.deepEqual(fileState(links), before.links);
+      assert.deepEqual(fileState(destination), before.tree);
+      assert.deepEqual(fileState(`${destination}.complete`), before.marker);
+      assert.deepEqual(fileState(path.join(root, "archives")), before.archives);
+      assert.deepEqual(fileState(calls), before.calls);
+      assert.equal(fs.existsSync(path.join(root, "home", "preparation.log")), false);
+      assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);
+    });
+  }
+}
+
+test("Go public aliases recheck the whole pair after preparation before replacing the slot", (t) => {
+  const { root, destination, runGo } = goArchiveFixture(t);
+  success(runGo("install_pinned_go"));
+  const links = path.join(root, "links");
+  fs.writeFileSync(path.join(destination, "keep"), "existing tree");
+  fs.writeFileSync(`${destination}.complete`, "existing marker");
+  const tree = fileState(destination);
+  const marker = fileState(`${destination}.complete`);
+  const calls = fileState(path.join(root, "home", "go.calls"));
+  const result = runGo(`${defaultGoPreparation}
+cache_public_toolchain_archives() {
+  rm "$go_link_dir/gofmt"
+  printf 'operator-gofmt\\n' >"$go_link_dir/gofmt"
+}
+install_go_toolchain
+`);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /public tool.*gofmt.*resolve before rebake/i);
+  assert.equal(fs.readFileSync(path.join(links, "gofmt"), "utf8"), "operator-gofmt\n");
+  assert.equal(fs.readlinkSync(path.join(links, "go")), path.join(destination, "bin", "go"));
+  assert.deepEqual(fileState(destination), tree);
+  assert.deepEqual(fileState(`${destination}.complete`), marker);
+  assert.deepEqual(fileState(path.join(root, "home", "go.calls")), calls);
+  assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);
+});
+
+test("Go archive pin remains exact 1.27.0 independently of the Node major", (t) => {
+  const { run } = fixture(t);
+  const result = run(`node_major=22\ntoolchain_archive_spec ${goArchive}`);
+  success(result);
+  assert.equal(
+    result.stdout.trim(),
+    `sha256 675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685 https://go.dev/dl/${goArchive}`,
+  );
+});
+
+test(
+  "Go public-archive native smoke requires a nonroot Linux x64 host",
+  {
+    skip:
+      (process.platform !== "linux" ||
+        process.arch !== "x64" ||
+        process.getuid?.() === 0 ||
+        !publicArchives ||
+        !fs.existsSync(path.join(publicArchives, goArchive))) &&
+      "requires a nonroot Linux x64 host with the reviewed Go archive",
+  },
+  (t) => {
+    const { run } = fixture(t);
+    success(
+      run('public_toolchain_archive_dir="$PUBLIC_ARCHIVES"\noffline_go_probe', {
+        PUBLIC_ARCHIVES: publicArchives,
+      }),
+    );
+  },
+);
 
 test("archive staging authenticates private bytes, skips downloads, and rejects symlinks or corruption", (t) => {
   const { root, run } = fixture(t);

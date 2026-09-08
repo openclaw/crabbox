@@ -418,9 +418,9 @@ written only after executable checks. This matches the GitHub tool-cache
 `$RUNNER_TOOL_CACHE/node/<version>/<architecture>` layout; it does not bind a
 runner to that root. Crabbox's GitHub runner defaults to
 `$HOME/actions-runner/_work/_tool`, and local Actions uses a disposable
-per-lease tools directory. Consumers must explicitly select the baked root or
-use the verified archives. Completion markers are availability hints, not
-authentication.
+per-lease tools directory. Native GitHub runner registration can copy the
+reviewed image slots into its owned default cache before starting the service,
+as described below. Completion markers are availability hints, not authentication.
 
 Before cache or network preparation, the pinned Node route checks all six
 public aliases: `node`, `npm`, `npx`, `corepack`, `pnpm`, and `pnpx`. It repeats
@@ -445,8 +445,9 @@ Public archives are retained under `/opt/crabbox/toolchain-archives`:
 | `pnpm-11.22.0.tgz` | pnpm 11.22.0 |
 | `pnpm-12.3.4.tgz` | pnpm 12.3.4 JavaScript wrapper |
 | `exe.linux-x64-12.3.4.tgz` | pnpm 12.3.4 native executable for glibc Linux x64 |
+| `go1.27.0.linux-amd64.tar.gz` | Complete Go 1.27.0 distribution |
 
-The SHA-256 Node pin and SHA-512 pnpm pins live in the installer's
+The SHA-256 Node/Go pins and SHA-512 pnpm pins live in the installer's
 `toolchain_archive_spec`. Consumers must carry independently reviewed pins,
 copy archives into private staging, validate those exact bytes, and extract
 fresh trees. Do not authenticate a cached installation by running `--version`,
@@ -484,10 +485,57 @@ script is the bundled Linux builder. It forwards the existing
 `CRABBOX_LINUX_NODE_MAJOR` and `CRABBOX_LINUX_PNPM_VERSION` overrides to that
 builder and freezes the same Node-major declaration into each smoke. The smoke
 checks the guest's Debian package architecture, not the mint host's architecture.
-Only Node major 24 on guest `amd64` requires these archives. ARM guests, other
-Node-major overrides, and custom prep scripts retain the existing normal-tool
-smoke; their success does not qualify the x86_64 archive recipe. Missing or
-corrupt archives cannot disable the required probe for the supported builder.
+Only Node major 24 on guest `amd64` requires the Node/pnpm archives. Go has an
+independent Linux `amd64` contract, including when the Node major is overridden.
+ARM guests and custom prep scripts retain the existing normal-tool smoke;
+their success does not qualify the x86_64 archive recipe. Missing or corrupt
+archives cannot disable either required probe for the supported builder.
+
+Go 1.27.0 installs at `/opt/hostedtoolcache/go/1.27.0/x64`, with image-owned
+`/usr/local/bin/go` and `gofmt` links. The installer authenticates a private
+archive copy and freshly extracts the entire distribution; it never executes
+an existing same-version tree to establish trust. The sibling `x64.complete`
+marker is written last, after version/architecture, standard-library tests and
+a CGO compile/link/run assertion pass. Source, candidate and promoted smokes
+repeat those functional checks as nonroot from a new private extraction with
+fresh writable build/module caches, `GOPROXY=off` and `GOTOOLCHAIN=local`.
+Go 1.27.1 or another version does not satisfy the exact 1.27.0 cache slot.
+
+Before cache or network preparation, and again before changing the Go slot or
+marker, both public `go` and `gofmt` paths must be absent or exact same-name
+absolute symlinks into the Go 1.27.0 x64 slot. Matching dangling links are
+allowed. Files, directories and other targets require operator resolution
+before rebaking; a conflict preserves the existing tree, marker and aliases.
+Publication uses the same private temporary-symlink replacement as Node,
+without treating the pair as one atomic transaction.
+
+Native GitHub runner registration seeds only `node/24.19.0/x64` and
+`go/1.27.0/x64` after configuration and before service start. It reads the
+actual `.runner` work folder and `.env` values, including the precedence of
+`RUNNER_TOOL_CACHE`, `RUNNER_TOOLSDIRECTORY`, `AGENT_TOOLSDIRECTORY` and
+`agent.ToolsDirectory`. Literal `.env` values are not evaluated as shell code.
+Only the quiescent, current-user-owned default `_work/_tool` is eligible.
+Custom roots, symlinked or foreign/writable paths, existing slots, busy runners,
+and externally configured service environments are preserved without seeding.
+Unknown ownership or process/service state skips the optimization.
+
+Each missing slot is copied privately and compared against an independently
+pinned raw archive, including every file, mode and symlink. Only Node's four
+private Corepack shim links (`pnpm`, `pnpx`, `yarn` and `yarnpkg`) are additional
+expected entries, each with its exact same-name relative target. Completion alone
+does not authenticate the image seed. The destination is an independent,
+writable copy; image ownership is not changed and the Runner root is not
+redirected. Logs report copied bytes, copy time and total authenticated seeding
+time for startup-cost measurement.
+Normal upstream cache misses remain writable. Local Actions keeps its private
+tools root and existing Go-on-PATH validation; its shim is not an upstream
+`setup-go` execution.
+
+Qualification must exercise the real pinned `setup-go` action with exact
+`go-version: 1.27.0`, `check-latest: false`, dependency `cache: false` and no
+custom download URL, verifying an offline toolchain hit and the native Runner's
+effective cache root. Fixture tests do not replace that Linux proof or imply
+ARM support, another Ubuntu release's ABI, or successful image publication.
 
 No repository checkout, project dependency tree, credential, or private
 package is added to the public archive cache. Existing dependency-cache keys
