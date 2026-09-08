@@ -473,6 +473,8 @@ const terminalRunPruneBatchSize = 16;
 const runtimeAdapterDeleteBatchSize = 16;
 const defaultTerminalRunRetentionDays = 30;
 const runPruneCursorKey = "maintenance:run-prune-cursor";
+const activeEgressSessionPrefix = "active-egress-session:";
+const replacedEgressSessionsPrefix = "replaced-egress-sessions:";
 const providerAccessReservationTTLMS = 15 * 60 * 1000;
 const maxPendingWebVNCBytes = 1024 * 1024;
 const maxCodeWebSocketFrameChunkBytes = 15 * 1024;
@@ -1112,7 +1114,7 @@ export class FleetCoordinator {
   // offline is accepted residual risk. Full closure would require server-bound session identity
   // (protocol change, out of scope).
   private readonly replacedEgressSessions = new Map<string, string[]>();
-  private readonly egressSessionState = new Map<string, "loaded" | "cleared">();
+  private readonly hydratedEgressSessionState = new Set<string>();
   private readonly egressSessionStateHydrations = new Map<string, Promise<void>>();
   private readonly runtimeAdapterAgents = new Map<string, WebSocket>();
   private readonly runtimeAdapterPending = new Map<string, RuntimeAdapterPendingRequest>();
@@ -2332,7 +2334,7 @@ export class FleetCoordinator {
     }
   }
 
-  private adminBridgeSockets(): Set<WebSocket> {
+  private bridgeSockets(): Set<WebSocket> {
     const sockets = new Set<WebSocket>([
       ...this.controlSockets.values(),
       ...this.codeAgents.values(),
@@ -2355,7 +2357,7 @@ export class FleetCoordinator {
 
   private async reconcileAdminBridgeSockets(validation: AdminGrantValidation): Promise<void> {
     const revokedEgressSessions = new Map<string, { leaseID: string; sessionID: string }>();
-    for (const socket of this.adminBridgeSockets()) {
+    for (const socket of this.bridgeSockets()) {
       const attachment = this.bridgeAttachment(socket);
       if (
         !attachment ||
@@ -2590,7 +2592,6 @@ export class FleetCoordinator {
     if (sessionProfile) {
       sessionStatus.profile = sessionProfile;
     }
-    this.egressSessionState.set(leaseID, "loaded");
     await this.state.storage.put(activeEgressSessionKey(leaseID), sessionStatus);
     this.egressSessions.set(leaseID, sessionStatus);
   }
@@ -2608,13 +2609,12 @@ export class FleetCoordinator {
     if (replaced.length > replacedEgressSessionsPerLease) {
       replaced.shift();
     }
-    this.egressSessionState.set(leaseID, "loaded");
     await this.state.storage.put(replacedEgressSessionsKey(leaseID), replaced);
     this.replacedEgressSessions.set(leaseID, replaced);
   }
 
   private async hydrateEgressSessionState(leaseID: string): Promise<void> {
-    if (this.egressSessionState.has(leaseID)) {
+    if (this.hydratedEgressSessionState.has(leaseID)) {
       return;
     }
     const existing = this.egressSessionStateHydrations.get(leaseID);
@@ -2639,7 +2639,7 @@ export class FleetCoordinator {
       } else if (active && !this.egressSessions.has(leaseID)) {
         this.egressSessions.set(leaseID, active);
       }
-      this.egressSessionState.set(leaseID, "loaded");
+      this.hydratedEgressSessionState.add(leaseID);
     })();
     this.egressSessionStateHydrations.set(leaseID, pending);
     try {
@@ -12328,16 +12328,13 @@ export class FleetCoordinator {
         this.egressClients.delete(key);
       }
     }
-    // Retirement sweeps revisit history. Only a completed delete can suppress a repeat;
-    // activation invalidates this fact before writing new state, and failures remain retryable.
-    if (this.egressSessionState.get(leaseID) === "cleared") return;
     this.egressSessions.delete(leaseID);
     await Promise.all([
       this.state.storage.delete(activeEgressSessionKey(leaseID)),
       this.state.storage.delete(replacedEgressSessionsKey(leaseID)),
     ]);
     this.replacedEgressSessions.delete(leaseID);
-    this.egressSessionState.set(leaseID, "cleared");
+    this.hydratedEgressSessionState.add(leaseID);
   }
 
   private async closeLeaseBridges(leaseID: string, code: number, reason: string): Promise<void> {
@@ -16812,13 +16809,39 @@ export class FleetCoordinator {
     return Boolean(attempt && sameCreateAttempt(attempt, fence.attempt));
   }
 
+  private async leaseBridgeOwners(): Promise<Set<string>> {
+    const owners = new Set([
+      ...this.egressSessions.keys(),
+      ...this.replacedEgressSessions.keys(),
+      ...[...this.pendingCodeRequests.values()].map((pending) => pending.leaseID),
+      ...[...this.pendingCodeFrames.values()].map((pending) => pending.leaseID),
+    ]);
+    for (const socket of this.bridgeSockets()) {
+      const attachment = this.bridgeAttachment(socket);
+      if (attachment && "leaseID" in attachment) owners.add(attachment.leaseID);
+    }
+    for (const prefix of [activeEgressSessionPrefix, replacedEgressSessionsPrefix]) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- bounded pages find persisted egress owners after a restart.
+      await this.visitStorageRecords<unknown>(prefix, (_value, key) => {
+        owners.add(key.slice(prefix.length));
+      });
+    }
+    return owners;
+  }
+
   private async expireLeases(): Promise<void> {
     const claims = await this.state.runExclusive(async () => {
       const now = Date.now();
       const claimed: Array<{ claim: string; lease: LeaseRecord }> = [];
+      const bridgeOwners = await this.leaseBridgeOwners();
       await this.visitLeaseRecords(async (stored) => {
+        const needsCleanup = leaseNeedsCleanup(stored, now);
+        const closeBridges = !leaseIsLive(stored) && bridgeOwners.has(stored.id);
+        // Most history has neither due provider work nor bridge state. Journal reads and
+        // deletes belong to actual candidates, including persisted egress left by a restart.
+        if (!needsCleanup && !closeBridges) return;
         if (await provisioningOwnsLease(this.state.storage, stored.id)) return;
-        if (!leaseIsLive(stored)) {
+        if (closeBridges) {
           await this.closeLeaseBridges(stored.id, 1008, "lease ended");
         }
         const workspace = stored.workspaceID
@@ -16834,7 +16857,7 @@ export class FleetCoordinator {
         ) {
           return;
         }
-        if (!leaseNeedsCleanup(stored, now)) {
+        if (!needsCleanup) {
           return;
         }
         const lease = structuredClone(stored);
@@ -21138,11 +21161,11 @@ function codeViewerSessionRevocationKey(portalSessionHash: string): string {
 }
 
 function activeEgressSessionKey(leaseID: string): string {
-  return `active-egress-session:${leaseID}`;
+  return `${activeEgressSessionPrefix}${leaseID}`;
 }
 
 function replacedEgressSessionsKey(leaseID: string): string {
-  return `replaced-egress-sessions:${leaseID}`;
+  return `${replacedEgressSessionsPrefix}${leaseID}`;
 }
 
 function runtimeAdapterTicketPrefix(): string {

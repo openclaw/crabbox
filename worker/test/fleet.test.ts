@@ -34617,7 +34617,7 @@ describe("fleet lease identity and idle", () => {
     "keeps egress cleanup bounded across retirement and %s storage failure",
     async (failure) => {
       const storage = new MemoryStorage();
-      const fleet = testWebSocketCoordinator(storage);
+      let fleet = testWebSocketCoordinator(storage);
       const leaseID = "cbx_000000000001";
       const headers = {
         "x-crabbox-owner": "alice@example.com",
@@ -34672,6 +34672,7 @@ describe("fleet lease identity and idle", () => {
         );
       const released = await release();
       expect(released.status).toBe(failsDelete ? 500 : 200);
+      fleet = testWebSocketCoordinator(storage);
       await fleet.alarm();
       expect(storage.value(`active-egress-session:${leaseID}`)).toBeUndefined();
       expect(storage.value(`replaced-egress-sessions:${leaseID}`)).toBeUndefined();
@@ -34722,6 +34723,9 @@ describe("fleet lease identity and idle", () => {
       expect(storage.value(`replaced-egress-sessions:${leaseID}`)).toBeUndefined();
       expect(deletes.length).toBeGreaterThan(completedDeletes);
       const reactivatedDeletes = deletes.length;
+      await fleet.alarm();
+      expect(deletes).toHaveLength(reactivatedDeletes);
+      fleet = testWebSocketCoordinator(storage);
       await fleet.alarm();
       expect(deletes).toHaveLength(reactivatedDeletes);
     },
