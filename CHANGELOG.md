@@ -10,7 +10,7 @@
 
 - Describe Cloud Run Sandbox configuration bindings once, keeping launcher/workdir defaults consistent across diagnostics and claims while preserving source precedence and operation-specific behavior. [PR 2000](https://github.com/openclaw/crabbox/pull/2000). Thanks @steipete.
 
-- Describe FastAPI Cloud configuration bindings once while preserving environment-only tokens, source precedence, and credential-destination checks. Thanks @steipete.
+- Describe FastAPI Cloud configuration bindings once while preserving environment-only tokens, source precedence, and credential-destination checks. [PR 2004](https://github.com/openclaw/crabbox/pull/2004). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 
