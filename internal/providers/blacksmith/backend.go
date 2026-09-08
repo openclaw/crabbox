@@ -1,6 +1,7 @@
 package blacksmith
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/tailbuffer"
 )
 
 type Config = core.Config
@@ -451,10 +453,10 @@ func blacksmithArtifactOutputCaptureLimit(maxBytes int64) int64 {
 
 type blacksmithProofTailBuffer struct {
 	mu         sync.Mutex
-	data       []byte
-	scanTail   string
+	data       tailbuffer.Buffer
+	scanTail   tailbuffer.Buffer
 	actionsURL string
-	truncated  bool
+	fullChunk  bool
 }
 
 func firstNonBlank(values ...string) string {
@@ -462,43 +464,33 @@ func firstNonBlank(values ...string) string {
 }
 
 func newBlacksmithProofTailBuffer() *blacksmithProofTailBuffer {
-	return &blacksmithProofTailBuffer{data: make([]byte, 0, 32*1024)}
+	return &blacksmithProofTailBuffer{
+		data:     tailbuffer.NewLimited(blacksmithProofStreamCaptureBytes),
+		scanTail: tailbuffer.NewLimited(2048),
+	}
 }
 
 func (b *blacksmithProofTailBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.actionsURL == "" {
-		probe := b.scanTail + string(p)
+		probe := b.scanTail.String() + string(p)
 		if match := firstBlacksmithActionsURL(probe); match != "" {
 			b.actionsURL = match
 		}
-		if len(probe) > 2048 {
-			b.scanTail = probe[len(probe)-2048:]
-		} else {
-			b.scanTail = probe
-		}
+		_, _ = b.scanTail.Write(p)
 	}
-	if len(p) >= blacksmithProofStreamCaptureBytes {
-		b.data = append(b.data[:0], p[len(p)-blacksmithProofStreamCaptureBytes:]...)
-		b.truncated = true
-		return len(p), nil
-	}
-	overflow := len(b.data) + len(p) - blacksmithProofStreamCaptureBytes
-	if overflow > 0 {
-		copy(b.data, b.data[overflow:])
-		b.data = b.data[:len(b.data)-overflow]
-		b.truncated = true
-	}
-	b.data = append(b.data, p...)
-	return len(p), nil
+	// Proof artifacts historically mark a full-sized incoming chunk, even
+	// when it exactly fills an empty tail without discarding earlier bytes.
+	b.fullChunk = b.fullChunk || len(p) >= blacksmithProofStreamCaptureBytes
+	return b.data.Write(p)
 }
 
 func (b *blacksmithProofTailBuffer) Bytes() []byte {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	data := append([]byte(nil), b.data...)
-	if !b.truncated {
+	data := bytes.Clone(b.data.Bytes())
+	if !b.fullChunk && !b.data.Exceeded() {
 		return data
 	}
 	prefix := fmt.Appendf(nil, "[crabbox: proof stream kept last %d bytes]\n", blacksmithProofStreamCaptureBytes)

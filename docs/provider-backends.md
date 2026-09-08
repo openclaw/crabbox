@@ -494,6 +494,14 @@ SSH retains its mutex-protected cloned snapshots and hides ordinary snapshots
 after truncation; its bounded diagnostic view still exposes the retained prefix
 and overflow flag.
 
+Raw byte-tail storage lives in `internal/tailbuffer`. Agent Sandbox stderr and
+Blacksmith proof streams share its finite last-N-byte retention and discard
+observation; it does not normalize text, lock, or add markers. Agent Sandbox
+retains stderr delivery order and native exit classification. Blacksmith keeps
+its mutex, cloned snapshots, first Actions URL detection before eviction, and
+the historical proof marker for a full-sized incoming chunk. Its URL scan carry
+uses the same storage owner without sharing URL policy with the leaf.
+
 Strict one-request/one-response JSON subprocesses may use
 `internal/providers/shared/procjson`. It owns bounded capture, cancellation
 grace, request encoding, and exact single-document decoding. Keep response
