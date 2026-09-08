@@ -1292,16 +1292,12 @@ find . -maxdepth 3 -path './.crabbox/scripts' -prune -o \
 sort -u "$files" > "$files.sorted"
 archive_list="$scratch/archive-files.txt"
 checkout=$(pwd -P 2>/dev/null || pwd)
-{
-  printf '%s\n' -C "$checkout"
 while IFS= read -r path; do
-  case "$path" in -*) path="./$path";; esac
-    printf '%s\n' "$path"
-done < "$files.sorted"
-  printf '%s\n' -C "$scratch" .crabbox/capture-manifest.txt
-  if [ -f "$gateway_tail" ]; then printf '%s\n' .crabbox/gateway-log-tail.txt; fi
-} > "$archive_list"
-COPYFILE_DISABLE=1 tar -czf "$out" -T "$archive_list" 2>/dev/null ||
+  printf '%s\0' "$path"
+done < "$files.sorted" > "$archive_list"
+metadata=(.crabbox/capture-manifest.txt)
+if [ -f "$gateway_tail" ]; then metadata+=(.crabbox/gateway-log-tail.txt); fi
+COPYFILE_DISABLE=1 tar -czf "$out" -C "$checkout" --null -T "$archive_list" -C "$scratch" "${metadata[@]}" 2>/dev/null ||
   COPYFILE_DISABLE=1 tar -czf "$out" -C "$scratch" .crabbox/capture-manifest.txt
 printf '%s\n' "$out"
 `)

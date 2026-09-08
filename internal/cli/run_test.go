@@ -7291,14 +7291,33 @@ func TestRemoteFailureCaptureKeepsLargeFileListOffArgv(t *testing.T) {
 	if err != nil {
 		t.Skip("tar is required for POSIX capture command test")
 	}
+	tarVersion, _ := exec.Command(realTar, "--version").CombinedOutput()
+	isBSDTar := bytes.Contains(tarVersion, []byte("bsdtar"))
 	workdir := t.TempDir()
 	tempRoot := t.TempDir()
 	binDir := t.TempDir()
 	t.Setenv("TMPDIR", tempRoot)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	const argumentBudget = 256
+	const argumentBudget = 1024
 	var fileListBytes int
 	var want []string
+	scriptPath := filepath.Join("scripts", "capture.sh ")
+	for _, name := range []string{
+		"-leading-dash.log",
+		`back\slash.log`,
+		" leading-whitespace.log",
+		scriptPath,
+	} {
+		path := filepath.Join(workdir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fileListBytes += len(name) + 1
+		want = append(want, name)
+	}
 	for i := range 40 {
 		name := fmt.Sprintf("evidence-%02d-%s.log", i, strings.Repeat("x", 64))
 		if err := os.WriteFile(filepath.Join(workdir, name), []byte(name), 0o600); err != nil {
@@ -7313,22 +7332,47 @@ func TestRemoteFailureCaptureKeepsLargeFileListOffArgv(t *testing.T) {
 	fakeTar := filepath.Join(binDir, "tar")
 	wrapper := `#!/bin/sh
 budget=` + strconv.Itoa(argumentBudget) + `
+bsd=` + strconv.FormatBool(isBSDTar) + `
 bytes=0
 list=no
+null=no
+output=
+checkout=
+scratch=
+list_path=
 previous=
 for argument do
   bytes=$((bytes + ${#argument} + 1))
-  if [ "$previous" = "-T" ]; then list=yes; fi
+  case "$previous" in
+    -czf) output=$argument ;;
+    -T) list=yes; list_path=$argument ;;
+    -C)
+      if [ -z "$checkout" ]; then checkout=$argument; else scratch=$argument; fi
+      ;;
+  esac
+  if [ "$argument" = "--null" ]; then null=yes; fi
   previous=$argument
 done
 [ "$bytes" -le "$budget" ] || exit 91
 [ "$list" = yes ] || exit 92
+[ "$null" = yes ] || exit 93
+if [ "$bsd" = true ]; then
+  combined="$list_path.bsdtar"
+  manifest="$checkout/.crabbox/capture-manifest.txt"
+  cp "$list_path" "$combined" || exit 94
+  cp "$scratch/.crabbox/capture-manifest.txt" "$manifest" || exit 95
+  printf '%s\0' .crabbox/capture-manifest.txt >> "$combined"
+  ` + shellQuote(realTar) + ` -czf "$output" -C "$checkout" --null -T "$combined"
+  result=$?
+  rm "$combined" "$manifest"
+  exit "$result"
+fi
 exec ` + shellQuote(realTar) + ` "$@"
 `
 	if err := os.WriteFile(fakeTar, []byte(wrapper), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	command := remoteFailureCaptureCommand(workdir, ".crabbox/capture.tar.gz", "")
+	command := remoteFailureCaptureCommand(workdir, ".crabbox/capture.tar.gz", scriptPath)
 	command = strings.Replace(command, "bash -lc ", "bash --noprofile --norc -c ", 1)
 	if out, err := exec.Command("bash", "-c", command).CombinedOutput(); err != nil {
 		t.Fatalf("capture command failed: %v\n%s", err, out)
