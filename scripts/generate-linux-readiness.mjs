@@ -16,7 +16,8 @@ const minimalPackageContract = [
   "ca-certificates", "curl", "git", "jq", "openssh-server", "rsync", "tmux", "util-linux",
 ];
 const builderAdditionalPackageContract = ["build-essential", "git-lfs", "pkg-config", "python3", "python3-venv"];
-const builderVenvProbeCommand = `python3 -c 'with __import__("tempfile").TemporaryDirectory() as directory: __import__("venv").EnvBuilder(with_pip=True).create(directory + "/venv"); __import__("subprocess").run([directory + "/venv/bin/python", "-m", "pip", "--version"], check=True)'`;
+// ensurepip can extract resources outside the venv; keep parent and child scratch inside the cleanup boundary.
+const builderVenvProbeCommand = `python3 -c 'with __import__("tempfile").TemporaryDirectory() as directory: __import__("os").environ["TMPDIR"] = directory; __import__("tempfile").tempdir = directory; __import__("venv").EnvBuilder(with_pip=True).create(directory + "/venv"); __import__("subprocess").run([directory + "/venv/bin/python", "-m", "pip", "--version"], check=True)'`;
 const minimalProbeContract = new Map([
   ["ca-certificates", "test -s /etc/ssl/certs/ca-certificates.crt"],
   ["curl", "curl --version"],

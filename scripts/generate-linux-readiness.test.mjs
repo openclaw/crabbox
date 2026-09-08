@@ -824,33 +824,69 @@ test("actual generated producer proves and cleans a real pip-enabled Python virt
   assert.deepEqual(await fixture.packageCalls(), []);
 });
 
-test("actual generated producer downgrades when venv imports but pip-enabled creation fails", async (t) => {
-  const fixture = await createFixture(t);
+test("actual generated readiness cleans dependency scratch when venv creation or pip proof fails", async (t) => {
   const resolvedPython = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" });
   assert.equal(resolvedPython.status, 0, resolvedPython.stderr);
-  const modules = join(fixture.root, "python-modules");
-  const temporaryRoot = join(fixture.root, "venv-temporary");
-  await mkdir(modules);
-  await mkdir(temporaryRoot);
-  await writeFile(join(modules, "venv.py"), `class EnvBuilder:\n    def __init__(self, *, with_pip):\n        self.with_pip = with_pip\n\n    def create(self, directory):\n        raise RuntimeError("ensurepip is unavailable")\n`);
-  const importOnly = spawnSync(resolvedPython.stdout.trim(), ["-c", "import venv"], {
-    encoding: "utf8",
-    env: { ...process.env, PYTHONPATH: modules },
-  });
-  assert.equal(importOnly.status, 0, importOnly.stderr);
-  const producer = await readFile(resolve(repoRoot, "scripts/linux-readiness.generated.sh"), "utf8");
-  const source = fixture.actualGenerated(producer.slice(producer.indexOf("crabbox_readiness_manifest_path=")));
-  const result = fixture.run(source, {
-    CRABBOX_FIXTURE_REAL_VENV: "1",
-    CRABBOX_FIXTURE_PYTHON: resolvedPython.stdout.trim(),
-    PYTHONPATH: modules,
-    TMPDIR: temporaryRoot,
-  });
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.equal(JSON.parse(await readFile(fixture.manifest, "utf8")).profile, "linux-minimal");
-  assert.match(await readFile(join(fixture.root, "venv-probes.log"), "utf8"), /EnvBuilder\(with_pip=True\)\.create/u);
-  assert.deepEqual(await readdir(temporaryRoot), [], "failed venv probes must clean their temporary directories");
-  assert.deepEqual(await fixture.packageCalls(), []);
+  for (const failure of ["creation", "pip"]) {
+    await t.test(failure, async (subtest) => {
+      const fixture = await createFixture(subtest);
+      const modules = join(fixture.root, "python-modules");
+      const temporaryRoot = join(fixture.root, "venv-temporary");
+      const reachedPip = join(fixture.root, "pip-reached");
+      await mkdir(modules);
+      await mkdir(temporaryRoot);
+      await writeFile(join(modules, "venv.py"), `import os, pathlib, subprocess, sys, tempfile
+class EnvBuilder:
+    def __init__(self, *, with_pip):
+        assert with_pip
+
+    def create(self, directory):
+        assert tempfile.gettempdir() == os.environ["TMPDIR"] == os.path.dirname(directory)
+        os.close(tempfile.mkstemp()[0])
+        subprocess.run([sys.executable, "-c", "import os, tempfile; assert tempfile.gettempdir() == os.environ['TMPDIR']; os.close(tempfile.mkstemp()[0])"], check=True)
+        if os.environ["CRABBOX_FIXTURE_VENV_FAILURE"] == "creation":
+            raise RuntimeError("ensurepip is unavailable")
+        binary = pathlib.Path(directory) / "bin"
+        binary.mkdir(parents=True)
+        (binary / "python").symlink_to(sys.executable)
+`);
+      await writeFile(join(modules, "pip.py"), `import os, pathlib, tempfile
+os.close(tempfile.mkstemp()[0])
+pathlib.Path(os.environ["CRABBOX_FIXTURE_PIP_REACHED"]).touch()
+raise RuntimeError("pip proof failed")
+`);
+      const environment = {
+        CRABBOX_FIXTURE_REAL_VENV: "1",
+        CRABBOX_FIXTURE_PYTHON: resolvedPython.stdout.trim(),
+        CRABBOX_FIXTURE_VENV_FAILURE: failure,
+        CRABBOX_FIXTURE_PIP_REACHED: reachedPip,
+        PYTHONPATH: modules,
+        TMPDIR: temporaryRoot,
+      };
+      const importOnly = spawnSync(resolvedPython.stdout.trim(), ["-c", "import venv"], {
+        encoding: "utf8",
+        env: { ...process.env, ...environment },
+      });
+      assert.equal(importOnly.status, 0, importOnly.stderr);
+      const producer = await readFile(resolve(repoRoot, "scripts/linux-readiness.generated.sh"), "utf8");
+      const source = fixture.actualGenerated(producer.slice(producer.indexOf("crabbox_readiness_manifest_path=")));
+      const result = fixture.run(source, environment);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(JSON.parse(await readFile(fixture.manifest, "utf8")).profile, "linux-minimal");
+      assert.match(await readFile(join(fixture.root, "venv-probes.log"), "utf8"), /EnvBuilder\(with_pip=True\)\.create/u);
+      assert.deepEqual(await readdir(temporaryRoot), [], "failed probes must clean all parent and child scratch");
+      if (failure === "pip") assert.equal(await readFile(reachedPip, "utf8"), "");
+      else await assert.rejects(readFile(reachedPip), { code: "ENOENT" });
+
+      await fixture.writeManifest("linux-builder");
+      const verified = fixture.runVerifier("linux-builder", environment);
+      assert.notEqual(verified.status, 0);
+      assert.match(verified.stderr, /linux-builder capability proof failed/);
+      assert.equal(JSON.parse(await readFile(fixture.manifest, "utf8")).profile, "linux-builder");
+      assert.deepEqual(await readdir(temporaryRoot), [], "verification failure must clean all scratch");
+      assert.deepEqual(await fixture.packageCalls(), []);
+    });
+  }
 });
 
 test("standalone producer replaces an existing builder claim when a builder capability disappears", async (t) => {
