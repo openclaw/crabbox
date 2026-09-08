@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Fix managed Windows WSL2 command timeouts by disabling redundant cloud-init discovery, verifying cold-start readiness, and allowing a target-specific status probe budget for fixed-ID orchestrators. https://github.com/openclaw/crabbox/pull/PR_NUMBER. Thanks @steipete.
+- Fix managed Windows WSL2 command timeouts by disabling redundant cloud-init discovery, verifying cold-start readiness, and allowing a target-specific status probe budget for fixed-ID orchestrators. https://github.com/openclaw/crabbox/pull/1996. Thanks @steipete.
 
 - Describe Anthropic Sandbox Runtime configuration bindings once, preserving inherited binary paths for empty YAML, explicit settings/debug clearing, and native runtime defaults. [PR 1993](https://github.com/openclaw/crabbox/pull/1993). Thanks @steipete.
 
