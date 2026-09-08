@@ -4,7 +4,7 @@
 
 - Describe Anthropic Sandbox Runtime configuration bindings once, preserving inherited binary paths for empty YAML, explicit settings/debug clearing, and native runtime defaults. [PR 1993](https://github.com/openclaw/crabbox/pull/1993). Thanks @steipete.
 
-- Describe Cloud Run Sandbox configuration bindings once, keeping launcher/workdir defaults consistent across diagnostics and claims while preserving source precedence and operation-specific behavior. Thanks @steipete.
+- Describe Cloud Run Sandbox configuration bindings once, keeping launcher/workdir defaults consistent across diagnostics and claims while preserving source precedence and operation-specific behavior. [PR 2000](https://github.com/openclaw/crabbox/pull/2000). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 

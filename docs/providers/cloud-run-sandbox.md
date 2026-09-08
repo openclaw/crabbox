@@ -59,7 +59,7 @@ Official references:
 | **Remote** | Laptop or CI | HTTP to a durable-routing gateway that owns the stateful lifecycle | Maintainers, CI, local proof |
 | **Direct** | Process already on Cloud Run | `Runtime.Exec` → `/usr/local/gcp/bin/sandbox` | Agents/services that already run on Cloud Run |
 
-A nonempty gateway URL selects remote mode and requires a secret. A missing
+A nonblank gateway URL selects remote mode and requires a secret. A missing
 secret is an error, not a fallback to direct mode. Without a gateway URL,
 Crabbox uses direct mode. `CRABBOX_CLOUD_RUN_SANDBOX_GATEWAY_URL` takes precedence
 over `CLOUD_RUN_SANDBOX_URL`; `--cloud-run-sandbox-gateway-url` overrides both.
