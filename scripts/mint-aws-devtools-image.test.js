@@ -1262,7 +1262,32 @@ test("measured baseline must match the default captured by the original promotio
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /baseline differs from the captured previous default/);
   assert.match(await readFile(fake.log, "utf8"), /--restore-receipt \S+ ami-devtools/);
+  const outcome = JSON.parse(await readFile(fake.outcome, "utf8"));
+  assert.equal(outcome.status, "failed");
+  assert.equal(outcome.stage, "promotion");
+  assert.equal(outcome.rollbackStatus, "succeeded");
+  assert.match(outcome.promotionBindingDigest, /^sha256:[0-9a-f]{64}$/);
   assert.doesNotMatch(result.stdout, /public measurement proof:/);
+});
+
+test("measured warmup cleanup failures remain visible to finalization", async (t) => {
+  const fake = await measuredFixture(t);
+  const result = await runScript(
+    fake.args,
+    {
+      ...fake.env,
+      CRABBOX_FAKE_WARMUP_FAIL_AFTER_LEASE: "1",
+      CRABBOX_FAKE_STOP_FAIL_LEASE: "cbx_source",
+    },
+    fake.script,
+  );
+  assert.equal(result.code, 23, result.stderr);
+  const log = await readFile(fake.log, "utf8");
+  assert.ok((log.match(/stop --provider aws --target linux cbx_source/g) ?? []).length >= 2);
+  const outcome = JSON.parse(await readFile(fake.outcome, "utf8"));
+  assert.equal(outcome.status, "failed");
+  assert.equal(outcome.stage, "source_prepare");
+  assert.equal(outcome.cleanupStatus, "failed");
 });
 
 test("measured wrong promoted selection stops the allocated lease before rollback", async (t) => {
@@ -1303,7 +1328,7 @@ test("measured post-promotion failures preserve the original publisher status", 
       assert.equal(result.code, mode === "outcome" ? 66 : 37, result.stderr);
       const log = await readFile(fake.log, "utf8");
       if (mode === "outcome") {
-        assert.doesNotMatch(log, /--restore-receipt/);
+        assert.match(log, /image promote --json --target linux .*--restore-receipt \S+ ami-devtools/);
       } else {
         assert.match(log, /image promote --json --target linux .*--restore-receipt \S+ ami-devtools/);
       }

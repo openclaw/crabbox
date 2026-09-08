@@ -605,7 +605,7 @@ export function validateOutcome(outcome) {
     assert.equal(outcome.promotionBindingDigest, null, "promotion preceded its stage");
   if (stageIndex >= stages.indexOf("promoted_smoke"))
     assert.ok(isDigest(outcome.promotionBindingDigest), "missing promotion binding");
-  if (stageIndex < stages.indexOf("promoted_smoke"))
+  if (stageIndex < stages.indexOf("promotion"))
     assert.equal(outcome.rollbackStatus, "not_required", "rollback preceded promotion");
   if (outcome.status === "initialized") {
     assert.equal(outcome.stage, "preflight");
@@ -629,7 +629,7 @@ export function validateOutcome(outcome) {
     assert.equal(outcome.candidateSelection, "explicit");
     assert.equal(outcome.promotedSelection, "promoted");
   }
-  if (outcome.rollbackStatus === "succeeded")
+  if (outcome.rollbackStatus !== "not_required")
     assert.ok(isDigest(outcome.promotionBindingDigest), "rollback is not bound to a promotion");
   return outcome;
 }

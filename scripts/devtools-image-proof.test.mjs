@@ -433,3 +433,39 @@ test("failed outcomes retain only validated partial cohorts", () => {
     }),
   );
 });
+
+test("promotion-stage failures retain bound rollback outcomes", () => {
+  const baselineInput = cohort();
+  const candidateInput = cohort(3);
+  const baseline = validateCohort(policy, "baseline", baselineInput, [], "ami-candidate");
+  const candidate = validateCohort(
+    policy,
+    "candidate",
+    candidateInput,
+    [baselineInput],
+    "ami-candidate",
+  );
+  const receipt = {
+    image: { id: "ami-candidate", region: policy.region, revision: "revision-1" },
+  };
+  const outcome = projectOutcome(policy, {
+    status: "failed",
+    stage: "promotion",
+    exitCode: 1,
+    rollbackStatus: "succeeded",
+    cleanupStatus: "succeeded",
+    cohorts: [baseline, candidate],
+    promotionReceipt: receipt,
+  });
+  assert.equal(outcome.rollbackStatus, "succeeded");
+  assert.equal(
+    outcome.promotionBindingDigest,
+    fingerprint(["aws-image-promotion", "ami-candidate", "revision-1"]),
+  );
+  assert.throws(() =>
+    validateOutcome({
+      ...outcome,
+      promotionBindingDigest: null,
+    }),
+  );
+});

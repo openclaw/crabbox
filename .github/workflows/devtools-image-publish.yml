@@ -263,7 +263,7 @@ jobs:
                   "- Exit code: `\(.exitCode // "unavailable")`"
                 ' "$public_outcome"
               else
-                echo "- Status: `outcome_unavailable`"
+                echo '- Status: `outcome_unavailable`'
               fi
             } >>"$GITHUB_STEP_SUMMARY"
             exit 0

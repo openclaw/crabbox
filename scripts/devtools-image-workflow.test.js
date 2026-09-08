@@ -72,6 +72,7 @@ test("measured Linux publication is explicit and declares its threshold and extr
   );
   assert.match(workflow, /public_outcome="\$RUNNER_TEMP\/devtools-image-proof\/manifest\.json"/);
   assert.match(workflow, /name: Initialize measured publication outcome/);
+  assert.match(workflow, /echo '- Status: `outcome_unavailable`'/);
   assert.match(workflow, /"\$\{command\[@\]\}" >"\$private_dir\/publish\.log" 2>&1/);
   assert.match(workflow, /devtools-image-proof\.mjs validate/);
   assert.doesNotMatch(workflow, /\bcp "\$\{manifests/);

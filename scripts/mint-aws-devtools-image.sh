@@ -257,6 +257,7 @@ measurement_lease=""
 measurement_handle=""
 promotion_log=""
 rollback_pending=0
+warmup_handle_dir="$log_dir/image-mint-${log_image_name}-leases-${log_id}"
 
 cleanup() {
   local exit_status=$?
@@ -267,6 +268,9 @@ cleanup() {
   local finalizer_status=0
   local proof_status=0
   local receipt_path="-"
+  local outcome_candidate=""
+  local lease handle seen_leases="|"
+  local -a cleanup_leases=()
   # A signal can arrive after handle publication but before run returns or writes timing.
   if [[ -z "$measurement_lease" && -n "$measurement_handle" && -f "$measurement_handle" ]]; then
     measurement_lease="$(node "$ROOT/scripts/devtools-image-proof.mjs" handle "$measurement_handle" | jq -er .leaseId)" || {
@@ -274,7 +278,7 @@ cleanup() {
       finalizer_status=1
     }
   fi
-  if [[ "$rollback_pending" == "1" ]]; then
+  if [[ "$rollback_pending" == "1" && "$exit_status" != "0" ]]; then
     rollback_pending=0
     if rollback_promoted_image "$promotion_log"; then
       rollback_status="succeeded"
@@ -285,8 +289,20 @@ cleanup() {
   fi
   if [[ "$keep_lease" != "1" ]]; then
     cleanup_status="succeeded"
-    for lease in "$measurement_lease" "$promoted_lease" "$candidate_lease" "$source_lease"; do
+    cleanup_leases=("$measurement_lease" "$promoted_lease" "$candidate_lease" "$source_lease")
+    if [[ -d "$warmup_handle_dir" ]]; then
+      for handle in "$warmup_handle_dir"/*.lease; do
+        [[ -f "$handle" ]] || continue
+        lease="$(cat "$handle")"
+        [[ -n "$lease" ]] && cleanup_leases+=("$lease")
+      done
+    fi
+    for lease in "${cleanup_leases[@]}"; do
       [[ -n "$lease" ]] || continue
+      case "$seen_leases" in
+        *"|$lease|"*) continue ;;
+      esac
+      seen_leases+="$lease|"
       if ! "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease"; then
         cleanup_status="failed"
         finalizer_status=1
@@ -296,21 +312,47 @@ cleanup() {
   if [[ "$exit_status" == "0" && "$finalizer_status" != "0" ]]; then
     exit_status="$finalizer_status"
   fi
+  if [[ "$rollback_pending" == "1" && "$exit_status" != "0" ]]; then
+    rollback_pending=0
+    if rollback_promoted_image "$promotion_log"; then
+      rollback_status="succeeded"
+    else
+      rollback_status="failed"
+      finalizer_status=1
+    fi
+  fi
   if [[ "$measured" == "1" && -n "$measurement_dir" && -n "$public_outcome" ]]; then
     if [[ -n "$promotion_log" ]] &&
       jq -e '.image.id and .image.revision' "$promotion_log" >/dev/null 2>&1; then
       receipt_path="$promotion_log"
     fi
+    outcome_candidate="$(mktemp "${public_outcome}.candidate.XXXXXX")" || proof_status=$?
+    if [[ "$proof_status" == "0" ]]; then
     node "$ROOT/scripts/devtools-image-proof.mjs" finalize \
-      "$public_outcome" "$measurement_dir/policy.json" "$measurement_dir" \
+      "$outcome_candidate" "$measurement_dir/policy.json" "$measurement_dir" \
       "$outcome_stage" "$exit_status" "$rollback_status" "$cleanup_status" "$receipt_path" ||
       proof_status=$?
+    fi
+    if [[ "$proof_status" == "0" ]]; then
+      mv -f "$outcome_candidate" "$public_outcome" || proof_status=$?
+    fi
     if [[ "$proof_status" != "0" ]]; then
+      [[ -z "$outcome_candidate" ]] || rm -f "$outcome_candidate"
       printf 'could not finalize public measurement outcome\n' >&2
       if [[ "$exit_status" == "0" ]]; then
         exit_status="$proof_status"
       fi
+      if [[ "$rollback_pending" == "1" ]]; then
+        rollback_pending=0
+        if rollback_promoted_image "$promotion_log"; then
+          rollback_status="succeeded"
+        else
+          rollback_status="failed"
+          finalizer_status=1
+        fi
+      fi
     elif [[ "$exit_status" == "0" ]]; then
+      rollback_pending=0
       printf 'public measurement proof: %s\n' "$public_outcome"
     fi
   fi
@@ -550,6 +592,14 @@ process.exit(1);
 ' "$1"
 }
 
+warmup_handle_path() {
+  printf '%s/%s.lease\n' "$warmup_handle_dir" "$1"
+}
+
+clear_warmup_handle() {
+  rm -f "$(warmup_handle_path "$1")"
+}
+
 assert_selected_image() {
   local log="$1"
   local image_id="$2"
@@ -592,9 +642,15 @@ warmup() {
   fi
   local lease
   lease="$(lease_from_log "$log" || true)"
+  if [[ -n "$lease" ]]; then
+    mkdir -p "$warmup_handle_dir"
+    printf '%s\n' "$lease" >"$(warmup_handle_path "$label")"
+  fi
   if [[ "$warmup_status" -ne 0 ]]; then
     if [[ -n "$lease" && "$keep_lease" != "1" ]]; then
-      run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" >&2 || true
+      if run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" >&2; then
+        clear_warmup_handle "$label"
+      fi
     fi
     return "$warmup_status"
   fi
@@ -616,7 +672,9 @@ warmup() {
     if [[ "$selection_status" != "0" ]]; then
       printf 'warmup selection evidence failed for %s\n' "$label" >&2
       [[ ! -s "$selection.error" ]] || cat "$selection.error" >&2
-      run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" >&2 || true
+      if run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" >&2; then
+        clear_warmup_handle "$label"
+      fi
       return "$selection_status"
     fi
   elif [[ "$label" == "candidate" ]]; then
@@ -627,7 +685,10 @@ warmup() {
   if [[ "$target" == "windows" ]]; then
     sleep "$windows_warmup_settle_seconds"
     if ! wait_windows_ssh_probe "$lease" "$windows_warmup_wait_timeout"; then
-      [[ "$keep_lease" == "1" ]] || run_cmd "$CRABBOX_BIN" stop --provider aws --target windows "$lease" >&2 || true
+      if [[ "$keep_lease" != "1" ]] &&
+        run_cmd "$CRABBOX_BIN" stop --provider aws --target windows "$lease" >&2; then
+        clear_warmup_handle "$label"
+      fi
       return 1
     fi
   fi
@@ -875,6 +936,7 @@ fi
 
 if [[ "$keep_lease" != "1" ]]; then
   run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$source_lease"
+  clear_warmup_handle source
   source_lease=""
 fi
 
@@ -889,6 +951,7 @@ fi
 
 if [[ "$keep_lease" != "1" ]]; then
   run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$candidate_lease"
+  clear_warmup_handle candidate
   candidate_lease=""
 fi
 
@@ -923,6 +986,7 @@ promoted_lease="$(warmup promoted)"
 smoke "$promoted_lease"
 if [[ "$measured" == "1" ]]; then
   run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$promoted_lease"
+  clear_warmup_handle promoted
   promoted_lease=""
   outcome_stage="promoted_measure"
   measure_cohort promoted
@@ -930,7 +994,6 @@ if [[ "$measured" == "1" ]]; then
   node "$ROOT/scripts/devtools-image-proof.mjs" receipt \
     "$measurement_dir/policy.json" "$measurement_dir/baseline-1.selection.json" "$promotion_log" "$ami_id"
 fi
-rollback_pending=0
 outcome_stage="complete"
 printf 'promoted image selection proved: %s\n' "$ami_id"
 printf 'promoted %s developer image passed: %s\n' "$target" "$ami_id"
