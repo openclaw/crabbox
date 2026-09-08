@@ -6997,6 +6997,169 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 }
 
+func TestOpenSandboxFilePresenceAndExcludedFields(t *testing.T) {
+	initial := OpenSandboxConfig{APIURL: "https://example.invalid/prior", Image: "image", Workdir: "/workspace/app", CPU: "2", Memory: "4Gi", TimeoutSecs: 10, ExecTimeoutSecs: 20, PlatformOS: "linux", PlatformArch: "arm64", SecureAccess: true, UseServerProxy: true}
+	for _, field := range []string{"APIURL", "ForgetMissing"} {
+		if _, ok := reflect.TypeOf(fileOpenSandboxConfig{}).FieldByName(field); ok {
+			t.Fatalf("%s must not have a YAML binding", field)
+		}
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, priorForget := range []bool{false, true} {
+			for _, mode := range []string{"omitted", "null", "zero"} {
+				t.Run(fmt.Sprintf("trusted=%t/forget=%t/%s", trusted, priorForget, mode), func(t *testing.T) {
+					body := fmt.Sprintf("openSandbox:\n  apiUrl: https://example.invalid/file\n  forgetMissing: %t\n", !priorForget)
+					if mode != "omitted" {
+						for _, key := range []string{"image", "workdir", "cpu", "memory", "timeoutSecs", "execTimeoutSecs", "platformOS", "platformArch", "secureAccess", "useServerProxy"} {
+							value := "null"
+							if mode == "zero" {
+								value = "''"
+								switch key {
+								case "timeoutSecs", "execTimeoutSecs":
+									value = "0"
+								case "secureAccess", "useServerProxy":
+									value = "false"
+								}
+							}
+							body += "  " + key + ": " + value + "\n"
+						}
+					}
+					cfg := baseConfig()
+					cfg.OpenSandbox = initial
+					cfg.OpenSandbox.ForgetMissing = priorForget
+					var file fileConfig
+					if err := yaml.Unmarshal([]byte(body), &file); err != nil {
+						t.Fatal(err)
+					}
+					if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+						t.Fatal(err)
+					}
+					want := initial
+					want.ForgetMissing = priorForget
+					if mode == "zero" {
+						want = OpenSandboxConfig{APIURL: initial.APIURL, ForgetMissing: priorForget}
+					}
+					if cfg.OpenSandbox != want {
+						t.Fatalf("got %#v, want %#v", cfg.OpenSandbox, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestOpenSandboxEnvironmentSourceAndBooleanSemantics(t *testing.T) {
+	for _, tc := range []struct{ primary, fallback, want string }{
+		{"https://example.invalid/primary", "https://example.invalid/fallback", "https://example.invalid/primary"},
+		{"", "https://example.invalid/fallback", "https://example.invalid/fallback"},
+		{"", "", "https://example.invalid/prior"},
+		{" ", "https://example.invalid/fallback", " "},
+		{"", " ", " "},
+	} {
+		t.Run("url/"+tc.want, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_OPENSANDBOX_API_URL", tc.primary)
+			t.Setenv("OPEN_SANDBOX_API_URL", tc.fallback)
+			cfg := baseConfig()
+			cfg.OpenSandbox.APIURL = "https://example.invalid/prior"
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.OpenSandbox.APIURL != tc.want {
+				t.Fatalf("URL=%q, want %q", cfg.OpenSandbox.APIURL, tc.want)
+			}
+		})
+	}
+	for _, prior := range []bool{false, true} {
+		for _, raw := range []string{"", "invalid", "true", "false", "yes", "no", "on", "off", "1", "0"} {
+			t.Run(fmt.Sprintf("bool/%t/%s", prior, raw), func(t *testing.T) {
+				clearConfigEnv(t)
+				t.Setenv("CRABBOX_OPENSANDBOX_SECURE_ACCESS", raw)
+				t.Setenv("CRABBOX_OPENSANDBOX_USE_SERVER_PROXY", raw)
+				t.Setenv("CRABBOX_OPENSANDBOX_FORGET_MISSING", strconv.FormatBool(!prior))
+				t.Setenv("OPEN_SANDBOX_FORGET_MISSING", strconv.FormatBool(!prior))
+				cfg := baseConfig()
+				cfg.OpenSandbox.SecureAccess, cfg.OpenSandbox.UseServerProxy, cfg.OpenSandbox.ForgetMissing = prior, prior, prior
+				if err := applyEnv(&cfg); err != nil {
+					t.Fatal(err)
+				}
+				want := prior
+				switch raw {
+				case "true", "yes", "on", "1":
+					want = true
+				case "false", "no", "off", "0":
+					want = false
+				}
+				if cfg.OpenSandbox.SecureAccess != want || cfg.OpenSandbox.UseServerProxy != want || cfg.OpenSandbox.ForgetMissing != prior {
+					t.Fatalf("boolean overlay=%#v, want bool=%t forget=%t", cfg.OpenSandbox, want, prior)
+				}
+			})
+		}
+	}
+}
+
+func TestOpenSandboxIntegerOverlayErrorOrder(t *testing.T) {
+	for _, source := range []string{"file", "env"} {
+		for _, second := range []bool{false, true} {
+			for _, invalid := range []string{"-1", "invalid"} {
+				if source == "file" && invalid == "invalid" {
+					continue
+				}
+				t.Run(fmt.Sprintf("%s/second=%t/%s", source, second, invalid), func(t *testing.T) {
+					clearConfigEnv(t)
+					first := invalid
+					if second {
+						first = "7"
+					}
+					cfg := baseConfig()
+					cfg.OpenSandbox.TimeoutSecs, cfg.OpenSandbox.ExecTimeoutSecs = 10, 20
+					cfg.OpenSandbox.PlatformOS = "before"
+					var err error
+					key, env := "timeoutSecs", "CRABBOX_OPENSANDBOX_TIMEOUT_SECS"
+					if second {
+						key, env = "execTimeoutSecs", "CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS"
+					}
+					wantError := "opensandbox " + key + " must be non-negative"
+					if source == "file" {
+						var file fileConfig
+						if err := yaml.Unmarshal([]byte("openSandbox:\n  image: after\n  platformOS: after\n  timeoutSecs: "+first+"\n  execTimeoutSecs: "+invalid+"\n"), &file); err != nil {
+							t.Fatal(err)
+						}
+						err = applyFileConfig(&cfg, file)
+					} else {
+						t.Setenv("CRABBOX_OPENSANDBOX_IMAGE", "after")
+						t.Setenv("CRABBOX_OPENSANDBOX_PLATFORM_OS", "after")
+						t.Setenv("CRABBOX_OPENSANDBOX_TIMEOUT_SECS", first)
+						t.Setenv("CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS", invalid)
+						err = applyEnv(&cfg)
+						wantError = env + " must be non-negative"
+						if invalid == "invalid" {
+							wantError = env + " must be an integer"
+						}
+					}
+					if err == nil || err.Error() != wantError {
+						t.Fatalf("error=%v, want %q", err, wantError)
+					}
+					wantFirst, wantSecond := 10, 20
+					if second {
+						wantFirst = 7
+					}
+					if source == "env" {
+						if second {
+							wantSecond = 0
+						} else {
+							wantFirst = 0
+						}
+					}
+					if cfg.OpenSandbox.TimeoutSecs != wantFirst || cfg.OpenSandbox.ExecTimeoutSecs != wantSecond || cfg.OpenSandbox.Image != "after" || cfg.OpenSandbox.PlatformOS != "before" {
+						t.Fatalf("partial update=%#v, want timeouts=%d,%d", cfg.OpenSandbox, wantFirst, wantSecond)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestApplyEnvRejectsNegativeOpenSandboxTimeouts(t *testing.T) {
 	for _, name := range []string{"CRABBOX_OPENSANDBOX_TIMEOUT_SECS", "CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS"} {
 		t.Run(name, func(t *testing.T) {
