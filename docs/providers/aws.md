@@ -235,6 +235,13 @@ finishes. Every batch settles before recovery, another batch or the next port;
 rule-limit recovery compacts once and retries each affected rule. Diagnostic
 request-duration totals include overlapping requests and can exceed wall time.
 
+Access refresh indexes the current and retained leases once. Ports share a
+security-group lookup only when their group, allowed source ranges and
+reconciliation mode match; different policies remain separate. Runner and
+workspace default groups retain distinct identities when stored group names
+are absent. Refresh uses the recorded ingress fields directly rather than
+rebuilding machine provisioning settings.
+
 ### Environment variables (direct mode)
 
 ```text

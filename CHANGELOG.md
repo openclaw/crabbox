@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Share service-control run-option validation across FastAPI Cloud, Railway, and Unikraft Cloud while preserving rejection messages, precedence, and refusal before provider access. [PR 1979](https://github.com/openclaw/crabbox/pull/1979). Thanks @steipete.
+- AWS: avoid duplicate access-refresh lookups for ports with matching permissions, index lease access once, and keep unnamed runner/workspace groups separate. https://github.com/openclaw/crabbox/pull/1980. Thanks @steipete.
 
 - AWS: overlap SSH ingress authorization in bounded batches while preserving revocation, recovery and cleanup ordering. https://github.com/openclaw/crabbox/pull/1976. Thanks @steipete.
 
@@ -14,6 +14,7 @@
 - Share byte-prefix storage across command capture, controller responses, and coordinator token helpers while preserving each caller's limits, cancellation, and diagnostics. [PR 1972](https://github.com/openclaw/crabbox/pull/1972).
 - Reuse shared prefix storage for SSH diagnostics and artifact capture while preserving locked, cloned snapshots and truncation visibility. [PR 1973](https://github.com/openclaw/crabbox/pull/1973).
 - Share raw byte-tail storage for Agent Sandbox stderr and Blacksmith proof streams while preserving native exit handling, Actions URL discovery, and cloned snapshots. [PR 1977](https://github.com/openclaw/crabbox/pull/1977). Thanks @steipete.
+- Share service-control run-option validation across FastAPI Cloud, Railway, and Unikraft Cloud while preserving rejection messages, precedence, and refusal before provider access. [PR 1979](https://github.com/openclaw/crabbox/pull/1979). Thanks @steipete.
 
 ## 0.52.0 - 2026-09-07
 
