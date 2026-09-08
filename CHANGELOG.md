@@ -4,7 +4,7 @@
 
 - AWS: avoid duplicate access-refresh lookups for ports with matching permissions, index lease access once, and keep unnamed runner/workspace groups separate. https://github.com/openclaw/crabbox/pull/1980. Thanks @steipete.
 
-- Keep failure-capture scratch files outside tested checkouts, bound intermediate archive creation and streamed SSH downloads while preserving existing destinations, and diagnose unknown failures from the recorded run instead of suggesting an unchanged full rerun.
+- Keep failure-capture scratch files outside tested checkouts, bound intermediate archive creation and streamed SSH downloads while preserving existing destinations, and diagnose unknown failures from the recorded run instead of suggesting an unchanged full rerun. https://github.com/openclaw/crabbox/pull/1983. Thanks @vincentkoc.
 - AWS: overlap SSH ingress authorization in bounded batches while preserving revocation, recovery and cleanup ordering. https://github.com/openclaw/crabbox/pull/1976. Thanks @steipete.
 
 - Overlap default-VPC and managed security-group discovery during AWS provisioning while retaining scope validation and joined failure handling. [PR 1974](https://github.com/openclaw/crabbox/pull/1974). Thanks @steipete.
