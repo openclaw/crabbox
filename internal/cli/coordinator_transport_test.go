@@ -132,10 +132,14 @@ func TestCoordinatorControlCloseDoesNotAwaitIdlePeer(t *testing.T) {
 }
 
 func TestCoordinatorHTTP2ClientRetainsWebSocketUpgrade(t *testing.T) {
-	protocols := make(chan int, 2)
+	protocols := make(chan int, 3)
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		protocols <- r.ProtoMajor
-		if r.URL.Path != "/v1/control" {
+		if r.URL.Path == "/v1/control" {
+			http.Redirect(w, r, "/control-target", http.StatusFound)
+			return
+		}
+		if r.URL.Path != "/control-target" {
 			io.WriteString(w, `{"ok":true}`)
 			return
 		}
@@ -170,6 +174,9 @@ func TestCoordinatorHTTP2ClientRetainsWebSocketUpgrade(t *testing.T) {
 	defer control.close()
 	if protocol := <-protocols; protocol != 1 {
 		t.Fatalf("WebSocket upgrade protocol=%d", protocol)
+	}
+	if protocol := <-protocols; protocol != 1 {
+		t.Fatalf("same-origin WebSocket redirect protocol=%d", protocol)
 	}
 	if err := control.write(t.Context(), map[string]string{"type": "ping"}); err != nil {
 		t.Fatal(err)

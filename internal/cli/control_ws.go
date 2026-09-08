@@ -50,9 +50,7 @@ func dialCoordinatorControl(ctx context.Context, coord *CoordinatorClient) (*coo
 	}
 	opts := &websocket.DialOptions{
 		HTTPHeader: headers,
-	}
-	if coord.Client != nil {
-		opts.HTTPClient = coord.Client
+		HTTPClient: coord.secureHTTPClient(),
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, coordinatorControlDialTimeout)
 	defer cancel()

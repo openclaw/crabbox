@@ -4,7 +4,7 @@
 
 - Fix Azure leases blocked by retained legacy shared-infrastructure fences by verifying settled resources before transactional takeover. [PR 1982](https://github.com/openclaw/crabbox/pull/1982). Thanks @steipete.
 
-- CLI: negotiate HTTP/2 for coordinator API requests and avoid waiting for idle control peers during shutdown. https://github.com/openclaw/crabbox/pull/1985. Thanks @steipete.
+- CLI: negotiate HTTP/2 for coordinator API requests, apply the shared redirect guard to control upgrades, and avoid waiting for idle control peers during shutdown. https://github.com/openclaw/crabbox/pull/1985. Thanks @steipete.
 
 - AWS: avoid duplicate access-refresh lookups for ports with matching permissions, index lease access once, and keep unnamed runner/workspace groups separate. https://github.com/openclaw/crabbox/pull/1980. Thanks @steipete.
 
