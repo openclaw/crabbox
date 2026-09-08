@@ -873,7 +873,14 @@ func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveReques
 			return LeaseTarget{}, exit(4, "coordinator returned lease %s for requested lease %s", blank(lease.ID, "<empty>"), req.ID)
 		}
 	}
-	return b.coordinatorLeaseTargetForConfig(lease, cfg, coord)
+	target, err := b.coordinatorLeaseTargetForConfig(lease, cfg, coord)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	if req.Prepare && !req.ReleaseOnly && target.providerRelease != nil {
+		return LeaseTarget{}, exit(2, "lease %s is released; start a new lease before running commands", target.LeaseID)
+	}
+	return target, nil
 }
 
 func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest) (statusView, error) {

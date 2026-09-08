@@ -16849,6 +16849,57 @@ describe("fleet lease identity and idle", () => {
         ),
       ).toBe(true);
     }
+    storage.resetListOptions();
+    await fleet.alarm();
+    const steadyLeaseScans = storage.listOptions.filter(
+      ({ prefix, startAfter }) => prefix === "lease:" && startAfter === undefined,
+    );
+    // Preparation and final scheduling may scan history; individual maintenance phases must not.
+    expect(steadyLeaseScans.length).toBeLessThanOrEqual(2);
+    expect(reconciliations).toEqual([[anchor.id]]);
+  });
+
+  it("schedules leases admitted while prepared maintenance waits for provider cleanup", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const storage = new MemoryStorage();
+    const entered = deferred<void>();
+    const resume = deferred<void>();
+    const oldLease = testLease({ expiresAt: new Date(Date.now() - 1000).toISOString() });
+    storage.seed(`lease:${oldLease.id}`, oldLease);
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(undefined, {}, async () => {
+        entered.resolve();
+        await resume.promise;
+      }),
+    });
+    const maintenance = fleet.alarm();
+    try {
+      await Promise.race([
+        entered.promise,
+        maintenance.then(() => {
+          throw new Error("provider cleanup did not start");
+        }),
+      ]);
+      const id = "cbx_aaaaaaaaaaaa";
+      const registered = await fleet.fetch(
+        request("PUT", `/v1/leases/${id}/registration`, {
+          headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+          body: { provider: "external", target: "linux", host: "198.51.100.20", ttlSeconds: 60 },
+        }),
+      );
+      expect(registered.status).toBe(201);
+      const lease = storage.value<LeaseRecord>(`lease:${id}`)!;
+      vi.setSystemTime(Date.parse(lease.expiresAt) + 1);
+      resume.resolve();
+      await maintenance;
+      expect(storage.alarm()).toBeLessThanOrEqual(Date.now());
+      await fleet.alarm();
+      expect(storage.value<LeaseRecord>(`lease:${id}`)?.state).toBe("expired");
+    } finally {
+      resume.resolve();
+      await Promise.allSettled([maintenance]);
+      vi.useRealTimers();
+    }
   });
 
   it("registers, borrows, and returns ready-pool leases", async () => {

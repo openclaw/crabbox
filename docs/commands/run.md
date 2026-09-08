@@ -114,6 +114,10 @@ failures are not retried. This repeats only the observation before SSH and scrip
 admission; it never reruns a script. Plain status and Stop retain their existing
 observation behavior.
 
+If the coordinator has confirmed a lease's provider cleanup, `run --id` fails
+immediately instead of waiting for SSH on the deleted machine. `status` and
+`stop` remain available to inspect the outcome and finish local cleanup.
+
 For an ordinary reused coordinator lease, `--ssh-port <port>` pins one of the
 lease's advertised primary or fallback SSH ports before workspace ownership or
 command delivery. An unadvertised port is rejected; the lease's host, user,

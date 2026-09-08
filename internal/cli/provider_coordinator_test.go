@@ -2600,6 +2600,44 @@ func TestCoordinatorResolveDropsHistoricalProvisioningTiming(t *testing.T) {
 	}
 }
 
+func TestCoordinatorResolveRejectsConfirmedReleasedExecution(t *testing.T) {
+	for _, admin := range []bool{false, true} {
+		t.Run(fmt.Sprintf("admin-fallback=%t", admin), func(t *testing.T) {
+			isolateTestUserDirs(t)
+			const leaseID = "cbx_0123456789ab"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/"+leaseID {
+					http.NotFound(w, r)
+					return
+				}
+				if admin && r.Header.Get("Authorization") != "Bearer admin-token" {
+					http.NotFound(w, r)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+					ID: leaseID, Provider: "aws", TargetOS: targetLinux,
+					State: "released", CleanupStatus: "complete",
+					CleanupCompletedAt: time.Now().UTC().Format(time.RFC3339),
+				}})
+			}))
+			defer server.Close()
+			adminToken := ""
+			if admin {
+				adminToken = "admin-token"
+			}
+			backend := newCoordinatorIdentityTestBackend(t, server.URL, adminToken)
+			_, err := backend.Resolve(t.Context(), ResolveRequest{ID: leaseID, Prepare: true})
+			if err == nil || !strings.Contains(err.Error(), leaseID) || !strings.Contains(err.Error(), "released") {
+				t.Fatalf("released execution should fail before SSH preparation: %v", err)
+			}
+			resolved, err := backend.Resolve(t.Context(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+			if err != nil || resolved.LeaseID != leaseID || resolved.Server.Status != "released" {
+				t.Fatalf("released metadata must remain available for cleanup: lease=%#v err=%v", resolved, err)
+			}
+		})
+	}
+}
+
 func TestCoordinatorProviderIdentityValidationCanonicalizesAliases(t *testing.T) {
 	backend := &coordinatorLeaseBackend{
 		spec: ProviderSpec{Name: "gcp"},

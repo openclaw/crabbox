@@ -3174,11 +3174,28 @@ export class FleetCoordinator {
     }
     await this.reconcileScheduledAdminGrants(forwardedAdminGrantVersion, preserveForwardedVersion);
     await this.quarantineLegacyWorkspaces();
-    await this.reconcileInterruptedLeaseProvisioning();
-    await this.expireLeases();
+    // Retain only candidate IDs while provider I/O yields. Each phase reads them anew;
+    // final scheduling still discovers work admitted during the pass.
+    const leaseIDs = await this.state.runExclusive(async () => {
+      const candidates = await this.leaseBridgeOwners();
+      const now = Date.now();
+      await this.visitLeaseRecords((lease) => {
+        if (
+          leaseIsLive(lease) ||
+          leaseNeedsCleanup(lease, now) ||
+          leaseMayNeedInterruptedProvisioningRecovery(lease) ||
+          lease.runtimeAdapterDeleteRequestedAt
+        ) {
+          candidates.add(lease.id);
+        }
+      });
+      return candidates;
+    });
+    await this.reconcileInterruptedLeaseProvisioning(leaseIDs);
+    await this.expireLeases(leaseIDs);
     await this.webVNCCredentialHandoffs.cleanupExpired();
     await this.cleanupExpiredWebVNCPortalViewerAuth();
-    await this.reconcileRuntimeAdapterDeletes();
+    await this.reconcileRuntimeAdapterDeletes(leaseIDs);
     await this.withReadyPoolBorrowLock(() =>
       this.state.runExclusive(() => this.maintainReadyPools(Date.now())),
     );
@@ -10113,7 +10130,7 @@ export class FleetCoordinator {
     });
   }
 
-  private async reconcileRuntimeAdapterDeletes(): Promise<void> {
+  private async reconcileRuntimeAdapterDeletes(leaseIDs: ReadonlySet<string>): Promise<void> {
     const pending = await this.state.runExclusive(async () => {
       const now = Date.now();
       const due: LeaseRecord[] = [];
@@ -10135,7 +10152,7 @@ export class FleetCoordinator {
           }
         }
         return true;
-      });
+      }, leaseIDs);
       return due;
     });
     await Promise.all(pending.map((lease) => this.reconcileRuntimeAdapterDelete(lease)));
@@ -16521,7 +16538,9 @@ export class FleetCoordinator {
     return json({ error: "not_found" }, { status: 404 });
   }
 
-  private async reconcileInterruptedLeaseProvisioning(): Promise<void> {
+  private async reconcileInterruptedLeaseProvisioning(
+    leaseIDs: ReadonlySet<string>,
+  ): Promise<void> {
     const now = Date.now();
     const candidates = await this.state.runExclusive(async () => {
       const due: LeaseRecord[] = [];
@@ -16555,7 +16574,7 @@ export class FleetCoordinator {
         if (recoveryAt <= now) {
           due.push(structuredClone(lease));
         }
-      });
+      }, leaseIDs);
       return due;
     });
     await Promise.all(candidates.map((lease) => this.reconcileInterruptedLease(lease)));
@@ -16829,7 +16848,7 @@ export class FleetCoordinator {
     return owners;
   }
 
-  private async expireLeases(): Promise<void> {
+  private async expireLeases(leaseIDs: ReadonlySet<string>): Promise<void> {
     const claims = await this.state.runExclusive(async () => {
       const now = Date.now();
       const claimed: Array<{ claim: string; lease: LeaseRecord }> = [];
@@ -16916,7 +16935,7 @@ export class FleetCoordinator {
         lease.updatedAt = nowISO;
         await this.putLease(lease, { noCache: true });
         claimed.push({ claim: nowISO, lease });
-      });
+      }, leaseIDs);
       return claimed;
     });
     await Promise.all(
@@ -18109,8 +18128,15 @@ export class FleetCoordinator {
 
   private async visitLeaseRecords(
     visitor: (lease: LeaseRecord) => Promise<boolean | void> | boolean | void,
+    leaseIDs?: ReadonlySet<string>,
   ): Promise<void> {
-    await this.visitStorageRecords("lease:", visitor);
+    if (leaseIDs === undefined) return this.visitStorageRecords("lease:", visitor);
+    for (const id of [...leaseIDs].toSorted()) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- hydrate one current candidate at a time in storage-key order.
+      const lease = await this.getLease(id, { noCache: true });
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each owner completes before advancing to the next candidate.
+      if (lease && (await visitor(lease)) === false) return;
+    }
   }
 
   private async observeStoredProviderReconciliationCandidate(input: {

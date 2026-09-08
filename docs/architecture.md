@@ -204,6 +204,9 @@ egress records, so ended leases with no bridge state require no repeated deletes
 including after coordinator restarts. Failed deletes retain their cleanup evidence.
 Ready-pool maintenance reads only the leases referenced by its entries, and
 interrupted-provisioning checks read journals only for recovery candidates.
+Each maintenance pass collects candidate lease IDs once, then rereads their
+current records at the owning phase. Final alarm selection still scans current
+state so work admitted during provider I/O keeps its wakeup.
 
 ## Coordinator HTTP API
 
