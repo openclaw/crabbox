@@ -2,12 +2,8 @@ package main
 
 import (
 	"bytes"
-	"go/ast"
-	"go/importer"
-	"go/parser"
-	"go/token"
-	"go/types"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -215,17 +211,23 @@ func getenvBool(string) (bool, bool) { panic("stub") }
 func normalizeList([]string) []string { panic("stub") }
 func splitCommaList(string) []string { panic("stub") }
 `
-	fset := token.NewFileSet()
-	var files []*ast.File
+	dir := t.TempDir()
 	for _, input := range []struct{ name, source string }{{"source.go", source}, {"generated.go", string(output)}, {"helpers.go", helpers}} {
-		file, err := parser.ParseFile(fset, input.name, input.source, 0)
-		if err != nil {
+		if err := os.WriteFile(filepath.Join(dir, input.name), []byte(input.source), 0600); err != nil {
 			t.Fatal(err)
 		}
-		files = append(files, file)
 	}
-	config := types.Config{Importer: importer.Default()}
-	if _, err := config.Check("cli", fset, files, nil); err != nil {
-		t.Fatal(err)
+	// A trimpath test binary may have no GOROOT for an in-process importer.
+	// The Go command discovers its own standard library; compile, never run, the fixture.
+	command := exec.Command("go", "build", "source.go", "generated.go", "helpers.go")
+	command.Dir = dir
+	command.Env = []string{"GOTOOLCHAIN=local", "GOWORK=off", "GOPROXY=off", "GOSUMDB=off", "GOENV=off"}
+	for _, name := range []string{"PATH", "HOME", "USERPROFILE", "LOCALAPPDATA", "SystemRoot", "WINDIR", "TMPDIR", "TEMP", "TMP", "GOCACHE", "GOROOT", "GOFLAGS"} {
+		if value, ok := os.LookupEnv(name); ok {
+			command.Env = append(command.Env, name+"="+value)
+		}
+	}
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("compile generated config: %v\n%s", err, output)
 	}
 }
