@@ -553,6 +553,10 @@ func TestRepositoryNomadDestinationWithoutSelectedTokenRemainsInspectable(t *tes
 }
 
 func TestRepositoryProviderSettingsRemainApplied(t *testing.T) {
+	var semaphoreFile fileConfig
+	if err := yaml.Unmarshal([]byte("semaphore:\n  host: repo.example.test\n  project: project\n  machine: f1-standard-4\n  osImage: ubuntu2404\n  idleTimeout: 20m\n"), &semaphoreFile); err != nil {
+		t.Fatal(err)
+	}
 	var cloudflareFile fileConfig
 	if err := yaml.Unmarshal([]byte("cloudflare:\n  apiUrl: https://runner.repo.example.test\n  workdir: /workspace/project\n"), &cloudflareFile); err != nil {
 		t.Fatal(err)
@@ -566,13 +570,7 @@ func TestRepositoryProviderSettingsRemainApplied(t *testing.T) {
 			WorkRoot:       "/workspace/project",
 		},
 		Cloudflare: cloudflareFile.Cloudflare,
-		Semaphore: &fileSemaphoreConfig{
-			Host:        "repo.example.test",
-			Project:     "project",
-			Machine:     "f1-standard-4",
-			OSImage:     "ubuntu2404",
-			IdleTimeout: "20m",
-		},
+		Semaphore:  semaphoreFile.Semaphore,
 	}
 	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
 		t.Fatal(err)

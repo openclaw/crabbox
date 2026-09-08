@@ -38,6 +38,8 @@
 
 - Describe SmolVM configuration bindings once, preserving all three API-key environment names, CPU/memory source rules, endpoint checks, and existing network behavior. Thanks @steipete.
 
+- Describe Semaphore configuration bindings once, sharing effective machine, OS-image, and idle-timeout defaults without changing empty config output, explicit flags, or credential sources. Thanks @steipete.
+
 ## 0.53.0 - 2026-09-08
 
 ### Highlights

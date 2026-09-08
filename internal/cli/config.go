@@ -1122,15 +1122,6 @@ type ParallelsHostConfig struct {
 	keySource  credentialValueSource
 }
 
-type SemaphoreConfig struct {
-	Host        string
-	Token       string
-	Project     string
-	Machine     string
-	OSImage     string
-	IdleTimeout string
-}
-
 type SpritesConfig struct {
 	Token    string
 	APIURL   string
@@ -4060,15 +4051,6 @@ func positiveMinimum(current, candidate int) int {
 	return min(current, candidate)
 }
 
-type fileSemaphoreConfig struct {
-	Host        string `yaml:"host,omitempty"`
-	Token       string `yaml:"token,omitempty"`
-	Project     string `yaml:"project,omitempty"`
-	Machine     string `yaml:"machine,omitempty"`
-	OSImage     string `yaml:"osImage,omitempty"`
-	IdleTimeout string `yaml:"idleTimeout,omitempty"`
-}
-
 type fileSpritesConfig struct {
 	APIURL   string `yaml:"apiUrl,omitempty"`
 	WorkRoot string `yaml:"workRoot,omitempty"`
@@ -6624,26 +6606,16 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		return err
 	}
 	applyCloudflareDynamicWorkersFileConfig(cfg, file.CloudflareDynamicWorkers, trusted)
-	if file.Semaphore != nil {
-		if file.Semaphore.Host != "" {
-			cfg.Semaphore.Host = file.Semaphore.Host
+	{
+		applied, err := cfg.Semaphore.applyFile(file.Semaphore)
+		if applied.Host {
 			cfg.credentialProvenance.semaphoreHost = credentialSource
 		}
-		if file.Semaphore.Token != "" {
-			cfg.Semaphore.Token = file.Semaphore.Token
+		if applied.Token {
 			cfg.credentialProvenance.semaphoreToken = credentialSource
 		}
-		if file.Semaphore.Project != "" {
-			cfg.Semaphore.Project = file.Semaphore.Project
-		}
-		if file.Semaphore.Machine != "" {
-			cfg.Semaphore.Machine = file.Semaphore.Machine
-		}
-		if file.Semaphore.OSImage != "" {
-			cfg.Semaphore.OSImage = file.Semaphore.OSImage
-		}
-		if file.Semaphore.IdleTimeout != "" {
-			cfg.Semaphore.IdleTimeout = file.Semaphore.IdleTimeout
+		if err != nil {
+			return err
 		}
 	}
 	if file.Sprites != nil {
@@ -8544,18 +8516,18 @@ func applyEnv(cfg *Config) error {
 	cfg.CloudflareDynamicWorkers.CPUMs = getenvInt("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_CPU_MS", cfg.CloudflareDynamicWorkers.CPUMs)
 	cfg.CloudflareDynamicWorkers.Subrequests = getenvInt("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_SUBREQUESTS", cfg.CloudflareDynamicWorkers.Subrequests)
 	cfg.CloudflareDynamicWorkers.TimeoutSecs = getenvInt("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TIMEOUT_SECS", cfg.CloudflareDynamicWorkers.TimeoutSecs)
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_HOST", "SEMAPHORE_HOST"); ok {
-		cfg.Semaphore.Host = value
-		cfg.credentialProvenance.semaphoreHost = credentialSourceEnvironment
+	{
+		applied, err := cfg.Semaphore.applyEnv()
+		if applied.Host {
+			cfg.credentialProvenance.semaphoreHost = credentialSourceEnvironment
+		}
+		if applied.Token {
+			cfg.credentialProvenance.semaphoreToken = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_TOKEN", "SEMAPHORE_API_TOKEN"); ok {
-		cfg.Semaphore.Token = value
-		cfg.credentialProvenance.semaphoreToken = credentialSourceEnvironment
-	}
-	cfg.Semaphore.Project = getenv("CRABBOX_SEMAPHORE_PROJECT", getenv("SEMAPHORE_PROJECT", cfg.Semaphore.Project))
-	cfg.Semaphore.Machine = getenv("CRABBOX_SEMAPHORE_MACHINE", cfg.Semaphore.Machine)
-	cfg.Semaphore.OSImage = getenv("CRABBOX_SEMAPHORE_OS_IMAGE", cfg.Semaphore.OSImage)
-	cfg.Semaphore.IdleTimeout = getenv("CRABBOX_SEMAPHORE_IDLE_TIMEOUT", cfg.Semaphore.IdleTimeout)
 	if value, ok := firstNonEmptyEnv("CRABBOX_SPRITES_TOKEN", "SPRITES_TOKEN", "SPRITE_TOKEN", "SETUP_SPRITE_TOKEN"); ok {
 		cfg.Sprites.Token = value
 		cfg.credentialProvenance.spritesToken = credentialSourceEnvironment

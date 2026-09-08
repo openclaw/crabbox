@@ -258,7 +258,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if flagWasSet(fs, "nomad-token-env") {
 		provenance.nomadTokenEnv = credentialSourceFlag
 	}
-	if flagWasSet(fs, "semaphore-host") {
+	if SemaphoreConfigFlagPresence(fs).Host {
 		provenance.semaphoreHost = credentialSourceFlag
 	}
 	if flagWasSet(fs, "sprites-api-url") {

@@ -19,7 +19,7 @@ import (
 )
 
 type field struct {
-	name, kind, key, configAlias, env, envAlias, envAlias2, flag, help, defaultExpr                                      string
+	name, kind, key, configAlias, env, envAlias, envAlias2, flag, help, defaultExpr, flagFallbackExpr                    string
 	nonnegative, trustedFileOnly, noFile, noEnv, noFlag, fileIgnoreEmpty, reportApplied, envIntFallback, fileIntPositive bool
 }
 
@@ -259,6 +259,15 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			}
 			f.envIntFallback = true
 		}
+		if value, ok := tags.Lookup("flagFallback"); ok {
+			if value == "" || f.kind != "string" || f.noFlag {
+				return s, fmt.Errorf("%s: flagFallback requires a nonempty value on a flag-admitted string field", f.name)
+			}
+			if _, hasDefault := tags.Lookup("default"); hasDefault {
+				return s, fmt.Errorf("%s: flagFallback and default are mutually exclusive", f.name)
+			}
+			f.flagFallbackExpr = strconv.Quote(value)
+		}
 		if value, ok := tags.Lookup("default"); ok {
 			f.defaultExpr, err = defaultExpression(f.kind, value)
 			if err != nil {
@@ -325,6 +334,9 @@ func generate(s schema, source string) ([]byte, error) {
 	for _, f := range s.fields {
 		if f.defaultExpr != "" {
 			p("const %sDefault%s %s = %s\n", s.name, f.name, f.kind, f.defaultExpr)
+		}
+		if f.flagFallbackExpr != "" {
+			p("const %sFlagFallback%s string = %s\n", s.name, f.name, f.flagFallbackExpr)
 		}
 	}
 	p("\nfunc default%s() %s { return %s{\n", s.name, s.name, s.name)
@@ -453,6 +465,9 @@ func generate(s schema, source string) ([]byte, error) {
 		}
 		method := map[string]string{"string": "String", "int": "Int", "float64": "Float64", "bool": "Bool", "[]string": "String"}[f.kind]
 		value := "defaults." + f.name
+		if f.flagFallbackExpr != "" {
+			value = fmt.Sprintf("blank(%s, %sFlagFallback%s)", value, s.name, f.name)
+		}
 		if f.kind == "[]string" {
 			value = "strings.Join(" + value + ", \",\")"
 		}

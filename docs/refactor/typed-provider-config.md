@@ -2,7 +2,7 @@
 
 Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
-runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, and SmolVM
+runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, and Semaphore
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -13,7 +13,7 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_upstash_box.go`, `internal/cli/config_cloudflare.go`,
 `internal/cli/config_cloudflare_sandbox.go`, `internal/cli/config_e2b.go`,
 `internal/cli/config_blaxel.go`, `internal/cli/config_azure_dynamic_sessions.go`,
-and `internal/cli/config_smolvm.go`.
+`internal/cli/config_smolvm.go`, and `internal/cli/config_semaphore.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -86,6 +86,13 @@ machine-specific paths. Its header identifies the generator and source file.
    then the first alias, then the second, then the prior value. Empty values
    fall through without trimming nonempty values. No arbitrary alias list or
    custom parser is accepted.
+   A flag-admitted string with an existing raw-empty registration fallback can
+   declare `flagFallback:"value"` instead of a `default` tag. The value must be
+   nonempty. Its generated constant supplies only the flag's raw-empty fallback;
+   the base config stays zero, whitespace is preserved, unvisited flags do not
+   assign, and explicitly empty flags still clear. Runtime consumers may use
+   the same constant through their existing fallback logic. No expression,
+   trimming mode, or duration parser is generated.
    For an existing string file binding that ignores empty YAML values, declare
    `fileIgnoreEmpty:"true"`. This is valid only for strings with a file source;
    it adds an exact nonempty check without trimming, changing environment/flag
@@ -105,7 +112,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -306,6 +313,13 @@ parsing; explicit flags and validation order remain separate. Endpoint input
 reports and central flag visits retain existing provenance ownership. Its six
 configured fallback consumers share constants, while raw-empty network behavior,
 fixed mount/upload roots, endpoint trust, and lifecycle remain unchanged.
+
+Semaphore declares all six string fields without filling its raw empty defaults.
+Machine, OS image, and idle timeout share three fallback constants across flag
+registration and their existing acquisition, display, and duration helpers.
+Host/token reports and central host visits preserve source policy; token has no
+flag. Host/project validation, job identity, SSH, and lifecycle stay outside the
+generator.
 
 The generator accepts only these seven exact source grants. Credential handling,
 destination validation and provenance, provider aliases, and provider selection

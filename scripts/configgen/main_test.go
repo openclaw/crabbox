@@ -454,6 +454,12 @@ func TestSmolvmGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestSemaphoreGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_semaphore.go", "../../internal/cli/config_semaphore_generated.go", "SemaphoreConfig", "semaphore", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -1233,4 +1239,76 @@ func TestSecondFallback(t *testing.T){
  }
 }
 `)
+}
+
+func TestSchemaFlagFallbackFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"empty", `default:"test"`, `flagFallback:""`, "flagFallback requires a nonempty value"},
+		{"default conflict", `help:"Name"`, `help:"Name" flagFallback:"fallback"`, "mutually exclusive"},
+		{"empty default conflict", `default:"test"`, `default:"" flagFallback:"fallback"`, "mutually exclusive"},
+		{"integer", `help:"Count"`, `help:"Count" flagFallback:"fallback"`, "flag-admitted string"},
+		{"float", `help:"CPUs"`, `help:"CPUs" flagFallback:"fallback"`, "flag-admitted string"},
+		{"bool", `help:"Enabled"`, `help:"Enabled" flagFallback:"fallback"`, "flag-admitted string"},
+		{"list", `help:"Ports"`, `help:"Ports" flagFallback:"fallback"`, "flag-admitted string"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(sample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+	for _, grant := range []string{"env", "user,repo,env", "user,env"} {
+		source := "package cli\ntype PilotConfig struct{ Name string `sources:\"" + grant + "\" env:\"NAME\" flagFallback:\"fallback\"` }"
+		if grant != "env" {
+			source = strings.Replace(source, `env:"NAME"`, `env:"NAME" config:"name"`, 1)
+		}
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "flag-admitted string") {
+			t.Fatalf("no-flag fallback %s: %v", grant, err)
+		}
+	}
+}
+
+func TestGenerateRawEmptyFlagFallback(t *testing.T) {
+	const source = "package cli\ntype PilotConfig struct { Name string `config:\"name\" env:\"NAME\" flag:\"name\" sources:\"user,repo,env,flag\" help:\"Name help\" flagFallback:\"fallback\"` }"
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic flag fallback: %v", err)
+	}
+	for _, want := range []string{`const PilotConfigFlagFallbackName string = "fallback"`, `fs.String("name", blank(defaults.Name, PilotConfigFlagFallbackName), "Name help")`} {
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("missing registration fallback %q", want)
+		}
+	}
+	if strings.Contains(string(output), "PilotConfigDefaultName") {
+		t.Fatal("flag fallback became base default")
+	}
+	typecheckGenerated(t, source+"\nfunc blank(value, fallback string)string{if value!=\"\"{return value};return fallback}\n", output)
+	const behavior = `package cli
+import("bytes";"flag";"strings";"testing")
+func blank(value,fallback string)string{if value!=""{return value};return fallback}
+func getenv(_ string,prior string)string{return prior}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestRegistrationOnly(t *testing.T){
+ if got:=defaultPilotConfig();got.Name!=""{t.Fatalf("base config not raw zero: %+v",got)}
+ for _,tc:=range []struct{raw,want string}{{"","fallback"},{" "," "},{"custom","custom"}}{
+  cfg:=PilotConfig{Name:tc.raw};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+  if fs.Lookup("name").DefValue!=tc.want||*values.Name!=tc.want||cfg.Name!=tc.raw{t.Fatalf("registration: raw=%q cfg=%+v flag=%+v",tc.raw,cfg,fs.Lookup("name"))}
+  var help bytes.Buffer;fs.SetOutput(&help);fs.PrintDefaults();if !strings.Contains(help.String(),tc.want){t.Fatalf("help omitted fallback: %q",help.String())}
+  values.Apply(&cfg,fs);if cfg.Name!=tc.raw{t.Fatal("unvisited flag applied fallback")}
+  if err:=fs.Parse([]string{"--name="});err!=nil{t.Fatal(err)};values.Apply(&cfg,fs);if cfg.Name!=""{t.Fatal("visited empty did not clear")}
+ }
+ value:="";cfg:=PilotConfig{Name:"prior"};if err:=cfg.applyFile(&filePilotConfig{Name:&value});err!=nil||cfg.Name!=""{t.Fatalf("fallback leaked into file: %+v %v",cfg,err)}
+ if err:=cfg.applyEnv();err!=nil||cfg.Name!=""{t.Fatalf("fallback leaked into env: %+v %v",cfg,err)}
+}
+`
+	runScalarFixture(t, source, output, behavior)
 }
