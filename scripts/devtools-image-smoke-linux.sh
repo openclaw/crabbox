@@ -1,5 +1,3 @@
-#!/usr/bin/env bash
-
 set -euo pipefail
 echo devtools-smoke-ok
 uname -a
@@ -17,7 +15,6 @@ command -v trufflehog
 trufflehog --no-update --version
 command -v docker
 node --version
-# shellcheck disable=SC2016
 node -e 'if (Number(process.versions.node.split(".")[0]) < 24) throw new Error(`Node.js 24 or newer is required, found ${process.version}`)'
 corepack --version
 pnpm --version
