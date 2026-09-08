@@ -107,7 +107,8 @@ from different providers require a canonical ID or explicit provider. An
 explicit `--provider` remains authoritative.
 
 For coordinator-backed preparation of an exact lease ID, an initial lease-read
-HTTP 5xx response is retried once within the original HTTP and caller deadline.
+HTTP 5xx response is retried once within the original 30-second control budget;
+shorter HTTP-client and caller deadlines still win.
 Authentication, absence, conflict, identity mismatch, cancellation and timeout
 failures are not retried. This repeats only the observation before SSH and script
 admission; it never reruns a script. Plain status and Stop retain their existing

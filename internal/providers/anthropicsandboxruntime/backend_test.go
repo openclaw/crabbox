@@ -59,6 +59,87 @@ func TestProviderFlagsApplyAndValidate(t *testing.T) {
 	}
 }
 
+func TestSRTFlagPresenceAndForeignValues(t *testing.T) {
+	for _, providerName := range []string{"anthropic-sandbox-runtime", "srt"} {
+		t.Run(providerName, func(t *testing.T) {
+			provider, err := core.ProviderFor(providerName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := newTestConfig()
+			cfg.Provider = providerName
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			values := provider.RegisterFlags(fs, cfg)
+			cfg.AnthropicSRT = core.AnthropicSRTConfig{CLIPath: "/opt/env-srt", Settings: "env.json", Debug: true}
+			before := cfg.AnthropicSRT
+			if err := provider.ApplyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.AnthropicSRT != before {
+				t.Fatal("unvisited flags restored registration defaults")
+			}
+			if err := fs.Parse([]string{"--anthropic-sandbox-runtime-cli=", "--anthropic-sandbox-runtime-settings=", "--anthropic-sandbox-runtime-debug=false"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := provider.ApplyFlags(&cfg, fs, values); err == nil || err.Error() != "anthropicSandboxRuntime cliPath must not be empty" {
+				t.Fatalf("explicit empty CLI validation=%v", err)
+			}
+			if cfg.AnthropicSRT != (core.AnthropicSRTConfig{}) {
+				t.Fatalf("all visited values must apply before validation: %#v", cfg.AnthropicSRT)
+			}
+			cfg.AnthropicSRT.CLIPath = "  "
+			for _, foreign := range []any{nil, struct{}{}} {
+				if err := provider.ApplyFlags(&cfg, fs, foreign); err != nil {
+					t.Fatalf("foreign values reached validation: %v", err)
+				}
+				if cfg.AnthropicSRT.CLIPath != "  " {
+					t.Fatal("foreign values copied flags")
+				}
+			}
+			if err := provider.(Provider).ValidateConfig(cfg); err == nil || err.Error() != "anthropicSandboxRuntime cliPath must not be empty" {
+				t.Fatalf("selected whitespace validation=%v", err)
+			}
+		})
+	}
+}
+
+func TestSRTLauncherDefaultsAndArgumentsRecorded(t *testing.T) {
+	for _, tc := range []struct {
+		name, cli, settings string
+		debug               bool
+		wantCLI             string
+		wantArgs            []string
+	}{
+		{name: "empty", wantCLI: "srt", wantArgs: []string{"-c", "echo ok"}},
+		{name: "whitespace", cli: " \t", settings: " \t", wantCLI: "srt", wantArgs: []string{"-c", "echo ok"}},
+		{name: "custom", cli: " /opt/example-srt ", settings: " config/settings.json ", debug: true, wantCLI: "/opt/example-srt", wantArgs: []string{"--debug", "--settings", "config/settings.json", "-c", "echo ok"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := newTestConfig()
+			cfg.AnthropicSRT = core.AnthropicSRTConfig{CLIPath: tc.cli, Settings: tc.settings, Debug: tc.debug}
+			before := cfg.AnthropicSRT
+			runner := &recordingRunner{}
+			client, err := newSRTCLI(cfg, Runtime{Exec: runner})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.runCommand(context.Background(), "/workspace/example", "echo ok", nil, io.Discard, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			call := runner.onlyCall(t)
+			if call.Name != tc.wantCLI || !reflect.DeepEqual(call.Args, tc.wantArgs) || call.Dir != "/workspace/example" {
+				t.Fatalf("recorded launcher=%q args=%v dir=%q", call.Name, call.Args, call.Dir)
+			}
+			if tc.name != "custom" && call.Name != core.BaseConfig().AnthropicSRT.CLIPath {
+				t.Fatal("fallback differs from configured default")
+			}
+			if cfg.AnthropicSRT != before {
+				t.Fatal("launcher changed input config")
+			}
+		})
+	}
+}
+
 func TestConfigureRequiresRuntimeExec(t *testing.T) {
 	cfg := newTestConfig()
 	if _, err := (Provider{}).Configure(cfg, Runtime{}); err != nil {

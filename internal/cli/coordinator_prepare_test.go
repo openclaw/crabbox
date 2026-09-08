@@ -184,3 +184,47 @@ func TestCoordinatorPrepareResolveRejectsCanceledRecoveryResponse(t *testing.T) 
 		t.Fatalf("calls=%d lease=%s error=%v", calls, lease.LeaseID, err)
 	}
 }
+
+func TestCoordinatorPrepareResolveSharesControlBudget(t *testing.T) {
+	for _, noHTTPTimeout := range []bool{false, true} {
+		name := "production HTTP timeout"
+		if noHTTPTimeout {
+			name = "no HTTP timeout"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("CRABBOX_OWNER", "alice@example.test")
+			synctest.Test(t, func(t *testing.T) {
+				coord := mustNewCoordinatorClient(t, Config{Coordinator: "https://broker.example.test"})
+				if coord.Client.Timeout != 30*time.Minute {
+					t.Fatalf("production HTTP timeout=%v", coord.Client.Timeout)
+				}
+				if noHTTPTimeout {
+					coord.Client.Timeout = 0
+				}
+				start := time.Now()
+				calls := 0
+				coord.Client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					calls++
+					deadline, ok := req.Context().Deadline()
+					t.Logf("request=%d method=%s path=%s elapsed=%s deadlineRemaining=%s", calls, req.Method, req.URL.Path, time.Since(start), time.Until(deadline))
+					if !ok || !deadline.Equal(start.Add(30*time.Second)) {
+						t.Errorf("request%d deadline=%v, want original control deadline", calls, deadline.Sub(start))
+					}
+					if calls == 1 {
+						time.Sleep(25 * time.Second)
+						t.Logf("response=500 elapsed=%s", time.Since(start))
+						return &http.Response{StatusCode: 500, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("temporary coordinator failure"))}, nil
+					}
+					<-req.Context().Done()
+					t.Logf("response=deadline elapsed=%s", time.Since(start))
+					return nil, req.Context().Err()
+				})
+				backend := &coordinatorLeaseBackend{cfg: Config{Provider: "aws"}, coord: coord}
+				lease, err := backend.Resolve(t.Context(), ResolveRequest{ID: "cbx_123456789abc", Prepare: true})
+				if calls != 2 || !errors.Is(err, context.DeadlineExceeded) || time.Since(start) != 30*time.Second || lease.LeaseID != "" {
+					t.Fatalf("calls=%d elapsed=%s lease=%s error=%v", calls, time.Since(start), lease.LeaseID, err)
+				}
+			})
+		})
+	}
+}

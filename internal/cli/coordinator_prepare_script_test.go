@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type coordinatorPrepareScriptBackend struct {
@@ -28,19 +29,23 @@ func (b *coordinatorPrepareScriptBackend) Resolve(ctx context.Context, req Resol
 
 func TestCoordinatorPrepareRecoveryPrecedesScriptAndDoesNotReplayFailure(t *testing.T) {
 	p, b, dir := setupSSHScriptRun(t)
+	started := time.Now()
 	entered, release := make(chan struct{}), make(chan struct{})
 	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
+		t.Logf("HTTP request=%d method=%s path=%s elapsed=%s", calls, r.Method, r.URL.Path, time.Since(started))
 		if r.Method != "GET" || r.URL.Path != "/v1/leases/"+b.lease.LeaseID {
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
 		if calls == 1 {
+			t.Logf("HTTP response=500 elapsed=%s", time.Since(started))
 			http.Error(w, "temporary", 500)
 			return
 		}
 		close(entered)
 		<-release
+		t.Logf("HTTP response=200 elapsed=%s", time.Since(started))
 		json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: b.lease.LeaseID, Provider: p.Name(), State: "active"}})
 	}))
 	defer server.Close()
@@ -74,6 +79,7 @@ func TestCoordinatorPrepareRecoveryPrecedesScriptAndDoesNotReplayFailure(t *test
 			t.Fatalf("execution preceded lease observation: %s error=%v", filepath.Base(path), err)
 		}
 	}
+	t.Log("while second HTTP response held: SSH absent, activity absent, script absent")
 	close(release)
 	released = true
 	err := <-done
@@ -82,6 +88,7 @@ func TestCoordinatorPrepareRecoveryPrecedesScriptAndDoesNotReplayFailure(t *test
 		t.Fatalf("run error=%v stderr=%s", err, stderr.String())
 	}
 	body, readErr := os.ReadFile(marker)
+	t.Logf("terminal: HTTP requests=%d script executions=%d script exit=%d activity joins=%d elapsed=%s", calls, len(body), ExitCodeForError(err, 0), b.joined, time.Since(started))
 	if readErr != nil || string(body) != "x" || calls != 2 || b.starts != 1 || b.joined != 1 {
 		t.Fatalf("script=%q read=%v GETs=%d activity=%d/%d", body, readErr, calls, b.starts, b.joined)
 	}

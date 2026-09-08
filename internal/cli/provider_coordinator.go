@@ -828,13 +828,15 @@ func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveReques
 		ctx, cancel = context.WithTimeout(ctx, coordinatorReleaseResolveTimeout)
 		defer cancel()
 	} else if prepare {
-		// A second observation shares the original HTTP budget, not a fresh
-		// timeout. The caller's earlier deadline and cancellation still win.
-		if timeout := b.coord.secureHTTPClient().Timeout; timeout > 0 {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, timeout)
-			defer cancel()
+		// GetLease owns a control deadline beneath the HTTP-client timeout.
+		// Share that original budget across both observations, including auth/curl.
+		timeout := coordinatorControlTimeout
+		if httpTimeout := b.coord.secureHTTPClient().Timeout; httpTimeout > 0 {
+			timeout = min(timeout, httpTimeout)
 		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
 	coord := b.coord
 	lease, err := coord.GetLease(ctx, req.ID)

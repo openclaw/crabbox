@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Retry an exact coordinator lease read once on HTTP 5xx during run preparation, sharing the original deadline without replaying SSH, scripts, or permanent failures.
+- Retry an exact coordinator lease read once on HTTP 5xx during run preparation, sharing the original deadline without replaying SSH, scripts, or permanent failures. [PR 1999](https://github.com/openclaw/crabbox/pull/1999).
+- Describe Anthropic Sandbox Runtime configuration bindings once, preserving inherited binary paths for empty YAML, explicit settings/debug clearing, and native runtime defaults. [PR 1993](https://github.com/openclaw/crabbox/pull/1993). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 
