@@ -7364,7 +7364,9 @@ exec ` + shellQuote(realTar) + ` "$@"
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(dfCalls)), "\n")
-	if len(lines) != 2 || !strings.Contains(lines[0], tempRoot) || lines[1] != "-Pk .crabbox" {
+	if len(lines) != 4 ||
+		!strings.Contains(lines[0], tempRoot) || lines[2] != lines[0] ||
+		lines[1] != "-Pk .crabbox" || lines[3] != lines[1] {
 		t.Fatalf("disk admission calls=%q", lines)
 	}
 	contents := readTarGzContents(t, filepath.Join(workdir, ".crabbox", "capture.tar.gz"))
