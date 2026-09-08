@@ -1023,12 +1023,6 @@ type DockerSandboxConfig struct {
 	Kit             []string
 }
 
-type AnthropicSRTConfig struct {
-	CLIPath  string
-	Settings string
-	Debug    bool
-}
-
 // CloudRunSandboxConfig configures the Google Cloud Run sandboxes provider.
 // Secrets (CLOUD_RUN_SANDBOX_SECRET / CLOUD_RUN_AUTH_TOKEN) are intentionally
 // absent: they are read at runtime from the environment only and never
@@ -3025,9 +3019,7 @@ func baseConfig() Config {
 			CLIPath: "sbx",
 			Agent:   "shell",
 		},
-		AnthropicSRT: AnthropicSRTConfig{
-			CLIPath: "srt",
-		},
+		AnthropicSRT: defaultAnthropicSRTConfig(),
 		CloudRunSandbox: CloudRunSandboxConfig{
 			CLIPath: "/usr/local/gcp/bin/sandbox",
 			Workdir: "/tmp/crabbox",
@@ -4110,12 +4102,6 @@ type fileDockerSandboxConfig struct {
 	ExtraWorkspaces *[]string `yaml:"extraWorkspaces,omitempty"`
 	MCP             *[]string `yaml:"mcp,omitempty"`
 	Kit             *[]string `yaml:"kit,omitempty"`
-}
-
-type fileAnthropicSRTConfig struct {
-	CLIPath  string  `yaml:"cliPath,omitempty"`
-	Settings *string `yaml:"settings,omitempty"`
-	Debug    *bool   `yaml:"debug,omitempty"`
 }
 
 type fileCloudRunSandboxConfig struct {
@@ -6875,12 +6861,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.DockerSandbox.Kit = append([]string(nil), (*file.DockerSandbox.Kit)...)
 		}
 	}
-	if file.AnthropicSRT != nil {
-		if file.AnthropicSRT.CLIPath != "" {
-			cfg.AnthropicSRT.CLIPath = file.AnthropicSRT.CLIPath
-		}
-		applyOptional(&cfg.AnthropicSRT.Settings, file.AnthropicSRT.Settings)
-		applyOptional(&cfg.AnthropicSRT.Debug, file.AnthropicSRT.Debug)
+	if err := cfg.AnthropicSRT.applyFile(file.AnthropicSRT); err != nil {
+		return err
 	}
 	if file.CloudRunSandbox != nil {
 		if file.CloudRunSandbox.CLIPath != "" {
@@ -8810,10 +8792,8 @@ func applyEnv(cfg *Config) error {
 	if values, ok := getenvList("CRABBOX_DOCKER_SANDBOX_KIT"); ok {
 		cfg.DockerSandbox.Kit = values
 	}
-	cfg.AnthropicSRT.CLIPath = getenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI", cfg.AnthropicSRT.CLIPath)
-	cfg.AnthropicSRT.Settings = getenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS", cfg.AnthropicSRT.Settings)
-	if value, ok := getenvBool("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG"); ok {
-		cfg.AnthropicSRT.Debug = value
+	if err := cfg.AnthropicSRT.applyEnv(); err != nil {
+		return err
 	}
 	cfg.CloudRunSandbox.GatewayURL = getenv("CRABBOX_CLOUD_RUN_SANDBOX_GATEWAY_URL", getenv("CLOUD_RUN_SANDBOX_URL", cfg.CloudRunSandbox.GatewayURL))
 	cfg.CloudRunSandbox.CLIPath = getenv("CRABBOX_CLOUD_RUN_SANDBOX_CLI", getenv("CLOUD_RUN_SANDBOX_BINARY", cfg.CloudRunSandbox.CLIPath))

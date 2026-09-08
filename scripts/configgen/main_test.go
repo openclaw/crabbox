@@ -257,6 +257,74 @@ func TestGenerateFlagOnlyBindings(t *testing.T) {
 	}
 }
 
+func TestSchemaFileIgnoreEmptyFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ name, old, new string }{
+		{"false", `help:"Name"`, `help:"Name" fileIgnoreEmpty:"false"`},
+		{"empty", `help:"Name"`, `help:"Name" fileIgnoreEmpty:""`},
+		{"integer", `help:"Count"`, `help:"Count" fileIgnoreEmpty:"true"`},
+		{"float", `help:"CPUs"`, `help:"CPUs" fileIgnoreEmpty:"true"`},
+		{"boolean", `help:"Enabled"`, `help:"Enabled" fileIgnoreEmpty:"true"`},
+		{"list", `help:"Ports"`, `help:"Ports" fileIgnoreEmpty:"true"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(sample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), "fileIgnoreEmpty is supported only as true for string fields with a file source") {
+				t.Fatalf("invalid file-only policy: %v", err)
+			}
+		})
+	}
+	for _, grant := range []string{"env,flag", "flag"} {
+		t.Run(grant, func(t *testing.T) {
+			source := strings.Replace(flagOnlySample, `sources:"flag"`, `sources:"`+grant+`" fileIgnoreEmpty:"true"`, 1)
+			if grant == "env,flag" {
+				source = strings.Replace(source, `help:"Name"`, `help:"Name" env:"PILOT_NAME"`, 1)
+			}
+			_, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), "fileIgnoreEmpty is supported only as true for string fields with a file source") {
+				t.Fatalf("file-only policy without file source: %v", err)
+			}
+		})
+	}
+}
+
+func TestGenerateFileIgnoreEmpty(t *testing.T) {
+	for _, grant := range []string{"user,repo,env,flag", "user,env,flag"} {
+		t.Run(grant, func(t *testing.T) {
+			source := strings.Replace(sample, `sources:"user,repo,env,flag"`, `sources:"`+grant+`"`, 1)
+			s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := generate(s, "pilot.go")
+			if err != nil {
+				t.Fatal(err)
+			}
+			source = strings.Replace(source, `help:"Name"`, `help:"Name" fileIgnoreEmpty:"true"`, 1)
+			s, err = parseSchema([]byte(source), "PilotConfig", "pilot")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !s.fields[0].fileIgnoreEmpty {
+				t.Fatal("missing explicit empty-file policy")
+			}
+			output, err := generate(s, "pilot.go")
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := generate(s, "pilot.go")
+			if err != nil || !bytes.Equal(output, again) {
+				t.Fatalf("nondeterministic output: %v", err)
+			}
+			// The declaration changes only the file predicate, not env/flags or other fields.
+			want := strings.Replace(string(before), "file.Name != nil {", `file.Name != nil && *file.Name != "" {`, 1)
+			if string(output) != want {
+				t.Fatalf("unexpected change beyond empty-string file predicate:\n%s", output)
+			}
+			typecheckGenerated(t, source, output)
+		})
+	}
+}
+
 func TestCheckMissingFreshAndStaleOutput(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "pilot.go")
@@ -316,6 +384,12 @@ func TestCuaGeneratedConfigIsCurrent(t *testing.T) {
 
 func TestOpenSandboxGeneratedConfigIsCurrent(t *testing.T) {
 	if err := run("../../internal/cli/config_opensandbox.go", "../../internal/cli/config_opensandbox_generated.go", "OpenSandboxConfig", "opensandbox", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAnthropicSandboxRuntimeGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_anthropic_sandbox_runtime.go", "../../internal/cli/config_anthropic_sandbox_runtime_generated.go", "AnthropicSRTConfig", "anthropic-sandbox-runtime", true); err != nil {
 		t.Fatal(err)
 	}
 }

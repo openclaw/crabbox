@@ -2978,15 +2978,13 @@ func TestAnthropicSandboxRuntimeConfigDefaultsFileAndEnv(t *testing.T) {
 		t.Fatalf("anthropicSandboxRuntime defaults not applied: %#v", cfg.AnthropicSRT)
 	}
 	settings := ".crabbox/srt-settings.json"
-	debug := true
-	applyFileConfig(&cfg, fileConfig{
-		Provider: "anthropic-sandbox-runtime",
-		AnthropicSRT: &fileAnthropicSRTConfig{
-			CLIPath:  "/opt/srt",
-			Settings: &settings,
-			Debug:    &debug,
-		},
-	})
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("provider: anthropic-sandbox-runtime\nanthropicSandboxRuntime:\n  cliPath: /opt/srt\n  settings: "+settings+"\n  debug: true\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
 	if cfg.Provider != "anthropic-sandbox-runtime" || cfg.AnthropicSRT.CLIPath != "/opt/srt" || cfg.AnthropicSRT.Settings != settings || !cfg.AnthropicSRT.Debug {
 		t.Fatalf("file anthropicSandboxRuntime config not applied: %#v", cfg.AnthropicSRT)
 	}
@@ -2999,6 +2997,84 @@ func TestAnthropicSandboxRuntimeConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 	if cfg.AnthropicSRT.CLIPath != "/usr/local/bin/srt" || cfg.AnthropicSRT.Settings != ".crabbox/env-srt-settings.json" || cfg.AnthropicSRT.Debug {
 		t.Fatalf("env anthropicSandboxRuntime config not applied: %#v", cfg.AnthropicSRT)
+	}
+}
+
+func TestAnthropicSandboxRuntimeFilePresenceAndTrust(t *testing.T) {
+	for _, trusted := range []bool{false, true} {
+		for _, tc := range []struct {
+			name, yaml, cli, settings string
+			debug                     bool
+		}{
+			{"omitted", "{}", "/opt/prior-srt", "prior.json", true},
+			{"null", "{cliPath: null, settings: null, debug: null}", "/opt/prior-srt", "prior.json", true},
+			{"empty", "{cliPath: '', settings: '', debug: false}", "/opt/prior-srt", "", false},
+			{"whitespace", "{cliPath: '  ', settings: '  ', debug: false}", "  ", "  ", false},
+		} {
+			t.Run(fmt.Sprintf("trusted=%t/%s", trusted, tc.name), func(t *testing.T) {
+				cfg := baseConfig()
+				cfg.AnthropicSRT = AnthropicSRTConfig{CLIPath: "/opt/prior-srt", Settings: "prior.json", Debug: true}
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte("anthropicSandboxRuntime: "+tc.yaml), &file); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				want := AnthropicSRTConfig{CLIPath: tc.cli, Settings: tc.settings, Debug: tc.debug}
+				if cfg.AnthropicSRT != want {
+					t.Fatalf("got=%#v want=%#v", cfg.AnthropicSRT, want)
+				}
+			})
+		}
+	}
+}
+
+func TestAnthropicSandboxRuntimeLayerAndEnvironmentSemantics(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	for _, layer := range []struct {
+		cli, settings string
+		trusted       bool
+	}{{"/opt/user-srt", "user.json", true}, {"/opt/repo-srt", "repo.json", false}} {
+		var file fileConfig
+		if err := yaml.Unmarshal([]byte("anthropicSandboxRuntime:\n  cliPath: "+layer.cli+"\n  settings: "+layer.settings+"\n  debug: true\n"), &file); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyFileConfigWithTrust(&cfg, file, layer.trusted); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.AnthropicSRT.CLIPath != layer.cli || cfg.AnthropicSRT.Settings != layer.settings || !cfg.AnthropicSRT.Debug {
+			t.Fatalf("layer=%#v got=%#v", layer, cfg.AnthropicSRT)
+		}
+	}
+	for _, raw := range []string{"", "invalid", "no", "invalid", "yes"} {
+		t.Setenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI", "")
+		t.Setenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS", "")
+		t.Setenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG", raw)
+		before := cfg.AnthropicSRT
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		want := before
+		if raw == "no" {
+			want.Debug = false
+		}
+		if raw == "yes" {
+			want.Debug = true
+		}
+		if cfg.AnthropicSRT != want {
+			t.Fatalf("env %q got=%#v want=%#v", raw, cfg.AnthropicSRT, want)
+		}
+	}
+	t.Setenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI", "/opt/env-srt")
+	t.Setenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS", "env.json")
+	t.Setenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG", "false")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AnthropicSRT != (AnthropicSRTConfig{CLIPath: "/opt/env-srt", Settings: "env.json"}) {
+		t.Fatalf("environment did not override repository: %#v", cfg.AnthropicSRT)
 	}
 }
 

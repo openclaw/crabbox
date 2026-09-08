@@ -1,9 +1,10 @@
 # Typed provider config bindings
 
-Vercel Sandbox, CodeSandbox, CUA, and OpenSandbox describe their mechanical config bindings
+Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, and Anthropic Sandbox Runtime describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
-`internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`, and
-`internal/cli/config_opensandbox.go`.
+`internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
+`internal/cli/config_opensandbox.go`, and
+`internal/cli/config_anthropic_sandbox_runtime.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 pointer-valued YAML input fields, compiled defaults, file/environment overlays,
@@ -49,6 +50,10 @@ machine-specific paths. Its header identifies the generator and source file.
    `envAlias`; primary and alias names share collision checks. Empty aliases
    are invalid. The primary value wins, then the alias, then the prior value;
    empty values fall through, without trimming nonempty values.
+   For an existing string file binding that ignores empty YAML values, declare
+   `fileIgnoreEmpty:"true"`. This is valid only for strings with a file source;
+   it adds an exact nonempty check without trimming, changing environment/flag
+   behavior, or changing other fields' presence semantics.
 3. Keep semantic and cross-field checks in the provider's
    validation function. Wire actual provider behavior there or in its
    existing client code as appropriate. Config presentation remains explicit in
@@ -56,7 +61,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -78,7 +83,8 @@ and explicit source permissions. Do not edit the output by hand.
 The loader still applies defaults, user files, repository files, environment,
 and explicit flags in that order. Both repository filenames retain their
 existing order. A YAML pointer distinguishes omission/null from explicit false,
-zero, an empty string, or an empty list. Lists are trimmed and blank entries
+zero, an empty string, or an empty list. Only an explicit `fileIgnoreEmpty:"true"`
+binding ignores an empty string; whitespace is still applied. Lists are trimmed and blank entries
 removed, without deduplication. Empty environment strings fall through; a
 nonempty list value containing only whitespace/commas clears the list. Existing
 boolean environment aliases (`yes/no`, `on/off`, `1/0`) remain accepted.
@@ -119,6 +125,15 @@ file and environment overlays leave it untouched, and only a visited flag copies
 its parsed value. Early provider validation still checks only the two timeout
 integers; URL, platform/resource and request-budget checks stay at their later
 owners. No configuration layer gains cleanup authority.
+
+Anthropic Sandbox Runtime's three fields retain user/repository file,
+environment, and flag sources. Its `cliPath` ignores omitted, null, and empty
+YAML values, while `settings` can be explicitly cleared and `debug: false`
+overrides true. Nonempty whitespace still reaches the existing provider
+validation, and an explicitly empty CLI flag still overrides and fails that
+validation. The native binary fallback uses the same generated `srt` default.
+The `srt` provider alias, native argument/environment handling, and SRT-owned
+settings and sandbox-policy validation remain outside generation.
 
 The generator accepts only these four exact source grants. Credential handling,
 destination validation and provenance, provider aliases, and provider selection
