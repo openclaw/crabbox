@@ -187,6 +187,7 @@ test("AWS developer image smoke executes package managers and requires TruffleHo
   );
   assert.match(text, /trap 'exit 130' INT\ntrap 'exit 143' TERM/);
   assert.match(text, /rollback_pending=1\nrun_json_tee "\$promotion_log"/);
+  assert.doesNotMatch(text, /\bBASHPID\b/);
 });
 
 test("AWS Linux image production stages and invokes only the generated readiness producer", async () => {

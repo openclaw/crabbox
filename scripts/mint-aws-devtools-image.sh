@@ -257,12 +257,11 @@ measurement_lease=""
 measurement_handle=""
 promotion_log=""
 rollback_pending=0
-publisher_pid="$BASHPID"
 
 cleanup() {
   local exit_status=$?
   trap - EXIT
-  if [[ "${BASH_SUBSHELL:-0}" != "0" || "$BASHPID" != "$publisher_pid" ]]; then
+  if [[ "${BASH_SUBSHELL:-0}" != "0" ]]; then
     return "$exit_status"
   fi
   local finalizer_status=0
