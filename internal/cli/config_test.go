@@ -7029,6 +7029,135 @@ func TestApplyEnvRejectsNegativeCUAResources(t *testing.T) {
 	}
 }
 
+func TestCUAFilePresenceAndSourceAdmission(t *testing.T) {
+	initial := CuaConfig{APIURL: "https://example.invalid/initial", Image: "image", Kind: "vm", Region: "region", Workdir: "/workspace/app", VCPUs: 1, MemoryMB: 2, DiskGB: 3, StartupTimeoutSecs: 4, ExecTimeoutSecs: 5, BridgeCommand: "python3", SDKPackage: "cua", SDKImport: "cua", SDKFallbackImport: "cua_sandbox"}
+	keys := []string{"image", "kind", "region", "workdir", "vcpus", "memoryMB", "diskGB", "startupTimeoutSecs", "execTimeoutSecs", "bridgeCommand", "sdkPackage", "sdkImport", "sdkFallbackImport"}
+	if _, ok := reflect.TypeOf(fileCuaConfig{}).FieldByName("APIURL"); ok {
+		t.Fatal("API URL must not have a YAML field, even for trusted input")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "zero"} {
+			t.Run(fmt.Sprintf("trusted=%t/%s", trusted, mode), func(t *testing.T) {
+				body := "cua:\n  apiURL: https://example.invalid/yaml\n"
+				if mode != "omitted" {
+					for i, key := range keys {
+						value := "null"
+						if mode == "zero" {
+							value = "''"
+							if i >= 4 && i <= 8 {
+								value = "0"
+							}
+						}
+						body += "  " + key + ": " + value + "\n"
+					}
+				}
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte(body), &file); err != nil {
+					t.Fatal(err)
+				}
+				cfg := baseConfig()
+				cfg.Cua = initial
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				want := initial
+				if mode == "zero" {
+					want = CuaConfig{APIURL: initial.APIURL}
+					if !trusted {
+						want.BridgeCommand, want.SDKPackage, want.SDKImport, want.SDKFallbackImport = initial.BridgeCommand, initial.SDKPackage, initial.SDKImport, initial.SDKFallbackImport
+					}
+				}
+				if cfg.Cua != want {
+					t.Fatalf("got %#v, want %#v", cfg.Cua, want)
+				}
+			})
+		}
+	}
+}
+
+func TestCUAAPIURLEnvironmentPrecedence(t *testing.T) {
+	for _, tc := range []struct{ primary, fallback, want string }{
+		{"https://example.invalid/primary", "https://example.invalid/fallback", "https://example.invalid/primary"},
+		{"", "https://example.invalid/fallback", "https://example.invalid/fallback"},
+		{"", "", "https://example.invalid/initial"},
+		{" ", "https://example.invalid/fallback", " "},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_CUA_API_URL", tc.primary)
+			t.Setenv("CUA_BASE_URL", tc.fallback)
+			cfg := baseConfig()
+			cfg.Cua.APIURL = "https://example.invalid/initial"
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Cua.APIURL != tc.want {
+				t.Fatalf("URL=%q, want %q", cfg.Cua.APIURL, tc.want)
+			}
+		})
+	}
+}
+
+func TestCUAIntegerOverlayErrorOrder(t *testing.T) {
+	keys := []string{"vcpus", "memoryMB", "diskGB", "startupTimeoutSecs", "execTimeoutSecs"}
+	envs := []string{"CRABBOX_CUA_VCPUS", "CRABBOX_CUA_MEMORY_MB", "CRABBOX_CUA_DISK_GB", "CRABBOX_CUA_STARTUP_TIMEOUT_SECS", "CRABBOX_CUA_EXEC_TIMEOUT_SECS"}
+	for _, source := range []string{"file", "env"} {
+		for fail := range keys {
+			for _, invalid := range []string{"-1", "invalid"} {
+				if source == "file" && invalid == "invalid" {
+					continue
+				}
+				t.Run(fmt.Sprintf("%s/%s/%s", source, keys[fail], invalid), func(t *testing.T) {
+					clearConfigEnv(t)
+					cfg := baseConfig()
+					cfg.Cua.VCPUs, cfg.Cua.MemoryMB, cfg.Cua.DiskGB, cfg.Cua.StartupTimeoutSecs, cfg.Cua.ExecTimeoutSecs = 10, 20, 30, 40, 50
+					cfg.Cua.BridgeCommand = "before-python"
+					body := "cua:\n  image: after\n  bridgeCommand: after-python\n"
+					t.Setenv("CRABBOX_CUA_IMAGE", "after")
+					t.Setenv("CRABBOX_CUA_BRIDGE_COMMAND", "after-python")
+					for i, key := range keys {
+						value := "7"
+						if i >= fail {
+							value = invalid
+						}
+						body += "  " + key + ": " + value + "\n"
+						t.Setenv(envs[i], value)
+					}
+					var err error
+					wantError := "cua " + keys[fail] + " must be non-negative"
+					if source == "file" {
+						var file fileConfig
+						if err := yaml.Unmarshal([]byte(body), &file); err != nil {
+							t.Fatal(err)
+						}
+						err = applyFileConfig(&cfg, file)
+					} else {
+						err = applyEnv(&cfg)
+						wantError = envs[fail] + " must be non-negative"
+						if invalid == "invalid" {
+							wantError = envs[fail] + " must be an integer"
+						}
+					}
+					if err == nil || err.Error() != wantError {
+						t.Fatalf("error=%v, want %q", err, wantError)
+					}
+					want := []int{10, 20, 30, 40, 50}
+					for i := 0; i < fail; i++ {
+						want[i] = 7
+					}
+					if source == "env" {
+						want[fail] = 0
+					}
+					got := []int{cfg.Cua.VCPUs, cfg.Cua.MemoryMB, cfg.Cua.DiskGB, cfg.Cua.StartupTimeoutSecs, cfg.Cua.ExecTimeoutSecs}
+					if !reflect.DeepEqual(got, want) || cfg.Cua.Image != "after" || cfg.Cua.BridgeCommand != "before-python" {
+						t.Fatalf("partial update=%#v, want integers %v", cfg.Cua, want)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestCUARepoConfigCannotReplaceBridgeRuntime(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Cua.BridgeCommand = "trusted-python"
@@ -7039,10 +7168,10 @@ func TestCUARepoConfigCannotReplaceBridgeRuntime(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(strings.Join([]string{
 		"cua:",
 		"  workdir: /workspace/repo",
-		"  bridgeCommand: ./steal-token",
-		"  sdkPackage: ./fake-sdk",
-		"  sdkImport: fake_sdk",
-		"  sdkFallbackImport: fake_fallback",
+		"  bridgeCommand: ./example-python",
+		"  sdkPackage: example-package",
+		"  sdkImport: example_sdk",
+		"  sdkFallbackImport: example_fallback",
 	}, "\n")), &file); err != nil {
 		t.Fatal(err)
 	}
@@ -7054,6 +7183,12 @@ func TestCUARepoConfigCannotReplaceBridgeRuntime(t *testing.T) {
 	}
 	if cfg.Cua.Workdir != "/workspace/repo" {
 		t.Fatalf("safe repository workdir setting not applied: %#v", cfg.Cua)
+	}
+	if err := applyFileConfigWithTrust(&cfg, file, true); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Cua.BridgeCommand != "./example-python" || cfg.Cua.SDKPackage != "example-package" || cfg.Cua.SDKImport != "example_sdk" || cfg.Cua.SDKFallbackImport != "example_fallback" {
+		t.Fatalf("trusted file did not apply bridge settings: %#v", cfg.Cua)
 	}
 }
 
