@@ -468,4 +468,15 @@ test("promotion-stage failures retain bound rollback outcomes", () => {
       promotionBindingDigest: null,
     }),
   );
+  const receiptUnavailable = projectOutcome(policy, {
+    status: "failed",
+    stage: "promotion",
+    exitCode: 55,
+    rollbackStatus: "failed",
+    cleanupStatus: "succeeded",
+    cohorts: [baseline, candidate],
+  });
+  assert.equal(receiptUnavailable.promotionBindingDigest, null);
+  assert.throws(() => validateOutcome({ ...receiptUnavailable, stage: "promoted_smoke" }));
+  assert.throws(() => validateOutcome({ ...receiptUnavailable, status: "passed", exitCode: 0 }));
 });

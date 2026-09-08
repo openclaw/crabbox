@@ -1270,6 +1270,30 @@ test("measured baseline must match the default captured by the original promotio
   assert.doesNotMatch(result.stdout, /public measurement proof:/);
 });
 
+test("measured receipt-less promotion failures retain the completed cohorts", async (t) => {
+  const fake = await measuredFixture(t);
+  const result = await runScript(
+    fake.args,
+    {
+      ...fake.env,
+      CRABBOX_FAKE_PROMOTION_FAIL: "1",
+    },
+    fake.script,
+  );
+  assert.equal(result.code, 55, result.stderr);
+  assert.match(result.stderr, /transactional promotion receipt is unavailable for rollback/);
+  const outcome = JSON.parse(await readFile(fake.outcome, "utf8"));
+  assert.equal(outcome.status, "failed");
+  assert.equal(outcome.stage, "promotion");
+  assert.equal(outcome.exitCode, 55);
+  assert.equal(outcome.rollbackStatus, "failed");
+  assert.equal(outcome.promotionBindingDigest, null);
+  assert.deepEqual(
+    outcome.cohorts.map((cohort) => cohort.phase),
+    ["baseline", "candidate"],
+  );
+});
+
 test("measured warmup cleanup failures remain visible to finalization", async (t) => {
   const fake = await measuredFixture(t);
   const result = await runScript(

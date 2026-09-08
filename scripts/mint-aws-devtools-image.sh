@@ -257,7 +257,7 @@ measurement_lease=""
 measurement_handle=""
 promotion_log=""
 rollback_pending=0
-warmup_handle_dir="$log_dir/image-mint-${log_image_name}-leases-${log_id}"
+warmup_handle_dir="$log_dir/.image-mint-${log_image_name}-leases-${log_id}"
 
 cleanup() {
   local exit_status=$?

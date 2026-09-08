@@ -629,8 +629,12 @@ export function validateOutcome(outcome) {
     assert.equal(outcome.candidateSelection, "explicit");
     assert.equal(outcome.promotedSelection, "promoted");
   }
-  if (outcome.rollbackStatus !== "not_required")
+  if (outcome.rollbackStatus === "succeeded")
     assert.ok(isDigest(outcome.promotionBindingDigest), "rollback is not bound to a promotion");
+  if (outcome.rollbackStatus === "failed" && outcome.promotionBindingDigest === null) {
+    assert.equal(outcome.status, "failed", "unbound rollback failure cannot pass");
+    assert.equal(outcome.stage, "promotion", "unbound rollback failure must be receipt-less");
+  }
   return outcome;
 }
 
