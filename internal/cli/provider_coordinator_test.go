@@ -2525,6 +2525,70 @@ func TestLeaseToServerTargetAppliesAWSCloudInitReadiness(t *testing.T) {
 	}
 }
 
+type coordinatorKoyebTargetProvider struct{ testAWSProvider }
+
+func (coordinatorKoyebTargetProvider) Name() string { return "koyeb" }
+
+func (coordinatorKoyebTargetProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "koyeb",
+		Family:      "koyeb",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureTailscale},
+		Coordinator: CoordinatorSupported,
+	}
+}
+
+func (coordinatorKoyebTargetProvider) ConfigureSSHTarget(target *SSHTarget, _ string) {
+	target.ProxyCommand = "tailscale nc %h %p"
+	target.SSHConfigProxy = true
+	target.ReadyCheck = "crabbox-ready"
+}
+
+func TestLeaseToServerTargetAppliesKoyebUserspaceTailscaleTransport(t *testing.T) {
+	const tailnetIP = "100.101.102.103"
+	previous, hadPrevious := providerRegistry["koyeb"]
+	providerRegistry["koyeb"] = coordinatorKoyebTargetProvider{}
+	t.Cleanup(func() {
+		if hadPrevious {
+			providerRegistry["koyeb"] = previous
+		} else {
+			delete(providerRegistry, "koyeb")
+		}
+	})
+
+	cfg := baseConfig()
+	cfg.Provider = "koyeb"
+	cfg.TargetOS = targetLinux
+	server, target, _ := leaseToServerTarget(CoordinatorLease{
+		ID:         "cbx_123",
+		Provider:   "koyeb",
+		TargetOS:   targetLinux,
+		Host:       tailnetIP,
+		SSHUser:    "crabbox",
+		SSHPort:    "22",
+		Tailscale:  &TailscaleMetadata{Enabled: true, IPv4: tailnetIP},
+		ServerType: "medium",
+	}, cfg)
+
+	if target.Host != tailnetIP || target.Port != "22" || target.User != "crabbox" {
+		t.Fatalf("target route=%#v", target)
+	}
+	if !target.SSHConfigProxy || target.ProxyCommand != "tailscale nc %h %p" {
+		t.Fatalf("target userspace proxy=%#v", target)
+	}
+	if target.ReadyCheck != "crabbox-ready" {
+		t.Fatalf("ready check=%q", target.ReadyCheck)
+	}
+	if target.NetworkKind == NetworkPublic {
+		t.Fatalf("target unexpectedly requires public networking: %#v", target)
+	}
+	if server.Labels["tailscale_ipv4"] != tailnetIP {
+		t.Fatalf("tailscale metadata=%#v", server.Labels)
+	}
+}
+
 func TestLeaseToServerTargetPreservesCoordinatorWorkRoot(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "aws"

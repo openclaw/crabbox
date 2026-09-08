@@ -569,6 +569,22 @@
     "caveat": "Needs KubeVirt, virtctl, and an SSH-ready template",
     "docs": "kubevirt.md"
   },
+  "koyeb": {
+    "status": "built-in",
+    "category": "brokerable-cloud",
+    "coordinator": true,
+    "substrate": "Koyeb Sandbox",
+    "location": "cloud",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "no",
+    "lifecycle": "Crabbox coordinator and Koyeb",
+    "cleanup": "owned Sandbox service delete",
+    "bestFit": "Ephemeral Linux desktop, browser, code, and shell sessions on Koyeb",
+    "caveat": "Coordinator-only; requires an immutable runner image and Tailscale OAuth",
+    "auth": "Coordinator-owned Koyeb API token and Tailscale OAuth client; no provider credential reaches the CLI or runner",
+    "docs": "koyeb.md"
+  },
   "lambda": {
     "status": "built-in",
     "category": "gpu-cloud",

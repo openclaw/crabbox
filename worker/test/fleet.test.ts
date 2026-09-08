@@ -44782,7 +44782,7 @@ describe("fleet identity", () => {
 
     expect(response.status).toBe(200);
     expect(body).toContain("provider health");
-    expect(body).toContain("5 supported");
+    expect(body).toContain("6 supported");
     expect(body).toContain("users");
     expect(body).toContain('href="/portal/admin/users"');
     expect(body).not.toContain("all leases");
@@ -44795,6 +44795,7 @@ describe("fleet identity", () => {
     expect(body).toContain("Azure");
     expect(body).toContain("GCP");
     expect(body).toContain("Hetzner");
+    expect(body).toContain("Koyeb");
     expect(body).not.toContain("Blacksmith");
     expect(body).toContain("GCP_PROJECT_ID");
     expect(body).not.toContain("alice@example.com");

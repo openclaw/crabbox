@@ -1119,6 +1119,33 @@ describe("lease config", () => {
     ).toThrow("supports SSH, sync, and run only");
   });
 
+  it("uses Koyeb Sandbox runner defaults and forces its private Tailscale transport", () => {
+    const config = leaseConfig({
+      provider: "koyeb",
+      sshPublicKey: "ssh-ed25519 test",
+      desktop: true,
+      browser: true,
+      code: true,
+    });
+    expect(config.serverType).toBe("large");
+    expect(serverTypeForProviderClass("koyeb", "standard")).toBe("large");
+    expect(config.sshUser).toBe("crabbox");
+    expect(config.sshPort).toBe("22");
+    expect(config.sshFallbackPorts).toEqual([]);
+    expect(config.workRoot).toBe("/workspace/crabbox");
+    expect(config.desktop).toBe(true);
+    expect(config.browser).toBe(true);
+    expect(config.code).toBe(true);
+    expect(config.tailscale).toBe(true);
+    expect(() =>
+      leaseConfig({
+        provider: "koyeb",
+        architecture: "arm64",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    ).toThrow("architecture=arm64 currently supports provider=azure or provider=aws");
+  });
+
   it("validates and normalizes AWS lease regions", () => {
     const config = leaseConfig({
       provider: "aws",

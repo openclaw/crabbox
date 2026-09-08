@@ -131,6 +131,20 @@ func TestVastRegistersCanonicalAndAliases(t *testing.T) {
 	}
 }
 
+func TestKoyebRegistersAsBuiltInProvider(t *testing.T) {
+	provider, err := core.ProviderFor("koyeb")
+	if err != nil {
+		t.Fatalf("ProviderFor(koyeb): %v", err)
+	}
+	if provider.Name() != "koyeb" {
+		t.Fatalf("ProviderFor(koyeb).Name=%q", provider.Name())
+	}
+	spec := provider.Spec()
+	if spec.Family != "koyeb" || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorSupported {
+		t.Fatalf("koyeb spec=%#v", spec)
+	}
+}
+
 func TestLambdaRegistersAsBuiltInProvider(t *testing.T) {
 	provider, err := core.ProviderFor("lambda")
 	if err != nil {
@@ -1371,6 +1385,7 @@ func allBuiltInProviderNames() []string {
 		"hyperv",
 		"incus",
 		"islo",
+		"koyeb",
 		"kubevirt",
 		"lambda",
 		"linode",

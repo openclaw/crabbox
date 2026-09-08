@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+umask 077
+export DISPLAY="${DISPLAY:-:99}"
+export HOME="${HOME:-/home/crabbox}"
+profile="${CRABBOX_BROWSER_PROFILE:-${HOME}/.cache/crabbox/browser-profile}"
+mkdir -p -- "$profile"
+chmod 0700 -- "$profile"
+
+exec /usr/bin/google-chrome-stable \
+  --no-first-run \
+  --no-default-browser-check \
+  --disable-default-apps \
+  --disable-dev-shm-usage \
+  --hide-crash-restore-bubble \
+  --password-store=basic \
+  --user-data-dir="$profile" \
+  --window-size=1500,900 \
+  --window-position=80,80 \
+  "$@"

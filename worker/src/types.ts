@@ -95,6 +95,14 @@ export interface Env {
   CRABBOX_DAYTONA_WORK_ROOT?: string;
   CRABBOX_DAYTONA_SSH_GATEWAY_HOST?: string;
   CRABBOX_DAYTONA_SSH_ACCESS_MINUTES?: string;
+  KOYEB_API_TOKEN?: string;
+  CRABBOX_KOYEB_API_URL?: string;
+  CRABBOX_KOYEB_ORGANIZATION_ID?: string;
+  CRABBOX_KOYEB_APP_ID?: string;
+  CRABBOX_KOYEB_REGION?: string;
+  CRABBOX_KOYEB_INSTANCE_TYPE?: string;
+  CRABBOX_KOYEB_IMAGE?: string;
+  CRABBOX_KOYEB_REGISTRY_SECRET?: string;
   CRABBOX_RUNTIME_ADAPTER_TOKEN?: string;
   CRABBOX_SHARED_TOKEN?: string;
   CRABBOX_SHARED_OWNER?: string;
@@ -105,6 +113,7 @@ export interface Env {
   CRABBOX_RUN_RETENTION_DAYS?: string;
   CRABBOX_GITHUB_CLIENT_ID?: string;
   CRABBOX_GITHUB_CLIENT_SECRET?: string;
+  CRABBOX_GITHUB_ALLOWED_OWNERS?: string;
   CRABBOX_GITHUB_ALLOWED_ORG?: string;
   CRABBOX_GITHUB_ALLOWED_ORGS?: string;
   CRABBOX_GITHUB_ALLOWED_TEAM?: string;
@@ -382,6 +391,13 @@ export const coordinatorProviderRegistry = [
     provider: "daytona",
     label: "Daytona",
     requiredSecrets: ["DAYTONA_CRABBOX_KEY"],
+    adminAudit: false,
+    supportsCapacityMarket: false,
+  },
+  {
+    provider: "koyeb",
+    label: "Koyeb Sandbox",
+    requiredSecrets: ["KOYEB_API_TOKEN"],
     adminAudit: false,
     supportsCapacityMarket: false,
   },

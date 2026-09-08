@@ -41,6 +41,7 @@ var benchmarkProviderCategories = map[string]string{
 	"hyperv":                     "local-vm",
 	"incus":                      "self-hosted-virtualization",
 	"islo":                       "delegated-sandbox",
+	"koyeb":                      "brokerable-cloud",
 	"kubevirt":                   "self-hosted-virtualization",
 	"lambda":                     "gpu-cloud",
 	"linode":                     "direct-cloud",
