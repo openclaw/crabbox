@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- AWS: avoid duplicate access-refresh lookups for ports with matching permissions, index lease access once, and keep unnamed runner/workspace groups separate. Thanks @steipete.
+- AWS: avoid duplicate access-refresh lookups for ports with matching permissions, index lease access once, and keep unnamed runner/workspace groups separate. https://github.com/openclaw/crabbox/pull/1980. Thanks @steipete.
 
 - AWS: overlap SSH ingress authorization in bounded batches while preserving revocation, recovery and cleanup ordering. https://github.com/openclaw/crabbox/pull/1976. Thanks @steipete.
 
