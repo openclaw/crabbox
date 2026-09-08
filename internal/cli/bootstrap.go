@@ -180,11 +180,12 @@ func windowsWSL2BootstrapPowerShell(cfg Config) string {
 	workRoot := windowsWSLWorkRoot(cfg)
 	headless := ""
 	if !cfg.Desktop && !cfg.Browser {
-		headless = windowsWSL2HeadlessConfigPowerShell
+		// WSLg can stall headless distro launches from Windows service sessions.
+		headless = `$managedWSLConfig = Set-CrabboxWSLConfigValue $managedWSLConfig 'wsl2' 'guiApplications=false'`
 	}
 	return `
 	$wslConfigChanged = $false
-` + headless + `
+` + strings.ReplaceAll(windowsWSL2ConfigPowerShell, "@HEADLESS_CONFIG@", headless) + `
 	$wslDistro = "Crabbox"
 	$wslRoot = "C:\ProgramData\crabbox\wsl\Crabbox"
 	$wslRootfs = "C:\ProgramData\crabbox\wsl\ubuntu-noble-wsl-amd64.rootfs.tar.gz"
@@ -220,7 +221,7 @@ func windowsWSL2BootstrapPowerShell(cfg Config) string {
 	}
 	if ($wslConfigChanged) {
 	  wsl.exe --shutdown | Out-Host
-	  if ($LASTEXITCODE -ne 0) { throw "apply headless WSL configuration failed with exit $LASTEXITCODE" }
+	  if ($LASTEXITCODE -ne 0) { throw "apply managed WSL configuration failed with exit $LASTEXITCODE" }
 	}
 	wsl.exe --set-default-version 2 | Out-Host
 	if ($LASTEXITCODE -ne 0) { throw "wsl --set-default-version 2 failed with exit $LASTEXITCODE" }
@@ -310,39 +311,41 @@ crabbox-ready
 	`
 }
 
-// WSLg's RDP compositor is unnecessary for headless SSH leases and can crash
-// in Windows service sessions, leaving even non-GUI distro launches blocked.
-const windowsWSL2HeadlessConfigPowerShell = `
-function ConvertTo-CrabboxHeadlessWSLConfig([string]$Text) {
+// The lease owns distro lifetime: WSL's client-idle shutdown kills detached
+// daemons even while their Linux processes remain active. WSLg stays optional.
+const windowsWSL2ConfigPowerShell = `
+function Set-CrabboxWSLConfigValue([string]$Text, [string]$Section, [string]$Setting) {
   $result = [Collections.Generic.List[string]]::new()
-  $inWSL2 = $false
+  $inSection = $false
   $hasSection = $false
   $hasKey = $false
+  $keyPattern = '^\s*' + [Regex]::Escape(($Setting -split '=', 2)[0]) + '\s*='
   if ($Text.Length -gt 0) {
     foreach ($line in ($Text -split '\r?\n')) {
       if ($line -match '^\s*\[([^\]]+)\]\s*(?:[;#].*)?$') {
-        if ($inWSL2 -and -not $hasKey) { $result.Add('guiApplications=false') }
-        $inWSL2 = $Matches[1].Trim() -eq 'wsl2'
-        $hasSection = $hasSection -or $inWSL2
+        if ($inSection -and -not $hasKey) { $result.Add($Setting) }
+        $inSection = $Matches[1].Trim() -eq $Section
+        $hasSection = $hasSection -or $inSection
         $hasKey = $false
       }
-      if ($inWSL2 -and $line -match '^\s*guiApplications\s*=') {
-        $result.Add('guiApplications=false')
+      if ($inSection -and $line -match $keyPattern) {
+        $result.Add($Setting)
         $hasKey = $true
       } else { $result.Add($line) }
     }
   }
-  if (-not $hasSection) { $result.Add('[wsl2]'); $inWSL2 = $true; $hasKey = $false }
-  if ($inWSL2 -and -not $hasKey) { $result.Add('guiApplications=false') }
+  if (-not $hasSection) { $result.Add('[' + $Section + ']'); $inSection = $true; $hasKey = $false }
+  if ($inSection -and -not $hasKey) { $result.Add($Setting) }
   return $result -join [char]10
 }
 $wslConfigPath = Join-Path $HOME '.wslconfig'
 $wslConfig = ''
 if (Test-Path -LiteralPath $wslConfigPath) { $wslConfig = [IO.File]::ReadAllText($wslConfigPath) }
-$headlessWSLConfig = ConvertTo-CrabboxHeadlessWSLConfig $wslConfig
-$wslConfigChanged = $headlessWSLConfig -cne $wslConfig
+$managedWSLConfig = Set-CrabboxWSLConfigValue $wslConfig 'general' 'instanceIdleTimeout=-1'
+@HEADLESS_CONFIG@
+$wslConfigChanged = $managedWSLConfig -cne $wslConfig
 if ($wslConfigChanged) {
-  [IO.File]::WriteAllText($wslConfigPath, $headlessWSLConfig, [Text.UTF8Encoding]::new($false))
+  [IO.File]::WriteAllText($wslConfigPath, $managedWSLConfig, [Text.UTF8Encoding]::new($false))
 }
 `
 
