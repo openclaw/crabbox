@@ -31,7 +31,7 @@
 
 - Describe OpenSandbox configuration bindings once, preserving CLI-only stale-claim cleanup, environment/flag-only API URL selection, defaults, and validation timing. [PR 1990](https://github.com/openclaw/crabbox/pull/1990). Thanks @steipete.
 
-- Describe Anthropic Sandbox Runtime configuration bindings once, preserving inherited binary paths for empty YAML, explicit settings/debug clearing, and native runtime defaults. Thanks @steipete.
+- Describe Anthropic Sandbox Runtime configuration bindings once, preserving inherited binary paths for empty YAML, explicit settings/debug clearing, and native runtime defaults. [PR 1993](https://github.com/openclaw/crabbox/pull/1993). Thanks @steipete.
 
 ## 0.52.0 - 2026-09-07
 
