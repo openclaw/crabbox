@@ -82,7 +82,17 @@ type sshWorkspaceOwnerTransport struct {
 }
 
 func (t sshWorkspaceOwnerTransport) CallBudget() time.Duration {
-	return sshTransportCallBudget(t.target, sshControlMetadataLimit, sshCommandLimit{execution: workspaceOwnerRemoteTimeout, control: true})
+	return sshTransportCallBudget(t.target, sshControlMetadataLimit, workspaceOwnerCommandLimit(t.target, workspaceOwnerRenew))
+}
+
+func workspaceOwnerCommandLimit(target SSHTarget, action workspaceOwnerAction) sshCommandLimit {
+	limit := sshCommandLimit{execution: workspaceOwnerRemoteTimeout, control: true}
+	if isWindowsWSL2Target(target) && action == workspaceOwnerRenew {
+		// The distro shares CPU and disk with the workload. Keep the native
+		// watchdog finite, but allow a renewal to survive a busy scheduler.
+		limit.execution = time.Minute
+	}
+	return limit
 }
 
 func (t sshWorkspaceOwnerTransport) Do(ctx context.Context, req workspaceOwnerRemoteRequest) (string, error) {
@@ -98,10 +108,18 @@ func (t sshWorkspaceOwnerTransport) Do(ctx context.Context, req workspaceOwnerRe
 		input = []byte(script)
 		remote = windowsPowerShellStdinScriptCommand(len([]byte(script)))
 	}
-	return runWorkspaceOwnerSSHProtocol(ctx, t.target, remote, input, req.Token)
+	limit := workspaceOwnerCommandLimit(t.target, req.Action)
+	for attempt := 0; ; attempt++ {
+		response, err := runWorkspaceOwnerSSHProtocol(ctx, t.target, remote, input, req.Token, limit)
+		// BUSY certifies that the renewal did not enter the gate or mutate
+		// state. Never replay an ambiguous execution or a rejected token.
+		if !isWindowsWSL2Target(t.target) || req.Action != workspaceOwnerRenew || err != nil || response != "BUSY" || attempt == 2 {
+			return response, err
+		}
+	}
 }
 
-func runWorkspaceOwnerSSHProtocol(ctx context.Context, target SSHTarget, remote string, input []byte, requestToken string) (output string, err error) {
+func runWorkspaceOwnerSSHProtocol(ctx context.Context, target SSHTarget, remote string, input []byte, requestToken string, limit sshCommandLimit) (output string, err error) {
 	if len(remote)+len(input) > sshControlMetadataLimit {
 		return "", errors.New("workspace owner metadata exceeds its accounted transport budget")
 	}
@@ -110,7 +128,7 @@ func runWorkspaceOwnerSSHProtocol(ctx context.Context, target SSHTarget, remote 
 		source = bytes.NewReader(input)
 	}
 	stdout, stderr := newSynchronizedBuffer(0), newSynchronizedBuffer(0)
-	err = executePreparedSSH(ctx, &target, remote, source, int64(len(input)), sshCommandLimit{execution: workspaceOwnerRemoteTimeout, control: true},
+	err = executePreparedSSH(ctx, &target, remote, source, int64(len(input)), limit,
 		workspaceOwnerSSHConnectTimeoutOption, workspaceOwnerSSHConnectionAttemptsOption, &stdout, &stderr)
 	output = strings.TrimSpace(stdout.String())
 	if err != nil {
@@ -574,6 +592,9 @@ done
 func remoteWorkspaceOwnerCommand(target SSHTarget, req workspaceOwnerRemoteRequest) string {
 	if isWindowsNativeTarget(target) {
 		return windowsPowerShellStdinScriptCommand(len([]byte(remoteWorkspaceOwnerWindows(req))))
+	}
+	if isWindowsWSL2Target(target) && req.Action == workspaceOwnerRenew {
+		return remoteWorkspaceOwnerWSL2Renew(req)
 	}
 	return remoteWorkspaceOwnerPOSIXLauncher(req.Key, req.Token, remoteWorkspaceOwnerPOSIX(req))
 }

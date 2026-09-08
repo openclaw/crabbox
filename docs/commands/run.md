@@ -317,9 +317,13 @@ concurrent checkout. POSIX, WSL2, and native Windows targets implement the same
 protocol; the small sync-finalization lock remains nested inside it.
 
 Renewal errors retain recognized `MISMATCH`, `EXPIRED`, and `AMBIGUOUS` protocol
-states alongside transport errors. Unrecognized response text is omitted. These
-diagnostics do not retry renewal or permit collection or cleanup after ownership
-fails closed.
+states alongside transport errors. Unrecognized response text is omitted.
+WSL2 renewal uses a compact marker-only helper with a 60-second execution
+allowance for CPU and disk contention. It retries confirmed lock contention at
+most twice within the original bounded call deadline; that deadline is included
+in the owner expiry window. A transport failure or rejected/ambiguous owner
+state is never retried. Collection and cleanup remain blocked after ownership
+fails closed. Linux and native Windows renewal behavior is unchanged.
 
 Native Windows stages owner scripts and witnessed command input with exact byte
 counts and asynchronous pipe reads. Empty frames complete without initializing
