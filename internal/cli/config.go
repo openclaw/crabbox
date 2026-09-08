@@ -947,24 +947,6 @@ type OpenComputerConfig struct {
 	ForgetMissing   bool
 }
 
-// CodeSandboxConfig configures the delegated CodeSandbox provider. The API key
-// is intentionally absent: it is read at runtime from
-// CRABBOX_CODESANDBOX_API_KEY / CSB_API_KEY and passed to the SDK bridge through
-// environment only, never persisted in Crabbox config or placed on argv.
-type CodeSandboxConfig struct {
-	TemplateID               string
-	Workdir                  string
-	VMTier                   string
-	Privacy                  string
-	HibernationTimeoutSecs   int
-	AutomaticWakeupHTTP      bool
-	AutomaticWakeupWebSocket bool
-	BridgeCommand            string
-	SDKPackage               string
-	DoctorListLimit          int
-	OperationTimeoutSecs     int
-}
-
 // OpenSandboxConfig configures the delegated OpenSandbox provider. The API key
 // is intentionally absent: it is read at runtime from
 // CRABBOX_OPENSANDBOX_API_KEY / OPEN_SANDBOX_API_KEY and sent only in request
@@ -3050,16 +3032,7 @@ func baseConfig() Config {
 			Workdir:         "/workspace/crabbox",
 			ExecTimeoutSecs: 3600,
 		},
-		CodeSandbox: CodeSandboxConfig{
-			Workdir:                  "/project/workspace",
-			Privacy:                  "private",
-			AutomaticWakeupHTTP:      true,
-			AutomaticWakeupWebSocket: false,
-			BridgeCommand:            "node",
-			SDKPackage:               "@codesandbox/sdk@2.4.2",
-			DoctorListLimit:          1,
-			OperationTimeoutSecs:     30,
-		},
+		CodeSandbox: defaultCodeSandboxConfig(),
 		OpenSandbox: OpenSandboxConfig{
 			// APIURL is intentionally unset here so repository YAML cannot
 			// redirect a shell-provided API key. The provider requires an
@@ -4132,20 +4105,6 @@ type fileOpenComputerConfig struct {
 	TimeoutSecs     *int   `yaml:"timeoutSecs,omitempty"`
 	ExecTimeoutSecs *int   `yaml:"execTimeoutSecs,omitempty"`
 	Burst           *bool  `yaml:"burst,omitempty"`
-}
-
-type fileCodeSandboxConfig struct {
-	TemplateID               *string `yaml:"templateId,omitempty"`
-	Workdir                  *string `yaml:"workdir,omitempty"`
-	VMTier                   *string `yaml:"vmTier,omitempty"`
-	Privacy                  *string `yaml:"privacy,omitempty"`
-	HibernationTimeoutSecs   *int    `yaml:"hibernationTimeoutSecs,omitempty"`
-	AutomaticWakeupHTTP      *bool   `yaml:"automaticWakeupHTTP,omitempty"`
-	AutomaticWakeupWebSocket *bool   `yaml:"automaticWakeupWebSocket,omitempty"`
-	BridgeCommand            *string `yaml:"bridgeCommand,omitempty"`
-	SDKPackage               *string `yaml:"sdkPackage,omitempty"`
-	DoctorListLimit          *int    `yaml:"doctorListLimit,omitempty"`
-	OperationTimeoutSecs     *int    `yaml:"operationTimeoutSecs,omitempty"`
 }
 
 type fileOpenSandboxConfig struct {
@@ -6862,37 +6821,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		applyOptional(&cfg.OpenComputer.ExecTimeoutSecs, file.OpenComputer.ExecTimeoutSecs)
 		applyOptional(&cfg.OpenComputer.Burst, file.OpenComputer.Burst)
 	}
-	if file.CodeSandbox != nil {
-		applyOptional(&cfg.CodeSandbox.TemplateID, file.CodeSandbox.TemplateID)
-		applyOptional(&cfg.CodeSandbox.Workdir, file.CodeSandbox.Workdir)
-		applyOptional(&cfg.CodeSandbox.VMTier, file.CodeSandbox.VMTier)
-		applyOptional(&cfg.CodeSandbox.Privacy, file.CodeSandbox.Privacy)
-		if file.CodeSandbox.HibernationTimeoutSecs != nil {
-			if *file.CodeSandbox.HibernationTimeoutSecs < 0 {
-				return exit(2, "codesandbox hibernationTimeoutSecs must be non-negative")
-			}
-			cfg.CodeSandbox.HibernationTimeoutSecs = *file.CodeSandbox.HibernationTimeoutSecs
-		}
-		applyOptional(&cfg.CodeSandbox.AutomaticWakeupHTTP, file.CodeSandbox.AutomaticWakeupHTTP)
-		applyOptional(&cfg.CodeSandbox.AutomaticWakeupWebSocket, file.CodeSandbox.AutomaticWakeupWebSocket)
-		if trusted && file.CodeSandbox.BridgeCommand != nil {
-			cfg.CodeSandbox.BridgeCommand = *file.CodeSandbox.BridgeCommand
-		}
-		if trusted && file.CodeSandbox.SDKPackage != nil {
-			cfg.CodeSandbox.SDKPackage = *file.CodeSandbox.SDKPackage
-		}
-		if file.CodeSandbox.DoctorListLimit != nil {
-			if *file.CodeSandbox.DoctorListLimit < 0 {
-				return exit(2, "codesandbox doctorListLimit must be non-negative")
-			}
-			cfg.CodeSandbox.DoctorListLimit = *file.CodeSandbox.DoctorListLimit
-		}
-		if file.CodeSandbox.OperationTimeoutSecs != nil {
-			if *file.CodeSandbox.OperationTimeoutSecs < 0 {
-				return exit(2, "codesandbox operationTimeoutSecs must be non-negative")
-			}
-			cfg.CodeSandbox.OperationTimeoutSecs = *file.CodeSandbox.OperationTimeoutSecs
-		}
+	if err := cfg.CodeSandbox.applyFile(file.CodeSandbox, trusted); err != nil {
+		return err
 	}
 	if file.OpenSandbox != nil {
 		applyOptional(&cfg.OpenSandbox.Image, file.OpenSandbox.Image)
@@ -8934,28 +8864,7 @@ func applyEnv(cfg *Config) error {
 	if v, ok := getenvBool("CRABBOX_OPENCOMPUTER_BURST"); ok {
 		cfg.OpenComputer.Burst = v
 	}
-	cfg.CodeSandbox.TemplateID = getenv("CRABBOX_CODESANDBOX_TEMPLATE_ID", cfg.CodeSandbox.TemplateID)
-	cfg.CodeSandbox.Workdir = getenv("CRABBOX_CODESANDBOX_WORKDIR", cfg.CodeSandbox.Workdir)
-	cfg.CodeSandbox.VMTier = getenv("CRABBOX_CODESANDBOX_VM_TIER", cfg.CodeSandbox.VMTier)
-	cfg.CodeSandbox.Privacy = getenv("CRABBOX_CODESANDBOX_PRIVACY", cfg.CodeSandbox.Privacy)
-	cfg.CodeSandbox.HibernationTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CODESANDBOX_HIBERNATION_TIMEOUT_SECS", cfg.CodeSandbox.HibernationTimeoutSecs)
-	if err != nil {
-		return err
-	}
-	if v, ok := getenvBool("CRABBOX_CODESANDBOX_AUTOMATIC_WAKEUP_HTTP"); ok {
-		cfg.CodeSandbox.AutomaticWakeupHTTP = v
-	}
-	if v, ok := getenvBool("CRABBOX_CODESANDBOX_AUTOMATIC_WAKEUP_WEBSOCKET"); ok {
-		cfg.CodeSandbox.AutomaticWakeupWebSocket = v
-	}
-	cfg.CodeSandbox.BridgeCommand = getenv("CRABBOX_CODESANDBOX_BRIDGE_COMMAND", cfg.CodeSandbox.BridgeCommand)
-	cfg.CodeSandbox.SDKPackage = getenv("CRABBOX_CODESANDBOX_SDK_PACKAGE", cfg.CodeSandbox.SDKPackage)
-	cfg.CodeSandbox.DoctorListLimit, err = getenvNonNegativeInt("CRABBOX_CODESANDBOX_DOCTOR_LIST_LIMIT", cfg.CodeSandbox.DoctorListLimit)
-	if err != nil {
-		return err
-	}
-	cfg.CodeSandbox.OperationTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CODESANDBOX_OPERATION_TIMEOUT_SECS", cfg.CodeSandbox.OperationTimeoutSecs)
-	if err != nil {
+	if err := cfg.CodeSandbox.applyEnv(); err != nil {
 		return err
 	}
 	cfg.OpenSandbox.APIURL = getenv("CRABBOX_OPENSANDBOX_API_URL", getenv("OPEN_SANDBOX_API_URL", cfg.OpenSandbox.APIURL))

@@ -8268,3 +8268,132 @@ func TestLumeHostLifecycleConfigRequiresTrustedFile(t *testing.T) {
 		t.Fatalf("bootstrap user trust boundary was not preserved: %#v", cfg.Lume)
 	}
 }
+
+func TestCodeSandboxFilePresenceAndTrust(t *testing.T) {
+	initial := CodeSandboxConfig{TemplateID: "template", Workdir: "/project/workspace/app", VMTier: "micro", Privacy: "private", HibernationTimeoutSecs: 60, AutomaticWakeupHTTP: true, AutomaticWakeupWebSocket: true, BridgeCommand: "node", SDKPackage: "@codesandbox/sdk", DoctorListLimit: 2, OperationTimeoutSecs: 30}
+	keys := []string{"templateId", "workdir", "vmTier", "privacy", "hibernationTimeoutSecs", "automaticWakeupHTTP", "automaticWakeupWebSocket", "bridgeCommand", "sdkPackage", "doctorListLimit", "operationTimeoutSecs"}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "zero"} {
+			t.Run(fmt.Sprintf("trusted=%t/%s", trusted, mode), func(t *testing.T) {
+				body := "codeSandbox: {}\n"
+				if mode != "omitted" {
+					body = "codeSandbox:\n"
+					for i, key := range keys {
+						value := "null"
+						if mode == "zero" {
+							value = "''"
+							if i == 4 || i == 9 || i == 10 {
+								value = "0"
+							}
+							if i == 5 || i == 6 {
+								value = "false"
+							}
+						}
+						body += "  " + key + ": " + value + "\n"
+					}
+				}
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte(body), &file); err != nil {
+					t.Fatal(err)
+				}
+				before, err := yaml.Marshal(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg := baseConfig()
+				cfg.CodeSandbox = initial
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				want := initial
+				if mode == "zero" {
+					want = CodeSandboxConfig{}
+					if !trusted {
+						want.BridgeCommand, want.SDKPackage = initial.BridgeCommand, initial.SDKPackage
+					}
+				}
+				if cfg.CodeSandbox != want {
+					t.Fatalf("got %#v, want %#v", cfg.CodeSandbox, want)
+				}
+				after, err := yaml.Marshal(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(before) != string(after) {
+					t.Fatal("file input mutated")
+				}
+			})
+		}
+	}
+}
+
+func TestCodeSandboxIntegerOverlayErrorOrder(t *testing.T) {
+	keys := []string{"hibernationTimeoutSecs", "doctorListLimit", "operationTimeoutSecs"}
+	envs := []string{"CRABBOX_CODESANDBOX_HIBERNATION_TIMEOUT_SECS", "CRABBOX_CODESANDBOX_DOCTOR_LIST_LIMIT", "CRABBOX_CODESANDBOX_OPERATION_TIMEOUT_SECS"}
+	for _, source := range []string{"file", "env"} {
+		for fail := range keys {
+			for _, invalid := range []string{"-1", "invalid"} {
+				if source == "file" && invalid == "invalid" {
+					continue
+				}
+				t.Run(fmt.Sprintf("%s/%s/%s", source, keys[fail], invalid), func(t *testing.T) {
+					clearConfigEnv(t)
+					cfg := baseConfig()
+					cfg.CodeSandbox.TemplateID = "before"
+					cfg.CodeSandbox.HibernationTimeoutSecs, cfg.CodeSandbox.DoctorListLimit, cfg.CodeSandbox.OperationTimeoutSecs = 10, 20, 30
+					cfg.CodeSandbox.AutomaticWakeupHTTP = true
+					cfg.CodeSandbox.BridgeCommand = "before-node"
+					body := "codeSandbox:\n  templateId: after\n  automaticWakeupHTTP: false\n  bridgeCommand: after-node\n"
+					t.Setenv("CRABBOX_CODESANDBOX_TEMPLATE_ID", "after")
+					t.Setenv("CRABBOX_CODESANDBOX_AUTOMATIC_WAKEUP_HTTP", "false")
+					t.Setenv("CRABBOX_CODESANDBOX_BRIDGE_COMMAND", "after-node")
+					for i, key := range keys {
+						value := "7"
+						if i >= fail {
+							value = invalid
+						}
+						body += "  " + key + ": " + value + "\n"
+						t.Setenv(envs[i], value)
+					}
+					var err error
+					wantError := "codesandbox " + keys[fail] + " must be non-negative"
+					if source == "file" {
+						var file fileConfig
+						if err := yaml.Unmarshal([]byte(body), &file); err != nil {
+							t.Fatal(err)
+						}
+						err = applyFileConfig(&cfg, file)
+					} else {
+						err = applyEnv(&cfg)
+						wantError = envs[fail] + " must be non-negative"
+						if invalid == "invalid" {
+							wantError = envs[fail] + " must be an integer"
+						}
+					}
+					if err == nil || err.Error() != wantError {
+						t.Fatalf("error=%v, want %q", err, wantError)
+					}
+					wantInts := []int{10, 20, 30}
+					for i := 0; i < fail; i++ {
+						wantInts[i] = 7
+					}
+					// Environment assignment stores the parser's zero result before returning its error.
+					if source == "env" {
+						wantInts[fail] = 0
+					}
+					gotInts := []int{cfg.CodeSandbox.HibernationTimeoutSecs, cfg.CodeSandbox.DoctorListLimit, cfg.CodeSandbox.OperationTimeoutSecs}
+					if !reflect.DeepEqual(gotInts, wantInts) {
+						t.Fatalf("integers=%v, want %v", gotInts, wantInts)
+					}
+					wantBridge := "before-node"
+					if fail > 0 {
+						wantBridge = "after-node"
+					}
+					if cfg.CodeSandbox.TemplateID != "after" || cfg.CodeSandbox.BridgeCommand != wantBridge || cfg.CodeSandbox.AutomaticWakeupHTTP != (fail == 0) {
+						t.Fatalf("partial update=%#v", cfg.CodeSandbox)
+					}
+				})
+			}
+		}
+	}
+}

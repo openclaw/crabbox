@@ -1,5 +1,5 @@
 // Command configgen derives mechanical config wiring from a concrete Go struct.
-// It deliberately supports only repo-safe fields; security policy stays in code.
+// It emits explicit source bindings; source trust is supplied by the loader.
 package main
 
 import (
@@ -20,7 +20,7 @@ import (
 
 type field struct {
 	name, kind, key, env, flag, help, defaultExpr string
-	nonnegative                                   bool
+	nonnegative, trustedFileOnly                  bool
 }
 
 type schema struct {
@@ -105,10 +105,14 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		}
 		tags := reflect.StructTag(raw)
 		f := field{name: node.Names[0].Name, key: tags.Get("config"), env: tags.Get("env"), flag: tags.Get("flag"), help: tags.Get("help")}
-		// This is an explicit source grant, not a default. Do not extend it to
-		// credentials or destinations without a separate provenance-aware design.
-		if tags.Get("sources") != "user,repo,env,flag" {
-			return s, fmt.Errorf("%s requires explicit repo-safe sources user,repo,env,flag", f.name)
+		// These exact grants preserve existing loader policy; they are not a
+		// general source-policy language or a default permission.
+		switch tags.Get("sources") {
+		case "user,repo,env,flag":
+		case "user,env,flag":
+			f.trustedFileOnly = true
+		default:
+			return s, fmt.Errorf("%s requires explicit sources user,repo,env,flag or user,env,flag", f.name)
 		}
 		for _, binding := range []struct{ label, value string }{{"config", f.key}, {"env", f.env}, {"flag", f.flag}} {
 			if binding.value == "" || strings.ContainsAny(binding.value, " \t\n,\"`") {
@@ -208,9 +212,20 @@ func generate(s schema, source string) ([]byte, error) {
 		}
 	}
 	p("} }\n\n")
-	p("func (cfg *%s) applyFile(file *file%s) error {\nif file == nil { return nil }\n", s.name, s.name)
+	trustedParameter := ""
 	for _, f := range s.fields {
-		p("if file.%s != nil {\n", f.name)
+		if f.trustedFileOnly {
+			trustedParameter = ", trusted bool"
+			break
+		}
+	}
+	p("func (cfg *%s) applyFile(file *file%s%s) error {\nif file == nil { return nil }\n", s.name, s.name, trustedParameter)
+	for _, f := range s.fields {
+		condition := ""
+		if f.trustedFileOnly {
+			condition = "trusted && "
+		}
+		p("if %sfile.%s != nil {\n", condition, f.name)
 		if f.nonnegative {
 			p("if *file.%s < 0 { return exit(2, %q) }\n", f.name, s.provider+" "+f.key+" must be non-negative")
 		}
