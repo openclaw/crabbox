@@ -317,6 +317,15 @@ readiness preflight, API, AWS-GO gate, and live canary are in
 | Windows WSL2 | `--windows-mode wsl2`; launches on nested-virtualization families (`c8i`/`m8i`/`m8i-flex`/`r8i`); POSIX sync and commands run inside WSL with the Linux image Node/npm baseline. |
 | macOS | Requires an available EC2 Mac Dedicated Host in the region; On-Demand only. Admin-authenticated broker requests can pin any host with `CRABBOX_HOST_ID` / `aws.macHostId` (`CRABBOX_AWS_MAC_HOST_ID` is a legacy alias); normal broker users can pin only a host from their own released lease and otherwise use automatic discovery. |
 
+Managed WSL2 commands run as the non-root `crabbox` Linux user, with
+`HOME=/home/crabbox`, Bash, passwordless sudo, and membership in the `sudo` and
+`docker` groups. This user owns the work root and `/var/cache/crabbox`.
+Bootstrap sets `[user] default=crabbox` in `/etc/wsl.conf`, preserving other
+distro settings, so staged commands, WSL sessions, sync/copy, readiness, and
+workspace ownership share one identity. Root is used only for distro setup;
+the Windows SSH transport account is unchanged. Existing leases need
+reprovisioning to receive this setup.
+
 Managed WSL2 bootstrap runs the Node-only entrypoint of
 `scripts/install-linux-developer-tools.sh`, bundled in the CLI/coordinator rather
 than downloaded at boot. It uses the same Node major policy and, on the managed
@@ -334,6 +343,10 @@ This avoids WSL datasource discovery blocking systemd and root login during
 later command invocations. Bootstrap restarts the distro and verifies its Linux
 ready check before publishing the setup marker; warmup also checks the WSL SSH
 runtime. `inspect` and `status` allow a 30-second WSL2 readiness probe.
+
+Managed WSL2 leases set `[general] instanceIdleTimeout=-1` in the Windows SSH
+user's `.wslconfig` so detached Linux daemons survive between commands until
+lease cleanup. Command deadlines and lease expiration still apply.
 
 Headless managed WSL2 leases also disable WSLg with `guiApplications=false` in
 the Windows SSH user's `.wslconfig`, preserving other settings. The GUI/RDP

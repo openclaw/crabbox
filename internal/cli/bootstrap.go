@@ -279,10 +279,43 @@ Acquire::https::Timeout "30";
 APT
 rm -rf /var/lib/apt/lists/*
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl git jq python3-minimal rsync
+apt-get install -y --no-install-recommends ca-certificates curl git jq python3 rsync sudo
+if ! id -u crabbox >/dev/null 2>&1; then
+  useradd --create-home --user-group --shell /bin/bash crabbox
+fi
+groupadd -f docker
+usermod --append --groups sudo,docker --shell /bin/bash crabbox
+test "$(id -u crabbox)" -ne 0
+install -d -m 0755 /etc/sudoers.d
+printf '%s\n' 'crabbox ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/crabbox
+chmod 0440 /etc/sudoers.d/crabbox
+visudo -cf /etc/sudoers.d/crabbox
+chown -R crabbox:crabbox ` + shellQuote(workRoot) + ` /var/cache/crabbox
+# All WSL transports inherit this identity, including staged helpers and rsync.
+# Preserve the distro's boot, automount, networking, and interop settings.
+python3 - <<'WSL_USER'
+import configparser
+from pathlib import Path
+path = Path('/etc/wsl.conf')
+config = configparser.ConfigParser(interpolation=None)
+config.optionxform = str
+config.read(path)
+if not config.has_section('user'):
+    config.add_section('user')
+config.set('user', 'default', 'crabbox')
+with path.open('w') as output:
+    config.write(output, space_around_delimiters=False)
+WSL_USER
 ` + sharedLinuxNodeInstall() + sharedWslTruffleHogInstall() + `cat >/usr/local/bin/crabbox-ready <<'READY'
 #!/usr/bin/env bash
 set -euo pipefail
+test "$(id -u)" -ne 0
+test "$(id -un)" = crabbox
+test "$HOME" = /home/crabbox
+test -w "$HOME"
+sudo -n true
+test -w /var/cache/crabbox/npm
+test -w /var/cache/crabbox/pnpm
 git --version >/dev/null
 python3 --version >/dev/null
 rsync --version >/dev/null
@@ -296,7 +329,7 @@ test -w ` + shellQuote(workRoot) + `
 READY
 chmod 0755 /usr/local/bin/crabbox-ready
 touch /var/lib/crabbox/bootstrapped
-crabbox-ready
+sudo -H -u crabbox /usr/local/bin/crabbox-ready
 '@
 	$linuxSetup = $linuxSetup.Replace(([string][char]13 + [string][char]10), ([string][char]10))
 	[IO.File]::WriteAllText($wslSetup, $linuxSetup, (New-Object Text.UTF8Encoding($false)))
@@ -304,7 +337,7 @@ crabbox-ready
 	if ($LASTEXITCODE -ne 0) { throw "WSL setup failed with exit $LASTEXITCODE" }
 	wsl.exe --terminate $wslDistro | Out-Host
 	if ($LASTEXITCODE -ne 0) { throw "WSL restart failed with exit $LASTEXITCODE" }
-	wsl.exe -d $wslDistro --user root --exec /usr/local/bin/crabbox-ready
+	wsl.exe -d $wslDistro --exec /usr/local/bin/crabbox-ready
 	if ($LASTEXITCODE -ne 0) { throw "WSL cold-start readiness failed with exit $LASTEXITCODE" }
 	Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
 	Restart-Service sshd -Force
