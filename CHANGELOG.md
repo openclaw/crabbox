@@ -1,8 +1,6 @@
 # Changelog
 
-## Unreleased
-
-Planned for **0.53.0**.
+## 0.53.0 - 2026-09-08
 
 ### Highlights
 
@@ -32,12 +30,15 @@ Planned for **0.53.0**.
 - Add scoped AWS provisioning diagnostics for credential preparation, signing, SDK request time, and retry-loop signing counts, keeping concurrent operations separate without changing retry behavior or recording request material. [PR 1968](https://github.com/openclaw/crabbox/pull/1968). Thanks @steipete.
 - Retain sanitized measured-image publication outcomes after success, failure, or interruption, with validated partial cohort measurements, opaque promotion binding, and final rollback and cleanup state. Runner loss leaves the initialized conservative outcome for investigation. [PR 1986](https://github.com/openclaw/crabbox/pull/1986). Thanks @vincentkoc.
 
+### Companion integration
+
+- **OpenClaw warm-image cleanup:** OpenClaw builds containing [PR 142166](https://github.com/openclaw/openclaw/pull/142166) restore maintenance when worker profiles use different Crabbox executables. Cleanup tries each configured catalog, retains deletion obligations on errors or deadline exhaustion, and preserves cancellation and allocation pins. Update OpenClaw separately to receive this plugin fix. Thanks @steipete.
+
 ### Maintenance
 
 - Consolidate bounded byte buffers across command capture, controller/token helpers, SSH diagnostics, Agent Sandbox, and Blacksmith while preserving limits, cancellation, snapshot isolation, truncation visibility, exit handling, and Actions URL discovery. [PR 1972](https://github.com/openclaw/crabbox/pull/1972), [PR 1973](https://github.com/openclaw/crabbox/pull/1973), [PR 1977](https://github.com/openclaw/crabbox/pull/1977). Thanks @steipete.
 - Share service-control run-option validation across FastAPI Cloud, Railway, and Unikraft Cloud while preserving rejection messages, precedence, and refusal before provider access. [PR 1979](https://github.com/openclaw/crabbox/pull/1979). Thanks @steipete.
 - Consolidate generated CodeSandbox, CUA, and OpenSandbox configuration bindings while preserving defaults, precedence, validation timing, trusted-only bridge settings, API URL restrictions, and CLI-only stale-claim cleanup. [PR 1988](https://github.com/openclaw/crabbox/pull/1988), [PR 1989](https://github.com/openclaw/crabbox/pull/1989), [PR 1990](https://github.com/openclaw/crabbox/pull/1990). Thanks @steipete.
-
 - Keep CUA runtime and Python bridge defaults aligned with declared configuration, preserving custom SDK imports, whitespace fallback behavior, and read-only diagnostics. [PR 1992](https://github.com/openclaw/crabbox/pull/1992). Thanks @steipete.
 
 ## 0.52.0 - 2026-09-07
