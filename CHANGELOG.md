@@ -25,7 +25,7 @@
 
 - Describe CodeSandbox configuration bindings once, preserving defaults, file/environment/flag precedence, validation order, and trusted-only bridge settings. [PR 1988](https://github.com/openclaw/crabbox/pull/1988). Thanks @steipete.
 
-- Describe CUA configuration bindings once, preserving environment/flag-only API URL selection and its alias, trusted-only bridge settings, defaults, and validation order.
+- Describe CUA configuration bindings once, preserving environment/flag-only API URL selection and its alias, trusted-only bridge settings, defaults, and validation order. [PR 1989](https://github.com/openclaw/crabbox/pull/1989). Thanks @steipete.
 
 ## 0.52.0 - 2026-09-07
 
