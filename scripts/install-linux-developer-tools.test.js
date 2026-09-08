@@ -1062,11 +1062,17 @@ test("linux developer image keeps the existing TruffleHog binary when candidate 
 test("linux developer image reports TruffleHog from the configured install directory", () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-trufflehog-version-"));
 	const fixture = installTruffleHogFixture(dir);
+	const goLinkDir = path.join(dir, "go-links");
 	const osRelease = path.join(dir, "os-release");
+	fs.mkdirSync(goLinkDir);
 	fs.writeFileSync(osRelease, "PRETTY_NAME='Test Linux'\n", "utf8");
 	writeExecutable(
 		path.join(fixture.targetBin, "trufflehog"),
 		"#!/usr/bin/env bash\nprintf 'trufflehog 3.95.9\\n'\n",
+	);
+	writeExecutable(
+		path.join(goLinkDir, "go"),
+		"#!/usr/bin/env bash\nprintf 'go version go1.27.0 linux/amd64\\n'\n",
 	);
 	for (const command of ["git", "gh", "jq", "rg", "fd", "python3", "node", "npm", "corepack", "pnpm", "docker"]) {
 		writeExecutable(
@@ -1074,9 +1080,18 @@ test("linux developer image reports TruffleHog from the configured install direc
 			`#!/usr/bin/env bash\nprintf '${command} test-version\\n'\n`,
 		);
 	}
+	writeExecutable(
+		path.join(fixture.bin, "uname"),
+		"#!/usr/bin/env bash\ncase \"${1:-}\" in\n  -s) printf 'Linux\\n' ;;\n  -m) printf 'x86_64\\n' ;;\nesac\n",
+	);
 	const result = spawnSync(
 		"bash",
-		["-c", "set -euo pipefail\nsource scripts/install-linux-developer-tools.sh\nprint_versions"],
+		[
+			"-c",
+			'set -euo pipefail\nsource scripts/install-linux-developer-tools.sh\ngo_link_dir="$1"\nprint_versions',
+			"bash",
+			goLinkDir,
+		],
 		{
 			cwd: repoRoot,
 			env: {
@@ -1090,6 +1105,7 @@ test("linux developer image reports TruffleHog from the configured install direc
 	);
 
 	assert.equal(result.status, 0, result.stderr || result.stdout);
+	assert.match(result.stdout, /go version go1\.27\.0 linux\/amd64/);
 	assert.match(result.stdout, /trufflehog 3\.95\.9/);
 });
 
