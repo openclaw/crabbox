@@ -492,17 +492,18 @@ export class GCPClient {
             throw error;
           }
           const message = errorMessage(error);
+          const fallback = isFallbackProvisioningError(error);
           history.record(
             {
               region: zone,
               serverType: machineType,
               market: config.capacityMarket,
-              category: isFallbackProvisioningError(message) ? "capacity" : "fatal",
+              category: fallback ? "capacity" : "fatal",
               message,
             },
             `${zone}/${machineType}: ${message}`,
           );
-          if (!isFallbackProvisioningError(message)) {
+          if (!fallback) {
             throw history.error("", { cause: error });
           }
         }
@@ -544,17 +545,18 @@ export class GCPClient {
               throw error;
             }
             const message = errorMessage(error);
+            const fallback = isFallbackProvisioningError(error);
             history.record(
               {
                 region: zone,
                 serverType: machineType,
                 market: "on-demand",
-                category: isFallbackProvisioningError(message) ? "capacity" : "fatal",
+                category: fallback ? "capacity" : "fatal",
                 message,
               },
               `on-demand ${zone}/${machineType}: ${message}`,
             );
-            if (!isFallbackProvisioningError(message)) {
+            if (!fallback) {
               throw history.error("", { cause: error });
             }
           }
@@ -1494,7 +1496,12 @@ export function gcpProviderLabelValue(value: string): string {
   return gcpLabelValue(providerLabelValue(value));
 }
 
-export function isFallbackProvisioningError(message: string): boolean {
+export function isFallbackProvisioningError(error: unknown): boolean {
+  // Display summaries are lossy; keep complete HTTP evidence inside retry classification.
+  const message =
+    error instanceof GCPHTTPError
+      ? `gcp ${error.method} ${error.path}: http ${error.status}: ${error.body}`
+      : errorMessage(error);
   const value = message.toLowerCase();
   return (
     value.includes("quota") ||
