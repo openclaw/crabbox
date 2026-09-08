@@ -93,6 +93,7 @@ import type {
   RunEventRecord,
   RunRecord,
 } from "../src/types";
+import { gcpBillingBody, gcpBillingError, gcpBillingMessage } from "./fixtures/gcp-billing-error";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -11028,6 +11029,62 @@ describe("fleet lease identity and idle", () => {
       state: "active",
       cloudID: "crabbox-fleet-is-gcp-recovery-c80c2195",
       host: "192.0.2.10",
+    });
+  });
+
+  it.each([
+    gcpBillingBody,
+    JSON.stringify({ ...gcpBillingError, detail: "x".repeat(3000) }, null, 2),
+  ])("preserves quoted GCP billing errors in lease failures and HTTP responses", async (body) => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const diagnostic = `gcp GET /global/firewalls/crabbox-ssh-8aa5859a: http 403: ${body}`;
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        onPrepareLeaseCreate(config, lease) {
+          return { config, lease, provisioning: {} };
+        },
+        async onCreateProvisioning() {
+          throw new ProvisioningAttemptsError(`europe-west2-a/c4-standard-4: ${diagnostic}`, [
+            {
+              region: "europe-west2-a",
+              serverType: "c4-standard-4",
+              category: "fatal",
+              message: diagnostic,
+            },
+          ]);
+        },
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          leaseID,
+          provider: "gcp",
+          target: "linux",
+          gcpProject: "proj",
+          gcpZone: "europe-west2-a",
+          serverType: "c4-standard-4",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    const failure = (await response.json()) as { error: string };
+    expect(failure.error).toContain(gcpBillingMessage);
+    expect(failure.error).toContain('"reason": "forbidden"');
+    expect(failure.error.length).toBeLessThanOrEqual(2048);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      failureError: failure.error,
+    });
+    const inspected = await fleet.fetch(request("GET", `/v1/leases/${leaseID}`));
+    expect(inspected.status).toBe(200);
+    await expect(inspected.json()).resolves.toMatchObject({
+      lease: { failureError: failure.error },
     });
   });
 
