@@ -1345,6 +1345,8 @@ while IFS= read -r path; do
 done < "$files.sorted" > "$archive_list"
 metadata=(.crabbox/capture-manifest.txt)
 if [ -f "$gateway_tail" ]; then metadata+=(.crabbox/gateway-log-tail.txt); fi
+capture_require_space scratch "$scratch"
+capture_require_space output "$out_dir"
 raw_archive="$scratch/capture.tar"
 (
   capture_apply_file_limit

@@ -224,10 +224,11 @@ func setupRunCleanupWorkspaceOwnerTest(t *testing.T) string {
 	isolateRunTestUserDirs(t, dir)
 	t.Chdir(dir)
 	sshPath := filepath.Join(dir, "ssh")
+	downloadedProof := []byte("proof-downloaded\n")
 	commandScript := `#!/bin/sh
 printf '%s\n---\n' "$1" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$1" in
-  *"base64 <"*) printf 'cHJvb2YtZG93bmxvYWRlZAo='; exit 0 ;;
+  *"base64 <"*) printf '%s' ` + shellQuote(encodedRunDownloadPayload(int64(len(downloadedProof)), downloadedProof)) + `; exit 0 ;;
   *"renewal-cleanup-exit-23"*) exit 23 ;;
 esac
 exit 0

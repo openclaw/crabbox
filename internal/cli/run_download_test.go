@@ -333,12 +333,16 @@ func (write runDownloadWriterFunc) Write(data []byte) (int, error) {
 }
 
 func encodedRunDownload(advertised int64, payload []byte) io.Reader {
+	return strings.NewReader(encodedRunDownloadPayload(advertised, payload))
+}
+
+func encodedRunDownloadPayload(advertised int64, payload []byte) string {
 	var data bytes.Buffer
 	fmt.Fprintf(&data, "%s%8d\n", remoteDownloadHeaderPrefix, advertised)
 	encoder := base64.NewEncoder(base64.StdEncoding, &data)
 	_, _ = encoder.Write(payload)
 	_ = encoder.Close()
-	return &data
+	return data.String()
 }
 
 type cancelingRunDownloadReader struct {
