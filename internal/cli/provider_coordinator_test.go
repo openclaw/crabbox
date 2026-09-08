@@ -2630,9 +2630,15 @@ func TestCoordinatorResolveRejectsConfirmedReleasedExecution(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), leaseID) || !strings.Contains(err.Error(), "released") {
 				t.Fatalf("released execution should fail before SSH preparation: %v", err)
 			}
-			resolved, err := backend.Resolve(t.Context(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
-			if err != nil || resolved.LeaseID != leaseID || resolved.Server.Status != "released" {
-				t.Fatalf("released metadata must remain available for cleanup: lease=%#v err=%v", resolved, err)
+			for _, req := range []ResolveRequest{
+				{ID: leaseID},
+				{ID: leaseID, ReleaseOnly: true},
+				{ID: leaseID, ReleaseOnly: true, Prepare: true},
+			} {
+				resolved, err := backend.Resolve(t.Context(), req)
+				if err != nil || resolved.LeaseID != leaseID || resolved.Server.Status != "released" {
+					t.Fatalf("released metadata must remain available for inspection and cleanup: lease=%#v err=%v", resolved, err)
+				}
 			}
 		})
 	}
