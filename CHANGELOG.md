@@ -13,7 +13,7 @@
 
 - Describe FastAPI Cloud configuration bindings once while preserving environment-only tokens, source precedence, and credential-destination checks. [PR 2004](https://github.com/openclaw/crabbox/pull/2004). Thanks @steipete.
 
-- Describe Railway configuration bindings once, sharing the client endpoint default while preserving environment-only tokens, source precedence, and existing claim routing. Thanks @steipete.
+- Describe Railway configuration bindings once, sharing the client endpoint default while preserving environment-only tokens, source precedence, and existing claim routing. [PR 2007](https://github.com/openclaw/crabbox/pull/2007). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 
