@@ -199,6 +199,12 @@ serialization and live bridge ownership are process-local. PostgreSQL and
 pg-boss are durable, but horizontal replicas need distributed locking and
 bridge routing first.
 
+Maintenance reuses the egress owner's completed cleanup result within the current
+runtime, so ended leases do not repeatedly delete already-cleared bridge state.
+New egress writes invalidate that result before persistence; failed cleanup stays
+retryable. Ready-pool maintenance reads only the leases referenced by its entries,
+and interrupted-provisioning checks read journals only for recovery candidates.
+
 ## Coordinator HTTP API
 
 Lease lifecycle:

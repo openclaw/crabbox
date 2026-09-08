@@ -1112,7 +1112,7 @@ export class FleetCoordinator {
   // offline is accepted residual risk. Full closure would require server-bound session identity
   // (protocol change, out of scope).
   private readonly replacedEgressSessions = new Map<string, string[]>();
-  private readonly hydratedEgressSessionState = new Set<string>();
+  private readonly egressSessionState = new Map<string, "loaded" | "cleared">();
   private readonly egressSessionStateHydrations = new Map<string, Promise<void>>();
   private readonly runtimeAdapterAgents = new Map<string, WebSocket>();
   private readonly runtimeAdapterPending = new Map<string, RuntimeAdapterPendingRequest>();
@@ -2590,6 +2590,7 @@ export class FleetCoordinator {
     if (sessionProfile) {
       sessionStatus.profile = sessionProfile;
     }
+    this.egressSessionState.set(leaseID, "loaded");
     await this.state.storage.put(activeEgressSessionKey(leaseID), sessionStatus);
     this.egressSessions.set(leaseID, sessionStatus);
   }
@@ -2607,12 +2608,13 @@ export class FleetCoordinator {
     if (replaced.length > replacedEgressSessionsPerLease) {
       replaced.shift();
     }
+    this.egressSessionState.set(leaseID, "loaded");
     await this.state.storage.put(replacedEgressSessionsKey(leaseID), replaced);
     this.replacedEgressSessions.set(leaseID, replaced);
   }
 
   private async hydrateEgressSessionState(leaseID: string): Promise<void> {
-    if (this.hydratedEgressSessionState.has(leaseID)) {
+    if (this.egressSessionState.has(leaseID)) {
       return;
     }
     const existing = this.egressSessionStateHydrations.get(leaseID);
@@ -2637,7 +2639,7 @@ export class FleetCoordinator {
       } else if (active && !this.egressSessions.has(leaseID)) {
         this.egressSessions.set(leaseID, active);
       }
-      this.hydratedEgressSessionState.add(leaseID);
+      this.egressSessionState.set(leaseID, "loaded");
     })();
     this.egressSessionStateHydrations.set(leaseID, pending);
     try {
@@ -12326,13 +12328,16 @@ export class FleetCoordinator {
         this.egressClients.delete(key);
       }
     }
+    // Retirement sweeps revisit history. Only a completed delete can suppress a repeat;
+    // activation invalidates this fact before writing new state, and failures remain retryable.
+    if (this.egressSessionState.get(leaseID) === "cleared") return;
     this.egressSessions.delete(leaseID);
     await Promise.all([
       this.state.storage.delete(activeEgressSessionKey(leaseID)),
       this.state.storage.delete(replacedEgressSessionsKey(leaseID)),
     ]);
     this.replacedEgressSessions.delete(leaseID);
-    this.hydratedEgressSessionState.add(leaseID);
+    this.egressSessionState.set(leaseID, "cleared");
   }
 
   private async closeLeaseBridges(leaseID: string, code: number, reason: string): Promise<void> {
@@ -13778,10 +13783,12 @@ export class FleetCoordinator {
       this.visitStorageRecords<ReadyPoolEntry>(typedReadyPoolPrefix, async (entry) => {
         typedEntries.push(entry);
       }),
-      this.visitLeaseRecords(async (lease) => {
-        leases.set(lease.id, lease);
-      }),
     ]);
+    for (const leaseID of new Set([...entries, ...typedEntries].map((entry) => entry.leaseID))) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- bound retained-pool hydration to one referenced lease at a time.
+      const lease = await this.getLease(leaseID, { noCache: true });
+      if (lease) leases.set(leaseID, lease);
+    }
     await this.maintainReadyPoolEntries(entries, leases, nowMs);
     await this.maintainReadyPoolEntries(typedEntries, leases, nowMs, true);
     await this.visitStorageRecords<ReadyPoolFillClaim>(readyPoolFillClaimPrefix, async (claim) => {
@@ -16525,13 +16532,15 @@ export class FleetCoordinator {
         if (due.length >= interruptedProvisioningRecoveryBatchSize) {
           return;
         }
-        if (await provisioningOwnsLease(this.state.storage, lease.id)) return;
         const recoveryAt = interruptedProvisioningRecoveryAt(
           lease,
           this.coordinatorGeneration,
           now,
         );
-        if (recoveryAt === undefined) {
+        if (
+          recoveryAt === undefined ||
+          (await provisioningOwnsLease(this.state.storage, lease.id))
+        ) {
           return;
         }
         if (!Number.isFinite(Date.parse(lease.provisioningRecoveryObservedAt ?? ""))) {
