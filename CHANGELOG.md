@@ -11,7 +11,7 @@
 - Enforce controller and coordinator token-command output limits consistently during pipe copying, preserving the existing overflow errors and command deadlines. [PR 1971](https://github.com/openclaw/crabbox/pull/1971).
 - Share byte-prefix storage across command capture, controller responses, and coordinator token helpers while preserving each caller's limits, cancellation, and diagnostics. [PR 1972](https://github.com/openclaw/crabbox/pull/1972).
 - Reuse shared prefix storage for SSH diagnostics and artifact capture while preserving locked, cloned snapshots and truncation visibility. [PR 1973](https://github.com/openclaw/crabbox/pull/1973).
-- Share raw byte-tail storage for Agent Sandbox stderr and Blacksmith proof streams while preserving native exit handling, Actions URL discovery, and cloned snapshots.
+- Share raw byte-tail storage for Agent Sandbox stderr and Blacksmith proof streams while preserving native exit handling, Actions URL discovery, and cloned snapshots. [PR 1977](https://github.com/openclaw/crabbox/pull/1977).
 
 ## 0.52.0 - 2026-09-07
 
