@@ -654,9 +654,9 @@ describe("aws provider", () => {
         }
         if (action === "DescribeSecurityGroups") {
           describedGroupID = params.get("GroupId.1") ?? "";
-          describedGroupName = params.get("Filter.1.Value.1") ?? "";
+          describedGroupName = params.get("GroupName.1") ?? "";
           return ec2XMLResponse(
-            "<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-workspaces</groupId><groupName>crabbox-workspaces</groupName><ipPermissions /></item></securityGroupInfo></DescribeSecurityGroupsResponse>",
+            "<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-workspaces</groupId><groupName>crabbox-workspaces</groupName><vpcId>vpc-default</vpcId><ipPermissions /></item></securityGroupInfo></DescribeSecurityGroupsResponse>",
           );
         }
         if (action === "RevokeSecurityGroupIngress") {
@@ -715,8 +715,9 @@ describe("aws provider", () => {
           describeSecurityGroups += 1;
           return ec2XMLResponse(
             describeSecurityGroups === 1
-              ? "<DescribeSecurityGroupsResponse><securityGroupInfo /></DescribeSecurityGroupsResponse>"
+              ? "<Response><Errors><Error><Code>InvalidGroup.NotFound</Code><Message>not yet visible</Message></Error></Errors></Response>"
               : "<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-raced</groupId><ipPermissions /></item></securityGroupInfo></DescribeSecurityGroupsResponse>",
+            describeSecurityGroups === 1 ? 400 : 200,
           );
         }
         if (action === "CreateSecurityGroup") {

@@ -85,6 +85,17 @@ const snapshotDeleteBackoffMs = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
 const securityGroupVisibilityBackoffMs = [100, 200, 400, 800, 1_600, 3_200];
 const awsInstanceVisibilityBackoffMs = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
 
+class AWSQueryError extends Error {
+  constructor(
+    readonly action: string,
+    readonly status: number,
+    readonly code: string,
+    detail: string,
+  ) {
+    super(`aws ${action}: http ${status}: ${detail}`);
+  }
+}
+
 export interface AWSPrivateWorkspaceConfig {
   accountID: string;
   region: string;
@@ -2377,18 +2388,56 @@ export class EC2SpotClient {
         return groupID;
       }
     } else {
-      const vpcID = await measure("security_group_vpc", () => this.securityGroupVPC(config));
       const name = awsManagedSecurityGroupName(config);
-      const existing = await measure("security_group_lookup", () =>
-        this.ec2("DescribeSecurityGroups", {
-          "Filter.1.Name": "group-name",
-          "Filter.1.Value.1": name,
-          "Filter.2.Name": "vpc-id",
-          "Filter.2.Value.1": vpcID,
-        }),
+      const scopedLookup = Boolean(
+        config.awsSubnetID ||
+        this.env.CRABBOX_AWS_SUBNET_ID ||
+        this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT,
       );
-      group = items(record(existing["securityGroupInfo"])["item"])[0];
+      const vpc = measure("security_group_vpc", () => this.securityGroupVPC(config));
+      const lookup = (params: Record<string, string>) =>
+        measure("security_group_lookup", () => this.ec2("DescribeSecurityGroups", params));
+      // EC2 GroupName selects only the default VPC. Subnet-scoped queries still
+      // depend on VPC discovery; every mutation waits for both reads and scope validation.
+      const existing = scopedLookup
+        ? vpc.then((vpcID) =>
+            lookup({
+              "Filter.1.Name": "group-name",
+              "Filter.1.Value.1": name,
+              "Filter.2.Name": "vpc-id",
+              "Filter.2.Value.1": vpcID,
+            }),
+          )
+        : lookup({ "GroupName.1": name }).catch((error: unknown): Record<string, unknown> => {
+            if (
+              !(error instanceof AWSQueryError) ||
+              error.action !== "DescribeSecurityGroups" ||
+              error.status !== 400 ||
+              error.code !== "InvalidGroup.NotFound"
+            ) {
+              throw error;
+            }
+            return {};
+          });
+      // Retain the ingress owner until both reads settle, including either failure.
+      // VPC errors keep their existing precedence over security-group lookup errors.
+      const [vpcResult, groupResult] = await Promise.allSettled([vpc, existing]);
+      if (vpcResult.status === "rejected") throw vpcResult.reason;
+      if (groupResult.status === "rejected") throw groupResult.reason;
+      const vpcID = vpcResult.value;
+      const groups = items(record(groupResult.value["securityGroupInfo"])["item"]);
+      group = groups[0];
       groupID = asString(record(group)["groupId"]);
+      if (
+        !scopedLookup &&
+        groups.length > 0 &&
+        (groups.length !== 1 ||
+          !groupID ||
+          asString(record(group)["groupName"]) !== name ||
+          asString(record(group)["vpcId"]) !== vpcID)
+      ) {
+        throw new Error("AWS default VPC security group lookup returned an unexpected group");
+      }
       if (!groupID) {
         try {
           const created = await measure("security_group_create", () =>
@@ -2740,7 +2789,7 @@ export class EC2SpotClient {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(this.awsQueryErrorMessage(action, response.status, text));
+      throw this.awsQueryError(action, response.status, text);
     }
     const parsed = this.parser.parse(text) as unknown;
     const parsedRecord = record(parsed);
@@ -2760,7 +2809,7 @@ export class EC2SpotClient {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(this.awsQueryErrorMessage(action, response.status, text));
+      throw this.awsQueryError(action, response.status, text);
     }
     const parsed = this.parser.parse(text) as unknown;
     const parsedRecord = record(parsed);
@@ -2797,8 +2846,9 @@ export class EC2SpotClient {
     return record(text ? JSON.parse(text) : {});
   }
 
-  private awsQueryErrorMessage(action: string, status: number, text: string): string {
+  private awsQueryError(action: string, status: number, text: string): AWSQueryError {
     let detail = "";
+    let code = "";
     try {
       const parsed = this.parser.parse(text) as unknown;
       const parsedRecord = record(parsed);
@@ -2813,13 +2863,14 @@ export class EC2SpotClient {
             record(root["Errors"])["error"],
         )[0],
       );
-      const code = asString(error["Code"] ?? error["code"]);
+      code = asString(error["Code"] ?? error["code"]);
       const message = asString(error["Message"] ?? error["message"]);
       detail = code && message ? `${code}: ${message}` : code || message;
     } catch {
       detail = "";
+      code = "";
     }
-    return `aws ${action}: http ${status}: ${detail || trimBody(text).replace(/\s+/g, " ")}`;
+    return new AWSQueryError(action, status, code, detail || trimBody(text).replace(/\s+/g, " "));
   }
 
   private async appliedServiceQuota(quotaCode: string): Promise<number | undefined> {

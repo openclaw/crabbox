@@ -25137,7 +25137,7 @@ describe("fleet lease identity and idle", () => {
         }
         if (action === "DescribeSecurityGroups") {
           return new Response(`<?xml version="1.0" encoding="UTF-8"?>
-<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-shared</groupId><ipPermissions><item><ipProtocol>tcp</ipProtocol><fromPort>22</fromPort><toPort>22</toPort><ipRanges><item><cidrIp>198.51.100.10/32</cidrIp><description>Crabbox SSH</description></item><item><cidrIp>198.51.100.20/32</cidrIp><description>Crabbox SSH</description></item></ipRanges></item></ipPermissions></item></securityGroupInfo></DescribeSecurityGroupsResponse>`);
+<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-shared</groupId><groupName>crabbox-runners</groupName><vpcId>vpc-default</vpcId><ipPermissions><item><ipProtocol>tcp</ipProtocol><fromPort>22</fromPort><toPort>22</toPort><ipRanges><item><cidrIp>198.51.100.10/32</cidrIp><description>Crabbox SSH</description></item><item><cidrIp>198.51.100.20/32</cidrIp><description>Crabbox SSH</description></item></ipRanges></item></ipPermissions></item></securityGroupInfo></DescribeSecurityGroupsResponse>`);
         }
         if (action === "RevokeSecurityGroupIngress") {
           revokedCIDRs.push(params.get("IpPermissions.1.IpRanges.1.CidrIp") ?? "");
@@ -25203,7 +25203,7 @@ describe("fleet lease identity and idle", () => {
         }
         if (action === "DescribeSecurityGroups") {
           return new Response(`<?xml version="1.0" encoding="UTF-8"?>
-<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-auto</groupId><groupName>crabbox-runners</groupName><ipPermissions><item><ipProtocol>tcp</ipProtocol><fromPort>22</fromPort><toPort>22</toPort><ipRanges><item><cidrIp>198.51.100.10/32</cidrIp><description>Crabbox SSH</description></item><item><cidrIp>198.51.100.20/32</cidrIp><description>Crabbox SSH</description></item></ipRanges></item></ipPermissions></item></securityGroupInfo></DescribeSecurityGroupsResponse>`);
+<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-auto</groupId><groupName>crabbox-runners</groupName><vpcId>vpc-default</vpcId><ipPermissions><item><ipProtocol>tcp</ipProtocol><fromPort>22</fromPort><toPort>22</toPort><ipRanges><item><cidrIp>198.51.100.10/32</cidrIp><description>Crabbox SSH</description></item><item><cidrIp>198.51.100.20/32</cidrIp><description>Crabbox SSH</description></item></ipRanges></item></ipPermissions></item></securityGroupInfo></DescribeSecurityGroupsResponse>`);
         }
         if (action === "RevokeSecurityGroupIngress") {
           revokedCIDRs.push(params.get("IpPermissions.1.IpRanges.1.CidrIp") ?? "");
@@ -25257,14 +25257,14 @@ describe("fleet lease identity and idle", () => {
           );
         }
         if (action === "DescribeSecurityGroups") {
-          const groupName = params.get("Filter.1.Value.1") ?? "";
+          const groupName = params.get("GroupName.1") ?? "";
           const groupID = groupName === "crabbox-workspaces" ? "sg-workspaces" : "sg-runners";
           const ingress =
             groupName === "crabbox-runners"
               ? "<ipPermissions><item><ipProtocol>tcp</ipProtocol><fromPort>22</fromPort><toPort>22</toPort><ipRanges><item><cidrIp>198.51.100.10/32</cidrIp><description>Crabbox SSH</description></item><item><cidrIp>198.51.100.20/32</cidrIp><description>Crabbox SSH</description></item></ipRanges></item></ipPermissions>"
               : "<ipPermissions />";
           return new Response(
-            `<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>${groupID}</groupId><groupName>${groupName}</groupName>${ingress}</item></securityGroupInfo></DescribeSecurityGroupsResponse>`,
+            `<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>${groupID}</groupId><groupName>${groupName}</groupName><vpcId>vpc-default</vpcId>${ingress}</item></securityGroupInfo></DescribeSecurityGroupsResponse>`,
           );
         }
         if (action === "RevokeSecurityGroupIngress") {

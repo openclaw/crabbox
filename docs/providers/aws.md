@@ -155,6 +155,13 @@ class is `beast`.
 
 ## Provisioning diagnostics
 
+For coordinator-managed groups in the default VPC, VPC discovery and the
+[default-VPC group-name lookup](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeSecurityGroups.html)
+run together. Both reads finish and the returned group scope is checked before
+any ingress change. Subnet-scoped discovery still resolves the subnet's VPC
+first; explicitly configured and private-workspace groups keep their existing
+lookup paths.
+
 Coordinator AWS create logs use the `crabbox_aws_provisioning` component. Each
 fixed operation bucket can include `transport` totals for its signed requests.
 Nested operations own their own totals; concurrent creates and preparation
