@@ -394,6 +394,12 @@ func TestAnthropicSandboxRuntimeGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestCloudRunSandboxGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_cloud_run_sandbox.go", "../../internal/cli/config_cloud_run_sandbox_generated.go", "CloudRunSandboxConfig", "cloud-run-sandbox", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {

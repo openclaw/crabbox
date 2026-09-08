@@ -1,10 +1,12 @@
 # Typed provider config bindings
 
-Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, and Anthropic Sandbox Runtime describe their mechanical config bindings
+Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime, and
+Cloud Run Sandbox describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
-`internal/cli/config_opensandbox.go`, and
-`internal/cli/config_anthropic_sandbox_runtime.go`.
+`internal/cli/config_opensandbox.go`,
+`internal/cli/config_anthropic_sandbox_runtime.go`, and
+`internal/cli/config_cloud_run_sandbox.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 pointer-valued YAML input fields, compiled defaults, file/environment overlays,
@@ -61,7 +63,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -142,6 +144,15 @@ validation, and an explicitly empty CLI flag still overrides and fails that
 validation. The native binary fallback uses the same generated `srt` default.
 The `srt` provider alias, native argument/environment handling, and SRT-owned
 settings and sandbox-policy validation remain outside generation.
+
+Cloud Run Sandbox's six fields include five YAML bindings; the gateway URL stays
+environment/flag-only, including in trusted user config. The three string YAML
+bindings ignore empty values without trimming, while explicit false values
+still apply. Existing environment aliases, generic sizing guards, and validation
+order remain in place. The launcher, doctor, cleanup hint, claim scope, and
+workdir helper use the generated CLI/workdir defaults. Raw-zero config, operation
+option precedence, keeper workdir omission, helper cwd, and timeouts retain their
+separate semantics; generated defaults do not fill every empty runtime option.
 
 The generator accepts only these four exact source grants. Credential handling,
 destination validation and provenance, provider aliases, and provider selection

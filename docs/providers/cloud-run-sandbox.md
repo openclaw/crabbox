@@ -59,9 +59,10 @@ Official references:
 | **Remote** | Laptop or CI | HTTP to a durable-routing gateway that owns the stateful lifecycle | Maintainers, CI, local proof |
 | **Direct** | Process already on Cloud Run | `Runtime.Exec` → `/usr/local/gcp/bin/sandbox` | Agents/services that already run on Cloud Run |
 
-Remote mode is selected when `CLOUD_RUN_SANDBOX_URL` (or
-`CRABBOX_CLOUD_RUN_SANDBOX_GATEWAY_URL`) **and** a secret are set. Otherwise
-Crabbox uses direct mode.
+A nonempty gateway URL selects remote mode and requires a secret. A missing
+secret is an error, not a fallback to direct mode. Without a gateway URL,
+Crabbox uses direct mode. `CRABBOX_CLOUD_RUN_SANDBOX_GATEWAY_URL` takes precedence
+over `CLOUD_RUN_SANDBOX_URL`; `--cloud-run-sandbox-gateway-url` overrides both.
 
 ## GCP setup (end-to-end)
 
@@ -375,6 +376,13 @@ CRABBOX_CLOUD_RUN_SANDBOX_ALLOW_EGRESS
 CRABBOX_CLOUD_RUN_SANDBOX_WRITE
 CRABBOX_CLOUD_RUN_SANDBOX_ROOTFS
 ```
+
+Omitted, null, or empty YAML `cliPath`, `workdir`, and `rootfs` values keep the
+inherited values. Whitespace-only strings still apply before existing runtime
+validation or interpretation. Explicit `allowEgress: false` and `write: false`
+override earlier true values. Visited flags, including empty strings and false,
+override earlier layers. The gateway URL remains environment/flag-only, even
+for trusted user YAML; credentials remain runtime environment inputs.
 
 ## Lifecycle
 

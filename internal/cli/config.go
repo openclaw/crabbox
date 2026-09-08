@@ -1023,21 +1023,6 @@ type DockerSandboxConfig struct {
 	Kit             []string
 }
 
-// CloudRunSandboxConfig configures the Google Cloud Run sandboxes provider.
-// Secrets (CLOUD_RUN_SANDBOX_SECRET / CLOUD_RUN_AUTH_TOKEN) are intentionally
-// absent: they are read at runtime from the environment only and never
-// persisted in Crabbox config or placed on argv.
-// GatewayURL is also not accepted from repository YAML; use flags or env so a
-// checked-in config cannot redirect a local secret to an untrusted endpoint.
-type CloudRunSandboxConfig struct {
-	GatewayURL  string
-	CLIPath     string
-	Workdir     string
-	AllowEgress bool
-	Write       bool
-	Rootfs      string
-}
-
 type ModalConfig struct {
 	App         string
 	Image       string
@@ -3019,13 +3004,8 @@ func baseConfig() Config {
 			CLIPath: "sbx",
 			Agent:   "shell",
 		},
-		AnthropicSRT: defaultAnthropicSRTConfig(),
-		CloudRunSandbox: CloudRunSandboxConfig{
-			CLIPath: "/usr/local/gcp/bin/sandbox",
-			Workdir: "/tmp/crabbox",
-			Write:   true,
-			Rootfs:  "/",
-		},
+		AnthropicSRT:    defaultAnthropicSRTConfig(),
+		CloudRunSandbox: defaultCloudRunSandboxConfig(),
 		Modal: ModalConfig{
 			App:     "crabbox",
 			Image:   "python:3.13-slim",
@@ -4102,14 +4082,6 @@ type fileDockerSandboxConfig struct {
 	ExtraWorkspaces *[]string `yaml:"extraWorkspaces,omitempty"`
 	MCP             *[]string `yaml:"mcp,omitempty"`
 	Kit             *[]string `yaml:"kit,omitempty"`
-}
-
-type fileCloudRunSandboxConfig struct {
-	CLIPath     string `yaml:"cliPath,omitempty"`
-	Workdir     string `yaml:"workdir,omitempty"`
-	AllowEgress *bool  `yaml:"allowEgress,omitempty"`
-	Write       *bool  `yaml:"write,omitempty"`
-	Rootfs      string `yaml:"rootfs,omitempty"`
 }
 
 type fileModalConfig struct {
@@ -6864,18 +6836,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	if err := cfg.AnthropicSRT.applyFile(file.AnthropicSRT); err != nil {
 		return err
 	}
-	if file.CloudRunSandbox != nil {
-		if file.CloudRunSandbox.CLIPath != "" {
-			cfg.CloudRunSandbox.CLIPath = file.CloudRunSandbox.CLIPath
-		}
-		if file.CloudRunSandbox.Workdir != "" {
-			cfg.CloudRunSandbox.Workdir = file.CloudRunSandbox.Workdir
-		}
-		applyOptional(&cfg.CloudRunSandbox.AllowEgress, file.CloudRunSandbox.AllowEgress)
-		applyOptional(&cfg.CloudRunSandbox.Write, file.CloudRunSandbox.Write)
-		if file.CloudRunSandbox.Rootfs != "" {
-			cfg.CloudRunSandbox.Rootfs = file.CloudRunSandbox.Rootfs
-		}
+	if err := cfg.CloudRunSandbox.applyFile(file.CloudRunSandbox); err != nil {
+		return err
 	}
 	if file.Modal != nil {
 		if file.Modal.App != "" {
@@ -8795,16 +8757,9 @@ func applyEnv(cfg *Config) error {
 	if err := cfg.AnthropicSRT.applyEnv(); err != nil {
 		return err
 	}
-	cfg.CloudRunSandbox.GatewayURL = getenv("CRABBOX_CLOUD_RUN_SANDBOX_GATEWAY_URL", getenv("CLOUD_RUN_SANDBOX_URL", cfg.CloudRunSandbox.GatewayURL))
-	cfg.CloudRunSandbox.CLIPath = getenv("CRABBOX_CLOUD_RUN_SANDBOX_CLI", getenv("CLOUD_RUN_SANDBOX_BINARY", cfg.CloudRunSandbox.CLIPath))
-	cfg.CloudRunSandbox.Workdir = getenv("CRABBOX_CLOUD_RUN_SANDBOX_WORKDIR", cfg.CloudRunSandbox.Workdir)
-	if value, ok := getenvBool("CRABBOX_CLOUD_RUN_SANDBOX_ALLOW_EGRESS"); ok {
-		cfg.CloudRunSandbox.AllowEgress = value
+	if err := cfg.CloudRunSandbox.applyEnv(); err != nil {
+		return err
 	}
-	if value, ok := getenvBool("CRABBOX_CLOUD_RUN_SANDBOX_WRITE"); ok {
-		cfg.CloudRunSandbox.Write = value
-	}
-	cfg.CloudRunSandbox.Rootfs = getenv("CRABBOX_CLOUD_RUN_SANDBOX_ROOTFS", cfg.CloudRunSandbox.Rootfs)
 	cfg.Modal.App = getenv("CRABBOX_MODAL_APP", cfg.Modal.App)
 	cfg.Modal.Image = getenv("CRABBOX_MODAL_IMAGE", cfg.Modal.Image)
 	cfg.Modal.Workdir = getenv("CRABBOX_MODAL_WORKDIR", cfg.Modal.Workdir)

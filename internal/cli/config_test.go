@@ -1549,18 +1549,13 @@ func TestCloudRunSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	if cfg.CloudRunSandbox.CLIPath != "/usr/local/gcp/bin/sandbox" || cfg.CloudRunSandbox.Workdir != "/tmp/crabbox" || !cfg.CloudRunSandbox.Write || cfg.CloudRunSandbox.Rootfs != "/" {
 		t.Fatalf("cloudRunSandbox defaults not applied: %#v", cfg.CloudRunSandbox)
 	}
-	allowEgress := true
-	write := false
-	applyFileConfig(&cfg, fileConfig{
-		Provider: "cloud-run-sandbox",
-		CloudRunSandbox: &fileCloudRunSandboxConfig{
-			CLIPath:     "/opt/sandbox",
-			Workdir:     "/workspace/app",
-			AllowEgress: &allowEgress,
-			Write:       &write,
-			Rootfs:      "/var/rootfs",
-		},
-	})
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("provider: cloud-run-sandbox\ncloudRunSandbox:\n  cliPath: /opt/sandbox\n  workdir: /workspace/app\n  allowEgress: true\n  write: false\n  rootfs: /var/rootfs\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
 	if cfg.Provider != "cloud-run-sandbox" || cfg.CloudRunSandbox.CLIPath != "/opt/sandbox" || cfg.CloudRunSandbox.Workdir != "/workspace/app" || !cfg.CloudRunSandbox.AllowEgress || cfg.CloudRunSandbox.Write || cfg.CloudRunSandbox.Rootfs != "/var/rootfs" {
 		t.Fatalf("file cloudRunSandbox config not applied: %#v", cfg.CloudRunSandbox)
 	}
@@ -1594,6 +1589,107 @@ func TestCloudRunSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 	if cfg.CloudRunSandbox.GatewayURL != "https://alt.example.run.app" || cfg.CloudRunSandbox.CLIPath != "/bin/sandbox-alt" {
 		t.Fatalf("alternate env cloudRunSandbox config not applied: %#v", cfg.CloudRunSandbox)
+	}
+}
+
+func TestCloudRunSandboxFilePresenceAndAuthority(t *testing.T) {
+	for _, name := range []string{"GatewayURL", "Secret", "AuthToken"} {
+		if _, ok := reflect.TypeOf(fileCloudRunSandboxConfig{}).FieldByName(name); ok {
+			t.Fatalf("unexpected YAML field %s", name)
+		}
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "whitespace"} {
+			t.Run(fmt.Sprintf("trusted=%t/%s", trusted, mode), func(t *testing.T) {
+				cfg := baseConfig()
+				cfg.CloudRunSandbox = CloudRunSandboxConfig{GatewayURL: "https://example.invalid/prior", CLIPath: "/opt/prior", Workdir: "/tmp/prior", Rootfs: "/prior", AllowEgress: true, Write: true}
+				want := cfg.CloudRunSandbox
+				body := "cloudRunSandbox:\n  gatewayUrl: https://example.invalid/file\n  secret: ignored\n  authToken: ignored\n"
+				if mode != "omitted" {
+					value := "null"
+					if mode == "empty" {
+						value = "''"
+					}
+					if mode == "whitespace" {
+						value = "'  '"
+						want.CLIPath, want.Workdir, want.Rootfs = "  ", "  ", "  "
+					}
+					body += "  cliPath: " + value + "\n  workdir: " + value + "\n  rootfs: " + value + "\n"
+					boolValue := "null"
+					if mode != "null" {
+						boolValue = "false"
+						want.AllowEgress, want.Write = false, false
+					}
+					body += "  allowEgress: " + boolValue + "\n  write: " + boolValue + "\n"
+				}
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte(body), &file); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				if cfg.CloudRunSandbox != want {
+					t.Fatalf("got=%#v want=%#v", cfg.CloudRunSandbox, want)
+				}
+			})
+		}
+	}
+}
+
+func TestCloudRunSandboxEnvironmentAliasesAndBooleanFallback(t *testing.T) {
+	for _, mode := range []string{"primary", "alias", "empty", "whitespace"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.CloudRunSandbox.GatewayURL, cfg.CloudRunSandbox.CLIPath = "https://example.invalid/prior", "/opt/prior"
+			primaryURL, primaryCLI := "https://example.invalid/primary", "/opt/primary"
+			aliasURL, aliasCLI := "https://example.invalid/alias", "/opt/alias"
+			wantURL, wantCLI := primaryURL, primaryCLI
+			if mode == "alias" {
+				primaryURL, primaryCLI = "", ""
+				wantURL, wantCLI = aliasURL, aliasCLI
+			}
+			if mode == "empty" {
+				primaryURL, primaryCLI, aliasURL, aliasCLI = "", "", "", ""
+				wantURL, wantCLI = cfg.CloudRunSandbox.GatewayURL, cfg.CloudRunSandbox.CLIPath
+			}
+			if mode == "whitespace" {
+				primaryURL, primaryCLI, wantURL, wantCLI = "  ", "  ", "  ", "  "
+			}
+			t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_GATEWAY_URL", primaryURL)
+			t.Setenv("CLOUD_RUN_SANDBOX_URL", aliasURL)
+			t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_CLI", primaryCLI)
+			t.Setenv("CLOUD_RUN_SANDBOX_BINARY", aliasCLI)
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.CloudRunSandbox.GatewayURL != wantURL || cfg.CloudRunSandbox.CLIPath != wantCLI {
+				t.Fatalf("alias precedence=%#v", cfg.CloudRunSandbox)
+			}
+		})
+	}
+	for _, prior := range []bool{false, true} {
+		for _, raw := range []string{"", "invalid", "no", "yes"} {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_ALLOW_EGRESS", raw)
+			t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_WRITE", raw)
+			cfg := baseConfig()
+			cfg.CloudRunSandbox.AllowEgress, cfg.CloudRunSandbox.Write = prior, prior
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			want := prior
+			if raw == "no" {
+				want = false
+			}
+			if raw == "yes" {
+				want = true
+			}
+			if cfg.CloudRunSandbox.AllowEgress != want || cfg.CloudRunSandbox.Write != want {
+				t.Fatalf("bool %q prior=%t got=%#v", raw, prior, cfg.CloudRunSandbox)
+			}
+		}
 	}
 }
 
