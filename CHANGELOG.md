@@ -2,34 +2,41 @@
 
 ## Unreleased
 
-- Fix truncated GCP lease failures by surfacing bounded API error summaries and preserving quoted JSON diagnostics with credential redaction. [PR 1984](https://github.com/openclaw/crabbox/pull/1984). Thanks @steipete.
+Planned for **0.53.0**.
 
-- Retain an exact-key sanitized outcome for successful, failed, and incomplete measured AWS image publications, with descriptive baseline evidence, opaque promotion binding, and rollback/cleanup state after finalization. [PR 1986](https://github.com/openclaw/crabbox/pull/1986). Thanks @vincentkoc.
+### Highlights
 
-- Fix Azure leases blocked by retained legacy shared-infrastructure fences by verifying settled resources before transactional takeover. [PR 1982](https://github.com/openclaw/crabbox/pull/1982). Thanks @steipete.
+- **Less waiting for runners and coordinator requests.** Use HTTP/2 where supported, close idle control connections promptly, and overlap AWS network discovery and SSH authorization while avoiding redundant access lookups.
+- **Recover lost run-start responses.** Keep the same run identity when a coordinator admission response is lost, recovering the original record without creating another run or replaying the command.
+- **Safer downloads and failure evidence.** Stream downloads into private temporary files, preserve existing destinations when a transfer fails, and keep failure-capture scratch files outside the tested checkout.
+- **Clearer cloud failures and recovery.** Preserve useful GCP API error messages, including billing failures, and automatically recover Azure leases blocked by settled legacy infrastructure operations.
+- **Image-publication outcomes even on failure.** Retain sanitized results for successful, failed, and incomplete measured AWS image publications, including partial measurements and rollback and cleanup state.
 
-- CLI: negotiate HTTP/2 for coordinator API requests, apply the shared redirect guard to control upgrades, and avoid waiting for idle control peers during shutdown. https://github.com/openclaw/crabbox/pull/1985. Thanks @steipete.
+### Upgrade notes
 
-- AWS: avoid duplicate access-refresh lookups for ports with matching permissions, index lease access once, and keep unnamed runner/workspace groups separate. https://github.com/openclaw/crabbox/pull/1980. Thanks @steipete.
+- **Upgrade self-hosted coordinators before clients.** Run admission now requires `PUT /v1/runs/<run-id>`; older coordinators cannot support the new recovery path. Updated coordinators retain the legacy `POST` route for older clients, and existing run IDs remain readable. [PR 1970](https://github.com/openclaw/crabbox/pull/1970).
+- Ordinary SSH downloads now enforce a **1 GiB per-file limit** and retain at least **1 GiB of local free space**. Failed, canceled, oversized, or size-mismatched transfers leave existing destinations unchanged. [PR 1983](https://github.com/openclaw/crabbox/pull/1983).
+- Automatic failure captures enforce a **64 MiB limit** on intermediate archives and downloaded payloads. Before archive creation, both scratch and output filesystems must each have the 1 GiB reserve plus twice the capture limit available. [PR 1983](https://github.com/openclaw/crabbox/pull/1983).
+- Measured AWS image-publication manifests now use `crabbox-devtools-image-proof/v2` and cover failed and incomplete outcomes. Baseline measurements are descriptive; only candidate and promoted cohorts apply the benchmark policy. [PR 1986](https://github.com/openclaw/crabbox/pull/1986).
 
-- Keep failure-capture scratch files outside tested checkouts, bound intermediate archive creation and streamed SSH downloads while preserving existing destinations, and diagnose unknown failures from the recorded run instead of suggesting an unchanged full rerun. https://github.com/openclaw/crabbox/pull/1983. Thanks @vincentkoc.
-- AWS: overlap SSH ingress authorization in bounded batches while preserving revocation, recovery and cleanup ordering. https://github.com/openclaw/crabbox/pull/1976. Thanks @steipete.
+### Changes
 
-- Overlap default-VPC and managed security-group discovery during AWS provisioning while retaining scope validation and joined failure handling. [PR 1974](https://github.com/openclaw/crabbox/pull/1974). Thanks @steipete.
-- Recover lost run-admission responses using a caller-known identity and an atomic initial history record, preserving authenticated request binding and refusing remote command replay. Current clients require a coordinator supporting the new admission route. [PR 1970](https://github.com/openclaw/crabbox/pull/1970), [Issue 1962](https://github.com/openclaw/crabbox/issues/1962). Thanks @steipete.
-- Add bounded AWS provisioning transport diagnostics for credential preparation, signing and SDK request time, including retry-loop signing counts, without changing retry behavior. [PR 1968](https://github.com/openclaw/crabbox/pull/1968). Thanks @steipete.
+- Negotiate HTTP/2 for coordinator API requests while retaining HTTP/1 compatibility, apply the existing redirect guard to WebSocket upgrades, and finish control shutdown without waiting for an idle peer's close handshake. [PR 1985](https://github.com/openclaw/crabbox/pull/1985). Thanks @steipete.
+- AWS: overlap default-VPC and managed security-group discovery, authorize SSH ingress in batches of at most four, and reuse access-refresh lookups for matching permissions; preserve scope validation, distinct default runner/workspace groups, and revocation and cleanup ordering. [PR 1974](https://github.com/openclaw/crabbox/pull/1974), [PR 1976](https://github.com/openclaw/crabbox/pull/1976), [PR 1980](https://github.com/openclaw/crabbox/pull/1980). Thanks @steipete.
+- Recover lost run-admission responses using a client-chosen identity and an atomic initial history record. Recovery stays within the original invocation and request budget, verifies the authenticated request binding, and never replays remote execution. [PR 1970](https://github.com/openclaw/crabbox/pull/1970), [Issue 1962](https://github.com/openclaw/crabbox/issues/1962). Thanks @steipete.
+- Keep failure-capture scratch files outside tested checkouts, bound archive creation and streamed SSH downloads, and publish downloads atomically after size and disk-space checks. Unknown failures point to recorded-run or retained-lease diagnosis instead of an unchanged full rerun. [PR 1983](https://github.com/openclaw/crabbox/pull/1983). Thanks @vincentkoc.
+- GCP: surface bounded API error summaries and preserve quoted and multiline JSON diagnostics after credential redaction, so lease failures retain their useful cause. [PR 1984](https://github.com/openclaw/crabbox/pull/1984). Thanks @steipete.
+- Azure: recover retained legacy shared-infrastructure fences on the next lease only after verifying that the relevant resources are absent or terminal and the fence owner is unchanged; active operations remain protected. [PR 1982](https://github.com/openclaw/crabbox/pull/1982). Thanks @steipete.
 - Islo: report failed stdout/stderr delivery instead of silently succeeding after losing command output; preserve remote exit codes when stream decoding and delivery finish successfully. [PR 1969](https://github.com/openclaw/crabbox/pull/1969).
 - Enforce controller and coordinator token-command output limits consistently during pipe copying, preserving the existing overflow errors and command deadlines. [PR 1971](https://github.com/openclaw/crabbox/pull/1971).
-- Share byte-prefix storage across command capture, controller responses, and coordinator token helpers while preserving each caller's limits, cancellation, and diagnostics. [PR 1972](https://github.com/openclaw/crabbox/pull/1972).
-- Reuse shared prefix storage for SSH diagnostics and artifact capture while preserving locked, cloned snapshots and truncation visibility. [PR 1973](https://github.com/openclaw/crabbox/pull/1973).
-- Share raw byte-tail storage for Agent Sandbox stderr and Blacksmith proof streams while preserving native exit handling, Actions URL discovery, and cloned snapshots. [PR 1977](https://github.com/openclaw/crabbox/pull/1977). Thanks @steipete.
+- Add scoped AWS provisioning diagnostics for credential preparation, signing, SDK request time, and retry-loop signing counts, keeping concurrent operations separate without changing retry behavior or recording request material. [PR 1968](https://github.com/openclaw/crabbox/pull/1968). Thanks @steipete.
+- Retain sanitized measured-image publication outcomes after success, failure, or interruption, with validated partial cohort measurements, opaque promotion binding, and final rollback and cleanup state. Runner loss leaves the initialized conservative outcome for investigation. [PR 1986](https://github.com/openclaw/crabbox/pull/1986). Thanks @vincentkoc.
+
+### Maintenance
+
+- Consolidate bounded byte buffers across command capture, controller/token helpers, SSH diagnostics, Agent Sandbox, and Blacksmith while preserving limits, cancellation, snapshot isolation, truncation visibility, exit handling, and Actions URL discovery. [PR 1972](https://github.com/openclaw/crabbox/pull/1972), [PR 1973](https://github.com/openclaw/crabbox/pull/1973), [PR 1977](https://github.com/openclaw/crabbox/pull/1977). Thanks @steipete.
 - Share service-control run-option validation across FastAPI Cloud, Railway, and Unikraft Cloud while preserving rejection messages, precedence, and refusal before provider access. [PR 1979](https://github.com/openclaw/crabbox/pull/1979). Thanks @steipete.
-
-- Describe CodeSandbox configuration bindings once, preserving defaults, file/environment/flag precedence, validation order, and trusted-only bridge settings. [PR 1988](https://github.com/openclaw/crabbox/pull/1988). Thanks @steipete.
-
-- Describe CUA configuration bindings once, preserving environment/flag-only API URL selection and its alias, trusted-only bridge settings, defaults, and validation order. [PR 1989](https://github.com/openclaw/crabbox/pull/1989). Thanks @steipete.
-
-- Describe OpenSandbox configuration bindings once, preserving CLI-only stale-claim cleanup, environment/flag-only API URL selection, defaults, and validation timing. [PR 1990](https://github.com/openclaw/crabbox/pull/1990). Thanks @steipete.
+- Consolidate generated CodeSandbox, CUA, and OpenSandbox configuration bindings while preserving defaults, precedence, validation timing, trusted-only bridge settings, API URL restrictions, and CLI-only stale-claim cleanup. [PR 1988](https://github.com/openclaw/crabbox/pull/1988), [PR 1989](https://github.com/openclaw/crabbox/pull/1989), [PR 1990](https://github.com/openclaw/crabbox/pull/1990). Thanks @steipete.
 
 - Keep CUA runtime and Python bridge defaults aligned with declared configuration, preserving custom SDK imports, whitespace fallback behavior, and read-only diagnostics. [PR 1992](https://github.com/openclaw/crabbox/pull/1992). Thanks @steipete.
 
