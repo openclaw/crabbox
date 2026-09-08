@@ -460,6 +460,12 @@ func TestSemaphoreGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestTensorlakeGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_tensorlake.go", "../../internal/cli/config_tensorlake_generated.go", "TensorlakeConfig", "tensorlake", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -1311,4 +1317,95 @@ func TestRegistrationOnly(t *testing.T){
 }
 `
 	runScalarFixture(t, source, output, behavior)
+}
+
+func TestSchemaFileFloatPositiveFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"empty", `help:"CPUs"`, `help:"CPUs" fileFloat:""`, "fileFloat is supported only as positive"},
+		{"unknown", `help:"CPUs"`, `help:"CPUs" fileFloat:"nonnegative"`, "fileFloat is supported only as positive"},
+		{"string", `help:"Name"`, `help:"Name" fileFloat:"positive"`, "fileFloat is supported only as positive"},
+		{"int", `help:"Count"`, `help:"Count" fileFloat:"positive"`, "fileFloat is supported only as positive"},
+		{"bool", `help:"Enabled"`, `help:"Enabled" fileFloat:"positive"`, "fileFloat is supported only as positive"},
+		{"list", `help:"Ports"`, `help:"Ports" fileFloat:"positive"`, "fileFloat is supported only as positive"},
+		{"fileInt remains int-only", `help:"CPUs"`, `help:"CPUs" fileInt:"positive" fileFloat:"positive"`, "fileInt is supported only as positive"},
+		{"empty-string policy conflict", `help:"CPUs"`, `help:"CPUs" fileIgnoreEmpty:"true" fileFloat:"positive"`, "fileIgnoreEmpty is supported only"},
+		{"nonnegative remains int-only", `help:"CPUs"`, `help:"CPUs" nonnegative:"true" fileFloat:"positive"`, "nonnegative is supported only"},
+		{"finite default retained", `default:"0.5"`, `default:"NaN" fileFloat:"positive"`, "default must be finite"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(sample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+	for _, source := range []string{
+		strings.Replace(flagOnlySample, `help:"CPUs"`, `help:"CPUs" fileFloat:"positive"`, 1),
+		"package cli\ntype PilotConfig struct{ CPUs float64 `sources:\"env,flag\" env:\"CPUS\" flag:\"cpus\" help:\"CPUs\" fileFloat:\"positive\"` }",
+	} {
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "fileFloat is supported only as positive") {
+			t.Fatalf("no-file float admitted: %v", err)
+		}
+	}
+}
+
+func TestGenerateFileFloatPositive(t *testing.T) {
+	const source = "package cli\ntype PilotConfig struct {\n" +
+		" First string `sources:\"user,repo,env,flag\" config:\"first\" env:\"FIRST\" flag:\"first\" help:\"First\" reportApplied:\"true\"`\n" +
+		" CPUs float64 `sources:\"user,repo,env,flag\" config:\"cpus\" env:\"CPUS\" flag:\"cpus\" help:\"CPUs\" default:\"1\"`\n" +
+		" Plain float64 `sources:\"user,repo,env,flag\" config:\"plain\" env:\"PLAIN\" flag:\"plain\" help:\"Plain\"`\n" +
+		" Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"COUNT\" flag:\"count\" help:\"Count\" nonnegative:\"true\"`\n" +
+		" Tail string `sources:\"user,repo,env,flag\" config:\"tail\" env:\"TAIL\" flag:\"tail\" help:\"Tail\" reportApplied:\"true\"`\n}"
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := strings.Replace(source, `help:"CPUs"`, `help:"CPUs" fileFloat:"positive"`, 1)
+	s, err = parseSchema([]byte(input), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.fields[1].fileFloatPositive || s.fields[2].fileFloatPositive {
+		t.Fatal("wrong float opt-in")
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic float output: %v", err)
+	}
+	want := strings.Replace(string(before), "if file.CPUs != nil {", "if file.CPUs != nil && *file.CPUs > 0 {", 1)
+	if string(output) != want {
+		t.Fatal("float predicate changed other file/default/env/flag semantics")
+	}
+	typecheckGenerated(t, input+"\nfunc firstNonEmptyEnv(...string)(string,bool){panic(\"stub\")}\n", output)
+	const behavior = `package cli
+import("flag";"fmt";"testing")
+func firstNonEmptyEnv(...string)(string,bool){return "",false}
+func getenvFloat(_ string,prior float64)float64{return prior}
+func getenvNonNegativeInt(_ string,prior int)(int,error){return prior,nil}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func exit(_ int,message string)error{return fmt.Errorf("%s",message)}
+func TestFloatFileAdmission(t *testing.T){
+ first,tail,bad:="first","tail",-1
+ zero,negative,fraction,positive:=0.0,-0.5,0.25,2.0
+ for _,tc:=range []struct{name string;value *float64;want float64}{{"omitted/null",nil,1},{"zero",&zero,1},{"negative",&negative,1},{"fraction",&fraction,0.25},{"positive",&positive,2}}{
+  cfg:=defaultPilotConfig();got,err:=cfg.applyFile(&filePilotConfig{First:&first,CPUs:tc.value,Plain:&negative,Tail:&tail})
+  if err!=nil||cfg.CPUs!=tc.want||cfg.Plain!=-0.5||!got.First||!got.Tail{t.Fatalf("%s: %+v %+v %v",tc.name,cfg,got,err)}
+ }
+ cfg:=defaultPilotConfig();cfg.Count=7
+ got,err:=cfg.applyFile(&filePilotConfig{First:&first,CPUs:&fraction,Count:&bad,Tail:&tail})
+ if err==nil||cfg.CPUs!=0.25||cfg.Count!=7||!got.First||got.Tail||cfg.Tail!=""{t.Fatalf("partial order: %+v %+v %v",cfg,got,err)}
+ fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+ if err:=fs.Parse([]string{"--cpus=-0.5"});err!=nil{t.Fatal(err)};values.Apply(&cfg,fs)
+ if cfg.CPUs!=-0.5{t.Fatal("file predicate affected negative flag")}
+}
+`
+	runScalarFixture(t, input, output, behavior)
 }

@@ -40,6 +40,8 @@
 
 - Describe Semaphore configuration bindings once, sharing effective machine, OS-image, and idle-timeout defaults without changing empty config output, explicit flags, or credential sources. Thanks @steipete.
 
+- Describe Tensorlake configuration bindings once, sharing API, CLI, and workdir defaults while preserving positive-only YAML sizing, environment parsing, credential sources, and native defaults. Thanks @steipete.
+
 ## 0.53.0 - 2026-09-08
 
 ### Highlights

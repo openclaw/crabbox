@@ -862,23 +862,6 @@ type TenkiConfig struct {
 	DiskGB    int
 }
 
-type TensorlakeConfig struct {
-	APIKey         string
-	APIURL         string
-	CLIPath        string
-	Image          string
-	Snapshot       string
-	OrganizationID string
-	ProjectID      string
-	Namespace      string
-	Workdir        string
-	CPUs           float64
-	MemoryMB       int
-	DiskMB         int
-	TimeoutSecs    int
-	NoInternet     bool
-}
-
 // OpenComputerConfig configures the delegated OpenComputer provider, which
 // talks to the OpenComputer REST API. The API key is intentionally absent: it
 // is read at runtime from CRABBOX_OPENCOMPUTER_API_KEY / OPENCOMPUTER_API_KEY
@@ -2839,15 +2822,8 @@ func baseConfig() Config {
 			CLIPath:  "tenki",
 			WorkRoot: "/home/tenki/crabbox",
 		},
-		Tensorlake: TensorlakeConfig{
-			APIURL:   "https://api.tensorlake.ai",
-			CLIPath:  "tensorlake",
-			Workdir:  "/workspace/crabbox",
-			CPUs:     1.0,
-			MemoryMB: 1024,
-			DiskMB:   10240,
-		},
-		Cua: defaultCuaConfig(),
+		Tensorlake: defaultTensorlakeConfig(),
+		Cua:        defaultCuaConfig(),
 		OpenComputer: OpenComputerConfig{
 			// APIURL is intentionally unset here so the `oc` config file's
 			// api_url is honored before the built-in default; the provider
@@ -3820,22 +3796,6 @@ type fileTenkiConfig struct {
 	CPUs      int    `yaml:"cpus,omitempty"`
 	MemoryMB  int    `yaml:"memoryMB,omitempty"`
 	DiskGB    int    `yaml:"diskGB,omitempty"`
-}
-
-type fileTensorlakeConfig struct {
-	APIURL         string  `yaml:"apiUrl,omitempty"`
-	CLIPath        string  `yaml:"cliPath,omitempty"`
-	Image          string  `yaml:"image,omitempty"`
-	Snapshot       string  `yaml:"snapshot,omitempty"`
-	OrganizationID string  `yaml:"organizationId,omitempty"`
-	ProjectID      string  `yaml:"projectId,omitempty"`
-	Namespace      string  `yaml:"namespace,omitempty"`
-	Workdir        string  `yaml:"workdir,omitempty"`
-	CPUs           float64 `yaml:"cpus,omitempty"`
-	MemoryMB       int     `yaml:"memoryMB,omitempty"`
-	DiskMB         int     `yaml:"diskMB,omitempty"`
-	TimeoutSecs    int     `yaml:"timeoutSecs,omitempty"`
-	NoInternet     *bool   `yaml:"noInternet,omitempty"`
 }
 
 type fileOpenComputerConfig struct {
@@ -6322,45 +6282,14 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Tenki.DiskGB = file.Tenki.DiskGB
 		}
 	}
-	if file.Tensorlake != nil {
-		if file.Tensorlake.APIURL != "" {
-			cfg.Tensorlake.APIURL = file.Tensorlake.APIURL
+	{
+		applied, err := cfg.Tensorlake.applyFile(file.Tensorlake)
+		if applied.APIURL {
 			cfg.credentialProvenance.tensorlakeAPIURL = credentialSource
 		}
-		if file.Tensorlake.CLIPath != "" {
-			cfg.Tensorlake.CLIPath = file.Tensorlake.CLIPath
+		if err != nil {
+			return err
 		}
-		if file.Tensorlake.Image != "" {
-			cfg.Tensorlake.Image = file.Tensorlake.Image
-		}
-		if file.Tensorlake.Snapshot != "" {
-			cfg.Tensorlake.Snapshot = file.Tensorlake.Snapshot
-		}
-		if file.Tensorlake.OrganizationID != "" {
-			cfg.Tensorlake.OrganizationID = file.Tensorlake.OrganizationID
-		}
-		if file.Tensorlake.ProjectID != "" {
-			cfg.Tensorlake.ProjectID = file.Tensorlake.ProjectID
-		}
-		if file.Tensorlake.Namespace != "" {
-			cfg.Tensorlake.Namespace = file.Tensorlake.Namespace
-		}
-		if file.Tensorlake.Workdir != "" {
-			cfg.Tensorlake.Workdir = file.Tensorlake.Workdir
-		}
-		if file.Tensorlake.CPUs > 0 {
-			cfg.Tensorlake.CPUs = file.Tensorlake.CPUs
-		}
-		if file.Tensorlake.MemoryMB > 0 {
-			cfg.Tensorlake.MemoryMB = file.Tensorlake.MemoryMB
-		}
-		if file.Tensorlake.DiskMB > 0 {
-			cfg.Tensorlake.DiskMB = file.Tensorlake.DiskMB
-		}
-		if file.Tensorlake.TimeoutSecs > 0 {
-			cfg.Tensorlake.TimeoutSecs = file.Tensorlake.TimeoutSecs
-		}
-		applyOptional(&cfg.Tensorlake.NoInternet, file.Tensorlake.NoInternet)
 	}
 	if err := cfg.Cua.applyFile(file.Cua, trusted); err != nil {
 		return err
@@ -8281,27 +8210,17 @@ func applyEnv(cfg *Config) error {
 	cfg.Tenki.CPUs = getenvInt("CRABBOX_TENKI_CPUS", cfg.Tenki.CPUs)
 	cfg.Tenki.MemoryMB = getenvInt("CRABBOX_TENKI_MEMORY_MB", cfg.Tenki.MemoryMB)
 	cfg.Tenki.DiskGB = getenvInt("CRABBOX_TENKI_DISK_GB", cfg.Tenki.DiskGB)
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_API_KEY", "TENSORLAKE_API_KEY"); ok {
-		cfg.Tensorlake.APIKey = value
-		cfg.credentialProvenance.tensorlakeAPIKey = credentialSourceEnvironment
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_API_URL", "TENSORLAKE_API_URL"); ok {
-		cfg.Tensorlake.APIURL = value
-		cfg.credentialProvenance.tensorlakeAPIURL = credentialSourceEnvironment
-	}
-	cfg.Tensorlake.CLIPath = getenv("CRABBOX_TENSORLAKE_CLI", cfg.Tensorlake.CLIPath)
-	cfg.Tensorlake.Image = getenv("CRABBOX_TENSORLAKE_IMAGE", cfg.Tensorlake.Image)
-	cfg.Tensorlake.Snapshot = getenv("CRABBOX_TENSORLAKE_SNAPSHOT", cfg.Tensorlake.Snapshot)
-	cfg.Tensorlake.OrganizationID = getenv("CRABBOX_TENSORLAKE_ORGANIZATION_ID", getenv("TENSORLAKE_ORGANIZATION_ID", cfg.Tensorlake.OrganizationID))
-	cfg.Tensorlake.ProjectID = getenv("CRABBOX_TENSORLAKE_PROJECT_ID", getenv("TENSORLAKE_PROJECT_ID", cfg.Tensorlake.ProjectID))
-	cfg.Tensorlake.Namespace = getenv("CRABBOX_TENSORLAKE_NAMESPACE", getenv("INDEXIFY_NAMESPACE", cfg.Tensorlake.Namespace))
-	cfg.Tensorlake.Workdir = getenv("CRABBOX_TENSORLAKE_WORKDIR", cfg.Tensorlake.Workdir)
-	cfg.Tensorlake.CPUs = getenvFloat("CRABBOX_TENSORLAKE_CPUS", cfg.Tensorlake.CPUs)
-	cfg.Tensorlake.MemoryMB = getenvInt("CRABBOX_TENSORLAKE_MEMORY_MB", cfg.Tensorlake.MemoryMB)
-	cfg.Tensorlake.DiskMB = getenvInt("CRABBOX_TENSORLAKE_DISK_MB", cfg.Tensorlake.DiskMB)
-	cfg.Tensorlake.TimeoutSecs = getenvInt("CRABBOX_TENSORLAKE_TIMEOUT_SECS", cfg.Tensorlake.TimeoutSecs)
-	if v, ok := getenvBool("CRABBOX_TENSORLAKE_NO_INTERNET"); ok {
-		cfg.Tensorlake.NoInternet = v
+	{
+		applied, err := cfg.Tensorlake.applyEnv()
+		if applied.APIKey {
+			cfg.credentialProvenance.tensorlakeAPIKey = credentialSourceEnvironment
+		}
+		if applied.APIURL {
+			cfg.credentialProvenance.tensorlakeAPIURL = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
 	var err error
 	if err := cfg.Cua.applyEnv(); err != nil {

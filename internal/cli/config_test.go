@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -10103,5 +10104,217 @@ func TestCodeSandboxIntegerOverlayErrorOrder(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestTensorlakeConfigFileContract(t *testing.T) {
+	if got, want := baseConfig().Tensorlake, (TensorlakeConfig{APIURL: "https://api.tensorlake.ai", CLIPath: "tensorlake", Workdir: "/workspace/crabbox", CPUs: 1, MemoryMB: 1024, DiskMB: 10240}); got != want {
+		t.Fatalf("defaults=%#v want %#v", got, want)
+	}
+	if _, ok := reflect.TypeOf(fileTensorlakeConfig{}).FieldByName("APIKey"); ok {
+		t.Fatal("APIKey must remain env-only")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace"} {
+			cfg := baseConfig()
+			cfg.Tensorlake.APIKey = "inert"
+			cfg.Tensorlake.Image = "prior-image"
+			cfg.Tensorlake.Snapshot = "prior-snapshot"
+			cfg.Tensorlake.OrganizationID = "prior-org"
+			cfg.Tensorlake.ProjectID = "prior-project"
+			cfg.Tensorlake.Namespace = "prior-namespace"
+			cfg.credentialProvenance.tensorlakeAPIURL = credentialSourceFlag
+			cfg.credentialProvenance.tensorlakeAPIKey = credentialSourceFlag
+			want := cfg.Tensorlake
+			source := credentialSourceFlag
+			fields := map[string]any{"apiKey": "ignored"}
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"apiUrl", &want.APIURL}, {"cliPath", &want.CLIPath}, {"image", &want.Image}, {"snapshot", &want.Snapshot}, {"organizationId", &want.OrganizationID}, {"projectId", &want.ProjectID}, {"namespace", &want.Namespace}, {"workdir", &want.Workdir}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+					*f.v = "  "
+				}
+				fields[f.key] = raw
+			}
+			if mode == "equal" || mode == "whitespace" {
+				source = credentialSourceForFile(trusted)
+			}
+			data, err := yaml.Marshal(map[string]any{"tensorlake": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Tensorlake != want || cfg.credentialProvenance.tensorlakeAPIURL != source || cfg.credentialProvenance.tensorlakeAPIKey != credentialSourceFlag {
+				t.Fatalf("mode=%s trusted=%t got=%#v", mode, trusted, cfg.Tensorlake)
+			}
+		}
+		for _, raw := range []string{"null", "0", "-2", "2"} {
+			cfg := baseConfig()
+			cfg.Tensorlake.TimeoutSecs = 45
+			cfg.Tensorlake.NoInternet = true
+			want := cfg.Tensorlake
+			want.NoInternet = false
+			if raw == "2" {
+				want.CPUs = 2
+				want.MemoryMB = 2
+				want.DiskMB = 2
+				want.TimeoutSecs = 2
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte(fmt.Sprintf("tensorlake:\n  cpus: %s\n  memoryMB: %s\n  diskMB: %s\n  timeoutSecs: %s\n  noInternet: false\n", raw, raw, raw, raw)), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Tensorlake != want {
+				t.Fatalf("raw=%s got=%#v want=%#v", raw, cfg.Tensorlake, want)
+			}
+		}
+		for _, raw := range []string{"0.25", "-0.25"} {
+			cfg := baseConfig()
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte("tensorlake:\n  cpus: "+raw+"\n"), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			want := 1.0
+			if raw == "0.25" {
+				want = 0.25
+			}
+			if cfg.Tensorlake.CPUs != want {
+				t.Fatalf("fraction %s got %v", raw, cfg.Tensorlake.CPUs)
+			}
+		}
+	}
+}
+
+func TestTensorlakeConfigEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"primary", "alias", "empty", "equal", "whitespace", "API_KEY", "API_URL"} {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		cfg.Tensorlake.APIKey = "inert"
+		want := cfg.Tensorlake
+		cfg.credentialProvenance.tensorlakeAPIKey = credentialSourceFlag
+		cfg.credentialProvenance.tensorlakeAPIURL = credentialSourceFlag
+		accepted := map[string]bool{}
+		for _, f := range []struct {
+			suffix, alias string
+			v             *string
+		}{{"API_KEY", "TENSORLAKE_API_KEY", &want.APIKey}, {"API_URL", "TENSORLAKE_API_URL", &want.APIURL}, {"CLI", "", &want.CLIPath}, {"IMAGE", "", &want.Image}, {"SNAPSHOT", "", &want.Snapshot}, {"ORGANIZATION_ID", "TENSORLAKE_ORGANIZATION_ID", &want.OrganizationID}, {"PROJECT_ID", "TENSORLAKE_PROJECT_ID", &want.ProjectID}, {"NAMESPACE", "INDEXIFY_NAMESPACE", &want.Namespace}, {"WORKDIR", "", &want.Workdir}} {
+			primary, alias := "primary-value", "alias-value"
+			if mode == "equal" {
+				primary = *f.v
+			}
+			if mode == "whitespace" {
+				primary = "  "
+			}
+			allow := mode != "empty" && ((mode != "API_KEY" && mode != "API_URL") || mode == f.suffix)
+			if mode == "alias" {
+				primary = ""
+				allow = f.alias != ""
+			}
+			if !allow {
+				primary = ""
+				alias = ""
+			}
+			if primary != "" {
+				*f.v = primary
+			} else if f.alias != "" && alias != "" {
+				*f.v = alias
+			}
+			accepted[f.suffix] = primary != "" || (f.alias != "" && alias != "")
+			t.Setenv("CRABBOX_TENSORLAKE_"+f.suffix, primary)
+			if f.alias != "" {
+				t.Setenv(f.alias, alias)
+			}
+		}
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		key, url := credentialSourceFlag, credentialSourceFlag
+		if accepted["API_KEY"] {
+			key = credentialSourceEnvironment
+		}
+		if accepted["API_URL"] {
+			url = credentialSourceEnvironment
+		}
+		if cfg.Tensorlake != want || cfg.credentialProvenance.tensorlakeAPIKey != key || cfg.credentialProvenance.tensorlakeAPIURL != url {
+			t.Fatalf("mode=%s got=%#v want=%#v", mode, cfg.Tensorlake, want)
+		}
+	}
+	for _, raw := range []string{"", "invalid", "0", "-2", "3"} {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		cfg.Tensorlake.TimeoutSecs = 45
+		cfg.Tensorlake.NoInternet = true
+		want := cfg.Tensorlake
+		for _, suffix := range []string{"CPUS", "MEMORY_MB", "DISK_MB", "TIMEOUT_SECS"} {
+			t.Setenv("CRABBOX_TENSORLAKE_"+suffix, raw)
+		}
+		if n, err := strconv.Atoi(raw); err == nil {
+			want.CPUs = float64(n)
+			want.MemoryMB = n
+			want.DiskMB = n
+			want.TimeoutSecs = n
+		}
+		t.Setenv("CRABBOX_TENSORLAKE_NO_INTERNET", raw)
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if raw == "0" {
+			want.NoInternet = false
+		}
+		if cfg.Tensorlake != want {
+			t.Fatalf("raw=%s got=%#v want=%#v", raw, cfg.Tensorlake, want)
+		}
+	}
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	t.Setenv("CRABBOX_TENSORLAKE_CPUS", "0.25")
+	t.Setenv("CRABBOX_TENSORLAKE_NO_INTERNET", "false")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tensorlake.CPUs != 0.25 || cfg.Tensorlake.NoInternet {
+		t.Fatal("fractional CPU/false env lost")
+	}
+}
+
+func TestTensorlakeConfigCentralFlagSource(t *testing.T) {
+	cfg := baseConfig()
+	cfg.credentialProvenance.tensorlakeAPIKey = credentialSourceEnvironment
+	fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+	fs.String("tensorlake-api-url", "", "")
+	markCredentialDestinationFlagSources(&cfg, fs)
+	if cfg.credentialProvenance.tensorlakeAPIURL == credentialSourceFlag {
+		t.Fatal("unvisited URL marked")
+	}
+	if err := fs.Parse([]string{"--tensorlake-api-url="}); err != nil {
+		t.Fatal(err)
+	}
+	markCredentialDestinationFlagSources(&cfg, fs)
+	if cfg.credentialProvenance.tensorlakeAPIURL != credentialSourceFlag || cfg.credentialProvenance.tensorlakeAPIKey != credentialSourceEnvironment {
+		t.Fatal("central source phase changed")
 	}
 }

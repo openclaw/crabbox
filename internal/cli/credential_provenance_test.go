@@ -675,6 +675,10 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 	if err := yaml.Unmarshal([]byte("upstashBox:\n  baseUrl: https://repo.example.test\n"), &upstashFile); err != nil {
 		t.Fatal(err)
 	}
+	var tensorlakeFile fileConfig
+	if err := yaml.Unmarshal([]byte("tensorlake:\n  apiUrl: https://repo.example.test\n"), &tensorlakeFile); err != nil {
+		t.Fatal(err)
+	}
 	var railwayFile fileConfig
 	if err := yaml.Unmarshal([]byte("railway:\n  apiUrl: https://repo.example.test\n"), &railwayFile); err != nil {
 		t.Fatal(err)
@@ -743,7 +747,7 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 		{
 			name:          "tensorlake",
 			provider:      "tensorlake",
-			file:          fileConfig{Tensorlake: &fileTensorlakeConfig{APIURL: "https://repo.example.test"}},
+			file:          tensorlakeFile,
 			credentialEnv: "CRABBOX_TENSORLAKE_API_KEY",
 			approveEnv:    "CRABBOX_TENSORLAKE_API_URL",
 		},

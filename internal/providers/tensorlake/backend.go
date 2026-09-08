@@ -431,7 +431,7 @@ func randomSuffix() string {
 func tensorlakeWorkdir(cfg Config) (string, error) {
 	workdir := strings.TrimSpace(cfg.Tensorlake.Workdir)
 	if workdir == "" {
-		workdir = "/workspace/crabbox"
+		workdir = core.TensorlakeConfigDefaultWorkdir
 	}
 	clean := path.Clean(workdir)
 	if !strings.HasPrefix(clean, "/") {

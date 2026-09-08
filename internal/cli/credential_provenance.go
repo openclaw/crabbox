@@ -237,7 +237,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if flagWasSet(fs, "tenki-gateway") {
 		provenance.tenkiGateway = credentialSourceFlag
 	}
-	if flagWasSet(fs, "tensorlake-api-url") {
+	if TensorlakeConfigFlagPresence(fs).APIURL {
 		provenance.tensorlakeAPIURL = credentialSourceFlag
 	}
 	if UpstashBoxConfigFlagPresence(fs).BaseURL {
