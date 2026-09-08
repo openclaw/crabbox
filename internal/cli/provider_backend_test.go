@@ -189,6 +189,50 @@ func TestCloudflareFlagSourceCentralPhase(t *testing.T) {
 	}
 }
 
+func TestE2BFlagSourcesCentralPhase(t *testing.T) {
+	original := providerRegistry["aws"]
+	t.Cleanup(func() { providerRegistry["aws"] = original })
+	for _, args := range [][]string{{"--e2b-api-url=https://example.invalid/flag"}, {"--e2b-domain=flag.example.invalid"}, {"--e2b-api-url=https://example.invalid/flag", "--e2b-domain=flag.example.invalid"}} {
+		for _, fail := range []bool{false, true} {
+			cfg := baseConfig()
+			cfg.Provider = "aws"
+			cfg.E2B.APIURL, cfg.E2B.Domain = "https://example.invalid/prior", "prior.example.invalid"
+			cfg.credentialProvenance.e2bAPIURL, cfg.credentialProvenance.e2bDomain = credentialSourceTrustedFile, credentialSourceTrustedFile
+			seenURL, seenDomain := credentialSourceUnknown, credentialSourceUnknown
+			var applyErr error
+			if fail {
+				applyErr = exit(2, "synthetic invalid configuration")
+			}
+			providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(c Config) {
+				seenURL, seenDomain = c.credentialProvenance.e2bAPIURL, c.credentialProvenance.e2bDomain
+			}}
+			fs := newFlagSet("test", io.Discard)
+			fs.String("e2b-api-url", "", "")
+			fs.String("e2b-domain", "", "")
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			err := applyProviderFlags(&cfg, fs, providerFlagValues{})
+			if (err != nil) != fail {
+				t.Fatalf("apply=%v", err)
+			}
+			urlSource, domainSource := credentialSourceTrustedFile, credentialSourceTrustedFile
+			if !fail {
+				for _, arg := range args {
+					if strings.HasPrefix(arg, "--e2b-api-url") {
+						urlSource = credentialSourceFlag
+					} else {
+						domainSource = credentialSourceFlag
+					}
+				}
+			}
+			if seenURL != credentialSourceTrustedFile || seenDomain != credentialSourceTrustedFile || cfg.credentialProvenance.e2bAPIURL != urlSource || cfg.credentialProvenance.e2bDomain != domainSource || cfg.E2B.APIURL != "https://example.invalid/prior" || cfg.E2B.Domain != "prior.example.invalid" {
+				t.Fatal("central visited-source phase changed")
+			}
+		}
+	}
+}
+
 func TestLoadBackendRequiresActionableProviderSelection(t *testing.T) {
 	t.Setenv(controllerProviderScopeEnv, "")
 	t.Setenv("HCLOUD_TOKEN", "")

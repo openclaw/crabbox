@@ -1543,6 +1543,128 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestE2BFileAcceptanceAndSource(t *testing.T) {
+	if _, ok := reflect.TypeOf(fileE2BConfig{}).FieldByName("APIKey"); ok {
+		t.Fatal("API key YAML field introduced")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace"} {
+			cfg := baseConfig()
+			cfg.Provider = "e2b"
+			cfg.E2B = E2BConfig{APIKey: "inert", APIURL: "https://example.invalid/api", Domain: "example.invalid", Template: "template", Workdir: "work", User: "alice"}
+			cfg.credentialProvenance.e2bAPIURL, cfg.credentialProvenance.e2bDomain, cfg.credentialProvenance.e2bAPIKey = credentialSourceEnvironment, credentialSourceEnvironment, credentialSourceEnvironment
+			want := cfg.E2B
+			source := credentialSourceEnvironment
+			fields := map[string]any{"apiKey": "ignored-inert"}
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"apiUrl", &want.APIURL}, {"domain", &want.Domain}, {"template", &want.Template}, {"workdir", &want.Workdir}, {"user", &want.User}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+					*f.v = "  "
+				}
+				fields[f.key] = raw
+			}
+			if mode == "equal" || mode == "whitespace" {
+				source = credentialSourceForFile(trusted)
+			}
+			data, err := yaml.Marshal(map[string]any{"e2b": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.E2B != want || cfg.credentialProvenance.e2bAPIURL != source || cfg.credentialProvenance.e2bDomain != source || cfg.credentialProvenance.e2bAPIKey != credentialSourceEnvironment {
+				t.Fatalf("file acceptance changed mode=%s trusted=%t", mode, trusted)
+			}
+		}
+	}
+}
+
+func TestE2BEnvironmentAcceptanceAndSource(t *testing.T) {
+	for _, mode := range []string{"primary", "alias", "empty", "equal", "whitespace", "API_KEY", "API_URL", "DOMAIN"} {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		cfg.E2B = E2BConfig{APIKey: "inert", APIURL: "https://example.invalid/api", Domain: "example.invalid", Template: "template", Workdir: "work", User: "alice"}
+		cfg.credentialProvenance.e2bAPIURL, cfg.credentialProvenance.e2bDomain, cfg.credentialProvenance.e2bAPIKey = credentialSourceTrustedFile, credentialSourceTrustedFile, credentialSourceTrustedFile
+		want := cfg.E2B
+		accepted := map[string]bool{}
+		for _, f := range []struct {
+			suffix, alias, value string
+			v                    *string
+		}{{"API_KEY", "E2B_API_KEY", "inert-new", &want.APIKey}, {"API_URL", "E2B_API_URL", "https://example.invalid/new", &want.APIURL}, {"DOMAIN", "E2B_DOMAIN", "new.example.invalid", &want.Domain}, {"TEMPLATE", "", "new-template", &want.Template}, {"WORKDIR", "", "new-work", &want.Workdir}, {"USER", "", "bob", &want.User}} {
+			primary, alias := f.value, f.value+"-alias"
+			if mode == "equal" {
+				primary = *f.v
+			}
+			if mode == "whitespace" {
+				primary = "  "
+			}
+			allow := mode != "empty" && (!(mode == "API_KEY" || mode == "API_URL" || mode == "DOMAIN") || mode == f.suffix)
+			if mode == "alias" {
+				primary = ""
+				allow = f.alias != ""
+			}
+			if !allow {
+				primary, alias = "", ""
+			} else if primary != "" {
+				*f.v = primary
+			} else {
+				*f.v = alias
+			}
+			accepted[f.suffix] = allow
+			t.Setenv("CRABBOX_E2B_"+f.suffix, primary)
+			if f.alias != "" {
+				t.Setenv(f.alias, alias)
+			}
+		}
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.E2B != want {
+			t.Fatalf("environment values changed mode=%s", mode)
+		}
+		for suffix, source := range map[string]credentialValueSource{"API_KEY": cfg.credentialProvenance.e2bAPIKey, "API_URL": cfg.credentialProvenance.e2bAPIURL, "DOMAIN": cfg.credentialProvenance.e2bDomain} {
+			want := credentialSourceTrustedFile
+			if accepted[suffix] {
+				want = credentialSourceEnvironment
+			}
+			if source != want {
+				t.Fatalf("source=%s mode=%s", suffix, mode)
+			}
+		}
+	}
+}
+
+func TestE2BCoreTemplateDefaultKeepsRawWhitespace(t *testing.T) {
+	for _, raw := range []string{"", "  ", "custom"} {
+		cfg := Config{Provider: "e2b", E2B: E2BConfig{Template: raw}}
+		want := raw
+		if want == "" {
+			want = "base"
+		}
+		if got := serverTypeForConfig(cfg); got != want {
+			t.Fatalf("template=%q got=%q want=%q", raw, got, want)
+		}
+	}
+}
+
 func TestCloudflareConfigAcceptanceAndSource(t *testing.T) {
 	for _, source := range []string{"user", "repository", "environment"} {
 		for _, mode := range []string{"omitted", "empty", "null", "equal", "whitespace", "token only", "URL only"} {

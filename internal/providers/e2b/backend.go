@@ -13,24 +13,10 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type e2bFlagValues struct {
-	APIURL   *string
-	Domain   *string
-	Template *string
-	Workdir  *string
-	User     *string
-}
-
 const e2bCleanupTimeout = 30 * time.Second
 
 func RegisterE2BProviderFlags(fs *flag.FlagSet, defaults Config) any {
-	return e2bFlagValues{
-		APIURL:   fs.String("e2b-api-url", defaults.E2B.APIURL, "E2B API URL"),
-		Domain:   fs.String("e2b-domain", defaults.E2B.Domain, "E2B sandbox domain"),
-		Template: fs.String("e2b-template", defaults.E2B.Template, "E2B sandbox template ID"),
-		Workdir:  fs.String("e2b-workdir", defaults.E2B.Workdir, "E2B sandbox working directory"),
-		User:     fs.String("e2b-user", defaults.E2B.User, "E2B sandbox user for command and file ownership"),
-	}
+	return core.RegisterE2BConfigFlags(fs, defaults.E2B)
 }
 
 func ApplyE2BProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
@@ -42,25 +28,11 @@ func ApplyE2BProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 			return exit(2, "--type is not supported for provider=e2b")
 		}
 	}
-	v, ok := values.(e2bFlagValues)
+	v, ok := values.(core.E2BConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "e2b-api-url") {
-		cfg.E2B.APIURL = *v.APIURL
-	}
-	if flagWasSet(fs, "e2b-domain") {
-		cfg.E2B.Domain = *v.Domain
-	}
-	if flagWasSet(fs, "e2b-template") {
-		cfg.E2B.Template = *v.Template
-	}
-	if flagWasSet(fs, "e2b-workdir") {
-		cfg.E2B.Workdir = *v.Workdir
-	}
-	if flagWasSet(fs, "e2b-user") {
-		cfg.E2B.User = *v.User
-	}
+	v.Apply(&cfg.E2B, fs)
 	return nil
 }
 
@@ -375,7 +347,7 @@ func (b *e2bBackend) createSandbox(ctx context.Context, client e2bAPI, repo Repo
 	if err != nil {
 		return "", e2bSandbox{}, "", err
 	}
-	template := blank(b.cfg.E2B.Template, "base")
+	template := blank(b.cfg.E2B.Template, core.E2BConfigDefaultTemplate)
 	cfg := b.cfg
 	workspace, err := cleanE2BWorkspacePath(e2bWorkspacePath(cfg))
 	if err != nil {
@@ -546,7 +518,7 @@ func validateE2BClaim(cfg Config, claim LeaseClaim, sandbox e2bSandbox) error {
 func e2bClaimConfig(cfg Config) Config {
 	cfg.Provider = e2bProvider
 	if strings.TrimSpace(cfg.E2B.APIURL) == "" {
-		cfg.E2B.APIURL = "https://api.e2b.app"
+		cfg.E2B.APIURL = core.E2BConfigDefaultAPIURL
 	}
 	return cfg
 }
@@ -735,7 +707,7 @@ func e2bTimeoutSeconds(ttl time.Duration) int {
 func e2bWorkspacePath(cfg Config) string {
 	workdir := strings.TrimSpace(cfg.E2B.Workdir)
 	if workdir == "" {
-		workdir = "crabbox"
+		workdir = core.E2BConfigDefaultWorkdir
 	}
 	if strings.HasPrefix(workdir, "/") {
 		return path.Clean(workdir)

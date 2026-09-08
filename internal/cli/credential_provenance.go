@@ -188,10 +188,11 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if flagWasSet(fs, "daytona-ssh-gateway-host") {
 		provenance.daytonaSSHGateway = credentialSourceFlag
 	}
-	if flagWasSet(fs, "e2b-api-url") {
+	e2bFlags := E2BConfigFlagPresence(fs)
+	if e2bFlags.APIURL {
 		provenance.e2bAPIURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "e2b-domain") {
+	if e2bFlags.Domain {
 		provenance.e2bDomain = credentialSourceFlag
 	}
 	if flagWasSet(fs, "cubesandbox-api-url") {

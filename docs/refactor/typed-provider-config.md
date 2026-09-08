@@ -2,15 +2,15 @@
 
 Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
-runner, and Cloudflare Sandbox describe their mechanical config bindings
+runner, Cloudflare Sandbox, and E2B describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
 `internal/cli/config_opensandbox.go`,
 `internal/cli/config_anthropic_sandbox_runtime.go`,
 `internal/cli/config_cloud_run_sandbox.go`,
 `internal/cli/config_fastapi_cloud.go`, `internal/cli/config_railway.go`,
-`internal/cli/config_upstash_box.go`, `internal/cli/config_cloudflare.go`, and
-`internal/cli/config_cloudflare_sandbox.go`.
+`internal/cli/config_upstash_box.go`, `internal/cli/config_cloudflare.go`,
+`internal/cli/config_cloudflare_sandbox.go`, and `internal/cli/config_e2b.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -88,7 +88,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -254,6 +254,17 @@ provider had none. Validation order, optional authentication, timeout zero,
 raw create workdir, and the dedicated `/workspace` descendant rule are unchanged.
 Only the Go workdir fallback shares the generated default; external bridge and
 bundled Worker protocol defaults remain separate.
+
+E2B's six strings include an environment-only API key, five nonempty-only YAML
+bindings, five flags, and three environment aliases. Accepted key/API URL/domain
+reports feed the existing source policy, with URL and domain visits still marked
+centrally after successful flag application. The generated constants also supply
+the eight configured/default-chain consumers in client, normalized claims,
+bridge/preview domains, acquisition, core template display, and workdir resolution.
+Their raw-empty versus trimmed-empty differences remain intact. Raw scope and
+routing, user-home roots, and the fixed missing-remote-template display fallback
+remain separate owners. Upload and lifecycle code are not changed by this binding
+migration.
 
 The generator accepts only these seven exact source grants. Credential handling,
 destination validation and provenance, provider aliases, and provider selection

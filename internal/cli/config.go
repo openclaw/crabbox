@@ -695,15 +695,6 @@ type DaytonaConfig struct {
 	SSHAccessMinutes int
 }
 
-type E2BConfig struct {
-	APIKey   string
-	APIURL   string
-	Domain   string
-	Template string
-	Workdir  string
-	User     string
-}
-
 type CubeSandboxConfig struct {
 	APIKey        string
 	APIURL        string
@@ -2817,12 +2808,7 @@ func baseConfig() Config {
 			SSHGatewayHost:   "ssh.app.daytona.io",
 			SSHAccessMinutes: 30,
 		},
-		E2B: E2BConfig{
-			APIURL:   "https://api.e2b.app",
-			Domain:   "e2b.app",
-			Template: "base",
-			Workdir:  "crabbox",
-		},
+		E2B: defaultE2BConfig(),
 		CubeSandbox: CubeSandboxConfig{
 			APIURL:        "http://127.0.0.1:3000",
 			Domain:        "cube.app",
@@ -3758,14 +3744,6 @@ type fileDaytonaConfig struct {
 	WorkRoot         string `yaml:"workRoot,omitempty"`
 	SSHGatewayHost   string `yaml:"sshGatewayHost,omitempty"`
 	SSHAccessMinutes int    `yaml:"sshAccessMinutes,omitempty"`
-}
-
-type fileE2BConfig struct {
-	APIURL   string `yaml:"apiUrl,omitempty"`
-	Domain   string `yaml:"domain,omitempty"`
-	Template string `yaml:"template,omitempty"`
-	Workdir  string `yaml:"workdir,omitempty"`
-	User     string `yaml:"user,omitempty"`
 }
 
 type fileCubeSandboxConfig struct {
@@ -6079,23 +6057,16 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Daytona.SSHAccessMinutes = file.Daytona.SSHAccessMinutes
 		}
 	}
-	if file.E2B != nil {
-		if file.E2B.APIURL != "" {
-			cfg.E2B.APIURL = file.E2B.APIURL
+	{
+		applied, err := cfg.E2B.applyFile(file.E2B)
+		if applied.APIURL {
 			cfg.credentialProvenance.e2bAPIURL = credentialSource
 		}
-		if file.E2B.Domain != "" {
-			cfg.E2B.Domain = file.E2B.Domain
+		if applied.Domain {
 			cfg.credentialProvenance.e2bDomain = credentialSource
 		}
-		if file.E2B.Template != "" {
-			cfg.E2B.Template = file.E2B.Template
-		}
-		if file.E2B.Workdir != "" {
-			cfg.E2B.Workdir = file.E2B.Workdir
-		}
-		if file.E2B.User != "" {
-			cfg.E2B.User = file.E2B.User
+		if err != nil {
+			return err
 		}
 	}
 	if file.CubeSandbox != nil {
@@ -8220,21 +8191,21 @@ func applyEnv(cfg *Config) error {
 		cfg.credentialProvenance.daytonaSSHGateway = credentialSourceEnvironment
 	}
 	cfg.Daytona.SSHAccessMinutes = getenvInt("CRABBOX_DAYTONA_SSH_ACCESS_MINUTES", cfg.Daytona.SSHAccessMinutes)
-	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_API_KEY", "E2B_API_KEY"); ok {
-		cfg.E2B.APIKey = value
-		cfg.credentialProvenance.e2bAPIKey = credentialSourceEnvironment
+	{
+		applied, err := cfg.E2B.applyEnv()
+		if applied.APIKey {
+			cfg.credentialProvenance.e2bAPIKey = credentialSourceEnvironment
+		}
+		if applied.APIURL {
+			cfg.credentialProvenance.e2bAPIURL = credentialSourceEnvironment
+		}
+		if applied.Domain {
+			cfg.credentialProvenance.e2bDomain = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_API_URL", "E2B_API_URL"); ok {
-		cfg.E2B.APIURL = value
-		cfg.credentialProvenance.e2bAPIURL = credentialSourceEnvironment
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_DOMAIN", "E2B_DOMAIN"); ok {
-		cfg.E2B.Domain = value
-		cfg.credentialProvenance.e2bDomain = credentialSourceEnvironment
-	}
-	cfg.E2B.Template = getenv("CRABBOX_E2B_TEMPLATE", cfg.E2B.Template)
-	cfg.E2B.Workdir = getenv("CRABBOX_E2B_WORKDIR", cfg.E2B.Workdir)
-	cfg.E2B.User = getenv("CRABBOX_E2B_USER", cfg.E2B.User)
 	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_API_KEY", "CUBE_API_KEY", "E2B_API_KEY"); ok {
 		cfg.CubeSandbox.APIKey = value
 	}
@@ -9099,7 +9070,7 @@ func serverTypeForConfig(cfg Config) string {
 		return ""
 	}
 	if cfg.Provider == "e2b" {
-		return blank(cfg.E2B.Template, "base")
+		return blank(cfg.E2B.Template, E2BConfigDefaultTemplate)
 	}
 	if cfg.Provider == "exe-dev" || cfg.Provider == "exedev" || cfg.Provider == "exe" {
 		return blank(cfg.ExeDev.Image, "default")

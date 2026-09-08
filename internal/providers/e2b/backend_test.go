@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -338,7 +340,175 @@ func TestValidateE2BAPIURL(t *testing.T) {
 	}
 }
 
+func TestE2BFlagsPreserveExactGuardAndDeferredValidation(t *testing.T) {
+	cfg := Config{Provider: "e2b"}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := RegisterE2BProviderFlags(fs, cfg)
+	fs.VisitAll(func(f *flag.Flag) {
+		if strings.Contains(f.Name, "key") {
+			t.Fatal("API key flag introduced")
+		}
+	})
+	cfg.E2B = E2BConfig{APIURL: "https://example.invalid/api", Domain: "example.invalid", Template: "custom", Workdir: "work", User: "alice"}
+	before := cfg
+	if err := ApplyE2BProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("unvisited flags changed config")
+	}
+	if err := fs.Parse([]string{"--e2b-api-url=https://example.invalid/api", "--e2b-domain=example.invalid", "--e2b-template=custom", "--e2b-workdir=work", "--e2b-user=alice"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.E2B = E2BConfig{}
+	if err := ApplyE2BProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("positive flags changed binding or marker semantics")
+	}
+	args := []string{"--e2b-api-url=", "--e2b-domain=", "--e2b-template=", "--e2b-workdir=", "--e2b-user="}
+	if err := fs.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyE2BProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal("wrapper added client validation")
+	}
+	before.E2B = E2BConfig{}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("explicit empty values or central provenance side effects changed")
+	}
+	if _, err := (Provider{}).Configure(cfg, Runtime{}); err != nil {
+		t.Fatalf("Configure added client validation: %v", err)
+	}
+	for _, name := range []string{"e2b", "E2B", " e2b "} {
+		cfg := Config{Provider: name}
+		fs := flag.NewFlagSet("guard", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		values := RegisterE2BProviderFlags(fs, cfg)
+		for _, args := range [][]string{{"--type=vm"}, {"--type=vm", "--class=large"}} {
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			for _, v := range []any{nil, struct{}{}, values} {
+				err := ApplyE2BProviderFlags(&cfg, fs, v)
+				if name != "e2b" {
+					if err != nil {
+						t.Fatalf("guard normalized provider: %v", err)
+					}
+					continue
+				}
+				want := "--type"
+				if len(args) == 2 {
+					want = "--class"
+				}
+				if err == nil || err.Error() != want+" is not supported for provider=e2b" {
+					t.Fatalf("guard=%v", err)
+				}
+			}
+		}
+	}
+}
+
+func TestE2BConfiguredEndpointDefaultsAndRawScope(t *testing.T) {
+	for _, raw := range []string{"", "  ", " https://example.invalid/api/ "} {
+		cfg := Config{E2B: E2BConfig{APIKey: "inert", APIURL: raw}}
+		before := cfg.E2B
+		api, err := newE2BClient(cfg, Runtime{HTTP: &http.Client{}})
+		if raw == "  " {
+			if err == nil {
+				t.Fatal("whitespace client endpoint unexpectedly defaulted")
+			}
+		} else {
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "https://api.e2b.app"
+			if raw != "" {
+				want = "https://example.invalid/api"
+			}
+			if api.(*e2bClient).apiURL != want {
+				t.Fatal("client endpoint default changed")
+			}
+		}
+		scoped := e2bClaimConfig(cfg)
+		want := "https://api.e2b.app"
+		if strings.TrimSpace(raw) != "" {
+			want = raw
+		}
+		if scoped.E2B.APIURL != want {
+			t.Fatal("claim-config trim-before-default changed")
+		}
+		scope := (Provider{}).ClaimScope(cfg)
+		if strings.TrimSpace(raw) == "" && scope != "" {
+			t.Fatal("raw scope gained endpoint default")
+		}
+		if strings.TrimSpace(raw) != "" && scope != "endpoint:https://example.invalid/api" {
+			t.Fatalf("custom scope=%q", scope)
+		}
+		if cfg.E2B != before {
+			t.Fatal("default helpers mutated config")
+		}
+	}
+	for _, raw := range []string{"", "  ", " sandbox.example.invalid "} {
+		cfg := Config{E2B: E2BConfig{APIKey: "inert", APIURL: "https://example.invalid/api", Domain: raw, User: " alice "}}
+		api, err := newE2BClient(cfg, Runtime{HTTP: &http.Client{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := strings.TrimSpace(raw)
+		if raw == "" {
+			want = "e2b.app"
+		}
+		if api.(*e2bClient).domain != want || api.(*e2bClient).user != " alice " {
+			t.Fatal("client domain/user predicate changed")
+		}
+	}
+	for _, rawKey := range []string{"", "  "} {
+		if _, err := newE2BClient(Config{E2B: E2BConfig{APIKey: rawKey, APIURL: "relative"}}, Runtime{HTTP: &http.Client{}}); err == nil || err.Error() != "provider=e2b requires E2B_API_KEY" {
+			t.Fatalf("key-first=%v", err)
+		}
+	}
+	cfg := Config{E2B: E2BConfig{APIURL: "https://example.invalid/api", Domain: " sandbox.example.invalid ", User: " alice ", Workdir: " project "}}
+	got := (Provider{}).CommandRouting(cfg, core.CommandRoutingRequest{}).Args
+	want := []string{"--e2b-api-url", "https://example.invalid/api", "--e2b-domain", " sandbox.example.invalid ", "--e2b-user", " alice ", "--e2b-workdir", " project "}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("raw routing=%v", got)
+	}
+}
+
+func TestE2BTemplateAcquisitionAndMetadataDefaultAreDistinct(t *testing.T) {
+	for _, raw := range []string{"", "  ", "custom-template"} {
+		t.Run(fmt.Sprintf("template=%q", raw), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cfg := core.BaseConfig()
+			cfg.Provider = "e2b"
+			cfg.E2B.Template = raw
+			b := &e2bBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+			fake := &fakeE2BSyncClient{}
+			_, sandbox, _, err := b.createSandbox(context.Background(), fake, Repo{Name: "example", Root: t.TempDir()}, false, false, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := raw
+			if want == "" {
+				want = "base"
+			}
+			if fake.createReq.TemplateID != want {
+				t.Fatalf("template=%q want=%q", fake.createReq.TemplateID, want)
+			}
+			if e2bSandboxToServer(sandbox).ServerType.Name != "base" {
+				t.Fatal("missing remote metadata inferred configured template")
+			}
+		})
+	}
+}
+
 func TestE2BWorkspacePath(t *testing.T) {
+	if got := e2bWorkspacePath(Config{E2B: E2BConfig{User: " alice ", Workdir: "  "}}); got != "/home/alice/crabbox" {
+		t.Fatalf("whitespace/default workspace=%q", got)
+	}
 	if got := e2bWorkspacePath(Config{}); got != "/home/user/crabbox" {
 		t.Fatalf("workspace=%q", got)
 	}

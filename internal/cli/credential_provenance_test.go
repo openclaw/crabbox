@@ -635,16 +635,14 @@ func TestConfigMergeTracksCredentialDestinationSources(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
 	cfg.Provider = "e2b"
-	if err := applyFileConfigWithTrust(&cfg, fileConfig{
-		E2B: &fileE2BConfig{
-			APIURL:   "https://repo.example.test",
-			Domain:   "repo.example.test",
-			Template: "project-template",
-			Workdir:  "project-workdir",
-		},
-	}, false); err != nil {
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("e2b:\n  apiUrl: https://repo.example.test\n  domain: repo.example.test\n  template: project-template\n  workdir: project-workdir\n"), &file); err != nil {
 		t.Fatal(err)
 	}
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+
 	t.Setenv("CRABBOX_E2B_API_KEY", "secret")
 	if err := applyEnv(&cfg); err != nil {
 		t.Fatal(err)
