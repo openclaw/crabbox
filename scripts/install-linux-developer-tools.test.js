@@ -1143,6 +1143,7 @@ need_root() { :; }
 retry() { printf 'retry=%s\\n' "$*"; }
 apt_install() { printf 'packages=%s\\n' "$*"; }
 dpkg() { echo amd64; }
+public_tool_links() { :; }
 add_nodesource() { echo repository; }
 cache_public_toolchain_archives() { printf 'archives=%s\\n' "$*"; }
 install_pinned_node() { echo pinned-node; }
