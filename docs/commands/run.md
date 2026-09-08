@@ -106,6 +106,13 @@ multiple scopes of one canonical provider, which that provider resolves; claims
 from different providers require a canonical ID or explicit provider. An
 explicit `--provider` remains authoritative.
 
+For coordinator-backed preparation of an exact lease ID, an initial lease-read
+HTTP 5xx response is retried once within the original HTTP and caller deadline.
+Authentication, absence, conflict, identity mismatch, cancellation and timeout
+failures are not retried. This repeats only the observation before SSH and script
+admission; it never reruns a script. Plain status and Stop retain their existing
+observation behavior.
+
 For an ordinary reused coordinator lease, `--ssh-port <port>` pins one of the
 lease's advertised primary or fallback SSH ports before workspace ownership or
 command delivery. An unadvertised port is rejected; the lease's host, user,

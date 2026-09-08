@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Retry an exact coordinator lease read once on HTTP 5xx during run preparation, sharing the original deadline without replaying SSH, scripts, or permanent failures.
+
 ## 0.53.0 - 2026-09-08
 
 ### Highlights
