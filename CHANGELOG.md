@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Describe Anthropic Sandbox Runtime configuration bindings once, preserving inherited binary paths for empty YAML, explicit settings/debug clearing, and native runtime defaults. [PR 1993](https://github.com/openclaw/crabbox/pull/1993). Thanks @steipete.
-- Reduce coordinator maintenance work for large lease histories by remembering completed egress cleanup and limiting pool and provisioning lookups to relevant leases. Thanks @steipete.
+- Reduce coordinator maintenance work for large lease histories by remembering completed egress cleanup and limiting pool and provisioning lookups to relevant leases. [PR 1997](https://github.com/openclaw/crabbox/pull/1997). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 
