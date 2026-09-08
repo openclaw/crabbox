@@ -68,7 +68,7 @@ codeSandbox:
   vmTier: ""                      # pico, nano, micro, small, medium, large, xlarge
   privacy: private                # public, unlisted, private, or public-hosts
   hibernationTimeoutSecs: 0       # 0 uses CodeSandbox default
-  automaticWakeupHttp: true       # allow host URL access to wake hibernated sandboxes
+  automaticWakeupHTTP: true       # allow host URL access to wake hibernated sandboxes
   automaticWakeupWebSocket: false
   bridgeCommand: node
   sdkPackage: "@codesandbox/sdk@2.4.2"

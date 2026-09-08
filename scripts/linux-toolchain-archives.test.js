@@ -115,20 +115,82 @@ function nodeRebakeFixture(t) {
   const context = nodeArchiveFixture(t);
   const { root } = context;
   const aptPayload = path.join(root, "apt-payload");
-  writeNodeToolchain(aptPayload, "22.0.0");
-  fs.mkdirSync(path.join(root, "apt-bin"));
+  writeNodeToolchain(path.join(aptPayload, "bin"), "22.0.0");
+  writeNodeToolchain(path.join(root, "apt", "bin"), "24.15.0");
+  fs.writeFileSync(path.join(root, "package-state"), "installed\t24.15.0-1nodesource1\tamd64\n");
+  fs.writeFileSync(
+    path.join(root, "apt-versions"),
+    [
+      "nodejs | 26.0.0-1nodesource1 | https://deb.nodesource.com/node_26.x nodistro/main amd64 Packages",
+      "nodejs | 22.1.0-1nodesource1 | https://other.invalid/node_22.x nodistro/main amd64 Packages",
+      "nodejs | 22.1.0-1nodesource1 | https://deb.nodesource.com/node_22.x nodistro/main arm64 Packages",
+      "nodejs | 22.0.0-1nodesource1 | https://deb.nodesource.com/node_22.x nodistro/main amd64 Packages",
+      "nodejs | 22.0.0-1nodesource1 | /var/lib/dpkg/status",
+      "",
+    ].join("\n"),
+  );
   const digest = context.pack();
   const shell = `${context.shell}
-export PATH="$node_link_dir:$PWD/apt-bin:$PATH"
+export PATH="$node_link_dir:$PWD/apt/bin:$PATH"
 for tool in node npm npx corepack pnpm pnpx; do "$tool" --version; done
 [[ "$(hash -t node)" == "$node_link_dir/node" ]]
 : >"$HOME/corepack.log"
 node_major=22
 pnpm_version=10.0.0
-apt_install() {
-  [[ "$*" == nodejs ]] || return 90
-  cp -R "$PWD/apt-payload/." "$PWD/apt-bin/"
+dpkg() {
+  if [[ "$*" == "--print-architecture" ]]; then echo amd64; return; fi
+  [[ "$1" == "--compare-versions" ]] || return 90
+  python3 - "$2" "$3" "$4" <<'PY'
+import re, sys
+left, op, right = sys.argv[1:]
+key = lambda value: tuple(map(int, re.findall(r"\\d+", value)))
+sys.exit(0 if {"gt": key(left) > key(right), "lt": key(left) < key(right)}[op] else 1)
+PY
 }
+apt-cache() {
+  [[ "$*" == "madison nodejs:amd64" ]] || return 90
+  cat "$PWD/apt-versions"
+}
+dpkg-query() {
+  case "$1" in
+    -W) cat "$PWD/package-state" ;;
+    -L) printf '%s\\n' "$PWD/apt/bin/node" ;;
+    *) return 90 ;;
+  esac
+}
+retry() { "$@"; }
+apt-get() {
+  printf '%s\\n' "$*" >>"$PWD/apt-calls"
+  [[ "\${FIXTURE_APT_EXIT:-0}" == "0" ]] || return "$FIXTURE_APT_EXIT"
+  [[ "$1" == install ]] || return 90
+  shift
+  local selector="" yes=0 no_recommends=0 allow_downgrade=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      -y) yes=1 ;;
+      --no-install-recommends) no_recommends=1 ;;
+      --allow-downgrades) allow_downgrade=1 ;;
+      nodejs|nodejs:amd64=22.0.0-1nodesource1)
+        [[ -z "$selector" ]] || return 90
+        selector="$arg"
+        ;;
+      *) return 90 ;;
+    esac
+  done
+  [[ "$yes" == 1 && "$no_recommends" == 1 ]] || return 90
+  # An unversioned install retains the newer installed package, as real APT did.
+  if [[ "$selector" == nodejs && "$allow_downgrade" == 0 ]]; then return 0; fi
+  [[ "$selector" == nodejs:amd64=22.0.0-1nodesource1 ]] || return 90
+  if [[ "$(cat "$PWD/package-state")" == *24.15.0* ]]; then
+    [[ "$allow_downgrade" == 1 ]] || return 90
+  else
+    [[ "$allow_downgrade" == 0 ]] || return 90
+  fi
+  cp -R "$PWD/apt-payload/." "$PWD/apt/"
+  printf 'installed\\t22.0.0-1nodesource1\\tamd64\\n' >"$PWD/package-state"
+  fixture_after_apt
+}
+fixture_after_apt() { :; }
 `;
   return {
     ...context,
@@ -431,12 +493,22 @@ ${dangling ? 'mv "$node_toolcache_root/node/24.19.0/x64/bin" "$node_toolcache_ro
 install_node_pnpm
 printf 'selected=%s\\n' "$(node --version)"
 for tool in node npm npx corepack pnpm pnpx; do
-  [[ "$(command -v "$tool")" == "$PWD/apt-bin/$tool" ]] || exit 91
+  [[ "$(command -v "$tool")" == "$PWD/apt/bin/$tool" ]] || exit 91
   "$tool" --version
 done
 `);
     success(result);
     assert.match(result.stdout, /selected=v22\.0\.0/);
+    assert.deepEqual(
+      new Set(fs.readFileSync(path.join(root, "apt-calls"), "utf8").trim().split(/\s+/)),
+      new Set([
+        "install",
+        "-y",
+        "--no-install-recommends",
+        "--allow-downgrades",
+        "nodejs:amd64=22.0.0-1nodesource1",
+      ]),
+    );
     for (const tool of ["node", "npm", "npx", "corepack", "pnpm", "pnpx"]) {
       assert.equal(fs.existsSync(path.join(root, "links", tool)), false);
       assert.throws(() => fs.lstatSync(path.join(root, "links", tool)), { code: "ENOENT" });
@@ -457,7 +529,7 @@ done
 test("Node-major rebake preserves exact owned links when APT fails even in a conditional caller", (t) => {
   const { root, runRebake, destination } = nodeRebakeFixture(t);
   const result = runRebake(`
-apt_install() { return 43; }
+FIXTURE_APT_EXIT=43
 if install_node_pnpm; then exit 91; fi
 [[ "$(node --version)" == v24.19.0 ]]
 `);
@@ -472,12 +544,145 @@ if install_node_pnpm; then exit 91; fi
   assert.equal(fs.existsSync(`${destination}.complete`), true);
 });
 
+for (const [name, setup, diagnostic, transaction] of [
+  ["missing candidate", ': >"$PWD/apt-versions"', /no NodeSource Node 22 package/, false],
+  [
+    "foreign repository only",
+    "sed -i.bak 's|https://deb.nodesource.com|https://other.invalid|g' \"$PWD/apt-versions\"",
+    /no NodeSource Node 22 package/,
+    false,
+  ],
+  [
+    "foreign architecture only",
+    "sed -i.bak 's/amd64 Packages/arm64 Packages/g' \"$PWD/apt-versions\"",
+    /no NodeSource Node 22 package/,
+    false,
+  ],
+  [
+    "same-major downgrade",
+    "printf 'installed\\t22.1.0-1nodesource1\\tamd64\\n' >\"$PWD/package-state\"",
+    /refusing Node package downgrade/,
+    false,
+  ],
+  [
+    "other-major downgrade",
+    "printf 'installed\\t26.0.0-1nodesource1\\tamd64\\n' >\"$PWD/package-state\"",
+    /refusing Node package downgrade/,
+    false,
+  ],
+  [
+    "wrong installed version",
+    "fixture_after_apt() { printf 'installed\\t24.15.0-1nodesource1\\tamd64\\n' >\"$PWD/package-state\"; }",
+    /package replacement verification failed/,
+    true,
+  ],
+  [
+    "wrong installed architecture",
+    "fixture_after_apt() { printf 'installed\\t22.0.0-1nodesource1\\tarm64\\n' >\"$PWD/package-state\"; }",
+    /package replacement verification failed/,
+    true,
+  ],
+  [
+    "incomplete installation",
+    "fixture_after_apt() { printf 'unpacked\\t22.0.0-1nodesource1\\tamd64\\n' >\"$PWD/package-state\"; }",
+    /package replacement verification failed/,
+    true,
+  ],
+  [
+    "wrong package binary",
+    'fixture_after_apt() { cp "$node_toolcache_root/node/24.19.0/x64/bin/node" "$PWD/apt/bin/node"; }',
+    /package-owned Node binary verification failed/,
+    true,
+  ],
+  [
+    "symlink package binary",
+    'fixture_after_apt() { rm "$PWD/apt/bin/node"; ln -s "$PWD/apt-payload/bin/node" "$PWD/apt/bin/node"; }',
+    /package-owned Node binary verification failed/,
+    true,
+  ],
+]) {
+  test(`Node-major rebake preserves owned links and caches on ${name}`, (t) => {
+    const { root, runRebake } = nodeRebakeFixture(t);
+    const result = runRebake(`
+${setup}
+cp -R "$node_link_dir" "$PWD/links-before"
+cp -R "$node_toolcache_root" "$PWD/tools-before"
+if install_node_pnpm; then exit 91; fi
+[[ "$(hash -t node)" == "$node_link_dir/node" ]]
+[[ "$(node --version)" == v24.19.0 ]]
+`);
+    success(result);
+    assert.match(result.stderr, diagnostic);
+    assert.doesNotMatch(result.stderr, /resolve PATH/);
+    assert.deepEqual(
+      fileState(path.join(root, "links")),
+      fileState(path.join(root, "links-before")),
+    );
+    assert.deepEqual(
+      fileState(path.join(root, "tools")),
+      fileState(path.join(root, "tools-before")),
+    );
+    assert.equal(fs.readFileSync(path.join(root, "home", "corepack.log"), "utf8"), "");
+    assert.equal(fs.existsSync(path.join(root, "apt-calls")), transaction);
+  });
+}
+
+test("Node-major rebake updates an older selected-major package without permitting downgrades", (t) => {
+  const { root, runRebake } = nodeRebakeFixture(t);
+  success(
+    runRebake(`
+printf 'installed\\t22.0.0-0nodesource1\\tamd64\\n' >"$PWD/package-state"
+install_node_pnpm
+[[ "$(node --version)" == v22.0.0 ]]
+`),
+  );
+  assert.deepEqual(
+    new Set(fs.readFileSync(path.join(root, "apt-calls"), "utf8").trim().split(/\s+/)),
+    new Set(["install", "-y", "--no-install-recommends", "nodejs:amd64=22.0.0-1nodesource1"]),
+  );
+});
+
+test("Node-major rebake rechecks its retirement set and preserves an operator replacement during APT", (t) => {
+  const { root, runRebake } = nodeRebakeFixture(t);
+  success(
+    runRebake(`
+fixture_after_apt() {
+  rm "$node_link_dir/node"
+  cp "$PWD/apt-payload/bin/node" "$node_link_dir/node"
+}
+install_node_pnpm
+[[ "$(node --version)" == v22.0.0 ]]
+`),
+  );
+  assert.equal(fs.lstatSync(path.join(root, "links", "node")).isFile(), true);
+  assert.deepEqual(
+    fs.readFileSync(path.join(root, "links", "node")),
+    fs.readFileSync(path.join(root, "apt-payload", "bin", "node")),
+  );
+});
+
+test("Node-major rebake supports a system with no owned public aliases", (t) => {
+  const { root, runRebake } = nodeRebakeFixture(t);
+  success(
+    runRebake(`
+rm "$node_link_dir/"*
+install_node_pnpm
+[[ "$(node --version)" == v22.0.0 ]]
+`),
+  );
+  assert.deepEqual(fs.readdirSync(path.join(root, "links")), []);
+  assert.match(
+    fs.readFileSync(path.join(root, "home", "corepack.log"), "utf8"),
+    /22 prepare pnpm@10.0.0 --activate node=v22.0.0/,
+  );
+});
+
 for (const [name, replacement, target, fails] of [
-  ["regular operator file", 'cp "$PWD/apt-payload/node" "$node_link_dir/node"', null, false],
+  ["regular operator file", 'cp "$PWD/apt-payload/bin/node" "$node_link_dir/node"', null, false],
   [
     "foreign absolute link",
-    'ln -s "$PWD/apt-payload/node" "$node_link_dir/node"',
-    "apt-payload/node",
+    'ln -s "$PWD/apt-payload/bin/node" "$node_link_dir/node"',
+    "apt-payload/bin/node",
     false,
   ],
   [
@@ -537,7 +742,7 @@ test("Node-major rebake leaves operator directories, relative and newline target
   success(
     runRebake(`
 rm "$node_link_dir/npm" "$node_link_dir/npx" "$node_link_dir/pnpm" "$node_link_dir/pnpx"
-cp "$PWD/apt-payload/npm" "$node_link_dir/npm"
+cp "$PWD/apt-payload/bin/npm" "$node_link_dir/npm"
 mkdir "$node_link_dir/npx"
 printf 'operator directory\\n' >"$node_link_dir/npx/keep"
 ln -s ../tools/node/24.19.0/x64/bin/pnpm "$node_link_dir/pnpm"
@@ -551,7 +756,7 @@ install_node_pnpm
   assert.equal(fs.lstatSync(path.join(links, "npm")).isFile(), true);
   assert.deepEqual(
     fs.readFileSync(path.join(links, "npm")),
-    fs.readFileSync(path.join(root, "apt-payload", "npm")),
+    fs.readFileSync(path.join(root, "apt-payload", "bin", "npm")),
   );
   assert.equal(fs.readFileSync(path.join(links, "npx", "keep"), "utf8"), "operator directory\n");
   assert.equal(fs.readlinkSync(path.join(links, "pnpm")), "../tools/node/24.19.0/x64/bin/pnpm");
@@ -582,6 +787,7 @@ dpkg() { printf '%s\\n' "$FIXTURE_ARCH"; }
 cache_public_toolchain_archives() { echo public-archives; }
 install_pinned_node() { echo pinned-node; }
 apt_install() { echo "apt $*"; }
+install_requested_node() { echo "apt nodejs"; }
 command() { return 0; }
 node() { printf 'v%s.0.0\\n' "$CRABBOX_LINUX_NODE_MAJOR"; }
 corepack() { echo "corepack $*"; }

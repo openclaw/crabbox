@@ -295,17 +295,20 @@ gh workflow run devtools-image-publish.yml \
 ```
 
 Use `macos_host=allocate` only when no suitable EC2 Mac Dedicated Host is
-available. Unmeasured publication uploads its complete mint logs and macOS lifecycle
-evidence as a 30-day diagnostic Actions artifact. These diagnostics are not
-sanitized public proof. Measured Linux publication uploads only its allowlisted
-manifest; its private evidence and diagnostics are excluded. Candidate failure leaves the default
-unchanged. Publication is serialized per target; promotion atomically captures
-the current scoped default, and promoted-image smoke failure attempts a
-compare-and-swap restore. If another operator promotes a newer image first,
-rollback fails visibly rather than overwriting it. Publisher rollback explicitly
-authorizes retiring the exact failed catalog revision so capability-aware leases
-cannot select it; generic stale compare-and-swap requests leave the catalog
-unchanged.
+available. Unmeasured publication uploads its complete mint logs and macOS
+lifecycle evidence as a 30-day diagnostic Actions artifact. These diagnostics
+are not sanitized public proof. Measured Linux publication initializes one
+fixed-path `crabbox-devtools-image-proof/v2` outcome immediately after the
+protected checkout, then atomically replaces it after wrapper rollback and
+cleanup. The allowlisted outcome uploads on success or failure; private
+evidence, receipts, and diagnostics are never copied into the artifact
+directory. Candidate failure leaves the default unchanged. Publication is
+serialized per target; promotion atomically captures the current scoped
+default, and promoted-image smoke failure attempts a compare-and-swap restore.
+If another operator promotes a newer image first, rollback fails visibly rather
+than overwriting it. Publisher rollback explicitly authorizes retiring the
+exact failed catalog revision so capability-aware leases cannot select it;
+generic stale compare-and-swap requests leave the catalog unchanged.
 
 ## Developer-image wrappers
 
@@ -461,13 +464,20 @@ installer's pnpm default of 11.1.0. Existing `CRABBOX_LINUX_PNPM_VERSION` and
 the existing ARM installer route retain the fingerprint-checked NodeSource
 path; this recipe does not add an ARM image.
 
-When rebaking with a different Node major, the installer waits for APT success
-before removing its six exact Node 24.19.0 toolcache symlinks, including dangling
-ones. It leaves operator files, nonmatching symlinks, and cached archives and
-trees intact, clears the shell command cache, and checks the selected Node major
-before preparing Corepack. A conflicting operator-provided Node stops the
-rebake with a PATH diagnostic rather than being deleted. The alternate toolchain
-must provide npm and Corepack; this does not add packaging for newer Node majors.
+For a nondefault Node major, the installer selects an exact native-architecture
+version from that major's fingerprint-checked NodeSource repository. An explicit
+`CRABBOX_LINUX_NODE_MAJOR=22` permits replacing an installed Node 24 package with
+Node 22; it does not authorize other downgrades or change the default Node 24
+route. APT failure or a failed installed-package version, architecture, or
+package-owned binary check leaves the owned links and caches intact.
+
+Only after those checks does the installer recheck and remove its six exact
+Node 24.19.0 toolcache symlinks, including dangling ones. Operator files,
+nonmatching symlinks, and cached archives and trees remain intact. It clears the
+shell command cache and checks normal PATH selection before preparing Corepack.
+A conflicting operator-provided Node stops the rebake with a PATH diagnostic
+rather than being deleted. The alternate toolchain must provide npm and Corepack;
+this does not add packaging for newer Node majors.
 
 The mint wrapper applies this archive contract only when its selected prep
 script is the bundled Linux builder. It forwards the existing
@@ -557,9 +567,10 @@ the separate qualification workflow's three-launch budget.
 
 Choose a positive absolute p95 runner-time cap before the campaign, based on
 the operator's acceptance policy. There is no default performance target.
-All three cohorts must pass that same cap. Their p95 values are also recorded
-side by side as a descriptive baseline comparison; passing `bench check` does
-not establish a speedup or statistical significance.
+The baseline cohort is evidence-only and does not apply the cap. The explicit
+candidate and normal-selection promoted cohorts must both pass it. All three
+p95 values are recorded side by side as a descriptive comparison; passing
+`bench check` does not establish a speedup or statistical significance.
 
 Measured mode validates the bundled Linux recipe and its exact input hashes
 before the first CLI operation. It requires clean source, an explicit region
@@ -591,10 +602,10 @@ cleanup also fails. Interruptions recover an already-published retained handle
 without waiting for a final timing record. The original runner timing excludes the subsequent evidence
 read and cleanup wait, consistently across all cohorts. Warmup timings are not
 benchmark samples, and a `--cold` label alone is not evidence of fresh acquisition.
-Existing `bench report` and
-`bench check` own the timing distributions and acceptance policy. Missing,
-mixed, reused, or insufficient observations block promotion; measured `0ms`
-sync remains valid.
+Existing `bench report` owns all three timing distributions. `bench check`
+enforces the predeclared p95 policy only for candidate and promoted cohorts.
+Missing, mixed, reused, or insufficient observations block promotion; measured
+`0ms` sync remains valid.
 
 Candidate lifecycle cleanup and all candidate measurements finish before
 transactional promotion. The original promotion receipt remains unchanged.
@@ -602,19 +613,29 @@ The baseline image is reconciled with the receipt's captured previous default
 before the post-promotion smoke and again before final acceptance.
 The normal-selection path clears the environment AMI override, and
 all promoted measurements must prove the new image was selected normally.
-Rollback remains armed through the final measurements and manifest creation.
+Rollback remains armed through the final measurements and outcome projection.
 Failure attempts the existing receipt-based restore and exact failed catalog
 revision retirement, retaining the original failure status. A concurrent
 newer promotion causes visible CAS rejection, never an overwrite.
 
-The public `manifest.json` contains only recipe/source/policy digests, fixed
-phase and outcome labels, numeric counts and measures, and check reasons.
-`plannedLeaseCount` is the campaign plan, not an observed provider-attempt count.
-Raw records, command text, paths, image/lease identities, promotion receipts,
-handles, and diagnostic logs remain in the private runner directory and are
-not uploaded for measured publication. Full config and administrative listings
-are never logged or persisted. A failed campaign does not emit a successful
-public manifest.
+The public `manifest.json` contains only fixed state labels, source,
+recipe/policy and opaque promotion-binding digests, numeric counts and
+measures, selection states, rollback/cleanup states, and the exit code.
+`plannedLeaseCount` is the campaign plan, not an observed provider-attempt
+count. The baseline records evidence with `policyApplied=false`; only candidate
+and promoted cohorts can report a passed policy. Failed and incomplete
+campaigns retain the last strictly validated partial cohorts without exposing
+raw errors. Raw records, command text, paths, image/lease identities, provider
+metadata, promotion receipts, handles, reasons, and diagnostic logs remain in
+the private runner directory and are not uploaded. Full config and
+administrative listings are never logged or persisted.
+
+Run the first measured publication as a supervised pilot. The wrapper finalizer
+can restore a captured promotion and publish the final outcome after ordinary
+errors, `SIGINT`, or `SIGTERM`, but it cannot run after runner loss or
+`SIGKILL`. In that case the initialized outcome remains conservative; inspect
+the private operator evidence, verify the current promoted default, and use the
+captured receipt for an explicit compare-and-swap rollback before retrying.
 
 ## macOS images
 

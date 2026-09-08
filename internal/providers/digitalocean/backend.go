@@ -106,7 +106,7 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	now := b.now()
+	now := core.ClockNow(b.RT.Clock).UTC()
 	created := droplet{}
 	committed := false
 	defer func() {
@@ -426,7 +426,7 @@ func (b *digitalOceanLeaseBackend) releaseTargetFromClaim(ctx context.Context, c
 		if recoveryName == "" {
 			recoveryName = "ambiguous-create"
 		}
-		if createdAt <= 0 || b.now().Before(time.Unix(createdAt, 0).Add(grace)) {
+		if createdAt <= 0 || core.ClockNow(b.RT.Clock).UTC().Before(time.Unix(createdAt, 0).Add(grace)) {
 			return core.LeaseTarget{}, core.Exit(4, "digitalocean %s recovery is still pending for lease=%s; retry stop later", recoveryName, claim.LeaseID)
 		}
 		if recovery == "ambiguous-key-create" {
@@ -807,7 +807,7 @@ func (b *digitalOceanLeaseBackend) Touch(ctx context.Context, req core.TouchRequ
 		delete(labels, "idle_timeout")
 		delete(labels, "idle_timeout_secs")
 	}
-	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, b.now())
+	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, core.ClockNow(b.RT.Clock).UTC())
 	for key, value := range liveTailscale {
 		labels[key] = value
 	}
@@ -1285,13 +1285,6 @@ func (b *digitalOceanLeaseBackend) waitForDropletIP(ctx context.Context, client 
 		return droplet{}, err
 	}
 	return result.Value, nil
-}
-
-func (b *digitalOceanLeaseBackend) now() time.Time {
-	if b.RT.Clock != nil {
-		return b.RT.Clock.Now().UTC()
-	}
-	return time.Now().UTC()
 }
 
 func rollbackDigitalOceanAcquire(client digitalOceanAPI, dropletID, keyID int64) error {

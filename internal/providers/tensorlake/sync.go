@@ -23,7 +23,7 @@ func rejectIncompatibleSyncOptions(req RunRequest) error {
 func (b *tensorlakeBackend) prepareArchive(ctx context.Context, req RunRequest) (*core.PreparedArchive, error) {
 	return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-		TempPattern: "crabbox-tensorlake-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+		TempPattern: "crabbox-tensorlake-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 	})
 }
 
@@ -42,7 +42,7 @@ func (b *tensorlakeBackend) syncWorkspace(ctx context.Context, cli *tensorlakeCL
 	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
 		Workdir: workdir, RemoteArchivePrefix: "crabbox-tensorlake-sync-",
-		Provider: providerName, PhaseName: "tensorlake_sync", Stderr: b.rt.Stderr, Now: b.now,
+		Provider: providerName, PhaseName: "tensorlake_sync", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 		Upload: func(uploadCtx context.Context, remoteArchive string, _ io.Reader) error {
 			return cli.uploadFile(uploadCtx, sandboxID, archive.File.Name(), remoteArchive)
 		},

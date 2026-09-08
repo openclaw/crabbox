@@ -14,6 +14,7 @@ import { prepareCoordinatorRequest } from "../src/coordinator-entry";
 import { errorMessage, json, redactDiagnosticSecrets, requestOwner } from "../src/http";
 import { MISSING_ORG_KEY, requestOrg, requestOrgLabel } from "../src/org-identity";
 import type { Env } from "../src/types";
+import { gcpBillingBody, gcpBillingError, gcpBillingMessage } from "./fixtures/gcp-billing-error";
 
 function proxyIdentityRequest(secret?: string): Request {
   return new Request("https://example.test/v1/whoami", {
@@ -1522,6 +1523,34 @@ describe("http responses", () => {
 
   it("keeps public error messages to the first line", () => {
     expect(errorMessage(new Error("boom\n    at hidden"))).toBe("boom");
+  });
+
+  it.each([gcpBillingBody, JSON.stringify(gcpBillingError)])(
+    "preserves quoted provider JSON in bounded diagnostics",
+    async (body) => {
+      const diagnostic = `gcp GET /global/firewalls/crabbox-ssh-8aa5859a: http 403: ${body}`;
+      const message = errorMessage(new Error(diagnostic));
+      expect(message).toContain(gcpBillingMessage);
+      expect(message).toContain('"reason":');
+      expect(message).not.toContain("\n");
+      expect(message.length).toBeLessThanOrEqual(2048);
+      await expect(json({ error: message }).json()).resolves.toEqual({ error: message });
+    },
+  );
+
+  it("redacts multiline JSON credentials before flattening and bounding diagnostics", () => {
+    const secret = "configured-credential".repeat(200);
+    const body = JSON.stringify(
+      { ...gcpBillingError, token: "reflected-secret", detail: secret, padding: "x".repeat(3000) },
+      null,
+      2,
+    );
+    const message = errorMessage(new Error(`provider failed: ${body}`), [secret]);
+    expect(message).toContain(gcpBillingMessage);
+    expect(message).toContain('"token": "[redacted]"');
+    expect(message).toContain('"detail": "[redacted]"');
+    expect(message).not.toContain("configured-credential");
+    expect(message).toHaveLength(2048);
   });
 
   it("redacts configured and structured credentials from diagnostics", () => {

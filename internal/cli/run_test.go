@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3280,12 +3281,13 @@ func TestRunCommandRequireArtifactFailsAfterSuccessfulCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	downloaded := []byte("downloaded\n")
 	script := `#!/bin/sh
 cmd=""
 for arg do cmd="$arg"; done
 printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd" in
-  *"base64 <"*) printf 'ZG93bmxvYWRlZAo='; exit 0 ;;
+  *"base64 <"*) printf '%s' ` + shellQuote(encodedRunDownloadPayload(int64(len(downloaded)), downloaded)) + `; exit 0 ;;
   *"check_artifact_file()"*) printf 'missing required artifact: reports/data/manifest.json\n' >&2; exit 8 ;;
   *"fixture-stage-success"*) printf 'CRABBOX_PHASE:install\npnpm install --package-import-method=copy completed\nCRABBOX_PHASE:test\n'; exit 0 ;;
 esac
@@ -3330,19 +3332,11 @@ exit 0
 	if !strings.Contains(stderr.String(), "keep-on-failure: kept lease=cbx_env_profile_test") {
 		t.Fatalf("missing keep-on-failure hint after required artifact failure:\n%s", stderr.String())
 	}
-	retryHints := 0
-	for _, line := range strings.Split(stderr.String(), "\n") {
-		if strings.Contains(line, "next: crabbox run ") {
-			retryHints++
-			if !strings.Contains(line, "--no-sync") || strings.Contains(line, "--fresh-sync") ||
-				!strings.Contains(line, "--require-artifact reports/data/manifest.json") ||
-				!strings.Contains(line, "--require-artifact 'reports/proof-*.json'") {
-				t.Errorf("retry lost no-sync or required-artifact intent: %s", line)
-			}
-		}
+	if strings.Contains(stderr.String(), "next: crabbox run ") {
+		t.Fatalf("unknown artifact failure advertised a blind rerun:\n%s", stderr.String())
 	}
-	if retryHints != 1 {
-		t.Errorf("retry hints=%d, want one runnable recovery", retryHints)
+	if !strings.Contains(stderr.String(), "next: crabbox ssh --provider run-env-profile-test --target linux --id cbx_env_profile_test") {
+		t.Fatalf("unknown artifact failure omitted lease-scoped diagnosis:\n%s", stderr.String())
 	}
 	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
 	var report TimingReport
@@ -7160,6 +7154,417 @@ func TestRemoteFailureCaptureCommandAvoidsDuplicateDirectoryChildren(t *testing.
 	}
 	if counts["test-results/failure.log"] != 1 {
 		t.Fatalf("test-results/failure.log count=%d entries=%#v", counts["test-results/failure.log"], counts)
+	}
+}
+
+func TestRemoteFailureCaptureLeavesCheckoutStatusUnchanged(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for POSIX capture command test")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for checkout cleanliness test")
+	}
+	workdir := t.TempDir()
+	tempRoot := t.TempDir()
+	t.Setenv("TMPDIR", tempRoot)
+	if out, err := exec.Command("git", "-C", workdir, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	for name, data := range map[string]string{
+		".crabbox/capture-manifest.txt":     "user manifest",
+		".crabbox/capture-files.txt.sorted": "user sorted list",
+		".crabbox/gateway-log-tail.txt":     "user gateway tail",
+		"test-results/failure.log":          "failure",
+		"user-target.txt":                   "user target",
+	} {
+		path := filepath.Join(workdir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(workdir, ".crabbox", "capture-files.txt")
+	if err := os.Symlink("../user-target.txt", link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	status := func() string {
+		t.Helper()
+		cmd := exec.Command("git", "-C", workdir, "status", "--porcelain=v1", "--untracked-files=all")
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(out)
+	}
+	before := status()
+	command := remoteFailureCaptureCommand(workdir, ".crabbox/run-capture.tar.gz", "")
+	if out, err := exec.Command("bash", "-lc", command).CombinedOutput(); err != nil {
+		t.Fatalf("capture command failed: %v\n%s", err, out)
+	}
+	archive := filepath.Join(workdir, ".crabbox", "run-capture.tar.gz")
+	contents := readTarGzContents(t, archive)
+	if manifest := contents[".crabbox/capture-manifest.txt"]; !bytes.Contains(manifest, []byte("captured_at=")) || bytes.Contains(manifest, []byte("user manifest")) {
+		t.Fatalf("capture metadata=%q", manifest)
+	}
+	cleanup := remoteRemoveFailureCaptureCommand(workdir, ".crabbox/run-capture.tar.gz")
+	if out, err := exec.Command("bash", "-lc", cleanup).CombinedOutput(); err != nil {
+		t.Fatalf("capture cleanup failed: %v\n%s", err, out)
+	}
+	if after := status(); after != before {
+		t.Fatalf("failure capture changed checkout status:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	for name, want := range map[string]string{
+		".crabbox/capture-manifest.txt":     "user manifest",
+		".crabbox/capture-files.txt.sorted": "user sorted list",
+		".crabbox/gateway-log-tail.txt":     "user gateway tail",
+		"user-target.txt":                   "user target",
+	} {
+		data, err := os.ReadFile(filepath.Join(workdir, filepath.FromSlash(name)))
+		if err != nil || string(data) != want {
+			t.Fatalf("user path %s=%q err=%v", name, data, err)
+		}
+	}
+	if target, err := os.Readlink(link); err != nil || target != "../user-target.txt" {
+		t.Fatalf("user symlink target=%q err=%v", target, err)
+	}
+	if entries, err := os.ReadDir(tempRoot); err != nil || len(entries) != 0 {
+		t.Fatalf("failure capture scratch retained: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestRemoteFailureCaptureRemovesPartialArchiveOnFailure(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for POSIX capture command test")
+	}
+	workdir := t.TempDir()
+	tempRoot := t.TempDir()
+	binDir := t.TempDir()
+	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	fakeGzip := filepath.Join(binDir, "gzip")
+	if err := os.WriteFile(fakeGzip, []byte(`#!/bin/sh
+printf partial
+exit 42
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := remoteFailureCaptureCommand(workdir, ".crabbox/capture.tar.gz", "")
+	command = strings.Replace(command, "bash -lc ", "bash --noprofile --norc -c ", 1)
+	out, err := exec.Command("bash", "-c", command).CombinedOutput()
+	if err == nil {
+		t.Fatalf("capture unexpectedly succeeded:\n%s", out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 42 {
+		t.Fatalf("capture exit=%v want=42:\n%s", err, out)
+	}
+	archive := filepath.Join(workdir, ".crabbox", "capture.tar.gz")
+	if _, err := os.Lstat(archive); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial capture remains at %s: %v", archive, err)
+	}
+	if entries, err := os.ReadDir(tempRoot); err != nil || len(entries) != 0 {
+		t.Fatalf("failure capture scratch retained: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestRemoteFailureCaptureKeepsLargeFileListOffArgv(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for POSIX capture command test")
+	}
+	realTar, err := exec.LookPath("tar")
+	if err != nil {
+		t.Skip("tar is required for POSIX capture command test")
+	}
+	workdir := t.TempDir()
+	tempRoot := t.TempDir()
+	binDir := t.TempDir()
+	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	const argumentBudget = 1024
+	dfLog := filepath.Join(binDir, "df.log")
+	fakeDF := filepath.Join(binDir, "df")
+	dfScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuote(dfLog) + "\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nfake 9999999 0 9999999 0%% /\\n'\n"
+	if err := os.WriteFile(fakeDF, []byte(dfScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var fileListBytes int
+	var want []string
+	scriptPath := filepath.Join("scripts", "capture.sh ")
+	for _, name := range []string{
+		"-leading-dash.log",
+		`back\slash.log`,
+		" leading-whitespace.log",
+		scriptPath,
+	} {
+		path := filepath.Join(workdir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fileListBytes += len(name) + 1
+		want = append(want, name)
+	}
+	for i := range 40 {
+		name := fmt.Sprintf("evidence-%02d-%s.log", i, strings.Repeat("x", 64))
+		if err := os.WriteFile(filepath.Join(workdir, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fileListBytes += len(name) + 1
+		want = append(want, name)
+	}
+	if fileListBytes <= argumentBudget {
+		t.Fatalf("file-list fixture bytes=%d want>%d", fileListBytes, argumentBudget)
+	}
+	fakeTar := filepath.Join(binDir, "tar")
+	wrapper := `#!/bin/sh
+budget=` + strconv.Itoa(argumentBudget) + `
+bytes=0
+mode=
+list=no
+null=no
+directories=0
+manifest=no
+previous=
+for argument do
+  bytes=$((bytes + ${#argument} + 1))
+  case "$previous" in
+    -T) list=yes ;;
+    -C) directories=$((directories + 1)) ;;
+  esac
+  case "$argument" in
+    -cf) mode=create ;;
+    -rf) mode=append ;;
+    --null) null=yes ;;
+    .crabbox/capture-manifest.txt) manifest=yes ;;
+  esac
+  previous=$argument
+done
+[ "$bytes" -le "$budget" ] || exit 91
+case "$mode" in
+  create) [ "$list" = yes ] && [ "$null" = yes ] && [ "$directories" -eq 1 ] || exit 92 ;;
+  append) [ "$list" = no ] && [ "$directories" -eq 1 ] && [ "$manifest" = yes ] || exit 93 ;;
+  *) exit 94 ;;
+esac
+exec ` + shellQuote(realTar) + ` "$@"
+`
+	if err := os.WriteFile(fakeTar, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := remoteFailureCaptureCommand(workdir, ".crabbox/capture.tar.gz", scriptPath)
+	command = strings.Replace(command, "bash -lc ", "bash --noprofile --norc -c ", 1)
+	if out, err := exec.Command("bash", "-c", command).CombinedOutput(); err != nil {
+		t.Fatalf("capture command failed: %v\n%s", err, out)
+	}
+	dfCalls, err := os.ReadFile(dfLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(dfCalls)), "\n")
+	if len(lines) != 4 ||
+		!strings.Contains(lines[0], tempRoot) || lines[2] != lines[0] ||
+		lines[1] != "-Pk .crabbox" || lines[3] != lines[1] {
+		t.Fatalf("disk admission calls=%q", lines)
+	}
+	contents := readTarGzContents(t, filepath.Join(workdir, ".crabbox", "capture.tar.gz"))
+	for _, name := range append(want, ".crabbox/capture-manifest.txt") {
+		if _, ok := contents[name]; !ok {
+			t.Fatalf("capture missing %q", name)
+		}
+	}
+	if entries, err := os.ReadDir(tempRoot); err != nil || len(entries) != 0 {
+		t.Fatalf("failure capture scratch retained: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestRemoteFailureCaptureRejectsLowOrUnknownDiskAdmission(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for POSIX capture command test")
+	}
+	for _, test := range []struct {
+		name   string
+		dfBody string
+		want   string
+	}{
+		{
+			name:   "low",
+			dfBody: "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nfake 100 65 35 65%% /\\n'",
+			want:   "required_blocks=36",
+		},
+		{
+			name:   "unknown",
+			dfBody: "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'",
+			want:   "disk availability unknown",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workdir := t.TempDir()
+			tempRoot := t.TempDir()
+			binDir := t.TempDir()
+			t.Setenv("TMPDIR", tempRoot)
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			fakeDF := filepath.Join(binDir, "df")
+			if err := os.WriteFile(fakeDF, []byte("#!/bin/sh\n"+test.dfBody+"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			command := remoteFailureCaptureCommandWithLimits(workdir, ".crabbox/capture.tar.gz", "", runDownloadLimits{
+				MaxBytes:         16 << 10,
+				DiskReserveBytes: 4 << 10,
+			})
+			command = strings.Replace(command, "bash -lc ", "bash --noprofile --norc -c ", 1)
+			out, err := exec.Command("bash", "-c", command).CombinedOutput()
+			if err == nil || !strings.Contains(string(out), test.want) {
+				t.Fatalf("capture err=%v want=%q:\n%s", err, test.want, out)
+			}
+			assertRemoteFailureCaptureFilesRemoved(t, workdir, tempRoot)
+		})
+	}
+}
+
+func TestRemoteFailureCaptureRechecksDiskAdmissionAfterScratchInputs(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for POSIX capture command test")
+	}
+	workdir := t.TempDir()
+	tempRoot := t.TempDir()
+	binDir := t.TempDir()
+	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dfCalls := filepath.Join(binDir, "df.calls")
+	fakeDF := filepath.Join(binDir, "df")
+	dfScript := `#!/bin/sh
+calls=0
+if [ -f "$CRABBOX_TEST_DF_CALLS" ]; then calls=$(cat "$CRABBOX_TEST_DF_CALLS"); fi
+calls=$((calls + 1))
+printf '%s\n' "$calls" > "$CRABBOX_TEST_DF_CALLS"
+available=9999999
+if [ "$calls" -eq 4 ]; then available=35; fi
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf 'fake 9999999 0 %s 0%% /\n' "$available"
+`
+	if err := os.WriteFile(fakeDF, []byte(dfScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writerLog := filepath.Join(binDir, "writers.log")
+	for _, name := range []string{"tar", "gzip"} {
+		path := filepath.Join(binDir, name)
+		script := "#!/bin/sh\nprintf '%s\\n' " + shellQuote(name) + " >> \"$CRABBOX_TEST_WRITER_LOG\"\nexit 99\n"
+		if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("CRABBOX_TEST_DF_CALLS", dfCalls)
+	t.Setenv("CRABBOX_TEST_WRITER_LOG", writerLog)
+	if err := os.WriteFile(filepath.Join(workdir, "evidence.log"), []byte("evidence"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	command := remoteFailureCaptureCommandWithLimits(workdir, ".crabbox/capture.tar.gz", "", runDownloadLimits{
+		MaxBytes:         16 << 10,
+		DiskReserveBytes: 4 << 10,
+	})
+	command = strings.Replace(command, "bash -lc ", "bash --noprofile --norc -c ", 1)
+	out, err := exec.Command("bash", "-c", command).CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
+		t.Fatalf("capture exit=%v want=7:\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "failure capture disk reserve unavailable: output") {
+		t.Fatalf("capture did not fail the late output admission:\n%s", out)
+	}
+	if calls, readErr := os.ReadFile(dfCalls); readErr != nil || string(calls) != "4\n" {
+		t.Fatalf("disk admission calls=%q err=%v, want four", calls, readErr)
+	}
+	if writers, readErr := os.ReadFile(writerLog); !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatalf("archive writer ran before late admission: %q err=%v", writers, readErr)
+	}
+	assertRemoteFailureCaptureFilesRemoved(t, workdir, tempRoot)
+}
+
+func TestRemoteFailureCaptureEnforcesWriterCaps(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for POSIX capture command test")
+	}
+	for _, test := range []struct {
+		name       string
+		maxBytes   int64
+		evidence   int
+		fakeGzip   bool
+		lowerLimit bool
+	}{
+		{name: "raw tar", maxBytes: 32 << 10, evidence: 64 << 10},
+		{name: "gzip output", maxBytes: 64 << 10, evidence: 1, fakeGzip: true},
+		{name: "lower inherited limit", maxBytes: 64 << 10, evidence: 1, lowerLimit: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workdir := t.TempDir()
+			tempRoot := t.TempDir()
+			binDir := t.TempDir()
+			t.Setenv("TMPDIR", tempRoot)
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			if err := os.WriteFile(filepath.Join(workdir, "evidence.log"), bytes.Repeat([]byte("x"), test.evidence), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if test.fakeGzip {
+				fakeGzip := filepath.Join(binDir, "gzip")
+				if err := os.WriteFile(fakeGzip, []byte("#!/bin/sh\nexec dd if=/dev/zero bs=1024 count=128 2>/dev/null\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			command := remoteFailureCaptureCommandWithLimits(workdir, ".crabbox/capture.tar.gz", "", runDownloadLimits{
+				MaxBytes:         test.maxBytes,
+				DiskReserveBytes: 0,
+			})
+			command = strings.Replace(command, "bash -lc ", "bash --noprofile --norc -c ", 1)
+			if test.lowerLimit {
+				command = "ulimit -f 1; " + command
+			}
+			if out, err := exec.Command("bash", "-c", command).CombinedOutput(); err == nil {
+				t.Fatalf("capture unexpectedly succeeded:\n%s", out)
+			}
+			assertRemoteFailureCaptureFilesRemoved(t, workdir, tempRoot)
+		})
+	}
+}
+
+func assertRemoteFailureCaptureFilesRemoved(t *testing.T, workdir, tempRoot string) {
+	t.Helper()
+	if _, err := os.Lstat(filepath.Join(workdir, ".crabbox", "capture.tar.gz")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial capture remains: %v", err)
+	}
+	if entries, err := os.ReadDir(tempRoot); err != nil || len(entries) != 0 {
+		t.Fatalf("failure capture scratch retained: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestCleanupRemoteFailureCaptureUsesBoundedUncancelledContext(t *testing.T) {
+	parent, cancel := context.WithCancel(t.Context())
+	cancel()
+	called := false
+	_, err := cleanupRemoteFailureCapture(parent, SSHTarget{}, "/work", ".crabbox/capture.tar.gz", func(ctx context.Context, _ SSHTarget, command string) (string, error) {
+		called = true
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("cleanup inherited cancellation: %v", err)
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("cleanup context is not bounded")
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 || remaining > remoteFailureCaptureCleanupTime {
+			t.Fatalf("cleanup deadline remaining=%s", remaining)
+		}
+		if !strings.Contains(command, "capture.tar.gz") {
+			t.Fatalf("cleanup command=%q", command)
+		}
+		return "", nil
+	})
+	if err != nil || !called {
+		t.Fatalf("cleanup called=%t err=%v", called, err)
 	}
 }
 

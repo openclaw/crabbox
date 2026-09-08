@@ -128,10 +128,13 @@ func TestRunCoordinatorCleanupOutcomes(t *testing.T) {
 				if len(digest) != 2 {
 					t.Fatalf("missing digest:\n%s", out)
 				}
-				for _, command := range []string{"ssh", "run", "stop"} {
+				for _, command := range []string{"ssh", "stop"} {
 					if got := strings.Contains(digest[1], "next: crabbox "+command+" "); got == tc.terminal {
 						t.Errorf("recovery %s present=%t terminal=%t\n%s", command, got, tc.terminal, out)
 					}
+				}
+				if strings.Contains(digest[1], "next: crabbox run ") {
+					t.Errorf("unknown failure advertised a blind rerun\n%s", out)
 				}
 				wantPosts := int32(1)
 				if tc.releaseError {

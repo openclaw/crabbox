@@ -60,6 +60,7 @@ import {
   isRetryableAWSProvisioningError,
   isAWSSecurityGroupRuleLimitError,
   type AWSMacHost,
+  type AWSIngressConfig,
   type AWSPrivateWorkspaceConfig,
 } from "./aws";
 import { InvalidAWSRegionError, sanitizeAWSRegion } from "./aws-region";
@@ -134,6 +135,7 @@ import {
   leaseConfig,
   normalizeArchitecture,
   validCIDRs,
+  validatedCIDRs,
   workspaceProviderKeyPrefix,
   type LeaseConfig,
   type LeaseConfigDefaults,
@@ -26252,7 +26254,7 @@ function awsIngressAccessTargetKey(
     ? `sg:${securityGroupID}`
     : securityGroupName
       ? `managed:${subnetID}:${securityGroupName}`
-      : `auto:${subnetID}`;
+      : `auto:${subnetID}:${awsManagedSecurityGroupName({ providerKey: lease.providerKey })}`;
   return [region, group, ...ports.toSorted()].join("\u0000");
 }
 
@@ -28555,15 +28557,19 @@ export class AWSProvider implements CloudProvider {
     if (lease.network?.awsPrivate) return;
     const globalCIDRs = awsGlobalSSHSourceCIDRs(this.env);
     const accessLeases = context.activeLeases.filter(leaseOwnsAWSSSHAccess);
-    const targets = new Map<string, { lease: LeaseRecord; port: string; region: string }>();
+    const targets = new Map<
+      string,
+      { lease: LeaseRecord; port: string; region: string; leases: LeaseRecord[] }
+    >();
     const targetScopes = new Map<string, { identities: Set<string>; hasUnknownGroup: boolean }>();
-    for (const candidate of [lease, ...accessLeases]) {
+    for (const [index, candidate] of [lease, ...accessLeases].entries()) {
       const region = candidate.region || this.region;
       for (const port of awsLeaseSSHPorts(candidate)) {
         const key = awsIngressAccessTargetKey(candidate, region, [port], this.env);
-        if (!targets.has(key)) {
-          targets.set(key, { lease: candidate, port, region });
-        }
+        const target = targets.get(key) ?? { lease: candidate, port, region, leases: [] };
+        // The anchor identifies cleanup scope; only the access snapshot grants sources.
+        if (index > 0) target.leases.push(candidate);
+        targets.set(key, target);
         const scopeKey = awsIngressPortScopeKey(region, port);
         const scope = targetScopes.get(scopeKey) ?? {
           identities: new Set<string>(),
@@ -28579,55 +28585,48 @@ export class AWSProvider implements CloudProvider {
         .filter(([, scope]) => scope.hasUnknownGroup && scope.identities.size > 1)
         .map(([scopeKey]) => scopeKey),
     );
-    for (const [targetKey, target] of targets) {
+    const refreshes = new Map<
+      string,
+      { config: AWSIngressConfig; reconcile: "additive" | "authoritative" }
+    >();
+    for (const target of targets.values()) {
       const targetLease = target.lease;
-      const targetLeases = accessLeases.filter((candidate) => {
-        const region = candidate.region || this.region;
-        return (
-          awsLeaseSSHPorts(candidate).includes(target.port) &&
-          awsIngressAccessTargetKey(candidate, region, [target.port], this.env) === targetKey
-        );
-      });
-      const cidrs = activeAWSSSHSourceCIDRs(targetLeases, globalCIDRs);
+      const cidrs = activeAWSSSHSourceCIDRs(target.leases, globalCIDRs);
       const reconcile =
         ambiguousTargetScopes.has(awsIngressPortScopeKey(target.region, target.port)) ||
-        hasUnknownActiveAWSSSHSource(targetLeases)
+        hasUnknownActiveAWSSSHSource(target.leases)
           ? "additive"
           : "authoritative";
-      const config = {
-        ...leaseConfig({
-          provider: "aws",
-          target: targetLease.target,
-          windowsMode: targetLease.windowsMode ?? "normal",
-          class: targetLease.class,
-          serverType: targetLease.serverType,
-          awsSSHCIDRs: cidrs,
-          ...(targetLease.network?.awsSecurityGroupID
-            ? { awsSGID: targetLease.network.awsSecurityGroupID }
-            : {}),
-          ...(targetLease.network?.awsSubnetID
-            ? { awsSubnetID: targetLease.network.awsSubnetID }
-            : {}),
-          capacity: { market: targetLease.market === "spot" ? "spot" : "on-demand" },
-          providerKey: targetLease.providerKey,
-          sshUser: targetLease.sshUser,
-          sshPort: target.port,
-          sshFallbackPorts: [],
-          sshPublicKey: "ssh-ed25519 ingress-reconcile",
-          workRoot: targetLease.workRoot,
-          ...(targetLease.hostId || targetLease.hostID
-            ? { hostId: targetLease.hostId || targetLease.hostID }
-            : {}),
-        }),
+      // Sharing a read is safe only when every grouped port has the same policy.
+      // Unioning distinct CIDRs or modes would widen access or prune retained rules.
+      const key = JSON.stringify([
+        awsIngressAccessTargetKey(targetLease, target.region, [], this.env),
+        reconcile,
+        cidrs.toSorted(),
+      ]);
+      const existing = refreshes.get(key);
+      if (existing) {
+        existing.config.sshFallbackPorts.push(target.port);
+        continue;
+      }
+      const config: AWSIngressConfig = {
+        awsPrivate: false,
+        awsRegion: target.region,
+        awsSSHCIDRs: validatedCIDRs(cidrs, "awsSSHCIDRs"),
+        awsSGID: targetLease.network?.awsSecurityGroupID ?? "",
         awsSGName: targetLease.network?.awsSecurityGroupName ?? "",
+        awsSubnetID: targetLease.network?.awsSubnetID ?? "",
+        providerKey: targetLease.providerKey.trim(),
+        sshPort: target.port,
+        sshFallbackPorts: [],
       };
-      const { region } = target;
+      refreshes.set(key, { config, reconcile });
+    }
+    for (const { config, reconcile } of refreshes.values()) {
+      const region = config.awsRegion;
       const client = region === this.region ? this.client : new EC2SpotClient(this.env, region);
-      // oxlint-disable-next-line eslint/no-await-in-loop -- each regional shared group is distinct.
-      await client.refreshSSHIngress(
-        { ...config, awsRegion: region },
-        { reconcile, allowEmpty: true },
-      );
+      // oxlint-disable-next-line eslint/no-await-in-loop -- distinct policies can share a group, so keep their mutation passes ordered.
+      await client.refreshSSHIngress(config, { reconcile, allowEmpty: true });
     }
   }
 

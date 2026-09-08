@@ -910,27 +910,6 @@ type TensorlakeConfig struct {
 	NoInternet     bool
 }
 
-// CuaConfig configures the read-only CUA diagnostics provider. API keys are intentionally
-// absent: later bridge code resolves CUA_API_KEY / credential-store auth at
-// runtime and must pass credentials only through environment or SDK stores.
-// APIURL is trusted local input only and is never loaded from repository YAML.
-type CuaConfig struct {
-	APIURL             string
-	Image              string
-	Kind               string
-	Region             string
-	Workdir            string
-	VCPUs              int
-	MemoryMB           int
-	DiskGB             int
-	StartupTimeoutSecs int
-	ExecTimeoutSecs    int
-	BridgeCommand      string
-	SDKPackage         string
-	SDKImport          string
-	SDKFallbackImport  string
-}
-
 // OpenComputerConfig configures the delegated OpenComputer provider, which
 // talks to the OpenComputer REST API. The API key is intentionally absent: it
 // is read at runtime from CRABBOX_OPENCOMPUTER_API_KEY / OPENCOMPUTER_API_KEY
@@ -944,43 +923,6 @@ type OpenComputerConfig struct {
 	TimeoutSecs     int
 	ExecTimeoutSecs int
 	Burst           bool
-	ForgetMissing   bool
-}
-
-// CodeSandboxConfig configures the delegated CodeSandbox provider. The API key
-// is intentionally absent: it is read at runtime from
-// CRABBOX_CODESANDBOX_API_KEY / CSB_API_KEY and passed to the SDK bridge through
-// environment only, never persisted in Crabbox config or placed on argv.
-type CodeSandboxConfig struct {
-	TemplateID               string
-	Workdir                  string
-	VMTier                   string
-	Privacy                  string
-	HibernationTimeoutSecs   int
-	AutomaticWakeupHTTP      bool
-	AutomaticWakeupWebSocket bool
-	BridgeCommand            string
-	SDKPackage               string
-	DoctorListLimit          int
-	OperationTimeoutSecs     int
-}
-
-// OpenSandboxConfig configures the delegated OpenSandbox provider. The API key
-// is intentionally absent: it is read at runtime from
-// CRABBOX_OPENSANDBOX_API_KEY / OPEN_SANDBOX_API_KEY and sent only in request
-// headers, never persisted in Crabbox config or placed on argv.
-type OpenSandboxConfig struct {
-	APIURL          string
-	Image           string
-	Workdir         string
-	CPU             string
-	Memory          string
-	TimeoutSecs     int
-	ExecTimeoutSecs int
-	PlatformOS      string
-	PlatformArch    string
-	SecureAccess    bool
-	UseServerProxy  bool
 	ForgetMissing   bool
 }
 
@@ -3032,16 +2974,7 @@ func baseConfig() Config {
 			MemoryMB: 1024,
 			DiskMB:   10240,
 		},
-		Cua: CuaConfig{
-			Image:             "ubuntu:24.04",
-			Kind:              "container",
-			Workdir:           "/workspace/crabbox",
-			ExecTimeoutSecs:   600,
-			BridgeCommand:     "python3",
-			SDKPackage:        "cua",
-			SDKImport:         "cua",
-			SDKFallbackImport: "cua_sandbox",
-		},
+		Cua: defaultCuaConfig(),
 		OpenComputer: OpenComputerConfig{
 			// APIURL is intentionally unset here so the `oc` config file's
 			// api_url is honored before the built-in default; the provider
@@ -3050,28 +2983,8 @@ func baseConfig() Config {
 			Workdir:         "/workspace/crabbox",
 			ExecTimeoutSecs: 3600,
 		},
-		CodeSandbox: CodeSandboxConfig{
-			Workdir:                  "/project/workspace",
-			Privacy:                  "private",
-			AutomaticWakeupHTTP:      true,
-			AutomaticWakeupWebSocket: false,
-			BridgeCommand:            "node",
-			SDKPackage:               "@codesandbox/sdk@2.4.2",
-			DoctorListLimit:          1,
-			OperationTimeoutSecs:     30,
-		},
-		OpenSandbox: OpenSandboxConfig{
-			// APIURL is intentionally unset here so repository YAML cannot
-			// redirect a shell-provided API key. The provider requires an
-			// explicit trusted endpoint from flags or environment.
-			Image:           "ubuntu:24.04",
-			Workdir:         "/workspace/crabbox",
-			CPU:             "1",
-			Memory:          "2Gi",
-			ExecTimeoutSecs: 600,
-			PlatformOS:      "linux",
-			PlatformArch:    "amd64",
-		},
+		CodeSandbox: defaultCodeSandboxConfig(),
+		OpenSandbox: defaultOpenSandboxConfig(),
 		Nomad: NomadConfig{
 			TokenEnv:          "NOMAD_TOKEN",
 			Task:              "crabbox",
@@ -4109,22 +4022,6 @@ type fileTensorlakeConfig struct {
 	NoInternet     *bool   `yaml:"noInternet,omitempty"`
 }
 
-type fileCuaConfig struct {
-	Image              *string `yaml:"image,omitempty"`
-	Kind               *string `yaml:"kind,omitempty"`
-	Region             *string `yaml:"region,omitempty"`
-	Workdir            *string `yaml:"workdir,omitempty"`
-	VCPUs              *int    `yaml:"vcpus,omitempty"`
-	MemoryMB           *int    `yaml:"memoryMB,omitempty"`
-	DiskGB             *int    `yaml:"diskGB,omitempty"`
-	StartupTimeoutSecs *int    `yaml:"startupTimeoutSecs,omitempty"`
-	ExecTimeoutSecs    *int    `yaml:"execTimeoutSecs,omitempty"`
-	BridgeCommand      *string `yaml:"bridgeCommand,omitempty"`
-	SDKPackage         *string `yaml:"sdkPackage,omitempty"`
-	SDKImport          *string `yaml:"sdkImport,omitempty"`
-	SDKFallbackImport  *string `yaml:"sdkFallbackImport,omitempty"`
-}
-
 type fileOpenComputerConfig struct {
 	Workdir         string `yaml:"workdir,omitempty"`
 	CPU             *int   `yaml:"cpu,omitempty"`
@@ -4132,33 +4029,6 @@ type fileOpenComputerConfig struct {
 	TimeoutSecs     *int   `yaml:"timeoutSecs,omitempty"`
 	ExecTimeoutSecs *int   `yaml:"execTimeoutSecs,omitempty"`
 	Burst           *bool  `yaml:"burst,omitempty"`
-}
-
-type fileCodeSandboxConfig struct {
-	TemplateID               *string `yaml:"templateId,omitempty"`
-	Workdir                  *string `yaml:"workdir,omitempty"`
-	VMTier                   *string `yaml:"vmTier,omitempty"`
-	Privacy                  *string `yaml:"privacy,omitempty"`
-	HibernationTimeoutSecs   *int    `yaml:"hibernationTimeoutSecs,omitempty"`
-	AutomaticWakeupHTTP      *bool   `yaml:"automaticWakeupHTTP,omitempty"`
-	AutomaticWakeupWebSocket *bool   `yaml:"automaticWakeupWebSocket,omitempty"`
-	BridgeCommand            *string `yaml:"bridgeCommand,omitempty"`
-	SDKPackage               *string `yaml:"sdkPackage,omitempty"`
-	DoctorListLimit          *int    `yaml:"doctorListLimit,omitempty"`
-	OperationTimeoutSecs     *int    `yaml:"operationTimeoutSecs,omitempty"`
-}
-
-type fileOpenSandboxConfig struct {
-	Image           *string `yaml:"image,omitempty"`
-	Workdir         *string `yaml:"workdir,omitempty"`
-	CPU             *string `yaml:"cpu,omitempty"`
-	Memory          *string `yaml:"memory,omitempty"`
-	TimeoutSecs     *int    `yaml:"timeoutSecs,omitempty"`
-	ExecTimeoutSecs *int    `yaml:"execTimeoutSecs,omitempty"`
-	PlatformOS      *string `yaml:"platformOS,omitempty"`
-	PlatformArch    *string `yaml:"platformArch,omitempty"`
-	SecureAccess    *bool   `yaml:"secureAccess,omitempty"`
-	UseServerProxy  *bool   `yaml:"useServerProxy,omitempty"`
 }
 
 type fileNomadConfig struct {
@@ -6804,53 +6674,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		applyOptional(&cfg.Tensorlake.NoInternet, file.Tensorlake.NoInternet)
 	}
-	if file.Cua != nil {
-		applyOptional(&cfg.Cua.Image, file.Cua.Image)
-		applyOptional(&cfg.Cua.Kind, file.Cua.Kind)
-		applyOptional(&cfg.Cua.Region, file.Cua.Region)
-		applyOptional(&cfg.Cua.Workdir, file.Cua.Workdir)
-		if file.Cua.VCPUs != nil {
-			if *file.Cua.VCPUs < 0 {
-				return exit(2, "cua vcpus must be non-negative")
-			}
-			cfg.Cua.VCPUs = *file.Cua.VCPUs
-		}
-		if file.Cua.MemoryMB != nil {
-			if *file.Cua.MemoryMB < 0 {
-				return exit(2, "cua memoryMB must be non-negative")
-			}
-			cfg.Cua.MemoryMB = *file.Cua.MemoryMB
-		}
-		if file.Cua.DiskGB != nil {
-			if *file.Cua.DiskGB < 0 {
-				return exit(2, "cua diskGB must be non-negative")
-			}
-			cfg.Cua.DiskGB = *file.Cua.DiskGB
-		}
-		if file.Cua.StartupTimeoutSecs != nil {
-			if *file.Cua.StartupTimeoutSecs < 0 {
-				return exit(2, "cua startupTimeoutSecs must be non-negative")
-			}
-			cfg.Cua.StartupTimeoutSecs = *file.Cua.StartupTimeoutSecs
-		}
-		if file.Cua.ExecTimeoutSecs != nil {
-			if *file.Cua.ExecTimeoutSecs < 0 {
-				return exit(2, "cua execTimeoutSecs must be non-negative")
-			}
-			cfg.Cua.ExecTimeoutSecs = *file.Cua.ExecTimeoutSecs
-		}
-		if trusted && file.Cua.BridgeCommand != nil {
-			cfg.Cua.BridgeCommand = *file.Cua.BridgeCommand
-		}
-		if trusted && file.Cua.SDKPackage != nil {
-			cfg.Cua.SDKPackage = *file.Cua.SDKPackage
-		}
-		if trusted && file.Cua.SDKImport != nil {
-			cfg.Cua.SDKImport = *file.Cua.SDKImport
-		}
-		if trusted && file.Cua.SDKFallbackImport != nil {
-			cfg.Cua.SDKFallbackImport = *file.Cua.SDKFallbackImport
-		}
+	if err := cfg.Cua.applyFile(file.Cua, trusted); err != nil {
+		return err
 	}
 	if file.OpenComputer != nil {
 		if file.OpenComputer.Workdir != "" {
@@ -6862,59 +6687,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		applyOptional(&cfg.OpenComputer.ExecTimeoutSecs, file.OpenComputer.ExecTimeoutSecs)
 		applyOptional(&cfg.OpenComputer.Burst, file.OpenComputer.Burst)
 	}
-	if file.CodeSandbox != nil {
-		applyOptional(&cfg.CodeSandbox.TemplateID, file.CodeSandbox.TemplateID)
-		applyOptional(&cfg.CodeSandbox.Workdir, file.CodeSandbox.Workdir)
-		applyOptional(&cfg.CodeSandbox.VMTier, file.CodeSandbox.VMTier)
-		applyOptional(&cfg.CodeSandbox.Privacy, file.CodeSandbox.Privacy)
-		if file.CodeSandbox.HibernationTimeoutSecs != nil {
-			if *file.CodeSandbox.HibernationTimeoutSecs < 0 {
-				return exit(2, "codesandbox hibernationTimeoutSecs must be non-negative")
-			}
-			cfg.CodeSandbox.HibernationTimeoutSecs = *file.CodeSandbox.HibernationTimeoutSecs
-		}
-		applyOptional(&cfg.CodeSandbox.AutomaticWakeupHTTP, file.CodeSandbox.AutomaticWakeupHTTP)
-		applyOptional(&cfg.CodeSandbox.AutomaticWakeupWebSocket, file.CodeSandbox.AutomaticWakeupWebSocket)
-		if trusted && file.CodeSandbox.BridgeCommand != nil {
-			cfg.CodeSandbox.BridgeCommand = *file.CodeSandbox.BridgeCommand
-		}
-		if trusted && file.CodeSandbox.SDKPackage != nil {
-			cfg.CodeSandbox.SDKPackage = *file.CodeSandbox.SDKPackage
-		}
-		if file.CodeSandbox.DoctorListLimit != nil {
-			if *file.CodeSandbox.DoctorListLimit < 0 {
-				return exit(2, "codesandbox doctorListLimit must be non-negative")
-			}
-			cfg.CodeSandbox.DoctorListLimit = *file.CodeSandbox.DoctorListLimit
-		}
-		if file.CodeSandbox.OperationTimeoutSecs != nil {
-			if *file.CodeSandbox.OperationTimeoutSecs < 0 {
-				return exit(2, "codesandbox operationTimeoutSecs must be non-negative")
-			}
-			cfg.CodeSandbox.OperationTimeoutSecs = *file.CodeSandbox.OperationTimeoutSecs
-		}
+	if err := cfg.CodeSandbox.applyFile(file.CodeSandbox, trusted); err != nil {
+		return err
 	}
-	if file.OpenSandbox != nil {
-		applyOptional(&cfg.OpenSandbox.Image, file.OpenSandbox.Image)
-		applyOptional(&cfg.OpenSandbox.Workdir, file.OpenSandbox.Workdir)
-		applyOptional(&cfg.OpenSandbox.CPU, file.OpenSandbox.CPU)
-		applyOptional(&cfg.OpenSandbox.Memory, file.OpenSandbox.Memory)
-		if file.OpenSandbox.TimeoutSecs != nil {
-			if *file.OpenSandbox.TimeoutSecs < 0 {
-				return exit(2, "opensandbox timeoutSecs must be non-negative")
-			}
-			cfg.OpenSandbox.TimeoutSecs = *file.OpenSandbox.TimeoutSecs
-		}
-		if file.OpenSandbox.ExecTimeoutSecs != nil {
-			if *file.OpenSandbox.ExecTimeoutSecs < 0 {
-				return exit(2, "opensandbox execTimeoutSecs must be non-negative")
-			}
-			cfg.OpenSandbox.ExecTimeoutSecs = *file.OpenSandbox.ExecTimeoutSecs
-		}
-		applyOptional(&cfg.OpenSandbox.PlatformOS, file.OpenSandbox.PlatformOS)
-		applyOptional(&cfg.OpenSandbox.PlatformArch, file.OpenSandbox.PlatformArch)
-		applyOptional(&cfg.OpenSandbox.SecureAccess, file.OpenSandbox.SecureAccess)
-		applyOptional(&cfg.OpenSandbox.UseServerProxy, file.OpenSandbox.UseServerProxy)
+	if err := cfg.OpenSandbox.applyFile(file.OpenSandbox); err != nil {
+		return err
 	}
 	if file.Nomad != nil {
 		if trusted && file.Nomad.Address != "" {
@@ -8896,35 +8673,9 @@ func applyEnv(cfg *Config) error {
 		cfg.Tensorlake.NoInternet = v
 	}
 	var err error
-	cfg.Cua.APIURL = getenv("CRABBOX_CUA_API_URL", getenv("CUA_BASE_URL", cfg.Cua.APIURL))
-	cfg.Cua.Image = getenv("CRABBOX_CUA_IMAGE", cfg.Cua.Image)
-	cfg.Cua.Kind = getenv("CRABBOX_CUA_KIND", cfg.Cua.Kind)
-	cfg.Cua.Region = getenv("CRABBOX_CUA_REGION", cfg.Cua.Region)
-	cfg.Cua.Workdir = getenv("CRABBOX_CUA_WORKDIR", cfg.Cua.Workdir)
-	cfg.Cua.VCPUs, err = getenvNonNegativeInt("CRABBOX_CUA_VCPUS", cfg.Cua.VCPUs)
-	if err != nil {
+	if err := cfg.Cua.applyEnv(); err != nil {
 		return err
 	}
-	cfg.Cua.MemoryMB, err = getenvNonNegativeInt("CRABBOX_CUA_MEMORY_MB", cfg.Cua.MemoryMB)
-	if err != nil {
-		return err
-	}
-	cfg.Cua.DiskGB, err = getenvNonNegativeInt("CRABBOX_CUA_DISK_GB", cfg.Cua.DiskGB)
-	if err != nil {
-		return err
-	}
-	cfg.Cua.StartupTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CUA_STARTUP_TIMEOUT_SECS", cfg.Cua.StartupTimeoutSecs)
-	if err != nil {
-		return err
-	}
-	cfg.Cua.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CUA_EXEC_TIMEOUT_SECS", cfg.Cua.ExecTimeoutSecs)
-	if err != nil {
-		return err
-	}
-	cfg.Cua.BridgeCommand = getenv("CRABBOX_CUA_BRIDGE_COMMAND", cfg.Cua.BridgeCommand)
-	cfg.Cua.SDKPackage = getenv("CRABBOX_CUA_SDK_PACKAGE", cfg.Cua.SDKPackage)
-	cfg.Cua.SDKImport = getenv("CRABBOX_CUA_SDK_IMPORT", cfg.Cua.SDKImport)
-	cfg.Cua.SDKFallbackImport = getenv("CRABBOX_CUA_SDK_FALLBACK_IMPORT", cfg.Cua.SDKFallbackImport)
 	cfg.OpenComputer.APIURL = getenv("CRABBOX_OPENCOMPUTER_API_URL", getenv("OPENCOMPUTER_API_URL", cfg.OpenComputer.APIURL))
 	cfg.OpenComputer.Workdir = getenv("CRABBOX_OPENCOMPUTER_WORKDIR", cfg.OpenComputer.Workdir)
 	cfg.OpenComputer.CPU = getenvInt("CRABBOX_OPENCOMPUTER_CPU", cfg.OpenComputer.CPU)
@@ -8934,50 +8685,11 @@ func applyEnv(cfg *Config) error {
 	if v, ok := getenvBool("CRABBOX_OPENCOMPUTER_BURST"); ok {
 		cfg.OpenComputer.Burst = v
 	}
-	cfg.CodeSandbox.TemplateID = getenv("CRABBOX_CODESANDBOX_TEMPLATE_ID", cfg.CodeSandbox.TemplateID)
-	cfg.CodeSandbox.Workdir = getenv("CRABBOX_CODESANDBOX_WORKDIR", cfg.CodeSandbox.Workdir)
-	cfg.CodeSandbox.VMTier = getenv("CRABBOX_CODESANDBOX_VM_TIER", cfg.CodeSandbox.VMTier)
-	cfg.CodeSandbox.Privacy = getenv("CRABBOX_CODESANDBOX_PRIVACY", cfg.CodeSandbox.Privacy)
-	cfg.CodeSandbox.HibernationTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CODESANDBOX_HIBERNATION_TIMEOUT_SECS", cfg.CodeSandbox.HibernationTimeoutSecs)
-	if err != nil {
+	if err := cfg.CodeSandbox.applyEnv(); err != nil {
 		return err
 	}
-	if v, ok := getenvBool("CRABBOX_CODESANDBOX_AUTOMATIC_WAKEUP_HTTP"); ok {
-		cfg.CodeSandbox.AutomaticWakeupHTTP = v
-	}
-	if v, ok := getenvBool("CRABBOX_CODESANDBOX_AUTOMATIC_WAKEUP_WEBSOCKET"); ok {
-		cfg.CodeSandbox.AutomaticWakeupWebSocket = v
-	}
-	cfg.CodeSandbox.BridgeCommand = getenv("CRABBOX_CODESANDBOX_BRIDGE_COMMAND", cfg.CodeSandbox.BridgeCommand)
-	cfg.CodeSandbox.SDKPackage = getenv("CRABBOX_CODESANDBOX_SDK_PACKAGE", cfg.CodeSandbox.SDKPackage)
-	cfg.CodeSandbox.DoctorListLimit, err = getenvNonNegativeInt("CRABBOX_CODESANDBOX_DOCTOR_LIST_LIMIT", cfg.CodeSandbox.DoctorListLimit)
-	if err != nil {
+	if err := cfg.OpenSandbox.applyEnv(); err != nil {
 		return err
-	}
-	cfg.CodeSandbox.OperationTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CODESANDBOX_OPERATION_TIMEOUT_SECS", cfg.CodeSandbox.OperationTimeoutSecs)
-	if err != nil {
-		return err
-	}
-	cfg.OpenSandbox.APIURL = getenv("CRABBOX_OPENSANDBOX_API_URL", getenv("OPEN_SANDBOX_API_URL", cfg.OpenSandbox.APIURL))
-	cfg.OpenSandbox.Image = getenv("CRABBOX_OPENSANDBOX_IMAGE", cfg.OpenSandbox.Image)
-	cfg.OpenSandbox.Workdir = getenv("CRABBOX_OPENSANDBOX_WORKDIR", cfg.OpenSandbox.Workdir)
-	cfg.OpenSandbox.CPU = getenv("CRABBOX_OPENSANDBOX_CPU", cfg.OpenSandbox.CPU)
-	cfg.OpenSandbox.Memory = getenv("CRABBOX_OPENSANDBOX_MEMORY", cfg.OpenSandbox.Memory)
-	cfg.OpenSandbox.TimeoutSecs, err = getenvNonNegativeInt("CRABBOX_OPENSANDBOX_TIMEOUT_SECS", cfg.OpenSandbox.TimeoutSecs)
-	if err != nil {
-		return err
-	}
-	cfg.OpenSandbox.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS", cfg.OpenSandbox.ExecTimeoutSecs)
-	if err != nil {
-		return err
-	}
-	cfg.OpenSandbox.PlatformOS = getenv("CRABBOX_OPENSANDBOX_PLATFORM_OS", cfg.OpenSandbox.PlatformOS)
-	cfg.OpenSandbox.PlatformArch = getenv("CRABBOX_OPENSANDBOX_PLATFORM_ARCH", cfg.OpenSandbox.PlatformArch)
-	if v, ok := getenvBool("CRABBOX_OPENSANDBOX_SECURE_ACCESS"); ok {
-		cfg.OpenSandbox.SecureAccess = v
-	}
-	if v, ok := getenvBool("CRABBOX_OPENSANDBOX_USE_SERVER_PROXY"); ok {
-		cfg.OpenSandbox.UseServerProxy = v
 	}
 	if value := os.Getenv("CRABBOX_NOMAD_ADDR"); value != "" {
 		cfg.Nomad.Address = value

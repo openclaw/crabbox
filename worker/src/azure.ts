@@ -2319,17 +2319,60 @@ export class AzureClient {
     if (!storage?.transaction) return this.ensureSharedInfraUnlocked(location, config);
     const key = `provisioning-lock:${this.providerScope().toLowerCase()}`;
     const owner = `legacy:${crypto.randomUUID()}`;
-    await storage.transaction(async (transaction) => {
-      if (await transaction.get(key))
-        throw new Error("Azure shared infrastructure has an unresolved operation");
+    const staleOwner = await storage.transaction(async (transaction) => {
+      const held = await transaction.get<string>(key);
+      if (held) {
+        if (!held.startsWith("legacy:"))
+          throw new Error("Azure shared infrastructure has an unresolved operation");
+        return held;
+      }
       await transaction.put(key, owner);
+      return undefined;
     });
+    if (staleOwner) {
+      if (!(await this.sharedInfraSettled(location)))
+        throw new Error("Azure shared infrastructure has an unresolved operation");
+      await storage.transaction(async (transaction) => {
+        if ((await transaction.get(key)) !== staleOwner)
+          throw new Error("Azure shared infrastructure has an unresolved operation");
+        await transaction.put(key, owner);
+      });
+    }
     // A failed legacy call retains the fence: no LRO journal proves its last write settled.
     const result = await this.ensureSharedInfraUnlocked(location, config);
     await storage.transaction(async (transaction) => {
       if ((await transaction.get(key)) === owner) await transaction.delete(key);
     });
     return result;
+  }
+
+  private async sharedInfraSettled(location: string): Promise<boolean> {
+    try {
+      const infra = await this.sharedInfraNamesForLocation(location);
+      const resources = [
+        [`/resourceGroups/${this.resourceGroup}`, API_VERSIONS.resources],
+        [networkPath(this.resourceGroup, "virtualNetworks", infra.vnet), API_VERSIONS.network],
+        [networkPath(this.resourceGroup, "networkSecurityGroups", infra.nsg), API_VERSIONS.network],
+      ] as const;
+      const settled = await Promise.all(
+        resources.map(async ([path, apiVersion]) => {
+          try {
+            const resource = await this.arm<{ properties?: { provisioningState?: string } }>(
+              "GET",
+              path,
+              apiVersion,
+            );
+            const state = resource?.properties?.provisioningState?.toLowerCase();
+            return state === "succeeded" || state === "failed" || state === "canceled";
+          } catch (error) {
+            return error instanceof AzureHTTPError && error.status === 404;
+          }
+        }),
+      );
+      return settled.every(Boolean);
+    } catch {
+      return false;
+    }
   }
 
   private async ensureSharedInfraUnlocked(

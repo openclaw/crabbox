@@ -41,7 +41,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if req.Options.Tailscale.Enabled {
 		return exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	transport, err := newTransport(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -54,7 +54,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: cloud-run-sandbox warmup keeps the sandbox until explicit stop\n")
 	}
-	total := b.now().Sub(started)
+	total := core.ClockNow(b.rt.Clock).Sub(started)
 	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
 		Provider: providerName,
 		LeaseID:  leaseID,
@@ -85,7 +85,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (finalResult RunResul
 	if err != nil {
 		return RunResult{}, err
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	transport, err := newTransport(b.cfg, b.rt)
 	if err != nil {
 		return RunResult{}, err
@@ -94,7 +94,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (finalResult RunResul
 	if req.ID == "" && !req.NoSync {
 		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-			TempPattern: "crabbox-cloud-run-sandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+			TempPattern: "crabbox-cloud-run-sandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 		})
 		if err != nil {
 			return RunResult{}, err
@@ -155,7 +155,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (finalResult RunResul
 		} else {
 			session.Kept = true
 		}
-		finalResult.Total = b.now().Sub(started)
+		finalResult.Total = core.ClockNow(b.rt.Clock).Sub(started)
 		finalResult = core.FinalizeRunResult(finalResult, finalErr)
 		if commandRan {
 			if req.NoSync {
@@ -171,7 +171,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (finalResult RunResul
 			finalResult, finalErr = appendRunFailure(finalResult, finalErr, writeTimingJSON(b.rt.Stderr, report))
 		}
 	}()
-	activityTimeout, err := claimOperationTimeout(claim, leaseActivityTimeout, b.now().UTC())
+	activityTimeout, err := claimOperationTimeout(claim, leaseActivityTimeout, core.ClockNow(b.rt.Clock).UTC())
 	if err != nil {
 		return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Session: session}, err
 	}
@@ -199,16 +199,16 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (finalResult RunResul
 				}
 				if err != nil {
 					handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-					return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
+					return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: core.ClockNow(b.rt.Clock).Sub(started), SyncDelegated: true, Session: session}, err
 				}
 				fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
 			} else if err := b.ensureWorkspace(ctx, transport, sandboxID, workdir); err != nil {
 				handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-				return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
+				return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: core.ClockNow(b.rt.Clock).Sub(started), SyncDelegated: true, Session: session}, err
 			}
 
 			if req.SyncOnly {
-				result := RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}
+				result := RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: core.ClockNow(b.rt.Clock).Sub(started), SyncDelegated: true, Session: session}
 				fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
 				if req.TimingJSON {
 					pendingTiming = timingReport{
@@ -230,9 +230,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (finalResult RunResul
 			if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
-			commandStart := b.now()
+			commandStart := core.ClockNow(b.rt.Clock)
 			exitCode, runErr := b.execCommand(ctx, transport, sandboxID, workdir, command, req.Env, b.rt.Stdout, b.rt.Stderr)
-			commandDuration := b.now().Sub(commandStart)
+			commandDuration := core.ClockNow(b.rt.Clock).Sub(commandStart)
 			commandRan = true
 			outcome := shared.FinalizeDelegatedCommandOutcome(exitCode, runErr)
 			if runErr != nil {
@@ -247,7 +247,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (finalResult RunResul
 				Status:        outcome.Status,
 				ErrorKind:     outcome.ErrorKind,
 				Command:       commandDuration,
-				Total:         b.now().Sub(started),
+				Total:         core.ClockNow(b.rt.Clock).Sub(started),
 				SyncDelegated: true,
 				Provider:      providerName,
 				LeaseID:       leaseID,
@@ -464,7 +464,7 @@ func (b *backend) claimStatus(claim LeaseClaim) (string, bool) {
 		ready = false
 	}
 	if expiresAt := strings.TrimSpace(claim.Labels[claimExpiresAtLabel]); expiresAt != "" {
-		if expires, parseErr := time.Parse(time.RFC3339Nano, expiresAt); parseErr != nil || !b.now().UTC().Before(expires) {
+		if expires, parseErr := time.Parse(time.RFC3339Nano, expiresAt); parseErr != nil || !core.ClockNow(b.rt.Clock).UTC().Before(expires) {
 			state = "expired"
 			ready = false
 		}
@@ -503,7 +503,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	if err != nil {
 		return err
 	}
-	now := b.now().UTC()
+	now := core.ClockNow(b.rt.Clock).UTC()
 	checked, removed, claimsRemoved := 0, 0, 0
 	var cleanupErrs []error
 	var transport sandboxTransport
@@ -621,7 +621,7 @@ func (b *backend) releaseClaimedSandboxIfUnchanged(ctx context.Context, transpor
 func (b *backend) markClaimActivity(claim LeaseClaim, state string, timeout time.Duration) (LeaseClaim, error) {
 	labels := cloneLabels(claim.Labels)
 	labels[claimStateLabel] = state
-	activeUntil := b.now().UTC().Add(timeout)
+	activeUntil := core.ClockNow(b.rt.Clock).UTC().Add(timeout)
 	if expires, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(labels[claimExpiresAtLabel])); err == nil && expires.Before(activeUntil) {
 		activeUntil = expires
 	}
@@ -633,7 +633,7 @@ func (b *backend) clearClaimActivity(claim LeaseClaim) (LeaseClaim, error) {
 	labels := cloneLabels(claim.Labels)
 	delete(labels, claimStateLabel)
 	delete(labels, claimActiveUntilLabel)
-	return updateLeaseClaimLabelsAndLastUsedIfUnchanged(claim.LeaseID, claim, labels, b.now().UTC())
+	return updateLeaseClaimLabelsAndLastUsedIfUnchanged(claim.LeaseID, claim, labels, core.ClockNow(b.rt.Clock).UTC())
 }
 
 func cloneLabels(labels map[string]string) map[string]string {
@@ -740,7 +740,7 @@ func (b *backend) createSandbox(ctx context.Context, transport sandboxTransport,
 	labels := map[string]string{}
 	labels[claimStateLabel] = "creating"
 	labels[claimOwnershipLabel] = sandboxID
-	now := b.now().UTC()
+	now := core.ClockNow(b.rt.Clock).UTC()
 	activeUntil := now.Add(defaultExecTimeout)
 	if b.cfg.TTL > 0 {
 		expiresAt := now.Add(b.cfg.TTL)
@@ -764,7 +764,7 @@ func (b *backend) createSandbox(ctx context.Context, transport sandboxTransport,
 	if err != nil {
 		return "", "", "", LeaseClaim{}, err
 	}
-	createTimeout, err := claimOperationTimeout(claim, defaultExecTimeout, b.now().UTC())
+	createTimeout, err := claimOperationTimeout(claim, defaultExecTimeout, core.ClockNow(b.rt.Clock).UTC())
 	if err != nil {
 		return "", "", "", LeaseClaim{}, err
 	}
@@ -897,13 +897,6 @@ func (b *backend) claimScope() (string, error) {
 	cli := blank(strings.TrimSpace(b.cfg.CloudRunSandbox.CLIPath), defaultCLIPath)
 	sum := sha256.Sum256([]byte("direct:" + cli))
 	return "direct:" + hex.EncodeToString(sum[:8]), nil
-}
-
-func (b *backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }
 
 func (b *backend) cleanupContext(parent context.Context) (context.Context, context.CancelFunc) {

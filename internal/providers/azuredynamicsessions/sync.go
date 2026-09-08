@@ -29,7 +29,7 @@ func (b *azureDynamicSessionsBackend) syncWorkspace(ctx context.Context, client 
 		PhaseName:           "azure_dynamic_sessions_sync",
 		Provider:            providerName,
 		Stderr:              b.rt.Stderr,
-		Now:                 b.now,
+		Now:                 func() time.Time { return core.ClockNow(b.rt.Clock) },
 		Upload: func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
 			archive, ok := body.(*os.File)
 			if !ok {

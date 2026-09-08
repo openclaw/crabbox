@@ -6997,6 +6997,169 @@ func TestEnvOverridesConfig(t *testing.T) {
 	}
 }
 
+func TestOpenSandboxFilePresenceAndExcludedFields(t *testing.T) {
+	initial := OpenSandboxConfig{APIURL: "https://example.invalid/prior", Image: "image", Workdir: "/workspace/app", CPU: "2", Memory: "4Gi", TimeoutSecs: 10, ExecTimeoutSecs: 20, PlatformOS: "linux", PlatformArch: "arm64", SecureAccess: true, UseServerProxy: true}
+	for _, field := range []string{"APIURL", "ForgetMissing"} {
+		if _, ok := reflect.TypeOf(fileOpenSandboxConfig{}).FieldByName(field); ok {
+			t.Fatalf("%s must not have a YAML binding", field)
+		}
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, priorForget := range []bool{false, true} {
+			for _, mode := range []string{"omitted", "null", "zero"} {
+				t.Run(fmt.Sprintf("trusted=%t/forget=%t/%s", trusted, priorForget, mode), func(t *testing.T) {
+					body := fmt.Sprintf("openSandbox:\n  apiUrl: https://example.invalid/file\n  forgetMissing: %t\n", !priorForget)
+					if mode != "omitted" {
+						for _, key := range []string{"image", "workdir", "cpu", "memory", "timeoutSecs", "execTimeoutSecs", "platformOS", "platformArch", "secureAccess", "useServerProxy"} {
+							value := "null"
+							if mode == "zero" {
+								value = "''"
+								switch key {
+								case "timeoutSecs", "execTimeoutSecs":
+									value = "0"
+								case "secureAccess", "useServerProxy":
+									value = "false"
+								}
+							}
+							body += "  " + key + ": " + value + "\n"
+						}
+					}
+					cfg := baseConfig()
+					cfg.OpenSandbox = initial
+					cfg.OpenSandbox.ForgetMissing = priorForget
+					var file fileConfig
+					if err := yaml.Unmarshal([]byte(body), &file); err != nil {
+						t.Fatal(err)
+					}
+					if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+						t.Fatal(err)
+					}
+					want := initial
+					want.ForgetMissing = priorForget
+					if mode == "zero" {
+						want = OpenSandboxConfig{APIURL: initial.APIURL, ForgetMissing: priorForget}
+					}
+					if cfg.OpenSandbox != want {
+						t.Fatalf("got %#v, want %#v", cfg.OpenSandbox, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestOpenSandboxEnvironmentSourceAndBooleanSemantics(t *testing.T) {
+	for _, tc := range []struct{ primary, fallback, want string }{
+		{"https://example.invalid/primary", "https://example.invalid/fallback", "https://example.invalid/primary"},
+		{"", "https://example.invalid/fallback", "https://example.invalid/fallback"},
+		{"", "", "https://example.invalid/prior"},
+		{" ", "https://example.invalid/fallback", " "},
+		{"", " ", " "},
+	} {
+		t.Run("url/"+tc.want, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_OPENSANDBOX_API_URL", tc.primary)
+			t.Setenv("OPEN_SANDBOX_API_URL", tc.fallback)
+			cfg := baseConfig()
+			cfg.OpenSandbox.APIURL = "https://example.invalid/prior"
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.OpenSandbox.APIURL != tc.want {
+				t.Fatalf("URL=%q, want %q", cfg.OpenSandbox.APIURL, tc.want)
+			}
+		})
+	}
+	for _, prior := range []bool{false, true} {
+		for _, raw := range []string{"", "invalid", "true", "false", "yes", "no", "on", "off", "1", "0"} {
+			t.Run(fmt.Sprintf("bool/%t/%s", prior, raw), func(t *testing.T) {
+				clearConfigEnv(t)
+				t.Setenv("CRABBOX_OPENSANDBOX_SECURE_ACCESS", raw)
+				t.Setenv("CRABBOX_OPENSANDBOX_USE_SERVER_PROXY", raw)
+				t.Setenv("CRABBOX_OPENSANDBOX_FORGET_MISSING", strconv.FormatBool(!prior))
+				t.Setenv("OPEN_SANDBOX_FORGET_MISSING", strconv.FormatBool(!prior))
+				cfg := baseConfig()
+				cfg.OpenSandbox.SecureAccess, cfg.OpenSandbox.UseServerProxy, cfg.OpenSandbox.ForgetMissing = prior, prior, prior
+				if err := applyEnv(&cfg); err != nil {
+					t.Fatal(err)
+				}
+				want := prior
+				switch raw {
+				case "true", "yes", "on", "1":
+					want = true
+				case "false", "no", "off", "0":
+					want = false
+				}
+				if cfg.OpenSandbox.SecureAccess != want || cfg.OpenSandbox.UseServerProxy != want || cfg.OpenSandbox.ForgetMissing != prior {
+					t.Fatalf("boolean overlay=%#v, want bool=%t forget=%t", cfg.OpenSandbox, want, prior)
+				}
+			})
+		}
+	}
+}
+
+func TestOpenSandboxIntegerOverlayErrorOrder(t *testing.T) {
+	for _, source := range []string{"file", "env"} {
+		for _, second := range []bool{false, true} {
+			for _, invalid := range []string{"-1", "invalid"} {
+				if source == "file" && invalid == "invalid" {
+					continue
+				}
+				t.Run(fmt.Sprintf("%s/second=%t/%s", source, second, invalid), func(t *testing.T) {
+					clearConfigEnv(t)
+					first := invalid
+					if second {
+						first = "7"
+					}
+					cfg := baseConfig()
+					cfg.OpenSandbox.TimeoutSecs, cfg.OpenSandbox.ExecTimeoutSecs = 10, 20
+					cfg.OpenSandbox.PlatformOS = "before"
+					var err error
+					key, env := "timeoutSecs", "CRABBOX_OPENSANDBOX_TIMEOUT_SECS"
+					if second {
+						key, env = "execTimeoutSecs", "CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS"
+					}
+					wantError := "opensandbox " + key + " must be non-negative"
+					if source == "file" {
+						var file fileConfig
+						if err := yaml.Unmarshal([]byte("openSandbox:\n  image: after\n  platformOS: after\n  timeoutSecs: "+first+"\n  execTimeoutSecs: "+invalid+"\n"), &file); err != nil {
+							t.Fatal(err)
+						}
+						err = applyFileConfig(&cfg, file)
+					} else {
+						t.Setenv("CRABBOX_OPENSANDBOX_IMAGE", "after")
+						t.Setenv("CRABBOX_OPENSANDBOX_PLATFORM_OS", "after")
+						t.Setenv("CRABBOX_OPENSANDBOX_TIMEOUT_SECS", first)
+						t.Setenv("CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS", invalid)
+						err = applyEnv(&cfg)
+						wantError = env + " must be non-negative"
+						if invalid == "invalid" {
+							wantError = env + " must be an integer"
+						}
+					}
+					if err == nil || err.Error() != wantError {
+						t.Fatalf("error=%v, want %q", err, wantError)
+					}
+					wantFirst, wantSecond := 10, 20
+					if second {
+						wantFirst = 7
+					}
+					if source == "env" {
+						if second {
+							wantSecond = 0
+						} else {
+							wantFirst = 0
+						}
+					}
+					if cfg.OpenSandbox.TimeoutSecs != wantFirst || cfg.OpenSandbox.ExecTimeoutSecs != wantSecond || cfg.OpenSandbox.Image != "after" || cfg.OpenSandbox.PlatformOS != "before" {
+						t.Fatalf("partial update=%#v, want timeouts=%d,%d", cfg.OpenSandbox, wantFirst, wantSecond)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestApplyEnvRejectsNegativeOpenSandboxTimeouts(t *testing.T) {
 	for _, name := range []string{"CRABBOX_OPENSANDBOX_TIMEOUT_SECS", "CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS"} {
 		t.Run(name, func(t *testing.T) {
@@ -7029,6 +7192,135 @@ func TestApplyEnvRejectsNegativeCUAResources(t *testing.T) {
 	}
 }
 
+func TestCUAFilePresenceAndSourceAdmission(t *testing.T) {
+	initial := CuaConfig{APIURL: "https://example.invalid/initial", Image: "image", Kind: "vm", Region: "region", Workdir: "/workspace/app", VCPUs: 1, MemoryMB: 2, DiskGB: 3, StartupTimeoutSecs: 4, ExecTimeoutSecs: 5, BridgeCommand: "python3", SDKPackage: "cua", SDKImport: "cua", SDKFallbackImport: "cua_sandbox"}
+	keys := []string{"image", "kind", "region", "workdir", "vcpus", "memoryMB", "diskGB", "startupTimeoutSecs", "execTimeoutSecs", "bridgeCommand", "sdkPackage", "sdkImport", "sdkFallbackImport"}
+	if _, ok := reflect.TypeOf(fileCuaConfig{}).FieldByName("APIURL"); ok {
+		t.Fatal("API URL must not have a YAML field, even for trusted input")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "zero"} {
+			t.Run(fmt.Sprintf("trusted=%t/%s", trusted, mode), func(t *testing.T) {
+				body := "cua:\n  apiURL: https://example.invalid/yaml\n"
+				if mode != "omitted" {
+					for i, key := range keys {
+						value := "null"
+						if mode == "zero" {
+							value = "''"
+							if i >= 4 && i <= 8 {
+								value = "0"
+							}
+						}
+						body += "  " + key + ": " + value + "\n"
+					}
+				}
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte(body), &file); err != nil {
+					t.Fatal(err)
+				}
+				cfg := baseConfig()
+				cfg.Cua = initial
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				want := initial
+				if mode == "zero" {
+					want = CuaConfig{APIURL: initial.APIURL}
+					if !trusted {
+						want.BridgeCommand, want.SDKPackage, want.SDKImport, want.SDKFallbackImport = initial.BridgeCommand, initial.SDKPackage, initial.SDKImport, initial.SDKFallbackImport
+					}
+				}
+				if cfg.Cua != want {
+					t.Fatalf("got %#v, want %#v", cfg.Cua, want)
+				}
+			})
+		}
+	}
+}
+
+func TestCUAAPIURLEnvironmentPrecedence(t *testing.T) {
+	for _, tc := range []struct{ primary, fallback, want string }{
+		{"https://example.invalid/primary", "https://example.invalid/fallback", "https://example.invalid/primary"},
+		{"", "https://example.invalid/fallback", "https://example.invalid/fallback"},
+		{"", "", "https://example.invalid/initial"},
+		{" ", "https://example.invalid/fallback", " "},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_CUA_API_URL", tc.primary)
+			t.Setenv("CUA_BASE_URL", tc.fallback)
+			cfg := baseConfig()
+			cfg.Cua.APIURL = "https://example.invalid/initial"
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Cua.APIURL != tc.want {
+				t.Fatalf("URL=%q, want %q", cfg.Cua.APIURL, tc.want)
+			}
+		})
+	}
+}
+
+func TestCUAIntegerOverlayErrorOrder(t *testing.T) {
+	keys := []string{"vcpus", "memoryMB", "diskGB", "startupTimeoutSecs", "execTimeoutSecs"}
+	envs := []string{"CRABBOX_CUA_VCPUS", "CRABBOX_CUA_MEMORY_MB", "CRABBOX_CUA_DISK_GB", "CRABBOX_CUA_STARTUP_TIMEOUT_SECS", "CRABBOX_CUA_EXEC_TIMEOUT_SECS"}
+	for _, source := range []string{"file", "env"} {
+		for fail := range keys {
+			for _, invalid := range []string{"-1", "invalid"} {
+				if source == "file" && invalid == "invalid" {
+					continue
+				}
+				t.Run(fmt.Sprintf("%s/%s/%s", source, keys[fail], invalid), func(t *testing.T) {
+					clearConfigEnv(t)
+					cfg := baseConfig()
+					cfg.Cua.VCPUs, cfg.Cua.MemoryMB, cfg.Cua.DiskGB, cfg.Cua.StartupTimeoutSecs, cfg.Cua.ExecTimeoutSecs = 10, 20, 30, 40, 50
+					cfg.Cua.BridgeCommand = "before-python"
+					body := "cua:\n  image: after\n  bridgeCommand: after-python\n"
+					t.Setenv("CRABBOX_CUA_IMAGE", "after")
+					t.Setenv("CRABBOX_CUA_BRIDGE_COMMAND", "after-python")
+					for i, key := range keys {
+						value := "7"
+						if i >= fail {
+							value = invalid
+						}
+						body += "  " + key + ": " + value + "\n"
+						t.Setenv(envs[i], value)
+					}
+					var err error
+					wantError := "cua " + keys[fail] + " must be non-negative"
+					if source == "file" {
+						var file fileConfig
+						if err := yaml.Unmarshal([]byte(body), &file); err != nil {
+							t.Fatal(err)
+						}
+						err = applyFileConfig(&cfg, file)
+					} else {
+						err = applyEnv(&cfg)
+						wantError = envs[fail] + " must be non-negative"
+						if invalid == "invalid" {
+							wantError = envs[fail] + " must be an integer"
+						}
+					}
+					if err == nil || err.Error() != wantError {
+						t.Fatalf("error=%v, want %q", err, wantError)
+					}
+					want := []int{10, 20, 30, 40, 50}
+					for i := 0; i < fail; i++ {
+						want[i] = 7
+					}
+					if source == "env" {
+						want[fail] = 0
+					}
+					got := []int{cfg.Cua.VCPUs, cfg.Cua.MemoryMB, cfg.Cua.DiskGB, cfg.Cua.StartupTimeoutSecs, cfg.Cua.ExecTimeoutSecs}
+					if !reflect.DeepEqual(got, want) || cfg.Cua.Image != "after" || cfg.Cua.BridgeCommand != "before-python" {
+						t.Fatalf("partial update=%#v, want integers %v", cfg.Cua, want)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestCUARepoConfigCannotReplaceBridgeRuntime(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Cua.BridgeCommand = "trusted-python"
@@ -7039,10 +7331,10 @@ func TestCUARepoConfigCannotReplaceBridgeRuntime(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(strings.Join([]string{
 		"cua:",
 		"  workdir: /workspace/repo",
-		"  bridgeCommand: ./steal-token",
-		"  sdkPackage: ./fake-sdk",
-		"  sdkImport: fake_sdk",
-		"  sdkFallbackImport: fake_fallback",
+		"  bridgeCommand: ./example-python",
+		"  sdkPackage: example-package",
+		"  sdkImport: example_sdk",
+		"  sdkFallbackImport: example_fallback",
 	}, "\n")), &file); err != nil {
 		t.Fatal(err)
 	}
@@ -7054,6 +7346,12 @@ func TestCUARepoConfigCannotReplaceBridgeRuntime(t *testing.T) {
 	}
 	if cfg.Cua.Workdir != "/workspace/repo" {
 		t.Fatalf("safe repository workdir setting not applied: %#v", cfg.Cua)
+	}
+	if err := applyFileConfigWithTrust(&cfg, file, true); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Cua.BridgeCommand != "./example-python" || cfg.Cua.SDKPackage != "example-package" || cfg.Cua.SDKImport != "example_sdk" || cfg.Cua.SDKFallbackImport != "example_fallback" {
+		t.Fatalf("trusted file did not apply bridge settings: %#v", cfg.Cua)
 	}
 }
 
@@ -8266,5 +8564,134 @@ func TestLumeHostLifecycleConfigRequiresTrustedFile(t *testing.T) {
 	}
 	if cfg.Lume.User != "trusted-user" || cfg.Lume.WorkRoot != "/Users/trusted-user/repo-work" {
 		t.Fatalf("bootstrap user trust boundary was not preserved: %#v", cfg.Lume)
+	}
+}
+
+func TestCodeSandboxFilePresenceAndTrust(t *testing.T) {
+	initial := CodeSandboxConfig{TemplateID: "template", Workdir: "/project/workspace/app", VMTier: "micro", Privacy: "private", HibernationTimeoutSecs: 60, AutomaticWakeupHTTP: true, AutomaticWakeupWebSocket: true, BridgeCommand: "node", SDKPackage: "@codesandbox/sdk", DoctorListLimit: 2, OperationTimeoutSecs: 30}
+	keys := []string{"templateId", "workdir", "vmTier", "privacy", "hibernationTimeoutSecs", "automaticWakeupHTTP", "automaticWakeupWebSocket", "bridgeCommand", "sdkPackage", "doctorListLimit", "operationTimeoutSecs"}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "zero"} {
+			t.Run(fmt.Sprintf("trusted=%t/%s", trusted, mode), func(t *testing.T) {
+				body := "codeSandbox: {}\n"
+				if mode != "omitted" {
+					body = "codeSandbox:\n"
+					for i, key := range keys {
+						value := "null"
+						if mode == "zero" {
+							value = "''"
+							if i == 4 || i == 9 || i == 10 {
+								value = "0"
+							}
+							if i == 5 || i == 6 {
+								value = "false"
+							}
+						}
+						body += "  " + key + ": " + value + "\n"
+					}
+				}
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte(body), &file); err != nil {
+					t.Fatal(err)
+				}
+				before, err := yaml.Marshal(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg := baseConfig()
+				cfg.CodeSandbox = initial
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				want := initial
+				if mode == "zero" {
+					want = CodeSandboxConfig{}
+					if !trusted {
+						want.BridgeCommand, want.SDKPackage = initial.BridgeCommand, initial.SDKPackage
+					}
+				}
+				if cfg.CodeSandbox != want {
+					t.Fatalf("got %#v, want %#v", cfg.CodeSandbox, want)
+				}
+				after, err := yaml.Marshal(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(before) != string(after) {
+					t.Fatal("file input mutated")
+				}
+			})
+		}
+	}
+}
+
+func TestCodeSandboxIntegerOverlayErrorOrder(t *testing.T) {
+	keys := []string{"hibernationTimeoutSecs", "doctorListLimit", "operationTimeoutSecs"}
+	envs := []string{"CRABBOX_CODESANDBOX_HIBERNATION_TIMEOUT_SECS", "CRABBOX_CODESANDBOX_DOCTOR_LIST_LIMIT", "CRABBOX_CODESANDBOX_OPERATION_TIMEOUT_SECS"}
+	for _, source := range []string{"file", "env"} {
+		for fail := range keys {
+			for _, invalid := range []string{"-1", "invalid"} {
+				if source == "file" && invalid == "invalid" {
+					continue
+				}
+				t.Run(fmt.Sprintf("%s/%s/%s", source, keys[fail], invalid), func(t *testing.T) {
+					clearConfigEnv(t)
+					cfg := baseConfig()
+					cfg.CodeSandbox.TemplateID = "before"
+					cfg.CodeSandbox.HibernationTimeoutSecs, cfg.CodeSandbox.DoctorListLimit, cfg.CodeSandbox.OperationTimeoutSecs = 10, 20, 30
+					cfg.CodeSandbox.AutomaticWakeupHTTP = true
+					cfg.CodeSandbox.BridgeCommand = "before-node"
+					body := "codeSandbox:\n  templateId: after\n  automaticWakeupHTTP: false\n  bridgeCommand: after-node\n"
+					t.Setenv("CRABBOX_CODESANDBOX_TEMPLATE_ID", "after")
+					t.Setenv("CRABBOX_CODESANDBOX_AUTOMATIC_WAKEUP_HTTP", "false")
+					t.Setenv("CRABBOX_CODESANDBOX_BRIDGE_COMMAND", "after-node")
+					for i, key := range keys {
+						value := "7"
+						if i >= fail {
+							value = invalid
+						}
+						body += "  " + key + ": " + value + "\n"
+						t.Setenv(envs[i], value)
+					}
+					var err error
+					wantError := "codesandbox " + keys[fail] + " must be non-negative"
+					if source == "file" {
+						var file fileConfig
+						if err := yaml.Unmarshal([]byte(body), &file); err != nil {
+							t.Fatal(err)
+						}
+						err = applyFileConfig(&cfg, file)
+					} else {
+						err = applyEnv(&cfg)
+						wantError = envs[fail] + " must be non-negative"
+						if invalid == "invalid" {
+							wantError = envs[fail] + " must be an integer"
+						}
+					}
+					if err == nil || err.Error() != wantError {
+						t.Fatalf("error=%v, want %q", err, wantError)
+					}
+					wantInts := []int{10, 20, 30}
+					for i := 0; i < fail; i++ {
+						wantInts[i] = 7
+					}
+					// Environment assignment stores the parser's zero result before returning its error.
+					if source == "env" {
+						wantInts[fail] = 0
+					}
+					gotInts := []int{cfg.CodeSandbox.HibernationTimeoutSecs, cfg.CodeSandbox.DoctorListLimit, cfg.CodeSandbox.OperationTimeoutSecs}
+					if !reflect.DeepEqual(gotInts, wantInts) {
+						t.Fatalf("integers=%v, want %v", gotInts, wantInts)
+					}
+					wantBridge := "before-node"
+					if fail > 0 {
+						wantBridge = "after-node"
+					}
+					if cfg.CodeSandbox.TemplateID != "after" || cfg.CodeSandbox.BridgeCommand != wantBridge || cfg.CodeSandbox.AutomaticWakeupHTTP != (fail == 0) {
+						t.Fatalf("partial update=%#v", cfg.CodeSandbox)
+					}
+				})
+			}
+		}
 	}
 }

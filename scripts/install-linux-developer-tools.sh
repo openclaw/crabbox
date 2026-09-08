@@ -392,6 +392,94 @@ install_pinned_node() (
   touch "$destination.complete"
 )
 
+nodesource_node_version() {
+  local arch="$1" versions package version origin extra url suite source_arch kind selected=""
+  [[ "$node_major" =~ ^[0-9]+$ ]] || return 1
+  versions="$(LC_ALL=C apt-cache madison "nodejs:$arch")" || return $?
+  while IFS='|' read -r package version origin extra; do
+    read -r package <<<"$package"
+    read -r version <<<"$version"
+    read -r url suite source_arch kind extra <<<"$origin"
+    [[ "$package" == "nodejs" || "$package" == "nodejs:$arch" ]] || continue
+    [[ "$url" == "https://deb.nodesource.com/node_$node_major.x" &&
+      "$suite" == "nodistro/main" && "$source_arch" == "$arch" &&
+      "$kind" == "Packages" && -z "$extra" ]] || continue
+    [[ "${version#*:}" == "$node_major."* ]] || continue
+    if [[ -z "$selected" ]] || dpkg --compare-versions "$version" gt "$selected"; then
+      selected="$version"
+    fi
+  done <<<"$versions"
+  [[ -n "$selected" ]] || return 1
+  printf '%s\n' "$selected"
+}
+
+install_requested_node() {
+  local arch version installed status installed_version installed_arch tool link_target
+  local package_files file node_binary="" actual_version expected_version
+  local -a retired_tools=() install_args=(install -y --no-install-recommends)
+  arch="$(dpkg --print-architecture)" || return $?
+  version="$(nodesource_node_version "$arch")" || {
+    log "no NodeSource Node $node_major package for native architecture $arch; owned links retained"
+    return 1
+  }
+  installed="$(dpkg-query -W -f='${db:Status-Status}\t${Version}\t${Architecture}\n' "nodejs:$arch" 2>/dev/null || true)"
+  read -r status installed_version installed_arch <<<"$installed"
+  if [[ "$status" == "installed" ]] && dpkg --compare-versions "$version" lt "$installed_version"; then
+    if [[ "$node_major" != "22" || "${installed_version#*:}" != "24."* || "$installed_arch" != "$arch" ]]; then
+      log "refusing Node package downgrade $installed_version to $version; only the explicit Node 24 to 22 transition is supported"
+      return 1
+    fi
+    install_args+=(--allow-downgrades)
+  fi
+  # Snapshot this installer's exact retirement set before APT can change any links.
+  for tool in node npm npx corepack pnpm pnpx; do
+    if [[ -L "$node_link_dir/$tool" ]]; then
+      link_target="$(readlink -n "$node_link_dir/$tool" && printf '.')" || return 1
+      [[ "$link_target" != "$node_toolcache_root/node/24.19.0/x64/bin/$tool." ]] || retired_tools+=("$tool")
+    fi
+  done
+  if retry apt-get "${install_args[@]}" "nodejs:$arch=$version"; then
+    :
+  else
+    status=$?
+    log "NodeSource package replacement failed for nodejs:$arch=$version; owned links retained"
+    return "$status"
+  fi
+  installed="$(dpkg-query -W -f='${db:Status-Status}\t${Version}\t${Architecture}\n' "nodejs:$arch")" || {
+    log "Node package replacement verification failed; owned links retained"
+    return 1
+  }
+  read -r status installed_version installed_arch <<<"$installed"
+  if [[ "$status" != "installed" || "$installed_version" != "$version" || "$installed_arch" != "$arch" ]]; then
+    log "Node package replacement verification failed for nodejs:$arch=$version; owned links retained"
+    return 1
+  fi
+  package_files="$(dpkg-query -L "nodejs:$arch")" || return $?
+  while IFS= read -r file; do
+    if [[ "$file" == /*/bin/node ]]; then
+      [[ -z "$node_binary" ]] || { log "ambiguous package-owned Node binary; owned links retained"; return 1; }
+      node_binary="$file"
+    fi
+  done <<<"$package_files"
+  expected_version="${version#*:}"
+  expected_version="v${expected_version%%-*}"
+  if [[ ! -f "$node_binary" || -L "$node_binary" || ! -x "$node_binary" ]] ||
+    ! actual_version="$("$node_binary" --version)" || [[ "$actual_version" != "$expected_version" ]]; then
+    log "package-owned Node binary verification failed for nodejs:$arch=$version; owned links retained"
+    return 1
+  fi
+  for tool in ${retired_tools[@]+"${retired_tools[@]}"}; do
+    if [[ -L "$node_link_dir/$tool" ]]; then
+      # Preserve operator replacements, including targets with trailing newlines.
+      link_target="$(readlink -n "$node_link_dir/$tool" && printf '.')" || return 1
+      if [[ "$link_target" == "$node_toolcache_root/node/24.19.0/x64/bin/$tool." ]]; then
+        rm -- "$node_link_dir/$tool" || return 1
+      fi
+    fi
+  done
+  hash -r
+}
+
 install_node_pnpm() {
   local use_pinned_node=0
   if pinned_node_supported; then
@@ -401,21 +489,9 @@ install_node_pnpm() {
     install_pinned_node || return $?
     export PATH="$node_link_dir:$PATH"
   else
-    # Preserve the existing Node-major override and non-x86_64 installer route.
-    apt_install nodejs || return $?
     if [[ "$node_major" != "24" ]]; then
-      local tool link_target actual_node_version
-      # Only retire this installer's exact links after the replacement is installed.
-      for tool in node npm npx corepack pnpm pnpx; do
-        if [[ -L "$node_link_dir/$tool" ]]; then
-          # The sentinel preserves trailing newlines in operator-provided targets.
-          link_target="$(readlink -n "$node_link_dir/$tool" && printf '.')" || return 1
-          if [[ "$link_target" == "$node_toolcache_root/node/24.19.0/x64/bin/$tool." ]]; then
-            rm -- "$node_link_dir/$tool" || return 1
-          fi
-        fi
-      done
-      hash -r
+      local actual_node_version
+      install_requested_node || return $?
       actual_node_version="$(node --version)" || {
         log "requested Node major $node_major is unavailable; resolve PATH before preparing Corepack"
         return 1
@@ -424,6 +500,9 @@ install_node_pnpm() {
         log "requested Node major $node_major, but node reports $actual_node_version; resolve PATH shadowing before preparing Corepack"
         return 1
       fi
+    else
+      # The non-x86_64 default route does not opt into any downgrade.
+      apt_install nodejs || return $?
     fi
   fi
   command -v npm >/dev/null

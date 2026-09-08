@@ -63,10 +63,19 @@ test("measured Linux publication is explicit and declares its threshold and extr
   );
   assert.match(
     workflow,
-    /name: Upload allowlisted measurement manifest[\s\S]*if: success\(\) && inputs\.measured/,
+    /name: Upload allowlisted measurement manifest[\s\S]*if: always\(\) && inputs\.measured/,
   );
   assert.match(workflow, /path: \$\{\{ runner\.temp \}\}\/devtools-image-proof\/manifest\.json/);
+  assert.match(
+    workflow,
+    /export CRABBOX_IMAGE_PUBLIC_OUTCOME="\$proof_dir\/manifest\.json"/,
+  );
+  assert.match(workflow, /public_outcome="\$RUNNER_TEMP\/devtools-image-proof\/manifest\.json"/);
+  assert.match(workflow, /name: Initialize measured publication outcome/);
+  assert.match(workflow, /echo '- Status: `outcome_unavailable`'/);
   assert.match(workflow, /"\$\{command\[@\]\}" >"\$private_dir\/publish\.log" 2>&1/);
-  assert.match(workflow, /cp "\$\{manifests\[0\]\}" "\$proof_dir\/manifest\.json"/);
+  assert.match(workflow, /devtools-image-proof\.mjs validate/);
+  assert.doesNotMatch(workflow, /\bcp "\$\{manifests/);
+  assert.doesNotMatch(workflow, /run-name:.*\$\{\{ inputs\.(?:region|linux_type)/);
   assert.doesNotMatch(workflow, /sanitized.*(?:logs|diagnostics)/i);
 });

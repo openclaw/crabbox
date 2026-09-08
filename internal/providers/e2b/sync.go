@@ -27,7 +27,7 @@ func (b *e2bBackend) syncWorkspace(ctx context.Context, client e2bAPI, session e
 		PhaseName:           "e2b_sync",
 		Provider:            e2bProvider,
 		Stderr:              b.rt.Stderr,
-		Now:                 b.now,
+		Now:                 func() time.Time { return core.ClockNow(b.rt.Clock) },
 		Upload: func(uploadCtx context.Context, remoteArchive string, archive io.Reader) error {
 			return e2bError("upload archive", client.UploadFile(uploadCtx, session, remoteArchive, archive))
 		},

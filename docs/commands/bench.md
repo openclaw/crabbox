@@ -165,6 +165,11 @@ is written before a policy exit of `1`. Check JSON is deterministic and excludes
 the store path, raw timing records, command text, command fingerprints, and
 lease or run IDs.
 
+Treat `bench check --json` as local, private evidence. It can still identify
+the selected provider and machine type, so it is not a publication format.
+Public workflows must project the result through a separate exact-key
+allowlist instead of uploading or copying this JSON directly.
+
 ## Privacy and interpretation
 
 Timing records can include repo paths, workdirs, command display text, labels,

@@ -86,6 +86,87 @@ func TestProviderForResolvesNameOnly(t *testing.T) {
 	}
 }
 
+func TestOpenSandboxFlagPresence(t *testing.T) {
+	cfg := testConfig()
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := RegisterOpenSandboxProviderFlags(fs, cfg)
+	cfg.OpenSandbox = core.OpenSandboxConfig{APIURL: "https://example.invalid/later", Image: "later", Workdir: "/workspace/later", CPU: "2", Memory: "4Gi", TimeoutSecs: 30, ExecTimeoutSecs: 20, PlatformOS: "linux", PlatformArch: "arm64", SecureAccess: true, UseServerProxy: true, ForgetMissing: true}
+	before := cfg.OpenSandbox
+	if err := ApplyOpenSandboxProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenSandbox != before {
+		t.Fatalf("unvisited flags changed config: %#v", cfg.OpenSandbox)
+	}
+	if err := fs.Parse([]string{"--opensandbox-api-url=https://example.invalid/later", "--opensandbox-image=later", "--opensandbox-workdir=/workspace/later", "--opensandbox-cpu=2", "--opensandbox-memory=4Gi", "--opensandbox-timeout-secs=30", "--opensandbox-exec-timeout-secs=20", "--opensandbox-platform-os=linux", "--opensandbox-platform-arch=arm64", "--opensandbox-secure-access=true", "--opensandbox-use-server-proxy=true", "--opensandbox-forget-missing=true"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.OpenSandbox = core.OpenSandboxConfig{}
+	if err := ApplyOpenSandboxProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenSandbox != before {
+		t.Fatalf("nonzero flags=%#v, want %#v", cfg.OpenSandbox, before)
+	}
+	if err := fs.Parse([]string{"--opensandbox-api-url=", "--opensandbox-image=", "--opensandbox-workdir=", "--opensandbox-cpu=", "--opensandbox-memory=", "--opensandbox-timeout-secs=0", "--opensandbox-exec-timeout-secs=0", "--opensandbox-platform-os=", "--opensandbox-platform-arch=", "--opensandbox-secure-access=false", "--opensandbox-use-server-proxy=false", "--opensandbox-forget-missing=false"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyOpenSandboxProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenSandbox != (core.OpenSandboxConfig{}) {
+		t.Fatalf("explicit zero flags not applied: %#v", cfg.OpenSandbox)
+	}
+	if err := fs.Parse([]string{"--opensandbox-forget-missing=true"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyOpenSandboxProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OpenSandbox.ForgetMissing {
+		t.Fatal("explicit true flag not applied")
+	}
+}
+
+func TestOpenSandboxSizingGuardBeforeValuesAssertion(t *testing.T) {
+	for _, provider := range []string{"opensandbox", " OpenSandbox ", "osb", "open-sandbox"} {
+		for _, args := range [][]string{{"--class=large"}, {"--type=vm"}, {"--type=vm", "--class=large"}} {
+			cfg := testConfig()
+			cfg.Provider = provider
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.String("class", "", "")
+			fs.String("type", "", "")
+			registered := RegisterOpenSandboxProviderFlags(fs, cfg)
+			if err := fs.Parse(append(args, "--opensandbox-image=changed")); err != nil {
+				t.Fatal(err)
+			}
+			for _, values := range []any{nil, struct{}{}, registered} {
+				before := cfg.OpenSandbox
+				err := ApplyOpenSandboxProviderFlags(&cfg, fs, values)
+				canonical := provider == "opensandbox" || provider == " OpenSandbox "
+				if canonical {
+					flagName := "--class"
+					if len(args) == 1 && args[0] == "--type=vm" {
+						flagName = "--type"
+					}
+					want := flagName + " is not supported for provider=opensandbox; use --opensandbox-cpu and --opensandbox-memory"
+					if err == nil || err.Error() != want {
+						t.Fatalf("provider=%q values=%T error=%v, want %q", provider, values, err, want)
+					}
+				} else if err != nil {
+					t.Fatalf("noncanonical provider guard: %v", err)
+				}
+				if !canonical && values == registered {
+					before.Image = "changed"
+				}
+				if cfg.OpenSandbox != before {
+					t.Fatalf("unexpected copies: %#v, want %#v", cfg.OpenSandbox, before)
+				}
+			}
+		}
+	}
+}
+
 func TestOpenSandboxFlagsRejectNegativeTimeouts(t *testing.T) {
 	for _, flagName := range []string{"opensandbox-timeout-secs", "opensandbox-exec-timeout-secs"} {
 		t.Run(flagName, func(t *testing.T) {
@@ -93,10 +174,13 @@ func TestOpenSandboxFlagsRejectNegativeTimeouts(t *testing.T) {
 			cfg.Provider = providerName
 			fs := flag.NewFlagSet(flagName, flag.ContinueOnError)
 			values := RegisterOpenSandboxProviderFlags(fs, cfg)
-			if err := fs.Parse([]string{"--" + flagName, "-1"}); err != nil {
+			if err := fs.Parse([]string{"--" + flagName, "-1", "--opensandbox-image=changed", "--opensandbox-forget-missing=true"}); err != nil {
 				t.Fatal(err)
 			}
 			err := ApplyOpenSandboxProviderFlags(&cfg, fs, values)
+			if cfg.OpenSandbox.Image != "changed" || !cfg.OpenSandbox.ForgetMissing {
+				t.Fatal("explicit flags must all apply before timeout validation")
+			}
 			if err == nil || !strings.Contains(err.Error(), "must be non-negative") {
 				t.Fatalf("err=%v, want non-negative timeout rejection", err)
 			}

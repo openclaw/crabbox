@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"text/tabwriter"
 	"time"
@@ -889,6 +890,60 @@ func TestBlacksmithRunFailureStagesLocalCommand(t *testing.T) {
 				t.Error("summary lost exit or failure stage")
 			}
 		})
+	}
+}
+
+func TestBlacksmithProofTailPreservesRawBytesURLAndSnapshots(t *testing.T) {
+	b := newBlacksmithProofTailBuffer()
+	var expected []byte
+	for _, chunk := range [][]byte{
+		{}, []byte(strings.Repeat("setup\n", 350)),
+		[]byte("https://github.com/example-org/my-app/actions/"),
+		[]byte("runs/123\n"), {'x', 0xff, '\n'},
+		[]byte("https://github.com/example-org/my-app/actions/runs/456\n"),
+	} {
+		n, err := b.Write(chunk)
+		if n != len(chunk) || err != nil {
+			t.Fatalf("write=%d/%v, want %d/nil", n, err, len(chunk))
+		}
+		expected = append(expected, chunk...)
+		if got := b.Bytes(); !bytes.Equal(got, expected) {
+			t.Fatalf("raw snapshot=%q want=%q", got, expected)
+		}
+	}
+	if got := b.ActionsURL(); got != "https://github.com/example-org/my-app/actions/runs/123" {
+		t.Fatalf("first split URL=%q", got)
+	}
+	snapshot := b.Bytes()
+	snapshot[0] = '!'
+	if !bytes.Equal(b.Bytes(), expected) {
+		t.Fatal("returned snapshot aliases retained bytes")
+	}
+	if _, err := b.Write([]byte("later")); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot) != len(expected) || string(snapshot[len(snapshot)-4:]) != "456\n" {
+		t.Fatal("later write changed the earlier snapshot")
+	}
+}
+
+func TestBlacksmithProofTailSerializesSmallWritesAndSnapshots(t *testing.T) {
+	b := newBlacksmithProofTailBuffer()
+	var group sync.WaitGroup
+	for range 2 {
+		group.Go(func() {
+			for range 8 {
+				if n, err := b.Write([]byte("line\n")); err != nil || n != 5 {
+					t.Errorf("write=%d/%v", n, err)
+				}
+				_ = b.Bytes()
+				_ = b.ActionsURL()
+			}
+		})
+	}
+	group.Wait()
+	if got := b.Bytes(); !bytes.Equal(got, []byte(strings.Repeat("line\n", 16))) {
+		t.Fatalf("serialized output=%q", got)
 	}
 }
 

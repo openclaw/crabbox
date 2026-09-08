@@ -494,6 +494,14 @@ SSH retains its mutex-protected cloned snapshots and hides ordinary snapshots
 after truncation; its bounded diagnostic view still exposes the retained prefix
 and overflow flag.
 
+Raw byte-tail storage lives in `internal/tailbuffer`. Agent Sandbox stderr and
+Blacksmith proof streams share its finite last-N-byte retention and discard
+observation; it does not normalize text, lock, or add markers. Agent Sandbox
+retains stderr delivery order and native exit classification. Blacksmith keeps
+its mutex, cloned snapshots, first Actions URL detection before eviction, and
+the historical proof marker for a full-sized incoming chunk. Its URL scan carry
+uses the same storage owner without sharing URL policy with the leaf.
+
 Strict one-request/one-response JSON subprocesses may use
 `internal/providers/shared/procjson`. It owns bounded capture, cancellation
 grace, request encoding, and exact single-document decoding. Keep response
@@ -770,6 +778,12 @@ Pick `Kind` carefully:
 - `ProviderKindServiceControl`: provider inspects or controls an existing
   hosted service instead of leasing a run surface (for example `railway` and
   `fastapi-cloud`).
+
+FastAPI Cloud, Railway, and Unikraft Cloud share their ordered unsupported-run
+option checks through `shared.RejectServiceRunOptions`. The adapters retain
+their lifecycle and shell explanations, request-ID requirements, and final
+command refusal. These checks do not grant a service an execution capability or
+contact its API.
 
 `Targets` should describe what the provider can actually satisfy. Use `linux`,
 `macos`, or `windows` only for real operating-system targets. Use

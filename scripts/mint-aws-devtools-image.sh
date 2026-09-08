@@ -33,6 +33,10 @@ measured=0
 max_p95_runner_total_ms=""
 measurement_dir=""
 measurement_policy=""
+public_outcome="${CRABBOX_IMAGE_PUBLIC_OUTCOME:-}"
+outcome_stage="preflight"
+rollback_status="not_required"
+cleanup_status="not_started"
 windows_reboot_marker='C:\ProgramData\crabbox\image-prep-reboot-required'
 
 usage() {
@@ -238,6 +242,15 @@ if [[ "$measured" == "1" ]]; then
     "$desktop" "$browser" "$promote" "$keep_lease" "$fast_snapshot_restore" "$ttl" "$idle_timeout")"
   # Candidate selection is explicit below; baseline and promoted proof use normal selection.
   unset CRABBOX_AWS_AMI
+  umask 077
+  mkdir -p "$log_dir"
+  measurement_dir="$(mktemp -d "$log_dir/measurement-${log_id}.XXXXXX")"
+  printf '%s\n' "$measurement_policy" >"$measurement_dir/policy.json"
+  if [[ -z "$public_outcome" ]]; then
+    public_outcome="$measurement_dir/manifest.json"
+  fi
+  node "$ROOT/scripts/devtools-image-proof.mjs" initialize-policy \
+    "$public_outcome" "$measurement_dir/policy.json"
 elif [[ -n "$max_p95_runner_total_ms" ]]; then
   printf '%s\n' '--max-p95-runner-total-ms requires --measured' >&2
   exit 2
@@ -250,24 +263,104 @@ measurement_lease=""
 measurement_handle=""
 promotion_log=""
 rollback_pending=0
+warmup_handle_dir="$log_dir/.image-mint-${log_image_name}-leases-${log_id}"
 
 cleanup() {
   local exit_status=$?
   trap - EXIT
+  if [[ "${BASH_SUBSHELL:-0}" != "0" ]]; then
+    return "$exit_status"
+  fi
+  local finalizer_status=0
+  local proof_status=0
+  local receipt_path="-"
+  local outcome_candidate=""
+  local lease handle seen_leases="|"
+  local -a cleanup_leases=()
   # A signal can arrive after handle publication but before run returns or writes timing.
   if [[ -z "$measurement_lease" && -n "$measurement_handle" && -f "$measurement_handle" ]]; then
-    measurement_lease="$(node "$ROOT/scripts/devtools-image-proof.mjs" handle "$measurement_handle" | jq -er .leaseId)" ||
+    measurement_lease="$(node "$ROOT/scripts/devtools-image-proof.mjs" handle "$measurement_handle" | jq -er .leaseId)" || {
       printf 'could not recover the active retained measurement handle\n' >&2
+      finalizer_status=1
+    }
   fi
-  if [[ "$rollback_pending" == "1" ]]; then
+  if [[ "$rollback_pending" == "1" && "$exit_status" != "0" ]]; then
     rollback_pending=0
-    rollback_promoted_image "$promotion_log" || true
+    if rollback_promoted_image "$promotion_log"; then
+      rollback_status="succeeded"
+    else
+      rollback_status="failed"
+      finalizer_status=1
+    fi
   fi
   if [[ "$keep_lease" != "1" ]]; then
-    for lease in "$measurement_lease" "$promoted_lease" "$candidate_lease" "$source_lease"; do
+    cleanup_status="succeeded"
+    cleanup_leases=("$measurement_lease" "$promoted_lease" "$candidate_lease" "$source_lease")
+    if [[ -d "$warmup_handle_dir" ]]; then
+      for handle in "$warmup_handle_dir"/*.lease; do
+        [[ -f "$handle" ]] || continue
+        lease="$(cat "$handle")"
+        [[ -n "$lease" ]] && cleanup_leases+=("$lease")
+      done
+    fi
+    for lease in "${cleanup_leases[@]}"; do
       [[ -n "$lease" ]] || continue
-      "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" || true
+      case "$seen_leases" in
+        *"|$lease|"*) continue ;;
+      esac
+      seen_leases+="$lease|"
+      if ! "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease"; then
+        cleanup_status="failed"
+        finalizer_status=1
+      fi
     done
+  fi
+  if [[ "$exit_status" == "0" && "$finalizer_status" != "0" ]]; then
+    exit_status="$finalizer_status"
+  fi
+  if [[ "$rollback_pending" == "1" && "$exit_status" != "0" ]]; then
+    rollback_pending=0
+    if rollback_promoted_image "$promotion_log"; then
+      rollback_status="succeeded"
+    else
+      rollback_status="failed"
+      finalizer_status=1
+    fi
+  fi
+  if [[ "$measured" == "1" && -n "$measurement_dir" && -n "$public_outcome" ]]; then
+    if [[ -n "$promotion_log" ]] &&
+      jq -e '.image.id and .image.revision' "$promotion_log" >/dev/null 2>&1; then
+      receipt_path="$promotion_log"
+    fi
+    outcome_candidate="$(mktemp "${public_outcome}.candidate.XXXXXX")" || proof_status=$?
+    if [[ "$proof_status" == "0" ]]; then
+    node "$ROOT/scripts/devtools-image-proof.mjs" finalize \
+      "$outcome_candidate" "$measurement_dir/policy.json" "$measurement_dir" \
+      "$outcome_stage" "$exit_status" "$rollback_status" "$cleanup_status" "$receipt_path" ||
+      proof_status=$?
+    fi
+    if [[ "$proof_status" == "0" ]]; then
+      mv -f "$outcome_candidate" "$public_outcome" || proof_status=$?
+    fi
+    if [[ "$proof_status" != "0" ]]; then
+      [[ -z "$outcome_candidate" ]] || rm -f "$outcome_candidate"
+      printf 'could not finalize public measurement outcome\n' >&2
+      if [[ "$exit_status" == "0" ]]; then
+        exit_status="$proof_status"
+      fi
+      if [[ "$rollback_pending" == "1" ]]; then
+        rollback_pending=0
+        if rollback_promoted_image "$promotion_log"; then
+          rollback_status="succeeded"
+        else
+          rollback_status="failed"
+          finalizer_status=1
+        fi
+      fi
+    elif [[ "$exit_status" == "0" ]]; then
+      rollback_pending=0
+      printf 'public measurement proof: %s\n' "$public_outcome"
+    fi
   fi
   exit "$exit_status"
 }
@@ -285,10 +378,14 @@ run_cmd() {
 run_json_tee() {
   local out="$1"
   shift
+  local -a statuses
   printf '+' >&2
   printf ' %q' "$@" >&2
   printf '\n' >&2
-  "$@" | tee "$out"
+  "$@" | tee "$out" &&
+    statuses=("${PIPESTATUS[@]}") || statuses=("${PIPESTATUS[@]}")
+  [[ "${statuses[0]}" == "0" ]] || return "${statuses[0]}"
+  return "${statuses[1]}"
 }
 
 rollback_promoted_image() {
@@ -304,7 +401,7 @@ rollback_promoted_image() {
   elif [[ "$previous_state" == "absent" ]]; then
     rollback_image="none"
   else
-    printf 'promoted-image smoke failed; promotion receipt has invalid previous state\n' >&2
+    printf 'post-promotion failure; promotion receipt has invalid previous state\n' >&2
     return 1
   fi
   local -a args=(image promote --json --target "$target")
@@ -313,10 +410,10 @@ rollback_promoted_image() {
   args+=(--restore-receipt "$receipt" "$current_id")
   rollback_log="$(mktemp "$log_dir/image-mint-${log_image_name}-rollback-${log_id}.json.XXXXXX")"
   if ! run_json_tee "$rollback_log" "$CRABBOX_BIN" "${args[@]}"; then
-    printf 'promoted-image smoke failed; CAS rollback failed or was rejected; a newer default was not overwritten\n' >&2
+    printf 'post-promotion failure; CAS rollback failed or was rejected; a newer default was not overwritten\n' >&2
     return 1
   fi
-  printf 'promoted-image smoke failed; restored previous default image=%s\n' "$rollback_image" >&2
+  printf 'post-promotion failure; restored previous default image=%s\n' "$rollback_image" >&2
 }
 
 duration_seconds() {
@@ -501,6 +598,14 @@ process.exit(1);
 ' "$1"
 }
 
+warmup_handle_path() {
+  printf '%s/%s.lease\n' "$warmup_handle_dir" "$1"
+}
+
+clear_warmup_handle() {
+  rm -f "$(warmup_handle_path "$1")"
+}
+
 assert_selected_image() {
   local log="$1"
   local image_id="$2"
@@ -543,9 +648,15 @@ warmup() {
   fi
   local lease
   lease="$(lease_from_log "$log" || true)"
+  if [[ -n "$lease" ]]; then
+    mkdir -p "$warmup_handle_dir"
+    printf '%s\n' "$lease" >"$(warmup_handle_path "$label")"
+  fi
   if [[ "$warmup_status" -ne 0 ]]; then
     if [[ -n "$lease" && "$keep_lease" != "1" ]]; then
-      run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" >&2 || true
+      if run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" >&2; then
+        clear_warmup_handle "$label"
+      fi
     fi
     return "$warmup_status"
   fi
@@ -566,7 +677,10 @@ warmup() {
     fi
     if [[ "$selection_status" != "0" ]]; then
       printf 'warmup selection evidence failed for %s\n' "$label" >&2
-      run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" >&2 || true
+      [[ ! -s "$selection.error" ]] || cat "$selection.error" >&2
+      if run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" >&2; then
+        clear_warmup_handle "$label"
+      fi
       return "$selection_status"
     fi
   elif [[ "$label" == "candidate" ]]; then
@@ -577,7 +691,10 @@ warmup() {
   if [[ "$target" == "windows" ]]; then
     sleep "$windows_warmup_settle_seconds"
     if ! wait_windows_ssh_probe "$lease" "$windows_warmup_wait_timeout"; then
-      [[ "$keep_lease" == "1" ]] || run_cmd "$CRABBOX_BIN" stop --provider aws --target windows "$lease" >&2 || true
+      if [[ "$keep_lease" != "1" ]] &&
+        run_cmd "$CRABBOX_BIN" stop --provider aws --target windows "$lease" >&2; then
+        clear_warmup_handle "$label"
+      fi
       return 1
     fi
   fi
@@ -586,7 +703,7 @@ warmup() {
 
 measure_cohort() {
   local phase="$1"
-  local sample log handle selection run_status recovery_status capture_status stop_status
+  local sample log handle selection run_status recovery_status capture_status stop_status partial_status
   local store="$measurement_dir/$phase.jsonl"
   local -a pipeline_status
   local -a env_args=(env -u CRABBOX_AWS_AMI CRABBOX_AWS_REGION="$region" AWS_REGION="$region")
@@ -608,12 +725,16 @@ measure_cohort() {
     recovery_status=0
     capture_status=0
     stop_status=0
+    partial_status=0
     # Even a failed run can allocate a lease. Recover only this attempted sample, not an older row.
     measurement_lease="$(node "$ROOT/scripts/devtools-image-proof.mjs" sample "$store" "$sample" "$handle" | jq -er .leaseId)" || recovery_status=$?
     if [[ -n "$measurement_lease" ]]; then
       if [[ "$run_status" == "0" ]]; then
         capture_selection "$measurement_lease" "$selection" || capture_status=$?
-        [[ "$capture_status" == "0" ]] || printf 'could not capture exact-lease measurement evidence\n' >&2
+        if [[ "$capture_status" != "0" ]]; then
+          printf 'could not capture exact-lease measurement evidence\n' >&2
+          [[ ! -s "$selection.error" ]] || cat "$selection.error" >&2
+        fi
       fi
       # Stop observes provider cleanup completion, outside the original runner timing.
       run_cmd "$CRABBOX_BIN" stop --provider aws --target linux "$measurement_lease" || stop_status=$?
@@ -629,120 +750,57 @@ measure_cohort() {
     else
       printf 'could not recover the attempted measurement lease; inspect %s\n' "$log" >&2
     fi
+    if [[ -f "$store" ]]; then
+      node "$ROOT/scripts/devtools-image-proof.mjs" partial \
+        "$measurement_dir/policy.json" "$store" "$phase" \
+        "$measurement_dir/$phase-cohort.json" || partial_status=$?
+    fi
     [[ "$run_status" == "0" ]] || return "$run_status"
     [[ "$recovery_status" == "0" ]] || return "$recovery_status"
     [[ "$capture_status" == "0" ]] || return "$capture_status"
     [[ "$stop_status" == "0" ]] || return "$stop_status"
+    [[ "$partial_status" == "0" ]] || return "$partial_status"
     node "$ROOT/scripts/devtools-image-proof.mjs" selection \
       "$measurement_dir/policy.json" "$selection" "$phase" "${ami_id:-}" \
       "$measurement_dir/baseline-1.selection.json"
   done
   run_json_tee "$measurement_dir/$phase-report.json" "$CRABBOX_BIN" bench report \
     --store "$store" --min-samples 3 --json
-  run_json_tee "$measurement_dir/$phase-check.json" "$CRABBOX_BIN" bench check \
-    --store "$store" --min-samples 3 --max-failures 0 \
-    --max-p95-runner-total "${max_p95_runner_total_ms}ms" --json
+  if [[ "$phase" != "baseline" ]]; then
+    run_json_tee "$measurement_dir/$phase-check.json" "$CRABBOX_BIN" bench check \
+      --store "$store" --min-samples 3 --max-failures 0 \
+      --max-p95-runner-total "${max_p95_runner_total_ms}ms" --json
+  fi
   node "$ROOT/scripts/devtools-image-proof.mjs" cohort \
-    "$measurement_dir/policy.json" "$measurement_dir" "$phase" "${ami_id:-}"
+    "$measurement_dir/policy.json" "$measurement_dir" "$phase" "${ami_id:-}" \
+    "$measurement_dir/$phase-cohort.json"
 }
 
 smoke_script() {
   if [[ "$target" == "windows" ]]; then
-    cat <<'POWERSHELL'
-$ErrorActionPreference = "Stop"
-Get-ComputerInfo | Select-Object OsName, OsVersion, OsBuildNumber | Format-List
-git --version
-gh --version | Select-Object -First 1
-jq --version
-rg --version | Select-Object -First 1
-fd --version
-python --version
-node --version
-$nodeMajor = [int](node -p "process.versions.node.split('.')[0]")
-if ($nodeMajor -lt 24) { throw "Node.js 24 or newer is required, found major $nodeMajor" }
-npm --version
-corepack --version
-pnpm --version
-trufflehog --no-update --version
-docker --version
-docker version
-docker image inspect mcr.microsoft.com/windows/servercore:ltsc2022 | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Docker image smoke failed: $LASTEXITCODE" }
-Write-Output "devtools-smoke-ok"
-POWERSHELL
+    smoke_script_path="$ROOT/scripts/devtools-image-smoke-windows.ps1"
   else
-    cat <<'SHELL'
-set -euo pipefail
-[[ "$(id -u)" -ne 0 ]] || { echo 'developer image smoke requires a nonroot user' >&2; exit 1; }
-uname -a
-command -v git
-command -v gh
-command -v jq
-command -v rg
-command -v fd
-command -v python3
-command -v node
-command -v npm
-command -v corepack
-command -v pnpm
-command -v trufflehog
-trufflehog --no-update --version
-command -v docker
-node --version
-SHELL
-    local expected_node_major=""
-    if [[ "$linux_developer_builder" == "1" && "$linux_node_major" != "24" ]]; then
-      expected_node_major="$linux_node_major"
-    fi
-    printf 'node -e %q -- %q\n' \
-      'const major = process.versions.node.split(".")[0]; const expected = process.argv[1]; if (expected ? major !== expected : Number(major) < 24) throw new Error("Node.js " + (expected ? "major " + expected : "24 or newer") + " is required, found " + process.version)' \
-      "$expected_node_major"
-    cat <<'SHELL'
-corepack --version
-pnpm --version
-docker_group_member() {
-  if id -nG 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
-    return 0
+    smoke_script_path="$ROOT/scripts/devtools-image-smoke-linux.sh"
   fi
-  local current_user docker_entry docker_members member
-  current_user="$(whoami)"
-  docker_entry="$(getent group docker 2>/dev/null || true)"
-  [[ -n "$docker_entry" ]] || return 1
-  docker_members="${docker_entry#*:*:*:}"
-  local IFS=','
-  local -a docker_member_list
-  read -ra docker_member_list <<<"$docker_members"
-  for member in "${docker_member_list[@]}"; do
-    [[ "$member" == "$current_user" ]] && return 0
-  done
-  return 1
-}
-docker_probe='docker version && docker compose version && docker image inspect hello-world ubuntu:24.04 node:24-bookworm >/dev/null'
-if ! sh -c "$docker_probe"; then
-  if command -v sg >/dev/null 2>&1 && docker_group_member; then
-    sg docker -c "$docker_probe"
-  else
-    sudo sh -c "$docker_probe"
-  fi
-fi
-test -d /var/cache/crabbox/pnpm
-test -f /var/lib/crabbox-readiness/linux.json
-test -f /var/lib/crabbox/image-ready
-SHELL
+  smoke_script_value=""
+  IFS= read -r -d '' smoke_script_value <"$smoke_script_path" || [[ -n "$smoke_script_value" ]] || return 1
+  if [[ "$target" == "linux" ]]; then
+    local expected_node_major="" archive_probe=":"
     if [[ "$linux_developer_builder" == "1" ]]; then
-      # Only the bundled builder declares these archives; custom prep keeps its existing smoke contract.
-      CRABBOX_LINUX_NODE_MAJOR="$linux_node_major" \
-        bash -c 'source "$1"; node_pnpm_smoke_script' _ "$ROOT/scripts/install-linux-developer-tools.sh"
+      [[ "$linux_node_major" == "24" ]] || expected_node_major="$linux_node_major"
+      # Only the bundled builder declares archives. Freeze its selection, not guest environment.
+      archive_probe="$(CRABBOX_LINUX_NODE_MAJOR="$linux_node_major" \
+        bash -c 'source "$1"; node_pnpm_smoke_script' _ "$ROOT/scripts/install-linux-developer-tools.sh")" || return $?
     fi
-    printf '%s\n' 'echo devtools-smoke-ok'
+    printf -v smoke_script_value 'set -euo pipefail\nexpected_node_major=%q\ndeveloper_archive_probe() {\n%s\n}\n%s' \
+      "$expected_node_major" "$archive_probe" "$smoke_script_value"
   fi
 }
 
 smoke() {
   local lease="$1"
-  local script
-  script="$(smoke_script)"
-  run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync --shell -- "$script"
+  smoke_script || return $?
+  run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync --shell -- "$smoke_script_value"
 }
 
 run_prep() {
@@ -856,17 +914,17 @@ EOF
 if [[ "$measured" == "1" ]]; then
   printf 'measured campaign: 12 planned leases (3 baseline + 3 candidate + 3 promoted measurements + 3 lifecycle leases)\n' >&2
   printf 'provider retries may add launch attempts; no hard attempt or dollar cap is enforced by this wrapper\n' >&2
-  printf 'absolute p95 runner threshold: %sms in every cohort; per-lease TTL: %s\n' \
+  printf 'absolute p95 runner threshold: %sms for candidate and promoted cohorts; per-lease TTL: %s\n' \
     "$max_p95_runner_total_ms" "$ttl" >&2
 fi
 
 if [[ "$run" != "1" ]]; then
   printf 'dry plan only; add --run to create source/candidate leases and AMIs.\n'
+  trap - EXIT
   exit 0
 fi
 
 if [[ "$measured" == "1" ]]; then
-  umask 077
   effective_config="$(env CRABBOX_AWS_REGION="$region" AWS_REGION="$region" \
     "$CRABBOX_BIN" config show --provider aws --json)"
   if ! jq -e --arg region "$region" \
@@ -876,12 +934,11 @@ if [[ "$measured" == "1" ]]; then
     printf 'measured publication requires a managed admin coordinator, the requested region, and no effective aws.ami override\n' >&2
     exit 2
   fi
-  mkdir -p "$log_dir"
-  measurement_dir="$(mktemp -d "$log_dir/measurement-${log_id}.XXXXXX")"
-  printf '%s\n' "$measurement_policy" >"$measurement_dir/policy.json"
+  outcome_stage="baseline"
   measure_cohort baseline
 fi
 
+outcome_stage="source_prepare"
 source_lease="$(warmup source)"
 stage_linux_readiness_producer "$source_lease"
 run_prep "$source_lease"
@@ -891,6 +948,7 @@ smoke "$source_lease"
 
 image_env=(env)
 [[ -n "$region" ]] && image_env+=(CRABBOX_AWS_REGION="$region" AWS_REGION="$region")
+outcome_stage="candidate_create"
 image_output="$("${image_env[@]}" "$CRABBOX_BIN" checkpoint create \
   --provider aws --target "$target" --id "$source_lease" --name "$image_name" \
   --mode native --strategy image --no-reboot=false --wait --wait-timeout "$wait_timeout")"
@@ -903,9 +961,11 @@ fi
 
 if [[ "$keep_lease" != "1" ]]; then
   run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$source_lease"
+  clear_warmup_handle source
   source_lease=""
 fi
 
+outcome_stage="candidate_smoke"
 candidate_lease="$(warmup candidate "$ami_id")"
 smoke "$candidate_lease"
 printf 'candidate AMI smoke passed: %s\n' "$ami_id"
@@ -916,13 +976,16 @@ fi
 
 if [[ "$keep_lease" != "1" ]]; then
   run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$candidate_lease"
+  clear_warmup_handle candidate
   candidate_lease=""
 fi
 
 if [[ "$measured" == "1" ]]; then
+  outcome_stage="candidate_measure"
   measure_cohort candidate
 fi
 
+outcome_stage="promotion"
 promote_args=(image promote --target "$target" --json --expected-current-image capture)
 [[ -n "$region" ]] && promote_args+=(--region "$region")
 if [[ "$fast_snapshot_restore" == "1" ]]; then
@@ -943,19 +1006,19 @@ if [[ "$measured" == "1" ]]; then
     "$measurement_dir/policy.json" "$measurement_dir/baseline-1.selection.json" "$promotion_log" "$ami_id"
 fi
 
+outcome_stage="promoted_smoke"
 promoted_lease="$(warmup promoted)"
 smoke "$promoted_lease"
 if [[ "$measured" == "1" ]]; then
   run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$promoted_lease"
+  clear_warmup_handle promoted
   promoted_lease=""
+  outcome_stage="promoted_measure"
   measure_cohort promoted
-  node "$ROOT/scripts/devtools-image-proof.mjs" manifest \
-    "$measurement_dir/policy.json" "$measurement_dir" "$promotion_log" "$ami_id" >"$measurement_dir/manifest.pending"
-  mv "$measurement_dir/manifest.pending" "$measurement_dir/manifest.json"
+  outcome_stage="proof"
+  node "$ROOT/scripts/devtools-image-proof.mjs" receipt \
+    "$measurement_dir/policy.json" "$measurement_dir/baseline-1.selection.json" "$promotion_log" "$ami_id"
 fi
-rollback_pending=0
-if [[ "$measured" == "1" ]]; then
-  printf 'public measurement proof: %s\n' "$measurement_dir/manifest.json"
-fi
+outcome_stage="complete"
 printf 'promoted image selection proved: %s\n' "$ami_id"
 printf 'promoted %s developer image passed: %s\n' "$target" "$ami_id"

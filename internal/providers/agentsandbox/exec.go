@@ -23,13 +23,6 @@ func (b *backend) cleanupContext(context.Context) (context.Context, context.Canc
 	return context.WithTimeout(context.Background(), agentSandboxCleanupTimeout)
 }
 
-func (b *backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
-}
-
 func (b *backend) execShell(ctx context.Context, client kubernetesClient, ready sandboxReadiness, command string) error {
 	execCtx, cancel := b.execContext(ctx)
 	defer cancel()

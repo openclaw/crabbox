@@ -301,6 +301,12 @@ commands can read it back:
   The coordinator computes `durationMs`, sets state `succeeded`/`failed`, and records
   classification (`blockedStage`, `retryLikely`).
 
+Coordinator API requests negotiate HTTP/2 over TLS when the server supports it,
+so independent requests can share a connection. HTTP/1 coordinators and the
+HTTP/1 WebSocket upgrade remain supported; both use the coordinator's same-origin
+redirect guard. An ended control owner closes and
+joins its local connection without waiting for a peer close handshake.
+
 The command itself, file sync, and I/O streaming all happen **directly
 CLI → runner over SSH** and never traverse the broker.
 

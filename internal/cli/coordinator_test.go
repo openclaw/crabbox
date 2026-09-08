@@ -293,7 +293,7 @@ func TestCurlConfigKeepsBearerTokenInConfig(t *testing.T) {
 	}
 }
 
-func TestCoordinatorHTTPRejectsCrossOriginRedirect(t *testing.T) {
+func TestCoordinatorRejectsCrossOriginRedirect(t *testing.T) {
 	var redirected atomic.Int32
 	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		redirected.Add(1)
@@ -327,6 +327,13 @@ func TestCoordinatorHTTPRejectsCrossOriginRedirect(t *testing.T) {
 	}
 	if got := redirected.Load(); got != 0 {
 		t.Fatalf("redirect target received %d requests", got)
+	}
+	_, err = dialCoordinatorControl(t.Context(), &client)
+	if err == nil || !strings.Contains(err.Error(), "refused cross-origin redirect") {
+		t.Fatalf("control error=%v, want cross-origin redirect rejection", err)
+	}
+	if got := redirected.Load(); got != 0 {
+		t.Fatalf("control redirect target received %d requests", got)
 	}
 }
 

@@ -2,9 +2,20 @@
 
 ## Unreleased
 
+- Fix truncated GCP lease failures by surfacing bounded API error summaries and preserving quoted JSON diagnostics with credential redaction. [PR 1984](https://github.com/openclaw/crabbox/pull/1984). Thanks @steipete.
+
+- Retain an exact-key sanitized outcome for successful, failed, and incomplete measured AWS image publications, with descriptive baseline evidence, opaque promotion binding, and rollback/cleanup state after finalization. [PR 1986](https://github.com/openclaw/crabbox/pull/1986). Thanks @vincentkoc.
+
+- Fix Azure leases blocked by retained legacy shared-infrastructure fences by verifying settled resources before transactional takeover. [PR 1982](https://github.com/openclaw/crabbox/pull/1982). Thanks @steipete.
+
+- CLI: negotiate HTTP/2 for coordinator API requests, apply the shared redirect guard to control upgrades, and avoid waiting for idle control peers during shutdown. https://github.com/openclaw/crabbox/pull/1985. Thanks @steipete.
+
+- AWS: avoid duplicate access-refresh lookups for ports with matching permissions, index lease access once, and keep unnamed runner/workspace groups separate. https://github.com/openclaw/crabbox/pull/1980. Thanks @steipete.
+
+- Keep failure-capture scratch files outside tested checkouts, bound intermediate archive creation and streamed SSH downloads while preserving existing destinations, and diagnose unknown failures from the recorded run instead of suggesting an unchanged full rerun. https://github.com/openclaw/crabbox/pull/1983. Thanks @vincentkoc.
 - AWS: overlap SSH ingress authorization in bounded batches while preserving revocation, recovery and cleanup ordering. https://github.com/openclaw/crabbox/pull/1976. Thanks @steipete.
 
-- Linux developer images: bake verified Node 24.19.0 and reusable public pnpm 11.22.0/12.3.4 archives, preserve version overrides and operator-owned tool paths across rebakes, enforce the selected nondefault Node major in Linux smoke checks, keep public Yarn aliases untouched on the pinned route, and require nonroot offline toolchain checks before reporting image-smoke success. [PR 1944](https://github.com/openclaw/crabbox/pull/1944). Thanks @vincentkoc.
+- Linux developer images: bake verified Node 24.19.0 and reusable public pnpm 11.22.0/12.3.4 archives, verify an exact native NodeSource package before retiring owned aliases on explicit Node 24-to-22 rebakes, preserve operator-owned tool paths and public Yarn aliases, and enforce the selected Node major and nonroot offline checks before image-smoke success. [PR 1944](https://github.com/openclaw/crabbox/pull/1944). Thanks @vincentkoc.
 - Overlap default-VPC and managed security-group discovery during AWS provisioning while retaining scope validation and joined failure handling. [PR 1974](https://github.com/openclaw/crabbox/pull/1974). Thanks @steipete.
 - Recover lost run-admission responses using a caller-known identity and an atomic initial history record, preserving authenticated request binding and refusing remote command replay. Current clients require a coordinator supporting the new admission route. [PR 1970](https://github.com/openclaw/crabbox/pull/1970), [Issue 1962](https://github.com/openclaw/crabbox/issues/1962). Thanks @steipete.
 - Add bounded AWS provisioning transport diagnostics for credential preparation, signing and SDK request time, including retry-loop signing counts, without changing retry behavior. [PR 1968](https://github.com/openclaw/crabbox/pull/1968). Thanks @steipete.
@@ -12,6 +23,14 @@
 - Enforce controller and coordinator token-command output limits consistently during pipe copying, preserving the existing overflow errors and command deadlines. [PR 1971](https://github.com/openclaw/crabbox/pull/1971).
 - Share byte-prefix storage across command capture, controller responses, and coordinator token helpers while preserving each caller's limits, cancellation, and diagnostics. [PR 1972](https://github.com/openclaw/crabbox/pull/1972).
 - Reuse shared prefix storage for SSH diagnostics and artifact capture while preserving locked, cloned snapshots and truncation visibility. [PR 1973](https://github.com/openclaw/crabbox/pull/1973).
+- Share raw byte-tail storage for Agent Sandbox stderr and Blacksmith proof streams while preserving native exit handling, Actions URL discovery, and cloned snapshots. [PR 1977](https://github.com/openclaw/crabbox/pull/1977). Thanks @steipete.
+- Share service-control run-option validation across FastAPI Cloud, Railway, and Unikraft Cloud while preserving rejection messages, precedence, and refusal before provider access. [PR 1979](https://github.com/openclaw/crabbox/pull/1979). Thanks @steipete.
+
+- Describe CodeSandbox configuration bindings once, preserving defaults, file/environment/flag precedence, validation order, and trusted-only bridge settings. [PR 1988](https://github.com/openclaw/crabbox/pull/1988). Thanks @steipete.
+
+- Describe CUA configuration bindings once, preserving environment/flag-only API URL selection and its alias, trusted-only bridge settings, defaults, and validation order. [PR 1989](https://github.com/openclaw/crabbox/pull/1989). Thanks @steipete.
+
+- Describe OpenSandbox configuration bindings once, preserving CLI-only stale-claim cleanup, environment/flag-only API URL selection, defaults, and validation timing. [PR 1990](https://github.com/openclaw/crabbox/pull/1990). Thanks @steipete.
 
 ## 0.52.0 - 2026-09-07
 

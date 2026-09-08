@@ -1,5 +1,5 @@
 name: Publish Developer Image
-run-name: Publish ${{ inputs.target }} developer image in ${{ inputs.region }}
+run-name: Publish developer image
 
 on:
   workflow_dispatch:
@@ -130,6 +130,25 @@ jobs:
       MEASURED: ${{ inputs.measured }}
       MAX_P95_RUNNER_TOTAL_MS: ${{ inputs.max_p95_runner_total_ms }}
     steps:
+      - name: Check out protected source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Initialize measured publication outcome
+        if: inputs.measured
+        shell: bash
+        run: |
+          set -euo pipefail
+          public_outcome="$RUNNER_TEMP/devtools-image-proof/manifest.json"
+          mkdir -p "$(dirname "$public_outcome")"
+          node scripts/devtools-image-proof.mjs initialize \
+            "$public_outcome" \
+            scripts/install-linux-developer-tools.sh \
+            "$REGION" "$LINUX_TYPE" standard "$MAX_P95_RUNNER_TOTAL_MS" \
+            1 1 1 0 0 2h 30m
+
       - name: Verify publisher configuration
         shell: bash
         run: |
@@ -142,12 +161,6 @@ jobs:
             echo "::error::Set the CRABBOX_COORDINATOR_ADMIN_TOKEN secret on the image-publisher environment."
             exit 1
           fi
-
-      - name: Check out protected source
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          ref: ${{ github.workflow_sha }}
-          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -201,24 +214,29 @@ jobs:
               )
               ;;
           esac
-          printf 'Publishing from protected commit %s\n' "$GITHUB_SHA"
-          printf 'Command:'
-          printf ' %q' "${command[@]}"
-          printf '\n'
           if [[ "$MEASURED" == true ]]; then
             umask 077
             private_dir="$(mktemp -d "$RUNNER_TEMP/devtools-image-private.XXXXXX")"
             export CRABBOX_IMAGE_LOG_DIR="$private_dir"
+            export CRABBOX_IMAGE_PUBLIC_OUTCOME="$proof_dir/manifest.json"
             status=0
             "${command[@]}" >"$private_dir/publish.log" 2>&1 || status=$?
+            proof_status=0
+            node scripts/devtools-image-proof.mjs validate \
+              "$CRABBOX_IMAGE_PUBLIC_OUTCOME" >/dev/null || proof_status=$?
             if [[ "$status" != 0 ]]; then
-              echo "::error::Measured publication failed (exit $status); no private evidence was uploaded."
+              echo "::error::Measured publication failed (exit $status)."
               exit "$status"
             fi
-            manifests=("$private_dir"/measurement-*/manifest.json)
-            [[ "${#manifests[@]}" == 1 && -f "${manifests[0]}" ]]
-            cp "${manifests[0]}" "$proof_dir/manifest.json"
+            if [[ "$proof_status" != 0 ]]; then
+              echo "::error::Measured publication outcome validation failed (exit $proof_status)."
+              exit "$proof_status"
+            fi
           else
+            printf 'Publishing from protected commit %s\n' "$GITHUB_SHA"
+            printf 'Command:'
+            printf ' %q' "${command[@]}"
+            printf '\n'
             "${command[@]}" 2>&1 | tee "$proof_dir/publish.log"
           fi
 
@@ -226,6 +244,30 @@ jobs:
         if: always()
         shell: bash
         run: |
+          if [[ "$MEASURED" == true ]]; then
+            public_outcome="$RUNNER_TEMP/devtools-image-proof/manifest.json"
+            {
+              echo "## Measured developer image publication"
+              echo
+              if node scripts/devtools-image-proof.mjs validate \
+                "$public_outcome" >/dev/null 2>&1; then
+                jq -r '
+                  "- Status: `\(.status)`",
+                  "- Stage: `\(.stage)`",
+                  "- Source revision: `\(.sourceRevision)`",
+                  "- Baseline p95 runner total: `\(.comparison.baselineP95RunnerTotalMs // "unavailable")`",
+                  "- Candidate p95 runner total: `\(.comparison.candidateP95RunnerTotalMs // "unavailable")`",
+                  "- Promoted p95 runner total: `\(.comparison.promotedP95RunnerTotalMs // "unavailable")`",
+                  "- Rollback: `\(.rollbackStatus)`",
+                  "- Cleanup: `\(.cleanupStatus)`",
+                  "- Exit code: `\(.exitCode // "unavailable")`"
+                ' "$public_outcome"
+              else
+                echo '- Status: `outcome_unavailable`'
+              fi
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           {
             echo "## Developer image publication"
             echo
@@ -250,7 +292,7 @@ jobs:
           retention-days: 30
 
       - name: Upload allowlisted measurement manifest
-        if: success() && inputs.measured
+        if: always() && inputs.measured
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: devtools-image-measurement-${{ github.run_id }}
