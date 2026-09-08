@@ -55,7 +55,7 @@ func TestGenerateDeterministicTypedBindings(t *testing.T) {
 
 func TestSchemaFailsClosed(t *testing.T) {
 	for _, tc := range []struct{ name, old, new, want string }{
-		{"source permission", `sources:"user,repo,env,flag"`, `sources:"user,env"`, "explicit sources"},
+		{"source permission", `sources:"user,repo,env,flag"`, `sources:"repo,env"`, "explicit sources"},
 		{"reordered source permission", `sources:"user,repo,env,flag"`, `sources:"env,user,flag"`, "explicit sources"},
 		{"extra source permission", `sources:"user,repo,env,flag"`, `sources:"user,env,flag,secret"`, "explicit sources"},
 		{"repo-only source permission", `sources:"user,repo,env,flag"`, `sources:"repo"`, "explicit sources"},
@@ -424,6 +424,12 @@ func TestCloudflareGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestCloudflareSandboxGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_cloudflare_sandbox.go", "../../internal/cli/config_cloudflare_sandbox_generated.go", "CloudflareSandboxConfig", "cloudflare-sandbox", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -592,10 +598,10 @@ func TestGenerateAppliedAndVisitedBindings(t *testing.T) {
 	}
 	// Keep the existing compile-only helper intact; this fixture supplies its new helper signature.
 	typecheckGenerated(t, appliedSample+"\nfunc firstNonEmptyEnv(...string) (string, bool) { panic(\"stub\") }\n", output)
-	runAppliedFixture(t, output)
+	runAppliedFixture(t, appliedSample, output, "")
 }
 
-func runAppliedFixture(t *testing.T, generated []byte) {
+func runAppliedFixture(t *testing.T, source string, generated []byte, extraTests string) {
 	t.Helper()
 	// Benign in-memory inputs control helper acceptance; no provider or host environment is read.
 	const behavior = `package cli
@@ -642,7 +648,7 @@ func TestAcceptedAssignments(t *testing.T) {
 }
 `
 	dir := t.TempDir()
-	for _, file := range []struct{ name, content string }{{"source.go", appliedSample}, {"generated.go", string(generated)}, {"behavior_test.go", behavior}} {
+	for _, file := range []struct{ name, content string }{{"source.go", source}, {"generated.go", string(generated)}, {"behavior_test.go", behavior + extraTests}} {
 		if err := os.WriteFile(filepath.Join(dir, file.name), []byte(file.content), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -705,7 +711,7 @@ func TestSchemaFileEnvironmentOnlyFailsClosed(t *testing.T) {
 		{"empty alias", `envAlias:"PILOT_ALIAS"`, `envAlias:""`, "invalid env binding"},
 		{"collision", `envAlias:"PILOT_ALIAS"`, `envAlias:"PILOT_INPUT"`, "duplicate env binding"},
 		{"env-only still excludes YAML", `sources:"user,repo,env"`, `sources:"env"`, "absent config tag"},
-		{"different grant", `sources:"user,repo,env"`, `sources:"user,env"`, "explicit sources"},
+		{"different grant", `sources:"user,repo,env"`, `sources:"repo,env"`, "explicit sources"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := parseSchema([]byte(strings.Replace(fileEnvSample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
@@ -759,4 +765,151 @@ func TestGenerateFileEnvironmentOnlyBindings(t *testing.T) {
 		}
 	}
 	typecheckGenerated(t, fileEnvSample+"\nfunc firstNonEmptyEnv(...string) (string, bool) { panic(\"stub\") }\n", output)
+}
+
+func TestSchemaTrustedFileEnvironmentOnly(t *testing.T) {
+	source := strings.Replace(fileEnvSample, `sources:"user,repo,env"`, `sources:"user,env"`, 1)
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := s.fields[0]; !f.noFlag || !f.trustedFileOnly || f.noFile || f.noEnv {
+		t.Fatalf("incorrect trusted source facts: %+v", f)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(output), `if trusted && file.Input != nil && *file.Input != "" {`) || strings.Contains(string(output), "values.Input") {
+		t.Fatal("trusted no-flag emission changed")
+	}
+	typecheckGenerated(t, source+"\nfunc firstNonEmptyEnv(...string) (string, bool) { panic(\"stub\") }\n", output)
+	for _, tag := range []string{"flag", "help", "default"} {
+		for _, value := range []string{"", "binding"} {
+			input := strings.Replace(source, `config:"input"`, `config:"input" `+tag+`:"`+value+`"`, 1)
+			if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "absent "+tag+" tag") {
+				t.Fatalf("contradictory %s=%q: %v", tag, value, err)
+			}
+		}
+	}
+	for _, tag := range []string{`config:"input"`, `env:"PILOT_INPUT"`} {
+		if _, err := parseSchema([]byte(strings.Replace(source, tag, "", 1)), "PilotConfig", "pilot"); err == nil {
+			t.Fatalf("accepted missing binding %s", tag)
+		}
+	}
+	for _, kind := range []string{"bool", "int", "float64", "[]string"} {
+		if _, err := parseSchema([]byte(strings.Replace(source, "Input string", "Input "+kind, 1)), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "user,env sources support only string") {
+			t.Fatalf("accepted kind %s: %v", kind, err)
+		}
+	}
+}
+
+func TestSchemaConfigAliasFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"empty", `help:"Name"`, `help:"Name" configAlias:""`, "invalid config binding"},
+		{"multiple", `help:"Name"`, `help:"Name" configAlias:"one,two"`, "invalid config binding"},
+		{"whitespace", `help:"Name"`, `help:"Name" configAlias:" alias"`, "invalid config binding"},
+		{"own key", `help:"Name"`, `help:"Name" configAlias:"name"`, "duplicate config binding"},
+		{"later key", `help:"Name"`, `help:"Name" configAlias:"count"`, "duplicate config binding"},
+		{"earlier key", `help:"Count"`, `help:"Count" configAlias:"name"`, "duplicate config binding"},
+		{"integer", `help:"Count"`, `help:"Count" configAlias:"another"`, "configAlias requires a string"},
+		{"float", `help:"CPUs"`, `help:"CPUs" configAlias:"another"`, "configAlias requires a string"},
+		{"boolean", `help:"Enabled"`, `help:"Enabled" configAlias:"another"`, "configAlias requires a string"},
+		{"list", `help:"Ports"`, `help:"Ports" configAlias:"another"`, "configAlias requires a string"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(sample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+	for _, source := range []string{
+		strings.Replace(flagOnlySample, `help:"Name"`, `help:"Name" configAlias:"alias"`, 1),
+		strings.Replace(appliedSample, `sources:"env"`, `sources:"env" configAlias:"alias"`, 1),
+	} {
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "configAlias requires a string field with a file source") {
+			t.Fatalf("alias without file: %v", err)
+		}
+	}
+	first := " Name string `config:\"name\" configAlias:\"alias\" env:\"NAME\" flag:\"name\" sources:\"user,repo,env,flag\" help:\"Name\"`\n"
+	for _, second := range []string{
+		" Other string `config:\"other\" configAlias:\"alias\" env:\"OTHER\" flag:\"other\" sources:\"user,repo,env,flag\" help:\"Other\"`\n",
+		" NameConfigAlias string `config:\"other\" env:\"OTHER\" flag:\"other\" sources:\"user,repo,env,flag\" help:\"Other\"`\n",
+	} {
+		for _, fields := range []string{first + second, second + first} {
+			_, err := parseSchema([]byte("package cli\ntype PilotConfig struct {\n"+fields+"}"), "PilotConfig", "pilot")
+			if err == nil || !(strings.Contains(err.Error(), "duplicate config binding") || strings.Contains(err.Error(), "duplicate generated file member")) {
+				t.Fatalf("missing collision rejection: %v", err)
+			}
+		}
+	}
+	// Runtime-only members do not collide with an alias in the separate file struct.
+	outside := " NameConfigAlias string `env:\"OTHER\" sources:\"env\"`\n"
+	if _, err := parseSchema([]byte("package cli\ntype PilotConfig struct {\n"+first+outside+"}"), "PilotConfig", "pilot"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGenerateOrderedConfigAlias(t *testing.T) {
+	source := strings.Replace(appliedSample, `config:"name"`, `config:"name" configAlias:"nickname"`, 1)
+	source = strings.Replace(source, `config:"tail"`, `config:"tail" configAlias:"other"`, 1)
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic alias output: %v", err)
+	}
+	if !strings.Contains(string(output), "NameConfigAlias") || !strings.Contains(string(output), "yaml:\"nickname,omitempty\"") {
+		t.Fatal("missing generated alias member")
+	}
+	plain, err := parseSchema([]byte(appliedSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := generate(plain, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{"func defaultPilotConfig()", "func (cfg *PilotConfig) applyEnv()"} {
+		old := strings.SplitN(string(before), marker, 2)[1]
+		current := strings.SplitN(string(output), marker, 2)[1]
+		if marker == "func defaultPilotConfig()" {
+			old = strings.SplitN(old, "// PilotConfigApplied", 2)[0]
+			current = strings.SplitN(current, "// PilotConfigApplied", 2)[0]
+		}
+		if old != current {
+			t.Fatalf("file alias changed non-file bindings after %s", marker)
+		}
+	}
+	typecheckGenerated(t, source+"\nfunc firstNonEmptyEnv(...string) (string, bool) { panic(\"stub\") }\n", output)
+	runAppliedFixture(t, source, output, `
+func TestOrderedAliases(t *testing.T) {
+ primary, alias, empty, whitespace, later := "primary", "alias", "", " ", "later"
+ bad := -1
+ for _, tc := range []struct{ name string; file filePilotConfig; trusted bool; nameWant, tailWant string; nameBit, tailBit bool }{
+  {"primary", filePilotConfig{Name:&primary,Tail:&primary}, true, "primary","primary",true,true},
+  {"alias", filePilotConfig{NameConfigAlias:&alias,TailConfigAlias:&alias}, true,"alias","alias",true,true},
+  {"both", filePilotConfig{Name:&primary,NameConfigAlias:&alias,Tail:&primary,TailConfigAlias:&alias},true,"alias","alias",true,true},
+  {"reverse initializer order", filePilotConfig{TailConfigAlias:&alias,Tail:&primary,NameConfigAlias:&alias,Name:&primary},true,"alias","alias",true,true},
+  {"null alias", filePilotConfig{Name:&primary,NameConfigAlias:nil,Tail:&primary,TailConfigAlias:nil},true,"primary","primary",true,true},
+  {"empty alias", filePilotConfig{Name:&primary,NameConfigAlias:&empty,Tail:&primary,TailConfigAlias:&empty},true,"primary","",true,true},
+  {"ignored empty alias", filePilotConfig{NameConfigAlias:&empty},true,"prior","prior",false,false},
+  {"whitespace alias", filePilotConfig{NameConfigAlias:&whitespace,TailConfigAlias:&whitespace},true," "," ",true,true},
+  {"untrusted", filePilotConfig{Name:&primary,NameConfigAlias:&alias,Tail:&primary,TailConfigAlias:&alias},false,"prior","alias",false,true},
+ } {
+  cfg := PilotConfig{Name:"prior",Tail:"prior"}; got, err := cfg.applyFile(&tc.file,tc.trusted)
+  if err != nil || cfg.Name != tc.nameWant || cfg.Tail != tc.tailWant || got.Name != tc.nameBit || got.Tail != tc.tailBit { t.Fatalf("%s: %+v %+v %v",tc.name,got,cfg,err) }
+ }
+ cfg := PilotConfig{Name:"prior",Tail:"prior",Count:8}
+ got, err := cfg.applyFile(&filePilotConfig{Name:&primary,NameConfigAlias:&alias,Count:&bad,TailConfigAlias:&later},true)
+ if err == nil || cfg.Name != "alias" || cfg.Count != 8 || cfg.Tail != "prior" || !got.Name || got.Tail { t.Fatalf("partial alias: %+v %+v %v",got,cfg,err) }
+}
+`)
 }

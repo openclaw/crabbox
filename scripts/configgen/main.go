@@ -19,8 +19,23 @@ import (
 )
 
 type field struct {
-	name, kind, key, env, envAlias, flag, help, defaultExpr                             string
+	name, kind, key, configAlias, env, envAlias, flag, help, defaultExpr                string
 	nonnegative, trustedFileOnly, noFile, noEnv, noFlag, fileIgnoreEmpty, reportApplied bool
+}
+
+type fileBinding struct {
+	member, key string
+}
+
+func (f field) fileBindings() []fileBinding {
+	if f.noFile {
+		return nil
+	}
+	bindings := []fileBinding{{f.name, f.key}}
+	if f.configAlias != "" {
+		bindings = append(bindings, fileBinding{f.name + "ConfigAlias", f.configAlias})
+	}
+	return bindings
 }
 
 type schema struct {
@@ -95,6 +110,7 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		return s, fmt.Errorf("config type %s not found", name)
 	}
 	seen := map[string]bool{}
+	seenFileMembers := map[string]bool{}
 	for _, node := range fields.List {
 		if len(node.Names) != 1 || !node.Names[0].IsExported() || node.Tag == nil {
 			return s, fmt.Errorf("each config field must be singly named, exported, and tagged")
@@ -116,11 +132,12 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			if _, ok := tags.Lookup("config"); ok {
 				return s, fmt.Errorf("%s: env,flag sources require an absent config tag", f.name)
 			}
-		case "user,repo,env":
+		case "user,repo,env", "user,env":
 			f.noFlag = true
+			f.trustedFileOnly = tags.Get("sources") == "user,env"
 			for _, tag := range []string{"flag", "help", "default"} {
 				if _, ok := tags.Lookup(tag); ok {
-					return s, fmt.Errorf("%s: user,repo,env sources require an absent %s tag", f.name, tag)
+					return s, fmt.Errorf("%s: %s sources require an absent %s tag", f.name, tags.Get("sources"), tag)
 				}
 			}
 		case "env":
@@ -138,7 +155,7 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 				}
 			}
 		default:
-			return s, fmt.Errorf("%s requires explicit sources user,repo,env,flag, user,env,flag, env,flag, flag, env, or user,repo,env", f.name)
+			return s, fmt.Errorf("%s requires explicit sources user,repo,env,flag, user,env,flag, env,flag, flag, env, user,repo,env, or user,env", f.name)
 		}
 		var bindings []struct{ label, value string }
 		if !f.noFlag {
@@ -154,6 +171,11 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		if hasAlias {
 			f.envAlias = alias
 			bindings = append(bindings, struct{ label, value string }{"env", alias})
+		}
+		configAlias, hasConfigAlias := tags.Lookup("configAlias")
+		if hasConfigAlias {
+			f.configAlias = configAlias
+			bindings = append(bindings, struct{ label, value string }{"config", configAlias})
 		}
 		for _, binding := range bindings {
 			if binding.value == "" || strings.ContainsAny(binding.value, " \t\n,\"`") {
@@ -177,6 +199,15 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		case "string", "int", "float64", "bool", "[]string":
 		default:
 			return s, fmt.Errorf("%s: unsupported config type %s", f.name, f.kind)
+		}
+		if hasConfigAlias && (f.kind != "string" || f.noFile) {
+			return s, fmt.Errorf("%s: configAlias requires a string field with a file source", f.name)
+		}
+		for _, binding := range f.fileBindings() {
+			if seenFileMembers[binding.member] {
+				return s, fmt.Errorf("duplicate generated file member %s", binding.member)
+			}
+			seenFileMembers[binding.member] = true
 		}
 		if f.noFlag && f.kind != "string" {
 			return s, fmt.Errorf("%s: %s sources support only string fields", f.name, tags.Get("sources"))
@@ -263,10 +294,9 @@ func generate(s schema, source string) ([]byte, error) {
 	p(")\n\n")
 	p("type file%s struct {\n", s.name)
 	for _, f := range s.fields {
-		if f.noFile {
-			continue
+		for _, binding := range f.fileBindings() {
+			p("%s *%s `yaml:%q`\n", binding.member, f.kind, binding.key+",omitempty")
 		}
-		p("%s *%s `yaml:%q`\n", f.name, f.kind, f.key+",omitempty")
 	}
 	p("}\n\n")
 	for _, f := range s.fields {
@@ -308,30 +338,29 @@ func generate(s schema, source string) ([]byte, error) {
 	}
 	p("func (cfg *%s) applyFile(file *file%s%s) %s {\n%sif file == nil { return %snil }\n", s.name, s.name, trustedParameter, resultType, reportInit, resultPrefix)
 	for _, f := range s.fields {
-		if f.noFile {
-			continue
+		for _, binding := range f.fileBindings() {
+			condition := ""
+			if f.trustedFileOnly {
+				condition = "trusted && "
+			}
+			fileCondition := fmt.Sprintf("%sfile.%s != nil", condition, binding.member)
+			if f.fileIgnoreEmpty {
+				fileCondition += fmt.Sprintf(" && *file.%s != \"\"", binding.member)
+			}
+			p("if %s {\n", fileCondition)
+			if f.nonnegative {
+				p("if *file.%s < 0 { return %sexit(2, %q) }\n", binding.member, resultPrefix, s.provider+" "+f.key+" must be non-negative")
+			}
+			value := "*file." + binding.member
+			if f.kind == "[]string" {
+				value = "normalizeList(" + value + ")"
+			}
+			p("cfg.%s = %s\n", f.name, value)
+			if f.reportApplied {
+				p("applied.%s = true\n", f.name)
+			}
+			p("}\n")
 		}
-		condition := ""
-		if f.trustedFileOnly {
-			condition = "trusted && "
-		}
-		fileCondition := fmt.Sprintf("%sfile.%s != nil", condition, f.name)
-		if f.fileIgnoreEmpty {
-			fileCondition += fmt.Sprintf(" && *file.%s != \"\"", f.name)
-		}
-		p("if %s {\n", fileCondition)
-		if f.nonnegative {
-			p("if *file.%s < 0 { return %sexit(2, %q) }\n", f.name, resultPrefix, s.provider+" "+f.key+" must be non-negative")
-		}
-		value := "*file." + f.name
-		if f.kind == "[]string" {
-			value = "normalizeList(" + value + ")"
-		}
-		p("cfg.%s = %s\n", f.name, value)
-		if f.reportApplied {
-			p("applied.%s = true\n", f.name)
-		}
-		p("}\n")
 	}
 	p("return %snil\n}\n\n", resultPrefix)
 	p("func (cfg *%s) applyEnv() %s {\n%s", s.name, resultType, reportInit)

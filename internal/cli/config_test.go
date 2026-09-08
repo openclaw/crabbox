@@ -5495,6 +5495,132 @@ func TestBlaxelConfigRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+func TestCloudflareSandboxOrderedFileAliasAndPresence(t *testing.T) {
+	for _, trusted := range []bool{false, true} {
+		for _, tc := range []struct{ name, body, wantURL string }{
+			{"omitted", "", "https://example.invalid/prior"},
+			{"primary", "  bridgeUrl: https://example.invalid/primary\n", "https://example.invalid/primary"},
+			{"alias", "  url: https://example.invalid/alias\n", "https://example.invalid/alias"},
+			{"both", "  bridgeUrl: https://example.invalid/primary\n  url: https://example.invalid/alias\n", "https://example.invalid/alias"},
+			{"reversed", "  url: https://example.invalid/alias\n  bridgeUrl: https://example.invalid/primary\n", "https://example.invalid/alias"},
+			{"alias empty", "  bridgeUrl: https://example.invalid/primary\n  url: ''\n", ""},
+			{"alias null", "  bridgeUrl: https://example.invalid/primary\n  url: null\n", "https://example.invalid/primary"},
+			{"whitespace", "  bridgeUrl: https://example.invalid/primary\n  url: '  '\n", "  "},
+		} {
+			t.Run(fmt.Sprintf("trusted=%t/%s", trusted, tc.name), func(t *testing.T) {
+				cfg := baseConfig()
+				cfg.CloudflareSandbox = CloudflareSandboxConfig{BridgeURL: "https://example.invalid/prior", Token: "inert", Workdir: "/workspace/prior", ExecTimeoutSecs: 12, ForgetMissing: true}
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte("cloudflareSandbox:\n"+tc.body+"  token: ''\n  workdir: ''\n  execTimeoutSecs: 0\n  forgetMissing: false\n"), &file); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				want := CloudflareSandboxConfig{BridgeURL: tc.wantURL}
+				if !trusted {
+					want.BridgeURL, want.Token = "https://example.invalid/prior", "inert"
+				}
+				if cfg.CloudflareSandbox != want {
+					t.Fatalf("file aliases/presence changed trusted=%t case=%s", trusted, tc.name)
+				}
+			})
+		}
+	}
+	cfg := baseConfig()
+	before := cfg.CloudflareSandbox
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("cloudflareSandbox: {bridgeUrl: null, url: null, token: null, workdir: null, execTimeoutSecs: null, forgetMissing: null}"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfigWithTrust(&cfg, file, true); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareSandbox != before {
+		t.Fatal("null fields changed config")
+	}
+}
+
+func TestCloudflareSandboxOverlayPartialErrorOrder(t *testing.T) {
+	for _, source := range []string{"file", "env"} {
+		for _, raw := range []string{"-1", "invalid", "0"} {
+			if source == "file" && raw == "invalid" {
+				continue
+			}
+			t.Run(source+"/"+raw, func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := baseConfig()
+				cfg.CloudflareSandbox = CloudflareSandboxConfig{BridgeURL: "https://example.invalid/prior", Token: "inert", Workdir: "/workspace/prior", ExecTimeoutSecs: 12, ForgetMissing: true}
+				var err error
+				if source == "file" {
+					var file fileConfig
+					if err := yaml.Unmarshal([]byte("cloudflareSandbox:\n  bridgeUrl: https://example.invalid/primary\n  url: https://example.invalid/after\n  token: inert-after\n  workdir: /workspace/after\n  execTimeoutSecs: "+raw+"\n  forgetMissing: false\n"), &file); err != nil {
+						t.Fatal(err)
+					}
+					err = applyFileConfigWithTrust(&cfg, file, true)
+				} else {
+					t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_URL", "https://example.invalid/after")
+					t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_TOKEN", "inert-after")
+					t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_WORKDIR", "/workspace/after")
+					t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_EXEC_TIMEOUT_SECS", raw)
+					t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_FORGET_MISSING", "false")
+					err = applyEnv(&cfg)
+				}
+				want := CloudflareSandboxConfig{BridgeURL: "https://example.invalid/after", Token: "inert-after", Workdir: "/workspace/after"}
+				if raw != "0" {
+					want.ForgetMissing = true
+					if source == "file" {
+						want.ExecTimeoutSecs = 12
+					}
+					message := "cloudflare-sandbox execTimeoutSecs must be non-negative"
+					if source == "env" {
+						message = "CRABBOX_CLOUDFLARE_SANDBOX_EXEC_TIMEOUT_SECS must be non-negative"
+						if raw == "invalid" {
+							message = "CRABBOX_CLOUDFLARE_SANDBOX_EXEC_TIMEOUT_SECS must be an integer"
+						}
+					}
+					if err == nil || err.Error() != message {
+						t.Fatalf("error=%v want=%s", err, message)
+					}
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				if cfg.CloudflareSandbox != want {
+					t.Fatal("overlay partial mutation order changed")
+				}
+			})
+		}
+	}
+}
+
+func TestCloudflareSandboxEmptyEnvironmentAndBooleanFallback(t *testing.T) {
+	for _, prior := range []bool{false, true} {
+		for _, raw := range []string{"", "invalid", "no", "yes"} {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_URL", "")
+			t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_TOKEN", "")
+			t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_WORKDIR", "")
+			t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_EXEC_TIMEOUT_SECS", "")
+			t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_FORGET_MISSING", raw)
+			cfg := baseConfig()
+			cfg.CloudflareSandbox = CloudflareSandboxConfig{BridgeURL: "https://example.invalid/prior", Token: "inert", Workdir: "/workspace/prior", ExecTimeoutSecs: 12, ForgetMissing: prior}
+			want := cfg.CloudflareSandbox
+			if raw == "no" {
+				want.ForgetMissing = false
+			}
+			if raw == "yes" {
+				want.ForgetMissing = true
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.CloudflareSandbox != want {
+				t.Fatalf("empty environment or boolean fallback changed raw=%q prior=%t", raw, prior)
+			}
+		}
+	}
+}
+
 func TestCloudflareSandboxConfigDefaultsYAMLAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()

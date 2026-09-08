@@ -1,15 +1,16 @@
 # Typed provider config bindings
 
 Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
-Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, and Cloudflare's container
-runner describe their mechanical config bindings
+Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
+runner, and Cloudflare Sandbox describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
 `internal/cli/config_opensandbox.go`,
 `internal/cli/config_anthropic_sandbox_runtime.go`,
 `internal/cli/config_cloud_run_sandbox.go`,
 `internal/cli/config_fastapi_cloud.go`, `internal/cli/config_railway.go`,
-`internal/cli/config_upstash_box.go`, and `internal/cli/config_cloudflare.go`.
+`internal/cli/config_upstash_box.go`, `internal/cli/config_cloudflare.go`, and
+`internal/cli/config_cloudflare_sandbox.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -58,6 +59,9 @@ machine-specific paths. Its header identifies the generator and source file.
    uses existing file predicates and applied reports without adding a flag or
    changing trust policy. This grant does not permit a file input on an
    environment-only field.
+   A trusted-file/environment string without a flag uses the exact
+   `sources:"user,env"` grant with the same absent flag/help/default requirement;
+   its file assignment uses the loader's existing trusted decision.
    There is no implicit source grant. An optional `default` tag supplies a scalar default checked
    against the field type; otherwise the Go zero value applies. Current integer
    fields require `nonnegative:"true"` for eager file/environment validation.
@@ -72,6 +76,11 @@ machine-specific paths. Its header identifies the generator and source file.
    Use `reportApplied:"true"` only on string/bool fields whose accepted-input
    events are needed by an existing handwritten policy. See the report boundary
    below; this is not a new source grant.
+   A file-admitted string can declare one `configAlias` YAML key. Its assignment
+   follows the primary immediately, using the same trust and empty-value rules,
+   regardless of document order. An accepted alias sets the same opted-in report
+   bit. YAML names and generated input member names must not collide. This does
+   not add environment aliases, flags, alternate parsing, or alias-specific policy.
 3. Keep semantic and cross-field checks in the provider's
    validation function. Wire actual provider behavior there or in its
    existing client code as appropriate. Config presentation remains explicit in
@@ -79,7 +88,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -233,10 +242,20 @@ normalization still precedes flag-value assertion, and URL/token/type validation
 remains deferred to the client. The Go workdir fallback uses the generated
 constant. The bundled Worker's omitted-field HTTP defaults remain a separate
 protocol contract because the Go client supplies its resolved workdir explicitly.
-This migration does not include the distinct Cloudflare Sandbox provider or its
-ordered YAML aliases.
+The distinct Cloudflare Sandbox provider keeps its own declaration and rules.
 
-The generator accepts only these six exact source grants. Credential handling,
+Cloudflare Sandbox's five fields include six YAML inputs: trusted `bridgeUrl`
+followed by its trusted `url` alias, an optional trusted token without a flag,
+and ordinary workdir, timeout, and forget-missing values. Explicit alias empty
+overrides the primary; null/omission does not. All allowed strings retain
+presence-based clearing. File/env timeout errors retain earlier mutations and
+precede later boolean application. No provenance report is added where the
+provider had none. Validation order, optional authentication, timeout zero,
+raw create workdir, and the dedicated `/workspace` descendant rule are unchanged.
+Only the Go workdir fallback shares the generated default; external bridge and
+bundled Worker protocol defaults remain separate.
+
+The generator accepts only these seven exact source grants. Credential handling,
 destination validation and provenance, provider aliases, and provider selection
 policy stay handwritten. A declared environment alias copies the existing string
 fallback only; it does not define credential forwarding or destination authority.

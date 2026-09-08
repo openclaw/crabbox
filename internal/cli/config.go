@@ -957,17 +957,6 @@ type BlaxelConfig struct {
 	ForgetMissing   bool
 }
 
-// CloudflareSandboxConfig configures the delegated Cloudflare Sandbox bridge
-// provider. The token may be loaded from trusted user config or environment,
-// but it is never exposed as a CLI flag and must be redacted in display output.
-type CloudflareSandboxConfig struct {
-	BridgeURL       string
-	Token           string
-	Workdir         string
-	ExecTimeoutSecs int
-	ForgetMissing   bool
-}
-
 // SuperserveConfig configures the delegated Superserve provider. The API key is
 // intentionally absent: it is read at runtime from
 // CRABBOX_SUPERSERVE_API_KEY / SUPERSERVE_API_KEY and sent only in request
@@ -2951,11 +2940,8 @@ func baseConfig() Config {
 			Workdir:         "/workspace/crabbox",
 			ExecTimeoutSecs: 600,
 		},
-		VercelSandbox: defaultVercelSandboxConfig(),
-		CloudflareSandbox: CloudflareSandboxConfig{
-			Workdir:         "/workspace/crabbox",
-			ExecTimeoutSecs: 600,
-		},
+		VercelSandbox:     defaultVercelSandboxConfig(),
+		CloudflareSandbox: defaultCloudflareSandboxConfig(),
 		Superserve: SuperserveConfig{
 			BaseURL:         "https://api.superserve.ai",
 			Template:        "superserve/base",
@@ -3990,15 +3976,6 @@ type fileBlaxelConfig struct {
 	ForgetMissing   *bool   `yaml:"forgetMissing,omitempty"`
 }
 
-type fileCloudflareSandboxConfig struct {
-	BridgeURL       *string `yaml:"bridgeUrl,omitempty"`
-	URL             *string `yaml:"url,omitempty"`
-	Token           *string `yaml:"token,omitempty"`
-	Workdir         *string `yaml:"workdir,omitempty"`
-	ExecTimeoutSecs *int    `yaml:"execTimeoutSecs,omitempty"`
-	ForgetMissing   *bool   `yaml:"forgetMissing,omitempty"`
-}
-
 type fileSuperserveConfig struct {
 	BaseURL         string   `yaml:"baseUrl,omitempty"`
 	Template        *string  `yaml:"template,omitempty"`
@@ -4075,26 +4052,6 @@ func applyOptional[T any](target, value *T) {
 	if value != nil {
 		*target = *value
 	}
-}
-
-func applyCloudflareSandboxFileConfig(cfg *Config, file *fileCloudflareSandboxConfig, trusted bool) error {
-	if file == nil {
-		return nil
-	}
-	if trusted {
-		applyOptional(&cfg.CloudflareSandbox.BridgeURL, file.BridgeURL)
-		applyOptional(&cfg.CloudflareSandbox.BridgeURL, file.URL)
-		applyOptional(&cfg.CloudflareSandbox.Token, file.Token)
-	}
-	applyOptional(&cfg.CloudflareSandbox.Workdir, file.Workdir)
-	if file.ExecTimeoutSecs != nil {
-		if *file.ExecTimeoutSecs < 0 {
-			return exit(2, "cloudflare-sandbox execTimeoutSecs must be non-negative")
-		}
-		cfg.CloudflareSandbox.ExecTimeoutSecs = *file.ExecTimeoutSecs
-	}
-	applyOptional(&cfg.CloudflareSandbox.ForgetMissing, file.ForgetMissing)
-	return nil
 }
 
 func applyCloudflareDynamicWorkersFileConfig(cfg *Config, file *fileCloudflareDynamicWorkersConfig, trusted bool) {
@@ -6825,7 +6782,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if err := applyCloudflareSandboxFileConfig(cfg, file.CloudflareSandbox, trusted); err != nil {
+	if err := cfg.CloudflareSandbox.applyFile(file.CloudflareSandbox, trusted); err != nil {
 		return err
 	}
 	applyCloudflareDynamicWorkersFileConfig(cfg, file.CloudflareDynamicWorkers, trusted)
@@ -8618,15 +8575,8 @@ func applyEnv(cfg *Config) error {
 	if err := cfg.VercelSandbox.applyEnv(); err != nil {
 		return err
 	}
-	cfg.CloudflareSandbox.BridgeURL = getenv("CRABBOX_CLOUDFLARE_SANDBOX_URL", cfg.CloudflareSandbox.BridgeURL)
-	cfg.CloudflareSandbox.Token = getenv("CRABBOX_CLOUDFLARE_SANDBOX_TOKEN", cfg.CloudflareSandbox.Token)
-	cfg.CloudflareSandbox.Workdir = getenv("CRABBOX_CLOUDFLARE_SANDBOX_WORKDIR", cfg.CloudflareSandbox.Workdir)
-	cfg.CloudflareSandbox.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CLOUDFLARE_SANDBOX_EXEC_TIMEOUT_SECS", cfg.CloudflareSandbox.ExecTimeoutSecs)
-	if err != nil {
+	if err := cfg.CloudflareSandbox.applyEnv(); err != nil {
 		return err
-	}
-	if v, ok := getenvBool("CRABBOX_CLOUDFLARE_SANDBOX_FORGET_MISSING"); ok {
-		cfg.CloudflareSandbox.ForgetMissing = v
 	}
 	cfg.Superserve.BaseURL = getenv("CRABBOX_SUPERSERVE_BASE_URL", getenv("SUPERSERVE_BASE_URL", cfg.Superserve.BaseURL))
 	cfg.Superserve.Template = getenv("CRABBOX_SUPERSERVE_TEMPLATE", cfg.Superserve.Template)
