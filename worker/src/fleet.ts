@@ -3167,30 +3167,63 @@ export class FleetCoordinator {
     forwardedAdminGrantVersion?: string,
     preserveForwardedVersion = false,
   ): Promise<void> {
+    const started = Date.now();
+    let previous = started;
+    const phases: Record<string, number> = {};
+    const mark = (phase: string) => {
+      const now = Date.now();
+      phases[phase] = now - previous;
+      previous = now;
+    };
     if (!(await this.restoredBridgesReady())) {
       throw new Error("restored bridge lease state is temporarily unavailable");
     }
+    mark("bridges");
     await this.reconcileScheduledAdminGrants(forwardedAdminGrantVersion, preserveForwardedVersion);
+    mark("grants");
     await this.quarantineLegacyWorkspaces();
+    mark("quarantine");
     await this.reconcileInterruptedLeaseProvisioning();
+    mark("provisioning");
     await this.expireLeases();
+    mark("expiry");
     await this.webVNCCredentialHandoffs.cleanupExpired();
+    mark("handoffs");
     await this.cleanupExpiredWebVNCPortalViewerAuth();
+    mark("viewer-auth");
     await this.reconcileRuntimeAdapterDeletes();
+    mark("adapter-deletes");
     await this.withReadyPoolBorrowLock(() =>
       this.state.runExclusive(() => this.maintainReadyPools(Date.now())),
     );
+    mark("ready-pools");
     await this.maintainWorkspacePrewarm();
+    mark("prewarm-before");
     await this.provisionPendingWorkspace();
+    mark("workspace-provisioning");
     await this.maintainWorkspacePrewarm();
+    mark("prewarm-after");
     await this.pruneTerminalWorkspaces();
+    mark("workspace-prune");
     await this.pruneTerminalRuns();
+    mark("run-prune");
     await this.maintainCheckpoints();
+    mark("checkpoints");
     await this.runAzureDeferredCleanups();
+    mark("azure-cleanup");
     await this.runAWSOrphanSweepIfDue("alarm");
+    mark("aws-orphans");
     await this.runAzureOrphanSweepIfDue("alarm");
+    mark("azure-orphans");
     await this.reconcileAWSIngressIfIdle();
+    mark("ingress");
     await this.state.runExclusive(() => this.scheduleAlarm());
+    mark("schedule");
+    if (previous - started >= 1000) {
+      console.info(
+        JSON.stringify({ component: "crabbox_maintenance", totalMs: previous - started, phases }),
+      );
+    }
   }
 
   private async scheduledMaintenance(request: Request): Promise<Response> {
