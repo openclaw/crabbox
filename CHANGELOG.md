@@ -6,7 +6,7 @@
 
 - Describe Anthropic Sandbox Runtime configuration bindings once, preserving inherited binary paths for empty YAML, explicit settings/debug clearing, and native runtime defaults. [PR 1993](https://github.com/openclaw/crabbox/pull/1993). Thanks @steipete.
 - Linux developer images: bake verified Node 24.19.0 and reusable public pnpm 11.22.0/12.3.4 archives, verify an exact native NodeSource package before retiring owned aliases on explicit Node 24-to-22 rebakes, preserve operator-owned tool paths and public Yarn aliases, and enforce the selected Node major and nonroot offline checks before image-smoke success. [PR 1944](https://github.com/openclaw/crabbox/pull/1944). Thanks @vincentkoc.
-- Prepare pending lease identities once per maintenance pass and reject commands on confirmed-deleted coordinator leases before SSH setup, avoiding repeated history scans and long recovery waits. Thanks @steipete.
+- Prepare pending lease identities once per maintenance pass and reject commands on confirmed-deleted coordinator leases before SSH setup, avoiding repeated history scans and long recovery waits. [PR 2001](https://github.com/openclaw/crabbox/pull/2001). Thanks @steipete.
 - Reduce coordinator maintenance work for large lease histories by selecting bridge cleanup from live owners and existing records, and limiting pool and provisioning lookups to relevant leases. [PR 1997](https://github.com/openclaw/crabbox/pull/1997). Thanks @steipete.
 - Retry an exact coordinator lease read once on HTTP 5xx during run preparation, sharing the original deadline without replaying SSH, scripts, or permanent failures. [PR 1999](https://github.com/openclaw/crabbox/pull/1999).
 
