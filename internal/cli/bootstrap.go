@@ -279,7 +279,7 @@ APT
 rm -rf /var/lib/apt/lists/*
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl git jq python3-minimal rsync
-` + sharedWslTruffleHogInstall() + `cat >/usr/local/bin/crabbox-ready <<'READY'
+` + sharedLinuxNodeInstall() + sharedWslTruffleHogInstall() + `cat >/usr/local/bin/crabbox-ready <<'READY'
 #!/usr/bin/env bash
 set -euo pipefail
 git --version >/dev/null
@@ -288,6 +288,8 @@ rsync --version >/dev/null
 curl --version >/dev/null
 jq --version >/dev/null
 trufflehog --no-update --version >/dev/null
+node --version >/dev/null
+npm --version >/dev/null
 wslpath -w ` + shellQuote(workRoot) + ` >/dev/null
 test -w ` + shellQuote(workRoot) + `
 READY

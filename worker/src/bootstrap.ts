@@ -1,5 +1,6 @@
 import {
   sharedLinuxSSHRestart,
+  sharedLinuxNodeInstall,
   sharedGnomeDesktopTheme,
   sharedWslTruffleHogInstall,
   sharedWindowsHeader,
@@ -373,7 +374,7 @@ APT
 rm -rf /var/lib/apt/lists/*
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl git rsync jq tmux
-${sharedWslTruffleHogInstall()}if [ -d /proc/sys/fs/binfmt_misc ]; then
+${sharedLinuxNodeInstall()}${sharedWslTruffleHogInstall()}if [ -d /proc/sys/fs/binfmt_misc ]; then
   if [ ! -e /proc/sys/fs/binfmt_misc/register ]; then
     mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
   fi
@@ -393,6 +394,8 @@ rsync --version >/dev/null
 curl --version >/dev/null
 jq --version >/dev/null
 trufflehog --no-update --version >/dev/null
+node --version >/dev/null
+npm --version >/dev/null
 test -e /proc/sys/fs/binfmt_misc/WSLInterop
 test -w ${shellQuote(workRoot)}
 READY

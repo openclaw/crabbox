@@ -904,6 +904,35 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 	}
 }
 
+func TestManagedWindowsWSL2BootstrapInstallsNodeBeforeReadiness(t *testing.T) {
+	for _, mode := range []string{windowsModeNormal, windowsModeWSL2} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.TargetOS, cfg.WindowsMode = targetWindows, mode
+			script := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+			install := "bash /var/lib/crabbox/install-linux-developer-tools.sh --node-only"
+			if mode == windowsModeNormal {
+				if strings.Contains(script, install) {
+					t.Fatal("native Windows unexpectedly installs a Linux runtime")
+				}
+				return
+			}
+			setupStart := strings.Index(script, "$linuxSetup = @'")
+			installIndex := strings.Index(script, install)
+			readyIndex := strings.Index(script, "cat >/usr/local/bin/crabbox-ready <<'READY'")
+			if setupStart < 0 || installIndex <= setupStart || readyIndex <= installIndex {
+				t.Fatal("WSL distro must install the shared Node baseline before readiness")
+			}
+			ready := script[readyIndex:]
+			for _, probe := range []string{"node --version >/dev/null", "npm --version >/dev/null"} {
+				if !strings.Contains(ready, probe) {
+					t.Errorf("WSL readiness missing %s", probe)
+				}
+			}
+		})
+	}
+}
+
 func TestManagedWindowsWSL2BootstrapOwnsDistroInitialization(t *testing.T) {
 	for _, mode := range []string{windowsModeNormal, windowsModeWSL2} {
 		t.Run(mode, func(t *testing.T) {

@@ -379,6 +379,10 @@ scripts/mint-aws-devtools-image.sh \
   `python3-venv`). The standalone generated readiness producer verifies every
   functional probe, including creating and checking a disposable pip-enabled
   virtual environment, before atomically emitting the strongest supported profile.
+- **Managed WSL2 distro bootstrap**: the Linux installer's `--node-only` entrypoint
+  provides the same Node/npm baseline (checksum-pinned Node 24.19.0 on amd64).
+  It skips image-only Docker, Go, browser/desktop setup, pnpm activation, and the
+  offline pnpm archives; see [AWS targets](../providers/aws.md#targets).
 - **Windows** (`scripts/install-windows-developer-tools.ps1`): common CLI/build
   tooling, GitHub CLI, Node 24, corepack/pnpm, TruffleHog 3.95.9, and Windows
   Server container support with Docker Engine. It deliberately avoids Docker

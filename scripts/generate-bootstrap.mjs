@@ -165,6 +165,17 @@ export async function loadSources(root = repoRoot) {
     fragmentTokens(loaded, constants);
     fragments.push(loaded);
   }
+  // Ship the canonical installer with its Node-only entrypoint; never fetch mutable script bytes at boot.
+  const installer = await readFile(resolve(root, "scripts/install-linux-developer-tools.sh"), "utf8");
+  const delimiter = "CRABBOX_LINUX_DEVELOPER_TOOLS";
+  if (!installer.endsWith("\n") || installer.includes("\r") || installer.includes("\0") ||
+      installer.split("\n").some((line) => line === delimiter || line === "'@")) {
+    throw new Error("Linux developer-tools installer must be LF text safe for the bootstrap heredocs");
+  }
+  fragments.push({
+    name: "linuxNodeInstall", file: "scripts/install-linux-developer-tools.sh", literal: true, parameters: {},
+    source: `cat >/var/lib/crabbox/install-linux-developer-tools.sh <<'${delimiter}'\n${installer}${delimiter}\nbash /var/lib/crabbox/install-linux-developer-tools.sh --node-only\n`,
+  });
   return { constants, catalog, fragments };
 }
 function gofmt(source) {

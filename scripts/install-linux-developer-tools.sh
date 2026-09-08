@@ -590,12 +590,12 @@ install_requested_node() {
   hash -r
 }
 
-install_node_pnpm() {
+install_node_runtime() {
   local use_pinned_node=0
   if pinned_node_supported; then
     use_pinned_node=1
     public_tool_links check "$node_link_dir" "$node_toolcache_root/node/$pinned_node_version/x64/bin" node npm npx corepack pnpm pnpx || return $?
-    cache_public_toolchain_archives
+    cache_public_toolchain_archives "node-v$pinned_node_version-linux-x64.tar.xz" || return $?
     install_pinned_node || return $?
     export PATH="$node_link_dir:$PATH"
   else
@@ -619,6 +619,13 @@ install_node_pnpm() {
   command -v corepack >/dev/null
   if [[ "$use_pinned_node" == "0" ]]; then
     corepack enable
+  fi
+}
+
+install_node_pnpm() {
+  install_node_runtime || return $?
+  if pinned_node_supported; then
+    cache_public_toolchain_archives || return $?
   fi
   corepack prepare "pnpm@$pnpm_version" --activate
   command -v pnpm >/dev/null
@@ -1021,8 +1028,27 @@ print_versions() {
   docker compose version
 }
 
+install_node_only() {
+  local started=$SECONDS
+  export DEBIAN_FRONTEND=noninteractive
+  retry apt-get update
+  apt_install ca-certificates curl gnupg python3-minimal xz-utils
+  add_nodesource
+  if ! pinned_node_supported; then
+    retry apt-get update
+  fi
+  install_node_runtime
+  node --version
+  npm --version
+  log "Node baseline installed in $((SECONDS - started))s"
+}
+
 main() {
   need_root "$@"
+  if [[ "${1:-}" == "--node-only" ]]; then
+    install_node_only
+    return
+  fi
   local readiness_producer readiness_package_output package
   local -a readiness_packages apt_get_base
   readiness_producer="$(readiness_producer_path)"
