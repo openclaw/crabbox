@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Fix truncated GCP lease failures by surfacing bounded API error summaries and preserving quoted JSON diagnostics with credential redaction. [PR 1984](https://github.com/openclaw/crabbox/pull/1984). Thanks @steipete.
-- Preserve GCP capacity fallback when a bounded error summary omits retry evidence, while keeping user-visible diagnostics redacted and bounded. Thanks @steipete.
+- Preserve GCP capacity fallback when a bounded error summary omits retry evidence, while keeping user-visible diagnostics redacted and bounded. [PR 1987](https://github.com/openclaw/crabbox/pull/1987). Thanks @steipete.
 
 - Fix Azure leases blocked by retained legacy shared-infrastructure fences by verifying settled resources before transactional takeover. [PR 1982](https://github.com/openclaw/crabbox/pull/1982). Thanks @steipete.
 
