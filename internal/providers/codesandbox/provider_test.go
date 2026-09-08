@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -118,6 +119,39 @@ func TestValidateCodeSandboxConfigRejectsUnsafeValues(t *testing.T) {
 			err := validateCodeSandboxConfig(cfg)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("validate err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodeSandboxEffectiveDefaults(t *testing.T) {
+	defaults := newTestConfig().CodeSandbox
+	for _, tc := range []struct {
+		name                  string
+		cfg                   CodeSandboxConfig
+		seconds, limit        int
+		command, sdk, workdir string
+	}{
+		{name: "empty", seconds: 30, limit: 1, command: "node", sdk: "@codesandbox/sdk@2.4.2", workdir: "/project/workspace"},
+		{name: "whitespace and negative", cfg: CodeSandboxConfig{BridgeCommand: " \t", SDKPackage: " \t", Workdir: " \t", OperationTimeoutSecs: -1, DoctorListLimit: -1}, seconds: 30, limit: 1, command: "node", sdk: "@codesandbox/sdk@2.4.2", workdir: "/project/workspace"},
+		{name: "custom trimmed", cfg: CodeSandboxConfig{BridgeCommand: " /opt/example-node ", SDKPackage: " @codesandbox/sdk@2.4.1 ", Workdir: " /project/workspace/app/ ", OperationTimeoutSecs: 45, DoctorListLimit: 3}, seconds: 45, limit: 3, command: "/opt/example-node", sdk: "@codesandbox/sdk@2.4.1", workdir: "/project/workspace/app"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := newTestConfig()
+			cfg.CodeSandbox = tc.cfg
+			before := cfg.CodeSandbox
+			workdir, err := codeSandboxWorkdir(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if operationTimeout(cfg.CodeSandbox) != time.Duration(tc.seconds)*time.Second || doctorListLimit(cfg.CodeSandbox) != tc.limit || bridgeCommand(cfg.CodeSandbox) != tc.command || sdkPackage(cfg.CodeSandbox) != tc.sdk || workdir != tc.workdir {
+				t.Fatalf("effective values differ from literal contract for %#v", tc.cfg)
+			}
+			if tc.name != "custom trimmed" && (tc.seconds != defaults.OperationTimeoutSecs || tc.limit != defaults.DoctorListLimit || tc.command != defaults.BridgeCommand || tc.sdk != defaults.SDKPackage || tc.workdir != defaults.Workdir) {
+				t.Fatalf("fallbacks differ from generated defaults: %#v", defaults)
+			}
+			if cfg.CodeSandbox != before {
+				t.Fatal("effective reads changed config")
 			}
 		})
 	}

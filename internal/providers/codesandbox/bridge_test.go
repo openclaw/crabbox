@@ -84,6 +84,56 @@ func TestSDKBridgeSendsJSONOnStdinAndTokenOnlyInEnv(t *testing.T) {
 	}
 }
 
+func TestSDKBridgeEffectiveDefaultsUseRecordingRunner(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		cfg          CodeSandboxConfig
+		command, pkg string
+		seconds      int
+	}{
+		{name: "blank", command: "node", pkg: "@codesandbox/sdk@2.4.2", seconds: 30},
+		{name: "whitespace", cfg: CodeSandboxConfig{BridgeCommand: " \t", SDKPackage: " \t", OperationTimeoutSecs: -1}, command: "node", pkg: "@codesandbox/sdk@2.4.2", seconds: 30},
+		{name: "custom", cfg: CodeSandboxConfig{BridgeCommand: " /opt/example-node ", SDKPackage: " @codesandbox/sdk@2.4.1 ", OperationTimeoutSecs: 45}, command: "/opt/example-node", pkg: "@codesandbox/sdk@2.4.1", seconds: 45},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setBridgeTestCacheDir(t)
+			runner := &recordingBridgeRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+				_, _ = io.WriteString(req.Stdout, `{"ok":true,"sandboxes":[]}`)
+				return LocalCommandResult{ExitCode: 0}, nil
+			}}
+			before := tc.cfg
+			started := time.Now()
+			if _, err := NewSDKBridge(tc.cfg, Runtime{Exec: runner}).RoundTrip(context.Background(), "", BridgeRequest{Operation: "list_sandboxes", Limit: doctorListLimit(tc.cfg)}); err != nil {
+				t.Fatal(err)
+			}
+			setup, call := runner.onlySetupCall(t), runner.onlyCall(t)
+			if setup.Args[len(setup.Args)-1] != tc.pkg || call.Name != tc.command || !envContains(call.Env, "CRABBOX_CODESANDBOX_SDK_PACKAGE="+tc.pkg) {
+				t.Fatalf("effective launcher/package mismatch: setup=%v command=%q", setup.Args, call.Name)
+			}
+			var request BridgeRequest
+			if err := json.NewDecoder(call.Stdin).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if request.Limit != 1 {
+				t.Fatalf("default request list limit=%d, want 1", request.Limit)
+			}
+			if len(runner.deadlines) != 2 {
+				t.Fatalf("deadline count=%d", len(runner.deadlines))
+			}
+			finished := time.Now()
+			for _, deadline := range runner.deadlines {
+				budget := time.Duration(tc.seconds) * time.Second
+				if deadline.Before(started.Add(budget)) || deadline.After(finished.Add(budget)) {
+					t.Fatalf("deadline does not use %s budget", budget)
+				}
+			}
+			if tc.cfg != before {
+				t.Fatal("bridge changed input config")
+			}
+		})
+	}
+}
+
 func TestSDKBridgeRequiresRunnerBeforeSDKSetup(t *testing.T) {
 	var exitErr ExitError
 	_, err := NewSDKBridge(newTestConfig().CodeSandbox, Runtime{}).RoundTrip(context.Background(), "secret", BridgeRequest{Operation: "list_sandboxes"})
@@ -244,6 +294,49 @@ func TestSDKBridgeScriptAwaitsAsyncPortListing(t *testing.T) {
 	}
 	if !strings.Contains(codeSandboxBridgeScript, "process.env.CRABBOX_CODESANDBOX_SDK_IMPORT") {
 		t.Fatalf("bridge script must import the resolved SDK package name from the trusted cache package")
+	}
+}
+
+func TestCodeSandboxClientListLimitReachesEmbeddedSDK(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node is required")
+	}
+	modulePath := filepath.Join(t.TempDir(), "list-only-sdk.mjs")
+	const module = `
+export class CodeSandbox {
+  constructor() {
+    this.sandboxes = {
+      list: async ({ limit }) => ({ sandboxes: [], totalCount: limit }),
+      listRunning: async () => ({ vms: [] })
+    };
+  }
+}
+`
+	if err := os.WriteFile(modulePath, []byte(module), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name                        string
+		configured, requested, want int
+	}{
+		{name: "default", want: 1},
+		{name: "configured", configured: 3, want: 3},
+		{name: "explicit", configured: 3, requested: 5, want: 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := newTestConfig().CodeSandbox
+			cfg.DoctorListLimit = tc.configured
+			cfg.SDKPackage = (&url.URL{Scheme: "file", Path: modulePath}).String()
+			rt := Runtime{Exec: actualBridgeRunner{}}
+			client := &codeSandboxClient{cfg: cfg, rt: rt, bridge: NewSDKBridge(cfg, rt), token: "synthetic-list-test"}
+			result, err := client.ListSandboxes(context.Background(), ListSandboxesRequest{Limit: tc.requested})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.TotalCount != tc.want {
+				t.Fatalf("SDK received limit=%d, want %d", result.TotalCount, tc.want)
+			}
+		})
 	}
 }
 

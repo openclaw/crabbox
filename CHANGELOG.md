@@ -31,6 +31,8 @@
 
 - Describe OpenSandbox configuration bindings once, preserving CLI-only stale-claim cleanup, environment/flag-only API URL selection, defaults, and validation timing. [PR 1990](https://github.com/openclaw/crabbox/pull/1990). Thanks @steipete.
 
+- Keep CodeSandbox runtime fallback defaults aligned with declared configuration while preserving the fixed SDK workspace boundary and operation-specific budgets.
+
 ## 0.52.0 - 2026-09-07
 
 ### Highlights
