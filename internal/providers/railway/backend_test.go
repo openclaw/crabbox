@@ -517,7 +517,7 @@ func TestRailwayRunRequiresNoSync(t *testing.T) {
 
 func TestRailwayRunRequiresServiceID(t *testing.T) {
 	backend := &railwayBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-	_, err := backend.Run(context.Background(), RunRequest{NoSync: true, Command: []string{"pnpm", "test"}})
+	_, err := backend.Run(context.Background(), RunRequest{NoSync: true})
 	if err == nil || !strings.Contains(err.Error(), "--id") {
 		t.Fatalf("err = %v, want --id rejection", err)
 	}
@@ -565,30 +565,43 @@ func TestRailwayRunRejectsLeaseFlags(t *testing.T) {
 		req  RunRequest
 		want string
 	}{
-		{name: "keep", req: RunRequest{ID: "svc-1", Keep: true, NoSync: true, Command: []string{"pnpm", "test"}}, want: "--keep"},
-		{name: "reclaim", req: RunRequest{ID: "svc-1", Reclaim: true, NoSync: true, Command: []string{"pnpm", "test"}}, want: "--reclaim"},
-		{name: "shell", req: RunRequest{ID: "svc-1", ShellMode: true, NoSync: true, Command: []string{"pnpm test"}}, want: "--shell"},
-		{name: "env summary", req: RunRequest{ID: "svc-1", NoSync: true, Env: map[string]string{"TOKEN": "secret"}, EnvSummary: true, Command: []string{"pnpm", "test"}}, want: "environment"},
+		{name: "keep first", req: RunRequest{Keep: true, Reclaim: true}, want: "provider=railway lifecycle is owned by Railway; --keep is not supported"},
+		{name: "reclaim", req: RunRequest{Reclaim: true}, want: "provider=railway lifecycle is owned by Railway; --reclaim is not supported"},
+		{name: "sync only", req: RunRequest{NoSync: true, SyncOnly: true}, want: "provider=railway does not support sync; --sync-only is rejected"},
+		{name: "checksum", req: RunRequest{NoSync: true, ChecksumSync: true}, want: "provider=railway does not support sync; --checksum is rejected"},
+		{name: "force large", req: RunRequest{NoSync: true, ForceSyncLarge: true}, want: "provider=railway does not support sync; --force-sync-large is rejected"},
+		{name: "full resync", req: RunRequest{NoSync: true, FullResync: true}, want: "provider=railway does not support sync; --full-resync is rejected"},
+		{name: "shell before ID", req: RunRequest{NoSync: true, ShellMode: true}, want: "provider=railway runs the Railway service start command; --shell is not supported"},
+		{name: "env summary without env", req: RunRequest{NoSync: true, EnvSummary: true}, want: "provider=railway cannot forward per-run environment variables"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			backend := &railwayBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-			_, err := backend.Run(context.Background(), tc.req)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("err = %v, want %s rejection", err, tc.want)
+			api := &fakeRailwayAPI{}
+			backend := newRailwayBackendForTest(api)
+			result, err := backend.Run(context.Background(), tc.req)
+			var public ExitError
+			if !errors.As(err, &public) || public.Code != 2 || public.Message != tc.want {
+				t.Fatalf("err=%v, want exit2 %q", err, tc.want)
+			}
+			if !reflect.DeepEqual(result, RunResult{}) || len(api.calls) != 0 {
+				t.Fatalf("result=%#v API calls=%v", result, api.calls)
 			}
 		})
 	}
 }
 
 func TestRailwayRunAllowsImplicitDefaultEnv(t *testing.T) {
-	err := rejectRailwayRunOptions(RunRequest{
-		ID:      "svc-1",
-		NoSync:  true,
-		Env:     map[string]string{"CI": "true"},
-		Command: []string{"pnpm", "test"},
+	api := &fakeRailwayAPI{}
+	backend := newRailwayBackendForTest(api)
+	result, err := backend.Run(context.Background(), RunRequest{
+		ID: "svc-1", NoSync: true, Env: map[string]string{"CI": "true"}, Command: []string{"pnpm", "test"},
 	})
-	if err != nil {
-		t.Fatalf("rejectRailwayRunOptions err: %v", err)
+	var public ExitError
+	want := "provider=railway cannot execute arbitrary run commands; Railway only runs the service's configured start command"
+	if !errors.As(err, &public) || public.Code != 2 || public.Message != want {
+		t.Fatalf("err=%v, want command rejection after option admission", err)
+	}
+	if !reflect.DeepEqual(result, RunResult{}) || len(api.calls) != 0 {
+		t.Fatalf("result=%#v API calls=%v", result, api.calls)
 	}
 }
 

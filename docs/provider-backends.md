@@ -779,6 +779,12 @@ Pick `Kind` carefully:
   hosted service instead of leasing a run surface (for example `railway` and
   `fastapi-cloud`).
 
+FastAPI Cloud, Railway, and Unikraft Cloud share their ordered unsupported-run
+option checks through `shared.RejectServiceRunOptions`. The adapters retain
+their lifecycle and shell explanations, request-ID requirements, and final
+command refusal. These checks do not grant a service an execution capability or
+contact its API.
+
 `Targets` should describe what the provider can actually satisfy. Use `linux`,
 `macos`, or `windows` only for real operating-system targets. Use
 `worker-runtime` for Worker-isolate or module-runtime providers that execute

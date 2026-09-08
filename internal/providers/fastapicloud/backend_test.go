@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -328,14 +329,31 @@ func TestFastAPICloudClientSurfacesNon2xxAsAPIError(t *testing.T) {
 }
 
 func TestFastAPICloudRunRejectsBeforeAPI(t *testing.T) {
-	backend := &fastAPICloudBackend{
-		spec:   Provider{}.Spec(),
-		cfg:    Config{},
-		client: panicFastAPICloudAPI{},
-	}
-	_, err := backend.Run(context.Background(), RunRequest{NoSync: true, Command: []string{"pytest"}})
-	if err == nil || !strings.Contains(err.Error(), "cannot execute arbitrary run commands") {
-		t.Fatalf("err = %v, want arbitrary command rejection", err)
+	for _, tc := range []struct {
+		name string
+		req  RunRequest
+		want string
+	}{
+		{name: "keep first", req: RunRequest{Keep: true, Reclaim: true}, want: "provider=fastapi-cloud lifecycle is owned by FastAPI Cloud; --keep is not supported"},
+		{name: "reclaim", req: RunRequest{Reclaim: true}, want: "provider=fastapi-cloud lifecycle is owned by FastAPI Cloud; --reclaim is not supported"},
+		{name: "no sync", req: RunRequest{}, want: "provider=fastapi-cloud does not support workspace sync; pass --no-sync"},
+		{name: "shell", req: RunRequest{NoSync: true, ShellMode: true}, want: "provider=fastapi-cloud cannot open an interactive shell; --shell is not supported"},
+		{name: "env summary without env", req: RunRequest{NoSync: true, EnvSummary: true}, want: "provider=fastapi-cloud cannot forward per-run environment variables"},
+		{name: "missing command", req: RunRequest{NoSync: true}, want: "missing command"},
+		{name: "command", req: RunRequest{NoSync: true, Command: []string{"pytest"}}, want: "provider=fastapi-cloud cannot execute arbitrary run commands; deploy with fastapi deploy or FastAPI Cloud CI"},
+		{name: "implicit env", req: RunRequest{NoSync: true, Env: map[string]string{"CI": "true"}, Command: []string{"pytest"}}, want: "provider=fastapi-cloud cannot execute arbitrary run commands; deploy with fastapi deploy or FastAPI Cloud CI"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := &fastAPICloudBackend{spec: Provider{}.Spec(), client: panicFastAPICloudAPI{}}
+			result, err := backend.Run(context.Background(), tc.req)
+			var public ExitError
+			if !errors.As(err, &public) || public.Code != 2 || public.Message != tc.want {
+				t.Fatalf("err=%v, want exit2 %q", err, tc.want)
+			}
+			if !reflect.DeepEqual(result, RunResult{}) {
+				t.Fatalf("result=%#v, want zero result", result)
+			}
+		})
 	}
 }
 
