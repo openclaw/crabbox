@@ -25243,152 +25243,316 @@ describe("fleet lease identity and idle", () => {
     expect(revokedCIDRs).not.toContain("198.51.100.20/32");
   });
 
-  it("prunes runner ingress while a distinct managed workspace group is active", async () => {
-    const revokedRules: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+  it.each([true, false])(
+    "keeps runner and workspace AWS groups separate (named metadata: %s)",
+    async (namedMetadata) => {
+      const revokedRules: string[] = [];
+      const authorizedRules: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const fetchRequest = input instanceof Request ? input : new Request(input, init);
+          const params = new URLSearchParams(await fetchRequest.clone().text());
+          const action = params.get("Action") ?? "";
+          if (action === "DescribeVpcs") {
+            return new Response(
+              "<DescribeVpcsResponse><vpcSet><item><vpcId>vpc-default</vpcId></item></vpcSet></DescribeVpcsResponse>",
+            );
+          }
+          if (action === "DescribeSecurityGroups") {
+            const groupName = params.get("GroupName.1") ?? "";
+            const groupID = groupName === "crabbox-workspaces" ? "sg-workspaces" : "sg-runners";
+            const ingress =
+              groupName === "crabbox-runners"
+                ? "<ipPermissions><item><ipProtocol>tcp</ipProtocol><fromPort>22</fromPort><toPort>22</toPort><ipRanges><item><cidrIp>198.51.100.10/32</cidrIp><description>Crabbox SSH</description></item><item><cidrIp>198.51.100.20/32</cidrIp><description>Crabbox SSH</description></item></ipRanges></item></ipPermissions>"
+                : "<ipPermissions />";
+            return new Response(
+              `<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>${groupID}</groupId><groupName>${groupName}</groupName><vpcId>vpc-default</vpcId>${ingress}</item></securityGroupInfo></DescribeSecurityGroupsResponse>`,
+            );
+          }
+          if (action === "RevokeSecurityGroupIngress") {
+            revokedRules.push(
+              `${params.get("GroupId")}:${params.get("IpPermissions.1.IpRanges.1.CidrIp")}`,
+            );
+          }
+          if (action === "AuthorizeSecurityGroupIngress") {
+            authorizedRules.push(
+              `${params.get("GroupId")}:${params.get("IpPermissions.1.IpRanges.1.CidrIp")}`,
+            );
+          }
+          return new Response("<Response />");
+        }),
+      );
+      const provider = new AWSProvider(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+        "eu-west-1",
+        new MemoryStorage(),
+      );
+      const anchor = testLease({
+        id: "cbx_abcdef123456",
+        provider: "aws",
+        state: "released",
+        region: "eu-west-1",
+        sshPort: "22",
+        network: namedMetadata ? { awsSecurityGroupName: "crabbox-runners" } : {},
+      });
+      const runner = testLease({
+        id: "cbx_abcdef123457",
+        provider: "aws",
+        region: "eu-west-1",
+        sshPort: "22",
+        network: {
+          ...(namedMetadata ? { awsSecurityGroupName: "crabbox-runners" } : {}),
+          sshSourceCIDRs: ["198.51.100.20/32"],
+          sshSourceCIDRsComplete: true,
+        },
+      });
+      const workspace = testLease({
+        id: "cbx_abcdef123458",
+        provider: "aws",
+        providerKey: "crabbox-workspace-0123456789ab",
+        region: "eu-west-1",
+        sshPort: "22",
+        network: {
+          ...(namedMetadata ? { awsSecurityGroupName: "crabbox-workspaces" } : {}),
+          sshSourceCIDRs: ["0.0.0.0/0"],
+          sshSourceCIDRsComplete: true,
+        },
+      });
+
+      await provider.reconcileLeaseAccess(anchor, {
+        requestSourceCIDRs: [],
+        activeLeases: [runner, workspace],
+      });
+
+      expect(revokedRules.includes("sg-runners:198.51.100.10/32")).toBe(namedMetadata);
+      expect(revokedRules).not.toContain("sg-runners:198.51.100.20/32");
+      expect(new Set(authorizedRules)).toEqual(
+        new Set(["sg-runners:198.51.100.20/32", "sg-workspaces:0.0.0.0/0"]),
+      );
+    },
+  );
+
+  it.each([
+    {
+      name: "different sources",
+      complete22: true,
+      source22: ["198.51.100.20/32"],
+      source2222: ["198.51.100.21/32"],
+      reads: 2,
+    },
+    {
+      name: "equal sources",
+      complete22: true,
+      source22: ["198.51.100.20/32"],
+      source2222: ["198.51.100.20/32"],
+      reads: 1,
+    },
+    {
+      name: "reordered equal sources",
+      complete22: true,
+      source22: ["198.51.100.20/32", "2001:db8::1/128"],
+      source2222: ["2001:db8::1/128", "198.51.100.20/32"],
+      reads: 1,
+    },
+    {
+      name: "different reconciliation modes",
+      complete22: false,
+      source22: [],
+      source2222: [],
+      reads: 2,
+    },
+  ])(
+    "reconciles shared AWS group ports with $name",
+    async ({ source22, source2222, reads, complete22 }) => {
+      const authorizedRules: string[] = [];
+      const staleRevokedPorts: string[] = [];
+      let groupReads = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const fetchRequest = input instanceof Request ? input : new Request(input, init);
+          const params = new URLSearchParams(await fetchRequest.clone().text());
+          const action = params.get("Action") ?? "";
+          if (action === "DescribeSecurityGroups") {
+            groupReads++;
+            return new Response(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-shared</groupId><ipPermissions>${["22", "2222"].map((port) => `<item><ipProtocol>tcp</ipProtocol><fromPort>${port}</fromPort><toPort>${port}</toPort><ipRanges><item><cidrIp>203.0.113.99/32</cidrIp><description>Crabbox SSH</description></item></ipRanges></item>`).join("")}</ipPermissions></item></securityGroupInfo></DescribeSecurityGroupsResponse>`);
+          }
+          if (action === "AuthorizeSecurityGroupIngress") {
+            authorizedRules.push(
+              `${params.get("IpPermissions.1.FromPort")}:${
+                params.get("IpPermissions.1.IpRanges.1.CidrIp") ??
+                params.get("IpPermissions.1.Ipv6Ranges.1.CidrIpv6")
+              }`,
+            );
+          }
+          if (
+            action === "RevokeSecurityGroupIngress" &&
+            params.get("IpPermissions.1.IpRanges.1.CidrIp") === "203.0.113.99/32"
+          ) {
+            staleRevokedPorts.push(params.get("IpPermissions.1.FromPort")!);
+          }
+          return new Response("<Response />");
+        }),
+      );
+      const provider = new AWSProvider(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+        "eu-west-1",
+        new MemoryStorage(),
+      );
+      const anchor = testLease({
+        id: "cbx_abcdef123456",
+        provider: "aws",
+        state: "released",
+        region: "eu-west-1",
+        sshPort: "22",
+        network: { awsSecurityGroupID: "sg-shared" },
+      });
+      const active22 = testLease({
+        id: "cbx_abcdef123457",
+        provider: "aws",
+        region: "eu-west-1",
+        sshPort: "22",
+        network: {
+          awsSecurityGroupID: "sg-shared",
+          sshSourceCIDRs: source22,
+          sshSourceCIDRsComplete: complete22,
+        },
+      });
+      const active2222 = testLease({
+        id: "cbx_abcdef123458",
+        provider: "aws",
+        region: "eu-west-1",
+        sshPort: "2222",
+        network: {
+          awsSecurityGroupID: "sg-shared",
+          sshSourceCIDRs: source2222,
+          sshSourceCIDRsComplete: true,
+        },
+      });
+
+      await provider.reconcileLeaseAccess(anchor, {
+        requestSourceCIDRs: [],
+        activeLeases: [active22, active2222],
+      });
+
+      expect(new Set(authorizedRules)).toEqual(
+        new Set([
+          ...source22.map((cidr) => `22:${cidr}`),
+          ...source2222.flatMap((cidr) => [`22:${cidr}`, `2222:${cidr}`]),
+        ]),
+      );
+      expect(groupReads).toBe(reads);
+      expect(staleRevokedPorts.toSorted()).toEqual(complete22 ? ["22", "2222"] : ["2222"]);
+    },
+  );
+
+  it.each([0, 1, 31, 97])(
+    "stress reconciles mixed AWS access without cross-group grants (rotation %s)",
+    async (rotation) => {
+      const leases: LeaseRecord[] = [];
+      const expected = new Set<string>();
+      const groups = new Map<string, { region: string; rules: Map<string, Set<string>> }>();
+      for (let group = 0; group < 64; group++) {
+        const groupID = `sg-stress-${group}`;
+        const region = group % 2 ? "us-east-1" : "eu-west-1";
+        groups.set(groupID, {
+          region,
+          rules: new Map(
+            ["22", "2222", "443"].map((port) => [port, new Set(["203.0.113.254/32"])]),
+          ),
+        });
+        for (let member = 0; member < 4; member++) {
+          const address = group % 2 ? member + 1 : 1;
+          const cidrs = [
+            `198.51.100.${((group * 4 + address) % 254) + 1}/32`,
+            `2001:db8:${group}::${address}/128`,
+          ];
+          const ports = member === 1 ? ["2222", "22"] : member === 2 ? ["443", "22"] : ["22"];
+          leases.push(
+            testLease({
+              id: `cbx_${(group * 4 + member).toString(16).padStart(12, "0")}`,
+              provider: "aws",
+              region,
+              sshPort: ports[0]!,
+              sshFallbackPorts: ports.slice(1),
+              state: member >= 2 ? "released" : "active",
+              releaseDeletesServer: member !== 2,
+              network: {
+                awsSecurityGroupID: groupID,
+                sshSourceCIDRs: cidrs,
+                sshSourceCIDRsComplete: true,
+              },
+            }),
+          );
+          if (member < 3)
+            for (const port of ports)
+              for (const cidr of cidrs) expected.add(`${groupID}|${port}|${cidr}`);
+        }
+      }
+      vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
         const fetchRequest = input instanceof Request ? input : new Request(input, init);
         const params = new URLSearchParams(await fetchRequest.clone().text());
-        const action = params.get("Action") ?? "";
-        if (action === "DescribeVpcs") {
+        const groupID = params.get("GroupId.1") ?? params.get("GroupId")!;
+        const group = groups.get(groupID);
+        if (!group || new URL(fetchRequest.url).hostname !== `ec2.${group.region}.amazonaws.com`)
+          throw new Error("fixture group/region mismatch");
+        if (params.get("Action") === "DescribeSecurityGroups") {
+          const permissions = [...group.rules]
+            .map(([port, cidrs]) => {
+              const ranges = (ipv6: boolean) =>
+                [...cidrs]
+                  .filter((cidr) => cidr.includes(":") === ipv6)
+                  .map(
+                    (cidr) =>
+                      `<item><${ipv6 ? "cidrIpv6" : "cidrIp"}>${cidr}</${ipv6 ? "cidrIpv6" : "cidrIp"}><description>Crabbox SSH</description></item>`,
+                  )
+                  .join("");
+              return `<item><ipProtocol>tcp</ipProtocol><fromPort>${port}</fromPort><toPort>${port}</toPort><ipRanges>${ranges(false)}</ipRanges><ipv6Ranges>${ranges(true)}</ipv6Ranges></item>`;
+            })
+            .join("");
           return new Response(
-            "<DescribeVpcsResponse><vpcSet><item><vpcId>vpc-default</vpcId></item></vpcSet></DescribeVpcsResponse>",
+            `<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>${groupID}</groupId><ipPermissions>${permissions}</ipPermissions></item></securityGroupInfo></DescribeSecurityGroupsResponse>`,
           );
         }
-        if (action === "DescribeSecurityGroups") {
-          const groupName = params.get("GroupName.1") ?? "";
-          const groupID = groupName === "crabbox-workspaces" ? "sg-workspaces" : "sg-runners";
-          const ingress =
-            groupName === "crabbox-runners"
-              ? "<ipPermissions><item><ipProtocol>tcp</ipProtocol><fromPort>22</fromPort><toPort>22</toPort><ipRanges><item><cidrIp>198.51.100.10/32</cidrIp><description>Crabbox SSH</description></item><item><cidrIp>198.51.100.20/32</cidrIp><description>Crabbox SSH</description></item></ipRanges></item></ipPermissions>"
-              : "<ipPermissions />";
-          return new Response(
-            `<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>${groupID}</groupId><groupName>${groupName}</groupName><vpcId>vpc-default</vpcId>${ingress}</item></securityGroupInfo></DescribeSecurityGroupsResponse>`,
-          );
-        }
-        if (action === "RevokeSecurityGroupIngress") {
-          revokedRules.push(
-            `${params.get("GroupId")}:${params.get("IpPermissions.1.IpRanges.1.CidrIp")}`,
-          );
-        }
+        const port = params.get("IpPermissions.1.FromPort")!;
+        const cidr =
+          params.get("IpPermissions.1.IpRanges.1.CidrIp") ??
+          params.get("IpPermissions.1.Ipv6Ranges.1.CidrIpv6")!;
+        const rules = group.rules.get(port);
+        if (
+          !rules ||
+          params.get("IpPermissions.1.ToPort") !== port ||
+          params.get("IpPermissions.1.IpProtocol") !== "tcp"
+        )
+          throw new Error("fixture permission mismatch");
+        if (params.get("Action") === "AuthorizeSecurityGroupIngress") rules.add(cidr);
+        else if (params.get("Action") === "RevokeSecurityGroupIngress") rules.delete(cidr);
+        else throw new Error(`Unexpected fixture action ${params.get("Action")}`);
         return new Response("<Response />");
-      }),
-    );
-    const provider = new AWSProvider(
-      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
-      "eu-west-1",
-      new MemoryStorage(),
-    );
-    const anchor = testLease({
-      id: "cbx_abcdef123456",
-      provider: "aws",
-      state: "released",
-      region: "eu-west-1",
-      sshPort: "22",
-      network: { awsSecurityGroupName: "crabbox-runners" },
-    });
-    const runner = testLease({
-      id: "cbx_abcdef123457",
-      provider: "aws",
-      region: "eu-west-1",
-      sshPort: "22",
-      network: {
-        awsSecurityGroupName: "crabbox-runners",
-        sshSourceCIDRs: ["198.51.100.20/32"],
-        sshSourceCIDRsComplete: true,
-      },
-    });
-    const workspace = testLease({
-      id: "cbx_abcdef123458",
-      provider: "aws",
-      providerKey: "crabbox-workspace-0123456789ab",
-      region: "eu-west-1",
-      sshPort: "22",
-      network: {
-        awsSecurityGroupName: "crabbox-workspaces",
-        sshSourceCIDRs: ["0.0.0.0/0"],
-        sshSourceCIDRsComplete: true,
-      },
-    });
-
-    await provider.reconcileLeaseAccess(anchor, {
-      requestSourceCIDRs: [],
-      activeLeases: [runner, workspace],
-    });
-
-    expect(revokedRules).toContain("sg-runners:198.51.100.10/32");
-    expect(revokedRules).not.toContain("sg-runners:198.51.100.20/32");
-  });
-
-  it("reconciles distinct SSH port sets that share an AWS security group", async () => {
-    const authorizedRules: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const fetchRequest = input instanceof Request ? input : new Request(input, init);
-        const params = new URLSearchParams(await fetchRequest.clone().text());
-        const action = params.get("Action") ?? "";
-        if (action === "DescribeSecurityGroups") {
-          return new Response(`<?xml version="1.0" encoding="UTF-8"?>
-<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-shared</groupId><ipPermissions /></item></securityGroupInfo></DescribeSecurityGroupsResponse>`);
-        }
-        if (action === "AuthorizeSecurityGroupIngress") {
-          authorizedRules.push(
-            `${params.get("IpPermissions.1.FromPort")}:${
-              params.get("IpPermissions.1.IpRanges.1.CidrIp") ??
-              params.get("IpPermissions.1.Ipv6Ranges.1.CidrIpv6")
-            }`,
-          );
-        }
-        return new Response("<Response />");
-      }),
-    );
-    const provider = new AWSProvider(
-      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
-      "eu-west-1",
-      new MemoryStorage(),
-    );
-    const anchor = testLease({
-      id: "cbx_abcdef123456",
-      provider: "aws",
-      state: "released",
-      region: "eu-west-1",
-      sshPort: "22",
-      network: { awsSecurityGroupID: "sg-shared" },
-    });
-    const active22 = testLease({
-      id: "cbx_abcdef123457",
-      provider: "aws",
-      region: "eu-west-1",
-      sshPort: "22",
-      network: {
-        awsSecurityGroupID: "sg-shared",
-        sshSourceCIDRs: ["198.51.100.20/32"],
-        sshSourceCIDRsComplete: true,
-      },
-    });
-    const active2222 = testLease({
-      id: "cbx_abcdef123458",
-      provider: "aws",
-      region: "eu-west-1",
-      sshPort: "2222",
-      network: {
-        awsSecurityGroupID: "sg-shared",
-        sshSourceCIDRs: ["198.51.100.21/32"],
-        sshSourceCIDRsComplete: true,
-      },
-    });
-
-    await provider.reconcileLeaseAccess(anchor, {
-      requestSourceCIDRs: [],
-      activeLeases: [active22, active2222],
-    });
-
-    expect(new Set(authorizedRules)).toEqual(
-      new Set(["22:198.51.100.20/32", "22:198.51.100.21/32", "2222:198.51.100.21/32"]),
-    );
-  });
+      });
+      const provider = new AWSProvider(
+        { AWS_ACCESS_KEY_ID: "fixture", AWS_SECRET_ACCESS_KEY: "fixture" } as Env,
+        "eu-west-1",
+        new MemoryStorage(),
+      );
+      const ordered = [...leases.slice(rotation), ...leases.slice(0, rotation)];
+      if (rotation % 2) ordered.reverse();
+      await provider.reconcileLeaseAccess(leases[0]!, {
+        requestSourceCIDRs: [],
+        activeLeases: ordered,
+      });
+      const actual = new Set(
+        [...groups].flatMap(([groupID, group]) =>
+          [...group.rules].flatMap(([port, cidrs]) =>
+            [...cidrs].map((cidr) => `${groupID}|${port}|${cidr}`),
+          ),
+        ),
+      );
+      expect(actual).toEqual(expected);
+    },
+  );
 
   it.each(
     [

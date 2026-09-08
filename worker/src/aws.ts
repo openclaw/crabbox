@@ -619,6 +619,19 @@ type SSHIngressRule = {
 
 type DescribedSSHIngressRule = SSHIngressRule & { description: string };
 
+export type AWSIngressConfig = Pick<
+  LeaseConfig,
+  | "awsPrivate"
+  | "awsRegion"
+  | "awsSGID"
+  | "awsSGName"
+  | "awsSubnetID"
+  | "awsSSHCIDRs"
+  | "providerKey"
+  | "sshPort"
+  | "sshFallbackPorts"
+>;
+
 interface AWSIngressOptions {
   reconcile?: "authoritative" | "additive";
   allowEmpty?: boolean;
@@ -1003,7 +1016,10 @@ export class EC2SpotClient {
     throw new Error(`${incomplete}: pagination exceeded ${awsDescribeInstancesMaxPages} pages`);
   }
 
-  async refreshSSHIngress(config: LeaseConfig, options: AWSIngressOptions = {}): Promise<void> {
+  async refreshSSHIngress(
+    config: AWSIngressConfig,
+    options: AWSIngressOptions = {},
+  ): Promise<void> {
     await this.ensureSecurityGroup(config, options);
   }
 
@@ -2345,7 +2361,7 @@ export class EC2SpotClient {
   }
 
   private async ensureSecurityGroup(
-    config: LeaseConfig,
+    config: AWSIngressConfig,
     options: AWSIngressOptions = {},
   ): Promise<string> {
     const measure = <T>(
@@ -2734,7 +2750,7 @@ export class EC2SpotClient {
     return rules.length > 0;
   }
 
-  private async securityGroupVPC(config: LeaseConfig): Promise<string> {
+  private async securityGroupVPC(config: Pick<LeaseConfig, "awsSubnetID">): Promise<string> {
     const subnetID = config.awsSubnetID || this.env.CRABBOX_AWS_SUBNET_ID || "";
     if (!subnetID) {
       const root = await this.ec2("DescribeVpcs", {
@@ -3001,7 +3017,11 @@ export function awsLeaseImageIdentity(
   return { id: imageID, source: "stock", provider: "aws", kind: "aws-ami", region };
 }
 
-function awsSSHCIDRs(config: LeaseConfig, env: Env, allowEmpty = false): string[] {
+function awsSSHCIDRs(
+  config: Pick<LeaseConfig, "awsSSHCIDRs">,
+  env: Env,
+  allowEmpty = false,
+): string[] {
   const configured = [...config.awsSSHCIDRs, ...(env.CRABBOX_AWS_SSH_CIDRS ?? "").split(",")];
   const cidrs = validatedCIDRs(configured, "CRABBOX_AWS_SSH_CIDRS");
   if (cidrs.length === 0 && !allowEmpty) {
