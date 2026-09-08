@@ -23,7 +23,7 @@
 - Share raw byte-tail storage for Agent Sandbox stderr and Blacksmith proof streams while preserving native exit handling, Actions URL discovery, and cloned snapshots. [PR 1977](https://github.com/openclaw/crabbox/pull/1977). Thanks @steipete.
 - Share service-control run-option validation across FastAPI Cloud, Railway, and Unikraft Cloud while preserving rejection messages, precedence, and refusal before provider access. [PR 1979](https://github.com/openclaw/crabbox/pull/1979). Thanks @steipete.
 
-- Describe CodeSandbox configuration bindings once, preserving defaults, file/environment/flag precedence, validation order, and trusted-only bridge settings.
+- Describe CodeSandbox configuration bindings once, preserving defaults, file/environment/flag precedence, validation order, and trusted-only bridge settings. [PR 1988](https://github.com/openclaw/crabbox/pull/1988). Thanks @steipete.
 
 ## 0.52.0 - 2026-09-07
 
