@@ -183,6 +183,15 @@ func statusTerminalState(state string) bool {
 	}
 }
 
+func statusSSHReadinessTimeout(target SSHTarget) time.Duration {
+	if isWindowsWSL2Target(target) {
+		// WSL startup, SFTP negotiation, and the Linux ready check share this
+		// budget; a healthy managed guest can exceed the ordinary four seconds.
+		return 30 * time.Second
+	}
+	return 4 * time.Second
+}
+
 func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarget) (statusView, error) {
 	server := lease.Server
 	target := lease.SSH
@@ -199,7 +208,7 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 	}
 	target = resolved.Target
 	state := blank(server.Labels["state"], server.Status)
-	ready := hasHost && leaseStatusStateCanBeReady(lease, state) && probeSSHReady(ctx, &target, 4*time.Second)
+	ready := hasHost && leaseStatusStateCanBeReady(lease, state) && probeSSHReady(ctx, &target, statusSSHReadinessTimeout(target))
 	meta := serverTailscaleMetadata(server)
 	var tailscale *TailscaleMetadata
 	if meta.Enabled {

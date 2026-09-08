@@ -317,6 +317,12 @@ readiness preflight, API, AWS-GO gate, and live canary are in
 | Windows WSL2 | `--windows-mode wsl2`; launches on nested-virtualization families (`c8i`/`m8i`/`m8i-flex`/`r8i`); POSIX sync and commands run inside WSL. |
 | macOS | Requires an available EC2 Mac Dedicated Host in the region; On-Demand only. Admin-authenticated broker requests can pin any host with `CRABBOX_HOST_ID` / `aws.macHostId` (`CRABBOX_AWS_MAC_HOST_ID` is a legacy alias); normal broker users can pin only a host from their own released lease and otherwise use automatic discovery. |
 
+Managed WSL2 distributions disable cloud-init because Crabbox owns their setup.
+This avoids WSL datasource discovery blocking systemd and root login during
+later command invocations. Bootstrap restarts the distro and verifies its Linux
+ready check before publishing the setup marker; warmup also checks the WSL SSH
+runtime. `inspect` and `status` allow a 30-second WSL2 readiness probe.
+
 ## Normal SSH lifecycle
 
 1. Import or reuse the per-lease SSH key (RSA for native Windows, ed25519

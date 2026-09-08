@@ -904,6 +904,37 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 	}
 }
 
+func TestManagedWindowsWSL2BootstrapOwnsDistroInitialization(t *testing.T) {
+	for _, mode := range []string{windowsModeNormal, windowsModeWSL2} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.TargetOS, cfg.WindowsMode = targetWindows, mode
+			script := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+			steps := []string{
+				"touch /etc/cloud/cloud-init.disabled",
+				"wsl.exe --terminate $wslDistro",
+				"wsl.exe -d $wslDistro --user root --exec /usr/local/bin/crabbox-ready",
+				"WSL cold-start readiness failed with exit $LASTEXITCODE",
+				"Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
+			}
+			last := -1
+			for _, step := range steps {
+				index := strings.Index(script, step)
+				if mode == windowsModeNormal {
+					if index >= 0 && step != steps[len(steps)-1] {
+						t.Fatalf("native Windows unexpectedly configures WSL: %s", step)
+					}
+					continue
+				}
+				if index <= last {
+					t.Fatalf("missing or out-of-order WSL initialization step: %s", step)
+				}
+				last = index
+			}
+		})
+	}
+}
+
 func TestWindowsWSL2BootstrapAttemptStreamsOutput(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")

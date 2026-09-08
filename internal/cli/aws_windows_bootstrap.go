@@ -203,7 +203,7 @@ func bootstrapManagedWindowsWSL2(ctx context.Context, cfg Config, target *SSHTar
 		}
 		target.Port = bootstrapTarget.Port
 		if probeWindowsWSL2BootstrapComplete(ctx, bootstrapTarget, target, 30*time.Second) {
-			return nil
+			return waitForSSHReady(ctx, target, stderr, "WSL2 runtime", bootstrapWaitTimeout(cfg))
 		}
 		fmt.Fprintln(stderr, "Windows WSL2 setup marker is not ready after bootstrap; retrying bootstrap")
 	}
