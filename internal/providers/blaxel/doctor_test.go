@@ -17,7 +17,7 @@ type fakeClient struct {
 	listErr    error
 }
 
-func (f *fakeClient) BaseURL() string { return defaultAPIURL }
+func (f *fakeClient) BaseURL() string { return "https://api.blaxel.ai" }
 func (f *fakeClient) Probe(context.Context) error {
 	f.probeCalls++
 	return f.probeErr
@@ -60,11 +60,26 @@ func (f *fakeClient) GetDirectoryTree(context.Context, string, string) (Director
 	return DirectoryTree{}, nil
 }
 
+func TestBlaxelDoctorEndpointDefaultPredicate(t *testing.T) {
+	for _, raw := range []string{"", "  ", "https://example.invalid/api"} {
+		fake := &fakeClient{}
+		b := &backend{spec: Provider{}.Spec(), cfg: Config{Blaxel: BlaxelConfig{APIURL: raw, APIKey: "inert"}}, clientFactory: func(Config, Runtime) (Client, error) { return fake, nil }}
+		_, err := b.Doctor(context.Background(), DoctorRequest{})
+		if raw == "  " {
+			if err == nil || fake.probeCalls != 0 || fake.listCalls != 0 {
+				t.Fatal("doctor whitespace endpoint defaulted")
+			}
+		} else if err != nil || fake.probeCalls != 1 || fake.listCalls != 1 {
+			t.Fatalf("doctor default/custom=%v", err)
+		}
+	}
+}
+
 func TestDoctorMissingCredentialsIsRedactedAndNonMutating(t *testing.T) {
 	fake := &fakeClient{}
 	backend := &backend{
 		spec: Provider{}.Spec(),
-		cfg:  core.Config{Blaxel: core.BlaxelConfig{APIURL: defaultAPIURL}},
+		cfg:  core.Config{Blaxel: core.BlaxelConfig{APIURL: "https://api.blaxel.ai"}},
 		clientFactory: func(Config, Runtime) (Client, error) {
 			return fake, nil
 		},
@@ -86,7 +101,7 @@ func TestDoctorUsesOnlyProbeAndList(t *testing.T) {
 	backend := &backend{
 		spec: Provider{}.Spec(),
 		cfg: core.Config{Blaxel: core.BlaxelConfig{
-			APIURL:    defaultAPIURL,
+			APIURL:    "https://api.blaxel.ai",
 			APIKey:    "test-key",
 			Workspace: "workspace-test",
 		}},

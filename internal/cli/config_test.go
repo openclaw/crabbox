@@ -5271,6 +5271,169 @@ func TestVercelSandboxConfigYAMLAndEnv(t *testing.T) {
 	}
 }
 
+func TestBlaxelFilePresenceTrustAndPartialErrors(t *testing.T) {
+	if _, ok := reflect.TypeOf(fileBlaxelConfig{}).FieldByName("APIKey"); ok {
+		t.Fatal("API key YAML source introduced")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "zero", "whitespace"} {
+			cfg := baseConfig()
+			cfg.Blaxel = BlaxelConfig{APIKey: "inert", APIURL: "https://example.invalid/prior", Workspace: "prior", Region: "prior", Image: "prior", MemoryMB: 10, TTL: "prior", IdleTTL: "prior", Workdir: "/workspace/prior", ExecTimeoutSecs: 20, ForgetMissing: true}
+			want := cfg.Blaxel
+			fields := map[string]any{"apiKey": "ignored-inert"}
+			for _, f := range []struct {
+				key                      string
+				v                        *string
+				ignoreEmpty, trustedOnly bool
+			}{{"apiUrl", &want.APIURL, true, true}, {"workspace", &want.Workspace, true, true}, {"region", &want.Region, true, false}, {"image", &want.Image, false, false}, {"ttl", &want.TTL, true, false}, {"idleTTL", &want.IdleTTL, true, false}, {"workdir", &want.Workdir, false, false}} {
+				if mode == "omitted" {
+					continue
+				}
+				var value any = nil
+				if mode == "zero" {
+					value = ""
+					if !f.ignoreEmpty && (!f.trustedOnly || trusted) {
+						*f.v = ""
+					}
+				}
+				if mode == "whitespace" {
+					value = "  "
+					if !f.trustedOnly || trusted {
+						*f.v = "  "
+					}
+				}
+				fields[f.key] = value
+			}
+			if mode != "omitted" {
+				fields["memoryMB"], fields["execTimeoutSecs"], fields["forgetMissing"] = nil, nil, nil
+				if mode != "null" {
+					fields["memoryMB"], fields["execTimeoutSecs"], fields["forgetMissing"] = 0, 0, false
+					want.MemoryMB, want.ExecTimeoutSecs, want.ForgetMissing = 0, 0, false
+				}
+			}
+			data, err := yaml.Marshal(map[string]any{"blaxel": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Blaxel != want {
+				t.Fatalf("file trust/presence mode=%s trusted=%t", mode, trusted)
+			}
+		}
+	}
+	for _, memoryFails := range []bool{false, true} {
+		cfg := baseConfig()
+		cfg.Blaxel.MemoryMB, cfg.Blaxel.ExecTimeoutSecs = 10, 20
+		cfg.Blaxel.ForgetMissing = true
+		before := cfg.Blaxel
+		memory, timeout := 7, -1
+		if memoryFails {
+			memory = -1
+		}
+		var file fileConfig
+		data := fmt.Sprintf("blaxel:\n  apiUrl: https://example.invalid/after\n  workspace: after\n  region: after\n  image: after\n  memoryMB: %d\n  ttl: after\n  idleTTL: after\n  workdir: /workspace/after\n  execTimeoutSecs: %d\n  forgetMissing: false\n", memory, timeout)
+		if err := yaml.Unmarshal([]byte(data), &file); err != nil {
+			t.Fatal(err)
+		}
+		err := applyFileConfigWithTrust(&cfg, file, true)
+		wantError := "blaxel execTimeoutSecs must be non-negative"
+		if memoryFails {
+			wantError = "blaxel memoryMB must be non-negative"
+		}
+		if err == nil || err.Error() != wantError {
+			t.Fatalf("file error=%v", err)
+		}
+		want := before
+		want.APIURL, want.Workspace, want.Region, want.Image = "https://example.invalid/after", "after", "after", "after"
+		if !memoryFails {
+			want.MemoryMB, want.TTL, want.IdleTTL, want.Workdir = 7, "after", "after", "/workspace/after"
+		}
+		if cfg.Blaxel != want {
+			t.Fatal("file partial mutation order changed")
+		}
+	}
+}
+
+func TestBlaxelMemoryEnvironmentParsingAndOrder(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want int
+	}{{"", 10}, {"invalid", 10}, {" 17 ", 10}, {" ", 10}, {"999999999999999999999999999999", 10}, {"-2", -2}, {"0", 0}, {"17", 17}} {
+		for _, timeout := range []string{"19", "0", "-1", "invalid"} {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Blaxel.MemoryMB, cfg.Blaxel.ExecTimeoutSecs = 10, 20
+			cfg.Blaxel.ForgetMissing = true
+			t.Setenv("CRABBOX_BLAXEL_MEMORY_MB", tc.raw)
+			t.Setenv("CRABBOX_BLAXEL_TTL", "after")
+			t.Setenv("CRABBOX_BLAXEL_IDLE_TTL", "after")
+			t.Setenv("CRABBOX_BLAXEL_WORKDIR", "/workspace/after")
+			t.Setenv("CRABBOX_BLAXEL_EXEC_TIMEOUT_SECS", timeout)
+			t.Setenv("CRABBOX_BLAXEL_FORGET_MISSING", "false")
+			err := applyEnv(&cfg)
+			wantTimeout := 19
+			wantForget := false
+			if timeout == "0" {
+				wantTimeout = 0
+			}
+			if timeout == "-1" || timeout == "invalid" {
+				wantTimeout = 0
+				wantForget = true
+				message := "CRABBOX_BLAXEL_EXEC_TIMEOUT_SECS must be non-negative"
+				if timeout == "invalid" {
+					message = "CRABBOX_BLAXEL_EXEC_TIMEOUT_SECS must be an integer"
+				}
+				if err == nil || err.Error() != message {
+					t.Fatalf("strict timeout error=%v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("tolerant memory=%q error=%v", tc.raw, err)
+			}
+			if cfg.Blaxel.MemoryMB != tc.want || cfg.Blaxel.TTL != "after" || cfg.Blaxel.IdleTTL != "after" || cfg.Blaxel.Workdir != "/workspace/after" || cfg.Blaxel.ExecTimeoutSecs != wantTimeout || cfg.Blaxel.ForgetMissing != wantForget {
+				t.Fatalf("env order memory=%q timeout=%q", tc.raw, timeout)
+			}
+		}
+	}
+}
+
+func TestBlaxelRawEnvironmentAliases(t *testing.T) {
+	for _, mode := range []string{"primary", "alias", "empty", "whitespace"} {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		cfg.Blaxel.APIKey, cfg.Blaxel.Workspace, cfg.Blaxel.Region = "prior", "prior", "prior"
+		want := "primary"
+		primary, alias := "primary", "alias"
+		if mode == "alias" {
+			primary = ""
+			want = "alias"
+		}
+		if mode == "empty" {
+			primary, alias = "", ""
+			want = "prior"
+		}
+		if mode == "whitespace" {
+			primary = "  "
+			want = "  "
+		}
+		for _, names := range [][2]string{{"CRABBOX_BLAXEL_API_KEY", "BL_API_KEY"}, {"CRABBOX_BLAXEL_WORKSPACE", "BL_WORKSPACE"}, {"CRABBOX_BLAXEL_REGION", "BL_REGION"}} {
+			t.Setenv(names[0], primary)
+			t.Setenv(names[1], alias)
+		}
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Blaxel.APIKey != want || cfg.Blaxel.Workspace != want || cfg.Blaxel.Region != want {
+			t.Fatalf("alias raw=%s", mode)
+		}
+	}
+}
+
 func TestBlaxelConfigYAMLAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()

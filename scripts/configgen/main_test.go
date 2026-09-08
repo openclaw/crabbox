@@ -436,6 +436,12 @@ func TestE2BGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestBlaxelGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_blaxel.go", "../../internal/cli/config_blaxel_generated.go", "BlaxelConfig", "blaxel", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -653,8 +659,13 @@ func TestAcceptedAssignments(t *testing.T) {
  if !got.Name || !got.Enabled || got.Input || got.Tail || cfg.Name != "" || cfg.Enabled { t.Fatalf("flag application: %+v %+v", got, cfg) }
 }
 `
+	runScalarFixture(t, source, generated, behavior+extraTests)
+}
+
+func runScalarFixture(t *testing.T, source string, generated []byte, behavior string) {
+	t.Helper()
 	dir := t.TempDir()
-	for _, file := range []struct{ name, content string }{{"source.go", source}, {"generated.go", string(generated)}, {"behavior_test.go", behavior + extraTests}} {
+	for _, file := range []struct{ name, content string }{{"source.go", source}, {"generated.go", string(generated)}, {"behavior_test.go", behavior}} {
 		if err := os.WriteFile(filepath.Join(dir, file.name), []byte(file.content), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -668,7 +679,7 @@ func TestAcceptedAssignments(t *testing.T) {
 		}
 	}
 	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("applied scalar fixture: %v\n%s", err, output)
+		t.Fatalf("generated scalar fixture: %v\n%s", err, output)
 	}
 }
 
@@ -918,4 +929,117 @@ func TestOrderedAliases(t *testing.T) {
  if err == nil || cfg.Name != "alias" || cfg.Count != 8 || cfg.Tail != "prior" || !got.Name || got.Tail { t.Fatalf("partial alias: %+v %+v %v",got,cfg,err) }
 }
 `)
+}
+
+func TestSchemaEnvIntFallbackFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"empty", `help:"Count"`, `help:"Count" envInt:""`, "envInt is supported only as fallback"},
+		{"unknown", `help:"Count"`, `help:"Count" envInt:"strict"`, "envInt is supported only as fallback"},
+		{"string", `help:"Name"`, `help:"Name" envInt:"fallback"`, "envInt is supported only as fallback"},
+		{"float", `help:"CPUs"`, `help:"CPUs" envInt:"fallback"`, "envInt is supported only as fallback"},
+		{"bool", `help:"Enabled"`, `help:"Enabled" envInt:"fallback"`, "envInt is supported only as fallback"},
+		{"list", `help:"Ports"`, `help:"Ports" envInt:"fallback"`, "envInt is supported only as fallback"},
+		{"alias", `help:"Count"`, `help:"Count" envInt:"fallback" envAlias:"OTHER_COUNT"`, "envAlias is supported only for string"},
+		{"required policy", `nonnegative:"true"`, `envInt:"fallback"`, "require nonnegative policy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(sample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+	source := strings.Replace(flagOnlySample, `help:"Count"`, `help:"Count" envInt:"fallback"`, 1)
+	if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "envInt is supported only as fallback") {
+		t.Fatalf("flag-only integer accepted: %v", err)
+	}
+}
+
+func TestGenerateEnvIntFallback(t *testing.T) {
+	const source = "package cli\ntype PilotConfig struct {\n" +
+		" Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"PILOT_COUNT\" flag:\"pilot-count\" help:\"Count\" nonnegative:\"true\" default:\"7\"`\n" +
+		" Strict int `sources:\"user,repo,env,flag\" config:\"strict\" env:\"PILOT_STRICT\" flag:\"pilot-strict\" help:\"Strict\" nonnegative:\"true\"`\n}"
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := strings.Replace(source, `help:"Count"`, `help:"Count" envInt:"fallback"`, 1)
+	s, err = parseSchema([]byte(input), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.fields[0].envIntFallback || s.fields[1].envIntFallback {
+		t.Fatal("incorrect field opt-in")
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic integer output: %v", err)
+	}
+	for _, marker := range []string{"func (cfg *PilotConfig) applyFile", "type PilotConfigFlagValues"} {
+		old, current := strings.SplitN(string(before), marker, 2)[1], strings.SplitN(string(output), marker, 2)[1]
+		if strings.Contains(marker, "applyFile") {
+			old = strings.SplitN(old, "func (cfg *PilotConfig) applyEnv", 2)[0]
+			current = strings.SplitN(current, "func (cfg *PilotConfig) applyEnv", 2)[0]
+		}
+		if old != current {
+			t.Fatalf("envInt changed file/flag binding after %s", marker)
+		}
+	}
+	if !strings.Contains(string(output), `cfg.Count = getenvInt("PILOT_COUNT", cfg.Count)`) || !strings.Contains(string(output), `cfg.Strict, err = getenvNonNegativeInt("PILOT_STRICT", cfg.Strict)`) {
+		t.Fatal("wrong integer helpers")
+	}
+	typecheckGenerated(t, input+"\nfunc getenvInt(string,int) int { panic(\"stub\") }\n", output)
+	// Execute the existing core helpers verbatim, rather than a test-specific integer parser.
+	coreSource, err := os.ReadFile("../../internal/cli/config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	helpers := ""
+	for _, name := range []string{"getenvInt", "getenvNonNegativeInt"} {
+		start := strings.Index(string(coreSource), "func "+name+"(")
+		if start < 0 {
+			t.Fatalf("missing core helper %s", name)
+		}
+		rest := string(coreSource)[start:]
+		end := strings.Index(rest, "\nfunc ")
+		if end < 0 {
+			t.Fatalf("missing end for core helper %s", name)
+		}
+		helpers += rest[:end] + "\n"
+	}
+	const behavior = `package cli
+import ("flag";"fmt";"os";"strconv";"testing")
+func exit(_ int, pattern string, args ...any) error { return fmt.Errorf(pattern,args...) }
+func flagWasSet(fs *flag.FlagSet,name string) bool { found:=false; fs.Visit(func(f *flag.Flag){ if f.Name==name {found=true} });return found }
+func TestIntegerSources(t *testing.T) {
+ initial:=defaultPilotConfig();if err:=initial.applyEnv();err!=nil||initial.Count!=7 {t.Fatalf("absent env: %+v %v",initial,err)}
+ for _, tc := range []struct{raw string; want int}{{"",7},{"12",12},{"0",0},{"-1",-1},{"bad",7},{" 12 ",7},{" ",7},{"999999999999999999999999999999",7}} {
+  t.Setenv("PILOT_COUNT",tc.raw);t.Setenv("PILOT_STRICT","")
+  cfg:=defaultPilotConfig();if err:=cfg.applyEnv();err!=nil||cfg.Count!=tc.want {t.Fatalf("%q: %+v %v",tc.raw,cfg,err)}
+ }
+ t.Setenv("PILOT_COUNT","-1");t.Setenv("PILOT_STRICT","bad")
+ cfg:=PilotConfig{Count:7,Strict:8};err:=cfg.applyEnv()
+ if err==nil||err.Error()!="PILOT_STRICT must be an integer"||cfg.Count!=-1||cfg.Strict!=0 {t.Fatalf("strict error phase: %+v %v",cfg,err)}
+ for _, raw:=range []string{"-1"," 2 ","999999999999999999999999999999"} {
+  t.Setenv("PILOT_STRICT",raw);cfg=PilotConfig{Count:7,Strict:8}
+  if err:=cfg.applyEnv();err==nil||cfg.Strict!=0 {t.Fatalf("strict %q: %+v %v",raw,cfg,err)}
+ }
+ bad,zero:=-1,0;cfg=PilotConfig{Count:7}
+ if err:=cfg.applyFile(&filePilotConfig{Count:&bad});err==nil||cfg.Count!=7 {t.Fatalf("file negative: %+v %v",cfg,err)}
+ if err:=cfg.applyFile(&filePilotConfig{Count:&zero});err!=nil||cfg.Count!=0 {t.Fatalf("file zero: %+v %v",cfg,err)}
+ cfg=PilotConfig{Count:7};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+ values.Apply(&cfg,fs);if cfg.Count!=7 {t.Fatal("unvisited flag changed value")}
+ if err:=fs.Parse([]string{"--pilot-count=-1"});err!=nil {t.Fatal(err)};values.Apply(&cfg,fs)
+ if cfg.Count!=-1 {t.Fatal("flag negative rejected before provider validation")}
+}
+`
+	runScalarFixture(t, input, output, behavior+helpers)
 }

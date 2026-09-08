@@ -32,6 +32,8 @@
 
 - Describe E2B configuration bindings once, keeping endpoint, domain, template, and workdir defaults consistent while preserving credential sources and existing scope/preview behavior. [PR 2014](https://github.com/openclaw/crabbox/pull/2014). Thanks @steipete.
 
+- Describe Blaxel configuration bindings once, sharing client and execution defaults while preserving tolerant memory environment parsing, trusted inputs, and validation order. Thanks @steipete.
+
 ## 0.53.0 - 2026-09-08
 
 ### Highlights

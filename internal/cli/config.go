@@ -932,22 +932,6 @@ type NomadConfig struct {
 	ExecTimeoutSecs   int
 }
 
-// BlaxelConfig configures the delegated Blaxel provider. API keys are read
-// from environment variables, never persisted in repository config or argv.
-type BlaxelConfig struct {
-	APIKey          string
-	APIURL          string
-	Workspace       string
-	Region          string
-	Image           string
-	MemoryMB        int
-	TTL             string
-	IdleTTL         string
-	Workdir         string
-	ExecTimeoutSecs int
-	ForgetMissing   bool
-}
-
 // SuperserveConfig configures the delegated Superserve provider. The API key is
 // intentionally absent: it is read at runtime from
 // CRABBOX_SUPERSERVE_API_KEY / SUPERSERVE_API_KEY and sent only in request
@@ -2920,12 +2904,7 @@ func baseConfig() Config {
 			EvalTimeout:       5 * time.Minute,
 			ExecTimeoutSecs:   600,
 		},
-		Blaxel: BlaxelConfig{
-			APIURL:          "https://api.blaxel.ai",
-			Image:           "ubuntu:24.04",
-			Workdir:         "/workspace/crabbox",
-			ExecTimeoutSecs: 600,
-		},
+		Blaxel:            defaultBlaxelConfig(),
 		VercelSandbox:     defaultVercelSandboxConfig(),
 		CloudflareSandbox: defaultCloudflareSandboxConfig(),
 		Superserve: SuperserveConfig{
@@ -3939,19 +3918,6 @@ type fileNomadConfig struct {
 	AllocReadyTimeout string   `yaml:"allocReadyTimeout,omitempty"`
 	EvalTimeout       string   `yaml:"evalTimeout,omitempty"`
 	ExecTimeoutSecs   *int     `yaml:"execTimeoutSecs,omitempty"`
-}
-
-type fileBlaxelConfig struct {
-	APIURL          string  `yaml:"apiUrl,omitempty"`
-	Workspace       string  `yaml:"workspace,omitempty"`
-	Region          string  `yaml:"region,omitempty"`
-	Image           *string `yaml:"image,omitempty"`
-	MemoryMB        *int    `yaml:"memoryMB,omitempty"`
-	TTL             string  `yaml:"ttl,omitempty"`
-	IdleTTL         string  `yaml:"idleTTL,omitempty"`
-	Workdir         *string `yaml:"workdir,omitempty"`
-	ExecTimeoutSecs *int    `yaml:"execTimeoutSecs,omitempty"`
-	ForgetMissing   *bool   `yaml:"forgetMissing,omitempty"`
 }
 
 type fileSuperserveConfig struct {
@@ -6569,37 +6535,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			}
 		}
 	}
-	if file.Blaxel != nil {
-		if trusted && file.Blaxel.APIURL != "" {
-			cfg.Blaxel.APIURL = file.Blaxel.APIURL
-		}
-		if trusted && file.Blaxel.Workspace != "" {
-			cfg.Blaxel.Workspace = file.Blaxel.Workspace
-		}
-		if file.Blaxel.Region != "" {
-			cfg.Blaxel.Region = file.Blaxel.Region
-		}
-		applyOptional(&cfg.Blaxel.Image, file.Blaxel.Image)
-		if file.Blaxel.MemoryMB != nil {
-			if *file.Blaxel.MemoryMB < 0 {
-				return exit(2, "blaxel memoryMB must be non-negative")
-			}
-			cfg.Blaxel.MemoryMB = *file.Blaxel.MemoryMB
-		}
-		if file.Blaxel.TTL != "" {
-			cfg.Blaxel.TTL = file.Blaxel.TTL
-		}
-		if file.Blaxel.IdleTTL != "" {
-			cfg.Blaxel.IdleTTL = file.Blaxel.IdleTTL
-		}
-		applyOptional(&cfg.Blaxel.Workdir, file.Blaxel.Workdir)
-		if file.Blaxel.ExecTimeoutSecs != nil {
-			if *file.Blaxel.ExecTimeoutSecs < 0 {
-				return exit(2, "blaxel execTimeoutSecs must be non-negative")
-			}
-			cfg.Blaxel.ExecTimeoutSecs = *file.Blaxel.ExecTimeoutSecs
-		}
-		applyOptional(&cfg.Blaxel.ForgetMissing, file.Blaxel.ForgetMissing)
+	if err := cfg.Blaxel.applyFile(file.Blaxel, trusted); err != nil {
+		return err
 	}
 	if err := cfg.VercelSandbox.applyFile(file.VercelSandbox); err != nil {
 		return err
@@ -8527,21 +8464,8 @@ func applyEnv(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	cfg.Blaxel.APIKey = getenv("CRABBOX_BLAXEL_API_KEY", getenv("BL_API_KEY", cfg.Blaxel.APIKey))
-	cfg.Blaxel.APIURL = getenv("CRABBOX_BLAXEL_API_URL", cfg.Blaxel.APIURL)
-	cfg.Blaxel.Workspace = getenv("CRABBOX_BLAXEL_WORKSPACE", getenv("BL_WORKSPACE", cfg.Blaxel.Workspace))
-	cfg.Blaxel.Region = getenv("CRABBOX_BLAXEL_REGION", getenv("BL_REGION", cfg.Blaxel.Region))
-	cfg.Blaxel.Image = getenv("CRABBOX_BLAXEL_IMAGE", cfg.Blaxel.Image)
-	cfg.Blaxel.MemoryMB = getenvInt("CRABBOX_BLAXEL_MEMORY_MB", cfg.Blaxel.MemoryMB)
-	cfg.Blaxel.TTL = getenv("CRABBOX_BLAXEL_TTL", cfg.Blaxel.TTL)
-	cfg.Blaxel.IdleTTL = getenv("CRABBOX_BLAXEL_IDLE_TTL", cfg.Blaxel.IdleTTL)
-	cfg.Blaxel.Workdir = getenv("CRABBOX_BLAXEL_WORKDIR", cfg.Blaxel.Workdir)
-	cfg.Blaxel.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_BLAXEL_EXEC_TIMEOUT_SECS", cfg.Blaxel.ExecTimeoutSecs)
-	if err != nil {
+	if err := cfg.Blaxel.applyEnv(); err != nil {
 		return err
-	}
-	if value, ok := getenvBool("CRABBOX_BLAXEL_FORGET_MISSING"); ok {
-		cfg.Blaxel.ForgetMissing = value
 	}
 	if err := cfg.VercelSandbox.applyEnv(); err != nil {
 		return err

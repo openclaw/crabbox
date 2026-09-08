@@ -19,8 +19,8 @@ import (
 )
 
 type field struct {
-	name, kind, key, configAlias, env, envAlias, flag, help, defaultExpr                string
-	nonnegative, trustedFileOnly, noFile, noEnv, noFlag, fileIgnoreEmpty, reportApplied bool
+	name, kind, key, configAlias, env, envAlias, flag, help, defaultExpr                                string
+	nonnegative, trustedFileOnly, noFile, noEnv, noFlag, fileIgnoreEmpty, reportApplied, envIntFallback bool
 }
 
 type fileBinding struct {
@@ -236,6 +236,12 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		if f.kind == "int" && !f.nonnegative {
 			return s, fmt.Errorf("%s: pilot int fields require nonnegative policy", f.name)
 		}
+		if value, ok := tags.Lookup("envInt"); ok {
+			if value != "fallback" || f.kind != "int" || f.noEnv || !f.nonnegative {
+				return s, fmt.Errorf("%s: envInt is supported only as fallback for environment-admitted nonnegative int fields", f.name)
+			}
+			f.envIntFallback = true
+		}
 		if value, ok := tags.Lookup("default"); ok {
 			f.defaultExpr, err = defaultExpression(f.kind, value)
 			if err != nil {
@@ -386,6 +392,10 @@ func generate(s schema, source string) ([]byte, error) {
 		case "float64":
 			p("cfg.%s = getenvFloat(%q, cfg.%s)\n", f.name, f.env, f.name)
 		case "int":
+			if f.envIntFallback {
+				p("cfg.%s = getenvInt(%q, cfg.%s)\n", f.name, f.env, f.name)
+				continue
+			}
 			p("{ var err error; cfg.%s, err = getenvNonNegativeInt(%q, cfg.%s); if err != nil { return %serr } }\n", f.name, f.env, f.name, resultPrefix)
 		case "bool":
 			if f.reportApplied {

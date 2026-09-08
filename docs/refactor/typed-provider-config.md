@@ -2,7 +2,7 @@
 
 Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
-runner, Cloudflare Sandbox, and E2B describe their mechanical config bindings
+runner, Cloudflare Sandbox, E2B, and Blaxel describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
 `internal/cli/config_opensandbox.go`,
@@ -10,7 +10,8 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_cloud_run_sandbox.go`,
 `internal/cli/config_fastapi_cloud.go`, `internal/cli/config_railway.go`,
 `internal/cli/config_upstash_box.go`, `internal/cli/config_cloudflare.go`,
-`internal/cli/config_cloudflare_sandbox.go`, and `internal/cli/config_e2b.go`.
+`internal/cli/config_cloudflare_sandbox.go`, `internal/cli/config_e2b.go`, and
+`internal/cli/config_blaxel.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -65,6 +66,12 @@ machine-specific paths. Its header identifies the generator and source file.
    There is no implicit source grant. An optional `default` tag supplies a scalar default checked
    against the field type; otherwise the Go zero value applies. Current integer
    fields require `nonnegative:"true"` for eager file/environment validation.
+   An existing source-specific integer can opt into `envInt:"fallback"` to use
+   core's `getenvInt` for environment input only. It requires an environment
+   source, `int`, and the existing nonnegative policy; empty or unknown modes are
+   rejected. File/default checks stay nonnegative, flags remain deferred, and
+   malformed environment input keeps the previous value while parsed negatives
+   reach the existing later validator. No parser function is supplied by the tag.
    A string field may name one existing fallback environment variable with
    `envAlias`; primary and alias names share collision checks. Empty aliases
    are invalid. The primary value wins, then the alias, then the prior value;
@@ -88,7 +95,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -265,6 +272,15 @@ Their raw-empty versus trimmed-empty differences remain intact. Raw scope and
 routing, user-home roots, and the fixed missing-remote-template display fallback
 remain separate owners. Upload and lifecycle code are not changed by this binding
 migration.
+
+Blaxel's eleven fields retain trusted endpoint/workspace file input, an
+environment-only API key, mixed ignored-empty/presence-based YAML strings, and
+their existing flag/validation order. Only MemoryMB uses the tolerant environment
+integer mode; its file negatives remain eager, while exec timeout stays strict.
+No provenance reporting is added where none existed. The seven configured
+default consumers share generated values without changing their normalization.
+API versions, lifecycle budgets, memory service defaults, upload and retry policy
+remain separate owners.
 
 The generator accepts only these seven exact source grants. Credential handling,
 destination validation and provenance, provider aliases, and provider selection
