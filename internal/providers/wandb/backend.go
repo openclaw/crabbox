@@ -59,7 +59,7 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResul
 	if err != nil {
 		return RunResult{}, err
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	cfg := b.cfg
 	image := blank(strings.TrimSpace(cfg.Wandb.DefaultImage), "ubuntu:24.04")
 	maxLifetime := wandbMaxLifetimeSeconds(cfg)
@@ -139,7 +139,7 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResul
 				result.Session.Kept = false
 			}
 		}
-		result.Total = b.now().Sub(started)
+		result.Total = core.ClockNow(b.rt.Clock).Sub(started)
 		if req.TimingJSON {
 			timingErr := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
 				Provider: providerName, Slug: sandboxID,
@@ -150,7 +150,7 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResul
 		}
 	}()
 
-	commandStarted := b.now()
+	commandStarted := core.ClockNow(b.rt.Clock)
 	var exitCode int
 	var execErr error
 	if err := verifyWandbClaim(claim); err != nil {
@@ -167,7 +167,7 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResul
 	// Command measures just the user's exec; Total includes Acquire+poll.
 	// Conflating them (the previous bug) made commandMs == totalMs on every
 	// fresh-sandbox run, hiding provisioning time from --timing-json users.
-	commandDuration := b.now().Sub(commandStarted)
+	commandDuration := core.ClockNow(b.rt.Clock).Sub(commandStarted)
 	result.ExitCode = exitCode
 	result.Command = commandDuration
 
@@ -416,13 +416,6 @@ func (b *wandbBackend) closeClientAfterOperation() {
 	if err := b.Close(); err != nil {
 		fmt.Fprintf(b.rt.Stderr, "warning: wandb client close failed: %v\n", err)
 	}
-}
-
-func (b *wandbBackend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }
 
 // applyWandbDefaults fills in interpreter / image / lifetime defaults without

@@ -83,7 +83,7 @@ func (b *e2bBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if err := validateE2BUser(b.cfg.E2B.User); err != nil {
 		return err
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := newE2BClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -96,7 +96,7 @@ func (b *e2bBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: e2b warmup keeps the sandbox until explicit stop\n")
 	}
-	total := b.now().Sub(started)
+	total := core.ClockNow(b.rt.Clock).Sub(started)
 	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
 		Provider: e2bProvider,
 		LeaseID:  leaseID,
@@ -132,7 +132,7 @@ func (b *e2bBackend) Run(ctx context.Context, req RunRequest) (RunResult, error)
 		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
 			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-e2b-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+				TempPattern: "crabbox-e2b-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 			})
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
@@ -215,7 +215,7 @@ func (b *e2bBackend) Status(ctx context.Context, req StatusRequest) (statusView,
 	if waitTimeout <= 0 {
 		waitTimeout = 5 * time.Minute
 	}
-	deadline := b.now().Add(waitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
 	pollCtx := ctx
 	cancel := func() {}
 	if req.Wait {
@@ -247,7 +247,7 @@ func (b *e2bBackend) Status(ctx context.Context, req StatusRequest) (statusView,
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return statusView{}, exit(5, "timed out waiting for sandbox %s to become ready", sandboxID)
 		}
 		select {
@@ -383,7 +383,7 @@ func (b *e2bBackend) createSandbox(ctx context.Context, client e2bAPI, repo Repo
 	}
 	cfg.TTL = e2bTimeoutDuration(cfg.TTL)
 	cfg.ServerType = template
-	labels := directLeaseLabels(cfg, leaseID, slug, e2bProvider, "", keep, b.now().UTC())
+	labels := directLeaseLabels(cfg, leaseID, slug, e2bProvider, "", keep, core.ClockNow(b.rt.Clock).UTC())
 	labels["state"] = "ready"
 	labels["workdir"] = workspace
 	labels["template"] = template
@@ -802,11 +802,4 @@ func e2bError(action string, err error) error {
 		return nil
 	}
 	return fmt.Errorf("e2b %s: %w", action, err)
-}
-
-func (b *e2bBackend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }

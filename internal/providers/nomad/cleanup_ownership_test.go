@@ -61,7 +61,7 @@ func TestNomadDestructionFencesValidationPurgeAndAbsence(t *testing.T) {
 			b, _, _ := testBackend(t, fake)
 			claim := createClaim(t, b, "cbx_a11111111111", "fence-crab", "crabbox-a11111111111", "alloc-a")
 			if operation == "cleanup" {
-				expireClaim(t, claim, b.now().Add(-time.Hour))
+				expireClaim(t, claim, core.ClockNow(b.rt.Clock).Add(-time.Hour))
 				claim, _ = readLeaseClaim(claim.LeaseID)
 			}
 			expectedJob := cloneJob(fake.jobs[claim.Labels[claimLabelJobID]])
@@ -134,7 +134,7 @@ func TestNomadCleanupRejectsClaimChangeAfterPreflight(t *testing.T) {
 					fake := newLifecycleFakeClient()
 					b, stdout, _ := testBackend(t, fake)
 					claim := createClaim(t, b, "cbx_a22222222222", "race-crab", "crabbox-a22222222222", "alloc-a")
-					expireClaim(t, claim, b.now().Add(-time.Hour))
+					expireClaim(t, claim, core.ClockNow(b.rt.Clock).Add(-time.Hour))
 					claim, _ = readLeaseClaim(claim.LeaseID)
 					if missing {
 						delete(fake.jobs, claim.Labels[claimLabelJobID])

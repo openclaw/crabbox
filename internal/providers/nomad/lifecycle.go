@@ -48,7 +48,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if req.Options.Tailscale.Enabled {
 		return exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := b.client()
 	if err != nil {
 		return err
@@ -61,7 +61,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: nomad warmup keeps the job until explicit stop\n")
 	}
-	total := b.now().Sub(started)
+	total := core.ClockNow(b.rt.Clock).Sub(started)
 	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
 		Provider: providerName,
 		LeaseID:  leaseID,
@@ -103,7 +103,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
 			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-nomad-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+				TempPattern: "crabbox-nomad-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 			})
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
@@ -193,7 +193,7 @@ func (b *backend) createJob(ctx context.Context, client Client, repo Repo, reque
 	}
 	expiresAt := time.Time{}
 	if b.cfg.TTL > 0 {
-		expiresAt = b.now().UTC().Add(b.cfg.TTL)
+		expiresAt = core.ClockNow(b.rt.Clock).UTC().Add(b.cfg.TTL)
 	}
 	jobID := jobIDForLease(leaseID)
 	job, err := buildJobSpec(b.cfg, jobSpecInput{LeaseID: leaseID, Slug: slug, JobID: jobID, ExpiresAt: expiresAt})
@@ -451,7 +451,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	if err != nil {
 		return err
 	}
-	now := b.now().UTC()
+	now := core.ClockNow(b.rt.Clock).UTC()
 	checked, removed := 0, 0
 	for _, listed := range claims {
 		if listed.Provider != providerName || listed.ProviderScope != claimScope(b.cfg) {
@@ -712,13 +712,6 @@ func (b *backend) client() (Client, error) {
 		return b.clientFactory(b.cfg, b.rt)
 	}
 	return newNomadClient(b.cfg, b.rt)
-}
-
-func (b *backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
 }
 
 func (b *backend) allocReadyTimeout() time.Duration {
