@@ -84,6 +84,86 @@ func TestSchemaFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSchemaEnvironmentOnlyAndAliasFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"environment-only config", `sources:"user,repo,env,flag"`, `sources:"env,flag"`, "absent config tag"},
+		{"empty config", `config:"name"`, `config:""`, "absent config tag"},
+		{"reordered grant", `sources:"user,repo,env,flag"`, `sources:"flag,env"`, "explicit sources"},
+		{"empty alias", `env:"PILOT_NAME"`, `env:"PILOT_NAME" envAlias:""`, "invalid env binding"},
+		{"multiple aliases", `env:"PILOT_NAME"`, `env:"PILOT_NAME" envAlias:"FIRST,SECOND"`, "invalid env binding"},
+		{"whitespace alias", `env:"PILOT_NAME"`, `env:"PILOT_NAME" envAlias:" ALIAS"`, "invalid env binding"},
+		{"integer alias", `env:"PILOT_COUNT"`, `env:"PILOT_COUNT" envAlias:"COUNT_ALIAS"`, "only for string fields"},
+		{"float alias", `env:"PILOT_CPUS"`, `env:"PILOT_CPUS" envAlias:"CPU_ALIAS"`, "only for string fields"},
+		{"boolean alias", `env:"PILOT_ENABLED"`, `env:"PILOT_ENABLED" envAlias:"BOOL_ALIAS"`, "only for string fields"},
+		{"list alias", `env:"PILOT_PORTS"`, `env:"PILOT_PORTS" envAlias:"LIST_ALIAS"`, "only for string fields"},
+		{"own primary collision", `env:"PILOT_NAME"`, `env:"PILOT_NAME" envAlias:"PILOT_NAME"`, "duplicate env binding"},
+		{"later primary collision", `env:"PILOT_NAME"`, `env:"PILOT_NAME" envAlias:"PILOT_COUNT"`, "duplicate env binding"},
+		{"earlier primary collision", `env:"PILOT_COUNT"`, `env:"PILOT_COUNT" envAlias:"PILOT_NAME"`, "duplicate env binding"},
+		{"alias collision", `env:"PILOT_COUNT"`, `env:"PILOT_COUNT" envAlias:"NAME_ALIAS"`, "duplicate env binding"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := sample
+			if tc.name == "empty config" {
+				source = strings.Replace(source, `sources:"user,repo,env,flag"`, `sources:"env,flag"`, 1)
+			}
+			if tc.name == "alias collision" {
+				source = strings.Replace(source, `env:"PILOT_NAME"`, `env:"PILOT_NAME" envAlias:"NAME_ALIAS"`, 1)
+			}
+			_, err := parseSchema([]byte(strings.Replace(source, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestGenerateEnvironmentOnlyAliasBindings(t *testing.T) {
+	source := strings.Replace(sample, `config:"name" `, "", 1)
+	source = strings.Replace(source, `sources:"user,repo,env,flag"`, `sources:"env,flag" envAlias:"PILOT_NAME_ALIAS"`, 1)
+	for _, trusted := range []bool{false, true} {
+		t.Run(map[bool]string{false: "ordinary files", true: "trusted files"}[trusted], func(t *testing.T) {
+			input := source
+			if trusted {
+				input = strings.Replace(input, `sources:"user,repo,env,flag"`, `sources:"user,env,flag"`, 1)
+			}
+			s, err := parseSchema([]byte(input), "PilotConfig", "pilot")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !s.fields[0].noFile || s.fields[0].trustedFileOnly || s.fields[0].envAlias != "PILOT_NAME_ALIAS" {
+				t.Fatalf("unexpected environment-only field: %+v", s.fields[0])
+			}
+			output, err := generate(s, "pilot.go")
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := generate(s, "pilot.go")
+			if err != nil || !bytes.Equal(output, again) {
+				t.Fatalf("nondeterministic output: %v", err)
+			}
+			text := string(output)
+			fileType := strings.SplitN(strings.SplitN(text, "type filePilotConfig struct {", 2)[1], "}", 2)[0]
+			if strings.Contains(fileType, "Name") || strings.Contains(text, "file.Name") {
+				t.Fatal("environment-only field admitted to file input")
+			}
+			if strings.Contains(text, ", trusted bool") != trusted {
+				t.Fatal("environment-only field changed trusted parameter policy")
+			}
+			for _, want := range []string{
+				`const PilotConfigDefaultName string = "test"`,
+				`cfg.Name = getenv("PILOT_NAME", getenv("PILOT_NAME_ALIAS", cfg.Name))`,
+				`fs.String("pilot-name", defaults.Name, "Name")`,
+				`cfg.Name = *values.Name`,
+			} {
+				if !strings.Contains(text, want) {
+					t.Fatalf("missing environment/flag binding %q", want)
+				}
+			}
+			typecheckGenerated(t, input, output)
+		})
+	}
+}
+
 func TestCheckMissingFreshAndStaleOutput(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "pilot.go")
@@ -131,6 +211,12 @@ func TestVercelSandboxGeneratedConfigIsCurrent(t *testing.T) {
 
 func TestCodeSandboxGeneratedConfigIsCurrent(t *testing.T) {
 	if err := run("../../internal/cli/config_codesandbox.go", "../../internal/cli/config_codesandbox_generated.go", "CodeSandboxConfig", "codesandbox", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCuaGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_cua.go", "../../internal/cli/config_cua_generated.go", "CuaConfig", "cua", true); err != nil {
 		t.Fatal(err)
 	}
 }

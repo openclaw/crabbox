@@ -19,8 +19,8 @@ import (
 )
 
 type field struct {
-	name, kind, key, env, flag, help, defaultExpr string
-	nonnegative, trustedFileOnly                  bool
+	name, kind, key, env, envAlias, flag, help, defaultExpr string
+	nonnegative, trustedFileOnly, noFile                    bool
 }
 
 type schema struct {
@@ -111,10 +111,24 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		case "user,repo,env,flag":
 		case "user,env,flag":
 			f.trustedFileOnly = true
+		case "env,flag":
+			f.noFile = true
+			if _, ok := tags.Lookup("config"); ok {
+				return s, fmt.Errorf("%s: env,flag sources require an absent config tag", f.name)
+			}
 		default:
-			return s, fmt.Errorf("%s requires explicit sources user,repo,env,flag or user,env,flag", f.name)
+			return s, fmt.Errorf("%s requires explicit sources user,repo,env,flag, user,env,flag, or env,flag", f.name)
 		}
-		for _, binding := range []struct{ label, value string }{{"config", f.key}, {"env", f.env}, {"flag", f.flag}} {
+		bindings := []struct{ label, value string }{{"env", f.env}, {"flag", f.flag}}
+		if !f.noFile {
+			bindings = append([]struct{ label, value string }{{"config", f.key}}, bindings...)
+		}
+		alias, hasAlias := tags.Lookup("envAlias")
+		if hasAlias {
+			f.envAlias = alias
+			bindings = append(bindings, struct{ label, value string }{"env", alias})
+		}
+		for _, binding := range bindings {
 			if binding.value == "" || strings.ContainsAny(binding.value, " \t\n,\"`") {
 				return s, fmt.Errorf("%s: invalid %s binding", f.name, binding.label)
 			}
@@ -136,6 +150,9 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		case "string", "int", "float64", "bool", "[]string":
 		default:
 			return s, fmt.Errorf("%s: unsupported config type %s", f.name, f.kind)
+		}
+		if hasAlias && f.kind != "string" {
+			return s, fmt.Errorf("%s: envAlias is supported only for string fields", f.name)
 		}
 		if value, ok := tags.Lookup("nonnegative"); ok {
 			if f.kind != "int" || value != "true" {
@@ -197,6 +214,9 @@ func generate(s schema, source string) ([]byte, error) {
 	p(")\n\n")
 	p("type file%s struct {\n", s.name)
 	for _, f := range s.fields {
+		if f.noFile {
+			continue
+		}
 		p("%s *%s `yaml:%q`\n", f.name, f.kind, f.key+",omitempty")
 	}
 	p("}\n\n")
@@ -221,6 +241,9 @@ func generate(s schema, source string) ([]byte, error) {
 	}
 	p("func (cfg *%s) applyFile(file *file%s%s) error {\nif file == nil { return nil }\n", s.name, s.name, trustedParameter)
 	for _, f := range s.fields {
+		if f.noFile {
+			continue
+		}
 		condition := ""
 		if f.trustedFileOnly {
 			condition = "trusted && "
@@ -240,7 +263,11 @@ func generate(s schema, source string) ([]byte, error) {
 	for _, f := range s.fields {
 		switch f.kind {
 		case "string":
-			p("cfg.%s = getenv(%q, cfg.%s)\n", f.name, f.env, f.name)
+			fallback := "cfg." + f.name
+			if f.envAlias != "" {
+				fallback = fmt.Sprintf("getenv(%q, %s)", f.envAlias, fallback)
+			}
+			p("cfg.%s = getenv(%q, %s)\n", f.name, f.env, fallback)
 		case "float64":
 			p("cfg.%s = getenvFloat(%q, cfg.%s)\n", f.name, f.env, f.name)
 		case "int":

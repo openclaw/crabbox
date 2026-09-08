@@ -1,8 +1,9 @@
 # Typed provider config bindings
 
-Vercel Sandbox and CodeSandbox describe their mechanical config bindings once,
-on the concrete structs in `internal/cli/config_vercel_sandbox.go` and
-`internal/cli/config_codesandbox.go`. `scripts/configgen` reads each declaration
+Vercel Sandbox, CodeSandbox, and CUA describe their mechanical config bindings
+once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
+`internal/cli/config_codesandbox.go`, and `internal/cli/config_cua.go`.
+`scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 pointer-valued YAML input fields, compiled defaults, file/environment overlays,
 and flag storage, registration, and presence-based application.
@@ -31,14 +32,21 @@ machine-specific paths. Its header identifies the generator and source file.
 
 1. Add an exported, singly named field to the provider's config struct. Supported types
    are `string`, `int`, `float64`, `bool`, and `[]string`.
-2. Set its `config` YAML key, `env` variable, `flag` spelling, and `help` text.
+2. Set its `env` variable, `flag` spelling, and `help` text; file-supported fields
+   also need a `config` YAML key.
    Explicitly set `sources:"user,repo,env,flag"` only after establishing that the
    value is safe in repository configuration and on argv. Use the exact
    `sources:"user,env,flag"` grant for an existing trusted-file-only binding;
-   the loader's existing trust decision gates its file application. There is no
-   implicit source grant. An optional `default` tag supplies a scalar default checked
+   the loader's existing trust decision gates its file application. An existing
+   environment/flag-only field uses `sources:"env,flag"` and must omit the
+   `config` tag entirely, including an empty tag. There is no implicit source
+   grant. An optional `default` tag supplies a scalar default checked
    against the field type; otherwise the Go zero value applies. Current integer
    fields require `nonnegative:"true"` for eager file/environment validation.
+   A string field may name one existing fallback environment variable with
+   `envAlias`; primary and alias names share collision checks. Empty aliases
+   are invalid. The primary value wins, then the alias, then the prior value;
+   empty values fall through, without trimming nonempty values.
 3. Keep semantic and cross-field checks in the provider's
    validation function. Wire actual provider behavior there or in its
    existing client code as appropriate. Config presentation remains explicit in
@@ -46,7 +54,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -95,10 +103,18 @@ infer trust from filenames. The other nine fields retain repository support.
 CodeSandbox's provider aliases, generic sizing rejection, and semantic validation
 remain in the provider wrapper, including their existing order.
 
-The generator accepts only those two exact source grants. Credential
-destinations, source-bound secrets, aliases, and provider selection policy stay
-handwritten and require separate design before migration. Do not mark a
-sensitive field as repo-safe just to make generation succeed.
+CUA's fourteen runtime/flag fields include thirteen YAML fields. Its `APIURL`
+retains environment/flag-only input and is absent even from trusted user YAML.
+`CRABBOX_CUA_API_URL` retains precedence over `CUA_BASE_URL`. The four bridge/SDK
+settings retain trusted-file-only admission; the other nine YAML fields remain
+repository-safe. Its sizing guard still precedes the flag-value type assertion,
+unlike CodeSandbox's wrapper. Read-only lifecycle restrictions are unchanged.
+
+The generator accepts only these three exact source grants. Credential handling,
+destination validation and provenance, provider aliases, and provider selection
+policy stay handwritten. A declared environment alias copies the existing string
+fallback only; it does not define credential forwarding or destination authority.
+Do not mark a sensitive field as repo-safe just to make generation succeed.
 
 Remaining providers can be considered individually after their existing
 contracts are captured. This pilot does not mandate converting the full catalog
