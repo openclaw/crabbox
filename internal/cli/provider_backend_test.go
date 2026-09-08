@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -133,6 +135,136 @@ func TestFinalizeRunResultClassifiesStatus(t *testing.T) {
 			got := FinalizeRunResult(tc.result, tc.err)
 			if got.Status != tc.want || got.ErrorKind != tc.wantError {
 				t.Fatalf("status/error=%q/%q want %q/%q", got.Status, got.ErrorKind, tc.want, tc.wantError)
+			}
+		})
+	}
+}
+
+type runClassificationTestError struct {
+	err   error
+	cause error
+}
+
+func (e runClassificationTestError) Error() string                 { return e.err.Error() }
+func (e runClassificationTestError) Unwrap() error                 { return e.err }
+func (e runClassificationTestError) RunClassificationCause() error { return e.cause }
+
+type runClassificationTestJoin []error
+
+func (e runClassificationTestJoin) Error() string   { return "joined failures" }
+func (e runClassificationTestJoin) Unwrap() []error { return e }
+
+func TestRunClassificationUsesOnlyPrimaryMarker(t *testing.T) {
+	primary := runClassificationTestError{err: context.DeadlineExceeded, cause: context.Canceled}
+	providerErr := errors.New("provider failed")
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status RunStatus
+		kind   RunErrorKind
+	}{
+		{name: "direct", err: primary, status: RunStatusCanceled, kind: RunErrorCanceled},
+		{name: "single wrapper", err: fmt.Errorf("readiness: %w", primary), status: RunStatusCanceled, kind: RunErrorCanceled},
+		{name: "primary join", err: errors.Join(primary, context.DeadlineExceeded), status: RunStatusCanceled, kind: RunErrorCanceled},
+		{name: "first nonnil child", err: runClassificationTestJoin{nil, primary, providerErr}, status: RunStatusCanceled, kind: RunErrorCanceled},
+		{name: "nil marker continues", err: runClassificationTestError{err: primary}, status: RunStatusCanceled, kind: RunErrorCanceled},
+		{name: "secondary marker keeps legacy graph", err: errors.Join(providerErr, primary), status: RunStatusTimedOut, kind: RunErrorTimeout},
+		{name: "ordinary join unchanged", err: errors.Join(context.Canceled, context.DeadlineExceeded), status: RunStatusTimedOut, kind: RunErrorTimeout},
+		{name: "ordinary provider unchanged", err: providerErr, status: RunStatusFailed, kind: RunErrorProvider},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := FinalizeRunResult(RunResult{}, tc.err)
+			if result.Status != tc.status || result.ErrorKind != tc.kind {
+				t.Fatalf("outcome=%s/%s want=%s/%s", result.Status, result.ErrorKind, tc.status, tc.kind)
+			}
+		})
+	}
+	pinned := RunResult{ExitCode: 23, Status: RunStatusFailed, ErrorKind: RunErrorCommandExit}
+	if got := FinalizeRunResult(pinned, primary); got.ExitCode != pinned.ExitCode || got.Status != pinned.Status || got.ErrorKind != pinned.ErrorKind {
+		t.Fatalf("pinned outcome changed: %#v", got)
+	}
+}
+
+func TestCommandCaptureBufferMethodSurface(t *testing.T) {
+	output := newCommandCaptureBuffer(4, nil)
+	var writer io.Writer = &output
+	if _, ok := writer.(io.ReaderFrom); ok {
+		t.Error("capture exposes ReaderFrom outside its cancellation-aware Write")
+	}
+	if _, ok := writer.(io.StringWriter); ok {
+		t.Error("capture exposes WriteString outside its cancellation-aware Write")
+	}
+}
+
+func TestCommandCaptureBufferCancellation(t *testing.T) {
+	for _, limit := range []int{-1, 0, 4} {
+		t.Run(strconv.Itoa(limit), func(t *testing.T) {
+			output := newCommandCaptureBuffer(limit, nil)
+			calls := 0
+			output.cancel = func() {
+				calls++
+				if output.String() != "abcd" || !output.buffer.Exceeded() {
+					t.Fatalf("cancel preceded capture: output=%q overflow=%v", output.String(), output.buffer.Exceeded())
+				}
+			}
+			for i, input := range []string{"", "abcd", "e", "", "f"} {
+				n, err := output.Write([]byte(input))
+				if n != len(input) || err != nil {
+					t.Fatalf("write=%d/%v, want %d/nil", n, err, len(input))
+				}
+				wantCalls := 0
+				if limit > 0 && i >= 2 {
+					wantCalls = i - 1
+				}
+				if calls != wantCalls {
+					t.Fatalf("write %d: cancel calls=%d, want %d", i, calls, wantCalls)
+				}
+			}
+			want := "abcdef"
+			if limit > 0 {
+				want = "abcd"
+			}
+			if output.String() != want {
+				t.Fatalf("output=%q, want %q", output.String(), want)
+			}
+		})
+	}
+}
+
+func TestCommandOutputWriterOrdering(t *testing.T) {
+	writeErr := errors.New("output unavailable")
+	for _, tc := range []struct {
+		name     string
+		disabled bool
+		err      error
+	}{
+		{name: "stream then capture"},
+		{name: "stream failure", err: writeErr},
+		{name: "capture disabled", disabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output := newCommandCaptureBuffer(4, nil)
+			calls := 0
+			writer := writerFunc(func(p []byte) (int, error) {
+				calls++
+				if output.String() != "" {
+					t.Fatal("capture ran before external writer")
+				}
+				if tc.err != nil {
+					return 0, tc.err
+				}
+				return len(p), nil
+			})
+			n, err := commandOutputWriter(writer, &output, tc.disabled).Write([]byte("ab"))
+			wantCount, wantOutput := 2, "ab"
+			if tc.err != nil {
+				wantCount = 0
+			}
+			if tc.err != nil || tc.disabled {
+				wantOutput = ""
+			}
+			if calls != 1 || n != wantCount || err != tc.err || output.String() != wantOutput {
+				t.Fatalf("calls=%d write=%d/%v output=%q", calls, n, err, output.String())
 			}
 		})
 	}

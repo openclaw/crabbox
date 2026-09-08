@@ -136,6 +136,29 @@ crabbox checkpoint create --id swift-crab --mode native --json
 --discard-failed            Explicitly discard a verified failed capture and retire.
 ```
 
+On success, `--json` prints the checkpoint record. A direct native provider that
+can prove it never attempted image submission may instead return this failure
+object, with a nonzero exit status, after the exact local reservation is removed
+and its absence is verified:
+
+```json
+{
+  "schema": "crabbox.checkpoint.create.failure.v1",
+  "outcome": "not_submitted",
+  "provider": "machine0",
+  "leaseId": "cbx_abcdef012345",
+  "checkpointId": "chk_0123456789abcdef",
+  "localReservation": "removed"
+}
+```
+
+The provider, lease, and checkpoint identify this invocation only. This result
+does not mean the source restarted successfully or is ready for use; source
+cleanup remains the lease owner's responsibility. Failed local cleanup emits no
+such result. Coordinator-managed captures, lost replies, interrupted commands,
+and failures after submission retain their existing recovery behavior. Never
+infer non-submission from an empty image ID, a missing checkpoint, or error text.
+
 `--mode` also accepts the aliases `provider-native`/`vm` (native),
 `ami`/`image` (image), `snapshot`/`disk`/`disk-snapshot` (disk snapshot),
 `workspace`/`workspace-archive` (archive), and `recipe`. `--strategy auto`
@@ -186,11 +209,20 @@ Before a native snapshot, Crabbox cleans the source: on Linux it runs
 `cloud-init clean --logs` (so a forked box regenerates SSH host keys) and
 `sync` to flush filesystem writes. Preparation uses the distro's
 `/usr/bin/python3` and installed cloud-init module to resolve its configured
-runtime directory. It requires completed initialization and a runtime directory
-on `tmpfs`, outside cloud-init's disk cache. The existing completion records are
+runtime directory. Before cleaning, it waits up to 30 seconds for cloud-init
+completion using `status --wait --format=json`; both a successful exit and
+`status: done` are required. Disabled initialization and recoverable errors
+remain failures. The runtime directory must be on `tmpfs`, outside cloud-init's
+disk cache. The existing completion records are
 copied there before cleaning, so the running source remains ready while a new
-VM must complete its own boot. Preparation errors stop capture before creating
-an image.
+VM must complete its own boot. An immediate status check after cleaning must
+still report successful completion; it does not wait to mask lost boot state.
+Status failures identify the pre-clean or post-clean phase and observed state.
+Preparation errors stop capture before creating an image. Direct AWS and
+Hetzner failures confirmed before their image-create request also release the
+fresh local reservation and can emit the non-submission JSON receipt above.
+This does not certify source rollback. Errors once the image request begins
+retain the checkpoint for recovery; existing uncertain records are unchanged.
 
 Direct AWS and Hetzner captures record the accepted image identity before
 waiting for readiness. If the process is interrupted during that wait, the

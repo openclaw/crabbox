@@ -295,8 +295,10 @@ gh workflow run devtools-image-publish.yml \
 ```
 
 Use `macos_host=allocate` only when no suitable EC2 Mac Dedicated Host is
-available. The workflow uploads its complete mint logs and macOS lifecycle
-evidence as a 30-day Actions artifact. Candidate failure leaves the default
+available. Unmeasured publication uploads its complete mint logs and macOS lifecycle
+evidence as a 30-day diagnostic Actions artifact. These diagnostics are not
+sanitized public proof. Measured Linux publication uploads only its allowlisted
+manifest; its private evidence and diagnostics are excluded. Candidate failure leaves the default
 unchanged. Publication is serialized per target; promotion atomically captures
 the current scoped default, and promoted-image smoke failure attempts a
 compare-and-swap restore. If another operator promotes a newer image first,
@@ -535,6 +537,84 @@ dependency using `--offline --ignore-scripts`, and loads that dependency. A fail
 probe stops the stage; `devtools-smoke-ok` is printed only after the required
 checks finish. These offline probes do not replace image-selection,
 credential-isolation, rollback, or cleanup qualification.
+
+### Measured Linux publication
+
+Opt in with `--measured --max-p95-runner-total-ms <positive-integer>`.
+The workflow exposes the same opt-in as `measured=true` and
+`max_p95_runner_total_ms`. It is off by default. Windows, macOS, and the ordinary
+three-lease Linux lifecycle do not gain benchmark launches.
+
+The measured plan schedules **12 leases**, not three: three baseline
+measurements, three explicit-candidate measurements, three normal
+promoted-selection measurements, and the source/candidate/promoted lifecycle
+leases. The wrapper prints this plan, the threshold, and the per-lease TTL
+before paid work. These are planned successful allocations, not a hard cap:
+provider acquisition may retry and add launch attempts. The wrapper does not
+enforce an attempt or dollar cap, or estimate prices. Review the extra
+allocations and image storage costs before adding `--run`; do not reuse
+the separate qualification workflow's three-launch budget.
+
+Choose a positive absolute p95 runner-time cap before the campaign, based on
+the operator's acceptance policy. There is no default performance target.
+All three cohorts must pass that same cap. Their p95 values are also recorded
+side by side as a descriptive baseline comparison; passing `bench check` does
+not establish a speedup or statistical significance.
+
+Measured mode validates the bundled Linux recipe and its exact input hashes
+before the first CLI operation. It requires clean source, an explicit region
+and instance type, x86_64, desktop/browser capabilities, the bundled prep
+script without Linux installer overrides, promotion, and cleanup. Custom prep,
+`--keep-lease`, `--no-promote`, and FSR are rejected in this mode.
+Set the existing `CRABBOX_OWNER` and `CRABBOX_ORG` selectors for a bounded
+administrative lease listing. Before allocation, offline `config show` must
+report a managed coordinator with configured user/admin auth, the requested
+region, and an empty effective `aws.ami`. Clearing the environment override
+does not clear an AMI inherited from config; remove that override first.
+Offline config cannot inspect the coordinator's own environment. A
+coordinator-side image override is rejected from the first recorded selection,
+after stopping that allocation; this is not a no-spend server-side preflight.
+
+Each measurement uses a fresh `run --timing-record`, the same `true` command,
+source revision, machine request, region, capabilities, and
+`--full-resync --no-hydrate` policy. `--keep --stop-after never --lease-output`
+publishes a retained-lease handle before command execution. No `--id` or pool
+is supplied. The handle must say `reused=false` and `kept=true`; its lease and
+run IDs must match the timing record. The wrapper reads the exact lease from
+the existing bounded administrative list, checks actual instance and image
+regions, and rejects mixed baseline images or repeated provider instances.
+Missing or ambiguous records fail closed; it never guesses a lease from a slug.
+
+The wrapper confirms cleanup with exact-ID `stop` on success or failure before
+starting another sample. A failed run keeps its original exit status even if
+cleanup also fails. Interruptions recover an already-published retained handle
+without waiting for a final timing record. The original runner timing excludes the subsequent evidence
+read and cleanup wait, consistently across all cohorts. Warmup timings are not
+benchmark samples, and a `--cold` label alone is not evidence of fresh acquisition.
+Existing `bench report` and
+`bench check` own the timing distributions and acceptance policy. Missing,
+mixed, reused, or insufficient observations block promotion; measured `0ms`
+sync remains valid.
+
+Candidate lifecycle cleanup and all candidate measurements finish before
+transactional promotion. The original promotion receipt remains unchanged.
+The baseline image is reconciled with the receipt's captured previous default
+before the post-promotion smoke and again before final acceptance.
+The normal-selection path clears the environment AMI override, and
+all promoted measurements must prove the new image was selected normally.
+Rollback remains armed through the final measurements and manifest creation.
+Failure attempts the existing receipt-based restore and exact failed catalog
+revision retirement, retaining the original failure status. A concurrent
+newer promotion causes visible CAS rejection, never an overwrite.
+
+The public `manifest.json` contains only recipe/source/policy digests, fixed
+phase and outcome labels, numeric counts and measures, and check reasons.
+`plannedLeaseCount` is the campaign plan, not an observed provider-attempt count.
+Raw records, command text, paths, image/lease identities, promotion receipts,
+handles, and diagnostic logs remain in the private runner directory and are
+not uploaded for measured publication. Full config and administrative listings
+are never logged or persisted. A failed campaign does not emit a successful
+public manifest.
 
 ## macOS images
 

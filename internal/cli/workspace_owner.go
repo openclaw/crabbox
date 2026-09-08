@@ -109,7 +109,7 @@ func runWorkspaceOwnerSSHProtocol(ctx context.Context, target SSHTarget, remote 
 	if input != nil {
 		source = bytes.NewReader(input)
 	}
-	var stdout, stderr synchronizedBuffer
+	stdout, stderr := newSynchronizedBuffer(0), newSynchronizedBuffer(0)
 	err = executePreparedSSH(ctx, &target, remote, source, int64(len(input)), sshCommandLimit{execution: workspaceOwnerRemoteTimeout, control: true},
 		workspaceOwnerSSHConnectTimeoutOption, workspaceOwnerSSHConnectionAttemptsOption, &stdout, &stderr)
 	output = strings.TrimSpace(stdout.String())
@@ -222,7 +222,7 @@ func stageWorkspaceOwnerWindowsWitness(ctx context.Context, target SSHTarget, ow
 		cleanup: remoteWorkspaceOwnerWindowsCleanupWitnessCommand(name),
 		name:    name,
 	}
-	var output synchronizedBuffer
+	output := newSynchronizedBuffer(0)
 	if err := runSSHInput(ctx, target, remoteWorkspaceOwnerWindowsStageWitnessCommand(owner.key, owner.token, name, int64(len([]byte(script)))), strings.NewReader(script), &output, &output); err != nil {
 		detail := trimFailureDetail(strings.TrimSpace(output.String()))
 		// The remote write may have succeeded even when its SSH result was lost.

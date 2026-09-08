@@ -153,6 +153,44 @@ Windows and macOS targets use their own candidate lists (Windows WSL2 uses
 nested-virtualization families; macOS uses `mac*.metal` types). The default
 class is `beast`.
 
+## Provisioning diagnostics
+
+For coordinator-managed groups in the default VPC, VPC discovery and the
+[default-VPC group-name lookup](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeSecurityGroups.html)
+run together. Both reads finish and the returned group scope is checked before
+any ingress change. Subnet-scoped discovery still resolves the subnet's VPC
+first; explicitly configured and private-workspace groups keep their existing
+lookup paths.
+
+Coordinator AWS create logs use the `crabbox_aws_provisioning` component. Each
+fixed operation bucket can include `transport` totals for its signed requests.
+Nested operations own their own totals; concurrent creates and preparation
+branches remain separate. These are bounded log counters, not stored lease
+state or permission decisions.
+
+`requests` counts calls entering credential preparation. `credentialsMs` and
+`credentialFailures` cover that preparation; `requestMs` and `requestFailures`
+cover the inherited SDK fetch call. A returned HTTP error response is not a
+transport failure. The operation's existing error count records how its caller
+handled that response. Response-body reading and decoding remain in the outer
+operation duration.
+
+`signInvocations`, `signCompletions`, `signFailures` and `signMs` observe the
+SDK's public signing method without changing its retry policy. Repeated signing
+invocations on a request indicate retry-loop re-entry; a completed signature
+alone does not prove that a server received the request. Signing time is part
+of `requestMs`, so do not add them together. These totals cannot distinguish
+network latency from SDK retry backoff or identify intermediate response status
+codes. They do not establish throttling. Requests outside a measured create
+operation and qualification-authority RPC transport do not add these totals.
+
+These durations use `Date.now()`. In deployed Cloudflare Workers,
+[timers advance only after I/O](https://developers.cloudflare.com/workers/runtime-apis/performance/).
+A `0` in `credentialsMs` or `signMs` therefore does not establish zero CPU work
+or zero elapsed time. Local Node fixtures use different timer behavior; their
+timings validate attribution, not deployed CPU cost. Invocation, completion and
+failure counters remain observations independent of this timer limitation.
+
 ## Configuration
 
 ```yaml
@@ -192,6 +230,10 @@ source ranges, then removes exact duplicates before reconciling each SSH port.
 Whitespace is trimmed; distinct IPv4 and IPv6 ranges keep their order. This does
 not reuse observed permissions: each unique desired range is still authorized,
 and stale-rule pruning and world-access revocation keep their existing policy.
+For each port, up to four authorization requests run together after revocation
+finishes. Every batch settles before recovery, another batch or the next port;
+rule-limit recovery compacts once and retries each affected rule. Diagnostic
+request-duration totals include overlapping requests and can exceed wall time.
 
 ### Environment variables (direct mode)
 

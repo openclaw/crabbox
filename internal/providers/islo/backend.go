@@ -157,7 +157,7 @@ func (b *isloBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	return nil
 }
 
-func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *isloBackend) Run(ctx context.Context, req RunRequest) (result RunResult, retErr error) {
 	if err := rejectIsloSyncOptions(req); err != nil {
 		return RunResult{}, err
 	}
@@ -175,6 +175,11 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 	acquired := false
 	tailnetEnrolled := false
 	tailnetReady := false
+	var tailnetAdmission *isloTailscaleAdmission
+	tailnetErrorBlocksRun := func(err error) bool {
+		unavailable := errors.Is(err, core.ErrTailnetPeerUnavailable) || errors.Is(err, core.ErrTailnetPeerValidationUnavailable)
+		return err != nil && (b.cfg.Tailscale.Enabled || tailnetEnrolled || !unavailable)
+	}
 	if req.ID == "" {
 		leaseID, name, slug, acquiredClaim, err = b.createSandbox(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
 		if err != nil {
@@ -202,59 +207,73 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 				return RunResult{}, exit(2, "provider=islo: cannot enable Tailscale in place on a reused plain lease; create a new lease with --tailscale")
 			}
 		}
-		if b.cfg.Tailscale.Enabled {
-			meta, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID, true)
-			if err != nil {
-				return RunResult{}, err
-			}
-			tailnetReady = meta.Enabled
-		} else {
-			meta, err := b.ensureLeaseTailscale(ctx, client, name, slug, leaseID, true)
-			if err != nil {
-				unavailable := errors.Is(err, core.ErrTailnetPeerUnavailable) ||
-					errors.Is(err, core.ErrTailnetPeerValidationUnavailable)
-				if tailnetEnrolled || !unavailable {
-					return RunResult{}, err
-				}
-			}
-			tailnetReady = err == nil && meta.Enabled
+		tailnetAdmission, err = b.admitLeaseTailscale(ctx, client, name, leaseID)
+		if tailnetErrorBlocksRun(err) {
+			return RunResult{}, err
 		}
 	}
 	shouldStop := acquired && !req.Keep
-	if shouldStop {
-		defer func() {
-			if !shouldStop {
-				return
-			}
-			if err := b.releaseIsloLease(client, acquiredClaim, name); err != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: islo stop failed for %s: %v\n", name, err)
-			}
-		}()
-	}
-	result := RunResult{
-		SyncDelegated: true,
+	result = RunResult{
+		Provider: isloProvider, LeaseID: leaseID, Slug: slug, SyncDelegated: true,
 		Session: &core.RunSessionHandle{
-			Provider:       isloProvider,
-			LeaseID:        leaseID,
-			Slug:           slug,
-			Reused:         !acquired,
-			Kept:           !shouldStop,
-			CleanupCommand: isloCleanupCommand(leaseID),
+			Provider: isloProvider, LeaseID: leaseID, Slug: slug,
+			Reused: !acquired, Kept: true, CleanupCommand: isloCleanupCommand(leaseID),
 		},
 	}
-	finishResult := func() RunResult {
+	syncDuration := time.Duration(0)
+	var syncPhases []timingPhase
+	if req.NoSync {
+		syncPhases = []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
+	}
+	commandRan := false
+	defer func() {
+		result, retErr = shared.PinDelegatedRunFailure(result, retErr)
+		if retErr != nil {
+			handleDelegatedRunFailure(b.rt.Stderr, req, isloProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		}
+		if shouldStop {
+			if cleanupErr := b.releaseIsloLease(client, acquiredClaim, name); cleanupErr != nil {
+				result, retErr = shared.AppendDelegatedRunFailure(result, retErr, fmt.Errorf("islo stop failed for %s: %w", name, cleanupErr), 1)
+			} else {
+				result.Session.Kept = false
+			}
+		}
 		result.Total = b.now().Sub(started)
-		result.Session.Kept = !shouldStop
-		return result
+		result = core.FinalizeRunResult(result, retErr)
+		if commandRan {
+			if req.NoSync {
+				fmt.Fprintf(b.rt.Stderr, "islo run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
+			} else {
+				fmt.Fprintf(b.rt.Stderr, "islo run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
+			}
+		}
+		if req.TimingJSON {
+			timingErr := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
+				Provider: isloProvider, LeaseID: leaseID, Slug: slug, SyncDelegated: true,
+				SyncMs: syncDuration.Milliseconds(), SyncPhases: syncPhases, SyncSkipped: req.NoSync,
+				CommandMs: result.Command.Milliseconds(), TotalMs: result.Total.Milliseconds(),
+				ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label), Artifacts: result.Artifacts,
+			}, result, retErr))
+			result, retErr = shared.AppendDelegatedRunFailure(result, retErr, timingErr, core.ExitCodeForError(timingErr, 1))
+		}
+		if retErr != nil {
+			retErr = shared.ExitErrorWithCause(result.ExitCode, shared.RedactErrorSecrets(retErr.Error(), b.cfg.Islo.APIKey), retErr)
+		}
+	}()
+
+	if !acquired {
+		meta, err := b.ensureAdmittedLeaseTailscale(ctx, client, name, slug, leaseID, tailnetAdmission, true)
+		if tailnetErrorBlocksRun(err) {
+			return result, err
+		}
+		tailnetReady = err == nil && meta.Enabled
 	}
 	if tailnetEnrolled {
 		if err := b.repairWorkspaceOwnership(ctx, client, name, workspace); err != nil {
-			return finishResult(), err
+			return result, err
 		}
 	}
 	fmt.Fprintf(b.rt.Stderr, "provider=islo lease=%s sandbox=%s\n", leaseID, name)
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
 	workloadUser := ""
 	if tailnetEnrolled {
 		workloadUser = isloWorkloadUser
@@ -263,72 +282,32 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 		var err error
 		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, name, req, workloadUser)
 		if err != nil {
-			return finishResult(), err
+			return result, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
 	} else if err := b.prepareWorkspace(ctx, client, name, workspace, workloadUser, false); err != nil {
-		return finishResult(), err
+		return result, err
 	}
 	commandStart := b.now()
 	exitCode, runErr := b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, isloWorkloadEnv(req.Env, tailnetReady), workloadUser)
 	commandDuration := b.now().Sub(commandStart)
-	result.ExitCode = exitCode
+	commandRan = true
 	result.Command = commandDuration
-	var artifactErr error
-	if runErr == nil && result.ExitCode == 0 && core.HasDelegatedRunDownloadRequests(req) {
-		downloadBackend := isloRunDownloadBackend{isloBackend: b, user: workloadUser}
-		result.Artifacts, artifactErr = core.MaterializeDelegatedRunDownloads(ctx, downloadBackend, req, leaseID, b.rt.Stderr)
-		if artifactErr != nil {
-			result.ExitCode = core.ExitCodeForError(artifactErr, 7)
-		}
-	}
-	result.Total = b.now().Sub(started)
-	if req.NoSync {
-		fmt.Fprintf(b.rt.Stderr, "islo run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	} else {
-		fmt.Fprintf(b.rt.Stderr, "islo run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	}
-	if req.TimingJSON {
-		var timingErr error
-		switch {
-		case artifactErr != nil:
-			timingErr = artifactErr
-		case runErr != nil:
-			timingErr = runErr
-		case result.ExitCode != 0:
-			timingErr = ExitError{Code: result.ExitCode, Message: fmt.Sprintf("islo run exited %d", result.ExitCode)}
-		}
-		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-			Provider:      isloProvider,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			SyncDelegated: true,
-			SyncMs:        syncDuration.Milliseconds(),
-			SyncPhases:    syncPhases,
-			SyncSkipped:   req.NoSync,
-			CommandMs:     result.Command.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      result.ExitCode,
-			Label:         strings.TrimSpace(req.Label),
-			Artifacts:     result.Artifacts,
-		}, result, timingErr)); err != nil {
-			return result, err
-		}
-	}
-	if artifactErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, isloProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		result.Session.Kept = !shouldStop
-		return result, artifactErr
-	}
+	outcome := shared.FinalizeDelegatedCommandOutcome(exitCode, runErr)
+	result.ExitCode, result.Status, result.ErrorKind = outcome.ExitCode, outcome.Status, outcome.ErrorKind
 	if runErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, isloProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		result.Session.Kept = !shouldStop
-		return result, ExitError{Code: 1, Message: fmt.Sprintf("islo run failed: %v", runErr)}
+		return result, shared.ExitErrorWithCause(result.ExitCode, fmt.Sprintf("islo run failed: %v", runErr), runErr)
 	}
 	if exitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, isloProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		result.Session.Kept = !shouldStop
 		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("islo run exited %d", exitCode)}
+	}
+	if core.HasDelegatedRunDownloadRequests(req) {
+		downloadBackend := isloRunDownloadBackend{isloBackend: b, user: workloadUser}
+		var artifactErr error
+		result.Artifacts, artifactErr = core.MaterializeDelegatedRunDownloads(ctx, downloadBackend, req, leaseID, b.rt.Stderr)
+		if artifactErr != nil {
+			return shared.AppendDelegatedRunFailure(result, nil, artifactErr, core.ExitCodeForError(artifactErr, 7))
+		}
 	}
 	return result, nil
 }

@@ -25137,7 +25137,7 @@ describe("fleet lease identity and idle", () => {
         }
         if (action === "DescribeSecurityGroups") {
           return new Response(`<?xml version="1.0" encoding="UTF-8"?>
-<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-shared</groupId><ipPermissions><item><ipProtocol>tcp</ipProtocol><fromPort>22</fromPort><toPort>22</toPort><ipRanges><item><cidrIp>198.51.100.10/32</cidrIp><description>Crabbox SSH</description></item><item><cidrIp>198.51.100.20/32</cidrIp><description>Crabbox SSH</description></item></ipRanges></item></ipPermissions></item></securityGroupInfo></DescribeSecurityGroupsResponse>`);
+<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-shared</groupId><groupName>crabbox-runners</groupName><vpcId>vpc-default</vpcId><ipPermissions><item><ipProtocol>tcp</ipProtocol><fromPort>22</fromPort><toPort>22</toPort><ipRanges><item><cidrIp>198.51.100.10/32</cidrIp><description>Crabbox SSH</description></item><item><cidrIp>198.51.100.20/32</cidrIp><description>Crabbox SSH</description></item></ipRanges></item></ipPermissions></item></securityGroupInfo></DescribeSecurityGroupsResponse>`);
         }
         if (action === "RevokeSecurityGroupIngress") {
           revokedCIDRs.push(params.get("IpPermissions.1.IpRanges.1.CidrIp") ?? "");
@@ -25203,7 +25203,7 @@ describe("fleet lease identity and idle", () => {
         }
         if (action === "DescribeSecurityGroups") {
           return new Response(`<?xml version="1.0" encoding="UTF-8"?>
-<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-auto</groupId><groupName>crabbox-runners</groupName><ipPermissions><item><ipProtocol>tcp</ipProtocol><fromPort>22</fromPort><toPort>22</toPort><ipRanges><item><cidrIp>198.51.100.10/32</cidrIp><description>Crabbox SSH</description></item><item><cidrIp>198.51.100.20/32</cidrIp><description>Crabbox SSH</description></item></ipRanges></item></ipPermissions></item></securityGroupInfo></DescribeSecurityGroupsResponse>`);
+<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-auto</groupId><groupName>crabbox-runners</groupName><vpcId>vpc-default</vpcId><ipPermissions><item><ipProtocol>tcp</ipProtocol><fromPort>22</fromPort><toPort>22</toPort><ipRanges><item><cidrIp>198.51.100.10/32</cidrIp><description>Crabbox SSH</description></item><item><cidrIp>198.51.100.20/32</cidrIp><description>Crabbox SSH</description></item></ipRanges></item></ipPermissions></item></securityGroupInfo></DescribeSecurityGroupsResponse>`);
         }
         if (action === "RevokeSecurityGroupIngress") {
           revokedCIDRs.push(params.get("IpPermissions.1.IpRanges.1.CidrIp") ?? "");
@@ -25257,14 +25257,14 @@ describe("fleet lease identity and idle", () => {
           );
         }
         if (action === "DescribeSecurityGroups") {
-          const groupName = params.get("Filter.1.Value.1") ?? "";
+          const groupName = params.get("GroupName.1") ?? "";
           const groupID = groupName === "crabbox-workspaces" ? "sg-workspaces" : "sg-runners";
           const ingress =
             groupName === "crabbox-runners"
               ? "<ipPermissions><item><ipProtocol>tcp</ipProtocol><fromPort>22</fromPort><toPort>22</toPort><ipRanges><item><cidrIp>198.51.100.10/32</cidrIp><description>Crabbox SSH</description></item><item><cidrIp>198.51.100.20/32</cidrIp><description>Crabbox SSH</description></item></ipRanges></item></ipPermissions>"
               : "<ipPermissions />";
           return new Response(
-            `<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>${groupID}</groupId><groupName>${groupName}</groupName>${ingress}</item></securityGroupInfo></DescribeSecurityGroupsResponse>`,
+            `<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>${groupID}</groupId><groupName>${groupName}</groupName><vpcId>vpc-default</vpcId>${ingress}</item></securityGroupInfo></DescribeSecurityGroupsResponse>`,
           );
         }
         if (action === "RevokeSecurityGroupIngress") {
@@ -26237,13 +26237,21 @@ describe("fleet lease identity and idle", () => {
     const refreshStarted = deferred<void>();
     const finishRefresh = deferred<void>();
     const queued = deferred<void>();
+    const finishAuthorizations = deferred<void>();
+    let authorizations = 0;
     let refreshing = true;
     const fixture = awsIngressTestFleet(async (action) => {
       if (action === "AuthorizeSecurityGroupIngress") {
         if (refreshing) {
           refreshStarted.resolve();
           await finishRefresh.promise;
-        } else vi.setSystemTime(Date.now() + 7);
+        } else {
+          if (++authorizations === 2) {
+            vi.setSystemTime(Date.now() + 7);
+            finishAuthorizations.resolve();
+          }
+          await finishAuthorizations.promise;
+        }
       }
       return undefined;
     });
@@ -26289,11 +26297,25 @@ describe("fleet lease identity and idle", () => {
         expect.arrayContaining([
           { name: "ingress_wait", count: 1, totalMs: 41, errors: 0 },
           { name: "lifecycle_wait", count: 1, totalMs: 0, errors: 0 },
-          { name: "authorize_ingress", count: 2, totalMs: 14, errors: 0 },
+          expect.objectContaining({
+            name: "authorize_ingress",
+            count: 2,
+            totalMs: 14,
+            errors: 0,
+            transport: expect.objectContaining({
+              requests: 2,
+              requestMs: 14,
+              signInvocations: 2,
+              signCompletions: 2,
+              signFailures: 0,
+              requestFailures: 0,
+            }),
+          }),
         ]),
       );
     } finally {
       finishRefresh.resolve();
+      finishAuthorizations.resolve();
       await Promise.allSettled([refresh, ...(creating ? [creating] : [])]);
       createSpy.mockRestore();
       log.mockRestore();
@@ -42257,6 +42279,123 @@ describe("fleet run history", () => {
     expect(storage.value("run:run_recent")).toBeDefined();
     expect(storage.value("run:run_still_running")).toBeDefined();
   });
+
+  it("recovers a caller-known run admission without restarting its history", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    const body = { runID: `run_${"a".repeat(32)}`, provider: "aws", command: ["echo", "hello"] };
+    const create = () => fleet.fetch(request("PUT", `/v1/runs/${body.runID}`, { headers, body }));
+    const [first, second] = await Promise.all([create(), create()]);
+    expect([first.status, second.status].toSorted()).toEqual([200, 201]);
+    const { run } = (await first.json()) as { run: RunRecord };
+    expect(run.id).toBe(body.runID);
+    expect(run).not.toHaveProperty("createRequestSHA256");
+    const replay = await create();
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({ run });
+    const finish = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/finish`, {
+        headers,
+        body: { exitCode: 0, log: "hello" },
+      }),
+    );
+    expect(finish.status).toBe(200);
+    const terminal = await create();
+    expect(terminal.status).toBe(200);
+    expect(await terminal.json()).toEqual(await finish.json());
+    const events = await fleet.fetch(request("GET", `/v1/runs/${run.id}/events`, { headers }));
+    expect(
+      ((await events.json()) as { events: RunEventRecord[] }).events.map((event) => event.type),
+    ).toEqual(["run.started", "command.finished"]);
+  });
+
+  it("keeps run admission bound to its original caller and request after lease attribution", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    const body = { runID: `run_${"b".repeat(32)}`, provider: "aws", command: ["true"] };
+    const first = await fleet.fetch(request("PUT", `/v1/runs/${body.runID}`, { headers, body }));
+    expect(first.status).toBe(201);
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        owner: "alice@example.com",
+        org: "example-org",
+        provider: "aws",
+      }),
+    );
+    const attached = await fleet.fetch(
+      request("POST", `/v1/runs/${body.runID}/events`, {
+        headers,
+        body: { type: "lease.created", leaseID: "cbx_000000000001", provider: "aws" },
+      }),
+    );
+    expect(attached.status).toBe(201);
+    const replay = await fleet.fetch(request("PUT", `/v1/runs/${body.runID}`, { headers, body }));
+    expect(replay.status).toBe(200);
+    expect(((await replay.json()) as { run: RunRecord }).run.leaseID).toBe("cbx_000000000001");
+    const changed = await fleet.fetch(
+      request("PUT", `/v1/runs/${body.runID}`, {
+        headers,
+        body: { ...body, leaseID: "cbx_000000000001" },
+      }),
+    );
+    expect(changed.status).toBe(409);
+    const otherCaller = await fleet.fetch(
+      request("PUT", `/v1/runs/${body.runID}`, {
+        headers: { ...headers, "x-crabbox-owner": "bob@example.com" },
+        body,
+      }),
+    );
+    expect(otherCaller.status).toBe(404);
+    const otherOrg = await fleet.fetch(
+      request("PUT", `/v1/runs/${body.runID}`, {
+        headers: { ...headers, "x-crabbox-org": "other-org" },
+        body,
+      }),
+    );
+    expect(otherOrg.status).toBe(404);
+    const changedCommand = await fleet.fetch(
+      request("PUT", `/v1/runs/${body.runID}`, {
+        headers,
+        body: { ...body, command: ["echo", "changed"] },
+      }),
+    );
+    expect(changedCommand.status).toBe(409);
+    const events = await fleet.fetch(request("GET", `/v1/runs/${body.runID}/events`, { headers }));
+    expect(
+      ((await events.json()) as { events: RunEventRecord[] }).events.map((event) => event.type),
+    ).toEqual(["run.started", "lease.created"]);
+  });
+
+  it.each(["POST", "PUT"])(
+    "commits %s run admission and its first event together",
+    async (method) => {
+      const storage = new MemoryStorage();
+      const fleet = testFleet(storage);
+      const body = { runID: `run_${"c".repeat(32)}`, command: ["true"] };
+      const path = method === "POST" ? "/v1/runs" : `/v1/runs/${body.runID}`;
+      storage.beforePut = async (key) => {
+        if (key.startsWith("runevent:")) throw new Error("event storage unavailable");
+      };
+      expect((await fleet.fetch(request(method, path, { body }))).status).toBe(500);
+      expect((await storage.list({ prefix: "run:" })).size).toBe(0);
+      expect((await storage.list({ prefix: "runevent:" })).size).toBe(0);
+      storage.beforePut = undefined;
+      expect((await fleet.fetch(request(method, path, { body }))).status).toBe(201);
+    },
+  );
+
+  it.each(["run_short", `run_${"a".repeat(33)}`, "42"])(
+    "rejects invalid requested run identity %j",
+    async (runID) => {
+      const fleet = testFleet(new MemoryStorage());
+      const response = await fleet.fetch(request("PUT", `/v1/runs/${runID}`, { body: {} }));
+      expect(response.status).toBe(400);
+    },
+  );
 
   it("creates early run sessions and appends durable events", async () => {
     const storage = new MemoryStorage();

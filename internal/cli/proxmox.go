@@ -1119,7 +1119,7 @@ func (c *ProxmoxClient) bootstrapSSH(ctx context.Context, host string, cfg Confi
 	deadline := time.Now().Add(10 * time.Minute)
 	for {
 		if proxmoxRunSSHQuietWithOptions(ctx, target, sshTransportProbeCommand(target), "5", "1") == nil {
-			out := synchronizedBuffer{limit: proxmoxBootstrapDiagnosticLimit}
+			out := newSynchronizedBuffer(proxmoxBootstrapDiagnosticLimit)
 			err := proxmoxRunSSHInput(ctx, target, "sudo /bin/bash -s", strings.NewReader(proxmoxBootstrapScript(cfg)), &out, &out)
 			if err == nil {
 				return nil

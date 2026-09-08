@@ -233,6 +233,7 @@ Runs and observability:
 ```text
 GET  /v1/runs
 POST /v1/runs
+PUT  /v1/runs/{run-id}
 GET  /v1/runs/{run-id}
 GET  /v1/runs/{run-id}/logs
 POST /v1/runs/{run-id}/events
@@ -287,7 +288,9 @@ retries as admin.
 progress to the broker so the portal and `history`/`logs`/`events`/`results`
 commands can read it back:
 
-- `POST /v1/runs` creates a `RunRecord` in state `running`.
+- `PUT /v1/runs/{id}` atomically admits a caller-known run and its first event,
+  or returns the retained record for the same caller and original request.
+  Legacy `POST /v1/runs` creates a coordinator-issued `RunRecord` in state `running`.
 - `POST /v1/runs/{id}/events` streams phase-tagged events: `run.started`,
   `leasing.started`, `bootstrap.waiting`, `sync.started`/`finished`,
   `actions.hydrate.*`, `command.started`, stdout/stderr chunks,

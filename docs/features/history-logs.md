@@ -30,6 +30,20 @@ ordered events as it advances:
 - `lease.released`
 - `run.failed` (if the run errors before the command finishes)
 
+Current clients admit runs through `PUT /v1/runs/<run-id>`, using a cryptographically
+random ID known before the request. The coordinator commits the record and its
+first event atomically. Matching admission replay returns the retained record;
+changed request content conflicts, and another actor cannot adopt the record.
+The original request binding remains unchanged when later events attach or
+replace a lease. Legacy clients can still use `POST /v1/runs` for coordinator-issued
+IDs, but that route cannot recover a lost create response. Upgrade an older
+coordinator before using the current client's admission route.
+
+Admission recovery is limited to the original live CLI invocation before command
+execution. A terminal or already-progressed record is a historical result, not
+permission to execute again. Record retention is unchanged; clients must never
+reuse an ID for a new invocation.
+
 Crabbox-generated event messages are redacted before they enter coordinator
 storage. The recorder removes configured and provider-discovered runtime
 credentials, authorization headers, credential-bearing URLs, and other known

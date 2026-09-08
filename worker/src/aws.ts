@@ -1,6 +1,6 @@
-import { AwsClient } from "aws4fetch";
 import { XMLParser } from "fast-xml-parser";
 
+import { RefreshingAWSFetchClient, type AWSFetchClient } from "./aws-fetch-client";
 import {
   createAWSProvisioningDiagnostics,
   type AWSProvisioningDiagnostics,
@@ -84,6 +84,19 @@ const awsMacHostQuotaSpecs: Record<string, { quotaCode: string; quotaName: strin
 const snapshotDeleteBackoffMs = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
 const securityGroupVisibilityBackoffMs = [100, 200, 400, 800, 1_600, 3_200];
 const awsInstanceVisibilityBackoffMs = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
+// Leave room below Workers' six-connection limit for concurrent quota discovery.
+const awsIngressBatchSize = 4;
+
+class AWSQueryError extends Error {
+  constructor(
+    readonly action: string,
+    readonly status: number,
+    readonly code: string,
+    detail: string,
+  ) {
+    super(`aws ${action}: http ${status}: ${detail}`);
+  }
+}
 
 export interface AWSPrivateWorkspaceConfig {
   accountID: string;
@@ -260,38 +273,6 @@ function assertPrivateWorkspaceSecurityGroupShape(group: Record<string, unknown>
     throw new Error(
       "AWS private workspace security group must have exactly one IPv4 TCP 443 egress rule",
     );
-  }
-}
-
-interface AWSFetchClient {
-  fetch(input: string, init?: RequestInit): Promise<Response>;
-}
-
-class RefreshingAWSFetchClient implements AWSFetchClient {
-  constructor(
-    private readonly credentials: AWSCredentialProvider,
-    private readonly service: string,
-    private readonly region: string,
-  ) {}
-
-  async fetch(input: string, init?: RequestInit): Promise<Response> {
-    const credentials = await this.credentials();
-    const accessKeyId = credentials.accessKeyId?.trim();
-    const secretAccessKey = credentials.secretAccessKey?.trim();
-    if (!accessKeyId || !secretAccessKey) {
-      throw new Error("AWS credential provider returned incomplete credentials");
-    }
-    const options: ConstructorParameters<typeof AwsClient>[0] = {
-      accessKeyId,
-      secretAccessKey,
-      service: this.service,
-      region: this.region,
-    };
-    const session = credentials.sessionToken?.trim();
-    if (session) {
-      options.sessionToken = session;
-    }
-    return await new AwsClient(options).fetch(input, init);
   }
 }
 
@@ -1060,17 +1041,33 @@ export class EC2SpotClient {
             ? ""
             : await this.resolveAMI(config),
       );
-      const securityGroupID = options.withIngress
-        ? await options.withIngress(
-            (cidrs) =>
-              diagnostics.measure("security_group", () =>
-                this.ensureSecurityGroup({ ...config, awsSSHCIDRs: cidrs }, options),
-              ),
-            diagnostics.record,
-          )
-        : await diagnostics.measure("security_group", () =>
-            this.ensureSecurityGroup(config, options),
-          );
+      const quotaCache = new Map<string, Promise<number | undefined>>();
+      const quotaForMarket = (market: LeaseConfig["capacityMarket"]) => {
+        const code = awsQuotaCodeForMarket(market);
+        let quota = quotaCache.get(code);
+        if (!quota) {
+          quota = diagnostics.measure("quota", () => this.appliedServiceQuota(code));
+          quotaCache.set(code, quota);
+        }
+        return quota;
+      };
+      // Quota reads do not own ingress. Join both preparations before launch or
+      // transient-image cleanup so a failed branch cannot leave work running.
+      const [securityGroup, initialQuota] = await Promise.allSettled([
+        options.withIngress
+          ? options.withIngress(
+              (cidrs) =>
+                diagnostics.measure("security_group", () =>
+                  this.ensureSecurityGroup({ ...config, awsSSHCIDRs: cidrs }, options),
+                ),
+              diagnostics.record,
+            )
+          : diagnostics.measure("security_group", () => this.ensureSecurityGroup(config, options)),
+        quotaForMarket(config.capacityMarket),
+      ]);
+      if (securityGroup.status === "rejected") throw securityGroup.reason;
+      if (initialQuota.status === "rejected") throw initialQuota.reason;
+      const securityGroupID = securityGroup.value;
       const pinnedMacHostID = config.target === "macos" ? config.hostID || config.awsMacHostID : "";
       // An explicit Mac host is tied to one hardware family. Resolve that family once so a
       // defaulted --type cannot send an incompatible instance type to the pinned host.
@@ -1088,7 +1085,6 @@ export class EC2SpotClient {
       }
       const candidates = pinnedMacHostType ? [pinnedMacHostType] : awsLaunchCandidates(config);
       const history = new ProvisioningAttemptHistory();
-      const quotaCache = new Map<string, number | undefined>();
       const imageCache = new Map<string, string>();
       const marketFallbackCandidates: string[] = [];
       const pinnedMacOSImageID =
@@ -1128,9 +1124,12 @@ export class EC2SpotClient {
         return imageID;
       };
       for (const serverType of candidates) {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- quota preflight follows sequential fallback order.
-        const preflight = await diagnostics.measure("quota", () =>
-          this.quotaPreflightAttempt(serverType, config.capacityMarket, quotaCache),
+        const preflight = awsQuotaPreflightAttempt(
+          serverType,
+          config.capacityMarket,
+          this.region,
+          // oxlint-disable-next-line eslint/no-await-in-loop -- quota preflight follows sequential fallback order.
+          await quotaForMarket(config.capacityMarket),
         );
         if (preflight) {
           history.record(preflight, `${serverType}: ${preflight.message}`);
@@ -1188,9 +1187,12 @@ export class EC2SpotClient {
       // Retry only candidates whose Spot failure can be recovered by On-Demand.
       if (marketFallbackCandidates.length > 0 && config.capacityFallback.startsWith("on-demand")) {
         for (const serverType of marketFallbackCandidates) {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback must stay sequential.
-          const preflight = await diagnostics.measure("quota", () =>
-            this.quotaPreflightAttempt(serverType, "on-demand", quotaCache),
+          const preflight = awsQuotaPreflightAttempt(
+            serverType,
+            "on-demand",
+            this.region,
+            // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback must stay sequential.
+            await quotaForMarket("on-demand"),
           );
           if (preflight) {
             history.record(preflight, `on-demand ${serverType}: ${preflight.message}`);
@@ -2388,18 +2390,56 @@ export class EC2SpotClient {
         return groupID;
       }
     } else {
-      const vpcID = await measure("security_group_vpc", () => this.securityGroupVPC(config));
       const name = awsManagedSecurityGroupName(config);
-      const existing = await measure("security_group_lookup", () =>
-        this.ec2("DescribeSecurityGroups", {
-          "Filter.1.Name": "group-name",
-          "Filter.1.Value.1": name,
-          "Filter.2.Name": "vpc-id",
-          "Filter.2.Value.1": vpcID,
-        }),
+      const scopedLookup = Boolean(
+        config.awsSubnetID ||
+        this.env.CRABBOX_AWS_SUBNET_ID ||
+        this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT,
       );
-      group = items(record(existing["securityGroupInfo"])["item"])[0];
+      const vpc = measure("security_group_vpc", () => this.securityGroupVPC(config));
+      const lookup = (params: Record<string, string>) =>
+        measure("security_group_lookup", () => this.ec2("DescribeSecurityGroups", params));
+      // EC2 GroupName selects only the default VPC. Subnet-scoped queries still
+      // depend on VPC discovery; every mutation waits for both reads and scope validation.
+      const existing = scopedLookup
+        ? vpc.then((vpcID) =>
+            lookup({
+              "Filter.1.Name": "group-name",
+              "Filter.1.Value.1": name,
+              "Filter.2.Name": "vpc-id",
+              "Filter.2.Value.1": vpcID,
+            }),
+          )
+        : lookup({ "GroupName.1": name }).catch((error: unknown): Record<string, unknown> => {
+            if (
+              !(error instanceof AWSQueryError) ||
+              error.action !== "DescribeSecurityGroups" ||
+              error.status !== 400 ||
+              error.code !== "InvalidGroup.NotFound"
+            ) {
+              throw error;
+            }
+            return {};
+          });
+      // Retain the ingress owner until both reads settle, including either failure.
+      // VPC errors keep their existing precedence over security-group lookup errors.
+      const [vpcResult, groupResult] = await Promise.allSettled([vpc, existing]);
+      if (vpcResult.status === "rejected") throw vpcResult.reason;
+      if (groupResult.status === "rejected") throw groupResult.reason;
+      const vpcID = vpcResult.value;
+      const groups = items(record(groupResult.value["securityGroupInfo"])["item"]);
+      group = groups[0];
       groupID = asString(record(group)["groupId"]);
+      if (
+        !scopedLookup &&
+        groups.length > 0 &&
+        (groups.length !== 1 ||
+          !groupID ||
+          asString(record(group)["groupName"]) !== name ||
+          asString(record(group)["vpcId"]) !== vpcID)
+      ) {
+        throw new Error("AWS default VPC security group lookup returned an unexpected group");
+      }
       if (!groupID) {
         try {
           const created = await measure("security_group_create", () =>
@@ -2443,42 +2483,54 @@ export class EC2SpotClient {
               },
             );
           }
-          for (const cidr of cidrs) {
-            // oxlint-disable-next-line eslint/no-await-in-loop -- duplicate ingress handling is per CIDR.
-            await measure("authorize_ingress", () => this.allowTCP(groupID, port, cidr)).catch(
-              (error: unknown) => {
+          for (let offset = 0; offset < cidrs.length; offset += awsIngressBatchSize) {
+            const batch = cidrs.slice(offset, offset + awsIngressBatchSize);
+            const canCompact = options.reconcile !== "additive" && !compactedAfterRuleLimit;
+            // Join every request before compaction, propagation retry or releasing
+            // the ingress owner. One failed request must not leave writes running.
+            // oxlint-disable-next-line eslint/no-await-in-loop -- bound each batch before starting more requests.
+            const results = await Promise.allSettled(
+              batch.map((cidr) =>
+                measure("authorize_ingress", () => this.allowTCP(groupID, port, cidr)),
+              ),
+            );
+            for (const [index, result] of results.entries()) {
+              if (result.status === "rejected") {
+                const error: unknown = result.reason;
+                const cidr = batch[index]!;
                 const message = error instanceof Error ? error.message : String(error);
                 if (message.includes("InvalidPermission.Duplicate")) {
                   options.diagnostics?.record("authorize_duplicate", 0);
-                  return;
+                  continue;
                 }
-                if (
-                  options.reconcile !== "additive" &&
-                  !compactedAfterRuleLimit &&
-                  isAWSSecurityGroupRuleLimitError(message)
-                ) {
-                  compactedAfterRuleLimit = true;
-                  return measure("compact_ingress", () =>
-                    this.compactSSHIngressForRuleLimit(groupID, ports, cidrs),
-                  ).then((compacted) => {
+                if (canCompact && isAWSSecurityGroupRuleLimitError(message)) {
+                  if (!compactedAfterRuleLimit) {
+                    compactedAfterRuleLimit = true;
+                    // oxlint-disable-next-line eslint/no-await-in-loop -- compact once after the entire batch has settled.
+                    const compacted = await measure("compact_ingress", () =>
+                      this.compactSSHIngressForRuleLimit(groupID, ports, cidrs),
+                    );
                     if (!compacted) {
                       throw error;
                     }
-                    return measure("authorize_ingress", () =>
-                      this.allowTCP(groupID, port, cidr),
-                    ).catch((retryError: unknown) => {
-                      const retryMessage =
-                        retryError instanceof Error ? retryError.message : String(retryError);
-                      if (!retryMessage.includes("InvalidPermission.Duplicate")) {
-                        throw retryError;
-                      }
-                      options.diagnostics?.record("authorize_duplicate", 0);
-                    });
+                  }
+                  // Every rule rejected before this batch's compaction gets one retry.
+                  // oxlint-disable-next-line eslint/no-await-in-loop -- recovery retries remain ordered after all initial writes finish.
+                  await measure("authorize_ingress", () =>
+                    this.allowTCP(groupID, port, cidr),
+                  ).catch((retryError: unknown) => {
+                    const retryMessage =
+                      retryError instanceof Error ? retryError.message : String(retryError);
+                    if (!retryMessage.includes("InvalidPermission.Duplicate")) {
+                      throw retryError;
+                    }
+                    options.diagnostics?.record("authorize_duplicate", 0);
                   });
+                  continue;
                 }
                 throw error;
-              },
-            );
+              }
+            }
           }
         }
         return groupID;
@@ -2751,7 +2803,7 @@ export class EC2SpotClient {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(this.awsQueryErrorMessage(action, response.status, text));
+      throw this.awsQueryError(action, response.status, text);
     }
     const parsed = this.parser.parse(text) as unknown;
     const parsedRecord = record(parsed);
@@ -2771,7 +2823,7 @@ export class EC2SpotClient {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(this.awsQueryErrorMessage(action, response.status, text));
+      throw this.awsQueryError(action, response.status, text);
     }
     const parsed = this.parser.parse(text) as unknown;
     const parsedRecord = record(parsed);
@@ -2808,8 +2860,9 @@ export class EC2SpotClient {
     return record(text ? JSON.parse(text) : {});
   }
 
-  private awsQueryErrorMessage(action: string, status: number, text: string): string {
+  private awsQueryError(action: string, status: number, text: string): AWSQueryError {
     let detail = "";
+    let code = "";
     try {
       const parsed = this.parser.parse(text) as unknown;
       const parsedRecord = record(parsed);
@@ -2824,27 +2877,14 @@ export class EC2SpotClient {
             record(root["Errors"])["error"],
         )[0],
       );
-      const code = asString(error["Code"] ?? error["code"]);
+      code = asString(error["Code"] ?? error["code"]);
       const message = asString(error["Message"] ?? error["message"]);
       detail = code && message ? `${code}: ${message}` : code || message;
     } catch {
       detail = "";
+      code = "";
     }
-    return `aws ${action}: http ${status}: ${detail || trimBody(text).replace(/\s+/g, " ")}`;
-  }
-
-  private async quotaPreflightAttempt(
-    serverType: string,
-    market: LeaseConfig["capacityMarket"],
-    quotaCache: Map<string, number | undefined>,
-  ): Promise<ProvisioningAttempt | undefined> {
-    const code = awsQuotaCodeForMarket(market);
-    let quota = quotaCache.get(code);
-    if (!quotaCache.has(code)) {
-      quota = await this.appliedServiceQuota(code);
-      quotaCache.set(code, quota);
-    }
-    return awsQuotaPreflightAttempt(serverType, market, this.region, quota);
+    return new AWSQueryError(action, status, code, detail || trimBody(text).replace(/\s+/g, " "));
   }
 
   private async appliedServiceQuota(quotaCode: string): Promise<number | undefined> {

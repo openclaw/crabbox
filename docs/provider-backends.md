@@ -483,6 +483,17 @@ semaphore, advisory file lock, retry cadence, and idempotent release. Adapters
 retain provider-specific lease ID validation, namespace preparation, and
 diagnostics; the provider name selects the existing on-disk lock filename.
 
+Raw byte-prefix storage lives in `internal/prefixbuffer`. Core command capture,
+controller responses, coordinator token helpers, and SSH capture share it. Finite
+nonpositive limits discard output; unlimited capture requires explicit construction.
+Command and SSH wrappers preserve their nonpositive-limit unlimited behavior. Callers
+retain cancellation, labelled errors, and independent file-watcher overflow.
+The buffer has no locking or truncation markers, and `Bytes` returns a borrowed
+view. Byte tails, line tails, and UTF-8-aware logs remain separate storage policies.
+SSH retains its mutex-protected cloned snapshots and hides ordinary snapshots
+after truncation; its bounded diagnostic view still exposes the retained prefix
+and overflow flag.
+
 Strict one-request/one-response JSON subprocesses may use
 `internal/providers/shared/procjson`. It owns bounded capture, cancellation
 grace, request encoding, and exact single-document decoding. Keep response

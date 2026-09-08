@@ -14643,7 +14643,10 @@ export class FleetCoordinator {
       .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
-  private async createRun(request: Request): Promise<Response> {
+  private async createRun(request: Request, requestedRunID?: string): Promise<Response> {
+    if (requestedRunID !== undefined && !/^run_[a-f0-9]{32}$/.test(requestedRunID)) {
+      return json({ error: "invalid_run_id" }, { status: 400 });
+    }
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     const input = await readJson<RunCreateRequest>(request);
@@ -14651,48 +14654,89 @@ export class FleetCoordinator {
     if (leaseID && !validLeaseID(leaseID)) {
       return json({ error: "invalid_lease_id" }, { status: 400 });
     }
-    const lease = leaseID ? await this.getLease(leaseID) : undefined;
-    if (lease && !this.leaseVisibleToRequest(lease, request, false)) {
-      return json({ error: "not_found" }, { status: 404 });
-    }
-    const now = new Date().toISOString();
-    const run: RunRecord = {
-      id: newRunID(),
-      leaseID,
-      leaseIDs: [],
-      owner,
-      org,
-      leaseOwners: [],
-      provider: lease?.provider ?? input.provider ?? "hetzner",
-      target: lease?.target ?? input.target ?? "linux",
-      class: lease?.class ?? input.class ?? "",
-      serverType: lease?.serverType ?? input.serverType ?? "",
-      command: Array.isArray(input.command) ? input.command.map(String) : [],
-      state: "running",
-      phase: "starting",
-      logBytes: 0,
-      logTruncated: false,
-      startedAt: now,
-      lastEventAt: now,
-      eventCount: 0,
-    };
-    if (lease) {
-      this.setRunLeaseAttribution(run, lease);
-    }
-    const windowsMode = lease?.windowsMode ?? input.windowsMode;
-    if (windowsMode) {
-      run.windowsMode = windowsMode;
-    }
-    if (lease?.slug) {
-      run.slug = lease.slug;
-    }
+    const command = Array.isArray(input.command) ? input.command.map(String) : [];
     const label = sanitizeRunLabel(input.label);
-    if (label) {
-      run.label = label;
+    // Bind the original request, not mutable lease attribution or provider-resolved fields.
+    const createRequestSHA256 = requestedRunID
+      ? await sha256Hex(
+          JSON.stringify([
+            "run-create-v1",
+            leaseID,
+            input.provider ?? "hetzner",
+            input.target ?? "linux",
+            input.windowsMode ?? "",
+            input.class ?? "",
+            input.serverType ?? "",
+            command,
+            label ?? "",
+          ]),
+        )
+      : undefined;
+    const id = requestedRunID ?? newRunID();
+    const now = new Date().toISOString();
+    const committed = await this.state.storage.transaction(async (storage) => {
+      const existing = await storage.get<RunRecord>(runKey(id));
+      if (existing) {
+        if (existing.owner !== owner || existing.org !== org) return { kind: "missing" as const };
+        if (!createRequestSHA256 || existing.createRequestSHA256 !== createRequestSHA256) {
+          return { kind: "conflict" as const };
+        }
+        return { kind: "replay" as const, run: existing };
+      }
+      const lease = leaseID ? await storage.get<LeaseRecord>(leaseKey(leaseID)) : undefined;
+      if (lease && !this.leaseVisibleToRequest(lease, request, false)) {
+        return { kind: "missing" as const };
+      }
+      const run: RunRecord = {
+        id,
+        leaseID,
+        leaseIDs: [],
+        owner,
+        org,
+        leaseOwners: [],
+        provider: lease?.provider ?? input.provider ?? "hetzner",
+        target: lease?.target ?? input.target ?? "linux",
+        class: lease?.class ?? input.class ?? "",
+        serverType: lease?.serverType ?? input.serverType ?? "",
+        command,
+        state: "running",
+        phase: "starting",
+        logBytes: 0,
+        logTruncated: false,
+        startedAt: now,
+        lastEventAt: now,
+        eventCount: 1,
+      };
+      if (lease) {
+        this.setRunLeaseAttribution(run, lease);
+      }
+      const windowsMode = lease?.windowsMode ?? input.windowsMode;
+      if (windowsMode) {
+        run.windowsMode = windowsMode;
+      }
+      if (lease?.slug) {
+        run.slug = lease.slug;
+      }
+      if (label) {
+        run.label = label;
+      }
+      if (createRequestSHA256) run.createRequestSHA256 = createRequestSHA256;
+      const event = boundedRunEvent(id, 1, now, { type: "run.started", phase: "starting" });
+      await storage.put(runKey(id), run);
+      await storage.put(runEventKey(id, 1), event);
+      return { kind: "created" as const, run, event };
+    });
+    if (committed.kind === "missing") return notFound();
+    if (committed.kind === "conflict") {
+      return json({ error: "run_id_conflict" }, { status: 409 });
     }
-    await this.putRun(run);
-    await this.appendRunEventRecord(run, { type: "run.started", phase: "starting" });
-    return json({ run: publicRunRecord(run) }, { status: 201 });
+    if (committed.kind === "created") await this.broadcastRunEvent(committed.run, committed.event);
+    return json(
+      { run: publicRunRecord(committed.run) },
+      {
+        status: committed.kind === "created" ? 201 : 200,
+      },
+    );
   }
 
   private async createArtifactUploads(request: Request): Promise<Response> {
@@ -14724,6 +14768,9 @@ export class FleetCoordinator {
 
   private async runRoute(request: Request, runID: string, action?: string): Promise<Response> {
     const method = request.method.toUpperCase();
+    if (method === "PUT" && action === undefined) {
+      return this.createRun(request, runID);
+    }
     if (method === "GET" && action === undefined) {
       const run = await this.getRun(runID);
       const lease = run ? await this.ensureRunLeaseAttribution(run) : undefined;

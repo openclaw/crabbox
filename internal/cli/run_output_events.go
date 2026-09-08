@@ -128,9 +128,9 @@ func (q *runEventPublisher) append(coord *CoordinatorClient, runID string, input
 
 // A binding owns admission, so queued diagnostics cannot consume its capacity
 // or HTTP budget. Drain and join before posting, then resume the same publisher.
-func (q *runEventPublisher) Bind(coord *CoordinatorClient, runID string, input CoordinatorRunEventInput) error {
+func (q *runEventPublisher) Bind(ctx context.Context, coord *CoordinatorClient, runID string, input CoordinatorRunEventInput) error {
 	q.CloseAndWait(runEventOutputPostWait)
-	if err := postRunEvent(context.Background(), coord, runID, input); err != nil {
+	if err := postRunEvent(ctx, coord, runID, input); err != nil {
 		return err
 	}
 	q.queueMu.Lock()

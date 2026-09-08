@@ -4,14 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { writeExecutable } from "./test-support/smoke-fixtures.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const pluginRoot = path.join(repoRoot, "plugins", "herdr");
-
-function writeExecutable(file, body) {
-  fs.writeFileSync(file, body, "utf8");
-  fs.chmodSync(file, 0o755);
-}
 
 test("Herdr plugin manifest exposes the supported Crabbox actions and panes", () => {
   const manifest = fs.readFileSync(path.join(pluginRoot, "herdr-plugin.toml"), "utf8");

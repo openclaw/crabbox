@@ -62,7 +62,7 @@ func collectRunArtifactGlobs(ctx context.Context, target SSHTarget, workdir, rep
 	name := safeCaptureName(firstNonBlank(runID, leaseID, "run")) + "-artifacts.tgz"
 	remotePath := ".crabbox/" + name
 	script := runArtifactCollectScript(workdir, remotePath, globs)
-	var output synchronizedBuffer
+	output := newSynchronizedBuffer(0)
 	err := runSSHInput(ctx, target, remoteRunArtifactShellInputCommand(target), strings.NewReader(script), &output, &output)
 	out := output.String()
 	if err != nil {

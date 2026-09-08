@@ -779,7 +779,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	envSelection.Inline = mergeEnv(envSelection.Inline, expansion.Env)
 	envSelection.Effective = mergeEnv(envSelection.Effective, expansion.Env)
 	stripExternalDesktopPasswordFromRunEnv(cfg, &envSelection)
-	executionRunID := newRunID()
+	executionRunID, err := newRunID()
+	if err != nil {
+		return exit(7, "create run identity: %v", err)
+	}
 	applyRunExecutionMetadata(&envSelection, strings.TrimSpace(*leaseIDFlag), executionRunID, requestedSlug)
 	envHelperName := strings.TrimSpace(*envHelper)
 	if envHelperName != "" && len(envSelection.Profile) == 0 {
@@ -1224,7 +1227,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	recordCommand := runScriptRecordCommand(script, command)
 	timingRecordCommand = recordCommand
-	recorder = newRunRecorder(ctx, coord, cfg, recordCommand, runLabelValue, a.Stderr, strings.TrimSpace(*leaseIDFlag) != "")
+	recorder = newRunRecorder(ctx, coord, cfg, recordCommand, runLabelValue, a.Stderr, strings.TrimSpace(*leaseIDFlag) != "", executionRunID)
+	if recorder.createErr != nil && !recorder.createPending && !*syncOnly {
+		return recorder.requireHandle()
+	}
 	if useCoordinator {
 		recorder.Event("leasing.started", "leasing", "")
 	}
@@ -1313,7 +1319,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return exit(2, "profile doctor is not supported for native Windows targets")
 		}
 		if useCoordinator {
-			if err := recorder.AttachLease(leaseID, serverSlug(server), cfg); err != nil {
+			if err := recorder.AttachLease(ctx, leaseID, serverSlug(server), cfg); err != nil {
 				if !*syncOnly {
 					return err
 				}
@@ -1340,7 +1346,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if lease.Coordinator != nil {
 			coord = lease.Coordinator
 			useCoordinator = true
-			recorder.UseCoordinator(coord)
+			if err := recorder.UseCoordinator(coord); err != nil {
+				return err
+			}
 		}
 		applyResolvedLeaseConfig(&cfg, server, &target)
 		if borrowedPool != nil {
@@ -1768,7 +1776,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		acquired = true
 		coord = newLease.Coordinator
 		useCoordinator = coord != nil
-		recorder.UseCoordinator(coord)
+		if err := recorder.UseCoordinator(coord); err != nil {
+			return true, err
+		}
 		applyResolvedServerConfig(&cfg, server)
 		removeEnvironmentKeys(runReq.Env, target.ChildEnvDenylist...)
 		if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
@@ -1784,10 +1794,18 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return true, exit(2, "profile doctor is not supported for native Windows targets")
 		}
 		if useCoordinator {
-			if err := recorder.AttachLease(leaseID, serverSlug(server), cfg); err != nil {
-				return true, err
+			if err := recorder.AttachLease(ctx, leaseID, serverSlug(server), cfg); err != nil {
+				if !*syncOnly {
+					return true, err
+				}
+				recorder.warnRunHistory("sync-only run history binding unavailable: %v", err)
 			}
 			startRunHeartbeat(nil)
+		}
+		if !*syncOnly {
+			if err := recorder.requireHandle(); err != nil {
+				return true, err
+			}
 		}
 		if recorder.runID != "" {
 			executionRunID = recorder.runID

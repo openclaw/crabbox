@@ -225,6 +225,45 @@ func TestHetznerNativeCheckpointCapabilityMatrix(t *testing.T) {
 	}
 }
 
+func TestCreateHetznerCheckpointSubmissionBoundary(t *testing.T) {
+	for _, phase := range []string{"source", "preparation", "submission"} {
+		t.Run(phase, func(t *testing.T) {
+			installHetznerClaimState(t)
+			source := checkpointHetznerServer()
+			seedHetznerClaim(t, source)
+			client := &fakeHetznerSnapshotClient{server: source}
+			events := installHetznerCheckpointHooks(t, client)
+			cause := core.Exit(7, "fixture %s failure", phase)
+			switch phase {
+			case "source":
+				client.serverErr = cause
+			case "preparation":
+				prepareHetznerCheckpointSource = func(context.Context, core.SSHTarget) error {
+					*events = append(*events, "prepare-source")
+					return cause
+				}
+			case "submission":
+				client.createErr = cause
+			}
+			result, err := (Provider{}).CreateNativeCheckpoint(t.Context(), checkpointCreateRequest(false, 0))
+			var unsubmitted core.NativeCheckpointNotSubmittedError
+			if !errors.Is(err, cause) || errors.As(err, &unsubmitted) != (phase != "submission") || result.Image.ID != "" {
+				t.Fatalf("phase=%s result=%+v err=%v, wrong submission certainty", phase, result, err)
+			}
+			want := []string{"get-server"}
+			if phase != "source" {
+				want = append(want, "prepare-source")
+			}
+			if phase == "submission" {
+				want = append(want, "create-snapshot")
+			}
+			if !reflect.DeepEqual(*events, want) {
+				t.Fatalf("events=%v, want %v", *events, want)
+			}
+		})
+	}
+}
+
 func TestCreateHetznerCheckpointWaitFalseRecordsBinding(t *testing.T) {
 	installHetznerClaimState(t)
 	source := checkpointHetznerServer()

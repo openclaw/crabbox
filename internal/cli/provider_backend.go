@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -13,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/prefixbuffer"
 )
 
 type Provider interface {
@@ -900,8 +901,8 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 	cmd.Env = stripControllerAcquireIdentityEnv(env)
 	cmd.Dir = req.Dir
 	cmd.Stdin = req.Stdin
-	stdout := commandCaptureBuffer{limit: req.MaxCapturedOutputBytes, cancel: cancel}
-	stderr := commandCaptureBuffer{limit: req.MaxCapturedOutputBytes, cancel: cancel}
+	stdout := newCommandCaptureBuffer(req.MaxCapturedOutputBytes, cancel)
+	stderr := newCommandCaptureBuffer(req.MaxCapturedOutputBytes, cancel)
 	cmd.Stdout = commandOutputWriter(req.Stdout, &stdout, req.DisableOutputCapture)
 	cmd.Stderr = commandOutputWriter(req.Stderr, &stderr, req.DisableOutputCapture)
 	var files *commandFileCapture
@@ -914,6 +915,7 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 		defer files.close()
 		cmd.Stdout, cmd.Stderr = files.streams[0].writer, files.streams[1].writer
 	}
+	var observedFileOverflow bool
 	err := cmd.Start()
 	if err == nil {
 		var finishCapture func() commandFileCaptureOutcome
@@ -933,8 +935,8 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 				err = errors.Join(err, readErr)
 				return LocalCommandResult{ExitCode: exitCode(err)}, err
 			}
-			stdout.overflow = stdout.overflow || observed.overflow
-			if stdout.overflow || stderr.overflow || err != nil {
+			observedFileOverflow = observed.overflow
+			if stdout.buffer.Exceeded() || stderr.buffer.Exceeded() || observedFileOverflow || err != nil {
 				_ = stopCommand()
 			}
 		}
@@ -943,7 +945,7 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 		_ = stopCommand()
 	}
 	result := LocalCommandResult{ExitCode: exitCode(err), Stdout: stdout.String(), Stderr: stderr.String()}
-	if stdout.overflow || stderr.overflow {
+	if stdout.buffer.Exceeded() || stderr.buffer.Exceeded() || observedFileOverflow {
 		err = fmt.Errorf("captured command output exceeded %d-byte limit", req.MaxCapturedOutputBytes)
 		result.ExitCode = 5
 	}
@@ -984,31 +986,24 @@ func configureBoundedCommandCancellation(cmd *exec.Cmd) {
 }
 
 type commandCaptureBuffer struct {
-	buffer   bytes.Buffer
-	limit    int
-	overflow bool
-	cancel   context.CancelFunc
+	buffer prefixbuffer.Buffer
+	cancel context.CancelFunc
+}
+
+func newCommandCaptureBuffer(limit int, cancel context.CancelFunc) commandCaptureBuffer {
+	buffer := prefixbuffer.NewUnlimited()
+	if limit > 0 {
+		buffer = prefixbuffer.NewLimited(limit)
+	}
+	return commandCaptureBuffer{buffer: buffer, cancel: cancel}
 }
 
 func (b *commandCaptureBuffer) Write(data []byte) (int, error) {
-	if b.limit <= 0 {
-		return b.buffer.Write(data)
-	}
-	original := len(data)
-	remaining := b.limit - b.buffer.Len()
-	if remaining > 0 {
-		if len(data) > remaining {
-			b.overflow = true
-			data = data[:remaining]
-		}
-		_, _ = b.buffer.Write(data)
-	} else if original > 0 {
-		b.overflow = true
-	}
-	if b.overflow && b.cancel != nil {
+	n, err := b.buffer.Write(data)
+	if b.buffer.Exceeded() && b.cancel != nil {
 		b.cancel()
 	}
-	return original, nil
+	return n, err
 }
 
 func (b *commandCaptureBuffer) String() string {
@@ -1320,7 +1315,38 @@ func FinalizeRunResult(result RunResult, err error) RunResult {
 	return result
 }
 
+// PrimaryRunClassificationCause finds an explicit classification cause only on
+// the primary error path. Ordinary errors retain their full-graph classification;
+// joined secondary failures cannot supply an override through this lookup.
+func PrimaryRunClassificationCause(err error) error {
+	for err != nil {
+		if classified, ok := err.(interface{ RunClassificationCause() error }); ok {
+			if cause := classified.RunClassificationCause(); cause != nil {
+				return cause
+			}
+		}
+		switch wrapped := err.(type) {
+		case interface{ Unwrap() error }:
+			err = wrapped.Unwrap()
+		case interface{ Unwrap() []error }:
+			err = nil
+			for _, child := range wrapped.Unwrap() {
+				if child != nil {
+					err = child
+					break
+				}
+			}
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
 func RunStatusForResult(result RunResult, err error) RunStatus {
+	if cause := PrimaryRunClassificationCause(err); cause != nil {
+		err = cause
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return RunStatusTimedOut
 	}
@@ -1334,6 +1360,9 @@ func RunStatusForResult(result RunResult, err error) RunStatus {
 }
 
 func RunErrorKindForResult(result RunResult, err error) RunErrorKind {
+	if cause := PrimaryRunClassificationCause(err); cause != nil {
+		err = cause
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return RunErrorTimeout
 	}
