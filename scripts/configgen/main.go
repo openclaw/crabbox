@@ -19,8 +19,8 @@ import (
 )
 
 type field struct {
-	name, kind, key, env, envAlias, flag, help, defaultExpr string
-	nonnegative, trustedFileOnly, noFile, noEnv             bool
+	name, kind, key, env, envAlias, flag, help, defaultExpr      string
+	nonnegative, trustedFileOnly, noFile, noEnv, fileIgnoreEmpty bool
 }
 
 type schema struct {
@@ -161,6 +161,12 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		default:
 			return s, fmt.Errorf("%s: unsupported config type %s", f.name, f.kind)
 		}
+		if value, ok := tags.Lookup("fileIgnoreEmpty"); ok {
+			if value != "true" || f.kind != "string" || f.noFile {
+				return s, fmt.Errorf("%s: fileIgnoreEmpty is supported only as true for string fields with a file source", f.name)
+			}
+			f.fileIgnoreEmpty = true
+		}
 		if hasAlias && f.kind != "string" {
 			return s, fmt.Errorf("%s: envAlias is supported only for string fields", f.name)
 		}
@@ -265,7 +271,11 @@ func generate(s schema, source string) ([]byte, error) {
 		if f.trustedFileOnly {
 			condition = "trusted && "
 		}
-		p("if %sfile.%s != nil {\n", condition, f.name)
+		fileCondition := fmt.Sprintf("%sfile.%s != nil", condition, f.name)
+		if f.fileIgnoreEmpty {
+			fileCondition += fmt.Sprintf(" && *file.%s != \"\"", f.name)
+		}
+		p("if %s {\n", fileCondition)
 		if f.nonnegative {
 			p("if *file.%s < 0 { return exit(2, %q) }\n", f.name, s.provider+" "+f.key+" must be non-negative")
 		}
