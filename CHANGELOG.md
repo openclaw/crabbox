@@ -27,7 +27,7 @@
 
 - Describe Cloudflare container-runner configuration bindings once, sharing the CLI workdir default while preserving token sources, instance-type mapping, and Worker protocol defaults. [PR 2012](https://github.com/openclaw/crabbox/pull/2012). Thanks @steipete.
 
-- Describe Cloudflare Sandbox configuration bindings once, preserving trusted URL-alias precedence, explicit clearing, optional tokens, and timeout-zero behavior. Thanks @steipete.
+- Describe Cloudflare Sandbox configuration bindings once, preserving trusted URL-alias precedence, explicit clearing, optional tokens, and timeout-zero behavior. [PR 2013](https://github.com/openclaw/crabbox/pull/2013). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 
