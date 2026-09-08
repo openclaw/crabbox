@@ -30,7 +30,7 @@
 
 - Describe Cloudflare Sandbox configuration bindings once, preserving trusted URL-alias precedence, explicit clearing, optional tokens, and timeout-zero behavior. [PR 2013](https://github.com/openclaw/crabbox/pull/2013). Thanks @steipete.
 
-- Describe E2B configuration bindings once, keeping endpoint, domain, template, and workdir defaults consistent while preserving credential sources and existing scope/preview behavior. Thanks @steipete.
+- Describe E2B configuration bindings once, keeping endpoint, domain, template, and workdir defaults consistent while preserving credential sources and existing scope/preview behavior. [PR 2014](https://github.com/openclaw/crabbox/pull/2014). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 
