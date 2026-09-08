@@ -2,7 +2,8 @@
 
 Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
-runner, Cloudflare Sandbox, E2B, Blaxel, and Azure Dynamic Sessions describe their mechanical config bindings
+runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, and SmolVM
+describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
 `internal/cli/config_opensandbox.go`,
@@ -11,7 +12,8 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_fastapi_cloud.go`, `internal/cli/config_railway.go`,
 `internal/cli/config_upstash_box.go`, `internal/cli/config_cloudflare.go`,
 `internal/cli/config_cloudflare_sandbox.go`, `internal/cli/config_e2b.go`,
-`internal/cli/config_blaxel.go`, and `internal/cli/config_azure_dynamic_sessions.go`.
+`internal/cli/config_blaxel.go`, `internal/cli/config_azure_dynamic_sessions.go`,
+and `internal/cli/config_smolvm.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -77,10 +79,13 @@ machine-specific paths. Its header identifies the generator and source file.
    omitted/null/zero/negative input is ignored. It requires an int with file
    admission and the existing nonnegative default policy. This fixed predicate
    changes no environment or flag behavior and accepts no custom expressions.
-   A string field may name one existing fallback environment variable with
-   `envAlias`; primary and alias names share collision checks. Empty aliases
-   are invalid. The primary value wins, then the alias, then the prior value;
-   empty values fall through, without trimming nonempty values.
+   A string field may name an existing fallback environment variable with
+   `envAlias`, and a second with `envAlias2` only when the first is present.
+   All names share collision checks; empty aliases, non-string fields, and
+   fields without environment admission are rejected. The primary value wins,
+   then the first alias, then the second, then the prior value. Empty values
+   fall through without trimming nonempty values. No arbitrary alias list or
+   custom parser is accepted.
    For an existing string file binding that ignores empty YAML values, declare
    `fileIgnoreEmpty:"true"`. This is valid only for strings with a file source;
    it adds an exact nonempty check without trimming, changing environment/flag
@@ -100,7 +105,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -294,6 +299,13 @@ TTL-positive, final-default timeout chain. Endpoint reports and central visits
 retain core provenance policy. API version and workdir share their Go defaults;
 Azure routing, native authentication and session behavior stay with their
 existing owners.
+
+SmolVM declares all eight fields, including its environment-only three-name key
+chain. CPU and memory retain positive-only file admission and tolerant environment
+parsing; explicit flags and validation order remain separate. Endpoint input
+reports and central flag visits retain existing provenance ownership. Its six
+configured fallback consumers share constants, while raw-empty network behavior,
+fixed mount/upload roots, endpoint trust, and lifecycle remain unchanged.
 
 The generator accepts only these seven exact source grants. Credential handling,
 destination validation and provenance, provider aliases, and provider selection

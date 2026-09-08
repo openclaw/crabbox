@@ -6084,6 +6084,169 @@ func TestOpenComputerBurstConfigYAMLAndEnv(t *testing.T) {
 	}
 }
 
+func TestSmolvmFilePresenceAndPositiveIntegers(t *testing.T) {
+	if _, ok := reflect.TypeOf(fileSmolvmConfig{}).FieldByName("APIKey"); ok {
+		t.Fatal("API key YAML source introduced")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace"} {
+			for _, integer := range []any{nil, 0, -1, 7} {
+				cfg := baseConfig()
+				cfg.Smolvm = SmolvmConfig{APIKey: "inert", BaseURL: "https://example.invalid/api", Image: "image", Workdir: "/workspace/app", CPUs: 3, MemoryMB: 100, Network: "open", Keep: true}
+				cfg.credentialProvenance.smolvmBaseURL = credentialSourceFlag
+				cfg.credentialProvenance.smolvmAPIKey = credentialSourceFlag
+				want := cfg.Smolvm
+				source := credentialSourceFlag
+				fields := map[string]any{"apiKey": "ignored-inert"}
+				for _, f := range []struct {
+					key string
+					v   *string
+				}{{"baseUrl", &want.BaseURL}, {"image", &want.Image}, {"workdir", &want.Workdir}, {"network", &want.Network}} {
+					if mode == "omitted" {
+						continue
+					}
+					var value any = *f.v
+					if mode == "null" {
+						value = nil
+					}
+					if mode == "empty" {
+						value = ""
+					}
+					if mode == "whitespace" {
+						value = "  "
+						*f.v = "  "
+					}
+					fields[f.key] = value
+				}
+				if mode == "equal" || mode == "whitespace" {
+					source = credentialSourceForFile(trusted)
+				}
+				fields["cpus"], fields["memoryMB"] = integer, integer
+				if v, ok := integer.(int); ok && v > 0 {
+					want.CPUs, want.MemoryMB = v, v
+				}
+				if mode == "null" {
+					fields["keep"] = nil
+				} else if mode != "omitted" {
+					fields["keep"] = false
+					want.Keep = false
+				}
+				data, err := yaml.Marshal(map[string]any{"smolvm": fields})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var file fileConfig
+				if err := yaml.Unmarshal(data, &file); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				if cfg.Smolvm != want || cfg.credentialProvenance.smolvmBaseURL != source || cfg.credentialProvenance.smolvmAPIKey != credentialSourceFlag {
+					t.Fatalf("file mode=%s integer=%v trusted=%t", mode, integer, trusted)
+				}
+			}
+		}
+	}
+}
+
+func TestSmolvmThreeNameKeyAndAcceptance(t *testing.T) {
+	for _, tc := range []struct {
+		primary, alias, alias2, want string
+		accepted                     bool
+	}{{"primary", "alias", "third", "primary", true}, {"", "alias", "third", "alias", true}, {"", "", "third", "third", true}, {"", "", "", "prior", false}, {"  ", "alias", "third", "  ", true}, {"", "  ", "third", "  ", true}, {"prior", "alias", "third", "prior", true}, {"", "", "  ", "  ", true}} {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		cfg.Smolvm.APIKey = "prior"
+		cfg.credentialProvenance.smolvmAPIKey = credentialSourceTrustedFile
+		cfg.credentialProvenance.smolvmBaseURL = credentialSourceTrustedFile
+		t.Setenv("CRABBOX_SMOLVM_API_KEY", tc.primary)
+		t.Setenv("SMOLMACHINES_API_KEY", tc.alias)
+		t.Setenv("SMK_API_KEY", tc.alias2)
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		source := credentialSourceTrustedFile
+		if tc.accepted {
+			source = credentialSourceEnvironment
+		}
+		if cfg.Smolvm.APIKey != tc.want || cfg.credentialProvenance.smolvmAPIKey != source || cfg.credentialProvenance.smolvmBaseURL != credentialSourceTrustedFile {
+			t.Fatal("three-name raw key acceptance changed")
+		}
+	}
+}
+
+func TestSmolvmEnvironmentIntegerAndStringSemantics(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want int
+	}{{"", 12}, {"invalid", 12}, {" 17 ", 12}, {"9999999999999999999999999", 12}, {"0", 0}, {"-1", -1}, {"17", 17}} {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		cfg.Smolvm.CPUs, cfg.Smolvm.MemoryMB = 12, 12
+		cfg.Smolvm.Keep = true
+		t.Setenv("CRABBOX_SMOLVM_CPUS", tc.raw)
+		t.Setenv("CRABBOX_SMOLVM_MEMORY_MB", tc.raw)
+		t.Setenv("CRABBOX_SMOLVM_NETWORK", "blocked")
+		t.Setenv("CRABBOX_SMOLVM_KEEP", "false")
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Smolvm.CPUs != tc.want || cfg.Smolvm.MemoryMB != tc.want || cfg.Smolvm.Network != "blocked" || cfg.Smolvm.Keep {
+			t.Fatalf("tolerant integer/continuation=%q", tc.raw)
+		}
+	}
+	for _, mode := range []string{"empty", "equal", "whitespace", "changed"} {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		cfg.Smolvm = SmolvmConfig{BaseURL: "https://example.invalid/api", Image: "image", Workdir: "/workspace/app", Network: "open", Keep: true}
+		cfg.credentialProvenance.smolvmBaseURL = credentialSourceFlag
+		cfg.credentialProvenance.smolvmAPIKey = credentialSourceTrustedFile
+		want := cfg.Smolvm
+		for _, f := range []struct {
+			suffix string
+			v      *string
+		}{{"BASE_URL", &want.BaseURL}, {"IMAGE", &want.Image}, {"WORKDIR", &want.Workdir}, {"NETWORK", &want.Network}} {
+			raw := *f.v
+			if mode == "empty" {
+				raw = ""
+			}
+			if mode == "whitespace" {
+				raw = "  "
+				*f.v = raw
+			}
+			if mode == "changed" {
+				raw += "-new"
+				*f.v = raw
+			}
+			t.Setenv("CRABBOX_SMOLVM_"+f.suffix, raw)
+		}
+		t.Setenv("CRABBOX_SMOLVM_KEEP", "invalid")
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		source := credentialSourceEnvironment
+		if mode == "empty" {
+			source = credentialSourceFlag
+		}
+		if cfg.Smolvm != want || cfg.credentialProvenance.smolvmBaseURL != source || cfg.credentialProvenance.smolvmAPIKey != credentialSourceTrustedFile {
+			t.Fatalf("string/boolean fallback mode=%s", mode)
+		}
+	}
+	for _, prior := range []bool{false, true} {
+		clearConfigEnv(t)
+		t.Setenv("CRABBOX_SMOLVM_KEEP", "invalid")
+		cfg := baseConfig()
+		cfg.Smolvm.Keep = prior
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Smolvm.Keep != prior {
+			t.Fatal("malformed boolean changed preceding value")
+		}
+	}
+}
+
 func TestSmolvmConfigYAMLOverrides(t *testing.T) {
 	cfg := baseConfig()
 	var file fileConfig

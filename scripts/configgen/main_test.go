@@ -448,6 +448,12 @@ func TestAzureDynamicSessionsGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestSmolvmGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_smolvm.go", "../../internal/cli/config_smolvm_generated.go", "SmolvmConfig", "smolvm", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -1148,4 +1154,83 @@ func TestFileAdmission(t *testing.T){
 `
 		runScalarFixture(t, input, output, behavior)
 	}
+}
+
+func TestSchemaSecondEnvAliasFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"missing first", `help:"Name"`, `help:"Name" envAlias2:"SECOND"`, "envAlias2 requires envAlias"},
+		{"empty first", `help:"Name"`, `help:"Name" envAlias:"" envAlias2:"SECOND"`, "invalid env binding"},
+		{"empty second", `help:"Name"`, `help:"Name" envAlias:"FIRST" envAlias2:""`, "invalid env binding"},
+		{"invalid second", `help:"Name"`, `help:"Name" envAlias:"FIRST" envAlias2:"ONE,TWO"`, "invalid env binding"},
+		{"whitespace second", `help:"Name"`, `help:"Name" envAlias:"FIRST" envAlias2:" SECOND"`, "invalid env binding"},
+		{"primary collision", `help:"Name"`, `help:"Name" envAlias:"FIRST" envAlias2:"PILOT_NAME"`, "duplicate env binding"},
+		{"first collision", `help:"Name"`, `help:"Name" envAlias:"FIRST" envAlias2:"FIRST"`, "duplicate env binding"},
+		{"later primary", `help:"Name"`, `help:"Name" envAlias:"FIRST" envAlias2:"PILOT_COUNT"`, "duplicate env binding"},
+		{"earlier primary", `help:"Count"`, `help:"Count" envAlias:"FIRST" envAlias2:"PILOT_NAME"`, "duplicate env binding"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(sample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+	for _, kind := range []string{"bool", "int", "float64", "[]string"} {
+		source := strings.Replace(sample, "Name string", "Name "+kind, 1)
+		source = strings.Replace(source, `help:"Name"`, `help:"Name" envAlias:"FIRST" envAlias2:"SECOND"`, 1)
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "envAlias2 requires an environment-admitted string") {
+			t.Fatalf("kind %s: %v", kind, err)
+		}
+	}
+	source := strings.Replace(flagOnlySample, `help:"Name"`, `help:"Name" envAlias2:"SECOND"`, 1)
+	if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "absent envAlias2 tag") {
+		t.Fatalf("flag-only alias accepted: %v", err)
+	}
+	first := " First string `env:\"PRIMARY\" envAlias:\"ALIAS\" envAlias2:\"SECOND\" sources:\"env\"`\n"
+	for _, binding := range []string{`env:"SECOND"`, `env:"OTHER" envAlias:"SECOND"`, `env:"OTHER" envAlias:"ANOTHER" envAlias2:"SECOND"`} {
+		second := " Other string `" + binding + " sources:\"env\"`\n"
+		for _, fields := range []string{first + second, second + first} {
+			if _, err := parseSchema([]byte("package cli\ntype PilotConfig struct{\n"+fields+"}"), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "duplicate env binding") {
+				t.Fatalf("cross-field collision accepted: %v", err)
+			}
+		}
+	}
+}
+
+func TestGenerateSecondEnvAlias(t *testing.T) {
+	source := strings.Replace(appliedSample, `envAlias:"PILOT_INPUT_ALIAS"`, `envAlias:"PILOT_INPUT_ALIAS" envAlias2:"PILOT_INPUT_SECOND"`, 1)
+	source = strings.TrimSuffix(source, "}") + " Plain string `sources:\"env\" env:\"PLAIN\" envAlias:\"PLAIN_ALIAS\" envAlias2:\"PLAIN_SECOND\"`\n}"
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic aliases: %v", err)
+	}
+	for _, want := range []string{`firstNonEmptyEnv("PILOT_INPUT", "PILOT_INPUT_ALIAS", "PILOT_INPUT_SECOND")`, `cfg.Plain = getenv("PLAIN", getenv("PLAIN_ALIAS", getenv("PLAIN_SECOND", cfg.Plain)))`} {
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("missing ordered selection %q", want)
+		}
+	}
+	typecheckGenerated(t, source+"\nfunc firstNonEmptyEnv(...string)(string,bool){panic(\"stub\")}\n", output)
+	runAppliedFixture(t, source, output, `
+func getenv(name, prior string)string{if value:=input[name];value!=""{return value};return prior}
+func TestSecondFallback(t *testing.T){
+ for _,tc:=range []struct{primary,alias,second,want string;applied bool}{
+  {"","","","prior",false},{"","","second","second",true},{"","alias","second","alias",true},{"primary","alias","second","primary",true},
+  {" ","alias","second"," ",true},{""," ","second"," ",true},{"",""," "," ",true},{"prior","alias","second","prior",true},
+ }{
+  cfg:=PilotConfig{Input:"prior",Plain:"prior"}
+  input=map[string]string{"PILOT_INPUT":tc.primary,"PILOT_INPUT_ALIAS":tc.alias,"PILOT_INPUT_SECOND":tc.second,"PLAIN":tc.primary,"PLAIN_ALIAS":tc.alias,"PLAIN_SECOND":tc.second}
+  selections=map[string]int{};boolAccepted=false;intError=false
+  got,err:=cfg.applyEnv()
+  if err!=nil||cfg.Input!=tc.want||cfg.Plain!=tc.want||got.Input!=tc.applied||selections["PILOT_INPUT"]!=1{t.Fatalf("%+v: cfg=%+v applied=%+v err=%v",tc,cfg,got,err)}
+ }
+}
+`)
 }

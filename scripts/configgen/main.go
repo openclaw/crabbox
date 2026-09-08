@@ -19,7 +19,7 @@ import (
 )
 
 type field struct {
-	name, kind, key, configAlias, env, envAlias, flag, help, defaultExpr                                                 string
+	name, kind, key, configAlias, env, envAlias, envAlias2, flag, help, defaultExpr                                      string
 	nonnegative, trustedFileOnly, noFile, noEnv, noFlag, fileIgnoreEmpty, reportApplied, envIntFallback, fileIntPositive bool
 }
 
@@ -149,7 +149,7 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			}
 		case "flag":
 			f.noFile, f.noEnv = true, true
-			for _, tag := range []string{"config", "env", "envAlias"} {
+			for _, tag := range []string{"config", "env", "envAlias", "envAlias2"} {
 				if _, ok := tags.Lookup(tag); ok {
 					return s, fmt.Errorf("%s: flag sources require an absent %s tag", f.name, tag)
 				}
@@ -171,6 +171,14 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		if hasAlias {
 			f.envAlias = alias
 			bindings = append(bindings, struct{ label, value string }{"env", alias})
+		}
+		alias2, hasAlias2 := tags.Lookup("envAlias2")
+		if hasAlias2 {
+			if !hasAlias {
+				return s, fmt.Errorf("%s: envAlias2 requires envAlias", f.name)
+			}
+			f.envAlias2 = alias2
+			bindings = append(bindings, struct{ label, value string }{"env", alias2})
 		}
 		configAlias, hasConfigAlias := tags.Lookup("configAlias")
 		if hasConfigAlias {
@@ -223,6 +231,9 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 				return s, fmt.Errorf("%s: fileIgnoreEmpty is supported only as true for string fields with a file source", f.name)
 			}
 			f.fileIgnoreEmpty = true
+		}
+		if hasAlias2 && (f.kind != "string" || f.noEnv) {
+			return s, fmt.Errorf("%s: envAlias2 requires an environment-admitted string field", f.name)
 		}
 		if hasAlias && f.kind != "string" {
 			return s, fmt.Errorf("%s: envAlias is supported only for string fields", f.name)
@@ -390,10 +401,16 @@ func generate(s schema, source string) ([]byte, error) {
 				if f.envAlias != "" {
 					names += ", " + strconv.Quote(f.envAlias)
 				}
+				if f.envAlias2 != "" {
+					names += ", " + strconv.Quote(f.envAlias2)
+				}
 				p("if value, ok := firstNonEmptyEnv(%s); ok { cfg.%s = value; applied.%s = true }\n", names, f.name, f.name)
 				continue
 			}
 			fallback := "cfg." + f.name
+			if f.envAlias2 != "" {
+				fallback = fmt.Sprintf("getenv(%q, %s)", f.envAlias2, fallback)
+			}
 			if f.envAlias != "" {
 				fallback = fmt.Sprintf("getenv(%q, %s)", f.envAlias, fallback)
 			}

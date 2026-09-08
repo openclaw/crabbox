@@ -665,6 +665,10 @@ func TestConfigMergeTracksCredentialDestinationSources(t *testing.T) {
 }
 
 func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
+	var smolvmFile fileConfig
+	if err := yaml.Unmarshal([]byte("smolvm:\n  baseUrl: https://repo.example.test\n"), &smolvmFile); err != nil {
+		t.Fatal(err)
+	}
 	var azSessionsFile fileConfig
 	if err := yaml.Unmarshal([]byte("azureDynamicSessions:\n  endpoint: https://repo.example.test\n"), &azSessionsFile); err != nil {
 		t.Fatal(err)
@@ -755,7 +759,7 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 		{
 			name:          "smolvm",
 			provider:      "smolvm",
-			file:          fileConfig{Smolvm: &fileSmolvmConfig{BaseURL: "https://repo.example.test"}},
+			file:          smolvmFile,
 			credentialEnv: "CRABBOX_SMOLVM_API_KEY",
 			approveEnv:    "CRABBOX_SMOLVM_BASE_URL",
 		},

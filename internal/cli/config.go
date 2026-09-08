@@ -974,17 +974,6 @@ type ModalConfig struct {
 	Secrets     []string
 }
 
-type SmolvmConfig struct {
-	APIKey   string
-	BaseURL  string
-	Image    string
-	Workdir  string
-	CPUs     int
-	MemoryMB int
-	Network  string
-	Keep     bool
-}
-
 type AsciiBoxConfig struct {
 	APIKey  string
 	BaseURL string
@@ -2919,14 +2908,7 @@ func baseConfig() Config {
 			Python:  "python3",
 		},
 		UpstashBox: defaultUpstashBoxConfig(),
-		Smolvm: SmolvmConfig{
-			BaseURL:  "https://api.smolmachines.com",
-			Image:    "alpine",
-			Workdir:  "/workspace",
-			CPUs:     2,
-			MemoryMB: 2048,
-			Network:  "open",
-		},
+		Smolvm:     defaultSmolvmConfig(),
 		AsciiBox: AsciiBoxConfig{
 			BaseURL: "https://ascii.dev",
 			CLIPath: "box",
@@ -3940,16 +3922,6 @@ type fileModalConfig struct {
 	Python      string   `yaml:"python,omitempty"`
 	Environment string   `yaml:"environment,omitempty"`
 	Secrets     []string `yaml:"secrets,omitempty"`
-}
-
-type fileSmolvmConfig struct {
-	BaseURL  string `yaml:"baseUrl,omitempty"`
-	Image    string `yaml:"image,omitempty"`
-	Workdir  string `yaml:"workdir,omitempty"`
-	CPUs     int    `yaml:"cpus,omitempty"`
-	MemoryMB int    `yaml:"memoryMB,omitempty"`
-	Network  string `yaml:"network,omitempty"`
-	Keep     *bool  `yaml:"keep,omitempty"`
 }
 
 type fileAsciiBoxConfig struct {
@@ -6615,27 +6587,14 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.Smolvm != nil {
-		if file.Smolvm.BaseURL != "" {
-			cfg.Smolvm.BaseURL = file.Smolvm.BaseURL
+	{
+		applied, err := cfg.Smolvm.applyFile(file.Smolvm)
+		if applied.BaseURL {
 			cfg.credentialProvenance.smolvmBaseURL = credentialSource
 		}
-		if file.Smolvm.Image != "" {
-			cfg.Smolvm.Image = file.Smolvm.Image
+		if err != nil {
+			return err
 		}
-		if file.Smolvm.Workdir != "" {
-			cfg.Smolvm.Workdir = file.Smolvm.Workdir
-		}
-		if file.Smolvm.CPUs > 0 {
-			cfg.Smolvm.CPUs = file.Smolvm.CPUs
-		}
-		if file.Smolvm.MemoryMB > 0 {
-			cfg.Smolvm.MemoryMB = file.Smolvm.MemoryMB
-		}
-		if file.Smolvm.Network != "" {
-			cfg.Smolvm.Network = file.Smolvm.Network
-		}
-		applyOptional(&cfg.Smolvm.Keep, file.Smolvm.Keep)
 	}
 	if file.AsciiBox != nil {
 		if file.AsciiBox.BaseURL != "" {
@@ -8516,21 +8475,17 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SMOLVM_API_KEY", "SMOLMACHINES_API_KEY", "SMK_API_KEY"); ok {
-		cfg.Smolvm.APIKey = value
-		cfg.credentialProvenance.smolvmAPIKey = credentialSourceEnvironment
-	}
-	if value := os.Getenv("CRABBOX_SMOLVM_BASE_URL"); value != "" {
-		cfg.Smolvm.BaseURL = value
-		cfg.credentialProvenance.smolvmBaseURL = credentialSourceEnvironment
-	}
-	cfg.Smolvm.Image = getenv("CRABBOX_SMOLVM_IMAGE", cfg.Smolvm.Image)
-	cfg.Smolvm.Workdir = getenv("CRABBOX_SMOLVM_WORKDIR", cfg.Smolvm.Workdir)
-	cfg.Smolvm.CPUs = getenvInt("CRABBOX_SMOLVM_CPUS", cfg.Smolvm.CPUs)
-	cfg.Smolvm.MemoryMB = getenvInt("CRABBOX_SMOLVM_MEMORY_MB", cfg.Smolvm.MemoryMB)
-	cfg.Smolvm.Network = getenv("CRABBOX_SMOLVM_NETWORK", cfg.Smolvm.Network)
-	if value, ok := getenvBool("CRABBOX_SMOLVM_KEEP"); ok {
-		cfg.Smolvm.Keep = value
+	{
+		applied, err := cfg.Smolvm.applyEnv()
+		if applied.APIKey {
+			cfg.credentialProvenance.smolvmAPIKey = credentialSourceEnvironment
+		}
+		if applied.BaseURL {
+			cfg.credentialProvenance.smolvmBaseURL = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_ASCII_BOX_API_KEY", "ASCII_BOX_API_KEY"); ok {
 		cfg.AsciiBox.APIKey = value

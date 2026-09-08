@@ -430,7 +430,7 @@ func machineToServer(cfg Config, m machineData) Server {
 }
 
 func machineBaseHost(cfg Config) string {
-	raw := blank(strings.TrimSpace(cfg.Smolvm.BaseURL), "https://api.smolmachines.com")
+	raw := blank(strings.TrimSpace(cfg.Smolvm.BaseURL), core.SmolvmConfigDefaultBaseURL)
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {
 		return raw
@@ -468,7 +468,7 @@ func statusReady(status string) bool {
 }
 
 func imageName(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Smolvm.Image), "alpine")
+	return blank(strings.TrimSpace(cfg.Smolvm.Image), core.SmolvmConfigDefaultImage)
 }
 
 func machineName(leaseID, slug string) string {
@@ -483,14 +483,14 @@ func cpusValue(cfg Config) int {
 	if cfg.Smolvm.CPUs > 0 {
 		return cfg.Smolvm.CPUs
 	}
-	return 2
+	return core.SmolvmConfigDefaultCPUs
 }
 
 func memoryValue(cfg Config) int {
 	if cfg.Smolvm.MemoryMB > 0 {
 		return cfg.Smolvm.MemoryMB
 	}
-	return 2048
+	return core.SmolvmConfigDefaultMemoryMB
 }
 
 func networkMode(cfg Config) string {
@@ -505,7 +505,7 @@ func networkMode(cfg Config) string {
 }
 
 func workdir(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Smolvm.Workdir), "/workspace")
+	return blank(strings.TrimSpace(cfg.Smolvm.Workdir), core.SmolvmConfigDefaultWorkdir)
 }
 
 func cleanWorkdir(workdir string) (string, error) {

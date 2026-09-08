@@ -243,7 +243,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if UpstashBoxConfigFlagPresence(fs).BaseURL {
 		provenance.upstashBoxBaseURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "smolvm-base-url") {
+	if SmolvmConfigFlagPresence(fs).BaseURL {
 		provenance.smolvmBaseURL = credentialSourceFlag
 	}
 	if flagWasSet(fs, "ascii-box-base-url") {

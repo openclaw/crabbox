@@ -36,6 +36,8 @@
 
 - Describe Azure Dynamic Sessions configuration bindings once, preserving positive-only YAML timeouts, legacy-pool rejection, endpoint provenance, and TTL fallback order. [PR 2017](https://github.com/openclaw/crabbox/pull/2017). Thanks @steipete.
 
+- Describe SmolVM configuration bindings once, preserving all three API-key environment names, CPU/memory source rules, endpoint checks, and existing network behavior. Thanks @steipete.
+
 ## 0.53.0 - 2026-09-08
 
 ### Highlights
