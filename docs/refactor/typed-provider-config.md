@@ -145,6 +145,26 @@ ignore zero. Modal's `secrets: []` deliberately remains pointer-backed so a writ
 retains the explicit clear. Positive-only numeric overlays still store negative
 inputs verbatim: ignoring an assignment is not permission to erase its file value.
 
+## Lambda's concrete owner
+
+Lambda uses `config_lambda.go` without generated bindings. Its structured mount
+list and different file/environment image-pair rules remain explicit typed code.
+`LambdaConfig` owns one eight-field YAML shape; the defined
+`type fileLambdaConfig LambdaConfig` preserves the existing file-input type name
+in decoder diagnostics without duplicating the fields. File input stays zero-valued,
+and runtime initialization is a separate function. No JSON tags or custom marshal
+methods are added; the supported file writer and config-show formats stay unchanged.
+Ad-hoc YAML serialization of the raw runtime type is not a supported contract.
+
+The source applicators and existing mount parser live with that concrete owner.
+`WithRuntimeDefaults` owns raw-empty region/type filling and the image-family
+fallback when both image and family are empty. Runtime initialization delegates
+from the zero value. Core applies the transform before its explicit OS override;
+the backend retains generic server-type projection before applying it. Trim-aware
+provider lookups remain separate from these raw-empty rules.
+Native mount filtering, lookup, credentials, class selection and OS mappings remain
+provider policy. The following field instructions apply to generated owners.
+
 ## Adding a field
 
 1. Add an exported, singly named field to the provider's config struct. Supported types

@@ -13283,3 +13283,253 @@ func TestLinodeTypedInitializer(t *testing.T) {
 		}
 	}
 }
+
+func TestLambdaBindingSources(t *testing.T) {
+	for _, source := range []string{"user", "repo", "env"} {
+		for _, raw := range []string{"", "same", "  ", "custom"} {
+			t.Run(source+raw, func(t *testing.T) {
+				cfg := baseConfig()
+				cfg.Lambda = LambdaConfig{Region: "same", Type: "same", Image: "same", ImageFamily: "same", FirewallRuleset: "same"}
+				v := raw
+				if v == "" {
+					v = "same"
+				}
+				want := LambdaConfig{Region: v, Type: v, Image: v, ImageFamily: v, FirewallRuleset: v}
+				if source == "env" {
+					for _, key := range []string{"REGION", "TYPE", "IMAGE", "IMAGE_FAMILY", "FIREWALL_RULESET"} {
+						t.Setenv("CRABBOX_LAMBDA_"+key, raw)
+					}
+					if raw != "" {
+						want.Image = ""
+					}
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					data, err := yaml.Marshal(map[string]any{"lambda": map[string]any{"region": raw, "type": raw, "image": raw, "imageFamily": raw, "firewallRuleset": raw}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					var file fileConfig
+					if err := yaml.Unmarshal(data, &file); err != nil {
+						t.Fatal(err)
+					}
+					if err := applyFileConfigWithTrust(&cfg, file, source == "user"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if !reflect.DeepEqual(cfg.Lambda, want) || cfg.lambdaTypeExplicit != (raw != "") || cfg.lambdaImageExplicit != (raw != "") || cfg.lambdaImageFamilyExplicit != (raw != "") {
+					t.Fatalf("source=%s raw=%q got=%#v want=%#v", source, raw, cfg.Lambda, want)
+				}
+			})
+		}
+	}
+	for _, raw := range []string{"{}", "null", "{region: null, type: null, image: null, imageFamily: null, firewallRuleset: null}"} {
+		var file fileConfig
+		if err := yaml.Unmarshal([]byte("lambda: "+raw), &file); err != nil {
+			t.Fatal(err)
+		}
+		cfg := baseConfig()
+		before := cfg.Lambda
+		if err := applyFileConfig(&cfg, file); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(cfg.Lambda, before) || cfg.lambdaTypeExplicit || cfg.lambdaImageExplicit || cfg.lambdaImageFamilyExplicit {
+			t.Fatal("empty/null input changed config")
+		}
+	}
+}
+
+func TestLambdaBindingPairs(t *testing.T) {
+	for _, source := range []string{"user", "repo", "env"} {
+		for _, tc := range []struct{ image, family, wantImage, wantFamily string }{{"new-image", "", "new-image", ""}, {"", "new-family", "old-image", "new-family"}, {"new-image", "new-family", "new-image", "new-family"}} {
+			t.Run(source+tc.image+tc.family, func(t *testing.T) {
+				cfg := baseConfig()
+				cfg.Lambda.Image = "old-image"
+				cfg.Lambda.ImageFamily = "old-family"
+				wi, wf := tc.wantImage, tc.wantFamily
+				if source == "env" {
+					t.Setenv("CRABBOX_LAMBDA_IMAGE", tc.image)
+					t.Setenv("CRABBOX_LAMBDA_IMAGE_FAMILY", tc.family)
+					if tc.family != "" {
+						wi = ""
+					}
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if err := applyFileConfigWithTrust(&cfg, fileConfig{Lambda: &fileLambdaConfig{Image: tc.image, ImageFamily: tc.family}}, source == "user"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if cfg.Lambda.Image != wi || cfg.Lambda.ImageFamily != wf || cfg.lambdaImageExplicit != (tc.image != "") || cfg.lambdaImageFamilyExplicit != (tc.family != "") || cfg.lambdaTypeExplicit {
+					t.Fatalf("pair image=%q family=%q", cfg.Lambda.Image, cfg.Lambda.ImageFamily)
+				}
+			})
+		}
+	}
+}
+
+func TestLambdaBindingLists(t *testing.T) {
+	for _, trusted := range []bool{false, true} {
+		for _, empty := range []bool{false, true} {
+			file := fileConfig{Lambda: &fileLambdaConfig{SSHCIDRs: []string{" raw ", "", "raw"}, FilesystemNames: []string{" data ", "data"}, FilesystemMounts: []LambdaFilesystemMount{{Name: " data ", MountPath: " /mnt/data "}, {}}}}
+			cfg := baseConfig()
+			if empty {
+				file.Lambda.SSHCIDRs = []string{}
+				file.Lambda.FilesystemNames = []string{}
+				file.Lambda.FilesystemMounts = []LambdaFilesystemMount{}
+				cfg.Lambda.SSHCIDRs = []string{"prior"}
+				cfg.Lambda.FilesystemNames = []string{"prior"}
+				cfg.Lambda.FilesystemMounts = []LambdaFilesystemMount{{Name: "prior"}}
+			}
+			before := cfg.Lambda
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if empty {
+				if !reflect.DeepEqual(cfg.Lambda, before) {
+					t.Fatal("empty lists replaced prior")
+				}
+			} else {
+				for _, name := range []string{"SSHCIDRs", "FilesystemNames", "FilesystemMounts"} {
+					got := reflect.ValueOf(cfg.Lambda).FieldByName(name)
+					want := reflect.ValueOf(file.Lambda).Elem().FieldByName(name)
+					if !reflect.DeepEqual(got.Interface(), want.Interface()) || got.Pointer() != want.Pointer() {
+						t.Fatalf("file list %s not raw/shared", name)
+					}
+				}
+			}
+		}
+	}
+	for _, raw := range []string{"", " , ", "none", " a:/mnt/a, b, a:/mnt/a "} {
+		t.Run(raw, func(t *testing.T) {
+			for _, key := range []string{"SSH_CIDRS", "FILESYSTEM_NAMES", "FILESYSTEM_MOUNTS"} {
+				t.Setenv("CRABBOX_LAMBDA_"+key, raw)
+			}
+			cfg := baseConfig()
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			var strs []string
+			var mounts []LambdaFilesystemMount
+			switch raw {
+			case " , ":
+				strs = []string{}
+				mounts = []LambdaFilesystemMount{}
+			case "none":
+				strs = []string{"none"}
+				mounts = []LambdaFilesystemMount{{Name: "none"}}
+			case " a:/mnt/a, b, a:/mnt/a ":
+				strs = []string{"a:/mnt/a", "b", "a:/mnt/a"}
+				mounts = []LambdaFilesystemMount{{Name: "a", MountPath: "/mnt/a"}, {Name: "b"}, {Name: "a", MountPath: "/mnt/a"}}
+			}
+			if !reflect.DeepEqual(cfg.Lambda.SSHCIDRs, strs) || !reflect.DeepEqual(cfg.Lambda.FilesystemNames, strs) || !reflect.DeepEqual(cfg.Lambda.FilesystemMounts, mounts) {
+				t.Fatalf("env lists=%#v", cfg.Lambda)
+			}
+			if len(strs) > 0 {
+				other := baseConfig()
+				if err := applyEnv(&other); err != nil {
+					t.Fatal(err)
+				}
+				cfg.Lambda.SSHCIDRs[0] = "changed"
+				cfg.Lambda.FilesystemNames[0] = "changed"
+				cfg.Lambda.FilesystemMounts[0].Name = "changed"
+				if !reflect.DeepEqual(other.Lambda.SSHCIDRs, strs) || !reflect.DeepEqual(other.Lambda.FilesystemNames, strs) || !reflect.DeepEqual(other.Lambda.FilesystemMounts, mounts) {
+					t.Fatal("env collections unexpectedly shared")
+				}
+			}
+		})
+	}
+}
+
+func TestLambdaBindingCoreDefaults(t *testing.T) {
+	cfg := baseConfig()
+	if !reflect.DeepEqual(cfg.Lambda, LambdaConfig{Region: "us-west-1", Type: "gpu_1x_a10", ImageFamily: "lambda-stack-24-04"}) || cfg.lambdaTypeExplicit || cfg.lambdaImageExplicit || cfg.lambdaImageFamilyExplicit {
+		t.Fatalf("base=%#v", cfg.Lambda)
+	}
+	for _, tc := range []struct {
+		os       string
+		explicit bool
+		family   string
+	}{{"ubuntu:26.04", false, "lambda-stack-24-04"}, {"ubuntu:24.04", true, "lambda-stack-24-04"}, {"ubuntu:26.04", true, ""}} {
+		cfg := baseConfig()
+		cfg.Provider = "lambda"
+		cfg.OSImage = tc.os
+		cfg.osImageExplicit = tc.explicit
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Lambda.ImageFamily != tc.family || cfg.Lambda.Image != "" {
+			t.Fatalf("OS=%s lambda=%#v", tc.os, cfg.Lambda)
+		}
+	}
+	for _, raw := range []string{"", "  ", "custom", "us-west-1"} {
+		for _, pair := range []struct{ image, family, wantFamily string }{{"", "", "lambda-stack-24-04"}, {"image", "", ""}, {"", "family", "family"}, {"image", "family", "family"}, {"  ", "  ", "  "}} {
+			cfg := baseConfig()
+			cfg.Provider = "lambda"
+			cfg.Class = "standard"
+			cfg.Lambda = LambdaConfig{Region: raw, Type: raw, Image: pair.image, ImageFamily: pair.family, FirewallRuleset: "rule", SSHCIDRs: []string{" raw ", ""}, FilesystemNames: []string{"data", "data"}, FilesystemMounts: []LambdaFilesystemMount{{Name: " data ", MountPath: " /mnt/data "}}}
+			cidrs, names, mounts := cfg.Lambda.SSHCIDRs, cfg.Lambda.FilesystemNames, cfg.Lambda.FilesystemMounts
+			r, typ := raw, raw
+			if raw == "" {
+				r = "us-west-1"
+				typ = "gpu_1x_a10"
+			}
+			want := LambdaConfig{Region: r, Type: typ, Image: pair.image, ImageFamily: pair.wantFamily, FirewallRuleset: "rule", SSHCIDRs: []string{" raw ", ""}, FilesystemNames: []string{"data", "data"}, FilesystemMounts: []LambdaFilesystemMount{{Name: " data ", MountPath: " /mnt/data "}}}
+			if err := applyProviderConfigDefaults(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Lambda, want) || &cfg.Lambda.SSHCIDRs[0] != &cidrs[0] || &cfg.Lambda.FilesystemNames[0] != &names[0] || &cfg.Lambda.FilesystemMounts[0] != &mounts[0] {
+				t.Fatalf("raw=%q pair=%#v cfg=%#v", raw, pair, cfg.Lambda)
+			}
+			if cfg.SSHUser != "ubuntu" || cfg.SSHPort != "22" || cfg.WorkRoot != "/work/crabbox" || cfg.Class != "standard" || cfg.TargetOS != targetLinux {
+				t.Fatal("core generic effects changed")
+			}
+		}
+	}
+	for _, tc := range []struct {
+		os                        string
+		imageMarker, familyMarker bool
+		want                      string
+	}{{"ubuntu:24.04", false, false, "lambda-stack-24-04"}, {"ubuntu:26.04", false, false, ""}, {"ubuntu:26.04", true, false, "family"}, {"ubuntu:26.04", false, true, "family"}, {"ubuntu:24.04", true, true, "family"}} {
+		cfg := baseConfig()
+		cfg.Provider = "lambda"
+		cfg.Lambda = LambdaConfig{Image: "image", ImageFamily: "family"}
+		cfg.OSImage = tc.os
+		cfg.osImageExplicit = true
+		cfg.lambdaImageExplicit = tc.imageMarker
+		cfg.lambdaImageFamilyExplicit = tc.familyMarker
+		cfg.SSHUser = "alice"
+		cfg.SSHPort = "2200"
+		cfg.WorkRoot = "/srv/project"
+		MarkSSHUserExplicit(&cfg)
+		MarkSSHPortExplicit(&cfg)
+		MarkWorkRootExplicit(&cfg)
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Lambda.Image != "image" || cfg.Lambda.ImageFamily != tc.want || cfg.Lambda.Region != "us-west-1" || cfg.Lambda.Type != "gpu_1x_a10" || cfg.SSHUser != "alice" || cfg.SSHPort != "2200" || cfg.WorkRoot != "/srv/project" || cfg.Lambda.SSHCIDRs != nil || cfg.Lambda.FilesystemNames != nil || cfg.Lambda.FilesystemMounts != nil {
+			t.Fatalf("explicit OS case=%#v cfg=%#v", tc, cfg.Lambda)
+		}
+	}
+
+}
+
+func TestLambdaWithRuntimeDefaults(t *testing.T) {
+	fixture := func() LambdaConfig {
+		return LambdaConfig{FirewallRuleset: "rule", SSHCIDRs: []string{" raw ", ""}, FilesystemNames: []string{"data", "data"}, FilesystemMounts: []LambdaFilesystemMount{{Name: "data", MountPath: "/mnt/data"}}}
+	}
+	cfg, before, want := fixture(), fixture(), fixture()
+	want.Region, want.Type, want.ImageFamily = "us-west-1", "gpu_1x_a10", "lambda-stack-24-04"
+	got := cfg.WithRuntimeDefaults()
+	if !reflect.DeepEqual(cfg, before) || !reflect.DeepEqual(got, want) {
+		t.Fatalf("receiver=%#v result=%#v", cfg, got)
+	}
+	if &got.SSHCIDRs[0] != &cfg.SSHCIDRs[0] || &got.FilesystemNames[0] != &cfg.FilesystemNames[0] || &got.FilesystemMounts[0] != &cfg.FilesystemMounts[0] {
+		t.Fatal("runtime defaults copied collection backing arrays")
+	}
+	if !reflect.DeepEqual(got.WithRuntimeDefaults(), got) {
+		t.Fatal("runtime defaults are not idempotent")
+	}
+}

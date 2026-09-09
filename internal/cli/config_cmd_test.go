@@ -2803,3 +2803,78 @@ func TestConfigShowLocalContainerExcludesInternalFields(t *testing.T) {
 		}
 	}
 }
+
+func TestLambdaBindingFileRoundTrip(t *testing.T) {
+	path := isolatedConfigPath(t)
+	for _, tc := range []struct {
+		input, want string
+		nilLambda   bool
+	}{{"{}\n", "{}\n", true}, {"lambda: null\n", "{}\n", true}, {"lambda: {}\n", "lambda: {}\n", false}, {"lambda: {sshCIDRs: [], filesystemNames: [], filesystemMounts: []}\n", "lambda: {}\n", false}, {"lambda:\n  region: west\n  type: gpu\n  image: image\n  imageFamily: family\n  firewallRuleset: rule\n  sshCIDRs: [cidr]\n  filesystemNames: [data]\n  filesystemMounts:\n    - name: data\n      mountPath: /mnt/data\n    - {}\n", "lambda:\n    region: west\n    type: gpu\n    image: image\n    imageFamily: family\n    firewallRuleset: rule\n    sshCIDRs:\n        - cidr\n    filesystemNames:\n        - data\n    filesystemMounts:\n        - name: data\n          mountPath: /mnt/data\n        - {}\n", false}} {
+		if err := os.WriteFile(path, []byte(tc.input), 0600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (file.Lambda == nil) != tc.nilLambda {
+			t.Fatalf("decoded lambda=%#v", file.Lambda)
+		}
+		if tc.input == "lambda: {}\n" && !reflect.DeepEqual(*file.Lambda, fileLambdaConfig{}) {
+			t.Fatal("decoded file initialized runtime defaults")
+		}
+		written, err := writeUserFileConfig(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if written != path {
+			t.Fatalf("write path=%q", written)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(data) != tc.want {
+			t.Fatalf("YAML got=%q want=%q", data, tc.want)
+		}
+		again, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.input != "lambda: {sshCIDRs: [], filesystemNames: [], filesystemMounts: []}\n" && !reflect.DeepEqual(again, file) {
+			t.Fatal("roundtrip fields changed")
+		}
+	}
+	for _, tc := range []struct{ input, detail string }{{"lambda: wrong\n", "line 1: cannot unmarshal !!str `wrong` into cli.fileLambdaConfig"}, {"lambda: [wrong]\n", "line 1: cannot unmarshal !!seq into cli.fileLambdaConfig"}} {
+		if err := os.WriteFile(path, []byte(tc.input), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := readFileConfig(path)
+		want := "parse config " + path + ": yaml: unmarshal errors:\n  " + tc.detail
+		if err == nil || err.Error() != want {
+			t.Fatalf("diagnostic=%v want=%q", err, want)
+		}
+	}
+}
+
+func TestLambdaBindingJSON(t *testing.T) {
+	isolatedConfigPath(t)
+	cfg := baseConfig()
+	cfg.Lambda = LambdaConfig{Region: "west", Type: "gpu", Image: "image", ImageFamily: "family", FirewallRuleset: "rule", SSHCIDRs: []string{"cidr"}, FilesystemNames: []string{"data"}, FilesystemMounts: []LambdaFilesystemMount{{Name: "data", MountPath: "/mnt/data"}, {}}}
+	data, err := json.Marshal(cfg.Lambda)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"Region":"west","Type":"gpu","Image":"image","ImageFamily":"family","FirewallRuleset":"rule","SSHCIDRs":["cidr"],"FilesystemNames":["data"],"FilesystemMounts":[{"name":"data","mountPath":"/mnt/data"},{}]}`
+	if string(data) != want {
+		t.Fatalf("runtime JSON=%s", data)
+	}
+	data, err = json.Marshal(configShowView(cfg)["lambda"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = `{"auth":"missing","filesystemMounts":[{"name":"data","mountPath":"/mnt/data"},{}],"filesystemNames":["data"],"firewallRuleset":"rule","image":"image","imageFamily":"family","region":"west","sshCIDRs":["cidr"],"type":"gpu"}`
+	if string(data) != want {
+		t.Fatalf("config-show JSON=%s", data)
+	}
+}

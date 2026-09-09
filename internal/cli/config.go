@@ -372,22 +372,6 @@ type GitHubCodespacesConfig struct {
 	WorkRoot         string
 }
 
-type LambdaConfig struct {
-	Region           string
-	Type             string
-	Image            string
-	ImageFamily      string
-	FirewallRuleset  string
-	SSHCIDRs         []string
-	FilesystemNames  []string
-	FilesystemMounts []LambdaFilesystemMount
-}
-
-type LambdaFilesystemMount struct {
-	Name      string `yaml:"name,omitempty" json:"name,omitempty"`
-	MountPath string `yaml:"mountPath,omitempty" json:"mountPath,omitempty"`
-}
-
 // NebiusConfig is intentionally non-secret. Authentication stays in the
 // Nebius CLI profile store and is never accepted as Crabbox config or argv.
 type NebiusConfig struct {
@@ -1506,20 +1490,13 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		return validateTargetConfig(*cfg)
 	}
 	if cfg.Provider == "lambda" {
-		if cfg.Lambda.Region == "" {
-			cfg.Lambda.Region = "us-west-1"
-		}
-		if cfg.Lambda.Type == "" {
-			cfg.Lambda.Type = "gpu_1x_a10"
-		}
+		cfg.Lambda = cfg.Lambda.WithRuntimeDefaults()
 		if cfg.osImageExplicit && !cfg.lambdaImageExplicit && !cfg.lambdaImageFamilyExplicit {
 			if cfg.OSImage == "ubuntu:24.04" {
 				cfg.Lambda.ImageFamily = "lambda-stack-24-04"
 			} else {
 				cfg.Lambda.ImageFamily = ""
 			}
-		} else if cfg.Lambda.Image == "" && cfg.Lambda.ImageFamily == "" {
-			cfg.Lambda.ImageFamily = "lambda-stack-24-04"
 		}
 		applyLinuxConnectionDefaults(cfg, "ubuntu", "22")
 		cfg.SSHFallbackPorts = nil
@@ -2413,11 +2390,7 @@ func baseConfig() Config {
 			DeleteOnRelease: true,
 			WorkRoot:        "/workspaces/crabbox",
 		},
-		Lambda: LambdaConfig{
-			Region:      "us-west-1",
-			Type:        "gpu_1x_a10",
-			ImageFamily: "lambda-stack-24-04",
-		},
+		Lambda:       initialLambdaConfig(),
 		OVH:          defaultOVHConfig(),
 		Scaleway:     defaultScalewayConfig(),
 		TencentCloud: defaultTencentCloudConfig(),
@@ -2926,17 +2899,6 @@ type fileGitHubCodespacesConfig struct {
 	RetentionPeriod  string `yaml:"retentionPeriod,omitempty"`
 	DeleteOnRelease  *bool  `yaml:"deleteOnRelease,omitempty"`
 	WorkRoot         string `yaml:"workRoot,omitempty"`
-}
-
-type fileLambdaConfig struct {
-	Region           string                  `yaml:"region,omitempty"`
-	Type             string                  `yaml:"type,omitempty"`
-	Image            string                  `yaml:"image,omitempty"`
-	ImageFamily      string                  `yaml:"imageFamily,omitempty"`
-	FirewallRuleset  string                  `yaml:"firewallRuleset,omitempty"`
-	SSHCIDRs         []string                `yaml:"sshCIDRs,omitempty"`
-	FilesystemNames  []string                `yaml:"filesystemNames,omitempty"`
-	FilesystemMounts []LambdaFilesystemMount `yaml:"filesystemMounts,omitempty"`
 }
 
 type fileNebiusConfig struct {
@@ -4347,40 +4309,16 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.GitHubCodespaces.WorkRoot = file.GitHubCodespaces.WorkRoot
 		}
 	}
-	if file.Lambda != nil {
-		lambdaImageSet := false
-		lambdaImageFamilySet := false
-		if file.Lambda.Region != "" {
-			cfg.Lambda.Region = file.Lambda.Region
-		}
-		if file.Lambda.Type != "" {
-			cfg.Lambda.Type = file.Lambda.Type
+	{
+		applied := cfg.Lambda.applyFile(file.Lambda)
+		if applied.Type {
 			cfg.lambdaTypeExplicit = true
 		}
-		if file.Lambda.Image != "" {
-			cfg.Lambda.Image = file.Lambda.Image
+		if applied.Image {
 			cfg.lambdaImageExplicit = true
-			lambdaImageSet = true
 		}
-		if file.Lambda.ImageFamily != "" {
-			cfg.Lambda.ImageFamily = file.Lambda.ImageFamily
+		if applied.ImageFamily {
 			cfg.lambdaImageFamilyExplicit = true
-			lambdaImageFamilySet = true
-		}
-		if lambdaImageSet && !lambdaImageFamilySet {
-			cfg.Lambda.ImageFamily = ""
-		}
-		if file.Lambda.FirewallRuleset != "" {
-			cfg.Lambda.FirewallRuleset = file.Lambda.FirewallRuleset
-		}
-		if len(file.Lambda.SSHCIDRs) > 0 {
-			cfg.Lambda.SSHCIDRs = file.Lambda.SSHCIDRs
-		}
-		if len(file.Lambda.FilesystemNames) > 0 {
-			cfg.Lambda.FilesystemNames = file.Lambda.FilesystemNames
-		}
-		if len(file.Lambda.FilesystemMounts) > 0 {
-			cfg.Lambda.FilesystemMounts = file.Lambda.FilesystemMounts
 		}
 	}
 	if file.Nebius != nil {
@@ -6854,30 +6792,17 @@ func applyEnv(cfg *Config) error {
 		MarkDeleteOnReleaseExplicit(cfg, "github-codespaces")
 	}
 	cfg.GitHubCodespaces.WorkRoot = getenv("CRABBOX_GITHUB_CODESPACES_WORK_ROOT", cfg.GitHubCodespaces.WorkRoot)
-	cfg.Lambda.Region = getenv("CRABBOX_LAMBDA_REGION", cfg.Lambda.Region)
-	if lambdaType := os.Getenv("CRABBOX_LAMBDA_TYPE"); lambdaType != "" {
-		cfg.Lambda.Type = lambdaType
-		cfg.lambdaTypeExplicit = true
-	}
-	if image := os.Getenv("CRABBOX_LAMBDA_IMAGE"); image != "" {
-		cfg.Lambda.Image = image
-		cfg.lambdaImageExplicit = true
-		cfg.Lambda.ImageFamily = ""
-	}
-	if imageFamily := os.Getenv("CRABBOX_LAMBDA_IMAGE_FAMILY"); imageFamily != "" {
-		cfg.Lambda.ImageFamily = imageFamily
-		cfg.lambdaImageFamilyExplicit = true
-		cfg.Lambda.Image = ""
-	}
-	cfg.Lambda.FirewallRuleset = getenv("CRABBOX_LAMBDA_FIREWALL_RULESET", cfg.Lambda.FirewallRuleset)
-	if cidrs := os.Getenv("CRABBOX_LAMBDA_SSH_CIDRS"); cidrs != "" {
-		cfg.Lambda.SSHCIDRs = splitCommaList(cidrs)
-	}
-	if names := os.Getenv("CRABBOX_LAMBDA_FILESYSTEM_NAMES"); names != "" {
-		cfg.Lambda.FilesystemNames = splitCommaList(names)
-	}
-	if mounts := os.Getenv("CRABBOX_LAMBDA_FILESYSTEM_MOUNTS"); mounts != "" {
-		cfg.Lambda.FilesystemMounts = parseLambdaFilesystemMounts(mounts)
+	{
+		applied := cfg.Lambda.applyEnv()
+		if applied.Type {
+			cfg.lambdaTypeExplicit = true
+		}
+		if applied.Image {
+			cfg.lambdaImageExplicit = true
+		}
+		if applied.ImageFamily {
+			cfg.lambdaImageFamilyExplicit = true
+		}
 	}
 	cfg.Nebius.CLI = getenv("CRABBOX_NEBIUS_CLI", cfg.Nebius.CLI)
 	cfg.Nebius.Profile = getenv("CRABBOX_NEBIUS_PROFILE", cfg.Nebius.Profile)
@@ -8542,20 +8467,6 @@ func getenvList(name string) ([]string, bool) {
 func splitCommaList(value string) []string {
 	parts := strings.Split(value, ",")
 	return normalizeList(parts)
-}
-
-func parseLambdaFilesystemMounts(value string) []LambdaFilesystemMount {
-	parts := splitCommaList(value)
-	out := make([]LambdaFilesystemMount, 0, len(parts))
-	for _, part := range parts {
-		name, mountPath, ok := strings.Cut(part, ":")
-		if !ok {
-			out = append(out, LambdaFilesystemMount{Name: strings.TrimSpace(part)})
-			continue
-		}
-		out = append(out, LambdaFilesystemMount{Name: strings.TrimSpace(name), MountPath: strings.TrimSpace(mountPath)})
-	}
-	return out
 }
 
 func normalizeList(values []string) []string {
