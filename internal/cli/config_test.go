@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -419,6 +420,14 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_APPLE_VM_CPUS",
 		"CRABBOX_APPLE_VM_MEMORY",
 		"CRABBOX_APPLE_VM_DISK",
+		"CRABBOX_APPLE_VZ_HELPER",
+		"CRABBOX_APPLE_VZ_IMAGE",
+		"CRABBOX_APPLE_VZ_IMAGE_SHA256",
+		"CRABBOX_APPLE_VZ_USER",
+		"CRABBOX_APPLE_VZ_WORK_ROOT",
+		"CRABBOX_APPLE_VZ_CPUS",
+		"CRABBOX_APPLE_VZ_MEMORY",
+		"CRABBOX_APPLE_VZ_DISK",
 		"CRABBOX_MULTIPASS_CLI",
 		"CRABBOX_MULTIPASS_IMAGE",
 		"CRABBOX_MULTIPASS_USER",
@@ -4394,6 +4403,276 @@ func TestAppleContainerConfigDefaultsFileAndEnv(t *testing.T) {
 	applyEnv(&cfg)
 	if cfg.AppleContainer.CLIPath != "/usr/local/bin/container" || cfg.AppleContainer.Image != "example-org/other:live" || cfg.AppleContainer.User != "env-user" || cfg.AppleContainer.WorkRoot != "/work/env" || cfg.AppleContainer.CPUs != 6 || cfg.AppleContainer.Memory != "12g" || len(cfg.AppleContainer.ExtraRunArgs) != 2 {
 		t.Fatalf("env appleContainer config not applied: %#v", cfg.AppleContainer)
+	}
+}
+
+func TestAppleVMOrdinaryFileSections(t *testing.T) {
+	t.Run("initializer", func(t *testing.T) {
+		cfg := baseConfig()
+		image, err := osImageDefaultAppleVMImage(cfg.OSImage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checksum, err := osImageDefaultAppleVMSHA256(cfg.OSImage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := AppleVMConfig{Image: image, ImageSHA256: checksum, User: "crabbox", WorkRoot: "/work/crabbox", CPUs: 4, MemoryMiB: 8192, DiskGiB: 30}
+		if cfg.AppleVM != want {
+			t.Fatalf("initial AppleVM=%+v, want %+v", cfg.AppleVM, want)
+		}
+		if AppleVMImageExplicit(cfg) || cfg.appleVMImageSHA256Explicit || AppleVMCPUsExplicit(cfg) || AppleVMMemoryExplicit(cfg) || AppleVMDiskExplicit(cfg) {
+			t.Fatal("initializer marked source values explicit")
+		}
+	})
+	initial := AppleVMConfig{HelperPath: "before-helper", Image: "before-image", ImageSHA256: "before-checksum", User: "before-user", WorkRoot: "/before", CPUs: 4, MemoryMiB: 8192, DiskGiB: 30}
+	current := AppleVMConfig{HelperPath: " ~/current/helper ", Image: " ~/current/image ", ImageSHA256: " current-checksum ", User: " current-user ", WorkRoot: " ~/current/work ", CPUs: 0, MemoryMiB: -2, DiskGiB: -3}
+	legacy := AppleVMConfig{HelperPath: " ~/legacy/helper ", Image: " ~/legacy/image ", ImageSHA256: " legacy-checksum ", User: " legacy-user ", WorkRoot: " ~/legacy/work ", CPUs: -1, MemoryMiB: 0, DiskGiB: 0}
+	currentYAML := "appleVM:\n  helperPath: ' ~/current/helper '\n  image: ' ~/current/image '\n  imageSHA256: ' current-checksum '\n  user: ' current-user '\n  workRoot: ' ~/current/work '\n  cpus: 0\n  memoryMiB: -2\n  diskGiB: -3\n"
+	legacyYAML := "appleVZ:\n  helperPath: ' ~/legacy/helper '\n  image: ' ~/legacy/image '\n  imageSHA256: ' legacy-checksum '\n  user: ' legacy-user '\n  workRoot: ' ~/legacy/work '\n  cpus: -1\n  memoryMiB: 0\n  diskGiB: 0\n"
+	for _, tc := range []struct {
+		name, document string
+		want           AppleVMConfig
+		marked         bool
+	}{
+		{"current", currentYAML, current, true},
+		{"legacy", legacyYAML, legacy, true},
+		{"current-whole-section-wins", currentYAML + legacyYAML, current, true},
+		{"current-whole-section-wins-reversed", legacyYAML + currentYAML, current, true},
+		{"empty-current-wins", "appleVM: {}\n" + legacyYAML, initial, false},
+		{"null-current-falls-back", "appleVM: null\n" + legacyYAML, legacy, true},
+		{"both-null", "appleVM: null\nappleVZ: null\n", initial, false},
+		{"equal-values-still-explicit", "appleVM:\n  helperPath: before-helper\n  image: before-image\n  imageSHA256: before-checksum\n  user: before-user\n  workRoot: /before\n  cpus: 4\n  memoryMiB: 8192\n  diskGiB: 30\n", initial, true},
+		{"empty-values-and-null-numbers", "appleVM:\n  helperPath: ''\n  image: ''\n  imageSHA256: ''\n  user: ''\n  workRoot: ''\n  cpus: null\n  memoryMiB: null\n  diskGiB: null\n" + legacyYAML, initial, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var file, original fileConfig
+			if err := yaml.Unmarshal([]byte(tc.document), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := yaml.Unmarshal([]byte(tc.document), &original); err != nil {
+				t.Fatal(err)
+			}
+			for _, alreadyMarked := range []bool{false, true} {
+				cfg := Config{AppleVM: initial, SSHUser: "generic-user", WorkRoot: "/generic"}
+				if alreadyMarked {
+					MarkAppleVMImageExplicit(&cfg)
+					MarkAppleVMImageSHA256Explicit(&cfg)
+					MarkAppleVMCPUsExplicit(&cfg)
+					MarkAppleVMMemoryExplicit(&cfg)
+					MarkAppleVMDiskExplicit(&cfg)
+				}
+				if err := applyFileConfig(&cfg, file); err != nil {
+					t.Fatal(err)
+				}
+				if cfg.AppleVM != tc.want {
+					t.Fatalf("AppleVM=%+v, want %+v", cfg.AppleVM, tc.want)
+				}
+				wantMarker := alreadyMarked || tc.marked
+				if got := [5]bool{AppleVMImageExplicit(cfg), cfg.appleVMImageSHA256Explicit, AppleVMCPUsExplicit(cfg), AppleVMMemoryExplicit(cfg), AppleVMDiskExplicit(cfg)}; got != [5]bool{wantMarker, wantMarker, wantMarker, wantMarker, wantMarker} {
+					t.Fatalf("markers=%v, want all %v", got, wantMarker)
+				}
+				if cfg.SSHUser != "generic-user" || cfg.WorkRoot != "/generic" || IsWorkRootExplicit(&cfg) {
+					t.Fatal("file overlay changed generic user/root state")
+				}
+				if !reflect.DeepEqual(file, original) {
+					t.Fatal("file input was mutated")
+				}
+			}
+		})
+	}
+	t.Run("sparse-current-does-not-merge-legacy", func(t *testing.T) {
+		var file fileConfig
+		if err := yaml.Unmarshal([]byte("appleVM:\n  user: current-user\n"+legacyYAML), &file); err != nil {
+			t.Fatal(err)
+		}
+		cfg := Config{AppleVM: initial}
+		if err := applyFileConfig(&cfg, file); err != nil {
+			t.Fatal(err)
+		}
+		want := initial
+		want.User = "current-user"
+		if cfg.AppleVM != want || AppleVMImageExplicit(cfg) || cfg.appleVMImageSHA256Explicit || AppleVMCPUsExplicit(cfg) || AppleVMMemoryExplicit(cfg) || AppleVMDiskExplicit(cfg) {
+			t.Fatalf("sparse current merged legacy values or markers: %+v", cfg.AppleVM)
+		}
+	})
+	// Successive source events must clear an earlier explicit checksum, even
+	// when the image value itself is unchanged.
+	for _, section := range []string{"appleVM", "appleVZ"} {
+		t.Run(section+"-image-sequence", func(t *testing.T) {
+			cfg := Config{AppleVM: initial}
+			for _, step := range []struct {
+				body, image, checksum       string
+				imageMarked, checksumMarked bool
+			}{
+				{"imageSHA256: before-checksum", initial.Image, initial.ImageSHA256, false, true},
+				{"image: before-image", initial.Image, "", true, false},
+				{"imageSHA256: next-checksum", initial.Image, "next-checksum", true, true},
+				{"image: next-image\n  imageSHA256: paired-checksum", "next-image", "paired-checksum", true, true},
+				{"image: ''\n  imageSHA256: ''", "next-image", "paired-checksum", true, true},
+			} {
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte(section+":\n  "+step.body+"\n"), &file); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfig(&cfg, file); err != nil {
+					t.Fatal(err)
+				}
+				if cfg.AppleVM.Image != step.image || cfg.AppleVM.ImageSHA256 != step.checksum || AppleVMImageExplicit(cfg) != step.imageMarked || cfg.appleVMImageSHA256Explicit != step.checksumMarked {
+					t.Fatalf("step %q: image/checksum=%q/%q markers=%v/%v", step.body, cfg.AppleVM.Image, cfg.AppleVM.ImageSHA256, AppleVMImageExplicit(cfg), cfg.appleVMImageSHA256Explicit)
+				}
+			}
+		})
+	}
+}
+
+func TestAppleVMOrdinaryEnvironmentAliases(t *testing.T) {
+	suffixes := []string{"HELPER", "IMAGE", "IMAGE_SHA256", "USER", "WORK_ROOT", "CPUS", "MEMORY", "DISK"}
+	initial := AppleVMConfig{HelperPath: "before-helper", Image: "before-image", ImageSHA256: "before-checksum", User: "before-user", WorkRoot: "/before", CPUs: 4, MemoryMiB: 8192, DiskGiB: 30}
+	current := []string{" ~/current/helper ", " ~/current/image ", " current-checksum ", " current-user ", " ~/current/work ", " +6 ", " -2 ", " 0 "}
+	legacy := []string{" ~/legacy/helper ", " ~/legacy/image ", " legacy-checksum ", " legacy-user ", " ~/legacy/work ", " -3 ", " 0 ", " +9 "}
+	equal := []string{initial.HelperPath, initial.Image, initial.ImageSHA256, initial.User, initial.WorkRoot, "4", "8192", "30"}
+	empty := make([]string, len(suffixes))
+	for _, tc := range []struct {
+		name            string
+		current, legacy []string
+		want            AppleVMConfig
+		marked          bool
+	}{
+		{"current-only", current, empty, AppleVMConfig{current[0], current[1], current[2], current[3], current[4], 6, -2, 0}, true},
+		{"legacy-only-empty-current", empty, legacy, AppleVMConfig{legacy[0], legacy[1], legacy[2], legacy[3], legacy[4], -3, 0, 9}, true},
+		{"current-outranks-legacy", current, legacy, AppleVMConfig{current[0], current[1], current[2], current[3], current[4], 6, -2, 0}, true},
+		{"equal-current-still-explicit", equal, legacy, initial, true},
+		{"equal-legacy-still-explicit", empty, equal, initial, true},
+		{"signed-numerics-all-fields", []string{equal[0], equal[1], equal[2], equal[3], equal[4], " -4 ", " +8192 ", " -30 "}, legacy, AppleVMConfig{initial.HelperPath, initial.Image, initial.ImageSHA256, initial.User, initial.WorkRoot, -4, 8192, -30}, true},
+		{"empty-preserves", empty, empty, initial, false},
+		{"whitespace-strings-win", []string{" ", " ", " ", " ", " ", "4", "8192", "30"}, legacy, AppleVMConfig{" ", " ", " ", " ", " ", 4, 8192, 30}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			for i, suffix := range suffixes {
+				t.Setenv("CRABBOX_APPLE_VM_"+suffix, tc.current[i])
+				t.Setenv("CRABBOX_APPLE_VZ_"+suffix, tc.legacy[i])
+			}
+			cfg := Config{AppleVM: initial, SSHUser: "generic-user", WorkRoot: "/generic"}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.AppleVM != tc.want {
+				t.Fatalf("AppleVM=%+v, want %+v", cfg.AppleVM, tc.want)
+			}
+			if got := [5]bool{AppleVMImageExplicit(cfg), cfg.appleVMImageSHA256Explicit, AppleVMCPUsExplicit(cfg), AppleVMMemoryExplicit(cfg), AppleVMDiskExplicit(cfg)}; got != [5]bool{tc.marked, tc.marked, tc.marked, tc.marked, tc.marked} {
+				t.Fatalf("markers=%v, want all %v", got, tc.marked)
+			}
+			if cfg.SSHUser != "generic-user" || cfg.WorkRoot != "/generic" || IsWorkRootExplicit(&cfg) {
+				t.Fatal("environment changed generic user/root state")
+			}
+			for i, suffix := range suffixes {
+				if os.Getenv("CRABBOX_APPLE_VM_"+suffix) != tc.current[i] || os.Getenv("CRABBOX_APPLE_VZ_"+suffix) != tc.legacy[i] {
+					t.Fatalf("environment input %s mutated", suffix)
+				}
+			}
+			for _, suffix := range suffixes {
+				t.Setenv("CRABBOX_APPLE_VM_"+suffix, "")
+				t.Setenv("CRABBOX_APPLE_VZ_"+suffix, "")
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.AppleVM != tc.want || [5]bool{AppleVMImageExplicit(cfg), cfg.appleVMImageSHA256Explicit, AppleVMCPUsExplicit(cfg), AppleVMMemoryExplicit(cfg), AppleVMDiskExplicit(cfg)} != [5]bool{tc.marked, tc.marked, tc.marked, tc.marked, tc.marked} {
+				t.Fatal("empty environment changed existing values or markers")
+			}
+		})
+	}
+	for _, prefix := range []string{"CRABBOX_APPLE_VM_", "CRABBOX_APPLE_VZ_"} {
+		t.Run(prefix+"image-sequence", func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := Config{AppleVM: initial}
+			for _, step := range []struct {
+				image, checksum, wantImage, wantChecksum string
+				imageMarked, checksumMarked              bool
+			}{
+				{"", initial.ImageSHA256, initial.Image, initial.ImageSHA256, false, true},
+				{initial.Image, "", initial.Image, "", true, false},
+				{"", " next-checksum ", initial.Image, " next-checksum ", true, true},
+				{" next-image ", " paired-checksum ", " next-image ", " paired-checksum ", true, true},
+				{"", "", " next-image ", " paired-checksum ", true, true},
+			} {
+				t.Setenv(prefix+"IMAGE", step.image)
+				t.Setenv(prefix+"IMAGE_SHA256", step.checksum)
+				if err := applyEnv(&cfg); err != nil {
+					t.Fatal(err)
+				}
+				if cfg.AppleVM.Image != step.wantImage || cfg.AppleVM.ImageSHA256 != step.wantChecksum || AppleVMImageExplicit(cfg) != step.imageMarked || cfg.appleVMImageSHA256Explicit != step.checksumMarked {
+					t.Fatalf("step %+v: image/checksum=%q/%q markers=%v/%v", step, cfg.AppleVM.Image, cfg.AppleVM.ImageSHA256, AppleVMImageExplicit(cfg), cfg.appleVMImageSHA256Explicit)
+				}
+			}
+		})
+	}
+}
+
+func TestAppleVMOrdinaryEnvironmentNumericErrors(t *testing.T) {
+	for _, prefix := range []string{"CRABBOX_APPLE_VM_", "CRABBOX_APPLE_VZ_"} {
+		for failed, suffix := range []string{"CPUS", "MEMORY", "DISK"} {
+			for _, raw := range []string{"garbage", " \t ", "1.5", "1_024", "9999999999999999999999999999999999999999"} {
+				for _, alreadyMarked := range []bool{false, true} {
+					t.Run(fmt.Sprintf("%s%s/%q/marked=%v", prefix, suffix, raw, alreadyMarked), func(t *testing.T) {
+						clearConfigEnv(t)
+						cfg := Config{AppleVM: AppleVMConfig{Image: "before-image", ImageSHA256: "before-checksum", CPUs: 4, MemoryMiB: 8192, DiskGiB: 30}}
+						if alreadyMarked {
+							MarkAppleVMCPUsExplicit(&cfg)
+							MarkAppleVMMemoryExplicit(&cfg)
+							MarkAppleVMDiskExplicit(&cfg)
+						}
+						MarkAppleVMImageSHA256Explicit(&cfg)
+						for key, value := range map[string]string{"HELPER": " ~/helper ", "IMAGE": " ~/image ", "USER": " user ", "WORK_ROOT": " ~/work "} {
+							t.Setenv(prefix+key, value)
+						}
+						for i, numeric := range []string{"CPUS", "MEMORY", "DISK"} {
+							value := " +6 "
+							if i == failed {
+								value = raw
+							} else if i > failed {
+								value = "later-invalid"
+							}
+							t.Setenv(prefix+numeric, value)
+							if prefix == "CRABBOX_APPLE_VM_" {
+								t.Setenv("CRABBOX_APPLE_VZ_"+numeric, "10")
+							}
+						}
+						// A later ordinary provider assignment must not be reached.
+						cfg.MXC.CLIPath = "before-cli"
+						t.Setenv("CRABBOX_MXC_CLI", "after-cli")
+						err := applyEnv(&cfg)
+						_, parseErr := strconv.Atoi(strings.TrimSpace(raw))
+						wantError := fmt.Sprintf("CRABBOX_APPLE_VM_%s must be an integer: %v", suffix, parseErr)
+						if err == nil || err.Error() != wantError {
+							t.Fatalf("error=%v, want %s", err, wantError)
+						}
+						var numericErr *strconv.NumError
+						if !errors.As(err, &numericErr) || *numericErr != *parseErr.(*strconv.NumError) {
+							t.Fatalf("error did not retain trimmed numeric parse cause: %v", err)
+						}
+						want := AppleVMConfig{HelperPath: " ~/helper ", Image: " ~/image ", User: " user ", WorkRoot: " ~/work ", CPUs: 4, MemoryMiB: 8192, DiskGiB: 30}
+						if failed > 0 {
+							want.CPUs = 6
+						}
+						if failed > 1 {
+							want.MemoryMiB = 6
+						}
+						if cfg.AppleVM != want {
+							t.Fatalf("partial AppleVM=%+v, want %+v", cfg.AppleVM, want)
+						}
+						if got := [3]bool{AppleVMCPUsExplicit(cfg), AppleVMMemoryExplicit(cfg), AppleVMDiskExplicit(cfg)}; got != [3]bool{alreadyMarked || failed > 0, alreadyMarked || failed > 1, alreadyMarked} {
+							t.Fatalf("partial numeric markers=%v", got)
+						}
+						if !AppleVMImageExplicit(cfg) || cfg.appleVMImageSHA256Explicit || cfg.MXC.CLIPath != "before-cli" {
+							t.Fatal("wrong image markers or later provider mutation")
+						}
+					})
+				}
+			}
+		}
 	}
 }
 

@@ -446,6 +446,79 @@ func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
 	}
 }
 
+func TestAppleVMOrdinaryFileRoundTrip(t *testing.T) {
+	full := "  helperPath: ' ~/helper '\n  image: ' ~/image '\n  imageSHA256: ' checksum '\n  user: ' user '\n  workRoot: ' ~/work '\n  cpus: 0\n  memoryMiB: -2\n  diskGiB: 0\n"
+	zeros := "  cpus: 0\n  memoryMiB: 0\n  diskGiB: 0\n"
+	for _, tc := range []struct {
+		name, document, serialized string
+	}{
+		{"current-all-fields", "appleVM:\n" + full, "appleVM:\n" + full},
+		{"legacy-retained", "appleVZ:\n" + full, "appleVZ:\n" + full},
+		{"both-retained", "appleVM:\n" + full + "appleVZ:\n" + zeros, "appleVM:\n" + full + "appleVZ:\n" + zeros},
+		{"empty-current-retained", "appleVM: {}\nappleVZ:\n" + full, "appleVM: {}\nappleVZ:\n" + full},
+		{"null-current-omitted", "appleVM: null\nappleVZ:\n" + full, "appleVZ:\n" + full},
+		{"value-strings-omitted-zero-pointers-retained", "appleVM:\n  helperPath: ''\n  image: ''\n  imageSHA256: ''\n  user: ''\n  workRoot: ''\n" + zeros, "appleVM:\n" + zeros},
+		{"null-numeric-pointers-omitted", "appleVM:\n  cpus: null\n  memoryMiB: null\n  diskGiB: null\n", "appleVM: {}\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := isolatedConfigPath(t)
+			if err := os.WriteFile(path, []byte(tc.document), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file, err := readFileConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var original fileConfig
+			if err := yaml.Unmarshal([]byte(tc.document), &original); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(file, original) {
+				t.Fatalf("read file=%+v, want %+v", file, original)
+			}
+			// Runtime alias selection must not normalize the persistent document.
+			cfg := Config{}
+			if err := applyFileConfig(&cfg, file); err != nil {
+				t.Fatal(err)
+			}
+			writtenPath, err := writeUserFileConfig(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if writtenPath != path {
+				t.Fatalf("writer path=%q, want %q", writtenPath, path)
+			}
+			if !reflect.DeepEqual(file, original) {
+				t.Fatal("apply/write mutated the input file config")
+			}
+			reread, err := readFileConfig(writtenPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(reread, original) {
+				t.Fatalf("round-trip file=%+v, want %+v", reread, original)
+			}
+			data, err := os.ReadFile(writtenPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var gotMap, wantMap map[string]any
+			if err := yaml.Unmarshal(data, &gotMap); err != nil {
+				t.Fatal(err)
+			}
+			if err := yaml.Unmarshal([]byte(tc.serialized), &wantMap); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(gotMap, wantMap) {
+				t.Fatalf("serialized config=%s, want semantic YAML %s", data, tc.serialized)
+			}
+			if strings.Contains(tc.serialized, "appleVM:") && strings.Contains(tc.serialized, "appleVZ:") && strings.Index(string(data), "appleVM:") > strings.Index(string(data), "appleVZ:") {
+				t.Fatal("current section should precede legacy section")
+			}
+		})
+	}
+}
+
 func TestSealosConfigWriter(t *testing.T) {
 	for _, value := range []string{"null", "{}", "{kubectl: '', kubeconfig: '', context: '', namespace: '', image: '', templateID: '', cpu: '', memory: '', storageLimit: '', network: '', sshGatewayHost: '', sshGatewayPort: '', sshUser: '', workRoot: '', nodeHost: '', deleteOnRelease: false}"} {
 		path := isolatedConfigPath(t)

@@ -905,17 +905,6 @@ type LocalContainerConfig struct {
 	CheckpointMetadata map[string]string `yaml:"-" json:"-"`
 }
 
-type AppleVMConfig struct {
-	HelperPath  string
-	Image       string
-	ImageSHA256 string
-	User        string
-	WorkRoot    string
-	CPUs        int
-	MemoryMiB   int
-	DiskGiB     int
-}
-
 type MXCConfig struct {
 	CLIPath           string
 	Version           string
@@ -2598,15 +2587,7 @@ func baseConfig() Config {
 			Network: "bridge",
 		},
 		AppleContainer: initialAppleContainerConfig(containerImage),
-		AppleVM: AppleVMConfig{
-			Image:       osImageSpecs[osImage].AppleVMImage,
-			ImageSHA256: osImageSpecs[osImage].AppleVMSHA256,
-			User:        "crabbox",
-			WorkRoot:    "/work/crabbox",
-			CPUs:        4,
-			MemoryMiB:   8192,
-			DiskGiB:     30,
-		},
+		AppleVM:        initialAppleVMConfig(osImageSpecs[osImage].AppleVMImage, osImageSpecs[osImage].AppleVMSHA256),
 		MXC: MXCConfig{
 			CLIPath:     "wxc-exec.exe",
 			Version:     "0.6.0-alpha",
@@ -3495,17 +3476,6 @@ type fileLocalContainerConfig struct {
 	Network      string `yaml:"network,omitempty"`
 	DockerSocket *bool  `yaml:"dockerSocket,omitempty"`
 	NoHostname   *bool  `yaml:"noHostname,omitempty"`
-}
-
-type fileAppleVMConfig struct {
-	HelperPath  string `yaml:"helperPath,omitempty"`
-	Image       string `yaml:"image,omitempty"`
-	ImageSHA256 string `yaml:"imageSHA256,omitempty"`
-	User        string `yaml:"user,omitempty"`
-	WorkRoot    string `yaml:"workRoot,omitempty"`
-	CPUs        *int   `yaml:"cpus,omitempty"`
-	MemoryMiB   *int   `yaml:"memoryMiB,omitempty"`
-	DiskGiB     *int   `yaml:"diskGiB,omitempty"`
 }
 
 type fileMXCConfig struct {
@@ -5732,39 +5702,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		// Deprecated pre-rename key; appleVM wins when both are present.
 		file.AppleVM = file.AppleVZLegacy
 	}
-	if file.AppleVM != nil {
-		if file.AppleVM.HelperPath != "" {
-			cfg.AppleVM.HelperPath = file.AppleVM.HelperPath
-		}
-		if file.AppleVM.Image != "" {
-			cfg.AppleVM.Image = file.AppleVM.Image
-			cfg.AppleVM.ImageSHA256 = ""
-			cfg.appleVMImageExplicit = true
-			cfg.appleVMImageSHA256Explicit = false
-		}
-		if file.AppleVM.ImageSHA256 != "" {
-			cfg.AppleVM.ImageSHA256 = file.AppleVM.ImageSHA256
-			cfg.appleVMImageSHA256Explicit = true
-		}
-		if file.AppleVM.User != "" {
-			cfg.AppleVM.User = file.AppleVM.User
-		}
-		if file.AppleVM.WorkRoot != "" {
-			cfg.AppleVM.WorkRoot = file.AppleVM.WorkRoot
-		}
-		if file.AppleVM.CPUs != nil {
-			cfg.AppleVM.CPUs = *file.AppleVM.CPUs
-			cfg.appleVMCPUsExplicit = true
-		}
-		if file.AppleVM.MemoryMiB != nil {
-			cfg.AppleVM.MemoryMiB = *file.AppleVM.MemoryMiB
-			cfg.appleVMMemoryExplicit = true
-		}
-		if file.AppleVM.DiskGiB != nil {
-			cfg.AppleVM.DiskGiB = *file.AppleVM.DiskGiB
-			cfg.appleVMDiskExplicit = true
-		}
-	}
+	applyAppleVMFile(cfg, file.AppleVM)
 	if file.MXC != nil {
 		if file.MXC.CLIPath != "" {
 			cfg.MXC.CLIPath = file.MXC.CLIPath
@@ -6302,15 +6240,6 @@ func applyNonNegativeLeaseDuration(target *time.Duration, value string) bool {
 	}
 	*target = parsed
 	return true
-}
-
-// appleVMEnv reads a CRABBOX_APPLE_VM_* variable, falling back to the
-// deprecated CRABBOX_APPLE_VZ_* spelling from before the provider rename.
-func appleVMEnv(name string) string {
-	if value := os.Getenv("CRABBOX_APPLE_VM_" + name); value != "" {
-		return value
-	}
-	return os.Getenv("CRABBOX_APPLE_VZ_" + name)
 }
 
 func applyEnv(cfg *Config) error {
@@ -7478,42 +7407,8 @@ func applyEnv(cfg *Config) error {
 	if cfg.AppleContainer.applyEnv() {
 		MarkAppleContainerImageExplicit(cfg)
 	}
-	cfg.AppleVM.HelperPath = getenv("CRABBOX_APPLE_VM_HELPER", getenv("CRABBOX_APPLE_VZ_HELPER", cfg.AppleVM.HelperPath))
-	if image := appleVMEnv("IMAGE"); image != "" {
-		cfg.AppleVM.Image = image
-		cfg.AppleVM.ImageSHA256 = ""
-		cfg.appleVMImageExplicit = true
-		cfg.appleVMImageSHA256Explicit = false
-	}
-	if checksum := appleVMEnv("IMAGE_SHA256"); checksum != "" {
-		cfg.AppleVM.ImageSHA256 = checksum
-		cfg.appleVMImageSHA256Explicit = true
-	}
-	cfg.AppleVM.User = getenv("CRABBOX_APPLE_VM_USER", getenv("CRABBOX_APPLE_VZ_USER", cfg.AppleVM.User))
-	cfg.AppleVM.WorkRoot = getenv("CRABBOX_APPLE_VM_WORK_ROOT", getenv("CRABBOX_APPLE_VZ_WORK_ROOT", cfg.AppleVM.WorkRoot))
-	if rawCPUs := appleVMEnv("CPUS"); rawCPUs != "" {
-		cpus, err := strconv.Atoi(strings.TrimSpace(rawCPUs))
-		if err != nil {
-			return fmt.Errorf("CRABBOX_APPLE_VM_CPUS must be an integer: %w", err)
-		}
-		cfg.AppleVM.CPUs = cpus
-		cfg.appleVMCPUsExplicit = true
-	}
-	if rawMemory := appleVMEnv("MEMORY"); rawMemory != "" {
-		memoryMiB, err := strconv.Atoi(strings.TrimSpace(rawMemory))
-		if err != nil {
-			return fmt.Errorf("CRABBOX_APPLE_VM_MEMORY must be an integer: %w", err)
-		}
-		cfg.AppleVM.MemoryMiB = memoryMiB
-		cfg.appleVMMemoryExplicit = true
-	}
-	if rawDisk := appleVMEnv("DISK"); rawDisk != "" {
-		diskGiB, err := strconv.Atoi(strings.TrimSpace(rawDisk))
-		if err != nil {
-			return fmt.Errorf("CRABBOX_APPLE_VM_DISK must be an integer: %w", err)
-		}
-		cfg.AppleVM.DiskGiB = diskGiB
-		cfg.appleVMDiskExplicit = true
+	if err := applyAppleVMEnv(cfg); err != nil {
+		return err
 	}
 	cfg.MXC.CLIPath = getenv("CRABBOX_MXC_CLI", cfg.MXC.CLIPath)
 	cfg.MXC.Version = getenv("CRABBOX_MXC_VERSION", cfg.MXC.Version)

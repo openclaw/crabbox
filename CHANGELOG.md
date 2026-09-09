@@ -14,6 +14,7 @@
 - Install checksum-pinned Node 24.19.0 for Intel and Apple Silicon managed macOS leases when Node/npm are missing, complete older coordinator bootstrap during warmup, and require both tools for readiness. [PR 2051](https://github.com/openclaw/crabbox/pull/2051). Thanks @steipete.
 - Close macOS command-wrapper pipe descriptors before user execution so detached daemons do not keep completed commands waiting. [PR 2051](https://github.com/openclaw/crabbox/pull/2051). Thanks @steipete.
 - Consolidate Sealos DevBox file, environment, and flag settings while preserving local versus guest path handling, explicit release choices, and saved-file omission. [PR 2056](https://github.com/openclaw/crabbox/pull/2056). Thanks @steipete.
+- Consolidate Apple VM settings and image/checksum updates while preserving legacy configuration names, explicit resource values, and ordered validation. Thanks @steipete.
 
 - Show the recorded provisioning cause when a coordinator lease fails with cleanup still pending, preserving the primary failure when present and omitting empty error details.
 

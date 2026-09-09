@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -324,6 +325,242 @@ func TestApplyDefaultsHonorsGlobalWorkRoot(t *testing.T) {
 	applyDefaults(&cfg)
 	if cfg.WorkRoot != "/work/apple-vm" || cfg.AppleVM.WorkRoot != "/work/apple-vm" {
 		t.Fatalf("specific work root=%q apple-vm=%q want /work/apple-vm", cfg.WorkRoot, cfg.AppleVM.WorkRoot)
+	}
+}
+
+func TestAppleVMOrdinaryPublicFlags(t *testing.T) {
+	// Keep successful application outside the selected-provider defaults phase.
+	// The image path is the inert path already used by TestApplyFlags.
+	initial := core.Config{Provider: "ordinary-config-test-unselected", SSHUser: "generic-user", WorkRoot: "/generic", AppleVM: core.AppleVMConfig{HelperPath: "/before/helper", Image: "/tmp/custom.img", ImageSHA256: strings.Repeat("a", 64), User: "before-user", WorkRoot: "/before", CPUs: 4, MemoryMiB: 8192, DiskGiB: 30}}
+	suffixes := []string{"helper", "image", "image-sha256", "user", "work-root", "cpus", "memory", "disk"}
+	current := []string{" ~/helper ", " /tmp/custom.img ", " " + strings.Repeat("b", 64) + " ", " current-user ", " ~/work ", "6", "12288", "64"}
+	legacy := []string{" /legacy/helper ", "/tmp/custom.img", strings.Repeat("c", 64), " legacy-user ", " /legacy/work ", "8", "16384", "80"}
+	equal := []string{initial.AppleVM.HelperPath, initial.AppleVM.Image, initial.AppleVM.ImageSHA256, initial.AppleVM.User, initial.AppleVM.WorkRoot, "4", "8192", "30"}
+	emptyStrings := []string{"", "", "", "", "", "6", "12288", "64"}
+	legacyZeros := append([]string(nil), legacy...)
+	legacyZeros[5], legacyZeros[6], legacyZeros[7] = "0", "0", "0"
+	for _, tc := range []struct {
+		name            string
+		current, legacy []string
+		want            core.AppleVMConfig
+		visited         bool
+	}{
+		{"unvisited", nil, nil, initial.AppleVM, false},
+		{"current", current, nil, core.AppleVMConfig{HelperPath: "~/helper", Image: "/tmp/custom.img", ImageSHA256: strings.Repeat("b", 64), User: "current-user", WorkRoot: "~/work", CPUs: 6, MemoryMiB: 12288, DiskGiB: 64}, true},
+		{"legacy", nil, legacy, core.AppleVMConfig{HelperPath: "/legacy/helper", Image: "/tmp/custom.img", ImageSHA256: strings.Repeat("c", 64), User: "legacy-user", WorkRoot: "/legacy/work", CPUs: 8, MemoryMiB: 16384, DiskGiB: 80}, true},
+		{"current-wins", current, legacy, core.AppleVMConfig{HelperPath: "~/helper", Image: "/tmp/custom.img", ImageSHA256: strings.Repeat("b", 64), User: "current-user", WorkRoot: "~/work", CPUs: 6, MemoryMiB: 12288, DiskGiB: 64}, true},
+		{"current-empty-strings-win", emptyStrings, legacy, core.AppleVMConfig{CPUs: 6, MemoryMiB: 12288, DiskGiB: 64}, true},
+		{"legacy-empty-strings-apply", nil, emptyStrings, core.AppleVMConfig{CPUs: 6, MemoryMiB: 12288, DiskGiB: 64}, true},
+		{"current-equal-still-explicit", equal, legacy, initial.AppleVM, true},
+		{"legacy-equal-still-explicit", nil, equal, initial.AppleVM, true},
+		{"current-valid-outranks-legacy-zero", equal, legacyZeros, initial.AppleVM, true},
+		{"minimum-numerics", []string{equal[0], equal[1], equal[2], equal[3], equal[4], "1", "1024", "1"}, nil, core.AppleVMConfig{HelperPath: initial.AppleVM.HelperPath, Image: initial.AppleVM.Image, ImageSHA256: initial.AppleVM.ImageSHA256, User: initial.AppleVM.User, WorkRoot: initial.AppleVM.WorkRoot, CPUs: 1, MemoryMiB: 1024, DiskGiB: 1}, true},
+	} {
+		for _, currentFirst := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/current-first=%v", tc.name, currentFirst), func(t *testing.T) {
+				cfg, defaults := initial, initial
+				provider := Provider{}
+				fs := flag.NewFlagSet("ordinary-applevm", flag.ContinueOnError)
+				values := provider.RegisterFlags(fs, defaults)
+				count := 0
+				fs.VisitAll(func(*flag.Flag) { count++ })
+				if count != 16 {
+					t.Fatalf("registered %d flags, want 16", count)
+				}
+				for i, suffix := range suffixes {
+					primary, old := fs.Lookup("apple-vm-"+suffix), fs.Lookup("apple-vz-"+suffix)
+					if primary == nil || old == nil {
+						t.Fatalf("missing flag pair %s", suffix)
+					}
+					// ImageIdentity remains opaque: compare the two registered defaults.
+					if primary.DefValue != old.DefValue || (suffix != "image" && primary.DefValue != equal[i]) {
+						t.Fatalf("flag defaults for %s=%q/%q", suffix, primary.DefValue, old.DefValue)
+					}
+					if primary.Usage == "" || old.Usage != "deprecated alias for --apple-vm-"+suffix {
+						t.Fatalf("flag help for %s=%q/%q", suffix, primary.Usage, old.Usage)
+					}
+				}
+				var args []string
+				appendFlags := func(prefix string, inputs []string) {
+					for i, value := range inputs {
+						args = append(args, "--"+prefix+suffixes[i]+"="+value)
+					}
+				}
+				if currentFirst {
+					appendFlags("apple-vm-", tc.current)
+					appendFlags("apple-vz-", tc.legacy)
+				} else {
+					appendFlags("apple-vz-", tc.legacy)
+					appendFlags("apple-vm-", tc.current)
+				}
+				originalArgs := append([]string(nil), args...)
+				if err := fs.Parse(args); err != nil {
+					t.Fatal(err)
+				}
+				if err := provider.ApplyFlags(&cfg, fs, values); err != nil {
+					t.Fatal(err)
+				}
+				want := initial
+				want.AppleVM = tc.want
+				if tc.visited {
+					want.SSHUser, want.WorkRoot = tc.want.User, tc.want.WorkRoot
+					core.MarkAppleVMImageExplicit(&want)
+					core.MarkAppleVMImageSHA256Explicit(&want)
+					core.MarkAppleVMCPUsExplicit(&want)
+					core.MarkAppleVMMemoryExplicit(&want)
+					core.MarkAppleVMDiskExplicit(&want)
+				}
+				// Whole-config equality also checks the opaque checksum marker and
+				// that copying WorkRoot did not mark the generic root explicit.
+				if !reflect.DeepEqual(cfg, want) {
+					t.Fatalf("flag state differs: AppleVM=%+v, want %+v; image=%v numeric=%v/%v/%v rootExplicit=%v", cfg.AppleVM, want.AppleVM, core.AppleVMImageExplicit(cfg), core.AppleVMCPUsExplicit(cfg), core.AppleVMMemoryExplicit(cfg), core.AppleVMDiskExplicit(cfg), core.IsWorkRootExplicit(&cfg))
+				}
+				if !reflect.DeepEqual(defaults, initial) || !reflect.DeepEqual(args, originalArgs) {
+					t.Fatal("registration/parse/application mutated input defaults or argv")
+				}
+			})
+		}
+	}
+	for _, foreign := range []any{nil, struct{}{}, new(int)} {
+		t.Run(fmt.Sprintf("foreign-%T", foreign), func(t *testing.T) {
+			cfg := initial
+			fs := flag.NewFlagSet("ordinary-applevm", flag.ContinueOnError)
+			provider := Provider{}
+			provider.RegisterFlags(fs, cfg)
+			if err := fs.Parse([]string{"--apple-vm-helper=/changed", "--apple-vm-cpus=0"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := provider.ApplyFlags(&cfg, fs, foreign); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, initial) {
+				t.Fatal("foreign flag object mutated config")
+			}
+		})
+	}
+	for _, prefix := range []string{"apple-vm-", "apple-vz-"} {
+		t.Run(prefix+"image-sequence", func(t *testing.T) {
+			cfg, want := initial, initial
+			for _, step := range []struct {
+				args                        []string
+				image, checksum             string
+				imageMarked, checksumMarked bool
+			}{
+				{[]string{"image-sha256=" + initial.AppleVM.ImageSHA256}, "/tmp/custom.img", initial.AppleVM.ImageSHA256, false, true},
+				{[]string{"image=/tmp/custom.img"}, "/tmp/custom.img", "", true, false},
+				{[]string{"image-sha256="}, "/tmp/custom.img", "", true, true},
+				{[]string{"image-sha256=" + initial.AppleVM.ImageSHA256, "image=/tmp/custom.img"}, "/tmp/custom.img", initial.AppleVM.ImageSHA256, true, true},
+				{[]string{"image="}, "", "", true, false},
+				{nil, "", "", true, false},
+			} {
+				fs := flag.NewFlagSet("ordinary-applevm", flag.ContinueOnError)
+				provider := Provider{}
+				values := provider.RegisterFlags(fs, initial)
+				args := make([]string, len(step.args))
+				for i, arg := range step.args {
+					args[i] = "--" + prefix + arg
+				}
+				if err := fs.Parse(args); err != nil {
+					t.Fatal(err)
+				}
+				if err := provider.ApplyFlags(&cfg, fs, values); err != nil {
+					t.Fatal(err)
+				}
+				want = initial
+				want.AppleVM.Image, want.AppleVM.ImageSHA256 = step.image, step.checksum
+				if step.imageMarked {
+					core.MarkAppleVMImageExplicit(&want)
+				}
+				if step.checksumMarked {
+					core.MarkAppleVMImageSHA256Explicit(&want)
+				}
+				if !reflect.DeepEqual(cfg, want) {
+					t.Fatalf("step %v: image/checksum=%q/%q, want %q/%q with markers %v/%v", step.args, cfg.AppleVM.Image, cfg.AppleVM.ImageSHA256, step.image, step.checksum, step.imageMarked, step.checksumMarked)
+				}
+			}
+		})
+	}
+}
+
+func TestAppleVMOrdinaryPublicFlagNumericErrors(t *testing.T) {
+	for failed, suffix := range []string{"cpus", "memory", "disk"} {
+		invalids := []int{0, -1}
+		if suffix == "memory" {
+			invalids = append(invalids, 1023)
+		}
+		for _, invalid := range invalids {
+			for _, spelling := range []string{"current", "legacy", "current-first", "current-last"} {
+				for _, alreadyMarked := range []bool{false, true} {
+					t.Run(fmt.Sprintf("%s/%d/%s/marked=%v", suffix, invalid, spelling, alreadyMarked), func(t *testing.T) {
+						cfg := core.Config{Provider: "ordinary-config-test-unselected", SSHUser: "before-user", WorkRoot: "/before", AppleVM: core.AppleVMConfig{Image: "/tmp/custom.img", ImageSHA256: strings.Repeat("a", 64), CPUs: 4, MemoryMiB: 8192, DiskGiB: 30}}
+						core.MarkAppleVMImageSHA256Explicit(&cfg)
+						if alreadyMarked {
+							core.MarkAppleVMCPUsExplicit(&cfg)
+							core.MarkAppleVMMemoryExplicit(&cfg)
+							core.MarkAppleVMDiskExplicit(&cfg)
+							core.MarkWorkRootExplicit(&cfg)
+						}
+						want := cfg
+						fs := flag.NewFlagSet("ordinary-applevm", flag.ContinueOnError)
+						provider := Provider{}
+						values := provider.RegisterFlags(fs, cfg)
+						prefix := "apple-vm-"
+						if spelling == "legacy" {
+							prefix = "apple-vz-"
+						}
+						// Reverse argv order: source application still proceeds helper,
+						// image, user/root, CPUs, memory, disk.
+						var args []string
+						for i := 2; i >= 0; i-- {
+							numeric := []string{"cpus", "memory", "disk"}[i]
+							value := []int{6, 12288, 64}[i]
+							if i == failed {
+								value = invalid
+							} else if i > failed {
+								value = 0
+							}
+							primary := fmt.Sprintf("--%s%s=%d", prefix, numeric, value)
+							legacy := fmt.Sprintf("--apple-vz-%s=%d", numeric, []int{8, 16384, 80}[i])
+							if spelling == "current-last" {
+								args = append(args, legacy)
+							}
+							args = append(args, primary)
+							if spelling == "current-first" {
+								args = append(args, legacy)
+							}
+						}
+						args = append(args, "--"+prefix+"work-root= /work/ci ", "--"+prefix+"user= ci ", "--"+prefix+"image= /tmp/custom.img ", "--"+prefix+"helper= ~/helper ")
+						if err := fs.Parse(args); err != nil {
+							t.Fatal(err)
+						}
+						err := provider.ApplyFlags(&cfg, fs, values)
+						message := fmt.Sprintf("--apple-vm-%s must be positive (got %d)", suffix, invalid)
+						if suffix == "memory" {
+							message = fmt.Sprintf("--apple-vm-memory must be at least 1024 MiB (got %d)", invalid)
+						}
+						var exitErr core.ExitError
+						if !errors.As(err, &exitErr) || exitErr.Code != 2 || exitErr.Message != message {
+							t.Fatalf("error=%v, want exit 2: %s", err, message)
+						}
+						want.AppleVM.HelperPath, want.AppleVM.ImageSHA256 = "~/helper", ""
+						want.AppleVM.User, want.SSHUser = "ci", "ci"
+						want.AppleVM.WorkRoot, want.WorkRoot = "/work/ci", "/work/ci"
+						core.MarkAppleVMImageExplicit(&want)
+						if failed > 0 {
+							want.AppleVM.CPUs = 6
+							core.MarkAppleVMCPUsExplicit(&want)
+						}
+						if failed > 1 {
+							want.AppleVM.MemoryMiB = 12288
+							core.MarkAppleVMMemoryExplicit(&want)
+						}
+						if !reflect.DeepEqual(cfg, want) {
+							t.Fatalf("partial state differs: AppleVM=%+v, want %+v; numeric markers=%v/%v/%v rootExplicit=%v", cfg.AppleVM, want.AppleVM, core.AppleVMCPUsExplicit(cfg), core.AppleVMMemoryExplicit(cfg), core.AppleVMDiskExplicit(cfg), core.IsWorkRootExplicit(&cfg))
+						}
+					})
+				}
+			}
+		}
 	}
 }
 

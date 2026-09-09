@@ -174,6 +174,27 @@ ignore zero. Modal's `secrets: []` deliberately remains pointer-backed so a writ
 retains the explicit clear. Positive-only numeric overlays still store negative
 inputs verbatim: ignoring an assignment is not permission to erase its file value.
 
+## Apple VM's concrete source owner
+
+`config_apple_vm.go` owns all eight settings, initialization, and complete file
+and environment application without generated bindings. Runtime and file types
+remain distinct: three pointer-backed file integers preserve explicit zero and
+null/omitted values, so deriving the file type from runtime values would lose a
+real storage contract. Initialization accepts the already-selected image and
+checksum pair without repeating OS-image selection or setting explicit markers.
+
+Shared accepted-image and checksum operations own the associated value and
+marker changes together. File and environment callers retain their raw-input
+acceptance; flags call those operations only after their existing trimming and
+validation. Source selection, legacy precedence, signed numeric parsing, exact
+errors and earlier mutations on failure remain explicit and ordered.
+
+The provider retains its sixteen current/deprecated flag spellings, current-name
+visit precedence, image-identity display, early validation and selected-provider
+defaults call. Native behavior and default-image selection are not source-input
+events and do not use the explicit-image transition. No generic alias, callback
+or staged-validation framework is added to the generator.
+
 ## Lambda's concrete owner
 
 Lambda uses `config_lambda.go` without generated bindings. Its structured mount
