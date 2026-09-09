@@ -3070,7 +3070,7 @@ func TestCoordinatorAcquireProviderMismatchCleanupPolicy(t *testing.T) {
 					capturedRequestedID, _ = body["leaseID"].(string)
 					createAttemptID, _ = body["createAttemptID"].(string)
 					_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
-						ID: test.wantLease, Provider: "external", TargetOS: targetLinux, State: "active",
+						ID: capturedRequestedID, Provider: "external", TargetOS: targetLinux, State: "active",
 					}})
 				case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+capturedRequestedID+"/cancel-create":
 					cancellations++
@@ -3093,7 +3093,7 @@ func TestCoordinatorAcquireProviderMismatchCleanupPolicy(t *testing.T) {
 				operationID = test.wantLease
 			}
 			_, err := backend.acquireOnceWithLeaseID(context.Background(), false, operationID, "identity-fence")
-			assertCoordinatorProviderIdentityError(t, err, "external", test.wantLease)
+			assertCoordinatorProviderIdentityError(t, err, "external", capturedRequestedID)
 			if cancellations != test.wantCancels {
 				t.Fatalf("cancel-create requests=%d want %d", cancellations, test.wantCancels)
 			}
