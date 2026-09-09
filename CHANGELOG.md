@@ -13,7 +13,7 @@
 
 - Describe DigitalOcean file and environment bindings once without adding provider flags, preserving raw defaults, image precedence, and list input behavior while sharing runtime fallback values. [PR 2045](https://github.com/openclaw/crabbox/pull/2045). Thanks @steipete.
 
-- Describe Vultr file and environment bindings once without adding provider flags, preserving raw boot settings and list behavior while sharing runtime region and user-scheme defaulting. Thanks @steipete.
+- Describe Vultr file and environment bindings once without adding provider flags, preserving raw boot settings and list behavior while sharing runtime region and user-scheme defaulting. [PR 2050](https://github.com/openclaw/crabbox/pull/2050). Thanks @steipete.
 
 ## 0.54.0 - 2026-09-09
 
