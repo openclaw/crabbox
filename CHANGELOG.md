@@ -6,6 +6,8 @@
 
 - Describe Scaleway configuration bindings once, sharing configured defaults while preserving explicit SDK location overrides and distinct file, environment, and flag list behavior. [PR 2036](https://github.com/openclaw/crabbox/pull/2036). Thanks @steipete.
 
+- Describe Tencent Cloud configuration bindings once, preserving 64-bit sizes, raw defaults, explicit type precedence, and trusted endpoint overrides while sharing runtime fallback values. Thanks @steipete.
+
 ## 0.54.0 - 2026-09-09
 
 ### Highlights
@@ -44,8 +46,6 @@
 - Unify OVHcloud, Runpod, Vast, and W&B configuration bindings and fallback ownership while preserving credential precedence, numeric overlays, explicit image and instance-type selection, machine-class mapping, and release behavior. [PR 2027](https://github.com/openclaw/crabbox/pull/2027), [PR 2032](https://github.com/openclaw/crabbox/pull/2032), [PR 2033](https://github.com/openclaw/crabbox/pull/2033), [PR 2034](https://github.com/openclaw/crabbox/pull/2034). Thanks @steipete.
 - Share unsupported machine-sizing checks and work-root inheritance decisions across providers, preserving explicit-input behavior, provider guidance, raw roots, and validation order. [PR 2023](https://github.com/openclaw/crabbox/pull/2023), [PR 2026](https://github.com/openclaw/crabbox/pull/2026). Thanks @steipete.
 - Share declared provider names and aliases across selection guards while keeping normalized selection and raw-exact matching distinct, with unchanged validation order and claim matching. [PR 2030](https://github.com/openclaw/crabbox/pull/2030), [PR 2031](https://github.com/openclaw/crabbox/pull/2031). Thanks @steipete.
-
-- Describe Tencent Cloud configuration bindings once, preserving 64-bit sizes, raw defaults, explicit type precedence, and trusted endpoint overrides while sharing runtime fallback values. Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 
