@@ -359,7 +359,16 @@ readiness preflight, API, AWS-GO gate, and live canary are in
 | Linux | Ubuntu bootstrap, SSH, rsync sync, optional desktop/browser/code, Tailscale, Actions hydration. |
 | Windows native | EC2Launch bootstrap, OpenSSH, Git for Windows, archive sync; optional desktop with `--desktop`. |
 | Windows WSL2 | `--windows-mode wsl2`; launches on nested-virtualization families (`c8i`/`m8i`/`m8i-flex`/`r8i`); POSIX sync and commands run inside WSL with the Linux image Node/npm baseline. |
-| macOS | Requires an available EC2 Mac Dedicated Host in the region; On-Demand only. Admin-authenticated broker requests can pin any host with `CRABBOX_HOST_ID` / `aws.macHostId` (`CRABBOX_AWS_MAC_HOST_ID` is a legacy alias); normal broker users can pin a host with an exact coordinator allocation record for that host, their current org, and the requested region. See the host ownership rules below. |
+| macOS | Non-root SSH commands, portable workspace ownership, and Node/npm baseline. Requires an available EC2 Mac Dedicated Host in the region; On-Demand only. Admin-authenticated broker requests can pin any host with `CRABBOX_HOST_ID` / `aws.macHostId` (`CRABBOX_AWS_MAC_HOST_ID` is a legacy alias); normal broker users can pin a host with an exact coordinator allocation record for that host, their current org, and the requested region. See the host ownership rules below. |
+
+Managed macOS commands use the image's SSH user (normally `ec2-user`) and its
+writable work root. Bootstrap installs Node 24.19.0, matching the Linux developer
+recipe's LTS baseline, when Node or npm is missing. Both Intel and Apple Silicon
+use checksum-pinned official `nodejs.org` archives, with versioned installations
+under `/usr/local/lib/crabbox` and command links in `/usr/local/bin`; Homebrew is
+not required. Healthy existing Node/npm installations are retained. Readiness
+requires both commands to execute successfully. Warmup also completes this
+baseline over SSH when an older coordinator's bootstrap omitted it.
 
 Managed WSL2 commands run as the non-root `crabbox` Linux user, with
 `HOME=/home/crabbox`, Bash, passwordless sudo, and membership in the `sudo` and

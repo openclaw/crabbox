@@ -40,6 +40,9 @@ func managedWindowsBootstrapTarget(cfg Config, target SSHTarget, authorizedPorts
 }
 
 func bootstrapPreparedManagedWindowsDesktop(ctx context.Context, cfg Config, target *SSHTarget, bootstrapTarget SSHTarget, publicKey string, stderr io.Writer) error {
+	if cfg.TargetOS == targetMacOS {
+		return bootstrapManagedMacOS(ctx, cfg, target, stderr)
+	}
 	if cfg.TargetOS != targetWindows {
 		return waitForSSHReady(ctx, target, stderr, "bootstrap", bootstrapWaitTimeout(cfg))
 	}

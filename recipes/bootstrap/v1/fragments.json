@@ -58,6 +58,11 @@
       "parameters": {}
     },
     {
+      "name": "macOSNodeInstall",
+      "file": "macOSNodeInstall.sh",
+      "parameters": {}
+    },
+    {
       "name": "macOS",
       "file": "macOS.sh",
       "parameters": {

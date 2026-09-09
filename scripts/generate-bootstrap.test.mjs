@@ -166,11 +166,12 @@ test("macOS bootstrap installs and reuses its account password without logging i
       const readyCalls = join(state, "ready-calls");
       // Execute the complete generated script with task-local paths and inert OS commands.
       let script = shared.sharedMacOS("fixture", "ssh-ed25519 fixture", work, ["2222", "22"]);
+      script = script.replaceAll("/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", `${bin}:/usr/bin:/bin`);
       for (const [original, local] of [
         ["/var/db/crabbox", state], ["/etc/ssh/sshd_config", join(state, "sshd_config")],
         ["/usr/sbin/sshd", join(bin, "sshd")], ["/usr/local/bin/crabbox-ready", join(bin, "crabbox-ready")],
       ]) script = script.replaceAll(original, local);
-      for (const command of ["sshd", "rsync", "curl", "nc"]) {
+      for (const command of ["sshd", "rsync", "curl", "node", "npm", "nc"]) {
         await writeFile(join(bin, command), `#!/bin/bash\nprintf '%s\\n' ${shellQuote(command)} >>${shellQuote(readyCalls)}\n`, { mode: 0o755 });
       }
       const receivePassword = `const fs = require("node:fs");
@@ -202,7 +203,7 @@ dscl() {
       assert.match(password, /^[A-Za-z0-9]{16}$/u);
       assert.equal(await readFile(installedPath, "utf8"), password + "\n");
       assert.equal((await stat(passwordPath)).mode & 0o777, 0o600);
-      assert.match(await readFile(readyCalls, "utf8"), /rsync\ncurl\nnc\nnc\n$/u);
+      assert.match(await readFile(readyCalls, "utf8"), /rsync\ncurl\nnode\nnpm\nnc\nnc\n$/u);
       const second = invoke();
       assert.equal(second.status, 0, "bootstrap must reuse the existing password");
       assert.equal(await readFile(passwordPath, "utf8"), password + "\n");

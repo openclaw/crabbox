@@ -61,6 +61,19 @@ policy; Crabbox's staged scripts, input, and workspace-owner state remain privat
 Keeping or reusing a POSIX SSH lease also preserves the remote caller's SIGINT
 and SIGQUIT dispositions, including intentionally ignored signals.
 
+POSIX workspace ownership uses `flock`, BSD `lockf`, or an atomic directory gate
+when neither tool is available. Acquire, renewal, release, and foreground-child
+registration share the same gate. The directory fallback never steals a gate
+based on elapsed time: an interrupted helper may still have a writer in flight.
+Stop and replace a managed lease if that gate remains ambiguous. Normal owner
+expiry recovery still requires proof that the recorded foreground child exited.
+Detached daemons should redirect stdin, stdout, and stderr explicitly (for
+example, `nohup sleep 600 </dev/null >daemon.log 2>&1 &`) so they do not keep an
+SSH command's streams open after its foreground shell exits.
+On macOS, the command handoff also closes inherited internal descriptors left
+by the system shell, preventing background processes from retaining its witness
+pipe after the foreground command finishes.
+
 Managed WSL2 commands, sync/copy, readiness checks, and workspace-owner helpers
 run as the non-root `crabbox` distro user with `HOME=/home/crabbox`, passwordless
 sudo, and a writable work root and caches. Node and npm remain on the default

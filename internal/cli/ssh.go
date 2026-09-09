@@ -663,6 +663,9 @@ git --version | Out-Null
 tar --version | Out-Null
 if (-not (Test-Path -LiteralPath ` + psQuote(targetWindowsReadyRoot(target)) + `)) { throw "work root missing" }`)
 	}
+	if target.TargetOS == targetMacOS {
+		return sshReadyCommand(SSHTarget{}) + " && /bin/bash -lc 'node --version >/dev/null && npm --version >/dev/null'"
+	}
 	return "test -x /usr/local/bin/crabbox-ready && /usr/local/bin/crabbox-ready >/tmp/crabbox-ready.log 2>&1"
 }
 

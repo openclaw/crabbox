@@ -4,6 +4,9 @@
 
 ### Changes
 
+- Support POSIX workspace ownership without `flock` or `lockf`, sharing an atomic directory gate across owner updates and child witnesses while preserving fail-closed recovery.
+- Install checksum-pinned Node 24.19.0 for Intel and Apple Silicon managed macOS leases when Node/npm are missing, complete older coordinator bootstrap during warmup, and require both tools for readiness.
+- Close macOS command-wrapper pipe descriptors before user execution so detached daemons do not keep completed commands waiting.
 - Show the recorded provisioning cause when a coordinator lease fails with cleanup still pending, preserving the primary failure when present and omitting empty error details.
 
 - Reject occupied host pins and coordinator replies with a different lease ID before bootstrap or cleanup; show retained leases in ordinary text and JSON listing. [PR 2049](https://github.com/openclaw/crabbox/pull/2049). Thanks @steipete.
