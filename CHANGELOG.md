@@ -68,7 +68,7 @@
 
 - Keep normalized provider selection aligned with declared names and aliases, sharing metadata across flag/default guards while preserving validation order and separate claim-matching rules. [PR 2030](https://github.com/openclaw/crabbox/pull/2030). Thanks @steipete.
 
-- Keep raw-exact provider selection aligned with declared names and aliases without normalizing inputs or changing flag/default validation order. Thanks @steipete.
+- Keep raw-exact provider selection aligned with declared names and aliases without normalizing inputs or changing flag/default validation order. [PR 2031](https://github.com/openclaw/crabbox/pull/2031). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 
