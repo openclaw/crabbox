@@ -354,14 +354,6 @@ type AWSLambdaMicroVMConfig struct {
 	ForgetMissing     bool
 }
 
-type LinodeConfig struct {
-	Region     string
-	Image      string
-	Type       string
-	FirewallID string
-	SSHCIDRs   []string
-}
-
 // GitHubCodespacesConfig is intentionally token-free. Authentication comes
 // from the GitHub CLI credential store or GitHub's standard environment
 // variables at the point of use, never from Crabbox config or argv.
@@ -1495,7 +1487,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 	}
 	if cfg.Provider == "linode" {
 		if cfg.Linode.Region == "" {
-			cfg.Linode.Region = "us-ord"
+			cfg.Linode.Region = LinodeConfiguredRegionDefault
 		}
 		if cfg.osImageExplicit && !cfg.linodeImageExplicit {
 			if cfg.OSImage == "ubuntu:24.04" {
@@ -1504,10 +1496,10 @@ func applyProviderConfigDefaults(cfg *Config) error {
 				cfg.Linode.Image = ""
 			}
 		} else if cfg.Linode.Image == "" {
-			cfg.Linode.Image = "linode/ubuntu24.04"
+			cfg.Linode.Image = LinodeImageFallback
 		}
 		if cfg.Linode.Type == "" {
-			cfg.Linode.Type = "g6-standard-1"
+			cfg.Linode.Type = LinodeConfiguredTypeDefault
 		}
 		applyLinuxConnectionDefaults(cfg, baseConfig().SSHUser, baseConfig().SSHPort)
 		normalizeTargetConfig(cfg)
@@ -2411,11 +2403,7 @@ func baseConfig() Config {
 		GCPRootGB:            400,
 		DigitalOcean:         defaultDigitalOceanConfig(),
 		Vultr:                defaultVultrConfig(),
-		Linode: LinodeConfig{
-			Region: "us-ord",
-			Image:  linodeImage,
-			Type:   "g6-standard-1",
-		},
+		Linode:               initialLinodeConfig(linodeImage),
 		GitHubCodespaces: GitHubCodespacesConfig{
 			APIURL:          "https://api.github.com",
 			GHPath:          "gh",
@@ -2923,14 +2911,6 @@ type fileHetznerConfig struct {
 	Location string `yaml:"location,omitempty"`
 	Image    string `yaml:"image,omitempty"`
 	SSHKey   string `yaml:"sshKey,omitempty"`
-}
-
-type fileLinodeConfig struct {
-	Region     string   `yaml:"region,omitempty"`
-	Image      string   `yaml:"image,omitempty"`
-	Type       string   `yaml:"type,omitempty"`
-	FirewallID string   `yaml:"firewall,omitempty"`
-	SSHCIDRs   []string `yaml:"sshCIDRs,omitempty"`
 }
 
 type fileGitHubCodespacesConfig struct {
@@ -4316,23 +4296,16 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	if err := cfg.Vultr.applyFile(file.Vultr); err != nil {
 		return err
 	}
-	if file.Linode != nil {
-		if file.Linode.Region != "" {
-			cfg.Linode.Region = file.Linode.Region
-		}
-		if file.Linode.Image != "" {
-			cfg.Linode.Image = file.Linode.Image
+	{
+		applied, err := cfg.Linode.applyFile(file.Linode)
+		if applied.Image {
 			cfg.linodeImageExplicit = true
 		}
-		if file.Linode.Type != "" {
-			cfg.Linode.Type = file.Linode.Type
+		if applied.Type {
 			cfg.linodeTypeExplicit = true
 		}
-		if file.Linode.FirewallID != "" {
-			cfg.Linode.FirewallID = file.Linode.FirewallID
-		}
-		if len(file.Linode.SSHCIDRs) > 0 {
-			cfg.Linode.SSHCIDRs = file.Linode.SSHCIDRs
+		if err != nil {
+			return err
 		}
 	}
 	if file.GitHubCodespaces != nil {
@@ -6848,18 +6821,17 @@ func applyEnv(cfg *Config) error {
 	if err := cfg.Vultr.applyEnv(); err != nil {
 		return err
 	}
-	cfg.Linode.Region = getenv("CRABBOX_LINODE_REGION", cfg.Linode.Region)
-	if image := os.Getenv("CRABBOX_LINODE_IMAGE"); image != "" {
-		cfg.Linode.Image = image
-		cfg.linodeImageExplicit = true
-	}
-	if linodeType := os.Getenv("CRABBOX_LINODE_TYPE"); linodeType != "" {
-		cfg.Linode.Type = linodeType
-		cfg.linodeTypeExplicit = true
-	}
-	cfg.Linode.FirewallID = getenv("CRABBOX_LINODE_FIREWALL", cfg.Linode.FirewallID)
-	if cidrs := os.Getenv("CRABBOX_LINODE_SSH_CIDRS"); cidrs != "" {
-		cfg.Linode.SSHCIDRs = splitCommaList(cidrs)
+	{
+		applied, err := cfg.Linode.applyEnv()
+		if applied.Image {
+			cfg.linodeImageExplicit = true
+		}
+		if applied.Type {
+			cfg.linodeTypeExplicit = true
+		}
+		if err != nil {
+			return err
+		}
 	}
 	cfg.GitHubCodespaces.APIURL = getenv("CRABBOX_GITHUB_CODESPACES_API_URL", cfg.GitHubCodespaces.APIURL)
 	cfg.GitHubCodespaces.GHPath = expandUserPath(getenv("CRABBOX_GITHUB_CODESPACES_GH_PATH", cfg.GitHubCodespaces.GHPath))

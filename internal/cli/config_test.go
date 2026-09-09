@@ -3176,15 +3176,17 @@ func TestProviderSelectionDefersDefaultsUntilAfterFlagOverrides(t *testing.T) {
 func TestLinodeConfigFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
+	var linodeFile fileLinodeConfig
+	if err := yaml.Unmarshal([]byte(`region: us-sea
+image: linode/ubuntu24.04
+type: g6-standard-2
+firewall: "12345"
+sshCIDRs: [203.0.113.0/24]`), &linodeFile); err != nil {
+		t.Fatal(err)
+	}
 	applyFileConfig(&cfg, fileConfig{
 		Provider: "linode",
-		Linode: &fileLinodeConfig{
-			Region:     "us-sea",
-			Image:      "linode/ubuntu24.04",
-			Type:       "g6-standard-2",
-			FirewallID: "12345",
-			SSHCIDRs:   []string{"203.0.113.0/24"},
-		},
+		Linode:   &linodeFile,
 	})
 	if cfg.Provider != "linode" || cfg.Linode.Region != "us-sea" || cfg.Location == "us-sea" || cfg.Linode.Image != "linode/ubuntu24.04" || cfg.Image == "linode/ubuntu24.04" || cfg.Linode.Type != "g6-standard-2" || cfg.Linode.FirewallID != "12345" {
 		t.Fatalf("file linode config not applied: cfg=%#v linode=%#v", cfg, cfg.Linode)
@@ -13081,6 +13083,203 @@ func TestVultrWithRuntimeDefaults(t *testing.T) {
 			if reflect.ValueOf(again.VPCIDs).Pointer() != reflect.ValueOf(input.VPCIDs).Pointer() || reflect.ValueOf(again.SSHCIDRs).Pointer() != reflect.ValueOf(input.SSHCIDRs).Pointer() {
 				t.Fatal("idempotent result must retain slice backing")
 			}
+		}
+	}
+}
+
+func TestLinodeBindingSources(t *testing.T) {
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"missing", "null", "empty", "equal", "padded", "custom"} {
+			cfg := baseConfig()
+			cfg.Linode = LinodeConfig{Region: "prior", Image: "prior", Type: "prior", FirewallID: "prior"}
+			want := cfg.Linode
+			fields := map[string]any{}
+			accepted := mode == "equal" || mode == "padded" || mode == "custom"
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"region", &want.Region}, {"image", &want.Image}, {"type", &want.Type}, {"firewall", &want.FirewallID}} {
+				switch mode {
+				case "null":
+					fields[f.key] = nil
+				case "empty":
+					fields[f.key] = ""
+				case "equal":
+					fields[f.key] = "prior"
+				case "padded":
+					fields[f.key] = "  "
+				case "custom":
+					fields[f.key] = "fixture"
+				}
+				if accepted {
+					*f.v = fields[f.key].(string)
+				}
+			}
+			data, err := yaml.Marshal(map[string]any{"linode": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Linode, want) || cfg.linodeImageExplicit != accepted || cfg.linodeTypeExplicit != accepted {
+				t.Fatalf("file mode=%s trusted=%t cfg=%#v markers=%t/%t", mode, trusted, cfg.Linode, cfg.linodeImageExplicit, cfg.linodeTypeExplicit)
+			}
+		}
+	}
+	for _, raw := range []string{"", "prior", "  ", "fixture"} {
+		t.Run("env-"+raw, func(t *testing.T) {
+			for _, key := range []string{"REGION", "IMAGE", "TYPE", "FIREWALL"} {
+				t.Setenv("CRABBOX_LINODE_"+key, raw)
+			}
+			cfg := baseConfig()
+			cfg.Linode = LinodeConfig{Region: "prior", Image: "prior", Type: "prior", FirewallID: "prior"}
+			v := raw
+			if v == "" {
+				v = "prior"
+			}
+			want := LinodeConfig{Region: v, Image: v, Type: v, FirewallID: v}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Linode, want) || cfg.linodeImageExplicit != (raw != "") || cfg.linodeTypeExplicit != (raw != "") {
+				t.Fatalf("env cfg=%#v markers=%t/%t", cfg.Linode, cfg.linodeImageExplicit, cfg.linodeTypeExplicit)
+			}
+		})
+	}
+	for _, field := range []string{"image", "type"} {
+		for _, source := range []string{"user", "repo", "env"} {
+			t.Run(field+source, func(t *testing.T) {
+				cfg := baseConfig()
+				cfg.Linode.Image = "same"
+				cfg.Linode.Type = "same"
+				if source == "env" {
+					t.Setenv("CRABBOX_LINODE_"+strings.ToUpper(field), "same")
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					var file fileConfig
+					if err := yaml.Unmarshal([]byte("linode: {"+field+": same}"), &file); err != nil {
+						t.Fatal(err)
+					}
+					if err := applyFileConfigWithTrust(&cfg, file, source == "user"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if cfg.linodeImageExplicit != (field == "image") || cfg.linodeTypeExplicit != (field == "type") {
+					t.Fatal("independent accepted markers changed")
+				}
+			})
+		}
+	}
+}
+
+func TestLinodeBindingLists(t *testing.T) {
+	for _, trusted := range []bool{false, true} {
+		for _, raw := range []string{"{}", "{sshCIDRs: null}", "{sshCIDRs: []}", "{sshCIDRs: [' 192.0.2.0/24 ', '', '192.0.2.0/24']}"} {
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte("linode: "+raw), &file); err != nil {
+				t.Fatal(err)
+			}
+			cfg := baseConfig()
+			cfg.Linode.SSHCIDRs = []string{"prior"}
+			prior := &cfg.Linode.SSHCIDRs[0]
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if len(cfg.Linode.SSHCIDRs) == 1 {
+				if cfg.Linode.SSHCIDRs[0] != "prior" || &cfg.Linode.SSHCIDRs[0] != prior {
+					t.Fatal("ignored list changed")
+				}
+				continue
+			}
+			if !reflect.DeepEqual(cfg.Linode.SSHCIDRs, []string{" 192.0.2.0/24 ", "", "192.0.2.0/24"}) {
+				t.Fatalf("list=%#v", cfg.Linode.SSHCIDRs)
+			}
+			v := reflect.ValueOf(file.Linode).Elem().FieldByName("SSHCIDRs")
+			if v.Kind() == reflect.Pointer {
+				v = v.Elem()
+			}
+			if v.Pointer() != reflect.ValueOf(cfg.Linode.SSHCIDRs).Pointer() {
+				t.Fatal("file list backing not shared")
+			}
+		}
+	}
+	for _, tc := range []struct {
+		raw  string
+		want []string
+	}{{"", nil}, {" , , ", []string{}}, {"none", []string{"none"}}, {" a, ,b,a ", []string{"a", "b", "a"}}} {
+		t.Run(tc.raw, func(t *testing.T) {
+			t.Setenv("CRABBOX_LINODE_SSH_CIDRS", tc.raw)
+			cfg := baseConfig()
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Linode.SSHCIDRs, tc.want) {
+				t.Fatalf("env list=%#v want=%#v", cfg.Linode.SSHCIDRs, tc.want)
+			}
+			if tc.raw == "" {
+				cfg.Linode.SSHCIDRs = []string{"prior"}
+				if err := applyEnv(&cfg); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(cfg.Linode.SSHCIDRs, []string{"prior"}) {
+					t.Fatal("empty env changed prior")
+				}
+			}
+		})
+	}
+}
+
+func TestLinodeBindingCoreDefaults(t *testing.T) {
+	cfg := baseConfig()
+	if cfg.OSImage != "ubuntu:26.04" || !reflect.DeepEqual(cfg.Linode, LinodeConfig{Region: "us-ord", Type: "g6-standard-1"}) || cfg.linodeImageExplicit || cfg.linodeTypeExplicit {
+		t.Fatalf("raw base=%#v os=%q", cfg.Linode, cfg.OSImage)
+	}
+	for _, tc := range []struct {
+		os, image               string
+		explicit, providerImage bool
+		want                    string
+	}{{"ubuntu:26.04", "", false, false, "linode/ubuntu24.04"}, {"ubuntu:24.04", "", true, false, "linode/ubuntu24.04"}, {"ubuntu:26.04", "", true, false, ""}, {"ubuntu:26.04", "custom", true, true, "custom"}} {
+		cfg := baseConfig()
+		cfg.Provider = "linode"
+		cfg.Linode.Region = ""
+		cfg.Linode.Type = ""
+		cfg.OSImage = tc.os
+		cfg.osImageExplicit = tc.explicit
+		cfg.Linode.Image = tc.image
+		cfg.linodeImageExplicit = tc.providerImage
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Linode.Region != "us-ord" || cfg.Linode.Type != "g6-standard-1" || cfg.Linode.Image != tc.want {
+			t.Fatalf("os=%q cfg=%#v", tc.os, cfg.Linode)
+		}
+	}
+	for _, raw := range []string{"  ", "custom"} {
+		cfg := baseConfig()
+		cfg.Provider = "linode"
+		cfg.Linode = LinodeConfig{Region: raw, Type: raw, Image: raw}
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Linode.Region != raw || cfg.Linode.Type != raw || cfg.Linode.Image != raw {
+			t.Fatalf("raw defaults=%#v", cfg.Linode)
+		}
+	}
+}
+
+func TestLinodeTypedInitializer(t *testing.T) {
+	for _, image := range []string{"", "linode/ubuntu24.04", " custom-image "} {
+		got := initialLinodeConfig(image)
+		want := LinodeConfig{Region: "us-ord", Image: image, Type: "g6-standard-1"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("initialLinodeConfig(%q) = %#v, want %#v", image, got, want)
 		}
 	}
 }

@@ -4,7 +4,7 @@ Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
 Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, Lume, Runpod, Vast,
-W&B, Scaleway, Tencent Cloud, DigitalOcean, and Vultr
+W&B, Scaleway, Tencent Cloud, DigitalOcean, Vultr, and Linode
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -22,8 +22,8 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_ovh.go`, `internal/cli/config_lume.go`,
 `internal/cli/config_runpod.go`, `internal/cli/config_vast.go`,
 `internal/cli/config_wandb.go`, `internal/cli/config_scaleway.go`,
-`internal/cli/config_tencentcloud.go`, `internal/cli/config_digitalocean.go`, and
-`internal/cli/config_vultr.go`.
+`internal/cli/config_tencentcloud.go`, `internal/cli/config_digitalocean.go`,
+`internal/cli/config_vultr.go`, and `internal/cli/config_linode.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -107,6 +107,13 @@ read-only user-scheme projections. It preserves other fields and slice sharing;
 the generated raw constructor stays zero-valued. The lower region helper retains
 its separate generic-location fallback. SSH-user policy, native boot-source
 parsing, and OS catalog selection remain outside this transformation.
+
+Linode combines generated flagless bindings with a concrete typed initializer.
+The initializer supplies configured region/type defaults and copies the image
+already resolved by core's portable-OS mapping, including an empty image. It
+does not repeat that lookup or introduce an eager image fallback. Accepted image
+and type inputs still set their existing explicit-source markers; later OS
+selection, class policy, and validation before backend defaults remain separate.
 
 ## Adding a field
 

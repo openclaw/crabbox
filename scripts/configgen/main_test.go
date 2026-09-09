@@ -550,6 +550,12 @@ func TestVultrGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestLinodeGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_linode.go", "../../internal/cli/config_linode_generated.go", "LinodeConfig", "linode", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
