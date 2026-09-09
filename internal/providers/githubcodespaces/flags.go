@@ -41,13 +41,13 @@ func RegisterGitHubCodespacesProviderFlags(fs *flag.FlagSet, defaults Config) an
 
 func ApplyGitHubCodespacesProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
-		if flagWasSet(fs, "class") {
+		if core.FlagWasSet(fs, "class") {
 			return exit(2, "--class is not supported for provider=github-codespaces; use --type or --github-codespaces-machine for a Codespaces machine slug")
 		}
 		if cfg.TargetOS != "" && strings.ToLower(strings.TrimSpace(cfg.TargetOS)) != targetLinux {
 			return exit(2, "provider=github-codespaces supports target=linux only")
 		}
-		if flagWasSet(fs, "type") && !flagWasSet(fs, "github-codespaces-machine") {
+		if core.FlagWasSet(fs, "type") && !core.FlagWasSet(fs, "github-codespaces-machine") {
 			if flag := fs.Lookup("type"); flag != nil {
 				cfg.GitHubCodespaces.Machine = strings.TrimSpace(flag.Value.String())
 			}
@@ -57,41 +57,41 @@ func ApplyGitHubCodespacesProviderFlags(cfg *Config, fs *flag.FlagSet, values an
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "github-codespaces-repo") {
+	if core.FlagWasSet(fs, "github-codespaces-repo") {
 		cfg.GitHubCodespaces.Repo = *v.Repo
 	}
-	if flagWasSet(fs, "github-codespaces-ref") {
+	if core.FlagWasSet(fs, "github-codespaces-ref") {
 		cfg.GitHubCodespaces.Ref = *v.Ref
 	}
-	if flagWasSet(fs, "github-codespaces-machine") {
+	if core.FlagWasSet(fs, "github-codespaces-machine") {
 		cfg.GitHubCodespaces.Machine = *v.Machine
 		cfg.ServerType = strings.TrimSpace(*v.Machine)
 		cfg.ServerTypeExplicit = true
 	}
-	if flagWasSet(fs, "github-codespaces-devcontainer-path") {
+	if core.FlagWasSet(fs, "github-codespaces-devcontainer-path") {
 		cfg.GitHubCodespaces.DevcontainerPath = *v.Devcontainer
 	}
-	if flagWasSet(fs, "github-codespaces-working-directory") {
+	if core.FlagWasSet(fs, "github-codespaces-working-directory") {
 		cfg.GitHubCodespaces.WorkingDirectory = *v.WorkingDir
 	}
-	if flagWasSet(fs, "github-codespaces-geo") {
+	if core.FlagWasSet(fs, "github-codespaces-geo") {
 		cfg.GitHubCodespaces.Geo = *v.Geo
 	}
-	if flagWasSet(fs, "github-codespaces-idle-timeout") {
+	if core.FlagWasSet(fs, "github-codespaces-idle-timeout") {
 		cfg.GitHubCodespaces.IdleTimeout = *v.IdleTimeout
 	}
-	if flagWasSet(fs, "github-codespaces-retention-period") {
+	if core.FlagWasSet(fs, "github-codespaces-retention-period") {
 		cfg.GitHubCodespaces.RetentionPeriod = *v.RetentionPeriod
 		markRetentionPeriodExplicit(cfg)
 	}
-	if flagWasSet(fs, "github-codespaces-delete-on-release") {
+	if core.FlagWasSet(fs, "github-codespaces-delete-on-release") {
 		cfg.GitHubCodespaces.DeleteOnRelease = *v.DeleteOnRelease
 		markDeleteOnReleaseExplicit(cfg)
 	}
-	if flagWasSet(fs, "github-codespaces-gh-path") {
+	if core.FlagWasSet(fs, "github-codespaces-gh-path") {
 		cfg.GitHubCodespaces.GHPath = *v.GHPath
 	}
-	if flagWasSet(fs, "github-codespaces-work-root") {
+	if core.FlagWasSet(fs, "github-codespaces-work-root") {
 		cfg.GitHubCodespaces.WorkRoot = *v.WorkRoot
 		cfg.WorkRoot = *v.WorkRoot
 		markWorkRootExplicit(cfg)

@@ -1,5 +1,7 @@
 package nomad
 
+import core "github.com/openclaw/crabbox/internal/cli"
+
 import (
 	"flag"
 	"strings"
@@ -62,10 +64,10 @@ func RegisterNomadProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyNomadProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if strings.EqualFold(strings.TrimSpace(cfg.Provider), providerName) {
-		if flagWasSet(fs, "class") {
+		if core.FlagWasSet(fs, "class") {
 			return exit(2, "--class is not supported for provider=nomad; use --nomad-cpu/--nomad-memory-mb")
 		}
-		if flagWasSet(fs, "type") {
+		if core.FlagWasSet(fs, "type") {
 			return exit(2, "--type is not supported for provider=nomad; use --nomad-image")
 		}
 	}
@@ -73,81 +75,81 @@ func ApplyNomadProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "nomad-address") {
+	if core.FlagWasSet(fs, "nomad-address") {
 		cfg.Nomad.Address = *v.Address
 	}
-	if flagWasSet(fs, "nomad-region") {
+	if core.FlagWasSet(fs, "nomad-region") {
 		cfg.Nomad.Region = *v.Region
 	}
-	if flagWasSet(fs, "nomad-namespace") {
+	if core.FlagWasSet(fs, "nomad-namespace") {
 		cfg.Nomad.Namespace = *v.Namespace
 	}
-	if flagWasSet(fs, "nomad-token-env") {
+	if core.FlagWasSet(fs, "nomad-token-env") {
 		cfg.Nomad.TokenEnv = *v.TokenEnv
 	}
-	if flagWasSet(fs, "nomad-ca-cert") {
+	if core.FlagWasSet(fs, "nomad-ca-cert") {
 		cfg.Nomad.CACert = *v.CACert
 	}
-	if flagWasSet(fs, "nomad-ca-path") {
+	if core.FlagWasSet(fs, "nomad-ca-path") {
 		cfg.Nomad.CAPath = *v.CAPath
 	}
-	if flagWasSet(fs, "nomad-client-cert") {
+	if core.FlagWasSet(fs, "nomad-client-cert") {
 		cfg.Nomad.ClientCert = *v.ClientCert
 	}
-	if flagWasSet(fs, "nomad-client-key") {
+	if core.FlagWasSet(fs, "nomad-client-key") {
 		cfg.Nomad.ClientKey = *v.ClientKey
 	}
-	if flagWasSet(fs, "nomad-tls-server-name") {
+	if core.FlagWasSet(fs, "nomad-tls-server-name") {
 		cfg.Nomad.TLSServerName = *v.TLSServerName
 	}
-	if flagWasSet(fs, "nomad-skip-verify") {
+	if core.FlagWasSet(fs, "nomad-skip-verify") {
 		cfg.Nomad.SkipVerify = *v.SkipVerify
 	}
-	if flagWasSet(fs, "nomad-task") {
+	if core.FlagWasSet(fs, "nomad-task") {
 		cfg.Nomad.Task = *v.Task
 	}
-	if flagWasSet(fs, "nomad-driver") {
+	if core.FlagWasSet(fs, "nomad-driver") {
 		cfg.Nomad.Driver = *v.Driver
 	}
-	if flagWasSet(fs, "nomad-image") {
+	if core.FlagWasSet(fs, "nomad-image") {
 		cfg.Nomad.Image = *v.Image
 	}
-	if flagWasSet(fs, "nomad-workdir") {
+	if core.FlagWasSet(fs, "nomad-workdir") {
 		cfg.Nomad.Workdir = *v.Workdir
 	}
-	if flagWasSet(fs, "nomad-jobspec-template") {
+	if core.FlagWasSet(fs, "nomad-jobspec-template") {
 		cfg.Nomad.JobSpecTemplate = *v.JobSpecTemplate
 	}
-	if flagWasSet(fs, "nomad-node-pool") {
+	if core.FlagWasSet(fs, "nomad-node-pool") {
 		cfg.Nomad.NodePool = *v.NodePool
 	}
-	if flagWasSet(fs, "nomad-datacenters") {
+	if core.FlagWasSet(fs, "nomad-datacenters") {
 		cfg.Nomad.Datacenters = splitList(*v.Datacenters)
 	}
-	if flagWasSet(fs, "nomad-cpu") {
+	if core.FlagWasSet(fs, "nomad-cpu") {
 		cfg.Nomad.CPU = *v.CPU
 	}
-	if flagWasSet(fs, "nomad-memory-mb") {
+	if core.FlagWasSet(fs, "nomad-memory-mb") {
 		cfg.Nomad.MemoryMB = *v.MemoryMB
 	}
-	if flagWasSet(fs, "nomad-disk-mb") {
+	if core.FlagWasSet(fs, "nomad-disk-mb") {
 		cfg.Nomad.DiskMB = *v.DiskMB
 	}
-	if flagWasSet(fs, "nomad-alloc-ready-timeout") {
+	if core.FlagWasSet(fs, "nomad-alloc-ready-timeout") {
 		parsed, err := parsePositiveDuration(*v.AllocReadyTimeout, "nomad alloc ready timeout")
 		if err != nil {
 			return err
 		}
 		cfg.Nomad.AllocReadyTimeout = parsed
 	}
-	if flagWasSet(fs, "nomad-eval-timeout") {
+	if core.FlagWasSet(fs, "nomad-eval-timeout") {
 		parsed, err := parsePositiveDuration(*v.EvalTimeout, "nomad eval timeout")
 		if err != nil {
 			return err
 		}
 		cfg.Nomad.EvalTimeout = parsed
 	}
-	if flagWasSet(fs, "nomad-exec-timeout-secs") {
+	if core.FlagWasSet(fs, "nomad-exec-timeout-secs") {
 		cfg.Nomad.ExecTimeoutSecs = *v.ExecTimeoutSecs
 	}
 	return validateConfig(*cfg)

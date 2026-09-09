@@ -1,5 +1,7 @@
 package namespace
 
+import core "github.com/openclaw/crabbox/internal/cli"
+
 import (
 	"flag"
 	"path"
@@ -36,33 +38,33 @@ func ApplyNamespaceProviderFlags(cfg *Config, fs *flag.FlagSet, values any) erro
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "namespace-image") {
+	if core.FlagWasSet(fs, "namespace-image") {
 		cfg.Namespace.Image = *v.Image
 	}
-	if flagWasSet(fs, "namespace-size") {
+	if core.FlagWasSet(fs, "namespace-size") {
 		cfg.Namespace.Size = strings.ToUpper(strings.TrimSpace(*v.Size))
 		cfg.ServerType = cfg.Namespace.Size
 		cfg.ServerTypeExplicit = true
 	}
-	if flagWasSet(fs, "namespace-repository") {
+	if core.FlagWasSet(fs, "namespace-repository") {
 		cfg.Namespace.Repository = *v.Repository
 	}
-	if flagWasSet(fs, "namespace-site") {
+	if core.FlagWasSet(fs, "namespace-site") {
 		cfg.Namespace.Site = *v.Site
 	}
-	if flagWasSet(fs, "namespace-volume-size-gb") {
+	if core.FlagWasSet(fs, "namespace-volume-size-gb") {
 		cfg.Namespace.VolumeSizeGB = *v.VolumeSizeGB
 	}
-	if flagWasSet(fs, "namespace-auto-stop-idle-timeout") {
+	if core.FlagWasSet(fs, "namespace-auto-stop-idle-timeout") {
 		if err := applyNamespaceDuration(&cfg.Namespace.AutoStopIdleTimeout, *v.AutoStopIdleTimeout); err != nil {
 			return err
 		}
 	}
-	if flagWasSet(fs, "namespace-work-root") {
+	if core.FlagWasSet(fs, "namespace-work-root") {
 		cfg.Namespace.WorkRoot = *v.WorkRoot
 		cfg.WorkRoot = *v.WorkRoot
 	}
-	if flagWasSet(fs, "namespace-delete-on-release") {
+	if core.FlagWasSet(fs, "namespace-delete-on-release") {
 		cfg.Namespace.DeleteOnRelease = *v.DeleteOnRelease
 		markDeleteOnReleaseExplicit(cfg)
 	}

@@ -55,47 +55,47 @@ func ApplyVastProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "vast-api-url") {
+	if core.FlagWasSet(fs, "vast-api-url") {
 		cfg.Vast.APIURL = *v.APIURL
 	}
-	if flagWasSet(fs, "vast-instance-type") {
+	if core.FlagWasSet(fs, "vast-instance-type") {
 		cfg.Vast.InstanceType = normalizeInstanceType(*v.InstanceType)
 	}
-	if flagWasSet(fs, "vast-gpu-name") {
+	if core.FlagWasSet(fs, "vast-gpu-name") {
 		cfg.Vast.GPUName = *v.GPUName
 	}
-	if flagWasSet(fs, "vast-gpu-count") {
+	if core.FlagWasSet(fs, "vast-gpu-count") {
 		cfg.Vast.GPUCount = *v.GPUCount
 	}
-	if flagWasSet(fs, "vast-image") {
+	if core.FlagWasSet(fs, "vast-image") {
 		cfg.Vast.Image = *v.Image
 	}
-	if flagWasSet(fs, "vast-template-id") {
+	if core.FlagWasSet(fs, "vast-template-id") {
 		cfg.Vast.TemplateID = *v.TemplateID
 	}
-	if flagWasSet(fs, "vast-runtype") {
+	if core.FlagWasSet(fs, "vast-runtype") {
 		cfg.Vast.Runtype = *v.Runtype
 	}
-	if flagWasSet(fs, "vast-disk-gb") {
+	if core.FlagWasSet(fs, "vast-disk-gb") {
 		cfg.Vast.DiskGB = *v.DiskGB
 	}
-	if flagWasSet(fs, "vast-max-dph-total") {
+	if core.FlagWasSet(fs, "vast-max-dph-total") {
 		cfg.Vast.MaxDphTotal = *v.MaxDphTotal
 	}
-	if flagWasSet(fs, "vast-min-reliability") {
+	if core.FlagWasSet(fs, "vast-min-reliability") {
 		cfg.Vast.MinReliability = *v.MinReliability
 	}
-	if flagWasSet(fs, "vast-order") {
+	if core.FlagWasSet(fs, "vast-order") {
 		cfg.Vast.Order = *v.Order
 	}
-	if flagWasSet(fs, "vast-user") {
+	if core.FlagWasSet(fs, "vast-user") {
 		cfg.Vast.User = *v.User
 	}
-	if flagWasSet(fs, "vast-work-root") {
+	if core.FlagWasSet(fs, "vast-work-root") {
 		cfg.Vast.WorkRoot = *v.WorkRoot
 		markVastWorkRootExplicit(cfg)
 	}
-	if flagWasSet(fs, "vast-release-action") {
+	if core.FlagWasSet(fs, "vast-release-action") {
 		cfg.Vast.ReleaseAction = *v.ReleaseAction
 		markReleaseActionExplicit(cfg)
 	}

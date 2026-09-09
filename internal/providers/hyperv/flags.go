@@ -33,25 +33,25 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "hyperv-image") {
+	if core.FlagWasSet(fs, "hyperv-image") {
 		cfg.HyperV.Image = *v.Image
 	}
-	if flagWasSet(fs, "hyperv-user") {
+	if core.FlagWasSet(fs, "hyperv-user") {
 		cfg.HyperV.User = *v.User
 	}
-	if flagWasSet(fs, "hyperv-work-root") {
+	if core.FlagWasSet(fs, "hyperv-work-root") {
 		cfg.HyperV.WorkRoot = *v.WorkRoot
 	}
-	if flagWasSet(fs, "hyperv-cpu") {
+	if core.FlagWasSet(fs, "hyperv-cpu") {
 		cfg.HyperV.CPUs = *v.CPUs
 	}
-	if flagWasSet(fs, "hyperv-memory") {
+	if core.FlagWasSet(fs, "hyperv-memory") {
 		cfg.HyperV.Memory = *v.Memory
 	}
-	if flagWasSet(fs, "hyperv-switch") {
+	if core.FlagWasSet(fs, "hyperv-switch") {
 		cfg.HyperV.Switch = *v.Switch
 	}
-	if flagWasSet(fs, "hyperv-init-password") {
+	if core.FlagWasSet(fs, "hyperv-init-password") {
 		cfg.HyperV.InitPassword = *v.InitPassword
 	}
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
@@ -59,7 +59,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		// commands. Leave target validation to the centralized provider-target
 		// check after all flag sources have been applied. When no target source
 		// is explicit, adopt the provider's Windows default here.
-		if !core.IsTargetExplicit(cfg) && !flagWasSet(fs, "target") {
+		if !core.IsTargetExplicit(cfg) && !core.FlagWasSet(fs, "target") {
 			cfg.TargetOS = targetWindows
 		}
 		applyDefaults(cfg)

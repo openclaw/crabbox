@@ -35,31 +35,31 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "multipass-cli") {
+	if core.FlagWasSet(fs, "multipass-cli") {
 		cfg.Multipass.CLIPath = *v.CLIPath
 	}
-	if flagWasSet(fs, "multipass-image") {
+	if core.FlagWasSet(fs, "multipass-image") {
 		cfg.Multipass.Image = *v.Image
 		core.MarkMultipassImageExplicit(cfg)
 	}
-	if flagWasSet(fs, "multipass-user") {
+	if core.FlagWasSet(fs, "multipass-user") {
 		cfg.Multipass.User = *v.User
 		cfg.SSHUser = *v.User
 	}
-	if flagWasSet(fs, "multipass-work-root") {
+	if core.FlagWasSet(fs, "multipass-work-root") {
 		cfg.Multipass.WorkRoot = *v.WorkRoot
 		cfg.WorkRoot = *v.WorkRoot
 	}
-	if flagWasSet(fs, "multipass-cpus") {
+	if core.FlagWasSet(fs, "multipass-cpus") {
 		cfg.Multipass.CPUs = *v.CPUs
 	}
-	if flagWasSet(fs, "multipass-memory") {
+	if core.FlagWasSet(fs, "multipass-memory") {
 		cfg.Multipass.Memory = *v.Memory
 	}
-	if flagWasSet(fs, "multipass-disk") {
+	if core.FlagWasSet(fs, "multipass-disk") {
 		cfg.Multipass.Disk = *v.Disk
 	}
-	if flagWasSet(fs, "multipass-launch-timeout") {
+	if core.FlagWasSet(fs, "multipass-launch-timeout") {
 		if err := core.ApplyLeaseDuration(&cfg.Multipass.LaunchTimeout, *v.LaunchTimeout); err != nil {
 			return err
 		}

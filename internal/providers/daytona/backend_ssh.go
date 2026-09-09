@@ -41,7 +41,7 @@ func RegisterDaytonaProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyDaytonaProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == daytonaProvider {
-		if flagWasSet(fs, "type") {
+		if core.FlagWasSet(fs, "type") {
 			return exit(2, "--type is not supported for provider=daytona; choose CPU, memory, and disk in the Daytona snapshot")
 		}
 	}
@@ -49,25 +49,25 @@ func ApplyDaytonaProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error 
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "daytona-api-url") {
+	if core.FlagWasSet(fs, "daytona-api-url") {
 		cfg.Daytona.APIURL = *v.APIURL
 	}
-	if flagWasSet(fs, "daytona-snapshot") {
+	if core.FlagWasSet(fs, "daytona-snapshot") {
 		cfg.Daytona.Snapshot = *v.Snapshot
 	}
-	if flagWasSet(fs, "daytona-target") {
+	if core.FlagWasSet(fs, "daytona-target") {
 		cfg.Daytona.Target = *v.Target
 	}
-	if flagWasSet(fs, "daytona-user") {
+	if core.FlagWasSet(fs, "daytona-user") {
 		cfg.Daytona.User = *v.User
 	}
-	if flagWasSet(fs, "daytona-work-root") {
+	if core.FlagWasSet(fs, "daytona-work-root") {
 		cfg.Daytona.WorkRoot = *v.WorkRoot
 	}
-	if flagWasSet(fs, "daytona-ssh-gateway-host") {
+	if core.FlagWasSet(fs, "daytona-ssh-gateway-host") {
 		cfg.Daytona.SSHGatewayHost = *v.SSHGatewayHost
 	}
-	if flagWasSet(fs, "daytona-ssh-access-minutes") {
+	if core.FlagWasSet(fs, "daytona-ssh-access-minutes") {
 		cfg.Daytona.SSHAccessMinutes = *v.SSHAccessMinutes
 	}
 	return nil

@@ -27,10 +27,10 @@ func RegisterSpritesProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplySpritesProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == spritesProvider {
-		if flagWasSet(fs, "class") {
+		if core.FlagWasSet(fs, "class") {
 			return exit(2, "--class is not supported for provider=sprites")
 		}
-		if flagWasSet(fs, "type") {
+		if core.FlagWasSet(fs, "type") {
 			return exit(2, "--type is not supported for provider=sprites")
 		}
 		if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
@@ -44,10 +44,10 @@ func ApplySpritesProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error 
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "sprites-api-url") {
+	if core.FlagWasSet(fs, "sprites-api-url") {
 		cfg.Sprites.APIURL = *v.APIURL
 	}
-	if flagWasSet(fs, "sprites-work-root") {
+	if core.FlagWasSet(fs, "sprites-work-root") {
 		cfg.Sprites.WorkRoot = *v.WorkRoot
 	}
 	return nil

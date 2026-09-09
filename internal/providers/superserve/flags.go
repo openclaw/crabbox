@@ -1,5 +1,7 @@
 package superserve
 
+import core "github.com/openclaw/crabbox/internal/cli"
+
 import (
 	"flag"
 	"net"
@@ -49,31 +51,31 @@ func ApplySuperserveProviderFlags(cfg *Config, fs *flag.FlagSet, values any) err
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "superserve-base-url") {
+	if core.FlagWasSet(fs, "superserve-base-url") {
 		cfg.Superserve.BaseURL = *v.BaseURL
 	}
-	if flagWasSet(fs, "superserve-template") {
+	if core.FlagWasSet(fs, "superserve-template") {
 		cfg.Superserve.Template = *v.Template
 	}
-	if flagWasSet(fs, "superserve-snapshot") {
+	if core.FlagWasSet(fs, "superserve-snapshot") {
 		cfg.Superserve.Snapshot = *v.Snapshot
 	}
-	if flagWasSet(fs, "superserve-workdir") {
+	if core.FlagWasSet(fs, "superserve-workdir") {
 		cfg.Superserve.Workdir = *v.Workdir
 	}
-	if flagWasSet(fs, "superserve-timeout-secs") {
+	if core.FlagWasSet(fs, "superserve-timeout-secs") {
 		cfg.Superserve.TimeoutSecs = *v.TimeoutSecs
 	}
-	if flagWasSet(fs, "superserve-exec-timeout-secs") {
+	if core.FlagWasSet(fs, "superserve-exec-timeout-secs") {
 		cfg.Superserve.ExecTimeoutSecs = *v.ExecTimeoutSecs
 	}
-	if flagWasSet(fs, "superserve-network-allow-out") {
+	if core.FlagWasSet(fs, "superserve-network-allow-out") {
 		cfg.Superserve.NetworkAllowOut = splitSuperserveList(*v.NetworkAllowOut)
 	}
-	if flagWasSet(fs, "superserve-network-deny-out") {
+	if core.FlagWasSet(fs, "superserve-network-deny-out") {
 		cfg.Superserve.NetworkDenyOut = splitSuperserveList(*v.NetworkDenyOut)
 	}
-	if flagWasSet(fs, "superserve-forget-missing") {
+	if core.FlagWasSet(fs, "superserve-forget-missing") {
 		cfg.Superserve.ForgetMissing = *v.ForgetMissing
 	}
 	return validateSuperserveConfig(*cfg)
