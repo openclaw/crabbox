@@ -46,7 +46,7 @@
 
 - Describe Tensorlake configuration bindings once, sharing API, CLI, and workdir defaults while preserving positive-only YAML sizing, environment parsing, credential sources, and native defaults. [PR 2018](https://github.com/openclaw/crabbox/pull/2018). Thanks @steipete.
 
-- Describe Orgo configuration bindings once and remove redundant client endpoint fallbacks, preserving configured-key precedence, runtime key resolution, sizing defaults, and claim scope. Thanks @steipete.
+- Describe Orgo configuration bindings once and remove redundant client endpoint fallbacks, preserving configured-key precedence, runtime key resolution, sizing defaults, and claim scope. [PR 2019](https://github.com/openclaw/crabbox/pull/2019). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 
