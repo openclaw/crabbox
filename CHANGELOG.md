@@ -54,7 +54,7 @@
 
 - Share unsupported machine-sizing flag checks across providers, preserving explicit-input behavior, provider-specific guidance, and validation order. [PR 2023](https://github.com/openclaw/crabbox/pull/2023). Thanks @steipete.
 
-- Describe Morph configuration bindings once, sharing endpoint, gateway, and work-root defaults while preserving source precedence, explicit deletion policy, and SSH wake behavior. Thanks @steipete.
+- Describe Morph configuration bindings once, sharing endpoint, gateway, and work-root defaults while preserving source precedence, explicit deletion policy, and SSH wake behavior. [PR 2024](https://github.com/openclaw/crabbox/pull/2024). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 
