@@ -13993,14 +13993,14 @@ export class FleetCoordinator {
     }
     if (action === "reservation" && hostID) {
       if (!/^h-[a-f0-9]+$/.test(hostID)) return json({ error: "invalid_host_id" }, { status: 400 });
-      if (method !== "GET" && method !== "DELETE") return notFound();
+      if (method !== "GET" && method !== "POST") return notFound();
       const scope: HostScope = { provider: "aws", hostID, region };
       const force = url.searchParams.get("force") === "true";
       return this.state.runExclusive(async () => {
         const result = await this.state.storage.transaction(async (storage) => {
           const reservations = await readHostReservations(storage, scope);
           const blocked = reservations.some((reservation) => !reservation.staleReason);
-          if (method === "DELETE" && blocked && !force) {
+          if (method === "POST" && blocked && !force) {
             return json(
               {
                 error: "host_in_use",
@@ -14012,16 +14012,16 @@ export class FleetCoordinator {
               { status: 409 },
             );
           }
-          if (method === "DELETE") await clearHostReservations(storage, reservations);
+          if (method === "POST") await clearHostReservations(storage, reservations);
           return reservations;
         });
         if (result instanceof Response) return result;
-        if (method === "DELETE")
+        if (method === "POST")
           logClearedHostReservations(scope, result, "admin_reservation_cleared");
         return json({
           ...scope,
           reservations: result.map(publicHostReservation),
-          ...(method === "DELETE" ? { cleared: result.length } : {}),
+          ...(method === "POST" ? { cleared: result.length } : {}),
         });
       });
     }

@@ -237,8 +237,8 @@ func TestAdminHostReservation(t *testing.T) {
 		force                bool
 	}{
 		{"inspect", "reservation", http.MethodGet, false},
-		{"clear", "clear", http.MethodDelete, false},
-		{"force clear", "clear", http.MethodDelete, true},
+		{"clear", "clear", http.MethodPost, false},
+		{"force clear", "clear", http.MethodPost, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearConfigEnv(t)
@@ -309,5 +309,28 @@ func TestAdminHostReservationPreservesConflict(t *testing.T) {
 	app := App{Stdout: io.Discard, Stderr: io.Discard}
 	if err := app.adminHosts(context.Background(), []string{"clear", "h-123abc"}); err == nil || !strings.Contains(err.Error(), "host_in_use") {
 		t.Fatalf("expected host conflict, got %v", err)
+	}
+}
+
+func TestAdminHostReservationClearCannotReleaseHostOnOlderCoordinator(t *testing.T) {
+	var released bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Older coordinators dispatch host DELETE using only the first path segment.
+		if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/admin/hosts/h-") {
+			released = true
+			_, _ = io.WriteString(w, `{"released":["h-123abc"]}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":"not_found"}`)
+	}))
+	defer server.Close()
+	client := &CoordinatorClient{BaseURL: server.URL, Token: "synthetic-admin-token"}
+	_, err := client.AdminHostReservation(context.Background(), "eu-west-1", "h-123abc", true, true)
+	if err == nil {
+		t.Fatal("expected unsupported-route error")
+	}
+	if released {
+		t.Fatal("reservation clear released a Dedicated Host")
 	}
 }

@@ -1920,7 +1920,8 @@ func (c *CoordinatorClient) AdminHostReservation(ctx context.Context, region, ho
 	}
 	method := http.MethodGet
 	if clear {
-		method = http.MethodDelete
+		// Older coordinators dispatch any host DELETE suffix as a Dedicated Host release.
+		method = http.MethodPost
 	}
 	path := "/v1/admin/hosts/" + url.PathEscape(hostID) + "/reservation?" + values.Encode()
 	var result json.RawMessage

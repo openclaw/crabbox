@@ -124,7 +124,8 @@ cleared. It preserves lease history, instance identity, and cleanup obligations;
 it does not terminate instances or release Dedicated Hosts. Active/provisioning
 and potentially retained associations require `clear --force`. A running create
 may restore its association, so inspect the lease and provider before forcing.
-Both commands require admin credentials and support the shared scope flags,
+Clear uses POST so older coordinators reject the unsupported operation without
+dispatching a Dedicated Host release. Both commands require admin credentials and support the shared scope flags,
 `--region`, and `--json`. They also work through `admin mac-hosts`.
 
 ### hosts policy

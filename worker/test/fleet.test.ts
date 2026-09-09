@@ -27892,7 +27892,7 @@ describe("fleet lease identity and idle", () => {
       const fleet = testFleet(storage);
       const path = `/v1/admin/${route}/h-123abc/reservation?region=eu-west-1`;
       const headers = { "x-crabbox-admin": "true" };
-      for (const method of ["GET", "DELETE"]) {
+      for (const method of ["GET", "POST"]) {
         // oxlint-disable-next-line eslint/no-await-in-loop -- both methods must require admin auth.
         expect((await fleet.fetch(request(method, path))).status).toBe(403);
       }
@@ -27906,9 +27906,9 @@ describe("fleet lease identity and idle", () => {
           { storageKey: `provider-access:${held.id}` },
         ],
       });
-      expect((await fleet.fetch(request("DELETE", path, { headers }))).status).toBe(409);
+      expect((await fleet.fetch(request("POST", path, { headers }))).status).toBe(409);
       expect(storage.value(`lease:${held.id}`)).toEqual(held);
-      const cleared = await fleet.fetch(request("DELETE", path + "&force=true", { headers }));
+      const cleared = await fleet.fetch(request("POST", path + "&force=true", { headers }));
       expect(cleared.status).toBe(200);
       await expect(cleared.json()).resolves.toMatchObject({ cleared: 2 });
       expect(storage.value<LeaseRecord>(`lease:${held.id}`)).toMatchObject({
@@ -27917,7 +27917,7 @@ describe("fleet lease identity and idle", () => {
       });
       expect(storage.value<LeaseRecord>(`lease:${held.id}`)?.hostId).toBeUndefined();
       await expect(
-        (await fleet.fetch(request("DELETE", path, { headers }))).json(),
+        (await fleet.fetch(request("POST", path, { headers }))).json(),
       ).resolves.toMatchObject({ cleared: 0 });
     },
   );
@@ -27935,7 +27935,7 @@ describe("fleet lease identity and idle", () => {
     storage.seed(`lease:${other.id}`, other);
     const fleet = testFleet(storage);
     const response = await fleet.fetch(
-      request("DELETE", "/v1/admin/hosts/h-123abc/reservation?region=eu-west-1", {
+      request("POST", "/v1/admin/hosts/h-123abc/reservation?region=eu-west-1", {
         headers: { "x-crabbox-admin": "true" },
       }),
     );
