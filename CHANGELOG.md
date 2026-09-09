@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Add an explicit Ubuntu 24.04 developer-image publication selector while retaining Ubuntu 26.04 as the default, and scope Linux promotion and receipt rollback to the selected OS. Thanks @vincentkoc.
+- Add an explicit Ubuntu 24.04 developer-image publication selector while retaining Ubuntu 26.04 as the default, and scope Linux promotion and receipt rollback to the selected OS. https://github.com/openclaw/crabbox/pull/2028. Thanks @vincentkoc.
 
 - Run managed WSL2 workloads as the non-root `crabbox` user with passwordless sudo, writable work/cache directories, and the shared Node baseline on PATH. https://github.com/openclaw/crabbox/pull/2016. Thanks @steipete.
 
