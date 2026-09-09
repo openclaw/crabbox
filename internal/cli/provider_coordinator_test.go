@@ -68,7 +68,7 @@ func TestCoordinatorListUsesUserLeasesWithoutAdminProbe(t *testing.T) {
 			t.Error("ordinary list must not probe the admin pool")
 			http.Error(w, "unexpected admin probe", http.StatusInternalServerError)
 		case "/v1/leases":
-			if got := r.URL.Query().Get("state"); got != "active" {
+			if got := r.URL.Query().Get("state"); got != "" {
 				t.Fatalf("leases state=%q", got)
 			}
 			if got := r.Header.Get("Authorization"); got != "Bearer user-token" {
@@ -175,7 +175,7 @@ func TestCoordinatorListJSONUsesUserLeasesWhenAdminTokenMissing(t *testing.T) {
 		if r.URL.Path != "/v1/leases" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
-		if got := r.URL.Query().Get("state"); got != "active" {
+		if got := r.URL.Query().Get("state"); got != "" {
 			t.Fatalf("leases state=%q", got)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"leases": []CoordinatorLease{
@@ -1037,54 +1037,6 @@ func TestCoordinatorAcquireRetainsCurrentProvisioningTiming(t *testing.T) {
 	want := coordinatorRunnerTiming(lease)
 	if !reflect.DeepEqual(acquired.runnerTiming, want) {
 		t.Fatalf("runner timing=%#v want current provisioning timing %#v", acquired.runnerTiming, want)
-	}
-}
-
-func TestCoordinatorAcquirePollsCanonicalIDFromProvisioningReplay(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	oldInterval := coordinatorCreateLeaseRecoveryInterval
-	coordinatorCreateLeaseRecoveryInterval = time.Millisecond
-	defer func() { coordinatorCreateLeaseRecoveryInterval = oldInterval }()
-
-	const requestedID = "cbx_abcdef123456"
-	const canonicalID = "cbx_abcdef123457"
-	gets := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases":
-			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
-				ID: canonicalID, Slug: "retained-canonical", Provider: "aws", TargetOS: targetLinux, State: "provisioning",
-			}})
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+canonicalID:
-			gets++
-			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
-				ID: canonicalID, Slug: "retained-canonical", Provider: "aws", TargetOS: targetLinux,
-				State: "active", CloudID: "i-retained", Host: "203.0.113.10", SSHUser: "crabbox", SSHPort: "2222", WorkRoot: defaultPOSIXWorkRoot,
-			}})
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+requestedID:
-			t.Fatalf("polled provisional ID instead of canonical ID")
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	cfg := baseConfig()
-	cfg.Provider = "aws"
-	cfg.TargetOS = targetLinux
-	cfg.Coordinator = server.URL
-	cfg.CoordToken = "user-token"
-	coord := mustNewCoordinatorClient(t, cfg)
-	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
-	lease, err := backend.createCoordinatorLeaseWithProgressMode(
-		context.Background(), cfg, "ssh-ed25519 test", true, requestedID, "retained-canonical", false,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lease.ID != canonicalID || lease.CloudID != "i-retained" || gets == 0 {
-		t.Fatalf("lease=%#v gets=%d", lease, gets)
 	}
 }
 
@@ -2106,7 +2058,7 @@ func TestCoordinatorCreateLeaseRecoversWithSameTokenBoundPost(t *testing.T) {
 	}()
 
 	var createdLeaseID string
-	const canonicalLeaseID = "cbx_recovered_canonical"
+	const canonicalLeaseID = "cbx_recover"
 	var createAttemptID string
 	posts := 0
 	gets := 0
@@ -2327,7 +2279,7 @@ func TestCoordinatorRecoveredProvisioningKeepsCreationLifetime(t *testing.T) {
 			t.Run(fmt.Sprintf("fixed=%v/%s", fixed, test.name), func(t *testing.T) {
 				synctest.Test(t, func(t *testing.T) {
 					const requestedID = "cbx_abcdef123463"
-					canonicalID := "cbx_abcdef123464"
+					canonicalID := requestedID
 					target := targetMacOS
 					createMethod, createPath := http.MethodPost, "/v1/leases"
 					if fixed {
@@ -2811,7 +2763,7 @@ func TestCoordinatorCreateCanonicalProviderMatching(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			lease := base
 			lease.Provider = test.provider
-			if got := backend.validateCoordinatorLeaseCreateResult(cfg, lease, lease.ID, false) == nil; got != test.want {
+			if got := backend.validateCoordinatorLeaseCreateResult(cfg, lease, lease.ID) == nil; got != test.want {
 				t.Fatalf("recovered=%t want %t for provider=%q", got, test.want, test.provider)
 			}
 		})

@@ -4,6 +4,10 @@
 
 ### Changes
 
+- Reject occupied host pins and coordinator replies with a different lease ID before bootstrap or cleanup; show retained leases in ordinary text and JSON listing.
+- Allow authenticated org members to pin unused AWS Mac hosts backed by exact coordinator allocation evidence, while keeping unknown and other-org hosts admin-only.
+
+
 - Transfer Blacksmith run artifacts through bounded native file download instead of bulk stdout, preserving the original collection deadline and claim while isolating each invocation's evidence. [PR 2043](https://github.com/openclaw/crabbox/pull/2043). Thanks @steipete.
 - Describe Scaleway configuration bindings once, sharing configured defaults while preserving explicit SDK location overrides and distinct file, environment, and flag list behavior. [PR 2036](https://github.com/openclaw/crabbox/pull/2036). Thanks @steipete.
 - Preserve recorded broker network diagnostics in inspect/status JSON, including SSH source CIDRs and AWS placement fields, without changing the resolved network mode or adding provider requests. https://github.com/openclaw/crabbox/pull/2039. Thanks @vincentkoc.

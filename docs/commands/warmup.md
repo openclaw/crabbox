@@ -312,6 +312,12 @@ self-hosted GitHub Actions runner for the current repository. Most projects
 should instead prefer [`crabbox actions hydrate --id <lease>`](actions.md) after
 warmup, because it also dispatches the workflow and waits for the ready marker.
 
+A new warmup does not adopt an existing lease by slug or pinned host. An occupied
+host returns a conflict identifying its lease; inspect or explicitly stop that
+lease before requesting a new one. `--lease-id` replays only the same fixed ID
+and create intent. If a coordinator returns another ID, the CLI stops before
+bootstrap, key migration, or failure cleanup.
+
 ## Flags
 
 ```text
