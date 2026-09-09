@@ -103,6 +103,10 @@ export interface Env {
   CRABBOX_KOYEB_INSTANCE_TYPE?: string;
   CRABBOX_KOYEB_IMAGE?: string;
   CRABBOX_KOYEB_REGISTRY_SECRET?: string;
+  KOYEB_APP_ID?: string;
+  KOYEB_APP_NAME?: string;
+  KOYEB_ORGANIZATION_ID?: string;
+  KOYEB_REGION?: string;
   CRABBOX_RUNTIME_ADAPTER_TOKEN?: string;
   CRABBOX_SHARED_TOKEN?: string;
   CRABBOX_SHARED_OWNER?: string;

@@ -500,8 +500,9 @@ image lifecycle.
 
 ### Koyeb Sandbox
 
-Brokered Koyeb Sandbox leases require durable provisioning admission and use
-Tailscale for private SSH and browser transport. Configure:
+Brokered Koyeb Sandbox leases require durable provisioning admission. They use
+Tailscale for private SSH and browser transport by default, or Koyeb's native
+private mesh when a lease explicitly sets `--tailscale=false`. Configure:
 
 ```text
 KOYEB_API_TOKEN                         # coordinator-only Koyeb API credential
@@ -514,15 +515,17 @@ CRABBOX_KOYEB_INSTANCE_TYPE             # optional; default large for desktop/br
 CRABBOX_KOYEB_REGISTRY_SECRET           # optional Koyeb registry secret name, not its UUID
 CRABBOX_DURABLE_PROVISIONING_ADMISSION  # must be true
 CRABBOX_SESSION_SECRET                  # stable durable-material encryption key
-CRABBOX_TAILSCALE_CLIENT_ID
-CRABBOX_TAILSCALE_CLIENT_SECRET
+CRABBOX_TAILSCALE_CLIENT_ID             # required only for the default transport
+CRABBOX_TAILSCALE_CLIENT_SECRET         # required only for the default transport
 ```
 
-The coordinator exposes only the Koyeb edge API-key-protected Sandbox management
-route during bootstrap; the runner validates the same generated bearer again.
-It does not publish a workload port or TCP proxy. The active
-lease records the exact image digest, registry secret name, Tailscale address,
-and SSH host key used for later access and fail-closed cleanup.
+The default transport exposes only the Koyeb edge API-key-protected Sandbox
+management route during bootstrap; the runner validates the same generated
+bearer again. Native mesh mode has no public route: management and key-only SSH
+use the Koyeb-injected `<service>.<app>.internal` address, while VNC and
+code-server remain loopback-only behind SSH. The active lease records the exact
+image digest, registry secret name, private address, transport metadata, and
+SSH host key used for later access and fail-closed cleanup.
 
 Each lease stays at exactly one running instance until its TTL, inactivity
 lifecycle, or explicit Crabbox cleanup deletes the Sandbox. Scale-to-zero is

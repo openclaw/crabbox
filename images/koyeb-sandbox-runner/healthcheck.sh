@@ -11,14 +11,23 @@ test -w /workspace/crabbox
 nc -z 127.0.0.1 22 >/dev/null 2>&1
 nc -z 127.0.0.1 5900 >/dev/null 2>&1
 
-# SSH callers already proved the tailnet route. Full daemon and Serve checks are
-# restricted to the root-owned Koyeb executor bootstrap/health path.
+# SSH callers already proved their selected private route. Full daemon and
+# transport checks are restricted to the root-owned executor health path.
 if [[ "$(id -u)" -ne 0 ]]; then
   exit 0
 fi
 
 test -r "$ready_file"
-jq -e '.schema == "crabbox-koyeb-sandbox-runner/v1"' "$ready_file" >/dev/null
+schema="$(jq -er '.schema' "$ready_file")"
+case "$schema" in
+  crabbox-koyeb-sandbox-runner/v1) network=tailscale ;;
+  crabbox-koyeb-sandbox-runner/v2)
+    network="$(jq -er '.network.transport' "$ready_file")"
+    [[ "$network" == koyeb-mesh ]]
+    jq -e '.network.privateHost == .ssh.host and (.ssh.host | test("^[a-z0-9][a-z0-9-]*\\.[a-z0-9][a-z0-9-]*\\.internal$"))' "$ready_file" >/dev/null
+    ;;
+  *) exit 1 ;;
+esac
 
 check_owned_pid() {
   local name="$1"
@@ -33,7 +42,9 @@ check_owned_pid() {
   [[ "$cmdline" == *"$expected"* ]]
 }
 
-check_owned_pid tailscaled "--socket=${tailscale_socket}"
+if [[ "$network" == tailscale ]]; then
+  check_owned_pid tailscaled "--socket=${tailscale_socket}"
+fi
 check_owned_pid sshd "${state_root}/sshd/sshd_config"
 check_owned_pid xvfb ':99'
 check_owned_pid desktop 'desktop-session.sh'
@@ -50,12 +61,17 @@ assert_loopback_listener() {
   fi
 }
 
-assert_loopback_listener 22
 assert_loopback_listener 5900
-
-tailscale_status="$(tailscale --socket="$tailscale_socket" status --json)"
-jq -e '.BackendState == "Running"' >/dev/null <<<"$tailscale_status"
-tailscale --socket="$tailscale_socket" ip -4 | grep -Eq '^100\.[0-9]+\.[0-9]+\.[0-9]+$'
-serve_status="$(tailscale --socket="$tailscale_socket" serve status --json)"
-grep -F '127.0.0.1:22' >/dev/null <<<"$serve_status"
-grep -Eq '"22"|":22"' <<<"$serve_status"
+if [[ "$network" == tailscale ]]; then
+  assert_loopback_listener 22
+  tailscale_status="$(tailscale --socket="$tailscale_socket" status --json)"
+  jq -e '.BackendState == "Running"' >/dev/null <<<"$tailscale_status"
+  tailscale --socket="$tailscale_socket" ip -4 | grep -Eq '^100\.[0-9]+\.[0-9]+\.[0-9]+$'
+  serve_status="$(tailscale --socket="$tailscale_socket" serve status --json)"
+  grep -F '127.0.0.1:22' >/dev/null <<<"$serve_status"
+  grep -Eq '"22"|":22"' <<<"$serve_status"
+else
+  ssh_listeners="$(ss -H -ltn 'sport = :22')"
+  [[ -n "$ssh_listeners" ]]
+  awk '{ print $4 }' <<<"$ssh_listeners" | grep -Eq '^0\.0\.0\.0:22$'
+fi

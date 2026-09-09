@@ -142,4 +142,5 @@ WORKDIR /workspace/crabbox
 
 # Do not add ENTRYPOINT, CMD, EXPOSE 22, or EXPOSE 5900. The Koyeb Sandbox
 # platform owns PID 1 and its authenticated management ports. Bootstrap is
-# invoked as a short executor /run call; only Tailscale Serve publishes SSH.
+# invoked as a short executor /run call; SSH is reachable only through
+# Tailscale Serve or the explicitly enabled Koyeb private mesh.

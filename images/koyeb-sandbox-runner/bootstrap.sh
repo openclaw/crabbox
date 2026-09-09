@@ -12,6 +12,7 @@ desktop_runtime="${runtime_root}/user"
 display=:99
 geometry=1920x1080x24
 ssh_user=crabbox
+network="${CRABBOX_KOYEB_NETWORK:-tailscale}"
 
 log() {
   printf 'crabbox-koyeb-bootstrap: %s\n' "$*" >&2
@@ -24,34 +25,51 @@ fail() {
 
 : "${CRABBOX_KOYEB_LEASE_ID:?missing CRABBOX_KOYEB_LEASE_ID}"
 : "${CRABBOX_KOYEB_SSH_PUBLIC_KEY_FILE:?missing CRABBOX_KOYEB_SSH_PUBLIC_KEY_FILE}"
-: "${CRABBOX_KOYEB_TAILSCALE_AUTH_KEY:?missing CRABBOX_KOYEB_TAILSCALE_AUTH_KEY}"
-: "${CRABBOX_KOYEB_TAILSCALE_HOSTNAME:?missing CRABBOX_KOYEB_TAILSCALE_HOSTNAME}"
-: "${CRABBOX_KOYEB_TAILSCALE_TAGS:?missing CRABBOX_KOYEB_TAILSCALE_TAGS}"
 
 lease_id="$CRABBOX_KOYEB_LEASE_ID"
 public_key_file="$CRABBOX_KOYEB_SSH_PUBLIC_KEY_FILE"
-tailscale_auth_key="$CRABBOX_KOYEB_TAILSCALE_AUTH_KEY"
-tailscale_hostname="$CRABBOX_KOYEB_TAILSCALE_HOSTNAME"
-tailscale_tags="$CRABBOX_KOYEB_TAILSCALE_TAGS"
-tailscale_login_server="${CRABBOX_KOYEB_TAILSCALE_LOGIN_SERVER:-}"
-unset CRABBOX_KOYEB_TAILSCALE_AUTH_KEY
+tailscale_auth_key=""
+tailscale_hostname=""
+tailscale_tags=""
+tailscale_login_server=""
+private_host=""
+case "$network" in
+  tailscale)
+    : "${CRABBOX_KOYEB_TAILSCALE_AUTH_KEY:?missing CRABBOX_KOYEB_TAILSCALE_AUTH_KEY}"
+    : "${CRABBOX_KOYEB_TAILSCALE_HOSTNAME:?missing CRABBOX_KOYEB_TAILSCALE_HOSTNAME}"
+    : "${CRABBOX_KOYEB_TAILSCALE_TAGS:?missing CRABBOX_KOYEB_TAILSCALE_TAGS}"
+    tailscale_auth_key="$CRABBOX_KOYEB_TAILSCALE_AUTH_KEY"
+    tailscale_hostname="$CRABBOX_KOYEB_TAILSCALE_HOSTNAME"
+    tailscale_tags="$CRABBOX_KOYEB_TAILSCALE_TAGS"
+    tailscale_login_server="${CRABBOX_KOYEB_TAILSCALE_LOGIN_SERVER:-}"
+    ;;
+  koyeb-mesh)
+    : "${CRABBOX_KOYEB_PRIVATE_HOST:?missing CRABBOX_KOYEB_PRIVATE_HOST}"
+    private_host="$CRABBOX_KOYEB_PRIVATE_HOST"
+    ;;
+  *) fail "invalid Koyeb network transport" ;;
+esac
+unset CRABBOX_KOYEB_TAILSCALE_AUTH_KEY CRABBOX_KOYEB_PRIVATE_HOST
 unset SANDBOX_SECRET KOYEB_API_TOKEN
 
 [[ "$(id -u)" -eq 0 ]] || fail "bootstrap must run as root through the Sandbox executor"
 [[ "$(uname -m)" == x86_64 ]] || fail "runner image supports linux/amd64 only"
 [[ "$lease_id" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || fail "invalid lease id"
-[[ "$tailscale_hostname" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || fail "invalid Tailscale hostname"
-[[ -n "$tailscale_auth_key" && "${#tailscale_auth_key}" -le 4096 ]] || fail "invalid Tailscale auth key"
-[[ "$tailscale_auth_key" != *$'\n'* && "$tailscale_auth_key" != *$'\r'* ]] || fail "invalid Tailscale auth key"
-if [[ -n "$tailscale_login_server" ]]; then
-  [[ "$tailscale_login_server" =~ ^https://[^[:space:]]+$ ]] || fail "invalid Tailscale login server"
+if [[ "$network" == tailscale ]]; then
+  [[ "$tailscale_hostname" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || fail "invalid Tailscale hostname"
+  [[ -n "$tailscale_auth_key" && "${#tailscale_auth_key}" -le 4096 ]] || fail "invalid Tailscale auth key"
+  [[ "$tailscale_auth_key" != *$'\n'* && "$tailscale_auth_key" != *$'\r'* ]] || fail "invalid Tailscale auth key"
+  if [[ -n "$tailscale_login_server" ]]; then
+    [[ "$tailscale_login_server" =~ ^https://[^[:space:]]+$ ]] || fail "invalid Tailscale login server"
+  fi
+  IFS=',' read -r -a requested_tags <<<"$tailscale_tags"
+  [[ "${#requested_tags[@]}" -gt 0 ]] || fail "at least one Tailscale tag is required"
+  for tag in "${requested_tags[@]}"; do
+    [[ "$tag" =~ ^tag:[a-z0-9][a-z0-9-]{0,62}$ ]] || fail "invalid Tailscale tag"
+  done
+else
+  [[ "$private_host" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.internal$ ]] || fail "invalid Koyeb private host"
 fi
-
-IFS=',' read -r -a requested_tags <<<"$tailscale_tags"
-[[ "${#requested_tags[@]}" -gt 0 ]] || fail "at least one Tailscale tag is required"
-for tag in "${requested_tags[@]}"; do
-  [[ "$tag" =~ ^tag:[a-z0-9][a-z0-9-]{0,62}$ ]] || fail "invalid Tailscale tag"
-done
 
 [[ -f "$public_key_file" && ! -L "$public_key_file" ]] || fail "SSH public key must be a regular non-symlink file"
 [[ "$(stat -c %s -- "$public_key_file")" -le 16384 ]] || fail "SSH public key file is too large"
@@ -59,8 +77,6 @@ done
 /usr/bin/ssh-keygen -l -f "$public_key_file" >/dev/null 2>&1 || fail "invalid SSH public key"
 
 for required in \
-  /usr/local/bin/tailscale \
-  /usr/local/sbin/tailscaled \
   /usr/sbin/sshd \
   /usr/bin/Xvfb \
   /usr/bin/x11vnc \
@@ -77,6 +93,11 @@ for required in \
   /usr/bin/google-chrome-stable; do
   [[ -x "$required" ]] || fail "missing image dependency: $required"
 done
+if [[ "$network" == tailscale ]]; then
+  for required in /usr/local/bin/tailscale /usr/local/sbin/tailscaled; do
+    [[ -x "$required" ]] || fail "missing image dependency: $required"
+  done
+fi
 
 for managed_dir in "$state_root" "$runtime_root"; do
   if [[ -L "$managed_dir" || ( -e "$managed_dir" && ! -d "$managed_dir" ) ]]; then
@@ -135,7 +156,6 @@ chmod 0600 "${sshd_dir}/ssh_host_ed25519_key"
 cat >"${sshd_dir}/sshd_config" <<EOF
 Port 22
 AddressFamily inet
-ListenAddress 127.0.0.1
 HostKey ${sshd_dir}/ssh_host_ed25519_key
 PidFile ${runtime_root}/sshd.internal.pid
 AuthorizedKeysFile ${authorized_keys_file}
@@ -157,6 +177,11 @@ StrictModes yes
 LogLevel VERBOSE
 Subsystem sftp internal-sftp
 EOF
+if [[ "$network" == koyeb-mesh ]]; then
+  sed -i '3iListenAddress 0.0.0.0' "${sshd_dir}/sshd_config"
+else
+  sed -i '3iListenAddress 127.0.0.1' "${sshd_dir}/sshd_config"
+fi
 /usr/sbin/sshd -t -f "${sshd_dir}/sshd_config"
 
 install -d -m 0755 -o "$ssh_user" -g "$ssh_user" /workspace/crabbox
@@ -192,42 +217,44 @@ start_owned() {
   [[ "$cmdline" == *"$expected"* ]] || fail "$name ownership check failed"
 }
 
-start_owned tailscaled "--socket=${tailscale_socket}" \
-  setsid /usr/local/sbin/tailscaled \
-    --tun=userspace-networking \
-    --state=mem: \
-    --socket="$tailscale_socket" \
-    --no-logs-no-support
-for _ in $(seq 1 60); do
-  [[ -S "$tailscale_socket" ]] && break
-  sleep 0.25
-done
-[[ -S "$tailscale_socket" ]] || fail "tailscaled socket did not become ready"
-
-tailscale_up_args=(
-  --accept-dns=false
-  --auth-key="file:/dev/stdin"
-  --hostname="$tailscale_hostname"
-  --advertise-tags="$tailscale_tags"
-  --timeout=120s
-)
-if [[ -n "$tailscale_login_server" ]]; then
-  tailscale_up_args+=(--login-server="$tailscale_login_server")
-fi
-printf '%s' "$tailscale_auth_key" | tailscale --socket="$tailscale_socket" up "${tailscale_up_args[@]}"
-unset tailscale_auth_key
-
 tailscale_ip=""
 tailscale_status=""
-for _ in $(seq 1 60); do
-  tailscale_status="$(tailscale --socket="$tailscale_socket" status --json 2>/dev/null || true)"
-  if jq -e '.BackendState == "Running"' >/dev/null 2>&1 <<<"$tailscale_status"; then
-    tailscale_ip="$(tailscale --socket="$tailscale_socket" ip -4 2>/dev/null | head -n1 || true)"
-    [[ -n "$tailscale_ip" ]] && break
+if [[ "$network" == tailscale ]]; then
+  start_owned tailscaled "--socket=${tailscale_socket}" \
+    setsid /usr/local/sbin/tailscaled \
+      --tun=userspace-networking \
+      --state=mem: \
+      --socket="$tailscale_socket" \
+      --no-logs-no-support
+  for _ in $(seq 1 60); do
+    [[ -S "$tailscale_socket" ]] && break
+    sleep 0.25
+  done
+  [[ -S "$tailscale_socket" ]] || fail "tailscaled socket did not become ready"
+
+  tailscale_up_args=(
+    --accept-dns=false
+    --auth-key="file:/dev/stdin"
+    --hostname="$tailscale_hostname"
+    --advertise-tags="$tailscale_tags"
+    --timeout=120s
+  )
+  if [[ -n "$tailscale_login_server" ]]; then
+    tailscale_up_args+=(--login-server="$tailscale_login_server")
   fi
-  sleep 1
-done
-[[ -n "$tailscale_ip" ]] || fail "Tailscale did not reach Running state"
+  printf '%s' "$tailscale_auth_key" | tailscale --socket="$tailscale_socket" up "${tailscale_up_args[@]}"
+  unset tailscale_auth_key
+
+  for _ in $(seq 1 60); do
+    tailscale_status="$(tailscale --socket="$tailscale_socket" status --json 2>/dev/null || true)"
+    if jq -e '.BackendState == "Running"' >/dev/null 2>&1 <<<"$tailscale_status"; then
+      tailscale_ip="$(tailscale --socket="$tailscale_socket" ip -4 2>/dev/null | head -n1 || true)"
+      [[ -n "$tailscale_ip" ]] && break
+    fi
+    sleep 1
+  done
+  [[ -n "$tailscale_ip" ]] || fail "Tailscale did not reach Running state"
+fi
 
 start_owned sshd "${sshd_dir}/sshd_config" \
   setsid /usr/sbin/sshd -D -e -f "${sshd_dir}/sshd_config"
@@ -270,26 +297,37 @@ for port in 22 5900; do
   nc -z 127.0.0.1 "$port" >/dev/null 2>&1 || fail "loopback port $port did not become ready"
 done
 
-tailscale --socket="$tailscale_socket" serve --tcp=22 tcp://127.0.0.1:22 --bg >/dev/null
-
-tailscale_dns_name="$(jq -r '.Self.DNSName // empty' <<<"$tailscale_status" | sed 's/\.$//')"
 host_public_key="$(cat "${sshd_dir}/ssh_host_ed25519_key.pub")"
 ready_tmp="${state_root}/crabbox-ready.json.tmp"
-jq -cn \
-  --arg schema "crabbox-koyeb-sandbox-runner/v1" \
-  --arg leaseId "$lease_id" \
-  --arg sshUser "$ssh_user" \
-  --arg sshHost "$tailscale_ip" \
-  --arg sshHostKey "$host_public_key" \
-  --arg tailscaleDNSName "$tailscale_dns_name" \
-  '{schema:$schema,leaseId:$leaseId,ssh:{user:$sshUser,host:$sshHost,port:22,hostKey:$sshHostKey},tailscale:{ipv4:$sshHost,dnsName:$tailscaleDNSName},desktop:{display:":99",vncHost:"127.0.0.1",vncPort:5900,browser:"/usr/local/bin/crabbox-browser",terminal:"xfce4-terminal"}}' \
-  >"$ready_tmp"
+if [[ "$network" == tailscale ]]; then
+  tailscale --socket="$tailscale_socket" serve --tcp=22 tcp://127.0.0.1:22 --bg >/dev/null
+  tailscale_dns_name="$(jq -r '.Self.DNSName // empty' <<<"$tailscale_status" | sed 's/\.$//')"
+  jq -cn \
+    --arg schema "crabbox-koyeb-sandbox-runner/v1" \
+    --arg leaseId "$lease_id" \
+    --arg sshUser "$ssh_user" \
+    --arg sshHost "$tailscale_ip" \
+    --arg sshHostKey "$host_public_key" \
+    --arg tailscaleDNSName "$tailscale_dns_name" \
+    '{schema:$schema,leaseId:$leaseId,ssh:{user:$sshUser,host:$sshHost,port:22,hostKey:$sshHostKey},tailscale:{ipv4:$sshHost,dnsName:$tailscaleDNSName},desktop:{display:":99",vncHost:"127.0.0.1",vncPort:5900,browser:"/usr/local/bin/crabbox-browser",terminal:"xfce4-terminal"}}' \
+    >"$ready_tmp"
+  printf '%s\n' "$tailscale_ip" >/var/lib/crabbox/tailscale-ipv4
+  printf '%s\n' "$tailscale_hostname" >/var/lib/crabbox/tailscale-hostname
+  printf '%s\n' "$tailscale_dns_name" >/var/lib/crabbox/tailscale-fqdn
+  chmod 0644 /var/lib/crabbox/tailscale-ipv4 /var/lib/crabbox/tailscale-hostname /var/lib/crabbox/tailscale-fqdn
+else
+  jq -cn \
+    --arg schema "crabbox-koyeb-sandbox-runner/v2" \
+    --arg leaseId "$lease_id" \
+    --arg sshUser "$ssh_user" \
+    --arg sshHost "$private_host" \
+    --arg sshHostKey "$host_public_key" \
+    --arg transport "koyeb-mesh" \
+    '{schema:$schema,leaseId:$leaseId,ssh:{user:$sshUser,host:$sshHost,port:22,hostKey:$sshHostKey},network:{transport:$transport,privateHost:$sshHost},desktop:{display:":99",vncHost:"127.0.0.1",vncPort:5900,browser:"/usr/local/bin/crabbox-browser",terminal:"xfce4-terminal"}}' \
+    >"$ready_tmp"
+fi
 chmod 0644 "$ready_tmp"
 mv -fT -- "$ready_tmp" "${state_root}/crabbox-ready.json"
-printf '%s\n' "$tailscale_ip" >/var/lib/crabbox/tailscale-ipv4
-printf '%s\n' "$tailscale_hostname" >/var/lib/crabbox/tailscale-hostname
-printf '%s\n' "$tailscale_dns_name" >/var/lib/crabbox/tailscale-fqdn
-chmod 0644 /var/lib/crabbox/tailscale-ipv4 /var/lib/crabbox/tailscale-hostname /var/lib/crabbox/tailscale-fqdn
 
 CRABBOX_KOYEB_STATE_ROOT="$state_root" CRABBOX_KOYEB_RUNTIME_ROOT="$runtime_root" \
   /usr/local/libexec/crabbox-koyeb-sandbox/healthcheck.sh >/dev/null

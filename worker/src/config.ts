@@ -337,7 +337,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     browser: input.browser ?? false,
     imageRequirements: normalizeImageRequirements(input.imageRequirements),
     code: input.code ?? false,
-    tailscale: provider === "koyeb" ? true : (input.tailscale ?? false),
+    tailscale: provider === "koyeb" ? (input.tailscale ?? true) : (input.tailscale ?? false),
     tailscaleTags: normalizeTailscaleTags(input.tailscaleTags ?? ["tag:crabbox"]),
     tailscaleHostname: input.tailscaleHostname ?? "",
     tailscaleAuthKey: "",

@@ -212,6 +212,28 @@ test("bootstrap consumes one-call auth safely and creates only tailnet SSH ingre
   assert.doesNotMatch(bootstrap, /\b(?:bind_port|EXPOSE|0\.0\.0\.0:22|0\.0\.0\.0:5900)\b/);
 });
 
+test("bootstrap supports key-only SSH on the native Koyeb private mesh", async () => {
+  const [bootstrap, health] = await Promise.all([
+    source("bootstrap.sh"),
+    source("healthcheck.sh"),
+  ]);
+
+  for (const required of [
+    'CRABBOX_KOYEB_NETWORK',
+    'koyeb-mesh',
+    'CRABBOX_KOYEB_PRIVATE_HOST',
+    'ListenAddress 0.0.0.0',
+    '"crabbox-koyeb-sandbox-runner/v2"',
+    '"koyeb-mesh"',
+  ]) {
+    assert.ok(bootstrap.includes(required), `private-mesh bootstrap missing ${required}`);
+  }
+  assert.match(bootstrap, /PasswordAuthentication no/);
+  assert.match(bootstrap, /AllowUsers \$\{ssh_user\}/);
+  assert.match(health, /network\.transport/);
+  assert.match(health, /koyeb-mesh/);
+});
+
 test("health and teardown fail closed around the owned process set", async () => {
   const [health, teardown] = await Promise.all([
     source("healthcheck.sh"),

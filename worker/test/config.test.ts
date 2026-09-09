@@ -1119,7 +1119,7 @@ describe("lease config", () => {
     ).toThrow("supports SSH, sync, and run only");
   });
 
-  it("uses Koyeb Sandbox runner defaults and forces its private Tailscale transport", () => {
+  it("uses Koyeb Sandbox runner defaults and preserves an explicit private-mesh transport", () => {
     const config = leaseConfig({
       provider: "koyeb",
       sshPublicKey: "ssh-ed25519 test",
@@ -1137,6 +1137,12 @@ describe("lease config", () => {
     expect(config.browser).toBe(true);
     expect(config.code).toBe(true);
     expect(config.tailscale).toBe(true);
+    const mesh = leaseConfig({
+      provider: "koyeb",
+      sshPublicKey: "ssh-ed25519 test",
+      tailscale: false,
+    });
+    expect(mesh.tailscale).toBe(false);
     expect(() =>
       leaseConfig({
         provider: "koyeb",

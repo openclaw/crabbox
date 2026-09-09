@@ -31,6 +31,7 @@ const immutableImagePattern =
   /^(?=.{1,512}$)[a-z0-9][a-z0-9._:-]*(?:\/[a-z0-9][a-z0-9._-]*)+@sha256:[a-f0-9]{64}$/;
 
 type JSONRecord = Record<string, unknown>;
+type KoyebTransport = "tailscale" | "koyeb-mesh";
 
 interface KoyebConfiguration {
   apiURL: string;
@@ -41,6 +42,7 @@ interface KoyebConfiguration {
   instanceType: string;
   image: string;
   registrySecret?: string;
+  appName?: string;
 }
 
 interface KoyebService {
@@ -83,6 +85,8 @@ interface KoyebProvisioningPlan {
   ttlSeconds: number;
   idleTimeoutSeconds: number;
   sshPublicKey: string;
+  transport: KoyebTransport;
+  privateHost?: string;
   tailscaleHostname: string;
   tailscaleTags: string[];
 }
@@ -106,8 +110,9 @@ interface OwnedDeployment {
 }
 
 interface RunnerReady {
+  transport: KoyebTransport;
   host: string;
-  ipv4: string;
+  ipv4?: string;
   fqdn?: string;
   user: string;
   port: string;
@@ -141,6 +146,7 @@ export class KoyebClient {
   readonly instanceType: string;
   readonly image: string;
   readonly registrySecret?: string;
+  readonly appName?: string;
   private readonly token: string;
 
   constructor(
@@ -160,6 +166,7 @@ export class KoyebClient {
     this.instanceType = configured.instanceType;
     this.image = configured.image;
     if (configured.registrySecret) this.registrySecret = configured.registrySecret;
+    if (configured.appName) this.appName = configured.appName;
   }
 
   async providerScope(): Promise<string> {
@@ -201,7 +208,7 @@ export class KoyebClient {
         const deploymentID = service.activeDeploymentID || service.latestDeploymentID;
         if (!deploymentID || !uuidPattern.test(deploymentID)) return undefined;
         const deployment = await this.getDeployment(deploymentID);
-        return deployment ? inventoryMachine(service, deployment) : undefined;
+        return deployment ? inventoryMachine(this, service, deployment) : undefined;
       }),
     );
     return machines.filter((machine): machine is ProviderMachine => machine !== undefined);
@@ -238,32 +245,40 @@ export class KoyebClient {
     return result !== undefined;
   }
 
-  async managementHealth(publicURL: string, routingKey: string, secret: string): Promise<void> {
-    await this.managementRequest(publicURL, routingKey, secret, "/health", "GET");
+  privateHost(serviceName: string): string | undefined {
+    return this.appName ? `${serviceName}.${this.appName}.internal` : undefined;
+  }
+
+  async managementHealth(
+    baseURL: string,
+    routingKey: string | undefined,
+    secret: string,
+  ): Promise<void> {
+    await this.managementRequest(baseURL, routingKey, secret, "/health", "GET");
   }
 
   async managementWriteFile(
-    publicURL: string,
-    routingKey: string,
+    baseURL: string,
+    routingKey: string | undefined,
     secret: string,
     path: string,
     content: string,
   ): Promise<void> {
-    await this.managementRequest(publicURL, routingKey, secret, "/write_file", "POST", {
+    await this.managementRequest(baseURL, routingKey, secret, "/write_file", "POST", {
       path,
       content,
     });
   }
 
   async managementRun(
-    publicURL: string,
-    routingKey: string,
+    baseURL: string,
+    routingKey: string | undefined,
     secret: string,
     body: { cmd: string; cwd?: string; env?: Record<string, string> },
     protectedValues: readonly string[] = [],
   ): Promise<{ stdout: string; stderr: string; code: number }> {
     const value = asObject(
-      await this.managementRequest(publicURL, routingKey, secret, "/run", "POST", body, [
+      await this.managementRequest(baseURL, routingKey, secret, "/run", "POST", body, [
         ...protectedValues,
       ]),
     );
@@ -324,23 +339,23 @@ export class KoyebClient {
   }
 
   private async managementRequest(
-    publicURL: string,
-    routingKey: string,
+    baseURL: string,
+    routingKey: string | undefined,
     secret: string,
     path: string,
     method: string,
     body?: unknown,
     protectedValues: readonly string[] = [],
   ): Promise<unknown> {
-    const base = managementBaseURL(publicURL);
-    if (!validRoutingKey(routingKey)) throw new Error("koyeb sandbox routing key is malformed");
+    const base = managementBaseURL(baseURL, routingKey !== undefined);
+    if (routingKey !== undefined && !validRoutingKey(routingKey)) {
+      throw new Error("koyeb sandbox routing key is malformed");
+    }
     if (!/^[A-Za-z0-9_-]{32,128}$/.test(secret)) {
       throw new Error("koyeb sandbox credential is malformed");
     }
-    const headers = new Headers({
-      authorization: `Bearer ${secret}`,
-      "x-routing-key": routingKey,
-    });
+    const headers = new Headers({ authorization: `Bearer ${secret}` });
+    if (routingKey !== undefined) headers.set("x-routing-key", routingKey);
     if (body !== undefined) headers.set("content-type", "application/json");
     const request = new Request(`${base}${path}`, {
       method,
@@ -352,7 +367,7 @@ export class KoyebClient {
       request,
       method,
       `${managementRoute}${path}`,
-      [this.token, secret, routingKey, ...protectedValues],
+      [this.token, secret, ...(routingKey ? [routingKey] : []), ...protectedValues],
       false,
     ))!;
   }
@@ -407,7 +422,7 @@ export class KoyebResumableProvisioning implements ProviderResumableProvisioning
       config.provider === "koyeb" &&
       config.target === "linux" &&
       config.architecture === "amd64" &&
-      config.tailscale &&
+      (config.tailscale || Boolean(this.client.privateHost("crabbox"))) &&
       !config.tailscaleExitNode &&
       config.serverType === this.client.instanceType &&
       config.workRoot === workRoot
@@ -427,11 +442,17 @@ export class KoyebResumableProvisioning implements ProviderResumableProvisioning
     if (!lease.createAttemptGeneration) {
       throw new Error("Koyeb provisioning requires an immutable attempt generation");
     }
-    if (!config.tailscaleAuthKey || config.tailscaleAuthKey.length > 4096) {
+    if (config.tailscale && (!config.tailscaleAuthKey || config.tailscaleAuthKey.length > 4096)) {
       throw new Error("Koyeb provisioning requires a bounded one-off Tailscale auth key");
     }
     const scope = await this.client.providerScope();
     const serviceName = leaseProviderName(lease.id, lease.slug);
+    const transport: KoyebTransport = config.tailscale ? "tailscale" : "koyeb-mesh";
+    const privateHost =
+      transport === "koyeb-mesh" ? this.client.privateHost(serviceName) : undefined;
+    if (transport === "koyeb-mesh" && !privateHost) {
+      throw new Error("Koyeb private-mesh identity is unavailable");
+    }
     const data: KoyebProvisioningPlan = {
       version: 1,
       serviceName,
@@ -450,6 +471,8 @@ export class KoyebResumableProvisioning implements ProviderResumableProvisioning
       ttlSeconds: lease.ttlSeconds,
       idleTimeoutSeconds: lease.idleTimeoutSeconds ?? lease.ttlSeconds,
       sshPublicKey: config.sshPublicKey,
+      transport,
+      ...(privateHost ? { privateHost } : {}),
       tailscaleHostname: config.tailscaleHostname,
       tailscaleTags: [...config.tailscaleTags],
     };
@@ -463,7 +486,7 @@ export class KoyebResumableProvisioning implements ProviderResumableProvisioning
       },
       material: {
         adminPassword: randomSecret(),
-        bootstrap: config.tailscaleAuthKey,
+        bootstrap: transport === "tailscale" ? config.tailscaleAuthKey : "",
         providerSecret: randomSecret(),
       },
       step: {
@@ -488,7 +511,10 @@ export class KoyebResumableProvisioning implements ProviderResumableProvisioning
     ) {
       return this.cleanup(input, plan, state);
     }
-    if (!input.material.providerSecret || !input.material.bootstrap) {
+    if (
+      !input.material.providerSecret ||
+      (plan.transport === "tailscale" && !input.material.bootstrap)
+    ) {
       throw new Error("Koyeb forward provisioning material is unavailable");
     }
     const output = (phase: ProvisioningStep["phase"], delay = pollInterval): ProvisioningStep => ({
@@ -559,8 +585,7 @@ export class KoyebResumableProvisioning implements ProviderResumableProvisioning
       if (
         observation.value.service.status !== "HEALTHY" ||
         observation.value.deployment.status !== "HEALTHY" ||
-        !observation.value.publicURL ||
-        !observation.value.routingKey
+        !managementTarget(observation.value, plan)
       ) {
         return output("provisioning");
       }
@@ -587,41 +612,51 @@ export class KoyebResumableProvisioning implements ProviderResumableProvisioning
       };
     }
     const owned = observation.value;
-    const publicURL = owned.publicURL;
-    const routingKey = owned.routingKey;
+    const management = managementTarget(owned, plan);
     if (
       owned.deployment.id !== state.deploymentID ||
       owned.service.status !== "HEALTHY" ||
       owned.deployment.status !== "HEALTHY" ||
-      !publicURL ||
-      !routingKey
+      !management
     ) {
       return { ...output("blocked"), blockedReason: "bootstrap_identity_unavailable" };
     }
-    await this.client.managementHealth(publicURL, routingKey, input.material.providerSecret);
+    await this.client.managementHealth(
+      management.baseURL,
+      management.routingKey,
+      input.material.providerSecret,
+    );
     await this.client.managementWriteFile(
-      publicURL,
-      routingKey,
+      management.baseURL,
+      management.routingKey,
       input.material.providerSecret,
       publicKeyPath,
       plan.sshPublicKey,
     );
+    const bootstrapEnvironment: Record<string, string> = {
+      CRABBOX_KOYEB_LEASE_ID: plan.runnerLeaseID,
+      CRABBOX_KOYEB_SSH_PUBLIC_KEY_FILE: publicKeyPath,
+      ...(plan.transport === "tailscale"
+        ? {
+            CRABBOX_KOYEB_TAILSCALE_AUTH_KEY: input.material.bootstrap,
+            CRABBOX_KOYEB_TAILSCALE_HOSTNAME: plan.tailscaleHostname,
+            CRABBOX_KOYEB_TAILSCALE_TAGS: plan.tailscaleTags.join(","),
+          }
+        : {
+            CRABBOX_KOYEB_NETWORK: "koyeb-mesh",
+            CRABBOX_KOYEB_PRIVATE_HOST: plan.privateHost!,
+          }),
+    };
     const run = await this.client.managementRun(
-      publicURL,
-      routingKey,
+      management.baseURL,
+      management.routingKey,
       input.material.providerSecret,
       {
         cmd: bootstrapCommand,
         cwd: workRoot,
-        env: {
-          CRABBOX_KOYEB_LEASE_ID: plan.runnerLeaseID,
-          CRABBOX_KOYEB_SSH_PUBLIC_KEY_FILE: publicKeyPath,
-          CRABBOX_KOYEB_TAILSCALE_AUTH_KEY: input.material.bootstrap,
-          CRABBOX_KOYEB_TAILSCALE_HOSTNAME: plan.tailscaleHostname,
-          CRABBOX_KOYEB_TAILSCALE_TAGS: plan.tailscaleTags.join(","),
-        },
+        env: bootstrapEnvironment,
       },
-      [input.material.bootstrap],
+      plan.transport === "tailscale" ? [input.material.bootstrap] : [],
     );
     if (run.code !== 0) {
       return { ...output("blocked"), blockedReason: "runner_bootstrap_failed" };
@@ -630,23 +665,29 @@ export class KoyebResumableProvisioning implements ProviderResumableProvisioning
     if (!ready) {
       return { ...output("blocked"), blockedReason: "runner_readiness_invalid" };
     }
-    const tailscale: TailscaleMetadata = {
-      enabled: true,
-      hostname: plan.tailscaleHostname,
-      ipv4: ready.ipv4,
-      ...(ready.fqdn ? { fqdn: ready.fqdn } : {}),
-      tags: [...plan.tailscaleTags],
-      state: "ready",
-    };
-    const labels = {
-      ...ownershipLabels(plan),
-      tailscale: "true",
-      tailscale_state: "ready",
-      tailscale_hostname: plan.tailscaleHostname,
-      tailscale_ipv4: ready.ipv4,
-      ...(ready.fqdn ? { tailscale_fqdn: ready.fqdn } : {}),
-      tailscale_tags: plan.tailscaleTags.join(","),
-    };
+    const tailscale: TailscaleMetadata | undefined =
+      plan.transport === "tailscale"
+        ? {
+            enabled: true,
+            hostname: plan.tailscaleHostname,
+            ipv4: ready.ipv4!,
+            ...(ready.fqdn ? { fqdn: ready.fqdn } : {}),
+            tags: [...plan.tailscaleTags],
+            state: "ready",
+          }
+        : undefined;
+    const labels =
+      plan.transport === "tailscale"
+        ? {
+            ...ownershipLabels(plan),
+            tailscale: "true",
+            tailscale_state: "ready",
+            tailscale_hostname: plan.tailscaleHostname,
+            tailscale_ipv4: ready.ipv4!,
+            ...(ready.fqdn ? { tailscale_fqdn: ready.fqdn } : {}),
+            tailscale_tags: plan.tailscaleTags.join(","),
+          }
+        : { ...ownershipLabels(plan), koyeb_network: "mesh" };
     const result = output("ready-to-publish", 1);
     result.publication = {
       server: machineForService(owned.service, plan, ready.host, labels),
@@ -658,7 +699,7 @@ export class KoyebResumableProvisioning implements ProviderResumableProvisioning
         sshFallbackPorts: [],
         workRoot,
         sshHostKey: ready.hostKey,
-        tailscale,
+        ...(tailscale ? { tailscale } : {}),
       },
       image: imageIdentity(plan),
     };
@@ -763,8 +804,22 @@ export function koyebConfigurationMissing(env: Env): string[] {
   return [...new Set(missing)];
 }
 
+export function koyebPrivateMeshAvailable(env: Env): boolean {
+  const appName = env.KOYEB_APP_NAME?.trim() ?? "";
+  const appID = env.KOYEB_APP_ID?.trim() ?? "";
+  const organizationID = env.KOYEB_ORGANIZATION_ID?.trim() ?? "";
+  const region = env.KOYEB_REGION?.trim() ?? "";
+  return (
+    validKoyebName(appName) &&
+    appID === env.CRABBOX_KOYEB_APP_ID?.trim() &&
+    organizationID === env.CRABBOX_KOYEB_ORGANIZATION_ID?.trim() &&
+    region === (env.CRABBOX_KOYEB_REGION?.trim() || defaultRegion)
+  );
+}
+
 function koyebConfiguration(env: Env): KoyebConfiguration {
   const registrySecret = env.CRABBOX_KOYEB_REGISTRY_SECRET?.trim();
+  const appName = koyebPrivateMeshAvailable(env) ? env.KOYEB_APP_NAME!.trim() : undefined;
   return {
     apiURL: canonicalAPIURL(env.CRABBOX_KOYEB_API_URL),
     token: env.KOYEB_API_TOKEN!.trim(),
@@ -774,6 +829,7 @@ function koyebConfiguration(env: Env): KoyebConfiguration {
     instanceType: env.CRABBOX_KOYEB_INSTANCE_TYPE?.trim() || defaultInstanceType,
     image: env.CRABBOX_KOYEB_IMAGE!.trim(),
     ...(registrySecret ? { registrySecret } : {}),
+    ...(appName ? { appName } : {}),
   };
 }
 
@@ -805,9 +861,15 @@ async function validatedPlan(
   frozen: FrozenProvisioningPlan,
   lease: LeaseRecord,
 ): Promise<KoyebProvisioningPlan> {
-  const data = asObject(frozen.data) as Partial<KoyebProvisioningPlan>;
+  const storedData = asObject(frozen.data) as Partial<KoyebProvisioningPlan>;
+  const data: Partial<KoyebProvisioningPlan> = {
+    ...storedData,
+    // Plans written before native mesh support implicitly used Tailscale.
+    transport: storedData.transport ?? "tailscale",
+  };
   const scope = await client.providerScope();
   const resource = frozen.resources[0];
+  const privateHost = client.privateHost(data.serviceName ?? "");
   if (
     frozen.version !== 1 ||
     frozen.provider !== "koyeb" ||
@@ -841,9 +903,13 @@ async function validatedPlan(
     (data.idleTimeoutSeconds ?? 0) > 86_400 ||
     typeof data.sshPublicKey !== "string" ||
     !data.sshPublicKey.trim() ||
-    !validKoyebName(data.tailscaleHostname ?? "") ||
+    !["tailscale", "koyeb-mesh"].includes(data.transport ?? "") ||
+    (data.transport === "koyeb-mesh" && (!privateHost || data.privateHost !== privateHost)) ||
+    (data.transport === "tailscale" && data.privateHost !== undefined) ||
+    (data.transport === "tailscale" && !validKoyebName(data.tailscaleHostname ?? "")) ||
+    typeof data.tailscaleHostname !== "string" ||
     !Array.isArray(data.tailscaleTags) ||
-    data.tailscaleTags.length === 0 ||
+    (data.transport === "tailscale" && data.tailscaleTags.length === 0) ||
     data.tailscaleTags.some((tag) => !/^tag:[a-z0-9][a-z0-9-]{0,62}$/.test(tag))
   ) {
     throw new Error("Koyeb provisioning plan is invalid or belongs to another context");
@@ -887,14 +953,24 @@ function createServiceRequest(plan: KoyebProvisioningPlan, sandboxSecret: string
       ],
       regions: [plan.region],
       instance_types: [{ type: plan.instanceType }],
-      ports: [{ port: 3030, protocol: "http" }],
-      routes: [
-        {
-          port: 3030,
-          path: `${managementRoute}/`,
-          security_policies: { api_keys: [sandboxSecret] },
-        },
-      ],
+      ...(plan.transport === "koyeb-mesh" ? { mesh: "DEPLOYMENT_MESH_ENABLED" } : {}),
+      ports:
+        plan.transport === "koyeb-mesh"
+          ? [
+              { port: 3030, protocol: "http" },
+              { port: 22, protocol: "tcp" },
+            ]
+          : [{ port: 3030, protocol: "http" }],
+      routes:
+        plan.transport === "koyeb-mesh"
+          ? []
+          : [
+              {
+                port: 3030,
+                path: `${managementRoute}/`,
+                security_policies: { api_keys: [sandboxSecret] },
+              },
+            ],
       scalings: [
         {
           min: 1,
@@ -986,6 +1062,18 @@ async function observeService(
   };
 }
 
+function managementTarget(
+  owned: OwnedDeployment,
+  plan: KoyebProvisioningPlan,
+): { baseURL: string; routingKey?: string } | undefined {
+  if (plan.transport === "koyeb-mesh") {
+    return plan.privateHost ? { baseURL: `http://${plan.privateHost}:3030` } : undefined;
+  }
+  return owned.publicURL && owned.routingKey
+    ? { baseURL: owned.publicURL, routingKey: owned.routingKey }
+    : undefined;
+}
+
 function serviceMatchesPlan(service: KoyebService, plan: KoyebProvisioningPlan): boolean {
   return (
     uuidPattern.test(service.id) &&
@@ -1027,12 +1115,13 @@ function deploymentMatchesPlan(
     deployment.serviceID === service.id &&
     definition["name"] === plan.serviceName &&
     definition["type"] === "SANDBOX" &&
+    meshMatchesPlan(definition["mesh"], plan) &&
     dockerMatchesPlan(docker, plan) &&
     exactStringArray(regions, [plan.region]) &&
     instanceTypesMatchPlan(instanceTypes, plan) &&
     scalingsMatchPlan(scalings, plan) &&
-    portsMatchPlan(ports) &&
-    routesMatchPlan(routes, sandboxSecret) &&
+    portsMatchPlan(ports, plan) &&
+    routesMatchPlan(routes, sandboxSecret, plan) &&
     optionalEmptyArray(proxyPorts) &&
     Boolean(sandboxSecret) &&
     (expectedSandboxSecret === undefined || sandboxSecret === expectedSandboxSecret) &&
@@ -1088,15 +1177,38 @@ function scalingsMatchPlan(value: unknown, plan: KoyebProvisioningPlan): boolean
   return true;
 }
 
-function portsMatchPlan(value: unknown): boolean {
-  if (!Array.isArray(value) || value.length !== 1) return false;
-  const port = asObject(value[0]);
-  return (
-    hasOnlyKeys(port, ["port", "protocol"]) && port["port"] === 3030 && port["protocol"] === "http"
-  );
+function meshMatchesPlan(value: unknown, plan: KoyebProvisioningPlan): boolean {
+  return plan.transport === "koyeb-mesh"
+    ? value === "DEPLOYMENT_MESH_ENABLED"
+    : nullish(value) || value === "DEPLOYMENT_MESH_AUTO";
 }
 
-function routesMatchPlan(value: unknown, sandboxSecret: string): boolean {
+function portsMatchPlan(value: unknown, plan: KoyebProvisioningPlan): boolean {
+  if (!Array.isArray(value)) return false;
+  const expected =
+    plan.transport === "koyeb-mesh"
+      ? [
+          { port: 3030, protocol: "http" },
+          { port: 22, protocol: "tcp" },
+        ]
+      : [{ port: 3030, protocol: "http" }];
+  if (value.length !== expected.length) return false;
+  return expected.every((wanted, index) => {
+    const port = asObject(value[index]);
+    return (
+      hasOnlyKeys(port, ["port", "protocol"]) &&
+      port["port"] === wanted.port &&
+      port["protocol"] === wanted.protocol
+    );
+  });
+}
+
+function routesMatchPlan(
+  value: unknown,
+  sandboxSecret: string,
+  plan: KoyebProvisioningPlan,
+): boolean {
+  if (plan.transport === "koyeb-mesh") return Array.isArray(value) && value.length === 0;
   if (!Array.isArray(value) || value.length !== 1) return false;
   const route = asObject(value[0]);
   return (
@@ -1243,11 +1355,33 @@ function runnerReady(stdout: string, plan: KoyebProvisioningPlan): RunnerReady |
   }
   const value = asObject(parsed);
   const ssh = asObject(value["ssh"]);
+  const host = stringValue(ssh["host"]);
+  const hostKey = sshPublicKeyIdentity(stringValue(ssh["hostKey"]));
+  if (plan.transport === "koyeb-mesh") {
+    const network = asObject(value["network"]);
+    if (
+      value["schema"] !== "crabbox-koyeb-sandbox-runner/v2" ||
+      value["leaseId"] !== plan.runnerLeaseID ||
+      ssh["user"] !== "crabbox" ||
+      ssh["port"] !== 22 ||
+      host !== plan.privateHost ||
+      network["transport"] !== "koyeb-mesh" ||
+      network["privateHost"] !== plan.privateHost ||
+      !/^ssh-ed25519 [A-Za-z0-9+/]+={0,2}$/.test(hostKey)
+    ) {
+      return undefined;
+    }
+    return {
+      transport: "koyeb-mesh",
+      host,
+      user: "crabbox",
+      port: "22",
+      hostKey,
+    };
+  }
   const tailscale = asObject(value["tailscale"]);
   const ipv4 = stringValue(tailscale["ipv4"]);
   const dnsName = optionalString(tailscale["dnsName"]);
-  const host = stringValue(ssh["host"]);
-  const hostKey = sshPublicKeyIdentity(stringValue(ssh["hostKey"]));
   if (
     value["schema"] !== "crabbox-koyeb-sandbox-runner/v1" ||
     value["leaseId"] !== plan.runnerLeaseID ||
@@ -1261,6 +1395,7 @@ function runnerReady(stdout: string, plan: KoyebProvisioningPlan): RunnerReady |
     return undefined;
   }
   return {
+    transport: "tailscale",
     host: dnsName || ipv4,
     ipv4,
     ...(dnsName ? { fqdn: dnsName } : {}),
@@ -1323,10 +1458,18 @@ function planForLeaseCleanup(client: KoyebClient, lease: LeaseRecord): KoyebProv
   ) {
     throw new ProviderResourceUnresolvedError("Koyeb lease cleanup image identity is incomplete");
   }
+  const serviceName = leaseProviderName(lease.id, lease.slug);
+  const expectedPrivateHost = client.privateHost(serviceName);
+  const transport: KoyebTransport =
+    !lease.tailscale?.enabled && lease.host === expectedPrivateHost ? "koyeb-mesh" : "tailscale";
+  const privateHost = transport === "koyeb-mesh" ? client.privateHost(serviceName) : undefined;
+  if (transport === "koyeb-mesh" && !privateHost) {
+    throw new ProviderResourceUnresolvedError("Koyeb lease cleanup mesh identity is incomplete");
+  }
   return {
     version: 1,
-    serviceName: leaseProviderName(lease.id, lease.slug),
-    runnerLeaseID: leaseProviderName(lease.id, lease.slug),
+    serviceName,
+    runnerLeaseID: serviceName,
     organizationID: client.organizationID,
     appID: client.appID,
     region,
@@ -1341,12 +1484,15 @@ function planForLeaseCleanup(client: KoyebClient, lease: LeaseRecord): KoyebProv
     ttlSeconds: lease.ttlSeconds,
     idleTimeoutSeconds: lease.idleTimeoutSeconds ?? lease.ttlSeconds,
     sshPublicKey: "cleanup-only",
+    transport,
+    ...(privateHost ? { privateHost } : {}),
     tailscaleHostname: lease.tailscale?.hostname || leaseProviderName(lease.id, lease.slug),
     tailscaleTags: lease.tailscale?.tags?.length ? [...lease.tailscale.tags] : ["tag:crabbox"],
   };
 }
 
 function inventoryMachine(
+  client: KoyebClient,
   service: KoyebService,
   deployment: KoyebDeployment,
 ): ProviderMachine | undefined {
@@ -1366,6 +1512,9 @@ function inventoryMachine(
     : "";
   const image = stringValue(docker["image"]);
   const registrySecret = optionalString(docker["image_registry_secret"]);
+  const transport: KoyebTransport =
+    definition["mesh"] === "DEPLOYMENT_MESH_ENABLED" ? "koyeb-mesh" : "tailscale";
+  const privateHost = transport === "koyeb-mesh" ? client.privateHost(service.name) : undefined;
   const deleteAfterCreate = service.lifeCycle["delete_after_create"];
   const deleteAfterSleep = service.lifeCycle["delete_after_sleep"];
   if (
@@ -1379,7 +1528,8 @@ function inventoryMachine(
     !immutableImagePattern.test(image) ||
     !Number.isSafeInteger(deleteAfterCreate) ||
     !Number.isSafeInteger(deleteAfterSleep) ||
-    (registrySecret !== undefined && !validKoyebSecretName(registrySecret))
+    (registrySecret !== undefined && !validKoyebSecretName(registrySecret)) ||
+    (transport === "koyeb-mesh" && !privateHost)
   ) {
     return undefined;
   }
@@ -1401,6 +1551,8 @@ function inventoryMachine(
     ttlSeconds: deleteAfterCreate as number,
     idleTimeoutSeconds: deleteAfterSleep as number,
     sshPublicKey: "inventory-only",
+    transport,
+    ...(privateHost ? { privateHost } : {}),
     tailscaleHostname: service.name,
     tailscaleTags: ["tag:crabbox"],
   };
@@ -1458,9 +1610,17 @@ function requireUUID(value: string, name: string): void {
   if (!uuidPattern.test(value)) throw new Error(`invalid Koyeb ${name}`);
 }
 
-function managementBaseURL(value: string): string {
+function managementBaseURL(value: string, publicEdge: boolean): string {
   const url = new URL(value.trim());
-  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+  const validPublic = publicEdge && url.protocol === "https:";
+  const validPrivate =
+    !publicEdge &&
+    url.protocol === "http:" &&
+    url.port === "3030" &&
+    (url.pathname === "/" || url.pathname === "") &&
+    url.hostname.endsWith(".internal") &&
+    validDNSName(url.hostname);
+  if ((!validPublic && !validPrivate) || url.username || url.password || url.search || url.hash) {
     throw new Error("koyeb sandbox management URL is malformed");
   }
   url.pathname = `${url.pathname.replace(/\/+$/, "")}${managementRoute}`;

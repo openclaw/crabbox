@@ -206,7 +206,12 @@ import {
   normalizeImageCapabilities,
   normalizeImageVariantSelectors,
 } from "./image-capabilities";
-import { KoyebClient, KoyebResumableProvisioning, koyebConfigurationMissing } from "./koyeb";
+import {
+  KoyebClient,
+  KoyebResumableProvisioning,
+  koyebConfigurationMissing,
+  koyebPrivateMeshAvailable,
+} from "./koyeb";
 import {
   MarketplaceInputError,
   marketplaceQuote,
@@ -19800,12 +19805,14 @@ function resumableProvisioningMissing(
     missing.push("CRABBOX_DURABLE_PROVISIONING_ADMISSION");
   }
   if (!runtimeAvailable) missing.push("transactional provisioning runtime");
-  if (env.CRABBOX_TAILSCALE_ENABLED === "0") missing.push("CRABBOX_TAILSCALE_ENABLED");
-  if (!nonSecretString(env.CRABBOX_TAILSCALE_CLIENT_ID)) {
-    missing.push("CRABBOX_TAILSCALE_CLIENT_ID");
-  }
-  if (!nonSecretString(env.CRABBOX_TAILSCALE_CLIENT_SECRET)) {
-    missing.push("CRABBOX_TAILSCALE_CLIENT_SECRET");
+  if (!koyebPrivateMeshAvailable(env)) {
+    if (env.CRABBOX_TAILSCALE_ENABLED === "0") missing.push("CRABBOX_TAILSCALE_ENABLED");
+    if (!nonSecretString(env.CRABBOX_TAILSCALE_CLIENT_ID)) {
+      missing.push("CRABBOX_TAILSCALE_CLIENT_ID");
+    }
+    if (!nonSecretString(env.CRABBOX_TAILSCALE_CLIENT_SECRET)) {
+      missing.push("CRABBOX_TAILSCALE_CLIENT_SECRET");
+    }
   }
   return missing;
 }

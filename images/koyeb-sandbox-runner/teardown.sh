@@ -7,7 +7,8 @@ state_root="${CRABBOX_KOYEB_STATE_ROOT:-/var/lib/crabbox-koyeb}"
 runtime_root="${CRABBOX_KOYEB_RUNTIME_ROOT:-/run/crabbox-koyeb}"
 tailscale_socket="${runtime_root}/tailscaled.sock"
 desktop_runtime="${runtime_root}/user"
-unset CRABBOX_KOYEB_TAILSCALE_AUTH_KEY SANDBOX_SECRET KOYEB_API_TOKEN
+unset CRABBOX_KOYEB_NETWORK CRABBOX_KOYEB_PRIVATE_HOST CRABBOX_KOYEB_TAILSCALE_AUTH_KEY
+unset SANDBOX_SECRET KOYEB_API_TOKEN
 
 [[ "$(id -u)" -eq 0 ]] || { echo "teardown must run as root" >&2; exit 2; }
 for managed_dir in "$state_root" "$runtime_root"; do

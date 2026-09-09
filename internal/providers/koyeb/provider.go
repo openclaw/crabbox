@@ -2,11 +2,14 @@ package koyeb
 
 import (
 	"flag"
+	"regexp"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 const providerName = "koyeb"
+
+var privateHostPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.internal$`)
 
 func init() {
 	core.RegisterProvider(Provider{})
@@ -59,8 +62,10 @@ func (Provider) ConfigureSSHTarget(target *core.SSHTarget, _ string) {
 	if target.TargetOS != core.TargetLinux {
 		return
 	}
-	target.ProxyCommand = "tailscale nc %h %p"
-	target.SSHConfigProxy = true
+	if !privateHostPattern.MatchString(target.Host) {
+		target.ProxyCommand = "tailscale nc %h %p"
+		target.SSHConfigProxy = true
+	}
 	target.ReadyCheck = "crabbox-ready"
 }
 

@@ -89,6 +89,24 @@ func TestProviderConfiguresUserspaceTailscaleSSH(t *testing.T) {
 	}
 }
 
+func TestProviderConfiguresDirectKoyebMeshSSH(t *testing.T) {
+	target := core.SSHTarget{
+		Host:     "cbx-blue-lobster.my-app.internal",
+		Port:     "22",
+		TargetOS: core.TargetLinux,
+	}
+	(Provider{}).ConfigureSSHTarget(&target, "command -v git")
+	if target.Host != "cbx-blue-lobster.my-app.internal" || target.Port != "22" {
+		t.Fatalf("route changed=%#v", target)
+	}
+	if target.SSHConfigProxy || target.ProxyCommand != "" {
+		t.Fatalf("private mesh must use direct SSH=%#v", target)
+	}
+	if target.ReadyCheck != "crabbox-ready" {
+		t.Fatalf("ReadyCheck=%q want crabbox-ready", target.ReadyCheck)
+	}
+}
+
 func TestProviderDefaultsRemoveUnrelatedCloudValuesAndPreserveNativeType(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName

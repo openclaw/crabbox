@@ -17,6 +17,8 @@ const serviceID = "11111111-1111-4111-8111-111111111111";
 const deploymentID = "22222222-2222-4222-8222-222222222222";
 const latestDeploymentID = "33333333-3333-4333-8333-333333333333";
 const serviceName = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+const appName = "my-app";
+const privateHost = `${serviceName}.${appName}.internal`;
 const runnerImage = `ghcr.io/example/crabbox-koyeb-runner@sha256:${"a".repeat(64)}`;
 const registrySecret = "crabbox-koyeb-runner";
 const tailscaleIPv4 = "100.64.12.34";
@@ -33,7 +35,11 @@ const baseEnv: Env = {
   CRABBOX_KOYEB_INSTANCE_TYPE: "large",
   CRABBOX_KOYEB_IMAGE: runnerImage,
   CRABBOX_KOYEB_REGISTRY_SECRET: registrySecret,
-};
+  KOYEB_APP_ID: "44444444-4444-4444-8444-444444444444",
+  KOYEB_APP_NAME: appName,
+  KOYEB_ORGANIZATION_ID: "33333333-3333-4333-8333-333333333333",
+  KOYEB_REGION: "was",
+} as Env;
 
 const fleetEnv: Env = {
   ...baseEnv,
@@ -107,6 +113,17 @@ function config() {
   return result;
 }
 
+function meshConfig() {
+  return leaseConfig({
+    provider: "koyeb",
+    sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey alice@example.com",
+    browser: true,
+    tailscale: false,
+    ttlSeconds: 3_600,
+    idleTimeoutSeconds: 600,
+  });
+}
+
 function service(overrides: Record<string, unknown> = {}) {
   return {
     id: serviceID,
@@ -167,6 +184,24 @@ function deployment(providerSecret: string, overrides: Record<string, unknown> =
         routing_key: "routing-key-one",
       },
     },
+    ...overrides,
+  };
+}
+
+function meshDeployment(providerSecret: string, overrides: Record<string, unknown> = {}) {
+  const current = deployment(providerSecret);
+  return {
+    ...current,
+    definition: {
+      ...current.definition,
+      mesh: "DEPLOYMENT_MESH_ENABLED",
+      ports: [
+        { port: 3030, protocol: "http" },
+        { port: 22, protocol: "tcp" },
+      ],
+      routes: [],
+    },
+    metadata: { sandbox: {} },
     ...overrides,
   };
 }
@@ -233,6 +268,54 @@ async function advanceFleetProvisioning(
 }
 
 describe("Koyeb Sandbox coordinator adapter", () => {
+  it("rejects private mesh when the coordinator is not in the configured Koyeb app", async () => {
+    const capability = new KoyebResumableProvisioning(
+      { ...baseEnv, KOYEB_APP_ID: "55555555-5555-4555-8555-555555555555" },
+      vi.fn<typeof fetch>(),
+    );
+
+    await expect(capability.prepare(meshConfig(), lease())).rejects.toThrow(
+      "Koyeb durable provisioning configuration unsupported",
+    );
+  });
+
+  it("freezes an unrouted Koyeb private-mesh service without Tailscale material", async () => {
+    const requests: Request[] = [];
+    const capability = new KoyebResumableProvisioning(baseEnv, async (request) => {
+      const captured = request instanceof Request ? request.clone() : new Request(request);
+      requests.push(captured);
+      const url = new URL(captured.url);
+      if (captured.method === "GET" && url.pathname === "/v1/services") {
+        return Response.json({ services: [], has_next: false });
+      }
+      if (captured.method === "POST" && url.pathname === "/v1/services") {
+        return Response.json({ service: service() });
+      }
+      throw new Error(`unexpected request ${captured.method} ${captured.url}`);
+    });
+    const prepared = await capability.prepare(meshConfig(), lease());
+
+    expect(prepared.plan).toMatchObject({
+      data: {
+        transport: "koyeb-mesh",
+        privateHost,
+      },
+    });
+    expect(prepared.material.bootstrap).toBe("");
+
+    await capability.advance(advanceInput(prepared, prepared.step, false));
+    const create = (await requests[1]!.json()) as Record<string, any>;
+    expect(create.definition).toMatchObject({
+      mesh: "DEPLOYMENT_MESH_ENABLED",
+      ports: [
+        { port: 3030, protocol: "http" },
+        { port: 22, protocol: "tcp" },
+      ],
+      routes: [],
+    });
+    expect(JSON.stringify(create)).not.toContain("TAILSCALE");
+  });
+
   it("freezes a one-replica Sandbox payload with native TTLs and sealed-only credentials", async () => {
     const requests: Request[] = [];
     const capability = new KoyebResumableProvisioning(baseEnv, async (request) => {
@@ -316,6 +399,35 @@ describe("Koyeb Sandbox coordinator adapter", () => {
     expect(JSON.stringify(create)).not.toContain("3031");
     expect(create.definition).not.toHaveProperty("proxy_ports");
     expect(requests[1]!.headers.get("authorization")).toBe("Bearer koyeb-api-token-value");
+  });
+
+  it("resumes Tailscale plans created before the transport discriminator existed", async () => {
+    const requests: Request[] = [];
+    const capability = new KoyebResumableProvisioning(baseEnv, async (request) => {
+      const captured = request instanceof Request ? request.clone() : new Request(request);
+      requests.push(captured);
+      const url = new URL(captured.url);
+      if (captured.method === "GET" && url.pathname === "/v1/services") {
+        return Response.json({ services: [], has_next: false });
+      }
+      if (captured.method === "POST" && url.pathname === "/v1/services") {
+        return Response.json({ service: service() });
+      }
+      throw new Error(`unexpected request ${captured.method} ${captured.url}`);
+    });
+    const prepared = await capability.prepare(config(), lease());
+    const legacyPlan = structuredClone(prepared.plan);
+    delete (legacyPlan.data as Record<string, unknown>).transport;
+
+    await expect(
+      capability.advance(advanceInput({ ...prepared, plan: legacyPlan }, prepared.step, false)),
+    ).resolves.toMatchObject({
+      phase: "provisioning",
+      state: { action: "observe", serviceID },
+    });
+    const create = (await requests[1]!.json()) as Record<string, any>;
+    expect(create.definition).not.toHaveProperty("mesh");
+    expect(create.definition.routes).toHaveLength(1);
   });
 
   it("uses the frozen lease image identity for active release after coordinator config changes", async () => {
@@ -740,6 +852,101 @@ describe("Koyeb Sandbox coordinator adapter", () => {
     expect(JSON.stringify(published)).not.toContain(config().tailscaleAuthKey);
   });
 
+  it("bootstraps privately over the Koyeb mesh and publishes direct key-only SSH", async () => {
+    const managementRequests: Request[] = [];
+    const capability = new KoyebResumableProvisioning(baseEnv, async (request) => {
+      const incoming = request instanceof Request ? request.clone() : new Request(request);
+      const url = new URL(incoming.url);
+      if (url.origin === "https://koyeb.example") {
+        if (url.pathname === `/v1/services/${serviceID}`) {
+          return Response.json({ service: service() });
+        }
+        if (url.pathname === `/v1/deployments/${deploymentID}`) {
+          return Response.json({ deployment: meshDeployment(material.providerSecret!) });
+        }
+      }
+      managementRequests.push(incoming);
+      if (incoming.method === "GET" && url.pathname === "/koyeb-sandbox/health") {
+        return Response.json({ ok: true });
+      }
+      if (incoming.method === "POST" && url.pathname === "/koyeb-sandbox/write_file") {
+        return Response.json({ ok: true });
+      }
+      if (incoming.method === "POST" && url.pathname === "/koyeb-sandbox/run") {
+        return Response.json({
+          stdout: JSON.stringify({
+            schema: "crabbox-koyeb-sandbox-runner/v2",
+            leaseId: serviceName,
+            ssh: { user: "crabbox", host: privateHost, port: 22, hostKey: sshHostKey },
+            network: { transport: "koyeb-mesh", privateHost },
+            desktop: {
+              display: ":99",
+              vncHost: "127.0.0.1",
+              vncPort: 5900,
+              browser: "/usr/local/bin/crabbox-browser",
+              terminal: "xfce4-terminal",
+            },
+          }),
+          stderr: "",
+          code: 0,
+        });
+      }
+      throw new Error(`unexpected request ${incoming.method} ${incoming.url}`);
+    });
+    const prepared = await capability.prepare(meshConfig(), lease());
+    const material = prepared.material;
+    const observeStep: ProvisioningStep = {
+      ...prepared.step,
+      phase: "provisioning",
+      state: { version: 1, action: "observe", serviceID },
+    };
+    const bootstrap = await capability.advance(advanceInput(prepared, observeStep, true));
+    expect(bootstrap).toMatchObject({ state: { action: "bootstrap", serviceID, deploymentID } });
+
+    const published = await capability.advance(advanceInput(prepared, bootstrap, true));
+    expect(published).toMatchObject({
+      phase: "ready-to-publish",
+      publication: {
+        server: {
+          provider: "koyeb",
+          cloudID: serviceID,
+          host: privateHost,
+          labels: { koyeb_network: "mesh" },
+        },
+        access: {
+          sshUser: "crabbox",
+          sshPort: "22",
+          sshFallbackPorts: [],
+          workRoot: "/workspace/crabbox",
+          sshHostKey: sshHostKey.split(" ", 2).join(" "),
+        },
+      },
+    });
+    expect(published.publication?.access).not.toHaveProperty("tailscale");
+    expect(managementRequests.map((request) => new URL(request.url).origin)).toEqual([
+      `http://${privateHost}:3030`,
+      `http://${privateHost}:3030`,
+      `http://${privateHost}:3030`,
+    ]);
+    for (const request of managementRequests) {
+      expect(request.headers.get("authorization")).toBe(`Bearer ${material.providerSecret}`);
+      expect(request.headers.has("x-routing-key")).toBe(false);
+    }
+    const run = (await managementRequests[2]!.json()) as Record<string, any>;
+    expect(run).toMatchObject({
+      cmd: "/usr/local/bin/crabbox-koyeb-bootstrap",
+      cwd: "/workspace/crabbox",
+      env: {
+        CRABBOX_KOYEB_LEASE_ID: serviceName,
+        CRABBOX_KOYEB_NETWORK: "koyeb-mesh",
+        CRABBOX_KOYEB_PRIVATE_HOST: privateHost,
+        CRABBOX_KOYEB_SSH_PUBLIC_KEY_FILE: "/run/crabbox-authorized-key.pub",
+      },
+    });
+    expect(JSON.stringify(run)).not.toContain("TAILSCALE");
+    expect(JSON.stringify(published)).not.toContain(material.providerSecret);
+  });
+
   it("requires exact deployment ownership before deleting and confirms provider absence", async () => {
     const methods: string[] = [];
     let deleted = false;
@@ -1043,7 +1250,7 @@ describe("Koyeb Fleet integration", () => {
     expect(await storage.get("lease:cbx_abcdef123456")).toBeUndefined();
   });
 
-  it("reports missing Koyeb image, durable material, and Tailscale requirements", async () => {
+  it("reports missing Koyeb image and durable material while accepting native mesh", async () => {
     const storage = new ProvisioningTestStorage();
     const runtime = new ProvisioningTestRuntime(storage);
     const { CRABBOX_KOYEB_IMAGE: _image, ...withoutImage } = baseEnv;
@@ -1071,7 +1278,8 @@ describe("Koyeb Fleet integration", () => {
       CRABBOX_TAILSCALE_ENABLED: "1",
       CRABBOX_DURABLE_PROVISIONING_ADMISSION: "false",
     }).fetch(fleetRequest("GET", "/v1/providers/koyeb/readiness"));
-    await expect(incompleteRuntime.json()).resolves.toMatchObject({
+    const payload = (await incompleteRuntime.json()) as Record<string, any>;
+    expect(payload).toMatchObject({
       provider: "koyeb",
       configured: true,
       missing: [],
@@ -1083,11 +1291,11 @@ describe("Koyeb Fleet integration", () => {
         missing: expect.arrayContaining([
           "CRABBOX_DURABLE_PROVISIONING_ADMISSION",
           "CRABBOX_SESSION_SECRET",
-          "CRABBOX_TAILSCALE_CLIENT_ID",
-          "CRABBOX_TAILSCALE_CLIENT_SECRET",
         ]),
       },
     });
+    expect(payload.resumableProvisioning.missing).not.toContain("CRABBOX_TAILSCALE_CLIENT_ID");
+    expect(payload.resumableProvisioning.missing).not.toContain("CRABBOX_TAILSCALE_CLIENT_SECRET");
   });
 
   it("includes owned Koyeb sandboxes in the provider pool", async () => {
