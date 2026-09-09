@@ -7,10 +7,10 @@ import (
 )
 
 type fileDigitalOceanConfig struct {
-	Region   *string   `yaml:"region,omitempty"`
-	Image    *string   `yaml:"image,omitempty"`
-	VPCUUID  *string   `yaml:"vpc,omitempty"`
-	SSHCIDRs *[]string `yaml:"sshCIDRs,omitempty"`
+	Region   string   `yaml:"region,omitempty"`
+	Image    string   `yaml:"image,omitempty"`
+	VPCUUID  string   `yaml:"vpc,omitempty"`
+	SSHCIDRs []string `yaml:"sshCIDRs,omitempty"`
 }
 
 func defaultDigitalOceanConfig() DigitalOceanConfig {
@@ -27,18 +27,18 @@ func (cfg *DigitalOceanConfig) applyFile(file *fileDigitalOceanConfig) (DigitalO
 	if file == nil {
 		return applied, nil
 	}
-	if file.Region != nil && *file.Region != "" {
-		cfg.Region = *file.Region
+	if file.Region != "" {
+		cfg.Region = file.Region
 	}
-	if file.Image != nil && *file.Image != "" {
-		cfg.Image = *file.Image
+	if file.Image != "" {
+		cfg.Image = file.Image
 		applied.Image = true
 	}
-	if file.VPCUUID != nil && *file.VPCUUID != "" {
-		cfg.VPCUUID = *file.VPCUUID
+	if file.VPCUUID != "" {
+		cfg.VPCUUID = file.VPCUUID
 	}
-	if file.SSHCIDRs != nil && len(*file.SSHCIDRs) > 0 {
-		cfg.SSHCIDRs = *file.SSHCIDRs
+	if len(file.SSHCIDRs) > 0 {
+		cfg.SSHCIDRs = file.SSHCIDRs
 	}
 	return applied, nil
 }

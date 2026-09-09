@@ -7,20 +7,20 @@ import (
 )
 
 type fileVastConfig struct {
-	APIURL         *string  `yaml:"apiUrl,omitempty"`
-	InstanceType   *string  `yaml:"instanceType,omitempty"`
-	GPUName        *string  `yaml:"gpuName,omitempty"`
-	GPUCount       *int     `yaml:"gpuCount,omitempty"`
-	Image          *string  `yaml:"image,omitempty"`
-	TemplateID     *string  `yaml:"templateId,omitempty"`
-	Runtype        *string  `yaml:"runtype,omitempty"`
-	DiskGB         *int     `yaml:"diskGB,omitempty"`
+	APIURL         string   `yaml:"apiUrl,omitempty"`
+	InstanceType   string   `yaml:"instanceType,omitempty"`
+	GPUName        string   `yaml:"gpuName,omitempty"`
+	GPUCount       int      `yaml:"gpuCount,omitempty"`
+	Image          string   `yaml:"image,omitempty"`
+	TemplateID     string   `yaml:"templateId,omitempty"`
+	Runtype        string   `yaml:"runtype,omitempty"`
+	DiskGB         int      `yaml:"diskGB,omitempty"`
 	MaxDphTotal    *float64 `yaml:"maxDphTotal,omitempty"`
 	MinReliability *float64 `yaml:"minReliability,omitempty"`
-	Order          *string  `yaml:"order,omitempty"`
-	User           *string  `yaml:"user,omitempty"`
-	WorkRoot       *string  `yaml:"workRoot,omitempty"`
-	ReleaseAction  *string  `yaml:"releaseAction,omitempty"`
+	Order          string   `yaml:"order,omitempty"`
+	User           string   `yaml:"user,omitempty"`
+	WorkRoot       string   `yaml:"workRoot,omitempty"`
+	ReleaseAction  string   `yaml:"releaseAction,omitempty"`
 }
 
 const VastConfigDefaultAPIURL string = "https://console.vast.ai/api/v0"
@@ -61,31 +61,31 @@ func (cfg *VastConfig) applyFile(file *fileVastConfig) (VastConfigApplied, error
 	if file == nil {
 		return applied, nil
 	}
-	if file.APIURL != nil && *file.APIURL != "" {
-		cfg.APIURL = *file.APIURL
+	if file.APIURL != "" {
+		cfg.APIURL = file.APIURL
 		applied.APIURL = true
 	}
-	if file.InstanceType != nil && *file.InstanceType != "" {
-		cfg.InstanceType = *file.InstanceType
+	if file.InstanceType != "" {
+		cfg.InstanceType = file.InstanceType
 		applied.InstanceType = true
 	}
-	if file.GPUName != nil && *file.GPUName != "" {
-		cfg.GPUName = *file.GPUName
+	if file.GPUName != "" {
+		cfg.GPUName = file.GPUName
 	}
-	if file.GPUCount != nil && *file.GPUCount != 0 {
-		cfg.GPUCount = *file.GPUCount
+	if file.GPUCount != 0 {
+		cfg.GPUCount = file.GPUCount
 	}
-	if file.Image != nil && *file.Image != "" {
-		cfg.Image = *file.Image
+	if file.Image != "" {
+		cfg.Image = file.Image
 	}
-	if file.TemplateID != nil && *file.TemplateID != "" {
-		cfg.TemplateID = *file.TemplateID
+	if file.TemplateID != "" {
+		cfg.TemplateID = file.TemplateID
 	}
-	if file.Runtype != nil && *file.Runtype != "" {
-		cfg.Runtype = *file.Runtype
+	if file.Runtype != "" {
+		cfg.Runtype = file.Runtype
 	}
-	if file.DiskGB != nil && *file.DiskGB != 0 {
-		cfg.DiskGB = *file.DiskGB
+	if file.DiskGB != 0 {
+		cfg.DiskGB = file.DiskGB
 	}
 	if file.MaxDphTotal != nil {
 		cfg.MaxDphTotal = *file.MaxDphTotal
@@ -93,18 +93,18 @@ func (cfg *VastConfig) applyFile(file *fileVastConfig) (VastConfigApplied, error
 	if file.MinReliability != nil {
 		cfg.MinReliability = *file.MinReliability
 	}
-	if file.Order != nil && *file.Order != "" {
-		cfg.Order = *file.Order
+	if file.Order != "" {
+		cfg.Order = file.Order
 	}
-	if file.User != nil && *file.User != "" {
-		cfg.User = *file.User
+	if file.User != "" {
+		cfg.User = file.User
 	}
-	if file.WorkRoot != nil && *file.WorkRoot != "" {
-		cfg.WorkRoot = *file.WorkRoot
+	if file.WorkRoot != "" {
+		cfg.WorkRoot = file.WorkRoot
 		applied.WorkRoot = true
 	}
-	if file.ReleaseAction != nil && *file.ReleaseAction != "" {
-		cfg.ReleaseAction = *file.ReleaseAction
+	if file.ReleaseAction != "" {
+		cfg.ReleaseAction = file.ReleaseAction
 		applied.ReleaseAction = true
 	}
 	return applied, nil

@@ -7,13 +7,13 @@ import (
 )
 
 type fileOrgoConfig struct {
-	APIKey      *string `yaml:"apiKey,omitempty"`
-	APIBase     *string `yaml:"apiBase,omitempty"`
-	WorkspaceID *string `yaml:"workspaceID,omitempty"`
-	RAMGB       *int    `yaml:"ramGB,omitempty"`
-	CPUs        *int    `yaml:"cpus,omitempty"`
-	DiskGB      *int    `yaml:"diskGB,omitempty"`
-	Resolution  *string `yaml:"resolution,omitempty"`
+	APIKey      string `yaml:"apiKey,omitempty"`
+	APIBase     string `yaml:"apiBase,omitempty"`
+	WorkspaceID string `yaml:"workspaceID,omitempty"`
+	RAMGB       int    `yaml:"ramGB,omitempty"`
+	CPUs        int    `yaml:"cpus,omitempty"`
+	DiskGB      int    `yaml:"diskGB,omitempty"`
+	Resolution  string `yaml:"resolution,omitempty"`
 }
 
 const OrgoConfigDefaultAPIBase string = "https://www.orgo.ai/api"
@@ -43,28 +43,28 @@ func (cfg *OrgoConfig) applyFile(file *fileOrgoConfig, trusted bool) (OrgoConfig
 	if file == nil {
 		return applied, nil
 	}
-	if trusted && file.APIKey != nil && *file.APIKey != "" {
-		cfg.APIKey = *file.APIKey
+	if trusted && file.APIKey != "" {
+		cfg.APIKey = file.APIKey
 		applied.APIKey = true
 	}
-	if file.APIBase != nil && *file.APIBase != "" {
-		cfg.APIBase = *file.APIBase
+	if file.APIBase != "" {
+		cfg.APIBase = file.APIBase
 		applied.APIBase = true
 	}
-	if file.WorkspaceID != nil && *file.WorkspaceID != "" {
-		cfg.WorkspaceID = *file.WorkspaceID
+	if file.WorkspaceID != "" {
+		cfg.WorkspaceID = file.WorkspaceID
 	}
-	if file.RAMGB != nil && *file.RAMGB > 0 {
-		cfg.RAMGB = *file.RAMGB
+	if file.RAMGB > 0 {
+		cfg.RAMGB = file.RAMGB
 	}
-	if file.CPUs != nil && *file.CPUs > 0 {
-		cfg.CPUs = *file.CPUs
+	if file.CPUs > 0 {
+		cfg.CPUs = file.CPUs
 	}
-	if file.DiskGB != nil && *file.DiskGB > 0 {
-		cfg.DiskGB = *file.DiskGB
+	if file.DiskGB > 0 {
+		cfg.DiskGB = file.DiskGB
 	}
-	if file.Resolution != nil && *file.Resolution != "" {
-		cfg.Resolution = *file.Resolution
+	if file.Resolution != "" {
+		cfg.Resolution = file.Resolution
 	}
 	return applied, nil
 }

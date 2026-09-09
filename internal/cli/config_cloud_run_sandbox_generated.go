@@ -7,11 +7,11 @@ import (
 )
 
 type fileCloudRunSandboxConfig struct {
-	CLIPath     *string `yaml:"cliPath,omitempty"`
-	Workdir     *string `yaml:"workdir,omitempty"`
-	AllowEgress *bool   `yaml:"allowEgress,omitempty"`
-	Write       *bool   `yaml:"write,omitempty"`
-	Rootfs      *string `yaml:"rootfs,omitempty"`
+	CLIPath     string `yaml:"cliPath,omitempty"`
+	Workdir     string `yaml:"workdir,omitempty"`
+	AllowEgress *bool  `yaml:"allowEgress,omitempty"`
+	Write       *bool  `yaml:"write,omitempty"`
+	Rootfs      string `yaml:"rootfs,omitempty"`
 }
 
 const CloudRunSandboxConfigDefaultCLIPath string = "/usr/local/gcp/bin/sandbox"
@@ -32,11 +32,11 @@ func (cfg *CloudRunSandboxConfig) applyFile(file *fileCloudRunSandboxConfig) err
 	if file == nil {
 		return nil
 	}
-	if file.CLIPath != nil && *file.CLIPath != "" {
-		cfg.CLIPath = *file.CLIPath
+	if file.CLIPath != "" {
+		cfg.CLIPath = file.CLIPath
 	}
-	if file.Workdir != nil && *file.Workdir != "" {
-		cfg.Workdir = *file.Workdir
+	if file.Workdir != "" {
+		cfg.Workdir = file.Workdir
 	}
 	if file.AllowEgress != nil {
 		cfg.AllowEgress = *file.AllowEgress
@@ -44,8 +44,8 @@ func (cfg *CloudRunSandboxConfig) applyFile(file *fileCloudRunSandboxConfig) err
 	if file.Write != nil {
 		cfg.Write = *file.Write
 	}
-	if file.Rootfs != nil && *file.Rootfs != "" {
-		cfg.Rootfs = *file.Rootfs
+	if file.Rootfs != "" {
+		cfg.Rootfs = file.Rootfs
 	}
 	return nil
 }

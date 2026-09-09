@@ -29,7 +29,7 @@ and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
 and storage, registration, and presence-based application for admitted flags.
 
-This is a wiring refactor, not a behavior correction. Other providers retain
+Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.
 
@@ -107,6 +107,34 @@ read-only user-scheme projections. It preserves other fields and slice sharing;
 the generated raw constructor stays zero-valued. The lower region helper retains
 its separate generic-location fallback. SSH-user policy, native boot-source
 parsing, and OS catalog selection remain outside this transformation.
+
+## File storage and configuration writes
+
+File assignment and file persistence are separate contracts. Commands such as
+`config set-broker` read and rewrite the whole user configuration. A pointer to
+an explicit empty value survives YAML `omitempty`, whereas the corresponding
+value field is omitted. Ignoring an empty overlay does not establish which
+representation a provider historically used.
+
+File fields remain pointers by default, preserving explicit false, zero, empty
+strings and empty-list clears. Use `fileStorage:"value"` only when the field's
+original value-backed storage and zero-ignoring assignment rule are established.
+The generator then emits a value field with the same YAML tag and a raw-value
+predicate; it does not normalize the stored value or change environment/flag
+handling. An explicitly present empty provider block remains `{}`.
+
+| Kind | Required file rule |
+| --- | --- |
+| `string` | `fileIgnoreEmpty:"true"` |
+| `[]string` | `fileList:"nonempty-raw"` |
+| `int`, `int64` | `fileInt:"positive"` or `fileInt:"nonzero"` |
+| `float64` | `fileFloat:"positive"` |
+
+Presence-sensitive rules, booleans and fields without file input cannot use value
+storage. Existing pointer-backed fields must not opt in merely because they
+ignore zero. Modal's `secrets: []` deliberately remains pointer-backed so a write
+retains the explicit clear. Positive-only numeric overlays still store negative
+inputs verbatim: ignoring an assignment is not permission to erase its file value.
 
 ## Adding a field
 
