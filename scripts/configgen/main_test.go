@@ -556,6 +556,12 @@ func TestLinodeGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestSealosDevboxGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_sealos_devbox.go", "../../internal/cli/config_sealos_devbox_generated.go", "SealosDevboxConfig", "sealos-devbox", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {

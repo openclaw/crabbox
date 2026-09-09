@@ -446,6 +446,40 @@ func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
 	}
 }
 
+func TestSealosConfigWriter(t *testing.T) {
+	for _, value := range []string{"null", "{}", "{kubectl: '', kubeconfig: '', context: '', namespace: '', image: '', templateID: '', cpu: '', memory: '', storageLimit: '', network: '', sshGatewayHost: '', sshGatewayPort: '', sshUser: '', workRoot: '', nodeHost: '', deleteOnRelease: false}"} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte("sealosDevbox: "+value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := yaml.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]any{}
+		if value != "null" {
+			want["sealosDevbox"] = map[string]any{}
+		}
+		if strings.Contains(value, "false") {
+			want["sealosDevbox"] = map[string]any{"deleteOnRelease": false}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("writer=%#v want %#v", got, want)
+		}
+	}
+}
+
 func TestGeneratedFileStorageWriter(t *testing.T) {
 	for _, tc := range []struct{ name, input, want string }{
 		{"missing", "{}", "{}"},

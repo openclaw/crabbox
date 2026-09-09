@@ -1184,6 +1184,118 @@ func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
 	}
 }
 
+func TestSealosConfigBindingPresence(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	wantDefaults := SealosDevboxConfig{Kubectl: "kubectl", Namespace: "default", CPU: "2", Memory: "4Gi", StorageLimit: "20Gi", Network: "SSHGate", SSHGatewayPort: "2233", SSHUser: "devbox", WorkRoot: "/home/devbox/project"}
+	if got := baseConfig().SealosDevbox; got != wantDefaults {
+		t.Fatalf("defaults=%#v, want %#v", got, wantDefaults)
+	}
+	fields := []struct{ field, key, env string }{
+		{"Kubectl", "kubectl", "KUBECTL"}, {"Kubeconfig", "kubeconfig", "KUBECONFIG"}, {"Context", "context", "CONTEXT"}, {"Namespace", "namespace", "NAMESPACE"}, {"Image", "image", "IMAGE"}, {"TemplateID", "templateID", "TEMPLATE_ID"}, {"CPU", "cpu", "CPU"}, {"Memory", "memory", "MEMORY"}, {"StorageLimit", "storageLimit", "STORAGE_LIMIT"}, {"Network", "network", "NETWORK"}, {"SSHGatewayHost", "sshGatewayHost", "SSH_GATEWAY_HOST"}, {"SSHGatewayPort", "sshGatewayPort", "SSH_GATEWAY_PORT"}, {"SSHUser", "sshUser", "SSH_USER"}, {"WorkRoot", "workRoot", "WORK_ROOT"}, {"NodeHost", "nodeHost", "NODE_HOST"},
+	}
+	for _, field := range fields {
+		t.Run(field.field, func(t *testing.T) {
+			for _, input := range []string{"null", "''", "'  '", "'same'"} {
+				cfg := baseConfig()
+				reflect.ValueOf(&cfg.SealosDevbox).Elem().FieldByName(field.field).SetString("same")
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte("sealosDevbox: {"+field.key+": "+input+"}"), &file); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfig(&cfg, file); err != nil {
+					t.Fatal(err)
+				}
+				want := "same"
+				if input == "'  '" {
+					want = "  "
+				}
+				if got := reflect.ValueOf(cfg.SealosDevbox).FieldByName(field.field).String(); got != want {
+					t.Fatalf("file %s: got %q want %q", input, got, want)
+				}
+				if field.field == "WorkRoot" && IsSealosDevboxWorkRootExplicit(&cfg) != (input == "'  '" || input == "'same'") {
+					t.Fatal("file work-root acceptance marker")
+				}
+			}
+			for _, input := range []string{"", "  ", "same"} {
+				t.Setenv("CRABBOX_SEALOS_DEVBOX_"+field.env, input)
+				cfg := baseConfig()
+				reflect.ValueOf(&cfg.SealosDevbox).Elem().FieldByName(field.field).SetString("same")
+				if err := applyEnv(&cfg); err != nil {
+					t.Fatal(err)
+				}
+				want := input
+				if input == "" {
+					want = "same"
+				}
+				if got := reflect.ValueOf(cfg.SealosDevbox).FieldByName(field.field).String(); got != want {
+					t.Fatalf("env %q: got %q want %q", input, got, want)
+				}
+				if field.field == "WorkRoot" && IsSealosDevboxWorkRootExplicit(&cfg) != (input != "") {
+					t.Fatal("env work-root acceptance marker")
+				}
+			}
+		})
+	}
+}
+
+func TestSealosConfigPathAndBoolTiming(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, input := range []string{"{}", "{kubectl: '', kubeconfig: ''}", "{kubectl: '~/bin/tool', kubeconfig: '~/config'}"} {
+		cfg := baseConfig()
+		cfg.SealosDevbox.Kubectl, cfg.SealosDevbox.Kubeconfig = "~/bin/tool", "~/config"
+		var file fileConfig
+		if err := yaml.Unmarshal([]byte("sealosDevbox: "+input), &file); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyFileConfig(&cfg, file); err != nil {
+			t.Fatal(err)
+		}
+		wantTool, wantConfig := "~/bin/tool", "~/config"
+		if strings.Contains(input, "~/") {
+			wantTool, wantConfig = filepath.Join(home, "bin/tool"), filepath.Join(home, "config")
+		}
+		if cfg.SealosDevbox.Kubectl != wantTool || cfg.SealosDevbox.Kubeconfig != wantConfig {
+			t.Fatal("file path expansion must follow acceptance")
+		}
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.SealosDevbox.Kubectl != filepath.Join(home, "bin/tool") || cfg.SealosDevbox.Kubeconfig != filepath.Join(home, "config") {
+			t.Fatal("environment fallback paths must expand")
+		}
+	}
+	for _, value := range []string{"", "invalid", " false ", "OFF", "yes"} {
+		t.Run("bool-"+value, func(t *testing.T) {
+			t.Setenv("CRABBOX_SEALOS_DEVBOX_DELETE_ON_RELEASE", value)
+			cfg := baseConfig()
+			accepted := value != "" && value != "invalid"
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.SealosDevbox.DeleteOnRelease != (value == "yes") || DeleteOnReleaseExplicit(cfg, "sealos-devbox") != accepted {
+				t.Fatal("bool acceptance/value")
+			}
+		})
+	}
+	for _, value := range []string{"null", "false", "true"} {
+		var file fileConfig
+		if err := yaml.Unmarshal([]byte("sealosDevbox: {deleteOnRelease: "+value+"}"), &file); err != nil {
+			t.Fatal(err)
+		}
+		cfg := baseConfig()
+		if err := applyFileConfig(&cfg, file); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.SealosDevbox.DeleteOnRelease != (value == "true") || DeleteOnReleaseExplicit(cfg, "sealos-devbox") != (value != "null") {
+			t.Fatal("file bool presence")
+		}
+	}
+}
+
 func TestSealosDevboxConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()

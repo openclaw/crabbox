@@ -4,7 +4,7 @@ Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
 Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, Lume, Runpod, Vast,
-W&B, Scaleway, Tencent Cloud, DigitalOcean, Vultr, and Linode
+W&B, Scaleway, Tencent Cloud, DigitalOcean, Vultr, Linode, and Sealos DevBox
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -23,7 +23,8 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_runpod.go`, `internal/cli/config_vast.go`,
 `internal/cli/config_wandb.go`, `internal/cli/config_scaleway.go`,
 `internal/cli/config_tencentcloud.go`, `internal/cli/config_digitalocean.go`,
-`internal/cli/config_vultr.go`, and `internal/cli/config_linode.go`.
+`internal/cli/config_vultr.go`, `internal/cli/config_linode.go`, and
+`internal/cli/config_sealos_devbox.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -32,6 +33,16 @@ and storage, registration, and presence-based application for admitted flags.
 Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.
+
+Sealos DevBox uses all sixteen bindings together. Its fifteen file strings retain
+value storage and trusted-user admission; the pointer-backed release boolean
+also accepts repository input and preserves explicit false. Applied facts for
+the two host paths let file and flag wrappers expand only accepted values;
+environment wrappers expand the final fallback values unconditionally. The
+existing path algorithm, guest-work-root rules, explicit markers, and validation
+remain outside generation. Moving path expansion immediately after assignment
+is valid here because these string/bool bindings are non-fallible and no
+intermediate observer reads them; it is not a generic delayed-normalization rule.
 
 ## Why generation
 
