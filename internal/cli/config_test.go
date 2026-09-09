@@ -11109,3 +11109,235 @@ func TestMorphConfigIndependentSources(t *testing.T) {
 		}
 	}
 }
+
+func TestExeDevConfigFileContract(t *testing.T) {
+	wantDefaults := ExeDevConfig{ControlHost: "exe.dev", CPUs: 2, Memory: "4GB", Disk: "10GB", NoEmail: true}
+	if got := baseConfig().ExeDev; got != wantDefaults {
+		t.Fatalf("defaults=%#v want=%#v", got, wantDefaults)
+	}
+	if reflect.TypeOf(ExeDevConfig{}).NumField() != 9 || reflect.TypeOf(fileExeDevConfig{}).NumField() != 9 {
+		t.Fatal("config field count changed")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace", "value"} {
+			cfg := baseConfig()
+			cfg.ExeDev.Image = "prior-image"
+			cfg.ExeDev.Command = "prior-command"
+			cfg.ExeDev.User = "prior-user"
+			cfg.ExeDev.WorkRoot = "/prior/root"
+			want := cfg.ExeDev
+			source := credentialSourceFlag
+			cfg.credentialProvenance.exeDevControlHost = source
+			fields := map[string]any{}
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"controlHost", &want.ControlHost}, {"image", &want.Image}, {"memory", &want.Memory}, {"disk", &want.Disk}, {"command", &want.Command}, {"user", &want.User}, {"workRoot", &want.WorkRoot}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = "fixture-value"
+				}
+				fields[f.key] = raw
+				if mode == "equal" || mode == "whitespace" || mode == "value" {
+					*f.v = raw.(string)
+					source = credentialSourceForFile(trusted)
+				}
+			}
+			data, err := yaml.Marshal(map[string]any{"exeDev": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ExeDev != want || cfg.credentialProvenance.exeDevControlHost != source {
+				t.Fatalf("file mode=%s trusted=%t", mode, trusted)
+			}
+		}
+		for _, raw := range []string{"null", "0", "-2", "3"} {
+			cfg := baseConfig()
+			cfg.ExeDev.CPUs = 6
+			want := cfg.ExeDev
+			want.NoEmail = false
+			if raw == "3" {
+				want.CPUs = 3
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte("exeDev:\n  cpus: "+raw+"\n  noEmail: false\n"), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ExeDev != want {
+				t.Fatalf("CPU=%s trusted=%t got=%#v want=%#v", raw, trusted, cfg.ExeDev, want)
+			}
+		}
+		for _, raw := range []string{"omitted", "null", "true"} {
+			cfg := baseConfig()
+			cfg.ExeDev.NoEmail = false
+			var file fileConfig
+			body := "exeDev: {}\n"
+			if raw != "omitted" {
+				body = "exeDev:\n  noEmail: " + raw + "\n"
+			}
+			if err := yaml.Unmarshal([]byte(body), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ExeDev.NoEmail != (raw == "true") {
+				t.Fatalf("noEmail raw=%s", raw)
+			}
+		}
+	}
+}
+
+func TestExeDevConfigEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"empty", "alias", "equal", "whitespace", "value"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.ExeDev.Image = "prior-image"
+			cfg.ExeDev.Command = "prior-command"
+			cfg.ExeDev.User = "prior-user"
+			cfg.ExeDev.WorkRoot = "/prior/root"
+			want := cfg.ExeDev
+			source := credentialSourceFlag
+			cfg.credentialProvenance.exeDevControlHost = source
+			for _, f := range []struct {
+				suffix, alias string
+				v             *string
+			}{{"CONTROL_HOST", "EXE_DEV_CONTROL_HOST", &want.ControlHost}, {"IMAGE", "EXE_DEV_IMAGE", &want.Image}, {"MEMORY", "EXE_DEV_MEMORY", &want.Memory}, {"DISK", "EXE_DEV_DISK", &want.Disk}, {"COMMAND", "", &want.Command}, {"USER", "", &want.User}, {"WORK_ROOT", "", &want.WorkRoot}} {
+				raw, alias := *f.v, "alias-value"
+				if mode == "empty" {
+					raw = ""
+					alias = ""
+				}
+				if mode == "alias" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = "fixture-value"
+				}
+				t.Setenv("CRABBOX_EXE_DEV_"+f.suffix, raw)
+				if f.alias != "" {
+					t.Setenv(f.alias, alias)
+				}
+				accepted := false
+				if raw != "" {
+					*f.v = raw
+					accepted = true
+				} else if f.alias != "" && alias != "" {
+					*f.v = alias
+					accepted = true
+				}
+				if f.suffix == "CONTROL_HOST" && accepted {
+					source = credentialSourceEnvironment
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ExeDev != want || cfg.credentialProvenance.exeDevControlHost != source {
+				t.Fatalf("env mode=%s got=%#v want=%#v", mode, cfg.ExeDev, want)
+			}
+		})
+	}
+	for _, raw := range []string{"", "invalid", "0", "-2", "3"} {
+		t.Run("CPU-"+raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.ExeDev.CPUs = 6
+			want := 6
+			t.Setenv("CRABBOX_EXE_DEV_CPUS", raw)
+			if n, err := strconv.Atoi(raw); err == nil {
+				want = n
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ExeDev.CPUs != want {
+				t.Fatalf("CPU=%d want=%d", cfg.ExeDev.CPUs, want)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		raw         string
+		prior, want bool
+	}{{"", true, true}, {"invalid", true, true}, {"false", true, false}, {"true", false, true}} {
+		t.Run("bool-"+tc.raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.ExeDev.NoEmail = tc.prior
+			t.Setenv("CRABBOX_EXE_DEV_NO_EMAIL", tc.raw)
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ExeDev.NoEmail != tc.want {
+				t.Fatalf("NoEmail=%t want=%t", cfg.ExeDev.NoEmail, tc.want)
+			}
+		})
+	}
+}
+
+func TestExeDevConfigCoreFallbackContract(t *testing.T) {
+	for _, tc := range []struct{ providerRoot, generic, want string }{{"", "/work/crabbox", "/tmp/crabbox"}, {"", "/custom/root", "/custom/root"}, {"/specific/root", "/custom/root", "/specific/root"}, {"  ", "/custom/root", "  "}} {
+		cfg := baseConfig()
+		cfg.Provider = "exe-dev"
+		cfg.WorkRoot = tc.generic
+		cfg.ExeDev.WorkRoot = tc.providerRoot
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.WorkRoot != tc.want || cfg.ExeDev.WorkRoot != tc.want {
+			t.Fatalf("roots=%q/%q want=%q", cfg.WorkRoot, cfg.ExeDev.WorkRoot, tc.want)
+		}
+	}
+	for _, tc := range []struct{ raw, want string }{{"", "default"}, {"  ", "  "}, {" image ", " image "}} {
+		cfg := baseConfig()
+		cfg.Provider = "exe-dev"
+		cfg.ExeDev.Image = tc.raw
+		if got := serverTypeForConfig(cfg); got != tc.want {
+			t.Fatalf("display=%q want=%q", got, tc.want)
+		}
+	}
+}
+
+func TestExeDevConfigCentralFlagSource(t *testing.T) {
+	cfg := baseConfig()
+	cfg.credentialProvenance.exeDevControlHost = credentialSourceTrustedFile
+	fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+	fs.String("exe-dev-control-host", "", "")
+	markCredentialDestinationFlagSources(&cfg, fs)
+	if cfg.credentialProvenance.exeDevControlHost != credentialSourceTrustedFile {
+		t.Fatal("unvisited source changed")
+	}
+	if err := fs.Parse([]string{"--exe-dev-control-host="}); err != nil {
+		t.Fatal(err)
+	}
+	markCredentialDestinationFlagSources(&cfg, fs)
+	if cfg.credentialProvenance.exeDevControlHost != credentialSourceFlag {
+		t.Fatal("explicit empty source missing")
+	}
+}

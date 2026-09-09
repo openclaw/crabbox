@@ -56,6 +56,8 @@
 
 - Describe Morph configuration bindings once, sharing endpoint, gateway, and work-root defaults while preserving source precedence, explicit deletion policy, and SSH wake behavior. [PR 2024](https://github.com/openclaw/crabbox/pull/2024). Thanks @steipete.
 
+- Describe exe.dev configuration bindings once, sharing configured defaults while preserving work-root inheritance, omitted native images, CPU input rules, and notification preferences. Thanks @steipete.
+
 ## 0.53.0 - 2026-09-08
 
 ### Highlights

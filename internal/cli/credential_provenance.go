@@ -277,7 +277,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if flagWasSet(fs, "static-host") {
 		provenance.staticHost = credentialSourceFlag
 	}
-	if flagWasSet(fs, "exe-dev-control-host") {
+	if ExeDevConfigFlagPresence(fs).ControlHost {
 		provenance.exeDevControlHost = credentialSourceFlag
 	}
 	if flagWasSet(fs, "external-routing-file") {

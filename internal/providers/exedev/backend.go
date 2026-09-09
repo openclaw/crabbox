@@ -379,22 +379,22 @@ func applyExeDevDefaults(cfg *Config) {
 	cfg.SSHPort = "22"
 	cfg.SSHFallbackPorts = nil
 	if cfg.ExeDev.ControlHost == "" {
-		cfg.ExeDev.ControlHost = "exe.dev"
+		cfg.ExeDev.ControlHost = core.ExeDevConfigDefaultControlHost
 	}
 	if cfg.ExeDev.CPUs <= 0 {
-		cfg.ExeDev.CPUs = 2
+		cfg.ExeDev.CPUs = core.ExeDevConfigDefaultCPUs
 	}
 	if cfg.ExeDev.Memory == "" {
-		cfg.ExeDev.Memory = "4GB"
+		cfg.ExeDev.Memory = core.ExeDevConfigDefaultMemory
 	}
 	if cfg.ExeDev.Disk == "" {
-		cfg.ExeDev.Disk = "10GB"
+		cfg.ExeDev.Disk = core.ExeDevConfigDefaultDisk
 	}
 	if cfg.ExeDev.WorkRoot == "" {
 		if !isDefaultWorkRoot(cfg.WorkRoot) {
 			cfg.ExeDev.WorkRoot = cfg.WorkRoot
 		} else {
-			cfg.ExeDev.WorkRoot = "/tmp/crabbox"
+			cfg.ExeDev.WorkRoot = core.ExeDevWorkRootFallback
 		}
 	}
 	if cfg.ExeDev.User != "" {
@@ -1197,5 +1197,5 @@ func isLowerHex(value string) bool {
 }
 
 func exeDevImage(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.ExeDev.Image), "default")
+	return blank(strings.TrimSpace(cfg.ExeDev.Image), core.ExeDevDefaultImageLabel)
 }

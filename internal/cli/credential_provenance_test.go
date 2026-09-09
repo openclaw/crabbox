@@ -2010,7 +2010,11 @@ func TestConfigMergeTracksSSHDestinationSources(t *testing.T) {
 	t.Run("exe dev environment host approves ambient auth", func(t *testing.T) {
 		cfg := baseConfig()
 		cfg.Provider = "exe-dev"
-		if err := applyFileConfigWithTrust(&cfg, fileConfig{ExeDev: &fileExeDevConfig{ControlHost: "repo.example.test"}}, false); err != nil {
+		var file fileConfig
+		if err := yaml.Unmarshal([]byte("exeDev:\n  controlHost: repo.example.test\n"), &file); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
 			t.Fatal(err)
 		}
 		if err := validateProviderCredentialDestination(cfg); err == nil {

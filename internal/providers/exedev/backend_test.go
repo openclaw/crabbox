@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"maps"
 	"reflect"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type exeDevRecordingRunner struct {
@@ -1116,5 +1119,168 @@ func TestExeDevSSHTargetUsesSSHDestUserPortAndWorkRootLabel(t *testing.T) {
 	server := exeDevServer(vm, "cbx_lease", "blue", cfg, true)
 	if server.Labels["work_root"] != "/tmp/crabbox" {
 		t.Fatalf("labels=%#v", server.Labels)
+	}
+}
+
+func TestExeDevConfigFlagContract(t *testing.T) {
+	t.Setenv("USER", "fixture-user")
+	for _, provider := range []string{"exe-dev", "exe", "exedev", " EXE-DEV ", "aws"} {
+		for _, cpu := range []int{0, -2} {
+			cfg := core.BaseConfig()
+			cfg.Provider = provider
+			fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+			values := RegisterExeDevProviderFlags(fs, cfg)
+			count := 0
+			fs.VisitAll(func(*flag.Flag) { count++ })
+			if count != 9 || fs.Lookup("exe-dev-work-root").DefValue != "" || fs.Lookup("exe-dev-image").DefValue != "" {
+				t.Fatal("raw flag default surface changed")
+			}
+			args := []string{"--exe-dev-control-host=", "--exe-dev-image=  ", fmt.Sprintf("--exe-dev-cpus=%d", cpu), "--exe-dev-memory=", "--exe-dev-disk=", "--exe-dev-command=command", "--exe-dev-user=fixture-user", "--exe-dev-work-root=/workspace/flag", "--exe-dev-no-email=false"}
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			before := fmt.Sprintf("%#v", cfg)
+			if err := ApplyExeDevProviderFlags(&cfg, fs, struct{}{}); err != nil {
+				t.Fatal(err)
+			}
+			if fmt.Sprintf("%#v", cfg) != before {
+				t.Fatal("wrong type changed config")
+			}
+			if err := ApplyExeDevProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			want := ExeDevConfig{Image: "  ", CPUs: cpu, Command: "command", User: "fixture-user", WorkRoot: "/workspace/flag"}
+			if provider == "exe-dev" || provider == "exe" || provider == "exedev" {
+				want.ControlHost = "exe.dev"
+				want.CPUs = 2
+				want.Memory = "4GB"
+				want.Disk = "10GB"
+				if cfg.WorkRoot != "/workspace/flag" || cfg.ServerType != "default" {
+					t.Fatal("selected defaults missing")
+				}
+			}
+			if cfg.ExeDev != want {
+				t.Fatalf("provider=%q flags=%#v want=%#v", provider, cfg.ExeDev, want)
+			}
+		}
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = "aws"
+	fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+	values := RegisterExeDevProviderFlags(fs, cfg)
+	cfg.ExeDev = ExeDevConfig{ControlHost: "layered", CPUs: 6, Image: "layered", Memory: "8GB", Disk: "20GB", Command: "layered", User: "layered", WorkRoot: "/layered", NoEmail: false}
+	want := cfg.ExeDev
+	if err := ApplyExeDevProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ExeDev != want {
+		t.Fatal("unvisited flags overwrote layered config")
+	}
+}
+
+func TestExeDevConfigFlagPhaseContract(t *testing.T) {
+	for _, provider := range []string{"exe-dev", "exe", "exedev", " EXE-DEV ", "aws"} {
+		for _, args := range [][]string{{"--type=machine", "--class="}, {"--type="}} {
+			cfg := core.BaseConfig()
+			cfg.Provider = provider
+			fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+			fs.String("class", "", "")
+			fs.String("type", "", "")
+			RegisterExeDevProviderFlags(fs, cfg)
+			if err := fs.Parse(append(args, "--exe-dev-image=fixture-image")); err != nil {
+				t.Fatal(err)
+			}
+			before := fmt.Sprintf("%#v", cfg)
+			err := ApplyExeDevProviderFlags(&cfg, fs, struct{}{})
+			selected := provider == "exe-dev" || provider == "exe" || provider == "exedev"
+			if selected {
+				want := "--type is not supported for provider=exe-dev; use --exe-dev-image"
+				if len(args) == 2 {
+					want = "--class is not supported for provider=exe-dev; use --exe-dev-cpus, --exe-dev-memory, and --exe-dev-disk"
+				}
+				var exitErr core.ExitError
+				if err == nil || err.Error() != want || !errors.As(err, &exitErr) || exitErr.Code != 2 {
+					t.Fatalf("err=%v want=%q", err, want)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if fmt.Sprintf("%#v", cfg) != before {
+				t.Fatal("guard/wrong type changed config")
+			}
+		}
+	}
+}
+
+func TestExeDevConfigEffectiveDefaultsContract(t *testing.T) {
+	t.Setenv("USER", "fixture-user")
+	for _, tc := range []struct{ providerRoot, generic, want string }{{"", "", "/tmp/crabbox"}, {"", "/work/crabbox", "/tmp/crabbox"}, {"", "/custom/root", "/custom/root"}, {"/specific/root", "/custom/root", "/specific/root"}, {"  ", "/custom/root", "  "}} {
+		cfg := Config{WorkRoot: tc.generic, ExeDev: ExeDevConfig{WorkRoot: tc.providerRoot, CPUs: -2}}
+		applyExeDevDefaults(&cfg)
+		if cfg.ExeDev.ControlHost != "exe.dev" || cfg.ExeDev.CPUs != 2 || cfg.ExeDev.Memory != "4GB" || cfg.ExeDev.Disk != "10GB" || cfg.ExeDev.WorkRoot != tc.want || cfg.WorkRoot != tc.want || cfg.ExeDev.NoEmail || cfg.ExeDev.Image != "" {
+			t.Fatalf("defaults=%#v want root=%q", cfg.ExeDev, tc.want)
+		}
+	}
+	cfg := Config{ExeDev: ExeDevConfig{ControlHost: "  ", CPUs: 6, Memory: "  ", Disk: "  ", Image: "  "}}
+	applyExeDevDefaults(&cfg)
+	if cfg.ExeDev.ControlHost != "  " || cfg.ExeDev.Memory != "  " || cfg.ExeDev.Disk != "  " || cfg.ExeDev.CPUs != 6 {
+		t.Fatal("raw whitespace fallback predicate changed")
+	}
+	for _, tc := range []struct{ raw, want string }{{"", "default"}, {"  ", "default"}, {" image ", "image"}} {
+		cfg.ExeDev.Image = tc.raw
+		if got := exeDevImage(cfg); got != tc.want {
+			t.Fatalf("display=%q want=%q", got, tc.want)
+		}
+	}
+	backend := NewExeDevLeaseBackend(Provider{}.Spec(), Config{}, Runtime{}).(*exeDevLeaseBackend)
+	if backend.cfg.ExeDev.NoEmail || backend.cfg.ExeDev.Image != "" {
+		t.Fatal("constructor filled raw false/image")
+	}
+	raw := backend.cfg
+	raw.ExeDev.CPUs = 0
+	backend.cfg = raw
+	effective := backend.configForRun()
+	if effective.ExeDev.CPUs != 2 || backend.cfg.ExeDev.CPUs != 0 {
+		t.Fatal("configForRun lost copy/default behavior")
+	}
+}
+
+func TestExeDevConfigCreateArgumentsContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USER", "fixture-user")
+	for _, tc := range []struct {
+		name, image          string
+		noEmail, paddedSizes bool
+	}{{"empty", "", false, false}, {"whitespace", "  ", false, true}, {"configured", " image ", true, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &exeDevRecordingRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
+				return LocalCommandResult{Stdout: `{"vm_name":"fixture-vm","ssh_dest":"fixture-vm.example","status":"running"}`}, nil
+			}}
+			cfg := Config{ExeDev: ExeDevConfig{Image: tc.image, NoEmail: tc.noEmail, Command: " echo ok "}}
+			if tc.paddedSizes {
+				cfg.ExeDev.Memory = "  "
+				cfg.ExeDev.Disk = "  "
+			}
+			backend := &exeDevLeaseBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+			if _, err := backend.createVM(t.Context(), backend.configForRun(), "fixture-vm", "cbx_fixture", "fixture", "cbx_generation"); err != nil {
+				t.Fatal(err)
+			}
+			want := "new --name fixture-vm --json --tag crabbox --tag crabbox-lease-cbx_fixture --tag crabbox-slug-fixture --tag crabbox-claim-cbx_generation"
+			if tc.noEmail {
+				want += " --no-email"
+			}
+			if tc.image == " image " {
+				want += " --image image"
+			}
+			want += " --cpu 2"
+			if !tc.paddedSizes {
+				want += " --memory 4GB --disk 10GB"
+			}
+			want += " --command 'echo ok'"
+			wantArgs := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", "exe.dev", want}
+			if len(runner.calls) != 1 || runner.calls[0].Name != "ssh" || !reflect.DeepEqual(runner.calls[0].Args, wantArgs) {
+				t.Fatalf("recorded calls=%#v want args=%v", runner.calls, wantArgs)
+			}
+		})
 	}
 }

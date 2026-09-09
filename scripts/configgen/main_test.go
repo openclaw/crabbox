@@ -490,6 +490,12 @@ func TestMorphGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestExeDevGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_exe_dev.go", "../../internal/cli/config_exe_dev_generated.go", "ExeDevConfig", "exe-dev", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {

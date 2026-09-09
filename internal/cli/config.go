@@ -713,18 +713,6 @@ func NormalizeAzureBackend(backend string) (string, error) {
 	}
 }
 
-type ExeDevConfig struct {
-	ControlHost string
-	Image       string
-	CPUs        int
-	Memory      string
-	Disk        string
-	Command     string
-	User        string
-	WorkRoot    string
-	NoEmail     bool
-}
-
 type UnikraftCloudConfig struct {
 	APIKey   string
 	APIURL   string
@@ -1855,7 +1843,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			if !isDefaultWorkRoot(cfg.WorkRoot) {
 				cfg.ExeDev.WorkRoot = cfg.WorkRoot
 			} else {
-				cfg.ExeDev.WorkRoot = "/tmp/crabbox"
+				cfg.ExeDev.WorkRoot = ExeDevWorkRootFallback
 			}
 		}
 		if cfg.ExeDev.WorkRoot != "" {
@@ -2693,13 +2681,7 @@ func baseConfig() Config {
 			Workdir:       "crabbox",
 			ProxyPortHTTP: 80,
 		},
-		ExeDev: ExeDevConfig{
-			ControlHost: "exe.dev",
-			CPUs:        2,
-			Memory:      "4GB",
-			Disk:        "10GB",
-			NoEmail:     true,
-		},
+		ExeDev:       defaultExeDevConfig(),
 		Railway:      defaultRailwayConfig(),
 		FastAPICloud: defaultFastAPICloudConfig(),
 		UnikraftCloud: UnikraftCloudConfig{
@@ -3598,18 +3580,6 @@ type fileFreestyleConfig struct {
 	Workdir  string `yaml:"workdir,omitempty"`
 	VCPUs    int    `yaml:"vcpus,omitempty"`
 	MemoryGB int    `yaml:"memoryGB,omitempty"`
-}
-
-type fileExeDevConfig struct {
-	ControlHost string `yaml:"controlHost,omitempty"`
-	Image       string `yaml:"image,omitempty"`
-	CPUs        int    `yaml:"cpus,omitempty"`
-	Memory      string `yaml:"memory,omitempty"`
-	Disk        string `yaml:"disk,omitempty"`
-	Command     string `yaml:"command,omitempty"`
-	User        string `yaml:"user,omitempty"`
-	WorkRoot    string `yaml:"workRoot,omitempty"`
-	NoEmail     *bool  `yaml:"noEmail,omitempty"`
 }
 
 type fileUnikraftCloudConfig struct {
@@ -5836,33 +5806,14 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.credentialProvenance.cubeSandboxProxyProto = credentialSource
 		}
 	}
-	if file.ExeDev != nil {
-		if file.ExeDev.ControlHost != "" {
-			cfg.ExeDev.ControlHost = file.ExeDev.ControlHost
+	{
+		applied, err := cfg.ExeDev.applyFile(file.ExeDev)
+		if applied.ControlHost {
 			cfg.credentialProvenance.exeDevControlHost = credentialSource
 		}
-		if file.ExeDev.Image != "" {
-			cfg.ExeDev.Image = file.ExeDev.Image
+		if err != nil {
+			return err
 		}
-		if file.ExeDev.CPUs > 0 {
-			cfg.ExeDev.CPUs = file.ExeDev.CPUs
-		}
-		if file.ExeDev.Memory != "" {
-			cfg.ExeDev.Memory = file.ExeDev.Memory
-		}
-		if file.ExeDev.Disk != "" {
-			cfg.ExeDev.Disk = file.ExeDev.Disk
-		}
-		if file.ExeDev.Command != "" {
-			cfg.ExeDev.Command = file.ExeDev.Command
-		}
-		if file.ExeDev.User != "" {
-			cfg.ExeDev.User = file.ExeDev.User
-		}
-		if file.ExeDev.WorkRoot != "" {
-			cfg.ExeDev.WorkRoot = file.ExeDev.WorkRoot
-		}
-		applyOptional(&cfg.ExeDev.NoEmail, file.ExeDev.NoEmail)
 	}
 	{
 		applied, err := cfg.Railway.applyFile(file.Railway)
@@ -7850,19 +7801,14 @@ func applyEnv(cfg *Config) error {
 		cfg.CubeSandbox.ProxyScheme = value
 		cfg.credentialProvenance.cubeSandboxProxyProto = credentialSourceEnvironment
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_CONTROL_HOST", "EXE_DEV_CONTROL_HOST"); ok {
-		cfg.ExeDev.ControlHost = value
-		cfg.credentialProvenance.exeDevControlHost = credentialSourceEnvironment
-	}
-	cfg.ExeDev.Image = getenv("CRABBOX_EXE_DEV_IMAGE", getenv("EXE_DEV_IMAGE", cfg.ExeDev.Image))
-	cfg.ExeDev.CPUs = getenvInt("CRABBOX_EXE_DEV_CPUS", cfg.ExeDev.CPUs)
-	cfg.ExeDev.Memory = getenv("CRABBOX_EXE_DEV_MEMORY", getenv("EXE_DEV_MEMORY", cfg.ExeDev.Memory))
-	cfg.ExeDev.Disk = getenv("CRABBOX_EXE_DEV_DISK", getenv("EXE_DEV_DISK", cfg.ExeDev.Disk))
-	cfg.ExeDev.Command = getenv("CRABBOX_EXE_DEV_COMMAND", cfg.ExeDev.Command)
-	cfg.ExeDev.User = getenv("CRABBOX_EXE_DEV_USER", cfg.ExeDev.User)
-	cfg.ExeDev.WorkRoot = getenv("CRABBOX_EXE_DEV_WORK_ROOT", cfg.ExeDev.WorkRoot)
-	if value, ok := getenvBool("CRABBOX_EXE_DEV_NO_EMAIL"); ok {
-		cfg.ExeDev.NoEmail = value
+	{
+		applied, err := cfg.ExeDev.applyEnv()
+		if applied.ControlHost {
+			cfg.credentialProvenance.exeDevControlHost = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
 	{
 		applied, err := cfg.Railway.applyEnv()
@@ -8643,7 +8589,7 @@ func serverTypeForConfig(cfg Config) string {
 		return blank(cfg.E2B.Template, E2BConfigDefaultTemplate)
 	}
 	if cfg.Provider == "exe-dev" || cfg.Provider == "exedev" || cfg.Provider == "exe" {
-		return blank(cfg.ExeDev.Image, "default")
+		return blank(cfg.ExeDev.Image, ExeDevDefaultImageLabel)
 	}
 	if cfg.Provider == "modal" {
 		return blank(cfg.Modal.Image, ModalConfigDefaultImage)
