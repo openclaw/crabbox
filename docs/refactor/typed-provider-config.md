@@ -194,6 +194,27 @@ provider lookups remain separate from these raw-empty rules.
 Native mount filtering, lookup, credentials, class selection and OS mappings remain
 provider policy. The following field instructions apply to generated owners.
 
+## Apple Container's shared concrete owner
+
+`config_apple_container.go` owns all seven shared settings without generated
+bindings. A YAML-tagged `AppleContainerConfig` and distinct defined
+`fileAppleContainerConfig` retain one field roster, the existing file type name,
+and zero-valued decoding. File persistence and the six-field config-show view
+remain unchanged; raw runtime JSON retains its existing shape. Ad-hoc YAML
+serialization of the runtime type is not a supported compatibility contract.
+
+Initialization accepts the already-resolved OS image, including an empty value,
+rather than resolving it again. File input clones nonempty argument lists;
+environment input ignores empty whitespace-tokenized results; a visited flag
+clears the list to nil when tokenization is empty. These are distinct policies,
+not interchangeable list modes.
+
+The owner provides two typed flag surfaces: seven Apple Container flags and four
+Apple Machine flags with their existing names and help. They are not aliases or
+a configurable prefix factory. Provider wrappers retain image markers, generic
+user/root propagation, and the exact selected Container defaults call. OS-image
+selection and native Container/Machine behavior remain outside this owner.
+
 ## Adding a field
 
 1. Add an exported, singly named field to the provider's config struct. Supported types

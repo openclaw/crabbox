@@ -5,6 +5,7 @@
 ### Changes
 
 - Consolidate KubeVirt settings and work-root selection without changing key-source rules, path expansion, saved-file semantics, or explicit release choices. [PR 2058](https://github.com/openclaw/crabbox/pull/2058). Thanks @steipete.
+- Consolidate Apple Container and Apple Machine shared settings while preserving their distinct flag surfaces, argument-list behavior, image selection, and saved-file formats. Thanks @steipete.
 
 - Initialize managed macOS SSH sessions through PAM so stock `nohup` can detach in the user's launchd context, retaining key-only authentication and using fresh bootstrap connections. [PR 2051](https://github.com/openclaw/crabbox/pull/2051). Thanks @steipete.
 - Support POSIX workspace ownership without `flock` or `lockf`, sharing an atomic directory gate across owner updates and child witnesses while preserving fail-closed recovery. [PR 2051](https://github.com/openclaw/crabbox/pull/2051). Thanks @steipete.

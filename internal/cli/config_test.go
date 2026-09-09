@@ -4232,6 +4232,136 @@ func TestCloudflareDynamicWorkersRepositoryCapsApplyAfterEnvironment(t *testing.
 	}
 }
 
+func TestAppleContainerConfigSources(t *testing.T) {
+	clearConfigEnv(t)
+	base := baseConfig()
+	want := AppleContainerConfig{CLIPath: "container", Image: base.LocalContainer.Image, User: "crabbox", WorkRoot: "/work/crabbox"}
+	if !reflect.DeepEqual(base.AppleContainer, want) || base.AppleContainer.Image == "" {
+		t.Fatalf("defaults=%#v want %#v", base.AppleContainer, want)
+	}
+	for _, f := range []struct{ field, key, env string }{{"CLIPath", "cliPath", "CLI"}, {"Image", "image", "IMAGE"}, {"User", "user", "USER"}, {"WorkRoot", "workRoot", "WORK_ROOT"}, {"Memory", "memory", "MEMORY"}} {
+		t.Run(f.field, func(t *testing.T) {
+			for _, input := range []string{"null", "''", "'  '", "'same'", "'~/literal'"} {
+				cfg := baseConfig()
+				reflect.ValueOf(&cfg.AppleContainer).Elem().FieldByName(f.field).SetString("same")
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte("appleContainer: {"+f.key+": "+input+"}"), &file); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfig(&cfg, file); err != nil {
+					t.Fatal(err)
+				}
+				want := "same"
+				if input == "'  '" {
+					want = "  "
+				}
+				if input == "'~/literal'" {
+					want = "~/literal"
+				}
+				if got := reflect.ValueOf(cfg.AppleContainer).FieldByName(f.field).String(); got != want {
+					t.Fatalf("file %s=%q want %q", input, got, want)
+				}
+				if AppleContainerImageExplicit(cfg) != (f.field == "Image" && input != "null" && input != "''") {
+					t.Fatal("file image acceptance marker")
+				}
+			}
+			for _, input := range []string{"", "  ", "same", "~/literal"} {
+				t.Setenv("CRABBOX_APPLE_CONTAINER_"+f.env, input)
+				cfg := baseConfig()
+				reflect.ValueOf(&cfg.AppleContainer).Elem().FieldByName(f.field).SetString("same")
+				if err := applyEnv(&cfg); err != nil {
+					t.Fatal(err)
+				}
+				want := input
+				if input == "" {
+					want = "same"
+				}
+				if got := reflect.ValueOf(cfg.AppleContainer).FieldByName(f.field).String(); got != want {
+					t.Fatalf("env %q=%q", input, got)
+				}
+				if AppleContainerImageExplicit(cfg) != (f.field == "Image" && input != "") {
+					t.Fatal("env image acceptance marker")
+				}
+			}
+		})
+	}
+	for _, input := range []int{-2, 0, 3} {
+		cfg := baseConfig()
+		cfg.AppleContainer.CPUs = 7
+		if err := applyFileConfig(&cfg, fileConfig{AppleContainer: &fileAppleContainerConfig{CPUs: input}}); err != nil {
+			t.Fatal(err)
+		}
+		want := 7
+		if input > 0 {
+			want = input
+		}
+		if cfg.AppleContainer.CPUs != want {
+			t.Fatal("file CPU positive predicate")
+		}
+	}
+	for _, tc := range []struct {
+		input string
+		want  int
+	}{{"", 7}, {"invalid", 7}, {" 3 ", 7}, {"0", 0}, {"-2", -2}, {"3", 3}} {
+		t.Run("cpu-"+tc.input, func(t *testing.T) {
+			t.Setenv("CRABBOX_APPLE_CONTAINER_CPUS", tc.input)
+			cfg := baseConfig()
+			cfg.AppleContainer.CPUs = 7
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.AppleContainer.CPUs != tc.want {
+				t.Fatalf("CPU=%d want %d", cfg.AppleContainer.CPUs, tc.want)
+			}
+		})
+	}
+}
+
+func TestAppleContainerConfigLists(t *testing.T) {
+	clearConfigEnv(t)
+	for _, source := range [][]string{nil, {}, {" alpha ", "alpha", "alpha"}} {
+		cfg := baseConfig()
+		cfg.AppleContainer.ExtraRunArgs = []string{"prior"}
+		file := fileConfig{AppleContainer: &fileAppleContainerConfig{ExtraRunArgs: source}}
+		if err := applyFileConfig(&cfg, file); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"prior"}
+		if len(source) > 0 {
+			want = []string{" alpha ", "alpha", "alpha"}
+		}
+		if !reflect.DeepEqual(cfg.AppleContainer.ExtraRunArgs, want) {
+			t.Fatal("file raw list/nonempty rule")
+		}
+		if len(source) > 0 {
+			source[0] = "source-change"
+			if cfg.AppleContainer.ExtraRunArgs[0] != " alpha " {
+				t.Fatal("accepted file list not cloned")
+			}
+			cfg.AppleContainer.ExtraRunArgs[1] = "runtime-change"
+			if source[1] != "alpha" {
+				t.Fatal("runtime list aliases file input")
+			}
+		}
+	}
+	for _, tc := range []struct {
+		input string
+		want  []string
+	}{{"", []string{"prior"}}, {" \t\n", []string{"prior"}}, {"alpha\tbeta alpha", []string{"alpha", "beta", "alpha"}}, {"\"alpha beta\" a,b", []string{"\"alpha", "beta\"", "a,b"}}} {
+		t.Run(tc.input, func(t *testing.T) {
+			t.Setenv("CRABBOX_APPLE_CONTAINER_EXTRA_RUN_ARGS", tc.input)
+			cfg := baseConfig()
+			cfg.AppleContainer.ExtraRunArgs = []string{"prior"}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.AppleContainer.ExtraRunArgs, tc.want) {
+				t.Fatalf("env list=%q want %q", cfg.AppleContainer.ExtraRunArgs, tc.want)
+			}
+		})
+	}
+}
+
 func TestAppleContainerConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()

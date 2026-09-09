@@ -532,6 +532,72 @@ func TestKubeVirtConfigWriter(t *testing.T) {
 	}
 }
 
+func TestAppleContainerConfigWriterAndJSON(t *testing.T) {
+	if reflect.TypeOf(fileAppleContainerConfig{}).Name() != "fileAppleContainerConfig" {
+		t.Fatal("file decoder destination name changed")
+	}
+	for _, tc := range []struct{ input, want string }{{"null", "{}"}, {"{}", "appleContainer: {}"}, {"{cliPath: '', image: '', user: '', workRoot: '', cpus: 0, memory: '', extraRunArgs: []}", "appleContainer: {}"}, {"{cliPath: '~/literal', image: '  ', cpus: -2, extraRunArgs: [' a ', a, a]}", "appleContainer: {cliPath: '~/literal', image: '  ', cpus: -2, extraRunArgs: [' a ', a, a]}"}} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte("appleContainer: "+tc.input), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := baseConfig()
+		if err := applyFileConfig(&cfg, file); err != nil {
+			t.Fatal(err)
+		}
+		after, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatal("overlay mutated writer input")
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got, want map[string]any
+		if err := yaml.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		if err := yaml.Unmarshal([]byte(tc.want), &want); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("writer=%#v want %#v", got, want)
+		}
+	}
+	cfg := baseConfig()
+	cfg.AppleContainer = AppleContainerConfig{CLIPath: "tool", Image: "image-example", User: "user-example", WorkRoot: "/workspace/example", CPUs: 3, Memory: "6g"}
+	wantView := map[string]any{"cliPath": "tool", "image": "image-example", "user": "user-example", "workRoot": "/workspace/example", "cpus": 3, "memory": "6g"}
+	if got := configShowView(cfg)["appleContainer"]; !reflect.DeepEqual(got, wantView) {
+		t.Fatalf("view=%#v", got)
+	}
+	data, err := json.Marshal(cfg.AppleContainer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	wantJSON := map[string]any{"CLIPath": "tool", "Image": "image-example", "User": "user-example", "WorkRoot": "/workspace/example", "CPUs": float64(3), "Memory": "6g", "ExtraRunArgs": nil}
+	if !reflect.DeepEqual(got, wantJSON) {
+		t.Fatalf("runtime JSON=%#v", got)
+	}
+}
+
 func TestGeneratedFileStorageWriter(t *testing.T) {
 	for _, tc := range []struct{ name, input, want string }{
 		{"missing", "{}", "{}"},

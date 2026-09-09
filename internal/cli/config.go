@@ -905,16 +905,6 @@ type LocalContainerConfig struct {
 	CheckpointMetadata map[string]string `yaml:"-" json:"-"`
 }
 
-type AppleContainerConfig struct {
-	CLIPath      string
-	Image        string
-	User         string
-	WorkRoot     string
-	CPUs         int
-	Memory       string
-	ExtraRunArgs []string
-}
-
 type AppleVMConfig struct {
 	HelperPath  string
 	Image       string
@@ -2607,12 +2597,7 @@ func baseConfig() Config {
 			User:    "crabbox",
 			Network: "bridge",
 		},
-		AppleContainer: AppleContainerConfig{
-			CLIPath:  "container",
-			Image:    containerImage,
-			User:     "crabbox",
-			WorkRoot: "/work/crabbox",
-		},
+		AppleContainer: initialAppleContainerConfig(containerImage),
 		AppleVM: AppleVMConfig{
 			Image:       osImageSpecs[osImage].AppleVMImage,
 			ImageSHA256: osImageSpecs[osImage].AppleVMSHA256,
@@ -3510,16 +3495,6 @@ type fileLocalContainerConfig struct {
 	Network      string `yaml:"network,omitempty"`
 	DockerSocket *bool  `yaml:"dockerSocket,omitempty"`
 	NoHostname   *bool  `yaml:"noHostname,omitempty"`
-}
-
-type fileAppleContainerConfig struct {
-	CLIPath      string   `yaml:"cliPath,omitempty"`
-	Image        string   `yaml:"image,omitempty"`
-	User         string   `yaml:"user,omitempty"`
-	WorkRoot     string   `yaml:"workRoot,omitempty"`
-	CPUs         int      `yaml:"cpus,omitempty"`
-	Memory       string   `yaml:"memory,omitempty"`
-	ExtraRunArgs []string `yaml:"extraRunArgs,omitempty"`
 }
 
 type fileAppleVMConfig struct {
@@ -5750,29 +5725,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		// be an explicit CLI action (--local-container-volume), not
 		// something an untrusted checkout can request via .crabbox.yaml.
 	}
-	if file.AppleContainer != nil {
-		if file.AppleContainer.CLIPath != "" {
-			cfg.AppleContainer.CLIPath = file.AppleContainer.CLIPath
-		}
-		if file.AppleContainer.Image != "" {
-			cfg.AppleContainer.Image = file.AppleContainer.Image
-			cfg.appleContainerImageExplicit = true
-		}
-		if file.AppleContainer.User != "" {
-			cfg.AppleContainer.User = file.AppleContainer.User
-		}
-		if file.AppleContainer.WorkRoot != "" {
-			cfg.AppleContainer.WorkRoot = file.AppleContainer.WorkRoot
-		}
-		if file.AppleContainer.CPUs > 0 {
-			cfg.AppleContainer.CPUs = file.AppleContainer.CPUs
-		}
-		if file.AppleContainer.Memory != "" {
-			cfg.AppleContainer.Memory = file.AppleContainer.Memory
-		}
-		if len(file.AppleContainer.ExtraRunArgs) > 0 {
-			cfg.AppleContainer.ExtraRunArgs = append([]string(nil), file.AppleContainer.ExtraRunArgs...)
-		}
+	if cfg.AppleContainer.applyFile(file.AppleContainer) {
+		MarkAppleContainerImageExplicit(cfg)
 	}
 	if file.AppleVM == nil {
 		// Deprecated pre-rename key; appleVM wins when both are present.
@@ -7521,17 +7475,8 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME"); ok {
 		cfg.LocalContainer.NoHostname = value
 	}
-	cfg.AppleContainer.CLIPath = getenv("CRABBOX_APPLE_CONTAINER_CLI", cfg.AppleContainer.CLIPath)
-	if image := os.Getenv("CRABBOX_APPLE_CONTAINER_IMAGE"); image != "" {
-		cfg.AppleContainer.Image = image
-		cfg.appleContainerImageExplicit = true
-	}
-	cfg.AppleContainer.User = getenv("CRABBOX_APPLE_CONTAINER_USER", cfg.AppleContainer.User)
-	cfg.AppleContainer.WorkRoot = getenv("CRABBOX_APPLE_CONTAINER_WORK_ROOT", cfg.AppleContainer.WorkRoot)
-	cfg.AppleContainer.CPUs = getenvInt("CRABBOX_APPLE_CONTAINER_CPUS", cfg.AppleContainer.CPUs)
-	cfg.AppleContainer.Memory = getenv("CRABBOX_APPLE_CONTAINER_MEMORY", cfg.AppleContainer.Memory)
-	if extra := strings.Fields(os.Getenv("CRABBOX_APPLE_CONTAINER_EXTRA_RUN_ARGS")); len(extra) > 0 {
-		cfg.AppleContainer.ExtraRunArgs = extra
+	if cfg.AppleContainer.applyEnv() {
+		MarkAppleContainerImageExplicit(cfg)
 	}
 	cfg.AppleVM.HelperPath = getenv("CRABBOX_APPLE_VM_HELPER", getenv("CRABBOX_APPLE_VZ_HELPER", cfg.AppleVM.HelperPath))
 	if image := appleVMEnv("IMAGE"); image != "" {
