@@ -59,16 +59,14 @@ lease. Only `--lease-id` can replay the same fixed create intent; changing its
 ID or intent does not authorize reactivation. The CLI also rejects a different
 ID returned by an older coordinator, without bootstrapping or requesting cleanup.
 
-Authenticated org members can pin an unused Mac Dedicated Host with matching
-coordinator ownership evidence in the requested region. New admin allocations
-record their authenticated org; `admin mac-hosts list` includes that org when
-recorded. For hosts allocated by older coordinators, prior coordinator-managed
-Mac lease records with that exact host and region are accepted only when all
-such records belong to the same current org identity. A released lease can
-provide this evidence after its instance has been deleted. Registered external
-leases, ambiguous legacy org identities, and EC2 inventory alone cannot grant
-pin access. A recorded allocation takes precedence over historical leases.
-Hosts with no matching evidence or belonging to another org require admin auth.
+Authenticated org members can pin an unused Mac Dedicated Host only when an
+exact coordinator allocation record matches the host, requested region, and
+requester's current org identity. New admin allocations record their authenticated
+org. Historical managed leases and EC2 inventory never substitute for that record.
+Hosts allocated by older coordinators without a record remain admin-only; this
+change does not add a claim or backfill command. Missing, ambiguous, and other-org
+allocation records do not grant org-member pin access.
+
 Host allocation, release, inventory, and other AWS resource selectors remain
 admin operations. Pin permission does not grant access to another member's lease.
 
@@ -303,7 +301,7 @@ CRABBOX_AWS_SUBNET_ID
 CRABBOX_AWS_INSTANCE_PROFILE
 CRABBOX_AWS_ROOT_GB
 CRABBOX_AWS_SSH_CIDRS               # comma-separated
-CRABBOX_HOST_ID                     # brokered pin requires org allocation evidence or admin auth
+CRABBOX_HOST_ID                     # brokered pin requires an exact org allocation record or admin auth
 CRABBOX_AWS_MAC_HOST_ID             # legacy alias for the Mac host id
 CRABBOX_CAPACITY_REGIONS            # comma-separated fallback regions
 CRABBOX_CAPACITY_AVAILABILITY_ZONES
@@ -361,7 +359,7 @@ readiness preflight, API, AWS-GO gate, and live canary are in
 | Linux | Ubuntu bootstrap, SSH, rsync sync, optional desktop/browser/code, Tailscale, Actions hydration. |
 | Windows native | EC2Launch bootstrap, OpenSSH, Git for Windows, archive sync; optional desktop with `--desktop`. |
 | Windows WSL2 | `--windows-mode wsl2`; launches on nested-virtualization families (`c8i`/`m8i`/`m8i-flex`/`r8i`); POSIX sync and commands run inside WSL with the Linux image Node/npm baseline. |
-| macOS | Requires an available EC2 Mac Dedicated Host in the region; On-Demand only. Admin-authenticated broker requests can pin any host with `CRABBOX_HOST_ID` / `aws.macHostId` (`CRABBOX_AWS_MAC_HOST_ID` is a legacy alias); normal broker users can pin a host with coordinator allocation evidence for their exact org and region, including prior managed Mac leases. See the host ownership rules below. |
+| macOS | Requires an available EC2 Mac Dedicated Host in the region; On-Demand only. Admin-authenticated broker requests can pin any host with `CRABBOX_HOST_ID` / `aws.macHostId` (`CRABBOX_AWS_MAC_HOST_ID` is a legacy alias); normal broker users can pin a host with an exact coordinator allocation record for that host, their current org, and the requested region. See the host ownership rules below. |
 
 Managed WSL2 commands run as the non-root `crabbox` Linux user, with
 `HOME=/home/crabbox`, Bash, passwordless sudo, and membership in the `sudo` and

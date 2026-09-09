@@ -28092,27 +28092,12 @@ export class AWSProvider implements CloudProvider {
     const allocation = await this.storage.get<AWSMacHostAllocation>(
       awsMacHostAllocationKey(this.region, hostID),
     );
-    if (allocation) {
-      return (
-        allocation.version === 1 &&
-        allocation.region === this.region &&
-        allocation.hostID === hostID &&
-        sameOrgIdentityKey(allocation.org, org)
-      );
-    }
-    // Older coordinators recorded placement on managed leases, before host allocations were persisted.
-    const leases = [
-      ...(await this.storage.list<LeaseRecord>({ prefix: "lease:" })).values(),
-    ].filter(
-      (lease) =>
-        lease.provider === "aws" &&
-        lease.target === "macos" &&
-        !isRegisteredLease(lease) &&
-        lease.region === this.region &&
-        leaseHostID(lease) === hostID &&
-        Boolean(lease.cloudID),
+    return (
+      allocation?.version === 1 &&
+      allocation.region === this.region &&
+      allocation.hostID === hostID &&
+      sameOrgIdentityKey(allocation.org, org)
     );
-    return leases.length > 0 && leases.every((lease) => sameOrgIdentityKey(lease.org, org));
   }
 
   readyPoolImageIdentity(lease: LeaseRecord): ReadyPoolImageIdentity | undefined {

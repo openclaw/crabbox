@@ -27695,13 +27695,12 @@ describe("fleet lease identity and idle", () => {
         org: "example-org",
       });
       storage.seed(`lease:${held.id}`, held);
-      if (!cloudID)
-        storage.seed("aws-mac-host-allocation:eu-west-1:h-kept", {
-          version: 1,
-          hostID: "h-kept",
-          region: "eu-west-1",
-          org: held.org,
-        });
+      storage.seed("aws-mac-host-allocation:eu-west-1:h-kept", {
+        version: 1,
+        hostID: "h-kept",
+        region: "eu-west-1",
+        org: held.org,
+      });
       let preparations = 0;
       let creates = 0;
       let releases = 0;
@@ -27919,6 +27918,30 @@ describe("fleet lease identity and idle", () => {
       allowed: false,
     },
     {
+      name: "ambiguous legacy allocation org",
+      allocation: true,
+      legacy: true,
+      org: "example-org",
+      region: "eu-west-1",
+      allowed: false,
+    },
+    {
+      name: "allocation host does not match its storage key",
+      allocation: true,
+      allocationHostID: "h-other",
+      org: "example-org",
+      region: "eu-west-1",
+      allowed: false,
+    },
+    {
+      name: "unsupported allocation version",
+      allocation: true,
+      allocationVersion: 2,
+      org: "example-org",
+      region: "eu-west-1",
+      allowed: false,
+    },
+    {
       name: "no allocation",
       allocation: false,
       org: "example-org",
@@ -27926,8 +27949,16 @@ describe("fleet lease identity and idle", () => {
       allowed: false,
     },
     {
-      name: "same org managed history",
+      name: "historical leases alone do not authorize an org member",
       history: true,
+      org: "example-org",
+      region: "eu-west-1",
+      allowed: false,
+    },
+    {
+      name: "admin can pin a host with only historical leases",
+      history: true,
+      admin: true,
       org: "example-org",
       region: "eu-west-1",
       allowed: true,
@@ -27964,14 +27995,25 @@ describe("fleet lease identity and idle", () => {
     },
   ])(
     "host pin authorization: $name",
-    async ({ allocation, history, registered, legacy, org, region, allowed }) => {
+    async ({
+      allocation,
+      allocationHostID,
+      allocationVersion,
+      history,
+      admin,
+      registered,
+      legacy,
+      org,
+      region,
+      allowed,
+    }) => {
       const storage = new MemoryStorage();
       if (allocation)
-        storage.seed(`aws-mac-host-allocation:${region}:h-owned`, {
-          version: 1,
-          hostID: "h-owned",
+        await storage.put(`aws-mac-host-allocation:${region}:h-owned`, {
+          version: allocationVersion ?? 1,
+          hostID: allocationHostID ?? "h-owned",
           region,
-          org: orgKeyForLabel(org),
+          org: legacy ? org : orgKeyForLabel(org),
         });
       if (history) {
         const lease = testLease({
@@ -28003,7 +28045,11 @@ describe("fleet lease identity and idle", () => {
       });
       const response = await fleet.fetch(
         request("POST", "/v1/leases", {
-          headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+          headers: {
+            "x-crabbox-owner": "alice@example.com",
+            "x-crabbox-org": "example-org",
+            ...(admin ? { "x-crabbox-admin": "true" } : {}),
+          },
           body: {
             provider: "aws",
             target: "macos",
@@ -28016,6 +28062,9 @@ describe("fleet lease identity and idle", () => {
       );
       expect(response.status).toBe(allowed ? 201 : 403);
       expect(creates).toBe(allowed ? 1 : 0);
+      await expect(response.json()).resolves.toMatchObject(
+        allowed ? { lease: { hostId: "h-owned" } } : { error: "admin_required" },
+      );
     },
   );
 

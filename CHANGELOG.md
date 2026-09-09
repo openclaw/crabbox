@@ -5,7 +5,7 @@
 ### Changes
 
 - Reject occupied host pins and coordinator replies with a different lease ID before bootstrap or cleanup; show retained leases in ordinary text and JSON listing. [PR 2049](https://github.com/openclaw/crabbox/pull/2049). Thanks @steipete.
-- Allow authenticated org members to pin unused AWS Mac hosts backed by exact coordinator allocation evidence, while keeping unknown and other-org hosts admin-only. [PR 2049](https://github.com/openclaw/crabbox/pull/2049). Thanks @steipete.
+- Require an exact coordinator host/org/region allocation record for org-member AWS Mac host pins; historical leases never grant pin access, and missing, ambiguous, or other-org records remain admin-only. [PR 2049](https://github.com/openclaw/crabbox/pull/2049). Thanks @steipete.
 
 
 - Transfer Blacksmith run artifacts through bounded native file download instead of bulk stdout, preserving the original collection deadline and claim while isolating each invocation's evidence. [PR 2043](https://github.com/openclaw/crabbox/pull/2043). Thanks @steipete.

@@ -183,12 +183,12 @@ an elevated owner limit.
 Provider host inventory is also capacity administration. Normal portal users
 see a Dedicated Host only when it backs an active lease already visible to
 them; unattached host inventory remains admin-only. Pinning an unused AWS Mac
-Dedicated Host also permits authenticated members of its recorded org in the
-same region. New admin allocations persist that org. Older hosts may use exact
-coordinator-managed Mac lease history as allocation evidence only when all
-matching host/region records belong to that current org identity. Missing or
-ambiguous evidence, registered external leases, and another org's records do
-not grant permission. Recorded allocations take precedence over history.
+Dedicated Host also permits authenticated members only when an exact coordinator
+allocation record matches that host, the requested region, and their current org
+identity. New admin allocations persist that org. Missing or ambiguous records,
+other-org records, and historical managed leases do not grant permission. Hosts
+allocated by older coordinators without a record remain admin-only; no claim or
+backfill command is added by this change.
 Other provider pins and other AWS resource selectors remain admin-only; existing
 checkpoint grants retain their exact host scope.
 
