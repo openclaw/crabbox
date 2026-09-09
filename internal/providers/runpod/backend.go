@@ -319,27 +319,27 @@ func applyRunpodDefaults(cfg *Config) {
 		cfg.TargetOS = targetLinux
 	}
 	if cfg.Runpod.APIURL == "" {
-		cfg.Runpod.APIURL = "https://rest.runpod.io/v1"
+		cfg.Runpod.APIURL = core.RunpodConfigDefaultAPIURL
 	}
 	if cfg.Runpod.CloudType == "" {
-		cfg.Runpod.CloudType = "SECURE"
+		cfg.Runpod.CloudType = core.RunpodConfigDefaultCloudType
 	}
 	if cfg.Runpod.InstanceID == "" {
-		cfg.Runpod.InstanceID = "NVIDIA L4,NVIDIA RTX 4000 Ada Generation,NVIDIA RTX A4000,NVIDIA GeForce RTX 3090,NVIDIA GeForce RTX 4090,NVIDIA RTX A5000,NVIDIA RTX A4500"
+		cfg.Runpod.InstanceID = core.RunpodConfigDefaultInstanceID
 	}
 	if cfg.Runpod.Image == "" {
-		cfg.Runpod.Image = "runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04"
+		cfg.Runpod.Image = core.RunpodConfigDefaultImage
 	}
 	if cfg.Runpod.DiskGB <= 0 {
-		cfg.Runpod.DiskGB = 20
+		cfg.Runpod.DiskGB = core.RunpodConfigDefaultDiskGB
 	}
-	cfg.Runpod.WorkRoot = core.ResolveInheritedWorkRoot(cfg.Runpod.WorkRoot, cfg.WorkRoot, "/tmp/crabbox")
+	cfg.Runpod.WorkRoot = core.ResolveInheritedWorkRoot(cfg.Runpod.WorkRoot, cfg.WorkRoot, core.RunpodWorkRootFallback)
 	if cfg.Runpod.User != "" {
 		cfg.SSHUser = cfg.Runpod.User
 	} else if cfg.SSHUser == "" || cfg.SSHUser == "crabbox" {
 		// RunPod pods always boot with root as the SSH user. The local USER
 		// environment variable is unrelated to the remote account.
-		cfg.SSHUser = "root"
+		cfg.SSHUser = core.RunpodSSHUserFallback
 	}
 	if cfg.Runpod.WorkRoot != "" {
 		cfg.WorkRoot = cfg.Runpod.WorkRoot

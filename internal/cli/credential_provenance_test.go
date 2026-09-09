@@ -682,6 +682,10 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 	if err := yaml.Unmarshal([]byte("orgo:\n  apiBase: https://repo.example.test\n"), &orgoFile); err != nil {
 		t.Fatal(err)
 	}
+	var runpodFile fileConfig
+	if err := yaml.Unmarshal([]byte("runpod:\n  apiUrl: https://repo.example.test\n"), &runpodFile); err != nil {
+		t.Fatal(err)
+	}
 	var railwayFile fileConfig
 	if err := yaml.Unmarshal([]byte("railway:\n  apiUrl: https://repo.example.test\n"), &railwayFile); err != nil {
 		t.Fatal(err)
@@ -723,7 +727,7 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 		{
 			name:          "runpod",
 			provider:      "runpod",
-			file:          fileConfig{Runpod: &fileRunpodConfig{APIURL: "https://repo.example.test"}},
+			file:          runpodFile,
 			credentialEnv: "CRABBOX_RUNPOD_API_KEY",
 			approveEnv:    "CRABBOX_RUNPOD_API_URL",
 		},

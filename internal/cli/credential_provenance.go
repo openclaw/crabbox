@@ -223,7 +223,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if flagWasSet(fs, "unikraft-cloud-url") {
 		provenance.unikraftCloudAPIURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "runpod-url") {
+	if RunpodConfigFlagPresence(fs).APIURL {
 		provenance.runpodAPIURL = credentialSourceFlag
 	}
 	if flagWasSet(fs, "vast-api-url") {

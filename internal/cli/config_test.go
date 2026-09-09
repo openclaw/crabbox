@@ -11601,3 +11601,199 @@ func TestLumeBindingEnvironmentContract(t *testing.T) {
 		})
 	}
 }
+
+func TestRunpodBindingFileContract(t *testing.T) {
+	wantDefaults := RunpodConfig{APIURL: "https://rest.runpod.io/v1", CloudType: "SECURE", InstanceID: "NVIDIA L4,NVIDIA RTX 4000 Ada Generation,NVIDIA RTX A4000,NVIDIA GeForce RTX 3090,NVIDIA GeForce RTX 4090,NVIDIA RTX A5000,NVIDIA RTX A4500", Image: "runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04", DiskGB: 20}
+	if got := baseConfig().Runpod; got != wantDefaults {
+		t.Fatalf("defaults=%#v want=%#v", got, wantDefaults)
+	}
+	if reflect.TypeOf(RunpodConfig{}).NumField() != 9 || reflect.TypeOf(fileRunpodConfig{}).NumField() != 8 {
+		t.Fatal("config source surface changed")
+	}
+	if _, ok := reflect.TypeOf(fileRunpodConfig{}).FieldByName("APIKey"); ok {
+		t.Fatal("key admitted to YAML")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace", "value"} {
+			cfg := baseConfig()
+			cfg.Runpod.APIKey = "inert-prior"
+			cfg.Runpod.TemplateID = "prior-template"
+			cfg.Runpod.User = "prior-user"
+			cfg.Runpod.WorkRoot = "/prior/root"
+			want := cfg.Runpod
+			source := credentialSourceFlag
+			cfg.credentialProvenance.runpodAPIKey = source
+			cfg.credentialProvenance.runpodAPIURL = source
+			fields := map[string]any{"apiKey": "ignored-inert-key"}
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"apiUrl", &want.APIURL}, {"cloudType", &want.CloudType}, {"instanceId", &want.InstanceID}, {"image", &want.Image}, {"templateId", &want.TemplateID}, {"user", &want.User}, {"workRoot", &want.WorkRoot}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = "fixture-value"
+				}
+				fields[f.key] = raw
+				if mode == "equal" || mode == "whitespace" || mode == "value" {
+					*f.v = raw.(string)
+					source = credentialSourceForFile(trusted)
+				}
+			}
+			data, err := yaml.Marshal(map[string]any{"runpod": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Runpod != want || cfg.credentialProvenance.runpodAPIURL != source || cfg.credentialProvenance.runpodAPIKey != credentialSourceFlag {
+				t.Fatalf("mode=%s trusted=%t", mode, trusted)
+			}
+		}
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, tc := range []struct {
+			yaml string
+			want int
+		}{{"runpod: null\n", 37}, {"runpod: {}\n", 37}, {"runpod:\n  diskGB: null\n", 37}, {"runpod:\n  diskGB: 0\n", 37}, {"runpod:\n  diskGB: -2\n", -2}, {"runpod:\n  diskGB: 4\n", 4}} {
+			cfg := baseConfig()
+			cfg.Runpod.DiskGB = 37
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte(tc.yaml), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Runpod.DiskGB != tc.want {
+				t.Fatalf("disk file=%q got=%d want=%d", tc.yaml, cfg.Runpod.DiskGB, tc.want)
+			}
+		}
+	}
+}
+
+func TestRunpodBindingEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"empty", "alias", "equal", "whitespace", "value", "API_KEY", "API_URL"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Runpod.APIKey = "inert-prior"
+			cfg.Runpod.TemplateID = "prior-template"
+			cfg.Runpod.User = "prior-user"
+			cfg.Runpod.WorkRoot = "/prior/root"
+			want := cfg.Runpod
+			cfg.credentialProvenance.runpodAPIKey = credentialSourceFlag
+			cfg.credentialProvenance.runpodAPIURL = credentialSourceFlag
+			accepted := map[string]bool{}
+			for _, f := range []struct {
+				suffix, alias string
+				v             *string
+			}{{"API_KEY", "RUNPOD_API_KEY", &want.APIKey}, {"API_URL", "RUNPOD_API_URL", &want.APIURL}, {"CLOUD_TYPE", "RUNPOD_CLOUD_TYPE", &want.CloudType}, {"INSTANCE_ID", "RUNPOD_INSTANCE_ID", &want.InstanceID}, {"IMAGE", "RUNPOD_IMAGE", &want.Image}, {"TEMPLATE_ID", "RUNPOD_TEMPLATE_ID", &want.TemplateID}, {"USER", "", &want.User}, {"WORK_ROOT", "", &want.WorkRoot}} {
+				raw, alias := *f.v, "alias-value"
+				if mode == "empty" {
+					raw = ""
+					alias = ""
+				}
+				if mode == "alias" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = "fixture-value"
+				}
+				if (mode == "API_KEY" || mode == "API_URL") && mode != f.suffix {
+					raw = ""
+					alias = ""
+				}
+				t.Setenv("CRABBOX_RUNPOD_"+f.suffix, raw)
+				if f.alias != "" {
+					t.Setenv(f.alias, alias)
+				}
+				if raw != "" {
+					*f.v = raw
+					accepted[f.suffix] = true
+				} else if f.alias != "" && alias != "" {
+					*f.v = alias
+					accepted[f.suffix] = true
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			key, url := credentialSourceFlag, credentialSourceFlag
+			if accepted["API_KEY"] {
+				key = credentialSourceEnvironment
+			}
+			if accepted["API_URL"] {
+				url = credentialSourceEnvironment
+			}
+			if cfg.Runpod != want || cfg.credentialProvenance.runpodAPIKey != key || cfg.credentialProvenance.runpodAPIURL != url {
+				t.Fatalf("env mode=%s got=%#v want=%#v", mode, cfg.Runpod, want)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		raw  string
+		want int
+	}{{"", 37}, {"invalid", 37}, {" 4 ", 37}, {"0", 0}, {"-2", -2}, {"4", 4}} {
+		t.Run("disk-"+tc.raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Runpod.DiskGB = 37
+			t.Setenv("CRABBOX_RUNPOD_DISK_GB", tc.raw)
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Runpod.DiskGB != tc.want {
+				t.Fatalf("env disk=%d want=%d", cfg.Runpod.DiskGB, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunpodBindingCentralURLPhase(t *testing.T) {
+	original := providerRegistry["aws"]
+	t.Cleanup(func() { providerRegistry["aws"] = original })
+	for _, visited := range []bool{false, true} {
+		cfg := baseConfig()
+		cfg.Provider = "aws"
+		cfg.credentialProvenance.runpodAPIURL = credentialSourceTrustedFile
+		seen := credentialSourceUnknown
+		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, observe: func(cfg Config) { seen = cfg.credentialProvenance.runpodAPIURL }}
+		fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+		fs.String("runpod-url", "", "")
+		if visited {
+			if err := fs.Parse([]string{"--runpod-url="}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := applyProviderFlags(&cfg, fs, providerFlagValues{}); err != nil {
+			t.Fatal(err)
+		}
+		want := credentialSourceTrustedFile
+		if visited {
+			want = credentialSourceFlag
+		}
+		if seen != credentialSourceTrustedFile || cfg.credentialProvenance.runpodAPIURL != want {
+			t.Fatal("URL source did not stay in central post-success phase")
+		}
+	}
+}

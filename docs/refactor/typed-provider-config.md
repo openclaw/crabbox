@@ -3,7 +3,7 @@
 Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
-Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, and Lume
+Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, Lume, and Runpod
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -18,7 +18,8 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_tensorlake.go`, `internal/cli/config_orgo.go`,
 `internal/cli/config_opencomputer.go`, `internal/cli/config_modal.go`,
 `internal/cli/config_morph.go`, `internal/cli/config_exe_dev.go`,
-`internal/cli/config_ovh.go`, and `internal/cli/config_lume.go`.
+`internal/cli/config_ovh.go`, `internal/cli/config_lume.go`, and
+`internal/cli/config_runpod.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -60,6 +61,11 @@ its user-dependent runtime root calculation. Changing the guest user can replace
 the old default root with `/Users/<user>/crabbox`; this trim-aware decision and
 native storage resolution remain outside generation.
 
+Runpod likewise keeps User and WorkRoot raw-empty so runtime defaults can inherit
+the generic SSH user and work root. Its named runtime fallbacks are not field
+defaults. A nonzero file disk value is an accepted input event; Runpod's later
+repair of nonpositive disk sizes to 20 remains provider policy.
+
 ## Adding a field
 
 1. Add an exported, singly named field to the provider's config struct. Supported types
@@ -94,7 +100,7 @@ native storage resolution remain outside generation.
    An existing source-specific integer can opt into `envInt:"fallback"` to use
    core's `getenvInt` for environment input only. It requires an environment
    source, `int`, and the existing nonnegative policy; empty or unknown modes are
-   rejected. File/default checks stay nonnegative, flags remain deferred, and
+   rejected. File rules remain independently selected, flags remain deferred, and
    malformed environment input keeps the previous value while parsed negatives
    retain each provider's existing later handling. No parser function is supplied
    by the tag.
@@ -107,6 +113,11 @@ native storage resolution remain outside generation.
    zero and negative values. It requires the same file-admitted int/default
    policy, but deliberately adds no file-value check. Omitted/null fields remain
    ignored; environment parsing is still selected independently.
+   `fileInt:"nonzero"` applies a present value only when it differs from zero,
+   including negative values. Omitted/null/zero input preserves the prior value.
+   It requires the same file-admitted int and nonnegative compiled-default policy,
+   but adds no file-negative rejection. Environment and flag behavior do not change;
+   later validation or default repair remains with the provider.
    A file-admitted `float64` with the same existing positive-only YAML rule can
    use `fileFloat:"positive"`. It emits the literal greater-than-zero predicate
    without changing float parsing or adding finite/range validation to file or
@@ -164,7 +175,7 @@ native storage resolution remain outside generation.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer ./internal/providers/modal ./internal/providers/morph ./internal/providers/exedev ./internal/providers/ovh ./internal/providers/lume` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer ./internal/providers/modal ./internal/providers/morph ./internal/providers/exedev ./internal/providers/ovh ./internal/providers/lume ./internal/providers/runpod` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:

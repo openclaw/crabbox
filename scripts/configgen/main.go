@@ -19,6 +19,7 @@ import (
 )
 
 type field struct {
+	fileIntNonzero                                                                                                                                                               bool
 	fileListRaw, envListPresence, flagListReplaceAppend                                                                                                                          bool
 	name, kind, key, configAlias, env, envAlias, envAlias2, flag, help, defaultExpr, flagFallbackExpr                                                                            string
 	nonnegative, trustedFileOnly, noFile, noEnv, noFlag, fileIgnoreEmpty, reportApplied, envIntFallback, fileIntPositive, fileIntPresent, fileFloatPositive, envAliasAfterConfig bool
@@ -271,11 +272,12 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			return s, fmt.Errorf("%s: pilot int fields require nonnegative policy", f.name)
 		}
 		if value, ok := tags.Lookup("fileInt"); ok {
-			if (value != "positive" && value != "present") || f.kind != "int" || f.noFile || !f.nonnegative {
-				return s, fmt.Errorf("%s: fileInt is supported only as positive or present for file-admitted nonnegative int fields", f.name)
+			if (value != "positive" && value != "present" && value != "nonzero") || f.kind != "int" || f.noFile || !f.nonnegative {
+				return s, fmt.Errorf("%s: fileInt is supported only as positive, present, or nonzero for file-admitted nonnegative int fields", f.name)
 			}
 			f.fileIntPositive = value == "positive"
 			f.fileIntPresent = value == "present"
+			f.fileIntNonzero = value == "nonzero"
 		}
 		if value, ok := tags.Lookup("fileFloat"); ok {
 			if value != "positive" || f.kind != "float64" || f.noFile {
@@ -415,8 +417,11 @@ func generate(s schema, source string) ([]byte, error) {
 			if f.fileIntPositive || f.fileFloatPositive {
 				fileCondition += fmt.Sprintf(" && *file.%s > 0", binding.member)
 			}
+			if f.fileIntNonzero {
+				fileCondition += fmt.Sprintf(" && *file.%s != 0", binding.member)
+			}
 			p("if %s {\n", fileCondition)
-			if f.nonnegative && !f.fileIntPositive && !f.fileIntPresent {
+			if f.nonnegative && !f.fileIntPositive && !f.fileIntPresent && !f.fileIntNonzero {
 				p("if *file.%s < 0 { return %sexit(2, %q) }\n", binding.member, resultPrefix, s.provider+" "+f.key+" must be non-negative")
 			}
 			value := "*file." + binding.member

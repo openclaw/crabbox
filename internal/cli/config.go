@@ -710,18 +710,6 @@ type UnikraftCloudConfig struct {
 	MemoryMB int
 }
 
-type RunpodConfig struct {
-	APIKey     string
-	APIURL     string
-	CloudType  string
-	InstanceID string
-	Image      string
-	TemplateID string
-	DiskGB     int
-	User       string
-	WorkRoot   string
-}
-
 // VastConfig contains Vast.ai provider settings. APIKey is populated only from
 // CRABBOX_VAST_API_KEY / VAST_API_KEY and must not be persisted or printed.
 type VastConfig struct {
@@ -2658,13 +2646,7 @@ func baseConfig() Config {
 		UnikraftCloud: UnikraftCloudConfig{
 			Metro: "fra",
 		},
-		Runpod: RunpodConfig{
-			APIURL:     "https://rest.runpod.io/v1",
-			CloudType:  "SECURE",
-			InstanceID: "NVIDIA L4,NVIDIA RTX 4000 Ada Generation,NVIDIA RTX A4000,NVIDIA GeForce RTX 3090,NVIDIA GeForce RTX 4090,NVIDIA RTX A5000,NVIDIA RTX A4500",
-			Image:      "runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04",
-			DiskGB:     20,
-		},
+		Runpod: defaultRunpodConfig(),
 		Vast: VastConfig{
 			APIURL:        "https://console.vast.ai/api/v0",
 			InstanceType:  "ondemand",
@@ -3546,17 +3528,6 @@ type fileUnikraftCloudConfig struct {
 	Metro    string `yaml:"metro,omitempty"`
 	Image    string `yaml:"image,omitempty"`
 	MemoryMB int    `yaml:"memoryMB,omitempty"`
-}
-
-type fileRunpodConfig struct {
-	APIURL     string `yaml:"apiUrl,omitempty"`
-	CloudType  string `yaml:"cloudType,omitempty"`
-	InstanceID string `yaml:"instanceId,omitempty"`
-	Image      string `yaml:"image,omitempty"`
-	TemplateID string `yaml:"templateId,omitempty"`
-	DiskGB     int    `yaml:"diskGB,omitempty"`
-	User       string `yaml:"user,omitempty"`
-	WorkRoot   string `yaml:"workRoot,omitempty"`
 }
 
 type fileVastConfig struct {
@@ -5793,31 +5764,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.UnikraftCloud.MemoryMB = file.UnikraftCloud.MemoryMB
 		}
 	}
-	if file.Runpod != nil {
-		if file.Runpod.APIURL != "" {
-			cfg.Runpod.APIURL = file.Runpod.APIURL
+	{
+		applied, err := cfg.Runpod.applyFile(file.Runpod)
+		if applied.APIURL {
 			cfg.credentialProvenance.runpodAPIURL = credentialSource
 		}
-		if file.Runpod.CloudType != "" {
-			cfg.Runpod.CloudType = file.Runpod.CloudType
-		}
-		if file.Runpod.InstanceID != "" {
-			cfg.Runpod.InstanceID = file.Runpod.InstanceID
-		}
-		if file.Runpod.Image != "" {
-			cfg.Runpod.Image = file.Runpod.Image
-		}
-		if file.Runpod.TemplateID != "" {
-			cfg.Runpod.TemplateID = file.Runpod.TemplateID
-		}
-		if file.Runpod.DiskGB != 0 {
-			cfg.Runpod.DiskGB = file.Runpod.DiskGB
-		}
-		if file.Runpod.User != "" {
-			cfg.Runpod.User = file.Runpod.User
-		}
-		if file.Runpod.WorkRoot != "" {
-			cfg.Runpod.WorkRoot = file.Runpod.WorkRoot
+		if err != nil {
+			return err
 		}
 	}
 	if file.Vast != nil {
@@ -7770,21 +7723,18 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.UnikraftCloud.Metro = getenv("CRABBOX_UNIKRAFT_CLOUD_METRO", getenv("UNIKRAFT_CLOUD_METRO", getenv("UKC_METRO", cfg.UnikraftCloud.Metro)))
 	cfg.UnikraftCloud.Image = getenv("CRABBOX_UNIKRAFT_CLOUD_IMAGE", getenv("UNIKRAFT_CLOUD_IMAGE", cfg.UnikraftCloud.Image))
-	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_API_KEY", "RUNPOD_API_KEY"); ok {
-		cfg.Runpod.APIKey = value
-		cfg.credentialProvenance.runpodAPIKey = credentialSourceEnvironment
+	{
+		applied, err := cfg.Runpod.applyEnv()
+		if applied.APIKey {
+			cfg.credentialProvenance.runpodAPIKey = credentialSourceEnvironment
+		}
+		if applied.APIURL {
+			cfg.credentialProvenance.runpodAPIURL = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_RUNPOD_API_URL", "RUNPOD_API_URL"); ok {
-		cfg.Runpod.APIURL = value
-		cfg.credentialProvenance.runpodAPIURL = credentialSourceEnvironment
-	}
-	cfg.Runpod.CloudType = getenv("CRABBOX_RUNPOD_CLOUD_TYPE", getenv("RUNPOD_CLOUD_TYPE", cfg.Runpod.CloudType))
-	cfg.Runpod.InstanceID = getenv("CRABBOX_RUNPOD_INSTANCE_ID", getenv("RUNPOD_INSTANCE_ID", cfg.Runpod.InstanceID))
-	cfg.Runpod.Image = getenv("CRABBOX_RUNPOD_IMAGE", getenv("RUNPOD_IMAGE", cfg.Runpod.Image))
-	cfg.Runpod.TemplateID = getenv("CRABBOX_RUNPOD_TEMPLATE_ID", getenv("RUNPOD_TEMPLATE_ID", cfg.Runpod.TemplateID))
-	cfg.Runpod.DiskGB = getenvInt("CRABBOX_RUNPOD_DISK_GB", cfg.Runpod.DiskGB)
-	cfg.Runpod.User = getenv("CRABBOX_RUNPOD_USER", cfg.Runpod.User)
-	cfg.Runpod.WorkRoot = getenv("CRABBOX_RUNPOD_WORK_ROOT", cfg.Runpod.WorkRoot)
 	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_API_KEY", "VAST_API_KEY"); ok {
 		cfg.Vast.APIKey = value
 		cfg.credentialProvenance.vastAPIKey = credentialSourceEnvironment

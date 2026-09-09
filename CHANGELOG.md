@@ -70,6 +70,8 @@
 
 - Keep raw-exact provider selection aligned with declared names and aliases without normalizing inputs or changing flag/default validation order. [PR 2031](https://github.com/openclaw/crabbox/pull/2031). Thanks @steipete.
 
+- Describe Runpod configuration bindings once, sharing effective defaults while preserving environment-only keys, nonzero disk overlays, and generic user/work-root inheritance. Thanks @steipete.
+
 ## 0.53.0 - 2026-09-08
 
 ### Highlights

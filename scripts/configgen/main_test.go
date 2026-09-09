@@ -508,6 +508,12 @@ func TestLumeGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestRunpodGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_runpod.go", "../../internal/cli/config_runpod_generated.go", "RunpodConfig", "runpod", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -1754,4 +1760,114 @@ func TestListSources(t *testing.T){
 }
 `
 	runScalarFixture(t, sourceListSample, output, behavior+helper+getters)
+}
+
+func TestSchemaFileIntNonzeroFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"empty", `help:"Count"`, `help:"Count" fileInt:""`, "fileInt is supported only"},
+		{"unknown", `help:"Count"`, `help:"Count" fileInt:"non-zero"`, "fileInt is supported only"},
+		{"string", `help:"Name"`, `help:"Name" fileInt:"nonzero"`, "fileInt is supported only"},
+		{"float", `help:"CPUs"`, `help:"CPUs" fileInt:"nonzero"`, "fileInt is supported only"},
+		{"bool", `help:"Enabled"`, `help:"Enabled" fileInt:"nonzero"`, "fileInt is supported only"},
+		{"list", `help:"Ports"`, `help:"Ports" fileInt:"nonzero"`, "fileInt is supported only"},
+		{"required policy", `nonnegative:"true"`, `fileInt:"nonzero"`, "require nonnegative policy"},
+		{"default remains constrained", `default:"7"`, `default:"-1" fileInt:"nonzero"`, "default must be non-negative"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(sample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+	for _, input := range []string{
+		strings.Replace(flagOnlySample, `help:"Count"`, `help:"Count" fileInt:"nonzero"`, 1),
+		"package cli\ntype PilotConfig struct{ Count int `sources:\"env,flag\" env:\"COUNT\" flag:\"count\" help:\"Count\" nonnegative:\"true\" fileInt:\"nonzero\"` }",
+	} {
+		if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "fileInt is supported only") {
+			t.Fatalf("no-file nonzero mode admitted: %v", err)
+		}
+	}
+}
+
+func TestGenerateFileIntNonzero(t *testing.T) {
+	const source = "package cli\ntype PilotConfig struct {\n" +
+		" Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"COUNT\" flag:\"count\" help:\"Count\" nonnegative:\"true\" default:\"37\"`\n" +
+		" Positive int `sources:\"user,repo,env,flag\" config:\"positive\" env:\"POSITIVE\" flag:\"positive\" help:\"Positive\" nonnegative:\"true\" fileInt:\"positive\"`\n" +
+		" Present int `sources:\"user,repo,env,flag\" config:\"present\" env:\"PRESENT\" flag:\"present\" help:\"Present\" nonnegative:\"true\" fileInt:\"present\"`\n" +
+		" Strict int `sources:\"user,repo,env,flag\" config:\"strict\" env:\"STRICT\" flag:\"strict\" help:\"Strict\" nonnegative:\"true\"`\n}"
+	coreSource, err := os.ReadFile("../../internal/cli/config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	helpers := ""
+	for _, name := range []string{"getenvInt", "getenvNonNegativeInt"} {
+		start := strings.Index(string(coreSource), "func "+name+"(")
+		if start < 0 {
+			t.Fatalf("missing helper %s", name)
+		}
+		rest := string(coreSource)[start:]
+		end := strings.Index(rest, "\nfunc ")
+		if end < 0 {
+			t.Fatalf("missing end for %s", name)
+		}
+		helpers += rest[:end] + "\n"
+	}
+	for _, fallback := range []bool{false, true} {
+		input := source
+		if fallback {
+			input = strings.Replace(input, `help:"Count"`, `help:"Count" envInt:"fallback"`, 1)
+		}
+		s, err := parseSchema([]byte(input), "PilotConfig", "pilot")
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := generate(s, "pilot.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		input = strings.Replace(input, `help:"Count"`, `help:"Count" fileInt:"nonzero"`, 1)
+		s, err = parseSchema([]byte(input), "PilotConfig", "pilot")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !s.fields[0].fileIntNonzero || s.fields[0].fileIntPositive || s.fields[0].fileIntPresent || s.fields[1].fileIntNonzero || s.fields[2].fileIntNonzero {
+			t.Fatal("file modes not exclusive")
+		}
+		output, err := generate(s, "pilot.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		again, err := generate(s, "pilot.go")
+		if err != nil || !bytes.Equal(output, again) {
+			t.Fatalf("nondeterministic nonzero: %v", err)
+		}
+		want := strings.Replace(string(before), "if file.Count != nil {", "if file.Count != nil && *file.Count != 0 {", 1)
+		want = strings.Replace(want, "\t\tif *file.Count < 0 {\n\t\t\treturn exit(2, \"pilot count must be non-negative\")\n\t\t}\n", "", 1)
+		if string(output) != want {
+			t.Fatal("nonzero mode changed other file/env/default/flag behavior")
+		}
+		typecheckGenerated(t, input+"\nfunc getenvInt(string,int)int{panic(\"stub\")}\n", output)
+		const behavior = `package cli
+import("flag";"fmt";"os";"strconv";"testing")
+func exit(_ int, pattern string, args ...any)error{return fmt.Errorf(pattern,args...)}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestNonzeroSources(t *testing.T){
+ zero,negative,positive:=0,-2,4
+ for _,tc:=range []struct{name string;value *int;want int}{{"omitted/null",nil,37},{"zero",&zero,37},{"negative",&negative,-2},{"positive",&positive,4}}{
+  cfg:=defaultPilotConfig();if err:=cfg.applyFile(&filePilotConfig{Count:tc.value});err!=nil||cfg.Count!=tc.want{t.Fatalf("%s: %+v %v",tc.name,cfg,err)}
+ }
+ cfg:=PilotConfig{Count:37,Positive:8,Present:9,Strict:10}
+ err:=cfg.applyFile(&filePilotConfig{Count:&negative,Positive:&negative,Present:&zero,Strict:&negative})
+ if err==nil||cfg.Count!=-2||cfg.Positive!=8||cfg.Present!=0||cfg.Strict!=10{t.Fatalf("mode/order: %+v %v",cfg,err)}
+ for _,raw:=range []string{"-2","bad"}{
+  t.Setenv("COUNT",raw);cfg=defaultPilotConfig();err=cfg.applyEnv()
+  if fallbackMode{want:=37;if raw=="-2"{want=-2};if err!=nil||cfg.Count!=want{t.Fatalf("fallback %q: %+v %v",raw,cfg,err)}}else if err==nil||cfg.Count!=0{t.Fatalf("strict %q: %+v %v",raw,cfg,err)}
+ }
+ fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+ if err:=fs.Parse([]string{"--count=0"});err!=nil{t.Fatal(err)};values.Apply(&cfg,fs);if cfg.Count!=0{t.Fatal("file zero rule leaked into flags")}
+}
+`
+		runScalarFixture(t, input, output, behavior+helpers+"\nconst fallbackMode = "+map[bool]string{false: "false", true: "true"}[fallback]+"\n")
+	}
 }
