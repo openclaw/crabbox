@@ -526,6 +526,12 @@ func TestWandbGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestScalewayGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_scaleway.go", "../../internal/cli/config_scaleway_generated.go", "ScalewayConfig", "scaleway", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -1971,4 +1977,112 @@ func TestNestedFallback(t *testing.T){
 }
 `
 	runScalarFixture(t, source, output, behavior+rest[:end])
+}
+
+func TestSchemaNonemptyRawAndEmptyScalarLists(t *testing.T) {
+	for _, mode := range []struct{ tag, value string }{{"fileList", "nonempty-raw"}, {"flagList", "empty-scalar"}} {
+		for _, value := range []string{"", "unknown", mode.value + ",raw"} {
+			input := strings.Replace(sample, `help:"Ports"`, `help:"Ports" `+mode.tag+`:"`+value+`"`, 1)
+			if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), mode.tag+" requires") {
+				t.Fatalf("invalid %s %q: %v", mode.tag, value, err)
+			}
+		}
+		for _, kind := range []string{"string", "int", "float64", "bool"} {
+			input := strings.Replace(sample, "Name string", "Name "+kind, 1)
+			input = strings.Replace(input, `help:"Name"`, `help:"Name" `+mode.tag+`:"`+mode.value+`"`, 1)
+			if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), mode.tag+" requires") {
+				t.Fatalf("kind%s mode%s: %v", kind, mode.tag, err)
+			}
+		}
+	}
+	input := strings.Replace(flagOnlySample, `help:"Ports"`, `help:"Ports" fileList:"nonempty-raw"`, 1)
+	if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "fileList requires") {
+		t.Fatalf("raw file without source: %v", err)
+	}
+	input = "package cli\ntype PilotConfig struct{ Items []string `sources:\"user,env\" config:\"items\" env:\"ITEMS\" flagList:\"empty-scalar\"` }"
+	if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil {
+		t.Fatal("flag mode without flag source admitted")
+	}
+}
+
+func TestGenerateNonemptyRawAndEmptyScalarLists(t *testing.T) {
+	const source = "package cli\ntype PilotConfig struct{ Items []string `sources:\"user,repo,env,flag\" config:\"items\" env:\"ITEMS\" flag:\"item\" help:\"Items\" fileList:\"nonempty-raw\" flagList:\"empty-scalar\"` }"
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.fields[0].fileListNonemptyRaw || s.fields[0].fileListRaw || !s.fields[0].flagListEmptyScalar || s.fields[0].flagListReplaceAppend || s.fields[0].envListPresence {
+		t.Fatal("mode facts wrong")
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic lists: %v", err)
+	}
+	text := string(output)
+	for _, want := range []string{`if file.Items != nil && len(*file.Items) > 0 {`, `cfg.Items = *file.Items`, `fs.String("item", "", "Items")`, `if value := os.Getenv("ITEMS"); value != ""`, `if len(cfg.Items) == 0 {`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing fixed list binding %q", want)
+		}
+	}
+	if strings.Contains(text, `"strings"`) || strings.Contains(text, "newReplaceAppendListFlag") {
+		t.Fatal("unused default-join import or append flag owner")
+	}
+	typecheckGenerated(t, source, output)
+	// A flag-only empty scalar list needs neither list-specific import.
+	flagSource := strings.Replace(source, `sources:"user,repo,env,flag" config:"items" env:"ITEMS"`, `sources:"flag"`, 1)
+	flagSource = strings.Replace(flagSource, ` fileList:"nonempty-raw"`, "", 1)
+	flagSchema, err := parseSchema([]byte(flagSource), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	flagOutput, err := generate(flagSchema, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(flagOutput), `"strings"`) || strings.Contains(string(flagOutput), `"os"`) {
+		t.Fatal("flag-only empty scalar list has unused imports")
+	}
+	typecheckGenerated(t, flagSource, flagOutput)
+	coreSource, err := os.ReadFile("../../internal/cli/config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	getters := ""
+	for _, name := range []string{"splitCommaList", "normalizeList"} {
+		start := strings.Index(string(coreSource), "func "+name+"(")
+		if start < 0 {
+			t.Fatalf("missing %s", name)
+		}
+		rest := string(coreSource)[start:]
+		end := strings.Index(rest, "\nfunc ")
+		if end < 0 {
+			t.Fatalf("missing end %s", name)
+		}
+		getters += rest[:end] + "\n"
+	}
+	const behavior = `package cli
+import("flag";"reflect";"strings";"testing")
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestDistinctListEvents(t *testing.T){
+ prior:=[]string{"prior"};cfg:=PilotConfig{Items:prior};empty:=[]string{}
+ for _,file:=range []*filePilotConfig{nil,{}, {Items:&empty}}{if err:=cfg.applyFile(file);err!=nil||&cfg.Items[0]!=&prior[0]{t.Fatal("empty file changed prior sharing")}}
+ raw:=[]string{" a ","","dup","dup"};file:=&filePilotConfig{Items:&raw}
+ if err:=cfg.applyFile(file);err!=nil||!reflect.DeepEqual(cfg.Items,raw)||&cfg.Items[0]!=&raw[0]{t.Fatal("file was normalized/copied")}
+ second:=PilotConfig{};if err:=second.applyFile(file);err!=nil{t.Fatal(err)};raw[0]="file mutation";if cfg.Items[0]!="file mutation"||second.Items[0]!="file mutation"{t.Fatal("file sharing lost")}
+ cfg.Items[1]="cfg mutation";if raw[1]!="cfg mutation"||second.Items[1]!="cfg mutation"{t.Fatal("cfg sharing lost")}
+ oneEmpty:=[]string{""};if err:=cfg.applyFile(&filePilotConfig{Items:&oneEmpty});err!=nil||len(cfg.Items)!=1{t.Fatal("nonempty list containing empty string ignored")}
+ cfg.Items=prior;if err:=cfg.applyEnv();err!=nil||&cfg.Items[0]!=&prior[0]{t.Fatal("absent env changed prior")}
+ t.Setenv("ITEMS","");if err:=cfg.applyEnv();err!=nil||&cfg.Items[0]!=&prior[0]{t.Fatal("empty env changed prior")}
+ for _,tc:=range []struct{raw string;want []string}{{" , ",[]string{}},{"none",[]string{"none"}},{" a, ,dup,dup ",[]string{"a","dup","dup"}}}{t.Setenv("ITEMS",tc.raw);if err:=cfg.applyEnv();err!=nil||!reflect.DeepEqual(cfg.Items,tc.want){t.Fatalf("env%q: %#v %v",tc.raw,cfg.Items,err)}}
+ cfg.Items=[]string{"configured"};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+ if fs.Lookup("item").DefValue!=""||*values.Items!=""{t.Fatal("flag default joined config")};values.Apply(&cfg,fs);if !reflect.DeepEqual(cfg.Items,[]string{"configured"}){t.Fatal("unvisited flag changed config")}
+ if err:=fs.Parse([]string{"--item=first","--item= a, ,dup,dup "});err!=nil{t.Fatal(err)};values.Apply(&cfg,fs);if !reflect.DeepEqual(cfg.Items,[]string{"a","dup","dup"}){t.Fatalf("last scalar/order: %#v",cfg.Items)}
+ for _,raw:=range []string{""," , ","none"}{fs:=flag.NewFlagSet("other",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg);if err:=fs.Parse([]string{"--item="+raw});err!=nil{t.Fatal(err)};values.Apply(&cfg,fs);if raw=="none"{if !reflect.DeepEqual(cfg.Items,[]string{"none"}){t.Fatal("none treated as flag sentinel")}}else if cfg.Items!=nil{t.Fatalf("empty flag notnil %#v",cfg.Items)}}
+}
+`
+	runScalarFixture(t, source, output, behavior+getters)
 }

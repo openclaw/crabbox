@@ -2566,19 +2566,11 @@ func TestOVHConfigShowRedactsEnvCredentials(t *testing.T) {
 func TestScalewayConfigFileEnvAndDefaults(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
-	if err := applyFileConfig(&cfg, fileConfig{
-		Provider: "scaleway",
-		Scaleway: &fileScalewayConfig{
-			Region:         "nl-ams",
-			Zone:           "nl-ams-1",
-			Image:          "ubuntu_jammy",
-			Type:           "DEV1-M",
-			ProjectID:      "project-file",
-			OrganizationID: "org-file",
-			SecurityGroup:  "sg-file",
-			SSHCIDRs:       []string{"203.0.113.0/24"},
-		},
-	}); err != nil {
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("provider: scaleway\nscaleway:\n  region: nl-ams\n  zone: nl-ams-1\n  image: ubuntu_jammy\n  type: DEV1-M\n  projectId: project-file\n  organizationId: org-file\n  securityGroup: sg-file\n  sshCIDRs: [203.0.113.0/24]\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Provider != "scaleway" || cfg.Scaleway.Region != "nl-ams" || cfg.Scaleway.Zone != "nl-ams-1" || cfg.Scaleway.Image != "ubuntu_jammy" || cfg.Scaleway.Type != "DEV1-M" || cfg.Scaleway.ProjectID != "project-file" || cfg.Scaleway.OrganizationID != "org-file" || cfg.Scaleway.SecurityGroup != "sg-file" {
@@ -12191,5 +12183,229 @@ func TestWandbBindingEnvironmentContract(t *testing.T) {
 				t.Fatalf("nested lifetime got=%d want=%d", cfg.Wandb.MaxLifetimeSeconds, tc.want)
 			}
 		})
+	}
+}
+
+func TestScalewayBindingFileContract(t *testing.T) {
+	defaults := ScalewayConfig{Region: "fr-par", Zone: "fr-par-1", Image: "ubuntu_noble", Type: "DEV1-S"}
+	if got := baseConfig().Scaleway; !reflect.DeepEqual(got, defaults) {
+		t.Fatalf("defaults=%#v", got)
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "padded", "custom"} {
+			cfg := baseConfig()
+			cfg.Scaleway.ProjectID = "prior-project"
+			cfg.Scaleway.OrganizationID = "prior-org"
+			cfg.Scaleway.SecurityGroup = "prior-group"
+			want := cfg.Scaleway
+			fields := map[string]any{}
+			accepted := mode == "equal" || mode == "padded" || mode == "custom"
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"region", &want.Region}, {"zone", &want.Zone}, {"image", &want.Image}, {"type", &want.Type}, {"projectId", &want.ProjectID}, {"organizationId", &want.OrganizationID}, {"securityGroup", &want.SecurityGroup}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "padded" {
+					raw = "  " + *f.v + "  "
+				}
+				if mode == "custom" {
+					raw = "fixture"
+				}
+				fields[f.key] = raw
+				if accepted {
+					*f.v = raw.(string)
+				}
+			}
+			data, err := yaml.Marshal(map[string]any{"scaleway": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Scaleway, want) || ScalewayRegionWasExplicit(cfg) != accepted || ScalewayZoneWasExplicit(cfg) != accepted || ScalewayImageWasExplicit(cfg) != accepted || ScalewayTypeWasExplicit(cfg) != accepted {
+				t.Fatalf("file mode=%s trusted=%t", mode, trusted)
+			}
+		}
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, tc := range []struct {
+			body     string
+			accepted bool
+			want     []string
+		}{{"scaleway: {}\n", false, nil}, {"scaleway:\n  sshCIDRs: null\n", false, nil}, {"scaleway:\n  sshCIDRs: []\n", false, nil}, {"scaleway:\n  sshCIDRs: ['']\n", true, []string{""}}, {"scaleway:\n  sshCIDRs: [' 203.0.113.0/24 ', '', ' ', '2001:db8::/64', '203.0.113.0/24']\n", true, []string{" 203.0.113.0/24 ", "", " ", "2001:db8::/64", "203.0.113.0/24"}}} {
+			for _, prior := range [][]string{nil, {}, {"prior"}} {
+				cfg := baseConfig()
+				cfg.Scaleway.SSHCIDRs = prior
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte(tc.body), &file); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				want := prior
+				if tc.accepted {
+					want = tc.want
+				}
+				if !reflect.DeepEqual(cfg.Scaleway.SSHCIDRs, want) {
+					t.Fatalf("file list=%q got=%#v want=%#v", tc.body, cfg.Scaleway.SSHCIDRs, want)
+				}
+				if !tc.accepted {
+					if len(prior) > 0 && &cfg.Scaleway.SSHCIDRs[0] != &prior[0] {
+						t.Fatal("ignored list changed backing array")
+					}
+					continue
+				}
+				second := baseConfig()
+				if err := applyFileConfigWithTrust(&second, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				source := reflect.ValueOf(file.Scaleway).Elem().FieldByName("SSHCIDRs")
+				if source.Kind() == reflect.Pointer {
+					source = source.Elem()
+				}
+				raw := source.Interface().([]string)
+				if &raw[0] != &cfg.Scaleway.SSHCIDRs[0] || &raw[0] != &second.Scaleway.SSHCIDRs[0] {
+					t.Fatal("accepted file list no longer directly shared")
+				}
+				cfg.Scaleway.SSHCIDRs[0] = "198.51.100.0/24"
+				if raw[0] != "198.51.100.0/24" || second.Scaleway.SSHCIDRs[0] != raw[0] {
+					t.Fatal("shared element update lost")
+				}
+			}
+		}
+	}
+}
+
+func TestScalewayBindingEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"missing", "empty", "equal", "padded", "custom"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			want := cfg.Scaleway
+			accepted := mode == "equal" || mode == "padded" || mode == "custom"
+			for _, f := range []struct {
+				suffix string
+				v      *string
+			}{{"REGION", &want.Region}, {"ZONE", &want.Zone}, {"IMAGE", &want.Image}, {"TYPE", &want.Type}, {"PROJECT_ID", &want.ProjectID}, {"ORGANIZATION_ID", &want.OrganizationID}, {"SECURITY_GROUP", &want.SecurityGroup}} {
+				raw := *f.v
+				if mode == "missing" || mode == "empty" {
+					raw = ""
+				}
+				if mode == "padded" {
+					raw = "  " + *f.v + "  "
+				}
+				if mode == "custom" {
+					raw = "fixture"
+				}
+				name := "CRABBOX_SCALEWAY_" + f.suffix
+				t.Setenv(name, raw)
+				if mode == "missing" {
+					if err := os.Unsetenv(name); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if raw != "" {
+					*f.v = raw
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Scaleway, want) || ScalewayRegionWasExplicit(cfg) != accepted || ScalewayZoneWasExplicit(cfg) != accepted || ScalewayImageWasExplicit(cfg) != accepted || ScalewayTypeWasExplicit(cfg) != accepted {
+				t.Fatalf("env mode=%s", mode)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, raw string
+		missing   bool
+		want      []string
+	}{{"missing", "", true, []string{"prior"}}, {"empty", "", false, []string{"prior"}}, {"blanks", " , \t , ", false, []string{}}, {"none", "none", false, []string{"none"}}, {"ordered", " 203.0.113.0/24, ,2001:db8::/64,203.0.113.0/24 ", false, []string{"203.0.113.0/24", "2001:db8::/64", "203.0.113.0/24"}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Scaleway.SSHCIDRs = []string{"prior"}
+			t.Setenv("CRABBOX_SCALEWAY_SSH_CIDRS", tc.raw)
+			if tc.missing {
+				if err := os.Unsetenv("CRABBOX_SCALEWAY_SSH_CIDRS"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Scaleway.SSHCIDRs, tc.want) {
+				t.Fatalf("env list=%#v want=%#v", cfg.Scaleway.SSHCIDRs, tc.want)
+			}
+		})
+	}
+}
+
+func TestScalewayBindingIndependentMarkers(t *testing.T) {
+	for _, name := range []string{"region", "zone", "image", "type"} {
+		for _, source := range []string{"user", "repo", "env"} {
+			t.Run(name+"-"+source, func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := baseConfig()
+				if source == "env" {
+					t.Setenv("CRABBOX_SCALEWAY_"+strings.ToUpper(name), "  ")
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					var file fileConfig
+					if err := yaml.Unmarshal([]byte("scaleway:\n  "+name+": '  '\n"), &file); err != nil {
+						t.Fatal(err)
+					}
+					if err := applyFileConfigWithTrust(&cfg, file, source == "user"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for field, got := range map[string]bool{"region": ScalewayRegionWasExplicit(cfg), "zone": ScalewayZoneWasExplicit(cfg), "image": ScalewayImageWasExplicit(cfg), "type": ScalewayTypeWasExplicit(cfg)} {
+					if got != (field == name) {
+						t.Fatalf("marker=%s got=%t", field, got)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestScalewayBindingCoreDefaults(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "scaleway"
+	cfg.Scaleway = ScalewayConfig{}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	want := ScalewayConfig{Region: "fr-par", Zone: "fr-par-1", Image: "ubuntu_noble", Type: "DEV1-S"}
+	if !reflect.DeepEqual(cfg.Scaleway, want) || ScalewayRegionWasExplicit(cfg) || ScalewayZoneWasExplicit(cfg) || ScalewayImageWasExplicit(cfg) || ScalewayTypeWasExplicit(cfg) {
+		t.Fatal("raw core defaults or markers changed")
+	}
+	cfg = baseConfig()
+	cfg.Provider = "scaleway"
+	cfg.Scaleway.Image = "prior-unmarked-image"
+	cfg.OSImage = "ubuntu:24.04"
+	cfg.osImageExplicit = true
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Scaleway.Image != "ubuntu_noble" {
+		t.Fatal("fixed portable image mapping changed")
 	}
 }

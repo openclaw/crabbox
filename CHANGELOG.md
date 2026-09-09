@@ -76,6 +76,8 @@
 
 - Describe W&B configuration bindings once, sharing runtime fallback values while preserving tolerant lifetime environment aliases, raw defaults, and client-owned login precedence. [PR 2034](https://github.com/openclaw/crabbox/pull/2034). Thanks @steipete.
 
+- Describe Scaleway configuration bindings once, sharing configured defaults while preserving explicit SDK location overrides and distinct file, environment, and flag list behavior. Thanks @steipete.
+
 ## 0.53.0 - 2026-09-08
 
 ### Highlights
