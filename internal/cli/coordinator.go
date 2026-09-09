@@ -71,6 +71,7 @@ type CoordinatorLease struct {
 	DesktopEnv                   string                         `json:"desktopEnv,omitempty"`
 	Browser                      bool                           `json:"browser,omitempty"`
 	Code                         bool                           `json:"code,omitempty"`
+	Network                      *LeaseNetworkDiagnostics       `json:"network,omitempty"`
 	Tailscale                    *TailscaleMetadata             `json:"tailscale,omitempty"`
 	Region                       string                         `json:"region,omitempty"`
 	ProviderProject              string                         `json:"providerProject,omitempty"`
@@ -122,6 +123,18 @@ type CoordinatorLease struct {
 	ProvisioningResourceMayExist *bool                          `json:"provisioningResourceMayExist,omitempty"`
 	ProvisioningFailureRetryable *bool                          `json:"provisioningFailureRetryable,omitempty"`
 	ProviderMetadata             map[string]any                 `json:"providerMetadata,omitempty"`
+}
+
+// LeaseNetworkDiagnostics retains broker records, not live ingress observations.
+// Pointers preserve unknown fields separately from explicit false or empty values.
+type LeaseNetworkDiagnostics struct {
+	SSHSourceCIDRs         *[]string `json:"sshSourceCIDRs,omitempty"`
+	SSHPinnedSourceCIDRs   *[]string `json:"sshPinnedSourceCIDRs,omitempty"`
+	SSHSourceCIDRsComplete *bool     `json:"sshSourceCIDRsComplete,omitempty"`
+	AWSSecurityGroupID     *string   `json:"awsSecurityGroupID,omitempty"`
+	AWSSecurityGroupName   *string   `json:"awsSecurityGroupName,omitempty"`
+	AWSSubnetID            *string   `json:"awsSubnetID,omitempty"`
+	AWSPrivate             *bool     `json:"awsPrivate,omitempty"`
 }
 
 // ProviderCleanupEvidence is recorded broker evidence, not a live provider observation.

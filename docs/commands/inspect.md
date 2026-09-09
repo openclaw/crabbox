@@ -65,6 +65,21 @@ key path, port, user, and host). Empty fields render as `-`.
 label map. Secrets such as broker tokens, provider keys, and VNC passwords are
 never included in either output mode.
 
+Brokered JSON records may also include `networkDiagnostics`, retaining the
+coordinator's recorded SSH source CIDRs (`sshSourceCIDRs`), pinned source CIDRs
+(`sshPinnedSourceCIDRs`), and completeness flag (`sshSourceCIDRsComplete`).
+AWS records may include `awsSecurityGroupID`, `awsSecurityGroupName`,
+`awsSubnetID`, and `awsPrivate`. The existing `network` field remains the resolved
+connection-mode string; these diagnostics do not change route selection.
+
+Omitted fields mean no value was recorded, including on older brokers. Explicit
+`false`, empty arrays, and empty strings remain distinct from omission. These
+are stored lease facts, also available on released records, not a fresh provider
+or security-group read, the complete effective ingress rule set, or proof that
+SSH is reachable. The diagnostic pass-through makes no additional request.
+Treat CIDRs and placement identifiers as private operational data and redact
+them before sharing output publicly.
+
 Brokered Hetzner leases may include versioned `providerCleanup` in JSON output.
 It binds the provider, lease ID and numeric server ID, retains dispatch and
 action status when known, and records a confirmation method and timestamp after

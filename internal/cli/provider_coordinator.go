@@ -926,6 +926,7 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		ServerType:                   lease.ServerType,
 		Host:                         lease.Host,
 		Network:                      resolved.Network,
+		NetworkDiagnostics:           lease.Network,
 		Tailscale:                    lease.Tailscale,
 		SSHHost:                      target.Host,
 		SSHHostKey:                   target.SSHHostKey,

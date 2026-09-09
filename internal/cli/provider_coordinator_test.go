@@ -444,6 +444,141 @@ func TestCoordinatorInspectJSONIncludesOptionalSSHHostKey(t *testing.T) {
 	}
 }
 
+func TestCoordinatorInspectJSONPreservesNetworkDiagnostics(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	for _, test := range []struct {
+		name    string
+		network string
+	}{
+		{name: "older broker omits network"},
+		{name: "empty object", network: `{}`},
+		{
+			name: "recorded ingress and placement",
+			network: `{
+				"sshSourceCIDRs": ["192.0.2.24/32", "2001:db8::24/128"],
+				"sshPinnedSourceCIDRs": ["203.0.113.0/24"],
+				"sshSourceCIDRsComplete": true,
+				"awsSecurityGroupID": "sg-example",
+				"awsSecurityGroupName": "crabbox-example",
+				"awsSubnetID": "subnet-example",
+				"awsPrivate": true
+			}`,
+		},
+		{
+			name: "explicit false and empty values",
+			network: `{
+				"sshSourceCIDRs": [],
+				"sshPinnedSourceCIDRs": [],
+				"sshSourceCIDRsComplete": false,
+				"awsSecurityGroupID": "",
+				"awsSecurityGroupName": "",
+				"awsSubnetID": "",
+				"awsPrivate": false
+			}`,
+		},
+		{name: "partial historical record", network: `{"sshSourceCIDRs": ["2001:db8::24/128"]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_network" ||
+					r.URL.RawQuery != "providerMetadata=authoritative" ||
+					r.Header.Get("Authorization") != "Bearer user-token" {
+					t.Errorf("unexpected inspect request: %s %s", r.Method, r.URL.Path)
+					http.Error(w, "unexpected request", http.StatusBadRequest)
+					return
+				}
+				lease := map[string]any{
+					"id": "cbx_network", "provider": "aws", "target": "linux",
+					"state": "released", "host": "", "cleanupStatus": "complete",
+					"cloudID": "i-example", "sshPort": "2222",
+				}
+				if test.network != "" {
+					lease["network"] = json.RawMessage(test.network)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+			}))
+			defer server.Close()
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "user-token")
+
+			var stdout bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+			if err := app.inspect(t.Context(), []string{"--provider", "aws", "--id", "cbx_network", "--json"}); err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got["network"] != "public" {
+				t.Fatalf("network=%#v, want existing public string", got["network"])
+			}
+			for field, want := range map[string]string{
+				"id": "cbx_network", "provider": "aws", "serverId": "i-example",
+				"sshPort": "2222", "cleanupStatus": "complete",
+			} {
+				if got[field] != want {
+					t.Fatalf("%s=%#v, want %q", field, got[field], want)
+				}
+			}
+			if got["state"] != "released" || got["hasHost"] != false || got["ready"] != false {
+				t.Fatalf("released hostless state changed: state=%v hasHost=%v ready=%v", got["state"], got["hasHost"], got["ready"])
+			}
+			if requests.Load() != 1 {
+				t.Fatalf("inspect made %d requests, want one existing lease GET", requests.Load())
+			}
+			keyPath, err := testboxKeyPath("cbx_network")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(filepath.Dir(keyPath)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("hostless inspect created local SSH state: %v", err)
+			}
+			diagnostics, present := got["networkDiagnostics"]
+			if test.network == "" {
+				if present {
+					t.Fatalf("networkDiagnostics=%#v, want omitted", diagnostics)
+				}
+				return
+			}
+			var want map[string]any
+			if err := json.Unmarshal([]byte(test.network), &want); err != nil {
+				t.Fatal(err)
+			}
+			if !present || !reflect.DeepEqual(diagnostics, want) {
+				t.Fatalf("networkDiagnostics=%#v present=%t, want %#v", diagnostics, present, want)
+			}
+		})
+	}
+
+	t.Run("direct provider omits broker diagnostics", func(t *testing.T) {
+		view, err := statusViewFromLeaseTarget(t.Context(), Config{Provider: "hetzner", Network: NetworkPublic}, LeaseTarget{
+			LeaseID: "cbx_direct",
+			Server:  Server{Provider: "hetzner", Status: "released"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(view)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got["network"] != "public" {
+			t.Fatalf("network=%#v, want existing public string", got["network"])
+		}
+		if diagnostics, present := got["networkDiagnostics"]; present {
+			t.Fatalf("networkDiagnostics=%#v, want omitted for direct provider", diagnostics)
+		}
+	})
+}
+
 func TestCoordinatorInspectJSONPreservesCleanupState(t *testing.T) {
 	isolateTestUserDirs(t)
 	retained := false

@@ -283,6 +283,7 @@ type StatusView struct {
 	Host                         string                   `json:"host"`
 	Pond                         string                   `json:"pond,omitempty"`
 	Network                      NetworkMode              `json:"network"`
+	NetworkDiagnostics           *LeaseNetworkDiagnostics `json:"networkDiagnostics,omitempty"`
 	Tailscale                    *TailscaleMetadata       `json:"tailscale,omitempty"`
 	SSHHost                      string                   `json:"sshHost"`
 	SSHHostKey                   string                   `json:"sshHostKey,omitempty"`
