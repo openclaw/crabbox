@@ -3,6 +3,7 @@ package runpod
 import (
 	"flag"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -35,7 +36,7 @@ func RegisterRunpodProviderFlags(fs *flag.FlagSet, defaults Config) any {
 }
 
 func ApplyRunpodProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if isRunpodProviderName(cfg.Provider) {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --runpod-instance-id", "use --runpod-image"); err != nil {
 			return err
 		}
@@ -68,7 +69,7 @@ func ApplyRunpodProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if flagWasSet(fs, "runpod-work-root") {
 		cfg.Runpod.WorkRoot = *v.WorkRoot
 	}
-	if isRunpodProviderName(cfg.Provider) {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		applyRunpodDefaults(cfg)
 	}
 	return nil

@@ -56,13 +56,27 @@ func TestRunpodClientRedactsReflectedCredential(t *testing.T) {
 }
 
 func TestRunpodIsRunpodProviderNameAcceptsAliases(t *testing.T) {
+	selected := func(name string) bool {
+		cfg := core.BaseConfig()
+		cfg.Provider = name
+		fs := flag.NewFlagSet("name-contract", flag.ContinueOnError)
+		p := Provider{}
+		values := p.RegisterFlags(fs, cfg)
+		if err := fs.Parse([]string{"--runpod-cloud-type="}); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		return cfg.Runpod.CloudType == "SECURE"
+	}
 	for _, name := range []string{"runpod", "Run-Pod", "  runpodio  ", "RUNPOD"} {
-		if !isRunpodProviderName(name) {
+		if !selected(name) {
 			t.Fatalf("isRunpodProviderName(%q) = false, want true", name)
 		}
 	}
 	for _, name := range []string{"", "exe-dev", "railway", "runpods"} {
-		if isRunpodProviderName(name) {
+		if selected(name) {
 			t.Fatalf("isRunpodProviderName(%q) = true, want false", name)
 		}
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"io"
-	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -125,16 +124,4 @@ func bootstrapWaitTimeout(cfg Config) time.Duration {
 
 func inventoryDoctorResult(provider string, leases int) DoctorResult {
 	return core.InventoryDoctorResult(provider, leases)
-}
-
-// isRunpodProviderName reports whether the configured provider string refers to
-// the runpod provider, accepting the canonical name and the documented aliases
-// in a case- and whitespace-tolerant way.
-func isRunpodProviderName(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName, "run-pod", "runpodio":
-		return true
-	default:
-		return false
-	}
 }

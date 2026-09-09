@@ -40,13 +40,32 @@ func TestWandbProviderSpec(t *testing.T) {
 }
 
 func TestWandbIsProviderName(t *testing.T) {
+	selected := func(name string) bool {
+		cfg := core.BaseConfig()
+		cfg.Provider = name
+		fs := flag.NewFlagSet("name-contract", flag.ContinueOnError)
+		fs.String("class", "", "")
+		p := Provider{}
+		values := p.RegisterFlags(fs, cfg)
+		if err := fs.Parse([]string{"--class=standard"}); err != nil {
+			t.Fatal(err)
+		}
+		err := p.ApplyFlags(&cfg, fs, values)
+		if err == nil {
+			return false
+		}
+		if err.Error() != "--class is not supported for provider=wandb" {
+			t.Fatalf("unexpected selection error: %v", err)
+		}
+		return true
+	}
 	for _, name := range []string{"wandb", "WANDB", "  wandb  ", "weights-and-biases"} {
-		if !isWandbProviderName(name) {
+		if !selected(name) {
 			t.Fatalf("isWandbProviderName(%q) = false, want true", name)
 		}
 	}
 	for _, name := range []string{"", "railway", "wandbx"} {
-		if isWandbProviderName(name) {
+		if selected(name) {
 			t.Fatalf("isWandbProviderName(%q) = true, want false", name)
 		}
 	}

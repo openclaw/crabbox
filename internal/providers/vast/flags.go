@@ -3,6 +3,7 @@ package vast
 import (
 	"flag"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -45,7 +46,7 @@ func RegisterVastProviderFlags(fs *flag.FlagSet, defaults Config) any {
 }
 
 func ApplyVastProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if isVastProviderName(cfg.Provider) {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --vast-gpu-name or --vast-gpu-count", "use --vast-image"); err != nil {
 			return err
 		}
@@ -98,7 +99,7 @@ func ApplyVastProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 		cfg.Vast.ReleaseAction = *v.ReleaseAction
 		markReleaseActionExplicit(cfg)
 	}
-	if isVastProviderName(cfg.Provider) {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		return Provider{}.ValidateConfig(*cfg)
 	}
 	return nil

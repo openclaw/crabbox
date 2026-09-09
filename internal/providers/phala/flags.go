@@ -2,7 +2,6 @@ package phala
 
 import (
 	"flag"
-	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -60,7 +59,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		value := *v.Attest
 		cfg.Phala.Attest = &value
 	}
-	if isProviderName(cfg.Provider) {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		applyDefaults(cfg)
 	}
 	return nil
@@ -70,13 +69,4 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 // ON by default (nil config => true); only an explicit false value disables it.
 func attestEnabled(cfg core.Config) bool {
 	return cfg.Phala.Attest == nil || *cfg.Phala.Attest
-}
-
-func isProviderName(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName, "phala-cloud", "dstack":
-		return true
-	default:
-		return false
-	}
 }

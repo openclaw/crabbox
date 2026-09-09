@@ -2,8 +2,8 @@ package wandb
 
 import (
 	"flag"
-	"strings"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -24,7 +24,7 @@ func RegisterWandbProviderFlags(fs *flag.FlagSet, defaults Config) any {
 }
 
 func ApplyWandbProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if isWandbProviderName(cfg.Provider) {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
 			return err
 		}
@@ -40,15 +40,4 @@ func ApplyWandbProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 		cfg.Wandb.MaxLifetimeSeconds = *v.MaxLifetimeSeconds
 	}
 	return nil
-}
-
-// isWandbProviderName is consulted from every routing switch (provider_backend,
-// flags, run, stop) so aliases share a single source of truth.
-func isWandbProviderName(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName, "weights-and-biases":
-		return true
-	default:
-		return false
-	}
 }

@@ -4,7 +4,6 @@ import (
 	"flag"
 	"os"
 	"strconv"
-	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -60,7 +59,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			core.MarkTartDiskExplicit(cfg)
 		}
 	}
-	if isTartProviderName(cfg.Provider) {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		if core.IsTargetExplicit(cfg) && cfg.TargetOS != targetMacOS {
 			return exit(2, "provider=%s supports target=%s only (got %s)", providerName, targetMacOS, cfg.TargetOS)
 		}
@@ -118,13 +117,4 @@ func validateTartEnvIntNonNegative(name string, msg string) error {
 		return exit(2, "%s (got %d)", msg, n)
 	}
 	return nil
-}
-
-func isTartProviderName(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName, "local-tart", "macos-vm":
-		return true
-	default:
-		return false
-	}
 }

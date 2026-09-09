@@ -18,7 +18,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		return nil
 	}
 	v.Apply(&cfg.Lume, fs)
-	if isLumeProviderName(cfg.Provider) {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		applyDefaults(cfg)
 		return validateConfig(cfg)
 	}
@@ -45,13 +45,4 @@ func validateConfig(cfg *core.Config) error {
 		return exit(2, "lume work root must be beneath /Users/%s", cfg.Lume.User)
 	}
 	return nil
-}
-
-func isLumeProviderName(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName, "local-lume", "lume-macos":
-		return true
-	default:
-		return false
-	}
 }

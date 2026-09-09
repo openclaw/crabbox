@@ -620,3 +620,217 @@ func TestProviderSizingNonAdopterControls(t *testing.T) {
 		t.Fatalf("Cloudflare mapped type=%q", cfg.ServerType)
 	}
 }
+
+var providerNameLiteralContracts = []struct {
+	name    string
+	aliases []string
+}{
+	{"cloudflare", []string{"cf"}}, {"codesandbox", []string{"csb", "code-sandbox"}}, {"fastapi-cloud", []string{"fastapicloud", "fastapi"}},
+	{"github-codespaces", []string{"codespaces", "gh-codespaces"}}, {"hyperv", nil}, {"lume", []string{"local-lume", "lume-macos"}},
+	{"multipass", []string{"mp", "canonical-multipass"}}, {"namespace-instance", []string{"namespace-compute"}}, {"nvidia-brev", []string{"brev", "nvidia"}},
+	{"phala", []string{"phala-cloud", "dstack"}}, {"railway", []string{"rail", "railwayapp"}}, {"runpod", []string{"run-pod", "runpodio"}},
+	{"tart", []string{"local-tart", "macos-vm"}}, {"unikraft-cloud", []string{"unikraftcloud", "ukc"}}, {"vast", []string{"vast-ai", "vastai"}},
+	{"wandb", []string{"weights-and-biases"}}, {"cloud-run-sandbox", []string{"gcrun-sandbox", "google-cloud-run-sandbox", "cloudrun-sandbox"}},
+	{"opencomputer", []string{"oc", "open-computer"}}, {"orgo", []string{"orgo-ai"}},
+}
+
+func TestProviderNameSelectionContracts(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	aliases := 0
+	for _, tc := range providerNameLiteralContracts {
+		aliases += len(tc.aliases)
+	}
+	if len(providerNameLiteralContracts) != 19 || aliases != 33 {
+		t.Fatal("literal cohort changed")
+	}
+	for _, tc := range providerNameLiteralContracts {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := core.ProviderFor(tc.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cases := []struct {
+				name     string
+				selected bool
+			}{{"", false}, {"  ", false}, {"unrelated-provider", false}, {"not-" + tc.name, false}}
+			for _, name := range append([]string{tc.name}, tc.aliases...) {
+				cases = append(cases, struct {
+					name     string
+					selected bool
+				}{name, true}, struct {
+					name     string
+					selected bool
+				}{strings.ToUpper(name), true}, struct {
+					name     string
+					selected bool
+				}{" \t" + strings.ToUpper(name) + " \n", true})
+			}
+			for _, item := range cases {
+				for _, wrong := range []bool{false, true} {
+					cfg := core.BaseConfig()
+					cfg.Provider = item.name
+					cfg.TargetOS = "linux"
+					cfg.Class = "tiny"
+					cfg.ServerType = ""
+					var args []string
+					classError := ""
+					field := ""
+					selectedValue := ""
+					unselectedValue := ""
+					switch tc.name {
+					case "cloudflare":
+						args = []string{"--class=tiny"}
+						field = "server-type"
+						selectedValue = "standard-4"
+					case "hyperv":
+						args = []string{"--hyperv-cpu=0"}
+						field = "hyperv-cpu"
+						selectedValue = "4"
+						unselectedValue = "0"
+					case "lume":
+						args = []string{"--lume-cli="}
+						field = "lume-cli"
+						selectedValue = "lume"
+					case "multipass":
+						args = []string{"--multipass-cli="}
+						field = "multipass-cli"
+						selectedValue = "multipass"
+					case "namespace-instance":
+						args = []string{"--namespace-instance-cli="}
+						field = "namespace-instance-cli"
+						selectedValue = "nsc"
+					case "phala":
+						args = []string{"--phala-cli="}
+						field = "phala-cli"
+						selectedValue = "phala"
+					case "tart":
+						field = "tart-target"
+						selectedValue = "macos"
+						unselectedValue = "linux"
+					default:
+						args = []string{"--class="}
+						classError = "--class is not supported for provider=" + tc.name
+						if tc.name == "github-codespaces" {
+							classError += "; use --type or --github-codespaces-machine for a Codespaces machine slug"
+						} else {
+							for _, sizing := range sizingFlagContracts {
+								if sizing.name == tc.name && sizing.classGuidance != "" {
+									classError += "; " + sizing.classGuidance
+								}
+							}
+						}
+					}
+					fs, values := sizingContractFlags(t, p, cfg, args)
+					if wrong {
+						values = struct{}{}
+					}
+					before := fmt.Sprintf("%#v", cfg)
+					wantErr := ""
+					if item.selected && classError != "" && !(wrong && tc.name == "codesandbox") {
+						wantErr = classError
+					}
+					assertSizingContractError(t, p.ApplyFlags(&cfg, fs, values), wantErr)
+					if wantErr != "" || (wrong && tc.name != "cloudflare") {
+						if fmt.Sprintf("%#v", cfg) != before {
+							t.Fatalf("selector=%q wrong=%t changed config before return", item.name, wrong)
+						}
+					}
+					if field != "" && (!wrong || tc.name == "cloudflare") {
+						got := ""
+						switch field {
+						case "server-type":
+							got = cfg.ServerType
+						case "hyperv-cpu":
+							got = fmt.Sprint(cfg.HyperV.CPUs)
+						case "lume-cli":
+							got = cfg.Lume.CLIPath
+						case "multipass-cli":
+							got = cfg.Multipass.CLIPath
+						case "namespace-instance-cli":
+							got = cfg.NamespaceInstance.CLIPath
+						case "phala-cli":
+							got = cfg.Phala.CLIPath
+						case "tart-target":
+							got = cfg.TargetOS
+						}
+						want := unselectedValue
+						if item.selected {
+							want = selectedValue
+						}
+						if got != want {
+							t.Fatalf("selector=%q field=%s got=%q want=%q wrong=%t", item.name, field, got, want, wrong)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestProviderNameSecondGuardContracts(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	for _, tc := range providerNameLiteralContracts {
+		if tc.name != "nvidia-brev" && tc.name != "runpod" && tc.name != "vast" && tc.name != "github-codespaces" {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := core.ProviderFor(tc.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			names := append([]string{tc.name}, tc.aliases...)
+			for _, name := range names {
+				for _, selected := range []bool{false, true} {
+					cfg := core.BaseConfig()
+					cfg.Provider = "unrelated-provider"
+					if selected {
+						cfg.Provider = " " + strings.ToUpper(name) + " "
+					}
+					if tc.name == "github-codespaces" {
+						cfg.TargetOS = "windows"
+						core.MarkTargetExplicit(&cfg)
+						want := ""
+						if selected {
+							want = "provider=github-codespaces supports target=linux only"
+						}
+						defaulter, ok := p.(core.ProviderConfigDefaulter)
+						if !ok {
+							t.Fatal("missing existing pure config defaulter")
+						}
+						assertSizingContractError(t, defaulter.ApplyConfigDefaults(&cfg), want)
+						continue
+					}
+					flagName, want := "nvidia-brev-release-action", "delete"
+					if tc.name == "runpod" {
+						flagName = "runpod-cloud-type"
+						want = "SECURE"
+					}
+					value := ""
+					if tc.name == "vast" {
+						flagName = "vast-instance-type"
+						value = "unknown-type"
+					}
+					fs, values := sizingContractFlags(t, p, cfg, []string{"--" + flagName + "=" + value})
+					wantErr := ""
+					if tc.name == "vast" && selected {
+						wantErr = "vast.instanceType must be ondemand or interruptible"
+					}
+					assertSizingContractError(t, p.ApplyFlags(&cfg, fs, values), wantErr)
+					got := cfg.NvidiaBrev.ReleaseAction
+					if tc.name == "runpod" {
+						got = cfg.Runpod.CloudType
+					}
+					if tc.name == "vast" {
+						got = cfg.Vast.InstanceType
+						want = "unknown-type"
+					} else if !selected {
+						want = ""
+					}
+					if got != want {
+						t.Fatalf("selector=%q copied/default value=%q want=%q", cfg.Provider, got, want)
+					}
+				}
+			}
+		})
+	}
+}

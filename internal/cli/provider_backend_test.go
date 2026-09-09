@@ -1974,3 +1974,35 @@ func TestServerLeaseClaimSnapshotIsExplicitAndCloned(t *testing.T) {
 		t.Fatalf("snapshot alias=%#v", again)
 	}
 }
+
+// The nil embedded provider makes any non-metadata method call fail this test.
+type nameMetadataOnlyTestProvider struct {
+	Provider
+	nameCalls, aliasCalls *int
+}
+
+func (p nameMetadataOnlyTestProvider) Name() string { *p.nameCalls++; return " Metadata-Only " }
+func (p nameMetadataOnlyTestProvider) Aliases() []string {
+	*p.aliasCalls++
+	return []string{" Alias-One ", "SECOND"}
+}
+
+func TestProviderNameMatchesMetadataOnly(t *testing.T) {
+	if _, registered := providerRegistry["metadata-only"]; registered {
+		t.Fatal("fixture must not be registered")
+	}
+	registrySize := len(providerRegistry)
+	nameCalls, aliasCalls := 0, 0
+	p := nameMetadataOnlyTestProvider{nameCalls: &nameCalls, aliasCalls: &aliasCalls}
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{{"metadata-only", true}, {" METADATA-ONLY ", true}, {"alias-one", true}, {"\tALIAS-ONE\n", true}, {"second", true}, {"", false}, {" \t ", false}, {"unrelated", false}, {"metadata-only-extra", false}} {
+		if got := ProviderNameMatches(tc.name, p); got != tc.want {
+			t.Fatalf("name=%q got=%t want=%t", tc.name, got, tc.want)
+		}
+	}
+	if nameCalls == 0 || aliasCalls == 0 || len(providerRegistry) != registrySize {
+		t.Fatal("metadata consultation or registry boundary changed")
+	}
+}

@@ -2,7 +2,6 @@ package multipass
 
 import (
 	"flag"
-	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -65,17 +64,8 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			return err
 		}
 	}
-	if isMultipassProviderName(cfg.Provider) {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		applyDefaults(cfg)
 	}
 	return nil
-}
-
-func isMultipassProviderName(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName, "mp", "canonical-multipass":
-		return true
-	default:
-		return false
-	}
 }

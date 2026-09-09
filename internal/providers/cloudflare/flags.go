@@ -12,7 +12,7 @@ func RegisterCloudflareProviderFlags(fs *flag.FlagSet, defaults Config) any {
 }
 
 func ApplyCloudflareProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if isCloudflareProviderName(cfg.Provider) {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		instanceType := strings.TrimSpace(cfg.ServerType)
 		if instanceType == "" {
 			instanceType = cloudflareContainerInstanceTypeForClass(cfg.Class)
@@ -33,13 +33,4 @@ func ApplyCloudflareProviderFlags(cfg *Config, fs *flag.FlagSet, values any) err
 	}
 	v.Apply(&cfg.Cloudflare, fs)
 	return nil
-}
-
-func isCloudflareProviderName(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName, providerAlias:
-		return true
-	default:
-		return false
-	}
 }
