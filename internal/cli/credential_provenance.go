@@ -226,7 +226,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if RunpodConfigFlagPresence(fs).APIURL {
 		provenance.runpodAPIURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "vast-api-url") {
+	if VastConfigFlagPresence(fs).APIURL {
 		provenance.vastAPIURL = credentialSourceFlag
 	}
 	if flagWasSet(fs, "islo-base-url") {

@@ -710,26 +710,6 @@ type UnikraftCloudConfig struct {
 	MemoryMB int
 }
 
-// VastConfig contains Vast.ai provider settings. APIKey is populated only from
-// CRABBOX_VAST_API_KEY / VAST_API_KEY and must not be persisted or printed.
-type VastConfig struct {
-	APIKey         string
-	APIURL         string
-	InstanceType   string
-	GPUName        string
-	GPUCount       int
-	Image          string
-	TemplateID     string
-	Runtype        string
-	DiskGB         int
-	MaxDphTotal    float64
-	MinReliability float64
-	Order          string
-	User           string
-	WorkRoot       string
-	ReleaseAction  string
-}
-
 // NvidiaBrevConfig is intentionally non-secret. Authentication stays in the
 // NVIDIA Brev CLI's own credential store and is never accepted as Crabbox
 // config or argv.
@@ -1622,31 +1602,31 @@ func applyProviderConfigDefaults(cfg *Config) error {
 	if cfg.Provider == "vast" {
 		cfg.Vast.InstanceType = normalizeVastInstanceType(cfg.Vast.InstanceType)
 		if cfg.Vast.APIURL == "" {
-			cfg.Vast.APIURL = "https://console.vast.ai/api/v0"
+			cfg.Vast.APIURL = VastConfigDefaultAPIURL
 		}
 		if cfg.Vast.InstanceType == "" {
-			cfg.Vast.InstanceType = "ondemand"
+			cfg.Vast.InstanceType = VastConfigDefaultInstanceType
 		}
 		if cfg.Vast.Image == "" {
-			cfg.Vast.Image = "nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04"
+			cfg.Vast.Image = VastConfigDefaultImage
 		}
 		if cfg.Vast.Runtype == "" {
-			cfg.Vast.Runtype = "ssh_direct"
+			cfg.Vast.Runtype = VastConfigDefaultRuntype
 		}
 		if cfg.Vast.DiskGB == 0 {
-			cfg.Vast.DiskGB = 20
+			cfg.Vast.DiskGB = VastConfigDefaultDiskGB
 		}
 		if cfg.Vast.Order == "" {
-			cfg.Vast.Order = "dlperf_per_dphtotal desc"
+			cfg.Vast.Order = VastConfigDefaultOrder
 		}
 		if cfg.Vast.User == "" {
-			cfg.Vast.User = "root"
+			cfg.Vast.User = VastConfigDefaultUser
 		}
 		if cfg.Vast.WorkRoot == "" {
-			cfg.Vast.WorkRoot = defaultPOSIXWorkRoot
+			cfg.Vast.WorkRoot = VastConfigDefaultWorkRoot
 		}
 		if cfg.Vast.ReleaseAction == "" {
-			cfg.Vast.ReleaseAction = "destroy"
+			cfg.Vast.ReleaseAction = VastConfigDefaultReleaseAction
 		}
 		if !IsTargetExplicit(cfg) {
 			cfg.TargetOS = targetLinux
@@ -2380,11 +2360,11 @@ func MarkVastWorkRootExplicit(cfg *Config) {
 
 func EffectiveVastWorkRoot(cfg Config) string {
 	workRoot := cfg.Vast.WorkRoot
-	if !IsVastWorkRootExplicit(&cfg) && (workRoot == "" || workRoot == defaultPOSIXWorkRoot) && cfg.explicitWorkRoot != "" {
+	if !IsVastWorkRootExplicit(&cfg) && (workRoot == "" || workRoot == VastConfigDefaultWorkRoot) && cfg.explicitWorkRoot != "" {
 		return cfg.explicitWorkRoot
 	}
 	if workRoot == "" {
-		return defaultPOSIXWorkRoot
+		return VastConfigDefaultWorkRoot
 	}
 	return workRoot
 }
@@ -2647,17 +2627,7 @@ func baseConfig() Config {
 			Metro: "fra",
 		},
 		Runpod: defaultRunpodConfig(),
-		Vast: VastConfig{
-			APIURL:        "https://console.vast.ai/api/v0",
-			InstanceType:  "ondemand",
-			Image:         "nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04",
-			Runtype:       "ssh_direct",
-			DiskGB:        20,
-			Order:         "dlperf_per_dphtotal desc",
-			User:          "root",
-			WorkRoot:      defaultPOSIXWorkRoot,
-			ReleaseAction: "destroy",
-		},
+		Vast:   defaultVastConfig(),
 		NvidiaBrev: NvidiaBrevConfig{
 			CLI:           "brev",
 			GPUName:       "A100",
@@ -3528,23 +3498,6 @@ type fileUnikraftCloudConfig struct {
 	Metro    string `yaml:"metro,omitempty"`
 	Image    string `yaml:"image,omitempty"`
 	MemoryMB int    `yaml:"memoryMB,omitempty"`
-}
-
-type fileVastConfig struct {
-	APIURL         string   `yaml:"apiUrl,omitempty"`
-	InstanceType   string   `yaml:"instanceType,omitempty"`
-	GPUName        string   `yaml:"gpuName,omitempty"`
-	GPUCount       int      `yaml:"gpuCount,omitempty"`
-	Image          string   `yaml:"image,omitempty"`
-	TemplateID     string   `yaml:"templateId,omitempty"`
-	Runtype        string   `yaml:"runtype,omitempty"`
-	DiskGB         int      `yaml:"diskGB,omitempty"`
-	MaxDphTotal    *float64 `yaml:"maxDphTotal,omitempty"`
-	MinReliability *float64 `yaml:"minReliability,omitempty"`
-	Order          string   `yaml:"order,omitempty"`
-	User           string   `yaml:"user,omitempty"`
-	WorkRoot       string   `yaml:"workRoot,omitempty"`
-	ReleaseAction  string   `yaml:"releaseAction,omitempty"`
 }
 
 type fileNvidiaBrevConfig struct {
@@ -5773,47 +5726,19 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.Vast != nil {
-		if file.Vast.APIURL != "" {
-			cfg.Vast.APIURL = file.Vast.APIURL
+	{
+		applied, err := cfg.Vast.applyFile(file.Vast)
+		if applied.APIURL {
 			cfg.credentialProvenance.vastAPIURL = credentialSource
 		}
-		if file.Vast.InstanceType != "" {
-			cfg.Vast.InstanceType = file.Vast.InstanceType
-		}
-		if file.Vast.GPUName != "" {
-			cfg.Vast.GPUName = file.Vast.GPUName
-		}
-		if file.Vast.GPUCount != 0 {
-			cfg.Vast.GPUCount = file.Vast.GPUCount
-		}
-		if file.Vast.Image != "" {
-			cfg.Vast.Image = file.Vast.Image
-		}
-		if file.Vast.TemplateID != "" {
-			cfg.Vast.TemplateID = file.Vast.TemplateID
-		}
-		if file.Vast.Runtype != "" {
-			cfg.Vast.Runtype = file.Vast.Runtype
-		}
-		if file.Vast.DiskGB != 0 {
-			cfg.Vast.DiskGB = file.Vast.DiskGB
-		}
-		applyOptional(&cfg.Vast.MaxDphTotal, file.Vast.MaxDphTotal)
-		applyOptional(&cfg.Vast.MinReliability, file.Vast.MinReliability)
-		if file.Vast.Order != "" {
-			cfg.Vast.Order = file.Vast.Order
-		}
-		if file.Vast.User != "" {
-			cfg.Vast.User = file.Vast.User
-		}
-		if file.Vast.WorkRoot != "" {
-			cfg.Vast.WorkRoot = file.Vast.WorkRoot
+		if applied.WorkRoot {
 			MarkVastWorkRootExplicit(cfg)
 		}
-		if file.Vast.ReleaseAction != "" {
-			cfg.Vast.ReleaseAction = file.Vast.ReleaseAction
+		if applied.ReleaseAction {
 			MarkDeleteOnReleaseExplicit(cfg, "vast")
+		}
+		if err != nil {
+			return err
 		}
 	}
 	if file.NvidiaBrev != nil {
@@ -7735,32 +7660,23 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_API_KEY", "VAST_API_KEY"); ok {
-		cfg.Vast.APIKey = value
-		cfg.credentialProvenance.vastAPIKey = credentialSourceEnvironment
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_VAST_API_URL", "VAST_API_URL"); ok {
-		cfg.Vast.APIURL = value
-		cfg.credentialProvenance.vastAPIURL = credentialSourceEnvironment
-	}
-	cfg.Vast.InstanceType = getenv("CRABBOX_VAST_INSTANCE_TYPE", cfg.Vast.InstanceType)
-	cfg.Vast.GPUName = getenv("CRABBOX_VAST_GPU_NAME", cfg.Vast.GPUName)
-	cfg.Vast.GPUCount = getenvInt("CRABBOX_VAST_GPU_COUNT", cfg.Vast.GPUCount)
-	cfg.Vast.Image = getenv("CRABBOX_VAST_IMAGE", cfg.Vast.Image)
-	cfg.Vast.TemplateID = getenv("CRABBOX_VAST_TEMPLATE_ID", cfg.Vast.TemplateID)
-	cfg.Vast.Runtype = getenv("CRABBOX_VAST_RUNTYPE", cfg.Vast.Runtype)
-	cfg.Vast.DiskGB = getenvInt("CRABBOX_VAST_DISK_GB", cfg.Vast.DiskGB)
-	cfg.Vast.MaxDphTotal = getenvFloat("CRABBOX_VAST_MAX_DPH_TOTAL", cfg.Vast.MaxDphTotal)
-	cfg.Vast.MinReliability = getenvFloat("CRABBOX_VAST_MIN_RELIABILITY", cfg.Vast.MinReliability)
-	cfg.Vast.Order = getenv("CRABBOX_VAST_ORDER", cfg.Vast.Order)
-	cfg.Vast.User = getenv("CRABBOX_VAST_USER", cfg.Vast.User)
-	if value := os.Getenv("CRABBOX_VAST_WORK_ROOT"); value != "" {
-		cfg.Vast.WorkRoot = value
-		MarkVastWorkRootExplicit(cfg)
-	}
-	if value := os.Getenv("CRABBOX_VAST_RELEASE_ACTION"); value != "" {
-		cfg.Vast.ReleaseAction = value
-		MarkDeleteOnReleaseExplicit(cfg, "vast")
+	{
+		applied, err := cfg.Vast.applyEnv()
+		if applied.APIKey {
+			cfg.credentialProvenance.vastAPIKey = credentialSourceEnvironment
+		}
+		if applied.APIURL {
+			cfg.credentialProvenance.vastAPIURL = credentialSourceEnvironment
+		}
+		if applied.WorkRoot {
+			MarkVastWorkRootExplicit(cfg)
+		}
+		if applied.ReleaseAction {
+			MarkDeleteOnReleaseExplicit(cfg, "vast")
+		}
+		if err != nil {
+			return err
+		}
 	}
 	cfg.NvidiaBrev.CLI = getenv("CRABBOX_NVIDIA_BREV_CLI", cfg.NvidiaBrev.CLI)
 	cfg.NvidiaBrev.Org = getenv("CRABBOX_NVIDIA_BREV_ORG", cfg.NvidiaBrev.Org)

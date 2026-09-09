@@ -72,6 +72,8 @@
 
 - Describe Runpod configuration bindings once, sharing effective defaults while preserving environment-only keys, nonzero disk overlays, and generic user/work-root inheritance. [PR 2032](https://github.com/openclaw/crabbox/pull/2032). Thanks @steipete.
 
+- Describe Vast configuration bindings once, sharing configured defaults while preserving flag-only instance-type normalization, numeric overlay rules, and explicit user/work-root/release behavior. Thanks @steipete.
+
 ## 0.53.0 - 2026-09-08
 
 ### Highlights

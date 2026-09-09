@@ -686,6 +686,10 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 	if err := yaml.Unmarshal([]byte("runpod:\n  apiUrl: https://repo.example.test\n"), &runpodFile); err != nil {
 		t.Fatal(err)
 	}
+	var vastFile fileConfig
+	if err := yaml.Unmarshal([]byte("vast:\n  apiUrl: https://repo.example.test\n"), &vastFile); err != nil {
+		t.Fatal(err)
+	}
 	var railwayFile fileConfig
 	if err := yaml.Unmarshal([]byte("railway:\n  apiUrl: https://repo.example.test\n"), &railwayFile); err != nil {
 		t.Fatal(err)
@@ -734,7 +738,7 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 		{
 			name:          "vast",
 			provider:      "vast",
-			file:          fileConfig{Vast: &fileVastConfig{APIURL: "https://repo.example.test"}},
+			file:          vastFile,
 			credentialEnv: "CRABBOX_VAST_API_KEY",
 			approveEnv:    "CRABBOX_VAST_API_URL",
 		},

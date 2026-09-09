@@ -11797,3 +11797,269 @@ func TestRunpodBindingCentralURLPhase(t *testing.T) {
 		}
 	}
 }
+
+func TestVastBindingFileContract(t *testing.T) {
+	defaults := VastConfig{APIURL: "https://console.vast.ai/api/v0", InstanceType: "ondemand", Image: "nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04", Runtype: "ssh_direct", DiskGB: 20, Order: "dlperf_per_dphtotal desc", User: "root", WorkRoot: "/work/crabbox", ReleaseAction: "destroy"}
+	if got := baseConfig().Vast; got != defaults {
+		t.Fatalf("defaults=%#v want=%#v", got, defaults)
+	}
+	if reflect.TypeOf(VastConfig{}).NumField() != 15 || reflect.TypeOf(fileVastConfig{}).NumField() != 14 {
+		t.Fatal("field grants changed")
+	}
+	if _, ok := reflect.TypeOf(fileVastConfig{}).FieldByName("APIKey"); ok {
+		t.Fatal("API key YAML source introduced")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace", "value"} {
+			cfg := baseConfig()
+			cfg.Vast.APIKey = "inert-prior"
+			cfg.Vast.GPUName = "prior-gpu"
+			cfg.Vast.TemplateID = "prior-template"
+			want := cfg.Vast
+			source := credentialSourceFlag
+			cfg.credentialProvenance.vastAPIKey = source
+			cfg.credentialProvenance.vastAPIURL = source
+			fields := map[string]any{"apiKey": "ignored-inert"}
+			accepted := mode == "equal" || mode == "whitespace" || mode == "value"
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"apiUrl", &want.APIURL}, {"instanceType", &want.InstanceType}, {"gpuName", &want.GPUName}, {"image", &want.Image}, {"templateId", &want.TemplateID}, {"runtype", &want.Runtype}, {"order", &want.Order}, {"user", &want.User}, {"workRoot", &want.WorkRoot}, {"releaseAction", &want.ReleaseAction}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = "fixture-value"
+				}
+				if mode == "value" && f.key == "instanceType" {
+					raw = " On_Demand "
+				}
+				fields[f.key] = raw
+				if accepted {
+					*f.v = raw.(string)
+				}
+			}
+			if accepted {
+				source = credentialSourceForFile(trusted)
+			}
+			data, err := yaml.Marshal(map[string]any{"vast": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Vast != want || cfg.credentialProvenance.vastAPIURL != source || cfg.credentialProvenance.vastAPIKey != credentialSourceFlag || IsVastWorkRootExplicit(&cfg) != accepted || DeleteOnReleaseExplicit(cfg, "vast") != accepted {
+				t.Fatalf("file mode=%s trusted=%t", mode, trusted)
+			}
+		}
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, raw := range []string{"omitted", "null", "0", "-2", "4"} {
+			cfg := baseConfig()
+			cfg.Vast.GPUCount = 37
+			cfg.Vast.DiskGB = 37
+			cfg.Vast.MaxDphTotal = .75
+			cfg.Vast.MinReliability = .75
+			want := cfg.Vast
+			body := "vast: {}\n"
+			if raw != "omitted" {
+				body = fmt.Sprintf("vast:\n  gpuCount: %s\n  diskGB: %s\n  maxDphTotal: %s\n  minReliability: %s\n", raw, raw, raw, raw)
+			}
+			if n, err := strconv.Atoi(raw); err == nil {
+				if n != 0 {
+					want.GPUCount = n
+					want.DiskGB = n
+				}
+				want.MaxDphTotal = float64(n)
+				want.MinReliability = float64(n)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte(body), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Vast != want {
+				t.Fatalf("numeric file=%q got=%#v want=%#v", raw, cfg.Vast, want)
+			}
+		}
+	}
+}
+
+func TestVastBindingEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"empty", "alias", "equal", "whitespace", "value", "API_KEY", "API_URL", "WORK_ROOT", "RELEASE_ACTION"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Vast.APIKey = "inert-prior"
+			cfg.Vast.GPUName = "prior-gpu"
+			cfg.Vast.TemplateID = "prior-template"
+			want := cfg.Vast
+			cfg.credentialProvenance.vastAPIKey = credentialSourceFlag
+			cfg.credentialProvenance.vastAPIURL = credentialSourceFlag
+			accepted := map[string]bool{}
+			for _, f := range []struct {
+				suffix, alias string
+				v             *string
+			}{{"API_KEY", "VAST_API_KEY", &want.APIKey}, {"API_URL", "VAST_API_URL", &want.APIURL}, {"INSTANCE_TYPE", "", &want.InstanceType}, {"GPU_NAME", "", &want.GPUName}, {"IMAGE", "", &want.Image}, {"TEMPLATE_ID", "", &want.TemplateID}, {"RUNTYPE", "", &want.Runtype}, {"ORDER", "", &want.Order}, {"USER", "", &want.User}, {"WORK_ROOT", "", &want.WorkRoot}, {"RELEASE_ACTION", "", &want.ReleaseAction}} {
+				raw, alias := *f.v, "alias-value"
+				if mode == "empty" {
+					raw = ""
+					alias = ""
+				}
+				if mode == "alias" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = "fixture-value"
+					if f.suffix == "INSTANCE_TYPE" {
+						raw = " On_Demand "
+					}
+				}
+				if (mode == "API_KEY" || mode == "API_URL" || mode == "WORK_ROOT" || mode == "RELEASE_ACTION") && mode != f.suffix {
+					raw = ""
+					alias = ""
+				}
+				t.Setenv("CRABBOX_VAST_"+f.suffix, raw)
+				if f.alias != "" {
+					t.Setenv(f.alias, alias)
+				}
+				if raw != "" {
+					*f.v = raw
+					accepted[f.suffix] = true
+				} else if f.alias != "" && alias != "" {
+					*f.v = alias
+					accepted[f.suffix] = true
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			key, url := credentialSourceFlag, credentialSourceFlag
+			if accepted["API_KEY"] {
+				key = credentialSourceEnvironment
+			}
+			if accepted["API_URL"] {
+				url = credentialSourceEnvironment
+			}
+			if cfg.Vast != want || cfg.credentialProvenance.vastAPIKey != key || cfg.credentialProvenance.vastAPIURL != url || IsVastWorkRootExplicit(&cfg) != accepted["WORK_ROOT"] || DeleteOnReleaseExplicit(cfg, "vast") != accepted["RELEASE_ACTION"] {
+				t.Fatalf("env mode=%s", mode)
+			}
+		})
+	}
+	for _, raw := range []string{"", "invalid", " 4 ", "0", "-2", "0.25"} {
+		t.Run("numeric-"+raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Vast.GPUCount = 37
+			cfg.Vast.DiskGB = 37
+			cfg.Vast.MaxDphTotal = .75
+			cfg.Vast.MinReliability = .75
+			want := cfg.Vast
+			for _, suffix := range []string{"GPU_COUNT", "DISK_GB", "MAX_DPH_TOTAL", "MIN_RELIABILITY"} {
+				t.Setenv("CRABBOX_VAST_"+suffix, raw)
+			}
+			if n, err := strconv.Atoi(raw); err == nil {
+				want.GPUCount = n
+				want.DiskGB = n
+			}
+			if n, err := strconv.ParseFloat(raw, 64); err == nil {
+				want.MaxDphTotal = n
+				want.MinReliability = n
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Vast != want {
+				t.Fatalf("env numeric=%q got=%#v want=%#v", raw, cfg.Vast, want)
+			}
+		})
+	}
+}
+
+func TestVastBindingCoreDefaultsAndMarkers(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "vast"
+	cfg.Vast = VastConfig{}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	want := VastConfig{APIURL: "https://console.vast.ai/api/v0", InstanceType: "ondemand", Image: "nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04", Runtype: "ssh_direct", DiskGB: 20, Order: "dlperf_per_dphtotal desc", User: "root", WorkRoot: "/work/crabbox", ReleaseAction: "destroy"}
+	if cfg.Vast != want {
+		t.Fatalf("core defaults=%#v", cfg.Vast)
+	}
+	for _, tc := range []struct {
+		root                 string
+		marked               bool
+		effective, projected string
+	}{{"/work/crabbox", false, "/generic/root", "/generic/root"}, {"/work/crabbox", true, "/work/crabbox", "/work/crabbox"}, {"", true, "/work/crabbox", "/work/crabbox"}, {"/provider/root", false, "/provider/root", "/generic/root"}, {"/provider/root", true, "/provider/root", "/provider/root"}} {
+		cfg := baseConfig()
+		cfg.Provider = "vast"
+		cfg.WorkRoot = "/generic/root"
+		MarkWorkRootExplicit(&cfg)
+		cfg.SSHUser = "generic-user"
+		MarkSSHUserExplicit(&cfg)
+		cfg.Vast.User = "provider-user"
+		cfg.Vast.WorkRoot = tc.root
+		if tc.marked {
+			MarkVastWorkRootExplicit(&cfg)
+		}
+		if got := EffectiveVastWorkRoot(cfg); got != tc.effective {
+			t.Fatalf("effective root=%q want=%q", got, tc.effective)
+		}
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Vast.WorkRoot != tc.projected || cfg.WorkRoot != tc.projected || cfg.SSHUser != "generic-user" {
+			t.Fatal("core explicit projection changed")
+		}
+	}
+}
+
+func TestVastBindingCentralURLPhase(t *testing.T) {
+	original := providerRegistry["aws"]
+	t.Cleanup(func() { providerRegistry["aws"] = original })
+	for _, visited := range []bool{false, true} {
+		cfg := baseConfig()
+		cfg.Provider = "aws"
+		cfg.credentialProvenance.vastAPIURL = credentialSourceTrustedFile
+		seen := credentialSourceUnknown
+		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, observe: func(cfg Config) { seen = cfg.credentialProvenance.vastAPIURL }}
+		fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+		fs.String("vast-api-url", "", "")
+		if visited {
+			if err := fs.Parse([]string{"--vast-api-url="}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := applyProviderFlags(&cfg, fs, providerFlagValues{}); err != nil {
+			t.Fatal(err)
+		}
+		want := credentialSourceTrustedFile
+		if visited {
+			want = credentialSourceFlag
+		}
+		if seen != credentialSourceTrustedFile || cfg.credentialProvenance.vastAPIURL != want {
+			t.Fatal("URL source moved out of central post-success phase")
+		}
+	}
+}

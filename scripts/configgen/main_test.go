@@ -514,6 +514,12 @@ func TestRunpodGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestVastGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_vast.go", "../../internal/cli/config_vast_generated.go", "VastConfig", "vast", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
