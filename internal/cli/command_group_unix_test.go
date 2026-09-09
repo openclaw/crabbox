@@ -243,7 +243,8 @@ func TestJoinedLocalCommandClosesFiniteDescendants(t *testing.T) {
 			go func() {
 				result, err := (execCommandRunner{}).Run(ctx, LocalCommandRequest{
 					Name: os.Args[0], Args: joinedCommandHelperArgs(tc.mode, dir),
-					Env:                     []string{"HOME=" + dir, "PATH=/usr/bin:/bin"},
+					// Direct-exit helpers must retain the Go driver's shared coverage directory.
+					Env:                     []string{"HOME=" + dir, "PATH=/usr/bin:/bin", "GOCOVERDIR=" + os.Getenv("GOCOVERDIR")},
 					RequireProcessGroupJoin: true, CancelGracePeriod: 50 * time.Millisecond,
 					MaxCapturedOutputBytes: 16, CaptureOutputToFiles: tc.files,
 				})

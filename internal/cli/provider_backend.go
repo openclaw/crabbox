@@ -775,7 +775,7 @@ type LocalCommandRequest struct {
 	// process group closes, including after cancellation or cleanup grace expiry.
 	RequireProcessGroupJoin bool
 	// OnCleanupPending reports grace expiry once while the command still joins.
-	OnCleanupPending func(error)
+	OnCleanupPending func(error) `json:"-"`
 }
 
 type LocalCommandResult struct {
