@@ -5,8 +5,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,7 +23,7 @@ import (
 
 func requireBlacksmithArtifactShell(t *testing.T) {
 	t.Helper()
-	for _, command := range []string{"/bin/sh", "bash", "timeout"} {
+	for _, command := range []string{"/bin/sh", "bash", "timeout", "sha256sum"} {
 		if _, err := exec.LookPath(command); err != nil {
 			t.Skipf("synthetic Blacksmith shell fixtures require %s: %v", command, err)
 		}
@@ -126,11 +124,13 @@ func TestBlacksmithArtifactRunShellAndTerminalExit(t *testing.T) {
 	requireBlacksmithArtifactShell(t)
 	for _, workspace := range []string{"native", "prepared"} {
 		for _, tt := range []struct {
-			name, command, stdout, stderr string
-			argv                          []string
-			code                          int
+			name, command, stdout, stderr, directory string
+			argv                                     []string
+			code                                     int
 		}{
 			{name: "zero", command: "printf original > report; printf out; printf err >&2", stdout: "out", stderr: "err"},
+			{name: "backslash-workdir", directory: `working\directory`, command: "printf original > report"},
+			{name: "newline-workdir", directory: "working\ndirectory", command: "printf original > report"},
 			{name: "one", command: "printf original > report; exit 1", code: 1},
 			{name: "explicit-exit", command: "printf original > report; exit 23; printf BAD", code: 23},
 			{name: "exec", command: "printf original > report; exec bash -c 'exit 23'", code: 23},
@@ -146,8 +146,14 @@ func TestBlacksmithArtifactRunShellAndTerminalExit(t *testing.T) {
 			{name: "signal", command: "printf original > report; kill -TERM $$", code: 143},
 		} {
 			t.Run(workspace+"/"+tt.name, func(t *testing.T) {
-				isolateBlacksmithOwnership(t)
+				isolateArtifactOwnership(t)
 				repo := t.TempDir()
+				if tt.directory != "" {
+					repo = filepath.Join(repo, tt.directory)
+					if err := os.Mkdir(repo, 0700); err != nil {
+						t.Fatal(err)
+					}
+				}
 				t.Chdir(repo)
 				testWriteBlacksmithFile(t, repo, "report", "original")
 				if workspace == "prepared" {
@@ -188,11 +194,13 @@ func TestBlacksmithArtifactRunShellAndTerminalExit(t *testing.T) {
 					t.Fatal("protocol leaked")
 				}
 				if tt.code >= 128 {
+					assertArtifactTransferCalls(t, runner.calls, 0)
 					if len(result.Artifacts) != 0 {
 						t.Fatal("signal-like exit published")
 					}
 					return
 				}
+				assertArtifactTransferCalls(t, runner.calls, 1)
 				if len(result.Artifacts) != 1 || readBlacksmithArchive(t, result.Artifacts[0].Path)["report"] != "original" {
 					t.Fatalf("wrong archive: %+v", result.Artifacts)
 				}
@@ -243,7 +251,7 @@ func TestBlacksmithArtifactWorkspaceBinding(t *testing.T) {
 	requireBlacksmithArtifactShell(t)
 	for _, mode := range []string{"relative", "retarget", "replace-directory", "created-by-workload", "file", "directory", "dangling", "file-target", "loop"} {
 		t.Run(mode, func(t *testing.T) {
-			isolateBlacksmithOwnership(t)
+			isolateArtifactOwnership(t)
 			repo := t.TempDir()
 			t.Chdir(repo)
 			root := testPreparedBlacksmithArtifactRoot(t, repo)
@@ -302,7 +310,7 @@ func TestBlacksmithArtifactWorkspaceBinding(t *testing.T) {
 					}
 				}
 			}
-			runner := ownershipRunner(func(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+			runner := artifactTestRunner(t, func(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 				return runSyntheticBlacksmithCommand(t, ctx, req)
 			})
 			backend := newTestBlacksmithBackend(baseConfig(), runner)
@@ -331,7 +339,7 @@ func TestBlacksmithArtifactRunCollectionFailurePreservesWorkload(t *testing.T) {
 	for _, kind := range []string{"required", "files", "compressed-bytes", "local-write", "remote-timeout"} {
 		for _, code := range []int{0, 1, 23} {
 			t.Run(fmt.Sprintf("%s/%d", kind, code), func(t *testing.T) {
-				isolateBlacksmithOwnership(t)
+				isolateArtifactOwnership(t)
 				repo := t.TempDir()
 				t.Chdir(repo)
 				const id = "tbx_collectfailure"
@@ -345,17 +353,22 @@ func TestBlacksmithArtifactRunCollectionFailurePreservesWorkload(t *testing.T) {
 						testWriteBlacksmithFile(t, repo, fmt.Sprintf("reports/%d", i), "x")
 					}
 				case "compressed-bytes":
-					data := make([]byte, core.DelegatedRunArtifactDefaultMaxBytes+1024)
-					if _, err := rand.Read(data); err != nil {
-						t.Fatal(err)
-					}
-					testWriteBlacksmithFile(t, repo, "reports/random", string(data))
+					testWriteBlacksmithFile(t, repo, "reports/report", "small fixture")
 				case "local-write":
 					testWriteBlacksmithFile(t, repo, ".crabbox/runs", "not a directory")
 				}
 				runs := 0
 				runner := &blacksmithFuncRunner{fn: func(native LocalCommandRequest) (LocalCommandResult, error) {
 					runs++
+					if kind == "compressed-bytes" {
+						// The collector's small-limit tests own archive construction;
+						// this boundary preserves workload status when metadata exceeds its cap.
+						start, exit, end := testBlacksmithReceiptFrames(t, syntheticBlacksmithCommand(t, native), code)
+						metadata, _ := testBlacksmithArtifactMetadata(t, native, makeTarGz(t, map[string]string{"reports/report": "small fixture"}))
+						metadata = regexp.MustCompile(`:bytes:[0-9]+`).ReplaceAllString(metadata, fmt.Sprintf(":bytes:%d", core.DelegatedRunArtifactDefaultMaxBytes+1))
+						fmt.Fprint(native.Stdout, start+exit+metadata+end)
+						return LocalCommandResult{}, nil
+					}
 					if kind == "remote-timeout" {
 						start, exit, end := testBlacksmithReceiptFrames(t, syntheticBlacksmithCommand(t, native), code)
 						fmt.Fprint(native.Stdout, start+exit+strings.Replace(end, ":end:0", ":end:124", 1))
@@ -381,6 +394,11 @@ func TestBlacksmithArtifactRunCollectionFailurePreservesWorkload(t *testing.T) {
 				if kind == "remote-timeout" && (runs != 1 || !strings.Contains(stderr.String(), "blacksmith artifact retrieval failed: collection exited 124\n")) {
 					t.Fatalf("remote collection timeout not reported: runs=%d stderr=%q", runs, stderr.String())
 				}
+				wantDownloads := 0
+				if kind == "local-write" {
+					wantDownloads = 1
+				}
+				assertArtifactTransferCalls(t, runner.calls, wantDownloads)
 			})
 		}
 	}
@@ -398,17 +416,21 @@ func testBlacksmithReceiptFrames(t *testing.T, command string, code int) (string
 
 func TestBlacksmithArtifactReceiptAdversarial(t *testing.T) {
 	archive := makeTarGz(t, map[string]string{"report": "synthetic"})
-	payload := core.DelegatedRunArtifactBeginMarker + "\n" + base64.StdEncoding.EncodeToString(archive) + "\n" + core.DelegatedRunArtifactEndMarker + "\n"
 	for _, kind := range []string{"valid", "missing-start", "missing-exit", "missing-end", "stale", "duplicate-start", "duplicate-exit", "duplicate-end", "order", "truncated", "malformed", "oversized-record", "partial-archive", "duplicate-archive", "native-before", "native-after", "nil-error-nonzero", "zero-code-error", "cancel", "overflow", "diagnostics-overflow", "wrong-stream"} {
 		t.Run(kind, func(t *testing.T) {
-			isolateBlacksmithOwnership(t)
+			isolateArtifactOwnership(t)
 			repo := t.TempDir()
 			t.Chdir(repo)
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			var stdout, stderr bytes.Buffer
-			runner := ownershipRunner(func(runCtx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+			runner := artifactTestRunner(t, func(runCtx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 				start, exit, end := testBlacksmithReceiptFrames(t, syntheticBlacksmithCommand(t, req), 0)
+				contents := archive
+				if kind == "duplicate-archive" {
+					contents = append(append([]byte(nil), archive...), archive...)
+				}
+				payload, archivePath := testBlacksmithArtifactMetadata(t, req, contents)
 				output := start + "ordinary\n" + exit + payload + end
 				switch kind {
 				case "missing-start":
@@ -437,15 +459,15 @@ func TestBlacksmithArtifactReceiptAdversarial(t *testing.T) {
 				case "malformed":
 					output = start + strings.Replace(exit, "exit:0", "exit:00", 1) + payload + end
 				case "oversized-record":
-					output = start[:len(start)-1] + strings.Repeat("x", 1024) + payload
+					output = start[:len(start)-1] + strings.Repeat("x", 129-len(start)+2) + payload
 				case "partial-archive":
-					output = start + exit + payload[:len(payload)/2] + end
-				case "duplicate-archive":
-					output = start + exit + payload + payload + end
+					if err := os.WriteFile(archivePath, archive[:len(archive)/2], 0o600); err != nil {
+						t.Fatal(err)
+					}
 				case "native-before":
 					return LocalCommandResult{ExitCode: 1}, errors.New("transport lost")
 				case "overflow":
-					output = start + exit + core.DelegatedRunArtifactBeginMarker + "\n" + strings.Repeat("A", int(blacksmithArtifactOutputCaptureLimit(core.DelegatedRunArtifactDefaultMaxBytes))+1)
+					output = start + exit + regexp.MustCompile(`:bytes:[0-9]+`).ReplaceAllString(payload, fmt.Sprintf(":bytes:%d", core.DelegatedRunArtifactDefaultMaxBytes+1)) + end
 				case "diagnostics-overflow":
 					output = start + exit + strings.Repeat("x", int(blacksmithArtifactDiagnosticCaptureBytes)+1)
 				}
@@ -491,7 +513,7 @@ func TestBlacksmithArtifactReceiptAdversarial(t *testing.T) {
 			} else if code == 0 && err == nil || len(collected) != 0 {
 				t.Fatalf("accepted %s code=%d err=%v", kind, code, err)
 			}
-			if strings.Contains(stdout.String()+stderr.String(), "CRABBOX_") || strings.Contains(stdout.String()+stderr.String(), base64.StdEncoding.EncodeToString(archive)[:20]) || strings.Contains(stdout.String()+stderr.String(), "\x1e") {
+			if strings.Contains(stdout.String()+stderr.String(), "CRABBOX_") || bytes.Contains(append(stdout.Bytes(), stderr.Bytes()...), archive[:min(len(archive), 20)]) || strings.Contains(stdout.String()+stderr.String(), "\x1e") {
 				t.Fatal("payload leaked")
 			}
 		})
@@ -503,7 +525,7 @@ func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 	for _, kind := range []string{"workload-outlives-budget", "local-collection-stall", "remote-collection-timeout", "sync-stall", "startup-failure", "missing-timeout", "unsupported-timeout"} {
 		for _, code := range []int{0, 1, 23} {
 			t.Run(fmt.Sprintf("%s/%d", kind, code), func(t *testing.T) {
-				isolateBlacksmithOwnership(t)
+				isolateArtifactOwnership(t)
 				repo := t.TempDir()
 				t.Chdir(repo)
 				testWriteBlacksmithFile(t, testPreparedBlacksmithArtifactRoot(t, repo), "report", "synthetic")
@@ -518,7 +540,7 @@ func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 				if kind == "workload-outlives-budget" {
 					budget, workloadWait = 3*time.Second, "3.2"
 				}
-				runner := ownershipRunner(func(runCtx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+				runner := artifactTestRunner(t, func(runCtx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 					if kind == "startup-failure" {
 						req.Env = []string{"BASH_ENV=" + filepath.Join(repo, "bash-env")}
 					}
@@ -589,10 +611,7 @@ func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 					if got != code || ended.IsZero() || !errors.As(err, &ee) || ee.Code != 7 || ee.Message != "collection exited 124" || len(artifacts) != 0 {
 						t.Fatalf("remote collection timeout lost workload result: code=%d ended=%v artifacts=%+v err=%v", got, ended, artifacts, err)
 					}
-					path := core.LocalRunArtifactPath(repo, "", "tbx_budget", "blacksmith-artifacts.tgz")
-					if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
-						t.Fatalf("remote collection timeout published an archive: %v", statErr)
-					}
+					assertNoBlacksmithArtifactPublication(t, repo, "tbx_budget")
 				} else {
 					var ee ExitError
 					if !errors.As(err, &ee) || ee.Code != 7 || len(artifacts) != 0 {
@@ -639,7 +658,7 @@ func TestBlacksmithArtifactCollectionTimeoutReceipt(t *testing.T) {
 	for _, boundary := range []string{"helper", "public"} {
 		for _, code := range []int{0, 1, 23} {
 			t.Run(fmt.Sprintf("%s/%d", boundary, code), func(t *testing.T) {
-				isolateBlacksmithOwnership(t)
+				isolateArtifactOwnership(t)
 				repo := t.TempDir()
 				t.Chdir(repo)
 				const id = "tbx_collecttimeout"
@@ -647,14 +666,14 @@ func TestBlacksmithArtifactCollectionTimeoutReceipt(t *testing.T) {
 					testOwnedBlacksmithClaim(t, id, "jade-krill", repo)
 				}
 				archive := makeTarGz(t, map[string]string{"report": "synthetic"})
-				// Deliver a complete batch before local timers can fire, even when
-				// the failed collector emitted an otherwise valid archive.
+				// Deliver complete metadata before local timers can fire, even when
+				// the failed collector finalized an otherwise valid archive.
 				synctest.Test(t, func(t *testing.T) {
 					runs := 0
 					runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 						runs++
 						start, workloadExit, end := testBlacksmithReceiptFrames(t, syntheticBlacksmithCommand(t, req), code)
-						payload := core.DelegatedRunArtifactBeginMarker + "\n" + base64.StdEncoding.EncodeToString(archive) + "\n" + core.DelegatedRunArtifactEndMarker + "\n"
+						payload, _ := testBlacksmithArtifactMetadata(t, req, archive)
 						fmt.Fprint(req.Stdout, start+workloadExit+payload+strings.Replace(end, "end:0", "end:124", 1))
 						return LocalCommandResult{}, nil
 					}}
@@ -684,10 +703,8 @@ func TestBlacksmithArtifactCollectionTimeoutReceipt(t *testing.T) {
 					if runs != 1 {
 						t.Fatalf("native runs=%d want=1", runs)
 					}
-					path := core.LocalRunArtifactPath(repo, "", id, "blacksmith-artifacts.tgz")
-					if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-						t.Fatalf("failed collector left a local archive: %v", err)
-					}
+					assertArtifactTransferCalls(t, runner.calls, 0)
+					assertNoBlacksmithArtifactPublication(t, repo, id)
 				})
 			})
 		}
@@ -696,7 +713,7 @@ func TestBlacksmithArtifactCollectionTimeoutReceipt(t *testing.T) {
 
 func TestBlacksmithArtifactRunInitialSourceAndTiming(t *testing.T) {
 	requireBlacksmithArtifactShell(t)
-	isolateBlacksmithOwnership(t)
+	isolateArtifactOwnership(t)
 	repo := t.TempDir()
 	t.Chdir(repo)
 	const id = "tbx_source"
@@ -718,6 +735,7 @@ func TestBlacksmithArtifactRunInitialSourceAndTiming(t *testing.T) {
 	if err != nil || runs != 1 || len(result.Artifacts) != 1 {
 		t.Fatalf("result=%+v runs=%d err=%v", result, runs, err)
 	}
+	assertArtifactTransferCalls(t, runner.calls, 1)
 	if readBlacksmithArchive(t, result.Artifacts[0].Path)["report"] != "workload-bytes" {
 		t.Fatal("native re-sync overwrote artifact")
 	}
@@ -730,7 +748,7 @@ func TestBlacksmithArtifactRunProtectedAndRequiredPaths(t *testing.T) {
 	requireBlacksmithArtifactShell(t)
 	for _, required := range []string{"report", "dangling", "directory-link/file", ".git/private", ".crabbox/private"} {
 		t.Run(required, func(t *testing.T) {
-			isolateBlacksmithOwnership(t)
+			isolateArtifactOwnership(t)
 			repo := t.TempDir()
 			t.Chdir(repo)
 			root := testPreparedBlacksmithArtifactRoot(t, repo)
@@ -742,7 +760,7 @@ func TestBlacksmithArtifactRunProtectedAndRequiredPaths(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			runner := ownershipRunner(func(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+			runner := artifactTestRunner(t, func(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 				return runSyntheticBlacksmithCommand(t, ctx, req)
 			})
 			backend := newTestBlacksmithBackend(baseConfig(), runner)
@@ -772,7 +790,7 @@ func TestBlacksmithArtifactRunProtectedAndRequiredPaths(t *testing.T) {
 func TestBlacksmithArtifactRunClaimFence(t *testing.T) {
 	for _, mode := range []string{"writer", "stop", "replacement-before-run"} {
 		t.Run(mode, func(t *testing.T) {
-			isolateBlacksmithOwnership(t)
+			isolateArtifactOwnership(t)
 			repo := t.TempDir()
 			t.Chdir(repo)
 			const id = "tbx_artifactfence"
@@ -780,8 +798,9 @@ func TestBlacksmithArtifactRunClaimFence(t *testing.T) {
 			route, _, _ := blacksmithClaimBinding(claim)
 			entered, release, stopped := make(chan struct{}), make(chan struct{}), make(chan struct{})
 			archive := makeTarGz(t, map[string]string{"report": "synthetic"})
+			var publishedPath string
 			cfg := baseConfig()
-			backend := newTestBlacksmithBackend(cfg, ownershipRunner(func(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+			backend := newTestBlacksmithBackend(cfg, artifactTestRunner(t, func(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 				switch req.Args[1] {
 				case "status":
 					state := "ready"
@@ -796,6 +815,9 @@ func TestBlacksmithArtifactRunClaimFence(t *testing.T) {
 					return LocalCommandResult{}, nil
 				case "run":
 					start, exit, end := testBlacksmithReceiptFrames(t, syntheticBlacksmithCommand(t, req), 23)
+					metadata, archivePath := testBlacksmithArtifactMetadata(t, req, archive)
+					nonce := strings.TrimPrefix(filepath.Base(filepath.Dir(archivePath)), "blacksmith-artifact-")
+					publishedPath = core.LocalRunArtifactPath(repo, "", id, filepath.Join(nonce, "blacksmith-artifacts.tgz"))
 					fmt.Fprint(req.Stdout, start+exit)
 					close(entered)
 					select {
@@ -805,7 +827,7 @@ func TestBlacksmithArtifactRunClaimFence(t *testing.T) {
 					case <-ctx.Done():
 						return LocalCommandResult{ExitCode: 1}, ctx.Err()
 					}
-					fmt.Fprint(req.Stdout, core.DelegatedRunArtifactBeginMarker+"\n"+base64.StdEncoding.EncodeToString(archive)+"\n"+core.DelegatedRunArtifactEndMarker+"\n"+end)
+					fmt.Fprint(req.Stdout, metadata+end)
 					return LocalCommandResult{}, nil
 				}
 				t.Errorf("unexpected native action %s", req.Args[1])
@@ -844,7 +866,7 @@ func TestBlacksmithArtifactRunClaimFence(t *testing.T) {
 			if mode == "writer" {
 				go func() {
 					other <- core.WithDurableLeaseClaimLockContext(ctx, id, func(current *core.LeaseClaim, exists bool, save func() error) error {
-						if _, err := os.Stat(core.LocalRunArtifactPath(repo, "", id, "blacksmith-artifacts.tgz")); err != nil {
+						if _, err := os.Stat(publishedPath); err != nil {
 							return fmt.Errorf("writer crossed publication fence: %w", err)
 						}
 						current.RepoRoot = "/replacement"
@@ -880,7 +902,7 @@ func TestBlacksmithArtifactFailureCleanupAndClassification(t *testing.T) {
 	for _, mode := range []string{"collector-cleanup", "collector-diagnostic", "lease-cleanup"} {
 		for _, code := range []int{0, 1, 23} {
 			t.Run(fmt.Sprintf("%s/%d", mode, code), func(t *testing.T) {
-				isolateBlacksmithOwnership(t)
+				isolateArtifactOwnership(t)
 				repo := t.TempDir()
 				t.Chdir(repo)
 				testWriteBlacksmithFile(t, repo, "report", "synthetic")
@@ -899,9 +921,9 @@ func TestBlacksmithArtifactFailureCleanupAndClassification(t *testing.T) {
 							if strings.HasPrefix(arg, "/bin/sh -c ") {
 								switch mode {
 								case "collector-cleanup":
-									// Actual script EXIT trap still removes its temporary file,
-									// then reports a synthetic cleanup failure after archive output.
-									req.Args[i] = strings.Replace(arg, "set -euo pipefail", "set -euo pipefail\nrm() { command rm \"$@\"; return 9; }", 1)
+									// Run the original EXIT cleanup before reporting failure,
+									// including when finalization already moved the temporary file.
+									req.Args[i] = strings.Replace(arg, "set -euo pipefail", "set -euo pipefail\ntrap() { builtin trap \"$1; exit 9\" \"$2\"; }", 1)
 								case "collector-diagnostic":
 									req.Args[i] = strings.Replace(arg, "set -euo pipefail", "echo out of memory CRABBOX_PHASE:install; exit 9\nset -euo pipefail", 1)
 								}
@@ -929,11 +951,15 @@ func TestBlacksmithArtifactFailureCleanupAndClassification(t *testing.T) {
 					t.Fatalf("result=%+v err=%v", result, err)
 				}
 				if mode == "lease-cleanup" {
+					assertArtifactTransferCalls(t, runner.calls, 1)
 					if len(result.Artifacts) != 1 || !result.Session.Kept {
 						t.Fatal("cleanup changed evidence or retention")
 					}
-				} else if len(result.Artifacts) != 0 {
-					t.Fatal("failed collector published")
+				} else {
+					assertArtifactTransferCalls(t, runner.calls, 0)
+					if len(result.Artifacts) != 0 {
+						t.Fatal("failed collector published")
+					}
 				}
 				for _, line := range strings.Split(stderr.String(), "\n") {
 					if !strings.HasPrefix(line, "{") {
@@ -971,7 +997,9 @@ func TestBlacksmithArtifactReceiptEverySplit(t *testing.T) {
 		t.Fatal(err)
 	}
 	start, exit, end := testBlacksmithReceiptFrames(t, r.command(RunRequest{Command: []string{"true"}}, time.Second), 23)
-	wire := "before" + start + "during" + exit + "private" + end
+	prefix := strings.TrimSuffix(start, "start\x1f")
+	metadata := prefix + "bytes:1\x1f" + prefix + "digest0:" + strings.Repeat("a", 32) + "\x1f" + prefix + "digest1:" + strings.Repeat("b", 32) + "\x1f"
+	wire := "before" + start + "during" + exit + "private" + metadata + end
 	for split := 0; split <= len(wire); split++ {
 		var visible bytes.Buffer
 		receipt := &blacksmithArtifactReceipt{nonce: r.nonce, now: time.Now, output: &visible}
@@ -980,7 +1008,7 @@ func TestBlacksmithArtifactReceiptEverySplit(t *testing.T) {
 		_, _ = demux.Write([]byte(wire[:split]))
 		_, _ = demux.Write([]byte(wire[split:]))
 		demux.finish()
-		if demux.err != nil || ctx.Err() != nil || receipt.stage != 3 || receipt.code != 23 || receipt.payload.String() != "private" || visible.String() != "beforeduring" {
+		if demux.err != nil || ctx.Err() != nil || receipt.stage != 3 || receipt.validateArchiveReceipt() != nil || receipt.code != 23 || receipt.payload.String() != "private" || visible.String() != "beforeduring" {
 			t.Fatalf("split %d failed", split)
 		}
 		cancel(nil)

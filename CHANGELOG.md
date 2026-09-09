@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Transfer Blacksmith run artifacts through bounded native file download instead of bulk stdout, preserving the original collection deadline and claim while isolating each invocation's evidence.
+
 ## 0.54.0 - 2026-09-09
 
 ### Highlights

@@ -317,18 +317,31 @@ for inventory and enrichment semantics.
   `--download` are rejected because Blacksmith owns command transport and remote
   file transport. Use `--emit-proof` for PR-ready transcript proof.
 - `--artifact-glob` and `--require-artifact` run through the Blacksmith adapter:
-  an adapter-owned supervisor collects in the original native invocation after
+  an adapter-owned supervisor finalizes a bounded archive in the original native invocation after
   a normal terminal workload exit, including failures below 128. No follow-up
-  native run or re-sync occurs. Signal-like exits skip collection. Publication
+  native run or re-sync occurs; the native download primitive transfers the exact
+  finalized file under the same claim and deadline. Signal-like exits skip collection. Publication
   requires a fresh complete receipt, clean native transport, an uncanceled
   caller, and the original unchanged claim fence; stopped-lease recovery is not
   supported. Collection failures preserve an earlier workload failure; after
   workload success they still fail the run. Required globs remain all-or-nothing.
   The defaults are 256 files and 10 MiB compressed, stored privately under
-  `.crabbox/runs/<lease>/blacksmith-artifacts.tgz`, with protected paths and
+  `.crabbox/runs/<lease>/<nonce>/blacksmith-artifacts.tgz`, with protected paths and
   symlink handling unchanged. Linux `timeout` with `--kill-after` is required
-  before execution; collection has its own 30-second budget and bounded local
-  wait, subordinate to caller cancellation, not a workload deadline. Command
+  before execution; collection and native download share one 30-second budget,
+  subordinate to caller cancellation, not a workload deadline. Finalized remote
+  transfer archives remain nonce-scoped until canonical lease cleanup; their
+  locator and policy are recorded. Bounded downloads require a macOS/Linux
+  client, native download support, compatible `ps` process-group inspection and
+  unprivileged OpenSSH scp. Missing or incompatible inspection fails before the
+  workload launches. Keep the installed
+  tools stable during transfer: observed scp path, identity or content changes
+  withhold artifacts. Standalone command groups
+  remain owned until live members close; inherited controller-owned mode is
+  refused before workload execution. Cleanup-pending failure holds the original
+  claim while joining and never extends the success deadline. The leader remains
+  unreaped through cleanup; a contradicted child reservation retains the same
+  pending owner without further signals or reaping. Command
   timing ends at the workload receipt; collection and cleanup count toward total.
   Artifacts from a failed run are not success proof or remote source attestation.
   See the [artifact contract](../features/blacksmith-testbox.md#run-artifacts).
