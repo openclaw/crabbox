@@ -25096,7 +25096,10 @@ function pinnedHostConflict(config: LeaseConfig, leases: LeaseRecord[]): Respons
       (!lease.region || lease.region === providerRegionForConfig(config)) &&
       (leaseIsLive(lease) ||
         (!leaseProviderCleanupConfirmed(lease) &&
-          (Boolean(lease.cloudID) || lease.provisioningResourceMayExist === true))),
+          (lease.keep ||
+            lease.releaseDeletesServer === false ||
+            Boolean(lease.cloudID) ||
+            lease.provisioningResourceMayExist === true))),
   );
   if (!occupied) return undefined;
   return json(

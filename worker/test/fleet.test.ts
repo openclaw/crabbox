@@ -27669,14 +27669,15 @@ describe("fleet lease identity and idle", () => {
   });
 
   it.each([
-    { state: "active", keep: false },
-    { state: "active", keep: true },
-    { state: "provisioning", keep: true },
-    { state: "released", keep: true },
-    { state: "released", keep: false },
+    { state: "active", keep: false, cloudID: "i-kept" },
+    { state: "active", keep: true, cloudID: "i-kept" },
+    { state: "provisioning", keep: true, cloudID: "i-kept" },
+    { state: "released", keep: true, cloudID: "i-kept" },
+    { state: "released", keep: true, cloudID: "" },
+    { state: "released", keep: false, cloudID: "i-kept" },
   ] as const)(
-    "rejects a pinned host carrying a $state lease with keep=$keep",
-    async ({ state, keep }) => {
+    "rejects a pinned host carrying a $state lease with keep=$keep cloudID=$cloudID",
+    async ({ state, keep, cloudID }) => {
       const storage = new MemoryStorage();
       const held = testLease({
         id: "cbx_000000000100",
@@ -27685,7 +27686,7 @@ describe("fleet lease identity and idle", () => {
         target: "macos",
         region: "eu-west-1",
         hostId: "h-kept",
-        cloudID: "i-kept",
+        cloudID,
         serverID: 0,
         state,
         keep,
@@ -27694,6 +27695,13 @@ describe("fleet lease identity and idle", () => {
         org: "example-org",
       });
       storage.seed(`lease:${held.id}`, held);
+      if (!cloudID)
+        storage.seed("aws-mac-host-allocation:eu-west-1:h-kept", {
+          version: 1,
+          hostID: "h-kept",
+          region: "eu-west-1",
+          org: held.org,
+        });
       let preparations = 0;
       let creates = 0;
       let releases = 0;
