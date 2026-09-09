@@ -4873,7 +4873,6 @@ export class FleetCoordinator {
       const clearedHostReservations = hostReservations.filter(
         (reservation) => reservation.staleReason,
       );
-      await clearHostReservations(transaction, clearedHostReservations);
       const providerAccess = [
         ...(await transaction.list<LeaseRecord>({ prefix: providerAccessPrefix() })).values(),
       ];
@@ -4896,6 +4895,7 @@ export class FleetCoordinator {
       for (const lease of merged.values()) addLeaseToCostLimitUsage(usage, lease, now);
       const limit = enforceCostLimitUsage(usage, record, costLimits(this.env));
       if (limit) return json({ error: "cost_limit_exceeded", message: limit }, { status: 429 });
+      await clearHostReservations(transaction, clearedHostReservations);
       if (currentAttempt && attempt)
         await transaction.put(createAttemptKey(leaseID), {
           ...currentAttempt,
