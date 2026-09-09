@@ -4,6 +4,7 @@
 
 ### Changes
 
+- Initialize managed macOS SSH sessions through PAM so stock `nohup` can detach in the user's launchd context, retaining key-only authentication and using fresh bootstrap connections. [PR 2051](https://github.com/openclaw/crabbox/pull/2051). Thanks @steipete.
 - Support POSIX workspace ownership without `flock` or `lockf`, sharing an atomic directory gate across owner updates and child witnesses while preserving fail-closed recovery. [PR 2051](https://github.com/openclaw/crabbox/pull/2051). Thanks @steipete.
 - Install checksum-pinned Node 24.19.0 for Intel and Apple Silicon managed macOS leases when Node/npm are missing, complete older coordinator bootstrap during warmup, and require both tools for readiness. [PR 2051](https://github.com/openclaw/crabbox/pull/2051). Thanks @steipete.
 - Close macOS command-wrapper pipe descriptors before user execution so detached daemons do not keep completed commands waiting. [PR 2051](https://github.com/openclaw/crabbox/pull/2051). Thanks @steipete.

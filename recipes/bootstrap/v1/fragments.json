@@ -58,6 +58,11 @@
       "parameters": {}
     },
     {
+      "name": "macOSSSHSession",
+      "file": "macOSSSHSession.sh",
+      "parameters": {}
+    },
+    {
       "name": "macOSNodeInstall",
       "file": "macOSNodeInstall.sh",
       "parameters": {}

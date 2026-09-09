@@ -18,6 +18,11 @@ func TestManagedMacOSNodeBaseline(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.TargetOS = targetMacOS
 	bootstrap := macOSUserData(cfg, "ssh-ed25519 fixture")
+	for _, want := range []string{"UsePAM yes", "PasswordAuthentication no", "KbdInteractiveAuthentication no"} {
+		if !strings.Contains(bootstrap, want) {
+			t.Errorf("macOS SSH session setup missing %q", want)
+		}
+	}
 	for _, want := range []string{"node_version=24.19.0", "node_arch=x64", "node_arch=arm64", "https://nodejs.org/dist/", "shasum -a 256 -c -", "node --version >/dev/null", "npm --version >/dev/null"} {
 		if !strings.Contains(bootstrap, want) {
 			t.Errorf("macOS bootstrap missing %q", want)
@@ -34,6 +39,67 @@ func TestManagedMacOSNodeBaseline(t *testing.T) {
 	}
 	if !strings.Contains(string(linux), `pinned_node_version="24.19.0"`) {
 		t.Fatal("update macOS Node pin with Linux baseline")
+	}
+}
+
+func TestMacOSSSHSessionBootstrap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires POSIX shell")
+	}
+	for _, tc := range []struct {
+		name, initial string
+		reject        bool
+	}{
+		{name: "stock disabled PAM", initial: "UsePAM no\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\nPort 2222\n"},
+		{name: "existing managed block", initial: "# crabbox ssh session begin\nUsePAM no\n# crabbox ssh session end\nPort 22\n"},
+		{name: "validator rejects candidate", initial: "Port 22\n", reject: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			config := filepath.Join(root, "sshd_config")
+			if err := os.WriteFile(config, []byte(tc.initial), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			validator := filepath.Join(root, "sshd")
+			body := "#!/bin/sh\nset -eu\n[ \"$1\" = -t ] && [ \"$2\" = -f ]\n[ \"$(sed -n '2p' \"$3\")\" = 'UsePAM yes' ]\n[ \"$(sed -n '3p' \"$3\")\" = 'PasswordAuthentication no' ]\n[ \"$(sed -n '4p' \"$3\")\" = 'KbdInteractiveAuthentication no' ]\n"
+			if tc.reject {
+				body += "exit 9\n"
+			}
+			if err := os.WriteFile(validator, []byte(body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			script := strings.ReplaceAll(sharedMacOSSSHSession(), "/etc/ssh", root)
+			script = strings.ReplaceAll(script, "/usr/sbin/sshd", shellQuote(validator))
+			run := func() ([]byte, error) { return exec.Command("/bin/bash", "-c", script).CombinedOutput() }
+			out, err := run()
+			if tc.reject {
+				if err == nil {
+					t.Fatal("invalid sshd configuration was accepted")
+				}
+				got, readErr := os.ReadFile(config)
+				if readErr != nil || string(got) != tc.initial {
+					t.Fatalf("rejected configuration changed original: %q %v", got, readErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("bootstrap: %s %v", out, err)
+			}
+			first, err := os.ReadFile(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(first), "Port ") || strings.Count(string(first), "# crabbox ssh session begin") != 1 {
+				t.Fatalf("lost configuration or duplicated block: %s", first)
+			}
+			if out, err := run(); err != nil {
+				t.Fatalf("repeat: %s %v", out, err)
+			}
+			second, err := os.ReadFile(config)
+			if err != nil || !bytes.Equal(first, second) {
+				t.Fatalf("bootstrap is not idempotent: %s %v", second, err)
+			}
+		})
 	}
 }
 

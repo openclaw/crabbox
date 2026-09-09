@@ -463,7 +463,7 @@ func macOSUserData(cfg Config, publicKey string) string {
 	if workRoot == "" {
 		workRoot = defaultMacOSWorkRoot
 	}
-	return "#!/bin/bash\nset -euo pipefail\n(\n" + sharedMacOSNodeInstall() + ")\n" + sharedMacOS(cfg.SSHUser, publicKey, workRoot, sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
+	return "#!/bin/bash\nset -euo pipefail\n(\n" + sharedMacOSSSHSession() + ")\n(\n" + sharedMacOSNodeInstall() + ")\n" + sharedMacOS(cfg.SSHUser, publicKey, workRoot, sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
 }
 
 func cloudInitOptionalReadyChecks(cfg Config) string {

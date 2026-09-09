@@ -369,6 +369,11 @@ under `/usr/local/lib/crabbox` and command links in `/usr/local/bin`; Homebrew i
 not required. Healthy existing Node/npm installations are retained. Readiness
 requires both commands to execute successfully. Warmup also completes this
 baseline over SSH when an older coordinator's bootstrap omitted it.
+Managed SSH enables PAM session setup so commands enter the SSH user's launchd
+Background context; the stock macOS `nohup` needs that context to detach.
+Password and keyboard-interactive authentication remain disabled. Bootstrap
+uses fresh SSH connections so a pre-setup control master cannot retain the old
+System context.
 
 Managed WSL2 commands run as the non-root `crabbox` Linux user, with
 `HOME=/home/crabbox`, Bash, passwordless sudo, and membership in the `sudo` and
