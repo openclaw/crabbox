@@ -520,6 +520,12 @@ func TestVastGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestWandbGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_wandb.go", "../../internal/cli/config_wandb_generated.go", "WandbConfig", "wandb", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -1017,7 +1023,7 @@ func TestSchemaEnvIntFallbackFailsClosed(t *testing.T) {
 		{"float", `help:"CPUs"`, `help:"CPUs" envInt:"fallback"`, "envInt is supported only as fallback"},
 		{"bool", `help:"Enabled"`, `help:"Enabled" envInt:"fallback"`, "envInt is supported only as fallback"},
 		{"list", `help:"Ports"`, `help:"Ports" envInt:"fallback"`, "envInt is supported only as fallback"},
-		{"alias", `help:"Count"`, `help:"Count" envInt:"fallback" envAlias:"OTHER_COUNT"`, "envAlias is supported only for string"},
+		{"strict alias", `help:"Count"`, `help:"Count" envAlias:"OTHER_COUNT"`, "envAlias is supported only for string"},
 		{"required policy", `nonnegative:"true"`, `envInt:"fallback"`, "require nonnegative policy"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1876,4 +1882,93 @@ func TestNonzeroSources(t *testing.T){
 `
 		runScalarFixture(t, input, output, behavior+helpers+"\nconst fallbackMode = "+map[bool]string{false: "false", true: "true"}[fallback]+"\n")
 	}
+}
+
+func TestSchemaFallbackIntAlias(t *testing.T) {
+	const source = "package cli\ntype PilotConfig struct { Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"COUNT\" envAlias:\"COUNT_ALIAS\" flag:\"count\" help:\"Count\" nonnegative:\"true\" envInt:\"fallback\" fileInt:\"positive\"` }"
+	if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"strict disallowed", `envInt:"fallback"`, "", "envAlias is supported only"},
+		{"empty alias", `envAlias:"COUNT_ALIAS"`, `envAlias:""`, "invalid env binding"},
+		{"primary collision", `envAlias:"COUNT_ALIAS"`, `envAlias:"COUNT"`, "duplicate env binding"},
+		{"second alias forbidden", `envAlias:"COUNT_ALIAS"`, `envAlias:"COUNT_ALIAS" envAlias2:"SECOND"`, "envAlias2 requires an environment-admitted string"},
+		{"config-order mode forbidden", `envAlias:"COUNT_ALIAS"`, `envAlias:"COUNT_ALIAS" envAliasAfterConfig:"true"`, "envAliasAfterConfig requires true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(source, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want%q", err, tc.want)
+			}
+		})
+	}
+	for _, input := range []string{
+		strings.Replace(flagOnlySample, `help:"Count"`, `help:"Count" envInt:"fallback" envAlias:"ALIAS"`, 1),
+		strings.Replace(sample, `help:"CPUs"`, `help:"CPUs" envAlias:"ALIAS"`, 1),
+	} {
+		if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil {
+			t.Fatal("unsupported numeric alias admitted")
+		}
+	}
+}
+
+func TestGenerateFallbackIntAlias(t *testing.T) {
+	const source = "package cli\ntype PilotConfig struct { Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"COUNT\" envAlias:\"COUNT_ALIAS\" flag:\"count\" help:\"Count\" nonnegative:\"true\" envInt:\"fallback\" fileInt:\"positive\"` }"
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic integer aliases: %v", err)
+	}
+	if !strings.Contains(string(output), `cfg.Count = getenvInt("COUNT", getenvInt("COUNT_ALIAS", cfg.Count))`) {
+		t.Fatal("missing exact nested tolerant integer fallback")
+	}
+	plain, err := parseSchema([]byte(strings.Replace(source, ` envAlias:"COUNT_ALIAS"`, "", 1)), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := generate(plain, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Replace(string(before), `getenvInt("COUNT", cfg.Count)`, `getenvInt("COUNT", getenvInt("COUNT_ALIAS", cfg.Count))`, 1)
+	if string(output) != want {
+		t.Fatal("integer alias changed non-env bindings")
+	}
+	typecheckGenerated(t, source+"\nfunc getenvInt(string,int)int{panic(\"stub\")}\n", output)
+	coreSource, err := os.ReadFile("../../internal/cli/config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(coreSource), "func getenvInt(")
+	if start < 0 {
+		t.Fatal("missing getenvInt")
+	}
+	rest := string(coreSource)[start:]
+	end := strings.Index(rest, "\nfunc ")
+	if end < 0 {
+		t.Fatal("missing helper end")
+	}
+	const behavior = `package cli
+import("flag";"os";"strconv";"testing")
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestNestedFallback(t *testing.T){
+ for _,tc:=range []struct{primary,alias string;want int}{{"","",37},{"","45",45},{"bad","45",45},{" 2 ","45",45},{"999999999999999999999999","45",45},{"0","45",0},{"-2","45",-2},{"12","45",12},{"bad","bad",37},{""," 2 ",37},{"","999999999999999999999999",37},{"bad","0",0},{"bad","-2",-2}}{
+  cfg:=PilotConfig{Count:37};t.Setenv("COUNT",tc.primary);t.Setenv("COUNT_ALIAS",tc.alias)
+  if err:=cfg.applyEnv();err!=nil||cfg.Count!=tc.want{t.Fatalf("%+v: %+v %v",tc,cfg,err)}
+ }
+ zero,negative,positive:=0,-2,4
+ for _,tc:=range []struct{value *int;want int}{{nil,37},{&zero,37},{&negative,37},{&positive,4}}{cfg:=PilotConfig{Count:37};if err:=cfg.applyFile(&filePilotConfig{Count:tc.value});err!=nil||cfg.Count!=tc.want{t.Fatalf("file: %+v %v",cfg,err)}}
+ cfg:=PilotConfig{Count:37};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+ if err:=fs.Parse([]string{"--count=0"});err!=nil{t.Fatal(err)};values.Apply(&cfg,fs);if cfg.Count!=0{t.Fatal("flag zero changed")}
+}
+`
+	runScalarFixture(t, source, output, behavior+rest[:end])
 }

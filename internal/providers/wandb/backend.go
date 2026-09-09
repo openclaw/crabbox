@@ -61,7 +61,7 @@ func (b *wandbBackend) Run(ctx context.Context, req RunRequest) (result RunResul
 	}
 	started := core.ClockNow(b.rt.Clock)
 	cfg := b.cfg
-	image := blank(strings.TrimSpace(cfg.Wandb.DefaultImage), "ubuntu:24.04")
+	image := blank(strings.TrimSpace(cfg.Wandb.DefaultImage), core.WandbDefaultImageFallback)
 	maxLifetime := wandbMaxLifetimeSeconds(cfg)
 
 	sandboxID := strings.TrimSpace(req.ID)
@@ -427,17 +427,17 @@ func applyWandbDefaults(cfg *Config) {
 		cfg.TargetOS = targetLinux
 	}
 	if cfg.Wandb.DefaultImage == "" {
-		cfg.Wandb.DefaultImage = "ubuntu:24.04"
+		cfg.Wandb.DefaultImage = core.WandbDefaultImageFallback
 	}
 	if cfg.Wandb.MaxLifetimeSeconds <= 0 {
-		cfg.Wandb.MaxLifetimeSeconds = 1800
+		cfg.Wandb.MaxLifetimeSeconds = core.WandbMaxLifetimeSecondsFallback
 	}
 }
 
 func wandbMaxLifetimeSeconds(cfg Config) int {
 	maxLifetime := cfg.Wandb.MaxLifetimeSeconds
 	if maxLifetime <= 0 {
-		maxLifetime = 1800
+		maxLifetime = core.WandbMaxLifetimeSecondsFallback
 	}
 	if cfg.TTL > 0 {
 		ttlSeconds := int((cfg.TTL + time.Second - 1) / time.Second)

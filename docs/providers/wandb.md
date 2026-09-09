@@ -87,8 +87,9 @@ wandb:
   maxLifetimeSeconds: 1800   # 30 min; W&B reclaims the sandbox at this limit
 ```
 
-Defaults applied when unset: `defaultImage` is `ubuntu:24.04` and
-`maxLifetimeSeconds` is `1800`.
+Runtime defaults applied when unset: `defaultImage` is `ubuntu:24.04` and
+`maxLifetimeSeconds` is `1800`. The raw configuration remains empty/zero until
+the provider applies these defaults; flag registration does not eagerly fill them.
 
 Provider flags (each overrides the matching `wandb.*` config key):
 
@@ -106,6 +107,14 @@ Environment overrides:
 - `CWSANDBOX_BASE_URL` overrides the gateway endpoint (default
   `api.cwsandbox.com:443`); the `https://` / `http://` scheme is stripped if
   present.
+
+The three configuration settings use shared typed bindings. Empty file/environment
+strings preserve prior values. File `maxLifetimeSeconds` assigns only when positive;
+zero or negative file values leave the prior setting intact. Environment parsing
+instead accepts signed integers: a parsed primary value, including zero or a
+negative value, wins. An empty or malformed primary falls back to the vendor alias,
+then to the prior setting. Runtime defaulting and the lease TTL still determine the
+effective lifetime. The client-owned API-key precedence above is unchanged.
 
 ## Lifecycle
 
@@ -241,5 +250,3 @@ Related docs:
 - [Provider backends](../provider-backends.md)
 - [W&B Sandboxes docs](https://docs.wandb.ai/sandboxes)
 - [CoreWeave Sandboxes docs](https://docs.coreweave.com/products/sandboxes)
-</content>
-</invoke>

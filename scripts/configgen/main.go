@@ -253,9 +253,6 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		if hasAlias2 && (f.kind != "string" || f.noEnv) {
 			return s, fmt.Errorf("%s: envAlias2 requires an environment-admitted string field", f.name)
 		}
-		if hasAlias && f.kind != "string" {
-			return s, fmt.Errorf("%s: envAlias is supported only for string fields", f.name)
-		}
 		if value, ok := tags.Lookup("envAliasAfterConfig"); ok {
 			if value != "true" || f.kind != "string" || f.noEnv || !hasAlias || hasAlias2 {
 				return s, fmt.Errorf("%s: envAliasAfterConfig requires true on an environment-admitted string with exactly one envAlias", f.name)
@@ -290,6 +287,9 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 				return s, fmt.Errorf("%s: envInt is supported only as fallback for environment-admitted nonnegative int fields", f.name)
 			}
 			f.envIntFallback = true
+		}
+		if hasAlias && f.kind != "string" && !(f.kind == "int" && !f.noEnv && f.envIntFallback) {
+			return s, fmt.Errorf("%s: envAlias is supported only for string fields or environment-admitted int fields with envInt fallback", f.name)
 		}
 		if value, ok := tags.Lookup("flagFallback"); ok {
 			if value == "" || f.kind != "string" || f.noFlag {
@@ -482,7 +482,11 @@ func generate(s schema, source string) ([]byte, error) {
 			p("cfg.%s = getenvFloat(%q, cfg.%s)\n", f.name, f.env, f.name)
 		case "int":
 			if f.envIntFallback {
-				p("cfg.%s = getenvInt(%q, cfg.%s)\n", f.name, f.env, f.name)
+				fallback := "cfg." + f.name
+				if f.envAlias != "" {
+					fallback = fmt.Sprintf("getenvInt(%q, %s)", f.envAlias, fallback)
+				}
+				p("cfg.%s = getenvInt(%q, %s)\n", f.name, f.env, fallback)
 				continue
 			}
 			p("{ var err error; cfg.%s, err = getenvNonNegativeInt(%q, cfg.%s); if err != nil { return %serr } }\n", f.name, f.env, f.name, resultPrefix)

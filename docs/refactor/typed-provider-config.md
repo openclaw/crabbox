@@ -3,7 +3,7 @@
 Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
-Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, Lume, Runpod, and Vast
+Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, Lume, Runpod, Vast, and W&B
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -19,7 +19,8 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_opencomputer.go`, `internal/cli/config_modal.go`,
 `internal/cli/config_morph.go`, `internal/cli/config_exe_dev.go`,
 `internal/cli/config_ovh.go`, `internal/cli/config_lume.go`,
-`internal/cli/config_runpod.go`, and `internal/cli/config_vast.go`.
+`internal/cli/config_runpod.go`, `internal/cli/config_vast.go`, and
+`internal/cli/config_wandb.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -71,6 +72,12 @@ flag; its file/environment bindings keep the raw value for later provider phases
 Its work-root and release-action markers remain handwritten policy. Nonzero integer
 file overlays ignore zero, while ordinary float overlays accept explicit zero;
 neither rule moves Vast's validation or post-flag defaulting into generation.
+
+W&B keeps its raw image and lifetime empty/zero, with named runtime fallback
+constants beside the declaration. The provider retains its raw-versus-trimmed
+image decisions and TTL rounding/clamp. Its integer environment alias uses nested
+tolerant parsing: a malformed primary falls back to the alias, while a parsed zero
+or negative primary wins. Its vendor login and netrc resolution stay client-owned.
 
 ## Adding a field
 
@@ -131,8 +138,12 @@ neither rule moves Vast's validation or post-flag defaulting into generation.
    the int-only nonnegative policy do not become float policies.
    A string field may name an existing fallback environment variable with
    `envAlias`, and a second with `envAlias2` only when the first is present.
-   All names share collision checks; empty aliases, non-string fields, and
-   fields without environment admission are rejected. The primary value wins,
+   All names share collision checks; empty aliases and fields without environment
+   admission are rejected. Integer fields permit exactly one `envAlias` only with
+   `envInt:"fallback"`, using nested `getenvInt` calls so a malformed primary falls
+   back to the alias and then the prior value; parsed zero and negatives still win.
+   Strict integers and other non-string types reject aliases, and `envAlias2`
+   remains string-only. For string aliases, the primary value wins,
    then the first alias, then the second, then the prior value. Empty values
    fall through without trimming nonempty values. No arbitrary alias list or
    custom parser is accepted.
@@ -181,7 +192,7 @@ neither rule moves Vast's validation or post-flag defaulting into generation.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer ./internal/providers/modal ./internal/providers/morph ./internal/providers/exedev ./internal/providers/ovh ./internal/providers/lume ./internal/providers/runpod ./internal/providers/vast` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer ./internal/providers/modal ./internal/providers/morph ./internal/providers/exedev ./internal/providers/ovh ./internal/providers/lume ./internal/providers/runpod ./internal/providers/vast ./internal/providers/wandb` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:

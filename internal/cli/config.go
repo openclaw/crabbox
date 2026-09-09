@@ -742,15 +742,6 @@ type HostingerConfig struct {
 	ReleaseAction   string
 }
 
-// WandbConfig drives the W&B Sandboxes (CoreWeave Sandboxes) provider. The
-// API key is the same one `wandb login` writes to ~/.netrc — the value
-// proposition of this provider is that AI researchers already have it.
-type WandbConfig struct {
-	APIKey             string
-	DefaultImage       string
-	MaxLifetimeSeconds int
-}
-
 type IsloConfig struct {
 	APIKey         string
 	BaseURL        string
@@ -2661,6 +2652,7 @@ func baseConfig() Config {
 			MemoryMB: 4096,
 			DiskGB:   20,
 		},
+		Wandb: defaultWandbConfig(),
 		Freestyle: FreestyleConfig{
 			APIURL:  "https://api.freestyle.sh",
 			Workdir: "crabbox",
@@ -3527,12 +3519,6 @@ type fileHostingerConfig struct {
 	WorkRoot        string `yaml:"workRoot,omitempty"`
 	AllowPurchase   *bool  `yaml:"allowPurchase,omitempty"`
 	ReleaseAction   string `yaml:"releaseAction,omitempty"`
-}
-
-type fileWandbConfig struct {
-	APIKey             string `yaml:"apiKey,omitempty"`
-	DefaultImage       string `yaml:"defaultImage,omitempty"`
-	MaxLifetimeSeconds int    `yaml:"maxLifetimeSeconds,omitempty"`
 }
 
 type fileIsloConfig struct {
@@ -5819,16 +5805,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Hostinger.ReleaseAction = file.Hostinger.ReleaseAction
 		}
 	}
-	if file.Wandb != nil {
-		if file.Wandb.APIKey != "" {
-			cfg.Wandb.APIKey = file.Wandb.APIKey
-		}
-		if file.Wandb.DefaultImage != "" {
-			cfg.Wandb.DefaultImage = file.Wandb.DefaultImage
-		}
-		if file.Wandb.MaxLifetimeSeconds > 0 {
-			cfg.Wandb.MaxLifetimeSeconds = file.Wandb.MaxLifetimeSeconds
-		}
+	if err := cfg.Wandb.applyFile(file.Wandb); err != nil {
+		return err
 	}
 	{
 		applied, err := cfg.Orgo.applyFile(file.Orgo, trusted)
@@ -7715,11 +7693,9 @@ func applyEnv(cfg *Config) error {
 		cfg.Hostinger.AllowPurchase = value
 	}
 	cfg.Hostinger.ReleaseAction = getenv("CRABBOX_HOSTINGER_RELEASE_ACTION", cfg.Hostinger.ReleaseAction)
-	// WANDB_API_KEY is resolved by the W&B client after file config so a
-	// generic shell login cannot override an explicit wandb.apiKey value.
-	cfg.Wandb.APIKey = getenv("CRABBOX_WANDB_API_KEY", cfg.Wandb.APIKey)
-	cfg.Wandb.DefaultImage = getenv("CRABBOX_WANDB_DEFAULT_IMAGE", getenv("WANDB_DEFAULT_IMAGE", cfg.Wandb.DefaultImage))
-	cfg.Wandb.MaxLifetimeSeconds = getenvInt("CRABBOX_WANDB_MAX_LIFETIME_SECONDS", getenvInt("WANDB_MAX_LIFETIME_SECONDS", cfg.Wandb.MaxLifetimeSeconds))
+	if err := cfg.Wandb.applyEnv(); err != nil {
+		return err
+	}
 	{
 		applied, err := cfg.Orgo.applyEnv()
 		if applied.APIKey {

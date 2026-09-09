@@ -12063,3 +12063,133 @@ func TestVastBindingCentralURLPhase(t *testing.T) {
 		}
 	}
 }
+
+func TestWandbBindingFileContract(t *testing.T) {
+	if got := baseConfig().Wandb; got != (WandbConfig{}) {
+		t.Fatalf("raw defaults=%#v", got)
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace", "value"} {
+			cfg := baseConfig()
+			cfg.Wandb = WandbConfig{APIKey: "inert-prior", DefaultImage: "prior-image", MaxLifetimeSeconds: 37}
+			want := cfg.Wandb
+			fields := map[string]any{}
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"apiKey", &want.APIKey}, {"defaultImage", &want.DefaultImage}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = "inert-value"
+				}
+				fields[f.key] = raw
+				if mode == "equal" || mode == "whitespace" || mode == "value" {
+					*f.v = raw.(string)
+				}
+			}
+			data, err := yaml.Marshal(map[string]any{"wandb": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Wandb != want {
+				t.Fatalf("file mode=%s trusted=%t got=%#v want=%#v", mode, trusted, cfg.Wandb, want)
+			}
+		}
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, tc := range []struct {
+			raw  string
+			want int
+		}{{"null", 37}, {"0", 37}, {"-2", 37}, {"45", 45}} {
+			cfg := baseConfig()
+			cfg.Wandb.MaxLifetimeSeconds = 37
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte("wandb:\n  maxLifetimeSeconds: "+tc.raw+"\n"), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Wandb.MaxLifetimeSeconds != tc.want {
+				t.Fatalf("file lifetime=%s got=%d want=%d", tc.raw, cfg.Wandb.MaxLifetimeSeconds, tc.want)
+			}
+		}
+	}
+}
+
+func TestWandbBindingEnvironmentContract(t *testing.T) {
+	for _, tc := range []struct{ name, key, primaryImage, aliasImage, wantKey, wantImage string }{
+		{"empty", "", "", "", "inert-prior", "prior-image"},
+		{"primary", "inert-primary", "primary-image", "alias-image", "inert-primary", "primary-image"},
+		{"image-alias", "", "", "alias-image", "inert-prior", "alias-image"},
+		{"whitespace", "  ", "  ", "alias-image", "  ", "  "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Wandb = WandbConfig{APIKey: "inert-prior", DefaultImage: "prior-image", MaxLifetimeSeconds: 37}
+			t.Setenv("CRABBOX_WANDB_API_KEY", tc.key)
+			t.Setenv("CRABBOX_WANDB_DEFAULT_IMAGE", tc.primaryImage)
+			t.Setenv("WANDB_DEFAULT_IMAGE", tc.aliasImage)
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Wandb != (WandbConfig{APIKey: tc.wantKey, DefaultImage: tc.wantImage, MaxLifetimeSeconds: 37}) {
+				t.Fatalf("env strings=%#v", cfg.Wandb)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, primary, vendor         string
+		missingPrimary, missingVendor bool
+		want                          int
+	}{
+		{"missing-primary", "", "45", true, false, 45}, {"empty-primary", "", "45", false, false, 45}, {"malformed-primary", "invalid", "45", false, false, 45},
+		{"overflow-primary", "999999999999999999999999999999999999", "45", false, false, 45}, {"padded-primary", " 46 ", "45", false, false, 45},
+		{"zero-primary", "0", "45", false, false, 0}, {"negative-primary", "-2", "45", false, false, -2}, {"positive-primary", "46", "45", false, false, 46},
+		{"both-invalid", "invalid", "invalid", false, false, 37}, {"bad-vendor", "", "invalid", false, false, 37}, {"padded-vendor", "", " 45 ", false, false, 37}, {"both-missing", "", "", true, true, 37},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Wandb.MaxLifetimeSeconds = 37
+			t.Setenv("CRABBOX_WANDB_MAX_LIFETIME_SECONDS", tc.primary)
+			t.Setenv("WANDB_MAX_LIFETIME_SECONDS", tc.vendor)
+			if tc.missingPrimary {
+				if err := os.Unsetenv("CRABBOX_WANDB_MAX_LIFETIME_SECONDS"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.missingVendor {
+				if err := os.Unsetenv("WANDB_MAX_LIFETIME_SECONDS"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Wandb.MaxLifetimeSeconds != tc.want {
+				t.Fatalf("nested lifetime got=%d want=%d", cfg.Wandb.MaxLifetimeSeconds, tc.want)
+			}
+		})
+	}
+}
