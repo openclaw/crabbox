@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1408,17 +1409,38 @@ func TestCoordinatorLeaseWatchCancelsWhenLeaseReleased(t *testing.T) {
 	}
 }
 
-func TestCoordinatorCurlFallbackSkipsNonIdempotentAndTimeouts(t *testing.T) {
-	transportErr := &url.Error{Op: "Get", URL: "https://broker.example.test/v1/leases", Err: io.ErrUnexpectedEOF}
-	if !shouldUseCoordinatorCurlFallback(http.MethodGet, false, transportErr) {
-		t.Fatal("GET transport error should use curl fallback")
-	}
-	if shouldUseCoordinatorCurlFallback(http.MethodPost, true, transportErr) {
-		t.Fatal("POST with body should not use curl fallback")
-	}
-	timeoutErr := &url.Error{Op: "Get", URL: "https://broker.example.test/v1/leases", Err: context.DeadlineExceeded}
-	if shouldUseCoordinatorCurlFallback(http.MethodGet, false, timeoutErr) {
-		t.Fatal("deadline exceeded should not use curl fallback")
+func TestCoordinatorCurlFallbackEligibility(t *testing.T) {
+	dialErr := &net.OpError{Op: "dial", Net: "tcp", Err: context.DeadlineExceeded}
+	for _, test := range []struct {
+		name      string
+		err       error
+		wrapped   bool
+		fallback  bool
+		transport bool
+	}{
+		{"unexpected EOF", io.ErrUnexpectedEOF, true, true, true},
+		{"dial deadline", dialErr, true, true, false},
+		{"unwrapped dial deadline", dialErr, false, false, false},
+		{"request deadline", context.DeadlineExceeded, true, false, false},
+		{"read deadline", &net.OpError{Op: "read", Net: "tcp", Err: context.DeadlineExceeded}, true, false, false},
+		{"cancellation", context.Canceled, true, false, false},
+		{"dial cancellation", &net.OpError{Op: "dial", Net: "tcp", Err: context.Canceled}, true, false, false},
+		{"no error", nil, false, false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.err
+			if test.wrapped {
+				err = &url.Error{Op: "Get", URL: "https://broker.example.test/v1/leases", Err: err}
+			}
+			for _, method := range []string{http.MethodGet, http.MethodHead} {
+				if got := shouldUseCoordinatorCurlFallback(t.Context(), method, false, err); got != test.fallback {
+					t.Errorf("%s fallback=%t, want %t", method, got, test.fallback)
+				}
+			}
+			if got := isCoordinatorTransportError(err); got != test.transport {
+				t.Errorf("shared transport classification=%t, want unchanged %t", got, test.transport)
+			}
+		})
 	}
 }
 

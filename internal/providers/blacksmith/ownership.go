@@ -218,7 +218,11 @@ func blacksmithExitDiagnostics(err error) error {
 }
 
 func blacksmithContextError(ctx context.Context, err error) error {
-	if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+	ctxErr := ctx.Err()
+	if ctxErr == nil {
+		return err
+	}
+	if !errors.Is(err, ctxErr) {
 		err = errors.Join(err, ctxErr)
 	}
 	if cause := context.Cause(ctx); cause != nil && !errors.Is(err, cause) {
