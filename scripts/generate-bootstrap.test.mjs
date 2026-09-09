@@ -51,7 +51,7 @@ async function temporary(t) {
   return directory;
 }
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, { encoding: "utf8", timeout: 60000, ...options });
+  const result = spawnSync(command, args, { encoding: "utf8", timeout: 60000, maxBuffer: 16 * 1024 * 1024, ...options });
   assert.equal(result.status, 0, result.stderr || result.stdout || String(result.error));
   return result.stdout;
 }
@@ -300,6 +300,8 @@ test("PowerShell fragments parse and download verification fails closed before e
 test("check detects missing and stale outputs without rewriting, and regeneration repairs them", async (t) => {
   const directory = await temporary(t);
   await cp(resolve(repoRoot, "recipes"), join(directory, "recipes"), { recursive: true });
+  await mkdir(join(directory, "scripts"), { recursive: true });
+  await cp(resolve(repoRoot, "scripts/install-linux-developer-tools.sh"), join(directory, "scripts/install-linux-developer-tools.sh"));
   await mkdir(join(directory, "internal/cli"), { recursive: true });
   await mkdir(join(directory, "worker/src"), { recursive: true });
   await mkdir(join(directory, "scripts"), { recursive: true });

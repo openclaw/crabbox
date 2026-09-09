@@ -36,7 +36,6 @@ const (
 	providerName   = "cloudflare-sandbox"
 	providerFamily = "cloudflare"
 	leasePrefix    = "cfsbx_"
-	defaultWorkdir = "/workspace/crabbox"
 	targetLinux    = core.TargetLinux
 	NetworkPublic  = "public"
 )

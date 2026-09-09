@@ -27,6 +27,8 @@ desktop="${CRABBOX_IMAGE_DESKTOP:-auto}"
 browser="${CRABBOX_IMAGE_BROWSER:-auto}"
 windows_mode="${CRABBOX_WINDOWS_MODE:-normal}"
 prep_script="${CRABBOX_IMAGE_PREP_SCRIPT:-}"
+linux_node_major="${CRABBOX_LINUX_NODE_MAJOR:-24}"
+linux_pnpm_version="${CRABBOX_LINUX_PNPM_VERSION:-11.1.0}"
 measured=0
 max_p95_runner_total_ms=""
 measurement_dir=""
@@ -200,6 +202,10 @@ if [[ -z "$prep_script" ]]; then
   else
     prep_script="$ROOT/scripts/install-linux-developer-tools.sh"
   fi
+fi
+linux_developer_builder=0
+if [[ "$target" == "linux" && "$prep_script" -ef "$ROOT/scripts/install-linux-developer-tools.sh" ]]; then
+  linux_developer_builder=1
 fi
 if [[ "$browser" == "auto" ]]; then
   if [[ "$target" == "linux" ]]; then
@@ -776,13 +782,35 @@ smoke_script() {
   else
     smoke_script_path="$ROOT/scripts/devtools-image-smoke-linux.sh"
   fi
-  IFS= read -r -d '' smoke_script_value <"$smoke_script_path" || [[ -n "$smoke_script_value" ]]
+  smoke_script_value=""
+  IFS= read -r -d '' smoke_script_value <"$smoke_script_path" || [[ -n "$smoke_script_value" ]] || return 1
+  if [[ "$target" == "linux" ]]; then
+    local expected_node_major="" archive_probe=":"
+    if [[ "$linux_developer_builder" == "1" ]]; then
+      [[ "$linux_node_major" == "24" ]] || expected_node_major="$linux_node_major"
+      # Only the bundled builder declares archives. Freeze its selection, not guest environment.
+      archive_probe="$(
+        CRABBOX_LINUX_NODE_MAJOR="$linux_node_major" \
+          bash -c 'source "$1"; node_pnpm_smoke_script' _ "$ROOT/scripts/install-linux-developer-tools.sh"
+      )" || return $?
+      local go_archive_probe bun_archive_probe
+      go_archive_probe="$(
+        bash -c 'source "$1"; go_smoke_script' _ "$ROOT/scripts/install-linux-developer-tools.sh"
+      )" || return $?
+      bun_archive_probe="$(
+        bash -c 'source "$1"; bun_smoke_script' _ "$ROOT/scripts/install-linux-developer-tools.sh"
+      )" || return $?
+      archive_probe+=$'\n'"$go_archive_probe"$'\n'"$bun_archive_probe"
+    fi
+    printf -v smoke_script_value 'set -euo pipefail\nexpected_node_major=%q\ndeveloper_archive_probe() {\n%s\n}\n%s' \
+      "$expected_node_major" "$archive_probe" "$smoke_script_value"
+  fi
 }
 
 smoke() {
   local lease="$1"
   verify_linux_image_readiness "$lease"
-  smoke_script
+  smoke_script || return $?
   if [[ "$target" == "linux" ]]; then
     local flags
     printf -v flags 'export CRABBOX_LINUX_DESKTOP_TOOLS=%q CRABBOX_LINUX_BROWSER=%q\n' "$desktop" "$browser"
@@ -821,7 +849,14 @@ run_prep() {
     wait_windows_prep_task "$lease"
     return
   fi
-  run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync --script "$prep_script"
+  if [[ "$linux_developer_builder" == "1" ]]; then
+    # Prep and every smoke must use the same declared overrides, not ambient guest state.
+    run_cmd env CRABBOX_LINUX_NODE_MAJOR="$linux_node_major" CRABBOX_LINUX_PNPM_VERSION="$linux_pnpm_version" \
+      "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync \
+      --allow-env CRABBOX_LINUX_NODE_MAJOR,CRABBOX_LINUX_PNPM_VERSION --script "$prep_script"
+  else
+    run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync --script "$prep_script"
+  fi
 }
 
 stage_linux_readiness_producer() {

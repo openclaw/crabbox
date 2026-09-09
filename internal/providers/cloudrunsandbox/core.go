@@ -40,8 +40,6 @@ const (
 	providerFamily        = "cloud-run-sandbox"
 	leasePrefix           = "gcrs_"
 	namePrefix            = "crabbox-"
-	defaultCLIPath        = "/usr/local/gcp/bin/sandbox"
-	defaultWorkdir        = "/tmp/crabbox"
 	defaultSandboxPath    = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 	targetLinux           = core.TargetLinux
 	NetworkPublic         = core.NetworkPublic

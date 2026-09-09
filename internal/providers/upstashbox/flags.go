@@ -3,24 +3,12 @@ package upstashbox
 import (
 	"flag"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-type flagValues struct {
-	BaseURL   *string
-	Runtime   *string
-	Size      *string
-	Workdir   *string
-	KeepAlive *bool
-}
-
 func RegisterUpstashBoxProviderFlags(fs *flag.FlagSet, defaults Config) any {
-	return flagValues{
-		BaseURL:   fs.String("upstash-box-base-url", defaults.UpstashBox.BaseURL, "Upstash Box API base URL"),
-		Runtime:   fs.String("upstash-box-runtime", defaults.UpstashBox.Runtime, "Upstash Box runtime: node, python, golang, ruby, or rust"),
-		Size:      fs.String("upstash-box-size", defaults.UpstashBox.Size, "Upstash Box size: small, medium, or large"),
-		Workdir:   fs.String("upstash-box-workdir", defaults.UpstashBox.Workdir, "absolute working directory inside the Upstash Box"),
-		KeepAlive: fs.Bool("upstash-box-keep-alive", defaults.UpstashBox.KeepAlive, "create Upstash boxes with keepAlive enabled"),
-	}
+	return core.RegisterUpstashBoxConfigFlags(fs, defaults.UpstashBox)
 }
 
 func ApplyUpstashBoxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
@@ -32,25 +20,11 @@ func ApplyUpstashBoxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) err
 			return exit(2, "--type is not supported for provider=%s; use --upstash-box-runtime", providerName)
 		}
 	}
-	v, ok := values.(flagValues)
+	v, ok := values.(core.UpstashBoxConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "upstash-box-base-url") {
-		cfg.UpstashBox.BaseURL = *v.BaseURL
-	}
-	if flagWasSet(fs, "upstash-box-runtime") {
-		cfg.UpstashBox.Runtime = *v.Runtime
-	}
-	if flagWasSet(fs, "upstash-box-size") {
-		cfg.UpstashBox.Size = *v.Size
-	}
-	if flagWasSet(fs, "upstash-box-workdir") {
-		cfg.UpstashBox.Workdir = *v.Workdir
-	}
-	if flagWasSet(fs, "upstash-box-keep-alive") {
-		cfg.UpstashBox.KeepAlive = *v.KeepAlive
-	}
+	v.Apply(&cfg.UpstashBox, fs)
 	return validateConfig(*cfg)
 }
 

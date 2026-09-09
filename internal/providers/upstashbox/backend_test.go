@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -52,6 +53,140 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	}
 	if !hasFeature(spec.Features, core.FeatureRunSession) {
 		t.Fatalf("features=%#v want run-session", spec.Features)
+	}
+}
+
+func TestUpstashBoxFlagPresenceAndExactGuardOrder(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := RegisterUpstashBoxProviderFlags(fs, cfg)
+	fs.VisitAll(func(f *flag.Flag) {
+		if strings.Contains(f.Name, "key") {
+			t.Fatal("API key flag registered")
+		}
+	})
+	cfg.UpstashBox = UpstashBoxConfig{BaseURL: "https://example.invalid/api", Runtime: "python", Size: "large", Workdir: "/workspace/home/app", KeepAlive: true}
+	before := cfg
+	if err := ApplyUpstashBoxProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("unvisited flags changed config")
+	}
+	if err := fs.Parse([]string{"--upstash-box-base-url=https://example.invalid/api", "--upstash-box-runtime=python", "--upstash-box-size=large", "--upstash-box-workdir=/workspace/home/app", "--upstash-box-keep-alive=true"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.UpstashBox = UpstashBoxConfig{}
+	if err := ApplyUpstashBoxProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("nonempty visited flags not applied")
+	}
+	if err := fs.Parse([]string{"--upstash-box-base-url=", "--upstash-box-runtime=", "--upstash-box-size=", "--upstash-box-workdir=", "--upstash-box-keep-alive=false"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyUpstashBoxProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	before.UpstashBox = UpstashBoxConfig{}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("visited clears or wrapper provenance changed")
+	}
+	for _, name := range []string{"upstash-box", "upstash", "box", "upstashbox", "UPSTASH", " upstash-box "} {
+		cfg := Config{Provider: name}
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		values := RegisterUpstashBoxProviderFlags(fs, cfg)
+		for _, args := range [][]string{{"--type=vm"}, {"--type=vm", "--class=large"}} {
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			for _, v := range []any{nil, struct{}{}, values} {
+				err := ApplyUpstashBoxProviderFlags(&cfg, fs, v)
+				if name == "UPSTASH" || name == " upstash-box " {
+					if err != nil {
+						t.Fatalf("nonexact alias guarded: %v", err)
+					}
+					continue
+				}
+				want := "--type is not supported for provider=upstash-box; use --upstash-box-runtime"
+				if len(args) == 2 {
+					want = "--class is not supported for provider=upstash-box; use --upstash-box-size"
+				}
+				if err == nil || err.Error() != want {
+					t.Fatalf("name=%q error=%v want=%q", name, err, want)
+				}
+			}
+		}
+	}
+	cfg = Config{UpstashBox: UpstashBoxConfig{Runtime: "other", Size: "other", Workdir: "relative"}}
+	validationFS := flag.NewFlagSet("validation", flag.ContinueOnError)
+	validationValues := RegisterUpstashBoxProviderFlags(validationFS, cfg)
+	if err := ApplyUpstashBoxProviderFlags(&cfg, validationFS, struct{}{}); err != nil {
+		t.Fatal("foreign values reached validation")
+	}
+	if err := ApplyUpstashBoxProviderFlags(&cfg, validationFS, validationValues); err == nil || err.Error() != `invalid upstash-box runtime "other"` {
+		t.Fatalf("unselected wrapper validation=%v", err)
+	}
+	if _, err := (Provider{}).Configure(cfg, Runtime{}); err != nil {
+		t.Fatalf("Configure introduced validation: %v", err)
+	}
+	if err := validateConfig(cfg); err == nil || err.Error() != `invalid upstash-box runtime "other"` {
+		t.Fatalf("runtime order=%v", err)
+	}
+	cfg.UpstashBox.Runtime = "node"
+	if err := validateConfig(cfg); err == nil || err.Error() != `invalid upstash-box size "other"` {
+		t.Fatalf("size order=%v", err)
+	}
+	cfg.UpstashBox.Size = "small"
+	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "absolute path") {
+		t.Fatalf("workdir order=%v", err)
+	}
+}
+
+func TestUpstashBoxEffectiveDefaultsAndWorkspaceBoundary(t *testing.T) {
+	for _, tc := range []struct{ name, base, runtime, size, dir, wantBase, wantRuntime, wantSize, wantDir, wantHost string }{
+		{name: "empty", wantBase: "https://us-east-1.box.upstash.com", wantRuntime: "node", wantSize: "small", wantDir: "/workspace/home/crabbox", wantHost: "us-east-1.box.upstash.com"},
+		{name: "whitespace", base: "  ", runtime: "  ", size: "  ", dir: "  ", wantBase: "https://us-east-1.box.upstash.com", wantRuntime: "node", wantSize: "small", wantDir: "/workspace/home/crabbox", wantHost: "us-east-1.box.upstash.com"},
+		{name: "custom", base: " https://example.invalid/api/ ", runtime: " python ", size: " medium ", dir: " /workspace/home/app ", wantBase: "https://example.invalid/api", wantRuntime: "python", wantSize: "medium", wantDir: "/workspace/home/app", wantHost: "example.invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{UpstashBox: UpstashBoxConfig{APIKey: "inert-constructor-only", BaseURL: tc.base, Runtime: tc.runtime, Size: tc.size, Workdir: tc.dir}}
+			before := cfg.UpstashBox
+			api, err := newAPI(cfg, Runtime{HTTP: &http.Client{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if api.(*client).base != tc.wantBase || boxBaseHost(cfg) != tc.wantHost || upstashBoxClaimScope(cfg) != "endpoint:"+tc.wantBase || runtimeName(cfg) != tc.wantRuntime || sizeName(cfg) != tc.wantSize || workdir(cfg) != tc.wantDir {
+				t.Fatalf("effective defaults changed case=%s", tc.name)
+			}
+			if tc.name != "custom" {
+				defaults := core.BaseConfig().UpstashBox
+				if defaults.BaseURL != tc.wantBase || defaults.Runtime != tc.wantRuntime || defaults.Size != tc.wantSize || defaults.Workdir != tc.wantDir {
+					t.Fatal("fallbacks differ from base config")
+				}
+			}
+			if cfg.UpstashBox != before {
+				t.Fatal("effective read changed config")
+			}
+		})
+	}
+	for _, key := range []string{"", "  "} {
+		if _, err := newAPI(Config{UpstashBox: UpstashBoxConfig{APIKey: key, BaseURL: "https://example.invalid/api"}}, Runtime{HTTP: &http.Client{}}); err == nil || err.Error() != "provider=upstash-box requires UPSTASH_BOX_API_KEY" {
+			t.Fatalf("key requirement=%v", err)
+		}
+	}
+	if workspaceRoot != "/workspace/home" {
+		t.Fatal("fixed workspace root changed")
+	}
+	if folder, err := workspaceFolder("/workspace/home/custom/app"); err != nil || folder != "custom/app" {
+		t.Fatalf("folder=%q error=%v", folder, err)
+	}
+	if _, err := workspaceFolder("/tmp/example"); err == nil {
+		t.Fatal("workspace boundary expanded")
 	}
 }
 

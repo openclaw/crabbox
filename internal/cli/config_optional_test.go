@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestApplyOptionalPreservesAbsentAndCopiesZero(t *testing.T) {
@@ -76,11 +79,10 @@ func TestApplyFileConfigOptionalPopulatedThenZero(t *testing.T) {
 }
 
 func TestApplyCloudflareSandboxOptionalTrustAndAlias(t *testing.T) {
-	bridge, alias, token, workdir := "https://bridge.example.com", "https://alias.example.com", "fixture-token", ""
-	disabled, zero := false, 0
-	file := &fileCloudflareSandboxConfig{
-		BridgeURL: &bridge, URL: &alias, Token: &token, Workdir: &workdir,
-		ExecTimeoutSecs: &zero, ForgetMissing: &disabled,
+	alias, token := "https://alias.example.com", "fixture-token"
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("cloudflareSandbox:\n  bridgeUrl: https://bridge.example.com\n  url: "+alias+"\n  token: "+token+"\n  workdir: ''\n  execTimeoutSecs: 0\n  forgetMissing: false\n"), &file); err != nil {
+		t.Fatal(err)
 	}
 	for _, trusted := range []bool{false, true} {
 		cfg := defaultConfig()
@@ -92,7 +94,7 @@ func TestApplyCloudflareSandboxOptionalTrustAndAlias(t *testing.T) {
 			want.BridgeURL, want.Token = alias, token
 		}
 		want.Workdir, want.ExecTimeoutSecs, want.ForgetMissing = "", 0, false
-		if err := applyCloudflareSandboxFileConfig(&cfg, file, trusted); err != nil {
+		if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
 			t.Fatal(err)
 		}
 		if cfg.CloudflareSandbox != want {
@@ -105,9 +107,11 @@ func TestApplyCloudflareSandboxOptionalTimeoutOrder(t *testing.T) {
 	cfg := defaultConfig()
 	before := cfg.CloudflareSandbox
 	workdir, negative, forget := "/workspace/custom", -1, !before.ForgetMissing
-	err := applyCloudflareSandboxFileConfig(&cfg, &fileCloudflareSandboxConfig{
-		Workdir: &workdir, ExecTimeoutSecs: &negative, ForgetMissing: &forget,
-	}, true)
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte(fmt.Sprintf("cloudflareSandbox:\n  workdir: %s\n  execTimeoutSecs: %d\n  forgetMissing: %t\n", workdir, negative, forget)), &file); err != nil {
+		t.Fatal(err)
+	}
+	err := applyFileConfigWithTrust(&cfg, file, true)
 	if err == nil || err.Error() != "cloudflare-sandbox execTimeoutSecs must be non-negative" {
 		t.Fatalf("unexpected timeout error: %v", err)
 	}

@@ -106,6 +106,18 @@ multiple scopes of one canonical provider, which that provider resolves; claims
 from different providers require a canonical ID or explicit provider. An
 explicit `--provider` remains authoritative.
 
+For coordinator-backed preparation of an exact lease ID, an initial lease-read
+HTTP 5xx response is retried once within the original 30-second control budget;
+shorter HTTP-client and caller deadlines still win.
+Authentication, absence, conflict, identity mismatch, cancellation and timeout
+failures are not retried. This repeats only the observation before SSH and script
+admission; it never reruns a script. Plain status and Stop retain their existing
+observation behavior.
+
+If the coordinator has confirmed a lease's provider cleanup, `run --id` fails
+immediately instead of waiting for SSH on the deleted machine. `status` and
+`stop` remain available to inspect the outcome and finish local cleanup.
+
 For an ordinary reused coordinator lease, `--ssh-port <port>` pins one of the
 lease's advertised primary or fallback SSH ports before workspace ownership or
 command delivery. An unadvertised port is rejected; the lease's host, user,
@@ -305,9 +317,13 @@ concurrent checkout. POSIX, WSL2, and native Windows targets implement the same
 protocol; the small sync-finalization lock remains nested inside it.
 
 Renewal errors retain recognized `MISMATCH`, `EXPIRED`, and `AMBIGUOUS` protocol
-states alongside transport errors. Unrecognized response text is omitted. These
-diagnostics do not retry renewal or permit collection or cleanup after ownership
-fails closed.
+states alongside transport errors. Unrecognized response text is omitted.
+WSL2 renewal uses a compact marker-only helper with a 60-second execution
+allowance for CPU and disk contention. It retries confirmed lock contention at
+most twice within the original bounded call deadline; that deadline is included
+in the owner expiry window. A transport failure or rejected/ambiguous owner
+state is never retried. Collection and cleanup remain blocked after ownership
+fails closed. Linux and native Windows renewal behavior is unchanged.
 
 Native Windows stages owner scripts and witnessed command input with exact byte
 counts and asynchronous pipe reads. Empty frames complete without initializing

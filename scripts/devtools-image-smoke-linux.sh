@@ -1,6 +1,6 @@
 set -euo pipefail
-[[ "$(id -u)" != 0 ]] || { echo 'developer image smoke requires the runtime user, not root' >&2; exit 1; }
-export COREPACK_ENABLE_NETWORK=0 npm_config_offline=true
+: "${expected_node_major?Mint smoke renderer must set expected_node_major}"
+[[ "$(id -u)" -ne 0 ]] || { echo 'developer image smoke requires a nonroot user' >&2; exit 1; }
 uname -a
 command -v git
 command -v gh
@@ -16,7 +16,7 @@ command -v trufflehog
 trufflehog --no-update --version
 command -v docker
 node --version
-node -e 'if (Number(process.versions.node.split(".")[0]) < 24) throw new Error(`Node.js 24 or newer is required, found ${process.version}`)'
+node -e 'const major = process.versions.node.split(".")[0]; const expected = process.argv[1]; if (expected ? major !== expected : Number(major) < 24) throw new Error("Node.js " + (expected ? "major " + expected : "24 or newer") + " is required, found " + process.version)' -- "$expected_node_major"
 corepack --version
 pnpm --version
 
@@ -40,6 +40,7 @@ cc "$smoke_dir/main.c" -o "$smoke_dir/compiler"
 python3 -I -c 'import sqlite3, ssl; assert sqlite3.connect(":memory:").execute("select 2 + 2").fetchone()[0] == 4; assert ssl.create_default_context().get_ca_certs()'
 printf '%s\n' '{"private":true,"scripts":{"check":"node -e \"require('\''node:assert/strict'\'').equal(2 + 2, 4)\""}}' >"$smoke_dir/package.json"
 (
+  export COREPACK_ENABLE_NETWORK=0 npm_config_offline=true
   cd "$smoke_dir"
   npm --offline run check
   pnpm run check
@@ -159,4 +160,5 @@ if [[ "${CRABBOX_LINUX_DESKTOP_TOOLS:-1}" == 1 ]]; then
     [[ "$rendered" == 1 ]] || { echo 'browser did not render the local fixture on the selected display' >&2; exit 1; }
   fi
 fi
+developer_archive_probe
 echo devtools-smoke-ok

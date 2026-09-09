@@ -964,10 +964,10 @@ func TestWorkspaceOwnerWSL2StagesThenExecutesOnceWithoutStdin(t *testing.T) {
 		if len(data) != int(spool.size) || string(data[:8]) != "CBXFLAT2" {
 			t.Fatalf("invalid staged owner spool bytes=%d", len(data))
 		}
-		if spool.size > 1<<20 || wslStageBudget(timing.stage, timing.idle, spool.size) != sshTransportTiming(sshCommandLimit{execution: workspaceOwnerRemoteTimeout, control: true}).stage {
+		if spool.size > 1<<20 || wslStageBudget(timing.stage, timing.idle, spool.size) != wantTiming.stage {
 			t.Fatalf("owner spool exceeds its accounted upload phase: bytes=%d budget=%s", spool.size, wslStageBudget(timing.stage, timing.idle, spool.size))
 		}
-		if binary.LittleEndian.Uint64(data[32:]) != uint64(timing.operation.Milliseconds()) || timing.operation != 38*time.Second {
+		if binary.LittleEndian.Uint64(data[32:]) != uint64(wantTiming.operation.Milliseconds()) {
 			t.Fatal("derived control operation guard missing")
 		}
 		launchers = append(launchers, wslStageLauncherCommand(nonce, spool.size, spool.digest(), wslStageCMD))
@@ -976,6 +976,7 @@ func TestWorkspaceOwnerWSL2StagesThenExecutesOnceWithoutStdin(t *testing.T) {
 	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
 	key, token := workspaceOwnerKey("cbx_wsl2_staged_protocol"), strings.Repeat("6", 64)
 	for index, action := range []workspaceOwnerAction{workspaceOwnerAcquire, workspaceOwnerRenew, workspaceOwnerInspect, workspaceOwnerRelease} {
+		wantTiming = sshTransportTiming(workspaceOwnerCommandLimit(target, action))
 		want := map[workspaceOwnerAction]string{
 			workspaceOwnerAcquire: "ACQUIRED", workspaceOwnerRenew: "RENEWED",
 			workspaceOwnerInspect: "OWNED", workspaceOwnerRelease: "RELEASED",
@@ -1069,7 +1070,8 @@ func TestWorkspaceOwnerWANBudgetContract(t *testing.T) {
 				t.Fatalf("call=%s lifecycle=%s", call, lifecycle)
 			}
 			owner := &workspaceOwner{transport: sshWorkspaceOwnerTransport{target: target}}
-			if owner.callTimeout() != call || owner.quiesceTimeout() != 2*call+time.Second {
+			ownerCall := sshTransportCallBudget(target, sshControlMetadataLimit, workspaceOwnerCommandLimit(target, workspaceOwnerRenew))
+			if owner.callTimeout() != ownerCall || owner.quiesceTimeout() != 2*ownerCall+time.Second {
 				t.Fatal("owner caller lost dynamic route allocation")
 			}
 			ttl := workspaceOwnerRenewInterval + call + workspaceOwnerRenewMargin

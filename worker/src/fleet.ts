@@ -473,6 +473,8 @@ const terminalRunPruneBatchSize = 16;
 const runtimeAdapterDeleteBatchSize = 16;
 const defaultTerminalRunRetentionDays = 30;
 const runPruneCursorKey = "maintenance:run-prune-cursor";
+const activeEgressSessionPrefix = "active-egress-session:";
+const replacedEgressSessionsPrefix = "replaced-egress-sessions:";
 const providerAccessReservationTTLMS = 15 * 60 * 1000;
 const maxPendingWebVNCBytes = 1024 * 1024;
 const maxCodeWebSocketFrameChunkBytes = 15 * 1024;
@@ -2332,7 +2334,7 @@ export class FleetCoordinator {
     }
   }
 
-  private adminBridgeSockets(): Set<WebSocket> {
+  private bridgeSockets(): Set<WebSocket> {
     const sockets = new Set<WebSocket>([
       ...this.controlSockets.values(),
       ...this.codeAgents.values(),
@@ -2355,7 +2357,7 @@ export class FleetCoordinator {
 
   private async reconcileAdminBridgeSockets(validation: AdminGrantValidation): Promise<void> {
     const revokedEgressSessions = new Map<string, { leaseID: string; sessionID: string }>();
-    for (const socket of this.adminBridgeSockets()) {
+    for (const socket of this.bridgeSockets()) {
       const attachment = this.bridgeAttachment(socket);
       if (
         !attachment ||
@@ -3172,11 +3174,28 @@ export class FleetCoordinator {
     }
     await this.reconcileScheduledAdminGrants(forwardedAdminGrantVersion, preserveForwardedVersion);
     await this.quarantineLegacyWorkspaces();
-    await this.reconcileInterruptedLeaseProvisioning();
-    await this.expireLeases();
+    // Retain only candidate IDs while provider I/O yields. Each phase reads them anew;
+    // final scheduling still discovers work admitted during the pass.
+    const leaseIDs = await this.state.runExclusive(async () => {
+      const candidates = await this.leaseBridgeOwners();
+      const now = Date.now();
+      await this.visitLeaseRecords((lease) => {
+        if (
+          leaseIsLive(lease) ||
+          leaseNeedsCleanup(lease, now) ||
+          leaseMayNeedInterruptedProvisioningRecovery(lease) ||
+          lease.runtimeAdapterDeleteRequestedAt
+        ) {
+          candidates.add(lease.id);
+        }
+      });
+      return candidates;
+    });
+    await this.reconcileInterruptedLeaseProvisioning(leaseIDs);
+    await this.expireLeases(leaseIDs);
     await this.webVNCCredentialHandoffs.cleanupExpired();
     await this.cleanupExpiredWebVNCPortalViewerAuth();
-    await this.reconcileRuntimeAdapterDeletes();
+    await this.reconcileRuntimeAdapterDeletes(leaseIDs);
     await this.withReadyPoolBorrowLock(() =>
       this.state.runExclusive(() => this.maintainReadyPools(Date.now())),
     );
@@ -10111,7 +10130,7 @@ export class FleetCoordinator {
     });
   }
 
-  private async reconcileRuntimeAdapterDeletes(): Promise<void> {
+  private async reconcileRuntimeAdapterDeletes(leaseIDs: ReadonlySet<string>): Promise<void> {
     const pending = await this.state.runExclusive(async () => {
       const now = Date.now();
       const due: LeaseRecord[] = [];
@@ -10133,7 +10152,7 @@ export class FleetCoordinator {
           }
         }
         return true;
-      });
+      }, leaseIDs);
       return due;
     });
     await Promise.all(pending.map((lease) => this.reconcileRuntimeAdapterDelete(lease)));
@@ -13778,10 +13797,12 @@ export class FleetCoordinator {
       this.visitStorageRecords<ReadyPoolEntry>(typedReadyPoolPrefix, async (entry) => {
         typedEntries.push(entry);
       }),
-      this.visitLeaseRecords(async (lease) => {
-        leases.set(lease.id, lease);
-      }),
     ]);
+    for (const leaseID of new Set([...entries, ...typedEntries].map((entry) => entry.leaseID))) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- bound retained-pool hydration to one referenced lease at a time.
+      const lease = await this.getLease(leaseID, { noCache: true });
+      if (lease) leases.set(leaseID, lease);
+    }
     await this.maintainReadyPoolEntries(entries, leases, nowMs);
     await this.maintainReadyPoolEntries(typedEntries, leases, nowMs, true);
     await this.visitStorageRecords<ReadyPoolFillClaim>(readyPoolFillClaimPrefix, async (claim) => {
@@ -16517,7 +16538,9 @@ export class FleetCoordinator {
     return json({ error: "not_found" }, { status: 404 });
   }
 
-  private async reconcileInterruptedLeaseProvisioning(): Promise<void> {
+  private async reconcileInterruptedLeaseProvisioning(
+    leaseIDs: ReadonlySet<string>,
+  ): Promise<void> {
     const now = Date.now();
     const candidates = await this.state.runExclusive(async () => {
       const due: LeaseRecord[] = [];
@@ -16525,13 +16548,15 @@ export class FleetCoordinator {
         if (due.length >= interruptedProvisioningRecoveryBatchSize) {
           return;
         }
-        if (await provisioningOwnsLease(this.state.storage, lease.id)) return;
         const recoveryAt = interruptedProvisioningRecoveryAt(
           lease,
           this.coordinatorGeneration,
           now,
         );
-        if (recoveryAt === undefined) {
+        if (
+          recoveryAt === undefined ||
+          (await provisioningOwnsLease(this.state.storage, lease.id))
+        ) {
           return;
         }
         if (!Number.isFinite(Date.parse(lease.provisioningRecoveryObservedAt ?? ""))) {
@@ -16549,7 +16574,7 @@ export class FleetCoordinator {
         if (recoveryAt <= now) {
           due.push(structuredClone(lease));
         }
-      });
+      }, leaseIDs);
       return due;
     });
     await Promise.all(candidates.map((lease) => this.reconcileInterruptedLease(lease)));
@@ -16803,13 +16828,39 @@ export class FleetCoordinator {
     return Boolean(attempt && sameCreateAttempt(attempt, fence.attempt));
   }
 
-  private async expireLeases(): Promise<void> {
+  private async leaseBridgeOwners(): Promise<Set<string>> {
+    const owners = new Set([
+      ...this.egressSessions.keys(),
+      ...this.replacedEgressSessions.keys(),
+      ...[...this.pendingCodeRequests.values()].map((pending) => pending.leaseID),
+      ...[...this.pendingCodeFrames.values()].map((pending) => pending.leaseID),
+    ]);
+    for (const socket of this.bridgeSockets()) {
+      const attachment = this.bridgeAttachment(socket);
+      if (attachment && "leaseID" in attachment) owners.add(attachment.leaseID);
+    }
+    for (const prefix of [activeEgressSessionPrefix, replacedEgressSessionsPrefix]) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- bounded pages find persisted egress owners after a restart.
+      await this.visitStorageRecords<unknown>(prefix, (_value, key) => {
+        owners.add(key.slice(prefix.length));
+      });
+    }
+    return owners;
+  }
+
+  private async expireLeases(leaseIDs: ReadonlySet<string>): Promise<void> {
     const claims = await this.state.runExclusive(async () => {
       const now = Date.now();
       const claimed: Array<{ claim: string; lease: LeaseRecord }> = [];
+      const bridgeOwners = await this.leaseBridgeOwners();
       await this.visitLeaseRecords(async (stored) => {
+        const needsCleanup = leaseNeedsCleanup(stored, now);
+        const closeBridges = !leaseIsLive(stored) && bridgeOwners.has(stored.id);
+        // Most history has neither due provider work nor bridge state. Journal reads and
+        // deletes belong to actual candidates, including persisted egress left by a restart.
+        if (!needsCleanup && !closeBridges) return;
         if (await provisioningOwnsLease(this.state.storage, stored.id)) return;
-        if (!leaseIsLive(stored)) {
+        if (closeBridges) {
           await this.closeLeaseBridges(stored.id, 1008, "lease ended");
         }
         const workspace = stored.workspaceID
@@ -16825,7 +16876,7 @@ export class FleetCoordinator {
         ) {
           return;
         }
-        if (!leaseNeedsCleanup(stored, now)) {
+        if (!needsCleanup) {
           return;
         }
         const lease = structuredClone(stored);
@@ -16884,7 +16935,7 @@ export class FleetCoordinator {
         lease.updatedAt = nowISO;
         await this.putLease(lease, { noCache: true });
         claimed.push({ claim: nowISO, lease });
-      });
+      }, leaseIDs);
       return claimed;
     });
     await Promise.all(
@@ -18077,8 +18128,15 @@ export class FleetCoordinator {
 
   private async visitLeaseRecords(
     visitor: (lease: LeaseRecord) => Promise<boolean | void> | boolean | void,
+    leaseIDs?: ReadonlySet<string>,
   ): Promise<void> {
-    await this.visitStorageRecords("lease:", visitor);
+    if (leaseIDs === undefined) return this.visitStorageRecords("lease:", visitor);
+    for (const id of [...leaseIDs].toSorted()) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- hydrate one current candidate at a time in storage-key order.
+      const lease = await this.getLease(id, { noCache: true });
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each owner completes before advancing to the next candidate.
+      if (lease && (await visitor(lease)) === false) return;
+    }
   }
 
   private async observeStoredProviderReconciliationCandidate(input: {
@@ -21129,11 +21187,11 @@ function codeViewerSessionRevocationKey(portalSessionHash: string): string {
 }
 
 function activeEgressSessionKey(leaseID: string): string {
-  return `active-egress-session:${leaseID}`;
+  return `${activeEgressSessionPrefix}${leaseID}`;
 }
 
 function replacedEgressSessionsKey(leaseID: string): string {
-  return `replaced-egress-sessions:${leaseID}`;
+  return `${replacedEgressSessionsPrefix}${leaseID}`;
 }
 
 function runtimeAdapterTicketPrefix(): string {

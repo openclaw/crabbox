@@ -318,6 +318,39 @@ func TestCoordinatorStatusKeepsFourSecondWindowsSSHProbe(t *testing.T) {
 	assertSSHOption(t, args, "ConnectionAttempts", "3")
 }
 
+func TestCoordinatorWSL2StatusAllowsCompleteProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	isolateTestUserDirs(t)
+	installSSHArgsRecorder(t)
+	t.Setenv("CRABBOX_FAKE_SSH_DELAY", "2.1")
+	previous := probeWSLSFTPSubsystem
+	probeWSLSFTPSubsystem = func(context.Context, SSHTarget, string, string, io.Writer) error { return nil }
+	t.Cleanup(func() { probeWSLSFTPSubsystem = previous })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_0123456789ab" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+			ID: "cbx_0123456789ab", Provider: "aws", State: "active",
+			TargetOS: targetWindows, WindowsMode: windowsModeWSL2,
+			Host: "example.test", SSHUser: "runner", SSHPort: "22",
+		}})
+	}))
+	defer server.Close()
+	cfg := baseConfig()
+	cfg.Provider, cfg.Coordinator, cfg.CoordToken = "aws", server.URL, "user-token"
+	cfg.Network = NetworkPublic
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: mustNewCoordinatorClient(t, cfg)}
+	view, err := backend.Status(t.Context(), StatusRequest{ID: "cbx_0123456789ab"})
+	if err != nil || !view.Ready {
+		t.Fatalf("ready=%t err=%v; brokered WSL readiness must allow the complete probe", view.Ready, err)
+	}
+}
+
 func TestCoordinatorInspectJSONIncludesOptionalSSHHostKey(t *testing.T) {
 	isolateTestUserDirs(t)
 	sshHostKey := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 47))
@@ -2564,6 +2597,50 @@ func TestCoordinatorResolveDropsHistoricalProvisioningTiming(t *testing.T) {
 	}
 	if resolved.LeaseID != leaseID || resolved.Server.CloudID != "i-reused" {
 		t.Fatalf("resolved lease identity=%#v", resolved)
+	}
+}
+
+func TestCoordinatorResolveRejectsConfirmedReleasedExecution(t *testing.T) {
+	for _, admin := range []bool{false, true} {
+		t.Run(fmt.Sprintf("admin-fallback=%t", admin), func(t *testing.T) {
+			isolateTestUserDirs(t)
+			const leaseID = "cbx_0123456789ab"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/"+leaseID {
+					http.NotFound(w, r)
+					return
+				}
+				if admin && r.Header.Get("Authorization") != "Bearer admin-token" {
+					http.NotFound(w, r)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+					ID: leaseID, Provider: "aws", TargetOS: targetLinux,
+					State: "released", CleanupStatus: "complete",
+					CleanupCompletedAt: time.Now().UTC().Format(time.RFC3339),
+				}})
+			}))
+			defer server.Close()
+			adminToken := ""
+			if admin {
+				adminToken = "admin-token"
+			}
+			backend := newCoordinatorIdentityTestBackend(t, server.URL, adminToken)
+			_, err := backend.Resolve(t.Context(), ResolveRequest{ID: leaseID, Prepare: true})
+			if err == nil || !strings.Contains(err.Error(), leaseID) || !strings.Contains(err.Error(), "released") {
+				t.Fatalf("released execution should fail before SSH preparation: %v", err)
+			}
+			for _, req := range []ResolveRequest{
+				{ID: leaseID},
+				{ID: leaseID, ReleaseOnly: true},
+				{ID: leaseID, ReleaseOnly: true, Prepare: true},
+			} {
+				resolved, err := backend.Resolve(t.Context(), req)
+				if err != nil || resolved.LeaseID != leaseID || resolved.Server.Status != "released" {
+					t.Fatalf("released metadata must remain available for inspection and cleanup: lease=%#v err=%v", resolved, err)
+				}
+			}
+		})
 	}
 }
 

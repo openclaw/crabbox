@@ -904,6 +904,66 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 	}
 }
 
+func TestManagedWindowsWSL2BootstrapInstallsNodeBeforeReadiness(t *testing.T) {
+	for _, mode := range []string{windowsModeNormal, windowsModeWSL2} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.TargetOS, cfg.WindowsMode = targetWindows, mode
+			script := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+			install := "bash /var/lib/crabbox/install-linux-developer-tools.sh --node-only"
+			if mode == windowsModeNormal {
+				if strings.Contains(script, install) {
+					t.Fatal("native Windows unexpectedly installs a Linux runtime")
+				}
+				return
+			}
+			setupStart := strings.Index(script, "$linuxSetup = @'")
+			installIndex := strings.Index(script, install)
+			readyIndex := strings.Index(script, "cat >/usr/local/bin/crabbox-ready <<'READY'")
+			if setupStart < 0 || installIndex <= setupStart || readyIndex <= installIndex {
+				t.Fatal("WSL distro must install the shared Node baseline before readiness")
+			}
+			ready := script[readyIndex:]
+			for _, probe := range []string{"node --version >/dev/null", "npm --version >/dev/null"} {
+				if !strings.Contains(ready, probe) {
+					t.Errorf("WSL readiness missing %s", probe)
+				}
+			}
+		})
+	}
+}
+
+func TestManagedWindowsWSL2BootstrapOwnsDistroInitialization(t *testing.T) {
+	for _, mode := range []string{windowsModeNormal, windowsModeWSL2} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.TargetOS, cfg.WindowsMode = targetWindows, mode
+			script := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+			steps := []string{
+				"touch /etc/cloud/cloud-init.disabled",
+				"wsl.exe --terminate $wslDistro",
+				"wsl.exe -d $wslDistro --user root --exec /usr/local/bin/crabbox-ready",
+				"WSL cold-start readiness failed with exit $LASTEXITCODE",
+				"Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
+			}
+			last := -1
+			for _, step := range steps {
+				index := strings.Index(script, step)
+				if mode == windowsModeNormal {
+					if index >= 0 && step != steps[len(steps)-1] {
+						t.Fatalf("native Windows unexpectedly configures WSL: %s", step)
+					}
+					continue
+				}
+				if index <= last {
+					t.Fatalf("missing or out-of-order WSL initialization step: %s", step)
+				}
+				last = index
+			}
+		})
+	}
+}
+
 func TestWindowsWSL2BootstrapAttemptStreamsOutput(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")

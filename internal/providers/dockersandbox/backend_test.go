@@ -18,6 +18,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestProviderSpecIsDelegatedLinuxAndAliasFree(t *testing.T) {
@@ -1864,40 +1865,23 @@ func TestRunTimingFailureDoesNotReportSuccess(t *testing.T) {
 }
 
 func TestRunCommandIntentReachesNativeRequest(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		command []string
-		literal map[int]bool
-		shell   bool
-		want    []string
-	}{
-		{"empty explicit source", []string{""}, nil, true, []string{"sh", "-lc", ""}},
-		{"ordinary", []string{"printf", "%s", "hello"}, nil, false, []string{"printf", "%s", "hello"}},
-		{"literal separator", []string{"printf", "%s", ";", "touch", "sentinel"}, map[int]bool{2: true}, false, []string{"printf", "%s", ";", "touch", "sentinel"}},
-		{"literal assignment executable", []string{"FOO=x", "argument"}, map[int]bool{0: true}, false, []string{"FOO=x", "argument"}},
-		{"literal singleton", []string{"literal command $(echo x)"}, map[int]bool{0: true}, false, []string{"literal command $(echo x)"}},
-		{"invalid assignment executable", []string{"bad-name=x", "argument"}, nil, false, []string{"bad-name=x", "argument"}},
-		{"mixed operators", []string{"printf", "%s", ";", "&&", "printf", "%s", "done"}, map[int]bool{2: true}, false, []string{"sh", "-lc", "'printf' '%s' ';' && 'printf' '%s' 'done'"}},
-		{"inferred source", []string{"printf one && printf two"}, nil, false, []string{"sh", "-lc", "printf one && printf two"}},
-		{"explicit source", []string{"printf one; exit 7"}, nil, true, []string{"sh", "-lc", "printf one; exit 7"}},
-		{"leading assignment", []string{"GREETING=hello world", "printf", "%s", "$GREETING"}, nil, false, []string{"sh", "-lc", "GREETING='hello world' 'printf' '%s' '$GREETING'"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			runner := newRunner(nil, nil)
-			backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
-			_, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, Command: tc.command, ShellMode: tc.shell, CommandLiteralArgs: tc.literal})
-			if err != nil {
-				t.Fatal(err)
-			}
-			call := findCall(runner, "exec")
-			if call == nil || len(call.Args) < 5 || call.Args[1] != "--workdir" {
-				t.Fatalf("exec=%#v", call)
-			}
-			got := call.Args[4:]
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("native command=%#v want %#v", got, tc.want)
-			}
+	testutil.VerifyNativeCommandIntent(t, "sh", true, func(t *testing.T, intent testutil.CommandIntent) []string {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		runner := newRunner(nil, nil)
+		backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+		_, err := backend.Run(t.Context(), RunRequest{
+			Repo:               Repo{Name: "my-app", Root: t.TempDir()},
+			Command:            intent.Command,
+			ShellMode:          intent.ShellMode,
+			CommandLiteralArgs: intent.LiteralArgs,
 		})
-	}
+		if err != nil {
+			t.Fatal(err)
+		}
+		call := findCall(runner, "exec")
+		if call == nil || len(call.Args) < 5 || call.Args[1] != "--workdir" {
+			t.Fatalf("exec=%#v", call)
+		}
+		return call.Args[4:]
+	})
 }

@@ -40,8 +40,8 @@ crabbox_readiness_owner_gid='0'
 crabbox_readiness_system_path='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 crabbox_minimal_manifest_payload='{"profile":"linux-minimal","recipeDigest":"sha256:e53fe3347f8b16609af41f4a6766d74771359d37f25389eca9d656fece47a6df","schema":"crabbox-linux-readiness/v1"}'
 crabbox_minimal_manifest_sha256='43f732626f4aabdc47b504044d6e444354315c7e65047ffc16ebf49d2a3d885a'
-crabbox_builder_manifest_payload='{"profile":"linux-builder","recipeDigest":"sha256:de59e6e796980b041dd5c644c904a101025c88636bf90e7b7495962c88e99238","schema":"crabbox-linux-readiness/v1"}'
-crabbox_builder_manifest_sha256='c35753cd0d56a8fede7acd9da68402d7b8f299e985d0d4194b465969c6064748'
+crabbox_builder_manifest_payload='{"profile":"linux-builder","recipeDigest":"sha256:7cf72f7c26e07f695206af1838d12ed4585fef852224cb91da23a2d37d722e2e","schema":"crabbox-linux-readiness/v1"}'
+crabbox_builder_manifest_sha256='9d122b7499ecb989a2dec75db16a6424f16a73902490d79cce62fea765198fc9'
 
 crabbox_minimal_readiness_probes() (
   PATH="$crabbox_readiness_system_path"
@@ -59,12 +59,27 @@ crabbox_minimal_readiness_probes() (
 crabbox_builder_additional_readiness_probes() (
   PATH="$crabbox_readiness_system_path"
   export PATH
+  # Python dependencies can leave scratch outside the venv. Own their TMPDIR before Python starts.
+  umask 077
+  crabbox_probe_directory="$(command mktemp -d "${TMPDIR:-/tmp}/crabbox-builder-probe.XXXXXXXX")" || exit $?
+  trap 'crabbox_probe_status=$?
+    trap - 0
+    if ! command rm -rf -- "$crabbox_probe_directory"; then
+      echo "Linux readiness: builder probe temporary cleanup failed" >&2
+      test "$crabbox_probe_status" -ne 0 || crabbox_probe_status=1
+    fi
+    exit "$crabbox_probe_status"' 0
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  TMPDIR="$crabbox_probe_directory"
+  export TMPDIR
   command cc --version >/dev/null 2>&1 &&
   command git lfs version >/dev/null 2>&1 &&
   command make --version >/dev/null 2>&1 &&
   command pkg-config --version >/dev/null 2>&1 &&
   command python3 --version >/dev/null 2>&1 &&
-  command python3 -c 'with __import__("tempfile").TemporaryDirectory() as directory: __import__("os").environ["TMPDIR"] = directory; __import__("tempfile").tempdir = directory; __import__("venv").EnvBuilder(with_pip=True).create(directory + "/venv"); __import__("subprocess").run([directory + "/venv/bin/python", "-m", "pip", "--version"], check=True)' >/dev/null 2>&1
+  command python3 -c 'with __import__("tempfile").TemporaryDirectory() as directory: __import__("venv").EnvBuilder(with_pip=True).create(directory + "/venv"); __import__("subprocess").run([directory + "/venv/bin/python", "-m", "pip", "--version"], check=True)' >/dev/null 2>&1
 )
 
 crabbox_builder_readiness_probes() {

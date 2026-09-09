@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestExternalDesktopTransientCredentialIsExactAndRedacted(t *testing.T) {
@@ -551,6 +553,10 @@ func TestRepositoryNomadDestinationWithoutSelectedTokenRemainsInspectable(t *tes
 }
 
 func TestRepositoryProviderSettingsRemainApplied(t *testing.T) {
+	var cloudflareFile fileConfig
+	if err := yaml.Unmarshal([]byte("cloudflare:\n  apiUrl: https://runner.repo.example.test\n  workdir: /workspace/project\n"), &cloudflareFile); err != nil {
+		t.Fatal(err)
+	}
 	cfg := baseConfig()
 	file := fileConfig{
 		Morph: &fileMorphConfig{
@@ -559,10 +565,7 @@ func TestRepositoryProviderSettingsRemainApplied(t *testing.T) {
 			SSHGatewayHost: "ssh.repo.example.test",
 			WorkRoot:       "/workspace/project",
 		},
-		Cloudflare: &fileCloudflareConfig{
-			APIURL:  "https://runner.repo.example.test",
-			Workdir: "/workspace/project",
-		},
+		Cloudflare: cloudflareFile.Cloudflare,
 		Semaphore: &fileSemaphoreConfig{
 			Host:        "repo.example.test",
 			Project:     "project",
@@ -632,16 +635,14 @@ func TestConfigMergeTracksCredentialDestinationSources(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
 	cfg.Provider = "e2b"
-	if err := applyFileConfigWithTrust(&cfg, fileConfig{
-		E2B: &fileE2BConfig{
-			APIURL:   "https://repo.example.test",
-			Domain:   "repo.example.test",
-			Template: "project-template",
-			Workdir:  "project-workdir",
-		},
-	}, false); err != nil {
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("e2b:\n  apiUrl: https://repo.example.test\n  domain: repo.example.test\n  template: project-template\n  workdir: project-workdir\n"), &file); err != nil {
 		t.Fatal(err)
 	}
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+
 	t.Setenv("CRABBOX_E2B_API_KEY", "secret")
 	if err := applyEnv(&cfg); err != nil {
 		t.Fatal(err)
@@ -664,6 +665,14 @@ func TestConfigMergeTracksCredentialDestinationSources(t *testing.T) {
 }
 
 func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
+	var upstashFile fileConfig
+	if err := yaml.Unmarshal([]byte("upstashBox:\n  baseUrl: https://repo.example.test\n"), &upstashFile); err != nil {
+		t.Fatal(err)
+	}
+	var railwayFile fileConfig
+	if err := yaml.Unmarshal([]byte("railway:\n  apiUrl: https://repo.example.test\n"), &railwayFile); err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		name          string
 		provider      string
@@ -687,7 +696,7 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 		{
 			name:          "railway",
 			provider:      "railway",
-			file:          fileConfig{Railway: &fileRailwayConfig{APIURL: "https://repo.example.test"}},
+			file:          railwayFile,
 			credentialEnv: "CRABBOX_RAILWAY_API_TOKEN",
 			approveEnv:    "CRABBOX_RAILWAY_API_URL",
 		},
@@ -735,7 +744,7 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 		{
 			name:          "upstash box",
 			provider:      "upstash-box",
-			file:          fileConfig{UpstashBox: &fileUpstashBoxConfig{BaseURL: "https://repo.example.test"}},
+			file:          upstashFile,
 			credentialEnv: "CRABBOX_UPSTASH_BOX_API_KEY",
 			approveEnv:    "CRABBOX_UPSTASH_BOX_BASE_URL",
 		},

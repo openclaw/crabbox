@@ -224,6 +224,43 @@ func TestStatusViewKeepsFourSecondWindowsSSHProbe(t *testing.T) {
 	assertSSHOption(t, args, "ConnectionAttempts", "3")
 }
 
+func TestStatusWSL2ReadinessAllowsCompleteProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	installSSHArgsRecorder(t)
+	t.Setenv("CRABBOX_FAKE_SSH_DELAY", "2.1")
+	previous := probeWSLSFTPSubsystem
+	probeWSLSFTPSubsystem = func(context.Context, SSHTarget, string, string, io.Writer) error { return nil }
+	t.Cleanup(func() { probeWSLSFTPSubsystem = previous })
+	cfg := baseConfig()
+	cfg.Network = NetworkPublic
+	target := SSHTarget{Host: "example.test", User: "runner", Port: "22", FallbackPorts: []string{}, TargetOS: targetWindows, WindowsMode: windowsModeWSL2, NetworkKind: NetworkPublic, ReadyCheck: "true"}
+	view, err := statusViewFromLeaseTarget(t.Context(), cfg, LeaseTarget{
+		Server: Server{Status: "active"}, SSH: target,
+	})
+	if err != nil || !view.Ready {
+		t.Fatalf("ready=%t err=%v; two successful WSL invocations may exceed four seconds", view.Ready, err)
+	}
+}
+
+func TestStatusSSHReadinessTimeout(t *testing.T) {
+	for _, test := range []struct {
+		name, target, mode string
+		want               time.Duration
+	}{
+		{"linux", targetLinux, "", 4 * time.Second},
+		{"native Windows", targetWindows, windowsModeNormal, 4 * time.Second},
+		{"WSL2", targetWindows, windowsModeWSL2, 30 * time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := statusSSHReadinessTimeout(SSHTarget{TargetOS: test.target, WindowsMode: test.mode}); got != test.want {
+				t.Fatalf("timeout=%s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
 func TestStatusWaitRequestsReadyProbe(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))

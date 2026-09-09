@@ -16,8 +16,8 @@ const minimalPackageContract = [
   "ca-certificates", "curl", "git", "jq", "openssh-server", "rsync", "tmux", "util-linux",
 ];
 const builderAdditionalPackageContract = ["build-essential", "git-lfs", "pkg-config", "python3", "python3-venv"];
-// ensurepip can extract resources outside the venv; keep parent and child scratch inside the cleanup boundary.
-const builderVenvProbeCommand = `python3 -c 'with __import__("tempfile").TemporaryDirectory() as directory: __import__("os").environ["TMPDIR"] = directory; __import__("tempfile").tempdir = directory; __import__("venv").EnvBuilder(with_pip=True).create(directory + "/venv"); __import__("subprocess").run([directory + "/venv/bin/python", "-m", "pip", "--version"], check=True)'`;
+// These frozen v1 bytes bind persisted manifests; scratch ownership belongs to the probe subshell.
+const builderVenvProbeCommand = `python3 -c 'with __import__("tempfile").TemporaryDirectory() as directory: __import__("venv").EnvBuilder(with_pip=True).create(directory + "/venv"); __import__("subprocess").run([directory + "/venv/bin/python", "-m", "pip", "--version"], check=True)'`;
 const minimalProbeContract = new Map([
   ["ca-certificates", "test -s /etc/ssl/certs/ca-certificates.crt"],
   ["curl", "curl --version"],
@@ -359,6 +359,21 @@ ${minimalProbes}
 crabbox_builder_additional_readiness_probes() (
   PATH="$crabbox_readiness_system_path"
   export PATH
+  # Python dependencies can leave scratch outside the venv. Own their TMPDIR before Python starts.
+  umask 077
+  crabbox_probe_directory="$(command mktemp -d "\${TMPDIR:-/tmp}/crabbox-builder-probe.XXXXXXXX")" || exit $?
+  trap 'crabbox_probe_status=$?
+    trap - 0
+    if ! command rm -rf -- "$crabbox_probe_directory"; then
+      echo "Linux readiness: builder probe temporary cleanup failed" >&2
+      test "$crabbox_probe_status" -ne 0 || crabbox_probe_status=1
+    fi
+    exit "$crabbox_probe_status"' 0
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  TMPDIR="$crabbox_probe_directory"
+  export TMPDIR
 ${builderProbes}
 )
 

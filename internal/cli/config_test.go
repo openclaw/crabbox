@@ -1543,24 +1543,600 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestE2BFileAcceptanceAndSource(t *testing.T) {
+	if _, ok := reflect.TypeOf(fileE2BConfig{}).FieldByName("APIKey"); ok {
+		t.Fatal("API key YAML field introduced")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace"} {
+			cfg := baseConfig()
+			cfg.Provider = "e2b"
+			cfg.E2B = E2BConfig{APIKey: "inert", APIURL: "https://example.invalid/api", Domain: "example.invalid", Template: "template", Workdir: "work", User: "alice"}
+			cfg.credentialProvenance.e2bAPIURL, cfg.credentialProvenance.e2bDomain, cfg.credentialProvenance.e2bAPIKey = credentialSourceEnvironment, credentialSourceEnvironment, credentialSourceEnvironment
+			want := cfg.E2B
+			source := credentialSourceEnvironment
+			fields := map[string]any{"apiKey": "ignored-inert"}
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"apiUrl", &want.APIURL}, {"domain", &want.Domain}, {"template", &want.Template}, {"workdir", &want.Workdir}, {"user", &want.User}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+					*f.v = "  "
+				}
+				fields[f.key] = raw
+			}
+			if mode == "equal" || mode == "whitespace" {
+				source = credentialSourceForFile(trusted)
+			}
+			data, err := yaml.Marshal(map[string]any{"e2b": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.E2B != want || cfg.credentialProvenance.e2bAPIURL != source || cfg.credentialProvenance.e2bDomain != source || cfg.credentialProvenance.e2bAPIKey != credentialSourceEnvironment {
+				t.Fatalf("file acceptance changed mode=%s trusted=%t", mode, trusted)
+			}
+		}
+	}
+}
+
+func TestE2BEnvironmentAcceptanceAndSource(t *testing.T) {
+	for _, mode := range []string{"primary", "alias", "empty", "equal", "whitespace", "API_KEY", "API_URL", "DOMAIN"} {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		cfg.E2B = E2BConfig{APIKey: "inert", APIURL: "https://example.invalid/api", Domain: "example.invalid", Template: "template", Workdir: "work", User: "alice"}
+		cfg.credentialProvenance.e2bAPIURL, cfg.credentialProvenance.e2bDomain, cfg.credentialProvenance.e2bAPIKey = credentialSourceTrustedFile, credentialSourceTrustedFile, credentialSourceTrustedFile
+		want := cfg.E2B
+		accepted := map[string]bool{}
+		for _, f := range []struct {
+			suffix, alias, value string
+			v                    *string
+		}{{"API_KEY", "E2B_API_KEY", "inert-new", &want.APIKey}, {"API_URL", "E2B_API_URL", "https://example.invalid/new", &want.APIURL}, {"DOMAIN", "E2B_DOMAIN", "new.example.invalid", &want.Domain}, {"TEMPLATE", "", "new-template", &want.Template}, {"WORKDIR", "", "new-work", &want.Workdir}, {"USER", "", "bob", &want.User}} {
+			primary, alias := f.value, f.value+"-alias"
+			if mode == "equal" {
+				primary = *f.v
+			}
+			if mode == "whitespace" {
+				primary = "  "
+			}
+			allow := mode != "empty" && (!(mode == "API_KEY" || mode == "API_URL" || mode == "DOMAIN") || mode == f.suffix)
+			if mode == "alias" {
+				primary = ""
+				allow = f.alias != ""
+			}
+			if !allow {
+				primary, alias = "", ""
+			} else if primary != "" {
+				*f.v = primary
+			} else {
+				*f.v = alias
+			}
+			accepted[f.suffix] = allow
+			t.Setenv("CRABBOX_E2B_"+f.suffix, primary)
+			if f.alias != "" {
+				t.Setenv(f.alias, alias)
+			}
+		}
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.E2B != want {
+			t.Fatalf("environment values changed mode=%s", mode)
+		}
+		for suffix, source := range map[string]credentialValueSource{"API_KEY": cfg.credentialProvenance.e2bAPIKey, "API_URL": cfg.credentialProvenance.e2bAPIURL, "DOMAIN": cfg.credentialProvenance.e2bDomain} {
+			want := credentialSourceTrustedFile
+			if accepted[suffix] {
+				want = credentialSourceEnvironment
+			}
+			if source != want {
+				t.Fatalf("source=%s mode=%s", suffix, mode)
+			}
+		}
+	}
+}
+
+func TestE2BCoreTemplateDefaultKeepsRawWhitespace(t *testing.T) {
+	for _, raw := range []string{"", "  ", "custom"} {
+		cfg := Config{Provider: "e2b", E2B: E2BConfig{Template: raw}}
+		want := raw
+		if want == "" {
+			want = "base"
+		}
+		if got := serverTypeForConfig(cfg); got != want {
+			t.Fatalf("template=%q got=%q want=%q", raw, got, want)
+		}
+	}
+}
+
+func TestCloudflareConfigAcceptanceAndSource(t *testing.T) {
+	for _, source := range []string{"user", "repository", "environment"} {
+		for _, mode := range []string{"omitted", "empty", "null", "equal", "whitespace", "token only", "URL only"} {
+			t.Run(source+"/"+mode, func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := baseConfig()
+				cfg.Provider = "cloudflare"
+				cfg.Cloudflare = CloudflareConfig{APIURL: "https://example.invalid/api", Token: "inert", Workdir: "/workspace/app"}
+				cfg.credentialProvenance.cloudflareAPIURL, cfg.credentialProvenance.cloudflareToken = credentialSourceFlag, credentialSourceFlag
+				want := cfg.Cloudflare
+				urlSource, tokenSource := credentialSourceFlag, credentialSourceFlag
+				acceptedSource := credentialSourceTrustedFile
+				if source == "repository" {
+					acceptedSource = credentialSourceRepository
+				}
+				if source == "environment" {
+					acceptedSource = credentialSourceEnvironment
+				}
+				fields := map[string]any{}
+				for _, field := range []struct {
+					key, env string
+					value    *string
+				}{{"apiUrl", "CRABBOX_CLOUDFLARE_RUNNER_URL", &want.APIURL}, {"token", "CRABBOX_CLOUDFLARE_RUNNER_TOKEN", &want.Token}, {"workdir", "CRABBOX_CLOUDFLARE_WORKDIR", &want.Workdir}} {
+					if mode == "omitted" || (mode == "token only" && field.key != "token") || (mode == "URL only" && field.key != "apiUrl") {
+						continue
+					}
+					var raw any = *field.value
+					if mode == "empty" {
+						raw = ""
+					}
+					if mode == "null" {
+						raw = nil
+					}
+					if mode == "whitespace" {
+						raw = "  "
+					}
+					fields[field.key] = raw
+					if v, ok := raw.(string); ok && v != "" {
+						*field.value = v
+						if field.key == "apiUrl" {
+							urlSource = acceptedSource
+						}
+						if field.key == "token" {
+							tokenSource = acceptedSource
+						}
+					}
+					if source == "environment" {
+						v, _ := raw.(string)
+						t.Setenv(field.env, v)
+					}
+				}
+				if source == "environment" {
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					data, err := yaml.Marshal(map[string]any{"cloudflare": fields})
+					if err != nil {
+						t.Fatal(err)
+					}
+					var file fileConfig
+					if err := yaml.Unmarshal(data, &file); err != nil {
+						t.Fatal(err)
+					}
+					if err := applyFileConfigWithTrust(&cfg, file, source == "user"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if cfg.Cloudflare != want || cfg.credentialProvenance.cloudflareAPIURL != urlSource || cfg.credentialProvenance.cloudflareToken != tokenSource {
+					t.Fatal("Cloudflare value/source acceptance changed")
+				}
+				if source == "repository" && mode == "equal" {
+					if err := validateProviderCredentialDestination(cfg); err != nil {
+						t.Fatalf("actual same-source repository token contract changed: %v", err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestUpstashBoxFileAcceptanceAndSource(t *testing.T) {
+	if _, ok := reflect.TypeOf(fileUpstashBoxConfig{}).FieldByName("APIKey"); ok {
+		t.Fatal("APIKey must not be a YAML field")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, raw := range []string{"null", "''", "'  '", "equal"} {
+			cfg := baseConfig()
+			cfg.Provider = "upstash-box"
+			cfg.UpstashBox = UpstashBoxConfig{APIKey: "inert", BaseURL: "https://example.invalid/api", Runtime: "python", Size: "large", Workdir: "/workspace/home/app", KeepAlive: true}
+			cfg.credentialProvenance.upstashBoxBaseURL, cfg.credentialProvenance.upstashBoxAPIKey = credentialSourceEnvironment, credentialSourceEnvironment
+			want := cfg.UpstashBox
+			wantSource := credentialSourceEnvironment
+			base, runtime, size, workdir := raw, raw, raw, raw
+			if raw == "equal" {
+				base, runtime, size, workdir = want.BaseURL, want.Runtime, want.Size, want.Workdir
+			}
+			if raw == "'  '" {
+				want.BaseURL, want.Runtime, want.Size, want.Workdir = "  ", "  ", "  ", "  "
+			}
+			if raw == "equal" || raw == "'  '" {
+				wantSource = credentialSourceForFile(trusted)
+			}
+			keep := "null"
+			if raw != "null" {
+				keep = "false"
+				want.KeepAlive = false
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte("upstashBox:\n  apiKey: ignored-inert\n  baseUrl: "+base+"\n  runtime: "+runtime+"\n  size: "+size+"\n  workdir: "+workdir+"\n  keepAlive: "+keep+"\n"), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.UpstashBox != want || cfg.credentialProvenance.upstashBoxBaseURL != wantSource || cfg.credentialProvenance.upstashBoxAPIKey != credentialSourceEnvironment {
+				t.Fatalf("file contract trusted=%t raw=%s", trusted, raw)
+			}
+			if raw == "equal" {
+				err := validateProviderCredentialDestination(cfg)
+				if (err != nil) != !trusted {
+					t.Fatalf("later policy=%v", err)
+				}
+			}
+			before := cfg
+			if err := applyFileConfigWithTrust(&cfg, fileConfig{UpstashBox: &fileUpstashBoxConfig{}}, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.UpstashBox != before.UpstashBox || !reflect.DeepEqual(cfg.credentialProvenance, before.credentialProvenance) {
+				t.Fatal("omission changed config/source")
+			}
+		}
+	}
+}
+
+func TestUpstashBoxEnvironmentAcceptanceAndSource(t *testing.T) {
+	for _, mode := range []string{"primary", "alias", "empty", "whitespace", "equal", "key only", "URL only"} {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		cfg.UpstashBox = UpstashBoxConfig{APIKey: "inert", BaseURL: "https://example.invalid/prior", Runtime: "node", Size: "small", Workdir: "/workspace/home/app"}
+		cfg.credentialProvenance.upstashBoxBaseURL, cfg.credentialProvenance.upstashBoxAPIKey = credentialSourceTrustedFile, credentialSourceTrustedFile
+		want := cfg.UpstashBox
+		for _, item := range []struct {
+			suffix, alias, value string
+			target               *string
+		}{
+			{"API_KEY", "UPSTASH_BOX_API_KEY", "inert-new", &want.APIKey}, {"BASE_URL", "UPSTASH_BOX_BASE_URL", "https://example.invalid/new", &want.BaseURL},
+			{"RUNTIME", "", "python", &want.Runtime}, {"SIZE", "", "large", &want.Size}, {"WORKDIR", "", "/workspace/home/new", &want.Workdir},
+		} {
+			primary, alias := item.value, item.value+"-alias"
+			if mode == "equal" {
+				primary = *item.target
+			} else if mode == "whitespace" {
+				primary = "  "
+			}
+			accept := mode != "empty" && !(mode == "key only" && item.suffix != "API_KEY") && !(mode == "URL only" && item.suffix != "BASE_URL")
+			if mode == "alias" {
+				primary = ""
+				accept = item.alias != ""
+			}
+			if !accept {
+				primary, alias = "", ""
+			} else if primary != "" {
+				*item.target = primary
+			} else {
+				*item.target = alias
+			}
+			t.Setenv("CRABBOX_UPSTASH_BOX_"+item.suffix, primary)
+			if item.alias != "" {
+				t.Setenv(item.alias, alias)
+			}
+		}
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		urlSource, keySource := credentialSourceEnvironment, credentialSourceEnvironment
+		if mode == "empty" || mode == "key only" {
+			urlSource = credentialSourceTrustedFile
+		}
+		if mode == "empty" || mode == "URL only" {
+			keySource = credentialSourceTrustedFile
+		}
+		if cfg.UpstashBox != want || cfg.credentialProvenance.upstashBoxBaseURL != urlSource || cfg.credentialProvenance.upstashBoxAPIKey != keySource {
+			t.Fatalf("env contract changed mode=%s", mode)
+		}
+	}
+	for _, prior := range []bool{false, true} {
+		for _, raw := range []string{"", "invalid", "no", "yes"} {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_UPSTASH_BOX_KEEP_ALIVE", raw)
+			cfg := baseConfig()
+			cfg.UpstashBox.KeepAlive = prior
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			want := prior
+			if raw == "no" {
+				want = false
+			}
+			if raw == "yes" {
+				want = true
+			}
+			if cfg.UpstashBox.KeepAlive != want {
+				t.Fatalf("bool raw=%q prior=%t", raw, prior)
+			}
+		}
+	}
+}
+
+func TestUpstashBoxCoreSizePresentationUsesExactAliases(t *testing.T) {
+	for _, name := range []string{"upstash-box", "upstash", "box", "upstashbox", " Upstash "} {
+		for _, size := range []string{"", "  ", "medium"} {
+			cfg := Config{Provider: name, UpstashBox: UpstashBoxConfig{Size: size}}
+			want := ""
+			if name == "upstash-box" || name == "upstash" {
+				want = size
+				if want == "" {
+					want = "small"
+				}
+			}
+			if got := serverTypeForConfig(cfg); got != want {
+				t.Fatalf("name=%q raw=%q type=%q want=%q", name, size, got, want)
+			}
+		}
+	}
+}
+
+func TestRailwayFileAcceptanceAndSource(t *testing.T) {
+	if _, ok := reflect.TypeOf(fileRailwayConfig{}).FieldByName("APIToken"); ok {
+		t.Fatal("APIToken must not be a YAML field")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, raw := range []string{"null", "''", "'  '", "equal"} {
+			cfg := baseConfig()
+			cfg.Provider = "railway"
+			cfg.Railway = RailwayConfig{APIToken: "inert", APIURL: "https://example.invalid/api", ProjectID: "project", EnvironmentID: "environment"}
+			cfg.credentialProvenance.railwayAPIURL, cfg.credentialProvenance.railwayAPIToken = credentialSourceEnvironment, credentialSourceEnvironment
+			want := cfg.Railway
+			wantSource := credentialSourceEnvironment
+			url, project, environment := raw, raw, raw
+			if raw == "equal" {
+				url, project, environment = want.APIURL, want.ProjectID, want.EnvironmentID
+			}
+			if raw == "'  '" {
+				want.APIURL, want.ProjectID, want.EnvironmentID = "  ", "  ", "  "
+			}
+			if raw == "equal" || raw == "'  '" {
+				wantSource = credentialSourceForFile(trusted)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte("railway:\n  apiToken: ignored-inert\n  apiUrl: "+url+"\n  projectId: "+project+"\n  environmentId: "+environment+"\n"), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Railway != want || cfg.credentialProvenance.railwayAPIURL != wantSource || cfg.credentialProvenance.railwayAPIToken != credentialSourceEnvironment {
+				t.Fatalf("file contract changed trusted=%t raw=%q", trusted, raw)
+			}
+			if raw == "equal" {
+				err := validateProviderCredentialDestination(cfg)
+				if (err != nil) != !trusted {
+					t.Fatalf("later policy trusted=%t err=%v", trusted, err)
+				}
+			}
+			before := cfg
+			if err := applyFileConfigWithTrust(&cfg, fileConfig{Railway: &fileRailwayConfig{}}, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Railway != before.Railway || !reflect.DeepEqual(cfg.credentialProvenance, before.credentialProvenance) {
+				t.Fatal("omitted fields changed value/source")
+			}
+		}
+	}
+}
+
+func TestRailwayEnvironmentAcceptanceAndSource(t *testing.T) {
+	for _, mode := range []string{"primary", "alias", "empty", "whitespace", "equal", "token only", "URL only"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Railway = RailwayConfig{APIToken: "inert", APIURL: "https://example.invalid/prior", ProjectID: "project", EnvironmentID: "environment"}
+			cfg.credentialProvenance.railwayAPIURL, cfg.credentialProvenance.railwayAPIToken = credentialSourceTrustedFile, credentialSourceTrustedFile
+			want := cfg.Railway
+			for _, item := range []struct {
+				suffix, primaryValue, aliasValue string
+				target                           *string
+			}{
+				{"API_TOKEN", "inert-primary", "inert-alias", &want.APIToken},
+				{"API_URL", "https://example.invalid/primary", "https://example.invalid/alias", &want.APIURL},
+				{"PROJECT_ID", "primary-project", "alias-project", &want.ProjectID},
+				{"ENVIRONMENT_ID", "primary-environment", "alias-environment", &want.EnvironmentID},
+			} {
+				primary, alias := item.primaryValue, item.aliasValue
+				switch mode {
+				case "empty":
+					primary, alias = "", ""
+				case "equal":
+					primary = *item.target
+				case "whitespace":
+					primary = "  "
+					*item.target = primary
+				case "alias":
+					primary = ""
+					*item.target = alias
+				case "token only", "URL only":
+					if (mode == "token only" && item.suffix == "API_TOKEN") || (mode == "URL only" && item.suffix == "API_URL") {
+						*item.target = primary
+					} else {
+						primary, alias = "", ""
+					}
+				default:
+					*item.target = primary
+				}
+				t.Setenv("CRABBOX_RAILWAY_"+item.suffix, primary)
+				t.Setenv("RAILWAY_"+item.suffix, alias)
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			urlSource, tokenSource := credentialSourceEnvironment, credentialSourceEnvironment
+			if mode == "empty" || mode == "token only" {
+				urlSource = credentialSourceTrustedFile
+			}
+			if mode == "empty" || mode == "URL only" {
+				tokenSource = credentialSourceTrustedFile
+			}
+			if cfg.Railway != want || cfg.credentialProvenance.railwayAPIURL != urlSource || cfg.credentialProvenance.railwayAPIToken != tokenSource {
+				t.Fatal("environment value/acceptance changed")
+			}
+		})
+	}
+}
+
+func TestFastAPICloudFileAcceptanceAndProvenance(t *testing.T) {
+	if _, ok := reflect.TypeOf(fileFastAPICloudConfig{}).FieldByName("Token"); ok {
+		t.Fatal("token must not have a YAML source")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "whitespace", "equal"} {
+			t.Run(fmt.Sprintf("trusted=%t/%s", trusted, mode), func(t *testing.T) {
+				cfg := baseConfig()
+				cfg.Provider = "fastapi-cloud"
+				cfg.FastAPICloud = FastAPICloudConfig{Token: "inert", APIURL: "https://example.invalid/api", AppID: "example-app", TeamID: "example-team"}
+				cfg.credentialProvenance.fastAPICloudAPIURL = credentialSourceEnvironment
+				cfg.credentialProvenance.fastAPICloudToken = credentialSourceEnvironment
+				want := cfg.FastAPICloud
+				wantSource := credentialSourceEnvironment
+				body := "fastapiCloud:\n  token: ignored-inert-value\n"
+				if mode != "omitted" {
+					url, app, team := "null", "null", "null"
+					if mode == "empty" {
+						url, app, team = "''", "''", "''"
+					}
+					if mode == "whitespace" {
+						url, app, team = "'  '", "'  '", "'  '"
+						want.APIURL, want.AppID, want.TeamID = "  ", "  ", "  "
+					}
+					if mode == "equal" {
+						url, app, team = want.APIURL, want.AppID, want.TeamID
+					}
+					if mode == "whitespace" || mode == "equal" {
+						wantSource = credentialSourceForFile(trusted)
+					}
+					body += "  apiUrl: " + url + "\n  appId: " + app + "\n  teamId: " + team + "\n"
+				}
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte(body), &file); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				if cfg.FastAPICloud != want || cfg.credentialProvenance.fastAPICloudAPIURL != wantSource || cfg.credentialProvenance.fastAPICloudToken != credentialSourceEnvironment {
+					t.Fatal("file acceptance/value/provenance mismatch")
+				}
+				if mode == "equal" {
+					err := validateProviderCredentialDestination(cfg)
+					if (err != nil) != !trusted {
+						t.Fatalf("later destination policy trusted=%t error=%v", trusted, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestFastAPICloudEnvironmentAcceptanceAndProvenance(t *testing.T) {
+	for _, mode := range []string{"primary", "alias", "empty", "whitespace", "equal", "token only", "URL only"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.FastAPICloud = FastAPICloudConfig{Token: "inert-prior", APIURL: "https://example.invalid/prior", AppID: "prior-app", TeamID: "prior-team"}
+			cfg.credentialProvenance.fastAPICloudAPIURL, cfg.credentialProvenance.fastAPICloudToken = credentialSourceTrustedFile, credentialSourceTrustedFile
+			want := cfg.FastAPICloud
+			for _, item := range []struct {
+				primary, alias, primaryValue, aliasValue string
+				target                                   *string
+			}{
+				{"CRABBOX_FASTAPI_CLOUD_TOKEN", "FASTAPI_CLOUD_TOKEN", "inert-primary", "inert-alias", &want.Token},
+				{"CRABBOX_FASTAPI_CLOUD_API_URL", "FASTAPI_CLOUD_API_URL", "https://example.invalid/primary", "https://example.invalid/alias", &want.APIURL},
+				{"CRABBOX_FASTAPI_CLOUD_APP_ID", "FASTAPI_CLOUD_APP_ID", "primary-app", "alias-app", &want.AppID},
+				{"CRABBOX_FASTAPI_CLOUD_TEAM_ID", "FASTAPI_CLOUD_TEAM_ID", "primary-team", "alias-team", &want.TeamID},
+			} {
+				primary, alias := item.primaryValue, item.aliasValue
+				switch mode {
+				case "alias":
+					primary = ""
+					*item.target = alias
+				case "empty":
+					primary, alias = "", ""
+				case "whitespace":
+					primary = "  "
+					*item.target = primary
+				case "equal":
+					primary = *item.target
+				default:
+					*item.target = primary
+				}
+				if mode == "token only" || mode == "URL only" {
+					accept := (mode == "token only" && item.primary == "CRABBOX_FASTAPI_CLOUD_TOKEN") || (mode == "URL only" && item.primary == "CRABBOX_FASTAPI_CLOUD_API_URL")
+					if !accept {
+						primary, alias = "", ""
+						switch item.primary {
+						case "CRABBOX_FASTAPI_CLOUD_TOKEN":
+							*item.target = cfg.FastAPICloud.Token
+						case "CRABBOX_FASTAPI_CLOUD_API_URL":
+							*item.target = cfg.FastAPICloud.APIURL
+						case "CRABBOX_FASTAPI_CLOUD_APP_ID":
+							*item.target = cfg.FastAPICloud.AppID
+						case "CRABBOX_FASTAPI_CLOUD_TEAM_ID":
+							*item.target = cfg.FastAPICloud.TeamID
+						}
+					}
+				}
+				t.Setenv(item.primary, primary)
+				t.Setenv(item.alias, alias)
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			wantSource := credentialSourceEnvironment
+			if mode == "empty" {
+				wantSource = credentialSourceTrustedFile
+			}
+			wantURLSource, wantTokenSource := wantSource, wantSource
+			if mode == "token only" {
+				wantURLSource = credentialSourceTrustedFile
+			}
+			if mode == "URL only" {
+				wantTokenSource = credentialSourceTrustedFile
+			}
+			if cfg.FastAPICloud != want || cfg.credentialProvenance.fastAPICloudAPIURL != wantURLSource || cfg.credentialProvenance.fastAPICloudToken != wantTokenSource {
+				t.Fatal("environment acceptance/value/provenance mismatch")
+			}
+		})
+	}
+}
+
 func TestCloudRunSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
 	if cfg.CloudRunSandbox.CLIPath != "/usr/local/gcp/bin/sandbox" || cfg.CloudRunSandbox.Workdir != "/tmp/crabbox" || !cfg.CloudRunSandbox.Write || cfg.CloudRunSandbox.Rootfs != "/" {
 		t.Fatalf("cloudRunSandbox defaults not applied: %#v", cfg.CloudRunSandbox)
 	}
-	allowEgress := true
-	write := false
-	applyFileConfig(&cfg, fileConfig{
-		Provider: "cloud-run-sandbox",
-		CloudRunSandbox: &fileCloudRunSandboxConfig{
-			CLIPath:     "/opt/sandbox",
-			Workdir:     "/workspace/app",
-			AllowEgress: &allowEgress,
-			Write:       &write,
-			Rootfs:      "/var/rootfs",
-		},
-	})
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("provider: cloud-run-sandbox\ncloudRunSandbox:\n  cliPath: /opt/sandbox\n  workdir: /workspace/app\n  allowEgress: true\n  write: false\n  rootfs: /var/rootfs\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
 	if cfg.Provider != "cloud-run-sandbox" || cfg.CloudRunSandbox.CLIPath != "/opt/sandbox" || cfg.CloudRunSandbox.Workdir != "/workspace/app" || !cfg.CloudRunSandbox.AllowEgress || cfg.CloudRunSandbox.Write || cfg.CloudRunSandbox.Rootfs != "/var/rootfs" {
 		t.Fatalf("file cloudRunSandbox config not applied: %#v", cfg.CloudRunSandbox)
 	}
@@ -1594,6 +2170,107 @@ func TestCloudRunSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 	if cfg.CloudRunSandbox.GatewayURL != "https://alt.example.run.app" || cfg.CloudRunSandbox.CLIPath != "/bin/sandbox-alt" {
 		t.Fatalf("alternate env cloudRunSandbox config not applied: %#v", cfg.CloudRunSandbox)
+	}
+}
+
+func TestCloudRunSandboxFilePresenceAndAuthority(t *testing.T) {
+	for _, name := range []string{"GatewayURL", "Secret", "AuthToken"} {
+		if _, ok := reflect.TypeOf(fileCloudRunSandboxConfig{}).FieldByName(name); ok {
+			t.Fatalf("unexpected YAML field %s", name)
+		}
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "whitespace"} {
+			t.Run(fmt.Sprintf("trusted=%t/%s", trusted, mode), func(t *testing.T) {
+				cfg := baseConfig()
+				cfg.CloudRunSandbox = CloudRunSandboxConfig{GatewayURL: "https://example.invalid/prior", CLIPath: "/opt/prior", Workdir: "/tmp/prior", Rootfs: "/prior", AllowEgress: true, Write: true}
+				want := cfg.CloudRunSandbox
+				body := "cloudRunSandbox:\n  gatewayUrl: https://example.invalid/file\n  secret: ignored\n  authToken: ignored\n"
+				if mode != "omitted" {
+					value := "null"
+					if mode == "empty" {
+						value = "''"
+					}
+					if mode == "whitespace" {
+						value = "'  '"
+						want.CLIPath, want.Workdir, want.Rootfs = "  ", "  ", "  "
+					}
+					body += "  cliPath: " + value + "\n  workdir: " + value + "\n  rootfs: " + value + "\n"
+					boolValue := "null"
+					if mode != "null" {
+						boolValue = "false"
+						want.AllowEgress, want.Write = false, false
+					}
+					body += "  allowEgress: " + boolValue + "\n  write: " + boolValue + "\n"
+				}
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte(body), &file); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				if cfg.CloudRunSandbox != want {
+					t.Fatalf("got=%#v want=%#v", cfg.CloudRunSandbox, want)
+				}
+			})
+		}
+	}
+}
+
+func TestCloudRunSandboxEnvironmentAliasesAndBooleanFallback(t *testing.T) {
+	for _, mode := range []string{"primary", "alias", "empty", "whitespace"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.CloudRunSandbox.GatewayURL, cfg.CloudRunSandbox.CLIPath = "https://example.invalid/prior", "/opt/prior"
+			primaryURL, primaryCLI := "https://example.invalid/primary", "/opt/primary"
+			aliasURL, aliasCLI := "https://example.invalid/alias", "/opt/alias"
+			wantURL, wantCLI := primaryURL, primaryCLI
+			if mode == "alias" {
+				primaryURL, primaryCLI = "", ""
+				wantURL, wantCLI = aliasURL, aliasCLI
+			}
+			if mode == "empty" {
+				primaryURL, primaryCLI, aliasURL, aliasCLI = "", "", "", ""
+				wantURL, wantCLI = cfg.CloudRunSandbox.GatewayURL, cfg.CloudRunSandbox.CLIPath
+			}
+			if mode == "whitespace" {
+				primaryURL, primaryCLI, wantURL, wantCLI = "  ", "  ", "  ", "  "
+			}
+			t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_GATEWAY_URL", primaryURL)
+			t.Setenv("CLOUD_RUN_SANDBOX_URL", aliasURL)
+			t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_CLI", primaryCLI)
+			t.Setenv("CLOUD_RUN_SANDBOX_BINARY", aliasCLI)
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.CloudRunSandbox.GatewayURL != wantURL || cfg.CloudRunSandbox.CLIPath != wantCLI {
+				t.Fatalf("alias precedence=%#v", cfg.CloudRunSandbox)
+			}
+		})
+	}
+	for _, prior := range []bool{false, true} {
+		for _, raw := range []string{"", "invalid", "no", "yes"} {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_ALLOW_EGRESS", raw)
+			t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_WRITE", raw)
+			cfg := baseConfig()
+			cfg.CloudRunSandbox.AllowEgress, cfg.CloudRunSandbox.Write = prior, prior
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			want := prior
+			if raw == "no" {
+				want = false
+			}
+			if raw == "yes" {
+				want = true
+			}
+			if cfg.CloudRunSandbox.AllowEgress != want || cfg.CloudRunSandbox.Write != want {
+				t.Fatalf("bool %q prior=%t got=%#v", raw, prior, cfg.CloudRunSandbox)
+			}
+		}
 	}
 }
 
@@ -2978,15 +3655,13 @@ func TestAnthropicSandboxRuntimeConfigDefaultsFileAndEnv(t *testing.T) {
 		t.Fatalf("anthropicSandboxRuntime defaults not applied: %#v", cfg.AnthropicSRT)
 	}
 	settings := ".crabbox/srt-settings.json"
-	debug := true
-	applyFileConfig(&cfg, fileConfig{
-		Provider: "anthropic-sandbox-runtime",
-		AnthropicSRT: &fileAnthropicSRTConfig{
-			CLIPath:  "/opt/srt",
-			Settings: &settings,
-			Debug:    &debug,
-		},
-	})
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("provider: anthropic-sandbox-runtime\nanthropicSandboxRuntime:\n  cliPath: /opt/srt\n  settings: "+settings+"\n  debug: true\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
 	if cfg.Provider != "anthropic-sandbox-runtime" || cfg.AnthropicSRT.CLIPath != "/opt/srt" || cfg.AnthropicSRT.Settings != settings || !cfg.AnthropicSRT.Debug {
 		t.Fatalf("file anthropicSandboxRuntime config not applied: %#v", cfg.AnthropicSRT)
 	}
@@ -2999,6 +3674,84 @@ func TestAnthropicSandboxRuntimeConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 	if cfg.AnthropicSRT.CLIPath != "/usr/local/bin/srt" || cfg.AnthropicSRT.Settings != ".crabbox/env-srt-settings.json" || cfg.AnthropicSRT.Debug {
 		t.Fatalf("env anthropicSandboxRuntime config not applied: %#v", cfg.AnthropicSRT)
+	}
+}
+
+func TestAnthropicSandboxRuntimeFilePresenceAndTrust(t *testing.T) {
+	for _, trusted := range []bool{false, true} {
+		for _, tc := range []struct {
+			name, yaml, cli, settings string
+			debug                     bool
+		}{
+			{"omitted", "{}", "/opt/prior-srt", "prior.json", true},
+			{"null", "{cliPath: null, settings: null, debug: null}", "/opt/prior-srt", "prior.json", true},
+			{"empty", "{cliPath: '', settings: '', debug: false}", "/opt/prior-srt", "", false},
+			{"whitespace", "{cliPath: '  ', settings: '  ', debug: false}", "  ", "  ", false},
+		} {
+			t.Run(fmt.Sprintf("trusted=%t/%s", trusted, tc.name), func(t *testing.T) {
+				cfg := baseConfig()
+				cfg.AnthropicSRT = AnthropicSRTConfig{CLIPath: "/opt/prior-srt", Settings: "prior.json", Debug: true}
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte("anthropicSandboxRuntime: "+tc.yaml), &file); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				want := AnthropicSRTConfig{CLIPath: tc.cli, Settings: tc.settings, Debug: tc.debug}
+				if cfg.AnthropicSRT != want {
+					t.Fatalf("got=%#v want=%#v", cfg.AnthropicSRT, want)
+				}
+			})
+		}
+	}
+}
+
+func TestAnthropicSandboxRuntimeLayerAndEnvironmentSemantics(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	for _, layer := range []struct {
+		cli, settings string
+		trusted       bool
+	}{{"/opt/user-srt", "user.json", true}, {"/opt/repo-srt", "repo.json", false}} {
+		var file fileConfig
+		if err := yaml.Unmarshal([]byte("anthropicSandboxRuntime:\n  cliPath: "+layer.cli+"\n  settings: "+layer.settings+"\n  debug: true\n"), &file); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyFileConfigWithTrust(&cfg, file, layer.trusted); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.AnthropicSRT.CLIPath != layer.cli || cfg.AnthropicSRT.Settings != layer.settings || !cfg.AnthropicSRT.Debug {
+			t.Fatalf("layer=%#v got=%#v", layer, cfg.AnthropicSRT)
+		}
+	}
+	for _, raw := range []string{"", "invalid", "no", "invalid", "yes"} {
+		t.Setenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI", "")
+		t.Setenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS", "")
+		t.Setenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG", raw)
+		before := cfg.AnthropicSRT
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		want := before
+		if raw == "no" {
+			want.Debug = false
+		}
+		if raw == "yes" {
+			want.Debug = true
+		}
+		if cfg.AnthropicSRT != want {
+			t.Fatalf("env %q got=%#v want=%#v", raw, cfg.AnthropicSRT, want)
+		}
+	}
+	t.Setenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI", "/opt/env-srt")
+	t.Setenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS", "env.json")
+	t.Setenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG", "false")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AnthropicSRT != (AnthropicSRTConfig{CLIPath: "/opt/env-srt", Settings: "env.json"}) {
+		t.Fatalf("environment did not override repository: %#v", cfg.AnthropicSRT)
 	}
 }
 
@@ -4861,6 +5614,132 @@ func TestBlaxelConfigRejectsInvalidValues(t *testing.T) {
 				t.Fatalf("applyEnv err=%v, want %q", err, tc.error)
 			}
 		})
+	}
+}
+
+func TestCloudflareSandboxOrderedFileAliasAndPresence(t *testing.T) {
+	for _, trusted := range []bool{false, true} {
+		for _, tc := range []struct{ name, body, wantURL string }{
+			{"omitted", "", "https://example.invalid/prior"},
+			{"primary", "  bridgeUrl: https://example.invalid/primary\n", "https://example.invalid/primary"},
+			{"alias", "  url: https://example.invalid/alias\n", "https://example.invalid/alias"},
+			{"both", "  bridgeUrl: https://example.invalid/primary\n  url: https://example.invalid/alias\n", "https://example.invalid/alias"},
+			{"reversed", "  url: https://example.invalid/alias\n  bridgeUrl: https://example.invalid/primary\n", "https://example.invalid/alias"},
+			{"alias empty", "  bridgeUrl: https://example.invalid/primary\n  url: ''\n", ""},
+			{"alias null", "  bridgeUrl: https://example.invalid/primary\n  url: null\n", "https://example.invalid/primary"},
+			{"whitespace", "  bridgeUrl: https://example.invalid/primary\n  url: '  '\n", "  "},
+		} {
+			t.Run(fmt.Sprintf("trusted=%t/%s", trusted, tc.name), func(t *testing.T) {
+				cfg := baseConfig()
+				cfg.CloudflareSandbox = CloudflareSandboxConfig{BridgeURL: "https://example.invalid/prior", Token: "inert", Workdir: "/workspace/prior", ExecTimeoutSecs: 12, ForgetMissing: true}
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte("cloudflareSandbox:\n"+tc.body+"  token: ''\n  workdir: ''\n  execTimeoutSecs: 0\n  forgetMissing: false\n"), &file); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				want := CloudflareSandboxConfig{BridgeURL: tc.wantURL}
+				if !trusted {
+					want.BridgeURL, want.Token = "https://example.invalid/prior", "inert"
+				}
+				if cfg.CloudflareSandbox != want {
+					t.Fatalf("file aliases/presence changed trusted=%t case=%s", trusted, tc.name)
+				}
+			})
+		}
+	}
+	cfg := baseConfig()
+	before := cfg.CloudflareSandbox
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("cloudflareSandbox: {bridgeUrl: null, url: null, token: null, workdir: null, execTimeoutSecs: null, forgetMissing: null}"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfigWithTrust(&cfg, file, true); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CloudflareSandbox != before {
+		t.Fatal("null fields changed config")
+	}
+}
+
+func TestCloudflareSandboxOverlayPartialErrorOrder(t *testing.T) {
+	for _, source := range []string{"file", "env"} {
+		for _, raw := range []string{"-1", "invalid", "0"} {
+			if source == "file" && raw == "invalid" {
+				continue
+			}
+			t.Run(source+"/"+raw, func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := baseConfig()
+				cfg.CloudflareSandbox = CloudflareSandboxConfig{BridgeURL: "https://example.invalid/prior", Token: "inert", Workdir: "/workspace/prior", ExecTimeoutSecs: 12, ForgetMissing: true}
+				var err error
+				if source == "file" {
+					var file fileConfig
+					if err := yaml.Unmarshal([]byte("cloudflareSandbox:\n  bridgeUrl: https://example.invalid/primary\n  url: https://example.invalid/after\n  token: inert-after\n  workdir: /workspace/after\n  execTimeoutSecs: "+raw+"\n  forgetMissing: false\n"), &file); err != nil {
+						t.Fatal(err)
+					}
+					err = applyFileConfigWithTrust(&cfg, file, true)
+				} else {
+					t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_URL", "https://example.invalid/after")
+					t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_TOKEN", "inert-after")
+					t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_WORKDIR", "/workspace/after")
+					t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_EXEC_TIMEOUT_SECS", raw)
+					t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_FORGET_MISSING", "false")
+					err = applyEnv(&cfg)
+				}
+				want := CloudflareSandboxConfig{BridgeURL: "https://example.invalid/after", Token: "inert-after", Workdir: "/workspace/after"}
+				if raw != "0" {
+					want.ForgetMissing = true
+					if source == "file" {
+						want.ExecTimeoutSecs = 12
+					}
+					message := "cloudflare-sandbox execTimeoutSecs must be non-negative"
+					if source == "env" {
+						message = "CRABBOX_CLOUDFLARE_SANDBOX_EXEC_TIMEOUT_SECS must be non-negative"
+						if raw == "invalid" {
+							message = "CRABBOX_CLOUDFLARE_SANDBOX_EXEC_TIMEOUT_SECS must be an integer"
+						}
+					}
+					if err == nil || err.Error() != message {
+						t.Fatalf("error=%v want=%s", err, message)
+					}
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				if cfg.CloudflareSandbox != want {
+					t.Fatal("overlay partial mutation order changed")
+				}
+			})
+		}
+	}
+}
+
+func TestCloudflareSandboxEmptyEnvironmentAndBooleanFallback(t *testing.T) {
+	for _, prior := range []bool{false, true} {
+		for _, raw := range []string{"", "invalid", "no", "yes"} {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_URL", "")
+			t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_TOKEN", "")
+			t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_WORKDIR", "")
+			t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_EXEC_TIMEOUT_SECS", "")
+			t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_FORGET_MISSING", raw)
+			cfg := baseConfig()
+			cfg.CloudflareSandbox = CloudflareSandboxConfig{BridgeURL: "https://example.invalid/prior", Token: "inert", Workdir: "/workspace/prior", ExecTimeoutSecs: 12, ForgetMissing: prior}
+			want := cfg.CloudflareSandbox
+			if raw == "no" {
+				want.ForgetMissing = false
+			}
+			if raw == "yes" {
+				want.ForgetMissing = true
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.CloudflareSandbox != want {
+				t.Fatalf("empty environment or boolean fallback changed raw=%q prior=%t", raw, prior)
+			}
+		}
 	}
 }
 

@@ -311,7 +311,7 @@ func cleanupCommand(cfg Config, leaseID string) string {
 	command := "crabbox stop --provider " + providerName
 	if gatewayURL := strings.TrimSpace(cfg.CloudRunSandbox.GatewayURL); gatewayURL != "" {
 		command += " --cloud-run-sandbox-gateway-url " + shellQuote(gatewayURL)
-	} else if cliPath := strings.TrimSpace(cfg.CloudRunSandbox.CLIPath); cliPath != "" && cliPath != defaultCLIPath {
+	} else if cliPath := strings.TrimSpace(cfg.CloudRunSandbox.CLIPath); cliPath != "" && cliPath != core.CloudRunSandboxConfigDefaultCLIPath {
 		command += " --cloud-run-sandbox-cli " + shellQuote(cliPath)
 	}
 	return command + " --id " + shellQuote(leaseID)
@@ -382,8 +382,8 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	healthErr := transport.Health(ctx)
 	details := map[string]string{
 		"mode":    transport.Mode(),
-		"cli":     blank(strings.TrimSpace(b.cfg.CloudRunSandbox.CLIPath), defaultCLIPath),
-		"workdir": blank(strings.TrimSpace(b.cfg.CloudRunSandbox.Workdir), defaultWorkdir),
+		"cli":     blank(strings.TrimSpace(b.cfg.CloudRunSandbox.CLIPath), core.CloudRunSandboxConfigDefaultCLIPath),
+		"workdir": blank(strings.TrimSpace(b.cfg.CloudRunSandbox.Workdir), core.CloudRunSandboxConfigDefaultWorkdir),
 	}
 	if transport.Mode() == "remote" {
 		details["gateway"] = strings.TrimSpace(b.cfg.CloudRunSandbox.GatewayURL)
@@ -894,7 +894,7 @@ func (b *backend) claimScope() (string, error) {
 		sum := sha256.Sum256([]byte(validated))
 		return "gateway:" + hex.EncodeToString(sum[:8]), nil
 	}
-	cli := blank(strings.TrimSpace(b.cfg.CloudRunSandbox.CLIPath), defaultCLIPath)
+	cli := blank(strings.TrimSpace(b.cfg.CloudRunSandbox.CLIPath), core.CloudRunSandboxConfigDefaultCLIPath)
 	sum := sha256.Sum256([]byte("direct:" + cli))
 	return "direct:" + hex.EncodeToString(sum[:8]), nil
 }
@@ -904,7 +904,7 @@ func (b *backend) cleanupContext(parent context.Context) (context.Context, conte
 }
 
 func cloudRunSandboxWorkdir(cfg Config) (string, error) {
-	workdir := blank(strings.TrimSpace(cfg.CloudRunSandbox.Workdir), defaultWorkdir)
+	workdir := blank(strings.TrimSpace(cfg.CloudRunSandbox.Workdir), core.CloudRunSandboxConfigDefaultWorkdir)
 	if !path.IsAbs(workdir) {
 		return "", exit(2, "cloudRunSandbox.workdir must be an absolute path")
 	}

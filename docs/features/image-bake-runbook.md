@@ -363,7 +363,8 @@ scripts/mint-aws-devtools-image.sh \
 ### What the prep scripts install
 
 - **Linux** (`scripts/install-linux-developer-tools.sh`): common CLI/build
-  tooling, GitHub CLI, Node 24, corepack/pnpm, TruffleHog 3.95.9, Chrome or
+  tooling, GitHub CLI, Node 24.19.0, Go 1.27.0, and Bun 1.4.0 on x86_64,
+  corepack/pnpm, TruffleHog 3.95.9, Chrome or
   Chromium for browser lanes, desktop/VNC helpers, Docker Engine, Compose,
   buildx, and a small default Docker image set. TruffleHog archives are pinned
   to reviewed SHA-256 digests for amd64 and arm64. NodeSource, Docker, and
@@ -380,6 +381,10 @@ scripts/mint-aws-devtools-image.sh \
   virtual environment, before atomically emitting the strongest supported profile.
   Developer-image preparation then requires `linux-builder` verification before
   cloud-init cleanup. A missing builder capability stops preparation.
+- **Managed WSL2 distro bootstrap**: the Linux installer's `--node-only` entrypoint
+  provides the same Node/npm baseline (checksum-pinned Node 24.19.0 on amd64).
+  It skips image-only Docker, Go, browser/desktop setup, pnpm activation, and the
+  offline pnpm archives; see [AWS targets](../providers/aws.md#targets).
 - **Windows** (`scripts/install-windows-developer-tools.ps1`): common CLI/build
   tooling, GitHub CLI, Node 24, corepack/pnpm, TruffleHog 3.95.9, and Windows
   Server container support with Docker Engine. It deliberately avoids Docker
@@ -410,6 +415,181 @@ before Docker starts; the wrapper detects the prep script's reboot marker,
 reboots the source lease, waits for Crabbox readiness, reruns the prep script to
 pull the configured Docker images, and only then runs the source smoke and AMI
 capture.
+
+### Linux public toolchain archives
+
+The x86_64 recipe installs the checksum-pinned upstream Node 24.19.0 archive,
+including its bundled Corepack 0.35.0, at
+`/opt/hostedtoolcache/node/24.19.0/x64`. The sibling `x64.complete` marker is
+written only after executable checks. This matches the GitHub tool-cache
+`$RUNNER_TOOL_CACHE/node/<version>/<architecture>` layout; it does not bind a
+runner to that root. Crabbox's GitHub runner defaults to
+`$HOME/actions-runner/_work/_tool`, and local Actions uses a disposable
+per-lease tools directory. Native GitHub runner registration can copy the
+reviewed image slots into its owned default cache before starting the service,
+as described below. Completion markers are availability hints, not authentication.
+
+Before cache or network preparation, the pinned Node route checks all six
+public aliases: `node`, `npm`, `npx`, `corepack`, `pnpm`, and `pnpx`. It repeats
+the check before replacing the image toolcache slot. Each alias must be absent
+or an absolute symlink to its same-named binary in the exact Node 24.19.0 x64
+slot; dangling matching links are allowed. Files, directories, and other link
+targets stop the bake with a resolve-before-rebake diagnostic. Relative aliases,
+including those from earlier unshipped builder revisions, require operator
+resolution rather than automatic ownership inference.
+
+Corepack enables its shims only inside the private staged Node tree. The
+installer publishes each public alias using a private temporary symlink and
+rename, then prepares the selected pnpm version without running public
+`corepack enable`. Existing public `yarn` and `yarnpkg` entries remain untouched.
+Each alias replacement is atomic; the six replacements are not one transaction.
+
+Public archives are retained under `/opt/crabbox/toolchain-archives`:
+
+| Filename | Purpose |
+| --- | --- |
+| `node-v24.19.0-linux-x64.tar.xz` | Node, npm, and bundled Corepack |
+| `pnpm-11.22.0.tgz` | pnpm 11.22.0 |
+| `pnpm-12.3.4.tgz` | pnpm 12.3.4 JavaScript wrapper |
+| `exe.linux-x64-12.3.4.tgz` | pnpm 12.3.4 native executable for glibc Linux x64 |
+| `go1.27.0.linux-amd64.tar.gz` | Complete Go 1.27.0 distribution |
+| `bun-v1.4.0-linux-x64-baseline.zip` | Original Bun 1.4.0 baseline Linux glibc ZIP |
+| `bun-v1.4.0-linux-x64.zip` | Original Bun 1.4.0 optimized Linux glibc ZIP |
+
+The SHA-256 Node/Go/Bun pins and SHA-512 pnpm pins live in the installer's
+`toolchain_archive_spec`. Consumers must carry independently reviewed pins,
+copy archives into private staging, validate those exact bytes, and extract
+fresh trees. Do not authenticate a cached installation by running `--version`,
+reading `.complete`, or trusting Corepack's mutable `.corepack` metadata.
+No Corepack-packed bundle is provided: any future packed bundle needs its own
+trusted digest before import.
+
+For offline Corepack execution, the smoke extracts authenticated pnpm into a
+fresh `$COREPACK_HOME/v1/pnpm/<version>` and then creates compatibility metadata.
+pnpm 12 also needs the independently verified native archive's `package/pnpm`
+installed as `pnpm-native` in that fresh pnpm directory. The consumer's exact
+package-manager pin selects execution; these archives do not change the
+installer's pnpm default of 11.1.0. Existing `CRABBOX_LINUX_PNPM_VERSION` and
+`CRABBOX_LINUX_NODE_MAJOR` overrides remain supported. Other Node majors and
+the existing ARM installer route retain the fingerprint-checked NodeSource
+path; this recipe does not add an ARM image.
+
+For a nondefault Node major, the installer selects an exact native-architecture
+version from that major's fingerprint-checked NodeSource repository. An explicit
+`CRABBOX_LINUX_NODE_MAJOR=22` permits replacing an installed Node 24 package with
+Node 22; it does not authorize other downgrades or change the default Node 24
+route. APT failure or a failed installed-package version, architecture, or
+package-owned binary check leaves the owned links and caches intact.
+
+Only after those checks does the installer recheck and remove its six exact
+Node 24.19.0 toolcache symlinks, including dangling ones. Operator files,
+nonmatching symlinks, and cached archives and trees remain intact. It clears the
+shell command cache and checks normal PATH selection before preparing Corepack.
+A conflicting operator-provided Node stops the rebake with a PATH diagnostic
+rather than being deleted. The alternate toolchain must provide npm and Corepack;
+this does not add packaging for newer Node majors.
+
+The mint wrapper applies this archive contract only when its selected prep
+script is the bundled Linux builder. It forwards the existing
+`CRABBOX_LINUX_NODE_MAJOR` and `CRABBOX_LINUX_PNPM_VERSION` overrides to that
+builder and freezes the same Node-major declaration into each smoke. The smoke
+checks the guest's Debian package architecture, not the mint host's architecture.
+Only Node major 24 on guest `amd64` requires the Node/pnpm archives. Go and Bun
+have independent Linux `amd64` contracts, including when the Node major is
+overridden. Bun additionally requires glibc. ARM guests and custom prep scripts
+retain the existing normal-tool smoke; their success does not qualify the
+x86_64 archive recipe. Missing or corrupt archives cannot disable any required
+probe for the supported builder.
+
+Go 1.27.0 installs at `/opt/hostedtoolcache/go/1.27.0/x64`, with image-owned
+`/usr/local/bin/go` and `gofmt` links. The installer authenticates a private
+archive copy and freshly extracts the entire distribution; it never executes
+an existing same-version tree to establish trust. The sibling `x64.complete`
+marker is written last, after version/architecture, standard-library tests and
+a CGO compile/link/run assertion pass. Source, candidate and promoted smokes
+repeat those functional checks as nonroot from a new private extraction with
+fresh writable build/module caches, `GOPROXY=off` and `GOTOOLCHAIN=local`.
+Go 1.27.1 or another version does not satisfy the exact 1.27.0 cache slot.
+
+Before cache or network preparation, and again before changing the Go slot or
+marker, both public `go` and `gofmt` paths must be absent or exact same-name
+absolute symlinks into the Go 1.27.0 x64 slot. Matching dangling links are
+allowed. Files, directories and other targets require operator resolution
+before rebaking; a conflict preserves the existing tree, marker and aliases.
+Publication uses the same private temporary-symlink replacement as Node,
+without treating the pair as one atomic transaction.
+
+The bundled builder retains both Bun 1.4.0 x64 ZIPs on glibc Linux `amd64`,
+independently of the Node-major override. Their versioned cache filenames do
+not change the upstream ZIP bytes. After Node and Go setup, the baseline
+executable is installed at
+`/opt/crabbox/toolchains/bun/1.4.0/linux-x64-baseline/bun`, with a private
+`bunx -> bun` link beside it. `/usr/local/bin/bun` and
+`/usr/local/bin/bunx` are absolute links to those same-name backing paths. The
+baseline remains the generic image default even when the build guest supports
+AVX2 because a subsequent guest may have a different CPU. The optimized
+executable is run only when every visible CPU in that guest's `/proc/cpuinfo`
+exposes both AVX and AVX2. Absent or incomplete CPU evidence keeps baseline
+execution.
+
+Bun installation downloads the pinned original archive only on a cache miss.
+A present corrupt archive, symlink, malformed ZIP, or malformed cache root is a
+hard error, not permission to download a replacement. Each extraction uses a
+fresh private copy authenticated with its independently pinned SHA-256 first.
+Before modifying archives, the backing slot, or public aliases, installation
+accepts only absent public paths or exact current managed links, including
+dangling links. Operator files, directories, and other link targets fail with
+a conflict diagnostic and remain unchanged. The unpublished regular `bun` and
+relative public `bunx` layout is not migrated.
+
+Repeated installation rebuilds the exact image-owned slot from verified bytes,
+including an incomplete slot with absent public aliases. Symlinked directories
+in its path are rejected. New image directories and executables are mode 0755
+so nonroot users can traverse and execute them; no ownership changes are made.
+Neither the installed version nor a marker authenticates cached code. The
+aarch64 digest is retained only for pinned fallback compatibility. This producer
+does not install or qualify an ARM image, add musl/non-Linux routes, change
+custom prep scripts, or integrate a consumer-owned Bun cache.
+
+Each nonroot bundled-builder smoke checks normal-PATH `bun` and `bunx` after
+Node and Go setup, then authenticates and freshly extracts both ZIPs. Baseline,
+and optimized when the guest supports it, must execute local TypeScript, pass
+`bun test`, bundle the TypeScript, and execute the bundle. The proof uses a
+private home and dependency-free fixtures with auto-install disabled; `bunx`
+executes a local binary with `--no-install`. A missing cache fails this offline
+proof even though installation supports a pinned download fallback.
+
+Native GitHub runner registration seeds only `node/24.19.0/x64` and
+`go/1.27.0/x64` after configuration and before service start. It reads the
+actual `.runner` work folder and `.env` values, including the precedence of
+`RUNNER_TOOL_CACHE`, `RUNNER_TOOLSDIRECTORY`, `AGENT_TOOLSDIRECTORY` and
+`agent.ToolsDirectory`. Literal `.env` values are not evaluated as shell code.
+Only the quiescent, current-user-owned default `_work/_tool` is eligible.
+Custom roots, symlinked or foreign/writable paths, existing slots, busy runners,
+and externally configured service environments are preserved without seeding.
+Unknown ownership or process/service state skips the optimization.
+
+Each missing slot is copied privately and compared against an independently
+pinned raw archive, including every file, mode and symlink. Only Node's four
+private Corepack shim links (`pnpm`, `pnpx`, `yarn` and `yarnpkg`) are additional
+expected entries, each with its exact same-name relative target. Completion alone
+does not authenticate the image seed. The destination is an independent,
+writable copy; image ownership is not changed and the Runner root is not
+redirected. Logs report copied bytes, copy time and total authenticated seeding
+time for startup-cost measurement.
+Normal upstream cache misses remain writable. Local Actions keeps its private
+tools root and existing Go-on-PATH validation; its shim is not an upstream
+`setup-go` execution.
+
+Qualification must exercise the real pinned `setup-go` action with exact
+`go-version: 1.27.0`, `check-latest: false`, dependency `cache: false` and no
+custom download URL, verifying an offline toolchain hit and the native Runner's
+effective cache root. Fixture tests do not replace that Linux proof or imply
+ARM support, another Ubuntu release's ABI, or successful image publication.
+
+No repository checkout, project dependency tree, credential, or private
+package is added to the public archive cache. Existing dependency-cache keys
+and hydration behavior are unchanged.
 
 ### Tuning the prebake set
 
@@ -451,6 +631,12 @@ evidence, downgrade the profile, or write the manifest or compatibility marker.
 Generic bootstrap still accepts verified `linux-minimal` images and retains its
 normal fallback behavior.
 
+The builder-probe subshell owns and cleans a private `TMPDIR` before Python
+starts, without changing the frozen v1 probe bytes or manifest digest. Old and
+new CLI/coordinator consumers retain the same manifest contract. Verifier
+availability is separate: stage the updated standalone script before preparing
+an image; an older installed producer does not gain `--verify` from its manifest.
+
 The Linux smoke runs as the runtime user. It compiles and executes a small C
 program, checks Python SSL and SQLite, runs Node package scripts offline, and
 tests shared-cache writes. Docker checks use the prebaked images without pulls
@@ -467,6 +653,19 @@ capabilities, not pristine image contents before bootstrap or project hydration.
 Keep scenario state out of the source image as described in
 [prebaked images](prebaked-images.md). Use the timing logs to compare provider
 request, network readiness, bootstrap, and end-to-end time before and after each bake.
+
+Linux source, candidate, and promoted smokes require a nonroot user and execute
+the normal `pnpm --version` command in that user's existing environment, preserving
+its readiness check and first-use cache warming. This normal command is not
+used to authenticate cached archives or skip their verification.
+
+For the bundled Node-24/amd64 builder, each smoke additionally revalidates public
+archive bytes in private temporary directories. It executes fresh Node and both
+pinned pnpm versions, with Corepack network access disabled, installs a local
+dependency using `--offline --ignore-scripts`, and loads that dependency. A failed
+probe stops the stage; `devtools-smoke-ok` is printed only after the required
+checks finish. These offline probes do not replace image-selection,
+credential-isolation, rollback, or cleanup qualification.
 
 ### Measured Linux publication
 

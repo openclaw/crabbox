@@ -882,6 +882,14 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("sha256sum -c -");
     expect(got).toContain('mv -f "$trufflehog_candidate" /usr/local/bin/trufflehog');
     expect(got).toContain("trufflehog --no-update --version >/dev/null");
+    const nodeInstall = got.indexOf(
+      "bash /var/lib/crabbox/install-linux-developer-tools.sh --node-only",
+    );
+    const readyScript = got.indexOf("cat >/usr/local/bin/crabbox-ready <<'READY'");
+    expect(nodeInstall).toBeGreaterThan(got.indexOf("$linuxSetup = @'"));
+    expect(readyScript).toBeGreaterThan(nodeInstall);
+    expect(got.slice(readyScript)).toContain("node --version >/dev/null");
+    expect(got.slice(readyScript)).toContain("npm --version >/dev/null");
     expect(got).toContain("test -e /proc/sys/fs/binfmt_misc/WSLInterop");
     expect(got).toContain("test -w '/work/crabbox'");
     expect(got).toContain("PubkeyAuthentication yes");

@@ -819,6 +819,7 @@ const coordinatorReleaseResolveTimeout = 10 * time.Second
 
 func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
 	cfg := b.cfg
+	prepare := req.Prepare && !req.ReleaseOnly && isCanonicalLeaseID(req.ID)
 	if req.ReleaseOnly {
 		// Provider cleanup must not depend on an optional guest route selection.
 		cfg.explicitSSHPort = ""
@@ -826,8 +827,29 @@ func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveReques
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, coordinatorReleaseResolveTimeout)
 		defer cancel()
+	} else if prepare {
+		// GetLease owns a control deadline beneath the HTTP-client timeout.
+		// Share that original budget across both observations, including auth/curl.
+		timeout := coordinatorControlTimeout
+		if httpTimeout := b.coord.secureHTTPClient().Timeout; httpTimeout > 0 {
+			timeout = min(timeout, httpTimeout)
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
-	lease, err := b.coord.GetLease(ctx, req.ID)
+	coord := b.coord
+	lease, err := coord.GetLease(ctx, req.ID)
+	var serviceError CoordinatorHTTPError
+	if prepare && ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
+		errors.As(err, &serviceError) && serviceError.StatusCode >= 500 && serviceError.StatusCode < 600 {
+		// Only repeat the exact read before run preparation; never replay SSH or
+		// infer lease absence from a failed coordinator observation.
+		lease, err = b.coord.GetLease(ctx, req.ID)
+	}
+	if prepare && ctx.Err() != nil {
+		return LeaseTarget{}, errors.Join(err, ctx.Err())
+	}
 	if err != nil {
 		if b.cfg.CoordAdminToken != "" && (isCoordinatorNotFoundError(err) || isCoordinatorUnauthorized(err)) {
 			adminCoord, adminErr := b.adminCoordinatorClient()
@@ -836,12 +858,29 @@ func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveReques
 			}
 			lease, adminErr = adminCoord.GetLease(ctx, req.ID)
 			if adminErr == nil {
-				return b.coordinatorLeaseTargetForConfig(lease, cfg, adminCoord)
+				coord, err = adminCoord, nil
 			}
 		}
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+	}
+	if prepare {
+		if err := ctx.Err(); err != nil {
+			return LeaseTarget{}, err
+		}
+		if lease.ID != req.ID {
+			return LeaseTarget{}, exit(4, "coordinator returned lease %s for requested lease %s", blank(lease.ID, "<empty>"), req.ID)
+		}
+	}
+	target, err := b.coordinatorLeaseTargetForConfig(lease, cfg, coord)
+	if err != nil {
 		return LeaseTarget{}, err
 	}
-	return b.coordinatorLeaseTargetForConfig(lease, cfg, b.coord)
+	if req.Prepare && !req.ReleaseOnly && target.providerRelease != nil {
+		return LeaseTarget{}, exit(2, "lease %s is released; start a new lease before running commands", target.LeaseID)
+	}
+	return target, nil
 }
 
 func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest) (statusView, error) {
@@ -874,7 +913,7 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		if err := prepareLeaseSSHTrust(&target, leaseID); err != nil {
 			return statusView{}, err
 		}
-		ready = probeSSHReady(ctx, &target, 4*time.Second)
+		ready = probeSSHReady(ctx, &target, statusSSHReadinessTimeout(target))
 	}
 	return statusView{
 		ID:                           lease.ID,

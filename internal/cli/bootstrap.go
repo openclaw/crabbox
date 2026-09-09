@@ -178,7 +178,13 @@ func windowsManagedCorePreludePowerShell(cfg Config) string {
 
 func windowsWSL2BootstrapPowerShell(cfg Config) string {
 	workRoot := windowsWSLWorkRoot(cfg)
+	headless := ""
+	if !cfg.Desktop && !cfg.Browser {
+		headless = windowsWSL2HeadlessConfigPowerShell
+	}
 	return `
+	$wslConfigChanged = $false
+` + headless + `
 	$wslDistro = "Crabbox"
 	$wslRoot = "C:\ProgramData\crabbox\wsl\Crabbox"
 	$wslRootfs = "C:\ProgramData\crabbox\wsl\ubuntu-noble-wsl-amd64.rootfs.tar.gz"
@@ -211,6 +217,10 @@ func windowsWSL2BootstrapPowerShell(cfg Config) string {
 	  wsl.exe --update --web-download | Out-Host
 	  if ($LASTEXITCODE -ne 0) { throw "wsl --update --web-download failed with exit $LASTEXITCODE" }
 	  Restart-CrabboxBootstrap $wslKernelMarker
+	}
+	if ($wslConfigChanged) {
+	  wsl.exe --shutdown | Out-Host
+	  if ($LASTEXITCODE -ne 0) { throw "apply headless WSL configuration failed with exit $LASTEXITCODE" }
 	}
 	wsl.exe --set-default-version 2 | Out-Host
 	if ($LASTEXITCODE -ne 0) { throw "wsl --set-default-version 2 failed with exit $LASTEXITCODE" }
@@ -256,6 +266,10 @@ func windowsWSL2BootstrapPowerShell(cfg Config) string {
 	$linuxSetup = @'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+mkdir -p /etc/cloud
+# Crabbox owns this distro's setup. WSL datasource discovery can block systemd
+# and root login while trying to invoke Windows tools from an SSH session.
+touch /etc/cloud/cloud-init.disabled
 mkdir -p ` + shellQuote(workRoot) + ` /var/cache/crabbox/pnpm /var/cache/crabbox/npm /var/lib/crabbox
 cat >/etc/apt/apt.conf.d/80-crabbox-retries <<'APT'
 Acquire::Retries "8";
@@ -265,7 +279,7 @@ APT
 rm -rf /var/lib/apt/lists/*
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl git jq python3-minimal rsync
-` + sharedWslTruffleHogInstall() + `cat >/usr/local/bin/crabbox-ready <<'READY'
+` + sharedLinuxNodeInstall() + sharedWslTruffleHogInstall() + `cat >/usr/local/bin/crabbox-ready <<'READY'
 #!/usr/bin/env bash
 set -euo pipefail
 git --version >/dev/null
@@ -274,6 +288,8 @@ rsync --version >/dev/null
 curl --version >/dev/null
 jq --version >/dev/null
 trufflehog --no-update --version >/dev/null
+node --version >/dev/null
+npm --version >/dev/null
 wslpath -w ` + shellQuote(workRoot) + ` >/dev/null
 test -w ` + shellQuote(workRoot) + `
 READY
@@ -285,10 +301,50 @@ crabbox-ready
 	[IO.File]::WriteAllText($wslSetup, $linuxSetup, (New-Object Text.UTF8Encoding($false)))
 	wsl.exe -d $wslDistro --user root --exec bash /mnt/c/ProgramData/crabbox/wsl/linux-setup.sh
 	if ($LASTEXITCODE -ne 0) { throw "WSL setup failed with exit $LASTEXITCODE" }
+	wsl.exe --terminate $wslDistro | Out-Host
+	if ($LASTEXITCODE -ne 0) { throw "WSL restart failed with exit $LASTEXITCODE" }
+	wsl.exe -d $wslDistro --user root --exec /usr/local/bin/crabbox-ready
+	if ($LASTEXITCODE -ne 0) { throw "WSL cold-start readiness failed with exit $LASTEXITCODE" }
 	Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
 	Restart-Service sshd -Force
 	`
 }
+
+// WSLg's RDP compositor is unnecessary for headless SSH leases and can crash
+// in Windows service sessions, leaving even non-GUI distro launches blocked.
+const windowsWSL2HeadlessConfigPowerShell = `
+function ConvertTo-CrabboxHeadlessWSLConfig([string]$Text) {
+  $result = [Collections.Generic.List[string]]::new()
+  $inWSL2 = $false
+  $hasSection = $false
+  $hasKey = $false
+  if ($Text.Length -gt 0) {
+    foreach ($line in ($Text -split '\r?\n')) {
+      if ($line -match '^\s*\[([^\]]+)\]\s*(?:[;#].*)?$') {
+        if ($inWSL2 -and -not $hasKey) { $result.Add('guiApplications=false') }
+        $inWSL2 = $Matches[1].Trim() -eq 'wsl2'
+        $hasSection = $hasSection -or $inWSL2
+        $hasKey = $false
+      }
+      if ($inWSL2 -and $line -match '^\s*guiApplications\s*=') {
+        $result.Add('guiApplications=false')
+        $hasKey = $true
+      } else { $result.Add($line) }
+    }
+  }
+  if (-not $hasSection) { $result.Add('[wsl2]'); $inWSL2 = $true; $hasKey = $false }
+  if ($inWSL2 -and -not $hasKey) { $result.Add('guiApplications=false') }
+  return $result -join [char]10
+}
+$wslConfigPath = Join-Path $HOME '.wslconfig'
+$wslConfig = ''
+if (Test-Path -LiteralPath $wslConfigPath) { $wslConfig = [IO.File]::ReadAllText($wslConfigPath) }
+$headlessWSLConfig = ConvertTo-CrabboxHeadlessWSLConfig $wslConfig
+$wslConfigChanged = $headlessWSLConfig -cne $wslConfig
+if ($wslConfigChanged) {
+  [IO.File]::WriteAllText($wslConfigPath, $headlessWSLConfig, [Text.UTF8Encoding]::new($false))
+}
+`
 
 func windowsDesktopBootstrapPowerShell() string {
 	return windowsDesktopLauncherServicePowerShell() + sharedWindowsDesktop()

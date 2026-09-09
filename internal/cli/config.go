@@ -695,15 +695,6 @@ type DaytonaConfig struct {
 	SSHAccessMinutes int
 }
 
-type E2BConfig struct {
-	APIKey   string
-	APIURL   string
-	Domain   string
-	Template string
-	Workdir  string
-	User     string
-}
-
 type CubeSandboxConfig struct {
 	APIKey        string
 	APIURL        string
@@ -750,20 +741,6 @@ type ExeDevConfig struct {
 	User        string
 	WorkRoot    string
 	NoEmail     bool
-}
-
-type RailwayConfig struct {
-	APIToken      string
-	APIURL        string
-	ProjectID     string
-	EnvironmentID string
-}
-
-type FastAPICloudConfig struct {
-	Token  string
-	APIURL string
-	AppID  string
-	TeamID string
 }
 
 type UnikraftCloudConfig struct {
@@ -971,17 +948,6 @@ type BlaxelConfig struct {
 	ForgetMissing   bool
 }
 
-// CloudflareSandboxConfig configures the delegated Cloudflare Sandbox bridge
-// provider. The token may be loaded from trusted user config or environment,
-// but it is never exposed as a CLI flag and must be redacted in display output.
-type CloudflareSandboxConfig struct {
-	BridgeURL       string
-	Token           string
-	Workdir         string
-	ExecTimeoutSecs int
-	ForgetMissing   bool
-}
-
 // SuperserveConfig configures the delegated Superserve provider. The API key is
 // intentionally absent: it is read at runtime from
 // CRABBOX_SUPERSERVE_API_KEY / SUPERSERVE_API_KEY and sent only in request
@@ -1023,27 +989,6 @@ type DockerSandboxConfig struct {
 	Kit             []string
 }
 
-type AnthropicSRTConfig struct {
-	CLIPath  string
-	Settings string
-	Debug    bool
-}
-
-// CloudRunSandboxConfig configures the Google Cloud Run sandboxes provider.
-// Secrets (CLOUD_RUN_SANDBOX_SECRET / CLOUD_RUN_AUTH_TOKEN) are intentionally
-// absent: they are read at runtime from the environment only and never
-// persisted in Crabbox config or placed on argv.
-// GatewayURL is also not accepted from repository YAML; use flags or env so a
-// checked-in config cannot redirect a local secret to an untrusted endpoint.
-type CloudRunSandboxConfig struct {
-	GatewayURL  string
-	CLIPath     string
-	Workdir     string
-	AllowEgress bool
-	Write       bool
-	Rootfs      string
-}
-
 type ModalConfig struct {
 	App         string
 	Image       string
@@ -1051,15 +996,6 @@ type ModalConfig struct {
 	Python      string
 	Environment string
 	Secrets     []string
-}
-
-type UpstashBoxConfig struct {
-	APIKey    string
-	BaseURL   string
-	Runtime   string
-	Size      string
-	Workdir   string
-	KeepAlive bool
 }
 
 type SmolvmConfig struct {
@@ -1077,12 +1013,6 @@ type AsciiBoxConfig struct {
 	APIKey  string
 	BaseURL string
 	CLIPath string
-	Workdir string
-}
-
-type CloudflareConfig struct {
-	APIURL  string
-	Token   string
 	Workdir string
 }
 
@@ -2878,12 +2808,7 @@ func baseConfig() Config {
 			SSHGatewayHost:   "ssh.app.daytona.io",
 			SSHAccessMinutes: 30,
 		},
-		E2B: E2BConfig{
-			APIURL:   "https://api.e2b.app",
-			Domain:   "e2b.app",
-			Template: "base",
-			Workdir:  "crabbox",
-		},
+		E2B: defaultE2BConfig(),
 		CubeSandbox: CubeSandboxConfig{
 			APIURL:        "http://127.0.0.1:3000",
 			Domain:        "cube.app",
@@ -2898,12 +2823,8 @@ func baseConfig() Config {
 			Disk:        "10GB",
 			NoEmail:     true,
 		},
-		Railway: RailwayConfig{
-			APIURL: "https://backboard.railway.com/graphql/v2",
-		},
-		FastAPICloud: FastAPICloudConfig{
-			APIURL: "https://api.fastapicloud.com/api/v1",
-		},
+		Railway:      defaultRailwayConfig(),
+		FastAPICloud: defaultFastAPICloudConfig(),
 		UnikraftCloud: UnikraftCloudConfig{
 			Metro: "fra",
 		},
@@ -3005,11 +2926,8 @@ func baseConfig() Config {
 			Workdir:         "/workspace/crabbox",
 			ExecTimeoutSecs: 600,
 		},
-		VercelSandbox: defaultVercelSandboxConfig(),
-		CloudflareSandbox: CloudflareSandboxConfig{
-			Workdir:         "/workspace/crabbox",
-			ExecTimeoutSecs: 600,
-		},
+		VercelSandbox:     defaultVercelSandboxConfig(),
+		CloudflareSandbox: defaultCloudflareSandboxConfig(),
 		Superserve: SuperserveConfig{
 			BaseURL:         "https://api.superserve.ai",
 			Template:        "superserve/base",
@@ -3025,27 +2943,15 @@ func baseConfig() Config {
 			CLIPath: "sbx",
 			Agent:   "shell",
 		},
-		AnthropicSRT: AnthropicSRTConfig{
-			CLIPath: "srt",
-		},
-		CloudRunSandbox: CloudRunSandboxConfig{
-			CLIPath: "/usr/local/gcp/bin/sandbox",
-			Workdir: "/tmp/crabbox",
-			Write:   true,
-			Rootfs:  "/",
-		},
+		AnthropicSRT:    defaultAnthropicSRTConfig(),
+		CloudRunSandbox: defaultCloudRunSandboxConfig(),
 		Modal: ModalConfig{
 			App:     "crabbox",
 			Image:   "python:3.13-slim",
 			Workdir: "/workspace/crabbox",
 			Python:  "python3",
 		},
-		UpstashBox: UpstashBoxConfig{
-			BaseURL: "https://us-east-1.box.upstash.com",
-			Runtime: "node",
-			Size:    "small",
-			Workdir: "/workspace/home/crabbox",
-		},
+		UpstashBox: defaultUpstashBoxConfig(),
 		Smolvm: SmolvmConfig{
 			BaseURL:  "https://api.smolmachines.com",
 			Image:    "alpine",
@@ -3059,9 +2965,7 @@ func baseConfig() Config {
 			CLIPath: "box",
 			Workdir: "/home/user/crabbox",
 		},
-		Cloudflare: CloudflareConfig{
-			Workdir: "/workspace/crabbox",
-		},
+		Cloudflare: defaultCloudflareConfig(),
 		CloudflareDynamicWorkers: CloudflareDynamicWorkersConfig{
 			CompatibilityDate: DefaultCloudflareDynamicWorkersCompatibilityDate,
 			CacheMode:         "stable",
@@ -3842,14 +3746,6 @@ type fileDaytonaConfig struct {
 	SSHAccessMinutes int    `yaml:"sshAccessMinutes,omitempty"`
 }
 
-type fileE2BConfig struct {
-	APIURL   string `yaml:"apiUrl,omitempty"`
-	Domain   string `yaml:"domain,omitempty"`
-	Template string `yaml:"template,omitempty"`
-	Workdir  string `yaml:"workdir,omitempty"`
-	User     string `yaml:"user,omitempty"`
-}
-
 type fileCubeSandboxConfig struct {
 	APIURL        string `yaml:"apiUrl,omitempty"`
 	Domain        string `yaml:"domain,omitempty"`
@@ -3886,18 +3782,6 @@ type fileExeDevConfig struct {
 	User        string `yaml:"user,omitempty"`
 	WorkRoot    string `yaml:"workRoot,omitempty"`
 	NoEmail     *bool  `yaml:"noEmail,omitempty"`
-}
-
-type fileRailwayConfig struct {
-	APIURL        string `yaml:"apiUrl,omitempty"`
-	ProjectID     string `yaml:"projectId,omitempty"`
-	EnvironmentID string `yaml:"environmentId,omitempty"`
-}
-
-type fileFastAPICloudConfig struct {
-	APIURL string `yaml:"apiUrl,omitempty"`
-	AppID  string `yaml:"appId,omitempty"`
-	TeamID string `yaml:"teamId,omitempty"`
 }
 
 type fileUnikraftCloudConfig struct {
@@ -4070,15 +3954,6 @@ type fileBlaxelConfig struct {
 	ForgetMissing   *bool   `yaml:"forgetMissing,omitempty"`
 }
 
-type fileCloudflareSandboxConfig struct {
-	BridgeURL       *string `yaml:"bridgeUrl,omitempty"`
-	URL             *string `yaml:"url,omitempty"`
-	Token           *string `yaml:"token,omitempty"`
-	Workdir         *string `yaml:"workdir,omitempty"`
-	ExecTimeoutSecs *int    `yaml:"execTimeoutSecs,omitempty"`
-	ForgetMissing   *bool   `yaml:"forgetMissing,omitempty"`
-}
-
 type fileSuperserveConfig struct {
 	BaseURL         string   `yaml:"baseUrl,omitempty"`
 	Template        *string  `yaml:"template,omitempty"`
@@ -4112,20 +3987,6 @@ type fileDockerSandboxConfig struct {
 	Kit             *[]string `yaml:"kit,omitempty"`
 }
 
-type fileAnthropicSRTConfig struct {
-	CLIPath  string  `yaml:"cliPath,omitempty"`
-	Settings *string `yaml:"settings,omitempty"`
-	Debug    *bool   `yaml:"debug,omitempty"`
-}
-
-type fileCloudRunSandboxConfig struct {
-	CLIPath     string `yaml:"cliPath,omitempty"`
-	Workdir     string `yaml:"workdir,omitempty"`
-	AllowEgress *bool  `yaml:"allowEgress,omitempty"`
-	Write       *bool  `yaml:"write,omitempty"`
-	Rootfs      string `yaml:"rootfs,omitempty"`
-}
-
 type fileModalConfig struct {
 	App         string   `yaml:"app,omitempty"`
 	Image       string   `yaml:"image,omitempty"`
@@ -4133,14 +3994,6 @@ type fileModalConfig struct {
 	Python      string   `yaml:"python,omitempty"`
 	Environment string   `yaml:"environment,omitempty"`
 	Secrets     []string `yaml:"secrets,omitempty"`
-}
-
-type fileUpstashBoxConfig struct {
-	BaseURL   string `yaml:"baseUrl,omitempty"`
-	Runtime   string `yaml:"runtime,omitempty"`
-	Size      string `yaml:"size,omitempty"`
-	Workdir   string `yaml:"workdir,omitempty"`
-	KeepAlive *bool  `yaml:"keepAlive,omitempty"`
 }
 
 type fileSmolvmConfig struct {
@@ -4159,12 +4012,6 @@ type fileAsciiBoxConfig struct {
 	Workdir string `yaml:"workdir,omitempty"`
 }
 
-type fileCloudflareConfig struct {
-	APIURL  string `yaml:"apiUrl,omitempty"`
-	Token   string `yaml:"token,omitempty"`
-	Workdir string `yaml:"workdir,omitempty"`
-}
-
 type fileCloudflareDynamicWorkersConfig struct {
 	LoaderURL          string            `yaml:"loaderUrl,omitempty"`
 	URL                string            `yaml:"url,omitempty"`
@@ -4179,47 +4026,10 @@ type fileCloudflareDynamicWorkersConfig struct {
 	Metadata           map[string]string `yaml:"metadata,omitempty"`
 }
 
-func applyCloudflareFileConfig(cfg *Config, file *fileCloudflareConfig, source credentialValueSource) {
-	if file == nil {
-		return
-	}
-	if file.APIURL != "" {
-		cfg.Cloudflare.APIURL = file.APIURL
-		cfg.credentialProvenance.cloudflareAPIURL = source
-	}
-	if file.Token != "" {
-		cfg.Cloudflare.Token = file.Token
-		cfg.credentialProvenance.cloudflareToken = source
-	}
-	if file.Workdir != "" {
-		cfg.Cloudflare.Workdir = file.Workdir
-	}
-}
-
 func applyOptional[T any](target, value *T) {
 	if value != nil {
 		*target = *value
 	}
-}
-
-func applyCloudflareSandboxFileConfig(cfg *Config, file *fileCloudflareSandboxConfig, trusted bool) error {
-	if file == nil {
-		return nil
-	}
-	if trusted {
-		applyOptional(&cfg.CloudflareSandbox.BridgeURL, file.BridgeURL)
-		applyOptional(&cfg.CloudflareSandbox.BridgeURL, file.URL)
-		applyOptional(&cfg.CloudflareSandbox.Token, file.Token)
-	}
-	applyOptional(&cfg.CloudflareSandbox.Workdir, file.Workdir)
-	if file.ExecTimeoutSecs != nil {
-		if *file.ExecTimeoutSecs < 0 {
-			return exit(2, "cloudflare-sandbox execTimeoutSecs must be non-negative")
-		}
-		cfg.CloudflareSandbox.ExecTimeoutSecs = *file.ExecTimeoutSecs
-	}
-	applyOptional(&cfg.CloudflareSandbox.ForgetMissing, file.ForgetMissing)
-	return nil
 }
 
 func applyCloudflareDynamicWorkersFileConfig(cfg *Config, file *fileCloudflareDynamicWorkersConfig, trusted bool) {
@@ -6247,23 +6057,16 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Daytona.SSHAccessMinutes = file.Daytona.SSHAccessMinutes
 		}
 	}
-	if file.E2B != nil {
-		if file.E2B.APIURL != "" {
-			cfg.E2B.APIURL = file.E2B.APIURL
+	{
+		applied, err := cfg.E2B.applyFile(file.E2B)
+		if applied.APIURL {
 			cfg.credentialProvenance.e2bAPIURL = credentialSource
 		}
-		if file.E2B.Domain != "" {
-			cfg.E2B.Domain = file.E2B.Domain
+		if applied.Domain {
 			cfg.credentialProvenance.e2bDomain = credentialSource
 		}
-		if file.E2B.Template != "" {
-			cfg.E2B.Template = file.E2B.Template
-		}
-		if file.E2B.Workdir != "" {
-			cfg.E2B.Workdir = file.E2B.Workdir
-		}
-		if file.E2B.User != "" {
-			cfg.E2B.User = file.E2B.User
+		if err != nil {
+			return err
 		}
 	}
 	if file.CubeSandbox != nil {
@@ -6325,28 +6128,22 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		applyOptional(&cfg.ExeDev.NoEmail, file.ExeDev.NoEmail)
 	}
-	if file.Railway != nil {
-		if file.Railway.APIURL != "" {
-			cfg.Railway.APIURL = file.Railway.APIURL
+	{
+		applied, err := cfg.Railway.applyFile(file.Railway)
+		if applied.APIURL {
 			cfg.credentialProvenance.railwayAPIURL = credentialSource
 		}
-		if file.Railway.ProjectID != "" {
-			cfg.Railway.ProjectID = file.Railway.ProjectID
-		}
-		if file.Railway.EnvironmentID != "" {
-			cfg.Railway.EnvironmentID = file.Railway.EnvironmentID
+		if err != nil {
+			return err
 		}
 	}
-	if file.FastAPICloud != nil {
-		if file.FastAPICloud.APIURL != "" {
-			cfg.FastAPICloud.APIURL = file.FastAPICloud.APIURL
+	{
+		applied, err := cfg.FastAPICloud.applyFile(file.FastAPICloud)
+		if applied.APIURL {
 			cfg.credentialProvenance.fastAPICloudAPIURL = credentialSource
 		}
-		if file.FastAPICloud.AppID != "" {
-			cfg.FastAPICloud.AppID = file.FastAPICloud.AppID
-		}
-		if file.FastAPICloud.TeamID != "" {
-			cfg.FastAPICloud.TeamID = file.FastAPICloud.TeamID
+		if err != nil {
+			return err
 		}
 	}
 	if file.UnikraftCloud != nil {
@@ -6875,25 +6672,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.DockerSandbox.Kit = append([]string(nil), (*file.DockerSandbox.Kit)...)
 		}
 	}
-	if file.AnthropicSRT != nil {
-		if file.AnthropicSRT.CLIPath != "" {
-			cfg.AnthropicSRT.CLIPath = file.AnthropicSRT.CLIPath
-		}
-		applyOptional(&cfg.AnthropicSRT.Settings, file.AnthropicSRT.Settings)
-		applyOptional(&cfg.AnthropicSRT.Debug, file.AnthropicSRT.Debug)
+	if err := cfg.AnthropicSRT.applyFile(file.AnthropicSRT); err != nil {
+		return err
 	}
-	if file.CloudRunSandbox != nil {
-		if file.CloudRunSandbox.CLIPath != "" {
-			cfg.CloudRunSandbox.CLIPath = file.CloudRunSandbox.CLIPath
-		}
-		if file.CloudRunSandbox.Workdir != "" {
-			cfg.CloudRunSandbox.Workdir = file.CloudRunSandbox.Workdir
-		}
-		applyOptional(&cfg.CloudRunSandbox.AllowEgress, file.CloudRunSandbox.AllowEgress)
-		applyOptional(&cfg.CloudRunSandbox.Write, file.CloudRunSandbox.Write)
-		if file.CloudRunSandbox.Rootfs != "" {
-			cfg.CloudRunSandbox.Rootfs = file.CloudRunSandbox.Rootfs
-		}
+	if err := cfg.CloudRunSandbox.applyFile(file.CloudRunSandbox); err != nil {
+		return err
 	}
 	if file.Modal != nil {
 		if file.Modal.App != "" {
@@ -6915,21 +6698,14 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Modal.Secrets = append([]string(nil), file.Modal.Secrets...)
 		}
 	}
-	if file.UpstashBox != nil {
-		if file.UpstashBox.BaseURL != "" {
-			cfg.UpstashBox.BaseURL = file.UpstashBox.BaseURL
+	{
+		applied, err := cfg.UpstashBox.applyFile(file.UpstashBox)
+		if applied.BaseURL {
 			cfg.credentialProvenance.upstashBoxBaseURL = credentialSource
 		}
-		if file.UpstashBox.Runtime != "" {
-			cfg.UpstashBox.Runtime = file.UpstashBox.Runtime
+		if err != nil {
+			return err
 		}
-		if file.UpstashBox.Size != "" {
-			cfg.UpstashBox.Size = file.UpstashBox.Size
-		}
-		if file.UpstashBox.Workdir != "" {
-			cfg.UpstashBox.Workdir = file.UpstashBox.Workdir
-		}
-		applyOptional(&cfg.UpstashBox.KeepAlive, file.UpstashBox.KeepAlive)
 	}
 	if file.Smolvm != nil {
 		if file.Smolvm.BaseURL != "" {
@@ -6965,8 +6741,19 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.AsciiBox.Workdir = file.AsciiBox.Workdir
 		}
 	}
-	applyCloudflareFileConfig(cfg, file.Cloudflare, credentialSource)
-	if err := applyCloudflareSandboxFileConfig(cfg, file.CloudflareSandbox, trusted); err != nil {
+	{
+		applied, err := cfg.Cloudflare.applyFile(file.Cloudflare)
+		if applied.APIURL {
+			cfg.credentialProvenance.cloudflareAPIURL = credentialSource
+		}
+		if applied.Token {
+			cfg.credentialProvenance.cloudflareToken = credentialSource
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if err := cfg.CloudflareSandbox.applyFile(file.CloudflareSandbox, trusted); err != nil {
 		return err
 	}
 	applyCloudflareDynamicWorkersFileConfig(cfg, file.CloudflareDynamicWorkers, trusted)
@@ -8404,21 +8191,21 @@ func applyEnv(cfg *Config) error {
 		cfg.credentialProvenance.daytonaSSHGateway = credentialSourceEnvironment
 	}
 	cfg.Daytona.SSHAccessMinutes = getenvInt("CRABBOX_DAYTONA_SSH_ACCESS_MINUTES", cfg.Daytona.SSHAccessMinutes)
-	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_API_KEY", "E2B_API_KEY"); ok {
-		cfg.E2B.APIKey = value
-		cfg.credentialProvenance.e2bAPIKey = credentialSourceEnvironment
+	{
+		applied, err := cfg.E2B.applyEnv()
+		if applied.APIKey {
+			cfg.credentialProvenance.e2bAPIKey = credentialSourceEnvironment
+		}
+		if applied.APIURL {
+			cfg.credentialProvenance.e2bAPIURL = credentialSourceEnvironment
+		}
+		if applied.Domain {
+			cfg.credentialProvenance.e2bDomain = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_API_URL", "E2B_API_URL"); ok {
-		cfg.E2B.APIURL = value
-		cfg.credentialProvenance.e2bAPIURL = credentialSourceEnvironment
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_E2B_DOMAIN", "E2B_DOMAIN"); ok {
-		cfg.E2B.Domain = value
-		cfg.credentialProvenance.e2bDomain = credentialSourceEnvironment
-	}
-	cfg.E2B.Template = getenv("CRABBOX_E2B_TEMPLATE", cfg.E2B.Template)
-	cfg.E2B.Workdir = getenv("CRABBOX_E2B_WORKDIR", cfg.E2B.Workdir)
-	cfg.E2B.User = getenv("CRABBOX_E2B_USER", cfg.E2B.User)
 	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_API_KEY", "CUBE_API_KEY", "E2B_API_KEY"); ok {
 		cfg.CubeSandbox.APIKey = value
 	}
@@ -8463,26 +8250,30 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_EXE_DEV_NO_EMAIL"); ok {
 		cfg.ExeDev.NoEmail = value
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_RAILWAY_API_TOKEN", "RAILWAY_API_TOKEN"); ok {
-		cfg.Railway.APIToken = value
-		cfg.credentialProvenance.railwayAPIToken = credentialSourceEnvironment
+	{
+		applied, err := cfg.Railway.applyEnv()
+		if applied.APIToken {
+			cfg.credentialProvenance.railwayAPIToken = credentialSourceEnvironment
+		}
+		if applied.APIURL {
+			cfg.credentialProvenance.railwayAPIURL = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_RAILWAY_API_URL", "RAILWAY_API_URL"); ok {
-		cfg.Railway.APIURL = value
-		cfg.credentialProvenance.railwayAPIURL = credentialSourceEnvironment
+	{
+		applied, err := cfg.FastAPICloud.applyEnv()
+		if applied.Token {
+			cfg.credentialProvenance.fastAPICloudToken = credentialSourceEnvironment
+		}
+		if applied.APIURL {
+			cfg.credentialProvenance.fastAPICloudAPIURL = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
-	cfg.Railway.ProjectID = getenv("CRABBOX_RAILWAY_PROJECT_ID", getenv("RAILWAY_PROJECT_ID", cfg.Railway.ProjectID))
-	cfg.Railway.EnvironmentID = getenv("CRABBOX_RAILWAY_ENVIRONMENT_ID", getenv("RAILWAY_ENVIRONMENT_ID", cfg.Railway.EnvironmentID))
-	if value, ok := firstNonEmptyEnv("CRABBOX_FASTAPI_CLOUD_TOKEN", "FASTAPI_CLOUD_TOKEN"); ok {
-		cfg.FastAPICloud.Token = value
-		cfg.credentialProvenance.fastAPICloudToken = credentialSourceEnvironment
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_FASTAPI_CLOUD_API_URL", "FASTAPI_CLOUD_API_URL"); ok {
-		cfg.FastAPICloud.APIURL = value
-		cfg.credentialProvenance.fastAPICloudAPIURL = credentialSourceEnvironment
-	}
-	cfg.FastAPICloud.AppID = getenv("CRABBOX_FASTAPI_CLOUD_APP_ID", getenv("FASTAPI_CLOUD_APP_ID", cfg.FastAPICloud.AppID))
-	cfg.FastAPICloud.TeamID = getenv("CRABBOX_FASTAPI_CLOUD_TEAM_ID", getenv("FASTAPI_CLOUD_TEAM_ID", cfg.FastAPICloud.TeamID))
 	if value, ok := firstNonEmptyEnv("CRABBOX_UNIKRAFT_CLOUD_API_KEY", "UNIKRAFT_CLOUD_API_KEY", "UKC_API_KEY", "UKC_TOKEN"); ok {
 		cfg.UnikraftCloud.APIKey = value
 		cfg.credentialProvenance.unikraftCloudAPIKey = credentialSourceEnvironment
@@ -8755,15 +8546,8 @@ func applyEnv(cfg *Config) error {
 	if err := cfg.VercelSandbox.applyEnv(); err != nil {
 		return err
 	}
-	cfg.CloudflareSandbox.BridgeURL = getenv("CRABBOX_CLOUDFLARE_SANDBOX_URL", cfg.CloudflareSandbox.BridgeURL)
-	cfg.CloudflareSandbox.Token = getenv("CRABBOX_CLOUDFLARE_SANDBOX_TOKEN", cfg.CloudflareSandbox.Token)
-	cfg.CloudflareSandbox.Workdir = getenv("CRABBOX_CLOUDFLARE_SANDBOX_WORKDIR", cfg.CloudflareSandbox.Workdir)
-	cfg.CloudflareSandbox.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CLOUDFLARE_SANDBOX_EXEC_TIMEOUT_SECS", cfg.CloudflareSandbox.ExecTimeoutSecs)
-	if err != nil {
+	if err := cfg.CloudflareSandbox.applyEnv(); err != nil {
 		return err
-	}
-	if v, ok := getenvBool("CRABBOX_CLOUDFLARE_SANDBOX_FORGET_MISSING"); ok {
-		cfg.CloudflareSandbox.ForgetMissing = v
 	}
 	cfg.Superserve.BaseURL = getenv("CRABBOX_SUPERSERVE_BASE_URL", getenv("SUPERSERVE_BASE_URL", cfg.Superserve.BaseURL))
 	cfg.Superserve.Template = getenv("CRABBOX_SUPERSERVE_TEMPLATE", cfg.Superserve.Template)
@@ -8810,21 +8594,12 @@ func applyEnv(cfg *Config) error {
 	if values, ok := getenvList("CRABBOX_DOCKER_SANDBOX_KIT"); ok {
 		cfg.DockerSandbox.Kit = values
 	}
-	cfg.AnthropicSRT.CLIPath = getenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_CLI", cfg.AnthropicSRT.CLIPath)
-	cfg.AnthropicSRT.Settings = getenv("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_SETTINGS", cfg.AnthropicSRT.Settings)
-	if value, ok := getenvBool("CRABBOX_ANTHROPIC_SANDBOX_RUNTIME_DEBUG"); ok {
-		cfg.AnthropicSRT.Debug = value
+	if err := cfg.AnthropicSRT.applyEnv(); err != nil {
+		return err
 	}
-	cfg.CloudRunSandbox.GatewayURL = getenv("CRABBOX_CLOUD_RUN_SANDBOX_GATEWAY_URL", getenv("CLOUD_RUN_SANDBOX_URL", cfg.CloudRunSandbox.GatewayURL))
-	cfg.CloudRunSandbox.CLIPath = getenv("CRABBOX_CLOUD_RUN_SANDBOX_CLI", getenv("CLOUD_RUN_SANDBOX_BINARY", cfg.CloudRunSandbox.CLIPath))
-	cfg.CloudRunSandbox.Workdir = getenv("CRABBOX_CLOUD_RUN_SANDBOX_WORKDIR", cfg.CloudRunSandbox.Workdir)
-	if value, ok := getenvBool("CRABBOX_CLOUD_RUN_SANDBOX_ALLOW_EGRESS"); ok {
-		cfg.CloudRunSandbox.AllowEgress = value
+	if err := cfg.CloudRunSandbox.applyEnv(); err != nil {
+		return err
 	}
-	if value, ok := getenvBool("CRABBOX_CLOUD_RUN_SANDBOX_WRITE"); ok {
-		cfg.CloudRunSandbox.Write = value
-	}
-	cfg.CloudRunSandbox.Rootfs = getenv("CRABBOX_CLOUD_RUN_SANDBOX_ROOTFS", cfg.CloudRunSandbox.Rootfs)
 	cfg.Modal.App = getenv("CRABBOX_MODAL_APP", cfg.Modal.App)
 	cfg.Modal.Image = getenv("CRABBOX_MODAL_IMAGE", cfg.Modal.Image)
 	cfg.Modal.Workdir = getenv("CRABBOX_MODAL_WORKDIR", cfg.Modal.Workdir)
@@ -8833,19 +8608,17 @@ func applyEnv(cfg *Config) error {
 	if values, ok := getenvList("CRABBOX_MODAL_SECRETS"); ok {
 		cfg.Modal.Secrets = values
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_UPSTASH_BOX_API_KEY", "UPSTASH_BOX_API_KEY"); ok {
-		cfg.UpstashBox.APIKey = value
-		cfg.credentialProvenance.upstashBoxAPIKey = credentialSourceEnvironment
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_UPSTASH_BOX_BASE_URL", "UPSTASH_BOX_BASE_URL"); ok {
-		cfg.UpstashBox.BaseURL = value
-		cfg.credentialProvenance.upstashBoxBaseURL = credentialSourceEnvironment
-	}
-	cfg.UpstashBox.Runtime = getenv("CRABBOX_UPSTASH_BOX_RUNTIME", cfg.UpstashBox.Runtime)
-	cfg.UpstashBox.Size = getenv("CRABBOX_UPSTASH_BOX_SIZE", cfg.UpstashBox.Size)
-	cfg.UpstashBox.Workdir = getenv("CRABBOX_UPSTASH_BOX_WORKDIR", cfg.UpstashBox.Workdir)
-	if value, ok := getenvBool("CRABBOX_UPSTASH_BOX_KEEP_ALIVE"); ok {
-		cfg.UpstashBox.KeepAlive = value
+	{
+		applied, err := cfg.UpstashBox.applyEnv()
+		if applied.APIKey {
+			cfg.credentialProvenance.upstashBoxAPIKey = credentialSourceEnvironment
+		}
+		if applied.BaseURL {
+			cfg.credentialProvenance.upstashBoxBaseURL = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_SMOLVM_API_KEY", "SMOLMACHINES_API_KEY", "SMK_API_KEY"); ok {
 		cfg.Smolvm.APIKey = value
@@ -8873,15 +8646,18 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.AsciiBox.CLIPath = getenv("CRABBOX_ASCII_BOX_CLI", getenv("BOX_CLI", cfg.AsciiBox.CLIPath))
 	cfg.AsciiBox.Workdir = getenv("CRABBOX_ASCII_BOX_WORKDIR", cfg.AsciiBox.Workdir)
-	if value := os.Getenv("CRABBOX_CLOUDFLARE_RUNNER_URL"); value != "" {
-		cfg.Cloudflare.APIURL = value
-		cfg.credentialProvenance.cloudflareAPIURL = credentialSourceEnvironment
+	{
+		applied, err := cfg.Cloudflare.applyEnv()
+		if applied.APIURL {
+			cfg.credentialProvenance.cloudflareAPIURL = credentialSourceEnvironment
+		}
+		if applied.Token {
+			cfg.credentialProvenance.cloudflareToken = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
-	if value := os.Getenv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN"); value != "" {
-		cfg.Cloudflare.Token = value
-		cfg.credentialProvenance.cloudflareToken = credentialSourceEnvironment
-	}
-	cfg.Cloudflare.Workdir = getenv("CRABBOX_CLOUDFLARE_WORKDIR", cfg.Cloudflare.Workdir)
 	cfg.Crownest.APIURL = getenv("CRABBOX_CROWNEST_API_URL", getenv("CROWNEST_API_URL", cfg.Crownest.APIURL))
 	cfg.Crownest.ProjectID = getenv("CRABBOX_CROWNEST_PROJECT_ID", getenv("CROWNEST_PROJECT_ID", cfg.Crownest.ProjectID))
 	cfg.Crownest.Template = getenv("CRABBOX_CROWNEST_TEMPLATE", getenv("CROWNEST_TEMPLATE", cfg.Crownest.Template))
@@ -9294,7 +9070,7 @@ func serverTypeForConfig(cfg Config) string {
 		return ""
 	}
 	if cfg.Provider == "e2b" {
-		return blank(cfg.E2B.Template, "base")
+		return blank(cfg.E2B.Template, E2BConfigDefaultTemplate)
 	}
 	if cfg.Provider == "exe-dev" || cfg.Provider == "exedev" || cfg.Provider == "exe" {
 		return blank(cfg.ExeDev.Image, "default")
@@ -9303,7 +9079,7 @@ func serverTypeForConfig(cfg Config) string {
 		return blank(cfg.Modal.Image, "python:3.13-slim")
 	}
 	if cfg.Provider == "upstash-box" || cfg.Provider == "upstash" {
-		return blank(cfg.UpstashBox.Size, "small")
+		return blank(cfg.UpstashBox.Size, UpstashBoxConfigDefaultSize)
 	}
 	if cfg.Provider == "daytona" {
 		return "snapshot"

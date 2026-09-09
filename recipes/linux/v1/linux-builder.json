@@ -30,7 +30,7 @@
     { "name": "make", "command": "make --version" },
     { "name": "pkg-config", "command": "pkg-config --version" },
     { "name": "python3", "command": "python3 --version" },
-    { "name": "python3-venv", "command": "python3 -c 'with __import__(\"tempfile\").TemporaryDirectory() as directory: __import__(\"os\").environ[\"TMPDIR\"] = directory; __import__(\"tempfile\").tempdir = directory; __import__(\"venv\").EnvBuilder(with_pip=True).create(directory + \"/venv\"); __import__(\"subprocess\").run([directory + \"/venv/bin/python\", \"-m\", \"pip\", \"--version\"], check=True)'" },
+    { "name": "python3-venv", "command": "python3 -c 'with __import__(\"tempfile\").TemporaryDirectory() as directory: __import__(\"venv\").EnvBuilder(with_pip=True).create(directory + \"/venv\"); __import__(\"subprocess\").run([directory + \"/venv/bin/python\", \"-m\", \"pip\", \"--version\"], check=True)'" },
     { "name": "rsync", "command": "rsync --version" },
     { "name": "sshd", "command": "test -x /usr/sbin/sshd" },
     { "name": "tmux", "command": "tmux -V" }

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestFreestyleProviderSpec(t *testing.T) {
@@ -1194,10 +1195,10 @@ func TestFreestyleSyncWorkspaceHonorsIncludes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !tarGzipContains(t, archive, "keep/file.txt") {
+	if !testutil.TarGzipContains(t, archive, "keep/file.txt") {
 		t.Fatal("archive missing included file")
 	}
-	if tarGzipContains(t, archive, "skip/file.txt") {
+	if testutil.TarGzipContains(t, archive, "skip/file.txt") {
 		t.Fatal("archive contains file outside sync.include")
 	}
 }
@@ -1550,28 +1551,6 @@ func (f *fakeFreestyleClient) commandContains(value string) bool {
 		}
 	}
 	return false
-}
-
-func tarGzipContains(t *testing.T, data []byte, name string) bool {
-	t.Helper()
-	gz, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			return false
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		if header.Name == name {
-			return true
-		}
-	}
 }
 
 func freestyleArchiveRepo(t *testing.T) Repo {

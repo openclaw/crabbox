@@ -367,7 +367,7 @@ func boxToServer(cfg Config, box boxData) Server {
 }
 
 func boxBaseHost(cfg Config) string {
-	raw := blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), "https://us-east-1.box.upstash.com")
+	raw := blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), core.UpstashBoxConfigDefaultBaseURL)
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {
 		return raw
@@ -376,7 +376,7 @@ func boxBaseHost(cfg Config) string {
 }
 
 func upstashBoxClaimScope(cfg Config) string {
-	raw := blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), "https://us-east-1.box.upstash.com")
+	raw := blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), core.UpstashBoxConfigDefaultBaseURL)
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {
 		return "endpoint:" + strings.TrimRight(raw, "/")
@@ -425,7 +425,7 @@ func isNotFound(err error) bool {
 }
 
 func runtimeName(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.UpstashBox.Runtime), "node")
+	return blank(strings.TrimSpace(cfg.UpstashBox.Runtime), core.UpstashBoxConfigDefaultRuntime)
 }
 
 func upstashBoxName(leaseID, slug string) string {
@@ -437,11 +437,11 @@ func upstashBoxName(leaseID, slug string) string {
 }
 
 func sizeName(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.UpstashBox.Size), "small")
+	return blank(strings.TrimSpace(cfg.UpstashBox.Size), core.UpstashBoxConfigDefaultSize)
 }
 
 func workdir(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.UpstashBox.Workdir), "/workspace/home/crabbox")
+	return blank(strings.TrimSpace(cfg.UpstashBox.Workdir), core.UpstashBoxConfigDefaultWorkdir)
 }
 
 func cleanWorkdir(workdir string) (string, error) {

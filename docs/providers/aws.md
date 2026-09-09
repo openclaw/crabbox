@@ -314,8 +314,35 @@ readiness preflight, API, AWS-GO gate, and live canary are in
 | --- | --- |
 | Linux | Ubuntu bootstrap, SSH, rsync sync, optional desktop/browser/code, Tailscale, Actions hydration. |
 | Windows native | EC2Launch bootstrap, OpenSSH, Git for Windows, archive sync; optional desktop with `--desktop`. |
-| Windows WSL2 | `--windows-mode wsl2`; launches on nested-virtualization families (`c8i`/`m8i`/`m8i-flex`/`r8i`); POSIX sync and commands run inside WSL. |
+| Windows WSL2 | `--windows-mode wsl2`; launches on nested-virtualization families (`c8i`/`m8i`/`m8i-flex`/`r8i`); POSIX sync and commands run inside WSL with the Linux image Node/npm baseline. |
 | macOS | Requires an available EC2 Mac Dedicated Host in the region; On-Demand only. Admin-authenticated broker requests can pin any host with `CRABBOX_HOST_ID` / `aws.macHostId` (`CRABBOX_AWS_MAC_HOST_ID` is a legacy alias); normal broker users can pin only a host from their own released lease and otherwise use automatic discovery. |
+
+Managed WSL2 bootstrap runs the Node-only entrypoint of
+`scripts/install-linux-developer-tools.sh`, bundled in the CLI/coordinator rather
+than downloaded at boot. It uses the same Node major policy and, on the managed
+amd64 distro, the same checksum-pinned Node 24.19.0 archive as Linux developer
+images. Node and npm are on the default command PATH and required by readiness.
+Re-bootstrap verifies the cached archive and reinstalls the owned version slot.
+The installer logs the Node step's elapsed seconds during warmup.
+
+WSL2 installs this subset to keep warmup bounded: it does not install the full
+Linux image's Docker, browser/desktop tools, Go, or offline pnpm archive set.
+Projects needing those tools should use their setup scripts or Actions hydration.
+
+Managed WSL2 distributions disable cloud-init because Crabbox owns their setup.
+This avoids WSL datasource discovery blocking systemd and root login during
+later command invocations. Bootstrap restarts the distro and verifies its Linux
+ready check before publishing the setup marker; warmup also checks the WSL SSH
+runtime. `inspect` and `status` allow a 30-second WSL2 readiness probe.
+
+Headless managed WSL2 leases also disable WSLg with `guiApplications=false` in
+the Windows SSH user's `.wslconfig`, preserving other settings. The GUI/RDP
+compositor is unnecessary for these leases and can crash in a Windows service
+session, blocking later Linux commands and workspace-owner renewal. Explicit
+desktop or browser requests retain their existing GUI configuration. Bootstrap
+applies a changed WSL configuration before starting the distro; existing leases
+need reprovisioning to receive this policy. Command execution and owner-control
+timeout budgets are unchanged.
 
 ## Normal SSH lifecycle
 

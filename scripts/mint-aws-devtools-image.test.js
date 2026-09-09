@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmod,
   copyFile,
@@ -63,6 +63,13 @@ case "$1" in
       printf 'Linux readiness verification: linux-builder manifest required\\n' >&2
       exit 74
     fi
+    if [[ " $* " == *" --allow-env CRABBOX_LINUX_NODE_MAJOR,CRABBOX_LINUX_PNPM_VERSION "* ]]; then
+      printf 'builder overrides node=%s pnpm=%s\\n' "\${CRABBOX_LINUX_NODE_MAJOR:-}" "\${CRABBOX_LINUX_PNPM_VERSION:-}" >>"\${CRABBOX_FAKE_LOG}"
+    fi
+    if [[ -n "\${CRABBOX_FAKE_SMOKE_FAIL_LEASE:-}" && " $* " == *" --id \${CRABBOX_FAKE_SMOKE_FAIL_LEASE} "* && "\${@: -1}" == *"docker_probe="* ]]; then
+      printf 'offline artifact smoke failed\\n' >&2
+      exit 73
+    fi
     if [[ "\${CRABBOX_FAKE_READINESS_FAIL:-0}" == "1" && "$*" == *"linux-readiness.generated.sh"* && "$*" != *"-- --install"* ]]; then
       printf 'Linux readiness producer: minimal capability proof failed\\n' >&2
       exit 74
@@ -72,6 +79,15 @@ case "$1" in
       if [[ "$last_arg" == *"docker_probe="* ]]; then
         printf '%s\\n' "$last_arg" >"\${CRABBOX_FAKE_CAPTURE_RUN_SCRIPT}"
       fi
+    fi
+    if [[ -n "\${CRABBOX_FAKE_NODE_CHECK_RUNNER:-}" && "\${@: -1}" == *"docker_probe="* ]]; then
+      lease=""
+      previous=""
+      for arg in "$@"; do
+        if [[ "$previous" == "--id" ]]; then lease="$arg"; break; fi
+        previous="$arg"
+      done
+      "\${CRABBOX_FAKE_NODE_CHECK_RUNNER}" "$lease" "\${@: -1}" || exit $?
     fi
     if [[ "$*" == *"Test-Path 'C:\\ProgramData\\crabbox\\image-prep-reboot-required'"* ]]; then
       if [[ "\${CRABBOX_FAKE_WINDOWS_REBOOT:-0}" == "1" && ! -f "\${CRABBOX_FAKE_LOG}.rebooted" ]]; then
@@ -189,6 +205,10 @@ test("AWS developer image smoke executes package managers and requires TruffleHo
     linuxSmoke,
     /command -v pnpm\ncommand -v trufflehog\ntrufflehog --no-update --version\ncommand -v docker\nnode --version\nnode -e .*\ncorepack --version\npnpm --version\n/,
   );
+  assert.match(linuxSmoke, /corepack --version\npnpm --version\n\nsmoke_dir=/);
+  assert.match(linuxSmoke, /\(\n  export COREPACK_ENABLE_NETWORK=0 npm_config_offline=true\n  cd "\$smoke_dir"\n  npm --offline run check\n  pnpm run check\n\)/);
+  assert.doesNotMatch(linuxSmoke.slice(0, linuxSmoke.indexOf("\nsmoke_dir=")), /COREPACK_ENABLE_NETWORK|npm_config_offline/);
+  assert.match(windowsSmoke, /docker image inspect .*\nif \(\$LASTEXITCODE -ne 0\).*throw.*\nWrite-Output "devtools-smoke-ok"\n$/);
   assert.match(text, /trap 'exit 130' INT\ntrap 'exit 143' TERM/);
   assert.match(text, /rollback_pending=1\nrun_json_tee "\$promotion_log"/);
   assert.doesNotMatch(text, /\bBASHPID\b/);
@@ -236,8 +256,6 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
       "--fast-snapshot-restore",
       "--fsr-az",
       "us-west-2a",
-      "--prep-script",
-      fake.linuxPrep,
     ],
     {
       CRABBOX_BIN: fake.fake,
@@ -274,7 +292,17 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
     /run --provider aws --target linux --id cbx_source --no-sync --shell -- export CRABBOX_LINUX_DESKTOP_TOOLS=1 CRABBOX_LINUX_BROWSER=1\nset -euo pipefail/,
   );
   assert.equal((log.match(/corepack --version/g) ?? []).length, 3);
-  assert.equal((log.match(/pnpm --version/g) ?? []).length, 3);
+  assert.equal(
+    (log.match(/\n  offline_node_pnpm_probe\nfi\npublic_toolchain_archive_dir=/g) ?? []).length,
+    3,
+  );
+  assert.equal(
+    (log.match(/\n  offline_go_probe\nfi\npublic_toolchain_archive_dir=/g) ?? []).length,
+    3,
+  );
+  assert.equal((log.match(/\n  offline_bun_probe\nfi\n}/g) ?? []).length, 3);
+  assert.equal((log.match(/\ndeveloper_archive_probe\necho devtools-smoke-ok/g) ?? []).length, 3);
+  assert.equal((log.match(/\npnpm --version\n/g) ?? []).length, 3);
   assert.match(log, /docker image inspect hello-world ubuntu:24\.04 node:24-bookworm/);
   assert.match(
     log,
@@ -285,6 +313,360 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
     log,
     /image promote --target linux --json --expected-current-image capture --region us-west-2 --fast-snapshot-restore --fsr-az us-west-2a ami-devtools/,
   );
+});
+
+for (const lease of ["cbx_source", "cbx_candidate", "cbx_promoted"]) {
+  test(`AWS image mint stops at failed offline smoke on ${lease}`, async (t) => {
+    const fake = await setupFakeCrabbox();
+    t.after(() => rm(fake.dir, { recursive: true, force: true }));
+    const result = await runScript(["--target", "linux", "--run"], {
+      CRABBOX_BIN: fake.fake,
+      CRABBOX_FAKE_LOG: fake.log,
+      CRABBOX_FAKE_SMOKE_FAIL_LEASE: lease,
+    });
+    assert.equal(result.code, 73, result.stderr);
+    assert.match(result.stderr, /offline artifact smoke failed/);
+    assert.doesNotMatch(result.stdout, /promoted linux developer image passed/);
+    const log = await readFile(fake.log, "utf8");
+    assert.match(log, new RegExp(`stop --provider aws --target linux ${lease}`));
+    if (lease === "cbx_source") assert.doesNotMatch(log, /checkpoint create/);
+    if (lease !== "cbx_promoted") {
+      assert.doesNotMatch(log, /image promote/);
+    } else {
+      assert.match(log, /image promote --json --target linux --restore-receipt \S+ ami-devtools/);
+      assert.match(result.stderr, /restored previous default image=ami-previous/);
+    }
+  });
+}
+
+async function writeNodeVersionFixture(bin) {
+  const file = path.join(bin, "node");
+  await writeFile(
+    file,
+    `#!${process.execPath}
+const vm = require("node:vm");
+const args = process.argv.slice(2);
+const version = process.env.FIXTURE_NODE_VERSION || "24.0.0";
+if (args[0] === "--version") {
+  console.log("v" + version);
+} else {
+  if (args[0] !== "-e") throw new Error("unexpected Node fixture invocation");
+  const argv = args.slice(args[2] === "--" ? 3 : 2);
+  vm.runInNewContext(args[1], {
+    process: { version: "v" + version, versions: { node: version },
+      argv: [process.execPath, ...argv], env: process.env },
+    console,
+  });
+}
+`,
+  );
+  await chmod(file, 0o755);
+}
+
+async function runNodeMajorMint(
+  t,
+  { major = "24", actual = "24.0.0", versions = {}, customPrep = false, ambient = "99" } = {},
+) {
+  const fake = await setupFakeCrabbox();
+  t.after(() => rm(fake.dir, { recursive: true, force: true }));
+  const bin = path.join(fake.dir, "bin");
+  await mkdir(bin);
+  await writeNodeVersionFixture(bin);
+  const runner = path.join(fake.dir, "node-check.cjs");
+  await writeFile(
+    runner,
+    `#!${process.execPath}
+const { spawnSync } = require("node:child_process");
+const [lease, source] = process.argv.slice(2);
+const checks = source.split("\\n").filter(line => line.startsWith("node -e "));
+if (checks.length !== 1) throw new Error("expected one generated Node version check");
+const selections = source.split("\\n").filter(line => line.startsWith("expected_node_major="));
+if (selections.length !== 1) throw new Error("expected one frozen Node selection");
+const versions = JSON.parse(process.env.FIXTURE_NODE_VERSIONS);
+const result = spawnSync("bash", ["-c", selections[0] + "\\n" + checks[0]], {
+  env: {
+    PATH: ${JSON.stringify(bin)} + ":" + process.env.PATH,
+    HOME: ${JSON.stringify(fake.dir)},
+    FIXTURE_NODE_VERSION: versions[lease] || process.env.FIXTURE_NODE_VERSION,
+    CRABBOX_LINUX_NODE_MAJOR: process.env.FIXTURE_GUEST_NODE_MAJOR,
+  },
+  stdio: "inherit",
+});
+if (result.error) throw result.error;
+if (result.status === 0) console.log("node-major-checked " + lease);
+process.exit(result.status ?? 1);
+`,
+  );
+  await chmod(runner, 0o755);
+  const args = ["--target", "linux", "--run"];
+  if (customPrep) args.push("--prep-script", fake.linuxPrep);
+  const result = await runScript(args, {
+    CRABBOX_BIN: fake.fake,
+    CRABBOX_FAKE_LOG: fake.log,
+    CRABBOX_IMAGE_LOG_DIR: path.join(fake.dir, "logs"),
+    CRABBOX_FAKE_NODE_CHECK_RUNNER: runner,
+    CRABBOX_LINUX_NODE_MAJOR: major,
+    FIXTURE_NODE_VERSION: actual,
+    FIXTURE_NODE_VERSIONS: JSON.stringify(versions),
+    FIXTURE_GUEST_NODE_MAJOR: ambient,
+  });
+  return { fake, result, log: await readFile(fake.log, "utf8") };
+}
+
+for (const major of ["22", "26"]) {
+  test(`Node-major smoke accepts selected ${major} through source, candidate, and promoted checks`, async (t) => {
+    const { result, log } = await runNodeMajorMint(t, { major, actual: `${major}.0.0` });
+    assert.equal(result.code, 0, result.stderr);
+    for (const lease of ["cbx_source", "cbx_candidate", "cbx_promoted"]) {
+      assert.match(result.stdout, new RegExp(`node-major-checked ${lease}`));
+    }
+    assert.match(log, /checkpoint create/);
+    assert.match(log, /image promote/);
+    assert.match(result.stdout, /promoted linux developer image passed/);
+  });
+}
+
+for (const lease of ["cbx_source", "cbx_candidate", "cbx_promoted"]) {
+  test(`Node-major smoke rejects mismatched selected 26 on ${lease}`, async (t) => {
+    const { result, log } = await runNodeMajorMint(t, {
+      major: "26",
+      actual: "26.0.0",
+      versions: { [lease]: "24.0.0" },
+      ambient: "24",
+    });
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /Node\.js.*26.*required.*v24\.0\.0/);
+    assert.doesNotMatch(result.stdout, /promoted linux developer image passed/);
+    assert.match(log, new RegExp(`stop --provider aws --target linux ${lease}`));
+    if (lease === "cbx_source") assert.doesNotMatch(log, /checkpoint create/);
+    if (lease !== "cbx_promoted") assert.doesNotMatch(log, /image promote/);
+    else assert.match(log, /image promote --json --target linux --restore-receipt/);
+  });
+}
+
+for (const [name, options, passes] of [
+  ["default below 24", { actual: "22.0.0" }, false],
+  ["default newer major", { actual: "26.0.0" }, true],
+  ["custom prep ignores selected 22", { major: "22", actual: "26.0.0", customPrep: true }, true],
+  [
+    "custom prep still rejects below 24",
+    { major: "22", actual: "22.0.0", customPrep: true },
+    false,
+  ],
+  [
+    "ambient major cannot replace selected 22",
+    { major: "22", actual: "26.0.0", ambient: "26" },
+    false,
+  ],
+  [
+    "shell-sensitive selection stays data",
+    { major: '22; touch "$HOME/injected"', actual: "26.0.0" },
+    false,
+  ],
+]) {
+  test(`Node-major smoke ${name}`, async (t) => {
+    const { fake, result, log } = await runNodeMajorMint(t, options);
+    assert.equal(result.code === 0, passes, result.stderr);
+    if (passes) assert.match(result.stdout, /promoted linux developer image passed/);
+    else {
+      assert.match(result.stderr, /Node\.js.*required/);
+      assert.doesNotMatch(log, /checkpoint create|image promote/);
+    }
+    await assert.rejects(readFile(path.join(fake.dir, "injected")), { code: "ENOENT" });
+  });
+}
+
+async function linuxSmokeFixture(t, { major = "24", pnpm = "11.1.0", customPrep = false } = {}) {
+  const fake = await setupFakeCrabbox();
+  t.after(() => rm(fake.dir, { recursive: true, force: true }));
+  const captured = path.join(fake.dir, "smoke.sh");
+  const args = ["--target", "linux", "--run", "--no-promote", "--no-browser", "--no-desktop"];
+  if (customPrep) args.push("--prep-script", fake.linuxPrep);
+  const result = await runScript(args, {
+    CRABBOX_BIN: fake.fake, CRABBOX_FAKE_LOG: fake.log, CRABBOX_FAKE_CAPTURE_RUN_SCRIPT: captured,
+    CRABBOX_LINUX_NODE_MAJOR: major, CRABBOX_LINUX_PNPM_VERSION: pnpm,
+  });
+  assert.equal(result.code, 0, result.stderr);
+  const log = await readFile(fake.log, "utf8");
+  if (customPrep) {
+    assert.doesNotMatch(log, /builder overrides/);
+  } else {
+    assert.ok(log.includes(`builder overrides node=${major} pnpm=${pnpm}\n`));
+    assert.match(log, /--allow-env CRABBOX_LINUX_NODE_MAJOR,CRABBOX_LINUX_PNPM_VERSION --script/);
+  }
+  const bin = path.join(fake.dir, "bin");
+  await mkdir(bin);
+  const tmp = path.join(fake.dir, "tmp");
+  await mkdir(tmp);
+  const caches = path.join(fake.dir, "caches");
+  for (const name of ["pnpm", "npm", "corepack", "docker"]) {
+    await mkdir(path.join(caches, name), { recursive: true });
+  }
+  const writeTool = async (name, body) => {
+    const file = path.join(bin, name);
+    await writeFile(file, `#!/usr/bin/env bash\n${body}\n`);
+    await chmod(file, 0o755);
+  };
+  for (const name of ["git", "gh", "jq", "rg", "fd", "npm", "trufflehog", "docker"]) {
+    await writeTool(name, "exit 0");
+  }
+  await writeNodeVersionFixture(bin);
+  await writeTool("cc", 'printf "#!/bin/sh\\nexit 0\\n" >"$3"\nchmod +x "$3"');
+  await writeTool("python3", `if [[ "\${1:-}" == -I ]]; then exit 0; fi\nexec /usr/bin/python3 "$@"`);
+  await writeTool("go", "printf 'go version go1.27.0 linux/amd64\\n'");
+  await writeTool("gofmt", "exit 0");
+  await writeTool("bun", '[[ "$*" == "--version" ]] && printf "1.4.0\\n" || printf "42\\n"');
+  await writeTool("bunx", 'printf "42\\n"');
+  await writeTool(
+    "uname",
+    'if [[ "$*" == "-s" ]]; then printf "%s\\n" "${FIXTURE_OS:-Linux}"; else printf "x86_64\\n"; fi',
+  );
+  await writeTool("getconf", 'printf "%s\\n" "${FIXTURE_LIBC:-glibc 2.39}"');
+  await writeTool("corepack", 'exit "${FIXTURE_TOOL_EXIT:-0}"');
+  await writeTool("id", 'printf "%s\\n" "$FIXTURE_UID"');
+  await writeTool("dpkg", '[[ "$*" == "--print-architecture" ]] || exit 65\nprintf "%s\\n" "$FIXTURE_ARCH"');
+  await writeTool("pnpm", `if [[ "$*" == --version ]]; then
+  [[ "\${COREPACK_ENABLE_NETWORK:-}" != 0 ]] || exit 66
+  printf "%s\\n" "$HOME" >>"$HOME/normal-pnpm.called"
+  exit "\${FIXTURE_PNPM_EXIT:-0}"
+fi
+[[ "$*" == "run check" && "$COREPACK_ENABLE_NETWORK" == 0 && "$npm_config_offline" == true ]]`);
+  const generated = (await readFile(captured, "utf8"))
+    .replaceAll("/var/cache/crabbox", caches)
+    .replace(
+      /^public_toolchain_archive_dir=.*$/gm,
+      'public_toolchain_archive_dir="$HOME/missing-archives"',
+    );
+  const execute = (env = {}, source = generated) => spawnSync("bash", ["-c", source], {
+    cwd: fake.dir,
+    env: {
+      PATH: `${bin}${path.delimiter}${process.env.PATH}`, HOME: fake.dir, TMPDIR: tmp,
+      FIXTURE_UID: "1000", FIXTURE_ARCH: "amd64", FIXTURE_NODE_VERSION: `${major}.0.0`, ...env,
+    },
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  return { fake, tmp, generated, execute };
+}
+
+test("generated Linux smoke emits success only after nonroot, tool, and offline artifact checks", async (t) => {
+  const { fake, tmp, generated, execute } = await linuxSmokeFixture(t);
+  for (const [env, diagnostic] of [
+    [{ FIXTURE_UID: "0" }, /requires a nonroot user/],
+    [{ FIXTURE_TOOL_EXIT: "46" }, null],
+    [{}, /verified public toolchain archive unavailable offline/],
+  ]) {
+    const smoke = execute(env);
+    assert.notEqual(smoke.status, 0, JSON.stringify(env));
+    assert.doesNotMatch(smoke.stdout, /devtools-smoke-ok/);
+    if (diagnostic) assert.match(smoke.stderr, diagnostic);
+    assert.deepEqual(await readdir(tmp), [], "failed smoke must remove private staging");
+  }
+  await mkdir(path.join(fake.dir, "missing-archives"));
+  await writeFile(path.join(fake.dir, "missing-archives", "node-v24.19.0-linux-x64.tar.xz"), "corrupt");
+  await writeFile(path.join(fake.dir, "missing-archives", "x64.complete"), "");
+  const corrupt = execute({ CRABBOX_LINUX_NODE_MAJOR: "26" });
+  assert.notEqual(corrupt.status, 0);
+  assert.match(corrupt.stderr, /checksum mismatch/);
+  assert.doesNotMatch(corrupt.stdout, /devtools-smoke-ok/);
+  assert.deepEqual(await readdir(tmp), []);
+  // The real artifact probe is covered separately; this assertion owns marker ordering.
+  const successful = execute(
+    {},
+    generated
+      .replace(/\n[ \t]*offline_node_pnpm_probe\n/, "\nprintf 'node-proof-done\\n'\n")
+      .replace(/\n[ \t]*offline_go_probe\n/, "\nprintf 'go-proof-done\\n'\n")
+      .replace(/\n[ \t]*offline_bun_probe\n/, "\nprintf 'bun-proof-done\\n'\n"),
+  );
+  assert.equal(successful.status, 0, successful.stderr);
+  const orderedMarkers = [
+    "node-proof-done\n",
+    "go-proof-done\n",
+    "bun-proof-done\n",
+    "devtools-smoke-ok\n",
+  ].map((marker) => successful.stdout.indexOf(marker));
+  assert.ok(orderedMarkers.every((index) => index >= 0), successful.stdout);
+  assert.deepEqual(orderedMarkers, [...orderedMarkers].sort((left, right) => left - right));
+});
+
+for (const route of [
+  { name: "ARM guest", arch: "arm64" },
+  { name: "ARM selected Node 22", arch: "arm64", major: "22" },
+  { name: "custom prep", arch: "amd64", customPrep: true },
+]) {
+  test(`generated Linux smoke preserves the ${route.name} route without x64 archives`, async (t) => {
+    const { fake, execute } = await linuxSmokeFixture(t, route);
+    const result = execute({ FIXTURE_ARCH: route.arch, CRABBOX_LINUX_NODE_MAJOR: "24" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /devtools-smoke-ok/);
+    assert.equal((await readFile(path.join(fake.dir, "normal-pnpm.called"), "utf8")).trim(), fake.dir);
+  });
+}
+
+test("generated Go smoke requires its own archive under an alternate Node major", async (t) => {
+  // Node selection only: these command fixtures do not assert native Node26 packaging support.
+  const { fake, execute } = await linuxSmokeFixture(t, { major: "26" });
+  const absent = execute();
+  assert.notEqual(absent.status, 0);
+  assert.match(absent.stderr, /unavailable offline: go1\.27\.0\.linux-amd64\.tar\.gz/);
+  assert.doesNotMatch(absent.stdout, /devtools-smoke-ok/);
+  await mkdir(path.join(fake.dir, "missing-archives"));
+  await writeFile(
+    path.join(fake.dir, "missing-archives", "go1.27.0.linux-amd64.tar.gz"),
+    "corrupt",
+  );
+  const corrupt = execute();
+  assert.notEqual(corrupt.status, 0);
+  assert.match(corrupt.stderr, /checksum mismatch/);
+  assert.doesNotMatch(corrupt.stdout, /devtools-smoke-ok/);
+});
+
+test("generated Bun smoke is required independently of Node overrides and cannot be disabled by cache absence", async (t) => {
+  const { fake, tmp, generated, execute } = await linuxSmokeFixture(t, { major: "26" });
+  const source = generated.replace(/\n[ \t]*offline_go_probe\n/, "\ntrue\n");
+  const missing = execute({}, source);
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /unavailable offline: bun-v1\.4\.0-linux-x64-baseline\.zip/);
+  assert.doesNotMatch(missing.stdout, /devtools-smoke-ok/);
+  assert.deepEqual(await readdir(tmp), []);
+  await mkdir(path.join(fake.dir, "missing-archives"));
+  await writeFile(
+    path.join(fake.dir, "missing-archives", "bun-v1.4.0-linux-x64-baseline.zip"),
+    "corrupt",
+  );
+  const corrupt = execute({}, source);
+  assert.notEqual(corrupt.status, 0);
+  assert.match(corrupt.stderr, /checksum mismatch/);
+  assert.doesNotMatch(corrupt.stdout, /devtools-smoke-ok/);
+  assert.deepEqual(await readdir(tmp), []);
+  for (const env of [
+    { FIXTURE_ARCH: "arm64" },
+    { FIXTURE_LIBC: "musl" },
+    { FIXTURE_OS: "Darwin" },
+  ]) {
+    const unsupported = execute(env, source);
+    assert.equal(unsupported.status, 0, unsupported.stderr);
+    assert.match(unsupported.stdout, /devtools-smoke-ok/);
+  }
+});
+
+test("generated Linux smoke requires the normal nonroot pnpm command even when private probes pass", async (t) => {
+  const { fake, generated, execute } = await linuxSmokeFixture(t);
+  const result = execute(
+    { FIXTURE_PNPM_EXIT: "48" },
+    generated.replace(/\n[ \t]*offline_node_pnpm_probe\n/, "\ntrue\n"),
+  );
+  assert.equal(result.status, 48, result.stderr);
+  assert.doesNotMatch(result.stdout, /devtools-smoke-ok/);
+  assert.equal((await readFile(path.join(fake.dir, "normal-pnpm.called"), "utf8")).trim(), fake.dir);
+});
+
+test("generated Linux smoke keeps required x64 archives under a pnpm override", async (t) => {
+  const { execute } = await linuxSmokeFixture(t, { pnpm: "12.3.4" });
+  const result = execute();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /verified public toolchain archive unavailable offline/);
+  assert.doesNotMatch(result.stdout, /devtools-smoke-ok/);
 });
 
 test("AWS devtools mint wrapper isolates warmup logs from explicit image names", async () => {
@@ -441,7 +823,11 @@ ${body}
     await writeTool(name, "exit 0");
   }
   for (const name of ["npm", "corepack", "pnpm"]) {
-    await writeTool(name, '[[ "$COREPACK_ENABLE_NETWORK" == 0 && "$npm_config_offline" == true ]]');
+    await writeTool(name, `if [[ "$*" == --version ]]; then
+  [[ "$COREPACK_ENABLE_NETWORK" == 1 && "$npm_config_offline" == false ]]
+else
+  [[ "$COREPACK_ENABLE_NETWORK" == 0 && "$npm_config_offline" == true ]]
+fi`);
   }
   await writeTool("node", `exec ${JSON.stringify(process.execPath)} "$@"`);
   await writeTool("cc", `[[ "$2" == -o ]]
@@ -471,11 +857,15 @@ fi`);
   await writeTool("ffprobe", "echo 1280,720");
   const smoke = path.join(root, "smoke.sh");
   const source = await readFile(path.join(scriptDir, "devtools-image-smoke-linux.sh"), "utf8");
-  await writeFile(smoke, source.replaceAll("/var/cache/crabbox", caches));
+  // Archive authentication is covered by the renderer fixtures; this fixture owns runtime capabilities.
+  await writeFile(smoke, `developer_archive_probe() { :; }\n${source.replaceAll("/var/cache/crabbox", caches)}`);
   const result = await runScript([], {
     PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
     TMPDIR: scratch,
     DISPLAY: ":99",
+    expected_node_major: "",
+    COREPACK_ENABLE_NETWORK: "1",
+    npm_config_offline: "false",
     CRABBOX_SMOKE_EVENTS: events,
     CRABBOX_SMOKE_BROWSER_PID: browserPID,
     CRABBOX_SMOKE_FAIL: options.fail ?? "",
@@ -927,6 +1317,47 @@ case "$1" in`,
     script: path.join(root, "scripts/mint-aws-devtools-image.sh"),
     outcome: env.CRABBOX_IMAGE_PUBLIC_OUTCOME,
   };
+}
+
+for (const failure of [
+  "missing smoke owner",
+  "Node archive probe rendering",
+  "Go archive probe rendering",
+  "Bun archive probe rendering",
+]) {
+  test(`AWS mint stops before capture when ${failure} fails`, async (t) => {
+    const fake = await measuredFixture(t);
+    if (failure === "missing smoke owner") {
+      await rm(path.join(fake.root, "scripts/devtools-image-smoke-linux.sh"));
+    } else {
+      const installer = path.join(fake.root, "scripts/install-linux-developer-tools.sh");
+      const renderer = {
+        "Node archive probe rendering":
+          "node_pnpm_smoke_script() { echo partial-node-probe; return 47; }",
+        "Go archive probe rendering": "go_smoke_script() { echo partial-go-probe; return 48; }",
+        "Bun archive probe rendering":
+          "bun_smoke_script() { echo partial-bun-probe; return 49; }",
+      }[failure];
+      await writeFile(
+        installer,
+        `${await readFile(installer, "utf8")}\n${renderer}\n`,
+      );
+    }
+    const result = await runScript(["--target", "linux", "--run", "--no-promote"], fake.env, fake.script);
+    const expected = {
+      "missing smoke owner": 1,
+      "Node archive probe rendering": 47,
+      "Go archive probe rendering": 48,
+      "Bun archive probe rendering": 49,
+    }[failure];
+    assert.equal(result.code, expected, result.stderr);
+    const log = await readFile(fake.log, "utf8");
+    assert.match(log, /stop --provider aws --target linux cbx_source/);
+    assert.doesNotMatch(
+      log,
+      /checkpoint create|image promote|docker_probe=|partial-(?:node|go|bun)-probe/,
+    );
+  });
 }
 
 test("measured Linux publication runs nine fresh samples and publishes only allowlisted proof", async (t) => {

@@ -188,10 +188,11 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if flagWasSet(fs, "daytona-ssh-gateway-host") {
 		provenance.daytonaSSHGateway = credentialSourceFlag
 	}
-	if flagWasSet(fs, "e2b-api-url") {
+	e2bFlags := E2BConfigFlagPresence(fs)
+	if e2bFlags.APIURL {
 		provenance.e2bAPIURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "e2b-domain") {
+	if e2bFlags.Domain {
 		provenance.e2bDomain = credentialSourceFlag
 	}
 	if flagWasSet(fs, "cubesandbox-api-url") {
@@ -209,10 +210,10 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if flagWasSet(fs, "cubesandbox-proxy-scheme") {
 		provenance.cubeSandboxProxyProto = credentialSourceFlag
 	}
-	if flagWasSet(fs, "railway-url") {
+	if RailwayConfigFlagPresence(fs).APIURL {
 		provenance.railwayAPIURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "fastapi-cloud-url") {
+	if FastAPICloudConfigFlagPresence(fs).APIURL {
 		provenance.fastAPICloudAPIURL = credentialSourceFlag
 	}
 	if flagWasSet(fs, "orgo-api-base") {
@@ -239,7 +240,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if flagWasSet(fs, "tensorlake-api-url") {
 		provenance.tensorlakeAPIURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "upstash-box-base-url") {
+	if UpstashBoxConfigFlagPresence(fs).BaseURL {
 		provenance.upstashBoxBaseURL = credentialSourceFlag
 	}
 	if flagWasSet(fs, "smolvm-base-url") {
@@ -248,7 +249,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if flagWasSet(fs, "ascii-box-base-url") {
 		provenance.asciiBoxBaseURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "cloudflare-url") {
+	if CloudflareConfigFlagPresence(fs).APIURL {
 		provenance.cloudflareAPIURL = credentialSourceFlag
 	}
 	if flagWasSet(fs, "nomad-address") {

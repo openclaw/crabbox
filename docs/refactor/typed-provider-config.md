@@ -1,13 +1,20 @@
 # Typed provider config bindings
 
-Vercel Sandbox, CodeSandbox, CUA, and OpenSandbox describe their mechanical config bindings
+Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
+Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
+runner, Cloudflare Sandbox, and E2B describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
-`internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`, and
-`internal/cli/config_opensandbox.go`.
+`internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
+`internal/cli/config_opensandbox.go`,
+`internal/cli/config_anthropic_sandbox_runtime.go`,
+`internal/cli/config_cloud_run_sandbox.go`,
+`internal/cli/config_fastapi_cloud.go`, `internal/cli/config_railway.go`,
+`internal/cli/config_upstash_box.go`, `internal/cli/config_cloudflare.go`,
+`internal/cli/config_cloudflare_sandbox.go`, and `internal/cli/config_e2b.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
-pointer-valued YAML input fields, compiled defaults, file/environment overlays,
-and flag storage, registration, and presence-based application.
+source-admitted YAML input fields, compiled defaults, file/environment overlays,
+and storage, registration, and presence-based application for admitted flags.
 
 This is a wiring refactor, not a behavior correction. Other providers retain
 their existing configuration code. Provider selection, command routing, config
@@ -33,7 +40,7 @@ machine-specific paths. Its header identifies the generator and source file.
 
 1. Add an exported, singly named field to the provider's config struct. Supported types
    are `string`, `int`, `float64`, `bool`, and `[]string`.
-2. Set its `flag` spelling and `help` text. Environment-supported fields need an
+2. Flag-supported fields need their `flag` spelling and `help` text. Environment-supported fields need an
    `env` variable, and file-supported fields also need a `config` YAML key.
    Explicitly set `sources:"user,repo,env,flag"` only after establishing that the
    value is safe in repository configuration and on argv. Use the exact
@@ -42,6 +49,19 @@ machine-specific paths. Its header identifies the generator and source file.
    environment/flag-only field uses `sources:"env,flag"` and must omit the
    `config` tag entirely, including an empty tag. A CLI-only field uses
    `sources:"flag"` and must omit `config`, `env`, and `envAlias` tags entirely.
+   An existing environment-only string uses `sources:"env"`: require its
+   primary `env`, allow an existing alias, and omit `config`, `flag`, `help`, and
+   `default` tags entirely. This mode retains a zero default and exposes no YAML
+   or command-line field; it does not generate credential presentation or policy.
+   An existing string with file/environment input but no flag uses the exact
+   `sources:"user,repo,env"` grant: require `config` and primary `env`, and omit
+   `flag`, `help`, and `default` tags entirely. It retains a zero default and
+   uses existing file predicates and applied reports without adding a flag or
+   changing trust policy. This grant does not permit a file input on an
+   environment-only field.
+   A trusted-file/environment string without a flag uses the exact
+   `sources:"user,env"` grant with the same absent flag/help/default requirement;
+   its file assignment uses the loader's existing trusted decision.
    There is no implicit source grant. An optional `default` tag supplies a scalar default checked
    against the field type; otherwise the Go zero value applies. Current integer
    fields require `nonnegative:"true"` for eager file/environment validation.
@@ -49,6 +69,18 @@ machine-specific paths. Its header identifies the generator and source file.
    `envAlias`; primary and alias names share collision checks. Empty aliases
    are invalid. The primary value wins, then the alias, then the prior value;
    empty values fall through, without trimming nonempty values.
+   For an existing string file binding that ignores empty YAML values, declare
+   `fileIgnoreEmpty:"true"`. This is valid only for strings with a file source;
+   it adds an exact nonempty check without trimming, changing environment/flag
+   behavior, or changing other fields' presence semantics.
+   Use `reportApplied:"true"` only on string/bool fields whose accepted-input
+   events are needed by an existing handwritten policy. See the report boundary
+   below; this is not a new source grant.
+   A file-admitted string can declare one `configAlias` YAML key. Its assignment
+   follows the primary immediately, using the same trust and empty-value rules,
+   regardless of document order. An accepted alias sets the same opted-in report
+   bit. YAML names and generated input member names must not collide. This does
+   not add environment aliases, flags, alternate parsing, or alias-specific policy.
 3. Keep semantic and cross-field checks in the provider's
    validation function. Wire actual provider behavior there or in its
    existing client code as appropriate. Config presentation remains explicit in
@@ -56,7 +88,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -73,12 +105,39 @@ The generated-output freshness tests perform the same checks in ordinary
 without writes, duplicate/missing bindings, unsupported types, default parsing,
 and explicit source permissions. Do not edit the output by hand.
 
+## Accepted input and flag presence
+
+Opted-in declarations generate a provider-specific `Applied` report containing only
+tracked fields. File/environment application returns the report with its error;
+flag application returns the report. Bits are set inside the same accepted-input
+branches that assign values, including assignments equal to the previous value.
+Absent or ignored input, input disallowed by the field's source grant, and
+parsing failures do not count as applied. Reports cover only opted-in fields.
+Earlier accepted bits survive a later error, just as earlier config
+mutations do; the report is not a transactional overlay. Defaults and flag
+registration do not report input events.
+
+Tracked fields with flags also produce a separate typed `VisitedFlags` query.
+Generated assignment and existing core policy share this query's declaration and
+visit predicate, but visits are not called applied values. Core retains its
+existing post-success flag-provenance phase; provider wrappers do not acquire
+that policy as a side effect. A declaration with no tracked flags emits no empty
+visited-flags type or query. Non-opted-in providers keep their existing generated
+signatures and output unchanged.
+
+Reports contain mechanical facts, not permission decisions. Handwritten owners
+map those facts to source enums, precedence, or other existing policy without
+re-reading YAML predicates, reparsing environment values, or inferring intent
+from value changes. Authentication, destination checks, redaction, and source
+trust remain outside the generator.
+
 ## Preserved contracts and security boundary
 
 The loader still applies defaults, user files, repository files, environment,
 and explicit flags in that order. Both repository filenames retain their
 existing order. A YAML pointer distinguishes omission/null from explicit false,
-zero, an empty string, or an empty list. Lists are trimmed and blank entries
+zero, an empty string, or an empty list. Only an explicit `fileIgnoreEmpty:"true"`
+binding ignores an empty string; whitespace is still applied. Lists are trimmed and blank entries
 removed, without deduplication. Empty environment strings fall through; a
 nonempty list value containing only whitespace/commas clears the list. Existing
 boolean environment aliases (`yes/no`, `on/off`, `1/0`) remain accepted.
@@ -112,6 +171,14 @@ settings retain trusted-file-only admission; the other nine YAML fields remain
 repository-safe. Its sizing guard still precedes the flag-value type assertion,
 unlike CodeSandbox's wrapper. Read-only lifecycle restrictions are unchanged.
 
+CUA's runtime fallbacks use the generated defaults as well. The Go bridge
+resolves an empty or whitespace-only fallback import before supplying both JSON
+and environment settings, preserving the effective SDK choice formerly supplied
+by Python. Python retains request-over-environment precedence but no longer owns
+duplicate import defaults. Other string fields retain their existing
+blank-before-trim behavior. The fixed 15-second doctor budget and the Python
+version check for the actual `cua_sandbox` module remain separate contracts.
+
 OpenSandbox's twelve runtime/flag fields include ten YAML fields and eleven
 environment fields. `APIURL` has no YAML source; `CRABBOX_OPENSANDBOX_API_URL`
 retains precedence over `OPEN_SANDBOX_API_URL`. `ForgetMissing` remains CLI-only:
@@ -120,7 +187,86 @@ its parsed value. Early provider validation still checks only the two timeout
 integers; URL, platform/resource and request-budget checks stay at their later
 owners. No configuration layer gains cleanup authority.
 
-The generator accepts only these four exact source grants. Credential handling,
+Anthropic Sandbox Runtime's three fields retain user/repository file,
+environment, and flag sources. Its `cliPath` ignores omitted, null, and empty
+YAML values, while `settings` can be explicitly cleared and `debug: false`
+overrides true. Nonempty whitespace still reaches the existing provider
+validation, and an explicitly empty CLI flag still overrides and fails that
+validation. The native binary fallback uses the same generated `srt` default.
+The `srt` provider alias, native argument/environment handling, and SRT-owned
+settings and sandbox-policy validation remain outside generation.
+
+Cloud Run Sandbox's six fields include five YAML bindings; the gateway URL stays
+environment/flag-only, including in trusted user config. The three string YAML
+bindings ignore empty values without trimming, while explicit false values
+still apply. Existing environment aliases, generic sizing guards, and validation
+order remain in place. The launcher, doctor, cleanup hint, claim scope, and
+workdir helper use the generated CLI/workdir defaults. Raw-zero config, operation
+option precedence, keeper workdir omission, helper cwd, and timeouts retain their
+separate semantics; generated defaults do not fill every empty runtime option.
+
+FastAPI Cloud's four fields include an environment-only token and three
+file/environment/flag values. All four existing environment aliases retain raw
+nonempty precedence. Empty YAML values are ignored; a repository API URL still
+records repository provenance and remains subject to the existing later
+credential-destination checks. Applied reports carry accepted token/URL events
+to the existing file/environment source mapping, while central flag provenance
+uses the distinct visited query at its unchanged phase. Client token checks,
+endpoint validation, redirects, service-control restrictions, and redacted
+presentation remain handwritten and deferred as before.
+
+Railway's four fields use the same existing mechanisms: an environment-only API
+token, three nonempty-only YAML bindings, four environment alias chains, and
+three flags. Accepted token/URL reports feed core's existing source mapping;
+raw URL flag visits remain a separate post-success provenance step. The real
+client shares the generated endpoint default, while claim scope and command
+routing keep their existing behavior for an empty configured endpoint. Token-first
+validation, Railway's own URL validator, provider aliases, bridge behavior,
+HTTP timeout, and service lifecycle remain outside generation.
+
+Upstash Box's six fields include an environment-only API key, four nonempty-only
+YAML strings, and a presence-based `keepAlive` boolean. Accepted key/endpoint
+reports feed the existing source mapping; endpoint flag visits retain central
+post-success provenance. Generated constants also supply the client, endpoint
+host and claim scope, runtime, size, workdir, and core server-type fallbacks.
+Their existing normalization is preserved, including core's raw size fallback
+and narrower provider spelling match. Exact provider alias guards, subsequent
+validation, the fixed workspace root, uploads, and lifecycle policy stay with
+their existing owners.
+
+Cloudflare's container runner declares all three string fields. Its token keeps
+existing nonempty file/environment admission without a flag; the URL and workdir
+retain flags. Accepted URL/token reports feed the same core source mapping, and
+raw URL flag visits stay in the central post-success phase. Provider class/type
+normalization still precedes flag-value assertion, and URL/token/type validation
+remains deferred to the client. The Go workdir fallback uses the generated
+constant. The bundled Worker's omitted-field HTTP defaults remain a separate
+protocol contract because the Go client supplies its resolved workdir explicitly.
+The distinct Cloudflare Sandbox provider keeps its own declaration and rules.
+
+Cloudflare Sandbox's five fields include six YAML inputs: trusted `bridgeUrl`
+followed by its trusted `url` alias, an optional trusted token without a flag,
+and ordinary workdir, timeout, and forget-missing values. Explicit alias empty
+overrides the primary; null/omission does not. All allowed strings retain
+presence-based clearing. File/env timeout errors retain earlier mutations and
+precede later boolean application. No provenance report is added where the
+provider had none. Validation order, optional authentication, timeout zero,
+raw create workdir, and the dedicated `/workspace` descendant rule are unchanged.
+Only the Go workdir fallback shares the generated default; external bridge and
+bundled Worker protocol defaults remain separate.
+
+E2B's six strings include an environment-only API key, five nonempty-only YAML
+bindings, five flags, and three environment aliases. Accepted key/API URL/domain
+reports feed the existing source policy, with URL and domain visits still marked
+centrally after successful flag application. The generated constants also supply
+the eight configured/default-chain consumers in client, normalized claims,
+bridge/preview domains, acquisition, core template display, and workdir resolution.
+Their raw-empty versus trimmed-empty differences remain intact. Raw scope and
+routing, user-home roots, and the fixed missing-remote-template display fallback
+remain separate owners. Upload and lifecycle code are not changed by this binding
+migration.
+
+The generator accepts only these seven exact source grants. Credential handling,
 destination validation and provenance, provider aliases, and provider selection
 policy stay handwritten. A declared environment alias copies the existing string
 fallback only; it does not define credential forwarding or destination authority.

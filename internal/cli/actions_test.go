@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -400,6 +403,317 @@ exit 99
 	}
 	if _, err := os.Stat(tarCalled); !os.IsNotExist(err) {
 		t.Fatalf("archive extraction ran before checksum rejection: %v", err)
+	}
+}
+
+func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
+	for _, name := range []string{"bash", "python3"} {
+		if _, err := exec.LookPath(name); err != nil {
+			t.Skip(name + " is required")
+		}
+	}
+	cases := []struct {
+		name             string
+		env              map[string]string
+		dotEnv           string
+		workFolder       string
+		change           string
+		managerEnv       string
+		wantNode, wantGo bool
+	}{
+		{name: "default", wantNode: true, wantGo: true},
+		{name: "custom work folder", workFolder: "custom"},
+		{name: "inherited root", env: map[string]string{"RUNNER_TOOL_CACHE": "/custom"}},
+		{name: "legacy runner root", env: map[string]string{"RUNNER_TOOLSDIRECTORY": "/custom"}},
+		{name: "legacy agent root", env: map[string]string{"AGENT_TOOLSDIRECTORY": "/custom"}},
+		{name: "legacy dotted root", env: map[string]string{"agent.ToolsDirectory": "/custom"}},
+		{name: "dotenv overrides inherited", env: map[string]string{"RUNNER_TOOL_CACHE": "DEFAULT"}, dotEnv: "RUNNER_TOOL_CACHE=/custom\n"},
+		{name: "dotenv removes inherited", env: map[string]string{"RUNNER_TOOL_CACHE": "/custom"}, dotEnv: "RUNNER_TOOL_CACHE=\n", wantNode: true, wantGo: true},
+		{name: "dotenv is not shell", dotEnv: "RUNNER_TOOL_CACHE=$(touch should-not-exist)\n"},
+		{name: "dotenv preserves vertical tab", dotEnv: "RUNNER_TOOL_CACHE=/custom\vRUNNER_TOOL_CACHE=\n"},
+		{name: "higher precedence wins", env: map[string]string{"RUNNER_TOOL_CACHE": "DEFAULT", "AGENT_TOOLSDIRECTORY": "/custom"}, wantNode: true, wantGo: true},
+		{name: "dotenv legacy root", dotEnv: "agent.ToolsDirectory=/custom\n"},
+		{name: "duplicate dotenv last wins", dotEnv: "RUNNER_TOOL_CACHE=\nRUNNER_TOOL_CACHE=/custom\n"},
+		{name: "runner busy", change: "busy"},
+		{name: "service busy", change: "active"},
+		{name: "service environment", change: "service-env"},
+		{name: "service environment file", change: "service-env-file"},
+		{name: "service pass environment", change: "service-pass-env"},
+		{name: "manager unrelated environment", managerEnv: `"LANG=en_US.UTF-8" "PATH=/usr/bin:/bin"`, wantNode: true, wantGo: true},
+		{name: "manager runner cache", managerEnv: "RUNNER_TOOL_CACHE=/custom"},
+		{name: "manager legacy runner cache", managerEnv: "RUNNER_TOOLSDIRECTORY=/custom"},
+		{name: "manager legacy agent cache", managerEnv: "AGENT_TOOLSDIRECTORY=/custom"},
+		{name: "manager legacy dotted cache", managerEnv: `"agent.ToolsDirectory=/custom cache"`},
+		{name: "manager missing response", change: "manager-missing"},
+		{name: "manager query failure", change: "manager-failed"},
+		{name: "service dropin", change: "dropin"},
+		{name: "foreign writable cache", change: "writable"},
+		{name: "symlink cache", change: "symlink"},
+		{name: "existing slot preserved", change: "existing", wantNode: true},
+		{name: "incomplete image slot", change: "incomplete", wantNode: true},
+		{name: "tampered archive", change: "archive", wantNode: true},
+		{name: "tampered tree", change: "tree", wantNode: true},
+		{name: "extra tree file", change: "extra", wantNode: true},
+		{name: "foreign image link", change: "link", wantNode: true},
+		{name: "wrong executable mode", change: "mode", wantNode: true},
+		{name: "wrong root mode", change: "root-mode", wantNode: true},
+		{name: "wrong Node Yarn target", change: "node-yarn", wantGo: true},
+		{name: "extra Node entry", change: "node-extra", wantGo: true},
+		{name: "arm runner", change: "arm"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := filepath.Join(root, "actions-runner")
+			cache := filepath.Join(runner, "_work", "_tool")
+			image := filepath.Join(root, "image")
+			archives := filepath.Join(root, "archives")
+			bin := filepath.Join(root, "bin")
+			write := func(p, value string, mode os.FileMode) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte(value), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			link := func(target, p string) {
+				t.Helper()
+				if err := os.Symlink(target, p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, dir := range []string{runner, cache, image, archives, bin} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pack := func(tool, version, archiveName string) string {
+				t.Helper()
+				var buf bytes.Buffer
+				gz := gzip.NewWriter(&buf)
+				tw := tar.NewWriter(gz)
+				slot := filepath.Join(image, tool, version, "x64")
+				if err := os.MkdirAll(filepath.Join(slot, "bin"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				for _, dir := range []string{tool + "/", tool + "/bin/"} {
+					if err := tw.WriteHeader(&tar.Header{Name: dir, Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				body := "#!/bin/sh\nprintf 'fixture only\\n'\n"
+				if err := tw.WriteHeader(&tar.Header{Name: tool + "/bin/" + tool, Typeflag: tar.TypeReg, Mode: 0o755, Size: int64(len(body))}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := tw.Write([]byte(body)); err != nil {
+					t.Fatal(err)
+				}
+				if err := tw.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err := gz.Close(); err != nil {
+					t.Fatal(err)
+				}
+				write(filepath.Join(slot, "bin", tool), body, 0o755)
+				if tool == "node" {
+					for _, name := range []string{"pnpm", "pnpx", "yarn", "yarnpkg"} {
+						link("../lib/node_modules/corepack/dist/"+name+".js", filepath.Join(slot, "bin", name))
+					}
+				}
+				write(slot+".complete", "", 0o644)
+				write(filepath.Join(archives, archiveName), buf.String(), 0o644)
+				return fmt.Sprintf("%x", sha256.Sum256(buf.Bytes()))
+			}
+			nodeDigest := pack("node", "24.19.0", "node-v24.19.0-linux-x64.tar.xz")
+			goDigest := pack("go", "1.27.0", "go1.27.0.linux-amd64.tar.gz")
+			nodeSlot := filepath.Join(image, "node", "24.19.0", "x64")
+			goSlot := filepath.Join(image, "go", "1.27.0", "x64")
+			destGo := filepath.Join(cache, "go", "1.27.0", "x64")
+			write(filepath.Join(runner, ".crabbox-runner-version-2.337.0-x64-sha256-"+strings.Repeat("a", 64)), "", 0o644)
+			workFolder := tc.workFolder
+			if workFolder == "" {
+				workFolder = "_work"
+			}
+			write(filepath.Join(runner, "config.sh"), "#!/bin/sh\nif [ \"${1:-}\" = remove ]; then rm -f .runner; exit 0; fi\nprintf '{\"workFolder\":\""+workFolder+"\"}\\n' >.runner\nprintf 'configured\\n' >>\"$HOME/order\"\n", 0o755)
+			write(filepath.Join(runner, ".env"), tc.dotEnv, 0o600)
+			write(filepath.Join(bin, "curl"), "#!/bin/sh\nprintf '{}'\n", 0o755)
+			write(filepath.Join(bin, "jq"), "#!/bin/sh\ncase \"$*\" in *tag_name*) printf 2.337.0;; *digest*) printf '"+strings.Repeat("a", 64)+"';; *) exit 2;; esac\n", 0o755)
+			write(filepath.Join(bin, "uname"), "#!/bin/sh\nprintf '"+map[bool]string{true: "aarch64", false: "x86_64"}[tc.change == "arm"]+"\\n'\n", 0o755)
+			// Nothing privileged or networked runs: only the generated owner's filesystem logic.
+			write(filepath.Join(bin, "sudo"), "#!/bin/sh\nif [ \"$1\" = tee ]; then cat >/dev/null; elif [ \"$1\" = systemctl ]; then shift; exec systemctl \"$@\"; fi\n", 0o755)
+			write(filepath.Join(bin, "pgrep"), "#!/bin/sh\nexit "+map[bool]string{true: "0", false: "1"}[tc.change == "busy"]+"\n", 0o755)
+			unitState := "LoadState=not-found\\nActiveState=inactive\\nEnvironment=\\nEnvironmentFiles=\\nDropInPaths=\\n"
+			switch tc.change {
+			case "active":
+				unitState = "LoadState=loaded\\nActiveState=active\\n"
+			case "service-env":
+				unitState = "LoadState=loaded\\nActiveState=inactive\\nEnvironment=RUNNER_TOOL_CACHE=/custom\\n"
+			case "service-env-file":
+				unitState = "LoadState=loaded\\nActiveState=inactive\\nEnvironmentFiles=/custom.env\\n"
+			case "service-pass-env":
+				unitState = "LoadState=loaded\\nActiveState=inactive\\nPassEnvironment=RUNNER_TOOL_CACHE\\n"
+			case "dropin":
+				unitState = "LoadState=loaded\\nActiveState=inactive\\nDropInPaths=/custom.conf\\n"
+			case "writable":
+				if err := os.Chmod(cache, 0o777); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.Remove(cache); err != nil {
+					t.Fatal(err)
+				}
+				foreign := filepath.Join(root, "foreign")
+				if err := os.Mkdir(foreign, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				link(foreign, cache)
+			case "existing":
+				write(filepath.Join(destGo, "keep"), "operator", 0o644)
+			case "incomplete":
+				if err := os.Remove(goSlot + ".complete"); err != nil {
+					t.Fatal(err)
+				}
+			case "archive":
+				write(filepath.Join(archives, "go1.27.0.linux-amd64.tar.gz"), "tampered", 0o644)
+			case "tree":
+				write(filepath.Join(goSlot, "bin", "go"), "tampered", 0o755)
+			case "extra":
+				write(filepath.Join(goSlot, "extra"), "unexpected", 0o644)
+			case "link":
+				if err := os.Remove(filepath.Join(goSlot, "bin", "go")); err != nil {
+					t.Fatal(err)
+				}
+				link("/foreign", filepath.Join(goSlot, "bin", "go"))
+			case "mode":
+				if err := os.Chmod(filepath.Join(goSlot, "bin", "go"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			case "root-mode":
+				if err := os.Chmod(goSlot, 0o777); err != nil {
+					t.Fatal(err)
+				}
+			case "node-yarn":
+				yarn := filepath.Join(nodeSlot, "bin", "yarn")
+				if err := os.Remove(yarn); err != nil {
+					t.Fatal(err)
+				}
+				link("../lib/node_modules/corepack/dist/pnpm.js", yarn)
+			case "node-extra":
+				write(filepath.Join(nodeSlot, "bin", "extra"), "unexpected", 0o644)
+			}
+			managerResponse := "printf '%s\\n' " + shellQuote("Environment="+tc.managerEnv)
+			switch tc.change {
+			case "manager-missing":
+				managerResponse = ":"
+			case "manager-failed":
+				managerResponse += "; exit 7"
+			}
+			// Manager properties differ from unit properties; unknown filters return no output.
+			write(filepath.Join(bin, "systemctl"), `#!/bin/sh
+case "$1" in
+show)
+  case "$2" in
+    --property=Environment) `+managerResponse+` ;;
+    --property=*) exit 0 ;;
+    crabbox-actions-runner.service) printf '`+unitState+`' ;;
+    *) exit 2 ;;
+  esac
+  ;;
+enable)
+  printf 'started\n' >>"$HOME/order"
+  find "$HOME/actions-runner" -name '*.complete' >"$HOME/started-slots"
+  ;;
+esac
+`, 0o755)
+			script := strings.NewReplacer(
+				"/opt/hostedtoolcache", image,
+				"/opt/crabbox/toolchain-archives", archives,
+				"14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647", nodeDigest,
+				"675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685", goDigest,
+			).Replace(githubActionsRunnerInstallScript("2.337.0", true))
+			// The ARM case must not trigger the unrelated Runner download path.
+			if tc.change == "arm" {
+				write(filepath.Join(runner, ".crabbox-runner-version-2.337.0-arm64-sha256-"+strings.Repeat("a", 64)), "", 0o644)
+			}
+			cmd := exec.Command("bash", "-c", script)
+			cmd.Env = []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "HOME=" + root,
+				"RUNNER_REPO=example-org/my-app", "RUNNER_NAME=fixture", "RUNNER_TOKEN=fixture",
+				"RUNNER_LABELS=fixture"}
+			for k, v := range tc.env {
+				if v == "DEFAULT" {
+					v = cache
+				}
+				cmd.Env = append(cmd.Env, k+"="+v)
+			}
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("installer failed: %v\n%s", err, output)
+			}
+			for _, expected := range []struct {
+				tool, version string
+				present       bool
+			}{
+				{"node", "24.19.0", tc.wantNode}, {"go", "1.27.0", tc.wantGo},
+			} {
+				slot := filepath.Join(cache, expected.tool, expected.version, "x64")
+				_, err := os.Stat(slot + ".complete")
+				if (err == nil) != expected.present {
+					t.Fatalf("%s completion=%v want %v\n%s", expected.tool, err, expected.present, output)
+				}
+				if expected.present {
+					want, _ := os.ReadFile(filepath.Join(image, expected.tool, expected.version, "x64", "bin", expected.tool))
+					got, err := os.ReadFile(filepath.Join(slot, "bin", expected.tool))
+					if err != nil || !bytes.Equal(got, want) {
+						t.Fatalf("copied bytes: %v", err)
+					}
+					if expected.tool == "node" {
+						for _, name := range []string{"pnpm", "pnpx", "yarn", "yarnpkg"} {
+							target, err := os.Readlink(filepath.Join(slot, "bin", name))
+							if err != nil || target != "../lib/node_modules/corepack/dist/"+name+".js" {
+								t.Fatalf("copied %s target=%q: %v", name, target, err)
+							}
+						}
+					}
+					// The destination owns an independent copy, not a hardlink or image-root redirect.
+					write(filepath.Join(slot, "bin", expected.tool), "local mutation", 0o755)
+					after, _ := os.ReadFile(filepath.Join(image, expected.tool, expected.version, "x64", "bin", expected.tool))
+					if !bytes.Equal(after, want) {
+						t.Fatal("runner mutation reached image seed")
+					}
+					started, _ := os.ReadFile(filepath.Join(root, "started-slots"))
+					if !strings.Contains(string(started), slot+".complete") {
+						t.Fatal("seed published after service start")
+					}
+				} else if expected.tool == "node" {
+					for _, absent := range []string{slot, slot + ".complete"} {
+						if _, err := os.Lstat(absent); !os.IsNotExist(err) {
+							t.Fatalf("rejected Node path still present: %s: %v", absent, err)
+						}
+					}
+				}
+			}
+			if tc.change == "existing" {
+				got, _ := os.ReadFile(filepath.Join(destGo, "keep"))
+				if string(got) != "operator" {
+					t.Fatal("existing slot changed")
+				}
+			}
+			if _, err := os.Stat(filepath.Join(runner, "should-not-exist")); !os.IsNotExist(err) {
+				t.Fatal("dotenv executed")
+			}
+			if tc.wantGo && !strings.Contains(string(output), "copy_ms=") {
+				t.Fatalf("missing copy cost: %s", output)
+			}
+			order, _ := os.ReadFile(filepath.Join(root, "order"))
+			if string(order) != "configured\nstarted\n" {
+				t.Fatalf("lifecycle order %q", order)
+			}
+		})
 	}
 }
 
