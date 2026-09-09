@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add an explicit Ubuntu 24.04 developer-image publication selector while retaining Ubuntu 26.04 as the default, and scope Linux promotion and receipt rollback to the selected OS. Thanks @vincentkoc.
+
 - Run managed WSL2 workloads as the non-root `crabbox` user with passwordless sudo, writable work/cache directories, and the shared Node baseline on PATH. https://github.com/openclaw/crabbox/pull/2016. Thanks @steipete.
 
 - Keep managed WSL2 distributions alive between commands so detached Linux daemons survive until lease cleanup; preserve command and ownership deadlines. https://github.com/openclaw/crabbox/pull/2016. Thanks @steipete.

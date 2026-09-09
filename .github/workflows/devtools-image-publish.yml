@@ -22,6 +22,14 @@ on:
         required: true
         default: m7i.large
         type: string
+      linux_os:
+        description: Linux image OS selector
+        required: true
+        default: ubuntu:26.04
+        type: choice
+        options:
+          - ubuntu:26.04
+          - ubuntu:24.04
       measured:
         description: Linux only - 12 planned leases instead of 3; provider retries can add attempts
         required: false
@@ -86,6 +94,7 @@ jobs:
           TARGET: ${{ inputs.target }}
           REGION: ${{ inputs.region }}
           LINUX_TYPE: ${{ inputs.linux_type }}
+          LINUX_OS: ${{ inputs.linux_os }}
           WINDOWS_TYPE: ${{ inputs.windows_type }}
           MACOS_TYPE: ${{ inputs.macos_type }}
           MACOS_HOST: ${{ inputs.macos_host }}
@@ -96,6 +105,10 @@ jobs:
           [[ "$TARGET" =~ ^(linux|windows|macos)$ ]]
           [[ "$REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]]
           [[ "$LINUX_TYPE" =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ "$LINUX_OS" == ubuntu:26.04 || "$LINUX_OS" == ubuntu:24.04 ]] || {
+            printf '%s\n' 'linux_os must be ubuntu:26.04 or ubuntu:24.04' >&2
+            exit 2
+          }
           [[ "$WINDOWS_TYPE" =~ ^[A-Za-z0-9.-]+$ ]]
           [[ "$MACOS_TYPE" =~ ^[A-Za-z0-9.-]+$ ]]
           [[ "$MACOS_HOST" =~ ^(use-existing|allocate)$ ]]
@@ -124,6 +137,7 @@ jobs:
       TARGET: ${{ inputs.target }}
       REGION: ${{ inputs.region }}
       LINUX_TYPE: ${{ inputs.linux_type }}
+      LINUX_OS: ${{ inputs.linux_os }}
       WINDOWS_TYPE: ${{ inputs.windows_type }}
       MACOS_TYPE: ${{ inputs.macos_type }}
       MACOS_HOST: ${{ inputs.macos_host }}
@@ -183,6 +197,7 @@ jobs:
           case "$TARGET" in
             linux)
               command=(
+                env CRABBOX_OS="$LINUX_OS"
                 scripts/mint-aws-devtools-image.sh
                 --target linux
                 --region "$REGION"

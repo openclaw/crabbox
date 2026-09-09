@@ -280,6 +280,7 @@ platform at a time from the protected default branch:
 gh workflow run devtools-image-publish.yml \
   --ref main \
   -f target=linux \
+  -f linux_os=ubuntu:24.04 \
   -f region=eu-west-1
 
 gh workflow run devtools-image-publish.yml \
@@ -293,6 +294,13 @@ gh workflow run devtools-image-publish.yml \
   -f region=eu-west-1 \
   -f macos_host=use-existing
 ```
+
+Linux publication defaults to `linux_os=ubuntu:26.04`; the example explicitly
+selects Ubuntu 24.04. The selector applies only to the Linux mint command and
+scopes its source, candidate, and promoted proof leases, promotion, and receipt
+rollback. Windows and macOS commands do not receive this Linux selector.
+Existing explicit image overrides still take precedence; requesting an OS does
+not prove the guest's actual OS or qualify the image.
 
 Use `macos_host=allocate` only when no suitable EC2 Mac Dedicated Host is
 available. Unmeasured publication uploads its complete mint logs and macOS
@@ -319,6 +327,17 @@ instead of hand-running the prep and image commands:
 scripts/mint-aws-devtools-image.sh --target linux
 scripts/mint-aws-devtools-image.sh --target windows
 ```
+
+For an explicit Ubuntu 24.04 Linux plan, use:
+
+```bash
+CRABBOX_OS=ubuntu:24.04 scripts/mint-aws-devtools-image.sh --target linux
+```
+
+The standalone wrapper leaves existing CLI/config selection unchanged when
+`CRABBOX_OS` is unset. When it is set for Linux, promotion and receipt rollback
+receive the same explicit `--os`; final proof still uses normal image selection
+without a candidate AMI override.
 
 The default is a no-spend plan that prints what it would do and stops. Add
 `--run` only when the selected AWS account, region, quotas, and image name are
