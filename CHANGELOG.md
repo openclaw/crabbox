@@ -60,7 +60,7 @@
 
 - Share work-root inheritance decisions across exe.dev, Runpod, Multipass, Hyper-V, and Tart while preserving raw provider roots, portable-default handling, and later validation. [PR 2026](https://github.com/openclaw/crabbox/pull/2026). Thanks @steipete.
 
-- Describe OVHcloud configuration bindings once, sharing configured endpoint, image, and flavor defaults while preserving input precedence, explicit image selection, regional aliases, and machine-class mapping. Thanks @steipete.
+- Describe OVHcloud configuration bindings once, sharing configured endpoint, image, and flavor defaults while preserving input precedence, explicit image selection, regional aliases, and machine-class mapping. [PR 2027](https://github.com/openclaw/crabbox/pull/2027). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 
