@@ -6,8 +6,10 @@ import {
 } from "./aws-provisioning-diagnostics";
 import type { AWSCredentialProvider } from "./types";
 
+type StopAWSResponseRetry = (response: Response) => Promise<boolean>;
+
 export interface AWSFetchClient {
-  fetch(input: string, init?: RequestInit): Promise<Response>;
+  fetch(input: string, init?: RequestInit, stopRetrying?: StopAWSResponseRetry): Promise<Response>;
 }
 
 class ObservedAwsClient extends AwsClient {
@@ -44,7 +46,11 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
     private readonly region: string,
   ) {}
 
-  async fetch(input: string, init?: RequestInit): Promise<Response> {
+  async fetch(
+    input: string,
+    init?: RequestInit,
+    stopRetrying?: StopAWSResponseRetry,
+  ): Promise<Response> {
     const observe = currentAWSTransportObserver();
     const observation: AWSTransportObservation = {
       requests: 1,
@@ -75,11 +81,27 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
       const session = credentials.sessionToken?.trim();
       if (session) options.sessionToken = session;
       // aws4fetch 1.0.20 calls public sign() once per retry-loop invocation.
-      // Keep its fetch implementation, retry policy, signed bytes and Response intact.
       const client = observe ? new ObservedAwsClient(options, observation) : new AwsClient(options);
       requestStartedAt = Date.now();
       observation.credentialsMs = Math.max(0, requestStartedAt - startedAt);
-      return await client.fetch(input, init);
+      if (!stopRetrying) return await client.fetch(input, init);
+      // aws4fetch has no response-policy hook. Preserve its budget, jitter, signing and
+      // thrown errors while allowing the operation owner to handle a definitive rejection.
+      /* oxlint-disable eslint/no-await-in-loop -- Each signed attempt and its backoff must settle before retry or handoff. */
+      for (let attempt = 0; ; attempt += 1) {
+        const response = await fetch(await client.sign(input, init));
+        if (
+          attempt === client.retries ||
+          (response.status < 500 && response.status !== 429) ||
+          (await stopRetrying(response))
+        ) {
+          return response;
+        }
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.random() * client.initRetryMs * 2 ** attempt),
+        );
+      }
+      /* oxlint-enable eslint/no-await-in-loop */
     } catch (error) {
       if (requestStartedAt === undefined) observation.credentialFailures += 1;
       else observation.requestFailures += 1;

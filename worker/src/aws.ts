@@ -1,4 +1,4 @@
-import { XMLParser } from "fast-xml-parser";
+import { XMLParser, XMLValidator } from "fast-xml-parser";
 
 import { RefreshingAWSFetchClient, type AWSFetchClient } from "./aws-fetch-client";
 import {
@@ -55,6 +55,8 @@ const awsSpotQuotaCode = "L-34B43A08";
 const awsOnDemandQuotaCode = "L-1216C47A";
 const awsSSHIngressDescription = "Crabbox SSH";
 const awsRunInstancesOutcomeUncertain = "crabbox_aws_run_instances_outcome_uncertain";
+const awsCapacityErrorMaxBytes = 64 * 1024;
+const awsCapacityErrorReadTimeoutMs = 1_000;
 const awsMacHostQuotaSpecs: Record<string, { quotaCode: string; quotaName: string }> = {
   mac1: { quotaCode: "L-A8448DC5", quotaName: "Running Dedicated mac1 Hosts" },
   mac2: { quotaCode: "L-5D8DADF5", quotaName: "Running Dedicated mac2 Hosts" },
@@ -95,6 +97,36 @@ class AWSQueryError extends Error {
     detail: string,
   ) {
     super(`aws ${action}: http ${status}: ${detail}`);
+  }
+}
+
+async function readAWSCapacityErrorBody(response: Response): Promise<string | undefined> {
+  const reader = response.clone().body?.getReader();
+  if (!reader) return undefined;
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
+  let text = "";
+  let bytes = 0;
+  const deadline = Date.now() + awsCapacityErrorReadTimeoutMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), awsCapacityErrorReadTimeoutMs);
+  });
+  try {
+    for (;;) {
+      // One deadline covers the whole body, including streams that keep dripping chunks.
+      if (Date.now() >= deadline) return undefined;
+      // oxlint-disable-next-line eslint/no-await-in-loop -- Bound each sequential read before buffering it.
+      const chunk = await Promise.race([reader.read(), expired]);
+      if (!chunk) return undefined;
+      if (chunk.done) return text + decoder.decode();
+      bytes += chunk.value.byteLength;
+      if (bytes > awsCapacityErrorMaxBytes) return undefined;
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    // Cancel only the probe branch. Awaiting tee cancellation can wait for the untouched original.
+    void reader.cancel().catch(() => undefined);
   }
 }
 
@@ -1100,6 +1132,16 @@ export class EC2SpotClient {
         );
       }
       const candidates = pinnedMacHostType ? [pinnedMacHostType] : awsLaunchCandidates(config);
+      const allowCapacityHandoff =
+        !config.awsPrivate && !config.serverTypeExplicit && config.target !== "macos";
+      const hasQuotaEligibleCandidate = (
+        serverTypes: string[],
+        market: LeaseConfig["capacityMarket"],
+        quota: number | undefined,
+      ) =>
+        serverTypes.some(
+          (serverType) => !awsQuotaPreflightAttempt(serverType, market, this.region, quota),
+        );
       const history = new ProvisioningAttemptHistory();
       const imageCache = new Map<string, string>();
       const marketFallbackCandidates: string[] = [];
@@ -1139,13 +1181,12 @@ export class EC2SpotClient {
         imageCache.set(cacheKey, imageID);
         return imageID;
       };
-      for (const serverType of candidates) {
+      for (const [candidateIndex, serverType] of candidates.entries()) {
         const preflight = awsQuotaPreflightAttempt(
           serverType,
           config.capacityMarket,
           this.region,
-          // oxlint-disable-next-line eslint/no-await-in-loop -- quota preflight follows sequential fallback order.
-          await quotaForMarket(config.capacityMarket),
+          initialQuota.value,
         );
         if (preflight) {
           history.record(preflight, `${serverType}: ${preflight.message}`);
@@ -1154,6 +1195,27 @@ export class EC2SpotClient {
           }
           continue;
         }
+        const laterCandidates = candidates.slice(candidateIndex + 1);
+        const canHandoffWithinMarket =
+          allowCapacityHandoff &&
+          hasQuotaEligibleCandidate(laterCandidates, config.capacityMarket, initialQuota.value);
+        const canCheckFallbackMarket =
+          allowCapacityHandoff &&
+          config.capacityMarket === "spot" &&
+          config.capacityFallback.startsWith("on-demand");
+        const capacityHandoff =
+          canHandoffWithinMarket || canCheckFallbackMarket
+            ? async () => {
+                if (canHandoffWithinMarket) return true;
+                // Extra-market quota I/O belongs only to an actual capacity rejection.
+                const quota = await quotaForMarket("on-demand");
+                return hasQuotaEligibleCandidate(
+                  [...marketFallbackCandidates, serverType, ...laterCandidates],
+                  "on-demand",
+                  quota,
+                );
+              }
+            : undefined;
         try {
           // oxlint-disable-next-line eslint/no-await-in-loop -- instance-type fallback may need an architecture-specific AMI.
           const imageID = await diagnostics.measure("image", () =>
@@ -1168,6 +1230,7 @@ export class EC2SpotClient {
               owner,
               imageID,
               securityGroupID,
+              capacityHandoff,
             ),
           );
           const result: {
@@ -1202,14 +1265,10 @@ export class EC2SpotClient {
       }
       // Retry only candidates whose Spot failure can be recovered by On-Demand.
       if (marketFallbackCandidates.length > 0 && config.capacityFallback.startsWith("on-demand")) {
-        for (const serverType of marketFallbackCandidates) {
-          const preflight = awsQuotaPreflightAttempt(
-            serverType,
-            "on-demand",
-            this.region,
-            // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback must stay sequential.
-            await quotaForMarket("on-demand"),
-          );
+        for (const [candidateIndex, serverType] of marketFallbackCandidates.entries()) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback follows its admitted candidate order.
+          const quota = await quotaForMarket("on-demand");
+          const preflight = awsQuotaPreflightAttempt(serverType, "on-demand", this.region, quota);
           if (preflight) {
             history.record(preflight, `on-demand ${serverType}: ${preflight.message}`);
             continue;
@@ -1232,6 +1291,14 @@ export class EC2SpotClient {
                 owner,
                 imageID,
                 securityGroupID,
+                allowCapacityHandoff &&
+                  hasQuotaEligibleCandidate(
+                    marketFallbackCandidates.slice(candidateIndex + 1),
+                    "on-demand",
+                    quota,
+                  )
+                  ? async () => true
+                  : undefined,
               ),
             );
             const result: {
@@ -2204,6 +2271,7 @@ export class EC2SpotClient {
     owner: string,
     imageID: string,
     securityGroupID: string,
+    capacityHandoff?: () => Promise<boolean>,
   ): Promise<ProviderMachine> {
     const now = new Date();
     const name = leaseProviderName(leaseID, slug);
@@ -2264,7 +2332,7 @@ export class EC2SpotClient {
       }
       let root: Record<string, unknown>;
       try {
-        root = await this.ec2("RunInstances", params);
+        root = await this.ec2("RunInstances", params, capacityHandoff);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (!config.awsPrivate || message.includes("aws RunInstances: http 4")) {
@@ -2809,14 +2877,36 @@ export class EC2SpotClient {
   private async ec2(
     action: string,
     params: Record<string, string>,
+    capacityHandoff?: () => Promise<boolean>,
   ): Promise<Record<string, unknown>> {
     await this.ensureExpectedIdentity();
     const body = new URLSearchParams({ Action: action, Version: ec2Version, ...params });
-    const response = await this.aws.fetch(this.endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" },
-      body: body.toString(),
-    });
+    const response = await this.aws.fetch(
+      this.endpoint,
+      {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" },
+        body: body.toString(),
+      },
+      capacityHandoff && action === "RunInstances"
+        ? async (candidate) => {
+            if (candidate.status < 500) return false;
+            try {
+              const text = await readAWSCapacityErrorBody(candidate);
+              return (
+                text !== undefined &&
+                XMLValidator.validate(text) === true &&
+                this.awsQueryError(action, candidate.status, text).code ===
+                  "InsufficientInstanceCapacity" &&
+                (await capacityHandoff())
+              );
+            } catch {
+              // Missing response or fallback-preflight evidence retains normal retries.
+              return false;
+            }
+          }
+        : undefined,
+    );
     const text = await response.text();
     if (!response.ok) {
       throw this.awsQueryError(action, response.status, text);

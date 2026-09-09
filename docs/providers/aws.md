@@ -153,6 +153,22 @@ Windows and macOS targets use their own candidate lists (Windows WSL2 uses
 nested-virtualization families; macOS uses `mac*.metal` types). The default
 class is `beast`.
 
+For coordinator-managed public Linux and Windows runners, a complete
+`RunInstances` error with code `InsufficientInstanceCapacity` goes directly to
+the next configured instance type or permitted On-Demand fallback. The client
+does not spend its HTTP retry budget repeating that capacity rejection first.
+Exact `--type` requests, macOS launches, private workspaces, and attempts with no
+remaining alternative that passes quota preflight retain their normal retries.
+The early handoff checks On-Demand quota only after a capacity rejection needs
+that alternative; the normal pass reuses the quota result and attempt order.
+Other server errors and HTTP 429 still use the SDK's retry budget and backoff;
+an opaque or incomplete response never triggers this early handoff. The lease's
+existing client token and resource-outcome checks remain unchanged.
+
+Each capacity probe reads at most 64 KiB and waits at most one second for the
+complete response body. An oversized, stalled, or unreadable body retains normal
+retries without consuming the original response.
+
 ## Provisioning diagnostics
 
 For coordinator-managed groups in the default VPC, VPC discovery and the
@@ -170,19 +186,21 @@ state or permission decisions.
 
 `requests` counts calls entering credential preparation. `credentialsMs` and
 `credentialFailures` cover that preparation; `requestMs` and `requestFailures`
-cover the inherited SDK fetch call. A returned HTTP error response is not a
-transport failure. The operation's existing error count records how its caller
-handled that response. Response-body reading and decoding remain in the outer
+cover signing, transport, and HTTP retry handling. A returned HTTP error response
+is not a transport failure. The operation's existing error count records how its
+caller handled that response. Capacity classification before a retry is included
+in `requestMs`; final response-body reading and decoding remain in the outer
 operation duration.
 
 `signInvocations`, `signCompletions`, `signFailures` and `signMs` observe the
-SDK's public signing method without changing its retry policy. Repeated signing
-invocations on a request indicate retry-loop re-entry; a completed signature
-alone does not prove that a server received the request. Signing time is part
-of `requestMs`, so do not add them together. These totals cannot distinguish
-network latency from SDK retry backoff or identify intermediate response status
-codes. They do not establish throttling. Requests outside a measured create
-operation and qualification-authority RPC transport do not add these totals.
+SDK's public signing method. Except for the capacity handoff described above,
+the SDK retry policy is unchanged. Repeated signing invocations on a request
+indicate retry-loop re-entry; a completed signature alone does not prove that a
+server received the request. Signing time is part of `requestMs`, so do not add
+them together. These totals cannot distinguish network latency from SDK retry
+backoff or identify intermediate response status codes. They do not establish
+throttling. Requests outside a measured create operation and
+qualification-authority RPC transport do not add these totals.
 
 These durations use `Date.now()`. In deployed Cloudflare Workers,
 [timers advance only after I/O](https://developers.cloudflare.com/workers/runtime-apis/performance/).
