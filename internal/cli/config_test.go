@@ -2278,14 +2278,16 @@ func TestCloudRunSandboxEnvironmentAliasesAndBooleanFallback(t *testing.T) {
 func TestDigitalOceanConfigFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
+	var digitalOceanFile fileDigitalOceanConfig
+	if err := yaml.Unmarshal([]byte(`region: sfo3
+image: ubuntu-24-04-x64
+vpc: vpc-file
+sshCIDRs: [203.0.113.0/24]`), &digitalOceanFile); err != nil {
+		t.Fatal(err)
+	}
 	applyFileConfig(&cfg, fileConfig{
-		Provider: "digitalocean",
-		DigitalOcean: &fileDigitalOceanConfig{
-			Region:   "sfo3",
-			Image:    "ubuntu-24-04-x64",
-			VPCUUID:  "vpc-file",
-			SSHCIDRs: []string{"203.0.113.0/24"},
-		},
+		Provider:     "digitalocean",
+		DigitalOcean: &digitalOceanFile,
 	})
 	if cfg.Provider != "digitalocean" || cfg.DigitalOcean.Region != "sfo3" || cfg.Location == "sfo3" || cfg.DigitalOcean.Image != "ubuntu-24-04-x64" || cfg.Image == "ubuntu-24-04-x64" || cfg.DigitalOcean.VPCUUID != "vpc-file" {
 		t.Fatalf("file digitalocean config not applied: cfg=%#v do=%#v", cfg, cfg.DigitalOcean)
@@ -2837,6 +2839,11 @@ func TestDigitalOceanDefaultsPreserveExplicitGenericBaseValues(t *testing.T) {
 	clearConfigEnv(t)
 	base := baseConfig()
 	cfg := baseConfig()
+	var digitalOceanFile fileDigitalOceanConfig
+	if err := yaml.Unmarshal([]byte(`region: sfo3
+image: ubuntu-24-04-x64`), &digitalOceanFile); err != nil {
+		t.Fatal(err)
+	}
 	applyFileConfig(&cfg, fileConfig{
 		Provider: "digitalocean",
 		SSH: &fileSSHConfig{
@@ -2847,10 +2854,7 @@ func TestDigitalOceanDefaultsPreserveExplicitGenericBaseValues(t *testing.T) {
 			Location: base.Location,
 			Image:    base.Image,
 		},
-		DigitalOcean: &fileDigitalOceanConfig{
-			Region: "sfo3",
-			Image:  "ubuntu-24-04-x64",
-		},
+		DigitalOcean: &digitalOceanFile,
 	})
 
 	if err := applyProviderConfigDefaults(&cfg); err != nil {
@@ -12649,6 +12653,163 @@ func TestTencentBindingMarkersAndCoreDefaults(t *testing.T) {
 		}
 		if cfg.TencentCloud.Region != "ap-shanghai" || cfg.TencentCloud.Zone != "ap-shanghai-2" || cfg.TencentCloud.Type != "SA5.MEDIUM2" || cfg.TencentCloud.RootGB != root || cfg.TencentCloud.InternetMaxBandwidthOut != bandwidth || cfg.TencentCloud.InternetChargeType != "TRAFFIC_POSTPAID_BY_HOUR" || cfg.TencentCloud.Image != "" || cfg.TencentCloud.APIEndpoint != "" {
 			t.Fatalf("core runtime n=%d cfg=%#v", n, cfg.TencentCloud)
+		}
+	}
+}
+
+func TestDigitalOceanBindingSources(t *testing.T) {
+	if got := baseConfig().DigitalOcean; !reflect.DeepEqual(got, DigitalOceanConfig{}) {
+		t.Fatalf("raw=%#v", got)
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"missing", "null", "empty", "equal", "padded", "custom"} {
+			cfg := baseConfig()
+			cfg.DigitalOcean = DigitalOceanConfig{Region: "prior", Image: "prior", VPCUUID: "prior"}
+			want := cfg.DigitalOcean
+			fields := map[string]any{}
+			accepted := mode == "equal" || mode == "padded" || mode == "custom"
+			for _, key := range []string{"region", "image", "vpc"} {
+				switch mode {
+				case "null":
+					fields[key] = nil
+				case "empty":
+					fields[key] = ""
+				case "equal":
+					fields[key] = "prior"
+				case "padded":
+					fields[key] = "  "
+				case "custom":
+					fields[key] = "fixture"
+				}
+			}
+			if accepted {
+				v := fields["image"].(string)
+				want.Region = v
+				want.Image = v
+				want.VPCUUID = v
+			}
+			data, err := yaml.Marshal(map[string]any{"digitalocean": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.DigitalOcean, want) || cfg.digitalOceanImageExplicit != accepted {
+				t.Fatalf("file trusted=%t mode=%s got=%#v marker=%t", trusted, mode, cfg.DigitalOcean, cfg.digitalOceanImageExplicit)
+			}
+		}
+	}
+	for _, raw := range []string{"", "prior", "  ", "fixture"} {
+		t.Run("env-"+raw, func(t *testing.T) {
+			for _, key := range []string{"REGION", "IMAGE", "VPC"} {
+				t.Setenv("CRABBOX_DIGITALOCEAN_"+key, raw)
+			}
+			cfg := baseConfig()
+			cfg.DigitalOcean = DigitalOceanConfig{Region: "prior", Image: "prior", VPCUUID: "prior"}
+			want := cfg.DigitalOcean
+			if raw != "" {
+				want.Region = raw
+				want.Image = raw
+				want.VPCUUID = raw
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.DigitalOcean, want) || cfg.digitalOceanImageExplicit != (raw != "") {
+				t.Fatalf("env raw=%q got=%#v marker=%t", raw, cfg.DigitalOcean, cfg.digitalOceanImageExplicit)
+			}
+		})
+	}
+}
+
+func TestDigitalOceanBindingLists(t *testing.T) {
+	for _, trusted := range []bool{false, true} {
+		for _, raw := range []string{"{}", "{sshCIDRs: null}", "{sshCIDRs: []}", "{sshCIDRs: [' 192.0.2.0/24 ', '', '192.0.2.0/24']}"} {
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte("digitalocean: "+raw), &file); err != nil {
+				t.Fatal(err)
+			}
+			cfg := baseConfig()
+			cfg.DigitalOcean.SSHCIDRs = []string{"prior"}
+			prior := &cfg.DigitalOcean.SSHCIDRs[0]
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if len(cfg.DigitalOcean.SSHCIDRs) == 1 {
+				if cfg.DigitalOcean.SSHCIDRs[0] != "prior" || &cfg.DigitalOcean.SSHCIDRs[0] != prior {
+					t.Fatal("ignored list changed")
+				}
+				continue
+			}
+			want := []string{" 192.0.2.0/24 ", "", "192.0.2.0/24"}
+			if !reflect.DeepEqual(cfg.DigitalOcean.SSHCIDRs, want) {
+				t.Fatalf("file list=%#v", cfg.DigitalOcean.SSHCIDRs)
+			}
+			v := reflect.ValueOf(file.DigitalOcean).Elem().FieldByName("SSHCIDRs")
+			if v.Kind() == reflect.Pointer {
+				v = v.Elem()
+			}
+			if v.Pointer() != reflect.ValueOf(cfg.DigitalOcean.SSHCIDRs).Pointer() {
+				t.Fatal("file list must share backing")
+			}
+		}
+	}
+	for _, tc := range []struct {
+		raw  string
+		want []string
+	}{{"", nil}, {" ,  ,", []string{}}, {"none", []string{"none"}}, {" 192.0.2.0/24, ,198.51.100.0/24,192.0.2.0/24 ", []string{"192.0.2.0/24", "198.51.100.0/24", "192.0.2.0/24"}}} {
+		t.Run(tc.raw, func(t *testing.T) {
+			t.Setenv("CRABBOX_DIGITALOCEAN_SSH_CIDRS", tc.raw)
+			cfg := baseConfig()
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.DigitalOcean.SSHCIDRs, tc.want) {
+				t.Fatalf("list=%#v want=%#v", cfg.DigitalOcean.SSHCIDRs, tc.want)
+			}
+		})
+	}
+}
+
+func TestDigitalOceanBindingCoreDefaults(t *testing.T) {
+	for _, raw := range []string{"", "  ", "custom"} {
+		cfg := baseConfig()
+		cfg.Provider = "digitalocean"
+		cfg.DigitalOcean.Region = raw
+		cfg.DigitalOcean.Image = raw
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		region, image := raw, raw
+		if raw == "" {
+			region = "nyc3"
+			image = "ubuntu-24-04-x64"
+		}
+		if cfg.DigitalOcean.Region != region || cfg.DigitalOcean.Image != image {
+			t.Fatalf("defaults=%#v", cfg.DigitalOcean)
+		}
+	}
+	for _, tc := range []struct {
+		os, image string
+		explicit  bool
+		want      string
+	}{{"ubuntu:24.04", "", false, "ubuntu-24-04-x64"}, {"ubuntu:26.04", "", false, ""}, {"ubuntu:26.04", "custom", true, "custom"}} {
+		cfg := baseConfig()
+		cfg.Provider = "digitalocean"
+		cfg.OSImage = tc.os
+		cfg.osImageExplicit = true
+		cfg.DigitalOcean.Image = tc.image
+		cfg.digitalOceanImageExplicit = tc.explicit
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DigitalOcean.Image != tc.want {
+			t.Fatalf("OS=%s image=%q", tc.os, cfg.DigitalOcean.Image)
 		}
 	}
 }

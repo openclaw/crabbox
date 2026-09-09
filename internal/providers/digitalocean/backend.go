@@ -1392,10 +1392,10 @@ func applyDigitalOceanDefaults(cfg *core.Config) {
 		cfg.TargetOS = core.TargetLinux
 	}
 	if cfg.DigitalOcean.Region == "" {
-		cfg.DigitalOcean.Region = "nyc3"
+		cfg.DigitalOcean.Region = core.DigitalOceanRegionFallback
 	}
 	if cfg.DigitalOcean.Image == "" {
-		cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
+		cfg.DigitalOcean.Image = core.DigitalOceanImageFallback
 	}
 	if !cfg.ServerTypeExplicit || cfg.ServerType == "" {
 		cfg.ServerType = digitalOceanServerTypeForClass(cfg.Class)

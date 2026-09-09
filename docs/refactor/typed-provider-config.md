@@ -4,7 +4,7 @@ Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
 Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, Lume, Runpod, Vast,
-W&B, Scaleway, and Tencent Cloud
+W&B, Scaleway, Tencent Cloud, and DigitalOcean
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -21,8 +21,8 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_morph.go`, `internal/cli/config_exe_dev.go`,
 `internal/cli/config_ovh.go`, `internal/cli/config_lume.go`,
 `internal/cli/config_runpod.go`, `internal/cli/config_vast.go`,
-`internal/cli/config_wandb.go`, `internal/cli/config_scaleway.go`, and
-`internal/cli/config_tencentcloud.go`.
+`internal/cli/config_wandb.go`, `internal/cli/config_scaleway.go`,
+`internal/cli/config_tencentcloud.go`, and `internal/cli/config_digitalocean.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -93,6 +93,11 @@ raw configuration. Named runtime constants share effective fallback values witho
 initializing flag defaults. Its trusted endpoint admission, four explicit markers,
 class matrix, market selection, and service-family endpoint policy remain separate.
 
+DigitalOcean has no provider flags. Its declaration owns file/environment input
+and a used zero constructor; the generator emits no flag storage, registration,
+application, or presence APIs for a flagless schema. Runtime region/image values
+remain separate from portable-OS mapping and lower generic-field inheritance.
+
 ## Adding a field
 
 1. Add an exported, singly named field to the provider's config struct. Supported types
@@ -110,12 +115,16 @@ class matrix, market selection, and service-family endpoint policy remain separa
    primary `env`, allow an existing alias, and omit `config`, `flag`, `help`, and
    `default` tags entirely. This mode retains a zero default and exposes no YAML
    or command-line field; it does not generate credential presentation or policy.
-   An existing string with file/environment input but no flag uses the exact
+   An existing string or string list with file/environment input but no flag uses the exact
    `sources:"user,repo,env"` grant: require `config` and primary `env`, and omit
    `flag`, `help`, and `default` tags entirely. It retains a zero default and
    uses existing file predicates and applied reports without adding a flag or
    changing trust policy. This grant does not permit a file input on an
    environment-only field.
+   String lists are admitted only by this untrusted-file-capable no-flag grant,
+   with the same existing file/environment list rules; other no-flag grants remain
+   string-only. A schema with no flag-admitted fields emits no placeholder flag
+   API or flag import. Mixed schemas retain their admitted flag bindings.
    A trusted-file/environment string without a flag uses the exact
    `sources:"user,env"` grant with the same absent flag/help/default requirement;
    its file assignment uses the loader's existing trusted decision.
@@ -218,7 +227,7 @@ class matrix, market selection, and service-family endpoint policy remain separa
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer ./internal/providers/modal ./internal/providers/morph ./internal/providers/exedev ./internal/providers/ovh ./internal/providers/lume ./internal/providers/runpod ./internal/providers/vast ./internal/providers/wandb ./internal/providers/scaleway ./internal/providers/tencentcloud` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer ./internal/providers/modal ./internal/providers/morph ./internal/providers/exedev ./internal/providers/ovh ./internal/providers/lume ./internal/providers/runpod ./internal/providers/vast ./internal/providers/wandb ./internal/providers/scaleway ./internal/providers/tencentcloud ./internal/providers/digitalocean` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:

@@ -354,13 +354,6 @@ type AWSLambdaMicroVMConfig struct {
 	ForgetMissing     bool
 }
 
-type DigitalOceanConfig struct {
-	Region   string
-	Image    string
-	VPCUUID  string
-	SSHCIDRs []string
-}
-
 type VultrConfig struct {
 	Region        string
 	OS            string
@@ -1489,7 +1482,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 	}
 	if cfg.Provider == "digitalocean" {
 		if cfg.DigitalOcean.Region == "" {
-			cfg.DigitalOcean.Region = "nyc3"
+			cfg.DigitalOcean.Region = DigitalOceanRegionFallback
 		}
 		if cfg.osImageExplicit && !cfg.digitalOceanImageExplicit {
 			if cfg.OSImage == "ubuntu:24.04" {
@@ -1498,7 +1491,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 				cfg.DigitalOcean.Image = ""
 			}
 		} else if cfg.DigitalOcean.Image == "" {
-			cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
+			cfg.DigitalOcean.Image = DigitalOceanImageFallback
 		}
 		applyLinuxConnectionDefaults(cfg, baseConfig().SSHUser, baseConfig().SSHPort)
 		normalizeTargetConfig(cfg)
@@ -2432,6 +2425,7 @@ func baseConfig() Config {
 		GCPNetwork:           "default",
 		GCPTags:              []string{"crabbox-ssh"},
 		GCPRootGB:            400,
+		DigitalOcean:         defaultDigitalOceanConfig(),
 		Linode: LinodeConfig{
 			Region: "us-ord",
 			Image:  linodeImage,
@@ -2944,13 +2938,6 @@ type fileHetznerConfig struct {
 	Location string `yaml:"location,omitempty"`
 	Image    string `yaml:"image,omitempty"`
 	SSHKey   string `yaml:"sshKey,omitempty"`
-}
-
-type fileDigitalOceanConfig struct {
-	Region   string   `yaml:"region,omitempty"`
-	Image    string   `yaml:"image,omitempty"`
-	VPCUUID  string   `yaml:"vpc,omitempty"`
-	SSHCIDRs []string `yaml:"sshCIDRs,omitempty"`
 }
 
 type fileVultrConfig struct {
@@ -4343,19 +4330,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.ProviderKey = file.Hetzner.SSHKey
 		}
 	}
-	if file.DigitalOcean != nil {
-		if file.DigitalOcean.Region != "" {
-			cfg.DigitalOcean.Region = file.DigitalOcean.Region
-		}
-		if file.DigitalOcean.Image != "" {
-			cfg.DigitalOcean.Image = file.DigitalOcean.Image
+	{
+		applied, err := cfg.DigitalOcean.applyFile(file.DigitalOcean)
+		if applied.Image {
 			cfg.digitalOceanImageExplicit = true
 		}
-		if file.DigitalOcean.VPCUUID != "" {
-			cfg.DigitalOcean.VPCUUID = file.DigitalOcean.VPCUUID
-		}
-		if len(file.DigitalOcean.SSHCIDRs) > 0 {
-			cfg.DigitalOcean.SSHCIDRs = file.DigitalOcean.SSHCIDRs
+		if err != nil {
+			return err
 		}
 	}
 	if file.Vultr != nil {
@@ -6904,14 +6885,14 @@ func applyEnv(cfg *Config) error {
 	if cidrs := os.Getenv("CRABBOX_GCP_SSH_CIDRS"); cidrs != "" {
 		cfg.GCPSSHCIDRs = splitCommaList(cidrs)
 	}
-	cfg.DigitalOcean.Region = getenv("CRABBOX_DIGITALOCEAN_REGION", cfg.DigitalOcean.Region)
-	if image := os.Getenv("CRABBOX_DIGITALOCEAN_IMAGE"); image != "" {
-		cfg.DigitalOcean.Image = image
-		cfg.digitalOceanImageExplicit = true
-	}
-	cfg.DigitalOcean.VPCUUID = getenv("CRABBOX_DIGITALOCEAN_VPC", cfg.DigitalOcean.VPCUUID)
-	if cidrs := os.Getenv("CRABBOX_DIGITALOCEAN_SSH_CIDRS"); cidrs != "" {
-		cfg.DigitalOcean.SSHCIDRs = splitCommaList(cidrs)
+	{
+		applied, err := cfg.DigitalOcean.applyEnv()
+		if applied.Image {
+			cfg.digitalOceanImageExplicit = true
+		}
+		if err != nil {
+			return err
+		}
 	}
 	cfg.Vultr.Region = getenv("CRABBOX_VULTR_REGION", cfg.Vultr.Region)
 	cfg.Vultr.OS = getenv("CRABBOX_VULTR_OS", cfg.Vultr.OS)
