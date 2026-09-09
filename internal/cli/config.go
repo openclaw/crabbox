@@ -433,20 +433,6 @@ type NebiusConfig struct {
 	RecoveryPolicy   string
 }
 
-// ScalewayConfig contains non-secret Scaleway Instances settings. Scaleway
-// credentials are intentionally loaded by the provider client from the official
-// SDK environment/config surfaces and are not persisted in Crabbox config.
-type ScalewayConfig struct {
-	Region         string
-	Zone           string
-	Image          string
-	Type           string
-	ProjectID      string
-	OrganizationID string
-	SecurityGroup  string
-	SSHCIDRs       []string
-}
-
 // TencentCloudConfig contains non-secret Tencent Cloud CVM settings. Tencent
 // Cloud API credentials are intentionally read from TENCENTCLOUD_SECRET_ID and
 // TENCENTCLOUD_SECRET_KEY by the provider client and are not persisted in
@@ -1693,10 +1679,10 @@ func applyProviderConfigDefaults(cfg *Config) error {
 	}
 	if cfg.Provider == "scaleway" {
 		if cfg.Scaleway.Region == "" {
-			cfg.Scaleway.Region = "fr-par"
+			cfg.Scaleway.Region = ScalewayConfigDefaultRegion
 		}
 		if cfg.Scaleway.Zone == "" {
-			cfg.Scaleway.Zone = "fr-par-1"
+			cfg.Scaleway.Zone = ScalewayConfigDefaultZone
 		}
 		if cfg.osImageExplicit && !cfg.scalewayImageExplicit {
 			if cfg.OSImage == "ubuntu:24.04" {
@@ -1705,10 +1691,10 @@ func applyProviderConfigDefaults(cfg *Config) error {
 				cfg.Scaleway.Image = ""
 			}
 		} else if cfg.Scaleway.Image == "" {
-			cfg.Scaleway.Image = "ubuntu_noble"
+			cfg.Scaleway.Image = ScalewayConfigDefaultImage
 		}
 		if cfg.Scaleway.Type == "" {
-			cfg.Scaleway.Type = "DEV1-S"
+			cfg.Scaleway.Type = ScalewayConfigDefaultType
 		}
 		applyLinuxConnectionDefaults(cfg, "root", "22")
 		normalizeTargetConfig(cfg)
@@ -2484,13 +2470,8 @@ func baseConfig() Config {
 			Type:        "gpu_1x_a10",
 			ImageFamily: "lambda-stack-24-04",
 		},
-		OVH: defaultOVHConfig(),
-		Scaleway: ScalewayConfig{
-			Region: "fr-par",
-			Zone:   "fr-par-1",
-			Image:  "ubuntu_noble",
-			Type:   "DEV1-S",
-		},
+		OVH:      defaultOVHConfig(),
+		Scaleway: defaultScalewayConfig(),
 		Incus: IncusConfig{
 			Remote:          "local",
 			Project:         "",
@@ -3050,17 +3031,6 @@ type fileNebiusConfig struct {
 	SecurityGroupIDs []string `yaml:"securityGroupIds,omitempty"`
 	ServiceAccountID string   `yaml:"serviceAccountId,omitempty"`
 	RecoveryPolicy   string   `yaml:"recoveryPolicy,omitempty"`
-}
-
-type fileScalewayConfig struct {
-	Region         string   `yaml:"region,omitempty"`
-	Zone           string   `yaml:"zone,omitempty"`
-	Image          string   `yaml:"image,omitempty"`
-	Type           string   `yaml:"type,omitempty"`
-	ProjectID      string   `yaml:"projectId,omitempty"`
-	OrganizationID string   `yaml:"organizationId,omitempty"`
-	SecurityGroup  string   `yaml:"securityGroup,omitempty"`
-	SSHCIDRs       []string `yaml:"sshCIDRs,omitempty"`
 }
 
 type fileTencentCloudConfig struct {
@@ -4594,34 +4564,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.Scaleway != nil {
-		if file.Scaleway.Region != "" {
-			cfg.Scaleway.Region = file.Scaleway.Region
-			cfg.scalewayRegionExplicit = true
-		}
-		if file.Scaleway.Zone != "" {
-			cfg.Scaleway.Zone = file.Scaleway.Zone
-			cfg.scalewayZoneExplicit = true
-		}
-		if file.Scaleway.Image != "" {
-			cfg.Scaleway.Image = file.Scaleway.Image
-			cfg.scalewayImageExplicit = true
-		}
-		if file.Scaleway.Type != "" {
-			cfg.Scaleway.Type = file.Scaleway.Type
-			cfg.scalewayTypeExplicit = true
-		}
-		if file.Scaleway.ProjectID != "" {
-			cfg.Scaleway.ProjectID = file.Scaleway.ProjectID
-		}
-		if file.Scaleway.OrganizationID != "" {
-			cfg.Scaleway.OrganizationID = file.Scaleway.OrganizationID
-		}
-		if file.Scaleway.SecurityGroup != "" {
-			cfg.Scaleway.SecurityGroup = file.Scaleway.SecurityGroup
-		}
-		if len(file.Scaleway.SSHCIDRs) > 0 {
-			cfg.Scaleway.SSHCIDRs = file.Scaleway.SSHCIDRs
+	{
+		applied, err := cfg.Scaleway.applyFile(file.Scaleway)
+		MarkScalewayConfigApplied(cfg, applied)
+		if err != nil {
+			return err
 		}
 	}
 	if file.TencentCloud != nil {
@@ -7130,27 +7077,12 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	if region := os.Getenv("CRABBOX_SCALEWAY_REGION"); region != "" {
-		cfg.Scaleway.Region = region
-		cfg.scalewayRegionExplicit = true
-	}
-	if zone := os.Getenv("CRABBOX_SCALEWAY_ZONE"); zone != "" {
-		cfg.Scaleway.Zone = zone
-		cfg.scalewayZoneExplicit = true
-	}
-	if image := os.Getenv("CRABBOX_SCALEWAY_IMAGE"); image != "" {
-		cfg.Scaleway.Image = image
-		cfg.scalewayImageExplicit = true
-	}
-	if serverType := os.Getenv("CRABBOX_SCALEWAY_TYPE"); serverType != "" {
-		cfg.Scaleway.Type = serverType
-		cfg.scalewayTypeExplicit = true
-	}
-	cfg.Scaleway.ProjectID = getenv("CRABBOX_SCALEWAY_PROJECT_ID", cfg.Scaleway.ProjectID)
-	cfg.Scaleway.OrganizationID = getenv("CRABBOX_SCALEWAY_ORGANIZATION_ID", cfg.Scaleway.OrganizationID)
-	cfg.Scaleway.SecurityGroup = getenv("CRABBOX_SCALEWAY_SECURITY_GROUP", cfg.Scaleway.SecurityGroup)
-	if cidrs := os.Getenv("CRABBOX_SCALEWAY_SSH_CIDRS"); cidrs != "" {
-		cfg.Scaleway.SSHCIDRs = splitCommaList(cidrs)
+	{
+		applied, err := cfg.Scaleway.applyEnv()
+		MarkScalewayConfigApplied(cfg, applied)
+		if err != nil {
+			return err
+		}
 	}
 	if region := os.Getenv("CRABBOX_TENCENTCLOUD_REGION"); region != "" {
 		cfg.TencentCloud.Region = region
