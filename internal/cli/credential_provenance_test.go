@@ -679,6 +679,10 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 	if err := yaml.Unmarshal([]byte("tensorlake:\n  apiUrl: https://repo.example.test\n"), &tensorlakeFile); err != nil {
 		t.Fatal(err)
 	}
+	var orgoFile fileConfig
+	if err := yaml.Unmarshal([]byte("orgo:\n  apiBase: https://repo.example.test\n"), &orgoFile); err != nil {
+		t.Fatal(err)
+	}
 	var railwayFile fileConfig
 	if err := yaml.Unmarshal([]byte("railway:\n  apiUrl: https://repo.example.test\n"), &railwayFile); err != nil {
 		t.Fatal(err)
@@ -713,7 +717,7 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 		{
 			name:          "orgo",
 			provider:      "orgo",
-			file:          fileConfig{Orgo: &fileOrgoConfig{APIBase: "https://repo.example.test"}},
+			file:          orgoFile,
 			credentialEnv: "CRABBOX_ORGO_API_KEY",
 			approveEnv:    "CRABBOX_ORGO_API_BASE",
 		},
@@ -2610,12 +2614,11 @@ func TestRepositorySSHDestinationsAllowExplicitFlagOverride(t *testing.T) {
 func TestConfigMergeIgnoresRepositoryOrgoCredential(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "orgo"
-	if err := applyFileConfigWithTrust(&cfg, fileConfig{
-		Orgo: &fileOrgoConfig{
-			APIBase: "https://repo.example.test",
-			APIKey:  "test-key",
-		},
-	}, false); err != nil {
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("orgo:\n  apiBase: https://repo.example.test\n  apiKey: test-key\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Orgo.APIKey != "" {

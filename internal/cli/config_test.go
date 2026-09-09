@@ -10318,3 +10318,212 @@ func TestTensorlakeConfigCentralFlagSource(t *testing.T) {
 		t.Fatal("central source phase changed")
 	}
 }
+
+func TestOrgoConfigFileContract(t *testing.T) {
+	wantDefaults := OrgoConfig{APIBase: "https://www.orgo.ai/api", RAMGB: 4, CPUs: 1, DiskGB: 8, Resolution: "1280x720x24"}
+	if got := baseConfig().Orgo; got != wantDefaults {
+		t.Fatalf("defaults=%#v want=%#v", got, wantDefaults)
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace", "value"} {
+			cfg := baseConfig()
+			cfg.Orgo.APIKey = "inert-prior"
+			cfg.Orgo.WorkspaceID = "prior-workspace"
+			want := cfg.Orgo
+			cfg.credentialProvenance.orgoAPIKey = credentialSourceFlag
+			cfg.credentialProvenance.orgoAPIBase = credentialSourceFlag
+			fields := map[string]any{}
+			key, base := credentialSourceFlag, credentialSourceFlag
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"apiKey", &want.APIKey}, {"apiBase", &want.APIBase}, {"workspaceID", &want.WorkspaceID}, {"resolution", &want.Resolution}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = "fixture-value"
+				}
+				fields[f.key] = raw
+				if mode == "equal" || mode == "whitespace" || mode == "value" {
+					if f.key != "apiKey" || trusted {
+						*f.v = raw.(string)
+					}
+					if f.key == "apiKey" && trusted {
+						key = credentialSourceForFile(trusted)
+					}
+					if f.key == "apiBase" {
+						base = credentialSourceForFile(trusted)
+					}
+				}
+			}
+			data, err := yaml.Marshal(map[string]any{"orgo": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Orgo != want || cfg.credentialProvenance.orgoAPIKey != key || cfg.credentialProvenance.orgoAPIBase != base {
+				t.Fatalf("mode=%s trusted=%t got=%#v want=%#v", mode, trusted, cfg.Orgo, want)
+			}
+		}
+		for _, raw := range []string{"null", "0", "-2", "3"} {
+			cfg := baseConfig()
+			want := cfg.Orgo
+			if raw == "3" {
+				want.RAMGB = 3
+				want.CPUs = 3
+				want.DiskGB = 3
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte(fmt.Sprintf("orgo:\n  ramGB: %s\n  cpus: %s\n  diskGB: %s\n", raw, raw, raw)), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Orgo != want {
+				t.Fatalf("raw=%s trusted=%t got=%#v want=%#v", raw, trusted, cfg.Orgo, want)
+			}
+		}
+	}
+}
+
+func TestOrgoConfigKeyEnvironmentContract(t *testing.T) {
+	for _, tc := range []struct {
+		name, primary, configured, alias, want string
+		applied                                bool
+	}{
+		{"primary", "inert-primary", "inert-config", "inert-vendor", "inert-primary", true},
+		{"configured", "", "inert-config", "inert-vendor", "inert-config", false},
+		{"vendor", "", "", "inert-vendor", "inert-vendor", true},
+		{"absent", "", "", "", "", false},
+		{"equal-primary", "inert-config", "inert-config", "inert-vendor", "inert-config", true},
+		{"equal-vendor-ignored", "", "inert-config", "inert-config", "inert-config", false},
+		{"raw-configured", "", "  ", "inert-vendor", "  ", false},
+		{"raw-primary", "  ", "inert-config", "inert-vendor", "  ", true},
+		{"raw-vendor", "", "", "  ", "  ", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Orgo.APIKey = tc.configured
+			cfg.credentialProvenance.orgoAPIKey = credentialSourceTrustedFile
+			t.Setenv("CRABBOX_ORGO_API_KEY", tc.primary)
+			t.Setenv("ORGO_API_KEY", tc.alias)
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			source := credentialSourceTrustedFile
+			if tc.applied {
+				source = credentialSourceEnvironment
+			}
+			if cfg.Orgo.APIKey != tc.want || cfg.credentialProvenance.orgoAPIKey != source {
+				t.Fatalf("key/source mismatch for %s", tc.name)
+			}
+		})
+	}
+}
+
+func TestOrgoConfigEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"primary", "alias", "empty", "equal", "whitespace"} {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		cfg.Orgo.WorkspaceID = "prior-workspace"
+		want := cfg.Orgo
+		cfg.credentialProvenance.orgoAPIBase = credentialSourceTrustedFile
+		source := credentialSourceTrustedFile
+		for _, f := range []struct {
+			suffix, alias string
+			v             *string
+		}{{"API_BASE", "ORGO_API_BASE_URL", &want.APIBase}, {"WORKSPACE_ID", "ORGO_WORKSPACE_ID", &want.WorkspaceID}, {"RESOLUTION", "", &want.Resolution}} {
+			primary, alias := "primary-value", "alias-value"
+			if mode == "alias" {
+				primary = ""
+			}
+			if mode == "empty" {
+				primary = ""
+				alias = ""
+			}
+			if mode == "equal" {
+				primary = *f.v
+			}
+			if mode == "whitespace" {
+				primary = "  "
+			}
+			if primary != "" {
+				*f.v = primary
+			} else if f.alias != "" && alias != "" {
+				*f.v = alias
+			}
+			if f.suffix == "API_BASE" && (primary != "" || alias != "") {
+				source = credentialSourceEnvironment
+			}
+			t.Setenv("CRABBOX_ORGO_"+f.suffix, primary)
+			if f.alias != "" {
+				t.Setenv(f.alias, alias)
+			}
+		}
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Orgo != want || cfg.credentialProvenance.orgoAPIBase != source {
+			t.Fatalf("mode=%s got=%#v want=%#v", mode, cfg.Orgo, want)
+		}
+	}
+	for _, key := range []string{"CRABBOX_ORGO_API_BASE", "ORGO_API_BASE_URL", "CRABBOX_ORGO_WORKSPACE_ID", "ORGO_WORKSPACE_ID", "CRABBOX_ORGO_RESOLUTION"} {
+		t.Setenv(key, "")
+	}
+	for _, raw := range []string{"", "invalid", " 2 ", "0", "-2", "3"} {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		want := cfg.Orgo
+		for _, s := range []string{"RAM_GB", "CPUS", "DISK_GB"} {
+			t.Setenv("CRABBOX_ORGO_"+s, raw)
+		}
+		if n, err := strconv.Atoi(raw); err == nil {
+			want.RAMGB = n
+			want.CPUs = n
+			want.DiskGB = n
+		}
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Orgo != want {
+			t.Fatalf("raw=%q got=%#v want=%#v", raw, cfg.Orgo, want)
+		}
+	}
+}
+
+func TestOrgoConfigCentralFlagSource(t *testing.T) {
+	cfg := baseConfig()
+	cfg.credentialProvenance.orgoAPIKey = credentialSourceTrustedFile
+	fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+	fs.String("orgo-api-base", "", "")
+	markCredentialDestinationFlagSources(&cfg, fs)
+	if cfg.credentialProvenance.orgoAPIBase == credentialSourceFlag {
+		t.Fatal("unvisited base marked")
+	}
+	if err := fs.Parse([]string{"--orgo-api-base="}); err != nil {
+		t.Fatal(err)
+	}
+	markCredentialDestinationFlagSources(&cfg, fs)
+	if cfg.credentialProvenance.orgoAPIBase != credentialSourceFlag || cfg.credentialProvenance.orgoAPIKey != credentialSourceTrustedFile {
+		t.Fatal("central source phase changed")
+	}
+}

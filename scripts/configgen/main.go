@@ -19,8 +19,8 @@ import (
 )
 
 type field struct {
-	name, kind, key, configAlias, env, envAlias, envAlias2, flag, help, defaultExpr, flagFallbackExpr                                       string
-	nonnegative, trustedFileOnly, noFile, noEnv, noFlag, fileIgnoreEmpty, reportApplied, envIntFallback, fileIntPositive, fileFloatPositive bool
+	name, kind, key, configAlias, env, envAlias, envAlias2, flag, help, defaultExpr, flagFallbackExpr                                                            string
+	nonnegative, trustedFileOnly, noFile, noEnv, noFlag, fileIgnoreEmpty, reportApplied, envIntFallback, fileIntPositive, fileFloatPositive, envAliasAfterConfig bool
 }
 
 type fileBinding struct {
@@ -238,6 +238,12 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		if hasAlias && f.kind != "string" {
 			return s, fmt.Errorf("%s: envAlias is supported only for string fields", f.name)
 		}
+		if value, ok := tags.Lookup("envAliasAfterConfig"); ok {
+			if value != "true" || f.kind != "string" || f.noEnv || !hasAlias || hasAlias2 {
+				return s, fmt.Errorf("%s: envAliasAfterConfig requires true on an environment-admitted string with exactly one envAlias", f.name)
+			}
+			f.envAliasAfterConfig = true
+		}
 		if value, ok := tags.Lookup("nonnegative"); ok {
 			if f.kind != "int" || value != "true" {
 				return s, fmt.Errorf("%s: nonnegative is supported only as true for int fields", f.name)
@@ -414,6 +420,18 @@ func generate(s schema, source string) ([]byte, error) {
 		}
 		switch f.kind {
 		case "string":
+			if f.envAliasAfterConfig {
+				p("if value, ok := firstNonEmptyEnv(%q); ok {\ncfg.%s = value\n", f.env, f.name)
+				if f.reportApplied {
+					p("applied.%s = true\n", f.name)
+				}
+				p("} else if cfg.%s == \"\" {\nif value, ok := firstNonEmptyEnv(%q); ok {\ncfg.%s = value\n", f.name, f.envAlias, f.name)
+				if f.reportApplied {
+					p("applied.%s = true\n", f.name)
+				}
+				p("}\n}\n")
+				continue
+			}
 			if f.reportApplied {
 				names := strconv.Quote(f.env)
 				if f.envAlias != "" {

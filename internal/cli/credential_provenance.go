@@ -216,7 +216,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if FastAPICloudConfigFlagPresence(fs).APIURL {
 		provenance.fastAPICloudAPIURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "orgo-api-base") {
+	if OrgoConfigFlagPresence(fs).APIBase {
 		provenance.orgoAPIBase = credentialSourceFlag
 	}
 	if flagWasSet(fs, "unikraft-cloud-url") {

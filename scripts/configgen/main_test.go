@@ -466,6 +466,12 @@ func TestTensorlakeGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestOrgoGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_orgo.go", "../../internal/cli/config_orgo_generated.go", "OrgoConfig", "orgo", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -1405,6 +1411,100 @@ func TestFloatFileAdmission(t *testing.T){
  fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
  if err:=fs.Parse([]string{"--cpus=-0.5"});err!=nil{t.Fatal(err)};values.Apply(&cfg,fs)
  if cfg.CPUs!=-0.5{t.Fatal("file predicate affected negative flag")}
+}
+`
+	runScalarFixture(t, input, output, behavior)
+}
+
+func TestSchemaEnvAliasAfterConfigFailsClosed(t *testing.T) {
+	for _, value := range []string{"", "false", "after"} {
+		source := strings.Replace(appliedSample, `envAlias:"PILOT_INPUT_ALIAS"`, `envAlias:"PILOT_INPUT_ALIAS" envAliasAfterConfig:"`+value+`"`, 1)
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "envAliasAfterConfig requires true") {
+			t.Fatalf("invalid rule %q: %v", value, err)
+		}
+	}
+	for _, source := range []string{
+		strings.Replace(sample, `help:"Name"`, `help:"Name" envAliasAfterConfig:"true"`, 1),
+		strings.Replace(flagOnlySample, `help:"Name"`, `help:"Name" envAliasAfterConfig:"true"`, 1),
+		strings.Replace(appliedSample, `envAlias:"PILOT_INPUT_ALIAS"`, `envAlias:"PILOT_INPUT_ALIAS" envAlias2:"SECOND" envAliasAfterConfig:"true"`, 1),
+	} {
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "envAliasAfterConfig requires true") {
+			t.Fatalf("unsupported composition: %v", err)
+		}
+	}
+	for _, kind := range []string{"bool", "int", "float64", "[]string"} {
+		source := strings.Replace(sample, "Name string", "Name "+kind, 1)
+		source = strings.Replace(source, `help:"Name"`, `help:"Name" envAliasAfterConfig:"true"`, 1)
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "envAliasAfterConfig requires true") {
+			t.Fatalf("kind %s: %v", kind, err)
+		}
+	}
+}
+
+func TestGenerateEnvAliasAfterConfig(t *testing.T) {
+	const source = "package cli\ntype PilotConfig struct{\n" +
+		" Tracked string `sources:\"user,env\" config:\"tracked\" env:\"PRIMARY\" envAlias:\"ALIAS\" reportApplied:\"true\" fileIgnoreEmpty:\"true\"`\n" +
+		" Plain string `sources:\"user,repo,env,flag\" config:\"plain\" env:\"PLAIN_PRIMARY\" envAlias:\"PLAIN_ALIAS\" flag:\"plain\" help:\"Plain\"`\n}"
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := strings.ReplaceAll(source, ` envAlias:`, ` envAliasAfterConfig:"true" envAlias:`)
+	s, err = parseSchema([]byte(input), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic config-before-alias: %v", err)
+	}
+	for _, name := range []string{"Tracked", "Plain"} {
+		if !strings.Contains(string(output), `else if cfg.`+name+` == "" {`) {
+			t.Fatalf("missing raw prior test for %s", name)
+		}
+	}
+	for _, marker := range []string{"func (cfg *PilotConfig) applyEnv()", "// PilotConfigFlagValues"} {
+		oldParts, newParts := strings.SplitN(string(before), marker, 2), strings.SplitN(string(output), marker, 2)
+		index := 0
+		if strings.Contains(marker, "FlagValues") {
+			index = 1
+		}
+		if oldParts[index] != newParts[index] {
+			t.Fatalf("changed non-env bindings around %s", marker)
+		}
+	}
+	typecheckGenerated(t, input+"\nfunc firstNonEmptyEnv(...string)(string,bool){panic(\"stub\")}\n", output)
+	const behavior = `package cli
+import("flag";"testing")
+var input map[string]string
+var calls map[string]int
+func firstNonEmptyEnv(names ...string)(string,bool){for _,name:=range names{calls[name]++;if value:=input[name];value!=""{return value,true}};return "",false}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestConfigBeforeAlias(t *testing.T){
+ for _,tc:=range []struct{primary,prior,alias,want string;applied,readAlias bool}{
+  {"","","","",false,true},{"","","vendor","vendor",true,true},{"","prior","vendor","prior",false,false},
+  {"primary","prior","vendor","primary",true,false},{"prior","prior","vendor","prior",true,false},
+  {" ","prior","vendor"," ",true,false},{""," ","vendor"," ",false,false},{"",""," "," ",true,true},
+  {"","prior","","prior",false,false},
+ }{
+  cfg:=PilotConfig{Tracked:tc.prior,Plain:tc.prior};calls=map[string]int{}
+  input=map[string]string{"PRIMARY":tc.primary,"ALIAS":tc.alias,"PLAIN_PRIMARY":tc.primary,"PLAIN_ALIAS":tc.alias}
+  got,err:=cfg.applyEnv()
+  if err!=nil||cfg.Tracked!=tc.want||cfg.Plain!=tc.want||got.Tracked!=tc.applied{t.Fatalf("%+v: cfg=%+v applied=%+v err=%v",tc,cfg,got,err)}
+  if calls["PRIMARY"]!=1||calls["PLAIN_PRIMARY"]!=1||(calls["ALIAS"]==1)!=tc.readAlias||(calls["PLAIN_ALIAS"]==1)!=tc.readAlias{t.Fatalf("unexpected source reads: %+v",calls)}
+ }
+ prior:="file";cfg:=PilotConfig{};applied,err:=cfg.applyFile(&filePilotConfig{Tracked:&prior},true)
+ if err!=nil||!applied.Tracked{t.Fatalf("file setup: %+v %v",applied,err)}
+ input=map[string]string{"ALIAS":"vendor"};calls=map[string]int{};applied,err=cfg.applyEnv()
+ if err!=nil||applied.Tracked||cfg.Tracked!="file"{t.Fatalf("alias overwrote file source: %+v %+v %v",cfg,applied,err)}
 }
 `
 	runScalarFixture(t, input, output, behavior)

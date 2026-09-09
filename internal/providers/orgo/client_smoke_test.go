@@ -28,7 +28,13 @@ func TestSmokeCreateRunAndDelete(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	api, err := newOrgoClient(Config{}, Runtime{})
+	cfg := Config{}
+	cfg.Orgo.APIBase = strings.TrimSpace(os.Getenv("CRABBOX_ORGO_API_BASE"))
+	if cfg.Orgo.APIBase == "" {
+		cfg.Orgo.APIBase = strings.TrimSpace(os.Getenv("ORGO_API_BASE_URL"))
+	}
+	backend := NewOrgoBackend(Provider{}.Spec(), cfg, Runtime{}).(*orgoBackend)
+	api, err := backend.api()
 	if err != nil {
 		t.Fatalf("newOrgoClient: %v", err)
 	}
