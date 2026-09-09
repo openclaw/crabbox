@@ -4,7 +4,7 @@ Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
 Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, Lume, Runpod, Vast,
-W&B, Scaleway, Tencent Cloud, DigitalOcean, Vultr, Linode, and Sealos DevBox
+W&B, Scaleway, Tencent Cloud, DigitalOcean, Vultr, Linode, Sealos DevBox, and KubeVirt
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -23,8 +23,9 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_runpod.go`, `internal/cli/config_vast.go`,
 `internal/cli/config_wandb.go`, `internal/cli/config_scaleway.go`,
 `internal/cli/config_tencentcloud.go`, `internal/cli/config_digitalocean.go`,
-`internal/cli/config_vultr.go`, `internal/cli/config_linode.go`, and
-`internal/cli/config_sealos_devbox.go`.
+`internal/cli/config_vultr.go`, `internal/cli/config_linode.go`,
+`internal/cli/config_sealos_devbox.go`, and
+`internal/cli/config_kubevirt.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -43,6 +44,23 @@ existing path algorithm, guest-work-root rules, explicit markers, and validation
 remain outside generation. Moving path expansion immediately after assignment
 is valid here because these string/bool bindings are non-fallible and no
 intermediate observer reads them; it is not a generic delayed-normalization rule.
+
+KubeVirt's complete twelve-field binding uses a mandatory typed file wrapper.
+The wrapper copies file input and applies the existing conditional public-key
+admission rule to that snapshot before calling the generated overlay. A rejected
+snapshot value becomes an ignored empty assignment, not a request to clear the
+runtime value. The original file object remains available unchanged to the
+writer. The generated overlay is a mechanical primitive; production file
+callers must go through the wrapper rather than treating source tags alone as
+the complete admission policy.
+
+Accepted reports retain KubeVirt's six host-path transformations and release
+marker. File/flags expand only accepted paths; environment processing expands
+final fallback values unconditionally. Only flags copy the raw provider work
+root to the generic root, without introducing a new explicitness bit. The
+provider owns the shared inherited-root decision used by configuration and
+command forwarding; its distinct routing and trim-aware fallback rules stay
+separate. No generator callback or new normalization policy is introduced.
 
 ## Why generation
 

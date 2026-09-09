@@ -480,6 +480,58 @@ func TestSealosConfigWriter(t *testing.T) {
 	}
 }
 
+func TestKubeVirtConfigWriter(t *testing.T) {
+	for _, input := range []string{"null", "{}", "{kubectl: '', virtctl: '', kubeconfig: '', context: '', namespace: '', template: '', sshUser: '', sshKey: '', sshPublicKey: '', sshPort: '', workRoot: '', deleteOnRelease: false}", "{context: '  ', workRoot: '/workspace/~/guest', deleteOnRelease: true}"} {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte("kubevirt: "+input), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := baseConfig()
+		if err := applyFileConfig(&cfg, file); err != nil {
+			t.Fatal(err)
+		}
+		after, err := yaml.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatal("overlay mutated writer input")
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := yaml.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]any{}
+		if input != "null" {
+			want["kubevirt"] = map[string]any{}
+		}
+		if strings.Contains(input, "false") {
+			want["kubevirt"] = map[string]any{"deleteOnRelease": false}
+		}
+		if strings.Contains(input, "true") {
+			want["kubevirt"] = map[string]any{"context": "  ", "workRoot": "/workspace/~/guest", "deleteOnRelease": true}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("writer=%#v want %#v", got, want)
+		}
+	}
+}
+
 func TestGeneratedFileStorageWriter(t *testing.T) {
 	for _, tc := range []struct{ name, input, want string }{
 		{"missing", "{}", "{}"},

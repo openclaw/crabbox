@@ -411,21 +411,6 @@ type BlacksmithConfig struct {
 	Debug       bool
 }
 
-type KubeVirtConfig struct {
-	Kubectl         string
-	Virtctl         string
-	Kubeconfig      string
-	Context         string
-	Namespace       string
-	Template        string
-	SSHUser         string
-	SSHKey          string
-	SSHPublicKey    string
-	SSHPort         string
-	WorkRoot        string
-	DeleteOnRelease bool
-}
-
 type AgentSandboxConfig struct {
 	Kubectl             string
 	Kubeconfig          string
@@ -2418,15 +2403,7 @@ func baseConfig() Config {
 			RunnerVersion: "latest",
 			Ephemeral:     true,
 		},
-		KubeVirt: KubeVirtConfig{
-			Kubectl:         "kubectl",
-			Virtctl:         "virtctl",
-			Namespace:       "default",
-			SSHUser:         "crabbox",
-			SSHPort:         "22",
-			WorkRoot:        "/home/crabbox/crabbox",
-			DeleteOnRelease: true,
-		},
+		KubeVirt:     defaultKubeVirtConfig(),
 		SealosDevbox: defaultSealosDevboxConfig(),
 		AgentSandbox: AgentSandboxConfig{
 			Kubectl:             "kubectl",
@@ -3116,21 +3093,6 @@ type fileBlacksmithConfig struct {
 	Ref         string `yaml:"ref,omitempty"`
 	IdleTimeout string `yaml:"idleTimeout,omitempty"`
 	Debug       *bool  `yaml:"debug,omitempty"`
-}
-
-type fileKubeVirtConfig struct {
-	Kubectl         string `yaml:"kubectl,omitempty"`
-	Virtctl         string `yaml:"virtctl,omitempty"`
-	Kubeconfig      string `yaml:"kubeconfig,omitempty"`
-	Context         string `yaml:"context,omitempty"`
-	Namespace       string `yaml:"namespace,omitempty"`
-	Template        string `yaml:"template,omitempty"`
-	SSHUser         string `yaml:"sshUser,omitempty"`
-	SSHKey          string `yaml:"sshKey,omitempty"`
-	SSHPublicKey    string `yaml:"sshPublicKey,omitempty"`
-	SSHPort         string `yaml:"sshPort,omitempty"`
-	WorkRoot        string `yaml:"workRoot,omitempty"`
-	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
 }
 
 type fileAgentSandboxConfig struct {
@@ -4881,44 +4843,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		applyLeaseDuration(&cfg.Blacksmith.IdleTimeout, file.Blacksmith.IdleTimeout)
 		applyOptional(&cfg.Blacksmith.Debug, file.Blacksmith.Debug)
 	}
-	if file.KubeVirt != nil {
-		if file.KubeVirt.Kubectl != "" {
-			cfg.KubeVirt.Kubectl = expandUserPath(file.KubeVirt.Kubectl)
-		}
-		if file.KubeVirt.Virtctl != "" {
-			cfg.KubeVirt.Virtctl = expandUserPath(file.KubeVirt.Virtctl)
-		}
-		if file.KubeVirt.Kubeconfig != "" {
-			cfg.KubeVirt.Kubeconfig = expandUserPath(file.KubeVirt.Kubeconfig)
-		}
-		if file.KubeVirt.Context != "" {
-			cfg.KubeVirt.Context = file.KubeVirt.Context
-		}
-		if file.KubeVirt.Namespace != "" {
-			cfg.KubeVirt.Namespace = file.KubeVirt.Namespace
-		}
-		if file.KubeVirt.Template != "" {
-			cfg.KubeVirt.Template = expandUserPath(file.KubeVirt.Template)
-		}
-		if file.KubeVirt.SSHUser != "" {
-			cfg.KubeVirt.SSHUser = file.KubeVirt.SSHUser
-		}
-		if trusted && file.KubeVirt.SSHKey != "" {
-			cfg.KubeVirt.SSHKey = expandUserPath(file.KubeVirt.SSHKey)
-		}
-		if file.KubeVirt.SSHPublicKey != "" && (trusted || inlineSSHPublicKey(file.KubeVirt.SSHPublicKey)) {
-			cfg.KubeVirt.SSHPublicKey = expandUserPath(file.KubeVirt.SSHPublicKey)
-		}
-		if file.KubeVirt.SSHPort != "" {
-			cfg.KubeVirt.SSHPort = file.KubeVirt.SSHPort
-		}
-		if file.KubeVirt.WorkRoot != "" {
-			cfg.KubeVirt.WorkRoot = file.KubeVirt.WorkRoot
-		}
-		if file.KubeVirt.DeleteOnRelease != nil {
-			cfg.KubeVirt.DeleteOnRelease = *file.KubeVirt.DeleteOnRelease
-			MarkDeleteOnReleaseExplicit(cfg, "kubevirt")
-		}
+	if err := applyKubeVirtFileConfig(cfg, file.KubeVirt, trusted); err != nil {
+		return err
 	}
 	{
 		applied, err := cfg.SealosDevbox.applyFile(file.SealosDevbox, trusted)
@@ -6925,20 +6851,20 @@ func applyEnv(cfg *Config) error {
 	cfg.Blacksmith.Workflow = getenv("CRABBOX_BLACKSMITH_WORKFLOW", cfg.Blacksmith.Workflow)
 	cfg.Blacksmith.Job = getenv("CRABBOX_BLACKSMITH_JOB", cfg.Blacksmith.Job)
 	cfg.Blacksmith.Ref = getenv("CRABBOX_BLACKSMITH_REF", cfg.Blacksmith.Ref)
-	cfg.KubeVirt.Kubectl = expandUserPath(getenv("CRABBOX_KUBEVIRT_KUBECTL", cfg.KubeVirt.Kubectl))
-	cfg.KubeVirt.Virtctl = expandUserPath(getenv("CRABBOX_KUBEVIRT_VIRTCTL", cfg.KubeVirt.Virtctl))
-	cfg.KubeVirt.Kubeconfig = expandUserPath(getenv("CRABBOX_KUBEVIRT_KUBECONFIG", cfg.KubeVirt.Kubeconfig))
-	cfg.KubeVirt.Context = getenv("CRABBOX_KUBEVIRT_CONTEXT", cfg.KubeVirt.Context)
-	cfg.KubeVirt.Namespace = getenv("CRABBOX_KUBEVIRT_NAMESPACE", cfg.KubeVirt.Namespace)
-	cfg.KubeVirt.Template = expandUserPath(getenv("CRABBOX_KUBEVIRT_TEMPLATE", cfg.KubeVirt.Template))
-	cfg.KubeVirt.SSHUser = getenv("CRABBOX_KUBEVIRT_SSH_USER", cfg.KubeVirt.SSHUser)
-	cfg.KubeVirt.SSHKey = expandUserPath(getenv("CRABBOX_KUBEVIRT_SSH_KEY", cfg.KubeVirt.SSHKey))
-	cfg.KubeVirt.SSHPublicKey = expandUserPath(getenv("CRABBOX_KUBEVIRT_SSH_PUBLIC_KEY", cfg.KubeVirt.SSHPublicKey))
-	cfg.KubeVirt.SSHPort = getenv("CRABBOX_KUBEVIRT_SSH_PORT", cfg.KubeVirt.SSHPort)
-	cfg.KubeVirt.WorkRoot = getenv("CRABBOX_KUBEVIRT_WORK_ROOT", cfg.KubeVirt.WorkRoot)
-	if value, ok := getenvBool("CRABBOX_KUBEVIRT_DELETE_ON_RELEASE"); ok {
-		cfg.KubeVirt.DeleteOnRelease = value
-		MarkDeleteOnReleaseExplicit(cfg, "kubevirt")
+	{
+		applied, err := cfg.KubeVirt.applyEnv()
+		cfg.KubeVirt.Kubectl = expandUserPath(cfg.KubeVirt.Kubectl)
+		cfg.KubeVirt.Virtctl = expandUserPath(cfg.KubeVirt.Virtctl)
+		cfg.KubeVirt.Kubeconfig = expandUserPath(cfg.KubeVirt.Kubeconfig)
+		cfg.KubeVirt.Template = expandUserPath(cfg.KubeVirt.Template)
+		cfg.KubeVirt.SSHKey = expandUserPath(cfg.KubeVirt.SSHKey)
+		cfg.KubeVirt.SSHPublicKey = expandUserPath(cfg.KubeVirt.SSHPublicKey)
+		if applied.DeleteOnRelease {
+			MarkDeleteOnReleaseExplicit(cfg, "kubevirt")
+		}
+		if err != nil {
+			return err
+		}
 	}
 	{
 		applied, err := cfg.SealosDevbox.applyEnv()

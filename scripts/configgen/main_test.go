@@ -562,6 +562,12 @@ func TestSealosDevboxGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestKubeVirtGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_kubevirt.go", "../../internal/cli/config_kubevirt_generated.go", "KubeVirtConfig", "kubevirt", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {

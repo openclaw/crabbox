@@ -1136,6 +1136,133 @@ func TestHostingerConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestKubeVirtConfigSources(t *testing.T) {
+	clearConfigEnv(t)
+	want := KubeVirtConfig{Kubectl: "kubectl", Virtctl: "virtctl", Namespace: "default", SSHUser: "crabbox", SSHPort: "22", WorkRoot: "/home/crabbox/crabbox", DeleteOnRelease: true}
+	if got := baseConfig().KubeVirt; got != want {
+		t.Fatalf("defaults=%#v want %#v", got, want)
+	}
+	fields := []struct{ field, key, env string }{
+		{"Kubectl", "kubectl", "KUBECTL"}, {"Virtctl", "virtctl", "VIRTCTL"}, {"Kubeconfig", "kubeconfig", "KUBECONFIG"}, {"Context", "context", "CONTEXT"}, {"Namespace", "namespace", "NAMESPACE"}, {"Template", "template", "TEMPLATE"}, {"SSHUser", "sshUser", "SSH_USER"}, {"SSHKey", "sshKey", "SSH_KEY"}, {"SSHPublicKey", "sshPublicKey", "SSH_PUBLIC_KEY"}, {"SSHPort", "sshPort", "SSH_PORT"}, {"WorkRoot", "workRoot", "WORK_ROOT"},
+	}
+	for _, f := range fields {
+		t.Run(f.field, func(t *testing.T) {
+			for _, input := range []string{"null", "''", "'  '", "'same'", "'next'"} {
+				cfg := baseConfig()
+				reflect.ValueOf(&cfg.KubeVirt).Elem().FieldByName(f.field).SetString("same")
+				generic := cfg.WorkRoot
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte("kubevirt: {"+f.key+": "+input+"}"), &file); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfig(&cfg, file); err != nil {
+					t.Fatal(err)
+				}
+				want := "same"
+				if input == "'  '" {
+					want = "  "
+				}
+				if input == "'next'" {
+					want = "next"
+				}
+				if got := reflect.ValueOf(cfg.KubeVirt).FieldByName(f.field).String(); got != want {
+					t.Fatalf("file %s=%q want %q", input, got, want)
+				}
+				if cfg.WorkRoot != generic || IsWorkRootExplicit(&cfg) {
+					t.Fatal("file introduced generic workroot state")
+				}
+			}
+			for _, input := range []string{"", "  ", "same", "next"} {
+				t.Setenv("CRABBOX_KUBEVIRT_"+f.env, input)
+				cfg := baseConfig()
+				reflect.ValueOf(&cfg.KubeVirt).Elem().FieldByName(f.field).SetString("same")
+				generic := cfg.WorkRoot
+				if err := applyEnv(&cfg); err != nil {
+					t.Fatal(err)
+				}
+				want := input
+				if input == "" {
+					want = "same"
+				}
+				if got := reflect.ValueOf(cfg.KubeVirt).FieldByName(f.field).String(); got != want {
+					t.Fatalf("env %q=%q want %q", input, got, want)
+				}
+				if cfg.WorkRoot != generic || IsWorkRootExplicit(&cfg) {
+					t.Fatal("env introduced generic workroot state")
+				}
+			}
+		})
+	}
+	for _, input := range []string{"", "invalid", " true ", "OFF"} {
+		t.Run("bool-"+input, func(t *testing.T) {
+			t.Setenv("CRABBOX_KUBEVIRT_DELETE_ON_RELEASE", input)
+			cfg := baseConfig()
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.KubeVirt.DeleteOnRelease != (input != "OFF") || DeleteOnReleaseExplicit(cfg, "kubevirt") != (input == " true " || input == "OFF") {
+				t.Fatal("bool value/accepted marker")
+			}
+		})
+	}
+}
+
+func TestKubeVirtConfigPathAndInput(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	fields := []struct{ field, key, env string }{{"Kubectl", "kubectl", "KUBECTL"}, {"Virtctl", "virtctl", "VIRTCTL"}, {"Kubeconfig", "kubeconfig", "KUBECONFIG"}, {"Template", "template", "TEMPLATE"}, {"SSHKey", "sshKey", "SSH_KEY"}, {"SSHPublicKey", "sshPublicKey", "SSH_PUBLIC_KEY"}}
+	for _, f := range fields {
+		t.Run(f.field, func(t *testing.T) {
+			for _, input := range []string{"null", "''", "'~/fixture'"} {
+				cfg := baseConfig()
+				reflect.ValueOf(&cfg.KubeVirt).Elem().FieldByName(f.field).SetString("~/fixture")
+				var file fileConfig
+				if err := yaml.Unmarshal([]byte("kubevirt: {"+f.key+": "+input+", deleteOnRelease: false}"), &file); err != nil {
+					t.Fatal(err)
+				}
+				original := *file.KubeVirt
+				ptr := file.KubeVirt.DeleteOnRelease
+				if err := applyFileConfig(&cfg, file); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(*file.KubeVirt, original) || file.KubeVirt.DeleteOnRelease != ptr || *ptr {
+					t.Fatal("file input or bool pointer mutated")
+				}
+				want := "~/fixture"
+				if input == "'~/fixture'" {
+					want = filepath.Join(home, "fixture")
+				}
+				if got := reflect.ValueOf(cfg.KubeVirt).FieldByName(f.field).String(); got != want {
+					t.Fatalf("file expansion=%q want %q", got, want)
+				}
+				if cfg.KubeVirt.DeleteOnRelease || !DeleteOnReleaseExplicit(cfg, "kubevirt") {
+					t.Fatal("false presence lost")
+				}
+				for _, env := range []string{"", "~/fixture"} {
+					t.Setenv("CRABBOX_KUBEVIRT_"+f.env, env)
+					reflect.ValueOf(&cfg.KubeVirt).Elem().FieldByName(f.field).SetString("~/fixture")
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+					if reflect.ValueOf(cfg.KubeVirt).FieldByName(f.field).String() != filepath.Join(home, "fixture") {
+						t.Fatal("env fallback did not expand")
+					}
+				}
+			}
+		})
+	}
+	cfg := baseConfig()
+	cfg.KubeVirt.Kubectl = "~/fixture"
+	before := cfg.KubeVirt
+	if err := applyFileConfig(&cfg, fileConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KubeVirt != before {
+		t.Fatal("nil file changed provider")
+	}
+}
+
 func TestDeleteOnReleaseExplicitTracksProviderAndSource(t *testing.T) {
 	value := true
 	cfg := baseConfig()
