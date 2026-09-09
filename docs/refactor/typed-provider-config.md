@@ -3,7 +3,7 @@
 Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
-Tensorlake, Orgo, and OpenComputer
+Tensorlake, Orgo, OpenComputer, and Modal
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -15,8 +15,8 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_cloudflare_sandbox.go`, `internal/cli/config_e2b.go`,
 `internal/cli/config_blaxel.go`, `internal/cli/config_azure_dynamic_sessions.go`,
 `internal/cli/config_smolvm.go`, `internal/cli/config_semaphore.go`,
-`internal/cli/config_tensorlake.go`, `internal/cli/config_orgo.go`, and
-`internal/cli/config_opencomputer.go`.
+`internal/cli/config_tensorlake.go`, `internal/cli/config_orgo.go`,
+`internal/cli/config_opencomputer.go`, and `internal/cli/config_modal.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -119,6 +119,18 @@ machine-specific paths. Its header identifies the generator and source file.
    `fileIgnoreEmpty:"true"`. This is valid only for strings with a file source;
    it adds an exact nonempty check without trimming, changing environment/flag
    behavior, or changing other fields' presence semantics.
+   Existing list bindings can opt into fixed source-specific rules on `[]string`:
+   `fileList:"raw"` clones a supplied YAML list without normalization, preserving
+   raw elements, order, and duplicates; omission/null preserves the prior value,
+   while an explicit empty list clears it. `envList:"presence"` delegates to
+   core's `getenvList`, including present-empty and `none` clearing. The repeatable
+   `flagList:"replace-append"` uses one shared flag-value implementation: first
+   occurrence clears configured defaults, later occurrences append, and each
+   comma-separated occurrence trims and drops blanks without deduplication.
+   Registration and application clone the list; unvisited flags do not assign.
+   These modes require their corresponding admitted source and reject unsupported
+   values or types. They accept no custom parser, separator, or expression and
+   leave ordinary list bindings unchanged.
    Use `reportApplied:"true"` only on string/bool fields whose accepted-input
    events are needed by an existing handwritten policy. See the report boundary
    below; this is not a new source grant.
@@ -134,7 +146,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer ./internal/providers/modal` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:

@@ -9928,10 +9928,10 @@ func TestModalSecretConfigRequiresTrustedFile(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Modal.Environment = "trusted-env"
 	cfg.Modal.Secrets = []string{"sample"}
-	file := fileConfig{Modal: &fileModalConfig{
-		Environment: "repo-env",
-		Secrets:     []string{"example"},
-	}}
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("modal:\n  environment: repo-env\n  secrets: [example]\n"), &file); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
 		t.Fatal(err)
@@ -10718,5 +10718,167 @@ func TestOpenComputerConfigEnvironmentContract(t *testing.T) {
 				t.Fatalf("burst raw=%q got=%t", tc.raw, cfg.OpenComputer.Burst)
 			}
 		})
+	}
+}
+
+func TestModalConfigFileContract(t *testing.T) {
+	wantDefaults := ModalConfig{App: "crabbox", Image: "python:3.13-slim", Workdir: "/workspace/crabbox", Python: "python3"}
+	if got := baseConfig().Modal; !reflect.DeepEqual(got, wantDefaults) {
+		t.Fatalf("defaults=%#v want=%#v", got, wantDefaults)
+	}
+	if reflect.TypeOf(ModalConfig{}).NumField() != 6 || reflect.TypeOf(fileModalConfig{}).NumField() != 6 {
+		t.Fatal("config field count changed")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace", "value"} {
+			cfg := baseConfig()
+			cfg.Modal.Environment = "prior-environment"
+			want := cfg.Modal
+			fields := map[string]any{}
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"app", &want.App}, {"image", &want.Image}, {"workdir", &want.Workdir}, {"python", &want.Python}, {"environment", &want.Environment}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = "fixture-value"
+				}
+				fields[f.key] = raw
+				if (mode == "equal" || mode == "whitespace" || mode == "value") && (trusted || f.key != "environment") {
+					*f.v = raw.(string)
+				}
+			}
+			data, err := yaml.Marshal(map[string]any{"modal": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Modal, want) {
+				t.Fatalf("mode=%s trusted=%t got=%#v want=%#v", mode, trusted, cfg.Modal, want)
+			}
+		}
+		for _, tc := range []struct {
+			name, yaml string
+			want       []string
+		}{{"omitted", "modal: {}\n", []string{"prior"}}, {"null", "modal:\n  secrets: null\n", []string{"prior"}}, {"empty", "modal:\n  secrets: []\n", nil}, {"raw", "modal:\n  secrets: [' alpha ', '', alpha, ' ', beta, alpha]\n", []string{" alpha ", "", "alpha", " ", "beta", "alpha"}}} {
+			cfg := baseConfig()
+			cfg.Modal.Secrets = []string{"prior"}
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte(tc.yaml), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			want := tc.want
+			if !trusted {
+				want = []string{"prior"}
+			}
+			if !reflect.DeepEqual(cfg.Modal.Secrets, want) {
+				t.Fatalf("list=%s trusted=%t got=%#v want=%#v", tc.name, trusted, cfg.Modal.Secrets, want)
+			}
+			if trusted && tc.name == "raw" {
+				source := reflect.ValueOf(file.Modal).Elem().FieldByName("Secrets")
+				if source.Kind() == reflect.Pointer {
+					source = source.Elem()
+				}
+				source.Index(0).SetString("source-mutated")
+				if cfg.Modal.Secrets[0] != " alpha " {
+					t.Fatal("file list aliases config")
+				}
+				cfg.Modal.Secrets[1] = "config-mutated"
+				if source.Index(1).String() != "" {
+					t.Fatal("config aliases file list")
+				}
+			}
+		}
+	}
+}
+
+func TestModalConfigEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"empty", "equal", "whitespace", "value"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Modal.Environment = "prior-environment"
+			want := cfg.Modal
+			for _, f := range []struct {
+				suffix string
+				v      *string
+			}{{"APP", &want.App}, {"IMAGE", &want.Image}, {"WORKDIR", &want.Workdir}, {"PYTHON", &want.Python}, {"ENVIRONMENT", &want.Environment}} {
+				raw := *f.v
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = "fixture-value"
+				}
+				t.Setenv("CRABBOX_MODAL_"+f.suffix, raw)
+				if raw != "" {
+					*f.v = raw
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Modal, want) {
+				t.Fatalf("mode=%s got=%#v want=%#v", mode, cfg.Modal, want)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, raw string
+		present   bool
+		want      []string
+	}{{"absent", "", false, []string{"prior"}}, {"empty", "", true, []string{}}, {"none", " NoNe ", true, []string{}}, {"blanks", " , , ", true, []string{}}, {"ordered", " alpha, ,beta,alpha ", true, []string{"alpha", "beta", "alpha"}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Modal.Secrets = []string{"prior"}
+			t.Setenv("CRABBOX_MODAL_SECRETS", tc.raw)
+			if !tc.present {
+				if err := os.Unsetenv("CRABBOX_MODAL_SECRETS"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Modal.Secrets, tc.want) {
+				t.Fatalf("list=%s got=%#v want=%#v", tc.name, cfg.Modal.Secrets, tc.want)
+			}
+		})
+	}
+}
+
+func TestModalConfigServerTypeFallback(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{{"", "python:3.13-slim"}, {"  ", "  "}, {" custom-image ", " custom-image "}} {
+		cfg := baseConfig()
+		cfg.Provider = "modal"
+		cfg.Modal.Image = tc.raw
+		if got := serverTypeForConfig(cfg); got != tc.want {
+			t.Fatalf("serverType=%q want=%q", got, tc.want)
+		}
 	}
 }

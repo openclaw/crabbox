@@ -920,15 +920,6 @@ type DockerSandboxConfig struct {
 	Kit             []string
 }
 
-type ModalConfig struct {
-	App         string
-	Image       string
-	Workdir     string
-	Python      string
-	Environment string
-	Secrets     []string
-}
-
 type AsciiBoxConfig struct {
 	APIKey  string
 	BaseURL string
@@ -2827,14 +2818,9 @@ func baseConfig() Config {
 		},
 		AnthropicSRT:    defaultAnthropicSRTConfig(),
 		CloudRunSandbox: defaultCloudRunSandboxConfig(),
-		Modal: ModalConfig{
-			App:     "crabbox",
-			Image:   "python:3.13-slim",
-			Workdir: "/workspace/crabbox",
-			Python:  "python3",
-		},
-		UpstashBox: defaultUpstashBoxConfig(),
-		Smolvm:     defaultSmolvmConfig(),
+		Modal:           defaultModalConfig(),
+		UpstashBox:      defaultUpstashBoxConfig(),
+		Smolvm:          defaultSmolvmConfig(),
 		AsciiBox: AsciiBoxConfig{
 			BaseURL: "https://ascii.dev",
 			CLIPath: "box",
@@ -3804,15 +3790,6 @@ type fileDockerSandboxConfig struct {
 	ExtraWorkspaces *[]string `yaml:"extraWorkspaces,omitempty"`
 	MCP             *[]string `yaml:"mcp,omitempty"`
 	Kit             *[]string `yaml:"kit,omitempty"`
-}
-
-type fileModalConfig struct {
-	App         string   `yaml:"app,omitempty"`
-	Image       string   `yaml:"image,omitempty"`
-	Workdir     string   `yaml:"workdir,omitempty"`
-	Python      string   `yaml:"python,omitempty"`
-	Environment string   `yaml:"environment,omitempty"`
-	Secrets     []string `yaml:"secrets,omitempty"`
 }
 
 type fileAsciiBoxConfig struct {
@@ -6389,25 +6366,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	if err := cfg.CloudRunSandbox.applyFile(file.CloudRunSandbox); err != nil {
 		return err
 	}
-	if file.Modal != nil {
-		if file.Modal.App != "" {
-			cfg.Modal.App = file.Modal.App
-		}
-		if file.Modal.Image != "" {
-			cfg.Modal.Image = file.Modal.Image
-		}
-		if file.Modal.Workdir != "" {
-			cfg.Modal.Workdir = file.Modal.Workdir
-		}
-		if file.Modal.Python != "" {
-			cfg.Modal.Python = file.Modal.Python
-		}
-		if trusted && file.Modal.Environment != "" {
-			cfg.Modal.Environment = file.Modal.Environment
-		}
-		if trusted && file.Modal.Secrets != nil {
-			cfg.Modal.Secrets = append([]string(nil), file.Modal.Secrets...)
-		}
+	if err := cfg.Modal.applyFile(file.Modal, trusted); err != nil {
+		return err
 	}
 	{
 		applied, err := cfg.UpstashBox.applyFile(file.UpstashBox)
@@ -8254,13 +8214,8 @@ func applyEnv(cfg *Config) error {
 	if err := cfg.CloudRunSandbox.applyEnv(); err != nil {
 		return err
 	}
-	cfg.Modal.App = getenv("CRABBOX_MODAL_APP", cfg.Modal.App)
-	cfg.Modal.Image = getenv("CRABBOX_MODAL_IMAGE", cfg.Modal.Image)
-	cfg.Modal.Workdir = getenv("CRABBOX_MODAL_WORKDIR", cfg.Modal.Workdir)
-	cfg.Modal.Python = getenv("CRABBOX_MODAL_PYTHON", cfg.Modal.Python)
-	cfg.Modal.Environment = getenv("CRABBOX_MODAL_ENVIRONMENT", cfg.Modal.Environment)
-	if values, ok := getenvList("CRABBOX_MODAL_SECRETS"); ok {
-		cfg.Modal.Secrets = values
+	if err := cfg.Modal.applyEnv(); err != nil {
+		return err
 	}
 	{
 		applied, err := cfg.UpstashBox.applyEnv()
@@ -8726,7 +8681,7 @@ func serverTypeForConfig(cfg Config) string {
 		return blank(cfg.ExeDev.Image, "default")
 	}
 	if cfg.Provider == "modal" {
-		return blank(cfg.Modal.Image, "python:3.13-slim")
+		return blank(cfg.Modal.Image, ModalConfigDefaultImage)
 	}
 	if cfg.Provider == "upstash-box" || cfg.Provider == "upstash" {
 		return blank(cfg.UpstashBox.Size, UpstashBoxConfigDefaultSize)

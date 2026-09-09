@@ -478,6 +478,12 @@ func TestOpenComputerGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestModalGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_modal.go", "../../internal/cli/config_modal_generated.go", "ModalConfig", "modal", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -1601,4 +1607,127 @@ func TestFilePresent(t *testing.T){
 `
 		runScalarFixture(t, input, output, behavior)
 	}
+}
+
+const sourceListSample = "package cli\ntype PilotConfig struct {\n" +
+	" Name string `sources:\"user,repo,env,flag\" config:\"name\" env:\"NAME\" flag:\"name\" help:\"Name\"`\n" +
+	" Items []string `sources:\"user,env,flag\" config:\"items\" env:\"ITEMS\" flag:\"item\" help:\"Items\" fileList:\"raw\" envList:\"presence\" flagList:\"replace-append\"`\n}"
+
+func TestSchemaListModesFailClosed(t *testing.T) {
+	for _, mode := range []struct{ tag, value string }{{"fileList", "raw"}, {"envList", "presence"}, {"flagList", "replace-append"}} {
+		for _, value := range []string{"", "other"} {
+			input := strings.Replace(sourceListSample, mode.tag+`:"`+mode.value+`"`, mode.tag+`:"`+value+`"`, 1)
+			if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), mode.tag+" requires") {
+				t.Fatalf("%s=%q: %v", mode.tag, value, err)
+			}
+		}
+		for _, kind := range []string{"string", "int", "bool", "float64"} {
+			input := strings.Replace(sample, `help:"Name"`, `help:"Name" `+mode.tag+`:"`+mode.value+`"`, 1)
+			input = strings.Replace(input, "Name string", "Name "+kind, 1)
+			if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), mode.tag+" requires") {
+				t.Fatalf("%s kind%s: %v", mode.tag, kind, err)
+			}
+		}
+	}
+	for _, mode := range []struct{ tag, value string }{{"fileList", "raw"}, {"envList", "presence"}} {
+		input := strings.Replace(flagOnlySample, `help:"Ports"`, `help:"Ports" `+mode.tag+`:"`+mode.value+`"`, 1)
+		if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), mode.tag+" requires") {
+			t.Fatalf("no-source %s: %v", mode.tag, err)
+		}
+	}
+	for _, extra := range []string{`default:"a"`, `reportApplied:"true"`, `envAlias:"OTHER"`, `configAlias:"other"`, `flagFallback:"a"`, `fileIgnoreEmpty:"true"`} {
+		input := strings.Replace(sourceListSample, `help:"Items"`, `help:"Items" `+extra, 1)
+		if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil {
+			t.Fatalf("incompatible list mode %s admitted", extra)
+		}
+	}
+	input := "package cli\ntype PilotConfig struct{ Items []string `sources:\"user,env\" config:\"items\" env:\"ITEMS\" flagList:\"replace-append\"` }"
+	if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil {
+		t.Fatal("no-flag list admitted")
+	}
+}
+
+func TestGenerateSourceSpecificLists(t *testing.T) {
+	s, err := parseSchema([]byte(sourceListSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic source lists: %v", err)
+	}
+	text := string(output)
+	for _, want := range []string{`cfg.Items = append([]string(nil), (*file.Items)...)`, `getenvList("ITEMS")`, `newReplaceAppendListFlag(defaults.Items)`, `cfg.Items = append([]string(nil), values.Items.values...)`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing list binding %q", want)
+		}
+	}
+	if strings.Contains(text, `"os"`) || strings.Contains(text, `"strings"`) {
+		t.Fatal("unused list helper imports emitted")
+	}
+	if strings.Index(text, `fs.Var(listItems`) > strings.Index(text, `fs.String("name"`) {
+		t.Fatal("repeatable list registered after scalar")
+	}
+	// Reuse the actual shared core flag value in both compilation and execution fixtures.
+	helperSource, err := os.ReadFile("../../internal/cli/config_list_flag.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper := strings.SplitN(string(helperSource), "import \"strings\"", 2)[1]
+	compileSource := strings.Replace(sourceListSample, "package cli", "package cli\nimport \"strings\"", 1) + helper + "\nfunc getenvList(string)([]string,bool){panic(\"stub\")}\n"
+	typecheckGenerated(t, compileSource, output)
+	coreSource, err := os.ReadFile("../../internal/cli/config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	getters := ""
+	for _, name := range []string{"getenvList", "splitCommaList", "normalizeList"} {
+		start := strings.Index(string(coreSource), "func "+name+"(")
+		if start < 0 {
+			t.Fatalf("missing core helper%s", name)
+		}
+		rest := string(coreSource)[start:]
+		end := strings.Index(rest, "\nfunc ")
+		if end < 0 {
+			t.Fatalf("missing end of helper%s", name)
+		}
+		getters += rest[:end] + "\n"
+	}
+	const behavior = `package cli
+import("flag";"os";"reflect";"strings";"testing")
+func getenv(_ string,prior string)string{return prior}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestListSources(t *testing.T){
+ prior:=[]string{"prior"};cfg:=PilotConfig{Items:prior}
+ if err:=cfg.applyFile(nil,true);err!=nil||!reflect.DeepEqual(cfg.Items,prior){t.Fatal("nil file changed config")}
+ if err:=cfg.applyFile(&filePilotConfig{},true);err!=nil||!reflect.DeepEqual(cfg.Items,prior){t.Fatal("null/omitted list changed config")}
+ raw:=[]string{" a ","","dup","dup"}
+ if err:=cfg.applyFile(&filePilotConfig{Items:&raw},false);err!=nil||!reflect.DeepEqual(cfg.Items,prior){t.Fatal("untrusted raw list applied")}
+ if err:=cfg.applyFile(&filePilotConfig{Items:&raw},true);err!=nil||!reflect.DeepEqual(cfg.Items,[]string{" a ","","dup","dup"}){t.Fatalf("raw copy %#v %v",cfg.Items,err)}
+ raw[0]="mutation";if cfg.Items[0]!=" a "{t.Fatal("file list storage shared")}
+ empty:=[]string{};if err:=cfg.applyFile(&filePilotConfig{Items:&empty},true);err!=nil||cfg.Items!=nil{t.Fatalf("empty file clone %#v %v",cfg.Items,err)}
+ cfg.Items=[]string{"prior"};if err:=cfg.applyEnv();err!=nil||!reflect.DeepEqual(cfg.Items,[]string{"prior"}){t.Fatal("absent env changed config")}
+ for _,tc:=range []struct{raw string;want []string}{{"",[]string{}},{" NoNe ",[]string{}},{" a, ,dup,dup ",[]string{"a","dup","dup"}},{" , ",[]string{}}}{
+  t.Setenv("ITEMS",tc.raw);if err:=cfg.applyEnv();err!=nil||!reflect.DeepEqual(cfg.Items,tc.want){t.Fatalf("env%q: %#v %v",tc.raw,cfg.Items,err)}
+ }
+ cfg.Items=[]string{"old"," raw "};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+ cfg.Items[0]="after registration";getter:=fs.Lookup("item").Value.(flag.Getter)
+ if !reflect.DeepEqual(getter.Get(),[]string{"old"," raw "})||fs.Lookup("item").DefValue!="old, raw "{t.Fatalf("registration snapshot %#v",getter.Get())}
+ values.Apply(&cfg,fs);if cfg.Items[0]!="after registration"{t.Fatal("unvisited snapshot overwritten config")}
+ if err:=fs.Parse([]string{"--item=","--item= one, ,two,one ","--item=none"});err!=nil{t.Fatal(err)}
+ if !reflect.DeepEqual(getter.Get(),[]string{"one","two","one","none"}){t.Fatalf("replace/append %#v",getter.Get())}
+ copy:=getter.Get().([]string);copy[0]="mutation";values.Apply(&cfg,fs)
+ if !reflect.DeepEqual(cfg.Items,[]string{"one","two","one","none"}){t.Fatal("Get aliased state")}
+ cfg.Items[0]="cfg mutation";if getter.Get().([]string)[0]!="one"{t.Fatal("Apply aliased flag state")}
+ fs2:=flag.NewFlagSet("empty",flag.ContinueOnError);values2:=RegisterPilotConfigFlags(fs2,PilotConfig{Items:[]string{"old"}})
+ if err:=fs2.Parse([]string{"--item="});err!=nil{t.Fatal(err)}
+ got:=fs2.Lookup("item").Value.(flag.Getter).Get().([]string);if got==nil||len(got)!=0{t.Fatalf("Get empty shape %#v",got)}
+ values2.Apply(&cfg,fs2);if cfg.Items!=nil{t.Fatalf("Apply empty shape %#v",cfg.Items)}
+}
+`
+	runScalarFixture(t, sourceListSample, output, behavior+helper+getters)
 }
