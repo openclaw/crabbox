@@ -894,6 +894,49 @@ test("AWS devtools mint wrapper preserves promotion failure while attempting rec
   assert.match(result.stderr, /transactional promotion receipt is unavailable for rollback/);
 });
 
+test("Linux C++ smoke links the older libxdo C ABI and retains its runtime assertion", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "crabbox-xdo-abi-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const smoke = await readFile(path.join(scriptDir, "devtools-image-smoke-linux.sh"), "utf8");
+  const cpp = smoke.match(/<<'CPP'\n([\s\S]*?)\nCPP/)[1];
+  const headers = {
+    "gtk/gtk.h": "inline int gtk_get_major_version() { return 3; }\n",
+    "webkit2/webkit2.h": "inline int webkit_get_major_version() { return 2; }\n",
+    "libayatana-appindicator/app-indicator.h": "inline int app_indicator_get_type() { return 1; }\n",
+    "librsvg/rsvg.h": "inline int rsvg_handle_get_type() { return 1; }\n",
+    "openssl/ssl.h": "inline int OPENSSL_init_ssl(int, void *) { return 1; }\n",
+    // libxdo 3.20160805.1 declares this C function without C++ linkage guards.
+    "xdo.h": "const char **xdo_get_symbol_map(void);\n",
+  };
+  for (const [name, content] of Object.entries(headers)) {
+    await mkdir(path.dirname(path.join(root, name)), { recursive: true });
+    await writeFile(path.join(root, name), content);
+  }
+  await writeFile(path.join(root, "xdo.c"), '#include "xdo.h"\nconst char **xdo_get_symbol_map(void) { static const char *symbols[] = {"alt", "Alt_L", 0}; return symbols; }\n');
+  const run = (command, args) => {
+    const result = spawnSync(command, args, { cwd: root, encoding: "utf8", timeout: 30_000 });
+    assert.ifError(result.error);
+    return result;
+  };
+  const object = run("cc", ["-c", "xdo.c", "-o", "xdo.o"]);
+  assert.equal(object.status, 0, object.stderr);
+  assert.match(cpp, /xdo_get_symbol_map\(\) == nullptr/);
+  for (const guarded of [false, true]) {
+    const input = guarded ? cpp : cpp.replace(/extern "C" \{\n(#include <xdo.h>)\n\}/, "$1");
+    await writeFile(path.join(root, "main.cpp"), input);
+    const linked = run("c++", ["-std=c++17", "-I.", "main.cpp", "xdo.o", "-o", "native-smoke"]);
+    if (!guarded) {
+      assert.notEqual(linked.status, 0);
+      assert.match(linked.stderr, /xdo_get_symbol_map/);
+    } else {
+      assert.equal(linked.status, 0, linked.stderr);
+      const executed = run(path.join(root, "native-smoke"), []);
+      assert.equal(executed.status, 0, executed.stderr);
+      assert.equal(executed.stdout.trim(), "native-build-ok");
+    }
+  }
+});
+
 async function runLinuxSmoke(t, options = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "crabbox-linux-smoke-"));
   t.after(() => rm(root, { recursive: true, force: true }));

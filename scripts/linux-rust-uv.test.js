@@ -8,14 +8,14 @@ import test from "node:test";
 
 const installer = path.resolve(import.meta.dirname, "install-linux-developer-tools.sh");
 const source = fs.readFileSync(installer, "utf8");
-function fixture(t) {
+function fixture(t, bash = "bash") {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-rust-uv-")));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   for (const name of ["home", "tmp", "bin"]) fs.mkdirSync(path.join(root, name));
   const run = (body, env = {}) => {
     // Darwin ignores TMPDIR for bare mktemp -d. Keep disposable probes under
     // this fixture without changing explicit production publication templates.
-    const result = spawnSync("bash", ["-c", `source "$INSTALLER"
+    const result = spawnSync(bash, ["-c", `source "$INSTALLER"
 mktemp() {
   if [[ "$#" == 1 && "$1" == -d ]]; then command mktemp -d "$TMPDIR/probe.XXXXXXXX"
   else command mktemp "$@"; fi
@@ -68,14 +68,44 @@ test("native runner Go seed binds the same versioned archive and digest as the i
   assert.ok(actions.includes(`("go", "1.27.1", "go1.27.1.linux-amd64.tar.gz",\n             "${digest}")`));
 });
 
-for (const renderer of ["go_smoke_script", "rust_smoke_script", "uv_smoke_script"]) {
-  test(`${renderer} retains valid native Bash serialized function syntax`, (t) => {
-    const { run } = fixture(t);
-    const result = run(`${renderer}`);
-    passed(result);
-    const checked = spawnSync("bash", ["-n"], { input: result.stdout, encoding: "utf8", timeout: 10_000 });
-    assert.ifError(checked.error);
-    passed(checked);
+const bashExecutables = [...new Set(["/bin/bash", ...(process.env.PATH ?? "").split(path.delimiter)
+  .map((directory) => path.join(directory, "bash"))].filter((file) => fs.existsSync(file)).map((file) => fs.realpathSync(file)))];
+for (const bash of bashExecutables) {
+  const version = spawnSync(bash, ["-c", 'printf "%s" "$BASH_VERSION"'], { encoding: "utf8", timeout: 10_000 });
+  assert.ifError(version.error);
+  passed(version);
+  for (const renderer of ["node_pnpm_smoke_script", "go_smoke_script", "bun_smoke_script", "rust_smoke_script", "uv_smoke_script"]) {
+    test(`${renderer} retains serialized function syntax with Bash ${version.stdout}`, (t) => {
+      const { run } = fixture(t, bash);
+      const result = run(renderer);
+      passed(result);
+      const checked = spawnSync(bash, ["-n"], { input: result.stdout, encoding: "utf8", timeout: 10_000 });
+      assert.ifError(checked.error);
+      passed(checked);
+    });
+  }
+  test(`serialized Go probe preserves heredoc failure with Bash ${version.stdout}`, (t) => {
+    const { root, run } = fixture(t, bash);
+    const bin = path.join(root, "go", "bin");
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(bin, "go"), `#!/bin/sh
+case "$1" in
+  version) echo 'go version go1.27.1 linux/amd64' ;;
+  env) printf 'linux\\namd64\\n' ;;
+  *) echo unexpected-go-execution >&2; exit 92 ;;
+esac
+`, { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, "gofmt"), "#!/bin/sh\necho unexpected-gofmt >&2\nexit 93\n", { mode: 0o755 });
+    const result = run(`
+definition="$(declare -f check_go_toolchain)"
+unset -f check_go_toolchain
+eval "$definition"
+cat() { return 47; }
+if check_go_toolchain "$PWD/go" "$PWD/check"; then exit 94; else exit $?; fi
+`);
+    assert.equal(result.status, 47, result.stderr);
+    assert.doesNotMatch(result.stderr, /unexpected-/);
+    assert.equal(fs.existsSync(path.join(root, "check", "formatted.go")), false);
   });
 }
 
@@ -228,18 +258,31 @@ function rustStateFixture(t) {
   const home = path.join(root, "home");
   const record = path.join(root, "root-state", "runtime-user.json");
   fs.mkdirSync(path.dirname(record), { mode: 0o755 });
-  // Only account/privileged ownership and remount metadata are modeled. The
-  // production preflight reads real files, links, modes, contents and inodes.
+  const systemRoot = path.join(root, "system");
+  // Model host ancestry and system-tool locations, not fixture-owned state.
+  // Real fixture files retain their modes, links, contents and inodes.
   const program = source.match(/rust_user_state\(\) \{[\s\S]*?<<'PY'\n([\s\S]*?)\nPY\n\}/)[1];
   const driver = `
-import os, pathlib, pwd, sys, types
+import os, pathlib, pwd, stat, sys, types
 fixture_home = os.environ["FIXTURE_HOME"]
-record_root = os.environ["RECORD_ROOT"]
+fixture_root = pathlib.Path(fixture_home).parent
+host_ancestors = set(fixture_root.parents)
+system_root = pathlib.Path(os.environ["SYSTEM_ROOT"])
 uid = os.getuid() or 1000
 pwd.getpwnam = lambda user: types.SimpleNamespace(pw_uid=uid, pw_dir=fixture_home)
-original_stat, original_lstat = pathlib.Path.stat, pathlib.Path.lstat
+# Path.lstat calls Path.stat on newer Python; model each OS result only once.
+original_stat, original_lstat = os.stat, os.lstat
+original_lexists = os.path.lexists
+def isolated_lexists(entry):
+    entry = pathlib.Path(entry)
+    if str(entry.parent) in ("/usr/local/bin", "/usr/bin", "/bin") and entry.name in ("rustup", "rustc", "cargo", "rustfmt"):
+        entry = system_root / str(entry).lstrip("/")
+    return original_lexists(entry)
+os.path.lexists = isolated_lexists
 def modeled(function, entry, *args, **kwargs):
     value = list(function(entry, *args, **kwargs))
+    if entry in host_ancestors:
+        value[0] = stat.S_IFDIR | 0o755
     if not str(entry).startswith(fixture_home):
         value[4] = 0
     else:
@@ -255,14 +298,35 @@ exec(${JSON.stringify(program)})
   const state = (action, env = {}) => {
     const result = spawnSync("python3", ["-c", driver, action, "alice", home, record, "1.97.1"], {
       env: { PATH: process.env.PATH, PYTHONDONTWRITEBYTECODE: "1", FIXTURE_HOME: home,
-        RECORD_ROOT: path.dirname(record), ...env },
+        SYSTEM_ROOT: systemRoot, ...env },
       encoding: "utf8", timeout: 10_000,
     });
     assert.ifError(result.error);
     return result;
   };
-  return { ...value, home, record, state };
+  return { ...value, home, record, state, systemRoot };
 }
+
+for (const directory of ["usr/local/bin", "usr/bin", "bin"]) {
+  for (const tool of ["rustup", "rustc", "cargo", "rustfmt"]) {
+    test(`Rust rejects an existing system tool without modifying it: ${directory}/${tool}`, (t) => {
+      const { state, record, systemRoot } = rustStateFixture(t);
+      const file = path.join(systemRoot, directory, tool);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, "operator tool\n");
+      assert.notEqual(state("check").status, 0);
+      assert.equal(fs.readFileSync(file, "utf8"), "operator tool\n");
+      assert.equal(fs.existsSync(record), false);
+    });
+  }
+}
+
+test("Rust rejects writable fixture-owned record ancestry", (t) => {
+  const { state, record } = rustStateFixture(t);
+  fs.chmodSync(path.dirname(record), 0o777);
+  assert.notEqual(state("check").status, 0);
+  assert.equal(fs.existsSync(record), false);
+});
 
 for (const conflict of [".cargo", ".rustup", "symlink-profile", "writable-profile"]) {
   test(`Rust leaves unknown runtime state unchanged: ${conflict}`, (t) => {

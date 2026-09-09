@@ -56,7 +56,10 @@ cat >"$smoke_dir/native/main.cpp" <<'CPP'
 #include <libayatana-appindicator/app-indicator.h>
 #include <librsvg/rsvg.h>
 #include <openssl/ssl.h>
+// Older distro libxdo headers omit their C++ linkage guard.
+extern "C" {
 #include <xdo.h>
+}
 int main() {
   if (gtk_get_major_version() < 3 || webkit_get_major_version() < 2 ||
       app_indicator_get_type() == 0 || rsvg_handle_get_type() == 0 ||

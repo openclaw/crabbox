@@ -381,7 +381,9 @@ check_go_toolchain() (
   target="$("$distribution/bin/go" env GOOS GOARCH)" || return $?
   [[ "$target" == $'linux\namd64' ]] || return 1
   cd "$scratch" || return $?
-  if cat >main.go <<'GO'
+  # Group the heredoc so Bash 3.2 and 5.2 both serialize its failure check safely.
+  {
+    cat >main.go <<'GO'
 package main
 
 // static int answer(void) { return 42; }
@@ -395,7 +397,7 @@ func main() {
 	fmt.Println("go-cgo-ok")
 }
 GO
-  then :; else return $?; fi
+  } || return $?
   "$distribution/bin/gofmt" main.go >formatted.go || return $?
   mv formatted.go main.go || return $?
   "$distribution/bin/go" test bytes crypto/sha256 || return $?
