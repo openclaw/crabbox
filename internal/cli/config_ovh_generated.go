@@ -7,11 +7,11 @@ import (
 )
 
 type fileOVHConfig struct {
-	Endpoint  *string `yaml:"endpoint,omitempty"`
-	ProjectID *string `yaml:"projectId,omitempty"`
-	Region    *string `yaml:"region,omitempty"`
-	Image     *string `yaml:"image,omitempty"`
-	Flavor    *string `yaml:"flavor,omitempty"`
+	Endpoint  string `yaml:"endpoint,omitempty"`
+	ProjectID string `yaml:"projectId,omitempty"`
+	Region    string `yaml:"region,omitempty"`
+	Image     string `yaml:"image,omitempty"`
+	Flavor    string `yaml:"flavor,omitempty"`
 }
 
 const OVHConfigDefaultEndpoint string = "https://api.us.ovhcloud.com/1.0"
@@ -36,21 +36,21 @@ func (cfg *OVHConfig) applyFile(file *fileOVHConfig, trusted bool) (OVHConfigApp
 	if file == nil {
 		return applied, nil
 	}
-	if trusted && file.Endpoint != nil && *file.Endpoint != "" {
-		cfg.Endpoint = *file.Endpoint
+	if trusted && file.Endpoint != "" {
+		cfg.Endpoint = file.Endpoint
 	}
-	if file.ProjectID != nil && *file.ProjectID != "" {
-		cfg.ProjectID = *file.ProjectID
+	if file.ProjectID != "" {
+		cfg.ProjectID = file.ProjectID
 	}
-	if file.Region != nil && *file.Region != "" {
-		cfg.Region = *file.Region
+	if file.Region != "" {
+		cfg.Region = file.Region
 	}
-	if file.Image != nil && *file.Image != "" {
-		cfg.Image = *file.Image
+	if file.Image != "" {
+		cfg.Image = file.Image
 		applied.Image = true
 	}
-	if file.Flavor != nil && *file.Flavor != "" {
-		cfg.Flavor = *file.Flavor
+	if file.Flavor != "" {
+		cfg.Flavor = file.Flavor
 	}
 	return applied, nil
 }

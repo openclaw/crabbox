@@ -7,9 +7,9 @@ import (
 )
 
 type fileWandbConfig struct {
-	APIKey             *string `yaml:"apiKey,omitempty"`
-	DefaultImage       *string `yaml:"defaultImage,omitempty"`
-	MaxLifetimeSeconds *int    `yaml:"maxLifetimeSeconds,omitempty"`
+	APIKey             string `yaml:"apiKey,omitempty"`
+	DefaultImage       string `yaml:"defaultImage,omitempty"`
+	MaxLifetimeSeconds int    `yaml:"maxLifetimeSeconds,omitempty"`
 }
 
 func defaultWandbConfig() WandbConfig {
@@ -20,14 +20,14 @@ func (cfg *WandbConfig) applyFile(file *fileWandbConfig) error {
 	if file == nil {
 		return nil
 	}
-	if file.APIKey != nil && *file.APIKey != "" {
-		cfg.APIKey = *file.APIKey
+	if file.APIKey != "" {
+		cfg.APIKey = file.APIKey
 	}
-	if file.DefaultImage != nil && *file.DefaultImage != "" {
-		cfg.DefaultImage = *file.DefaultImage
+	if file.DefaultImage != "" {
+		cfg.DefaultImage = file.DefaultImage
 	}
-	if file.MaxLifetimeSeconds != nil && *file.MaxLifetimeSeconds > 0 {
-		cfg.MaxLifetimeSeconds = *file.MaxLifetimeSeconds
+	if file.MaxLifetimeSeconds > 0 {
+		cfg.MaxLifetimeSeconds = file.MaxLifetimeSeconds
 	}
 	return nil
 }

@@ -7,12 +7,12 @@ import (
 )
 
 type fileOpenComputerConfig struct {
-	Workdir         *string `yaml:"workdir,omitempty"`
-	CPU             *int    `yaml:"cpu,omitempty"`
-	MemoryMB        *int    `yaml:"memoryMB,omitempty"`
-	TimeoutSecs     *int    `yaml:"timeoutSecs,omitempty"`
-	ExecTimeoutSecs *int    `yaml:"execTimeoutSecs,omitempty"`
-	Burst           *bool   `yaml:"burst,omitempty"`
+	Workdir         string `yaml:"workdir,omitempty"`
+	CPU             *int   `yaml:"cpu,omitempty"`
+	MemoryMB        *int   `yaml:"memoryMB,omitempty"`
+	TimeoutSecs     *int   `yaml:"timeoutSecs,omitempty"`
+	ExecTimeoutSecs *int   `yaml:"execTimeoutSecs,omitempty"`
+	Burst           *bool  `yaml:"burst,omitempty"`
 }
 
 const OpenComputerConfigDefaultWorkdir string = "/workspace/crabbox"
@@ -29,8 +29,8 @@ func (cfg *OpenComputerConfig) applyFile(file *fileOpenComputerConfig) error {
 	if file == nil {
 		return nil
 	}
-	if file.Workdir != nil && *file.Workdir != "" {
-		cfg.Workdir = *file.Workdir
+	if file.Workdir != "" {
+		cfg.Workdir = file.Workdir
 	}
 	if file.CPU != nil {
 		cfg.CPU = *file.CPU

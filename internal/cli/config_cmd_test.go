@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 type configArchitectureTestProvider struct {
@@ -441,6 +443,82 @@ func TestConfigShowIncludesFirecrackerConfig(t *testing.T) {
 		if !strings.Contains(text.String(), want) {
 			t.Fatalf("config show missing %q: %q", want, text.String())
 		}
+	}
+}
+
+func TestGeneratedFileStorageWriter(t *testing.T) {
+	for _, tc := range []struct{ name, input, want string }{
+		{"missing", "{}", "{}"},
+		{"null sections", "vultr: null\ntensorlake: null\ntencentcloud: null\nrunpod: null\nlinode: null", "{}"},
+		{"empty sections", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}\nlinode: {}", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}\nlinode: {}"},
+		{"null values", "vultr: {region: null, vpcIds: null}\ntensorlake: {cpus: null, memoryMB: null}\ntencentcloud: {rootGB: null}\nrunpod: {diskGB: null}\nlinode: {region: null, image: null, type: null, firewall: null, sshCIDRs: null}", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}\nlinode: {}"},
+		{"historical zero omission", "vultr: {region: '', vpcIds: [], sshCIDRs: []}\ntensorlake: {cpus: 0, memoryMB: 0}\ntencentcloud: {rootGB: 0}\nrunpod: {diskGB: 0}\nlinode: {region: '', image: '', type: '', firewall: '', sshCIDRs: []}", "vultr: {}\ntensorlake: {}\ntencentcloud: {}\nrunpod: {}\nlinode: {}"},
+		{"raw nonzero storage", "vultr: {region: '  ', vpcIds: [' a ', a, a]}\ntensorlake: {cpus: -0.5, memoryMB: -2}\ntencentcloud: {rootGB: 4294967296}\nrunpod: {diskGB: -3}\nlinode: {region: '  ', image: image-example, type: type-example, firewall: firewall-example, sshCIDRs: [' 192.0.2.0/24 ', 192.0.2.0/24, 192.0.2.0/24]}", "vultr: {region: '  ', vpcIds: [' a ', a, a]}\ntensorlake: {cpus: -0.5, memoryMB: -2}\ntencentcloud: {rootGB: 4294967296}\nrunpod: {diskGB: -3}\nlinode: {region: '  ', image: image-example, type: type-example, firewall: firewall-example, sshCIDRs: [' 192.0.2.0/24 ', 192.0.2.0/24, 192.0.2.0/24]}"},
+		{"negative int64 retained", "tencentcloud: {rootGB: -4}", "tencentcloud: {rootGB: -4}"},
+		{"intentional presence and clear", "blaxel: {execTimeoutSecs: 0, forgetMissing: false}\nanthropicSandboxRuntime: {settings: '', debug: false}\nmodal: {secrets: []}", "blaxel: {execTimeoutSecs: 0, forgetMissing: false}\nanthropicSandboxRuntime: {settings: '', debug: false}\nmodal: {secrets: []}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := isolatedConfigPath(t)
+			if err := os.WriteFile(path, []byte(tc.input), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file, err := readFileConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := writeUserFileConfig(file); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got, want map[string]any
+			if err := yaml.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			if err := yaml.Unmarshal([]byte(tc.want), &want); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("stored config = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+func TestGeneratedFileStorageSetBroker(t *testing.T) {
+	path := isolatedConfigPath(t)
+	if err := os.WriteFile(path, []byte("vultr: {region: '', vpcIds: []}\nlinode: {region: '', image: '', type: '', firewall: '', sshCIDRs: []}\nmodal: {secrets: []}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := app.configSetBroker([]string{"--url", "https://broker.example.invalid"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := yaml.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got["vultr"], map[string]any{}) {
+		t.Errorf("vultr storage = %#v, want empty mapping", got["vultr"])
+	}
+	if !reflect.DeepEqual(got["linode"], map[string]any{}) {
+		t.Errorf("linode storage = %#v, want empty mapping", got["linode"])
+	}
+	if !reflect.DeepEqual(got["modal"], map[string]any{"secrets": []any{}}) {
+		t.Errorf("modal clear lost: %#v", got["modal"])
+	}
+	file, err := readFileConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Broker == nil || file.Broker.URL != "https://broker.example.invalid" {
+		t.Fatalf("broker update missing")
 	}
 }
 

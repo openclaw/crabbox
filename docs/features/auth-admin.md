@@ -164,7 +164,7 @@ GET  /v1/runs and logs/events    own runs only
 GET  /v1/usage                   own usage only
 GET  /v1/capacity                self-owner admission aggregate across months/orgs
 GET  /v1/pool                    admin token only
-POST /v1/leases with hostId      admin token only
+POST /v1/leases with hostId      admin, or matching org-owned Mac allocation
 /v1/admin/*                      admin token only
 ```
 
@@ -182,8 +182,21 @@ an elevated owner limit.
 
 Provider host inventory is also capacity administration. Normal portal users
 see a Dedicated Host only when it backs an active lease already visible to
-them; unattached host inventory and explicit host-pinned lease creation require
-admin authentication.
+them; unattached host inventory remains admin-only. Pinning an unused AWS Mac
+Dedicated Host also permits authenticated members only when an exact coordinator
+allocation record matches that host, the requested region, and their current org
+identity. New admin allocations persist that org. Missing or ambiguous records,
+other-org records, and historical managed leases do not grant permission. Hosts
+allocated by older coordinators without a record remain admin-only; no claim or
+backfill command is added by this change.
+Other provider pins and other AWS resource selectors remain admin-only; existing
+checkpoint grants retain their exact host scope.
+
+Host permission never authorizes adopting an occupying lease. A create request
+fails with `host_in_use` while that host has a live or retained instance. Exact
+fixed-ID replay preserves its existing owner and intent checks. Kept leases
+remain visible to their owners and share recipients in ordinary CLI listing,
+even when released with the instance retained.
 
 ## Lease sharing
 

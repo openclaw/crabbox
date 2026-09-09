@@ -1474,10 +1474,20 @@ func (c *CoordinatorClient) Pool(ctx context.Context, cfg Config) ([]Coordinator
 }
 
 func (c *CoordinatorClient) Leases(ctx context.Context, state string, limit int) ([]CoordinatorLease, error) {
+	return c.listLeases(ctx, state, limit, "", "")
+}
+
+func (c *CoordinatorClient) listLeases(ctx context.Context, state string, limit int, view, provider string) ([]CoordinatorLease, error) {
 	var res struct {
 		Leases []CoordinatorLease `json:"leases"`
 	}
 	values := url.Values{}
+	if view != "" {
+		values.Set("view", view)
+	}
+	if provider != "" {
+		values.Set("provider", provider)
+	}
 	if state != "" {
 		values.Set("state", state)
 	}

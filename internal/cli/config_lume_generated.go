@@ -7,11 +7,11 @@ import (
 )
 
 type fileLumeConfig struct {
-	CLIPath  *string `yaml:"cliPath,omitempty"`
-	Base     *string `yaml:"base,omitempty"`
-	Storage  *string `yaml:"storage,omitempty"`
-	User     *string `yaml:"user,omitempty"`
-	WorkRoot *string `yaml:"workRoot,omitempty"`
+	CLIPath  string `yaml:"cliPath,omitempty"`
+	Base     string `yaml:"base,omitempty"`
+	Storage  string `yaml:"storage,omitempty"`
+	User     string `yaml:"user,omitempty"`
+	WorkRoot string `yaml:"workRoot,omitempty"`
 }
 
 const LumeConfigDefaultCLIPath string = "lume"
@@ -32,20 +32,20 @@ func (cfg *LumeConfig) applyFile(file *fileLumeConfig, trusted bool) error {
 	if file == nil {
 		return nil
 	}
-	if trusted && file.CLIPath != nil && *file.CLIPath != "" {
-		cfg.CLIPath = *file.CLIPath
+	if trusted && file.CLIPath != "" {
+		cfg.CLIPath = file.CLIPath
 	}
-	if trusted && file.Base != nil && *file.Base != "" {
-		cfg.Base = *file.Base
+	if trusted && file.Base != "" {
+		cfg.Base = file.Base
 	}
-	if trusted && file.Storage != nil && *file.Storage != "" {
-		cfg.Storage = *file.Storage
+	if trusted && file.Storage != "" {
+		cfg.Storage = file.Storage
 	}
-	if trusted && file.User != nil && *file.User != "" {
-		cfg.User = *file.User
+	if trusted && file.User != "" {
+		cfg.User = file.User
 	}
-	if file.WorkRoot != nil && *file.WorkRoot != "" {
-		cfg.WorkRoot = *file.WorkRoot
+	if file.WorkRoot != "" {
+		cfg.WorkRoot = file.WorkRoot
 	}
 	return nil
 }

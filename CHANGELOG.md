@@ -4,7 +4,12 @@
 
 ### Changes
 
+- Reject occupied host pins and coordinator replies with a different lease ID before bootstrap or cleanup; show retained leases in ordinary text and JSON listing. [PR 2049](https://github.com/openclaw/crabbox/pull/2049). Thanks @steipete.
+- Require an exact coordinator host/org/region allocation record for org-member AWS Mac host pins; historical leases never grant pin access, and missing, ambiguous, or other-org records remain admin-only. [PR 2049](https://github.com/openclaw/crabbox/pull/2049). Thanks @steipete.
+
+
 - Transfer Blacksmith run artifacts through bounded native file download instead of bulk stdout, preserving the original collection deadline and claim while isolating each invocation's evidence. [PR 2043](https://github.com/openclaw/crabbox/pull/2043). Thanks @steipete.
+- Restore omission of ignored empty and zero provider settings when updating user configuration, while preserving explicit clears and meaningful false/zero overrides. [PR 2053](https://github.com/openclaw/crabbox/pull/2053). Thanks @steipete.
 - Describe Scaleway configuration bindings once, sharing configured defaults while preserving explicit SDK location overrides and distinct file, environment, and flag list behavior. [PR 2036](https://github.com/openclaw/crabbox/pull/2036). Thanks @steipete.
 - Preserve recorded broker network diagnostics in inspect/status JSON, including SSH source CIDRs and AWS placement fields, without changing the resolved network mode or adding provider requests. https://github.com/openclaw/crabbox/pull/2039. Thanks @vincentkoc.
 - Allow the existing bodyless coordinator GET/HEAD curl fallback after a dial-local timeout while the request budget remains live, without replaying mutations or extending deadlines. https://github.com/openclaw/crabbox/pull/2044. Thanks @vincentkoc.
@@ -16,7 +21,7 @@
 
 - Describe Vultr file and environment bindings once without adding provider flags, preserving raw boot settings and list behavior while sharing runtime region and user-scheme defaulting. [PR 2050](https://github.com/openclaw/crabbox/pull/2050). Thanks @steipete.
 
-- Describe Linode file and environment bindings once, preserving OS-derived initial images, explicit image/type selection, and flagless configuration while sharing configured fallback values. [PR 2052](https://github.com/openclaw/crabbox/pull/2052). Thanks @steipete.
+- Describe Linode file and environment bindings once, preserving OS-derived initial images, explicit image/type selection, flagless configuration, and saved-file omission while sharing configured fallback values. [PR 2052](https://github.com/openclaw/crabbox/pull/2052). Thanks @steipete.
 
 ## 0.54.0 - 2026-09-09
 

@@ -11,11 +11,11 @@ const (
 // LinodeConfig contains non-secret settings without provider flags.
 // Portable OS resolution and late native validation remain separate policy.
 type LinodeConfig struct {
-	Region     string   `config:"region" env:"CRABBOX_LINODE_REGION" sources:"user,repo,env" fileIgnoreEmpty:"true"`
-	Image      string   `config:"image" env:"CRABBOX_LINODE_IMAGE" sources:"user,repo,env" fileIgnoreEmpty:"true" reportApplied:"true"`
-	Type       string   `config:"type" env:"CRABBOX_LINODE_TYPE" sources:"user,repo,env" fileIgnoreEmpty:"true" reportApplied:"true"`
-	FirewallID string   `config:"firewall" env:"CRABBOX_LINODE_FIREWALL" sources:"user,repo,env" fileIgnoreEmpty:"true"`
-	SSHCIDRs   []string `config:"sshCIDRs" env:"CRABBOX_LINODE_SSH_CIDRS" sources:"user,repo,env" fileList:"nonempty-raw"`
+	Region     string   `config:"region" env:"CRABBOX_LINODE_REGION" sources:"user,repo,env" fileIgnoreEmpty:"true" fileStorage:"value"`
+	Image      string   `config:"image" env:"CRABBOX_LINODE_IMAGE" sources:"user,repo,env" fileIgnoreEmpty:"true" reportApplied:"true" fileStorage:"value"`
+	Type       string   `config:"type" env:"CRABBOX_LINODE_TYPE" sources:"user,repo,env" fileIgnoreEmpty:"true" reportApplied:"true" fileStorage:"value"`
+	FirewallID string   `config:"firewall" env:"CRABBOX_LINODE_FIREWALL" sources:"user,repo,env" fileIgnoreEmpty:"true" fileStorage:"value"`
+	SSHCIDRs   []string `config:"sshCIDRs" env:"CRABBOX_LINODE_SSH_CIDRS" sources:"user,repo,env" fileList:"nonempty-raw" fileStorage:"value"`
 }
 
 // initialLinodeConfig preserves core's already-resolved image, including empty.

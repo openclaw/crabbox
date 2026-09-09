@@ -2333,3 +2333,129 @@ func TestNoFlagSources(t *testing.T){
 `
 	runScalarFixture(t, noFlagListSample, output, behavior+getters)
 }
+
+func TestGenerateFileStorageValue(t *testing.T) {
+	for _, tc := range []struct{ name, kind, policy, predicate string }{
+		{"string", "string", `fileIgnoreEmpty:"true"`, `file.Value != ""`},
+		{"list", "[]string", `fileList:"nonempty-raw"`, `len(file.Value) > 0`},
+		{"int-positive", "int", `nonnegative:"true" fileInt:"positive"`, `file.Value > 0`},
+		{"int-nonzero", "int", `nonnegative:"true" fileInt:"nonzero"`, `file.Value != 0`},
+		{"int64-positive", "int64", `nonnegative:"true" fileInt:"positive" envInt:"fallback"`, `file.Value > 0`},
+		{"int64-nonzero", "int64", `nonnegative:"true" fileInt:"nonzero" envInt:"fallback"`, `file.Value != 0`},
+		{"float-positive", "float64", `fileFloat:"positive"`, `file.Value > 0`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := "package cli\ntype PilotConfig struct { Value " + tc.kind + " `config:\"value\" env:\"VALUE\" flag:\"value\" sources:\"user,repo,env,flag\" help:\"Value\" " + tc.policy + " fileStorage:\"value\"` }"
+			s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+			if err != nil {
+				t.Fatal(err)
+			}
+			output, err := generate(s, "pilot.go")
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := generate(s, "pilot.go")
+			if err != nil || !bytes.Equal(output, again) {
+				t.Fatal("nondeterministic value output")
+			}
+			text := strings.Join(strings.Fields(string(output)), " ")
+			for _, want := range []string{"Value " + tc.kind + " `yaml:\"value,omitempty\"`", "if " + tc.predicate + " {", "cfg.Value = file.Value"} {
+				if !strings.Contains(text, want) {
+					t.Errorf("missing value storage output %q", want)
+				}
+			}
+			for _, bad := range []string{"Value *" + tc.kind + " `yaml:", "*file.Value", "file.Value != nil"} {
+				if strings.Contains(text, bad) {
+					t.Errorf("value storage retained pointer expression %q", bad)
+				}
+			}
+			// Removing the explicit opt-in keeps the existing pointer representation.
+			pointerSource := strings.Replace(source, ` fileStorage:"value"`, "", 1)
+			ps, err := parseSchema([]byte(pointerSource), "PilotConfig", "pilot")
+			if err != nil {
+				t.Fatal(err)
+			}
+			pointer, err := generate(ps, "pilot.go")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(strings.Join(strings.Fields(string(pointer)), " "), "Value *"+tc.kind+" `yaml:\"value,omitempty\"`") {
+				t.Fatal("default storage stopped being pointer")
+			}
+		})
+	}
+}
+
+func TestGenerateFileStorageTrustedAlias(t *testing.T) {
+	source := strings.Replace(sample, `sources:"user,repo,env,flag"`, `sources:"user,env,flag"`, 1)
+	source = strings.Replace(source, `help:"Name"`, `help:"Name" fileIgnoreEmpty:"true" configAlias:"nickname" fileStorage:"value"`, 1)
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(strings.Fields(string(out)), " ")
+	for _, want := range []string{`Name string ` + "`yaml:\"name,omitempty\"`", `NameConfigAlias string ` + "`yaml:\"nickname,omitempty\"`", `if trusted && file.Name != "" {`, `if trusted && file.NameConfigAlias != "" {`, `cfg.Name = file.Name`, `cfg.Name = file.NameConfigAlias`, `Count *int ` + "`yaml:\"count,omitempty\"`", `Enabled *bool ` + "`yaml:\"enabled,omitempty\"`"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing trusted/alias/control output %q", want)
+		}
+	}
+	if strings.Index(text, "cfg.Name = file.NameConfigAlias") < strings.Index(text, "cfg.Name = file.Name ") {
+		t.Error("alias precedes primary")
+	}
+	pointerSource := strings.Replace(source, ` fileStorage:"value"`, "", 1)
+	ps, err := parseSchema([]byte(pointerSource), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pointer, err := generate(ps, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{"applyEnv(", "RegisterPilotConfigFlags(", "Apply(cfg *PilotConfig,"} {
+		a := strings.Index(string(out), method)
+		b := strings.Index(string(pointer), method)
+		if a < 0 || b < 0 {
+			t.Fatalf("missing existing method %s", method)
+		}
+		tail := func(s string, i int) string {
+			v := s[i:]
+			if end := strings.Index(v, "\nfunc "); end >= 0 {
+				return v[:end]
+			}
+			return v
+		}
+		if tail(string(out), a) != tail(string(pointer), b) {
+			t.Errorf("storage changed non-file %s", method)
+		}
+	}
+}
+
+func TestSchemaFileStorageRejectsUnsupported(t *testing.T) {
+	for _, tc := range []struct{ name, kind, policy, storage string }{
+		{"empty-tag", "string", `fileIgnoreEmpty:"true"`, ""}, {"unknown-tag", "string", `fileIgnoreEmpty:"true"`, "pointer"},
+		{"presence-string", "string", "", "value"}, {"bool", "bool", "", "value"},
+		{"ordinary-int", "int", `nonnegative:"true"`, "value"}, {"present-int", "int", `nonnegative:"true" fileInt:"present"`, "value"}, {"ordinary-int64", "int64", `nonnegative:"true" envInt:"fallback"`, "value"},
+		{"ordinary-float", "float64", "", "value"}, {"normalized-list", "[]string", "", "value"}, {"raw-clone-list", "[]string", `fileList:"raw"`, "value"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := "package cli\ntype PilotConfig struct { Value " + tc.kind + " `config:\"value\" env:\"VALUE\" flag:\"value\" sources:\"user,repo,env,flag\" help:\"Value\" " + tc.policy + " fileStorage:\"" + tc.storage + "\"` }"
+			if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil {
+				t.Fatal("unsupported fileStorage accepted")
+			} else if !strings.Contains(err.Error(), "fileStorage") {
+				t.Fatalf("wrong rejection reason: %v, want fileStorage eligibility error", err)
+			}
+		})
+	}
+	t.Run("no-file", func(t *testing.T) {
+		source := "package cli\ntype PilotConfig struct { Value string `env:\"VALUE\" sources:\"env\" fileStorage:\"value\"` }"
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil {
+			t.Fatal("fileStorage accepted without file source")
+		} else if !strings.Contains(err.Error(), "fileStorage") {
+			t.Fatalf("wrong rejection reason: %v, want fileStorage eligibility error", err)
+		}
+	})
+}

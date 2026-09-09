@@ -29,7 +29,7 @@ and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
 and storage, registration, and presence-based application for admitted flags.
 
-This is a wiring refactor, not a behavior correction. Other providers retain
+Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.
 
@@ -114,6 +114,36 @@ already resolved by core's portable-OS mapping, including an empty image. It
 does not repeat that lookup or introduce an eager image fallback. Accepted image
 and type inputs still set their existing explicit-source markers; later OS
 selection, class policy, and validation before backend defaults remain separate.
+All five file fields retain their legacy value-backed YAML storage, so saving
+configuration omits ignored empty strings and lists without adding defaults.
+
+## File storage and configuration writes
+
+File assignment and file persistence are separate contracts. Commands such as
+`config set-broker` read and rewrite the whole user configuration. A pointer to
+an explicit empty value survives YAML `omitempty`, whereas the corresponding
+value field is omitted. Ignoring an empty overlay does not establish which
+representation a provider historically used.
+
+File fields remain pointers by default, preserving explicit false, zero, empty
+strings and empty-list clears. Use `fileStorage:"value"` only when the field's
+original value-backed storage and zero-ignoring assignment rule are established.
+The generator then emits a value field with the same YAML tag and a raw-value
+predicate; it does not normalize the stored value or change environment/flag
+handling. An explicitly present empty provider block remains `{}`.
+
+| Kind | Required file rule |
+| --- | --- |
+| `string` | `fileIgnoreEmpty:"true"` |
+| `[]string` | `fileList:"nonempty-raw"` |
+| `int`, `int64` | `fileInt:"positive"` or `fileInt:"nonzero"` |
+| `float64` | `fileFloat:"positive"` |
+
+Presence-sensitive rules, booleans and fields without file input cannot use value
+storage. Existing pointer-backed fields must not opt in merely because they
+ignore zero. Modal's `secrets: []` deliberately remains pointer-backed so a write
+retains the explicit clear. Positive-only numeric overlays still store negative
+inputs verbatim: ignoring an assignment is not permission to erase its file value.
 
 ## Adding a field
 
@@ -159,7 +189,8 @@ selection, class policy, and validation before backend defaults remain separate.
    by the tag.
    Environment-admitted `int64` fields currently require this fallback mode;
    strict `int64` environment parsing and aliases are not generated. File fields
-   remain `*int64`, and flags use `flag.Int64`, with no platform-width conversion.
+   use `*int64` by default or `int64` with `fileStorage:"value"`; flags use
+   `flag.Int64`, with no platform-width conversion.
    Compiled `int` defaults retain the existing signed 32-bit check; `int64`
    defaults are checked at signed 64-bit width.
    An existing positive-only integer file binding can opt into
@@ -291,15 +322,18 @@ trust remain outside the generator.
 
 The loader still applies defaults, user files, repository files, environment,
 and explicit flags in that order. Both repository filenames retain their
-existing order. A YAML pointer distinguishes omission/null from explicit false,
-zero, an empty string, or an empty list. Only an explicit `fileIgnoreEmpty:"true"`
-binding ignores an empty string; whitespace is still applied. Lists are trimmed and blank entries
-removed, without deduplication. Empty environment strings fall through; a
-nonempty list value containing only whitespace/commas clears the list. Existing
-boolean environment aliases (`yes/no`, `on/off`, `1/0`) remain accepted.
-Malformed boolean/float environment values keep the previous value, while
-malformed or negative timeout values fail. These differences are preserved,
-not standardized by this refactor.
+existing order. Presence-sensitive YAML bindings use pointers to distinguish
+omission/null from explicit false, zero, an empty string, or an empty list.
+Value-backed fields retain their declared zero-ignoring rules. Only an explicit
+`fileIgnoreEmpty:"true"` binding ignores an empty string; whitespace still applies.
+List normalization follows each declared source mode: raw file lists stay raw,
+while ordinary comma-separated environment input trims blanks without deduplication.
+Ordinary empty environment strings fall through; presence-based list bindings
+can clear on empty input. Existing boolean aliases (`yes/no`, `on/off`, `1/0`)
+remain accepted. Malformed boolean/float environment values keep the previous
+value. Strict nonnegative integer bindings reject malformed or negative input;
+explicitly tolerant integer bindings retain their documented fallback behavior.
+These differences are preserved, not standardized by generation.
 
 Flags keep their names, help, types, defaults, and `flag.FlagSet` presence
 semantics. Explicit false/zero/empty flags override earlier layers. Registration

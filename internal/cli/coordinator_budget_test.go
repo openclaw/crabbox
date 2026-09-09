@@ -147,6 +147,8 @@ func TestCoordinatorHeartbeatHonorsCallerDeadlineWithoutReplay(t *testing.T) {
 
 func TestCoordinatorReadCurlFallbackSharesCallerDeadline(t *testing.T) {
 	clearConfigEnv(t)
+	// Keep the HTTP deadline independent of local git process startup.
+	t.Setenv("CRABBOX_OWNER", "alice@example.com")
 	if _, err := exec.LookPath("curl"); err != nil {
 		t.Skip("curl is unavailable")
 	}

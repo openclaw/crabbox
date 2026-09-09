@@ -7,14 +7,14 @@ import (
 )
 
 type fileVultrConfig struct {
-	Region        *string   `yaml:"region,omitempty"`
-	OS            *string   `yaml:"os,omitempty"`
-	Image         *string   `yaml:"image,omitempty"`
-	Snapshot      *string   `yaml:"snapshot,omitempty"`
-	FirewallGroup *string   `yaml:"firewallGroup,omitempty"`
-	VPCIDs        *[]string `yaml:"vpcIds,omitempty"`
-	SSHCIDRs      *[]string `yaml:"sshCIDRs,omitempty"`
-	UserScheme    *string   `yaml:"userScheme,omitempty"`
+	Region        string   `yaml:"region,omitempty"`
+	OS            string   `yaml:"os,omitempty"`
+	Image         string   `yaml:"image,omitempty"`
+	Snapshot      string   `yaml:"snapshot,omitempty"`
+	FirewallGroup string   `yaml:"firewallGroup,omitempty"`
+	VPCIDs        []string `yaml:"vpcIds,omitempty"`
+	SSHCIDRs      []string `yaml:"sshCIDRs,omitempty"`
+	UserScheme    string   `yaml:"userScheme,omitempty"`
 }
 
 func defaultVultrConfig() VultrConfig {
@@ -25,29 +25,29 @@ func (cfg *VultrConfig) applyFile(file *fileVultrConfig) error {
 	if file == nil {
 		return nil
 	}
-	if file.Region != nil && *file.Region != "" {
-		cfg.Region = *file.Region
+	if file.Region != "" {
+		cfg.Region = file.Region
 	}
-	if file.OS != nil && *file.OS != "" {
-		cfg.OS = *file.OS
+	if file.OS != "" {
+		cfg.OS = file.OS
 	}
-	if file.Image != nil && *file.Image != "" {
-		cfg.Image = *file.Image
+	if file.Image != "" {
+		cfg.Image = file.Image
 	}
-	if file.Snapshot != nil && *file.Snapshot != "" {
-		cfg.Snapshot = *file.Snapshot
+	if file.Snapshot != "" {
+		cfg.Snapshot = file.Snapshot
 	}
-	if file.FirewallGroup != nil && *file.FirewallGroup != "" {
-		cfg.FirewallGroup = *file.FirewallGroup
+	if file.FirewallGroup != "" {
+		cfg.FirewallGroup = file.FirewallGroup
 	}
-	if file.VPCIDs != nil && len(*file.VPCIDs) > 0 {
-		cfg.VPCIDs = *file.VPCIDs
+	if len(file.VPCIDs) > 0 {
+		cfg.VPCIDs = file.VPCIDs
 	}
-	if file.SSHCIDRs != nil && len(*file.SSHCIDRs) > 0 {
-		cfg.SSHCIDRs = *file.SSHCIDRs
+	if len(file.SSHCIDRs) > 0 {
+		cfg.SSHCIDRs = file.SSHCIDRs
 	}
-	if file.UserScheme != nil && *file.UserScheme != "" {
-		cfg.UserScheme = *file.UserScheme
+	if file.UserScheme != "" {
+		cfg.UserScheme = file.UserScheme
 	}
 	return nil
 }

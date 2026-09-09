@@ -47,11 +47,8 @@ func newCoordinatorAsyncFixture(t *testing.T, fixed bool) *coordinatorAsyncFixtu
 	t.Setenv("CRABBOX_OWNER", "alice@example.com")
 	f := &coordinatorAsyncFixture{
 		t: t, fixed: fixed, started: time.Now(),
-		requested: "cbx_abcdef123456", canonical: "cbx_abcdef123457",
+		requested: "cbx_abcdef123456", canonical: "cbx_abcdef123456",
 		cfg: Config{Provider: "azure", TargetOS: targetWindows, WindowsMode: windowsModeNormal},
-	}
-	if fixed {
-		f.canonical = f.requested
 	}
 	f.backend = &coordinatorLeaseBackend{
 		cfg: f.cfg, rt: Runtime{Stderr: &f.stderr},
@@ -326,9 +323,6 @@ func TestCoordinatorAsyncRejectsIdentityMismatchBeforeFurtherPolling(t *testing.
 		for _, replay := range []bool{false, true} {
 			for _, stage := range []string{"accepted", "poll"} {
 				for _, field := range []string{"id", "empty id", "provider", "unknown provider", "target", "windows mode"} {
-					if !fixed && stage == "accepted" && field == "id" {
-						continue // Ordinary POST is authoritative for canonical remapping.
-					}
 					t.Run(fmt.Sprintf("fixed=%t/replay=%t/%s/%s", fixed, replay, stage, field), func(t *testing.T) {
 						synctest.Test(t, func(t *testing.T) {
 							f := newCoordinatorAsyncFixture(t, fixed)
@@ -369,7 +363,7 @@ func TestCoordinatorAsyncRejectsIdentityMismatchBeforeFurtherPolling(t *testing.
 							if stage == "poll" {
 								wantGets = 1
 							}
-							if fixed {
+							if fixed || field == "id" || field == "empty id" {
 								wantCancels = 0
 							}
 							if replay {

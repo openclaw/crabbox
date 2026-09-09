@@ -276,11 +276,6 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 		}
 		return LeaseTarget{}, err
 	}
-	if lease.ID != "" && lease.ID != leaseID {
-		if err := moveStoredTestboxKey(leaseID, lease.ID); err != nil {
-			fmt.Fprintf(b.rt.Stderr, "warning: could not move local key from %s to %s: %v\n", leaseID, lease.ID, err)
-		}
-	}
 	if err := validateCoordinatorLeaseCapabilities(cfg, lease); err != nil {
 		if requestedLeaseID == "" {
 			cleanupLeaseID := blank(lease.ID, leaseID)
@@ -509,9 +504,14 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 		}
 	}()
 	cancelOnError := false
+	identityMismatch := false
 	defer func() {
 		stopProgress()
 		<-progressDone
+		if identityMismatch {
+			lease = CoordinatorLease{}
+			return
+		}
 		if ctx.Err() != nil {
 			lease = CoordinatorLease{}
 			err = b.canceledCoordinatorLeaseCreateError(ctx, leaseID, slug, createAttemptID, fixed, err)
@@ -550,16 +550,22 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 			return CoordinatorLease{}, err
 		}
 	}
+	identityMismatch = lease.ID != leaseID
+	if identityMismatch {
+		return CoordinatorLease{}, b.validateCoordinatorLeaseCreateResult(cfg, lease, leaseID)
+	}
 	if err := createCtx.Err(); err != nil {
 		return CoordinatorLease{}, err
 	}
 	cancelOnError = true
-	if err := b.validateCoordinatorLeaseCreateResult(cfg, lease, leaseID, fixed); err != nil {
+	if err := b.validateCoordinatorLeaseCreateResult(cfg, lease, leaseID); err != nil {
 		return CoordinatorLease{}, err
 	}
 	if lease.State == "provisioning" {
 		// Rebinding only confirms the operation. Readiness uses the original deadline.
-		return b.waitForCoordinatorLeaseActivation(createCtx, cfg, lease.ID, lease)
+		lease, err = b.waitForCoordinatorLeaseActivation(createCtx, cfg, lease.ID, lease)
+		identityMismatch = isCoordinatorLeaseIDConflict(err)
+		return lease, err
 	}
 	if rebound && lease.State == "active" && lease.Host == "" {
 		return CoordinatorLease{}, fmt.Errorf("coordinator replay returned active lease %s without an endpoint", lease.ID)
@@ -567,9 +573,18 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 	return lease, coordinatorLeaseProvisioningError(lease)
 }
 
-func (b *coordinatorLeaseBackend) validateCoordinatorLeaseCreateResult(cfg Config, lease CoordinatorLease, requestedLeaseID string, fixed bool) error {
-	if fixed && lease.ID != requestedLeaseID {
-		return exit(4, "lease_id_conflict: coordinator returned lease %s for operation %s", blank(lease.ID, "<empty>"), requestedLeaseID)
+type coordinatorLeaseIDConflict struct{ err error }
+
+func (e coordinatorLeaseIDConflict) Error() string { return e.err.Error() }
+func (e coordinatorLeaseIDConflict) Unwrap() error { return e.err }
+func isCoordinatorLeaseIDConflict(err error) bool {
+	var conflict coordinatorLeaseIDConflict
+	return errors.As(err, &conflict)
+}
+
+func (b *coordinatorLeaseBackend) validateCoordinatorLeaseCreateResult(cfg Config, lease CoordinatorLease, requestedLeaseID string) error {
+	if lease.ID != requestedLeaseID {
+		return coordinatorLeaseIDConflict{err: exit(4, "lease_id_conflict: coordinator returned lease %s (slug %s) for operation %s; no bootstrap or cleanup was attempted", blank(lease.ID, "<empty>"), blank(lease.Slug, "-"), requestedLeaseID)}
 	}
 	if strings.TrimSpace(lease.ID) == "" {
 		return exit(4, "coordinator create returned an empty canonical lease id for operation %s", requestedLeaseID)
@@ -728,7 +743,7 @@ func (b *coordinatorLeaseBackend) waitForCoordinatorLeaseActivation(ctx context.
 				continue
 			}
 			// GET observes the confirmed canonical lease; it cannot remap identity.
-			if err := b.validateCoordinatorLeaseCreateResult(cfg, lease, leaseID, true); err != nil {
+			if err := b.validateCoordinatorLeaseCreateResult(cfg, lease, leaseID); err != nil {
 				return CoordinatorLease{}, err
 			}
 			current = lease
@@ -992,12 +1007,23 @@ func (b *coordinatorLeaseBackend) ListJSON(ctx context.Context, req ListRequest)
 }
 
 func (b *coordinatorLeaseBackend) listUserLeases(ctx context.Context) ([]CoordinatorLease, error) {
-	leases, err := b.coord.Leases(ctx, "active", 1000)
+	leases, err := b.coord.listLeases(ctx, "", 1000, "current", b.cfg.Provider)
 	if err != nil {
 		return nil, err
 	}
+	if len(leases) >= 1000 {
+		fmt.Fprintln(b.rt.Stderr, "warning: coordinator list reached its 1000-lease limit; older kept leases may be omitted; inspect them by exact lease ID")
+	}
+	// Older coordinators ignore view=current and return ended history too.
+	current := make([]CoordinatorLease, 0, len(leases))
+	for _, lease := range leases {
+		retained := lease.Keep || lease.ReleaseDeletesServer != nil && !*lease.ReleaseDeletesServer
+		if lease.State == "active" || lease.State == "provisioning" || retained && !coordinatorProviderReleaseConfirmed(lease) {
+			current = append(current, lease)
+		}
+	}
 	return redactCoordinatorLeaseListSecrets(
-		filterCoordinatorLeasesForProvider(leases, b.cfg.Provider),
+		filterCoordinatorLeasesForProvider(current, b.cfg.Provider),
 	), nil
 }
 

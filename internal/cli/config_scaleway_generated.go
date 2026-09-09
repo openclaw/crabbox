@@ -8,14 +8,14 @@ import (
 )
 
 type fileScalewayConfig struct {
-	Region         *string   `yaml:"region,omitempty"`
-	Zone           *string   `yaml:"zone,omitempty"`
-	Image          *string   `yaml:"image,omitempty"`
-	Type           *string   `yaml:"type,omitempty"`
-	ProjectID      *string   `yaml:"projectId,omitempty"`
-	OrganizationID *string   `yaml:"organizationId,omitempty"`
-	SecurityGroup  *string   `yaml:"securityGroup,omitempty"`
-	SSHCIDRs       *[]string `yaml:"sshCIDRs,omitempty"`
+	Region         string   `yaml:"region,omitempty"`
+	Zone           string   `yaml:"zone,omitempty"`
+	Image          string   `yaml:"image,omitempty"`
+	Type           string   `yaml:"type,omitempty"`
+	ProjectID      string   `yaml:"projectId,omitempty"`
+	OrganizationID string   `yaml:"organizationId,omitempty"`
+	SecurityGroup  string   `yaml:"securityGroup,omitempty"`
+	SSHCIDRs       []string `yaml:"sshCIDRs,omitempty"`
 }
 
 const ScalewayConfigDefaultRegion string = "fr-par"
@@ -45,33 +45,33 @@ func (cfg *ScalewayConfig) applyFile(file *fileScalewayConfig) (ScalewayConfigAp
 	if file == nil {
 		return applied, nil
 	}
-	if file.Region != nil && *file.Region != "" {
-		cfg.Region = *file.Region
+	if file.Region != "" {
+		cfg.Region = file.Region
 		applied.Region = true
 	}
-	if file.Zone != nil && *file.Zone != "" {
-		cfg.Zone = *file.Zone
+	if file.Zone != "" {
+		cfg.Zone = file.Zone
 		applied.Zone = true
 	}
-	if file.Image != nil && *file.Image != "" {
-		cfg.Image = *file.Image
+	if file.Image != "" {
+		cfg.Image = file.Image
 		applied.Image = true
 	}
-	if file.Type != nil && *file.Type != "" {
-		cfg.Type = *file.Type
+	if file.Type != "" {
+		cfg.Type = file.Type
 		applied.Type = true
 	}
-	if file.ProjectID != nil && *file.ProjectID != "" {
-		cfg.ProjectID = *file.ProjectID
+	if file.ProjectID != "" {
+		cfg.ProjectID = file.ProjectID
 	}
-	if file.OrganizationID != nil && *file.OrganizationID != "" {
-		cfg.OrganizationID = *file.OrganizationID
+	if file.OrganizationID != "" {
+		cfg.OrganizationID = file.OrganizationID
 	}
-	if file.SecurityGroup != nil && *file.SecurityGroup != "" {
-		cfg.SecurityGroup = *file.SecurityGroup
+	if file.SecurityGroup != "" {
+		cfg.SecurityGroup = file.SecurityGroup
 	}
-	if file.SSHCIDRs != nil && len(*file.SSHCIDRs) > 0 {
-		cfg.SSHCIDRs = *file.SSHCIDRs
+	if len(file.SSHCIDRs) > 0 {
+		cfg.SSHCIDRs = file.SSHCIDRs
 	}
 	return applied, nil
 }

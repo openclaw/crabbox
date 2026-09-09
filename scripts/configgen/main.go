@@ -19,6 +19,7 @@ import (
 )
 
 type field struct {
+	fileStorageValue                                                                                                                                                             bool
 	fileListNonemptyRaw, flagListEmptyScalar                                                                                                                                     bool
 	fileIntNonzero                                                                                                                                                               bool
 	fileListRaw, envListPresence, flagListReplaceAppend                                                                                                                          bool
@@ -209,6 +210,9 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		switch f.kind {
 		case "string", "int", "int64", "float64", "bool", "[]string":
 		default:
+			if _, ok := tags.Lookup("fileStorage"); ok {
+				return s, fmt.Errorf("%s: fileStorage does not support config type %s", f.name, f.kind)
+			}
 			return s, fmt.Errorf("%s: unsupported config type %s", f.name, f.kind)
 		}
 		if hasConfigAlias && (f.kind != "string" || f.noFile) {
@@ -321,6 +325,23 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 				return s, fmt.Errorf("%s default must be non-negative", f.name)
 			}
 		}
+		if value, ok := tags.Lookup("fileStorage"); ok {
+			eligible := false
+			switch f.kind {
+			case "string":
+				eligible = f.fileIgnoreEmpty
+			case "[]string":
+				eligible = f.fileListNonemptyRaw
+			case "int", "int64":
+				eligible = f.fileIntPositive || f.fileIntNonzero
+			case "float64":
+				eligible = f.fileFloatPositive
+			}
+			if value != "value" || f.noFile || !eligible {
+				return s, fmt.Errorf("%s: fileStorage requires value on a file-admitted field with a zero-ignoring file rule", f.name)
+			}
+			f.fileStorageValue = true
+		}
 		s.fields = append(s.fields, f)
 	}
 	if len(s.fields) == 0 {
@@ -381,7 +402,11 @@ func generate(s schema, source string) ([]byte, error) {
 	p("type file%s struct {\n", s.name)
 	for _, f := range s.fields {
 		for _, binding := range f.fileBindings() {
-			p("%s *%s `yaml:%q`\n", binding.member, f.kind, binding.key+",omitempty")
+			kind := "*" + f.kind
+			if f.fileStorageValue {
+				kind = f.kind
+			}
+			p("%s %s `yaml:%q`\n", binding.member, kind, binding.key+",omitempty")
 		}
 	}
 	p("}\n\n")
@@ -428,28 +453,32 @@ func generate(s schema, source string) ([]byte, error) {
 	p("func (cfg *%s) applyFile(file *file%s%s) %s {\n%sif file == nil { return %snil }\n", s.name, s.name, trustedParameter, resultType, reportInit, resultPrefix)
 	for _, f := range s.fields {
 		for _, binding := range f.fileBindings() {
-			condition := ""
+			member := "file." + binding.member
+			value := member
+			var conditions []string
 			if f.trustedFileOnly {
-				condition = "trusted && "
+				conditions = append(conditions, "trusted")
 			}
-			fileCondition := fmt.Sprintf("%sfile.%s != nil", condition, binding.member)
+			if !f.fileStorageValue {
+				conditions = append(conditions, member+" != nil")
+				value = "*" + member
+			}
 			if f.fileIgnoreEmpty {
-				fileCondition += fmt.Sprintf(" && *file.%s != \"\"", binding.member)
+				conditions = append(conditions, value+" != \"\"")
 			}
 			if f.fileIntPositive || f.fileFloatPositive {
-				fileCondition += fmt.Sprintf(" && *file.%s > 0", binding.member)
+				conditions = append(conditions, value+" > 0")
 			}
 			if f.fileIntNonzero {
-				fileCondition += fmt.Sprintf(" && *file.%s != 0", binding.member)
+				conditions = append(conditions, value+" != 0")
 			}
 			if f.fileListNonemptyRaw {
-				fileCondition += fmt.Sprintf(" && len(*file.%s) > 0", binding.member)
+				conditions = append(conditions, "len("+value+") > 0")
 			}
-			p("if %s {\n", fileCondition)
+			p("if %s {\n", strings.Join(conditions, " && "))
 			if f.nonnegative && !f.fileIntPositive && !f.fileIntPresent && !f.fileIntNonzero {
-				p("if *file.%s < 0 { return %sexit(2, %q) }\n", binding.member, resultPrefix, s.provider+" "+f.key+" must be non-negative")
+				p("if %s < 0 { return %sexit(2, %q) }\n", value, resultPrefix, s.provider+" "+f.key+" must be non-negative")
 			}
-			value := "*file." + binding.member
 			if f.kind == "[]string" {
 				if f.fileListRaw {
 					value = "append([]string(nil), (" + value + ")...)"

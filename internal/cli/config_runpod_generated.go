@@ -7,14 +7,14 @@ import (
 )
 
 type fileRunpodConfig struct {
-	APIURL     *string `yaml:"apiUrl,omitempty"`
-	CloudType  *string `yaml:"cloudType,omitempty"`
-	InstanceID *string `yaml:"instanceId,omitempty"`
-	Image      *string `yaml:"image,omitempty"`
-	TemplateID *string `yaml:"templateId,omitempty"`
-	DiskGB     *int    `yaml:"diskGB,omitempty"`
-	User       *string `yaml:"user,omitempty"`
-	WorkRoot   *string `yaml:"workRoot,omitempty"`
+	APIURL     string `yaml:"apiUrl,omitempty"`
+	CloudType  string `yaml:"cloudType,omitempty"`
+	InstanceID string `yaml:"instanceId,omitempty"`
+	Image      string `yaml:"image,omitempty"`
+	TemplateID string `yaml:"templateId,omitempty"`
+	DiskGB     int    `yaml:"diskGB,omitempty"`
+	User       string `yaml:"user,omitempty"`
+	WorkRoot   string `yaml:"workRoot,omitempty"`
 }
 
 const RunpodConfigDefaultAPIURL string = "https://rest.runpod.io/v1"
@@ -44,30 +44,30 @@ func (cfg *RunpodConfig) applyFile(file *fileRunpodConfig) (RunpodConfigApplied,
 	if file == nil {
 		return applied, nil
 	}
-	if file.APIURL != nil && *file.APIURL != "" {
-		cfg.APIURL = *file.APIURL
+	if file.APIURL != "" {
+		cfg.APIURL = file.APIURL
 		applied.APIURL = true
 	}
-	if file.CloudType != nil && *file.CloudType != "" {
-		cfg.CloudType = *file.CloudType
+	if file.CloudType != "" {
+		cfg.CloudType = file.CloudType
 	}
-	if file.InstanceID != nil && *file.InstanceID != "" {
-		cfg.InstanceID = *file.InstanceID
+	if file.InstanceID != "" {
+		cfg.InstanceID = file.InstanceID
 	}
-	if file.Image != nil && *file.Image != "" {
-		cfg.Image = *file.Image
+	if file.Image != "" {
+		cfg.Image = file.Image
 	}
-	if file.TemplateID != nil && *file.TemplateID != "" {
-		cfg.TemplateID = *file.TemplateID
+	if file.TemplateID != "" {
+		cfg.TemplateID = file.TemplateID
 	}
-	if file.DiskGB != nil && *file.DiskGB != 0 {
-		cfg.DiskGB = *file.DiskGB
+	if file.DiskGB != 0 {
+		cfg.DiskGB = file.DiskGB
 	}
-	if file.User != nil && *file.User != "" {
-		cfg.User = *file.User
+	if file.User != "" {
+		cfg.User = file.User
 	}
-	if file.WorkRoot != nil && *file.WorkRoot != "" {
-		cfg.WorkRoot = *file.WorkRoot
+	if file.WorkRoot != "" {
+		cfg.WorkRoot = file.WorkRoot
 	}
 	return applied, nil
 }

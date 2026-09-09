@@ -7,11 +7,11 @@ import (
 )
 
 type fileLinodeConfig struct {
-	Region     *string   `yaml:"region,omitempty"`
-	Image      *string   `yaml:"image,omitempty"`
-	Type       *string   `yaml:"type,omitempty"`
-	FirewallID *string   `yaml:"firewall,omitempty"`
-	SSHCIDRs   *[]string `yaml:"sshCIDRs,omitempty"`
+	Region     string   `yaml:"region,omitempty"`
+	Image      string   `yaml:"image,omitempty"`
+	Type       string   `yaml:"type,omitempty"`
+	FirewallID string   `yaml:"firewall,omitempty"`
+	SSHCIDRs   []string `yaml:"sshCIDRs,omitempty"`
 }
 
 func defaultLinodeConfig() LinodeConfig {
@@ -29,22 +29,22 @@ func (cfg *LinodeConfig) applyFile(file *fileLinodeConfig) (LinodeConfigApplied,
 	if file == nil {
 		return applied, nil
 	}
-	if file.Region != nil && *file.Region != "" {
-		cfg.Region = *file.Region
+	if file.Region != "" {
+		cfg.Region = file.Region
 	}
-	if file.Image != nil && *file.Image != "" {
-		cfg.Image = *file.Image
+	if file.Image != "" {
+		cfg.Image = file.Image
 		applied.Image = true
 	}
-	if file.Type != nil && *file.Type != "" {
-		cfg.Type = *file.Type
+	if file.Type != "" {
+		cfg.Type = file.Type
 		applied.Type = true
 	}
-	if file.FirewallID != nil && *file.FirewallID != "" {
-		cfg.FirewallID = *file.FirewallID
+	if file.FirewallID != "" {
+		cfg.FirewallID = file.FirewallID
 	}
-	if file.SSHCIDRs != nil && len(*file.SSHCIDRs) > 0 {
-		cfg.SSHCIDRs = *file.SSHCIDRs
+	if len(file.SSHCIDRs) > 0 {
+		cfg.SSHCIDRs = file.SSHCIDRs
 	}
 	return applied, nil
 }
