@@ -16,7 +16,7 @@
 
 - Describe Vultr file and environment bindings once without adding provider flags, preserving raw boot settings and list behavior while sharing runtime region and user-scheme defaulting. [PR 2050](https://github.com/openclaw/crabbox/pull/2050). Thanks @steipete.
 
-- Describe Linode file and environment bindings once, preserving OS-derived initial images, explicit image/type selection, and flagless configuration while sharing configured fallback values. Thanks @steipete.
+- Describe Linode file and environment bindings once, preserving OS-derived initial images, explicit image/type selection, and flagless configuration while sharing configured fallback values. [PR 2052](https://github.com/openclaw/crabbox/pull/2052). Thanks @steipete.
 
 ## 0.54.0 - 2026-09-09
 
