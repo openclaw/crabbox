@@ -300,7 +300,9 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
     (log.match(/\n  offline_go_probe\nfi\npublic_toolchain_archive_dir=/g) ?? []).length,
     3,
   );
-  assert.equal((log.match(/\n  offline_bun_probe\nfi\n}/g) ?? []).length, 3);
+  assert.equal((log.match(/\n  offline_bun_probe\nfi\npinned_rust_version=/g) ?? []).length, 3);
+  assert.equal((log.match(/\n  rust_runtime_probe\nfi\npublic_toolchain_archive_dir=/g) ?? []).length, 3);
+  assert.equal((log.match(/\n  offline_uv_probe\nfi\n}/g) ?? []).length, 3);
   assert.equal((log.match(/\ndeveloper_archive_probe\necho devtools-smoke-ok/g) ?? []).length, 3);
   assert.equal((log.match(/\npnpm --version\n/g) ?? []).length, 3);
   assert.match(log, /docker image inspect hello-world ubuntu:24\.04 node:24-bookworm/);
@@ -507,16 +509,25 @@ async function linuxSmokeFixture(t, { major = "24", pnpm = "11.1.0", customPrep 
     await writeFile(file, `#!/usr/bin/env bash\n${body}\n`);
     await chmod(file, 0o755);
   };
-  for (const name of ["git", "gh", "jq", "rg", "fd", "npm", "trufflehog", "docker"]) {
+  for (const name of ["git", "gh", "jq", "rg", "fd", "npm", "trufflehog", "docker",
+    "autoconf", "automake", "gawk", "nasm", "yasm", "batcat", "direnv", "zoxide", "sqlite3"]) {
     await writeTool(name, "exit 0");
   }
   await writeNodeVersionFixture(bin);
   await writeTool("cc", 'printf "#!/bin/sh\\nexit 0\\n" >"$3"\nchmod +x "$3"');
+  await writeTool("cmake", `if [[ "$1" == --build ]]; then
+mkdir -p "$2"
+printf '#!/bin/sh\\necho native-build-ok\\n' >"$2/native-smoke"
+chmod +x "$2/native-smoke"
+fi`);
+  await writeTool("timeout", 'shift\nexec "$@"');
   await writeTool("python3", `if [[ "\${1:-}" == -I ]]; then exit 0; fi\nexec /usr/bin/python3 "$@"`);
-  await writeTool("go", "printf 'go version go1.27.0 linux/amd64\\n'");
+  await writeTool("go", "printf 'go version go1.27.1 linux/amd64\\n'");
   await writeTool("gofmt", "exit 0");
   await writeTool("bun", '[[ "$*" == "--version" ]] && printf "1.4.0\\n" || printf "42\\n"');
   await writeTool("bunx", 'printf "42\\n"');
+  await writeTool("uv", 'printf "uv 0.12.11\\n"');
+  await writeTool("uvx", 'printf "uvx 0.12.11\\n"');
   await writeTool(
     "uname",
     'if [[ "$*" == "-s" ]]; then printf "%s\\n" "${FIXTURE_OS:-Linux}"; else printf "x86_64\\n"; fi',
@@ -537,7 +548,8 @@ fi
       /^public_toolchain_archive_dir=.*$/gm,
       'public_toolchain_archive_dir="$HOME/missing-archives"',
     );
-  const execute = (env = {}, source = generated) => spawnSync("bash", ["-c", source], {
+  const execute = (env = {}, source = generated) => {
+    const result = spawnSync("bash", ["-c", source], {
     cwd: fake.dir,
     env: {
       PATH: `${bin}${path.delimiter}${process.env.PATH}`, HOME: fake.dir, TMPDIR: tmp,
@@ -545,7 +557,10 @@ fi
     },
     encoding: "utf8",
     timeout: 10_000,
-  });
+    });
+    assert.ifError(result.error);
+    return result;
+  };
   return { fake, tmp, generated, execute };
 }
 
@@ -576,13 +591,17 @@ test("generated Linux smoke emits success only after nonroot, tool, and offline 
     generated
       .replace(/\n[ \t]*offline_node_pnpm_probe\n/, "\nprintf 'node-proof-done\\n'\n")
       .replace(/\n[ \t]*offline_go_probe\n/, "\nprintf 'go-proof-done\\n'\n")
-      .replace(/\n[ \t]*offline_bun_probe\n/, "\nprintf 'bun-proof-done\\n'\n"),
+      .replace(/\n[ \t]*offline_bun_probe\n/, "\nprintf 'bun-proof-done\\n'\n")
+      .replace(/\n[ \t]*rust_runtime_probe\n/, "\nprintf 'rust-proof-done\\n'\n")
+      .replace(/\n[ \t]*offline_uv_probe\n/, "\nprintf 'uv-proof-done\\n'\n"),
   );
   assert.equal(successful.status, 0, successful.stderr);
   const orderedMarkers = [
     "node-proof-done\n",
     "go-proof-done\n",
     "bun-proof-done\n",
+    "rust-proof-done\n",
+    "uv-proof-done\n",
     "devtools-smoke-ok\n",
   ].map((marker) => successful.stdout.indexOf(marker));
   assert.ok(orderedMarkers.every((index) => index >= 0), successful.stdout);
@@ -608,11 +627,11 @@ test("generated Go smoke requires its own archive under an alternate Node major"
   const { fake, execute } = await linuxSmokeFixture(t, { major: "26" });
   const absent = execute();
   assert.notEqual(absent.status, 0);
-  assert.match(absent.stderr, /unavailable offline: go1\.27\.0\.linux-amd64\.tar\.gz/);
+  assert.match(absent.stderr, /unavailable offline: go1\.27\.1\.linux-amd64\.tar\.gz/);
   assert.doesNotMatch(absent.stdout, /devtools-smoke-ok/);
   await mkdir(path.join(fake.dir, "missing-archives"));
   await writeFile(
-    path.join(fake.dir, "missing-archives", "go1.27.0.linux-amd64.tar.gz"),
+    path.join(fake.dir, "missing-archives", "go1.27.1.linux-amd64.tar.gz"),
     "corrupt",
   );
   const corrupt = execute();
@@ -623,7 +642,10 @@ test("generated Go smoke requires its own archive under an alternate Node major"
 
 test("generated Bun smoke is required independently of Node overrides and cannot be disabled by cache absence", async (t) => {
   const { fake, tmp, generated, execute } = await linuxSmokeFixture(t, { major: "26" });
-  const source = generated.replace(/\n[ \t]*offline_go_probe\n/, "\ntrue\n");
+  // This fixture isolates Bun's libc selection; the other mandatory bundles have separate gates.
+  const source = generated.replace(/\n[ \t]*offline_go_probe\n/, "\ntrue\n")
+    .replace(/\n[ \t]*rust_runtime_probe\n/, "\ntrue\n")
+    .replace(/\n[ \t]*offline_uv_probe\n/, "\ntrue\n");
   const missing = execute({}, source);
   assert.notEqual(missing.status, 0);
   assert.match(missing.stderr, /unavailable offline: bun-v1\.4\.0-linux-x64-baseline\.zip/);
@@ -649,6 +671,22 @@ test("generated Bun smoke is required independently of Node overrides and cannot
     assert.match(unsupported.stdout, /devtools-smoke-ok/);
   }
 });
+
+for (const tool of ["Rust", "uv"]) {
+  test(`generated ${tool} smoke cannot skip missing runtime or archive state under an alternate Node major`, async (t) => {
+    const { generated, execute, tmp } = await linuxSmokeFixture(t, { major: "26" });
+    let source = generated.replace(/\n[ \t]*offline_go_probe\n/, "\ntrue\n")
+      .replace(/\n[ \t]*offline_bun_probe\n/, "\ntrue\n");
+    if (tool === "uv") source = source.replace(/\n[ \t]*rust_runtime_probe\n/, "\ntrue\n");
+    const result = execute({}, source);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, tool === "Rust"
+      ? /normal login PATH does not resolve the runtime user's rustup/
+      : /unavailable offline: uv-0\.12\.11-x86_64-unknown-linux-gnu\.tar\.gz/);
+    assert.doesNotMatch(result.stdout, /devtools-smoke-ok/);
+    assert.deepEqual(await readdir(tmp), []);
+  });
+}
 
 test("generated Linux smoke requires the normal nonroot pnpm command even when private probes pass", async (t) => {
   const { fake, generated, execute } = await linuxSmokeFixture(t);
@@ -813,13 +851,14 @@ async function runLinuxSmoke(t, options = {}) {
     const file = path.join(bin, name);
     await writeFile(file, `#!/usr/bin/env bash
 set -eu
-printf '%s %s\\n' '${name}' "$*" >>"$CRABBOX_SMOKE_EVENTS"
+printf '%s %s\\n' '${name}' "$*" >>${JSON.stringify(events)}
 [[ "\${CRABBOX_SMOKE_FAIL:-}" != '${name}' ]] || exit 37
 ${body}
 `);
     await chmod(file, 0o755);
   };
-  for (const name of ["git", "gh", "jq", "rg", "fd", "python3", "trufflehog", "xset"]) {
+  for (const name of ["git", "gh", "jq", "rg", "fd", "python3", "trufflehog", "xset",
+    "autoconf", "automake", "gawk", "nasm", "yasm", "batcat", "direnv", "zoxide", "sqlite3"]) {
     await writeTool(name, "exit 0");
   }
   for (const name of ["npm", "corepack", "pnpm"]) {
@@ -833,6 +872,23 @@ fi`);
   await writeTool("cc", `[[ "$2" == -o ]]
 printf '#!/bin/sh\\nexit 0\\n' >"$3"
 chmod +x "$3"`);
+  await writeTool("cmake", `[[ -z "\${CRABBOX_SMOKE_FAIL+x}" && -z "\${CRABBOX_SMOKE_SECRET+x}" ]]
+[[ "$HOME" == "$TMPDIR/../build-home" || "$HOME" == "\${TMPDIR%/build-tmp}/build-home" ]]
+if [[ "$1" == -S ]]; then
+  [[ "${options.fail ?? ""}" != cmake ]] || exit 37
+  [[ "$3 $5 $6" == "-B -G Ninja" ]]
+  for library in gtk+-3.0 webkit2gtk-4.1 ayatana-appindicator3-0.1 librsvg-2.0 openssl; do
+    grep -Fq "$library" "$2/CMakeLists.txt"
+  done
+  grep -q '#include <xdo.h>' "$2/main.cpp"
+  grep -q 'cxx_std_17' "$2/CMakeLists.txt"
+  mkdir -p "$4"
+else
+  [[ "$1 $3 $4" == "--build --parallel 2" ]]
+  [[ "${options.fail ?? ""}" != native-build ]] || exit 37
+  printf '#!/bin/sh\\n%s\\n' '${options.fail === "native-run" ? "exit 38" : "echo native-build-ok"}' >"$2/native-smoke"
+  chmod +x "$2/native-smoke"
+fi`);
   await writeTool("id", 'case "$*" in -u) echo 1000 ;; -nG) echo users ;; esac');
   await writeTool("whoami", "echo alice");
   await writeTool("getent", `[[ "\${CRABBOX_SMOKE_FAIL:-}" != access ]] || exit 1
@@ -869,6 +925,7 @@ fi`);
     CRABBOX_SMOKE_EVENTS: events,
     CRABBOX_SMOKE_BROWSER_PID: browserPID,
     CRABBOX_SMOKE_FAIL: options.fail ?? "",
+    CRABBOX_SMOKE_SECRET: "fixture-only-not-a-credential",
     CRABBOX_SMOKE_REFRESH: options.refresh ? "1" : "0",
     CRABBOX_LINUX_BROWSER: options.browser ?? "1",
     CRABBOX_LINUX_DESKTOP_TOOLS: options.desktop ?? "1",
@@ -885,6 +942,8 @@ test("Linux image smoke runs offline functional checks and cleans its fixtures",
   const result = await runLinuxSmoke(t);
   assert.equal(result.code, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /devtools-smoke-ok/);
+  assert.match(result.events, /cmake -S .* -B .* -G Ninja/);
+  assert.match(result.events, /cmake --build .* --parallel 2/);
   assert.match(result.events, /npm --offline run check/);
   assert.match(result.events, /pnpm run check/);
   assert.match(result.events, /docker run --rm --pull=never --network=none/);
@@ -907,7 +966,7 @@ test("Linux image smoke refreshes the first Docker group member without root exe
 });
 
 test("Linux image smoke rejects failed capabilities without success output and cleans fixtures", async (t) => {
-  for (const fail of ["cc", "python3", "npm", "pnpm", "cache", "buildx", "compose", "access", "crabbox-browser", "xset", "ffprobe", "window", "render"]) {
+  for (const fail of ["cc", "cmake", "native-build", "native-run", "python3", "npm", "pnpm", "cache", "buildx", "compose", "access", "crabbox-browser", "xset", "ffprobe", "window", "render"]) {
     await t.test(fail, async (subtest) => {
       const result = await runLinuxSmoke(subtest, { fail });
       assert.notEqual(result.code, 0, result.stderr || result.stdout);
@@ -1324,6 +1383,8 @@ for (const failure of [
   "Node archive probe rendering",
   "Go archive probe rendering",
   "Bun archive probe rendering",
+  "Rust archive probe rendering",
+  "uv archive probe rendering",
 ]) {
   test(`AWS mint stops before capture when ${failure} fails`, async (t) => {
     const fake = await measuredFixture(t);
@@ -1337,6 +1398,10 @@ for (const failure of [
         "Go archive probe rendering": "go_smoke_script() { echo partial-go-probe; return 48; }",
         "Bun archive probe rendering":
           "bun_smoke_script() { echo partial-bun-probe; return 49; }",
+        "Rust archive probe rendering":
+          "rust_smoke_script() { echo partial-rust-probe; return 50; }",
+        "uv archive probe rendering":
+          "uv_smoke_script() { echo partial-uv-probe; return 51; }",
       }[failure];
       await writeFile(
         installer,
@@ -1349,13 +1414,15 @@ for (const failure of [
       "Node archive probe rendering": 47,
       "Go archive probe rendering": 48,
       "Bun archive probe rendering": 49,
+      "Rust archive probe rendering": 50,
+      "uv archive probe rendering": 51,
     }[failure];
     assert.equal(result.code, expected, result.stderr);
     const log = await readFile(fake.log, "utf8");
     assert.match(log, /stop --provider aws --target linux cbx_source/);
     assert.doesNotMatch(
       log,
-      /checkpoint create|image promote|docker_probe=|partial-(?:node|go|bun)-probe/,
+      /checkpoint create|image promote|docker_probe=|partial-(?:node|go|bun|rust|uv)-probe/,
     );
   });
 }

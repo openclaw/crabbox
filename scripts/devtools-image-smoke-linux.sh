@@ -37,6 +37,43 @@ trap 'exit 143' TERM
 printf 'int main(void) { return 0; }\n' >"$smoke_dir/main.c"
 cc "$smoke_dir/main.c" -o "$smoke_dir/compiler"
 "$smoke_dir/compiler"
+mkdir "$smoke_dir/native" "$smoke_dir/build-home" "$smoke_dir/build-tmp"
+cat >"$smoke_dir/native/CMakeLists.txt" <<'CMAKE'
+cmake_minimum_required(VERSION 3.16)
+project(native_smoke LANGUAGES CXX)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(NATIVE REQUIRED IMPORTED_TARGET
+  gtk+-3.0 webkit2gtk-4.1 ayatana-appindicator3-0.1 librsvg-2.0 openssl)
+find_library(XDO_LIBRARY NAMES xdo REQUIRED)
+add_executable(native-smoke main.cpp)
+target_compile_features(native-smoke PRIVATE cxx_std_17)
+target_link_libraries(native-smoke PRIVATE PkgConfig::NATIVE ${XDO_LIBRARY})
+CMAKE
+cat >"$smoke_dir/native/main.cpp" <<'CPP'
+#include <iostream>
+#include <gtk/gtk.h>
+#include <webkit2/webkit2.h>
+#include <libayatana-appindicator/app-indicator.h>
+#include <librsvg/rsvg.h>
+#include <openssl/ssl.h>
+#include <xdo.h>
+int main() {
+  if (gtk_get_major_version() < 3 || webkit_get_major_version() < 2 ||
+      app_indicator_get_type() == 0 || rsvg_handle_get_type() == 0 ||
+      OPENSSL_init_ssl(0, nullptr) != 1 || xdo_get_symbol_map() == nullptr) return 1;
+  std::cout << "native-build-ok\n";
+}
+CPP
+# Use only task-owned build/cache state; no project dependencies or ambient credentials.
+build_env=(env -i "PATH=$PATH" "HOME=$smoke_dir/build-home" "TMPDIR=$smoke_dir/build-tmp"
+  "XDG_CACHE_HOME=$smoke_dir/build-home/cache")
+timeout 60 "${build_env[@]}" cmake -S "$smoke_dir/native" -B "$smoke_dir/native/build" -G Ninja
+timeout 60 "${build_env[@]}" cmake --build "$smoke_dir/native/build" --parallel 2
+native_result="$(timeout 10 "${build_env[@]}" "$smoke_dir/native/build/native-smoke")" || exit $?
+[[ "$native_result" == native-build-ok ]] || { echo 'native build execution failed' >&2; exit 1; }
+for tool in autoconf automake gawk nasm yasm batcat direnv zoxide sqlite3; do
+  command -v "$tool"
+done
 python3 -I -c 'import sqlite3, ssl; assert sqlite3.connect(":memory:").execute("select 2 + 2").fetchone()[0] == 4; assert ssl.create_default_context().get_ca_certs()'
 printf '%s\n' '{"private":true,"scripts":{"check":"node -e \"require('\''node:assert/strict'\'').equal(2 + 2, 4)\""}}' >"$smoke_dir/package.json"
 (

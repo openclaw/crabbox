@@ -530,10 +530,10 @@ func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
 				return fmt.Sprintf("%x", sha256.Sum256(buf.Bytes()))
 			}
 			nodeDigest := pack("node", "24.19.0", "node-v24.19.0-linux-x64.tar.xz")
-			goDigest := pack("go", "1.27.0", "go1.27.0.linux-amd64.tar.gz")
+			goDigest := pack("go", "1.27.1", "go1.27.1.linux-amd64.tar.gz")
 			nodeSlot := filepath.Join(image, "node", "24.19.0", "x64")
-			goSlot := filepath.Join(image, "go", "1.27.0", "x64")
-			destGo := filepath.Join(cache, "go", "1.27.0", "x64")
+			goSlot := filepath.Join(image, "go", "1.27.1", "x64")
+			destGo := filepath.Join(cache, "go", "1.27.1", "x64")
 			write(filepath.Join(runner, ".crabbox-runner-version-2.337.0-x64-sha256-"+strings.Repeat("a", 64)), "", 0o644)
 			workFolder := tc.workFolder
 			if workFolder == "" {
@@ -579,7 +579,7 @@ func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "archive":
-				write(filepath.Join(archives, "go1.27.0.linux-amd64.tar.gz"), "tampered", 0o644)
+				write(filepath.Join(archives, "go1.27.1.linux-amd64.tar.gz"), "tampered", 0o644)
 			case "tree":
 				write(filepath.Join(goSlot, "bin", "go"), "tampered", 0o755)
 			case "extra":
@@ -658,7 +658,7 @@ esac
 				tool, version string
 				present       bool
 			}{
-				{"node", "24.19.0", tc.wantNode}, {"go", "1.27.0", tc.wantGo},
+				{"node", "24.19.0", tc.wantNode}, {"go", "1.27.1", tc.wantGo},
 			} {
 				slot := filepath.Join(cache, expected.tool, expected.version, "x64")
 				_, err := os.Stat(slot + ".complete")
