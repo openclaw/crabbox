@@ -744,7 +744,7 @@ func TestConfigSetBrokerRejectsDirectOnlyProvider(t *testing.T) {
 	var stdout bytes.Buffer
 	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
 	err := app.configSetBroker([]string{"--url", "https://broker.example.test", "--provider", "xcp-ng"})
-	if err == nil || !strings.Contains(err.Error(), "provider must advertise coordinator support") {
+	if err == nil || !strings.Contains(err.Error(), "cannot be used with a broker") {
 		t.Fatalf("err=%v, want brokered provider rejection", err)
 	}
 	if _, statErr := os.Stat(configPath); !os.IsNotExist(statErr) {

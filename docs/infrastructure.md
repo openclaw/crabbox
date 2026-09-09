@@ -2,15 +2,14 @@
 
 Read this when you stand up, audit, or operate a self-hosted Crabbox broker: the
 Cloudflare or Node.js/PostgreSQL coordinator, its secrets, the brokered providers
-(Hetzner, AWS, Azure, GCP, Daytona, Koyeb), and the network front door.
+(Hetzner, AWS, Azure, GCP, Daytona), and the network front door.
 
 Crabbox runs in three modes (see [How It Works](how-it-works.md)). A *broker* is
 only required for **brokered mode**, where lease lifecycle, cost limits, cleanup,
 sharing, and `crabbox usage` are owned by the coordinator. Direct and delegated
-providers run straight from the CLI and need none of this. `hetzner`, `aws`,
-`azure`, `gcp`, and `daytona` run either direct or brokered. `koyeb` is
-coordinator-only because its one-call bootstrap material and cleanup are held
-in the durable provisioning journal.
+providers run straight from the CLI and need none of this. The five brokerable
+providers are `hetzner`, `aws`, `azure`, `gcp`, and `daytona`; even those run direct unless a
+coordinator URL is configured.
 
 Use neutral placeholders below — `broker.example.com`, `example-org`,
 `alice@example.com`. Replace them with your own values. Keep every secret out of
@@ -226,7 +225,6 @@ CRABBOX_GITHUB_CLIENT_ID
 CRABBOX_GITHUB_CLIENT_SECRET
 CRABBOX_PUBLIC_URL               # canonical HTTPS coordinator origin
 CRABBOX_SESSION_SECRET            # signs cbxu_ user tokens; required and distinct from CRABBOX_SHARED_TOKEN
-CRABBOX_GITHUB_ALLOWED_OWNERS    # optional: restrict to canonical github:<positive-numeric-id> owners
 CRABBOX_GITHUB_ALLOWED_ORG       # or CRABBOX_GITHUB_ALLOWED_ORGS (comma-separated)
 CRABBOX_GITHUB_ALLOWED_TEAMS     # optional: restrict to org teams (alias CRABBOX_GITHUB_ALLOWED_TEAM)
 CRABBOX_GITHUB_REVOKED_USERS     # optional: deny listed github:<numeric-id> owners; mutable selectors fail closed
@@ -498,44 +496,6 @@ lease client and is redacted from the portal. Daytona does not support
 coordinator workspaces, ready pools, desktop/browser/code, Tailscale, or native
 image lifecycle.
 
-### Koyeb Sandbox
-
-Brokered Koyeb Sandbox leases require durable provisioning admission. They use
-Tailscale for private SSH and browser transport by default, or Koyeb's native
-private mesh when a lease explicitly sets `--tailscale=false`. Configure:
-
-```text
-KOYEB_API_TOKEN                         # coordinator-only Koyeb API credential
-CRABBOX_KOYEB_ORGANIZATION_ID           # Koyeb organization UUID
-CRABBOX_KOYEB_APP_ID                    # existing Koyeb app UUID
-CRABBOX_KOYEB_IMAGE                     # immutable container image with @sha256 digest
-CRABBOX_KOYEB_API_URL                   # optional; default https://app.koyeb.com
-CRABBOX_KOYEB_REGION                    # optional; default was
-CRABBOX_KOYEB_INSTANCE_TYPE             # optional; default large for desktop/browser workloads
-CRABBOX_KOYEB_REGISTRY_SECRET           # optional Koyeb registry secret name, not its UUID
-CRABBOX_DURABLE_PROVISIONING_ADMISSION  # must be true
-CRABBOX_SESSION_SECRET                  # stable durable-material encryption key
-CRABBOX_TAILSCALE_CLIENT_ID             # required only for the default transport
-CRABBOX_TAILSCALE_CLIENT_SECRET         # required only for the default transport
-```
-
-The default transport exposes only the Koyeb edge API-key-protected Sandbox
-management route during bootstrap; the runner validates the same generated
-bearer again. Native mesh mode has no public route: management and key-only SSH
-use the Koyeb-injected `<service>.<app>.internal` address, while VNC and
-code-server remain loopback-only behind SSH. The active lease records the exact
-image digest, registry secret name, private address, transport metadata, and
-SSH host key used for later access and fail-closed cleanup.
-
-Each lease stays at exactly one running instance until its TTL, inactivity
-lifecycle, or explicit Crabbox cleanup deletes the Sandbox. Scale-to-zero is
-intentionally disabled: the one-time Tailscale enrollment key and runner state
-are ephemeral, so a deep-sleep restart would otherwise strand a published
-lease. The reviewed runner image includes Chrome, XFCE, VNC, code-server, Git,
-Node.js, Python with pip and venv support, build-essential, zip/unzip, and the
-Crabbox browser and terminal launchers. The default `large` instance type is
-the supported baseline for that desktop toolchain.
-
 ## Machine Classes
 
 Leases request a *class* rather than a hardcoded instance type; the broker
@@ -666,9 +626,7 @@ Pick an auth model:
 
 - **Browser login** — create the GitHub OAuth app (above) and set
   `CRABBOX_GITHUB_CLIENT_ID`, `CRABBOX_GITHUB_CLIENT_SECRET`,
-  `CRABBOX_SESSION_SECRET`, and `CRABBOX_GITHUB_ALLOWED_ORG[S]`. Optionally set
-  `CRABBOX_GITHUB_ALLOWED_OWNERS` to a comma-separated list of exact immutable
-  `github:<positive-numeric-id>` principals; policy changes apply to existing sessions.
+  `CRABBOX_SESSION_SECRET`, and `CRABBOX_GITHUB_ALLOWED_ORG[S]`.
 - **Shared-token automation** — set `CRABBOX_SHARED_TOKEN` and
   `CRABBOX_SHARED_OWNER`. GitHub OAuth is not required if every caller runs
   `crabbox login --url <your-url> --token-stdin`.
@@ -757,13 +715,11 @@ CRABBOX_HOST_ID / CRABBOX_AWS_MAC_HOST_ID (optional; admin-only except owner rea
 AZURE_* / CRABBOX_AZURE_* (Azure)
 GCP_* / CRABBOX_GCP_* (GCP)
 DAYTONA_CRABBOX_KEY / CRABBOX_DAYTONA_* (Daytona)
-KOYEB_API_TOKEN / CRABBOX_KOYEB_* (Koyeb Sandbox)
 
 # Auth
 CRABBOX_SHARED_TOKEN, CRABBOX_SHARED_OWNER
 CRABBOX_ADMIN_TOKEN                       # admin routes + image promotion
 CRABBOX_GITHUB_CLIENT_ID, CRABBOX_GITHUB_CLIENT_SECRET
-CRABBOX_GITHUB_ALLOWED_OWNERS (optional immutable owner admission list)
 CRABBOX_GITHUB_ALLOWED_ORG[S], CRABBOX_GITHUB_ALLOWED_TEAMS (optional)
 CRABBOX_GITHUB_REVOKED_USERS, CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS (optional)
 CRABBOX_GITHUB_ADMIN_OWNERS               # optional github:<numeric-id> admin owners
