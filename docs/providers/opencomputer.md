@@ -74,6 +74,11 @@ must use HTTPS and cannot contain userinfo, query parameters, or fragments;
 plain HTTP is accepted only for `localhost` or a loopback IP during local
 development.
 
+The API URL is not a Crabbox YAML field, including in trusted user files. Its
+raw config default stays empty so client construction can still select the
+external OC file's `api_url` before the built-in URL. Configuration generation
+does not read that file or resolve keys.
+
 ## Config
 
 ```yaml
@@ -106,6 +111,17 @@ overrides (for example `CRABBOX_OPENCOMPUTER_WORKDIR`,
 `CRABBOX_OPENCOMPUTER_CPU`, `CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS`). The API
 URL also reads `OPENCOMPUTER_API_URL`. `--opencomputer-forget-missing` is
 deliberately CLI-only so stale-claim removal always requires explicit intent.
+
+All eight bindings share one typed declaration. The four integer YAML fields
+apply whenever present, including zero and negative values; omitted/null fields
+preserve earlier values. Environment integer parsing retains the earlier value
+on malformed input, while explicit flags keep their existing value semantics.
+These parsing rules do not add service-side sizing validation. Nonempty workdir
+strings and explicit `burst: false` retain their existing behavior.
+
+Workdir and execution-timeout helpers share their compiled defaults. Raw-empty
+API URL resolution, service sizing, request-level timeout fallbacks, and
+missing-sandbox handling remain with their existing client/operation owners.
 
 > **Sizing tiers.** When both `cpu` and `memoryMB` are set, they must form an
 > allowed tier (for example `1/1024`, `1/4096`, `2/8192`, `4/16384`). When only

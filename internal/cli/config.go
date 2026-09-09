@@ -850,22 +850,6 @@ type TenkiConfig struct {
 	DiskGB    int
 }
 
-// OpenComputerConfig configures the delegated OpenComputer provider, which
-// talks to the OpenComputer REST API. The API key is intentionally absent: it
-// is read at runtime from CRABBOX_OPENCOMPUTER_API_KEY / OPENCOMPUTER_API_KEY
-// or the `oc` CLI config (`oc config set api-key`), and sent only in the
-// X-API-Key header — never persisted in Crabbox config or placed on argv.
-type OpenComputerConfig struct {
-	APIURL          string
-	Workdir         string
-	CPU             int
-	MemoryMB        int
-	TimeoutSecs     int
-	ExecTimeoutSecs int
-	Burst           bool
-	ForgetMissing   bool
-}
-
 // NomadConfig configures the delegated Nomad provider. The ACL token is
 // intentionally absent: it is read at runtime from NOMAD_TOKEN or TokenEnv and
 // is never persisted in Crabbox config or placed on argv.
@@ -2804,18 +2788,11 @@ func baseConfig() Config {
 			CLIPath:  "tenki",
 			WorkRoot: "/home/tenki/crabbox",
 		},
-		Tensorlake: defaultTensorlakeConfig(),
-		Cua:        defaultCuaConfig(),
-		OpenComputer: OpenComputerConfig{
-			// APIURL is intentionally unset here so the `oc` config file's
-			// api_url is honored before the built-in default; the provider
-			// applies the default (https://app.opencomputer.dev) as the final
-			// fallback in newOCAPIClient.
-			Workdir:         "/workspace/crabbox",
-			ExecTimeoutSecs: 3600,
-		},
-		CodeSandbox: defaultCodeSandboxConfig(),
-		OpenSandbox: defaultOpenSandboxConfig(),
+		Tensorlake:   defaultTensorlakeConfig(),
+		Cua:          defaultCuaConfig(),
+		OpenComputer: defaultOpenComputerConfig(),
+		CodeSandbox:  defaultCodeSandboxConfig(),
+		OpenSandbox:  defaultOpenSandboxConfig(),
 		Nomad: NomadConfig{
 			TokenEnv:          "NOMAD_TOKEN",
 			Task:              "crabbox",
@@ -3768,15 +3745,6 @@ type fileTenkiConfig struct {
 	CPUs      int    `yaml:"cpus,omitempty"`
 	MemoryMB  int    `yaml:"memoryMB,omitempty"`
 	DiskGB    int    `yaml:"diskGB,omitempty"`
-}
-
-type fileOpenComputerConfig struct {
-	Workdir         string `yaml:"workdir,omitempty"`
-	CPU             *int   `yaml:"cpu,omitempty"`
-	MemoryMB        *int   `yaml:"memoryMB,omitempty"`
-	TimeoutSecs     *int   `yaml:"timeoutSecs,omitempty"`
-	ExecTimeoutSecs *int   `yaml:"execTimeoutSecs,omitempty"`
-	Burst           *bool  `yaml:"burst,omitempty"`
 }
 
 type fileNomadConfig struct {
@@ -6253,15 +6221,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	if err := cfg.Cua.applyFile(file.Cua, trusted); err != nil {
 		return err
 	}
-	if file.OpenComputer != nil {
-		if file.OpenComputer.Workdir != "" {
-			cfg.OpenComputer.Workdir = file.OpenComputer.Workdir
-		}
-		applyOptional(&cfg.OpenComputer.CPU, file.OpenComputer.CPU)
-		applyOptional(&cfg.OpenComputer.MemoryMB, file.OpenComputer.MemoryMB)
-		applyOptional(&cfg.OpenComputer.TimeoutSecs, file.OpenComputer.TimeoutSecs)
-		applyOptional(&cfg.OpenComputer.ExecTimeoutSecs, file.OpenComputer.ExecTimeoutSecs)
-		applyOptional(&cfg.OpenComputer.Burst, file.OpenComputer.Burst)
+	if err := cfg.OpenComputer.applyFile(file.OpenComputer); err != nil {
+		return err
 	}
 	if err := cfg.CodeSandbox.applyFile(file.CodeSandbox, trusted); err != nil {
 		return err
@@ -8179,14 +8140,8 @@ func applyEnv(cfg *Config) error {
 	if err := cfg.Cua.applyEnv(); err != nil {
 		return err
 	}
-	cfg.OpenComputer.APIURL = getenv("CRABBOX_OPENCOMPUTER_API_URL", getenv("OPENCOMPUTER_API_URL", cfg.OpenComputer.APIURL))
-	cfg.OpenComputer.Workdir = getenv("CRABBOX_OPENCOMPUTER_WORKDIR", cfg.OpenComputer.Workdir)
-	cfg.OpenComputer.CPU = getenvInt("CRABBOX_OPENCOMPUTER_CPU", cfg.OpenComputer.CPU)
-	cfg.OpenComputer.MemoryMB = getenvInt("CRABBOX_OPENCOMPUTER_MEMORY_MB", cfg.OpenComputer.MemoryMB)
-	cfg.OpenComputer.TimeoutSecs = getenvInt("CRABBOX_OPENCOMPUTER_TIMEOUT_SECS", cfg.OpenComputer.TimeoutSecs)
-	cfg.OpenComputer.ExecTimeoutSecs = getenvInt("CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS", cfg.OpenComputer.ExecTimeoutSecs)
-	if v, ok := getenvBool("CRABBOX_OPENCOMPUTER_BURST"); ok {
-		cfg.OpenComputer.Burst = v
+	if err := cfg.OpenComputer.applyEnv(); err != nil {
+		return err
 	}
 	if err := cfg.CodeSandbox.applyEnv(); err != nil {
 		return err

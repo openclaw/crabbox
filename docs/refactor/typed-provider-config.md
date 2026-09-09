@@ -3,7 +3,7 @@
 Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
-Tensorlake, and Orgo
+Tensorlake, Orgo, and OpenComputer
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -15,7 +15,8 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_cloudflare_sandbox.go`, `internal/cli/config_e2b.go`,
 `internal/cli/config_blaxel.go`, `internal/cli/config_azure_dynamic_sessions.go`,
 `internal/cli/config_smolvm.go`, `internal/cli/config_semaphore.go`,
-`internal/cli/config_tensorlake.go`, and `internal/cli/config_orgo.go`.
+`internal/cli/config_tensorlake.go`, `internal/cli/config_orgo.go`, and
+`internal/cli/config_opencomputer.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -69,7 +70,9 @@ machine-specific paths. Its header identifies the generator and source file.
    its file assignment uses the loader's existing trusted decision.
    There is no implicit source grant. An optional `default` tag supplies a scalar default checked
    against the field type; otherwise the Go zero value applies. Current integer
-   fields require `nonnegative:"true"` for eager file/environment validation.
+   fields require `nonnegative:"true"` for compiled-default validation and
+   ordinary file/environment checks; the explicit source modes below preserve
+   providers whose input rules differ.
    An existing source-specific integer can opt into `envInt:"fallback"` to use
    core's `getenvInt` for environment input only. It requires an environment
    source, `int`, and the existing nonnegative policy; empty or unknown modes are
@@ -82,6 +85,10 @@ machine-specific paths. Its header identifies the generator and source file.
    omitted/null/zero/negative input is ignored. It requires an int with file
    admission and the existing nonnegative default policy. This fixed predicate
    changes no environment or flag behavior and accepts no custom expressions.
+   `fileInt:"present"` instead applies every nonnil integer pointer, including
+   zero and negative values. It requires the same file-admitted int/default
+   policy, but deliberately adds no file-value check. Omitted/null fields remain
+   ignored; environment parsing is still selected independently.
    A file-admitted `float64` with the same existing positive-only YAML rule can
    use `fileFloat:"positive"`. It emits the literal greater-than-zero predicate
    without changing float parsing or adding finite/range validation to file or
@@ -127,7 +134,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -349,6 +356,13 @@ defaults; the client no longer contains unreachable ambient API-base fallbacks.
 Its later key resolution remains unchanged because raw configuration admission
 and trimmed runtime resolution are different reachable stages. Defaulting and
 claim-scope consumers share constants without changing their normalization.
+
+OpenComputer declares all eight fields, with four presence-based file integers,
+an env/flag-only API URL whose raw default remains empty, and CLI-only
+ForgetMissing. Its API key remains outside Crabbox config. Two configured
+fallback consumers share constants; external OC-file resolution, the single
+client-owned built-in URL, request-level timeout fallback, and lifecycle remain
+unchanged.
 
 The generator accepts only these seven exact source grants. Credential handling,
 destination validation and provenance, provider aliases, and provider selection

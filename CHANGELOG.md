@@ -48,6 +48,8 @@
 
 - Describe Orgo configuration bindings once and remove redundant client endpoint fallbacks, preserving configured-key precedence, runtime key resolution, sizing defaults, and claim scope. [PR 2019](https://github.com/openclaw/crabbox/pull/2019). Thanks @steipete.
 
+- Describe OpenComputer configuration bindings once, sharing workdir and execution-timeout defaults while preserving explicit file integers, OC-file URL resolution, and CLI-only cleanup intent. Thanks @steipete.
+
 ## 0.53.0 - 2026-09-08
 
 ### Highlights

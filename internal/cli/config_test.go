@@ -10527,3 +10527,196 @@ func TestOrgoConfigCentralFlagSource(t *testing.T) {
 		t.Fatal("central source phase changed")
 	}
 }
+
+func TestOpenComputerConfigFileContract(t *testing.T) {
+	wantDefaults := OpenComputerConfig{Workdir: "/workspace/crabbox", ExecTimeoutSecs: 3600}
+	if got := baseConfig().OpenComputer; got != wantDefaults {
+		t.Fatalf("defaults=%#v want=%#v", got, wantDefaults)
+	}
+	if reflect.TypeOf(OpenComputerConfig{}).NumField() != 8 || reflect.TypeOf(fileOpenComputerConfig{}).NumField() != 6 {
+		t.Fatal("configuration field count changed")
+	}
+	for _, name := range []string{"APIKey", "APIURL", "ForgetMissing"} {
+		if _, ok := reflect.TypeOf(fileOpenComputerConfig{}).FieldByName(name); ok {
+			t.Fatalf("unexpected file field %s", name)
+		}
+	}
+	if _, ok := reflect.TypeOf(OpenComputerConfig{}).FieldByName("APIKey"); ok {
+		t.Fatal("API key config field introduced")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, raw := range []string{"omitted", "null", "0", "-2", "3"} {
+			cfg := baseConfig()
+			cfg.OpenComputer = OpenComputerConfig{APIURL: "prior-url", Workdir: "/workspace/prior", CPU: 8, MemoryMB: 1024, TimeoutSecs: 45, ExecTimeoutSecs: 90}
+			want := cfg.OpenComputer
+			fields := map[string]any{"apiUrl": "ignored-file-url", "apiKey": "ignored-inert-key", "forgetMissing": true}
+			for _, f := range []struct {
+				key string
+				v   *int
+			}{{"cpu", &want.CPU}, {"memoryMB", &want.MemoryMB}, {"timeoutSecs", &want.TimeoutSecs}, {"execTimeoutSecs", &want.ExecTimeoutSecs}} {
+				if raw == "omitted" {
+					continue
+				}
+				if raw == "null" {
+					fields[f.key] = nil
+					continue
+				}
+				n, err := strconv.Atoi(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fields[f.key] = n
+				*f.v = n
+			}
+			data, err := yaml.Marshal(map[string]any{"openComputer": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.OpenComputer != want {
+				t.Fatalf("raw=%s trusted=%t got=%#v want=%#v", raw, trusted, cfg.OpenComputer, want)
+			}
+		}
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace", "value"} {
+			cfg := baseConfig()
+			cfg.OpenComputer.Workdir = "/workspace/prior"
+			cfg.OpenComputer.Burst = true
+			want := cfg.OpenComputer
+			fields := map[string]any{}
+			if mode != "omitted" {
+				var workdir any = want.Workdir
+				var burst any = false
+				if mode == "null" {
+					workdir = nil
+					burst = nil
+				}
+				if mode == "empty" {
+					workdir = ""
+				}
+				if mode == "whitespace" {
+					workdir = "  "
+				}
+				if mode == "value" {
+					workdir = "/workspace/value"
+				}
+				fields["workdir"] = workdir
+				fields["burst"] = burst
+				if mode != "null" {
+					want.Burst = false
+					if workdir != "" {
+						want.Workdir = workdir.(string)
+					}
+				}
+			}
+			data, err := yaml.Marshal(map[string]any{"openComputer": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.OpenComputer != want {
+				t.Fatalf("mode=%s trusted=%t got=%#v want=%#v", mode, trusted, cfg.OpenComputer, want)
+			}
+		}
+	}
+}
+
+func TestOpenComputerConfigEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"primary", "alias", "empty", "equal", "whitespace"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.OpenComputer.APIURL = "prior-url"
+			want := cfg.OpenComputer
+			primary, alias, workdir := "primary-url", "alias-url", "/workspace/env"
+			if mode == "alias" {
+				primary = ""
+				workdir = ""
+			}
+			if mode == "empty" {
+				primary = ""
+				alias = ""
+				workdir = ""
+			}
+			if mode == "equal" {
+				primary = want.APIURL
+				workdir = want.Workdir
+			}
+			if mode == "whitespace" {
+				primary = "  "
+				workdir = "  "
+			}
+			t.Setenv("CRABBOX_OPENCOMPUTER_API_URL", primary)
+			t.Setenv("OPENCOMPUTER_API_URL", alias)
+			t.Setenv("CRABBOX_OPENCOMPUTER_WORKDIR", workdir)
+			t.Setenv("CRABBOX_OPENCOMPUTER_FORGET_MISSING", "true")
+			if primary != "" {
+				want.APIURL = primary
+			} else if alias != "" {
+				want.APIURL = alias
+			}
+			if workdir != "" {
+				want.Workdir = workdir
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.OpenComputer != want {
+				t.Fatalf("mode=%s got=%#v want=%#v", mode, cfg.OpenComputer, want)
+			}
+		})
+	}
+	for _, raw := range []string{"", "invalid", " 2 ", "0", "-2", "3"} {
+		t.Run("numbers-"+raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.OpenComputer.CPU = 8
+			cfg.OpenComputer.MemoryMB = 1024
+			cfg.OpenComputer.TimeoutSecs = 45
+			want := cfg.OpenComputer
+			for _, f := range []struct {
+				suffix string
+				v      *int
+			}{{"CPU", &want.CPU}, {"MEMORY_MB", &want.MemoryMB}, {"TIMEOUT_SECS", &want.TimeoutSecs}, {"EXEC_TIMEOUT_SECS", &want.ExecTimeoutSecs}} {
+				t.Setenv("CRABBOX_OPENCOMPUTER_"+f.suffix, raw)
+				if n, err := strconv.Atoi(raw); err == nil {
+					*f.v = n
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.OpenComputer != want {
+				t.Fatalf("raw=%q got=%#v want=%#v", raw, cfg.OpenComputer, want)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		raw           string
+		initial, want bool
+	}{{"", true, true}, {"invalid", true, true}, {"false", true, false}, {"true", false, true}, {"0", true, false}} {
+		t.Run("burst-"+tc.raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.OpenComputer.Burst = tc.initial
+			t.Setenv("CRABBOX_OPENCOMPUTER_BURST", tc.raw)
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.OpenComputer.Burst != tc.want {
+				t.Fatalf("burst raw=%q got=%t", tc.raw, cfg.OpenComputer.Burst)
+			}
+		})
+	}
+}

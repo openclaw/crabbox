@@ -33,7 +33,6 @@ const (
 	leasePrefix     = "ocbx_"
 	namePrefix      = "crabbox-"
 	defaultAPIURL   = "https://app.opencomputer.dev"
-	defaultWorkdir  = "/workspace/crabbox"
 	targetLinux     = core.TargetLinux
 	NetworkPublic   = core.NetworkPublic
 	statusViewReady = "running"

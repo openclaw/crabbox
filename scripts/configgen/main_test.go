@@ -472,6 +472,12 @@ func TestOrgoGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestOpenComputerGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_opencomputer.go", "../../internal/cli/config_opencomputer_generated.go", "OpenComputerConfig", "opencomputer", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -1508,4 +1514,91 @@ func TestConfigBeforeAlias(t *testing.T){
 }
 `
 	runScalarFixture(t, input, output, behavior)
+}
+
+func TestSchemaFileIntPresentFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"empty", `help:"Count"`, `help:"Count" fileInt:""`, "fileInt is supported only"},
+		{"unknown", `help:"Count"`, `help:"Count" fileInt:"raw"`, "fileInt is supported only"},
+		{"string", `help:"Name"`, `help:"Name" fileInt:"present"`, "fileInt is supported only"},
+		{"float", `help:"CPUs"`, `help:"CPUs" fileInt:"present"`, "fileInt is supported only"},
+		{"bool", `help:"Enabled"`, `help:"Enabled" fileInt:"present"`, "fileInt is supported only"},
+		{"list", `help:"Ports"`, `help:"Ports" fileInt:"present"`, "fileInt is supported only"},
+		{"default constraint", `default:"7"`, `default:"-1" fileInt:"present"`, "default must be non-negative"},
+		{"required policy", `nonnegative:"true"`, `fileInt:"present"`, "require nonnegative policy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(sample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+	for _, source := range []string{
+		strings.Replace(flagOnlySample, `help:"Count"`, `help:"Count" fileInt:"present"`, 1),
+		"package cli\ntype PilotConfig struct{ Count int `sources:\"env,flag\" env:\"COUNT\" flag:\"count\" help:\"Count\" nonnegative:\"true\" fileInt:\"present\"` }",
+	} {
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "fileInt is supported only") {
+			t.Fatalf("no-file presence mode admitted: %v", err)
+		}
+	}
+}
+
+func TestGenerateFileIntPresent(t *testing.T) {
+	const source = "package cli\ntype PilotConfig struct {\n" +
+		" Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"COUNT\" flag:\"count\" help:\"Count\" nonnegative:\"true\" default:\"7\"`\n" +
+		" Positive int `sources:\"user,repo,env,flag\" config:\"positive\" env:\"POSITIVE\" flag:\"positive\" help:\"Positive\" nonnegative:\"true\" fileInt:\"positive\"`\n" +
+		" Strict int `sources:\"user,repo,env,flag\" config:\"strict\" env:\"STRICT\" flag:\"strict\" help:\"Strict\" nonnegative:\"true\"`\n}"
+	for _, fallback := range []bool{false, true} {
+		input := source
+		if fallback {
+			input = strings.Replace(input, `help:"Count"`, `help:"Count" envInt:"fallback"`, 1)
+		}
+		s, err := parseSchema([]byte(input), "PilotConfig", "pilot")
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := generate(s, "pilot.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		input = strings.Replace(input, `help:"Count"`, `help:"Count" fileInt:"present"`, 1)
+		s, err = parseSchema([]byte(input), "PilotConfig", "pilot")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !s.fields[0].fileIntPresent || s.fields[0].fileIntPositive || !s.fields[1].fileIntPositive || s.fields[1].fileIntPresent || s.fields[2].fileIntPresent || s.fields[2].fileIntPositive {
+			t.Fatal("file modes not exclusive")
+		}
+		output, err := generate(s, "pilot.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		again, err := generate(s, "pilot.go")
+		if err != nil || !bytes.Equal(output, again) {
+			t.Fatalf("nondeterministic present mode: %v", err)
+		}
+		want := strings.Replace(string(before), "\t\tif *file.Count < 0 {\n\t\t\treturn exit(2, \"pilot count must be non-negative\")\n\t\t}\n", "", 1)
+		if string(output) != want {
+			t.Fatal("present mode changed more than file negative check")
+		}
+		typecheckGenerated(t, input+"\nfunc getenvInt(string,int)int{panic(\"stub\")}\n", output)
+		const behavior = `package cli
+import("flag";"fmt";"testing")
+func getenvInt(_ string,prior int)int{return prior}
+func getenvNonNegativeInt(_ string,prior int)(int,error){return prior,nil}
+func exit(_ int,message string)error{return fmt.Errorf("%s",message)}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestFilePresent(t *testing.T){
+ zero,negative,positive:=0,-2,12
+ for _,tc:=range []struct{name string;value *int;want int}{{"nil",nil,7},{"zero",&zero,0},{"negative",&negative,-2},{"positive",&positive,12}}{
+  cfg:=defaultPilotConfig();if err:=cfg.applyFile(&filePilotConfig{Count:tc.value});err!=nil||cfg.Count!=tc.want{t.Fatalf("%s: %+v %v",tc.name,cfg,err)}
+ }
+ cfg:=PilotConfig{Count:7,Positive:8,Strict:9}
+ err:=cfg.applyFile(&filePilotConfig{Count:&negative,Positive:&zero,Strict:&negative})
+ if err==nil||err.Error()!="pilot strict must be non-negative"||cfg.Count!=-2||cfg.Positive!=8||cfg.Strict!=9{t.Fatalf("mode/order preservation: %+v %v",cfg,err)}
+}
+`
+		runScalarFixture(t, input, output, behavior)
+	}
 }
