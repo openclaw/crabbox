@@ -50,7 +50,7 @@
 
 - Describe OpenComputer configuration bindings once, sharing workdir and execution-timeout defaults while preserving explicit file integers, OC-file URL resolution, and CLI-only cleanup intent. [PR 2020](https://github.com/openclaw/crabbox/pull/2020). Thanks @steipete.
 
-- Describe Modal configuration bindings once, sharing configured defaults while preserving trusted Secret-name lists, environment clearing, and first-replace/later-append flags. Thanks @steipete.
+- Describe Modal configuration bindings once, sharing configured defaults while preserving trusted Secret-name lists, environment clearing, and first-replace/later-append flags. [PR 2022](https://github.com/openclaw/crabbox/pull/2022). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 
