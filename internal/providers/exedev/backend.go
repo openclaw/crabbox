@@ -390,13 +390,7 @@ func applyExeDevDefaults(cfg *Config) {
 	if cfg.ExeDev.Disk == "" {
 		cfg.ExeDev.Disk = core.ExeDevConfigDefaultDisk
 	}
-	if cfg.ExeDev.WorkRoot == "" {
-		if !isDefaultWorkRoot(cfg.WorkRoot) {
-			cfg.ExeDev.WorkRoot = cfg.WorkRoot
-		} else {
-			cfg.ExeDev.WorkRoot = core.ExeDevWorkRootFallback
-		}
-	}
+	cfg.ExeDev.WorkRoot = core.ResolveInheritedWorkRoot(cfg.ExeDev.WorkRoot, cfg.WorkRoot, core.ExeDevWorkRootFallback)
 	if cfg.ExeDev.User != "" {
 		cfg.SSHUser = cfg.ExeDev.User
 	} else if cfg.SSHUser == "" || cfg.SSHUser == "crabbox" {

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -332,13 +333,7 @@ func applyRunpodDefaults(cfg *Config) {
 	if cfg.Runpod.DiskGB <= 0 {
 		cfg.Runpod.DiskGB = 20
 	}
-	if cfg.Runpod.WorkRoot == "" {
-		if !isDefaultWorkRoot(cfg.WorkRoot) {
-			cfg.Runpod.WorkRoot = cfg.WorkRoot
-		} else {
-			cfg.Runpod.WorkRoot = "/tmp/crabbox"
-		}
-	}
+	cfg.Runpod.WorkRoot = core.ResolveInheritedWorkRoot(cfg.Runpod.WorkRoot, cfg.WorkRoot, "/tmp/crabbox")
 	if cfg.Runpod.User != "" {
 		cfg.SSHUser = cfg.Runpod.User
 	} else if cfg.SSHUser == "" || cfg.SSHUser == "crabbox" {

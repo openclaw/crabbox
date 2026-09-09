@@ -11341,3 +11341,41 @@ func TestExeDevConfigCentralFlagSource(t *testing.T) {
 		t.Fatal("explicit empty source missing")
 	}
 }
+
+func TestInheritedWorkRootCallerContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USER", "fixture-user")
+	for _, tc := range []struct{ providerRoot, genericRoot, want string }{
+		{"", "", "/tmp/crabbox"}, {"", "/work/crabbox", "/tmp/crabbox"}, {"", "/Users/ec2-user/crabbox", "/tmp/crabbox"}, {"", `C:\crabbox`, "/tmp/crabbox"},
+		{"", " /work/crabbox ", " /work/crabbox "}, {"", "/WORK/crabbox", "/WORK/crabbox"}, {"", `c:\crabbox`, `c:\crabbox`},
+		{"", "/srv/custom", "/srv/custom"}, {"", "/Users/alice/custom", "/Users/alice/custom"}, {"", `D:\custom`, `D:\custom`}, {"", "  ", "  "},
+		{" ", "/srv/custom", " "}, {"/work/crabbox", "/srv/custom", "/work/crabbox"}, {"relative", "/srv/custom", "relative"}, {"/provider/root", "/srv/custom", "/provider/root"},
+	} {
+		for _, explicit := range []bool{false, true} {
+			cfg := baseConfig()
+			cfg.Provider = "exe-dev"
+			cfg.SSHUser = "fixture-user"
+			cfg.SSHPort = "1234"
+			cfg.SSHFallbackPorts = []string{"4567"}
+			cfg.WorkRoot = "/recorded/root"
+			if explicit {
+				MarkWorkRootExplicit(&cfg)
+			}
+			cfg.WorkRoot = tc.genericRoot
+			cfg.ExeDev.WorkRoot = tc.providerRoot
+			want := cfg
+			want.WorkRoot = tc.want
+			want.ExeDev.WorkRoot = tc.want
+			want.SSHFallbackPorts = nil
+			want.providerDefaultsApplied = "exe-dev"
+			want.inferredTargetProvider = "exe-dev"
+			want.osImageProviderDefaults = want.OSImage
+			if err := applyProviderConfigDefaults(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("whole core config differs for roots=%q/%q explicit=%t: got=%#v want=%#v", tc.providerRoot, tc.genericRoot, explicit, cfg, want)
+			}
+		}
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -733,5 +734,61 @@ func TestReleaseRequiresExactClaim(t *testing.T) {
 func TestLaunchArgTimeoutValueIsNumeric(t *testing.T) {
 	if _, err := strconv.Atoi(strconv.Itoa(durationSecondsCeil(10 * time.Minute))); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestInheritedWorkRootCallerContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USER", "fixture-user")
+	for _, tc := range []struct{ providerRoot, genericRoot, want string }{
+		{"", "", "/work/crabbox"},
+		{"", "/work/crabbox", "/work/crabbox"},
+		{"", "/Users/ec2-user/crabbox", "/work/crabbox"},
+		{"", "C:\\crabbox", "/work/crabbox"},
+		{"", " /work/crabbox ", " /work/crabbox "},
+		{"", "/WORK/crabbox", "/WORK/crabbox"},
+		{"", "c:\\crabbox", "c:\\crabbox"},
+		{"", "/srv/custom", "/srv/custom"},
+		{"", "/Users/alice/custom", "/Users/alice/custom"},
+		{"", "D:\\custom", "D:\\custom"},
+		{"", "  ", "  "},
+		{" ", "/srv/custom", " "},
+		{"/work/crabbox", "/srv/custom", "/work/crabbox"},
+		{"relative", "/srv/custom", "relative"},
+		{"/provider/root", "/srv/custom", "/provider/root"},
+	} {
+		for _, explicit := range []bool{false, true} {
+			cfg := Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
+			if explicit {
+				core.MarkWorkRootExplicit(&cfg)
+				cfg.TargetOS = "existing-target"
+				cfg.WindowsMode = "prior-mode"
+			}
+			cfg.WorkRoot = tc.genericRoot
+			cfg.Multipass.WorkRoot = tc.providerRoot
+
+			want := cfg
+			want.Provider = "multipass"
+			if !explicit {
+				want.TargetOS = "linux"
+			}
+			want.Multipass.WorkRoot = tc.want
+			want.WorkRoot = tc.want
+			want.Multipass.CLIPath = "multipass"
+			want.Multipass.Image = "26.04"
+			want.Multipass.User = "crabbox"
+			want.Multipass.LaunchTimeout = 20 * time.Minute
+			want.SSHUser = "crabbox"
+			want.SSHPort = "22"
+			want.SSHFallbackPorts = []string{}
+			want.ServerType = "26.04"
+			if !explicit {
+				want.WindowsMode = ""
+			}
+			applyDefaults(&cfg)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("whole config differs for roots=%q/%q explicit=%t: got=%#v want=%#v", tc.providerRoot, tc.genericRoot, explicit, cfg, want)
+			}
+		}
 	}
 }

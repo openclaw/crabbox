@@ -1284,3 +1284,55 @@ func TestExeDevConfigCreateArgumentsContract(t *testing.T) {
 		})
 	}
 }
+
+func TestInheritedWorkRootCallerContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USER", "fixture-user")
+	for _, tc := range []struct{ providerRoot, genericRoot, want string }{
+		{"", "", "/tmp/crabbox"},
+		{"", "/work/crabbox", "/tmp/crabbox"},
+		{"", "/Users/ec2-user/crabbox", "/tmp/crabbox"},
+		{"", "C:\\crabbox", "/tmp/crabbox"},
+		{"", " /work/crabbox ", " /work/crabbox "},
+		{"", "/WORK/crabbox", "/WORK/crabbox"},
+		{"", "c:\\crabbox", "c:\\crabbox"},
+		{"", "/srv/custom", "/srv/custom"},
+		{"", "/Users/alice/custom", "/Users/alice/custom"},
+		{"", "D:\\custom", "D:\\custom"},
+		{"", "  ", "  "},
+		{" ", "/srv/custom", " "},
+		{"/work/crabbox", "/srv/custom", "/work/crabbox"},
+		{"relative", "/srv/custom", "relative"},
+		{"/provider/root", "/srv/custom", "/provider/root"},
+	} {
+		for _, explicit := range []bool{false, true} {
+			cfg := Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
+			if explicit {
+				core.MarkWorkRootExplicit(&cfg)
+				cfg.TargetOS = "existing-target"
+				cfg.WindowsMode = "prior-mode"
+			}
+			cfg.WorkRoot = tc.genericRoot
+			cfg.ExeDev.WorkRoot = tc.providerRoot
+
+			want := cfg
+			want.Provider = "exe-dev"
+			if !explicit {
+				want.TargetOS = "linux"
+			}
+			want.ExeDev.WorkRoot = tc.want
+			want.WorkRoot = tc.want
+			want.ExeDev.ControlHost = "exe.dev"
+			want.ExeDev.CPUs = 2
+			want.ExeDev.Memory = "4GB"
+			want.ExeDev.Disk = "10GB"
+			want.SSHPort = "22"
+			want.SSHFallbackPorts = nil
+			want.ServerType = "default"
+			applyExeDevDefaults(&cfg)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("whole config differs for roots=%q/%q explicit=%t: got=%#v want=%#v", tc.providerRoot, tc.genericRoot, explicit, cfg, want)
+			}
+		}
+	}
+}

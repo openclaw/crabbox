@@ -1839,13 +1839,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			cfg.SSHPort = "22"
 		}
 		cfg.SSHFallbackPorts = nil
-		if cfg.ExeDev.WorkRoot == "" {
-			if !isDefaultWorkRoot(cfg.WorkRoot) {
-				cfg.ExeDev.WorkRoot = cfg.WorkRoot
-			} else {
-				cfg.ExeDev.WorkRoot = ExeDevWorkRootFallback
-			}
-		}
+		cfg.ExeDev.WorkRoot = ResolveInheritedWorkRoot(cfg.ExeDev.WorkRoot, cfg.WorkRoot, ExeDevWorkRootFallback)
 		if cfg.ExeDev.WorkRoot != "" {
 			cfg.WorkRoot = cfg.ExeDev.WorkRoot
 		}

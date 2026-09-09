@@ -972,6 +972,15 @@ Blacksmith does) when the config type is not ready to export cleanly.
 If a provider needs durable config, add typed config fields in `Config` and env
 overrides in `config.go`.
 
+`cli.ResolveInheritedWorkRoot` shares the raw work-root decision used by exe.dev
+(core loading and backend defaults), Runpod, Multipass, Hyper-V, and Tart. A
+nonempty provider root wins; otherwise a generic root that is not an exact
+portable default is inherited, or the caller's fallback is used. The resolver
+does not trim, normalize paths, inspect markers or targets, validate directories,
+or mutate configuration. Keep subsequent generic-root copies and other default
+assignments at their existing call sites. Providers with trimmed classifiers,
+explicit-root markers, or different projection rules retain their own policy.
+
 Never pass provider secrets as command-line arguments. Use environment variables,
 local SDK config, the broker, or a credential store outside repo config.
 
