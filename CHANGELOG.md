@@ -66,7 +66,7 @@
 
 - Describe Lume configuration bindings once, sharing configured defaults while preserving trusted host settings, user-dependent work roots, and provider validation order. [PR 2029](https://github.com/openclaw/crabbox/pull/2029). Thanks @steipete.
 
-- Keep normalized provider selection aligned with declared names and aliases, sharing metadata across flag/default guards while preserving validation order and separate claim-matching rules. Thanks @steipete.
+- Keep normalized provider selection aligned with declared names and aliases, sharing metadata across flag/default guards while preserving validation order and separate claim-matching rules. [PR 2030](https://github.com/openclaw/crabbox/pull/2030). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 
