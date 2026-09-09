@@ -1,80 +1,43 @@
 # Changelog
 
-## Unreleased
+## 0.54.0 - 2026-09-09
 
-- Add an explicit Ubuntu 24.04 developer-image publication selector while retaining Ubuntu 26.04 as the default, and scope Linux promotion and receipt rollback to the selected OS. https://github.com/openclaw/crabbox/pull/2028. Thanks @vincentkoc.
+### Highlights
 
-- Run managed WSL2 workloads as the non-root `crabbox` user with passwordless sudo, writable work/cache directories, and the shared Node baseline on PATH. https://github.com/openclaw/crabbox/pull/2016. Thanks @steipete.
+- **More reliable managed WSL2 runners.** Run Linux workloads as the non-root `crabbox` user with Node/npm ready on PATH, keep detached daemons alive between commands, and avoid headless WSLg and cloud-init startup stalls.
+- **Less coordinator overhead and faster failure detection.** Avoid repeated work over ended lease history, reject confirmed-deleted execution targets before SSH, and recover one transient lease-read failure without replaying the workload.
+- **Offline-ready Linux toolchains.** The developer-image builder now carries verified Node 24.19.0, Go 1.27.0, Bun 1.4.0, and reusable pnpm archives, with offline execution checks and protection for operator-owned tool paths.
+- **Choose Ubuntu 24.04 for image publication.** Select it explicitly while Ubuntu 26.04 remains the default, with promotion and receipt-based rollback scoped to the selected OS.
 
-- Keep managed WSL2 distributions alive between commands so detached Linux daemons survive until lease cleanup; preserve command and ownership deadlines. https://github.com/openclaw/crabbox/pull/2016. Thanks @steipete.
+### Upgrade notes
 
-- Install the shared Linux Node/npm baseline during managed WSL2 bootstrap and require both tools for readiness. https://github.com/openclaw/crabbox/pull/2008. Thanks @steipete.
-- Keep WSL2 workspace-owner renewal small and allow bounded workload contention without weakening token, expiry, or child-state checks. https://github.com/openclaw/crabbox/pull/2011. Thanks @steipete.
+- **Reprovision existing managed WSL2 leases** to receive the bootstrap fixes. New managed workloads run as `crabbox` with passwordless sudo and writable work/cache directories; use `sudo` for operations that require root. [PR 1996](https://github.com/openclaw/crabbox/pull/1996), [PR 2005](https://github.com/openclaw/crabbox/pull/2005), [PR 2016](https://github.com/openclaw/crabbox/pull/2016).
+- Headless managed WSL2 bootstrap sets `guiApplications=false` in the Windows SSH user's `.wslconfig`, preserving other settings. Explicit desktop/browser requests retain the existing GUI configuration. WSL2 status probes allow up to 30 seconds; other SSH targets retain four seconds. [PR 1996](https://github.com/openclaw/crabbox/pull/1996), [PR 2005](https://github.com/openclaw/crabbox/pull/2005).
+- The pinned Node/Go/Bun archives apply to newly built or rebaked Linux x86_64 developer images. Managed WSL2 installs the Node/npm subset, without the full image's Go, Docker, browser tools, pnpm activation, or offline pnpm archives. Updating the CLI does not rebake or replace existing images. [PR 1944](https://github.com/openclaw/crabbox/pull/1944), [PR 2006](https://github.com/openclaw/crabbox/pull/2006), [PR 2008](https://github.com/openclaw/crabbox/pull/2008), [PR 2009](https://github.com/openclaw/crabbox/pull/2009).
+- Image publication accepts `linux_os=ubuntu:24.04` or `ubuntu:26.04`, defaulting to 26.04. Standalone Linux minting accepts `CRABBOX_OS`; explicit image overrides still take precedence, so the selector alone does not verify the guest OS or qualify an image. [PR 2028](https://github.com/openclaw/crabbox/pull/2028).
 
-- Disable the unused WSLg compositor on headless managed Windows WSL2 leases to avoid service-session crashes that stall commands and workspace-owner renewal; preserve other WSL settings and existing execution deadlines. https://github.com/openclaw/crabbox/pull/2005. Thanks @steipete.
+### Changes
 
-- Fix managed Windows WSL2 command timeouts by disabling redundant cloud-init discovery, verifying cold-start readiness, and allowing a target-specific status probe budget for fixed-ID orchestrators. https://github.com/openclaw/crabbox/pull/1996. Thanks @steipete.
+- Managed WSL2: disable redundant cloud-init discovery, verify cold-start Linux readiness before accepting bootstrap, and disable the unused WSLg compositor on headless leases while preserving other WSL settings and existing execution deadlines. [PR 1996](https://github.com/openclaw/crabbox/pull/1996), [PR 2005](https://github.com/openclaw/crabbox/pull/2005). Thanks @steipete.
+- Managed WSL2: install the shared Node/npm baseline and require both tools for readiness; run workloads as the non-root `crabbox` user with passwordless sudo, writable work/cache directories, and the managed Node path available. Keep the distribution alive between commands so detached Linux daemons survive until lease cleanup. [PR 2008](https://github.com/openclaw/crabbox/pull/2008), [PR 2016](https://github.com/openclaw/crabbox/pull/2016). Thanks @steipete.
+- Keep WSL2 workspace-owner renewal small and allow bounded workload contention while preserving token, expiry, and child-state checks. [PR 2011](https://github.com/openclaw/crabbox/pull/2011). Thanks @steipete.
+- Reduce coordinator maintenance work for large lease histories: prepare relevant candidates once per pass, select bridge cleanup from live owners and existing records, and limit pool and provisioning lookups while preserving current-state ownership checks and wakeups. [PR 1997](https://github.com/openclaw/crabbox/pull/1997), [PR 2001](https://github.com/openclaw/crabbox/pull/2001). Thanks @steipete.
+- Reject run preparation on confirmed-deleted coordinator leases before SSH setup, keeping inspection and release available for recovery. [PR 2001](https://github.com/openclaw/crabbox/pull/2001). Thanks @steipete.
+- Retry an exact coordinator lease read once on HTTP 5xx during run preparation, sharing the original deadline and preserving cancellation and reply-identity checks; SSH, scripts, permanent failures, and ordinary status reads are not replayed. [PR 1999](https://github.com/openclaw/crabbox/pull/1999).
+- Linux developer-image builder: retain verified Node 24.19.0 and pnpm 11.22.0/12.3.4 archives, enforce the selected Node major, and verify an exact NodeSource package before retiring owned aliases on explicit Node 24-to-22 rebakes. Preserve operator-owned tool paths and public Yarn aliases. [PR 1944](https://github.com/openclaw/crabbox/pull/1944). Thanks @vincentkoc.
+- Linux developer-image builder: bake checksum-pinned Go 1.27.0 with offline standard-library and CGO checks. Seed verified Node/Go copies and private Corepack shims into eligible quiescent native GitHub runners' default tool caches, correctly reading systemd's manager environment while preserving custom roots, existing slots, and operator-owned Go aliases. [PR 2006](https://github.com/openclaw/crabbox/pull/2006). Thanks @vincentkoc.
+- Linux developer-image builder: add verified Bun 1.4.0 baseline and optimized archives, keep the portable baseline on the normal PATH, and require guest-compatible nonroot offline TypeScript, test, bundle, and local `bunx` checks. Preserve operator-owned tool paths across rebakes. [PR 2009](https://github.com/openclaw/crabbox/pull/2009). Thanks @vincentkoc.
+- Add explicit Ubuntu 24.04 developer-image publication selection, retaining Ubuntu 26.04 by default and carrying the selected Linux OS through promotion and receipt rollback. [PR 2028](https://github.com/openclaw/crabbox/pull/2028). Thanks @vincentkoc.
 
-- GitHub runner tool-cache seeding: query systemd's manager environment correctly so eligible quiescent runners can reuse authenticated Node/Go copies while custom cache settings and unknown runner state still block publication. https://github.com/openclaw/crabbox/pull/2006. Thanks @vincentkoc.
-- Linux developer images: bake checksum-pinned Go 1.27.0 with offline stdlib/CGO checks while preserving operator-owned Go aliases, and seed authenticated Node/Go copies with all four private Corepack shims into quiescent native GitHub runners' owned default tool caches while preserving custom roots and existing slots. https://github.com/openclaw/crabbox/pull/2006. Thanks @vincentkoc.
-- Linux developer images: bake verified Bun 1.4.0 baseline and optimized archives, preserve operator-owned tool paths across rebakes, keep baseline on the normal tool PATH, and require guest-compatible nonroot offline TypeScript, test, and bundle proof. https://github.com/openclaw/crabbox/pull/2009. Thanks @vincentkoc.
-- Describe Anthropic Sandbox Runtime configuration bindings once, preserving inherited binary paths for empty YAML, explicit settings/debug clearing, and native runtime defaults. [PR 1993](https://github.com/openclaw/crabbox/pull/1993). Thanks @steipete.
-- Linux developer images: bake verified Node 24.19.0 and reusable public pnpm 11.22.0/12.3.4 archives, verify an exact native NodeSource package before retiring owned aliases on explicit Node 24-to-22 rebakes, preserve operator-owned tool paths and public Yarn aliases, and enforce the selected Node major and nonroot offline checks before image-smoke success. [PR 1944](https://github.com/openclaw/crabbox/pull/1944). Thanks @vincentkoc.
-- Prepare pending lease identities once per maintenance pass and reject commands on confirmed-deleted coordinator leases before SSH setup, avoiding repeated history scans and long recovery waits. [PR 2001](https://github.com/openclaw/crabbox/pull/2001). Thanks @steipete.
-- Reduce coordinator maintenance work for large lease histories by selecting bridge cleanup from live owners and existing records, and limiting pool and provisioning lookups to relevant leases. [PR 1997](https://github.com/openclaw/crabbox/pull/1997). Thanks @steipete.
-- Retry an exact coordinator lease read once on HTTP 5xx during run preparation, sharing the original deadline without replaying SSH, scripts, or permanent failures. [PR 1999](https://github.com/openclaw/crabbox/pull/1999).
+### Maintenance
 
-- Describe Cloud Run Sandbox configuration bindings once, keeping launcher/workdir defaults consistent across diagnostics and claims while preserving source precedence and operation-specific behavior. [PR 2000](https://github.com/openclaw/crabbox/pull/2000). Thanks @steipete.
-
-- Describe FastAPI Cloud configuration bindings once while preserving environment-only tokens, source precedence, and credential-destination checks. [PR 2004](https://github.com/openclaw/crabbox/pull/2004). Thanks @steipete.
-
-- Describe Railway configuration bindings once, sharing the client endpoint default while preserving environment-only tokens, source precedence, and existing claim routing. [PR 2007](https://github.com/openclaw/crabbox/pull/2007). Thanks @steipete.
-
-- Describe Upstash Box configuration bindings once, keeping runtime, size, endpoint, and workdir defaults consistent across clients, claims, and display without changing source precedence. [PR 2010](https://github.com/openclaw/crabbox/pull/2010). Thanks @steipete.
-
-- Describe Cloudflare container-runner configuration bindings once, sharing the CLI workdir default while preserving token sources, instance-type mapping, and Worker protocol defaults. [PR 2012](https://github.com/openclaw/crabbox/pull/2012). Thanks @steipete.
-
-- Describe Cloudflare Sandbox configuration bindings once, preserving trusted URL-alias precedence, explicit clearing, optional tokens, and timeout-zero behavior. [PR 2013](https://github.com/openclaw/crabbox/pull/2013). Thanks @steipete.
-
-- Describe E2B configuration bindings once, keeping endpoint, domain, template, and workdir defaults consistent while preserving credential sources and existing scope/preview behavior. [PR 2014](https://github.com/openclaw/crabbox/pull/2014). Thanks @steipete.
-
-- Describe Blaxel configuration bindings once, sharing client and execution defaults while preserving tolerant memory environment parsing, trusted inputs, and validation order. [PR 2015](https://github.com/openclaw/crabbox/pull/2015). Thanks @steipete.
-
-- Describe Azure Dynamic Sessions configuration bindings once, preserving positive-only YAML timeouts, legacy-pool rejection, endpoint provenance, and TTL fallback order. [PR 2017](https://github.com/openclaw/crabbox/pull/2017). Thanks @steipete.
-
-- Describe SmolVM configuration bindings once, preserving all three API-key environment names, CPU/memory source rules, endpoint checks, and existing network behavior. [PR 2018](https://github.com/openclaw/crabbox/pull/2018). Thanks @steipete.
-
-- Describe Semaphore configuration bindings once, sharing effective machine, OS-image, and idle-timeout defaults without changing raw configuration values, explicit flags, or credential sources. [PR 2018](https://github.com/openclaw/crabbox/pull/2018). Thanks @steipete.
-
-- Describe Tensorlake configuration bindings once, sharing API, CLI, and workdir defaults while preserving positive-only YAML sizing, environment parsing, credential sources, and native defaults. [PR 2018](https://github.com/openclaw/crabbox/pull/2018). Thanks @steipete.
-
-- Describe Orgo configuration bindings once and remove redundant client endpoint fallbacks, preserving configured-key precedence, runtime key resolution, sizing defaults, and claim scope. [PR 2019](https://github.com/openclaw/crabbox/pull/2019). Thanks @steipete.
-
-- Describe OpenComputer configuration bindings once, sharing workdir and execution-timeout defaults while preserving explicit file integers, OC-file URL resolution, and CLI-only cleanup intent. [PR 2020](https://github.com/openclaw/crabbox/pull/2020). Thanks @steipete.
-
-- Describe Modal configuration bindings once, sharing configured defaults while preserving trusted Secret-name lists, environment clearing, and first-replace/later-append flags. [PR 2022](https://github.com/openclaw/crabbox/pull/2022). Thanks @steipete.
-
-- Share unsupported machine-sizing flag checks across providers, preserving explicit-input behavior, provider-specific guidance, and validation order. [PR 2023](https://github.com/openclaw/crabbox/pull/2023). Thanks @steipete.
-
-- Describe Morph configuration bindings once, sharing endpoint, gateway, and work-root defaults while preserving source precedence, explicit deletion policy, and SSH wake behavior. [PR 2024](https://github.com/openclaw/crabbox/pull/2024). Thanks @steipete.
-
-- Describe exe.dev configuration bindings once, sharing configured defaults while preserving work-root inheritance, omitted native images, CPU input rules, and notification preferences. [PR 2025](https://github.com/openclaw/crabbox/pull/2025). Thanks @steipete.
-
-- Share work-root inheritance decisions across exe.dev, Runpod, Multipass, Hyper-V, and Tart while preserving raw provider roots, portable-default handling, and later validation. [PR 2026](https://github.com/openclaw/crabbox/pull/2026). Thanks @steipete.
-
-- Describe OVHcloud configuration bindings once, sharing configured endpoint, image, and flavor defaults while preserving input precedence, explicit image selection, regional aliases, and machine-class mapping. [PR 2027](https://github.com/openclaw/crabbox/pull/2027). Thanks @steipete.
-
-- Describe Lume configuration bindings once, sharing configured defaults while preserving trusted host settings, user-dependent work roots, and provider validation order. [PR 2029](https://github.com/openclaw/crabbox/pull/2029). Thanks @steipete.
-
-- Keep normalized provider selection aligned with declared names and aliases, sharing metadata across flag/default guards while preserving validation order and separate claim-matching rules. [PR 2030](https://github.com/openclaw/crabbox/pull/2030). Thanks @steipete.
-
-- Keep raw-exact provider selection aligned with declared names and aliases without normalizing inputs or changing flag/default validation order. [PR 2031](https://github.com/openclaw/crabbox/pull/2031). Thanks @steipete.
-
-- Describe Runpod configuration bindings once, sharing effective defaults while preserving environment-only keys, nonzero disk overlays, and generic user/work-root inheritance. [PR 2032](https://github.com/openclaw/crabbox/pull/2032). Thanks @steipete.
-
-- Describe Vast configuration bindings once, sharing configured defaults while preserving flag-only instance-type normalization, numeric overlay rules, and explicit user/work-root/release behavior. [PR 2033](https://github.com/openclaw/crabbox/pull/2033). Thanks @steipete.
-
-- Describe W&B configuration bindings once, sharing runtime fallback values while preserving tolerant lifetime environment aliases, raw defaults, and client-owned login precedence. [PR 2034](https://github.com/openclaw/crabbox/pull/2034). Thanks @steipete.
+- Consolidate configuration bindings and shared defaults for Anthropic Sandbox Runtime, Cloud Run Sandbox, FastAPI Cloud, Railway, and Upstash Box while preserving source precedence, explicit clearing, native defaults, and credential boundaries. [PR 1993](https://github.com/openclaw/crabbox/pull/1993), [PR 2000](https://github.com/openclaw/crabbox/pull/2000), [PR 2004](https://github.com/openclaw/crabbox/pull/2004), [PR 2007](https://github.com/openclaw/crabbox/pull/2007), [PR 2010](https://github.com/openclaw/crabbox/pull/2010). Thanks @steipete.
+- Consolidate Azure Dynamic Sessions, Blaxel, Cloudflare container-runner, Cloudflare Sandbox, and E2B configuration bindings while preserving provider-specific parsing, timeout rules, trusted URL precedence, credential sources, and claim behavior. [PR 2012](https://github.com/openclaw/crabbox/pull/2012), [PR 2013](https://github.com/openclaw/crabbox/pull/2013), [PR 2014](https://github.com/openclaw/crabbox/pull/2014), [PR 2015](https://github.com/openclaw/crabbox/pull/2015), [PR 2017](https://github.com/openclaw/crabbox/pull/2017). Thanks @steipete.
+- Unify Modal, OpenComputer, Orgo, Semaphore, SmolVM, and Tensorlake configuration/default ownership while retaining sizing and timeout overlays, key resolution, native defaults, cleanup intent, and repeatable-list semantics. [PR 2018](https://github.com/openclaw/crabbox/pull/2018), [PR 2019](https://github.com/openclaw/crabbox/pull/2019), [PR 2020](https://github.com/openclaw/crabbox/pull/2020), [PR 2022](https://github.com/openclaw/crabbox/pull/2022). Thanks @steipete.
+- Unify exe.dev, Lume, and Morph configuration bindings and defaults while preserving trusted hosts, work-root inheritance, input precedence, native image selection, deletion policy, and SSH wake behavior. [PR 2024](https://github.com/openclaw/crabbox/pull/2024), [PR 2025](https://github.com/openclaw/crabbox/pull/2025), [PR 2029](https://github.com/openclaw/crabbox/pull/2029). Thanks @steipete.
+- Unify OVHcloud, Runpod, Vast, and W&B configuration bindings and fallback ownership while preserving credential precedence, numeric overlays, explicit image and instance-type selection, machine-class mapping, and release behavior. [PR 2027](https://github.com/openclaw/crabbox/pull/2027), [PR 2032](https://github.com/openclaw/crabbox/pull/2032), [PR 2033](https://github.com/openclaw/crabbox/pull/2033), [PR 2034](https://github.com/openclaw/crabbox/pull/2034). Thanks @steipete.
+- Share unsupported machine-sizing checks and work-root inheritance decisions across providers, preserving explicit-input behavior, provider guidance, raw roots, and validation order. [PR 2023](https://github.com/openclaw/crabbox/pull/2023), [PR 2026](https://github.com/openclaw/crabbox/pull/2026). Thanks @steipete.
+- Share declared provider names and aliases across selection guards while keeping normalized selection and raw-exact matching distinct, with unchanged validation order and claim matching. [PR 2030](https://github.com/openclaw/crabbox/pull/2030), [PR 2031](https://github.com/openclaw/crabbox/pull/2031). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 
