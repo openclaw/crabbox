@@ -74,7 +74,7 @@
 
 - Describe Vast configuration bindings once, sharing configured defaults while preserving flag-only instance-type normalization, numeric overlay rules, and explicit user/work-root/release behavior. [PR 2033](https://github.com/openclaw/crabbox/pull/2033). Thanks @steipete.
 
-- Describe W&B configuration bindings once, sharing runtime fallback values while preserving tolerant lifetime environment aliases, raw defaults, and client-owned login precedence. Thanks @steipete.
+- Describe W&B configuration bindings once, sharing runtime fallback values while preserving tolerant lifetime environment aliases, raw defaults, and client-owned login precedence. [PR 2034](https://github.com/openclaw/crabbox/pull/2034). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 
