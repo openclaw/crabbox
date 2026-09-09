@@ -1,7 +1,6 @@
 package codesandbox
 
 import (
-	"flag"
 	"io"
 	"os"
 	"strings"
@@ -53,10 +52,6 @@ const (
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
 }
 
 func inventoryDoctorResult(provider string, leases int) DoctorResult {
