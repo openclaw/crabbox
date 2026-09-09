@@ -120,7 +120,7 @@ func TestVultrBindingNoFlags(t *testing.T) {
 func TestVultrBindingRuntime(t *testing.T) {
 	for _, tc := range []struct{ raw, generic, region, user string }{{"", "", "ewr", "root"}, {"", "generic", "generic", "root"}, {"  ", "generic", "  ", "  "}, {"custom", "generic", "custom", "custom"}} {
 		cfg := core.Config{Location: tc.generic, Vultr: core.VultrConfig{Region: tc.raw, UserScheme: tc.raw}}
-		if vultrRegion(cfg) != tc.region || vultrUserScheme(cfg) != tc.user {
+		if vultrRegion(cfg) != tc.region || cfg.Vultr.WithRuntimeDefaults().UserScheme != tc.user {
 			t.Fatal("lower fallback mismatch")
 		}
 		applyVultrDefaults(&cfg)
@@ -146,5 +146,72 @@ func TestVultrBindingRuntime(t *testing.T) {
 		if cfg.SSHUser != "alice" || cfg.SSHPort != "2200" || cfg.WorkRoot != "/srv/project" || cfg.ServerType != "custom-type" {
 			t.Fatal("explicit generic fields changed")
 		}
+	}
+}
+
+func TestVultrRuntimeTransformProvider(t *testing.T) {
+	for _, region := range []string{"", "custom-region", "  "} {
+		for _, scheme := range []string{"", "custom-scheme", "  ", "limited", "LIMITED", " limited "} {
+			for _, lists := range []string{"nil", "empty", "shared"} {
+				for _, explicit := range []bool{false, true} {
+					cfg := core.Config{Provider: "vultr", Location: "generic-region", Class: "standard", Vultr: core.VultrConfig{Region: region, UserScheme: scheme, OS: "raw-os", Image: "raw-image", Snapshot: "raw-snapshot", FirewallGroup: "raw-group"}}
+					switch lists {
+					case "empty":
+						cfg.Vultr.VPCIDs = []string{}
+						cfg.Vultr.SSHCIDRs = []string{}
+					case "shared":
+						cfg.Vultr.VPCIDs = []string{"vpc-a", "vpc-a"}
+						cfg.Vultr.SSHCIDRs = []string{" 192.0.2.0/24 ", ""}
+					}
+					before := cfg.Vultr
+					want := before
+					if region == "" {
+						want.Region = "ewr"
+					}
+					if scheme == "" {
+						want.UserScheme = "root"
+					}
+					if got := cfg.Vultr.WithRuntimeDefaults().UserScheme; got != want.UserScheme {
+						t.Fatalf("getter=%q want=%q", got, want.UserScheme)
+					}
+					if !reflect.DeepEqual(cfg.Vultr, before) {
+						t.Fatal("read-only getter changed config")
+					}
+					lowerRegion := region
+					if lowerRegion == "" {
+						lowerRegion = "generic-region"
+					}
+					if got := vultrRegion(cfg); got != lowerRegion {
+						t.Fatalf("lower region=%q want=%q", got, lowerRegion)
+					}
+					user, port, root := "root", "22", "/work/crabbox"
+					if scheme == "limited" || scheme == "LIMITED" {
+						user = "limited"
+					}
+					if explicit {
+						user, port, root = "alice", "2200", "/srv/project"
+						cfg.SSHUser = user
+						cfg.SSHPort = port
+						cfg.WorkRoot = root
+						core.MarkSSHUserExplicit(&cfg)
+						core.MarkSSHPortExplicit(&cfg)
+						core.MarkWorkRootExplicit(&cfg)
+					}
+					applyVultrDefaults(&cfg)
+					if !reflect.DeepEqual(cfg.Vultr, want) {
+						t.Fatalf("region=%q scheme=%q lists=%s got=%#v want=%#v", region, scheme, lists, cfg.Vultr, want)
+					}
+					if reflect.ValueOf(cfg.Vultr.VPCIDs).Pointer() != reflect.ValueOf(before.VPCIDs).Pointer() || reflect.ValueOf(cfg.Vultr.SSHCIDRs).Pointer() != reflect.ValueOf(before.SSHCIDRs).Pointer() {
+						t.Fatal("backend changed slice backing")
+					}
+					if cfg.SSHUser != user || cfg.SSHPort != port || cfg.WorkRoot != root || cfg.Class != "standard" || cfg.Location != "generic-region" || cfg.ServerType != "vc2-1c-1gb" || cfg.TargetOS != core.TargetLinux || cfg.SSHFallbackPorts != nil {
+						t.Fatalf("generic effects user=%q port=%q root=%q class=%q location=%q type=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot, cfg.Class, cfg.Location, cfg.ServerType)
+					}
+				}
+			}
+		}
+	}
+	if got := vultrRegion(core.Config{}); got != "ewr" {
+		t.Fatalf("lower raw fallback=%q", got)
 	}
 }

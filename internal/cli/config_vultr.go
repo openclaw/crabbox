@@ -20,3 +20,15 @@ type VultrConfig struct {
 	SSHCIDRs      []string `config:"sshCIDRs" env:"CRABBOX_VULTR_SSH_CIDRS" sources:"user,repo,env" fileList:"nonempty-raw"`
 	UserScheme    string   `config:"userScheme" env:"CRABBOX_VULTR_USER_SCHEME" sources:"user,repo,env" fileIgnoreEmpty:"true"`
 }
+
+// WithRuntimeDefaults returns a shallow copy with only raw-empty Region and
+// UserScheme filled. It does not normalize values or select generic SSH policy.
+func (cfg VultrConfig) WithRuntimeDefaults() VultrConfig {
+	if cfg.Region == "" {
+		cfg.Region = VultrRegionFallback
+	}
+	if cfg.UserScheme == "" {
+		cfg.UserScheme = VultrUserSchemeFallback
+	}
+	return cfg
+}

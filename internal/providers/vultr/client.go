@@ -395,7 +395,7 @@ func (c *vultrClient) createInstanceBody(ctx context.Context, cfg core.Config, p
 		"hostname":         name,
 		"tags":             leaseTags(cfg, leaseID, slug, "provisioning", keep, now),
 		"activation_email": false,
-		"user_scheme":      vultrUserScheme(cfg),
+		"user_scheme":      cfg.Vultr.WithRuntimeDefaults().UserScheme,
 	}
 	for k, v := range boot {
 		body[k] = v
@@ -661,13 +661,6 @@ func vultrRegion(cfg core.Config) string {
 		return cfg.Location
 	}
 	return core.VultrRegionFallback
-}
-
-func vultrUserScheme(cfg core.Config) string {
-	if cfg.Vultr.UserScheme != "" {
-		return cfg.Vultr.UserScheme
-	}
-	return core.VultrUserSchemeFallback
 }
 
 func providerKeyForLease(leaseID string) string {

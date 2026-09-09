@@ -101,8 +101,12 @@ remain separate from portable-OS mapping and lower generic-field inheritance.
 
 Vultr reuses the same flagless bindings without extending the generator. Its two
 raw file lists retain sharing and its environment lists retain their own empty
-representation. Runtime region/user-scheme fallback values do not replace SSH-user
-policy, native boot-source parsing, or OS catalog selection.
+representation. Its handwritten `WithRuntimeDefaults` value method owns raw-empty
+region/user-scheme filling at the existing core and backend phases and supplies
+read-only user-scheme projections. It preserves other fields and slice sharing;
+the generated raw constructor stays zero-valued. The lower region helper retains
+its separate generic-location fallback. SSH-user policy, native boot-source
+parsing, and OS catalog selection remain outside this transformation.
 
 ## Adding a field
 

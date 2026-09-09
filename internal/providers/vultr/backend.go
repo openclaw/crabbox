@@ -481,7 +481,7 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 		return core.DoctorResult{}, err
 	}
 	result := core.InventoryDoctorResult(providerName, len(instances))
-	result.Message += fmt.Sprintf(" default_type=%s region=%s user_scheme=%s", b.Cfg.ServerType, vultrRegion(b.Cfg), vultrUserScheme(b.Cfg))
+	result.Message += fmt.Sprintf(" default_type=%s region=%s user_scheme=%s", b.Cfg.ServerType, vultrRegion(b.Cfg), b.Cfg.Vultr.WithRuntimeDefaults().UserScheme)
 	return result, nil
 }
 
@@ -873,7 +873,7 @@ func authorizeVultrSSHKeyDelete(ctx context.Context, client vultrAPI, leaseID, k
 }
 
 func validateVultrUserScheme(cfg core.Config) error {
-	switch strings.ToLower(strings.TrimSpace(vultrUserScheme(cfg))) {
+	switch strings.ToLower(strings.TrimSpace(cfg.Vultr.WithRuntimeDefaults().UserScheme)) {
 	case "root", "limited":
 		return nil
 	default:
@@ -883,12 +883,7 @@ func validateVultrUserScheme(cfg core.Config) error {
 
 func applyVultrDefaults(cfg *core.Config) {
 	cfg.Provider = providerName
-	if cfg.Vultr.Region == "" {
-		cfg.Vultr.Region = core.VultrRegionFallback
-	}
-	if cfg.Vultr.UserScheme == "" {
-		cfg.Vultr.UserScheme = core.VultrUserSchemeFallback
-	}
+	cfg.Vultr = cfg.Vultr.WithRuntimeDefaults()
 	if !core.IsSSHUserExplicit(cfg) && strings.EqualFold(cfg.Vultr.UserScheme, "limited") {
 		cfg.SSHUser = "limited"
 	} else if cfg.SSHUser == "" {

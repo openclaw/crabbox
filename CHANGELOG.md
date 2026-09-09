@@ -52,7 +52,7 @@
 - Share unsupported machine-sizing checks and work-root inheritance decisions across providers, preserving explicit-input behavior, provider guidance, raw roots, and validation order. [PR 2023](https://github.com/openclaw/crabbox/pull/2023), [PR 2026](https://github.com/openclaw/crabbox/pull/2026). Thanks @steipete.
 - Share declared provider names and aliases across selection guards while keeping normalized selection and raw-exact matching distinct, with unchanged validation order and claim matching. [PR 2030](https://github.com/openclaw/crabbox/pull/2030), [PR 2031](https://github.com/openclaw/crabbox/pull/2031). Thanks @steipete.
 
-- Describe Vultr file and environment bindings once without adding provider flags, preserving raw boot settings and list behavior while sharing runtime region and user-scheme fallback values. Thanks @steipete.
+- Describe Vultr file and environment bindings once without adding provider flags, preserving raw boot settings and list behavior while sharing runtime region and user-scheme defaulting. Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 

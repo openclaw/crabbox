@@ -1487,12 +1487,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		return validateTargetConfig(*cfg)
 	}
 	if cfg.Provider == "vultr" {
-		if cfg.Vultr.Region == "" {
-			cfg.Vultr.Region = VultrRegionFallback
-		}
-		if cfg.Vultr.UserScheme == "" {
-			cfg.Vultr.UserScheme = VultrUserSchemeFallback
-		}
+		cfg.Vultr = cfg.Vultr.WithRuntimeDefaults()
 		applyLinuxConnectionDefaults(cfg, "root", "22")
 		cfg.SSHFallbackPorts = nil
 		normalizeTargetConfig(cfg)

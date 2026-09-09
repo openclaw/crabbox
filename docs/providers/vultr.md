@@ -111,8 +111,10 @@ Nonempty YAML VPC/CIDR lists assign raw without copying, trimming, or deduplicat
 omitted, null, and empty lists preserve prior values. Nonempty environment text is
 comma-split and trimmed, with empty items dropped and order/duplicates retained.
 Delimiter-only input yields a nonnil empty list, exact empty input preserves the
-prior value, and `none` is an ordinary item. Region and user-scheme defaulting remain
-in their existing runtime phases; no firewall or authentication behavior is added.
+prior value, and `none` is an ordinary item. Region and user-scheme defaulting use
+one typed transformation at their existing runtime phases. It fills only raw-empty
+fields, without trimming custom values, selecting a boot source, or choosing the
+SSH user. No firewall or authentication behavior is added.
 
 ## Token Permissions
 

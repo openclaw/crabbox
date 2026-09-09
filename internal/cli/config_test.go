@@ -12981,3 +12981,106 @@ func TestVultrBindingCoreDefaults(t *testing.T) {
 		}
 	}
 }
+
+func TestVultrRuntimeTransformCore(t *testing.T) {
+	for _, region := range []string{"", "custom-region", "  "} {
+		for _, scheme := range []string{"", "custom-scheme", "  ", "limited", "LIMITED", " limited "} {
+			for _, lists := range []string{"nil", "empty", "shared"} {
+				for _, explicit := range []bool{false, true} {
+					cfg := baseConfig()
+					cfg.Provider = "vultr"
+					cfg.Location = "generic-region"
+					cfg.Class = "standard"
+					cfg.Vultr = VultrConfig{Region: region, UserScheme: scheme, OS: "raw-os", Image: "raw-image", Snapshot: "raw-snapshot", FirewallGroup: "raw-group"}
+					switch lists {
+					case "empty":
+						cfg.Vultr.VPCIDs = []string{}
+						cfg.Vultr.SSHCIDRs = []string{}
+					case "shared":
+						cfg.Vultr.VPCIDs = []string{"vpc-a", "vpc-a"}
+						cfg.Vultr.SSHCIDRs = []string{" 192.0.2.0/24 ", ""}
+					}
+					before := cfg.Vultr
+					want := before
+					if region == "" {
+						want.Region = "ewr"
+					}
+					if scheme == "" {
+						want.UserScheme = "root"
+					}
+					user, port, root := "root", "22", "/work/crabbox"
+					if explicit {
+						user, port, root = "alice", "2200", "/srv/project"
+						cfg.SSHUser = user
+						cfg.SSHPort = port
+						cfg.WorkRoot = root
+						MarkSSHUserExplicit(&cfg)
+						MarkSSHPortExplicit(&cfg)
+						MarkWorkRootExplicit(&cfg)
+					}
+					if err := applyProviderConfigDefaults(&cfg); err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(cfg.Vultr, want) {
+						t.Fatalf("region=%q scheme=%q lists=%s got=%#v want=%#v", region, scheme, lists, cfg.Vultr, want)
+					}
+					if reflect.ValueOf(cfg.Vultr.VPCIDs).Pointer() != reflect.ValueOf(before.VPCIDs).Pointer() || reflect.ValueOf(cfg.Vultr.SSHCIDRs).Pointer() != reflect.ValueOf(before.SSHCIDRs).Pointer() {
+						t.Fatal("core changed slice backing")
+					}
+					if cfg.SSHUser != user || cfg.SSHPort != port || cfg.WorkRoot != root || cfg.Class != "standard" || cfg.Location != "generic-region" || cfg.TargetOS != targetLinux || cfg.SSHFallbackPorts != nil {
+						t.Fatalf("generic effects user=%q port=%q root=%q class=%q location=%q target=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot, cfg.Class, cfg.Location, cfg.TargetOS)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestVultrWithRuntimeDefaults(t *testing.T) {
+	for _, tc := range []struct{ region, scheme, wantRegion, wantScheme string }{
+		{"", "", "ewr", "root"},
+		{"custom-region", "custom-scheme", "custom-region", "custom-scheme"},
+		{"  ", " limited ", "  ", " limited "},
+		{"", "custom-scheme", "ewr", "custom-scheme"},
+		{"custom-region", "", "custom-region", "root"},
+	} {
+		for _, listState := range []string{"nil", "empty", "populated"} {
+			input := VultrConfig{Region: tc.region, UserScheme: tc.scheme, OS: "raw-os", Image: "raw-image", Snapshot: "raw-snapshot", FirewallGroup: "raw-group"}
+			switch listState {
+			case "empty":
+				input.VPCIDs = []string{}
+				input.SSHCIDRs = []string{}
+			case "populated":
+				input.VPCIDs = []string{"vpc-a", "vpc-a"}
+				input.SSHCIDRs = []string{" 192.0.2.0/24 ", ""}
+			}
+			// Independent slice copies retain nilness and expose mutations to input storage.
+			original := input
+			if input.VPCIDs != nil {
+				original.VPCIDs = make([]string, len(input.VPCIDs))
+				copy(original.VPCIDs, input.VPCIDs)
+			}
+			if input.SSHCIDRs != nil {
+				original.SSHCIDRs = make([]string, len(input.SSHCIDRs))
+				copy(original.SSHCIDRs, input.SSHCIDRs)
+			}
+			want := original
+			want.Region = tc.wantRegion
+			want.UserScheme = tc.wantScheme
+			got := input.WithRuntimeDefaults()
+			if !reflect.DeepEqual(got, want) || !reflect.DeepEqual(input, original) {
+				t.Fatalf("region=%q scheme=%q lists=%s got=%#v input=%#v want=%#v", tc.region, tc.scheme, listState, got, input, want)
+			}
+			if reflect.ValueOf(got.VPCIDs).Pointer() != reflect.ValueOf(input.VPCIDs).Pointer() || reflect.ValueOf(got.SSHCIDRs).Pointer() != reflect.ValueOf(input.SSHCIDRs).Pointer() {
+				t.Fatal("result must share slice backing")
+			}
+			again := got.WithRuntimeDefaults()
+			if !reflect.DeepEqual(again, want) || !reflect.DeepEqual(got, want) || !reflect.DeepEqual(input, original) {
+				t.Fatal("runtime defaults must be idempotent without mutating receiver or slices")
+			}
+			if reflect.ValueOf(again.VPCIDs).Pointer() != reflect.ValueOf(input.VPCIDs).Pointer() || reflect.ValueOf(again.SSHCIDRs).Pointer() != reflect.ValueOf(input.SSHCIDRs).Pointer() {
+				t.Fatal("idempotent result must retain slice backing")
+			}
+		}
+	}
+}
