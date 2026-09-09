@@ -201,10 +201,22 @@ Tenki sessions cannot independently prove lost-claim ownership.
 The provider does not expose Tenki's internal node-agent, mesh IPs, or guest IPs.
 All SSH traffic goes through Tenki's supported cert-backed `ssh-proxy` path.
 Sandbox restores can present a different ephemeral SSH host key on consecutive
-proxy connections, so Crabbox mirrors the Tenki CLI's host-key policy and binds
-trust to the authenticated TLS proxy, exact session ID, identity key, and
-per-session SSH certificate instead of a `known_hosts` entry. Do not bypass the
-proxy or reuse this policy for a direct network SSH target.
+proxy connections, so Crabbox mirrors the Tenki CLI's host-key policy instead
+of maintaining a `known_hosts` entry. Server authentication depends on the
+trusted TLS gateway; the SSH client certificate does not authenticate the server.
+Use a trusted `wss://` gateway. Do not bypass the proxy or reuse this policy for
+a direct network SSH target.
+
+The cert-backed gateway selects the sandbox from the signed SSH certificate.
+Changing the proxy's session URL alone does not grant access to another sandbox:
+a certificate for session A still selects A. Crabbox obtains the certificate and
+proxy command together for the requested session.
+
+An issued SSH certificate is an access credential until it expires. Expired
+certificates are rejected on new connections, but Crabbox does not guarantee
+that revoking an API key immediately invalidates a cached SSH certificate or
+closes an existing SSH connection. Do not treat an API-key authentication error
+as proof that earlier SSH access has ended.
 
 ## Capabilities
 
