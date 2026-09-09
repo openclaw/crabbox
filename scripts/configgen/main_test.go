@@ -496,6 +496,12 @@ func TestExeDevGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestOVHGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_ovh.go", "../../internal/cli/config_ovh_generated.go", "OVHConfig", "ovh", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {

@@ -2489,16 +2489,11 @@ func TestVultrDefaultsPreserveExplicitGenericValues(t *testing.T) {
 func TestOVHConfigFileEnvAndDefaults(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
-	if err := applyFileConfig(&cfg, fileConfig{
-		Provider: "ovh",
-		OVH: &fileOVHConfig{
-			Endpoint:  "https://ca.api.ovhcloud.com/1.0",
-			ProjectID: "project-file",
-			Region:    "BHS5",
-			Image:     "Ubuntu 22.04",
-			Flavor:    "b3-16",
-		},
-	}); err != nil {
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("provider: ovh\novh:\n  endpoint: https://ca.api.ovhcloud.com/1.0\n  projectId: project-file\n  region: BHS5\n  image: Ubuntu 22.04\n  flavor: b3-16\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Provider != "ovh" || cfg.OVH.Endpoint != "https://ca.api.ovhcloud.com/1.0" || cfg.OVH.ProjectID != "project-file" || cfg.OVH.Region != "BHS5" || cfg.OVH.Image != "Ubuntu 22.04" || cfg.OVH.Flavor != "b3-16" {
@@ -2714,12 +2709,11 @@ func TestRepoConfigCannotRedirectInheritedOVHCredentials(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
 	cfg.OVH.Endpoint = "https://api.us.ovhcloud.com/1.0"
-	if err := applyFileConfigWithTrust(&cfg, fileConfig{
-		OVH: &fileOVHConfig{
-			Endpoint:  "https://attacker.example.test/1.0",
-			ProjectID: "project-from-repo",
-		},
-	}, false); err != nil {
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("ovh:\n  endpoint: https://attacker.example.test/1.0\n  projectId: project-from-repo\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.OVH.Endpoint != "https://api.us.ovhcloud.com/1.0" {
@@ -11376,6 +11370,141 @@ func TestInheritedWorkRootCallerContract(t *testing.T) {
 			if !reflect.DeepEqual(cfg, want) {
 				t.Fatalf("whole core config differs for roots=%q/%q explicit=%t: got=%#v want=%#v", tc.providerRoot, tc.genericRoot, explicit, cfg, want)
 			}
+		}
+	}
+}
+
+func TestOVHBindingFileContract(t *testing.T) {
+	wantDefaults := OVHConfig{Endpoint: "https://api.us.ovhcloud.com/1.0", Image: "Ubuntu 24.04", Flavor: "b3-8"}
+	if cfg := baseConfig(); cfg.OVH != wantDefaults || OVHImageWasExplicit(cfg) {
+		t.Fatalf("defaults=%#v", cfg.OVH)
+	}
+	if reflect.TypeOf(OVHConfig{}).NumField() != 5 || reflect.TypeOf(fileOVHConfig{}).NumField() != 5 {
+		t.Fatal("five-field config surface changed")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, priorMarker := range []bool{false, true} {
+			for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace", "value", "other-only"} {
+				cfg := baseConfig()
+				cfg.OVH.ProjectID = "prior-project"
+				cfg.OVH.Region = "prior-region"
+				cfg.ovhImageExplicit = priorMarker
+				want := cfg.OVH
+				wantMarker := priorMarker
+				fields := map[string]any{}
+				for _, f := range []struct {
+					key string
+					v   *string
+				}{{"endpoint", &want.Endpoint}, {"projectId", &want.ProjectID}, {"region", &want.Region}, {"image", &want.Image}, {"flavor", &want.Flavor}} {
+					if mode == "omitted" || (mode == "other-only" && f.key == "image") {
+						continue
+					}
+					var raw any = *f.v
+					if mode == "null" {
+						raw = nil
+					}
+					if mode == "empty" {
+						raw = ""
+					}
+					if mode == "whitespace" {
+						raw = "  "
+					}
+					if mode == "value" || mode == "other-only" {
+						raw = "fixture-value"
+					}
+					fields[f.key] = raw
+					if mode == "equal" || mode == "whitespace" || mode == "value" || mode == "other-only" {
+						if trusted || f.key != "endpoint" {
+							*f.v = raw.(string)
+						}
+						if f.key == "image" {
+							wantMarker = true
+						}
+					}
+				}
+				data, err := yaml.Marshal(map[string]any{"ovh": fields})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var file fileConfig
+				if err := yaml.Unmarshal(data, &file); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				if cfg.OVH != want || OVHImageWasExplicit(cfg) != wantMarker {
+					t.Fatalf("file mode=%s trusted=%t priorMarker=%t got=%#v want=%#v", mode, trusted, priorMarker, cfg.OVH, want)
+				}
+			}
+		}
+	}
+}
+
+func TestOVHBindingEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"absent", "empty", "equal", "whitespace", "value", "other-only"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.OVH.ProjectID = "prior-project"
+			cfg.OVH.Region = "prior-region"
+			want := cfg.OVH
+			wantMarker := false
+			for _, f := range []struct {
+				env string
+				v   *string
+			}{{"OVH_ENDPOINT", &want.Endpoint}, {"CRABBOX_OVH_PROJECT_ID", &want.ProjectID}, {"CRABBOX_OVH_REGION", &want.Region}, {"CRABBOX_OVH_IMAGE", &want.Image}, {"CRABBOX_OVH_FLAVOR", &want.Flavor}} {
+				raw := *f.v
+				if mode == "absent" || mode == "empty" || (mode == "other-only" && f.env == "CRABBOX_OVH_IMAGE") {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" || (mode == "other-only" && f.env != "CRABBOX_OVH_IMAGE") {
+					raw = "fixture-value"
+				}
+				t.Setenv(f.env, raw)
+				if mode == "absent" {
+					if err := os.Unsetenv(f.env); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if raw != "" {
+					*f.v = raw
+					if f.env == "CRABBOX_OVH_IMAGE" {
+						wantMarker = true
+					}
+				}
+			}
+			t.Setenv("CRABBOX_OVH_ENDPOINT", "ignored-unrecognized-alias")
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.OVH != want || OVHImageWasExplicit(cfg) != wantMarker {
+				t.Fatalf("env mode=%s got=%#v want=%#v marker=%t", mode, cfg.OVH, want, OVHImageWasExplicit(cfg))
+			}
+		})
+	}
+}
+
+func TestOVHBindingCoreDefaults(t *testing.T) {
+	for _, raw := range []string{"", "  ", "fixture-value"} {
+		cfg := baseConfig()
+		cfg.Provider = "ovh"
+		cfg.OVH = OVHConfig{Endpoint: raw, ProjectID: "project", Region: "region", Image: raw, Flavor: raw}
+		cfg.ovhImageExplicit = false
+		want := cfg.OVH
+		if raw == "" {
+			want.Endpoint = "https://api.us.ovhcloud.com/1.0"
+			want.Image = "Ubuntu 24.04"
+			want.Flavor = "b3-8"
+		}
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.OVH != want || OVHImageWasExplicit(cfg) || cfg.TargetOS != "linux" {
+			t.Fatalf("raw=%q defaults=%#v want=%#v", raw, cfg.OVH, want)
 		}
 	}
 }

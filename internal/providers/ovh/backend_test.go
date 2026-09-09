@@ -1372,3 +1372,27 @@ func testBackend(fake *fakeAPI) *Backend {
 	backend.ipWaitInterval = time.Millisecond
 	return backend
 }
+
+func TestOVHBindingAcquireDefaultsContract(t *testing.T) {
+	for _, tc := range []struct{ image, wantImage, configuredFlavor, genericType, wantFlavor string }{{"", "Ubuntu 24.04", "", "", "b3-8"}, {"Ubuntu 22.04", "Ubuntu 22.04", "configured-flavor", "generic-flavor", "generic-flavor"}} {
+		cfg := core.Config{Class: "standard", ServerType: tc.genericType, ServerTypeExplicit: tc.genericType != "", OVH: core.OVHConfig{Endpoint: "https://api.us.ovhcloud.com/1.0", ProjectID: "fixture-project", Region: "fixture-region", Image: tc.image, Flavor: tc.configuredFlavor}}
+		fake := &fakeAPI{flavors: []Flavor{{ID: "fixture-flavor-id", Name: tc.wantFlavor}}, images: []Image{{ID: "fixture-image-id", Name: tc.wantImage, Status: "active", Type: "linux", Visibility: "public"}}}
+		backend := NewBackend(Provider{}.Spec(), cfg, core.Runtime{})
+		var input core.Config
+		calls := 0
+		backend.clientFactory = func(cfg core.Config, _ core.Runtime) (API, error) { calls++; input = cfg; return fake, nil }
+		got, err := backend.resolveAcquireConfig(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if calls != 1 || input.OVH.Image != tc.wantImage || input.OVH.Flavor != tc.wantFlavor || input.TargetOS != "linux" || input.OVH.ProjectID != "fixture-project" || input.OVH.Region != "fixture-region" {
+			t.Fatalf("resolved factory input=%#v", input.OVH)
+		}
+		if got.OVH.Image != "fixture-image-id" || got.OVH.Flavor != "fixture-flavor-id" || got.ServerType != "fixture-flavor-id" || backend.Cfg.OVH != cfg.OVH {
+			t.Fatal("resolved output or stored config changed")
+		}
+		if fake.authCalls != 0 || fake.regionCalls != 0 || fake.instanceCalls != 0 || fake.mutatingCalls != 0 || fake.flavorCalls != 1 || fake.imageCalls != 1 {
+			t.Fatal("fixture exceeded pure catalog resolution")
+		}
+	}
+}

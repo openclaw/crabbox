@@ -433,17 +433,6 @@ type NebiusConfig struct {
 	RecoveryPolicy   string
 }
 
-// OVHConfig contains non-secret OVHcloud Public Cloud settings. OVH
-// application credentials are intentionally read from environment variables by
-// the provider client and are not persisted in Crabbox config.
-type OVHConfig struct {
-	Endpoint  string
-	ProjectID string
-	Region    string
-	Image     string
-	Flavor    string
-}
-
 // ScalewayConfig contains non-secret Scaleway Instances settings. Scaleway
 // credentials are intentionally loaded by the provider client from the official
 // SDK environment/config surfaces and are not persisted in Crabbox config.
@@ -1739,13 +1728,13 @@ func applyProviderConfigDefaults(cfg *Config) error {
 	}
 	if cfg.Provider == "ovh" {
 		if cfg.OVH.Endpoint == "" {
-			cfg.OVH.Endpoint = "https://api.us.ovhcloud.com/1.0"
+			cfg.OVH.Endpoint = OVHConfigDefaultEndpoint
 		}
 		if cfg.OVH.Image == "" {
-			cfg.OVH.Image = "Ubuntu 24.04"
+			cfg.OVH.Image = OVHConfigDefaultImage
 		}
 		if cfg.OVH.Flavor == "" {
-			cfg.OVH.Flavor = "b3-8"
+			cfg.OVH.Flavor = OVHConfigDefaultFlavor
 		}
 		applyLinuxConnectionDefaults(cfg, baseConfig().SSHUser, baseConfig().SSHPort)
 		normalizeTargetConfig(cfg)
@@ -2544,11 +2533,7 @@ func baseConfig() Config {
 			Type:        "gpu_1x_a10",
 			ImageFamily: "lambda-stack-24-04",
 		},
-		OVH: OVHConfig{
-			Endpoint: "https://api.us.ovhcloud.com/1.0",
-			Image:    "Ubuntu 24.04",
-			Flavor:   "b3-8",
-		},
+		OVH: defaultOVHConfig(),
 		Scaleway: ScalewayConfig{
 			Region: "fr-par",
 			Zone:   "fr-par-1",
@@ -3134,14 +3119,6 @@ type fileNebiusConfig struct {
 	SecurityGroupIDs []string `yaml:"securityGroupIds,omitempty"`
 	ServiceAccountID string   `yaml:"serviceAccountId,omitempty"`
 	RecoveryPolicy   string   `yaml:"recoveryPolicy,omitempty"`
-}
-
-type fileOVHConfig struct {
-	Endpoint  string `yaml:"endpoint,omitempty"`
-	ProjectID string `yaml:"projectId,omitempty"`
-	Region    string `yaml:"region,omitempty"`
-	Image     string `yaml:"image,omitempty"`
-	Flavor    string `yaml:"flavor,omitempty"`
 }
 
 type fileScalewayConfig struct {
@@ -4719,22 +4696,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Nebius.RecoveryPolicy = file.Nebius.RecoveryPolicy
 		}
 	}
-	if file.OVH != nil {
-		if trusted && file.OVH.Endpoint != "" {
-			cfg.OVH.Endpoint = file.OVH.Endpoint
-		}
-		if file.OVH.ProjectID != "" {
-			cfg.OVH.ProjectID = file.OVH.ProjectID
-		}
-		if file.OVH.Region != "" {
-			cfg.OVH.Region = file.OVH.Region
-		}
-		if file.OVH.Image != "" {
-			cfg.OVH.Image = file.OVH.Image
+	{
+		applied, err := cfg.OVH.applyFile(file.OVH, trusted)
+		if applied.Image {
 			cfg.ovhImageExplicit = true
 		}
-		if file.OVH.Flavor != "" {
-			cfg.OVH.Flavor = file.OVH.Flavor
+		if err != nil {
+			return err
 		}
 	}
 	if file.Scaleway != nil {
@@ -7334,14 +7302,15 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.Nebius.ServiceAccountID = getenv("CRABBOX_NEBIUS_SERVICE_ACCOUNT_ID", cfg.Nebius.ServiceAccountID)
 	cfg.Nebius.RecoveryPolicy = getenv("CRABBOX_NEBIUS_RECOVERY_POLICY", cfg.Nebius.RecoveryPolicy)
-	cfg.OVH.Endpoint = getenv("OVH_ENDPOINT", cfg.OVH.Endpoint)
-	cfg.OVH.ProjectID = getenv("CRABBOX_OVH_PROJECT_ID", cfg.OVH.ProjectID)
-	cfg.OVH.Region = getenv("CRABBOX_OVH_REGION", cfg.OVH.Region)
-	if image := os.Getenv("CRABBOX_OVH_IMAGE"); image != "" {
-		cfg.OVH.Image = image
-		cfg.ovhImageExplicit = true
+	{
+		applied, err := cfg.OVH.applyEnv()
+		if applied.Image {
+			cfg.ovhImageExplicit = true
+		}
+		if err != nil {
+			return err
+		}
 	}
-	cfg.OVH.Flavor = getenv("CRABBOX_OVH_FLAVOR", cfg.OVH.Flavor)
 	if region := os.Getenv("CRABBOX_SCALEWAY_REGION"); region != "" {
 		cfg.Scaleway.Region = region
 		cfg.scalewayRegionExplicit = true
