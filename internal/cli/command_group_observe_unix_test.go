@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,11 @@ func TestJoinedLocalCommandObservesExitBeforeReaping(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], joinedObserverHelperArgs(mode, dir)...)
+			release, err := cmd.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release.Close()
 			owner, err := configureJoinedLocalCommand(ctx, cmd, time.Second, nil)
 			if err != nil {
 				t.Fatal(err)
@@ -102,6 +108,9 @@ func TestJoinedLocalCommandObservesExitBeforeReaping(t *testing.T) {
 				case <-time.After(30 * time.Millisecond):
 				}
 				if err := cmd.Process.Signal(syscall.SIGCONT); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := release.Write([]byte{1}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -184,6 +193,11 @@ func TestJoinedLocalCommandObserverHelper(t *testing.T) {
 		}
 		if mode == "stopped" {
 			_ = syscall.Kill(os.Getpid(), syscall.SIGSTOP)
+			// Signal delivery may lag this thread; only the parent can allow exit.
+			var release [1]byte
+			if _, err := io.ReadFull(os.Stdin, release[:]); err != nil {
+				os.Exit(96)
+			}
 		}
 		os.Exit(7)
 	}

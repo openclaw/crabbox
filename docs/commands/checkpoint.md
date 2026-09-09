@@ -136,8 +136,8 @@ crabbox checkpoint create --id swift-crab --mode native --json
 --discard-failed            Explicitly discard a verified failed capture and retire.
 ```
 
-On success, `--json` prints the checkpoint record. A direct native provider that
-can prove it never attempted image submission may instead return this failure
+On success, `--json` prints the checkpoint record. A native checkpoint operation
+that can prove it never attempted image submission may instead return this failure
 object, with a nonzero exit status, after the exact local reservation is removed
 and its absence is verified:
 
@@ -218,9 +218,10 @@ copied there before cleaning, so the running source remains ready while a new
 VM must complete its own boot. An immediate status check after cleaning must
 still report successful completion; it does not wait to mask lost boot state.
 Status failures identify the pre-clean or post-clean phase and observed state.
-Preparation errors stop capture before creating an image. Direct AWS and
-Hetzner failures confirmed before their image-create request also release the
-fresh local reservation and can emit the non-submission JSON receipt above.
+Preparation errors stop capture before creating an image. Brokered source
+preparation failures, and direct AWS and Hetzner failures confirmed before their
+image-create request, release the fresh local reservation and can emit the
+non-submission JSON receipt above.
 This does not certify source rollback. Errors once the image request begins
 retain the checkpoint for recovery; existing uncertain records are unchanged.
 
