@@ -884,10 +884,10 @@ func validateVultrUserScheme(cfg core.Config) error {
 func applyVultrDefaults(cfg *core.Config) {
 	cfg.Provider = providerName
 	if cfg.Vultr.Region == "" {
-		cfg.Vultr.Region = "ewr"
+		cfg.Vultr.Region = core.VultrRegionFallback
 	}
 	if cfg.Vultr.UserScheme == "" {
-		cfg.Vultr.UserScheme = "root"
+		cfg.Vultr.UserScheme = core.VultrUserSchemeFallback
 	}
 	if !core.IsSSHUserExplicit(cfg) && strings.EqualFold(cfg.Vultr.UserScheme, "limited") {
 		cfg.SSHUser = "limited"

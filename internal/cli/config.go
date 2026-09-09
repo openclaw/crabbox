@@ -354,17 +354,6 @@ type AWSLambdaMicroVMConfig struct {
 	ForgetMissing     bool
 }
 
-type VultrConfig struct {
-	Region        string
-	OS            string
-	Image         string
-	Snapshot      string
-	FirewallGroup string
-	VPCIDs        []string
-	SSHCIDRs      []string
-	UserScheme    string
-}
-
 type LinodeConfig struct {
 	Region     string
 	Image      string
@@ -1499,10 +1488,10 @@ func applyProviderConfigDefaults(cfg *Config) error {
 	}
 	if cfg.Provider == "vultr" {
 		if cfg.Vultr.Region == "" {
-			cfg.Vultr.Region = "ewr"
+			cfg.Vultr.Region = VultrRegionFallback
 		}
 		if cfg.Vultr.UserScheme == "" {
-			cfg.Vultr.UserScheme = "root"
+			cfg.Vultr.UserScheme = VultrUserSchemeFallback
 		}
 		applyLinuxConnectionDefaults(cfg, "root", "22")
 		cfg.SSHFallbackPorts = nil
@@ -2426,6 +2415,7 @@ func baseConfig() Config {
 		GCPTags:              []string{"crabbox-ssh"},
 		GCPRootGB:            400,
 		DigitalOcean:         defaultDigitalOceanConfig(),
+		Vultr:                defaultVultrConfig(),
 		Linode: LinodeConfig{
 			Region: "us-ord",
 			Image:  linodeImage,
@@ -2938,17 +2928,6 @@ type fileHetznerConfig struct {
 	Location string `yaml:"location,omitempty"`
 	Image    string `yaml:"image,omitempty"`
 	SSHKey   string `yaml:"sshKey,omitempty"`
-}
-
-type fileVultrConfig struct {
-	Region        string   `yaml:"region,omitempty"`
-	OS            string   `yaml:"os,omitempty"`
-	Image         string   `yaml:"image,omitempty"`
-	Snapshot      string   `yaml:"snapshot,omitempty"`
-	FirewallGroup string   `yaml:"firewallGroup,omitempty"`
-	VPCIDs        []string `yaml:"vpcIds,omitempty"`
-	SSHCIDRs      []string `yaml:"sshCIDRs,omitempty"`
-	UserScheme    string   `yaml:"userScheme,omitempty"`
 }
 
 type fileLinodeConfig struct {
@@ -4339,31 +4318,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.Vultr != nil {
-		if file.Vultr.Region != "" {
-			cfg.Vultr.Region = file.Vultr.Region
-		}
-		if file.Vultr.OS != "" {
-			cfg.Vultr.OS = file.Vultr.OS
-		}
-		if file.Vultr.Image != "" {
-			cfg.Vultr.Image = file.Vultr.Image
-		}
-		if file.Vultr.Snapshot != "" {
-			cfg.Vultr.Snapshot = file.Vultr.Snapshot
-		}
-		if file.Vultr.FirewallGroup != "" {
-			cfg.Vultr.FirewallGroup = file.Vultr.FirewallGroup
-		}
-		if len(file.Vultr.VPCIDs) > 0 {
-			cfg.Vultr.VPCIDs = file.Vultr.VPCIDs
-		}
-		if len(file.Vultr.SSHCIDRs) > 0 {
-			cfg.Vultr.SSHCIDRs = file.Vultr.SSHCIDRs
-		}
-		if file.Vultr.UserScheme != "" {
-			cfg.Vultr.UserScheme = file.Vultr.UserScheme
-		}
+	if err := cfg.Vultr.applyFile(file.Vultr); err != nil {
+		return err
 	}
 	if file.Linode != nil {
 		if file.Linode.Region != "" {
@@ -6894,18 +6850,9 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	cfg.Vultr.Region = getenv("CRABBOX_VULTR_REGION", cfg.Vultr.Region)
-	cfg.Vultr.OS = getenv("CRABBOX_VULTR_OS", cfg.Vultr.OS)
-	cfg.Vultr.Image = getenv("CRABBOX_VULTR_IMAGE", cfg.Vultr.Image)
-	cfg.Vultr.Snapshot = getenv("CRABBOX_VULTR_SNAPSHOT", cfg.Vultr.Snapshot)
-	cfg.Vultr.FirewallGroup = getenv("CRABBOX_VULTR_FIREWALL_GROUP", cfg.Vultr.FirewallGroup)
-	if vpcs := os.Getenv("CRABBOX_VULTR_VPC_IDS"); vpcs != "" {
-		cfg.Vultr.VPCIDs = splitCommaList(vpcs)
+	if err := cfg.Vultr.applyEnv(); err != nil {
+		return err
 	}
-	if cidrs := os.Getenv("CRABBOX_VULTR_SSH_CIDRS"); cidrs != "" {
-		cfg.Vultr.SSHCIDRs = splitCommaList(cidrs)
-	}
-	cfg.Vultr.UserScheme = getenv("CRABBOX_VULTR_USER_SCHEME", cfg.Vultr.UserScheme)
 	cfg.Linode.Region = getenv("CRABBOX_LINODE_REGION", cfg.Linode.Region)
 	if image := os.Getenv("CRABBOX_LINODE_IMAGE"); image != "" {
 		cfg.Linode.Image = image

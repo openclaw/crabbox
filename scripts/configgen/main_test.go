@@ -544,6 +544,12 @@ func TestDigitalOceanGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestVultrGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_vultr.go", "../../internal/cli/config_vultr_generated.go", "VultrConfig", "vultr", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {

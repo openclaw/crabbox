@@ -4,7 +4,7 @@ Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
 Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, Lume, Runpod, Vast,
-W&B, Scaleway, Tencent Cloud, and DigitalOcean
+W&B, Scaleway, Tencent Cloud, DigitalOcean, and Vultr
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -22,7 +22,8 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_ovh.go`, `internal/cli/config_lume.go`,
 `internal/cli/config_runpod.go`, `internal/cli/config_vast.go`,
 `internal/cli/config_wandb.go`, `internal/cli/config_scaleway.go`,
-`internal/cli/config_tencentcloud.go`, and `internal/cli/config_digitalocean.go`.
+`internal/cli/config_tencentcloud.go`, `internal/cli/config_digitalocean.go`, and
+`internal/cli/config_vultr.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -97,6 +98,11 @@ DigitalOcean has no provider flags. Its declaration owns file/environment input
 and a used zero constructor; the generator emits no flag storage, registration,
 application, or presence APIs for a flagless schema. Runtime region/image values
 remain separate from portable-OS mapping and lower generic-field inheritance.
+
+Vultr reuses the same flagless bindings without extending the generator. Its two
+raw file lists retain sharing and its environment lists retain their own empty
+representation. Runtime region/user-scheme fallback values do not replace SSH-user
+policy, native boot-source parsing, or OS catalog selection.
 
 ## Adding a field
 
@@ -227,7 +233,7 @@ remain separate from portable-OS mapping and lower generic-field inheritance.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer ./internal/providers/modal ./internal/providers/morph ./internal/providers/exedev ./internal/providers/ovh ./internal/providers/lume ./internal/providers/runpod ./internal/providers/vast ./internal/providers/wandb ./internal/providers/scaleway ./internal/providers/tencentcloud ./internal/providers/digitalocean` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer ./internal/providers/modal ./internal/providers/morph ./internal/providers/exedev ./internal/providers/ovh ./internal/providers/lume ./internal/providers/runpod ./internal/providers/vast ./internal/providers/wandb ./internal/providers/scaleway ./internal/providers/tencentcloud ./internal/providers/digitalocean ./internal/providers/vultr` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:

@@ -660,14 +660,14 @@ func vultrRegion(cfg core.Config) string {
 	if cfg.Location != "" {
 		return cfg.Location
 	}
-	return "ewr"
+	return core.VultrRegionFallback
 }
 
 func vultrUserScheme(cfg core.Config) string {
 	if cfg.Vultr.UserScheme != "" {
 		return cfg.Vultr.UserScheme
 	}
-	return "root"
+	return core.VultrUserSchemeFallback
 }
 
 func providerKeyForLease(leaseID string) string {

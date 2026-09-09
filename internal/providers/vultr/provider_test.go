@@ -2,7 +2,9 @@ package vultr
 
 import (
 	"context"
+	"flag"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -90,5 +92,59 @@ func TestConfigureReturnsLeaseAndDoctorBackend(t *testing.T) {
 	result, err := doctor.Doctor(context.Background(), core.DoctorRequest{})
 	if err == nil || !strings.Contains(err.Error(), "VULTR_API_KEY is required") {
 		t.Fatalf("doctor result=%#v err=%v", result, err)
+	}
+}
+
+func TestVultrBindingNoFlags(t *testing.T) {
+	for _, name := range []string{"vultr", "other", ""} {
+		cfg := core.Config{Provider: name, Vultr: core.VultrConfig{Region: "prior", UserScheme: "prior", VPCIDs: []string{"prior"}}}
+		before := cfg
+		fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+		v := (Provider{}).RegisterFlags(fs, cfg)
+		n := 0
+		fs.VisitAll(func(*flag.Flag) { n++ })
+		if n != 0 || !reflect.DeepEqual(v, core.NoProviderFlags()) {
+			t.Fatalf("flags=%d values=%#v", n, v)
+		}
+		for _, values := range []any{v, nil, struct{}{}} {
+			if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, before) {
+				t.Fatal("no-op changed cfg")
+			}
+		}
+	}
+}
+
+func TestVultrBindingRuntime(t *testing.T) {
+	for _, tc := range []struct{ raw, generic, region, user string }{{"", "", "ewr", "root"}, {"", "generic", "generic", "root"}, {"  ", "generic", "  ", "  "}, {"custom", "generic", "custom", "custom"}} {
+		cfg := core.Config{Location: tc.generic, Vultr: core.VultrConfig{Region: tc.raw, UserScheme: tc.raw}}
+		if vultrRegion(cfg) != tc.region || vultrUserScheme(cfg) != tc.user {
+			t.Fatal("lower fallback mismatch")
+		}
+		applyVultrDefaults(&cfg)
+		r, u := tc.raw, tc.raw
+		if r == "" {
+			r = "ewr"
+			u = "root"
+		}
+		if cfg.Vultr.Region != r || cfg.Vultr.UserScheme != u || cfg.SSHUser != "root" || cfg.SSHPort != "22" || cfg.WorkRoot != "/work/crabbox" || cfg.ServerType != "vc2-1c-1gb" || cfg.TargetOS != core.TargetLinux || cfg.Vultr.OS != "" || cfg.Vultr.Image != "" || cfg.Vultr.Snapshot != "" {
+			t.Fatalf("defaults=%#v ssh=%q/%q", cfg.Vultr, cfg.SSHUser, cfg.SSHPort)
+		}
+	}
+	for _, tc := range []struct{ scheme, user string }{{"limited", "limited"}, {"LIMITED", "limited"}, {" limited ", "root"}, {"root", "root"}} {
+		cfg := core.Config{Vultr: core.VultrConfig{UserScheme: tc.scheme}}
+		applyVultrDefaults(&cfg)
+		if cfg.SSHUser != tc.user || cfg.Vultr.UserScheme != tc.scheme {
+			t.Fatalf("scheme=%q ssh=%q", tc.scheme, cfg.SSHUser)
+		}
+		cfg = core.Config{SSHUser: "alice", SSHPort: "2200", WorkRoot: "/srv/project", ServerType: "custom-type", Vultr: core.VultrConfig{UserScheme: tc.scheme}}
+		core.MarkSSHUserExplicit(&cfg)
+		core.MarkSSHPortExplicit(&cfg)
+		applyVultrDefaults(&cfg)
+		if cfg.SSHUser != "alice" || cfg.SSHPort != "2200" || cfg.WorkRoot != "/srv/project" || cfg.ServerType != "custom-type" {
+			t.Fatal("explicit generic fields changed")
+		}
 	}
 }
