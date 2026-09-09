@@ -2468,7 +2468,7 @@ func (c *CoordinatorClient) doWithHeaders(ctx context.Context, method, path stri
 		}
 	}
 	err = c.doHTTPWithHeaders(ctx, method, path, data, body != nil, out, headers)
-	if err == nil || !shouldUseCoordinatorCurlFallback(method, body != nil, err) {
+	if err == nil || !shouldUseCoordinatorCurlFallback(ctx, method, body != nil, err) {
 		return err
 	}
 	if curlErr := c.doCurl(ctx, method, path, data, body != nil, out); curlErr == nil {
@@ -2729,16 +2729,23 @@ func isCoordinatorTransportError(err error) bool {
 	return errors.As(err, &urlErr)
 }
 
-func shouldUseCoordinatorCurlFallback(method string, hasBody bool, err error) bool {
-	if hasBody {
+func shouldUseCoordinatorCurlFallback(ctx context.Context, method string, hasBody bool, err error) bool {
+	if ctx.Err() != nil || hasBody || errors.Is(err, context.Canceled) {
 		return false
 	}
 	switch method {
 	case http.MethodGet, http.MethodHead:
-		return isCoordinatorTransportError(err)
 	default:
 		return false
 	}
+	if isCoordinatorTransportError(err) {
+		return true
+	}
+	// A dial timeout can match DeadlineExceeded while the request budget is live.
+	var urlErr *url.Error
+	var dialErr *net.OpError
+	return errors.As(err, &urlErr) && errors.As(urlErr.Err, &dialErr) &&
+		dialErr.Op == "dial" && dialErr.Timeout()
 }
 
 func (c *CoordinatorClient) applyChildEnvironment(cmd *exec.Cmd) {
