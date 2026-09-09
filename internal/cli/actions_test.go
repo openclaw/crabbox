@@ -520,6 +520,12 @@ func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
 					t.Fatal(err)
 				}
 				write(filepath.Join(slot, "bin", tool), body, 0o755)
+				// Archive fixture modes must not depend on the caller's umask.
+				for _, path := range []string{slot, filepath.Join(slot, "bin"), filepath.Join(slot, "bin", tool)} {
+					if err := os.Chmod(path, 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if tool == "node" {
 					for _, name := range []string{"pnpm", "pnpx", "yarn", "yarnpkg"} {
 						link("../lib/node_modules/corepack/dist/"+name+".js", filepath.Join(slot, "bin", name))
@@ -634,7 +640,7 @@ esac
 				"/opt/hostedtoolcache", image,
 				"/opt/crabbox/toolchain-archives", archives,
 				"14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647", nodeDigest,
-				"675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685", goDigest,
+				"63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445", goDigest,
 			).Replace(githubActionsRunnerInstallScript("2.337.0", true))
 			// The ARM case must not trigger the unrelated Runner download path.
 			if tc.change == "arm" {
