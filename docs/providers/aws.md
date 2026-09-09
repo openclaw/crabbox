@@ -59,6 +59,27 @@ lease. Only `--lease-id` can replay the same fixed create intent; changing its
 ID or intent does not authorize reactivation. The CLI also rejects a different
 ID returned by an older coordinator, without bootstrapping or requesting cleanup.
 
+Host occupancy resolves each stored host association to its exact lease record.
+Missing leases, completed provider cleanup, and expired leases without an instance
+or unresolved launch no longer reserve the host. Create drops stale host references
+under the admission lock and emits a structured `crabbox_host_reservation` log.
+Active and provisioning leases still block, including creates that have not yet
+received an instance ID; retained or uncertain resources also remain protected.
+
+Inspect or repair the coordinator association with admin credentials:
+
+```sh
+crabbox admin mac-hosts reservation h-0123456789abcdef0 --region eu-west-1 --json
+crabbox admin mac-hosts clear h-0123456789abcdef0 --region eu-west-1
+```
+
+Inspection returns storage keys, safe reservation and canonical lease summaries,
+and the stale reason. Clear removes host references while preserving lease history
+and provider cleanup state; it does not terminate an instance or release the billed
+Dedicated Host. It refuses a live or potentially retained association unless
+`--force` is supplied. Inspect provider inventory before forcing: a running create
+can publish its host association again when provisioning finishes.
+
 Authenticated org members can pin an unused Mac Dedicated Host only when an
 exact coordinator allocation record matches the host, requested region, and
 requester's current org identity. New admin allocations record their authenticated

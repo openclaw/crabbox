@@ -198,6 +198,16 @@ fixed-ID replay preserves its existing owner and intent checks. Kept leases
 remain visible to their owners and share recipients in ordinary CLI listing,
 even when released with the instance retained.
 
+Host reservation inspection and repair are admin-only, including the legacy
+Mac-host route: `GET` or `DELETE /v1/admin/hosts/<host-id>/reservation`
+(and `/v1/admin/mac-hosts/<host-id>/reservation`). Pass `region` and optionally
+`provider=aws&target=macos`. DELETE rejects live or potentially retained leases
+with `409 host_in_use` unless `force=true`; missing leases and safely ended
+associations can be cleared without force. The response includes safe summaries,
+not lease credentials. Neither operation changes EC2 resources or allocation
+ownership. Use `crabbox admin mac-hosts reservation <host-id>` to inspect and
+`crabbox admin mac-hosts clear <host-id> [--force]` to repair.
+
 ## Lease sharing
 
 Sharing grants broker and portal access to a lease without distributing the

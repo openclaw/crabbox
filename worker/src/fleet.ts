@@ -2,6 +2,13 @@ import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
 
 import { AzureResumableProvisioning } from "./azure-provisioning";
 import {
+  clearHostReservations,
+  logClearedHostReservations,
+  publicHostReservation,
+  readHostReservations,
+  type HostScope,
+} from "./host-reservations";
+import {
   clearLeaseCleanupCompletion,
   completeLeaseProviderCleanup,
   leaseHasConfirmedNoProviderResource,
@@ -1309,10 +1316,12 @@ export class FleetCoordinator {
         return await this.adminTailscalePreflight();
       }
       if (parts[0] === "v1" && parts[1] === "admin" && parts[2] === "hosts") {
-        return await this.adminHostsRoute(request, parts[3]);
+        if (parts.length > 5) return notFound();
+        return await this.adminHostsRoute(request, parts[3], parts[4]);
       }
       if (parts[0] === "v1" && parts[1] === "admin" && parts[2] === "mac-hosts") {
-        return await this.adminMacHostsRoute(request, parts[3]);
+        if (parts.length > 5) return notFound();
+        return await this.adminMacHostsRoute(request, parts[3], parts[4]);
       }
       if (
         (method === "GET" || method === "POST") &&
@@ -4092,6 +4101,7 @@ export class FleetCoordinator {
         request,
         config,
         checkpointAuthorization?.checkpoint.hostID,
+        true,
       );
       if (reservationHostError) return reservationHostError;
       const now = new Date();
@@ -4846,8 +4856,24 @@ export class FleetCoordinator {
       const storedLeases = [
         ...(await transaction.list<LeaseRecord>({ prefix: "lease:" })).values(),
       ];
-      const hostConflict = pinnedHostConflict(config, storedLeases);
+      const hostID = config.hostID || config.awsMacHostID;
+      const scope: HostScope = {
+        provider: config.provider,
+        hostID: hostID || "",
+        region: providerRegionForConfig(config),
+      };
+      const hostReservations = hostID ? await readHostReservations(transaction, scope) : [];
+      const hostConflict = pinnedHostConflict(
+        config,
+        hostReservations
+          .filter((reservation) => !reservation.staleReason && reservation.lease)
+          .map((reservation) => reservation.lease!),
+      );
       if (hostConflict) return hostConflict;
+      const clearedHostReservations = hostReservations.filter(
+        (reservation) => reservation.staleReason,
+      );
+      await clearHostReservations(transaction, clearedHostReservations);
       const providerAccess = [
         ...(await transaction.list<LeaseRecord>({ prefix: providerAccessPrefix() })).values(),
       ];
@@ -4881,9 +4907,11 @@ export class FleetCoordinator {
       await transaction.put(provisioningPlanKey(operationID), prepared.plan);
       await transaction.put(provisioningMaterialKey(operationID), sealed);
       await putProvisioningOperation(transaction, operation);
-      return { lease: record, replay: false };
+      return { lease: record, replay: false, clearedHostReservations, hostScope: scope };
     });
     if (admission instanceof Response) return admission;
+    if (admission.hostScope && admission.clearedHostReservations)
+      logClearedHostReservations(admission.hostScope, admission.clearedHostReservations);
     if (admission.replay) {
       // A concurrent release may commit before admission's acknowledgement returns.
       // Replay must observe the current attempt rather than its earlier lease snapshot.
@@ -13928,7 +13956,11 @@ export class FleetCoordinator {
     return json({ tailscale: await tailscalePreflight(this.env) });
   }
 
-  private async adminHostsRoute(request: Request, hostID?: string): Promise<Response> {
+  private async adminHostsRoute(
+    request: Request,
+    hostID?: string,
+    action?: string,
+  ): Promise<Response> {
     const url = new URL(request.url);
     const provider = (url.searchParams.get("provider") ?? "aws").trim().toLowerCase();
     const target = (url.searchParams.get("target") ?? "macos").trim().toLowerCase();
@@ -13941,10 +13973,14 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
-    return await this.adminMacHostsRoute(request, hostID);
+    return await this.adminMacHostsRoute(request, hostID, action);
   }
 
-  private async adminMacHostsRoute(request: Request, hostID?: string): Promise<Response> {
+  private async adminMacHostsRoute(
+    request: Request,
+    hostID?: string,
+    action?: string,
+  ): Promise<Response> {
     const method = request.method.toUpperCase();
     const url = new URL(request.url);
     const queryRegion = url.searchParams.get("region") ?? this.env.CRABBOX_AWS_REGION ?? "";
@@ -13955,6 +13991,41 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
+    if (action === "reservation" && hostID) {
+      if (!/^h-[a-f0-9]+$/.test(hostID)) return json({ error: "invalid_host_id" }, { status: 400 });
+      if (method !== "GET" && method !== "DELETE") return notFound();
+      const scope: HostScope = { provider: "aws", hostID, region };
+      const force = url.searchParams.get("force") === "true";
+      return this.state.runExclusive(async () => {
+        const result = await this.state.storage.transaction(async (storage) => {
+          const reservations = await readHostReservations(storage, scope);
+          const blocked = reservations.some((reservation) => !reservation.staleReason);
+          if (method === "DELETE" && blocked && !force) {
+            return json(
+              {
+                error: "host_in_use",
+                message:
+                  "host reservation references a live or potentially retained instance; use --force only after inspecting it",
+                ...scope,
+                reservations: reservations.map(publicHostReservation),
+              },
+              { status: 409 },
+            );
+          }
+          if (method === "DELETE") await clearHostReservations(storage, reservations);
+          return reservations;
+        });
+        if (result instanceof Response) return result;
+        if (method === "DELETE")
+          logClearedHostReservations(scope, result, "admin_reservation_cleared");
+        return json({
+          ...scope,
+          reservations: result.map(publicHostReservation),
+          ...(method === "DELETE" ? { cleared: result.length } : {}),
+        });
+      });
+    }
+    if (action) return notFound();
     const client = new EC2SpotClient(this.env, region);
     if (method === "GET" && hostID === "offerings") {
       const serverType = (url.searchParams.get("type") ?? "mac2.metal").trim();
@@ -17811,6 +17882,7 @@ export class FleetCoordinator {
     request: Request,
     config: LeaseConfig,
     authorizedHostID?: string,
+    repair = false,
   ): Promise<Response | undefined> {
     const hostID = config.hostID || config.awsMacHostID;
     if (!hostID) return undefined;
@@ -17833,7 +17905,27 @@ export class FleetCoordinator {
         { status: 403 },
       );
     }
-    return pinnedHostConflict(config, await this.leaseRecords());
+    const scope: HostScope = {
+      provider: config.provider,
+      hostID,
+      region: providerRegionForConfig(config),
+    };
+    const inspect = async (storage: CoordinatorStorageView) => {
+      const reservations = await readHostReservations(storage, scope);
+      const stale = reservations.filter((reservation) => reservation.staleReason);
+      if (repair) await clearHostReservations(storage, stale);
+      return {
+        stale,
+        leases: reservations
+          .filter((reservation) => !reservation.staleReason && reservation.lease)
+          .map((reservation) => reservation.lease!),
+      };
+    };
+    const result = repair
+      ? await this.state.storage.transaction(inspect)
+      : await inspect(this.state.storage);
+    if (repair) logClearedHostReservations(scope, result.stale);
+    return pinnedHostConflict(config, result.leases);
   }
 
   private async leaseAdmissionState(

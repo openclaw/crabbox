@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Repair stale coordinator host associations against canonical lease state during pinned creation, preserving in-flight and retained instances; add admin host reservation inspection and guarded clearing.
+
 ### Changes
 
 - Initialize managed macOS SSH sessions through PAM so stock `nohup` can detach in the user's launchd context, retaining key-only authentication and using fresh bootstrap connections. [PR 2051](https://github.com/openclaw/crabbox/pull/2051). Thanks @steipete.

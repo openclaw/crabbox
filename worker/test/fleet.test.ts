@@ -27754,6 +27754,199 @@ describe("fleet lease identity and idle", () => {
     },
   );
 
+  it.each([
+    {
+      kind: "dangling lease association",
+      state: "provisioning",
+      missing: true,
+      complete: false,
+      alias: true,
+    },
+    { kind: "dangling access snapshot", state: "provisioning", missing: true, complete: false },
+    { kind: "released cleanup complete", state: "released", missing: false, complete: true },
+    { kind: "expired without an instance", state: "expired", missing: false, complete: false },
+  ] as const)("repairs $kind during pinned create", async (testCase) => {
+    const { state, missing, complete } = testCase;
+    const storage = new MemoryStorage();
+    const held = testLease({
+      id: "cbx_000000000120",
+      provider: "aws",
+      target: "macos",
+      region: "eu-west-1",
+      hostId: "h-123abc",
+      state,
+      cloudID: complete ? "i-old" : "",
+      serverID: 0,
+      host: "",
+      keep: true,
+      provisioningResourceMayExist: false,
+      ...(complete ? { cleanupCompletedAt: new Date().toISOString() } : {}),
+    });
+    if (!missing) storage.seed(`lease:${held.id}`, held);
+    if ("alias" in testCase) storage.seed("lease:legacy-host-association", held);
+    storage.seed(`provider-access:${held.id}`, { ...held, state: "provisioning" });
+    let creates = 0;
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const fleet = testFleet(storage, {
+        aws: fakeProvider(() => creates++, {
+          provider: "aws",
+          hostID: "h-123abc",
+          serverType: "mac1.metal",
+        }),
+      });
+      const response = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers: {
+            "x-crabbox-admin": "true",
+            "x-crabbox-owner": "alice@example.com",
+            "x-crabbox-org": "example-org",
+          },
+          body: {
+            leaseID: "cbx_000000000121",
+            provider: "aws",
+            target: "macos",
+            hostId: "h-123abc",
+            serverType: "mac1.metal",
+            capacity: { market: "on-demand" },
+            sshPublicKey: "ssh-ed25519 synthetic",
+          },
+        }),
+      );
+      expect(response.status).toBe(201);
+      expect(creates).toBe(1);
+      expect(storage.value<LeaseRecord>(`provider-access:${held.id}`)?.hostId).toBeUndefined();
+      expect(storage.value<LeaseRecord>(`lease:${held.id}`)?.hostId).toBeUndefined();
+      expect(storage.value<LeaseRecord>("lease:legacy-host-association")?.hostId).toBeUndefined();
+      expect(storage.value<LeaseRecord>(`lease:${held.id}`)?.cloudID).toBe(
+        missing ? undefined : held.cloudID,
+      );
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining('"action":"stale_reservation_cleared"'),
+      );
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it.each(["active", "provisioning"] as const)(
+    "preserves an in-flight %s host association without an instance ID",
+    async (state) => {
+      const storage = new MemoryStorage();
+      const held = testLease({
+        id: "cbx_000000000120",
+        provider: "aws",
+        target: "macos",
+        region: "eu-west-1",
+        hostId: "h-123abc",
+        state,
+        cloudID: "",
+        serverID: 0,
+        host: "",
+      });
+      storage.seed(`lease:${held.id}`, held);
+      const fleet = testFleet(storage, {
+        aws: fakeProvider(
+          () => {
+            throw new Error("must not provision");
+          },
+          { provider: "aws" },
+        ),
+      });
+      const response = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers: { "x-crabbox-admin": "true" },
+          body: {
+            provider: "aws",
+            target: "macos",
+            hostId: "h-123abc",
+            serverType: "mac1.metal",
+            capacity: { market: "on-demand" },
+            sshPublicKey: "ssh-ed25519 synthetic",
+          },
+        }),
+      );
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ error: "host_in_use" });
+      expect(storage.value(`lease:${held.id}`)).toEqual(held);
+    },
+  );
+
+  it.each(["hosts", "mac-hosts"])(
+    "inspects and safely clears admin %s reservations",
+    async (route) => {
+      const storage = new MemoryStorage();
+      const held = testLease({
+        id: "cbx_000000000120",
+        provider: "aws",
+        target: "macos",
+        region: "eu-west-1",
+        hostId: "h-123abc",
+        state: "provisioning",
+        cloudID: "",
+        serverID: 0,
+        sshPrivateKey: "secret-not-for-response",
+      });
+      storage.seed(`lease:${held.id}`, held);
+      storage.seed(`provider-access:${held.id}`, held);
+      const fleet = testFleet(storage);
+      const path = `/v1/admin/${route}/h-123abc/reservation?region=eu-west-1`;
+      const headers = { "x-crabbox-admin": "true" };
+      for (const method of ["GET", "DELETE"]) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- both methods must require admin auth.
+        expect((await fleet.fetch(request(method, path))).status).toBe(403);
+      }
+      const inspect = await fleet.fetch(request("GET", path, { headers }));
+      expect(inspect.status).toBe(200);
+      const body = await inspect.text();
+      expect(body).not.toContain("secret-not-for-response");
+      expect(JSON.parse(body)).toMatchObject({
+        reservations: [
+          { storageKey: `lease:${held.id}`, stale: false, lease: { id: held.id } },
+          { storageKey: `provider-access:${held.id}` },
+        ],
+      });
+      expect((await fleet.fetch(request("DELETE", path, { headers }))).status).toBe(409);
+      expect(storage.value(`lease:${held.id}`)).toEqual(held);
+      const cleared = await fleet.fetch(request("DELETE", path + "&force=true", { headers }));
+      expect(cleared.status).toBe(200);
+      await expect(cleared.json()).resolves.toMatchObject({ cleared: 2 });
+      expect(storage.value<LeaseRecord>(`lease:${held.id}`)).toMatchObject({
+        state: "provisioning",
+        sshPrivateKey: "secret-not-for-response",
+      });
+      expect(storage.value<LeaseRecord>(`lease:${held.id}`)?.hostId).toBeUndefined();
+      await expect(
+        (await fleet.fetch(request("DELETE", path, { headers }))).json(),
+      ).resolves.toMatchObject({ cleared: 0 });
+    },
+  );
+
+  it("clears a dangling host snapshot without force and leaves other hosts untouched", async () => {
+    const storage = new MemoryStorage();
+    const dangling = testLease({
+      id: "cbx_000000000120",
+      provider: "aws",
+      region: "eu-west-1",
+      hostId: "h-123abc",
+    });
+    const other = { ...dangling, id: "cbx_000000000122", hostId: "h-456def" };
+    storage.seed(`provider-access:${dangling.id}`, dangling);
+    storage.seed(`lease:${other.id}`, other);
+    const fleet = testFleet(storage);
+    const response = await fleet.fetch(
+      request("DELETE", "/v1/admin/hosts/h-123abc/reservation?region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      cleared: 1,
+      reservations: [{ lease: null, reason: "lease_missing" }],
+    });
+    expect(storage.value(`lease:${other.id}`)).toEqual(other);
+  });
+
   it("rechecks host occupancy when concurrent creates reserve the same host", async () => {
     const storage = new MemoryStorage();
     let creates = 0;
