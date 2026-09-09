@@ -83,16 +83,16 @@ func applyDefaults(cfg *Config) {
 	cfg.WindowsMode = ""
 	cfg.SSHFallbackPorts = nil
 	if strings.TrimSpace(cfg.Lume.CLIPath) == "" {
-		cfg.Lume.CLIPath = "lume"
+		cfg.Lume.CLIPath = core.LumeConfigDefaultCLIPath
 	}
 	if strings.TrimSpace(cfg.Lume.Base) == "" {
-		cfg.Lume.Base = "crabbox-macos-golden"
+		cfg.Lume.Base = core.LumeConfigDefaultBase
 	}
 	if strings.TrimSpace(cfg.Lume.User) == "" {
-		cfg.Lume.User = "lume"
+		cfg.Lume.User = core.LumeConfigDefaultUser
 	}
-	lumeWorkRootIsDefault := strings.TrimSpace(cfg.Lume.WorkRoot) == "" || (cfg.Lume.User != "lume" && cfg.Lume.WorkRoot == "/Users/lume/crabbox")
-	genericWorkRootIsDefault := strings.TrimSpace(cfg.WorkRoot) == "" || core.IsDefaultWorkRoot(cfg.WorkRoot) || cfg.WorkRoot == "/Users/lume/crabbox"
+	lumeWorkRootIsDefault := strings.TrimSpace(cfg.Lume.WorkRoot) == "" || (cfg.Lume.User != core.LumeConfigDefaultUser && cfg.Lume.WorkRoot == core.LumeConfigDefaultWorkRoot)
+	genericWorkRootIsDefault := strings.TrimSpace(cfg.WorkRoot) == "" || core.IsDefaultWorkRoot(cfg.WorkRoot) || cfg.WorkRoot == core.LumeConfigDefaultWorkRoot
 	if lumeWorkRootIsDefault {
 		if !genericWorkRootIsDefault {
 			cfg.Lume.WorkRoot = cfg.WorkRoot

@@ -1129,14 +1129,6 @@ type TartConfig struct {
 	Disk     int
 }
 
-type LumeConfig struct {
-	CLIPath  string
-	Base     string
-	Storage  string
-	User     string
-	WorkRoot string
-}
-
 type HyperVConfig struct {
 	Image         string
 	User          string
@@ -2867,12 +2859,7 @@ func baseConfig() Config {
 			CPUs:     4,
 			Memory:   8192,
 		},
-		Lume: LumeConfig{
-			CLIPath:  "lume",
-			Base:     "crabbox-macos-golden",
-			User:     "lume",
-			WorkRoot: "/Users/lume/crabbox",
-		},
+		Lume: defaultLumeConfig(),
 		HyperV: HyperVConfig{
 			User:     "crabbox",
 			WorkRoot: defaultWindowsWorkRoot,
@@ -3929,14 +3916,6 @@ type fileTartConfig struct {
 	CPUs     *int   `yaml:"cpus,omitempty"`
 	Memory   *int   `yaml:"memory,omitempty"`
 	Disk     *int   `yaml:"disk,omitempty"`
-}
-
-type fileLumeConfig struct {
-	CLIPath  string `yaml:"cliPath,omitempty"`
-	Base     string `yaml:"base,omitempty"`
-	Storage  string `yaml:"storage,omitempty"`
-	User     string `yaml:"user,omitempty"`
-	WorkRoot string `yaml:"workRoot,omitempty"`
 }
 
 type fileHyperVConfig struct {
@@ -6527,24 +6506,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.tartDiskExplicit = true
 		}
 	}
-	if file.Lume != nil {
-		if trusted {
-			if file.Lume.CLIPath != "" {
-				cfg.Lume.CLIPath = file.Lume.CLIPath
-			}
-			if file.Lume.Base != "" {
-				cfg.Lume.Base = file.Lume.Base
-			}
-			if file.Lume.Storage != "" {
-				cfg.Lume.Storage = file.Lume.Storage
-			}
-			if file.Lume.User != "" {
-				cfg.Lume.User = file.Lume.User
-			}
-		}
-		if file.Lume.WorkRoot != "" {
-			cfg.Lume.WorkRoot = file.Lume.WorkRoot
-		}
+	if err := cfg.Lume.applyFile(file.Lume, trusted); err != nil {
+		return err
 	}
 	if file.HyperV != nil {
 		if file.HyperV.Image != "" {
@@ -8339,11 +8302,9 @@ func applyEnv(cfg *Config) error {
 		cfg.Tart.Disk = getenvInt("CRABBOX_TART_DISK", cfg.Tart.Disk)
 		cfg.tartDiskExplicit = cfg.Tart.Disk > 0
 	}
-	cfg.Lume.CLIPath = getenv("CRABBOX_LUME_CLI", cfg.Lume.CLIPath)
-	cfg.Lume.Base = getenv("CRABBOX_LUME_BASE", cfg.Lume.Base)
-	cfg.Lume.Storage = getenv("CRABBOX_LUME_STORAGE", cfg.Lume.Storage)
-	cfg.Lume.User = getenv("CRABBOX_LUME_USER", cfg.Lume.User)
-	cfg.Lume.WorkRoot = getenv("CRABBOX_LUME_WORK_ROOT", cfg.Lume.WorkRoot)
+	if err := cfg.Lume.applyEnv(); err != nil {
+		return err
+	}
 	cfg.HyperV.Image = getenv("CRABBOX_HYPERV_IMAGE", cfg.HyperV.Image)
 	cfg.HyperV.User = getenv("CRABBOX_HYPERV_USER", cfg.HyperV.User)
 	cfg.HyperV.WorkRoot = getenv("CRABBOX_HYPERV_WORK_ROOT", cfg.HyperV.WorkRoot)

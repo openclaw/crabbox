@@ -9944,23 +9944,17 @@ func TestModalSecretConfigRequiresTrustedFile(t *testing.T) {
 
 func TestLumeHostLifecycleConfigRequiresTrustedFile(t *testing.T) {
 	cfg := baseConfig()
-	trusted := fileConfig{Lume: &fileLumeConfig{
-		CLIPath:  "/opt/homebrew/bin/lume",
-		Base:     "trusted-golden",
-		Storage:  "trusted-storage",
-		User:     "trusted-user",
-		WorkRoot: "/Users/trusted-user/work",
-	}}
+	var trusted fileConfig
+	if err := yaml.Unmarshal([]byte("lume:\n  cliPath: /opt/homebrew/bin/lume\n  base: trusted-golden\n  storage: trusted-storage\n  user: trusted-user\n  workRoot: /Users/trusted-user/work\n"), &trusted); err != nil {
+		t.Fatal(err)
+	}
 	if err := applyFileConfigWithTrust(&cfg, trusted, true); err != nil {
 		t.Fatal(err)
 	}
-	untrusted := fileConfig{Lume: &fileLumeConfig{
-		CLIPath:  "./run-me",
-		Base:     "credentialed-personal-vm",
-		Storage:  "other-storage",
-		User:     "repo-user",
-		WorkRoot: "/Users/trusted-user/repo-work",
-	}}
+	var untrusted fileConfig
+	if err := yaml.Unmarshal([]byte("lume:\n  cliPath: ./run-me\n  base: credentialed-personal-vm\n  storage: other-storage\n  user: repo-user\n  workRoot: /Users/trusted-user/repo-work\n"), &untrusted); err != nil {
+		t.Fatal(err)
+	}
 	if err := applyFileConfigWithTrust(&cfg, untrusted, false); err != nil {
 		t.Fatal(err)
 	}
@@ -11506,5 +11500,104 @@ func TestOVHBindingCoreDefaults(t *testing.T) {
 		if cfg.OVH != want || OVHImageWasExplicit(cfg) || cfg.TargetOS != "linux" {
 			t.Fatalf("raw=%q defaults=%#v want=%#v", raw, cfg.OVH, want)
 		}
+	}
+}
+
+func TestLumeBindingFileContract(t *testing.T) {
+	wantDefaults := LumeConfig{CLIPath: "lume", Base: "crabbox-macos-golden", User: "lume", WorkRoot: "/Users/lume/crabbox"}
+	if got := baseConfig().Lume; got != wantDefaults {
+		t.Fatalf("defaults=%#v want=%#v", got, wantDefaults)
+	}
+	if reflect.TypeOf(LumeConfig{}).NumField() != 5 || reflect.TypeOf(fileLumeConfig{}).NumField() != 5 {
+		t.Fatal("five-field surface changed")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace", "value"} {
+			cfg := baseConfig()
+			cfg.Lume.Storage = "prior-storage"
+			want := cfg.Lume
+			fields := map[string]any{}
+			for _, f := range []struct {
+				key, value string
+				v          *string
+			}{{"cliPath", "/usr/local/bin/lume-fixture", &want.CLIPath}, {"base", "fixture-base", &want.Base}, {"storage", "fixture-storage", &want.Storage}, {"user", "alice", &want.User}, {"workRoot", "/Users/alice/work", &want.WorkRoot}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = f.value
+				}
+				fields[f.key] = raw
+				if (mode == "equal" || mode == "whitespace" || mode == "value") && (trusted || f.key == "workRoot") {
+					*f.v = raw.(string)
+				}
+			}
+			data, err := yaml.Marshal(map[string]any{"lume": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Lume != want {
+				t.Fatalf("file mode=%s trusted=%t got=%#v want=%#v", mode, trusted, cfg.Lume, want)
+			}
+		}
+	}
+}
+
+func TestLumeBindingEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"absent", "empty", "equal", "whitespace", "value"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Lume.Storage = "prior-storage"
+			want := cfg.Lume
+			for _, f := range []struct {
+				suffix, value string
+				v             *string
+			}{{"CLI", "lume-fixture", &want.CLIPath}, {"BASE", "fixture-base", &want.Base}, {"STORAGE", "fixture-storage", &want.Storage}, {"USER", "alice", &want.User}, {"WORK_ROOT", "/Users/alice/work", &want.WorkRoot}} {
+				raw := *f.v
+				if mode == "absent" || mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = f.value
+				}
+				name := "CRABBOX_LUME_" + f.suffix
+				t.Setenv(name, raw)
+				if mode == "absent" {
+					if err := os.Unsetenv(name); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if raw != "" {
+					*f.v = raw
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Lume != want {
+				t.Fatalf("env mode=%s got=%#v want=%#v", mode, cfg.Lume, want)
+			}
+		})
 	}
 }

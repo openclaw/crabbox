@@ -3,7 +3,7 @@
 Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
-Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, and OVHcloud
+Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, and Lume
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -17,8 +17,8 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_smolvm.go`, `internal/cli/config_semaphore.go`,
 `internal/cli/config_tensorlake.go`, `internal/cli/config_orgo.go`,
 `internal/cli/config_opencomputer.go`, `internal/cli/config_modal.go`,
-`internal/cli/config_morph.go`, `internal/cli/config_exe_dev.go`, and
-`internal/cli/config_ovh.go`.
+`internal/cli/config_morph.go`, `internal/cli/config_exe_dev.go`,
+`internal/cli/config_ovh.go`, and `internal/cli/config_lume.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -54,6 +54,11 @@ OVHcloud shares configured endpoint, image, and flavor defaults without coupling
 them to its fixed regional endpoint aliases or machine-class profiles. Image
 explicitness still records accepted input, including a value equal to the default;
 it is not inferred from whether the final value differs from that default.
+
+Lume shares its configured CLI, base, user, and work-root defaults while retaining
+its user-dependent runtime root calculation. Changing the guest user can replace
+the old default root with `/Users/<user>/crabbox`; this trim-aware decision and
+native storage resolution remain outside generation.
 
 ## Adding a field
 
@@ -159,7 +164,7 @@ it is not inferred from whether the final value differs from that default.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer ./internal/providers/modal ./internal/providers/morph ./internal/providers/exedev ./internal/providers/ovh` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer ./internal/providers/modal ./internal/providers/morph ./internal/providers/exedev ./internal/providers/ovh ./internal/providers/lume` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:

@@ -502,6 +502,12 @@ func TestOVHGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestLumeGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_lume.go", "../../internal/cli/config_lume_generated.go", "LumeConfig", "lume", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {

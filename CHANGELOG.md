@@ -62,6 +62,8 @@
 
 - Describe OVHcloud configuration bindings once, sharing configured endpoint, image, and flavor defaults while preserving input precedence, explicit image selection, regional aliases, and machine-class mapping. [PR 2027](https://github.com/openclaw/crabbox/pull/2027). Thanks @steipete.
 
+- Describe Lume configuration bindings once, sharing configured defaults while preserving trusted host settings, user-dependent work roots, and provider validation order. Thanks @steipete.
+
 ## 0.53.0 - 2026-09-08
 
 ### Highlights
