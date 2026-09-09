@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep authenticated Linux toolchain archives readable to workload users when owned public cache directories have restrictive modes; reject replaced or foreign-owned directories without widening private ancestors. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
+
 - Identify failed Linux toolchain archive downloads while preserving curl diagnostics and exit status. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
 
 - Require verified builder capabilities for Linux developer images before cleanup and throughout publication, with trusted nonwriting verification and runtime-user functional smokes. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.

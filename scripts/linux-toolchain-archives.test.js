@@ -23,7 +23,8 @@ const bunVariants = ["linux-x64-baseline", "linux-x64"];
 function fixture(t) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-toolchain-")));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  for (const dir of ["archives", "staging", "home", "tmp"]) fs.mkdirSync(path.join(root, dir));
+  for (const dir of ["public/archives", "staging", "home", "tmp"])
+    fs.mkdirSync(path.join(root, dir), { recursive: true });
   const run = (body, env = {}) =>
     spawnSync("bash", ["-c", `source "$INSTALLER"\n${body}`], {
       cwd: root,
@@ -31,6 +32,7 @@ function fixture(t) {
         PATH: process.env.PATH,
         HOME: path.join(root, "home"),
         TMPDIR: path.join(root, "tmp"),
+        PYTHONDONTWRITEBYTECODE: "1",
         INSTALLER: installer,
         ...env,
       },
@@ -73,7 +75,7 @@ case "$*" in
 esac`,
     );
     const name = `bun-v1.4.0-${variant}.zip`;
-    const archive = path.join(root, "archives", name);
+    const archive = path.join(root, "public", "archives", name);
     success(
       spawnSync(
         "python3",
@@ -95,7 +97,7 @@ with zipfile.ZipFile(sys.argv[1], "w") as archive:
     specs.push(`${name}) printf 'sha256 ${digest} https://example.invalid/${name}\\n' ;;`);
   }
   const setup = `
-public_toolchain_archive_dir="$PWD/archives"
+public_toolchain_archive_dir="$PWD/public/archives"
 bun_bin_dir="$PWD/bin"
 bun_toolchain_root="$PWD/tools/bun"
 toolchain_archive_spec() { case "$1" in ${specs.join("\n")} *) return 1 ;; esac; }
@@ -109,6 +111,175 @@ curl() { echo unexpected-network >&2; return 89; }
     setup,
     destination: path.join(root, "tools", "bun", "1.4.0", "linux-x64-baseline"),
   };
+}
+
+for (const entry of [
+  "cache_public_toolchain_archives bun-v1.4.0-linux-x64-baseline.zip",
+  "install_bun",
+]) {
+  for (const state of ["fresh", "parent-0700", "leaf-0700"]) {
+    test(`public archive preparation ${entry} repairs only owned boundaries: ${state}`, (t) => {
+      const { root, run, setup } = bunFixture(t);
+      const parent = path.join(root, "public");
+      const archives = path.join(parent, "archives");
+      fs.cpSync(archives, path.join(root, "upstream"), { recursive: true });
+      if (state === "fresh") fs.rmSync(parent, { recursive: true });
+      if (state === "parent-0700") fs.chmodSync(parent, 0o700);
+      if (state === "leaf-0700") fs.chmodSync(archives, 0o700);
+      fs.chmodSync(path.join(root, "home"), 0o700);
+      const privateRoot = fs.statSync(root);
+      const home = fileState(path.join(root, "home"));
+      success(
+        run(`${setup}
+curl() {
+  while [[ "$1" != "--output" ]]; do shift; done
+  cp "$PWD/upstream/\${2##*/}" "$2"
+}
+${entry}
+`),
+      );
+      assert.equal(fs.statSync(parent).mode & 0o777, 0o755);
+      assert.equal(fs.statSync(archives).mode & 0o777, 0o755);
+      const published =
+        entry === "install_bun"
+          ? bunVariants.map((variant) => `bun-v1.4.0-${variant}.zip`)
+          : ["bun-v1.4.0-linux-x64-baseline.zip"];
+      for (const name of published) {
+        assert.equal(fs.statSync(path.join(archives, name)).mode & 0o777, 0o644);
+        assert.deepEqual(
+          fs.readFileSync(path.join(archives, name)),
+          fs.readFileSync(path.join(root, "upstream", name)),
+        );
+      }
+      const currentRoot = fs.statSync(root);
+      for (const key of ["mode", "uid", "gid"]) assert.equal(currentRoot[key], privateRoot[key]);
+      assert.deepEqual(fileState(path.join(root, "home")), home);
+    });
+  }
+
+  for (const boundary of ["parent", "leaf"]) {
+    for (const kind of ["symlink", "file", "foreign-owner"]) {
+      test(
+        `public archive preparation ${entry} rejects ${boundary} ${kind} before mutation`,
+        {
+          skip: kind === "foreign-owner" && process.getuid?.() !== 0,
+        },
+        (t) => {
+          const { root, run, setup } = bunFixture(t);
+          const parent = path.join(root, "public");
+          const target = boundary === "parent" ? parent : path.join(parent, "archives");
+          const outside = path.join(root, "outside");
+          fs.mkdirSync(outside, { mode: 0o700 });
+          fs.writeFileSync(path.join(outside, "keep"), "private content", { mode: 0o600 });
+          fs.chmodSync(parent, 0o700);
+          if (kind === "foreign-owner") {
+            fs.chownSync(target, 1001, 1001);
+          } else {
+            fs.rmSync(target, { recursive: true });
+            if (kind === "symlink") fs.symlinkSync(outside, target);
+            else fs.writeFileSync(target, "not a public directory", { mode: 0o600 });
+          }
+          const before = fileState(root);
+          const result = run(`${setup}
+if ${entry}; then exit 91; fi
+`);
+          success(result);
+          assert.match(result.stderr, /invalid public toolchain archive directory/);
+          assert.deepEqual(
+            fileState(root),
+            before,
+            "reject both boundaries before changing either",
+          );
+        },
+      );
+    }
+  }
+
+  test(`public archive preparation failure propagates through conditional ${entry}`, (t) => {
+    const { root, run, setup } = bunFixture(t);
+    const before = fileState(root);
+    const result = run(`${setup}
+prepare_public_toolchain_archive_dir() { return 47; }
+stage_toolchain_archive() { touch "$PWD/staged"; return 0; }
+if ${entry}; then exit 91; else exit "$?"; fi
+`);
+    assert.equal(result.status, 47, result.stderr);
+    assert.deepEqual(fileState(root), before);
+  });
+}
+
+for (const entry of ["install_node_pnpm", "install_go_toolchain"]) {
+  test(`public archive preparation failure stops conditional ${entry} before installation`, (t) => {
+    const { root, run } = fixture(t);
+    const result = run(`
+node_link_dir="$PWD/links"
+go_link_dir="$PWD/links"
+node_toolcache_root="$PWD/tools"
+go_toolcache_root="$PWD/tools"
+pinned_node_supported() { return 0; }
+linux_x64_supported() { return 0; }
+prepare_public_toolchain_archive_dir() { return 47; }
+install_pinned_node() { touch "$PWD/installed"; }
+install_pinned_go() { touch "$PWD/installed"; }
+if ${entry}; then exit 91; else exit "$?"; fi
+`);
+    assert.equal(result.status, 47, result.stderr);
+    assert.equal(fs.existsSync(path.join(root, "installed")), false);
+  });
+}
+
+for (const [failure, status] of [
+  ["staging", 47],
+  ["download", 22],
+  ["verification", 48],
+  ["pending", 49],
+  ["install", 50],
+  ["rename", 51],
+]) {
+  test(`conditional archive publication preserves ${failure} failure and earlier good bytes`, (t) => {
+    const { root, run } = fixture(t);
+    const payload = Buffer.from("authenticated archive fixture\n");
+    fs.writeFileSync(path.join(root, "payload.tgz"), payload);
+    const digest = createHash("sha256").update(payload).digest("hex");
+    const result = run(`
+public_toolchain_archive_dir="$PWD/public/archives"
+toolchain_archive_spec() { printf 'sha256 ${digest} https://example.invalid/%s\\n' "$1"; }
+mktemp() {
+  if [[ "${failure}" == staging && "$1" == -d ]]; then
+    printf '%s\\n' "$PWD/staging"
+    return ${status}
+  fi
+  if [[ "${failure}" == pending && "$1" == "$public_toolchain_archive_dir/.archive.XXXXXX" &&
+        -f "$public_toolchain_archive_dir/good.tgz" ]]; then return ${status}; fi
+  command mktemp "$@"
+}
+curl() {
+  while [[ "$1" != --output ]]; do shift; done
+  if [[ "${failure}" == download && "$2" == */bad.tgz ]]; then
+    printf partial >"$2"
+    return ${status}
+  fi
+  cp "$PWD/payload.tgz" "$2"
+}
+install() {
+  if [[ "${failure}" == install && "$1" == -m && "\${3:-}" == */bad.tgz ]]; then return ${status}; fi
+  command install "$@"
+}
+python3() {
+  if [[ "${failure}" == verification && "\${2:-}" == sha256 && "\${4:-}" == */bad.tgz ]]; then return ${status}; fi
+  if [[ "${failure}" == rename && "\${3:-}" == "$public_toolchain_archive_dir/bad.tgz" ]]; then return ${status}; fi
+  command python3 "$@"
+}
+if cache_public_toolchain_archives good.tgz bad.tgz unattempted.tgz; then exit 91; else exit "$?"; fi
+`);
+    assert.equal(result.status, status, result.stderr);
+    const archives = path.join(root, "public", "archives");
+    assert.deepEqual(fs.readdirSync(archives), failure === "staging" ? [] : ["good.tgz"]);
+    if (failure !== "staging") {
+      assert.deepEqual(fs.readFileSync(path.join(archives, "good.tgz")), payload);
+    }
+    assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);
+  });
 }
 
 test("Bun installs baseline from authenticated ZIPs, replaces stale PATH tools, and repeats offline", (t) => {
@@ -216,7 +387,7 @@ for (const tool of ["bun", "bunx"]) {
         }[kind];
         fs.symlinkSync(target, conflict);
       }
-      const archives = path.join(root, "archives");
+      const archives = path.join(root, "public", "archives");
       for (const name of fs.readdirSync(archives)) fs.chmodSync(path.join(archives, name), 0o600);
       const before = {
         links: fileState(links),
@@ -266,26 +437,26 @@ for (const component of [
     fs.symlinkSync(outside, directory);
     const before = {
       outside: fileState(outside),
-      archives: fileState(path.join(root, "archives")),
+      archives: fileState(path.join(root, "public", "archives")),
     };
     const result = run(`${setup}\ninstall_bun`);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /symlinked Bun managed directory/);
     assert.deepEqual(fileState(outside), before.outside);
-    assert.deepEqual(fileState(path.join(root, "archives")), before.archives);
+    assert.deepEqual(fileState(path.join(root, "public", "archives")), before.archives);
     assert.deepEqual(fs.readdirSync(path.join(root, "bin")), []);
   });
 }
 
 test("Bun rejects present corrupt or malformed caches without downloading or replacing tools", (t) => {
   const { root, run, setup } = bunFixture(t);
-  const archive = path.join(root, "archives", "bun-v1.4.0-linux-x64-baseline.zip");
+  const archive = path.join(root, "public", "archives", "bun-v1.4.0-linux-x64-baseline.zip");
   const original = fs.readFileSync(archive);
   for (const kind of ["tamper", "wrong-variant", "directory", "symlink"]) {
     fs.rmSync(archive, { recursive: true, force: true });
     if (kind === "tamper") fs.writeFileSync(archive, "corrupt");
     if (kind === "wrong-variant")
-      fs.copyFileSync(path.join(root, "archives", "bun-v1.4.0-linux-x64.zip"), archive);
+      fs.copyFileSync(path.join(root, "public", "archives", "bun-v1.4.0-linux-x64.zip"), archive);
     if (kind === "directory") fs.mkdirSync(archive);
     if (kind === "symlink") fs.symlinkSync("bun-v1.4.0-linux-x64.zip", archive);
     const result = run(`${setup}\ninstall_bun`);
@@ -297,16 +468,16 @@ test("Bun rejects present corrupt or malformed caches without downloading or rep
   }
   fs.rmSync(archive);
   fs.writeFileSync(archive, original);
-  fs.renameSync(path.join(root, "archives"), path.join(root, "elsewhere"));
-  fs.symlinkSync("elsewhere", path.join(root, "archives"));
+  fs.renameSync(path.join(root, "public", "archives"), path.join(root, "elsewhere"));
+  fs.symlinkSync("elsewhere", path.join(root, "public", "archives"));
   const malformedRoot = run(`${setup}\ninstall_bun`);
   assert.notEqual(malformedRoot.status, 0);
-  assert.match(malformedRoot.stderr, /malformed Bun archive cache/);
+  assert.match(malformedRoot.stderr, /invalid public toolchain archive directory/);
 });
 
 test("Bun cache misses use only the pinned download, and offline misses cannot disable proof", (t) => {
   const { root, run, setup } = bunFixture(t);
-  fs.renameSync(path.join(root, "archives"), path.join(root, "upstream"));
+  fs.renameSync(path.join(root, "public", "archives"), path.join(root, "upstream"));
   const offline = run(`${setup}\nextract_bun_archive linux-x64-baseline "$PWD/staging"`);
   assert.notEqual(offline.status, 0);
   assert.match(offline.stderr, /unavailable offline/);
@@ -323,7 +494,7 @@ install_bun
 `);
   success(download);
   assert.deepEqual(
-    fs.readdirSync(path.join(root, "archives")).sort(),
+    fs.readdirSync(path.join(root, "public", "archives")).sort(),
     bunVariants.map((variant) => `bun-v1.4.0-${variant}.zip`).sort(),
   );
 });
@@ -332,7 +503,7 @@ for (const variant of bunVariants) {
   test(`Bun preserves curl failure for ${variant} without publishing the failed archive`, (t) => {
     const { root, run, setup, destination } = bunFixture(t);
     const name = `bun-v1.4.0-${variant}.zip`;
-    fs.renameSync(path.join(root, "archives"), path.join(root, "upstream"));
+    fs.renameSync(path.join(root, "public", "archives"), path.join(root, "upstream"));
     const result = run(`${setup}
 curl() {
   local output
@@ -359,7 +530,8 @@ install_bun
       result.stderr,
       `curl: (22) The requested URL returned error: 500\nlinux-tools: toolchain archive download failed: ${name} (curl exit 22)\n`,
     );
-    const attempted = bunVariants.slice(0, bunVariants.indexOf(variant) + 1)
+    const attempted = bunVariants
+      .slice(0, bunVariants.indexOf(variant) + 1)
       .map((item) => `bun-v1.4.0-${item}.zip`);
     assert.deepEqual(
       fs.readFileSync(path.join(root, "curl.calls"), "utf8").trim().split("\n"),
@@ -375,7 +547,7 @@ install_bun
     assert.equal(fs.existsSync(path.join(root, "extracted")), false);
     assert.equal(fs.existsSync(destination), false);
     assert.deepEqual(fs.readdirSync(path.join(root, "bin")), []);
-    const cache = path.join(root, "archives");
+    const cache = path.join(root, "public", "archives");
     const retained = attempted.slice(0, -1);
     assert.deepEqual(fs.existsSync(cache) ? fs.readdirSync(cache) : [], retained);
     for (const cached of retained) {
@@ -598,7 +770,7 @@ function nodeArchiveFixture(t) {
   const { root } = context;
   const bin = path.join(root, "payload", "node", "bin");
   writeNodeToolchain(bin, "24.19.0");
-  const archive = path.join(root, "archives", nodeArchive);
+  const archive = path.join(root, "public", "archives", nodeArchive);
   const pack = () => {
     success(
       spawnSync("tar", ["-cJf", archive, "-C", path.join(root, "payload"), "node"], {
@@ -608,7 +780,7 @@ function nodeArchiveFixture(t) {
     return createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
   };
   const setup = `
-public_toolchain_archive_dir="$PWD/archives"
+public_toolchain_archive_dir="$PWD/public/archives"
 node_toolcache_root="$PWD/tools"
 node_link_dir="$PWD/links"
 toolchain_archive_spec() { printf 'sha256 %s https://example.invalid/node.tar.xz\\n' "$FIXTURE_DIGEST"; }
@@ -728,7 +900,7 @@ case "$*" in
 esac`,
   );
   writeTool(path.join(bin, "gofmt"), 'cat "$1"');
-  const archive = path.join(root, "archives", goArchive);
+  const archive = path.join(root, "public", "archives", goArchive);
   const pack = () => {
     success(
       spawnSync("tar", ["-czf", archive, "-C", path.join(root, "payload"), "go"], {
@@ -739,7 +911,7 @@ esac`,
   };
   const destination = path.join(root, "tools", "go", "1.27.0", "x64");
   const shell = `
-public_toolchain_archive_dir="$PWD/archives"
+public_toolchain_archive_dir="$PWD/public/archives"
 go_toolcache_root="$PWD/tools"
 go_link_dir="$PWD/links"
 toolchain_archive_spec() { printf 'sha256 %s https://example.invalid/go.tar.gz\\n' "$FIXTURE_DIGEST"; }
@@ -875,7 +1047,7 @@ for (const entry of ["install_go_toolchain", "install_pinned_go"]) {
         links: fileState(links),
         tree: fileState(destination),
         marker: fileState(`${destination}.complete`),
-        archives: fileState(path.join(root, "archives")),
+        archives: fileState(path.join(root, "public", "archives")),
         calls: fileState(calls),
       };
       const result = run(`${shell}${defaultGoPreparation}${entry}`, {
@@ -888,7 +1060,7 @@ for (const entry of ["install_go_toolchain", "install_pinned_go"]) {
       assert.deepEqual(fileState(links), before.links);
       assert.deepEqual(fileState(destination), before.tree);
       assert.deepEqual(fileState(`${destination}.complete`), before.marker);
-      assert.deepEqual(fileState(path.join(root, "archives")), before.archives);
+      assert.deepEqual(fileState(path.join(root, "public", "archives")), before.archives);
       assert.deepEqual(fileState(calls), before.calls);
       assert.equal(fs.existsSync(path.join(root, "home", "preparation.log")), false);
       assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);
@@ -957,10 +1129,10 @@ test("archive staging authenticates private bytes, skips downloads, and rejects 
   const { root, run } = fixture(t);
   const payload = Buffer.from("reviewed public archive fixture\n");
   const digest = createHash("sha256").update(payload).digest("hex");
-  const cached = path.join(root, "archives", "fixture.tgz");
+  const cached = path.join(root, "public", "archives", "fixture.tgz");
   const staged = path.join(root, "staging", "fixture.tgz");
   const shell = `
-public_toolchain_archive_dir="$PWD/archives"
+public_toolchain_archive_dir="$PWD/public/archives"
 toolchain_archive_spec() { printf 'sha256 %s https://example.invalid/fixture.tgz\\n' "$FIXTURE_DIGEST"; }
 curl() { echo unexpected-network >&2; return 89; }
 stage_toolchain_archive fixture.tgz "$PWD/staging"
@@ -1010,14 +1182,18 @@ stage_toolchain_archive fixture.tgz "$PWD/staging"
 });
 
 for (const [name, status, message, url] of [
-  ["bun-v1.4.0-linux-x64-baseline.zip", 22, "The requested URL returned error: 500",
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64-baseline.zip"],
+  [
+    "bun-v1.4.0-linux-x64-baseline.zip",
+    22,
+    "The requested URL returned error: 500",
+    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64-baseline.zip",
+  ],
   [nodeArchive, 7, "Failed to connect", `https://nodejs.org/dist/v24.19.0/${nodeArchive}`],
 ]) {
   test(`archive staging reports curl ${status} without changing its status, stderr, or arguments`, (t) => {
     const { root, run } = fixture(t);
     const result = run(`
-public_toolchain_archive_dir="$PWD/archives"
+public_toolchain_archive_dir="$PWD/public/archives"
 curl() {
   printf '%s\\0' "$@" >>"$PWD/curl.args"
   while [[ "$1" != "--output" ]]; do shift; done
@@ -1036,20 +1212,32 @@ stage_toolchain_archive "${name}" "$PWD/staging" 1
     );
     assert.deepEqual(
       fs.readFileSync(path.join(root, "curl.args"), "utf8").split("\0").slice(0, -1),
-      ["-q", "--proto", "=https", "--tlsv1.2", "-fsSL", "--connect-timeout", "10",
-        "--max-time", "300", "--output", path.join(root, "staging", name), url],
+      [
+        "-q",
+        "--proto",
+        "=https",
+        "--tlsv1.2",
+        "-fsSL",
+        "--connect-timeout",
+        "10",
+        "--max-time",
+        "300",
+        "--output",
+        path.join(root, "staging", name),
+        url,
+      ],
     );
     assert.equal(fs.existsSync(path.join(root, "verified")), false);
-    assert.deepEqual(fs.readdirSync(path.join(root, "archives")), []);
+    assert.deepEqual(fs.readdirSync(path.join(root, "public", "archives")), []);
   });
 }
 
 test("raw pnpm authentication cannot be replaced by forged Corepack metadata or a packed bundle", (t) => {
   const { root, run } = fixture(t);
-  fs.writeFileSync(path.join(root, "archives", "pnpm-11.22.0.tgz"), "forged payload");
+  fs.writeFileSync(path.join(root, "public", "archives", "pnpm-11.22.0.tgz"), "forged payload");
   const destination = path.join(root, "home", "v1", "pnpm", "11.22.0");
   const rejected = run(`
-public_toolchain_archive_dir="$PWD/archives"
+public_toolchain_archive_dir="$PWD/public/archives"
 if seed_offline_pnpm 11.22.0 "$PWD/staging" "$PWD/home"; then exit 91; fi
 `);
   success(rejected);
@@ -1116,16 +1304,20 @@ function fileState(file) {
     if (error.code === "ENOENT") return null;
     throw error;
   }
-  if (stat.isSymbolicLink()) return { link: fs.readlinkSync(file) };
+  const metadata = { mode: stat.mode, uid: stat.uid, gid: stat.gid };
+  if (stat.isSymbolicLink()) return { ...metadata, link: fs.readlinkSync(file) };
   if (stat.isDirectory()) {
-    return Object.fromEntries(
-      fs
-        .readdirSync(file)
-        .sort()
-        .map((name) => [name, fileState(path.join(file, name))]),
-    );
+    return {
+      ...metadata,
+      entries: Object.fromEntries(
+        fs
+          .readdirSync(file)
+          .sort()
+          .map((name) => [name, fileState(path.join(file, name))]),
+      ),
+    };
   }
-  return { mode: stat.mode, contents: fs.readFileSync(file).toString("base64") };
+  return { ...metadata, contents: fs.readFileSync(file).toString("base64") };
 }
 
 for (const state of ["fresh", "current", "dangling"]) {
@@ -1222,7 +1414,7 @@ for (const entry of ["install_node_pnpm", "install_pinned_node"]) {
         links: fileState(links),
         tree: fileState(destination),
         marker: fileState(`${destination}.complete`),
-        archives: fileState(path.join(root, "archives")),
+        archives: fileState(path.join(root, "public", "archives")),
       };
       const result = run(
         `${setup}${defaultNodePreparation}
@@ -1235,7 +1427,7 @@ if ${entry}; then exit 91; fi
       assert.deepEqual(fileState(links), before.links);
       assert.deepEqual(fileState(destination), before.tree);
       assert.deepEqual(fileState(`${destination}.complete`), before.marker);
-      assert.deepEqual(fileState(path.join(root, "archives")), before.archives);
+      assert.deepEqual(fileState(path.join(root, "public", "archives")), before.archives);
       assert.equal(fs.existsSync(path.join(root, "home", "preparation.log")), false);
       assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);
     });
@@ -1393,8 +1585,8 @@ for (const [name, setup, diagnostic, transaction] of [
     const { root, runRebake } = nodeRebakeFixture(t);
     const result = runRebake(`
 ${setup}
-cp -R "$node_link_dir" "$PWD/links-before"
-cp -R "$node_toolcache_root" "$PWD/tools-before"
+cp -pR "$node_link_dir" "$PWD/links-before"
+cp -pR "$node_toolcache_root" "$PWD/tools-before"
 if install_node_pnpm; then exit 91; fi
 [[ "$(hash -t node)" == "$node_link_dir/node" ]]
 [[ "$(node --version)" == v24.19.0 ]]
@@ -1622,14 +1814,14 @@ seed_offline_pnpm 12.3.4 "$PWD/staging" "$PWD/corepack"
     );
     fs.copyFileSync(
       path.join(publicArchives, "pnpm-12.3.4.tgz"),
-      path.join(root, "archives", "pnpm-12.3.4.tgz"),
+      path.join(root, "public", "archives", "pnpm-12.3.4.tgz"),
     );
     fs.writeFileSync(
-      path.join(root, "archives", "exe.linux-x64-12.3.4.tgz"),
+      path.join(root, "public", "archives", "exe.linux-x64-12.3.4.tgz"),
       "forged native payload",
     );
     const forgedNative = run(`
-public_toolchain_archive_dir="$PWD/archives"
+public_toolchain_archive_dir="$PWD/public/archives"
 seed_offline_pnpm 12.3.4 "$PWD/staging" "$PWD/forged-corepack"
 `);
     assert.notEqual(forgedNative.status, 0);

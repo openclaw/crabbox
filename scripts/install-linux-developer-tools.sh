@@ -304,26 +304,40 @@ stage_toolchain_archive() {
   verify_toolchain_archive "$algorithm" "$expected" "$staging/$name"
 }
 
+prepare_public_toolchain_archive_dir() {
+  local parent directory
+  parent="$(dirname "$public_toolchain_archive_dir")"
+  # Validate both owned public boundaries before changing either; never widen
+  # unrelated ancestors or follow an operator-owned replacement.
+  for directory in "$parent" "$public_toolchain_archive_dir"; do
+    if [[ -L "$directory" || ( -e "$directory" && ( ! -d "$directory" || ! -O "$directory" ) ) ]]; then
+      log "invalid public toolchain archive directory: $directory"
+      return 1
+    fi
+  done
+  install -d -m 0755 "$parent" "$public_toolchain_archive_dir"
+}
+
 cache_public_toolchain_archives() (
   set -euo pipefail
   umask 077
   local staging name pending
-  staging="$(mktemp -d)"
+  # Conditional callers disable errexit; never publish after a failed step.
+  prepare_public_toolchain_archive_dir || return $?
+  staging="$(mktemp -d)" || return $?
   # Bind paths now: Bash can unwind function locals before an EXIT trap on failure.
   # shellcheck disable=SC2064
   trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
-  [[ ! -L "$public_toolchain_archive_dir" ]] || return 1
-  install -d -m 0755 "$public_toolchain_archive_dir"
   if [[ "$#" -eq 0 ]]; then
     set -- node-v24.19.0-linux-x64.tar.xz pnpm-11.22.0.tgz pnpm-12.3.4.tgz exe.linux-x64-12.3.4.tgz
   fi
   for name in "$@"; do
-    stage_toolchain_archive "$name" "$staging" 1
-    pending="$(mktemp "$public_toolchain_archive_dir/.archive.XXXXXX")"
+    stage_toolchain_archive "$name" "$staging" 1 || return $?
+    pending="$(mktemp "$public_toolchain_archive_dir/.archive.XXXXXX")" || return $?
     # shellcheck disable=SC2064
     trap "$(printf 'rm -rf -- %q %q' "$staging" "$pending")" EXIT
-    install -m 0644 "$staging/$name" "$pending"
-    python3 - "$pending" "$public_toolchain_archive_dir/$name" <<'PY'
+    install -m 0644 "$staging/$name" "$pending" || return $?
+    python3 - "$pending" "$public_toolchain_archive_dir/$name" <<'PY' || return $?
 import os
 import sys
 os.replace(sys.argv[1], sys.argv[2])
@@ -391,7 +405,7 @@ install_pinned_go() (
 install_go_toolchain() {
   if linux_x64_supported; then
     public_tool_links check "$go_link_dir" "$go_toolcache_root/go/$pinned_go_version/x64/bin" go gofmt || return $?
-    cache_public_toolchain_archives go1.27.0.linux-amd64.tar.gz
+    cache_public_toolchain_archives go1.27.0.linux-amd64.tar.gz || return $?
     install_pinned_go
   fi
 }
@@ -766,6 +780,7 @@ install_bun() {
     [[ ! -L "$directory" ]] || { log "symlinked Bun managed directory: $directory"; return 1; }
     directory="$(dirname "$directory")" || return $?
   done
+  prepare_public_toolchain_archive_dir || return $?
   (
     set -euo pipefail
     umask 077
@@ -776,7 +791,6 @@ install_bun() {
     for variant in linux-x64-baseline linux-x64; do
       name="bun-v$pinned_bun_version-$variant.zip"
       stage_bun_archive "$name" "$staging" 1 || return $?
-      install -d -m 0755 "$public_toolchain_archive_dir" || return $?
       pending="$(mktemp "$public_toolchain_archive_dir/.bun-archive.XXXXXX")" || return $?
       # shellcheck disable=SC2064
       trap "$(printf 'rm -rf -- %q %q' "$staging" "$pending")" EXIT
