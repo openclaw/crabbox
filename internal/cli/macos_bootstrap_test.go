@@ -71,7 +71,7 @@ func TestMacOSNodeInstaller(t *testing.T) {
 				}
 				write(filepath.Join(bin, "node"), "#!/bin/sh\nexit 1\n")
 			}
-			for _, name := range []string{"install", "mktemp", "rm", "rmdir", "mkdir", "mv", "ln", "tar", "shasum", "chmod", "dirname", "sleep"} {
+			for _, name := range []string{"install", "mktemp", "rm", "rmdir", "mkdir", "mv", "ln", "tar", "gzip", "shasum", "chmod", "dirname", "sleep"} {
 				p, err := exec.LookPath(name)
 				if err != nil {
 					t.Fatal(err)
