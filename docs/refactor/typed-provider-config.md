@@ -180,7 +180,8 @@ inputs verbatim: ignoring an assignment is not permission to erase its file valu
    by the tag.
    Environment-admitted `int64` fields currently require this fallback mode;
    strict `int64` environment parsing and aliases are not generated. File fields
-   remain `*int64`, and flags use `flag.Int64`, with no platform-width conversion.
+   use `*int64` by default or `int64` with `fileStorage:"value"`; flags use
+   `flag.Int64`, with no platform-width conversion.
    Compiled `int` defaults retain the existing signed 32-bit check; `int64`
    defaults are checked at signed 64-bit width.
    An existing positive-only integer file binding can opt into
@@ -312,15 +313,18 @@ trust remain outside the generator.
 
 The loader still applies defaults, user files, repository files, environment,
 and explicit flags in that order. Both repository filenames retain their
-existing order. A YAML pointer distinguishes omission/null from explicit false,
-zero, an empty string, or an empty list. Only an explicit `fileIgnoreEmpty:"true"`
-binding ignores an empty string; whitespace is still applied. Lists are trimmed and blank entries
-removed, without deduplication. Empty environment strings fall through; a
-nonempty list value containing only whitespace/commas clears the list. Existing
-boolean environment aliases (`yes/no`, `on/off`, `1/0`) remain accepted.
-Malformed boolean/float environment values keep the previous value, while
-malformed or negative timeout values fail. These differences are preserved,
-not standardized by this refactor.
+existing order. Presence-sensitive YAML bindings use pointers to distinguish
+omission/null from explicit false, zero, an empty string, or an empty list.
+Value-backed fields retain their declared zero-ignoring rules. Only an explicit
+`fileIgnoreEmpty:"true"` binding ignores an empty string; whitespace still applies.
+List normalization follows each declared source mode: raw file lists stay raw,
+while ordinary comma-separated environment input trims blanks without deduplication.
+Ordinary empty environment strings fall through; presence-based list bindings
+can clear on empty input. Existing boolean aliases (`yes/no`, `on/off`, `1/0`)
+remain accepted. Malformed boolean/float environment values keep the previous
+value. Strict nonnegative integer bindings reject malformed or negative input;
+explicitly tolerant integer bindings retain their documented fallback behavior.
+These differences are preserved, not standardized by generation.
 
 Flags keep their names, help, types, defaults, and `flag.FlagSet` presence
 semantics. Explicit false/zero/empty flags override earlier layers. Registration
