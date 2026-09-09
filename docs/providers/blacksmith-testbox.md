@@ -333,8 +333,8 @@ for inventory and enrichment semantics.
   transfer archives remain nonce-scoped until canonical lease cleanup; their
   locator and policy are recorded. Bounded downloads require a macOS/Linux
   client, native download support, compatible `ps` process-group inspection and
-  unprivileged OpenSSH scp. Missing or incompatible inspection fails before the
-  workload launches. Keep the installed
+  unprivileged OpenSSH scp. Missing or incompatible process inspection and
+  unavailable or privileged scp helpers fail before the workload launches. Keep the installed
   tools stable during transfer: observed scp path, identity or content changes
   withhold artifacts. Standalone command groups
   remain owned until live members close; inherited controller-owned mode is

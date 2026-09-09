@@ -298,7 +298,9 @@ the resolved installed `scp` path through a private dispatcher, preserving its
 installation context. Checks before and after transfer reject observed changes
 to its file identity, permissions or contents. They are finite observations,
 not atomic executable pinning; a change restored between checks can go undetected.
-Set-id executables and Linux file capabilities are unsupported.
+The installed helper is also resolved and inspected before workload launch.
+Missing, non-executable, unreadable, set-id and Linux file-capability helpers
+are rejected at startup.
 
 Collection runs after exit 0 or normal nonzero exits below 128; signal-like
 codes skip collection. The Linux environment needs Bash, `find`, `tar`,

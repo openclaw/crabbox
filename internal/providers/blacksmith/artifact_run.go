@@ -59,7 +59,9 @@ func (r *blacksmithArtifactReceipt) command(req RunRequest, budget time.Duration
 		"printf '" + format + "digest1:%s\\037' \"${archive_digest:32}\" || exit 7\n"
 	// Pin the prepared directory before workload code can retarget its binding.
 	// Only the child returns to the native cwd; cd, exit, exec, and traps stay child-owned.
-	body := `native_cwd=$(pwd -P) || exit 7
+	body := `# Preserve filename newlines; remove only pwd's newline and the sentinel.
+native_cwd=$(pwd -P && printf .) || exit 7
+native_cwd=${native_cwd%??}
 binding=./.git/crabbox-artifact-root
 if [ -e "$binding" ] || [ -L "$binding" ]; then
   if [ ! -L "$binding" ] || ! cd -P "$binding" 2>/dev/null; then
@@ -301,6 +303,13 @@ func (b *blacksmithBackend) runArtifactTestbox(ctx context.Context, req RunReque
 	}
 	if !strings.Contains(capability.Stdout, "testbox download --id") || !strings.Contains(capability.Stdout, "--ssh-private-key") {
 		return 2, time.Time{}, collected, exit(2, "Blacksmith artifact collection requires native testbox download support; update the Blacksmith CLI")
+	}
+	scp, err := blacksmithDownloadExecutable("scp")
+	if err == nil {
+		_, err = inspectBlacksmithDownloadExecutable(ctx, scp)
+	}
+	if err = blacksmithContextError(ctx, err); err != nil {
+		return core.ExitCodeForError(err, 2), time.Time{}, collected, fmt.Errorf("Blacksmith artifact scp preflight: %w", err)
 	}
 	r, err := newBlacksmithArtifactReceipt(b.rt.Clock.Now)
 	if err != nil {

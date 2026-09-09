@@ -131,6 +131,8 @@ func TestBlacksmithArtifactRunShellAndTerminalExit(t *testing.T) {
 			{name: "zero", command: "printf original > report; printf out; printf err >&2", stdout: "out", stderr: "err"},
 			{name: "backslash-workdir", directory: `working\directory`, command: "printf original > report"},
 			{name: "newline-workdir", directory: "working\ndirectory", command: "printf original > report"},
+			{name: "trailing-newline-workdir", directory: "working\n", command: "printf original > report"},
+			{name: "trailing-newlines-workdir", directory: "working\n\n", command: "printf original > report"},
 			{name: "one", command: "printf original > report; exit 1", code: 1},
 			{name: "explicit-exit", command: "printf original > report; exit 23; printf BAD", code: 23},
 			{name: "exec", command: "printf original > report; exec bash -c 'exit 23'", code: 23},
@@ -221,6 +223,61 @@ func TestBlacksmithArtifactRunShellAndTerminalExit(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestBlacksmithArtifactPreflightsSCPBeforeWorkload(t *testing.T) {
+	requireBlacksmithArtifactShell(t)
+	for _, tc := range []struct {
+		name string
+		mode os.FileMode
+	}{
+		{name: "missing"},
+		{name: "non-executable", mode: 0o600},
+		{name: "setuid", mode: 0o700 | os.ModeSetuid},
+		{name: "setgid", mode: 0o700 | os.ModeSetgid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateArtifactOwnership(t)
+			childPATH := os.Getenv("PATH")
+			parentBin := t.TempDir()
+			for _, name := range []string{"blacksmith", "ps"} {
+				path, err := exec.LookPath(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(path, filepath.Join(parentBin, name)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.mode != 0 {
+				path := filepath.Join(parentBin, "scp")
+				if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 99\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(path, tc.mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PATH", parentBin)
+			repo := t.TempDir()
+			runs := 0
+			runner := artifactTestRunner(t, func(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+				runs++
+				// Keep shell tools available without masking the missing local helper.
+				req.Env = append(req.Env, "PATH="+childPATH)
+				return runSyntheticBlacksmithCommand(t, ctx, req)
+			})
+			backend := newTestBlacksmithBackend(baseConfig(), runner)
+			code, ended, artifacts, err := backend.runArtifactTestbox(t.Context(), RunRequest{
+				Repo: Repo{Root: repo}, Command: []string{"printf started > workload-started; printf payload > report"}, ShellMode: true,
+				ArtifactGlobs: []string{"report"}, RequiredArtifactGlobs: []string{"report"},
+			}, "tbx_preflight", nil, nil, nil, time.Second)
+			_, markerErr := os.Stat(filepath.Join(repo, "workload-started"))
+			if err == nil || !strings.Contains(err.Error(), "scp") || code == 0 || !ended.IsZero() || len(artifacts) != 0 || runs != 0 || !errors.Is(markerErr, os.ErrNotExist) {
+				t.Fatalf("invalid helper reached workload: code=%d ended=%v artifacts=%v runs=%d marker=%v err=%v", code, ended, artifacts, runs, markerErr, err)
+			}
+		})
 	}
 }
 
