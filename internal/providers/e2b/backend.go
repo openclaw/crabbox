@@ -21,11 +21,8 @@ func RegisterE2BProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyE2BProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == e2bProvider {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=e2b")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=e2b")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, e2bProvider, "", ""); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(core.E2BConfigFlagValues)

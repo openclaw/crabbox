@@ -913,6 +913,19 @@ each `Provider.RegisterFlags` invocation, and treats everything else registered
 by `run` as a shared command flag. It never calls `ApplyFlags` or `Configure`.
 Do not add a parallel flag inventory.
 
+Providers that reject both explicit `--class` and `--type` can share
+`shared.RejectExplicitMachineSizingFlags`. It checks flag visits rather than
+inherited config values, rejects class before type regardless of argument order,
+and retains the caller's canonical provider name and literal guidance. An empty
+explicit value is still a visit. The helper does not select a provider, mutate
+configuration, register flags, or infer admission from class-mapping metadata.
+
+Keep its call at the provider's existing validation position. In particular,
+value-type assertions may precede the guard, and target/expose checks or field
+application may follow it. Single-flag rejection, supported type mapping, and
+providers without this rejection policy remain distinct contracts; do not use
+the pair helper to change them.
+
 Pattern for a provider with typed config fields:
 
 ```go

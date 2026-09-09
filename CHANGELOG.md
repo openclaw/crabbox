@@ -52,6 +52,8 @@
 
 - Describe Modal configuration bindings once, sharing configured defaults while preserving trusted Secret-name lists, environment clearing, and first-replace/later-append flags. [PR 2022](https://github.com/openclaw/crabbox/pull/2022). Thanks @steipete.
 
+- Share unsupported machine-sizing flag checks across providers, preserving explicit-input behavior, provider-specific guidance, and validation order. Thanks @steipete.
+
 ## 0.53.0 - 2026-09-08
 
 ### Highlights

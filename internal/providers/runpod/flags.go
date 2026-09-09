@@ -1,6 +1,10 @@
 package runpod
 
-import "flag"
+import (
+	"flag"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
+)
 
 type runpodFlagValues struct {
 	APIURL     *string
@@ -32,11 +36,8 @@ func RegisterRunpodProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyRunpodProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if isRunpodProviderName(cfg.Provider) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s; use --runpod-instance-id", providerName)
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s; use --runpod-image", providerName)
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --runpod-instance-id", "use --runpod-image"); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(runpodFlagValues)

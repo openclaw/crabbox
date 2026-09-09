@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 // RegisterRailwayProviderFlags exposes railway-specific flags. The API token is
@@ -17,11 +18,8 @@ func RegisterRailwayProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyRailwayProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if isRailwayProviderName(cfg.Provider) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s", providerName)
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s", providerName)
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(core.RailwayConfigFlagValues)

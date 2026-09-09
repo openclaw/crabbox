@@ -57,11 +57,8 @@ func RegisterMorphProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyMorphProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if isMorphProviderName(cfg.Provider) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=morph")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=morph; use --morph-snapshot")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", "use --morph-snapshot"); err != nil {
+			return err
 		}
 		if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
 			return exit(2, "provider=morph supports target=linux only")

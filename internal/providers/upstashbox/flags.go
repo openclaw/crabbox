@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func RegisterUpstashBoxProviderFlags(fs *flag.FlagSet, defaults Config) any {
@@ -13,11 +14,8 @@ func RegisterUpstashBoxProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyUpstashBoxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == providerName || cfg.Provider == "upstash" || cfg.Provider == "box" || cfg.Provider == "upstashbox" {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s; use --upstash-box-size", providerName)
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s; use --upstash-box-runtime", providerName)
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --upstash-box-size", "use --upstash-box-runtime"); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(core.UpstashBoxConfigFlagValues)

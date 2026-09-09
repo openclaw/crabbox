@@ -42,11 +42,8 @@ func RegisterCubeSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyCubeSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == providerName {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=cubesandbox")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=cubesandbox")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(cubesandboxFlagValues)

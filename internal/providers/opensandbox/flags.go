@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func RegisterOpenSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
@@ -14,11 +15,8 @@ func RegisterOpenSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
 func ApplyOpenSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	switch strings.ToLower(strings.TrimSpace(cfg.Provider)) {
 	case providerName:
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=opensandbox; use --opensandbox-cpu and --opensandbox-memory")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=opensandbox; use --opensandbox-cpu and --opensandbox-memory")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --opensandbox-cpu and --opensandbox-memory", "use --opensandbox-cpu and --opensandbox-memory"); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(core.OpenSandboxConfigFlagValues)

@@ -1,6 +1,10 @@
 package nvidiabrev
 
-import "flag"
+import (
+	"flag"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
+)
 
 type nvidiaBrevFlagValues struct {
 	CLI           *string
@@ -38,11 +42,8 @@ func RegisterNvidiaBrevProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyNvidiaBrevProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if isNvidiaBrevProviderName(cfg.Provider) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s; use --nvidia-brev-gpu-name", providerName)
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s; use --nvidia-brev-type", providerName)
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --nvidia-brev-gpu-name", "use --nvidia-brev-type"); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(nvidiaBrevFlagValues)

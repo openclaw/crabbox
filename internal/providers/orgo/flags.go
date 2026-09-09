@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 // RegisterOrgoProviderFlags exposes non-secret Orgo settings. The API key is
@@ -16,11 +17,8 @@ func RegisterOrgoProviderFlags(fs *flag.FlagSet, defaults Config) any {
 func ApplyOrgoProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	switch strings.ToLower(strings.TrimSpace(cfg.Provider)) {
 	case providerName, "orgo-ai":
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s", providerName)
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s", providerName)
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(core.OrgoConfigFlagValues)

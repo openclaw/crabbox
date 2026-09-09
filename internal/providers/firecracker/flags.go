@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type flagValues struct {
@@ -47,11 +48,8 @@ func RegisterFirecrackerProviderFlags(fs *flag.FlagSet, defaults core.Config) an
 
 func ApplyFirecrackerProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if isFirecrackerProviderName(cfg.Provider) {
-		if core.FlagWasSet(fs, "class") {
-			return core.Exit(2, "--class is not supported for provider=firecracker; use --firecracker-cpus, --firecracker-memory-mib, and --firecracker-disk-mib")
-		}
-		if core.FlagWasSet(fs, "type") {
-			return core.Exit(2, "--type is not supported for provider=firecracker; use explicit Firecracker kernel, rootfs, and sizing flags")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --firecracker-cpus, --firecracker-memory-mib, and --firecracker-disk-mib", "use explicit Firecracker kernel, rootfs, and sizing flags"); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(flagValues)

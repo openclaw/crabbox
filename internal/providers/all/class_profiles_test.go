@@ -1,13 +1,17 @@
 package all
 
 import (
+	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestProductionProviderClassCatalogCompleteness(t *testing.T) {
@@ -320,4 +324,299 @@ func specSupportsTarget(spec core.ProviderSpec, target, windowsMode string) bool
 		}
 	}
 	return false
+}
+
+// The selector and guidance table pins adapter-owned contracts independently
+// of the shared formatter and of each provider's registry aliases.
+var sizingFlagContracts = []struct {
+	name, classGuidance, typeGuidance string
+	normalized, assertionFirst        bool
+	aliases                           []string
+}{
+	{"azure-dynamic-sessions", "choose pool sizing in Azure", "choose pool sizing in Azure", false, false, nil},
+	{"blaxel", "use --blaxel-memory-mb", "use --blaxel-image", true, false, nil},
+	{"cloudflare-dynamic-workers", "", "", false, false, []string{"cf-dynamic", "cfdw"}},
+	{"cloudflare-sandbox", "", "", true, false, nil},
+	{"cloud-run-sandbox", "sandboxes share Cloud Run service CPU/memory", "sandboxes share Cloud Run service CPU/memory", true, false, []string{"gcrun-sandbox", "google-cloud-run-sandbox", "cloudrun-sandbox"}},
+	{"coder", "choose size through the Coder template or --coder-preset", "choose a Coder template with --coder-template", false, false, nil},
+	{"codesandbox", "use --codesandbox-vm-tier", "use --codesandbox-vm-tier", true, true, []string{"csb", "code-sandbox"}},
+	{"crownest", "use --crownest-template", "use --crownest-template", true, false, nil},
+	{"cua", "use --cua-vcpus and --cua-memory-mb", "use --cua-image and --cua-kind", true, false, nil},
+	{"cubesandbox", "", "", false, false, nil},
+	{"docker-sandbox", "use --docker-sandbox-cpus or --docker-sandbox-memory", "use --docker-sandbox-template", false, false, nil},
+	{"e2b", "", "", false, false, nil},
+	{"exe-dev", "use --exe-dev-cpus, --exe-dev-memory, and --exe-dev-disk", "use --exe-dev-image", false, false, []string{"exe", "exedev"}},
+	{"fastapi-cloud", "", "", true, false, []string{"fastapicloud", "fastapi"}},
+	{"firecracker", "use --firecracker-cpus, --firecracker-memory-mib, and --firecracker-disk-mib", "use explicit Firecracker kernel, rootfs, and sizing flags", true, false, nil},
+	{"modal", "", "", false, false, nil},
+	{"morph", "", "use --morph-snapshot", true, false, nil},
+	{"nvidia-brev", "use --nvidia-brev-gpu-name", "use --nvidia-brev-type", true, false, []string{"brev", "nvidia"}},
+	{"opencomputer", "use --opencomputer-cpu and --opencomputer-memory-mb", "use --opencomputer-cpu and --opencomputer-memory-mb", true, false, []string{"oc", "open-computer"}},
+	{"opensandbox", "use --opensandbox-cpu and --opensandbox-memory", "use --opensandbox-cpu and --opensandbox-memory", true, false, nil},
+	{"orgo", "", "", true, false, []string{"orgo-ai"}},
+	{"railway", "", "", true, false, []string{"rail", "railwayapp"}},
+	{"runpod", "use --runpod-instance-id", "use --runpod-image", true, false, []string{"run-pod", "runpodio"}},
+	{"smolvm", "use --smolvm-cpus/--smolvm-memory-mb", "use --smolvm-image", false, false, []string{"smol", "smolmachines", "smolfleet"}},
+	{"superserve", "use --superserve-template or --superserve-snapshot", "use --superserve-template or --superserve-snapshot", true, false, nil},
+	{"unikraft-cloud", "", "", true, false, []string{"unikraftcloud", "ukc"}},
+	{"upstash-box", "use --upstash-box-size", "use --upstash-box-runtime", false, false, []string{"upstash", "box", "upstashbox"}},
+	{"vast", "use --vast-gpu-name or --vast-gpu-count", "use --vast-image", true, false, []string{"vast-ai", "vastai"}},
+	{"vercel-sandbox", "use --vercel-sandbox-vcpus", "use --vercel-sandbox-runtime or --vercel-sandbox-vcpus", true, false, nil},
+	{"wandb", "", "", true, false, []string{"weights-and-biases"}},
+	{"windows-sandbox", "Windows Sandbox sizing is controlled by the host", "Windows Sandbox sizing is controlled by the host", false, true, []string{"wsb", "windows-sandbox-provider"}},
+}
+
+func sizingContractFlags(t *testing.T, provider core.Provider, cfg core.Config, args []string) (*flag.FlagSet, any) {
+	t.Helper()
+	fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.String("class", "", "")
+	fs.String("type", "", "")
+	fs.String("target", "", "")
+	fs.String("windows-mode", "", "")
+	fs.String("expose", "", "")
+	values := provider.RegisterFlags(fs, cfg)
+	if err := fs.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	return fs, values
+}
+
+func assertSizingContractError(t *testing.T, err error, want string) {
+	t.Helper()
+	if want == "" {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return
+	}
+	var exitErr core.ExitError
+	if err == nil || err.Error() != want || !errors.As(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("error=%v exit=%#v want exit2 %q", err, exitErr, want)
+	}
+}
+
+func TestProviderSizingGuardContracts(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	if len(sizingFlagContracts) != 31 {
+		t.Fatal("expected all 31 eligible adapters")
+	}
+	for _, tc := range sizingFlagContracts {
+		t.Run(tc.name, func(t *testing.T) {
+			provider, err := core.ProviderFor(tc.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, args := range [][]string{{"--class=large"}, {"--type=machine"}, {"--class=large", "--type=machine"}, {"--type=machine", "--class=large"}, {"--class="}, {"--type="}} {
+				for _, wrong := range []bool{false, true} {
+					cfg := core.BaseConfig()
+					cfg.Provider = tc.name
+					cfg.TargetOS = "linux"
+					cfg.WindowsMode = "prior-mode"
+					before := fmt.Sprintf("%#v", cfg)
+					fs, values := sizingContractFlags(t, provider, cfg, args)
+					// A visited provider value exposes any copy accidentally moved before rejection.
+					copiedFlag := ""
+					fs.VisitAll(func(f *flag.Flag) {
+						if copiedFlag != "" || f.Name == "class" || f.Name == "type" || f.Name == "target" || f.Name == "windows-mode" || f.Name == "expose" {
+							return
+						}
+						if getter, ok := f.Value.(flag.Getter); ok {
+							if _, ok := getter.Get().(string); ok {
+								copiedFlag = f.Name
+							}
+						}
+					})
+					if copiedFlag == "" {
+						t.Fatal("provider has no string flag for copy-order fixture")
+					}
+					if err := fs.Set(copiedFlag, fs.Lookup(copiedFlag).Value.String()+"-fixture"); err != nil {
+						t.Fatal(err)
+					}
+					if wrong {
+						values = struct{}{}
+					}
+					flagName, guide := "class", tc.classGuidance
+					if len(args) == 1 && strings.HasPrefix(args[0], "--type") {
+						flagName = "type"
+						guide = tc.typeGuidance
+					}
+					want := "--" + flagName + " is not supported for provider=" + tc.name
+					if guide != "" {
+						want += "; " + guide
+					}
+					if wrong && tc.assertionFirst {
+						want = ""
+					}
+					assertSizingContractError(t, provider.ApplyFlags(&cfg, fs, values), want)
+					if after := fmt.Sprintf("%#v", cfg); after != before {
+						t.Fatalf("rejection/wrong-type mutated config for args=%v", args)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestProviderSizingSelectorContracts(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	for _, tc := range sizingFlagContracts {
+		t.Run(tc.name, func(t *testing.T) {
+			provider, err := core.ProviderFor(tc.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			names := append([]string{tc.name, " " + strings.ToUpper(tc.name) + " ", "unselected"}, tc.aliases...)
+			names = append(names, provider.Aliases()...)
+			for _, selector := range names {
+				selected := selector == tc.name
+				for _, alias := range tc.aliases {
+					selected = selected || selector == alias
+				}
+				if tc.normalized {
+					normalized := strings.ToLower(strings.TrimSpace(selector))
+					selected = normalized == tc.name
+					for _, alias := range tc.aliases {
+						selected = selected || normalized == alias
+					}
+				}
+				cfg := core.BaseConfig()
+				cfg.Provider = selector
+				cfg.Class = "large"
+				cfg.ServerType = "inherited-machine"
+				fs, values := sizingContractFlags(t, provider, cfg, []string{"--class="})
+				want := ""
+				if selected {
+					want = "--class is not supported for provider=" + tc.name
+					if tc.classGuidance != "" {
+						want += "; " + tc.classGuidance
+					}
+				} else if tc.name == "cloudflare-sandbox" {
+					want = "cloudflare-sandbox requires cloudflareSandbox.url or CRABBOX_CLOUDFLARE_SANDBOX_URL"
+				}
+				assertSizingContractError(t, provider.ApplyFlags(&cfg, fs, values), want)
+			}
+			cfg := core.BaseConfig()
+			cfg.Provider = tc.name
+			cfg.Class = "large"
+			cfg.ServerType = "inherited-machine"
+			fs, values := sizingContractFlags(t, provider, cfg, nil)
+			want := ""
+			if tc.name == "cloudflare-sandbox" {
+				want = "cloudflare-sandbox requires cloudflareSandbox.url or CRABBOX_CLOUDFLARE_SANDBOX_URL"
+			}
+			assertSizingContractError(t, provider.ApplyFlags(&cfg, fs, values), want)
+		})
+	}
+}
+
+func TestProviderSizingLocalOrderContracts(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	for _, name := range []string{"coder", "morph"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, args := range [][]string{{"--class="}, {"--type="}, nil} {
+			cfg := core.BaseConfig()
+			cfg.Provider = name
+			cfg.TargetOS = "windows"
+			fs, values := sizingContractFlags(t, provider, cfg, args)
+			want := "provider=" + name + " supports target=linux only"
+			if len(args) > 0 {
+				for _, tc := range sizingFlagContracts {
+					if tc.name == name {
+						flagName, guide := "class", tc.classGuidance
+						if strings.HasPrefix(args[0], "--type") {
+							flagName = "type"
+							guide = tc.typeGuidance
+						}
+						want = "--" + flagName + " is not supported for provider=" + name
+						if guide != "" {
+							want += "; " + guide
+						}
+					}
+				}
+			}
+			before := fmt.Sprintf("%#v", cfg)
+			assertSizingContractError(t, provider.ApplyFlags(&cfg, fs, values), want)
+			if fmt.Sprintf("%#v", cfg) != before {
+				t.Fatal("target/sizing rejection mutated config")
+			}
+		}
+	}
+	provider, err := core.ProviderFor("cloudflare-dynamic-workers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		args []string
+		flag string
+	}{{[]string{"--expose=8080", "--type=machine", "--class=large"}, "class"}, {[]string{"--expose=8080", "--type="}, "type"}, {[]string{"--expose="}, "expose"}} {
+		cfg := core.BaseConfig()
+		cfg.Provider = provider.Name()
+		fs, values := sizingContractFlags(t, provider, cfg, tc.args)
+		before := fmt.Sprintf("%#v", cfg)
+		assertSizingContractError(t, provider.ApplyFlags(&cfg, fs, values), "--"+tc.flag+" is not supported for provider=cloudflare-dynamic-workers")
+		if fmt.Sprintf("%#v", cfg) != before {
+			t.Fatal("dynamic rejection mutated config")
+		}
+	}
+	provider, err = core.ProviderFor("windows-sandbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = provider.Name()
+	cfg.TargetOS = "linux"
+	cfg.WindowsMode = "prior-mode"
+	fs, values := sizingContractFlags(t, provider, cfg, nil)
+	assertSizingContractError(t, provider.ApplyFlags(&cfg, fs, values), "")
+	if cfg.TargetOS != "windows" || cfg.WindowsMode != "normal" {
+		t.Fatalf("Windows defaults=%s/%s", cfg.TargetOS, cfg.WindowsMode)
+	}
+}
+
+func TestProviderSizingNonAdopterControls(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	for _, name := range []string{"semaphore", "tensorlake", "srt"} {
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := core.BaseConfig()
+		cfg.Provider = name
+		fs, values := sizingContractFlags(t, provider, cfg, []string{"--class=large", "--type=machine"})
+		assertSizingContractError(t, provider.ApplyFlags(&cfg, fs, values), "")
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{{"daytona", []string{"--class=large"}, ""}, {"daytona", []string{"--type="}, "--type is not supported for provider=daytona; choose CPU, memory, and disk in the Daytona snapshot"}, {"github-codespaces", []string{"--class="}, "--class is not supported for provider=github-codespaces; use --type or --github-codespaces-machine for a Codespaces machine slug"}, {"github-codespaces", []string{"--type= fixture-machine "}, ""}} {
+		provider, err := core.ProviderFor(tc.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := core.BaseConfig()
+		cfg.Provider = tc.name
+		fs, values := sizingContractFlags(t, provider, cfg, tc.args)
+		assertSizingContractError(t, provider.ApplyFlags(&cfg, fs, values), tc.want)
+		if tc.name == "github-codespaces" && tc.want == "" && cfg.GitHubCodespaces.Machine != "fixture-machine" {
+			t.Fatal("Codespaces type mapping changed")
+		}
+	}
+	provider, err := core.ProviderFor("cloudflare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = "cloudflare"
+	cfg.Class = "tiny"
+	cfg.ServerType = ""
+	fs, values := sizingContractFlags(t, provider, cfg, []string{"--class=tiny"})
+	assertSizingContractError(t, provider.ApplyFlags(&cfg, fs, values), "")
+	if cfg.ServerType != "standard-4" {
+		t.Fatalf("Cloudflare mapped type=%q", cfg.ServerType)
+	}
 }

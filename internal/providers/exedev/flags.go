@@ -1,6 +1,10 @@
 package exedev
 
-import "flag"
+import (
+	"flag"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
+)
 
 type exeDevFlagValues struct {
 	ControlHost *string
@@ -30,11 +34,8 @@ func RegisterExeDevProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyExeDevProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == providerName || cfg.Provider == "exe" || cfg.Provider == "exedev" {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s; use --exe-dev-cpus, --exe-dev-memory, and --exe-dev-disk", providerName)
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s; use --exe-dev-image", providerName)
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --exe-dev-cpus, --exe-dev-memory, and --exe-dev-disk", "use --exe-dev-image"); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(exeDevFlagValues)
