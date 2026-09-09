@@ -507,6 +507,46 @@ func TestCoordinatorAsyncReplayedActiveLeaseRequiresEndpoint(t *testing.T) {
 	})
 }
 
+func TestCoordinatorAsyncTerminalProvisioningCause(t *testing.T) {
+	for _, stage := range []string{"initial", "poll"} {
+		for _, tc := range []struct {
+			name    string
+			failure string
+			cleanup string
+			want    string
+		}{
+			{name: "pending cleanup", cleanup: "provider SSH readiness timed out", want: "error=provider SSH readiness timed out"},
+			{name: "primary failure", failure: "provider allocation failed", cleanup: "provider cleanup retry failed", want: "error=provider allocation failed"},
+			{name: "no cause"},
+		} {
+			t.Run(stage+"/"+tc.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					f := newCoordinatorAsyncFixture(t, false)
+					terminal := f.lease("failed")
+					terminal.FailureError, terminal.CleanupError = tc.failure, tc.cleanup
+					resourceMayExist := true
+					terminal.ProvisioningResourceMayExist = &resourceMayExist
+					f.onCreate = func(*http.Request) (*http.Response, error) {
+						if stage == "initial" {
+							return f.reply(terminal)
+						}
+						return f.reply(f.lease("provisioning"))
+					}
+					f.onGet = func(*http.Request) (*http.Response, error) { return f.reply(terminal) }
+					lease, err := f.acquire(context.Background())
+					want := "coordinator lease " + f.canonical + " ended while provisioning: state=failed"
+					if tc.want != "" {
+						want += " " + tc.want
+					}
+					if err == nil || err.Error() != want || lease.ID != "" || f.creates != 1 || f.cancels != 1 {
+						t.Fatalf("lease=%#v err=%v want=%q creates=%d cancels=%d", lease, err, want, f.creates, f.cancels)
+					}
+				})
+			})
+		}
+	}
+}
+
 func TestCoordinatorAsyncTerminalDiagnosticDoesNotAuthorizeFreshAllocation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newCoordinatorAsyncFixture(t, false)

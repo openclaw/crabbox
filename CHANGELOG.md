@@ -4,6 +4,8 @@
 
 ### Changes
 
+- Show the recorded provisioning cause when a coordinator lease fails with cleanup still pending, preserving the primary failure when present and omitting empty error details.
+
 - Reject occupied host pins and coordinator replies with a different lease ID before bootstrap or cleanup; show retained leases in ordinary text and JSON listing. [PR 2049](https://github.com/openclaw/crabbox/pull/2049). Thanks @steipete.
 - Require an exact coordinator host/org/region allocation record for org-member AWS Mac host pins; historical leases never grant pin access, and missing, ambiguous, or other-org records remain admin-only. [PR 2049](https://github.com/openclaw/crabbox/pull/2049). Thanks @steipete.
 

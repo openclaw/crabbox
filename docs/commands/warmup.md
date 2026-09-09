@@ -53,6 +53,12 @@ the ready lease; it does not allocate again or stop the Testbox.
 Warmup records a local claim binding the lease to the current repo checkout. Use
 `--reclaim` to overwrite an existing claim for that lease.
 
+If a coordinator lease ends while provisioning, warmup reports the lease ID,
+terminal state, and recorded failure cause. When the coordinator retains the
+cause in cleanup metadata because a resource may still exist, warmup includes
+that diagnostic. Use `crabbox inspect --id <lease>` to check the retained
+provisioning and cleanup evidence before recovery.
+
 Warmup requires an explicit provider selection from `--provider`,
 `CRABBOX_PROVIDER`, user or repository config, broker config, or an applicable
 recorded lease route. With no selection it exits before provider initialization

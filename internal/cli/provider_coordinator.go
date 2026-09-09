@@ -764,7 +764,12 @@ func coordinatorLeaseProvisioningError(lease CoordinatorLease) error {
 	case "active", "provisioning":
 		return nil
 	case "failed", "released", "expired":
-		return coordinatorLeaseProvisioningStateError{message: fmt.Sprintf("coordinator lease %s ended while provisioning: state=%s error=%s", lease.ID, lease.State, lease.FailureError)}
+		message := fmt.Sprintf("coordinator lease %s ended while provisioning: state=%s", lease.ID, lease.State)
+		// Provisioning failures retain their cause in cleanupError while a resource may still exist.
+		if cause := blank(lease.FailureError, lease.CleanupError); cause != "" {
+			message += " error=" + cause
+		}
+		return coordinatorLeaseProvisioningStateError{message: message}
 	default:
 		return coordinatorLeaseProvisioningStateError{message: fmt.Sprintf("coordinator lease %s returned unexpected provisioning state %q", lease.ID, lease.State)}
 	}
