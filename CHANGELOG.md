@@ -9,7 +9,7 @@
 
 - Describe Tencent Cloud configuration bindings once, preserving 64-bit sizes, raw defaults, explicit type precedence, and trusted endpoint overrides while sharing runtime fallback values. [PR 2041](https://github.com/openclaw/crabbox/pull/2041). Thanks @steipete.
 
-- Describe DigitalOcean file and environment bindings once without adding provider flags, preserving raw defaults, image precedence, and list input behavior while sharing runtime fallback values. Thanks @steipete.
+- Describe DigitalOcean file and environment bindings once without adding provider flags, preserving raw defaults, image precedence, and list input behavior while sharing runtime fallback values. [PR 2045](https://github.com/openclaw/crabbox/pull/2045). Thanks @steipete.
 
 ## 0.54.0 - 2026-09-09
 
