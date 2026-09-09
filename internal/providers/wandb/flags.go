@@ -33,10 +33,10 @@ func ApplyWandbProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "wandb-image") {
+	if flagWasSet(fs, "wandb-image") {
 		cfg.Wandb.DefaultImage = *v.DefaultImage
 	}
-	if core.FlagWasSet(fs, "wandb-max-lifetime") {
+	if flagWasSet(fs, "wandb-max-lifetime") {
 		cfg.Wandb.MaxLifetimeSeconds = *v.MaxLifetimeSeconds
 	}
 	return nil
