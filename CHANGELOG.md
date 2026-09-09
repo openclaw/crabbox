@@ -2,11 +2,11 @@
 
 ## Unreleased
 
-- Tenki: support fixed lease IDs for retry-safe worker allocation, report SSH readiness during inspection, and keep proxy connections working when sandbox host keys change.
-- Keep uploaded scripts in the selected workspace when a sandbox's login-shell startup changes directories, and let canceled fixed-ID allocations stop waiting for a busy claim lock.
-
 - Install the shared Linux Node/npm baseline during managed WSL2 bootstrap and require both tools for readiness. https://github.com/openclaw/crabbox/pull/2008. Thanks @steipete.
 - Keep WSL2 workspace-owner renewal small and allow bounded workload contention without weakening token, expiry, or child-state checks. https://github.com/openclaw/crabbox/pull/2011. Thanks @steipete.
+
+- Tenki: support fixed lease IDs for retry-safe worker allocation, report SSH readiness during inspection, and keep proxy connections working when sandbox host keys change. https://github.com/openclaw/crabbox/pull/2021.
+- Keep uploaded scripts in the selected workspace when a sandbox's login-shell startup changes directories, and let canceled fixed-ID allocations stop waiting for a busy claim lock. https://github.com/openclaw/crabbox/pull/2021.
 
 - Disable the unused WSLg compositor on headless managed Windows WSL2 leases to avoid service-session crashes that stall commands and workspace-owner renewal; preserve other WSL settings and existing execution deadlines. https://github.com/openclaw/crabbox/pull/2005. Thanks @steipete.
 
