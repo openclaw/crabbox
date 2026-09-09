@@ -3,7 +3,7 @@
 Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
-Tensorlake, and Orgo
+Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, and Lume
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -15,7 +15,10 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_cloudflare_sandbox.go`, `internal/cli/config_e2b.go`,
 `internal/cli/config_blaxel.go`, `internal/cli/config_azure_dynamic_sessions.go`,
 `internal/cli/config_smolvm.go`, `internal/cli/config_semaphore.go`,
-`internal/cli/config_tensorlake.go`, and `internal/cli/config_orgo.go`.
+`internal/cli/config_tensorlake.go`, `internal/cli/config_orgo.go`,
+`internal/cli/config_opencomputer.go`, `internal/cli/config_modal.go`,
+`internal/cli/config_morph.go`, `internal/cli/config_exe_dev.go`,
+`internal/cli/config_ovh.go`, and `internal/cli/config_lume.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -40,6 +43,22 @@ consume the output without running the generator. The source declaration remains
 readable to Go tools; the output remains readable to reviewers. Field order is
 source order, formatting uses `go/format`, and output contains no timestamps or
 machine-specific paths. Its header identifies the generator and source file.
+
+Not every fallback is a base configuration default. exe.dev keeps Image and
+WorkRoot raw-empty: native creation omits an unspecified image, and work-root
+resolution can inherit the generic root. Named runtime/display constants beside
+the declaration share those fallback values without `default` or `flagFallback`
+tags, while their existing raw-versus-trimmed predicates stay with the callers.
+
+OVHcloud shares configured endpoint, image, and flavor defaults without coupling
+them to its fixed regional endpoint aliases or machine-class profiles. Image
+explicitness still records accepted input, including a value equal to the default;
+it is not inferred from whether the final value differs from that default.
+
+Lume shares its configured CLI, base, user, and work-root defaults while retaining
+its user-dependent runtime root calculation. Changing the guest user can replace
+the old default root with `/Users/<user>/crabbox`; this trim-aware decision and
+native storage resolution remain outside generation.
 
 ## Adding a field
 
@@ -69,7 +88,9 @@ machine-specific paths. Its header identifies the generator and source file.
    its file assignment uses the loader's existing trusted decision.
    There is no implicit source grant. An optional `default` tag supplies a scalar default checked
    against the field type; otherwise the Go zero value applies. Current integer
-   fields require `nonnegative:"true"` for eager file/environment validation.
+   fields require `nonnegative:"true"` for compiled-default validation and
+   ordinary file/environment checks; the explicit source modes below preserve
+   providers whose input rules differ.
    An existing source-specific integer can opt into `envInt:"fallback"` to use
    core's `getenvInt` for environment input only. It requires an environment
    source, `int`, and the existing nonnegative policy; empty or unknown modes are
@@ -82,6 +103,10 @@ machine-specific paths. Its header identifies the generator and source file.
    omitted/null/zero/negative input is ignored. It requires an int with file
    admission and the existing nonnegative default policy. This fixed predicate
    changes no environment or flag behavior and accepts no custom expressions.
+   `fileInt:"present"` instead applies every nonnil integer pointer, including
+   zero and negative values. It requires the same file-admitted int/default
+   policy, but deliberately adds no file-value check. Omitted/null fields remain
+   ignored; environment parsing is still selected independently.
    A file-admitted `float64` with the same existing positive-only YAML rule can
    use `fileFloat:"positive"`. It emits the literal greater-than-zero predicate
    without changing float parsing or adding finite/range validation to file or
@@ -112,6 +137,18 @@ machine-specific paths. Its header identifies the generator and source file.
    `fileIgnoreEmpty:"true"`. This is valid only for strings with a file source;
    it adds an exact nonempty check without trimming, changing environment/flag
    behavior, or changing other fields' presence semantics.
+   Existing list bindings can opt into fixed source-specific rules on `[]string`:
+   `fileList:"raw"` clones a supplied YAML list without normalization, preserving
+   raw elements, order, and duplicates; omission/null preserves the prior value,
+   while an explicit empty list clears it. `envList:"presence"` delegates to
+   core's `getenvList`, including present-empty and `none` clearing. The repeatable
+   `flagList:"replace-append"` uses one shared flag-value implementation: first
+   occurrence clears configured defaults, later occurrences append, and each
+   comma-separated occurrence trims and drops blanks without deduplication.
+   Registration and application clone the list; unvisited flags do not assign.
+   These modes require their corresponding admitted source and reject unsupported
+   values or types. They accept no custom parser, separator, or expression and
+   leave ordinary list bindings unchanged.
    Use `reportApplied:"true"` only on string/bool fields whose accepted-input
    events are needed by an existing handwritten policy. See the report boundary
    below; this is not a new source grant.
@@ -127,7 +164,7 @@ machine-specific paths. Its header identifies the generator and source file.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer ./internal/providers/modal ./internal/providers/morph ./internal/providers/exedev ./internal/providers/ovh ./internal/providers/lume` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:
@@ -349,6 +386,13 @@ defaults; the client no longer contains unreachable ambient API-base fallbacks.
 Its later key resolution remains unchanged because raw configuration admission
 and trimmed runtime resolution are different reachable stages. Defaulting and
 claim-scope consumers share constants without changing their normalization.
+
+OpenComputer declares all eight fields, with four presence-based file integers,
+an env/flag-only API URL whose raw default remains empty, and CLI-only
+ForgetMissing. Its API key remains outside Crabbox config. Two configured
+fallback consumers share constants; external OC-file resolution, the single
+client-owned built-in URL, request-level timeout fallback, and lifecycle remain
+unchanged.
 
 The generator accepts only these seven exact source grants. Credential handling,
 destination validation and provenance, provider aliases, and provider selection

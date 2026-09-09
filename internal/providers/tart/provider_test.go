@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -4249,5 +4250,58 @@ func TestNormalizeLeaseSlugWithPrefix(t *testing.T) {
 	result := normalizeLeaseSlug("my-slug")
 	if result == "" {
 		t.Fatal("normalizeLeaseSlug should return non-empty for valid slug")
+	}
+}
+
+func TestInheritedWorkRootCallerContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USER", "fixture-user")
+	for _, tc := range []struct{ providerRoot, genericRoot, want string }{
+		{"", "", "/Users/admin/crabbox"},
+		{"", "/work/crabbox", "/Users/admin/crabbox"},
+		{"", "/Users/ec2-user/crabbox", "/Users/admin/crabbox"},
+		{"", "C:\\crabbox", "/Users/admin/crabbox"},
+		{"", " /work/crabbox ", " /work/crabbox "},
+		{"", "/WORK/crabbox", "/WORK/crabbox"},
+		{"", "c:\\crabbox", "c:\\crabbox"},
+		{"", "/srv/custom", "/srv/custom"},
+		{"", "/Users/alice/custom", "/Users/alice/custom"},
+		{"", "D:\\custom", "D:\\custom"},
+		{"", "  ", "  "},
+		{" ", "/srv/custom", " "},
+		{"/work/crabbox", "/srv/custom", "/work/crabbox"},
+		{"relative", "/srv/custom", "relative"},
+		{"/provider/root", "/srv/custom", "/provider/root"},
+	} {
+		for _, explicit := range []bool{false, true} {
+			cfg := Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
+			if explicit {
+				core.MarkWorkRootExplicit(&cfg)
+				cfg.TargetOS = "existing-target"
+				cfg.WindowsMode = "prior-mode"
+			}
+			cfg.WorkRoot = tc.genericRoot
+			cfg.Tart.WorkRoot = tc.providerRoot
+			cfg.Tart.Image = "fixture-image"
+			want := cfg
+			want.Provider = "tart"
+			if !explicit {
+				want.TargetOS = "macos"
+			}
+			want.Tart.WorkRoot = tc.want
+			want.WorkRoot = tc.want
+			want.Tart.User = "fixture-user"
+			want.Tart.Password = "admin"
+			want.Tart.CPUs = 4
+			want.Tart.Memory = 8192
+			want.SSHPort = "22"
+			want.SSHFallbackPorts = []string{}
+			want.WindowsMode = ""
+			want.ServerType = "fixture-image"
+			applyDefaults(&cfg)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("whole config differs for roots=%q/%q explicit=%t: got=%#v want=%#v", tc.providerRoot, tc.genericRoot, explicit, cfg, want)
+			}
+		}
 	}
 }

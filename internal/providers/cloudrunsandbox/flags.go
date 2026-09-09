@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func RegisterCloudRunSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
@@ -14,11 +15,8 @@ func RegisterCloudRunSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any
 func ApplyCloudRunSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	switch strings.ToLower(strings.TrimSpace(cfg.Provider)) {
 	case providerName, "gcrun-sandbox", "google-cloud-run-sandbox", "cloudrun-sandbox":
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=cloud-run-sandbox; sandboxes share Cloud Run service CPU/memory")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=cloud-run-sandbox; sandboxes share Cloud Run service CPU/memory")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "sandboxes share Cloud Run service CPU/memory", "sandboxes share Cloud Run service CPU/memory"); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(core.CloudRunSandboxConfigFlagValues)

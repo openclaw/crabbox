@@ -2489,16 +2489,11 @@ func TestVultrDefaultsPreserveExplicitGenericValues(t *testing.T) {
 func TestOVHConfigFileEnvAndDefaults(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
-	if err := applyFileConfig(&cfg, fileConfig{
-		Provider: "ovh",
-		OVH: &fileOVHConfig{
-			Endpoint:  "https://ca.api.ovhcloud.com/1.0",
-			ProjectID: "project-file",
-			Region:    "BHS5",
-			Image:     "Ubuntu 22.04",
-			Flavor:    "b3-16",
-		},
-	}); err != nil {
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("provider: ovh\novh:\n  endpoint: https://ca.api.ovhcloud.com/1.0\n  projectId: project-file\n  region: BHS5\n  image: Ubuntu 22.04\n  flavor: b3-16\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Provider != "ovh" || cfg.OVH.Endpoint != "https://ca.api.ovhcloud.com/1.0" || cfg.OVH.ProjectID != "project-file" || cfg.OVH.Region != "BHS5" || cfg.OVH.Image != "Ubuntu 22.04" || cfg.OVH.Flavor != "b3-16" {
@@ -2714,12 +2709,11 @@ func TestRepoConfigCannotRedirectInheritedOVHCredentials(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
 	cfg.OVH.Endpoint = "https://api.us.ovhcloud.com/1.0"
-	if err := applyFileConfigWithTrust(&cfg, fileConfig{
-		OVH: &fileOVHConfig{
-			Endpoint:  "https://attacker.example.test/1.0",
-			ProjectID: "project-from-repo",
-		},
-	}, false); err != nil {
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("ovh:\n  endpoint: https://attacker.example.test/1.0\n  projectId: project-from-repo\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.OVH.Endpoint != "https://api.us.ovhcloud.com/1.0" {
@@ -9928,10 +9922,10 @@ func TestModalSecretConfigRequiresTrustedFile(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Modal.Environment = "trusted-env"
 	cfg.Modal.Secrets = []string{"sample"}
-	file := fileConfig{Modal: &fileModalConfig{
-		Environment: "repo-env",
-		Secrets:     []string{"example"},
-	}}
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("modal:\n  environment: repo-env\n  secrets: [example]\n"), &file); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
 		t.Fatal(err)
@@ -9950,23 +9944,17 @@ func TestModalSecretConfigRequiresTrustedFile(t *testing.T) {
 
 func TestLumeHostLifecycleConfigRequiresTrustedFile(t *testing.T) {
 	cfg := baseConfig()
-	trusted := fileConfig{Lume: &fileLumeConfig{
-		CLIPath:  "/opt/homebrew/bin/lume",
-		Base:     "trusted-golden",
-		Storage:  "trusted-storage",
-		User:     "trusted-user",
-		WorkRoot: "/Users/trusted-user/work",
-	}}
+	var trusted fileConfig
+	if err := yaml.Unmarshal([]byte("lume:\n  cliPath: /opt/homebrew/bin/lume\n  base: trusted-golden\n  storage: trusted-storage\n  user: trusted-user\n  workRoot: /Users/trusted-user/work\n"), &trusted); err != nil {
+		t.Fatal(err)
+	}
 	if err := applyFileConfigWithTrust(&cfg, trusted, true); err != nil {
 		t.Fatal(err)
 	}
-	untrusted := fileConfig{Lume: &fileLumeConfig{
-		CLIPath:  "./run-me",
-		Base:     "credentialed-personal-vm",
-		Storage:  "other-storage",
-		User:     "repo-user",
-		WorkRoot: "/Users/trusted-user/repo-work",
-	}}
+	var untrusted fileConfig
+	if err := yaml.Unmarshal([]byte("lume:\n  cliPath: ./run-me\n  base: credentialed-personal-vm\n  storage: other-storage\n  user: repo-user\n  workRoot: /Users/trusted-user/repo-work\n"), &untrusted); err != nil {
+		t.Fatal(err)
+	}
 	if err := applyFileConfigWithTrust(&cfg, untrusted, false); err != nil {
 		t.Fatal(err)
 	}
@@ -10525,5 +10513,1091 @@ func TestOrgoConfigCentralFlagSource(t *testing.T) {
 	markCredentialDestinationFlagSources(&cfg, fs)
 	if cfg.credentialProvenance.orgoAPIBase != credentialSourceFlag || cfg.credentialProvenance.orgoAPIKey != credentialSourceTrustedFile {
 		t.Fatal("central source phase changed")
+	}
+}
+
+func TestOpenComputerConfigFileContract(t *testing.T) {
+	wantDefaults := OpenComputerConfig{Workdir: "/workspace/crabbox", ExecTimeoutSecs: 3600}
+	if got := baseConfig().OpenComputer; got != wantDefaults {
+		t.Fatalf("defaults=%#v want=%#v", got, wantDefaults)
+	}
+	if reflect.TypeOf(OpenComputerConfig{}).NumField() != 8 || reflect.TypeOf(fileOpenComputerConfig{}).NumField() != 6 {
+		t.Fatal("configuration field count changed")
+	}
+	for _, name := range []string{"APIKey", "APIURL", "ForgetMissing"} {
+		if _, ok := reflect.TypeOf(fileOpenComputerConfig{}).FieldByName(name); ok {
+			t.Fatalf("unexpected file field %s", name)
+		}
+	}
+	if _, ok := reflect.TypeOf(OpenComputerConfig{}).FieldByName("APIKey"); ok {
+		t.Fatal("API key config field introduced")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, raw := range []string{"omitted", "null", "0", "-2", "3"} {
+			cfg := baseConfig()
+			cfg.OpenComputer = OpenComputerConfig{APIURL: "prior-url", Workdir: "/workspace/prior", CPU: 8, MemoryMB: 1024, TimeoutSecs: 45, ExecTimeoutSecs: 90}
+			want := cfg.OpenComputer
+			fields := map[string]any{"apiUrl": "ignored-file-url", "apiKey": "ignored-inert-key", "forgetMissing": true}
+			for _, f := range []struct {
+				key string
+				v   *int
+			}{{"cpu", &want.CPU}, {"memoryMB", &want.MemoryMB}, {"timeoutSecs", &want.TimeoutSecs}, {"execTimeoutSecs", &want.ExecTimeoutSecs}} {
+				if raw == "omitted" {
+					continue
+				}
+				if raw == "null" {
+					fields[f.key] = nil
+					continue
+				}
+				n, err := strconv.Atoi(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fields[f.key] = n
+				*f.v = n
+			}
+			data, err := yaml.Marshal(map[string]any{"openComputer": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.OpenComputer != want {
+				t.Fatalf("raw=%s trusted=%t got=%#v want=%#v", raw, trusted, cfg.OpenComputer, want)
+			}
+		}
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace", "value"} {
+			cfg := baseConfig()
+			cfg.OpenComputer.Workdir = "/workspace/prior"
+			cfg.OpenComputer.Burst = true
+			want := cfg.OpenComputer
+			fields := map[string]any{}
+			if mode != "omitted" {
+				var workdir any = want.Workdir
+				var burst any = false
+				if mode == "null" {
+					workdir = nil
+					burst = nil
+				}
+				if mode == "empty" {
+					workdir = ""
+				}
+				if mode == "whitespace" {
+					workdir = "  "
+				}
+				if mode == "value" {
+					workdir = "/workspace/value"
+				}
+				fields["workdir"] = workdir
+				fields["burst"] = burst
+				if mode != "null" {
+					want.Burst = false
+					if workdir != "" {
+						want.Workdir = workdir.(string)
+					}
+				}
+			}
+			data, err := yaml.Marshal(map[string]any{"openComputer": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.OpenComputer != want {
+				t.Fatalf("mode=%s trusted=%t got=%#v want=%#v", mode, trusted, cfg.OpenComputer, want)
+			}
+		}
+	}
+}
+
+func TestOpenComputerConfigEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"primary", "alias", "empty", "equal", "whitespace"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.OpenComputer.APIURL = "prior-url"
+			want := cfg.OpenComputer
+			primary, alias, workdir := "primary-url", "alias-url", "/workspace/env"
+			if mode == "alias" {
+				primary = ""
+				workdir = ""
+			}
+			if mode == "empty" {
+				primary = ""
+				alias = ""
+				workdir = ""
+			}
+			if mode == "equal" {
+				primary = want.APIURL
+				workdir = want.Workdir
+			}
+			if mode == "whitespace" {
+				primary = "  "
+				workdir = "  "
+			}
+			t.Setenv("CRABBOX_OPENCOMPUTER_API_URL", primary)
+			t.Setenv("OPENCOMPUTER_API_URL", alias)
+			t.Setenv("CRABBOX_OPENCOMPUTER_WORKDIR", workdir)
+			t.Setenv("CRABBOX_OPENCOMPUTER_FORGET_MISSING", "true")
+			if primary != "" {
+				want.APIURL = primary
+			} else if alias != "" {
+				want.APIURL = alias
+			}
+			if workdir != "" {
+				want.Workdir = workdir
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.OpenComputer != want {
+				t.Fatalf("mode=%s got=%#v want=%#v", mode, cfg.OpenComputer, want)
+			}
+		})
+	}
+	for _, raw := range []string{"", "invalid", " 2 ", "0", "-2", "3"} {
+		t.Run("numbers-"+raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.OpenComputer.CPU = 8
+			cfg.OpenComputer.MemoryMB = 1024
+			cfg.OpenComputer.TimeoutSecs = 45
+			want := cfg.OpenComputer
+			for _, f := range []struct {
+				suffix string
+				v      *int
+			}{{"CPU", &want.CPU}, {"MEMORY_MB", &want.MemoryMB}, {"TIMEOUT_SECS", &want.TimeoutSecs}, {"EXEC_TIMEOUT_SECS", &want.ExecTimeoutSecs}} {
+				t.Setenv("CRABBOX_OPENCOMPUTER_"+f.suffix, raw)
+				if n, err := strconv.Atoi(raw); err == nil {
+					*f.v = n
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.OpenComputer != want {
+				t.Fatalf("raw=%q got=%#v want=%#v", raw, cfg.OpenComputer, want)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		raw           string
+		initial, want bool
+	}{{"", true, true}, {"invalid", true, true}, {"false", true, false}, {"true", false, true}, {"0", true, false}} {
+		t.Run("burst-"+tc.raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.OpenComputer.Burst = tc.initial
+			t.Setenv("CRABBOX_OPENCOMPUTER_BURST", tc.raw)
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.OpenComputer.Burst != tc.want {
+				t.Fatalf("burst raw=%q got=%t", tc.raw, cfg.OpenComputer.Burst)
+			}
+		})
+	}
+}
+
+func TestModalConfigFileContract(t *testing.T) {
+	wantDefaults := ModalConfig{App: "crabbox", Image: "python:3.13-slim", Workdir: "/workspace/crabbox", Python: "python3"}
+	if got := baseConfig().Modal; !reflect.DeepEqual(got, wantDefaults) {
+		t.Fatalf("defaults=%#v want=%#v", got, wantDefaults)
+	}
+	if reflect.TypeOf(ModalConfig{}).NumField() != 6 || reflect.TypeOf(fileModalConfig{}).NumField() != 6 {
+		t.Fatal("config field count changed")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace", "value"} {
+			cfg := baseConfig()
+			cfg.Modal.Environment = "prior-environment"
+			want := cfg.Modal
+			fields := map[string]any{}
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"app", &want.App}, {"image", &want.Image}, {"workdir", &want.Workdir}, {"python", &want.Python}, {"environment", &want.Environment}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = "fixture-value"
+				}
+				fields[f.key] = raw
+				if (mode == "equal" || mode == "whitespace" || mode == "value") && (trusted || f.key != "environment") {
+					*f.v = raw.(string)
+				}
+			}
+			data, err := yaml.Marshal(map[string]any{"modal": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Modal, want) {
+				t.Fatalf("mode=%s trusted=%t got=%#v want=%#v", mode, trusted, cfg.Modal, want)
+			}
+		}
+		for _, tc := range []struct {
+			name, yaml string
+			want       []string
+		}{{"omitted", "modal: {}\n", []string{"prior"}}, {"null", "modal:\n  secrets: null\n", []string{"prior"}}, {"empty", "modal:\n  secrets: []\n", nil}, {"raw", "modal:\n  secrets: [' alpha ', '', alpha, ' ', beta, alpha]\n", []string{" alpha ", "", "alpha", " ", "beta", "alpha"}}} {
+			cfg := baseConfig()
+			cfg.Modal.Secrets = []string{"prior"}
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte(tc.yaml), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			want := tc.want
+			if !trusted {
+				want = []string{"prior"}
+			}
+			if !reflect.DeepEqual(cfg.Modal.Secrets, want) {
+				t.Fatalf("list=%s trusted=%t got=%#v want=%#v", tc.name, trusted, cfg.Modal.Secrets, want)
+			}
+			if trusted && tc.name == "raw" {
+				source := reflect.ValueOf(file.Modal).Elem().FieldByName("Secrets")
+				if source.Kind() == reflect.Pointer {
+					source = source.Elem()
+				}
+				source.Index(0).SetString("source-mutated")
+				if cfg.Modal.Secrets[0] != " alpha " {
+					t.Fatal("file list aliases config")
+				}
+				cfg.Modal.Secrets[1] = "config-mutated"
+				if source.Index(1).String() != "" {
+					t.Fatal("config aliases file list")
+				}
+			}
+		}
+	}
+}
+
+func TestModalConfigEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"empty", "equal", "whitespace", "value"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Modal.Environment = "prior-environment"
+			want := cfg.Modal
+			for _, f := range []struct {
+				suffix string
+				v      *string
+			}{{"APP", &want.App}, {"IMAGE", &want.Image}, {"WORKDIR", &want.Workdir}, {"PYTHON", &want.Python}, {"ENVIRONMENT", &want.Environment}} {
+				raw := *f.v
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = "fixture-value"
+				}
+				t.Setenv("CRABBOX_MODAL_"+f.suffix, raw)
+				if raw != "" {
+					*f.v = raw
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Modal, want) {
+				t.Fatalf("mode=%s got=%#v want=%#v", mode, cfg.Modal, want)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, raw string
+		present   bool
+		want      []string
+	}{{"absent", "", false, []string{"prior"}}, {"empty", "", true, []string{}}, {"none", " NoNe ", true, []string{}}, {"blanks", " , , ", true, []string{}}, {"ordered", " alpha, ,beta,alpha ", true, []string{"alpha", "beta", "alpha"}}} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Modal.Secrets = []string{"prior"}
+			t.Setenv("CRABBOX_MODAL_SECRETS", tc.raw)
+			if !tc.present {
+				if err := os.Unsetenv("CRABBOX_MODAL_SECRETS"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Modal.Secrets, tc.want) {
+				t.Fatalf("list=%s got=%#v want=%#v", tc.name, cfg.Modal.Secrets, tc.want)
+			}
+		})
+	}
+}
+
+func TestModalConfigServerTypeFallback(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{{"", "python:3.13-slim"}, {"  ", "  "}, {" custom-image ", " custom-image "}} {
+		cfg := baseConfig()
+		cfg.Provider = "modal"
+		cfg.Modal.Image = tc.raw
+		if got := serverTypeForConfig(cfg); got != tc.want {
+			t.Fatalf("serverType=%q want=%q", got, tc.want)
+		}
+	}
+}
+
+func TestMorphConfigFileContract(t *testing.T) {
+	wantDefaults := MorphConfig{APIURL: "https://cloud.morph.so", SSHGatewayHost: "ssh.cloud.morph.so", WorkRoot: "/tmp/crabbox", WakeOnSSH: true}
+	if got := baseConfig().Morph; got != wantDefaults {
+		t.Fatalf("defaults=%#v want=%#v", got, wantDefaults)
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace", "value"} {
+			cfg := baseConfig()
+			cfg.Morph.APIKey = "inert-prior"
+			cfg.Morph.Snapshot = "prior-snapshot"
+			want := cfg.Morph
+			source := credentialSourceFlag
+			cfg.credentialProvenance.morphAPIKey = source
+			cfg.credentialProvenance.morphAPIURL = source
+			cfg.credentialProvenance.morphSSHGatewayHost = source
+			fields := map[string]any{}
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"apiKey", &want.APIKey}, {"apiUrl", &want.APIURL}, {"snapshot", &want.Snapshot}, {"sshGatewayHost", &want.SSHGatewayHost}, {"workRoot", &want.WorkRoot}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = "fixture-value"
+				}
+				fields[f.key] = raw
+				if mode == "equal" || mode == "whitespace" || mode == "value" {
+					*f.v = raw.(string)
+					source = credentialSourceForFile(trusted)
+				}
+			}
+			data, err := yaml.Marshal(map[string]any{"morph": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Morph != want || cfg.credentialProvenance.morphAPIKey != source || cfg.credentialProvenance.morphAPIURL != source || cfg.credentialProvenance.morphSSHGatewayHost != source {
+				t.Fatalf("file mode=%s trusted=%t", mode, trusted)
+			}
+		}
+		for _, raw := range []string{"omitted", "null", "false", "true"} {
+			cfg := baseConfig()
+			cfg.Morph.DeleteOnRelease = false
+			cfg.Morph.WakeOnSSH = true
+			want := cfg.Morph
+			data := "morph: {}\n"
+			if raw != "omitted" {
+				data = "morph:\n  deleteOnRelease: " + raw + "\n  wakeOnSSH: " + raw + "\n"
+			}
+			if raw == "false" {
+				want.WakeOnSSH = false
+			}
+			if raw == "true" {
+				want.DeleteOnRelease = true
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte(data), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Morph != want || DeleteOnReleaseExplicit(cfg, "morph") != (raw == "false" || raw == "true") {
+				t.Fatalf("bool file raw=%s trusted=%t", raw, trusted)
+			}
+		}
+	}
+}
+
+func TestMorphConfigEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"empty", "alias", "equal", "whitespace", "value"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Morph.APIKey = "inert-prior"
+			cfg.Morph.Snapshot = "prior-snapshot"
+			want := cfg.Morph
+			prior := credentialSourceTrustedFile
+			cfg.credentialProvenance.morphAPIKey = prior
+			cfg.credentialProvenance.morphAPIURL = prior
+			cfg.credentialProvenance.morphSSHGatewayHost = prior
+			accepted := map[string]bool{}
+			for _, f := range []struct {
+				suffix string
+				v      *string
+			}{{"API_KEY", &want.APIKey}, {"API_URL", &want.APIURL}, {"SNAPSHOT", &want.Snapshot}, {"SSH_GATEWAY_HOST", &want.SSHGatewayHost}, {"WORK_ROOT", &want.WorkRoot}} {
+				raw := *f.v
+				if mode == "empty" || mode == "alias" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = "fixture-value"
+				}
+				t.Setenv("CRABBOX_MORPH_"+f.suffix, raw)
+				if raw != "" {
+					*f.v = raw
+					accepted[f.suffix] = true
+				}
+			}
+			t.Setenv("MORPH_API_KEY", "")
+			if mode == "alias" || mode == "value" || mode == "whitespace" {
+				t.Setenv("MORPH_API_KEY", "inert-alias")
+				if mode == "alias" {
+					want.APIKey = "inert-alias"
+					accepted["API_KEY"] = true
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			key, url, host := prior, prior, prior
+			if accepted["API_KEY"] {
+				key = credentialSourceEnvironment
+			}
+			if accepted["API_URL"] {
+				url = credentialSourceEnvironment
+			}
+			if accepted["SSH_GATEWAY_HOST"] {
+				host = credentialSourceEnvironment
+			}
+			if cfg.Morph != want || cfg.credentialProvenance.morphAPIKey != key || cfg.credentialProvenance.morphAPIURL != url || cfg.credentialProvenance.morphSSHGatewayHost != host {
+				t.Fatalf("env mode=%s", mode)
+			}
+		})
+	}
+	for _, raw := range []string{"", "invalid", "false", "true"} {
+		t.Run("bool-"+raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			want := cfg.Morph
+			t.Setenv("CRABBOX_MORPH_DELETE_ON_RELEASE", raw)
+			t.Setenv("CRABBOX_MORPH_WAKE_ON_SSH", raw)
+			if raw == "false" {
+				want.WakeOnSSH = false
+			}
+			if raw == "true" {
+				want.DeleteOnRelease = true
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Morph != want || DeleteOnReleaseExplicit(cfg, "morph") != (raw == "false" || raw == "true") {
+				t.Fatalf("bool env raw=%s", raw)
+			}
+		})
+	}
+}
+
+func TestMorphConfigCentralFlagSources(t *testing.T) {
+	cfg := baseConfig()
+	cfg.credentialProvenance.morphAPIKey = credentialSourceEnvironment
+	fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+	fs.String("morph-api-url", "", "")
+	fs.String("morph-ssh-gateway-host", "", "")
+	markCredentialDestinationFlagSources(&cfg, fs)
+	if cfg.credentialProvenance.morphAPIURL == credentialSourceFlag || cfg.credentialProvenance.morphSSHGatewayHost == credentialSourceFlag {
+		t.Fatal("unvisited marked")
+	}
+	if err := fs.Parse([]string{"--morph-api-url=", "--morph-ssh-gateway-host="}); err != nil {
+		t.Fatal(err)
+	}
+	markCredentialDestinationFlagSources(&cfg, fs)
+	if cfg.credentialProvenance.morphAPIURL != credentialSourceFlag || cfg.credentialProvenance.morphSSHGatewayHost != credentialSourceFlag || cfg.credentialProvenance.morphAPIKey != credentialSourceEnvironment {
+		t.Fatal("central sources changed")
+	}
+}
+
+func TestMorphConfigIndependentSources(t *testing.T) {
+	for _, tc := range []struct{ key, env string }{{"apiKey", "API_KEY"}, {"apiUrl", "API_URL"}, {"sshGatewayHost", "SSH_GATEWAY_HOST"}} {
+		for _, mode := range []string{"user", "repo", "env"} {
+			t.Run(tc.key+"-"+mode, func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := baseConfig()
+				cfg.credentialProvenance.morphAPIKey = credentialSourceFlag
+				cfg.credentialProvenance.morphAPIURL = credentialSourceFlag
+				cfg.credentialProvenance.morphSSHGatewayHost = credentialSourceFlag
+				var source credentialValueSource
+				if mode == "env" {
+					t.Setenv("CRABBOX_MORPH_"+tc.env, "fixture")
+					source = credentialSourceEnvironment
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					var file fileConfig
+					if err := yaml.Unmarshal([]byte("morph:\n  "+tc.key+": fixture\n"), &file); err != nil {
+						t.Fatal(err)
+					}
+					source = credentialSourceForFile(mode == "user")
+					if err := applyFileConfigWithTrust(&cfg, file, mode == "user"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for key, got := range map[string]credentialValueSource{"apiKey": cfg.credentialProvenance.morphAPIKey, "apiUrl": cfg.credentialProvenance.morphAPIURL, "sshGatewayHost": cfg.credentialProvenance.morphSSHGatewayHost} {
+					want := credentialSourceFlag
+					if key == tc.key {
+						want = source
+					}
+					if got != want {
+						t.Fatalf("source %s=%v want=%v", key, got, want)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestExeDevConfigFileContract(t *testing.T) {
+	wantDefaults := ExeDevConfig{ControlHost: "exe.dev", CPUs: 2, Memory: "4GB", Disk: "10GB", NoEmail: true}
+	if got := baseConfig().ExeDev; got != wantDefaults {
+		t.Fatalf("defaults=%#v want=%#v", got, wantDefaults)
+	}
+	if reflect.TypeOf(ExeDevConfig{}).NumField() != 9 || reflect.TypeOf(fileExeDevConfig{}).NumField() != 9 {
+		t.Fatal("config field count changed")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace", "value"} {
+			cfg := baseConfig()
+			cfg.ExeDev.Image = "prior-image"
+			cfg.ExeDev.Command = "prior-command"
+			cfg.ExeDev.User = "prior-user"
+			cfg.ExeDev.WorkRoot = "/prior/root"
+			want := cfg.ExeDev
+			source := credentialSourceFlag
+			cfg.credentialProvenance.exeDevControlHost = source
+			fields := map[string]any{}
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"controlHost", &want.ControlHost}, {"image", &want.Image}, {"memory", &want.Memory}, {"disk", &want.Disk}, {"command", &want.Command}, {"user", &want.User}, {"workRoot", &want.WorkRoot}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = "fixture-value"
+				}
+				fields[f.key] = raw
+				if mode == "equal" || mode == "whitespace" || mode == "value" {
+					*f.v = raw.(string)
+					source = credentialSourceForFile(trusted)
+				}
+			}
+			data, err := yaml.Marshal(map[string]any{"exeDev": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ExeDev != want || cfg.credentialProvenance.exeDevControlHost != source {
+				t.Fatalf("file mode=%s trusted=%t", mode, trusted)
+			}
+		}
+		for _, raw := range []string{"null", "0", "-2", "3"} {
+			cfg := baseConfig()
+			cfg.ExeDev.CPUs = 6
+			want := cfg.ExeDev
+			want.NoEmail = false
+			if raw == "3" {
+				want.CPUs = 3
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte("exeDev:\n  cpus: "+raw+"\n  noEmail: false\n"), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ExeDev != want {
+				t.Fatalf("CPU=%s trusted=%t got=%#v want=%#v", raw, trusted, cfg.ExeDev, want)
+			}
+		}
+		for _, raw := range []string{"omitted", "null", "true"} {
+			cfg := baseConfig()
+			cfg.ExeDev.NoEmail = false
+			var file fileConfig
+			body := "exeDev: {}\n"
+			if raw != "omitted" {
+				body = "exeDev:\n  noEmail: " + raw + "\n"
+			}
+			if err := yaml.Unmarshal([]byte(body), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ExeDev.NoEmail != (raw == "true") {
+				t.Fatalf("noEmail raw=%s", raw)
+			}
+		}
+	}
+}
+
+func TestExeDevConfigEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"empty", "alias", "equal", "whitespace", "value"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.ExeDev.Image = "prior-image"
+			cfg.ExeDev.Command = "prior-command"
+			cfg.ExeDev.User = "prior-user"
+			cfg.ExeDev.WorkRoot = "/prior/root"
+			want := cfg.ExeDev
+			source := credentialSourceFlag
+			cfg.credentialProvenance.exeDevControlHost = source
+			for _, f := range []struct {
+				suffix, alias string
+				v             *string
+			}{{"CONTROL_HOST", "EXE_DEV_CONTROL_HOST", &want.ControlHost}, {"IMAGE", "EXE_DEV_IMAGE", &want.Image}, {"MEMORY", "EXE_DEV_MEMORY", &want.Memory}, {"DISK", "EXE_DEV_DISK", &want.Disk}, {"COMMAND", "", &want.Command}, {"USER", "", &want.User}, {"WORK_ROOT", "", &want.WorkRoot}} {
+				raw, alias := *f.v, "alias-value"
+				if mode == "empty" {
+					raw = ""
+					alias = ""
+				}
+				if mode == "alias" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = "fixture-value"
+				}
+				t.Setenv("CRABBOX_EXE_DEV_"+f.suffix, raw)
+				if f.alias != "" {
+					t.Setenv(f.alias, alias)
+				}
+				accepted := false
+				if raw != "" {
+					*f.v = raw
+					accepted = true
+				} else if f.alias != "" && alias != "" {
+					*f.v = alias
+					accepted = true
+				}
+				if f.suffix == "CONTROL_HOST" && accepted {
+					source = credentialSourceEnvironment
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ExeDev != want || cfg.credentialProvenance.exeDevControlHost != source {
+				t.Fatalf("env mode=%s got=%#v want=%#v", mode, cfg.ExeDev, want)
+			}
+		})
+	}
+	for _, raw := range []string{"", "invalid", "0", "-2", "3"} {
+		t.Run("CPU-"+raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.ExeDev.CPUs = 6
+			want := 6
+			t.Setenv("CRABBOX_EXE_DEV_CPUS", raw)
+			if n, err := strconv.Atoi(raw); err == nil {
+				want = n
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ExeDev.CPUs != want {
+				t.Fatalf("CPU=%d want=%d", cfg.ExeDev.CPUs, want)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		raw         string
+		prior, want bool
+	}{{"", true, true}, {"invalid", true, true}, {"false", true, false}, {"true", false, true}} {
+		t.Run("bool-"+tc.raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.ExeDev.NoEmail = tc.prior
+			t.Setenv("CRABBOX_EXE_DEV_NO_EMAIL", tc.raw)
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ExeDev.NoEmail != tc.want {
+				t.Fatalf("NoEmail=%t want=%t", cfg.ExeDev.NoEmail, tc.want)
+			}
+		})
+	}
+}
+
+func TestExeDevConfigCoreFallbackContract(t *testing.T) {
+	for _, tc := range []struct{ providerRoot, generic, want string }{{"", "/work/crabbox", "/tmp/crabbox"}, {"", "/custom/root", "/custom/root"}, {"/specific/root", "/custom/root", "/specific/root"}, {"  ", "/custom/root", "  "}} {
+		cfg := baseConfig()
+		cfg.Provider = "exe-dev"
+		cfg.WorkRoot = tc.generic
+		cfg.ExeDev.WorkRoot = tc.providerRoot
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.WorkRoot != tc.want || cfg.ExeDev.WorkRoot != tc.want {
+			t.Fatalf("roots=%q/%q want=%q", cfg.WorkRoot, cfg.ExeDev.WorkRoot, tc.want)
+		}
+	}
+	for _, tc := range []struct{ raw, want string }{{"", "default"}, {"  ", "  "}, {" image ", " image "}} {
+		cfg := baseConfig()
+		cfg.Provider = "exe-dev"
+		cfg.ExeDev.Image = tc.raw
+		if got := serverTypeForConfig(cfg); got != tc.want {
+			t.Fatalf("display=%q want=%q", got, tc.want)
+		}
+	}
+}
+
+func TestExeDevConfigCentralFlagSource(t *testing.T) {
+	cfg := baseConfig()
+	cfg.credentialProvenance.exeDevControlHost = credentialSourceTrustedFile
+	fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+	fs.String("exe-dev-control-host", "", "")
+	markCredentialDestinationFlagSources(&cfg, fs)
+	if cfg.credentialProvenance.exeDevControlHost != credentialSourceTrustedFile {
+		t.Fatal("unvisited source changed")
+	}
+	if err := fs.Parse([]string{"--exe-dev-control-host="}); err != nil {
+		t.Fatal(err)
+	}
+	markCredentialDestinationFlagSources(&cfg, fs)
+	if cfg.credentialProvenance.exeDevControlHost != credentialSourceFlag {
+		t.Fatal("explicit empty source missing")
+	}
+}
+
+func TestInheritedWorkRootCallerContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USER", "fixture-user")
+	for _, tc := range []struct{ providerRoot, genericRoot, want string }{
+		{"", "", "/tmp/crabbox"}, {"", "/work/crabbox", "/tmp/crabbox"}, {"", "/Users/ec2-user/crabbox", "/tmp/crabbox"}, {"", `C:\crabbox`, "/tmp/crabbox"},
+		{"", " /work/crabbox ", " /work/crabbox "}, {"", "/WORK/crabbox", "/WORK/crabbox"}, {"", `c:\crabbox`, `c:\crabbox`},
+		{"", "/srv/custom", "/srv/custom"}, {"", "/Users/alice/custom", "/Users/alice/custom"}, {"", `D:\custom`, `D:\custom`}, {"", "  ", "  "},
+		{" ", "/srv/custom", " "}, {"/work/crabbox", "/srv/custom", "/work/crabbox"}, {"relative", "/srv/custom", "relative"}, {"/provider/root", "/srv/custom", "/provider/root"},
+	} {
+		for _, explicit := range []bool{false, true} {
+			cfg := baseConfig()
+			cfg.Provider = "exe-dev"
+			cfg.SSHUser = "fixture-user"
+			cfg.SSHPort = "1234"
+			cfg.SSHFallbackPorts = []string{"4567"}
+			cfg.WorkRoot = "/recorded/root"
+			if explicit {
+				MarkWorkRootExplicit(&cfg)
+			}
+			cfg.WorkRoot = tc.genericRoot
+			cfg.ExeDev.WorkRoot = tc.providerRoot
+			want := cfg
+			want.WorkRoot = tc.want
+			want.ExeDev.WorkRoot = tc.want
+			want.SSHFallbackPorts = nil
+			want.providerDefaultsApplied = "exe-dev"
+			want.inferredTargetProvider = "exe-dev"
+			want.osImageProviderDefaults = want.OSImage
+			if err := applyProviderConfigDefaults(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("whole core config differs for roots=%q/%q explicit=%t: got=%#v want=%#v", tc.providerRoot, tc.genericRoot, explicit, cfg, want)
+			}
+		}
+	}
+}
+
+func TestOVHBindingFileContract(t *testing.T) {
+	wantDefaults := OVHConfig{Endpoint: "https://api.us.ovhcloud.com/1.0", Image: "Ubuntu 24.04", Flavor: "b3-8"}
+	if cfg := baseConfig(); cfg.OVH != wantDefaults || OVHImageWasExplicit(cfg) {
+		t.Fatalf("defaults=%#v", cfg.OVH)
+	}
+	if reflect.TypeOf(OVHConfig{}).NumField() != 5 || reflect.TypeOf(fileOVHConfig{}).NumField() != 5 {
+		t.Fatal("five-field config surface changed")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, priorMarker := range []bool{false, true} {
+			for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace", "value", "other-only"} {
+				cfg := baseConfig()
+				cfg.OVH.ProjectID = "prior-project"
+				cfg.OVH.Region = "prior-region"
+				cfg.ovhImageExplicit = priorMarker
+				want := cfg.OVH
+				wantMarker := priorMarker
+				fields := map[string]any{}
+				for _, f := range []struct {
+					key string
+					v   *string
+				}{{"endpoint", &want.Endpoint}, {"projectId", &want.ProjectID}, {"region", &want.Region}, {"image", &want.Image}, {"flavor", &want.Flavor}} {
+					if mode == "omitted" || (mode == "other-only" && f.key == "image") {
+						continue
+					}
+					var raw any = *f.v
+					if mode == "null" {
+						raw = nil
+					}
+					if mode == "empty" {
+						raw = ""
+					}
+					if mode == "whitespace" {
+						raw = "  "
+					}
+					if mode == "value" || mode == "other-only" {
+						raw = "fixture-value"
+					}
+					fields[f.key] = raw
+					if mode == "equal" || mode == "whitespace" || mode == "value" || mode == "other-only" {
+						if trusted || f.key != "endpoint" {
+							*f.v = raw.(string)
+						}
+						if f.key == "image" {
+							wantMarker = true
+						}
+					}
+				}
+				data, err := yaml.Marshal(map[string]any{"ovh": fields})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var file fileConfig
+				if err := yaml.Unmarshal(data, &file); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				if cfg.OVH != want || OVHImageWasExplicit(cfg) != wantMarker {
+					t.Fatalf("file mode=%s trusted=%t priorMarker=%t got=%#v want=%#v", mode, trusted, priorMarker, cfg.OVH, want)
+				}
+			}
+		}
+	}
+}
+
+func TestOVHBindingEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"absent", "empty", "equal", "whitespace", "value", "other-only"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.OVH.ProjectID = "prior-project"
+			cfg.OVH.Region = "prior-region"
+			want := cfg.OVH
+			wantMarker := false
+			for _, f := range []struct {
+				env string
+				v   *string
+			}{{"OVH_ENDPOINT", &want.Endpoint}, {"CRABBOX_OVH_PROJECT_ID", &want.ProjectID}, {"CRABBOX_OVH_REGION", &want.Region}, {"CRABBOX_OVH_IMAGE", &want.Image}, {"CRABBOX_OVH_FLAVOR", &want.Flavor}} {
+				raw := *f.v
+				if mode == "absent" || mode == "empty" || (mode == "other-only" && f.env == "CRABBOX_OVH_IMAGE") {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" || (mode == "other-only" && f.env != "CRABBOX_OVH_IMAGE") {
+					raw = "fixture-value"
+				}
+				t.Setenv(f.env, raw)
+				if mode == "absent" {
+					if err := os.Unsetenv(f.env); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if raw != "" {
+					*f.v = raw
+					if f.env == "CRABBOX_OVH_IMAGE" {
+						wantMarker = true
+					}
+				}
+			}
+			t.Setenv("CRABBOX_OVH_ENDPOINT", "ignored-unrecognized-alias")
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.OVH != want || OVHImageWasExplicit(cfg) != wantMarker {
+				t.Fatalf("env mode=%s got=%#v want=%#v marker=%t", mode, cfg.OVH, want, OVHImageWasExplicit(cfg))
+			}
+		})
+	}
+}
+
+func TestOVHBindingCoreDefaults(t *testing.T) {
+	for _, raw := range []string{"", "  ", "fixture-value"} {
+		cfg := baseConfig()
+		cfg.Provider = "ovh"
+		cfg.OVH = OVHConfig{Endpoint: raw, ProjectID: "project", Region: "region", Image: raw, Flavor: raw}
+		cfg.ovhImageExplicit = false
+		want := cfg.OVH
+		if raw == "" {
+			want.Endpoint = "https://api.us.ovhcloud.com/1.0"
+			want.Image = "Ubuntu 24.04"
+			want.Flavor = "b3-8"
+		}
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.OVH != want || OVHImageWasExplicit(cfg) || cfg.TargetOS != "linux" {
+			t.Fatalf("raw=%q defaults=%#v want=%#v", raw, cfg.OVH, want)
+		}
+	}
+}
+
+func TestLumeBindingFileContract(t *testing.T) {
+	wantDefaults := LumeConfig{CLIPath: "lume", Base: "crabbox-macos-golden", User: "lume", WorkRoot: "/Users/lume/crabbox"}
+	if got := baseConfig().Lume; got != wantDefaults {
+		t.Fatalf("defaults=%#v want=%#v", got, wantDefaults)
+	}
+	if reflect.TypeOf(LumeConfig{}).NumField() != 5 || reflect.TypeOf(fileLumeConfig{}).NumField() != 5 {
+		t.Fatal("five-field surface changed")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace", "value"} {
+			cfg := baseConfig()
+			cfg.Lume.Storage = "prior-storage"
+			want := cfg.Lume
+			fields := map[string]any{}
+			for _, f := range []struct {
+				key, value string
+				v          *string
+			}{{"cliPath", "/usr/local/bin/lume-fixture", &want.CLIPath}, {"base", "fixture-base", &want.Base}, {"storage", "fixture-storage", &want.Storage}, {"user", "alice", &want.User}, {"workRoot", "/Users/alice/work", &want.WorkRoot}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = f.value
+				}
+				fields[f.key] = raw
+				if (mode == "equal" || mode == "whitespace" || mode == "value") && (trusted || f.key == "workRoot") {
+					*f.v = raw.(string)
+				}
+			}
+			data, err := yaml.Marshal(map[string]any{"lume": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Lume != want {
+				t.Fatalf("file mode=%s trusted=%t got=%#v want=%#v", mode, trusted, cfg.Lume, want)
+			}
+		}
+	}
+}
+
+func TestLumeBindingEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"absent", "empty", "equal", "whitespace", "value"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Lume.Storage = "prior-storage"
+			want := cfg.Lume
+			for _, f := range []struct {
+				suffix, value string
+				v             *string
+			}{{"CLI", "lume-fixture", &want.CLIPath}, {"BASE", "fixture-base", &want.Base}, {"STORAGE", "fixture-storage", &want.Storage}, {"USER", "alice", &want.User}, {"WORK_ROOT", "/Users/alice/work", &want.WorkRoot}} {
+				raw := *f.v
+				if mode == "absent" || mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = f.value
+				}
+				name := "CRABBOX_LUME_" + f.suffix
+				t.Setenv(name, raw)
+				if mode == "absent" {
+					if err := os.Unsetenv(name); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if raw != "" {
+					*f.v = raw
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Lume != want {
+				t.Fatalf("env mode=%s got=%#v want=%#v", mode, cfg.Lume, want)
+			}
+		})
 	}
 }

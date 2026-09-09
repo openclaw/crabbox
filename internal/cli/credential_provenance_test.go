@@ -561,14 +561,13 @@ func TestRepositoryProviderSettingsRemainApplied(t *testing.T) {
 	if err := yaml.Unmarshal([]byte("cloudflare:\n  apiUrl: https://runner.repo.example.test\n  workdir: /workspace/project\n"), &cloudflareFile); err != nil {
 		t.Fatal(err)
 	}
+	var morphFile fileConfig
+	if err := yaml.Unmarshal([]byte("morph:\n  apiUrl: https://repo.example.test\n  snapshot: snapshot-project\n  sshGatewayHost: ssh.repo.example.test\n  workRoot: /workspace/project\n"), &morphFile); err != nil {
+		t.Fatal(err)
+	}
 	cfg := baseConfig()
 	file := fileConfig{
-		Morph: &fileMorphConfig{
-			APIURL:         "https://repo.example.test",
-			Snapshot:       "snapshot-project",
-			SSHGatewayHost: "ssh.repo.example.test",
-			WorkRoot:       "/workspace/project",
-		},
+		Morph:      morphFile.Morph,
 		Cloudflare: cloudflareFile.Cloudflare,
 		Semaphore:  semaphoreFile.Semaphore,
 	}
@@ -2011,7 +2010,11 @@ func TestConfigMergeTracksSSHDestinationSources(t *testing.T) {
 	t.Run("exe dev environment host approves ambient auth", func(t *testing.T) {
 		cfg := baseConfig()
 		cfg.Provider = "exe-dev"
-		if err := applyFileConfigWithTrust(&cfg, fileConfig{ExeDev: &fileExeDevConfig{ControlHost: "repo.example.test"}}, false); err != nil {
+		var file fileConfig
+		if err := yaml.Unmarshal([]byte("exeDev:\n  controlHost: repo.example.test\n"), &file); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
 			t.Fatal(err)
 		}
 		if err := validateProviderCredentialDestination(cfg); err == nil {

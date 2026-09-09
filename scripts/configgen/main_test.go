@@ -472,6 +472,42 @@ func TestOrgoGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestOpenComputerGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_opencomputer.go", "../../internal/cli/config_opencomputer_generated.go", "OpenComputerConfig", "opencomputer", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestModalGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_modal.go", "../../internal/cli/config_modal_generated.go", "ModalConfig", "modal", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMorphGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_morph.go", "../../internal/cli/config_morph_generated.go", "MorphConfig", "morph", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExeDevGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_exe_dev.go", "../../internal/cli/config_exe_dev_generated.go", "ExeDevConfig", "exe-dev", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOVHGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_ovh.go", "../../internal/cli/config_ovh_generated.go", "OVHConfig", "ovh", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLumeGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_lume.go", "../../internal/cli/config_lume_generated.go", "LumeConfig", "lume", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -1508,4 +1544,214 @@ func TestConfigBeforeAlias(t *testing.T){
 }
 `
 	runScalarFixture(t, input, output, behavior)
+}
+
+func TestSchemaFileIntPresentFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"empty", `help:"Count"`, `help:"Count" fileInt:""`, "fileInt is supported only"},
+		{"unknown", `help:"Count"`, `help:"Count" fileInt:"raw"`, "fileInt is supported only"},
+		{"string", `help:"Name"`, `help:"Name" fileInt:"present"`, "fileInt is supported only"},
+		{"float", `help:"CPUs"`, `help:"CPUs" fileInt:"present"`, "fileInt is supported only"},
+		{"bool", `help:"Enabled"`, `help:"Enabled" fileInt:"present"`, "fileInt is supported only"},
+		{"list", `help:"Ports"`, `help:"Ports" fileInt:"present"`, "fileInt is supported only"},
+		{"default constraint", `default:"7"`, `default:"-1" fileInt:"present"`, "default must be non-negative"},
+		{"required policy", `nonnegative:"true"`, `fileInt:"present"`, "require nonnegative policy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(sample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+	for _, source := range []string{
+		strings.Replace(flagOnlySample, `help:"Count"`, `help:"Count" fileInt:"present"`, 1),
+		"package cli\ntype PilotConfig struct{ Count int `sources:\"env,flag\" env:\"COUNT\" flag:\"count\" help:\"Count\" nonnegative:\"true\" fileInt:\"present\"` }",
+	} {
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "fileInt is supported only") {
+			t.Fatalf("no-file presence mode admitted: %v", err)
+		}
+	}
+}
+
+func TestGenerateFileIntPresent(t *testing.T) {
+	const source = "package cli\ntype PilotConfig struct {\n" +
+		" Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"COUNT\" flag:\"count\" help:\"Count\" nonnegative:\"true\" default:\"7\"`\n" +
+		" Positive int `sources:\"user,repo,env,flag\" config:\"positive\" env:\"POSITIVE\" flag:\"positive\" help:\"Positive\" nonnegative:\"true\" fileInt:\"positive\"`\n" +
+		" Strict int `sources:\"user,repo,env,flag\" config:\"strict\" env:\"STRICT\" flag:\"strict\" help:\"Strict\" nonnegative:\"true\"`\n}"
+	for _, fallback := range []bool{false, true} {
+		input := source
+		if fallback {
+			input = strings.Replace(input, `help:"Count"`, `help:"Count" envInt:"fallback"`, 1)
+		}
+		s, err := parseSchema([]byte(input), "PilotConfig", "pilot")
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := generate(s, "pilot.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		input = strings.Replace(input, `help:"Count"`, `help:"Count" fileInt:"present"`, 1)
+		s, err = parseSchema([]byte(input), "PilotConfig", "pilot")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !s.fields[0].fileIntPresent || s.fields[0].fileIntPositive || !s.fields[1].fileIntPositive || s.fields[1].fileIntPresent || s.fields[2].fileIntPresent || s.fields[2].fileIntPositive {
+			t.Fatal("file modes not exclusive")
+		}
+		output, err := generate(s, "pilot.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		again, err := generate(s, "pilot.go")
+		if err != nil || !bytes.Equal(output, again) {
+			t.Fatalf("nondeterministic present mode: %v", err)
+		}
+		want := strings.Replace(string(before), "\t\tif *file.Count < 0 {\n\t\t\treturn exit(2, \"pilot count must be non-negative\")\n\t\t}\n", "", 1)
+		if string(output) != want {
+			t.Fatal("present mode changed more than file negative check")
+		}
+		typecheckGenerated(t, input+"\nfunc getenvInt(string,int)int{panic(\"stub\")}\n", output)
+		const behavior = `package cli
+import("flag";"fmt";"testing")
+func getenvInt(_ string,prior int)int{return prior}
+func getenvNonNegativeInt(_ string,prior int)(int,error){return prior,nil}
+func exit(_ int,message string)error{return fmt.Errorf("%s",message)}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestFilePresent(t *testing.T){
+ zero,negative,positive:=0,-2,12
+ for _,tc:=range []struct{name string;value *int;want int}{{"nil",nil,7},{"zero",&zero,0},{"negative",&negative,-2},{"positive",&positive,12}}{
+  cfg:=defaultPilotConfig();if err:=cfg.applyFile(&filePilotConfig{Count:tc.value});err!=nil||cfg.Count!=tc.want{t.Fatalf("%s: %+v %v",tc.name,cfg,err)}
+ }
+ cfg:=PilotConfig{Count:7,Positive:8,Strict:9}
+ err:=cfg.applyFile(&filePilotConfig{Count:&negative,Positive:&zero,Strict:&negative})
+ if err==nil||err.Error()!="pilot strict must be non-negative"||cfg.Count!=-2||cfg.Positive!=8||cfg.Strict!=9{t.Fatalf("mode/order preservation: %+v %v",cfg,err)}
+}
+`
+		runScalarFixture(t, input, output, behavior)
+	}
+}
+
+const sourceListSample = "package cli\ntype PilotConfig struct {\n" +
+	" Name string `sources:\"user,repo,env,flag\" config:\"name\" env:\"NAME\" flag:\"name\" help:\"Name\"`\n" +
+	" Items []string `sources:\"user,env,flag\" config:\"items\" env:\"ITEMS\" flag:\"item\" help:\"Items\" fileList:\"raw\" envList:\"presence\" flagList:\"replace-append\"`\n}"
+
+func TestSchemaListModesFailClosed(t *testing.T) {
+	for _, mode := range []struct{ tag, value string }{{"fileList", "raw"}, {"envList", "presence"}, {"flagList", "replace-append"}} {
+		for _, value := range []string{"", "other"} {
+			input := strings.Replace(sourceListSample, mode.tag+`:"`+mode.value+`"`, mode.tag+`:"`+value+`"`, 1)
+			if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), mode.tag+" requires") {
+				t.Fatalf("%s=%q: %v", mode.tag, value, err)
+			}
+		}
+		for _, kind := range []string{"string", "int", "bool", "float64"} {
+			input := strings.Replace(sample, `help:"Name"`, `help:"Name" `+mode.tag+`:"`+mode.value+`"`, 1)
+			input = strings.Replace(input, "Name string", "Name "+kind, 1)
+			if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), mode.tag+" requires") {
+				t.Fatalf("%s kind%s: %v", mode.tag, kind, err)
+			}
+		}
+	}
+	for _, mode := range []struct{ tag, value string }{{"fileList", "raw"}, {"envList", "presence"}} {
+		input := strings.Replace(flagOnlySample, `help:"Ports"`, `help:"Ports" `+mode.tag+`:"`+mode.value+`"`, 1)
+		if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), mode.tag+" requires") {
+			t.Fatalf("no-source %s: %v", mode.tag, err)
+		}
+	}
+	for _, extra := range []string{`default:"a"`, `reportApplied:"true"`, `envAlias:"OTHER"`, `configAlias:"other"`, `flagFallback:"a"`, `fileIgnoreEmpty:"true"`} {
+		input := strings.Replace(sourceListSample, `help:"Items"`, `help:"Items" `+extra, 1)
+		if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil {
+			t.Fatalf("incompatible list mode %s admitted", extra)
+		}
+	}
+	input := "package cli\ntype PilotConfig struct{ Items []string `sources:\"user,env\" config:\"items\" env:\"ITEMS\" flagList:\"replace-append\"` }"
+	if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil {
+		t.Fatal("no-flag list admitted")
+	}
+}
+
+func TestGenerateSourceSpecificLists(t *testing.T) {
+	s, err := parseSchema([]byte(sourceListSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic source lists: %v", err)
+	}
+	text := string(output)
+	for _, want := range []string{`cfg.Items = append([]string(nil), (*file.Items)...)`, `getenvList("ITEMS")`, `newReplaceAppendListFlag(defaults.Items)`, `cfg.Items = append([]string(nil), values.Items.values...)`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing list binding %q", want)
+		}
+	}
+	if strings.Contains(text, `"os"`) || strings.Contains(text, `"strings"`) {
+		t.Fatal("unused list helper imports emitted")
+	}
+	if strings.Index(text, `fs.Var(listItems`) > strings.Index(text, `fs.String("name"`) {
+		t.Fatal("repeatable list registered after scalar")
+	}
+	// Reuse the actual shared core flag value in both compilation and execution fixtures.
+	helperSource, err := os.ReadFile("../../internal/cli/config_list_flag.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper := strings.SplitN(string(helperSource), "import \"strings\"", 2)[1]
+	compileSource := strings.Replace(sourceListSample, "package cli", "package cli\nimport \"strings\"", 1) + helper + "\nfunc getenvList(string)([]string,bool){panic(\"stub\")}\n"
+	typecheckGenerated(t, compileSource, output)
+	coreSource, err := os.ReadFile("../../internal/cli/config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	getters := ""
+	for _, name := range []string{"getenvList", "splitCommaList", "normalizeList"} {
+		start := strings.Index(string(coreSource), "func "+name+"(")
+		if start < 0 {
+			t.Fatalf("missing core helper%s", name)
+		}
+		rest := string(coreSource)[start:]
+		end := strings.Index(rest, "\nfunc ")
+		if end < 0 {
+			t.Fatalf("missing end of helper%s", name)
+		}
+		getters += rest[:end] + "\n"
+	}
+	const behavior = `package cli
+import("flag";"os";"reflect";"strings";"testing")
+func getenv(_ string,prior string)string{return prior}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestListSources(t *testing.T){
+ prior:=[]string{"prior"};cfg:=PilotConfig{Items:prior}
+ if err:=cfg.applyFile(nil,true);err!=nil||!reflect.DeepEqual(cfg.Items,prior){t.Fatal("nil file changed config")}
+ if err:=cfg.applyFile(&filePilotConfig{},true);err!=nil||!reflect.DeepEqual(cfg.Items,prior){t.Fatal("null/omitted list changed config")}
+ raw:=[]string{" a ","","dup","dup"}
+ if err:=cfg.applyFile(&filePilotConfig{Items:&raw},false);err!=nil||!reflect.DeepEqual(cfg.Items,prior){t.Fatal("untrusted raw list applied")}
+ if err:=cfg.applyFile(&filePilotConfig{Items:&raw},true);err!=nil||!reflect.DeepEqual(cfg.Items,[]string{" a ","","dup","dup"}){t.Fatalf("raw copy %#v %v",cfg.Items,err)}
+ raw[0]="mutation";if cfg.Items[0]!=" a "{t.Fatal("file list storage shared")}
+ empty:=[]string{};if err:=cfg.applyFile(&filePilotConfig{Items:&empty},true);err!=nil||cfg.Items!=nil{t.Fatalf("empty file clone %#v %v",cfg.Items,err)}
+ cfg.Items=[]string{"prior"};if err:=cfg.applyEnv();err!=nil||!reflect.DeepEqual(cfg.Items,[]string{"prior"}){t.Fatal("absent env changed config")}
+ for _,tc:=range []struct{raw string;want []string}{{"",[]string{}},{" NoNe ",[]string{}},{" a, ,dup,dup ",[]string{"a","dup","dup"}},{" , ",[]string{}}}{
+  t.Setenv("ITEMS",tc.raw);if err:=cfg.applyEnv();err!=nil||!reflect.DeepEqual(cfg.Items,tc.want){t.Fatalf("env%q: %#v %v",tc.raw,cfg.Items,err)}
+ }
+ cfg.Items=[]string{"old"," raw "};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+ cfg.Items[0]="after registration";getter:=fs.Lookup("item").Value.(flag.Getter)
+ if !reflect.DeepEqual(getter.Get(),[]string{"old"," raw "})||fs.Lookup("item").DefValue!="old, raw "{t.Fatalf("registration snapshot %#v",getter.Get())}
+ values.Apply(&cfg,fs);if cfg.Items[0]!="after registration"{t.Fatal("unvisited snapshot overwritten config")}
+ if err:=fs.Parse([]string{"--item=","--item= one, ,two,one ","--item=none"});err!=nil{t.Fatal(err)}
+ if !reflect.DeepEqual(getter.Get(),[]string{"one","two","one","none"}){t.Fatalf("replace/append %#v",getter.Get())}
+ copy:=getter.Get().([]string);copy[0]="mutation";values.Apply(&cfg,fs)
+ if !reflect.DeepEqual(cfg.Items,[]string{"one","two","one","none"}){t.Fatal("Get aliased state")}
+ cfg.Items[0]="cfg mutation";if getter.Get().([]string)[0]!="one"{t.Fatal("Apply aliased flag state")}
+ fs2:=flag.NewFlagSet("empty",flag.ContinueOnError);values2:=RegisterPilotConfigFlags(fs2,PilotConfig{Items:[]string{"old"}})
+ if err:=fs2.Parse([]string{"--item="});err!=nil{t.Fatal(err)}
+ got:=fs2.Lookup("item").Value.(flag.Getter).Get().([]string);if got==nil||len(got)!=0{t.Fatalf("Get empty shape %#v",got)}
+ values2.Apply(&cfg,fs2);if cfg.Items!=nil{t.Fatalf("Apply empty shape %#v",cfg.Items)}
+}
+`
+	runScalarFixture(t, sourceListSample, output, behavior+helper+getters)
 }

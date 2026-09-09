@@ -433,17 +433,6 @@ type NebiusConfig struct {
 	RecoveryPolicy   string
 }
 
-// OVHConfig contains non-secret OVHcloud Public Cloud settings. OVH
-// application credentials are intentionally read from environment variables by
-// the provider client and are not persisted in Crabbox config.
-type OVHConfig struct {
-	Endpoint  string
-	ProjectID string
-	Region    string
-	Image     string
-	Flavor    string
-}
-
 // ScalewayConfig contains non-secret Scaleway Instances settings. Scaleway
 // credentials are intentionally loaded by the provider client from the official
 // SDK environment/config surfaces and are not persisted in Crabbox config.
@@ -672,16 +661,6 @@ type CoderConfig struct {
 	RichParameterFile    string
 }
 
-type MorphConfig struct {
-	APIKey          string
-	APIURL          string
-	Snapshot        string
-	SSHGatewayHost  string
-	WorkRoot        string
-	DeleteOnRelease bool
-	WakeOnSSH       bool
-}
-
 type DaytonaConfig struct {
 	APIKey           string
 	JWTToken         string
@@ -721,18 +700,6 @@ func NormalizeAzureBackend(backend string) (string, error) {
 	default:
 		return "", fmt.Errorf("azure backend must be vm or dynamic-sessions")
 	}
-}
-
-type ExeDevConfig struct {
-	ControlHost string
-	Image       string
-	CPUs        int
-	Memory      string
-	Disk        string
-	Command     string
-	User        string
-	WorkRoot    string
-	NoEmail     bool
 }
 
 type UnikraftCloudConfig struct {
@@ -850,22 +817,6 @@ type TenkiConfig struct {
 	DiskGB    int
 }
 
-// OpenComputerConfig configures the delegated OpenComputer provider, which
-// talks to the OpenComputer REST API. The API key is intentionally absent: it
-// is read at runtime from CRABBOX_OPENCOMPUTER_API_KEY / OPENCOMPUTER_API_KEY
-// or the `oc` CLI config (`oc config set api-key`), and sent only in the
-// X-API-Key header — never persisted in Crabbox config or placed on argv.
-type OpenComputerConfig struct {
-	APIURL          string
-	Workdir         string
-	CPU             int
-	MemoryMB        int
-	TimeoutSecs     int
-	ExecTimeoutSecs int
-	Burst           bool
-	ForgetMissing   bool
-}
-
 // NomadConfig configures the delegated Nomad provider. The ACL token is
 // intentionally absent: it is read at runtime from NOMAD_TOKEN or TokenEnv and
 // is never persisted in Crabbox config or placed on argv.
@@ -934,15 +885,6 @@ type DockerSandboxConfig struct {
 	ExtraWorkspaces []string
 	MCP             []string
 	Kit             []string
-}
-
-type ModalConfig struct {
-	App         string
-	Image       string
-	Workdir     string
-	Python      string
-	Environment string
-	Secrets     []string
 }
 
 type AsciiBoxConfig struct {
@@ -1185,14 +1127,6 @@ type TartConfig struct {
 	CPUs     int
 	Memory   int
 	Disk     int
-}
-
-type LumeConfig struct {
-	CLIPath  string
-	Base     string
-	Storage  string
-	User     string
-	WorkRoot string
 }
 
 type HyperVConfig struct {
@@ -1786,13 +1720,13 @@ func applyProviderConfigDefaults(cfg *Config) error {
 	}
 	if cfg.Provider == "ovh" {
 		if cfg.OVH.Endpoint == "" {
-			cfg.OVH.Endpoint = "https://api.us.ovhcloud.com/1.0"
+			cfg.OVH.Endpoint = OVHConfigDefaultEndpoint
 		}
 		if cfg.OVH.Image == "" {
-			cfg.OVH.Image = "Ubuntu 24.04"
+			cfg.OVH.Image = OVHConfigDefaultImage
 		}
 		if cfg.OVH.Flavor == "" {
-			cfg.OVH.Flavor = "b3-8"
+			cfg.OVH.Flavor = OVHConfigDefaultFlavor
 		}
 		applyLinuxConnectionDefaults(cfg, baseConfig().SSHUser, baseConfig().SSHPort)
 		normalizeTargetConfig(cfg)
@@ -1886,13 +1820,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			cfg.SSHPort = "22"
 		}
 		cfg.SSHFallbackPorts = nil
-		if cfg.ExeDev.WorkRoot == "" {
-			if !isDefaultWorkRoot(cfg.WorkRoot) {
-				cfg.ExeDev.WorkRoot = cfg.WorkRoot
-			} else {
-				cfg.ExeDev.WorkRoot = "/tmp/crabbox"
-			}
-		}
+		cfg.ExeDev.WorkRoot = ResolveInheritedWorkRoot(cfg.ExeDev.WorkRoot, cfg.WorkRoot, ExeDevWorkRootFallback)
 		if cfg.ExeDev.WorkRoot != "" {
 			cfg.WorkRoot = cfg.ExeDev.WorkRoot
 		}
@@ -2597,11 +2525,7 @@ func baseConfig() Config {
 			Type:        "gpu_1x_a10",
 			ImageFamily: "lambda-stack-24-04",
 		},
-		OVH: OVHConfig{
-			Endpoint: "https://api.us.ovhcloud.com/1.0",
-			Image:    "Ubuntu 24.04",
-			Flavor:   "b3-8",
-		},
+		OVH: defaultOVHConfig(),
 		Scaleway: ScalewayConfig{
 			Region: "fr-par",
 			Zone:   "fr-par-1",
@@ -2711,13 +2635,8 @@ func baseConfig() Config {
 			WorkRoot:        "/home/coder/crabbox",
 			Wait:            "yes",
 		},
-		Morph: MorphConfig{
-			APIURL:         "https://cloud.morph.so",
-			SSHGatewayHost: "ssh.cloud.morph.so",
-			WorkRoot:       "/tmp/crabbox",
-			WakeOnSSH:      true,
-		},
-		Orgo: defaultOrgoConfig(),
+		Morph: defaultMorphConfig(),
+		Orgo:  defaultOrgoConfig(),
 		Daytona: DaytonaConfig{
 			APIURL:           "https://app.daytona.io/api",
 			User:             "daytona",
@@ -2733,13 +2652,7 @@ func baseConfig() Config {
 			Workdir:       "crabbox",
 			ProxyPortHTTP: 80,
 		},
-		ExeDev: ExeDevConfig{
-			ControlHost: "exe.dev",
-			CPUs:        2,
-			Memory:      "4GB",
-			Disk:        "10GB",
-			NoEmail:     true,
-		},
+		ExeDev:       defaultExeDevConfig(),
 		Railway:      defaultRailwayConfig(),
 		FastAPICloud: defaultFastAPICloudConfig(),
 		UnikraftCloud: UnikraftCloudConfig{
@@ -2804,18 +2717,11 @@ func baseConfig() Config {
 			CLIPath:  "tenki",
 			WorkRoot: "/home/tenki/crabbox",
 		},
-		Tensorlake: defaultTensorlakeConfig(),
-		Cua:        defaultCuaConfig(),
-		OpenComputer: OpenComputerConfig{
-			// APIURL is intentionally unset here so the `oc` config file's
-			// api_url is honored before the built-in default; the provider
-			// applies the default (https://app.opencomputer.dev) as the final
-			// fallback in newOCAPIClient.
-			Workdir:         "/workspace/crabbox",
-			ExecTimeoutSecs: 3600,
-		},
-		CodeSandbox: defaultCodeSandboxConfig(),
-		OpenSandbox: defaultOpenSandboxConfig(),
+		Tensorlake:   defaultTensorlakeConfig(),
+		Cua:          defaultCuaConfig(),
+		OpenComputer: defaultOpenComputerConfig(),
+		CodeSandbox:  defaultCodeSandboxConfig(),
+		OpenSandbox:  defaultOpenSandboxConfig(),
 		Nomad: NomadConfig{
 			TokenEnv:          "NOMAD_TOKEN",
 			Task:              "crabbox",
@@ -2850,14 +2756,9 @@ func baseConfig() Config {
 		},
 		AnthropicSRT:    defaultAnthropicSRTConfig(),
 		CloudRunSandbox: defaultCloudRunSandboxConfig(),
-		Modal: ModalConfig{
-			App:     "crabbox",
-			Image:   "python:3.13-slim",
-			Workdir: "/workspace/crabbox",
-			Python:  "python3",
-		},
-		UpstashBox: defaultUpstashBoxConfig(),
-		Smolvm:     defaultSmolvmConfig(),
+		Modal:           defaultModalConfig(),
+		UpstashBox:      defaultUpstashBoxConfig(),
+		Smolvm:          defaultSmolvmConfig(),
 		AsciiBox: AsciiBoxConfig{
 			BaseURL: "https://ascii.dev",
 			CLIPath: "box",
@@ -2958,12 +2859,7 @@ func baseConfig() Config {
 			CPUs:     4,
 			Memory:   8192,
 		},
-		Lume: LumeConfig{
-			CLIPath:  "lume",
-			Base:     "crabbox-macos-golden",
-			User:     "lume",
-			WorkRoot: "/Users/lume/crabbox",
-		},
+		Lume: defaultLumeConfig(),
 		HyperV: HyperVConfig{
 			User:     "crabbox",
 			WorkRoot: defaultWindowsWorkRoot,
@@ -3210,14 +3106,6 @@ type fileNebiusConfig struct {
 	SecurityGroupIDs []string `yaml:"securityGroupIds,omitempty"`
 	ServiceAccountID string   `yaml:"serviceAccountId,omitempty"`
 	RecoveryPolicy   string   `yaml:"recoveryPolicy,omitempty"`
-}
-
-type fileOVHConfig struct {
-	Endpoint  string `yaml:"endpoint,omitempty"`
-	ProjectID string `yaml:"projectId,omitempty"`
-	Region    string `yaml:"region,omitempty"`
-	Image     string `yaml:"image,omitempty"`
-	Flavor    string `yaml:"flavor,omitempty"`
 }
 
 type fileScalewayConfig struct {
@@ -3624,16 +3512,6 @@ func (c *fileCoderConfig) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-type fileMorphConfig struct {
-	APIKey          string `yaml:"apiKey,omitempty"`
-	APIURL          string `yaml:"apiUrl,omitempty"`
-	Snapshot        string `yaml:"snapshot,omitempty"`
-	SSHGatewayHost  string `yaml:"sshGatewayHost,omitempty"`
-	WorkRoot        string `yaml:"workRoot,omitempty"`
-	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
-	WakeOnSSH       *bool  `yaml:"wakeOnSSH,omitempty"`
-}
-
 type fileDaytonaConfig struct {
 	APIURL           string `yaml:"apiUrl,omitempty"`
 	Snapshot         string `yaml:"snapshot,omitempty"`
@@ -3660,18 +3538,6 @@ type fileFreestyleConfig struct {
 	Workdir  string `yaml:"workdir,omitempty"`
 	VCPUs    int    `yaml:"vcpus,omitempty"`
 	MemoryGB int    `yaml:"memoryGB,omitempty"`
-}
-
-type fileExeDevConfig struct {
-	ControlHost string `yaml:"controlHost,omitempty"`
-	Image       string `yaml:"image,omitempty"`
-	CPUs        int    `yaml:"cpus,omitempty"`
-	Memory      string `yaml:"memory,omitempty"`
-	Disk        string `yaml:"disk,omitempty"`
-	Command     string `yaml:"command,omitempty"`
-	User        string `yaml:"user,omitempty"`
-	WorkRoot    string `yaml:"workRoot,omitempty"`
-	NoEmail     *bool  `yaml:"noEmail,omitempty"`
 }
 
 type fileUnikraftCloudConfig struct {
@@ -3770,15 +3636,6 @@ type fileTenkiConfig struct {
 	DiskGB    int    `yaml:"diskGB,omitempty"`
 }
 
-type fileOpenComputerConfig struct {
-	Workdir         string `yaml:"workdir,omitempty"`
-	CPU             *int   `yaml:"cpu,omitempty"`
-	MemoryMB        *int   `yaml:"memoryMB,omitempty"`
-	TimeoutSecs     *int   `yaml:"timeoutSecs,omitempty"`
-	ExecTimeoutSecs *int   `yaml:"execTimeoutSecs,omitempty"`
-	Burst           *bool  `yaml:"burst,omitempty"`
-}
-
 type fileNomadConfig struct {
 	Address           string   `yaml:"address,omitempty"`
 	Region            string   `yaml:"region,omitempty"`
@@ -3836,15 +3693,6 @@ type fileDockerSandboxConfig struct {
 	ExtraWorkspaces *[]string `yaml:"extraWorkspaces,omitempty"`
 	MCP             *[]string `yaml:"mcp,omitempty"`
 	Kit             *[]string `yaml:"kit,omitempty"`
-}
-
-type fileModalConfig struct {
-	App         string   `yaml:"app,omitempty"`
-	Image       string   `yaml:"image,omitempty"`
-	Workdir     string   `yaml:"workdir,omitempty"`
-	Python      string   `yaml:"python,omitempty"`
-	Environment string   `yaml:"environment,omitempty"`
-	Secrets     []string `yaml:"secrets,omitempty"`
 }
 
 type fileAsciiBoxConfig struct {
@@ -4068,14 +3916,6 @@ type fileTartConfig struct {
 	CPUs     *int   `yaml:"cpus,omitempty"`
 	Memory   *int   `yaml:"memory,omitempty"`
 	Disk     *int   `yaml:"disk,omitempty"`
-}
-
-type fileLumeConfig struct {
-	CLIPath  string `yaml:"cliPath,omitempty"`
-	Base     string `yaml:"base,omitempty"`
-	Storage  string `yaml:"storage,omitempty"`
-	User     string `yaml:"user,omitempty"`
-	WorkRoot string `yaml:"workRoot,omitempty"`
 }
 
 type fileHyperVConfig struct {
@@ -4835,22 +4675,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Nebius.RecoveryPolicy = file.Nebius.RecoveryPolicy
 		}
 	}
-	if file.OVH != nil {
-		if trusted && file.OVH.Endpoint != "" {
-			cfg.OVH.Endpoint = file.OVH.Endpoint
-		}
-		if file.OVH.ProjectID != "" {
-			cfg.OVH.ProjectID = file.OVH.ProjectID
-		}
-		if file.OVH.Region != "" {
-			cfg.OVH.Region = file.OVH.Region
-		}
-		if file.OVH.Image != "" {
-			cfg.OVH.Image = file.OVH.Image
+	{
+		applied, err := cfg.OVH.applyFile(file.OVH, trusted)
+		if applied.Image {
 			cfg.ovhImageExplicit = true
 		}
-		if file.OVH.Flavor != "" {
-			cfg.OVH.Flavor = file.OVH.Flavor
+		if err != nil {
+			return err
 		}
 	}
 	if file.Scaleway != nil {
@@ -5830,30 +5661,23 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Coder.RichParameterFile = expandUserPath(file.Coder.RichParameterFile)
 		}
 	}
-	if file.Morph != nil {
-		if file.Morph.APIKey != "" {
-			cfg.Morph.APIKey = file.Morph.APIKey
+	{
+		applied, err := cfg.Morph.applyFile(file.Morph)
+		if applied.APIKey {
 			cfg.credentialProvenance.morphAPIKey = credentialSource
 		}
-		if file.Morph.APIURL != "" {
-			cfg.Morph.APIURL = file.Morph.APIURL
+		if applied.APIURL {
 			cfg.credentialProvenance.morphAPIURL = credentialSource
 		}
-		if file.Morph.Snapshot != "" {
-			cfg.Morph.Snapshot = file.Morph.Snapshot
-		}
-		if file.Morph.SSHGatewayHost != "" {
-			cfg.Morph.SSHGatewayHost = file.Morph.SSHGatewayHost
+		if applied.SSHGatewayHost {
 			cfg.credentialProvenance.morphSSHGatewayHost = credentialSource
 		}
-		if file.Morph.WorkRoot != "" {
-			cfg.Morph.WorkRoot = file.Morph.WorkRoot
-		}
-		if file.Morph.DeleteOnRelease != nil {
-			cfg.Morph.DeleteOnRelease = *file.Morph.DeleteOnRelease
+		if applied.DeleteOnRelease {
 			MarkDeleteOnReleaseExplicit(cfg, "morph")
 		}
-		applyOptional(&cfg.Morph.WakeOnSSH, file.Morph.WakeOnSSH)
+		if err != nil {
+			return err
+		}
 	}
 	if file.Daytona != nil {
 		if file.Daytona.APIURL != "" {
@@ -5923,33 +5747,14 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.credentialProvenance.cubeSandboxProxyProto = credentialSource
 		}
 	}
-	if file.ExeDev != nil {
-		if file.ExeDev.ControlHost != "" {
-			cfg.ExeDev.ControlHost = file.ExeDev.ControlHost
+	{
+		applied, err := cfg.ExeDev.applyFile(file.ExeDev)
+		if applied.ControlHost {
 			cfg.credentialProvenance.exeDevControlHost = credentialSource
 		}
-		if file.ExeDev.Image != "" {
-			cfg.ExeDev.Image = file.ExeDev.Image
+		if err != nil {
+			return err
 		}
-		if file.ExeDev.CPUs > 0 {
-			cfg.ExeDev.CPUs = file.ExeDev.CPUs
-		}
-		if file.ExeDev.Memory != "" {
-			cfg.ExeDev.Memory = file.ExeDev.Memory
-		}
-		if file.ExeDev.Disk != "" {
-			cfg.ExeDev.Disk = file.ExeDev.Disk
-		}
-		if file.ExeDev.Command != "" {
-			cfg.ExeDev.Command = file.ExeDev.Command
-		}
-		if file.ExeDev.User != "" {
-			cfg.ExeDev.User = file.ExeDev.User
-		}
-		if file.ExeDev.WorkRoot != "" {
-			cfg.ExeDev.WorkRoot = file.ExeDev.WorkRoot
-		}
-		applyOptional(&cfg.ExeDev.NoEmail, file.ExeDev.NoEmail)
 	}
 	{
 		applied, err := cfg.Railway.applyFile(file.Railway)
@@ -6253,15 +6058,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	if err := cfg.Cua.applyFile(file.Cua, trusted); err != nil {
 		return err
 	}
-	if file.OpenComputer != nil {
-		if file.OpenComputer.Workdir != "" {
-			cfg.OpenComputer.Workdir = file.OpenComputer.Workdir
-		}
-		applyOptional(&cfg.OpenComputer.CPU, file.OpenComputer.CPU)
-		applyOptional(&cfg.OpenComputer.MemoryMB, file.OpenComputer.MemoryMB)
-		applyOptional(&cfg.OpenComputer.TimeoutSecs, file.OpenComputer.TimeoutSecs)
-		applyOptional(&cfg.OpenComputer.ExecTimeoutSecs, file.OpenComputer.ExecTimeoutSecs)
-		applyOptional(&cfg.OpenComputer.Burst, file.OpenComputer.Burst)
+	if err := cfg.OpenComputer.applyFile(file.OpenComputer); err != nil {
+		return err
 	}
 	if err := cfg.CodeSandbox.applyFile(file.CodeSandbox, trusted); err != nil {
 		return err
@@ -6428,25 +6226,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	if err := cfg.CloudRunSandbox.applyFile(file.CloudRunSandbox); err != nil {
 		return err
 	}
-	if file.Modal != nil {
-		if file.Modal.App != "" {
-			cfg.Modal.App = file.Modal.App
-		}
-		if file.Modal.Image != "" {
-			cfg.Modal.Image = file.Modal.Image
-		}
-		if file.Modal.Workdir != "" {
-			cfg.Modal.Workdir = file.Modal.Workdir
-		}
-		if file.Modal.Python != "" {
-			cfg.Modal.Python = file.Modal.Python
-		}
-		if trusted && file.Modal.Environment != "" {
-			cfg.Modal.Environment = file.Modal.Environment
-		}
-		if trusted && file.Modal.Secrets != nil {
-			cfg.Modal.Secrets = append([]string(nil), file.Modal.Secrets...)
-		}
+	if err := cfg.Modal.applyFile(file.Modal, trusted); err != nil {
+		return err
 	}
 	{
 		applied, err := cfg.UpstashBox.applyFile(file.UpstashBox)
@@ -6725,24 +6506,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.tartDiskExplicit = true
 		}
 	}
-	if file.Lume != nil {
-		if trusted {
-			if file.Lume.CLIPath != "" {
-				cfg.Lume.CLIPath = file.Lume.CLIPath
-			}
-			if file.Lume.Base != "" {
-				cfg.Lume.Base = file.Lume.Base
-			}
-			if file.Lume.Storage != "" {
-				cfg.Lume.Storage = file.Lume.Storage
-			}
-			if file.Lume.User != "" {
-				cfg.Lume.User = file.Lume.User
-			}
-		}
-		if file.Lume.WorkRoot != "" {
-			cfg.Lume.WorkRoot = file.Lume.WorkRoot
-		}
+	if err := cfg.Lume.applyFile(file.Lume, trusted); err != nil {
+		return err
 	}
 	if file.HyperV != nil {
 		if file.HyperV.Image != "" {
@@ -7500,14 +7265,15 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.Nebius.ServiceAccountID = getenv("CRABBOX_NEBIUS_SERVICE_ACCOUNT_ID", cfg.Nebius.ServiceAccountID)
 	cfg.Nebius.RecoveryPolicy = getenv("CRABBOX_NEBIUS_RECOVERY_POLICY", cfg.Nebius.RecoveryPolicy)
-	cfg.OVH.Endpoint = getenv("OVH_ENDPOINT", cfg.OVH.Endpoint)
-	cfg.OVH.ProjectID = getenv("CRABBOX_OVH_PROJECT_ID", cfg.OVH.ProjectID)
-	cfg.OVH.Region = getenv("CRABBOX_OVH_REGION", cfg.OVH.Region)
-	if image := os.Getenv("CRABBOX_OVH_IMAGE"); image != "" {
-		cfg.OVH.Image = image
-		cfg.ovhImageExplicit = true
+	{
+		applied, err := cfg.OVH.applyEnv()
+		if applied.Image {
+			cfg.ovhImageExplicit = true
+		}
+		if err != nil {
+			return err
+		}
 	}
-	cfg.OVH.Flavor = getenv("CRABBOX_OVH_FLAVOR", cfg.OVH.Flavor)
 	if region := os.Getenv("CRABBOX_SCALEWAY_REGION"); region != "" {
 		cfg.Scaleway.Region = region
 		cfg.scalewayRegionExplicit = true
@@ -7842,13 +7608,23 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_PHALA_ATTEST"); ok {
 		cfg.Phala.Attest = &value
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MORPH_API_KEY", "MORPH_API_KEY"); ok {
-		cfg.Morph.APIKey = value
-		cfg.credentialProvenance.morphAPIKey = credentialSourceEnvironment
-	}
-	if value := os.Getenv("CRABBOX_MORPH_API_URL"); value != "" {
-		cfg.Morph.APIURL = value
-		cfg.credentialProvenance.morphAPIURL = credentialSourceEnvironment
+	{
+		applied, err := cfg.Morph.applyEnv()
+		if applied.APIKey {
+			cfg.credentialProvenance.morphAPIKey = credentialSourceEnvironment
+		}
+		if applied.APIURL {
+			cfg.credentialProvenance.morphAPIURL = credentialSourceEnvironment
+		}
+		if applied.SSHGatewayHost {
+			cfg.credentialProvenance.morphSSHGatewayHost = credentialSourceEnvironment
+		}
+		if applied.DeleteOnRelease {
+			MarkDeleteOnReleaseExplicit(cfg, "morph")
+		}
+		if err != nil {
+			return err
+		}
 	}
 	if value, ok := os.LookupEnv("CRABBOX_BOXD_API_URL"); ok {
 		cfg.Boxd.APIURL = value
@@ -7884,19 +7660,6 @@ func applyEnv(cfg *Config) error {
 		cfg.Coder.Parameters = params
 	}
 	cfg.Coder.RichParameterFile = expandUserPath(getenv("CRABBOX_CODER_RICH_PARAMETER_FILE", cfg.Coder.RichParameterFile))
-	cfg.Morph.Snapshot = getenv("CRABBOX_MORPH_SNAPSHOT", cfg.Morph.Snapshot)
-	if value := os.Getenv("CRABBOX_MORPH_SSH_GATEWAY_HOST"); value != "" {
-		cfg.Morph.SSHGatewayHost = value
-		cfg.credentialProvenance.morphSSHGatewayHost = credentialSourceEnvironment
-	}
-	cfg.Morph.WorkRoot = getenv("CRABBOX_MORPH_WORK_ROOT", cfg.Morph.WorkRoot)
-	if value, ok := getenvBool("CRABBOX_MORPH_DELETE_ON_RELEASE"); ok {
-		cfg.Morph.DeleteOnRelease = value
-		MarkDeleteOnReleaseExplicit(cfg, "morph")
-	}
-	if value, ok := getenvBool("CRABBOX_MORPH_WAKE_ON_SSH"); ok {
-		cfg.Morph.WakeOnSSH = value
-	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_DAYTONA_API_KEY", "DAYTONA_API_KEY"); ok {
 		cfg.Daytona.APIKey = value
 		cfg.credentialProvenance.daytonaAPIKey = credentialSourceEnvironment
@@ -7964,19 +7727,14 @@ func applyEnv(cfg *Config) error {
 		cfg.CubeSandbox.ProxyScheme = value
 		cfg.credentialProvenance.cubeSandboxProxyProto = credentialSourceEnvironment
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_CONTROL_HOST", "EXE_DEV_CONTROL_HOST"); ok {
-		cfg.ExeDev.ControlHost = value
-		cfg.credentialProvenance.exeDevControlHost = credentialSourceEnvironment
-	}
-	cfg.ExeDev.Image = getenv("CRABBOX_EXE_DEV_IMAGE", getenv("EXE_DEV_IMAGE", cfg.ExeDev.Image))
-	cfg.ExeDev.CPUs = getenvInt("CRABBOX_EXE_DEV_CPUS", cfg.ExeDev.CPUs)
-	cfg.ExeDev.Memory = getenv("CRABBOX_EXE_DEV_MEMORY", getenv("EXE_DEV_MEMORY", cfg.ExeDev.Memory))
-	cfg.ExeDev.Disk = getenv("CRABBOX_EXE_DEV_DISK", getenv("EXE_DEV_DISK", cfg.ExeDev.Disk))
-	cfg.ExeDev.Command = getenv("CRABBOX_EXE_DEV_COMMAND", cfg.ExeDev.Command)
-	cfg.ExeDev.User = getenv("CRABBOX_EXE_DEV_USER", cfg.ExeDev.User)
-	cfg.ExeDev.WorkRoot = getenv("CRABBOX_EXE_DEV_WORK_ROOT", cfg.ExeDev.WorkRoot)
-	if value, ok := getenvBool("CRABBOX_EXE_DEV_NO_EMAIL"); ok {
-		cfg.ExeDev.NoEmail = value
+	{
+		applied, err := cfg.ExeDev.applyEnv()
+		if applied.ControlHost {
+			cfg.credentialProvenance.exeDevControlHost = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
 	{
 		applied, err := cfg.Railway.applyEnv()
@@ -8179,14 +7937,8 @@ func applyEnv(cfg *Config) error {
 	if err := cfg.Cua.applyEnv(); err != nil {
 		return err
 	}
-	cfg.OpenComputer.APIURL = getenv("CRABBOX_OPENCOMPUTER_API_URL", getenv("OPENCOMPUTER_API_URL", cfg.OpenComputer.APIURL))
-	cfg.OpenComputer.Workdir = getenv("CRABBOX_OPENCOMPUTER_WORKDIR", cfg.OpenComputer.Workdir)
-	cfg.OpenComputer.CPU = getenvInt("CRABBOX_OPENCOMPUTER_CPU", cfg.OpenComputer.CPU)
-	cfg.OpenComputer.MemoryMB = getenvInt("CRABBOX_OPENCOMPUTER_MEMORY_MB", cfg.OpenComputer.MemoryMB)
-	cfg.OpenComputer.TimeoutSecs = getenvInt("CRABBOX_OPENCOMPUTER_TIMEOUT_SECS", cfg.OpenComputer.TimeoutSecs)
-	cfg.OpenComputer.ExecTimeoutSecs = getenvInt("CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS", cfg.OpenComputer.ExecTimeoutSecs)
-	if v, ok := getenvBool("CRABBOX_OPENCOMPUTER_BURST"); ok {
-		cfg.OpenComputer.Burst = v
+	if err := cfg.OpenComputer.applyEnv(); err != nil {
+		return err
 	}
 	if err := cfg.CodeSandbox.applyEnv(); err != nil {
 		return err
@@ -8299,13 +8051,8 @@ func applyEnv(cfg *Config) error {
 	if err := cfg.CloudRunSandbox.applyEnv(); err != nil {
 		return err
 	}
-	cfg.Modal.App = getenv("CRABBOX_MODAL_APP", cfg.Modal.App)
-	cfg.Modal.Image = getenv("CRABBOX_MODAL_IMAGE", cfg.Modal.Image)
-	cfg.Modal.Workdir = getenv("CRABBOX_MODAL_WORKDIR", cfg.Modal.Workdir)
-	cfg.Modal.Python = getenv("CRABBOX_MODAL_PYTHON", cfg.Modal.Python)
-	cfg.Modal.Environment = getenv("CRABBOX_MODAL_ENVIRONMENT", cfg.Modal.Environment)
-	if values, ok := getenvList("CRABBOX_MODAL_SECRETS"); ok {
-		cfg.Modal.Secrets = values
+	if err := cfg.Modal.applyEnv(); err != nil {
+		return err
 	}
 	{
 		applied, err := cfg.UpstashBox.applyEnv()
@@ -8555,11 +8302,9 @@ func applyEnv(cfg *Config) error {
 		cfg.Tart.Disk = getenvInt("CRABBOX_TART_DISK", cfg.Tart.Disk)
 		cfg.tartDiskExplicit = cfg.Tart.Disk > 0
 	}
-	cfg.Lume.CLIPath = getenv("CRABBOX_LUME_CLI", cfg.Lume.CLIPath)
-	cfg.Lume.Base = getenv("CRABBOX_LUME_BASE", cfg.Lume.Base)
-	cfg.Lume.Storage = getenv("CRABBOX_LUME_STORAGE", cfg.Lume.Storage)
-	cfg.Lume.User = getenv("CRABBOX_LUME_USER", cfg.Lume.User)
-	cfg.Lume.WorkRoot = getenv("CRABBOX_LUME_WORK_ROOT", cfg.Lume.WorkRoot)
+	if err := cfg.Lume.applyEnv(); err != nil {
+		return err
+	}
 	cfg.HyperV.Image = getenv("CRABBOX_HYPERV_IMAGE", cfg.HyperV.Image)
 	cfg.HyperV.User = getenv("CRABBOX_HYPERV_USER", cfg.HyperV.User)
 	cfg.HyperV.WorkRoot = getenv("CRABBOX_HYPERV_WORK_ROOT", cfg.HyperV.WorkRoot)
@@ -8768,10 +8513,10 @@ func serverTypeForConfig(cfg Config) string {
 		return blank(cfg.E2B.Template, E2BConfigDefaultTemplate)
 	}
 	if cfg.Provider == "exe-dev" || cfg.Provider == "exedev" || cfg.Provider == "exe" {
-		return blank(cfg.ExeDev.Image, "default")
+		return blank(cfg.ExeDev.Image, ExeDevDefaultImageLabel)
 	}
 	if cfg.Provider == "modal" {
-		return blank(cfg.Modal.Image, "python:3.13-slim")
+		return blank(cfg.Modal.Image, ModalConfigDefaultImage)
 	}
 	if cfg.Provider == "upstash-box" || cfg.Provider == "upstash" {
 		return blank(cfg.UpstashBox.Size, UpstashBoxConfigDefaultSize)

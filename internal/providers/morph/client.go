@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -339,7 +340,7 @@ func (c *morphClient) doRaw(ctx context.Context, method, path string, query url.
 func normalizeMorphAPIURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		raw = "https://cloud.morph.so"
+		raw = core.MorphConfigDefaultAPIURL
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil {

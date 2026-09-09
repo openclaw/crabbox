@@ -33,6 +33,7 @@ async function setupFakeCrabbox() {
     `#!/usr/bin/env bash
 set -euo pipefail
 printf 'env CRABBOX_AWS_REGION=%s AWS_REGION=%s CRABBOX_AWS_AMI=%s args %s\\n' "\${CRABBOX_AWS_REGION:-}" "\${AWS_REGION:-}" "\${CRABBOX_AWS_AMI:-}" "$*" >>"\${CRABBOX_FAKE_LOG:?}"
+printf 'selection os=%s ami=%s command=%s\\n' "\${CRABBOX_OS-unset}" "\${CRABBOX_AWS_AMI-unset}" "$1" >>"\${CRABBOX_FAKE_LOG}"
 case "$1" in
   warmup)
     count_file="\${CRABBOX_FAKE_LOG}.count"
@@ -316,6 +317,64 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
     /image promote --target linux --json --expected-current-image capture --region us-west-2 --fast-snapshot-restore --fsr-az us-west-2a ami-devtools/,
   );
 });
+
+for (const [target, osImage] of [
+  ["linux", undefined],
+  ["linux", "ubuntu:26.04"],
+  ["linux", "ubuntu:24.04"],
+  ["windows", "ubuntu:24.04"],
+]) {
+  for (const failPromotedSmoke of target === "linux" ? [false, true] : [false]) {
+    test(`AWS ${target} OS ${osImage ?? "unset"} survives ${failPromotedSmoke ? "receipt rollback" : "promotion"}`, async (t) => {
+      const fake = await setupFakeCrabbox();
+      t.after(() => rm(fake.dir, { recursive: true, force: true }));
+      const result = await runScript(
+        [
+          "--target",
+          target,
+          "--region",
+          "us-west-2",
+          "--run",
+          "--prep-script",
+          target === "linux" ? fake.linuxPrep : fake.windowsPrep,
+        ],
+        {
+          CRABBOX_BIN: fake.fake,
+          CRABBOX_FAKE_LOG: fake.log,
+          CRABBOX_IMAGE_LOG_DIR: fake.dir,
+          CRABBOX_OS: osImage,
+          CRABBOX_AWS_AMI: undefined,
+          CRABBOX_IMAGE_WINDOWS_WARMUP_SETTLE_SECONDS: "0",
+          CRABBOX_FAKE_SMOKE_FAIL_LEASE: failPromotedSmoke ? "cbx_promoted" : "",
+        },
+      );
+      assert.equal(result.code, failPromotedSmoke ? 73 : 0, result.stderr);
+      const log = await readFile(fake.log, "utf8");
+      assert.deepEqual(
+        log.split("\n").filter((line) => /^selection .* command=warmup$/.test(line)),
+        ["unset", "ami-devtools", "unset"].map(
+          (ami) => `selection os=${osImage ?? "unset"} ami=${ami} command=warmup`,
+        ),
+      );
+      const promotions = log.split("\n").filter((line) => line.includes("args image promote "));
+      assert.equal(promotions.length, failPromotedSmoke ? 2 : 1);
+      for (const line of promotions) {
+        assert.equal(line.match(/--os (\S+)/)?.[1], target === "linux" ? osImage : undefined);
+      }
+      assert.match(promotions[0], /--expected-current-image capture/);
+      for (const lease of ["cbx_source", "cbx_candidate", "cbx_promoted"]) {
+        assert.match(log, new RegExp(`stop --provider aws --target ${target} ${lease}`));
+      }
+      if (failPromotedSmoke) {
+        assert.match(promotions[1], /--restore-receipt \S+ ami-devtools$/);
+        assert.match(result.stderr, /restored previous default image=ami-previous/);
+        assert.doesNotMatch(result.stdout, /promoted linux developer image passed/);
+      } else {
+        assert.match(result.stdout, /promoted image selection proved: ami-devtools/);
+      }
+    });
+  }
+}
 
 for (const lease of ["cbx_source", "cbx_candidate", "cbx_promoted"]) {
   test(`AWS image mint stops at failed offline smoke on ${lease}`, async (t) => {
@@ -1050,6 +1109,7 @@ test("AWS devtools mint wrapper maps windows flags", async () => {
       CRABBOX_BIN: fake.fake,
       CRABBOX_FAKE_LOG: fake.log,
       CRABBOX_IMAGE_WINDOWS_WARMUP_SETTLE_SECONDS: "0",
+      CRABBOX_OS: "ubuntu:24.04",
     },
   );
   assert.equal(result.code, 0, result.stderr);
@@ -1062,6 +1122,7 @@ test("AWS devtools mint wrapper maps windows flags", async () => {
   assert.doesNotMatch(log, /--desktop/);
   assert.doesNotMatch(log, /--browser/);
   assert.doesNotMatch(log, /warmup .*--region us-east-1/);
+  assert.doesNotMatch(log, /--os /);
   assert.match(
     log,
     /run --provider aws --target windows --id cbx_source --no-sync --shell -- Write-Output "windows-ssh-ready"/,

@@ -6,6 +6,8 @@ import (
 	"math"
 	"path"
 	"strings"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type stringListFlag []string
@@ -63,11 +65,8 @@ func RegisterDockerSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyDockerSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == providerName {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s; use --docker-sandbox-cpus or --docker-sandbox-memory", providerName)
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s; use --docker-sandbox-template", providerName)
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --docker-sandbox-cpus or --docker-sandbox-memory", "use --docker-sandbox-template"); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(flagValues)

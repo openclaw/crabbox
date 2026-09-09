@@ -3,6 +3,8 @@ package wandb
 import (
 	"flag"
 	"strings"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type wandbFlagValues struct {
@@ -23,11 +25,8 @@ func RegisterWandbProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyWandbProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if isWandbProviderName(cfg.Provider) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s", providerName)
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s", providerName)
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(wandbFlagValues)

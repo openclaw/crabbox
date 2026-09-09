@@ -71,6 +71,7 @@ Flags:
 
 Useful env:
   CRABBOX_BIN
+  CRABBOX_OS            Linux selector for leases, promotion, and receipt rollback
   CRABBOX_IMAGE_RUN
   CRABBOX_IMAGE_PROMOTE
   CRABBOX_IMAGE_KEEP_LEASE
@@ -407,6 +408,7 @@ rollback_promoted_image() {
   local -a args=(image promote --json --target "$target")
   [[ -n "$region" ]] && args+=(--region "$region")
   [[ -n "$server_type" ]] && args+=(--type "$server_type")
+  [[ "$target" == "linux" && -n "${CRABBOX_OS:-}" ]] && args+=(--os "$CRABBOX_OS")
   args+=(--restore-receipt "$receipt" "$current_id")
   rollback_log="$(mktemp "$log_dir/image-mint-${log_image_name}-rollback-${log_id}.json.XXXXXX")"
   if ! run_json_tee "$rollback_log" "$CRABBOX_BIN" "${args[@]}"; then
@@ -1009,6 +1011,7 @@ fi
 outcome_stage="promotion"
 promote_args=(image promote --target "$target" --json --expected-current-image capture)
 [[ -n "$region" ]] && promote_args+=(--region "$region")
+[[ "$target" == "linux" && -n "${CRABBOX_OS:-}" ]] && promote_args+=(--os "$CRABBOX_OS")
 if [[ "$fast_snapshot_restore" == "1" ]]; then
   promote_args+=(--fast-snapshot-restore)
   IFS=',' read -r -a fsr_az_values <<<"$fast_snapshot_restore_azs"

@@ -1,6 +1,10 @@
 package vast
 
-import "flag"
+import (
+	"flag"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
+)
 
 type vastFlagValues struct {
 	APIURL         *string
@@ -42,11 +46,8 @@ func RegisterVastProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyVastProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if isVastProviderName(cfg.Provider) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s; use --vast-gpu-name or --vast-gpu-count", providerName)
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s; use --vast-image", providerName)
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --vast-gpu-name or --vast-gpu-count", "use --vast-image"); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(vastFlagValues)

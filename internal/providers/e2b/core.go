@@ -1,7 +1,6 @@
 package e2b
 
 import (
-	"flag"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -41,10 +40,6 @@ type statusView = core.StatusView
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
 }
 
 func blank(value, fallback string) string {

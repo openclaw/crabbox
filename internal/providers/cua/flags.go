@@ -17,11 +17,8 @@ func RegisterProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if strings.EqualFold(strings.TrimSpace(cfg.Provider), providerName) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=cua; use --cua-vcpus and --cua-memory-mb")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=cua; use --cua-image and --cua-kind")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --cua-vcpus and --cua-memory-mb", "use --cua-image and --cua-kind"); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(core.CuaConfigFlagValues)

@@ -12,6 +12,8 @@
 
 - Contain Linux readiness venv and pip scratch files within the probe's temporary directory, including when dependency checks fail, while preserving the frozen v1 manifest digest. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
 
+- Add an explicit Ubuntu 24.04 developer-image publication selector while retaining Ubuntu 26.04 as the default, and scope Linux promotion and receipt rollback to the selected OS. https://github.com/openclaw/crabbox/pull/2028. Thanks @vincentkoc.
+
 - Run managed WSL2 workloads as the non-root `crabbox` user with passwordless sudo, writable work/cache directories, and the shared Node baseline on PATH. https://github.com/openclaw/crabbox/pull/2016. Thanks @steipete.
 
 - Keep managed WSL2 distributions alive between commands so detached Linux daemons survive until lease cleanup; preserve command and ownership deadlines. https://github.com/openclaw/crabbox/pull/2016. Thanks @steipete.
@@ -57,6 +59,22 @@
 - Describe Tensorlake configuration bindings once, sharing API, CLI, and workdir defaults while preserving positive-only YAML sizing, environment parsing, credential sources, and native defaults. [PR 2018](https://github.com/openclaw/crabbox/pull/2018). Thanks @steipete.
 
 - Describe Orgo configuration bindings once and remove redundant client endpoint fallbacks, preserving configured-key precedence, runtime key resolution, sizing defaults, and claim scope. [PR 2019](https://github.com/openclaw/crabbox/pull/2019). Thanks @steipete.
+
+- Describe OpenComputer configuration bindings once, sharing workdir and execution-timeout defaults while preserving explicit file integers, OC-file URL resolution, and CLI-only cleanup intent. [PR 2020](https://github.com/openclaw/crabbox/pull/2020). Thanks @steipete.
+
+- Describe Modal configuration bindings once, sharing configured defaults while preserving trusted Secret-name lists, environment clearing, and first-replace/later-append flags. [PR 2022](https://github.com/openclaw/crabbox/pull/2022). Thanks @steipete.
+
+- Share unsupported machine-sizing flag checks across providers, preserving explicit-input behavior, provider-specific guidance, and validation order. [PR 2023](https://github.com/openclaw/crabbox/pull/2023). Thanks @steipete.
+
+- Describe Morph configuration bindings once, sharing endpoint, gateway, and work-root defaults while preserving source precedence, explicit deletion policy, and SSH wake behavior. [PR 2024](https://github.com/openclaw/crabbox/pull/2024). Thanks @steipete.
+
+- Describe exe.dev configuration bindings once, sharing configured defaults while preserving work-root inheritance, omitted native images, CPU input rules, and notification preferences. [PR 2025](https://github.com/openclaw/crabbox/pull/2025). Thanks @steipete.
+
+- Share work-root inheritance decisions across exe.dev, Runpod, Multipass, Hyper-V, and Tart while preserving raw provider roots, portable-default handling, and later validation. [PR 2026](https://github.com/openclaw/crabbox/pull/2026). Thanks @steipete.
+
+- Describe OVHcloud configuration bindings once, sharing configured endpoint, image, and flavor defaults while preserving input precedence, explicit image selection, regional aliases, and machine-class mapping. [PR 2027](https://github.com/openclaw/crabbox/pull/2027). Thanks @steipete.
+
+- Describe Lume configuration bindings once, sharing configured defaults while preserving trusted host settings, user-dependent work roots, and provider validation order. [PR 2029](https://github.com/openclaw/crabbox/pull/2029). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 

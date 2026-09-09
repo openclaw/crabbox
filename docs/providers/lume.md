@@ -19,3 +19,25 @@ Crabbox pins a durable marker in each storage root. Missing or changed storage
 identity retains lease claims and keys for fail-closed recovery.
 
 Clone/start; SSH; run; clean; destroy; confirm absent.
+
+## Configuration bindings
+
+The five non-secret settings use the shared typed configuration bindings:
+
+| YAML key under `lume` | Environment variable | Flag |
+| --- | --- | --- |
+| `cliPath` | `CRABBOX_LUME_CLI` | `--lume-cli` |
+| `base` | `CRABBOX_LUME_BASE` | `--lume-base` |
+| `storage` | `CRABBOX_LUME_STORAGE` | `--lume-storage` |
+| `user` | `CRABBOX_LUME_USER` | `--lume-user` |
+| `workRoot` | `CRABBOX_LUME_WORK_ROOT` | `--lume-work-root` |
+
+Only `workRoot` is accepted from repository configuration; the other four keys
+require trusted user configuration, environment variables, or flags. Empty YAML
+or environment strings preserve prior values, while explicitly empty flags assign
+before the existing selected-provider defaults and validation run.
+
+Runtime defaults can derive `/Users/<user>/crabbox` after a guest-user change or
+inherit a custom generic work root. That user-dependent decision, native storage
+resolution, and validation remain provider-owned; the shared bindings do not read
+Lume settings or create a VM.

@@ -711,7 +711,7 @@ func (b *Backend) resolveAcquireConfig(ctx context.Context) (core.Config, error)
 		return core.Config{}, core.Exit(2, "provider=ovh does not support --os %s; use --os ubuntu:24.04 or set ovh.image explicitly", cfg.OSImage)
 	}
 	if cfg.OVH.Image == "" {
-		cfg.OVH.Image = "Ubuntu 24.04"
+		cfg.OVH.Image = core.OVHConfigDefaultImage
 	}
 	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
 		cfg.OVH.Flavor = cfg.ServerType

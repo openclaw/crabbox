@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func RegisterBlaxelProviderFlags(fs *flag.FlagSet, defaults Config) any {
@@ -13,11 +14,8 @@ func RegisterBlaxelProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyBlaxelProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if strings.EqualFold(strings.TrimSpace(cfg.Provider), providerName) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=blaxel; use --blaxel-memory-mb")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=blaxel; use --blaxel-image")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --blaxel-memory-mb", "use --blaxel-image"); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(core.BlaxelConfigFlagValues)

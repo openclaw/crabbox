@@ -19,8 +19,9 @@ import (
 )
 
 type field struct {
-	name, kind, key, configAlias, env, envAlias, envAlias2, flag, help, defaultExpr, flagFallbackExpr                                                            string
-	nonnegative, trustedFileOnly, noFile, noEnv, noFlag, fileIgnoreEmpty, reportApplied, envIntFallback, fileIntPositive, fileFloatPositive, envAliasAfterConfig bool
+	fileListRaw, envListPresence, flagListReplaceAppend                                                                                                                          bool
+	name, kind, key, configAlias, env, envAlias, envAlias2, flag, help, defaultExpr, flagFallbackExpr                                                                            string
+	nonnegative, trustedFileOnly, noFile, noEnv, noFlag, fileIgnoreEmpty, reportApplied, envIntFallback, fileIntPositive, fileIntPresent, fileFloatPositive, envAliasAfterConfig bool
 }
 
 type fileBinding struct {
@@ -220,6 +221,22 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		if f.noFlag && f.kind != "string" {
 			return s, fmt.Errorf("%s: %s sources support only string fields", f.name, tags.Get("sources"))
 		}
+		for _, mode := range []struct {
+			tag, accepted string
+			admitted      bool
+			enabled       *bool
+		}{
+			{"fileList", "raw", !f.noFile, &f.fileListRaw},
+			{"envList", "presence", !f.noEnv, &f.envListPresence},
+			{"flagList", "replace-append", !f.noFlag, &f.flagListReplaceAppend},
+		} {
+			if value, ok := tags.Lookup(mode.tag); ok {
+				if value != mode.accepted || f.kind != "[]string" || !mode.admitted {
+					return s, fmt.Errorf("%s: %s requires %s on a []string field with that source", f.name, mode.tag, mode.accepted)
+				}
+				*mode.enabled = true
+			}
+		}
 		if value, ok := tags.Lookup("reportApplied"); ok {
 			if value != "true" || (f.kind != "string" && f.kind != "bool") {
 				return s, fmt.Errorf("%s: reportApplied is supported only as true for string or bool fields", f.name)
@@ -254,10 +271,11 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			return s, fmt.Errorf("%s: pilot int fields require nonnegative policy", f.name)
 		}
 		if value, ok := tags.Lookup("fileInt"); ok {
-			if value != "positive" || f.kind != "int" || f.noFile || !f.nonnegative {
-				return s, fmt.Errorf("%s: fileInt is supported only as positive for file-admitted nonnegative int fields", f.name)
+			if (value != "positive" && value != "present") || f.kind != "int" || f.noFile || !f.nonnegative {
+				return s, fmt.Errorf("%s: fileInt is supported only as positive or present for file-admitted nonnegative int fields", f.name)
 			}
-			f.fileIntPositive = true
+			f.fileIntPositive = value == "positive"
+			f.fileIntPresent = value == "present"
 		}
 		if value, ok := tags.Lookup("fileFloat"); ok {
 			if value != "positive" || f.kind != "float64" || f.noFile {
@@ -325,8 +343,8 @@ func generate(s schema, source string) ([]byte, error) {
 	needsOS, needsStrings := false, false
 	for _, f := range s.fields {
 		if f.kind == "[]string" {
-			needsStrings = true
-			needsOS = needsOS || !f.noEnv
+			needsStrings = needsStrings || !f.flagListReplaceAppend
+			needsOS = needsOS || (!f.noEnv && !f.envListPresence)
 		}
 	}
 	if needsOS {
@@ -398,12 +416,16 @@ func generate(s schema, source string) ([]byte, error) {
 				fileCondition += fmt.Sprintf(" && *file.%s > 0", binding.member)
 			}
 			p("if %s {\n", fileCondition)
-			if f.nonnegative && !f.fileIntPositive {
+			if f.nonnegative && !f.fileIntPositive && !f.fileIntPresent {
 				p("if *file.%s < 0 { return %sexit(2, %q) }\n", binding.member, resultPrefix, s.provider+" "+f.key+" must be non-negative")
 			}
 			value := "*file." + binding.member
 			if f.kind == "[]string" {
-				value = "normalizeList(" + value + ")"
+				if f.fileListRaw {
+					value = "append([]string(nil), (" + value + ")...)"
+				} else {
+					value = "normalizeList(" + value + ")"
+				}
 			}
 			p("cfg.%s = %s\n", f.name, value)
 			if f.reportApplied {
@@ -466,6 +488,10 @@ func generate(s schema, source string) ([]byte, error) {
 				p("if value, ok := getenvBool(%q); ok { cfg.%s = value }\n", f.env, f.name)
 			}
 		case "[]string":
+			if f.envListPresence {
+				p("if value, ok := getenvList(%q); ok { cfg.%s = value }\n", f.env, f.name)
+				continue
+			}
 			p("if value := os.Getenv(%q); value != \"\" { cfg.%s = splitCommaList(value) }\n", f.env, f.name)
 		}
 	}
@@ -478,13 +504,26 @@ func generate(s schema, source string) ([]byte, error) {
 		kind := f.kind
 		if kind == "[]string" {
 			kind = "string"
+			if f.flagListReplaceAppend {
+				kind = "replaceAppendListFlag"
+			}
 		}
 		p("%s *%s\n", f.name, kind)
 	}
 	p("}\n\n")
-	p("// Register%sFlags registers mechanical bindings without selecting a provider.\nfunc Register%sFlags(fs *flag.FlagSet, defaults %s) %sFlagValues {\nreturn %sFlagValues{\n", s.name, s.name, s.name, s.name, s.name)
+	p("// Register%sFlags registers mechanical bindings without selecting a provider.\nfunc Register%sFlags(fs *flag.FlagSet, defaults %s) %sFlagValues {\n", s.name, s.name, s.name, s.name)
+	for _, f := range s.fields {
+		if f.flagListReplaceAppend {
+			p("list%s := newReplaceAppendListFlag(defaults.%s)\nfs.Var(list%s, %q, %q)\n", f.name, f.name, f.name, f.flag, f.help)
+		}
+	}
+	p("return %sFlagValues{\n", s.name)
 	for _, f := range s.fields {
 		if f.noFlag {
+			continue
+		}
+		if f.flagListReplaceAppend {
+			p("%s: list%s,\n", f.name, f.name)
 			continue
 		}
 		method := map[string]string{"string": "String", "int": "Int", "float64": "Float64", "bool": "Bool", "[]string": "String"}[f.kind]
@@ -528,7 +567,11 @@ func generate(s schema, source string) ([]byte, error) {
 		}
 		value := "*values." + f.name
 		if f.kind == "[]string" {
-			value = "splitCommaList(" + value + ")"
+			if f.flagListReplaceAppend {
+				value = "append([]string(nil), values." + f.name + ".values...)"
+			} else {
+				value = "splitCommaList(" + value + ")"
+			}
 		}
 		if f.reportApplied {
 			p("if visited.%s { cfg.%s = %s; applied.%s = true }\n", f.name, f.name, value, f.name)

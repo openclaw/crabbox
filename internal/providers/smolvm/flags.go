@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func RegisterSmolvmProviderFlags(fs *flag.FlagSet, defaults Config) any {
@@ -13,11 +14,8 @@ func RegisterSmolvmProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplySmolvmProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == providerName || cfg.Provider == "smol" || cfg.Provider == "smolmachines" || cfg.Provider == "smolfleet" {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s; use --smolvm-cpus/--smolvm-memory-mb", providerName)
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s; use --smolvm-image", providerName)
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --smolvm-cpus/--smolvm-memory-mb", "use --smolvm-image"); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(core.SmolvmConfigFlagValues)

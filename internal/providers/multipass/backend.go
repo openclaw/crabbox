@@ -72,13 +72,7 @@ func applyDefaults(cfg *Config) {
 	if cfg.Multipass.User == "" {
 		cfg.Multipass.User = "crabbox"
 	}
-	if cfg.Multipass.WorkRoot == "" {
-		if !core.IsDefaultWorkRoot(cfg.WorkRoot) {
-			cfg.Multipass.WorkRoot = cfg.WorkRoot
-		} else {
-			cfg.Multipass.WorkRoot = "/work/crabbox"
-		}
-	}
+	cfg.Multipass.WorkRoot = core.ResolveInheritedWorkRoot(cfg.Multipass.WorkRoot, cfg.WorkRoot, "/work/crabbox")
 	if cfg.Multipass.LaunchTimeout <= 0 {
 		cfg.Multipass.LaunchTimeout = 20 * time.Minute
 	}

@@ -1,7 +1,6 @@
 package opencomputer
 
 import (
-	"flag"
 	"io"
 	"time"
 
@@ -33,7 +32,6 @@ const (
 	leasePrefix     = "ocbx_"
 	namePrefix      = "crabbox-"
 	defaultAPIURL   = "https://app.opencomputer.dev"
-	defaultWorkdir  = "/workspace/crabbox"
 	targetLinux     = core.TargetLinux
 	NetworkPublic   = core.NetworkPublic
 	statusViewReady = "running"
@@ -44,10 +42,6 @@ const (
 
 func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
-}
-
-func flagWasSet(fs *flag.FlagSet, name string) bool {
-	return core.FlagWasSet(fs, name)
 }
 
 func newLeaseSlug(leaseID string) string {

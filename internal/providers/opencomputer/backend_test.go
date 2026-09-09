@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -519,8 +520,8 @@ func TestRunCreatesExecsAndKillsEphemeral(t *testing.T) {
 	if last.Cwd != "/workspace/crabbox" {
 		t.Fatalf("user exec cwd=%q", last.Cwd)
 	}
-	if last.Timeout != openComputerExecTimeoutSecs {
-		t.Fatalf("user exec timeout=%d want %d", last.Timeout, openComputerExecTimeoutSecs)
+	if last.Timeout != 3600 {
+		t.Fatalf("user exec timeout=%d want %d", last.Timeout, 3600)
 	}
 }
 
@@ -1702,5 +1703,140 @@ func TestRunMissingCommandRetainsCleanup(t *testing.T) {
 	}
 	if calls := fake.allExecs(); len(calls) != 1 {
 		t.Fatalf("expected only workspace setup, got %#v", calls)
+	}
+}
+
+func TestOpenComputerConfigFlagContract(t *testing.T) {
+	for _, provider := range []string{"opencomputer", " OC ", "open-computer", "aws"} {
+		cfg := Config{Provider: provider, OpenComputer: core.OpenComputerConfig{APIURL: "prior-url", Workdir: "/workspace/prior", CPU: 8, MemoryMB: 1024, TimeoutSecs: 45, ExecTimeoutSecs: 90, Burst: true, ForgetMissing: true}}
+		fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+		values := RegisterOpenComputerProviderFlags(fs, cfg)
+		count := 0
+		fs.VisitAll(func(*flag.Flag) { count++ })
+		if count != 8 || fs.Lookup("opencomputer-api-key") != nil {
+			t.Fatalf("flag count=%d", count)
+		}
+		original := cfg.OpenComputer
+		if err := ApplyOpenComputerProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.OpenComputer != original {
+			t.Fatal("unvisited changed config")
+		}
+		if err := fs.Parse([]string{"--opencomputer-api-url=", "--opencomputer-workdir=  ", "--opencomputer-cpu=0", "--opencomputer-memory-mb=-2", "--opencomputer-timeout-secs=-3", "--opencomputer-exec-timeout-secs=-4", "--opencomputer-burst=false", "--opencomputer-forget-missing=false"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyOpenComputerProviderFlags(&cfg, fs, struct{}{}); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.OpenComputer != original {
+			t.Fatal("wrong values type changed config")
+		}
+		if err := ApplyOpenComputerProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want := core.OpenComputerConfig{Workdir: "  ", MemoryMB: -2, TimeoutSecs: -3, ExecTimeoutSecs: -4}
+		if cfg.OpenComputer != want {
+			t.Fatalf("flags=%#v want=%#v", cfg.OpenComputer, want)
+		}
+		if err := fs.Set("opencomputer-forget-missing", "true"); err != nil {
+			t.Fatal(err)
+		}
+		if err := fs.Set("opencomputer-burst", "true"); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyOpenComputerProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want.ForgetMissing = true
+		want.Burst = true
+		if cfg.OpenComputer != want {
+			t.Fatal("explicit true flags lost")
+		}
+	}
+}
+
+func TestOpenComputerConfigMachineFlagOrder(t *testing.T) {
+	for _, provider := range []string{"opencomputer", " OC ", "open-computer", "aws"} {
+		for _, args := range [][]string{{"--class=large", "--type=machine"}, {"--type=machine"}} {
+			cfg := Config{Provider: provider}
+			fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+			fs.String("class", "", "")
+			fs.String("type", "", "")
+			RegisterOpenComputerProviderFlags(fs, cfg)
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			err := ApplyOpenComputerProviderFlags(&cfg, fs, struct{}{})
+			if provider == "aws" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				continue
+			}
+			want := "--type is not supported"
+			if len(args) == 2 {
+				want = "--class is not supported"
+			}
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("provider=%q err=%v want=%s", provider, err, want)
+			}
+		}
+	}
+}
+
+func TestOpenComputerConfigEffectiveDefaults(t *testing.T) {
+	for _, tc := range []struct{ workdir, want string }{{"", "/workspace/crabbox"}, {"  ", "/workspace/crabbox"}, {" /workspace/example/ ", "/workspace/example"}} {
+		cfg := Config{OpenComputer: core.OpenComputerConfig{Workdir: tc.workdir}}
+		got, err := openComputerWorkdir(cfg)
+		if err != nil || got != tc.want {
+			t.Fatalf("workdir=%q err=%v want=%q", got, err, tc.want)
+		}
+	}
+	for _, n := range []int{-2, 0, 45} {
+		cfg := Config{OpenComputer: core.OpenComputerConfig{ExecTimeoutSecs: n}}
+		backend := NewOpenComputerBackend(Provider{}.Spec(), cfg, Runtime{}).(*openComputerBackend)
+		want := 3600
+		if n > 0 {
+			want = n
+		}
+		if got := backend.execTimeoutSecs(); got != want {
+			t.Fatalf("timeout=%d want=%d", got, want)
+		}
+		if backend.cfg.OpenComputer != cfg.OpenComputer {
+			t.Fatal("effective defaults mutated raw config")
+		}
+	}
+}
+
+func TestOpenComputerConfigClientFallbackContract(t *testing.T) {
+	for _, tc := range []struct{ name, primary, vendor, fileURL, wantKey, wantURL string }{
+		{"default-url", "", "", "", "inert-file", "https://app.opencomputer.dev"},
+		{"primary-key", " inert-primary ", "inert-vendor", "https://fixture.example", "inert-primary", "https://fixture.example"},
+		{"vendor-key", "", " inert-vendor ", "https://fixture.example", "inert-vendor", "https://fixture.example"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", tc.primary)
+			t.Setenv("OPENCOMPUTER_API_KEY", tc.vendor)
+			if err := os.MkdirAll(home+"/.oc", 0700); err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(ocFileConfig{APIURL: tc.fileURL, APIKey: "inert-file"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(home+"/.oc/config.json", data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			api, err := newOCAPIClient(Config{}, Runtime{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if api.apiKey != tc.wantKey || api.baseURL != tc.wantURL {
+				t.Fatalf("normal source resolution changed for %s", tc.name)
+			}
+		})
 	}
 }

@@ -161,3 +161,17 @@ func TestApplyProfileAndJobOptionalOverlays(t *testing.T) {
 		t.Fatal("job pointer options share their copies")
 	}
 }
+
+func TestResolveInheritedWorkRootContract(t *testing.T) {
+	for _, tc := range []struct{ providerRoot, genericRoot, fallback, want string }{
+		{"", "", "fallback", "fallback"}, {"", "/work/crabbox", "fallback", "fallback"}, {"", "/Users/ec2-user/crabbox", "fallback", "fallback"}, {"", `C:\crabbox`, "fallback", "fallback"},
+		{"", " /work/crabbox ", "fallback", " /work/crabbox "}, {"", "/WORK/crabbox", "fallback", "/WORK/crabbox"}, {"", `c:\crabbox`, "fallback", `c:\crabbox`},
+		{"", "/srv/custom", "fallback", "/srv/custom"}, {"", "/Users/alice/custom", "fallback", "/Users/alice/custom"}, {"", `D:\custom`, "fallback", `D:\custom`}, {"", "  ", "fallback", "  "},
+		{" ", "/srv/custom", "fallback", " "}, {"/work/crabbox", "/srv/custom", "fallback", "/work/crabbox"}, {"relative", "/srv/custom", "fallback", "relative"},
+		{"", "/work/crabbox", "  literal fallback ", "  literal fallback "}, {"", "/work/crabbox", "", ""},
+	} {
+		if got := ResolveInheritedWorkRoot(tc.providerRoot, tc.genericRoot, tc.fallback); got != tc.want {
+			t.Fatalf("roots=%q/%q fallback=%q got=%q want=%q", tc.providerRoot, tc.genericRoot, tc.fallback, got, tc.want)
+		}
+	}
+}

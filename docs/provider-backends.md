@@ -913,6 +913,19 @@ each `Provider.RegisterFlags` invocation, and treats everything else registered
 by `run` as a shared command flag. It never calls `ApplyFlags` or `Configure`.
 Do not add a parallel flag inventory.
 
+Providers that reject both explicit `--class` and `--type` can share
+`shared.RejectExplicitMachineSizingFlags`. It checks flag visits rather than
+inherited config values, rejects class before type regardless of argument order,
+and retains the caller's canonical provider name and literal guidance. An empty
+explicit value is still a visit. The helper does not select a provider, mutate
+configuration, register flags, or infer admission from class-mapping metadata.
+
+Keep its call at the provider's existing validation position. In particular,
+value-type assertions may precede the guard, and target/expose checks or field
+application may follow it. Single-flag rejection, supported type mapping, and
+providers without this rejection policy remain distinct contracts; do not use
+the pair helper to change them.
+
 Pattern for a provider with typed config fields:
 
 ```go
@@ -958,6 +971,15 @@ Blacksmith does) when the config type is not ready to export cleanly.
 
 If a provider needs durable config, add typed config fields in `Config` and env
 overrides in `config.go`.
+
+`cli.ResolveInheritedWorkRoot` shares the raw work-root decision used by exe.dev
+(core loading and backend defaults), Runpod, Multipass, Hyper-V, and Tart. A
+nonempty provider root wins; otherwise a generic root that is not an exact
+portable default is inherited, or the caller's fallback is used. The resolver
+does not trim, normalize paths, inspect markers or targets, validate directories,
+or mutate configuration. Keep subsequent generic-root copies and other default
+assignments at their existing call sites. Providers with trimmed classifiers,
+explicit-root markers, or different projection rules retain their own policy.
 
 Never pass provider secrets as command-line arguments. Use environment variables,
 local SDK config, the broker, or a credential store outside repo config.

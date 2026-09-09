@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1127,5 +1128,57 @@ func TestRunpodClientRetriesGPUCapacityFallbacks(t *testing.T) {
 	}
 	if len(seen) != 2 || seen[0] != "NVIDIA L4" || seen[1] != "NVIDIA RTX 4000 Ada Generation" {
 		t.Fatalf("seen=%v", seen)
+	}
+}
+
+func TestInheritedWorkRootCallerContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USER", "fixture-user")
+	for _, tc := range []struct{ providerRoot, genericRoot, want string }{
+		{"", "", "/tmp/crabbox"},
+		{"", "/work/crabbox", "/tmp/crabbox"},
+		{"", "/Users/ec2-user/crabbox", "/tmp/crabbox"},
+		{"", "C:\\crabbox", "/tmp/crabbox"},
+		{"", " /work/crabbox ", " /work/crabbox "},
+		{"", "/WORK/crabbox", "/WORK/crabbox"},
+		{"", "c:\\crabbox", "c:\\crabbox"},
+		{"", "/srv/custom", "/srv/custom"},
+		{"", "/Users/alice/custom", "/Users/alice/custom"},
+		{"", "D:\\custom", "D:\\custom"},
+		{"", "  ", "  "},
+		{" ", "/srv/custom", " "},
+		{"/work/crabbox", "/srv/custom", "/work/crabbox"},
+		{"relative", "/srv/custom", "relative"},
+		{"/provider/root", "/srv/custom", "/provider/root"},
+	} {
+		for _, explicit := range []bool{false, true} {
+			cfg := Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
+			if explicit {
+				core.MarkWorkRootExplicit(&cfg)
+				cfg.TargetOS = "existing-target"
+				cfg.WindowsMode = "prior-mode"
+			}
+			cfg.WorkRoot = tc.genericRoot
+			cfg.Runpod.WorkRoot = tc.providerRoot
+			cfg.Runpod.APIURL = "https://fixture.invalid"
+			cfg.Runpod.CloudType = "SECURE"
+			cfg.Runpod.InstanceID = "fixture-instance"
+			cfg.Runpod.Image = "fixture-image"
+			want := cfg
+			want.Provider = "runpod"
+			if !explicit {
+				want.TargetOS = "linux"
+			}
+			want.Runpod.WorkRoot = tc.want
+			want.WorkRoot = tc.want
+			want.Runpod.DiskGB = 20
+			want.SSHPort = ""
+			want.SSHFallbackPorts = nil
+			want.ServerType = "fixture-instance"
+			applyRunpodDefaults(&cfg)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("whole config differs for roots=%q/%q explicit=%t: got=%#v want=%#v", tc.providerRoot, tc.genericRoot, explicit, cfg, want)
+			}
+		}
 	}
 }
