@@ -4823,12 +4823,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	}
 	{
 		applied, err := cfg.SealosDevbox.applyFile(file.SealosDevbox, trusted)
-		if applied.Kubectl {
-			cfg.SealosDevbox.Kubectl = expandUserPath(cfg.SealosDevbox.Kubectl)
-		}
-		if applied.Kubeconfig {
-			cfg.SealosDevbox.Kubeconfig = expandUserPath(cfg.SealosDevbox.Kubeconfig)
-		}
+		cfg.SealosDevbox.ExpandAppliedLocalPaths(applied)
 		if applied.WorkRoot {
 			MarkSealosDevboxWorkRootExplicit(cfg)
 		}

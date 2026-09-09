@@ -2,8 +2,8 @@ package cli
 
 //go:generate go run ../../scripts/configgen -source config_kubevirt.go -output config_kubevirt_generated.go -type KubeVirtConfig -provider kubevirt
 
-// KubeVirtConfig owns mechanical bindings. File admission and local-path
-// expansion remain in applyKubeVirtFileConfig and the source callers.
+// KubeVirtConfig owns mechanical bindings and accepted local-path expansion.
+// File admission remains in applyKubeVirtFileConfig.
 type KubeVirtConfig struct {
 	Kubectl    string `config:"kubectl" env:"CRABBOX_KUBEVIRT_KUBECTL" flag:"kubevirt-kubectl" sources:"user,repo,env,flag" help:"kubectl executable" default:"kubectl" fileIgnoreEmpty:"true" fileStorage:"value" reportApplied:"true"`
 	Virtctl    string `config:"virtctl" env:"CRABBOX_KUBEVIRT_VIRTCTL" flag:"kubevirt-virtctl" sources:"user,repo,env,flag" help:"virtctl executable" default:"virtctl" fileIgnoreEmpty:"true" fileStorage:"value" reportApplied:"true"`
@@ -20,6 +20,28 @@ type KubeVirtConfig struct {
 	DeleteOnRelease bool   `config:"deleteOnRelease" env:"CRABBOX_KUBEVIRT_DELETE_ON_RELEASE" flag:"kubevirt-delete-on-release" sources:"user,repo,env,flag" help:"delete the VM on release instead of stopping it" default:"true" reportApplied:"true"`
 }
 
+// ExpandAppliedLocalPaths expands local paths accepted by a file or flag overlay.
+func (cfg *KubeVirtConfig) ExpandAppliedLocalPaths(applied KubeVirtConfigApplied) {
+	if applied.Kubectl {
+		cfg.Kubectl = expandUserPath(cfg.Kubectl)
+	}
+	if applied.Virtctl {
+		cfg.Virtctl = expandUserPath(cfg.Virtctl)
+	}
+	if applied.Kubeconfig {
+		cfg.Kubeconfig = expandUserPath(cfg.Kubeconfig)
+	}
+	if applied.Template {
+		cfg.Template = expandUserPath(cfg.Template)
+	}
+	if applied.SSHKey {
+		cfg.SSHKey = expandUserPath(cfg.SSHKey)
+	}
+	if applied.SSHPublicKey {
+		cfg.SSHPublicKey = expandUserPath(cfg.SSHPublicKey)
+	}
+}
+
 // applyKubeVirtFileConfig is the sole file-policy entry to the generated overlay.
 // Filter a snapshot so ignored input remains intact for configuration persistence.
 func applyKubeVirtFileConfig(cfg *Config, file *fileKubeVirtConfig, trusted bool) error {
@@ -31,24 +53,7 @@ func applyKubeVirtFileConfig(cfg *Config, file *fileKubeVirtConfig, trusted bool
 		snapshot.SSHPublicKey = ""
 	}
 	applied, err := cfg.KubeVirt.applyFile(&snapshot, trusted)
-	if applied.Kubectl {
-		cfg.KubeVirt.Kubectl = expandUserPath(cfg.KubeVirt.Kubectl)
-	}
-	if applied.Virtctl {
-		cfg.KubeVirt.Virtctl = expandUserPath(cfg.KubeVirt.Virtctl)
-	}
-	if applied.Kubeconfig {
-		cfg.KubeVirt.Kubeconfig = expandUserPath(cfg.KubeVirt.Kubeconfig)
-	}
-	if applied.Template {
-		cfg.KubeVirt.Template = expandUserPath(cfg.KubeVirt.Template)
-	}
-	if applied.SSHKey {
-		cfg.KubeVirt.SSHKey = expandUserPath(cfg.KubeVirt.SSHKey)
-	}
-	if applied.SSHPublicKey {
-		cfg.KubeVirt.SSHPublicKey = expandUserPath(cfg.KubeVirt.SSHPublicKey)
-	}
+	cfg.KubeVirt.ExpandAppliedLocalPaths(applied)
 	if applied.DeleteOnRelease {
 		MarkDeleteOnReleaseExplicit(cfg, "kubevirt")
 	}

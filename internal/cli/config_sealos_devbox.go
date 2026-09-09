@@ -2,8 +2,8 @@ package cli
 
 //go:generate go run ../../scripts/configgen -source config_sealos_devbox.go -output config_sealos_devbox_generated.go -type SealosDevboxConfig -provider sealos-devbox
 
-// SealosDevboxConfig owns source bindings; local-path expansion and native
-// validation remain with the configuration callers and provider.
+// SealosDevboxConfig owns source bindings and accepted local-path expansion.
+// Native validation remains with the provider.
 type SealosDevboxConfig struct {
 	Kubectl         string `config:"kubectl" env:"CRABBOX_SEALOS_DEVBOX_KUBECTL" flag:"sealos-devbox-kubectl" sources:"user,env,flag" help:"kubectl executable" default:"kubectl" fileIgnoreEmpty:"true" fileStorage:"value" reportApplied:"true"`
 	Kubeconfig      string `config:"kubeconfig" env:"CRABBOX_SEALOS_DEVBOX_KUBECONFIG" flag:"sealos-devbox-kubeconfig" sources:"user,env,flag" help:"Kubernetes kubeconfig path" fileIgnoreEmpty:"true" fileStorage:"value" reportApplied:"true"`
@@ -21,4 +21,14 @@ type SealosDevboxConfig struct {
 	WorkRoot        string `config:"workRoot" env:"CRABBOX_SEALOS_DEVBOX_WORK_ROOT" flag:"sealos-devbox-work-root" sources:"user,env,flag" help:"DevBox Crabbox work root" default:"/home/devbox/project" fileIgnoreEmpty:"true" fileStorage:"value" reportApplied:"true"`
 	NodeHost        string `config:"nodeHost" env:"CRABBOX_SEALOS_DEVBOX_NODE_HOST" flag:"sealos-devbox-node-host" sources:"user,env,flag" help:"Node host for NodePort mode" fileIgnoreEmpty:"true" fileStorage:"value"`
 	DeleteOnRelease bool   `config:"deleteOnRelease" env:"CRABBOX_SEALOS_DEVBOX_DELETE_ON_RELEASE" flag:"sealos-devbox-delete-on-release" sources:"user,repo,env,flag" help:"delete the DevBox on release instead of retaining it" reportApplied:"true"`
+}
+
+// ExpandAppliedLocalPaths expands local paths accepted by a file or flag overlay.
+func (cfg *SealosDevboxConfig) ExpandAppliedLocalPaths(applied SealosDevboxConfigApplied) {
+	if applied.Kubectl {
+		cfg.Kubectl = expandUserPath(cfg.Kubectl)
+	}
+	if applied.Kubeconfig {
+		cfg.Kubeconfig = expandUserPath(cfg.Kubeconfig)
+	}
 }

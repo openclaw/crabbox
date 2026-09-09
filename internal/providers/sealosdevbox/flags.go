@@ -20,12 +20,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		return nil
 	}
 	applied := v.Apply(&cfg.SealosDevbox, fs)
-	if applied.Kubectl {
-		cfg.SealosDevbox.Kubectl = core.ExpandUserPath(cfg.SealosDevbox.Kubectl)
-	}
-	if applied.Kubeconfig {
-		cfg.SealosDevbox.Kubeconfig = core.ExpandUserPath(cfg.SealosDevbox.Kubeconfig)
-	}
+	cfg.SealosDevbox.ExpandAppliedLocalPaths(applied)
 	if applied.WorkRoot {
 		cfg.WorkRoot = cfg.SealosDevbox.WorkRoot
 		core.MarkSealosDevboxWorkRootExplicit(cfg)

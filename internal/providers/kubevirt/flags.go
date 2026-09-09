@@ -15,24 +15,7 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 		return nil
 	}
 	applied := v.Apply(&cfg.KubeVirt, fs)
-	if applied.Kubectl {
-		cfg.KubeVirt.Kubectl = core.ExpandUserPath(cfg.KubeVirt.Kubectl)
-	}
-	if applied.Virtctl {
-		cfg.KubeVirt.Virtctl = core.ExpandUserPath(cfg.KubeVirt.Virtctl)
-	}
-	if applied.Kubeconfig {
-		cfg.KubeVirt.Kubeconfig = core.ExpandUserPath(cfg.KubeVirt.Kubeconfig)
-	}
-	if applied.Template {
-		cfg.KubeVirt.Template = core.ExpandUserPath(cfg.KubeVirt.Template)
-	}
-	if applied.SSHKey {
-		cfg.KubeVirt.SSHKey = core.ExpandUserPath(cfg.KubeVirt.SSHKey)
-	}
-	if applied.SSHPublicKey {
-		cfg.KubeVirt.SSHPublicKey = core.ExpandUserPath(cfg.KubeVirt.SSHPublicKey)
-	}
+	cfg.KubeVirt.ExpandAppliedLocalPaths(applied)
 	if applied.WorkRoot {
 		cfg.WorkRoot = cfg.KubeVirt.WorkRoot
 	}

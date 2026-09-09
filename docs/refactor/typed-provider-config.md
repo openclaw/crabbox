@@ -62,6 +62,12 @@ provider owns the shared inherited-root decision used by configuration and
 command forwarding; its distinct routing and trim-aware fallback rules stay
 separate. No generator callback or new normalization policy is introduced.
 
+Each provider owns an `ExpandAppliedLocalPaths` method used by its file and
+flag wrappers. It consumes the actual applied report and preserves the ordered
+field transformations; it does not change acceptance, markers, or guest paths.
+Environment fallback expansion stays explicit and does not manufacture an
+all-true applied report.
+
 ## Why generation
 
 Provider packages already import `internal/cli`, which owns `Config` and file
