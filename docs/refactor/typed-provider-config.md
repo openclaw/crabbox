@@ -3,7 +3,8 @@
 Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
-Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, Lume, Runpod, Vast, and W&B
+Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, Lume, Runpod, Vast,
+W&B, and Scaleway
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -19,8 +20,8 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_opencomputer.go`, `internal/cli/config_modal.go`,
 `internal/cli/config_morph.go`, `internal/cli/config_exe_dev.go`,
 `internal/cli/config_ovh.go`, `internal/cli/config_lume.go`,
-`internal/cli/config_runpod.go`, `internal/cli/config_vast.go`, and
-`internal/cli/config_wandb.go`.
+`internal/cli/config_runpod.go`, `internal/cli/config_vast.go`,
+`internal/cli/config_wandb.go`, and `internal/cli/config_scaleway.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -78,6 +79,13 @@ constants beside the declaration. The provider retains its raw-versus-trimmed
 image decisions and TTL rounding/clamp. Its integer environment alias uses nested
 tolerant parsing: a malformed primary falls back to the alias, while a parsed zero
 or negative primary wins. Its vendor login and netrc resolution stay client-owned.
+
+Scaleway shares its four configured defaults while preserving explicit-source
+markers, SDK location precedence, and independent portable-OS/class mappings.
+Its list file input accepts only nonempty raw lists; scalar flag input registers
+an independent empty default and produces nil for empty results. Environment
+parsing retains its distinct nonnil empty result. These are source-specific
+assignment rules, not a shared normalization policy.
 
 ## Adding a field
 
@@ -168,12 +176,19 @@ or negative primary wins. Its vendor login and netrc resolution stay client-owne
    Existing list bindings can opt into fixed source-specific rules on `[]string`:
    `fileList:"raw"` clones a supplied YAML list without normalization, preserving
    raw elements, order, and duplicates; omission/null preserves the prior value,
-   while an explicit empty list clears it. `envList:"presence"` delegates to
+   while an explicit empty list clears it. `fileList:"nonempty-raw"` instead
+   ignores nil/empty lists and directly assigns a nonempty raw list without
+   cloning, preserving its backing-array sharing. `envList:"presence"` delegates to
    core's `getenvList`, including present-empty and `none` clearing. The repeatable
    `flagList:"replace-append"` uses one shared flag-value implementation: first
    occurrence clears configured defaults, later occurrences append, and each
    comma-separated occurrence trims and drops blanks without deduplication.
    Registration and application clone the list; unvisited flags do not assign.
+   `flagList:"empty-scalar"` instead registers an empty string independently of
+   configured values. Repeated occurrences use the last scalar, and application
+   trims comma-separated items, drops blanks, and returns nil when none remain.
+   Unvisited flags preserve the prior list; ordinary environment parsing remains
+   independent and can produce a nonnil empty list.
    These modes require their corresponding admitted source and reject unsupported
    values or types. They accept no custom parser, separator, or expression and
    leave ordinary list bindings unchanged.
@@ -192,7 +207,7 @@ or negative primary wins. Its vendor login and netrc resolution stay client-owne
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer ./internal/providers/modal ./internal/providers/morph ./internal/providers/exedev ./internal/providers/ovh ./internal/providers/lume ./internal/providers/runpod ./internal/providers/vast ./internal/providers/wandb` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer ./internal/providers/modal ./internal/providers/morph ./internal/providers/exedev ./internal/providers/ovh ./internal/providers/lume ./internal/providers/runpod ./internal/providers/vast ./internal/providers/wandb ./internal/providers/scaleway` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:

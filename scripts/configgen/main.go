@@ -19,6 +19,7 @@ import (
 )
 
 type field struct {
+	fileListNonemptyRaw, flagListEmptyScalar                                                                                                                                     bool
 	fileIntNonzero                                                                                                                                                               bool
 	fileListRaw, envListPresence, flagListReplaceAppend                                                                                                                          bool
 	name, kind, key, configAlias, env, envAlias, envAlias2, flag, help, defaultExpr, flagFallbackExpr                                                                            string
@@ -223,19 +224,23 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			return s, fmt.Errorf("%s: %s sources support only string fields", f.name, tags.Get("sources"))
 		}
 		for _, mode := range []struct {
-			tag, accepted string
-			admitted      bool
-			enabled       *bool
+			tag, accepted, alternative  string
+			admitted                    bool
+			enabled, alternativeEnabled *bool
 		}{
-			{"fileList", "raw", !f.noFile, &f.fileListRaw},
-			{"envList", "presence", !f.noEnv, &f.envListPresence},
-			{"flagList", "replace-append", !f.noFlag, &f.flagListReplaceAppend},
+			{"fileList", "raw", "nonempty-raw", !f.noFile, &f.fileListRaw, &f.fileListNonemptyRaw},
+			{"envList", "presence", "", !f.noEnv, &f.envListPresence, nil},
+			{"flagList", "replace-append", "empty-scalar", !f.noFlag, &f.flagListReplaceAppend, &f.flagListEmptyScalar},
 		} {
 			if value, ok := tags.Lookup(mode.tag); ok {
-				if value != mode.accepted || f.kind != "[]string" || !mode.admitted {
-					return s, fmt.Errorf("%s: %s requires %s on a []string field with that source", f.name, mode.tag, mode.accepted)
+				if f.kind != "[]string" || !mode.admitted || (value != mode.accepted && (mode.alternative == "" || value != mode.alternative)) {
+					return s, fmt.Errorf("%s: %s requires a supported mode on a []string field with that source", f.name, mode.tag)
 				}
-				*mode.enabled = true
+				if value == mode.accepted {
+					*mode.enabled = true
+				} else {
+					*mode.alternativeEnabled = true
+				}
 			}
 		}
 		if value, ok := tags.Lookup("reportApplied"); ok {
@@ -345,7 +350,7 @@ func generate(s schema, source string) ([]byte, error) {
 	needsOS, needsStrings := false, false
 	for _, f := range s.fields {
 		if f.kind == "[]string" {
-			needsStrings = needsStrings || !f.flagListReplaceAppend
+			needsStrings = needsStrings || (!f.flagListReplaceAppend && !f.flagListEmptyScalar)
 			needsOS = needsOS || (!f.noEnv && !f.envListPresence)
 		}
 	}
@@ -420,6 +425,9 @@ func generate(s schema, source string) ([]byte, error) {
 			if f.fileIntNonzero {
 				fileCondition += fmt.Sprintf(" && *file.%s != 0", binding.member)
 			}
+			if f.fileListNonemptyRaw {
+				fileCondition += fmt.Sprintf(" && len(*file.%s) > 0", binding.member)
+			}
 			p("if %s {\n", fileCondition)
 			if f.nonnegative && !f.fileIntPositive && !f.fileIntPresent && !f.fileIntNonzero {
 				p("if *file.%s < 0 { return %sexit(2, %q) }\n", binding.member, resultPrefix, s.provider+" "+f.key+" must be non-negative")
@@ -428,7 +436,7 @@ func generate(s schema, source string) ([]byte, error) {
 			if f.kind == "[]string" {
 				if f.fileListRaw {
 					value = "append([]string(nil), (" + value + ")...)"
-				} else {
+				} else if !f.fileListNonemptyRaw {
 					value = "normalizeList(" + value + ")"
 				}
 			}
@@ -541,7 +549,11 @@ func generate(s schema, source string) ([]byte, error) {
 			value = fmt.Sprintf("blank(%s, %sFlagFallback%s)", value, s.name, f.name)
 		}
 		if f.kind == "[]string" {
-			value = "strings.Join(" + value + ", \",\")"
+			if f.flagListEmptyScalar {
+				value = "\"\""
+			} else {
+				value = "strings.Join(" + value + ", \",\")"
+			}
 		}
 		p("%s: fs.%s(%q, %s, %q),\n", f.name, method, f.flag, value, f.help)
 	}
@@ -572,6 +584,10 @@ func generate(s schema, source string) ([]byte, error) {
 	}
 	for _, f := range s.fields {
 		if f.noFlag {
+			continue
+		}
+		if f.flagListEmptyScalar {
+			p("if flagWasSet(fs, %q) { cfg.%s = splitCommaList(*values.%s); if len(cfg.%s) == 0 { cfg.%s = nil } }\n", f.flag, f.name, f.name, f.name, f.name)
 			continue
 		}
 		value := "*values." + f.name

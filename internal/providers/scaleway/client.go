@@ -316,10 +316,10 @@ func applyCrabboxScalewayOverrides(profile *scw.Profile, cfg core.Config) {
 
 func applyScalewayLocationDefaults(profile *scw.Profile) {
 	if stringPtrValue(profile.DefaultRegion) == "" {
-		profile.DefaultRegion = scw.StringPtr(defaultRegion)
+		profile.DefaultRegion = scw.StringPtr(core.ScalewayConfigDefaultRegion)
 	}
 	if stringPtrValue(profile.DefaultZone) == "" {
-		profile.DefaultZone = scw.StringPtr(defaultZone)
+		profile.DefaultZone = scw.StringPtr(core.ScalewayConfigDefaultZone)
 	}
 }
 
