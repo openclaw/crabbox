@@ -61,6 +61,18 @@ policy; Crabbox's staged scripts, input, and workspace-owner state remain privat
 Keeping or reusing a POSIX SSH lease also preserves the remote caller's SIGINT
 and SIGQUIT dispositions, including intentionally ignored signals.
 
+Managed WSL2 commands, sync/copy, readiness checks, and workspace-owner helpers
+run as the non-root `crabbox` distro user with `HOME=/home/crabbox`, passwordless
+sudo, and a writable work root and caches. Node and npm remain on the default
+PATH. Bootstrap alone runs as root; the Windows SSH account is unchanged.
+
+Managed WSL2 leases disable WSL's distribution idle shutdown with
+`[general] instanceIdleTimeout=-1` in the bootstrap user's `.wslconfig`.
+Detached Linux daemons can therefore outlive individual commands until the
+lease is stopped. This does not change command deadlines, workspace ownership,
+or lease expiration. Headless leases also disable WSLg; other WSL settings,
+including the separate VM idle policy, are preserved.
+
 Local Ctrl+C cancels the CLI's non-interactive SSH connection; it does not
 guarantee that the remote foreground process has stopped. A retained lease can
 therefore remain busy until that process exits. Crabbox preserves child

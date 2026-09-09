@@ -34,11 +34,7 @@ type timingPhase = core.TimingPhase
 
 const (
 	providerName      = "blaxel"
-	defaultAPIURL     = "https://api.blaxel.ai"
 	defaultAPIVersion = "2026-04-28"
-	defaultImage      = "ubuntu:24.04"
-	defaultRegion     = ""
-	defaultWorkdir    = "/workspace/crabbox"
 	targetLinux       = core.TargetLinux
 	networkPublic     = core.NetworkPublic
 	leasePrefix       = "blx_"
@@ -49,7 +45,6 @@ const (
 	blaxelCleanupTimeout = 15 * time.Second
 	blaxelReadyTimeout   = 5 * time.Minute
 	blaxelStatusPoll     = 2 * time.Second
-	blaxelExecTimeout    = 600
 	blaxelClaimKey       = "crabbox.claim"
 )
 

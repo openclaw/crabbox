@@ -6,6 +6,10 @@
 
 - Contain Linux readiness venv and pip scratch files within the probe's temporary directory, including when dependency checks fail, while preserving the frozen v1 manifest digest. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
 
+- Run managed WSL2 workloads as the non-root `crabbox` user with passwordless sudo, writable work/cache directories, and the shared Node baseline on PATH. https://github.com/openclaw/crabbox/pull/2016. Thanks @steipete.
+
+- Keep managed WSL2 distributions alive between commands so detached Linux daemons survive until lease cleanup; preserve command and ownership deadlines. https://github.com/openclaw/crabbox/pull/2016. Thanks @steipete.
+
 - Install the shared Linux Node/npm baseline during managed WSL2 bootstrap and require both tools for readiness. https://github.com/openclaw/crabbox/pull/2008. Thanks @steipete.
 - Keep WSL2 workspace-owner renewal small and allow bounded workload contention without weakening token, expiry, or child-state checks. https://github.com/openclaw/crabbox/pull/2011. Thanks @steipete.
 
@@ -35,6 +39,18 @@
 - Describe Cloudflare Sandbox configuration bindings once, preserving trusted URL-alias precedence, explicit clearing, optional tokens, and timeout-zero behavior. [PR 2013](https://github.com/openclaw/crabbox/pull/2013). Thanks @steipete.
 
 - Describe E2B configuration bindings once, keeping endpoint, domain, template, and workdir defaults consistent while preserving credential sources and existing scope/preview behavior. [PR 2014](https://github.com/openclaw/crabbox/pull/2014). Thanks @steipete.
+
+- Describe Blaxel configuration bindings once, sharing client and execution defaults while preserving tolerant memory environment parsing, trusted inputs, and validation order. [PR 2015](https://github.com/openclaw/crabbox/pull/2015). Thanks @steipete.
+
+- Describe Azure Dynamic Sessions configuration bindings once, preserving positive-only YAML timeouts, legacy-pool rejection, endpoint provenance, and TTL fallback order. [PR 2017](https://github.com/openclaw/crabbox/pull/2017). Thanks @steipete.
+
+- Describe SmolVM configuration bindings once, preserving all three API-key environment names, CPU/memory source rules, endpoint checks, and existing network behavior. [PR 2018](https://github.com/openclaw/crabbox/pull/2018). Thanks @steipete.
+
+- Describe Semaphore configuration bindings once, sharing effective machine, OS-image, and idle-timeout defaults without changing raw configuration values, explicit flags, or credential sources. [PR 2018](https://github.com/openclaw/crabbox/pull/2018). Thanks @steipete.
+
+- Describe Tensorlake configuration bindings once, sharing API, CLI, and workdir defaults while preserving positive-only YAML sizing, environment parsing, credential sources, and native defaults. [PR 2018](https://github.com/openclaw/crabbox/pull/2018). Thanks @steipete.
+
+- Describe Orgo configuration bindings once and remove redundant client endpoint fallbacks, preserving configured-key precedence, runtime key resolution, sizing defaults, and claim scope. [PR 2019](https://github.com/openclaw/crabbox/pull/2019). Thanks @steipete.
 
 ## 0.53.0 - 2026-09-08
 

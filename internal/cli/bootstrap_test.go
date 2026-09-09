@@ -863,7 +863,7 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 		`$wslSetup = "C:\ProgramData\crabbox\wsl\linux-setup.sh"`,
 		"WriteAllText($wslSetup",
 		"wsl.exe -d $wslDistro --user root --exec bash /mnt/c/ProgramData/crabbox/wsl/linux-setup.sh",
-		"apt-get install -y --no-install-recommends ca-certificates curl git jq python3-minimal rsync",
+		"apt-get install -y --no-install-recommends ca-certificates curl git jq python3 rsync sudo",
 		"trufflehog_version='3.95.9'",
 		"trufflehog_${trufflehog_version}_linux_amd64.tar.gz",
 		wslTruffleHogAMD64SHA256,
@@ -942,7 +942,7 @@ func TestManagedWindowsWSL2BootstrapOwnsDistroInitialization(t *testing.T) {
 			steps := []string{
 				"touch /etc/cloud/cloud-init.disabled",
 				"wsl.exe --terminate $wslDistro",
-				"wsl.exe -d $wslDistro --user root --exec /usr/local/bin/crabbox-ready",
+				"wsl.exe -d $wslDistro --exec /usr/local/bin/crabbox-ready",
 				"WSL cold-start readiness failed with exit $LASTEXITCODE",
 				"Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
 			}

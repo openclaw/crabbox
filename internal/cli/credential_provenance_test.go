@@ -553,6 +553,10 @@ func TestRepositoryNomadDestinationWithoutSelectedTokenRemainsInspectable(t *tes
 }
 
 func TestRepositoryProviderSettingsRemainApplied(t *testing.T) {
+	var semaphoreFile fileConfig
+	if err := yaml.Unmarshal([]byte("semaphore:\n  host: repo.example.test\n  project: project\n  machine: f1-standard-4\n  osImage: ubuntu2404\n  idleTimeout: 20m\n"), &semaphoreFile); err != nil {
+		t.Fatal(err)
+	}
 	var cloudflareFile fileConfig
 	if err := yaml.Unmarshal([]byte("cloudflare:\n  apiUrl: https://runner.repo.example.test\n  workdir: /workspace/project\n"), &cloudflareFile); err != nil {
 		t.Fatal(err)
@@ -566,13 +570,7 @@ func TestRepositoryProviderSettingsRemainApplied(t *testing.T) {
 			WorkRoot:       "/workspace/project",
 		},
 		Cloudflare: cloudflareFile.Cloudflare,
-		Semaphore: &fileSemaphoreConfig{
-			Host:        "repo.example.test",
-			Project:     "project",
-			Machine:     "f1-standard-4",
-			OSImage:     "ubuntu2404",
-			IdleTimeout: "20m",
-		},
+		Semaphore:  semaphoreFile.Semaphore,
 	}
 	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
 		t.Fatal(err)
@@ -665,8 +663,24 @@ func TestConfigMergeTracksCredentialDestinationSources(t *testing.T) {
 }
 
 func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
+	var smolvmFile fileConfig
+	if err := yaml.Unmarshal([]byte("smolvm:\n  baseUrl: https://repo.example.test\n"), &smolvmFile); err != nil {
+		t.Fatal(err)
+	}
+	var azSessionsFile fileConfig
+	if err := yaml.Unmarshal([]byte("azureDynamicSessions:\n  endpoint: https://repo.example.test\n"), &azSessionsFile); err != nil {
+		t.Fatal(err)
+	}
 	var upstashFile fileConfig
 	if err := yaml.Unmarshal([]byte("upstashBox:\n  baseUrl: https://repo.example.test\n"), &upstashFile); err != nil {
+		t.Fatal(err)
+	}
+	var tensorlakeFile fileConfig
+	if err := yaml.Unmarshal([]byte("tensorlake:\n  apiUrl: https://repo.example.test\n"), &tensorlakeFile); err != nil {
+		t.Fatal(err)
+	}
+	var orgoFile fileConfig
+	if err := yaml.Unmarshal([]byte("orgo:\n  apiBase: https://repo.example.test\n"), &orgoFile); err != nil {
 		t.Fatal(err)
 	}
 	var railwayFile fileConfig
@@ -683,7 +697,7 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 		{
 			name:       "azure dynamic sessions",
 			provider:   "azure-dynamic-sessions",
-			file:       fileConfig{AzureDynamicSessions: &fileAzureDynamicSessionsConfig{Endpoint: "https://repo.example.test"}},
+			file:       azSessionsFile,
 			approveEnv: "CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT",
 		},
 		{
@@ -703,7 +717,7 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 		{
 			name:          "orgo",
 			provider:      "orgo",
-			file:          fileConfig{Orgo: &fileOrgoConfig{APIBase: "https://repo.example.test"}},
+			file:          orgoFile,
 			credentialEnv: "CRABBOX_ORGO_API_KEY",
 			approveEnv:    "CRABBOX_ORGO_API_BASE",
 		},
@@ -737,7 +751,7 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 		{
 			name:          "tensorlake",
 			provider:      "tensorlake",
-			file:          fileConfig{Tensorlake: &fileTensorlakeConfig{APIURL: "https://repo.example.test"}},
+			file:          tensorlakeFile,
 			credentialEnv: "CRABBOX_TENSORLAKE_API_KEY",
 			approveEnv:    "CRABBOX_TENSORLAKE_API_URL",
 		},
@@ -751,7 +765,7 @@ func TestConfigMergeSourceBindsDirectProviderCredentials(t *testing.T) {
 		{
 			name:          "smolvm",
 			provider:      "smolvm",
-			file:          fileConfig{Smolvm: &fileSmolvmConfig{BaseURL: "https://repo.example.test"}},
+			file:          smolvmFile,
 			credentialEnv: "CRABBOX_SMOLVM_API_KEY",
 			approveEnv:    "CRABBOX_SMOLVM_BASE_URL",
 		},
@@ -2600,12 +2614,11 @@ func TestRepositorySSHDestinationsAllowExplicitFlagOverride(t *testing.T) {
 func TestConfigMergeIgnoresRepositoryOrgoCredential(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "orgo"
-	if err := applyFileConfigWithTrust(&cfg, fileConfig{
-		Orgo: &fileOrgoConfig{
-			APIBase: "https://repo.example.test",
-			APIKey:  "test-key",
-		},
-	}, false); err != nil {
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("orgo:\n  apiBase: https://repo.example.test\n  apiKey: test-key\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Orgo.APIKey != "" {

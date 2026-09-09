@@ -707,14 +707,6 @@ type CubeSandboxConfig struct {
 	ProxyScheme   string
 }
 
-type AzureDynamicSessionsConfig struct {
-	Endpoint    string
-	Pool        string
-	APIVersion  string
-	Workdir     string
-	TimeoutSecs int
-}
-
 const (
 	AzureBackendVM              = "vm"
 	AzureBackendDynamicSessions = "dynamic-sessions"
@@ -824,18 +816,6 @@ type WandbConfig struct {
 	MaxLifetimeSeconds int
 }
 
-// OrgoConfig drives the Orgo delegated-run provider. The API key is resolved
-// from env/config only; it must not be passed on the command line.
-type OrgoConfig struct {
-	APIKey      string
-	APIBase     string
-	WorkspaceID string
-	RAMGB       int
-	CPUs        int
-	DiskGB      int
-	Resolution  string
-}
-
 type IsloConfig struct {
 	APIKey         string
 	BaseURL        string
@@ -868,23 +848,6 @@ type TenkiConfig struct {
 	CPUs      int
 	MemoryMB  int
 	DiskGB    int
-}
-
-type TensorlakeConfig struct {
-	APIKey         string
-	APIURL         string
-	CLIPath        string
-	Image          string
-	Snapshot       string
-	OrganizationID string
-	ProjectID      string
-	Namespace      string
-	Workdir        string
-	CPUs           float64
-	MemoryMB       int
-	DiskMB         int
-	TimeoutSecs    int
-	NoInternet     bool
 }
 
 // OpenComputerConfig configures the delegated OpenComputer provider, which
@@ -930,22 +893,6 @@ type NomadConfig struct {
 	AllocReadyTimeout time.Duration
 	EvalTimeout       time.Duration
 	ExecTimeoutSecs   int
-}
-
-// BlaxelConfig configures the delegated Blaxel provider. API keys are read
-// from environment variables, never persisted in repository config or argv.
-type BlaxelConfig struct {
-	APIKey          string
-	APIURL          string
-	Workspace       string
-	Region          string
-	Image           string
-	MemoryMB        int
-	TTL             string
-	IdleTTL         string
-	Workdir         string
-	ExecTimeoutSecs int
-	ForgetMissing   bool
 }
 
 // SuperserveConfig configures the delegated Superserve provider. The API key is
@@ -996,17 +943,6 @@ type ModalConfig struct {
 	Python      string
 	Environment string
 	Secrets     []string
-}
-
-type SmolvmConfig struct {
-	APIKey   string
-	BaseURL  string
-	Image    string
-	Workdir  string
-	CPUs     int
-	MemoryMB int
-	Network  string
-	Keep     bool
 }
 
 type AsciiBoxConfig struct {
@@ -1155,15 +1091,6 @@ type ParallelsHostConfig struct {
 	MaxVMs     int
 	hostSource credentialValueSource
 	keySource  credentialValueSource
-}
-
-type SemaphoreConfig struct {
-	Host        string
-	Token       string
-	Project     string
-	Machine     string
-	OSImage     string
-	IdleTimeout string
 }
 
 type SpritesConfig struct {
@@ -2637,24 +2564,20 @@ func baseConfig() Config {
 		AWSLambdaMicroVM: AWSLambdaMicroVMConfig{
 			Workdir: "/workspace/crabbox",
 		},
-		AzureBackend:       "vm",
-		AzureLocation:      "eastus",
-		AzureResourceGroup: "crabbox-leases",
-		AzureImage:         azureImage,
-		AzureOSDisk:        AzureOSDiskManaged,
-		AzureVNet:          "crabbox-vnet",
-		AzureSubnet:        "crabbox-subnet",
-		AzureNSG:           "crabbox-nsg",
-		AzureDynamicSessions: AzureDynamicSessionsConfig{
-			APIVersion:  "2025-02-02-preview",
-			Workdir:     "/workspace/crabbox",
-			TimeoutSecs: 1800,
-		},
-		GCPZone:    "europe-west2-a",
-		GCPImage:   gcpImage,
-		GCPNetwork: "default",
-		GCPTags:    []string{"crabbox-ssh"},
-		GCPRootGB:  400,
+		AzureBackend:         "vm",
+		AzureLocation:        "eastus",
+		AzureResourceGroup:   "crabbox-leases",
+		AzureImage:           azureImage,
+		AzureOSDisk:          AzureOSDiskManaged,
+		AzureVNet:            "crabbox-vnet",
+		AzureSubnet:          "crabbox-subnet",
+		AzureNSG:             "crabbox-nsg",
+		AzureDynamicSessions: defaultAzureDynamicSessionsConfig(),
+		GCPZone:              "europe-west2-a",
+		GCPImage:             gcpImage,
+		GCPNetwork:           "default",
+		GCPTags:              []string{"crabbox-ssh"},
+		GCPRootGB:            400,
 		Linode: LinodeConfig{
 			Region: "us-ord",
 			Image:  linodeImage,
@@ -2794,13 +2717,7 @@ func baseConfig() Config {
 			WorkRoot:       "/tmp/crabbox",
 			WakeOnSSH:      true,
 		},
-		Orgo: OrgoConfig{
-			APIBase:    "https://www.orgo.ai/api",
-			RAMGB:      4,
-			CPUs:       1,
-			DiskGB:     8,
-			Resolution: "1280x720x24",
-		},
+		Orgo: defaultOrgoConfig(),
 		Daytona: DaytonaConfig{
 			APIURL:           "https://app.daytona.io/api",
 			User:             "daytona",
@@ -2887,15 +2804,8 @@ func baseConfig() Config {
 			CLIPath:  "tenki",
 			WorkRoot: "/home/tenki/crabbox",
 		},
-		Tensorlake: TensorlakeConfig{
-			APIURL:   "https://api.tensorlake.ai",
-			CLIPath:  "tensorlake",
-			Workdir:  "/workspace/crabbox",
-			CPUs:     1.0,
-			MemoryMB: 1024,
-			DiskMB:   10240,
-		},
-		Cua: defaultCuaConfig(),
+		Tensorlake: defaultTensorlakeConfig(),
+		Cua:        defaultCuaConfig(),
 		OpenComputer: OpenComputerConfig{
 			// APIURL is intentionally unset here so the `oc` config file's
 			// api_url is honored before the built-in default; the provider
@@ -2920,12 +2830,7 @@ func baseConfig() Config {
 			EvalTimeout:       5 * time.Minute,
 			ExecTimeoutSecs:   600,
 		},
-		Blaxel: BlaxelConfig{
-			APIURL:          "https://api.blaxel.ai",
-			Image:           "ubuntu:24.04",
-			Workdir:         "/workspace/crabbox",
-			ExecTimeoutSecs: 600,
-		},
+		Blaxel:            defaultBlaxelConfig(),
 		VercelSandbox:     defaultVercelSandboxConfig(),
 		CloudflareSandbox: defaultCloudflareSandboxConfig(),
 		Superserve: SuperserveConfig{
@@ -2952,14 +2857,7 @@ func baseConfig() Config {
 			Python:  "python3",
 		},
 		UpstashBox: defaultUpstashBoxConfig(),
-		Smolvm: SmolvmConfig{
-			BaseURL:  "https://api.smolmachines.com",
-			Image:    "alpine",
-			Workdir:  "/workspace",
-			CPUs:     2,
-			MemoryMB: 2048,
-			Network:  "open",
-		},
+		Smolvm:     defaultSmolvmConfig(),
 		AsciiBox: AsciiBoxConfig{
 			BaseURL: "https://ascii.dev",
 			CLIPath: "box",
@@ -3757,14 +3655,6 @@ type fileCubeSandboxConfig struct {
 	ProxyScheme   string `yaml:"proxyScheme,omitempty"`
 }
 
-type fileAzureDynamicSessionsConfig struct {
-	Endpoint    string `yaml:"endpoint,omitempty"`
-	Pool        string `yaml:"pool,omitempty"`
-	APIVersion  string `yaml:"apiVersion,omitempty"`
-	Workdir     string `yaml:"workdir,omitempty"`
-	TimeoutSecs int    `yaml:"timeoutSecs,omitempty"`
-}
-
 type fileFreestyleConfig struct {
 	APIURL   string `yaml:"apiUrl,omitempty"`
 	Workdir  string `yaml:"workdir,omitempty"`
@@ -3855,16 +3745,6 @@ type fileWandbConfig struct {
 	MaxLifetimeSeconds int    `yaml:"maxLifetimeSeconds,omitempty"`
 }
 
-type fileOrgoConfig struct {
-	APIKey      string `yaml:"apiKey,omitempty"`
-	APIBase     string `yaml:"apiBase,omitempty"`
-	WorkspaceID string `yaml:"workspaceID,omitempty"`
-	RAMGB       int    `yaml:"ramGB,omitempty"`
-	CPUs        int    `yaml:"cpus,omitempty"`
-	DiskGB      int    `yaml:"diskGB,omitempty"`
-	Resolution  string `yaml:"resolution,omitempty"`
-}
-
 type fileIsloConfig struct {
 	BaseURL        string `yaml:"baseUrl,omitempty"`
 	Image          string `yaml:"image,omitempty"`
@@ -3888,22 +3768,6 @@ type fileTenkiConfig struct {
 	CPUs      int    `yaml:"cpus,omitempty"`
 	MemoryMB  int    `yaml:"memoryMB,omitempty"`
 	DiskGB    int    `yaml:"diskGB,omitempty"`
-}
-
-type fileTensorlakeConfig struct {
-	APIURL         string  `yaml:"apiUrl,omitempty"`
-	CLIPath        string  `yaml:"cliPath,omitempty"`
-	Image          string  `yaml:"image,omitempty"`
-	Snapshot       string  `yaml:"snapshot,omitempty"`
-	OrganizationID string  `yaml:"organizationId,omitempty"`
-	ProjectID      string  `yaml:"projectId,omitempty"`
-	Namespace      string  `yaml:"namespace,omitempty"`
-	Workdir        string  `yaml:"workdir,omitempty"`
-	CPUs           float64 `yaml:"cpus,omitempty"`
-	MemoryMB       int     `yaml:"memoryMB,omitempty"`
-	DiskMB         int     `yaml:"diskMB,omitempty"`
-	TimeoutSecs    int     `yaml:"timeoutSecs,omitempty"`
-	NoInternet     *bool   `yaml:"noInternet,omitempty"`
 }
 
 type fileOpenComputerConfig struct {
@@ -3939,19 +3803,6 @@ type fileNomadConfig struct {
 	AllocReadyTimeout string   `yaml:"allocReadyTimeout,omitempty"`
 	EvalTimeout       string   `yaml:"evalTimeout,omitempty"`
 	ExecTimeoutSecs   *int     `yaml:"execTimeoutSecs,omitempty"`
-}
-
-type fileBlaxelConfig struct {
-	APIURL          string  `yaml:"apiUrl,omitempty"`
-	Workspace       string  `yaml:"workspace,omitempty"`
-	Region          string  `yaml:"region,omitempty"`
-	Image           *string `yaml:"image,omitempty"`
-	MemoryMB        *int    `yaml:"memoryMB,omitempty"`
-	TTL             string  `yaml:"ttl,omitempty"`
-	IdleTTL         string  `yaml:"idleTTL,omitempty"`
-	Workdir         *string `yaml:"workdir,omitempty"`
-	ExecTimeoutSecs *int    `yaml:"execTimeoutSecs,omitempty"`
-	ForgetMissing   *bool   `yaml:"forgetMissing,omitempty"`
 }
 
 type fileSuperserveConfig struct {
@@ -3994,16 +3845,6 @@ type fileModalConfig struct {
 	Python      string   `yaml:"python,omitempty"`
 	Environment string   `yaml:"environment,omitempty"`
 	Secrets     []string `yaml:"secrets,omitempty"`
-}
-
-type fileSmolvmConfig struct {
-	BaseURL  string `yaml:"baseUrl,omitempty"`
-	Image    string `yaml:"image,omitempty"`
-	Workdir  string `yaml:"workdir,omitempty"`
-	CPUs     int    `yaml:"cpus,omitempty"`
-	MemoryMB int    `yaml:"memoryMB,omitempty"`
-	Network  string `yaml:"network,omitempty"`
-	Keep     *bool  `yaml:"keep,omitempty"`
 }
 
 type fileAsciiBoxConfig struct {
@@ -4140,15 +3981,6 @@ func positiveMinimum(current, candidate int) int {
 		return candidate
 	}
 	return min(current, candidate)
-}
-
-type fileSemaphoreConfig struct {
-	Host        string `yaml:"host,omitempty"`
-	Token       string `yaml:"token,omitempty"`
-	Project     string `yaml:"project,omitempty"`
-	Machine     string `yaml:"machine,omitempty"`
-	OSImage     string `yaml:"osImage,omitempty"`
-	IdleTimeout string `yaml:"idleTimeout,omitempty"`
 }
 
 type fileSpritesConfig struct {
@@ -5192,22 +5024,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.AzureNetwork = file.Azure.Network
 		}
 	}
-	if file.AzureDynamicSessions != nil {
-		if file.AzureDynamicSessions.Endpoint != "" {
-			cfg.AzureDynamicSessions.Endpoint = file.AzureDynamicSessions.Endpoint
+	{
+		applied, err := cfg.AzureDynamicSessions.applyFile(file.AzureDynamicSessions)
+		if applied.Endpoint {
 			cfg.credentialProvenance.azSessionsEndpoint = credentialSource
 		}
-		if file.AzureDynamicSessions.Pool != "" {
-			cfg.AzureDynamicSessions.Pool = file.AzureDynamicSessions.Pool
-		}
-		if file.AzureDynamicSessions.APIVersion != "" {
-			cfg.AzureDynamicSessions.APIVersion = file.AzureDynamicSessions.APIVersion
-		}
-		if file.AzureDynamicSessions.Workdir != "" {
-			cfg.AzureDynamicSessions.Workdir = file.AzureDynamicSessions.Workdir
-		}
-		if file.AzureDynamicSessions.TimeoutSecs > 0 {
-			cfg.AzureDynamicSessions.TimeoutSecs = file.AzureDynamicSessions.TimeoutSecs
+		if err != nil {
+			return err
 		}
 	}
 	if file.GCP != nil {
@@ -6324,29 +6147,16 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Wandb.MaxLifetimeSeconds = file.Wandb.MaxLifetimeSeconds
 		}
 	}
-	if file.Orgo != nil {
-		if trusted && file.Orgo.APIKey != "" {
-			cfg.Orgo.APIKey = file.Orgo.APIKey
+	{
+		applied, err := cfg.Orgo.applyFile(file.Orgo, trusted)
+		if applied.APIKey {
 			cfg.credentialProvenance.orgoAPIKey = credentialSource
 		}
-		if file.Orgo.APIBase != "" {
-			cfg.Orgo.APIBase = file.Orgo.APIBase
+		if applied.APIBase {
 			cfg.credentialProvenance.orgoAPIBase = credentialSource
 		}
-		if file.Orgo.WorkspaceID != "" {
-			cfg.Orgo.WorkspaceID = file.Orgo.WorkspaceID
-		}
-		if file.Orgo.RAMGB > 0 {
-			cfg.Orgo.RAMGB = file.Orgo.RAMGB
-		}
-		if file.Orgo.CPUs > 0 {
-			cfg.Orgo.CPUs = file.Orgo.CPUs
-		}
-		if file.Orgo.DiskGB > 0 {
-			cfg.Orgo.DiskGB = file.Orgo.DiskGB
-		}
-		if file.Orgo.Resolution != "" {
-			cfg.Orgo.Resolution = file.Orgo.Resolution
+		if err != nil {
+			return err
 		}
 	}
 	if file.Islo != nil {
@@ -6431,45 +6241,14 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Tenki.DiskGB = file.Tenki.DiskGB
 		}
 	}
-	if file.Tensorlake != nil {
-		if file.Tensorlake.APIURL != "" {
-			cfg.Tensorlake.APIURL = file.Tensorlake.APIURL
+	{
+		applied, err := cfg.Tensorlake.applyFile(file.Tensorlake)
+		if applied.APIURL {
 			cfg.credentialProvenance.tensorlakeAPIURL = credentialSource
 		}
-		if file.Tensorlake.CLIPath != "" {
-			cfg.Tensorlake.CLIPath = file.Tensorlake.CLIPath
+		if err != nil {
+			return err
 		}
-		if file.Tensorlake.Image != "" {
-			cfg.Tensorlake.Image = file.Tensorlake.Image
-		}
-		if file.Tensorlake.Snapshot != "" {
-			cfg.Tensorlake.Snapshot = file.Tensorlake.Snapshot
-		}
-		if file.Tensorlake.OrganizationID != "" {
-			cfg.Tensorlake.OrganizationID = file.Tensorlake.OrganizationID
-		}
-		if file.Tensorlake.ProjectID != "" {
-			cfg.Tensorlake.ProjectID = file.Tensorlake.ProjectID
-		}
-		if file.Tensorlake.Namespace != "" {
-			cfg.Tensorlake.Namespace = file.Tensorlake.Namespace
-		}
-		if file.Tensorlake.Workdir != "" {
-			cfg.Tensorlake.Workdir = file.Tensorlake.Workdir
-		}
-		if file.Tensorlake.CPUs > 0 {
-			cfg.Tensorlake.CPUs = file.Tensorlake.CPUs
-		}
-		if file.Tensorlake.MemoryMB > 0 {
-			cfg.Tensorlake.MemoryMB = file.Tensorlake.MemoryMB
-		}
-		if file.Tensorlake.DiskMB > 0 {
-			cfg.Tensorlake.DiskMB = file.Tensorlake.DiskMB
-		}
-		if file.Tensorlake.TimeoutSecs > 0 {
-			cfg.Tensorlake.TimeoutSecs = file.Tensorlake.TimeoutSecs
-		}
-		applyOptional(&cfg.Tensorlake.NoInternet, file.Tensorlake.NoInternet)
 	}
 	if err := cfg.Cua.applyFile(file.Cua, trusted); err != nil {
 		return err
@@ -6569,37 +6348,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			}
 		}
 	}
-	if file.Blaxel != nil {
-		if trusted && file.Blaxel.APIURL != "" {
-			cfg.Blaxel.APIURL = file.Blaxel.APIURL
-		}
-		if trusted && file.Blaxel.Workspace != "" {
-			cfg.Blaxel.Workspace = file.Blaxel.Workspace
-		}
-		if file.Blaxel.Region != "" {
-			cfg.Blaxel.Region = file.Blaxel.Region
-		}
-		applyOptional(&cfg.Blaxel.Image, file.Blaxel.Image)
-		if file.Blaxel.MemoryMB != nil {
-			if *file.Blaxel.MemoryMB < 0 {
-				return exit(2, "blaxel memoryMB must be non-negative")
-			}
-			cfg.Blaxel.MemoryMB = *file.Blaxel.MemoryMB
-		}
-		if file.Blaxel.TTL != "" {
-			cfg.Blaxel.TTL = file.Blaxel.TTL
-		}
-		if file.Blaxel.IdleTTL != "" {
-			cfg.Blaxel.IdleTTL = file.Blaxel.IdleTTL
-		}
-		applyOptional(&cfg.Blaxel.Workdir, file.Blaxel.Workdir)
-		if file.Blaxel.ExecTimeoutSecs != nil {
-			if *file.Blaxel.ExecTimeoutSecs < 0 {
-				return exit(2, "blaxel execTimeoutSecs must be non-negative")
-			}
-			cfg.Blaxel.ExecTimeoutSecs = *file.Blaxel.ExecTimeoutSecs
-		}
-		applyOptional(&cfg.Blaxel.ForgetMissing, file.Blaxel.ForgetMissing)
+	if err := cfg.Blaxel.applyFile(file.Blaxel, trusted); err != nil {
+		return err
 	}
 	if err := cfg.VercelSandbox.applyFile(file.VercelSandbox); err != nil {
 		return err
@@ -6707,27 +6457,14 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.Smolvm != nil {
-		if file.Smolvm.BaseURL != "" {
-			cfg.Smolvm.BaseURL = file.Smolvm.BaseURL
+	{
+		applied, err := cfg.Smolvm.applyFile(file.Smolvm)
+		if applied.BaseURL {
 			cfg.credentialProvenance.smolvmBaseURL = credentialSource
 		}
-		if file.Smolvm.Image != "" {
-			cfg.Smolvm.Image = file.Smolvm.Image
+		if err != nil {
+			return err
 		}
-		if file.Smolvm.Workdir != "" {
-			cfg.Smolvm.Workdir = file.Smolvm.Workdir
-		}
-		if file.Smolvm.CPUs > 0 {
-			cfg.Smolvm.CPUs = file.Smolvm.CPUs
-		}
-		if file.Smolvm.MemoryMB > 0 {
-			cfg.Smolvm.MemoryMB = file.Smolvm.MemoryMB
-		}
-		if file.Smolvm.Network != "" {
-			cfg.Smolvm.Network = file.Smolvm.Network
-		}
-		applyOptional(&cfg.Smolvm.Keep, file.Smolvm.Keep)
 	}
 	if file.AsciiBox != nil {
 		if file.AsciiBox.BaseURL != "" {
@@ -6757,26 +6494,16 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		return err
 	}
 	applyCloudflareDynamicWorkersFileConfig(cfg, file.CloudflareDynamicWorkers, trusted)
-	if file.Semaphore != nil {
-		if file.Semaphore.Host != "" {
-			cfg.Semaphore.Host = file.Semaphore.Host
+	{
+		applied, err := cfg.Semaphore.applyFile(file.Semaphore)
+		if applied.Host {
 			cfg.credentialProvenance.semaphoreHost = credentialSource
 		}
-		if file.Semaphore.Token != "" {
-			cfg.Semaphore.Token = file.Semaphore.Token
+		if applied.Token {
 			cfg.credentialProvenance.semaphoreToken = credentialSource
 		}
-		if file.Semaphore.Project != "" {
-			cfg.Semaphore.Project = file.Semaphore.Project
-		}
-		if file.Semaphore.Machine != "" {
-			cfg.Semaphore.Machine = file.Semaphore.Machine
-		}
-		if file.Semaphore.OSImage != "" {
-			cfg.Semaphore.OSImage = file.Semaphore.OSImage
-		}
-		if file.Semaphore.IdleTimeout != "" {
-			cfg.Semaphore.IdleTimeout = file.Semaphore.IdleTimeout
+		if err != nil {
+			return err
 		}
 	}
 	if file.Sprites != nil {
@@ -7606,14 +7333,15 @@ func applyEnv(cfg *Config) error {
 		cfg.AzureSSHCIDRs = splitCommaList(cidrs)
 	}
 	cfg.AzureNetwork = getenv("CRABBOX_AZURE_NETWORK", cfg.AzureNetwork)
-	if value := os.Getenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT"); value != "" {
-		cfg.AzureDynamicSessions.Endpoint = value
-		cfg.credentialProvenance.azSessionsEndpoint = credentialSourceEnvironment
+	{
+		applied, err := cfg.AzureDynamicSessions.applyEnv()
+		if applied.Endpoint {
+			cfg.credentialProvenance.azSessionsEndpoint = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
-	cfg.AzureDynamicSessions.Pool = getenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_POOL", cfg.AzureDynamicSessions.Pool)
-	cfg.AzureDynamicSessions.APIVersion = getenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_API_VERSION", cfg.AzureDynamicSessions.APIVersion)
-	cfg.AzureDynamicSessions.Workdir = getenv("CRABBOX_AZURE_DYNAMIC_SESSIONS_WORKDIR", cfg.AzureDynamicSessions.Workdir)
-	cfg.AzureDynamicSessions.TimeoutSecs = getenvInt("CRABBOX_AZURE_DYNAMIC_SESSIONS_TIMEOUT_SECS", cfg.AzureDynamicSessions.TimeoutSecs)
 	if project := os.Getenv("CRABBOX_GCP_PROJECT"); project != "" {
 		cfg.GCPProject = project
 		cfg.gcpProjectExplicit = true
@@ -8368,24 +8096,18 @@ func applyEnv(cfg *Config) error {
 	cfg.Wandb.APIKey = getenv("CRABBOX_WANDB_API_KEY", cfg.Wandb.APIKey)
 	cfg.Wandb.DefaultImage = getenv("CRABBOX_WANDB_DEFAULT_IMAGE", getenv("WANDB_DEFAULT_IMAGE", cfg.Wandb.DefaultImage))
 	cfg.Wandb.MaxLifetimeSeconds = getenvInt("CRABBOX_WANDB_MAX_LIFETIME_SECONDS", getenvInt("WANDB_MAX_LIFETIME_SECONDS", cfg.Wandb.MaxLifetimeSeconds))
-	if value := os.Getenv("CRABBOX_ORGO_API_KEY"); value != "" {
-		cfg.Orgo.APIKey = value
-		cfg.credentialProvenance.orgoAPIKey = credentialSourceEnvironment
-	} else if cfg.Orgo.APIKey == "" {
-		if value := os.Getenv("ORGO_API_KEY"); value != "" {
-			cfg.Orgo.APIKey = value
+	{
+		applied, err := cfg.Orgo.applyEnv()
+		if applied.APIKey {
 			cfg.credentialProvenance.orgoAPIKey = credentialSourceEnvironment
 		}
+		if applied.APIBase {
+			cfg.credentialProvenance.orgoAPIBase = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_ORGO_API_BASE", "ORGO_API_BASE_URL"); ok {
-		cfg.Orgo.APIBase = value
-		cfg.credentialProvenance.orgoAPIBase = credentialSourceEnvironment
-	}
-	cfg.Orgo.WorkspaceID = getenv("CRABBOX_ORGO_WORKSPACE_ID", getenv("ORGO_WORKSPACE_ID", cfg.Orgo.WorkspaceID))
-	cfg.Orgo.RAMGB = getenvInt("CRABBOX_ORGO_RAM_GB", cfg.Orgo.RAMGB)
-	cfg.Orgo.CPUs = getenvInt("CRABBOX_ORGO_CPUS", cfg.Orgo.CPUs)
-	cfg.Orgo.DiskGB = getenvInt("CRABBOX_ORGO_DISK_GB", cfg.Orgo.DiskGB)
-	cfg.Orgo.Resolution = getenv("CRABBOX_ORGO_RESOLUTION", cfg.Orgo.Resolution)
 	if value, ok := firstNonEmptyEnv("CRABBOX_ISLO_API_KEY", "ISLO_API_KEY"); ok {
 		cfg.Islo.APIKey = value
 		cfg.credentialProvenance.isloAPIKey = credentialSourceEnvironment
@@ -8441,27 +8163,17 @@ func applyEnv(cfg *Config) error {
 	cfg.Tenki.CPUs = getenvInt("CRABBOX_TENKI_CPUS", cfg.Tenki.CPUs)
 	cfg.Tenki.MemoryMB = getenvInt("CRABBOX_TENKI_MEMORY_MB", cfg.Tenki.MemoryMB)
 	cfg.Tenki.DiskGB = getenvInt("CRABBOX_TENKI_DISK_GB", cfg.Tenki.DiskGB)
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_API_KEY", "TENSORLAKE_API_KEY"); ok {
-		cfg.Tensorlake.APIKey = value
-		cfg.credentialProvenance.tensorlakeAPIKey = credentialSourceEnvironment
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENSORLAKE_API_URL", "TENSORLAKE_API_URL"); ok {
-		cfg.Tensorlake.APIURL = value
-		cfg.credentialProvenance.tensorlakeAPIURL = credentialSourceEnvironment
-	}
-	cfg.Tensorlake.CLIPath = getenv("CRABBOX_TENSORLAKE_CLI", cfg.Tensorlake.CLIPath)
-	cfg.Tensorlake.Image = getenv("CRABBOX_TENSORLAKE_IMAGE", cfg.Tensorlake.Image)
-	cfg.Tensorlake.Snapshot = getenv("CRABBOX_TENSORLAKE_SNAPSHOT", cfg.Tensorlake.Snapshot)
-	cfg.Tensorlake.OrganizationID = getenv("CRABBOX_TENSORLAKE_ORGANIZATION_ID", getenv("TENSORLAKE_ORGANIZATION_ID", cfg.Tensorlake.OrganizationID))
-	cfg.Tensorlake.ProjectID = getenv("CRABBOX_TENSORLAKE_PROJECT_ID", getenv("TENSORLAKE_PROJECT_ID", cfg.Tensorlake.ProjectID))
-	cfg.Tensorlake.Namespace = getenv("CRABBOX_TENSORLAKE_NAMESPACE", getenv("INDEXIFY_NAMESPACE", cfg.Tensorlake.Namespace))
-	cfg.Tensorlake.Workdir = getenv("CRABBOX_TENSORLAKE_WORKDIR", cfg.Tensorlake.Workdir)
-	cfg.Tensorlake.CPUs = getenvFloat("CRABBOX_TENSORLAKE_CPUS", cfg.Tensorlake.CPUs)
-	cfg.Tensorlake.MemoryMB = getenvInt("CRABBOX_TENSORLAKE_MEMORY_MB", cfg.Tensorlake.MemoryMB)
-	cfg.Tensorlake.DiskMB = getenvInt("CRABBOX_TENSORLAKE_DISK_MB", cfg.Tensorlake.DiskMB)
-	cfg.Tensorlake.TimeoutSecs = getenvInt("CRABBOX_TENSORLAKE_TIMEOUT_SECS", cfg.Tensorlake.TimeoutSecs)
-	if v, ok := getenvBool("CRABBOX_TENSORLAKE_NO_INTERNET"); ok {
-		cfg.Tensorlake.NoInternet = v
+	{
+		applied, err := cfg.Tensorlake.applyEnv()
+		if applied.APIKey {
+			cfg.credentialProvenance.tensorlakeAPIKey = credentialSourceEnvironment
+		}
+		if applied.APIURL {
+			cfg.credentialProvenance.tensorlakeAPIURL = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
 	var err error
 	if err := cfg.Cua.applyEnv(); err != nil {
@@ -8527,21 +8239,8 @@ func applyEnv(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	cfg.Blaxel.APIKey = getenv("CRABBOX_BLAXEL_API_KEY", getenv("BL_API_KEY", cfg.Blaxel.APIKey))
-	cfg.Blaxel.APIURL = getenv("CRABBOX_BLAXEL_API_URL", cfg.Blaxel.APIURL)
-	cfg.Blaxel.Workspace = getenv("CRABBOX_BLAXEL_WORKSPACE", getenv("BL_WORKSPACE", cfg.Blaxel.Workspace))
-	cfg.Blaxel.Region = getenv("CRABBOX_BLAXEL_REGION", getenv("BL_REGION", cfg.Blaxel.Region))
-	cfg.Blaxel.Image = getenv("CRABBOX_BLAXEL_IMAGE", cfg.Blaxel.Image)
-	cfg.Blaxel.MemoryMB = getenvInt("CRABBOX_BLAXEL_MEMORY_MB", cfg.Blaxel.MemoryMB)
-	cfg.Blaxel.TTL = getenv("CRABBOX_BLAXEL_TTL", cfg.Blaxel.TTL)
-	cfg.Blaxel.IdleTTL = getenv("CRABBOX_BLAXEL_IDLE_TTL", cfg.Blaxel.IdleTTL)
-	cfg.Blaxel.Workdir = getenv("CRABBOX_BLAXEL_WORKDIR", cfg.Blaxel.Workdir)
-	cfg.Blaxel.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_BLAXEL_EXEC_TIMEOUT_SECS", cfg.Blaxel.ExecTimeoutSecs)
-	if err != nil {
+	if err := cfg.Blaxel.applyEnv(); err != nil {
 		return err
-	}
-	if value, ok := getenvBool("CRABBOX_BLAXEL_FORGET_MISSING"); ok {
-		cfg.Blaxel.ForgetMissing = value
 	}
 	if err := cfg.VercelSandbox.applyEnv(); err != nil {
 		return err
@@ -8620,21 +8319,17 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SMOLVM_API_KEY", "SMOLMACHINES_API_KEY", "SMK_API_KEY"); ok {
-		cfg.Smolvm.APIKey = value
-		cfg.credentialProvenance.smolvmAPIKey = credentialSourceEnvironment
-	}
-	if value := os.Getenv("CRABBOX_SMOLVM_BASE_URL"); value != "" {
-		cfg.Smolvm.BaseURL = value
-		cfg.credentialProvenance.smolvmBaseURL = credentialSourceEnvironment
-	}
-	cfg.Smolvm.Image = getenv("CRABBOX_SMOLVM_IMAGE", cfg.Smolvm.Image)
-	cfg.Smolvm.Workdir = getenv("CRABBOX_SMOLVM_WORKDIR", cfg.Smolvm.Workdir)
-	cfg.Smolvm.CPUs = getenvInt("CRABBOX_SMOLVM_CPUS", cfg.Smolvm.CPUs)
-	cfg.Smolvm.MemoryMB = getenvInt("CRABBOX_SMOLVM_MEMORY_MB", cfg.Smolvm.MemoryMB)
-	cfg.Smolvm.Network = getenv("CRABBOX_SMOLVM_NETWORK", cfg.Smolvm.Network)
-	if value, ok := getenvBool("CRABBOX_SMOLVM_KEEP"); ok {
-		cfg.Smolvm.Keep = value
+	{
+		applied, err := cfg.Smolvm.applyEnv()
+		if applied.APIKey {
+			cfg.credentialProvenance.smolvmAPIKey = credentialSourceEnvironment
+		}
+		if applied.BaseURL {
+			cfg.credentialProvenance.smolvmBaseURL = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_ASCII_BOX_API_KEY", "ASCII_BOX_API_KEY"); ok {
 		cfg.AsciiBox.APIKey = value
@@ -8693,18 +8388,18 @@ func applyEnv(cfg *Config) error {
 	cfg.CloudflareDynamicWorkers.CPUMs = getenvInt("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_CPU_MS", cfg.CloudflareDynamicWorkers.CPUMs)
 	cfg.CloudflareDynamicWorkers.Subrequests = getenvInt("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_SUBREQUESTS", cfg.CloudflareDynamicWorkers.Subrequests)
 	cfg.CloudflareDynamicWorkers.TimeoutSecs = getenvInt("CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TIMEOUT_SECS", cfg.CloudflareDynamicWorkers.TimeoutSecs)
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_HOST", "SEMAPHORE_HOST"); ok {
-		cfg.Semaphore.Host = value
-		cfg.credentialProvenance.semaphoreHost = credentialSourceEnvironment
+	{
+		applied, err := cfg.Semaphore.applyEnv()
+		if applied.Host {
+			cfg.credentialProvenance.semaphoreHost = credentialSourceEnvironment
+		}
+		if applied.Token {
+			cfg.credentialProvenance.semaphoreToken = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SEMAPHORE_TOKEN", "SEMAPHORE_API_TOKEN"); ok {
-		cfg.Semaphore.Token = value
-		cfg.credentialProvenance.semaphoreToken = credentialSourceEnvironment
-	}
-	cfg.Semaphore.Project = getenv("CRABBOX_SEMAPHORE_PROJECT", getenv("SEMAPHORE_PROJECT", cfg.Semaphore.Project))
-	cfg.Semaphore.Machine = getenv("CRABBOX_SEMAPHORE_MACHINE", cfg.Semaphore.Machine)
-	cfg.Semaphore.OSImage = getenv("CRABBOX_SEMAPHORE_OS_IMAGE", cfg.Semaphore.OSImage)
-	cfg.Semaphore.IdleTimeout = getenv("CRABBOX_SEMAPHORE_IDLE_TIMEOUT", cfg.Semaphore.IdleTimeout)
 	if value, ok := firstNonEmptyEnv("CRABBOX_SPRITES_TOKEN", "SPRITES_TOKEN", "SPRITE_TOKEN", "SETUP_SPRITE_TOKEN"); ok {
 		cfg.Sprites.Token = value
 		cfg.credentialProvenance.spritesToken = credentialSourceEnvironment
