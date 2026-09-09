@@ -672,16 +672,6 @@ type CoderConfig struct {
 	RichParameterFile    string
 }
 
-type MorphConfig struct {
-	APIKey          string
-	APIURL          string
-	Snapshot        string
-	SSHGatewayHost  string
-	WorkRoot        string
-	DeleteOnRelease bool
-	WakeOnSSH       bool
-}
-
 type DaytonaConfig struct {
 	APIKey           string
 	JWTToken         string
@@ -2686,13 +2676,8 @@ func baseConfig() Config {
 			WorkRoot:        "/home/coder/crabbox",
 			Wait:            "yes",
 		},
-		Morph: MorphConfig{
-			APIURL:         "https://cloud.morph.so",
-			SSHGatewayHost: "ssh.cloud.morph.so",
-			WorkRoot:       "/tmp/crabbox",
-			WakeOnSSH:      true,
-		},
-		Orgo: defaultOrgoConfig(),
+		Morph: defaultMorphConfig(),
+		Orgo:  defaultOrgoConfig(),
 		Daytona: DaytonaConfig{
 			APIURL:           "https://app.daytona.io/api",
 			User:             "daytona",
@@ -3585,16 +3570,6 @@ func (c *fileCoderConfig) UnmarshalYAML(node *yaml.Node) error {
 	}
 	*c = fileCoderConfig(out)
 	return nil
-}
-
-type fileMorphConfig struct {
-	APIKey          string `yaml:"apiKey,omitempty"`
-	APIURL          string `yaml:"apiUrl,omitempty"`
-	Snapshot        string `yaml:"snapshot,omitempty"`
-	SSHGatewayHost  string `yaml:"sshGatewayHost,omitempty"`
-	WorkRoot        string `yaml:"workRoot,omitempty"`
-	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
-	WakeOnSSH       *bool  `yaml:"wakeOnSSH,omitempty"`
 }
 
 type fileDaytonaConfig struct {
@@ -5775,30 +5750,23 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Coder.RichParameterFile = expandUserPath(file.Coder.RichParameterFile)
 		}
 	}
-	if file.Morph != nil {
-		if file.Morph.APIKey != "" {
-			cfg.Morph.APIKey = file.Morph.APIKey
+	{
+		applied, err := cfg.Morph.applyFile(file.Morph)
+		if applied.APIKey {
 			cfg.credentialProvenance.morphAPIKey = credentialSource
 		}
-		if file.Morph.APIURL != "" {
-			cfg.Morph.APIURL = file.Morph.APIURL
+		if applied.APIURL {
 			cfg.credentialProvenance.morphAPIURL = credentialSource
 		}
-		if file.Morph.Snapshot != "" {
-			cfg.Morph.Snapshot = file.Morph.Snapshot
-		}
-		if file.Morph.SSHGatewayHost != "" {
-			cfg.Morph.SSHGatewayHost = file.Morph.SSHGatewayHost
+		if applied.SSHGatewayHost {
 			cfg.credentialProvenance.morphSSHGatewayHost = credentialSource
 		}
-		if file.Morph.WorkRoot != "" {
-			cfg.Morph.WorkRoot = file.Morph.WorkRoot
-		}
-		if file.Morph.DeleteOnRelease != nil {
-			cfg.Morph.DeleteOnRelease = *file.Morph.DeleteOnRelease
+		if applied.DeleteOnRelease {
 			MarkDeleteOnReleaseExplicit(cfg, "morph")
 		}
-		applyOptional(&cfg.Morph.WakeOnSSH, file.Morph.WakeOnSSH)
+		if err != nil {
+			return err
+		}
 	}
 	if file.Daytona != nil {
 		if file.Daytona.APIURL != "" {
@@ -7763,13 +7731,23 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_PHALA_ATTEST"); ok {
 		cfg.Phala.Attest = &value
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MORPH_API_KEY", "MORPH_API_KEY"); ok {
-		cfg.Morph.APIKey = value
-		cfg.credentialProvenance.morphAPIKey = credentialSourceEnvironment
-	}
-	if value := os.Getenv("CRABBOX_MORPH_API_URL"); value != "" {
-		cfg.Morph.APIURL = value
-		cfg.credentialProvenance.morphAPIURL = credentialSourceEnvironment
+	{
+		applied, err := cfg.Morph.applyEnv()
+		if applied.APIKey {
+			cfg.credentialProvenance.morphAPIKey = credentialSourceEnvironment
+		}
+		if applied.APIURL {
+			cfg.credentialProvenance.morphAPIURL = credentialSourceEnvironment
+		}
+		if applied.SSHGatewayHost {
+			cfg.credentialProvenance.morphSSHGatewayHost = credentialSourceEnvironment
+		}
+		if applied.DeleteOnRelease {
+			MarkDeleteOnReleaseExplicit(cfg, "morph")
+		}
+		if err != nil {
+			return err
+		}
 	}
 	if value, ok := os.LookupEnv("CRABBOX_BOXD_API_URL"); ok {
 		cfg.Boxd.APIURL = value
@@ -7805,19 +7783,6 @@ func applyEnv(cfg *Config) error {
 		cfg.Coder.Parameters = params
 	}
 	cfg.Coder.RichParameterFile = expandUserPath(getenv("CRABBOX_CODER_RICH_PARAMETER_FILE", cfg.Coder.RichParameterFile))
-	cfg.Morph.Snapshot = getenv("CRABBOX_MORPH_SNAPSHOT", cfg.Morph.Snapshot)
-	if value := os.Getenv("CRABBOX_MORPH_SSH_GATEWAY_HOST"); value != "" {
-		cfg.Morph.SSHGatewayHost = value
-		cfg.credentialProvenance.morphSSHGatewayHost = credentialSourceEnvironment
-	}
-	cfg.Morph.WorkRoot = getenv("CRABBOX_MORPH_WORK_ROOT", cfg.Morph.WorkRoot)
-	if value, ok := getenvBool("CRABBOX_MORPH_DELETE_ON_RELEASE"); ok {
-		cfg.Morph.DeleteOnRelease = value
-		MarkDeleteOnReleaseExplicit(cfg, "morph")
-	}
-	if value, ok := getenvBool("CRABBOX_MORPH_WAKE_ON_SSH"); ok {
-		cfg.Morph.WakeOnSSH = value
-	}
 	if value, ok := firstNonEmptyEnv("CRABBOX_DAYTONA_API_KEY", "DAYTONA_API_KEY"); ok {
 		cfg.Daytona.APIKey = value
 		cfg.credentialProvenance.daytonaAPIKey = credentialSourceEnvironment

@@ -10882,3 +10882,230 @@ func TestModalConfigServerTypeFallback(t *testing.T) {
 		}
 	}
 }
+
+func TestMorphConfigFileContract(t *testing.T) {
+	wantDefaults := MorphConfig{APIURL: "https://cloud.morph.so", SSHGatewayHost: "ssh.cloud.morph.so", WorkRoot: "/tmp/crabbox", WakeOnSSH: true}
+	if got := baseConfig().Morph; got != wantDefaults {
+		t.Fatalf("defaults=%#v want=%#v", got, wantDefaults)
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace", "value"} {
+			cfg := baseConfig()
+			cfg.Morph.APIKey = "inert-prior"
+			cfg.Morph.Snapshot = "prior-snapshot"
+			want := cfg.Morph
+			source := credentialSourceFlag
+			cfg.credentialProvenance.morphAPIKey = source
+			cfg.credentialProvenance.morphAPIURL = source
+			cfg.credentialProvenance.morphSSHGatewayHost = source
+			fields := map[string]any{}
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"apiKey", &want.APIKey}, {"apiUrl", &want.APIURL}, {"snapshot", &want.Snapshot}, {"sshGatewayHost", &want.SSHGatewayHost}, {"workRoot", &want.WorkRoot}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = "fixture-value"
+				}
+				fields[f.key] = raw
+				if mode == "equal" || mode == "whitespace" || mode == "value" {
+					*f.v = raw.(string)
+					source = credentialSourceForFile(trusted)
+				}
+			}
+			data, err := yaml.Marshal(map[string]any{"morph": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Morph != want || cfg.credentialProvenance.morphAPIKey != source || cfg.credentialProvenance.morphAPIURL != source || cfg.credentialProvenance.morphSSHGatewayHost != source {
+				t.Fatalf("file mode=%s trusted=%t", mode, trusted)
+			}
+		}
+		for _, raw := range []string{"omitted", "null", "false", "true"} {
+			cfg := baseConfig()
+			cfg.Morph.DeleteOnRelease = false
+			cfg.Morph.WakeOnSSH = true
+			want := cfg.Morph
+			data := "morph: {}\n"
+			if raw != "omitted" {
+				data = "morph:\n  deleteOnRelease: " + raw + "\n  wakeOnSSH: " + raw + "\n"
+			}
+			if raw == "false" {
+				want.WakeOnSSH = false
+			}
+			if raw == "true" {
+				want.DeleteOnRelease = true
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte(data), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Morph != want || DeleteOnReleaseExplicit(cfg, "morph") != (raw == "false" || raw == "true") {
+				t.Fatalf("bool file raw=%s trusted=%t", raw, trusted)
+			}
+		}
+	}
+}
+
+func TestMorphConfigEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"empty", "alias", "equal", "whitespace", "value"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Morph.APIKey = "inert-prior"
+			cfg.Morph.Snapshot = "prior-snapshot"
+			want := cfg.Morph
+			prior := credentialSourceTrustedFile
+			cfg.credentialProvenance.morphAPIKey = prior
+			cfg.credentialProvenance.morphAPIURL = prior
+			cfg.credentialProvenance.morphSSHGatewayHost = prior
+			accepted := map[string]bool{}
+			for _, f := range []struct {
+				suffix string
+				v      *string
+			}{{"API_KEY", &want.APIKey}, {"API_URL", &want.APIURL}, {"SNAPSHOT", &want.Snapshot}, {"SSH_GATEWAY_HOST", &want.SSHGatewayHost}, {"WORK_ROOT", &want.WorkRoot}} {
+				raw := *f.v
+				if mode == "empty" || mode == "alias" {
+					raw = ""
+				}
+				if mode == "whitespace" {
+					raw = "  "
+				}
+				if mode == "value" {
+					raw = "fixture-value"
+				}
+				t.Setenv("CRABBOX_MORPH_"+f.suffix, raw)
+				if raw != "" {
+					*f.v = raw
+					accepted[f.suffix] = true
+				}
+			}
+			t.Setenv("MORPH_API_KEY", "")
+			if mode == "alias" || mode == "value" || mode == "whitespace" {
+				t.Setenv("MORPH_API_KEY", "inert-alias")
+				if mode == "alias" {
+					want.APIKey = "inert-alias"
+					accepted["API_KEY"] = true
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			key, url, host := prior, prior, prior
+			if accepted["API_KEY"] {
+				key = credentialSourceEnvironment
+			}
+			if accepted["API_URL"] {
+				url = credentialSourceEnvironment
+			}
+			if accepted["SSH_GATEWAY_HOST"] {
+				host = credentialSourceEnvironment
+			}
+			if cfg.Morph != want || cfg.credentialProvenance.morphAPIKey != key || cfg.credentialProvenance.morphAPIURL != url || cfg.credentialProvenance.morphSSHGatewayHost != host {
+				t.Fatalf("env mode=%s", mode)
+			}
+		})
+	}
+	for _, raw := range []string{"", "invalid", "false", "true"} {
+		t.Run("bool-"+raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			want := cfg.Morph
+			t.Setenv("CRABBOX_MORPH_DELETE_ON_RELEASE", raw)
+			t.Setenv("CRABBOX_MORPH_WAKE_ON_SSH", raw)
+			if raw == "false" {
+				want.WakeOnSSH = false
+			}
+			if raw == "true" {
+				want.DeleteOnRelease = true
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Morph != want || DeleteOnReleaseExplicit(cfg, "morph") != (raw == "false" || raw == "true") {
+				t.Fatalf("bool env raw=%s", raw)
+			}
+		})
+	}
+}
+
+func TestMorphConfigCentralFlagSources(t *testing.T) {
+	cfg := baseConfig()
+	cfg.credentialProvenance.morphAPIKey = credentialSourceEnvironment
+	fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+	fs.String("morph-api-url", "", "")
+	fs.String("morph-ssh-gateway-host", "", "")
+	markCredentialDestinationFlagSources(&cfg, fs)
+	if cfg.credentialProvenance.morphAPIURL == credentialSourceFlag || cfg.credentialProvenance.morphSSHGatewayHost == credentialSourceFlag {
+		t.Fatal("unvisited marked")
+	}
+	if err := fs.Parse([]string{"--morph-api-url=", "--morph-ssh-gateway-host="}); err != nil {
+		t.Fatal(err)
+	}
+	markCredentialDestinationFlagSources(&cfg, fs)
+	if cfg.credentialProvenance.morphAPIURL != credentialSourceFlag || cfg.credentialProvenance.morphSSHGatewayHost != credentialSourceFlag || cfg.credentialProvenance.morphAPIKey != credentialSourceEnvironment {
+		t.Fatal("central sources changed")
+	}
+}
+
+func TestMorphConfigIndependentSources(t *testing.T) {
+	for _, tc := range []struct{ key, env string }{{"apiKey", "API_KEY"}, {"apiUrl", "API_URL"}, {"sshGatewayHost", "SSH_GATEWAY_HOST"}} {
+		for _, mode := range []string{"user", "repo", "env"} {
+			t.Run(tc.key+"-"+mode, func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := baseConfig()
+				cfg.credentialProvenance.morphAPIKey = credentialSourceFlag
+				cfg.credentialProvenance.morphAPIURL = credentialSourceFlag
+				cfg.credentialProvenance.morphSSHGatewayHost = credentialSourceFlag
+				var source credentialValueSource
+				if mode == "env" {
+					t.Setenv("CRABBOX_MORPH_"+tc.env, "fixture")
+					source = credentialSourceEnvironment
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					var file fileConfig
+					if err := yaml.Unmarshal([]byte("morph:\n  "+tc.key+": fixture\n"), &file); err != nil {
+						t.Fatal(err)
+					}
+					source = credentialSourceForFile(mode == "user")
+					if err := applyFileConfigWithTrust(&cfg, file, mode == "user"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for key, got := range map[string]credentialValueSource{"apiKey": cfg.credentialProvenance.morphAPIKey, "apiUrl": cfg.credentialProvenance.morphAPIURL, "sshGatewayHost": cfg.credentialProvenance.morphSSHGatewayHost} {
+					want := credentialSourceFlag
+					if key == tc.key {
+						want = source
+					}
+					if got != want {
+						t.Fatalf("source %s=%v want=%v", key, got, want)
+					}
+				}
+			})
+		}
+	}
+}

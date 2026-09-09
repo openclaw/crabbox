@@ -484,6 +484,12 @@ func TestModalGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestMorphGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_morph.go", "../../internal/cli/config_morph_generated.go", "MorphConfig", "morph", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
