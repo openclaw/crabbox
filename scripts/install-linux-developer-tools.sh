@@ -281,7 +281,7 @@ PY
 
 stage_toolchain_archive() {
   local name="$1" staging="$2" allow_download="${3:-0}"
-  local algorithm expected url
+  local algorithm expected url status
   read -r algorithm expected url <<<"$(toolchain_archive_spec "$name")"
   [[ -n "$expected" ]] || return 1
   # Hash the private copy that will be extracted; never execute a cached tree.
@@ -296,8 +296,12 @@ stage_toolchain_archive() {
     return 1
   fi
   curl -q --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 300 \
-    --output "$staging/$name" "$url" &&
-    verify_toolchain_archive "$algorithm" "$expected" "$staging/$name"
+    --output "$staging/$name" "$url" || {
+      status=$?
+      log "toolchain archive download failed: $name (curl exit $status)"
+      return "$status"
+    }
+  verify_toolchain_archive "$algorithm" "$expected" "$staging/$name"
 }
 
 cache_public_toolchain_archives() (

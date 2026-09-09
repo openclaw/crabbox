@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Identify failed Linux toolchain archive downloads while preserving curl diagnostics and exit status. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
+
 - Require verified builder capabilities for Linux developer images before cleanup and throughout publication, with trusted nonwriting verification and runtime-user functional smokes. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
 
 - Contain Linux readiness venv and pip scratch files within the probe's temporary directory, including when dependency checks fail, while preserving the frozen v1 manifest digest. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.

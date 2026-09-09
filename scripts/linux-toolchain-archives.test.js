@@ -328,6 +328,66 @@ install_bun
   );
 });
 
+for (const variant of bunVariants) {
+  test(`Bun preserves curl failure for ${variant} without publishing the failed archive`, (t) => {
+    const { root, run, setup, destination } = bunFixture(t);
+    const name = `bun-v1.4.0-${variant}.zip`;
+    fs.renameSync(path.join(root, "archives"), path.join(root, "upstream"));
+    const result = run(`${setup}
+curl() {
+  local output
+  while [[ "$1" != "--output" ]]; do shift; done
+  output="$2"
+  printf '%s\\n' "\${output##*/}" >>"$PWD/curl.calls"
+  if [[ "\${output##*/}" == "${name}" ]]; then
+    printf partial >"$output"
+    printf 'curl: (22) The requested URL returned error: 500\\n' >&2
+    return 22
+  fi
+  cp "$PWD/upstream/\${output##*/}" "$output"
+}
+python3() {
+  printf '%s\\n' "$*" >>"$PWD/python.calls"
+  command python3 "$@"
+}
+extract_bun_archive() { touch "$PWD/extracted"; return 91; }
+install_bun
+`);
+    assert.equal(result.status, 22, result.error?.message || result.stderr);
+    assert.equal(result.stdout, "");
+    assert.equal(
+      result.stderr,
+      `curl: (22) The requested URL returned error: 500\nlinux-tools: toolchain archive download failed: ${name} (curl exit 22)\n`,
+    );
+    const attempted = bunVariants.slice(0, bunVariants.indexOf(variant) + 1)
+      .map((item) => `bun-v1.4.0-${item}.zip`);
+    assert.deepEqual(
+      fs.readFileSync(path.join(root, "curl.calls"), "utf8").trim().split("\n"),
+      attempted,
+      "each archive must have only one download attempt",
+    );
+    const pythonCalls = path.join(root, "python.calls");
+    assert.equal(
+      fs.existsSync(pythonCalls) && fs.readFileSync(pythonCalls, "utf8").includes(name),
+      false,
+      "failed downloads must not reach verification or publication",
+    );
+    assert.equal(fs.existsSync(path.join(root, "extracted")), false);
+    assert.equal(fs.existsSync(destination), false);
+    assert.deepEqual(fs.readdirSync(path.join(root, "bin")), []);
+    const cache = path.join(root, "archives");
+    const retained = attempted.slice(0, -1);
+    assert.deepEqual(fs.existsSync(cache) ? fs.readdirSync(cache) : [], retained);
+    for (const cached of retained) {
+      assert.deepEqual(
+        fs.readFileSync(path.join(cache, cached)),
+        fs.readFileSync(path.join(root, "upstream", cached)),
+      );
+    }
+    assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);
+  });
+}
+
 for (const options of [{ version: "1.3.0" }, { malformed: true }]) {
   test(`Bun rejects authenticated but invalid content ${JSON.stringify(options)}`, (t) => {
     const { root, run, setup } = bunFixture(t, options);
@@ -948,6 +1008,41 @@ stage_toolchain_archive fixture.tgz "$PWD/staging"
   success(downloaded);
   assert.deepEqual(fs.readFileSync(staged), payload);
 });
+
+for (const [name, status, message, url] of [
+  ["bun-v1.4.0-linux-x64-baseline.zip", 22, "The requested URL returned error: 500",
+    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64-baseline.zip"],
+  [nodeArchive, 7, "Failed to connect", `https://nodejs.org/dist/v24.19.0/${nodeArchive}`],
+]) {
+  test(`archive staging reports curl ${status} without changing its status, stderr, or arguments`, (t) => {
+    const { root, run } = fixture(t);
+    const result = run(`
+public_toolchain_archive_dir="$PWD/archives"
+curl() {
+  printf '%s\\0' "$@" >>"$PWD/curl.args"
+  while [[ "$1" != "--output" ]]; do shift; done
+  printf partial >"$2"
+  printf 'curl: (${status}) ${message}\\n' >&2
+  return ${status}
+}
+verify_toolchain_archive() { touch "$PWD/verified"; return 91; }
+stage_toolchain_archive "${name}" "$PWD/staging" 1
+`);
+    assert.equal(result.status, status, result.error?.message || result.stderr);
+    assert.equal(result.stdout, "");
+    assert.equal(
+      result.stderr,
+      `curl: (${status}) ${message}\nlinux-tools: toolchain archive download failed: ${name} (curl exit ${status})\n`,
+    );
+    assert.deepEqual(
+      fs.readFileSync(path.join(root, "curl.args"), "utf8").split("\0").slice(0, -1),
+      ["-q", "--proto", "=https", "--tlsv1.2", "-fsSL", "--connect-timeout", "10",
+        "--max-time", "300", "--output", path.join(root, "staging", name), url],
+    );
+    assert.equal(fs.existsSync(path.join(root, "verified")), false);
+    assert.deepEqual(fs.readdirSync(path.join(root, "archives")), []);
+  });
+}
 
 test("raw pnpm authentication cannot be replaced by forged Corepack metadata or a packed bundle", (t) => {
   const { root, run } = fixture(t);
