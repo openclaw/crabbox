@@ -58,7 +58,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if core.FlagWasSet(fs, "apple-container-extra-run-args") {
 		cfg.AppleContainer.ExtraRunArgs = splitExtraArgs(*v.ExtraRun)
 	}
-	if isAppleContainerProvider(cfg.Provider) {
+	if core.ProviderNameMatchesExact(cfg.Provider, Provider{}) {
 		applyDefaults(cfg)
 	}
 	return nil

@@ -94,7 +94,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		}
 		cfg.LocalContainer.Volumes = []string(*v.Volumes)
 	}
-	if cfg.Provider == providerName || cfg.Provider == "docker" || cfg.Provider == "container" || cfg.Provider == "local-docker" {
+	if core.ProviderNameMatchesExact(cfg.Provider, Provider{}) {
 		applyDefaults(cfg)
 	}
 	return nil

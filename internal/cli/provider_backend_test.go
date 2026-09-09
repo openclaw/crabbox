@@ -2006,3 +2006,23 @@ func TestProviderNameMatchesMetadataOnly(t *testing.T) {
 		t.Fatal("metadata consultation or registry boundary changed")
 	}
 }
+
+func TestProviderNameMatchesExactMetadataOnly(t *testing.T) {
+	if _, registered := providerRegistry["metadata-only"]; registered {
+		t.Fatal("fixture must not be registered")
+	}
+	registrySize := len(providerRegistry)
+	nameCalls, aliasCalls := 0, 0
+	p := nameMetadataOnlyTestProvider{nameCalls: &nameCalls, aliasCalls: &aliasCalls}
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{{" Metadata-Only ", true}, {"Metadata-Only", false}, {" metadata-only ", false}, {"  Metadata-Only  ", false}, {" Alias-One ", true}, {"Alias-One", false}, {" ALIAS-ONE ", false}, {"SECOND", true}, {"second", false}, {" SECOND ", false}, {"", false}, {" ", false}, {"unknown", false}} {
+		if got := ProviderNameMatchesExact(tc.name, p); got != tc.want {
+			t.Fatalf("exact name=%q got=%t want=%t", tc.name, got, tc.want)
+		}
+	}
+	if nameCalls == 0 || aliasCalls == 0 || len(providerRegistry) != registrySize {
+		t.Fatal("metadata consultation or registry boundary changed")
+	}
+}

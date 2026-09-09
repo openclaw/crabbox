@@ -40,7 +40,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	selected := cfg.Provider == providerName || cfg.Provider == "wsb" || cfg.Provider == "windows-sandbox-provider"
+	selected := core.ProviderNameMatchesExact(cfg.Provider, Provider{})
 	if selected {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "Windows Sandbox sizing is controlled by the host", "Windows Sandbox sizing is controlled by the host"); err != nil {
 			return err

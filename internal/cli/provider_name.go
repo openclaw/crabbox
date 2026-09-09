@@ -17,3 +17,17 @@ func ProviderNameMatches(name string, provider Provider) bool {
 	}
 	return false
 }
+
+// ProviderNameMatchesExact compares raw names with provider metadata without
+// normalization, registry lookup, or backend configuration.
+func ProviderNameMatchesExact(name string, provider Provider) bool {
+	if name == provider.Name() {
+		return true
+	}
+	for _, alias := range provider.Aliases() {
+		if name == alias {
+			return true
+		}
+	}
+	return false
+}

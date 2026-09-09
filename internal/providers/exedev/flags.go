@@ -12,7 +12,7 @@ func RegisterExeDevProviderFlags(fs *flag.FlagSet, defaults Config) any {
 }
 
 func ApplyExeDevProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if cfg.Provider == providerName || cfg.Provider == "exe" || cfg.Provider == "exedev" {
+	if core.ProviderNameMatchesExact(cfg.Provider, Provider{}) {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --exe-dev-cpus, --exe-dev-memory, and --exe-dev-disk", "use --exe-dev-image"); err != nil {
 			return err
 		}
@@ -22,7 +22,7 @@ func ApplyExeDevProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 		return nil
 	}
 	v.Apply(&cfg.ExeDev, fs)
-	if cfg.Provider == providerName || cfg.Provider == "exe" || cfg.Provider == "exedev" {
+	if core.ProviderNameMatchesExact(cfg.Provider, Provider{}) {
 		applyExeDevDefaults(cfg)
 	}
 	return nil
