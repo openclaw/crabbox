@@ -6,7 +6,7 @@
 
 - Describe Scaleway configuration bindings once, sharing configured defaults while preserving explicit SDK location overrides and distinct file, environment, and flag list behavior. [PR 2036](https://github.com/openclaw/crabbox/pull/2036). Thanks @steipete.
 
-- Describe Tencent Cloud configuration bindings once, preserving 64-bit sizes, raw defaults, explicit type precedence, and trusted endpoint overrides while sharing runtime fallback values. Thanks @steipete.
+- Describe Tencent Cloud configuration bindings once, preserving 64-bit sizes, raw defaults, explicit type precedence, and trusted endpoint overrides while sharing runtime fallback values. [PR 2041](https://github.com/openclaw/crabbox/pull/2041). Thanks @steipete.
 
 ## 0.54.0 - 2026-09-09
 
