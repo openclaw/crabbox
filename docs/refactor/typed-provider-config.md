@@ -4,7 +4,7 @@ Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
 Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, Lume, Runpod, Vast,
-W&B, and Scaleway
+W&B, Scaleway, and Tencent Cloud
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -21,7 +21,8 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_morph.go`, `internal/cli/config_exe_dev.go`,
 `internal/cli/config_ovh.go`, `internal/cli/config_lume.go`,
 `internal/cli/config_runpod.go`, `internal/cli/config_vast.go`,
-`internal/cli/config_wandb.go`, and `internal/cli/config_scaleway.go`.
+`internal/cli/config_wandb.go`, `internal/cli/config_scaleway.go`, and
+`internal/cli/config_tencentcloud.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -87,10 +88,15 @@ an independent empty default and produces nil for empty results. Environment
 parsing retains its distinct nonnil empty result. These are source-specific
 assignment rules, not a shared normalization policy.
 
+Tencent Cloud preserves signed 64-bit numeric bindings and an entirely zero-valued
+raw configuration. Named runtime constants share effective fallback values without
+initializing flag defaults. Its trusted endpoint admission, four explicit markers,
+class matrix, market selection, and service-family endpoint policy remain separate.
+
 ## Adding a field
 
 1. Add an exported, singly named field to the provider's config struct. Supported types
-   are `string`, `int`, `float64`, `bool`, and `[]string`.
+   are `string`, `int`, `int64`, `float64`, `bool`, and `[]string`.
 2. Flag-supported fields need their `flag` spelling and `help` text. Environment-supported fields need an
    `env` variable, and file-supported fields also need a `config` YAML key.
    Explicitly set `sources:"user,repo,env,flag"` only after establishing that the
@@ -119,15 +125,20 @@ assignment rules, not a shared normalization policy.
    ordinary file/environment checks; the explicit source modes below preserve
    providers whose input rules differ.
    An existing source-specific integer can opt into `envInt:"fallback"` to use
-   core's `getenvInt` for environment input only. It requires an environment
-   source, `int`, and the existing nonnegative policy; empty or unknown modes are
+   core's `getenvInt` or `getenvInt64` for environment input only. It requires an environment
+   source, `int` or `int64`, and the existing nonnegative policy; empty or unknown modes are
    rejected. File rules remain independently selected, flags remain deferred, and
    malformed environment input keeps the previous value while parsed negatives
    retain each provider's existing later handling. No parser function is supplied
    by the tag.
+   Environment-admitted `int64` fields currently require this fallback mode;
+   strict `int64` environment parsing and aliases are not generated. File fields
+   remain `*int64`, and flags use `flag.Int64`, with no platform-width conversion.
+   Compiled `int` defaults retain the existing signed 32-bit check; `int64`
+   defaults are checked at signed 64-bit width.
    An existing positive-only integer file binding can opt into
    `fileInt:"positive"`: only a present value greater than zero assigns;
-   omitted/null/zero/negative input is ignored. It requires an int with file
+   omitted/null/zero/negative input is ignored. It requires an int or int64 with file
    admission and the existing nonnegative default policy. This fixed predicate
    changes no environment or flag behavior and accepts no custom expressions.
    `fileInt:"present"` instead applies every nonnil integer pointer, including
@@ -136,14 +147,14 @@ assignment rules, not a shared normalization policy.
    ignored; environment parsing is still selected independently.
    `fileInt:"nonzero"` applies a present value only when it differs from zero,
    including negative values. Omitted/null/zero input preserves the prior value.
-   It requires the same file-admitted int and nonnegative compiled-default policy,
+   It requires the same file-admitted int or int64 and nonnegative compiled-default policy,
    but adds no file-negative rejection. Environment and flag behavior do not change;
    later validation or default repair remains with the provider.
    A file-admitted `float64` with the same existing positive-only YAML rule can
    use `fileFloat:"positive"`. It emits the literal greater-than-zero predicate
    without changing float parsing or adding finite/range validation to file or
    environment input. Float default validation remains separate; `fileInt` and
-   the int-only nonnegative policy do not become float policies.
+   the integer-only nonnegative policy do not become float policies.
    A string field may name an existing fallback environment variable with
    `envAlias`, and a second with `envAlias2` only when the first is present.
    All names share collision checks; empty aliases and fields without environment
@@ -207,7 +218,7 @@ assignment rules, not a shared normalization policy.
 4. Add contract tests for the field's presence, source precedence, invalid
    values, and provider behavior. Update the provider reference.
 5. Run `go generate ./internal/cli`, review the generated diff, and run
-   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer ./internal/providers/modal ./internal/providers/morph ./internal/providers/exedev ./internal/providers/ovh ./internal/providers/lume ./internal/providers/runpod ./internal/providers/vast ./internal/providers/wandb ./internal/providers/scaleway` plus the
+   `go test -race ./scripts/configgen ./internal/providers/vercelsandbox ./internal/providers/codesandbox ./internal/providers/cua ./internal/providers/opensandbox ./internal/providers/anthropicsandboxruntime ./internal/providers/cloudrunsandbox ./internal/providers/fastapicloud ./internal/providers/railway ./internal/providers/upstashbox ./internal/providers/cloudflare ./internal/providers/cloudflaresandbox ./internal/providers/e2b ./internal/providers/blaxel ./internal/providers/azuredynamicsessions ./internal/providers/smolvm ./internal/providers/semaphore ./internal/providers/tensorlake ./internal/providers/orgo ./internal/providers/opencomputer ./internal/providers/modal ./internal/providers/morph ./internal/providers/exedev ./internal/providers/ovh ./internal/providers/lume ./internal/providers/runpod ./internal/providers/vast ./internal/providers/wandb ./internal/providers/scaleway ./internal/providers/tencentcloud` plus the
    relevant configuration and CLI flag tests.
 
 The standalone stale-output check, from the repository root, is:

@@ -45,6 +45,8 @@
 - Share unsupported machine-sizing checks and work-root inheritance decisions across providers, preserving explicit-input behavior, provider guidance, raw roots, and validation order. [PR 2023](https://github.com/openclaw/crabbox/pull/2023), [PR 2026](https://github.com/openclaw/crabbox/pull/2026). Thanks @steipete.
 - Share declared provider names and aliases across selection guards while keeping normalized selection and raw-exact matching distinct, with unchanged validation order and claim matching. [PR 2030](https://github.com/openclaw/crabbox/pull/2030), [PR 2031](https://github.com/openclaw/crabbox/pull/2031). Thanks @steipete.
 
+- Describe Tencent Cloud configuration bindings once, preserving 64-bit sizes, raw defaults, explicit type precedence, and trusted endpoint overrides while sharing runtime fallback values. Thanks @steipete.
+
 ## 0.53.0 - 2026-09-08
 
 ### Highlights

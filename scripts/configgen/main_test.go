@@ -532,6 +532,12 @@ func TestScalewayGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestTencentCloudGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_tencentcloud.go", "../../internal/cli/config_tencentcloud_generated.go", "TencentCloudConfig", "tencentcloud", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -2085,4 +2091,113 @@ func TestDistinctListEvents(t *testing.T){
 }
 `
 	runScalarFixture(t, source, output, behavior+getters)
+}
+
+const int64Sample = "package cli\ntype PilotConfig struct { Wide int64 `sources:\"user,repo,env,flag\" config:\"wide\" env:\"WIDE\" flag:\"wide\" help:\"Wide\" nonnegative:\"true\" fileInt:\"positive\" envInt:\"fallback\" default:\"4294967296\"` }"
+
+func TestSchemaInt64WidthAndRestrictions(t *testing.T) {
+	for _, value := range []string{"0", "2147483648", "9223372036854775807"} {
+		input := strings.Replace(int64Sample, `default:"4294967296"`, `default:"`+value+`"`, 1)
+		if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err != nil {
+			t.Fatalf("valid64 default %s: %v", value, err)
+		}
+	}
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"positive overflow", `default:"4294967296"`, `default:"9223372036854775808"`, "default:"},
+		{"negative overflow", `default:"4294967296"`, `default:"-9223372036854775809"`, "default:"},
+		{"negative default", `default:"4294967296"`, `default:"-9223372036854775808"`, "default must be non-negative"},
+		{"strict env unsupported", `envInt:"fallback"`, "", "int64 environment fields require envInt fallback"},
+		{"alias unsupported", `help:"Wide"`, `help:"Wide" envAlias:"ALIAS"`, "envAlias is supported only"},
+		{"second alias unsupported", `help:"Wide"`, `help:"Wide" envAlias:"ALIAS" envAlias2:"SECOND"`, "envAlias2 requires"},
+		{"required constraint", `nonnegative:"true"`, "", "require nonnegative policy"},
+		{"report unsupported", `help:"Wide"`, `help:"Wide" reportApplied:"true"`, "reportApplied is supported only"},
+		{"unsigned unsupported", "Wide int64", "Wide uint64", "unsupported config type"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(int64Sample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v want%q", err, tc.want)
+			}
+		})
+	}
+	if _, err := defaultExpression("int", "2147483648"); err == nil {
+		t.Fatal("existing int default width broadened")
+	}
+	if got, err := defaultExpression("int64", "-9223372036854775808"); err != nil || got != "-9223372036854775808" {
+		t.Fatalf("signed64 parsing: %q %v", got, err)
+	}
+}
+
+func TestGenerateInt64Width(t *testing.T) {
+	s, err := parseSchema([]byte(int64Sample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic int64: %v", err)
+	}
+	for _, want := range []string{"Wide *int64", `const PilotConfigDefaultWide int64 = 4294967296`, `getenvInt64("WIDE", cfg.Wide)`, `fs.Int64("wide", defaults.Wide, "Wide")`} {
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("missing width binding%q", want)
+		}
+	}
+	typecheckGenerated(t, int64Sample+"\nfunc getenvInt64(string,int64)int64{panic(\"stub\")}\n", output)
+	// Exercise the actual core ParseInt(...,64) helper rather than another parser.
+	coreSource, err := os.ReadFile("../../internal/cli/config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(coreSource), "func getenvInt64(")
+	if start < 0 {
+		t.Fatal("missing int64 helper")
+	}
+	rest := string(coreSource)[start:]
+	end := strings.Index(rest, "\nfunc ")
+	if end < 0 {
+		t.Fatal("missing helper end")
+	}
+	const behavior = `package cli
+import("flag";"os";"strconv";"testing")
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestWidth(t *testing.T){
+ const prior int64=4294967296
+ const max int64=9223372036854775807
+ const min int64=-9223372036854775808
+ for _,tc:=range []struct{raw string;want int64}{{"",prior},{"2147483648",2147483648},{"9223372036854775807",max},{"-9223372036854775808",min},{"9223372036854775808",prior},{"-9223372036854775809",prior},{"bad",prior},{" 9 ",prior},{"0",0},{"-1",-1}}{
+  cfg:=defaultPilotConfig();t.Setenv("WIDE",tc.raw);if err:=cfg.applyEnv();err!=nil||cfg.Wide!=tc.want{t.Fatalf("env%q: %+v %v",tc.raw,cfg,err)}
+ }
+ zero,negative,wide:=int64(0),min,max
+ for _,tc:=range []struct{value *int64;want int64}{{nil,prior},{&zero,prior},{&negative,prior},{&wide,max}}{cfg:=defaultPilotConfig();if err:=cfg.applyFile(&filePilotConfig{Wide:tc.value});err!=nil||cfg.Wide!=tc.want{t.Fatalf("file: %+v %v",cfg,err)}}
+ for _,raw:=range []string{"0","-9223372036854775808","9223372036854775807"}{cfg:=defaultPilotConfig();fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg);if err:=fs.Parse([]string{"--wide="+raw});err!=nil{t.Fatal(err)};values.Apply(&cfg,fs);want,_:=strconv.ParseInt(raw,10,64);if cfg.Wide!=want{t.Fatalf("flag%q: %+v",raw,cfg)}}
+}
+`
+	runScalarFixture(t, int64Sample, output, behavior+rest[:end])
+	for _, mode := range []string{"present", "nonzero"} {
+		input := strings.Replace(int64Sample, `fileInt:"positive"`, `fileInt:"`+mode+`"`, 1)
+		s, err := parseSchema([]byte(input), "PilotConfig", "pilot")
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := generate(s, "pilot.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		typecheckGenerated(t, input+"\nfunc getenvInt64(string,int64)int64{panic(\"stub\")}\n", out)
+	}
+	flagOnly := strings.Replace(int64Sample, `sources:"user,repo,env,flag" config:"wide" env:"WIDE"`, `sources:"flag"`, 1)
+	flagOnly = strings.Replace(flagOnly, ` fileInt:"positive" envInt:"fallback"`, "", 1)
+	fs, err := parseSchema([]byte(flagOnly), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fo, err := generate(fs, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	typecheckGenerated(t, flagOnly, fo)
 }

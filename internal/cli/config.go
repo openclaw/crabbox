@@ -433,25 +433,6 @@ type NebiusConfig struct {
 	RecoveryPolicy   string
 }
 
-// TencentCloudConfig contains non-secret Tencent Cloud CVM settings. Tencent
-// Cloud API credentials are intentionally read from TENCENTCLOUD_SECRET_ID and
-// TENCENTCLOUD_SECRET_KEY by the provider client and are not persisted in
-// Crabbox config.
-type TencentCloudConfig struct {
-	Region                  string
-	Zone                    string
-	Image                   string
-	Type                    string
-	VPCID                   string
-	SubnetID                string
-	SecurityGroupID         string
-	SSHCIDRs                []string
-	RootGB                  int64
-	InternetChargeType      string
-	InternetMaxBandwidthOut int64
-	APIEndpoint             string
-}
-
 type ActionsConfig struct {
 	Repo          string
 	Workflow      string
@@ -1702,22 +1683,22 @@ func applyProviderConfigDefaults(cfg *Config) error {
 	}
 	if cfg.Provider == "tencentcloud" {
 		if cfg.TencentCloud.Region == "" {
-			cfg.TencentCloud.Region = "ap-shanghai"
+			cfg.TencentCloud.Region = TencentCloudRegionFallback
 		}
 		if cfg.TencentCloud.Zone == "" {
-			cfg.TencentCloud.Zone = "ap-shanghai-2"
+			cfg.TencentCloud.Zone = TencentCloudZoneFallback
 		}
 		if cfg.TencentCloud.Type == "" {
-			cfg.TencentCloud.Type = "SA5.MEDIUM2"
+			cfg.TencentCloud.Type = TencentCloudTypeFallback
 		}
 		if cfg.TencentCloud.RootGB == 0 {
-			cfg.TencentCloud.RootGB = 50
+			cfg.TencentCloud.RootGB = TencentCloudRootGBFallback
 		}
 		if cfg.TencentCloud.InternetChargeType == "" {
-			cfg.TencentCloud.InternetChargeType = "TRAFFIC_POSTPAID_BY_HOUR"
+			cfg.TencentCloud.InternetChargeType = TencentCloudInternetChargeTypeFallback
 		}
 		if cfg.TencentCloud.InternetMaxBandwidthOut == 0 {
-			cfg.TencentCloud.InternetMaxBandwidthOut = 5
+			cfg.TencentCloud.InternetMaxBandwidthOut = TencentCloudInternetMaxBandwidthOutFallback
 		}
 		applyLinuxConnectionDefaults(cfg, "ubuntu", "22")
 		cfg.SSHFallbackPorts = nil
@@ -2470,8 +2451,9 @@ func baseConfig() Config {
 			Type:        "gpu_1x_a10",
 			ImageFamily: "lambda-stack-24-04",
 		},
-		OVH:      defaultOVHConfig(),
-		Scaleway: defaultScalewayConfig(),
+		OVH:          defaultOVHConfig(),
+		Scaleway:     defaultScalewayConfig(),
+		TencentCloud: defaultTencentCloudConfig(),
 		Incus: IncusConfig{
 			Remote:          "local",
 			Project:         "",
@@ -3031,21 +3013,6 @@ type fileNebiusConfig struct {
 	SecurityGroupIDs []string `yaml:"securityGroupIds,omitempty"`
 	ServiceAccountID string   `yaml:"serviceAccountId,omitempty"`
 	RecoveryPolicy   string   `yaml:"recoveryPolicy,omitempty"`
-}
-
-type fileTencentCloudConfig struct {
-	Region                  string   `yaml:"region,omitempty"`
-	Zone                    string   `yaml:"zone,omitempty"`
-	Image                   string   `yaml:"image,omitempty"`
-	Type                    string   `yaml:"type,omitempty"`
-	VPCID                   string   `yaml:"vpcId,omitempty"`
-	SubnetID                string   `yaml:"subnetId,omitempty"`
-	SecurityGroupID         string   `yaml:"securityGroupId,omitempty"`
-	SSHCIDRs                []string `yaml:"sshCIDRs,omitempty"`
-	RootGB                  int64    `yaml:"rootGB,omitempty"`
-	InternetChargeType      string   `yaml:"internetChargeType,omitempty"`
-	InternetMaxBandwidthOut int64    `yaml:"internetMaxBandwidthOut,omitempty"`
-	APIEndpoint             string   `yaml:"apiEndpoint,omitempty"`
 }
 
 type fileAWSConfig struct {
@@ -4571,46 +4538,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.TencentCloud != nil {
-		if file.TencentCloud.Region != "" {
-			cfg.TencentCloud.Region = file.TencentCloud.Region
-			cfg.tencentCloudRegionExplicit = true
-		}
-		if file.TencentCloud.Zone != "" {
-			cfg.TencentCloud.Zone = file.TencentCloud.Zone
-			cfg.tencentCloudZoneExplicit = true
-		}
-		if file.TencentCloud.Image != "" {
-			cfg.TencentCloud.Image = file.TencentCloud.Image
-			cfg.tencentCloudImageExplicit = true
-		}
-		if file.TencentCloud.Type != "" {
-			cfg.TencentCloud.Type = file.TencentCloud.Type
-			cfg.tencentCloudTypeExplicit = true
-		}
-		if file.TencentCloud.VPCID != "" {
-			cfg.TencentCloud.VPCID = file.TencentCloud.VPCID
-		}
-		if file.TencentCloud.SubnetID != "" {
-			cfg.TencentCloud.SubnetID = file.TencentCloud.SubnetID
-		}
-		if file.TencentCloud.SecurityGroupID != "" {
-			cfg.TencentCloud.SecurityGroupID = file.TencentCloud.SecurityGroupID
-		}
-		if len(file.TencentCloud.SSHCIDRs) > 0 {
-			cfg.TencentCloud.SSHCIDRs = file.TencentCloud.SSHCIDRs
-		}
-		if file.TencentCloud.RootGB > 0 {
-			cfg.TencentCloud.RootGB = file.TencentCloud.RootGB
-		}
-		if file.TencentCloud.InternetChargeType != "" {
-			cfg.TencentCloud.InternetChargeType = file.TencentCloud.InternetChargeType
-		}
-		if file.TencentCloud.InternetMaxBandwidthOut > 0 {
-			cfg.TencentCloud.InternetMaxBandwidthOut = file.TencentCloud.InternetMaxBandwidthOut
-		}
-		if trusted && file.TencentCloud.APIEndpoint != "" {
-			cfg.TencentCloud.APIEndpoint = file.TencentCloud.APIEndpoint
+	{
+		applied, err := cfg.TencentCloud.applyFile(file.TencentCloud, trusted)
+		MarkTencentCloudConfigApplied(cfg, applied)
+		if err != nil {
+			return err
 		}
 	}
 	if file.AWS != nil {
@@ -7084,32 +7016,13 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	if region := os.Getenv("CRABBOX_TENCENTCLOUD_REGION"); region != "" {
-		cfg.TencentCloud.Region = region
-		cfg.tencentCloudRegionExplicit = true
+	{
+		applied, err := cfg.TencentCloud.applyEnv()
+		MarkTencentCloudConfigApplied(cfg, applied)
+		if err != nil {
+			return err
+		}
 	}
-	if zone := os.Getenv("CRABBOX_TENCENTCLOUD_ZONE"); zone != "" {
-		cfg.TencentCloud.Zone = zone
-		cfg.tencentCloudZoneExplicit = true
-	}
-	if image := os.Getenv("CRABBOX_TENCENTCLOUD_IMAGE"); image != "" {
-		cfg.TencentCloud.Image = image
-		cfg.tencentCloudImageExplicit = true
-	}
-	if serverType := os.Getenv("CRABBOX_TENCENTCLOUD_TYPE"); serverType != "" {
-		cfg.TencentCloud.Type = serverType
-		cfg.tencentCloudTypeExplicit = true
-	}
-	cfg.TencentCloud.VPCID = getenv("CRABBOX_TENCENTCLOUD_VPC_ID", cfg.TencentCloud.VPCID)
-	cfg.TencentCloud.SubnetID = getenv("CRABBOX_TENCENTCLOUD_SUBNET_ID", cfg.TencentCloud.SubnetID)
-	cfg.TencentCloud.SecurityGroupID = getenv("CRABBOX_TENCENTCLOUD_SECURITY_GROUP_ID", cfg.TencentCloud.SecurityGroupID)
-	if cidrs := os.Getenv("CRABBOX_TENCENTCLOUD_SSH_CIDRS"); cidrs != "" {
-		cfg.TencentCloud.SSHCIDRs = splitCommaList(cidrs)
-	}
-	cfg.TencentCloud.RootGB = getenvInt64("CRABBOX_TENCENTCLOUD_ROOT_GB", cfg.TencentCloud.RootGB)
-	cfg.TencentCloud.InternetChargeType = getenv("CRABBOX_TENCENTCLOUD_INTERNET_CHARGE_TYPE", cfg.TencentCloud.InternetChargeType)
-	cfg.TencentCloud.InternetMaxBandwidthOut = getenvInt64("CRABBOX_TENCENTCLOUD_INTERNET_MAX_BANDWIDTH_OUT", cfg.TencentCloud.InternetMaxBandwidthOut)
-	cfg.TencentCloud.APIEndpoint = getenv("CRABBOX_TENCENTCLOUD_API_ENDPOINT", cfg.TencentCloud.APIEndpoint)
 	if value := os.Getenv("CRABBOX_PROXMOX_API_URL"); value != "" {
 		cfg.Proxmox.APIURL = value
 		cfg.credentialProvenance.proxmoxAPIURL = credentialSourceEnvironment

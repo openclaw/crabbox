@@ -207,7 +207,7 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		}
 		f.kind = typeText.String()
 		switch f.kind {
-		case "string", "int", "float64", "bool", "[]string":
+		case "string", "int", "int64", "float64", "bool", "[]string":
 		default:
 			return s, fmt.Errorf("%s: unsupported config type %s", f.name, f.kind)
 		}
@@ -265,16 +265,16 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			f.envAliasAfterConfig = true
 		}
 		if value, ok := tags.Lookup("nonnegative"); ok {
-			if f.kind != "int" || value != "true" {
-				return s, fmt.Errorf("%s: nonnegative is supported only as true for int fields", f.name)
+			if (f.kind != "int" && f.kind != "int64") || value != "true" {
+				return s, fmt.Errorf("%s: nonnegative is supported only as true for int fields or int64 fields", f.name)
 			}
 			f.nonnegative = true
 		}
-		if f.kind == "int" && !f.nonnegative {
+		if (f.kind == "int" || f.kind == "int64") && !f.nonnegative {
 			return s, fmt.Errorf("%s: pilot int fields require nonnegative policy", f.name)
 		}
 		if value, ok := tags.Lookup("fileInt"); ok {
-			if (value != "positive" && value != "present" && value != "nonzero") || f.kind != "int" || f.noFile || !f.nonnegative {
+			if (value != "positive" && value != "present" && value != "nonzero") || (f.kind != "int" && f.kind != "int64") || f.noFile || !f.nonnegative {
 				return s, fmt.Errorf("%s: fileInt is supported only as positive, present, or nonzero for file-admitted nonnegative int fields", f.name)
 			}
 			f.fileIntPositive = value == "positive"
@@ -288,10 +288,13 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			f.fileFloatPositive = true
 		}
 		if value, ok := tags.Lookup("envInt"); ok {
-			if value != "fallback" || f.kind != "int" || f.noEnv || !f.nonnegative {
+			if value != "fallback" || (f.kind != "int" && f.kind != "int64") || f.noEnv || !f.nonnegative {
 				return s, fmt.Errorf("%s: envInt is supported only as fallback for environment-admitted nonnegative int fields", f.name)
 			}
 			f.envIntFallback = true
+		}
+		if f.kind == "int64" && !f.noEnv && !f.envIntFallback {
+			return s, fmt.Errorf("%s: int64 environment fields require envInt fallback", f.name)
 		}
 		if hasAlias && f.kind != "string" && !(f.kind == "int" && !f.noEnv && f.envIntFallback) {
 			return s, fmt.Errorf("%s: envAlias is supported only for string fields or environment-admitted int fields with envInt fallback", f.name)
@@ -328,6 +331,9 @@ func defaultExpression(kind, value string) (string, error) {
 		return strconv.Quote(value), nil
 	case "int":
 		v, err := strconv.ParseInt(value, 10, 32)
+		return strconv.FormatInt(v, 10), err
+	case "int64":
+		v, err := strconv.ParseInt(value, 10, 64)
 		return strconv.FormatInt(v, 10), err
 	case "float64":
 		v, err := strconv.ParseFloat(value, 64)
@@ -498,6 +504,8 @@ func generate(s schema, source string) ([]byte, error) {
 				continue
 			}
 			p("{ var err error; cfg.%s, err = getenvNonNegativeInt(%q, cfg.%s); if err != nil { return %serr } }\n", f.name, f.env, f.name, resultPrefix)
+		case "int64":
+			p("cfg.%s = getenvInt64(%q, cfg.%s)\n", f.name, f.env, f.name)
 		case "bool":
 			if f.reportApplied {
 				p("if value, ok := getenvBool(%q); ok { cfg.%s = value; applied.%s = true }\n", f.env, f.name, f.name)
@@ -543,7 +551,7 @@ func generate(s schema, source string) ([]byte, error) {
 			p("%s: list%s,\n", f.name, f.name)
 			continue
 		}
-		method := map[string]string{"string": "String", "int": "Int", "float64": "Float64", "bool": "Bool", "[]string": "String"}[f.kind]
+		method := map[string]string{"string": "String", "int": "Int", "int64": "Int64", "float64": "Float64", "bool": "Bool", "[]string": "String"}[f.kind]
 		value := "defaults." + f.name
 		if f.flagFallbackExpr != "" {
 			value = fmt.Sprintf("blank(%s, %sFlagFallback%s)", value, s.name, f.name)

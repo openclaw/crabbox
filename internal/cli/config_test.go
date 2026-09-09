@@ -12409,3 +12409,246 @@ func TestScalewayBindingCoreDefaults(t *testing.T) {
 		t.Fatal("fixed portable image mapping changed")
 	}
 }
+
+func TestTencentBindingFileContract(t *testing.T) {
+	if got := baseConfig().TencentCloud; !reflect.DeepEqual(got, TencentCloudConfig{}) {
+		t.Fatalf("raw base=%#v", got)
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, mode := range []string{"omitted", "null", "empty", "equal", "padded", "custom"} {
+			cfg := baseConfig()
+			cfg.TencentCloud = TencentCloudConfig{Region: "prior-region", Zone: "prior-zone", Image: "prior-image", Type: "prior-type", VPCID: "prior-vpc", SubnetID: "prior-subnet", SecurityGroupID: "prior-group", InternetChargeType: "prior-charge", APIEndpoint: "https://endpoint.example.test"}
+			want := cfg.TencentCloud
+			fields := map[string]any{}
+			accepted := mode == "equal" || mode == "padded" || mode == "custom"
+			for _, f := range []struct {
+				key string
+				v   *string
+			}{{"region", &want.Region}, {"zone", &want.Zone}, {"image", &want.Image}, {"type", &want.Type}, {"vpcId", &want.VPCID}, {"subnetId", &want.SubnetID}, {"securityGroupId", &want.SecurityGroupID}, {"internetChargeType", &want.InternetChargeType}, {"apiEndpoint", &want.APIEndpoint}} {
+				if mode == "omitted" {
+					continue
+				}
+				var raw any = *f.v
+				if mode == "null" {
+					raw = nil
+				}
+				if mode == "empty" {
+					raw = ""
+				}
+				if mode == "padded" {
+					raw = "  " + *f.v + "  "
+				}
+				if mode == "custom" {
+					raw = "fixture"
+					if f.key == "apiEndpoint" {
+						raw = "https://custom.example.test"
+					}
+				}
+				fields[f.key] = raw
+				if accepted && (trusted || f.key != "apiEndpoint") {
+					*f.v = raw.(string)
+				}
+			}
+			data, err := yaml.Marshal(map[string]any{"tencentcloud": fields})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file fileConfig
+			if err := yaml.Unmarshal(data, &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.TencentCloud, want) || TencentCloudRegionWasExplicit(cfg) != accepted || TencentCloudZoneWasExplicit(cfg) != accepted || TencentCloudImageWasExplicit(cfg) != accepted || TencentCloudTypeWasExplicit(cfg) != accepted {
+				t.Fatalf("file mode=%s trusted=%t got=%#v want=%#v", mode, trusted, cfg.TencentCloud, want)
+			}
+		}
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, tc := range []struct {
+			raw  string
+			want int64
+		}{{"null", 37}, {"0", 37}, {"-2", 37}, {"8589934592", 8589934592}, {"9223372036854775807", 9223372036854775807}} {
+			cfg := baseConfig()
+			cfg.TencentCloud.RootGB = 37
+			cfg.TencentCloud.InternetMaxBandwidthOut = 37
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte("tencentcloud:\n  rootGB: "+tc.raw+"\n  internetMaxBandwidthOut: "+tc.raw+"\n"), &file); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.TencentCloud.RootGB != tc.want || cfg.TencentCloud.InternetMaxBandwidthOut != tc.want {
+				t.Fatalf("file int64=%s got=%d/%d", tc.raw, cfg.TencentCloud.RootGB, cfg.TencentCloud.InternetMaxBandwidthOut)
+			}
+		}
+	}
+	for _, body := range []string{"tencentcloud: {}\n", "tencentcloud:\n  sshCIDRs: null\n", "tencentcloud:\n  sshCIDRs: []\n"} {
+		cfg := baseConfig()
+		prior := []string{"prior"}
+		cfg.TencentCloud.SSHCIDRs = prior
+		var file fileConfig
+		if err := yaml.Unmarshal([]byte(body), &file); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyFileConfig(&cfg, file); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(cfg.TencentCloud.SSHCIDRs, prior) || &cfg.TencentCloud.SSHCIDRs[0] != &prior[0] {
+			t.Fatal("empty file list changed prior")
+		}
+	}
+	for _, trusted := range []bool{false, true} {
+		cfg := baseConfig()
+		var file fileConfig
+		if err := yaml.Unmarshal([]byte("tencentcloud:\n  sshCIDRs: [' 203.0.113.0/24 ', '', '203.0.113.0/24']\n"), &file); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(cfg.TencentCloud.SSHCIDRs, []string{" 203.0.113.0/24 ", "", "203.0.113.0/24"}) {
+			t.Fatal("file list normalized")
+		}
+		source := reflect.ValueOf(file.TencentCloud).Elem().FieldByName("SSHCIDRs")
+		if source.Kind() == reflect.Pointer {
+			source = source.Elem()
+		}
+		raw := source.Interface().([]string)
+		cfg.TencentCloud.SSHCIDRs[0] = "198.51.100.0/24"
+		if raw[0] != "198.51.100.0/24" {
+			t.Fatal("file list no longer shares backing")
+		}
+	}
+}
+
+func TestTencentBindingEnvironmentContract(t *testing.T) {
+	for _, mode := range []string{"missing", "empty", "equal", "padded", "custom"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.TencentCloud = TencentCloudConfig{Region: "prior", Zone: "prior", Image: "prior", Type: "prior", VPCID: "prior", SubnetID: "prior", SecurityGroupID: "prior", InternetChargeType: "prior", APIEndpoint: "https://endpoint.example.test"}
+			want := cfg.TencentCloud
+			accepted := mode == "equal" || mode == "padded" || mode == "custom"
+			for _, f := range []struct {
+				suffix string
+				v      *string
+			}{{"REGION", &want.Region}, {"ZONE", &want.Zone}, {"IMAGE", &want.Image}, {"TYPE", &want.Type}, {"VPC_ID", &want.VPCID}, {"SUBNET_ID", &want.SubnetID}, {"SECURITY_GROUP_ID", &want.SecurityGroupID}, {"INTERNET_CHARGE_TYPE", &want.InternetChargeType}, {"API_ENDPOINT", &want.APIEndpoint}} {
+				raw := *f.v
+				if mode == "missing" || mode == "empty" {
+					raw = ""
+				}
+				if mode == "padded" {
+					raw = "  " + *f.v + "  "
+				}
+				if mode == "custom" {
+					raw = "fixture"
+					if f.suffix == "API_ENDPOINT" {
+						raw = "https://custom.example.test"
+					}
+				}
+				name := "CRABBOX_TENCENTCLOUD_" + f.suffix
+				t.Setenv(name, raw)
+				if mode == "missing" {
+					if err := os.Unsetenv(name); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if raw != "" {
+					*f.v = raw
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.TencentCloud, want) || TencentCloudRegionWasExplicit(cfg) != accepted || TencentCloudZoneWasExplicit(cfg) != accepted || TencentCloudImageWasExplicit(cfg) != accepted || TencentCloudTypeWasExplicit(cfg) != accepted {
+				t.Fatalf("env mode=%s", mode)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		raw  string
+		want int64
+	}{{"", 37}, {"invalid", 37}, {" 50 ", 37}, {"9223372036854775808", 37}, {"0", 0}, {"-2", -2}, {"8589934592", 8589934592}, {"-9223372036854775808", -9223372036854775808}, {"9223372036854775807", 9223372036854775807}} {
+		t.Run("int64-"+tc.raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.TencentCloud.RootGB = 37
+			cfg.TencentCloud.InternetMaxBandwidthOut = 37
+			t.Setenv("CRABBOX_TENCENTCLOUD_ROOT_GB", tc.raw)
+			t.Setenv("CRABBOX_TENCENTCLOUD_INTERNET_MAX_BANDWIDTH_OUT", tc.raw)
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.TencentCloud.RootGB != tc.want || cfg.TencentCloud.InternetMaxBandwidthOut != tc.want {
+				t.Fatalf("env int64=%q got=%d/%d", tc.raw, cfg.TencentCloud.RootGB, cfg.TencentCloud.InternetMaxBandwidthOut)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		raw  string
+		want []string
+	}{{"", []string{"prior"}}, {" , , ", []string{}}, {"none", []string{"none"}}, {" 203.0.113.0/24,,2001:db8::/64,203.0.113.0/24 ", []string{"203.0.113.0/24", "2001:db8::/64", "203.0.113.0/24"}}} {
+		t.Run("list-"+tc.raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.TencentCloud.SSHCIDRs = []string{"prior"}
+			t.Setenv("CRABBOX_TENCENTCLOUD_SSH_CIDRS", tc.raw)
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.TencentCloud.SSHCIDRs, tc.want) {
+				t.Fatalf("env list=%#v want=%#v", cfg.TencentCloud.SSHCIDRs, tc.want)
+			}
+		})
+	}
+}
+
+func TestTencentBindingMarkersAndCoreDefaults(t *testing.T) {
+	for _, name := range []string{"region", "zone", "image", "type"} {
+		for _, source := range []string{"user", "repo", "env"} {
+			t.Run(name+source, func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := baseConfig()
+				if source == "env" {
+					t.Setenv("CRABBOX_TENCENTCLOUD_"+strings.ToUpper(name), "  ")
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					var file fileConfig
+					if err := yaml.Unmarshal([]byte("tencentcloud:\n  "+name+": '  '\n"), &file); err != nil {
+						t.Fatal(err)
+					}
+					if err := applyFileConfigWithTrust(&cfg, file, source == "user"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for field, got := range map[string]bool{"region": TencentCloudRegionWasExplicit(cfg), "zone": TencentCloudZoneWasExplicit(cfg), "image": TencentCloudImageWasExplicit(cfg), "type": TencentCloudTypeWasExplicit(cfg)} {
+					if got != (field == name) {
+						t.Fatalf("marker=%s got=%t", field, got)
+					}
+				}
+			})
+		}
+	}
+	for _, n := range []int64{0, -2, 8589934592} {
+		cfg := baseConfig()
+		cfg.Provider = "tencentcloud"
+		cfg.TencentCloud.RootGB = n
+		cfg.TencentCloud.InternetMaxBandwidthOut = n
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		root, bandwidth := n, n
+		if n == 0 {
+			root = 50
+			bandwidth = 5
+		}
+		if cfg.TencentCloud.Region != "ap-shanghai" || cfg.TencentCloud.Zone != "ap-shanghai-2" || cfg.TencentCloud.Type != "SA5.MEDIUM2" || cfg.TencentCloud.RootGB != root || cfg.TencentCloud.InternetMaxBandwidthOut != bandwidth || cfg.TencentCloud.InternetChargeType != "TRAFFIC_POSTPAID_BY_HOUR" || cfg.TencentCloud.Image != "" || cfg.TencentCloud.APIEndpoint != "" {
+			t.Fatalf("core runtime n=%d cfg=%#v", n, cfg.TencentCloud)
+		}
+	}
+}
