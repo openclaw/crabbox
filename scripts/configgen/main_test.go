@@ -568,6 +568,12 @@ func TestKubeVirtGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestNamespaceGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_namespace.go", "../../internal/cli/config_namespace_generated.go", "NamespaceConfig", "namespace", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAWSLambdaMicroVMGeneratedConfigIsCurrent(t *testing.T) {
 	if err := run("../../internal/cli/config_aws_lambda_microvm.go", "../../internal/cli/config_aws_lambda_microvm_generated.go", "AWSLambdaMicroVMConfig", "awsLambdaMicroVM", true); err != nil {
 		t.Fatal(err)
@@ -649,7 +655,7 @@ func typecheckGenerated(t *testing.T, source string, output []byte) {
 import ("flag"; "time")
 func applyLeaseDuration(*time.Duration, string) { panic("stub") }
 func flagWasSet(*flag.FlagSet, string) bool { panic("stub") }
-func exit(int, string) error { panic("stub") }
+func exit(int, string, ...any) error { panic("stub") }
 func getenv(string, string) string { panic("stub") }
 func getenvFloat(string, float64) float64 { panic("stub") }
 func getenvNonNegativeInt(string, int) (int, error) { panic("stub") }
@@ -939,6 +945,77 @@ func TestDurationSources(t *testing.T) {
 }
 `
 	runScalarFixture(t, durationSample, output, behavior+helpers)
+}
+
+func TestGenerateStrictDurationFlags(t *testing.T) {
+	const field = "Timeout time.Duration `sources:\"flag\" flag:\"timeout\" help:\"Timeout\" duration:\"positive-overlay\" flagDuration:\"trim-positive\" flagDurationError:\"timeout must be positive (100%)\"`"
+	const single = "package cli\nimport \"time\"\ntype PilotConfig struct { " + field + " }"
+	for _, tc := range []struct{ old, replacement, want string }{
+		{`flagDuration:"trim-positive"`, `flagDuration:""`, "flagDuration requires"},
+		{`flagDuration:"trim-positive"`, `flagDuration:"unknown"`, "flagDuration requires"},
+		{`flagDuration:"trim-positive"`, "", "flagDurationError requires"},
+		{`flagDurationError:"timeout must be positive (100%)"`, "", "nonempty flagDurationError"},
+		{`flagDurationError:"timeout must be positive (100%)"`, `flagDurationError:" "`, "nonempty flagDurationError"},
+		{`sources:"flag" flag:"timeout" help:"Timeout"`, `sources:"user,repo,env" config:"timeout" env:"TIMEOUT" fileStorage:"value"`, "flagDuration requires"},
+		{`Timeout time.Duration`, `Timeout string`, "duration is supported only"},
+	} {
+		_, err := parseSchema([]byte(strings.Replace(single, tc.old, tc.replacement, 1)), "PilotConfig", "pilot")
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: error=%v, want %q", tc.old, err, tc.want)
+		}
+	}
+	const tracked = "package cli\nimport \"time\"\ntype PilotConfig struct {\nBefore string `sources:\"flag\" flag:\"before\" help:\"Before\" reportApplied:\"true\"`\n" + field + "\nSecond time.Duration `sources:\"flag\" flag:\"second\" help:\"Second\" duration:\"positive-overlay\" flagDuration:\"trim-positive\" flagDurationError:\"second duration\"`\nAfter string `sources:\"flag\" flag:\"after\" help:\"After\" reportApplied:\"true\"`\n}"
+	const envReport = "package cli\nimport \"time\"\ntype PilotConfig struct {\nInput string `sources:\"env\" env:\"INPUT\" reportApplied:\"true\"`\n" + field + "\n}"
+	for _, source := range []string{single, tracked, envReport} {
+		s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+		if err != nil {
+			t.Fatal(err)
+		}
+		output, err := generate(s, "pilot.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		compileSource := source
+		if source == envReport {
+			compileSource += "\nfunc firstNonEmptyEnv(...string) (string, bool) { panic(\"stub\") }"
+		}
+		typecheckGenerated(t, compileSource, output)
+		if strings.Contains(string(output), `"os"`) || !strings.Contains(string(output), `fs.String("timeout", defaults.Timeout.String(), "Timeout")`) {
+			t.Fatal("strict duration imports/registration changed")
+		}
+		if source == envReport && strings.Contains(string(output), "visited :=") {
+			t.Fatal("env-only applied report manufactured flag visits")
+		}
+	}
+	s, err := parseSchema([]byte(tracked), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const behavior = `package cli
+import("flag";"fmt";"testing";"time")
+func exit(code int,pattern string,args ...any)error{return fmt.Errorf("%d: %s",code,fmt.Sprintf(pattern,args...))}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestStrictFlagOrder(t *testing.T){
+ for _,raw:=range []string{""," \t ","invalid","0s","-1s"}{
+  cfg:=PilotConfig{Before:"old",Timeout:17*time.Second,Second:19*time.Second,After:"old"};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);v:=RegisterPilotConfigFlags(fs,cfg)
+  if fs.Lookup("timeout").DefValue!="17s"{t.Fatal("duration default representation changed")}
+  if err:=fs.Parse([]string{"--before=earlier","--timeout="+raw,"--second=3s","--after=later"});err!=nil{t.Fatalf("duration parsed too early: %v",err)}
+  applied,err:=v.Apply(&cfg,fs)
+  if err==nil||err.Error()!="2: timeout must be positive (100%)"||!applied.Before||applied.After||cfg.Before!="earlier"||cfg.After!="old"||cfg.Timeout!=17*time.Second||cfg.Second!=19*time.Second{t.Fatalf("partial effects: %+v %+v %v",cfg,applied,err)}
+ }
+ cfg:=PilotConfig{Timeout:17*time.Second,Second:19*time.Second,After:"old"};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);v:=RegisterPilotConfigFlags(fs,cfg)
+ if _,err:=v.Apply(&cfg,fs);err!=nil||cfg.Timeout!=17*time.Second{t.Fatal("unvisited duration changed")}
+ if err:=fs.Parse([]string{"--timeout=1s","--timeout= 5s ","--second=invalid","--after=later"});err!=nil{t.Fatal(err)}
+ applied,err:=v.Apply(&cfg,fs);if err==nil||err.Error()!="2: second duration"||cfg.Timeout!=5*time.Second||cfg.Second!=19*time.Second||applied.After||cfg.After!="old"{t.Fatalf("second duration: %+v %+v %v",cfg,applied,err)}
+ if err:=fs.Parse([]string{"--second= 7s "});err!=nil{t.Fatal(err)}
+ applied,err=v.Apply(&cfg,fs);if err!=nil||!applied.After||cfg.After!="later"||cfg.Timeout!=5*time.Second||cfg.Second!=7*time.Second{t.Fatalf("success: %+v %+v %v",cfg,applied,err)}
+}
+`
+	runScalarFixture(t, tracked, output, behavior)
 }
 
 func TestGenerateOnlyEnvironmentField(t *testing.T) {

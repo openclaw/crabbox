@@ -474,17 +474,6 @@ type ExternalDesktopConfig struct {
 	PasswordEnv string `yaml:"passwordEnv,omitempty" json:"passwordEnv,omitempty"`
 }
 
-type NamespaceConfig struct {
-	Image               string
-	Size                string
-	Repository          string
-	Site                string
-	VolumeSizeGB        int
-	AutoStopIdleTimeout time.Duration
-	WorkRoot            string
-	DeleteOnRelease     bool
-}
-
 type NamespaceInstanceConfig struct {
 	CLIPath     string
 	MachineType string
@@ -2351,11 +2340,7 @@ func baseConfig() Config {
 		External: ExternalConfig{
 			WorkRoot: defaultPOSIXWorkRoot,
 		},
-		Namespace: NamespaceConfig{
-			Image:               "builtin:base",
-			WorkRoot:            "/workspaces/crabbox",
-			AutoStopIdleTimeout: 30 * time.Minute,
-		},
+		Namespace: defaultNamespaceConfig(),
 		NamespaceInstance: NamespaceInstanceConfig{
 			CLIPath:  "nsc",
 			WorkRoot: "/work/crabbox",
@@ -3010,17 +2995,6 @@ type fileExternalConfig struct {
 	Connection   *ExternalConnectionConfig   `yaml:"connection,omitempty"`
 	WorkRoot     string                      `yaml:"workRoot,omitempty"`
 	RoutingFile  string                      `yaml:"routingFile,omitempty"`
-}
-
-type fileNamespaceConfig struct {
-	Image               string `yaml:"image,omitempty"`
-	Size                string `yaml:"size,omitempty"`
-	Repository          string `yaml:"repository,omitempty"`
-	Site                string `yaml:"site,omitempty"`
-	VolumeSizeGB        int    `yaml:"volumeSizeGB,omitempty"`
-	AutoStopIdleTimeout string `yaml:"autoStopIdleTimeout,omitempty"`
-	WorkRoot            string `yaml:"workRoot,omitempty"`
-	DeleteOnRelease     *bool  `yaml:"deleteOnRelease,omitempty"`
 }
 
 type fileNamespaceInstanceConfig struct {
@@ -4775,29 +4749,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			}
 		}
 	}
-	if file.Namespace != nil {
-		if file.Namespace.Image != "" {
-			cfg.Namespace.Image = file.Namespace.Image
-		}
-		if file.Namespace.Size != "" {
-			cfg.Namespace.Size = file.Namespace.Size
-		}
-		if file.Namespace.Repository != "" {
-			cfg.Namespace.Repository = file.Namespace.Repository
-		}
-		if file.Namespace.Site != "" {
-			cfg.Namespace.Site = file.Namespace.Site
-		}
-		if file.Namespace.VolumeSizeGB > 0 {
-			cfg.Namespace.VolumeSizeGB = file.Namespace.VolumeSizeGB
-		}
-		applyLeaseDuration(&cfg.Namespace.AutoStopIdleTimeout, file.Namespace.AutoStopIdleTimeout)
-		if file.Namespace.WorkRoot != "" {
-			cfg.Namespace.WorkRoot = file.Namespace.WorkRoot
-		}
-		if file.Namespace.DeleteOnRelease != nil {
-			cfg.Namespace.DeleteOnRelease = *file.Namespace.DeleteOnRelease
+	{
+		applied, err := cfg.Namespace.applyFile(file.Namespace)
+		if applied.DeleteOnRelease {
 			MarkDeleteOnReleaseExplicit(cfg, "namespace-devbox")
+		}
+		if err != nil {
+			return err
 		}
 	}
 	if file.NamespaceInstance != nil {
@@ -6540,18 +6498,14 @@ func applyEnv(cfg *Config) error {
 	if value, ok := getenvBool("CRABBOX_EXTERNAL_IDEMPOTENT_LEASE_ID"); ok {
 		cfg.External.Capabilities.IdempotentLeaseID = value
 	}
-	cfg.Namespace.Image = getenv("CRABBOX_NAMESPACE_IMAGE", cfg.Namespace.Image)
-	cfg.Namespace.Size = getenv("CRABBOX_NAMESPACE_SIZE", cfg.Namespace.Size)
-	cfg.Namespace.Repository = getenv("CRABBOX_NAMESPACE_REPOSITORY", cfg.Namespace.Repository)
-	cfg.Namespace.Site = getenv("CRABBOX_NAMESPACE_SITE", cfg.Namespace.Site)
-	cfg.Namespace.VolumeSizeGB = getenvInt("CRABBOX_NAMESPACE_VOLUME_SIZE_GB", cfg.Namespace.VolumeSizeGB)
-	if idleTimeout := os.Getenv("CRABBOX_NAMESPACE_AUTO_STOP_IDLE_TIMEOUT"); idleTimeout != "" {
-		applyLeaseDuration(&cfg.Namespace.AutoStopIdleTimeout, idleTimeout)
-	}
-	cfg.Namespace.WorkRoot = getenv("CRABBOX_NAMESPACE_WORK_ROOT", cfg.Namespace.WorkRoot)
-	if value, ok := getenvBool("CRABBOX_NAMESPACE_DELETE_ON_RELEASE"); ok {
-		cfg.Namespace.DeleteOnRelease = value
-		MarkDeleteOnReleaseExplicit(cfg, "namespace-devbox")
+	{
+		applied, err := cfg.Namespace.applyEnv()
+		if applied.DeleteOnRelease {
+			MarkDeleteOnReleaseExplicit(cfg, "namespace-devbox")
+		}
+		if err != nil {
+			return err
+		}
 	}
 	cfg.NamespaceInstance.CLIPath = expandUserPath(getenv("CRABBOX_NAMESPACE_INSTANCE_CLI", cfg.NamespaceInstance.CLIPath))
 	cfg.NamespaceInstance.MachineType = getenv("CRABBOX_NAMESPACE_INSTANCE_MACHINE_TYPE", cfg.NamespaceInstance.MachineType)

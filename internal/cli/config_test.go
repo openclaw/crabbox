@@ -1772,6 +1772,70 @@ func TestAgentSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestNamespaceConfigBindingSources(t *testing.T) {
+	clearConfigEnv(t)
+	defaults := baseConfig().Namespace
+	if defaults.Image != "builtin:base" || defaults.Size != "" || defaults.Repository != "" || defaults.Site != "" || defaults.VolumeSizeGB != 0 || defaults.AutoStopIdleTimeout != 30*time.Minute || defaults.WorkRoot != "/workspaces/crabbox" || defaults.DeleteOnRelease {
+		t.Fatalf("Namespace defaults=%#v", defaults)
+	}
+	for _, tc := range []struct {
+		name, duration, volumeEnv     string
+		volumeFile, fileWant, envWant int
+		wantDuration                  time.Duration
+	}{
+		{"positive", "45m", "9", 9, 9, 9, 45 * time.Minute},
+		{"zero", "0s", "0", 0, 7, 0, 17 * time.Minute},
+		{"negative", "-1m", "-2", -2, 7, -2, 17 * time.Minute},
+		{"malformed", "invalid", "invalid", 0, 7, 7, 17 * time.Minute},
+		{"padded", " 45m ", "7", 0, 7, 7, 17 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			newConfig := func() Config {
+				cfg := baseConfig()
+				cfg.Namespace.VolumeSizeGB = 7
+				cfg.Namespace.AutoStopIdleTimeout = 17 * time.Minute
+				cfg.Namespace.DeleteOnRelease = true
+				return cfg
+			}
+			value := false
+			file := fileConfig{Namespace: &fileNamespaceConfig{Image: " raw-image ", Size: " l ", Repository: " raw-repo ", Site: " raw-site ", VolumeSizeGB: tc.volumeFile, AutoStopIdleTimeout: tc.duration, WorkRoot: " /workspaces/raw ", DeleteOnRelease: &value}}
+			cfg := newConfig()
+			priorRoot, priorType := cfg.WorkRoot, cfg.ServerType
+			if err := applyFileConfig(&cfg, file); err != nil {
+				t.Fatal(err)
+			}
+			assertRaw := func(cfg Config, volume int) {
+				t.Helper()
+				got := cfg.Namespace
+				if got.Image != " raw-image " || got.Size != " l " || got.Repository != " raw-repo " || got.Site != " raw-site " || got.WorkRoot != " /workspaces/raw " || got.VolumeSizeGB != volume || got.AutoStopIdleTimeout != tc.wantDuration || got.DeleteOnRelease || !DeleteOnReleaseExplicit(cfg, "namespace-devbox") {
+					t.Fatalf("raw source binding=%#v", got)
+				}
+				if cfg.WorkRoot != priorRoot || cfg.ServerType != priorType {
+					t.Fatal("file/environment input acquired flag-only generic effects")
+				}
+			}
+			assertRaw(cfg, tc.fileWant)
+			encoded, err := yaml.Marshal(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded fileConfig
+			if err := yaml.Unmarshal(encoded, &decoded); err != nil || !reflect.DeepEqual(file.Namespace, decoded.Namespace) {
+				t.Fatalf("raw Namespace writer representation changed: %s (%v)", encoded, err)
+			}
+			for name, raw := range map[string]string{"IMAGE": " raw-image ", "SIZE": " l ", "REPOSITORY": " raw-repo ", "SITE": " raw-site ", "WORK_ROOT": " /workspaces/raw ", "VOLUME_SIZE_GB": tc.volumeEnv, "AUTO_STOP_IDLE_TIMEOUT": tc.duration, "DELETE_ON_RELEASE": "false"} {
+				t.Setenv("CRABBOX_NAMESPACE_"+name, raw)
+			}
+			cfg = newConfig()
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			assertRaw(cfg, tc.envWant)
+		})
+	}
+}
+
 func TestAgentSandboxDurationOverlays(t *testing.T) {
 	for _, tc := range []struct {
 		raw  string
