@@ -28,7 +28,7 @@ const imageKind = "koyeb-sandbox-runner";
 const pollInterval = 2_000;
 const uuidPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const immutableImagePattern =
-  /^(?=.{1,512}$)[a-z0-9][a-z0-9._:-]*(?:\/[a-z0-9][a-z0-9._-]*)+@sha256:[a-f0-9]{64}$/;
+  /^(?=.{1,512}$)[a-z0-9][a-z0-9._:-]*(?:\/[a-z0-9][a-z0-9._-]*)+(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?@sha256:[a-f0-9]{64}$/;
 
 type JSONRecord = Record<string, unknown>;
 type KoyebTransport = "tailscale" | "koyeb-mesh";

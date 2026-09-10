@@ -19,7 +19,8 @@ const latestDeploymentID = "33333333-3333-4333-8333-333333333333";
 const serviceName = leaseProviderName("cbx_abcdef123456", "blue-lobster");
 const appName = "my-app";
 const privateHost = `${serviceName}.${appName}.internal`;
-const runnerImage = `ghcr.io/example/crabbox-koyeb-runner@sha256:${"a".repeat(64)}`;
+const runnerImage = `ghcr.io/example/crabbox-koyeb-runner:source-${"b".repeat(40)}@sha256:${"a".repeat(64)}`;
+const digestOnlyRunnerImage = `ghcr.io/example/crabbox-koyeb-runner@sha256:${"c".repeat(64)}`;
 const registrySecret = "crabbox-koyeb-runner";
 const tailscaleIPv4 = "100.64.12.34";
 const tailscaleFQDN = "crabbox-blue-lobster.tail.example.ts.net";
@@ -1296,6 +1297,23 @@ describe("Koyeb Fleet integration", () => {
     });
     expect(payload.resumableProvisioning.missing).not.toContain("CRABBOX_TAILSCALE_CLIENT_ID");
     expect(payload.resumableProvisioning.missing).not.toContain("CRABBOX_TAILSCALE_CLIENT_SECRET");
+  });
+
+  it("accepts digest-only Koyeb runner images for backwards compatibility", async () => {
+    const readiness = await new FleetCoordinator(
+      new ProvisioningTestRuntime(new ProvisioningTestStorage()),
+      {
+        ...baseEnv,
+        CRABBOX_KOYEB_IMAGE: digestOnlyRunnerImage,
+      },
+    ).fetch(fleetRequest("GET", "/v1/providers/koyeb/readiness"));
+
+    expect(readiness.status).toBe(200);
+    await expect(readiness.json()).resolves.toMatchObject({
+      provider: "koyeb",
+      configured: true,
+      missing: [],
+    });
   });
 
   it("includes owned Koyeb sandboxes in the provider pool", async () => {
