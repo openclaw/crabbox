@@ -5429,7 +5429,7 @@ func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 		`xfconf-query -c xfce4-panel -p /panels/dark-mode`,
 		`/panels/$panel_id/background-rgba`,
 		`crabbox desktop theme start`,
-		`-wait 16 -defer 8 -nowait_bog`,
+		`su "$user" -s /bin/sh -c "XDG_RUNTIME_DIR='$runtime' Xtigervnc :99 -geometry 1920x1080 -depth 24 -localhost yes -rfbport 5900 -SecurityTypes VncAuth -PasswordFile=/var/lib/crabbox/vnc.pass -AlwaysShared -AcceptSetDesktopSize -nolisten tcp -ac`,
 		`wayvnc --config '$home_dir/.config/wayvnc/config' --render-cursor --max-fps=60`,
 		`gsettings set org.gnome.desktop.interface color-scheme '$gsettings_scheme'`,
 		`if [ "$(id -u)" -eq 0 ]; then`,
