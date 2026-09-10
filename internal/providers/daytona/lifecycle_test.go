@@ -50,6 +50,7 @@ type daytonaLifecycleFixture struct {
 	duplicateAttemptInventory bool
 	attemptInventoryCursor    string
 	destroyingReads           int
+	staleInventoryReads       int
 	deleteUnacknowledged      bool
 }
 
@@ -96,6 +97,14 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 					t.Errorf("exact attempt discovery did not use bounded live selectors: %s", r.URL.RawQuery)
 				}
 				matches := f.sandbox != nil && f.sandbox.GetState() != api.SANDBOXSTATE_DESTROYED && !f.hideAttemptInventory
+				if f.sandbox != nil && f.sandbox.GetState() == api.SANDBOXSTATE_DESTROYED && f.staleInventoryReads > 0 {
+					// The eventually consistent index still shows the destruction in progress.
+					f.staleInventoryReads--
+					stale := *f.sandbox
+					stale.SetState(api.SANDBOXSTATE_DESTROYING)
+					_ = json.NewEncoder(w).Encode(map[string]any{"items": []*api.Sandbox{&stale}, "nextCursor": nil})
+					return
+				}
 				if matches && sandboxErroredPendingDeletion(f.sandbox) && r.URL.Query().Get("includeErroredDeleted") != "true" {
 					matches = false
 				}

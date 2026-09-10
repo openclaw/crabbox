@@ -575,7 +575,9 @@ func acknowledgeFixedDaytonaDeletion(ctx context.Context, client fixedDaytonaDel
 		if err := verifyFixedDaytonaOrganization(ctx, client, claim); err != nil {
 			return claim, err
 		}
-		if err := confirmFixedDaytonaAbsence(ctx, client, claim); err != nil {
+		// Absent, or still indexed as being destroyed: both attest that the
+		// owned resource is going away; an errored deletion retains instead.
+		if _, err := fixedDaytonaInventorySettled(ctx, client, claim); err != nil {
 			return claim, err
 		}
 		return recordFixedDaytonaDeletionAcknowledgement(claim), nil
@@ -619,29 +621,40 @@ func recordFixedDaytonaDeletionAcknowledgement(claim LeaseClaim) LeaseClaim {
 // delay bounds the window in which an errored deletion is not indexed yet.
 var fixedDaytonaAbsenceRecheckDelay = 3 * time.Second
 
-// confirmFixedDaytonaAbsence rejects a 404 that hides an errored sandbox whose
-// deletion is still pending: such a resource is absent from GET but remains in
-// inventory with includeErroredDeleted. Two consistent empty reads are required.
-func confirmFixedDaytonaAbsence(ctx context.Context, client fixedDaytonaDeletionAPI, claim LeaseClaim) error {
+func fixedDaytonaSandboxErroredPendingDeletion(sandbox *api.Sandbox) bool {
+	return sandbox != nil && (sandbox.GetState() == api.SANDBOXSTATE_ERROR || sandbox.GetState() == api.SANDBOXSTATE_BUILD_FAILED) &&
+		sandbox.GetDesiredState() == api.SANDBOXDESIREDSTATE_DESTROYED
+}
+
+// fixedDaytonaInventorySettled decides what a 404 for the exact UUID means.
+// GET hides destroyed sandboxes and errored sandboxes whose deletion is still
+// pending; the latter may still hold resources and are only visible through
+// inventory with includeErroredDeleted. Two consistent empty reads settle the
+// absence. An errored pending deletion retains the claim. Any other indexed row
+// is an in-progress destruction that the caller keeps waiting for.
+func fixedDaytonaInventorySettled(ctx context.Context, client fixedDaytonaDeletionAPI, claim LeaseClaim) (bool, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		if attempt > 0 {
 			if err := shared.SleepContext(ctx, fixedDaytonaAbsenceRecheckDelay); err != nil {
-				return err
+				return false, err
 			}
 		}
 		live, err := client.findFixedAttemptSandbox(ctx, claim)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if live == nil {
 			continue
 		}
 		if live.GetId() != claim.CloudID {
-			return exit(4, "Daytona fixed attempt inventory names a different resource; retain its ownership record")
+			return false, exit(4, "Daytona fixed attempt inventory names a different resource; retain its ownership record")
 		}
-		return exit(4, "Daytona still lists fixed resource %s in state %s with a pending deletion; native destruction has not completed, so its ownership record is retained", live.GetId(), live.GetState())
+		if fixedDaytonaSandboxErroredPendingDeletion(live) {
+			return false, exit(4, "Daytona still lists fixed resource %s in state %s with a pending deletion; native destruction has not completed, so its ownership record is retained", live.GetId(), live.GetState())
+		}
+		return false, nil
 	}
-	return nil
+	return true, nil
 }
 
 // awaitFixedDaytonaDeletion waits for the acknowledged resource to disappear.
@@ -655,22 +668,27 @@ func awaitFixedDaytonaDeletion(ctx context.Context, client fixedDaytonaDeletionA
 	for {
 		sandbox, err := client.GetSandbox(ctx, claim.CloudID)
 		if err != nil {
-			if daytonaIsNotFoundError(err) {
-				if err := verifyFixedDaytonaOrganization(ctx, client, claim); err != nil {
-					return err
-				}
-				return confirmFixedDaytonaAbsence(ctx, client, claim)
+			if !daytonaIsNotFoundError(err) {
+				return err
 			}
-			return err
-		}
-		if err := validateFixedDaytonaDeletionIdentity(client, claim, sandbox); err != nil {
-			return err
-		}
-		if sandbox.GetState() == api.SANDBOXSTATE_DESTROYED {
-			return nil
-		}
-		if !fixedDaytonaSandboxDestroying(sandbox) {
-			return exit(4, "Daytona fixed resource is no longer being destroyed; retain its ownership record")
+			if err := verifyFixedDaytonaOrganization(ctx, client, claim); err != nil {
+				return err
+			}
+			settled, err := fixedDaytonaInventorySettled(ctx, client, claim)
+			if err != nil || settled {
+				return err
+			}
+			// The index still shows the destruction in progress; keep waiting.
+		} else {
+			if err := validateFixedDaytonaDeletionIdentity(client, claim, sandbox); err != nil {
+				return err
+			}
+			if sandbox.GetState() == api.SANDBOXSTATE_DESTROYED {
+				return nil
+			}
+			if !fixedDaytonaSandboxDestroying(sandbox) {
+				return exit(4, "Daytona fixed resource is no longer being destroyed; retain its ownership record")
+			}
 		}
 		if err := shared.SleepContext(ctx, time.Second); err != nil {
 			return err

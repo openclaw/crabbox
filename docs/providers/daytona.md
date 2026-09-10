@@ -232,10 +232,11 @@ anything becomes terminal: the DELETE response naming the exact owned sandbox,
 an owned sandbox already observed as being destroyed, or, for a known UUID, an
 authorized organization-scoped read that finds no resource. After that
 acknowledgement, a 404 for the recorded UUID retires the claim once two
-inventory reads a few seconds apart confirm that no errored sandbox with a
-pending deletion still carries that UUID; Daytona hides such sandboxes from
-`GET` while they may still hold resources, and its list index is eventually
-consistent. An errored deletion retains the claim until Daytona finishes it.
+inventory reads a few seconds apart confirm that no sandbox still carries that
+UUID; Daytona hides destroyed and errored pending-deletion sandboxes from
+`GET`, and its list index is eventually consistent. A row still indexed as
+being destroyed keeps cleanup waiting, and an errored deletion retains the
+claim until Daytona finishes it.
 The DELETE and its acknowledgement run under the exclusive claim fence, so a
 live run or repository transfer cannot race them, and a previously acknowledged
 claim re-establishes its endpoint and organization before absence is accepted.
