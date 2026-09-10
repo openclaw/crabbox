@@ -285,7 +285,7 @@ test("PowerShell fragments parse and download verification fails closed before e
   const directory = await temporary(t);
   const files = [];
   for (const fragment of sources.fragments.filter((f) => f.file.endsWith(".ps1"))) {
-    const file = join(directory, fragment.file);
+    const file = join(directory, fragment.name + ".ps1");
     await writeFile(file, render(fragment, fixtures.find((f) => f.name === "windows-quotes")));
     files.push(file);
   }
