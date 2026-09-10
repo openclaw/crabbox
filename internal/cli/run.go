@@ -95,7 +95,8 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 		defer unlock()
 	}
 	options := leaseOptionsFromConfig(cfg)
-	if delegated, ok := backend.(DelegatedRunBackend); ok {
+	// Fixed IDs must reach Acquire; delegated warmup has no durable-ID request.
+	if delegated, ok := backend.(DelegatedRunBackend); ok && strings.TrimSpace(*requestedLeaseID) == "" {
 		return delegated.Warmup(ctx, WarmupRequest{
 			Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim,
 			ActionsRunner: *actionsRunner, RequestedSlug: requestedSlug, TimingJSON: *timingJSON,

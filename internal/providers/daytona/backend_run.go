@@ -82,6 +82,28 @@ func (b *daytonaLeaseBackend) Warmup(ctx context.Context, req WarmupRequest) err
 }
 
 func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (result RunResult, runErr error) {
+	if req.ID != "" {
+		claim, exists, err := resolveLeaseClaimForProvider(req.ID, daytonaProvider)
+		if err != nil {
+			return RunResult{}, err
+		}
+		if exists && claim.FixedCreateIntent != nil {
+			claim, err = b.reclaimFixed(ctx, claim, req.Repo.Root, req.Reclaim)
+			if err != nil {
+				return RunResult{}, err
+			}
+			err := core.WithLeaseClaimUnchangedShared(ctx, claim.LeaseID, claim, func() error {
+				var err error
+				result, err = b.run(ctx, req, &claim)
+				return err
+			})
+			return result, err
+		}
+	}
+	return b.run(ctx, req, nil)
+}
+
+func (b *daytonaLeaseBackend) run(ctx context.Context, req RunRequest, original *LeaseClaim) (result RunResult, runErr error) {
 	started := time.Now()
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
@@ -98,7 +120,7 @@ func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (result R
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=daytona sandbox=%s\n", leaseID, slug, sandbox.ID)
 		acquired = true
 	} else {
-		sandbox, leaseID, err = b.resolveDaytonaToolboxSandbox(ctx, req.ID, req.Repo, req.Reclaim)
+		sandbox, leaseID, err = b.resolveDaytonaToolboxSandbox(ctx, req.ID, req.Repo, req.Reclaim, original)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -225,6 +247,18 @@ func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (result R
 }
 
 func (b *daytonaLeaseBackend) Status(ctx context.Context, req StatusRequest) (statusView, error) {
+	claim, exists, err := resolveLeaseClaimForProvider(req.ID, daytonaProvider)
+	if err != nil {
+		return statusView{}, err
+	}
+	if exists && claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == "released" {
+		if err := fixedDaytonaLeaseKind.ValidateTerminalClaim(claim, LeaseClaim{}, claim.LeaseID, nil); err != nil {
+			return statusView{}, err
+		}
+		return statusView{ID: claim.LeaseID, Slug: claim.Slug, Provider: daytonaProvider, TargetOS: targetLinux,
+			State: "released", Network: NetworkPublic, Labels: map[string]string{"lease": claim.LeaseID, "slug": claim.Slug, "state": "released"}}, nil
+	}
+
 	if req.Wait {
 		timeout := req.WaitTimeout
 		if timeout <= 0 {
@@ -268,6 +302,11 @@ func (b *daytonaLeaseBackend) Status(ctx context.Context, req StatusRequest) (st
 func (b *daytonaLeaseBackend) Stop(ctx context.Context, req StopRequest) error {
 	ctx, cancel := context.WithTimeout(ctx, daytonaCleanupTimeout)
 	defer cancel()
+	if claim, exists, err := resolveLeaseClaimForProvider(req.ID, daytonaProvider); err != nil {
+		return err
+	} else if exists && claim.FixedCreateIntent != nil {
+		return b.stopFixed(ctx, claim)
+	}
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -275,6 +314,11 @@ func (b *daytonaLeaseBackend) Stop(ctx context.Context, req StopRequest) error {
 	sandbox, leaseID, err := resolveDaytonaSandbox(ctx, client, b.cfg, req.ID)
 	if err != nil {
 		return err
+	}
+	if claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil {
+		return err
+	} else if exists && claim.FixedCreateIntent != nil {
+		return b.stopFixed(ctx, claim)
 	}
 	if err := requireExactDaytonaClaim(leaseID, sandbox); err != nil {
 		return err
@@ -284,6 +328,14 @@ func (b *daytonaLeaseBackend) Stop(ctx context.Context, req StopRequest) error {
 	}
 	removeLeaseClaim(leaseID)
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", leaseID, sandbox.GetId())
+	return nil
+}
+
+func (b *daytonaLeaseBackend) stopFixed(ctx context.Context, claim LeaseClaim) error {
+	if err := b.releaseFixed(ctx, claim, ""); err != nil {
+		return err
+	}
+	fmt.Fprintf(b.rt.Stderr, "released fixed lease=%s\n", claim.LeaseID)
 	return nil
 }
 
@@ -299,7 +351,7 @@ func (b *daytonaLeaseBackend) createDaytonaToolboxSandbox(ctx context.Context, r
 	return toolboxSandbox, leaseID, slug, nil
 }
 
-func (b *daytonaLeaseBackend) resolveDaytonaToolboxSandbox(ctx context.Context, id string, repo Repo, reclaim bool) (*sdkdaytona.Sandbox, string, error) {
+func (b *daytonaLeaseBackend) resolveDaytonaToolboxSandbox(ctx context.Context, id string, repo Repo, reclaim bool, original *LeaseClaim) (*sdkdaytona.Sandbox, string, error) {
 	apiClient, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
 		return nil, "", err
@@ -309,7 +361,20 @@ func (b *daytonaLeaseBackend) resolveDaytonaToolboxSandbox(ctx context.Context, 
 		return nil, "", err
 	}
 	server := daytonaSandboxToServer(apiSandbox)
-	if reclaim {
+	if original != nil {
+		if err := core.CheckLeaseClaimRepositoryOwner(leaseID, *original, repo.Root, false); err != nil {
+			return nil, "", err
+		}
+		if err := core.AuthorizeCheckpointRelease(*original, ""); err != nil {
+			return nil, "", err
+		}
+		if err := validateFixedDaytonaSandbox(*original, apiSandbox); err != nil {
+			return nil, "", err
+		}
+	} else if hasFixedDaytonaOwnershipLabels(apiSandbox.GetLabels()) {
+		return nil, "", exit(4, "Use the canonical lease ID or slug to run this fixed Daytona sandbox")
+	}
+	if reclaim && original == nil {
 		if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), b.cfg, server, SSHTarget{}, repo.Root, b.cfg.IdleTimeout, true); err != nil {
 			return nil, "", err
 		}
@@ -317,7 +382,7 @@ func (b *daytonaLeaseBackend) resolveDaytonaToolboxSandbox(ctx context.Context, 
 	if err := requireExactDaytonaClaim(leaseID, apiSandbox); err != nil {
 		return nil, "", err
 	}
-	if !reclaim {
+	if !reclaim && original == nil {
 		if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), b.cfg, server, SSHTarget{}, repo.Root, b.cfg.IdleTimeout, false); err != nil {
 			return nil, "", err
 		}
@@ -336,6 +401,11 @@ func (b *daytonaLeaseBackend) resolveDaytonaToolboxSandbox(ctx context.Context, 
 	apiSandbox, err = apiClient.GetSandbox(ctx, apiSandbox.GetId())
 	if err != nil {
 		return nil, "", daytonaError("get sandbox", err)
+	}
+	if original != nil {
+		if err := validateFixedDaytonaSandbox(*original, apiSandbox); err != nil {
+			return nil, "", err
+		}
 	}
 	sandbox, err := newDaytonaToolboxSandbox(b.cfg, b.rt, apiSandbox)
 	if err != nil {
