@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Keep Sprites API, bootstrap, and SSH commands on the configured account and endpoint; validate ownership before reuse, require explicit adoption without a local claim, keep status observational, and safely recover already-deleted resources. [PR 1776](https://github.com/openclaw/crabbox/pull/1776). Thanks @aezell.
+- Keep Sprites API, bootstrap, and SSH commands on the configured account and endpoint; validate ownership before reuse, require explicit adoption without a local claim, keep status observational, and safely recover already-deleted resources. [PR 1776](https://github.com/openclaw/crabbox/pull/1776), [PR 2077](https://github.com/openclaw/crabbox/pull/2077). Thanks @aezell.
 
 - Refresh native Windows PowerShell command and readiness PATH from machine/user settings, and verify SSH returns on fresh connections after baseline installation restarts the service. [PR 2074](https://github.com/openclaw/crabbox/pull/2074).
 - Install checksum-pinned Node 24.19.0/npm on managed native Windows leases when missing or broken, require both tools for readiness, and update the developer-image default pin while preserving overrides. [PR 2069](https://github.com/openclaw/crabbox/pull/2069).
