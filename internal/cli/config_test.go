@@ -1141,6 +1141,59 @@ func TestEffectiveNvidiaBrevWorkRootDoesNotInheritAnotherProviderDefault(t *test
 	}
 }
 
+func TestExplicitProviderWorkRootResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name                         string
+		savedGeneric, currentGeneric string
+		vastRoot, brevRoot           string
+		vastMarked, brevMarked       bool
+		wantVast, wantBrev           string
+	}{
+		{"no saved generic", "", "/generic/current", "", "/tmp/crabbox", false, false, "/work/crabbox", "/tmp/crabbox"},
+		{"no saved generic reversed roots", "", "", "/work/crabbox", "", false, false, "/work/crabbox", "/tmp/crabbox"},
+		{"saved generic snapshot", "/generic/saved", "/generic/current", "", "/tmp/crabbox", false, false, "/generic/saved", "/generic/saved"},
+		{"saved generic after current cleared", "/generic/saved", "", "/work/crabbox", "", false, false, "/generic/saved", "/generic/saved"},
+		{"explicit empty vast", "/generic/saved", "/generic/current", "", "/tmp/crabbox", true, false, "/work/crabbox", "/generic/saved"},
+		{"explicit empty brev", "/generic/saved", "/generic/current", "/work/crabbox", "", false, true, "/generic/saved", "/tmp/crabbox"},
+		{"explicit default vast", "/generic/saved", "/generic/current", "/work/crabbox", "", true, false, "/work/crabbox", "/generic/saved"},
+		{"explicit default brev", "/generic/saved", "/generic/current", "", "/tmp/crabbox", false, true, "/generic/saved", "/tmp/crabbox"},
+		{"unmarked custom roots", "/generic/saved", "/generic/current", "/vast/custom", "/brev/custom", false, false, "/vast/custom", "/brev/custom"},
+		{"marked custom roots", "/generic/saved", "/generic/current", "/vast/custom", "/brev/custom", true, true, "/vast/custom", "/brev/custom"},
+		{"padded provider defaults", "/generic/saved", "/generic/current", " /work/crabbox\t", "\t/tmp/crabbox ", false, false, " /work/crabbox\t", "\t/tmp/crabbox "},
+		{"whitespace provider roots", "/generic/saved", "/generic/current", " \t ", "\t ", true, false, " \t ", "\t "},
+		{"saved generic looks like vast default", "/work/crabbox", "/generic/current", "", "/tmp/crabbox", false, false, "/work/crabbox", "/work/crabbox"},
+		{"saved generic looks like brev default", "/tmp/crabbox", "/generic/current", "/work/crabbox", "", false, false, "/tmp/crabbox", "/tmp/crabbox"},
+		{"padded saved generic", " \t/generic/saved \t", "/generic/current", "", "/tmp/crabbox", false, false, " \t/generic/saved \t", " \t/generic/saved \t"},
+		{"whitespace saved generic", " \t ", "/generic/current", "/work/crabbox", "", false, false, " \t ", " \t "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{Provider: "unselected-config-test", WorkRoot: tc.savedGeneric}
+			MarkWorkRootExplicit(&cfg)
+			cfg.WorkRoot = tc.currentGeneric
+			cfg.Vast.WorkRoot, cfg.NvidiaBrev.WorkRoot = tc.vastRoot, tc.brevRoot
+			if tc.vastMarked {
+				MarkVastWorkRootExplicit(&cfg)
+			}
+			if tc.brevMarked {
+				MarkNvidiaBrevWorkRootExplicit(&cfg)
+			}
+			before := cfg
+			if got := EffectiveVastWorkRoot(cfg); got != tc.wantVast {
+				t.Errorf("effective vast work root=%q, want %q", got, tc.wantVast)
+			}
+			if got := EffectiveNvidiaBrevWorkRoot(cfg); got != tc.wantBrev {
+				t.Errorf("effective nvidia-brev work root=%q, want %q", got, tc.wantBrev)
+			}
+			if !reflect.DeepEqual(cfg, before) {
+				t.Error("effective work-root getters modified Config")
+			}
+			if cfg.explicitWorkRoot != tc.savedGeneric || IsVastWorkRootExplicit(&cfg) != tc.vastMarked || IsNvidiaBrevWorkRootExplicit(&cfg) != tc.brevMarked {
+				t.Error("work-root markers changed")
+			}
+		})
+	}
+}
+
 func TestCoordinatorTokenCommandEnv(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("CRABBOX_COORDINATOR_TOKEN_COMMAND", `["token-helper","--scope","example"]`)

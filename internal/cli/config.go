@@ -2203,14 +2203,7 @@ func MarkVastWorkRootExplicit(cfg *Config) {
 }
 
 func EffectiveVastWorkRoot(cfg Config) string {
-	workRoot := cfg.Vast.WorkRoot
-	if !IsVastWorkRootExplicit(&cfg) && (workRoot == "" || workRoot == VastConfigDefaultWorkRoot) && cfg.explicitWorkRoot != "" {
-		return cfg.explicitWorkRoot
-	}
-	if workRoot == "" {
-		return VastConfigDefaultWorkRoot
-	}
-	return workRoot
+	return resolveExplicitProviderWorkRoot(cfg.Vast.WorkRoot, VastConfigDefaultWorkRoot, cfg.explicitWorkRoot, IsVastWorkRootExplicit(&cfg))
 }
 
 func NormalizeVastInstanceType(value string) string {
@@ -2227,15 +2220,17 @@ func normalizeVastInstanceType(value string) string {
 }
 
 func EffectiveNvidiaBrevWorkRoot(cfg Config) string {
-	workRoot := cfg.NvidiaBrev.WorkRoot
-	providerDefault := workRoot == "" || workRoot == "/tmp/crabbox"
-	if !IsNvidiaBrevWorkRootExplicit(&cfg) && providerDefault && cfg.explicitWorkRoot != "" {
-		return cfg.explicitWorkRoot
+	return resolveExplicitProviderWorkRoot(cfg.NvidiaBrev.WorkRoot, "/tmp/crabbox", cfg.explicitWorkRoot, IsNvidiaBrevWorkRootExplicit(&cfg))
+}
+
+func resolveExplicitProviderWorkRoot(providerRoot, providerFallback, explicitGenericRoot string, providerExplicit bool) string {
+	if !providerExplicit && (providerRoot == "" || providerRoot == providerFallback) && explicitGenericRoot != "" {
+		return explicitGenericRoot
 	}
-	if workRoot == "" {
-		return "/tmp/crabbox"
+	if providerRoot == "" {
+		return providerFallback
 	}
-	return workRoot
+	return providerRoot
 }
 
 func DeleteOnReleaseExplicit(cfg Config, provider string) bool {
