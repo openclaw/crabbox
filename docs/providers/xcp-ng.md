@@ -148,6 +148,12 @@ doctor and lifecycle commands. A template name or UUID is required before
 optional placement hints. `user` becomes the cloud-init SSH user, and
 `workRoot` becomes the remote workspace root.
 
+For each template, SR, or network name/UUID pair, file and environment layers
+replace the whole pair when either input is nonempty: name-only clears an
+inherited UUID, UUID-only clears an inherited name, and both inputs keep both
+raw values. Two empty inputs preserve the prior values. Flags remain sequential,
+and the UUID wins if both flags in a pair are visited.
+
 When `network` or `networkUuid` is set, Crabbox moves all VIFs on the copied VM
 to the selected network. Use a single-NIC template for Crabbox-managed VMs, or
 leave the setting unset when the template's network topology should be

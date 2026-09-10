@@ -814,6 +814,15 @@ type XCPNgConfig struct {
 	InsecureTLS  bool
 }
 
+// A nonempty selector replaces the whole layer's name/UUID pair; two empty inputs inherit it.
+func applyXCPNgNameUUIDPair(dstName, dstUUID *string, incomingName, incomingUUID string) {
+	if incomingName == "" && incomingUUID == "" {
+		return
+	}
+	*dstName = incomingName
+	*dstUUID = incomingUUID
+}
+
 type IncusConfig struct {
 	CheckpointMetadata map[string]string `yaml:"-" json:"-"`
 	Remote             string
@@ -4508,42 +4517,9 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if trusted && file.XCPNg.Password != "" {
 			cfg.XCPNg.Password = file.XCPNg.Password
 		}
-		if file.XCPNg.Template != "" {
-			cfg.XCPNg.Template = file.XCPNg.Template
-			if file.XCPNg.TemplateUUID == "" {
-				cfg.XCPNg.TemplateUUID = ""
-			}
-		}
-		if file.XCPNg.TemplateUUID != "" {
-			cfg.XCPNg.TemplateUUID = file.XCPNg.TemplateUUID
-			if file.XCPNg.Template == "" {
-				cfg.XCPNg.Template = ""
-			}
-		}
-		if file.XCPNg.SR != "" {
-			cfg.XCPNg.SR = file.XCPNg.SR
-			if file.XCPNg.SRUUID == "" {
-				cfg.XCPNg.SRUUID = ""
-			}
-		}
-		if file.XCPNg.SRUUID != "" {
-			cfg.XCPNg.SRUUID = file.XCPNg.SRUUID
-			if file.XCPNg.SR == "" {
-				cfg.XCPNg.SR = ""
-			}
-		}
-		if file.XCPNg.Network != "" {
-			cfg.XCPNg.Network = file.XCPNg.Network
-			if file.XCPNg.NetworkUUID == "" {
-				cfg.XCPNg.NetworkUUID = ""
-			}
-		}
-		if file.XCPNg.NetworkUUID != "" {
-			cfg.XCPNg.NetworkUUID = file.XCPNg.NetworkUUID
-			if file.XCPNg.Network == "" {
-				cfg.XCPNg.Network = ""
-			}
-		}
+		applyXCPNgNameUUIDPair(&cfg.XCPNg.Template, &cfg.XCPNg.TemplateUUID, file.XCPNg.Template, file.XCPNg.TemplateUUID)
+		applyXCPNgNameUUIDPair(&cfg.XCPNg.SR, &cfg.XCPNg.SRUUID, file.XCPNg.SR, file.XCPNg.SRUUID)
+		applyXCPNgNameUUIDPair(&cfg.XCPNg.Network, &cfg.XCPNg.NetworkUUID, file.XCPNg.Network, file.XCPNg.NetworkUUID)
 		if file.XCPNg.Host != "" {
 			cfg.XCPNg.Host = file.XCPNg.Host
 		}
@@ -6553,44 +6529,11 @@ func applyEnv(cfg *Config) error {
 	cfg.XCPNg.Username = getenv("CRABBOX_XCP_NG_USERNAME", cfg.XCPNg.Username)
 	cfg.XCPNg.Password = getenv("CRABBOX_XCP_NG_PASSWORD", cfg.XCPNg.Password)
 	xcpNgTemplate, xcpNgTemplateUUID := os.Getenv("CRABBOX_XCP_NG_TEMPLATE"), os.Getenv("CRABBOX_XCP_NG_TEMPLATE_UUID")
-	if xcpNgTemplate != "" {
-		cfg.XCPNg.Template = xcpNgTemplate
-		if xcpNgTemplateUUID == "" {
-			cfg.XCPNg.TemplateUUID = ""
-		}
-	}
-	if xcpNgTemplateUUID != "" {
-		cfg.XCPNg.TemplateUUID = xcpNgTemplateUUID
-		if xcpNgTemplate == "" {
-			cfg.XCPNg.Template = ""
-		}
-	}
+	applyXCPNgNameUUIDPair(&cfg.XCPNg.Template, &cfg.XCPNg.TemplateUUID, xcpNgTemplate, xcpNgTemplateUUID)
 	xcpNgSR, xcpNgSRUUID := os.Getenv("CRABBOX_XCP_NG_SR"), os.Getenv("CRABBOX_XCP_NG_SR_UUID")
-	if xcpNgSR != "" {
-		cfg.XCPNg.SR = xcpNgSR
-		if xcpNgSRUUID == "" {
-			cfg.XCPNg.SRUUID = ""
-		}
-	}
-	if xcpNgSRUUID != "" {
-		cfg.XCPNg.SRUUID = xcpNgSRUUID
-		if xcpNgSR == "" {
-			cfg.XCPNg.SR = ""
-		}
-	}
+	applyXCPNgNameUUIDPair(&cfg.XCPNg.SR, &cfg.XCPNg.SRUUID, xcpNgSR, xcpNgSRUUID)
 	xcpNgNetwork, xcpNgNetworkUUID := os.Getenv("CRABBOX_XCP_NG_NETWORK"), os.Getenv("CRABBOX_XCP_NG_NETWORK_UUID")
-	if xcpNgNetwork != "" {
-		cfg.XCPNg.Network = xcpNgNetwork
-		if xcpNgNetworkUUID == "" {
-			cfg.XCPNg.NetworkUUID = ""
-		}
-	}
-	if xcpNgNetworkUUID != "" {
-		cfg.XCPNg.NetworkUUID = xcpNgNetworkUUID
-		if xcpNgNetwork == "" {
-			cfg.XCPNg.Network = ""
-		}
-	}
+	applyXCPNgNameUUIDPair(&cfg.XCPNg.Network, &cfg.XCPNg.NetworkUUID, xcpNgNetwork, xcpNgNetworkUUID)
 	cfg.XCPNg.Host = getenv("CRABBOX_XCP_NG_HOST", cfg.XCPNg.Host)
 	cfg.XCPNg.User = getenv("CRABBOX_XCP_NG_USER", cfg.XCPNg.User)
 	cfg.XCPNg.WorkRoot = getenv("CRABBOX_XCP_NG_WORK_ROOT", cfg.XCPNg.WorkRoot)

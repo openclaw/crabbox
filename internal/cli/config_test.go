@@ -7672,36 +7672,128 @@ func TestRepoConfigCannotRedirectInheritedXCPNgCredentials(t *testing.T) {
 }
 
 func TestXCPNgHigherPrecedenceNamesClearInheritedUUIDs(t *testing.T) {
-	clearConfigEnv(t)
-	cfg := baseConfig()
-	cfg.XCPNg.TemplateUUID = "old-template-uuid"
-	cfg.XCPNg.SRUUID = "old-sr-uuid"
-	cfg.XCPNg.NetworkUUID = "old-network-uuid"
-	if err := applyFileConfig(&cfg, fileConfig{XCPNg: &fileXCPNgConfig{
-		Template: "new-template",
-		SR:       "new-sr",
-		Network:  "new-network",
-	}}); err != nil {
-		t.Fatal(err)
+	// Values are ordered as Template, TemplateUUID, SR, SRUUID, Network, NetworkUUID.
+	type selectors [6]string
+	prior := selectors{"old-template", "old-template-uuid", "old-sr", "old-sr-uuid", "old-network", "old-network-uuid"}
+	tests := []struct {
+		name     string
+		absent   bool
+		in, want selectors
+	}{
+		{name: "absent", absent: true, want: prior},
+		{name: "both empty", want: prior},
+		{
+			name: "name only",
+			in:   selectors{"new-template", "", "new-sr", "", "new-network", ""},
+			want: selectors{"new-template", "", "new-sr", "", "new-network", ""},
+		},
+		{
+			name: "uuid only",
+			in:   selectors{"", "new-template-uuid", "", "new-sr-uuid", "", "new-network-uuid"},
+			want: selectors{"", "new-template-uuid", "", "new-sr-uuid", "", "new-network-uuid"},
+		},
+		{
+			name: "both populated",
+			in:   selectors{"new-template", "new-template-uuid", "new-sr", "new-sr-uuid", "new-network", "new-network-uuid"},
+			want: selectors{"new-template", "new-template-uuid", "new-sr", "new-sr-uuid", "new-network", "new-network-uuid"},
+		},
+		{
+			name: "template empty with other updates",
+			in:   selectors{"", "", "new-sr", "", "", "new-network-uuid"},
+			want: selectors{"old-template", "old-template-uuid", "new-sr", "", "", "new-network-uuid"},
+		},
+		{
+			name: "sr empty with other updates",
+			in:   selectors{"", "new-template-uuid", "", "", "new-network", ""},
+			want: selectors{"", "new-template-uuid", "old-sr", "old-sr-uuid", "new-network", ""},
+		},
+		{
+			name: "network empty with other updates",
+			in:   selectors{"new-template", "", "", "new-sr-uuid", "", ""},
+			want: selectors{"new-template", "", "", "new-sr-uuid", "old-network", "old-network-uuid"},
+		},
+		{
+			name: "equal name only clears uuid",
+			in:   selectors{"old-template", "", "old-sr", "", "old-network", ""},
+			want: selectors{"old-template", "", "old-sr", "", "old-network", ""},
+		},
+		{
+			name: "equal uuid only clears name",
+			in:   selectors{"", "old-template-uuid", "", "old-sr-uuid", "", "old-network-uuid"},
+			want: selectors{"", "old-template-uuid", "", "old-sr-uuid", "", "old-network-uuid"},
+		},
+		{
+			name: "whitespace name only",
+			in:   selectors{" ", "", "\t", "", " \t ", ""},
+			want: selectors{" ", "", "\t", "", " \t ", ""},
+		},
+		{
+			name: "whitespace uuid only",
+			in:   selectors{"", "\t ", "", " \t", "", "\t\t"},
+			want: selectors{"", "\t ", "", " \t", "", "\t\t"},
+		},
+		{
+			name: "both raw padded values",
+			in:   selectors{" template ", " template-uuid\t", " sr ", " sr-uuid\t", " network ", " network-uuid\t"},
+			want: selectors{" template ", " template-uuid\t", " sr ", " sr-uuid\t", " network ", " network-uuid\t"},
+		},
 	}
-	if cfg.XCPNg.TemplateUUID != "" || cfg.XCPNg.SRUUID != "" || cfg.XCPNg.NetworkUUID != "" {
-		t.Fatalf("file names did not clear inherited UUIDs: %#v", cfg.XCPNg)
-	}
-
-	cfg.XCPNg.TemplateUUID = "old-template-uuid"
-	cfg.XCPNg.SRUUID = "old-sr-uuid"
-	cfg.XCPNg.NetworkUUID = "old-network-uuid"
-	t.Setenv("CRABBOX_XCP_NG_TEMPLATE", "env-template")
-	t.Setenv("CRABBOX_XCP_NG_TEMPLATE_UUID", "")
-	t.Setenv("CRABBOX_XCP_NG_SR", "env-sr")
-	t.Setenv("CRABBOX_XCP_NG_SR_UUID", "")
-	t.Setenv("CRABBOX_XCP_NG_NETWORK", "env-network")
-	t.Setenv("CRABBOX_XCP_NG_NETWORK_UUID", "")
-	if err := applyEnv(&cfg); err != nil {
-		t.Fatal(err)
-	}
-	if cfg.XCPNg.TemplateUUID != "" || cfg.XCPNg.SRUUID != "" || cfg.XCPNg.NetworkUUID != "" {
-		t.Fatalf("environment names did not clear inherited UUIDs: %#v", cfg.XCPNg)
+	for _, source := range []string{"file", "env"} {
+		for _, tt := range tests {
+			t.Run(source+"/"+tt.name, func(t *testing.T) {
+				clearConfigEnv(t)
+				for _, key := range []string{"CRABBOX_PROVIDER", "CRABBOX_OS", "CRABBOX_WORK_ROOT", "CRABBOX_USER", "CRABBOX_SSH_USER", "CRABBOX_XCP_NG_HOST", "CRABBOX_XCP_NG_USER", "CRABBOX_XCP_NG_WORK_ROOT"} {
+					t.Setenv(key, "")
+				}
+				cfg := baseConfig()
+				cfg.Provider = "unselected-config-test"
+				cfg.XCPNg = XCPNgConfig{
+					Template: prior[0], TemplateUUID: prior[1],
+					SR: prior[2], SRUUID: prior[3],
+					Network: prior[4], NetworkUUID: prior[5],
+					Host: "prior-host", User: "prior-user", WorkRoot: t.TempDir(),
+				}
+				want := cfg.XCPNg
+				want.Template, want.TemplateUUID = tt.want[0], tt.want[1]
+				want.SR, want.SRUUID = tt.want[2], tt.want[3]
+				want.Network, want.NetworkUUID = tt.want[4], tt.want[5]
+				if source == "file" {
+					file := fileConfig{}
+					wantFile := fileConfig{}
+					if !tt.absent {
+						input := fileXCPNgConfig{
+							Template: tt.in[0], TemplateUUID: tt.in[1],
+							SR: tt.in[2], SRUUID: tt.in[3],
+							Network: tt.in[4], NetworkUUID: tt.in[5],
+						}
+						inputCopy := input
+						file.XCPNg, wantFile.XCPNg = &input, &inputCopy
+					}
+					if err := applyFileConfig(&cfg, file); err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(file, wantFile) {
+						t.Fatal("file input changed")
+					}
+				} else {
+					for i, key := range []string{"TEMPLATE", "TEMPLATE_UUID", "SR", "SR_UUID", "NETWORK", "NETWORK_UUID"} {
+						key = "CRABBOX_XCP_NG_" + key
+						t.Setenv(key, tt.in[i])
+						if tt.absent {
+							if err := os.Unsetenv(key); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if !reflect.DeepEqual(cfg.XCPNg, want) {
+					t.Fatalf("XCPNg=%#v, want %#v", cfg.XCPNg, want)
+				}
+			})
+		}
 	}
 }
 
