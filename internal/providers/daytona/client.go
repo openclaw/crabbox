@@ -57,9 +57,9 @@ var newDaytonaClient = func(cfg Config, rt Runtime) (daytonaAPI, error) {
 	apiURL := daytonaAPIURL(cfg, auth)
 	apiCfg := daytona.NewConfiguration()
 	apiCfg.Servers = daytona.ServerConfigurations{{URL: apiURL}}
-	if auth.OrganizationID != "" {
-		apiCfg.AddDefaultHeader("X-Daytona-Organization-ID", auth.OrganizationID)
-	}
+	// Every request sets X-Daytona-Organization-ID itself. A default header
+	// would be sent again under the literal key beside the canonical one, and
+	// Daytona rejects the duplicated header as an invalid authentication context.
 	controlClient := rt.HTTP
 	if controlClient == nil {
 		controlClient = &http.Client{Timeout: daytonaControlTimeout}
@@ -88,7 +88,11 @@ func (c *daytonaSDKClient) fixedOrganization(ctx context.Context) (string, strin
 		}
 		return c.apiURL, organization.GetId(), nil
 	}
-	items, _, err := c.api.SandboxAPI.ListSandboxes(c.ctx(ctx)).Limit(1).Execute()
+	identity := c.api.SandboxAPI.ListSandboxes(c.ctx(ctx)).Limit(1)
+	if c.orgID != "" {
+		identity = identity.XDaytonaOrganizationID(c.orgID)
+	}
+	items, _, err := identity.Execute()
 	if err != nil {
 		return "", "", c.redactError(err)
 	}

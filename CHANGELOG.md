@@ -8,6 +8,7 @@
 - Include the resolved `workroot` in SSH-backed inspect/status JSON, including native Windows and WSL2 leases. [PR 2069](https://github.com/openclaw/crabbox/pull/2069).
 - Managed Linux: reuse installed desktop packages and a working package-installed Chrome or Chromium on restored images, avoiding redundant package transactions and browser repository downloads while preserving per-lease configuration and readiness checks. https://github.com/openclaw/crabbox/pull/2073
 - Daytona: support fixed warmup and checkpoint-fork IDs with durable, organization-bound replay and cleanup, preserving original lease deadlines and explicit repository transfers without recreating released operations. [PR 1700](https://github.com/openclaw/crabbox/pull/1700). Thanks @steipete.
+- Daytona: send the organization header exactly once so direct control-plane calls with a Daytona CLI OAuth profile no longer fail with 403 "Invalid authentication context". [PR 1700](https://github.com/openclaw/crabbox/pull/1700). Thanks @steipete.
 
 ## 0.55.0 - 2026-09-09
 

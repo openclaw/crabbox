@@ -61,6 +61,11 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 		switch {
 		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/snapshots/"):
 			if f.classSnapshot == nil {
+		// Daytona rejects a duplicated organization header (default header plus
+		// per-request value) with 403 "Invalid authentication context".
+		if values := r.Header.Values("X-Daytona-Organization-Id"); len(values) > 1 {
+			t.Errorf("%s %s sent the organization header %d times", r.Method, r.URL.Path, len(values))
+		}
 				w.WriteHeader(http.StatusNotFound)
 				_, _ = io.WriteString(w, `{"message":"snapshot not found"}`)
 				return
@@ -786,5 +791,24 @@ func TestDaytonaHTTPRedirectPolicy(t *testing.T) {
 				t.Fatalf("redirect error=%v", err)
 			}
 		})
+	}
+}
+
+func TestDaytonaClientSendsOrganizationHeaderOnce(t *testing.T) {
+	f, b, _ := newDaytonaLifecycleFixture(t)
+	f.identityOrganization = "org-test"
+	b.cfg.Daytona.JWTToken = "synthetic-jwt"
+	b.cfg.Daytona.OrganizationID = "org-test"
+	client, err := newDaytonaClient(b.cfg, b.rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fixture fails the test when any request carries the organization
+	// header more than once; Daytona rejects duplicates as 403.
+	if _, err := client.ListCrabboxSandboxes(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.GetSandbox(t.Context(), "identity-sandbox"); err != nil {
+		t.Fatal(err)
 	}
 }
