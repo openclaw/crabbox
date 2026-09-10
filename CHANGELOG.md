@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Fix image qualification bundles to include the Linux smoke script and admit publisher cleanup-owned rollback without disarming promotion early.
+- Fix image qualification bundles to include the Linux smoke script and admit publisher cleanup-owned rollback without disarming promotion early. [PR #2062](https://github.com/openclaw/crabbox/pull/2062) Thanks @vincentkoc.
 
 - Repair stale coordinator host associations against canonical lease state during pinned creation, preserving in-flight and retained instances; add admin host reservation inspection and guarded clearing. [PR 2057](https://github.com/openclaw/crabbox/pull/2057). Thanks @steipete.
 
