@@ -16,7 +16,9 @@ then drives the normal SSH sync/run/release path.
 The provider is direct-only: it talks to the Proxmox API straight from the CLI.
 The Crabbox coordinator (broker) does not provision or broker Proxmox capacity,
 so brokered shared-team leases are not available here. Proxmox supports the
-`ssh`, `crabbox-sync`, and `cleanup` features on `target=linux` only.
+`ssh`, `crabbox-sync`, and `cleanup` features on `target=linux` only. Direct
+Proxmox also supports caller-supplied fixed lease IDs with
+`warmup --lease-id cbx_<12 lowercase hex>`.
 
 ## When to use
 
@@ -377,6 +379,20 @@ VMs that migrated away from the configured node. Cleanup uses names and labels
 only to discover candidates; they never authorize deletion by themselves.
 Failed acquisition cleanup removes the per-lease SSH key only after confirming
 the VM is absent across the cluster.
+
+For an ordinary acquire, step 2 remains a per-create `/cluster/nextid` lookup.
+For `warmup --lease-id`, Crabbox instead persists the normalized create intent,
+selected VMID, source node, and cluster scope in the fixed lease claim before
+submitting the clone, then passes that exact VMID as the clone API's `newid`.
+An identical replay inspects the persisted VMID and adopts only the VM whose
+lease labels, intent fingerprint, cluster scope, VMID, and native `vmgenid`
+match. Slugs are never replay authority. A changed intent, copied labels,
+different VMID or generation, duplicate match, or unresolved post-submit
+attempt returns `lease_id_conflict` without issuing another clone.
+
+Successful fixed-ID release, including authoritative confirmation that the
+selected VMID is absent, retains a terminal local tombstone. The fixed lease ID
+is single-use and cannot allocate another VM after release.
 
 ### Automatic cleanup ownership
 

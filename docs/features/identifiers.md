@@ -57,15 +57,15 @@ private token and generation never appear in public lease records. Fixed-ID
 to own replay, and caller cancellation never releases them.
 
 Automation may instead supply the canonical ID with `warmup --lease-id`. For
-direct AWS, direct Machine0, direct local-container, and managed coordinator
-leases, that ID is an immutable create identity: an identical semantic replay
-returns the same lease, while intent drift returns `lease_id_conflict`. External
-providers also accept requested IDs when their protocol explicitly advertises
-idempotent lease identity support. The coordinator durably stores a versioned
-normalized request hash. Direct AWS durably stores the intent and current
-resolved EC2 attempt in the normal lease claim before `RunInstances`, then uses
-a deterministic regional/zonal client token. No path uses the slug to decide
-replay ownership.
+direct AWS, direct Machine0, direct local-container, direct Proxmox, and managed
+coordinator leases, that ID is an immutable create identity: an identical
+semantic replay returns the same lease, while intent drift returns
+`lease_id_conflict`. External providers also accept requested IDs when their
+protocol explicitly advertises idempotent lease identity support. The
+coordinator durably stores a versioned normalized request hash. Direct AWS
+durably stores the intent and current resolved EC2 attempt in the normal lease
+claim before `RunInstances`, then uses a deterministic regional/zonal client
+token. No path uses the slug to decide replay ownership.
 
 Direct Machine0 binds the intent to its deterministic VM name before creation;
 the durable attempt binds the first visible match to its Machine0 resource ID,
@@ -81,6 +81,15 @@ missing acquired container fails closed instead of starting another container.
 Its fixed claims use the downgrade-safe `local-container-fixed-v1` marker, so
 older clients cannot mistake them for ordinary local-container claims.
 
+Direct Proxmox selects a free VMID through the cluster allocator, then durably
+binds that exact VMID, the normalized intent, source node, and cluster scope
+before submitting the template clone with an explicit `newid`. Replay inspects
+that VMID and requires matching lease labels, intent fingerprint, provider
+scope, and native `vmgenid`; it never derives a VMID from the lease ID or adopts
+by slug. Missing or ambiguous post-submit state retains the attempt and cannot
+issue another clone. Its fixed claims use the downgrade-safe
+`proxmox-fixed-v1` marker.
+
 After the direct AWS launch attempt is durable, Crabbox never submits that
 attempt again. An ambiguous replay with no visible tagged instance fails closed;
 a later replay can adopt the one instance after inventory converges only when
@@ -89,11 +98,12 @@ match the persisted attempt exactly. Fixed AWS
 claims use the downgrade-safe local discriminator `aws-fixed-v1`; current
 clients map it to runtime AWS, while older clients skip/refuse it.
 
-Fixed IDs are single-use operation identities. Direct AWS, Machine0, and
-local-container keep a compact terminal claim tombstone after successful
-destroy release or exact missing-resource cleanup. Tombstones contain only the
-ID, slug, provider scope, versioned intent hash, timestamps, and terminal
-state; automatic provider cleanup never prunes them.
+Fixed IDs are single-use operation identities. Direct AWS, Machine0,
+local-container, and Proxmox keep a terminal claim tombstone after successful
+destroy release or exact missing-resource cleanup. Proxmox retains the selected
+VMID and, when observed, its native generation identity so release
+reconciliation remains exact. Automatic provider cleanup never prunes fixed-ID
+tombstones.
 There is no time-based reuse window. Explicitly deleting local Crabbox claim
 state forfeits this replay protection, so automation must instead mint a new
 operation ID.
