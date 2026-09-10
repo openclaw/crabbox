@@ -9,6 +9,7 @@ import {
   readFile,
   readdir,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -318,7 +319,9 @@ process.exit(result.status ?? 1);
 `,
   );
   await chmod(runner, 0o755);
-  const result = await runScript(["--target", "linux", "--run"], {
+  const args = ["--target", "linux", "--run"];
+  if (options.customPrep) args.push("--prep-script", fake.linuxPrep);
+  const result = await runScript(args, {
     CRABBOX_BIN: fake.fake,
     CRABBOX_FAKE_LOG: fake.log,
     CRABBOX_IMAGE_LOG_DIR: path.join(fake.dir, "logs"),
@@ -435,6 +438,100 @@ test("runtime-user publisher uses real Corepack 0.35.0 without changing project 
   }
 });
 
+async function qualificationFixture(t) {
+  const fake = await setupFakeCrabbox();
+  t.after(() => rm(fake.dir, { recursive: true, force: true }));
+  const workflow = await readFile(
+    path.join(repoRoot, ".github/workflows/image-qualification.yml"),
+    "utf8",
+  );
+  const copyCommand = workflow.match(
+    /^          cp candidate\/scripts\/mint-aws-devtools-image\.sh \\\n(?:            .*\n)+/m,
+  )?.[0];
+  assert.ok(copyCommand, "qualification workflow publisher copy command is missing");
+  const artifact = path.join(fake.dir, "artifact");
+  await mkdir(path.join(artifact, "candidate/scripts"), { recursive: true });
+  await symlink(repoRoot, path.join(fake.dir, "candidate"));
+  execFileSync("bash", ["-euc", copyCommand], {
+    cwd: fake.dir,
+    env: { ...process.env, ARTIFACT: artifact },
+  });
+  return {
+    ...fake,
+    script: path.join(artifact, "candidate/scripts/mint-aws-devtools-image.sh"),
+    env: {
+      CRABBOX_BIN: fake.fake,
+      CRABBOX_FAKE_LOG: fake.log,
+      CRABBOX_IMAGE_LOG_DIR: fake.dir,
+      CRABBOX_OS: undefined,
+      CRABBOX_AWS_AMI: undefined,
+    },
+  };
+}
+
+test("qualification bundle runs the bundled installer and all three Linux smokes", async (t) => {
+  const fake = await qualificationFixture(t);
+  const result = await runScript(["--target", "linux", "--run"], fake.env, fake.script);
+  const log = await readFile(fake.log, "utf8");
+  assert.match(log, /stop --provider aws --target linux cbx_source/);
+  if (result.code !== 0) {
+    assert.doesNotMatch(log, /checkpoint create|image promote/);
+  }
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(log.includes(`--script ${path.dirname(fake.script)}/install-linux-developer-tools.sh`));
+  assert.equal((log.match(/docker_probe=/g) ?? []).length, 3);
+  for (const lease of ["cbx_source", "cbx_candidate", "cbx_promoted"]) {
+    assert.match(log, new RegExp(`run .*--id ${lease} --no-sync --shell -- export CRABBOX_LINUX_DESKTOP_TOOLS=1 CRABBOX_LINUX_BROWSER=1\nset -euo pipefail`));
+    assert.match(log, new RegExp(`stop --provider aws --target linux ${lease}`));
+  }
+  assert.match(log, /checkpoint create/);
+  assert.match(log, /--expected-current-image capture/);
+  assert.doesNotMatch(log, /--restore-receipt/);
+});
+
+test("qualification bundle preserves the protected promoted-smoke failure and receipt rollback", async (t) => {
+  const fake = await qualificationFixture(t);
+  const state = path.join(fake.dir, "adapter");
+  const result = await runScript(
+    ["--target", "linux", "--run"],
+    {
+      ...fake.env,
+      CRABBOX_BIN: path.join(scriptDir, "image-qualification-crabbox-adapter.sh"),
+      QUALIFICATION_REAL_CRABBOX: fake.fake,
+      QUALIFICATION_ADAPTER_STATE: state,
+    },
+    fake.script,
+  );
+  assert.equal(result.code, 86, result.stderr);
+  assert.equal(await readFile(path.join(state, "injected"), "utf8"), "after-promoted-smoke\n");
+  const promotion = JSON.parse(await readFile(path.join(state, "promotion-receipt.json"), "utf8"));
+  const rollback = JSON.parse(await readFile(path.join(state, "rollback-receipt.json"), "utf8"));
+  assert.equal(promotion.previous.imageId, rollback.image.id);
+  const log = await readFile(fake.log, "utf8");
+  assert.equal((log.match(/docker_probe=/g) ?? []).length, 3);
+  assert.match(log, /--restore-receipt \S+ ami-devtools/);
+  for (const lease of ["cbx_source", "cbx_candidate", "cbx_promoted"]) {
+    assert.match(log, new RegExp(`stop --provider aws --target linux ${lease}`));
+  }
+});
+
+test("qualification bundle rolls back when promoted lease cleanup fails after successful smoke", async (t) => {
+  const fake = await qualificationFixture(t);
+  const result = await runScript(
+    ["--target", "linux", "--run"],
+    { ...fake.env, CRABBOX_FAKE_STOP_FAIL_LEASE: "cbx_promoted" },
+    fake.script,
+  );
+  assert.equal(result.code, 1, result.stderr);
+  assert.match(result.stderr, /stop failed for cbx_promoted/);
+  assert.match(result.stderr, /restored previous default image=ami-previous/);
+  const log = await readFile(fake.log, "utf8");
+  assert.equal((log.match(/docker_probe=/g) ?? []).length, 3);
+  const stop = log.indexOf("stop --provider aws --target linux cbx_promoted");
+  const restore = log.indexOf("--restore-receipt");
+  assert.ok(stop !== -1 && restore > stop, "cleanup failure must trigger receipt rollback");
+});
+
 test("AWS devtools mint wrapper defaults to dry plan", async () => {
   const fake = await setupFakeCrabbox();
   const result = await runScript(["--prep-script", fake.linuxPrep], {
@@ -448,11 +545,14 @@ test("AWS devtools mint wrapper defaults to dry plan", async () => {
 
 test("AWS developer image smoke executes package managers and requires TruffleHog", async () => {
   const text = await readFile(script, "utf8");
+  const linuxSmoke = await readFile(
+    path.join(scriptDir, "devtools-image-smoke-linux.sh"),
+    "utf8",
+  );
   const windowsSmoke = await readFile(
     path.join(scriptDir, "devtools-image-smoke-windows.ps1"),
     "utf8",
   );
-  const linuxSmoke = await readFile(path.join(scriptDir, "devtools-image-smoke-linux.sh"), "utf8");
   assert.match(windowsSmoke, /pnpm --version\ntrufflehog --no-update --version\ndocker --version/);
   assert.match(
     linuxSmoke,
@@ -605,6 +705,7 @@ for (const [target, osImage] of [
       );
       assert.equal(result.code, failPromotedSmoke ? 73 : 0, result.stderr);
       const log = await readFile(fake.log, "utf8");
+      assert.doesNotMatch(log, /--capture-stdout/);
       assert.deepEqual(
         log.split("\n").filter((line) => /^selection .* command=warmup$/.test(line)),
         ["unset", "ami-devtools", "unset"].map(
@@ -1046,7 +1147,11 @@ test("generated Linux smoke keeps required x64 archives under a pnpm override", 
   const { execute } = await linuxSmokeFixture(t, { pnpm: "12.3.4" });
   const result = execute();
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /verified public toolchain archive unavailable offline/);
+  assert.match(
+    result.stderr,
+    /verified public toolchain archive unavailable offline/,
+    JSON.stringify({ status: result.status, signal: result.signal, error: result.error?.message }),
+  );
   assert.doesNotMatch(result.stdout, /devtools-smoke-ok/);
 });
 

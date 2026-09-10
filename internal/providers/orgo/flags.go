@@ -2,7 +2,6 @@ package orgo
 
 import (
 	"flag"
-	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
@@ -15,8 +14,7 @@ func RegisterOrgoProviderFlags(fs *flag.FlagSet, defaults Config) any {
 }
 
 func ApplyOrgoProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	switch strings.ToLower(strings.TrimSpace(cfg.Provider)) {
-	case providerName, "orgo-ai":
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
 			return err
 		}

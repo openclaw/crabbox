@@ -27,11 +27,7 @@ func (Provider) Spec() core.ProviderSpec {
 }
 
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return registerFlags(fs, defaults)
-}
-
-func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	return applyFlags(cfg, fs, values)
+	return core.RegisterAppleMachineConfigFlags(fs, defaults.AppleContainer)
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {

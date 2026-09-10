@@ -64,6 +64,7 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 		{"local-container", runCheckpointContainerReviewContract},
 		{"aws", runCheckpointAWSStrategyContract},
 		{"aws-non-submission", runCheckpointAWSNonSubmissionContract},
+		{"coordinator-non-submission", runCheckpointCoordinatorNonSubmissionContract},
 		{"machine0-strategy", runCheckpointMachine0StrategyContract},
 		{"native-lifetime", runCheckpointNativeLifetimeContract},
 	} {

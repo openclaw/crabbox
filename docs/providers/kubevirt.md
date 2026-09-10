@@ -64,6 +64,18 @@ flags. This applies to `kubectl`, `virtctl`, `kubeconfig`, `template`,
 `sshKey`, and file-form `sshPublicKey`. `workRoot` is a guest path and is not
 shell-expanded.
 
+Empty file and environment strings retain prior values; visited flags can
+assign empty values before validation. File and flag path expansion follows
+accepted input, while environment processing also expands retained fallback
+paths. Saving configuration omits empty strings but preserves an explicit
+`deleteOnRelease: false`. Applying configuration does not rewrite the original
+file values or remove settings that were ignored for that input source.
+
+A custom top-level work root is inherited when the provider work root is blank
+or still at its default. A custom provider work root takes precedence. Command
+forwarding and backend configuration share this decision; guest-root trimming
+and the initial routing projection remain separate steps.
+
 Local lease claims are scoped by the same kubeconfig, context, and namespace
 tuple that Crabbox passes to `kubectl` and `virtctl`. `kubevirt.context` is
 required so claims cannot drift when a kubeconfig's current context changes.

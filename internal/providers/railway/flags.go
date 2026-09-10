@@ -2,7 +2,6 @@ package railway
 
 import (
 	"flag"
-	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
@@ -17,7 +16,7 @@ func RegisterRailwayProviderFlags(fs *flag.FlagSet, defaults Config) any {
 }
 
 func ApplyRailwayProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if isRailwayProviderName(cfg.Provider) {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
 			return err
 		}
@@ -28,13 +27,4 @@ func ApplyRailwayProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error 
 	}
 	v.Apply(&cfg.Railway, fs)
 	return nil
-}
-
-func isRailwayProviderName(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName, "rail", "railwayapp":
-		return true
-	default:
-		return false
-	}
 }

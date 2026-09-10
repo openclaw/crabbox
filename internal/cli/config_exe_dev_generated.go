@@ -7,15 +7,15 @@ import (
 )
 
 type fileExeDevConfig struct {
-	ControlHost *string `yaml:"controlHost,omitempty"`
-	Image       *string `yaml:"image,omitempty"`
-	CPUs        *int    `yaml:"cpus,omitempty"`
-	Memory      *string `yaml:"memory,omitempty"`
-	Disk        *string `yaml:"disk,omitempty"`
-	Command     *string `yaml:"command,omitempty"`
-	User        *string `yaml:"user,omitempty"`
-	WorkRoot    *string `yaml:"workRoot,omitempty"`
-	NoEmail     *bool   `yaml:"noEmail,omitempty"`
+	ControlHost string `yaml:"controlHost,omitempty"`
+	Image       string `yaml:"image,omitempty"`
+	CPUs        int    `yaml:"cpus,omitempty"`
+	Memory      string `yaml:"memory,omitempty"`
+	Disk        string `yaml:"disk,omitempty"`
+	Command     string `yaml:"command,omitempty"`
+	User        string `yaml:"user,omitempty"`
+	WorkRoot    string `yaml:"workRoot,omitempty"`
+	NoEmail     *bool  `yaml:"noEmail,omitempty"`
 }
 
 const ExeDevConfigDefaultControlHost string = "exe.dev"
@@ -44,30 +44,30 @@ func (cfg *ExeDevConfig) applyFile(file *fileExeDevConfig) (ExeDevConfigApplied,
 	if file == nil {
 		return applied, nil
 	}
-	if file.ControlHost != nil && *file.ControlHost != "" {
-		cfg.ControlHost = *file.ControlHost
+	if file.ControlHost != "" {
+		cfg.ControlHost = file.ControlHost
 		applied.ControlHost = true
 	}
-	if file.Image != nil && *file.Image != "" {
-		cfg.Image = *file.Image
+	if file.Image != "" {
+		cfg.Image = file.Image
 	}
-	if file.CPUs != nil && *file.CPUs > 0 {
-		cfg.CPUs = *file.CPUs
+	if file.CPUs > 0 {
+		cfg.CPUs = file.CPUs
 	}
-	if file.Memory != nil && *file.Memory != "" {
-		cfg.Memory = *file.Memory
+	if file.Memory != "" {
+		cfg.Memory = file.Memory
 	}
-	if file.Disk != nil && *file.Disk != "" {
-		cfg.Disk = *file.Disk
+	if file.Disk != "" {
+		cfg.Disk = file.Disk
 	}
-	if file.Command != nil && *file.Command != "" {
-		cfg.Command = *file.Command
+	if file.Command != "" {
+		cfg.Command = file.Command
 	}
-	if file.User != nil && *file.User != "" {
-		cfg.User = *file.User
+	if file.User != "" {
+		cfg.User = file.User
 	}
-	if file.WorkRoot != nil && *file.WorkRoot != "" {
-		cfg.WorkRoot = *file.WorkRoot
+	if file.WorkRoot != "" {
+		cfg.WorkRoot = file.WorkRoot
 	}
 	if file.NoEmail != nil {
 		cfg.NoEmail = *file.NoEmail

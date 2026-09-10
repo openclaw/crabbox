@@ -2153,13 +2153,25 @@ func TestCommandErrorMinimalExitCode(t *testing.T) {
 }
 
 func TestIsTartProviderName(t *testing.T) {
+	selected := func(name string) bool {
+		cfg := core.BaseConfig()
+		cfg.Provider = name
+		cfg.TargetOS = "linux"
+		fs := flag.NewFlagSet("name-contract", flag.ContinueOnError)
+		p := Provider{}
+		values := p.RegisterFlags(fs, cfg)
+		if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		return cfg.TargetOS == "macos"
+	}
 	for _, name := range []string{"tart", "Tart", "TART", "local-tart", "macos-vm", " tart "} {
-		if !isTartProviderName(name) {
+		if !selected(name) {
 			t.Errorf("isTartProviderName(%q) = false, want true", name)
 		}
 	}
 	for _, name := range []string{"docker", "aws", "hyperv", ""} {
-		if isTartProviderName(name) {
+		if selected(name) {
 			t.Errorf("isTartProviderName(%q) = true, want false", name)
 		}
 	}

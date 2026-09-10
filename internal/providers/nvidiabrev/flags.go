@@ -3,6 +3,7 @@ package nvidiabrev
 import (
 	"flag"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -41,7 +42,7 @@ func RegisterNvidiaBrevProviderFlags(fs *flag.FlagSet, defaults Config) any {
 }
 
 func ApplyNvidiaBrevProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if isNvidiaBrevProviderName(cfg.Provider) {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --nvidia-brev-gpu-name", "use --nvidia-brev-type"); err != nil {
 			return err
 		}
@@ -88,7 +89,7 @@ func ApplyNvidiaBrevProviderFlags(cfg *Config, fs *flag.FlagSet, values any) err
 		cfg.NvidiaBrev.WorkRoot = *v.WorkRoot
 		markNvidiaBrevWorkRootExplicit(cfg)
 	}
-	if isNvidiaBrevProviderName(cfg.Provider) {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		applyNvidiaBrevDefaults(cfg)
 		return Provider{}.ValidateConfig(*cfg)
 	}

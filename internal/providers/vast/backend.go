@@ -73,28 +73,28 @@ func applyVastDefaults(cfg *core.Config) {
 	} else if cfg.Vast.User != "" {
 		cfg.SSHUser = cfg.Vast.User
 	} else if cfg.SSHUser == "" {
-		cfg.SSHUser = "root"
+		cfg.SSHUser = core.VastConfigDefaultUser
 	}
 	if cfg.Vast.WorkRoot != "" {
 		cfg.WorkRoot = cfg.Vast.WorkRoot
 	}
 	if cfg.WorkRoot == "" {
-		cfg.WorkRoot = "/work/crabbox"
+		cfg.WorkRoot = core.VastConfigDefaultWorkRoot
 	}
 	if cfg.SSHPort == "" {
 		cfg.SSHPort = "22"
 	}
 	if cfg.Vast.InstanceType == "" {
-		cfg.Vast.InstanceType = "ondemand"
+		cfg.Vast.InstanceType = core.VastConfigDefaultInstanceType
 	}
 	if cfg.Vast.Runtype == "" {
-		cfg.Vast.Runtype = "ssh_direct"
+		cfg.Vast.Runtype = core.VastConfigDefaultRuntype
 	}
 	if cfg.Vast.Order == "" {
-		cfg.Vast.Order = "dlperf_per_dphtotal desc"
+		cfg.Vast.Order = core.VastConfigDefaultOrder
 	}
 	if cfg.Vast.ReleaseAction == "" {
-		cfg.Vast.ReleaseAction = "destroy"
+		cfg.Vast.ReleaseAction = core.VastConfigDefaultReleaseAction
 	}
 }
 

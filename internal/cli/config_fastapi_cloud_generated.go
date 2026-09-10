@@ -7,9 +7,9 @@ import (
 )
 
 type fileFastAPICloudConfig struct {
-	APIURL *string `yaml:"apiUrl,omitempty"`
-	AppID  *string `yaml:"appId,omitempty"`
-	TeamID *string `yaml:"teamId,omitempty"`
+	APIURL string `yaml:"apiUrl,omitempty"`
+	AppID  string `yaml:"appId,omitempty"`
+	TeamID string `yaml:"teamId,omitempty"`
 }
 
 const FastAPICloudConfigDefaultAPIURL string = "https://api.fastapicloud.com/api/v1"
@@ -31,15 +31,15 @@ func (cfg *FastAPICloudConfig) applyFile(file *fileFastAPICloudConfig) (FastAPIC
 	if file == nil {
 		return applied, nil
 	}
-	if file.APIURL != nil && *file.APIURL != "" {
-		cfg.APIURL = *file.APIURL
+	if file.APIURL != "" {
+		cfg.APIURL = file.APIURL
 		applied.APIURL = true
 	}
-	if file.AppID != nil && *file.AppID != "" {
-		cfg.AppID = *file.AppID
+	if file.AppID != "" {
+		cfg.AppID = file.AppID
 	}
-	if file.TeamID != nil && *file.TeamID != "" {
-		cfg.TeamID = *file.TeamID
+	if file.TeamID != "" {
+		cfg.TeamID = file.TeamID
 	}
 	return applied, nil
 }

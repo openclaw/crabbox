@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -57,6 +59,58 @@ func testBackend(runner *recordingRunner) *backend {
 	cfg.AppleContainer.CPUs = 4
 	cfg.AppleContainer.Memory = "8G"
 	return newBackend(Provider{}.Spec(), cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+}
+
+func TestAppleMachineConfigFlags(t *testing.T) {
+	defaults := core.Config{AppleContainer: core.AppleContainerConfig{CLIPath: "tool", Image: "image-example", User: "user-example", WorkRoot: "/workspace/example", CPUs: 3, Memory: "6g", ExtraRunArgs: []string{"token"}}}
+	fs := flag.NewFlagSet("machine", flag.ContinueOnError)
+	v := (Provider{}).RegisterFlags(fs, defaults)
+	got := map[string]string{}
+	fs.VisitAll(func(f *flag.Flag) { got[f.Name] = f.DefValue })
+	want := map[string]string{"apple-machine-cli": "tool", "apple-machine-image": "image-example", "apple-machine-cpus": "3", "apple-machine-memory": "6g"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("four-flag surface=%#v", got)
+	}
+	cfg := defaults
+	cfg.Provider = "apple-machine"
+	before := cfg
+	if err := (Provider{}).ApplyFlags(&cfg, fs, v); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("unvisited machine flags ran defaults")
+	}
+	if err := fs.Parse([]string{"--apple-machine-cli=~/literal", "--apple-machine-image=first", "--apple-machine-image=image-example", "--apple-machine-cpus=-2", "--apple-machine-memory=8G"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Provider{}).ApplyFlags(&cfg, fs, v); err != nil {
+		t.Fatal(err)
+	}
+	wantConfig := defaults.AppleContainer
+	wantConfig.CLIPath = "~/literal"
+	wantConfig.CPUs = -2
+	wantConfig.Memory = "8G"
+	if !reflect.DeepEqual(cfg.AppleContainer, wantConfig) || !core.AppleContainerImageExplicit(cfg) || cfg.SSHUser != "" || cfg.WorkRoot != "" || cfg.ServerType != "" || cfg.TargetOS != "" {
+		t.Fatal("machine values/marker must not gain container projection")
+	}
+	f := flag.NewFlagSet("empty", flag.ContinueOnError)
+	values := (Provider{}).RegisterFlags(f, cfg)
+	if err := f.Parse([]string{"--apple-machine-cli=", "--apple-machine-image=", "--apple-machine-cpus=0", "--apple-machine-memory="}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Provider{}).ApplyFlags(&cfg, f, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppleContainer.CLIPath != "" || cfg.AppleContainer.Image != "" || cfg.AppleContainer.CPUs != 0 || cfg.AppleContainer.Memory != "" || cfg.AppleContainer.User != "user-example" || !reflect.DeepEqual(cfg.AppleContainer.ExtraRunArgs, []string{"token"}) {
+		t.Fatal("machine empty assignments/no defaults")
+	}
+	for _, foreign := range []any{nil, struct{}{}} {
+		c := core.Config{Provider: "apple-machine"}
+		before := c
+		if err := (Provider{}).ApplyFlags(&c, flag.NewFlagSet("foreign", flag.ContinueOnError), foreign); err != nil || !reflect.DeepEqual(c, before) {
+			t.Fatal("foreign values changed machine config")
+		}
+	}
 }
 
 func TestCreateMachineArgs(t *testing.T) {

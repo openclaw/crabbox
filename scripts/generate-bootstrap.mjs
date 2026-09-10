@@ -176,6 +176,27 @@ export async function loadSources(root = repoRoot) {
     name: "linuxNodeInstall", file: "scripts/install-linux-developer-tools.sh", literal: true, parameters: {},
     source: `cat >/var/lib/crabbox/install-linux-developer-tools.sh <<'${delimiter}'\n${installer}${delimiter}\nbash /var/lib/crabbox/install-linux-developer-tools.sh --node-only\n`,
   });
+  const detached = await readFile(resolve(root, "scripts/start-windows-detached-process.ps1"), "utf8");
+  if (!detached.endsWith("\n") || detached.includes("\r") || detached.includes("\0") ||
+      detached.split("\n").some((line) => line === "'@")) {
+    throw new Error("Windows detached launcher must be LF text safe for a PowerShell here-string");
+  }
+  fragments.push({
+    name: "windowsDetachInstall", file: "scripts/start-windows-detached-process.ps1", literal: true, parameters: {},
+    source: `
+$detachBin = Join-Path $env:ProgramFiles "Crabbox\\bin"
+New-Item -ItemType Directory -Force -Path $detachBin | Out-Null
+$detachSource = @'
+${detached}'@
+[IO.File]::WriteAllText((Join-Path $detachBin "Start-CrabboxDetachedProcess.ps1"), $detachSource, [Text.UTF8Encoding]::new($true))
+$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+if (@($machinePath -split ";") -notcontains $detachBin) {
+  $machinePath = $machinePath + ";" + $detachBin
+  [Environment]::SetEnvironmentVariable("Path", $machinePath, "Machine")
+}
+$env:Path = $machinePath + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+`,
+  });
   return { constants, catalog, fragments };
 }
 function gofmt(source) {

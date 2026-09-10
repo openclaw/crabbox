@@ -792,6 +792,9 @@ func TestSSHForwardRealPondWaitsForEveryGroup(t *testing.T) {
 			other.SSHHostKey = second.hostKey
 			members = append(members, pondMember{Lease: "second", SSH: other})
 			local, _ := strconv.Atoi(boundaryPort(t))
+			for local == summary.Forwards[0].LocalPort || local == summary.Forwards[1].LocalPort {
+				local, _ = strconv.Atoi(boundaryPort(t))
+			}
 			summary.Forwards = append(summary.Forwards, pondMeshForward{Peer: "second", LeaseID: "second", LocalPort: local, RemotePort: echo})
 			for i := range summary.Forwards {
 				summary.Forwards[i].RemotePort = echo

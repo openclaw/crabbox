@@ -593,8 +593,10 @@ conflict guard. Their smoke builds a tiny wheel with the distro's
 fresh authenticated uv extraction. Isolated homes/caches, explicit system
 Python, and `--offline --no-config --no-python-downloads` cover local wheel
 installation and uvx console execution. No repository dependencies or extra
-Python interpreter downloads are baked. Only named probes are offline;
-ordinary pnpm version reporting may still hydrate its selected version.
+Python interpreter downloads are baked. Publisher-owned pnpm activation may
+download the selected release. In the bundled publisher, ordinary-default checks
+and named archive probes run offline; this does not make the entire preparation
+workflow network-free.
 
 The bundled builder retains both Bun 1.4.0 x64 ZIPs on glibc Linux `amd64`,
 independently of the Node-major override. Their versioned cache filenames do

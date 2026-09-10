@@ -7,12 +7,12 @@ import (
 )
 
 type fileSemaphoreConfig struct {
-	Host        *string `yaml:"host,omitempty"`
-	Token       *string `yaml:"token,omitempty"`
-	Project     *string `yaml:"project,omitempty"`
-	Machine     *string `yaml:"machine,omitempty"`
-	OSImage     *string `yaml:"osImage,omitempty"`
-	IdleTimeout *string `yaml:"idleTimeout,omitempty"`
+	Host        string `yaml:"host,omitempty"`
+	Token       string `yaml:"token,omitempty"`
+	Project     string `yaml:"project,omitempty"`
+	Machine     string `yaml:"machine,omitempty"`
+	OSImage     string `yaml:"osImage,omitempty"`
+	IdleTimeout string `yaml:"idleTimeout,omitempty"`
 }
 
 const SemaphoreConfigFlagFallbackMachine string = "f1-standard-2"
@@ -34,25 +34,25 @@ func (cfg *SemaphoreConfig) applyFile(file *fileSemaphoreConfig) (SemaphoreConfi
 	if file == nil {
 		return applied, nil
 	}
-	if file.Host != nil && *file.Host != "" {
-		cfg.Host = *file.Host
+	if file.Host != "" {
+		cfg.Host = file.Host
 		applied.Host = true
 	}
-	if file.Token != nil && *file.Token != "" {
-		cfg.Token = *file.Token
+	if file.Token != "" {
+		cfg.Token = file.Token
 		applied.Token = true
 	}
-	if file.Project != nil && *file.Project != "" {
-		cfg.Project = *file.Project
+	if file.Project != "" {
+		cfg.Project = file.Project
 	}
-	if file.Machine != nil && *file.Machine != "" {
-		cfg.Machine = *file.Machine
+	if file.Machine != "" {
+		cfg.Machine = file.Machine
 	}
-	if file.OSImage != nil && *file.OSImage != "" {
-		cfg.OSImage = *file.OSImage
+	if file.OSImage != "" {
+		cfg.OSImage = file.OSImage
 	}
-	if file.IdleTimeout != nil && *file.IdleTimeout != "" {
-		cfg.IdleTimeout = *file.IdleTimeout
+	if file.IdleTimeout != "" {
+		cfg.IdleTimeout = file.IdleTimeout
 	}
 	return applied, nil
 }

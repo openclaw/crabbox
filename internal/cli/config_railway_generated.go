@@ -7,9 +7,9 @@ import (
 )
 
 type fileRailwayConfig struct {
-	APIURL        *string `yaml:"apiUrl,omitempty"`
-	ProjectID     *string `yaml:"projectId,omitempty"`
-	EnvironmentID *string `yaml:"environmentId,omitempty"`
+	APIURL        string `yaml:"apiUrl,omitempty"`
+	ProjectID     string `yaml:"projectId,omitempty"`
+	EnvironmentID string `yaml:"environmentId,omitempty"`
 }
 
 const RailwayConfigDefaultAPIURL string = "https://backboard.railway.com/graphql/v2"
@@ -31,15 +31,15 @@ func (cfg *RailwayConfig) applyFile(file *fileRailwayConfig) (RailwayConfigAppli
 	if file == nil {
 		return applied, nil
 	}
-	if file.APIURL != nil && *file.APIURL != "" {
-		cfg.APIURL = *file.APIURL
+	if file.APIURL != "" {
+		cfg.APIURL = file.APIURL
 		applied.APIURL = true
 	}
-	if file.ProjectID != nil && *file.ProjectID != "" {
-		cfg.ProjectID = *file.ProjectID
+	if file.ProjectID != "" {
+		cfg.ProjectID = file.ProjectID
 	}
-	if file.EnvironmentID != nil && *file.EnvironmentID != "" {
-		cfg.EnvironmentID = *file.EnvironmentID
+	if file.EnvironmentID != "" {
+		cfg.EnvironmentID = file.EnvironmentID
 	}
 	return applied, nil
 }

@@ -404,6 +404,7 @@ The core provider contract lives in `internal/cli`:
 
 ```text
 internal/cli/provider_backend.go      # interfaces, registry, request/result types
+internal/cli/provider_name.go         # pure normalized/exact name membership
 internal/cli/provider_coordinator.go  # brokered coordinator lease wrapper
 internal/cli/provider_labels.go       # shared direct-provider label helpers
 ```
@@ -685,6 +686,23 @@ type Provider interface {
 	Configure(cfg Config, rt Runtime) (Backend, error)
 }
 ```
+
+Normalized selection guards use `cli.ProviderNameMatches(name, Provider{})` so
+`Name()` and `Aliases()` remain the single name-set owner. The matcher reads only
+that metadata and uses the existing name normalizer; it does not look up or
+register a provider, call `Spec` or `Configure`, or mutate configuration. Keep
+the check at its existing position relative to flag copying and validation.
+
+This is not a replacement for raw comparisons, case-fold-only comparisons,
+provider-family routing, or historical claim-provider interpretation. Those
+callers retain their own contracts rather than automatically accepting future
+selection aliases.
+
+For a guard whose contract is raw equality against the complete declared name
+set, use `cli.ProviderNameMatchesExact(name, Provider{})`. It compares both the
+input and metadata unchanged: case and surrounding whitespace remain significant.
+Keep canonical-only constant checks as they are when there is no duplicated alias
+set. Neither matcher changes claim/history interpretation or owns validation order.
 
 A minimal SSH provider package:
 

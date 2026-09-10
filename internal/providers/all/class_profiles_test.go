@@ -620,3 +620,436 @@ func TestProviderSizingNonAdopterControls(t *testing.T) {
 		t.Fatalf("Cloudflare mapped type=%q", cfg.ServerType)
 	}
 }
+
+var providerNameLiteralContracts = []struct {
+	name    string
+	aliases []string
+}{
+	{"cloudflare", []string{"cf"}}, {"codesandbox", []string{"csb", "code-sandbox"}}, {"fastapi-cloud", []string{"fastapicloud", "fastapi"}},
+	{"github-codespaces", []string{"codespaces", "gh-codespaces"}}, {"hyperv", nil}, {"lume", []string{"local-lume", "lume-macos"}},
+	{"multipass", []string{"mp", "canonical-multipass"}}, {"namespace-instance", []string{"namespace-compute"}}, {"nvidia-brev", []string{"brev", "nvidia"}},
+	{"phala", []string{"phala-cloud", "dstack"}}, {"railway", []string{"rail", "railwayapp"}}, {"runpod", []string{"run-pod", "runpodio"}},
+	{"tart", []string{"local-tart", "macos-vm"}}, {"unikraft-cloud", []string{"unikraftcloud", "ukc"}}, {"vast", []string{"vast-ai", "vastai"}},
+	{"wandb", []string{"weights-and-biases"}}, {"cloud-run-sandbox", []string{"gcrun-sandbox", "google-cloud-run-sandbox", "cloudrun-sandbox"}},
+	{"opencomputer", []string{"oc", "open-computer"}}, {"orgo", []string{"orgo-ai"}},
+}
+
+func TestProviderNameSelectionContracts(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	aliases := 0
+	for _, tc := range providerNameLiteralContracts {
+		aliases += len(tc.aliases)
+	}
+	if len(providerNameLiteralContracts) != 19 || aliases != 33 {
+		t.Fatal("literal cohort changed")
+	}
+	for _, tc := range providerNameLiteralContracts {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := core.ProviderFor(tc.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cases := []struct {
+				name     string
+				selected bool
+			}{{"", false}, {"  ", false}, {"unrelated-provider", false}, {"not-" + tc.name, false}}
+			for _, name := range append([]string{tc.name}, tc.aliases...) {
+				cases = append(cases, struct {
+					name     string
+					selected bool
+				}{name, true}, struct {
+					name     string
+					selected bool
+				}{strings.ToUpper(name), true}, struct {
+					name     string
+					selected bool
+				}{" \t" + strings.ToUpper(name) + " \n", true})
+			}
+			for _, item := range cases {
+				for _, wrong := range []bool{false, true} {
+					cfg := core.BaseConfig()
+					cfg.Provider = item.name
+					cfg.TargetOS = "linux"
+					cfg.Class = "tiny"
+					cfg.ServerType = ""
+					var args []string
+					classError := ""
+					field := ""
+					selectedValue := ""
+					unselectedValue := ""
+					switch tc.name {
+					case "cloudflare":
+						args = []string{"--class=tiny"}
+						field = "server-type"
+						selectedValue = "standard-4"
+					case "hyperv":
+						args = []string{"--hyperv-cpu=0"}
+						field = "hyperv-cpu"
+						selectedValue = "4"
+						unselectedValue = "0"
+					case "lume":
+						args = []string{"--lume-cli="}
+						field = "lume-cli"
+						selectedValue = "lume"
+					case "multipass":
+						args = []string{"--multipass-cli="}
+						field = "multipass-cli"
+						selectedValue = "multipass"
+					case "namespace-instance":
+						args = []string{"--namespace-instance-cli="}
+						field = "namespace-instance-cli"
+						selectedValue = "nsc"
+					case "phala":
+						args = []string{"--phala-cli="}
+						field = "phala-cli"
+						selectedValue = "phala"
+					case "tart":
+						field = "tart-target"
+						selectedValue = "macos"
+						unselectedValue = "linux"
+					default:
+						args = []string{"--class="}
+						classError = "--class is not supported for provider=" + tc.name
+						if tc.name == "github-codespaces" {
+							classError += "; use --type or --github-codespaces-machine for a Codespaces machine slug"
+						} else {
+							for _, sizing := range sizingFlagContracts {
+								if sizing.name == tc.name && sizing.classGuidance != "" {
+									classError += "; " + sizing.classGuidance
+								}
+							}
+						}
+					}
+					fs, values := sizingContractFlags(t, p, cfg, args)
+					if wrong {
+						values = struct{}{}
+					}
+					before := fmt.Sprintf("%#v", cfg)
+					wantErr := ""
+					if item.selected && classError != "" && !(wrong && tc.name == "codesandbox") {
+						wantErr = classError
+					}
+					assertSizingContractError(t, p.ApplyFlags(&cfg, fs, values), wantErr)
+					if wantErr != "" || (wrong && tc.name != "cloudflare") {
+						if fmt.Sprintf("%#v", cfg) != before {
+							t.Fatalf("selector=%q wrong=%t changed config before return", item.name, wrong)
+						}
+					}
+					if field != "" && (!wrong || tc.name == "cloudflare") {
+						got := ""
+						switch field {
+						case "server-type":
+							got = cfg.ServerType
+						case "hyperv-cpu":
+							got = fmt.Sprint(cfg.HyperV.CPUs)
+						case "lume-cli":
+							got = cfg.Lume.CLIPath
+						case "multipass-cli":
+							got = cfg.Multipass.CLIPath
+						case "namespace-instance-cli":
+							got = cfg.NamespaceInstance.CLIPath
+						case "phala-cli":
+							got = cfg.Phala.CLIPath
+						case "tart-target":
+							got = cfg.TargetOS
+						}
+						want := unselectedValue
+						if item.selected {
+							want = selectedValue
+						}
+						if got != want {
+							t.Fatalf("selector=%q field=%s got=%q want=%q wrong=%t", item.name, field, got, want, wrong)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestProviderNameSecondGuardContracts(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	for _, tc := range providerNameLiteralContracts {
+		if tc.name != "nvidia-brev" && tc.name != "runpod" && tc.name != "vast" && tc.name != "github-codespaces" {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := core.ProviderFor(tc.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			names := append([]string{tc.name}, tc.aliases...)
+			for _, name := range names {
+				for _, selected := range []bool{false, true} {
+					cfg := core.BaseConfig()
+					cfg.Provider = "unrelated-provider"
+					if selected {
+						cfg.Provider = " " + strings.ToUpper(name) + " "
+					}
+					if tc.name == "github-codespaces" {
+						cfg.TargetOS = "windows"
+						core.MarkTargetExplicit(&cfg)
+						want := ""
+						if selected {
+							want = "provider=github-codespaces supports target=linux only"
+						}
+						defaulter, ok := p.(core.ProviderConfigDefaulter)
+						if !ok {
+							t.Fatal("missing existing pure config defaulter")
+						}
+						assertSizingContractError(t, defaulter.ApplyConfigDefaults(&cfg), want)
+						continue
+					}
+					flagName, want := "nvidia-brev-release-action", "delete"
+					if tc.name == "runpod" {
+						flagName = "runpod-cloud-type"
+						want = "SECURE"
+					}
+					value := ""
+					if tc.name == "vast" {
+						flagName = "vast-instance-type"
+						value = "unknown-type"
+					}
+					fs, values := sizingContractFlags(t, p, cfg, []string{"--" + flagName + "=" + value})
+					wantErr := ""
+					if tc.name == "vast" && selected {
+						wantErr = "vast.instanceType must be ondemand or interruptible"
+					}
+					assertSizingContractError(t, p.ApplyFlags(&cfg, fs, values), wantErr)
+					got := cfg.NvidiaBrev.ReleaseAction
+					if tc.name == "runpod" {
+						got = cfg.Runpod.CloudType
+					}
+					if tc.name == "vast" {
+						got = cfg.Vast.InstanceType
+						want = "unknown-type"
+					} else if !selected {
+						want = ""
+					}
+					if got != want {
+						t.Fatalf("selector=%q copied/default value=%q want=%q", cfg.Provider, got, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+var providerNameExactLiteralContracts = []struct {
+	name    string
+	aliases []string
+}{
+	{"exe-dev", []string{"exe", "exedev"}}, {"smolvm", []string{"smol", "smolmachines", "smolfleet"}}, {"upstash-box", []string{"upstash", "box", "upstashbox"}},
+	{"windows-sandbox", []string{"wsb", "windows-sandbox-provider"}}, {"cloudflare-dynamic-workers", []string{"cf-dynamic", "cfdw"}},
+	{"apple-container", []string{"apple", "applecontainer"}}, {"local-container", []string{"docker", "container", "local-docker"}},
+}
+
+func TestProviderNameExactGuardContracts(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	count := 0
+	for _, tc := range providerNameExactLiteralContracts {
+		count += len(tc.aliases)
+	}
+	if len(providerNameExactLiteralContracts) != 7 || count != 17 {
+		t.Fatal("literal cohort changed")
+	}
+	for _, tc := range providerNameExactLiteralContracts {
+		if tc.name == "apple-container" || tc.name == "local-container" {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := core.ProviderFor(tc.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cases := []struct {
+				name     string
+				selected bool
+			}{{"", false}, {"unrelated-provider", false}}
+			for _, name := range append([]string{tc.name}, tc.aliases...) {
+				cases = append(cases, struct {
+					name     string
+					selected bool
+				}{name, true}, struct {
+					name     string
+					selected bool
+				}{strings.ToUpper(name), false}, struct {
+					name     string
+					selected bool
+				}{" " + name + " ", false})
+			}
+			for _, item := range cases {
+				for _, args := range [][]string{{"--class=standard", "--type=fixture"}, {"--type=fixture", "--class=standard"}, {"--class="}, {"--type="}} {
+					for _, wrong := range []bool{false, true} {
+						cfg := core.BaseConfig()
+						cfg.Provider = item.name
+						cfg.TargetOS = "linux"
+						cfg.WindowsMode = "prior-mode"
+						fs, values := sizingContractFlags(t, p, cfg, args)
+						copyFlag, copyValue := "exe-dev-image", "fixture-image"
+						switch tc.name {
+						case "smolvm":
+							copyFlag = "smolvm-image"
+						case "upstash-box":
+							copyFlag = "upstash-box-workdir"
+							copyValue = "/workspace/home/fixture"
+						case "windows-sandbox":
+							copyFlag = "windows-sandbox-workdir"
+							copyValue = `C:\fixture`
+						case "cloudflare-dynamic-workers":
+							copyFlag = "cloudflare-dynamic-workers-cache"
+							copyValue = "one-shot"
+						}
+						if item.selected {
+							if err := fs.Set(copyFlag, copyValue); err != nil {
+								t.Fatal(err)
+							}
+						}
+						if wrong {
+							values = struct{}{}
+						}
+						before := fmt.Sprintf("%#v", cfg)
+						want := ""
+						if item.selected && !(wrong && tc.name == "windows-sandbox") {
+							flagName := "class"
+							if len(args) == 1 && strings.HasPrefix(args[0], "--type") {
+								flagName = "type"
+							}
+							want = "--" + flagName + " is not supported for provider=" + tc.name
+							for _, sizing := range sizingFlagContracts {
+								if sizing.name == tc.name {
+									guide := sizing.classGuidance
+									if flagName == "type" {
+										guide = sizing.typeGuidance
+									}
+									if guide != "" {
+										want += "; " + guide
+									}
+								}
+							}
+						}
+						assertSizingContractError(t, p.ApplyFlags(&cfg, fs, values), want)
+						if want != "" || wrong {
+							if fmt.Sprintf("%#v", cfg) != before {
+								t.Fatalf("selector=%q args=%v wrong=%t mutated before return", item.name, args, wrong)
+							}
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestProviderNameExactDefaultContracts(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	for _, tc := range providerNameExactLiteralContracts {
+		if tc.name != "exe-dev" && tc.name != "apple-container" && tc.name != "local-container" && tc.name != "windows-sandbox" {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := core.ProviderFor(tc.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cases := []struct {
+				name     string
+				selected bool
+			}{{"", false}, {"unrelated-provider", false}}
+			for _, name := range append([]string{tc.name}, tc.aliases...) {
+				cases = append(cases, struct {
+					name     string
+					selected bool
+				}{name, true}, struct {
+					name     string
+					selected bool
+				}{strings.ToUpper(name), false}, struct {
+					name     string
+					selected bool
+				}{" " + name + " ", false})
+			}
+			for _, item := range cases {
+				for _, wrong := range []bool{false, true} {
+					cfg := core.BaseConfig()
+					cfg.Provider = item.name
+					cfg.TargetOS = "linux"
+					cfg.WindowsMode = "prior-mode"
+					cfg.LocalContainer.DockerSocket = false
+					flagName, selectedValue := "exe-dev-memory", "4GB"
+					switch tc.name {
+					case "apple-container":
+						flagName = "apple-container-cli"
+						selectedValue = "container"
+					case "local-container":
+						flagName = "local-container-runtime"
+						selectedValue = "docker"
+					case "windows-sandbox":
+						flagName = "windows-sandbox-workdir"
+						selectedValue = `C:\crabbox-work`
+					}
+					fs, values := sizingContractFlags(t, p, cfg, []string{"--" + flagName + "="})
+					if wrong {
+						values = struct{}{}
+					}
+					before := fmt.Sprintf("%#v", cfg)
+					assertSizingContractError(t, p.ApplyFlags(&cfg, fs, values), "")
+					if wrong {
+						if fmt.Sprintf("%#v", cfg) != before {
+							t.Fatal("wrong values type mutated config")
+						}
+						continue
+					}
+					got := cfg.ExeDev.Memory
+					switch tc.name {
+					case "apple-container":
+						got = cfg.AppleContainer.CLIPath
+					case "local-container":
+						got = cfg.LocalContainer.Runtime
+					case "windows-sandbox":
+						got = cfg.WindowsSandbox.Workdir
+					}
+					want := ""
+					if item.selected {
+						want = selectedValue
+					}
+					if got != want {
+						t.Fatalf("selector=%q field=%s got=%q want=%q", item.name, flagName, got, want)
+					}
+					if tc.name == "windows-sandbox" {
+						target, mode := "linux", "prior-mode"
+						if item.selected {
+							target = "windows"
+							mode = "normal"
+						}
+						if cfg.TargetOS != target || cfg.WindowsMode != mode {
+							t.Fatalf("Windows selected target/mode=%s/%s", cfg.TargetOS, cfg.WindowsMode)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestProviderNameExactDynamicOrder(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	p, err := core.ProviderFor("cloudflare-dynamic-workers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"cloudflare-dynamic-workers", "cf-dynamic", "cfdw"} {
+		for _, tc := range []struct {
+			args []string
+			flag string
+		}{{[]string{"--expose=8080", "--type=fixture", "--class=standard"}, "class"}, {[]string{"--expose=8080", "--type="}, "type"}, {[]string{"--expose="}, "expose"}} {
+			cfg := core.BaseConfig()
+			cfg.Provider = name
+			fs, values := sizingContractFlags(t, p, cfg, tc.args)
+			before := fmt.Sprintf("%#v", cfg)
+			assertSizingContractError(t, p.ApplyFlags(&cfg, fs, values), "--"+tc.flag+" is not supported for provider=cloudflare-dynamic-workers")
+			if fmt.Sprintf("%#v", cfg) != before {
+				t.Fatal("ordered rejection mutated config")
+			}
+		}
+	}
+}

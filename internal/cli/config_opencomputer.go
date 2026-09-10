@@ -7,7 +7,7 @@ package cli
 // built-in URL. API-key resolution remains outside this config structure.
 type OpenComputerConfig struct {
 	APIURL          string `env:"CRABBOX_OPENCOMPUTER_API_URL" envAlias:"OPENCOMPUTER_API_URL" flag:"opencomputer-api-url" sources:"env,flag" help:"Trusted OpenComputer API base URL; not accepted from repository config"`
-	Workdir         string `config:"workdir" env:"CRABBOX_OPENCOMPUTER_WORKDIR" flag:"opencomputer-workdir" sources:"user,repo,env,flag" help:"Absolute working directory inside the sandbox (also used as sync target)" default:"/workspace/crabbox" fileIgnoreEmpty:"true"`
+	Workdir         string `config:"workdir" env:"CRABBOX_OPENCOMPUTER_WORKDIR" flag:"opencomputer-workdir" sources:"user,repo,env,flag" help:"Absolute working directory inside the sandbox (also used as sync target)" default:"/workspace/crabbox" fileIgnoreEmpty:"true" fileStorage:"value"`
 	CPU             int    `config:"cpu" env:"CRABBOX_OPENCOMPUTER_CPU" flag:"opencomputer-cpu" sources:"user,repo,env,flag" help:"OpenComputer sandbox vCPU count (0 = service default; the service infers memory when omitted)" nonnegative:"true" fileInt:"present" envInt:"fallback"`
 	MemoryMB        int    `config:"memoryMB" env:"CRABBOX_OPENCOMPUTER_MEMORY_MB" flag:"opencomputer-memory-mb" sources:"user,repo,env,flag" help:"OpenComputer sandbox memory in MB (0 = service default; the service infers CPU when omitted)" nonnegative:"true" fileInt:"present" envInt:"fallback"`
 	TimeoutSecs     int    `config:"timeoutSecs" env:"CRABBOX_OPENCOMPUTER_TIMEOUT_SECS" flag:"opencomputer-timeout-secs" sources:"user,repo,env,flag" help:"OpenComputer sandbox idle timeout in seconds (0 = service default)" nonnegative:"true" fileInt:"present" envInt:"fallback"`

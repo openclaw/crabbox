@@ -7,11 +7,11 @@ import (
 )
 
 type fileAzureDynamicSessionsConfig struct {
-	Endpoint    *string `yaml:"endpoint,omitempty"`
-	Pool        *string `yaml:"pool,omitempty"`
-	APIVersion  *string `yaml:"apiVersion,omitempty"`
-	Workdir     *string `yaml:"workdir,omitempty"`
-	TimeoutSecs *int    `yaml:"timeoutSecs,omitempty"`
+	Endpoint    string `yaml:"endpoint,omitempty"`
+	Pool        string `yaml:"pool,omitempty"`
+	APIVersion  string `yaml:"apiVersion,omitempty"`
+	Workdir     string `yaml:"workdir,omitempty"`
+	TimeoutSecs int    `yaml:"timeoutSecs,omitempty"`
 }
 
 const AzureDynamicSessionsConfigDefaultAPIVersion string = "2025-02-02-preview"
@@ -36,21 +36,21 @@ func (cfg *AzureDynamicSessionsConfig) applyFile(file *fileAzureDynamicSessionsC
 	if file == nil {
 		return applied, nil
 	}
-	if file.Endpoint != nil && *file.Endpoint != "" {
-		cfg.Endpoint = *file.Endpoint
+	if file.Endpoint != "" {
+		cfg.Endpoint = file.Endpoint
 		applied.Endpoint = true
 	}
-	if file.Pool != nil && *file.Pool != "" {
-		cfg.Pool = *file.Pool
+	if file.Pool != "" {
+		cfg.Pool = file.Pool
 	}
-	if file.APIVersion != nil && *file.APIVersion != "" {
-		cfg.APIVersion = *file.APIVersion
+	if file.APIVersion != "" {
+		cfg.APIVersion = file.APIVersion
 	}
-	if file.Workdir != nil && *file.Workdir != "" {
-		cfg.Workdir = *file.Workdir
+	if file.Workdir != "" {
+		cfg.Workdir = file.Workdir
 	}
-	if file.TimeoutSecs != nil && *file.TimeoutSecs > 0 {
-		cfg.TimeoutSecs = *file.TimeoutSecs
+	if file.TimeoutSecs > 0 {
+		cfg.TimeoutSecs = file.TimeoutSecs
 	}
 	return applied, nil
 }

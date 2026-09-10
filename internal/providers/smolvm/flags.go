@@ -13,7 +13,7 @@ func RegisterSmolvmProviderFlags(fs *flag.FlagSet, defaults Config) any {
 }
 
 func ApplySmolvmProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if cfg.Provider == providerName || cfg.Provider == "smol" || cfg.Provider == "smolmachines" || cfg.Provider == "smolfleet" {
+	if core.ProviderNameMatchesExact(cfg.Provider, Provider{}) {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --smolvm-cpus/--smolvm-memory-mb", "use --smolvm-image"); err != nil {
 			return err
 		}

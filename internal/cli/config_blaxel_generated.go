@@ -7,13 +7,13 @@ import (
 )
 
 type fileBlaxelConfig struct {
-	APIURL          *string `yaml:"apiUrl,omitempty"`
-	Workspace       *string `yaml:"workspace,omitempty"`
-	Region          *string `yaml:"region,omitempty"`
+	APIURL          string  `yaml:"apiUrl,omitempty"`
+	Workspace       string  `yaml:"workspace,omitempty"`
+	Region          string  `yaml:"region,omitempty"`
 	Image           *string `yaml:"image,omitempty"`
 	MemoryMB        *int    `yaml:"memoryMB,omitempty"`
-	TTL             *string `yaml:"ttl,omitempty"`
-	IdleTTL         *string `yaml:"idleTTL,omitempty"`
+	TTL             string  `yaml:"ttl,omitempty"`
+	IdleTTL         string  `yaml:"idleTTL,omitempty"`
 	Workdir         *string `yaml:"workdir,omitempty"`
 	ExecTimeoutSecs *int    `yaml:"execTimeoutSecs,omitempty"`
 	ForgetMissing   *bool   `yaml:"forgetMissing,omitempty"`
@@ -37,14 +37,14 @@ func (cfg *BlaxelConfig) applyFile(file *fileBlaxelConfig, trusted bool) error {
 	if file == nil {
 		return nil
 	}
-	if trusted && file.APIURL != nil && *file.APIURL != "" {
-		cfg.APIURL = *file.APIURL
+	if trusted && file.APIURL != "" {
+		cfg.APIURL = file.APIURL
 	}
-	if trusted && file.Workspace != nil && *file.Workspace != "" {
-		cfg.Workspace = *file.Workspace
+	if trusted && file.Workspace != "" {
+		cfg.Workspace = file.Workspace
 	}
-	if file.Region != nil && *file.Region != "" {
-		cfg.Region = *file.Region
+	if file.Region != "" {
+		cfg.Region = file.Region
 	}
 	if file.Image != nil {
 		cfg.Image = *file.Image
@@ -55,11 +55,11 @@ func (cfg *BlaxelConfig) applyFile(file *fileBlaxelConfig, trusted bool) error {
 		}
 		cfg.MemoryMB = *file.MemoryMB
 	}
-	if file.TTL != nil && *file.TTL != "" {
-		cfg.TTL = *file.TTL
+	if file.TTL != "" {
+		cfg.TTL = file.TTL
 	}
-	if file.IdleTTL != nil && *file.IdleTTL != "" {
-		cfg.IdleTTL = *file.IdleTTL
+	if file.IdleTTL != "" {
+		cfg.IdleTTL = file.IdleTTL
 	}
 	if file.Workdir != nil {
 		cfg.Workdir = *file.Workdir
