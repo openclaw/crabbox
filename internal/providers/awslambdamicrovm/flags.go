@@ -14,27 +14,14 @@ import (
 )
 
 type flagValues struct {
-	Region            *string
-	Image             *string
-	ImageVersion      *string
-	ExecutionRoleARN  *string
-	Workdir           *string
-	IngressConnectors *string
-	EgressConnectors  *string
-	ForgetMissing     *bool
+	Region *string
+	Config core.AWSLambdaMicroVMConfigFlagValues
 }
 
 func registerFlags(fs *flag.FlagSet, defaults Config) any {
-	cfg := defaults.AWSLambdaMicroVM
 	return flagValues{
-		Region:            fs.String("aws-lambda-microvm-region", defaults.AWSRegion, "AWS Region for Lambda MicroVMs"),
-		Image:             fs.String("aws-lambda-microvm-image", cfg.Image, "Lambda MicroVM image ARN"),
-		ImageVersion:      fs.String("aws-lambda-microvm-image-version", cfg.ImageVersion, "Lambda MicroVM image version (default latest active)"),
-		ExecutionRoleARN:  fs.String("aws-lambda-microvm-execution-role-arn", cfg.ExecutionRoleARN, "optional IAM execution role ARN"),
-		Workdir:           fs.String("aws-lambda-microvm-workdir", cfg.Workdir, "absolute runner workdir"),
-		IngressConnectors: fs.String("aws-lambda-microvm-ingress-connectors", strings.Join(cfg.IngressConnectors, ","), "comma-separated ingress connector ARNs"),
-		EgressConnectors:  fs.String("aws-lambda-microvm-egress-connectors", strings.Join(cfg.EgressConnectors, ","), "comma-separated egress connector ARNs"),
-		ForgetMissing:     fs.Bool("aws-lambda-microvm-forget-missing", cfg.ForgetMissing, "remove local claim when the MicroVM is already missing"),
+		Region: fs.String("aws-lambda-microvm-region", defaults.AWSRegion, "AWS Region for Lambda MicroVMs"),
+		Config: core.RegisterAWSLambdaMicroVMConfigFlags(fs, defaults.AWSLambdaMicroVM),
 	}
 }
 
@@ -46,27 +33,8 @@ func applyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if core.FlagWasSet(fs, "aws-lambda-microvm-region") {
 		cfg.AWSRegion = strings.TrimSpace(*v.Region)
 	}
-	if core.FlagWasSet(fs, "aws-lambda-microvm-image") {
-		cfg.AWSLambdaMicroVM.Image = strings.TrimSpace(*v.Image)
-	}
-	if core.FlagWasSet(fs, "aws-lambda-microvm-image-version") {
-		cfg.AWSLambdaMicroVM.ImageVersion = strings.TrimSpace(*v.ImageVersion)
-	}
-	if core.FlagWasSet(fs, "aws-lambda-microvm-execution-role-arn") {
-		cfg.AWSLambdaMicroVM.ExecutionRoleARN = strings.TrimSpace(*v.ExecutionRoleARN)
-	}
-	if core.FlagWasSet(fs, "aws-lambda-microvm-workdir") {
-		cfg.AWSLambdaMicroVM.Workdir = strings.TrimSpace(*v.Workdir)
-	}
-	if core.FlagWasSet(fs, "aws-lambda-microvm-ingress-connectors") {
-		cfg.AWSLambdaMicroVM.IngressConnectors = csv(*v.IngressConnectors)
-	}
-	if core.FlagWasSet(fs, "aws-lambda-microvm-egress-connectors") {
-		cfg.AWSLambdaMicroVM.EgressConnectors = csv(*v.EgressConnectors)
-	}
-	if core.FlagWasSet(fs, "aws-lambda-microvm-forget-missing") {
-		cfg.AWSLambdaMicroVM.ForgetMissing = *v.ForgetMissing
-	}
+	applied := v.Config.Apply(&cfg.AWSLambdaMicroVM, fs)
+	cfg.AWSLambdaMicroVM.NormalizeAppliedFlags(applied)
 	return validateConfig(*cfg)
 }
 
@@ -129,14 +97,4 @@ func validateConnectorARN(value, region string) error {
 		return fmt.Errorf("expected Lambda network-connector ARN in region %s", region)
 	}
 	return nil
-}
-
-func csv(value string) []string {
-	var values []string
-	for _, item := range strings.Split(value, ",") {
-		if item = strings.TrimSpace(item); item != "" {
-			values = append(values, item)
-		}
-	}
-	return values
 }

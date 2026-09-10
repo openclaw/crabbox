@@ -344,16 +344,6 @@ type CapacityConfig struct {
 	Hints             bool
 }
 
-type AWSLambdaMicroVMConfig struct {
-	Image             string
-	ImageVersion      string
-	ExecutionRoleARN  string
-	Workdir           string
-	IngressConnectors []string
-	EgressConnectors  []string
-	ForgetMissing     bool
-}
-
 // GitHubCodespacesConfig is intentionally token-free. Authentication comes
 // from the GitHub CLI credential store or GitHub's standard environment
 // variables at the point of use, never from Crabbox config or argv.
@@ -2281,26 +2271,24 @@ func baseConfig() Config {
 		Image:                   hetznerImage,
 		AWSRegion:               "eu-west-1",
 		AWSRootGB:               400,
-		AWSLambdaMicroVM: AWSLambdaMicroVMConfig{
-			Workdir: "/workspace/crabbox",
-		},
-		AzureBackend:         "vm",
-		AzureLocation:        "eastus",
-		AzureResourceGroup:   "crabbox-leases",
-		AzureImage:           azureImage,
-		AzureOSDisk:          AzureOSDiskManaged,
-		AzureVNet:            "crabbox-vnet",
-		AzureSubnet:          "crabbox-subnet",
-		AzureNSG:             "crabbox-nsg",
-		AzureDynamicSessions: defaultAzureDynamicSessionsConfig(),
-		GCPZone:              "europe-west2-a",
-		GCPImage:             gcpImage,
-		GCPNetwork:           "default",
-		GCPTags:              []string{"crabbox-ssh"},
-		GCPRootGB:            400,
-		DigitalOcean:         defaultDigitalOceanConfig(),
-		Vultr:                defaultVultrConfig(),
-		Linode:               initialLinodeConfig(linodeImage),
+		AWSLambdaMicroVM:        defaultAWSLambdaMicroVMConfig(),
+		AzureBackend:            "vm",
+		AzureLocation:           "eastus",
+		AzureResourceGroup:      "crabbox-leases",
+		AzureImage:              azureImage,
+		AzureOSDisk:             AzureOSDiskManaged,
+		AzureVNet:               "crabbox-vnet",
+		AzureSubnet:             "crabbox-subnet",
+		AzureNSG:                "crabbox-nsg",
+		AzureDynamicSessions:    defaultAzureDynamicSessionsConfig(),
+		GCPZone:                 "europe-west2-a",
+		GCPImage:                gcpImage,
+		GCPNetwork:              "default",
+		GCPTags:                 []string{"crabbox-ssh"},
+		GCPRootGB:               400,
+		DigitalOcean:            defaultDigitalOceanConfig(),
+		Vultr:                   defaultVultrConfig(),
+		Linode:                  initialLinodeConfig(linodeImage),
 		GitHubCodespaces: GitHubCodespacesConfig{
 			APIURL:          "https://api.github.com",
 			GHPath:          "gh",
@@ -2803,16 +2791,6 @@ type fileAWSConfig struct {
 	RootGB          int32    `yaml:"rootGB,omitempty"`
 	SSHCIDRs        []string `yaml:"sshCIDRs,omitempty"`
 	MacHostID       string   `yaml:"macHostId,omitempty"`
-}
-
-type fileAWSLambdaMicroVMConfig struct {
-	Image             string    `yaml:"image,omitempty"`
-	ImageVersion      string    `yaml:"imageVersion,omitempty"`
-	ExecutionRoleARN  string    `yaml:"executionRoleArn,omitempty"`
-	Workdir           string    `yaml:"workdir,omitempty"`
-	IngressConnectors *[]string `yaml:"ingressConnectors,omitempty"`
-	EgressConnectors  *[]string `yaml:"egressConnectors,omitempty"`
-	ForgetMissing     *bool     `yaml:"forgetMissing,omitempty"`
 }
 
 type fileAzureConfig struct {
@@ -4211,26 +4189,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			}
 		}
 	}
-	if file.AWSLambdaMicroVM != nil {
-		if file.AWSLambdaMicroVM.Image != "" {
-			cfg.AWSLambdaMicroVM.Image = file.AWSLambdaMicroVM.Image
-		}
-		if file.AWSLambdaMicroVM.ImageVersion != "" {
-			cfg.AWSLambdaMicroVM.ImageVersion = file.AWSLambdaMicroVM.ImageVersion
-		}
-		if file.AWSLambdaMicroVM.ExecutionRoleARN != "" {
-			cfg.AWSLambdaMicroVM.ExecutionRoleARN = file.AWSLambdaMicroVM.ExecutionRoleARN
-		}
-		if file.AWSLambdaMicroVM.Workdir != "" {
-			cfg.AWSLambdaMicroVM.Workdir = file.AWSLambdaMicroVM.Workdir
-		}
-		if file.AWSLambdaMicroVM.IngressConnectors != nil {
-			cfg.AWSLambdaMicroVM.IngressConnectors = append([]string(nil), (*file.AWSLambdaMicroVM.IngressConnectors)...)
-		}
-		if file.AWSLambdaMicroVM.EgressConnectors != nil {
-			cfg.AWSLambdaMicroVM.EgressConnectors = append([]string(nil), (*file.AWSLambdaMicroVM.EgressConnectors)...)
-		}
-		applyOptional(&cfg.AWSLambdaMicroVM.ForgetMissing, file.AWSLambdaMicroVM.ForgetMissing)
+	if _, err := cfg.AWSLambdaMicroVM.applyFile(file.AWSLambdaMicroVM); err != nil {
+		return err
 	}
 	if file.Azure != nil {
 		if file.Azure.Backend != "" {
@@ -6187,18 +6147,8 @@ func applyEnv(cfg *Config) error {
 	cfg.AWSProfile = getenv("CRABBOX_AWS_INSTANCE_PROFILE", cfg.AWSProfile)
 	cfg.AWSRootGB = getenvInt32("CRABBOX_AWS_ROOT_GB", cfg.AWSRootGB)
 	cfg.AWSMacHostID = getenv("CRABBOX_AWS_MAC_HOST_ID", cfg.AWSMacHostID)
-	cfg.AWSLambdaMicroVM.Image = getenv("CRABBOX_AWS_LAMBDA_MICROVM_IMAGE", cfg.AWSLambdaMicroVM.Image)
-	cfg.AWSLambdaMicroVM.ImageVersion = getenv("CRABBOX_AWS_LAMBDA_MICROVM_IMAGE_VERSION", cfg.AWSLambdaMicroVM.ImageVersion)
-	cfg.AWSLambdaMicroVM.ExecutionRoleARN = getenv("CRABBOX_AWS_LAMBDA_MICROVM_EXECUTION_ROLE_ARN", cfg.AWSLambdaMicroVM.ExecutionRoleARN)
-	cfg.AWSLambdaMicroVM.Workdir = getenv("CRABBOX_AWS_LAMBDA_MICROVM_WORKDIR", cfg.AWSLambdaMicroVM.Workdir)
-	if value := os.Getenv("CRABBOX_AWS_LAMBDA_MICROVM_INGRESS_CONNECTORS"); value != "" {
-		cfg.AWSLambdaMicroVM.IngressConnectors = splitCSV(value)
-	}
-	if value := os.Getenv("CRABBOX_AWS_LAMBDA_MICROVM_EGRESS_CONNECTORS"); value != "" {
-		cfg.AWSLambdaMicroVM.EgressConnectors = splitCSV(value)
-	}
-	if value, ok := getenvBool("CRABBOX_AWS_LAMBDA_MICROVM_FORGET_MISSING"); ok {
-		cfg.AWSLambdaMicroVM.ForgetMissing = value
+	if _, err := cfg.AWSLambdaMicroVM.applyEnv(); err != nil {
+		return err
 	}
 	if cfg.HostID == "" && cfg.AWSMacHostID != "" {
 		cfg.HostID = cfg.AWSMacHostID

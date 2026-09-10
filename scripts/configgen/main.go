@@ -20,6 +20,7 @@ import (
 )
 
 type field struct {
+	envListCSV, flagListScalarEmptyNil                                                                                                                                           bool
 	fileStorageValue                                                                                                                                                             bool
 	fileListNonemptyRaw, flagListEmptyScalar                                                                                                                                     bool
 	fileIntNonzero                                                                                                                                                               bool
@@ -254,23 +255,20 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			return s, fmt.Errorf("%s: %s sources support only %s", f.name, tags.Get("sources"), allowed)
 		}
 		for _, mode := range []struct {
-			tag, accepted, alternative  string
-			admitted                    bool
-			enabled, alternativeEnabled *bool
+			tag      string
+			admitted bool
+			values   map[string]*bool
 		}{
-			{"fileList", "raw", "nonempty-raw", !f.noFile, &f.fileListRaw, &f.fileListNonemptyRaw},
-			{"envList", "presence", "", !f.noEnv, &f.envListPresence, nil},
-			{"flagList", "replace-append", "empty-scalar", !f.noFlag, &f.flagListReplaceAppend, &f.flagListEmptyScalar},
+			{"fileList", !f.noFile, map[string]*bool{"raw": &f.fileListRaw, "nonempty-raw": &f.fileListNonemptyRaw}},
+			{"envList", !f.noEnv, map[string]*bool{"presence": &f.envListPresence, "csv": &f.envListCSV}},
+			{"flagList", !f.noFlag, map[string]*bool{"replace-append": &f.flagListReplaceAppend, "empty-scalar": &f.flagListEmptyScalar, "scalar-empty-nil": &f.flagListScalarEmptyNil}},
 		} {
 			if value, ok := tags.Lookup(mode.tag); ok {
-				if f.kind != "[]string" || !mode.admitted || (value != mode.accepted && (mode.alternative == "" || value != mode.alternative)) {
+				enabled := mode.values[value]
+				if f.kind != "[]string" || !mode.admitted || enabled == nil {
 					return s, fmt.Errorf("%s: %s requires a supported mode on a []string field with that source", f.name, mode.tag)
 				}
-				if value == mode.accepted {
-					*mode.enabled = true
-				} else {
-					*mode.alternativeEnabled = true
-				}
+				*enabled = true
 			}
 		}
 		if value, ok := tags.Lookup("reportApplied"); ok {
@@ -614,7 +612,11 @@ func generate(s schema, source string) ([]byte, error) {
 				p("if value, ok := getenvList(%q); ok { cfg.%s = value }\n", f.env, f.name)
 				continue
 			}
-			p("if value := os.Getenv(%q); value != \"\" { cfg.%s = splitCommaList(value) }\n", f.env, f.name)
+			parser := "splitCommaList"
+			if f.envListCSV {
+				parser = "splitCSV"
+			}
+			p("if value := os.Getenv(%q); value != \"\" { cfg.%s = %s(value) }\n", f.env, f.name, parser)
 		}
 	}
 	p("return %snil\n}\n\n", resultPrefix)
@@ -692,7 +694,7 @@ func generate(s schema, source string) ([]byte, error) {
 			if f.noFlag {
 				continue
 			}
-			if f.flagListEmptyScalar {
+			if f.flagListEmptyScalar || f.flagListScalarEmptyNil {
 				p("if flagWasSet(fs, %q) { cfg.%s = splitCommaList(*values.%s); if len(cfg.%s) == 0 { cfg.%s = nil } }\n", f.flag, f.name, f.name, f.name, f.name)
 				continue
 			}

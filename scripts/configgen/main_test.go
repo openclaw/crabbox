@@ -568,6 +568,12 @@ func TestKubeVirtGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestAWSLambdaMicroVMGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_aws_lambda_microvm.go", "../../internal/cli/config_aws_lambda_microvm_generated.go", "AWSLambdaMicroVMConfig", "awsLambdaMicroVM", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAgentSandboxGeneratedConfigIsCurrent(t *testing.T) {
 	if err := run("../../internal/cli/config_agentsandbox.go", "../../internal/cli/config_agentsandbox_generated.go", "AgentSandboxConfig", "agentSandbox", true); err != nil {
 		t.Fatal(err)
@@ -1940,6 +1946,72 @@ func TestListSources(t *testing.T){
 }
 `
 	runScalarFixture(t, sourceListSample, output, behavior+helper+getters)
+}
+
+func TestGenerateCSVListSourceContract(t *testing.T) {
+	const input = "package cli\ntype PilotConfig struct { Items []string `sources:\"user,repo,env,flag\" config:\"items\" env:\"ITEMS\" flag:\"items\" help:\"Items\" fileList:\"raw\" envList:\"csv\" flagList:\"scalar-empty-nil\"` }"
+	for _, mode := range []struct{ tag, value string }{{"envList", "csv"}, {"flagList", "scalar-empty-nil"}} {
+		for _, bad := range []string{"", "unknown"} {
+			source := strings.Replace(input, mode.tag+`:"`+mode.value+`"`, mode.tag+`:"`+bad+`"`, 1)
+			if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), mode.tag+" requires") {
+				t.Fatalf("%s=%q: %v", mode.tag, bad, err)
+			}
+		}
+		source := strings.Replace(sample, `help:"Name"`, `help:"Name" `+mode.tag+`:"`+mode.value+`"`, 1)
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), mode.tag+" requires") {
+			t.Fatalf("wrong kind %s: %v", mode.tag, err)
+		}
+	}
+	for _, source := range []string{
+		"package cli\ntype PilotConfig struct { Items []string `sources:\"flag\" flag:\"items\" help:\"Items\" envList:\"csv\"` }",
+		"package cli\ntype PilotConfig struct { Items []string `sources:\"user,repo,env\" config:\"items\" env:\"ITEMS\" flagList:\"scalar-empty-nil\"` }",
+	} {
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil {
+			t.Fatal("list mode without its source was admitted")
+		}
+	}
+	s, err := parseSchema([]byte(input), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	typecheckGenerated(t, input+"\nfunc splitCSV(string) []string { panic(\"stub\") }", output)
+	helpers := ""
+	for _, item := range []struct{ file, name string }{{"config.go", "splitCommaList"}, {"config.go", "normalizeList"}, {"egress.go", "splitCSV"}} {
+		source, err := os.ReadFile("../../internal/cli/" + item.file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := strings.Index(string(source), "func "+item.name+"(")
+		if start < 0 {
+			t.Fatalf("missing helper %s", item.name)
+		}
+		rest := string(source)[start:]
+		end := strings.Index(rest, "\nfunc ")
+		if end < 0 {
+			t.Fatalf("missing end for helper %s", item.name)
+		}
+		helpers += rest[:end] + "\n"
+	}
+	const behavior = `package cli
+import("flag";"reflect";"strings";"testing")
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestCSVSourceShapes(t *testing.T){
+ for _,tc:=range []struct{raw string;env,flag []string}{{"",[]string{"prior"},nil},{" \t ",nil,nil},{" , , ",[]string{},nil},{" a , b , a ",[]string{"a","b","a"},[]string{"a","b","a"}},{"none",[]string{"none"},[]string{"none"}}}{
+  cfg:=PilotConfig{Items:[]string{"prior"}};t.Setenv("ITEMS",tc.raw)
+  if err:=cfg.applyEnv();err!=nil||!reflect.DeepEqual(cfg.Items,tc.env){t.Fatalf("env %q: %#v %v",tc.raw,cfg.Items,err)}
+  cfg.Items=[]string{"prior"," raw "};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+  if fs.Lookup("items").DefValue!="prior, raw "{t.Fatal("joined registration changed")}
+  values.Apply(&cfg,fs);if !reflect.DeepEqual(cfg.Items,[]string{"prior"," raw "}){t.Fatal("unvisited list changed")}
+  if err:=fs.Parse([]string{"--items=ignored","--items="+tc.raw});err!=nil{t.Fatal(err)}
+  values.Apply(&cfg,fs);if !reflect.DeepEqual(cfg.Items,tc.flag){t.Fatalf("flag %q: %#v",tc.raw,cfg.Items)}
+ }
+}
+`
+	runScalarFixture(t, input, output, behavior+helpers)
 }
 
 func TestSchemaFileIntNonzeroFailsClosed(t *testing.T) {

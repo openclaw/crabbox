@@ -5,7 +5,7 @@ Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
 Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, Lume, Runpod, Vast,
 W&B, Scaleway, Tencent Cloud, DigitalOcean, Vultr, Linode, Sealos DevBox, KubeVirt,
-and Agent Sandbox
+Agent Sandbox, and AWS Lambda MicroVM
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -26,7 +26,8 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_tencentcloud.go`, `internal/cli/config_digitalocean.go`,
 `internal/cli/config_vultr.go`, `internal/cli/config_linode.go`,
 `internal/cli/config_sealos_devbox.go`, and
-`internal/cli/config_kubevirt.go`, and `internal/cli/config_agentsandbox.go`.
+`internal/cli/config_kubevirt.go`, `internal/cli/config_agentsandbox.go`, and
+`internal/cli/config_aws_lambda_microvm.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -89,6 +90,20 @@ values before provider validation; they do not inherit file/env acceptance.
 Declared defaults must parse to a positive duration and produce typed constants;
 an omitted default remains zero. Arbitrary qualified types, alternate parsers,
 callbacks and additional duration policies are not supported.
+
+AWS Lambda MicroVM uses all seven bindings together. Its four string flags trim
+only accepted values; file/environment strings remain raw. The existing flat
+AWSRegion flag stays in the provider wrapper and applies before generated fields,
+with provider validation last. It is not a new nested Region setting.
+
+Its connector lists use two fixed source modes. `envList:"csv"` calls the existing
+`splitCSV` after a raw-nonempty guard: absent/empty input preserves the prior
+list, whitespace yields nil, and comma-only input yields a nonnil empty list.
+`flagList:"scalar-empty-nil"` keeps joined defaults and last-scalar-wins parsing,
+but returns nil for every all-empty result. Unlike `empty-scalar`, registration
+does not discard inherited defaults. Both keep order, duplicates and literal
+`none`; `fileList:"raw"` separately retains cloned pointer-list input and writer
+presence. Native connector fallback selection remains outside generation.
 
 ## Why generation
 
