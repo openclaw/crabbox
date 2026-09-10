@@ -148,6 +148,18 @@ func (b *daytonaLeaseBackend) resolve(ctx context.Context, req ResolveRequest, o
 			return lease, err
 		}
 	}
+	if original != nil && original.FixedCreateIntent != nil && original.FixedCreateIntent.State == "released" {
+		if err := fixedDaytonaLeaseKind.ValidateTerminalClaim(*original, LeaseClaim{}, original.LeaseID, nil); err != nil {
+			return LeaseTarget{}, err
+		}
+		if !req.StatusOnly {
+			return LeaseTarget{}, exit(4, "Daytona fixed lease %s is released and cannot be reused", original.LeaseID)
+		}
+		server := Server{Provider: daytonaProvider, Status: "released", Labels: map[string]string{"lease": original.LeaseID, "slug": original.Slug, "state": "released"}}
+		core.SetServerLeaseClaimSnapshot(&server, *original, true)
+		return LeaseTarget{LeaseID: original.LeaseID, Server: server}, nil
+	}
+
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
 		return LeaseTarget{}, err

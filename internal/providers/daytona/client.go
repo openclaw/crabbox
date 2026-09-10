@@ -57,9 +57,8 @@ var newDaytonaClient = func(cfg Config, rt Runtime) (daytonaAPI, error) {
 	apiURL := daytonaAPIURL(cfg, auth)
 	apiCfg := daytona.NewConfiguration()
 	apiCfg.Servers = daytona.ServerConfigurations{{URL: apiURL}}
-	// Every request sets X-Daytona-Organization-ID itself. A default header
-	// would be sent again under the literal key beside the canonical one, and
-	// Daytona rejects the duplicated header as an invalid authentication context.
+	// Request builders own this header. A default adds a second literal-key
+	// copy beside Go's canonical key, which Daytona rejects for OAuth profiles.
 	controlClient := rt.HTTP
 	if controlClient == nil {
 		controlClient = &http.Client{Timeout: daytonaControlTimeout}
@@ -463,48 +462,84 @@ func (c *daytonaSDKClient) requestSandboxDeletion(ctx context.Context, id string
 
 func (c *daytonaSDKClient) fixedSelection() (string, string) { return c.apiURL, c.orgID }
 
-// findFixedAttemptSandbox reads the exact fixed attempt from Daytona's
-// database-backed paginated inventory (`GET /sandbox/paginated`). The default
-// list endpoint is an eventually consistent search index, so it cannot attest
-// absence; the paginated query reads the sandbox table directly and, with
-// includeErroredDeleted, also returns errored sandboxes whose deletion is still
-// pending. Destroyed sandboxes are never returned by any Daytona read.
-// It returns a nil sandbox when no resource-holding row matches the attempt.
-func (c *daytonaSDKClient) findFixedAttemptSandbox(ctx context.Context, claim LeaseClaim) (*daytona.Sandbox, error) {
-	intent := claim.FixedCreateIntent
-	if !fixedDaytonaLeaseKind.IsFixedClaim(claim) || intent.Version != fixedDaytonaLeaseKind.IntentVersion || !isCanonicalLeaseID(claim.LeaseID) ||
-		intent.Fingerprint == "" || intent.Attempt["nonce"] == "" || intent.Attempt["organization"] == "" ||
-		intent.Attempt["snapshot_id"] == "" || intent.Attempt["snapshot"] == "" || intent.Attempt["user"] == "" {
-		return nil, exit(4, "Daytona attempt discovery requires a complete fixed create attempt")
+// This released endpoint reads the sandbox table directly. Do not substitute
+// the search-index list or filter mutable labels: neither can attest absence.
+func (c *daytonaSDKClient) findPendingDeletion(ctx context.Context, id string) (*daytona.Sandbox, error) {
+	const limit int64 = 100
+	previousTotal := int64(-1)
+	seen := map[string]bool{}
+	for page := int64(1); ; page++ {
+		if float64(float32(page)) != float64(page) {
+			return nil, exit(4, "Daytona deletion inventory page is not representable by the SDK")
+		}
+		req := c.api.SandboxAPI.ListSandboxesPaginatedDeprecated(c.ctx(ctx)).Id(id).IncludeErroredDeleted(true).Page(float32(page)).Limit(float32(limit))
+		if c.orgID != "" {
+			req = req.XDaytonaOrganizationID(c.orgID)
+		}
+		out, response, err := req.Execute()
+		if err != nil {
+			return nil, c.redactError(err)
+		}
+		if out == nil || out.Items == nil || response == nil || response.Body == nil {
+			return nil, exit(4, "Daytona deletion database inventory response is incomplete")
+		}
+		// The SDK coerces null numeric fields to zero. Validate its retained
+		// response body so null/rounded metadata cannot establish empty custody.
+		var metadata struct {
+			Total      *int64 `json:"total"`
+			Page       *int64 `json:"page"`
+			TotalPages *int64 `json:"totalPages"`
+		}
+		decodeErr := json.NewDecoder(response.Body).Decode(&metadata)
+		_ = response.Body.Close()
+		if decodeErr != nil || metadata.Total == nil || metadata.Page == nil || metadata.TotalPages == nil {
+			return nil, exit(4, "Daytona deletion database inventory metadata is incomplete or invalid")
+		}
+		total, returnedPage, totalPages := *metadata.Total, *metadata.Page, *metadata.TotalPages
+		expectedPages := total / limit
+		if total%limit != 0 {
+			expectedPages++
+		}
+		if total < 0 || returnedPage != page || totalPages != expectedPages ||
+			(page > totalPages && !(page == 1 && total == 0)) || (previousTotal >= 0 && total != previousTotal) {
+			return nil, exit(4, "Daytona deletion database inventory pagination is inconsistent")
+		}
+		expectedItems := min(limit, total-(page-1)*limit)
+		if int64(len(out.Items)) != expectedItems {
+			return nil, exit(4, "Daytona deletion database inventory page is incomplete")
+		}
+		previousTotal = total
+		for _, item := range out.Items {
+			if item.GetId() == "" || seen[item.GetId()] {
+				return nil, exit(4, "Daytona deletion database inventory contains an invalid or repeated resource")
+			}
+			seen[item.GetId()] = true
+			if item.GetId() == id {
+				return &item, nil
+			}
+		}
+		if page >= totalPages {
+			return nil, nil
+		}
 	}
-	filter, _ := json.Marshal(map[string]string{
-		"crabbox": "true", "provider": daytonaProvider, "lease": claim.LeaseID,
-		"fixed_claim_provider": claim.Provider, "fixed_intent_sha256": intent.Fingerprint, "fixed_attempt": intent.Attempt["nonce"],
-	})
-	// A bounded exact-attempt search must expose ambiguity, never pick a first
-	// match. Errored resources with a pending deletion still hold a resource.
-	req := c.api.SandboxAPI.ListSandboxesPaginatedDeprecated(c.ctx(ctx)).Labels(string(filter)).IncludeErroredDeleted(true).Page(1).Limit(2)
-	if claim.CloudID != "" {
-		// A known UUID narrows the query to the exact resource, including an
-		// errored sandbox whose pending deletion hides it from GET.
-		req = req.Id(claim.CloudID)
-	}
-	if c.orgID != "" {
-		req = req.XDaytonaOrganizationID(c.orgID)
-	}
-	response, _, err := req.Execute()
-	if err != nil {
-		return nil, c.redactError(err)
-	}
-	if response == nil || len(response.GetItems()) == 0 {
-		return nil, nil
-	}
-	if len(response.GetItems()) > 1 || response.GetTotal() > 1 {
-		return nil, exit(4, "Daytona fixed attempt inventory is ambiguous; retain its ownership record")
-	}
-	sandbox := response.GetItems()[0]
-	return &sandbox, nil
 }
+
+// OrganizationAuthContextGuard checks the path against an API key's intrinsic
+// organization. Unlike the optional header, this also attests an empty account.
+func (c *daytonaSDKClient) attestDeletionOrganization(ctx context.Context, expected string) error {
+	if expected == "" || c.orgID != "" && c.orgID != expected {
+		return exit(4, "Daytona deletion organization differs from the selected organization")
+	}
+	organization, _, err := c.api.OrganizationsAPI.GetOrganization(c.ctx(ctx), expected).Execute()
+	if err != nil {
+		return c.redactError(err)
+	}
+	if organization == nil || organization.GetId() != expected {
+		return exit(4, "Daytona deletion organization could not be attested")
+	}
+	return nil
+}
+
 func (c *daytonaSDKClient) ReplaceLabels(ctx context.Context, id string, labels map[string]string) error {
 	req := c.api.SandboxAPI.ReplaceLabels(c.ctx(ctx), id).SandboxLabels(*daytona.NewSandboxLabels(labels))
 	if c.orgID != "" {

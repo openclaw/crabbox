@@ -77,11 +77,10 @@ Direct Daytona binds the API endpoint and observed native organization, then
 persists its exact create attempt before submission and the first observed
 sandbox UUID before readiness or deletion. Its `daytona-fixed-v1` claim marker
 prevents older clients from treating it as an ordinary lease. Submitted cleanup
-records a deletion acknowledgement (the DELETE response, an observed destroying
-sandbox, or an authorized empty read of a known UUID) before a 404 for that
-UUID retires the claim, and re-checks inventory for an errored pending deletion
-first; a 404 alone never does, and a never-observed UUID is never finalized
-from an empty search. See
+records an exact deletion acknowledgment, then reconciles a scope-attested UUID
+404 against complete failure-inclusive database inventory. Durable cleanup entry
+blocks reuse; unknown UUIDs and an unqualified 404 retain custody. The ordinary
+search index and mutable label filters do not establish absence. See
 [Daytona fixed operation IDs](../providers/daytona.md#fixed-operation-ids)
 for organization discovery and recovery limits.
 

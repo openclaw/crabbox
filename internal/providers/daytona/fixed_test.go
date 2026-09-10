@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -375,191 +374,377 @@ func TestDaytonaFixedDrainedPoolReusesPrivateSnapshot(t *testing.T) {
 	}
 }
 
-func TestDaytonaFixedCleanupAcknowledgesDeletionBeforeTerminalWitness(t *testing.T) {
+// Interrupt only after the provider has durably acknowledged deletion. Closing
+// the witness channel also joins fixture access before the next simulated state.
+func interruptDaytonaFixedCleanup(t *testing.T, f *daytonaLifecycleFixture, leaseID string, action func(context.Context) error) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	observed := make(chan struct{})
+	observations := 0
+	original := f.server.Config.Handler
+	f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		original.ServeHTTP(w, r)
+		f.mu.Lock()
+		visibleDetail := r.URL.Path == "/sandbox/sandbox-test" && !hiddenDaytonaDeletion(f.sandbox)
+		f.mu.Unlock()
+		if r.Method == http.MethodGet && (visibleDetail || r.URL.Path == "/sandbox/paginated") {
+			claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+			if err == nil && exists && claim.FixedCreateIntent != nil && claim.FixedCreateIntent.Attempt["deletion_acknowledged_id"] == claim.CloudID {
+				observations++
+				// Let one pending observation reach the caller. An implementation
+				// that incorrectly retires it must fail before this second read.
+				if observations == 2 {
+					close(observed)
+					cancel()
+				}
+			}
+		}
+	})
+	err := action(ctx)
+	select {
+	case <-observed:
+	case <-ctx.Done():
+		select {
+		case <-observed:
+		default:
+			t.Fatalf("cleanup did not reach its durable acknowledgment: %v", err)
+		}
+	}
+	f.server.Config.Handler = original
+	return err
+}
+
+func TestDaytonaFixedLastSandboxDeletionReconcilesAfterRestart(t *testing.T) {
 	f, b, req := newFixedDaytonaFixture(t)
 	lease, err := b.Acquire(t.Context(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Native soft deletion keeps the renamed resource visible for a while.
-	f.destroyingReads = 1000
-	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-	defer cancel()
-	if err := b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease}); err == nil {
-		t.Fatal("a still-visible resource retired the claim")
+	f.hideIdentitySandbox = true
+	f.deletionPending = true
+	if err := interruptDaytonaFixedCleanup(t, f, req.RequestedLeaseID, func(ctx context.Context) error {
+		return b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease})
+	}); err == nil {
+		t.Fatal("deletion acknowledgment alone retired the claim")
 	}
 	claim, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
 	if err != nil || !exists || claim.FixedCreateIntent.State == "released" || f.deletes != 1 ||
-		claim.FixedCreateIntent.Attempt[fixedDaytonaDeletionAcknowledged] != "sandbox-test" || claim.FixedCreateIntent.Attempt[fixedDaytonaDeletionAcknowledged+"_at"] == "" {
-		t.Fatalf("deletion acknowledgement was not durably recorded: claim=%+v err=%v", claim, err)
+		claim.FixedCreateIntent.Attempt["deletion_acknowledged_id"] != lease.Server.CloudID ||
+		claim.FixedCreateIntent.Attempt["deletion_indexed_id"] != lease.Server.CloudID {
+		t.Fatalf("interrupted cleanup lost its durable witness: %v", err)
 	}
-	// An acknowledged deletion can no longer be replayed into a running lease.
-	if _, err := b.Acquire(t.Context(), req); err == nil || f.sandboxCreates != 1 {
-		t.Fatalf("acknowledged deletion was replayed: %v", err)
-	}
-	// After restart the resource is gone; the recorded acknowledgement makes
-	// that 404 terminal without another DELETE.
-	f.destroyingReads = 0
+	// Native deletion finishes after the process exits. No live sandbox is left
+	// to attest the account, so recovery authenticates the persisted organization.
+	f.sandbox.SetState(api.SANDBOXSTATE_DESTROYED)
+	b.cfg.Daytona.APIKey = "rotated-synthetic-credential"
 	restarted := &daytonaLeaseBackend{cfg: b.cfg, rt: b.rt}
 	if err := restarted.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err != nil {
 		t.Fatal(err)
 	}
 	claim, exists, err = core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
 	if err != nil || !exists || claim.FixedCreateIntent.State != "released" || f.deletes != 1 {
-		t.Fatalf("acknowledged terminal reconciliation failed or deleted twice: %v", err)
+		t.Fatalf("terminal reconciliation failed or deleted twice: %v", err)
 	}
 }
 
 func TestDaytonaFixedCleanupPersistsUUIDBeforeLostDeleteResponse(t *testing.T) {
-	f, b, req := newFixedDaytonaFixture(t)
-	f.createErrorStatus = http.StatusInternalServerError
-	if _, err := b.Acquire(t.Context(), req); err == nil {
-		t.Fatal("create response loss unexpectedly succeeded")
-	}
-	claim, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
-	if err != nil || !exists || claim.CloudID != "" || f.sandboxCreates != 1 {
-		t.Fatalf("expected a submitted attempt without a returned UUID: %v", err)
-	}
-	f.hideIdentitySandbox = true
-	f.deleteErrorAfterApply = true
-	if err := b.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err == nil {
-		t.Fatal("lost deletion response must remain unresolved")
-	}
-	claim, exists, err = core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
-	if err != nil || !exists || claim.CloudID != "sandbox-test" || claim.CloudImmutableID != claim.CloudID || claim.FixedCreateIntent.State == "released" ||
-		claim.FixedCreateIntent.Attempt[fixedDaytonaDeletionAcknowledged] != "" || f.deletes != 1 {
-		t.Fatalf("first observed UUID was not retained before deletion: claim=%+v err=%v", claim, err)
-	}
-	// GET now hides the destroyed resource. A bare 404 without organization
-	// context is not deletion proof; custody stays with the claim.
-	restarted := &daytonaLeaseBackend{cfg: b.cfg, rt: b.rt}
-	if err := restarted.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err == nil {
-		t.Fatal("bare 404 retired the claim without organization context")
-	}
-	retained, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
-	if a, z := mustJSON(t, claim), mustJSON(t, retained); err != nil || !exists || a != z || f.deletes != 1 {
-		t.Fatalf("unverified 404 changed custody: %v", err)
-	}
-	// With the organization re-established, an authorized exact-attempt search
-	// that finds no live resource is the supported terminal witness.
-	f.hideIdentitySandbox = false
-	if err := restarted.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err != nil {
-		t.Fatal(err)
-	}
-	claim, exists, err = core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
-	if err != nil || !exists || claim.FixedCreateIntent.State != "released" || f.sandboxCreates != 1 || f.deletes != 1 {
-		t.Fatalf("fresh cleanup resubmitted or lost terminal custody: %v", err)
-	}
-}
-
-func mustJSON(t *testing.T, value any) string {
-	t.Helper()
-	data, err := json.Marshal(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(data)
-}
-
-func TestDaytonaFixedCleanupResolvesUnknownUUIDFromLiveInventory(t *testing.T) {
-	for _, scenario := range []string{"live", "destroying", "absent", "absent without organization", "duplicate", "cursor", "wrong organization", "wrong snapshot", "wrong user", "empty target"} {
-		t.Run(scenario, func(t *testing.T) {
+	for _, remainsVisible := range []bool{false, true} {
+		t.Run(fmt.Sprintf("visible=%t", remainsVisible), func(t *testing.T) {
 			f, b, req := newFixedDaytonaFixture(t)
 			f.createErrorStatus = http.StatusInternalServerError
 			if _, err := b.Acquire(t.Context(), req); err == nil {
-				t.Fatal("lost create response unexpectedly succeeded")
+				t.Fatal("create response loss unexpectedly succeeded")
 			}
-			before, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
-			if err != nil || !exists || before.CloudID != "" || before.FixedCreateIntent.State != "prepared" {
-				t.Fatalf("expected submitted attempt without UUID: %v", err)
+			f.hideIdentitySandbox = true
+			f.deleteErrorAfterApply = true
+			f.deletionPending = remainsVisible
+			if err := b.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err == nil {
+				t.Fatal("lost deletion response must remain unresolved")
 			}
-			// Native deletion or expiry renames the sandbox; the attempt name is unusable.
-			original := f.server.Config.Handler
-			f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == http.MethodGet && r.URL.Path == "/sandbox/"+before.FixedCreateIntent.Attempt["name"] {
-					w.WriteHeader(http.StatusNotFound)
-					return
+			claim, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+			if err != nil || !exists || claim.CloudID != "sandbox-test" || claim.CloudImmutableID != claim.CloudID ||
+				claim.FixedCreateIntent.Attempt["deletion_acknowledged_id"] != "" || f.deletes != 1 {
+				t.Fatalf("first UUID or ambiguous deletion custody lost: %+v %v", claim, err)
+			}
+			restarted := &daytonaLeaseBackend{cfg: b.cfg, rt: b.rt}
+			if remainsVisible {
+				err = interruptDaytonaFixedCleanup(t, f, req.RequestedLeaseID, func(ctx context.Context) error {
+					return restarted.Stop(ctx, StopRequest{ID: req.RequestedLeaseID})
+				})
+			} else {
+				err = restarted.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID})
+			}
+			claim, exists, readErr := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+			if err == nil || readErr != nil || !exists || claim.FixedCreateIntent.State == "released" || f.deletes != 1 {
+				t.Fatalf("ambiguous cleanup retired/redeleted the resource: %v %v", err, readErr)
+			}
+			if remainsVisible {
+				if claim.FixedCreateIntent.Attempt["deletion_acknowledged_id"] != claim.CloudID {
+					t.Fatal("exact positive desired-destruction observation was not recorded")
 				}
-				original.ServeHTTP(w, r)
-			})
-			switch scenario {
-			case "destroying":
-				f.sandbox.SetState(api.SANDBOXSTATE_DESTROYING)
-				f.sandbox.SetDesiredState(api.SANDBOXDESIREDSTATE_DESTROYED)
-				f.destroyingReads = 1000
-			case "absent":
 				f.sandbox.SetState(api.SANDBOXSTATE_DESTROYED)
-				f.sandbox.SetDesiredState(api.SANDBOXDESIREDSTATE_DESTROYED)
-			case "absent without organization":
-				f.sandbox.SetState(api.SANDBOXSTATE_DESTROYED)
-				f.sandbox.SetDesiredState(api.SANDBOXDESIREDSTATE_DESTROYED)
-				f.hideIdentitySandbox = true
-			case "duplicate":
-				f.duplicateAttemptInventory = true
-			case "cursor":
-				f.attemptInventoryCursor = "another-page"
-			case "wrong organization":
-				f.sandbox.SetOrganizationId("another-org")
-			case "wrong snapshot":
-				f.sandbox.SetSnapshot("another-snapshot")
-			case "wrong user":
-				f.sandbox.SetUser("another-user")
-			case "empty target":
-				f.sandbox.SetTarget("")
-			}
-			ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-			err = b.Stop(ctx, StopRequest{ID: req.RequestedLeaseID})
-			cancel()
-			after, exists, readErr := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
-			if readErr != nil || !exists || f.sandboxCreates != 1 {
-				t.Fatalf("inventory resolution changed native resources or lost custody: %v", readErr)
-			}
-			switch scenario {
-			case "live":
-				if err != nil || after.FixedCreateIntent.State != "released" || f.deletes != 1 {
-					t.Fatalf("live exact attempt was not adopted and deleted: %v", err)
+				if err := restarted.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err != nil || f.deletes != 1 {
+					t.Fatalf("observed acknowledgment did not reconcile: %v", err)
 				}
-			case "destroying":
-				if err == nil || after.CloudID != f.sandbox.GetId() || after.CloudImmutableID != after.CloudID || after.FixedCreateIntent.State != "prepared" ||
-					after.FixedCreateIntent.Attempt[fixedDaytonaDeletionAcknowledged] != after.CloudID || f.deletes != 0 {
-					t.Fatalf("observed destruction was not durably bound and acknowledged: %v", err)
-				}
-				f.destroyingReads = 0
-				restarted := &daytonaLeaseBackend{cfg: b.cfg, rt: b.rt}
-				if err := restarted.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err != nil {
-					t.Fatalf("acknowledged terminal recovery after restart failed: %v", err)
-				}
-				if final, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID); final.FixedCreateIntent.State != "released" || f.deletes != 0 {
-					t.Fatal("acknowledged native destruction was deleted again or not finalized")
-				}
-			case "absent":
-				// The list index is eventually consistent; a never-observed UUID
-				// cannot be finalized from an empty search.
-				if err == nil || mustJSON(t, before) != mustJSON(t, after) || f.deletes != 0 || !strings.Contains(err.Error(), "absence is unverified") {
-					t.Fatalf("empty inventory finalized a never-observed attempt: %v", err)
-				}
-			default:
-				if err == nil || mustJSON(t, before) != mustJSON(t, after) || f.deletes != 0 {
-					t.Fatalf("unverified inventory changed custody: %v", err)
-				}
+			} else if claim.FixedCreateIntent.Attempt["deletion_acknowledged_id"] != "" {
+				t.Fatal("404 invented a deletion acknowledgment")
 			}
 		})
 	}
 }
 
-func TestDaytonaFixtureRejectsDestroyedStateQueries(t *testing.T) {
-	f, _, _ := newFixedDaytonaFixture(t)
-	// Daytona v0.190.0 validates list states against every state except
-	// destroyed; the fixture must model that rejection so no cleanup path can
-	// depend on a destroyed-state inventory row.
-	response, err := http.Get(f.server.URL + "/sandbox?states=destroyed&limit=1")
+func TestDaytonaFixedUncertainDeleteBlocksReuse(t *testing.T) {
+	f, b, req := newFixedDaytonaFixture(t)
+	lease, err := b.Acquire(t.Context(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
-	body, _ := io.ReadAll(response.Body)
-	if response.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "each value must be one of the following values") {
-		t.Fatalf("fixture accepted a destroyed-state query: %d %s", response.StatusCode, body)
+	// A failed DELETE response does not establish whether the provider queued
+	// deletion. The native resource can still report its original ready state.
+	f.deleteError = true
+	if err := b.ReleaseLease(t.Context(), ReleaseLeaseRequest{Lease: lease}); err == nil {
+		t.Fatal("uncertain deletion unexpectedly completed")
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+	if err != nil || !exists || claim.FixedCreateIntent.Attempt["deletion_indexed_id"] != lease.Server.CloudID ||
+		claim.FixedCreateIntent.Attempt["deletion_acknowledged_id"] != "" || f.sandbox.GetState() != api.SANDBOXSTATE_STARTED {
+		t.Fatalf("missing uncertain cleanup fixture: %+v %v", claim, err)
+	}
+	requests := len(f.paths)
+	if _, err := b.Acquire(t.Context(), req); err == nil {
+		t.Fatal("fixed replay exposed a sandbox after an uncertain DELETE")
+	}
+	if _, err := b.Resolve(t.Context(), ResolveRequest{ID: req.RequestedLeaseID, Repo: req.Repo}); err == nil {
+		t.Fatal("execution resolution exposed a sandbox after an uncertain DELETE")
+	}
+	if len(f.paths) != requests || f.sandboxCreates != 1 {
+		t.Fatal("cleanup-only reuse contacted the provider or created another sandbox")
+	}
+	f.deleteError = false
+	if err := b.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err != nil {
+		t.Fatalf("cleanup-only claim lost its stop recovery path: %v", err)
+	}
+	claim, exists, err = core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+	if err != nil || !exists || claim.FixedCreateIntent.State != "released" {
+		t.Fatalf("reconciled cleanup did not publish its terminal claim: %v", err)
+	}
+}
+
+func TestDaytonaFixedCleanupUnwitnessedAbsenceRetainsCustody(t *testing.T) {
+	for _, unknownUUID := range []bool{false, true} {
+		t.Run(fmt.Sprintf("unknown-uuid=%t", unknownUUID), func(t *testing.T) {
+			f, b, req := newFixedDaytonaFixture(t)
+			if unknownUUID {
+				f.createErrorStatus = http.StatusInternalServerError
+			}
+			_, err := b.Acquire(t.Context(), req)
+			if (err != nil) != unknownUUID {
+				t.Fatalf("unexpected acquisition result: %v", err)
+			}
+			before, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+			f.sandbox.SetState(api.SANDBOXSTATE_DESTROYED)
+			f.sandbox.SetName("DESTROYED_" + f.sandbox.GetName())
+			f.hideIdentitySandbox = true
+			err = b.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID})
+			after, exists, readErr := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+			a, _ := json.Marshal(before)
+			z, _ := json.Marshal(after)
+			if err == nil || readErr != nil || !exists || !bytes.Equal(a, z) || f.deletes != 0 || f.sandboxCreates != 1 {
+				t.Fatalf("unwitnessed absence changed custody: %v %v", err, readErr)
+			}
+		})
+	}
+}
+
+func TestDaytonaFixedCleanupFailureInclusiveInventory(t *testing.T) {
+	for _, scenario := range []string{"absent", "prefix neighbor", "stale", "error", "build failed", "later page error", "later page absent", "repeated resource", "page failure", "wrong page", "changed total", "missing items", "null items", "missing total", "null total", "fractional total", "negative total", "null page", "null total pages", "inconsistent total pages", "short page", "wrong nonce", "changed organization"} {
+		t.Run(scenario, func(t *testing.T) {
+			f, b, req := newFixedDaytonaFixture(t)
+			lease, err := b.Acquire(t.Context(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.deletionPending = true
+			err = interruptDaytonaFixedCleanup(t, f, req.RequestedLeaseID, func(ctx context.Context) error {
+				return b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease})
+			})
+			if err == nil || f.deletes != 1 {
+				t.Fatalf("missing interrupted deletion: %v", err)
+			}
+			f.sandbox.SetState(api.SANDBOXSTATE_DESTROYED)
+			if scenario == "changed organization" {
+				f.identityOrganization = "other-org"
+			}
+			item := *f.sandbox
+			item.SetState(api.SANDBOXSTATE_ERROR)
+			if scenario == "build failed" {
+				item.SetState(api.SANDBOXSTATE_BUILD_FAILED)
+			}
+			if scenario == "stale" {
+				item.SetState(api.SANDBOXSTATE_STARTED)
+			}
+			if scenario == "prefix neighbor" {
+				item.SetId(item.GetId() + "-neighbor")
+			}
+			if scenario == "wrong nonce" {
+				item.Labels = map[string]string{}
+			}
+			original := f.server.Config.Handler
+			pages := 0
+			f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/sandbox/paginated" {
+					original.ServeHTTP(w, r)
+					return
+				}
+				pages++
+				if r.URL.Query().Get("states") != "" || r.URL.Query().Get("labels") != "" || r.URL.Query().Get("includeErroredDeleted") != "true" || r.URL.Query().Get("id") != lease.Server.CloudID {
+					t.Errorf("unsupported or unscoped database inventory: %s", r.URL.RawQuery)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				body := map[string]any{"items": []api.Sandbox{item}, "total": 1, "page": 1, "totalPages": 1}
+				switch scenario {
+				case "absent", "missing items", "null items", "missing total", "null total", "fractional total", "negative total", "null page", "null total pages", "inconsistent total pages", "short page":
+					body = map[string]any{"items": []api.Sandbox{}, "total": 0, "page": 1, "totalPages": 0}
+					switch scenario {
+					case "missing items":
+						delete(body, "items")
+					case "null items":
+						body["items"] = nil
+					case "missing total":
+						delete(body, "total")
+					case "null total":
+						body["total"] = nil
+					case "fractional total":
+						body["total"] = 0.5
+					case "negative total":
+						body["total"] = -1
+					case "null page":
+						body["page"] = nil
+					case "null total pages":
+						body["totalPages"] = nil
+					case "inconsistent total pages":
+						body["totalPages"] = 1
+					case "short page":
+						body["total"], body["totalPages"] = 1, 1
+					}
+				case "later page error", "later page absent", "repeated resource", "page failure", "wrong page", "changed total":
+					if r.URL.Query().Get("page") == "1" {
+						neighbors := make([]api.Sandbox, 100)
+						for i := range neighbors {
+							neighbors[i] = item
+							neighbors[i].SetId(fmt.Sprintf("%s-neighbor-%d", item.GetId(), i))
+						}
+						body = map[string]any{"items": neighbors, "total": 101, "page": 1, "totalPages": 2}
+					} else {
+						if scenario == "page failure" {
+							w.WriteHeader(http.StatusServiceUnavailable)
+							return
+						}
+						body["total"], body["page"], body["totalPages"] = 101, 2, 2
+						if scenario == "later page absent" || scenario == "repeated resource" {
+							neighbor := item
+							neighbor.SetId(item.GetId() + "-neighbor-final")
+							if scenario == "repeated resource" {
+								neighbor.SetId(item.GetId() + "-neighbor-0")
+							}
+							body["items"] = []api.Sandbox{neighbor}
+						}
+						if scenario == "wrong page" {
+							body["page"] = 1
+						}
+						if scenario == "changed total" {
+							body["total"] = 102
+						}
+					}
+				}
+				_ = json.NewEncoder(w).Encode(body)
+			})
+			if scenario == "stale" {
+				err = interruptDaytonaFixedCleanup(t, f, req.RequestedLeaseID, func(ctx context.Context) error { return b.Stop(ctx, StopRequest{ID: req.RequestedLeaseID}) })
+			} else {
+				err = b.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID})
+			}
+			claim, exists, readErr := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+			wantReleased := scenario == "absent" || scenario == "prefix neighbor" || scenario == "later page absent"
+			if readErr != nil || !exists || (err == nil) != wantReleased || (claim.FixedCreateIntent.State == "released") != wantReleased || f.deletes != 1 {
+				t.Fatalf("incorrect deletion reconciliation: err=%v read=%v state=%s deletes=%d", err, readErr, claim.FixedCreateIntent.State, f.deletes)
+			}
+			if (scenario == "later page error" || scenario == "later page absent" || scenario == "repeated resource" || scenario == "page failure" || scenario == "wrong page" || scenario == "changed total") && pages != 2 {
+				t.Fatalf("incomplete pagination: pages=%d", pages)
+			}
+		})
+	}
+}
+
+func TestDaytonaFixedCleanupRequiresDatabaseIdentity(t *testing.T) {
+	f, b, req := newFixedDaytonaFixture(t)
+	lease, err := b.Acquire(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := f.server.Config.Handler
+	f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/sandbox/paginated" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"items":[],"total":0,"page":1,"totalPages":0}`)
+			return
+		}
+		original.ServeHTTP(w, r)
+	})
+	if err := b.ReleaseLease(t.Context(), ReleaseLeaseRequest{Lease: lease}); err == nil || f.deletes != 0 {
+		t.Fatalf("unobserved child reached deletion: %v", err)
+	}
+	f.server.Config.Handler = original
+	if err := b.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err != nil || f.deletes != 1 {
+		t.Fatalf("database-visible child failed cleanup: %v", err)
+	}
+}
+
+func TestDaytonaFixedReleasedStatusIsLocal(t *testing.T) {
+	f, b, req := newFixedDaytonaFixture(t)
+	lease, err := b.Acquire(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReleaseLease(t.Context(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	requests := len(f.paths)
+	for _, wait := range []bool{false, true} {
+		view, err := b.Status(t.Context(), StatusRequest{ID: req.RequestedLeaseID, Wait: wait})
+		if err != nil || view.ID != req.RequestedLeaseID || view.State != "released" || view.Ready || view.HasHost || view.ServerID != "" || view.Host != "" {
+			t.Fatalf("terminal status lost identity or advertised access: %+v %v", view, err)
+		}
+	}
+	terminal, err := b.Resolve(t.Context(), ResolveRequest{ID: req.RequestedLeaseID, StatusOnly: true, NoLocalStateMutations: true})
+	if err != nil || terminal.Server.Status != "released" || terminal.Server.CloudID != "" || terminal.SSH.Host != "" {
+		t.Fatalf("terminal status-only resolution failed: %+v %v", terminal, err)
+	}
+	if _, err := b.Resolve(t.Context(), ResolveRequest{ID: req.RequestedLeaseID}); err == nil {
+		t.Fatal("released lease admitted execution")
+	}
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(config, []byte(fmt.Sprintf("provider: daytona\nnetwork: public\ndaytona:\n  apiUrl: %q\n", b.cfg.Daytona.APIURL)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", config)
+	t.Setenv("CRABBOX_DAYTONA_API_KEY", b.cfg.Daytona.APIKey)
+	for _, command := range [][]string{{"inspect"}, {"status"}, {"status", "--wait"}} {
+		var stdout, stderr bytes.Buffer
+		args := append(append([]string{}, command...), "--id", req.RequestedLeaseID, "--json")
+		err := (core.App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), args)
+		var view core.StatusView
+		if decodeErr := json.Unmarshal(stdout.Bytes(), &view); decodeErr != nil || view.State != "released" || view.Ready || view.HasHost || view.ServerID != "" || view.Host != "" || view.SSHKey != "" {
+			t.Fatalf("terminal CLI view is unusable: args=%v output=%s err=%v decode=%v", args, stdout.String(), err, decodeErr)
+		}
+		if (err != nil) != (len(command) == 2) {
+			t.Fatalf("terminal wait outcome changed: args=%v err=%v", args, err)
+		}
+	}
+
+	if len(f.paths) != requests {
+		t.Fatal("local terminal inspection contacted the provider")
 	}
 }
 
@@ -681,135 +866,28 @@ func TestDaytonaFixedScopeAndResourceDriftPreserveClaim(t *testing.T) {
 			case "uuid":
 				f.sandbox.Id = "other-sandbox"
 			case "unverified deletion":
-				f.deleteUnacknowledged = true
+				f.deletionPending = true
 			}
-			ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-			defer cancel()
-			if err := b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease}); err == nil {
+			if drift == "unverified deletion" {
+				err = interruptDaytonaFixedCleanup(t, f, req.RequestedLeaseID, func(ctx context.Context) error {
+					return b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease})
+				})
+			} else {
+				err = b.ReleaseLease(t.Context(), ReleaseLeaseRequest{Lease: lease})
+			}
+			if err == nil {
 				t.Fatal("unverified release succeeded")
 			}
 			after, exists, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
 			a, _ := json.Marshal(before)
 			z, _ := json.Marshal(after)
-			if !exists || string(a) != string(z) {
-				t.Fatal("failed cleanup changed durable ownership")
+			if !exists || after.FixedCreateIntent.State == "released" ||
+				(drift != "unverified deletion" && string(a) != string(z)) ||
+				(drift == "unverified deletion" && after.FixedCreateIntent.Attempt["deletion_acknowledged_id"] != after.CloudID) {
+				t.Fatal("failed cleanup changed ownership or lost the acknowledged deletion")
 			}
 			if drift != "unverified deletion" && f.deletes != 0 {
 				t.Fatal("deleted after ownership drift")
-			}
-		})
-	}
-}
-
-func TestDaytonaFixedCleanupRefusesChangedClaimBeforeDeletion(t *testing.T) {
-	f, b, req := newFixedDaytonaFixture(t)
-	if _, err := b.Acquire(t.Context(), req); err != nil {
-		t.Fatal(err)
-	}
-	stale, _, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Another owner transfers the repository between the release read and the
-	// fenced DELETE; the stale snapshot must not reach the native call.
-	transferred := stale
-	transferred.RepoRoot = t.TempDir()
-	transferred, err = core.ReplaceLeaseClaimIfUnchangedDurableReturning(stale.LeaseID, stale, transferred)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := b.releaseFixed(t.Context(), stale, ""); err == nil {
-		t.Fatal("stale claim snapshot released the lease")
-	}
-	after, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
-	if f.deletes != 0 || mustJSON(t, after) != mustJSON(t, transferred) {
-		t.Fatalf("changed claim was deleted or mutated: deletes=%d", f.deletes)
-	}
-	if err := b.releaseFixed(t.Context(), transferred, ""); err != nil {
-		t.Fatal(err)
-	}
-	if final, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID); final.FixedCreateIntent.State != "released" || f.deletes != 1 {
-		t.Fatalf("current owner could not release: deletes=%d", f.deletes)
-	}
-}
-
-func TestDaytonaFixedAcknowledgedCleanupRevalidatesOrganization(t *testing.T) {
-	f, b, req := newFixedDaytonaFixture(t)
-	lease, err := b.Acquire(t.Context(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.destroyingReads = 1000
-	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-	defer cancel()
-	if err := b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease}); err == nil {
-		t.Fatal("a still-visible resource retired the claim")
-	}
-	claim, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
-	if claim.FixedCreateIntent.Attempt[fixedDaytonaDeletionAcknowledged] != "sandbox-test" || f.deletes != 1 {
-		t.Fatalf("deletion acknowledgement missing: %+v", claim)
-	}
-	// The resource is gone now, but other credentials cannot turn that 404
-	// into completion: absence is only meaningful under the claim's organization.
-	f.destroyingReads = 0
-	cfg := b.cfg
-	cfg.Daytona.OrganizationID = "other-org"
-	drifted := &daytonaLeaseBackend{cfg: cfg, rt: b.rt}
-	if err := drifted.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err == nil {
-		t.Fatal("foreign organization retired an acknowledged claim")
-	}
-	after, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
-	if mustJSON(t, after) != mustJSON(t, claim) || f.deletes != 1 {
-		t.Fatal("organization drift changed custody")
-	}
-	restarted := &daytonaLeaseBackend{cfg: b.cfg, rt: b.rt}
-	if err := restarted.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err != nil {
-		t.Fatal(err)
-	}
-	if final, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID); final.FixedCreateIntent.State != "released" || f.deletes != 1 {
-		t.Fatalf("acknowledged terminal reconciliation failed: deletes=%d", f.deletes)
-	}
-}
-
-func TestDaytonaFixedCleanupRetainsErroredPendingDeletion(t *testing.T) {
-	for _, phase := range []string{"before acknowledgement", "after acknowledgement"} {
-		t.Run(phase, func(t *testing.T) {
-			f, b, req := newFixedDaytonaFixture(t)
-			lease, err := b.Acquire(t.Context(), req)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if phase == "after acknowledgement" {
-				f.destroyingReads = 1000
-				ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-				err = b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease})
-				cancel()
-				if err == nil {
-					t.Fatal("a still-visible resource retired the claim")
-				}
-				f.destroyingReads = 0
-			}
-			// Native destruction errored: GET answers 404, but the errored resource
-			// remains in inventory with a pending deletion.
-			f.sandbox.SetState(api.SANDBOXSTATE_ERROR)
-			f.sandbox.SetDesiredState(api.SANDBOXDESIREDSTATE_DESTROYED)
-			before, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
-			restarted := &daytonaLeaseBackend{cfg: b.cfg, rt: b.rt}
-			err = restarted.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID})
-			after, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
-			if err == nil || !strings.Contains(err.Error(), "pending deletion") || after.FixedCreateIntent.State == "released" {
-				t.Fatalf("errored pending deletion retired the claim: %v", err)
-			}
-			if phase == "before acknowledgement" && (mustJSON(t, before) != mustJSON(t, after) || f.deletes != 0) {
-				t.Fatalf("errored resource changed custody or was deleted: deletes=%d", f.deletes)
-			}
-			// Once Daytona finishes the destruction, the same claim finalizes.
-			f.sandbox.SetState(api.SANDBOXSTATE_DESTROYED)
-			if err := restarted.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err != nil {
-				t.Fatal(err)
-			}
-			if final, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID); final.FixedCreateIntent.State != "released" {
-				t.Fatal("destroyed resource did not finalize")
 			}
 		})
 	}

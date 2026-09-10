@@ -247,6 +247,18 @@ func (b *daytonaLeaseBackend) run(ctx context.Context, req RunRequest, original 
 }
 
 func (b *daytonaLeaseBackend) Status(ctx context.Context, req StatusRequest) (statusView, error) {
+	claim, exists, err := resolveLeaseClaimForProvider(req.ID, daytonaProvider)
+	if err != nil {
+		return statusView{}, err
+	}
+	if exists && claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == "released" {
+		if err := fixedDaytonaLeaseKind.ValidateTerminalClaim(claim, LeaseClaim{}, claim.LeaseID, nil); err != nil {
+			return statusView{}, err
+		}
+		return statusView{ID: claim.LeaseID, Slug: claim.Slug, Provider: daytonaProvider, TargetOS: targetLinux,
+			State: "released", Network: NetworkPublic, Labels: map[string]string{"lease": claim.LeaseID, "slug": claim.Slug, "state": "released"}}, nil
+	}
+
 	if req.Wait {
 		timeout := req.WaitTimeout
 		if timeout <= 0 {

@@ -223,32 +223,34 @@ behavior. No credentials or token-derived identifiers are stored in fixed claims
 
 Fixed claims use a distinct provider marker so older clients cannot treat them
 as ordinary Daytona claims and erase terminal replay protection. Failed or
-uncertain cleanup retains the claim. Daytona never lists or returns destroyed
-sandboxes: its list query rejects the destroyed state and `GET` answers 404 once
-a sandbox is gone. An unqualified 404 is still not deletion proof, because the
-provider's resource-access layer uses the same response for failed access.
-Fixed cleanup therefore records a deletion acknowledgement on the claim before
-anything becomes terminal: the DELETE response naming the exact owned sandbox,
-an owned sandbox already observed as being destroyed, or, for a known UUID, an
-authorized organization-scoped read that finds no resource. After that
-acknowledgement, a 404 for the recorded UUID retires the claim once two
-inventory reads a few seconds apart confirm that no sandbox still carries that
-UUID; Daytona hides destroyed and errored pending-deletion sandboxes from
-`GET`, and its list index is eventually consistent. A row still indexed as
-being destroyed keeps cleanup waiting, and an errored deletion retains the
-claim until Daytona finishes it.
-The DELETE and its acknowledgement run under the exclusive claim fence, so a
-live run or repository transfer cannot race them, and a previously acknowledged
-claim re-establishes its endpoint and organization before absence is accepted.
-A DELETE whose response was lost records nothing; the next stop re-reads the
-resource. A create attempt whose response was lost before any UUID was observed
-is resolved only through a visible sandbox carrying its exact attempt labels:
-one match is adopted and deleted, while ambiguous inventory, an unverifiable
-organization, or an empty search retains the claim, because an eventually
-consistent index cannot prove that a never-observed attempt holds nothing.
-These contracts were checked against the Daytona v0.190.0 API sources pinned by
-this release and must be re-verified for a different deployed provider version
-before relying on automatic fixed capacity.
+uncertain cleanup retains the claim. An unqualified 404 is not deletion proof:
+the provider's resource-access layer can also use that response for failed access.
+Fixed cleanup durably binds the native UUID, verifies that UUID through the
+existing `/sandbox/paginated` database-backed inventory, and records an
+identity-validated deletion acknowledgment before reconciling removal. The query
+uses only the UUID and `includeErroredDeleted`, without mutable label filters;
+it reads the sandbox table directly rather than the ordinary search index.
+
+Once cleanup durably records its entry before DELETE, replay and execution are
+blocked even if the DELETE response is lost and the sandbox still appears ready;
+retry `stop` to reconcile it. Acknowledgment only means destruction was requested.
+Cleanup then requires an exact UUID lookup returning 404, fresh authenticated
+access to the original organization, and complete database inventory showing no
+exact UUID. Required pagination metadata must be present, integral, and
+consistent; failed-deletion rows, malformed responses, and incomplete pages
+retain custody. No timed sampling or search-index fallback establishes absence.
+This confirms removal from the provider's database, not independent proof of
+physical storage reclamation.
+
+This works after deletion of the last live sandbox and accommodates the native
+rename during deletion. The durable acknowledgment survives interruption and
+same-organization credential rotation. A lost response can be reconciled only
+while the exact resource still positively reports destruction requested; a bare
+404 without that witness, or an expired create whose UUID was never observed,
+remains an explicit operator reconciliation obligation. No second create is
+submitted. A valid released claim remains available through `inspect` and
+`status` as `released`, never ready, with no provider request or remote access.
+`status --wait` reports that terminal state instead of waiting for readiness.
 
 The fixed producer also labels its native sandbox with `fixed_claim_provider`
 and an attempt nonce. The fingerprint alone remains opaque metadata on ordinary
