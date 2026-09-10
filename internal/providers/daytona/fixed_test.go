@@ -27,9 +27,6 @@ func newFixedDaytonaFixture(t *testing.T) (*daytonaLifecycleFixture, *daytonaLea
 	}
 	f, b, repo := newDaytonaLifecycleFixture(t)
 	f.identityOrganization = "org-test"
-	previousRecheck := fixedDaytonaAbsenceRecheckDelay
-	fixedDaytonaAbsenceRecheckDelay = 5 * time.Millisecond
-	t.Cleanup(func() { fixedDaytonaAbsenceRecheckDelay = previousRecheck })
 	f.classSnapshot = &api.SnapshotDto{Id: "snapshot-exact-id", Name: "test-snapshot", State: api.SNAPSHOTSTATE_ACTIVE, Cpu: 1, Mem: 1, Disk: 3, RegionIds: []string{"us"}, Entrypoint: []string{}}
 	f.classSnapshot.SetOrganizationId("org-test")
 	f.classSnapshot.SetSandboxClass("container")
@@ -815,22 +812,5 @@ func TestDaytonaFixedCleanupRetainsErroredPendingDeletion(t *testing.T) {
 				t.Fatal("destroyed resource did not finalize")
 			}
 		})
-	}
-}
-
-func TestDaytonaFixedCleanupWaitsForStaleDestroyingIndex(t *testing.T) {
-	f, b, req := newFixedDaytonaFixture(t)
-	lease, err := b.Acquire(t.Context(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// GET already answers 404 while the eventually consistent index still lists
-	// the sandbox as destroying; cleanup must wait, not retain.
-	f.staleInventoryReads = 3
-	if err := b.ReleaseLease(t.Context(), ReleaseLeaseRequest{Lease: lease}); err != nil {
-		t.Fatal(err)
-	}
-	if final, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID); final.FixedCreateIntent.State != "released" || f.deletes != 1 || f.staleInventoryReads != 0 {
-		t.Fatalf("stale destroying index did not settle: state=%s deletes=%d stale=%d", final.FixedCreateIntent.State, f.deletes, f.staleInventoryReads)
 	}
 }

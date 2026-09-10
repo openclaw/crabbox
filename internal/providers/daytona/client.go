@@ -463,11 +463,13 @@ func (c *daytonaSDKClient) requestSandboxDeletion(ctx context.Context, id string
 
 func (c *daytonaSDKClient) fixedSelection() (string, string) { return c.apiURL, c.orgID }
 
-// findFixedAttemptSandbox searches live inventory for the exact fixed attempt.
-// Daytona never lists or returns destroyed sandboxes (its list query rejects the
-// destroyed state and filters it from every result), so a bounded exact-label
-// search over every resource-holding state is the supported inventory contract.
-// It returns a nil sandbox when no live resource matches the attempt.
+// findFixedAttemptSandbox reads the exact fixed attempt from Daytona's
+// database-backed paginated inventory (`GET /sandbox/paginated`). The default
+// list endpoint is an eventually consistent search index, so it cannot attest
+// absence; the paginated query reads the sandbox table directly and, with
+// includeErroredDeleted, also returns errored sandboxes whose deletion is still
+// pending. Destroyed sandboxes are never returned by any Daytona read.
+// It returns a nil sandbox when no resource-holding row matches the attempt.
 func (c *daytonaSDKClient) findFixedAttemptSandbox(ctx context.Context, claim LeaseClaim) (*daytona.Sandbox, error) {
 	intent := claim.FixedCreateIntent
 	if !fixedDaytonaLeaseKind.IsFixedClaim(claim) || intent.Version != fixedDaytonaLeaseKind.IntentVersion || !isCanonicalLeaseID(claim.LeaseID) ||
@@ -481,9 +483,9 @@ func (c *daytonaSDKClient) findFixedAttemptSandbox(ctx context.Context, claim Le
 	})
 	// A bounded exact-attempt search must expose ambiguity, never pick a first
 	// match. Errored resources with a pending deletion still hold a resource.
-	req := c.api.SandboxAPI.ListSandboxes(c.ctx(ctx)).Labels(string(filter)).IncludeErroredDeleted(true).Limit(2)
+	req := c.api.SandboxAPI.ListSandboxesPaginatedDeprecated(c.ctx(ctx)).Labels(string(filter)).IncludeErroredDeleted(true).Page(1).Limit(2)
 	if claim.CloudID != "" {
-		// A known UUID narrows the search to the exact resource, including an
+		// A known UUID narrows the query to the exact resource, including an
 		// errored sandbox whose pending deletion hides it from GET.
 		req = req.Id(claim.CloudID)
 	}
@@ -497,10 +499,10 @@ func (c *daytonaSDKClient) findFixedAttemptSandbox(ctx context.Context, claim Le
 	if response == nil || len(response.GetItems()) == 0 {
 		return nil, nil
 	}
-	if len(response.GetItems()) > 1 || strings.TrimSpace(response.GetNextCursor()) != "" {
+	if len(response.GetItems()) > 1 || response.GetTotal() > 1 {
 		return nil, exit(4, "Daytona fixed attempt inventory is ambiguous; retain its ownership record")
 	}
-	sandbox := daytonaSandboxFromListItem(response.GetItems()[0])
+	sandbox := response.GetItems()[0]
 	return &sandbox, nil
 }
 func (c *daytonaSDKClient) ReplaceLabels(ctx context.Context, id string, labels map[string]string) error {

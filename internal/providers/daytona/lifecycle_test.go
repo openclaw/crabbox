@@ -50,7 +50,6 @@ type daytonaLifecycleFixture struct {
 	duplicateAttemptInventory bool
 	attemptInventoryCursor    string
 	destroyingReads           int
-	staleInventoryReads       int
 	deleteUnacknowledged      bool
 }
 
@@ -88,49 +87,51 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 				return
 			}
 			items := []*api.Sandbox{}
-			var cursor *string
 			var filter map[string]string
 			_ = json.Unmarshal([]byte(r.URL.Query().Get("labels")), &filter)
 			if filter["lease"] != "" {
-				// Exact-attempt discovery: every requested label must match.
-				if r.URL.Query().Get("limit") != "2" || r.URL.Query().Get("includeErroredDeleted") != "true" {
-					t.Errorf("exact attempt discovery did not use bounded live selectors: %s", r.URL.RawQuery)
-				}
-				matches := f.sandbox != nil && f.sandbox.GetState() != api.SANDBOXSTATE_DESTROYED && !f.hideAttemptInventory
-				if f.sandbox != nil && f.sandbox.GetState() == api.SANDBOXSTATE_DESTROYED && f.staleInventoryReads > 0 {
-					// The eventually consistent index still shows the destruction in progress.
-					f.staleInventoryReads--
-					stale := *f.sandbox
-					stale.SetState(api.SANDBOXSTATE_DESTROYING)
-					_ = json.NewEncoder(w).Encode(map[string]any{"items": []*api.Sandbox{&stale}, "nextCursor": nil})
-					return
-				}
-				if matches && sandboxErroredPendingDeletion(f.sandbox) && r.URL.Query().Get("includeErroredDeleted") != "true" {
-					matches = false
-				}
-				if id := r.URL.Query().Get("id"); matches && id != "" && f.sandbox.GetId() != id {
-					matches = false
-				}
-				for key, value := range filter {
-					if f.sandbox == nil || f.sandbox.GetLabels()[key] != value {
-						matches = false
-					}
-				}
-				if matches {
-					items = append(items, f.sandbox)
-					if f.duplicateAttemptInventory {
-						items = append(items, f.sandbox)
-					}
-				}
-				if f.attemptInventoryCursor != "" {
-					cursor = &f.attemptInventoryCursor
-				}
+				// Exact-attempt discovery must not use the eventually consistent search index.
+				t.Errorf("exact attempt discovery used the search index: %s", r.URL.RawQuery)
+				w.WriteHeader(http.StatusBadRequest)
+				return
 			} else if r.URL.Query().Get("limit") == "1" && f.identityOrganization != "" && !f.hideIdentitySandbox {
 				items = append(items, &api.Sandbox{Id: "identity-sandbox", OrganizationId: f.identityOrganization, Labels: map[string]string{}})
 			} else if f.sandbox != nil && f.sandbox.GetState() != api.SANDBOXSTATE_DESTROYED {
 				items = append(items, f.sandbox)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "nextCursor": cursor})
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "nextCursor": nil})
+		case r.Method == "GET" && r.URL.Path == "/sandbox/paginated":
+			// Database-backed inventory: exact id/label filters; errored pending
+			// deletions only with includeErroredDeleted; destroyed rows never.
+			var filter map[string]string
+			_ = json.Unmarshal([]byte(r.URL.Query().Get("labels")), &filter)
+			if filter["lease"] == "" || r.URL.Query().Get("limit") != "2" || r.URL.Query().Get("includeErroredDeleted") != "true" {
+				t.Errorf("exact attempt discovery did not use bounded database selectors: %s", r.URL.RawQuery)
+			}
+			matches := f.sandbox != nil && f.sandbox.GetState() != api.SANDBOXSTATE_DESTROYED && !f.hideAttemptInventory
+			if matches && sandboxErroredPendingDeletion(f.sandbox) && r.URL.Query().Get("includeErroredDeleted") != "true" {
+				matches = false
+			}
+			if id := r.URL.Query().Get("id"); matches && id != "" && f.sandbox.GetId() != id {
+				matches = false
+			}
+			for key, value := range filter {
+				if f.sandbox == nil || f.sandbox.GetLabels()[key] != value {
+					matches = false
+				}
+			}
+			items := []*api.Sandbox{}
+			if matches {
+				items = append(items, f.sandbox)
+				if f.duplicateAttemptInventory {
+					items = append(items, f.sandbox)
+				}
+			}
+			total := len(items)
+			if f.attemptInventoryCursor != "" {
+				total = 3
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "total": total, "page": 1, "totalPages": 1})
 		case r.Method == "GET" && r.URL.Path == "/sandbox/identity-sandbox":
 			_ = json.NewEncoder(w).Encode(&api.Sandbox{Id: "identity-sandbox", OrganizationId: f.identityOrganization, Labels: map[string]string{}})
 		case r.Method == "POST" && r.URL.Path == "/sandbox":

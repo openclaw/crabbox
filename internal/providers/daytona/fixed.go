@@ -384,9 +384,9 @@ func (b *daytonaLeaseBackend) releaseFixed(ctx context.Context, claim core.Lease
 				return err
 			}
 			// Native deletion renames the sandbox and a lost create response never
-			// recorded its UUID. Daytona never lists or returns destroyed sandboxes,
-			// so an authorized exact-attempt search over live inventory is the only
-			// supported way to establish whether the attempt still holds a resource.
+			// recorded its UUID. Daytona never returns destroyed sandboxes, so an
+			// authorized exact-attempt read of the database-backed inventory is the
+			// only supported way to find a resource the attempt still holds.
 			if err := verifyFixedDaytonaOrganization(ctx, client, claim); err != nil {
 				return err
 			}
@@ -617,10 +617,6 @@ func recordFixedDaytonaDeletionAcknowledgement(claim LeaseClaim) LeaseClaim {
 	return claim
 }
 
-// Daytona's list endpoint is eventually consistent; a second read after this
-// delay bounds the window in which an errored deletion is not indexed yet.
-var fixedDaytonaAbsenceRecheckDelay = 3 * time.Second
-
 func fixedDaytonaSandboxErroredPendingDeletion(sandbox *api.Sandbox) bool {
 	return sandbox != nil && (sandbox.GetState() == api.SANDBOXSTATE_ERROR || sandbox.GetState() == api.SANDBOXSTATE_BUILD_FAILED) &&
 		sandbox.GetDesiredState() == api.SANDBOXDESIREDSTATE_DESTROYED
@@ -629,32 +625,24 @@ func fixedDaytonaSandboxErroredPendingDeletion(sandbox *api.Sandbox) bool {
 // fixedDaytonaInventorySettled decides what a 404 for the exact UUID means.
 // GET hides destroyed sandboxes and errored sandboxes whose deletion is still
 // pending; the latter may still hold resources and are only visible through
-// inventory with includeErroredDeleted. Two consistent empty reads settle the
-// absence. An errored pending deletion retains the claim. Any other indexed row
-// is an in-progress destruction that the caller keeps waiting for.
+// the database-backed inventory with includeErroredDeleted. An empty read
+// settles the absence, an errored pending deletion retains the claim, and any
+// other row is an in-progress destruction that the caller keeps waiting for.
 func fixedDaytonaInventorySettled(ctx context.Context, client fixedDaytonaDeletionAPI, claim LeaseClaim) (bool, error) {
-	for attempt := 0; attempt < 2; attempt++ {
-		if attempt > 0 {
-			if err := shared.SleepContext(ctx, fixedDaytonaAbsenceRecheckDelay); err != nil {
-				return false, err
-			}
-		}
-		live, err := client.findFixedAttemptSandbox(ctx, claim)
-		if err != nil {
-			return false, err
-		}
-		if live == nil {
-			continue
-		}
-		if live.GetId() != claim.CloudID {
-			return false, exit(4, "Daytona fixed attempt inventory names a different resource; retain its ownership record")
-		}
-		if fixedDaytonaSandboxErroredPendingDeletion(live) {
-			return false, exit(4, "Daytona still lists fixed resource %s in state %s with a pending deletion; native destruction has not completed, so its ownership record is retained", live.GetId(), live.GetState())
-		}
-		return false, nil
+	live, err := client.findFixedAttemptSandbox(ctx, claim)
+	if err != nil {
+		return false, err
 	}
-	return true, nil
+	if live == nil {
+		return true, nil
+	}
+	if live.GetId() != claim.CloudID {
+		return false, exit(4, "Daytona fixed attempt inventory names a different resource; retain its ownership record")
+	}
+	if fixedDaytonaSandboxErroredPendingDeletion(live) {
+		return false, exit(4, "Daytona still lists fixed resource %s in state %s with a pending deletion; native destruction has not completed, so its ownership record is retained", live.GetId(), live.GetState())
+	}
+	return false, nil
 }
 
 // awaitFixedDaytonaDeletion waits for the acknowledged resource to disappear.
