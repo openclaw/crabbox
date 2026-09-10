@@ -356,6 +356,7 @@ import {
   tailscaleTagOwnershipErrorMessage,
   validateTailscaleTags,
 } from "./tailscale";
+import { orderedTelemetrySamples } from "./telemetry";
 import { timingSafeEqual } from "./timing-safe";
 import type {
   CapacityHint,
@@ -25065,15 +25066,7 @@ function appendLeaseTelemetryHistory(
 }
 
 function boundedTelemetrySamples(samples: LeaseTelemetry[], max: number): LeaseTelemetry[] {
-  const byTime = new Map<string, LeaseTelemetry>();
-  for (const sample of samples) {
-    if (sample?.capturedAt) {
-      byTime.set(sample.capturedAt, sample);
-    }
-  }
-  return [...byTime.values()]
-    .toSorted((left, right) => left.capturedAt.localeCompare(right.capturedAt))
-    .slice(-max);
+  return orderedTelemetrySamples(samples).slice(-max);
 }
 
 const fixedLeaseCreateIntentVersion = 2;
