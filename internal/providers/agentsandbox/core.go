@@ -66,10 +66,6 @@ func exit(code int, format string, args ...any) core.ExitError {
 	return core.Exit(code, format, args...)
 }
 
-func expandUserPath(path string) string {
-	return core.ExpandUserPath(path)
-}
-
 func blank(value, fallback string) string {
 	return core.Blank(value, fallback)
 }
