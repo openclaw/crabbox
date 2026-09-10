@@ -69,7 +69,7 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	}
 	return DoctorResult{
 		Provider: providerName,
-		Status:   aggregateStatus(checks),
+		Status:   core.DoctorChecksStatus(checks),
 		Message:  "bridge=checked mutation=false",
 		Checks:   checks,
 	}, nil
@@ -841,18 +841,4 @@ func (e *cloudflareSandboxNotFoundError) Unwrap() error { return e.err }
 func isCloudflareSandboxNotFound(err error) bool {
 	var notFound *cloudflareSandboxNotFoundError
 	return errors.As(err, &notFound)
-}
-
-func aggregateStatus(checks []DoctorCheck) string {
-	for _, check := range checks {
-		if check.Status == "failed" {
-			return "failed"
-		}
-	}
-	for _, check := range checks {
-		if check.Status == "warning" {
-			return "warning"
-		}
-	}
-	return "ok"
 }
