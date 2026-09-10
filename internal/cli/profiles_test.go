@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -337,6 +338,10 @@ func TestPresetCommandTreatsVariablesAsArgValues(t *testing.T) {
 	if shouldUseShellWithLiteralArgs(expansion.Command, expansion.LiteralArgs) {
 		t.Fatalf("placeholder value should not introduce shell operators: %#v", expansion.Command)
 	}
+	intent, err := ParseCommandIntent(expansion.Command, false, expansion.LiteralArgs)
+	if err != nil || !slices.Equal(intent.Argv("bash", "-lc"), want) {
+		t.Fatalf("profile command intent=%q err=%v", intent.Argv("bash", "-lc"), err)
+	}
 	if got := runCommandDisplayWithLiteralArgs(expansion.Command, false, expansion.LiteralArgs); got != "pnpm qa --scenario '&&' --fail-fast" {
 		t.Fatalf("display=%q", got)
 	}
@@ -349,6 +354,10 @@ func TestPresetCommandTreatsVariablesAsArgValues(t *testing.T) {
 	}
 	if shouldUseShellWithLiteralArgs(single.Command, single.LiteralArgs) {
 		t.Fatalf("single placeholder value should remain a literal arg: %#v", single.Command)
+	}
+	singleIntent, err := ParseCommandIntent(single.Command, false, single.LiteralArgs)
+	if err != nil || !slices.Equal(singleIntent.Argv("bash", "-lc"), single.Command) {
+		t.Fatalf("single profile intent=%q err=%v", singleIntent.Argv("bash", "-lc"), err)
 	}
 	if got := runCommandShellStringWithLiteralArgs(single.Command, false, single.LiteralArgs); got != "'echo ok && false'" {
 		t.Fatalf("single shell command=%q", got)
@@ -1561,6 +1570,7 @@ profiles:
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	downloadedArtifacts := []byte("artifacts\n")
 	script := `#!/bin/sh
 cmd=""
 for arg do cmd="$arg"; done
@@ -1568,7 +1578,7 @@ input="$(cat)"
 printf '%s\n%s\n---\n' "$cmd" "$input" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd
 $input" in
-  *"base64 <"*) printf 'YXJ0aWZhY3RzCg=='; exit 0 ;;
+  *"base64 <"*) printf '%s' ` + shellQuote(encodedRunDownloadPayload(int64(len(downloadedArtifacts)), downloadedArtifacts)) + `; exit 0 ;;
   *"base64 -d >"*) printf 'ok      node             v22.1.0\nok      pnpm             9.0.0\nok      docker-compose   Docker Compose version v2.27.0\n'; exit 0 ;;
   *"artifacts.tgz"*) printf 'warning: no artifact matches\n'; exit 0 ;;
 esac

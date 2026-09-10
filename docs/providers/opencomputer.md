@@ -74,6 +74,11 @@ must use HTTPS and cannot contain userinfo, query parameters, or fragments;
 plain HTTP is accepted only for `localhost` or a loopback IP during local
 development.
 
+The API URL is not a Crabbox YAML field, including in trusted user files. Its
+raw config default stays empty so client construction can still select the
+external OC file's `api_url` before the built-in URL. Configuration generation
+does not read that file or resolve keys.
+
 ## Config
 
 ```yaml
@@ -106,6 +111,17 @@ overrides (for example `CRABBOX_OPENCOMPUTER_WORKDIR`,
 `CRABBOX_OPENCOMPUTER_CPU`, `CRABBOX_OPENCOMPUTER_EXEC_TIMEOUT_SECS`). The API
 URL also reads `OPENCOMPUTER_API_URL`. `--opencomputer-forget-missing` is
 deliberately CLI-only so stale-claim removal always requires explicit intent.
+
+All eight bindings share one typed declaration. The four integer YAML fields
+apply whenever present, including zero and negative values; omitted/null fields
+preserve earlier values. Environment integer parsing retains the earlier value
+on malformed input, while explicit flags keep their existing value semantics.
+These parsing rules do not add service-side sizing validation. Nonempty workdir
+strings and explicit `burst: false` retain their existing behavior.
+
+Workdir and execution-timeout helpers share their compiled defaults. Raw-empty
+API URL resolution, service sizing, request-level timeout fallbacks, and
+missing-sandbox handling remain with their existing client/operation owners.
 
 > **Sizing tiers.** When both `cpu` and `memoryMB` are set, they must form an
 > allowed tier (for example `1/1024`, `1/4096`, `2/8192`, `4/16384`). When only
@@ -159,6 +175,20 @@ crabbox run --provider opencomputer --allow-env API_TOKEN -- printenv API_TOKEN
    only after confirming the sandbox is gone in the intended account.
 6. `run --lease-output <path>` writes the OpenComputer lease ID, slug,
    reuse/retention state, and exact cleanup command for orchestration handoff.
+
+Command transport failures preserve their original error cause, including
+cancellation and deadlines, while retaining exit code 1 and the normal cleanup
+or `--keep-on-failure` behavior. Completed commands still mirror their remote
+exit code.
+
+Run outcomes and timing are finalized after cleanup. A failed automatic deletion
+now returns a failure with a retained recovery session. An existing command
+failure keeps its exit code if cleanup or timing output also fails, and
+`--keep-on-failure` also covers command preparation failures. Transport failures
+are classified as provider errors, not completed command exits; cancellation and
+deadline classifications remain distinct. Reused sandboxes are never
+automatically deleted, and standalone `stop` retains its stricter handling of a
+missing or inaccessible sandbox.
 
 ## Capabilities
 

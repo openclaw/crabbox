@@ -18,9 +18,8 @@ import (
 )
 
 const (
-	openComputerCleanupTimeout  = 15 * time.Second
-	openComputerExecTimeoutSecs = 3600
-	openComputerClaimTagKey     = "crabbox.claim"
+	openComputerCleanupTimeout = 15 * time.Second
+	openComputerClaimTagKey    = "crabbox.claim"
 )
 
 func NewOpenComputerBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
@@ -41,7 +40,7 @@ func (b *openComputerBackend) Warmup(ctx context.Context, req WarmupRequest) err
 	if req.ActionsRunner {
 		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	api, err := newOCAPIClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -54,18 +53,13 @@ func (b *openComputerBackend) Warmup(ctx context.Context, req WarmupRequest) err
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: opencomputer warmup keeps the sandbox until explicit stop\n")
 	}
-	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	total := core.ClockNow(b.rt.Clock).Sub(started)
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
 func (b *openComputerBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
@@ -73,166 +67,84 @@ func (b *openComputerBackend) Run(ctx context.Context, req RunRequest) (RunResul
 	if err != nil {
 		return RunResult{}, err
 	}
-	started := b.now()
-	api, err := newOCAPIClient(b.cfg, b.rt)
-	if err != nil {
-		return RunResult{}, err
+	var api *ocAPIClient
+	var leaseID, sandboxID, slug string
+	boundSandbox := func() shared.DelegatedSandbox {
+		fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
+		return shared.DelegatedSandbox{LeaseID: leaseID, Slug: slug, CleanupCommand: openComputerCleanupCommand(leaseID)}
 	}
-	var prepared *core.PreparedArchive
-	if req.ID == "" && !req.NoSync {
-		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-			TempPattern: "crabbox-opencomputer-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
-		})
-		if err != nil {
-			return RunResult{}, err
-		}
-		defer prepared.Close()
-	}
-	leaseID, sandboxID, slug := "", "", ""
-	acquired := false
-	if req.ID == "" {
-		leaseID, sandboxID, slug, err = b.createSandbox(ctx, api, req.Repo, req.Reclaim, req.RequestedSlug)
-		if err != nil {
-			return RunResult{}, err
-		}
-		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
-		acquired = true
-	} else {
-		leaseID, sandboxID, _, err = resolveLeaseID(req.ID, "", false, 0, api.baseURL)
-		if err != nil {
-			return RunResult{}, err
-		}
-		if _, err := verifyOpenComputerClaim(ctx, api, leaseID, sandboxID); err != nil {
-			return RunResult{}, err
-		}
-		claim, err := readLeaseClaim(leaseID)
-		if err != nil {
-			return RunResult{}, err
-		}
-		_, _, slug, err = finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, api.baseURL)
-		if err != nil {
-			return RunResult{}, err
-		}
-	}
-	shouldStop := acquired && !req.Keep
-	session := &RunSessionHandle{
-		Provider:       providerName,
-		LeaseID:        leaseID,
-		Slug:           slug,
-		Reused:         !acquired,
-		Kept:           !shouldStop,
-		CleanupCommand: openComputerCleanupCommand(leaseID),
-	}
-	if shouldStop {
-		defer func() {
-			if !shouldStop {
-				session.Kept = true
-				return
+	return shared.RunDelegatedSandbox(ctx, req, shared.DelegatedSandboxLifecycle{
+		Provider: providerName, Runtime: b.rt, Workdir: workdir,
+		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL, CleanupTimeout: b.cleanupTimeout(),
+		Preflight: func(context.Context) error {
+			var err error
+			api, err = newOCAPIClient(b.cfg, b.rt)
+			return err
+		},
+		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
+			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
+				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
+				TempPattern: "crabbox-opencomputer-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
+			})
+		},
+		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var err error
+			leaseID, sandboxID, slug, err = b.createSandbox(ctx, api, req.Repo, req.Reclaim, req.RequestedSlug)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
 			}
-			cleanupCtx, cancel := b.cleanupContext(ctx)
-			defer cancel()
-			if killErr := api.killSandbox(cleanupCtx, sandboxID); killErr != nil && !isOCNotFound(killErr) {
-				fmt.Fprintf(b.rt.Stderr, "warning: opencomputer kill failed for %s: %v\n", sandboxID, killErr)
-				session.Kept = true
-				return
+			fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
+			return boundSandbox(), nil
+		},
+		Resolve: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var err error
+			leaseID, sandboxID, _, err = resolveLeaseID(req.ID, "", false, 0, api.baseURL)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			if _, err := verifyOpenComputerClaim(ctx, api, leaseID, sandboxID); err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			claim, err := readLeaseClaim(leaseID)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			_, _, slug, err = finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, api.baseURL)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			return boundSandbox(), nil
+		},
+		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+			return b.syncWorkspace(ctx, api, sandboxID, req, workdir, prepared)
+		},
+		NoSync: func(ctx context.Context) error {
+			return b.ensureWorkspace(ctx, api, sandboxID, workdir)
+		},
+		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
+			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+			if err != nil {
+				return shared.DelegatedSandboxCommand{}, err
+			}
+			command := intent.Argv("bash", "-lc")
+			if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
+				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+			}
+			return shared.DelegatedSandboxCommand{
+				Text: strings.Join(req.Command, " "),
+				Run: func(ctx context.Context) (int, error) {
+					return b.execCommand(ctx, api, sandboxID, workdir, command, req.Env)
+				},
+			}, nil
+		},
+		Cleanup: func(ctx context.Context) error {
+			if err := api.killSandbox(ctx, sandboxID); err != nil && !isOCNotFound(err) {
+				return err
 			}
 			removeLeaseClaim(leaseID)
-			session.Kept = false
-		}()
-	}
-	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
-
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
-	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, api, sandboxID, req, workdir, prepared)
-		if err != nil {
-			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-			return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
-		}
-		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.ensureWorkspace(ctx, api, sandboxID, workdir); err != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
-	}
-
-	if req.SyncOnly {
-		result := RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}
-		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
-		if req.TimingJSON {
-			return result, writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-				Provider:      providerName,
-				LeaseID:       leaseID,
-				Slug:          slug,
-				SyncDelegated: true,
-				SyncMs:        syncDuration.Milliseconds(),
-				SyncPhases:    syncPhases,
-				SyncSkipped:   req.NoSync,
-				TotalMs:       result.Total.Milliseconds(),
-				ExitCode:      0,
-				Label:         strings.TrimSpace(req.Label),
-			}, result, nil))
-		}
-		return result, nil
-	}
-
-	command, err := buildCommand(req.Command, req.ShellMode)
-	if err != nil {
-		return RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
-	}
-	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
-		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
-	}
-	commandStart := b.now()
-	// Env travels in the exec request body (`envs`), never argv. cwd is the
-	// synced workspace.
-	exitCode, runErr := b.execCommand(ctx, api, sandboxID, workdir, command, req.Env)
-	commandDuration := b.now().Sub(commandStart)
-	result := RunResult{
-		ExitCode:      exitCode,
-		Command:       commandDuration,
-		Total:         b.now().Sub(started),
-		SyncDelegated: true,
-		Provider:      providerName,
-		LeaseID:       leaseID,
-		Slug:          slug,
-		CommandText:   strings.Join(req.Command, " "),
-		Session:       session,
-	}
-	if req.NoSync {
-		fmt.Fprintf(b.rt.Stderr, "opencomputer run summary sync_skipped=true command=%s total=%s exit=%d\n",
-			result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
-	} else {
-		fmt.Fprintf(b.rt.Stderr, "opencomputer run summary sync=%s command=%s total=%s exit=%d\n",
-			syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), exitCode)
-	}
-	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-			Provider:      providerName,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			SyncDelegated: true,
-			SyncMs:        syncDuration.Milliseconds(),
-			SyncPhases:    syncPhases,
-			SyncSkipped:   req.NoSync,
-			CommandMs:     result.Command.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      exitCode,
-			Label:         strings.TrimSpace(req.Label),
-		}, result, runErr)); err != nil {
-			return result, err
-		}
-	}
-	if runErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, ExitError{Code: 1, Message: fmt.Sprintf("opencomputer run failed: %v", runErr)}
-	}
-	if exitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("opencomputer run exited %d", exitCode)}
-	}
-	return result, nil
+			return nil
+		},
+	})
 }
 
 func openComputerCleanupCommand(leaseID string) string {
@@ -328,7 +240,7 @@ func (b *openComputerBackend) Status(ctx context.Context, req StatusRequest) (St
 	if waitTimeout <= 0 {
 		waitTimeout = 5 * time.Minute
 	}
-	deadline := b.now().Add(waitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
 	pollCtx := ctx
 	cancel := func() {}
 	if req.Wait {
@@ -375,7 +287,7 @@ func (b *openComputerBackend) Status(ctx context.Context, req StatusRequest) (St
 		if isTerminalState(state) {
 			return StatusView{}, exit(5, "opencomputer sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return StatusView{}, exit(5, "timed out waiting for opencomputer sandbox %s to become ready", sandboxID)
 		}
 		select {
@@ -610,32 +522,12 @@ func randomSuffix() string {
 	return shared.RandomSuffix()
 }
 
-func buildCommand(command []string, shellMode bool) ([]string, error) {
-	if len(command) == 0 {
-		return nil, errors.New("missing command")
-	}
-	if shellMode {
-		return []string{"bash", "-lc", strings.Join(command, " ")}, nil
-	}
-	if shouldUseShell(command) || leadingEnvAssignment(command) {
-		if len(command) == 1 {
-			return []string{"bash", "-lc", command[0]}, nil
-		}
-		return []string{"bash", "-lc", shellScriptFromArgv(command)}, nil
-	}
-	return command, nil
-}
-
-func leadingEnvAssignment(command []string) bool {
-	return len(command) > 1 && strings.Contains(command[0], "=") && !strings.HasPrefix(command[0], "-")
-}
-
 // openComputerWorkdir returns the configured absolute workspace path inside the
 // sandbox, validating that it isn't relative, empty, or a broad system path.
 func openComputerWorkdir(cfg Config) (string, error) {
 	workdir := strings.TrimSpace(cfg.OpenComputer.Workdir)
 	if workdir == "" {
-		workdir = defaultWorkdir
+		workdir = core.OpenComputerConfigDefaultWorkdir
 	}
 	clean := path.Clean(workdir)
 	if !strings.HasPrefix(clean, "/") {
@@ -648,19 +540,15 @@ func openComputerWorkdir(cfg Config) (string, error) {
 	return clean, nil
 }
 
-func (b *openComputerBackend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
+func (b *openComputerBackend) cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), b.cleanupTimeout())
 }
 
-func (b *openComputerBackend) cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	timeout := openComputerCleanupTimeout
+func (b *openComputerBackend) cleanupTimeout() time.Duration {
 	if b.cleanupTimeoutOverride > 0 {
-		timeout = b.cleanupTimeoutOverride
+		return b.cleanupTimeoutOverride
 	}
-	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	return openComputerCleanupTimeout
 }
 
 func (b *openComputerBackend) cleanupCreateFailure(ctx context.Context, api *ocAPIClient, sandboxID string, cause error) error {
@@ -679,5 +567,5 @@ func (b *openComputerBackend) execTimeoutSecs() int {
 	if b.cfg.OpenComputer.ExecTimeoutSecs > 0 {
 		return b.cfg.OpenComputer.ExecTimeoutSecs
 	}
-	return openComputerExecTimeoutSecs
+	return core.OpenComputerConfigDefaultExecTimeoutSecs
 }

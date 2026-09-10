@@ -264,38 +264,17 @@ describe("PostgresCoordinatorStorage", () => {
     const id = "chk_postgres_fanout";
     const now = new Date().toISOString();
     const org = orgKeyForLabel("example-org");
-    await storage.put(checkpointKey(id), {
-      version: 1,
-      id,
-      owner: "alice@example.com",
-      org,
-      leaseID: "cbx_000000000001",
-      provider: "aws",
-      scope: { region: "eu-west-1", accountID: "123456789012" },
-      name: "parallel-checkpoint",
-      strategy: "disk-snapshot",
-      noReboot: true,
-      image: {
-        id: "snap-owned",
-        resourceID: "snap-owned",
-        kind: "aws-ebs-snapshot",
-        immutableID: "snap-owned",
-        snapshotIDs: ["snap-owned"],
-        state: "available",
-      },
-      state: "ready",
-      retention: { mode: "manual" },
-      generation: 1,
-      revision: 1,
-      createdAt: now,
-      updatedAt: now,
-      lastUsedAt: now,
-      attempts: 0,
-      pinCount: 0,
-      activeUseCount: 0,
-      eventSequence: 0,
-      target: "linux",
-    } satisfies CoordinatorCheckpointRecord);
+    await storage.put(
+      checkpointKey(id),
+      postgresCheckpointFixture({
+        id,
+        owner: "alice@example.com",
+        org,
+        name: "parallel-checkpoint",
+        imageID: "snap-owned",
+        now,
+      }),
+    );
     const claims = await Promise.all(
       Array.from({ length: 12 }, async () =>
         acquireCheckpointUse(storage, id, { owner: "alice@example.com", org }),
@@ -317,38 +296,17 @@ describe("PostgresCoordinatorStorage", () => {
       const id = "chk_postgres_finish_retry";
       const now = new Date().toISOString();
       const org = orgKeyForLabel("example-org");
-      await storage.put(checkpointKey(id), {
-        version: 1,
-        id,
-        owner: "alice@example.com",
-        org,
-        leaseID: "cbx_000000000001",
-        provider: "aws",
-        scope: { region: "eu-west-1", accountID: "123456789012" },
-        name: "parallel-checkpoint",
-        strategy: "disk-snapshot",
-        noReboot: true,
-        image: {
-          id: "snap-owned",
-          resourceID: "snap-owned",
-          kind: "aws-ebs-snapshot",
-          immutableID: "snap-owned",
-          snapshotIDs: ["snap-owned"],
-          state: "available",
-        },
-        state: "ready",
-        retention: { mode: "manual" },
-        generation: 1,
-        revision: 1,
-        createdAt: now,
-        updatedAt: now,
-        lastUsedAt: now,
-        attempts: 0,
-        pinCount: 0,
-        activeUseCount: 0,
-        eventSequence: 0,
-        target: "linux",
-      } satisfies CoordinatorCheckpointRecord);
+      await storage.put(
+        checkpointKey(id),
+        postgresCheckpointFixture({
+          id,
+          owner: "alice@example.com",
+          org,
+          name: "parallel-checkpoint",
+          imageID: "snap-owned",
+          now,
+        }),
+      );
 
       const principal = { owner: "alice@example.com", org };
       const claim = await acquireCheckpointUse(storage, id, principal);
@@ -547,38 +505,17 @@ describe("PostgresCoordinatorStorage", () => {
     const now = new Date().toISOString();
     await Promise.all(
       checkpointIDs.map(async (id) => {
-        await storage.put(checkpointKey(id), {
-          version: 1,
-          id,
-          owner: principal.owner,
-          org: principal.org,
-          leaseID: "cbx_000000000001",
-          provider: "aws",
-          scope: { region: "eu-west-1", accountID: "123456789012" },
-          name: id,
-          strategy: "disk-snapshot",
-          noReboot: true,
-          image: {
+        await storage.put(
+          checkpointKey(id),
+          postgresCheckpointFixture({
             id,
-            resourceID: id,
-            kind: "aws-ebs-snapshot",
-            immutableID: id,
-            snapshotIDs: [id],
-            state: "available",
-          },
-          state: "ready",
-          retention: { mode: "manual" },
-          generation: 1,
-          revision: 1,
-          createdAt: now,
-          updatedAt: now,
-          lastUsedAt: now,
-          attempts: 0,
-          pinCount: 0,
-          activeUseCount: 0,
-          eventSequence: 0,
-          target: "linux",
-        } satisfies CoordinatorCheckpointRecord);
+            owner: principal.owner,
+            org: principal.org,
+            name: id,
+            imageID: id,
+            now,
+          }),
+        );
       }),
     );
     const claims = await Promise.all(
@@ -869,38 +806,17 @@ describe("PostgresCoordinatorStorage", () => {
     const now = new Date().toISOString();
     await Promise.all(
       checkpointIDs.map(async (id) => {
-        await storage.put(checkpointKey(id), {
-          version: 1,
-          id,
-          owner: principal.owner,
-          org: principal.org,
-          leaseID: "cbx_000000000001",
-          provider: "aws",
-          scope: { region: "eu-west-1", accountID: "123456789012" },
-          name: id,
-          strategy: "disk-snapshot",
-          noReboot: true,
-          image: {
+        await storage.put(
+          checkpointKey(id),
+          postgresCheckpointFixture({
             id,
-            resourceID: id,
-            kind: "aws-ebs-snapshot",
-            immutableID: id,
-            snapshotIDs: [id],
-            state: "available",
-          },
-          state: "ready",
-          retention: { mode: "manual" },
-          generation: 1,
-          revision: 1,
-          createdAt: now,
-          updatedAt: now,
-          lastUsedAt: now,
-          attempts: 0,
-          pinCount: 0,
-          activeUseCount: 0,
-          eventSequence: 0,
-          target: "linux",
-        } satisfies CoordinatorCheckpointRecord);
+            owner: principal.owner,
+            org: principal.org,
+            name: id,
+            imageID: id,
+            now,
+          }),
+        );
       }),
     );
     const claims = await Promise.all(
@@ -971,38 +887,17 @@ describe("PostgresCoordinatorStorage", () => {
     const id = "chk_postgres_claim_cap";
     const now = new Date().toISOString();
     const org = orgKeyForLabel("example-org");
-    await storage.put(checkpointKey(id), {
-      version: 1,
-      id,
-      owner: "alice@example.com",
-      org,
-      leaseID: "cbx_000000000001",
-      provider: "aws",
-      scope: { region: "eu-west-1", accountID: "123456789012" },
-      name: "parallel-checkpoint",
-      strategy: "disk-snapshot",
-      noReboot: true,
-      image: {
-        id: "snap-owned",
-        resourceID: "snap-owned",
-        kind: "aws-ebs-snapshot",
-        immutableID: "snap-owned",
-        snapshotIDs: ["snap-owned"],
-        state: "available",
-      },
-      state: "ready",
-      retention: { mode: "manual" },
-      generation: 1,
-      revision: 1,
-      createdAt: now,
-      updatedAt: now,
-      lastUsedAt: now,
-      attempts: 0,
-      pinCount: 0,
-      activeUseCount: 0,
-      eventSequence: 0,
-      target: "linux",
-    } satisfies CoordinatorCheckpointRecord);
+    await storage.put(
+      checkpointKey(id),
+      postgresCheckpointFixture({
+        id,
+        owner: "alice@example.com",
+        org,
+        name: "parallel-checkpoint",
+        imageID: "snap-owned",
+        now,
+      }),
+    );
     const limits = checkpointLimits({ CRABBOX_MAX_CHECKPOINT_USE_CLAIMS: "5" });
 
     const results = await Promise.allSettled(
@@ -1162,6 +1057,55 @@ describe("PostgresCoordinatorStorage", () => {
     },
   );
 });
+
+function postgresCheckpointFixture({
+  id,
+  owner,
+  org,
+  name,
+  imageID,
+  now,
+}: {
+  id: string;
+  owner: string;
+  org: string;
+  name: string;
+  imageID: string;
+  now: string;
+}) {
+  return {
+    version: 1,
+    id,
+    owner,
+    org,
+    leaseID: "cbx_000000000001",
+    provider: "aws",
+    scope: { region: "eu-west-1", accountID: "123456789012" },
+    name,
+    strategy: "disk-snapshot",
+    noReboot: true,
+    image: {
+      id: imageID,
+      resourceID: imageID,
+      kind: "aws-ebs-snapshot",
+      immutableID: imageID,
+      snapshotIDs: [imageID],
+      state: "available",
+    },
+    state: "ready",
+    retention: { mode: "manual" },
+    generation: 1,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+    lastUsedAt: now,
+    attempts: 0,
+    pinCount: 0,
+    activeUseCount: 0,
+    eventSequence: 0,
+    target: "linux",
+  } satisfies CoordinatorCheckpointRecord;
+}
 
 async function postgresReadyPoolFixture() {
   const pool = statefulFakePool();

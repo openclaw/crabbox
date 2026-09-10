@@ -25,16 +25,30 @@ type DelegatedSandbox struct {
 // DelegatedSandboxCommand keeps command preparation (including credential
 // staging) outside the execution timer. Close receives a bounded, uncanceled
 // context before sandbox cleanup, including for retained/reused sandboxes.
-// Best-effort transport cleanup and its diagnostics remain adapter-owned.
+// Adapters may return a mandatory cleanup failure, or warn and return nil for
+// best-effort cleanup. An explicit ExitError preserves its cleanup-only code.
 type DelegatedSandboxCommand struct {
 	Text  string
 	Run   func(context.Context) (int, error)
-	Close func(context.Context)
+	Close func(context.Context) error
+}
+
+type observedProcessEndError struct{ message string }
+
+func (e observedProcessEndError) Error() string { return e.message }
+
+// ObservedProcessEndError marks an abnormal end decoded for the submitted
+// command. Its accompanying return code is the observed process exit, not a
+// transport status. The message must already be safe to display. Return this
+// error directly from Command.Run; wrapping or joining it loses this distinction.
+func ObservedProcessEndError(message string) error {
+	return observedProcessEndError{message: message}
 }
 
 // DelegatedSandboxLifecycle describes sandbox operations, not a provider API.
 // Adapters retain claim authorization, scope checks, locks, credential filtering,
-// archive transport and execution. Jobs and SSH leases have different lifecycles.
+// archive transport and execution. Persistent shell allocations fit this owner;
+// finite batch jobs and SSH leases have different lifecycles.
 type DelegatedSandboxLifecycle struct {
 	Provider       string
 	Runtime        core.Runtime
@@ -47,23 +61,73 @@ type DelegatedSandboxLifecycle struct {
 	PrepareArchive func(context.Context) (*core.PreparedArchive, error)
 	Acquire        func(context.Context) (DelegatedSandbox, error)
 	Resolve        func(context.Context) (DelegatedSandbox, error)
-	Setup          func(context.Context) error
-	Sync           func(context.Context, *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error)
-	NoSync         func(context.Context) error
-	Command        func(context.Context) (DelegatedSandboxCommand, error)
-	Retained       func(context.Context) error
-	Cleanup        func(context.Context) error
+	// AdmitReuse checks run readiness after Resolve binds an authorized session.
+	// Failure retains that session without activity refresh or rerun hints.
+	AdmitReuse func(context.Context) error
+	Setup      func(context.Context) error
+	Sync       func(context.Context, *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error)
+	NoSync     func(context.Context) error
+	Command    func(context.Context) (DelegatedSandboxCommand, error)
+	Retained   func(context.Context) error
+	Cleanup    func(context.Context) error
+}
+
+// FinalizeDelegatedCommandOutcome interprets a provider's command response.
+// Transport errors do not establish command exits, regardless of numeric code.
+func FinalizeDelegatedCommandOutcome(exitCode int, err error) core.RunResult {
+	if err == nil {
+		return core.FinalizeRunResult(core.RunResult{ExitCode: exitCode}, nil)
+	}
+	if _, observed := err.(observedProcessEndError); observed {
+		if exitCode == 0 {
+			exitCode = 1
+		}
+		return core.RunResult{ExitCode: exitCode, Status: core.RunStatusFailed, ErrorKind: core.RunErrorCommandExit}
+	}
+	outcome := core.FinalizeRunResult(core.RunResult{}, err)
+	outcome.ExitCode = 1
+	return outcome
+}
+
+// PinDelegatedRunFailure classifies an unclassified setup failure before cleanup.
+// Nonzero public setup codes (including signed process exits) survive without
+// becoming user command exits. Already classified outcomes and their error
+// identities are left unchanged.
+func PinDelegatedRunFailure(result core.RunResult, err error) (core.RunResult, error) {
+	if err == nil || result.Status != "" {
+		return result, err
+	}
+	outcome := core.FinalizeRunResult(core.RunResult{}, err)
+	result.Status, result.ErrorKind = outcome.Status, outcome.ErrorKind
+	result.ExitCode = core.ExitCodeForError(err, 1)
+	return result, ExitErrorWithCause(result.ExitCode, err.Error(), err)
+}
+
+// AppendDelegatedRunFailure adds a terminal cleanup or reporting failure to an
+// already classified primary outcome. A first failure selects firstCode and a
+// provider-error result; later failures preserve the primary code/status and
+// expose each safe error message without formatting hidden underlying causes.
+func AppendDelegatedRunFailure(result core.RunResult, primary, secondary error, firstCode int) (core.RunResult, error) {
+	if secondary == nil {
+		return result, primary
+	}
+	if primary == nil {
+		result.ExitCode = firstCode
+		result.Status, result.ErrorKind = core.RunStatusFailed, core.RunErrorProvider
+		return result, ExitErrorWithCause(firstCode, secondary.Error(), secondary)
+	}
+	joined := errors.Join(primary, secondary)
+	// The CLI prints the selected ExitError message, not the joined error.
+	return result, ExitErrorWithCause(result.ExitCode, joined.Error(), joined)
 }
 
 // RunDelegatedSandbox owns the single sandbox run sequence and finalization.
 // The first failure determines the exit code/status; later cleanup failures are
-// joined as diagnostics. Cleanup alone fails with code 1. A failed deletion
+// joined as diagnostics. Sandbox cleanup alone fails with code 1. A failed deletion
 // leaves the session kept (and its claim intact in the adapter) for recovery.
 func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle DelegatedSandboxLifecycle) (result core.RunResult, retErr error) {
-	now := time.Now
-	if lifecycle.Runtime.Clock != nil {
-		now = lifecycle.Runtime.Clock.Now
-	}
+	clock := lifecycle.Runtime.Clock
+	now := func() time.Time { return core.ClockNow(clock) }
 	stdout, stderr := lifecycle.Runtime.Stdout, lifecycle.Runtime.Stderr
 	if stdout == nil {
 		stdout = io.Discard
@@ -87,6 +151,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 		syncPhases = []core.TimingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
 	}
 	acquired := req.ID == ""
+	reuseAdmitted := acquired || lifecycle.AdmitReuse == nil
 	commandRan := false
 
 	defer func() {
@@ -96,52 +161,31 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 		if prepared != nil {
 			defer prepared.Close()
 		}
+		result, retErr = PinDelegatedRunFailure(result, retErr)
+		appendFailure := func(err error, firstCode int) {
+			result, retErr = AppendDelegatedRunFailure(result, retErr, err, firstCode)
+		}
 		if command.Close != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
-			command.Close(cleanupCtx)
+			closeErr := command.Close(cleanupCtx)
 			cancel()
-		}
-		// Classify before secondary cleanup errors can obscure command/cancel
-		// outcomes. Setup exit codes are CLI failures, not user command exits.
-		if retErr != nil && result.Status == "" {
-			outcome := core.FinalizeRunResult(core.RunResult{}, retErr)
-			result.Status, result.ErrorKind = outcome.Status, outcome.ErrorKind
-			var ee core.ExitError
-			result.ExitCode = 1
-			if errors.As(retErr, &ee) && ee.Code != 0 {
-				result.ExitCode = ee.Code
-			}
-			// Pin the primary exit before joining cleanup errors, which may
-			// themselves contain an ExitError with a different code.
-			retErr = sandboxLifecycleError(result.ExitCode, retErr.Error(), retErr)
-		}
-		appendFailure := func(err error) {
-			if err == nil {
-				return
-			}
-			if retErr == nil {
-				result.ExitCode = 1
-				result.Status, result.ErrorKind = core.RunStatusFailed, core.RunErrorProvider
-				retErr = sandboxLifecycleError(1, err.Error(), err)
-			} else {
-				retErr = errors.Join(retErr, err)
-			}
+			appendFailure(closeErr, core.ExitCodeForError(closeErr, 1))
 		}
 		if result.Session != nil {
 			shouldStop := acquired && !req.Keep
-			if retErr != nil {
+			if retErr != nil && reuseAdmitted {
 				core.HandleDelegatedRunFailure(stderr, req, lifecycle.Provider, sandbox.LeaseID, sandbox.Slug, lifecycle.IdleTimeout, lifecycle.TTL, acquired, &shouldStop)
 			}
 			result.Session.Kept = true
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 			if shouldStop {
 				if err := lifecycle.Cleanup(cleanupCtx); err != nil {
-					appendFailure(fmt.Errorf("%s cleanup failed: %w", lifecycle.Provider, err))
+					appendFailure(fmt.Errorf("%s cleanup failed: %w", lifecycle.Provider, err), 1)
 				} else {
 					result.Session.Kept = false
 				}
-			} else if lifecycle.Retained != nil {
-				appendFailure(lifecycle.Retained(cleanupCtx))
+			} else if reuseAdmitted && lifecycle.Retained != nil {
+				appendFailure(lifecycle.Retained(cleanupCtx), 1)
 			}
 			cancel()
 		}
@@ -159,11 +203,11 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 				Provider: lifecycle.Provider, LeaseID: result.LeaseID, Slug: result.Slug,
 				SyncDelegated: true, SyncSkipped: req.NoSync, SyncMs: syncDuration.Milliseconds(), SyncPhases: syncPhases,
 				CommandMs: result.Command.Milliseconds(), TotalMs: result.Total.Milliseconds(),
-				ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label),
+				ExitCode: result.ExitCode, Label: strings.TrimSpace(req.Label), Workdir: lifecycle.Workdir,
 			}, result, retErr))
 			// A failed writer cannot emit an agreed record. Still report the I/O
 			// failure without replacing an existing command/cleanup failure.
-			appendFailure(err)
+			appendFailure(err, 1)
 		}
 	}()
 
@@ -200,6 +244,15 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 	result.Session = &core.RunSessionHandle{
 		Provider: lifecycle.Provider, LeaseID: sandbox.LeaseID, Slug: sandbox.Slug,
 		Reused: !acquired, CleanupCommand: sandbox.CleanupCommand,
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if !acquired && lifecycle.AdmitReuse != nil {
+		if err := lifecycle.AdmitReuse(ctx); err != nil {
+			return result, err
+		}
+		reuseAdmitted = true
 	}
 	if err := ctx.Err(); err != nil {
 		return result, err
@@ -242,16 +295,12 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 	result.ExitCode, err = command.Run(ctx)
 	result.Command = now().Sub(commandStarted)
 	commandRan = true
+	outcome := FinalizeDelegatedCommandOutcome(result.ExitCode, err)
+	result.ExitCode, result.Status, result.ErrorKind = outcome.ExitCode, outcome.Status, outcome.ErrorKind
 	if err != nil {
-		// Transport errors are not command exits, even if the API also reports
-		// a nonzero process code. Preserve context causes for normalization.
-		outcome := core.FinalizeRunResult(core.RunResult{}, err)
-		result.ExitCode = 1
-		result.Status, result.ErrorKind = outcome.Status, outcome.ErrorKind
-		return result, sandboxLifecycleError(1, fmt.Sprintf("%s run failed: %v", lifecycle.Provider, RedactErrorSecrets(err.Error())), err)
+		return result, ExitErrorWithCause(result.ExitCode, fmt.Sprintf("%s run failed: %v", lifecycle.Provider, RedactErrorSecrets(err.Error())), err)
 	}
 	if result.ExitCode != 0 {
-		result = core.FinalizeRunResult(result, nil)
 		return result, core.ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s run exited %d", lifecycle.Provider, result.ExitCode)}
 	}
 	return result, nil
@@ -266,6 +315,12 @@ type sandboxRunError struct {
 
 func (e sandboxRunError) Unwrap() []error { return []error{e.ExitError, e.cause} }
 
-func sandboxLifecycleError(code int, message string, cause error) error {
+func (e sandboxRunError) RunClassificationCause() error {
+	return core.PrimaryRunClassificationCause(e.cause)
+}
+
+// ExitErrorWithCause keeps the selected exit code and a display-safe message
+// while retaining the cause for errors.Is/As without printing it again.
+func ExitErrorWithCause(code int, message string, cause error) error {
 	return sandboxRunError{ExitError: core.ExitError{Code: code, Message: message}, cause: cause}
 }

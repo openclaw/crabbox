@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type machine struct {
@@ -37,7 +39,7 @@ func (b *backend) createMachine(ctx context.Context, name string) error {
 	args = append(args, blank(strings.TrimSpace(b.cfg.AppleContainer.Image), "ubuntu:26.04"))
 	result, err := b.command(ctx, args, "")
 	if err != nil {
-		return exit(5, "create Apple container machine: %s", failureDetail(result, err))
+		return shared.ExitErrorWithCause(5, fmt.Sprintf("create Apple container machine: %s", failureDetail(result, err)), err)
 	}
 	return nil
 }
@@ -45,7 +47,7 @@ func (b *backend) createMachine(ctx context.Context, name string) error {
 func (b *backend) inspectMachine(ctx context.Context, name string) (machine, error) {
 	result, err := b.control(ctx, []string{"machine", "inspect", name})
 	if err != nil {
-		return machine{}, exit(4, "Apple container machine %q not found: %s", name, failureDetail(result, err))
+		return machine{}, shared.ExitErrorWithCause(4, fmt.Sprintf("Apple container machine %q not found: %s", name, failureDetail(result, err)), err)
 	}
 	var machines []machine
 	if err := json.Unmarshal([]byte(result.Stdout), &machines); err != nil || len(machines) != 1 || machines[0].ID != name || machines[0].Status == "" {
@@ -57,7 +59,7 @@ func (b *backend) inspectMachine(ctx context.Context, name string) (machine, err
 func (b *backend) listMachines(ctx context.Context) ([]machine, error) {
 	result, err := b.control(ctx, []string{"machine", "list", "--format", "json"})
 	if err != nil {
-		return nil, exit(5, "list Apple container machines: %s", failureDetail(result, err))
+		return nil, shared.ExitErrorWithCause(5, fmt.Sprintf("list Apple container machines: %s", failureDetail(result, err)), err)
 	}
 	var machines []machine
 	if err := json.Unmarshal([]byte(result.Stdout), &machines); err != nil {
@@ -79,7 +81,7 @@ func (b *backend) listMachines(ctx context.Context) ([]machine, error) {
 func (b *backend) removeMachine(ctx context.Context, name string) error {
 	result, err := b.control(ctx, []string{"machine", "rm", name})
 	if err != nil {
-		return exit(5, "delete Apple container machine %q: %s", name, failureDetail(result, err))
+		return shared.ExitErrorWithCause(5, fmt.Sprintf("delete Apple container machine %q: %s", name, failureDetail(result, err)), err)
 	}
 	return nil
 }

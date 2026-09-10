@@ -3,6 +3,9 @@ package cloudflaredynamicworkers
 import (
 	"flag"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type flagValues struct {
@@ -31,12 +34,9 @@ func RegisterProviderFlags(fs *flag.FlagSet, defaults Config) any {
 }
 
 func ApplyProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if cfg.Provider == providerName || cfg.Provider == "cf-dynamic" || cfg.Provider == "cfdw" {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s", providerName)
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s", providerName)
+	if core.ProviderNameMatchesExact(cfg.Provider, Provider{}) {
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
+			return err
 		}
 		if flagWasSet(fs, "expose") {
 			return exit(2, "--expose is not supported for provider=%s", providerName)

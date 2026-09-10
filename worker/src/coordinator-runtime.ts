@@ -113,6 +113,10 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   if (path[0] === "v1" && path[1] === "workspaces") {
     return "direct";
   }
+  if (method === "GET" && path.join("/") === "v1/control") {
+    // Admission only binds this socket; control messages retain their lifecycle fences.
+    return "direct";
+  }
   if (method === "GET" && path.join("/") === "v1/native-vnc/handoff") {
     return "direct";
   }
@@ -128,7 +132,7 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     path[2] &&
     ((method === "POST" &&
       path.length === 4 &&
-      (path[3] === "promote" || path[3] === "promote-catalog")) ||
+      (path[3] === "promote" || path[3] === "promote-cas" || path[3] === "promote-catalog")) ||
       (method === "DELETE" &&
         (path.length === 3 ||
           (path.length === 4 && (path[3] === "promote-catalog" || path[3] === "promote")))))
@@ -151,6 +155,17 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     return "direct";
   }
   if (path[0] === "v1" && path[1] === "providers" && path[3] === "readiness") {
+    return "direct";
+  }
+  if (
+    path[0] === "v1" &&
+    path[1] === "leases" &&
+    path[2] &&
+    path.length === 4 &&
+    path[3] === "cleanup" &&
+    (method === "GET" || method === "POST")
+  ) {
+    // Provider reads stay outside the queue; recovery owns its short final commit fence.
     return "direct";
   }
   if (

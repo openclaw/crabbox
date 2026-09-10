@@ -51,7 +51,7 @@ async function temporary(t) {
   return directory;
 }
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, { encoding: "utf8", timeout: 60000, ...options });
+  const result = spawnSync(command, args, { encoding: "utf8", timeout: 60000, maxBuffer: 16 * 1024 * 1024, ...options });
   assert.equal(result.status, 0, result.stderr || result.stdout || String(result.error));
   return result.stdout;
 }
@@ -155,6 +155,34 @@ test("shell and PowerShell literals preserve quoting-sensitive data without eval
   }
 });
 
+test("optional Linux packages reuse installed capabilities and preserve failures", { skip: process.platform === "win32" }, async (t) => {
+  const fixture = await readFile(resolve(repoRoot, "testdata/bootstrap/installed-browser-fixture.sh"), "utf8");
+  const packages = "tigervnc-standalone-server xfce4-session";
+  for (const entry of [
+    { name: "desktop installed", command: `crabbox_install_packages ${packages}`, env: {}, code: 0, calls: "" },
+    { name: "installed package held", command: `crabbox_install_packages ${packages}`, env: { HELD_PACKAGE: "xfce4-session" }, code: 0, calls: "" },
+    { name: "desktop package missing", command: `crabbox_install_packages ${packages}`, env: { MISSING_PACKAGE: "xfce4-session", INSTALL_ALLOWED: "1" }, code: 0, calls: `apt-get install -y --no-install-recommends ${packages}\n` },
+    { name: "desktop install fails", command: `crabbox_install_packages ${packages}`, env: { MISSING_PACKAGE: "xfce4-session", INSTALL_ALLOWED: "1", INSTALL_FAIL: "1" }, code: 47, calls: `apt-get install -y --no-install-recommends ${packages}\n` },
+    { name: "Chrome works", command: "crabbox_existing_browser", env: {}, code: 0, browser: "google-chrome", calls: "" },
+    { name: "Chromium works", command: "crabbox_existing_browser", env: { BROWSER_PACKAGE: "chromium" }, code: 0, browser: "chromium", calls: "" },
+    { name: "browser package missing", command: "crabbox_existing_browser", env: { MISSING_PACKAGE: "google-chrome-stable" }, code: 1, calls: "" },
+    { name: "browser package unconfigured", command: "crabbox_existing_browser", env: { BROKEN_PACKAGE: "google-chrome-stable" }, code: 1, calls: "" },
+    { name: "browser executable broken", command: "crabbox_existing_browser", env: { BROWSER_BROKEN: "1" }, code: 1, calls: "" },
+  ]) {
+    await t.test(entry.name, async (t) => {
+      const directory = await temporary(t);
+      const log = join(directory, "calls");
+      const result = spawnSync("bash", ["-c", fixture + "\n" + shared.sharedLinuxOptionalPackages() + "\n" + entry.command], {
+        env: { PATH: "/usr/bin:/bin", FIXTURE_BIN: join(directory, "bin"), FIXTURE_LOG: log, ...entry.env }, encoding: "utf8", timeout: 5000,
+      });
+      assert.equal(result.status, entry.code, result.stderr || String(result.error));
+      if (entry.browser) assert.equal(result.stdout.trim(), join(directory, "bin", entry.browser));
+      const calls = await readFile(log, "utf8").catch(error => { if (error.code === "ENOENT") return ""; throw error; });
+      assert.equal(calls, entry.calls);
+    });
+  }
+});
+
 test("macOS bootstrap installs and reuses its account password without logging it", async (t) => {
   for (const traced of [false, true]) {
     await t.test(traced ? "caller enables xtrace" : "normal caller", async (t) => {
@@ -166,11 +194,12 @@ test("macOS bootstrap installs and reuses its account password without logging i
       const readyCalls = join(state, "ready-calls");
       // Execute the complete generated script with task-local paths and inert OS commands.
       let script = shared.sharedMacOS("fixture", "ssh-ed25519 fixture", work, ["2222", "22"]);
+      script = script.replaceAll("/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", `${bin}:/usr/bin:/bin`);
       for (const [original, local] of [
         ["/var/db/crabbox", state], ["/etc/ssh/sshd_config", join(state, "sshd_config")],
         ["/usr/sbin/sshd", join(bin, "sshd")], ["/usr/local/bin/crabbox-ready", join(bin, "crabbox-ready")],
       ]) script = script.replaceAll(original, local);
-      for (const command of ["sshd", "rsync", "curl", "nc"]) {
+      for (const command of ["sshd", "rsync", "curl", "node", "npm", "nc"]) {
         await writeFile(join(bin, command), `#!/bin/bash\nprintf '%s\\n' ${shellQuote(command)} >>${shellQuote(readyCalls)}\n`, { mode: 0o755 });
       }
       const receivePassword = `const fs = require("node:fs");
@@ -202,7 +231,7 @@ dscl() {
       assert.match(password, /^[A-Za-z0-9]{16}$/u);
       assert.equal(await readFile(installedPath, "utf8"), password + "\n");
       assert.equal((await stat(passwordPath)).mode & 0o777, 0o600);
-      assert.match(await readFile(readyCalls, "utf8"), /rsync\ncurl\nnc\nnc\n$/u);
+      assert.match(await readFile(readyCalls, "utf8"), /rsync\ncurl\nnode\nnpm\nnc\nnc\n$/u);
       const second = invoke();
       assert.equal(second.status, 0, "bootstrap must reuse the existing password");
       assert.equal(await readFile(passwordPath, "utf8"), password + "\n");
@@ -284,7 +313,7 @@ test("PowerShell fragments parse and download verification fails closed before e
   const directory = await temporary(t);
   const files = [];
   for (const fragment of sources.fragments.filter((f) => f.file.endsWith(".ps1"))) {
-    const file = join(directory, fragment.file);
+    const file = join(directory, fragment.name + ".ps1");
     await writeFile(file, render(fragment, fixtures.find((f) => f.name === "windows-quotes")));
     files.push(file);
   }
@@ -300,6 +329,10 @@ test("PowerShell fragments parse and download verification fails closed before e
 test("check detects missing and stale outputs without rewriting, and regeneration repairs them", async (t) => {
   const directory = await temporary(t);
   await cp(resolve(repoRoot, "recipes"), join(directory, "recipes"), { recursive: true });
+  await mkdir(join(directory, "scripts"), { recursive: true });
+  for (const name of ["install-linux-developer-tools.sh", "start-windows-detached-process.ps1"]) {
+    await cp(resolve(repoRoot, "scripts", name), join(directory, "scripts", name));
+  }
   await mkdir(join(directory, "internal/cli"), { recursive: true });
   await mkdir(join(directory, "worker/src"), { recursive: true });
   await mkdir(join(directory, "scripts"), { recursive: true });

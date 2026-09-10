@@ -254,7 +254,7 @@ func (a App) adminHosts(ctx context.Context, args []string) error {
 
 func (a App) adminHostsWithCommand(ctx context.Context, commandName string, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
-		return exit(2, "usage: crabbox %s <list|offerings|quota|allocate|release|policy> [--provider aws] [--target macos] [flags]", commandName)
+		return exit(2, "usage: crabbox %s <list|offerings|quota|allocate|release|reservation|clear|policy> [--provider aws] [--target macos] [flags]", commandName)
 	}
 	switch args[0] {
 	case "list":
@@ -267,11 +267,45 @@ func (a App) adminHostsWithCommand(ctx context.Context, commandName string, args
 		return a.adminMacHostsAllocate(ctx, args[1:])
 	case "release":
 		return a.adminMacHostsRelease(ctx, args[1:])
+	case "reservation", "clear":
+		return a.adminHostReservation(ctx, args[0], args[1:])
 	case "policy":
 		return a.adminMacHostsPolicy(args[1:])
 	default:
-		return exit(2, "usage: crabbox %s <list|offerings|quota|allocate|release|policy> [--provider aws] [--target macos] [flags]", commandName)
+		return exit(2, "usage: crabbox %s <list|offerings|quota|allocate|release|reservation|clear|policy> [--provider aws] [--target macos] [flags]", commandName)
 	}
+}
+
+func (a App) adminHostReservation(ctx context.Context, action string, args []string) error {
+	args, force := extractBoolFlag(args, "force")
+	args, jsonOut := extractBoolFlag(args, "json")
+	args, hostID := extractFirstPositionalArg(args, map[string]bool{"provider": true, "target": true, "region": true})
+	fs := newFlagSet("admin hosts "+action, a.Stderr)
+	provider, target := adminHostScopeFlags(fs)
+	region := fs.String("region", "", "AWS region")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if err := validateAdminHostScope(*provider, *target); err != nil {
+		return err
+	}
+	if hostID == "" || fs.NArg() != 0 || (action == "reservation" && force) {
+		return exit(2, "usage: crabbox admin hosts %s <host-id> [--region <region>] [--json]%s", action, map[bool]string{true: " [--force]"}[action == "clear"])
+	}
+	coord, err := configuredAdminCoordinator()
+	if err != nil {
+		return err
+	}
+	result, err := coord.AdminHostReservation(ctx, *region, hostID, action == "clear", force)
+	if err != nil {
+		return err
+	}
+	if jsonOut {
+		return json.NewEncoder(a.Stdout).Encode(result)
+	}
+	enc := json.NewEncoder(a.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(result)
 }
 
 func adminHostScopeFlags(fs flagSetLike) (*string, *string) {

@@ -17,7 +17,6 @@ import (
 const (
 	devboxGroupVersion = "devbox.sealos.io/v1alpha2"
 	devboxResource     = "devboxes.devbox.sealos.io"
-	devboxCRD          = "devboxes.devbox.sealos.io"
 )
 
 func (b *backend) kubectl(ctx context.Context, stdout io.Writer, namespace bool, args ...string) (string, error) {
@@ -339,13 +338,6 @@ func doctorCheck(status, check, message string, details map[string]string) core.
 	}
 }
 
-func formatDoctorSummary(checks []core.DoctorCheck) string {
-	status := "ready"
-	for _, check := range checks {
-		if strings.EqualFold(check.Status, "failed") || strings.EqualFold(check.Status, "missing") {
-			status = "blocked"
-			break
-		}
-	}
+func formatDoctorSummary(status string) string {
 	return fmt.Sprintf("automation_surface=%s control_plane=%s mutation=false", AutomationSurfaceDecision, status)
 }

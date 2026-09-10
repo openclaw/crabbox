@@ -6,10 +6,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestWriteWindowsBootstrapSSHWarningIncludesDetail(t *testing.T) {
@@ -38,7 +41,9 @@ func TestCloudInitUsesRetryingBootstrap(t *testing.T) {
 		"test -s '/etc/ssl/certs/ca-certificates.crt'",
 		"crabbox Linux readiness manifest verified; skipping apt bootstrap",
 		"crabbox legacy image readiness migrated without package-manager work",
-		"retry apt-get update",
+		"retry apt-get -o Acquire::Languages=none",
+		"-o Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false",
+		"-o Acquire::IndexTargets::deb::CNF::DefaultEnabled=false update",
 		"retry apt-get install -y --no-install-recommends $crabbox_readiness_packages",
 		"crabbox_readiness_packages='ca-certificates curl git jq openssh-server rsync tmux util-linux'",
 		"curl --version >/dev/null",
@@ -143,7 +148,7 @@ func TestCloudInitStartsSSHBeforeOptionalDesktopBootstrap(t *testing.T) {
 	cfg.Desktop = true
 	got := cloudInit(cfg, "ssh-ed25519 test")
 	sshIndex := strings.Index(got, "timeout 30s systemctl restart ssh")
-	desktopIndex := strings.Index(got, "retry apt-get install -y --no-install-recommends tigervnc-standalone-server")
+	desktopIndex := strings.Index(got, "crabbox_install_packages tigervnc-standalone-server")
 	bootstrappedIndex := strings.Index(got, "touch /var/lib/crabbox/bootstrapped")
 	if sshIndex < 0 || desktopIndex < 0 || bootstrappedIndex < 0 {
 		t.Fatalf("cloudInit(desktop) missing expected bootstrap markers")
@@ -607,6 +612,71 @@ func TestAWSUserDataDefaultsToCloudInit(t *testing.T) {
 	}
 }
 
+func TestAWSUserDataUbuntuAPTPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		modify func(*Config)
+		want   bool
+	}{
+		{name: "default Canonical amd64", want: true},
+		{name: "explicit amd64", modify: func(cfg *Config) { cfg.architectureExplicit = true }, want: true},
+		{name: "custom or captured AMI", modify: func(cfg *Config) { cfg.AWSAMI = "ami-custom" }},
+		{name: "snapshot fork", modify: func(cfg *Config) { cfg.AWSSnapshot = "snap-captured" }},
+		{name: "Ubuntu 24.04", modify: func(cfg *Config) { cfg.OSImage = "ubuntu:24.04" }},
+		{name: "explicit ARM", modify: func(cfg *Config) {
+			cfg.Architecture, cfg.architectureExplicit = ArchitectureARM64, true
+		}},
+		{name: "inferred Graviton", modify: func(cfg *Config) { cfg.ServerType = "m7g.large" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = "aws"
+			cfg.ServerType = "m7a.large"
+			if tc.modify != nil {
+				tc.modify(&cfg)
+			}
+			got := awsUserData(cfg, "ssh-ed25519 test")
+			var document map[string]any
+			if err := yaml.Unmarshal([]byte(got), &document); err != nil {
+				t.Fatalf("invalid cloud-config: %v", err)
+			}
+			if !tc.want {
+				if _, ok := document["apt"]; ok {
+					t.Fatal("custom image or unqualified target must retain its APT policy")
+				}
+				if got != cloudInit(cfg, "ssh-ed25519 test") {
+					t.Fatal("excluded image must retain the ordinary cloud-init bytes")
+				}
+				return
+			}
+			want := map[string]any{
+				"primary":  []any{map[string]any{"arches": []any{"amd64"}, "uri": "https://archive.ubuntu.com/ubuntu/"}},
+				"security": []any{map[string]any{"arches": []any{"amd64"}, "uri": "http://security.ubuntu.com/ubuntu/"}},
+			}
+			if !reflect.DeepEqual(document["apt"], want) {
+				t.Fatalf("APT policy = %#v, want primary HTTPS with the separate security archive", document["apt"])
+			}
+		})
+	}
+	for _, provider := range []string{"gcp", "hetzner", "azure"} {
+		t.Run(provider, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = provider
+			got := cloudInit(cfg, "ssh-ed25519 test")
+			if provider == "azure" {
+				got = azureLinuxCloudInit(cfg, "ssh-ed25519 test")
+			}
+			var document map[string]any
+			if err := yaml.Unmarshal([]byte(got), &document); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := document["apt"]; ok {
+				t.Fatal("AWS archive policy must not change another provider")
+			}
+		})
+	}
+}
+
 func TestAWSUserDataWindowsProfile(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "aws"
@@ -793,7 +863,7 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 		`$wslSetup = "C:\ProgramData\crabbox\wsl\linux-setup.sh"`,
 		"WriteAllText($wslSetup",
 		"wsl.exe -d $wslDistro --user root --exec bash /mnt/c/ProgramData/crabbox/wsl/linux-setup.sh",
-		"apt-get install -y --no-install-recommends ca-certificates curl git jq python3-minimal rsync",
+		"apt-get install -y --no-install-recommends ca-certificates curl git jq python3 rsync sudo",
 		"trufflehog_version='3.95.9'",
 		"trufflehog_${trufflehog_version}_linux_amd64.tar.gz",
 		wslTruffleHogAMD64SHA256,
@@ -831,6 +901,66 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 	}
 	if sftpIndex, readyIndex := strings.Index(got, "Subsystem sftp internal-sftp"), strings.Index(got, "crabbox-ready"); sftpIndex < 0 || readyIndex < 0 || sftpIndex > readyIndex {
 		t.Fatalf("windows WSL2 bootstrap must configure SFTP before checking WSL readiness")
+	}
+}
+
+func TestManagedWindowsWSL2BootstrapInstallsNodeBeforeReadiness(t *testing.T) {
+	for _, mode := range []string{windowsModeNormal, windowsModeWSL2} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.TargetOS, cfg.WindowsMode = targetWindows, mode
+			script := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+			install := "bash /var/lib/crabbox/install-linux-developer-tools.sh --node-only"
+			if mode == windowsModeNormal {
+				if strings.Contains(script, install) {
+					t.Fatal("native Windows unexpectedly installs a Linux runtime")
+				}
+				return
+			}
+			setupStart := strings.Index(script, "$linuxSetup = @'")
+			installIndex := strings.Index(script, install)
+			readyIndex := strings.Index(script, "cat >/usr/local/bin/crabbox-ready <<'READY'")
+			if setupStart < 0 || installIndex <= setupStart || readyIndex <= installIndex {
+				t.Fatal("WSL distro must install the shared Node baseline before readiness")
+			}
+			ready := script[readyIndex:]
+			for _, probe := range []string{"node --version >/dev/null", "npm --version >/dev/null"} {
+				if !strings.Contains(ready, probe) {
+					t.Errorf("WSL readiness missing %s", probe)
+				}
+			}
+		})
+	}
+}
+
+func TestManagedWindowsWSL2BootstrapOwnsDistroInitialization(t *testing.T) {
+	for _, mode := range []string{windowsModeNormal, windowsModeWSL2} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.TargetOS, cfg.WindowsMode = targetWindows, mode
+			script := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+			steps := []string{
+				"touch /etc/cloud/cloud-init.disabled",
+				"wsl.exe --terminate $wslDistro",
+				"wsl.exe -d $wslDistro --exec /usr/local/bin/crabbox-ready",
+				"WSL cold-start readiness failed with exit $LASTEXITCODE",
+				"Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
+			}
+			last := -1
+			for _, step := range steps {
+				index := strings.Index(script, step)
+				if mode == windowsModeNormal {
+					if index >= 0 && step != steps[len(steps)-1] {
+						t.Fatalf("native Windows unexpectedly configures WSL: %s", step)
+					}
+					continue
+				}
+				if index <= last {
+					t.Fatalf("missing or out-of-order WSL initialization step: %s", step)
+				}
+				last = index
+			}
+		})
 	}
 }
 

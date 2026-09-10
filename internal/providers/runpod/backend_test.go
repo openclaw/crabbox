@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -47,16 +49,34 @@ func TestRunpodClientRedactsReflectedCredential(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "quota exceeded") {
 		t.Fatalf("Whoami error=%v, want redacted useful provider error", err)
 	}
+	var apiErr *runpodAPIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized || apiErr.Status != "401 Unauthorized" {
+		t.Fatalf("API error classification changed: %v", err)
+	}
 }
 
 func TestRunpodIsRunpodProviderNameAcceptsAliases(t *testing.T) {
+	selected := func(name string) bool {
+		cfg := core.BaseConfig()
+		cfg.Provider = name
+		fs := flag.NewFlagSet("name-contract", flag.ContinueOnError)
+		p := Provider{}
+		values := p.RegisterFlags(fs, cfg)
+		if err := fs.Parse([]string{"--runpod-cloud-type="}); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		return cfg.Runpod.CloudType == "SECURE"
+	}
 	for _, name := range []string{"runpod", "Run-Pod", "  runpodio  ", "RUNPOD"} {
-		if !isRunpodProviderName(name) {
+		if !selected(name) {
 			t.Fatalf("isRunpodProviderName(%q) = false, want true", name)
 		}
 	}
 	for _, name := range []string{"", "exe-dev", "railway", "runpods"} {
-		if isRunpodProviderName(name) {
+		if selected(name) {
 			t.Fatalf("isRunpodProviderName(%q) = true, want false", name)
 		}
 	}
@@ -224,6 +244,7 @@ func TestRunpodDeployPayloadUsesGPUAvailabilityPriority(t *testing.T) {
 func TestRunpodDeployPayloadSerializesSSHPublicKey(t *testing.T) {
 	payload := runpodDeployPayload(runpodDeployInput{
 		InstanceID: "NVIDIA L4",
+		CloudType:  "SECURE",
 		PublicKey:  testRunpodPublicKey,
 	})
 	data, err := json.Marshal(payload)
@@ -630,31 +651,46 @@ func TestRunpodAcquireRollbackCannotBlockForever(t *testing.T) {
 }
 
 func TestRunpodAcquireRejectsMismatchedReadyPodAndRollsBack(t *testing.T) {
-	fake := &fakeRunpodAPI{
-		deployPod: runpodPod{ID: "pod_created", Name: "crabbox-blue-12345678"},
-		getPod: func(string) (runpodPod, error) {
-			return runpodPod{
-				ID:            "pod_other",
-				Name:          "crabbox-blue-12345678",
-				DesiredStatus: "RUNNING",
-				Runtime: &runpodRuntime{Ports: []runpodRuntimePort{{
-					IP: "203.0.113.9", PrivatePort: 22, PublicPort: 41200, IsIPPublic: true, Type: "tcp",
-				}}},
-			}, nil
-		},
-	}
-	backend := &runpodLeaseBackend{
-		cfg:    testRunpodConfig(t),
-		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		client: fake,
-	}
-
-	_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
-	if err == nil || !strings.Contains(err.Error(), "readiness resolved pod_other") {
-		t.Fatalf("err=%v, want create/readiness identity mismatch", err)
-	}
-	if len(fake.terminated) != 1 || fake.terminated[0] != "pod_created" {
-		t.Fatalf("terminated=%v, want exact created pod rollback", fake.terminated)
+	for _, tt := range []struct {
+		name       string
+		mutate     func(*runpodPod)
+		diagnostic string
+	}{
+		{"different ID", func(p *runpodPod) { p.ID = "pod_other" }, "readiness resolved pod_other"},
+		{"missing ID", func(p *runpodPod) { p.ID = "" }, "readiness resolved <empty>"},
+		{"different name", func(p *runpodPod) { p.Name = "other-name" }, "readiness returned other-name"},
+		{"missing name", func(p *runpodPod) { p.Name = "" }, "readiness returned <empty>"},
+	} {
+		for _, keep := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/keep=%v", tt.name, keep), func(t *testing.T) {
+				fake := &fakeRunpodAPI{deployPod: runpodPod{ID: "pod_created"}}
+				fake.getPod = func(id string) (runpodPod, error) {
+					if id != "pod_created" {
+						t.Fatalf("GET pod=%s", id)
+					}
+					pod := runpodPod{
+						ID: "pod_created", Name: fake.deployCalls[0].Name, DesiredStatus: "RUNNING",
+						Runtime: &runpodRuntime{Ports: []runpodRuntimePort{{
+							IP: "203.0.113.9", PrivatePort: 22, PublicPort: 41200, IsIPPublic: true, Type: "tcp",
+						}}},
+					}
+					tt.mutate(&pod)
+					return pod, nil
+				}
+				backend := &runpodLeaseBackend{cfg: testRunpodConfig(t), rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: fake}
+				_, err := backend.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: keep})
+				if err == nil || !strings.Contains(err.Error(), tt.diagnostic) {
+					t.Fatalf("err=%v, want %s", err, tt.diagnostic)
+				}
+				if keep {
+					if len(fake.terminated) != 0 {
+						t.Fatalf("kept pod terminated: %v", fake.terminated)
+					}
+				} else if len(fake.terminated) != 1 || fake.terminated[0] != "pod_created" {
+					t.Fatalf("terminated=%v, want original pod only", fake.terminated)
+				}
+			})
+		}
 	}
 }
 
@@ -1107,5 +1143,213 @@ func TestRunpodClientRetriesGPUCapacityFallbacks(t *testing.T) {
 	}
 	if len(seen) != 2 || seen[0] != "NVIDIA L4" || seen[1] != "NVIDIA RTX 4000 Ada Generation" {
 		t.Fatalf("seen=%v", seen)
+	}
+}
+
+func TestInheritedWorkRootCallerContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USER", "fixture-user")
+	for _, tc := range []struct{ providerRoot, genericRoot, want string }{
+		{"", "", "/tmp/crabbox"},
+		{"", "/work/crabbox", "/tmp/crabbox"},
+		{"", "/Users/ec2-user/crabbox", "/tmp/crabbox"},
+		{"", "C:\\crabbox", "/tmp/crabbox"},
+		{"", " /work/crabbox ", " /work/crabbox "},
+		{"", "/WORK/crabbox", "/WORK/crabbox"},
+		{"", "c:\\crabbox", "c:\\crabbox"},
+		{"", "/srv/custom", "/srv/custom"},
+		{"", "/Users/alice/custom", "/Users/alice/custom"},
+		{"", "D:\\custom", "D:\\custom"},
+		{"", "  ", "  "},
+		{" ", "/srv/custom", " "},
+		{"/work/crabbox", "/srv/custom", "/work/crabbox"},
+		{"relative", "/srv/custom", "relative"},
+		{"/provider/root", "/srv/custom", "/provider/root"},
+	} {
+		for _, explicit := range []bool{false, true} {
+			cfg := Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
+			if explicit {
+				core.MarkWorkRootExplicit(&cfg)
+				cfg.TargetOS = "existing-target"
+				cfg.WindowsMode = "prior-mode"
+			}
+			cfg.WorkRoot = tc.genericRoot
+			cfg.Runpod.WorkRoot = tc.providerRoot
+			cfg.Runpod.APIURL = "https://fixture.invalid"
+			cfg.Runpod.CloudType = "SECURE"
+			cfg.Runpod.InstanceID = "fixture-instance"
+			cfg.Runpod.Image = "fixture-image"
+			want := cfg
+			want.Provider = "runpod"
+			if !explicit {
+				want.TargetOS = "linux"
+			}
+			want.Runpod.WorkRoot = tc.want
+			want.WorkRoot = tc.want
+			want.Runpod.DiskGB = 20
+			want.SSHPort = ""
+			want.SSHFallbackPorts = nil
+			want.ServerType = "fixture-instance"
+			applyRunpodDefaults(&cfg)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("whole config differs for roots=%q/%q explicit=%t: got=%#v want=%#v", tc.providerRoot, tc.genericRoot, explicit, cfg, want)
+			}
+		}
+	}
+}
+
+func TestRunpodBindingFlagContract(t *testing.T) {
+	for _, selector := range []string{"runpod", "run-pod", " RUNPODIO ", "aws"} {
+		for _, disk := range []int{0, -2} {
+			cfg := core.BaseConfig()
+			cfg.Provider = selector
+			cfg.Runpod.DiskGB = 37
+			fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+			p := Provider{}
+			values := p.RegisterFlags(fs, cfg)
+			count := 0
+			fs.VisitAll(func(*flag.Flag) { count++ })
+			if count != 8 || fs.Lookup("runpod-api-key") != nil || fs.Lookup("runpod-user").DefValue != "" || fs.Lookup("runpod-work-root").DefValue != "" {
+				t.Fatal("raw flag source/default surface changed")
+			}
+			if err := fs.Parse([]string{"--runpod-url=", "--runpod-cloud-type=", "--runpod-instance-id=fixture-instance", "--runpod-image=fixture-image", "--runpod-template-id=fixture-template", fmt.Sprintf("--runpod-disk-gb=%d", disk), "--runpod-user=alice", "--runpod-work-root=/workspace/fixture"}); err != nil {
+				t.Fatal(err)
+			}
+			before := fmt.Sprintf("%#v", cfg)
+			if err := p.ApplyFlags(&cfg, fs, struct{}{}); err != nil {
+				t.Fatal(err)
+			}
+			if fmt.Sprintf("%#v", cfg) != before {
+				t.Fatal("wrong values type changed config")
+			}
+			if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			expected := core.RunpodConfig{InstanceID: "fixture-instance", Image: "fixture-image", TemplateID: "fixture-template", DiskGB: disk, User: "alice", WorkRoot: "/workspace/fixture"}
+			if selector != "aws" {
+				expected.APIURL = "https://rest.runpod.io/v1"
+				expected.CloudType = "SECURE"
+				expected.DiskGB = 20
+			}
+			if cfg.Runpod != expected {
+				t.Fatalf("selector=%q got=%#v want=%#v", selector, cfg.Runpod, expected)
+			}
+		}
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = "aws"
+	fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+	p := Provider{}
+	values := p.RegisterFlags(fs, cfg)
+	cfg.Runpod.DiskGB = 37
+	cfg.Runpod.Image = "layered-image"
+	expected := cfg.Runpod
+	if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runpod != expected {
+		t.Fatal("unvisited flags overwrote later config")
+	}
+}
+
+func TestRunpodBindingSizingPhase(t *testing.T) {
+	for _, selector := range []string{"runpod", "run-pod", " RUNPODIO ", "aws"} {
+		for _, tc := range []struct {
+			args []string
+			want string
+		}{{[]string{"--type=fixture", "--class="}, "--class is not supported for provider=runpod; use --runpod-instance-id"}, {[]string{"--type="}, "--type is not supported for provider=runpod; use --runpod-image"}} {
+			cfg := core.BaseConfig()
+			cfg.Provider = selector
+			fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+			fs.String("class", "", "")
+			fs.String("type", "", "")
+			p := Provider{}
+			p.RegisterFlags(fs, cfg)
+			if err := fs.Parse(append(tc.args, "--runpod-disk-gb=0")); err != nil {
+				t.Fatal(err)
+			}
+			before := fmt.Sprintf("%#v", cfg)
+			err := p.ApplyFlags(&cfg, fs, struct{}{})
+			if selector == "aws" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				var exitErr core.ExitError
+				if err == nil || err.Error() != tc.want || !errors.As(err, &exitErr) || exitErr.Code != 2 {
+					t.Fatalf("error=%v want=%q", err, tc.want)
+				}
+			}
+			if fmt.Sprintf("%#v", cfg) != before {
+				t.Fatal("sizing before assertion phase changed config")
+			}
+		}
+	}
+}
+
+func TestRunpodBindingDefaultsContract(t *testing.T) {
+	for _, n := range []int{-2, 0, 4, 37} {
+		cfg := Config{Runpod: RunpodConfig{DiskGB: n}}
+		applyRunpodDefaults(&cfg)
+		wantDisk := n
+		if n <= 0 {
+			wantDisk = 20
+		}
+		if cfg.Runpod.APIURL != "https://rest.runpod.io/v1" || cfg.Runpod.CloudType != "SECURE" || cfg.Runpod.InstanceID != "NVIDIA L4,NVIDIA RTX 4000 Ada Generation,NVIDIA RTX A4000,NVIDIA GeForce RTX 3090,NVIDIA GeForce RTX 4090,NVIDIA RTX A5000,NVIDIA RTX A4500" || cfg.Runpod.Image != "runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04" || cfg.Runpod.DiskGB != wantDisk || cfg.Runpod.User != "" {
+			t.Fatalf("disk=%d defaults=%#v", n, cfg.Runpod)
+		}
+	}
+	cfg := Config{Runpod: RunpodConfig{APIURL: "  ", CloudType: "  ", InstanceID: "  ", Image: "  ", DiskGB: 37}}
+	applyRunpodDefaults(&cfg)
+	if cfg.Runpod.APIURL != "  " || cfg.Runpod.CloudType != "  " || cfg.Runpod.InstanceID != "  " || cfg.Runpod.Image != "  " || cfg.Runpod.DiskGB != 37 {
+		t.Fatal("raw whitespace defaults changed")
+	}
+	for _, tc := range []struct{ user, genericUser, root, genericRoot, wantUser, wantRoot string }{{"", "", "", "", "root", "/tmp/crabbox"}, {"", "crabbox", "", "/work/crabbox", "root", "/tmp/crabbox"}, {"", "alice", "", "/Users/ec2-user/crabbox", "alice", "/tmp/crabbox"}, {"", "  ", "", `C:\crabbox`, "  ", "/tmp/crabbox"}, {"provider-user", "alice", "", "/custom/root", "provider-user", "/custom/root"}, {"", "alice", "/provider/root", "/custom/root", "alice", "/provider/root"}, {"", "alice", "", " /work/crabbox ", "alice", " /work/crabbox "}} {
+		cfg := Config{SSHUser: tc.genericUser, WorkRoot: tc.genericRoot, Runpod: RunpodConfig{User: tc.user, WorkRoot: tc.root}}
+		applyRunpodDefaults(&cfg)
+		if cfg.Runpod.User != tc.user || cfg.SSHUser != tc.wantUser || cfg.Runpod.WorkRoot != tc.wantRoot || cfg.WorkRoot != tc.wantRoot || cfg.SSHPort != "" || cfg.SSHFallbackPorts != nil {
+			t.Fatalf("roles user=%q root=%q got=%#v SSH=%q", tc.user, tc.root, cfg.Runpod, cfg.SSHUser)
+		}
+	}
+}
+
+func TestRunpodBindingEffectivePayloadContract(t *testing.T) {
+	for _, tc := range []struct {
+		url, cloud, template, wantCloud string
+		disk, wantDisk                  int
+	}{{"", "", "", "SECURE", -2, 20}, {"https://rest.runpod.io/v1/", "COMMUNITY", "fixture-template", "COMMUNITY", 37, 37}} {
+		cfg := Config{Runpod: RunpodConfig{APIKey: "inert-configured-key", APIURL: tc.url, CloudType: tc.cloud, TemplateID: tc.template, DiskGB: tc.disk}}
+		backend := NewRunpodLeaseBackend(Provider{}.Spec(), cfg, Runtime{}).(*runpodLeaseBackend)
+		effective := backend.configForRun()
+		if effective.Runpod.APIURL == "" || effective.Runpod.CloudType != tc.wantCloud || effective.Runpod.DiskGB != tc.wantDisk {
+			t.Fatal("upstream effective inputs missing")
+		}
+		api, err := backend.api()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if api.(*runpodClient).apiURL != "https://rest.runpod.io/v1" {
+			t.Fatal("constructor did not use effective endpoint")
+		}
+		payload := runpodDeployPayload(runpodDeployInput{Name: "fixture-pod", ImageName: effective.Runpod.Image, InstanceID: effective.Runpod.InstanceID, CloudType: effective.Runpod.CloudType, TemplateID: effective.Runpod.TemplateID, ContainerDiskInGb: effective.Runpod.DiskGB, Ports: "22/tcp"})
+		data, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded struct {
+			CloudType string `json:"cloudType"`
+			ImageName string `json:"imageName"`
+			Disk      int    `json:"containerDiskInGb"`
+		}
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if decoded.CloudType != tc.wantCloud || decoded.Disk != tc.wantDisk || decoded.ImageName != "runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04" {
+			t.Fatalf("effective payload=%s", data)
+		}
+		_, templatePresent := payload["templateId"]
+		if templatePresent != (tc.template != "") {
+			t.Fatal("template omission changed")
+		}
 	}
 }

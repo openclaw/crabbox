@@ -9,8 +9,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -347,19 +349,6 @@ func TestParseFirstIPv4(t *testing.T) {
 		got := parseFirstIPv4(tc.raw)
 		if got != tc.want {
 			t.Fatalf("parseFirstIPv4(%q)=%q want %q", tc.raw, got, tc.want)
-		}
-	}
-}
-
-func TestIsIPv4(t *testing.T) {
-	for _, good := range []string{"192.168.1.1", "10.0.0.1", "172.20.0.5", "0.0.0.0", "255.255.255.255"} {
-		if !isIPv4(good) {
-			t.Fatalf("isIPv4(%q) should be true", good)
-		}
-	}
-	for _, bad := range []string{"fe80::1", "abc", "192.168.1", "192.168.1.1.1", "300.0.0.1"} {
-		if isIPv4(bad) {
-			t.Fatalf("isIPv4(%q) should be false", bad)
 		}
 	}
 }
@@ -2052,5 +2041,92 @@ func TestAcquireWaitsForGuestReadyBeforeLockdown(t *testing.T) {
 	}
 	if readyIdx >= stageIdx {
 		t.Fatalf("readiness probe (%d) must precede pre-network lockdown (%d)", readyIdx, stageIdx)
+	}
+}
+
+func TestWaitGuestReadyBackoffDeadlinePreservesProbeCodeAndCause(t *testing.T) {
+	for _, code := range []int{23, -9} {
+		t.Run(fmt.Sprintf("code_%d", code), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				runner := &recordingRunner{}
+				runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+					if !readinessProbe(req) {
+						t.Fatal("unexpected non-readiness command")
+					}
+					return core.LocalCommandResult{ExitCode: code, Stderr: "guest boot pending"}, errors.New("probe unavailable"), true
+				}
+				b := testBackend(runner)
+				b.guestReadyBudget = 100 * time.Millisecond
+				b.guestReadyProbeTimeout = time.Second
+				b.guestRetryBackoff = time.Hour
+				started := time.Now()
+				err := b.waitGuestReady(context.Background(), "crabbox-blue-1234", "crabbox")
+				if err == nil || !strings.Contains(err.Error(), "did not accept PowerShell Direct within 100ms") || !strings.Contains(err.Error(), "guest boot pending") || core.ExitCodeForError(err, 1) != code {
+					t.Fatalf("boot diagnostic/code changed: err=%v want code=%d", err, code)
+				}
+				var failure core.ExitError
+				if !core.AsExitError(err, &failure) || failure.Code != code || failure.Message != "guest readiness probe failed: probe unavailable: guest boot pending" {
+					t.Errorf("first typed probe error changed: %#v", failure)
+				}
+				if len(runner.calls) != 1 || time.Since(started) != b.guestReadyBudget {
+					t.Fatalf("backoff budget/first probe changed: calls=%d elapsed=%s", len(runner.calls), time.Since(started))
+				}
+				if !errors.Is(err, context.DeadlineExceeded) || core.RunStatusForResult(core.RunResult{}, err) != core.RunStatusTimedOut || core.RunErrorKindForResult(core.RunResult{}, err) != core.RunErrorTimeout {
+					t.Errorf("owned boot deadline lost: err=%v status=%s kind=%s", err, core.RunStatusForResult(core.RunResult{}, err), core.RunErrorKindForResult(core.RunResult{}, err))
+				}
+			})
+		})
+	}
+}
+
+func TestInheritedWorkRootCallerContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USER", "fixture-user")
+	for _, tc := range []struct{ providerRoot, genericRoot, want string }{
+		{"", "", "C:\\crabbox"},
+		{"", "/work/crabbox", "C:\\crabbox"},
+		{"", "/Users/ec2-user/crabbox", "C:\\crabbox"},
+		{"", "C:\\crabbox", "C:\\crabbox"},
+		{"", " /work/crabbox ", " /work/crabbox "},
+		{"", "/WORK/crabbox", "/WORK/crabbox"},
+		{"", "c:\\crabbox", "c:\\crabbox"},
+		{"", "/srv/custom", "/srv/custom"},
+		{"", "/Users/alice/custom", "/Users/alice/custom"},
+		{"", "D:\\custom", "D:\\custom"},
+		{"", "  ", "  "},
+		{" ", "/srv/custom", " "},
+		{"/work/crabbox", "/srv/custom", "/work/crabbox"},
+		{"relative", "/srv/custom", "relative"},
+		{"/provider/root", "/srv/custom", "/provider/root"},
+	} {
+		for _, explicit := range []bool{false, true} {
+			cfg := Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
+			if explicit {
+				core.MarkWorkRootExplicit(&cfg)
+				cfg.TargetOS = "existing-target"
+				cfg.WindowsMode = "prior-mode"
+			}
+			cfg.WorkRoot = tc.genericRoot
+			cfg.HyperV.WorkRoot = tc.providerRoot
+
+			want := cfg
+			want.Provider = "hyperv"
+			if !explicit {
+				want.TargetOS = "windows"
+				want.WindowsMode = "normal"
+			}
+			want.HyperV.WorkRoot = tc.want
+			want.WorkRoot = tc.want
+			want.HyperV.User = "fixture-user"
+			want.HyperV.CPUs = 4
+			want.HyperV.Memory = 8192
+			want.HyperV.Switch = "Default Switch"
+			want.SSHPort = "22"
+			want.SSHFallbackPorts = []string{}
+			applyDefaults(&cfg)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("whole config differs for roots=%q/%q explicit=%t: got=%#v want=%#v", tc.providerRoot, tc.genericRoot, explicit, cfg, want)
+			}
+		}
 	}
 }

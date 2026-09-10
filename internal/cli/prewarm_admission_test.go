@@ -266,3 +266,31 @@ func TestRunProviderAdmissionBeforeConfigure(t *testing.T) {
 		})
 	}
 }
+
+func TestRunProfileLiteralIntentSurvivesDelegatedHandoff(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("mixed=%t", mixed), func(t *testing.T) {
+			p := setupProbeAdmission(t, nil)
+			preset := "printf {{scenario}}"
+			want := []string{"printf", "&&"}
+			if mixed {
+				preset += " && printf done"
+				want = append(want, "&&", "printf", "done")
+			}
+			writeFile(t, os.Getenv("CRABBOX_CONFIG"), "provider: probe-admission-test\nprofiles:\n  qa:\n    presets:\n      check:\n        command: "+preset+"\n")
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), []string{"run", "--profile", "qa", "--preset", "check", "--scenario", "&&", "--id", "cbx_0123456789ab", "--no-sync", "--no-hydrate"})
+			if err != nil {
+				t.Fatalf("run: %v\n%s", err, stderr.String())
+			}
+			if len(p.admissions) != 1 || p.ran != 1 {
+				t.Fatalf("admissions=%d executions=%d", len(p.admissions), p.ran)
+			}
+			for _, req := range []RunRequest{p.admissions[0], p.execution.req} {
+				if req.ShellMode || !reflect.DeepEqual(req.Command, want) || !reflect.DeepEqual(req.CommandLiteralArgs, map[int]bool{1: true}) {
+					t.Fatalf("lost literal intent: command=%q literal=%v shell=%t", req.Command, req.CommandLiteralArgs, req.ShellMode)
+				}
+			}
+		})
+	}
+}

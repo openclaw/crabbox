@@ -25,6 +25,7 @@ import {
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageManagers = ["apt", "apt-get", "apt-cache", "dpkg", "dpkg-query"];
 const fixtureRecipes = loadRecipes();
+const minimalUpdateCommand = "apt-get -o Acquire::Languages=none -o Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false -o Acquire::IndexTargets::deb::CNF::DefaultEnabled=false update";
 
 function quote(value) {
   return `'${String(value).replaceAll("'", "'\"'\"'")}'`;
@@ -426,7 +427,7 @@ test("legacy migration accepts the real runtime-owned marker parent only after i
       });
       if (missing) {
         assert.notEqual(result.status, 0);
-        assert.deepEqual(await fixture.packageCalls(), ["apt-get update"]);
+        assert.deepEqual(await fixture.packageCalls(), [minimalUpdateCommand]);
         await assert.rejects(readFile(fixture.manifest));
       } else {
         assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -448,7 +449,7 @@ test("readiness probes ignore user PATH entries and shadowing shell functions", 
   const source = `curl() { touch ${quote(executionLog)}; return 0; }\n${fixture.shell}`;
   const result = fixture.run(source, { PATH: `${hostile}:${fixture.bin}:${process.env.PATH}` });
   assert.notEqual(result.status, 0);
-  assert.deepEqual(await fixture.packageCalls(), ["apt-get update"]);
+  assert.deepEqual(await fixture.packageCalls(), [minimalUpdateCommand]);
   await assert.rejects(readFile(executionLog));
   await assert.rejects(readFile(fixture.manifest));
 });
@@ -469,11 +470,12 @@ test("truly clean bootstrap creates both trusted parents and atomically writes c
   const result = fixture.run(fixture.shell, { CRABBOX_APT_SUCCESS: "1" });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.deepEqual(await fixture.packageCalls(), [
-    "apt-get update",
+    minimalUpdateCommand,
     `apt-get install -y --no-install-recommends ${fixture.minimal.aptPackages.join(" ")}`,
   ]);
   assert.equal(await readFile(fixture.manifest, "utf8"), `${canonicalJSON(manifestFor("linux-minimal", digest(fixture.minimal)))}\n`);
   assert.equal(await readFile(fixture.marker, "utf8"), "crabbox-devtools-v1\n");
+  assert.equal(await readFile(fixture.aptConfig, "utf8"), 'Acquire::Retries "8";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n');
   for (const directory of [fixture.readiness, fixture.state]) {
     const metadata = await stat(directory);
     assert.equal(metadata.uid, Number(fixture.ownerUID));
@@ -530,7 +532,7 @@ test("missing legacy parent is never created beneath untrusted, writable, or sym
       const result = fixture.run(source, { ...environment, CRABBOX_APT_SUCCESS: "1" });
       assert.notEqual(result.status, 0, result.stderr || result.stdout);
       assert.deepEqual(await fixture.packageCalls(), [
-        "apt-get update",
+        minimalUpdateCommand,
         `apt-get install -y --no-install-recommends ${fixture.minimal.aptPackages.join(" ")}`,
       ]);
       await assert.rejects(stat(parent), (error) => error?.code === "ENOENT" || error?.code === "ENOTDIR");
@@ -559,7 +561,7 @@ test("noncanonical, stale, oversized, or unsafe manifest never allows marker res
       await fixture.writeManifest("linux-minimal", contents(fixture));
       const result = fixture.run();
       assert.notEqual(result.status, 0);
-      assert.deepEqual(await fixture.packageCalls(), ["apt-get update"]);
+      assert.deepEqual(await fixture.packageCalls(), [minimalUpdateCommand]);
     });
   }
 });
@@ -590,7 +592,7 @@ test("manifest and marker reject symlinks, untrusted parents, ownership, group, 
       const overrides = await setup(fixture);
       const result = fixture.run(fixture.shell, overrides);
       assert.notEqual(result.status, 0, result.stderr || result.stdout);
-      assert.deepEqual(await fixture.packageCalls(), ["apt-get update"]);
+      assert.deepEqual(await fixture.packageCalls(), [minimalUpdateCommand]);
     });
   }
 });
@@ -609,7 +611,7 @@ test("every missing minimal or builder probe rejects the corresponding manifest"
         else await writeFile(join(fixture.root, `disabled-${name}`), "1");
         const result = fixture.run();
         assert.notEqual(result.status, 0);
-        assert.deepEqual(await fixture.packageCalls(), ["apt-get update"]);
+        assert.deepEqual(await fixture.packageCalls(), [minimalUpdateCommand]);
       });
     }
   }
@@ -810,7 +812,7 @@ test("actual generated Go and Worker bootstrap fragments make identical decision
       const result = fixture.run(fixture.actualGenerated(goFragment), environment);
       if (scenario === "unsafe") {
         assert.notEqual(result.status, 0);
-        assert.deepEqual(await fixture.packageCalls(), ["apt-get update"]);
+        assert.deepEqual(await fixture.packageCalls(), [minimalUpdateCommand]);
         assert.equal(await readFile(fixture.manifest, "utf8"), "{}\n");
         return;
       }

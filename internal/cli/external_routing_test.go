@@ -561,6 +561,35 @@ func TestAutoRouteExternalLeaseUsesPersistedClaimRouting(t *testing.T) {
 	}
 }
 
+func TestAutoRouteExternalLeaseDoesNotTreatCanonicalIDAsSlug(t *testing.T) {
+	root := setExternalRoutingTestHome(t)
+	const leaseID = "cbx_bbbbbbbbbbbb"
+	routing := ExternalConfig{Command: "other-provider", WorkRoot: "/other/work"}
+	if _, err := PersistExternalRouting(leaseID, routing); err != nil {
+		t.Fatal(err)
+	}
+	if err := claimLeaseForRepoProviderScope(leaseID, "cbx-aaaaaaaaaaaa", "external", "other-scope", root, time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	cfg.External = ExternalConfig{Command: "current-provider", WorkRoot: "/current/work"}
+	fs := newFlagSet("test", io.Discard)
+	if err := autoRouteExternalLease(&cfg, fs, "cbx_aaaaaaaaaaaa"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.External.Command != "current-provider" || cfg.External.RoutingFile != "" {
+		t.Errorf("missing canonical ID loaded unrelated routing: %#v", cfg.External)
+	}
+	cfg.External = ExternalConfig{Command: "current-provider", WorkRoot: "/current/work"}
+	if err := autoRouteExternalLease(&cfg, fs, "cbx-aaaaaaaaaaaa"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.External.Command != routing.Command || cfg.External.WorkRoot != routing.WorkRoot {
+		t.Fatalf("explicit slug did not restore routing: %#v", cfg.External)
+	}
+}
+
 func TestAutoRouteExternalLeaseAcceptsCanonicalProviderAliasClaims(t *testing.T) {
 	for _, identifier := range []string{"cbx_1257eeee0001", "legacy-external"} {
 		t.Run(identifier, func(t *testing.T) {

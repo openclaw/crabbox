@@ -671,6 +671,9 @@ func TestProviderKindFeatureContracts(t *testing.T) {
 				t.Fatalf("%s advertises %s but kind=%s", name, feature, spec.Kind)
 			}
 		}
+		if spec.Features.Has(core.FeaturePreparedArtifactWorkspace) && !spec.Features.Has(core.FeatureRunArtifacts) {
+			t.Fatalf("%s advertises a prepared artifact workspace without run artifacts", name)
+		}
 		if spec.Features.Has(core.FeaturePauseResume) && spec.Kind != core.ProviderKindDelegatedRun && spec.Kind != core.ProviderKindSSHLease {
 			t.Fatalf("%s advertises %s but kind=%s", name, core.FeaturePauseResume, spec.Kind)
 		}
@@ -1135,41 +1138,29 @@ func TestWorkspaceFeaturesRequireNativeCheckpointProvider(t *testing.T) {
 	}
 }
 
-func TestRunEvidenceFeaturesRequireDelegatedBackends(t *testing.T) {
-	artifactProviders := 0
+func TestRunDownloadFeatureRequiresDelegatedBackend(t *testing.T) {
 	downloadProviders := 0
 	for _, name := range allBuiltInProviderNames() {
 		provider := mustProvider(t, name)
 		spec := provider.Spec()
-		if !hasAnyFeature(spec.Features, core.FeatureRunArtifacts, core.FeatureRunDownloads) {
+		if !spec.Features.Has(core.FeatureRunDownloads) {
 			continue
 		}
 		if spec.Kind != core.ProviderKindDelegatedRun {
-			t.Fatalf("%s advertises delegated run evidence features %v but has kind=%s", name, spec.Features, spec.Kind)
+			t.Fatalf("%s advertises delegated run downloads but has kind=%s", name, spec.Kind)
 		}
 		cfg, ok := offlineConformanceConfig(name)
 		if !ok {
-			t.Fatalf("%s advertises delegated run evidence features %v; add an offline conformance config for it", name, spec.Features)
+			t.Fatalf("%s advertises delegated run downloads; add an offline conformance config for it", name)
 		}
 		backend, err := provider.Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 		if err != nil {
 			t.Fatalf("%s configure error: %v", name, err)
 		}
-		if spec.Features.Has(core.FeatureRunArtifacts) {
-			if _, ok := backend.(core.DelegatedRunArtifactBackend); !ok {
-				t.Fatalf("%s advertises %s but backend %T is not DelegatedRunArtifactBackend", name, core.FeatureRunArtifacts, backend)
-			}
-			artifactProviders++
+		if _, ok := backend.(core.DelegatedRunDownloadBackend); !ok {
+			t.Fatalf("%s advertises %s but backend %T is not DelegatedRunDownloadBackend", name, core.FeatureRunDownloads, backend)
 		}
-		if spec.Features.Has(core.FeatureRunDownloads) {
-			if _, ok := backend.(core.DelegatedRunDownloadBackend); !ok {
-				t.Fatalf("%s advertises %s but backend %T is not DelegatedRunDownloadBackend", name, core.FeatureRunDownloads, backend)
-			}
-			downloadProviders++
-		}
-	}
-	if artifactProviders == 0 {
-		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureRunArtifacts)
+		downloadProviders++
 	}
 	if downloadProviders == 0 {
 		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureRunDownloads)

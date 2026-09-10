@@ -69,7 +69,7 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	}
 	return DoctorResult{
 		Provider: providerName,
-		Status:   aggregateStatus(checks),
+		Status:   core.DoctorChecksStatus(checks),
 		Message:  "bridge=checked mutation=false",
 		Checks:   checks,
 	}, nil
@@ -86,7 +86,7 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if err != nil {
 		return err
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	api, err := b.client()
 	if err != nil {
 		return err
@@ -100,18 +100,13 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: cloudflare-sandbox warmup keeps the sandbox until explicit stop\n")
 	}
-	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	total := core.ClockNow(b.rt.Clock).Sub(started)
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  leaseID,
+		Slug:     slug,
+		Total:    total,
+	})
 }
 
 func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
@@ -141,7 +136,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
 			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-cloudflare-sandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+				TempPattern: "crabbox-cloudflare-sandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 			})
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
@@ -179,11 +174,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			return b.ensureWorkspace(ctx, api, sandboxID, workdir)
 		},
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
-			command, err := buildCommand(req.Command, req.ShellMode)
+			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 			if err != nil {
 				return shared.DelegatedSandboxCommand{}, err
 			}
-			commandText := commandScript(command)
+			commandText := intent.ShellCommand("bash", "-lc")
 			commandEnv, strippedAuthEnv := cloudflareSandboxCommandEnv(req.Env)
 			if len(strippedAuthEnv) > 0 {
 				fmt.Fprintf(b.rt.Stderr, "warning: provider=%s did not forward provider authentication variables: %s\n", providerName, strings.Join(strippedAuthEnv, ","))
@@ -277,7 +272,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if waitTimeout <= 0 {
 		waitTimeout = 5 * time.Minute
 	}
-	deadline := b.now().Add(waitTimeout)
+	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
 	pollCtx := ctx
 	cancel := func() {}
 	if req.Wait {
@@ -323,7 +318,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		if isTerminalState(state) {
 			return StatusView{}, exit(5, "cloudflare-sandbox sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if b.now().After(deadline) {
+		if core.ClockNow(b.rt.Clock).After(deadline) {
 			return StatusView{}, exit(5, "timed out waiting for cloudflare-sandbox sandbox %s to become ready", sandboxID)
 		}
 		select {
@@ -392,7 +387,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		}
 		return nil
 	}
-	now := b.now().UTC()
+	now := core.ClockNow(b.rt.Clock).UTC()
 	checked := 0
 	removed := 0
 	claimsRemoved := 0
@@ -762,13 +757,6 @@ func (b *backend) execTimeoutSecs() int {
 	return b.cfg.CloudflareSandbox.ExecTimeoutSecs
 }
 
-func (b *backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
-}
-
 func normalizedSandboxState(sb sandboxSummary) string {
 	return strings.ToLower(blank(strings.TrimSpace(sb.Status), "unknown"))
 }
@@ -843,26 +831,6 @@ func newSandboxName(repo Repo) string {
 	return fmt.Sprintf("%s-%x", base, time.Now().UnixNano()&0xffffffff)
 }
 
-func buildCommand(command []string, shellMode bool) ([]string, error) {
-	if len(command) == 0 {
-		return nil, errors.New("missing command")
-	}
-	if shellMode {
-		return []string{"bash", "-lc", strings.Join(command, " ")}, nil
-	}
-	if shouldUseShell(command) || leadingEnvAssignment(command) {
-		if len(command) == 1 {
-			return []string{"bash", "-lc", command[0]}, nil
-		}
-		return []string{"bash", "-lc", shellScriptFromArgv(command)}, nil
-	}
-	return command, nil
-}
-
-func commandScript(command []string) string {
-	return shellScriptFromArgv(command)
-}
-
 type cloudflareSandboxNotFoundError struct {
 	err error
 }
@@ -873,18 +841,4 @@ func (e *cloudflareSandboxNotFoundError) Unwrap() error { return e.err }
 func isCloudflareSandboxNotFound(err error) bool {
 	var notFound *cloudflareSandboxNotFoundError
 	return errors.As(err, &notFound)
-}
-
-func aggregateStatus(checks []DoctorCheck) string {
-	for _, check := range checks {
-		if check.Status == "failed" {
-			return "failed"
-		}
-	}
-	for _, check := range checks {
-		if check.Status == "warning" {
-			return "warning"
-		}
-	}
-	return "ok"
 }

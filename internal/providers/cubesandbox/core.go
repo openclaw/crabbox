@@ -2,7 +2,6 @@ package cubesandbox
 
 import (
 	"flag"
-	"io"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -18,7 +17,6 @@ type DoctorResult = core.DoctorResult
 type WarmupRequest = core.WarmupRequest
 type RunRequest = core.RunRequest
 type RunResult = core.RunResult
-type RunSessionHandle = core.RunSessionHandle
 type LeaseClaim = core.LeaseClaim
 type ListRequest = core.ListRequest
 type LeaseView = core.LeaseView
@@ -29,7 +27,6 @@ type Server = core.Server
 type SSHTarget = core.SSHTarget
 type Repo = core.Repo
 type ExitError = core.ExitError
-type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 
 const (
@@ -99,36 +96,8 @@ func isCanonicalLeaseID(value string) bool {
 	return core.IsCanonicalLeaseID(value)
 }
 
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
-}
-
-func timingReportWithRunResult(report timingReport, result RunResult, err error) timingReport {
-	return core.TimingReportWithRunResult(report, result, err)
-}
-
-func handleDelegatedRunFailure(w io.Writer, req RunRequest, provider, leaseID, slug string, idleTimeout, ttl time.Duration, acquired bool, shouldStop *bool) {
-	core.HandleDelegatedRunFailure(w, req, provider, leaseID, slug, idleTimeout, ttl, acquired, shouldStop)
-}
-
 func shellQuote(s string) string {
 	return core.ShellQuote(s)
-}
-
-func shellScriptFromArgv(command []string) string {
-	return core.ShellScriptFromArgv(command)
-}
-
-func shellWords(words []string) []string {
-	return core.ShellWords(words)
-}
-
-func shouldUseShell(command []string) bool {
-	return core.ShouldUseShell(command)
-}
-
-func leadingEnvAssignment(command []string) bool {
-	return core.LeadingEnvAssignment(command)
 }
 
 func summarizeJSON(data []byte) string {

@@ -49,63 +49,16 @@ func (Provider) ClassProfiles() []core.ProviderClassProfile {
 	return classProfiles
 }
 
-type flagValues struct {
-	Region         *string
-	Zone           *string
-	Image          *string
-	Type           *string
-	ProjectID      *string
-	OrganizationID *string
-	SecurityGroup  *string
-	SSHCIDRs       *string
-}
-
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return flagValues{
-		Region:         fs.String("scaleway-region", defaults.Scaleway.Region, "Scaleway region"),
-		Zone:           fs.String("scaleway-zone", defaults.Scaleway.Zone, "Scaleway zone"),
-		Image:          fs.String("scaleway-image", defaults.Scaleway.Image, "Scaleway image label or ID"),
-		Type:           fs.String("scaleway-type", defaults.Scaleway.Type, "Scaleway Instances commercial type"),
-		ProjectID:      fs.String("scaleway-project-id", defaults.Scaleway.ProjectID, "Scaleway project ID"),
-		OrganizationID: fs.String("scaleway-organization-id", defaults.Scaleway.OrganizationID, "Scaleway organization ID"),
-		SecurityGroup:  fs.String("scaleway-security-group", defaults.Scaleway.SecurityGroup, "Scaleway security group ID"),
-		SSHCIDRs:       fs.String("scaleway-ssh-cidrs", "", "comma-separated Scaleway SSH source CIDRs"),
-	}
+	return core.RegisterScalewayConfigFlags(fs, defaults.Scaleway)
 }
 
 func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(flagValues)
+	v, ok := values.(core.ScalewayConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "scaleway-region") {
-		cfg.Scaleway.Region = *v.Region
-		core.SetScalewayRegionExplicit(cfg)
-	}
-	if core.FlagWasSet(fs, "scaleway-zone") {
-		cfg.Scaleway.Zone = *v.Zone
-		core.SetScalewayZoneExplicit(cfg)
-	}
-	if core.FlagWasSet(fs, "scaleway-image") {
-		cfg.Scaleway.Image = *v.Image
-		core.SetScalewayImageExplicit(cfg)
-	}
-	if core.FlagWasSet(fs, "scaleway-type") {
-		cfg.Scaleway.Type = *v.Type
-		core.SetScalewayTypeExplicit(cfg)
-	}
-	if core.FlagWasSet(fs, "scaleway-project-id") {
-		cfg.Scaleway.ProjectID = *v.ProjectID
-	}
-	if core.FlagWasSet(fs, "scaleway-organization-id") {
-		cfg.Scaleway.OrganizationID = *v.OrganizationID
-	}
-	if core.FlagWasSet(fs, "scaleway-security-group") {
-		cfg.Scaleway.SecurityGroup = *v.SecurityGroup
-	}
-	if core.FlagWasSet(fs, "scaleway-ssh-cidrs") {
-		cfg.Scaleway.SSHCIDRs = splitCommaList(*v.SSHCIDRs)
-	}
+	core.MarkScalewayConfigApplied(cfg, v.Apply(&cfg.Scaleway, fs))
 	return nil
 }
 
@@ -1271,20 +1224,6 @@ func isAmbiguousScalewayError(err error) bool {
 		}
 	}
 	return false
-}
-
-func splitCommaList(value string) []string {
-	if value == "" {
-		return nil
-	}
-	var out []string
-	for _, item := range strings.Split(value, ",") {
-		item = strings.TrimSpace(item)
-		if item != "" {
-			out = append(out, item)
-		}
-	}
-	return out
 }
 
 func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadata) {

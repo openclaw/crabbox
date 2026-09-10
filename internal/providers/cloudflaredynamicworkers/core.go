@@ -138,10 +138,3 @@ func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []s
 func rejectDelegatedSyncOptions(spec ProviderSpec, req RunRequest) error {
 	return core.RejectDelegatedSyncOptionsForSpec(spec, req)
 }
-
-func now(rt Runtime) time.Time {
-	if rt.Clock != nil {
-		return rt.Clock.Now()
-	}
-	return time.Now()
-}

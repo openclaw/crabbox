@@ -4,6 +4,7 @@ import (
 	"flag"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type flagValues struct {
@@ -39,13 +40,10 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	selected := cfg.Provider == providerName || cfg.Provider == "wsb" || cfg.Provider == "windows-sandbox-provider"
+	selected := core.ProviderNameMatchesExact(cfg.Provider, Provider{})
 	if selected {
-		if core.FlagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s; Windows Sandbox sizing is controlled by the host", providerName)
-		}
-		if core.FlagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s; Windows Sandbox sizing is controlled by the host", providerName)
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "Windows Sandbox sizing is controlled by the host", "Windows Sandbox sizing is controlled by the host"); err != nil {
+			return err
 		}
 		if !core.FlagWasSet(fs, "target") {
 			cfg.TargetOS = targetWindows

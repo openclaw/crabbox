@@ -207,7 +207,8 @@ If either `GCP_CLIENT_EMAIL` or `GCP_PRIVATE_KEY` is set, both must be set.
 When `CRABBOX_GCP_CREDENTIAL_SOURCE` is unset, brokered GCP uses the
 service-account-key path. `CRABBOX_GCP_CREDENTIAL_SOURCE=service-account-key`
 is accepted as an explicit spelling of the same default. Metadata token requests
-reject redirects and responses without Google's metadata marker, refresh before
+use manual redirect handling supported by both Node and workerd, reject all `3xx`
+responses without following them or retrying, reject responses without Google's metadata marker, refresh before
 the metadata server's five-minute token-cache boundary, and retry
 connection/startup failures plus transient `429`, `499`, and `5xx` responses
 with bounded exponential backoff and a one-minute overall deadline.
@@ -358,17 +359,41 @@ Cleanup lists Crabbox-labeled instances across the project's visible zones using
 aggregated instance listing with partial success enabled. Inventory accepts only
 deterministically named instances with the canonical `crabbox`, `created_by`,
 `provider`, and valid lease labels, then deletes expired or released leases in
-the zone recorded on each VM. Brokered workspace recovery first resolves the
-exact deterministic instance name in the lease's recorded project and zone. A
-zonal miss falls back to cross-zone inventory for that exact name so interrupted
-pre-upgrade fallback creates remain recoverable. Both paths check the same
-canonical labels; neither adopts the first project-wide lease-label match, and
-duplicate exact-name matches fail as ambiguous. These checks are
-defense-in-depth against accidental or ambiguous resource adoption. GCP labels
-are operator metadata, not an authorization boundary against another principal
-that can already mutate instances in the same project. Brokered cleanup is
-coordinator-owned; direct cleanup additionally requires the exact local claim
-described above.
+the zone recorded on each VM. Brokered workspace recovery uses one authoritative
+lookup for the persisted project, zone, and instance name, then requires the
+unchanged numeric instance ID and canonical ownership labels. It does not fall
+back to project inventory or adopt a replacement instance. For an interrupted
+non-workspace create with an exact durable create-attempt binding but no cloud
+identity, the coordinator may perform one canonical-name lookup, persist only
+the observed numeric instance ID under the unchanged lease and attempt fences,
+then require a second strict lookup before binding the resource for cleanup.
+If that strict lookup fails transiently, recovery retries only with the same
+captured ID; absence or replacement remains unresolved. Successful creates do
+not publish cleanup custody until either the operation or an exact owned-instance
+lookup supplies the numeric ID.
+Unbound legacy, tokenless, active, registered, workspace, or already claimed
+leases cannot use this interrupted-create path.
+
+For a fully bound pre-upgrade brokered lease that lacks only the numeric instance
+ID, manual deletion or expiry cleanup may perform one exact scoped lookup under
+the unchanged cleanup claim. The lookup must match all ownership labels and
+either the exact durable raw resource identity or, when that identity is absent,
+corroborate the observed raw ID through the lease's positive, finite, integral
+historical numeric server ID. The numeric comparison is intentionally lossy
+corroboration, not exact identity proof. The coordinator persists the observed
+raw ID, then performs the ordinary exact lookup again before deletion. It never
+uses project inventory or this migration path for registered, workspace,
+provisioning, or uncertain-create records. Absence completes cleanup only after
+the same post-lookup lease and cleanup fences pass; replacement or ambiguity
+retains the captured ID without deleting either instance.
+
+Brokered release requires the persisted numeric ID and refuses deletion when it
+is absent from or differs from the observed VM. These checks are defense-in-depth
+against accidental or ambiguous resource adoption.
+GCP labels are operator metadata, not an authorization boundary against another
+principal that can already mutate instances in the same project. Brokered
+cleanup is coordinator-owned; direct cleanup additionally requires the exact
+local claim described above.
 
 Three independent safety nets enforce expiry:
 
@@ -382,6 +407,39 @@ Three independent safety nets enforce expiry:
   provider inventory.
 
 See [Lifecycle and cleanup](../features/lifecycle-cleanup.md) for the shared model.
+
+## Typed ready-pool identity
+
+Typed ready-pool identity generation and registration observe the exact
+Crabbox-owned VM and its single persistent boot disk. Crabbox accepts only a
+canonical global image or snapshot source with the immutable numeric resource
+ID reported by Compute Engine. Machine images, foreign ownership, ambiguous
+boot disks, and malformed or incomplete source evidence fail closed.
+The coordinator binds the lease's exact numeric VM resource ID, requires the
+disk self-link and sole `users` attachment to identify that VM, then rereads
+both resources and rejects replacement, attachment, ownership, or provenance
+drift before persisting evidence.
+
+This observation runs only for typed `identity` and `register-identity`
+requests after lease access, state, expiry, and request metadata validation.
+Ordinary launches, legacy ready pools, borrow/return/heartbeat, and reconciliation
+do not read image or snapshot metadata. The coordinator credentials need
+`compute.instances.get` and `compute.disks.get` for typed GCP identity
+operations.
+
+Once persisted, typed cohort identity uses the source namespace
+`projects/<project>/global/images` or
+`projects/<project>/global/snapshots`, the immutable numeric source ID, and the
+canonical architecture. The execution project remains required launch evidence
+but is not substituted for the source project or included in the identity. The
+launch zone is excluded so capacity fallback does not split an otherwise
+identical cohort.
+
+Only exact relative resource names and the lowercase official Compute API HTTPS
+forms are accepted. Leading or trailing whitespace, family aliases, extra path
+segments, ports, queries, fragments, percent-encoded ambiguity,
+kind/collection mismatches, and non-numeric IDs fail closed. Machine images
+remain valid checkpoint sources but cannot join typed ready-pool cohorts.
 
 ## Checkpoints
 
@@ -403,6 +461,11 @@ Wrong-project, disabled-API, authorization, operation, or name-reuse failures
 never count as successful deletion. Provider labels remain within GCP's
 63-character value limit even when the coordinator checkpoint identifier is
 long; a bounded ownership digest links those labels to the full durable ID.
+
+Machine images remain valid checkpoint fork/restore sources, but Compute Engine
+does not expose exact created-disk source evidence for them. They therefore
+cannot supply typed ready-pool immutable provenance; use a boot image or disk
+snapshot when that identity is required.
 
 Generic `crabbox image delete <image-id> --provider gcp` refuses an image owned
 by a managed checkpoint; use `checkpoint delete <id>` instead. GCP does not yet

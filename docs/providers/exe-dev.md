@@ -45,7 +45,7 @@ exeDev:
   disk: 10GB             # default
   command: ""            # optional container command
   user: ""               # SSH login user (defaults to ssh_dest / local user)
-  workRoot: /tmp/crabbox # default remote work root
+  workRoot: ""          # inherit a non-default top-level root; otherwise /tmp/crabbox
   noEmail: true          # default; suppress exe.dev notification email
 ```
 
@@ -84,8 +84,20 @@ CRABBOX_EXE_DEV_NO_EMAIL
 `exeDev.user` is empty by default; Crabbox uses the user embedded in the VM's
 `ssh_dest` (falling back to your local SSH identity), so set it only when your
 image expects a different login user. The SSH port comes from `ssh_dest` as
-well. `exeDev.workRoot` defaults to `/tmp/crabbox`; setting a non-default
-top-level `workRoot` propagates to the VM when `exeDev.workRoot` is unset.
+well. The raw `exeDev.workRoot` setting stays empty until resolution: a
+non-default top-level `workRoot` is inherited, otherwise the runtime fallback
+is `/tmp/crabbox`. A nonempty provider work root takes precedence.
+
+The raw image setting also stays empty by default. Native creation omits
+`--image` when its trimmed value is empty; the displayed label `default` is not
+a configured native image. These runtime and display fallbacks do not populate
+base configuration or unselected provider flag defaults.
+
+Nonempty YAML strings replace prior values without trimming; empty, omitted,
+or `null` strings keep the prior value. YAML CPU values apply only when positive.
+Environment CPU parsing keeps the prior value on malformed input; parsed zero
+or negative values reach the existing runtime fallback. Explicit
+`noEmail: false` is preserved.
 
 ## Behavior
 

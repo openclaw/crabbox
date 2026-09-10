@@ -4,6 +4,8 @@ import (
 	"flag"
 	"path"
 	"strings"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type coderFlagValues struct {
@@ -36,11 +38,8 @@ func RegisterCoderProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyCoderProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == coderProvider {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=coder; choose size through the Coder template or --coder-preset")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=coder; choose a Coder template with --coder-template")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, coderProvider, "choose size through the Coder template or --coder-preset", "choose a Coder template with --coder-template"); err != nil {
+			return err
 		}
 		if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
 			return exit(2, "provider=coder supports target=linux only")

@@ -31,6 +31,13 @@ Cancellation by the caller stops the command without printing a successful
 result. Pass `--reclaim` when you are intentionally taking over a lease that is
 claimed by another repo checkout.
 
+Before rebinding resolved access to a stored lease, Crabbox rejects conflicting
+known provider identities, including immutable generation IDs and numeric resource
+IDs. Missing identity fields remain unknown for compatibility with older claims;
+they do not establish ownership. When discarding a resolver-created alias,
+Crabbox removes its stored key only after validating and removing its unchanged
+claim. A key directory without an accompanying claim is retained.
+
 ## Network selection
 
 The `--network` flag controls which path to the box the command targets:

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -146,6 +147,8 @@ func TestCoordinatorHeartbeatHonorsCallerDeadlineWithoutReplay(t *testing.T) {
 
 func TestCoordinatorReadCurlFallbackSharesCallerDeadline(t *testing.T) {
 	clearConfigEnv(t)
+	// Keep the HTTP deadline independent of local git process startup.
+	t.Setenv("CRABBOX_OWNER", "alice@example.com")
 	if _, err := exec.LookPath("curl"); err != nil {
 		t.Skip("curl is unavailable")
 	}
@@ -177,6 +180,123 @@ func TestCoordinatorReadCurlFallbackSharesCallerDeadline(t *testing.T) {
 	_, err := client.GetLease(ctx, "cbx_budget")
 	if err == nil || !strings.Contains(err.Error(), "curl fallback failed") || ctx.Err() != context.DeadlineExceeded || calls.Load() != 1 || time.Since(started) > 5*time.Second {
 		t.Fatalf("fallback err=%v parent=%v requests=%d elapsed=%s", err, ctx.Err(), calls.Load(), time.Since(started))
+	}
+}
+
+func TestCoordinatorReadCurlFallbackAfterDialTimeout(t *testing.T) {
+	clearConfigEnv(t)
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl is unavailable")
+	}
+	t.Setenv("CRABBOX_OWNER", "alice@example.com")
+	t.Setenv("NO_PROXY", "127.0.0.1")
+	t.Setenv("no_proxy", "127.0.0.1")
+	var nativeCalls, curlCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		curlCalls.Add(1)
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_dial" ||
+			r.Header.Get("Authorization") != "Bearer synthetic-dial-token" {
+			t.Errorf("unexpected fallback request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		_, _ = io.WriteString(w, `{"lease":{"id":"cbx_dial","provider":"aws","state":"released"}}`)
+	}))
+	defer server.Close()
+	client := &CoordinatorClient{BaseURL: server.URL, Token: "synthetic-dial-token", Client: &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			nativeCalls.Add(1)
+			// Expire only the dialer's own budget, not the logical request.
+			dialer := net.Dialer{Deadline: time.Now().Add(-time.Second)}
+			conn, err := dialer.DialContext(req.Context(), "tcp", server.Listener.Addr().String())
+			if conn != nil {
+				_ = conn.Close()
+				t.Fatal("expired dial unexpectedly connected")
+			}
+			var dialErr *net.OpError
+			if !errors.As(err, &dialErr) || dialErr.Op != "dial" || !dialErr.Timeout() ||
+				!errors.Is(err, context.DeadlineExceeded) || req.Context().Err() != nil {
+				t.Fatalf("dial error=%v request=%v, want dial-local deadline with live request", err, req.Context().Err())
+			}
+			return nil, err
+		}),
+	}}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	lease, err := client.GetLease(ctx, "cbx_dial")
+	if err != nil || lease.ID != "cbx_dial" || lease.Provider != "aws" || lease.State != "released" ||
+		nativeCalls.Load() != 1 || curlCalls.Load() != 1 || ctx.Err() != nil {
+		t.Fatalf("live-parent dial fallback: err=%v lease=%s/%s/%s native=%d curl=%d parent=%v",
+			err, lease.ID, lease.Provider, lease.State, nativeCalls.Load(), curlCalls.Load(), ctx.Err())
+	}
+}
+
+func TestCoordinatorReadCurlFallbackRejectsIneligibleRequests(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_OWNER", "alice@example.com")
+	t.Setenv("NO_PROXY", "127.0.0.1")
+	t.Setenv("no_proxy", "127.0.0.1")
+	dialErr := &net.OpError{Op: "dial", Net: "tcp", Err: context.DeadlineExceeded}
+	for _, test := range []struct {
+		name         string
+		method       string
+		body         any
+		err          error
+		cancelDuring bool
+		expired      bool
+	}{
+		{"canceled during native attempt", http.MethodGet, nil, io.ErrUnexpectedEOF, true, false},
+		{"expired parent", http.MethodGet, nil, dialErr, false, true},
+		{"GET with body", http.MethodGet, map[string]string{"query": "fixture"}, dialErr, false, false},
+		{"HEAD with body", http.MethodHead, map[string]string{"query": "fixture"}, dialErr, false, false},
+		{"POST", http.MethodPost, nil, dialErr, false, false},
+		{"PUT", http.MethodPut, nil, dialErr, false, false},
+		{"PATCH", http.MethodPatch, nil, dialErr, false, false},
+		{"DELETE", http.MethodDelete, nil, dialErr, false, false},
+		{"CONNECT", http.MethodConnect, nil, dialErr, false, false},
+		{"OPTIONS", http.MethodOptions, nil, dialErr, false, false},
+		{"TRACE", http.MethodTrace, nil, dialErr, false, false},
+		{"request deadline", http.MethodGet, nil, context.DeadlineExceeded, false, false},
+		{"read deadline", http.MethodGet, nil, &net.OpError{Op: "read", Net: "tcp", Err: context.DeadlineExceeded}, false, false},
+		{"dial cancellation", http.MethodGet, nil, &net.OpError{Op: "dial", Net: "tcp", Err: context.Canceled}, false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var nativeCalls, curlCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				curlCalls.Add(1)
+				_, _ = io.WriteString(w, `{}`)
+			}))
+			defer server.Close()
+			deadline := time.Now().Add(5 * time.Second)
+			if test.expired {
+				deadline = time.Now().Add(-time.Second)
+			}
+			ctx, cancel := context.WithDeadline(t.Context(), deadline)
+			defer cancel()
+			client := &CoordinatorClient{BaseURL: server.URL, Client: &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					nativeCalls.Add(1)
+					if req.Context().Err() != nil {
+						t.Fatal("native attempt started with an expired context")
+					}
+					if test.cancelDuring {
+						cancel()
+					}
+					return nil, test.err
+				}),
+			}}
+			err := client.do(ctx, test.method, "/v1/health", test.body, nil)
+			wantCalls := int32(1)
+			wantErr := test.err
+			if test.expired {
+				wantCalls, wantErr = 0, context.DeadlineExceeded
+			}
+			if err == nil || !errors.Is(err, wantErr) || strings.Contains(err.Error(), "curl fallback failed") ||
+				nativeCalls.Load() != wantCalls || curlCalls.Load() != 0 {
+				t.Fatalf("err=%v native=%d curl=%d, want original error, %d native calls and no fallback",
+					err, nativeCalls.Load(), curlCalls.Load(), wantCalls)
+			}
+		})
 	}
 }
 
@@ -213,7 +333,7 @@ func TestStopCoordinatorStalledLookup(t *testing.T) {
 						http.Error(w, "invalid release", http.StatusBadRequest)
 						return
 					}
-					_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: "cbx_abcdef123456", Provider: "aws", State: "released"}})
+					_ = json.NewEncoder(w).Encode(map[string]any{"lease": confirmedCoordinatorRelease("cbx_abcdef123456", "aws")})
 				default:
 					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 					http.NotFound(w, r)

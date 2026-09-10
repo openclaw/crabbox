@@ -6,6 +6,7 @@ import (
 	"flag"
 	"io"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -117,12 +118,100 @@ func TestCommandRoutingArgsPrefersExplicitProviderWorkRoot(t *testing.T) {
 	}
 }
 
+func TestSealosConfigFlagContract(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := testConfig()
+	fields := []struct{ field, flag, value string }{
+		{"Kubectl", "kubectl", "~/bin/tool"}, {"Kubeconfig", "kubeconfig", "~/config"}, {"Context", "context", "context-example"}, {"Namespace", "namespace", "team-example"}, {"Image", "image", "image-example"}, {"TemplateID", "template-id", "template-example"}, {"CPU", "cpu", "3"}, {"Memory", "memory", "6Gi"}, {"StorageLimit", "storage-limit", "30Gi"}, {"Network", "network", "NodePort"}, {"SSHGatewayHost", "ssh-gateway-host", "gateway.example.invalid"}, {"SSHGatewayPort", "ssh-gateway-port", "2244"}, {"SSHUser", "ssh-user", "example"}, {"WorkRoot", "work-root", "/workspace/~/example"}, {"NodeHost", "node-host", "node.example.invalid"},
+	}
+	fs := flag.NewFlagSet("sealos", flag.ContinueOnError)
+	values := (Provider{}).RegisterFlags(fs, cfg)
+	var args []string
+	for _, f := range fields {
+		name := "sealos-devbox-" + f.flag
+		if got := fs.Lookup(name).DefValue; got != reflect.ValueOf(cfg.SealosDevbox).FieldByName(f.field).String() {
+			t.Fatalf("default %s=%q", name, got)
+		}
+		args = append(args, "--"+name+"="+f.value)
+	}
+	if fs.Lookup("sealos-devbox-delete-on-release").DefValue != "false" {
+		t.Fatal("bool registration")
+	}
+	before := cfg.SealosDevbox
+	if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SealosDevbox != before || core.IsSealosDevboxWorkRootExplicit(&cfg) || core.DeleteOnReleaseExplicit(cfg, providerName) {
+		t.Fatal("unvisited flags changed state")
+	}
+	args = append(args, "--sealos-devbox-delete-on-release=false")
+	if err := fs.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range fields {
+		want := f.value
+		if f.field == "Kubectl" {
+			want = filepath.Join(home, "bin/tool")
+		}
+		if f.field == "Kubeconfig" {
+			want = filepath.Join(home, "config")
+		}
+		if got := reflect.ValueOf(cfg.SealosDevbox).FieldByName(f.field).String(); got != want {
+			t.Fatalf("flag %s=%q want %q", f.flag, got, want)
+		}
+	}
+	if cfg.WorkRoot != "/workspace/~/example" || !core.IsSealosDevboxWorkRootExplicit(&cfg) || !core.DeleteOnReleaseExplicit(cfg, providerName) || cfg.SealosDevbox.DeleteOnRelease {
+		t.Fatal("flag workroot/bool markers")
+	}
+	for _, f := range fields {
+		t.Run("empty-"+f.field, func(t *testing.T) {
+			c := testConfig()
+			fs := flag.NewFlagSet("empty", flag.ContinueOnError)
+			v := (Provider{}).RegisterFlags(fs, c)
+			if err := fs.Parse([]string{"--sealos-devbox-" + f.flag + "="}); err != nil {
+				t.Fatal(err)
+			}
+			_ = (Provider{}).ApplyFlags(&c, fs, v)
+			if reflect.ValueOf(c.SealosDevbox).FieldByName(f.field).String() != "" {
+				t.Fatal("explicit empty did not assign before validation")
+			}
+		})
+	}
+}
+
+func TestSealosConfigFlagTiming(t *testing.T) {
+	cfg := core.Config{}
+	fs := flag.NewFlagSet("foreign", flag.ContinueOnError)
+	if err := (Provider{}).ApplyFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, core.Config{}) {
+		t.Fatal("foreign values must return before validation")
+	}
+	for _, name := range []string{"sealos-devbox", "sealos", "sealos-dev"} {
+		c := testConfig()
+		c.Provider = name
+		fs := flag.NewFlagSet(name, flag.ContinueOnError)
+		v := (Provider{}).RegisterFlags(fs, c)
+		if err := fs.Parse([]string{"--sealos-devbox-context=first", "--sealos-devbox-context=last", "--sealos-devbox-work-root=/home/devbox/project", "--sealos-devbox-delete-on-release=false"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := (Provider{}).ApplyFlags(&c, fs, v); err != nil {
+			t.Fatal(err)
+		}
+		if c.SealosDevbox.Context != "last" || !core.IsSealosDevboxWorkRootExplicit(&c) || !core.DeleteOnReleaseExplicit(c, providerName) {
+			t.Fatal("last-wins/equal marker")
+		}
+	}
+}
+
 func TestFlagsExpandLocalPathsAndPreserveGuestWorkRoot(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	cfg := testConfig()
 	fs := flag.NewFlagSet("sealos-devbox", flag.ContinueOnError)
-	values := registerFlags(fs, cfg)
+	values := (Provider{}).RegisterFlags(fs, cfg)
 	if err := fs.Parse([]string{
 		"--sealos-devbox-kubectl=~/bin/kubectl",
 		"--sealos-devbox-kubeconfig=~/.kube/sealos.yaml",

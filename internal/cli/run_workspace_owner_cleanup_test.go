@@ -224,10 +224,11 @@ func setupRunCleanupWorkspaceOwnerTest(t *testing.T) string {
 	isolateRunTestUserDirs(t, dir)
 	t.Chdir(dir)
 	sshPath := filepath.Join(dir, "ssh")
+	downloadedProof := []byte("proof-downloaded\n")
 	commandScript := `#!/bin/sh
 printf '%s\n---\n' "$1" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$1" in
-  *"base64 <"*) printf 'cHJvb2YtZG93bmxvYWRlZAo='; exit 0 ;;
+  *"base64 <"*) printf '%s' ` + shellQuote(encodedRunDownloadPayload(int64(len(downloadedProof)), downloadedProof)) + `; exit 0 ;;
   *"renewal-cleanup-exit-23"*) exit 23 ;;
 esac
 exit 0
@@ -575,15 +576,22 @@ func TestRunFailureDigestCleanupOutcomes(t *testing.T) {
 			if report.ExitCode != 23 || (report.LeaseStopped != nil && *report.LeaseStopped) != test.wantStop {
 				t.Fatalf("timing outcome disagrees with cleanup: %#v", report)
 			}
-			if report.RunStatus != "failed" || (report.LeaseStopErr != "") != (test.stopErr != nil) {
+			if report.RunStatus != "failed" || report.RetryLikely != "unknown" || (report.LeaseStopErr != "") != (test.stopErr != nil) {
 				t.Errorf("run status or release error changed: %#v", report)
 			}
 			if !strings.Contains(out, "failure digest") {
 				t.Fatalf("missing failure digest:\n%s", out)
 			}
-			for _, command := range []string{"ssh", "run", "stop"} {
-				if got := strings.Contains(out, "next: crabbox "+command+" "); got == test.wantStop {
-					t.Errorf("recovery %s present=%v, stopped=%v:\n%s", command, got, test.wantStop, out)
+			for _, command := range []struct {
+				name string
+				want bool
+			}{
+				{name: "ssh", want: !test.wantStop},
+				{name: "run"},
+				{name: "stop", want: !test.wantStop},
+			} {
+				if got := strings.Contains(out, "next: crabbox "+command.name+" "); got != command.want {
+					t.Errorf("recovery %s present=%v want=%v, stopped=%v:\n%s", command.name, got, command.want, test.wantStop, out)
 				}
 			}
 			if (test.wantStop || test.stopErr != nil || test.retained) != (releaseCalls == 1) {

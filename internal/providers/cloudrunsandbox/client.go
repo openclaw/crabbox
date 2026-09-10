@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -519,7 +520,7 @@ type directTransport struct {
 func (t *directTransport) Mode() string { return "direct" }
 
 func (t *directTransport) binary() string {
-	return blank(strings.TrimSpace(t.cfg.CloudRunSandbox.CLIPath), defaultCLIPath)
+	return blank(strings.TrimSpace(t.cfg.CloudRunSandbox.CLIPath), core.CloudRunSandboxConfigDefaultCLIPath)
 }
 
 func (t *directTransport) baseArgs() []string { return nil }
@@ -672,6 +673,9 @@ func (t *directTransport) Exec(ctx context.Context, sandboxID, command string, o
 		defer cancel()
 	}
 	result, err := t.runCLIWithStdin(ctx, args, strings.NewReader(script.String()), stdout, stderr)
+	if core.IsPlainLocalCommandExit(result, err) {
+		return result.ExitCode, nil
+	}
 	if err != nil {
 		return result.ExitCode, fmt.Errorf("sandbox exec failed: %w", err)
 	}

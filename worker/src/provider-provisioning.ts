@@ -81,12 +81,17 @@ export interface ProviderProvisioningCleanupClaim {
   providerProject?: string;
   providerScope?: string;
   serverID?: number;
+  providerResourceID?: string;
 }
 
 // Unlike retryable cleanup failure, this requires identity or scope resolution before
 // another provider operation can be authorized. It never establishes resource absence.
 export class ProviderResourceUnresolvedError extends Error {
   override name = "ProviderResourceUnresolvedError";
+}
+
+export class ProviderProvisioningOutcomeUncertainError extends Error {
+  override name = "ProviderProvisioningOutcomeUncertainError";
 }
 
 export class ProviderProvisioningCleanupError extends Error {
@@ -109,6 +114,15 @@ export function providerProvisioningCleanupClaim(
     current = current.cause;
   }
   return undefined;
+}
+
+export function providerProvisioningOutcomeUncertain(error: unknown): boolean {
+  let current = error;
+  for (let depth = 0; depth < 8 && current instanceof Error; depth += 1) {
+    if (current instanceof ProviderProvisioningOutcomeUncertainError) return true;
+    current = current.cause;
+  }
+  return false;
 }
 
 export function validatedProviderProvisioningCleanupClaim(
@@ -142,7 +156,9 @@ export function validateProviderProvisioningCleanupClaim(
         ? claim
         : undefined;
     case "gcp":
-      return nonEmptyClaimValue(claim.region) && nonEmptyClaimValue(claim.providerProject)
+      return nonEmptyClaimValue(claim.region) &&
+        nonEmptyClaimValue(claim.providerProject) &&
+        canonicalNumericClaimValue(claim.providerResourceID)
         ? claim
         : undefined;
     case "daytona":
@@ -157,6 +173,10 @@ export function validateProviderProvisioningCleanupClaim(
 
 function nonEmptyClaimValue(value: string | undefined): boolean {
   return Boolean(value && value === value.trim());
+}
+
+function canonicalNumericClaimValue(value: string | undefined): boolean {
+  return Boolean(value && value === value.trim() && /^[0-9]+$/.test(value));
 }
 
 function validAzureProviderScope(value: string | undefined): boolean {

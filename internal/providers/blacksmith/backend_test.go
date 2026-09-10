@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"text/tabwriter"
 	"time"
@@ -37,6 +37,9 @@ func (r *blacksmithFuncRunner) Run(ctx context.Context, req LocalCommandRequest)
 	r.calls = append(r.calls, append([]string(nil), req.Args...))
 	if r.onRequest != nil {
 		r.onRequest(ctx, req)
+	}
+	if handled, result, err := testBlacksmithArtifactTransfer(req); handled {
+		return result, err
 	}
 	if len(req.Args) >= 2 && req.Args[0] == "auth" && req.Args[1] == "status" {
 		return LocalCommandResult{Stdout: "Authenticated organizations:\n  * example-org (current)\n"}, nil
@@ -777,6 +780,175 @@ func TestBlacksmithRunTimingJSONIncludesCommandPhases(t *testing.T) {
 	}
 }
 
+func TestBlacksmithRunFailureStagesLocalCommand(t *testing.T) {
+	if _, err := exec.LookPath("/bin/sh"); err != nil {
+		t.Skipf("local staged command requires /bin/sh: %v", err)
+	}
+	for _, tt := range []struct {
+		name, failStage, wantStage string
+		code                       int
+		marked                     bool
+	}{
+		{"test", "test", "test", 1, true},
+		{"build", "build", "build", 23, true},
+		{"install", "install", "install", 2, true},
+		{"unmarked receipts", "test", "unknown", 1, false},
+		{"success", "", "", 0, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateBlacksmithOwnership(t)
+			repo := t.TempDir()
+			t.Chdir(repo)
+			const id = "tbx_stages"
+			testOwnedBlacksmithClaim(t, id, "stage-check", repo)
+			var script, wantStdout, wantStderr strings.Builder
+			var wantPhases = []string{"user-command"}
+			reached := true
+			for _, phase := range []struct{ name, command string }{
+				{"install", `["pnpm","install","--frozen-lockfile","--package-import-method=copy","--child-concurrency=2","--network-concurrency=4"]`},
+				{"build", `["pnpm","build"]`},
+				{"test", `["node","scripts/run-tests.mjs","example.e2e.test.ts"]`},
+			} {
+				if tt.marked {
+					marker := "CRABBOX_PHASE:" + phase.name + "\n"
+					fmt.Fprintf(&script, "printf '%%s' %s >&2\n", shellQuote(marker))
+					if reached {
+						wantStderr.WriteString(marker)
+						wantPhases = append(wantPhases, phase.name)
+					}
+				}
+				code := 0
+				if phase.name == tt.failStage {
+					code = tt.code
+				}
+				receipt := fmt.Sprintf("STAGE %s START\n{\"name\":%q,\"command\":%s,\"exit\":%d,\"seconds\":0.001}\n", phase.name, phase.name, phase.command, code)
+				fmt.Fprintf(&script, "printf '%%s' %s\n", shellQuote(receipt))
+				if reached {
+					wantStdout.WriteString(receipt)
+				}
+				if code != 0 {
+					diagnostic := fmt.Sprintf("[%s] FAILED (exit %d)\nassertion one failed\nassertion two failed\n", phase.name, code)
+					fmt.Fprintf(&script, "printf '%%s' %s >&2\nexit %d\n", shellQuote(diagnostic), code)
+					wantStderr.WriteString(diagnostic)
+					reached = false
+				}
+			}
+			command := strings.TrimSpace(script.String())
+			var nativeCode, runs int
+			runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+				if len(req.Args) < 2 || req.Args[0] != "testbox" || req.Args[1] != "run" {
+					return LocalCommandResult{ExitCode: 2}, fmt.Errorf("unexpected native operation: %v", req.Args)
+				}
+				var gotCommand string
+				for _, arg := range req.Args {
+					if strings.HasPrefix(arg, "printf ") {
+						gotCommand = arg
+						break
+					}
+				}
+				if gotCommand != command {
+					return LocalCommandResult{ExitCode: 2}, fmt.Errorf("delegated command changed: got %q want %q", gotCommand, command)
+				}
+				runs++
+				cmd := exec.CommandContext(t.Context(), "/bin/sh", "-c", gotCommand)
+				cmd.Dir, cmd.Stdout, cmd.Stderr = repo, req.Stdout, req.Stderr
+				cmd.Env = []string{"PATH=/usr/bin:/bin"}
+				cmd.WaitDelay = time.Second
+				err := cmd.Run()
+				if cmd.ProcessState == nil {
+					return LocalCommandResult{ExitCode: 2}, err
+				}
+				nativeCode = cmd.ProcessState.ExitCode()
+				return LocalCommandResult{ExitCode: nativeCode}, err
+			}}
+			backend := newTestBlacksmithBackend(baseConfig(), runner)
+			var stdout, stderr bytes.Buffer
+			backend.rt.Stdout, backend.rt.Stderr = &stdout, &stderr
+			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Root: repo}, ID: id, Command: []string{command}, ShellMode: true, TimingJSON: true})
+			t.Logf("command:\n%s\nstdout:\n%sstderr:\n%snative exit=%d delegated exit=%d error=%v", command, stdout.String(), stderr.String(), nativeCode, result.ExitCode, err)
+			var ee ExitError
+			if runs != 1 || nativeCode != tt.code || result.ExitCode != tt.code || (tt.code == 0 && err != nil) || (tt.code != 0 && (!errors.As(err, &ee) || ee.Code != tt.code)) {
+				t.Fatalf("runs=%d native=%d result=%+v err=%v", runs, nativeCode, result, err)
+			}
+			if stdout.String() != wantStdout.String() || !strings.Contains(stderr.String(), wantStderr.String()) || result.CommandText != command {
+				t.Fatal("command or workload output changed")
+			}
+			var report timingReport
+			for _, line := range strings.Split(stderr.String(), "\n") {
+				if strings.HasPrefix(line, "{") {
+					if err := json.Unmarshal([]byte(line), &report); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			var phases []string
+			for _, phase := range report.CommandPhases {
+				phases = append(phases, phase.Name)
+			}
+			if report.Provider != blacksmithTestboxProvider || report.ExitCode != tt.code || report.BlockedStage != tt.wantStage || !reflect.DeepEqual(phases, wantPhases) {
+				t.Errorf("timing=%+v want exit=%d stage=%q phases=%v", report, tt.code, tt.wantStage, wantPhases)
+			}
+			if tt.code != 0 && !strings.Contains(stderr.String(), fmt.Sprintf("exit=%d blocked_stage=%s retry_likely=unknown", tt.code, tt.wantStage)) {
+				t.Error("summary lost exit or failure stage")
+			}
+		})
+	}
+}
+
+func TestBlacksmithProofTailPreservesRawBytesURLAndSnapshots(t *testing.T) {
+	b := newBlacksmithProofTailBuffer()
+	var expected []byte
+	for _, chunk := range [][]byte{
+		{}, []byte(strings.Repeat("setup\n", 350)),
+		[]byte("https://github.com/example-org/my-app/actions/"),
+		[]byte("runs/123\n"), {'x', 0xff, '\n'},
+		[]byte("https://github.com/example-org/my-app/actions/runs/456\n"),
+	} {
+		n, err := b.Write(chunk)
+		if n != len(chunk) || err != nil {
+			t.Fatalf("write=%d/%v, want %d/nil", n, err, len(chunk))
+		}
+		expected = append(expected, chunk...)
+		if got := b.Bytes(); !bytes.Equal(got, expected) {
+			t.Fatalf("raw snapshot=%q want=%q", got, expected)
+		}
+	}
+	if got := b.ActionsURL(); got != "https://github.com/example-org/my-app/actions/runs/123" {
+		t.Fatalf("first split URL=%q", got)
+	}
+	snapshot := b.Bytes()
+	snapshot[0] = '!'
+	if !bytes.Equal(b.Bytes(), expected) {
+		t.Fatal("returned snapshot aliases retained bytes")
+	}
+	if _, err := b.Write([]byte("later")); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot) != len(expected) || string(snapshot[len(snapshot)-4:]) != "456\n" {
+		t.Fatal("later write changed the earlier snapshot")
+	}
+}
+
+func TestBlacksmithProofTailSerializesSmallWritesAndSnapshots(t *testing.T) {
+	b := newBlacksmithProofTailBuffer()
+	var group sync.WaitGroup
+	for range 2 {
+		group.Go(func() {
+			for range 8 {
+				if n, err := b.Write([]byte("line\n")); err != nil || n != 5 {
+					t.Errorf("write=%d/%v", n, err)
+				}
+				_ = b.Bytes()
+				_ = b.ActionsURL()
+			}
+		})
+	}
+	group.Wait()
+	if got := b.Bytes(); !bytes.Equal(got, []byte(strings.Repeat("line\n", 16))) {
+		t.Fatalf("serialized output=%q", got)
+	}
+}
+
 func TestBlacksmithRunProofArtifactsPersistSuccessStreams(t *testing.T) {
 	home := t.TempDir()
 	repo := t.TempDir()
@@ -845,103 +1017,12 @@ func TestBlacksmithRunProofArtifactsPersistSuccessStreams(t *testing.T) {
 	}
 }
 
-func TestBlacksmithCollectRunArtifactsWritesBoundedArchive(t *testing.T) {
-	home := t.TempDir()
-	repo := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
-	archive := makeTarGz(t, map[string]string{"reports/manifest.json": `{"ok":true}`})
-	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
-		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" {
-			if req.Stdout != nil {
-				_, _ = req.Stdout.Write([]byte("required artifact reports/manifest.json matched=1\n"))
-				_, _ = req.Stdout.Write([]byte(core.DelegatedRunArtifactBeginMarker + "\n"))
-				_, _ = req.Stdout.Write([]byte(base64.StdEncoding.EncodeToString(archive)))
-				_, _ = req.Stdout.Write([]byte("\n" + core.DelegatedRunArtifactEndMarker + "\n"))
-			}
-			return LocalCommandResult{}, nil
-		}
-		return LocalCommandResult{}, nil
-	}}
-	cfg := baseConfig()
-	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
-	testOwnedBlacksmithClaim(t, "tbx_artifacts", "jade-krill", repo)
-	backend := newTestBlacksmithBackend(cfg, runner)
-	result, err := backend.CollectRunArtifacts(context.Background(), core.DelegatedRunArtifactRequest{
-		RunReq: core.RunRequest{
-			Repo:                  core.Repo{Root: repo},
-			ArtifactGlobs:         []string{"reports/**"},
-			RequiredArtifactGlobs: []string{"reports/manifest.json"},
-		},
-		Result:   core.RunResult{LeaseID: "tbx_artifacts"},
-		MaxFiles: 16,
-		MaxBytes: int64(len(archive) + 128),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(result.Output, "required artifact reports/manifest.json matched=1") {
-		t.Fatalf("output=%q", result.Output)
-	}
-	if len(result.Artifacts) != 1 {
-		t.Fatalf("artifacts=%#v", result.Artifacts)
-	}
-	artifact := result.Artifacts[0]
-	if artifact.Kind != "artifact-glob" || artifact.Bytes != len(archive) {
-		t.Fatalf("artifact=%#v", artifact)
-	}
-	got, err := os.ReadFile(artifact.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, archive) {
-		t.Fatalf("archive mismatch bytes=%d want=%d", len(got), len(archive))
-	}
-	if len(runner.calls) != 4 || !strings.Contains(strings.Join(runner.calls[3], " "), core.DelegatedRunArtifactBeginMarker) {
-		t.Fatalf("runner calls=%#v", runner.calls)
-	}
-}
-
-func TestBlacksmithCollectRunArtifactsBoundsCommandOutput(t *testing.T) {
-	home := t.TempDir()
-	repo := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
-	const maxBytes int64 = 64
-	oversized := strings.Repeat("x", int(blacksmithArtifactOutputCaptureLimit(maxBytes)+1024))
-	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
-		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" && req.Stdout != nil {
-			if !req.DisableOutputCapture {
-				t.Fatalf("artifact collection should disable command-runner output capture")
-			}
-			_, _ = req.Stdout.Write([]byte(oversized))
-		}
-		return LocalCommandResult{}, nil
-	}}
-	cfg := baseConfig()
-	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
-	testOwnedBlacksmithClaim(t, "tbx_artifacts", "jade-krill", repo)
-	backend := newTestBlacksmithBackend(cfg, runner)
-	_, err := backend.CollectRunArtifacts(context.Background(), core.DelegatedRunArtifactRequest{
-		RunReq: core.RunRequest{
-			Repo:          core.Repo{Root: repo},
-			ArtifactGlobs: []string{"reports/**"},
-		},
-		Result:   core.RunResult{LeaseID: "tbx_artifacts"},
-		MaxFiles: 16,
-		MaxBytes: maxBytes,
-	})
-	if err == nil || !strings.Contains(err.Error(), "artifact output too large before archive validation") {
-		t.Fatalf("err=%v, want bounded output error", err)
-	}
-}
-
 func TestBlacksmithRunCollectsArtifactsBeforeOneShotCleanup(t *testing.T) {
 	requireBlacksmithArtifactShell(t)
+	isolateArtifactOwnership(t)
 	home := t.TempDir()
 	repo := t.TempDir()
+	t.Chdir(repo)
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
@@ -975,16 +1056,18 @@ func TestBlacksmithRunCollectsArtifactsBeforeOneShotCleanup(t *testing.T) {
 	if len(result.Artifacts) != 1 {
 		t.Fatalf("artifacts=%#v", result.Artifacts)
 	}
-	if len(runner.calls) != 9 || runCalls != 1 {
+	if len(runner.calls) != 11 || runCalls != 1 {
 		t.Fatalf("calls=%d, want scoped artifact retrieval and terminal finalization", len(runner.calls))
 	}
-	if runner.calls[1][1] != "warmup" || runner.calls[4][1] != "run" || runner.calls[6][1] != "stop" {
+	if runner.calls[1][1] != "warmup" || runner.calls[5][1] != "run" || runner.calls[8][1] != "stop" {
 		t.Fatalf("unexpected call order: %#v", runner.calls)
 	}
+	assertArtifactTransferCalls(t, runner.calls, 1)
 }
 
 func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 	requireBlacksmithArtifactShell(t)
+	isolateArtifactOwnership(t)
 	home := t.TempDir()
 	repo := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1024,9 +1107,10 @@ func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
 		t.Fatalf("err=%v want artifact exit 7", err)
 	}
-	if len(runner.calls) != 5 || runCalls != 1 {
+	if len(runner.calls) != 6 || runCalls != 1 {
 		t.Fatalf("blacksmith calls=%d want one warmup/run without stop: %#v", len(runner.calls), runner.calls)
 	}
+	assertArtifactTransferCalls(t, runner.calls, 0)
 	if result.Session == nil || !result.Session.Kept {
 		t.Fatalf("session=%#v, want kept after artifact failure", result.Session)
 	}
@@ -1035,55 +1119,6 @@ func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stderr missing %q in:\n%s", want, got)
 		}
-	}
-}
-
-func TestBlacksmithExtractArtifactArchiveRejectsMissingEnvelope(t *testing.T) {
-	_, _, err := blacksmithExtractArtifactArchive("no marker", core.DelegatedRunArtifactDefaultMaxBytes)
-	if err == nil || !strings.Contains(err.Error(), "did not return a bounded artifact archive") {
-		t.Fatalf("err=%v, want missing envelope", err)
-	}
-}
-
-func TestBlacksmithExtractArtifactArchiveIgnoresPreambleMarkerText(t *testing.T) {
-	archive := makeTarGz(t, map[string]string{"reports/manifest.json": `{"ok":true}`})
-	output := strings.Join([]string{
-		"required artifact " + core.DelegatedRunArtifactBeginMarker + " matched=1",
-		"required artifact " + core.DelegatedRunArtifactEndMarker + " matched=1",
-		core.DelegatedRunArtifactBeginMarker,
-		base64.StdEncoding.EncodeToString(archive),
-		core.DelegatedRunArtifactEndMarker,
-	}, "\n")
-	got, clean, err := blacksmithExtractArtifactArchive(output, core.DelegatedRunArtifactDefaultMaxBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, archive) {
-		t.Fatalf("archive mismatch bytes=%d want=%d", len(got), len(archive))
-	}
-	for _, want := range []string{
-		"required artifact " + core.DelegatedRunArtifactBeginMarker + " matched=1",
-		"required artifact " + core.DelegatedRunArtifactEndMarker + " matched=1",
-	} {
-		if !strings.Contains(clean, want) {
-			t.Fatalf("clean output missing %q:\n%s", want, clean)
-		}
-	}
-}
-
-func TestBlacksmithExtractArtifactArchiveAllowsExactMaxWithPadding(t *testing.T) {
-	archive := bytes.Repeat([]byte("x"), 64)
-	output := strings.Join([]string{
-		core.DelegatedRunArtifactBeginMarker,
-		base64.StdEncoding.EncodeToString(archive),
-		core.DelegatedRunArtifactEndMarker,
-	}, "\n")
-	got, _, err := blacksmithExtractArtifactArchive(output, int64(len(archive)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, archive) {
-		t.Fatalf("archive mismatch bytes=%d want=%d", len(got), len(archive))
 	}
 }
 
@@ -1227,42 +1262,6 @@ func TestBlacksmithRunTerminatesSyncStall(t *testing.T) {
 		t.Fatalf("exit=%d want 124", code)
 	}
 	if !strings.Contains(stderr.String(), "Blacksmith Testbox sync did not print a completion marker") {
-		t.Fatalf("stderr=%q", stderr.String())
-	}
-}
-
-func TestBlacksmithCollectRunArtifactsTerminatesSyncStall(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("CRABBOX_BLACKSMITH_SYNC_TIMEOUT_MS", "1")
-	if _, _, err := ensureTestboxKey("tbx_artifactstall"); err != nil {
-		t.Fatal(err)
-	}
-	var stderr bytes.Buffer
-	testOwnedBlacksmithClaim(t, "tbx_artifactstall", "jade-krill", "/repo")
-	backend := &blacksmithBackend{
-		spec: Provider{}.Spec(),
-		cfg:  baseConfig(),
-		rt: Runtime{
-			Stdout: io.Discard,
-			Stderr: &stderr,
-			Clock:  testClock{},
-			Exec:   blockingSyncRunner{},
-		},
-	}
-	_, err := backend.CollectRunArtifacts(context.Background(), core.DelegatedRunArtifactRequest{
-		RunReq: core.RunRequest{
-			Repo:          core.Repo{Root: "/repo"},
-			ArtifactGlobs: []string{"reports/**"},
-		},
-		Result: core.RunResult{LeaseID: "tbx_artifactstall"},
-	})
-	var exitErr ExitError
-	if !errors.As(err, &exitErr) || exitErr.Code != 124 {
-		t.Fatalf("err=%v want exit 124", err)
-	}
-	if !strings.Contains(stderr.String(), "during artifact retrieval") {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
 }

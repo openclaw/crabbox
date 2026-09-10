@@ -50,7 +50,9 @@ exec ${JSON.stringify(python)} "$@"
 }
 
 const prepareSmokeRepo = (dir) =>
-  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-digitalocean-smoke.sh"));
+  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-digitalocean-smoke.sh"), [
+    "lib/live-smoke-common.sh",
+  ]);
 
 test("live digitalocean smoke skips unless opted in", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-do-skip-"));

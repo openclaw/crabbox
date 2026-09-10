@@ -530,7 +530,7 @@ test("run-free public validation and freeze bind the complete immutable asset in
     const bin = path.join(root, "bin");
     fs.mkdirSync(bin);
     writeExecutable(path.join(bin, "git"), `#!/bin/sh
-[ "$*" = "-C ${repoRoot} show ${"b".repeat(40)}:CHANGELOG.md" ] || exit 98
+[ "$*" = ${shellQuote(`-C ${repoRoot} show ${"b".repeat(40)}:CHANGELOG.md`)} ] || exit 98
 printf '## 1.2.3\\n\\nexact notes\\n'
 `);
     writeExecutable(path.join(bin, "curl"), `#!/bin/bash

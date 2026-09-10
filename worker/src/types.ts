@@ -1,3 +1,5 @@
+import type { AWSQualificationTransportBinding } from "./aws-qualification-contract";
+
 export interface AWSCredentials {
   accessKeyId: string;
   secretAccessKey: string;
@@ -15,6 +17,7 @@ export interface Env {
     timestamp: string;
   };
   HETZNER_TOKEN: string;
+  CRABBOX_AWS_QUALIFICATION_TRANSPORT?: AWSQualificationTransportBinding;
   awsCredentialProvider?: AWSCredentialProvider;
   AWS_ACCESS_KEY_ID?: string;
   AWS_SECRET_ACCESS_KEY?: string;
@@ -347,12 +350,14 @@ export const coordinatorProviderRegistry = [
     label: "Hetzner",
     requiredSecrets: ["HETZNER_TOKEN"],
     adminAudit: false,
+    supportsCapacityMarket: false,
   },
   {
     provider: "aws",
     label: "AWS",
     requiredSecrets: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
     adminAudit: true,
+    supportsCapacityMarket: true,
   },
   {
     provider: "azure",
@@ -364,24 +369,28 @@ export const coordinatorProviderRegistry = [
       "AZURE_SUBSCRIPTION_ID",
     ],
     adminAudit: true,
+    supportsCapacityMarket: true,
   },
   {
     provider: "gcp",
     label: "GCP",
     requiredSecrets: ["GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"],
     adminAudit: false,
+    supportsCapacityMarket: true,
   },
   {
     provider: "daytona",
     label: "Daytona",
     requiredSecrets: ["DAYTONA_CRABBOX_KEY"],
     adminAudit: false,
+    supportsCapacityMarket: false,
   },
 ] as const satisfies readonly {
   provider: string;
   label: string;
   requiredSecrets: readonly (keyof Env)[];
   adminAudit: boolean;
+  supportsCapacityMarket: boolean;
 }[];
 
 export type CoordinatorProviderSpec = (typeof coordinatorProviderRegistry)[number];
@@ -424,6 +433,25 @@ export interface RunTelemetrySummary {
   end?: LeaseTelemetry;
   samples?: LeaseTelemetry[];
 }
+
+export interface HetznerCleanupEvidence {
+  version: 1;
+  provider: "hetzner";
+  leaseID: string;
+  serverID: number;
+  dispatchStartedAt?: string;
+  deleteNotFoundAt?: string;
+  action?: { id: number; status: "running" | "success" | "error" };
+  confirmation?: {
+    method:
+      | "delete-action-success-and-server-absent"
+      | "already-absent"
+      | "delete-not-found-and-server-absent";
+    at: string;
+  };
+}
+
+export type ProviderCleanupEvidence = HetznerCleanupEvidence;
 
 export interface LeaseRecord {
   id: string;
@@ -480,6 +508,7 @@ export interface LeaseRecord {
   awsSSMLogGroup?: string;
   capacityHints?: CapacityHint[];
   serverID: number;
+  providerResourceID?: string;
   serverName: string;
   providerKey: string;
   providerKeyCleanupOwned?: boolean;
@@ -505,11 +534,13 @@ export interface LeaseRecord {
   telemetry?: LeaseTelemetry;
   telemetryHistory?: LeaseTelemetry[];
   cleanupAttempts?: number;
+  providerCleanup?: ProviderCleanupEvidence;
   cleanupError?: string;
   cleanupFailedAt?: string;
   cleanupRetryAt?: string;
   cleanupStartedAt?: string;
   cleanupClaimExpiresAt?: string;
+  cleanupCompletedAt?: string;
   failureError?: string;
   provisioningResourceMayExist?: boolean;
   provisioningFailureRetryable?: boolean;
@@ -728,11 +759,23 @@ export interface LeaseImageIdentity {
   promotedAt?: string;
 }
 
+// Request-local observations; never persisted or used to authorize provider access.
+export type ProviderAccessTimingObserver = (
+  step: "ingress_wait" | "lifecycle_wait" | "access_snapshot",
+  durationMs: number,
+) => void;
+
 export interface LeaseProvisioningTiming {
   requestMs: number;
   networkReadyMs?: number;
   bootstrapMs?: number;
   totalMs: number;
+  phases?: LeaseProvisioningPhase[];
+}
+
+export interface LeaseProvisioningPhase {
+  name: "request" | "network_ready" | "bootstrap" | "unattributed";
+  ms: number;
 }
 
 export interface CapacityHint {
@@ -930,6 +973,7 @@ export interface ProviderFastSnapshotRestore {
 
 export interface PromotedImageRecord extends ProviderImage {
   promotedAt: string;
+  revision?: string;
   catalogOnly?: boolean;
   variantSelectors?: ImageVariantSelectors;
 }
@@ -968,6 +1012,7 @@ export interface RunRecord {
   terminalReceipt?: TerminalRunReceipt;
   terminalFinishSHA256?: string;
   terminalLogPrefix?: string;
+  createRequestSHA256?: string;
 }
 
 export interface TerminalRunReceipt {
@@ -1164,6 +1209,7 @@ export interface MachineView {
 export interface ProviderMachine {
   provider: Provider;
   id: number;
+  providerResourceID?: string;
   cloudID: string;
   region?: string;
   name: string;

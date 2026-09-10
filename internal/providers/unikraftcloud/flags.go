@@ -2,7 +2,9 @@ package unikraftcloud
 
 import (
 	"flag"
-	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type unikraftCloudFlagValues struct {
@@ -26,12 +28,9 @@ func registerUnikraftCloudProviderFlags(fs *flag.FlagSet, defaults Config) any {
 }
 
 func applyUnikraftCloudProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if isUnikraftCloudProviderName(cfg.Provider) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s", providerName)
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s", providerName)
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(unikraftCloudFlagValues)
@@ -51,13 +50,4 @@ func applyUnikraftCloudProviderFlags(cfg *Config, fs *flag.FlagSet, values any) 
 		cfg.UnikraftCloud.MemoryMB = *v.MemoryMB
 	}
 	return nil
-}
-
-func isUnikraftCloudProviderName(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName, "unikraftcloud", "ukc":
-		return true
-	default:
-		return false
-	}
 }

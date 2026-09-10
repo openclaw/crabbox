@@ -23,7 +23,9 @@ exec ${JSON.stringify(python)} "$@"
 }
 
 const prepareSmokeRepo = (dir) =>
-  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-linode-smoke.sh"));
+  copySmokeRepo(dir, path.join(repoRoot, "scripts", "live-linode-smoke.sh"), [
+    "lib/live-smoke-common.sh",
+  ]);
 
 test("live linode smoke skips unless opted in", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-linode-skip-"));

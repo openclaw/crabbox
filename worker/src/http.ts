@@ -4,13 +4,6 @@ export function json(data: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(redactStackTraceFields(data)), { ...init, headers });
 }
 
-export function text(message: string, status = 200): Response {
-  return new Response(message, {
-    status,
-    headers: { "content-type": "text/plain; charset=utf-8" },
-  });
-}
-
 export async function readJson<T>(request: Request): Promise<T> {
   const value = (await request.json()) as unknown;
   return value as T;
@@ -37,10 +30,11 @@ export function errorMessage(
   error: unknown,
   secrets: readonly (string | undefined)[] = [],
 ): string {
-  return redactDiagnosticSecrets(
-    firstLine(error instanceof Error ? error.message : String(error)),
+  const redacted = redactDiagnosticSecrets(
+    error instanceof Error ? error.message : String(error),
     secrets,
   );
+  return firstLine(redacted).slice(0, 2048);
 }
 
 const maxDiagnosticRedactionPasses = 64;
@@ -493,5 +487,15 @@ function redactStackTraceFields(value: unknown, seen = new WeakSet<object>()): u
 
 function firstLine(value: string): string {
   const index = value.indexOf("\n");
+  const bodyStart = value.indexOf("{");
+  if (index >= 0 && bodyStart >= 0 && bodyStart < index) {
+    try {
+      // A formatted JSON body is diagnostic text, not a stack trace.
+      JSON.parse(value.slice(bodyStart));
+      return value.replace(/\r?\n\s*/g, " ");
+    } catch {
+      // Preserve first-line filtering for ordinary errors and stack traces.
+    }
+  }
   return index >= 0 ? value.slice(0, index) : value;
 }

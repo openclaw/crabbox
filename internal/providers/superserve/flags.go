@@ -41,11 +41,8 @@ func RegisterSuperserveProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplySuperserveProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if strings.EqualFold(strings.TrimSpace(cfg.Provider), providerName) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=superserve; use --superserve-template or --superserve-snapshot")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=superserve; use --superserve-template or --superserve-snapshot")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --superserve-template or --superserve-snapshot", "use --superserve-template or --superserve-snapshot"); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(superserveFlagValues)

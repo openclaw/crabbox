@@ -94,13 +94,6 @@ func (b *backend) SupportsRequestedLeaseID() bool { return true }
 
 func (b *backend) SupportsRequestedCheckpointID() bool { return true }
 
-func (b *backend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now().UTC()
-	}
-	return time.Now().UTC()
-}
-
 func (b *backend) configForRun() Config {
 	cfg := b.cfg
 	applyDefaults(&cfg)
@@ -167,7 +160,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		return LeaseTarget{}, err
 	}
 	pendingMachine := machine{Name: name, Status: "CREATING", Size: cfg.Machine0.Size, Region: cfg.Machine0.Region, Image: image, ImageVersion: cfg.Machine0.ImageVersion}
-	pendingServer := Server{Provider: providerName, Name: name, Status: "provisioning", Labels: machineLabels(cfg, pendingMachine, leaseID, slug, req.Keep, b.now())}
+	pendingServer := Server{Provider: providerName, Name: name, Status: "provisioning", Labels: machineLabels(cfg, pendingMachine, leaseID, slug, req.Keep, core.ClockNow(b.rt.Clock).UTC())}
 	pendingServer.Labels["recovery"] = "create-pending"
 	recoveryClaim, claimErr := core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(
 		leaseID, slug, cfg, machine0NameScope(name), pendingServer, SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, LeaseClaim{}, false,
@@ -211,7 +204,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	recoveryClaim = boundClaim
 	claim := LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: machineScope(item.ID)}
 	server := b.serverFromMachine(item, claim, cfg)
-	server.Labels = machineLabels(cfg, item, leaseID, slug, req.Keep, b.now())
+	server.Labels = machineLabels(cfg, item, leaseID, slug, req.Keep, core.ClockNow(b.rt.Clock).UTC())
 	lease, err := b.prepareLease(ctx, item, server, leaseID, true)
 	if err != nil {
 		return LeaseTarget{}, rollback(err)
@@ -514,7 +507,7 @@ func (b *backend) resolve(ctx context.Context, req ResolveRequest, original *Lea
 		return LeaseTarget{}, err
 	}
 	if !claimed && req.Reclaim {
-		lease.Server.Labels = machineLabels(cfg, item, leaseID, slug, true, b.now())
+		lease.Server.Labels = machineLabels(cfg, item, leaseID, slug, true, core.ClockNow(b.rt.Clock).UTC())
 		if err := claimLease(leaseID, slug, cfg, req.Repo.Root, true, lease.Server, lease.SSH); err != nil {
 			return LeaseTarget{}, err
 		}
@@ -563,30 +556,23 @@ func (b *backend) AuthorizeStatusTouchClaim(_ context.Context, lease LeaseTarget
 }
 
 func (b *backend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
-	expected, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server)
-	if !set || !exists {
-		return Server{}, exit(4, "machine0 lease %s has no exact claim snapshot; refusing touch", req.Lease.LeaseID)
-	}
-	if err := b.AuthorizeStatusTouchClaim(ctx, req.Lease, expected); err != nil {
-		return Server{}, err
-	}
-	if req.IdleTimeoutOverride != nil && *req.IdleTimeoutOverride <= 0 {
-		return Server{}, exit(2, "machine0 lease %s idle timeout override must be positive", req.Lease.LeaseID)
-	}
-
-	cfg := b.configForRun()
-	if expected.IdleTimeoutSeconds > 0 {
-		cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
-	}
-	labels := shared.CloneLabels(expected.Labels)
-	for _, key := range machineLabelKeys {
-		if value := req.Lease.Server.Labels[key]; value != "" {
-			labels[key] = value
-		}
-	}
-	now := b.now()
-	labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, req.State, now, req.IdleTimeoutOverride)
-	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(ctx, req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
+		Provider: "machine0", Authorize: b.AuthorizeStatusTouchClaim,
+		Prepare: func(expected LeaseClaim) (map[string]string, time.Time) {
+			cfg := b.configForRun()
+			if expected.IdleTimeoutSeconds > 0 {
+				cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
+			}
+			labels := shared.CloneLabels(expected.Labels)
+			for _, key := range machineLabelKeys {
+				if value := req.Lease.Server.Labels[key]; value != "" {
+					labels[key] = value
+				}
+			}
+			now := core.ClockNow(b.rt.Clock).UTC()
+			return core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, req.State, now, req.IdleTimeoutOverride), now
+		},
+	})
 	if err != nil {
 		return Server{}, err
 	}
@@ -677,7 +663,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			continue
 		}
 		server := b.serverFromMachine(item, claim, cfg)
-		should, reason := shouldCleanupMachine0(server, claim, claim.LeaseID != "", b.now())
+		should, reason := shouldCleanupMachine0(server, claim, claim.LeaseID != "", core.ClockNow(b.rt.Clock).UTC())
 		if !should {
 			fmt.Fprintf(b.rt.Stderr, "skip machine name=%s reason=%s\n", item.Name, reason)
 			continue
@@ -1321,7 +1307,7 @@ func (b *backend) serverFromMachine(item machine, claim LeaseClaim, cfg Config) 
 	labels := shared.CloneLabels(claim.Labels)
 	leaseID, slug := claim.LeaseID, claim.Slug
 	if len(labels) == 0 {
-		labels = machineLabels(cfg, item, leaseID, slug, false, b.now())
+		labels = machineLabels(cfg, item, leaseID, slug, false, core.ClockNow(b.rt.Clock).UTC())
 	}
 	for key, value := range machineDynamicLabels(item) {
 		labels[key] = value

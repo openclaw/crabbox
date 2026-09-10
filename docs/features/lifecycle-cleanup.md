@@ -32,10 +32,11 @@ including when the original request used `keep=true`. A retention request cannot
 undo a deletion request that already owns cleanup.
 
 Healthy queued cleanup reports `cleanupStatus: pending` through release and GET.
-Verified final cleanup clears its transient metadata and reports `complete`;
-identity conflicts, missing successful-deletion proof and observed errors report
-`failed`. Retention reports `retained`. These states preserve the existing client
-rule to keep local credentials until cleanup is verified complete.
+Verified final cleanup writes `cleanupCompletedAt`, clears transient metadata and
+remote access fields, and reports `complete`; identity conflicts, missing
+successful-deletion proof and observed errors report `failed`. Retention reports
+`retained`. These states preserve the existing client rule to keep local
+credentials until cleanup is verified complete.
 
 Durable Azure cleanup uses the same owned-delete claims, immutable identity and
 attachment validation as ordinary release. Each bounded tick removes at most one
@@ -89,6 +90,20 @@ cancel an already-dispatched provider request. Failed and released records can
 still carry unresolved cleanup responsibility. Their local state alone is not
 proof that the provider resource was deleted.
 
+Interrupted provisioning recovery describes an observed interruption, without
+attributing it to a deployment. It can reconcile settled calls in the same
+coordinator generation as well as attempts observed after reconstruction; the
+existing generation and settlement eligibility checks still apply.
+
+AWS recovery inventory is evidence only for the queried Region and existing
+tag/state filters. Both the coordinator's instance inventory and private
+workspace lookup read every `DescribeInstances` page, retaining duplicate
+matches for ambiguity checks. A repeated pagination token, more than 100 pages,
+or a later-page failure makes the inventory incomplete and rejects the entire
+lookup. Incomplete inventory retains cleanup debt and cannot confirm absence,
+even after the existing 30-minute absence confirmation window. A complete empty
+inventory remains subject to that window and the existing ownership checks.
+
 For an exact Azure lease whose provisioning stops before VM creation, ordinary
 owned-resource release can clean the observed creation prefix: an unattached
 canonical public IP alone, or the exact canonical public IP and NIC together.
@@ -132,6 +147,17 @@ Both release and expiry call the same provider delete path:
   cloud server for every active lease past `expiresAt`, then sets state
   `expired`.
 
+Release and expiry publish provider-cleanup completion only after the provider
+delete path succeeds and the exact cleanup claim is revalidated. The stored
+record then clears `host`, `tailscale`, `sshHostKey`, and
+`providerAccessExpiresAt`. It retains provider resource IDs, server identity,
+ownership labels, provider scope, network, exposed ports, and `workRoot` for
+orphan recovery, audit, and AWS ingress reconciliation.
+When provisioning has not dispatched, the reservation owner persists explicit
+no-resource evidence before publishing the same completion fact. Missing cloud
+identity without that evidence is a legacy or unresolved state and remains
+unconfirmed.
+
 `keep=true` only suppresses the automatic release when a `run` command exits; it
 does **not** exempt a lease from idle or TTL expiry.
 
@@ -144,13 +170,17 @@ cleanup diagnostics remain intact for clients that predate this classification.
 New AWS instance IDs can be temporarily invisible. Cleanup observes visibility
 within the existing bound before verifying allocation ownership; unconfirmed
 visibility or termination retains cleanup debt rather than reporting deletion.
+Managed public AWS release uses the same confirmed termination path as private
+workspaces: `TerminateInstances` must acknowledge the exact instance, followed
+by a terminal `terminated` read or exact `InvalidInstanceID.NotFound`.
 Allocation claims carry the prepared account scope for AWS Mac instances.
 Storage failures while publishing or checking an allocation preserve its cleanup
 claim without retrying creation.
 The CLI removes its local per-lease SSH connection directory only after final
-cleanup state is observed. Pending or retrying cleanup, observation timeout or
-cancellation, provider errors, ownership mismatches, and retained resources keep
-the local claim and credentials available for a safe retry. Acquisition rollback
+cleanup state, `cleanupCompletedAt`, and hostless public access are observed.
+Pending or retrying cleanup, observation timeout or cancellation, provider
+errors, ownership mismatches, and retained resources keep the local claim and
+credentials available for a safe retry. Acquisition rollback
 and automatic post-run release only queue cleanup and do not wait for provider
 deletion; they preserve local state while cleanup is pending. Local cleanup is
 scoped to `<user-config>/crabbox/testboxes/<lease-id>` and its private short SSH
@@ -160,10 +190,13 @@ artifacts. Local failure preserves the confirmed remote outcome and local claim;
 a fresh confirmed-deletion lookup retries only local cleanup, not provider deletion.
 
 For public AWS leases, shared security-group writes remain serialized with release
-and authoritative ingress reconciliation. Image selection, instance creation and
-network-address readiness do not hold that fence, so a slow new instance does
-not delay release of another lease. Every regional ingress attempt rechecks the
-creating lease and derives access from current lease records before writing.
+state changes and authoritative ingress reconciliation. Image selection, instance
+creation, network readiness and provider deletion do not hold that fence, so a
+slow instance or termination does not block another lease's ingress work. Cleanup
+still waits for its provider result, then reacquires the ingress fence and
+revalidates its exact claim before publishing success or failure. Every regional
+ingress attempt rechecks the creating lease and derives access from current lease
+records before writing.
 
 If a create attempt is canceled or its lease is released during AWS region
 preparation, the in-flight create returns `409 create_canceled` with the reason.
@@ -204,6 +237,69 @@ charged until exact lifecycle reconciliation. Each checkpoint retains only its
 256 most recent ordered audit events, and eventual tombstone pruning removes
 that entire retained suffix. Direct, archive, recipe, and historical checkpoints
 remain operator-managed.
+### Brokered Hetzner cleanup confirmation
+
+The coordinator records version-1 `providerCleanup` evidence on the existing
+lease before dispatching an exact-server DELETE. It saves the validated delete
+action ID before waiting on `/servers/actions/{id}`. Completion requires action
+success followed by exact `/servers/{id}` GET absence. Hetzner can remove the
+server from account visibility while deletion is still running; GET 404 alone
+does not complete a known action. Observation is bounded to 60 seconds per
+attempt, with each request and body read bounded to 10 seconds or the remaining
+observation budget.
+
+An exact DELETE rejection with HTTP 400, 401, 403, 405, 409, 410, 412, 423, or
+429 retires only that rejected attempt's dispatch marker under the cleanup
+owner fence. These statuses describe rejected requests in Hetzner's
+[error contract](https://docs.hetzner.cloud/cloud.spec.json). The rejection
+remains a cleanup failure and uses the existing broker backoff. The next attempt
+freshly reads the exact server and revalidates ownership, then durably records
+a new dispatch before DELETE. A failed rejection write retains uncertainty.
+HTTP 408, 422 (which also covers service errors), 5xx, timeouts, malformed
+actions, and lost acknowledgements never authorize retiring that marker.
+
+An exact server already missing before any recorded dispatch has the distinct
+`already-absent` basis. DELETE 404 requires a subsequent exact GET 404 and has
+its own basis. Neither can replace an unresolved action or lost acknowledgement.
+Action errors, malformed or missing actions, uncertain dispatches, conflicting
+identity or ownership, and exhausted waits retain cleanup debt. An unknown
+numeric server identity is unresolved unless the recorded failure proves that
+only a newly created owned SSH key needs cleanup; an empty inventory is not
+deletion proof.
+Modern ownership requires canonical lease, provider, slug, and owner labels.
+The supported pre-slug contract still requires the canonical server name and
+legacy labels, and rejects an explicitly conflicting owner label.
+
+Evidence writes and final publication are fenced to the same cleanup claim,
+lease incarnation, and resource identity. Retries resume recorded actions without
+another DELETE. For provisioned servers, owned SSH-key cleanup follows durable
+server confirmation; key failures retain that evidence for retry, and shared
+keys remain retained.
+Definite key-only failure records retain `provisioningResourceMayExist=false`
+and the exact owned-created key ID, with no server identity, server cleanup
+journal, or outstanding provisioning request. Cleanup rechecks the current
+claim before deleting that key and creates no server-absence receipt. Explicit
+no-delete retention preserves this evidence for later deletion. Historical
+records that lost the definite no-resource flag require resolution; absence of
+request markers alone cannot authorize the key-only path.
+Ordinary authenticated GET and `crabbox inspect --json` expose the nonsecret
+journal. Its confirmation timestamp records the provider API contract observed
+then, not physical hardware inspection or a fresh probe. `cleanupStatus` still
+governs finality. Historical released leases without evidence are not passively
+backfilled.
+
+For recovery, the ordinary owner should inspect the exact lease with
+`crabbox inspect --id <lease-id> --json` and retain local credentials and recorded
+evidence. Historical host fields, `released` state, or missing flags do not prove
+absence. An explicit stop of a historical managed lease with stored provider
+identity re-enters the same exact-owner cleanup path and establishes
+`cleanupCompletedAt` only after provider deletion succeeds. A recorded action
+with a known ID resumes through the same lease owner and broker cleanup path.
+Missing no-resource evidence or dispatch acknowledgement authority requires
+operator reconciliation of the exact resource in its original provider project.
+Never manually clear cleanup flags or fabricate a receipt. There is no supported
+automatic population sweep.
+
 ### Managed Daytona cleanup
 
 New brokered Daytona sandboxes receive native wall-clock TTL in the original
@@ -300,11 +396,48 @@ cannot prove which cleanup deleted that member. A legacy claim can establish a
 new stable baseline only while the VM, NIC, public IP, and managed disk are all
 still present; an already-empty legacy claim can be cleared without mutation.
 
+Automatic cleanup does not relax that rule. For the specific expired, disk-only
+case with recorded VM/NIC deletion and an absent public IP, an owner or admin may
+use [audited cleanup recovery](../commands/inspect.md#audited-azure-cleanup-recovery)
+to explicitly accept original-scope public-IP absence. The resulting version-3
+claim retains its original baseline and actual DELETE receipts, records the
+operator acknowledgement separately, and requires the exact original owned disk
+to remain detached. Older workers reject this claim version. Normal release
+rechecks survivors before deleting the disk; it does not infer a historical
+public-IP DELETE receipt, and its separate audit survives claim cleanup.
+
+Azure polling distinguishes `Azure-AsyncOperation` status documents from
+`Location` completion responses. Location HTTP 202 remains pending; terminal
+200/204 completes only without an explicit pending/failure state. An empty
+Azure-AsyncOperation response never establishes success.
+
 ## Direct-provider lifecycle
 
 Without a coordinator, the CLI talks to the provider API directly and owns
 cleanup itself. Releasing a direct lease (`crabbox stop` / `crabbox release`)
 deletes the backing machine immediately.
+
+Ordinary direct AWS, Azure, GCP, and Hetzner acquisition can retry a bootstrap
+timeout with a fresh lease. If rollback reports a cleanup failure, acquisition
+stops instead: the original failure and cleanup diagnostics remain available,
+and no second allocation is attempted. This consumes each adapter's existing
+cleanup result; it does not give all providers the same deletion-confirmation
+guarantee. AWS termination acceptance and Hetzner DELETE success still differ
+from GCP operation completion and Azure's dependent-resource absence checks.
+GCP also stops retrying if its selected-scope cleanup client cannot be rebuilt,
+even if the existing best-effort fallback client returns success. That fallback
+does not establish that the selected project and zone were cleaned.
+
+RunPod and Hetzner bind readiness to the immutable resource ID and expected name
+returned or requested at creation, before using the SSH endpoint. Hetzner also
+checks the new allocation's lease, provider ownership, slug, and selected-key
+labels. A contradictory readiness response cannot replace the original rollback
+target or its key labels. If the creation response itself cannot be bound to the
+request, Hetzner refuses to delete the returned server and reports the unresolved
+allocation; only an independently created attempt key can be cleaned up. These
+checks do not establish generation-fenced deletion for providers addressed by
+reusable names. Existing provider-specific failed-acquisition keep and cleanup
+policies remain unchanged.
 
 `crabbox cleanup` (alias `crabbox machine cleanup`) sweeps expired
 direct-provider machines and stale local state. It refuses to run when a
@@ -374,3 +507,25 @@ attempt cannot overwrite or delete a newer claim.
 - [inspect command](../commands/inspect.md)
 - [Identifiers](identifiers.md)
 - [Security](../security.md)
+
+### Direct Azure acquisition identity
+
+After successful VM creation, direct Azure acquisition binds the returned native
+VM ID to the requested VM name and ownership tags. A final readiness observation
+must retain that binding before bootstrap, ready tagging, or claim publication.
+An incomplete creation result or changed readiness identity reports unresolved
+cleanup and withholds VM deletion; a later matching read does not erase the
+contradiction.
+
+Ordinary failures after a valid creation use the same prepared owned-cleanup
+operations as release: re-read the original VM, capture companion identities,
+revalidate them, delete the VM first, then its surviving companions. Refusal or
+cleanup failure preserves the original acquisition error and prevents a fresh
+bootstrap retry. This in-process rollback has no persisted recovery claim and
+does not provide crash-resumable companion cleanup.
+
+These are observed-identity checks, not an atomic generation-conditional Azure
+DELETE. Inner create-failure rollback and Windows setup performed during create,
+intermediate hidden readiness polls, and replacement races after the final
+validation remain separate boundaries. This does not change GCP cleanup or
+make name-addressed resources equivalent to immutable-ID deletion targets.

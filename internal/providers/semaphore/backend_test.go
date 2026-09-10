@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -98,12 +99,189 @@ func TestProviderSpecIsSSHLease(t *testing.T) {
 
 // --- Flag registration ---
 
+func TestSemaphoreRegistrationOnlyFallbacksAndNoGuards(t *testing.T) {
+	cfg := core.BaseConfig()
+	if cfg.Semaphore != (core.SemaphoreConfig{}) {
+		t.Fatal("raw config defaults populated")
+	}
+	p := Provider{}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.String("class", "", "")
+	fs.String("type", "", "")
+	values := p.RegisterFlags(fs, cfg)
+	for name, want := range map[string]string{"semaphore-machine": "f1-standard-2", "semaphore-os-image": "ubuntu2204", "semaphore-idle-timeout": "30m", "semaphore-host": "", "semaphore-project": ""} {
+		if got := fs.Lookup(name).DefValue; got != want {
+			t.Fatalf("flag %s default=%q want=%q", name, got, want)
+		}
+	}
+	if fs.Lookup("semaphore-token") != nil {
+		t.Fatal("token flag introduced")
+	}
+	if d, err := time.ParseDuration(fs.Lookup("semaphore-idle-timeout").DefValue); err != nil || d != 30*time.Minute {
+		t.Fatalf("duration fallback literal=%s error=%v", d, err)
+	}
+	if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Semaphore != (core.SemaphoreConfig{}) {
+		t.Fatal("unvisited flag fallbacks leaked into raw config")
+	}
+	cfg.Semaphore = core.SemaphoreConfig{Host: "prior.semaphoreci.com", Token: "inert", Project: "prior", Machine: "prior", OSImage: "prior", IdleTimeout: "1h"}
+	before := cfg
+	if err := fs.Parse([]string{"--class=any", "--type=any"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []any{nil, struct{}{}, values} {
+		if err := p.ApplyFlags(&cfg, fs, v); err != nil {
+			t.Fatalf("unexpected sizing/semantic guard=%v", err)
+		}
+	}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("unvisited values changed config")
+	}
+	if err := fs.Parse([]string{"--semaphore-host=", "--semaphore-project=", "--semaphore-machine=", "--semaphore-os-image=", "--semaphore-idle-timeout="}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	before.Semaphore = core.SemaphoreConfig{Token: "inert"}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("explicit empty flag or central source timing changed")
+	}
+}
+
+func TestSemaphoreBackendNormalizationAndProjectOrder(t *testing.T) {
+	cfg := core.Config{Semaphore: core.SemaphoreConfig{Host: "example/path"}}
+	if _, err := newBackend(Provider{}.Spec(), cfg, testRuntime(&http.Client{})); err == nil || !strings.Contains(err.Error(), "must be a host name") {
+		t.Fatalf("host normalization first=%v", err)
+	}
+	cfg.Semaphore.Host = " https://example.semaphoreci.com/ "
+	if _, err := newBackend(Provider{}.Spec(), cfg, testRuntime(&http.Client{})); err == nil || !strings.Contains(err.Error(), "semaphore.token") {
+		t.Fatalf("token requirement=%v", err)
+	}
+	cfg.Semaphore.Token = "  "
+	configured, err := newBackend(Provider{}.Spec(), cfg, testRuntime(&http.Client{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := configured.(*semaphoreBackend)
+	if b.cfg.Semaphore.Host != "example.semaphoreci.com" || b.cfg.Semaphore.Token != "  " {
+		t.Fatal("host normalization/raw token contract changed")
+	}
+	b.cfg.Semaphore.IdleTimeout = "later"
+	if _, err := b.Acquire(context.Background(), core.AcquireRequest{}); err == nil || err.Error() != "semaphore.project is required" {
+		t.Fatalf("project before timeout=%v", err)
+	}
+	b.cfg.Semaphore.Project = "project"
+	if _, err := b.Acquire(context.Background(), core.AcquireRequest{}); err == nil || err.Error() != `invalid semaphore idle timeout "later"` {
+		t.Fatalf("timeout after project=%v", err)
+	}
+	for _, raw := range []string{"", "15m", " ", "0s"} {
+		d, err := idleTimeout(core.Config{Semaphore: core.SemaphoreConfig{IdleTimeout: raw}})
+		switch raw {
+		case "":
+			if err != nil || d != 30*time.Minute {
+				t.Fatal("empty duration fallback changed")
+			}
+		case "15m":
+			if err != nil || d != 15*time.Minute {
+				t.Fatal("custom duration changed")
+			}
+		default:
+			if err == nil || err.Error() != fmt.Sprintf("invalid semaphore idle timeout %q", raw) {
+				t.Fatalf("duration error=%v", err)
+			}
+		}
+	}
+}
+
+func TestSemaphoreRecordedAcquireAndResolveFallbacks(t *testing.T) {
+	for _, tc := range []struct {
+		name, machine, image, idle, wantMachine, wantImage string
+		seconds                                            int
+	}{{"empty", "", "", "", "f1-standard-2", "ubuntu2204", 1800}, {"custom", "f1-standard-4", "ubuntu2404", "15m", "f1-standard-4", "ubuntu2404", 900}, {"raw whitespace", "  ", "  ", "", "  ", "  ", 1800}} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("HOME", root)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+			t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+			var routes []string
+			transport := semaphoreRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				routes = append(routes, req.Method+" "+req.URL.Path)
+				response := ""
+				switch req.Method + " " + req.URL.Path {
+				case "GET /api/v1alpha/projects/example":
+					response = `{"metadata":{"id":"project-example"}}`
+				case "POST /api/v1alpha/jobs":
+					defer req.Body.Close()
+					var body struct {
+						Spec struct {
+							Project string `json:"project_id"`
+							Agent   struct {
+								Machine struct {
+									Type  string `json:"type"`
+									Image string `json:"os_image"`
+								} `json:"machine"`
+							} `json:"agent"`
+							Commands []string `json:"commands"`
+						} `json:"spec"`
+					}
+					if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+						t.Fatal(err)
+					}
+					if body.Spec.Project != "project-example" || body.Spec.Agent.Machine.Type != tc.wantMachine || body.Spec.Agent.Machine.Image != tc.wantImage || len(body.Spec.Commands) != 1 || !strings.HasSuffix(body.Spec.Commands[0], fmt.Sprintf("sleep %d", tc.seconds)) {
+						t.Fatal("normal job request defaults changed")
+					}
+					response = `{"metadata":{"id":"job-example"}}`
+				case "GET /api/v1alpha/jobs/job-example":
+					response = `{"metadata":{"name":"crabbox testbox"},"status":{"state":"RUNNING","agent":{"ip":"192.0.2.25","ports":[{"name":"ssh","number":22}]}}}`
+				case "GET /api/v1alpha/jobs/job-example/debug_ssh_key":
+					response = `{"key":"inert-recorded-key-text"}`
+				default:
+					t.Fatalf("unexpected recorded route %s %s", req.Method, req.URL.Path)
+				}
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response))}, nil
+			})
+			cfg := core.Config{Provider: providerName, Semaphore: core.SemaphoreConfig{Host: "example.semaphoreci.com", Token: "inert", Project: "example", Machine: tc.machine, OSImage: tc.image, IdleTimeout: tc.idle}}
+			configured, err := newBackend(Provider{}.Spec(), cfg, testRuntime(&http.Client{Transport: transport}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			b := configured.(*semaphoreBackend)
+			target, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Name: "example", Root: t.TempDir()}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if target.Server.ServerType.Name != tc.wantMachine || target.Server.Labels["os_image"] != tc.wantImage {
+				t.Fatal("acquisition display values changed")
+			}
+			key, err := os.ReadFile(target.SSH.Key)
+			if err != nil || string(key) != "inert-recorded-key-text" {
+				t.Fatal("recorded inert key not stored in temp state")
+			}
+			resolved, err := b.resolveByJobID(context.Background(), "job-example", true, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resolved.Server.ServerType.Name != tc.wantMachine {
+				t.Fatal("resolveByJobID display fallback changed")
+			}
+			wantRoutes := []string{"GET /api/v1alpha/projects/example", "POST /api/v1alpha/jobs", "GET /api/v1alpha/jobs/job-example", "GET /api/v1alpha/jobs/job-example/debug_ssh_key", "GET /api/v1alpha/jobs/job-example"}
+			if !reflect.DeepEqual(routes, wantRoutes) {
+				t.Fatalf("recorded route sequence=%v", routes)
+			}
+			t.Logf("recorded routes=%v machine=%q os=%q durationSeconds=%d", routes, tc.wantMachine, tc.wantImage, tc.seconds)
+		})
+	}
+}
+
 func TestRegisterAndApplyFlags(t *testing.T) {
 	cfg := core.BaseConfig()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
-	values := registerFlags(fs, cfg)
+	values := (Provider{}).RegisterFlags(fs, cfg)
 	err := fs.Parse([]string{
 		"--semaphore-host", "myorg.semaphoreci.com",
 		"--semaphore-project", "my-app",
@@ -115,7 +293,9 @@ func TestRegisterAndApplyFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	applyFlagOverrides(&cfg, fs, values)
+	if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
 
 	if cfg.Semaphore.Host != "myorg.semaphoreci.com" {
 		t.Errorf("host = %q", cfg.Semaphore.Host)
@@ -140,10 +320,12 @@ func TestFlagsNotSetLeavesDefaults(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
-	values := registerFlags(fs, cfg)
+	values := (Provider{}).RegisterFlags(fs, cfg)
 	_ = fs.Parse([]string{}) // no flags
 
-	applyFlagOverrides(&cfg, fs, values)
+	if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
 
 	if cfg.Semaphore.Machine != "original" {
 		t.Errorf("machine changed to %q, should stay original", cfg.Semaphore.Machine)
@@ -183,12 +365,18 @@ func TestIdleTimeoutRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
-func TestWithDefault(t *testing.T) {
-	if withDefault("", "fallback") != "fallback" {
-		t.Error("empty should use fallback")
-	}
-	if withDefault("value", "fallback") != "value" {
-		t.Error("non-empty should use value")
+func TestFlagRegistrationFallbackKeepsRawNonemptyValues(t *testing.T) {
+	for _, raw := range []string{"", "value", "  "} {
+		cfg := core.Config{Semaphore: core.SemaphoreConfig{Machine: raw}}
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		(Provider{}).RegisterFlags(fs, cfg)
+		want := raw
+		if raw == "" {
+			want = "f1-standard-2"
+		}
+		if got := fs.Lookup("semaphore-machine").DefValue; got != want {
+			t.Fatalf("raw=%q default=%q want=%q", raw, got, want)
+		}
 	}
 }
 

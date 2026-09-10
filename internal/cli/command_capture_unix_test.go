@@ -20,25 +20,76 @@ import (
 	"time"
 )
 
+func TestCommandFileCaptureRetainsObservedOverflow(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	capture, err := newCommandFileCapture(4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer capture.close()
+	if _, err := capture.streams[0].writer.WriteString("abcde"); err != nil {
+		t.Fatal(err)
+	}
+	observed := make(chan struct{}, 1)
+	finish := capture.watch(func() {
+		select {
+		case observed <- struct{}{}:
+		default:
+		}
+	}, func() error { return nil }, time.Second)
+	finished := false
+	defer func() {
+		if !finished {
+			capture.closeWriters()
+			finish()
+		}
+	}()
+	select {
+	case <-observed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not observe the few-byte overflow")
+	}
+	if err := capture.streams[0].writer.Truncate(3); err != nil {
+		t.Fatal(err)
+	}
+	capture.closeWriters()
+	outcome := finish()
+	finished = true
+	if !outcome.settled || !outcome.overflow || outcome.err != nil {
+		t.Fatalf("watcher outcome=%+v", outcome)
+	}
+	stdout, stderr := newCommandCaptureBuffer(4, nil), newCommandCaptureBuffer(4, nil)
+	if err := capture.read(&stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != "abc" || stderr.String() != "" || stdout.buffer.Exceeded() || stderr.buffer.Exceeded() {
+		t.Fatalf("readback=%q/%q overflow=%v/%v", stdout.String(), stderr.String(), stdout.buffer.Exceeded(), stderr.buffer.Exceeded())
+	}
+}
+
 func TestExecCommandRunnerFileCapture(t *testing.T) {
 	t.Setenv(controllerProcessTreeOwnedEnv, "")
 	for _, tc := range []struct {
-		mode      string
-		code      int
-		stdout    string
-		stderr    string
-		cancel    bool
-		waitDelay bool
-		overflow  bool
+		mode       string
+		code       int
+		stdout     string
+		stderr     string
+		cancel     bool
+		deadline   bool
+		lateCancel bool
+		waitDelay  bool
+		overflow   bool
 	}{
 		{mode: "normal", stdout: "out", stderr: "err"},
 		{mode: "nonzero", code: 7, stdout: "out", stderr: "err"},
 		{mode: "early-close", cancel: true},
 		{mode: "cancel", cancel: true},
+		{mode: "deadline", cancel: true, deadline: true},
 		{mode: "stdout-overflow", code: 5, stdout: strings.Repeat("x", 1024), overflow: true},
 		{mode: "stderr-overflow", code: 5, stderr: strings.Repeat("x", 1024), overflow: true},
 		{mode: "overflow-exit", code: 5, stdout: strings.Repeat("x", 1024), overflow: true},
 		{mode: "inherited-writer", waitDelay: true},
+		{mode: "completed-exit", code: 23, lateCancel: true, waitDelay: true},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			dir := t.TempDir()
@@ -64,21 +115,32 @@ func TestExecCommandRunnerFileCapture(t *testing.T) {
 				})
 				done <- outcome{result, err}
 			}()
-			if tc.cancel {
+			if tc.cancel || tc.lateCancel {
 				awaitCaptureMarker(t, filepath.Join(dir, "ready"))
-				cancel()
+				if !tc.deadline {
+					cancel()
+				}
 			}
 			got := <-done
 			joined = true
-			if !tc.cancel && ctx.Err() != nil {
+			if !tc.cancel && !tc.lateCancel && ctx.Err() != nil {
 				t.Fatal("command needed the test deadline to stop")
 			}
 			if tc.cancel {
 				if got.err == nil || got.result.ExitCode == 0 {
 					t.Fatalf("canceled child succeeded: %+v", got.result)
 				}
+				if !errors.Is(got.err, ctx.Err()) {
+					t.Errorf("terminated child lost caller context: %v, want %v", got.err, ctx.Err())
+				}
 			} else if tc.waitDelay {
-				if !errors.Is(got.err, exec.ErrWaitDelay) || got.result.ExitCode == 0 {
+				if tc.lateCancel {
+					// The process exited, but Wait may still be joining its watcher;
+					// cancellation can settle the retained writer or leave WaitDelay.
+					if errors.Is(got.err, context.Canceled) || got.result.ExitCode != tc.code {
+						t.Fatalf("late cancellation replaced observed exit: result=%+v err=%v", got.result, got.err)
+					}
+				} else if !errors.Is(got.err, exec.ErrWaitDelay) || got.result.ExitCode == 0 {
 					t.Fatalf("retained writer result=%+v err=%v", got.result, got.err)
 				}
 			} else if got.result.ExitCode != tc.code || (got.err != nil) != (tc.code != 0) {
@@ -86,6 +148,9 @@ func TestExecCommandRunnerFileCapture(t *testing.T) {
 			}
 			if tc.overflow && !strings.Contains(got.err.Error(), "exceeded 1024-byte limit") {
 				t.Fatalf("overflow error=%v", got.err)
+			}
+			if tc.overflow && (errors.Is(got.err, context.Canceled) || errors.Is(got.err, context.DeadlineExceeded)) {
+				t.Fatalf("internal output-limit cancellation became caller cancellation: %v", got.err)
 			}
 			if got.result.Stdout != tc.stdout || got.result.Stderr != tc.stderr {
 				t.Fatalf("capture stdout bytes=%d stderr bytes=%d", len(got.result.Stdout), len(got.result.Stderr))
@@ -225,13 +290,30 @@ func TestExecCommandRunnerFileCaptureHelper(t *testing.T) {
 		}
 	}
 	switch mode {
+	case "completed-exit":
+		child := exec.Command(os.Args[0], append(captureHelperArgs("orphan-leaf", dir), strconv.Itoa(os.Getpid()))...)
+		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(97)
+		}
+		// Start the post-exit capture deadline only after the retained writer has booted.
+		awaitCaptureMarker(t, filepath.Join(dir, "leaf-pgid"))
+		os.Exit(23)
+	case "orphan-leaf":
+		parent, _ := strconv.Atoi(os.Args[index+3])
+		_ = os.WriteFile(filepath.Join(dir, "leaf-pgid"), []byte(strconv.Itoa(syscall.Getpgrp())), 0o600)
+		for os.Getppid() == parent {
+			time.Sleep(time.Millisecond)
+		}
+		_ = os.WriteFile(filepath.Join(dir, "ready"), []byte("parent exited"), 0o600)
+		time.Sleep(time.Hour)
 	case "normal", "nonzero":
 		_, _ = io.WriteString(os.Stdout, "out")
 		_, _ = io.WriteString(os.Stderr, "err")
 		if mode == "nonzero" {
 			os.Exit(7)
 		}
-	case "early-close", "cancel":
+	case "early-close", "cancel", "deadline":
 		if mode == "early-close" {
 			_ = os.Stdout.Close()
 			_ = os.Stderr.Close()
@@ -256,6 +338,7 @@ func TestExecCommandRunnerFileCaptureHelper(t *testing.T) {
 		if err := child.Start(); err != nil {
 			os.Exit(97)
 		}
+		awaitCaptureMarker(t, filepath.Join(dir, "leaf-pgid"))
 		_, _ = io.WriteString(os.Stdout, "out")
 	case "leaf":
 		_ = os.WriteFile(filepath.Join(dir, "leaf-pgid"), []byte(strconv.Itoa(syscall.Getpgrp())), 0o600)

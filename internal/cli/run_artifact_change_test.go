@@ -39,7 +39,7 @@ func TestRunArtifactChangeRejectsBlankPathBeforeNormalization(t *testing.T) {
 			isolateRunTestUserDirs(t, dir)
 			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "config.yaml"))
 			err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(context.Background(), []string{"--provider", "run-env-profile-test", "--require-artifact-change", p, "--", "true"})
-			if exitCodeForError(err, 0) != 2 || !strings.Contains(fmt.Sprint(err), "--require-artifact-change") {
+			if ExitCodeForError(err, 0) != 2 || !strings.Contains(fmt.Sprint(err), "--require-artifact-change") {
 				t.Fatalf("invalid exact path was normalized away: %v", err)
 			}
 		})
@@ -191,7 +191,7 @@ func TestRunArtifactChangeRejectsUnsupportedRoutes(t *testing.T) {
 			var stderr bytes.Buffer
 			args := append(append([]string{}, flags...), "--require-artifact-change", "proof", "--", "true")
 			err := (App{Stdout: io.Discard, Stderr: &stderr}).runCommand(context.Background(), args)
-			if exitCodeForError(err, 0) != 2 || !strings.Contains(fmt.Sprint(err), "--require-artifact-change") {
+			if ExitCodeForError(err, 0) != 2 || !strings.Contains(fmt.Sprint(err), "--require-artifact-change") {
 				t.Fatalf("err=%v stderr=%s", err, stderr.String())
 			}
 		})
@@ -219,11 +219,13 @@ func runArtifactChangeE2E(t *testing.T, failureDownloads bool) {
 		{"created", "printf new > created", "created", 0, false},
 		{"missing", "rm proof", "missing", 7, false},
 		{"failed", "exit 23", "not-evaluated", 23, false},
+		{"workload exit 7", "exit 7", "not-evaluated", 7, false},
 		{"failed with changed bytes", "printf new > proof; exit 23", "not-evaluated", 23, false},
 		{"workload exit 255", "exit 255", "not-evaluated", 255, false},
 		{"transport", "echo TRANSPORT_BREAK", "not-evaluated", 255, false},
 		{"schema cannot rescue stale", "true", "unchanged", 7, true},
 		{"schema after change", "printf '\"new\"' > proof", "changed", 0, true},
+		{"schema rejects changed artifact", "printf '\"new\"' > proof", "changed", 7, true},
 		{"changed before JUnit", "printf new > proof", "changed", 1, false},
 		{"stale before JUnit", "true", "unchanged", 7, false},
 		{"changed before nested JUnit", "printf new > proof", "changed", 1, false},
@@ -305,8 +307,15 @@ exit 0
 			if failureDownloads {
 				args = append(args, "--download-on-failure", "proof="+download)
 			}
+			if tc.name == "changed" {
+				args = append(args, "--require-artifact", "proof")
+			}
 			if tc.schema {
-				if err := os.WriteFile(filepath.Join(dir, "schema.json"), []byte(`true`), 0600); err != nil {
+				schema := "true"
+				if tc.name == "schema rejects changed artifact" {
+					schema = "false"
+				}
+				if err := os.WriteFile(filepath.Join(dir, "schema.json"), []byte(schema), 0600); err != nil {
 					t.Fatal(err)
 				}
 				args = append(args, "--require-artifact-schema", "proof=schema.json")
@@ -323,7 +332,7 @@ exit 0
 			}
 			args = append(args, "--", "sh", "-c", command)
 			err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), args)
-			if exitCodeForError(err, 0) != tc.code {
+			if ExitCodeForError(err, 0) != tc.code {
 				t.Fatalf("err=%v stdout=%s stderr=%s", err, stdout.String(), stderr.String())
 			}
 			if strings.HasSuffix(tc.name, "before nested JUnit") {
@@ -356,7 +365,27 @@ exit 0
 			if len(report.ArtifactChanges) != 1 || report.ArtifactChanges[0].Status != tc.status {
 				t.Fatalf("report=%+v stderr=%s", report, stderr.String())
 			}
-			if tc.schema && tc.code == 0 {
+			if tc.code == 7 && tc.status != "not-evaluated" {
+				if report.ExitCode != 7 || report.RunStatus != RunStatusFailed || report.ErrorKind != RunErrorProvider || report.BlockedStage != "artifacts" || report.RetryLikely != "unknown" {
+					t.Fatalf("artifact validation outcome=%+v", report)
+				}
+				for _, want := range []string{"\n  phase: artifacts\n", "\n  area: artifacts\n"} {
+					if !strings.Contains(stderr.String(), want) {
+						t.Fatalf("artifact digest missing %q: %s", want, stderr.String())
+					}
+				}
+			} else if tc.name == "workload exit 7" {
+				if report.ErrorKind != RunErrorCommandExit || report.BlockedStage == "artifacts" {
+					t.Fatalf("workload exit became artifact failure: %+v", report)
+				}
+			} else if tc.code == 0 && (report.RunStatus != RunStatusSucceeded || report.ErrorKind != RunErrorNone || report.BlockedStage != "") {
+				t.Fatalf("successful validation failed: %+v", report)
+			}
+			if tc.name == "schema rejects changed artifact" {
+				if len(report.SchemaValidations) != 1 || report.SchemaValidations[0].Valid {
+					t.Fatalf("schema rejection missing: %+v", report)
+				}
+			} else if tc.schema && tc.code == 0 {
 				if len(report.SchemaValidations) != 1 || !report.SchemaValidations[0].Valid {
 					t.Fatalf("schema not validated after change: %+v", report)
 				}
@@ -370,14 +399,14 @@ exit 0
 			}
 			if wantArchive {
 				if len(report.Artifacts) != 1 {
-					t.Fatalf("artifacts=%+v", report.Artifacts)
+					t.Fatalf("artifacts=%+v, want one committed archive", report.Artifacts)
 				}
 				names := tarGzNames(t, report.Artifacts[0].Path)
 				if !reflect.DeepEqual(names, []string{p}) {
 					t.Fatalf("archive admitted extra paths: %v", names)
 				}
 			} else if len(report.Artifacts) != 0 {
-				t.Fatalf("failed run archived evidence: %+v", report.Artifacts)
+				t.Fatalf("timing included uncommitted or failed artifacts: %+v", report.Artifacts)
 			}
 			if releases != 1 || report.LeaseStopped == nil || !*report.LeaseStopped {
 				t.Fatalf("cleanup releases=%d report=%+v", releases, report)

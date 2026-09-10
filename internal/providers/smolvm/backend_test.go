@@ -1,10 +1,14 @@
 package smolvm
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,13 +17,149 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
+
+func TestSmolvmFlagPresenceAndValidationOrder(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := RegisterSmolvmProviderFlags(fs, cfg)
+	fs.VisitAll(func(f *flag.Flag) {
+		if strings.Contains(f.Name, "key") {
+			t.Fatal("key flag introduced")
+		}
+	})
+	cfg.Smolvm = core.SmolvmConfig{APIKey: "inert", BaseURL: "http://127.0.0.1:8787", Image: "ubuntu", Workdir: "/workspace/app", CPUs: 3, MemoryMB: 3000, Network: "blocked", Keep: true}
+	before := cfg
+	if err := ApplySmolvmProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("unvisited flags changed config")
+	}
+	if err := fs.Parse([]string{"--smolvm-base-url=http://127.0.0.1:8787", "--smolvm-image=ubuntu", "--smolvm-workdir=/workspace/app", "--smolvm-cpus=3", "--smolvm-memory-mb=3000", "--smolvm-network=blocked", "--smolvm-keep=true"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Smolvm = core.SmolvmConfig{APIKey: "inert"}
+	if err := ApplySmolvmProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("positive fields/central provenance changed")
+	}
+	if err := fs.Parse([]string{"--smolvm-base-url=", "--smolvm-image=", "--smolvm-workdir=", "--smolvm-cpus=0", "--smolvm-memory-mb=0", "--smolvm-network=", "--smolvm-keep=false"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplySmolvmProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	before.Smolvm = core.SmolvmConfig{APIKey: "inert"}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("explicit false/empty/zero flags changed")
+	}
+	for _, name := range []string{"smolvm", "smol", "smolmachines", "smolfleet", "SMOL", " smolvm "} {
+		cfg := Config{Provider: name}
+		fs := flag.NewFlagSet("guard", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		values := RegisterSmolvmProviderFlags(fs, cfg)
+		for _, args := range [][]string{{"--type=vm"}, {"--type=vm", "--class=large"}} {
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			want := "--type is not supported for provider=smolvm; use --smolvm-image"
+			if len(args) == 2 {
+				want = "--class is not supported for provider=smolvm; use --smolvm-cpus/--smolvm-memory-mb"
+			}
+			for _, v := range []any{nil, struct{}{}, values} {
+				err := ApplySmolvmProviderFlags(&cfg, fs, v)
+				if name == "SMOL" || name == " smolvm " {
+					if err != nil {
+						t.Fatal("guard gained provider normalization")
+					}
+					continue
+				}
+				if err == nil || err.Error() != want {
+					t.Fatalf("guard=%v", err)
+				}
+			}
+		}
+	}
+	cfg = Config{Smolvm: core.SmolvmConfig{Network: "other", CPUs: -1, MemoryMB: -1, Workdir: "relative"}}
+	if err := ApplySmolvmProviderFlags(&cfg, flag.NewFlagSet("foreign", flag.ContinueOnError), struct{}{}); err != nil {
+		t.Fatal("foreign values reached validation")
+	}
+	if err := validateConfig(cfg); err == nil || !strings.HasPrefix(err.Error(), "invalid smolvm network") {
+		t.Fatalf("network order=%v", err)
+	}
+	cfg.Smolvm.Network = "blocked"
+	if err := validateConfig(cfg); err == nil || err.Error() != "smolvm cpus must be >= 0" {
+		t.Fatalf("CPU order=%v", err)
+	}
+	cfg.Smolvm.CPUs = 0
+	if err := validateConfig(cfg); err == nil || err.Error() != "smolvm memory-mb must be >= 0" {
+		t.Fatalf("memory order=%v", err)
+	}
+	cfg.Smolvm.MemoryMB = 0
+	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "absolute path") {
+		t.Fatalf("workdir order=%v", err)
+	}
+}
+
+func TestSmolvmSixDefaultConsumersAndSeparateNetworkRoot(t *testing.T) {
+	for _, tc := range []struct{ base, image, dir, wantBase, wantImage, wantDir, wantHost string }{{"", "", "", "https://api.smolmachines.com", "alpine", "/workspace", "api.smolmachines.com"}, {"  ", "  ", "  ", "https://api.smolmachines.com", "alpine", "/workspace", "api.smolmachines.com"}, {" http://127.0.0.1:8787/api/ ", " ubuntu ", " /workspace/app ", "http://127.0.0.1:8787/api", "ubuntu", "/workspace/app", "127.0.0.1:8787"}} {
+		cfg := Config{Smolvm: core.SmolvmConfig{APIKey: "inert", BaseURL: tc.base, Image: tc.image, Workdir: tc.dir}}
+		before := cfg.Smolvm
+		endpoint, err := smolvmEndpoint(cfg)
+		if err != nil || endpoint != tc.wantBase {
+			t.Fatalf("endpoint=%q err=%v", endpoint, err)
+		}
+		api, err := newAPI(cfg, Runtime{HTTP: &http.Client{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if api.(*client).base != tc.wantBase || machineBaseHost(cfg) != tc.wantHost || imageName(cfg) != tc.wantImage || workdir(cfg) != tc.wantDir {
+			t.Fatal("default consumer changed")
+		}
+		if cfg.Smolvm != before {
+			t.Fatal("consumer mutated raw config")
+		}
+	}
+	for _, raw := range []int{-1, 0, 7} {
+		cfg := Config{Smolvm: core.SmolvmConfig{CPUs: raw, MemoryMB: raw}}
+		cpu, memory := 2, 2048
+		if raw > 0 {
+			cpu, memory = raw, raw
+		}
+		if cpusValue(cfg) != cpu || memoryValue(cfg) != memory {
+			t.Fatal("numeric default changed")
+		}
+	}
+	if networkMode(Config{}) != "blocked" || networkMode(core.BaseConfig()) != "open" {
+		t.Fatal("raw empty network and compiled open default conflated")
+	}
+	for raw, want := range map[string]string{"  ": "blocked", " PUBLIC ": "open", "private": "blocked"} {
+		if got := networkMode(Config{Smolvm: core.SmolvmConfig{Network: raw}}); got != want {
+			t.Fatalf("network raw=%q got=%q", raw, got)
+		}
+	}
+	if workspaceRoot != "/workspace" {
+		t.Fatal("fixed transfer root changed")
+	}
+	for _, path := range []string{"/workspace", "/workspace/app"} {
+		if got, err := workspaceFolder(path); err != nil || got != path {
+			t.Fatalf("workspace folder=%q err=%v", got, err)
+		}
+	}
+}
 
 func TestProviderSpecAndAliases(t *testing.T) {
 	p := Provider{}
@@ -108,13 +248,13 @@ func TestClientUsesSmolvmRESTShape(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Direct heredoc-based archive inject.
-			if strings.Contains(body.Command, "crabbox-sync.tgz") || strings.Contains(body.Command, "smolvm-direct-archive-extract") {
+			if strings.Contains(body.Command, "tar -xzf") {
 				injectSeen = true
 				_ = json.NewEncoder(w).Encode(map[string]any{"exitCode": 0, "stdout": "smolvm-direct-archive-extract: ok\n"})
 				return
 			}
 			// Direct write (env profile etc) also uses base64 heredoc /exec.
-			if strings.Contains(body.Command, "smolvm-direct-write") || strings.Contains(body.Command, "CRABBOX_WRITE_B64_EOF") {
+			if strings.Contains(body.Command, "mv -f") {
 				_ = json.NewEncoder(w).Encode(map[string]any{"exitCode": 0, "stdout": "smolvm-direct-write: ok\n"})
 				return
 			}
@@ -258,7 +398,7 @@ func TestSmolVMFallbackBoundsControlAndPreservesCommand(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	control, data := smolvmHTTPClients(nil, controlTimeout)
+	control, data := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	trusted, _ := url.Parse(server.URL)
 	client := &client{
 		apiKey:   "smk_key",
@@ -466,17 +606,7 @@ func TestCleanWorkdirAndCommand(t *testing.T) {
 			t.Fatalf("cleanWorkdir(%q) succeeded unexpectedly", value)
 		}
 	}
-	command, err := buildCommand([]string{"go", "test", "./..."}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if command != "exec 'go' 'test' './...'" {
-		t.Fatalf("command=%q", command)
-	}
-	env := shellEnvProfile(map[string]string{"B": "two", "A": "one two", "BAD; id >&2 #": "boom"})
-	if env != "set -a\nA='one two'\nB='two'\nset +a\n" {
-		t.Fatalf("env profile=%q", env)
-	}
+
 }
 
 func TestWarmupRejectsActionsRunner(t *testing.T) {
@@ -589,18 +719,236 @@ func TestRunPreservesSessionAfterDeleteFailure(t *testing.T) {
 	rt.Stderr = &stderr
 	backend := NewBackend(Provider{}.Spec(), testConfig(), rt).(*backend)
 	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "repo", Root: t.TempDir()},
-		Command: []string{"echo", "hello"},
-		NoSync:  true,
+		Repo:       Repo{Name: "repo", Root: t.TempDir()},
+		Command:    []string{"echo", "hello"},
+		NoSync:     true,
+		TimingJSON: true,
 	})
-	if err != nil {
-		t.Fatal(err)
+	var public ExitError
+	if !errors.Is(err, fake.deleteErr) || !errors.As(err, &public) || public.Code != 1 || result.ExitCode != 1 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider {
+		t.Errorf("cleanup failure result=%+v err=%v", result, err)
 	}
 	if result.Session == nil || !result.Session.Kept || result.Session.CleanupCommand == "" {
 		t.Fatalf("session=%#v, want retained cleanup handle", result.Session)
 	}
-	if !strings.Contains(stderr.String(), "smolvm delete failed") {
-		t.Fatalf("stderr=%q", stderr.String())
+	if err == nil || !strings.Contains(err.Error(), "cleanup failed") {
+		t.Fatalf("cleanup diagnostic missing: %v", err)
+	}
+	if claim, exists, claimErr := core.ReadLeaseClaimWithPresence(result.LeaseID); claimErr != nil || !exists || claim.CloudID != fake.machine.ID {
+		t.Fatalf("cleanup lost original claim: claim=%+v exists=%t err=%v", claim, exists, claimErr)
+	}
+	assertLifecycleTiming(t, stderr.String(), result, err)
+}
+
+func assertLifecycleTiming(t *testing.T, stderr string, result RunResult, err error) {
+	t.Helper()
+	result = core.FinalizeRunResult(result, err)
+	var reports []core.TimingReport
+	for _, line := range strings.Split(strings.TrimSpace(stderr), "\n") {
+		if strings.HasPrefix(line, "{") {
+			var report core.TimingReport
+			if err := json.Unmarshal([]byte(line), &report); err != nil {
+				t.Fatal(err)
+			}
+			reports = append(reports, report)
+		}
+	}
+	if len(reports) != 1 {
+		t.Fatalf("timing records=%d stderr=%s", len(reports), stderr)
+	}
+	report := reports[0]
+	if report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind || report.LeaseID != result.LeaseID || report.Slug != result.Slug {
+		t.Fatalf("timing=%+v result=%+v", report, result)
+	}
+}
+
+type lifecycleTimingWriter struct {
+	bytes.Buffer
+	cause error
+}
+
+func (w *lifecycleTimingWriter) Write(data []byte) (int, error) {
+	if len(data) > 0 && data[0] == '{' {
+		return 0, w.cause
+	}
+	return w.Buffer.Write(data)
+}
+
+func TestRunFinalizationPreservesPrimaryOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name                                   string
+		code                                   int
+		cause                                  error
+		setup, cleanup, badTiming, keepFailure bool
+		wantCode                               int
+		wantStatus                             core.RunStatus
+		wantKind                               core.RunErrorKind
+	}{
+		{name: "command and cleanup", code: 23, cleanup: true, wantCode: 23, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorCommandExit},
+		{name: "command cleanup and timing", code: 23, cleanup: true, badTiming: true, wantCode: 23, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorCommandExit},
+		{name: "kept command and timing", code: 23, keepFailure: true, badTiming: true, wantCode: 23, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorCommandExit},
+		{name: "success then timing", keepFailure: true, badTiming: true, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "transport", cause: io.ErrUnexpectedEOF, keepFailure: true, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+		{name: "cancellation", cause: context.Canceled, keepFailure: true, wantCode: 1, wantStatus: core.RunStatusCanceled, wantKind: core.RunErrorCanceled},
+		{name: "deadline and cleanup", cause: context.DeadlineExceeded, cleanup: true, wantCode: 1, wantStatus: core.RunStatusTimedOut, wantKind: core.RunErrorTimeout},
+		{name: "early setup retention", cause: io.ErrUnexpectedEOF, setup: true, keepFailure: true, wantCode: 1, wantStatus: core.RunStatusFailed, wantKind: core.RunErrorProvider},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cleanupErr, writerErr := errors.New("synthetic deletion failure"), errors.New("synthetic timing failure")
+			fake := &fakeAPI{streamCode: tc.code, streamErr: tc.cause}
+			if tc.setup {
+				fake.execHook = func(context.Context, string) (execResult, error) { return execResult{}, tc.cause }
+			}
+			if tc.cleanup {
+				fake.deleteErr = cleanupErr
+			}
+			withFakeAPI(t, fake)
+			var stderr bytes.Buffer
+			rt := testRuntime()
+			rt.Stderr = &stderr
+			if tc.badTiming {
+				rt.Stderr = &lifecycleTimingWriter{cause: writerErr}
+			}
+			b := NewBackend(Provider{}.Spec(), testConfig(), rt).(*backend)
+			result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: tc.keepFailure, TimingJSON: true, Command: []string{"true"}})
+			var public ExitError
+			if !errors.As(err, &public) || public.Code != tc.wantCode || result.ExitCode != tc.wantCode || result.Status != tc.wantStatus || result.ErrorKind != tc.wantKind {
+				t.Errorf("primary outcome: result=%+v err=%v public=%+v", result, err, public)
+			}
+			for _, cause := range []error{tc.cause, fake.deleteErr} {
+				if cause != nil && !errors.Is(err, cause) {
+					t.Errorf("lost cause %v: %v", cause, err)
+				}
+			}
+			if tc.cleanup && !strings.Contains(public.Message, cleanupErr.Error()) {
+				t.Errorf("CLI cleanup diagnostic missing: %q", public.Message)
+			}
+			if tc.badTiming && (!errors.Is(err, writerErr) || !strings.Contains(public.Message, writerErr.Error())) {
+				t.Errorf("timing diagnostic lost: %v", err)
+			}
+			failedBeforeTiming := tc.code != 0 || tc.cause != nil
+			wantKept := tc.cleanup || tc.keepFailure && failedBeforeTiming
+			wantDelete := !(tc.keepFailure && failedBeforeTiming)
+			if result.Session == nil || result.Session.Kept != wantKept || result.Session.Reused || (fake.deletedID != "") != wantDelete {
+				t.Errorf("disposition: session=%+v deleted=%q", result.Session, fake.deletedID)
+			}
+			if _, exists, claimErr := core.ReadLeaseClaimWithPresence(result.LeaseID); claimErr != nil || exists != wantKept {
+				t.Errorf("claim exists=%t want=%t err=%v", exists, wantKept, claimErr)
+			}
+			wantStreams := 1
+			if tc.setup {
+				wantStreams = 0
+			}
+			if len(fake.streamCommands) != wantStreams || t.Context().Err() != nil {
+				t.Errorf("streams=%v parent=%v", fake.streamCommands, t.Context().Err())
+			}
+			if !tc.badTiming {
+				assertLifecycleTiming(t, stderr.String(), result, err)
+			}
+		})
+	}
+}
+
+func TestRunEffectiveKeepAndReuseControls(t *testing.T) {
+	for _, tc := range []struct {
+		name                                             string
+		providerKeep, keep, keepFailure, reuse, syncOnly bool
+		code                                             int
+	}{
+		{name: "default success"},
+		{name: "provider keep success", providerKeep: true},
+		{name: "provider keep failure", providerKeep: true, code: 23},
+		{name: "provider keep sync only", providerKeep: true, syncOnly: true},
+		{name: "CLI keep", keep: true, code: 23},
+		{name: "keep failure", keepFailure: true, code: 23},
+		{name: "sync only does not fail", keepFailure: true, syncOnly: true},
+		{name: "reused success", reuse: true},
+		{name: "reused failure", reuse: true, code: 23},
+		{name: "reused sync only", reuse: true, syncOnly: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := &fakeAPI{streamCode: tc.code}
+			withFakeAPI(t, fake)
+			cfg, rt := testConfig(), testRuntime()
+			cfg.Smolvm.Keep = tc.providerKeep
+			var stderr bytes.Buffer
+			rt.Stderr = &stderr
+			b := NewBackend(Provider{}.Spec(), cfg, rt).(*backend)
+			req := RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, Keep: tc.keep, KeepOnFailure: tc.keepFailure, SyncOnly: tc.syncOnly, NoSync: true, TimingJSON: true, Command: []string{"true"}}
+			if tc.reuse {
+				req.ID = "cbx_123456789abc"
+				seedSmolvmClaim(t, req.ID, "blue", "mach_1", req.Repo.Root, nil)
+			}
+			result, err := b.Run(t.Context(), req)
+			wantKept := tc.reuse || tc.keep || tc.providerKeep || tc.keepFailure && tc.code != 0
+			if result.ExitCode != tc.code || (err != nil) != (tc.code != 0) || result.Session == nil || result.Session.Kept != wantKept || result.Session.Reused != tc.reuse || fake.deleted != !wantKept {
+				t.Fatalf("result=%+v err=%v deleted=%t", result, err, fake.deleted)
+			}
+			if tc.reuse {
+				if fake.createReq.Name != "" {
+					t.Fatal("reused machine was recreated")
+				}
+			} else if fake.createReq.Ephemeral != !(tc.keep || tc.providerKeep) || (fake.createReq.TTLSeconds != 0) != !(tc.keep || tc.providerKeep) {
+				t.Fatalf("effective keep changed create request: %+v", fake.createReq)
+			}
+			if _, exists, err := core.ReadLeaseClaimWithPresence(result.LeaseID); err != nil || exists != wantKept {
+				t.Fatalf("claim exists=%t err=%v", exists, err)
+			}
+			wantStreams := 1
+			if tc.syncOnly {
+				wantStreams = 0
+			}
+			if len(fake.streamCommands) != wantStreams {
+				t.Fatalf("streams=%v", fake.streamCommands)
+			}
+			assertLifecycleTiming(t, stderr.String(), result, err)
+		})
+	}
+}
+
+func TestRunCleanupBudgetsRemainIndependent(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprint(partial), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var cleanupOrder []string
+			checkBudget := func(ctx context.Context, name string, budget time.Duration) {
+				t.Helper()
+				deadline, ok := ctx.Deadline()
+				remaining := time.Until(deadline)
+				if ctx.Err() != nil || !ok || remaining > budget || remaining < budget-5*time.Second {
+					t.Errorf("%s cleanup budget=%s err=%v", name, remaining, ctx.Err())
+				}
+				cleanupOrder = append(cleanupOrder, name)
+			}
+			fake := &fakeAPI{streamHook: cancel}
+			if partial {
+				fake.writeHook = func(context.Context, string, string) error { cancel(); return context.Canceled }
+			}
+			fake.execHook = func(ctx context.Context, command string) (execResult, error) {
+				if strings.HasPrefix(command, "rm -f ") {
+					checkBudget(ctx, "profile", 30*time.Second)
+				}
+				return execResult{}, nil
+			}
+			fake.deleteHook = func(ctx context.Context, _ string) error {
+				checkBudget(ctx, "machine", 60*time.Second)
+				fake.deleted = true
+				return nil
+			}
+			withFakeAPI(t, fake)
+			b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+			result, err := b.Run(ctx, RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, Command: []string{"true"}, Env: map[string]string{"FIXTURE": "synthetic"}})
+			if partial && !errors.Is(err, context.Canceled) || !partial && err != nil {
+				t.Errorf("result=%+v err=%v", result, err)
+			}
+			if !reflect.DeepEqual(cleanupOrder, []string{"profile", "machine"}) || result.Session == nil || result.Session.Kept {
+				t.Fatalf("cleanup=%v session=%+v", cleanupOrder, result.Session)
+			}
+		})
 	}
 }
 
@@ -650,12 +998,259 @@ func TestSyncWorkspaceUsesInject(t *testing.T) {
 	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
 	_, _, err := backend.syncWorkspace(context.Background(), fake, "mach_1", RunRequest{
 		Repo: Repo{Name: "repo", Root: newGitRepo(t)},
-	}, "/workspace", ".")
+	}, "/workspace", nil)
 	if err != nil {
 		t.Fatalf("sync err=%v", err)
 	}
 	if !reflect.DeepEqual(fake.verbs, []string{"exec", "inject"}) {
 		t.Fatalf("verbs=%v", fake.verbs)
+	}
+}
+
+type archivePreparationClock func() time.Time
+
+func (now archivePreparationClock) Now() time.Time { return now() }
+
+func TestRunArchivePreparationPrecedesMutation(t *testing.T) {
+	for _, reused := range []bool{false, true} {
+		for _, failure := range []string{"full guardrail", "archive creation"} {
+			t.Run(fmt.Sprintf("reused=%t/%s", reused, failure), func(t *testing.T) {
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				temp := t.TempDir()
+				t.Setenv("TMPDIR", temp)
+				t.Setenv("TMP", temp)
+				t.Setenv("TEMP", temp)
+				repo := newGitRepo(t)
+				if err := os.WriteFile(filepath.Join(repo, "second.txt"), []byte("second"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				runGit(t, repo, "add", "second.txt")
+				runGit(t, repo, "commit", "-m", "second file")
+				if err := os.WriteFile(filepath.Join(repo, "hello.txt"), []byte("dirty"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				fake := &fakeAPI{machine: ownedTestMachine()}
+				starts := 0
+				fake.startHook = func(context.Context, string) error { starts++; return nil }
+				withFakeAPI(t, fake)
+				cfg := testConfig()
+				cfg.Sync.Delete = true
+				rt := testRuntime()
+				if failure == "full guardrail" {
+					cfg.Sync.FailFiles = 2
+					configPath := filepath.Join(t.TempDir(), "config.yaml")
+					if err := os.WriteFile(configPath, []byte("provider: smolvm\nsync:\n  failFiles: 2\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					t.Setenv("CRABBOX_CONFIG", configPath)
+					t.Setenv("CRABBOX_PROVIDER", "smolvm")
+					t.Setenv("CRABBOX_SYNC_ALLOW_LARGE", "")
+					t.Chdir(repo)
+					var preview, diagnostics bytes.Buffer
+					if err := (core.App{Stdout: &preview, Stderr: &diagnostics}).Run(t.Context(), []string{"sync-plan", "--json"}); err != nil {
+						t.Fatalf("sync-plan: %v: %s", err, diagnostics.String())
+					}
+					var plan struct {
+						Guardrail struct {
+							Scope, Status string
+							Files         int
+						}
+						DirtyDelta struct{ Files int }
+					}
+					if err := json.Unmarshal(preview.Bytes(), &plan); err != nil || plan.Guardrail.Scope != "candidate" || plan.Guardrail.Status != "failed" || plan.Guardrail.Files != 2 || plan.DirtyDelta.Files != 1 {
+						t.Fatalf("preview disagrees with archive admission: %s err=%v", preview.String(), err)
+					}
+				} else {
+					calls := 0
+					rt.Clock = archivePreparationClock(func() time.Time {
+						calls++
+						// The manifest is captured, but the archive has not opened its members.
+						if calls == 6 {
+							if err := os.Remove(filepath.Join(repo, "hello.txt")); err != nil {
+								t.Fatal(err)
+							}
+						}
+						return time.Unix(0, int64(calls)*int64(time.Millisecond))
+					})
+				}
+				req := RunRequest{Repo: Repo{Root: repo, Name: "fixture"}, SyncOnly: true}
+				if reused {
+					req.ID = "cbx_123456789abc"
+					seedSmolvmClaim(t, req.ID, "blue", "mach_1", repo, nil)
+				}
+				b := NewBackend(Provider{}.Spec(), cfg, rt).(*backend)
+				_, err := b.Run(t.Context(), req)
+				if err == nil {
+					t.Fatalf("preparation unexpectedly succeeded: verbs=%v", fake.verbs)
+				}
+				want := "sync candidate too large: 2 files"
+				if failure == "archive creation" {
+					want = "stat sync path hello.txt"
+				}
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("wrong preparation failure: %v, want %q", err, want)
+				}
+				if len(fake.verbs) != 0 || starts != 0 {
+					t.Fatalf("preparation failure mutated provider: verbs=%v starts=%d", fake.verbs, starts)
+				}
+				claims, err := core.ListLeaseClaims()
+				if err != nil || (!reused && len(claims) != 0) || (reused && (len(claims) != 1 || claims[0].CloudID != "mach_1" || claims[0].RepoRoot != repo)) {
+					t.Fatalf("claims=%v err=%v", claims, err)
+				}
+				archives, err := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "crabbox-smolvm-sync-*.tgz"))
+				if err != nil || len(archives) != 0 {
+					t.Fatalf("archives leaked=%v err=%v", archives, err)
+				}
+			})
+		}
+	}
+}
+
+func TestRunUploadsPreparedSnapshotAndClosesIt(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repo := newGitRepo(t)
+	fake := &fakeAPI{}
+	withFakeAPI(t, fake)
+	fake.createHook = func(*fakeAPI) {
+		if err := os.WriteFile(filepath.Join(repo, "hello.txt"), []byte("changed during provisioning"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var archivePath string
+	fake.injectHook = func(_ context.Context, archive, target string) error {
+		archivePath = archive
+		if target != "/workspace" {
+			t.Fatalf("target=%q", target)
+		}
+		file, err := os.Open(archive)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		gz, err := gzip.NewReader(file)
+		if err != nil {
+			return err
+		}
+		defer gz.Close()
+		tr := tar.NewReader(gz)
+		h, err := tr.Next()
+		if err != nil {
+			return err
+		}
+		data, err := io.ReadAll(tr)
+		if h.Name != "hello.txt" || string(data) != "hello" {
+			t.Fatalf("snapshot %q=%q, want pre-create hello", h.Name, data)
+		}
+		return err
+	}
+	var stderr bytes.Buffer
+	rt := testRuntime()
+	rt.Stderr = &stderr
+	b := NewBackend(Provider{}.Spec(), testConfig(), rt).(*backend)
+	if _, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: repo}, SyncOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(stderr.String(), "sync candidate:") != 1 || archivePath == "" {
+		t.Fatalf("archive=%q diagnostics=%s", archivePath, stderr.String())
+	}
+	if _, err := os.Stat(archivePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("archive remains: %v", err)
+	}
+}
+
+func TestSyncArchivePreparationTiming(t *testing.T) {
+	repo := newGitRepo(t)
+	for _, external := range []bool{false, true} {
+		t.Run(fmt.Sprint(external), func(t *testing.T) {
+			calls := 0
+			rt := testRuntime()
+			rt.Clock = archivePreparationClock(func() time.Time {
+				calls++
+				return time.Unix(0, int64(calls)*int64(7*time.Millisecond))
+			})
+			b := NewBackend(Provider{}.Spec(), testConfig(), rt).(*backend)
+			req := RunRequest{Repo: Repo{Root: repo}}
+			var prepared *core.PreparedArchive
+			if external {
+				var err error
+				prepared, err = b.prepareArchive(t.Context(), req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer prepared.Close()
+			}
+			phases, total, err := b.syncWorkspace(t.Context(), &fakeAPI{}, "mach_1", req, "/workspace", prepared)
+			want := 77 * time.Millisecond
+			if external {
+				want = 56 * time.Millisecond
+			}
+			if err != nil || total != want || len(phases) != 6 || phases[5].Ms != want.Milliseconds() {
+				t.Fatalf("phases=%v total=%v err=%v want=%v", phases, total, err, want)
+			}
+			for i, name := range []string{"manifest", "preflight", "archive", "prepare", "inject"} {
+				if phases[i].Name != name || phases[i].Ms != 7 {
+					t.Fatalf("phase %d=%v", i, phases[i])
+				}
+			}
+		})
+	}
+}
+
+func TestSyncPreparedArchiveSharesRemainingBudget(t *testing.T) {
+	repo := newGitRepo(t)
+	for _, test := range []struct {
+		name                                string
+		timeout, parent, archive, remaining time.Duration
+	}{
+		{"remaining after archive", 5 * time.Second, 0, 2 * time.Second, 3 * time.Second},
+		{"parent wins", 5 * time.Second, time.Second, 0, time.Second},
+		{"disabled keeps parent", 0, time.Second, 0, time.Second},
+		{"disabled", 0, 0, 0, 0},
+		{"exhausted", time.Second, 0, 2 * time.Second, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+			prepared, err := b.prepareArchive(t.Context(), RunRequest{Repo: Repo{Root: repo}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer prepared.Close()
+			prepared.ArchiveDuration = test.archive
+			b.cfg.Sync.Timeout = test.timeout
+			synctest.Test(t, func(t *testing.T) {
+				time.Sleep(time.Hour) // Provisioning must not consume transfer budget.
+				ctx := context.Background()
+				if test.parent > 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, test.parent)
+					defer cancel()
+				}
+				var prepareCtx context.Context
+				fake := &fakeAPI{execHook: func(ctx context.Context, _ string) (execResult, error) {
+					prepareCtx = ctx
+					deadline, bounded := ctx.Deadline()
+					if bounded != (test.timeout > 0 || test.parent > 0) || (bounded && time.Until(deadline) != test.remaining) {
+						t.Fatalf("deadline=%v bounded=%v remaining=%v", deadline, bounded, time.Until(deadline))
+					}
+					if bounded {
+						time.Sleep(test.remaining)
+						synctest.Wait()
+					}
+					return execResult{}, nil
+				}}
+				fake.injectHook = func(ctx context.Context, _, _ string) error {
+					if ctx != prepareCtx {
+						t.Fatal("injection restarted the workspace preparation budget")
+					}
+					return ctx.Err()
+				}
+				_, _, err := b.syncWorkspace(ctx, fake, "mach_1", RunRequest{}, "/workspace", prepared)
+				bounded := test.timeout > 0 || test.parent > 0
+				if (bounded && !errors.Is(err, context.DeadlineExceeded)) || (!bounded && err != nil) {
+					t.Fatalf("sync err=%v", err)
+				}
+			})
+		})
 	}
 }
 
@@ -773,6 +1368,11 @@ type fakeAPI struct {
 	getHook        func(context.Context, string) (machineData, error)
 	deleteHook     func(context.Context, string) error
 	streamHook     func()
+	streamErr      error
+	streamCode     int
+	writeHook      func(context.Context, string, string) error
+	execHook       func(context.Context, string) (execResult, error)
+	injectHook     func(context.Context, string, string) error
 }
 
 func (f *fakeAPI) CreateMachine(_ context.Context, req createRequest) (machineData, error) {
@@ -831,10 +1431,13 @@ func (f *fakeAPI) StartMachine(ctx context.Context, id string) error {
 }
 func (f *fakeAPI) StopMachine(context.Context, string) error { return nil }
 
-func (f *fakeAPI) Exec(_ context.Context, _ string, command, folder string) (execResult, error) {
+func (f *fakeAPI) Exec(ctx context.Context, _ string, command, folder string) (execResult, error) {
 	f.verbs = append(f.verbs, "exec")
 	f.execCommands = append(f.execCommands, command)
 	f.execFolders = append(f.execFolders, folder)
+	if f.execHook != nil {
+		return f.execHook(ctx, command)
+	}
 	if len(f.execResults) == 0 {
 		return execResult{ExitCode: 0}, nil
 	}
@@ -851,20 +1454,26 @@ func (f *fakeAPI) ExecStream(_ context.Context, _ string, command, folder string
 	f.streamCommands = append(f.streamCommands, command)
 	f.streamFolders = append(f.streamFolders, folder)
 	_, _ = io.WriteString(stdout, "ok\n")
-	return 0, nil
+	return f.streamCode, f.streamErr
 }
 
-func (f *fakeAPI) InjectArchive(_ context.Context, _, _, targetDir string) error {
+func (f *fakeAPI) InjectArchive(ctx context.Context, _, archive, targetDir string) error {
 	f.verbs = append(f.verbs, "inject")
 	f.injectTargets = append(f.injectTargets, targetDir)
 	f.injected = true
+	if f.injectHook != nil {
+		return f.injectHook(ctx, archive, targetDir)
+	}
 	return nil
 }
 
-func (f *fakeAPI) WriteFile(_ context.Context, _, remotePath, content string) error {
+func (f *fakeAPI) WriteFile(ctx context.Context, _ string, remotePath, content string) error {
 	f.verbs = append(f.verbs, "write")
 	f.writePaths = append(f.writePaths, remotePath)
 	f.writeContents = append(f.writeContents, content)
+	if f.writeHook != nil {
+		return f.writeHook(ctx, remotePath, content)
+	}
 	return nil
 }
 
@@ -899,5 +1508,380 @@ func testMachineResponse(id, name, state string) map[string]any {
 		"resources": map[string]any{"cpus": 2, "memoryMb": 4096},
 		"network":   map[string]any{"mode": "blocked"},
 		"ephemeral": false, "createdAt": "2026-06-12T20:00:00Z", "updatedAt": "2026-06-12T20:00:00Z",
+	}
+}
+
+// Exercise the actual HTTP client and generated shell; only the hosted exec
+// service is replaced with a local, credential-free subprocess fixture.
+func TestClientNativeUploadFailureAndPublication(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native upload fixture requires POSIX shell tools")
+	}
+	for _, tool := range []string{"sh", "base64", "tar", "mktemp"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s unavailable", tool)
+		}
+	}
+	decoder, _ := exec.LookPath("base64")
+	if runtime.GOOS == "darwin" {
+		var err error
+		decoder, err = exec.LookPath("gbase64")
+		if err != nil {
+			t.Skip("GNU base64 required to reproduce the Linux decoder contract")
+		}
+	}
+	for _, tc := range []struct {
+		name, operation, failure string
+		wantError                bool
+	}{
+		{"write", "write", "", false},
+		{"write-partial-decoder", "write", "decode", true},
+		{"write-directory", "write", "directory", true},
+		{"write-cleanup-failure", "write", "cleanup", true},
+		{"write-decode-and-cleanup-failure", "write", "decode-cleanup", true},
+		{"archive", "archive", "", false},
+		{"archive-corrupt", "archive", "corrupt", true},
+		{"archive-decoder-late-failure", "archive", "decode-after-output", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			workspace := filepath.Join(root, "work space'quoted")
+			if err := os.Mkdir(workspace, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			destination := filepath.Join(workspace, "env.sh")
+			if tc.failure == "directory" {
+				if err := os.Mkdir(destination, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			const content = "literal quote'\n$(must-not-execute)\x00bytes"
+			scriptPrefix := "base64() { " + shellQuote(decoder) + " \"$@\"; };\n"
+			if tc.failure == "decode" || tc.failure == "decode-cleanup" {
+				scriptPrefix = "base64() { printf partial; return 23; };\n"
+			} else if tc.failure == "decode-after-output" {
+				scriptPrefix = "base64() { " + shellQuote(decoder) + " \"$@\"; return 23; };\n"
+			}
+			if strings.Contains(tc.failure, "cleanup") {
+				scriptPrefix += "rm() { return 17; };\n"
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/machines/fixture/exec" {
+					http.Error(w, "unexpected request", 400)
+					return
+				}
+				var request struct {
+					Command string `json:"command"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+				// Isolate the old fixed staging name when demonstrating the regression.
+				script := strings.ReplaceAll(request.Command, "/tmp/crabbox-sync.tgz", shellQuote(filepath.Join(root, "baseline-sync.tgz")))
+				script = strings.ReplaceAll(script, "/tmp/crabbox-write-", filepath.Join(root, "baseline-write-"))
+				cmd := exec.Command("sh", "-c", "umask 022\n"+scriptPrefix+script)
+				cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root, "TMPDIR=" + root}
+				out, err := cmd.CombinedOutput()
+				code := 0
+				if err != nil {
+					var ee *exec.ExitError
+					if !errors.As(err, &ee) {
+						http.Error(w, err.Error(), 500)
+						return
+					}
+					code = ee.ExitCode()
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"exitCode": code, "stdout": string(out)})
+			}))
+			defer server.Close()
+			c := &client{base: server.URL, http: server.Client()}
+			var uploadErr error
+			if tc.operation == "write" {
+				uploadErr = c.WriteFile(t.Context(), "fixture", destination, content)
+			} else {
+				repo := t.TempDir()
+				if err := os.WriteFile(filepath.Join(repo, "uploaded"), []byte(content), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				archive, err := core.CreateSyncArchive(t.Context(), Repo{Root: repo}, core.SyncManifest{Files: []string{"uploaded"}}, "crabbox-smolvm-native-*.tgz")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer os.Remove(archive.Name())
+				if err := archive.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if tc.failure == "corrupt" {
+					if err := os.WriteFile(archive.Name(), []byte("not an archive"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				uploadErr = c.InjectArchive(t.Context(), "fixture", archive.Name(), workspace)
+			}
+			if (uploadErr != nil) != tc.wantError {
+				t.Fatalf("upload error=%v, wantError=%v", uploadErr, tc.wantError)
+			}
+			if strings.HasPrefix(tc.failure, "decode") {
+				var exitErr ExitError
+				if !errors.As(uploadErr, &exitErr) || exitErr.Code != 23 {
+					t.Fatalf("decoder status lost: %v", uploadErr)
+				}
+			}
+			if strings.Contains(tc.failure, "cleanup") && !strings.Contains(uploadErr.Error(), "upload staging cleanup failed") {
+				t.Fatalf("cleanup diagnostic lost: %v", uploadErr)
+			}
+			if tc.operation == "write" && tc.failure != "directory" {
+				got, err := os.ReadFile(destination)
+				want := content
+				if tc.wantError && tc.failure != "cleanup" {
+					want = "old"
+				}
+				if err != nil || string(got) != want {
+					t.Fatalf("destination=%q err=%v, want %q", got, err, want)
+				}
+				info, err := os.Stat(destination)
+				if err != nil || info.Mode().Perm() != 0o600 {
+					t.Fatalf("private file mode: info=%v err=%v", info, err)
+				}
+			} else if tc.operation == "archive" {
+				got, err := os.ReadFile(filepath.Join(workspace, "uploaded"))
+				if tc.wantError {
+					if !os.IsNotExist(err) {
+						t.Fatalf("failed upload consumed archive: data=%q err=%v", got, err)
+					}
+				} else if err != nil || string(got) != content {
+					t.Fatalf("archive payload=%q err=%v", got, err)
+				}
+				if !tc.wantError {
+					info, err := os.Stat(filepath.Join(workspace, "uploaded"))
+					if err != nil || info.Mode().Perm() != 0o755 {
+						t.Fatalf("archive mode changed: info=%v err=%v", info, err)
+					}
+				}
+			}
+			for _, dir := range []string{root, workspace} {
+				matches, err := filepath.Glob(filepath.Join(dir, ".crabbox-upload.*"))
+				wantResidue := 0
+				if dir == workspace && strings.Contains(tc.failure, "cleanup") {
+					wantResidue = 1
+				}
+				if err != nil || len(matches) != wantResidue {
+					t.Fatalf("staging residue=%v err=%v", matches, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRunPreservesStreamErrorCause(t *testing.T) {
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded, errors.New("synthetic transport failure")} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := &fakeAPI{streamErr: fmt.Errorf("stream: %w", cause)}
+			withFakeAPI(t, fake)
+			b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+			result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir()}, NoSync: true, Keep: true, Command: []string{"true"}})
+			var exitErr ExitError
+			if !errors.Is(err, cause) || !errors.As(err, &exitErr) || exitErr.Code != 1 || len(fake.streamCommands) != 1 || t.Context().Err() != nil {
+				t.Fatalf("stream cause lost: err=%v stream calls=%d parent=%v", err, len(fake.streamCommands), t.Context().Err())
+			}
+			if got, want := core.RunStatusForResult(result, err), core.RunStatusForResult(result, cause); got != want {
+				t.Fatalf("primary status=%s, want %s", got, want)
+			}
+		})
+	}
+}
+
+func TestRunSkipsStreamAfterCanceledSuccessfulEnvUpload(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	fake := &fakeAPI{writeHook: func(context.Context, string, string) error { cancel(); return nil }}
+	cleanups := 0
+	fake.execHook = func(cleanupCtx context.Context, command string) (execResult, error) {
+		if strings.HasPrefix(command, "rm -f ") {
+			cleanups++
+			if cleanupCtx.Err() != nil {
+				t.Error("profile cleanup inherited cancellation")
+			}
+		}
+		return execResult{}, nil
+	}
+	withFakeAPI(t, fake)
+	b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+	_, err := b.Run(ctx, RunRequest{Repo: Repo{Root: t.TempDir()}, NoSync: true, Keep: true, Command: []string{"true"}, Env: map[string]string{"FIXTURE": "synthetic"}})
+	if !errors.Is(err, context.Canceled) || len(fake.streamCommands) != 0 || cleanups != 1 || fake.deleted {
+		t.Fatalf("canceled successful upload: err=%v streams=%v cleanups=%d deleted=%t", err, fake.streamCommands, cleanups, fake.deleted)
+	}
+}
+
+func TestRunCleansPartialEnvironmentProfile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native cleanup fixture requires POSIX shell")
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
+	for _, canceled := range []bool{false, true} {
+		t.Run(fmt.Sprint(canceled), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			root := t.TempDir()
+			mapped := filepath.Join(root, "partial-profile")
+			var remote string
+			primary := errors.New("partial upload")
+			fake := &fakeAPI{}
+			fake.writeHook = func(_ context.Context, remotePath, content string) error {
+				remote = remotePath
+				if err := os.WriteFile(mapped, []byte(content), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if canceled {
+					cancel()
+					return context.Canceled
+				}
+				return primary
+			}
+			cleanups := 0
+			fake.execHook = func(cleanupCtx context.Context, command string) (execResult, error) {
+				if !strings.HasPrefix(command, "rm -f ") {
+					return execResult{}, nil
+				}
+				cleanups++
+				if cleanupCtx.Err() != nil {
+					t.Fatalf("cleanup canceled: %v", cleanupCtx.Err())
+				}
+				if _, ok := cleanupCtx.Deadline(); !ok {
+					t.Fatal("cleanup is unbounded")
+				}
+				if !strings.Contains(command, shellQuote(remote)) {
+					t.Fatal("wrong cleanup target")
+				}
+				cmd := exec.CommandContext(cleanupCtx, "sh", "-c", strings.ReplaceAll(command, shellQuote(remote), shellQuote(mapped)))
+				out, err := cmd.CombinedOutput()
+				return execResult{Output: string(out)}, err
+			}
+			withFakeAPI(t, fake)
+			b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+			_, err := b.Run(ctx, RunRequest{Repo: Repo{Root: root, Name: "fixture"}, NoSync: true, Keep: true, Command: []string{"true"}, Env: map[string]string{"FIXTURE": "synthetic"}})
+			want := primary
+			if canceled {
+				want = context.Canceled
+			}
+			if !errors.Is(err, want) || cleanups != 1 || len(fake.streamCommands) != 0 || fake.deleted {
+				t.Fatalf("err=%v cleanups=%d commands=%v deleted=%v", err, cleanups, fake.streamCommands, fake.deleted)
+			}
+			if _, err := os.Stat(mapped); !os.IsNotExist(err) {
+				t.Fatalf("partial profile retained: %v", err)
+			}
+		})
+	}
+}
+
+func TestEnvironmentProfileCleanupRejectsChangedOwnership(t *testing.T) {
+	for _, changed := range []string{"claim", "machine"} {
+		t.Run(changed, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := &fakeAPI{}
+			withFakeAPI(t, fake)
+			var stderr bytes.Buffer
+			rt := testRuntime()
+			rt.Stderr = &stderr
+			b := NewBackend(Provider{}.Spec(), testConfig(), rt).(*backend)
+			fake.streamHook = func() {
+				if changed == "machine" {
+					fake.machine.CreatedAt = "2026-09-01T00:00:00Z"
+					return
+				}
+				claims, err := core.ListLeaseClaims()
+				if err != nil || len(claims) != 1 {
+					t.Fatalf("claims=%v err=%v", claims, err)
+				}
+				labels := map[string]string{}
+				for k, v := range claims[0].Labels {
+					labels[k] = v
+				}
+				labels["fixture_changed"] = "true"
+				if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(claims[0].LeaseID, claims[0], labels); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, Keep: true, Command: []string{"true"}, Env: map[string]string{"FIXTURE": "synthetic"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, command := range fake.execCommands {
+				if strings.HasPrefix(command, "rm -f ") {
+					t.Fatalf("stale cleanup executed: %s", command)
+				}
+			}
+			if !strings.Contains(stderr.String(), "env profile cleanup failed") {
+				t.Fatalf("missing cleanup warning: %s", stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunSourceIntentSurvivesNativeShell(t *testing.T) {
+	if os.PathSeparator != '/' {
+		t.Skip("POSIX source transport")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh unavailable")
+	}
+	for _, tc := range []struct {
+		name    string
+		command []string
+		literal map[int]bool
+		want    string
+		code    int
+	}{
+		{"literal separator", []string{"printf", "<%s>", ";", "touch", "sentinel"}, map[int]bool{2: true}, "<;><touch><sentinel>", 0},
+		{"literal executable", []string{"FOO=x", "argument"}, map[int]bool{0: true}, "literal:argument", 42},
+		{"mixed intent", []string{"printf", "%s", ";", "&&", "printf", "%s", "done"}, map[int]bool{2: true}, ";done", 0},
+		{"inferred singleton", []string{"printf 'source value'"}, nil, "source value", 0},
+		{"ordinary argv", []string{"printf", "%s", "value"}, nil, "value", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			root := t.TempDir()
+			program := filepath.Join(root, "FOO=x")
+			if err := os.WriteFile(program, []byte("#!/bin/sh\nprintf 'literal:%s' \"$*\"\nexit 42\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			fake := &fakeAPI{}
+			withFakeAPI(t, fake)
+			b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+			_, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: root, Name: "fixture"}, NoSync: true, Keep: true, Command: tc.command, CommandLiteralArgs: tc.literal})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(fake.streamCommands) != 1 {
+				t.Fatalf("stream commands=%v", fake.streamCommands)
+			}
+			cmd := exec.Command(sh, "-c", fake.streamCommands[0])
+			cmd.Dir = root
+			cmd.Env = []string{"HOME=" + root, "PATH=" + root + ":/usr/bin:/bin", "ENV=" + os.DevNull}
+			out, runErr := cmd.CombinedOutput()
+			code := 0
+			if runErr != nil {
+				var ee *exec.ExitError
+				if !errors.As(runErr, &ee) {
+					t.Fatal(runErr)
+				}
+				code = ee.ExitCode()
+			}
+			if string(out) != tc.want || code != tc.code {
+				t.Fatalf("source=%q output=%q code=%d want=%q/%d", fake.streamCommands[0], out, code, tc.want, tc.code)
+			}
+			if _, err := os.Stat(filepath.Join(root, "sentinel")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("literal created sentinel: %v", err)
+			}
+		})
 	}
 }

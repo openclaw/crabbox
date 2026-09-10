@@ -75,6 +75,11 @@ func TestCoordinatorResolveExplicitSSHPort(t *testing.T) {
 			if tc.state == "provisioning" {
 				advertised.Host, advertised.SSHPort, advertised.SSHHostKey = "", "", ""
 			}
+			if tc.state == "released" {
+				advertised = confirmedCoordinatorRelease(advertised.ID, advertised.Provider)
+				advertised.TargetOS = targetWindows
+				advertised.WindowsMode = windowsModeNormal
+			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 				if req.Method != http.MethodGet || req.URL.Path != "/v1/leases/"+advertised.ID {
 					t.Errorf("unexpected coordinator operation %s %s", req.Method, req.URL.Path)

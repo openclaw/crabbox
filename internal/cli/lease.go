@@ -34,8 +34,12 @@ func NewLeaseID() string {
 	return newLeaseID()
 }
 
-func newRunID() string {
-	return "run_" + strings.TrimPrefix(newLeaseID(), "cbx_")
+func newRunID() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", err
+	}
+	return "run_" + hex.EncodeToString(value[:]), nil
 }
 
 func PublicKeyFor(privatePath string) (string, error) {
@@ -269,35 +273,6 @@ func useLeaseKnownHosts(target *SSHTarget, leaseID string) error {
 
 func UseLeaseKnownHosts(target *SSHTarget, leaseID string) error {
 	return useLeaseKnownHosts(target, leaseID)
-}
-
-func moveStoredTestboxKey(oldLeaseID, newLeaseID string) error {
-	if oldLeaseID == "" || newLeaseID == "" || oldLeaseID == newLeaseID {
-		return nil
-	}
-	oldPath, err := testboxKeyPath(oldLeaseID)
-	if err != nil {
-		return err
-	}
-	newPath, err := testboxKeyPath(newLeaseID)
-	if err != nil {
-		return err
-	}
-	oldDir := filepath.Dir(oldPath)
-	newDir := filepath.Dir(newPath)
-	if _, err := os.Stat(oldPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	if _, err := os.Stat(newPath); err == nil {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(newDir), 0o700); err != nil {
-		return err
-	}
-	return os.Rename(oldDir, newDir)
 }
 
 func removeStoredTestboxKey(leaseID string) {

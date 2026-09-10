@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/prefixbuffer"
 )
 
 func controllerSubprocessTestTimeout(base time.Duration) time.Duration {
@@ -1678,16 +1680,18 @@ func TestControllerAbsenceIdentitySetUsesEveryPersistedIdentity(t *testing.T) {
 	}
 }
 
-func TestControllerLimitedBufferReportsOverflow(t *testing.T) {
-	var output controllerLimitedBuffer
-	output.limit = 4
-	if n, err := output.Write([]byte("12345")); err != nil || n != 5 {
-		t.Fatalf("write bytes=%d err=%v", n, err)
+func TestControllerOutputReportsOverflow(t *testing.T) {
+	output := prefixbuffer.NewLimited(4)
+	if err := controllerOutputOverflowError(output.Exceeded(), "controller provider inventory", 4); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := io.Copy(&output, struct{ io.Reader }{strings.NewReader("12345")}); err != nil || n != 5 {
+		t.Fatalf("copied bytes=%d err=%v", n, err)
 	}
 	if got := output.String(); got != "1234" {
 		t.Fatalf("retained output=%q", got)
 	}
-	if err := output.overflowError("controller provider inventory"); err == nil || !strings.Contains(err.Error(), "exceeded 4-byte output limit") {
+	if err := controllerOutputOverflowError(output.Exceeded(), "controller provider inventory", 4); err == nil || err.Error() != "controller provider inventory exceeded 4-byte output limit" {
 		t.Fatalf("overflow error=%v", err)
 	}
 }

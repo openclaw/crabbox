@@ -12,6 +12,35 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func finalizeAWSLeaseAfterCleanup(expected core.LeaseClaim, action func() error) error {
+	if !fixedAWSLeaseKind.IsFixedClaim(expected) {
+		return core.RemoveLeaseClaimIfUnchangedAfter(expected.LeaseID, expected, action)
+	}
+	tombstone := fixedAWSLeaseKind.TerminalClaim(expected, time.Now().UTC())
+	return core.WithDurableLeaseClaimLock(expected.LeaseID, func(claim *core.LeaseClaim, exists bool, persist func() error) error {
+		if !exists || !reflect.DeepEqual(*claim, expected) {
+			return exit(2, "lease %s claim changed; retry", expected.LeaseID)
+		}
+		if err := action(); err != nil {
+			return err
+		}
+		*claim = tombstone
+		if err := persist(); err != nil {
+			return err
+		}
+		// Save remote completion before fallible local cleanup so stop can retry.
+		// Keep the claim fence until cleanup ends; replacement owners keep their keys.
+		return cleanupAWSLeaseSSH(expected.LeaseID)
+	})
+}
+
+func cleanupAWSLeaseSSH(leaseID string) error {
+	if err := core.RemoveStoredTestboxConnectionArtifacts(leaseID); err != nil {
+		return fmt.Errorf("AWS resources released for lease %s; local SSH cleanup failed: %w; retry crabbox stop --provider aws --id %s", leaseID, err, leaseID)
+	}
+	return nil
+}
+
 // A terminal claim is local cleanup evidence, not a provider status word.
 // Historical compact tombstones and no-allocation rejections lack this binding.
 func validateAWSTerminalReceipt(claim core.LeaseClaim, leaseID string) error {
@@ -118,8 +147,10 @@ func (b *awsLeaseBackend) releaseTerminalReceipt(ctx context.Context, req Releas
 		if err != nil {
 			return err
 		}
-		err = validateAWSTerminalInventory(*claim, servers)
-		outcome.Terminal = err == nil
-		return err
+		if err := validateAWSTerminalInventory(*claim, servers); err != nil {
+			return err
+		}
+		outcome.Terminal = true
+		return cleanupAWSLeaseSSH(claim.LeaseID)
 	})
 }

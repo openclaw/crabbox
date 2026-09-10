@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -124,7 +125,7 @@ const blaxelControlTimeout = 60 * time.Second
 func newBlaxelClient(cfg Config, rt Runtime) (Client, error) {
 	baseURL := strings.TrimSpace(cfg.Blaxel.APIURL)
 	if baseURL == "" {
-		baseURL = defaultAPIURL
+		baseURL = core.BlaxelConfigDefaultAPIURL
 	}
 	baseURL, err := ValidateAPIURL(baseURL)
 	if err != nil {
@@ -135,7 +136,7 @@ func newBlaxelClient(cfg Config, rt Runtime) (Client, error) {
 		return nil, exit(2, "provider=blaxel needs an API key; load CRABBOX_BLAXEL_API_KEY or BL_API_KEY from a secret manager")
 	}
 	workspace := strings.TrimSpace(cfg.Blaxel.Workspace)
-	httpClient, dataHTTPClient := blaxelHTTPClients(rt.HTTP, blaxelControlTimeout)
+	httpClient, dataHTTPClient := shared.ControlAndDataHTTPClients(rt.HTTP, blaxelControlTimeout)
 	return &restClient{
 		base:      baseURL,
 		apiKey:    apiKey,
@@ -144,13 +145,6 @@ func newBlaxelClient(cfg Config, rt Runtime) (Client, error) {
 		http:      secureHTTPClient(httpClient),
 		dataHTTP:  secureHTTPClient(dataHTTPClient),
 	}, nil
-}
-
-func blaxelHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
-	if injected != nil {
-		return injected, injected
-	}
-	return &http.Client{Timeout: controlTimeout}, &http.Client{}
 }
 
 func BlaxelAPIKey(cfg Config) string {
@@ -237,7 +231,7 @@ func isBlaxelDataPlaneHost(host string) bool {
 }
 
 func validateBlaxelConfig(cfg Config) error {
-	if _, err := ValidateAPIURL(blank(cfg.Blaxel.APIURL, defaultAPIURL)); err != nil {
+	if _, err := ValidateAPIURL(blank(cfg.Blaxel.APIURL, core.BlaxelConfigDefaultAPIURL)); err != nil {
 		return err
 	}
 	if cfg.Blaxel.MemoryMB < 0 {
@@ -282,24 +276,7 @@ func secureHTTPClient(source *http.Client) *http.Client {
 }
 
 func sameOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectivePort(a) == effectivePort(b)
-}
-
-func effectivePort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+	return shared.SameOrigin(a, b)
 }
 
 func (c *restClient) BaseURL() string { return c.base }
@@ -896,11 +873,19 @@ func (e apiError) Error() string {
 	return fmt.Sprintf("blaxel API request failed status=%d body=%s", e.StatusCode, e.Body)
 }
 
+type redactedError struct {
+	message string
+	cause   error
+}
+
+func (e redactedError) Error() string { return e.message }
+func (e redactedError) Unwrap() error { return e.cause }
+
 func redactError(err error) error {
 	if err == nil {
 		return nil
 	}
-	return errors.New(redactString(err.Error()))
+	return redactedError{message: redactString(err.Error()), cause: err}
 }
 
 func redactString(value string) string {

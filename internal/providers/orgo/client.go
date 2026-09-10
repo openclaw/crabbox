@@ -16,7 +16,6 @@ import (
 )
 
 const (
-	defaultAPIBase           = "https://www.orgo.ai/api"
 	orgoMaxResponseBodyBytes = 4 << 20
 )
 
@@ -134,16 +133,8 @@ func newOrgoClient(cfg Config, rt Runtime) (orgoAPI, error) {
 	if apiKey == "" {
 		return nil, exit(2, "provider=%s requires CRABBOX_ORGO_API_KEY, orgo.apiKey, or ORGO_API_KEY", providerName)
 	}
+	// The backend resolves APIBase before constructing its lazy client.
 	baseURL := strings.TrimSpace(cfg.Orgo.APIBase)
-	if baseURL == "" {
-		baseURL = strings.TrimSpace(os.Getenv("CRABBOX_ORGO_API_BASE"))
-	}
-	if baseURL == "" {
-		baseURL = strings.TrimSpace(os.Getenv("ORGO_API_BASE_URL"))
-	}
-	if baseURL == "" {
-		baseURL = defaultAPIBase
-	}
 	parsed, err := url.Parse(baseURL)
 	if err != nil {
 		return nil, exit(2, "provider=%s invalid Orgo API base URL %q: %v", providerName, baseURL, err)
@@ -154,20 +145,13 @@ func newOrgoClient(cfg Config, rt Runtime) (orgoAPI, error) {
 	if parsed.Scheme != "https" && !isOrgoLoopbackHTTP(parsed) {
 		return nil, exit(2, "provider=%s API base URL %q must use https unless it targets localhost", providerName, baseURL)
 	}
-	client, dataClient := orgoHTTPClients(rt.HTTP, orgoControlTimeout)
+	client, dataClient := shared.ControlAndDataHTTPClients(rt.HTTP, orgoControlTimeout)
 	return &orgoHTTPClient{
 		baseURL:  strings.TrimRight(baseURL, "/"),
 		apiKey:   apiKey,
 		http:     client,
 		dataHTTP: dataClient,
 	}, nil
-}
-
-func orgoHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
-	if injected != nil {
-		return injected, injected
-	}
-	return &http.Client{Timeout: controlTimeout}, &http.Client{}
 }
 
 func isOrgoLoopbackHTTP(parsed *url.URL) bool {

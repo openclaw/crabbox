@@ -2,8 +2,8 @@ package shared
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -35,10 +35,7 @@ func (b *DirectSSHBackend) CleanupServers(ctx context.Context, req core.CleanupR
 	if b.PrepareCleanup != nil && b.CleanupEligible != nil {
 		return core.Exit(2, "provider=%s cleanup backend cannot configure both PrepareCleanup and CleanupEligible", b.SpecValue.Name)
 	}
-	now := time.Now().UTC()
-	if b.RT.Clock != nil {
-		now = b.RT.Clock.Now().UTC()
-	}
+	now := core.ClockNow(b.RT.Clock).UTC()
 	for _, s := range servers {
 		shouldDelete, reason := core.ShouldCleanupServer(s, now)
 		if !shouldDelete {
@@ -114,6 +111,21 @@ func (b *DirectSSHBackend) Touch(ctx context.Context, server core.Server, state 
 	return core.TouchDirectLeaseBestEffort(ctx, b.Cfg, server, state, b.RT.Stderr)
 }
 
+// JoinAcquireCleanupError marks reported rollback failure as a fresh-allocation
+// retry veto while preserving both causes. A nil cleanup error says only that
+// the provider's existing cleanup contract succeeded, not universal absence.
+func JoinAcquireCleanupError(acquireErr, cleanupErr error) error {
+	if cleanupErr == nil {
+		return acquireErr
+	}
+	return &acquireCleanupError{cause: errors.Join(acquireErr, cleanupErr)}
+}
+
+type acquireCleanupError struct{ cause error }
+
+func (e *acquireCleanupError) Error() string { return e.cause.Error() }
+func (e *acquireCleanupError) Unwrap() error { return e.cause }
+
 func AcquireAttemptsRetry(rt core.Runtime, keep bool, acquire func() (core.LeaseTarget, error)) (core.LeaseTarget, error) {
 	var lastErr error
 	attempts := core.AcquireAttempts(keep)
@@ -123,6 +135,11 @@ func AcquireAttemptsRetry(rt core.Runtime, keep bool, acquire func() (core.Lease
 			return lease, nil
 		}
 		lastErr = err
+		var cleanupErr *acquireCleanupError
+		if errors.As(err, &cleanupErr) {
+			fmt.Fprintf(rt.Stderr, "warning: acquisition cleanup failed; refusing a fresh lease retry: %v\n", err)
+			return core.LeaseTarget{}, err
+		}
 		if attempt == attempts || !core.IsBootstrapWaitError(err) {
 			return core.LeaseTarget{}, err
 		}

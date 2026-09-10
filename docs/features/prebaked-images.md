@@ -4,6 +4,12 @@ A prebaked image is a provider machine image (AWS AMI, Hetzner snapshot, and so
 on) with the stable parts of a runner already installed, so a lease boots ready
 instead of installing tooling on every warmup.
 
+Managed Linux also reuses fully installed optional desktop packages and a
+package-installed Chrome or Chromium that passes its functional version check.
+Browser signing-key downloads and repository refreshes run only when a usable
+installed browser is absent. Maintain browser versions through image updates
+or rebakes; each lease still receives current configuration and readiness checks.
+
 Read this when you are:
 
 - deciding what belongs in a provider image versus a warm lease or a repo cache;

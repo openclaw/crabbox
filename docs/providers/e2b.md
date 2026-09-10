@@ -13,6 +13,10 @@ config, repo claims, sync manifests and guardrails, slugs, timing summaries, and
 normalized `list`/`status` rendering. There is no Crabbox SSH lease and no broker
 coordinator — the CLI talks to E2B directly.
 
+E2B and CubeSandbox share the envd Connect wire codec, but retain their own
+process-end interpretation. E2B continues reading after an end event; a later
+RPC or stream-read failure takes precedence over the reported command exit.
+
 ## When to use
 
 Use E2B when the remote Linux sandbox should be owned by E2B and commands run
@@ -45,6 +49,10 @@ export E2B_API_KEY=e2b_...
 
 `CRABBOX_E2B_API_KEY` is also accepted and takes precedence over `E2B_API_KEY`.
 Do not pass the key as a command-line argument.
+
+The key remains environment-only for CLI configuration: neither user nor
+repository YAML has an API-key field, and no key flag is registered. The first
+raw nonempty primary or alias value wins; an empty value falls through.
 
 Endpoint overrides:
 
@@ -80,6 +88,20 @@ Provider flags (each overrides the matching `e2b.*` config key):
 `template` also reads `CRABBOX_E2B_TEMPLATE`, `workdir` reads
 `CRABBOX_E2B_WORKDIR`, and `user` reads `CRABBOX_E2B_USER`.
 
+All six bindings share one typed declaration. Nonempty YAML strings override
+earlier values without trimming; omitted, null, and empty values preserve them.
+Environment strings retain raw nonempty precedence, including the three existing
+key/URL/domain alias chains. Visited empty flags still apply. Accepted key, API
+URL, and domain inputs keep their existing source classification; URL/domain
+flag visits remain a separate central post-success step. Source admission does
+not grant a repository destination authority to use inherited credentials.
+
+The client, configured claim defaults, bridge/preview domains, template, display,
+and workdir helpers share the compiled defaults while retaining their existing
+normalization. Raw claim scope and command routing do not gain a new fallback.
+The fixed display fallback for missing remote template metadata remains separate
+from the configured template, as do user-home and platform-root rules.
+
 ### Workdir and user resolution
 
 A relative `e2b.workdir` resolves inside the selected E2B user's home: the
@@ -113,6 +135,19 @@ files.
 E2B caps sandbox timeouts at one hour. Crabbox clamps a longer local lease TTL to
 that limit when creating or connecting to a sandbox, and a TTL of zero falls back
 to five minutes.
+
+Sandbox reads and connections must return the exact requested native sandbox
+ID. A missing or different ID is rejected before its metadata or execution
+session can be used; ordinary cleanup of an already acquired sandbox still
+follows that sandbox's original claim.
+
+Commands share Crabbox's argv-versus-shell intent handling. Quoted profile
+arguments remain literal, including separators and assignment-shaped executable
+names. Single-string inferred programs and explicit `--shell` source execute
+in envd's existing `/bin/bash -l -c` shell; explicitly empty shell source is valid.
+Literal argv uses `exec` in that shell, so the workload replaces it rather than
+running a shell suffix or exit trap afterward. No additional shell is inserted.
+Use `--shell` for shell-only builtins or functions rather than literal argv.
 
 ## Capabilities
 

@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type exeDevLeaseBackend struct {
@@ -377,24 +379,18 @@ func applyExeDevDefaults(cfg *Config) {
 	cfg.SSHPort = "22"
 	cfg.SSHFallbackPorts = nil
 	if cfg.ExeDev.ControlHost == "" {
-		cfg.ExeDev.ControlHost = "exe.dev"
+		cfg.ExeDev.ControlHost = core.ExeDevConfigDefaultControlHost
 	}
 	if cfg.ExeDev.CPUs <= 0 {
-		cfg.ExeDev.CPUs = 2
+		cfg.ExeDev.CPUs = core.ExeDevConfigDefaultCPUs
 	}
 	if cfg.ExeDev.Memory == "" {
-		cfg.ExeDev.Memory = "4GB"
+		cfg.ExeDev.Memory = core.ExeDevConfigDefaultMemory
 	}
 	if cfg.ExeDev.Disk == "" {
-		cfg.ExeDev.Disk = "10GB"
+		cfg.ExeDev.Disk = core.ExeDevConfigDefaultDisk
 	}
-	if cfg.ExeDev.WorkRoot == "" {
-		if !isDefaultWorkRoot(cfg.WorkRoot) {
-			cfg.ExeDev.WorkRoot = cfg.WorkRoot
-		} else {
-			cfg.ExeDev.WorkRoot = "/tmp/crabbox"
-		}
-	}
+	cfg.ExeDev.WorkRoot = core.ResolveInheritedWorkRoot(cfg.ExeDev.WorkRoot, cfg.WorkRoot, core.ExeDevWorkRootFallback)
 	if cfg.ExeDev.User != "" {
 		cfg.SSHUser = cfg.ExeDev.User
 	} else if cfg.SSHUser == "" || cfg.SSHUser == "crabbox" {
@@ -855,16 +851,16 @@ func (b *exeDevLeaseBackend) rollbackCreatedVM(name, leaseID, slug, generation s
 	defer cancel()
 	vm, err := b.findVMByExactName(cleanupCtx, name)
 	if err != nil {
-		return exit(exitCodeForError(cause), "%v; exe.dev cleanup could not verify VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
+		return exit(core.ExitCodeForError(cause, 1), "%v; exe.dev cleanup could not verify VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
 	}
 	if err := validateExeDevVMOwnership(vm, leaseID, slug, "provisioning rollback"); err != nil {
-		return exit(exitCodeForError(cause), "%v; exe.dev cleanup refused unverified VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
+		return exit(core.ExitCodeForError(cause, 1), "%v; exe.dev cleanup refused unverified VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
 	}
 	if err := validateExeDevClaimGeneration(vm, generation); err != nil {
-		return exit(exitCodeForError(cause), "%v; exe.dev cleanup refused replacement VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
+		return exit(core.ExitCodeForError(cause, 1), "%v; exe.dev cleanup refused replacement VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
 	}
 	if err := b.deleteVM(cleanupCtx, name); err != nil {
-		return exit(exitCodeForError(cause), "%v; exe.dev cleanup failed for VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
+		return exit(core.ExitCodeForError(cause, 1), "%v; exe.dev cleanup failed for VM %s; manual cleanup: %s: %v", cause, name, b.manualDeleteCommand(name), err)
 	}
 	return cause
 }
@@ -879,14 +875,6 @@ func (b *exeDevLeaseBackend) manualDeleteCommand(name string) string {
 		args = append(args, "-p", port)
 	}
 	return shellQuoteArgs(append(args, dest, "rm", name))
-}
-
-func exitCodeForError(err error) int {
-	var exitErr ExitError
-	if errors.As(err, &exitErr) && exitErr.Code != 0 {
-		return exitErr.Code
-	}
-	return 1
 }
 
 func exeDevControlDestination(value string) (string, string, error) {
@@ -1203,5 +1191,5 @@ func isLowerHex(value string) bool {
 }
 
 func exeDevImage(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.ExeDev.Image), "default")
+	return blank(strings.TrimSpace(cfg.ExeDev.Image), core.ExeDevDefaultImageLabel)
 }

@@ -596,19 +596,6 @@ func defaultArtifactPublishPrefix(opts artifactPublishOptions, now time.Time) st
 	return strings.Join([]string{scope, bundle, stamp}, "/")
 }
 
-func uploadArtifactGrant(ctx context.Context, path string, grant CoordinatorArtifactUploadGrant) error {
-	file, err := os.Open(path)
-	if err != nil {
-		return exit(2, "open artifact %s: %v", grant.Name, err)
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return exit(2, "stat artifact %s: %v", grant.Name, err)
-	}
-	return uploadArtifactGrantReader(ctx, file, info.Size(), grant)
-}
-
 func uploadArtifactGrantSnapshot(ctx context.Context, file artifactFile, grant CoordinatorArtifactUploadGrant) error {
 	if err := requireArtifactSnapshot(file); err != nil {
 		return err

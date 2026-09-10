@@ -81,17 +81,8 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if core.FlagWasSet(fs, "namespace-instance-bare") {
 		cfg.NamespaceInstance.Bare = *v.Bare
 	}
-	if isProviderName(cfg.Provider) {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		applyDefaults(cfg)
 	}
 	return nil
-}
-
-func isProviderName(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName, "namespace-compute":
-		return true
-	default:
-		return false
-	}
 }

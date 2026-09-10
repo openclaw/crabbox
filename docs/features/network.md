@@ -170,14 +170,29 @@ ordered list of additional ports the CLI tries when the primary is unreachable,
 typically because the operator's egress is restricted, sshd has not bound the
 new port yet, or cloud-init is still mid-flight.
 
-Fallback behavior:
+For coordinator leases, an explicit `--ssh-port`, `ssh.port`, or
+`CRABBOX_SSH_PORT` selects exactly one of the lease's advertised ports. An
+unadvertised port is rejected, and command delivery never retries on another
+port. Without an explicit setting, the lease's advertised port order governs
+automatic selection.
+
+Fresh AWS Windows leases (native and WSL2) have a separate initial bootstrap
+connection: EC2Launch first enables OpenSSH on `22`. Crabbox can use that route
+when the coordinator advertises it, then checks readiness and delivers work on
+the explicitly selected final port. This does not enable fallback for reused
+leases or add an unadvertised port. See [Windows bootstrap](vnc-windows.md).
+
+Automatic fallback behavior:
 
 - the CLI builds an ordered, de-duplicated candidate list of `ssh.port`
   followed by each fallback port;
 - it tries the primary first, then each fallback in order;
 - the first port that connects wins for that operation;
-- the probe is repeated per operation, so a later command re-evaluates the
-  candidates from scratch.
+- a successful readiness or transport probe prepares that host and port for
+  the current operation, so its subsequent SSH requests avoid another login
+  probe; each request still authenticates and enforces workspace ownership;
+- a fresh command or a changed host or port evaluates the advertised candidates
+  again, including when switching between public and tailnet addresses.
 
 Set `ssh.fallbackPorts: []` or `CRABBOX_SSH_FALLBACK_PORTS=none` to disable
 fallback entirely. Some networks prefer this so a misconfigured `2222` rule

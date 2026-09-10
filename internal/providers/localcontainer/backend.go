@@ -1597,27 +1597,20 @@ func (b *backend) cleanupContainerSidecars(leaseID string, labels map[string]str
 }
 
 func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
-	expected, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server)
-	if !set || !exists {
-		return core.Server{}, core.Exit(4, "local-container lease %s has no exact claim snapshot; refusing touch", req.Lease.LeaseID)
-	}
-	if err := b.AuthorizeStatusTouchClaim(ctx, req.Lease, expected); err != nil {
-		return core.Server{}, err
-	}
-	if req.IdleTimeoutOverride != nil && *req.IdleTimeoutOverride <= 0 {
-		return core.Server{}, core.Exit(2, "local-container lease %s idle timeout override must be positive", req.Lease.LeaseID)
-	}
-
-	now := time.Now().UTC()
-	if b.rt.Clock != nil {
-		now = b.rt.Clock.Now().UTC()
-	}
-	cfg := b.configForRun()
-	if expected.IdleTimeoutSeconds > 0 {
-		cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
-	}
-	labels := localContainerTouchLabels(expected, cfg, req.State, now, req.IdleTimeoutOverride)
-	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(ctx, req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
+		Provider: "local-container", Authorize: b.AuthorizeStatusTouchClaim,
+		Prepare: func(expected core.LeaseClaim) (map[string]string, time.Time) {
+			now := time.Now().UTC()
+			if b.rt.Clock != nil {
+				now = b.rt.Clock.Now().UTC()
+			}
+			cfg := b.configForRun()
+			if expected.IdleTimeoutSeconds > 0 {
+				cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
+			}
+			return localContainerTouchLabels(expected, cfg, req.State, now, req.IdleTimeoutOverride), now
+		},
+	})
 	if err != nil {
 		return core.Server{}, err
 	}
@@ -1800,7 +1793,6 @@ func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.C
 	args := []string{
 		"run", "-d",
 		"--name", name,
-		"--hostname", name,
 		"--user", "root",
 		"--network", cfg.LocalContainer.Network,
 		"-p", "127.0.0.1::" + sshPort,
@@ -1815,6 +1807,10 @@ func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.C
 	}
 	for i, volume := range cfg.Cache.Volumes {
 		args = append(args, "-e", fmt.Sprintf("CRABBOX_CACHE_VOLUME_PATH_%d=%s", i, strings.TrimSpace(volume.Path)))
+	}
+	// Runtimes sharing a host UTS namespace can reject an explicit hostname.
+	if !cfg.LocalContainer.NoHostname {
+		args = append(args, "--hostname", name)
 	}
 	for i, destination := range hostVolumeDestinations {
 		args = append(args, "-e", fmt.Sprintf("CRABBOX_HOST_VOLUME_PATH_%d=%s", i, destination))
@@ -2154,6 +2150,10 @@ func (b *backend) exactContainerAbsent(ctx context.Context, id string) (bool, er
 		return false, commandError("confirm local-container absence", result, err)
 	}
 	containerID := strings.ToLower(strings.TrimSpace(id))
+	// Accept Podman's quoted-ID spelling only as the complete diagnostic.
+	if containerID != "" && detail == "error: no such container \""+containerID+"\"" {
+		return true, nil
+	}
 	for _, marker := range []string{
 		"no such object: " + containerID,
 		"no such container: " + containerID,

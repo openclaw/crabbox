@@ -6,17 +6,173 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
+
+func TestAzureDynamicSessionsFlagRouteAndDeferredPoolContract(t *testing.T) {
+	p := Provider{}
+	cfg := Config{}
+	if err := p.RouteConfig(&cfg, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AzureBackend != core.AzureBackendDynamicSessions {
+		t.Fatal("Azure backend route changed")
+	}
+	for _, target := range []string{"", core.TargetLinux, "darwin"} {
+		cfg := Config{TargetOS: target}
+		b, err := p.Configure(cfg, Runtime{})
+		if target == "darwin" {
+			if err == nil || err.Error() != "azure-dynamic-sessions supports target=linux only" {
+				t.Fatalf("target check=%v", err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := b.(*azureDynamicSessionsBackend).cfg
+		if got.Provider != providerName || got.TargetOS != core.TargetLinux {
+			t.Fatal("Configure canonical selection changed")
+		}
+	}
+	cfg = core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := RegisterAzureDynamicSessionsProviderFlags(fs, cfg)
+	if fs.Lookup("azure-dynamic-sessions-pool") != nil {
+		t.Fatal("legacy Pool acquired a flag")
+	}
+	cfg.AzureDynamicSessions = AzureDynamicSessionsConfig{Endpoint: "https://example.invalid/pool", Pool: "legacy", APIVersion: "version", Workdir: "/workspace/app", TimeoutSecs: 12}
+	before := cfg
+	if err := ApplyAzureDynamicSessionsProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("unvisited flags changed config")
+	}
+	if err := fs.Parse([]string{"--azure-dynamic-sessions-endpoint=https://example.invalid/pool", "--azure-dynamic-sessions-api-version=version", "--azure-dynamic-sessions-workdir=/workspace/app", "--azure-dynamic-sessions-timeout-secs=12"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.AzureDynamicSessions = AzureDynamicSessionsConfig{Pool: "legacy"}
+	if err := ApplyAzureDynamicSessionsProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("positive flags changed fields or source phase")
+	}
+	if err := fs.Parse([]string{"--azure-dynamic-sessions-endpoint=", "--azure-dynamic-sessions-api-version=", "--azure-dynamic-sessions-workdir=", "--azure-dynamic-sessions-timeout-secs=-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyAzureDynamicSessionsProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal("flag application performed deferred validation")
+	}
+	before.AzureDynamicSessions = AzureDynamicSessionsConfig{Pool: "legacy", TimeoutSecs: -1}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("explicit fields or central marker phase changed")
+	}
+	if err := fs.Parse([]string{"--azure-dynamic-sessions-timeout-secs=0"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyAzureDynamicSessionsProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AzureDynamicSessions.TimeoutSecs != 0 {
+		t.Fatal("explicit flag zero ignored")
+	}
+	if _, err := azureDynamicSessionsEndpoint(cfg); err == nil || err.Error() != "azureDynamicSessions.pool is not supported; set azureDynamicSessions.endpoint to the custom container poolManagementEndpoint" {
+		t.Fatalf("legacy Pool later rejection=%v", err)
+	}
+	for _, name := range []string{providerName, "Azure-Dynamic-Sessions", " azure-dynamic-sessions "} {
+		cfg := Config{Provider: name}
+		fs := flag.NewFlagSet("guard", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		values := RegisterAzureDynamicSessionsProviderFlags(fs, cfg)
+		for _, args := range [][]string{{"--type=vm"}, {"--type=vm", "--class=large"}} {
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			for _, v := range []any{nil, struct{}{}, values} {
+				err := ApplyAzureDynamicSessionsProviderFlags(&cfg, fs, v)
+				if name != providerName {
+					if err != nil {
+						t.Fatal("provider guard gained normalization")
+					}
+					continue
+				}
+				want := "--type"
+				if len(args) == 2 {
+					want = "--class"
+				}
+				if err == nil || err.Error() != want+" is not supported for provider=azure-dynamic-sessions; choose pool sizing in Azure" {
+					t.Fatalf("guard=%v", err)
+				}
+			}
+		}
+	}
+}
+
+func TestAzureDynamicSessionsDefaultConsumersWithMockedAuth(t *testing.T) {
+	t.Setenv(tokenEnvName, "")
+	for _, raw := range []string{"", "  ", " custom-version "} {
+		cfg := Config{AzureDynamicSessions: AzureDynamicSessionsConfig{Endpoint: "http://127.0.0.1:8787", APIVersion: raw, Workdir: "  "}}
+		runner := &recordingRunner{result: LocalCommandResult{Stdout: "inert-mocked-auth\n"}}
+		api, err := newAzureDynamicSessionsClient(context.Background(), cfg, Runtime{Exec: runner, HTTP: &http.Client{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "2025-02-02-preview"
+		if strings.TrimSpace(raw) != "" {
+			want = "custom-version"
+		}
+		if api.(*azureDynamicSessionsClient).managementAPIVersion != want {
+			t.Fatal("API version default changed")
+		}
+		if len(runner.calls) != 1 || runner.calls[0].Name != "az" {
+			t.Fatal("authentication did not stay in recording runtime")
+		}
+		if got, err := azureDynamicSessionsWorkspace(cfg); err != nil || got != "/workspace/crabbox" {
+			t.Fatalf("workspace default=%q error=%v", got, err)
+		}
+	}
+	for _, tc := range []struct {
+		configured int
+		ttl        time.Duration
+		want       int
+	}{{0, 0, 1800}, {-1, 0, 1800}, {0, -time.Second, 1800}, {0, 1500 * time.Millisecond, 2}, {-1, 42 * time.Second, 42}, {7, 42 * time.Second, 7}} {
+		cfg := Config{TTL: tc.ttl, AzureDynamicSessions: AzureDynamicSessionsConfig{TimeoutSecs: tc.configured}}
+		if got := azureDynamicSessionsTimeoutSeconds(cfg); got != tc.want {
+			t.Fatalf("timeout configured=%d ttl=%s got=%d want=%d", tc.configured, tc.ttl, got, tc.want)
+		}
+	}
+	cfg := Config{AzureDynamicSessions: AzureDynamicSessionsConfig{Workdir: " /workspace/custom/ "}}
+	if got, err := azureDynamicSessionsWorkspace(cfg); err != nil || got != "/workspace/custom" {
+		t.Fatalf("custom workspace=%q error=%v", got, err)
+	}
+	defaults := core.BaseConfig().AzureDynamicSessions
+	if defaults.APIVersion != "2025-02-02-preview" || defaults.Workdir != "/workspace/crabbox" || defaults.TimeoutSecs != 1800 {
+		t.Fatal("compiled defaults changed")
+	}
+	runner := &recordingRunner{result: LocalCommandResult{Stdout: "inert"}}
+	_, err := newAzureDynamicSessionsClient(context.Background(), Config{AzureDynamicSessions: AzureDynamicSessionsConfig{Pool: "legacy"}}, Runtime{Exec: runner, HTTP: &http.Client{}})
+	if err == nil || len(runner.calls) != 0 {
+		t.Fatal("legacy Pool validation must precede mocked authentication")
+	}
+}
 
 func TestAzureDynamicSessionsFallbackBoundsControlAndPreservesExecStream(t *testing.T) {
 	const controlTimeout = 30 * time.Millisecond
@@ -41,7 +197,7 @@ func TestAzureDynamicSessionsFallbackBoundsControlAndPreservesExecStream(t *test
 	}))
 	defer server.Close()
 
-	control, data := azureDynamicSessionsHTTPClients(nil, controlTimeout)
+	control, data := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 	client := &azureDynamicSessionsClient{
 		endpoint:             server.URL,
 		managementAPIVersion: "2025-02-02-preview",
@@ -556,4 +712,50 @@ type recordingRunner struct {
 func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
 	return r.result, nil
+}
+
+type azureDynamicSessionsStreamEOFTransport struct {
+	body io.ReadCloser
+}
+
+func (t azureDynamicSessionsStreamEOFTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/x-ndjson"}}, Body: t.body, Request: req}, nil
+}
+
+type azureDynamicSessionsCancelingEOFBody struct {
+	data   string
+	cancel context.CancelFunc
+}
+
+func (b *azureDynamicSessionsCancelingEOFBody) Read(p []byte) (int, error) {
+	n := copy(p, b.data)
+	b.data = b.data[n:]
+	if b.data == "" {
+		b.cancel()
+		return n, io.EOF
+	}
+	return n, nil
+}
+func (*azureDynamicSessionsCancelingEOFBody) Close() error { return nil }
+
+func TestAzureDynamicSessionsStreamCancellationAtCleanEOF(t *testing.T) {
+	for _, complete := range []bool{false, true} {
+		t.Run(fmt.Sprint(complete), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			data := ""
+			if complete {
+				data = "{\"type\":\"complete\",\"exitCode\":7}\n"
+			}
+			client := &azureDynamicSessionsClient{endpoint: "http://127.0.0.1", httpClient: &http.Client{Transport: azureDynamicSessionsStreamEOFTransport{body: &azureDynamicSessionsCancelingEOFBody{data: data, cancel: cancel}}}}
+			code, err := client.ExecStream(ctx, "fixture", azureDynamicSessionsExecRequest{Command: "true"}, io.Discard, io.Discard)
+			if complete {
+				if err != nil || code != 7 {
+					t.Fatalf("accepted completion changed: code=%d err=%v", code, err)
+				}
+			} else if !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancellation lost at clean EOF: %v", err)
+			}
+		})
+	}
 }

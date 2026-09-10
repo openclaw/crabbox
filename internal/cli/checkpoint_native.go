@@ -17,7 +17,13 @@ type checkpointNativeCreateDriver interface {
 
 type directAWSAMICheckpointDriver struct{}
 
-func (directAWSAMICheckpointDriver) Create(ctx context.Context, req NativeCheckpointCreateRequest) (CoordinatorImage, error) {
+func (directAWSAMICheckpointDriver) Create(ctx context.Context, req NativeCheckpointCreateRequest) (_ CoordinatorImage, err error) {
+	requestStarted := false
+	defer func() {
+		if err != nil && !requestStarted {
+			err = NativeCheckpointNotSubmittedError{Cause: err}
+		}
+	}()
 	name := req.Name
 	if name == "" {
 		name = defaultNativeImageName(req.LeaseID, req.RepoName)
@@ -34,6 +40,8 @@ func (directAWSAMICheckpointDriver) Create(ctx context.Context, req NativeCheckp
 			return CoordinatorImage{}, err
 		}
 	}
+	// The request owner still attests a failed account lookup before its API call.
+	requestStarted = true
 	image, err := client.CreateImageCheckpoint(ctx, req.Server.CloudID, name, req.NoReboot)
 	if err != nil {
 		return CoordinatorImage{}, err
@@ -157,7 +165,7 @@ func (coordinatorCheckpointDriver) Create(ctx context.Context, req NativeCheckpo
 	}
 	if !isWindowsNativeTarget(req.Target) {
 		if err := prepareNativeImageSource(ctx, req.Target); err != nil {
-			return CoordinatorImage{}, err
+			return CoordinatorImage{}, NativeCheckpointNotSubmittedError{Cause: err}
 		}
 	}
 	var image CoordinatorImage
@@ -515,12 +523,19 @@ sudo /usr/bin/python3 -I -c ` + shellQuote(`import json, os, pathlib, shutil, su
 from cloudinit.cmd.devel import read_cfg_paths
 
 cloud_init = [sys.executable, "-I", "-m", "cloudinit.cmd.main"]
-def require_done():
-    result = subprocess.run(cloud_init + ["status", "--format=json"], check=True, capture_output=True, text=True, timeout=30)
-    if json.loads(result.stdout)["status"] != "done":
-        raise RuntimeError("native checkpoint requires completed cloud-init initialization")
+def require_done(stage, wait=False):
+    try:
+        result = subprocess.run(cloud_init + ["status", "--format=json"] + (["--wait"] if wait else []), capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("native checkpoint cloud-init " + stage + ": status=unknown timeout=30s") from None
+    try:
+        status = json.loads(result.stdout)["status"]
+    except (ValueError, KeyError, TypeError):
+        raise RuntimeError("native checkpoint cloud-init " + stage + ": status=invalid-response exit=" + str(result.returncode)) from None
+    if result.returncode != 0 or status != "done":
+        raise RuntimeError("native checkpoint cloud-init " + stage + ": status=" + repr(status)[:64] + " exit=" + str(result.returncode))
 
-require_done()
+require_done("pre-clean", wait=True)
 paths = read_cfg_paths()
 runtime = pathlib.Path(paths.run_dir).absolute()
 cache = pathlib.Path(paths.cloud_dir).resolve()
@@ -548,7 +563,7 @@ for path in files:
         if os.path.exists(temporary):
             os.unlink(temporary)
 subprocess.run(cloud_init + ["clean", "--logs"], check=True)
-require_done()
+require_done("post-clean")
 `) + `
 fi
 sync`

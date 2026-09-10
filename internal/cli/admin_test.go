@@ -230,3 +230,107 @@ func TestSanitizeMacHostDryRunChecks(t *testing.T) {
 		t.Fatalf("message leaked provider details: %q", got)
 	}
 }
+
+func TestAdminHostReservation(t *testing.T) {
+	for _, tc := range []struct {
+		name, action, method string
+		force                bool
+	}{
+		{"inspect", "reservation", http.MethodGet, false},
+		{"clear", "clear", http.MethodPost, false},
+		{"force clear", "clear", http.MethodPost, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != tc.method || r.URL.Path != "/v1/admin/hosts/h-123abc/reservation" {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				}
+				if r.URL.Query().Get("region") != "eu-west-1" || r.URL.Query().Get("provider") != "aws" || r.URL.Query().Get("target") != "macos" {
+					t.Errorf("unexpected scope: %s", r.URL.RawQuery)
+				}
+				if (r.URL.Query().Get("force") == "true") != tc.force {
+					t.Error("incorrect force flag")
+				}
+				if r.Header.Get("Authorization") != "Bearer admin-token" {
+					t.Error("missing admin auth")
+				}
+				_, _ = io.WriteString(w, `{"hostID":"h-123abc","reservations":[],"cleared":0}`)
+			}))
+			defer server.Close()
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "admin-token")
+			args := []string{tc.action, "h-123abc", "--region", "eu-west-1", "--json"}
+			if tc.force {
+				args = append(args, "--force")
+			}
+			var stdout bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: io.Discard}
+			if err := app.adminMacHosts(context.Background(), args); err != nil {
+				t.Fatal(err)
+			}
+			var result struct {
+				HostID string `json:"hostID"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.HostID != "h-123abc" {
+				t.Fatalf("unexpected output: %s (%v)", stdout.String(), err)
+			}
+		})
+	}
+}
+
+func TestAdminHostReservationRejectsInvalidArguments(t *testing.T) {
+	for _, args := range [][]string{
+		{"reservation"}, {"clear"}, {"reservation", "h-123abc", "--force"},
+		{"clear", "h-123abc", "extra"}, {"reservation", "h-123abc", "--provider", "gcp"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			app := App{Stdout: io.Discard, Stderr: io.Discard}
+			if err := app.adminHosts(context.Background(), args); err == nil {
+				t.Fatal("expected argument error")
+			}
+		})
+	}
+}
+
+func TestAdminHostReservationPreservesConflict(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{"error":"host_in_use","message":"reservation references a provisioning lease"}`)
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "admin-token")
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	if err := app.adminHosts(context.Background(), []string{"clear", "h-123abc"}); err == nil || !strings.Contains(err.Error(), "host_in_use") {
+		t.Fatalf("expected host conflict, got %v", err)
+	}
+}
+
+func TestAdminHostReservationClearCannotReleaseHostOnOlderCoordinator(t *testing.T) {
+	var released bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Older coordinators dispatch host DELETE using only the first path segment.
+		if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/admin/hosts/h-") {
+			released = true
+			_, _ = io.WriteString(w, `{"released":["h-123abc"]}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":"not_found"}`)
+	}))
+	defer server.Close()
+	client := &CoordinatorClient{BaseURL: server.URL, Token: "synthetic-admin-token"}
+	_, err := client.AdminHostReservation(context.Background(), "eu-west-1", "h-123abc", true, true)
+	if err == nil {
+		t.Fatal("expected unsupported-route error")
+	}
+	if released {
+		t.Fatal("reservation clear released a Dedicated Host")
+	}
+}

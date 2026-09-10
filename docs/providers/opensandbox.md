@@ -66,8 +66,10 @@ config and never placed on argv. If no key is resolvable, operations fail with
 a clear error before any sandbox is created.
 
 The API base URL can come from `--opensandbox-api-url`,
-`CRABBOX_OPENSANDBOX_API_URL`, or `OPEN_SANDBOX_API_URL`. Repository YAML cannot
-set the API URL. That prevents a checked-in config from redirecting an
+`CRABBOX_OPENSANDBOX_API_URL`, or `OPEN_SANDBOX_API_URL`. Neither user nor
+repository YAML can set the API URL. A nonempty `CRABBOX_OPENSANDBOX_API_URL`
+takes precedence over `OPEN_SANDBOX_API_URL`; empty values fall through.
+The YAML restriction prevents a checked-in config from redirecting an
 automatically loaded API key. Overrides must be absolute HTTP(S) URLs; plain
 HTTP is accepted only for `localhost` or loopback IPs during local development.
 Userinfo, query parameters, and fragments are rejected.
@@ -115,6 +117,9 @@ Provider flags:
 --opensandbox-forget-missing
 ```
 
+`--opensandbox-forget-missing` is CLI-only. It has no YAML setting or environment
+override; pass the flag explicitly when you intend stale-claim cleanup.
+
 Configuration flags have matching `CRABBOX_OPENSANDBOX_*` environment
 overrides, for example `CRABBOX_OPENSANDBOX_IMAGE`,
 `CRABBOX_OPENSANDBOX_WORKDIR`, and
@@ -147,16 +152,32 @@ crabbox run --provider opensandbox --allow-env API_TOKEN -- printenv API_TOKEN
    `--sync-only` syncs and stops without running a command.
 4. The command runs through OpenSandbox execd with `cwd` set to the workdir and
    `envs` carrying forwarded environment values. The remote exit code is
-   mirrored by Crabbox.
-5. On release the sandbox is deleted unless `--keep` was set.
+   mirrored by Crabbox. Command intent is classified once: literal profile
+   arguments stay data through the final execd source string, including shell
+   operators and assignment-shaped executable names. Explicit or inferred shell
+   source retains the existing Bash login wrapper; cwd and envs remain native
+   request fields.
+5. A newly created sandbox is deleted after the run unless `--keep` was set;
+   reused sandboxes are retained.
    `--keep-on-failure` retains a newly created sandbox after a sync, workspace
-   setup, or command failure and prints rerun/stop guidance. Best-effort
-   cleanup calls are bounded; failed cleanup reports the sandbox ID for manual
-   provider-side cleanup.
+   setup, or command failure and prints rerun/stop guidance. Cleanup is bounded;
+   failure retains the recovery claim and fails an otherwise successful run.
+   An existing command failure keeps its original exit code even when cleanup
+   also fails. Timing and session reports are finalized after cleanup.
 6. `cleanup` removes retained sandboxes after their local sliding idle timeout.
    Cleanup rechecks ownership metadata and serializes with lease reuse.
    Missing-or-inaccessible claims are preserved unless `forgetMissing` is
    explicitly enabled.
+
+Before reuse, Crabbox verifies ownership and repository authorization, checks
+the remaining absolute TTL, resumes if needed, and checks the budget again
+before updating the claim. Failed admission retains the authorized session
+without refreshing activity or printing a rerun hint for an unusable sandbox.
+
+Running-state and execd readiness report the terminating deadline or cancellation
+consistently, including when it happens between probes. Existing diagnostic text
+and exit codes are preserved. A discovered sandbox expiration remains a separate
+provider failure; it is not reclassified as a caller timeout.
 
 ## Capabilities
 

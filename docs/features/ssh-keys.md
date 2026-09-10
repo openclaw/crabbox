@@ -10,6 +10,14 @@ Crabbox generates a fresh SSH client authentication key per lease by default.
 This keeps a long-lived personal key out of every runner and gives the provider
 layer a predictable, per-lease resource name it can import and later delete.
 
+For provisioned servers, brokered Hetzner cleanup records confirmation before
+deleting an owned per-lease key. If key cleanup fails, the lease retains both the server evidence
+and cleanup debt, so a retry can finish key cleanup without repeating server
+deletion. A definitive failed create that left only a newly created owned key
+can retry its exact retained key ID under the cleanup claim without inventing
+a server-absence receipt. Shared keys remain retained. See
+[Hetzner cleanup confirmation](lifecycle-cleanup.md#brokered-hetzner-cleanup-confirmation).
+
 ## Per-lease key generation
 
 When a lease is created, the CLI runs `ssh-keygen` to produce a key it stores
@@ -75,6 +83,13 @@ under a stable lease alias before any readiness probe or other SSH transport.
 Those connections use `StrictHostKeyChecking=yes`; an invalid key or unsafe
 local trust path fails closed without attempting SSH. A refreshed authoritative
 key replaces the prior isolated pin rather than appending stale trust.
+
+Readiness stops promptly when OpenSSH rejects a host key, including during the
+separate WSL SFTP probe. Waiting for guest startup cannot repair that rejection:
+verify the lease identity and its SSH host trust before reconnecting. Detection
+works across split writes and large diagnostics without retaining their text;
+it does not replace keys or relax host-key checking. Other startup failures keep
+their existing retry policy, and caller cancellation remains authoritative.
 
 Targets without authoritative host-key metadata preserve the existing behavior.
 Their SSH connections use:

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
+import { writeExecutable } from "./test-support/smoke-fixtures.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const smokeScript = path.join(repoRoot, "scripts", "live-unikraft-cloud-smoke.sh");
@@ -34,11 +35,6 @@ async function waitForFile(file, timeoutMs = 15_000) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(`timed out waiting for ${path.basename(file)}`);
-}
-
-function writeExecutable(file, body) {
-  fs.writeFileSync(file, body, "utf8");
-  fs.chmodSync(file, 0o755);
 }
 
 function embeddedRawHelper() {
@@ -927,9 +923,10 @@ test("TERM interrupts an active warmup and starts zero-residue cleanup promptly"
   warmup)
     printf '%s' '[{"name":"existing-service","uuid":"${existingUUID}"},{"name":"${createdName}","uuid":"${createdUUID}"}]\n' >${JSON.stringify("$FAKE_REMOTE")}
     printf 'leased ${createdLease} slug=unikraft-cloud-live-smoke-test provider=unikraft-cloud instance=${createdUUID} state=running\n'
-    : >${JSON.stringify("$WARMUP_STARTED")}
     (trap '' TERM; while :; do sleep 1; done) &
     printf '%s' "$!" >${JSON.stringify("$SLEEP_PID")}
+    # TERM must not interrupt before the descendant PID is recorded.
+    : >${JSON.stringify("$WARMUP_STARTED")}
     wait
     ;;
   stop)
