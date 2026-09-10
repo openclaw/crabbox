@@ -381,7 +381,7 @@ func newLeaseID() string {
 func readinessTimeout(cfg Config) time.Duration {
 	timeout := cfg.AgentSandbox.SandboxReadyTimeout
 	if timeout <= 0 {
-		timeout = 180 * time.Second
+		timeout = core.AgentSandboxConfigDefaultSandboxReadyTimeout
 	}
 	return timeout
 }
@@ -389,7 +389,7 @@ func readinessTimeout(cfg Config) time.Duration {
 func podReadinessTimeout(cfg Config) time.Duration {
 	timeout := cfg.AgentSandbox.PodReadyTimeout
 	if timeout <= 0 {
-		timeout = 180 * time.Second
+		timeout = core.AgentSandboxConfigDefaultPodReadyTimeout
 	}
 	return timeout
 }

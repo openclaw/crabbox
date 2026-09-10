@@ -568,6 +568,12 @@ func TestKubeVirtGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestAgentSandboxGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_agentsandbox.go", "../../internal/cli/config_agentsandbox_generated.go", "AgentSandboxConfig", "agentSandbox", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -634,7 +640,8 @@ func typecheckGenerated(t *testing.T, source string, output []byte) {
 	t.Helper()
 	// Signatures match the handwritten helpers; only generated wiring is checked here.
 	const helpers = `package cli
-import "flag"
+import ("flag"; "time")
+func applyLeaseDuration(*time.Duration, string) { panic("stub") }
 func flagWasSet(*flag.FlagSet, string) bool { panic("stub") }
 func exit(int, string) error { panic("stub") }
 func getenv(string, string) string { panic("stub") }
@@ -807,6 +814,125 @@ func runScalarFixture(t *testing.T, source string, generated []byte, behavior st
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("generated scalar fixture: %v\n%s", err, output)
 	}
+}
+
+const durationSample = "package cli\nimport \"time\"\ntype PilotConfig struct {\n" +
+	" Timeout time.Duration `sources:\"user,repo,env,flag\" config:\"timeout\" env:\"PILOT_TIMEOUT\" flag:\"pilot-timeout\" help:\"Timeout\" duration:\"positive-overlay\" fileStorage:\"value\" default:\"180s\"`\n" +
+	" Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"PILOT_COUNT\" flag:\"pilot-count\" help:\"Count\" nonnegative:\"true\"`\n" +
+	" After bool `sources:\"user,repo,env,flag\" config:\"after\" env:\"PILOT_AFTER\" flag:\"pilot-after\" help:\"After\" reportApplied:\"true\"`\n}"
+
+func TestSchemaDurationContract(t *testing.T) {
+	for _, tc := range []struct{ raw, expression string }{
+		{"180s", "180 * time.Second"}, {"250ms", "250 * time.Millisecond"},
+		{"3us", "3 * time.Microsecond"}, {"1.25us", "1250 * time.Nanosecond"},
+	} {
+		got, err := defaultExpression("time.Duration", tc.raw)
+		if err != nil || got != tc.expression {
+			t.Fatalf("duration default %q = %q, %v", tc.raw, got, err)
+		}
+	}
+	for _, source := range []string{durationSample, strings.Replace(durationSample, `import "time"`, `import time "time"`, 1)} {
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct{ name, old, replacement, want string }{
+		{"missing import", `import "time"`, "", "standard time import"},
+		{"wrong import", `import "time"`, `import time "example/time"`, "standard time import"},
+		{"renamed import", `import "time"`, `import clock "time"`, "standard time import"},
+		{"missing mode", ` duration:"positive-overlay"`, "", "requires duration positive-overlay"},
+		{"wrong mode", `duration:"positive-overlay"`, `duration:"strict"`, "requires duration positive-overlay"},
+		{"missing storage", ` fileStorage:"value"`, "", "duration file input requires fileStorage value"},
+		{"pointer storage", `fileStorage:"value"`, `fileStorage:"pointer"`, "duration file input requires fileStorage value"},
+		{"wrong kind", `Timeout time.Duration`, `Timeout string`, "duration is supported only"},
+		{"reported duration", `help:"Timeout"`, `help:"Timeout" reportApplied:"true"`, "reportApplied is supported only"},
+		{"duration alias", `env:"PILOT_TIMEOUT"`, `env:"PILOT_TIMEOUT" envAlias:"OTHER"`, "envAlias is supported only"},
+		{"malformed default", `default:"180s"`, `default:"later"`, "Timeout default:"},
+		{"overflow default", `default:"180s"`, `default:"999999999999999999h"`, "Timeout default:"},
+		{"zero default", `default:"180s"`, `default:"0s"`, "duration default must be positive"},
+		{"negative default", `default:"180s"`, `default:"-1s"`, "duration default must be positive"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(durationSample, tc.old, tc.replacement, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestGenerateDurationBindings(t *testing.T) {
+	s, err := parseSchema([]byte(durationSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatal("nondeterministic duration output")
+	}
+	for _, want := range []string{`Timeout string ` + "`yaml:\"timeout,omitempty\"`", "const PilotConfigDefaultTimeout time.Duration = 180 * time.Second", "applyLeaseDuration(&cfg.Timeout, file.Timeout)", `fs.Duration("pilot-timeout", defaults.Timeout, "Timeout")`} {
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("missing duration binding %q", want)
+		}
+	}
+	typecheckGenerated(t, durationSample, output)
+	withoutDefault := strings.Replace(durationSample, ` default:"180s"`, "", 1)
+	zeroSchema, err := parseSchema([]byte(withoutDefault), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeroOutput, err := generate(zeroSchema, "pilot.go")
+	if err != nil || strings.Contains(string(zeroOutput), "PilotConfigDefaultTimeout") {
+		t.Fatal("omitted duration default must remain zero without a fallback constant")
+	}
+	typecheckGenerated(t, withoutDefault, zeroOutput)
+	coreSource, err := os.ReadFile("../../internal/cli/config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	helpers := ""
+	for _, name := range []string{"applyLeaseDuration", "getenvNonNegativeInt", "getenvBool"} {
+		start := strings.Index(string(coreSource), "func "+name+"(")
+		if start < 0 {
+			t.Fatalf("missing core helper %s", name)
+		}
+		rest := string(coreSource)[start:]
+		end := strings.Index(rest, "\nfunc ")
+		if end < 0 {
+			t.Fatalf("missing end for core helper %s", name)
+		}
+		helpers += rest[:end] + "\n"
+	}
+	const behavior = `package cli
+import ("flag";"fmt";"os";"strconv";"strings";"testing";"time")
+func exit(_ int, pattern string, args ...any) error { return fmt.Errorf(pattern,args...) }
+func flagWasSet(fs *flag.FlagSet,name string) bool { found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found }
+func TestDurationSources(t *testing.T) {
+ if defaultPilotConfig().Timeout!=180*time.Second {t.Fatal("typed default changed")}
+ for _,tc:=range []struct{raw string;want time.Duration}{{"",13*time.Second},{"0",13*time.Second},{"0s",13*time.Second},{"-1s",13*time.Second},{"invalid",13*time.Second},{" 2m ",13*time.Second},{"2m",2*time.Minute},{"125ms",125*time.Millisecond}} {
+  cfg:=PilotConfig{Timeout:13*time.Second};file:=filePilotConfig{Timeout:tc.raw}
+  if _,err:=cfg.applyFile(&file);err!=nil||cfg.Timeout!=tc.want||file.Timeout!=tc.raw {t.Fatalf("file %q: %+v %v",tc.raw,cfg,err)}
+  t.Setenv("PILOT_TIMEOUT",tc.raw);cfg=PilotConfig{Timeout:13*time.Second}
+  if _,err:=cfg.applyEnv();err!=nil||cfg.Timeout!=tc.want {t.Fatalf("env %q: %+v %v",tc.raw,cfg,err)}
+ }
+ negative,after:=-1,true;cfg:=PilotConfig{Timeout:13*time.Second,Count:7}
+ applied,err:=cfg.applyFile(&filePilotConfig{Timeout:"2m",Count:&negative,After:&after})
+ if err==nil||cfg.Timeout!=2*time.Minute||cfg.Count!=7||cfg.After||applied.After {t.Fatalf("file partial: %+v %+v %v",cfg,applied,err)}
+ t.Setenv("PILOT_TIMEOUT","250ms");t.Setenv("PILOT_COUNT","invalid");t.Setenv("PILOT_AFTER","true");cfg=PilotConfig{Count:7}
+ applied,err=cfg.applyEnv();if err==nil||cfg.Timeout!=250*time.Millisecond||cfg.Count!=0||cfg.After||applied.After {t.Fatalf("env partial: %+v %+v %v",cfg,applied,err)}
+ for _,raw:=range []string{"0s","-1s","125ms"} {
+  cfg=defaultPilotConfig();fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+  values.Apply(&cfg,fs);if cfg.Timeout!=180*time.Second {t.Fatal("unvisited duration changed")}
+  if err:=fs.Parse([]string{"--pilot-timeout="+raw});err!=nil {t.Fatal(err)}
+  values.Apply(&cfg,fs);want,_:=time.ParseDuration(raw);if cfg.Timeout!=want {t.Fatalf("flag %s = %v",raw,cfg.Timeout)}
+ }
+}
+`
+	runScalarFixture(t, durationSample, output, behavior+helpers)
 }
 
 func TestGenerateOnlyEnvironmentField(t *testing.T) {

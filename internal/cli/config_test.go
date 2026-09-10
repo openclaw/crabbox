@@ -1772,6 +1772,108 @@ func TestAgentSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestAgentSandboxDurationOverlays(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"", 13 * time.Second}, {"0", 13 * time.Second}, {"0s", 13 * time.Second},
+		{"-1s", 13 * time.Second}, {"invalid", 13 * time.Second}, {" 2m ", 13 * time.Second},
+		{"999999999999999999999h", 13 * time.Second}, {"2m", 2 * time.Minute}, {"1500ms", 1500 * time.Millisecond},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.AgentSandbox.SandboxReadyTimeout = 13 * time.Second
+			cfg.AgentSandbox.PodReadyTimeout = 13 * time.Second
+			file := fileConfig{AgentSandbox: &fileAgentSandboxConfig{SandboxReadyTimeout: tc.raw, PodReadyTimeout: tc.raw}}
+			if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.AgentSandbox.SandboxReadyTimeout != tc.want || cfg.AgentSandbox.PodReadyTimeout != tc.want {
+				t.Fatalf("file durations=%v/%v, want %v", cfg.AgentSandbox.SandboxReadyTimeout, cfg.AgentSandbox.PodReadyTimeout, tc.want)
+			}
+			encoded, err := yaml.Marshal(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded fileConfig
+			if err := yaml.Unmarshal(encoded, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if decoded.AgentSandbox == nil || decoded.AgentSandbox.SandboxReadyTimeout != tc.raw || decoded.AgentSandbox.PodReadyTimeout != tc.raw {
+				t.Fatalf("duration storage changed raw input %q", tc.raw)
+			}
+			cfg.AgentSandbox.SandboxReadyTimeout = 13 * time.Second
+			cfg.AgentSandbox.PodReadyTimeout = 13 * time.Second
+			t.Setenv("CRABBOX_AGENT_SANDBOX_SANDBOX_READY_TIMEOUT", tc.raw)
+			t.Setenv("CRABBOX_AGENT_SANDBOX_POD_READY_TIMEOUT", tc.raw)
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.AgentSandbox.SandboxReadyTimeout != tc.want || cfg.AgentSandbox.PodReadyTimeout != tc.want {
+				t.Fatalf("env durations=%v/%v, want %v", cfg.AgentSandbox.SandboxReadyTimeout, cfg.AgentSandbox.PodReadyTimeout, tc.want)
+			}
+		})
+	}
+}
+
+func TestAgentSandboxPartialInputAndPathEvents(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	negative, disabled, forgotten := -1, false, true
+	file := fileConfig{AgentSandbox: &fileAgentSandboxConfig{
+		Kubectl: "custom-kubectl", Kubeconfig: "~/accepted", Namespace: "changed",
+		SandboxReadyTimeout: "2m", PodReadyTimeout: "invalid", ExecTimeoutSecs: &negative,
+		DeleteOnRelease: &disabled, ForgetMissing: &forgotten,
+	}}
+	cfg := baseConfig()
+	err := applyFileConfig(&cfg, file)
+	if err == nil || err.Error() != "agentSandbox execTimeoutSecs must be non-negative" {
+		t.Fatalf("file error=%v", err)
+	}
+	if cfg.AgentSandbox.Kubeconfig != filepath.Join(home, "accepted") || cfg.AgentSandbox.Namespace != "changed" ||
+		cfg.AgentSandbox.SandboxReadyTimeout != 2*time.Minute || cfg.AgentSandbox.PodReadyTimeout != 180*time.Second || cfg.AgentSandbox.ExecTimeoutSecs != 600 {
+		t.Fatalf("file partial values=%#v", cfg.AgentSandbox)
+	}
+	if !cfg.AgentSandbox.DeleteOnRelease || cfg.AgentSandbox.ForgetMissing || DeleteOnReleaseExplicit(cfg, "agent-sandbox") {
+		t.Fatal("later booleans applied after file error")
+	}
+	if file.AgentSandbox.Kubeconfig != "~/accepted" {
+		t.Fatal("file input was normalized in place")
+	}
+
+	cfg = baseConfig()
+	cfg.AgentSandbox.Kubeconfig = "~/inherited"
+	file.AgentSandbox.ExecTimeoutSecs = nil
+	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AgentSandbox.Kubeconfig != "~/inherited" || cfg.AgentSandbox.Kubectl != "kubectl" || cfg.AgentSandbox.Namespace != "default" {
+		t.Fatal("unaccepted strings changed")
+	}
+	if cfg.AgentSandbox.DeleteOnRelease || !cfg.AgentSandbox.ForgetMissing || !DeleteOnReleaseExplicit(cfg, "agent-sandbox") {
+		t.Fatal("admitted explicit booleans were lost")
+	}
+
+	cfg = baseConfig()
+	cfg.AgentSandbox.Kubeconfig = "~/inherited"
+	t.Setenv("CRABBOX_AGENT_SANDBOX_SANDBOX_READY_TIMEOUT", "90s")
+	t.Setenv("CRABBOX_AGENT_SANDBOX_EXEC_TIMEOUT_SECS", "invalid")
+	t.Setenv("CRABBOX_AGENT_SANDBOX_DELETE_ON_RELEASE", "false")
+	t.Setenv("CRABBOX_AGENT_SANDBOX_FORGET_MISSING", "true")
+	if err := applyEnv(&cfg); err == nil {
+		t.Fatal("missing integer environment error")
+	}
+	if cfg.AgentSandbox.Kubeconfig != filepath.Join(home, "inherited") || cfg.AgentSandbox.SandboxReadyTimeout != 90*time.Second || cfg.AgentSandbox.ExecTimeoutSecs != 0 {
+		t.Fatalf("env partial values=%#v", cfg.AgentSandbox)
+	}
+	if !cfg.AgentSandbox.DeleteOnRelease || cfg.AgentSandbox.ForgetMissing || DeleteOnReleaseExplicit(cfg, "agent-sandbox") {
+		t.Fatal("later booleans applied after environment error")
+	}
+}
+
 func TestSealosDevboxUntrustedConfigCannotRedirectClusterWorkload(t *testing.T) {
 	cfg := baseConfig()
 	cfg.SealosDevbox.Kubectl = "/trusted/kubectl"

@@ -4,7 +4,8 @@ Vercel Sandbox, CodeSandbox, CUA, OpenSandbox, Anthropic Sandbox Runtime,
 Cloud Run Sandbox, FastAPI Cloud, Railway, Upstash Box, Cloudflare's container
 runner, Cloudflare Sandbox, E2B, Blaxel, Azure Dynamic Sessions, SmolVM, Semaphore,
 Tensorlake, Orgo, OpenComputer, Modal, Morph, exe.dev, OVHcloud, Lume, Runpod, Vast,
-W&B, Scaleway, Tencent Cloud, DigitalOcean, Vultr, Linode, Sealos DevBox, and KubeVirt
+W&B, Scaleway, Tencent Cloud, DigitalOcean, Vultr, Linode, Sealos DevBox, KubeVirt,
+and Agent Sandbox
 describe their mechanical config bindings
 once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_codesandbox.go`, `internal/cli/config_cua.go`,
@@ -25,7 +26,7 @@ once, on the concrete structs in `internal/cli/config_vercel_sandbox.go`,
 `internal/cli/config_tencentcloud.go`, `internal/cli/config_digitalocean.go`,
 `internal/cli/config_vultr.go`, `internal/cli/config_linode.go`,
 `internal/cli/config_sealos_devbox.go`, and
-`internal/cli/config_kubevirt.go`.
+`internal/cli/config_kubevirt.go`, and `internal/cli/config_agentsandbox.go`.
 `scripts/configgen` reads each declaration
 and emits its matching `_generated.go` file. Each generated file contains
 source-admitted YAML input fields, compiled defaults, file/environment overlays,
@@ -67,6 +68,27 @@ flag wrappers. It consumes the actual applied report and preserves the ordered
 field transformations; it does not change acceptance, markers, or guest paths.
 Environment fallback expansion stays explicit and does not manufacture an
 all-true applied report.
+
+Agent Sandbox uses all twelve bindings together, including both `time.Duration`
+timeouts. Its seven file strings remain trusted-user-only and value-backed;
+duration strings, the integer and booleans retain repository admission. The file
+wrapper expands only accepted Kubeconfig input, including partial results before
+an integer error. Environment processing expands the final inherited-or-new
+Kubeconfig even when no override was accepted. The delete marker stays outside
+generation and is applied only when its field was reached. Flag application
+copies all visited values before the provider's existing validation.
+
+Duration support is deliberately one fixed mode: canonical standard-library
+`time.Duration` with `duration:"positive-overlay"`. File-admitted fields must
+also declare `fileStorage:"value"`; their YAML fields remain raw strings, not
+parsed durations or pointers. File/env input calls the existing positive,
+tolerant `applyLeaseDuration` helper without trimming. Invalid, zero and negative
+inputs do not replace the current runtime value, but raw file values survive
+configuration writes. Flags use `flag.Duration` and copy explicit zero/negative
+values before provider validation; they do not inherit file/env acceptance.
+Declared defaults must parse to a positive duration and produce typed constants;
+an omitted default remains zero. Arbitrary qualified types, alternate parsers,
+callbacks and additional duration policies are not supported.
 
 ## Why generation
 
