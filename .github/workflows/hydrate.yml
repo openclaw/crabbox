@@ -23,6 +23,7 @@ permissions:
 
 jobs:
   hydrate:
+    if: inputs.crabbox_job != 'image-toolcache'
     runs-on: [self-hosted, "${{ inputs.crabbox_runner_label }}"]
     timeout-minutes: 20
 
@@ -83,3 +84,156 @@ jobs:
             echo "READY_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } > "${state}.tmp"
           mv "${state}.tmp" "$state"
+
+  image-toolcache:
+    if: inputs.crabbox_job == 'image-toolcache'
+    runs-on: [self-hosted, "${{ inputs.crabbox_runner_label }}"]
+    timeout-minutes: 10
+    steps:
+      - name: Check out pinned setup-go without running it
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: actions/setup-go
+          ref: 924ae3a1cded613372ab5595356fb5720e22ba16
+          path: .crabbox-setup-go
+          persist-credentials: false
+
+      - name: Verify registered Runner offline Go cache
+        id: toolcache
+        shell: bash
+        run: |
+          /usr/bin/python3 -I - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import pwd
+          import stat
+          import subprocess
+          import sys
+          import tempfile
+
+          def require(condition, message):
+              if not condition:
+                  raise RuntimeError(message)
+
+          def owned(path, directory=False):
+              info = path.lstat()
+              kind = stat.S_ISDIR if directory else stat.S_ISREG
+              return kind(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o022
+
+          command_exit = 1
+          def qualify():
+              global command_exit
+              require(sys.platform == "linux" and os.uname().machine == "x86_64" and os.getuid() != 0,
+                      "qualification requires a nonroot Linux x64 Runner")
+              home = Path(os.environ["HOME"])
+              runner = home / "actions-runner"
+              cache = runner / "_work" / "_tool"
+              require(home.is_absolute() and home.resolve() == home, "unexpected Runner home")
+              require(os.environ["RUNNER_TOOL_CACHE"] == str(cache), "Runner selected a different tool cache")
+              for directory in (home, runner, runner / "_work", cache, cache / "go", cache / "go/1.27.1", cache / "go/1.27.1/x64"):
+                  require(owned(directory, True), "Runner cache is not an owned regular directory")
+              require(owned(runner / ".runner"), "Runner registration is not owned")
+              settings = json.loads((runner / ".runner").read_text())
+              require(os.path.abspath(runner / settings["workFolder"]) == str(runner / "_work"),
+                      "Runner registration uses a different work folder")
+              require(owned(cache / "go/1.27.1/x64.complete"), "seeded Go completion marker is missing or unowned")
+              user = pwd.getpwuid(os.getuid()).pw_name
+              unit = subprocess.run(
+                  ["/usr/bin/systemctl", "show", "crabbox-actions-runner.service",
+                   "--property=MainPID,ActiveState,User,WorkingDirectory"],
+                  check=True, capture_output=True, text=True, timeout=10)
+              properties = dict(line.split("=", 1) for line in unit.stdout.splitlines() if "=" in line)
+              require(properties.get("ActiveState") == "active" and properties.get("User") == user and
+                      properties.get("WorkingDirectory") == str(runner), "registered Runner service does not match this user")
+              main_pid = int(properties["MainPID"])
+              current = os.getpid()
+              for _ in range(64):
+                  if current == main_pid and main_pid > 1:
+                      break
+                  require(current > 1, "job is not descended from the registered Runner service")
+                  current = int(Path(f"/proc/{current}/stat").read_text().rsplit(") ", 1)[1].split()[1])
+              else:
+                  raise RuntimeError("Runner service ancestry exceeded its bound")
+              require(not os.environ.get("GO_DOWNLOAD_BASE_URL") and not os.environ.get("INPUT_GO-DOWNLOAD-BASE-URL"),
+                      "custom Go download URLs are not qualified")
+              action = Path(os.environ["GITHUB_WORKSPACE"]) / ".crabbox-setup-go"
+              for name, digest in (
+                  ("dist/setup/index.js", "67a5bacd381cf1b90fd8490e32aa40092094176db43e75493164941a6a072446"),
+                  ("matchers.json", "03d59f953e08fdbe12c43f98bce08e9daa6d0ff5b5920111c9b23dd4e1991d06"),
+              ):
+                  file = action / name
+                  require(owned(file) and hashlib.sha256(file.read_bytes()).hexdigest() == digest,
+                          "pinned setup-go bytes changed")
+              # Keep the actual job's cache selection and Runner command files.
+              # Registration, not this probe, must have populated the cache.
+              keys = (
+                  "HOME", "USER", "LOGNAME", "PATH", "RUNNER_TOOL_CACHE", "RUNNER_TOOLSDIRECTORY",
+                  "AGENT_TOOLSDIRECTORY", "agent.ToolsDirectory", "RUNNER_TEMP", "RUNNER_OS", "RUNNER_ARCH",
+                  "GITHUB_WORKSPACE", "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
+                  "GITHUB_ACTIONS", "CI",
+              )
+              environment = {key: os.environ[key] for key in keys if key in os.environ}
+              for key in ("PATH", "RUNNER_TEMP", "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT"):
+                  require(bool(environment.get(key)), "required Runner environment is missing")
+              environment.update({"INPUT_GO-VERSION": "1.27.1", "INPUT_CHECK-LATEST": "false",
+                                  "INPUT_CACHE": "false", "INPUT_ARCHITECTURE": "x64", "INPUT_TOKEN": ""})
+              namespaces = [os.readlink("/proc/self/ns/" + name) for name in ("net", "pid", "mnt")]
+              child = """
+          import json, os, resource, subprocess, sys
+          assert os.getuid() == int(sys.argv[2]) and os.getuid() != 0
+          namespaces = [os.readlink("/proc/self/ns/" + name) for name in ("net", "pid", "mnt")]
+          assert namespaces[0] != sys.argv[3] and namespaces[1:] == sys.argv[4:6]
+          # sysfs can still show the parent network namespace without a new mount.
+          links = json.loads(subprocess.run(["/usr/sbin/ip", "-j", "link", "show"],
+                                           check=True, capture_output=True, text=True, timeout=5).stdout)
+          assert isinstance(links, list) and len(links) == 1 and links[0]["ifname"] == "lo"
+          flags = links[0]["flags"]
+          assert isinstance(flags, list) and all(isinstance(flag, str) for flag in flags)
+          assert "LOOPBACK" in flags and "UP" not in flags
+          routes = json.loads(subprocess.run(["/usr/sbin/ip", "-j", "route", "show", "table", "all"],
+                                            check=True, capture_output=True, text=True, timeout=5).stdout)
+          assert routes == []
+          resource.setrlimit(resource.RLIMIT_FSIZE, (65536, 65536))
+          os.execvpe("node", ["node", sys.argv[1]], os.environ)
+          """
+              os.umask(0o077)
+              with tempfile.TemporaryDirectory(prefix="crabbox-toolcache-", dir=environment["RUNNER_TEMP"]) as scratch:
+                  log = Path(scratch) / "action.log"
+                  with log.open("wb") as output:
+                      result = subprocess.run(
+                          ["sudo", "-n", "/usr/bin/timeout", "--kill-after=5", "90", "/usr/bin/unshare", "--net",
+                           "--", "/usr/sbin/runuser", "-u", user, "--", "env", "-i",
+                           *[key + "=" + value for key, value in environment.items()],
+                           "/usr/bin/python3", "-I", "-c", child, str(action / "dist/setup/index.js"),
+                           str(os.getuid()), *namespaces],
+                          stdout=output, stderr=subprocess.STDOUT)
+                  command_exit = result.returncode if result.returncode >= 0 else 128 - result.returncode
+                  require(result.returncode == 0, "pinned setup-go failed with exit " + str(result.returncode))
+                  require(log.stat().st_size < 65536, "setup-go output exceeded its bound")
+                  lines = log.read_text().splitlines()
+                  require(lines.count("Found in cache @ " + str(cache / "go/1.27.1/x64")) == 1,
+                          "setup-go did not use the seeded Runner cache")
+                  require(not any("Attempting to download" in line for line in lines), "setup-go attempted a download")
+                  require(lines.count("go version go1.27.1 linux/amd64") == 1, "setup-go selected a different Go version")
+              print("registered Runner: pinned setup-go 1.27.1 used its preexisting cache without network access")
+
+          try:
+              qualify()
+          except Exception as error:
+              # setup-go prints full go env; never relay its raw log on failure.
+              print(str(error) if isinstance(error, RuntimeError) else "Runner toolcache qualification failed: " + type(error).__name__,
+                    file=sys.stderr)
+              sys.exit(command_exit or 1)
+          PY
+
+      - name: Verify Runner-applied Go environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GOTOOLCHAIN" == local ]]
+          [[ "$(command -v go)" == "$RUNNER_TOOL_CACHE/go/1.27.1/x64/bin/go" ]]
+          [[ "$(go env GOROOT)" == "$RUNNER_TOOL_CACHE/go/1.27.1/x64" ]]
+          [[ "$(go version)" == 'go version go1.27.1 linux/amd64' ]]
+          echo 'registered Runner applied the seeded Go PATH and GOTOOLCHAIN environment'

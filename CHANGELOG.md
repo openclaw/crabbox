@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add an opt-in registered-Runner image toolcache qualification job that checks pinned Go setup offline and verifies the Runner-applied environment without changing ordinary hydration. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
+
 - Keep browser timeout handling independent of blocked process-diagnostic reads, retain both timed samples with fault and wait-channel evidence, and bound the complete diagnostic line without changing browser limits. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
 
 - Inject the image-qualification rollback failure only after the complete promoted runtime smoke, not its preceding readiness verification. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
