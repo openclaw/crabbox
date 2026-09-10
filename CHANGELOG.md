@@ -5,7 +5,7 @@
 - Install checksum-pinned Node 24.19.0/npm on managed native Windows leases when missing or broken, require both tools for readiness, and update the developer-image default pin while preserving overrides. [PR 2069](https://github.com/openclaw/crabbox/pull/2069).
 - Add `Start-CrabboxDetachedProcess.ps1` for native Windows daemons that survive command and SSH-session exit with a private hidden console, preserving ordinary command timeouts and workspace ownership. [PR 2069](https://github.com/openclaw/crabbox/pull/2069).
 - Include the resolved `workroot` in SSH-backed inspect/status JSON, including native Windows and WSL2 leases. [PR 2069](https://github.com/openclaw/crabbox/pull/2069).
-- Managed Linux: reuse installed desktop packages and a working package-installed Chrome or Chromium on restored images, avoiding redundant package transactions and browser repository downloads while preserving per-lease configuration and readiness checks.
+- Managed Linux: reuse installed desktop packages and a working package-installed Chrome or Chromium on restored images, avoiding redundant package transactions and browser repository downloads while preserving per-lease configuration and readiness checks. https://github.com/openclaw/crabbox/pull/2073
 
 ## 0.55.0 - 2026-09-09
 
