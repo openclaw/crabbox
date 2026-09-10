@@ -418,7 +418,6 @@ func (b *spritesBackend) prepareLease(ctx context.Context, sprite spritesInfo, l
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	target.ReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null"
 	server := b.spriteToServer(sprite, keep)
 	server.Labels["lease"] = leaseID
 	server.Labels["slug"] = slug
@@ -576,6 +575,7 @@ func spritesSSHTarget(name, keyPath string) SSHTarget {
 		NetworkKind:    networkPublic,
 		SSHConfigProxy: true,
 		ProxyCommand:   "sprite proxy -s %h -W 22",
+		ReadyCheck:     "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null",
 	}
 }
 
