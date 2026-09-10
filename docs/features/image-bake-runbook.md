@@ -650,10 +650,27 @@ boots independently rerun the declared probes under a sanitized system PATH
 before skipping baseline APT. Use the timing logs to compare provider request,
 network readiness, bootstrap, and end-to-end time before and after each bake.
 
-Linux source, candidate, and promoted smokes require a nonroot user and execute
-the normal `pnpm --version` command in that user's existing environment, preserving
-its readiness check and first-use cache warming. This normal command is not
-used to authenticate cached archives or skip their verification.
+Linux source, candidate, and promoted smokes require a nonroot user. After
+successful bundled Linux preparation, the wrapper activates the selected pnpm
+release as the lease user: the privileged installer only seeds root's Corepack
+cache. The existing `CRABBOX_LINUX_PNPM_VERSION` selector is passed unchanged to
+Corepack, including tags, ranges, and integrity-qualified versions.
+
+Before image capture, the wrapper records the resolved ordinary `pnpm --version`
+outside the checkout, using the lease user's normal home/cache and disabling
+Corepack network access for the probe. It also requires `corepack pnpm --version`
+to agree, rejecting version disagreement from a shadowing command. Each later
+smoke checks that same resolved default offline without reactivating it or
+resolving the selector again.
+Preparation, capture, or version mismatch failures stop publication and follow
+the existing lease cleanup and promotion rollback paths.
+
+This establishes the image user's initial default, not a permanent version lock.
+Project `packageManager` pins and existing cached releases remain usable; no
+shared Corepack home is introduced. Custom prep scripts and Windows retain their
+existing behavior, and the standalone root installer does not configure arbitrary
+users. These normal-command checks do not authenticate cached archives or skip
+their verification.
 
 For the bundled Node-24/amd64 builder, each smoke additionally revalidates public
 archive bytes in private temporary directories. It executes fresh Node and both

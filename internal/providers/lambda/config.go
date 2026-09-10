@@ -9,14 +9,13 @@ import (
 )
 
 const (
-	providerName       = "lambda"
-	defaultAPIBaseURL  = "https://cloud.lambda.ai/api/v1"
-	defaultRegion      = "us-west-1"
-	defaultType        = "gpu_1x_a10"
-	defaultImageFamily = "lambda-stack-24-04"
-	defaultUser        = "ubuntu"
-	defaultPort        = "22"
-	tokenEnv           = "LAMBDA_API_KEY"
+	providerName      = "lambda"
+	defaultAPIBaseURL = "https://cloud.lambda.ai/api/v1"
+	// The class mapping remains independent of configured defaults.
+	defaultType = "gpu_1x_a10"
+	defaultUser = "ubuntu"
+	defaultPort = "22"
+	tokenEnv    = "LAMBDA_API_KEY"
 )
 
 func tokenFromEnv() string {
@@ -32,21 +31,21 @@ func requireToken() (string, error) {
 }
 
 func regionForConfig(cfg core.Config) string {
-	return firstNonBlank(cfg.Lambda.Region, defaultRegion)
+	return firstNonBlank(cfg.Lambda.Region, core.LambdaConfiguredRegionDefault)
 }
 
 func typeForConfig(cfg core.Config) string {
 	if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
 		return strings.TrimSpace(cfg.ServerType)
 	}
-	return firstNonBlank(cfg.Lambda.Type, defaultType)
+	return firstNonBlank(cfg.Lambda.Type, core.LambdaConfiguredTypeDefault)
 }
 
 func imageFamilyForConfig(cfg core.Config) string {
 	if strings.TrimSpace(cfg.Lambda.Image) != "" {
 		return ""
 	}
-	return firstNonBlank(cfg.Lambda.ImageFamily, defaultImageFamily)
+	return firstNonBlank(cfg.Lambda.ImageFamily, core.LambdaImageFamilyFallback)
 }
 
 func imageForConfig(cfg core.Config) string {

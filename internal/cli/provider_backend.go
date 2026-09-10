@@ -771,6 +771,11 @@ type LocalCommandRequest struct {
 	// child cannot block forever after the capture buffer fills.
 	MaxCapturedOutputBytes int
 	CancelGracePeriod      time.Duration
+	// RequireProcessGroupJoin keeps this call active until its owned standalone
+	// process group closes, including after cancellation or cleanup grace expiry.
+	RequireProcessGroupJoin bool
+	// OnCleanupPending reports grace expiry once while the command still joins.
+	OnCleanupPending func(error) `json:"-"`
 }
 
 type LocalCommandResult struct {
@@ -866,7 +871,7 @@ func TrackLocalCommandCancellation(ctx context.Context, cmd *exec.Cmd) func(erro
 	}
 }
 
-func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (result LocalCommandResult, err error) {
 	if req.CaptureOutputToFiles && (req.DisableOutputCapture || req.MaxCapturedOutputBytes <= 0 || req.Stdout != nil || req.Stderr != nil) {
 		return LocalCommandResult{ExitCode: 1}, errors.New("file output capture requires a positive limit and no streaming writers")
 	}
@@ -889,6 +894,13 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 	}
 	if req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
 		configureBoundedCommandCancellation(cmd)
+	}
+	var group *localCommandGroupOwner
+	if req.RequireProcessGroupJoin {
+		group, err = configureJoinedLocalCommand(ctx, cmd, req.CancelGracePeriod, req.OnCleanupPending)
+		if err != nil {
+			return LocalCommandResult{ExitCode: 1}, err
+		}
 	}
 	stopCommand := cmd.Cancel
 	withCancellationCause := TrackLocalCommandCancellation(ctx, cmd)
@@ -916,12 +928,26 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 		cmd.Stdout, cmd.Stderr = files.streams[0].writer, files.streams[1].writer
 	}
 	var observedFileOverflow bool
-	err := cmd.Start()
+	err = cmd.Start()
 	if err == nil {
 		var finishCapture func() commandFileCaptureOutcome
 		if files != nil {
 			files.closeWriters()
 			finishCapture = files.watch(cancel, stopCommand, cmd.WaitDelay)
+		}
+		if group != nil {
+			// This owner is the sole reaper. Retain the leader's PID until
+			// every group signal and join is complete, including cancellation.
+			groupErr := group.beforeWait()
+			defer func() {
+				if groupErr != nil && !errors.Is(err, groupErr) {
+					err = errors.Join(err, groupErr)
+					if result.ExitCode == 0 {
+						result.ExitCode = 1
+					}
+				}
+			}()
+			close(group.waitReady)
 		}
 		err = withCancellationCause(cmd.Wait())
 		if finishCapture != nil {
@@ -944,7 +970,7 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 	if errors.Is(err, exec.ErrWaitDelay) && req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
 		_ = stopCommand()
 	}
-	result := LocalCommandResult{ExitCode: exitCode(err), Stdout: stdout.String(), Stderr: stderr.String()}
+	result = LocalCommandResult{ExitCode: exitCode(err), Stdout: stdout.String(), Stderr: stderr.String()}
 	if stdout.buffer.Exceeded() || stderr.buffer.Exceeded() || observedFileOverflow {
 		err = fmt.Errorf("captured command output exceeded %d-byte limit", req.MaxCapturedOutputBytes)
 		result.ExitCode = 5

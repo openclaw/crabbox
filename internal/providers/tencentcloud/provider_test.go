@@ -5,11 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -647,4 +649,167 @@ func hasTag(tags []tag, key string) bool {
 		}
 	}
 	return false
+}
+
+func TestTencentBindingFlagContract(t *testing.T) {
+	p := Provider{}
+	cfg := core.BaseConfig()
+	cfg.TencentCloud.SSHCIDRs = []string{"prior"}
+	fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+	values := p.RegisterFlags(fs, cfg)
+	count := 0
+	fs.VisitAll(func(*flag.Flag) { count++ })
+	if count != 12 || fs.Lookup("tencentcloud-region").DefValue != "" || fs.Lookup("tencentcloud-root-gb").DefValue != "0" || fs.Lookup("tencentcloud-ssh-cidrs").DefValue != "" {
+		t.Fatal("raw flag defaults changed")
+	}
+	if _, ok := fs.Lookup("tencentcloud-root-gb").Value.(flag.Getter).Get().(int64); !ok {
+		t.Fatal("root flag is not int64")
+	}
+	if _, ok := fs.Lookup("tencentcloud-internet-max-bandwidth-out").Value.(flag.Getter).Get().(int64); !ok {
+		t.Fatal("bandwidth flag is not int64")
+	}
+	cfg.TencentCloud.Region = "layered-region"
+	before := cfg.TencentCloud
+	if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.TencentCloud, before) || core.TencentCloudRegionWasExplicit(cfg) {
+		t.Fatal("unvisited changed config")
+	}
+	args := []string{"--tencentcloud-region=ap-guangzhou", "--tencentcloud-zone=ap-guangzhou-7", "--tencentcloud-image=img-fixture", "--tencentcloud-type=S5.SMALL2", "--tencentcloud-vpc-id=vpc-fixture", "--tencentcloud-subnet-id=subnet-fixture", "--tencentcloud-security-group-id=sg-fixture", "--tencentcloud-ssh-cidrs=203.0.113.0/24, 2001:db8::/64,203.0.113.0/24", "--tencentcloud-root-gb=8589934592", "--tencentcloud-internet-charge-type=TRAFFIC_POSTPAID_BY_HOUR", "--tencentcloud-internet-max-bandwidth-out=8589934593", "--tencentcloud-api-endpoint=https://endpoint.example.test"}
+	if err := fs.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := fmt.Sprintf("%#v", cfg)
+	if err := p.ApplyFlags(&cfg, fs, struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprintf("%#v", cfg) != snapshot {
+		t.Fatal("wrong type changed config")
+	}
+	if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := core.TencentCloudConfig{Region: "ap-guangzhou", Zone: "ap-guangzhou-7", Image: "img-fixture", Type: "S5.SMALL2", VPCID: "vpc-fixture", SubnetID: "subnet-fixture", SecurityGroupID: "sg-fixture", SSHCIDRs: []string{"203.0.113.0/24", "2001:db8::/64", "203.0.113.0/24"}, RootGB: 8589934592, InternetChargeType: "TRAFFIC_POSTPAID_BY_HOUR", InternetMaxBandwidthOut: 8589934593, APIEndpoint: "https://endpoint.example.test"}
+	if !reflect.DeepEqual(cfg.TencentCloud, want) || !core.TencentCloudRegionWasExplicit(cfg) || !core.TencentCloudZoneWasExplicit(cfg) || !core.TencentCloudImageWasExplicit(cfg) || !core.TencentCloudTypeWasExplicit(cfg) {
+		t.Fatal("complete flag values/markers changed")
+	}
+	for _, raw := range []string{"0", "-2", "-9223372036854775808", "9223372036854775807"} {
+		cfg := core.BaseConfig()
+		fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+		values := p.RegisterFlags(fs, cfg)
+		if err := fs.Parse([]string{"--tencentcloud-root-gb=" + raw, "--tencentcloud-internet-max-bandwidth-out=" + raw}); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if fmt.Sprint(cfg.TencentCloud.RootGB) != raw || fmt.Sprint(cfg.TencentCloud.InternetMaxBandwidthOut) != raw {
+			t.Fatalf("flag int64=%s got=%d/%d", raw, cfg.TencentCloud.RootGB, cfg.TencentCloud.InternetMaxBandwidthOut)
+		}
+	}
+	for _, name := range []string{"region", "zone", "image", "type"} {
+		for _, raw := range []string{"", "  ", "equal-value"} {
+			cfg := core.BaseConfig()
+			cfg.TencentCloud.Region = "equal-value"
+			cfg.TencentCloud.Zone = "equal-value"
+			cfg.TencentCloud.Image = "equal-value"
+			cfg.TencentCloud.Type = "equal-value"
+			fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+			values := p.RegisterFlags(fs, cfg)
+			if err := fs.Parse([]string{"--tencentcloud-" + name + "=" + raw}); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			for field, got := range map[string]bool{"region": core.TencentCloudRegionWasExplicit(cfg), "zone": core.TencentCloudZoneWasExplicit(cfg), "image": core.TencentCloudImageWasExplicit(cfg), "type": core.TencentCloudTypeWasExplicit(cfg)} {
+				if got != (field == name) {
+					t.Fatalf("flag=%s marker=%s", name, field)
+				}
+			}
+		}
+	}
+	for _, tc := range []struct {
+		args []string
+		want []string
+	}{{[]string{"--tencentcloud-ssh-cidrs="}, nil}, {[]string{"--tencentcloud-ssh-cidrs= , , "}, nil}, {[]string{"--tencentcloud-ssh-cidrs=none"}, []string{"none"}}, {[]string{"--tencentcloud-ssh-cidrs=203.0.113.0/24", "--tencentcloud-ssh-cidrs=198.51.100.0/24,198.51.100.0/24"}, []string{"198.51.100.0/24", "198.51.100.0/24"}}} {
+		cfg := core.BaseConfig()
+		cfg.TencentCloud.SSHCIDRs = []string{"prior"}
+		fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+		values := p.RegisterFlags(fs, cfg)
+		if err := fs.Parse(tc.args); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(cfg.TencentCloud.SSHCIDRs, tc.want) {
+			t.Fatalf("list=%#v want=%#v", cfg.TencentCloud.SSHCIDRs, tc.want)
+		}
+	}
+}
+
+func TestTencentBindingRuntimeAndClassContract(t *testing.T) {
+	for _, n := range []int64{0, -2, 8589934592} {
+		cfg := core.Config{TencentCloud: core.TencentCloudConfig{RootGB: n, InternetMaxBandwidthOut: n}, SSHUser: "fixture-user", SSHPort: "1234", WorkRoot: "/fixture/root"}
+		got := cfgForRun(cfg)
+		root, bandwidth := n, n
+		if n == 0 {
+			root = 50
+			bandwidth = 5
+		}
+		if got.TencentCloud.Region != "ap-shanghai" || got.TencentCloud.Zone != "ap-shanghai-2" || got.TencentCloud.Type != "SA5.MEDIUM2" || got.TencentCloud.RootGB != root || got.TencentCloud.InternetMaxBandwidthOut != bandwidth || got.TencentCloud.InternetChargeType != "TRAFFIC_POSTPAID_BY_HOUR" || got.TencentCloud.Image != "" || got.TencentCloud.APIEndpoint != "" || got.SSHUser != "fixture-user" || got.SSHPort != "1234" || got.WorkRoot != "/fixture/root" || cfg.TencentCloud.Region != "" {
+			t.Fatalf("runtime n=%d got=%#v", n, got.TencentCloud)
+		}
+	}
+	for _, raw := range []string{"", "  "} {
+		cfg := core.Config{TencentCloud: core.TencentCloudConfig{Region: raw, Zone: raw, APIEndpoint: raw}}
+		if regionForConfig(cfg) != "ap-shanghai" || zoneForConfig(cfg) != "ap-shanghai-2" || cvmEndpointForConfig(cfg) != "https://cvm.tencentcloudapi.com" {
+			t.Fatal("trimmed helper defaults changed")
+		}
+	}
+	cfg := core.Config{TencentCloud: core.TencentCloudConfig{Region: "  ", Zone: "  ", InternetChargeType: "  ", APIEndpoint: " cvm.intl.tencentcloudapi.com "}}
+	got := cfgForRun(cfg)
+	if got.TencentCloud.Region != "  " || got.TencentCloud.Zone != "  " || got.TencentCloud.InternetChargeType != "  " || cvmEndpointForConfig(cfg) != "https://cvm.intl.tencentcloudapi.com" {
+		t.Fatal("raw versus trimmed fallback predicate changed")
+	}
+	cfg = core.BaseConfig()
+	cfg.Provider = "tencentcloud"
+	if serverTypeForConfig(cfg) != "SA5.MEDIUM2" {
+		t.Fatal("inherited class changed provider fallback")
+	}
+	cfg.TencentCloud.Type = "S5.SMALL2"
+	if serverTypeForConfig(cfg) != "S5.SMALL2" {
+		t.Fatal("configured type lost")
+	}
+	cfg.Class = "fast"
+	core.MarkClassExplicit(&cfg)
+	if serverTypeForConfig(cfg) != "SA5.LARGE8" {
+		t.Fatal("explicit class lost")
+	}
+	core.SetTencentCloudTypeExplicit(&cfg)
+	if serverTypeForConfig(cfg) != "S5.SMALL2" {
+		t.Fatal("explicit provider type lost")
+	}
+	cfg.ServerType = "S6.MEDIUM4"
+	cfg.ServerTypeExplicit = true
+	if serverTypeForConfig(cfg) != "S6.MEDIUM4" || cfgForRun(cfg).TencentCloud.Type != "S6.MEDIUM4" {
+		t.Fatal("generic type priority lost")
+	}
+	for _, tc := range []struct {
+		market   string
+		explicit bool
+		want     string
+	}{{"spot", false, "POSTPAID_BY_HOUR"}, {"spot", true, "SPOTPAID"}, {"on-demand", true, "POSTPAID_BY_HOUR"}} {
+		cfg := core.BaseConfig()
+		cfg.Capacity.Market = tc.market
+		if tc.explicit {
+			core.MarkCapacityMarketExplicit(&cfg)
+		}
+		got, err := tencentCloudChargeType(cfg)
+		if err != nil || got != tc.want {
+			t.Fatalf("market=%s explicit=%t got=%s err=%v", tc.market, tc.explicit, got, err)
+		}
+	}
 }

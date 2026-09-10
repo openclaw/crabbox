@@ -115,16 +115,13 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 
 func doctorResult(checks []core.DoctorCheck) core.DoctorResult {
 	status := "ready"
-	for _, check := range checks {
-		if check.Status == "failed" || check.Status == "missing" {
-			status = "blocked"
-			break
-		}
+	if core.DoctorChecksStatus(checks) == "failed" {
+		status = "blocked"
 	}
 	return core.DoctorResult{
 		Provider: providerName,
 		Status:   status,
-		Message:  formatDoctorSummary(checks),
+		Message:  formatDoctorSummary(status),
 		Checks:   checks,
 	}
 }

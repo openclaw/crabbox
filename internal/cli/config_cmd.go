@@ -93,54 +93,19 @@ func effectiveConfigForShow(cfg Config) Config {
 	cfg.Vast.WorkRoot = EffectiveVastWorkRoot(cfg)
 	cfg.NvidiaBrev.WorkRoot = EffectiveNvidiaBrevWorkRoot(cfg)
 	if cfg.Provider == "digitalocean" || cfg.Provider == "linode" {
-		base := baseConfig()
-		if !IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
-			cfg.SSHUser = "root"
-		}
-		if !IsSSHPortExplicit(&cfg) && (cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort) {
-			cfg.SSHPort = "22"
-		}
-		cfg.SSHFallbackPorts = nil
+		applyConfigShowSSHDefaults(&cfg, "root")
 	}
 	if cfg.Provider == "vultr" {
-		base := baseConfig()
-		if !IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
-			cfg.SSHUser = "root"
-		}
-		if !IsSSHPortExplicit(&cfg) && (cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort) {
-			cfg.SSHPort = "22"
-		}
-		cfg.SSHFallbackPorts = nil
+		applyConfigShowSSHDefaults(&cfg, "root")
 	}
 	if cfg.Provider == "lambda" {
-		base := baseConfig()
-		if !IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
-			cfg.SSHUser = "ubuntu"
-		}
-		if !IsSSHPortExplicit(&cfg) && (cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort) {
-			cfg.SSHPort = "22"
-		}
-		cfg.SSHFallbackPorts = nil
+		applyConfigShowSSHDefaults(&cfg, "ubuntu")
 	}
 	if cfg.Provider == "scaleway" {
-		base := baseConfig()
-		if !IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
-			cfg.SSHUser = "root"
-		}
-		if !IsSSHPortExplicit(&cfg) && (cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort) {
-			cfg.SSHPort = "22"
-		}
-		cfg.SSHFallbackPorts = nil
+		applyConfigShowSSHDefaults(&cfg, "root")
 	}
 	if cfg.Provider == "tencentcloud" {
-		base := baseConfig()
-		if !IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
-			cfg.SSHUser = "ubuntu"
-		}
-		if !IsSSHPortExplicit(&cfg) && (cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort) {
-			cfg.SSHPort = "22"
-		}
-		cfg.SSHFallbackPorts = nil
+		applyConfigShowSSHDefaults(&cfg, "ubuntu")
 	}
 	if cfg.Provider == "hostinger" {
 		cfg.WorkRoot = cfg.Hostinger.WorkRoot
@@ -167,6 +132,18 @@ func effectiveConfigForShow(cfg Config) Config {
 		}
 	}
 	return cfg
+}
+
+// applyConfigShowSSHDefaults only mutates the local copy used for offline display.
+func applyConfigShowSSHDefaults(cfg *Config, user string) {
+	base := baseConfig()
+	if !IsSSHUserExplicit(cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
+		cfg.SSHUser = user
+	}
+	if !IsSSHPortExplicit(cfg) && (cfg.SSHPort == "" || cfg.SSHPort == base.SSHPort) {
+		cfg.SSHPort = "22"
+	}
+	cfg.SSHFallbackPorts = nil
 }
 
 func configShowView(cfg Config) map[string]any {

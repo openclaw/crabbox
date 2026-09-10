@@ -134,7 +134,7 @@ func windowsBootstrapHeaderPowerShell(cfg Config, publicKey, workRoot string) st
 	script := sharedWindowsHeader(cfg.SSHUser, publicKey, workRoot, sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
 	// An omitted mode retains the native default; WSL2 owns a separate Linux runtime.
 	if cfg.WindowsMode != windowsModeWSL2 {
-		script += sharedWindowsRuntime() + sharedWindowsRuntimeGate()
+		script += sharedWindowsRuntime() + sharedWindowsRuntimeGate() + sharedWindowsNodeInstall() + sharedWindowsDetachInstall()
 	}
 	return script
 }
@@ -463,7 +463,7 @@ func macOSUserData(cfg Config, publicKey string) string {
 	if workRoot == "" {
 		workRoot = defaultMacOSWorkRoot
 	}
-	return sharedMacOS(cfg.SSHUser, publicKey, workRoot, sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
+	return "#!/bin/bash\nset -euo pipefail\n(\n" + sharedMacOSSSHSession() + ")\n(\n" + sharedMacOSNodeInstall() + ")\n" + sharedMacOS(cfg.SSHUser, publicKey, workRoot, sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
 }
 
 func cloudInitOptionalReadyChecks(cfg Config) string {
@@ -854,6 +854,9 @@ func cloudInitWaylandDesktopWriteFiles(desktopEnv string) string {
 
 func cloudInitOptionalBootstrap(cfg Config) string {
 	var parts []string
+	if cfg.Desktop || cfg.Browser {
+		parts = append(parts, indentCloudInitRuncmd(sharedLinuxOptionalPackages()))
+	}
 	if cfg.Tailscale.Enabled {
 		parts = append(parts, cloudInitTailscaleBootstrap(cfg))
 	}
@@ -912,7 +915,7 @@ chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme
 `)
 			themeConfigure = "    CRABBOX_DESKTOP_USER=crabbox /usr/local/bin/crabbox-configure-desktop-theme\n"
 		}
-		parts = append(parts, `    retry apt-get install -y --no-install-recommends `+packages+`
+		parts = append(parts, `    crabbox_install_packages `+packages+`
     install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
     if [ ! -s /var/lib/crabbox/vnc.password ]; then
       (umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)
@@ -945,7 +948,7 @@ chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme
     systemctl enable crabbox-desktop.service crabbox-wayvnc.service
     systemctl restart crabbox-desktop.service crabbox-wayvnc.service`)
 	} else if cfg.Desktop {
-		parts = append(parts, `    retry apt-get install -y --no-install-recommends tigervnc-standalone-server tigervnc-tools xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme util-linux novnc websockify
+		parts = append(parts, `    crabbox_install_packages tigervnc-standalone-server tigervnc-tools xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme util-linux novnc websockify
     install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
     if [ ! -s /var/lib/crabbox/vnc.password ]; then
       (umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)
@@ -966,9 +969,9 @@ chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme
 		parts = append(parts, cloudInitGCPExpiryGuardBootstrap())
 	}
 	if cfg.Browser {
-		parts = append(parts, `    retry apt-get install -y --no-install-recommends gnupg build-essential python3
-    browser_path=""
-    if [ "$(dpkg --print-architecture)" = "amd64" ]; then
+		parts = append(parts, `    crabbox_install_packages gnupg build-essential python3
+    browser_path="$(crabbox_existing_browser || true)"
+    if [ -z "$browser_path" ] && [ "$(dpkg --print-architecture)" = "amd64" ]; then
       install -d -m 0755 /etc/apt/keyrings
       google_key_tmp="$(mktemp -d /etc/apt/keyrings/google-linux.gpg.tmp.XXXXXX)"
       google_key_home="$google_key_tmp/gnupg"

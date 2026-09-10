@@ -58,6 +58,10 @@ Config keys under `digitalocean:`:
 | `vpc` | `cfg.DigitalOcean.VPCUUID` | empty | Optional VPC UUID for Droplet placement. |
 | `sshCIDRs` | `cfg.DigitalOcean.SSHCIDRs` | empty | Reserved for firewall-aware follow-up work; Phase 1 does not create firewalls. |
 
+These are effective runtime defaults; the raw provider configuration starts
+empty/nil. DigitalOcean adds no provider-specific flags. Configure these settings
+through YAML or the environment; generic command flags remain separate.
+
 The portable `--os ubuntu:24.04` selector maps to `ubuntu-24-04-x64`.
 DigitalOcean does not currently offer the portable default Ubuntu 26.04 image,
 so provisioning with an explicit `--os ubuntu:26.04` is rejected unless
@@ -83,6 +87,20 @@ CRABBOX_DIGITALOCEAN_SSH_CIDRS     Comma-separated SSH CIDRs, reserved for firew
 
 Do not pass the DigitalOcean token as a command-line argument. Keep it in the
 environment or in a local secret manager.
+
+### Input semantics
+
+The four settings use shared typed bindings without generating a flag interface.
+Nonempty file/environment strings retain whitespace. Accepted image inputs remain
+explicit even when equal to a default, preserving the portable-OS override rules.
+Unsupported-OS validation is captured before backend defaults fill an empty image;
+defaulting does not erase that validation result.
+
+A nonempty YAML CIDR list replaces the prior list without trimming or copying;
+omitted, null, and empty lists leave it intact. Nonempty environment text is
+comma-split, trimmed, and stripped of empty items, preserving order and duplicates.
+Delimiter-only input produces a nonnil empty list; exact empty input preserves the
+prior value, and `none` is an ordinary item. No firewall behavior is added.
 
 ## Token Scopes
 

@@ -508,6 +508,66 @@ func TestLumeGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestRunpodGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_runpod.go", "../../internal/cli/config_runpod_generated.go", "RunpodConfig", "runpod", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVastGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_vast.go", "../../internal/cli/config_vast_generated.go", "VastConfig", "vast", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWandbGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_wandb.go", "../../internal/cli/config_wandb_generated.go", "WandbConfig", "wandb", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestScalewayGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_scaleway.go", "../../internal/cli/config_scaleway_generated.go", "ScalewayConfig", "scaleway", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTencentCloudGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_tencentcloud.go", "../../internal/cli/config_tencentcloud_generated.go", "TencentCloudConfig", "tencentcloud", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDigitalOceanGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_digitalocean.go", "../../internal/cli/config_digitalocean_generated.go", "DigitalOceanConfig", "digitalocean", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVultrGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_vultr.go", "../../internal/cli/config_vultr_generated.go", "VultrConfig", "vultr", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLinodeGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_linode.go", "../../internal/cli/config_linode_generated.go", "LinodeConfig", "linode", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSealosDevboxGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_sealos_devbox.go", "../../internal/cli/config_sealos_devbox_generated.go", "SealosDevboxConfig", "sealos-devbox", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestKubeVirtGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_kubevirt.go", "../../internal/cli/config_kubevirt_generated.go", "KubeVirtConfig", "kubevirt", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerateScalarOnlyImports(t *testing.T) {
 	s, err := parseSchema([]byte(sample), "PilotConfig", "pilot")
 	if err != nil {
@@ -803,7 +863,7 @@ func TestSchemaFileEnvironmentOnlyFailsClosed(t *testing.T) {
 			}
 		})
 	}
-	for _, kind := range []string{"bool", "int", "float64", "[]string"} {
+	for _, kind := range []string{"bool", "int", "float64"} {
 		_, err := parseSchema([]byte(strings.Replace(fileEnvSample, "Input string", "Input "+kind, 1)), "PilotConfig", "pilot")
 		if err == nil || !strings.Contains(err.Error(), "user,repo,env sources support only string fields") {
 			t.Fatalf("kind %s: %v", kind, err)
@@ -838,9 +898,9 @@ func TestGenerateFileEnvironmentOnlyBindings(t *testing.T) {
 			t.Fatalf("missing accepted-source binding %q", want)
 		}
 	}
-	flagFields := strings.SplitN(strings.SplitN(text, "type PilotConfigFlagValues struct {", 2)[1], "}", 2)[0]
-	if strings.TrimSpace(flagFields) != "" {
-		t.Fatal("file/environment-only field exposed as flag storage")
+	// A schema without flag sources has no placeholder flag API.
+	if strings.Contains(text, "FlagValues") || strings.Contains(text, "RegisterPilotConfigFlags") || strings.Contains(text, `"flag"`) {
+		t.Fatal("file/environment-only schema exposed a flag API")
 	}
 	for _, absent := range []string{"trusted bool", "VisitedFlags", "FlagPresence", "values.Input", "fs.String(", "PilotConfigDefaultInput"} {
 		if strings.Contains(text, absent) {
@@ -1005,7 +1065,7 @@ func TestSchemaEnvIntFallbackFailsClosed(t *testing.T) {
 		{"float", `help:"CPUs"`, `help:"CPUs" envInt:"fallback"`, "envInt is supported only as fallback"},
 		{"bool", `help:"Enabled"`, `help:"Enabled" envInt:"fallback"`, "envInt is supported only as fallback"},
 		{"list", `help:"Ports"`, `help:"Ports" envInt:"fallback"`, "envInt is supported only as fallback"},
-		{"alias", `help:"Count"`, `help:"Count" envInt:"fallback" envAlias:"OTHER_COUNT"`, "envAlias is supported only for string"},
+		{"strict alias", `help:"Count"`, `help:"Count" envAlias:"OTHER_COUNT"`, "envAlias is supported only for string"},
 		{"required policy", `nonnegative:"true"`, `envInt:"fallback"`, "require nonnegative policy"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1754,4 +1814,660 @@ func TestListSources(t *testing.T){
 }
 `
 	runScalarFixture(t, sourceListSample, output, behavior+helper+getters)
+}
+
+func TestSchemaFileIntNonzeroFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"empty", `help:"Count"`, `help:"Count" fileInt:""`, "fileInt is supported only"},
+		{"unknown", `help:"Count"`, `help:"Count" fileInt:"non-zero"`, "fileInt is supported only"},
+		{"string", `help:"Name"`, `help:"Name" fileInt:"nonzero"`, "fileInt is supported only"},
+		{"float", `help:"CPUs"`, `help:"CPUs" fileInt:"nonzero"`, "fileInt is supported only"},
+		{"bool", `help:"Enabled"`, `help:"Enabled" fileInt:"nonzero"`, "fileInt is supported only"},
+		{"list", `help:"Ports"`, `help:"Ports" fileInt:"nonzero"`, "fileInt is supported only"},
+		{"required policy", `nonnegative:"true"`, `fileInt:"nonzero"`, "require nonnegative policy"},
+		{"default remains constrained", `default:"7"`, `default:"-1" fileInt:"nonzero"`, "default must be non-negative"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(sample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+	for _, input := range []string{
+		strings.Replace(flagOnlySample, `help:"Count"`, `help:"Count" fileInt:"nonzero"`, 1),
+		"package cli\ntype PilotConfig struct{ Count int `sources:\"env,flag\" env:\"COUNT\" flag:\"count\" help:\"Count\" nonnegative:\"true\" fileInt:\"nonzero\"` }",
+	} {
+		if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "fileInt is supported only") {
+			t.Fatalf("no-file nonzero mode admitted: %v", err)
+		}
+	}
+}
+
+func TestGenerateFileIntNonzero(t *testing.T) {
+	const source = "package cli\ntype PilotConfig struct {\n" +
+		" Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"COUNT\" flag:\"count\" help:\"Count\" nonnegative:\"true\" default:\"37\"`\n" +
+		" Positive int `sources:\"user,repo,env,flag\" config:\"positive\" env:\"POSITIVE\" flag:\"positive\" help:\"Positive\" nonnegative:\"true\" fileInt:\"positive\"`\n" +
+		" Present int `sources:\"user,repo,env,flag\" config:\"present\" env:\"PRESENT\" flag:\"present\" help:\"Present\" nonnegative:\"true\" fileInt:\"present\"`\n" +
+		" Strict int `sources:\"user,repo,env,flag\" config:\"strict\" env:\"STRICT\" flag:\"strict\" help:\"Strict\" nonnegative:\"true\"`\n}"
+	coreSource, err := os.ReadFile("../../internal/cli/config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	helpers := ""
+	for _, name := range []string{"getenvInt", "getenvNonNegativeInt"} {
+		start := strings.Index(string(coreSource), "func "+name+"(")
+		if start < 0 {
+			t.Fatalf("missing helper %s", name)
+		}
+		rest := string(coreSource)[start:]
+		end := strings.Index(rest, "\nfunc ")
+		if end < 0 {
+			t.Fatalf("missing end for %s", name)
+		}
+		helpers += rest[:end] + "\n"
+	}
+	for _, fallback := range []bool{false, true} {
+		input := source
+		if fallback {
+			input = strings.Replace(input, `help:"Count"`, `help:"Count" envInt:"fallback"`, 1)
+		}
+		s, err := parseSchema([]byte(input), "PilotConfig", "pilot")
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := generate(s, "pilot.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		input = strings.Replace(input, `help:"Count"`, `help:"Count" fileInt:"nonzero"`, 1)
+		s, err = parseSchema([]byte(input), "PilotConfig", "pilot")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !s.fields[0].fileIntNonzero || s.fields[0].fileIntPositive || s.fields[0].fileIntPresent || s.fields[1].fileIntNonzero || s.fields[2].fileIntNonzero {
+			t.Fatal("file modes not exclusive")
+		}
+		output, err := generate(s, "pilot.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		again, err := generate(s, "pilot.go")
+		if err != nil || !bytes.Equal(output, again) {
+			t.Fatalf("nondeterministic nonzero: %v", err)
+		}
+		want := strings.Replace(string(before), "if file.Count != nil {", "if file.Count != nil && *file.Count != 0 {", 1)
+		want = strings.Replace(want, "\t\tif *file.Count < 0 {\n\t\t\treturn exit(2, \"pilot count must be non-negative\")\n\t\t}\n", "", 1)
+		if string(output) != want {
+			t.Fatal("nonzero mode changed other file/env/default/flag behavior")
+		}
+		typecheckGenerated(t, input+"\nfunc getenvInt(string,int)int{panic(\"stub\")}\n", output)
+		const behavior = `package cli
+import("flag";"fmt";"os";"strconv";"testing")
+func exit(_ int, pattern string, args ...any)error{return fmt.Errorf(pattern,args...)}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestNonzeroSources(t *testing.T){
+ zero,negative,positive:=0,-2,4
+ for _,tc:=range []struct{name string;value *int;want int}{{"omitted/null",nil,37},{"zero",&zero,37},{"negative",&negative,-2},{"positive",&positive,4}}{
+  cfg:=defaultPilotConfig();if err:=cfg.applyFile(&filePilotConfig{Count:tc.value});err!=nil||cfg.Count!=tc.want{t.Fatalf("%s: %+v %v",tc.name,cfg,err)}
+ }
+ cfg:=PilotConfig{Count:37,Positive:8,Present:9,Strict:10}
+ err:=cfg.applyFile(&filePilotConfig{Count:&negative,Positive:&negative,Present:&zero,Strict:&negative})
+ if err==nil||cfg.Count!=-2||cfg.Positive!=8||cfg.Present!=0||cfg.Strict!=10{t.Fatalf("mode/order: %+v %v",cfg,err)}
+ for _,raw:=range []string{"-2","bad"}{
+  t.Setenv("COUNT",raw);cfg=defaultPilotConfig();err=cfg.applyEnv()
+  if fallbackMode{want:=37;if raw=="-2"{want=-2};if err!=nil||cfg.Count!=want{t.Fatalf("fallback %q: %+v %v",raw,cfg,err)}}else if err==nil||cfg.Count!=0{t.Fatalf("strict %q: %+v %v",raw,cfg,err)}
+ }
+ fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+ if err:=fs.Parse([]string{"--count=0"});err!=nil{t.Fatal(err)};values.Apply(&cfg,fs);if cfg.Count!=0{t.Fatal("file zero rule leaked into flags")}
+}
+`
+		runScalarFixture(t, input, output, behavior+helpers+"\nconst fallbackMode = "+map[bool]string{false: "false", true: "true"}[fallback]+"\n")
+	}
+}
+
+func TestSchemaFallbackIntAlias(t *testing.T) {
+	const source = "package cli\ntype PilotConfig struct { Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"COUNT\" envAlias:\"COUNT_ALIAS\" flag:\"count\" help:\"Count\" nonnegative:\"true\" envInt:\"fallback\" fileInt:\"positive\"` }"
+	if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"strict disallowed", `envInt:"fallback"`, "", "envAlias is supported only"},
+		{"empty alias", `envAlias:"COUNT_ALIAS"`, `envAlias:""`, "invalid env binding"},
+		{"primary collision", `envAlias:"COUNT_ALIAS"`, `envAlias:"COUNT"`, "duplicate env binding"},
+		{"second alias forbidden", `envAlias:"COUNT_ALIAS"`, `envAlias:"COUNT_ALIAS" envAlias2:"SECOND"`, "envAlias2 requires an environment-admitted string"},
+		{"config-order mode forbidden", `envAlias:"COUNT_ALIAS"`, `envAlias:"COUNT_ALIAS" envAliasAfterConfig:"true"`, "envAliasAfterConfig requires true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(source, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want%q", err, tc.want)
+			}
+		})
+	}
+	for _, input := range []string{
+		strings.Replace(flagOnlySample, `help:"Count"`, `help:"Count" envInt:"fallback" envAlias:"ALIAS"`, 1),
+		strings.Replace(sample, `help:"CPUs"`, `help:"CPUs" envAlias:"ALIAS"`, 1),
+	} {
+		if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil {
+			t.Fatal("unsupported numeric alias admitted")
+		}
+	}
+}
+
+func TestGenerateFallbackIntAlias(t *testing.T) {
+	const source = "package cli\ntype PilotConfig struct { Count int `sources:\"user,repo,env,flag\" config:\"count\" env:\"COUNT\" envAlias:\"COUNT_ALIAS\" flag:\"count\" help:\"Count\" nonnegative:\"true\" envInt:\"fallback\" fileInt:\"positive\"` }"
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic integer aliases: %v", err)
+	}
+	if !strings.Contains(string(output), `cfg.Count = getenvInt("COUNT", getenvInt("COUNT_ALIAS", cfg.Count))`) {
+		t.Fatal("missing exact nested tolerant integer fallback")
+	}
+	plain, err := parseSchema([]byte(strings.Replace(source, ` envAlias:"COUNT_ALIAS"`, "", 1)), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := generate(plain, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Replace(string(before), `getenvInt("COUNT", cfg.Count)`, `getenvInt("COUNT", getenvInt("COUNT_ALIAS", cfg.Count))`, 1)
+	if string(output) != want {
+		t.Fatal("integer alias changed non-env bindings")
+	}
+	typecheckGenerated(t, source+"\nfunc getenvInt(string,int)int{panic(\"stub\")}\n", output)
+	coreSource, err := os.ReadFile("../../internal/cli/config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(coreSource), "func getenvInt(")
+	if start < 0 {
+		t.Fatal("missing getenvInt")
+	}
+	rest := string(coreSource)[start:]
+	end := strings.Index(rest, "\nfunc ")
+	if end < 0 {
+		t.Fatal("missing helper end")
+	}
+	const behavior = `package cli
+import("flag";"os";"strconv";"testing")
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestNestedFallback(t *testing.T){
+ for _,tc:=range []struct{primary,alias string;want int}{{"","",37},{"","45",45},{"bad","45",45},{" 2 ","45",45},{"999999999999999999999999","45",45},{"0","45",0},{"-2","45",-2},{"12","45",12},{"bad","bad",37},{""," 2 ",37},{"","999999999999999999999999",37},{"bad","0",0},{"bad","-2",-2}}{
+  cfg:=PilotConfig{Count:37};t.Setenv("COUNT",tc.primary);t.Setenv("COUNT_ALIAS",tc.alias)
+  if err:=cfg.applyEnv();err!=nil||cfg.Count!=tc.want{t.Fatalf("%+v: %+v %v",tc,cfg,err)}
+ }
+ zero,negative,positive:=0,-2,4
+ for _,tc:=range []struct{value *int;want int}{{nil,37},{&zero,37},{&negative,37},{&positive,4}}{cfg:=PilotConfig{Count:37};if err:=cfg.applyFile(&filePilotConfig{Count:tc.value});err!=nil||cfg.Count!=tc.want{t.Fatalf("file: %+v %v",cfg,err)}}
+ cfg:=PilotConfig{Count:37};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+ if err:=fs.Parse([]string{"--count=0"});err!=nil{t.Fatal(err)};values.Apply(&cfg,fs);if cfg.Count!=0{t.Fatal("flag zero changed")}
+}
+`
+	runScalarFixture(t, source, output, behavior+rest[:end])
+}
+
+func TestSchemaNonemptyRawAndEmptyScalarLists(t *testing.T) {
+	for _, mode := range []struct{ tag, value string }{{"fileList", "nonempty-raw"}, {"flagList", "empty-scalar"}} {
+		for _, value := range []string{"", "unknown", mode.value + ",raw"} {
+			input := strings.Replace(sample, `help:"Ports"`, `help:"Ports" `+mode.tag+`:"`+value+`"`, 1)
+			if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), mode.tag+" requires") {
+				t.Fatalf("invalid %s %q: %v", mode.tag, value, err)
+			}
+		}
+		for _, kind := range []string{"string", "int", "float64", "bool"} {
+			input := strings.Replace(sample, "Name string", "Name "+kind, 1)
+			input = strings.Replace(input, `help:"Name"`, `help:"Name" `+mode.tag+`:"`+mode.value+`"`, 1)
+			if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), mode.tag+" requires") {
+				t.Fatalf("kind%s mode%s: %v", kind, mode.tag, err)
+			}
+		}
+	}
+	input := strings.Replace(flagOnlySample, `help:"Ports"`, `help:"Ports" fileList:"nonempty-raw"`, 1)
+	if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "fileList requires") {
+		t.Fatalf("raw file without source: %v", err)
+	}
+	input = "package cli\ntype PilotConfig struct{ Items []string `sources:\"user,env\" config:\"items\" env:\"ITEMS\" flagList:\"empty-scalar\"` }"
+	if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil {
+		t.Fatal("flag mode without flag source admitted")
+	}
+}
+
+func TestGenerateNonemptyRawAndEmptyScalarLists(t *testing.T) {
+	const source = "package cli\ntype PilotConfig struct{ Items []string `sources:\"user,repo,env,flag\" config:\"items\" env:\"ITEMS\" flag:\"item\" help:\"Items\" fileList:\"nonempty-raw\" flagList:\"empty-scalar\"` }"
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.fields[0].fileListNonemptyRaw || s.fields[0].fileListRaw || !s.fields[0].flagListEmptyScalar || s.fields[0].flagListReplaceAppend || s.fields[0].envListPresence {
+		t.Fatal("mode facts wrong")
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic lists: %v", err)
+	}
+	text := string(output)
+	for _, want := range []string{`if file.Items != nil && len(*file.Items) > 0 {`, `cfg.Items = *file.Items`, `fs.String("item", "", "Items")`, `if value := os.Getenv("ITEMS"); value != ""`, `if len(cfg.Items) == 0 {`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing fixed list binding %q", want)
+		}
+	}
+	if strings.Contains(text, `"strings"`) || strings.Contains(text, "newReplaceAppendListFlag") {
+		t.Fatal("unused default-join import or append flag owner")
+	}
+	typecheckGenerated(t, source, output)
+	// A flag-only empty scalar list needs neither list-specific import.
+	flagSource := strings.Replace(source, `sources:"user,repo,env,flag" config:"items" env:"ITEMS"`, `sources:"flag"`, 1)
+	flagSource = strings.Replace(flagSource, ` fileList:"nonempty-raw"`, "", 1)
+	flagSchema, err := parseSchema([]byte(flagSource), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	flagOutput, err := generate(flagSchema, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(flagOutput), `"strings"`) || strings.Contains(string(flagOutput), `"os"`) {
+		t.Fatal("flag-only empty scalar list has unused imports")
+	}
+	typecheckGenerated(t, flagSource, flagOutput)
+	coreSource, err := os.ReadFile("../../internal/cli/config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	getters := ""
+	for _, name := range []string{"splitCommaList", "normalizeList"} {
+		start := strings.Index(string(coreSource), "func "+name+"(")
+		if start < 0 {
+			t.Fatalf("missing %s", name)
+		}
+		rest := string(coreSource)[start:]
+		end := strings.Index(rest, "\nfunc ")
+		if end < 0 {
+			t.Fatalf("missing end %s", name)
+		}
+		getters += rest[:end] + "\n"
+	}
+	const behavior = `package cli
+import("flag";"reflect";"strings";"testing")
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestDistinctListEvents(t *testing.T){
+ prior:=[]string{"prior"};cfg:=PilotConfig{Items:prior};empty:=[]string{}
+ for _,file:=range []*filePilotConfig{nil,{}, {Items:&empty}}{if err:=cfg.applyFile(file);err!=nil||&cfg.Items[0]!=&prior[0]{t.Fatal("empty file changed prior sharing")}}
+ raw:=[]string{" a ","","dup","dup"};file:=&filePilotConfig{Items:&raw}
+ if err:=cfg.applyFile(file);err!=nil||!reflect.DeepEqual(cfg.Items,raw)||&cfg.Items[0]!=&raw[0]{t.Fatal("file was normalized/copied")}
+ second:=PilotConfig{};if err:=second.applyFile(file);err!=nil{t.Fatal(err)};raw[0]="file mutation";if cfg.Items[0]!="file mutation"||second.Items[0]!="file mutation"{t.Fatal("file sharing lost")}
+ cfg.Items[1]="cfg mutation";if raw[1]!="cfg mutation"||second.Items[1]!="cfg mutation"{t.Fatal("cfg sharing lost")}
+ oneEmpty:=[]string{""};if err:=cfg.applyFile(&filePilotConfig{Items:&oneEmpty});err!=nil||len(cfg.Items)!=1{t.Fatal("nonempty list containing empty string ignored")}
+ cfg.Items=prior;if err:=cfg.applyEnv();err!=nil||&cfg.Items[0]!=&prior[0]{t.Fatal("absent env changed prior")}
+ t.Setenv("ITEMS","");if err:=cfg.applyEnv();err!=nil||&cfg.Items[0]!=&prior[0]{t.Fatal("empty env changed prior")}
+ for _,tc:=range []struct{raw string;want []string}{{" , ",[]string{}},{"none",[]string{"none"}},{" a, ,dup,dup ",[]string{"a","dup","dup"}}}{t.Setenv("ITEMS",tc.raw);if err:=cfg.applyEnv();err!=nil||!reflect.DeepEqual(cfg.Items,tc.want){t.Fatalf("env%q: %#v %v",tc.raw,cfg.Items,err)}}
+ cfg.Items=[]string{"configured"};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+ if fs.Lookup("item").DefValue!=""||*values.Items!=""{t.Fatal("flag default joined config")};values.Apply(&cfg,fs);if !reflect.DeepEqual(cfg.Items,[]string{"configured"}){t.Fatal("unvisited flag changed config")}
+ if err:=fs.Parse([]string{"--item=first","--item= a, ,dup,dup "});err!=nil{t.Fatal(err)};values.Apply(&cfg,fs);if !reflect.DeepEqual(cfg.Items,[]string{"a","dup","dup"}){t.Fatalf("last scalar/order: %#v",cfg.Items)}
+ for _,raw:=range []string{""," , ","none"}{fs:=flag.NewFlagSet("other",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg);if err:=fs.Parse([]string{"--item="+raw});err!=nil{t.Fatal(err)};values.Apply(&cfg,fs);if raw=="none"{if !reflect.DeepEqual(cfg.Items,[]string{"none"}){t.Fatal("none treated as flag sentinel")}}else if cfg.Items!=nil{t.Fatalf("empty flag notnil %#v",cfg.Items)}}
+}
+`
+	runScalarFixture(t, source, output, behavior+getters)
+}
+
+const int64Sample = "package cli\ntype PilotConfig struct { Wide int64 `sources:\"user,repo,env,flag\" config:\"wide\" env:\"WIDE\" flag:\"wide\" help:\"Wide\" nonnegative:\"true\" fileInt:\"positive\" envInt:\"fallback\" default:\"4294967296\"` }"
+
+func TestSchemaInt64WidthAndRestrictions(t *testing.T) {
+	for _, value := range []string{"0", "2147483648", "9223372036854775807"} {
+		input := strings.Replace(int64Sample, `default:"4294967296"`, `default:"`+value+`"`, 1)
+		if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err != nil {
+			t.Fatalf("valid64 default %s: %v", value, err)
+		}
+	}
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"positive overflow", `default:"4294967296"`, `default:"9223372036854775808"`, "default:"},
+		{"negative overflow", `default:"4294967296"`, `default:"-9223372036854775809"`, "default:"},
+		{"negative default", `default:"4294967296"`, `default:"-9223372036854775808"`, "default must be non-negative"},
+		{"strict env unsupported", `envInt:"fallback"`, "", "int64 environment fields require envInt fallback"},
+		{"alias unsupported", `help:"Wide"`, `help:"Wide" envAlias:"ALIAS"`, "envAlias is supported only"},
+		{"second alias unsupported", `help:"Wide"`, `help:"Wide" envAlias:"ALIAS" envAlias2:"SECOND"`, "envAlias2 requires"},
+		{"required constraint", `nonnegative:"true"`, "", "require nonnegative policy"},
+		{"report unsupported", `help:"Wide"`, `help:"Wide" reportApplied:"true"`, "reportApplied is supported only"},
+		{"unsigned unsupported", "Wide int64", "Wide uint64", "unsupported config type"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(int64Sample, tc.old, tc.new, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v want%q", err, tc.want)
+			}
+		})
+	}
+	if _, err := defaultExpression("int", "2147483648"); err == nil {
+		t.Fatal("existing int default width broadened")
+	}
+	if got, err := defaultExpression("int64", "-9223372036854775808"); err != nil || got != "-9223372036854775808" {
+		t.Fatalf("signed64 parsing: %q %v", got, err)
+	}
+}
+
+func TestGenerateInt64Width(t *testing.T) {
+	s, err := parseSchema([]byte(int64Sample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic int64: %v", err)
+	}
+	for _, want := range []string{"Wide *int64", `const PilotConfigDefaultWide int64 = 4294967296`, `getenvInt64("WIDE", cfg.Wide)`, `fs.Int64("wide", defaults.Wide, "Wide")`} {
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("missing width binding%q", want)
+		}
+	}
+	typecheckGenerated(t, int64Sample+"\nfunc getenvInt64(string,int64)int64{panic(\"stub\")}\n", output)
+	// Exercise the actual core ParseInt(...,64) helper rather than another parser.
+	coreSource, err := os.ReadFile("../../internal/cli/config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(coreSource), "func getenvInt64(")
+	if start < 0 {
+		t.Fatal("missing int64 helper")
+	}
+	rest := string(coreSource)[start:]
+	end := strings.Index(rest, "\nfunc ")
+	if end < 0 {
+		t.Fatal("missing helper end")
+	}
+	const behavior = `package cli
+import("flag";"os";"strconv";"testing")
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestWidth(t *testing.T){
+ const prior int64=4294967296
+ const max int64=9223372036854775807
+ const min int64=-9223372036854775808
+ for _,tc:=range []struct{raw string;want int64}{{"",prior},{"2147483648",2147483648},{"9223372036854775807",max},{"-9223372036854775808",min},{"9223372036854775808",prior},{"-9223372036854775809",prior},{"bad",prior},{" 9 ",prior},{"0",0},{"-1",-1}}{
+  cfg:=defaultPilotConfig();t.Setenv("WIDE",tc.raw);if err:=cfg.applyEnv();err!=nil||cfg.Wide!=tc.want{t.Fatalf("env%q: %+v %v",tc.raw,cfg,err)}
+ }
+ zero,negative,wide:=int64(0),min,max
+ for _,tc:=range []struct{value *int64;want int64}{{nil,prior},{&zero,prior},{&negative,prior},{&wide,max}}{cfg:=defaultPilotConfig();if err:=cfg.applyFile(&filePilotConfig{Wide:tc.value});err!=nil||cfg.Wide!=tc.want{t.Fatalf("file: %+v %v",cfg,err)}}
+ for _,raw:=range []string{"0","-9223372036854775808","9223372036854775807"}{cfg:=defaultPilotConfig();fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg);if err:=fs.Parse([]string{"--wide="+raw});err!=nil{t.Fatal(err)};values.Apply(&cfg,fs);want,_:=strconv.ParseInt(raw,10,64);if cfg.Wide!=want{t.Fatalf("flag%q: %+v",raw,cfg)}}
+}
+`
+	runScalarFixture(t, int64Sample, output, behavior+rest[:end])
+	for _, mode := range []string{"present", "nonzero"} {
+		input := strings.Replace(int64Sample, `fileInt:"positive"`, `fileInt:"`+mode+`"`, 1)
+		s, err := parseSchema([]byte(input), "PilotConfig", "pilot")
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := generate(s, "pilot.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		typecheckGenerated(t, input+"\nfunc getenvInt64(string,int64)int64{panic(\"stub\")}\n", out)
+	}
+	flagOnly := strings.Replace(int64Sample, `sources:"user,repo,env,flag" config:"wide" env:"WIDE"`, `sources:"flag"`, 1)
+	flagOnly = strings.Replace(flagOnly, ` fileInt:"positive" envInt:"fallback"`, "", 1)
+	fs, err := parseSchema([]byte(flagOnly), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fo, err := generate(fs, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	typecheckGenerated(t, flagOnly, fo)
+}
+
+const noFlagListSample = "package cli\ntype PilotConfig struct {\n" +
+	" Name string `sources:\"user,repo,env\" config:\"name\" env:\"NAME\" fileIgnoreEmpty:\"true\" reportApplied:\"true\"`\n" +
+	" Items []string `sources:\"user,repo,env\" config:\"items\" env:\"ITEMS\" fileList:\"nonempty-raw\"`\n}"
+
+func TestSchemaNoFlagListAdmission(t *testing.T) {
+	if _, err := parseSchema([]byte(noFlagListSample), "PilotConfig", "pilot"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tag := range []string{"flag", "help", "default"} {
+		for _, value := range []string{"", "value"} {
+			input := strings.Replace(noFlagListSample, `config:"items"`, `config:"items" `+tag+`:"`+value+`"`, 1)
+			if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "absent "+tag+" tag") {
+				t.Fatalf("forbidden %s=%q: %v", tag, value, err)
+			}
+		}
+	}
+	for _, tag := range []string{`config:"items"`, `env:"ITEMS"`} {
+		if _, err := parseSchema([]byte(strings.Replace(noFlagListSample, tag, "", 1)), "PilotConfig", "pilot"); err == nil {
+			t.Fatalf("missing required binding %s", tag)
+		}
+	}
+	for _, grant := range []string{"user,env", "env"} {
+		input := "package cli\ntype PilotConfig struct{ Items []string `sources:\"" + grant + "\" env:\"ITEMS\"` }"
+		if grant == "user,env" {
+			input = strings.Replace(input, `env:"ITEMS"`, `env:"ITEMS" config:"items"`, 1)
+		}
+		if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil {
+			t.Fatalf("broadened other grant %s", grant)
+		}
+	}
+	for _, kind := range []string{"[]int", "map[string]string"} {
+		if _, err := parseSchema([]byte(strings.Replace(noFlagListSample, "Items []string", "Items "+kind, 1)), "PilotConfig", "pilot"); err == nil {
+			t.Fatalf("unsupported kind%s admitted", kind)
+		}
+	}
+	input := strings.Replace(noFlagListSample, `config:"items"`, `config:"items" flagList:"empty-scalar"`, 1)
+	if _, err := parseSchema([]byte(input), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "flagList requires") {
+		t.Fatalf("flagmode without admission: %v", err)
+	}
+}
+
+func TestGenerateNoFlagListSchema(t *testing.T) {
+	s, err := parseSchema([]byte(noFlagListSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic flagless output: %v", err)
+	}
+	text := string(output)
+	for _, absent := range []string{`"flag"`, `"strings"`, "FlagValues", "RegisterPilotConfigFlags", "FlagPresence", "VisitedFlags"} {
+		if strings.Contains(text, absent) {
+			t.Fatalf("flagless artifact %q", absent)
+		}
+	}
+	if !strings.Contains(text, `"os"`) || !strings.Contains(text, "type PilotConfigApplied struct") {
+		t.Fatal("missing actual env import or applied report")
+	}
+	typecheckGenerated(t, noFlagListSample+"\nfunc firstNonEmptyEnv(...string)(string,bool){panic(\"stub\")}\n", output)
+	// A real flagged scalar keeps its APIs, without a join import for the no-flag list.
+	mixed := strings.Replace(noFlagListSample, `sources:"user,repo,env" config:"name"`, `sources:"user,repo,env,flag" config:"name" flag:"name" help:"Name"`, 1)
+	ms, err := parseSchema([]byte(mixed), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mo, err := generate(ms, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(mo), "RegisterPilotConfigFlags") || strings.Contains(string(mo), `"strings"`) {
+		t.Fatal("mixed import/API selection wrong")
+	}
+	typecheckGenerated(t, mixed+"\nfunc firstNonEmptyEnv(...string)(string,bool){panic(\"stub\")}\n", mo)
+	coreSource, err := os.ReadFile("../../internal/cli/config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	getters := ""
+	for _, name := range []string{"splitCommaList", "normalizeList"} {
+		start := strings.Index(string(coreSource), "func "+name+"(")
+		if start < 0 {
+			t.Fatalf("missing%s", name)
+		}
+		rest := string(coreSource)[start:]
+		end := strings.Index(rest, "\nfunc ")
+		if end < 0 {
+			t.Fatalf("missing end%s", name)
+		}
+		getters += rest[:end] + "\n"
+	}
+	const behavior = `package cli
+import("os";"reflect";"strings";"testing")
+func firstNonEmptyEnv(names ...string)(string,bool){for _,name:=range names{if value:=os.Getenv(name);value!=""{return value,true}};return "",false}
+func TestNoFlagSources(t *testing.T){
+ if cfg:=defaultPilotConfig();cfg.Name!=""||cfg.Items!=nil{t.Fatalf("raw defaults changed %+v",cfg)}
+ prior:=[]string{"prior"};empty:=[]string{};cfg:=PilotConfig{Name:"same",Items:prior}
+ for _,file:=range []*filePilotConfig{nil,{}, {Items:&empty}}{got,err:=cfg.applyFile(file);if err!=nil||got.Name||&cfg.Items[0]!=&prior[0]{t.Fatalf("ignoredfile %+v %v",got,err)}}
+ name:="same";raw:=[]string{" raw ","","dup","dup"};got,err:=cfg.applyFile(&filePilotConfig{Name:&name,Items:&raw})
+ if err!=nil||!got.Name||!reflect.DeepEqual(cfg.Items,raw)||&cfg.Items[0]!=&raw[0]{t.Fatal("file acceptance/sharing changed")}
+ raw[0]="mutated";if cfg.Items[0]!="mutated"{t.Fatal("file clone added")}
+ cfg.Items=prior;got,err=cfg.applyEnv();if err!=nil||got.Name||&cfg.Items[0]!=&prior[0]{t.Fatal("absent environment changed config")}
+ t.Setenv("ITEMS","");got,err=cfg.applyEnv();if err!=nil||got.Name||&cfg.Items[0]!=&prior[0]{t.Fatal("empty environment changed config")}
+ t.Setenv("NAME"," ");t.Setenv("ITEMS"," , ");got,err=cfg.applyEnv();if err!=nil||!got.Name||cfg.Name!=" "||cfg.Items==nil||len(cfg.Items)!=0{t.Fatalf("applied empty env %+v %+v %v",cfg,got,err)}
+ t.Setenv("ITEMS","none, dup,dup");_,err=cfg.applyEnv();if err!=nil||!reflect.DeepEqual(cfg.Items,[]string{"none","dup","dup"}){t.Fatalf("env list %#v %v",cfg.Items,err)}
+}
+`
+	runScalarFixture(t, noFlagListSample, output, behavior+getters)
+}
+
+func TestGenerateFileStorageValue(t *testing.T) {
+	for _, tc := range []struct{ name, kind, policy, predicate string }{
+		{"string", "string", `fileIgnoreEmpty:"true"`, `file.Value != ""`},
+		{"list", "[]string", `fileList:"nonempty-raw"`, `len(file.Value) > 0`},
+		{"int-positive", "int", `nonnegative:"true" fileInt:"positive"`, `file.Value > 0`},
+		{"int-nonzero", "int", `nonnegative:"true" fileInt:"nonzero"`, `file.Value != 0`},
+		{"int64-positive", "int64", `nonnegative:"true" fileInt:"positive" envInt:"fallback"`, `file.Value > 0`},
+		{"int64-nonzero", "int64", `nonnegative:"true" fileInt:"nonzero" envInt:"fallback"`, `file.Value != 0`},
+		{"float-positive", "float64", `fileFloat:"positive"`, `file.Value > 0`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := "package cli\ntype PilotConfig struct { Value " + tc.kind + " `config:\"value\" env:\"VALUE\" flag:\"value\" sources:\"user,repo,env,flag\" help:\"Value\" " + tc.policy + " fileStorage:\"value\"` }"
+			s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+			if err != nil {
+				t.Fatal(err)
+			}
+			output, err := generate(s, "pilot.go")
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := generate(s, "pilot.go")
+			if err != nil || !bytes.Equal(output, again) {
+				t.Fatal("nondeterministic value output")
+			}
+			text := strings.Join(strings.Fields(string(output)), " ")
+			for _, want := range []string{"Value " + tc.kind + " `yaml:\"value,omitempty\"`", "if " + tc.predicate + " {", "cfg.Value = file.Value"} {
+				if !strings.Contains(text, want) {
+					t.Errorf("missing value storage output %q", want)
+				}
+			}
+			for _, bad := range []string{"Value *" + tc.kind + " `yaml:", "*file.Value", "file.Value != nil"} {
+				if strings.Contains(text, bad) {
+					t.Errorf("value storage retained pointer expression %q", bad)
+				}
+			}
+			// Removing the explicit opt-in keeps the existing pointer representation.
+			pointerSource := strings.Replace(source, ` fileStorage:"value"`, "", 1)
+			ps, err := parseSchema([]byte(pointerSource), "PilotConfig", "pilot")
+			if err != nil {
+				t.Fatal(err)
+			}
+			pointer, err := generate(ps, "pilot.go")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(strings.Join(strings.Fields(string(pointer)), " "), "Value *"+tc.kind+" `yaml:\"value,omitempty\"`") {
+				t.Fatal("default storage stopped being pointer")
+			}
+		})
+	}
+}
+
+func TestGenerateFileStorageTrustedAlias(t *testing.T) {
+	source := strings.Replace(sample, `sources:"user,repo,env,flag"`, `sources:"user,env,flag"`, 1)
+	source = strings.Replace(source, `help:"Name"`, `help:"Name" fileIgnoreEmpty:"true" configAlias:"nickname" fileStorage:"value"`, 1)
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(strings.Fields(string(out)), " ")
+	for _, want := range []string{`Name string ` + "`yaml:\"name,omitempty\"`", `NameConfigAlias string ` + "`yaml:\"nickname,omitempty\"`", `if trusted && file.Name != "" {`, `if trusted && file.NameConfigAlias != "" {`, `cfg.Name = file.Name`, `cfg.Name = file.NameConfigAlias`, `Count *int ` + "`yaml:\"count,omitempty\"`", `Enabled *bool ` + "`yaml:\"enabled,omitempty\"`"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing trusted/alias/control output %q", want)
+		}
+	}
+	if strings.Index(text, "cfg.Name = file.NameConfigAlias") < strings.Index(text, "cfg.Name = file.Name ") {
+		t.Error("alias precedes primary")
+	}
+	pointerSource := strings.Replace(source, ` fileStorage:"value"`, "", 1)
+	ps, err := parseSchema([]byte(pointerSource), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pointer, err := generate(ps, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{"applyEnv(", "RegisterPilotConfigFlags(", "Apply(cfg *PilotConfig,"} {
+		a := strings.Index(string(out), method)
+		b := strings.Index(string(pointer), method)
+		if a < 0 || b < 0 {
+			t.Fatalf("missing existing method %s", method)
+		}
+		tail := func(s string, i int) string {
+			v := s[i:]
+			if end := strings.Index(v, "\nfunc "); end >= 0 {
+				return v[:end]
+			}
+			return v
+		}
+		if tail(string(out), a) != tail(string(pointer), b) {
+			t.Errorf("storage changed non-file %s", method)
+		}
+	}
+}
+
+func TestSchemaFileStorageRejectsUnsupported(t *testing.T) {
+	for _, tc := range []struct{ name, kind, policy, storage string }{
+		{"empty-tag", "string", `fileIgnoreEmpty:"true"`, ""}, {"unknown-tag", "string", `fileIgnoreEmpty:"true"`, "pointer"},
+		{"presence-string", "string", "", "value"}, {"bool", "bool", "", "value"},
+		{"ordinary-int", "int", `nonnegative:"true"`, "value"}, {"present-int", "int", `nonnegative:"true" fileInt:"present"`, "value"}, {"ordinary-int64", "int64", `nonnegative:"true" envInt:"fallback"`, "value"},
+		{"ordinary-float", "float64", "", "value"}, {"normalized-list", "[]string", "", "value"}, {"raw-clone-list", "[]string", `fileList:"raw"`, "value"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := "package cli\ntype PilotConfig struct { Value " + tc.kind + " `config:\"value\" env:\"VALUE\" flag:\"value\" sources:\"user,repo,env,flag\" help:\"Value\" " + tc.policy + " fileStorage:\"" + tc.storage + "\"` }"
+			if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil {
+				t.Fatal("unsupported fileStorage accepted")
+			} else if !strings.Contains(err.Error(), "fileStorage") {
+				t.Fatalf("wrong rejection reason: %v, want fileStorage eligibility error", err)
+			}
+		})
+	}
+	t.Run("no-file", func(t *testing.T) {
+		source := "package cli\ntype PilotConfig struct { Value string `env:\"VALUE\" sources:\"env\" fileStorage:\"value\"` }"
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil {
+			t.Fatal("fileStorage accepted without file source")
+		} else if !strings.Contains(err.Error(), "fileStorage") {
+			t.Fatalf("wrong rejection reason: %v, want fileStorage eligibility error", err)
+		}
+	})
 }

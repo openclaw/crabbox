@@ -40,6 +40,9 @@ func managedWindowsBootstrapTarget(cfg Config, target SSHTarget, authorizedPorts
 }
 
 func bootstrapPreparedManagedWindowsDesktop(ctx context.Context, cfg Config, target *SSHTarget, bootstrapTarget SSHTarget, publicKey string, stderr io.Writer) error {
+	if cfg.TargetOS == targetMacOS {
+		return bootstrapManagedMacOS(ctx, cfg, target, stderr)
+	}
 	if cfg.TargetOS != targetWindows {
 		return waitForSSHReady(ctx, target, stderr, "bootstrap", bootstrapWaitTimeout(cfg))
 	}
@@ -67,6 +70,12 @@ func bootstrapAWSWindowsDesktop(ctx context.Context, cfg Config, target *SSHTarg
 }
 
 func runWindowsBootstrapOverSSH(ctx context.Context, cfg Config, target *SSHTarget, bootstrapTarget SSHTarget, publicKey string, stderr io.Writer, phase string) error {
+	// Bootstrap restarts sshd after updating machine PATH. Probe new sessions,
+	// not a surviving pre-bootstrap control master with the old environment.
+	bootstrapTarget.NoControlMaster = true
+	previousNoControlMaster := target.NoControlMaster
+	target.NoControlMaster = true
+	defer func() { target.NoControlMaster = previousNoControlMaster }()
 	if err := waitForSSHReady(ctx, &bootstrapTarget, stderr, "windows openssh", 20*time.Minute); err != nil {
 		return err
 	}

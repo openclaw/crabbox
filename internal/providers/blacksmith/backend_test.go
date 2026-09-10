@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +37,9 @@ func (r *blacksmithFuncRunner) Run(ctx context.Context, req LocalCommandRequest)
 	r.calls = append(r.calls, append([]string(nil), req.Args...))
 	if r.onRequest != nil {
 		r.onRequest(ctx, req)
+	}
+	if handled, result, err := testBlacksmithArtifactTransfer(req); handled {
+		return result, err
 	}
 	if len(req.Args) >= 2 && req.Args[0] == "auth" && req.Args[1] == "status" {
 		return LocalCommandResult{Stdout: "Authenticated organizations:\n  * example-org (current)\n"}, nil
@@ -1017,8 +1019,10 @@ func TestBlacksmithRunProofArtifactsPersistSuccessStreams(t *testing.T) {
 
 func TestBlacksmithRunCollectsArtifactsBeforeOneShotCleanup(t *testing.T) {
 	requireBlacksmithArtifactShell(t)
+	isolateArtifactOwnership(t)
 	home := t.TempDir()
 	repo := t.TempDir()
+	t.Chdir(repo)
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
@@ -1052,16 +1056,18 @@ func TestBlacksmithRunCollectsArtifactsBeforeOneShotCleanup(t *testing.T) {
 	if len(result.Artifacts) != 1 {
 		t.Fatalf("artifacts=%#v", result.Artifacts)
 	}
-	if len(runner.calls) != 9 || runCalls != 1 {
+	if len(runner.calls) != 11 || runCalls != 1 {
 		t.Fatalf("calls=%d, want scoped artifact retrieval and terminal finalization", len(runner.calls))
 	}
-	if runner.calls[1][1] != "warmup" || runner.calls[4][1] != "run" || runner.calls[6][1] != "stop" {
+	if runner.calls[1][1] != "warmup" || runner.calls[5][1] != "run" || runner.calls[8][1] != "stop" {
 		t.Fatalf("unexpected call order: %#v", runner.calls)
 	}
+	assertArtifactTransferCalls(t, runner.calls, 1)
 }
 
 func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 	requireBlacksmithArtifactShell(t)
+	isolateArtifactOwnership(t)
 	home := t.TempDir()
 	repo := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1101,9 +1107,10 @@ func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
 		t.Fatalf("err=%v want artifact exit 7", err)
 	}
-	if len(runner.calls) != 5 || runCalls != 1 {
+	if len(runner.calls) != 6 || runCalls != 1 {
 		t.Fatalf("blacksmith calls=%d want one warmup/run without stop: %#v", len(runner.calls), runner.calls)
 	}
+	assertArtifactTransferCalls(t, runner.calls, 0)
 	if result.Session == nil || !result.Session.Kept {
 		t.Fatalf("session=%#v, want kept after artifact failure", result.Session)
 	}
@@ -1112,55 +1119,6 @@ func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stderr missing %q in:\n%s", want, got)
 		}
-	}
-}
-
-func TestBlacksmithExtractArtifactArchiveRejectsMissingEnvelope(t *testing.T) {
-	_, _, err := blacksmithExtractArtifactArchive("no marker", core.DelegatedRunArtifactDefaultMaxBytes)
-	if err == nil || !strings.Contains(err.Error(), "did not return a bounded artifact archive") {
-		t.Fatalf("err=%v, want missing envelope", err)
-	}
-}
-
-func TestBlacksmithExtractArtifactArchiveIgnoresPreambleMarkerText(t *testing.T) {
-	archive := makeTarGz(t, map[string]string{"reports/manifest.json": `{"ok":true}`})
-	output := strings.Join([]string{
-		"required artifact " + core.DelegatedRunArtifactBeginMarker + " matched=1",
-		"required artifact " + core.DelegatedRunArtifactEndMarker + " matched=1",
-		core.DelegatedRunArtifactBeginMarker,
-		base64.StdEncoding.EncodeToString(archive),
-		core.DelegatedRunArtifactEndMarker,
-	}, "\n")
-	got, clean, err := blacksmithExtractArtifactArchive(output, core.DelegatedRunArtifactDefaultMaxBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, archive) {
-		t.Fatalf("archive mismatch bytes=%d want=%d", len(got), len(archive))
-	}
-	for _, want := range []string{
-		"required artifact " + core.DelegatedRunArtifactBeginMarker + " matched=1",
-		"required artifact " + core.DelegatedRunArtifactEndMarker + " matched=1",
-	} {
-		if !strings.Contains(clean, want) {
-			t.Fatalf("clean output missing %q:\n%s", want, clean)
-		}
-	}
-}
-
-func TestBlacksmithExtractArtifactArchiveAllowsExactMaxWithPadding(t *testing.T) {
-	archive := bytes.Repeat([]byte("x"), 64)
-	output := strings.Join([]string{
-		core.DelegatedRunArtifactBeginMarker,
-		base64.StdEncoding.EncodeToString(archive),
-		core.DelegatedRunArtifactEndMarker,
-	}, "\n")
-	got, _, err := blacksmithExtractArtifactArchive(output, int64(len(archive)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, archive) {
-		t.Fatalf("archive mismatch bytes=%d want=%d", len(got), len(archive))
 	}
 }
 

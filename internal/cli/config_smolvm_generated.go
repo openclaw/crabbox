@@ -7,13 +7,13 @@ import (
 )
 
 type fileSmolvmConfig struct {
-	BaseURL  *string `yaml:"baseUrl,omitempty"`
-	Image    *string `yaml:"image,omitempty"`
-	Workdir  *string `yaml:"workdir,omitempty"`
-	CPUs     *int    `yaml:"cpus,omitempty"`
-	MemoryMB *int    `yaml:"memoryMB,omitempty"`
-	Network  *string `yaml:"network,omitempty"`
-	Keep     *bool   `yaml:"keep,omitempty"`
+	BaseURL  string `yaml:"baseUrl,omitempty"`
+	Image    string `yaml:"image,omitempty"`
+	Workdir  string `yaml:"workdir,omitempty"`
+	CPUs     int    `yaml:"cpus,omitempty"`
+	MemoryMB int    `yaml:"memoryMB,omitempty"`
+	Network  string `yaml:"network,omitempty"`
+	Keep     *bool  `yaml:"keep,omitempty"`
 }
 
 const SmolvmConfigDefaultBaseURL string = "https://api.smolmachines.com"
@@ -45,24 +45,24 @@ func (cfg *SmolvmConfig) applyFile(file *fileSmolvmConfig) (SmolvmConfigApplied,
 	if file == nil {
 		return applied, nil
 	}
-	if file.BaseURL != nil && *file.BaseURL != "" {
-		cfg.BaseURL = *file.BaseURL
+	if file.BaseURL != "" {
+		cfg.BaseURL = file.BaseURL
 		applied.BaseURL = true
 	}
-	if file.Image != nil && *file.Image != "" {
-		cfg.Image = *file.Image
+	if file.Image != "" {
+		cfg.Image = file.Image
 	}
-	if file.Workdir != nil && *file.Workdir != "" {
-		cfg.Workdir = *file.Workdir
+	if file.Workdir != "" {
+		cfg.Workdir = file.Workdir
 	}
-	if file.CPUs != nil && *file.CPUs > 0 {
-		cfg.CPUs = *file.CPUs
+	if file.CPUs > 0 {
+		cfg.CPUs = file.CPUs
 	}
-	if file.MemoryMB != nil && *file.MemoryMB > 0 {
-		cfg.MemoryMB = *file.MemoryMB
+	if file.MemoryMB > 0 {
+		cfg.MemoryMB = file.MemoryMB
 	}
-	if file.Network != nil && *file.Network != "" {
-		cfg.Network = *file.Network
+	if file.Network != "" {
+		cfg.Network = file.Network
 	}
 	if file.Keep != nil {
 		cfg.Keep = *file.Keep

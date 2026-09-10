@@ -319,45 +319,88 @@ test("protected build prep binds source, rejects substitution, and seals exact b
   }
 });
 
-test("publisher admission requires transactional rollback before paid deployment", async () => {
+test("publisher admission accepts the actual transactional publisher before paid deployment", async () => {
   const module = await import(
     `${pathToFileURL(path.join(root, "scripts/image-qualification-control.mjs"))}?admit=${Date.now()}`
   );
-  const admissible = `
-CRABBOX_BIN="\${CRABBOX_BIN:-$ROOT/bin/crabbox}"
-cleanup() {
-  rollback_promoted_image "$promotion_log"
-}
-trap cleanup EXIT
-rollback_promoted_image() {
-  args+=(--restore-receipt "$receipt" "$current_id")
-  printf 'promoted-image smoke failed; restored previous default image=%s\\n' "$rollback_image"
-}
-run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$candidate_lease"
-candidate_lease=""
-promote_args=(image promote --target "$target" --json --expected-current-image capture)
-rollback_pending=1
-run_json_tee "$promotion_log" "$CRABBOX_BIN" "\${promote_args[@]}"
-jq -e '.previous.aliases | length > 0' "$promotion_log"
-promoted_lease="$(warmup promoted)"
-smoke "$promoted_lease"
-rollback_pending=0
+  assert.doesNotThrow(() =>
+    module.verifyPublisherContract(read("scripts/mint-aws-devtools-image.sh")),
+  );
+});
+
+test("publisher admission rejects broken transaction and cleanup boundaries", async (t) => {
+  const { verifyPublisherContract } = await import(
+    pathToFileURL(path.join(root, "scripts/image-qualification-control.mjs"))
+  );
+  const source = read("scripts/mint-aws-devtools-image.sh");
+  const propagation = `  if [[ "$exit_status" == "0" && "$finalizer_status" != "0" ]]; then
+    exit_status="$finalizer_status"
+  fi
 `;
-  assert.doesNotThrow(() => module.verifyPublisherContract(admissible));
-  assert.throws(
-    () =>
-      module.verifyPublisherContract(
-        admissible.replace("--expected-current-image capture", "ami-candidate"),
-      ),
-    /transactional rollback contract/,
-  );
-  assert.throws(
-    () =>
-      module.verifyPublisherContract(
-        admissible.replace('candidate_lease=""', 'candidate_lease="still-running"'),
-      ),
-    /rollback ordering/,
-  );
+  const rollback = `  if [[ "$rollback_pending" == "1" && "$exit_status" != "0" ]]; then
+    rollback_pending=0
+    if rollback_promoted_image "$promotion_log"; then
+      rollback_status="succeeded"
+    else
+      rollback_status="failed"
+      finalizer_status=1
+    fi
+  fi
+`;
+  const stop = `      if ! "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease"; then
+        cleanup_status="failed"
+        finalizer_status=1
+      fi`;
+  const proofRollback = `      if [[ "$rollback_pending" == "1" ]]; then
+        rollback_pending=0
+        if rollback_promoted_image "$promotion_log"; then
+          rollback_status="succeeded"
+        else
+          rollback_status="failed"
+          finalizer_status=1
+        fi
+      fi`;
+  const armAndPromote =
+    'rollback_pending=1\nrun_json_tee "$promotion_log" "$CRABBOX_BIN" "${promote_args[@]}"';
+  for (const [name, before, after] of [
+    ["CAS removed", "--expected-current-image capture", "ami-candidate"],
+    ["receipt restore removed", '--restore-receipt "$receipt" "$current_id"', '"$current_id"'],
+    ["EXIT trap removed", "trap cleanup EXIT", "trap : EXIT"],
+    [
+      "candidate still owned",
+      'clear_warmup_handle candidate\n  candidate_lease=""',
+      'clear_warmup_handle candidate\n  candidate_lease="still-running"',
+    ],
+    [
+      "arm after promotion",
+      armAndPromote,
+      'run_json_tee "$promotion_log" "$CRABBOX_BIN" "${promote_args[@]}"\nrollback_pending=1',
+    ],
+    [
+      "early main disarm",
+      'smoke "$promoted_lease"\n',
+      'smoke "$promoted_lease"\nrollback_pending=0\n',
+    ],
+    ["original failure rollback removed", rollback, ""],
+    ["cleanup failure rollback removed", propagation + rollback, propagation],
+    ["cleanup failure rollback reordered", propagation + rollback, rollback + propagation],
+    ["lease cleanup removed", stop, ":"],
+    ["lease cleanup error ignored", stop, stop.replace("finalizer_status=1", ":")],
+    ["proof failure swallowed", 'exit_status="$proof_status"', "exit_status=0"],
+    ["proof rollback removed", proofRollback, ""],
+    [
+      "proof publication error ignored",
+      'mv -f "$outcome_candidate" "$public_outcome" || proof_status=$?',
+      'mv -f "$outcome_candidate" "$public_outcome" || true',
+    ],
+    ["final status swallowed", '  exit "$exit_status"\n}', "  exit 0\n}"],
+  ]) {
+    await t.test(name, () => {
+      const changed = source.replace(before, after);
+      assert.ok(changed !== source, `mutation did not apply: ${name}`);
+      assert.throws(() => verifyPublisherContract(changed), /candidate publisher/);
+    });
+  }
 });
 
 test("authorization selects one exact same-PR candidate artifact and detects replacement", async () => {

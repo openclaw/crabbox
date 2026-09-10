@@ -1026,7 +1026,7 @@ describe("coordinator-managed checkpoints", () => {
   );
 
   it("does not remap a fixed checkpoint fork to a retained Mac lease", async () => {
-    const { storage, checkpointID, body, begin, fork, create } = await fixedForkFixture();
+    const { storage, checkpointID, begin, fork, create } = await fixedForkFixture();
     const checkpoint = (await storage.get<CoordinatorCheckpointRecord>(
       checkpointKey(checkpointID),
     ))!;
@@ -1047,10 +1047,10 @@ describe("coordinator-managed checkpoints", () => {
       awsMacHostID: "h-0123456789abcdef0",
       capacity: { market: "on-demand" },
     });
-    expect(response.status).toBe(201);
-    await expect(response.json()).resolves.toMatchObject({ lease: { id: body.leaseID } });
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ error: "host_in_use" });
     expect(await storage.get(`lease:${leaseID}`)).toMatchObject({ state: "released" });
-    expect(create).toHaveBeenCalledOnce();
+    expect(create).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -4831,7 +4831,7 @@ describe("coordinator-managed checkpoints", () => {
         )
       ).json()) as { claim: string };
       const requestedLeaseID = "cbx_000000000002";
-      const canonicalLeaseID = macOS ? "cbx_000000000099" : requestedLeaseID;
+      const canonicalLeaseID = requestedLeaseID;
       const createAttemptID = `cat_${"8".repeat(32)}`;
       const provision = vi
         .spyOn(coordinator as never, "createLease" as never)

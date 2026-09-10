@@ -6,17 +6,122 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestDoctorChecksStatus(t *testing.T) {
+	tests := []struct {
+		name   string
+		checks []DoctorCheck
+		want   string
+	}{
+		{name: "nil checks", want: "ok"},
+		{name: "empty checks", checks: []DoctorCheck{}, want: "ok"},
+		{name: "absent status", checks: []DoctorCheck{{Check: "config"}}, want: "ok"},
+		{name: "empty status", checks: []DoctorCheck{{Status: ""}}, want: "ok"},
+		{name: "whitespace status", checks: []DoctorCheck{{Status: " \t\n"}}, want: "ok"},
+		{name: "literal missing", checks: []DoctorCheck{{Status: "missing"}}, want: "failed"},
+		{name: "ok", checks: []DoctorCheck{{Status: "ok"}}, want: "ok"},
+		{name: "failed", checks: []DoctorCheck{{Status: "failed"}}, want: "failed"},
+		{name: "warning", checks: []DoctorCheck{{Status: "warning"}}, want: "warning"},
+		{name: "skip", checks: []DoctorCheck{{Status: "skip"}}, want: "ok"},
+		{name: "unknown statuses", checks: []DoctorCheck{{Status: "unknown"}, {Status: "error"}, {Status: "blocked"}}, want: "ok"},
+		{name: "failure words are not statuses", checks: []DoctorCheck{{Status: "missing tool"}, {Status: "not failed"}, {Status: "warnings"}}, want: "ok"},
+		{name: "normalized ok and skip", checks: []DoctorCheck{{Status: " OK "}, {Status: "\tSkIp\n"}}, want: "ok"},
+		{name: "normalized failed", checks: []DoctorCheck{{Status: "\tFaIlEd\n"}}, want: "failed"},
+		{name: "normalized missing", checks: []DoctorCheck{{Status: " MiSsInG "}}, want: "failed"},
+		{name: "normalized warning", checks: []DoctorCheck{{Status: "\nWaRnInG\t"}}, want: "warning"},
+		{name: "warning then failure", checks: []DoctorCheck{{Status: "warning"}, {Status: "failed"}}, want: "failed"},
+		{name: "failure then warning", checks: []DoctorCheck{{Status: "failed"}, {Status: "warning"}}, want: "failed"},
+		{name: "warning then missing", checks: []DoctorCheck{{Status: " WARNING "}, {Status: " MiSsInG "}}, want: "failed"},
+		{name: "missing then warning", checks: []DoctorCheck{{Status: " MiSsInG "}, {Status: " WARNING "}}, want: "failed"},
+		{name: "nonfailures do not clear warning", checks: []DoctorCheck{{Status: "warning"}, {}, {Status: "skip"}, {Status: "unknown"}, {Status: "ok"}}, want: "warning"},
+		{name: "duplicate successes", checks: []DoctorCheck{{Status: "ok"}, {Status: "ok"}}, want: "ok"},
+		{name: "duplicate warnings", checks: []DoctorCheck{{Status: "warning"}, {Status: "warning"}}, want: "warning"},
+		{name: "duplicate failures", checks: []DoctorCheck{{Status: "failed"}, {Status: "failed"}}, want: "failed"},
+		{
+			name: "raw checks and details survive warning",
+			checks: []DoctorCheck{
+				{Status: " WaRnInG ", Check: " network ", Message: " advisory\n", Details: map[string]string{"note": " raw value ", "mutation": "false"}},
+				{Status: "", Check: "empty details", Details: map[string]string{}},
+				{Status: " SkIp ", Check: "nil details"},
+			},
+			want: "warning",
+		},
+		{
+			name: "raw checks and details survive failure",
+			checks: []DoctorCheck{
+				{Status: " MiSsInG ", Check: " config ", Message: " unavailable\n", Details: map[string]string{"note": " raw value "}},
+				{Status: " WaRnInG ", Check: "later check", Details: map[string]string{"note": " retain me "}},
+			},
+			want: "failed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := slices.Clone(tt.checks)
+			for i := range before {
+				before[i].Details = maps.Clone(tt.checks[i].Details)
+			}
+			if got := DoctorChecksStatus(tt.checks); got != tt.want {
+				t.Errorf("DoctorChecksStatus() = %q, want %q", got, tt.want)
+			}
+			if !reflect.DeepEqual(tt.checks, before) {
+				t.Errorf("checks changed: got %#v, want %#v", tt.checks, before)
+			}
+		})
+	}
+}
+
+func TestDoctorStatusFails(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		want   bool
+	}{
+		{name: "absent status", want: false},
+		{name: "empty status", status: "", want: false},
+		{name: "whitespace status", status: " \t\n", want: false},
+		{name: "literal missing", status: "missing", want: true},
+		{name: "failed", status: "failed", want: true},
+		{name: "ok", status: "ok", want: false},
+		{name: "advisory warning", status: "warning", want: false},
+		{name: "skip", status: "skip", want: false},
+		{name: "unknown", status: "unknown", want: false},
+		{name: "error is not failed", status: "error", want: false},
+		{name: "local blocked is not failed", status: "blocked", want: false},
+		{name: "missing phrase is not missing", status: "missing tool", want: false},
+		{name: "failed phrase is not failed", status: "not failed", want: false},
+		{name: "padded failed", status: " failed\t", want: true},
+		{name: "mixed case failed", status: "FaIlEd", want: true},
+		{name: "normalized failed", status: "\tFaIlEd\n", want: true},
+		{name: "padded missing", status: " missing\n", want: true},
+		{name: "mixed case missing", status: "MiSsInG", want: true},
+		{name: "normalized missing", status: "\nMiSsInG\t", want: true},
+		{name: "normalized warning", status: " WaRnInG ", want: false},
+		{name: "normalized skip", status: " SkIp ", want: false},
+		{name: "normalized ok", status: " OK ", want: false},
+		{name: "normalized unknown", status: " UNKNOWN ", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := doctorStatusFails(tt.status); got != tt.want {
+				t.Errorf("doctorStatusFails(%q) = %t, want %t", tt.status, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestCoordinatorProviderReadinessSupported(t *testing.T) {
 	tests := []struct {

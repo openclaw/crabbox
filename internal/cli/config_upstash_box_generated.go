@@ -7,11 +7,11 @@ import (
 )
 
 type fileUpstashBoxConfig struct {
-	BaseURL   *string `yaml:"baseUrl,omitempty"`
-	Runtime   *string `yaml:"runtime,omitempty"`
-	Size      *string `yaml:"size,omitempty"`
-	Workdir   *string `yaml:"workdir,omitempty"`
-	KeepAlive *bool   `yaml:"keepAlive,omitempty"`
+	BaseURL   string `yaml:"baseUrl,omitempty"`
+	Runtime   string `yaml:"runtime,omitempty"`
+	Size      string `yaml:"size,omitempty"`
+	Workdir   string `yaml:"workdir,omitempty"`
+	KeepAlive *bool  `yaml:"keepAlive,omitempty"`
 }
 
 const UpstashBoxConfigDefaultBaseURL string = "https://us-east-1.box.upstash.com"
@@ -39,18 +39,18 @@ func (cfg *UpstashBoxConfig) applyFile(file *fileUpstashBoxConfig) (UpstashBoxCo
 	if file == nil {
 		return applied, nil
 	}
-	if file.BaseURL != nil && *file.BaseURL != "" {
-		cfg.BaseURL = *file.BaseURL
+	if file.BaseURL != "" {
+		cfg.BaseURL = file.BaseURL
 		applied.BaseURL = true
 	}
-	if file.Runtime != nil && *file.Runtime != "" {
-		cfg.Runtime = *file.Runtime
+	if file.Runtime != "" {
+		cfg.Runtime = file.Runtime
 	}
-	if file.Size != nil && *file.Size != "" {
-		cfg.Size = *file.Size
+	if file.Size != "" {
+		cfg.Size = file.Size
 	}
-	if file.Workdir != nil && *file.Workdir != "" {
-		cfg.Workdir = *file.Workdir
+	if file.Workdir != "" {
+		cfg.Workdir = file.Workdir
 	}
 	if file.KeepAlive != nil {
 		cfg.KeepAlive = *file.KeepAlive

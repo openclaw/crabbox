@@ -33,11 +33,7 @@ func (Provider) Spec() core.ProviderSpec {
 }
 
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return registerFlags(fs, defaults)
-}
-
-func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	return applyFlags(cfg, fs, values)
+	return core.RegisterKubeVirtConfigFlags(fs, defaults.KubeVirt)
 }
 
 func (Provider) RouteConfig(cfg *core.Config, _ *flag.FlagSet, _ any) error {
@@ -48,11 +44,7 @@ func (Provider) RouteConfig(cfg *core.Config, _ *flag.FlagSet, _ any) error {
 }
 
 func (Provider) CommandRouting(cfg core.Config, request core.CommandRoutingRequest) core.CommandRouting {
-	values := cfg.KubeVirt
-	base := core.BaseConfig()
-	if strings.TrimSpace(cfg.WorkRoot) != "" && cfg.WorkRoot != base.WorkRoot && (strings.TrimSpace(values.WorkRoot) == "" || values.WorkRoot == base.KubeVirt.WorkRoot) {
-		values.WorkRoot = cfg.WorkRoot
-	}
+	values := configWithInheritedWorkRoot(cfg)
 	args := []string{
 		"--kubevirt-kubectl", values.Kubectl,
 		"--kubevirt-virtctl", values.Virtctl,
@@ -92,12 +84,7 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)
 	}
-	base := core.BaseConfig()
-	explicitTopLevelWorkRoot := strings.TrimSpace(cfg.WorkRoot) != "" && cfg.WorkRoot != base.WorkRoot
-	providerWorkRootDefault := strings.TrimSpace(cfg.KubeVirt.WorkRoot) == "" || cfg.KubeVirt.WorkRoot == base.KubeVirt.WorkRoot
-	if explicitTopLevelWorkRoot && providerWorkRootDefault {
-		cfg.KubeVirt.WorkRoot = cfg.WorkRoot
-	}
+	cfg.KubeVirt = configWithInheritedWorkRoot(cfg)
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}
@@ -109,6 +96,15 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	cfg.SSHFallbackPorts = nil
 	cfg.WorkRoot = kubeVirtWorkRoot(cfg)
 	return &leaseBackend{spec: p.Spec(), cfg: cfg, rt: rt}, nil
+}
+
+func configWithInheritedWorkRoot(cfg core.Config) core.KubeVirtConfig {
+	values := cfg.KubeVirt
+	base := core.BaseConfig()
+	if strings.TrimSpace(cfg.WorkRoot) != "" && cfg.WorkRoot != base.WorkRoot && (strings.TrimSpace(values.WorkRoot) == "" || values.WorkRoot == base.KubeVirt.WorkRoot) {
+		values.WorkRoot = cfg.WorkRoot
+	}
+	return values
 }
 
 func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {

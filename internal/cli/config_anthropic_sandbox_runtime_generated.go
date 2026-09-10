@@ -7,7 +7,7 @@ import (
 )
 
 type fileAnthropicSRTConfig struct {
-	CLIPath  *string `yaml:"cliPath,omitempty"`
+	CLIPath  string  `yaml:"cliPath,omitempty"`
 	Settings *string `yaml:"settings,omitempty"`
 	Debug    *bool   `yaml:"debug,omitempty"`
 }
@@ -24,8 +24,8 @@ func (cfg *AnthropicSRTConfig) applyFile(file *fileAnthropicSRTConfig) error {
 	if file == nil {
 		return nil
 	}
-	if file.CLIPath != nil && *file.CLIPath != "" {
-		cfg.CLIPath = *file.CLIPath
+	if file.CLIPath != "" {
+		cfg.CLIPath = file.CLIPath
 	}
 	if file.Settings != nil {
 		cfg.Settings = *file.Settings

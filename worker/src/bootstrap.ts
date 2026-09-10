@@ -1,17 +1,22 @@
 import {
   sharedLinuxSSHRestart,
+  sharedLinuxOptionalPackages,
   sharedLinuxNodeInstall,
   sharedGnomeDesktopTheme,
   sharedWslTruffleHogInstall,
   sharedWindowsHeader,
   sharedWindowsRuntime,
   sharedWindowsRuntimeGate,
+  sharedWindowsNodeInstall,
+  sharedWindowsDetachInstall,
   sharedWindowsCore,
   sharedWindowsDesktopPrelude,
   sharedWindowsNativePrelude,
   sharedWindowsFinalize,
   sharedWindowsDesktop,
   sharedMacOS,
+  sharedMacOSSSHSession,
+  sharedMacOSNodeInstall,
   sharedCodeServerInstall,
   sharedTailscalePinnedInstall,
   sharedTailscalePackageInstall,
@@ -249,7 +254,11 @@ function windowsBootstrapHeaderPowerShell(config: LeaseConfig): string {
   );
   // An omitted mode retains the native default; WSL2 owns a separate Linux runtime.
   if (config.windowsMode !== "wsl2") {
-    script += sharedWindowsRuntime() + sharedWindowsRuntimeGate();
+    script +=
+      sharedWindowsRuntime() +
+      sharedWindowsRuntimeGate() +
+      sharedWindowsNodeInstall() +
+      sharedWindowsDetachInstall();
   }
   return script;
 }
@@ -435,7 +444,14 @@ ${setupComplete}
 }
 
 export function macOSUserData(config: LeaseConfig): string {
-  return sharedMacOS(config.sshUser, config.sshPublicKey, config.workRoot, sshPorts(config));
+  return (
+    "#!/bin/bash\nset -euo pipefail\n(\n" +
+    sharedMacOSSSHSession() +
+    ")\n(\n" +
+    sharedMacOSNodeInstall() +
+    ")\n" +
+    sharedMacOS(config.sshUser, config.sshPublicKey, config.workRoot, sshPorts(config))
+  );
 }
 
 function optionalReadyChecks(config: LeaseConfig): string {
@@ -894,6 +910,9 @@ ${displayEnv}      EOF
 
 function optionalBootstrap(config: LeaseConfig): string {
   const parts: string[] = [];
+  if (config.desktop || config.browser) {
+    parts.push(indentRuncmdScript(sharedLinuxOptionalPackages()));
+  }
   if (config.tailscale) {
     parts.push(tailscaleBootstrap(config));
   }
@@ -958,7 +977,7 @@ chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme
     const themeConfigure = gnome
       ? "    CRABBOX_DESKTOP_USER=crabbox /usr/local/bin/crabbox-configure-desktop-theme\n"
       : "";
-    parts.push(`    retry apt-get install -y --no-install-recommends ${packages}
+    parts.push(`    crabbox_install_packages ${packages}
     install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
     if [ ! -s /var/lib/crabbox/vnc.password ]; then
       (umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)
@@ -990,7 +1009,7 @@ ${themeConfigure}    systemctl daemon-reload
     systemctl enable crabbox-desktop.service crabbox-wayvnc.service
     systemctl restart crabbox-desktop.service crabbox-wayvnc.service`);
   } else if (config.desktop) {
-    parts.push(`    retry apt-get install -y --no-install-recommends tigervnc-standalone-server tigervnc-tools xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme util-linux novnc websockify
+    parts.push(`    crabbox_install_packages tigervnc-standalone-server tigervnc-tools xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme util-linux novnc websockify
     install -d -m 0750 -o crabbox -g crabbox /var/lib/crabbox
     if [ ! -s /var/lib/crabbox/vnc.password ]; then
       (umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)
@@ -1008,9 +1027,9 @@ ${themeConfigure}    systemctl daemon-reload
     systemctl restart crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service`);
   }
   if (config.browser) {
-    parts.push(`    retry apt-get install -y --no-install-recommends gnupg build-essential python3
-    browser_path=""
-    if [ "$(dpkg --print-architecture)" = "amd64" ]; then
+    parts.push(`    crabbox_install_packages gnupg build-essential python3
+    browser_path="$(crabbox_existing_browser || true)"
+    if [ -z "$browser_path" ] && [ "$(dpkg --print-architecture)" = "amd64" ]; then
       install -d -m 0755 /etc/apt/keyrings
       google_key_tmp="$(mktemp -d /etc/apt/keyrings/google-linux.gpg.tmp.XXXXXX)"
       google_key_home="$google_key_tmp/gnupg"

@@ -7,13 +7,13 @@ import (
 )
 
 type fileMorphConfig struct {
-	APIKey          *string `yaml:"apiKey,omitempty"`
-	APIURL          *string `yaml:"apiUrl,omitempty"`
-	Snapshot        *string `yaml:"snapshot,omitempty"`
-	SSHGatewayHost  *string `yaml:"sshGatewayHost,omitempty"`
-	WorkRoot        *string `yaml:"workRoot,omitempty"`
-	DeleteOnRelease *bool   `yaml:"deleteOnRelease,omitempty"`
-	WakeOnSSH       *bool   `yaml:"wakeOnSSH,omitempty"`
+	APIKey          string `yaml:"apiKey,omitempty"`
+	APIURL          string `yaml:"apiUrl,omitempty"`
+	Snapshot        string `yaml:"snapshot,omitempty"`
+	SSHGatewayHost  string `yaml:"sshGatewayHost,omitempty"`
+	WorkRoot        string `yaml:"workRoot,omitempty"`
+	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
+	WakeOnSSH       *bool  `yaml:"wakeOnSSH,omitempty"`
 }
 
 const MorphConfigDefaultAPIURL string = "https://cloud.morph.so"
@@ -43,23 +43,23 @@ func (cfg *MorphConfig) applyFile(file *fileMorphConfig) (MorphConfigApplied, er
 	if file == nil {
 		return applied, nil
 	}
-	if file.APIKey != nil && *file.APIKey != "" {
-		cfg.APIKey = *file.APIKey
+	if file.APIKey != "" {
+		cfg.APIKey = file.APIKey
 		applied.APIKey = true
 	}
-	if file.APIURL != nil && *file.APIURL != "" {
-		cfg.APIURL = *file.APIURL
+	if file.APIURL != "" {
+		cfg.APIURL = file.APIURL
 		applied.APIURL = true
 	}
-	if file.Snapshot != nil && *file.Snapshot != "" {
-		cfg.Snapshot = *file.Snapshot
+	if file.Snapshot != "" {
+		cfg.Snapshot = file.Snapshot
 	}
-	if file.SSHGatewayHost != nil && *file.SSHGatewayHost != "" {
-		cfg.SSHGatewayHost = *file.SSHGatewayHost
+	if file.SSHGatewayHost != "" {
+		cfg.SSHGatewayHost = file.SSHGatewayHost
 		applied.SSHGatewayHost = true
 	}
-	if file.WorkRoot != nil && *file.WorkRoot != "" {
-		cfg.WorkRoot = *file.WorkRoot
+	if file.WorkRoot != "" {
+		cfg.WorkRoot = file.WorkRoot
 	}
 	if file.DeleteOnRelease != nil {
 		cfg.DeleteOnRelease = *file.DeleteOnRelease

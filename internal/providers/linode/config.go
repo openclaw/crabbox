@@ -8,10 +8,9 @@ import (
 )
 
 const (
-	defaultRegion = "us-ord"
-	defaultImage  = "linode/ubuntu24.04"
-	defaultType   = "g6-standard-1"
-	tokenEnv      = "LINODE_TOKEN"
+	// Class selection remains independent of configured defaults.
+	defaultType = "g6-standard-1"
+	tokenEnv    = "LINODE_TOKEN"
 )
 
 func tokenFromEnv() string {
@@ -30,14 +29,14 @@ func linodeRegionForConfig(cfg core.Config) string {
 	if strings.TrimSpace(cfg.Linode.Region) != "" {
 		return strings.TrimSpace(cfg.Linode.Region)
 	}
-	return defaultRegion
+	return core.LinodeConfiguredRegionDefault
 }
 
 func linodeImageForConfig(cfg core.Config) string {
 	if strings.TrimSpace(cfg.Linode.Image) != "" {
 		return strings.TrimSpace(cfg.Linode.Image)
 	}
-	return defaultImage
+	return core.LinodeImageFallback
 }
 
 func linodeServerTypeForConfig(cfg core.Config) string {

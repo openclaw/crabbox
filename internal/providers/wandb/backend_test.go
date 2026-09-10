@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1147,5 +1149,102 @@ func TestWandbExistingIDEnvironmentPolicy(t *testing.T) {
 				t.Errorf("reuse environment accepted=%t want=%t", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestWandbBindingFlagContract(t *testing.T) {
+	for _, selector := range []string{"wandb", " WEIGHTS-AND-BIASES ", "aws"} {
+		for _, life := range []int{-2, 0, 45} {
+			cfg := core.BaseConfig()
+			cfg.Provider = selector
+			fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+			values := RegisterWandbProviderFlags(fs, cfg)
+			count := 0
+			fs.VisitAll(func(*flag.Flag) { count++ })
+			if count != 2 || fs.Lookup("wandb-image").DefValue != "" || fs.Lookup("wandb-max-lifetime").DefValue != "0" {
+				t.Fatal("raw registration defaults changed")
+			}
+			cfg.Wandb.DefaultImage = "layered-image"
+			cfg.Wandb.MaxLifetimeSeconds = 37
+			before := cfg.Wandb
+			if err := ApplyWandbProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Wandb != before {
+				t.Fatal("unvisited flags changed config")
+			}
+			if err := fs.Parse([]string{"--wandb-image=", fmt.Sprintf("--wandb-max-lifetime=%d", life)}); err != nil {
+				t.Fatal(err)
+			}
+			snapshot := fmt.Sprintf("%#v", cfg)
+			if err := ApplyWandbProviderFlags(&cfg, fs, struct{}{}); err != nil {
+				t.Fatal(err)
+			}
+			if fmt.Sprintf("%#v", cfg) != snapshot {
+				t.Fatal("wrong values type changed config")
+			}
+			if err := ApplyWandbProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Wandb.DefaultImage != "" || cfg.Wandb.MaxLifetimeSeconds != life {
+				t.Fatal("flag application introduced defaults/validation")
+			}
+		}
+	}
+	for _, args := range [][]string{{"--type=fixture", "--class="}, {"--type="}} {
+		cfg := core.BaseConfig()
+		cfg.Provider = " WEIGHTS-AND-BIASES "
+		fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		RegisterWandbProviderFlags(fs, cfg)
+		if err := fs.Parse(args); err != nil {
+			t.Fatal(err)
+		}
+		err := ApplyWandbProviderFlags(&cfg, fs, struct{}{})
+		want := "--type is not supported for provider=wandb"
+		if len(args) == 2 {
+			want = "--class is not supported for provider=wandb"
+		}
+		var exitErr core.ExitError
+		if err == nil || err.Error() != want || !errors.As(err, &exitErr) || exitErr.Code != 2 {
+			t.Fatalf("guard err=%v want=%q", err, want)
+		}
+	}
+}
+
+func TestWandbBindingRuntimeDefaultsContract(t *testing.T) {
+	for _, image := range []string{"", "  ", " image "} {
+		for _, life := range []int{-2, 0, 37} {
+			cfg := Config{Provider: "prior", WorkRoot: "/fixture/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, Wandb: core.WandbConfig{APIKey: "inert-configured", DefaultImage: image, MaxLifetimeSeconds: life}}
+			want := cfg
+			want.Provider = "wandb"
+			want.TargetOS = "linux"
+			if image == "" {
+				want.Wandb.DefaultImage = "ubuntu:24.04"
+			}
+			if life <= 0 {
+				want.Wandb.MaxLifetimeSeconds = 1800
+			}
+			applyWandbDefaults(&cfg)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("runtime defaults image=%q life=%d got=%#v want=%#v", image, life, cfg, want)
+			}
+		}
+	}
+	cfg := Config{TargetOS: "macos"}
+	applyWandbDefaults(&cfg)
+	if cfg.TargetOS != "macos" {
+		t.Fatal("nonempty target changed")
+	}
+	for _, tc := range []struct {
+		life int
+		ttl  time.Duration
+		want int
+	}{{0, 0, 1800}, {-2, -time.Second, 1800}, {37, 0, 37}, {0, time.Nanosecond, 1}, {0, 999 * time.Millisecond, 1}, {0, time.Second, 1}, {0, 1001 * time.Millisecond, 2}, {1, 1500 * time.Millisecond, 1}, {37, 36100 * time.Millisecond, 37}, {37, 35100 * time.Millisecond, 36}, {0, time.Hour, 1800}, {-2, time.Minute, 60}} {
+		cfg := Config{TTL: tc.ttl, Wandb: core.WandbConfig{MaxLifetimeSeconds: tc.life}}
+		if got := wandbMaxLifetimeSeconds(cfg); got != tc.want {
+			t.Fatalf("life=%d ttl=%s got=%d want=%d", tc.life, tc.ttl, got, tc.want)
+		}
 	}
 }

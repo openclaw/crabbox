@@ -160,6 +160,15 @@ checks, and is gated by the provider's declared feature set.
 - `--code` — installs `code-server` (managed Linux only) for the authenticated
   [portal](portal.md) editor; readiness verifies `code-server --version`.
 
+Desktop and browser prerequisite package installation is skipped only when dpkg
+reports every required package fully installed. A supported, package-installed
+browser must also pass a bounded `--version` probe before bootstrap skips its
+repository and download work. These checks read current machine state without
+creating another capability marker. Missing or broken prerequisites still use
+the installation path, and installation failures remain failures. Bootstrap
+always configures the requested services and runs the complete readiness check;
+reusing an image does not implicitly update its working browser.
+
 Crabbox owns these machine capabilities; scenario systems still own browser
 automation and proof artifacts. For slow QA lanes, bake these capabilities into
 a provider image while keeping secrets, browser profiles, repository checkouts,
