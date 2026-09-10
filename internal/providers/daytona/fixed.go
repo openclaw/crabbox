@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"reflect"
 	"strings"
 	"time"
 
@@ -355,9 +356,9 @@ func (b *daytonaLeaseBackend) releaseFixed(ctx context.Context, claim core.Lease
 	if err := core.AuthorizeCheckpointRelease(claim, checkpointID); err != nil {
 		return err
 	}
-	finalize := func(cleanup func() error) error {
-		return fixedDaytonaLeaseKind.FinalizeAfterCleanup(claim, func() error {
-			if err := core.AuthorizeCheckpointRelease(claim, checkpointID); err != nil {
+	finalize := func(current core.LeaseClaim, cleanup func() error) error {
+		return fixedDaytonaLeaseKind.FinalizeAfterCleanup(current, func() error {
+			if err := core.AuthorizeCheckpointRelease(current, checkpointID); err != nil {
 				return err
 			}
 			return cleanup()
@@ -366,7 +367,7 @@ func (b *daytonaLeaseBackend) releaseFixed(ctx context.Context, claim core.Lease
 	// Version 1 never clears a submitted attempt. An empty initial claim
 	// therefore proves the durable authorization preceding POST never existed.
 	if neverSubmittedDaytonaClaim(claim) {
-		return finalize(func() error { return nil })
+		return finalize(claim, func() error { return nil })
 	}
 	apiClient, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
@@ -396,7 +397,7 @@ func (b *daytonaLeaseBackend) releaseFixed(ctx context.Context, claim core.Lease
 			if sandbox == nil {
 				// The attempt never landed or was already destroyed natively; a
 				// destroyed sandbox holds no resource, so nothing remains to delete.
-				return finalize(func() error { return nil })
+				return finalize(claim, func() error { return nil })
 			}
 		}
 		if err := ctx.Err(); err != nil {
@@ -409,11 +410,33 @@ func (b *daytonaLeaseBackend) releaseFixed(ctx context.Context, claim core.Lease
 			return err
 		}
 	}
-	claim, err = acknowledgeFixedDaytonaDeletion(ctx, client, claim, checkpointID)
-	if err != nil {
+	// The native DELETE and its acknowledgement run under the exclusive
+	// unchanged-claim fence, so a live run or a repository transfer cannot race
+	// the destructive call; a changed claim retries without native effects.
+	expected := claim
+	acknowledged := claim
+	if err := core.WithDurableLeaseClaimLockContext(ctx, claim.LeaseID, func(current *core.LeaseClaim, exists bool, persist func() error) error {
+		if !exists || !reflect.DeepEqual(*current, expected) {
+			return exit(4, "fixed Daytona lease %s claim changed before release; retry", expected.LeaseID)
+		}
+		next, err := acknowledgeFixedDaytonaDeletion(ctx, client, *current, checkpointID)
+		if err != nil {
+			return err
+		}
+		if reflect.DeepEqual(next, *current) {
+			acknowledged = *current
+			return nil
+		}
+		*current = next
+		if err := persist(); err != nil {
+			return err
+		}
+		acknowledged = *current
+		return nil
+	}); err != nil {
 		return err
 	}
-	return finalize(func() error { return awaitFixedDaytonaDeletion(ctx, client, claim) })
+	return finalize(acknowledged, func() error { return awaitFixedDaytonaDeletion(ctx, client, acknowledged) })
 }
 
 func bindFixedDaytonaClaim(client fixedDaytonaDeletionAPI, claim LeaseClaim, sandbox *api.Sandbox) (LeaseClaim, error) {
@@ -532,6 +555,12 @@ func acknowledgeFixedDaytonaDeletion(ctx context.Context, client fixedDaytonaDel
 		if acknowledged != claim.CloudID {
 			return claim, exit(4, "Daytona deletion acknowledgement names a different resource; retain its ownership record")
 		}
+		// A recorded acknowledgement only authorizes absence under the same
+		// endpoint and organization; other credentials could see a 404 for a
+		// resource that still exists.
+		if err := verifyFixedDaytonaOrganization(ctx, client, claim); err != nil {
+			return claim, err
+		}
 		return claim, nil
 	}
 	sandbox, err := client.GetSandbox(ctx, claim.CloudID)
@@ -549,7 +578,7 @@ func acknowledgeFixedDaytonaDeletion(ctx context.Context, client fixedDaytonaDel
 			return claim, err
 		}
 		if live == nil {
-			return recordFixedDaytonaDeletionAcknowledgement(claim)
+			return recordFixedDaytonaDeletionAcknowledgement(claim), nil
 		}
 		if live.GetId() != claim.CloudID {
 			return claim, exit(4, "Daytona fixed attempt inventory names a different resource; retain its ownership record")
@@ -578,22 +607,23 @@ func acknowledgeFixedDaytonaDeletion(ctx context.Context, client fixedDaytonaDel
 			return claim, exit(4, "Daytona did not acknowledge destruction of the fixed resource")
 		}
 	}
-	return recordFixedDaytonaDeletionAcknowledgement(claim)
+	return recordFixedDaytonaDeletionAcknowledgement(claim), nil
 }
 
-func recordFixedDaytonaDeletionAcknowledgement(claim LeaseClaim) (LeaseClaim, error) {
-	expected := claim
+// The caller persists the returned claim under the exclusive claim fence.
+func recordFixedDaytonaDeletionAcknowledgement(claim LeaseClaim) LeaseClaim {
 	intent := *claim.FixedCreateIntent
 	intent.Attempt = maps.Clone(intent.Attempt)
 	intent.Attempt[fixedDaytonaDeletionAcknowledged] = claim.CloudID
 	intent.Attempt[fixedDaytonaDeletionAcknowledged+"_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 	claim.FixedCreateIntent = &intent
-	return core.ReplaceLeaseClaimIfUnchangedDurableReturning(claim.LeaseID, expected, claim)
+	return claim
 }
 
 // awaitFixedDaytonaDeletion waits for the acknowledged resource to disappear.
-// After an acknowledgement, a 404 for that exact UUID is the terminal witness;
-// native soft deletion may keep the renamed resource visible for a while.
+// After an acknowledgement, a 404 for that exact UUID under the claim's
+// verified endpoint and organization is the terminal witness; native soft
+// deletion may keep the renamed resource visible for a while.
 func awaitFixedDaytonaDeletion(ctx context.Context, client fixedDaytonaDeletionAPI, claim LeaseClaim) error {
 	if claim.FixedCreateIntent.Attempt[fixedDaytonaDeletionAcknowledged] != claim.CloudID {
 		return exit(4, "Daytona fixed cleanup requires an acknowledged deletion")
@@ -602,7 +632,7 @@ func awaitFixedDaytonaDeletion(ctx context.Context, client fixedDaytonaDeletionA
 		sandbox, err := client.GetSandbox(ctx, claim.CloudID)
 		if err != nil {
 			if daytonaIsNotFoundError(err) {
-				return nil
+				return verifyFixedDaytonaOrganization(ctx, client, claim)
 			}
 			return err
 		}

@@ -698,3 +698,73 @@ func TestDaytonaFixedScopeAndResourceDriftPreserveClaim(t *testing.T) {
 		})
 	}
 }
+
+func TestDaytonaFixedCleanupRefusesChangedClaimBeforeDeletion(t *testing.T) {
+	f, b, req := newFixedDaytonaFixture(t)
+	if _, err := b.Acquire(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	stale, _, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another owner transfers the repository between the release read and the
+	// fenced DELETE; the stale snapshot must not reach the native call.
+	transferred := stale
+	transferred.RepoRoot = t.TempDir()
+	transferred, err = core.ReplaceLeaseClaimIfUnchangedDurableReturning(stale.LeaseID, stale, transferred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.releaseFixed(t.Context(), stale, ""); err == nil {
+		t.Fatal("stale claim snapshot released the lease")
+	}
+	after, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+	if f.deletes != 0 || mustJSON(t, after) != mustJSON(t, transferred) {
+		t.Fatalf("changed claim was deleted or mutated: deletes=%d", f.deletes)
+	}
+	if err := b.releaseFixed(t.Context(), transferred, ""); err != nil {
+		t.Fatal(err)
+	}
+	if final, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID); final.FixedCreateIntent.State != "released" || f.deletes != 1 {
+		t.Fatalf("current owner could not release: deletes=%d", f.deletes)
+	}
+}
+
+func TestDaytonaFixedAcknowledgedCleanupRevalidatesOrganization(t *testing.T) {
+	f, b, req := newFixedDaytonaFixture(t)
+	lease, err := b.Acquire(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.destroyingReads = 1000
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	if err := b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease}); err == nil {
+		t.Fatal("a still-visible resource retired the claim")
+	}
+	claim, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+	if claim.FixedCreateIntent.Attempt[fixedDaytonaDeletionAcknowledged] != "sandbox-test" || f.deletes != 1 {
+		t.Fatalf("deletion acknowledgement missing: %+v", claim)
+	}
+	// The resource is gone now, but other credentials cannot turn that 404
+	// into completion: absence is only meaningful under the claim's organization.
+	f.destroyingReads = 0
+	cfg := b.cfg
+	cfg.Daytona.OrganizationID = "other-org"
+	drifted := &daytonaLeaseBackend{cfg: cfg, rt: b.rt}
+	if err := drifted.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err == nil {
+		t.Fatal("foreign organization retired an acknowledged claim")
+	}
+	after, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+	if mustJSON(t, after) != mustJSON(t, claim) || f.deletes != 1 {
+		t.Fatal("organization drift changed custody")
+	}
+	restarted := &daytonaLeaseBackend{cfg: b.cfg, rt: b.rt}
+	if err := restarted.Stop(t.Context(), StopRequest{ID: req.RequestedLeaseID}); err != nil {
+		t.Fatal(err)
+	}
+	if final, _, _ := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID); final.FixedCreateIntent.State != "released" || f.deletes != 1 {
+		t.Fatalf("acknowledged terminal reconciliation failed: deletes=%d", f.deletes)
+	}
+}

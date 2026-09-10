@@ -232,7 +232,10 @@ anything becomes terminal: the DELETE response naming the exact owned sandbox,
 an owned sandbox already observed as being destroyed, or an authorized
 organization-scoped search for the exact create attempt that finds no
 resource-holding sandbox. After that acknowledgement, a 404 for the recorded
-UUID retires the claim. A DELETE whose response was lost records nothing; the
+UUID retires the claim. The DELETE and its acknowledgement run under the
+exclusive claim fence, so a live run or repository transfer cannot race them,
+and a previously acknowledged claim re-establishes its endpoint and
+organization before absence is accepted. A DELETE whose response was lost records nothing; the
 next stop re-reads the resource and resolves it through the inventory search
 once the organization is re-established. An unknown UUID from a lost create
 response uses the same bounded exact-attempt search: one live match is adopted
