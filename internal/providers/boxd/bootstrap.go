@@ -3,9 +3,8 @@ package boxd
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"golang.org/x/crypto/ssh/knownhosts"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -13,15 +12,19 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/boxd/boxdapi"
 	"golang.org/x/crypto/ssh"
-	"nhooyr.io/websocket"
+	"golang.org/x/crypto/ssh/knownhosts"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const hostKeyMarker = "CRABBOX_BOXD_HOST_KEY "
-const maxTerminalOutput = 256 << 10
+const maxExecOutput = 256 << 10
 
-// Only public keys enter this script. The terminal is authenticated by HTTPS;
-// its host-key output is authoritative before the first SSH connection.
+// Only public keys enter this script. The exec stream is authenticated gRPC
+// over TLS; its host-key output is authoritative before the first SSH
+// connection.
 func bootstrapCommand(publicKey string) (string, error) {
 	key, _, options, rest, err := ssh.ParseAuthorizedKey([]byte(publicKey))
 	if err != nil || len(options) != 0 || len(strings.TrimSpace(string(rest))) != 0 {
@@ -65,76 +68,85 @@ fi
 host_key="$(ssh-keygen -y -f /etc/ssh/ssh_host_ed25519_key)"
 printf '\n` + hostKeyMarker + `%s\n' "$host_key"
 `
-	// The interactive shell may echo this line before stty takes effect. Base64
-	// keeps the output marker out of that echo, so it cannot forge completion.
-	return "stty -echo; exec bash -c 'set -o pipefail; printf %s " + base64.StdEncoding.EncodeToString([]byte(script)) + " | base64 -d | sudo -n bash'\n", nil
+	// The exec runs without a PTY, so nothing echoes the command line back;
+	// base64 additionally keeps the output marker out of the command itself,
+	// so a transcript of the sent command cannot forge completion.
+	return "bash -c 'set -o pipefail; printf %s " + base64.StdEncoding.EncodeToString([]byte(script)) + " | base64 -d | sudo -n bash'", nil
 }
 
-func (c *consoleClient) bootstrap(ctx context.Context, id, publicKey string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
+// bootstrap installs the per-lease key and dedicated sshd through the
+// authenticated gRPC exec stream and returns the guest's SSH host key. A
+// nonzero exit code on any chunk fails the bootstrap; a clean end of stream
+// without one is completion with exit code zero, and the host-key marker must
+// then be present on stdout.
+func (c *apiClient) bootstrap(ctx context.Context, id, publicKey string) (string, error) {
+	if err := validateMachineID(id); err != nil {
+		return "", err
+	}
 	command, err := bootstrapCommand(publicKey)
 	if err != nil {
 		return "", err
 	}
-	route, err := machineRoute(id, "term")
+	ctx, cancel, err := c.authed(ctx, 2*time.Minute)
 	if err != nil {
 		return "", err
 	}
-	u := *c.base
-	u.Scheme, u.Path = "wss", route
-	q := u.Query()
-	q.Set("token", c.token)
-	q.Set("cols", "120")
-	q.Set("rows", "40")
-	u.RawQuery = q.Encode()
-	conn, _, err := websocket.Dial(ctx, u.String(), &websocket.DialOptions{HTTPClient: c.http})
+	defer cancel()
+	stream, err := c.api.Exec(ctx)
 	if err != nil {
-		return "", terminalError(ctx, "connect")
+		return "", execError(ctx, err, "connect")
 	}
-	defer conn.CloseNow()
-	conn.SetReadLimit(maxTerminalOutput)
-	if err := conn.Write(ctx, websocket.MessageBinary, []byte(command)); err != nil {
-		return "", terminalError(ctx, "write")
+	if err := stream.Send(&boxdapi.ExecChunk{VmId: id, Command: command}); err != nil {
+		return "", execError(ctx, err, "write")
 	}
-	var output strings.Builder
-	total := 0
+	if err := stream.CloseSend(); err != nil {
+		return "", execError(ctx, err, "write")
+	}
+	var stdout strings.Builder
+	total, exitCode := 0, 0
 	for {
-		kind, data, err := conn.Read(ctx)
+		chunk, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
 		if err != nil {
-			return "", terminalError(ctx, "disconnected without completion")
+			return "", execError(ctx, err, "disconnected without completion")
 		}
-		total += len(data)
-		if total > maxTerminalOutput {
-			return "", core.Exit(5, "boxd terminal output exceeded limit")
+		total += len(chunk.GetData())
+		if total > maxExecOutput {
+			return "", core.Exit(5, "boxd exec output exceeded limit")
 		}
-		if kind == websocket.MessageBinary {
-			output.Write(data)
-			continue
+		if chunk.GetExitCode() != 0 {
+			exitCode = int(chunk.GetExitCode())
 		}
-		var event struct {
-			Type string `json:"type"`
-			Code *int   `json:"code"`
+		if len(chunk.GetData()) > 0 && !chunk.GetIsStderr() {
+			stdout.Write(chunk.GetData())
 		}
-		if json.Unmarshal(data, &event) != nil || event.Type != "exit" || event.Code == nil {
-			return "", core.Exit(5, "invalid boxd terminal completion")
-		}
-		if *event.Code != 0 {
-			return "", core.Exit(5, "boxd guest bootstrap failed (nonzero terminal exit)")
-		}
-		return terminalHostKey(output.String())
 	}
+	if exitCode != 0 {
+		return "", core.Exit(5, "boxd guest bootstrap failed (nonzero exit)")
+	}
+	return execHostKey(stdout.String())
 }
 
-func terminalError(ctx context.Context, phase string) error {
+func execError(ctx context.Context, err error, phase string) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	// WebSocket errors can contain the JWT query, unsafe close reasons or bodies.
-	return core.Exit(5, "boxd authenticated terminal %s", phase)
+	// A cancellation can surface as a stream status before the local context
+	// registers as expired; report it as the context error either way.
+	switch status.Code(err) {
+	case codes.DeadlineExceeded:
+		return context.DeadlineExceeded
+	case codes.Canceled:
+		return context.Canceled
+	}
+	// Stream errors can carry vendor status text or partial output. Withhold
+	// them from diagnostics.
+	return core.Exit(5, "boxd authenticated exec %s", phase)
 }
 
-func terminalHostKey(output string) (string, error) {
+func execHostKey(output string) (string, error) {
 	var result string
 	for _, line := range strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
 		if !strings.HasPrefix(line, hostKeyMarker) {

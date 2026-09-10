@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -16,6 +15,7 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"google.golang.org/grpc/codes"
 )
 
 const (
@@ -29,7 +29,7 @@ type backend struct {
 	cfg        core.Config
 	rt         core.Runtime
 	clientOnce sync.Once
-	api        *consoleClient
+	api        *apiClient
 	clientErr  error
 	// Package-private seams keep tests off real SSH and provider infrastructure.
 	readyTimeout, pollInterval, absenceGrace, rollbackTimeout time.Duration
@@ -53,17 +53,27 @@ func (b *backend) now() time.Time {
 	}
 	return time.Now().UTC()
 }
-func (b *backend) client() (*consoleClient, error) {
+func (b *backend) client() (*apiClient, error) {
 	b.clientOnce.Do(func() {
-		token := os.Getenv("CRABBOX_BOXD_TOKEN")
-		if token == "" {
-			token = os.Getenv("BOXD_TOKEN")
+		key, err := apiKeyFromEnv()
+		if err != nil {
+			b.clientErr = err
+			return
 		}
-		b.api, b.clientErr = newConsoleClient(b.cfg, b.rt, token)
+		b.api, b.clientErr = newAPIClient(b.cfg, b.rt, key)
 	})
 	return b.api, b.clientErr
 }
 func (b *backend) scope() string { return Provider{}.ClaimScope(b.cfg) }
+
+// scopeMatches accepts the current claim scope and the exact scope the
+// earlier console-based provider wrote, so pre-migration claims remain
+// visible to lifecycle inspection and cleanup. Every action on such a claim
+// still passes the authenticated-user, immutable-ID, and machine-context
+// fences; only new acquisitions write scopes, always in the current format.
+func (b *backend) scopeMatches(scope string) bool {
+	return scope == b.scope() || scope == legacyClaimScope(b.cfg)
+}
 
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	ctx, cancel := context.WithTimeout(ctx, b.readyTimeout)
@@ -108,7 +118,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		if err != nil {
 			return core.Server{}, core.SSHTarget{}, false, err
 		}
-		if _, err := machineRoute(vm.ID, ""); err != nil {
+		if err := validateMachineID(vm.ID); err != nil {
 			return core.Server{}, core.SSHTarget{}, false, core.Exit(5, "boxd create response has no valid immutable machine ID")
 		}
 		server.CloudID = vm.ID
@@ -117,10 +127,10 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		return server, core.SSHTarget{}, true, nil
 	})
 	if err != nil {
-		var rejection *consoleHTTPError
+		var rejection *grpcStatusError
 		if errors.As(err, &rejection) {
 			switch rejection.Code {
-			case 400, 401, 403, 422:
+			case codes.InvalidArgument, codes.Unauthenticated, codes.PermissionDenied, codes.AlreadyExists, codes.ResourceExhausted:
 				// A definite rejection did not allocate a resource. Remove only
 				// our unchanged pending intent; never retain it as ambiguous.
 				return core.LeaseTarget{}, errors.Join(err, core.RemoveLeaseClaimIfUnchanged(id, claim))
@@ -128,7 +138,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 		// Transport/server errors and malformed success can follow a committed
 		// create. Do not retry the write or guess ownership from inventory names.
-		return core.LeaseTarget{}, errors.Join(err, core.Exit(5, "boxd creation is ambiguous; retained claim %s (machine %s). Inspect the HTTPS console before manual recovery; Crabbox will not adopt a machine by name", id, labels["machine"]))
+		return core.LeaseTarget{}, errors.Join(err, core.Exit(5, "boxd creation is ambiguous; retained claim %s (machine %s). Inspect the boxd console before manual recovery; Crabbox will not adopt a machine by name", id, labels["machine"]))
 	}
 	claim = createdClaim
 	rollback := func(cause error) (core.LeaseTarget, error) {
@@ -149,7 +159,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		return core.LeaseTarget{}, cause
 	}
 	if req.OnAcquired != nil {
-		if err := req.OnAcquired(leaseFromClaim(claim, consoleMachine{})); err != nil {
+		if err := req.OnAcquired(leaseFromClaim(claim, machine{})); err != nil {
 			return rollback(err)
 		}
 	}
@@ -165,45 +175,63 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	return core.LeaseTarget{LeaseID: id, Server: server, SSH: target}, nil
 }
 
-func (b *backend) authenticateClaim(ctx context.Context, c *consoleClient, claim core.LeaseClaim) error {
+func (b *backend) authenticateClaim(ctx context.Context, c *apiClient, claim core.LeaseClaim) error {
 	user, err := c.whoami(ctx)
 	if err != nil {
 		return err
 	}
-	if claim.Provider != providerName || claim.ProviderScope != b.scope() || claim.Labels["user_id"] != user || claim.Labels["lease"] != claim.LeaseID {
+	if claim.Provider != providerName || !b.scopeMatches(claim.ProviderScope) || claim.Labels["user_id"] != user || claim.Labels["lease"] != claim.LeaseID {
 		return core.Exit(4, "boxd claim origin, organization, or authenticated account does not match")
 	}
 	if claim.CloudID == "" || claim.Labels["vm_id"] != claim.CloudID {
-		return core.Exit(4, "boxd claim has no verified immutable machine ID; inspect the HTTPS console for manual recovery")
+		return core.Exit(4, "boxd claim has no verified immutable machine ID; inspect the boxd console for manual recovery")
 	}
-	_, err = machineRoute(claim.CloudID, "")
-	return err
+	return validateMachineID(claim.CloudID)
 }
 
-func findMachine(rows []consoleMachine, id string) (consoleMachine, bool) {
-	for _, vm := range rows {
-		if vm.ID == id {
-			return vm, true
+// fenceMachineContext rejects a machine outside this configuration's account
+// context: the gRPC API has no per-machine owner field, so the immutable-ID
+// binding is the primary ownership fence and these are its corroboration —
+// Crabbox never creates shared machines, and the billing context must match
+// the configured organization (name or ID; empty means the personal quota).
+func (b *backend) fenceMachineContext(vm machine) error {
+	if vm.SharedOrg != "" {
+		return core.Exit(4, "boxd machine is shared with an organization; refusing a machine outside its ownership claim")
+	}
+	if b.cfg.Boxd.Org == "" {
+		if vm.BillingOrg != "" || vm.BillingOrgID != "" {
+			return core.Exit(4, "boxd machine billing organization does not match its ownership claim")
 		}
+		return nil
 	}
-	return consoleMachine{}, false
+	if vm.BillingOrg != b.cfg.Boxd.Org && vm.BillingOrgID != b.cfg.Boxd.Org {
+		return core.Exit(4, "boxd machine billing organization does not match its ownership claim")
+	}
+	return nil
 }
-func (b *backend) observe(ctx context.Context, c *consoleClient, claim core.LeaseClaim) (consoleMachine, bool, error) {
+func (b *backend) observe(ctx context.Context, c *apiClient, claim core.LeaseClaim) (machine, bool, error) {
 	if err := b.authenticateClaim(ctx, c, claim); err != nil {
-		return consoleMachine{}, false, err
+		return machine{}, false, err
 	}
-	rows, err := c.machines(ctx)
+	vm, found, err := c.getVM(ctx, claim.CloudID)
 	if err != nil {
-		return consoleMachine{}, false, err
+		return machine{}, false, err
 	}
-	vm, found := findMachine(rows, claim.CloudID)
-	if found && vm.OwnerID != claim.Labels["user_id"] {
-		return consoleMachine{}, false, core.Exit(4, "boxd machine owner does not match its authenticated ownership claim")
+	// A destroyed machine remains readable as a tombstone; report it as
+	// absent for lifecycle decisions. deleteClaim separately reads the
+	// tombstone as definitive deletion proof.
+	if found && machineState(vm.Status) == "deleted" {
+		return machine{}, false, nil
+	}
+	if found {
+		if err := b.fenceMachineContext(vm); err != nil {
+			return machine{}, false, err
+		}
 	}
 	return vm, found, nil
 }
 
-func (b *backend) prepare(ctx context.Context, c *consoleClient, claim core.LeaseClaim) (core.LeaseTarget, error) {
+func (b *backend) prepare(ctx context.Context, c *apiClient, claim core.LeaseClaim) (core.LeaseTarget, error) {
 	ctx, cancel := context.WithTimeout(ctx, b.readyTimeout)
 	defer cancel()
 	vm, found, err := b.observe(ctx, c, claim)
@@ -218,10 +246,10 @@ func (b *backend) prepare(ctx context.Context, c *consoleClient, claim core.Leas
 			return core.LeaseTarget{}, err
 		}
 	}
-	result, err := shared.Poll(ctx, 0, b.pollInterval, shared.SleepContext, func(ctx context.Context) (consoleMachine, error) {
+	result, err := shared.Poll(ctx, 0, b.pollInterval, shared.SleepContext, func(ctx context.Context) (machine, error) {
 		vm, _, err := b.observe(ctx, c, claim)
 		return vm, err
-	}, func(_ context.Context, vm consoleMachine, err error) (bool, error) {
+	}, func(_ context.Context, vm machine, err error) (bool, error) {
 		if err != nil {
 			return false, err
 		}
@@ -289,7 +317,7 @@ func (b *backend) prepare(ctx context.Context, c *consoleClient, claim core.Leas
 	return lease, nil
 }
 
-func leaseFromClaim(claim core.LeaseClaim, vm consoleMachine) core.LeaseTarget {
+func leaseFromClaim(claim core.LeaseClaim, vm machine) core.LeaseTarget {
 	labels := shared.CloneLabels(claim.Labels)
 	state := labels["state"]
 	if vm.ID != "" {
@@ -319,18 +347,31 @@ func machineState(status string) string {
 
 func (b *backend) resolveClaim(identifier string) (core.LeaseClaim, error) {
 	claim, found, err := shared.ResolveProviderClaimStrict(identifier, providerName, b.scope())
+	if err == nil && found {
+		return claim, nil
+	}
+	// A canonical lease ID under the pre-migration scope resolves as a strict
+	// mismatch against the current scope; retry with the exact legacy scope
+	// before reporting the original outcome.
+	legacy, legacyFound, legacyErr := shared.ResolveProviderClaimStrict(identifier, providerName, legacyClaimScope(b.cfg))
+	if legacyErr == nil && legacyFound {
+		return legacy, nil
+	}
 	if err != nil {
 		return core.LeaseClaim{}, err
 	}
-	if !found {
-		return core.LeaseClaim{}, core.Exit(4, "boxd lease has no matching local ownership claim; machines are never adopted by name")
-	}
-	return claim, nil
+	return core.LeaseClaim{}, core.Exit(4, "boxd lease has no matching local ownership claim; machines are never adopted by name")
 }
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
 	claim, err := b.resolveClaim(req.ID)
 	if err != nil {
 		return core.LeaseTarget{}, err
+	}
+	// A pre-migration claim supports inspection and release only: its SSH
+	// bootstrap state predates this transport, so guest access requires a
+	// fresh acquisition under the current scope.
+	if claim.ProviderScope != b.scope() && !(req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe)) {
+		return core.LeaseTarget{}, core.Exit(4, "boxd claim predates the gRPC provider and supports status, stop, and cleanup only; acquire a new lease for guest access")
 	}
 	c, err := b.client()
 	if err != nil {
@@ -399,7 +440,11 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 func (b *backend) exactClaim(lease core.LeaseTarget) (core.LeaseClaim, error) {
 	claim, err := shared.RequireExactClaim(shared.ClaimBinding{Provider: providerName, ProviderScope: b.scope(), ExactProviderScope: true, LeaseID: lease.LeaseID, CloudID: lease.Server.CloudID})
 	if err != nil {
-		return core.LeaseClaim{}, err
+		legacy, legacyErr := shared.RequireExactClaim(shared.ClaimBinding{Provider: providerName, ProviderScope: legacyClaimScope(b.cfg), ExactProviderScope: true, LeaseID: lease.LeaseID, CloudID: lease.Server.CloudID})
+		if legacyErr != nil {
+			return core.LeaseClaim{}, err
+		}
+		claim = legacy
 	}
 	if snapshot, exists, set := core.ServerLeaseClaimSnapshot(lease.Server); set {
 		if !exists {
@@ -414,11 +459,11 @@ func (b *backend) exactClaim(lease core.LeaseTarget) (core.LeaseClaim, error) {
 	return claim, nil
 }
 
-func (b *backend) deleteClaim(ctx context.Context, c *consoleClient, claim core.LeaseClaim) error {
+func (b *backend) deleteClaim(ctx context.Context, c *apiClient, claim core.LeaseClaim) error {
 	return b.deleteClaimWithOutcome(ctx, c, claim, &core.ReleaseLeaseOutcome{})
 }
 
-func (b *backend) deleteClaimWithOutcome(ctx context.Context, c *consoleClient, claim core.LeaseClaim, outcome *core.ReleaseLeaseOutcome) error {
+func (b *backend) deleteClaimWithOutcome(ctx context.Context, c *apiClient, claim core.LeaseClaim, outcome *core.ReleaseLeaseOutcome) error {
 	ctx, cancel := context.WithTimeout(ctx, b.rollbackTimeout)
 	defer cancel()
 	return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
@@ -431,17 +476,33 @@ func (b *backend) deleteClaimWithOutcome(ctx context.Context, c *consoleClient, 
 				return err
 			}
 		}
-		// An acknowledged write is not deletion proof. Require consistent inventory
-		// absence across a grace period, checking the authenticated account each time.
+		// An acknowledged write is not deletion proof. A "destroyed" tombstone
+		// on the immutable ID is definitive; plain absence must instead hold
+		// across a grace period, checking the authenticated account each time.
 		var absentSince time.Time
-		_, err = shared.Poll(ctx, 0, b.pollInterval, shared.SleepContext, func(ctx context.Context) (bool, error) {
-			_, found, err := b.observe(ctx, c, claim)
-			return !found, err
-		}, func(_ context.Context, absent bool, err error) (bool, error) {
+		_, err = shared.Poll(ctx, 0, b.pollInterval, shared.SleepContext, func(ctx context.Context) (string, error) {
+			if err := b.authenticateClaim(ctx, c, claim); err != nil {
+				return "", err
+			}
+			vm, found, err := c.getVM(ctx, claim.CloudID)
+			if err != nil {
+				return "", err
+			}
+			if !found {
+				return "absent", nil
+			}
+			if machineState(vm.Status) == "deleted" {
+				return "tombstone", nil
+			}
+			return "", b.fenceMachineContext(vm)
+		}, func(_ context.Context, state string, err error) (bool, error) {
 			if err != nil {
 				return false, err
 			}
-			if !absent {
+			if state == "tombstone" {
+				return true, nil
+			}
+			if state != "absent" {
 				absentSince = time.Time{}
 				return false, nil
 			}
@@ -475,7 +536,7 @@ func (b *backend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if err != nil {
 		return err
 	}
-	if deleteOnRelease(leaseFromClaim(claim, consoleMachine{}), b.cfg) {
+	if deleteOnRelease(leaseFromClaim(claim, machine{}), b.cfg) {
 		return b.deleteClaimWithOutcome(ctx, c, claim, outcome)
 	}
 	labels := shared.CloneLabels(claim.Labels)
@@ -545,22 +606,30 @@ func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseVie
 	if err != nil {
 		return nil, err
 	}
-	rows, err := c.machines(ctx)
-	if err != nil {
-		return nil, err
-	}
 	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return nil, err
 	}
 	out := make([]core.LeaseView, 0)
 	for _, claim := range claims {
-		if claim.Provider != providerName || claim.ProviderScope != b.scope() || claim.Labels["user_id"] != user {
+		if claim.Provider != providerName || !b.scopeMatches(claim.ProviderScope) || claim.Labels["user_id"] != user {
 			continue
 		}
-		vm, found := findMachine(rows, claim.CloudID)
-		if found && vm.OwnerID != user {
-			return nil, core.Exit(4, "boxd machine owner does not match its claim")
+		var vm machine
+		found := false
+		if claim.CloudID != "" {
+			vm, found, err = c.getVM(ctx, claim.CloudID)
+			if err != nil {
+				return nil, err
+			}
+			if found && machineState(vm.Status) == "deleted" {
+				vm, found = machine{}, false
+			}
+			if found {
+				if err := b.fenceMachineContext(vm); err != nil {
+					return nil, err
+				}
+			}
 		}
 		lease := leaseFromClaim(claim, vm)
 		if !found && claim.CloudID != "" {
@@ -590,7 +659,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	for _, server := range views {
 		claim, _, _ := core.ServerLeaseClaimSnapshot(server)
 		if claim.CloudID == "" {
-			fmt.Fprintf(b.rt.Stderr, "skip lease=%s: ambiguous creation needs manual HTTPS console recovery\n", claim.LeaseID)
+			fmt.Fprintf(b.rt.Stderr, "skip lease=%s: ambiguous creation needs manual boxd console recovery\n", claim.LeaseID)
 			continue
 		}
 		eligible, reason := core.ShouldCleanupServer(server, b.now())

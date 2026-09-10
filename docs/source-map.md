@@ -119,10 +119,12 @@ SSH-lease providers:
   lives in `vmd/` and is embedded into the helper by `scripts/build-vmd.sh`
   plus `-tags vmdembed`; release packaging is in `.goreleaser.yaml` and the
   macOS CI/release jobs
-- Boxd KVM microVMs via the HTTPS console API, authenticated WSS guest
-  bootstrap, and per-lease SSH trust: `internal/providers/boxd`; config wiring
-  lives in `internal/cli/config.go`; explicit HTTPS device login lives in
-  `scripts/boxd-login.mjs`
+- Boxd KVM microVMs via the TLS gRPC API (API-key auth through the HTTPS
+  console exchange), exec-stream guest bootstrap, and per-lease SSH trust:
+  `internal/providers/boxd`; the vendored proto subset and generated stubs
+  live in `internal/providers/boxd/proto` and `internal/providers/boxd/boxdapi`
+  (regenerate with `scripts/gen-boxd-proto.sh`); config wiring lives in
+  `internal/cli/config.go`
 - Canonical Multipass local Ubuntu VM: `internal/providers/multipass`
 - Cirrus Labs tart local macOS VM: `internal/providers/tart`
 - Lume local macOS VM cloned from a stopped golden image: `internal/providers/lume`

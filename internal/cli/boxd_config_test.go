@@ -4,7 +4,7 @@ import "testing"
 
 func TestBoxdConfigDefaults(t *testing.T) {
 	cfg := baseConfig()
-	if cfg.Boxd.APIURL != "https://app.boxd.sh" || cfg.Boxd.WorkRoot != "/home/boxd/crabbox" || !cfg.Boxd.DeleteOnRelease {
+	if cfg.Boxd.APIURL != "https://app.boxd.sh" || cfg.Boxd.GRPCURL != "boxd.sh:9443" || cfg.Boxd.WorkRoot != "/home/boxd/crabbox" || !cfg.Boxd.DeleteOnRelease {
 		t.Fatalf("boxd defaults=%#v", cfg.Boxd)
 	}
 }
@@ -12,10 +12,12 @@ func TestBoxdConfigDefaults(t *testing.T) {
 func TestBoxdUntrustedConfigCannotRedirectCredentialedAPI(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Boxd.APIURL = "https://trusted.example.test"
+	cfg.Boxd.GRPCURL = "trusted.example.test:9443"
 	cfg.Boxd.Org = "trusted-org"
 	deleteOnRelease := false
 	file := fileConfig{Boxd: &fileBoxdConfig{
 		APIURL:          "https://repository.example.test",
+		GRPCURL:         "repository.example.test:9443",
 		Org:             "repository-org",
 		WorkRoot:        "/home/boxd/project",
 		DeleteOnRelease: &deleteOnRelease,
@@ -23,7 +25,7 @@ func TestBoxdUntrustedConfigCannotRedirectCredentialedAPI(t *testing.T) {
 	if err := applyFileConfigWithTrust(&cfg, file, false); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Boxd.APIURL != "https://trusted.example.test" || cfg.Boxd.Org != "trusted-org" {
+	if cfg.Boxd.APIURL != "https://trusted.example.test" || cfg.Boxd.GRPCURL != "trusted.example.test:9443" || cfg.Boxd.Org != "trusted-org" {
 		t.Fatalf("untrusted config redirected the credentialed API: %#v", cfg.Boxd)
 	}
 	if cfg.Boxd.WorkRoot != "/home/boxd/project" || cfg.Boxd.DeleteOnRelease {
@@ -38,13 +40,14 @@ func TestBoxdTrustedConfigCanSelectOriginAndAccount(t *testing.T) {
 	cfg := baseConfig()
 	file := fileConfig{Boxd: &fileBoxdConfig{
 		APIURL:   "https://trusted.example.test",
+		GRPCURL:  "trusted.example.test:9443",
 		Org:      "trusted-org",
 		WorkRoot: "/home/boxd/project",
 	}}
 	if err := applyFileConfigWithTrust(&cfg, file, true); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Boxd.APIURL != "https://trusted.example.test" || cfg.Boxd.Org != "trusted-org" || cfg.Boxd.WorkRoot != "/home/boxd/project" {
+	if cfg.Boxd.APIURL != "https://trusted.example.test" || cfg.Boxd.GRPCURL != "trusted.example.test:9443" || cfg.Boxd.Org != "trusted-org" || cfg.Boxd.WorkRoot != "/home/boxd/project" {
 		t.Fatalf("trusted config was not applied: %#v", cfg.Boxd)
 	}
 }
@@ -52,13 +55,14 @@ func TestBoxdTrustedConfigCanSelectOriginAndAccount(t *testing.T) {
 func TestBoxdEnvironmentConfig(t *testing.T) {
 	cfg := baseConfig()
 	t.Setenv("CRABBOX_BOXD_API_URL", "https://environment.example.test")
+	t.Setenv("CRABBOX_BOXD_GRPC_URL", "environment.example.test:9443")
 	t.Setenv("CRABBOX_BOXD_ORG", "environment-org")
 	t.Setenv("CRABBOX_BOXD_WORK_ROOT", "/home/boxd/environment")
 	t.Setenv("CRABBOX_BOXD_DELETE_ON_RELEASE", "false")
 	if err := applyEnv(&cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Boxd.APIURL != "https://environment.example.test" || cfg.Boxd.Org != "environment-org" ||
+	if cfg.Boxd.APIURL != "https://environment.example.test" || cfg.Boxd.GRPCURL != "environment.example.test:9443" || cfg.Boxd.Org != "environment-org" ||
 		cfg.Boxd.WorkRoot != "/home/boxd/environment" || cfg.Boxd.DeleteOnRelease || !DeleteOnReleaseExplicit(cfg, "boxd") || !IsBoxdWorkRootExplicit(&cfg) {
 		t.Fatalf("environment config was not applied: %#v", cfg.Boxd)
 	}
@@ -67,13 +71,15 @@ func TestBoxdEnvironmentConfig(t *testing.T) {
 func TestBoxdEmptyEnvironmentClearsTrustedAccountContext(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Boxd.APIURL = "https://trusted.example.test"
+	cfg.Boxd.GRPCURL = "trusted.example.test:9443"
 	cfg.Boxd.Org = "trusted-org"
 	t.Setenv("CRABBOX_BOXD_API_URL", "")
+	t.Setenv("CRABBOX_BOXD_GRPC_URL", "")
 	t.Setenv("CRABBOX_BOXD_ORG", "")
 	if err := applyEnv(&cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Boxd.APIURL != "" || cfg.Boxd.Org != "" {
+	if cfg.Boxd.APIURL != "" || cfg.Boxd.GRPCURL != "" || cfg.Boxd.Org != "" {
 		t.Fatalf("explicit empty environment did not clear trusted vendor context: %#v", cfg.Boxd)
 	}
 }
