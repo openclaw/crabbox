@@ -221,6 +221,27 @@ provider lookups remain separate from these raw-empty rules.
 Native mount filtering, lookup, credentials, class selection and OS mappings remain
 provider policy. The following field instructions apply to generated owners.
 
+## Local Container's concrete source owner
+
+`config_local_container.go` keeps eleven runtime members distinct from nine
+file/environment settings. The file type retains two pointer booleans and its
+existing omissions. CLI-only volumes and transient checkpoint metadata remain
+runtime data, not new persisted settings; their list/map identities survive
+ordinary source application. The initializer accepts the resolved image and
+keeps the raw work root empty without marking compiled defaults explicit.
+
+Three accepted-input operations pair Runtime, Image and WorkRoot assignments
+with their existing source markers. File/environment predicates and scalar flag
+visitation stay with their current callers. The flag work-root operation sets
+the provider bit before the independent generic root copy/snapshot; later
+observers see the same state, including the existing empty-snapshot semantics.
+No concurrency guarantee or callback layer is introduced.
+
+Flag storage, raw volume-list behavior, creation-only checks and provider
+defaults remain provider-owned. NoHostname stays file/environment-only. This
+concrete owner needs neither generated runtime-state exclusions nor a new flag
+list framework; native, socket, mount and checkpoint behavior is unchanged.
+
 ## Apple Container's shared concrete owner
 
 `config_apple_container.go` owns all seven shared settings without generated

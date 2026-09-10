@@ -891,20 +891,6 @@ type SpritesConfig struct {
 	WorkRoot string
 }
 
-type LocalContainerConfig struct {
-	Runtime            string
-	Image              string
-	User               string
-	WorkRoot           string
-	CPUs               int
-	Memory             string
-	Network            string
-	DockerSocket       bool
-	NoHostname         bool
-	Volumes            []string
-	CheckpointMetadata map[string]string `yaml:"-" json:"-"`
-}
-
 type MXCConfig struct {
 	CLIPath           string
 	Version           string
@@ -2580,12 +2566,7 @@ func baseConfig() Config {
 			APIURL:   "https://api.sprites.dev",
 			WorkRoot: "/home/sprite/crabbox",
 		},
-		LocalContainer: LocalContainerConfig{
-			Runtime: "docker",
-			Image:   containerImage,
-			User:    "crabbox",
-			Network: "bridge",
-		},
+		LocalContainer: initialLocalContainerConfig(containerImage),
 		AppleContainer: initialAppleContainerConfig(containerImage),
 		AppleVM:        initialAppleVMConfig(osImageSpecs[osImage].AppleVMImage, osImageSpecs[osImage].AppleVMSHA256),
 		MXC: MXCConfig{
@@ -3464,18 +3445,6 @@ func positiveMinimum(current, candidate int) int {
 type fileSpritesConfig struct {
 	APIURL   string `yaml:"apiUrl,omitempty"`
 	WorkRoot string `yaml:"workRoot,omitempty"`
-}
-
-type fileLocalContainerConfig struct {
-	Runtime      string `yaml:"runtime,omitempty"`
-	Image        string `yaml:"image,omitempty"`
-	User         string `yaml:"user,omitempty"`
-	WorkRoot     string `yaml:"workRoot,omitempty"`
-	CPUs         int    `yaml:"cpus,omitempty"`
-	Memory       string `yaml:"memory,omitempty"`
-	Network      string `yaml:"network,omitempty"`
-	DockerSocket *bool  `yaml:"dockerSocket,omitempty"`
-	NoHostname   *bool  `yaml:"noHostname,omitempty"`
 }
 
 type fileMXCConfig struct {
@@ -5658,38 +5627,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Sprites.WorkRoot = file.Sprites.WorkRoot
 		}
 	}
-	if file.LocalContainer != nil {
-		if file.LocalContainer.Runtime != "" {
-			cfg.LocalContainer.Runtime = file.LocalContainer.Runtime
-			cfg.localContainerRuntimeExplicit = true
-		}
-		if file.LocalContainer.Image != "" {
-			cfg.LocalContainer.Image = file.LocalContainer.Image
-			cfg.localContainerImageExplicit = true
-		}
-		if file.LocalContainer.User != "" {
-			cfg.LocalContainer.User = file.LocalContainer.User
-		}
-		if file.LocalContainer.WorkRoot != "" {
-			cfg.LocalContainer.WorkRoot = file.LocalContainer.WorkRoot
-			cfg.localContainerRootExplicit = true
-		}
-		if file.LocalContainer.CPUs > 0 {
-			cfg.LocalContainer.CPUs = file.LocalContainer.CPUs
-		}
-		if file.LocalContainer.Memory != "" {
-			cfg.LocalContainer.Memory = file.LocalContainer.Memory
-		}
-		if file.LocalContainer.Network != "" {
-			cfg.LocalContainer.Network = file.LocalContainer.Network
-		}
-		applyOptional(&cfg.LocalContainer.DockerSocket, file.LocalContainer.DockerSocket)
-		applyOptional(&cfg.LocalContainer.NoHostname, file.LocalContainer.NoHostname)
-		// NOTE: localContainer.volumes is intentionally NOT loaded from
-		// repo-local config files. Bind mounts expose host paths and must
-		// be an explicit CLI action (--local-container-volume), not
-		// something an untrusted checkout can request via .crabbox.yaml.
-	}
+	applyLocalContainerFile(cfg, file.LocalContainer)
 	if cfg.AppleContainer.applyFile(file.AppleContainer) {
 		MarkAppleContainerImageExplicit(cfg)
 	}
@@ -7377,28 +7315,7 @@ func applyEnv(cfg *Config) error {
 		cfg.credentialProvenance.spritesAPIURL = credentialSourceEnvironment
 	}
 	cfg.Sprites.WorkRoot = getenv("CRABBOX_SPRITES_WORK_ROOT", cfg.Sprites.WorkRoot)
-	if runtimeName := os.Getenv("CRABBOX_LOCAL_CONTAINER_RUNTIME"); runtimeName != "" {
-		cfg.LocalContainer.Runtime = runtimeName
-		cfg.localContainerRuntimeExplicit = true
-	}
-	if image := os.Getenv("CRABBOX_LOCAL_CONTAINER_IMAGE"); image != "" {
-		cfg.LocalContainer.Image = image
-		cfg.localContainerImageExplicit = true
-	}
-	cfg.LocalContainer.User = getenv("CRABBOX_LOCAL_CONTAINER_USER", cfg.LocalContainer.User)
-	if workRoot := os.Getenv("CRABBOX_LOCAL_CONTAINER_WORK_ROOT"); workRoot != "" {
-		cfg.LocalContainer.WorkRoot = workRoot
-		cfg.localContainerRootExplicit = true
-	}
-	cfg.LocalContainer.CPUs = getenvInt("CRABBOX_LOCAL_CONTAINER_CPUS", cfg.LocalContainer.CPUs)
-	cfg.LocalContainer.Memory = getenv("CRABBOX_LOCAL_CONTAINER_MEMORY", cfg.LocalContainer.Memory)
-	cfg.LocalContainer.Network = getenv("CRABBOX_LOCAL_CONTAINER_NETWORK", cfg.LocalContainer.Network)
-	if value, ok := getenvBool("CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET"); ok {
-		cfg.LocalContainer.DockerSocket = value
-	}
-	if value, ok := getenvBool("CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME"); ok {
-		cfg.LocalContainer.NoHostname = value
-	}
+	applyLocalContainerEnv(cfg)
 	if cfg.AppleContainer.applyEnv() {
 		MarkAppleContainerImageExplicit(cfg)
 	}

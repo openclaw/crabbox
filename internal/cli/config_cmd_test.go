@@ -17,6 +17,67 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestLocalContainerOrdinaryFileRoundTrip(t *testing.T) {
+	for _, tc := range []struct {
+		name, input, wantYAML string
+		present, enabled      bool
+	}{
+		{"omitted", "{}", "localContainer: {}\n", false, true},
+		{"null", "{dockerSocket: null, noHostname: null}", "localContainer: {}\n", false, true},
+		{"false", "{dockerSocket: false, noHostname: false}", "localContainer:\n    dockerSocket: false\n    noHostname: false\n", true, false},
+		{"true", "{dockerSocket: true, noHostname: true}", "localContainer:\n    dockerSocket: true\n    noHostname: true\n", true, true},
+		{"zero values", "{runtime: '', image: '', user: '', workRoot: '', cpus: 0, memory: '', network: ''}", "localContainer: {}\n", false, true},
+		{"nine values", "{runtime: custom, image: example:tag, user: runner, workRoot: '~/literal', cpus: 3, memory: 4g, network: custom, dockerSocket: false, noHostname: false}", "localContainer:\n    runtime: custom\n    image: example:tag\n    user: runner\n    workRoot: ~/literal\n    cpus: 3\n    memory: 4g\n    network: custom\n    dockerSocket: false\n    noHostname: false\n", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := isolatedConfigPath(t)
+			if err := os.WriteFile(path, []byte("localContainer: "+tc.input+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file, err := readFileConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if file.LocalContainer == nil || (file.LocalContainer.DockerSocket != nil) != tc.present || (file.LocalContainer.NoHostname != nil) != tc.present {
+				t.Fatal("reader lost pointer boolean presence")
+			}
+			cfg := baseConfig()
+			cfg.Provider = "unselected-config-test"
+			cfg.LocalContainer.DockerSocket, cfg.LocalContainer.NoHostname = !tc.enabled, !tc.enabled
+			if !tc.present {
+				cfg.LocalContainer.DockerSocket, cfg.LocalContainer.NoHostname = true, true
+			}
+			if err := applyFileConfig(&cfg, file); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.LocalContainer.DockerSocket != tc.enabled || cfg.LocalContainer.NoHostname != tc.enabled {
+				t.Fatal("file boolean layering changed")
+			}
+			written, err := writeUserFileConfig(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if written != path {
+				t.Fatalf("write path=%q, want %q", written, path)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != tc.wantYAML {
+				t.Fatalf("written YAML=%q, want %q", data, tc.wantYAML)
+			}
+			again, err := readFileConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(again, file) {
+				t.Fatal("file values changed on round trip")
+			}
+		})
+	}
+}
+
 type configArchitectureTestProvider struct {
 	architectureCapabilityTestProvider
 }

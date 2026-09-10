@@ -20,6 +20,103 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestLocalContainerBaseConfig(t *testing.T) {
+	cfg := baseConfig()
+	_, _, _, _, _, image, _ := osImageDefaultProviderImages(cfg.OSImage)
+	want := LocalContainerConfig{Runtime: "docker", Image: image, User: "crabbox", Network: "bridge"}
+	if image == "" || !reflect.DeepEqual(cfg.LocalContainer, want) {
+		t.Fatalf("compiled local-container defaults=%#v, want %#v", cfg.LocalContainer, want)
+	}
+	if cfg.localContainerImageExplicit || LocalContainerRuntimeExplicit(cfg) || LocalContainerWorkRootExplicit(cfg) {
+		t.Fatal("compiled defaults marked explicit")
+	}
+}
+
+func TestLocalContainerOrdinarySourceLayering(t *testing.T) {
+	settings := func(text string, cpus int, enabled bool) LocalContainerConfig {
+		return LocalContainerConfig{
+			Runtime: text, Image: text, User: text, WorkRoot: text,
+			CPUs: cpus, Memory: text, Network: text, DockerSocket: enabled, NoHostname: enabled,
+		}
+	}
+	for _, source := range []string{"file", "env"} {
+		for _, tc := range []struct {
+			name, text, cpu, boolean, wantText string
+			fileCPU, envCPU                    int
+			startBool, wantBool                bool
+		}{
+			{"empty preserves", "", "", "", "prior", 5, 5, true, true},
+			{"equal accepts", "prior", "5", "true", "prior", 5, 5, true, true},
+			{"raw paths and false", "~/literal ", "7", "false", "~/literal ", 7, 7, true, false},
+			{"whitespace and zero", " \t ", "0", "", " \t ", 5, 0, true, true},
+			{"negative and true", "", "-2", "true", "prior", 5, -2, false, true},
+			{"malformed preserves", "", "bad", "invalid", "prior", 5, 5, true, true},
+			{"boolean on", "", "", " ON ", "prior", 5, 5, false, true},
+			{"boolean off", "", "", " Off ", "prior", 5, 5, true, false},
+		} {
+			t.Run(source+"/"+tc.name, func(t *testing.T) {
+				clearConfigEnv(t)
+				for _, key := range []string{"CRABBOX_PROVIDER", "CRABBOX_OS", "CRABBOX_WORK_ROOT", "CRABBOX_USER", "CRABBOX_SSH_USER"} {
+					t.Setenv(key, "")
+				}
+				cfg := baseConfig()
+				cfg.Provider = "unselected-config-test"
+				cfg.SSHUser, cfg.WorkRoot = "generic-user", "generic-root"
+				cfg.LocalContainer = settings("prior", 5, tc.startBool)
+				list := []string{"inert-list-value"}
+				metadata := map[string]string{"inert-key": "inert-value"}
+				cfg.LocalContainer.Volumes, cfg.LocalContainer.CheckpointMetadata = list, metadata
+				wantCPU := tc.fileCPU
+				if source == "file" {
+					cpu, _ := strconv.Atoi(tc.cpu)
+					var boolean *bool
+					if tc.boolean != "" && tc.boolean != "invalid" {
+						value := tc.wantBool
+						boolean = &value
+					}
+					if err := applyFileConfig(&cfg, fileConfig{LocalContainer: &fileLocalContainerConfig{
+						Runtime: tc.text, Image: tc.text, User: tc.text, WorkRoot: tc.text,
+						CPUs: cpu, Memory: tc.text, Network: tc.text, DockerSocket: boolean, NoHostname: boolean,
+					}}); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					wantCPU = tc.envCPU
+					for _, key := range []string{"RUNTIME", "IMAGE", "USER", "WORK_ROOT", "MEMORY", "NETWORK"} {
+						t.Setenv("CRABBOX_LOCAL_CONTAINER_"+key, tc.text)
+					}
+					t.Setenv("CRABBOX_LOCAL_CONTAINER_CPUS", tc.cpu)
+					t.Setenv("CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET", tc.boolean)
+					t.Setenv("CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME", tc.boolean)
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				}
+				want := settings(tc.wantText, wantCPU, tc.wantBool)
+				want.Volumes = []string{"inert-list-value"}
+				want.CheckpointMetadata = map[string]string{"inert-key": "inert-value"}
+				if !reflect.DeepEqual(cfg.LocalContainer, want) {
+					t.Fatalf("source settings=%#v, want %#v", cfg.LocalContainer, want)
+				}
+				accepted := tc.text != ""
+				if cfg.localContainerImageExplicit != accepted || LocalContainerRuntimeExplicit(cfg) != accepted || LocalContainerWorkRootExplicit(cfg) != accepted {
+					t.Fatal("source markers did not track acceptance")
+				}
+				if cfg.SSHUser != "generic-user" || cfg.WorkRoot != "generic-root" || IsWorkRootExplicit(&cfg) {
+					t.Fatal("provider source changed generic user/root or its marker")
+				}
+				if &cfg.LocalContainer.Volumes[0] != &list[0] {
+					t.Fatal("source replaced the runtime list")
+				}
+				metadata["inert-key"] = "updated-inert-value"
+				if cfg.LocalContainer.CheckpointMetadata["inert-key"] != "updated-inert-value" {
+					t.Fatal("source replaced the runtime map")
+				}
+			})
+		}
+	}
+}
+
 func isolateTestUserDirs(t *testing.T) testutil.UserDirs {
 	t.Helper()
 	return testutil.IsolateUserDirs(t)

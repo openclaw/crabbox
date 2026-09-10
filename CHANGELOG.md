@@ -40,6 +40,8 @@
 
 - Consolidate Lambda configuration and runtime defaults while preserving structured filesystem mounts, image precedence, and YAML diagnostics; clarify the distinct YAML and environment mount formats. [PR 2055](https://github.com/openclaw/crabbox/pull/2055). Thanks @steipete.
 
+- Consolidate Local Container settings while retaining explicit source choices, false-value overrides, and runtime-only state. Thanks @steipete.
+
 ## 0.54.0 - 2026-09-09
 
 ### Highlights
