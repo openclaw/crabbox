@@ -51,41 +51,41 @@ func ApplyNvidiaBrevProviderFlags(cfg *Config, fs *flag.FlagSet, values any) err
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "nvidia-brev-cli") {
+	if core.FlagWasSet(fs, "nvidia-brev-cli") {
 		cfg.NvidiaBrev.CLI = *v.CLI
 	}
-	if flagWasSet(fs, "nvidia-brev-org") {
+	if core.FlagWasSet(fs, "nvidia-brev-org") {
 		cfg.NvidiaBrev.Org = *v.Org
 	}
-	if flagWasSet(fs, "nvidia-brev-type") {
+	if core.FlagWasSet(fs, "nvidia-brev-type") {
 		cfg.NvidiaBrev.Type = *v.Type
 	}
-	if flagWasSet(fs, "nvidia-brev-gpu-name") {
+	if core.FlagWasSet(fs, "nvidia-brev-gpu-name") {
 		cfg.NvidiaBrev.GPUName = *v.GPUName
 	}
-	if flagWasSet(fs, "nvidia-brev-provider") {
+	if core.FlagWasSet(fs, "nvidia-brev-provider") {
 		cfg.NvidiaBrev.Provider = *v.Provider
 	}
-	if flagWasSet(fs, "nvidia-brev-mode") {
+	if core.FlagWasSet(fs, "nvidia-brev-mode") {
 		cfg.NvidiaBrev.Mode = *v.Mode
 	}
-	if flagWasSet(fs, "nvidia-brev-launchable") {
+	if core.FlagWasSet(fs, "nvidia-brev-launchable") {
 		cfg.NvidiaBrev.Launchable = *v.Launchable
 	}
-	if flagWasSet(fs, "nvidia-brev-startup-script") {
+	if core.FlagWasSet(fs, "nvidia-brev-startup-script") {
 		cfg.NvidiaBrev.StartupScript = *v.StartupScript
 	}
-	if flagWasSet(fs, "nvidia-brev-release-action") {
+	if core.FlagWasSet(fs, "nvidia-brev-release-action") {
 		cfg.NvidiaBrev.ReleaseAction = *v.ReleaseAction
 		markReleaseActionExplicit(cfg)
 	}
-	if flagWasSet(fs, "nvidia-brev-target") {
+	if core.FlagWasSet(fs, "nvidia-brev-target") {
 		cfg.NvidiaBrev.Target = *v.Target
 	}
-	if flagWasSet(fs, "nvidia-brev-user") {
+	if core.FlagWasSet(fs, "nvidia-brev-user") {
 		cfg.NvidiaBrev.User = *v.User
 	}
-	if flagWasSet(fs, "nvidia-brev-work-root") {
+	if core.FlagWasSet(fs, "nvidia-brev-work-root") {
 		cfg.NvidiaBrev.WorkRoot = *v.WorkRoot
 		markNvidiaBrevWorkRootExplicit(cfg)
 	}

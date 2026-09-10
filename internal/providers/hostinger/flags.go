@@ -1,5 +1,7 @@
 package hostinger
 
+import core "github.com/openclaw/crabbox/internal/cli"
+
 import "flag"
 
 type hostingerFlagValues struct {
@@ -35,37 +37,37 @@ func ApplyHostingerProviderFlags(cfg *Config, fs *flag.FlagSet, values any) erro
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "hostinger-url") {
+	if core.FlagWasSet(fs, "hostinger-url") {
 		cfg.Hostinger.APIURL = *v.APIURL
 	}
-	if flagWasSet(fs, "hostinger-item-id") {
+	if core.FlagWasSet(fs, "hostinger-item-id") {
 		cfg.Hostinger.ItemID = *v.ItemID
 	}
-	if flagWasSet(fs, "hostinger-payment-method-id") {
+	if core.FlagWasSet(fs, "hostinger-payment-method-id") {
 		cfg.Hostinger.PaymentMethodID = *v.PaymentMethodID
 	}
-	if flagWasSet(fs, "hostinger-template-id") {
+	if core.FlagWasSet(fs, "hostinger-template-id") {
 		cfg.Hostinger.TemplateID = *v.TemplateID
 	}
-	if flagWasSet(fs, "hostinger-data-center-id") {
+	if core.FlagWasSet(fs, "hostinger-data-center-id") {
 		cfg.Hostinger.DataCenterID = *v.DataCenterID
 	}
-	if flagWasSet(fs, "hostinger-hostname-prefix") {
+	if core.FlagWasSet(fs, "hostinger-hostname-prefix") {
 		cfg.Hostinger.HostnamePrefix = *v.HostnamePrefix
 	}
-	if flagWasSet(fs, "hostinger-user") {
+	if core.FlagWasSet(fs, "hostinger-user") {
 		cfg.Hostinger.User = *v.User
 		cfg.SSHUser = *v.User
 		markHostingerUserExplicit(cfg)
 	}
-	if flagWasSet(fs, "hostinger-work-root") {
+	if core.FlagWasSet(fs, "hostinger-work-root") {
 		cfg.Hostinger.WorkRoot = *v.WorkRoot
 		markHostingerWorkRootExplicit(cfg)
 	}
-	if flagWasSet(fs, "hostinger-allow-purchase") {
+	if core.FlagWasSet(fs, "hostinger-allow-purchase") {
 		cfg.Hostinger.AllowPurchase = *v.AllowPurchase
 	}
-	if flagWasSet(fs, "hostinger-release-action") {
+	if core.FlagWasSet(fs, "hostinger-release-action") {
 		cfg.Hostinger.ReleaseAction = *v.ReleaseAction
 	}
 	if cfg.Provider == providerName {

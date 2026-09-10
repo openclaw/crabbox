@@ -44,41 +44,41 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "agent-sandbox-kubectl") {
+	if core.FlagWasSet(fs, "agent-sandbox-kubectl") {
 		cfg.AgentSandbox.Kubectl = *v.Kubectl
 	}
-	if flagWasSet(fs, "agent-sandbox-kubeconfig") {
+	if core.FlagWasSet(fs, "agent-sandbox-kubeconfig") {
 		cfg.AgentSandbox.Kubeconfig = expandUserPath(*v.Kubeconfig)
 	}
-	if flagWasSet(fs, "agent-sandbox-context") {
+	if core.FlagWasSet(fs, "agent-sandbox-context") {
 		cfg.AgentSandbox.Context = *v.Context
 	}
-	if flagWasSet(fs, "agent-sandbox-namespace") {
+	if core.FlagWasSet(fs, "agent-sandbox-namespace") {
 		cfg.AgentSandbox.Namespace = *v.Namespace
 	}
-	if flagWasSet(fs, "agent-sandbox-warm-pool") {
+	if core.FlagWasSet(fs, "agent-sandbox-warm-pool") {
 		cfg.AgentSandbox.WarmPool = *v.WarmPool
 	}
-	if flagWasSet(fs, "agent-sandbox-container") {
+	if core.FlagWasSet(fs, "agent-sandbox-container") {
 		cfg.AgentSandbox.Container = *v.Container
 	}
-	if flagWasSet(fs, "agent-sandbox-workdir") {
+	if core.FlagWasSet(fs, "agent-sandbox-workdir") {
 		cfg.AgentSandbox.Workdir = *v.Workdir
 	}
-	if flagWasSet(fs, "agent-sandbox-sandbox-ready-timeout") {
+	if core.FlagWasSet(fs, "agent-sandbox-sandbox-ready-timeout") {
 		cfg.AgentSandbox.SandboxReadyTimeout = *v.SandboxReadyTimeout
 	}
-	if flagWasSet(fs, "agent-sandbox-pod-ready-timeout") {
+	if core.FlagWasSet(fs, "agent-sandbox-pod-ready-timeout") {
 		cfg.AgentSandbox.PodReadyTimeout = *v.PodReadyTimeout
 	}
-	if flagWasSet(fs, "agent-sandbox-exec-timeout-secs") {
+	if core.FlagWasSet(fs, "agent-sandbox-exec-timeout-secs") {
 		cfg.AgentSandbox.ExecTimeoutSecs = *v.ExecTimeoutSecs
 	}
-	if flagWasSet(fs, "agent-sandbox-delete-on-release") {
+	if core.FlagWasSet(fs, "agent-sandbox-delete-on-release") {
 		cfg.AgentSandbox.DeleteOnRelease = *v.DeleteOnRelease
 		core.MarkDeleteOnReleaseExplicit(cfg, providerName)
 	}
-	if flagWasSet(fs, "agent-sandbox-forget-missing") {
+	if core.FlagWasSet(fs, "agent-sandbox-forget-missing") {
 		cfg.AgentSandbox.ForgetMissing = *v.ForgetMissing
 	}
 	return validateConfig(*cfg)

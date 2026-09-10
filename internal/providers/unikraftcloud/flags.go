@@ -37,16 +37,16 @@ func applyUnikraftCloudProviderFlags(cfg *Config, fs *flag.FlagSet, values any) 
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "unikraft-cloud-url") {
+	if core.FlagWasSet(fs, "unikraft-cloud-url") {
 		cfg.UnikraftCloud.APIURL = *v.APIURL
 	}
-	if flagWasSet(fs, "unikraft-cloud-metro") {
+	if core.FlagWasSet(fs, "unikraft-cloud-metro") {
 		cfg.UnikraftCloud.Metro = *v.Metro
 	}
-	if flagWasSet(fs, "unikraft-cloud-image") {
+	if core.FlagWasSet(fs, "unikraft-cloud-image") {
 		cfg.UnikraftCloud.Image = *v.Image
 	}
-	if flagWasSet(fs, "unikraft-cloud-memory") {
+	if core.FlagWasSet(fs, "unikraft-cloud-memory") {
 		cfg.UnikraftCloud.MemoryMB = *v.MemoryMB
 	}
 	return nil
