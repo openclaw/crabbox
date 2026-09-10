@@ -1191,8 +1191,6 @@ source scripts/install-linux-developer-tools.sh
 go_link_dir="$1"
 resolve_rust_runtime_user() { runtime_user=alice; runtime_home=/home/alice; }
 run_rust_runtime_user() { printf 'runtime-rust=%s\\n' "$*"; }
-resolve_runtime_user() { runtime_user=alice; runtime_home=/home/alice; }
-run_runtime_user() { printf 'runtime-pnpm=%s\\n' "$*"; }
 print_versions`,
 			"bash",
 			goLinkDir,
@@ -1219,77 +1217,23 @@ print_versions`,
 	assert.match(result.stdout, /runtime-rust=env RUSTUP_AUTO_INSTALL=0 \/bin\/bash -lc set -e; cd \/; rustup --version; rustc --version; cargo --version; rustfmt --version/);
 	assert.match(result.stdout, new RegExp(`${fixture.bin}/bunx`));
 	assert.match(result.stdout, /trufflehog 3\.95\.9/);
-	assert.match(result.stdout, /runtime-pnpm=env COREPACK_ENABLE_NETWORK=0 pnpm --version/);
+	assert.match(result.stdout, /pnpm test-version/);
 });
 
-for (const [sudo, container, account, expected] of [
-  [undefined, undefined, "root:x:0:0::/root:/bin/sh", "root 0 /root /bin/sh"],
-  ["root", undefined, "root:x:0:0::/root:/bin/bash", "root 0 /root /bin/bash"],
-  [undefined, "root", "root:x:0:0::/root:/bin/sh", "root 0 /root /bin/sh"],
-  ["alice", "bob", "alice:x:1000:1000::/home/alice:/bin/sh", "alice 1000 /home/alice /bin/sh"],
-  [undefined, "bob", "bob:x:1001:1001::/home/bob:/usr/bin/zsh", "bob 1001 /home/bob /usr/bin/zsh"],
-  ["", undefined, "", null],
-  ["unknown", undefined, "", null],
-  ["-bad", undefined, "", null],
-  ["alice", undefined, "mallory:x:1000:1000::/home/mallory:/bin/bash", null],
-  ["alice", undefined, "alice:x:0:0::/root:/bin/bash", null],
-  ["alice", undefined, "alice:x:1000:1000::relative:/bin/bash", null],
-  ["alice", undefined, "alice:x:1000:1000::/:/bin/bash", null],
-  ["alice", undefined, "alice:x:1000:1000::/home/alice:/bin/bash\nroot:x:0:0::/root:/bin/bash", null],
-]) {
-  test(`pnpm NSS runtime selection: ${JSON.stringify([sudo, container, account])}`, () => {
-    const env = { PATH: process.env.PATH, ACCOUNT: account };
-    if (sudo !== undefined) env.SUDO_USER = sudo;
-    if (container !== undefined) env.CRABBOX_SSH_USER = container;
-    const result = spawnSync("bash", ["-c", `
-source scripts/install-linux-developer-tools.sh
-getent() { printf '%s\\n' "$ACCOUNT"; }
-resolve_runtime_user root-allowed || exit $?
-printf '%s %s %s %s\\n' "$runtime_user" "$runtime_uid" "$runtime_home" "$runtime_shell"
-`], { cwd: repoRoot, env, encoding: "utf8", timeout: 10_000 });
-    assert.ifError(result.error);
-    assert.equal(result.status === 0, expected !== null, result.stderr);
-    if (expected) assert.equal(result.stdout.trim(), expected);
-  });
-}
-
-test("pnpm runtime execution drops ambient caches and Rust settings without a login shell", () => {
-  const result = spawnSync("bash", ["-c", `
-source scripts/install-linux-developer-tools.sh
-runtime_user=alice runtime_home=/home/alice runtime_shell=/bin/sh
-runuser() { printf 'cwd=%s\\n' "$PWD"; printf '%s\\n' "$@"; }
-run_runtime_user corepack prepare pnpm@11.1.0 --activate
-`], { cwd: repoRoot, env: {
-    PATH: process.env.PATH, COREPACK_HOME: "/foreign", XDG_CACHE_HOME: "/foreign",
-    RUSTUP_DIST_SERVER: "https://example.invalid", CARGO_HOME: "/foreign", BASH_ENV: "",
-  }, encoding: "utf8", timeout: 10_000 });
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /^cwd=\/\n-u\nalice\n--\nenv\n-i\n/);
-  assert.match(result.stdout, /HOME=\/home\/alice\nUSER=alice\nLOGNAME=alice\nSHELL=\/bin\/sh/);
-  assert.doesNotMatch(result.stdout, /foreign|RUSTUP_|CARGO_HOME|BASH_ENV|COREPACK_HOME|XDG_CACHE_HOME|PROJECT_SPEC/);
-});
-
-for (const [failure, expected] of [["check", 41], ["runtime", 42], ["activate", 43], ["verify", 44], ["mismatch", 1], ["", 0]]) {
+for (const [failure, expected] of [["runtime", 42], ["activate", 43], ["", 0]]) {
   test(`pnpm conditional installation preserves ${failure || "success"} result`, () => {
     const result = spawnSync("bash", ["-c", `
 source scripts/install-linux-developer-tools.sh
-resolve_runtime_user() { :; }
-check_runtime_corepack_state() { echo check >&2; [[ "$FAIL" != check ]] || return 41; }
 install_node_runtime() { echo runtime >&2; [[ "$FAIL" != runtime ]] || return 42; }
 pinned_node_supported() { return 1; }
-run_runtime_user() {
-  if [[ "$1" == corepack ]]; then
-    echo activate >&2; [[ "$FAIL" != activate ]] || return 43
-  else
-    echo verify >&2; [[ "$FAIL" != verify ]] || return 44
-    [[ "$FAIL" == mismatch ]] && echo 12.3.4 || echo 11.1.0
-  fi
-}
+corepack() { echo activate >&2; [[ "$FAIL" != activate ]] || return 43; }
+command() { echo verify >&2; builtin command "$@"; }
+pnpm() { :; }
 if install_node_pnpm; then echo complete; else exit $?; fi
 `], { cwd: repoRoot, env: { PATH: process.env.PATH, FAIL: failure }, encoding: "utf8", timeout: 10_000 });
     assert.equal(result.status, expected, result.stderr);
     if (failure) assert.doesNotMatch(result.stdout, /complete/);
-    if (failure === "check") assert.doesNotMatch(result.stderr, /runtime|activate|verify/);
+    if (failure === "runtime") assert.doesNotMatch(result.stderr, /activate|verify/);
     if (failure === "activate") assert.doesNotMatch(result.stderr, /verify/);
   });
 }
@@ -1298,141 +1242,16 @@ for (const missing of ["npm", "corepack"]) {
   test(`conditional Node runtime rejects missing ${missing} before activation`, () => {
     const result = spawnSync("bash", ["-c", `
 source scripts/install-linux-developer-tools.sh
-resolve_runtime_user() { :; }
-check_runtime_corepack_state() { :; }
 pinned_node_supported() { return 1; }
 apt_install() { :; }
 command() { [[ "$*" != "-v $MISSING" ]] || return 71; builtin command "$@"; }
 corepack() { echo unexpected-enable; }
-run_runtime_user() { echo unexpected-activation; }
 if install_node_pnpm; then echo unexpected-success; else exit $?; fi
 `], { cwd: repoRoot, env: { PATH: process.env.PATH, MISSING: missing }, encoding: "utf8", timeout: 10_000 });
     assert.equal(result.status, 71, result.stderr);
     assert.doesNotMatch(result.stdout, /unexpected-/);
   });
 }
-
-function corepackStateFixture(t) {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-pnpm-state-")));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const home = path.join(root, "home");
-  const cache = path.join(home, ".cache/node/corepack");
-  fs.mkdirSync(cache, { recursive: true });
-  const run = (body, extra = {}) => spawnSync("bash", ["-c", `
-source "$INSTALLER"
-runtime_uid="$FIXTURE_UID"
-run_runtime_user() { env -i PATH="$PATH" HOME="$HOME" "$@"; }
-${body}
-`], { cwd: root, env: {
-    PATH: process.env.PATH, HOME: home, FIXTURE_UID: String(process.getuid()),
-    INSTALLER: path.join(repoRoot, "scripts/install-linux-developer-tools.sh"), ...extra,
-  }, encoding: "utf8", timeout: 15_000 });
-  return { root, home, cache, run };
-}
-
-for (const value of [null, {}, { pnpm: "11.1.0" }, { pnpm: "12.3.4", yarn: "4.9.1", npm: "11.0.0" }]) {
-  test(`pnpm preflight accepts owned Corepack metadata ${JSON.stringify(value)}`, (t) => {
-    const { cache, run } = corepackStateFixture(t);
-    if (value) fs.writeFileSync(path.join(cache, "lastKnownGood.json"), JSON.stringify(value));
-    const result = run("check_runtime_corepack_state");
-    assert.equal(result.status, 0, result.stderr);
-  });
-}
-
-test("pnpm preflight leaves unrelated versions and archive-internal symlinks alone", (t) => {
-  const { root, cache, run } = corepackStateFixture(t);
-  const selected = path.join(cache, "v1/pnpm/11.1.0");
-  fs.mkdirSync(selected, { recursive: true });
-  fs.writeFileSync(path.join(selected, ".corepack"), "{}");
-  fs.symlinkSync("package/bin", path.join(selected, "archive-link"));
-  fs.symlinkSync(root, path.join(cache, "v1/pnpm/12.3.4"));
-  const result = run("check_runtime_corepack_state");
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(fs.readlinkSync(path.join(selected, "archive-link")), "package/bin");
-  assert.equal(fs.readlinkSync(path.join(cache, "v1/pnpm/12.3.4")), root);
-});
-
-for (const conflict of ["json", "array", "duplicate", "nonstring", "large", "metadata-link", "metadata-hardlink", "cache-link", "cache-file", "writable-home", "writable-store", "store-link"]) {
-  test(`pnpm rejects ${conflict} before Node/cache/default mutation`, (t) => {
-    const { root, home, cache, run } = corepackStateFixture(t);
-    const metadata = path.join(cache, "lastKnownGood.json");
-    const contents = {
-      json: "{", array: "[]", duplicate: '{"pnpm":"11.1.0","pnpm":"12.3.4"}',
-      nonstring: '{"pnpm":null}', large: " ".repeat(65537),
-    }[conflict];
-    if (contents) fs.writeFileSync(metadata, contents);
-    if (conflict === "metadata-link") fs.symlinkSync(path.join(root, "outside"), metadata);
-    if (conflict === "metadata-hardlink") {
-      fs.writeFileSync(path.join(root, "outside"), '{"pnpm":"12.3.4"}');
-      fs.linkSync(path.join(root, "outside"), metadata);
-    }
-    if (conflict === "cache-link" || conflict === "cache-file") {
-      fs.rmdirSync(cache);
-      if (conflict === "cache-link") fs.symlinkSync(root, cache);
-      else fs.writeFileSync(cache, "not a directory");
-    }
-    if (conflict === "writable-home") fs.chmodSync(home, 0o777);
-    if (conflict === "writable-store" || conflict === "store-link") {
-      fs.mkdirSync(path.join(cache, "v1/pnpm"), { recursive: true });
-      if (conflict === "writable-store") fs.chmodSync(path.join(cache, "v1/pnpm"), 0o777);
-      else fs.symlinkSync(root, path.join(cache, "v1/pnpm/11.1.0"));
-    }
-    const result = run(`
-resolve_runtime_user() { runtime_uid="$FIXTURE_UID"; }
-install_node_runtime() { echo unexpected-node-mutation; }
-if install_node_pnpm; then echo unexpected-success; else exit $?; fi
-`);
-    assert.notEqual(result.status, 0, result.stderr);
-    assert.doesNotMatch(result.stdout, /unexpected-/);
-    if (contents) assert.equal(fs.readFileSync(metadata, "utf8"), contents);
-  });
-}
-
-test("real Corepack 0.35.0 activates the runtime default offline and preserves project precedence", {
-  skip: !process.env.COREPACK_TEST_ROOT && "set COREPACK_TEST_ROOT to the isolated, integrity-verified Corepack 0.35.0 and pnpm 11.1.0 fixture",
-}, (t) => {
-  const assets = process.env.COREPACK_TEST_ROOT;
-  const packageRoot = path.join(assets, "package");
-  assert.equal(JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"))).version, "0.35.0");
-  const { root, home, cache, run } = corepackStateFixture(t);
-  fs.cpSync(path.join(assets, "home/.cache/node/corepack/v1"), path.join(cache, "v1"), { recursive: true });
-  const metadata = path.join(cache, "lastKnownGood.json");
-  const bin = path.join(root, "bin");
-  fs.mkdirSync(bin);
-  for (const tool of ["corepack", "pnpm"]) writeExecutable(path.join(bin, tool),
-    `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(packageRoot, "dist", `${tool}.js`))} "$@"\n`);
-  const startup = path.join(home, ".bashrc");
-  fs.writeFileSync(startup, "# preserve startup bytes\n");
-  const project = path.join(root, "project");
-  fs.mkdirSync(project);
-  const projectManifest = '{"packageManager":"pnpm@99.99.99"}\n';
-  fs.writeFileSync(path.join(project, "package.json"), projectManifest);
-  for (const previous of [null, "11.1.0", "12.3.4"]) {
-    fs.writeFileSync(metadata, JSON.stringify({ ...(previous && { pnpm: previous }), yarn: "4.9.1", npm: "11.0.0" }));
-    const result = run(`
-resolve_runtime_user() { runtime_user=alice; runtime_uid="$FIXTURE_UID"; runtime_home="$HOME"; runtime_shell=/bin/sh; }
-install_node_runtime() { :; }
-pinned_node_supported() { return 1; }
-run_runtime_user() {
-  (cd / && env -i HOME="$HOME" PATH="$PATH" COREPACK_ENABLE_NETWORK=0 COREPACK_DEFAULT_TO_LATEST=0 COREPACK_ENV_FILE=0 "$@")
-}
-if install_node_pnpm; then install_node_pnpm; else exit $?; fi
-`, { PATH: `${bin}:${process.env.PATH}` });
-    assert.equal(result.status, 0, result.stderr);
-    const value = JSON.parse(fs.readFileSync(metadata));
-    assert.equal(value.pnpm, "11.1.0");
-    assert.equal(value.yarn, "4.9.1");
-    assert.equal(value.npm, "11.0.0");
-  }
-  const result = spawnSync(path.join(bin, "pnpm"), ["--version"], {
-    cwd: project, env: { PATH: process.env.PATH, HOME: home, COREPACK_ENABLE_NETWORK: "0", COREPACK_ENV_FILE: "0" },
-    encoding: "utf8", timeout: 10_000,
-  });
-  assert.notEqual(result.status, 0, "the project's uncached explicit pin must override the working image default");
-  assert.match(result.stderr, /99\.99\.99|Network access disabled/);
-  assert.equal(fs.readFileSync(path.join(project, "package.json"), "utf8"), projectManifest);
-  assert.equal(fs.readFileSync(startup, "utf8"), "# preserve startup bytes\n");
-});
 
 test("linux developer image keeps pinned TruffleHog probes update-free", () => {
 	const script = fs.readFileSync(path.join(repoRoot, "scripts/install-linux-developer-tools.sh"), "utf8");

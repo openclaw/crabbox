@@ -504,20 +504,12 @@ installer's pnpm default of 11.1.0. Existing `CRABBOX_LINUX_PNPM_VERSION` and
 the existing ARM installer route retain the fingerprint-checked NodeSource
 path; this recipe does not add an ARM image.
 
-The installer activates pnpm through Corepack as the NSS account named by
-`SUDO_USER`, or `CRABBOX_SSH_USER` when there is no sudo user. With neither
-selector, it uses root; an explicit valid root selector is also supported for
-pnpm. Unknown accounts and unsafe or malformed owned Corepack paths stop
-preparation before Node or Corepack changes. Rust retains its separate nonroot
+The privileged installer prepares pnpm in root's Corepack home. Failed activation
+stops it before readiness and fast-boot preparation; it does not configure
+arbitrary runtime accounts. The bundled publisher then activates the same
+selector as the actual lease user and captures its resolved default, as described
+under [Wrapper behavior](#wrapper-behavior). Rust retains its separate nonroot
 Bash-account requirement.
-
-Corepack writes its own `lastKnownGood.json` in that account's normal home,
-replacing an existing pnpm default when necessary while preserving other
-manager entries. No root cache is copied into the runtime home. Activation,
-ordinary offline `pnpm --version` verification, and version reporting use the
-same clean account environment without changing shell startup files or project
-pins. Activation or verification failure stops the installer before readiness
-and fast-boot preparation.
 
 For a nondefault Node major, the installer selects an exact native-architecture
 version from that major's fingerprint-checked NodeSource repository. An explicit
@@ -537,7 +529,7 @@ this does not add packaging for newer Node majors.
 The mint wrapper applies this archive contract only when its selected prep
 script is the bundled Linux builder. It forwards the existing
 `CRABBOX_LINUX_NODE_MAJOR` and `CRABBOX_LINUX_PNPM_VERSION` overrides to that
-builder and freezes the same Node-major and pnpm-version declarations into each smoke. The smoke
+builder and freezes the Node major and resolved pnpm default into each smoke. The smoke
 checks the guest's Debian package architecture, not the mint host's architecture.
 Only Node major 24 on guest `amd64` requires the Node/pnpm archives. Go, Bun, Rust and uv
 have independent Linux `amd64` contracts, including when the Node major is
@@ -748,13 +740,27 @@ Keep scenario state out of the source image as described in
 [prebaked images](prebaked-images.md). Use the timing logs to compare provider
 request, network readiness, bootstrap, and end-to-end time before and after each bake.
 
-Linux source, candidate, and promoted smokes require a nonroot user and execute
-the normal `pnpm --version` command with network access disabled in a
-manifest-free temporary directory, using that user's existing Corepack home.
-The bundled builder requires the selected pnpm version; custom prep does not
-declare a pnpm pin. Smoke never activates or repairs the default, bypasses
-project selection, or warms a missing package from the network. This normal
-command is not used to authenticate cached archives or skip their verification.
+Linux source, candidate, and promoted smokes require a nonroot user. After
+successful bundled Linux preparation, the wrapper activates the selected pnpm
+release as the lease user: the privileged installer only seeds root's Corepack
+cache. The existing `CRABBOX_LINUX_PNPM_VERSION` selector is passed unchanged to
+Corepack, including tags, ranges, and integrity-qualified versions.
+
+Before image capture, the wrapper records the resolved ordinary `pnpm --version`
+outside the checkout, using the lease user's normal home/cache and disabling
+Corepack network access for the probe. It also requires `corepack pnpm --version`
+to agree, rejecting version disagreement from a shadowing command. Each later
+smoke checks that same resolved default offline without reactivating it or
+resolving the selector again.
+Preparation, capture, or version mismatch failures stop publication and follow
+the existing lease cleanup and promotion rollback paths.
+
+This establishes the image user's initial default, not a permanent version lock.
+Project `packageManager` pins and existing cached releases remain usable; no
+shared Corepack home is introduced. Custom prep scripts and Windows retain their
+existing behavior, and the standalone root installer does not configure arbitrary
+users. These normal-command checks do not authenticate cached archives or skip
+their verification.
 
 For the bundled Node-24/amd64 builder, each smoke additionally revalidates public
 archive bytes in private temporary directories. It executes fresh Node and both

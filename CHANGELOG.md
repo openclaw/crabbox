@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Activate and verify Linux developer-image pnpm defaults as the intended runtime user, reject stale candidate defaults offline, and preserve bounded browser failure evidence without retries or longer smoke limits. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
+- Use publisher-owned lease-user pnpm activation and resolved-default checks from https://github.com/openclaw/crabbox/pull/2065, preserving opaque selectors and standalone installer behavior; retain bounded browser failure evidence without retries or longer smoke limits. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
 
 - Keep Linux developer-image smoke scripts valid when rendered by Bash 5.2, and link the C++ native-library probe against older libxdo C headers. https://github.com/openclaw/crabbox/pull/1995. Thanks @vincentkoc.
 

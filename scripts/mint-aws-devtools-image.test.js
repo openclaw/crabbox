@@ -3,6 +3,7 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmod,
   copyFile,
+  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -66,6 +67,30 @@ case "$1" in
     fi
     if [[ " $* " == *" --allow-env CRABBOX_LINUX_NODE_MAJOR,CRABBOX_LINUX_PNPM_VERSION "* ]]; then
       printf 'builder overrides node=%s pnpm=%s\\n' "\${CRABBOX_LINUX_NODE_MAJOR:-}" "\${CRABBOX_LINUX_PNPM_VERSION:-}" >>"\${CRABBOX_FAKE_LOG}"
+      [[ "\${CRABBOX_FAKE_PREP_EXIT:-0}" == "0" ]] || exit "$CRABBOX_FAKE_PREP_EXIT"
+    fi
+    capture=""
+    lease=""
+    previous=""
+    for arg in "$@"; do
+      [[ "$previous" != "--capture-stdout" ]] || capture="$arg"
+      [[ "$previous" != "--id" ]] || lease="$arg"
+      previous="$arg"
+    done
+    if [[ -n "$capture" ]]; then
+      if [[ -n "\${CRABBOX_FAKE_PNPM_RUNNER:-}" ]]; then
+        "$CRABBOX_FAKE_PNPM_RUNNER" "$lease" "\${@: -1}" >"$capture" || exit $?
+      else
+        printf '%s\\n' "\${CRABBOX_FAKE_RESOLVED_PNPM:-11.1.0}" >"$capture"
+      fi
+      if [[ -n "\${CRABBOX_FAKE_CAPTURE_BASE64+x}" ]]; then
+        node -e 'require("node:fs").writeFileSync(process.argv[1], Buffer.from(process.argv[2], "base64"))' "$capture" "$CRABBOX_FAKE_CAPTURE_BASE64"
+      fi
+      exit "\${CRABBOX_FAKE_CAPTURE_EXIT:-0}"
+    fi
+    if [[ -n "\${CRABBOX_FAKE_PNPM_RUNNER:-}" && "\${@: -1}" == *"docker_probe="* ]]; then
+      "$CRABBOX_FAKE_PNPM_RUNNER" "$lease" "\${@: -1}" || exit $?
+      exit 0
     fi
     if [[ -n "\${CRABBOX_FAKE_SMOKE_FAIL_LEASE:-}" && " $* " == *" --id \${CRABBOX_FAKE_SMOKE_FAIL_LEASE} "* && "\${@: -1}" == *"docker_probe="* ]]; then
       printf 'offline artifact smoke failed\\n' >&2
@@ -183,6 +208,208 @@ function runScript(args, env, scriptPath = script, onOutput) {
   });
 }
 
+async function runtimePnpmFixture(t, options = {}) {
+  const fake = await setupFakeCrabbox();
+  t.after(() => rm(fake.dir, { recursive: true, force: true }));
+  const bin = path.join(fake.dir, "bin");
+  await mkdir(bin);
+  const writeTool = async (name, body) => {
+    const file = path.join(bin, name);
+    await writeFile(file, `#!/usr/bin/env bash\nset -euo pipefail\n${body}\n`);
+    await chmod(file, 0o755);
+  };
+  for (const tool of ["git", "gh", "jq", "rg", "fd", "npm", "trufflehog", "docker"]) {
+    await writeTool(tool, "exit 0");
+  }
+  await writeTool("id", 'printf "1000\\n"');
+  await writeNodeVersionFixture(bin);
+  await writeTool(
+    "corepack",
+    `
+case "$*" in
+  --version) printf '0.35.0\\n' ;;
+  prepare*)
+    printf '%s\\n' "$2" >"$HOME/prepare-request"
+    [[ "$#" == "3" && "$3" == "--activate" ]] || exit 90
+    [[ "\${FIXTURE_ACTIVATION_EXIT:-0}" == "0" ]] || exit "$FIXTURE_ACTIVATION_EXIT"
+    printf '%s\\n' "$FIXTURE_RESOLVED_PNPM" >"$HOME/default"
+    printf 'Preparing package manager for immediate activation...\\n'
+    ;;
+  'pnpm --version')
+    [[ "\${COREPACK_ENABLE_NETWORK:-}" == "0" && "$PWD" == "/" ]] || exit 91
+    [[ "\${FIXTURE_COREPACK_EXIT:-0}" == "0" ]] || exit "$FIXTURE_COREPACK_EXIT"
+    cat "$HOME/default"
+    ;;
+  *) exit 92 ;;
+esac`,
+  );
+  await writeTool(
+    "pnpm",
+    `
+[[ "$*" == "--version" ]] || exit 93
+[[ "\${COREPACK_ENABLE_NETWORK:-}" == "0" && "$PWD" == "/" ]] || exit 94
+[[ "\${FIXTURE_PNPM_EXIT:-0}" == "0" ]] || exit "$FIXTURE_PNPM_EXIT"
+if [[ -n "\${FIXTURE_ACTUAL_PNPM:-}" ]]; then
+  printf '%s\\n' "$FIXTURE_ACTUAL_PNPM"
+else
+  cat "$HOME/default"
+fi`,
+  );
+  if (options.realCorepack) {
+    const assets = process.env.COREPACK_TEST_ROOT;
+    const packageRoot = path.join(assets, "package");
+    assert.equal(JSON.parse(await readFile(path.join(packageRoot, "package.json"))).version, "0.35.0");
+    const cache = path.join(fake.dir, ".cache/node/corepack");
+    await cp(path.join(assets, "home/.cache/node/corepack/v1"), path.join(cache, "v1"), { recursive: true });
+    await writeFile(path.join(cache, "lastKnownGood.json"), JSON.stringify({ pnpm: "12.3.4", yarn: "4.9.1", npm: "11.0.0" }));
+    for (const tool of ["corepack", "pnpm"]) {
+      await writeTool(tool, `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(packageRoot, "dist", `${tool}.js`))} "$@"`);
+    }
+    await writeFile(path.join(fake.dir, ".bashrc"), "# preserve startup bytes\n");
+    await mkdir(path.join(fake.dir, "project"));
+    await writeFile(path.join(fake.dir, "project/package.json"), '{"packageManager":"pnpm@99.99.99"}\n');
+  }
+  const runner = path.join(fake.dir, "runtime.cjs");
+  await writeFile(
+    runner,
+    `#!${process.execPath}
+const {spawnSync} = require("node:child_process");
+const [lease, source] = process.argv.slice(2);
+const actual = JSON.parse(process.env.FIXTURE_PNPM_VERSIONS)[lease] || "";
+// Run the real rendered version checks; later native/artifact probes have separate proof.
+const marker = source.indexOf("\\nsmoke_dir=");
+const command = marker < 0 ? source : source.slice(0, marker);
+const env = {...process.env, PATH: ${JSON.stringify(bin)} + ":" + process.env.PATH,
+  HOME: ${JSON.stringify(fake.dir)}, FIXTURE_ACTUAL_PNPM: actual};
+delete env.COREPACK_HOME;
+delete env.XDG_CACHE_HOME;
+const result = spawnSync("bash", ["-c", command], {
+  cwd: ${JSON.stringify(fake.dir)},
+  env,
+  stdio: "inherit",
+});
+if (result.error) throw result.error;
+process.exit(result.status ?? 1);
+`,
+  );
+  await chmod(runner, 0o755);
+  const result = await runScript(["--target", "linux", "--run"], {
+    CRABBOX_BIN: fake.fake,
+    CRABBOX_FAKE_LOG: fake.log,
+    CRABBOX_IMAGE_LOG_DIR: path.join(fake.dir, "logs"),
+    CRABBOX_FAKE_PNPM_RUNNER: runner,
+    CRABBOX_LINUX_PNPM_VERSION: options.selector ?? "11.1.0",
+    FIXTURE_RESOLVED_PNPM: options.resolved ?? "11.1.0",
+    FIXTURE_PNPM_VERSIONS: JSON.stringify(options.versions ?? {}),
+    ...options.env,
+  });
+  return { fake, result, log: await readFile(fake.log, "utf8") };
+}
+
+for (const selector of [
+  "11.1.0",
+  "latest",
+  "^11.0.0",
+  "11.1.0+sha512.deadbeef",
+  '11.1.0; touch "$HOME/injected"',
+]) {
+  test(`runtime-user pnpm freezes the resolved default for selector ${selector}`, async (t) => {
+    const { fake, result, log } = await runtimePnpmFixture(t, { selector });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(
+      await readFile(path.join(fake.dir, "prepare-request"), "utf8"),
+      `pnpm@${selector}\n`,
+    );
+    assert.equal((log.match(/--capture-stdout /g) ?? []).length, 1);
+    assert.match(result.stdout, /promoted linux developer image passed/);
+    await assert.rejects(readFile(path.join(fake.dir, "injected")), { code: "ENOENT" });
+  });
+}
+
+for (const lease of ["cbx_candidate", "cbx_promoted"]) {
+  test(`runtime-user pnpm rejects version drift on ${lease}`, async (t) => {
+    const { result, log } = await runtimePnpmFixture(t, { versions: { [lease]: "11.22.0" } });
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /pnpm default mismatch/);
+    assert.match(log, new RegExp(`stop --provider aws --target linux ${lease}`));
+    assert.doesNotMatch(result.stdout, /promoted linux developer image passed/);
+    if (lease === "cbx_candidate") assert.doesNotMatch(log, /image promote/);
+    else assert.match(log, /--restore-receipt/);
+  });
+}
+
+for (const [name, env, status, activated] of [
+  ["privileged prep", { CRABBOX_FAKE_PREP_EXIT: "43" }, 43, false],
+  ["user activation", { FIXTURE_ACTIVATION_EXIT: "44" }, 44, true],
+  ["ordinary pnpm", { FIXTURE_PNPM_EXIT: "45" }, 45, true],
+  ["Corepack pnpm", { FIXTURE_COREPACK_EXIT: "46" }, 46, true],
+  ["capture transport", { CRABBOX_FAKE_CAPTURE_EXIT: "47" }, 47, true],
+]) {
+  test(`runtime-user pnpm preserves ${name} failure and stops before image capture`, async (t) => {
+    const { fake, result, log } = await runtimePnpmFixture(t, { env });
+    assert.equal(result.code, status, result.stderr);
+    assert.doesNotMatch(log, /checkpoint create|docker_probe=|image promote/);
+    assert.match(log, /stop --provider aws --target linux cbx_source/);
+    if (activated) await readFile(path.join(fake.dir, "prepare-request"));
+    else await assert.rejects(readFile(path.join(fake.dir, "prepare-request")), { code: "ENOENT" });
+  });
+}
+
+for (const [name, bytes] of [
+  ["empty", ""],
+  ["blank", "\n"],
+  ["extra line", "11.1.0\nextra\n"],
+  ["oversized", `${"1".repeat(129)}\n`],
+  ["missing newline", "11.1.0"],
+  ["control byte", "11.\0.0\n"],
+]) {
+  test(`runtime-user pnpm refuses ${name} version capture`, async (t) => {
+    const { result, log } = await runtimePnpmFixture(t, {
+      env: { CRABBOX_FAKE_CAPTURE_BASE64: Buffer.from(bytes).toString("base64") },
+    });
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /invalid runtime-user pnpm version/);
+    assert.doesNotMatch(log, /checkpoint create|docker_probe=|image promote/);
+    assert.match(log, /stop --provider aws --target linux cbx_source/);
+  });
+}
+
+test("runtime-user pnpm rejects a shadowing ordinary command before image capture", async (t) => {
+  const { result, log } = await runtimePnpmFixture(t, { versions: { cbx_source: "12.3.4" } });
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /pnpm.*does not match Corepack/);
+  assert.doesNotMatch(log, /checkpoint create|docker_probe=|image promote/);
+  assert.match(log, /stop --provider aws --target linux cbx_source/);
+});
+
+test("runtime-user publisher uses real Corepack 0.35.0 without changing project pins or other defaults", {
+  skip: !process.env.COREPACK_TEST_ROOT && "set COREPACK_TEST_ROOT to the isolated, integrity-verified Corepack 0.35.0 and pnpm 11.1.0 fixture",
+}, async (t) => {
+  const metadata = JSON.parse(await readFile(path.join(
+    process.env.COREPACK_TEST_ROOT, "home/.cache/node/corepack/v1/pnpm/11.1.0/.corepack",
+  )));
+  for (const selector of ["11.1.0", "^11.0.0", `11.1.0+${metadata.hash}`]) {
+    const { fake, result, log } = await runtimePnpmFixture(t, {
+      selector, realCorepack: true, env: { COREPACK_ENABLE_NETWORK: "0", COREPACK_ENV_FILE: "0" },
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal((log.match(/--capture-stdout /g) ?? []).length, 1);
+    const defaults = JSON.parse(await readFile(path.join(fake.dir, ".cache/node/corepack/lastKnownGood.json")));
+    assert.match(defaults.pnpm, /^11\.1\.0(?:\+|$)/);
+    assert.equal(defaults.yarn, "4.9.1");
+    assert.equal(defaults.npm, "11.0.0");
+    const project = spawnSync(path.join(fake.dir, "bin/pnpm"), ["--version"], {
+      cwd: path.join(fake.dir, "project"),
+      env: { PATH: process.env.PATH, HOME: fake.dir, COREPACK_ENABLE_NETWORK: "0", COREPACK_ENV_FILE: "0" },
+      encoding: "utf8", timeout: 10_000,
+    });
+    assert.notEqual(project.status, 0);
+    assert.match(project.stderr, /99\.99\.99|Network access disabled/);
+    assert.equal(await readFile(path.join(fake.dir, "project/package.json"), "utf8"), '{"packageManager":"pnpm@99.99.99"}\n');
+    assert.equal(await readFile(path.join(fake.dir, ".bashrc"), "utf8"), "# preserve startup bytes\n");
+  }
+});
+
 test("AWS devtools mint wrapper defaults to dry plan", async () => {
   const fake = await setupFakeCrabbox();
   const result = await runScript(["--prep-script", fake.linuxPrep], {
@@ -206,10 +433,10 @@ test("AWS developer image smoke executes package managers and requires TruffleHo
     linuxSmoke,
     /command -v pnpm\ncommand -v trufflehog\ntrufflehog --no-update --version\ncommand -v docker\nnode --version\nnode -e .*\ncorepack --version\n/,
   );
-  assert.match(linuxSmoke, /COREPACK_ENV_FILE=0 pnpm --version/);
+  assert.match(linuxSmoke, /version="\$\(COREPACK_ENABLE_NETWORK=0 pnpm --version\)"/);
   assert.doesNotMatch(linuxSmoke, /COREPACK_ENABLE_PROJECT_SPEC=0|corepack prepare|corepack install/);
   assert.match(linuxSmoke, /\(\n  export COREPACK_ENABLE_NETWORK=0 npm_config_offline=true\n  cd "\$smoke_dir"\n  npm --offline run check\n  pnpm run check\n\)/);
-  assert.doesNotMatch(linuxSmoke.slice(0, linuxSmoke.indexOf("\nsmoke_dir=")), /COREPACK_ENABLE_NETWORK|npm_config_offline/);
+  assert.doesNotMatch(linuxSmoke.slice(0, linuxSmoke.indexOf("\nsmoke_dir=")), /export COREPACK_ENABLE_NETWORK|npm_config_offline/);
   assert.match(windowsSmoke, /docker image inspect .*\nif \(\$LASTEXITCODE -ne 0\).*throw.*\nWrite-Output "devtools-smoke-ok"\n$/);
   assert.match(text, /trap 'exit 130' INT\ntrap 'exit 143' TERM/);
   assert.match(text, /rollback_pending=1\nrun_json_tee "\$promotion_log"/);
@@ -306,7 +533,7 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
   assert.equal((log.match(/\n  rust_runtime_probe\nfi\npublic_toolchain_archive_dir=/g) ?? []).length, 3);
   assert.equal((log.match(/\n  offline_uv_probe\nfi\n}/g) ?? []).length, 3);
   assert.equal((log.match(/\ndeveloper_archive_probe\necho devtools-smoke-ok/g) ?? []).length, 3);
-  assert.equal((log.match(/COREPACK_ENV_FILE=0 pnpm --version/g) ?? []).length, 3);
+  assert.equal((log.match(/expected_pnpm_version=11\.1\.0/g) ?? []).length, 3);
   assert.match(log, /docker image inspect hello-world ubuntu:24\.04 node:24-bookworm/);
   assert.match(
     log,
@@ -547,11 +774,13 @@ async function linuxSmokeFixture(t, { major = "24", pnpm = "11.1.0", customPrep 
   const result = await runScript(args, {
     CRABBOX_BIN: fake.fake, CRABBOX_FAKE_LOG: fake.log, CRABBOX_FAKE_CAPTURE_RUN_SCRIPT: captured,
     CRABBOX_LINUX_NODE_MAJOR: major, CRABBOX_LINUX_PNPM_VERSION: pnpm,
+    CRABBOX_FAKE_RESOLVED_PNPM: pnpm,
   });
   assert.equal(result.code, 0, result.stderr);
   const log = await readFile(fake.log, "utf8");
   if (customPrep) {
     assert.doesNotMatch(log, /builder overrides/);
+    assert.doesNotMatch(log, /--capture-stdout/);
   } else {
     assert.ok(log.includes(`builder overrides node=${major} pnpm=${pnpm}\n`));
     assert.match(log, /--allow-env CRABBOX_LINUX_NODE_MAJOR,CRABBOX_LINUX_PNPM_VERSION --script/);
@@ -593,11 +822,15 @@ fi`);
     'if [[ "$*" == "-s" ]]; then printf "%s\\n" "${FIXTURE_OS:-Linux}"; else printf "x86_64\\n"; fi',
   );
   await writeTool("getconf", 'printf "%s\\n" "${FIXTURE_LIBC:-glibc 2.39}"');
-  await writeTool("corepack", 'exit "${FIXTURE_TOOL_EXIT:-0}"');
+  await writeTool("corepack", `[[ "\${FIXTURE_TOOL_EXIT:-0}" == 0 ]] || exit "$FIXTURE_TOOL_EXIT"
+if [[ "$*" == "pnpm --version" ]]; then
+  [[ "$COREPACK_ENABLE_NETWORK" == 0 && "$PWD" == / ]] || exit 66
+  printf '%s\\n' "$FIXTURE_RESOLVED_PNPM"
+fi`);
   await writeTool("id", 'printf "%s\\n" "$FIXTURE_UID"');
   await writeTool("dpkg", '[[ "$*" == "--print-architecture" ]] || exit 65\nprintf "%s\\n" "$FIXTURE_ARCH"');
   await writeTool("pnpm", `if [[ "$*" == --version ]]; then
-  [[ "\${COREPACK_ENABLE_NETWORK:-}" == 0 && -z "\${COREPACK_ENABLE_PROJECT_SPEC+x}" ]] || exit 66
+  [[ "\${COREPACK_ENABLE_NETWORK:-}" == ${customPrep ? '""' : "0"} && -z "\${COREPACK_ENABLE_PROJECT_SPEC+x}" ]] || exit 66
   printf "%s\\n" "$HOME" >>"$HOME/normal-pnpm.called"
   printf '%s\\n' "\${FIXTURE_PNPM_VERSION:-${pnpm}}"
   exit "\${FIXTURE_PNPM_EXIT:-0}"
@@ -614,6 +847,7 @@ fi
     cwd: fake.dir,
     env: {
       PATH: `${bin}${path.delimiter}${process.env.PATH}`, HOME: fake.dir, TMPDIR: tmp,
+      FIXTURE_RESOLVED_PNPM: pnpm,
       FIXTURE_UID: "1000", FIXTURE_ARCH: "amd64", FIXTURE_NODE_VERSION: `${major}.0.0`, ...env,
     },
     encoding: "utf8",
@@ -764,8 +998,8 @@ test("bundled Linux smoke rejects a different ordinary pnpm default without acti
   const { generated, execute } = await linuxSmokeFixture(t);
   const result = execute({ FIXTURE_PNPM_VERSION: "12.3.4" });
   assert.equal(result.status, 1, result.stderr);
-  assert.match(result.stderr, /runtime pnpm version differs from requested 11\.1\.0/);
-  const normalCheck = generated.slice(generated.indexOf("# Check the ordinary"), generated.indexOf("printf 'int main"));
+  assert.match(result.stderr, /pnpm default mismatch: expected 11\.1\.0/);
+  const normalCheck = generated.slice(generated.indexOf('corepack --version\nif '), generated.indexOf("\nsmoke_dir="));
   assert.match(normalCheck, /COREPACK_ENABLE_NETWORK=0/);
   assert.doesNotMatch(normalCheck, /corepack prepare|corepack install|COREPACK_ENABLE_PROJECT_SPEC=0/);
 });
@@ -983,7 +1217,10 @@ ${body}
     await writeTool(name, "exit 0");
   }
   for (const name of ["npm", "corepack", "pnpm"]) {
-    await writeTool(name, `if [[ "$*" == --version ]]; then
+    await writeTool(name, `if [[ "${name}" == corepack && "$*" == "pnpm --version" ]]; then
+  [[ "$COREPACK_ENABLE_NETWORK" == 0 && "$PWD" == / ]]
+  echo 11.1.0
+elif [[ "$*" == --version ]]; then
   if [[ "${name}" == pnpm ]]; then
     [[ "$COREPACK_ENABLE_NETWORK" == 0 && -z "\${COREPACK_ENABLE_PROJECT_SPEC+x}" ]]
     echo 11.1.0
@@ -1316,6 +1553,7 @@ test("AWS devtools mint wrapper maps windows flags", async () => {
   assert.match(log, /--windows-mode normal/);
   assert.doesNotMatch(log, /--desktop/);
   assert.doesNotMatch(log, /--browser/);
+  assert.doesNotMatch(log, /--capture-stdout|pnpm preparation requires a nonroot user/);
   assert.doesNotMatch(log, /warmup .*--region us-east-1/);
   assert.doesNotMatch(log, /--os /);
   assert.match(

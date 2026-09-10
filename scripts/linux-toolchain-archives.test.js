@@ -33,15 +33,6 @@ mktemp() {
   if [[ "$#" == 1 && "$1" == -d ]]; then command mktemp -d "$TMPDIR/probe.XXXXXXXX"
   else command mktemp "$@"; fi
 }
-# Model the account boundary without privileged runuser; keep the real owned-state check.
-resolve_runtime_user() {
-  runtime_user=fixture runtime_uid="$FIXTURE_UID" runtime_home="$HOME" runtime_shell=/bin/bash
-}
-run_runtime_user() {
-  (cd / && env -i HOME="$runtime_home" USER="$runtime_user" LOGNAME="$runtime_user" \
-    SHELL="$runtime_shell" PATH="$PATH" CI=1 COREPACK_DEFAULT_TO_LATEST=0 \
-    COREPACK_ENABLE_AUTO_PIN=0 COREPACK_ENV_FILE=0 "$@")
-}
 ${body}`], {
       cwd: root,
       env: {
@@ -49,7 +40,6 @@ ${body}`], {
         HOME: path.join(root, "home"),
         TMPDIR: path.join(root, "tmp"),
         PYTHONDONTWRITEBYTECODE: "1",
-        FIXTURE_UID: String(process.getuid()),
         INSTALLER: installer,
         ...env,
       },

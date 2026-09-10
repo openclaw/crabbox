@@ -29,6 +29,7 @@ windows_mode="${CRABBOX_WINDOWS_MODE:-normal}"
 prep_script="${CRABBOX_IMAGE_PREP_SCRIPT:-}"
 linux_node_major="${CRABBOX_LINUX_NODE_MAJOR:-24}"
 linux_pnpm_version="${CRABBOX_LINUX_PNPM_VERSION:-11.1.0}"
+linux_pnpm_default=""
 measured=0
 max_p95_runner_total_ms=""
 measurement_dir=""
@@ -787,10 +788,9 @@ smoke_script() {
   smoke_script_value=""
   IFS= read -r -d '' smoke_script_value <"$smoke_script_path" || [[ -n "$smoke_script_value" ]] || return 1
   if [[ "$target" == "linux" ]]; then
-    local expected_node_major="" expected_pnpm_version="" archive_probe=":"
+    local expected_node_major="" archive_probe=":"
     if [[ "$linux_developer_builder" == "1" ]]; then
       [[ "$linux_node_major" == "24" ]] || expected_node_major="$linux_node_major"
-      expected_pnpm_version="$linux_pnpm_version"
       # Only the bundled builder declares archives. Freeze its selection, not guest environment.
       archive_probe="$(
         CRABBOX_LINUX_NODE_MAJOR="$linux_node_major" \
@@ -812,7 +812,7 @@ smoke_script() {
       archive_probe+=$'\n'"$go_archive_probe"$'\n'"$bun_archive_probe"$'\n'"$rust_archive_probe"$'\n'"$uv_archive_probe"
     fi
     printf -v smoke_script_value 'set -euo pipefail\nexpected_node_major=%q\nexpected_pnpm_version=%q\ndeveloper_archive_probe() {\n%s\n}\n%s' \
-      "$expected_node_major" "$expected_pnpm_version" "$archive_probe" "$smoke_script_value"
+      "$expected_node_major" "$linux_pnpm_default" "$archive_probe" "$smoke_script_value"
   fi
 }
 
@@ -862,7 +862,32 @@ run_prep() {
     # Prep and every smoke must use the same declared overrides, not ambient guest state.
     run_cmd env CRABBOX_LINUX_NODE_MAJOR="$linux_node_major" CRABBOX_LINUX_PNPM_VERSION="$linux_pnpm_version" \
       "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync \
-      --allow-env CRABBOX_LINUX_NODE_MAJOR,CRABBOX_LINUX_PNPM_VERSION --script "$prep_script"
+      --allow-env CRABBOX_LINUX_NODE_MAJOR,CRABBOX_LINUX_PNPM_VERSION --script "$prep_script" || return $?
+    # sudo preparation seeds root's Corepack state, not the lease user's default.
+    local pnpm_command pnpm_capture
+    printf -v pnpm_command 'set -euo pipefail\n[[ "$(id -u)" -ne 0 ]] || { echo "pnpm preparation requires a nonroot user" >&2; exit 1; }\ncd /\ncorepack prepare %q --activate >&2\n' "pnpm@$linux_pnpm_version"
+    pnpm_command+='version="$(COREPACK_ENABLE_NETWORK=0 pnpm --version)"
+corepack_version="$(COREPACK_ENABLE_NETWORK=0 corepack pnpm --version)"
+[[ "$version" == "$corepack_version" ]] || { echo "ordinary pnpm does not match Corepack" >&2; exit 1; }
+printf "%s\n" "$version"'
+    pnpm_capture="$(mktemp "$log_dir/.image-mint-pnpm-${log_id}.XXXXXX")" || return $?
+    run_cmd "$CRABBOX_BIN" run --provider aws --target linux --id "$lease" --no-sync \
+      --capture-stdout "$pnpm_capture" --shell -- "$pnpm_command" || return $?
+    # Bound the read and reject extra output before rendering it into later smokes.
+    linux_pnpm_default="$(node - "$pnpm_capture" <<'NODE'
+const fs = require("node:fs");
+const fd = fs.openSync(process.argv[2], "r");
+const bytes = Buffer.alloc(130);
+const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
+fs.closeSync(fd);
+const version = bytes.subarray(0, length).toString("latin1");
+if (!/^[!-~]{1,128}\n$/.test(version)) {
+  console.error("invalid runtime-user pnpm version: expected one bounded version line");
+  process.exit(1);
+}
+process.stdout.write(version.slice(0, -1));
+NODE
+    )" || return $?
   else
     run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync --script "$prep_script"
   fi
