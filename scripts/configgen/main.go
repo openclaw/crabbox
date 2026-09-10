@@ -20,6 +20,7 @@ import (
 )
 
 type field struct {
+	flagDurationRawZeroReset, flagListAppendTrimmed                                                                                                                              bool
 	flagDurationError                                                                                                                                                            string
 	envListCSV, flagListScalarEmptyNil                                                                                                                                           bool
 	fileStorageValue                                                                                                                                                             bool
@@ -127,6 +128,12 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			return s, err
 		}
 		tags := reflect.StructTag(raw)
+		if tags.Get("sources") == "runtime" {
+			if raw != `sources:"runtime"` {
+				return s, fmt.Errorf("%s: runtime fields require only sources:\"runtime\"", node.Names[0].Name)
+			}
+			continue
+		}
 		f := field{name: node.Names[0].Name, key: tags.Get("config"), env: tags.Get("env"), flag: tags.Get("flag"), help: tags.Get("help")}
 		// These exact grants preserve existing loader policy; they are not a
 		// general source-policy language or a default permission.
@@ -242,13 +249,19 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		flagDuration, hasFlagDuration := tags.Lookup("flagDuration")
 		flagDurationError, hasFlagDurationError := tags.Lookup("flagDurationError")
 		if hasFlagDuration {
-			if f.kind != "time.Duration" || f.noFlag || flagDuration != "trim-positive" {
-				return s, fmt.Errorf("%s: flagDuration requires trim-positive on a flag-admitted time.Duration", f.name)
+			if f.kind != "time.Duration" || f.noFlag || (flagDuration != "trim-positive" && flagDuration != "raw-zero-reset") {
+				return s, fmt.Errorf("%s: flagDuration requires trim-positive or raw-zero-reset on a flag-admitted time.Duration", f.name)
 			}
-			if !hasFlagDurationError || strings.TrimSpace(flagDurationError) == "" {
+			if flagDuration == "raw-zero-reset" {
+				if hasFlagDurationError {
+					return s, fmt.Errorf("%s: raw-zero-reset forbids flagDurationError", f.name)
+				}
+				f.flagDurationRawZeroReset = true
+			} else if !hasFlagDurationError || strings.TrimSpace(flagDurationError) == "" {
 				return s, fmt.Errorf("%s: flagDuration requires a nonempty flagDurationError", f.name)
+			} else {
+				f.flagDurationError = flagDurationError
 			}
-			f.flagDurationError = flagDurationError
 		} else if hasFlagDurationError {
 			return s, fmt.Errorf("%s: flagDurationError requires flagDuration", f.name)
 		}
@@ -275,7 +288,7 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		}{
 			{"fileList", !f.noFile, map[string]*bool{"raw": &f.fileListRaw, "nonempty-raw": &f.fileListNonemptyRaw}},
 			{"envList", !f.noEnv, map[string]*bool{"presence": &f.envListPresence, "csv": &f.envListCSV}},
-			{"flagList", !f.noFlag, map[string]*bool{"replace-append": &f.flagListReplaceAppend, "empty-scalar": &f.flagListEmptyScalar, "scalar-empty-nil": &f.flagListScalarEmptyNil}},
+			{"flagList", !f.noFlag, map[string]*bool{"replace-append": &f.flagListReplaceAppend, "append-trimmed": &f.flagListAppendTrimmed, "empty-scalar": &f.flagListEmptyScalar, "scalar-empty-nil": &f.flagListScalarEmptyNil}},
 		} {
 			if value, ok := tags.Lookup(mode.tag); ok {
 				enabled := mode.values[value]
@@ -365,7 +378,7 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			case "string":
 				eligible = f.fileIgnoreEmpty
 			case "[]string":
-				eligible = f.fileListNonemptyRaw
+				eligible = f.fileListNonemptyRaw || f.fileListRaw
 			case "int", "int64":
 				eligible = f.fileIntPositive || f.fileIntNonzero
 			case "float64":
@@ -434,14 +447,14 @@ func generate(s schema, source string) ([]byte, error) {
 	hasFlags, needsOS, needsStrings, needsTime, flagsCanFail := false, false, false, false, false
 	for _, f := range s.fields {
 		hasFlags = hasFlags || !f.noFlag
-		flagsCanFail = flagsCanFail || f.flagDurationError != ""
-		needsStrings = needsStrings || f.flagDurationError != ""
+		flagsCanFail = flagsCanFail || f.flagDurationError != "" || f.flagDurationRawZeroReset
+		needsStrings = needsStrings || f.flagDurationError != "" || f.flagDurationRawZeroReset
 		if f.kind == "time.Duration" {
-			needsTime = true
+			needsTime = needsTime || !f.flagDurationRawZeroReset || f.defaultExpr != ""
 			needsOS = needsOS || !f.noEnv
 		}
 		if f.kind == "[]string" {
-			needsStrings = needsStrings || (!f.noFlag && !f.flagListReplaceAppend && !f.flagListEmptyScalar)
+			needsStrings = needsStrings || (!f.noFlag && !f.flagListReplaceAppend && !f.flagListAppendTrimmed && !f.flagListEmptyScalar)
 			needsOS = needsOS || (!f.noEnv && !f.envListPresence)
 		}
 	}
@@ -539,6 +552,9 @@ func generate(s schema, source string) ([]byte, error) {
 			}
 			if f.fileListNonemptyRaw {
 				conditions = append(conditions, "len("+value+") > 0")
+			}
+			if f.fileListRaw && f.fileStorageValue {
+				conditions = append(conditions, value+" != nil")
 			}
 			p("if %s {\n", strings.Join(conditions, " && "))
 			if f.nonnegative && !f.fileIntPositive && !f.fileIntPresent && !f.fileIntNonzero {
@@ -643,7 +659,7 @@ func generate(s schema, source string) ([]byte, error) {
 				continue
 			}
 			kind := f.kind
-			if f.flagDurationError != "" {
+			if f.flagDurationError != "" || f.flagDurationRawZeroReset {
 				kind = "string"
 			}
 			if kind == "[]string" {
@@ -651,28 +667,40 @@ func generate(s schema, source string) ([]byte, error) {
 				if f.flagListReplaceAppend {
 					kind = "replaceAppendListFlag"
 				}
+				if f.flagListAppendTrimmed {
+					kind = "appendTrimmedListFlag"
+				}
 			}
 			p("%s *%s\n", f.name, kind)
 		}
 		p("}\n\n")
 		p("// Register%sFlags registers mechanical bindings without selecting a provider.\nfunc Register%sFlags(fs *flag.FlagSet, defaults %s) %sFlagValues {\n", s.name, s.name, s.name, s.name)
+		hasAppendTrimmed := false
 		for _, f := range s.fields {
 			if f.flagListReplaceAppend {
 				p("list%s := newReplaceAppendListFlag(defaults.%s)\nfs.Var(list%s, %q, %q)\n", f.name, f.name, f.name, f.flag, f.help)
 			}
+			if f.flagListAppendTrimmed {
+				hasAppendTrimmed = true
+				p("list%s := newAppendTrimmedListFlag(defaults.%s)\n", f.name, f.name)
+			}
 		}
-		p("return %sFlagValues{\n", s.name)
+		if hasAppendTrimmed {
+			p("values := %sFlagValues{\n", s.name)
+		} else {
+			p("return %sFlagValues{\n", s.name)
+		}
 		for _, f := range s.fields {
 			if f.noFlag {
 				continue
 			}
-			if f.flagListReplaceAppend {
+			if f.flagListReplaceAppend || f.flagListAppendTrimmed {
 				p("%s: list%s,\n", f.name, f.name)
 				continue
 			}
 			method := map[string]string{"string": "String", "int": "Int", "int64": "Int64", "float64": "Float64", "bool": "Bool", "[]string": "String", "time.Duration": "Duration"}[f.kind]
 			value := "defaults." + f.name
-			if f.flagDurationError != "" {
+			if f.flagDurationError != "" || f.flagDurationRawZeroReset {
 				method = "String"
 				value += ".String()"
 			}
@@ -688,7 +716,16 @@ func generate(s schema, source string) ([]byte, error) {
 			}
 			p("%s: fs.%s(%q, %s, %q),\n", f.name, method, f.flag, value, f.help)
 		}
-		p("}\n}\n\n")
+		p("}\n")
+		if hasAppendTrimmed {
+			for _, f := range s.fields {
+				if f.flagListAppendTrimmed {
+					p("fs.Var(list%s, %q, %q)\n", f.name, f.flag, f.help)
+				}
+			}
+			p("return values\n")
+		}
+		p("}\n\n")
 		applyResult := ""
 		if trackedFlags {
 			p("// %sVisitedFlags records raw flag visits, independently of application.\ntype %sVisitedFlags struct {\n", s.name, s.name)
@@ -723,6 +760,10 @@ func generate(s schema, source string) ([]byte, error) {
 			if f.noFlag {
 				continue
 			}
+			if f.flagDurationRawZeroReset {
+				p("if flagWasSet(fs, %q) { if strings.TrimSpace(*values.%s) == \"0s\" { cfg.%s = 0 } else if err := ApplyLeaseDuration(&cfg.%s, *values.%s); err != nil { return %serr } }\n", f.flag, f.name, f.name, f.name, f.name, resultPrefix)
+				continue
+			}
 			if f.flagDurationError != "" {
 				p("if flagWasSet(fs, %q) { parsed, err := time.ParseDuration(strings.TrimSpace(*values.%s)); if err != nil || parsed <= 0 { return %sexit(2, \"%%s\", %q) }; cfg.%s = parsed }\n", f.flag, f.name, resultPrefix, f.flagDurationError, f.name)
 				continue
@@ -735,6 +776,8 @@ func generate(s schema, source string) ([]byte, error) {
 			if f.kind == "[]string" {
 				if f.flagListReplaceAppend {
 					value = "append([]string(nil), values." + f.name + ".values...)"
+				} else if f.flagListAppendTrimmed {
+					value = "append([]string(nil), values." + f.name + ".stringListFlag...)"
 				} else {
 					value = "splitCommaList(" + value + ")"
 				}

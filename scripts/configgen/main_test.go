@@ -574,6 +574,12 @@ func TestNamespaceGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestNamespaceInstanceGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_namespace_instance.go", "../../internal/cli/config_namespace_instance_generated.go", "NamespaceInstanceConfig", "namespaceInstance", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAWSLambdaMicroVMGeneratedConfigIsCurrent(t *testing.T) {
 	if err := run("../../internal/cli/config_aws_lambda_microvm.go", "../../internal/cli/config_aws_lambda_microvm_generated.go", "AWSLambdaMicroVMConfig", "awsLambdaMicroVM", true); err != nil {
 		t.Fatal(err)
@@ -1971,6 +1977,24 @@ func TestGenerateSourceSpecificLists(t *testing.T) {
 		t.Fatal(err)
 	}
 	helper := strings.SplitN(string(helperSource), "import \"strings\"", 2)[1]
+	actionsSource, err := os.ReadFile("../../internal/cli/actions.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(actionsSource), "type stringListFlag []string")
+	if start < 0 {
+		t.Fatal("missing core stringListFlag")
+	}
+	listSource := string(actionsSource)[start:]
+	getStart := strings.Index(listSource, "func (f *stringListFlag) Get() any {")
+	if getStart < 0 {
+		t.Fatal("missing core stringListFlag.Get")
+	}
+	getEnd := strings.Index(listSource[getStart:], "\n}")
+	if getEnd < 0 {
+		t.Fatal("missing end of core stringListFlag.Get")
+	}
+	helper += "\n" + listSource[:getStart+getEnd+2] + "\n"
 	compileSource := strings.Replace(sourceListSample, "package cli", "package cli\nimport \"strings\"", 1) + helper + "\nfunc getenvList(string)([]string,bool){panic(\"stub\")}\n"
 	typecheckGenerated(t, compileSource, output)
 	coreSource, err := os.ReadFile("../../internal/cli/config.go")
@@ -2726,7 +2750,7 @@ func TestSchemaFileStorageRejectsUnsupported(t *testing.T) {
 		{"empty-tag", "string", `fileIgnoreEmpty:"true"`, ""}, {"unknown-tag", "string", `fileIgnoreEmpty:"true"`, "pointer"},
 		{"presence-string", "string", "", "value"}, {"bool", "bool", "", "value"},
 		{"ordinary-int", "int", `nonnegative:"true"`, "value"}, {"present-int", "int", `nonnegative:"true" fileInt:"present"`, "value"}, {"ordinary-int64", "int64", `nonnegative:"true" envInt:"fallback"`, "value"},
-		{"ordinary-float", "float64", "", "value"}, {"normalized-list", "[]string", "", "value"}, {"raw-clone-list", "[]string", `fileList:"raw"`, "value"},
+		{"ordinary-float", "float64", "", "value"}, {"normalized-list", "[]string", "", "value"}, {"raw-list-invalid-storage", "[]string", `fileList:"raw"`, "clone"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			source := "package cli\ntype PilotConfig struct { Value " + tc.kind + " `config:\"value\" env:\"VALUE\" flag:\"value\" sources:\"user,repo,env,flag\" help:\"Value\" " + tc.policy + " fileStorage:\"" + tc.storage + "\"` }"
@@ -2745,4 +2769,391 @@ func TestSchemaFileStorageRejectsUnsupported(t *testing.T) {
 			t.Fatalf("wrong rejection reason: %v, want fileStorage eligibility error", err)
 		}
 	})
+}
+
+const runtimeFieldSample = "package cli\ntype runtimeState struct { Value string }\ntype PilotConfig struct {\n" +
+	" Name string `sources:\"user,repo,env,flag\" config:\"name\" env:\"NAME\" flag:\"name\" help:\"Name\" default:\"default\" reportApplied:\"true\"`\n" +
+	" RuntimeState *runtimeState `sources:\"runtime\"`\n" +
+	" RuntimeItems map[string][]string `sources:\"runtime\"`\n}"
+
+func TestSchemaRuntimeFieldsFailClosed(t *testing.T) {
+	for _, tag := range []string{
+		"config", "configAlias", "env", "envAlias", "envAlias2", "flag", "help", "default", "flagFallback",
+		"fileStorage", "fileList", "envList", "flagList", "duration", "flagDuration", "flagDurationError",
+		"reportApplied", "fileIgnoreEmpty", "nonnegative", "fileInt", "envInt", "fileFloat", "envAliasAfterConfig",
+		"yaml", "unknown", "sources",
+	} {
+		for _, value := range []string{"", "value"} {
+			t.Run(tag+"/"+value, func(t *testing.T) {
+				input := strings.Replace(runtimeFieldSample, `sources:"runtime"`, `sources:"runtime" `+tag+`:"`+value+`"`, 1)
+				_, err := parseSchema([]byte(input), "PilotConfig", "pilot")
+				if err == nil || !strings.Contains(err.Error(), `runtime fields require only sources:"runtime"`) {
+					t.Fatalf("runtime extra tag %s=%q: %v", tag, value, err)
+				}
+			})
+		}
+	}
+	for _, tc := range []struct{ name, old, replacement, want string }{
+		{"mixed source", `sources:"runtime"`, `sources:"runtime,flag"`, "explicit sources"},
+		{"padded source", `sources:"runtime"`, `sources:" runtime "`, "explicit sources"},
+		{"leading tag space", `sources:"runtime"`, ` sources:"runtime"`, "runtime fields require only"},
+		{"trailing tag space", `sources:"runtime"`, `sources:"runtime" `, "runtime fields require only"},
+		{"untagged", " `sources:\"runtime\"`", "", "singly named, exported, and tagged"},
+		{"private", "RuntimeState *runtimeState", "runtimeValue *runtimeState", "singly named, exported, and tagged"},
+		{"multiple names", "RuntimeState *runtimeState", "RuntimeState, Other *runtimeState", "singly named, exported, and tagged"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(runtimeFieldSample, tc.old, tc.replacement, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestGenerateRuntimeFieldsStayInInput(t *testing.T) {
+	s, err := parseSchema([]byte(runtimeFieldSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.fields) != 1 || s.fields[0].name != "Name" {
+		t.Fatalf("runtime fields entered binding schema: %+v", s.fields)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := strings.SplitN(runtimeFieldSample, " RuntimeState", 2)[0] + "}"
+	baseSchema, err := parseSchema([]byte(baseline), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseOutput, err := generate(baseSchema, "pilot.go")
+	if err != nil || !bytes.Equal(output, baseOutput) {
+		t.Fatalf("runtime fields changed generated bindings/defaults: %v", err)
+	}
+	for _, name := range []string{"RuntimeState", "RuntimeItems", "runtimeState"} {
+		if strings.Contains(string(output), name) {
+			t.Fatalf("runtime name %s leaked into generated output", name)
+		}
+	}
+	typecheckGenerated(t, runtimeFieldSample+"\nfunc firstNonEmptyEnv(...string) (string, bool) { panic(\"stub\") }\n", output)
+	const behavior = `package cli
+import("flag";"testing")
+func firstNonEmptyEnv(...string)(string,bool){return "environment",true}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestRuntimeStateSurvivesBindings(t *testing.T){
+ cfg:=defaultPilotConfig();if cfg.Name!="default"||cfg.RuntimeState!=nil||cfg.RuntimeItems!=nil{t.Fatalf("defaults: %+v",cfg)}
+ state:=&runtimeState{Value:"retained"};items:=map[string][]string{"key":{"raw"}}
+ cfg.RuntimeState=state;cfg.RuntimeItems=items;name:="file"
+ if applied,err:=cfg.applyFile(&filePilotConfig{Name:&name});err!=nil||!applied.Name||cfg.Name!="file"{t.Fatalf("file: %+v %v",applied,err)}
+ if applied,err:=cfg.applyEnv();err!=nil||!applied.Name||cfg.Name!="environment"{t.Fatalf("env: %+v %v",applied,err)}
+ fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+ count:=0;fs.VisitAll(func(*flag.Flag){count++});if count!=1{t.Fatalf("runtime flags registered: %d",count)}
+ if err:=fs.Parse([]string{"--name=flag"});err!=nil{t.Fatal(err)}
+ if applied:=values.Apply(&cfg,fs);!applied.Name||cfg.Name!="flag"{t.Fatalf("flags: %+v %+v",applied,cfg)}
+ if cfg.RuntimeState!=state||cfg.RuntimeState.Value!="retained"{t.Fatal("runtime pointer changed")}
+ items["new"]=[]string{"shared"};items["key"][0]="mutated"
+ if cfg.RuntimeItems["key"][0]!="mutated"||cfg.RuntimeItems["new"][0]!="shared"{t.Fatal("runtime map or slice identity changed")}
+}
+`
+	runScalarFixture(t, runtimeFieldSample, output, behavior)
+}
+
+const rawValueAppendListSample = "package cli\ntype PilotConfig struct { Items []string `sources:\"user,repo,env,flag\" config:\"items\" env:\"ITEMS\" flag:\"item\" help:\"Items\" fileList:\"raw\" fileStorage:\"value\" flagList:\"append-trimmed\"` }"
+
+func TestSchemaRawValueAndAppendTrimmedListsFailClosed(t *testing.T) {
+	for _, mode := range []struct{ tag, value string }{{"fileList", "raw"}, {"fileStorage", "value"}, {"flagList", "append-trimmed"}} {
+		for _, value := range []string{"", "other"} {
+			t.Run(mode.tag+"/"+value, func(t *testing.T) {
+				input := strings.Replace(rawValueAppendListSample, mode.tag+`:"`+mode.value+`"`, mode.tag+`:"`+value+`"`, 1)
+				_, err := parseSchema([]byte(input), "PilotConfig", "pilot")
+				if err == nil || !strings.Contains(err.Error(), mode.tag+" requires") {
+					t.Fatalf("error=%v, want %s rejection", err, mode.tag)
+				}
+			})
+		}
+	}
+	for _, kind := range []string{"string", "int", "bool", "float64"} {
+		t.Run("flag kind/"+kind, func(t *testing.T) {
+			input := strings.Replace(flagOnlySample, "Name string", "Name "+kind, 1)
+			input = strings.Replace(input, `help:"Name"`, `help:"Name" flagList:"append-trimmed"`, 1)
+			_, err := parseSchema([]byte(input), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), "flagList requires") {
+				t.Fatalf("kind %s: %v", kind, err)
+			}
+		})
+	}
+	for _, tc := range []struct{ name, source, want string }{
+		{"no flag source", "package cli\ntype PilotConfig struct { Items []string `sources:\"user,repo,env\" config:\"items\" env:\"ITEMS\" flagList:\"append-trimmed\"` }", "flagList requires"},
+		{"no file source", "package cli\ntype PilotConfig struct { Items []string `sources:\"flag\" flag:\"item\" help:\"Items\" fileList:\"raw\" fileStorage:\"value\"` }", "fileList requires"},
+		{"storage without file", "package cli\ntype PilotConfig struct { Items []string `sources:\"flag\" flag:\"item\" help:\"Items\" fileStorage:\"value\" flagList:\"append-trimmed\"` }", "fileStorage requires"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(tc.source), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestGenerateRawValueAndAppendTrimmedLists(t *testing.T) {
+	s, err := parseSchema([]byte(rawValueAppendListSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.fields) != 1 || !s.fields[0].fileListRaw || !s.fields[0].fileStorageValue || !s.fields[0].flagListAppendTrimmed || s.fields[0].flagListReplaceAppend {
+		t.Fatalf("wrong list modes: %+v", s.fields)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatalf("nondeterministic raw value/append list output: %v", err)
+	}
+	text := strings.Join(strings.Fields(string(output)), " ")
+	for _, want := range []string{
+		"Items []string `yaml:\"items,omitempty\"`", "if file.Items != nil {", "cfg.Items = append([]string(nil), (file.Items)...)",
+		"Items *appendTrimmedListFlag", "listItems := newAppendTrimmedListFlag(defaults.Items)", `fs.Var(listItems, "item", "Items")`,
+		`if flagWasSet(fs, "item") {`, "cfg.Items = append([]string(nil), values.Items.stringListFlag...)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing list binding %q", want)
+		}
+	}
+	for _, bad := range []string{"*file.Items", "normalizeList(file.Items)", "newReplaceAppendListFlag", `fs.String("item"`} {
+		if strings.Contains(text, bad) {
+			t.Fatalf("unexpected list binding %q", bad)
+		}
+	}
+	helperSource, err := os.ReadFile("../../internal/cli/config_list_flag.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper := strings.SplitN(string(helperSource), "import \"strings\"", 2)[1]
+	actionsSource, err := os.ReadFile("../../internal/cli/actions.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(actionsSource), "type stringListFlag []string")
+	if start < 0 {
+		t.Fatal("missing core stringListFlag")
+	}
+	listSource := string(actionsSource)[start:]
+	getStart := strings.Index(listSource, "func (f *stringListFlag) Get() any {")
+	if getStart < 0 {
+		t.Fatal("missing core stringListFlag.Get")
+	}
+	getEnd := strings.Index(listSource[getStart:], "\n}")
+	if getEnd < 0 {
+		t.Fatal("missing end of core stringListFlag.Get")
+	}
+	helper += "\n" + listSource[:getStart+getEnd+2] + "\n"
+	compileSource := strings.Replace(rawValueAppendListSample, "package cli", "package cli\nimport \"strings\"", 1) + helper
+	typecheckGenerated(t, compileSource, output)
+	coreSource, err := os.ReadFile("../../internal/cli/config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	getters := ""
+	for _, name := range []string{"splitCommaList", "normalizeList"} {
+		start := strings.Index(string(coreSource), "func "+name+"(")
+		if start < 0 {
+			t.Fatalf("missing core helper %s", name)
+		}
+		rest := string(coreSource)[start:]
+		end := strings.Index(rest, "\nfunc ")
+		if end < 0 {
+			t.Fatalf("missing end of core helper %s", name)
+		}
+		getters += rest[:end] + "\n"
+	}
+	const behavior = `package cli
+import("flag";"reflect";"strings";"testing")
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestRawValueFileList(t *testing.T){
+ prior:=[]string{"prior"};cfg:=PilotConfig{Items:prior}
+ for _,file:=range []*filePilotConfig{nil,{}, {Items:nil}}{
+  if err:=cfg.applyFile(file);err!=nil||!reflect.DeepEqual(cfg.Items,prior)||&cfg.Items[0]!=&prior[0]{t.Fatalf("nil input changed prior: %#v %v",cfg.Items,err)}
+ }
+ file:=filePilotConfig{Items:[]string{}}
+ if err:=cfg.applyFile(&file);err!=nil||cfg.Items!=nil||file.Items==nil{t.Fatalf("empty clear: %#v %#v %v",cfg.Items,file.Items,err)}
+ raw:=[]string{" a ","","a,b","dup","dup"};file.Items=raw
+ if err:=cfg.applyFile(&file);err!=nil||!reflect.DeepEqual(cfg.Items,raw){t.Fatalf("raw file: %#v %v",cfg.Items,err)}
+ raw[0]="file mutation";if cfg.Items[0]!=" a "{t.Fatal("file list aliases config")}
+ cfg.Items[1]="config mutation";if raw[1]!=""{t.Fatal("config list aliases file")}
+}
+func TestAppendTrimmedOccurrences(t *testing.T){
+ inherited:=[]string{" inherited ","","dup"};cfg:=PilotConfig{Items:inherited}
+ fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+ getter:=fs.Lookup("item").Value.(flag.Getter)
+ if !reflect.DeepEqual(getter.Get(),[]string{" inherited ","","dup"})||fs.Lookup("item").DefValue!=" inherited ,,dup"{t.Fatalf("inherited snapshot: %#v",getter.Get())}
+ inherited[0]="later default";values.Apply(&cfg,fs)
+ if cfg.Items[0]!="later default"||getter.Get().([]string)[0]!=" inherited "{t.Fatal("registration aliases defaults or unvisited Apply overwrites them")}
+ if err:=fs.Parse([]string{"--item= \t ","--item= a,b ","--item= dup ","--item=dup","--item=\u2003 last \u2003"});err!=nil{t.Fatal(err)}
+ want:=[]string{" inherited ","","dup","","a,b","dup","dup","last"}
+ if !reflect.DeepEqual(getter.Get(),want){t.Fatalf("whole trimmed occurrences: %#v",getter.Get())}
+ copy:=getter.Get().([]string);copy[0]="getter mutation"
+ if !reflect.DeepEqual(getter.Get(),want){t.Fatal("Get aliases flag storage")}
+ values.Apply(&cfg,fs);if !reflect.DeepEqual(cfg.Items,want){t.Fatalf("Apply: %#v",cfg.Items)}
+ cfg.Items[0]="config mutation";if !reflect.DeepEqual(getter.Get(),want){t.Fatal("Apply aliases flag storage")}
+ if err:=fs.Set("item"," later,whole ");err!=nil{t.Fatal(err)}
+ if len(cfg.Items)!=len(want){t.Fatal("later flag occurrence changed already applied config")}
+ values.Apply(&cfg,fs);want=append(want,"later,whole");if !reflect.DeepEqual(cfg.Items,want){t.Fatalf("subsequent append: %#v",cfg.Items)}
+ for _,defaults:=range [][]string{nil,{}, {"inherited"}}{
+  fs:=flag.NewFlagSet("empty",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,PilotConfig{Items:defaults})
+  if err:=fs.Parse([]string{"--item="});err!=nil{t.Fatal(err)}
+  values.Apply(&cfg,fs);want:=append(append([]string(nil),defaults...),"")
+  if !reflect.DeepEqual(cfg.Items,want){t.Fatalf("empty occurrence cleared defaults: %#v, want %#v",cfg.Items,want)}
+ }
+}
+`
+	runScalarFixture(t, rawValueAppendListSample, output, behavior+helper+getters)
+}
+
+const rawZeroResetDurationField = "Timeout time.Duration `sources:\"flag\" flag:\"timeout\" help:\"Timeout\" duration:\"positive-overlay\" flagDuration:\"raw-zero-reset\" default:\"17s\"`"
+
+func TestSchemaRawZeroResetDurationFailsClosed(t *testing.T) {
+	const source = "package cli\nimport \"time\"\ntype PilotConfig struct { " + rawZeroResetDurationField + " }"
+	for _, value := range []string{"", " ", "custom error"} {
+		t.Run("error tag/"+value, func(t *testing.T) {
+			input := strings.Replace(source, `flagDuration:"raw-zero-reset"`, `flagDuration:"raw-zero-reset" flagDurationError:"`+value+`"`, 1)
+			_, err := parseSchema([]byte(input), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), "raw-zero-reset forbids flagDurationError") {
+				t.Fatalf("flagDurationError=%q: %v", value, err)
+			}
+		})
+	}
+	for _, mode := range []string{"", "unknown", " raw-zero-reset "} {
+		t.Run("mode/"+mode, func(t *testing.T) {
+			input := strings.Replace(source, `flagDuration:"raw-zero-reset"`, `flagDuration:"`+mode+`"`, 1)
+			_, err := parseSchema([]byte(input), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), "flagDuration requires") {
+				t.Fatalf("mode %q: %v", mode, err)
+			}
+		})
+	}
+	for _, kind := range []string{"string", "int", "bool", "float64", "[]string"} {
+		t.Run("kind/"+kind, func(t *testing.T) {
+			input := strings.Replace(source, "Timeout time.Duration", "Timeout "+kind, 1)
+			input = strings.Replace(input, ` duration:"positive-overlay"`, "", 1)
+			_, err := parseSchema([]byte(input), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), "flagDuration requires") {
+				t.Fatalf("kind %s: %v", kind, err)
+			}
+		})
+	}
+	for _, tc := range []struct{ name, old, replacement, want string }{
+		{"no flag source", `sources:"flag" flag:"timeout" help:"Timeout"`, `sources:"user,repo,env" config:"timeout" env:"TIMEOUT" fileStorage:"value"`, "flagDuration requires"},
+		{"missing duration policy", `duration:"positive-overlay"`, "", "time.Duration requires duration positive-overlay"},
+		{"wrong duration policy", `duration:"positive-overlay"`, `duration:"raw"`, "time.Duration requires duration positive-overlay"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := strings.Replace(source, tc.old, tc.replacement, 1)
+			// A no-flag source must omit its default before duration admission is reached.
+			if tc.name == "no flag source" {
+				input = strings.Replace(input, ` default:"17s"`, "", 1)
+			}
+			_, err := parseSchema([]byte(input), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestGenerateRawZeroResetDurationFlags(t *testing.T) {
+	const single = "package cli\nimport \"time\"\ntype PilotConfig struct { " + rawZeroResetDurationField + " }"
+	const tracked = "package cli\nimport \"time\"\ntype PilotConfig struct {\n" +
+		"Before string `sources:\"flag\" flag:\"before\" help:\"Before\" reportApplied:\"true\"`\n" + rawZeroResetDurationField + "\n" +
+		"Second time.Duration `sources:\"flag\" flag:\"second\" help:\"Second\" duration:\"positive-overlay\" flagDuration:\"raw-zero-reset\"`\n" +
+		"After string `sources:\"flag\" flag:\"after\" help:\"After\" reportApplied:\"true\"`\n}"
+	var trackedOutput []byte
+	withoutDefault := strings.Replace(single, ` default:"17s"`, "", 1)
+	for _, source := range []string{single, tracked, withoutDefault} {
+		s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+		if err != nil {
+			t.Fatal(err)
+		}
+		output, err := generate(s, "pilot.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		again, err := generate(s, "pilot.go")
+		if err != nil || !bytes.Equal(output, again) {
+			t.Fatalf("nondeterministic raw-zero-reset output: %v", err)
+		}
+		text := strings.Join(strings.Fields(string(output)), " ")
+		for _, want := range []string{
+			`fs.String("timeout", defaults.Timeout.String(), "Timeout")`, `if strings.TrimSpace(*values.Timeout) == "0s" { cfg.Timeout = 0 }`,
+			`ApplyLeaseDuration(&cfg.Timeout, *values.Timeout)`,
+		} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("missing raw-zero-reset binding %q", want)
+			}
+		}
+		if strings.Contains(text, "time.ParseDuration(") || strings.Contains(text, "exit(") || strings.Contains(text, `"os"`) {
+			t.Fatal("raw-zero-reset introduced a parser, exit wrapper, or unused environment import")
+		}
+		signature := "Apply(cfg *PilotConfig, fs *flag.FlagSet) error"
+		if source == tracked {
+			signature = "Apply(cfg *PilotConfig, fs *flag.FlagSet) (PilotConfigApplied, error)"
+			trackedOutput = output
+		}
+		if !strings.Contains(text, signature) {
+			t.Fatalf("missing fallible Apply signature %q", signature)
+		}
+		typecheckGenerated(t, source+"\nfunc ApplyLeaseDuration(*time.Duration, string) error { panic(\"stub\") }\n", output)
+	}
+	coreSource, err := os.ReadFile("../../internal/cli/provider_exports.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(coreSource), "func ApplyLeaseDuration(")
+	if start < 0 {
+		t.Fatal("missing core ApplyLeaseDuration")
+	}
+	rest := string(coreSource)[start:]
+	end := strings.Index(rest, "\nfunc ")
+	if end < 0 {
+		t.Fatal("missing end of core ApplyLeaseDuration")
+	}
+	const behavior = `package cli
+import("flag";"fmt";"testing";"time")
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestRawDurationContractAndOrder(t *testing.T){
+ for _,tc:=range []struct{raw string;want time.Duration;bad bool}{
+  {"",17*time.Second,false},{"0s",0,false},{" \t0s\n",0,false},{"\u20030s\u2003",0,false},
+  {"2m",2*time.Minute,false},{"125ms",125*time.Millisecond,false},{"+1s",time.Second,false},
+  {"0",17*time.Second,true},{"0ms",17*time.Second,true},{"0.0s",17*time.Second,true},{"+0s",17*time.Second,true},{"-0s",17*time.Second,true},
+  {"-1s",17*time.Second,true},{"invalid",17*time.Second,true},{" \t ",17*time.Second,true},{" 2m ",17*time.Second,true},
+ }{
+  t.Run(tc.raw,func(t *testing.T){
+   cfg:=PilotConfig{Before:"old",Timeout:17*time.Second,Second:19*time.Second,After:"old"}
+   fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+   if fs.Lookup("timeout").DefValue!="17s"{t.Fatal("raw string default changed")}
+   if err:=fs.Parse([]string{"--before=earlier","--timeout="+tc.raw,"--second=3s","--after=later"});err!=nil{t.Fatalf("duration parsed during flag parsing: %v",err)}
+   applied,err:=values.Apply(&cfg,fs)
+   if (err!=nil)!=tc.bad||cfg.Timeout!=tc.want||cfg.Before!="earlier"||!applied.Before{t.Fatalf("duration result: %+v %+v %v",cfg,applied,err)}
+   if tc.bad{
+    if err.Error()!=fmt.Sprintf("invalid duration %q",tc.raw)||cfg.Second!=19*time.Second||cfg.After!="old"||applied.After{t.Fatalf("ordinary error/remaining fields: %+v %+v %v",cfg,applied,err)}
+   }else if cfg.Second!=3*time.Second||cfg.After!="later"||!applied.After{t.Fatalf("success stopped later fields: %+v %+v",cfg,applied)}
+  })
+ }
+ cfg:=defaultPilotConfig();cfg.Second=19*time.Second;cfg.After="old"
+ fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+ cfg.Timeout=23*time.Second
+ if applied,err:=values.Apply(&cfg,fs);err!=nil||applied!=(PilotConfigApplied{})||cfg.Timeout!=23*time.Second{t.Fatalf("unvisited duration: %+v %+v %v",cfg,applied,err)}
+ if err:=fs.Parse([]string{"--timeout=1s","--timeout= 0s ","--second=invalid","--after=later"});err!=nil{t.Fatal(err)}
+ applied,err:=values.Apply(&cfg,fs)
+ if err==nil||err.Error()!="invalid duration \"invalid\""||cfg.Timeout!=0||cfg.Second!=19*time.Second||cfg.After!="old"||applied.After{t.Fatalf("second duration failure: %+v %+v %v",cfg,applied,err)}
+ if err:=fs.Set("second","5s");err!=nil{t.Fatal(err)}
+ applied,err=values.Apply(&cfg,fs)
+ if err!=nil||cfg.Timeout!=0||cfg.Second!=5*time.Second||cfg.After!="later"||!applied.After{t.Fatalf("retry success: %+v %+v %v",cfg,applied,err)}
+}
+`
+	runScalarFixture(t, tracked, trackedOutput, behavior+rest[:end])
 }

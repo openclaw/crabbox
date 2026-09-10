@@ -8,7 +8,7 @@ import (
 
 func (Provider) CommandRouting(cfg core.Config, _ core.CommandRoutingRequest) core.CommandRouting {
 	var args []string
-	if strings.TrimSpace(cfg.NamespaceInstance.CLIPath) != "" && cfg.NamespaceInstance.CLIPath != "nsc" {
+	if strings.TrimSpace(cfg.NamespaceInstance.CLIPath) != "" && cfg.NamespaceInstance.CLIPath != core.NamespaceInstanceConfigDefaultCLIPath {
 		args = append(args, "--namespace-instance-cli", cfg.NamespaceInstance.CLIPath)
 	}
 	if strings.TrimSpace(cfg.NamespaceInstance.Endpoint) != "" {
