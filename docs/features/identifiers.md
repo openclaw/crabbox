@@ -77,8 +77,10 @@ Direct Daytona binds the API endpoint and observed native organization, then
 persists its exact create attempt before submission and the first observed
 sandbox UUID before readiness or deletion. Its `daytona-fixed-v1` claim marker
 prevents older clients from treating it as an ordinary lease. Submitted cleanup
-requires a positive exact destroyed-state inventory record; a 404 alone never
-retires the claim. See [Daytona fixed operation IDs](../providers/daytona.md#fixed-operation-ids)
+records a deletion acknowledgement (the DELETE response, an observed destroying
+sandbox, or an authorized empty exact-attempt inventory) before a 404 for that
+UUID retires the claim; a 404 alone never does. See
+[Daytona fixed operation IDs](../providers/daytona.md#fixed-operation-ids)
 for organization discovery and recovery limits.
 
 Direct local-container binds the intent to its runtime and daemon scope,

@@ -223,16 +223,24 @@ behavior. No credentials or token-derived identifiers are stored in fixed claims
 
 Fixed claims use a distinct provider marker so older clients cannot treat them
 as ordinary Daytona claims and erase terminal replay protection. Failed or
-uncertain cleanup retains the claim. An unqualified 404 is not deletion proof:
-the provider's resource-access layer can also use that response for failed access.
-Fixed cleanup requires an exact positive destroyed-state inventory record; a
-deleted resource that returns only 404 remains an explicit reconciliation
-obligation. This works after deletion of the last live sandbox and accommodates
-the provider's rename during deletion, including expiry before a lost create
-response's UUID was recovered. Unknown UUIDs require a single terminal row
-matching the original attempt; ambiguous inventory retains the claim.
-These native organization and terminal-state contracts must be
-verified for the deployed provider before relying on automatic fixed capacity.
+uncertain cleanup retains the claim. Daytona never lists or returns destroyed
+sandboxes: its list query rejects the destroyed state and `GET` answers 404 once
+a sandbox is gone. An unqualified 404 is still not deletion proof, because the
+provider's resource-access layer uses the same response for failed access.
+Fixed cleanup therefore records a deletion acknowledgement on the claim before
+anything becomes terminal: the DELETE response naming the exact owned sandbox,
+an owned sandbox already observed as being destroyed, or an authorized
+organization-scoped search for the exact create attempt that finds no
+resource-holding sandbox. After that acknowledgement, a 404 for the recorded
+UUID retires the claim. A DELETE whose response was lost records nothing; the
+next stop re-reads the resource and resolves it through the inventory search
+once the organization is re-established. An unknown UUID from a lost create
+response uses the same bounded exact-attempt search: one live match is adopted
+and deleted, an empty result finalizes the attempt because a destroyed sandbox
+holds no resource, and ambiguous inventory or an unverifiable organization
+retains the claim. These contracts were checked against the Daytona v0.190.0
+API sources pinned by this release and must be re-verified for a different
+deployed provider version before relying on automatic fixed capacity.
 
 The fixed producer also labels its native sandbox with `fixed_claim_provider`
 and an attempt nonce. The fingerprint alone remains opaque metadata on ordinary

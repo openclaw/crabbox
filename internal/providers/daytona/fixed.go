@@ -321,6 +321,9 @@ func loadFixedDaytonaSandbox(ctx context.Context, client daytonaAPI, claim core.
 	if claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State == "released" || claim.FixedCreateIntent.Attempt["name"] == "" {
 		return nil, exit(4, "Daytona fixed lease has no active create attempt; it cannot allocate a replacement")
 	}
+	if claim.FixedCreateIntent.Attempt[fixedDaytonaDeletionAcknowledged] != "" {
+		return nil, exit(4, "Daytona fixed lease %s has an acknowledged deletion; stop it to finalize instead of replaying", claim.LeaseID)
+	}
 	lookup := claim.CloudID
 	if lookup == "" {
 		lookup = claim.FixedCreateIntent.Attempt["name"]
@@ -352,59 +355,70 @@ func (b *daytonaLeaseBackend) releaseFixed(ctx context.Context, claim core.Lease
 	if err := core.AuthorizeCheckpointRelease(claim, checkpointID); err != nil {
 		return err
 	}
-	var client fixedDaytonaDeletionAPI
-	if !neverSubmittedDaytonaClaim(claim) {
-		apiClient, err := newDaytonaClient(b.cfg, b.rt)
+	finalize := func(cleanup func() error) error {
+		return fixedDaytonaLeaseKind.FinalizeAfterCleanup(claim, func() error {
+			if err := core.AuthorizeCheckpointRelease(claim, checkpointID); err != nil {
+				return err
+			}
+			return cleanup()
+		})
+	}
+	// Version 1 never clears a submitted attempt. An empty initial claim
+	// therefore proves the durable authorization preceding POST never existed.
+	if neverSubmittedDaytonaClaim(claim) {
+		return finalize(func() error { return nil })
+	}
+	apiClient, err := newDaytonaClient(b.cfg, b.rt)
+	if err != nil {
+		return err
+	}
+	client, ok := apiClient.(fixedDaytonaDeletionAPI)
+	if !ok {
+		return exit(4, "Daytona client cannot attest fixed resource deletion")
+	}
+	if claim.CloudID == "" {
+		sandbox, err := loadFixedDaytonaSandbox(ctx, client, claim)
+		if err != nil {
+			if !daytonaIsNotFoundError(err) {
+				return err
+			}
+			// Native deletion renames the sandbox and a lost create response never
+			// recorded its UUID. Daytona never lists or returns destroyed sandboxes,
+			// so an authorized exact-attempt search over live inventory is the only
+			// supported way to establish whether the attempt still holds a resource.
+			if err := verifyFixedDaytonaOrganization(ctx, client, claim); err != nil {
+				return err
+			}
+			sandbox, err = client.findFixedAttemptSandbox(ctx, claim)
+			if err != nil {
+				return err
+			}
+			if sandbox == nil {
+				// The attempt never landed or was already destroyed natively; a
+				// destroyed sandbox holds no resource, so nothing remains to delete.
+				return finalize(func() error { return nil })
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// Deletion can rename/hide the resource before returning. Persist
+		// the first observed UUID before it can become unreachable by name.
+		claim, err = bindFixedDaytonaClaim(client, claim, sandbox)
 		if err != nil {
 			return err
 		}
-		var ok bool
-		client, ok = apiClient.(fixedDaytonaDeletionAPI)
-		if !ok {
-			return exit(4, "Daytona client cannot attest fixed resource deletion")
-		}
-		if claim.CloudID == "" {
-			sandbox, err := loadFixedDaytonaSandbox(ctx, client, claim)
-			if err != nil {
-				if !daytonaIsNotFoundError(err) {
-					return err
-				}
-				terminal, lookupErr := client.findDestroyedSandbox(ctx, claim)
-				if lookupErr != nil {
-					return lookupErr
-				}
-				if terminal == nil {
-					return err
-				}
-				sandbox = terminal
-			}
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			// Deletion can rename/hide the resource before returning. Persist
-			// the first observed UUID before it can become unreachable by name.
-			claim, err = bindFixedDaytonaClaim(client, claim, sandbox)
-			if err != nil {
-				return err
-			}
-		}
 	}
-	return fixedDaytonaLeaseKind.FinalizeAfterCleanup(claim, func() error {
-		if err := core.AuthorizeCheckpointRelease(claim, checkpointID); err != nil {
-			return err
-		}
-		// Version 1 never clears a submitted attempt. An empty initial claim
-		// therefore proves the durable authorization preceding POST never existed.
-		if neverSubmittedDaytonaClaim(claim) {
-			return nil
-		}
-		return deleteFixedDaytonaSandbox(ctx, client, claim)
-	})
+	claim, err = acknowledgeFixedDaytonaDeletion(ctx, client, claim, checkpointID)
+	if err != nil {
+		return err
+	}
+	return finalize(func() error { return awaitFixedDaytonaDeletion(ctx, client, claim) })
 }
 
 func bindFixedDaytonaClaim(client fixedDaytonaDeletionAPI, claim LeaseClaim, sandbox *api.Sandbox) (LeaseClaim, error) {
 	var err error
-	if sandbox != nil && sandbox.GetState() == api.SANDBOXSTATE_DESTROYED {
+	if fixedDaytonaSandboxDestroying(sandbox) {
 		err = validateFixedDaytonaDeletionIdentity(client, claim, sandbox)
 	} else {
 		err = validateFixedDaytonaSandbox(claim, sandbox)
@@ -451,8 +465,17 @@ func (b *daytonaLeaseBackend) reclaimFixed(ctx context.Context, claim LeaseClaim
 type fixedDaytonaDeletionAPI interface {
 	daytonaAPI
 	fixedSelection() (endpoint, organization string)
-	findDestroyedSandbox(context.Context, LeaseClaim) (*api.Sandbox, error)
+	findFixedAttemptSandbox(context.Context, LeaseClaim) (*api.Sandbox, error)
 	requestSandboxDeletion(context.Context, string) (*api.Sandbox, error)
+}
+
+// The acknowledgement records the exact UUID whose deletion Daytona confirmed,
+// or whose absence an authorized live-inventory search established.
+const fixedDaytonaDeletionAcknowledged = "deletion_acknowledged"
+
+func fixedDaytonaSandboxDestroying(sandbox *api.Sandbox) bool {
+	return sandbox != nil && (sandbox.GetDesiredState() == api.SANDBOXDESIREDSTATE_DESTROYED ||
+		sandbox.GetState() == api.SANDBOXSTATE_DESTROYED || sandbox.GetState() == api.SANDBOXSTATE_DESTROYING)
 }
 
 func validateFixedDaytonaDeletionIdentity(client fixedDaytonaDeletionAPI, claim LeaseClaim, sandbox *api.Sandbox) error {
@@ -467,14 +490,6 @@ func validateFixedDaytonaDeletionIdentity(client fixedDaytonaDeletionAPI, claim 
 		attempt["nonce"] == "" || sandbox.GetLabels()["fixed_attempt"] != attempt["nonce"] {
 		return exit(4, "Daytona deletion response does not match the exact fixed resource")
 	}
-	// Native TTL can rename the sandbox before its UUID was ever observed.
-	// Only a terminal row matching the persisted attempt may establish that UUID.
-	if claim.CloudID == "" && (sandbox.GetState() != api.SANDBOXSTATE_DESTROYED ||
-		(sandbox.GetSnapshot() != attempt["snapshot"] && sandbox.GetSnapshot() != attempt["snapshot_id"]) ||
-		sandbox.GetUser() != attempt["user"] || sandbox.GetTarget() == "" ||
-		(attempt["resolved_target"] != "" && sandbox.GetTarget() != attempt["resolved_target"])) {
-		return exit(4, "Daytona terminal sandbox does not match the unresolved fixed create attempt")
-	}
 	if leaseID, owned := daytonaSandboxOwnership(sandbox); !owned || leaseID != claim.LeaseID {
 		return exit(4, "Daytona deletion response lost fixed lease ownership")
 	}
@@ -488,53 +503,117 @@ func validateFixedDaytonaDeletionIdentity(client fixedDaytonaDeletionAPI, claim 
 	return nil
 }
 
-func deleteFixedDaytonaSandbox(ctx context.Context, client fixedDaytonaDeletionAPI, claim LeaseClaim) error {
+// verifyFixedDaytonaOrganization proves the current credentials still select the
+// claim's exact API endpoint and organization before an inventory absence may
+// stand in for a resource. A GET 404 alone never establishes that context.
+func verifyFixedDaytonaOrganization(ctx context.Context, client daytonaAPI, claim LeaseClaim) error {
+	scope, organization, err := fixedDaytonaContext(ctx, client)
+	if err != nil {
+		return fmt.Errorf("Daytona fixed lease %s retains its ownership record; organization context could not be established: %w", claim.LeaseID, err)
+	}
+	if scope != claim.ProviderScope || organization != claim.FixedCreateIntent.Attempt["organization"] {
+		return exit(4, "Daytona fixed lease API or organization changed; retain its ownership record")
+	}
+	return nil
+}
+
+// acknowledgeFixedDaytonaDeletion obtains and durably records the deletion witness
+// for the claim's exact UUID before any terminal finalization. Daytona v0.190.0
+// never lists or returns destroyed sandboxes, so the witness is either the DELETE
+// response naming the owned resource, an owned resource already observed as being
+// destroyed, or an authorized organization-scoped exact-attempt search that finds
+// no resource-holding sandbox. A bare 404 is never accepted on its own.
+func acknowledgeFixedDaytonaDeletion(ctx context.Context, client fixedDaytonaDeletionAPI, claim LeaseClaim, checkpointID string) (LeaseClaim, error) {
 	if claim.CloudID == "" {
-		return exit(4, "Daytona fixed cleanup requires its durably observed resource UUID")
+		return claim, exit(4, "Daytona fixed cleanup requires its durably observed resource UUID")
 	}
-	terminal := func() (bool, error) {
-		sandbox, err := client.findDestroyedSandbox(ctx, claim)
-		if err != nil || sandbox == nil {
-			return false, err
+	attempt := claim.FixedCreateIntent.Attempt
+	if acknowledged := attempt[fixedDaytonaDeletionAcknowledged]; acknowledged != "" {
+		if acknowledged != claim.CloudID {
+			return claim, exit(4, "Daytona deletion acknowledgement names a different resource; retain its ownership record")
 		}
-		if err := validateFixedDaytonaDeletionIdentity(client, claim, sandbox); err != nil {
-			return false, err
-		}
-		return sandbox.GetState() == api.SANDBOXSTATE_DESTROYED, nil
-	}
-	// A positive terminal inventory row remains readable after GET hides the
-	// last destroyed sandbox. No unrelated live resource is needed for cleanup.
-	if done, err := terminal(); err != nil || done {
-		return err
+		return claim, nil
 	}
 	sandbox, err := client.GetSandbox(ctx, claim.CloudID)
-	if err == nil {
+	if err != nil {
+		if !daytonaIsNotFoundError(err) {
+			return claim, err
+		}
+		// A 404 may mask failed access, and a DELETE whose response was lost
+		// left no acknowledgement. Only an authorized live search decides.
+		if err := verifyFixedDaytonaOrganization(ctx, client, claim); err != nil {
+			return claim, err
+		}
+		live, err := client.findFixedAttemptSandbox(ctx, claim)
+		if err != nil {
+			return claim, err
+		}
+		if live == nil {
+			return recordFixedDaytonaDeletionAcknowledgement(claim)
+		}
+		if live.GetId() != claim.CloudID {
+			return claim, exit(4, "Daytona fixed attempt inventory names a different resource; retain its ownership record")
+		}
+		sandbox = live
+	}
+	if err := validateFixedDaytonaDeletionIdentity(client, claim, sandbox); err != nil {
+		return claim, err
+	}
+	if !fixedDaytonaSandboxDestroying(sandbox) {
+		if err := validateFixedDaytonaSandbox(claim, sandbox); err != nil {
+			return claim, err
+		}
+		if err := core.AuthorizeCheckpointRelease(claim, checkpointID); err != nil {
+			return claim, err
+		}
+		// A lost DELETE response records nothing; replay re-reads the resource.
+		sandbox, err = client.requestSandboxDeletion(ctx, claim.CloudID)
+		if err != nil {
+			return claim, err
+		}
+		if err := validateFixedDaytonaDeletionIdentity(client, claim, sandbox); err != nil {
+			return claim, err
+		}
+		if !fixedDaytonaSandboxDestroying(sandbox) {
+			return claim, exit(4, "Daytona did not acknowledge destruction of the fixed resource")
+		}
+	}
+	return recordFixedDaytonaDeletionAcknowledgement(claim)
+}
+
+func recordFixedDaytonaDeletionAcknowledgement(claim LeaseClaim) (LeaseClaim, error) {
+	expected := claim
+	intent := *claim.FixedCreateIntent
+	intent.Attempt = maps.Clone(intent.Attempt)
+	intent.Attempt[fixedDaytonaDeletionAcknowledged] = claim.CloudID
+	intent.Attempt[fixedDaytonaDeletionAcknowledged+"_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	claim.FixedCreateIntent = &intent
+	return core.ReplaceLeaseClaimIfUnchangedDurableReturning(claim.LeaseID, expected, claim)
+}
+
+// awaitFixedDaytonaDeletion waits for the acknowledged resource to disappear.
+// After an acknowledgement, a 404 for that exact UUID is the terminal witness;
+// native soft deletion may keep the renamed resource visible for a while.
+func awaitFixedDaytonaDeletion(ctx context.Context, client fixedDaytonaDeletionAPI, claim LeaseClaim) error {
+	if claim.FixedCreateIntent.Attempt[fixedDaytonaDeletionAcknowledged] != claim.CloudID {
+		return exit(4, "Daytona fixed cleanup requires an acknowledged deletion")
+	}
+	for {
+		sandbox, err := client.GetSandbox(ctx, claim.CloudID)
+		if err != nil {
+			if daytonaIsNotFoundError(err) {
+				return nil
+			}
+			return err
+		}
 		if err := validateFixedDaytonaDeletionIdentity(client, claim, sandbox); err != nil {
 			return err
 		}
-		if sandbox.GetDesiredState() != api.SANDBOXDESIREDSTATE_DESTROYED {
-			if err := validateFixedDaytonaSandbox(claim, sandbox); err != nil {
-				return err
-			}
-			sandbox, err = client.requestSandboxDeletion(ctx, claim.CloudID)
-			if err != nil {
-				return err
-			}
-			if err := validateFixedDaytonaDeletionIdentity(client, claim, sandbox); err != nil {
-				return err
-			}
-			if sandbox.GetDesiredState() != api.SANDBOXDESIREDSTATE_DESTROYED && sandbox.GetState() != api.SANDBOXSTATE_DESTROYED {
-				return exit(4, "Daytona did not acknowledge destruction of the fixed resource")
-			}
+		if sandbox.GetState() == api.SANDBOXSTATE_DESTROYED {
+			return nil
 		}
-	} else if !daytonaIsNotFoundError(err) {
-		return err
-	}
-	// GET 404 may mask access failures; only an exact positive destroyed row
-	// retires the claim. Names change during native soft deletion.
-	for {
-		if done, err := terminal(); err != nil || done {
-			return err
+		if !fixedDaytonaSandboxDestroying(sandbox) {
+			return exit(4, "Daytona fixed resource is no longer being destroyed; retain its ownership record")
 		}
 		if err := shared.SleepContext(ctx, time.Second); err != nil {
 			return err

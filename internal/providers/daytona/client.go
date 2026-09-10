@@ -463,46 +463,41 @@ func (c *daytonaSDKClient) requestSandboxDeletion(ctx context.Context, id string
 
 func (c *daytonaSDKClient) fixedSelection() (string, string) { return c.apiURL, c.orgID }
 
-func (c *daytonaSDKClient) findDestroyedSandbox(ctx context.Context, claim LeaseClaim) (*daytona.Sandbox, error) {
-	req := c.api.SandboxAPI.ListSandboxes(c.ctx(ctx)).States([]daytona.SandboxState{daytona.SANDBOXSTATE_DESTROYED}).Limit(1)
+// findFixedAttemptSandbox searches live inventory for the exact fixed attempt.
+// Daytona never lists or returns destroyed sandboxes (its list query rejects the
+// destroyed state and filters it from every result), so a bounded exact-label
+// search over every resource-holding state is the supported inventory contract.
+// It returns a nil sandbox when no live resource matches the attempt.
+func (c *daytonaSDKClient) findFixedAttemptSandbox(ctx context.Context, claim LeaseClaim) (*daytona.Sandbox, error) {
+	intent := claim.FixedCreateIntent
+	if !fixedDaytonaLeaseKind.IsFixedClaim(claim) || intent.Version != fixedDaytonaLeaseKind.IntentVersion || !isCanonicalLeaseID(claim.LeaseID) ||
+		intent.Fingerprint == "" || intent.Attempt["nonce"] == "" || intent.Attempt["organization"] == "" ||
+		intent.Attempt["snapshot_id"] == "" || intent.Attempt["snapshot"] == "" || intent.Attempt["user"] == "" {
+		return nil, exit(4, "Daytona attempt discovery requires a complete fixed create attempt")
+	}
+	filter, _ := json.Marshal(map[string]string{
+		"crabbox": "true", "provider": daytonaProvider, "lease": claim.LeaseID,
+		"fixed_claim_provider": claim.Provider, "fixed_intent_sha256": intent.Fingerprint, "fixed_attempt": intent.Attempt["nonce"],
+	})
+	// A bounded exact-attempt search must expose ambiguity, never pick a first
+	// match. Errored resources with a pending deletion still hold a resource.
+	req := c.api.SandboxAPI.ListSandboxes(c.ctx(ctx)).Labels(string(filter)).IncludeErroredDeleted(true).Limit(2)
 	if c.orgID != "" {
 		req = req.XDaytonaOrganizationID(c.orgID)
-	}
-	if claim.CloudID != "" {
-		req = req.Id(claim.CloudID)
-	} else {
-		intent := claim.FixedCreateIntent
-		if !fixedDaytonaLeaseKind.IsFixedClaim(claim) || intent.Version != fixedDaytonaLeaseKind.IntentVersion || !isCanonicalLeaseID(claim.LeaseID) ||
-			intent.Fingerprint == "" || intent.Attempt["nonce"] == "" || intent.Attempt["organization"] == "" ||
-			intent.Attempt["snapshot_id"] == "" || intent.Attempt["snapshot"] == "" || intent.Attempt["user"] == "" {
-			return nil, exit(4, "Daytona terminal discovery requires a complete fixed create attempt")
-		}
-		filter, _ := json.Marshal(map[string]string{
-			"crabbox": "true", "provider": daytonaProvider, "lease": claim.LeaseID,
-			"fixed_claim_provider": claim.Provider, "fixed_intent_sha256": intent.Fingerprint, "fixed_attempt": intent.Attempt["nonce"],
-		})
-		// A bounded exact-attempt search must expose ambiguity, never pick a
-		// first match after native deletion has made the original name unusable.
-		req = req.Labels(string(filter)).Limit(2)
 	}
 	response, _, err := req.Execute()
 	if err != nil {
 		return nil, c.redactError(err)
 	}
-	if claim.CloudID == "" && response != nil && (len(response.GetItems()) > 1 || response.GetNextCursor() != "") {
-		return nil, exit(4, "Daytona terminal fixed attempt is ambiguous; retain its ownership record")
-	}
 	if response == nil || len(response.GetItems()) == 0 {
 		return nil, nil
 	}
-	item := response.GetItems()[0]
-	if claim.CloudID != "" && item.GetId() != claim.CloudID || item.GetState() != daytona.SANDBOXSTATE_DESTROYED {
-		return nil, nil
+	if len(response.GetItems()) > 1 || strings.TrimSpace(response.GetNextCursor()) != "" {
+		return nil, exit(4, "Daytona fixed attempt inventory is ambiguous; retain its ownership record")
 	}
-	sandbox := daytonaSandboxFromListItem(item)
+	sandbox := daytonaSandboxFromListItem(response.GetItems()[0])
 	return &sandbox, nil
 }
-
 func (c *daytonaSDKClient) ReplaceLabels(ctx context.Context, id string, labels map[string]string) error {
 	req := c.api.SandboxAPI.ReplaceLabels(c.ctx(ctx), id).SandboxLabels(*daytona.NewSandboxLabels(labels))
 	if c.orgID != "" {
