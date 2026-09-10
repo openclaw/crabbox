@@ -830,25 +830,6 @@ export function serverTypeForClass(machineClass: string): string {
   return serverTypeCandidatesForClass(machineClass)[0] ?? machineClass;
 }
 
-export function serverTypeForProviderClass(provider: Provider, machineClass: string): string {
-  if (provider === "daytona") {
-    return "snapshot";
-  }
-  if (provider === "koyeb") {
-    return "large";
-  }
-  if (provider === "aws") {
-    return awsInstanceTypeCandidatesForClass(machineClass)[0] ?? machineClass;
-  }
-  if (provider === "azure") {
-    return azureVMSizeCandidatesForClass(machineClass)[0] ?? machineClass;
-  }
-  if (provider === "gcp") {
-    return gcpMachineTypeCandidatesForClass(machineClass)[0] ?? machineClass;
-  }
-  return serverTypeForClass(machineClass);
-}
-
 export function serverTypeForConfig(
   provider: Provider,
   target: TargetOS,
