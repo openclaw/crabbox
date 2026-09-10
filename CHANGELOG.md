@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Seed the Linux developer image user's selected pnpm default after privileged preparation and reject offline source, candidate, or promoted default drift without changing project pins.
+- Seed the Linux developer image user's selected pnpm default after privileged preparation and reject offline source, candidate, or promoted default drift without changing project pins. [PR #2065](https://github.com/openclaw/crabbox/pull/2065) Thanks @vincentkoc.
 
 - Fix image qualification bundles to include the Linux smoke script and admit publisher cleanup-owned rollback without disarming promotion early. [PR #2062](https://github.com/openclaw/crabbox/pull/2062) Thanks @vincentkoc.
 
