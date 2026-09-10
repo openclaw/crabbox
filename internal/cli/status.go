@@ -207,8 +207,6 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		return statusView{}, err
 	}
 	target = resolved.Target
-	workRootConfig, workRootTarget := cfg, target
-	applyResolvedLeaseConfig(&workRootConfig, server, &workRootTarget)
 	state := blank(server.Labels["state"], server.Status)
 	ready := hasHost && leaseStatusStateCanBeReady(lease, state) && probeSSHReady(ctx, &target, statusSSHReadinessTimeout(target))
 	meta := serverTailscaleMetadata(server)
@@ -226,7 +224,7 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		Slug:             serverSlug(server),
 		Provider:         provider,
 		TargetOS:         blank(server.Labels["target"], cfg.TargetOS),
-		WorkRoot:         workRootConfig.WorkRoot,
+		WorkRoot:         statusWorkRoot(cfg, server, target),
 		WindowsMode:      blank(server.Labels["windows_mode"], cfg.WindowsMode),
 		State:            state,
 		ServerID:         serverID,
@@ -250,6 +248,11 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		HasHost:          hasHost,
 		Ready:            ready,
 	}, nil
+}
+
+func statusWorkRoot(cfg Config, server Server, target SSHTarget) string {
+	applyResolvedLeaseConfig(&cfg, server, &target)
+	return cfg.WorkRoot
 }
 
 func inspectProviderMetadata(provider string, metadata map[string]any) map[string]any {

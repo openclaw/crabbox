@@ -2,6 +2,8 @@ package cli
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -87,6 +89,43 @@ func TestStatusWorkroot(t *testing.T) {
 			cfg.Provider = "aws"
 			cfg.Network = NetworkPublic
 			view, err := statusViewFromLeaseTarget(t.Context(), cfg, LeaseTarget{Server: Server{Status: "released", Labels: map[string]string{"target": tc.target, "windows_mode": tc.mode, "work_root": tc.root}}, SSH: SSHTarget{TargetOS: tc.target, WindowsMode: tc.mode}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(view)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]any
+			if err := json.Unmarshal(data, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if fields["workroot"] != tc.want {
+				t.Fatalf("workroot = %v, want %s", fields["workroot"], tc.want)
+			}
+		})
+	}
+}
+
+func TestCoordinatorStatusWorkroot(t *testing.T) {
+	for _, tc := range []struct{ name, mode, root, want string }{
+		{"native-default", windowsModeNormal, "", `C:\crabbox`},
+		{"native-recorded", windowsModeNormal, `D:\build`, `D:\build`},
+		{"wsl-default", windowsModeWSL2, "", defaultPOSIXWorkRoot},
+		{"wsl-recorded", windowsModeWSL2, "/workspace", "/workspace"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_0123456789ab" {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: "cbx_0123456789ab", Provider: "aws", TargetOS: targetWindows, WindowsMode: tc.mode, WorkRoot: tc.root, State: "released"}})
+			}))
+			defer server.Close()
+			cfg := baseConfig()
+			cfg.Provider, cfg.Coordinator, cfg.CoordToken = "aws", server.URL, "fixture-token"
+			backend := &coordinatorLeaseBackend{cfg: cfg, coord: mustNewCoordinatorClient(t, cfg)}
+			view, err := backend.Status(t.Context(), StatusRequest{ID: "cbx_0123456789ab", AuthoritativeProviderMetadata: true})
 			if err != nil {
 				t.Fatal(err)
 			}

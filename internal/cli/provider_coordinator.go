@@ -940,6 +940,7 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		Slug:                         lease.Slug,
 		Provider:                     blank(lease.Provider, b.cfg.Provider),
 		TargetOS:                     blank(target.TargetOS, b.cfg.TargetOS),
+		WorkRoot:                     statusWorkRoot(b.cfg, server, target),
 		WindowsMode:                  blank(target.WindowsMode, b.cfg.WindowsMode),
 		State:                        lease.State,
 		ServerID:                     leaseDisplayID(lease),
