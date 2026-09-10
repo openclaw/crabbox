@@ -1161,7 +1161,9 @@ test("Linux smoke keeps its quoted Python probe parseable by both Bash interpret
 });
 
 for (const [mode, expected] of [["exit", 37], ["timeout", 124], ["ignore-term", 137], ["interrupt", 143], ["diagnostic-failure", 37]]) {
-  test(`browser diagnostics preserve ${mode} status and settle only owned descendants`, async (t) => {
+  test(`browser diagnostics preserve ${mode} status and settle only owned descendants`, {
+    skip: process.platform !== "linux" && "native Linux supervision requires GNU timeout and /proc",
+  }, async (t) => {
     const root = await mkdtemp(path.join(os.tmpdir(), "crabbox-browser-evidence-"));
     const bin = path.join(root, "bin");
     await mkdir(bin);
