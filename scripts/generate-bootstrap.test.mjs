@@ -155,6 +155,34 @@ test("shell and PowerShell literals preserve quoting-sensitive data without eval
   }
 });
 
+test("optional Linux packages reuse installed capabilities and preserve failures", { skip: process.platform === "win32" }, async (t) => {
+  const fixture = await readFile(resolve(repoRoot, "testdata/bootstrap/installed-browser-fixture.sh"), "utf8");
+  const packages = "tigervnc-standalone-server xfce4-session";
+  for (const entry of [
+    { name: "desktop installed", command: `crabbox_install_packages ${packages}`, env: {}, code: 0, calls: "" },
+    { name: "installed package held", command: `crabbox_install_packages ${packages}`, env: { HELD_PACKAGE: "xfce4-session" }, code: 0, calls: "" },
+    { name: "desktop package missing", command: `crabbox_install_packages ${packages}`, env: { MISSING_PACKAGE: "xfce4-session", INSTALL_ALLOWED: "1" }, code: 0, calls: `apt-get install -y --no-install-recommends ${packages}\n` },
+    { name: "desktop install fails", command: `crabbox_install_packages ${packages}`, env: { MISSING_PACKAGE: "xfce4-session", INSTALL_ALLOWED: "1", INSTALL_FAIL: "1" }, code: 47, calls: `apt-get install -y --no-install-recommends ${packages}\n` },
+    { name: "Chrome works", command: "crabbox_existing_browser", env: {}, code: 0, browser: "google-chrome", calls: "" },
+    { name: "Chromium works", command: "crabbox_existing_browser", env: { BROWSER_PACKAGE: "chromium" }, code: 0, browser: "chromium", calls: "" },
+    { name: "browser package missing", command: "crabbox_existing_browser", env: { MISSING_PACKAGE: "google-chrome-stable" }, code: 1, calls: "" },
+    { name: "browser package unconfigured", command: "crabbox_existing_browser", env: { BROKEN_PACKAGE: "google-chrome-stable" }, code: 1, calls: "" },
+    { name: "browser executable broken", command: "crabbox_existing_browser", env: { BROWSER_BROKEN: "1" }, code: 1, calls: "" },
+  ]) {
+    await t.test(entry.name, async (t) => {
+      const directory = await temporary(t);
+      const log = join(directory, "calls");
+      const result = spawnSync("bash", ["-c", fixture + "\n" + shared.sharedLinuxOptionalPackages() + "\n" + entry.command], {
+        env: { PATH: "/usr/bin:/bin", FIXTURE_BIN: join(directory, "bin"), FIXTURE_LOG: log, ...entry.env }, encoding: "utf8", timeout: 5000,
+      });
+      assert.equal(result.status, entry.code, result.stderr || String(result.error));
+      if (entry.browser) assert.equal(result.stdout.trim(), join(directory, "bin", entry.browser));
+      const calls = await readFile(log, "utf8").catch(error => { if (error.code === "ENOENT") return ""; throw error; });
+      assert.equal(calls, entry.calls);
+    });
+  }
+});
+
 test("macOS bootstrap installs and reuses its account password without logging it", async (t) => {
   for (const traced of [false, true]) {
     await t.test(traced ? "caller enables xtrace" : "normal caller", async (t) => {

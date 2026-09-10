@@ -148,7 +148,7 @@ func TestCloudInitStartsSSHBeforeOptionalDesktopBootstrap(t *testing.T) {
 	cfg.Desktop = true
 	got := cloudInit(cfg, "ssh-ed25519 test")
 	sshIndex := strings.Index(got, "timeout 30s systemctl restart ssh")
-	desktopIndex := strings.Index(got, "retry apt-get install -y --no-install-recommends tigervnc-standalone-server")
+	desktopIndex := strings.Index(got, "crabbox_install_packages tigervnc-standalone-server")
 	bootstrappedIndex := strings.Index(got, "touch /var/lib/crabbox/bootstrapped")
 	if sshIndex < 0 || desktopIndex < 0 || bootstrappedIndex < 0 {
 		t.Fatalf("cloudInit(desktop) missing expected bootstrap markers")

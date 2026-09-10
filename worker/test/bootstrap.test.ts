@@ -523,10 +523,8 @@ describe("cloud-init bootstrap", () => {
   it("starts ssh before optional desktop and browser bootstrap", () => {
     const got = cloudInit({ ...config, desktop: true, browser: true });
     const sshIndex = got.indexOf("systemctl restart ssh");
-    const desktopIndex = got.indexOf(
-      "retry apt-get install -y --no-install-recommends tigervnc-standalone-server",
-    );
-    const browserIndex = got.indexOf("retry apt-get install -y --no-install-recommends gnupg");
+    const desktopIndex = got.indexOf("crabbox_install_packages tigervnc-standalone-server");
+    const browserIndex = got.indexOf("crabbox_install_packages gnupg");
     const bootstrappedIndex = got.indexOf("touch /var/lib/crabbox/bootstrapped");
     expect(sshIndex).toBeGreaterThanOrEqual(0);
     expect(desktopIndex).toBeGreaterThanOrEqual(0);
