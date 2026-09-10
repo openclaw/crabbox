@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -2087,6 +2088,197 @@ func TestConfigShowAppliesHostingerPerUserWorkRootDefault(t *testing.T) {
 		got.SSHUser != "ubuntu" ||
 		got.Hostinger.WorkRoot != "/home/ubuntu/crabbox" {
 		t.Fatalf("unexpected effective Hostinger config: %#v", got)
+	}
+}
+
+func TestConfigShowSSHDefaults(t *testing.T) {
+	clearConfigEnv(t)
+	type sshValues struct{ user, port string }
+	for _, tc := range []struct {
+		name, provider     string
+		source             providerSelectionSource
+		user, port         string
+		marked             *sshValues
+		fallback           []string
+		fallbackExplicit   bool
+		wantUser, wantPort string
+		wantFallback       []string
+	}{
+		{
+			name: "digitalocean/empty", provider: "digitalocean",
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "digitalocean/base compiled default", provider: "digitalocean", source: providerSelectionCompiledDefault,
+			user: "crabbox", port: "2222", fallback: []string{"22", "2201"}, fallbackExplicit: true,
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "linode/empty", provider: "linode", fallback: []string{},
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "linode/base compiled default", provider: "linode", source: providerSelectionCompiledDefault,
+			user: "crabbox", port: "2222", fallback: []string{"22", "2201"},
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "vultr/empty", provider: "vultr", fallback: []string{"22", "2201"},
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "vultr/base compiled default", provider: "vultr", source: providerSelectionCompiledDefault,
+			user: "crabbox", port: "2222", fallback: []string{}, fallbackExplicit: true,
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "lambda/empty with fallback backing data", provider: "lambda",
+			fallback: []string{"2201", "2202"}[:0], fallbackExplicit: true,
+			wantUser: "ubuntu", wantPort: "22",
+		},
+		{
+			name: "lambda/base compiled default", provider: "lambda", source: providerSelectionCompiledDefault,
+			user: "crabbox", port: "2222", fallback: []string{"22", "2201"}, fallbackExplicit: true,
+			wantUser: "ubuntu", wantPort: "22",
+		},
+		{
+			name: "scaleway/empty with explicit nil fallback", provider: "scaleway", fallbackExplicit: true,
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "scaleway/base compiled default", provider: "scaleway", source: providerSelectionCompiledDefault,
+			user: "crabbox", port: "2222", fallback: []string{"22", "2201"},
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "tencentcloud/empty", provider: "tencentcloud", fallback: []string{"22", "2201"},
+			wantUser: "ubuntu", wantPort: "22",
+		},
+		{
+			name: "tencentcloud/base compiled default", provider: "tencentcloud", source: providerSelectionCompiledDefault,
+			user: "crabbox", port: "2222", fallback: []string{},
+			wantUser: "ubuntu", wantPort: "22",
+		},
+		{
+			name: "digitalocean/custom user with base port", provider: "digitalocean",
+			user: "operator", port: "2222", fallback: []string{"2201"},
+			wantUser: "operator", wantPort: "22",
+		},
+		{
+			name: "linode/base user with custom port", provider: "linode",
+			user: "crabbox", port: "2200", wantUser: "root", wantPort: "2200",
+		},
+		{
+			name: "lambda/padded base values", provider: "lambda",
+			user: " crabbox ", port: " 2222 ", fallback: []string{"2201"},
+			wantUser: " crabbox ", wantPort: " 2222 ",
+		},
+		{
+			name: "vultr/whitespace values", provider: "vultr",
+			user: " \t", port: " ", wantUser: " \t", wantPort: " ",
+		},
+		{
+			name: "scaleway/user marker only", provider: "scaleway",
+			user: "crabbox", port: "2222", marked: &sshValues{user: "crabbox"},
+			wantUser: "crabbox", wantPort: "22",
+		},
+		{
+			name: "tencentcloud/port marker only", provider: "tencentcloud",
+			user: "crabbox", port: "2222", marked: &sshValues{port: "2222"},
+			wantUser: "ubuntu", wantPort: "2222",
+		},
+		{
+			name: "linode/both marked then base values", provider: "linode",
+			user: "crabbox", port: "2222", marked: &sshValues{user: "saved-user", port: "2200"},
+			fallback: []string{"22", "2201"}, fallbackExplicit: true,
+			wantUser: "crabbox", wantPort: "2222",
+		},
+		{
+			name: "vultr/both marked then cleared", provider: "vultr",
+			marked: &sshValues{user: "saved-user", port: "2200"}, fallback: []string{"2201"},
+			wantUser: "", wantPort: "",
+		},
+		{
+			name: "lambda/both marked then changed", provider: "lambda",
+			user: "current-user", port: "2202", marked: &sshValues{user: "saved-user", port: "2200"},
+			fallback: []string{"2203"}, fallbackExplicit: true,
+			wantUser: "current-user", wantPort: "2202",
+		},
+		{
+			name: "digitalocean/empty snapshots are not explicit", provider: "digitalocean",
+			user: "crabbox", port: "2222", marked: &sshValues{},
+			wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "tencentcloud/whitespace snapshots are explicit", provider: "tencentcloud",
+			marked:   &sshValues{user: " ", port: "\t"},
+			wantUser: "", wantPort: "",
+		},
+		{
+			name: "scaleway/actionable selection", provider: "scaleway", source: providerSelectionFlag,
+			fallback: []string{"2201"}, wantUser: "root", wantPort: "22",
+		},
+		{
+			name: "outside cohort/hetzner", provider: "hetzner",
+			fallback: []string{"22", "2201"}, wantFallback: []string{"22", "2201"},
+			wantUser: "", wantPort: "",
+		},
+		{
+			name: "outside cohort/padded provider", provider: " digitalocean ",
+			user: "crabbox", port: "2222", fallback: []string{"2201"},
+			wantUser: "crabbox", wantPort: "2222", wantFallback: []string{"2201"},
+		},
+		{
+			name: "outside cohort/alias", provider: "do",
+			fallback: []string{}, wantFallback: []string{},
+			wantUser: "", wantPort: "",
+		},
+		{
+			name: "outside cohort/case variant", provider: "Lambda",
+			user: "crabbox", port: "2222", fallback: []string{"2201"},
+			wantUser: "crabbox", wantPort: "2222", wantFallback: []string{"2201"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{
+				Provider: tc.provider, providerSelectionSource: tc.source,
+				TargetOS: "windows", WindowsMode: "wsl", Class: "beast", WorkRoot: "/srv/config-show",
+				SSHFallbackPorts: tc.fallback, sshFallbackPortsExplicit: tc.fallbackExplicit,
+			}
+			// Keep the unrelated work-root preprojections stable for the full-config comparison.
+			cfg.Hostinger.WorkRoot = "/srv/hostinger"
+			cfg.Vast.WorkRoot = "/srv/vast"
+			cfg.NvidiaBrev.WorkRoot = "/srv/brev"
+			MarkWorkRootExplicit(&cfg)
+			if tc.marked != nil {
+				cfg.SSHUser, cfg.SSHPort = tc.marked.user, tc.marked.port
+				MarkSSHUserExplicit(&cfg)
+				MarkSSHPortExplicit(&cfg)
+			}
+			cfg.SSHUser, cfg.SSHPort = tc.user, tc.port
+			if tc.fallbackExplicit {
+				cfg.explicitSSHFallbackPorts = []string{"2205", "2206"}
+			}
+			before := cfg
+			before.SSHFallbackPorts = slices.Clone(cfg.SSHFallbackPorts)
+			before.explicitSSHFallbackPorts = slices.Clone(cfg.explicitSSHFallbackPorts)
+			fallbackBacking := cfg.SSHFallbackPorts[:cap(cfg.SSHFallbackPorts)]
+			beforeBacking := slices.Clone(fallbackBacking)
+			want := before
+			want.SSHUser, want.SSHPort, want.SSHFallbackPorts = tc.wantUser, tc.wantPort, tc.wantFallback
+
+			got := effectiveConfigForShow(cfg)
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("display config differs from expected SSH-only projection: user=%q port=%q fallbacks=%#v; want user=%q port=%q fallbacks=%#v",
+					got.SSHUser, got.SSHPort, got.SSHFallbackPorts, tc.wantUser, tc.wantPort, tc.wantFallback)
+			}
+			if !reflect.DeepEqual(cfg, before) {
+				t.Error("display projection changed the input config or marker snapshots")
+			}
+			if !reflect.DeepEqual(fallbackBacking, beforeBacking) {
+				t.Errorf("display projection changed fallback backing data: got %#v, want %#v", fallbackBacking, beforeBacking)
+			}
+		})
 	}
 }
 
