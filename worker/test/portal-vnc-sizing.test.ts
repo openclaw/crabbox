@@ -35,7 +35,7 @@ async function viewer(target: TargetOS = "linux", desktopEnv = "wayland") {
     target,
     desktopEnv,
   } as LeaseRecord).text();
-  const script = [...page.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)]
+  const script = [...page.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\b[^>]*>/gi)]
     .map((match) => match[1]!)
     .find((body) => body.includes("import RFBModule"))!
     .replace(/import RFBModule from [^;]+;/, "const RFBModule = FakeRFB;");
