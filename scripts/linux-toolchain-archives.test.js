@@ -33,6 +33,15 @@ mktemp() {
   if [[ "$#" == 1 && "$1" == -d ]]; then command mktemp -d "$TMPDIR/probe.XXXXXXXX"
   else command mktemp "$@"; fi
 }
+# Model the account boundary without privileged runuser; keep the real owned-state check.
+resolve_runtime_user() {
+  runtime_user=fixture runtime_uid="$FIXTURE_UID" runtime_home="$HOME" runtime_shell=/bin/bash
+}
+run_runtime_user() {
+  (cd / && env -i HOME="$runtime_home" USER="$runtime_user" LOGNAME="$runtime_user" \
+    SHELL="$runtime_shell" PATH="$PATH" CI=1 COREPACK_DEFAULT_TO_LATEST=0 \
+    COREPACK_ENABLE_AUTO_PIN=0 COREPACK_ENV_FILE=0 "$@")
+}
 ${body}`], {
       cwd: root,
       env: {
@@ -40,6 +49,7 @@ ${body}`], {
         HOME: path.join(root, "home"),
         TMPDIR: path.join(root, "tmp"),
         PYTHONDONTWRITEBYTECODE: "1",
+        FIXTURE_UID: String(process.getuid()),
         INSTALLER: installer,
         ...env,
       },
@@ -737,7 +747,12 @@ function writeNodeToolchain(bin, version) {
   fs.mkdirSync(dist, { recursive: true });
   writeTool(path.join(bin, "node"), `printf "v${version}\\n"`);
   for (const tool of ["npm", "npx"]) writeTool(path.join(bin, tool), `printf "npm-${major}\\n"`);
-  for (const tool of ["pnpm", "pnpx", "yarn", "yarnpkg"]) {
+  for (const tool of ["pnpm", "pnpx"]) {
+    writeTool(path.join(dist, `${tool}.js`), `
+[[ "$*" == --version ]] || exit 64
+cat "$HOME/pnpm-version"`);
+  }
+  for (const tool of ["yarn", "yarnpkg"]) {
     writeTool(path.join(dist, `${tool}.js`), `printf "${tool}-${major}\\n"`);
   }
   fs.symlinkSync("../lib/node_modules/corepack/dist/corepack.js", path.join(bin, "corepack"));
@@ -766,7 +781,10 @@ for name in ("pnpm", "pnpx", "yarn", "yarnpkg"):
         link.unlink()
     link.symlink_to(target)
 PY
-elif [[ "$1" != "prepare" ]]; then
+elif [[ "$1" == "prepare" ]]; then
+  [[ "$#" == 3 && "$2" == pnpm@* && "$3" == --activate ]] || exit 64
+  printf '%s\\n' "\${2#pnpm@}" >"$HOME/pnpm-version"
+else
   exit 64
 fi`,
   );
@@ -799,6 +817,7 @@ toolchain_archive_spec() { printf 'sha256 %s https://example.invalid/node.tar.xz
 function nodeRebakeFixture(t) {
   const context = nodeArchiveFixture(t);
   const { root } = context;
+  fs.writeFileSync(path.join(root, "home", "pnpm-version"), "12.3.4\n");
   const aptPayload = path.join(root, "apt-payload");
   writeNodeToolchain(path.join(aptPayload, "bin"), "22.0.0");
   writeNodeToolchain(path.join(root, "apt", "bin"), "24.15.0");
@@ -1620,10 +1639,15 @@ test("Node-major rebake preserves exact owned links when APT fails even in a con
   const { root, runRebake, destination } = nodeRebakeFixture(t);
   const result = runRebake(`
 FIXTURE_APT_EXIT=43
-if install_node_pnpm; then exit 91; fi
+if install_node_pnpm; then exit 91; else status="$?"; fi
 [[ "$(node --version)" == v24.19.0 ]]
+exit "$status"
 `);
-  success(result);
+  assert.equal(result.status, 43, result.stderr || result.stdout);
+  assert.equal(
+    fs.readFileSync(path.join(root, "apt-calls"), "utf8"),
+    "install -y --no-install-recommends --allow-downgrades nodejs:amd64=22.0.0-1nodesource1\n",
+  );
   for (const tool of ["node", "npm", "npx", "corepack", "pnpm", "pnpx"]) {
     assert.equal(
       fs.readlinkSync(path.join(root, "links", tool)),
@@ -1868,9 +1892,15 @@ for (const [major, arch, pnpm, pinned] of [
   ["24", "arm64", "11.22.0", false],
 ]) {
   test(`Node ${major}/${arch} preserves pnpm ${pnpm || "default"} selection`, (t) => {
-    const { run } = fixture(t);
+    const { root, run } = fixture(t);
+    const bin = path.join(root, "bin");
+    writeNodeToolchain(bin, `${major}.0.0`);
+    for (const tool of ["pnpm", "pnpx"]) {
+      fs.symlinkSync(`../lib/node_modules/corepack/dist/${tool}.js`, path.join(bin, tool));
+    }
     const result = run(
       `
+export PATH="$PWD/bin:$PATH"
 node_link_dir="$PWD/links"
 node_toolcache_root="$PWD/tools"
 dpkg() { printf '%s\\n' "$FIXTURE_ARCH"; }
@@ -1878,10 +1908,8 @@ cache_public_toolchain_archives() { echo public-archives; }
 install_pinned_node() { echo pinned-node; }
 apt_install() { echo "apt $*"; }
 install_requested_node() { echo "apt nodejs"; }
-command() { return 0; }
-node() { printf 'v%s.0.0\\n' "$CRABBOX_LINUX_NODE_MAJOR"; }
-corepack() { echo "corepack $*"; }
 install_node_pnpm
+[[ "$(command -v pnpm)" == "$PWD/bin/pnpm" ]]
 `,
       {
         CRABBOX_LINUX_NODE_MAJOR: major,
@@ -1890,7 +1918,11 @@ install_node_pnpm
       },
     );
     success(result);
-    assert.match(result.stdout, new RegExp(`corepack prepare pnpm@${pnpm || "11.1.0"} --activate`));
+    assert.match(
+      fs.readFileSync(path.join(root, "home", "corepack.log"), "utf8"),
+      new RegExp(`${major} prepare pnpm@${pnpm || "11.1.0"} --activate node=v${major}\\.0\\.0`),
+    );
+    assert.equal(fs.readFileSync(path.join(root, "home", "pnpm-version"), "utf8"), `${pnpm || "11.1.0"}\n`);
     assert.equal(result.stdout.includes("pinned-node"), pinned);
     assert.equal(result.stdout.includes("apt nodejs"), !pinned);
   });
