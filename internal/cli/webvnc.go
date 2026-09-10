@@ -3643,7 +3643,7 @@ func directSSHWebVNCURL(localPort, password string) string {
 	values.Set("port", localPort)
 	values.Set("path", "websockify")
 	values.Set("autoconnect", "1")
-	values.Set("resize", "scale")
+	values.Set("resize", "remote")
 	values.Set("compression", "0")
 	values.Set("quality", "6")
 	if strings.TrimSpace(password) != "" {

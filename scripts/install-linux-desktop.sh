@@ -46,10 +46,23 @@ retry() {
   done
 }
 
+desktop_services() {
+  local services="crabbox-xvfb.service crabbox-desktop.service"
+  if [[ "${geometry##*x}" == 8 ]]; then
+    services+=" crabbox-x11vnc.service"
+  fi
+  printf '%s\n' "$services"
+}
+
 install_packages() {
   if ! command -v apt-get >/dev/null 2>&1; then
     log "this bootstrap currently supports Debian and Ubuntu guests"
     exit 2
+  fi
+  local vnc_packages=(tigervnc-standalone-server tigervnc-tools)
+  # Preserve the released 8-bit geometry contract; TigerVNC cannot start at depth 8.
+  if [[ "${geometry##*x}" == 8 ]]; then
+    vnc_packages=(xvfb x11vnc)
   fi
   export DEBIAN_FRONTEND=noninteractive
   retry apt-get update
@@ -65,14 +78,13 @@ install_packages() {
     scrot \
     sudo \
     util-linux \
-    x11vnc \
+    "${vnc_packages[@]}" \
     x11-xserver-utils \
     xauth \
     xclip \
     xdotool \
     xsel \
     xterm \
-    xvfb \
     xfce4-panel \
     xfce4-session \
     xfce4-settings \
@@ -137,7 +149,12 @@ install_credentials() {
 		require_safe_managed_file "$path"
 	done
 	openssl rand -base64 18 | write_managed_file /var/lib/crabbox/vnc.password 0600 "$desktop_user" "$desktop_group"
-	rm -f -- /var/lib/crabbox/vnc.pass
+	if [[ "${geometry##*x}" == 8 ]]; then
+		rm -f -- /var/lib/crabbox/vnc.pass
+	else
+		head -c 8 /var/lib/crabbox/vnc.password | tigervncpasswd -f \
+			| write_managed_file /var/lib/crabbox/vnc.pass 0600 "$desktop_user" "$desktop_group"
+	fi
 	printf 'CRABBOX_DESKTOP_ENV=xfce\nDISPLAY=%s\n' "$display" \
 		| write_managed_file /var/lib/crabbox/desktop.env 0640 root "$desktop_group"
 }
@@ -145,23 +162,28 @@ install_credentials() {
 install_reset_helper() {
 	require_safe_managed_directory /usr/local/bin
 	install -d -m 0755 -o root -g root /usr/local/bin
-	write_managed_file /usr/local/bin/crabbox-start-desktop 0755 root root <<'EOF'
+	{
+		cat <<'EOF'
 #!/bin/bash
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
-
-/usr/bin/systemctl restart crabbox-desktop.service crabbox-x11vnc.service
+EOF
+		printf 'services=(%s)\n' "$(desktop_services)"
+		cat <<'EOF'
+/usr/bin/systemctl restart "${services[@]}"
 for attempt in {1..30}; do
-  if /usr/bin/systemctl is-active --quiet crabbox-desktop.service \
-    && /usr/bin/systemctl is-active --quiet crabbox-x11vnc.service; then
-    exit 0
-  fi
+  ready=true
+  for service in "${services[@]}"; do
+    /usr/bin/systemctl is-active --quiet "$service" || ready=false
+  done
+  if "$ready"; then exit 0; fi
   /usr/bin/sleep 1
 done
-/usr/bin/systemctl --no-pager --full status crabbox-desktop.service crabbox-x11vnc.service >&2 || true
+/usr/bin/systemctl --no-pager --full status "${services[@]}" >&2 || true
 exit 5
 EOF
+	} | write_managed_file /usr/local/bin/crabbox-start-desktop 0755 root root
 	require_safe_managed_directory /etc/sudoers.d
 	install -d -m 0755 -o root -g root /etc/sudoers.d
 	printf '%s ALL=(root) NOPASSWD: /bin/bash /usr/local/bin/crabbox-start-desktop\n' "$desktop_user" \
@@ -170,6 +192,14 @@ EOF
 }
 
 install_services() {
+	local size="${geometry%x*}"
+	local depth="${geometry##*x}"
+	local display_command="/usr/bin/Xtigervnc $display -geometry $size -depth $depth -localhost yes -rfbport 5900 -SecurityTypes VncAuth -PasswordFile=/var/lib/crabbox/vnc.pass -AlwaysShared -AcceptSetDesktopSize -nolisten tcp -ac"
+	local services
+	read -r -a services <<< "$(desktop_services)"
+	if [[ "$depth" == 8 ]]; then
+		display_command="/usr/bin/Xvfb $display -screen 0 $geometry -nolisten tcp -ac"
+	fi
 	write_managed_file /etc/systemd/system/crabbox-xvfb.service 0644 root root <<EOF
 [Unit]
 Description=Crabbox virtual X display
@@ -178,7 +208,7 @@ After=network.target
 [Service]
 User=$desktop_user
 Environment=DISPLAY=$display
-ExecStart=/usr/bin/Xvfb $display -screen 0 $geometry -nolisten tcp -ac
+ExecStart=$display_command
 Restart=always
 RestartSec=2
 
@@ -203,7 +233,8 @@ RestartSec=2
 WantedBy=multi-user.target
 EOF
 
-	write_managed_file /etc/systemd/system/crabbox-x11vnc.service 0644 root root <<EOF
+  if [[ "$depth" == 8 ]]; then
+    write_managed_file /etc/systemd/system/crabbox-x11vnc.service 0644 root root <<EOF
 [Unit]
 Description=Crabbox loopback VNC server
 After=crabbox-xvfb.service crabbox-desktop.service
@@ -218,18 +249,23 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 EOF
-
+  elif systemctl cat crabbox-x11vnc.service >/dev/null 2>&1; then
+    systemctl disable --now crabbox-x11vnc.service
+  fi
   systemctl daemon-reload
-  systemctl enable crabbox-xvfb.service crabbox-desktop.service crabbox-x11vnc.service
-  systemctl restart crabbox-xvfb.service crabbox-desktop.service crabbox-x11vnc.service
+  systemctl enable "${services[@]}"
+  systemctl restart "${services[@]}"
 }
 
 verify_desktop() {
-  local attempt
+  local attempt service ready services
+  read -r -a services <<< "$(desktop_services)"
   for attempt in {1..30}; do
-    if systemctl is-active --quiet crabbox-xvfb.service \
-      && systemctl is-active --quiet crabbox-desktop.service \
-      && systemctl is-active --quiet crabbox-x11vnc.service \
+    ready=true
+    for service in "${services[@]}"; do
+      systemctl is-active --quiet "$service" || ready=false
+    done
+    if "$ready" \
       && ss -ltn | awk '$4 ~ /127\.0\.0\.1:5900$/ || $4 ~ /\[::1\]:5900$/ { found=1 } END { exit !found }'; then
       log "ready user=$desktop_user display=$display vnc=127.0.0.1:5900"
       return
@@ -237,7 +273,7 @@ verify_desktop() {
     sleep 1
   done
   log "desktop services did not become ready"
-  systemctl --no-pager --full status crabbox-xvfb.service crabbox-desktop.service crabbox-x11vnc.service >&2 || true
+  systemctl --no-pager --full status "${services[@]}" >&2 || true
   exit 5
 }
 

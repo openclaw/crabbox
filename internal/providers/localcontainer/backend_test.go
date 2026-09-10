@@ -5603,6 +5603,51 @@ func TestBootstrapImagePathProfileCanonicalization(t *testing.T) {
 	}
 }
 
+func TestBootstrapScriptSupportsResizableXFCE(t *testing.T) {
+	for _, want := range []string{
+		"tigervnc-standalone-server tigervnc-tools",
+		"head -c 8 /var/lib/crabbox/vnc.password | tigervncpasswd -f > /var/lib/crabbox/vnc.pass",
+		"Xtigervnc :99 -geometry 1920x1080 -depth 24",
+		"-localhost yes -rfbport 5900 -SecurityTypes VncAuth -PasswordFile=/var/lib/crabbox/vnc.pass",
+		"-AlwaysShared -AcceptSetDesktopSize -nolisten tcp -ac",
+	} {
+		if !strings.Contains(bootstrapScript, want) {
+			t.Fatalf("bootstrap missing %q", want)
+		}
+	}
+	if strings.Contains(bootstrapScript, "Xvfb :99") || strings.Contains(bootstrapScript, "x11vnc") {
+		t.Fatal("new desktop bootstrap still starts a fixed-size server")
+	}
+	cfg := core.BaseConfig()
+	cfg.Desktop = true
+	check := localContainerReadyCheck(cfg)
+	// Execute the emitted process predicate against both shipped generations.
+	start := strings.Index(check, "(pgrep -f 'Xtigervnc")
+	if start < 0 {
+		t.Fatalf("desktop ready predicate missing: %s", check)
+	}
+	end := strings.Index(check[start:], "; } || {")
+	if end < 0 {
+		t.Fatalf("desktop ready predicate terminator missing: %s", check)
+	}
+	predicate := check[start : start+end]
+	for _, server := range []string{"Xtigervnc", "legacy", "missing"} {
+		cmd := exec.Command("sh", "-c", `
+pgrep() {
+  case "$server:$*" in
+    Xtigervnc:*Xtigervnc*|legacy:*Xvfb*|legacy:*x11vnc*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+`+predicate)
+		cmd.Env = append(os.Environ(), "server="+server)
+		out, err := cmd.CombinedOutput()
+		if (err == nil) != (server != "missing") {
+			t.Fatalf("ready predicate %s: %v: %s", server, err, out)
+		}
+	}
+}
+
 func TestBootstrapScriptSupportsWaylandDesktop(t *testing.T) {
 	if strings.Count(bootstrapScript, core.GnomeDesktopThemeScript()) != 1 {
 		t.Fatal("container bootstrap must install exactly one complete shared GNOME theme script")

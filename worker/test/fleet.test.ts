@@ -38536,6 +38536,9 @@ describe("fleet lease identity and idle", () => {
       let authenticationFailed = false;
       let retryAttempt = 0;
       let rfb;
+      let connectionEpoch = 0;
+      let controllerID = "";
+      function retireConnection() { connectionEpoch += 1; }
       const target = "macos";
       const password = "";
       const screen = { replaceChildren() {} };

@@ -50,6 +50,42 @@ Reusing a lease requires matching capability labels: a lease warmed without
 `--desktop` (or with a different `--desktop-env`) cannot gain the desktop after
 creation.
 
+### Window sizing
+
+Linux portal viewers default to **Match window**. The connected controller
+requests a desktop resolution matching the available browser area, including
+fullscreen changes. Observers never request a resize. **Fit desktop** scales
+the current desktop without changing its resolution. Both modes keep the
+desktop visible while the server handles a request; selecting Match does not
+prove the server accepted it.
+
+New XFCE local-container desktops and the public Linux desktop installer use
+TigerVNC, like managed cloud XFCE desktops. Existing Xvfb/x11vnc containers
+remain usable at their fixed resolution; recreate those leases for resizing.
+The installer keeps `CRABBOX_DESKTOP_GEOMETRY=1920x1080x24` as its initial size
+and depth, not a permanent size limit. Depths 16, 24, and 32 use TigerVNC.
+The released 8-bit input remains supported through the fixed-size Xvfb/x11vnc
+backend because TigerVNC cannot start at depth 8. Choose a higher depth for
+dynamic sizing; the installer never silently changes the requested depth.
+
+The `wayland` and `gnome` profiles need a resize-capable WayVNC and a headless
+compositor output. Actual Ubuntu 26.04 packages include WayVNC 0.9.1; Ubuntu
+24.04's WayVNC 0.7.2 does not support client-requested resizing. Check the
+guest's actual `wayvnc --version` and `/etc/os-release`: the OS selector alone
+is not proof. In particular, Hetzner's `ubuntu:26.04` selector currently maps
+to an Ubuntu 24.04 image.
+
+WayVNC gives layout ownership to the first client that requests a resize,
+until that client disconnects. Changing to Fit, becoming an observer, or
+transferring Crabbox input control does not release that ownership. After a
+takeover, close the previous sizing viewer, then reconnect the new controller.
+The portal shows this reminder independently of connection-status messages.
+GNOME applications use Xwayland inside labwc, not a full GNOME Shell session.
+
+Direct Linux SSH viewers request remote resizing through noVNC. Generic local
+handoff viewers, macOS, and Windows keep **Fit desktop** as the default; their
+**Match window** option also requires server support.
+
 ### Injected environment
 
 `crabbox run --desktop` resolves the recorded desktop environment, then:

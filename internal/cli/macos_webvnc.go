@@ -314,17 +314,18 @@ func createMacOSWebVNCHandoff(webPort string, session macOSWebVNCSession, viewer
 		credentialsScript += `try{const body=new URLSearchParams({token:config.token});const response=await fetch(config.credentialsURL,{method:"POST",body});` +
 			`if(response.ok)creds=await response.json();else status.textContent="could not load VNC credentials"}catch(error){status.textContent="could not load VNC credentials"}`
 	}
-	content := `<!doctype html><html><head><meta charset="utf-8"><title>Crabbox WebVNC</title><style>` +
+	content := `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Crabbox WebVNC</title><style>` +
 		// Palette: carapace ink tokens (v0.6.1); backdrop stays dark by design behind the VNC canvas.
-		`html,body{margin:0;height:100%;background:#0d0b0b;overflow:hidden}#screen{width:100%;height:100%}` +
-		`#status{position:fixed;top:0;left:0;right:0;color:#f4f1ef;font:12px/1.6 ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,monospace;padding:4px 8px;background:rgba(13,11,11,.72);z-index:10}` +
-		`</style></head><body><div id="status">connecting...</div><div id="screen"></div><script type="module">` +
+		`html,body{margin:0;height:100%;background:#0d0b0b;overflow:hidden}body{display:flex;flex-direction:column}#screen{width:100%;flex:1;min-height:0}` +
+		`header{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:36px;padding:0 8px;color:#f4f1ef;font:12px/1.6 ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,monospace}#status{overflow-wrap:anywhere}select{width:142px;height:28px;flex-shrink:0}` +
+		`</style></head><body><header><span id="status">connecting...</span><select id="sizing" aria-label="desktop sizing" title="Match requests the window size from a supported server; Fit scales without resizing. Wayland sizing stays with the first resizing viewer until it disconnects."><option value="fit">Fit desktop</option><option value="match">Match window</option></select></header><div id="screen"></div><script type="module">` +
 		`const source=` + string(rfbJSON) + `;const moduleURL=URL.createObjectURL(new Blob([source],{type:"text/javascript"}));` +
 		`const{default:RFB}=await import(moduleURL);const config=` + string(configJSON) + `;const status=document.getElementById("status");` +
 		credentialsScript +
 		`const rfb=new RFB(document.getElementById("screen"),config.websocketURL,{credentials:creds,wsProtocols:[config.protocol]});` +
-		`rfb.scaleViewport=true;rfb.focusOnClick=true;rfb.addEventListener("connect",()=>{status.textContent="connected";setTimeout(()=>{status.style.display="none"},1500)});` +
-		`rfb.addEventListener("disconnect",event=>{status.style.display="block";status.textContent="disconnected"+(event.detail&&event.detail.clean?"":" (connection error)")});` +
+		`const sizing=document.getElementById("sizing");let connected=false;function applySizing(){const resize=connected&&sizing.value==="match";if(rfb.resizeSession!==resize)rfb.resizeSession=resize} ` +
+		`rfb.scaleViewport=true;rfb.focusOnClick=true;sizing.addEventListener("change",applySizing);rfb.addEventListener("connect",()=>{connected=true;applySizing();status.textContent="connected"});` +
+		`rfb.addEventListener("disconnect",event=>{connected=false;applySizing();status.textContent="disconnected"+(event.detail&&event.detail.clean?"":" (connection error)")});` +
 		`rfb.addEventListener("credentialsrequired",()=>{status.style.display="block";status.textContent="VNC credentials required"});` +
 		`</script></body></html>`
 	if _, err := file.WriteString(content); err != nil {

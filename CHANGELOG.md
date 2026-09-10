@@ -5,6 +5,7 @@
 ### Fixes
 
 - Bound artifact discovery to the possible match depth for canonical non-recursive wildcard patterns, preserving selection and recursive glob behavior. [PR 2214](https://github.com/openclaw/crabbox/pull/2214). Thanks @vincentkoc.
+- Match Linux WebVNC desktops to the viewer window with controller-only resize requests and a Fit opt-out; use resize-capable TigerVNC for new local-container and public-installer XFCE desktops, retain the installer's fixed-size 8-bit mode, and surface Wayland sizing ownership limits.
 
 ## 0.58.0 - 2026-09-12
 
