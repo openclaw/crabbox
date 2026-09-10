@@ -198,7 +198,7 @@ function meshDeployment(providerSecret: string, overrides: Record<string, unknow
       mesh: "DEPLOYMENT_MESH_ENABLED",
       ports: [
         { port: 3030, protocol: "http" },
-        { port: 22, protocol: "tcp" },
+        { port: 3031, protocol: "tcp" },
       ],
       routes: [],
     },
@@ -310,7 +310,7 @@ describe("Koyeb Sandbox coordinator adapter", () => {
       mesh: "DEPLOYMENT_MESH_ENABLED",
       ports: [
         { port: 3030, protocol: "http" },
-        { port: 22, protocol: "tcp" },
+        { port: 3031, protocol: "tcp" },
       ],
       routes: [],
     });
@@ -745,6 +745,43 @@ describe("Koyeb Sandbox coordinator adapter", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it("recognizes Koyeb-canonicalized legacy mesh ports so failed leases remain reclaimable", async () => {
+    const capability = new KoyebResumableProvisioning(baseEnv, async (request) => {
+      const incoming = request instanceof Request ? request : new Request(request);
+      const url = new URL(incoming.url);
+      if (url.pathname === `/v1/services/${serviceID}`) {
+        return Response.json({ service: service() });
+      }
+      if (url.pathname === `/v1/deployments/${deploymentID}`) {
+        const legacy = meshDeployment("u".repeat(32));
+        legacy.definition.ports = [
+          { port: 22, protocol: "tcp" },
+          { port: 3030, protocol: "http" },
+        ];
+        return Response.json({ deployment: legacy });
+      }
+      throw new Error(`unexpected request ${incoming.method} ${incoming.url}`);
+    });
+    const prepared = await capability.prepare(meshConfig(), lease());
+    prepared.material.providerSecret = "u".repeat(32);
+    const observed = await capability.advance(
+      advanceInput(
+        prepared,
+        {
+          ...prepared.step,
+          phase: "cleanup",
+          state: { version: 1, action: "observe", serviceID },
+        },
+        true,
+      ),
+    );
+
+    expect(observed).toMatchObject({
+      phase: "cleanup",
+      state: { action: "delete", serviceID, deploymentID },
+    });
+  });
+
   it("bootstraps through the exact authenticated management URL and publishes only Tailscale SSH", async () => {
     const managementRequests: Request[] = [];
     const capability = new KoyebResumableProvisioning(baseEnv, async (request) => {
@@ -853,7 +890,7 @@ describe("Koyeb Sandbox coordinator adapter", () => {
     expect(JSON.stringify(published)).not.toContain(config().tailscaleAuthKey);
   });
 
-  it("bootstraps privately over the Koyeb mesh and publishes direct key-only SSH", async () => {
+  it("bootstraps privately over the Koyeb mesh and publishes proxied key-only SSH", async () => {
     const managementRequests: Request[] = [];
     const capability = new KoyebResumableProvisioning(baseEnv, async (request) => {
       const incoming = request instanceof Request ? request.clone() : new Request(request);
@@ -892,6 +929,9 @@ describe("Koyeb Sandbox coordinator adapter", () => {
           code: 0,
         });
       }
+      if (incoming.method === "POST" && url.pathname === "/koyeb-sandbox/bind_port") {
+        return Response.json({ success: true, message: "Port binding configured", port: "22" });
+      }
       throw new Error(`unexpected request ${incoming.method} ${incoming.url}`);
     });
     const prepared = await capability.prepare(meshConfig(), lease());
@@ -916,7 +956,7 @@ describe("Koyeb Sandbox coordinator adapter", () => {
         },
         access: {
           sshUser: "crabbox",
-          sshPort: "22",
+          sshPort: "3031",
           sshFallbackPorts: [],
           workRoot: "/workspace/crabbox",
           sshHostKey: sshHostKey.split(" ", 2).join(" "),
@@ -924,10 +964,16 @@ describe("Koyeb Sandbox coordinator adapter", () => {
       },
     });
     expect(published.publication?.access).not.toHaveProperty("tailscale");
-    expect(managementRequests.map((request) => new URL(request.url).origin)).toEqual([
-      `http://${privateHost}:3030`,
-      `http://${privateHost}:3030`,
-      `http://${privateHost}:3030`,
+    expect(
+      managementRequests.map((request) => [
+        new URL(request.url).origin,
+        new URL(request.url).pathname,
+      ]),
+    ).toEqual([
+      [`http://${privateHost}:3030`, "/koyeb-sandbox/health"],
+      [`http://${privateHost}:3030`, "/koyeb-sandbox/write_file"],
+      [`http://${privateHost}:3030`, "/koyeb-sandbox/run"],
+      [`http://${privateHost}:3030`, "/koyeb-sandbox/bind_port"],
     ]);
     for (const request of managementRequests) {
       expect(request.headers.get("authorization")).toBe(`Bearer ${material.providerSecret}`);
@@ -945,7 +991,31 @@ describe("Koyeb Sandbox coordinator adapter", () => {
       },
     });
     expect(JSON.stringify(run)).not.toContain("TAILSCALE");
+    await expect(managementRequests[3]!.json()).resolves.toEqual({ port: "22" });
     expect(JSON.stringify(published)).not.toContain(material.providerSecret);
+  });
+
+  it("treats only an exact existing Sandbox TCP proxy binding as idempotent", async () => {
+    const sandboxSecret = "synthetic-sandbox-secret-value-xx";
+    const exact = new KoyebClient(baseEnv, async () =>
+      Response.json(
+        { success: false, error: "Port already bound", current_port: "22" },
+        { status: 409 },
+      ),
+    );
+    await expect(
+      exact.managementBindPort(`http://${privateHost}:3030`, undefined, sandboxSecret, "22"),
+    ).resolves.toBeUndefined();
+
+    const drifted = new KoyebClient(baseEnv, async () =>
+      Response.json(
+        { success: false, error: "Port already bound", current_port: "5900" },
+        { status: 409 },
+      ),
+    );
+    await expect(
+      drifted.managementBindPort(`http://${privateHost}:3030`, undefined, sandboxSecret, "22"),
+    ).rejects.toBeInstanceOf(KoyebHTTPError);
   });
 
   it("requires exact deployment ownership before deleting and confirms provider absence", async () => {

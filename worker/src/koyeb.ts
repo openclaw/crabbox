@@ -132,7 +132,7 @@ export class KoyebHTTPError extends Error {
     readonly method: string,
     readonly path: string,
     readonly status: number,
-    detail = "",
+    readonly detail = "",
   ) {
     super(`koyeb ${method} ${path}: http ${status}${detail ? `: ${detail}` : ""}`);
   }
@@ -287,6 +287,33 @@ export class KoyebClient {
     const code = value["code"];
     if (!Number.isSafeInteger(code)) throw new Error("koyeb sandbox run response is malformed");
     return { stdout, stderr, code: Number(code) };
+  }
+
+  async managementBindPort(
+    baseURL: string,
+    routingKey: string | undefined,
+    secret: string,
+    port: string,
+  ): Promise<void> {
+    let value: JSONRecord;
+    try {
+      value = asObject(
+        await this.managementRequest(baseURL, routingKey, secret, "/bind_port", "POST", { port }),
+      );
+    } catch (error) {
+      if (error instanceof KoyebHTTPError && error.status === 409) {
+        try {
+          const conflict = asObject(JSON.parse(error.detail));
+          if (conflict["success"] === false && conflict["current_port"] === port) return;
+        } catch {
+          // Preserve the original authenticated-management error below.
+        }
+      }
+      throw error;
+    }
+    if (value["success"] !== true || value["port"] !== port) {
+      throw new Error("koyeb sandbox bind-port response is malformed");
+    }
   }
 
   async ownedServiceForLease(lease: LeaseRecord): Promise<OwnedDeployment | undefined> {
@@ -665,6 +692,14 @@ export class KoyebResumableProvisioning implements ProviderResumableProvisioning
     if (!ready) {
       return { ...output("blocked"), blockedReason: "runner_readiness_invalid" };
     }
+    if (plan.transport === "koyeb-mesh") {
+      await this.client.managementBindPort(
+        management.baseURL,
+        management.routingKey,
+        input.material.providerSecret,
+        "22",
+      );
+    }
     const tailscale: TailscaleMetadata | undefined =
       plan.transport === "tailscale"
         ? {
@@ -695,7 +730,7 @@ export class KoyebResumableProvisioning implements ProviderResumableProvisioning
       market: "on-demand",
       access: {
         sshUser: ready.user,
-        sshPort: ready.port,
+        sshPort: plan.transport === "koyeb-mesh" ? "3031" : ready.port,
         sshFallbackPorts: [],
         workRoot,
         sshHostKey: ready.hostKey,
@@ -954,11 +989,14 @@ function createServiceRequest(plan: KoyebProvisioningPlan, sandboxSecret: string
       regions: [plan.region],
       instance_types: [{ type: plan.instanceType }],
       ...(plan.transport === "koyeb-mesh" ? { mesh: "DEPLOYMENT_MESH_ENABLED" } : {}),
+      // Koyeb's Sandbox runtime owns 3030 for management and 3031 for its TCP
+      // proxy. Exposing target port 22 directly makes Koyeb select it as PORT,
+      // moving management off 3030 before Crabbox can bootstrap the runner.
       ports:
         plan.transport === "koyeb-mesh"
           ? [
               { port: 3030, protocol: "http" },
-              { port: 22, protocol: "tcp" },
+              { port: 3031, protocol: "tcp" },
             ]
           : [{ port: 3030, protocol: "http" }],
       routes:
@@ -1185,22 +1223,27 @@ function meshMatchesPlan(value: unknown, plan: KoyebProvisioningPlan): boolean {
 
 function portsMatchPlan(value: unknown, plan: KoyebProvisioningPlan): boolean {
   if (!Array.isArray(value)) return false;
+  const actual = value
+    .map((item) => asObject(item))
+    .map((port) => {
+      if (!hasOnlyKeys(port, ["port", "protocol"])) return "";
+      return `${String(port["port"])}:${String(port["protocol"])}`;
+    })
+    .toSorted();
   const expected =
     plan.transport === "koyeb-mesh"
       ? [
-          { port: 3030, protocol: "http" },
-          { port: 22, protocol: "tcp" },
+          ["3030:http", "3031:tcp"],
+          // Plans created before the Sandbox proxy contract exposed SSH
+          // directly. Koyeb canonicalized that payload to this order. Keep
+          // recognizing it so failed legacy leases remain safely reclaimable.
+          ["22:tcp", "3030:http"],
         ]
-      : [{ port: 3030, protocol: "http" }];
-  if (value.length !== expected.length) return false;
-  return expected.every((wanted, index) => {
-    const port = asObject(value[index]);
-    return (
-      hasOnlyKeys(port, ["port", "protocol"]) &&
-      port["port"] === wanted.port &&
-      port["protocol"] === wanted.protocol
-    );
-  });
+      : [["3030:http"]];
+  return expected.some(
+    (ports) =>
+      actual.length === ports.length && ports.every((port, index) => actual[index] === port),
+  );
 }
 
 function routesMatchPlan(

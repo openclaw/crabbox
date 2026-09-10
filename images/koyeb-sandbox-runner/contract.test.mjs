@@ -222,7 +222,7 @@ test("bootstrap supports key-only SSH on the native Koyeb private mesh", async (
     'CRABBOX_KOYEB_NETWORK',
     'koyeb-mesh',
     'CRABBOX_KOYEB_PRIVATE_HOST',
-    'ListenAddress 0.0.0.0',
+    'ListenAddress 127.0.0.1',
     '"crabbox-koyeb-sandbox-runner/v2"',
     '"koyeb-mesh"',
   ]) {

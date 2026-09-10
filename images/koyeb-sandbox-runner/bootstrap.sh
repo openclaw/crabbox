@@ -177,11 +177,7 @@ StrictModes yes
 LogLevel VERBOSE
 Subsystem sftp internal-sftp
 EOF
-if [[ "$network" == koyeb-mesh ]]; then
-  sed -i '3iListenAddress 0.0.0.0' "${sshd_dir}/sshd_config"
-else
-  sed -i '3iListenAddress 127.0.0.1' "${sshd_dir}/sshd_config"
-fi
+sed -i '3iListenAddress 127.0.0.1' "${sshd_dir}/sshd_config"
 /usr/sbin/sshd -t -f "${sshd_dir}/sshd_config"
 
 install -d -m 0755 -o "$ssh_user" -g "$ssh_user" /workspace/crabbox

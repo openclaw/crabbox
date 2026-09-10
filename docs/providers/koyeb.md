@@ -87,14 +87,16 @@ publishing a private DNS name it cannot reach. See Koyeb's
    key, and the runner validates the same bearer. Bootstrap consumes a
    one-call Tailscale auth key and publishes a tailnet SSH identity.
 4. With `--tailscale=false`, the Sandbox joins the Koyeb mesh, publishes no
-   public route, and exposes ports 3030 and 22 only on the private service
-   network. The coordinator calls `http://<service>.<app>.internal:3030` with
-   the generated Sandbox bearer; no routing key or Tailscale credential exists.
-5. Bootstrap starts key-only SSH, Xvfb/XFCE, localhost-only VNC, and
-   code-server. SSH listens on the private interface only in mesh mode.
+   public route, and exposes the Sandbox management port 3030 plus its TCP proxy
+   port 3031 only on the private service network. The coordinator calls
+   `http://<service>.<app>.internal:3030` with the generated Sandbox bearer,
+   bootstraps loopback-only SSH on port 22, and binds the authenticated Sandbox
+   proxy to it. No routing key or Tailscale credential exists.
+5. Bootstrap starts loopback-only key-only SSH, Xvfb/XFCE, localhost-only VNC,
+   and code-server. The Sandbox TCP proxy is the only mesh listener for SSH.
 6. The CLI pins the returned SSH host key. It uses `tailscale nc` for the
-   default transport and direct SSH for a validated `<service>.<app>.internal`
-   mesh host. No public SSH or VNC port is created.
+   default transport and direct SSH to port 3031 on a validated
+   `<service>.<app>.internal` mesh host. No public SSH or VNC port is created.
 7. Release and expiry delete only a service whose app, organization, lifecycle,
    deployment, image, environment, route, scaling, and generation still match
    the frozen plan. Active/latest deployment drift blocks deletion.

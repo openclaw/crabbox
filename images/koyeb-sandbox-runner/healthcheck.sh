@@ -71,7 +71,5 @@ if [[ "$network" == tailscale ]]; then
   grep -F '127.0.0.1:22' >/dev/null <<<"$serve_status"
   grep -Eq '"22"|":22"' <<<"$serve_status"
 else
-  ssh_listeners="$(ss -H -ltn 'sport = :22')"
-  [[ -n "$ssh_listeners" ]]
-  awk '{ print $4 }' <<<"$ssh_listeners" | grep -Eq '^0\.0\.0\.0:22$'
+  assert_loopback_listener 22
 fi
