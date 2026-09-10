@@ -3054,7 +3054,8 @@ def seed():
     if not owned(home, True) or not owned(runner, True) or not owned(runner / ".runner"):
         skip("nonowned runner configuration")
         return
-    with (runner / ".runner").open() as configuration:
+    # Runner's IOUtil.SaveObject writes UTF-8 with a BOM.
+    with (runner / ".runner").open(encoding="utf-8-sig") as configuration:
         fcntl.flock(configuration, fcntl.LOCK_EX | fcntl.LOCK_NB)
         settings = json.load(configuration)
         if not isinstance(settings, dict):

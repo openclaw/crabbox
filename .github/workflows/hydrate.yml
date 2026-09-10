@@ -135,7 +135,8 @@ jobs:
               for directory in (home, runner, runner / "_work", cache, cache / "go", cache / "go/1.27.1", cache / "go/1.27.1/x64"):
                   require(owned(directory, True), "Runner cache is not an owned regular directory")
               require(owned(runner / ".runner"), "Runner registration is not owned")
-              settings = json.loads((runner / ".runner").read_text())
+              # Runner's IOUtil.SaveObject writes UTF-8 with a BOM.
+              settings = json.loads((runner / ".runner").read_text(encoding="utf-8-sig"))
               require(os.path.abspath(runner / settings["workFolder"]) == str(runner / "_work"),
                       "Runner registration uses a different work folder")
               require(owned(cache / "go/1.27.1/x64.complete"), "seeded Go completion marker is missing or unowned")

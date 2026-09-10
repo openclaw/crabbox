@@ -417,11 +417,15 @@ func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
 		env              map[string]string
 		dotEnv           string
 		workFolder       string
+		registration     string
 		change           string
 		managerEnv       string
 		wantNode, wantGo bool
 	}{
 		{name: "default", wantNode: true, wantGo: true},
+		{name: "BOM registration", registration: "bom", wantNode: true, wantGo: true},
+		{name: "malformed registration", registration: "malformed"},
+		{name: "malformed BOM registration", registration: "malformed-bom"},
 		{name: "custom work folder", workFolder: "custom"},
 		{name: "inherited root", env: map[string]string{"RUNNER_TOOL_CACHE": "/custom"}},
 		{name: "legacy runner root", env: map[string]string{"RUNNER_TOOLSDIRECTORY": "/custom"}},
@@ -545,7 +549,15 @@ func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
 			if workFolder == "" {
 				workFolder = "_work"
 			}
-			write(filepath.Join(runner, "config.sh"), "#!/bin/sh\nif [ \"${1:-}\" = remove ]; then rm -f .runner; exit 0; fi\nprintf '{\"workFolder\":\""+workFolder+"\"}\\n' >.runner\nprintf 'configured\\n' >>\"$HOME/order\"\n", 0o755)
+			configuration := "{\"workFolder\":\"" + workFolder + "\"}\n"
+			if strings.HasPrefix(tc.registration, "malformed") {
+				configuration = "{invalid\n"
+			}
+			// Runner's IOUtil.SaveObject emits UTF-8 with a BOM.
+			if strings.HasSuffix(tc.registration, "bom") {
+				configuration = "\ufeff" + configuration
+			}
+			write(filepath.Join(runner, "config.sh"), "#!/bin/sh\nif [ \"${1:-}\" = remove ]; then rm -f .runner; exit 0; fi\nprintf '%s' "+shellQuote(configuration)+" >.runner\nchmod 600 .runner\nprintf 'configured\\n' >>\"$HOME/order\"\n", 0o755)
 			write(filepath.Join(runner, ".env"), tc.dotEnv, 0o600)
 			write(filepath.Join(bin, "curl"), "#!/bin/sh\nprintf '{}'\n", 0o755)
 			write(filepath.Join(bin, "jq"), "#!/bin/sh\ncase \"$*\" in *tag_name*) printf 2.337.0;; *digest*) printf '"+strings.Repeat("a", 64)+"';; *) exit 2;; esac\n", 0o755)
@@ -659,6 +671,14 @@ esac
 			output, err := cmd.CombinedOutput()
 			if err != nil {
 				t.Fatalf("installer failed: %v\n%s", err, output)
+			}
+			gotConfiguration, err := os.ReadFile(filepath.Join(runner, ".runner"))
+			if err != nil || string(gotConfiguration) != configuration {
+				t.Fatalf("registration changed: %v", err)
+			}
+			configurationInfo, err := os.Stat(filepath.Join(runner, ".runner"))
+			if err != nil || configurationInfo.Mode().Perm() != 0o600 {
+				t.Fatalf("registration mode changed: %v", err)
 			}
 			for _, expected := range []struct {
 				tool, version string

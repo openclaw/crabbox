@@ -76,7 +76,13 @@ with tempfile.TemporaryDirectory(prefix="crabbox-hydrate-test-") as temporary:
     slot.mkdir(parents=True)
     marker = slot.with_name("x64.complete")
     marker.touch()
-    (runner / ".runner").write_text(json.dumps({"workFolder": "_work" if mode != "work-folder" else "other"}))
+    configuration = json.dumps({"workFolder": "_work" if mode != "work-folder" else "other"})
+    if mode.startswith("malformed"):
+        configuration = "{invalid"
+    if mode.endswith("-bom"):
+        configuration = "\ufeff" + configuration
+    (runner / ".runner").write_text(configuration, encoding="utf-8")
+    configuration_info = (runner / ".runner").stat()
     workspace = root / "workspace"
     action = workspace / ".crabbox-setup-go"
     (action / "dist/setup").mkdir(parents=True)
@@ -118,6 +124,7 @@ with tempfile.TemporaryDirectory(prefix="crabbox-hydrate-test-") as temporary:
     original_lstat = pathlib.Path.lstat
     original_read = pathlib.Path.read_text
     original_iterdir = pathlib.Path.iterdir
+    original_readlink = os.readlink
     calls = []
     ip_calls = []
     mount_reads = []
@@ -139,6 +146,11 @@ with tempfile.TemporaryDirectory(prefix="crabbox-hydrate-test-") as temporary:
             mount_reads.append(str(path))
             return iter([pathlib.Path("/sys/class/net/lo"), pathlib.Path("/sys/class/net/eth0")])
         return original_iterdir(path)
+    def namespace_link(path, *args, **kwargs):
+        # Python 3.9 resolves ordinary paths through readlink too.
+        if str(path) in ("/proc/self/ns/net", "/proc/self/ns/pid", "/proc/self/ns/mnt"):
+            return "parent-" + str(path).rsplit("/", 1)[1]
+        return original_readlink(path, *args, **kwargs)
     def run(arguments, **options):
         if arguments[0] == "/usr/bin/systemctl":
             return types.SimpleNamespace(stdout="MainPID=333\nActiveState=" + ("inactive" if mode == "service" else "active") +
@@ -225,7 +237,7 @@ with tempfile.TemporaryDirectory(prefix="crabbox-hydrate-test-") as temporary:
         stack.enter_context(mock.patch.object(pathlib.Path, "lstat", metadata))
         stack.enter_context(mock.patch.object(pathlib.Path, "read_text", read))
         stack.enter_context(mock.patch.object(pathlib.Path, "iterdir", entries))
-        stack.enter_context(mock.patch.object(os, "readlink", side_effect=lambda value: "parent-" + value.rsplit("/", 1)[1]))
+        stack.enter_context(mock.patch.object(os, "readlink", side_effect=namespace_link))
         stack.enter_context(mock.patch.object(subprocess, "run", run))
         if mode in ("cleanup", "exit-and-cleanup"):
             stack.enter_context(mock.patch.object(tempfile.TemporaryDirectory, "_rmtree", side_effect=OSError("cleanup")))
@@ -237,11 +249,17 @@ with tempfile.TemporaryDirectory(prefix="crabbox-hydrate-test-") as temporary:
     leftovers = len(list(scratch.iterdir()))
     assert leftovers == (1 if mode in ("cleanup", "exit-and-cleanup") else 0), leftovers
     assert mount_reads == [], mount_reads
+    assert (runner / ".runner").read_bytes() == configuration.encode("utf-8")
+    after = (runner / ".runner").stat()
+    assert (after.st_mode, after.st_uid, after.st_mtime_ns, after.st_ctime_ns) == (
+        configuration_info.st_mode, configuration_info.st_uid, configuration_info.st_mtime_ns, configuration_info.st_ctime_ns)
     print("FIXTURE_RESULT " + json.dumps({"code": code, "calls": len(calls), "leftovers": leftovers}))
 `;
 
 for (const [mode, code, calls] of [
   ["success", 0, 1],
+  ["registration-bom", 0, 1],
+  ["malformed", 1, 0], ["malformed-bom", 1, 0],
   ...["root", "custom-cache", "work-folder", "service", "ancestry", "missing-slot", "writable", "foreign",
     "symlink", "action-hash", "matcher-hash", "custom-url", "custom-url-input", "missing-env"].map((mode) => [mode, 1, 0]),
   ...["same-network", "network-up", "network-route", "cache-miss", "download", "version", "oversize", "cleanup"].map((mode) => [mode, 1, 1]),
