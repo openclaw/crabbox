@@ -728,8 +728,21 @@ and removes disposable files, containers, and the test image on success or failu
 Browser execution remains a single invocation with a 30-second limit and bounded
 forced termination. Before removing its temporary files, each browser probe
 records its command exit status and elapsed time, a capped static-fixture DOM excerpt,
-redacted stderr diagnostics, wrapper/package identity, and at most two
-samples of owned-process state, CPU ticks, memory and I/O. It does not dump
+redacted stderr diagnostics, wrapper/package identity, and up to two retained
+`processSamples` at one and 25 seconds. Each sample records the sampler attempt's
+actual launch offset and launch-to-observation duration, outcome, and reap status;
+these are attempt windows, not measurements of individual kernel-read latency.
+Owned-process rows include
+PID/start identity, UID/process-group/session identity, CPU ticks with
+`SC_CLK_TCK`, memory, I/O, minor/major faults, and a bounded wait-channel name.
+Zero or unavailable wait channels remain unknown.
+All `/proc` reads run in one owned sampler child at a time with a 250 ms deadline:
+even a small `/proc/PID/io` read can wait on a kernel lock. Nonblocking collection
+and reaping keep that wait out of the browser timeout loop; an unreaped sampler
+is recorded, not reported as settled or replaced by another child. Missed samples
+are not retried. The complete UTF-8 evidence line stays below 8 KiB, including its
+prefix and newline, trimming stderr first and then balanced process-row tails
+while retaining both sample records and truncation counts. It does not dump
 arguments, environments, arbitrary DOM or raw stderr. Failed visible-render
 assertions relay this observation even when the browser exited zero. Diagnostic collection
 does not replace the original timeout, signal or command failure status.

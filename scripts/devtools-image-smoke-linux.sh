@@ -79,7 +79,10 @@ child = None
 status = 1
 streams = {"stdout": bytearray(), "stderr": bytearray()}
 sizes = {"stdout": 0, "stderr": 0}
-processes = []
+process_samples = []
+sampler = None
+sample_timeout = 0.25
+sample_bytes = 16384
 identity = {}
 def interrupt(signum, _frame):
     global interrupted
@@ -91,29 +94,178 @@ def signal_group(signum):
         os.killpg(child.pid, signum)
     except ProcessLookupError:
         pass
-def sample():
+def read_proc(entry, name, limit=4096):
+    with (entry / name).open("rb") as source:
+        data = source.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("proc field exceeds limit")
+    return data.decode("ascii")
+
+def proc_stat(entry):
+    prefix, fields = read_proc(entry, "stat").rsplit(") ", 1)
+    if prefix.split(" ", 1)[0] != entry.name:
+        raise ValueError("proc pid changed")
+    fields = fields.split()
+    if not re.fullmatch(r"[A-Za-z]", fields[0]):
+        raise ValueError("invalid proc state")
+    row = {"pid": int(entry.name), "uid": entry.stat().st_uid,
+           "ppid": int(fields[1]), "pgid": int(fields[2]), "sid": int(fields[3]),
+           "state": fields[0], "minorFaults": int(fields[7]), "majorFaults": int(fields[9]),
+           "startTicks": int(fields[19]), "userTicks": int(fields[11]),
+           "systemTicks": int(fields[12]), "rssBytes": int(fields[21]) * os.sysconf("SC_PAGE_SIZE")}
+    if any(not 0 <= value < 2 ** 64 for value in row.values() if isinstance(value, int)):
+        raise ValueError("invalid proc counter")
+    return row
+
+def sample(proc_root, group_id, uid):
     result = []
-    # Read numeric kernel metadata only: never cmdline, environ, or user paths.
-    for entry in itertools.islice(pathlib.Path("/proc").iterdir(), 8192):
+    # Only the sampler reads proc: even a small io read can wait on a kernel lock.
+    for entry in itertools.islice(proc_root.iterdir(), 8192):
         if not entry.name.isdecimal():
             continue
         try:
-            fields = (entry / "stat").read_text().rsplit(") ", 1)[1].split()
-            if int(fields[2]) == child.pid and int(fields[3]) == child.pid and entry.stat().st_uid == os.getuid():
-                row = {"pid": int(entry.name), "ppid": int(fields[1]), "state": fields[0],
-                       "startTicks": int(fields[19]), "userTicks": int(fields[11]),
-                       "systemTicks": int(fields[12]), "rssBytes": int(fields[21]) * os.sysconf("SC_PAGE_SIZE")}
-                try:
-                    io = dict(line.split(": ", 1) for line in (entry / "io").read_text().splitlines())
-                    row["io"] = {key: int(io[key]) for key in ("read_bytes", "write_bytes", "rchar", "wchar")}
-                except (OSError, ValueError, KeyError):
-                    pass
-                result.append(row)
-                if len(result) == 8:
-                    break
-        except (OSError, ValueError, IndexError):
+            row = proc_stat(entry)
+            if (row["pgid"], row["sid"], row["uid"]) != (group_id, group_id, uid):
+                continue
+            try:
+                io = dict(line.split(": ", 1) for line in read_proc(entry, "io").splitlines())
+                values = {key: int(io[key]) for key in ("read_bytes", "write_bytes", "rchar", "wchar")}
+                if all(0 <= value < 2 ** 64 for value in values.values()):
+                    row["io"] = values
+            except (OSError, ValueError, KeyError):
+                pass
+            row["wchan"] = None
+            try:
+                wchan = read_proc(entry, "wchan", 65).strip()
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,63}", wchan):
+                    row["wchan"] = wchan
+            except (OSError, ValueError):
+                pass
+            after = proc_stat(entry)
+            if any(after[key] != row[key] for key in ("pid", "uid", "pgid", "sid", "startTicks")):
+                continue
+            result.append(row)
+            if len(result) == 8:
+                break
+        except (OSError, ValueError, IndexError, UnicodeError):
             continue
     return result
+
+def start_sample(now):
+    global sampler
+    record = {"attemptElapsedMs": round((now - started) * 1000), "attemptDurationMs": 0,
+              "outcome": "error", "processes": [], "truncatedRows": 0, "samplerReaped": False}
+    process_samples.append(record)
+    if sampler is not None:
+        record["reason"] = "previousSamplerUnreaped"
+        return
+    reader = writer = None
+    try:
+        reader, writer = os.pipe()
+        os.set_blocking(reader, False)
+        os.set_blocking(writer, False)
+        pid = os.fork()
+    except OSError:
+        for fd in (reader, writer):
+            if fd is not None:
+                os.close(fd)
+        record["reason"] = "start"
+        return
+    if pid == 0:
+        try:
+            for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT, signal.SIGPIPE):
+                signal.signal(signum, signal.SIG_DFL)
+            signal.pthread_sigmask(signal.SIG_SETMASK, [])
+            os.close(reader)
+            # A stuck sampler must not retain the outer command's output pipes.
+            with open(os.devnull, "rb+") as null:
+                for fd in (0, 1, 2):
+                    os.dup2(null.fileno(), fd)
+            for stream in (child.stdout, child.stderr):
+                stream.close()
+            data = json.dumps(sample(pathlib.Path("/proc"), child.pid, os.getuid())).encode("utf-8")
+            if len(data) > sample_bytes or os.write(writer, data) != len(data):
+                os._exit(1)
+            os._exit(0)
+        except BaseException:
+            os._exit(1)
+    os.close(writer)
+    record["samplerPID"] = pid
+    sampler = {"pid": pid, "fd": reader, "record": record, "started": now,
+               "data": bytearray(), "finished": False}
+
+def poll_sample(now, cancel=None):
+    global sampler
+    if sampler is None:
+        return
+    current = sampler
+    record = current["record"]
+    try:
+        pid, result = os.waitpid(current["pid"], os.WNOHANG)
+    except ChildProcessError:
+        record["outcome"], record["reason"] = "error", "notChild"
+        if not current["finished"]:
+            os.close(current["fd"])
+        sampler = None
+        return
+    if pid:
+        record["samplerReaped"] = True
+    if not current["finished"]:
+        # Preserve an already completed worker before cancelling a live collector.
+        reason = None if pid else cancel or ("deadline" if now - current["started"] >= sample_timeout else None)
+        if reason is None:
+            try:
+                current["data"].extend(os.read(current["fd"], sample_bytes + 1 - len(current["data"])))
+                if len(current["data"]) > sample_bytes:
+                    reason = "ipcLimit"
+            except BlockingIOError:
+                pass
+            except OSError:
+                reason = "ipcRead"
+        if reason is not None or pid:
+            record["attemptDurationMs"] = round((now - current["started"]) * 1000)
+            record["outcome"] = "timeout" if reason == "deadline" else "error"
+            if reason is None and result == 0:
+                try:
+                    rows = json.loads(current["data"])
+                    if not isinstance(rows, list) or len(rows) > 8 or not all(isinstance(row, dict) for row in rows):
+                        raise ValueError("invalid sample")
+                    record["processes"] = rows
+                    record["outcome"] = "ok" if rows else "empty"
+                except (ValueError, UnicodeError):
+                    reason = "ipcData"
+            else:
+                reason = reason or "collector"
+            if reason:
+                record["reason"] = reason
+            if not pid:
+                # This unreaped direct child cannot have had its PID reused.
+                try:
+                    os.kill(current["pid"], signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            os.close(current["fd"])
+            current["finished"] = True
+    if pid:
+        sampler = None
+
+def evidence_line(evidence):
+    evidence["truncatedStderrBytes"] = 0
+    while True:
+        line = ("browser-smoke-evidence " + json.dumps(evidence, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+        if len(line) < 8192:
+            return line
+        if evidence["stderr"]:
+            before = evidence["stderr"].encode("utf-8")
+            evidence["stderr"] = before[:max(0, len(before) - (len(line) - 8191))].decode("utf-8", errors="ignore")
+            evidence["truncatedStderrBytes"] += len(before) - len(evidence["stderr"].encode("utf-8"))
+            continue
+        available = [record for record in evidence["processSamples"] if record["processes"]]
+        if not available:
+            raise ValueError("evidence metadata exceeds limit")
+        record = max(available, key=lambda item: len(item["processes"]))
+        record["processes"].pop()
+        record["truncatedRows"] += 1
 try:
     try:
         wrapper = pathlib.Path(shutil.which("crabbox-browser"))
@@ -137,21 +289,19 @@ try:
         samples = iter((started + 1, started + 25))
         next_sample = next(samples)
         child_done = None
-        while child.poll() is None or ready.get_map():
+        while child.poll() is None or ready.get_map() or sampler is not None:
             now = time.monotonic()
-            if now >= next_sample:
-                try:
-                    observed = sample()
-                    if observed:
-                        processes = observed
-                except OSError:
-                    pass
-                next_sample = next(samples, float("inf"))
+            poll_sample(now, "browserComplete" if child.returncode is not None else None)
             if interrupted or now - started >= 36:
                 status = interrupted or (child.returncode if child.returncode is not None else 137)
                 if status < 0:
                     status = 128 - status
                 break
+            if child.returncode is None and now >= next_sample:
+                start_sample(now)
+                next_sample = next(samples, float("inf"))
+                while next_sample <= now:
+                    next_sample = next(samples, float("inf"))
             for key, _ in ready.select(0.1):
                 data = os.read(key.fd, 65536)
                 if not data:
@@ -162,12 +312,13 @@ try:
                 streams[name].extend(data[:max(0, 4096 - len(streams[name]))])
             if child.returncode is not None:
                 child_done = child_done or now
-                if not ready.get_map() or now - child_done >= 2:
+                if (not ready.get_map() and sampler is None) or now - child_done >= 2:
                     status = child.returncode if child.returncode >= 0 else 128 - child.returncode
                     break
         if not interrupted and child.returncode is not None:
             status = child.returncode if child.returncode >= 0 else 128 - child.returncode
 finally:
+    poll_sample(time.monotonic(), "interrupted" if interrupted else "browserComplete")
     if child is not None:
         # timeout owns its browser; this outer owner also reaps on interruption
         # or inherited pipes held open by surviving descendants.
@@ -180,6 +331,12 @@ finally:
         signal_group(signal.SIGKILL)
         for name in streams:
             getattr(child, name).close()
+    # Reap without a blocking wait, using only the sampler's original deadline.
+    while sampler is not None and time.monotonic() - sampler["started"] < sample_timeout:
+        poll_sample(time.monotonic(), "browserComplete")
+        if sampler is not None:
+            time.sleep(0.005)
+    poll_sample(time.monotonic(), "browserComplete")
     status = interrupted or status
     try:
         text = streams["stderr"].decode("utf-8", errors="replace")
@@ -195,11 +352,13 @@ finally:
         dom = next((fixture[:length].decode() for length in range(len(fixture), 0, -1)
                     if fixture[:length] in streams["stdout"]), "")
         # A successful process can still fail the calling DOM/render assertion.
-        print("browser-smoke-evidence " + json.dumps({
+        line = evidence_line({
             "commandExit": status, "elapsedMs": round((time.monotonic() - started) * 1000),
             "stdoutBytes": sizes["stdout"], "stderrBytes": sizes["stderr"],
-            "dom": dom, "stderr": text[:4096], "processes": processes, "identity": identity,
-        }, sort_keys=True), file=sys.stderr)
+            "dom": dom, "stderr": text[:4096], "processSamples": process_samples,
+            "clockTicksPerSecond": os.sysconf("SC_CLK_TCK"), "identity": identity,
+        })
+        sys.stderr.buffer.write(line)
     except Exception:
         pass
     if not status:

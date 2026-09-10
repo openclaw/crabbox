@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmod,
   copyFile,
@@ -1549,6 +1550,7 @@ test("browser probe extraction isolates the complete actual heredoc", async () =
   assert.ok(definition.startsWith("browser_probe=\"$(cat <<'PY'\n"));
   assert.ok(definition.endsWith("\nsys.exit(status)\nPY\n)\""));
   assert.ok(definition.includes('"--kill-after=5", "30"'));
+  assert.ok(definition.includes('"clockTicksPerSecond": os.sysconf("SC_CLK_TCK")'));
   assert.doesNotMatch(definition, /cmake_minimum_required|docker run|devtools-smoke-ok/);
 });
 
@@ -1560,7 +1562,358 @@ test("browser probe extraction rejects missing or unterminated heredocs", () => 
   );
 });
 
-for (const [mode, expected] of [["exit", 37], ["timeout", 124], ["ignore-term", 137], ["interrupt", 143], ["diagnostic-failure", 37]]) {
+async function browserProbeUnit(code, root = "", timeoutMs = 5000) {
+  const raw = await readFile(path.join(scriptDir, "devtools-image-smoke-linux.sh"), "utf8");
+  const definition = browserProbeDefinition(raw);
+  const source = definition.slice("browser_probe=\"$(cat <<'PY'\n".length, -"\nPY\n)\"".length);
+  const child = spawn("python3", ["-c", `import ast
+tree = ast.parse(${JSON.stringify(source)})
+# Execute the canonical owners without launching the browser or installing signals.
+exec(compile(ast.Module(body=[node for node in tree.body if isinstance(node,
+    (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.Assign))], type_ignores=[]),
+    "<browser-probe>", "exec"))
+${code}`, root], { detached: true, stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "", stderr = "", expired = false, stopped = false;
+  const stop = () => {
+    if (stopped || !Number.isInteger(child.pid)) return;
+    try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+    stopped = true;
+  };
+  const deadline = setTimeout(() => { expired = true; stop(); }, timeoutMs);
+  for (const stream of [child.stdout, child.stderr]) {
+    stream.on("data", (data) => {
+      if (stream === child.stdout) stdout += data;
+      else stderr += data;
+      if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > 1024 * 1024) stop();
+    });
+  }
+  let result;
+  try {
+    result = await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (status, signal) => resolve({ status, signal }));
+    });
+  } finally {
+    clearTimeout(deadline);
+    // A failed assertion may leave a forked sampler alive in this exact group.
+    stop();
+  }
+  assert.equal(expired, false, "browser sampler fixture timed out after owned group cleanup");
+  assert.equal(result.status, 0, stderr);
+  return stdout;
+}
+
+test("browser sampler fixture timeout joins an ignoring owner and its owned child", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "crabbox-browser-proc-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await assert.rejects(browserProbeUnit(`
+signal.signal(signal.SIGTERM, lambda *_: None)
+pid = os.fork()
+if pid == 0:
+    time.sleep(60)
+    os._exit(0)
+pathlib.Path(sys.argv[1], "child").write_text(str(pid))
+time.sleep(60)
+`, root, 500), /fixture timed out after owned group cleanup/);
+  const pid = Number(await readFile(path.join(root, "child"), "utf8"));
+  const probe = spawnSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8", timeout: 1000 });
+  assert.ok(probe.status !== 0 || probe.stdout.trim().startsWith("Z"), `fixture child survived: ${probe.stdout}`);
+});
+
+test("browser sampler retains two proc snapshots with clock, faults and owned identities", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "crabbox-browser-proc-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await browserProbeUnit(`
+root = pathlib.Path(sys.argv[1])
+entry = root / "101"
+entry.mkdir()
+fields = ["0"] * 22
+fields[0:4] = ["D", "1", "77", "77"]
+for index, value in ((7, 11), (9, 2), (11, 13), (12, 14), (19, 15), (21, 2)):
+    fields[index] = str(value)
+def write_stat():
+    (entry / "stat").write_text("101 (fixture ) name) " + " ".join(fields))
+write_stat()
+(entry / "io").write_text("read_bytes: 94343168\\nwrite_bytes: 4096\\nrchar: 100\\nwchar: 20\\n")
+(entry / "wchan").write_text("folio_wait_bit_common\\n")
+first = sample(root, 77, os.getuid())
+assert len(first) == 1
+assert first[0]["uid"] == os.getuid()
+assert (first[0]["pgid"], first[0]["sid"], first[0]["pid"], first[0]["startTicks"]) == (77, 77, 101, 15)
+assert (first[0]["minorFaults"], first[0]["majorFaults"]) == (11, 2)
+assert first[0]["wchan"] == "folio_wait_bit_common"
+fields[7], fields[9], fields[11] = "21", "5", "18"
+write_stat()
+second = sample(root, 77, os.getuid())
+assert (second[0]["minorFaults"], second[0]["majorFaults"], second[0]["userTicks"]) == (21, 5, 18)
+assert first[0]["minorFaults"] == 11
+assert os.sysconf("SC_CLK_TCK") > 0
+`, root);
+});
+
+test("browser sampler rejects PID races, foreign ownership and malformed proc fields", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "crabbox-browser-proc-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await browserProbeUnit(`
+root = pathlib.Path(sys.argv[1])
+entry = root / "101"
+entry.mkdir()
+fields = ["0"] * 22
+fields[0:4] = ["S", "1", "77", "77"]
+fields[19] = "15"
+def reset():
+    (entry / "stat").write_text("101 (fixture) " + " ".join(fields))
+    (entry / "io").write_text("malformed")
+reset()
+assert sample(root, 77, os.getuid() + 1) == []
+assert sample(root, 78, os.getuid()) == []
+for value in ("0", "", "private/path", "x" * 65, "\\u00e9", "wait\\nsecret"):
+    (entry / "wchan").write_text(value)
+    rows = sample(root, 77, os.getuid())
+    assert len(rows) == 1 and rows[0]["wchan"] is None and "io" not in rows[0]
+(entry / "wchan").unlink()
+assert sample(root, 77, os.getuid())[0]["wchan"] is None
+(entry / "wchan").write_text("w" * 64)
+assert sample(root, 77, os.getuid())[0]["wchan"] == "w" * 64
+for value in ("", "102 (fixture) " + " ".join(fields), "101 (fixture) S",
+              "101 (fixture) " + " ".join(fields[:7] + ["bad"] + fields[8:]),
+              "101 (fixture) " + " ".join(fields[:7] + [str(2 ** 64)] + fields[8:])):
+    (entry / "stat").write_text(value)
+    assert sample(root, 77, os.getuid()) == []
+reset()
+original_stat = proc_stat
+calls = 0
+def raced_stat(item):
+    global calls
+    calls += 1
+    row = original_stat(item)
+    if calls == 2:
+        row["startTicks"] += 1
+    return row
+proc_stat = raced_stat
+assert sample(root, 77, os.getuid()) == []
+`, root);
+});
+
+test("browser sampler records empty, error and timeout outcomes without overlapping children", async () => {
+  await browserProbeUnit(`
+import io
+from types import SimpleNamespace
+child = SimpleNamespace(pid=77, stdout=io.BytesIO(), stderr=io.BytesIO())
+def settle():
+    deadline = time.monotonic() + 1
+    while sampler is not None and time.monotonic() < deadline:
+        poll_sample(time.monotonic())
+        time.sleep(0.005)
+    assert sampler is None
+signal.signal(signal.SIGTERM, lambda *_: None)
+def empty(*_):
+    assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+    assert signal.getsignal(signal.SIGINT) == signal.SIG_DFL
+    return []
+sample = empty
+start_sample(time.monotonic())
+settle()
+assert process_samples[-1]["outcome"] == "empty"
+sample = lambda *_: [{"pid": 101}]
+start_sample(time.monotonic())
+settle()
+assert [item["outcome"] for item in process_samples] == ["empty", "ok"]
+assert all(item["samplerReaped"] for item in process_samples)
+assert process_samples[0]["attemptElapsedMs"] <= process_samples[1]["attemptElapsedMs"]
+assert all(0 <= item["attemptDurationMs"] < 1000 for item in process_samples)
+sample = empty
+start_sample(time.monotonic())
+completed = os.waitpid(sampler["pid"], 0)
+original_waitpid = os.waitpid
+os.waitpid = lambda *_: completed
+poll_sample(time.monotonic(), "browserComplete")
+os.waitpid = original_waitpid
+assert sampler is None and process_samples[-1]["outcome"] == "empty"
+assert process_samples[-1]["samplerReaped"] and "reason" not in process_samples[-1]
+sample = lambda *_: time.sleep(60)
+start_sample(time.monotonic())
+owned = sampler["pid"]
+start_sample(time.monotonic())
+assert sampler["pid"] == owned
+assert process_samples[-1]["reason"] == "previousSamplerUnreaped"
+settle()
+assert process_samples[-2]["outcome"] == "timeout"
+assert process_samples[-2]["samplerReaped"]
+def broken(*_):
+    raise OSError("fixture-only")
+sample = broken
+start_sample(time.monotonic())
+settle()
+assert process_samples[-1]["reason"] == "collector"
+original_dumps = json.dumps
+json.dumps = lambda *_: "not-json"
+sample = empty
+start_sample(time.monotonic())
+settle()
+json.dumps = original_dumps
+assert process_samples[-1]["reason"] == "ipcData"
+sample = lambda *_: time.sleep(60)
+start_sample(time.monotonic())
+original_read = os.read
+os.read = lambda *_: b"x" * (sample_bytes + 1)
+poll_sample(time.monotonic())
+os.read = original_read
+settle()
+assert process_samples[-1]["reason"] == "ipcLimit"
+assert process_samples[-1]["samplerReaped"]
+`);
+});
+
+test("browser evidence caps the entire UTF-8 line and balances retained sample tails", async () => {
+  await browserProbeUnit(`
+import copy
+row = {key: 2 ** 64 - 1 for key in ("pid", "ppid", "uid", "pgid", "sid", "startTicks",
+       "userTicks", "systemTicks", "rssBytes", "minorFaults", "majorFaults")}
+row.update(state="D", wchan="w" * 64,
+           io={key: 2 ** 64 - 1 for key in ("rchar", "wchar", "read_bytes", "write_bytes")})
+records = [{"attemptElapsedMs": moment, "attemptDurationMs": 250, "outcome": "ok", "samplerReaped": True,
+            "processes": [copy.deepcopy(row) for _ in range(8)], "truncatedRows": 0}
+           for moment in (1001, 25003)]
+evidence = {"commandExit": 124, "stderr": "\\U0001f642" * 4096,
+            "identity": {"packages": ["\\U0001f642" * 160] * 2, "wrapperSHA256": "a" * 64},
+            "processSamples": records, "clockTicksPerSecond": os.sysconf("SC_CLK_TCK")}
+line = evidence_line(evidence)
+assert len(line) < 8192 and line.endswith(b"\\n")
+decoded = json.loads(line[len(b"browser-smoke-evidence "):])
+assert decoded["clockTicksPerSecond"] == os.sysconf("SC_CLK_TCK")
+assert decoded["truncatedStderrBytes"] == 4096 * 4
+assert [item["attemptElapsedMs"] for item in decoded["processSamples"]] == [1001, 25003]
+assert len(records) == 2 and all(len(item["processes"]) + item["truncatedRows"] == 8 for item in records)
+assert abs(len(records[0]["processes"]) - len(records[1]["processes"])) <= 1
+assert all(item["processes"] for item in records)
+`);
+});
+
+for (const mode of ["completion", "interrupt", "owner-exit"]) {
+  test(`browser blocked sampler is reaped on ${mode} without changing command status`, async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "crabbox-browser-sampler-"));
+    const samplerReady = path.join(root, "sampler");
+    const browserPID = path.join(root, "browser");
+    const recordIdentity = `def record_identity(filename):
+    pid = os.getpid()
+    metadata = subprocess.check_output(["ps", "-ww", "-p", str(pid),
+        "-o", "pgid=,uid=,lstart=,command="], text=True).strip()
+    pathlib.Path(filename).write_text(json.dumps({"pid": pid, "pgid": os.getpgrp(),
+        "startIdentity": hashlib.sha256(metadata.encode()).hexdigest()}))
+`;
+    for (const [name, content] of [
+      ["timeout", '#!/bin/sh\n[ "$1 $2" = "--kill-after=5 30" ] || exit 91\nshift 2\nexec "$@"\n'],
+      ["crabbox-browser", `#!/usr/bin/env python3
+import hashlib, json, os, pathlib, subprocess, sys, time
+${recordIdentity}
+record_identity(os.environ["BROWSER_PID"])
+print("<p>crabbox-browser-smoke</p>", flush=True)
+${mode === "completion" ? 'while not pathlib.Path(os.environ["SAMPLER_READY"]).exists():\n    time.sleep(0.005)\nsys.exit(37)' : "time.sleep(60)"}
+`],
+    ]) {
+      await writeFile(path.join(root, name), content);
+      await chmod(path.join(root, name), 0o755);
+    }
+    const raw = await readFile(path.join(scriptDir, "devtools-image-smoke-linux.sh"), "utf8");
+    const definition = browserProbeDefinition(raw)
+      .replace("def sample(proc_root, group_id, uid):", `${recordIdentity}
+def sample(proc_root, group_id, uid):
+    record_identity(os.environ["SAMPLER_READY"])
+    time.sleep(60)`);
+    const source = definition.slice("browser_probe=\"$(cat <<'PY'\n".length, -"\nPY\n)\"".length);
+    const child = spawn("python3", ["-c", source, root], {
+      env: { PATH: `${root}:${process.env.PATH}`, HOME: root, LC_ALL: "C", SAMPLER_READY: samplerReady, BROWSER_PID: browserPID },
+      detached: true, stdio: ["ignore", "pipe", "pipe"],
+    });
+    const killed = new Set();
+    const running = (record) => {
+      const probe = spawnSync("ps", ["-ww", "-p", String(record.pid), "-o", "stat=,pgid=,uid=,lstart=,command="],
+        { encoding: "utf8", timeout: 1000, killSignal: "SIGKILL", maxBuffer: 64 * 1024, env: { PATH: process.env.PATH, LC_ALL: "C" } });
+      assert.ifError(probe.error);
+      if (probe.status === 1 && !probe.stdout.trim()) return false;
+      assert.equal(probe.status, 0, probe.stderr);
+      const [, state, identity] = probe.stdout.trim().match(/^(\S+)\s+([\s\S]+)$/) || [];
+      if (state?.startsWith("Z")) return false;
+      assert.ok(identity, "fixture process metadata is missing");
+      assert.equal(createHash("sha256").update(identity).digest("hex"), record.startIdentity, "fixture process identity changed");
+      return true;
+    };
+    let cleanup;
+    const terminateFixture = () => cleanup ||= (async () => {
+      const records = [];
+      for (const [file, group] of [[browserPID, true], [samplerReady, false]]) {
+        const text = await readFile(file, "utf8").catch((error) => { if (error.code !== "ENOENT") throw error; return ""; });
+        if (!text) continue;
+        const record = JSON.parse(text);
+        assert.ok(Number.isInteger(record.pid) && record.pid > 1);
+        assert.equal(record.pgid, group ? record.pid : child.pid);
+        records.push(record);
+        // Parent exit changes PPID, not this start/UID/group/unique-command identity.
+        if (running(record)) {
+          try { process.kill(group ? -record.pgid : record.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+          killed.add(record.pid);
+        }
+      }
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      const until = Date.now() + 1000;
+      for (const record of records) {
+        while (running(record)) {
+          assert.ok(Date.now() < until, `owned fixture process ${record.pid} survived cleanup`);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      }
+    })();
+    t.after(async () => { await terminateFixture(); await rm(root, { recursive: true, force: true }); });
+    let stderr = "";
+    child.stderr.on("data", (data) => { stderr += data; });
+    child.stdout.resume();
+    let expired = false;
+    const deadline = setTimeout(() => {
+      expired = true;
+      void terminateFixture();
+    }, 4000);
+    const done = new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", () => { terminateFixture().catch(reject); });
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    });
+    if (mode !== "completion") {
+      const until = Date.now() + 2000;
+      while (!(await readFile(samplerReady, "utf8").catch(() => "")) && Date.now() < until) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      child.kill(mode === "interrupt" ? "SIGTERM" : "SIGKILL");
+    }
+    const result = await done;
+    await terminateFixture();
+    clearTimeout(deadline);
+    assert.equal(expired, false, "blocked sampler fixture timed out after owned process cleanup");
+    if (mode === "owner-exit") {
+      assert.equal(result.signal, "SIGKILL");
+      for (const file of [browserPID, samplerReady]) {
+        const record = JSON.parse(await readFile(file, "utf8"));
+        assert.ok(killed.has(record.pid), "external owner must clean both reparented processes");
+        assert.equal(running(record), false);
+      }
+      assert.ok((await readdir(root)).includes("browser"), "verify termination before removing fixture records");
+      return;
+    }
+    assert.equal(result.code, mode === "completion" ? 37 : 143, stderr);
+    assert.equal(result.signal, null);
+    const line = stderr.split("\n").find((value) => value.startsWith("browser-smoke-evidence "));
+    assert.ok(line, stderr);
+    const evidence = JSON.parse(line.slice("browser-smoke-evidence ".length));
+    assert.equal(evidence.processSamples.length, 1);
+    const record = evidence.processSamples[0];
+    assert.equal(record.outcome, "error", stderr);
+    assert.equal(record.reason, mode === "completion" ? "browserComplete" : "interrupted");
+    assert.equal(record.samplerReaped, true);
+    assert.throws(() => process.kill(record.samplerPID, 0), { code: "ESRCH" });
+  });
+}
+
+for (const [mode, expected] of [["exit", 37], ["timeout", 124], ["ignore-term", 137], ["interrupt", 143], ["diagnostic-failure", 37], ["two-samples", 124]]) {
   test(`browser diagnostics preserve ${mode} status and settle only owned descendants`, {
     skip: process.platform !== "linux" && "native Linux supervision requires GNU timeout and /proc",
   }, async (t) => {
@@ -1600,7 +1953,8 @@ setInterval(() => {}, 1000);
     let definition = browserProbeDefinition(raw);
     assert.ok(definition.includes('"--kill-after=5", "30"'));
     assert.ok(definition.includes("started + 1, started + 25"));
-    if (mode === "diagnostic-failure") definition = definition.replace("json.dumps(", "(lambda *_args, **_kwargs: 1 / 0)(");
+    if (mode === "two-samples") definition = definition.replace("started + 1, started + 25", "started + 0.2, started + 0.8");
+    if (mode === "diagnostic-failure") definition = definition.replace("line = evidence_line(", "line = (lambda *_args, **_kwargs: 1 / 0)(");
     const child = spawn("bash", ["-c", `${definition}
 python3 -c "$browser_probe" --headless --dump-dom 'data:text/html,<p>crabbox-browser-smoke</p>' &
 owner=$!
@@ -1633,12 +1987,27 @@ wait "$owner"
       return;
     }
     assert.ok(line, stderr);
-    assert.ok(line.length < 8192);
+    assert.ok(Buffer.byteLength(`${line}\n`, "utf8") < 8192);
     const evidence = JSON.parse(line.slice("browser-smoke-evidence ".length));
     assert.equal(evidence.commandExit, expected);
     assert.equal(evidence.dom, "<p>crabbox-browser-smoke</p>");
     assert.ok(evidence.stderr.includes("org.freedesktop.UPower"));
     assert.equal(evidence.identity.wrapperSHA256.length, 64);
+    if (mode === "two-samples") {
+      assert.equal(evidence.processSamples.length, 2);
+      assert.ok(evidence.clockTicksPerSecond > 0);
+      for (const record of evidence.processSamples) {
+        assert.equal(record.outcome, "ok");
+        assert.equal(record.samplerReaped, true);
+        assert.ok(record.processes.length > 0);
+        for (const row of record.processes) {
+          assert.equal(row.uid, process.getuid());
+          assert.equal(row.pgid, row.sid);
+          assert.ok(row.startTicks > 0);
+          assert.ok(Number.isInteger(row.minorFaults) && Number.isInteger(row.majorFaults));
+        }
+      }
+    }
     assert.doesNotMatch(line, /fixture-secret|private-dom-token|sensitive|cmdline|environ/);
     const owned = (await readFile(pids, "utf8")).trim().split(/\s+/).map(Number);
     for (const pid of owned) {
